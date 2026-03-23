@@ -38,9 +38,7 @@ pub fn run() {
             commands::send_chat,
             // Agent 执行
             agent::execute_command,
-            agent::run_agent_task,
-            agent::plan_next_step,
-            agent::execute_single_step,
+            agent::run_agent_main_loop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
