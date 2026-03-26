@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use crate::db::DbState;
 use tauri::State;
 use reqwest;
@@ -20,6 +20,7 @@ pub struct ChatMessage {
 pub struct AgentStep {
     pub id: usize,
     pub description: String,
+    pub thought: String,
     pub tool: String,
     pub command: String,
     pub status: String, // "pending" | "running" | "done" | "error"
@@ -68,6 +69,71 @@ fn chars_preview(s: &str, limit: usize) -> String {
     }
 }
 
+/// 从 AI 回复中鲁棒地提取 JSON 对象。
+/// 处理以下情况：
+/// 1. 纯 JSON: `{"tool": ...}`
+/// 2. Markdown 包裹: ```json { ... } ```
+/// 3. 前后有废话: `我来帮你... {"tool": ...} 希望这样可以`
+fn extract_json_from_text(text: &str) -> Option<String> {
+    // 先剥掉 Markdown 代码块标记
+    let cleaned = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    // 尝试直接解析（最快路径）
+    if serde_json::from_str::<serde_json::Value>(cleaned).is_ok() {
+        return Some(cleaned.to_string());
+    }
+
+    // 找第一个 '{' 和匹配的最后一个 '}'，用花括号深度匹配
+    let chars: Vec<char> = cleaned.chars().collect();
+    let start = chars.iter().position(|c| *c == '{')?;
+    
+    let mut depth = 0i32;
+    let mut end = start;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for i in start..chars.len() {
+        let ch = chars[i];
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if !in_string {
+            if ch == '{' { depth += 1; }
+            if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    if depth == 0 && end > start {
+        let json_str: String = chars[start..=end].iter().collect();
+        // 验证提取的内容确实是合法 JSON
+        if serde_json::from_str::<serde_json::Value>(&json_str).is_ok() {
+            return Some(json_str);
+        }
+    }
+
+    None
+}
+
 // ================= 浏览器与 DOM 控制 =================
 
 static GLOBAL_BROWSER: OnceLock<headless_chrome::Browser> = OnceLock::new();
@@ -79,8 +145,15 @@ fn get_or_create_tab() -> Result<Arc<headless_chrome::Tab>, String> {
     }
     
     let options = headless_chrome::LaunchOptions::default_builder()
-        .headless(false)
+        .headless(false) // 设置为 false 方便调试
         .idle_browser_timeout(Duration::from_secs(36000))
+        .args(vec![
+            "--no-sandbox".as_ref(),
+            "--disable-setuid-sandbox".as_ref(),
+            "--disable-gpu".as_ref(), // 有时启用 GPU 会导致内核崩溃
+            "--window-size=1280,800".as_ref(),
+            "--disable-dev-shm-usage".as_ref(), // 解决 Linux 环境下的内存限制
+        ])
         .build().unwrap_or_default();
         
     let browser = headless_chrome::Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?;
@@ -142,8 +215,11 @@ fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             if !target_url.starts_with("http") {
                 return (String::new(), "URL 格式不正确，必须以 http 开头".to_string(), false);
             }
-            if tab.navigate_to(&target_url).is_err() || tab.wait_until_navigated().is_err() {
-                 return (String::new(), "页面导航失败".to_string(), false);
+            if let Err(e) = tab.navigate_to(&target_url) {
+                 return (String::new(), format!("跳转指令发送失败: {:?}", e), false);
+            }
+            if let Err(e) = tab.wait_until_navigated() {
+                 return (String::new(), format!("页面加载超时或等待失败: {:?}", e), false);
             }
             std::thread::sleep(Duration::from_secs(3));
             let title = tab.get_title().unwrap_or_default();
@@ -258,25 +334,19 @@ pub async fn run_agent_main_loop(
     };
 
     // 2. 初始化对话历史
-    let system_prompt = r#"你是一个极其谨慎的 macOS 自动化特工。
-你必须通过多轮对话完成用户的最终目标。
-
-核心规则：
-1. 每次你只能执行【唯一 1 个】步骤。
-2. 你必须返回合法的 JSON 格式：{"description": "...", "tool": "...", "command": "..."}。
-3. 只要操作浏览器，tool 必须是 "browser_dom"！
-4. browser_dom 的 command 说明：
-   - goto [URL]: 分配一个 URL
-   - extract: 提取屏幕所有可点击元素及其 ID
-   - click [ID]: 点击元素
-   - type [ID] [文本]: 输入文本
-   - press [Key]: 模拟按键（如 press Enter）
-   - read: 读取全页文本内容
-5. 当你认为由于某些原因目标已经圆满完成，请使用 tool: "finish"，并在 command 写下你的结论总结。
-千万注意：不要编写任何代码、脚本或多余的操作。只使用提供的工具！"#;
+    let prompt_path = app.path().resource_dir().map_err(|e| e.to_string())?
+        .join("prompts/agent_system_prompt.md");
+    
+    // 如果是开发环境，可能需要直接读取工作目录
+    let system_prompt = std::fs::read_to_string(&prompt_path).unwrap_or_else(|_| {
+        // Fallback to relative paths for development
+        std::fs::read_to_string("src-tauri/prompts/agent_system_prompt.md")
+            .or_else(|_| std::fs::read_to_string("prompts/agent_system_prompt.md"))
+            .unwrap_or_else(|_| "你是一个极其谨慎的 macOS 自动化特工。任务目标：完成用户目标。返回 JSON。".to_string())
+    });
 
     let mut messages: Vec<ChatMessage> = vec![
-        ChatMessage { role: "system".to_string(), content: system_prompt.to_string() },
+        ChatMessage { role: "system".to_string(), content: system_prompt },
         ChatMessage { role: "user".to_string(), content: format!("任务目标：{}", goal) },
     ];
 
@@ -318,18 +388,40 @@ pub async fn run_agent_main_loop(
             }
         };
 
-        let cleaned = content.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
-        let plan: serde_json::Value = match serde_json::from_str(cleaned) {
-            Ok(p) => p,
-            Err(_) => {
-                app.emit("agent-progress", json!({"type": "error", "message": format!("AI 输出了非 JSON 内容: {}", content)})).ok();
-                break;
+        // 强力 JSON 提取：无论模型在 JSON 前后加了什么废话，都能正确提取
+        let extracted_json = extract_json_from_text(&content);
+        let plan: serde_json::Value = match extracted_json {
+            Some(json_str) => match serde_json::from_str(&json_str) {
+                Ok(p) => p,
+                Err(e) => {
+                    // JSON 找到了但解析失败，把错误反馈给模型让它重试
+                    app.emit("agent-progress", json!({"type": "error", "message": format!("JSON 解析失败，正在要求模型重新输出: {}", e)})).ok();
+                    messages.push(ChatMessage { role: "assistant".to_string(), content: content.clone() });
+                    messages.push(ChatMessage { role: "user".to_string(), content: format!(
+                        "你的上一次回复 JSON 格式有误（错误: {}）。请严格按照格式重新输出，只返回纯 JSON，不要包含任何其他文字。", e
+                    )});
+                    continue; // 让模型重试
+                }
+            },
+            None => {
+                // 完全找不到 JSON，反馈给模型让它重试
+                app.emit("agent-progress", json!({"type": "error", "message": format!("AI 输出了非 JSON 内容，正在要求重新输出")})).ok();
+                messages.push(ChatMessage { role: "assistant".to_string(), content: content.clone() });
+                messages.push(ChatMessage { role: "user".to_string(), content:
+                    "你的上一次回复不包含合法的 JSON 对象。请记住：你只能返回纯 JSON，格式为 {\"thought\":\"...\",\"description\":\"...\",\"tool\":\"...\",\"command\":\"...\"}。不要包含任何 Markdown、解释或额外文字。".to_string()
+                });
+                continue; // 让模型重试
             }
         };
 
         let description = plan["description"].as_str().unwrap_or("未知步骤").to_string();
         let tool = plan["tool"].as_str().unwrap_or("finish").to_string();
         let command = plan["command"].as_str().unwrap_or("").to_string();
+        let thought = plan["thought"].as_str().unwrap_or("").to_string();
+
+        if !thought.is_empty() {
+             println!("【AI 思考】：{}", thought);
+        }
 
         // 任务结束判断
         if tool == "finish" {
@@ -343,6 +435,7 @@ pub async fn run_agent_main_loop(
             "step": {
                 "id": step_count,
                 "description": description.clone(),
+                "thought": thought.clone(),
                 "tool": tool.clone(),
                 "command": command.clone(),
                 "status": "pending",
@@ -371,7 +464,7 @@ pub async fn run_agent_main_loop(
         
         // --- D. 更新上下文与历史 ---
         // 我们需要把 AI 的决定和执行的结果都存入 messages
-        messages.push(ChatMessage { role: "assistant".to_string(), content: cleaned.to_string() });
+        messages.push(ChatMessage { role: "assistant".to_string(), content: plan.to_string() });
         
         // 注意：历史结果如果是巨大的 DOM，我们可以在存入历史时做一点剪裁，防止 Token 撑爆
         let hist_output = if tool == "browser_dom" && command.contains("extract") {

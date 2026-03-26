@@ -246,8 +246,12 @@
                                     v-if="expandedStep === step.id"
                                     class="step-details"
                                 >
+                                    <div class="detail-block" v-if="step.thought">
+                                        <div class="detail-label">💭 思考过程</div>
+                                        <div class="detail-thought text-accent-light">{{ step.thought }}</div>
+                                    </div>
                                     <div class="detail-block">
-                                        <div class="detail-label">命令</div>
+                                        <div class="detail-label">🔧 指令详情</div>
                                         <pre class="detail-cmd">{{
                                             step.command
                                         }}</pre>
@@ -336,6 +340,7 @@ interface ModelOption {
 interface AgentStep {
     id: number;
     description: string;
+    thought: string;
     tool: string;
     command: string;
     status: "pending" | "running" | "done" | "error";
@@ -1187,6 +1192,21 @@ function addLog(type: LogEntry["type"], message: string) {
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--text-4);
+}
+
+.detail-thought {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-2);
+    background: rgba(108, 99, 255, 0.05);
+    border-left: 3px solid var(--accent);
+    padding: 10px 14px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+}
+
+.text-accent-light {
+    color: var(--accent-light);
 }
 
 .detail-cmd {
