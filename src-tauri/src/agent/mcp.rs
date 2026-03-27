@@ -70,7 +70,27 @@ impl McpClient {
     }
 
     pub fn call_tool(&mut self, tool_name: &str, arguments: serde_json::Value) -> Result<serde_json::Value, String> {
+        self.ensure_alive()?;
         self.send_request("tools/call", json!({ "name": tool_name, "arguments": arguments }))
+    }
+
+    /// 检查并确保子进程存活，如果已退出则尝试重启
+    pub fn ensure_alive(&mut self) -> Result<(), String> {
+        let needs_restart = match self._child.try_wait() {
+            Ok(Some(_status)) => true, // 已退出
+            Ok(None) => false,         // 运行中
+            Err(_) => true,            // 异常
+        };
+
+        if needs_restart {
+            println!("[MCP:{}] 检测到进程退出，正在尝试重启...", self.config.name);
+            let new_client = Self::spawn(self.config.clone())?;
+            self._child = new_client._child;
+            self.stdin = new_client.stdin;
+            self.stdout = new_client.stdout;
+            // id 不重置，保持单次会话连续性
+        }
+        Ok(())
     }
 }
 

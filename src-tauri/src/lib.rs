@@ -9,11 +9,14 @@ pub fn run() {
     let db_path = get_db_path();
     let conn = init_db(&db_path).expect("Failed to initialize database");
 
+    let registry = std::sync::Arc::new(tokio::sync::Mutex::new(agent::mcp::PluginRegistry::new()));
+    
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(DbState(std::sync::Mutex::new(conn)))
+        .manage(registry)
         .invoke_handler(tauri::generate_handler![
             // 平台
             commands::get_platforms,

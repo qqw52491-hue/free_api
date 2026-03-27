@@ -85,6 +85,7 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                 let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
                 ("hover".to_string(), None, id, None)
             }
+            "screenshot" => ("screenshot".to_string(), None, None, None),
             _ => ("unknown".to_string(), None, None, None),
         }
     };
@@ -240,6 +241,15 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                     (format!("【当前页正文】：\n{}", preview), String::new(), true)
                 }
                 Err(e) => (String::new(), format!("读取失败: {}", e), false),
+            }
+        }
+        "screenshot" => {
+            match tab.capture_screenshot(headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png, None, None, true) {
+                Ok(data) => {
+                    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
+                    (format!("data:image/png;base64,{}", b64), String::new(), true)
+                }
+                Err(e) => (String::new(), format!("截图失败: {:?}", e), false),
             }
         }
         _ => (String::new(), format!("❌ 未知指令: {}", action), false),

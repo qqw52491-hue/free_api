@@ -1,17 +1,17 @@
+pub mod browser;
+pub mod context;
+pub mod mcp;
 pub mod types;
 pub mod utils;
-pub mod browser;
-pub mod mcp;
-pub mod context;
 
-use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::time::{sleep, Duration};
-use crate::db::DbState;
-use crate::agent::types::*;
-use crate::agent::utils::*;
 use crate::agent::browser::*;
 use crate::agent::mcp::*;
+use crate::agent::types::*;
+use crate::agent::utils::*;
+use crate::db::DbState;
+use serde_json::json;
+use tauri::{AppHandle, Manager, State};
+use tokio::time::{sleep, Duration};
 
 const BUILTIN_BROWSER_ACTIONS: &[&str] = &[
     "navigate", "goto", "extract", "look", "click", "type", "press", "scroll", "hover", "read",
@@ -29,15 +29,28 @@ pub fn run_agent_step(
         } else {
             instruction.params.to_string()
         };
-        let full_cmd = if cmd_str.is_empty() { action.clone() } else { format!("{} {}", action, cmd_str) };
+        let full_cmd = if cmd_str.is_empty() {
+            action.clone()
+        } else {
+            format!("{} {}", action, cmd_str)
+        };
         let (stdout, stderr, success) = run_browser_dom(&full_cmd);
-        return DispatchResult { stdout, stderr, success, route: "browser".to_string() };
+        return DispatchResult {
+            stdout,
+            stderr,
+            success,
+            route: "browser".to_string(),
+        };
     }
 
     let (plugin_name, tool_name) = if let Some(pos) = instruction.action.find('/') {
         (&instruction.action[..pos], &instruction.action[pos + 1..])
     } else {
-        let tool = instruction.params.get("tool").and_then(|v| v.as_str()).unwrap_or(&instruction.action);
+        let tool = instruction
+            .params
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&instruction.action);
         (&instruction.action as &str, tool)
     };
 
@@ -45,10 +58,21 @@ pub fn run_agent_step(
         let arguments = instruction.params.clone();
         match client.call_tool(tool_name, arguments) {
             Ok(result) => {
-                let stdout = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-                DispatchResult { stdout, stderr: String::new(), success: true, route: format!("mcp:{}", plugin_name) }
+                let stdout =
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+                DispatchResult {
+                    stdout,
+                    stderr: String::new(),
+                    success: true,
+                    route: format!("mcp:{}", plugin_name),
+                }
             }
-            Err(e) => DispatchResult { stdout: String::new(), stderr: e, success: false, route: format!("mcp:{}", plugin_name) },
+            Err(e) => DispatchResult {
+                stdout: String::new(),
+                stderr: e,
+                success: false,
+                route: format!("mcp:{}", plugin_name),
+            },
         }
     } else {
         DispatchResult {
@@ -61,16 +85,36 @@ pub fn run_agent_step(
 }
 
 #[tauri::command]
-pub async fn dispatch_agent_step(instruction_json: String) -> Result<serde_json::Value, String> {
-    let instruction: AgentInstruction = serde_json::from_str(&instruction_json).map_err(|e| e.to_string())?;
-    let mut registry = PluginRegistry::new();
-    let result = tokio::task::spawn_blocking(move || run_agent_step(&instruction, &mut registry)).await.map_err(|e| e.to_string())?;
-    Ok(json!({ "route": result.route, "success": result.success, "stdout": result.stdout, "stderr": result.stderr }))
+pub async fn dispatch_agent_step(
+    instruction_json: String,
+    registry_state: State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
+) -> Result<serde_json::Value, String> {
+    let instruction: AgentInstruction =
+        serde_json::from_str(&instruction_json).map_err(|e| e.to_string())?;
+
+    // 克隆 Arc 以满足 'static 约束
+    let registry_arc = registry_state.inner().clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        // 在阻塞线程内部加锁
+        let mut registry = futures::executor::block_on(registry_arc.lock());
+        run_agent_step(&instruction, &mut registry)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(
+        json!({ "route": result.route, "success": result.success, "stdout": result.stdout, "stderr": result.stderr }),
+    )
 }
 
 #[tauri::command]
 pub async fn execute_command(tool: String, command: String) -> Result<serde_json::Value, String> {
-    let (stdout, stderr, success) = if tool == "osascript" { run_osascript(&command) } else { run_shell(&command) };
+    let (stdout, stderr, success) = if tool == "osascript" {
+        run_osascript(&command)
+    } else {
+        run_shell(&command)
+    };
     Ok(json!({ "success": success, "stdout": stdout.trim(), "stderr": stderr.trim() }))
 }
 
@@ -78,17 +122,27 @@ pub async fn execute_command(tool: String, command: String) -> Result<serde_json
 pub async fn run_agent_main_loop(
     app: AppHandle,
     state: State<'_, DbState>,
+    registry_state: State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
     model_id: String,
     goal: String,
     auto_pilot: bool,
 ) -> Result<(), String> {
-    // 1. 加载所有 MCP 插件
-    let mut registry = PluginRegistry::load_from_dir(
-        &app.path().app_config_dir().unwrap_or_default().join("plugins")
-    );
+    // 1. 确保插件已加载（如果未加载过，则根据目录加载）
+    {
+        let mut registry = registry_state.lock().await;
+        if registry.plugin_names().is_empty() {
+            let plugins_dir = app
+                .path()
+                .app_config_dir()
+                .unwrap_or_default()
+                .join("plugins");
+            *registry = PluginRegistry::load_from_dir(&plugins_dir);
+        }
+    }
 
     // 2. 初始化三明治上下文
-    let system_prompt = "你是一个极简、彻底解耦的 Agent 核心。通过内置 Browser 或 MCP 工具解决问题。".to_string();
+    let system_prompt =
+        "你是一个极简、彻底解耦的 Agent 核心。通过内置 Browser 或 MCP 工具解决问题。".to_string();
     let mut context = context::SandwichContext::new(system_prompt, goal);
 
     // 3. 构建 HTTP 客户端（对接 LLM）
@@ -98,27 +152,35 @@ pub async fn run_agent_main_loop(
 
     let mut step_id = 1;
     loop {
-        if step_id > 20 { break; }
+        if step_id > 20 {
+            break;
+        }
 
         // --- A. AI 规划阶段 ---
         let messages = context.assemble_messages();
         // 请求 LLM 获取 AgentInstruction JSON (简化示意)
         // let instruction: AgentInstruction = call_llm(messages).await?;
-        
+
         // 模拟一条指令进行演示
         let instruction = AgentInstruction {
             thought: "我需要通过浏览器查看当前页面状态".to_string(),
             action: "extract".to_string(), // 内置动作
             params: serde_json::Value::Object(Default::default()),
-            todo_update: vec![]
+            todo_update: vec![],
         };
 
         // --- B. 执行路由分发 ---
-        let result = tokio::task::spawn_blocking(move || {
-             // 此处需注意：registry 不能被简单 move 进入，实际中应存入持久 State 或跨线程访问
-             // 这里仅展示解耦后的调用逻辑
-             run_agent_step(&instruction, &mut registry)
-        }).await.map_err(|e| e.to_string())?;
+        let result = {
+            let instruction_c = instruction.clone();
+            let registry_arc = registry_state.inner().clone();
+            tokio::task::spawn_blocking(move || {
+                // 在阻塞线程中同步锁定进行分发
+                let mut registry = futures::executor::block_on(registry_arc.lock());
+                run_agent_step(&instruction_c, &mut registry)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        };
 
         // --- C. 更新记忆与观测 ---
         context.push_memory(ShortMemory {
@@ -131,8 +193,10 @@ pub async fn run_agent_main_loop(
         context.update_observation(result.stdout);
 
         // --- D. 任务完成判定 ---
-        if instruction.action == "finish" { break; }
-        
+        if instruction.action == "finish" {
+            break;
+        }
+
         step_id += 1;
         sleep(Duration::from_millis(500)).await;
     }

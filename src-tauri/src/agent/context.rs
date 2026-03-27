@@ -32,6 +32,10 @@ impl SandwichContext {
         self.short_memory.push_back(mem);
     }
 
+    pub fn update_observation(&mut self, obs: String) {
+        self.current_observation = obs;
+    }
+
     pub fn assemble_messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         messages.push(ChatMessage { role: "system".to_string(), content: self.system_prompt.clone() });
