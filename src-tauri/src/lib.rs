@@ -39,6 +39,7 @@ pub fn run() {
             // Agent 执行
             agent::execute_command,
             agent::run_agent_main_loop,
+            agent::dispatch_agent_step,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
