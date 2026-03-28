@@ -49,52 +49,18 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
         Err(e) => return (String::new(), format!("获取Tab失败: {:?}", e), false),
     };
 
-    let (action, url, id, text) = if command_str.trim().starts_with('{') {
-        let action = "extract".to_string();
-        (action, None, None, None)
-    } else {
-        let parts: Vec<&str> = command_str.splitn(3, ' ').collect();
-        let cmd_type = parts.get(0).unwrap_or(&"").to_lowercase();
-        match cmd_type.as_str() {
-            "goto" | "navigate" => (
-                "navigate".to_string(),
-                parts.get(1).map(|s| s.to_string()),
-                None,
-                None,
-            ),
-            "extract" | "look" => ("extract".to_string(), None, None, None),
-            "click" => {
-                let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
-                ("click".to_string(), None, id, None)
-            }
-            "type" => {
-                let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
-                let val = parts.get(2).map(|s| s.to_string());
-                ("type".to_string(), None, id, val)
-            }
-            "press" => {
-                let key = parts.get(1).map(|s| s.to_string());
-                ("press".to_string(), None, None, key)
-            }
-            "read" => ("read".to_string(), None, None, None),
-            "scroll" => {
-                let dir = parts.get(1).map(|s| s.to_string());
-                ("scroll".to_string(), None, None, dir)
-            }
-            "hover" => {
-                let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
-                ("hover".to_string(), None, id, None)
-            }
-            "screenshot" => ("screenshot".to_string(), None, None, None),
-            _ => ("unknown".to_string(), None, None, None),
-        }
-    };
+    // --- 解析指令 ---
+    let parts: Vec<&str> = command_str.splitn(3, ' ').collect();
+    let cmd_type = parts.get(0).unwrap_or(&"").to_lowercase();
+    let arg1 = parts.get(1).map(|s| s.to_string());
+    let arg2 = parts.get(2).map(|s| s.to_string());
 
-    match action.as_str() {
-        "navigate" => {
-            let target_url = url.unwrap_or_default();
+    match cmd_type.as_str() {
+        // ===== 导航类 =====
+        "goto" | "navigate" => {
+            let target_url = arg1.unwrap_or_default();
             if !target_url.starts_with("http") {
-                return (String::new(), "URL 格式不正确".to_string(), false);
+                return (String::new(), "URL 格式不正确，需要以 http 开头".to_string(), false);
             }
             if let Err(e) = tab.navigate_to(&target_url) {
                 return (String::new(), format!("跳转失败: {:?}", e), false);
@@ -105,7 +71,77 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             let title = tab.get_title().unwrap_or_default();
             (format!("成功跳转！标题: {}", title), String::new(), true)
         }
-        "extract" => {
+        "back" => {
+            let js = "window.history.back(); true;";
+            let _ = tab.evaluate(js, false);
+            std::thread::sleep(Duration::from_millis(1500));
+            let title = tab.get_title().unwrap_or_default();
+            (format!("✅ 已后退，当前页: {}", title), String::new(), true)
+        }
+        "forward" => {
+            let js = "window.history.forward(); true;";
+            let _ = tab.evaluate(js, false);
+            std::thread::sleep(Duration::from_millis(1500));
+            let title = tab.get_title().unwrap_or_default();
+            (format!("✅ 已前进，当前页: {}", title), String::new(), true)
+        }
+        "refresh" | "reload" => {
+            let js = "location.reload(); true;";
+            let _ = tab.evaluate(js, false);
+            std::thread::sleep(Duration::from_millis(2000));
+            let title = tab.get_title().unwrap_or_default();
+            (format!("✅ 页面已刷新: {}", title), String::new(), true)
+        }
+        "tab_url" | "url" => {
+            match tab.evaluate("window.location.href;", false) {
+                Ok(remote_obj) => {
+                    let url = remote_obj.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+                    (format!("当前 URL: {}", url), String::new(), true)
+                }
+                Err(e) => (String::new(), format!("获取URL失败: {:?}", e), false),
+            }
+        }
+
+        // ===== 等待类 =====
+        "wait" => {
+            // wait 2  → 等待2秒
+            // wait    → 默认等待1秒
+            let secs: f64 = arg1.as_deref().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+            let ms = (secs * 1000.0) as u64;
+            std::thread::sleep(Duration::from_millis(ms));
+            (format!("✅ 已等待 {:.1} 秒", secs), String::new(), true)
+        }
+        "wait_for" => {
+            // wait_for 12 → 等待元素[12]出现，最多10秒
+            let target_id = arg1.as_deref().unwrap_or("0");
+            let timeout_ms: u64 = arg2.as_deref().and_then(|s| s.parse().ok()).unwrap_or(10000);
+            let js = format!(r#"
+                new Promise((resolve) => {{
+                    const start = Date.now();
+                    const check = () => {{
+                        const el = document.querySelector('[data-tauri-agent-id="{}"]');
+                        if (el) {{ resolve('found'); return; }}
+                        if (Date.now() - start > {}) {{ resolve('timeout'); return; }}
+                        requestAnimationFrame(check);
+                    }};
+                    check();
+                }});
+            "#, target_id, timeout_ms);
+            match tab.evaluate(&js, true) {
+                Ok(res) => {
+                    let result = res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or("timeout".to_string());
+                    if result == "found" {
+                        (format!("✅ 元素 [{}] 已出现", target_id), String::new(), true)
+                    } else {
+                        (String::new(), format!("⏱ 等待元素 [{}] 超时 ({}ms)", target_id, timeout_ms), false)
+                    }
+                }
+                Err(e) => (String::new(), format!("等待失败: {:?}", e), false),
+            }
+        }
+
+        // ===== 交互类 =====
+        "extract" | "look" => {
             let js = r#"
             (function() {
                 const isVisible = (elem) => !!( elem.offsetWidth || elem.offsetHeight || elem.getClientRects().length );
@@ -159,7 +195,7 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             }
         }
         "click" => {
-            let id = id.unwrap_or(0);
+            let id = arg1.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let js = format!(r#"
                 let el = document.querySelector('[data-tauri-agent-id="{}"]');
                 if (el) {{
@@ -178,8 +214,9 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             }
         }
         "type" => {
-            let id = id.unwrap_or(0);
-            let val = text.unwrap_or_default();
+            let id = arg1.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let val = arg2.unwrap_or_default();
+            let escaped_val = val.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
             let js_type = format!(r#"
                 let el = document.querySelector('[data-tauri-agent-id="{}"]');
                 if (el) {{
@@ -191,30 +228,38 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                     true;
                 }} else {{ false; }}
-            "#, id, val, val);
+            "#, id, escaped_val, escaped_val);
             if tab.evaluate(&js_type, false).is_err() { return (String::new(), format!("❌ 找不到元素 [{}]", id), false); }
             let _ = tab.type_str(&val);
             (format!("✅ 成功输入: {}", val), String::new(), true)
         }
+        "select" => {
+            // select 8 option_value → 选择下拉框
+            let id = arg1.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let option_val = arg2.unwrap_or_default();
+            let escaped_val = option_val.replace('\\', "\\\\").replace('\'', "\\'");
+            let js = format!(r#"
+                let el = document.querySelector('[data-tauri-agent-id="{}"]');
+                if (el && el.tagName === 'SELECT') {{
+                    el.value = '{}';
+                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    true;
+                }} else {{ false; }}
+            "#, id, escaped_val);
+            match tab.evaluate(&js, false) {
+                Ok(res) if res.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false) => {
+                    (format!("✅ 下拉框 [{}] 已选择: {}", id, option_val), String::new(), true)
+                }
+                _ => (String::new(), format!("❌ 无法选择元素 [{}] 或它不是下拉框", id), false),
+            }
+        }
         "press" => {
-            let key = text.unwrap_or_else(|| "Enter".to_string());
+            let key = arg1.unwrap_or_else(|| "Enter".to_string());
             if tab.press_key(&key).is_err() { return (String::new(), format!("❌ 按键 {} 失败", key), false); }
             (format!("✅ 成功按下 [{}] 键", key), String::new(), true)
         }
-        "scroll" => {
-            let direction = text.unwrap_or_else(|| "down".to_string());
-            let js = match direction.as_str() {
-                "up" => "window.scrollBy({ top: -window.innerHeight * 0.8, behavior: 'smooth' }); true;",
-                "top" => "window.scrollTo({ top: 0, behavior: 'smooth' }); true;",
-                "bottom" => "window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); true;",
-                _ => "window.scrollBy({ top: window.innerHeight * 0.8, behavior: 'smooth' }); true;",
-            };
-            let _ = tab.evaluate(js, false);
-            std::thread::sleep(Duration::from_millis(800));
-            (format!("✅ 页面已向 {} 滚动", direction), String::new(), true)
-        }
         "hover" => {
-            let id = id.unwrap_or(0);
+            let id = arg1.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let js = format!(r#"
                 let el = document.querySelector('[data-tauri-agent-id="{}"]');
                 if (el) {{
@@ -232,6 +277,8 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                 _ => (String::new(), format!("❌ 找不到编号为 [{}] 的元素", id), false),
             }
         }
+
+        // ===== 读取类 =====
         "read" => {
             let js = "document.body.innerText;";
             match tab.evaluate(js, false) {
@@ -252,6 +299,37 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                 Err(e) => (String::new(), format!("截图失败: {:?}", e), false),
             }
         }
-        _ => (String::new(), format!("❌ 未知指令: {}", action), false),
+
+        // ===== 滚动类 =====
+        "scroll" => {
+            let direction = arg1.unwrap_or_else(|| "down".to_string());
+            let js = match direction.as_str() {
+                "up" => "window.scrollBy({ top: -window.innerHeight * 0.8, behavior: 'smooth' }); true;",
+                "top" => "window.scrollTo({ top: 0, behavior: 'smooth' }); true;",
+                "bottom" => "window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); true;",
+                _ => "window.scrollBy({ top: window.innerHeight * 0.8, behavior: 'smooth' }); true;",
+            };
+            let _ = tab.evaluate(js, false);
+            std::thread::sleep(Duration::from_millis(800));
+            (format!("✅ 页面已向 {} 滚动", direction), String::new(), true)
+        }
+
+        // ===== 万能 JS =====
+        "eval" | "js" => {
+            // eval document.title → 运行任意 JS 并返回结果
+            let code = format!("{} {}", arg1.unwrap_or_default(), arg2.unwrap_or_default());
+            match tab.evaluate(&code, false) {
+                Ok(remote_obj) => {
+                    let result = remote_obj.value
+                        .map(|v| if v.is_string() { v.as_str().unwrap_or("").to_string() } else { v.to_string() })
+                        .unwrap_or_else(|| "undefined".to_string());
+                    (format!("JS 结果: {}", result), String::new(), true)
+                }
+                Err(e) => (String::new(), format!("JS 执行失败: {:?}", e), false),
+            }
+        }
+
+        _ => (String::new(), format!("❌ 未知浏览器指令: {}", cmd_type), false),
     }
 }
+

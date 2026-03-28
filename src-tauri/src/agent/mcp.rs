@@ -28,6 +28,14 @@ struct JsonRpcResponse {
     pub error: Option<serde_json::Value>,
 }
 
+/// 工具定义，从 MCP Server 查回来的
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolDef {
+    pub name: String,
+    pub description: String,
+    pub schema: serde_json::Value,
+}
+
 pub struct McpClient {
     pub config: PluginConfig,
     _child: Child,
@@ -77,25 +85,53 @@ impl McpClient {
     /// 检查并确保子进程存活，如果已退出则尝试重启
     pub fn ensure_alive(&mut self) -> Result<(), String> {
         let needs_restart = match self._child.try_wait() {
-            Ok(Some(_status)) => true, // 已退出
-            Ok(None) => false,         // 运行中
-            Err(_) => true,            // 异常
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => true,
         };
-
         if needs_restart {
-            println!("[MCP:{}] 检测到进程退出，正在尝试重启...", self.config.name);
+            println!("[MCP:{}] 进程已退出，正在重启...", self.config.name);
             let new_client = Self::spawn(self.config.clone())?;
             self._child = new_client._child;
             self.stdin = new_client.stdin;
             self.stdout = new_client.stdout;
-            // id 不重置，保持单次会话连续性
         }
         Ok(())
     }
+
+    /// MCP 握手（有些 Server 强依赖这一步）
+    pub fn initialize(&mut self) -> Result<(), String> {
+        let result = self.send_request("initialize", json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "tools": {} },
+            "clientInfo": { "name": "free-api-agent", "version": "0.1.0" }
+        }));
+        // 握手可能有的 server 不需要，所以忽略错误
+        let _ = result;
+        Ok(())
+    }
+
+    /// 查询 MCP Server 提供的所有工具（说明书）
+    pub fn list_tools(&mut self) -> Result<Vec<McpToolDef>, String> {
+        self.ensure_alive()?;
+        let result = self.send_request("tools/list", json!({}))?;
+        let tools = result.get("tools")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let defs = tools.into_iter().filter_map(|t| {
+            let name = t.get("name")?.as_str()?.to_string();
+            let description = t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let schema = t.get("inputSchema").cloned().unwrap_or(json!({}));
+            Some(McpToolDef { name, description, schema })
+        }).collect();
+        Ok(defs)
+    }
 }
 
+
 pub struct PluginRegistry {
-    clients: std::collections::HashMap<String, McpClient>,
+    pub clients: std::collections::HashMap<String, McpClient>,
 }
 
 impl PluginRegistry {
@@ -108,13 +144,54 @@ impl PluginRegistry {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("yaml") && path.extension().and_then(|e| e.to_str()) != Some("yml") { continue; }
             let content = std::fs::read_to_string(&path).unwrap_or_default();
-            let config: PluginConfig = serde_yaml::from_str(&content).unwrap();
+            let config: PluginConfig = match serde_yaml::from_str(&content) {
+                Ok(c) => c,
+                Err(e) => {
+                    println!("加载插件配置失败 [{}]: {}", path.display(), e);
+                    continue;
+                }
+            };
             let name = config.name.clone();
-            if let Ok(client) = McpClient::spawn(config) { registry.clients.insert(name, client); }
+            if let Ok(mut client) = McpClient::spawn(config) {
+                // 加载时顺便握手并查询一次工具，确保存活
+                let _ = client.initialize();
+                let tool_count = client.list_tools().map(|t| t.len()).unwrap_or(0);
+                println!("🚀 插件加载成功: {} (共 {} 个工具)", name, tool_count);
+                registry.clients.insert(name, client);
+            } else {
+                println!("❌ 插件启动失败: {}", name);
+            }
         }
         registry
     }
 
     pub fn get_mut(&mut self, name: &str) -> Option<&mut McpClient> { self.clients.get_mut(name) }
     pub fn plugin_names(&self) -> Vec<&str> { self.clients.keys().map(String::as_str).collect() }
+
+    /// 查询所有已加载的 MCP Server 的工具列表
+    pub fn list_all_tools(&mut self) -> Vec<(String, McpToolDef)> {
+        let mut result = Vec::new();
+        for (plugin_name, client) in &mut self.clients {
+            if let Ok(tools) = client.list_tools() {
+                for tool in tools {
+                    result.push((plugin_name.clone(), tool));
+                }
+            }
+        }
+        result
+    }
+
+    /// 生成注入系统提示词的 MCP 工具块
+    pub fn format_tools_for_prompt(&mut self) -> String {
+        let tools = self.list_all_tools();
+        if tools.is_empty() { return String::new(); }
+        let mut lines = vec!["\n## 外部 MCP 工具 (重要：参数必须符合 JSON Schema)".to_string()];
+        for (plugin, tool) in &tools {
+            lines.push(format!("- {}/{} — {}", plugin, tool.name, tool.description));
+            lines.push(format!("  参数规格: {}", tool.schema));
+            lines.push(format!("  示例: {{\"tool\": \"{}/{}\", \"command\": {{...}}}}", plugin, tool.name));
+        }
+        lines.push("\n注意：当前系统是 macOS，路径请使用 /Users/wx/... 格式。".to_string());
+        lines.join("\n")
+    }
 }

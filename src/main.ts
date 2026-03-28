@@ -4,6 +4,7 @@ import App from './App.vue'
 import ApiManager from './views/ApiManager.vue'
 import ChatView from './views/ChatView.vue'
 import AgentView from './views/AgentView.vue'
+import PluginView from './views/PluginView.vue'
 import './style.css'
 
 const router = createRouter({
@@ -13,6 +14,7 @@ const router = createRouter({
     { path: '/chat', component: ChatView },
     { path: '/apis', component: ApiManager },
     { path: '/agent', component: AgentView },
+    { path: '/plugins', component: PluginView },
   ]
 })
 

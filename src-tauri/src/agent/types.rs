@@ -30,6 +30,7 @@ pub struct MainContent {
 pub struct TodoItem {
     pub id: usize,
     pub status: String, // "pending" | "in_progress" | "done" | "failed"
+    #[serde(default)]
     pub description: String,
 }
 
@@ -43,12 +44,42 @@ pub struct ShortMemory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryItem {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentInstruction {
     pub thought: String,
-    pub action: String,
-    pub params: serde_json::Value,
+    #[serde(default)]
+    pub description: String,
+    
+    // 兼容 tool / action
+    pub tool: Option<String>,
+    pub action: Option<String>,
+    
+    // 兼容 command / params
+    pub command: Option<serde_json::Value>,
+    pub params: Option<serde_json::Value>,
+
     #[serde(default)]
     pub todo_update: Vec<TodoItem>,
+    #[serde(default)]
+    pub memories_update: Vec<MemoryItem>,
+}
+
+impl AgentInstruction {
+    pub fn get_action(&self) -> String {
+        self.tool.clone()
+            .or_else(|| self.action.clone())
+            .unwrap_or_default()
+    }
+    pub fn get_params(&self) -> serde_json::Value {
+        self.command.clone()
+            .or_else(|| self.params.clone())
+            .unwrap_or(serde_json::Value::Null)
+    }
 }
 
 #[derive(Debug)]

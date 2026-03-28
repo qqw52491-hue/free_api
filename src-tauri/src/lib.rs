@@ -39,6 +39,11 @@ pub fn run() {
             commands::save_message,
             // 对话
             commands::send_chat,
+            // MCP 插件管理
+            commands::get_mcp_plugins,
+            commands::save_mcp_plugin,
+            commands::delete_mcp_plugin,
+            commands::toggle_mcp_plugin,
             // Agent 执行
             agent::execute_command,
             agent::run_agent_main_loop,

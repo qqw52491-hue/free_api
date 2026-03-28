@@ -1,4 +1,5 @@
 use crate::db::{ChatMessage, ChatSession, DbState, Model, Platform};
+use crate::agent::mcp::PluginConfig;
 use chrono::Utc;
 use futures_util::StreamExt;
 use rusqlite::params;
@@ -6,6 +7,100 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
+
+// ==================== MCP PLUGIN COMMANDS ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPluginRow {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+#[tauri::command]
+pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginRow>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, command, args, env, enabled, created_at FROM mcp_plugins ORDER BY created_at DESC"
+    ).map_err(|e| e.to_string())?;
+    let list = stmt.query_map([], |row| {
+        let args_str: String = row.get(3)?;
+        let env_str: String = row.get(4)?;
+        Ok(McpPluginRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            command: row.get(2)?,
+            args: serde_json::from_str(&args_str).unwrap_or_default(),
+            env: serde_json::from_str(&env_str).unwrap_or_default(),
+            enabled: row.get::<_, i64>(5)? == 1,
+            created_at: row.get(6)?,
+        })
+    }).map_err(|e| e.to_string())?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| e.to_string())?;
+    Ok(list)
+}
+
+#[tauri::command]
+pub async fn save_mcp_plugin(
+    state: State<'_, DbState>,
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: Option<std::collections::HashMap<String, String>>,
+) -> Result<McpPluginRow, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let args_json = serde_json::to_string(&args).unwrap_or("[]".to_string());
+    let env_map = env.unwrap_or_default();
+    let env_json = serde_json::to_string(&env_map).unwrap_or("{}".to_string());
+
+    // UPSERT: 如果 name 已存在就更新
+    conn.execute(
+        "INSERT INTO mcp_plugins (id, name, command, args, env, enabled, created_at) 
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
+         ON CONFLICT(name) DO UPDATE SET command=?3, args=?4, env=?5",
+        params![id, name, command, args_json, env_json, now],
+    ).map_err(|e| e.to_string())?;
+
+    // 同时写一个 yaml 文件到 plugins/ 目录（双重保险）
+    let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
+    let _ = std::fs::create_dir_all(&plugins_dir);
+    let config = PluginConfig { name: name.clone(), command: command.clone(), args: args.clone(), env: env_map.clone() };
+    let yaml = serde_yaml::to_string(&config).unwrap_or_default();
+    let _ = std::fs::write(plugins_dir.join(format!("{}.yaml", name)), yaml);
+
+    Ok(McpPluginRow { id, name, command, args, env: env_map, enabled: true, created_at: now })
+}
+
+#[tauri::command]
+pub async fn delete_mcp_plugin(state: State<'_, DbState>, name: String) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM mcp_plugins WHERE name=?1", params![name])
+        .map_err(|e| e.to_string())?;
+
+    // 同时删 yaml
+    let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
+    let yaml_path = plugins_dir.join(format!("{}.yaml", name));
+    if yaml_path.exists() { let _ = std::fs::remove_file(yaml_path); }
+    
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn toggle_mcp_plugin(state: State<'_, DbState>, name: String, enabled: bool) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE mcp_plugins SET enabled=?1 WHERE name=?2",
+        params![enabled as i64, name],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 // ==================== PLATFORM COMMANDS ====================
 

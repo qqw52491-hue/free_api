@@ -25,6 +25,14 @@
         </svg>
         AI Agent
       </RouterLink>
+      <RouterLink to="/plugins" class="nav-link">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+          <path d="M2 17l10 5 10-5"/>
+          <path d="M2 12l10 5 10-5"/>
+        </svg>
+        插件中心
+      </RouterLink>
     </nav>
     <main class="main-content">
       <RouterView />

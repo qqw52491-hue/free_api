@@ -107,6 +107,16 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_models_platform ON models(platform_id);
         CREATE INDEX IF NOT EXISTS idx_messages_session ON chat_messages(session_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_updated ON chat_sessions(updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS mcp_plugins (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            command TEXT NOT NULL,
+            args TEXT NOT NULL DEFAULT '[]',
+            env TEXT NOT NULL DEFAULT '{}',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
     ")?;
 
     Ok(conn)
