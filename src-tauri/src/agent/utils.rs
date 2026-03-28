@@ -1,14 +1,14 @@
 use std::process::Command;
 
-use futures::StreamExt;
-use rusqlite::params;
-use serde_json::json;
-use tauri::State;
-
 use crate::{
     agent::{context::SandwichContext, types::AgentInstruction},
     db::DbState,
 };
+use futures::Stream;
+use futures::StreamExt;
+use rusqlite::params;
+use serde_json::json;
+use tauri::State;
 
 pub fn run_shell(cmd: &str) -> (String, String, bool) {
     let result = Command::new("bash").arg("-c").arg(cmd).output();
@@ -148,24 +148,44 @@ pub async fn call_llm(
         "temperature": temperature,
         "stream": true
     });
+    // --- 定义重试逻辑 (最多 3 次) ---
+    let mut last_error = String::new();
+    let mut final_resp: Option<reqwest::Response> = None;
 
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("HTTP-Referer", "https://free-api-chat.app")
-        .header("X-OpenRouter-Title", "Free API Chat")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
+    for i in 0..3 {
+        let resp_result = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("HTTP-Referer", "https://free-api-chat.app")
+            .header("X-OpenRouter-Title", "Free API Chat")
+            .json(&body)
+            .send()
+            .await;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("API 错误 {}: {}", status, body));
+        match resp_result {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    final_resp = Some(resp);
+                    break; // 成功，退出循环
+                } else {
+                    let status = resp.status();
+                    let error_body = resp.text().await.unwrap_or_default();
+                    last_error = format!("API 错误 {}: {}", status, error_body);
+                    println!("⚠️ LLM 请求失败 (第 {} 次尝试): {}", i + 1, last_error);
+                }
+            }
+            Err(e) => {
+                last_error = format!("网络请求失败: {}", e);
+                println!("⚠️ LLM 网络错误 (第 {} 次尝试): {}", i + 1, last_error);
+            }
+        }
+        
+        if i < 2 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        }
     }
 
-    // --- 流式读取，正确处理跨 chunk 的行拆分 ---
+    let resp = final_resp.ok_or_else(|| format!("LLM 请求最终失败 (3次尝试): {}", last_error))?;
     let mut stream = resp.bytes_stream();
     let mut full_response = String::new();
     let mut line_buf = String::new(); // 缓冲不完整的行

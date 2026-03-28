@@ -144,46 +144,66 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
         "extract" | "look" => {
             let js = r#"
             (function() {
-                const isVisible = (elem) => !!( elem.offsetWidth || elem.offsetHeight || elem.getClientRects().length );
-                const interactables = Array.from(document.querySelectorAll('a, button, input, textarea, select, [contenteditable="true"], [role="button"], [role="link"], [role="menuitem"], [tabindex]:not([tabindex="-1"]), [class*="button" i], [class*="btn" i]')).filter(isVisible);
+                // 1. 清理旧 ID
+                document.querySelectorAll('[data-tauri-agent-id]').forEach(el => {
+                    el.removeAttribute('data-tauri-agent-id');
+                    el.style.outline = "";
+                });
 
-                let textNodes = [];
+                const isVisible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || style.pointerEvents === 'none') return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 2 && rect.height > 2; // 过滤掉太小的元素
+                };
+
+                const isTopLevel = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const x = rect.left + rect.width / 2;
+                    const y = rect.top + rect.height / 2;
+                    if (x < 0 || x >= window.innerWidth || y < 0 || y >= window.innerHeight) return true;
+                    const topEl = document.elementFromPoint(x, y);
+                    return !topEl || el.contains(topEl) || topEl.contains(el);
+                };
+
+                // 选择候选元素
+                let candidates = Array.from(document.querySelectorAll('a, button, input, textarea, select, [role="button"], [role="link"], [contenteditable="true"], .btn, .button')).filter(isVisible);
+                
+                // 补充文本节点
                 let treeWalker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-                let currentNode;
-                while(currentNode = treeWalker.nextNode()) {
-                    if(currentNode.textContent.trim().length > 1) {
-                        let parent = currentNode.parentElement;
-                        if(parent && isVisible(parent) && !parent.closest('a, button, input, textarea, select, [contenteditable="true"], [role="button"]')) {
-                            textNodes.push(parent);
-                        }
-                    }
+                let textNodes = [];
+                let node;
+                while(node = treeWalker.nextNode()) {
+                   if(node.textContent.trim().length > 2) {
+                       let p = node.parentElement;
+                       if(p && isVisible(p) && !p.closest('a, button, input, textarea, select')) {
+                           textNodes.push(p);
+                       }
+                   }
                 }
 
-                let allElements = Array.from(new Set([...interactables, ...textNodes]));
-                let results = allElements.map((el, i) => {
+                let all = Array.from(new Set([...candidates, ...textNodes])).filter(isTopLevel);
+                
+                let resultLines = all.map((el, index) => {
+                    const id = index + 1;
                     const rect = el.getBoundingClientRect();
-                    if (rect.width === 0 || rect.height === 0 || rect.bottom < 0 || rect.top > window.innerHeight) return null;
+                    if (rect.top > window.innerHeight || rect.bottom < 0) return null; // 视口外的不显示，但保留 ID
 
-                    let id = i + 1;
                     el.setAttribute('data-tauri-agent-id', id);
-                    el.style.outline = "2px solid red";
+                    el.style.outline = "2px solid rgba(255, 0, 0, 0.5)"; // 红色虚线框
 
-                    let text = el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.value || el.placeholder;
-                    if (!text || text.trim() === '') {
-                        if (el.tagName === 'INPUT' && el.type === 'checkbox') text = el.checked ? "已勾选复选框" : "未勾选复选框";
-                        else if (el.tagName === 'INPUT') text = "输入框";
-                        else if (el.querySelector('svg') || el.querySelector('img')) text = "图标/图片按钮";
-                        else text = "无文本交互区";
+                    let text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || el.placeholder || "").trim();
+                    if (!text) {
+                        if (el.tagName === 'INPUT') text = `输入框(${el.type})`;
+                        else if (el.querySelector('img')) text = "图片按钮";
+                        else text = "交互元素";
                     }
 
-                    let tag = el.tagName.toLowerCase();
-                    let cx = Math.round(rect.x + rect.width / 2);
-                    let cy = Math.round(rect.y + rect.height / 2);
-                    return `[${id}] <${tag}> (X:${cx}, Y:${cy}): ${text.substring(0, 60).replace(/\n/g, ' ')}`;
-                }).filter(r => r !== null);
+                    return `[${id}] <${el.tagName.toLowerCase()}> ${text.substring(0, 50).replace(/\n/g, ' ')} (X:${Math.round(rect.left + rect.width/2)}, Y:${Math.round(rect.top + rect.height/2)})`;
+                }).filter(l => l !== null);
 
-                let scrollStatus = `【页面状态】: 视口宽度 ${window.innerWidth}, 视口高度 ${window.innerHeight}, 当前滚动高度 ${Math.round(window.scrollY)} / 总高度 ${document.body.scrollHeight}`;
-                return scrollStatus + '\n【当前屏幕交互元素清单】:\n' + results.join('\n');
+                let status = `【页面状态】: 视口 ${window.innerWidth}x${window.innerHeight}, 滚动 ${Math.round(window.scrollY)}/${document.body.scrollHeight}`;
+                return status + "\n【可用元素清单】:\n" + resultLines.join('\n');
             })();
             "#;
             match tab.evaluate(js, false) {
@@ -191,26 +211,41 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                     let text = remote_obj.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
                     (text, String::new(), true)
                 }
-                Err(e) => (String::new(), format!("提取DOM失败: {}", e), false),
+                Err(e) => (String::new(), format!("提取失败: {}", e), false),
             }
         }
         "click" => {
             let id = arg1.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let js = format!(r#"
-                let el = document.querySelector('[data-tauri-agent-id="{}"]');
-                if (el) {{
+                (function() {{
+                    let el = document.querySelector('[data-tauri-agent-id="{}"]');
+                    if (!el) return "NOT_FOUND";
+                    
                     el.scrollIntoView({{behavior: 'instant', block: 'center'}});
-                    el.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}));
-                    el.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true}}));
-                    el.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true}}));
-                    el.dispatchEvent(new MouseEvent('click', {{bubbles: true}}));
-                    if (el.tagName.toLowerCase() === 'a' && el.href) window.location.href = el.href;
-                    true;
-                }} else {{ false; }}
+                    
+                    // 模拟真实交互序列
+                    const events = ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click'];
+                    events.forEach(name => {{
+                        el.dispatchEvent(new MouseEvent(name, {{bubbles: true, cancelable: true, view: window}}));
+                    }});
+
+                    // 兜底：如果是 A 标签且没跳转，强制跳转
+                    if (el.tagName.toLowerCase() === 'a' && el.href && !el.href.startsWith('javascript:')) {{
+                        setTimeout(() => {{ window.location.href = el.href; }}, 100);
+                    }}
+                    return "OK";
+                }})();
             "#, id);
             match tab.evaluate(&js, false) {
-                Ok(res) if res.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false) => (format!("✅ 成功点击元素 [{}]", id), String::new(), true),
-                _ => (String::new(), format!("❌ 找不到元素 [{}]", id), false),
+                Ok(res) => {
+                    let val = res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+                    if val == "OK" {
+                        (format!("✅ 成功点击元素 [{}]", id), String::new(), true)
+                    } else {
+                        (String::new(), format!("❌ 找不到元素 [{}]", id), false)
+                    }
+                },
+                Err(e) => (String::new(), format!("点击出错: {}", e), false),
             }
         }
         "type" => {

@@ -12,6 +12,12 @@ pub struct SandwichContext {
     pub memory_window_size: usize,
     pub current_observation: String,
     pub memories: HashMap<String, String>,
+    /// AI 上一轮选择的工具名（用于按需加载说明书）
+    #[serde(default)]
+    pub active_tool: Option<String>,
+    /// 当前活跃工具的详细 schema/说明（动态注入）
+    #[serde(default)]
+    pub active_tool_detail: String,
 }
 
 impl SandwichContext {
@@ -24,6 +30,8 @@ impl SandwichContext {
             memory_window_size: 15,
             current_observation: String::new(),
             memories: HashMap::new(),
+            active_tool: None,
+            active_tool_detail: String::new(),
         }
     }
 
@@ -46,8 +54,19 @@ impl SandwichContext {
 
     pub fn assemble_messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
-        // 定义用户目标
-        messages.push(ChatMessage { role: "system".to_string(), content: self.system_prompt.clone() });
+        
+        // --- 1. 核心逻辑提示词 ---
+        let mut full_system = self.system_prompt.clone();
+        
+        // --- 2. 动态加载当前工具的详细说明书 ---
+        // active_tool_detail 由 mod.rs 主循环在每一步之前注入
+        if !self.active_tool_detail.is_empty() {
+            full_system.push_str("\n\n<active_tool_instructions>\n");
+            full_system.push_str(&self.active_tool_detail);
+            full_system.push_str("\n</active_tool_instructions>");
+        }
+        
+        messages.push(ChatMessage { role: "system".to_string(), content: full_system });
         messages.push(ChatMessage { role: "user".to_string(), content: format!("【终极目标】\n{}", self.ultimate_goal) });
 
         let todo_json = serde_json::to_string_pretty(&self.todo_list).unwrap_or_else(|_| "[]".to_string());
@@ -55,11 +74,11 @@ impl SandwichContext {
             format!("  Step#{} [{}] {} -> {} | 成功: {}", m.step_id, m.tool, m.command, chars_preview(&m.output_summary, 1000), m.success)
         }).collect();
 
-        // 核心事实 (Absolute Facts) - AI 永远不会忘的数据
+        // 核心事实 (Absolute Facts)
         let facts_section = if self.memories.is_empty() {
             String::new()
         } else {
-            let facts: Vec<String> = self.memories.iter().map(|(k, v)| format!("  {} = {}", k, v)).collect();
+            let facts: Vec<String> = self.memories.iter().map(|(k, v)| format!("  {}: {}", k, v)).collect();
             format!("\n\n【核心事实与数据 (Absolute Facts)】\n{}", facts.join("\n"))
         };
 

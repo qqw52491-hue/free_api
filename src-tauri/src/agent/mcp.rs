@@ -182,16 +182,38 @@ impl PluginRegistry {
     }
 
     /// 生成注入系统提示词的 MCP 工具块
-    pub fn format_tools_for_prompt(&mut self) -> String {
+    /// 第一层：简短菜单（永远携带，Token 消耗极低）
+    /// 让 AI 知道"我有哪些工具可以用"
+    pub fn format_tools_menu(&mut self) -> String {
         let tools = self.list_all_tools();
         if tools.is_empty() { return String::new(); }
-        let mut lines = vec!["\n## 外部 MCP 工具 (重要：参数必须符合 JSON Schema)".to_string()];
+        let mut lines = vec!["\n## 可用 MCP 工具菜单 (选择后会获得详细参数说明)".to_string()];
         for (plugin, tool) in &tools {
-            lines.push(format!("- {}/{} — {}", plugin, tool.name, tool.description));
-            lines.push(format!("  参数规格: {}", tool.schema));
-            lines.push(format!("  示例: {{\"tool\": \"{}/{}\", \"command\": {{...}}}}", plugin, tool.name));
+            lines.push(format!("- {}/{}: {}", plugin, tool.name, tool.description));
         }
-        lines.push("\n注意：当前系统是 macOS，路径请使用 /Users/wx/... 格式。".to_string());
+        lines.push("\n用法：tool 字段填 \"插件名/工具名\"，command 字段填参数对象。".to_string());
         lines.join("\n")
+    }
+
+    /// 第二层：某个插件的详细说明书（按需加载，AI 选了才带）
+    /// 包含完整的 JSON Schema 参数规格
+    pub fn format_tool_detail(&mut self, plugin_name: &str) -> String {
+        let tools = self.list_all_tools();
+        let matched: Vec<_> = tools.iter().filter(|(p, _)| p == plugin_name).collect();
+        if matched.is_empty() { return String::new(); }
+        
+        let mut lines = vec![format!("\n## 【{}】工具详细参数说明 (必须严格遵守)", plugin_name)];
+        for (plugin, tool) in &matched {
+            lines.push(format!("### {}/{}", plugin, tool.name));
+            lines.push(format!("描述: {}", tool.description));
+            lines.push(format!("参数规格 (JSON Schema): {}", tool.schema));
+            lines.push(format!("调用示例: {{\"tool\": \"{}/{}\", \"command\": {{...按照上面的 Schema 填写...}}}}", plugin, tool.name));
+        }
+        lines.join("\n")
+    }
+
+    /// 兼容旧接口（合并菜单+详情，用于首次启动时）
+    pub fn format_tools_for_prompt(&mut self) -> String {
+        self.format_tools_menu()
     }
 }

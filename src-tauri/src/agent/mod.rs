@@ -204,6 +204,31 @@ pub async fn run_agent_main_loop(
             println!("📝 AI 更新了核心记忆: {:?}", instruction.memories_update);
         }
 
+        // --- C. 【预加载优化】按需加载下一轮的工具详细说明书 ---
+        // 优先使用 AI 明确预示的下个工具，如果没给，则沿用当前正在使用的工具（防止连续操作时丢说明书）
+        let next_tool = instruction.next_tool_hint.clone()
+            .unwrap_or_else(|| instruction.get_action());
+        
+        context.active_tool = Some(next_tool.clone());
+        
+        // 优先从本地 prompts/tools/{tool}.md 加载（内置工具）
+        let local_tool_path = format!("prompts/tools/{}.md", next_tool);
+        if let Ok(tool_md) = std::fs::read_to_string(&local_tool_path) {
+            context.active_tool_detail = tool_md;
+        } else if next_tool.contains('/') {
+            // MCP 工具：从 registry 动态加载该插件的详细 schema
+            let plugin_name = next_tool.split('/').next().unwrap_or("");
+            let detail = {
+                let mut registry = registry_state.lock().await;
+                registry.format_tool_detail(plugin_name)
+            };
+            context.active_tool_detail = detail;
+        } else {
+            context.active_tool_detail.clear(); // 无额外说明
+        }
+
+        println!("💡 预加载下轮工具说明: [{}]", next_tool);
+
         // 推送整个三明治状态（包含最新的 todo_list 和 memory）
         app.emit("agent-context", &context).map_err(|e| e.to_string())?;
 
