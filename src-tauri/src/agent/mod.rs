@@ -18,14 +18,19 @@ use tauri::{AppHandle, Manager, State};
 use tokio::time::{sleep, Duration};
 
 // 根据指令执行具体动作
-pub fn run_agent_step(
-    instruction: &AgentInstruction,
-    registry: &mut PluginRegistry,
-) -> DispatchResult {
-    let action = instruction.get_action().trim().to_lowercase();
-    let params = instruction.get_params();
+    pub fn run_agent_step(
+        instruction: &AgentInstruction,
+        registry: &mut PluginRegistry,
+    ) -> DispatchResult {
+        let mut action = instruction.get_action().trim().to_lowercase();
+        let params = instruction.get_params();
 
-    // 1. 优先尝试本地内置工具
+        // --- 容错路由：如果 action 直接就是一个 http 地址，自动补全为 goto ---
+        if action.starts_with("http://") || action.starts_with("https://") {
+            action = format!("goto {}", action);
+        }
+
+        // 1. 优先尝试本地内置工具
     if let Some(res) = run_builtin_step(&action, &params) {
         return res;
     }
@@ -160,42 +165,124 @@ pub async fn run_agent_main_loop(
     // 2. 初始化三明治上下文：加载系统提示词 + 动态注入 MCP 工具
     let prompt_path = app.path().resource_dir()
         .unwrap_or_default()
-        .join("prompts/agent_system_prompt.md");
+        .join("prompts/core_logic.md");
     let base_prompt = std::fs::read_to_string(&prompt_path)
-        .or_else(|_| std::fs::read_to_string("prompts/agent_system_prompt.md"))
-        .unwrap_or_else(|_| "你是一个 macOS 自动化特工。每轮只返回1个JSON动作：{\"thought\":\"...\",\"description\":\"...\",\"tool\":\"browser_dom|shell|osascript|finish\",\"command\":\"...\"}".to_string());
+        .or_else(|_| std::fs::read_to_string("prompts/core_logic.md"))
+        .unwrap_or_else(|_| "你是一个全自动 Web Agent。".to_string());
 
-    // 查询所有 MCP Server 的工具列表，动态附加到提示词
-    let mcp_tools_section = {
+    // 2. 动态扫描所有内置工具 (Built-in Tools)
+    let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
+    let tools_dir = app.path().resource_dir().unwrap_or_default().join("prompts/tools");
+    let tools_dir_dev = std::path::PathBuf::from("prompts/tools");
+    
+    let entries = std::fs::read_dir(&tools_dir)
+        .or_else(|_| std::fs::read_dir(&tools_dir_dev))
+        .unwrap_or_else(|_| return std::fs::read_dir(".").unwrap()); // 容错处理
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("md") {
+            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                // 抓取简短的 summary 标签内容
+                let summary = content.find("<summary>")
+                    .and_then(|start| content.find("</summary>").map(|end| &content[start+9..end]))
+                    .unwrap_or("无详细描述");
+                local_tools_menu.push_str(&format!("- {}: {}\n", name, summary));
+            }
+        }
+    }
+
+    // 3. 查询所有 MCP Server 的工具列表，追加到菜单里
+    let mcp_tools_menu = {
         let mut registry = registry_state.lock().await;
-        registry.format_tools_for_prompt()
+        registry.format_tools_menu()
     };
-    let system_prompt = format!("{}{}", base_prompt, mcp_tools_section);
-    println!("--- 最终系统提示词 (含 MCP) ---\n{}\n------------------", system_prompt);
-
+    
+    let system_prompt = format!("{}\n{}\n{}", base_prompt, local_tools_menu, mcp_tools_menu);
+    println!("--- 最终系统提示词 (级联菜单模式) ---\n{}\n------------------", system_prompt);
     let mut context = context::SandwichContext::new(system_prompt, goal);
 
-    let mut step_id = 0;
-    loop {
-        if step_id >= 50 {
+    for step_id in 0..50 {
+        app.emit("agent-log", format!("正在规划第 {} 步...", step_id + 1)).map_err(|e| e.to_string())?;
+        
+        // ================================================================
+        // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
+        // ================================================================
+        let mut retry_count = 0;
+        let max_retries = 3;
+        
+        let (instruction, result) = loop {
+            // --- A. 请求 AI 规划 ---
+            let inst = match call_llm(&context, &state, model_id.clone()).await {
+                Ok(inst) => inst,
+                Err(e) => {
+                    retry_count += 1;
+                    if retry_count >= max_retries {
+                        return Err(format!("AI 无法解析 JSON: {}", e));
+                    }
+                    app.emit("agent-log", format!("🔄 格式错误(第{}次)，正在自我修复...", retry_count)).map_err(|er| er.to_string())?;
+                    context.add_error_feedback(&e);
+                    continue;
+                }
+            };
+
+            // 通知前端：发现了新计划
+            app.emit("agent-log", format!("🤖 AI 规划了新动作: {}", inst.description)).map_err(|e| e.to_string())?;
             app.emit("agent-progress", json!({
-                "type": "error",
-                "message": "达到最大步数限制"
+                "type": "step_new",
+                "step": {
+                    "id": step_id,
+                    "description": inst.description.clone(),
+                    "thought": inst.thought.clone(),
+                    "tool": inst.get_action(),
+                    "command": inst.get_params().to_string(),
+                    "status": "pending",
+                    "output": ""
+                }
             })).map_err(|e| e.to_string())?;
-            break;
-        }
 
-        // --- A. AI 规划阶段 ---
-        app.emit("agent-progress", json!({
-            "type": "planning",
-            "message": format!("正在规划第 {} 步...", step_id + 1)
-        })).map_err(|e| e.to_string())?;
+            // --- B. 执行动作 ---
+            app.emit("agent-log", format!("▶ 步骤 {}: {}", step_id+1, inst.description)).map_err(|e| e.to_string())?;
+            app.emit("agent-progress", json!({
+                "type": "step_start",
+                "step_id": step_id,
+                "description": &inst.description
+            })).map_err(|e| e.to_string())?;
 
-        let _messages = context.assemble_messages(); // 仅用于调试引用
-        // 请求 LLM 获取 AgentInstruction JSON
-        let instruction: AgentInstruction = call_llm(&context, &state, model_id.clone()).await?;
+            let dispatch_result = {
+                let inst_c = inst.clone();
+                let registry_arc = registry_state.inner().clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut registry = futures::executor::block_on(registry_arc.lock());
+                    run_agent_step(&inst_c, &mut registry)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            };
 
-        // --- B. 更新任务规划 + 核心记忆 ---
+            // --- C. 判断执行结果 ---
+            if dispatch_result.success || inst.get_action() == "finish" {
+                break (inst, dispatch_result); // 成功！
+            } else {
+                retry_count += 1;
+                let error_detail = format!("❌ 执行失败: {}", dispatch_result.stderr);
+                
+                if retry_count >= max_retries {
+                    app.emit("agent-log", format!("⚠️ 重试 {} 次均失败，跳过", max_retries)).map_err(|e| e.to_string())?;
+                    break (inst, dispatch_result); 
+                }
+                
+                app.emit("agent-log", format!("🔄 执行错误 (第 {} 次)，正在重新规划...", retry_count)).map_err(|e| e.to_string())?;
+                context.add_error_feedback(&error_detail);
+            }
+        };
+
+        // ================================================================
+        // 以下是成功跳出重试循环后的正常流程
+        // ================================================================
+
+        // --- 更新任务规划 + 核心记忆 ---
         if !instruction.todo_update.is_empty() {
             context.todo_list = instruction.todo_update.clone();
         }
@@ -204,19 +291,21 @@ pub async fn run_agent_main_loop(
             println!("📝 AI 更新了核心记忆: {:?}", instruction.memories_update);
         }
 
-        // --- C. 【预加载优化】按需加载下一轮的工具详细说明书 ---
-        // 优先使用 AI 明确预示的下个工具，如果没给，则沿用当前正在使用的工具（防止连续操作时丢说明书）
+        // --- 预加载下一轮工具说明书 ---
         let next_tool = instruction.next_tool_hint.clone()
             .unwrap_or_else(|| instruction.get_action());
-        
         context.active_tool = Some(next_tool.clone());
-        
-        // 优先从本地 prompts/tools/{tool}.md 加载（内置工具）
-        let local_tool_path = format!("prompts/tools/{}.md", next_tool);
-        if let Ok(tool_md) = std::fs::read_to_string(&local_tool_path) {
+
+        let tool_filename = format!("{}.md", next_tool);
+        let resource_dir = app.path().resource_dir().unwrap_or_default();
+        let tool_path_production = resource_dir.join("prompts/tools").join(&tool_filename);
+        let tool_path_dev = std::path::PathBuf::from("prompts/tools").join(&tool_filename);
+
+        if let Ok(tool_md) = std::fs::read_to_string(&tool_path_production)
+            .or_else(|_| std::fs::read_to_string(&tool_path_dev)) 
+        {
             context.active_tool_detail = tool_md;
         } else if next_tool.contains('/') {
-            // MCP 工具：从 registry 动态加载该插件的详细 schema
             let plugin_name = next_tool.split('/').next().unwrap_or("");
             let detail = {
                 let mut registry = registry_state.lock().await;
@@ -224,73 +313,28 @@ pub async fn run_agent_main_loop(
             };
             context.active_tool_detail = detail;
         } else {
-            context.active_tool_detail.clear(); // 无额外说明
+            context.active_tool_detail.clear();
         }
 
-        println!("💡 预加载下轮工具说明: [{}]", next_tool);
-
-        // 推送整个三明治状态（包含最新的 todo_list 和 memory）
-        app.emit("agent-context", &context).map_err(|e| e.to_string())?;
-
-        // 通知前端新步骤产生
-        app.emit("agent-progress", json!({
-            "type": "step_new",
-            "step": {
-                "id": step_id,
-                "description": instruction.description.clone(),
-                "thought": instruction.thought.clone(),
-                "tool": instruction.get_action(),
-                "command": instruction.get_params().to_string(),
-                "status": "pending",
-                "output": ""
-            }
-        })).map_err(|e| e.to_string())?;
-
-        // --- C. 执行路由分发 ---
-        app.emit("agent-progress", json!({
-            "type": "step_start",
-            "step_id": step_id,
-            "description": &instruction.description
-        })).map_err(|e| e.to_string())?;
-
-        let result = {
-            let instruction_c = instruction.clone();
-            let registry_arc = registry_state.inner().clone();
-            tokio::task::spawn_blocking(move || {
-                // 在阻塞线程中同步锁定进行分发
-                let mut registry = futures::executor::block_on(registry_arc.lock());
-                run_agent_step(&instruction_c, &mut registry)
-            })
-            .await
-            .map_err(|e| e.to_string())?
-        };
-
-        // --- D. 更新记忆与观测 ---
-        context.push_memory(ShortMemory {
-            step_id: step_id + 1,
-            tool: instruction.get_action(),
-            command: instruction.get_params().to_string(),
-            output_summary: chars_preview(&result.stdout, 500),
-            success: result.success,
-        });
-        context.update_observation(result.stdout.clone());
-
-        // 通知前端步骤完成
-        if result.success {
-            app.emit("agent-progress", json!({
-                "type": "step_done",
-                "step_id": step_id,
-                "output": result.stdout
-            })).map_err(|e| e.to_string())?;
+        // --- 记录历史 + 更新观测 ---
+        let output_text = if result.success {
+            result.stdout.clone()
         } else {
-            app.emit("agent-progress", json!({
-                "type": "step_error",
-                "step_id": step_id,
-                "output": format!("{} \n {}", result.stderr, result.stdout)
-            })).map_err(|e| e.to_string())?;
-        }
+            format!("❌ {}\n{}", result.stderr, result.stdout)
+        };
+        context.add_step(&instruction, &output_text);
+        context.current_observation = output_text.clone();
 
-        // --- D. 任务完成判定 ---
+        // --- 前端通知 ---
+        app.emit("agent-context", &context).map_err(|e| e.to_string())?;
+        app.emit("agent-progress", json!({
+            "type": if result.success { "step_done" } else { "step_error" },
+            "step_id": step_id,
+            "description": instruction.description,
+            "output": output_text
+        })).map_err(|e| e.to_string())?;
+
+        // --- 任务完成判定 ---
         if instruction.get_action() == "finish" {
             app.emit("agent-progress", json!({
                 "type": "complete",
@@ -300,7 +344,6 @@ pub async fn run_agent_main_loop(
             break;
         }
 
-        step_id += 1;
         sleep(Duration::from_millis(500)).await;
     }
 

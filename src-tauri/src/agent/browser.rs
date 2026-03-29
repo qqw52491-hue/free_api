@@ -252,20 +252,39 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             let id = arg1.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let val = arg2.unwrap_or_default();
             let escaped_val = val.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
-            let js_type = format!(r#"
-                let el = document.querySelector('[data-tauri-agent-id="{}"]');
-                if (el) {{
+            
+            // --- 核心改进：先清空，再输入 ---
+            let js_prepare = format!(r#"
+                (function() {{
+                    const el = document.querySelector('[data-tauri-agent-id="{}"]');
+                    if (!el) return "NOT_FOUND";
                     el.scrollIntoView({{behavior: 'instant', block: 'center'}});
                     el.focus();
-                    el.value = '{}';
-                    if(el.isContentEditable) el.innerText = '{}';
+                    el.value = ''; // 强行清空
+                    if(el.isContentEditable) el.innerText = '';
                     el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    true;
-                }} else {{ false; }}
-            "#, id, escaped_val, escaped_val);
-            if tab.evaluate(&js_type, false).is_err() { return (String::new(), format!("❌ 找不到元素 [{}]", id), false); }
-            let _ = tab.type_str(&val);
+                    return "OK";
+                }})();
+            "#, id);
+
+            match tab.evaluate(&js_prepare, false) {
+                Ok(res) => {
+                    let status = res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+                    if status != "OK" {
+                        return (String::new(), format!("❌ 找不到输入框 [{}]", id), false);
+                    }
+                },
+                Err(e) => return (String::new(), format!("输入准备失败: {:?}", e), false),
+            }
+
+            // 模拟真实按键输入
+            if !val.is_empty() {
+                if let Err(e) = tab.type_str(&val) {
+                   return (String::new(), format!("键盘模拟输入失败: {:?}", e), false);
+                }
+            }
+            
             (format!("✅ 成功输入: {}", val), String::new(), true)
         }
         "select" => {

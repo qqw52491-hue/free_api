@@ -179,7 +179,7 @@ pub async fn call_llm(
                 println!("⚠️ LLM 网络错误 (第 {} 次尝试): {}", i + 1, last_error);
             }
         }
-        
+
         if i < 2 {
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         }

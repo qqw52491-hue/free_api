@@ -74,15 +74,25 @@ pub struct AgentInstruction {
 
 impl AgentInstruction {
     pub fn get_action(&self) -> String {
-        self.tool.clone()
-            .or_else(|| self.action.clone())
-            .unwrap_or_default()
+        self.tool.clone().or(self.action.clone()).unwrap_or_default()
     }
+
+    pub fn get_tool(&self) -> String {
+        self.tool.clone().unwrap_or_else(|| "core".to_string())
+    }
+
     pub fn get_params(&self) -> serde_json::Value {
-        self.command.clone()
-            .or_else(|| self.params.clone())
-            .unwrap_or(serde_json::Value::Null)
+        self.command.clone().or(self.params.clone()).unwrap_or(serde_json::json!({}))
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryStep {
+    pub thought: String,
+    pub description: String,
+    pub tool: String,
+    pub command: String,
+    pub output_summary: String,
 }
 
 #[derive(Debug)]
