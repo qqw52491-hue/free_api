@@ -70,6 +70,14 @@ pub fn get_or_create_tab() -> Result<Arc<Tab>, String> {
             
             println!("💾 [浏览器模式: 持久化] 数据目录: {}", data_dir.display());
 
+            // ⚠️ 核心防闪退机制：杀掉因为代码热重载残留下来的僵尸 Chrome 进程，并强行删除死锁文件
+            // 完美解决你在视频和环境里遇到的“谷歌浏览器弹出来闪一下就消失/报错”的问题。
+            #[cfg(target_family = "unix")]
+            let _ = std::process::Command::new("pkill").args(["-9", "-f", "free-api-agent-browser"]).output();
+            
+            let _ = std::fs::remove_file(data_dir.join("SingletonLock"));
+            std::thread::sleep(std::time::Duration::from_millis(200)); // 等待系统内核回收进程
+
             let options = LaunchOptions::default_builder()
                 .headless(false)
                 .idle_browser_timeout(Duration::from_secs(36000))
@@ -162,11 +170,15 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             if let Err(e) = tab.navigate_to(&target_url) {
                 return (String::new(), format!("跳转失败: {:?}", e), false);
             }
-            if let Err(e) = tab.wait_until_navigated() {
-                return (String::new(), format!("加载等待失败: {:?}", e), false);
-            }
+            
+            // ⚠️ 极其核心的保命修改：坚决不能调用 tab.wait_until_navigated()！
+            // 像 kimi.com 这种基于 websocket 和重型框架的 AI 单页应用，
+            // 它的 loadEvent 有极高概率永远不会触发，导致 headless_chrome 的这行代码发生死锁，程序被彻底卡死。
+            // 做法：给它 1.5 秒缓冲，直接让该指令通过，把它交给大模型的下一轮 wait_idle 去处理。
+            std::thread::sleep(Duration::from_millis(1500));
+            
             let title = tab.get_title().unwrap_or_default();
-            (format!("成功跳转！标题: {}", title), String::new(), true)
+            (format!("触发跳转！标题可能还在加载中: {}", title), String::new(), true)
         }
         "back" => {
             let js = "window.history.back(); true;";
@@ -199,7 +211,6 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             }
         }
 
-        // ===== 等待类 =====
         "wait" => {
             // wait 2  → 等待2秒
             // wait    → 默认等待1秒
@@ -208,34 +219,41 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             std::thread::sleep(Duration::from_millis(ms));
             (format!("✅ 已等待 {:.1} 秒", secs), String::new(), true)
         }
-        "wait_for" => {
-            // wait_for 12 → 等待元素[12]出现，最多10秒
-            let target_id = arg1.as_deref().unwrap_or("0");
-            let timeout_ms: u64 = arg2.as_deref().and_then(|s| s.parse().ok()).unwrap_or(10000);
+        "wait_idle" => {
+            // 智能等待 DOM 稳定（800ms 内没有新元素加载才继续），默认最大超时 10 秒
+            let timeout_ms: u64 = arg1.as_deref().and_then(|s| s.parse().ok()).unwrap_or(10000);
             let js = format!(r#"
                 new Promise((resolve) => {{
-                    const start = Date.now();
-                    const check = () => {{
-                        const el = document.querySelector('[data-tauri-agent-id="{}"]');
-                        if (el) {{ resolve('found'); return; }}
-                        if (Date.now() - start > {}) {{ resolve('timeout'); return; }}
-                        requestAnimationFrame(check);
+                    let timeoutId;
+                    let maxTimeoutId;
+                    const observer = new MutationObserver(() => {{
+                        clearTimeout(timeoutId);
+                        timeoutId = setTimeout(() => finish('stable'), 800);
+                    }});
+                    const finish = (reason) => {{
+                        observer.disconnect();
+                        clearTimeout(timeoutId);
+                        clearTimeout(maxTimeoutId);
+                        resolve(reason);
                     }};
-                    check();
+                    observer.observe(document.body, {{ childList: true, subtree: true, attributes: true }});
+                    timeoutId = setTimeout(() => finish('stable'), 800);
+                    maxTimeoutId = setTimeout(() => finish('timeout'), {});
                 }});
-            "#, target_id, timeout_ms);
+            "#, timeout_ms);
             match tab.evaluate(&js, true) {
                 Ok(res) => {
-                    let result = res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or("timeout".to_string());
-                    if result == "found" {
-                        (format!("✅ 元素 [{}] 已出现", target_id), String::new(), true)
+                    let result = res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+                    if result == "stable" {
+                        (format!("✅ DOM 已完全加载并进入稳定状态"), String::new(), true)
                     } else {
-                        (String::new(), format!("⏱ 等待元素 [{}] 超时 ({}ms)", target_id, timeout_ms), false)
+                        (format!("⏳ DOM 稳定检测超时 ({} ms)，但已允许继续操作", timeout_ms), String::new(), true)
                     }
                 }
-                Err(e) => (String::new(), format!("等待失败: {:?}", e), false),
+                Err(e) => (String::new(), format!("智能等待失败: {:?}", e), false),
             }
         }
+
 
         // ===== 交互类 =====
         "extract" | "look" => {
@@ -296,7 +314,11 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                         else text = "交互元素";
                     }
 
-                    return `[${id}] <${el.tagName.toLowerCase()}> ${text.substring(0, 50).replace(/\n/g, ' ')} (X:${Math.round(rect.left + rect.width/2)}, Y:${Math.round(rect.top + rect.height/2)})`;
+                    // 优化：清理多余的换行和连续空格，限制最高30字符
+                    text = text.replace(/[\r\n\s]+/g, ' ').trim();
+                    const shortText = text.substring(0, 30) + (text.length > 30 ? "..." : "");
+
+                    return `[${id}] <${el.tagName.toLowerCase()}> ${shortText} (X:${Math.round(rect.left + rect.width/2)}, Y:${Math.round(rect.top + rect.height/2)})`;
                 }).filter(l => l !== null);
 
                 let status = `【页面状态】: 视口 ${window.innerWidth}x${window.innerHeight}, 滚动 ${Math.round(window.scrollY)}/${document.body.scrollHeight}`;
@@ -357,8 +379,18 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                     if (!el) return "NOT_FOUND";
                     el.scrollIntoView({{behavior: 'instant', block: 'center'}});
                     el.focus();
-                    el.value = ''; // 强行清空
+                    
+                    // 兼容 React 和 Vue 的深度清空 Hack 写法
+                    let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+                    let setter = nativeInputValueSetter ? nativeInputValueSetter.set : null;
+                    if (setter) {{
+                        setter.call(el, '');
+                    }} else {{
+                        el.value = '';
+                    }}
+
                     if(el.isContentEditable) el.innerText = '';
+                    
                     el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                     return "OK";

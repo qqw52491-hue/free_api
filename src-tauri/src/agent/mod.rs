@@ -43,14 +43,16 @@ pub fn set_browser_launch_mode(mode: u8) -> Result<String, String> {
         if action.starts_with("http://") || action.starts_with("https://") {
             action = format!("goto {}", action);
         }
-
+        
         // 1. 优先尝试本地内置工具
     if let Some(res) = run_builtin_step(&action, &params) {
+        println!("执行动作调用本地内置工具: {}", action);
         return res;
     }
 
     // 2. 尝试分发到 MCP 插件
     let (plugin_name, tool_name) = if let Some(pos) = action.find('/') {
+        println!("执行动作调用MCP插件: {}", action);
         (&action[..pos], &action[pos + 1..])
     } else {
         let tool = params
@@ -60,6 +62,9 @@ pub fn set_browser_launch_mode(mode: u8) -> Result<String, String> {
         (&action as &str, tool)
     };
 
+    println!("执行动作调用MCP插件: {}", action);
+    println!("执行动作调用MCP插件: {}", plugin_name);
+    println!("执行动作调用MCP插件: {}", tool_name);
     if let Some(client) = registry.get_mut(plugin_name) {
         // --- 参数预处理：确保 MCP 拿到的是 Object ---
         let arguments = if let Some(s) = params.as_str() {
@@ -264,11 +269,13 @@ pub async fn run_agent_main_loop(
                 "description": &inst.description
             })).map_err(|e| e.to_string())?;
 
+            // 具体和本地工具交互
             let dispatch_result = {
                 let inst_c = inst.clone();
                 let registry_arc = registry_state.inner().clone();
                 tokio::task::spawn_blocking(move || {
                     let mut registry = futures::executor::block_on(registry_arc.lock());
+                    println!("执行动作: {:?}", inst_c);
                     run_agent_step(&inst_c, &mut registry)
                 })
                 .await

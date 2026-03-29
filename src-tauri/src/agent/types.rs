@@ -49,6 +49,7 @@ pub struct MemoryItem {
     pub value: String,
 }
 
+// 这是ai 回答的具体格式
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentInstruction {
     pub thought: String,
@@ -62,6 +63,11 @@ pub struct AgentInstruction {
     // 兼容 command / params
     pub command: Option<serde_json::Value>,
     pub params: Option<serde_json::Value>,
+
+    // 兼容大模型直接平铺参数的幻觉（例如直接输出 "url": "..."）
+    pub url: Option<String>,
+    pub text: Option<String>,
+    pub id: Option<u64>,
 
     #[serde(default)]
     pub todo_update: Vec<TodoItem>,
@@ -84,7 +90,20 @@ impl AgentInstruction {
     }
 
     pub fn get_params(&self) -> serde_json::Value {
-        self.command.clone().or(self.params.clone()).unwrap_or(serde_json::json!({}))
+        if let Some(ref c) = self.command { return c.clone(); }
+        if let Some(ref p) = self.params { return p.clone(); }
+        
+        // 如果都没传，并且提取到了平铺的幻觉参数，则自动组装成 JSON Object 返回给下层
+        let mut map = serde_json::Map::new();
+        if let Some(ref u) = self.url { map.insert("url".to_string(), serde_json::Value::String(u.clone())); }
+        if let Some(ref t) = self.text { map.insert("text".to_string(), serde_json::Value::String(t.clone())); }
+        if let Some(i) = self.id { map.insert("id".to_string(), serde_json::Value::Number(i.into())); }
+        
+        if !map.is_empty() {
+            return serde_json::Value::Object(map);
+        }
+        
+        serde_json::json!({})
     }
 }
 
