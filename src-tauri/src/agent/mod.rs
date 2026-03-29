@@ -17,6 +17,20 @@ use tauri::Emitter;
 use tauri::{AppHandle, Manager, State};
 use tokio::time::{sleep, Duration};
 
+/// 前端调用：设置浏览器启动模式
+/// mode: 0=临时(默认), 1=持久化(保留Cookie), 2=连接已有Chrome
+#[tauri::command]
+pub fn set_browser_launch_mode(mode: u8) -> Result<String, String> {
+    let desc = match mode {
+        0 => "临时模式（每次干净 profile）",
+        1 => "持久化模式（保留 Cookie/登录态）",
+        2 => "连接模式（接管已打开的 Chrome:9222）",
+        _ => return Err("无效模式，请使用 0/1/2".to_string()),
+    };
+    crate::agent::browser::set_browser_mode(mode);
+    Ok(format!("浏览器已切换为: {}", desc))
+}
+
 // 根据指令执行具体动作
     pub fn run_agent_step(
         instruction: &AgentInstruction,

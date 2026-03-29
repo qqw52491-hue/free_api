@@ -1,4 +1,6 @@
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::path::PathBuf;
 use tokio::time::Duration;
 use headless_chrome::{Browser, Tab, LaunchOptions};
 use serde::{Deserialize, Serialize};
@@ -6,33 +8,128 @@ use serde::{Deserialize, Serialize};
 static GLOBAL_BROWSER: OnceLock<Browser> = OnceLock::new();
 static GLOBAL_TAB: OnceLock<Arc<Tab>> = OnceLock::new();
 
+/// 浏览器启动模式
+/// 0 = 默认（每次干净的临时 profile）
+/// 1 = 持久化（user_data_dir，保留 Cookie/登录态）
+/// 2 = 连接已有浏览器（CDP 端口 9222）
+static BROWSER_MODE: AtomicU8 = AtomicU8::new(0);
+
+/// 外部调用：设置浏览器模式（在首次使用浏览器之前调用）
+pub fn set_browser_mode(mode: u8) {
+    BROWSER_MODE.store(mode, Ordering::Relaxed);
+}
+
+/// 获取当前浏览器模式
+pub fn get_browser_mode() -> u8 {
+    BROWSER_MODE.load(Ordering::Relaxed)
+}
+
 pub fn get_or_create_tab() -> Result<Arc<Tab>, String> {
     if let Some(tab) = GLOBAL_TAB.get() {
         return Ok(tab.clone());
     }
 
-    let options = LaunchOptions::default_builder()
-        .headless(false) 
-        .idle_browser_timeout(Duration::from_secs(36000))
-        .args(vec![
-            "--no-sandbox".as_ref(),
-            "--disable-setuid-sandbox".as_ref(),
-            "--disable-gpu".as_ref(),
-            "--window-size=1280,800".as_ref(),
-            "--disable-dev-shm-usage".as_ref(),
-        ])
-        .build()
-        .unwrap_or_default();
+    let mode = BROWSER_MODE.load(Ordering::Relaxed);
 
-    let browser = Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?;
-    let tab = browser
-        .new_tab()
-        .map_err(|e| format!("新建标签页失败: {:?}", e))?;
+    match mode {
+        // === 模式 2：连接到已经手动打开的 Chrome (CDP) ===
+        2 => {
+            println!("🔗 [浏览器模式: 连接已有 Chrome] 正在连接 localhost:9222...");
+            
+            // 先通过 HTTP 获取 WebSocket URL
+            let ws_url = get_cdp_ws_url("http://127.0.0.1:9222")
+                .map_err(|e| format!("无法连接已有浏览器。请确保已以调试模式启动 Chrome:\n\
+                    /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222\n\
+                    错误: {}", e))?;
+            
+            let browser = Browser::connect(ws_url)
+                .map_err(|e| format!("CDP 连接失败: {}", e))?;
+            
+            // 获取已存在的标签页
+            let tab = {
+                let tabs = browser.get_tabs().lock().unwrap();
+                if let Some(first_tab) = tabs.first() {
+                    first_tab.clone()
+                } else {
+                    drop(tabs);
+                    browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?
+                }
+            };
 
-    let _ = GLOBAL_BROWSER.set(browser);
-    let _ = GLOBAL_TAB.set(tab.clone());
+            let _ = GLOBAL_BROWSER.set(browser);
+            let _ = GLOBAL_TAB.set(tab.clone());
+            Ok(tab)
+        }
 
-    Ok(tab)
+        // === 模式 1：持久化 profile（保留登录态） ===
+        1 => {
+            // 使用固定的 user_data_dir
+            let data_dir = dirs_next::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("free-api-agent-browser");
+            
+            println!("💾 [浏览器模式: 持久化] 数据目录: {}", data_dir.display());
+
+            let options = LaunchOptions::default_builder()
+                .headless(false)
+                .idle_browser_timeout(Duration::from_secs(36000))
+                .user_data_dir(Some(data_dir))
+                .args(vec![
+                    "--no-sandbox".as_ref(),
+                    "--disable-setuid-sandbox".as_ref(),
+                    "--disable-gpu".as_ref(),
+                    "--window-size=1280,800".as_ref(),
+                    "--disable-dev-shm-usage".as_ref(),
+                ])
+                .build()
+                .unwrap_or_default();
+
+            let browser = Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?;
+            let tab = browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?;
+
+            let _ = GLOBAL_BROWSER.set(browser);
+            let _ = GLOBAL_TAB.set(tab.clone());
+            Ok(tab)
+        }
+
+        // === 模式 0：默认（干净临时 profile） ===
+        _ => {
+            println!("🧹 [浏览器模式: 临时] 每次启动全新 profile");
+
+            let options = LaunchOptions::default_builder()
+                .headless(false)
+                .idle_browser_timeout(Duration::from_secs(36000))
+                .args(vec![
+                    "--no-sandbox".as_ref(),
+                    "--disable-setuid-sandbox".as_ref(),
+                    "--disable-gpu".as_ref(),
+                    "--window-size=1280,800".as_ref(),
+                    "--disable-dev-shm-usage".as_ref(),
+                ])
+                .build()
+                .unwrap_or_default();
+
+            let browser = Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?;
+            let tab = browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?;
+
+            let _ = GLOBAL_BROWSER.set(browser);
+            let _ = GLOBAL_TAB.set(tab.clone());
+            Ok(tab)
+        }
+    }
+}
+
+/// 通过 HTTP 获取 Chrome 的 WebSocket debugger URL
+fn get_cdp_ws_url(base: &str) -> Result<String, String> {
+    let url = format!("{}/json/version", base);
+    let resp = reqwest::blocking::get(&url)
+        .map_err(|e| format!("HTTP 请求失败: {}", e))?;
+    let json: serde_json::Value = resp.json()
+        .map_err(|e| format!("解析 JSON 失败: {}", e))?;
+    json["webSocketDebuggerUrl"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "未找到 webSocketDebuggerUrl".to_string())
 }
 
 #[derive(Serialize, Deserialize)]

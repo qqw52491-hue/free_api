@@ -35,6 +35,22 @@
                 </select>
             </div>
 
+            <!-- 浏览器模式选择 -->
+            <div class="control-section">
+                <label class="form-label">浏览器模式</label>
+                <select
+                    class="form-select"
+                    v-model="selectedBrowserMode"
+                    :disabled="isRunning"
+                >
+                    <option :value="0">🧹 临时模式 (无痕/干净)</option>
+                    <option :value="1">💾 持久化模式 (保留登录态)</option>
+                    <option :value="2">🔗 连接模式 (接管 Chrome:9222)</option>
+                </select>
+                <div class="form-tip" v-if="selectedBrowserMode === 1">建议：首次登录后自动保持，无需重复扫码。</div>
+                <div class="form-tip connect-tip" v-if="selectedBrowserMode === 2">提示：请先以远程调试模式启动 Chrome。</div>
+            </div>
+
             <!-- 快捷预设 -->
             <div class="control-section">
                 <label class="form-label">快捷预设</label>
@@ -358,8 +374,9 @@ const selectedModelId = ref("");
 const goalInput = ref("");
 const currentGoal = ref("");
 const isRunning = ref(false);
-const planningMessage = ref("");
+const selectedBrowserMode = ref(1); // 默认持久化
 const steps = ref<AgentStep[]>([]);
+const planningMessage = ref("");
 const runningStep = ref<number | null>(null);
 const completionMessage = ref("");
 const hasError = ref(false);
@@ -509,22 +526,27 @@ async function runAgent() {
     if (!selectedModelId.value || !goalInput.value.trim() || isRunning.value)
         return;
 
-    isRunning.value = true;
-    currentGoal.value = goalInput.value.trim();
-    steps.value = [];
-    completionMessage.value = "";
-    hasError.value = false;
-    runningStep.value = null;
-
-    addLog("info", `🚀 开启特工大脑 (后端托管模式): ${currentGoal.value}`);
-
     try {
+        // 先设置浏览器模式
+        const modeDesc = await invoke<string>("set_browser_launch_mode", { 
+            mode: selectedBrowserMode.value 
+        });
+        console.log('浏览器设置:', modeDesc);
+
+        isRunning.value = true;
+        currentGoal.value = goalInput.value.trim();
+        steps.value = [];
+        completionMessage.value = "";
+        hasError.value = false;
+        runningStep.value = null;
+
+        addLog("info", `🚀 开启特工大脑 (${modeDesc}): ${currentGoal.value}`);
+
         // 调用后端受控循环
-        // 注意：目前后端逻辑主要支持 auto_pilot
         await invoke("run_agent_main_loop", {
             modelId: selectedModelId.value,
             goal: currentGoal.value,
-            autoPilot: true, // 默认开启全自动
+            autoPilot: true,
         });
     } catch (e: any) {
         const msg = typeof e === "string" ? e : e?.message || "任务初始化失败";
@@ -533,15 +555,6 @@ async function runAgent() {
     }
 }
 
-// 监听进度并更新 (部分已在 onMounted 中实现，这里补充或修改逻辑以兼容新后端推送到事件)
-// 注意：以下是前端 listen 的补充逻辑说明：
-// - step_new: 向 steps.value 中 push 新的空步骤
-// - step_start: 将对应 id 的步骤设为 running
-// - step_done: 将对应 id 的步骤设为 done 并填入 output
-// - complete: 结束任务
-// - error: 报错并结束
-
-// 清空方法保持不变
 function clearAll() {
     steps.value = [];
     completionMessage.value = "";
