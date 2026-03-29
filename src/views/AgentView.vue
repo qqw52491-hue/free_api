@@ -526,6 +526,9 @@ async function runAgent() {
     if (!selectedModelId.value || !goalInput.value.trim() || isRunning.value)
         return;
 
+    // 立即锁定，防止重复点击导致并发
+    isRunning.value = true;
+
     try {
         // 先设置浏览器模式
         const modeDesc = await invoke<string>("set_browser_launch_mode", { 
@@ -533,7 +536,6 @@ async function runAgent() {
         });
         console.log('浏览器设置:', modeDesc);
 
-        isRunning.value = true;
         currentGoal.value = goalInput.value.trim();
         steps.value = [];
         completionMessage.value = "";

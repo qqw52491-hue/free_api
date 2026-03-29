@@ -6,7 +6,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    pub content: serde_json::Value, // 改为 Value，支持 String 或 Array (多模态)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +21,9 @@ pub struct SandwichContext {
     // --- 动态载入的工具详情 ---
     pub active_tool: Option<String>,
     pub active_tool_detail: String,
+
+    // --- Token 优化：是否要在本轮携带全部记忆内容 ---
+    pub carry_memories: bool,
 }
 
 impl SandwichContext {
@@ -34,6 +37,7 @@ impl SandwichContext {
             current_observation: String::new(),
             active_tool: None,
             active_tool_detail: String::new(),
+            carry_memories: false, 
         }
     }
 
@@ -49,13 +53,13 @@ impl SandwichContext {
         // 我们存入 ChatHistory，AI 就能看到历史
         let msg = ChatMessage {
             role: "assistant".to_string(),
-            content: serde_json::to_string(instruction).unwrap_or_default()
+            content: json!(serde_json::to_string(instruction).unwrap_or_default())
         };
         self.turns_history.push(msg);
         
         let feedback = ChatMessage {
             role: "user".to_string(),
-            content: format!("【执行结果】\n{}", output_summary)
+            content: json!(format!("【执行结果】\n{}", output_summary))
         };
         self.turns_history.push(feedback);
         
@@ -75,11 +79,28 @@ impl SandwichContext {
         self.current_observation = obs;
     }
 
+    /// 注入截图/图片反馈信息 (多模态)
+    pub fn add_image_feedback(&mut self, text: &str, base64_image: &str) {
+        let msg = ChatMessage {
+            role: "user".to_string(),
+            content: json!([
+                { "type": "text", "text": text },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:image/jpeg;base64,{}", base64_image)
+                    }
+                }
+            ])
+        };
+        self.turns_history.push(msg);
+    }
+
     /// 注入错误反馈信息，告知 AI 修正它的输出
     pub fn add_error_feedback(&mut self, error_msg: &str) {
         let msg = ChatMessage {
             role: "user".to_string(),
-            content: format!("【❌ 格式或执行错误】\n{}\n请检查格式规则（勿用 XML/```），修正后立即重新输出正确 JSON。", error_msg)
+            content: json!(format!("【❌ 格式或执行错误】\n{}\n请检查格式规则（勿用 XML/```），修正后立即重新输出正确 JSON。", error_msg))
         };
         self.turns_history.push(msg);
     }
@@ -96,7 +117,7 @@ impl SandwichContext {
         
         messages.push(ChatMessage {
             role: "system".to_string(),
-            content: full_system
+            content: json!(full_system)
         });
 
         // 2. 将历史对话加入其中
@@ -106,21 +127,26 @@ impl SandwichContext {
         let todo_json = serde_json::to_string_pretty(&self.todo_list).unwrap_or_default();
         let facts_section = if self.memories.is_empty() {
             String::new()
-        } else {
+        } else if self.carry_memories {
+            // 这里是 AI 申请了，由我们大方给出的全部细节
             let facts: Vec<String> = self.memories.iter().map(|(k, v)| format!("  {}: {}", k, v)).collect();
-            format!("\n\n【核心事实与数据 (Absolute Facts)】\n{}", facts.join("\n"))
+            format!("\n\n【核心事实与数据 (载入全部细节)】\n{}", facts.join("\n"))
+        } else {
+            // 这里是默认状态：只给一个 Key 列表，不给数据内容
+            let keys: Vec<String> = self.memories.keys().cloned().collect();
+            format!("\n\n【冷存储档案库 (载入内容请设 require_memory: true)】\n索引清单: [{}]", keys.join(", "))
         };
 
         let middle = format!("【用户终极目标】\n{}\n\n【任务面板】\n{}\n\n【近期记忆】\n(以上是历史对话){}", self.user_goal, todo_json, facts_section);
-        messages.push(ChatMessage { role: "user".to_string(), content: middle });
+        messages.push(ChatMessage { role: "user".to_string(), content: json!(middle) });
 
         if !self.current_observation.is_empty() {
-            messages.push(ChatMessage { role: "user".to_string(), content: format!("【当前实时观测】\n{}", self.current_observation) });
+            messages.push(ChatMessage { role: "user".to_string(), content: json!(format!("【当前实时观测】\n{}", self.current_observation)) });
         }
 
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: "请基于提示执行下一步操作。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格符合白名单。".to_string()
+            content: json!("请基于提示执行下一步操作。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格符合白名单。")
         });
 
         messages

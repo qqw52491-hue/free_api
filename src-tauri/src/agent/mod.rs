@@ -305,6 +305,10 @@ pub async fn run_agent_main_loop(
             println!("📝 AI 更新了核心记忆: {:?}", instruction.memories_update);
         }
 
+        // --- 核心增强：Token 优化与冷存储检索 ---
+        // AI 在本轮请求 "require_memory: true"，下一轮组装消息时就会塞入全部 Fact 内容
+        context.carry_memories = instruction.require_memory.unwrap_or(false);
+
         // --- 预加载下一轮工具说明书 ---
         let next_tool = instruction.next_tool_hint.clone()
             .unwrap_or_else(|| instruction.get_action());
@@ -330,13 +334,37 @@ pub async fn run_agent_main_loop(
             context.active_tool_detail.clear();
         }
 
+        // --- 核心增强：检查是否有截图反馈需要注入多模态消息 ---
+        let mut final_stdout = result.stdout.clone();
+        if result.success && final_stdout.contains("[Screenshot Saved as Base64]: ") {
+            if let Some(pos) = final_stdout.find("[Screenshot Saved as Base64]: ") {
+                let base64_img = &final_stdout[pos + 30..].trim();
+                let log_text = &final_stdout[..pos].trim();
+                
+                // 1. 发送图片反馈给 AI
+                context.add_image_feedback(
+                    &format!("【截图回退】DOM 提取发现异常，已自动生成截图供你参考分析：\n{}", log_text), 
+                    base64_img
+                );
+                
+                // 2. 清理 stdout，只保留日志文字供状态显示
+                final_stdout = format!("{}\n(已作为图片附件发送给 AI)", log_text);
+            }
+        }
+
         // --- 记录历史 + 更新观测 ---
         let output_text = if result.success {
-            result.stdout.clone()
+            final_stdout.clone()
         } else {
-            format!("❌ {}\n{}", result.stderr, result.stdout)
+            format!("❌ {}\n{}", result.stderr, final_stdout)
         };
-        context.add_step(&instruction, &output_text);
+        
+        // 如果是普通的文本，才走 add_step (常规历史记录)
+        // 注意：add_image_feedback 内部已经 push 了一条 history，所以这里加个判断
+        if !result.stdout.contains("[Screenshot Saved as Base64]: ") {
+            context.add_step(&instruction, &output_text);
+        }
+        
         context.current_observation = output_text.clone();
 
         // --- 前端通知 ---

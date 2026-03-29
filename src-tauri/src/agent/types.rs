@@ -70,6 +70,8 @@ pub struct AgentInstruction {
     /// 【预加载优化】AI 预告下一轮想用的工具，系统会提前加载该工具的详细说明书
     #[serde(default)]
     pub next_tool_hint: Option<String>,
+    #[serde(default)]
+    pub require_memory: Option<bool>,
 }
 
 impl AgentInstruction {

@@ -181,35 +181,34 @@ impl PluginRegistry {
         result
     }
 
-    /// 生成注入系统提示词的 MCP 工具块
-    /// 第一层：简短菜单（永远携带，Token 消耗极低）
-    /// 让 AI 知道"我有哪些工具可以用"
+    /// 【黄金平衡版】工具映射索引 (极简 Token，明确能力)
     pub fn format_tools_menu(&mut self) -> String {
-        let tools = self.list_all_tools();
-        if tools.is_empty() { return String::new(); }
-        let mut lines = vec!["\n## 可用 MCP 工具菜单 (选择后会获得详细参数说明)".to_string()];
-        for (plugin, tool) in &tools {
-            lines.push(format!("- {}/{}: {}", plugin, tool.name, tool.description));
+        let mut lines: Vec<String> = Vec::new();
+        lines.push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\")".to_string());
+        
+        for (name, client) in &mut self.clients {
+            if let Ok(tools) = client.list_tools() {
+                let tool_names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
+                lines.push(format!("- {}: [{}]", name, tool_names.join(", ")));
+            }
         }
-        lines.push("\n用法：tool 字段填 \"插件名/工具名\"，command 字段填参数对象。".to_string());
+        
+        lines.push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}".to_string());
         lines.join("\n")
     }
 
-    /// 第二层：某个插件的详细说明书（按需加载，AI 选了才带）
-    /// 包含完整的 JSON Schema 参数规格
+    /// 核心参数规格（按需加载）
     pub fn format_tool_detail(&mut self, plugin_name: &str) -> String {
-        let tools = self.list_all_tools();
-        let matched: Vec<_> = tools.iter().filter(|(p, _)| p == plugin_name).collect();
-        if matched.is_empty() { return String::new(); }
+        let all = self.list_all_tools();
+        let matched: Vec<_> = all.iter().filter(|(p, _)| p == plugin_name).collect();
+        if matched.is_empty() { return format!("\n❌ 未找到插件 [{}] 的说明书。", plugin_name); }
         
-        let mut lines = vec![format!("\n## 【{}】工具详细参数说明 (必须严格遵守)", plugin_name)];
-        for (plugin, tool) in &matched {
-            lines.push(format!("### {}/{}", plugin, tool.name));
-            lines.push(format!("描述: {}", tool.description));
-            lines.push(format!("参数规格 (JSON Schema): {}", tool.schema));
-            lines.push(format!("调用示例: {{\"tool\": \"{}/{}\", \"command\": {{...按照上面的 Schema 填写...}}}}", plugin, tool.name));
+        let mut detail = format!("\n## 📦 [{}] 工具规格 (严格遵守 JSON Schema)\n", plugin_name);
+        for (_, tool) in &matched {
+            detail.push_str(&format!("### {}/{}\n- 描述: {}\n- 参数: {}\n", 
+                plugin_name, tool.name, tool.description, tool.schema));
         }
-        lines.join("\n")
+        detail
     }
 
     /// 兼容旧接口（合并菜单+详情，用于首次启动时）
