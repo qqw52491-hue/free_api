@@ -546,13 +546,18 @@ pub async fn send_chat(
         .map_err(|e| e.to_string())?;
 
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let body = json!({
+    let is_ollama = base_url.contains("localhost:11434") || base_url.contains("127.0.0.1:11434");
+    let mut body = json!({
         "model": model_name,
         "messages": api_messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": true
     });
+    // 🔓 Ollama 智能解封：检测到本地 Ollama 时，自动注入大上下文窗口
+    if is_ollama {
+        body["options"] = json!({ "num_ctx": 32768 });
+    }
 
     let resp = client
         .post(&url)

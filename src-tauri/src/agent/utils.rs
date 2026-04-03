@@ -141,13 +141,19 @@ pub async fn call_llm(
 
     // 拼接body
     let api_messages = messages.assemble_messages();
-    let body = json!({
+    let is_ollama = base_url.contains("localhost:11434") || base_url.contains("127.0.0.1:11434");
+    let mut body = json!({
         "model": model_name,
         "messages": api_messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": true
     });
+    // 🔓 Ollama 智能解封：检测到本地 Ollama 时，自动注入大上下文窗口，防止系统提示词被截断
+    if is_ollama {
+        body["options"] = json!({ "num_ctx": 32768 });
+        println!("🔓 检测到 Ollama 本地模型，已自动注入 num_ctx: 32768");
+    }
     // --- 定义重试逻辑 (最多 3 次) ---
     let mut last_error = String::new();
     let mut final_resp: Option<reqwest::Response> = None;
