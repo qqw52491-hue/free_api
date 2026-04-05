@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     println!("💡 请在下方粘贴这行 JSON 并回车体验【全自动物理键盘盲打 Kimi】：\n{{\"tool\": \"ask_kimi\", \"url\": \"https://kimi.moonshot.cn\", \"question\": \"你好，请用一句话夸夸我\"}}\n");
 
     let stdin = io::stdin();
-    
+
     // 启动监听循环，充当底层协议服务端
     for line in stdin.lock().lines() {
         let line = line?;
@@ -37,7 +37,7 @@ fn main() -> Result<()> {
         match serde_json::from_str::<AgentCommand>(&line) {
             Ok(cmd) => {
                 println!("\n🤖 收到指令: [{}]，正在执行物理界操作...", cmd.tool);
-                
+
                 // 路由指令到对应的机械臂动作
                 let response = match cmd.tool.as_str() {
                     "screenshot" => {
@@ -65,7 +65,7 @@ fn main() -> Result<()> {
                     }
                     _ => error_response(&format!("抱歉，不支持 '{}'", cmd.tool)),
                 };
-                
+
                 // 将执行结果转化为 JSON 打印出来
                 let result_json = serde_json::to_string(&response)?;
                 println!("📤 执行完毕，返回给大模型的响应: {}\n", result_json);
@@ -139,7 +139,10 @@ fn error_response(msg: &str) -> AgentResponse {
 
 // ================= 最新黑科技：极简交互树提取 =================
 fn perform_extract_dom(url: &str) -> AgentResponse {
-    let options = LaunchOptions::default_builder().headless(false).build().unwrap();
+    let options = LaunchOptions::default_builder()
+        .headless(false)
+        .build()
+        .unwrap();
     let browser = match Browser::new(options) {
         Ok(b) => b,
         Err(e) => return error_response(&format!("浏览器拉起失败: {}", e)),
@@ -223,7 +226,7 @@ fn perform_extract_dom(url: &str) -> AgentResponse {
                     let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
                     println!("{}", serde_json::to_string_pretty(&parsed).unwrap());
                     println!("========================================================================\n");
-                    
+
                     AgentResponse {
                         status: "success".to_string(),
                         message: "极简交互树提取成功".to_string(),
@@ -248,7 +251,7 @@ fn perform_ask_kimi(url: &str, question: &str) -> AgentResponse {
     // 我们在这里建一个这个 AI 专属的“持久化独立缓存目录”
     let env_dir = std::env::current_dir().unwrap();
     let rpa_profile_path = env_dir.join(".rpa_profile");
-    
+
     let options = LaunchOptions::default_builder()
         .headless(false)
         .user_data_dir(Some(rpa_profile_path)) // 👈 让 AI 拥有自己独立的浏览器分身，而且永不掉线！
@@ -257,7 +260,12 @@ fn perform_ask_kimi(url: &str, question: &str) -> AgentResponse {
 
     let browser = match Browser::new(options) {
         Ok(b) => b,
-        Err(e) => return error_response(&format!("拉起失败（你是不是没彻底退出 Chrome 程序？导致锁冲突了）：{}", e)),
+        Err(e) => {
+            return error_response(&format!(
+                "拉起失败（你是不是没彻底退出 Chrome 程序？导致锁冲突了）：{}",
+                e
+            ))
+        }
     };
 
     let tab = match browser.new_tab() {
@@ -271,8 +279,8 @@ fn perform_ask_kimi(url: &str, question: &str) -> AgentResponse {
     }
 
     println!("⏳ 正在扫描输入框...");
-    std::thread::sleep(Duration::from_secs(4)); 
-    
+    std::thread::sleep(Duration::from_secs(4));
+
     // 【第一步】锁定框
     let chat_input = match tab.wait_for_element("div[contenteditable='true']") {
         Ok(el) => el,
@@ -281,10 +289,10 @@ fn perform_ask_kimi(url: &str, question: &str) -> AgentResponse {
 
     println!("🎯 已锁定 Kimi 聊天框，强击输入第一句话: \"{}\"", question);
     chat_input.click().ok();
-    std::thread::sleep(Duration::from_millis(500)); 
+    std::thread::sleep(Duration::from_millis(500));
     let _ = chat_input.type_into(question);
-    
-    std::thread::sleep(Duration::from_millis(500)); 
+
+    std::thread::sleep(Duration::from_millis(500));
     let _ = tab.press_key("Enter");
 
     // 【第二步】重点来了！固定死等 10 秒听 Kimi 胡扯完
@@ -296,22 +304,22 @@ fn perform_ask_kimi(url: &str, question: &str) -> AgentResponse {
     println!("🔄 10秒结束！强行插入二次追问！");
     // 通常发送完后焦点还在输入框或者需要重新去找
     let chat_input_2 = match tab.wait_for_element("div[contenteditable='true']") {
-         Ok(el) => el,
-         Err(_) => return error_response("追问时找不到输入框了！"),
+        Ok(el) => el,
+        Err(_) => return error_response("追问时找不到输入框了！"),
     };
-    
+
     chat_input_2.click().ok();
-    std::thread::sleep(Duration::from_millis(500)); 
-    
+    std::thread::sleep(Duration::from_millis(500));
+
     let followup = "刚才说到哪了？你能把你说的再精简成3个字吗？";
     println!("🤖 第二波物理盲打输入: \"{}\"", followup);
     let _ = chat_input_2.type_into(followup);
-    
-    std::thread::sleep(Duration::from_millis(500)); 
+
+    std::thread::sleep(Duration::from_millis(500));
     let _ = tab.press_key("Enter");
 
     println!("✨ 连续两次对话物理流打穿完爆！(10秒后程序自动清理退出...)");
-    std::thread::sleep(Duration::from_secs(10)); 
+    std::thread::sleep(Duration::from_secs(10));
 
     AgentResponse {
         status: "success".to_string(),
@@ -319,4 +327,3 @@ fn perform_ask_kimi(url: &str, question: &str) -> AgentResponse {
         data: None,
     }
 }
-

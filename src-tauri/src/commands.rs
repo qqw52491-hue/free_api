@@ -1,5 +1,5 @@
-use crate::db::{ChatMessage, ChatSession, DbState, Model, Platform};
 use crate::agent::mcp::PluginConfig;
+use crate::db::{ChatMessage, ChatSession, DbState, Model, Platform};
 use chrono::Utc;
 use futures_util::StreamExt;
 use rusqlite::params;
@@ -27,21 +27,23 @@ pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginR
     let mut stmt = conn.prepare(
         "SELECT id, name, command, args, env, enabled, created_at FROM mcp_plugins ORDER BY created_at DESC"
     ).map_err(|e| e.to_string())?;
-    let list = stmt.query_map([], |row| {
-        let args_str: String = row.get(3)?;
-        let env_str: String = row.get(4)?;
-        Ok(McpPluginRow {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            command: row.get(2)?,
-            args: serde_json::from_str(&args_str).unwrap_or_default(),
-            env: serde_json::from_str(&env_str).unwrap_or_default(),
-            enabled: row.get::<_, i64>(5)? == 1,
-            created_at: row.get(6)?,
+    let list = stmt
+        .query_map([], |row| {
+            let args_str: String = row.get(3)?;
+            let env_str: String = row.get(4)?;
+            Ok(McpPluginRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                command: row.get(2)?,
+                args: serde_json::from_str(&args_str).unwrap_or_default(),
+                env: serde_json::from_str(&env_str).unwrap_or_default(),
+                enabled: row.get::<_, i64>(5)? == 1,
+                created_at: row.get(6)?,
+            })
         })
-    }).map_err(|e| e.to_string())?
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     Ok(list)
 }
 
@@ -66,16 +68,30 @@ pub async fn save_mcp_plugin(
          VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
          ON CONFLICT(name) DO UPDATE SET command=?3, args=?4, env=?5",
         params![id, name, command, args_json, env_json, now],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     // 同时写一个 yaml 文件到 plugins/ 目录（双重保险）
     let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
     let _ = std::fs::create_dir_all(&plugins_dir);
-    let config = PluginConfig { name: name.clone(), command: command.clone(), args: args.clone(), env: env_map.clone() };
+    let config = PluginConfig {
+        name: name.clone(),
+        command: command.clone(),
+        args: args.clone(),
+        env: env_map.clone(),
+    };
     let yaml = serde_yaml::to_string(&config).unwrap_or_default();
     let _ = std::fs::write(plugins_dir.join(format!("{}.yaml", name)), yaml);
 
-    Ok(McpPluginRow { id, name, command, args, env: env_map, enabled: true, created_at: now })
+    Ok(McpPluginRow {
+        id,
+        name,
+        command,
+        args,
+        env: env_map,
+        enabled: true,
+        created_at: now,
+    })
 }
 
 #[tauri::command]
@@ -87,18 +103,25 @@ pub async fn delete_mcp_plugin(state: State<'_, DbState>, name: String) -> Resul
     // 同时删 yaml
     let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
     let yaml_path = plugins_dir.join(format!("{}.yaml", name));
-    if yaml_path.exists() { let _ = std::fs::remove_file(yaml_path); }
-    
+    if yaml_path.exists() {
+        let _ = std::fs::remove_file(yaml_path);
+    }
+
     Ok(())
 }
 
 #[tauri::command]
-pub async fn toggle_mcp_plugin(state: State<'_, DbState>, name: String, enabled: bool) -> Result<(), String> {
+pub async fn toggle_mcp_plugin(
+    state: State<'_, DbState>,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE mcp_plugins SET enabled=?1 WHERE name=?2",
         params![enabled as i64, name],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -562,7 +585,7 @@ pub async fn send_chat(
     // 🔓 Ollama 智能解封：检测到本地 Ollama 时，自动注入大上下文窗口
     if is_ollama {
         context_window = 65536;
-        body["options"] = json!({ 
+        body["options"] = json!({
             "num_ctx": context_window,
             "temperature": 0.0,
             "top_p": 0.9
@@ -613,25 +636,39 @@ pub async fn send_chat(
                     let delta = &j["choices"][0]["delta"];
 
                     // 🧠 解析 thinking/reasoning 内容（兼容多种字段名）
-                    let reasoning = delta.get("reasoning_content").and_then(|v| v.as_str())
+                    let reasoning = delta
+                        .get("reasoning_content")
+                        .and_then(|v| v.as_str())
                         .or_else(|| delta.get("reasoning").and_then(|v| v.as_str()))
-                        .or_else(|| j.get("message").and_then(|m| m.get("thinking")).and_then(|v| v.as_str()));
+                        .or_else(|| {
+                            j.get("message")
+                                .and_then(|m| m.get("thinking"))
+                                .and_then(|v| v.as_str())
+                        });
 
                     if let Some(think_chunk) = reasoning {
                         if !think_chunk.is_empty() {
                             if !is_thinking {
                                 is_thinking = true;
-                                app.emit("chat-thinking", json!({
-                                    "session_id": session_id,
-                                    "status": "start"
-                                })).ok();
+                                app.emit(
+                                    "chat-thinking",
+                                    json!({
+                                        "session_id": session_id,
+                                        "status": "start"
+                                    }),
+                                )
+                                .ok();
                             }
                             thinking_text.push_str(think_chunk);
-                            app.emit("chat-thinking", json!({
-                                "session_id": session_id,
-                                "content": think_chunk,
-                                "status": "streaming"
-                            })).ok();
+                            app.emit(
+                                "chat-thinking",
+                                json!({
+                                    "session_id": session_id,
+                                    "content": think_chunk,
+                                    "status": "streaming"
+                                }),
+                            )
+                            .ok();
                         }
                     }
 
@@ -641,11 +678,15 @@ pub async fn send_chat(
                             // 如果之前在思考，现在开始输出正文，标记思考结束
                             if is_thinking {
                                 is_thinking = false;
-                                app.emit("chat-thinking", json!({
-                                    "session_id": session_id,
-                                    "status": "done",
-                                    "full_thinking": &thinking_text
-                                })).ok();
+                                app.emit(
+                                    "chat-thinking",
+                                    json!({
+                                        "session_id": session_id,
+                                        "status": "done",
+                                        "full_thinking": &thinking_text
+                                    }),
+                                )
+                                .ok();
                             }
                             full_text.push_str(content);
                             app.emit(
@@ -676,16 +717,23 @@ pub async fn send_chat(
 
     // 如果思考还在进行中就结束了（某些模型只有 thinking 没有 content）
     if is_thinking && !thinking_text.is_empty() {
-        app.emit("chat-thinking", json!({
-            "session_id": session_id,
-            "status": "done",
-            "full_thinking": &thinking_text
-        })).ok();
+        app.emit(
+            "chat-thinking",
+            json!({
+                "session_id": session_id,
+                "status": "done",
+                "full_thinking": &thinking_text
+            }),
+        )
+        .ok();
     }
 
     if !thinking_text.is_empty() {
-        println!("🧠 思考过程 ({} 字符): {}...", thinking_text.len(),
-            thinking_text.chars().take(200).collect::<String>());
+        println!(
+            "🧠 思考过程 ({} 字符): {}...",
+            thinking_text.len(),
+            thinking_text.chars().take(200).collect::<String>()
+        );
     }
 
     app.emit(
@@ -711,9 +759,11 @@ pub async fn send_chat(
     let (final_prompt, final_completion) = if usage_prompt > 0 || usage_completion > 0 {
         (usage_prompt, usage_completion)
     } else {
-        let est_prompt = (api_messages.iter()
+        let est_prompt = (api_messages
+            .iter()
             .map(|m| serde_json::to_string(m).unwrap_or_default().len())
-            .sum::<usize>() / 3) as i64;
+            .sum::<usize>()
+            / 3) as i64;
         let est_completion = (full_text.len() / 3) as i64;
         (est_prompt, est_completion)
     };
@@ -737,8 +787,10 @@ pub async fn send_chat(
     )
     .ok();
 
-    println!("📊 Chat Token: 输入={}, 输出={}, 合计={} | 上下文: {}/{} ({:.1}%)",
-        final_prompt, final_completion, final_total, final_total, context_window, final_percent);
+    println!(
+        "📊 Chat Token: 输入={}, 输出={}, 合计={} | 上下文: {}/{} ({:.1}%)",
+        final_prompt, final_completion, final_total, final_total, context_window, final_percent
+    );
 
     Ok(full_text)
 }

@@ -24,7 +24,7 @@ pub struct Model {
     pub max_tokens: i64,
     pub temperature: f64,
     pub enabled: bool,
-    pub status: String,       // unknown, online, offline, testing
+    pub status: String, // unknown, online, offline, testing
     pub latency_ms: i64,
 }
 
@@ -58,7 +58,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     std::fs::create_dir_all(path.parent().unwrap()).ok();
     let conn = Connection::open(path)?;
 
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         PRAGMA journal_mode=WAL;
         PRAGMA foreign_keys=ON;
 
@@ -117,7 +118,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             enabled INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         );
-    ")?;
+    ",
+    )?;
 
     Ok(conn)
 }

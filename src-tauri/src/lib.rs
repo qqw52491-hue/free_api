@@ -1,8 +1,8 @@
-mod db;
-mod commands;
 mod agent;
+mod commands;
+mod db;
 
-use db::{DbState, get_db_path, init_db};
+use db::{get_db_path, init_db, DbState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,7 +10,7 @@ pub fn run() {
     let conn = init_db(&db_path).expect("Failed to initialize database");
 
     let registry = std::sync::Arc::new(tokio::sync::Mutex::new(agent::mcp::PluginRegistry::new()));
-    
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

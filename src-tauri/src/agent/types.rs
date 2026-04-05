@@ -55,8 +55,8 @@ pub struct TokenUsage {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
-    pub context_window: i64,     // 配置的上下文窗口大小 (num_ctx)
-    pub usage_percent: f64,      // total_tokens / context_window * 100
+    pub context_window: i64, // 配置的上下文窗口大小 (num_ctx)
+    pub usage_percent: f64,  // total_tokens / context_window * 100
 }
 
 impl TokenUsage {
@@ -67,14 +67,24 @@ impl TokenUsage {
         } else {
             0.0
         };
-        Self { prompt_tokens, completion_tokens, total_tokens, context_window, usage_percent }
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            context_window,
+            usage_percent,
+        }
     }
 
     pub fn summary(&self) -> String {
         format!(
             "📊 Token: 输入={}, 输出={}, 合计={} | 上下文: {}/{} ({:.1}%)",
-            self.prompt_tokens, self.completion_tokens, self.total_tokens,
-            self.total_tokens, self.context_window, self.usage_percent
+            self.prompt_tokens,
+            self.completion_tokens,
+            self.total_tokens,
+            self.total_tokens,
+            self.context_window,
+            self.usage_percent
         )
     }
 }
@@ -86,11 +96,11 @@ pub struct AgentInstruction {
     pub thought: String,
     #[serde(default)]
     pub description: String,
-    
+
     // 兼容 tool / action
     pub tool: Option<String>,
     pub action: Option<String>,
-    
+
     // 兼容 command / params
     pub command: Option<serde_json::Value>,
     pub params: Option<serde_json::Value>,
@@ -117,7 +127,10 @@ pub struct AgentInstruction {
 
 impl AgentInstruction {
     pub fn get_action(&self) -> String {
-        self.tool.clone().or(self.action.clone()).unwrap_or_default()
+        self.tool
+            .clone()
+            .or(self.action.clone())
+            .unwrap_or_default()
     }
 
     pub fn get_tool(&self) -> String {
@@ -132,7 +145,10 @@ impl AgentInstruction {
 
         if c_is_verb && self.params.as_ref().map_or(false, |p| p.is_object()) {
             let mut map = self.params.as_ref().unwrap().as_object().unwrap().clone();
-            map.insert("command".to_string(), self.command.as_ref().unwrap().clone());
+            map.insert(
+                "command".to_string(),
+                self.command.as_ref().unwrap().clone(),
+            );
             return serde_json::Value::Object(map);
         }
 
@@ -145,23 +161,31 @@ impl AgentInstruction {
             }
         }
 
-        if let Some(ref p) = self.params { return p.clone(); }
-        
+        if let Some(ref p) = self.params {
+            return p.clone();
+        }
+
         // 如果都没传，并且提取到了平铺的幻觉参数，则自动组装成 JSON Object 返回给下层
         let mut map = serde_json::Map::new();
-        if let Some(ref u) = self.url { map.insert("url".to_string(), serde_json::Value::String(u.clone())); }
-        if let Some(ref t) = self.text { map.insert("text".to_string(), serde_json::Value::String(t.clone())); }
-        if let Some(i) = self.id { map.insert("id".to_string(), serde_json::Value::Number(i.into())); }
-        
+        if let Some(ref u) = self.url {
+            map.insert("url".to_string(), serde_json::Value::String(u.clone()));
+        }
+        if let Some(ref t) = self.text {
+            map.insert("text".to_string(), serde_json::Value::String(t.clone()));
+        }
+        if let Some(i) = self.id {
+            map.insert("id".to_string(), serde_json::Value::Number(i.into()));
+        }
+
         // 把所有的外卡字段都塞进去
         for (k, v) in &self.extra_fields {
             map.insert(k.clone(), v.clone());
         }
-        
+
         if !map.is_empty() {
             return serde_json::Value::Object(map);
         }
-        
+
         serde_json::json!({})
     }
 }

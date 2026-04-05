@@ -1,40 +1,25 @@
-use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
-use std::path::PathBuf;
-use tokio::time::Duration;
-use headless_chrome::{Browser, Tab, LaunchOptions};
+use headless_chrome::{Browser, LaunchOptions, Tab};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::time::Duration;
 
 static GLOBAL_BROWSER: OnceLock<Browser> = OnceLock::new();
-static GLOBAL_TABS: OnceLock<Mutex<std::collections::HashMap<u32, Arc<Tab>>>> = OnceLock::new();
-static CURRENT_TAB_ID: AtomicU32 = AtomicU32::new(1);
-static NEXT_TAB_ID: AtomicU32 = AtomicU32::new(2);
-
-/// 浏览器启动模式
-/// 0 = 默认（每次干净的临时 profile）
-/// 1 = 持久化（user_data_dir，保留 Cookie/登录态）
-/// 2 = 连接已有浏览器（CDP 端口 9222）
+static GLOBAL_TABS: OnceLock<Mutex<std::collections::HashMap<String, std::collections::HashMap<String, Arc<Tab>>>>> = OnceLock::new();
 static BROWSER_MODE: AtomicU8 = AtomicU8::new(0);
+static TAB_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 /// 外部调用：设置浏览器模式（在首次使用浏览器之前调用）
 pub fn set_browser_mode(mode: u8) {
     BROWSER_MODE.store(mode, Ordering::Relaxed);
 }
 
-/// 获取当前浏览器模式
-pub fn get_current_tab_id() -> u32 {
-    CURRENT_TAB_ID.load(Ordering::Relaxed)
-}
-
-pub fn set_current_tab_id(id: u32) {
-    CURRENT_TAB_ID.store(id, Ordering::Relaxed);
-}
-
 pub fn get_browser_mode() -> u8 {
     BROWSER_MODE.load(Ordering::Relaxed)
 }
 
-pub fn get_or_create_browser() -> Result<&'static Browser, String> {
+pub fn get_or_create_browser(session_id: &str) -> Result<&'static Browser, String> {
     if let Some(browser) = GLOBAL_BROWSER.get() {
         return Ok(browser);
     }
@@ -53,7 +38,9 @@ pub fn get_or_create_browser() -> Result<&'static Browser, String> {
                     first_tab.clone()
                 } else {
                     drop(tabs);
-                    browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?
+                    browser
+                        .new_tab()
+                        .map_err(|e| format!("新建标签页失败: {:?}", e))?
                 }
             };
             (browser, tab)
@@ -65,7 +52,9 @@ pub fn get_or_create_browser() -> Result<&'static Browser, String> {
             println!("💾 [浏览器模式: 持久化] 数据目录: {}", data_dir.display());
 
             #[cfg(target_family = "unix")]
-            let _ = std::process::Command::new("pkill").args(["-9", "-f", "free-api-agent-browser"]).output();
+            let _ = std::process::Command::new("pkill")
+                .args(["-9", "-f", "free-api-agent-browser"])
+                .output();
             let _ = std::fs::remove_file(data_dir.join("SingletonLock"));
             std::thread::sleep(std::time::Duration::from_millis(200));
 
@@ -84,11 +73,13 @@ pub fn get_or_create_browser() -> Result<&'static Browser, String> {
                 .unwrap_or_default();
 
             let browser = Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?;
-            let tab = browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?;
+            let tab = browser
+                .new_tab()
+                .map_err(|e| format!("新建标签页失败: {:?}", e))?;
             (browser, tab)
         }
         _ => {
-            println!("🧹 [浏览器模式: 临时] 每次启动全新 profile");
+            println!("扫帚 [浏览器模式: 临时] 每次启动全新 profile");
             let options = LaunchOptions::default_builder()
                 .headless(false)
                 .idle_browser_timeout(Duration::from_secs(36000))
@@ -103,39 +94,45 @@ pub fn get_or_create_browser() -> Result<&'static Browser, String> {
                 .unwrap_or_default();
 
             let browser = Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?;
-            let tab = browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?;
+            let tab = browser
+                .new_tab()
+                .map_err(|e| format!("新建标签页失败: {:?}", e))?;
             (browser, tab)
         }
     };
 
     let _ = GLOBAL_BROWSER.set(browser);
-    let mut tabs_map = std::collections::HashMap::new();
-    tabs_map.insert(1, tab);
-    let _ = GLOBAL_TABS.set(Mutex::new(tabs_map));
-    
+    GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
+    let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+    session_tabs.insert("main".to_string(), tab);
+
     Ok(GLOBAL_BROWSER.get().unwrap())
 }
 
-pub fn get_or_create_tab() -> Result<Arc<Tab>, String> {
-    let _ = get_or_create_browser()?; 
-
-    let current_id = CURRENT_TAB_ID.load(Ordering::Relaxed);
-    let tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
-    
-    if let Some(tab) = tabs_map.get(&current_id) {
+pub fn get_or_create_tab(session_id: &str) -> Result<Arc<Tab>, String> {
+    let browser = get_or_create_browser(session_id)?;
+    GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
+    let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+    if let Some(tab) = session_tabs.get("main") {
         Ok(tab.clone())
     } else {
-        Err(format!("当前聚焦标签页 [{}] 已被关闭或不存在，请切换至存在的窗口", current_id))
+        if let Some(tab) = session_tabs.values().next() {
+            Ok(tab.clone())
+        } else {
+            let new_tab = browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?;
+            session_tabs.insert("main".to_string(), new_tab.clone());
+            Ok(new_tab)
+        }
     }
 }
 
 /// 通过 HTTP 获取 Chrome 的 WebSocket debugger URL
 fn get_cdp_ws_url(base: &str) -> Result<String, String> {
     let url = format!("{}/json/version", base);
-    let resp = reqwest::blocking::get(&url)
-        .map_err(|e| format!("HTTP 请求失败: {}", e))?;
-    let json: serde_json::Value = resp.json()
-        .map_err(|e| format!("解析 JSON 失败: {}", e))?;
+    let resp = reqwest::blocking::get(&url).map_err(|e| format!("HTTP 请求失败: {}", e))?;
+    let json: serde_json::Value = resp.json().map_err(|e| format!("解析 JSON 失败: {}", e))?;
     json["webSocketDebuggerUrl"]
         .as_str()
         .map(|s| s.to_string())
@@ -150,98 +147,29 @@ pub struct BrowserAction {
     pub text: Option<String>,
 }
 
-pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
-    let parts: Vec<&str> = command_str.splitn(3, ' ').collect();
-    let cmd_type = parts.get(0).unwrap_or(&"").to_lowercase();
-    let arg1 = parts.get(1).map(|s| s.to_string());
-    let arg2 = parts.get(2).map(|s| s.to_string());
+#[derive(Debug, Clone, PartialEq)]
+pub enum WebAiPage {
+    Kimi,
+}
 
-    // --- 处理多标签页专属指令 ---
-    match cmd_type.as_str() {
-        "new_tab" => {
-            return match get_or_create_browser() {
-                Ok(browser) => {
-                    match browser.new_tab() {
-                        Ok(new_tab) => {
-                            let new_id = NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed);
-                            GLOBAL_TABS.get().unwrap().lock().unwrap().insert(new_id, new_tab.clone());
-                            CURRENT_TAB_ID.store(new_id, Ordering::Relaxed);
-                            if let Some(target_url) = arg1 {
-                                let _ = new_tab.navigate_to(&target_url);
-                                std::thread::sleep(Duration::from_millis(1500));
-                            }
-                            (format!("✅ 已开启新标签页并切换，ID: {}", new_id), String::new(), true)
-                        }
-                        Err(e) => (String::new(), format!("❌ 创建新标签页失败: {:?}", e), false),
-                    }
-                }
-                Err(e) => (String::new(), e, false),
-            };
+impl WebAiPage {
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id.to_lowercase().as_str() {
+            "kimi" => Some(Self::Kimi),
+            _ => None,
         }
-        "switch_tab" => {
-            let _ = get_or_create_browser();
-            let target_id: u32 = arg1.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
-            let tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
-            if tabs_map.contains_key(&target_id) {
-                CURRENT_TAB_ID.store(target_id, Ordering::Relaxed);
-                return (format!("✅ 已切换焦点至标签页 ID: {}", target_id), String::new(), true);
-            } else {
-                return (String::new(), format!("❌ 标签页 ID: {} 不存在", target_id), false);
-            }
+    }
+
+    pub fn default_url(&self) -> &'static str {
+        match self {
+            Self::Kimi => "https://kimi.moonshot.cn",
         }
-        "list_tabs" => {
-            let _ = get_or_create_browser();
-            let tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
-            let current_id = CURRENT_TAB_ID.load(Ordering::Relaxed);
-            let mut list_str = vec![];
-            for (id, tab) in tabs_map.iter() {
-                let url = tab.get_url();
-                let title = tab.get_title().unwrap_or_else(|_| "".to_string());
-                let active_mark = if *id == current_id { " [*当前焦点*]" } else { "" };
-                list_str.push(format!("- Tab {}{}: {} ({})", id, active_mark, title, url));
-            }
-            return (format!("📂 当前存在的标签页:\n{}", list_str.join("\n")), String::new(), true);
-        }
-        "close_tab" => {
-            let _ = get_or_create_browser();
-            let target_id: u32 = arg1.as_deref().and_then(|s| s.parse().ok()).unwrap_or_else(|| CURRENT_TAB_ID.load(Ordering::Relaxed));
-            let mut tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
-            if tabs_map.remove(&target_id).is_some() {
-                if CURRENT_TAB_ID.load(Ordering::Relaxed) == target_id {
-                    let next_curr_id = tabs_map.keys().next().copied().unwrap_or(0);
-                    CURRENT_TAB_ID.store(next_curr_id, Ordering::Relaxed);
-                }
-                return (format!("✅ 已关闭/移除标签页 ID: {}", target_id), String::new(), true);
-            } else {
-                return (String::new(), format!("❌ 标签页 ID: {} 不存在", target_id), false);
-            }
-        }
-        "ask_web_ai" => {
-            let target_url = arg1.clone().unwrap_or_else(|| "https://kimi.moonshot.cn".to_string());
-            let prompt = arg2.unwrap_or_default();
-            
-            let browser = match get_or_create_browser() {
-                Ok(b) => b,
-                Err(e) => return (String::new(), format!("打开网页模型失败: {:?}", e), false),
-            };
-            
-            let mut tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
-            let ai_tab_id = NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed);
-            let tab = match browser.new_tab() {
-                Ok(t) => t,
-                Err(e) => return (String::new(), format!("新建标签页失败: {:?}", e), false),
-            };
-            tabs_map.insert(ai_tab_id, tab.clone());
-            drop(tabs_map);
-            
-            if let Err(e) = tab.navigate_to(&target_url) {
-                return (String::new(), format!("跳转失败: {:?}", e), false);
-            }
-            std::thread::sleep(Duration::from_millis(5000));
-            
-            let escaped_prompt = prompt.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('`', "\\`");
-            
-            let js_action = format!(r#"
+    }
+
+    pub fn js_send_message(&self, escaped_prompt: &str) -> String {
+        match self {
+            Self::Kimi => format!(
+                r#"
                 (async function() {{
                     return new Promise((resolve) => {{
                         let checkCount = 0;
@@ -252,16 +180,14 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                                 let style = window.getComputedStyle(el);
                                 return style.display !== 'none' && style.visibility !== 'hidden' && el.getBoundingClientRect().height > 5;
                             }}).pop();
-                            
+
                             if (target) {{
                                 clearInterval(findInput);
                                 target.focus();
-                                
-                                // React / Lexical 万能插入法
+
                                 document.execCommand("selectAll", false, null);
-                        document.execCommand("insertText", false, `{}`);
-                        
-                        // 给 React 一点反应用时，去点亮发送按钮
+                                document.execCommand("insertText", false, `{}`);
+
                                 setTimeout(() => {{
                                     let kimiBtn = document.querySelector('[data-testid="msh-chatinput-send-button"], [data-testid="send-button"], button[aria-label*="发送"], button[aria-label*="Send"]');
                                     if (kimiBtn && !kimiBtn.disabled) {{
@@ -272,7 +198,7 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                                             let t = (b.innerText || '').toLowerCase();
                                             return t.includes('send') || t.includes('发送') || b.querySelector('svg');
                                         }});
-                                        
+
                                         if (sendBtn) {{
                                             sendBtn.click();
                                         }} else {{
@@ -288,17 +214,16 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                         }}, 1000);
                     }});
                 }})();
-            "#, escaped_prompt);
+            "#,
+                escaped_prompt
+            ),
+        }
+    }
 
-            match tab.evaluate(&js_action, true) {
-                Ok(res) => {
-                    let status = res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
-                    if status != "OK" { return (String::new(), status, false); }
-                }
-                Err(e) => return (String::new(), format!("输入执行故障: {:?}", e), false),
-            }
-
-            let wait_js = r#"
+    pub fn js_wait_response(&self) -> &'static str {
+        match self {
+            Self::Kimi => {
+                r#"
                 new Promise((resolve) => {
                     let timeout;
                     let absoluteTimeout;
@@ -313,47 +238,209 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                     };
                     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
                     timeout = setTimeout(() => finish(), 6000);
-                    absoluteTimeout = setTimeout(() => finish(), 45000); // 绝对最大超时，防止光标闪烁死锁
+                    absoluteTimeout = setTimeout(() => finish(), 45000); 
                 });
-            "#;
-            
-            let _ = tab.evaluate(wait_js, true);
-            std::thread::sleep(Duration::from_millis(500));
+            "#
+            }
+        }
+    }
 
-            let extract_js = r#"
+    pub fn js_extract_response(&self) -> &'static str {
+        match self {
+            Self::Kimi => {
+                r#"
                 (function() {
                     let messages = Array.from(document.querySelectorAll('.markdown, .prose, [data-message-author-role="assistant"], .message-bot, [class*="response"]'));
                     if(messages.length === 0) return document.body.innerText;
                     return messages[messages.length - 1].innerText;
                 })();
-            "#;
-            
-            let answer = match tab.evaluate(extract_js, false) {
-                Ok(res) => res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_else(|| "未能提取到有效的回答文本".to_string()),
-                Err(e) => return (String::new(), format!("提取回答失败: {:?}", e), false),
+            "#
+            }
+        }
+    }
+}
+
+pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, bool) {
+    let parts: Vec<&str> = command_str.splitn(3, ' ').collect();
+    let cmd_type = parts.get(0).unwrap_or(&"").to_lowercase();
+    let arg1 = parts.get(1).map(|s| s.to_string());
+    let arg2 = parts.get(2).map(|s| s.to_string());
+
+    // --- 处理多标签页专属指令 ---
+    match cmd_type.as_str() {
+        "new_tab" => {
+            return match get_or_create_browser(session_id) {
+                Ok(browser) => match browser.new_tab() {
+                    Ok(new_tab) => {
+                        // 如果提供了名字就用名字，否则用数字
+                        let tab_id = arg1.clone().unwrap_or_else(|| {
+                            let next = TAB_COUNTER.fetch_add(1, Ordering::Relaxed);
+                            next.to_string()
+                        });
+
+                        GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+                        let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
+                        let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+                        session_tabs.insert(tab_id.clone(), new_tab.clone());
+
+                        if let Some(target_url) = arg2 {
+                            let _ = new_tab.navigate_to(&target_url);
+                            std::thread::sleep(Duration::from_millis(1500));
+                        }
+                        (
+                            format!("✅ 已开启新标签页，ID: {}", tab_id),
+                            String::new(),
+                            true,
+                        )
+                    }
+                    Err(e) => (
+                        String::new(),
+                        format!("❌ 创建新标签页失败: {:?}", e),
+                        false,
+                    ),
+                },
+                Err(e) => (String::new(), e, false),
             };
-            
-            // --- 关键优化：不再销毁 Kimi 标签页，让它常驻后台，下次提问更丝滑 ---
-            // tabs_map.remove(&ai_tab_id); 
-            // let _ = tab.close_with_unload();
-            
-            // 物理唤醒：直接使用 CDP 协议层的 activate() 指令强制把老页面（原现场）拽到最前方
-            let old_id = CURRENT_TAB_ID.load(Ordering::Relaxed);
+        }
+        "switch_tab" => {
+            let _ = get_or_create_browser(session_id);
+            let target_id = arg1.clone().unwrap_or_else(|| "main".to_string());
+            GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+            let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
+            let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+            if let Some(tab) = session_tabs.get(&target_id) {
+                let _ = tab.activate();
+                return (
+                    format!("✅ 已物理切换焦点至标签页: {}", target_id),
+                    String::new(),
+                    true,
+                );
+            } else {
+                return (
+                    String::new(),
+                    format!("❌ 标签页: {} 不存在", target_id),
+                    false,
+                );
+            }
+        }
+        "list_tabs" => {
+            let _ = get_or_create_browser(session_id);
+            GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+            let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
+            let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+            let mut list_str = vec![];
+            for (id, tab) in session_tabs.iter() {
+                let url = tab.get_url();
+                let title = tab.get_title().unwrap_or_else(|_| "".to_string());
+                list_str.push(format!("- [{}]: {} ({})", id, title, url));
+            }
+            return (
+                format!("📂 当前存在的页面角色:\n{}", list_str.join("\n")),
+                String::new(),
+                true,
+            );
+        }
+        "close_tab" => {
+            let _ = get_or_create_browser(session_id);
+            let target_id = arg1.clone().unwrap_or_else(|| "main".to_string());
+            if target_id == "main" {
+                return (String::new(), "❌ 不能关闭主工作页 main".to_string(), false);
+            }
+            GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+            let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
+            let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+            if session_tabs.remove(&target_id).is_some() {
+                return (
+                    format!("✅ 已关闭/移除辅助页: {}", target_id),
+                    String::new(),
+                    true,
+                );
+            } else {
+                return (
+                    String::new(),
+                    format!("❌ 角色页: {} 不存在", target_id),
+                    false,
+                );
+            }
+        }
+        "ask_web_ai" => {
+            let ai_type = arg1.clone().unwrap_or_else(|| "kimi".to_string());
+            let prompt = arg2.unwrap_or_default();
+
+            let agent = match WebAiPage::from_id(&ai_type) {
+                Some(a) => a,
+                None => {
+                    return (
+                        String::new(),
+                        format!("不支持的 web ai 类型: {}", ai_type),
+                        false,
+                    )
+                }
+            };
+
+            let browser = match get_or_create_browser(session_id) {
+                Ok(b) => b,
+                Err(e) => return (String::new(), format!("打开浏览器失败: {:?}", e), false),
+            };
+
+            let tab = {
+                GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+                let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
+                let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+                if let Some(existing_tab) = session_tabs.get(&ai_type) {
+                    let _ = existing_tab.activate();
+                    existing_tab.clone()
+                } else {
+                    let new_tab = match browser.new_tab() {
+                        Ok(t) => t,
+                        Err(e) => return (String::new(), format!("创建AI页面失败: {:?}", e), false),
+                    };
+                    let _ = new_tab.navigate_to(agent.default_url());
+                    session_tabs.insert(ai_type.clone(), new_tab.clone());
+                    std::thread::sleep(Duration::from_millis(3000));
+                    new_tab
+                }
+            };
+
+            let escaped_prompt = prompt
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('`', "\\`");
+
+            let js_action = agent.js_send_message(&escaped_prompt);
+            let _ = tab.evaluate(&js_action, true);
+
+            let _ = tab.evaluate(agent.js_wait_response(), true);
+            std::thread::sleep(Duration::from_millis(500));
+
+            let answer = match tab.evaluate(agent.js_extract_response(), false) {
+                Ok(res) => res
+                    .value
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_default(),
+                Err(e) => return (String::new(), format!("提取失败: {:?}", e), false),
+            };
+
+            // 物理切回主页
             {
-                let tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
-                if let Some(old_tab) = tabs_map.get(&old_id) {
-                    let _ = old_tab.activate(); // CDP Level physical tab switch
+                GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+                let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
+                let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+                if let Some(main) = session_tabs.get("main") {
+                    let _ = main.activate();
                 }
             }
-            
-            // 物理回稳：给系统 1.5 秒时间处理 Tab 切换动画、重排 DOM 和重新捕获输入焦点
-            std::thread::sleep(Duration::from_millis(1500));
-            
-            return (format!("✅ Web AI [{}] 的思考结果:\n===================\n{}\n===================", target_url, answer), String::new(), true);
+
+            return (
+                format!("✅ Web AI [{}] 回复:\n{}", ai_type, answer),
+                String::new(),
+                true,
+            );
         }
         _ => {} // 继续向下走普通的 DOM 操作逻辑
     }
-    let tab = match get_or_create_tab() {
+    let tab = match get_or_create_tab(session_id) {
         Ok(t) => t,
         Err(e) => return (String::new(), format!("获取Tab失败: {:?}", e), false),
     };
@@ -363,20 +450,28 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
         "goto" | "navigate" => {
             let target_url = arg1.unwrap_or_default();
             if !target_url.starts_with("http") {
-                return (String::new(), "URL 格式不正确，需要以 http 开头".to_string(), false);
+                return (
+                    String::new(),
+                    "URL 格式不正确，需要以 http 开头".to_string(),
+                    false,
+                );
             }
             if let Err(e) = tab.navigate_to(&target_url) {
                 return (String::new(), format!("跳转失败: {:?}", e), false);
             }
-            
-            // ⚠️ 极其核心的保命修改：坚决不能调用 tab.wait_until_navigated()！
+
+            // 扫帚 极其核心的保命修改：坚决不能调用 tab.wait_until_navigated()！
             // 像 kimi.com 这种基于 websocket 和重型框架的 AI 单页应用，
             // 它的 loadEvent 有极高概率永远不会触发，导致 headless_chrome 的这行代码发生死锁，程序被彻底卡死。
             // 做法：给它 1.5 秒缓冲，直接让该指令通过，把它交给大模型的下一轮 wait_idle 去处理。
             std::thread::sleep(Duration::from_millis(1500));
-            
+
             let title = tab.get_title().unwrap_or_default();
-            (format!("触发跳转！标题可能还在加载中: {}", title), String::new(), true)
+            (
+                format!("触发跳转！标题可能还在加载中: {}", title),
+                String::new(),
+                true,
+            )
         }
         "back" => {
             let js = "window.history.back(); true;";
@@ -399,15 +494,16 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             let title = tab.get_title().unwrap_or_default();
             (format!("✅ 页面已刷新: {}", title), String::new(), true)
         }
-        "tab_url" | "url" => {
-            match tab.evaluate("window.location.href;", false) {
-                Ok(remote_obj) => {
-                    let url = remote_obj.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
-                    (format!("当前 URL: {}", url), String::new(), true)
-                }
-                Err(e) => (String::new(), format!("获取URL失败: {:?}", e), false),
+        "tab_url" | "url" => match tab.evaluate("window.location.href;", false) {
+            Ok(remote_obj) => {
+                let url = remote_obj
+                    .value
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                (format!("当前 URL: {}", url), String::new(), true)
             }
-        }
+            Err(e) => (String::new(), format!("获取URL失败: {:?}", e), false),
+        },
 
         "wait" => {
             // wait 2  → 等待2秒
@@ -419,8 +515,12 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
         }
         "wait_idle" => {
             // 智能等待 DOM 稳定（800ms 内没有新元素加载才继续），默认最大超时 10 秒
-            let timeout_ms: u64 = arg1.as_deref().and_then(|s| s.parse().ok()).unwrap_or(10000);
-            let js = format!(r#"
+            let timeout_ms: u64 = arg1
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10000);
+            let js = format!(
+                r#"
                 new Promise((resolve) => {{
                     let timeoutId;
                     let maxTimeoutId;
@@ -438,20 +538,32 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                     timeoutId = setTimeout(() => finish('stable'), 800);
                     maxTimeoutId = setTimeout(() => finish('timeout'), {});
                 }});
-            "#, timeout_ms);
+            "#,
+                timeout_ms
+            );
             match tab.evaluate(&js, true) {
                 Ok(res) => {
-                    let result = res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+                    let result = res
+                        .value
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default();
                     if result == "stable" {
-                        (format!("✅ DOM 已完全加载并进入稳定状态"), String::new(), true)
+                        (
+                            format!("✅ DOM 已完全加载并进入稳定状态"),
+                            String::new(),
+                            true,
+                        )
                     } else {
-                        (format!("⏳ DOM 稳定检测超时 ({} ms)，但已允许继续操作", timeout_ms), String::new(), true)
+                        (
+                            format!("⏳ DOM 稳定检测超时 ({} ms)，但已允许继续操作", timeout_ms),
+                            String::new(),
+                            true,
+                        )
                     }
                 }
                 Err(e) => (String::new(), format!("智能等待失败: {:?}", e), false),
             }
         }
-
 
         // ===== 交互类 =====
         "extract" | "look" => {
@@ -481,7 +593,7 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
 
                 // 选择候选元素
                 let candidates = Array.from(document.querySelectorAll('a, button, input, textarea, select, [role="button"], [role="link"], [contenteditable="true"], .btn, .button')).filter(isVisible);
-                
+
                 // 补充文本节点
                 let treeWalker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
                 let textNodes = [];
@@ -496,7 +608,7 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                 }
 
                 let all = Array.from(new Set([...candidates, ...textNodes])).filter(isTopLevel);
-                
+
                 let resultLines = all.map((el, index) => {
                     const id = index + 1;
                     const rect = el.getBoundingClientRect();
@@ -525,21 +637,28 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             "#;
             match tab.evaluate(js, false) {
                 Ok(remote_obj) => {
-                    let text = remote_obj.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+                    let text = remote_obj
+                        .value
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default();
                     (text, String::new(), true)
                 }
                 Err(e) => (String::new(), format!("提取失败: {}", e), false),
             }
         }
         "click" => {
-            let id = arg1.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-            let js = format!(r#"
+            let id = arg1
+                .as_deref()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            let js = format!(
+                r#"
                 (function() {{
                     let el = document.querySelector('[data-tauri-agent-id="{}"]');
                     if (!el) return "NOT_FOUND";
-                    
+
                     el.scrollIntoView({{behavior: 'instant', block: 'center'}});
-                    
+
                     // 模拟真实交互序列
                     const events = ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click'];
                     events.forEach(name => {{
@@ -552,32 +671,44 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                     }}
                     return "OK";
                 }})();
-            "#, id);
+            "#,
+                id
+            );
             match tab.evaluate(&js, false) {
                 Ok(res) => {
-                    let val = res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+                    let val = res
+                        .value
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default();
                     if val == "OK" {
                         (format!("✅ 成功点击元素 [{}]", id), String::new(), true)
                     } else {
                         (String::new(), format!("❌ 找不到元素 [{}]", id), false)
                     }
-                },
+                }
                 Err(e) => (String::new(), format!("点击出错: {}", e), false),
             }
         }
         "type" => {
-            let id = arg1.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let id = arg1
+                .as_deref()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
             let val = arg2.unwrap_or_default();
-            let escaped_val = val.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
-            
+            let _escaped_val = val
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n");
+
             // --- 核心改进：先清空，再输入 ---
-            let js_prepare = format!(r#"
+            let js_prepare = format!(
+                r#"
                 (function() {{
                     const el = document.querySelector('[data-tauri-agent-id="{}"]');
                     if (!el) return "NOT_FOUND";
                     el.scrollIntoView({{behavior: 'instant', block: 'center'}});
                     el.focus();
-                    
+
                     // 兼容 React 和 Vue 的深度清空 Hack 写法
                     let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
                     let setter = nativeInputValueSetter ? nativeInputValueSetter.set : null;
@@ -588,74 +719,124 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
                     }}
 
                     if(el.isContentEditable) el.innerText = '';
-                    
+
                     el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                     return "OK";
                 }})();
-            "#, id);
+            "#,
+                id
+            );
 
             match tab.evaluate(&js_prepare, false) {
                 Ok(res) => {
-                    let status = res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+                    let status = res
+                        .value
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default();
                     if status != "OK" {
                         return (String::new(), format!("❌ 找不到输入框 [{}]", id), false);
                     }
-                },
+                }
                 Err(e) => return (String::new(), format!("输入准备失败: {:?}", e), false),
             }
 
             // 模拟真实按键输入
             if !val.is_empty() {
                 if let Err(e) = tab.type_str(&val) {
-                   return (String::new(), format!("键盘模拟输入失败: {:?}", e), false);
+                    return (String::new(), format!("键盘模拟输入失败: {:?}", e), false);
                 }
             }
-            
+
             (format!("✅ 成功输入: {}", val), String::new(), true)
         }
         "select" => {
             // select 8 option_value → 选择下拉框
-            let id = arg1.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let id = arg1
+                .as_deref()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
             let option_val = arg2.unwrap_or_default();
             let escaped_val = option_val.replace('\\', "\\\\").replace('\'', "\\'");
-            let js = format!(r#"
+            let js = format!(
+                r#"
                 let el = document.querySelector('[data-tauri-agent-id="{}"]');
                 if (el && el.tagName === 'SELECT') {{
                     el.value = '{}';
                     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                     true;
                 }} else {{ false; }}
-            "#, id, escaped_val);
+            "#,
+                id, escaped_val
+            );
             match tab.evaluate(&js, false) {
-                Ok(res) if res.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false) => {
-                    (format!("✅ 下拉框 [{}] 已选择: {}", id, option_val), String::new(), true)
+                Ok(res)
+                    if res
+                        .value
+                        .as_ref()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false) =>
+                {
+                    (
+                        format!("✅ 下拉框 [{}] 已选择: {}", id, option_val),
+                        String::new(),
+                        true,
+                    )
                 }
-                _ => (String::new(), format!("❌ 无法选择元素 [{}] 或它不是下拉框", id), false),
+                _ => (
+                    String::new(),
+                    format!("❌ 无法选择元素 [{}] 或它不是下拉框", id),
+                    false,
+                ),
             }
         }
         "press" => {
             let key = arg1.unwrap_or_else(|| "Enter".to_string());
-            if tab.press_key(&key).is_err() { return (String::new(), format!("❌ 按键 {} 失败", key), false); }
+            if let Err(e) = tab.press_key(&key) {
+                return (String::new(), format!("❌ 按键 {} 失败: {:?}", key, e), false);
+            }
             (format!("✅ 成功按下 [{}] 键", key), String::new(), true)
         }
         "hover" => {
-            let id = arg1.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-            let js = format!(r#"
-                let el = document.querySelector('[data-tauri-agent-id="{}"]');
-                if (el) {{
-                    el.scrollIntoView({{behavior: 'instant', block: 'center'}});
-                    el.dispatchEvent(new MouseEvent('mouseenter', {{bubbles: true}}));
-                    el.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}));
-                    true;
-                }} else {{ false; }}
-            "#, id);
+            let id = arg1
+                .as_deref()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            let js = format!(
+                r#"
+                (function() {{
+                    let el = document.querySelector('[data-tauri-agent-id="{}"]');
+                    if (el) {{
+                        el.scrollIntoView({{behavior: 'instant', block: 'center'}});
+                        el.dispatchEvent(new MouseEvent('mouseenter', {{bubbles: true}}));
+                        el.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}));
+                        return true;
+                    }}
+                    return false;
+                }})();
+            "#,
+                id
+            );
             match tab.evaluate(&js, false) {
-                Ok(res) if res.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false) => {
+                Ok(res)
+                    if res
+                        .value
+                        .as_ref()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false) =>
+                {
                     std::thread::sleep(Duration::from_millis(500));
-                    (format!("✅ 鼠标已悬停在元素 [{}] 上", id), String::new(), true)
+                    (
+                        format!("✅ 鼠标已悬停在元素 [{}] 上", id),
+                        String::new(),
+                        true,
+                    )
                 }
-                _ => (String::new(), format!("❌ 找不到编号为 [{}] 的元素", id), false),
+                _ => (
+                    String::new(),
+                    format!("❌ 找不到编号为 [{}] 的元素", id),
+                    false,
+                ),
             }
         }
 
@@ -664,18 +845,39 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             let js = "document.body.innerText;";
             match tab.evaluate(js, false) {
                 Ok(remote_obj) => {
-                    let t = remote_obj.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
-                    let preview = if t.chars().count() > 5000 { t.chars().take(5000).collect::<String>() + "\n..." } else { t };
-                    (format!("【当前页正文】：\n{}", preview), String::new(), true)
+                    let t = remote_obj
+                        .value
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    let preview = if t.chars().count() > 5000 {
+                        t.chars().take(5000).collect::<String>() + "\n..."
+                    } else {
+                        t
+                    };
+                    (
+                        format!("【当前页正文】：\n{}", preview),
+                        String::new(),
+                        true,
+                    )
                 }
                 Err(e) => (String::new(), format!("读取失败: {}", e), false),
             }
         }
         "screenshot" => {
-            match tab.capture_screenshot(headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png, None, None, true) {
+            match tab.capture_screenshot(
+                headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png,
+                None,
+                None,
+                true,
+            ) {
                 Ok(data) => {
-                    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
-                    (format!("data:image/png;base64,{}", b64), String::new(), true)
+                    let b64 =
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
+                    (
+                        format!("data:image/png;base64,{}", b64),
+                        String::new(),
+                        true,
+                    )
                 }
                 Err(e) => (String::new(), format!("截图失败: {:?}", e), false),
             }
@@ -692,7 +894,11 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             };
             let _ = tab.evaluate(js, false);
             std::thread::sleep(Duration::from_millis(800));
-            (format!("✅ 页面已向 {} 滚动", direction), String::new(), true)
+            (
+                format!("✅ 页面已向 {} 滚动", direction),
+                String::new(),
+                true,
+            )
         }
 
         // ===== 万能 JS =====
@@ -701,8 +907,15 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             let code = format!("{} {}", arg1.unwrap_or_default(), arg2.unwrap_or_default());
             match tab.evaluate(&code, false) {
                 Ok(remote_obj) => {
-                    let result = remote_obj.value
-                        .map(|v| if v.is_string() { v.as_str().unwrap_or("").to_string() } else { v.to_string() })
+                    let result = remote_obj
+                        .value
+                        .map(|v| {
+                            if v.is_string() {
+                                v.as_str().unwrap_or("").to_string()
+                            } else {
+                                v.to_string()
+                            }
+                        })
                         .unwrap_or_else(|| "undefined".to_string());
                     (format!("JS 结果: {}", result), String::new(), true)
                 }
@@ -710,7 +923,10 @@ pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
             }
         }
 
-        _ => (String::new(), format!("❌ 未知浏览器指令: {}", cmd_type), false),
+        _ => (
+            String::new(),
+            format!("❌ 未知浏览器指令: {}", cmd_type),
+            false,
+        ),
     }
 }
-
