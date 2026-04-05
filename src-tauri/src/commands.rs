@@ -552,11 +552,18 @@ pub async fn send_chat(
         "messages": api_messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "stream": true
+        "stream": true,
+        "stream_options": { "include_usage": true }
     });
+
+    // 确定上下文窗口大小
+    let context_window: i64;
     // 🔓 Ollama 智能解封：检测到本地 Ollama 时，自动注入大上下文窗口
     if is_ollama {
-        body["options"] = json!({ "num_ctx": 32768 });
+        context_window = 65536;
+        body["options"] = json!({ "num_ctx": context_window });
+    } else {
+        context_window = 128000;
     }
 
     let resp = client
@@ -577,7 +584,11 @@ pub async fn send_chat(
 
     let mut stream = resp.bytes_stream();
     let mut full_text = String::new();
+    let mut thinking_text = String::new();
     let mut buffer = String::new();
+    let mut usage_prompt: i64 = 0;
+    let mut usage_completion: i64 = 0;
+    let mut is_thinking = false;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| e.to_string())?;
@@ -594,21 +605,82 @@ pub async fn send_chat(
                     break;
                 }
                 if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(content) = j["choices"][0]["delta"]["content"].as_str() {
-                        full_text.push_str(content);
-                        app.emit(
-                            "chat-stream",
-                            json!({
+                    let delta = &j["choices"][0]["delta"];
+
+                    // 🧠 解析 thinking/reasoning 内容（兼容多种字段名）
+                    let reasoning = delta.get("reasoning_content").and_then(|v| v.as_str())
+                        .or_else(|| delta.get("reasoning").and_then(|v| v.as_str()))
+                        .or_else(|| j.get("message").and_then(|m| m.get("thinking")).and_then(|v| v.as_str()));
+
+                    if let Some(think_chunk) = reasoning {
+                        if !think_chunk.is_empty() {
+                            if !is_thinking {
+                                is_thinking = true;
+                                app.emit("chat-thinking", json!({
+                                    "session_id": session_id,
+                                    "status": "start"
+                                })).ok();
+                            }
+                            thinking_text.push_str(think_chunk);
+                            app.emit("chat-thinking", json!({
                                 "session_id": session_id,
-                                "content": content,
-                                "done": false
-                            }),
-                        )
-                        .ok();
+                                "content": think_chunk,
+                                "status": "streaming"
+                            })).ok();
+                        }
+                    }
+
+                    // 📝 解析正常内容
+                    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                        if !content.is_empty() {
+                            // 如果之前在思考，现在开始输出正文，标记思考结束
+                            if is_thinking {
+                                is_thinking = false;
+                                app.emit("chat-thinking", json!({
+                                    "session_id": session_id,
+                                    "status": "done",
+                                    "full_thinking": &thinking_text
+                                })).ok();
+                            }
+                            full_text.push_str(content);
+                            app.emit(
+                                "chat-stream",
+                                json!({
+                                    "session_id": session_id,
+                                    "content": content,
+                                    "done": false
+                                }),
+                            )
+                            .ok();
+                        }
+                    }
+
+                    // 解析 usage 信息（通常在最后一个 chunk 中）
+                    if let Some(usage) = j.get("usage") {
+                        if let Some(p) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                            usage_prompt = p;
+                        }
+                        if let Some(c) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                            usage_completion = c;
+                        }
                     }
                 }
             }
         }
+    }
+
+    // 如果思考还在进行中就结束了（某些模型只有 thinking 没有 content）
+    if is_thinking && !thinking_text.is_empty() {
+        app.emit("chat-thinking", json!({
+            "session_id": session_id,
+            "status": "done",
+            "full_thinking": &thinking_text
+        })).ok();
+    }
+
+    if !thinking_text.is_empty() {
+        println!("🧠 思考过程 ({} 字符): {}...", thinking_text.len(),
+            thinking_text.chars().take(200).collect::<String>());
     }
 
     app.emit(
@@ -616,10 +688,52 @@ pub async fn send_chat(
         json!({
             "session_id": session_id,
             "content": "",
-            "done": true
+            "done": true,
+            "thinking": if thinking_text.is_empty() { None } else { Some(&thinking_text) }
         }),
     )
     .ok();
+
+    // 📊 发送 Token 用量统计到前端
+    let total_tokens = usage_prompt + usage_completion;
+    let usage_percent = if context_window > 0 {
+        (total_tokens as f64 / context_window as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // 如果 API 没返回 usage，做粗略估算
+    let (final_prompt, final_completion) = if usage_prompt > 0 || usage_completion > 0 {
+        (usage_prompt, usage_completion)
+    } else {
+        let est_prompt = (api_messages.iter()
+            .map(|m| serde_json::to_string(m).unwrap_or_default().len())
+            .sum::<usize>() / 3) as i64;
+        let est_completion = (full_text.len() / 3) as i64;
+        (est_prompt, est_completion)
+    };
+    let final_total = final_prompt + final_completion;
+    let final_percent = if context_window > 0 {
+        (final_total as f64 / context_window as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    app.emit(
+        "chat-token-usage",
+        json!({
+            "session_id": session_id,
+            "prompt_tokens": final_prompt,
+            "completion_tokens": final_completion,
+            "total_tokens": final_total,
+            "context_window": context_window,
+            "usage_percent": final_percent
+        }),
+    )
+    .ok();
+
+    println!("📊 Chat Token: 输入={}, 输出={}, 合计={} | 上下文: {}/{} ({:.1}%)",
+        final_prompt, final_completion, final_total, final_total, context_window, final_percent);
 
     Ok(full_text)
 }

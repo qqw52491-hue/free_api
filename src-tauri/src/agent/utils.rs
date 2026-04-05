@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use crate::{
-    agent::{context::SandwichContext, types::AgentInstruction},
+    agent::{context::SandwichContext, types::{AgentInstruction, TokenUsage}},
     db::DbState,
 };
 use futures::Stream;
@@ -103,11 +103,25 @@ pub fn extract_json_from_text(text: &str) -> Option<String> {
     None
 }
 
+/// 从 SSE 流中解析 usage 信息
+fn parse_usage_from_json(json: &serde_json::Value) -> Option<(i64, i64)> {
+    let usage = json.get("usage")?;
+    let prompt = usage.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let completion = usage.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    if prompt > 0 || completion > 0 {
+        Some((prompt, completion))
+    } else {
+        None
+    }
+}
+
 pub async fn call_llm(
     messages: &SandwichContext,
     state: &State<'_, DbState>,
     model_id: String,
-) -> Result<AgentInstruction, String> {
+    app: Option<&tauri::AppHandle>,
+    step_id: usize,
+) -> Result<(AgentInstruction, TokenUsage, String), String> {
     // 获取具体数据库信息
     let (base_url, api_key, model_name, max_tokens, temperature) = {
         let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -147,13 +161,23 @@ pub async fn call_llm(
         "messages": api_messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "stream": true
+        "stream": true,
+        "stream_options": { "include_usage": true }
     });
-    // 🔓 Ollama 智能解封：检测到本地 Ollama 时，自动注入大上下文窗口，防止系统提示词被截断
+
+    // 确定上下文窗口大小
+    let context_window: i64;
+
+    // 🔓 Ollama 智能解封：检测到本地 Ollama 时，自动注入大上下文窗口
     if is_ollama {
-        body["options"] = json!({ "num_ctx": 32768 });
-        println!("🔓 检测到 Ollama 本地模型，已自动注入 num_ctx: 32768");
+        context_window = 65536;
+        body["options"] = json!({ "num_ctx": context_window });
+        println!("🔓 检测到 Ollama 本地模型，已自动注入 num_ctx: {}", context_window);
+    } else {
+        // 非 Ollama 平台，使用一个合理的默认值
+        context_window = 128000; // 大多数云端模型默认 128K
     }
+
     // --- 定义重试逻辑 (最多 3 次) ---
     let mut last_error = String::new();
     let mut final_resp: Option<reqwest::Response> = None;
@@ -194,7 +218,9 @@ pub async fn call_llm(
     let resp = final_resp.ok_or_else(|| format!("LLM 请求最终失败 (3次尝试): {}", last_error))?;
     let mut stream = resp.bytes_stream();
     let mut full_response = String::new();
+    let mut thinking_text = String::new();
     let mut line_buf = String::new(); // 缓冲不完整的行
+    let mut usage_data: Option<(i64, i64)> = None;
 
     while let Some(item) = stream.next().await {
         let chunk = item.map_err(|e| e.to_string())?;
@@ -214,8 +240,37 @@ pub async fn call_llm(
             }
             if let Some(data_str) = line.strip_prefix("data: ") {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(data_str) {
-                    if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                        full_response.push_str(content);
+                    let delta = &json["choices"][0]["delta"];
+
+                    // 🧠 解析 thinking/reasoning 内容（兼容多种字段名）
+                    let reasoning = delta.get("reasoning_content").and_then(|v| v.as_str())
+                        .or_else(|| delta.get("reasoning").and_then(|v| v.as_str()))
+                        .or_else(|| json.get("message").and_then(|m| m.get("thinking")).and_then(|v| v.as_str()));
+                    if let Some(think_chunk) = reasoning {
+                        if !think_chunk.is_empty() {
+                            thinking_text.push_str(think_chunk);
+                            // 🚀 实时推送到前端，让页面立即显示！
+                            if let Some(app_handle) = app {
+                                use tauri::Emitter;
+                                app_handle.emit("agent-progress", json!({
+                                    "type": "thinking",
+                                    "step_id": step_id,
+                                    "content": &thinking_text,
+                                    "done": false
+                                })).ok();
+                            }
+                        }
+                    }
+
+                    // 📝 解析正常内容
+                    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                        if !content.is_empty() {
+                            full_response.push_str(content);
+                        }
+                    }
+                    // 解析 usage 信息（通常在最后一个 chunk 中）
+                    if let Some(u) = parse_usage_from_json(&json) {
+                        usage_data = Some(u);
                     }
                 }
             }
@@ -227,11 +282,45 @@ pub async fn call_llm(
     if !remaining.is_empty() && remaining != "data: [DONE]" {
         if let Some(data_str) = remaining.strip_prefix("data: ") {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(data_str) {
-                if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                    full_response.push_str(content);
+                let delta = &json["choices"][0]["delta"];
+                let reasoning = delta.get("reasoning_content").and_then(|v| v.as_str())
+                    .or_else(|| delta.get("reasoning").and_then(|v| v.as_str()))
+                    .or_else(|| json.get("message").and_then(|m| m.get("thinking")).and_then(|v| v.as_str()));
+                if let Some(think_chunk) = reasoning {
+                    if !think_chunk.is_empty() {
+                        thinking_text.push_str(think_chunk);
+                    }
+                }
+                if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                    if !content.is_empty() {
+                        full_response.push_str(content);
+                    }
+                }
+                if let Some(u) = parse_usage_from_json(&json) {
+                    usage_data = Some(u);
                 }
             }
         }
+    }
+
+    // --- 构建 Token 用量统计 ---
+    let token_usage = if let Some((prompt, completion)) = usage_data {
+        TokenUsage::new(prompt, completion, context_window)
+    } else {
+        // 如果 API 没返回 usage，做一个粗略估算 (1 token ≈ 3 chars for 中文)
+        let est_prompt = (api_messages.iter()
+            .map(|m| m.content.to_string().len())
+            .sum::<usize>() / 3) as i64;
+        let est_completion = (full_response.len() / 3) as i64;
+        let mut usage = TokenUsage::new(est_prompt, est_completion, context_window);
+        println!("⚠️ API 未返回 usage，使用估算值: {}", usage.summary());
+        usage
+    };
+
+    println!("{}", token_usage.summary());
+    if !thinking_text.is_empty() {
+        println!("🧠 Agent 思考过程 ({} 字符): {}...", thinking_text.len(),
+            thinking_text.chars().take(300).collect::<String>());
     }
 
     // --- 解析 LLM 完整响应 ---
@@ -245,5 +334,5 @@ pub async fn call_llm(
     let inst: AgentInstruction = serde_json::from_value(val)
         .map_err(|e| format!("数据结构转换失败: {}\n原文: {}", e, final_json_str))?;
 
-    Ok(inst)
+    Ok((inst, token_usage, thinking_text))
 }

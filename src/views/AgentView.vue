@@ -172,19 +172,33 @@
             >
                 <!-- 进度概览 -->
                 <div class="progress-header">
-                    <div class="progress-goal">
-                        <span class="goal-badge">目标</span>
-                        <span class="goal-text">{{ currentGoal }}</span>
+                    <div class="header-left">
+                        <div class="progress-goal">
+                            <span class="goal-badge">目标</span>
+                            <span class="goal-text">{{ currentGoal }}</span>
+                        </div>
+                        <div class="progress-stats">
+                            <span class="stat done">✓ {{ doneCount }}</span>
+                            <span class="stat fail" v-if="errorCount > 0"
+                                >✕ {{ errorCount }}</span
+                            >
+                            <span class="stat total">/ {{ steps.length }}</span>
+                        </div>
                     </div>
-                    <div class="progress-stats">
-                        <span class="stat done">✓ {{ doneCount }}</span>
-                        <span class="stat running" v-if="runningStep !== null"
-                            >⟳ 执行中</span
-                        >
-                        <span class="stat error" v-if="errorCount > 0"
-                            >✕ {{ errorCount }}</span
-                        >
-                        <span class="stat total">/ {{ steps.length }} 步</span>
+
+                    <!-- 📊 Token 用量统计栏 - Agent版 -->
+                    <div v-if="tokenUsage" class="agent-token-bar">
+                        <div class="agent-token-stats">
+                            <span class="token-label">Token</span>
+                            <span class="token-item">⬆️{{ tokenUsage.prompt_tokens }}</span>
+                            <span class="token-item">⬇️{{ tokenUsage.completion_tokens }}</span>
+                        </div>
+                        <div class="agent-token-ctx">
+                            <div class="ctx-bar">
+                                <div class="ctx-fill" :style="{ width: Math.min(tokenUsage.usage_percent, 100) + '%' }" :class="{ warning: tokenUsage.usage_percent > 70, danger: tokenUsage.usage_percent > 90 }"></div>
+                            </div>
+                            <span class="ctx-text">{{ tokenUsage.total_tokens }}/{{ tokenUsage.context_window }} ({{ tokenUsage.usage_percent.toFixed(1) }}%)</span>
+                        </div>
                     </div>
                 </div>
 
@@ -265,6 +279,10 @@
                                     <div class="detail-block" v-if="step.thought">
                                         <div class="detail-label">💭 思考过程</div>
                                         <div class="detail-thought text-accent-light">{{ step.thought }}</div>
+                                    </div>
+                                    <div class="detail-block" v-if="step.thinking">
+                                        <div class="detail-label">🧠 模型思考</div>
+                                        <pre class="detail-thinking">{{ step.thinking }}</pre>
                                     </div>
                                     <div class="detail-block">
                                         <div class="detail-label">🔧 指令详情</div>
@@ -357,6 +375,7 @@ interface AgentStep {
     id: number;
     description: string;
     thought: string;
+    thinking: string;
     tool: string;
     command: string;
     status: "pending" | "running" | "done" | "error";
@@ -367,6 +386,14 @@ interface LogEntry {
     message: string;
     type: "info" | "success" | "error" | "warn";
 }
+interface TokenUsageInfo {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    context_window: number;
+    usage_percent: number;
+}
+const tokenUsage = ref<TokenUsageInfo | null>(null);
 
 // ---- 状态 ----
 const allModels = ref<ModelOption[]>([]);
@@ -479,7 +506,13 @@ onMounted(async () => {
             );
         } else if (type === "step_new") {
             // 后端新生成了一个步骤
-            steps.value.push(data.step);
+            const idx = steps.value.findIndex(s => s.id === data.step.id);
+            if (idx !== -1) {
+                // 如果思考阶段已经创建了占位符，更新它而不覆盖 thinking 内容
+                steps.value[idx] = { ...steps.value[idx], ...data.step, thinking: steps.value[idx].thinking };
+            } else {
+                steps.value.push(data.step);
+            }
             addLog("info", `🤖 AI 规划了新动作: ${data.step.description}`);
         } else if (type === "step_start") {
             const s = steps.value.find((s) => s.id === data.step_id);
@@ -511,6 +544,43 @@ onMounted(async () => {
             completionMessage.value = data.message;
             hasError.value = !data.success;
             addLog(data.success ? "success" : "error", `🏁 ${data.message}`);
+        } else if (type === "token_usage") {
+            tokenUsage.value = {
+                prompt_tokens: data.prompt_tokens,
+                completion_tokens: data.completion_tokens,
+                total_tokens: data.total_tokens,
+                context_window: data.context_window,
+                usage_percent: data.usage_percent,
+            };
+            addLog(
+                "info",
+                `📊 Token: ⬆️${data.prompt_tokens} ⬇️${data.completion_tokens} ∑${data.total_tokens} | 上下文: ${data.total_tokens}/${data.context_window} (${data.usage_percent.toFixed(1)}%)`,
+            );
+        } else if (type === "thinking") {
+            let s = steps.value.find((s) => s.id === data.step_id);
+            if (!s) {
+                s = {
+                    id: data.step_id,
+                    description: "正在深入思考...",
+                    thought: "",
+                    thinking: "",
+                    tool: "thinking",
+                    command: "",
+                    status: "running",
+                    output: ""
+                };
+                steps.value.push(s);
+                runningStep.value = data.step_id;
+                expandedStep.value = data.step_id; // 自动展开查看实时思考
+                nextTick(() => { document.querySelector(".agent-container")?.scrollTo({ top: 99999, behavior: "smooth" }); });
+            }
+            s.thinking = data.content;
+            if (data.done) {
+                addLog(
+                    "info",
+                    `🧠 AI思考完毕 (约 ${data.content.length} 字)`,
+                );
+            }
         } else if (type === "error") {
             isRunning.value = false;
             planningMessage.value = "";
@@ -924,8 +994,16 @@ function addLog(type: LogEntry["type"], message: string) {
 
 .progress-header {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border-1);
+    margin-bottom: 20px;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
     gap: 16px;
 }
 
@@ -975,13 +1053,7 @@ function addLog(type: LogEntry["type"], message: string) {
     color: var(--green);
 }
 
-.stat.running {
-    background: rgba(108, 99, 255, 0.12);
-    color: var(--accent-light);
-    animation: pulse 1.5s ease infinite;
-}
-
-.stat.error {
+.stat.fail {
     background: rgba(255, 71, 87, 0.1);
     color: var(--red-light);
 }
@@ -1080,52 +1152,6 @@ function addLog(type: LogEntry["type"], message: string) {
     background: var(--green);
 }
 
-.copilot-confirm-box {
-    background: rgba(108, 99, 255, 0.05);
-    border: 1px dashed var(--accent);
-    border-radius: var(--radius-md);
-    padding: 16px;
-    margin-top: 8px;
-    animation: slideFadeIn 0.3s ease;
-}
-.copilot-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--accent-light);
-    margin-bottom: 8px;
-}
-.copilot-desc {
-    font-size: 13px;
-    color: var(--text-1);
-    margin-bottom: 12px;
-}
-.copilot-cmd {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    background: var(--bg-0);
-    padding: 10px;
-    border-radius: var(--radius-sm);
-    color: var(--text-2);
-    margin-bottom: 16px;
-    white-space: pre-wrap;
-    border: 1px solid var(--border-1);
-}
-.copilot-actions {
-    display: flex;
-    gap: 12px;
-}
-
-@keyframes slideFadeIn {
-    from {
-        opacity: 0;
-        transform: translateY(-10px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
 .step-content {
     flex: 1;
     padding-bottom: 12px;
@@ -1222,6 +1248,24 @@ function addLog(type: LogEntry["type"], message: string) {
 
 .text-accent-light {
     color: var(--accent-light);
+}
+
+.detail-thinking {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text-3);
+    background: rgba(0, 212, 170, 0.04);
+    border-left: 3px solid var(--teal, #00d4aa);
+    border: 1px solid rgba(0, 212, 170, 0.12);
+    border-left: 3px solid var(--teal, #00d4aa);
+    padding: 10px 14px;
+    border-radius: 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 250px;
+    overflow-y: auto;
+    font-style: italic;
 }
 
 .detail-cmd {
@@ -1334,8 +1378,10 @@ function addLog(type: LogEntry["type"], message: string) {
 }
 
 .log-time {
+    font-size: 11px;
     color: var(--text-4);
-    flex-shrink: 0;
+    min-width: 55px;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
 }
 
 .log-msg {

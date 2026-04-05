@@ -233,8 +233,8 @@ pub async fn run_agent_main_loop(
         
         let (instruction, result) = loop {
             // --- A. 请求 AI 规划 ---
-            let inst = match call_llm(&context, &state, model_id.clone()).await {
-                Ok(inst) => inst,
+            let (inst, token_usage, thinking_text) = match call_llm(&context, &state, model_id.clone(), Some(&app), step_id).await {
+                Ok(r) => r,
                 Err(e) => {
                     retry_count += 1;
                     if retry_count >= max_retries {
@@ -245,6 +245,30 @@ pub async fn run_agent_main_loop(
                     continue;
                 }
             };
+
+            // 📊 发送 Token 用量统计到前端
+            app.emit("agent-progress", json!({
+                "type": "token_usage",
+                "step_id": step_id,
+                "prompt_tokens": token_usage.prompt_tokens,
+                "completion_tokens": token_usage.completion_tokens,
+                "total_tokens": token_usage.total_tokens,
+                "context_window": token_usage.context_window,
+                "usage_percent": token_usage.usage_percent,
+                "summary": token_usage.summary()
+            })).map_err(|e| e.to_string())?;
+            println!("{}", token_usage.summary());
+
+            // 🧠 发送最终思考完成事件到前端
+            if !thinking_text.is_empty() {
+                app.emit("agent-progress", json!({
+                    "type": "thinking",
+                    "step_id": step_id,
+                    "content": &thinking_text,
+                    "done": true
+                })).map_err(|e| e.to_string())?;
+                app.emit("agent-log", format!("🧠 AI思考完毕 (共{}字)", thinking_text.len())).map_err(|e| e.to_string())?;
+            }
 
             // 通知前端：发现了新计划
             app.emit("agent-log", format!("🤖 AI 规划了新动作: {}", inst.description)).map_err(|e| e.to_string())?;

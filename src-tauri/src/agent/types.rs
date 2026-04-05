@@ -49,9 +49,40 @@ pub struct MemoryItem {
     pub value: String,
 }
 
+// ==================== Token 用量统计 ====================
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenUsage {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub context_window: i64,     // 配置的上下文窗口大小 (num_ctx)
+    pub usage_percent: f64,      // total_tokens / context_window * 100
+}
+
+impl TokenUsage {
+    pub fn new(prompt_tokens: i64, completion_tokens: i64, context_window: i64) -> Self {
+        let total_tokens = prompt_tokens + completion_tokens;
+        let usage_percent = if context_window > 0 {
+            (total_tokens as f64 / context_window as f64) * 100.0
+        } else {
+            0.0
+        };
+        Self { prompt_tokens, completion_tokens, total_tokens, context_window, usage_percent }
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "📊 Token: 输入={}, 输出={}, 合计={} | 上下文: {}/{} ({:.1}%)",
+            self.prompt_tokens, self.completion_tokens, self.total_tokens,
+            self.total_tokens, self.context_window, self.usage_percent
+        )
+    }
+}
+
 // 这是ai 回答的具体格式
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentInstruction {
+    #[serde(default)]
     pub thought: String,
     #[serde(default)]
     pub description: String,

@@ -6,7 +6,7 @@ extract(获取列表ID) -> click(进详情) -> read/extract(取数据并存入me
 </web_automation_survival_rules><self_correction_tree>灵活纠错与异常恢复机制如果上一步动作报错或找不到元素，不要死循环，按照以下决策树恢复：场景 A（找不到元素）：可能是页面没渲染完 -> 执行 wait 2 或重新 extract。场景 B（列表抓取不全）：可能是数据在视口下方 -> 执行 scroll down 然后再 extract。场景 C（点错链接陷入死胡同）：发现 tab_url 不对 -> 立即执行 back 返回上一级。
 </self_correction_tree><core_action_rules>核心动作与输出规则单步执行：每轮只返回 1 个动作。纯净输出：绝对只能输出纯 JSON，不要输出任何其他内容（禁止附带 Markdown 语法块标签如 ```json）。记忆固化 (memories_update)：你从页面提取的核心数据（标题、链接、关键数值等）必须通过 memories_update 保存。否则页面一跳转，你会彻底遗忘！覆盖机制：若存了同名 key，新 value 会自动覆盖旧值。需要累加数据时，请在原 value 基础上拼接，如 {"key": "收集列表", "value": "A, B"}。文件生成策略：如果要生成 Excel/CSV/TXT，利用 shell 工具执行 Python 脚本，将你 memories_update 中的数据写入本地。
 </core_action_rules><output_format>输出格式 (严格为纯 JSON){
-"thought": "分析当前状态和上一步的结果，规划这步要做什么",
+"thought": "(选填) 分析并规划这步怎么做。如果你是带有原生思考/推理能力的大模型(如DeepSeek-R1/Gemma4等)，请务必将此字段留空，避免重复思考！否则必须写出你的推理过程",
 "description": "用一句话简述本步动作",
 "tool": "调用的工具名",
 "command": "具体的指令参数",

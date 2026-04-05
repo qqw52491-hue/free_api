@@ -94,17 +94,50 @@
           </div>
 
           <!-- 流式输出 -->
-          <div v-if="streaming" class="message-row assistant">
+          <div v-if="streaming || thinkingContent" class="message-row assistant">
             <div class="message-avatar"><span>🤖</span></div>
             <div class="message-body">
               <div class="message-header">
                 <span class="message-role">AI</span>
-                <span class="message-model pulsing">生成中…</span>
+                <span class="message-model pulsing" v-if="streaming">
+                  {{ isThinking ? '🧠 思考中…' : '生成中…' }}
+                </span>
               </div>
+
+              <!-- 🧠 思考过程展示 -->
+              <div v-if="thinkingContent" class="thinking-block" :class="{ collapsed: thinkingCollapsed && !isThinking }">
+                <div class="thinking-header" @click="thinkingCollapsed = !thinkingCollapsed">
+                  <span class="thinking-icon" :class="{ spinning: isThinking }">🧠</span>
+                  <span class="thinking-title">{{ isThinking ? '思考中...' : '思考过程' }}</span>
+                  <span class="thinking-toggle">{{ thinkingCollapsed ? '▼ 展开' : '▲ 收起' }}</span>
+                </div>
+                <div v-show="!thinkingCollapsed || isThinking" class="thinking-body">
+                  <div class="thinking-content" v-html="renderMarkdown(thinkingContent)"></div>
+                </div>
+              </div>
+
               <div class="message-content md-content" v-if="streamContent" v-html="renderMarkdown(streamContent)"></div>
-              <div class="message-content" v-else>
+              <div class="message-content" v-else-if="!thinkingContent">
                 <div class="loading-dots"><span></span><span></span><span></span></div>
               </div>
+            </div>
+          </div>
+
+          <!-- 📊 Token 用量统计栏 -->
+          <div v-if="tokenUsage" class="token-usage-bar">
+            <div class="token-stats">
+              <span class="token-label">📊 Token</span>
+              <span class="token-item">⬆️ <strong>{{ tokenUsage.prompt_tokens }}</strong></span>
+              <span class="token-sep">·</span>
+              <span class="token-item">⬇️ <strong>{{ tokenUsage.completion_tokens }}</strong></span>
+              <span class="token-sep">·</span>
+              <span class="token-item">∑ <strong>{{ tokenUsage.total_tokens }}</strong></span>
+            </div>
+            <div class="token-ctx">
+              <div class="ctx-bar">
+                <div class="ctx-fill" :style="{ width: Math.min(tokenUsage.usage_percent, 100) + '%' }" :class="{ warning: tokenUsage.usage_percent > 70, danger: tokenUsage.usage_percent > 90 }"></div>
+              </div>
+              <span class="ctx-text">{{ tokenUsage.total_tokens }}/{{ tokenUsage.context_window }} ({{ tokenUsage.usage_percent.toFixed(1) }}%)</span>
             </div>
           </div>
         </div>
@@ -181,6 +214,18 @@ const sidebarCollapsed = ref(false)
 const renamingId = ref('')
 const renameText = ref('')
 
+interface TokenUsageInfo {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  context_window: number;
+  usage_percent: number;
+}
+const tokenUsage = ref<TokenUsageInfo | null>(null)
+const thinkingContent = ref('')
+const isThinking = ref(false)
+const thinkingCollapsed = ref(false)
+
 const messagesContainer = ref<HTMLElement>()
 const inputRef = ref<HTMLTextAreaElement>()
 
@@ -210,6 +255,33 @@ onMounted(async () => {
     else {
       streamContent.value += event.payload.content
       scrollToBottom()
+    }
+  })
+
+  // 监听思考过程
+  listen<{ session_id: string; content?: string; status: string; full_thinking?: string }>('chat-thinking', (event) => {
+    const { status, content } = event.payload
+    if (status === 'start') {
+      isThinking.value = true
+      thinkingCollapsed.value = false
+      thinkingContent.value = ''
+    } else if (status === 'streaming' && content) {
+      thinkingContent.value += content
+      scrollToBottom()
+    } else if (status === 'done') {
+      isThinking.value = false
+      thinkingCollapsed.value = true  // 思考完成后自动收起
+    }
+  })
+
+  // 监听 Token 用量统计
+  listen<TokenUsageInfo & { session_id: string }>('chat-token-usage', (event) => {
+    tokenUsage.value = {
+      prompt_tokens: event.payload.prompt_tokens,
+      completion_tokens: event.payload.completion_tokens,
+      total_tokens: event.payload.total_tokens,
+      context_window: event.payload.context_window,
+      usage_percent: event.payload.usage_percent,
     }
   })
 })
@@ -279,6 +351,10 @@ async function sendMessage() {
   pendingFiles.value = []
   streaming.value = true
   streamContent.value = ''
+  tokenUsage.value = null
+  thinkingContent.value = ''
+  isThinking.value = false
+  thinkingCollapsed.value = false
 
   try {
     const fullResp = await invoke<string>('send_chat', {
@@ -401,4 +477,138 @@ watch(userInput, () => { nextTick(() => { const el = inputRef.value; if (el) { e
 .btn-send:disabled { opacity: 0.35; cursor: not-allowed; }
 .input-hint { font-size: 11px; color: var(--text-4); padding: 6px 4px 0; }
 .input-error { color: var(--red-light); }
+
+/* 📊 Token 用量统计栏 */
+.token-usage-bar {
+  margin: 0 28px 8px;
+  padding: 10px 16px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  animation: fadeSlideUp 0.3s ease;
+}
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.token-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.token-label {
+  font-weight: 700;
+  color: var(--text-2);
+  margin-right: 4px;
+}
+.token-item strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+.token-sep {
+  color: var(--border-2);
+  font-size: 10px;
+}
+.token-ctx {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.ctx-bar {
+  width: 100px;
+  height: 6px;
+  background: var(--bg-3);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.ctx-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--accent);
+  transition: width 0.5s ease, background 0.3s ease;
+}
+.ctx-fill.warning {
+  background: var(--orange, #ffa43d);
+}
+.ctx-fill.danger {
+  background: var(--red, #ff4757);
+}
+.ctx-text {
+  font-size: 10px;
+  color: var(--text-4);
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* 🧠 思考过程展示 */
+.thinking-block {
+  background: rgba(108, 99, 255, 0.04);
+  border: 1px solid rgba(108, 99, 255, 0.15);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: all 0.3s ease;
+  margin-bottom: 8px;
+}
+.thinking-block.collapsed {
+  border-color: rgba(108, 99, 255, 0.08);
+  background: rgba(108, 99, 255, 0.02);
+}
+.thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.thinking-header:hover {
+  background: rgba(108, 99, 255, 0.06);
+}
+.thinking-icon {
+  font-size: 14px;
+  transition: transform 0.3s;
+}
+.thinking-icon.spinning {
+  animation: spin 1.5s linear infinite;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.thinking-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-light);
+  flex: 1;
+}
+.thinking-toggle {
+  font-size: 10px;
+  color: var(--text-4);
+}
+.thinking-body {
+  padding: 0 12px 10px;
+  max-height: 300px;
+  overflow-y: auto;
+  transition: max-height 0.3s ease;
+}
+.thinking-content {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.thinking-content :deep(p) {
+  margin: 4px 0;
+}
 </style>
