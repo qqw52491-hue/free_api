@@ -56,7 +56,8 @@ pub fn set_browser_launch_mode(mode: u8) -> Result<String, String> {
         (&action[..pos], &action[pos + 1..])
     } else {
         let tool = params
-            .get("tool")
+            .get("action")
+            .or(params.get("tool"))
             .and_then(|v| v.as_str())
             .unwrap_or(&action);
         (&action as &str, tool)
@@ -77,7 +78,13 @@ pub fn set_browser_launch_mode(mode: u8) -> Result<String, String> {
                 return DispatchResult { stdout: String::new(), stderr: format!("❌ MCP 预检失败: AI 发送的是普通字符串 '{}', 但 MCP 工具 '{}' 需要 JSON 对象参数. 请参考说明书中的【参数规格】。", s, tool_name), success: false, route: "mcp_check".to_string() };
             }
         } else if params.is_object() {
-            params.clone()
+            let mut clean_params = params.clone();
+            if let Some(map) = clean_params.as_object_mut() {
+                map.remove("action");
+                map.remove("verb");
+                map.remove("command");
+            }
+            clean_params
         } else {
             json!({})
         };
@@ -85,13 +92,31 @@ pub fn set_browser_launch_mode(mode: u8) -> Result<String, String> {
         println!("🛠️ 正在调用 MCP 插件 [{}], 工具 [{}], 参数: {}", plugin_name, tool_name, arguments);
         match client.call_tool(tool_name, arguments) {
             Ok(result) => {
-                let stdout =
-                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-                DispatchResult {
-                    stdout,
-                    stderr: String::new(),
-                    success: true,
-                    route: format!("mcp:{}", plugin_name),
+                println!("📦 MCP 返回原始结果: {}", serde_json::to_string_pretty(&result).unwrap_or_default());
+                let is_error = result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+                let text_output = result
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|first| first.get("text"))
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| serde_json::to_string_pretty(&result).unwrap_or_default());
+                
+                if is_error {
+                    DispatchResult {
+                        stdout: String::new(),
+                        stderr: text_output,
+                        success: false,
+                        route: format!("mcp:{}", plugin_name),
+                    }
+                } else {
+                    DispatchResult {
+                        stdout: text_output,
+                        stderr: String::new(),
+                        success: true,
+                        route: format!("mcp:{}", plugin_name),
+                    }
                 }
             }
             Err(e) => DispatchResult {
@@ -311,15 +336,15 @@ pub async fn run_agent_main_loop(
                 break (inst, dispatch_result); // 成功！
             } else {
                 retry_count += 1;
-                let error_detail = format!("❌ 执行失败: {}", dispatch_result.stderr);
+                let error_detail = format!("【❌ 执行失败】: {}", dispatch_result.stderr);
                 
                 if retry_count >= max_retries {
-                    app.emit("agent-log", format!("⚠️ 重试 {} 次均失败，跳过", max_retries)).map_err(|e| e.to_string())?;
-                    break (inst, dispatch_result); 
+                    return Err(error_detail);
                 }
                 
-                app.emit("agent-log", format!("🔄 执行错误 (第 {} 次)，正在重新规划...", retry_count)).map_err(|e| e.to_string())?;
+                app.emit("agent-log", format!("🔄 执行失败(第{}次)，正注入错误反馈给 AI 重试...", retry_count)).map_err(|e| e.to_string())?;
                 context.add_error_feedback(&error_detail);
+                continue; // 带着错误信息，重新规划！
             }
         };
 

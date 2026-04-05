@@ -13,12 +13,33 @@ pub fn run_builtin_step(action: &str, params: &serde_json::Value) -> Option<Disp
     let cmd_str = if let Some(s) = params.as_str() {
         s.to_string()
     } else if params.is_object() {
-        // 如果 AI 给了个对象 {"id": 12, "text": "xxx"}, 尝试拼成字符串
-        let id = params.get("id").or(params.get("element_id")).and_then(|v| v.as_u64().or(v.as_str().and_then(|s| s.parse().ok()))).map(|n| n.to_string()).unwrap_or_default();
-        let text = params.get("text").or(params.get("val")).or(params.get("command")).and_then(|v| v.as_str()).unwrap_or_default();
+        let id = params.get("id").or(params.get("element_id"))
+            .and_then(|v| {
+                v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.trim_start_matches('[').trim_end_matches(']').parse().ok()))
+            })
+            .map(|n| n.to_string()).unwrap_or_default();
+        let text = params.get("text").or(params.get("val")).or(params.get("query")).and_then(|v| v.as_str()).unwrap_or_default();
         let url = params.get("url").and_then(|v| v.as_str()).unwrap_or_default();
         
-        format!("{} {} {}", id, text, url).trim().to_string()
+        let mut verb = params.get("action").or(params.get("verb")).or(params.get("command")).and_then(|v| v.as_str()).unwrap_or_default();
+        if verb.is_empty() { verb = action; }
+
+        let safe_id = if id.is_empty() { "0" } else { id.as_str() };
+        
+        let final_cmd = match verb {
+            "goto" | "navigate" => format!("{} {}", verb, url),
+            "type" => format!("{} {} {}", verb, safe_id, text),
+            "click" => format!("{} {}", verb, safe_id),
+            "scroll" | "press" => {
+                let arg = if !text.is_empty() { text } else { safe_id };
+                format!("{} {}", verb, arg)
+            },
+            "wait" => format!("{} {}", verb, safe_id),
+            _ => verb.to_string() // extract, wait_idle, read, etc
+        };
+        
+        final_cmd.trim().to_string()
     } else {
         String::new()
     };
@@ -31,7 +52,11 @@ pub fn run_builtin_step(action: &str, params: &serde_json::Value) -> Option<Disp
 
     // 特殊：如果 action 本身就是浏览器指令名
     if BROWSER_VERBS.contains(&action_low.as_str()) {
-        let full_cmd = format!("{} {}", action_low, cmd_str).trim().to_string();
+        let full_cmd = if cmd_str.starts_with(&action_low) {
+            cmd_str.clone()
+        } else {
+            format!("{} {}", action_low, cmd_str).trim().to_string()
+        };
         let (stdout, stderr, success) = run_browser_dom(&full_cmd);
         return Some(DispatchResult { stdout, stderr, success, route: "browser".to_string() });
     }

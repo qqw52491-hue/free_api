@@ -551,7 +551,8 @@ pub async fn send_chat(
         "model": model_name,
         "messages": api_messages,
         "max_tokens": max_tokens,
-        "temperature": temperature,
+        "temperature": if is_ollama { 0.0 } else { temperature },
+        "top_p": if is_ollama { 0.9 } else { 1.0 },
         "stream": true,
         "stream_options": { "include_usage": true }
     });
@@ -561,7 +562,11 @@ pub async fn send_chat(
     // 🔓 Ollama 智能解封：检测到本地 Ollama 时，自动注入大上下文窗口
     if is_ollama {
         context_window = 65536;
-        body["options"] = json!({ "num_ctx": context_window });
+        body["options"] = json!({ 
+            "num_ctx": context_window,
+            "temperature": 0.0,
+            "top_p": 0.9
+        });
     } else {
         context_window = 128000;
     }

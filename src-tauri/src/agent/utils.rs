@@ -154,31 +154,41 @@ pub async fn call_llm(
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
     // 拼接body
-    let api_messages = messages.assemble_messages();
+    let mut api_messages = messages.assemble_messages();
     let is_ollama = base_url.contains("localhost:11434") || base_url.contains("127.0.0.1:11434");
-    let mut body = json!({
-        "model": model_name,
-        "messages": api_messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": true,
-        "stream_options": { "include_usage": true }
-    });
 
     // 确定上下文窗口大小
-    let context_window: i64;
+    let context_window: i64 = if is_ollama { 65536 } else { 128000 };
 
-    // 🔓 Ollama 智能解封：检测到本地 Ollama 时，自动注入大上下文窗口
     if is_ollama {
-        context_window = 65536;
-        body["options"] = json!({ "num_ctx": context_window });
         println!("🔓 检测到 Ollama 本地模型，已自动注入 num_ctx: {}", context_window);
-    } else {
-        // 非 Ollama 平台，使用一个合理的默认值
-        context_window = 128000; // 大多数云端模型默认 128K
     }
 
-    // --- 定义重试逻辑 (最多 3 次) ---
+    let mut current_agent_try = 0;
+    let max_agent_retries = 3;
+
+    loop {
+        current_agent_try += 1;
+
+        let mut body = json!({
+            "model": model_name,
+            "messages": api_messages,
+            "max_tokens": max_tokens,
+            "temperature": if is_ollama { 0.0 } else { temperature },
+            "top_p": if is_ollama { 0.9 } else { 1.0 },
+            "stream": true,
+            "stream_options": { "include_usage": true }
+        });
+
+        if is_ollama {
+            body["options"] = json!({ 
+                "num_ctx": context_window,
+                "temperature": 0.0,
+                "top_p": 0.9
+            });
+        }
+
+        // --- 定义重试逻辑 (最多 3 次) ---
     let mut last_error = String::new();
     let mut final_resp: Option<reqwest::Response> = None;
 
@@ -324,15 +334,38 @@ pub async fn call_llm(
     }
 
     // --- 解析 LLM 完整响应 ---
-    let final_json_str = extract_json_from_text(&full_response).unwrap_or(full_response);
+    let final_json_str = extract_json_from_text(&full_response).unwrap_or_else(|| full_response.clone());
 
-    // 先解析成 Value 以自动合并/忽略重复字段（Map 模式下重复 Key 会被覆盖）
-    let val: serde_json::Value = serde_json::from_str(&final_json_str)
-        .map_err(|e| format!("基础 JSON 语法错误: {}\n原文: {}", e, final_json_str))?;
+    let parse_result = (|| -> Result<AgentInstruction, String> {
+        let val: serde_json::Value = serde_json::from_str(&final_json_str)
+            .map_err(|e| format!("基础 JSON 语法错误: {}", e))?;
+        let inst: AgentInstruction = serde_json::from_value(val)
+            .map_err(|e| format!("数据结构转换失败: {}", e))?;
+        Ok(inst)
+    })();
 
-    // 再从 Value 转为强类型结构体
-    let inst: AgentInstruction = serde_json::from_value(val)
-        .map_err(|e| format!("数据结构转换失败: {}\n原文: {}", e, final_json_str))?;
-
-    Ok((inst, token_usage, thinking_text))
+    match parse_result {
+        Ok(inst) => {
+            return Ok((inst, token_usage, thinking_text));
+        }
+        Err(e) => {
+            if current_agent_try >= max_agent_retries {
+                return Err(format!("{} \n原文: {}", e, final_json_str));
+            }
+            println!("⚠️ 大模型输出了错误的 JSON 格式，开始自动拦截并重试 (第 {} 次 / 共 {} 次): {}", current_agent_try, max_agent_retries, e);
+            
+            // 将助手的错误输出加入上下文
+            api_messages.push(crate::agent::context::ChatMessage {
+                role: "assistant".to_string(),
+                content: json!(full_response),
+            });
+            
+            // 将报错信息丢回给模型纠正
+            api_messages.push(crate::agent::context::ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!("YOUR LAST OUTPUT TRIGGERED A PARSE ERROR: \n{}\n\nRULES:\n1. 遇到问题必须且只能在 <think> 标签内完成逻辑推导。\n2. <think> 结束后的最终输出，必须且只能是一个有效的 JSON 对象来调用对应的工具函数。\n3. 绝对禁止在 JSON 外输出任何解释性文本。违反此规则将导致系统崩溃。\n\nFix the syntax error and generate again.", e)),
+            });
+        }
+    }
+    } // end of loop
 }

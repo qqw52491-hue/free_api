@@ -109,6 +109,10 @@ pub struct AgentInstruction {
     pub next_tool_hint: Option<String>,
     #[serde(default)]
     pub require_memory: Option<bool>,
+
+    // 终极绝招：捕获所有未定义但被平铺的外卡字段（如 element_id, val 等幻觉字段）
+    #[serde(flatten)]
+    pub extra_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl AgentInstruction {
@@ -121,7 +125,26 @@ impl AgentInstruction {
     }
 
     pub fn get_params(&self) -> serde_json::Value {
-        if let Some(ref c) = self.command { return c.clone(); }
+        // 发现 AI 有时会将动词（如 "type"）放在 command 字段，把其余参数放在 params 字段
+        let c_is_verb = self.command.as_ref().map_or(false, |c| {
+            c.is_string() && !c.as_str().unwrap().contains(' ') && !c.as_str().unwrap().is_empty()
+        });
+
+        if c_is_verb && self.params.as_ref().map_or(false, |p| p.is_object()) {
+            let mut map = self.params.as_ref().unwrap().as_object().unwrap().clone();
+            map.insert("command".to_string(), self.command.as_ref().unwrap().clone());
+            return serde_json::Value::Object(map);
+        }
+
+        if let Some(ref c) = self.command {
+            if c.is_object() || (c.is_string() && c.as_str().unwrap().contains(' ')) {
+                return c.clone();
+            }
+            if self.params.is_none() {
+                return c.clone();
+            }
+        }
+
         if let Some(ref p) = self.params { return p.clone(); }
         
         // 如果都没传，并且提取到了平铺的幻觉参数，则自动组装成 JSON Object 返回给下层
@@ -129,6 +152,11 @@ impl AgentInstruction {
         if let Some(ref u) = self.url { map.insert("url".to_string(), serde_json::Value::String(u.clone())); }
         if let Some(ref t) = self.text { map.insert("text".to_string(), serde_json::Value::String(t.clone())); }
         if let Some(i) = self.id { map.insert("id".to_string(), serde_json::Value::Number(i.into())); }
+        
+        // 把所有的外卡字段都塞进去
+        for (k, v) in &self.extra_fields {
+            map.insert(k.clone(), v.clone());
+        }
         
         if !map.is_empty() {
             return serde_json::Value::Object(map);
