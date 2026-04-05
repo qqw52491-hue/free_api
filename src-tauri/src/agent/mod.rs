@@ -11,6 +11,7 @@ use crate::agent::mcp::*;
 use crate::agent::types::*;
 use crate::agent::utils::*;
 use crate::db::DbState;
+use std::sync::atomic::Ordering;
 use rusqlite::params;
 use serde_json::json;
 use tauri::Emitter;
@@ -245,7 +246,7 @@ pub async fn run_agent_main_loop(
     
     let system_prompt = format!("{}\n{}\n{}", base_prompt, local_tools_menu, mcp_tools_menu);
     println!("--- 最终系统提示词 (级联菜单模式) ---\n{}\n------------------", system_prompt);
-    let mut context = context::SandwichContext::new(system_prompt, goal);
+    let mut context = context::SandwichContext::new(system_prompt, goal.clone());
 
     for step_id in 0..50 {
         app.emit("agent-log", format!("正在规划第 {} 步...", step_id + 1)).map_err(|e| e.to_string())?;
@@ -254,9 +255,36 @@ pub async fn run_agent_main_loop(
         // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
         // ================================================================
         let mut retry_count = 0;
-        let max_retries = 3;
+        let mut max_retries = 3;
+        let mut pre_computed_inst: Option<crate::agent::types::AgentInstruction> = None;
         
         let (instruction, result) = loop {
+            // ================================================================
+            // 🔥 [Kimi 专家直达快线]：如果上一步已经拿到了 Kimi 的指令，直接跳过整个规划循环
+            // ================================================================
+            if let Some(inst) = pre_computed_inst.take() {
+                app.emit("agent-log", "🚀 Kimi 专家指令已就绪，跳过本地 AI 思考，直接执行！").map_err(|e| e.to_string())?;
+                
+                // 构造一个空的 Token 使用统计
+                let token_usage = crate::agent::types::TokenUsage::new(0, 0, 0);
+                
+                // 直接跳到对应的执行逻辑中
+                let dispatch_result = {
+                    let inst_c = inst.clone();
+                    let registry_arc = registry_state.inner().clone();
+                    tokio::task::spawn_blocking(move || {
+                        let mut registry = futures::executor::block_on(registry_arc.lock());
+                        println!("⚡ 专家指令直接执行: {:?}", inst_c);
+                        run_agent_step(&inst_c, &mut registry)
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                };
+                
+                // 执行完后，把指令赋给 instruction 变量，让后面的上下文更新逻辑继续执行
+                break (inst, dispatch_result);
+            }
+
             // --- A. 请求 AI 规划 ---
             let (inst, token_usage, thinking_text) = match call_llm(&context, &state, model_id.clone(), Some(&app), step_id).await {
                 Ok(r) => r,
@@ -338,6 +366,78 @@ pub async fn run_agent_main_loop(
                 retry_count += 1;
                 let error_detail = format!("【❌ 执行失败】: {}", dispatch_result.stderr);
                 
+                if retry_count == 1 {
+                    let _ = app.emit("agent-log", "🚨 连续 1 次失败，强制触发 Kimi 网页专家护驾！");
+                    
+                    // 记录报错时的当前 Tab ID，这是我们后面要“代打”执行的真正现场
+                    let original_tab_id = crate::agent::browser::get_current_tab_id();
+                    
+                    let mut recent_context = String::new();
+                    for msg in context.turns_history.iter().rev().take(4).rev() {
+                        let content_str = match &msg.content {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        recent_context.push_str(&format!("角色: {}\n内容: {}\n---\n", msg.role, content_str));
+                    }
+                    
+                    let help_prompt = format!(
+                        "提示：你现在正在帮我处理一个终极任务：【{}】。我遭遇了执行瓶颈，需要你的神级判断。\n\n我目前的详细场景上下文如下：\n{}\n刚才我尝试使用的动作是 {}，参数是: {:?}。结果遭受了惨痛失败，报错为：{}\n\n请你分析报错以及 DOM 树结构（ID 和 X,Y 坐标），告诉我：\n1. 错在哪？\n2. 接下来该怎么办？\n最关键的是：请你跳过废话，直接代替我输出这一步的执行 JSON 结构，我将绕过本地 AI 直接运行你的指令：\n```json\n{{\n  \"thought\": \"简短思路\",\n  \"description\": \"下一步操作描述\",\n  \"tool\": \"browser_dom\",\n  \"command\": {{\n    \"action\": \"type/click/extract/goto\",\n    \"id\": 纯数字,\n    \"text\": \"可选文本\"\n  }}\n}}\n```\n请务必只使用 id 且不要携带 selector 这种词汇。只要你返回正确的 JSON，我就能瞬间在原页面代打执行！",
+                        goal, recent_context, inst.get_action(), inst.get_params(), dispatch_result.stderr
+                    );
+                    let ask_cmd = format!("ask_web_ai https://kimi.moonshot.cn {}", help_prompt);
+                    let (stdout, stderr, success) = crate::agent::browser::run_browser_dom(&ask_cmd);
+                    
+                    if success {
+                        // 尝试直接截获 Kimi 吐出的 JSON 指令包！
+                        if let Some(json_str) = crate::agent::utils::extract_json_from_text(&stdout) {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                if let Ok(parsed_inst) = serde_json::from_value::<crate::agent::types::AgentInstruction>(val) {
+                                    let _ = app.emit("agent-log", "🔥 Kimi 返回了完美的 JSON 指令格式，系统已截断本地 AI，马上自动代打本回合！");
+                                    
+                                    // 核心修复：将逻辑焦点和物理焦点全部强制切回报错现场
+                                    crate::agent::browser::set_current_tab_id(original_tab_id);
+                                    let _ = crate::agent::browser::run_browser_dom("window.focus(); document.body.focus();");
+                                    
+                                    // 给浏览器 1 秒钟完成物理层面的 Tab 切换动画和焦点捕获
+                                    futures::executor::block_on(async { tokio::time::sleep(Duration::from_millis(1000)).await });
+                                    
+                                    // 不要用 continue 重头规划，直接把这一条完美方案覆盖给本次本该让 AI 出的代码，去跑！
+                                    let dispatch_result = {
+                                        let inst_c = parsed_inst.clone();
+                                        let registry_arc = registry_state.inner().clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            let mut registry = futures::executor::block_on(registry_arc.lock());
+                                            println!("⚡ 专家指令直接执行: {:?}", inst_c);
+                                            run_agent_step(&inst_c, &mut registry)
+                                        })
+                                        .await
+                                        .map_err(|e| e.to_string())?
+                                    };
+                                    
+                                    // 代办：直接拿着刚才跑出来的 dispatch_result 跳出去正常记录，如果失败了的话由外面的判断自己去收拾！
+                                    break (parsed_inst, dispatch_result);
+                                }
+                            }
+                        }
+                        
+                        let rescue_feedback = format!("【🌟 场外专家 (网页 Kimi) 的急救诊断建议】：\n{}\n请你必须仔细阅读上述专家建议，并立即改变你的策略重新规划行动！", stdout);
+                        context.add_error_feedback(&error_detail);
+                        context.add_error_feedback(&rescue_feedback);
+                        
+                        let _ = app.emit("agent-log", "✅ 场外救驾对策已就绪（但非 JSON 指令），交还本地 AI 最后尝试...");
+                        max_retries = 4; // 给出最后一次机会
+                        continue;
+                    } else {
+                        let rescue_feedback = format!("【⚠️ 自动场外援助失败，只能重新靠你自己】：{}", stderr);
+                        context.add_error_feedback(&error_detail);
+                        context.add_error_feedback(&rescue_feedback);
+                        
+                        max_retries = 4;
+                        continue;
+                    }
+                }
+                
                 if retry_count >= max_retries {
                     return Err(error_detail);
                 }
@@ -349,7 +449,7 @@ pub async fn run_agent_main_loop(
         };
 
         // ================================================================
-        // 以下是成功跳出重试循环后的正常流程
+        // 以下是成功跳出规划+执行重试循环后的处理逻辑
         // ================================================================
 
         // --- 更新任务规划 + 核心记忆 ---

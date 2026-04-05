@@ -3,7 +3,7 @@ use crate::agent::browser::run_browser_dom;
 use crate::agent::utils::{run_shell, run_osascript};
 
 const BROWSER_VERBS: &[&str] = &[
-    "goto", "navigate", "extract", "look", "click", "type", "press", "read", "scroll", "hover", "select", "wait", "wait_for", "back", "forward", "refresh", "url", "tab_url", "eval", "js", "screenshot"
+    "goto", "navigate", "extract", "look", "click", "type", "press", "read", "scroll", "hover", "select", "wait", "wait_for", "back", "forward", "refresh", "url", "tab_url", "eval", "js", "screenshot", "ask_web_ai"
 ];
 
 pub fn run_builtin_step(action: &str, params: &serde_json::Value) -> Option<DispatchResult> {
@@ -29,6 +29,7 @@ pub fn run_builtin_step(action: &str, params: &serde_json::Value) -> Option<Disp
         
         let final_cmd = match verb {
             "goto" | "navigate" => format!("{} {}", verb, url),
+            "ask_web_ai" => format!("{} {} {}", verb, url, text),
             "type" => format!("{} {} {}", verb, safe_id, text),
             "click" => format!("{} {}", verb, safe_id),
             "scroll" | "press" => {

@@ -1,12 +1,14 @@
-use std::sync::{Arc, OnceLock};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::path::PathBuf;
 use tokio::time::Duration;
 use headless_chrome::{Browser, Tab, LaunchOptions};
 use serde::{Deserialize, Serialize};
 
 static GLOBAL_BROWSER: OnceLock<Browser> = OnceLock::new();
-static GLOBAL_TAB: OnceLock<Arc<Tab>> = OnceLock::new();
+static GLOBAL_TABS: OnceLock<Mutex<std::collections::HashMap<u32, Arc<Tab>>>> = OnceLock::new();
+static CURRENT_TAB_ID: AtomicU32 = AtomicU32::new(1);
+static NEXT_TAB_ID: AtomicU32 = AtomicU32::new(2);
 
 /// 浏览器启动模式
 /// 0 = 默认（每次干净的临时 profile）
@@ -20,32 +22,31 @@ pub fn set_browser_mode(mode: u8) {
 }
 
 /// 获取当前浏览器模式
+pub fn get_current_tab_id() -> u32 {
+    CURRENT_TAB_ID.load(Ordering::Relaxed)
+}
+
+pub fn set_current_tab_id(id: u32) {
+    CURRENT_TAB_ID.store(id, Ordering::Relaxed);
+}
+
 pub fn get_browser_mode() -> u8 {
     BROWSER_MODE.load(Ordering::Relaxed)
 }
 
-pub fn get_or_create_tab() -> Result<Arc<Tab>, String> {
-    if let Some(tab) = GLOBAL_TAB.get() {
-        return Ok(tab.clone());
+pub fn get_or_create_browser() -> Result<&'static Browser, String> {
+    if let Some(browser) = GLOBAL_BROWSER.get() {
+        return Ok(browser);
     }
 
     let mode = BROWSER_MODE.load(Ordering::Relaxed);
 
-    match mode {
-        // === 模式 2：连接到已经手动打开的 Chrome (CDP) ===
+    let (browser, tab) = match mode {
         2 => {
             println!("🔗 [浏览器模式: 连接已有 Chrome] 正在连接 localhost:9222...");
-            
-            // 先通过 HTTP 获取 WebSocket URL
             let ws_url = get_cdp_ws_url("http://127.0.0.1:9222")
-                .map_err(|e| format!("无法连接已有浏览器。请确保已以调试模式启动 Chrome:\n\
-                    /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222\n\
-                    错误: {}", e))?;
-            
-            let browser = Browser::connect(ws_url)
-                .map_err(|e| format!("CDP 连接失败: {}", e))?;
-            
-            // 获取已存在的标签页
+                .map_err(|e| format!("无法连接已有浏览器。确保已启动 Chrome: {}", e))?;
+            let browser = Browser::connect(ws_url).map_err(|e| format!("CDP 连接失败: {}", e))?;
             let tab = {
                 let tabs = browser.get_tabs().lock().unwrap();
                 if let Some(first_tab) = tabs.first() {
@@ -55,28 +56,18 @@ pub fn get_or_create_tab() -> Result<Arc<Tab>, String> {
                     browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?
                 }
             };
-
-            let _ = GLOBAL_BROWSER.set(browser);
-            let _ = GLOBAL_TAB.set(tab.clone());
-            Ok(tab)
+            (browser, tab)
         }
-
-        // === 模式 1：持久化 profile（保留登录态） ===
         1 => {
-            // 使用固定的 user_data_dir
             let data_dir = dirs_next::data_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("free-api-agent-browser");
-            
             println!("💾 [浏览器模式: 持久化] 数据目录: {}", data_dir.display());
 
-            // ⚠️ 核心防闪退机制：杀掉因为代码热重载残留下来的僵尸 Chrome 进程，并强行删除死锁文件
-            // 完美解决你在视频和环境里遇到的“谷歌浏览器弹出来闪一下就消失/报错”的问题。
             #[cfg(target_family = "unix")]
             let _ = std::process::Command::new("pkill").args(["-9", "-f", "free-api-agent-browser"]).output();
-            
             let _ = std::fs::remove_file(data_dir.join("SingletonLock"));
-            std::thread::sleep(std::time::Duration::from_millis(200)); // 等待系统内核回收进程
+            std::thread::sleep(std::time::Duration::from_millis(200));
 
             let options = LaunchOptions::default_builder()
                 .headless(false)
@@ -94,16 +85,10 @@ pub fn get_or_create_tab() -> Result<Arc<Tab>, String> {
 
             let browser = Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?;
             let tab = browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?;
-
-            let _ = GLOBAL_BROWSER.set(browser);
-            let _ = GLOBAL_TAB.set(tab.clone());
-            Ok(tab)
+            (browser, tab)
         }
-
-        // === 模式 0：默认（干净临时 profile） ===
         _ => {
             println!("🧹 [浏览器模式: 临时] 每次启动全新 profile");
-
             let options = LaunchOptions::default_builder()
                 .headless(false)
                 .idle_browser_timeout(Duration::from_secs(36000))
@@ -119,11 +104,28 @@ pub fn get_or_create_tab() -> Result<Arc<Tab>, String> {
 
             let browser = Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?;
             let tab = browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?;
-
-            let _ = GLOBAL_BROWSER.set(browser);
-            let _ = GLOBAL_TAB.set(tab.clone());
-            Ok(tab)
+            (browser, tab)
         }
+    };
+
+    let _ = GLOBAL_BROWSER.set(browser);
+    let mut tabs_map = std::collections::HashMap::new();
+    tabs_map.insert(1, tab);
+    let _ = GLOBAL_TABS.set(Mutex::new(tabs_map));
+    
+    Ok(GLOBAL_BROWSER.get().unwrap())
+}
+
+pub fn get_or_create_tab() -> Result<Arc<Tab>, String> {
+    let _ = get_or_create_browser()?; 
+
+    let current_id = CURRENT_TAB_ID.load(Ordering::Relaxed);
+    let tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
+    
+    if let Some(tab) = tabs_map.get(&current_id) {
+        Ok(tab.clone())
+    } else {
+        Err(format!("当前聚焦标签页 [{}] 已被关闭或不存在，请切换至存在的窗口", current_id))
     }
 }
 
@@ -149,16 +151,212 @@ pub struct BrowserAction {
 }
 
 pub fn run_browser_dom(command_str: &str) -> (String, String, bool) {
-    let tab = match get_or_create_tab() {
-        Ok(t) => t,
-        Err(e) => return (String::new(), format!("获取Tab失败: {:?}", e), false),
-    };
-
-    // --- 解析指令 ---
     let parts: Vec<&str> = command_str.splitn(3, ' ').collect();
     let cmd_type = parts.get(0).unwrap_or(&"").to_lowercase();
     let arg1 = parts.get(1).map(|s| s.to_string());
     let arg2 = parts.get(2).map(|s| s.to_string());
+
+    // --- 处理多标签页专属指令 ---
+    match cmd_type.as_str() {
+        "new_tab" => {
+            return match get_or_create_browser() {
+                Ok(browser) => {
+                    match browser.new_tab() {
+                        Ok(new_tab) => {
+                            let new_id = NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed);
+                            GLOBAL_TABS.get().unwrap().lock().unwrap().insert(new_id, new_tab.clone());
+                            CURRENT_TAB_ID.store(new_id, Ordering::Relaxed);
+                            if let Some(target_url) = arg1 {
+                                let _ = new_tab.navigate_to(&target_url);
+                                std::thread::sleep(Duration::from_millis(1500));
+                            }
+                            (format!("✅ 已开启新标签页并切换，ID: {}", new_id), String::new(), true)
+                        }
+                        Err(e) => (String::new(), format!("❌ 创建新标签页失败: {:?}", e), false),
+                    }
+                }
+                Err(e) => (String::new(), e, false),
+            };
+        }
+        "switch_tab" => {
+            let _ = get_or_create_browser();
+            let target_id: u32 = arg1.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
+            if tabs_map.contains_key(&target_id) {
+                CURRENT_TAB_ID.store(target_id, Ordering::Relaxed);
+                return (format!("✅ 已切换焦点至标签页 ID: {}", target_id), String::new(), true);
+            } else {
+                return (String::new(), format!("❌ 标签页 ID: {} 不存在", target_id), false);
+            }
+        }
+        "list_tabs" => {
+            let _ = get_or_create_browser();
+            let tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
+            let current_id = CURRENT_TAB_ID.load(Ordering::Relaxed);
+            let mut list_str = vec![];
+            for (id, tab) in tabs_map.iter() {
+                let url = tab.get_url();
+                let title = tab.get_title().unwrap_or_else(|_| "".to_string());
+                let active_mark = if *id == current_id { " [*当前焦点*]" } else { "" };
+                list_str.push(format!("- Tab {}{}: {} ({})", id, active_mark, title, url));
+            }
+            return (format!("📂 当前存在的标签页:\n{}", list_str.join("\n")), String::new(), true);
+        }
+        "close_tab" => {
+            let _ = get_or_create_browser();
+            let target_id: u32 = arg1.as_deref().and_then(|s| s.parse().ok()).unwrap_or_else(|| CURRENT_TAB_ID.load(Ordering::Relaxed));
+            let mut tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
+            if tabs_map.remove(&target_id).is_some() {
+                if CURRENT_TAB_ID.load(Ordering::Relaxed) == target_id {
+                    let next_curr_id = tabs_map.keys().next().copied().unwrap_or(0);
+                    CURRENT_TAB_ID.store(next_curr_id, Ordering::Relaxed);
+                }
+                return (format!("✅ 已关闭/移除标签页 ID: {}", target_id), String::new(), true);
+            } else {
+                return (String::new(), format!("❌ 标签页 ID: {} 不存在", target_id), false);
+            }
+        }
+        "ask_web_ai" => {
+            let target_url = arg1.clone().unwrap_or_else(|| "https://kimi.moonshot.cn".to_string());
+            let prompt = arg2.unwrap_or_default();
+            
+            let browser = match get_or_create_browser() {
+                Ok(b) => b,
+                Err(e) => return (String::new(), format!("打开网页模型失败: {:?}", e), false),
+            };
+            
+            let mut tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
+            let ai_tab_id = NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed);
+            let tab = match browser.new_tab() {
+                Ok(t) => t,
+                Err(e) => return (String::new(), format!("新建标签页失败: {:?}", e), false),
+            };
+            tabs_map.insert(ai_tab_id, tab.clone());
+            drop(tabs_map);
+            
+            if let Err(e) = tab.navigate_to(&target_url) {
+                return (String::new(), format!("跳转失败: {:?}", e), false);
+            }
+            std::thread::sleep(Duration::from_millis(5000));
+            
+            let escaped_prompt = prompt.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('`', "\\`");
+            
+            let js_action = format!(r#"
+                (async function() {{
+                    return new Promise((resolve) => {{
+                        let checkCount = 0;
+                        let findInput = setInterval(() => {{
+                            checkCount++;
+                            let inputs = Array.from(document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"], .ql-editor, [data-lexical-editor="true"], .chat-input-editor'));
+                            let target = inputs.filter(el => {{
+                                let style = window.getComputedStyle(el);
+                                return style.display !== 'none' && style.visibility !== 'hidden' && el.getBoundingClientRect().height > 5;
+                            }}).pop();
+                            
+                            if (target) {{
+                                clearInterval(findInput);
+                                target.focus();
+                                
+                                // React / Lexical 万能插入法
+                                document.execCommand("selectAll", false, null);
+                        document.execCommand("insertText", false, `{}`);
+                        
+                        // 给 React 一点反应用时，去点亮发送按钮
+                                setTimeout(() => {{
+                                    let kimiBtn = document.querySelector('[data-testid="msh-chatinput-send-button"], [data-testid="send-button"], button[aria-label*="发送"], button[aria-label*="Send"]');
+                                    if (kimiBtn && !kimiBtn.disabled) {{
+                                        kimiBtn.click();
+                                    }} else {{
+                                        let buttons = Array.from(document.querySelectorAll('button:not([disabled])'));
+                                        let sendBtn = buttons.reverse().find(b => {{
+                                            let t = (b.innerText || '').toLowerCase();
+                                            return t.includes('send') || t.includes('发送') || b.querySelector('svg');
+                                        }});
+                                        
+                                        if (sendBtn) {{
+                                            sendBtn.click();
+                                        }} else {{
+                                            target.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}}));
+                                        }}
+                                    }}
+                                    resolve("OK");
+                                }}, 1000);
+                            }} else if (checkCount > 15) {{
+                                clearInterval(findInput);
+                                resolve("❌ 检查了15次(等待了15秒)，仍未在目标页面找到输入框");
+                            }}
+                        }}, 1000);
+                    }});
+                }})();
+            "#, escaped_prompt);
+
+            match tab.evaluate(&js_action, true) {
+                Ok(res) => {
+                    let status = res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+                    if status != "OK" { return (String::new(), status, false); }
+                }
+                Err(e) => return (String::new(), format!("输入执行故障: {:?}", e), false),
+            }
+
+            let wait_js = r#"
+                new Promise((resolve) => {
+                    let timeout;
+                    let absoluteTimeout;
+                    const observer = new MutationObserver(() => {
+                        clearTimeout(timeout);
+                        timeout = setTimeout(() => finish(), 4000);
+                    });
+                    const finish = () => {
+                        observer.disconnect();
+                        clearTimeout(absoluteTimeout);
+                        resolve('done');
+                    };
+                    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+                    timeout = setTimeout(() => finish(), 6000);
+                    absoluteTimeout = setTimeout(() => finish(), 45000); // 绝对最大超时，防止光标闪烁死锁
+                });
+            "#;
+            
+            let _ = tab.evaluate(wait_js, true);
+            std::thread::sleep(Duration::from_millis(500));
+
+            let extract_js = r#"
+                (function() {
+                    let messages = Array.from(document.querySelectorAll('.markdown, .prose, [data-message-author-role="assistant"], .message-bot, [class*="response"]'));
+                    if(messages.length === 0) return document.body.innerText;
+                    return messages[messages.length - 1].innerText;
+                })();
+            "#;
+            
+            let answer = match tab.evaluate(extract_js, false) {
+                Ok(res) => res.value.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_else(|| "未能提取到有效的回答文本".to_string()),
+                Err(e) => return (String::new(), format!("提取回答失败: {:?}", e), false),
+            };
+            
+            // --- 关键优化：不再销毁 Kimi 标签页，让它常驻后台，下次提问更丝滑 ---
+            // tabs_map.remove(&ai_tab_id); 
+            // let _ = tab.close_with_unload();
+            
+            // 物理唤醒：直接使用 CDP 协议层的 activate() 指令强制把老页面（原现场）拽到最前方
+            let old_id = CURRENT_TAB_ID.load(Ordering::Relaxed);
+            {
+                let tabs_map = GLOBAL_TABS.get().unwrap().lock().unwrap();
+                if let Some(old_tab) = tabs_map.get(&old_id) {
+                    let _ = old_tab.activate(); // CDP Level physical tab switch
+                }
+            }
+            
+            // 物理回稳：给系统 1.5 秒时间处理 Tab 切换动画、重排 DOM 和重新捕获输入焦点
+            std::thread::sleep(Duration::from_millis(1500));
+            
+            return (format!("✅ Web AI [{}] 的思考结果:\n===================\n{}\n===================", target_url, answer), String::new(), true);
+        }
+        _ => {} // 继续向下走普通的 DOM 操作逻辑
+    }
+    let tab = match get_or_create_tab() {
+        Ok(t) => t,
+        Err(e) => return (String::new(), format!("获取Tab失败: {:?}", e), false),
+    };
 
     match cmd_type.as_str() {
         // ===== 导航类 =====

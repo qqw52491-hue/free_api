@@ -29,6 +29,11 @@
 - `{"action": "wait_idle"}`: **智能等待页面 DOM 稳定。** 强烈推荐在 click、goto 等之后使用。
 - `{"action": "back"}` / `{"action": "forward"}` / `{"action": "refresh"}`: 基础导航 (执行后必重新 extract)
 - `{"action": "screenshot"}`: 获取视图快照
+- `{"action": "ask_web_ai", "url": "https://kimi.moonshot.cn", "text": "你的具体问题/上下文"}`: **【杀手锏】如果你遇到极难处理的混淆代码、正则提取或验证逻辑，立刻调用此宏 或者遇到无法解决的问题！**系统会自动在后台新建一个 Tab 访问该 AI 网页，自动寻找输入框提问，并死等生成结束后将结果提取返回给你，完全不干扰你当前的网页上下文。
+- `{"action": "new_tab", "url": "https..."}`: 新建标签页 
+- `{"action": "switch_tab", "id": 2}`: 切换焦点至指定标签页 ID。所有提取、点击等操作都会应用在当前焦点标签页上。
+- `{"action": "list_tabs"}`: 列出当前存在的所有标签页（ID、标题、URL及当前焦点所在）。
+- `{"action": "close_tab", "id": 2}`: 关闭/移除指定 ID 的标签页。如果不传 id，则关闭当前标签页。
 
 ## 经典实操范式 (Few-Shot Strategy)
 **场景**： 抓取首页前 2 篇文章内容。
