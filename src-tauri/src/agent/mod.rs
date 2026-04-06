@@ -39,6 +39,14 @@ pub fn run_agent_step(
     registry: &mut PluginRegistry,
 ) -> DispatchResult {
     let mut action = instruction.get_action().trim().to_lowercase();
+    
+    // --- 幻觉纠偏：如果 action 为空但 extra_fields 里有 tool_name，尝试打捞 ---
+    if action.is_empty() {
+        if let Some(name) = instruction.extra_fields.get("tool_name").and_then(|v| v.as_str()) {
+            action = name.to_lowercase();
+        }
+    }
+
     let params = instruction.get_params();
 
     // --- 容错路由：如果 action 直接就是一个 http 地址，自动补全为 goto ---
@@ -306,6 +314,7 @@ pub async fn run_agent_main_loop(
         // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
         // ================================================================
         let mut retry_count = 0;
+        let mut tool_retry_count = 0;
         let mut max_retries = 3;
         let mut pre_computed_inst: Option<crate::agent::types::AgentInstruction> = None;
 
@@ -451,16 +460,19 @@ pub async fn run_agent_main_loop(
 
             // --- C. 判断执行结果 ---
             if dispatch_result.success || inst.get_action() == "finish" {
+                tool_retry_count = 0; // 成功后重置计数器
                 break (inst, dispatch_result); // 成功！
             } else {
                 retry_count += 1;
+                tool_retry_count += 1;
                 let error_detail = format!("【❌ 执行失败】: {}", dispatch_result.stderr);
 
-                if retry_count == 1 {
+                if tool_retry_count == 1 {
                     let _ = app.emit(
                         "agent-log",
-                        "🚨 连续 1 次失败，强制触发 Kimi 网页专家护驾！",
+                        "🚨 检测到指令执行失败，正在唤起 Kimi 网页专家护驾...",
                     );
+                    println!("🚨 [Rescue] 触发 Kimi 网页专家救援模式 (Session: {})...", final_session_id);
 
                     // 记录报错时的场景上下文，以便 Kimi 协助分析
                     // 注意：现在不需要手动记录 original_tab_id，因为动作默认就在 "main" 执行
@@ -480,11 +492,12 @@ pub async fn run_agent_main_loop(
                         "提示：你现在正在帮我处理一个终极任务：【{}】。我遭遇了执行瓶颈，需要你的神级判断。\n\n我目前的详细场景上下文如下：\n{}\n刚才我尝试使用的动作是 {}，参数是: {:?}。结果遭受了惨痛失败，报错为：{}\n\n请你分析报错以及 DOM 树结构（ID 和 X,Y 坐标），告诉我：\n1. 错在哪？\n2. 接下来该怎么办？\n最关键的是：请你跳过废话，直接代替我输出这一步的执行 JSON 结构，我将绕过本地 AI 直接运行你的指令：\n```json\n{{\n  \"thought\": \"简短思路\",\n  \"description\": \"下一步操作描述\",\n  \"tool\": \"browser_dom\",\n  \"command\": {{\n    \"action\": \"type/click/extract/goto\",\n    \"id\": 纯数字,\n    \"text\": \"可选文本\"\n  }}\n}}\n```\n请务必只使用 id 且不要携带 selector 这种词汇。只要你返回正确的 JSON，我就能瞬间在原页面代打执行！",
                         goal, recent_context, inst.get_action(), inst.get_params(), dispatch_result.stderr
                     );
-                    let ask_cmd = format!("ask_web_ai https://kimi.moonshot.cn {}", help_prompt);
+                    let ask_cmd = format!("ask_web_ai kimi {}", help_prompt);
                     let (stdout, stderr, success) =
                         crate::agent::browser::run_browser_dom(&final_session_id, &ask_cmd);
 
                     if success {
+                        println!("✅ [Rescue] Kimi 救援响应成功！");
                         // 尝试直接截获 Kimi 吐出的 JSON 指令包！
                         if let Some(json_str) = crate::agent::utils::extract_json_from_text(&stdout)
                         {
@@ -538,6 +551,7 @@ pub async fn run_agent_main_loop(
                         max_retries = 4; // 给出最后一次机会
                         continue;
                     } else {
+                        println!("⚠️ [Rescue] 场外援助由于异常失败: {}", stderr);
                         let rescue_feedback =
                             format!("【⚠️ 自动场外援助失败，只能重新靠你自己】：{}", stderr);
                         context.add_error_feedback(&error_detail);

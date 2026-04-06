@@ -20,111 +20,105 @@ pub fn get_browser_mode() -> u8 {
 }
 
 pub fn get_or_create_browser(session_id: &str) -> Result<&'static Browser, String> {
-    if let Some(browser) = GLOBAL_BROWSER.get() {
-        return Ok(browser);
-    }
+    let browser = if let Some(browser) = GLOBAL_BROWSER.get() {
+        browser
+    } else {
+        let mode = BROWSER_MODE.load(Ordering::Relaxed);
+        let browser = match mode {
+            2 => {
+                println!("🔗 [浏览器模式: 连接已有 Chrome] 正在连接 localhost:9222...");
+                let ws_url = get_cdp_ws_url("http://127.0.0.1:9222")
+                    .map_err(|e| format!("无法连接已有浏览器。确保已启动 Chrome: {}", e))?;
+                Browser::connect(ws_url).map_err(|e| format!("CDP 连接失败: {}", e))?
+            }
+            1 => {
+                let data_dir = dirs_next::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("free-api-agent-browser");
+                println!("💾 [浏览器模式: 持久化] 数据目录: {}", data_dir.display());
 
-    let mode = BROWSER_MODE.load(Ordering::Relaxed);
+                #[cfg(target_family = "unix")]
+                let _ = std::process::Command::new("pkill")
+                    .args(["-9", "-f", "free-api-agent-browser"])
+                    .output();
+                let _ = std::fs::remove_file(data_dir.join("SingletonLock"));
+                std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let (browser, tab) = match mode {
-        2 => {
-            println!("🔗 [浏览器模式: 连接已有 Chrome] 正在连接 localhost:9222...");
-            let ws_url = get_cdp_ws_url("http://127.0.0.1:9222")
-                .map_err(|e| format!("无法连接已有浏览器。确保已启动 Chrome: {}", e))?;
-            let browser = Browser::connect(ws_url).map_err(|e| format!("CDP 连接失败: {}", e))?;
-            let tab = {
-                let tabs = browser.get_tabs().lock().unwrap();
-                if let Some(first_tab) = tabs.first() {
-                    first_tab.clone()
-                } else {
-                    drop(tabs);
-                    browser
-                        .new_tab()
-                        .map_err(|e| format!("新建标签页失败: {:?}", e))?
-                }
-            };
-            (browser, tab)
-        }
-        1 => {
-            let data_dir = dirs_next::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("free-api-agent-browser");
-            println!("💾 [浏览器模式: 持久化] 数据目录: {}", data_dir.display());
+                let options = LaunchOptions::default_builder()
+                    .headless(false)
+                    .idle_browser_timeout(Duration::from_secs(36000))
+                    .user_data_dir(Some(data_dir))
+                    .args(vec![
+                        "--no-sandbox".as_ref(),
+                        "--disable-setuid-sandbox".as_ref(),
+                        "--disable-gpu".as_ref(),
+                        "--window-size=1280,800".as_ref(),
+                        "--disable-dev-shm-usage".as_ref(),
+                    ])
+                    .build()
+                    .unwrap_or_default();
 
-            #[cfg(target_family = "unix")]
-            let _ = std::process::Command::new("pkill")
-                .args(["-9", "-f", "free-api-agent-browser"])
-                .output();
-            let _ = std::fs::remove_file(data_dir.join("SingletonLock"));
-            std::thread::sleep(std::time::Duration::from_millis(200));
+                Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?
+            }
+            _ => {
+                println!("扫帚 [浏览器模式: 临时] 每次启动全新 profile");
+                let options = LaunchOptions::default_builder()
+                    .headless(false)
+                    .idle_browser_timeout(Duration::from_secs(36000))
+                    .args(vec![
+                        "--no-sandbox".as_ref(),
+                        "--disable-setuid-sandbox".as_ref(),
+                        "--disable-gpu".as_ref(),
+                        "--window-size=1280,800".as_ref(),
+                        "--disable-dev-shm-usage".as_ref(),
+                    ])
+                    .build()
+                    .unwrap_or_default();
 
-            let options = LaunchOptions::default_builder()
-                .headless(false)
-                .idle_browser_timeout(Duration::from_secs(36000))
-                .user_data_dir(Some(data_dir))
-                .args(vec![
-                    "--no-sandbox".as_ref(),
-                    "--disable-setuid-sandbox".as_ref(),
-                    "--disable-gpu".as_ref(),
-                    "--window-size=1280,800".as_ref(),
-                    "--disable-dev-shm-usage".as_ref(),
-                ])
-                .build()
-                .unwrap_or_default();
-
-            let browser = Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?;
-            let tab = browser
-                .new_tab()
-                .map_err(|e| format!("新建标签页失败: {:?}", e))?;
-            (browser, tab)
-        }
-        _ => {
-            println!("扫帚 [浏览器模式: 临时] 每次启动全新 profile");
-            let options = LaunchOptions::default_builder()
-                .headless(false)
-                .idle_browser_timeout(Duration::from_secs(36000))
-                .args(vec![
-                    "--no-sandbox".as_ref(),
-                    "--disable-setuid-sandbox".as_ref(),
-                    "--disable-gpu".as_ref(),
-                    "--window-size=1280,800".as_ref(),
-                    "--disable-dev-shm-usage".as_ref(),
-                ])
-                .build()
-                .unwrap_or_default();
-
-            let browser = Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?;
-            let tab = browser
-                .new_tab()
-                .map_err(|e| format!("新建标签页失败: {:?}", e))?;
-            (browser, tab)
-        }
+                Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?
+            }
+        };
+        let _ = GLOBAL_BROWSER.set(browser);
+        GLOBAL_BROWSER.get().unwrap()
     };
 
-    let _ = GLOBAL_BROWSER.set(browser);
+    // --- 确保该 Session 的 tabs 容器和 main 标签页已就绪 ---
     GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
-    let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
-    session_tabs.insert("main".to_string(), tab);
+    let session_tabs = all_tabs
+        .entry(session_id.to_string())
+        .or_insert_with(std::collections::HashMap::new);
 
-    Ok(GLOBAL_BROWSER.get().unwrap())
+    if !session_tabs.contains_key("main") {
+        println!("🚀 [Session: {}] 正在初始化主工作标签页 main...", session_id);
+        let tab = browser
+            .new_tab()
+            .map_err(|e| format!("新建标签页失败: {:?}", e))?;
+        session_tabs.insert("main".to_string(), tab);
+    }
+
+    Ok(browser)
 }
 
 pub fn get_or_create_tab(session_id: &str) -> Result<Arc<Tab>, String> {
     let browser = get_or_create_browser(session_id)?;
+
     GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
-    let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+    let session_tabs = all_tabs
+        .entry(session_id.to_string())
+        .or_insert_with(std::collections::HashMap::new);
+
     if let Some(tab) = session_tabs.get("main") {
         Ok(tab.clone())
+    } else if let Some(tab) = session_tabs.values().next() {
+        Ok(tab.clone())
     } else {
-        if let Some(tab) = session_tabs.values().next() {
-            Ok(tab.clone())
-        } else {
-            let new_tab = browser.new_tab().map_err(|e| format!("新建标签页失败: {:?}", e))?;
-            session_tabs.insert("main".to_string(), new_tab.clone());
-            Ok(new_tab)
-        }
+        let new_tab = browser
+            .new_tab()
+            .map_err(|e| format!("新建标签页失败: {:?}", e))?;
+        session_tabs.insert("main".to_string(), new_tab.clone());
+        Ok(new_tab)
     }
 }
 
@@ -261,6 +255,7 @@ impl WebAiPage {
 }
 
 pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, bool) {
+    println!("🌐 [BrowserDOM: {}] 收到指令: {}", session_id, command_str);
     let parts: Vec<&str> = command_str.splitn(3, ' ').collect();
     let cmd_type = parts.get(0).unwrap_or(&"").to_lowercase();
     let arg1 = parts.get(1).map(|s| s.to_string());
@@ -280,7 +275,9 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
 
                         GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
                         let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
-                        let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+                        let session_tabs = all_tabs
+                            .entry(session_id.to_string())
+                            .or_insert_with(std::collections::HashMap::new);
                         session_tabs.insert(tab_id.clone(), new_tab.clone());
 
                         if let Some(target_url) = arg2 {
@@ -367,6 +364,7 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             let ai_type = arg1.clone().unwrap_or_else(|| "kimi".to_string());
             let prompt = arg2.unwrap_or_default();
 
+            // 通过kimi 指定获取对象实体 内部有默认的地址等
             let agent = match WebAiPage::from_id(&ai_type) {
                 Some(a) => a,
                 None => {
@@ -409,11 +407,14 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 .replace('`', "\\`");
 
             let js_action = agent.js_send_message(&escaped_prompt);
+            println!("📡 [Session: {}] 正在将求救信号发送至网页版 Kimi，请稍候...", session_id);
             let _ = tab.evaluate(&js_action, true);
 
+            println!("⏳ [Session: {}] Kimi 正在思考诊断方案 (最长等待45秒)...", session_id);
             let _ = tab.evaluate(agent.js_wait_response(), true);
             std::thread::sleep(Duration::from_millis(500));
 
+            println!("📥 [Session: {}] 正在抓取 Kimi 的诊断建议...", session_id);
             let answer = match tab.evaluate(agent.js_extract_response(), false) {
                 Ok(res) => res
                     .value
@@ -422,14 +423,22 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 Err(e) => return (String::new(), format!("提取失败: {:?}", e), false),
             };
 
-            // 物理切回主页
+            // 物理切回主页 (如果存在且不是当前页的话)
             {
-                GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
                 let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
-                let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
-                if let Some(main) = session_tabs.get("main") {
-                    let _ = main.activate();
+                if let Some(session_tabs) = all_tabs.get_mut(session_id) {
+                    if let Some(main) = session_tabs.get("main") {
+                        let _ = main.activate();
+                    }
                 }
+            }
+
+            println!("🌟 [Session: {}] Kimi 救援响应已到手 ({} 字符)", session_id, answer.len());
+            if answer.len() > 100 {
+                let preview: String = answer.chars().take(100).collect();
+                println!("--- [Kimi 建议摘要] ---\n{}...\n-----------------------", preview);
+            } else {
+                println!("--- [Kimi 建议全文] ---\n{}\n-----------------------", &answer);
             }
 
             return (
@@ -694,7 +703,16 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 .as_deref()
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(0);
+            
+            if id == 0 {
+                return (String::new(), "❌ 动作解析失败：缺少有效元素 ID (0) 或参数名不匹配".to_string(), false);
+            }
+
             let val = arg2.unwrap_or_default();
+            if val.is_empty() {
+                 return (String::new(), format!("❌ 动作解析失败：准备对元素 [{}] 输入，但输入内容为空", id), false);
+            }
+
             let _escaped_val = val
                 .replace('\\', "\\\\")
                 .replace('\'', "\\'")

@@ -37,6 +37,7 @@ pub fn run_builtin_step(session_id: &str, action: &str, params: &serde_json::Val
         let id = params
             .get("id")
             .or(params.get("element_id"))
+            .or(params.get("selector")) // 增加容错
             .and_then(|v| {
                 v.as_u64().or_else(|| {
                     v.as_str()
@@ -48,6 +49,7 @@ pub fn run_builtin_step(session_id: &str, action: &str, params: &serde_json::Val
         let text = params
             .get("text")
             .or(params.get("val"))
+            .or(params.get("value")) // 增加容错
             .or(params.get("query"))
             .and_then(|v| v.as_str())
             .unwrap_or_default();
