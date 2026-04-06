@@ -32,12 +32,145 @@ pub fn set_browser_launch_mode(mode: u8) -> Result<String, String> {
     Ok(format!("浏览器已切换为: {}", desc))
 }
 
+/// 执行单条指令的内部路由逻辑
+fn execute_command_inner(
+    session_id: &str,
+    tool: &str,
+    action: &str,
+    params: &serde_json::Value,
+    registry: &mut PluginRegistry,
+) -> DispatchResult {
+    let mut final_action = action.to_string();
+
+    // --- 兼容性修复：如果 action 为空但 params 里有参数，尝试从 params 里捞 action ---
+    if final_action.is_empty() {
+        if let Some(a) = params.get("action").and_then(|v| v.as_str()) {
+            final_action = a.to_string();
+        } else if let Some(a) = params.get("command").and_then(|v| v.as_str()) {
+            final_action = a.to_string();
+        }
+    }
+
+    // --- 容错路由：如果 action 直接就是一个 http 地址，自动补全为 goto ---
+    if final_action.starts_with("http://") || final_action.starts_with("https://") {
+        final_action = format!("goto {}", final_action);
+    }
+
+    // 1. 优先尝试本地内置工具
+    if let Some(res) = run_builtin_step(session_id, &final_action, params) {
+        println!("执行动作调用本地内置工具: {}", final_action);
+        return res;
+    }
+
+    // 2. 尝试从注册表加载外部插件
+    let (plugin_name, tool_name) = if tool.contains('/') {
+        let parts: Vec<&str> = tool.split('/').collect();
+        (parts[0].to_string(), parts[1].to_string())
+    } else {
+        (tool.to_string(), final_action.to_string())
+    };
+
+    if let Some(plugin) = registry.get_mut(&plugin_name) {
+        println!("执行动作调用外部插件: {}/{}", plugin_name, tool_name);
+        match plugin.call_tool(&tool_name, params.clone()) {
+            Ok(out) => {
+                let is_error = out.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+                let content = out
+                    .get("content")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.get(0))
+                    .and_then(|m| m.get("text"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if is_error {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: content,
+                        success: false,
+                        route: format!("plugin:{}/{}", plugin_name, tool_name),
+                    };
+                } else {
+                    return DispatchResult {
+                        stdout: content,
+                        stderr: String::new(),
+                        success: true,
+                        route: format!("plugin:{}/{}", plugin_name, tool_name),
+                    };
+                }
+            }
+            Err(e) => {
+                return DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("插件调用异常: {:?}", e),
+                    success: false,
+                    route: format!("plugin:{}/{}", plugin_name, tool_name),
+                };
+            }
+        }
+    }
+
+    DispatchResult {
+        stdout: String::new(),
+        stderr: format!("❌ 未知 action='{}', params={:?}", final_action, params),
+        success: false,
+        route: "unknown".to_string(),
+    }
+}
+
 // 根据指令执行具体动作
 pub fn run_agent_step(
     session_id: &str,
     instruction: &AgentInstruction,
     registry: &mut PluginRegistry,
 ) -> DispatchResult {
+    let tool_name = instruction.get_tool().to_lowercase();
+    
+    // --- 场景 A: 组合指令流水线 Batch Execution ---
+    if !instruction.commands.is_empty() {
+        println!("🚀 [Pipeline: {}] 正在按顺序执行 {} 个组合动作...", session_id, instruction.commands.len());
+        let mut total_stdout = String::new();
+        
+        for (idx, cmd_val) in instruction.commands.iter().enumerate() {
+            let step_idx = idx + 1;
+            // 提取单步的 action
+            let step_action = cmd_val.get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            
+            println!("   ➡️  Step {}: 执行动作 '{}'...", step_idx, step_action);
+            
+            // 执行单步
+            let res = execute_command_inner(session_id, &tool_name, &step_action, cmd_val, registry);
+            
+            // 拼接输出结果
+            if !res.stdout.is_empty() {
+                total_stdout.push_str(&format!("\n[Step {} Result]: {}", step_idx, res.stdout));
+            }
+            
+            // --- 核心修复：Fail-Fast 快速失败机制 ---
+            if !res.success {
+                println!("   🚫 Step {} 执行失败，流水线立即熔断！原因: {}", step_idx, res.stderr);
+                return DispatchResult {
+                    stdout: total_stdout,
+                    stderr: format!("流水线在第 {} 步崩溃: {}", step_idx, res.stderr),
+                    success: false,
+                    route: format!("pipeline_fail_at_{}", step_idx),
+                };
+            }
+        }
+        
+        return DispatchResult {
+            stdout: total_stdout,
+            stderr: String::new(),
+            success: true,
+            route: "pipeline_success".to_string(),
+        };
+    }
+
+    // --- 场景 B: 传统单步指令 Single Execution ---
     let mut action = instruction.get_action().trim().to_lowercase();
     
     // --- 幻觉纠偏：如果 action 为空但 extra_fields 里有 tool_name，尝试打捞 ---
@@ -48,126 +181,11 @@ pub fn run_agent_step(
     }
 
     let params = instruction.get_params();
-
-    // --- 容错路由：如果 action 直接就是一个 http 地址，自动补全为 goto ---
-    if action.starts_with("http://") || action.starts_with("https://") {
-        action = format!("goto {}", action);
-    }
-
-    // 1. 优先尝试本地内置工具
-    if let Some(res) = run_builtin_step(session_id, &action, &params) {
-        println!("执行动作调用本地内置工具: {}", action);
-        return res;
-    }
-
-    // 2. 尝试分发到 MCP 插件
-    let (plugin_name, tool_name) = if let Some(pos) = action.find('/') {
-        println!("执行动作调用MCP插件: {}", action);
-        (&action[..pos], &action[pos + 1..])
-    } else {
-        let tool = params
-            .get("action")
-            .or(params.get("tool"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(&action);
-        (&action as &str, tool)
-    };
-
-    println!("执行动作调用MCP插件: {}", action);
-    println!("执行动作调用MCP插件: {}", plugin_name);
-    println!("执行动作调用MCP插件: {}", tool_name);
-    if let Some(client) = registry.get_mut(plugin_name) {
-        // --- 参数预处理：确保 MCP 拿到的是 Object ---
-        let arguments = if let Some(s) = params.as_str() {
-            // 如果是字符串，尝试解析成 JSON 对象
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
-                if val.is_object() {
-                    val
-                } else {
-                    return DispatchResult {
-                        stdout: String::new(),
-                        stderr: format!(
-                            "❌ MCP 预检失败: 参数必须是对象，不能是基本类型. 收到: {}",
-                            s
-                        ),
-                        success: false,
-                        route: "mcp_check".to_string(),
-                    };
-                }
-            } else {
-                return DispatchResult { stdout: String::new(), stderr: format!("❌ MCP 预检失败: AI 发送的是普通字符串 '{}', 但 MCP 工具 '{}' 需要 JSON 对象参数. 请参考说明书中的【参数规格】。", s, tool_name), success: false, route: "mcp_check".to_string() };
-            }
-        } else if params.is_object() {
-            let mut clean_params = params.clone();
-            if let Some(map) = clean_params.as_object_mut() {
-                map.remove("action");
-                map.remove("verb");
-                map.remove("command");
-            }
-            clean_params
-        } else {
-            json!({})
-        };
-
-        println!(
-            "🛠️ 正在调用 MCP 插件 [{}], 工具 [{}], 参数: {}",
-            plugin_name, tool_name, arguments
-        );
-        match client.call_tool(tool_name, arguments) {
-            Ok(result) => {
-                println!(
-                    "📦 MCP 返回原始结果: {}",
-                    serde_json::to_string_pretty(&result).unwrap_or_default()
-                );
-                let is_error = result
-                    .get("isError")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let text_output = result
-                    .get("content")
-                    .and_then(|c| c.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|first| first.get("text"))
-                    .and_then(|t| t.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| serde_json::to_string_pretty(&result).unwrap_or_default());
-
-                if is_error {
-                    DispatchResult {
-                        stdout: String::new(),
-                        stderr: text_output,
-                        success: false,
-                        route: format!("mcp:{}", plugin_name),
-                    }
-                } else {
-                    DispatchResult {
-                        stdout: text_output,
-                        stderr: String::new(),
-                        success: true,
-                        route: format!("mcp:{}", plugin_name),
-                    }
-                }
-            }
-            Err(e) => DispatchResult {
-                stdout: String::new(),
-                stderr: e,
-                success: false,
-                route: format!("mcp:{}", plugin_name),
-            },
-        }
-    } else {
-        // --- 3. 实在没辙了 ---
-        DispatchResult {
-            stdout: String::new(),
-            stderr: format!(
-                "❌ 未知 action='{}', params={:?}",
-                action, instruction.params
-            ),
-            success: false,
-            route: "unknown".to_string(),
-        }
-    }
+    execute_command_inner(session_id, &tool_name, &action, &params, registry)
 }
+
+
+
 
 #[tauri::command]
 pub async fn dispatch_agent_step(
@@ -479,7 +497,7 @@ pub async fn run_agent_main_loop(
                     let _original_id = "main";
 
                     let mut recent_context = String::new();
-                    for msg in context.turns_history.iter().rev().take(4).rev() {
+                    for msg in context.turns_history.iter().rev().take(5).rev() {
                         let content_str = match &msg.content {
                             serde_json::Value::String(s) => s.clone(),
                             other => other.to_string(),
@@ -489,8 +507,8 @@ pub async fn run_agent_main_loop(
                     }
 
                     let help_prompt = format!(
-                        "提示：你现在正在帮我处理一个终极任务：【{}】。我遭遇了执行瓶颈，需要你的神级判断。\n\n我目前的详细场景上下文如下：\n{}\n刚才我尝试使用的动作是 {}，参数是: {:?}。结果遭受了惨痛失败，报错为：{}\n\n请你分析报错以及 DOM 树结构（ID 和 X,Y 坐标），告诉我：\n1. 错在哪？\n2. 接下来该怎么办？\n最关键的是：请你跳过废话，直接代替我输出这一步的执行 JSON 结构，我将绕过本地 AI 直接运行你的指令：\n```json\n{{\n  \"thought\": \"简短思路\",\n  \"description\": \"下一步操作描述\",\n  \"tool\": \"browser_dom\",\n  \"command\": {{\n    \"action\": \"type/click/extract/goto\",\n    \"id\": 纯数字,\n    \"text\": \"可选文本\"\n  }}\n}}\n```\n请务必只使用 id 且不要携带 selector 这种词汇。只要你返回正确的 JSON，我就能瞬间在原页面代打执行！",
-                        goal, recent_context, inst.get_action(), inst.get_params(), dispatch_result.stderr
+                        "提示：你现在正在帮我处理一个终极任务：【{}】。我遭遇了执行瓶颈，需要你的神级判断。\n\n【⚡ 你的操作手册/系统指令规范如下】：\n{}\n\n【具体需要的工具dom使用手册如下】：\n{}\n\n【📝 我目前的详细场景上下文如下】：\n{}\n刚才我尝试使用的动作是 {}，参数是: {:?}。结果遭受了惨痛失败，报错为：{}\n\n请你分析报错以及 DOM 树结构（ID 和 X,Y 坐标），告诉我：\n1. 错在哪？\n2. 接下来该怎么办？\n最关键的是：请你跳过废话，直接按照手册规范，代替我输出这一步的执行 JSON 结构：\n```json\n{{\n  \"thought\": \"简短思路\",\n  \"description\": \"下一步操作描述\",\n  \"tool\": \"browser_dom\",\n  \"command\": {{\n    \"action\": \"type/click/extract/goto\",\n    \"id\": 纯数字,\n    \"text\": \"可选文本\"\n  }}\n}}\n```\n请务必只使用 id 且不要携带 selector 这种词汇。只要你返回正确的 JSON，我就能瞬间在原页面代打执行！",
+                        goal, context.system_prompt, context.active_tool_detail, recent_context, inst.get_action(), inst.get_params(), dispatch_result.stderr
                     );
                     let ask_cmd = format!("ask_web_ai kimi {}", help_prompt);
                     let (stdout, stderr, success) =
@@ -507,17 +525,6 @@ pub async fn run_agent_main_loop(
                                 >(val)
                                 {
                                     let _ = app.emit("agent-log", "🔥 Kimi 返回了完美的 JSON 指令格式，系统已截断本地 AI，马上自动代打本回合！");
-
-                                    // 核心修复：物理焦点强制切回主工作现场 "main"
-                                    let _ = crate::agent::browser::run_browser_dom(
-                                        &final_session_id,
-                                        "switch_tab main",
-                                    );
-
-                                    // 给浏览器 1 秒钟完成物理层面的 Tab 切换动画和焦点捕获
-                                    futures::executor::block_on(async {
-                                        tokio::time::sleep(Duration::from_millis(1000)).await
-                                    });
 
                                     // 不要用 continue 重头规划，直接把这一条完美方案覆盖给本次本该让 AI 出的代码，去跑！
                                     let dispatch_result = {

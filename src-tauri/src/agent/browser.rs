@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::time::Duration;
 
-static GLOBAL_BROWSER: OnceLock<Browser> = OnceLock::new();
+static WORKER_BROWSER: OnceLock<Arc<Browser>> = OnceLock::new();
+static AI_BROWSER: OnceLock<Arc<Browser>> = OnceLock::new();
 static GLOBAL_TABS: OnceLock<Mutex<std::collections::HashMap<String, std::collections::HashMap<String, Arc<Tab>>>>> = OnceLock::new();
 static BROWSER_MODE: AtomicU8 = AtomicU8::new(0);
 static TAB_COUNTER: AtomicU32 = AtomicU32::new(1);
@@ -19,85 +20,81 @@ pub fn get_browser_mode() -> u8 {
     BROWSER_MODE.load(Ordering::Relaxed)
 }
 
-pub fn get_or_create_browser(session_id: &str) -> Result<&'static Browser, String> {
-    let browser = if let Some(browser) = GLOBAL_BROWSER.get() {
-        browser
-    } else {
-        let mode = BROWSER_MODE.load(Ordering::Relaxed);
-        let browser = match mode {
-            2 => {
-                println!("🔗 [浏览器模式: 连接已有 Chrome] 正在连接 localhost:9222...");
-                let ws_url = get_cdp_ws_url("http://127.0.0.1:9222")
-                    .map_err(|e| format!("无法连接已有浏览器。确保已启动 Chrome: {}", e))?;
-                Browser::connect(ws_url).map_err(|e| format!("CDP 连接失败: {}", e))?
-            }
-            1 => {
-                let data_dir = dirs_next::data_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("free-api-agent-browser");
-                println!("💾 [浏览器模式: 持久化] 数据目录: {}", data_dir.display());
+pub fn get_or_create_browser_instance(is_ai: bool) -> Result<Arc<Browser>, String> {
+    let mode = BROWSER_MODE.load(Ordering::Relaxed);
+    let lock_obj = if is_ai { &AI_BROWSER } else { &WORKER_BROWSER };
 
-                #[cfg(target_family = "unix")]
-                let _ = std::process::Command::new("pkill")
-                    .args(["-9", "-f", "free-api-agent-browser"])
-                    .output();
-                let _ = std::fs::remove_file(data_dir.join("SingletonLock"));
-                std::thread::sleep(std::time::Duration::from_millis(200));
-
-                let options = LaunchOptions::default_builder()
-                    .headless(false)
-                    .idle_browser_timeout(Duration::from_secs(36000))
-                    .user_data_dir(Some(data_dir))
-                    .args(vec![
-                        "--no-sandbox".as_ref(),
-                        "--disable-setuid-sandbox".as_ref(),
-                        "--disable-gpu".as_ref(),
-                        "--window-size=1280,800".as_ref(),
-                        "--disable-dev-shm-usage".as_ref(),
-                    ])
-                    .build()
-                    .unwrap_or_default();
-
-                Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?
-            }
-            _ => {
-                println!("扫帚 [浏览器模式: 临时] 每次启动全新 profile");
-                let options = LaunchOptions::default_builder()
-                    .headless(false)
-                    .idle_browser_timeout(Duration::from_secs(36000))
-                    .args(vec![
-                        "--no-sandbox".as_ref(),
-                        "--disable-setuid-sandbox".as_ref(),
-                        "--disable-gpu".as_ref(),
-                        "--window-size=1280,800".as_ref(),
-                        "--disable-dev-shm-usage".as_ref(),
-                    ])
-                    .build()
-                    .unwrap_or_default();
-
-                Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?
-            }
-        };
-        let _ = GLOBAL_BROWSER.set(browser);
-        GLOBAL_BROWSER.get().unwrap()
-    };
-
-    // --- 确保该 Session 的 tabs 容器和 main 标签页已就绪 ---
-    GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
-    let session_tabs = all_tabs
-        .entry(session_id.to_string())
-        .or_insert_with(std::collections::HashMap::new);
-
-    if !session_tabs.contains_key("main") {
-        println!("🚀 [Session: {}] 正在初始化主工作标签页 main...", session_id);
-        let tab = browser
-            .new_tab()
-            .map_err(|e| format!("新建标签页失败: {:?}", e))?;
-        session_tabs.insert("main".to_string(), tab);
+    if let Some(b) = lock_obj.get() {
+        return Ok(b.clone());
     }
 
-    Ok(browser)
+    let data_dir = dirs_next::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("free-api-agent-browser")
+        .join(if is_ai { "ai_agent" } else { "worker_agent" });
+    
+    std::fs::create_dir_all(&data_dir).ok();
+
+    // 关键修复：暴力删除 SingletonLock 文件，防止 Chrome 启动时检测到冲突自动退出
+    #[cfg(target_family = "unix")]
+    {
+        let lock_file = data_dir.join("SingletonLock");
+        if lock_file.exists() {
+            let _ = std::fs::remove_file(lock_file);
+        }
+    }
+
+    let browser = match mode {
+        2 => {
+            println!("🔗 [浏览器模式: 连接已有 Chrome] 正在连接 localhost:9222...");
+            let ws_url = get_cdp_ws_url("http://127.0.0.1:9222")
+                .map_err(|e| format!("无法连接已有浏览器: {}", e))?;
+            Browser::connect(ws_url).map_err(|e| format!("CDP 连接失败: {}", e))?
+        }
+        1 => {
+            println!("💾 [浏览器模式: 持久化] 数据目录: {}", data_dir.display());
+            let options = LaunchOptions::default_builder()
+                .headless(false)
+                .idle_browser_timeout(Duration::from_secs(36000))
+                .user_data_dir(Some(data_dir.clone()))
+                .args(vec![
+                    "--no-sandbox".as_ref(),
+                    "--disable-setuid-sandbox".as_ref(),
+                    "--disable-gpu".as_ref(),
+                    "--window-size=1280,800".as_ref(),
+                    "--disable-dev-shm-usage".as_ref(),
+                ])
+                .build()
+                .map_err(|e| e.to_string())?;
+            Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?
+        }
+        _ => {
+            println!("🧹 [浏览器模式: 临时] 每次启动全新 profile");
+            let options = LaunchOptions::default_builder()
+                .headless(false)
+                .idle_browser_timeout(Duration::from_secs(36000))
+                .user_data_dir(Some(data_dir.clone()))
+                .args(vec![
+                    "--no-sandbox".as_ref(),
+                    "--disable-setuid-sandbox".as_ref(),
+                    "--disable-gpu".as_ref(),
+                    "--window-size=1280,800".as_ref(),
+                    "--disable-dev-shm-usage".as_ref(),
+                ])
+                .build()
+                .map_err(|e| e.to_string())?;
+            Browser::new(options).map_err(|e| format!("拉起浏览器失败: {}", e))?
+        }
+    };
+
+    let browser_arc = Arc::new(browser);
+    let _ = lock_obj.set(browser_arc.clone());
+    println!("✅ [Instance: {}] 物理浏览器实例启动成功，路径：{}", if is_ai { "AI" } else { "Worker" }, data_dir.display());
+    Ok(browser_arc)
+}
+
+pub fn get_or_create_browser(session_id: &str) -> Result<Arc<Browser>, String> {
+    get_or_create_browser_instance(false)
 }
 
 pub fn get_or_create_tab(session_id: &str) -> Result<Arc<Tab>, String> {
@@ -109,16 +106,25 @@ pub fn get_or_create_tab(session_id: &str) -> Result<Arc<Tab>, String> {
         .entry(session_id.to_string())
         .or_insert_with(std::collections::HashMap::new);
 
-    if let Some(tab) = session_tabs.get("main") {
-        Ok(tab.clone())
-    } else if let Some(tab) = session_tabs.values().next() {
-        Ok(tab.clone())
-    } else {
-        let new_tab = browser
+    if let Some(existing_tab) = session_tabs.get("main") {
+        // 心跳检测：通过尝试执行 JS 来探测连接是否还活着
+        if existing_tab.evaluate("1", false).is_ok() {
+            return Ok(existing_tab.clone());
+        } else {
+            println!("🔄 [Session: {}] 核心标签页 main 可能已关闭，正在尝试重连/复活...", session_id);
+            session_tabs.remove("main");
+        }
+    }
+
+    if !session_tabs.contains_key("main") {
+        println!("🚀 [Session: {}] 正在拉起业务工作现场 main...", session_id);
+        let tab = browser
             .new_tab()
-            .map_err(|e| format!("新建标签页失败: {:?}", e))?;
-        session_tabs.insert("main".to_string(), new_tab.clone());
-        Ok(new_tab)
+            .map_err(|e| format!("新建主标签页失败: {:?}", e))?;
+        session_tabs.insert("main".to_string(), tab.clone());
+        Ok(tab)
+    } else {
+        Ok(session_tabs.get("main").unwrap().clone())
     }
 }
 
@@ -376,9 +382,9 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 }
             };
 
-            let browser = match get_or_create_browser(session_id) {
+            let ai_browser = match get_or_create_browser_instance(true) {
                 Ok(b) => b,
-                Err(e) => return (String::new(), format!("打开浏览器失败: {:?}", e), false),
+                Err(e) => return (String::new(), format!("打开救援浏览器失败: {:?}", e), false),
             };
 
             let tab = {
@@ -389,9 +395,9 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                     let _ = existing_tab.activate();
                     existing_tab.clone()
                 } else {
-                    let new_tab = match browser.new_tab() {
+                    let new_tab = match ai_browser.new_tab() {
                         Ok(t) => t,
-                        Err(e) => return (String::new(), format!("创建AI页面失败: {:?}", e), false),
+                        Err(e) => return (String::new(), format!("创建AI救援页面失败: {:?}", e), false),
                     };
                     let _ = new_tab.navigate_to(agent.default_url());
                     session_tabs.insert(ai_type.clone(), new_tab.clone());
@@ -703,70 +709,52 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 .as_deref()
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(0);
-            
-            if id == 0 {
-                return (String::new(), "❌ 动作解析失败：缺少有效元素 ID (0) 或参数名不匹配".to_string(), false);
-            }
 
             let val = arg2.unwrap_or_default();
             if val.is_empty() {
-                 return (String::new(), format!("❌ 动作解析失败：准备对元素 [{}] 输入，但输入内容为空", id), false);
+                return (String::new(), "❌ type 指令：输入内容为空".to_string(), false);
             }
 
-            let _escaped_val = val
-                .replace('\\', "\\\\")
-                .replace('\'', "\\'")
-                .replace('\n', "\\n");
-
-            // --- 核心改进：先清空，再输入 ---
-            let js_prepare = format!(
-                r#"
-                (function() {{
-                    const el = document.querySelector('[data-tauri-agent-id="{}"]');
-                    if (!el) return "NOT_FOUND";
-                    el.scrollIntoView({{behavior: 'instant', block: 'center'}});
-                    el.focus();
-
-                    // 兼容 React 和 Vue 的深度清空 Hack 写法
-                    let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
-                    let setter = nativeInputValueSetter ? nativeInputValueSetter.set : null;
-                    if (setter) {{
-                        setter.call(el, '');
-                    }} else {{
-                        el.value = '';
-                    }}
-
-                    if(el.isContentEditable) el.innerText = '';
-
-                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    return "OK";
-                }})();
-            "#,
-                id
-            );
-
-            match tab.evaluate(&js_prepare, false) {
-                Ok(res) => {
-                    let status = res
-                        .value
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .unwrap_or_default();
-                    if status != "OK" {
-                        return (String::new(), format!("❌ 找不到输入框 [{}]", id), false);
+            // --- 有 id：先发 click 事件拿到物理焦点，立即 type_str（原子操作）---
+            if id > 0 {
+                let js_click = format!(
+                    r#"
+                    (function() {{
+                        const el = document.querySelector('[data-tauri-agent-id="{}"]');
+                        if (!el) return "NOT_FOUND";
+                        el.scrollIntoView({{behavior: 'instant', block: 'center'}});
+                        // 发射真实点击序列，让框架感知物理交互（不调用 focus()）
+                        ['mousedown', 'mouseup', 'click'].forEach(name => {{
+                            el.dispatchEvent(new MouseEvent(name, {{
+                                bubbles: true, cancelable: true, view: window
+                            }}));
+                        }});
+                        return "OK";
+                    }})();
+                    "#,
+                    id
+                );
+                match tab.evaluate(&js_click, false) {
+                    Ok(res) => {
+                        let status = res.value
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        if status != "OK" {
+                            return (String::new(), format!("❌ type：找不到元素 [{}]，点击失败", id), false);
+                        }
                     }
+                    Err(e) => return (String::new(), format!("❌ type：点击出错: {:?}", e), false),
                 }
-                Err(e) => return (String::new(), format!("输入准备失败: {:?}", e), false),
+                // 等 click handler / React 渲染稳定再打字
+                std::thread::sleep(Duration::from_millis(150));
             }
+            // --- id=0 盲打模式：沿用当前物理焦点，不做任何聚焦操作 ---
 
-            // 模拟真实按键输入
-            if !val.is_empty() {
-                if let Err(e) = tab.type_str(&val) {
-                    return (String::new(), format!("键盘模拟输入失败: {:?}", e), false);
-                }
+            // CDP 键盘事件逐字符写入
+            match tab.type_str(&val) {
+                Ok(_) => (format!("✅ 输入完成 [id={}]: {}", id, val), String::new(), true),
+                Err(e) => (String::new(), format!("❌ 键盘输入失败: {:?}", e), false),
             }
-
-            (format!("✅ 成功输入: {}", val), String::new(), true)
         }
         "select" => {
             // select 8 option_value → 选择下拉框

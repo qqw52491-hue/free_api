@@ -114,6 +114,9 @@ pub struct AgentInstruction {
     pub todo_update: Vec<TodoItem>,
     #[serde(default)]
     pub memories_update: Vec<MemoryItem>,
+    /// 【指令流水线】支持单回合执行多条连续动作
+    #[serde(default)]
+    pub commands: Vec<serde_json::Value>,
     /// 【预加载优化】AI 预告下一轮想用的工具，系统会提前加载该工具的详细说明书
     #[serde(default)]
     pub next_tool_hint: Option<String>,
