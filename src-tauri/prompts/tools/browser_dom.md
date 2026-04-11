@@ -3,14 +3,42 @@
 
 # 网页自动化 (browser_dom) 战术指南
 
+## 页面感知铁律 (Observation Rules) 🧭
+> **这是最重要的规则！每次操作后你必须先搞清楚"我在哪"，再决定"我要做什么"。**
+
+1. **全局扫描优先**：执行完 `goto` 或 `extract` 后，不要只盯着你想找的元素！先看返回结果中的页面标题、URL 和 `<h1>`，确认你到底到了哪个页面。
+2. **空结果 ≠ 再试一次**：如果你 `extract` 搜索框却什么都没拿到，**绝对禁止**再次盲目 `extract`！
+   - 立刻在 `reflection` 中判断：此页面可能无搜索功能、搜索框由 JS 动态渲染导致 DOM 抓不到。
+   - **正确应对**：直接构造搜索 URL 跳转（见下方 URL 直达术）。
+3. **识别死页面**：如果 `read` 或 `extract` 返回的内容大量包含 "404"、"Not Found"、"Access Denied"、"Sign In"、"Login"，立即在 `reflection` 中承认"当前页面不可用"，触发撤退或换站。
+4. **防遮挡感知**：如果 `click` 后返回 "OK" 但页面没有变化，可能是元素被悬浮导航栏遮挡。请 `scroll down` 少量距离后再试。
+
+## URL 直达术 (URL Direct Navigation) 🎯
+> **降维打击：能拼 URL 就绝不去找搜索框！**
+
+很多现代网站的搜索框是 JS 动态渲染的，headless 浏览器根本点不到。直接构造搜索 URL 才是最稳妥的方式：
+
+| 网站 | 搜索 URL 模式 |
+|------|--------------|
+| Google | `https://www.google.com/search?q=关键词` |
+| Bing | `https://www.bing.com/search?q=关键词` |
+| 百度 | `https://www.baidu.com/s?wd=关键词` |
+| BBC | `https://www.bbc.co.uk/search?q=关键词` |
+| CNN | `https://edition.cnn.com/search?q=关键词` |
+| Reuters | `https://www.reuters.com/site-search/?query=关键词` |
+| GitHub | `https://github.com/search?q=关键词` |
+| Wikipedia | `https://en.wikipedia.org/wiki/关键词` |
+
+**规则**：如果你需要在一个网站上搜索内容，**第一反应**应该是 `goto` 上述格式的 URL，而不是 `extract` 去找搜索框。
+
 ## 狙击手战术 (Tactical Heuristics)
-- **零容忍地毯式搜索**：如果 extract 结果中有 `<input>` 或带 search 关键字的 ID，第一步永远是输入关键词搜索。绝对禁止逐个点击分类链接去"碰运气"。
-- **死胡同撤退策略 (Dead-End Retreat)**：如果你点击了一个分类或链接，发现里面没有你要的数据，必须立刻调用 `back` 返回上一页，并在 TODO 中将该尝试标记为 canceled，然后换搜索词或其他策略。
-- **抗门口效应 (Sign-In Wall)**：如果 read 结果包含过多"Login", "Sign In"，且当前滚动高度为 0，说明数据被折叠或在视口下方。你必须先 `scroll down` 两次来探测真实正文。
+- **零容忍地毯式搜索**：如果 extract 结果中有 `<input>` 或带 search 关键字的 ID，直接用 `type` 输入关键词搜索。绝对禁止逐个点击分类链接去"碰运气"。
+- **死胡同撤退策略 (Dead-End Retreat)**：如果你点击了一个分类或链接，发现里面没有你要的数据，必须立刻调用 `back` 返回上一页，并在 TODO 中将该尝试标记为 `canceled`，然后换搜索词或其他策略。
+- **抗门口效应 (Sign-In Wall)**：如果 `read` 结果包含过多"Login", "Sign In"，且当前滚动高度为 0，说明数据被折叠或在视口下方。你必须先 `scroll down` 两次来探测真实正文。
 
 ## DOM 刷新铁律 (Critical State Rules)
 - **ID 必定失效规则**：每次发生 `goto`、`click`(导致跳转)、`back` 或 `refresh` 后，当前页面的所有元素 ID **瞬间作废**！你必须在下一步立即执行 `extract` 生成新 ID，严禁凭记忆点击旧 ID。
-- **列表循环范式 (List-Detail-Back)**：`extract` -> 2. `click` (进详情) -> 3. `read`/`extract` (抓数据并存 memory) -> 4. `back` (退回列表) -> 5. `wait_idle` (等 DOM 稳定) -> 6. **必杀技**：重新 `extract` (获取新列表ID)。
+- **列表循环范式 (List-Detail-Back)**：`extract` -> `click` (进详情) -> `read`/`extract` (抓数据并存 memory) -> `back` (退回列表) -> `wait_idle` (等 DOM 稳定) -> **必杀技**：重新 `extract` (获取新列表ID)。
 
 ## ⚡ type 原子指令铁律（重要升级）
 > **`type` 指令现在是"点击+输入"的原子操作，不需要，也不应该在 type 前单独调 click！**
@@ -40,6 +68,7 @@
 使用 `commands` 数组一次性提交多个动作。适合「输入 → 等待 → 按键」等需要间隔的场景。
 ```json
 {
+  "reflection": "上一步 extract 确认了搜索框 ID=12，页面正常",
   "thought": "输入关键词并按 Enter 搜索",
   "tool": "browser_dom",
   "commands": [
@@ -71,14 +100,22 @@
 
 ## 经典实操范式 (Few-Shot Strategy)
 
-**场景 1：在百度搜索框输入并搜索**（展示 type 原子能力）
+**场景 1：在新闻网站搜索（URL 直达术 + 兜底）**
+```
+第1步：直接 goto "https://www.bbc.co.uk/search?q=马斯克" （优先 URL 直达）
+第2步：wait_idle（等待搜索结果页加载）
+第3步：extract（获取搜索结果列表 ID）
+第4步：如果结果为空 → reflection 声明"该站搜索无结果"，todo canceled，换站
+```
+
+**场景 2：在百度搜索框输入并搜索**（展示 type 原子能力，URL 直达公式不确定时的兜底）
 ```
 第1步：extract（找搜索框 ID，假设是 12）
 第2步：commands: [{"action":"type","id":12,"text":"今天新闻"}, {"action":"press","key":"Enter"}]
 ```
 ⚠️ 注意：**没有单独的 click 步骤**！type 已经内置点击。
 
-**场景 2：抓取首页前 2 篇文章内容**
+**场景 3：抓取首页前 2 篇文章内容**
 ```
 第1步：extract（找出前2条链接 ID）
 第2步：click id=15（点进第1条，这里 click 用于导航跳转）

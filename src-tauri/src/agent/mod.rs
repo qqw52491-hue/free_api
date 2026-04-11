@@ -423,7 +423,14 @@ pub async fn run_agent_main_loop(
                 .map_err(|e| e.to_string())?;
             }
 
-            // 通知前端：发现了新计划
+            // 通知前端：发现了新计划（含反思）
+            if !inst.reflection.is_empty() {
+                app.emit(
+                    "agent-log",
+                    format!("🪞 AI 反思: {}", inst.reflection),
+                )
+                .map_err(|e| e.to_string())?;
+            }
             app.emit(
                 "agent-log",
                 format!("🤖 AI 规划了新动作: {}", inst.description),
@@ -436,6 +443,7 @@ pub async fn run_agent_main_loop(
                     "step": {
                         "id": step_id,
                         "description": inst.description.clone(),
+                        "reflection": inst.reflection.clone(),
                         "thought": inst.thought.clone(),
                         "tool": inst.get_action(),
                         "command": inst.get_params().to_string(),
@@ -507,8 +515,8 @@ pub async fn run_agent_main_loop(
                     }
 
                     let help_prompt = format!(
-                        "提示：你现在正在帮我处理一个终极任务：【{}】。我遭遇了执行瓶颈，需要你的神级判断。\n\n【⚡ 你的操作手册/系统指令规范如下】：\n{}\n\n【具体需要的工具dom使用手册如下】：\n{}\n\n【📝 我目前的详细场景上下文如下】：\n{}\n刚才我尝试使用的动作是 {}，参数是: {:?}。结果遭受了惨痛失败，报错为：{}\n\n请你分析报错以及 DOM 树结构（ID 和 X,Y 坐标），告诉我：\n1. 错在哪？\n2. 接下来该怎么办？\n最关键的是：请你跳过废话，直接按照手册规范，代替我输出这一步的执行 JSON 结构：\n```json\n{{\n  \"thought\": \"简短思路\",\n  \"description\": \"下一步操作描述\",\n  \"tool\": \"browser_dom\",\n  \"command\": {{\n    \"action\": \"type/click/extract/goto\",\n    \"id\": 纯数字,\n    \"text\": \"可选文本\"\n  }}\n}}\n```\n请务必只使用 id 且不要携带 selector 这种词汇。只要你返回正确的 JSON，我就能瞬间在原页面代打执行！",
-                        goal, context.system_prompt, context.active_tool_detail, recent_context, inst.get_action(), inst.get_params(), dispatch_result.stderr
+                        "提示：你现在正在帮我处理一个终极任务：【{}】。我遭遇了执行瓶颈，需要你的神级判断。\n\n【⚡ 你的操作手册/系统指令规范如下】：\n{}\n\n【具体需要的工具dom使用手册如下】：\n{}\n\n【📝 我目前的详细场景上下文如下】：\n{}\n【当前屏幕实时最新观测与最新DOM】:\n{}\n\n刚才我尝试使用的动作是 {}，参数是: {:?}。结果遭受了惨痛失败，报错为：{}\n\n请你分析报错以及 DOM 树结构（ID 和 X,Y 坐标），告诉我：\n1. 错在哪？\n2. 接下来该怎么办？\n最关键的是：请你跳过废话，直接按照手册规范，代替我输出这一步的执行 JSON 结构：\n```json\n{{\n  \"thought\": \"简短思路\",\n  \"description\": \"下一步操作描述\",\n  \"tool\": \"browser_dom\",\n  \"command\": {{\n    \"action\": \"type/click/extract/goto\",\n    \"id\": 纯数字,\n    \"text\": \"可选文本\"\n  }}\n}}\n```\n请务必只使用 id 且不要携带 selector 这种词汇。只要你返回正确的 JSON，我就能瞬间在原页面代打执行！",
+                        goal, context.system_prompt, context.active_tool_detail, recent_context, context.current_observation, inst.get_action(), inst.get_params(), dispatch_result.stderr
                     );
                     let ask_cmd = format!("ask_web_ai kimi {}", help_prompt);
                     let (stdout, stderr, success) =

@@ -92,6 +92,9 @@ impl TokenUsage {
 // 这是ai 回答的具体格式
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentInstruction {
+    /// 【强制反思】AI 对上一步执行结果的客观评估，用于检测循环和死路
+    #[serde(default)]
+    pub reflection: String,
     #[serde(default)]
     pub thought: String,
     #[serde(default)]
@@ -130,10 +133,24 @@ pub struct AgentInstruction {
 
 impl AgentInstruction {
     pub fn get_action(&self) -> String {
-        self.tool
-            .clone()
-            .or(self.action.clone())
-            .unwrap_or_default()
+        if let Some(ref a) = self.action {
+            return a.to_string();
+        }
+        if let Some(ref cmd) = self.command {
+            if let Some(cmd_obj) = cmd.as_object() {
+                if let Some(action_val) = cmd_obj.get("action") {
+                    if let Some(action_str) = action_val.as_str() {
+                        return action_str.to_string();
+                    }
+                }
+            } else if let Some(cmd_str) = cmd.as_str() {
+                // 如果 command 本身就是个单纯的字符串动词
+                if !cmd_str.contains(' ') {
+                    return cmd_str.to_string();
+                }
+            }
+        }
+        self.tool.clone().unwrap_or_default()
     }
 
     pub fn get_tool(&self) -> String {

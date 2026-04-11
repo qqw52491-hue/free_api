@@ -176,6 +176,20 @@ pub async fn call_llm(
         );
     }
 
+    // 🔍 调试：打印发送给模型的消息概况
+    println!("═══════════════════════════════════════════");
+    println!("📤 [DEBUG] 发送给模型的消息列表 (共 {} 条):", api_messages.len());
+    for (i, msg) in api_messages.iter().enumerate() {
+        let content_str = match &msg.content {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let char_count = content_str.len();
+        let preview: String = content_str.chars().take(120).collect();
+        println!("  [{}] role={}, chars={}, preview: {}...", i, msg.role, char_count, preview);
+    }
+    println!("═══════════════════════════════════════════");
+
     let mut current_agent_try = 0;
     let max_agent_retries = 3;
 

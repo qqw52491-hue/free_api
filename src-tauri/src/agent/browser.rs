@@ -35,13 +35,35 @@ pub fn get_or_create_browser_instance(is_ai: bool) -> Result<Arc<Browser>, Strin
     
     std::fs::create_dir_all(&data_dir).ok();
 
-    // 关键修复：暴力删除 SingletonLock 文件，防止 Chrome 启动时检测到冲突自动退出
-    #[cfg(target_family = "unix")]
+    // 关键修复：跨平台（Mac/Windows/Linux）真正强杀占用该目录的僵尸 Chrome 进程
     {
+        let dir_str = data_dir.to_string_lossy().to_string();
+        let mut sys = sysinfo::System::new_all();
+        // 强制刷新所有进程列表
+        sys.refresh_all();
+        
+        for (_pid, process) in sys.processes() {
+            // 在较新的 sysinfo 版本中，cmd() 返回 &[OsString] 或类似类型，需要迭代拼接
+            let cmd_vec: Vec<String> = process.cmd().iter().map(|oss| oss.to_string_lossy().into_owned()).collect();
+            let cmd_str = cmd_vec.join(" ");
+            
+            let is_chrome = cmd_str.to_lowercase().contains("chrome");
+            let contains_dir = cmd_str.contains(&dir_str);
+            
+            if is_chrome && contains_dir {
+                println!("🔫 强杀占用数据目录的幽灵进程 (PID: {})", process.pid());
+                process.kill();
+            }
+        }
+
+        // 另外再保险删掉软锁文件
         let lock_file = data_dir.join("SingletonLock");
         if lock_file.exists() {
             let _ = std::fs::remove_file(lock_file);
         }
+        
+        // 等待底层文件句柄彻底释放
+        std::thread::sleep(Duration::from_millis(500));
     }
 
     let browser = match mode {

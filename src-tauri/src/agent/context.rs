@@ -9,6 +9,16 @@ pub struct ChatMessage {
     pub content: serde_json::Value, // 改为 Value，支持 String 或 Array (多模态)
 }
 
+/// 精简的动作摘要，用于在底部面包片注入可读的动作轨迹
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionSummary {
+    pub step: usize,
+    pub action: String,
+    pub description: String,
+    pub success: bool,
+    pub output_preview: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandwichContext {
     pub system_prompt: String,
@@ -24,6 +34,12 @@ pub struct SandwichContext {
 
     // --- Token 优化：是否要在本轮携带全部记忆内容 ---
     pub carry_memories: bool,
+
+    // --- 结构化动作轨迹（用于循环检测和强注入） ---
+    #[serde(default)]
+    pub action_history: Vec<ActionSummary>,
+    #[serde(default)]
+    pub step_counter: usize,
 }
 
 impl SandwichContext {
@@ -38,17 +54,46 @@ impl SandwichContext {
             active_tool: None,
             active_tool_detail: String::new(),
             carry_memories: false,
+            action_history: Vec::new(),
+            step_counter: 0,
         }
     }
 
     pub fn add_step(&mut self, instruction: &AgentInstruction, output_summary: &str) {
-        let step = HistoryStep {
+        self.step_counter += 1;
+
+        let _step = HistoryStep {
             thought: instruction.thought.clone(),
             description: instruction.description.clone(),
             tool: instruction.get_tool(),
             command: instruction.get_action(),
             output_summary: output_summary.chars().take(1000).collect(),
         };
+
+        // 记录结构化动作摘要（用于底部面包片和循环检测）
+        let is_success = !output_summary.starts_with("❌");
+        let action_str = format!("{}:{}", instruction.get_tool(), instruction.get_action());
+        let preview: String = output_summary
+            .lines()
+            .take(2)
+            .collect::<Vec<&str>>()
+            .join(" ")
+            .chars()
+            .take(120)
+            .collect();
+
+        self.action_history.push(ActionSummary {
+            step: self.step_counter,
+            action: action_str,
+            description: instruction.description.clone(),
+            success: is_success,
+            output_preview: preview,
+        });
+
+        // 只保留最近 10 条动作摘要
+        if self.action_history.len() > 10 {
+            self.action_history = self.action_history[self.action_history.len() - 10..].to_vec();
+        }
 
         // 我们存入 ChatHistory，AI 就能看到历史
         let msg = ChatMessage {
@@ -57,13 +102,26 @@ impl SandwichContext {
         };
         self.turns_history.push(msg);
 
+        // 为防止历史上下文爆炸导致 Ollama 超出 4096 token 而阶段提示词，历史对话中的执行结果应该被极致压缩。
+        // 凡是带有“【可用元素清单】”的长 DOM 树全部削减，因为当前最新 DOM 已经在 `current_observation` 底部了。
+        let mut history_feedback = output_summary.to_string();
+        if let Some(idx) = history_feedback.find("【可用元素清单】") {
+            history_feedback.replace_range(
+                idx..,
+                "【可用元素清单】: (已折叠，详见底部当前最新观测)"
+            );
+        } else {
+            // 普通日志截断到 300 字符
+            history_feedback = history_feedback.chars().take(300).collect();
+        }
+
         let feedback = ChatMessage {
             role: "user".to_string(),
-            content: json!(format!("【执行结果】\n{}", output_summary)),
+            content: json!(format!("【历史执行结果摘要】\n{}", history_feedback)),
         };
         self.turns_history.push(feedback);
 
-        // 滑动窗口：只保留最近 15 步 (30 条对话)，防止上下文爆炸
+        // 滑动窗口：只保留最近 15 步 (30 条对话)，进一步严防死守
         if self.turns_history.len() > 30 {
             self.turns_history = self.turns_history[self.turns_history.len() - 30..].to_vec();
         }
@@ -103,6 +161,60 @@ impl SandwichContext {
             content: json!(format!("【❌ 格式或执行错误】\n{}\n请检查格式规则（勿用 XML/```），修正后立即重新输出正确 JSON。", error_msg))
         };
         self.turns_history.push(msg);
+    }
+
+    /// 生成人类可读的动作轨迹文本（注入到底部面包片）
+    fn format_action_trajectory(&self) -> String {
+        if self.action_history.is_empty() {
+            return String::from("（暂无历史动作，这是你的第一步）");
+        }
+
+        let mut lines = Vec::new();
+        for entry in &self.action_history {
+            let status = if entry.success { "✅" } else { "❌" };
+            lines.push(format!(
+                "  Step {}: {} {} → {} | {}",
+                entry.step, status, entry.action, entry.description, entry.output_preview
+            ));
+        }
+
+        lines.join("\n")
+    }
+
+    /// 检测是否存在循环模式（连续 N 次相同动作）
+    fn detect_loop_warning(&self) -> Option<String> {
+        if self.action_history.len() < 2 {
+            return None;
+        }
+
+        let recent = &self.action_history;
+        let last = &recent[recent.len() - 1];
+
+        // 检测连续相同动作
+        let mut consecutive_same = 0;
+        for entry in recent.iter().rev() {
+            if entry.action == last.action {
+                consecutive_same += 1;
+            } else {
+                break;
+            }
+        }
+
+        if consecutive_same >= 3 {
+            return Some(format!(
+                "🚨🚨🚨 【系统强制警告：检测到死循环！】\n你已连续 {} 次执行相同动作 \"{}\"！\n你必须在 reflection 中承认循环，并立刻执行以下任一操作：\n1. 直接构造搜索 URL（如 https://xxx.com/search?q=关键词）跳转\n2. 换一个完全不同的网站\n3. 调用 finish 终止任务\n绝对禁止再次执行 \"{}\"！",
+                consecutive_same, last.action, last.action
+            ));
+        }
+
+        if consecutive_same >= 2 {
+            return Some(format!(
+                "⚠️ 【系统提醒：疑似循环】你已连续 {} 次执行 \"{}\"。如果下一步还是相同动作，系统将强制判定为死循环。请立即更换策略！",
+                consecutive_same, last.action
+            ));
+        }
+
+        None
     }
 
     pub fn assemble_messages(&self) -> Vec<ChatMessage> {
@@ -147,9 +259,18 @@ impl SandwichContext {
             )
         };
 
+        // 4. 生成动作轨迹和循环预警
+        let trajectory = self.format_action_trajectory();
+        let loop_warning = self.detect_loop_warning().unwrap_or_default();
+
         let middle = format!(
-            "【用户终极目标】\n{}\n\n【任务面板】\n{}\n\n【近期记忆】\n(以上是历史对话){}",
-            self.user_goal, todo_json, facts_section
+            "【用户终极目标】\n{}\n\n【任务面板】\n{}\n\n【你的动作历史轨迹 (不可篡改，你必须审查！)】\n{}\n{}{}\n\n【近期记忆】\n(以上是历史对话){}",
+            self.user_goal,
+            todo_json,
+            trajectory,
+            if loop_warning.is_empty() { "" } else { "\n" },
+            loop_warning,
+            facts_section
         );
         messages.push(ChatMessage {
             role: "user".to_string(),
@@ -165,7 +286,7 @@ impl SandwichContext {
 
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: json!("请基于提示执行下一步操作。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格符合白名单。")
+            content: json!("请基于提示执行下一步操作。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格符合白名单。注意：你必须先填 reflection 字段审视上一步结果。")
         });
 
         messages
