@@ -41,6 +41,7 @@
 
 ### 任务终结
 - 完成目标或确认彻底无法完成时，必须调用 `tool: "finish"`。
+- **特别注意：调用 finish 时，内部 command 传 {} 即可，严禁带 action: complete 指令。格式见示例 C。**
 
 ### Mac/Windows 路径铁律
 - 根据当前系统环境，所有 filepath 必须使用正确的绝对格式。
@@ -125,6 +126,17 @@
   "memories_update": [{"key":"策略切换","value":"BBC首页无搜索框，改用URL直接搜索"}],
   "next_tool_hint": "browser_dom",
   "require_memory": false
+}
+
+场景 C：任务全部完成，准备退出（这是最标准的工作终结范式）
+{
+  "reflection": "已成功搜索并整理天津武清所有小学数据，Excel 存档完毕，任务成功目标达成",
+  "thought": "所有目标已实现，不再需要进行任何网页操作",
+  "description": "任务正式结项",
+  "tool": "finish",
+  "command": {},
+  "todo_update": [{"id":1,"status":"done","description":"..."}],
+  "next_tool_hint": ""
 }
 </example>
 

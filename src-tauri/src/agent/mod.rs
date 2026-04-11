@@ -56,7 +56,17 @@ fn execute_command_inner(
         final_action = format!("goto {}", final_action);
     }
 
-    // 1. 优先尝试本地内置工具
+    // 1. 优先处理 finish 特权指令 (防止模型在 finish command 里塞 action: complete 导致报错)
+    if tool == "finish" || action == "finish" {
+        return DispatchResult {
+            stdout: "任务已由 AI 标记完成".to_string(),
+            stderr: String::new(),
+            success: true,
+            route: "agent".to_string(),
+        };
+    }
+
+    // 2. 优先尝试本地内置工具
     if let Some(res) = run_builtin_step(session_id, &final_action, params) {
         println!("执行动作调用本地内置工具: {}", final_action);
         return res;
