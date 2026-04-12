@@ -153,9 +153,11 @@ pub async fn call_llm(
         .map_err(|e| format!("模型不存在: {}", e))?
     };
 
-    // 构建具体client
+    // 构建具体client（本地模型超时延长到 300s）
+    let is_local_model = base_url.contains("localhost") || base_url.contains("127.0.0.1");
+    let timeout_secs = if is_local_model { 300 } else { 120 };
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -165,14 +167,22 @@ pub async fn call_llm(
     // 拼接body
     let mut api_messages = messages.assemble_messages();
     let is_ollama = base_url.contains("localhost:11434") || base_url.contains("127.0.0.1:11434");
+    let is_lmstudio = base_url.contains("localhost:1234") || base_url.contains("127.0.0.1:1234")
+        || base_url.contains("lmstudio");
 
     // 确定上下文窗口大小
-    let context_window: i64 = if is_ollama { 65536 } else { 128000 };
+    let context_window: i64 = if is_ollama || is_lmstudio { 32768 } else { 128000 };
 
     if is_ollama {
         println!(
             "🔓 检测到 Ollama 本地模型，已自动注入 num_ctx: {}",
             context_window
+        );
+    }
+    if is_lmstudio {
+        println!(
+            "🔓 检测到 LM Studio 本地模型，context_window={}, timeout={}s",
+            context_window, timeout_secs
         );
     }
 
@@ -196,15 +206,29 @@ pub async fn call_llm(
     loop {
         current_agent_try += 1;
 
+        // 本地模型用合理的温度；LM Studio 不支持 stream_options 会导致断流
+        let local_temperature = if temperature == 0.0 { 0.6 } else { temperature };
+        let (use_temperature, use_top_p) = if is_ollama {
+            (0.0_f64, 0.9_f64)
+        } else if is_lmstudio {
+            (local_temperature, 0.95_f64)
+        } else {
+            (temperature, 1.0_f64)
+        };
+
         let mut body = json!({
             "model": model_name,
             "messages": api_messages,
             "max_tokens": max_tokens,
-            "temperature": if is_ollama { 0.0 } else { temperature },
-            "top_p": if is_ollama { 0.9 } else { 1.0 },
-            "stream": true,
-            "stream_options": { "include_usage": true }
+            "temperature": use_temperature,
+            "top_p": use_top_p,
+            "stream": true
         });
+
+        // stream_options 只有 OpenAI/OpenRouter 支持，本地模型不加（否则 LM Studio 会断流）
+        if !is_ollama && !is_lmstudio {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
 
         if is_ollama {
             body["options"] = json!({

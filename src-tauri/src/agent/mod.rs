@@ -680,15 +680,21 @@ pub async fn run_agent_main_loop(
             .or_else(|_| std::fs::read_to_string(&tool_path_dev))
         {
             context.active_tool_detail = tool_md;
-        } else if next_tool.contains('/') {
-            let plugin_name = next_tool.split('/').next().unwrap_or("");
+        } else {
+            let plugin_name = next_tool.split('/').next().unwrap_or(&next_tool);
             let detail = {
                 let mut registry = registry_state.lock().await;
-                registry.format_tool_detail(plugin_name)
+                if registry.plugin_names().contains(&plugin_name) {
+                    registry.format_tool_detail(plugin_name)
+                } else {
+                    String::new()
+                }
             };
-            context.active_tool_detail = detail;
-        } else {
-            context.active_tool_detail.clear();
+            if detail.is_empty() {
+                context.active_tool_detail.clear();
+            } else {
+                context.active_tool_detail = detail;
+            }
         }
 
         // --- 核心增强：检查是否有截图反馈需要注入多模态消息 ---
