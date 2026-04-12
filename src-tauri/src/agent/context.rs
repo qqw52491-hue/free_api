@@ -1,4 +1,4 @@
-use crate::agent::types::{AgentInstruction, HistoryStep, TodoItem};
+use crate::agent::types::{AgentInstruction, TodoItem};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -62,17 +62,19 @@ impl SandwichContext {
     pub fn add_step(&mut self, instruction: &AgentInstruction, output_summary: &str) {
         self.step_counter += 1;
 
-        let _step = HistoryStep {
-            thought: instruction.thought.clone(),
-            description: instruction.description.clone(),
-            tool: instruction.get_tool(),
-            command: instruction.get_action(),
-            output_summary: output_summary.chars().take(1000).collect(),
-        };
-
         // 记录结构化动作摘要（用于底部面包片和循环检测）
         let is_success = !output_summary.starts_with("❌");
-        let action_str = format!("{}:{}", instruction.get_tool(), instruction.get_action());
+
+        // goto 类动作把 URL 也编入 key，使重复访问同一页面能被循环检测器识别
+        let raw_action = instruction.get_action();
+        let action_str = if raw_action == "goto" {
+            let params = instruction.get_params();
+            let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            format!("{}:goto:{}", instruction.get_tool(), url)
+        } else {
+            format!("{}:{}", instruction.get_tool(), raw_action)
+        };
+
         let preview: String = output_summary
             .lines()
             .take(2)
