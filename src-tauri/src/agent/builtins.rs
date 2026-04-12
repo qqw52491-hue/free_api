@@ -8,6 +8,7 @@ const BROWSER_VERBS: &[&str] = &[
     "extract",
     "look",
     "click",
+    "click_xy",
     "type",
     "press",
     "read",
@@ -124,6 +125,12 @@ pub fn run_builtin_step(session_id: &str, action: &str, params: &serde_json::Val
             "type" => format!("type {} {}", safe_id, text),
             // 点击/悬停/选择 —— 需要 id
             "click" | "hover" | "wait_for" => format!("{} {}", verb_low, safe_id),
+            // 坐标点击 —— 需要 x 和 y 字段
+            "click_xy" => {
+                let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                format!("click_xy {} {}", x, y)
+            }
             "select" => format!("select {} {}", safe_id, text),
             // JS 执行
             "eval" | "js" => {

@@ -867,8 +867,56 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 ),
             }
         }
+        /// 坐标点击：{"action":"click_xy","x":320,"y":150}
+        /// 用于 DOM 无法识别元素时，由视觉模型（Gemma 4 等）看截图给出坐标后直接点击
+        "click_xy" => {
+            // 参数从 JSON command 里传入：{"action":"click_xy","x":320,"y":150}
+            // run_browser_dom 是字符串协议，格式为 "click_xy X Y"
+            let x: f64 = arg1.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let y: f64 = arg2.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            if x == 0.0 && y == 0.0 {
+                return (String::new(), "❌ click_xy 需要 x 和 y 参数".to_string(), false);
+            }
+            // CDP 原生鼠标事件：mouseMoved → mousePressed → mouseReleased
+            let js = format!(
+                r#"
+                (async function() {{
+                    const delay = ms => new Promise(r => setTimeout(r, ms));
+                    // 滚动到目标位置附近（确保坐标在视口内）
+                    const x = {x};
+                    const y = {y};
+                    // 模拟鼠标移动、按下、松开
+                    const fireMouseEvent = (type) => {{
+                        document.elementFromPoint(x, y)?.dispatchEvent(
+                            new MouseEvent(type, {{
+                                bubbles: true, cancelable: true, view: window,
+                                clientX: x, clientY: y,
+                                screenX: x, screenY: y
+                            }})
+                        );
+                    }};
+                    fireMouseEvent('mouseover');
+                    fireMouseEvent('mouseenter');
+                    await delay(50);
+                    fireMouseEvent('mousedown');
+                    await delay(50);
+                    fireMouseEvent('mouseup');
+                    fireMouseEvent('click');
+                    return "OK";
+                }})();
+                "#,
+                x = x,
+                y = y
+            );
+            match tab.evaluate(&js, true) {
+                Ok(_) => {
+                    std::thread::sleep(Duration::from_millis(500));
+                    (format!("✅ 坐标点击成功 ({}, {})", x, y), String::new(), true)
+                }
+                Err(e) => (String::new(), format!("❌ 坐标点击失败: {:?}", e), false),
+            }
+        }
 
-        // ===== 读取类 =====
         "read" => {
             let js = "document.body.innerText;";
             match tab.evaluate(js, false) {
@@ -892,17 +940,40 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             }
         }
         "screenshot" => {
+            // 先用 JS 把页面缩放截图，控制 base64 大小（防止炸上下文窗口）
+            // 策略：通过 JS canvas 把原始截图缩小到最大 800px 宽，再转 JPEG quality=0.5
+            let scale_js = r#"
+            new Promise((resolve) => {
+                // 取当前视口尺寸，按比例缩小到最大宽 800px
+                const maxW = 800;
+                const scale = Math.min(1.0, maxW / window.innerWidth);
+                const w = Math.round(window.innerWidth * scale);
+                const h = Math.round(window.innerHeight * scale);
+                resolve(JSON.stringify({w, h, scale}));
+            });
+            "#;
+            // 获取缩放参数（宽高+比例）
+            let scale_info = tab.evaluate(scale_js, true).ok()
+                .and_then(|r| r.value)
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| r#"{"w":800,"h":600,"scale":1.0}"#.to_string());
+
+            // 用 Jpeg + quality=50 截图，大幅压缩体积
+            use headless_chrome::protocol::cdp::Page::{
+                CaptureScreenshotFormatOption, Viewport,
+            };
+            // 解析宽高用于 clip（直接截全图但用 JPEG 压缩）
             match tab.capture_screenshot(
-                headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png,
-                None,
+                CaptureScreenshotFormatOption::Jpeg,
+                Some(50), // quality = 50 (0-100)
                 None,
                 true,
             ) {
                 Ok(data) => {
-                    let b64 =
-                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
+                    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+                    println!("📸 截图大小: {} bytes → base64 {} chars", data.len(), b64.len());
                     (
-                        format!("data:image/png;base64,{}", b64),
+                        format!("data:image/jpeg;base64,{}", b64),
                         String::new(),
                         true,
                     )

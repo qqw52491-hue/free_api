@@ -124,6 +124,28 @@ fn execute_command_inner(
         }
     }
 
+    // 专项检测：model 幻觉成了内置函数调用格式（tool_name / tool_input）
+    let is_function_calling_hallucination = params.get("tool_name").is_some()
+        || params.get("tool_input").is_some()
+        || params.get("function_call").is_some()
+        || final_action == "none"
+        || final_action.is_empty();
+
+    if is_function_calling_hallucination {
+        return DispatchResult {
+            stdout: String::new(),
+            stderr: format!(
+                "❌ 【幻觉纠正】你输出了错误的函数调用格式（tool_name/tool_input）！\n\
+                这不是我们的协议。正确格式必须是：\n\
+                {{\"tool\": \"browser_dom\", \"command\": {{\"action\": \"具体动作\"}}}}\n\
+                或者任务完成时：{{\"tool\": \"finish\", \"command\": {{}}}}\n\
+                绝对禁止输出 tool_name / tool_input / function_call 等字段！"
+            ),
+            success: false,
+            route: "hallucination_detected".to_string(),
+        };
+    }
+
     DispatchResult {
         stdout: String::new(),
         stderr: format!("❌ 未知 action='{}', params={:?}", final_action, params),
@@ -670,23 +692,69 @@ pub async fn run_agent_main_loop(
         }
 
         // --- 核心增强：检查是否有截图反馈需要注入多模态消息 ---
+        // browser.rs 的 screenshot 动作返回格式："data:image/jpeg;base64,xxxxx"
         let mut final_stdout = result.stdout.clone();
-        if result.success && final_stdout.contains("[Screenshot Saved as Base64]: ") {
+
+        // 动态获取当前视口真实尺寸（用于告知模型坐标范围）
+        let viewport_size = {
+            let tab_result = crate::agent::browser::get_or_create_tab(&final_session_id);
+            if let Ok(tab) = tab_result {
+                let js = "JSON.stringify({w: window.innerWidth, h: window.innerHeight})";
+                tab.evaluate(js, false).ok()
+                    .and_then(|r| r.value)
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| r#"{"w":1280,"h":800}"#.to_string())
+            } else {
+                r#"{"w":1280,"h":800}"#.to_string()
+            }
+        };
+        // 解析 w/h
+        let vp: serde_json::Value = serde_json::from_str(&viewport_size).unwrap_or(json!({"w":1280,"h":800}));
+        let vp_w = vp.get("w").and_then(|v| v.as_i64()).unwrap_or(1280);
+        let vp_h = vp.get("h").and_then(|v| v.as_i64()).unwrap_or(800);
+
+        if result.success && (final_stdout.starts_with("data:image/png;base64,") || final_stdout.starts_with("data:image/jpeg;base64,")) {
+            let base64_img = final_stdout
+                .trim_start_matches("data:image/png;base64,")
+                .trim_start_matches("data:image/jpeg;base64,");
+
+            // 注入给视觉模型的指令性文字：告知真实像素尺寸，要求按此空间给坐标
+            let vision_prompt = format!(
+                "【📸 截图已就绪，请完成以下视觉分析任务】\n\
+                当前目标任务：{}\n\n\
+                ⚠️ 【坐标系说明 - 非常重要】\n\
+                - 此截图的真实像素尺寸为：{}×{} 像素\n\
+                - 你看到的图片可能被缩放显示，但坐标必须基于原始 {}×{} 像素空间\n\
+                - 坐标原点在左上角(0,0)，x 轴向右最大 {}，y 轴向下最大 {}\n\n\
+                请仔细观察截图中的页面元素，完成以下步骤：\n\
+                1. 找到与当前任务目标最相关的可点击元素\n\
+                2. 估算该元素在原始 {}×{} 像素图中的中心点坐标 (x, y)\n\
+                3. 在下一步 JSON 输出中用 click_xy 点击该坐标\n\n\
+                ✅ 正确输出示例（坐标必须在 0~{} / 0~{} 范围内）：\n\
+                {{\n\
+                  \"reflection\": \"截图分析：目标元素在右上角，原始像素坐标约 (950, 80)\",\n\
+                  \"thought\": \"使用 click_xy 按原始像素坐标点击\",\n\
+                  \"tool\": \"browser_dom\",\n\
+                  \"command\": {{\"action\": \"click_xy\", \"x\": 950, \"y\": 80}}\n\
+                }}",
+                goal,
+                vp_w, vp_h, vp_w, vp_h, vp_w, vp_h,
+                vp_w, vp_h, vp_w, vp_h
+            );
+
+            context.add_image_feedback(&vision_prompt, base64_img);
+            final_stdout = "(截图已发送给视觉模型分析，等待坐标点击指令)".to_string();
+        } else if result.success && final_stdout.contains("[Screenshot Saved as Base64]: ") {
+            // 兼容旧格式
             if let Some(pos) = final_stdout.find("[Screenshot Saved as Base64]: ") {
                 let base64_img = &final_stdout[pos + 30..].trim();
                 let log_text = &final_stdout[..pos].trim();
-
-                // 1. 发送图片反馈给 AI
-                context.add_image_feedback(
-                    &format!(
-                        "【截图回退】DOM 提取发现异常，已自动生成截图供你参考分析：\n{}",
-                        log_text
-                    ),
-                    base64_img,
+                let vision_prompt = format!(
+                    "【截图回退】DOM 提取发现异常，截图如下。\n{}\n\n请分析截图，识别目标元素坐标，下一步输出 click_xy 指令。",
+                    log_text
                 );
-
-                // 2. 清理 stdout，只保留日志文字供状态显示
-                final_stdout = format!("{}\n(已作为图片附件发送给 AI)", log_text);
+                context.add_image_feedback(&vision_prompt, base64_img);
+                final_stdout = format!("{}\n(已作为图片附件发送给视觉模型)", log_text);
             }
         }
 

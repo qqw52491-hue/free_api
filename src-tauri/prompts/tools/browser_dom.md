@@ -1,5 +1,5 @@
 <tool_specific_instructions>
-<summary>网页全自动操控。核心动词: goto(跳转), extract(提取ID), click(点击), type(输入), scroll(滚动), read(语义阅读), back(后退)。</summary>
+<summary>网页全自动操控。核心动词: goto(跳转), extract(提取ID), click(点击), type(输入), scroll(滚动), read(语义阅读), back(后退), click_xy(坐标点击)。</summary>
 
 # 网页自动化 (browser_dom) 战术指南
 
@@ -12,6 +12,10 @@
    - **正确应对**：直接构造搜索 URL 跳转（见下方 URL 直达术）。
 3. **识别死页面**：如果 `read` 或 `extract` 返回的内容大量包含 "404"、"Not Found"、"Access Denied"、"Sign In"、"Login"，立即在 `reflection` 中承认"当前页面不可用"，触发撤退或换站。
 4. **防遮挡感知**：如果 `click` 后返回 "OK" 但页面没有变化，可能是元素被悬浮导航栏遮挡。请 `scroll down` 少量距离后再试。
+5. **收到截图时的强制行为** 🎯：系统向你发送 `【📸 截图已就绪】` 消息时，说明 DOM 方式已失效。你**必须**：
+   - 仔细观察截图中与当前任务目标最相关的可点击元素
+   - 估算其中心点的视口坐标 (x, y)，坐标原点左上角，范围 (0~1280, 0~800)
+   - **下一步立即输出 `click_xy` 指令**，禁止输出 extract/click/read 等 DOM 指令
 
 ## URL 直达术 (URL Direct Navigation) 🎯
 > **降维打击：能拼 URL 就绝不去找搜索框！**
@@ -84,8 +88,9 @@
 所有指令必须包含 `action` 字段。
 
 - `{"action": "goto", "url": "https://www..."}`: 跳转网页
-- `{"action": "extract"}`: 提取当前视口内交互元素
+- `{"action": "extract"}`: 提取当前视口内交互元素（返回元素列表，含 **XY 坐标**）
 - `{"action": "click", "id": 12}`: 点击链接/按钮（只用于导航跳转类按钮，**不要用它来聚焦输入框**）
+- `{"action": "click_xy", "x": 320, "y": 150}`: **【视觉坐标点击·终极武器】** 当 DOM 无法识别按钮时，先截图让视觉模型定位，再用此指令按坐标直接点击。坐标为**视口坐标**（与 extract 返回的 X/Y 同一系，左上角为0,0）。
 - `{"action": "type", "id": 12, "text": "内容"}`: **【原子操作】** 自动点击元素获得焦点后立即输入。有 id 时无需先 click。
 - `{"action": "type", "text": "内容"}`: 盲打模式，沿用当前焦点直接输入（用于 click 按钮后跟打）
 - `{"action": "press", "key": "Enter"}`: 模拟按键（支持 Enter/Tab/Escape 等）
@@ -94,7 +99,7 @@
 - `{"action": "read"}`: 读取当前正文
 - `{"action": "scroll", "direction": "down"}`: 滚动页面，direction 可填 down/up/top/bottom
 - `{"action": "back"}` / `{"action": "forward"}` / `{"action": "refresh"}`: 基础导航
-- `{"action": "screenshot"}`: 获取视图快照
+- `{"action": "screenshot"}`: 获取当前视口截图（返回 base64 图片，供视觉模型分析）
 - `{"action": "ask_web_ai", "url": "kimi", "text": "问题"}`: **【杀手锏】** 遇到极难处理的混淆代码、报错或验证逻辑，立刻调用场外 Kimi 援助！
 - `{"action": "new_tab", "url": "https..."}` / `{"action": "switch_tab", "id": 2}` / `{"action": "close_tab", "id": 2}`: 标签页管理
 
@@ -123,4 +128,17 @@
 第4步：extract（⚠️ 必须！back 后所有 ID 失效，必须重新 extract）
 第5步：click id=18（点进第2条）
 ```
+
+**场景 4：DOM 无法识别按钮 → 截图视觉定位 → 坐标点击（终极兜底）**
+> 适用：按钮被 Canvas 渲染、Shadow DOM 嵌套、或 extract 返回空
+```
+第1步：screenshot（拿到当前视口截图，系统自动发给视觉模型）
+第2步：视觉模型看图返回按钮坐标，例如 x=427, y=312
+第3步：{"action": "click_xy", "x": 427, "y": 312}（按坐标直接点击，完全绕过 DOM）
+第4步：wait_idle（等待点击后的页面响应）
+```
+⚠️ **坐标范围说明**：
+- 坐标为**视口坐标**，左上角 (0,0)，右下角约 (1280,800)
+- extract 返回的 `(X:N, Y:N)` 与 click_xy 的坐标**完全同一坐标系**，可直接复用
+- 页面滚动后坐标会变！scroll 之后必须重新 screenshot 确认坐标
 </tool_specific_instructions>
