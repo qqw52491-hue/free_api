@@ -724,32 +724,82 @@ pub async fn run_agent_main_loop(
                 .trim_start_matches("data:image/png;base64,")
                 .trim_start_matches("data:image/jpeg;base64,");
 
-            // 注入给视觉模型的指令性文字：告知真实像素尺寸，要求按此空间给坐标
+            // === 新增：获取当前页面的轻量 DOM 坐标快照 ===
+            // 只提取有文字的可交互元素，每个元素给出精确的中心点坐标
+            // 这样大模型就不需要"猜"坐标，直接从表里查就行
+            let dom_coord_snapshot = {
+                let tab_result = crate::agent::browser::get_or_create_tab(&final_session_id);
+                if let Ok(tab) = tab_result {
+                    let js = r#"
+                    (function() {
+                        let items = [];
+                        let idx = 1;
+                        document.querySelectorAll('a, button, input, textarea, select, [role="button"], [role="link"], [contenteditable="true"]').forEach((el) => {
+                            const rect = el.getBoundingClientRect();
+                            // 过滤掉不可见元素和视口外的元素
+                            if (rect.width < 2 || rect.height < 2) return;
+                            if (rect.top > window.innerHeight || rect.bottom < 0) return;
+                            if (rect.left > window.innerWidth || rect.right < 0) return;
+                            const style = window.getComputedStyle(el);
+                            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
+
+                            // 提取元素文字
+                            let text = (el.innerText || el.placeholder || el.getAttribute('aria-label') || el.getAttribute('title') || el.value || '').trim().replace(/[\r\n\s]+/g, ' ');
+                            if (!text) {
+                                if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+                                    text = `输入框(${el.type || 'text'})`;
+                                } else {
+                                    return; // 无字的 div/span 直接跳过
+                                }
+                            }
+                            if (text.length > 30) text = text.slice(0, 30) + '..';
+
+                            const cx = Math.round(rect.left + rect.width / 2);
+                            const cy = Math.round(rect.top + rect.height / 2);
+                            items.push(`[${idx}] "${text}" => cx:${cx}, cy:${cy}`);
+                            idx++;
+                        });
+                        return items.slice(0, 40).join('\n'); // 最多40条，防止 Token 爆炸
+                    })()
+                    "#;
+                    tab.evaluate(js, false).ok()
+                        .and_then(|r| r.value)
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "（DOM坐标获取失败，请凭截图目测估算）".to_string())
+                } else {
+                    "（无法获取标签页，请凭截图目测估算）".to_string()
+                }
+            };
+
+            // === 升级版 Vision Prompt：DOM坐标 + 截图双锚点 ===
             let vision_prompt = format!(
-                "【📸 截图已就绪，请完成以下视觉分析任务】\n\
-                当前目标任务：{}\n\n\
-                ⚠️ 【坐标系说明 - 非常重要】\n\
-                - 此截图的真实像素尺寸为：{}×{} 像素\n\
-                - 你看到的图片可能被缩放显示，但坐标必须基于原始 {}×{} 像素空间\n\
-                - 坐标原点在左上角(0,0)，x 轴向右最大 {}，y 轴向下最大 {}\n\n\
-                请仔细观察截图中的页面元素，完成以下步骤：\n\
-                1. 找到与当前任务目标最相关的可点击元素\n\
-                2. 估算该元素在原始 {}×{} 像素图中的中心点坐标 (x, y)\n\
-                3. 在下一步 JSON 输出中用 click_xy 点击该坐标\n\n\
-                ✅ 正确输出示例（坐标必须在 0~{} / 0~{} 范围内）：\n\
+                "【📸 截图 + DOM坐标双锚点分析】\n\
+                当前目标任务：{}\n\
+                视口真实尺寸：{}×{} 像素\n\n\
+                ✅ 【精确坐标表 (来自DOM实时计算，优先使用！)】\n\
+                {}\n\n\
+                📋 【操作规则 - 严格遵守】\n\
+                1. 先看截图，理解当前页面的整体布局和状态\n\
+                2. 在上方坐标表中找到与任务目标最匹配的元素\n\
+                3. 直接使用表中的 cx/cy 值作为 click_xy 的坐标参数，禁止自行估算！\n\
+                4. 如果坐标表中确实没有目标元素（如元素被遮挡或在视口外），才允许凭截图目视估算坐标\n\n\
+                ✅ 正确输出示例（坐标直接来自坐标表）：\n\
                 {{\n\
-                  \"reflection\": \"截图分析：目标元素在右上角，原始像素坐标约 (950, 80)\",\n\
-                  \"thought\": \"使用 click_xy 按原始像素坐标点击\",\n\
+                  \"reflection\": \"截图显示评论输入框可见，坐标表[3]\\\"下面我简单唠两句\\\" => cx:648, cy:329，直接使用\",\n\
+                  \"thought\": \"使用 DOM 精确坐标 click_xy 点击评论框\",\n\
                   \"tool\": \"browser_dom\",\n\
-                  \"command\": {{\"action\": \"click_xy\", \"x\": 950, \"y\": 80}}\n\
+                  \"command\": {{\"action\": \"click_xy\", \"x\": 648, \"y\": 329}}\n\
                 }}",
                 goal,
-                vp_w, vp_h, vp_w, vp_h, vp_w, vp_h,
-                vp_w, vp_h, vp_w, vp_h
+                vp_w, vp_h,
+                dom_coord_snapshot
             );
 
             context.add_image_feedback(&vision_prompt, base64_img);
-            final_stdout = "(截图已发送给视觉模型分析，等待坐标点击指令)".to_string();
+            final_stdout = format!(
+                "(截图+DOM坐标双锚点已发送给视觉模型，共提取 {} 个元素坐标，等待点击指令)",
+                dom_coord_snapshot.lines().count()
+            );
         } else if result.success && final_stdout.contains("[Screenshot Saved as Base64]: ") {
             // 兼容旧格式
             if let Some(pos) = final_stdout.find("[Screenshot Saved as Base64]: ") {

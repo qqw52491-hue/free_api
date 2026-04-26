@@ -940,11 +940,61 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             }
         }
         "screenshot" => {
-            // 先用 JS 把页面缩放截图，控制 base64 大小（防止炸上下文窗口）
-            // 策略：通过 JS canvas 把原始截图缩小到最大 800px 宽，再转 JPEG quality=0.5
+            // --- Set-of-Mark (SoM) 视觉注入 ---
+            // 在截屏前，在页面上画出带着数字的红框，跟 mod.rs 里的坐标表索引严格对齐
+            let som_inject_js = r#"
+            (function() {
+                // 清理旧标记
+                document.querySelectorAll('.agent-som-mark').forEach(e => e.remove());
+                
+                let idx = 1;
+                document.querySelectorAll('a, button, input, textarea, select, [role="button"], [role="link"], [contenteditable="true"]').forEach((el) => {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width < 2 || rect.height < 2) return;
+                    if (rect.top > window.innerHeight || rect.bottom < 0) return;
+                    if (rect.left > window.innerWidth || rect.right < 0) return;
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
+
+                    let text = (el.innerText || el.placeholder || el.getAttribute('aria-label') || el.getAttribute('title') || el.value || '').trim();
+                    if (!text && el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') return;
+
+                    // 绘制显眼的红色数字标签
+                    const mark = document.createElement('div');
+                    mark.className = 'agent-som-mark';
+                    mark.textContent = idx;
+                    mark.style.position = 'absolute';
+                    mark.style.left = (rect.left + window.scrollX) + 'px';
+                    mark.style.top = (rect.top + window.scrollY) + 'px';
+                    mark.style.backgroundColor = 'rgba(255, 0, 0, 0.9)';
+                    mark.style.color = '#fff';
+                    mark.style.fontSize = '14px';
+                    mark.style.fontWeight = 'bold';
+                    mark.style.padding = '2px 5px';
+                    mark.style.borderRadius = '3px';
+                    mark.style.zIndex = '2147483647';
+                    mark.style.pointerEvents = 'none';
+                    mark.style.boxShadow = '0 0 3px rgba(0,0,0,0.5)';
+                    
+                    document.body.appendChild(mark);
+                    
+                    // 临时记录原本的 outline 以便恢复
+                    el.setAttribute('data-som-old-outline', el.style.outline);
+                    el.style.outline = '2px solid rgba(255, 0, 0, 0.6)';
+                    el.classList.add('agent-som-outline');
+                    
+                    idx++;
+                    if (idx > 40) return; // 必须与 mod.rs 中的截断数 40 保持一致！
+                });
+            })();
+            "#;
+            let _ = tab.evaluate(som_inject_js, false);
+            // 稍微等待 DOM 渲染出红框
+            std::thread::sleep(Duration::from_millis(150));
+
+            // 先用 JS 把页面缩放截图，控制 base64 大小
             let scale_js = r#"
             new Promise((resolve) => {
-                // 取当前视口尺寸，按比例缩小到最大宽 800px
                 const maxW = 800;
                 const scale = Math.min(1.0, maxW / window.innerWidth);
                 const w = Math.round(window.innerWidth * scale);
@@ -952,7 +1002,6 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 resolve(JSON.stringify({w, h, scale}));
             });
             "#;
-            // 获取缩放参数（宽高+比例）
             let scale_info = tab.evaluate(scale_js, true).ok()
                 .and_then(|r| r.value)
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -970,8 +1019,19 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 true,
             ) {
                 Ok(data) => {
+                    // --- 清理 SoM 视觉标记 ---
+                    let som_cleanup_js = r#"
+                    document.querySelectorAll('.agent-som-mark').forEach(e => e.remove());
+                    document.querySelectorAll('.agent-som-outline').forEach(el => {
+                        el.style.outline = el.getAttribute('data-som-old-outline') || '';
+                        el.removeAttribute('data-som-old-outline');
+                        el.classList.remove('agent-som-outline');
+                    });
+                    "#;
+                    let _ = tab.evaluate(som_cleanup_js, false);
+
                     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
-                    println!("📸 截图大小: {} bytes → base64 {} chars", data.len(), b64.len());
+                    println!("📸 截图大小: {} bytes → base64 {} chars (带SoM视觉标记)", data.len(), b64.len());
                     (
                         format!("data:image/jpeg;base64,{}", b64),
                         String::new(),
