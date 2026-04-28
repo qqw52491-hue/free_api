@@ -61,6 +61,18 @@
                 <div class="form-tip connect-tip" v-if="selectedBrowserMode === 2">提示：请先以远程调试模式启动 Chrome。</div>
             </div>
 
+            <!-- Kimi 场外救援开关 -->
+            <div class="control-section">
+                <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;">
+                    <span>🆘 Kimi 场外救援</span>
+                    <span style="font-size:11px;color:var(--text-4);font-weight:400;">执行失败时呼叫 Kimi</span>
+                    <input type="checkbox" v-model="modelRouting.enableRescue" :disabled="isRunning" style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent);">
+                </label>
+                <div class="form-tip" v-if="!modelRouting.enableRescue" style="color:var(--text-4);">当前已关闭，失败时 AI 自行重试</div>
+                <div class="form-tip" v-if="modelRouting.enableRescue" style="color:var(--accent-light);">开启后失败时会打开第二个浏览器窗口找 Kimi 帮忙</div>
+            </div>
+
+
             <!-- 快捷预设 -->
             <div class="control-section">
                 <label class="form-label">快捷预设</label>
@@ -403,7 +415,7 @@ interface TokenUsageInfo {
 // ---- 独立状态（每个面板完全隔离） ----
 const sessionId = props.panelId;
 const tokenUsage = ref<TokenUsageInfo | null>(null);
-const modelRouting = ref({ pro: "", flash: "", vision: "" });
+const modelRouting = ref({ pro: "", flash: "", vision: "", enableRescue: false });
 const goalInput = ref("");
 const currentGoal = ref("");
 const isRunning = ref(false);
@@ -567,7 +579,7 @@ async function runAgent() {
             modelRouting: modelRouting.value,
             goal: currentGoal.value,
             autoPilot: true,
-            session_id: sessionId,
+            sessionId: sessionId,  // 修复: Tauri 要求 camelCase，snake_case 会被忽略导致频道对不上
         });
     } catch (e: any) {
         const msg = typeof e === "string" ? e : e?.message || "任务初始化失败";

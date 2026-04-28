@@ -7,6 +7,9 @@ pub struct ModelRoutingConfig {
     pub pro: String,
     pub flash: String,
     pub vision: String,
+    /// 是否开启 Kimi 场外救援功能（默认关）
+    #[serde(default)]
+    pub enable_rescue: bool,
 }
 
 /// 路由判定结果（对外暴露，方便主循环获取判定理由并打日志）

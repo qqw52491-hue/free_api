@@ -97,9 +97,24 @@ pub fn run_builtin_step(session_id: &str, action: &str, params: &serde_json::Val
             .unwrap_or_default();
         let safe_id = if id.is_empty() { "0" } else { id.as_str() };
 
-        let final_cmd = match verb_low.as_str() {
+        let mut final_verb = verb_low.clone();
+        
+        // --- 容错打捞：如果动词是 browser_dom（说明 AI 误把工具名当动作了），尝试根据参数猜测真实意图 ---
+        if final_verb == "browser_dom" || final_verb.is_empty() {
+            if !url.is_empty() {
+                final_verb = "goto".to_string();
+            } else if !id.is_empty() && id != "0" {
+                final_verb = "click".to_string();
+            } else if !text.is_empty() {
+                final_verb = "type".to_string();
+            } else if !js_code.is_empty() {
+                final_verb = "eval".to_string();
+            }
+        }
+
+        let final_cmd = match final_verb.as_str() {
             // 导航
-            "goto" | "navigate" => format!("{} {}", verb_low, url),
+            "goto" | "navigate" => format!("{} {}", final_verb, url),
             // 滚动 —— 支持 direction 字段（这是之前丢失数据的主要场景！）
             "scroll" => {
                 let arg = if !direction.is_empty() { direction }
@@ -124,7 +139,7 @@ pub fn run_builtin_step(session_id: &str, action: &str, params: &serde_json::Val
             // 输入 —— 需要 id + text
             "type" => format!("type {} {}", safe_id, text),
             // 点击/悬停/选择 —— 需要 id
-            "click" | "hover" | "wait_for" => format!("{} {}", verb_low, safe_id),
+            "click" | "hover" | "wait_for" => format!("{} {}", final_verb, safe_id),
             // 坐标点击 —— 需要 x 和 y 字段
             "click_xy" => {
                 let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -142,9 +157,9 @@ pub fn run_builtin_step(session_id: &str, action: &str, params: &serde_json::Val
             // 无参数指令
             "extract" | "look" | "read" | "screenshot" | "tab_url" | "url"
             | "back" | "forward" | "refresh" | "wait_idle"
-            | "list_tabs" | "new_tab" | "switch_tab" | "close_tab" => verb_low.to_string(),
+            | "list_tabs" | "new_tab" | "switch_tab" | "close_tab" => final_verb.to_string(),
             // 兜底：直接把 verb 原样传下去
-            _ => verb_low.to_string(),
+            _ => final_verb.to_string(),
         };
 
         final_cmd.trim().to_string()

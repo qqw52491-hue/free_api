@@ -1,8 +1,6 @@
 name: excel
-command: /Users/wx/.local/bin/uvx
+command: uvx
 args:
   - "excel-mcp-server"
   - "stdio"
-env:
-  # Stdio 模式下路径是动态传入的，但如果需要默认路径可以设这个
-  # EXCEL_FILES_PATH: "/Users/wx/Documents/excel_files"
+env: {}

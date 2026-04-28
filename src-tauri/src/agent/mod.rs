@@ -166,16 +166,26 @@ pub fn run_agent_step(
 ) -> DispatchResult {
     let tool_name = instruction.get_tool().to_lowercase();
 
+    // --- 核心修复：兼容 root.commands 和 root.command.commands ---
+    let mut batch_commands = instruction.commands.clone();
+    if batch_commands.is_empty() {
+        if let Some(cmd_val) = &instruction.command {
+            if let Some(cmds) = cmd_val.get("commands").and_then(|v| v.as_array()) {
+                batch_commands = cmds.clone();
+            }
+        }
+    }
+
     // --- 场景 A: 组合指令流水线 Batch Execution ---
-    if !instruction.commands.is_empty() {
+    if !batch_commands.is_empty() {
         println!(
             "🚀 [Pipeline: {}] 正在按顺序执行 {} 个组合动作...",
             session_id,
-            instruction.commands.len()
+            batch_commands.len()
         );
         let mut total_stdout = String::new();
 
-        for (idx, cmd_val) in instruction.commands.iter().enumerate() {
+        for (idx, cmd_val) in batch_commands.iter().enumerate() {
             let step_idx = idx + 1;
             // 提取单步的 action
             let step_action = cmd_val
@@ -287,35 +297,58 @@ pub async fn run_agent_main_loop(
             .map(|d| d.as_millis().to_string())
             .unwrap_or_else(|_| "default".to_string())
     });
-    // 1. 自动加载插件（多路探测：系统配置、项目根目录、src-tauri 目录）
+    // 1. 自动加载插件（强制探测模式）
     {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        println!("========================================");
+        println!(
+            "🔍 [插件探测] 强制执行开始！当前工作目录 cwd = {}",
+            cwd.display()
+        );
+
         let mut registry = registry_state.lock().await;
-        if registry.plugin_names().is_empty() {
-            let mut all_clients = std::collections::HashMap::new();
+        registry.clients.clear();
+        let mut all_clients = std::collections::HashMap::new();
 
-            // 待扫描的目录列表
-            let mut search_paths = vec![
-                app.path()
-                    .app_config_dir()
-                    .unwrap_or_default()
-                    .join("plugins"), // 系统路径
-                std::env::current_dir().unwrap_or_default().join("plugins"), // 当前路径/plugins
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .join("../plugins"), // 如果在 src-tauri 里，搜根目录/plugins
-            ];
+        // 多路探测：涵盖开发模式、生产模式、src-tauri 作为 cwd 的情况
+        let search_paths: Vec<std::path::PathBuf> = vec![
+            cwd.join("plugins"),       // cwd/plugins（项目根目录）
+            cwd.join("../plugins"),    // cwd/../plugins（从 src-tauri 向上）
+            cwd.join("../../plugins"), // 再向上一层保险
+            app.path()
+                .app_config_dir()
+                .unwrap_or_default()
+                .join("plugins"), // 系统配置路径
+            app.path()
+                .resource_dir()
+                .unwrap_or_default()
+                .join("plugins"), // 打包后资源路径
+        ];
 
-            for path in search_paths {
+        for path in &search_paths {
+            println!(
+                "  探测路径: {} → {}",
+                path.display(),
                 if path.exists() {
-                    println!("📂 正在扫描插件目录: {}", path.display());
-                    let reg = PluginRegistry::load_from_dir(&path);
-                    for (name, client) in reg.clients {
-                        all_clients.insert(name, client);
-                    }
+                    "✅ 存在"
+                } else {
+                    "❌ 不存在"
+                }
+            );
+        }
+
+        for path in search_paths {
+            if path.exists() {
+                let reg = PluginRegistry::load_from_dir(&path);
+                for (name, client) in reg.clients {
+                    println!("🔌 成功挂载插件: {} (来自 {})", name, path.display());
+                    all_clients.insert(name, client);
                 }
             }
-            registry.clients = all_clients;
         }
+        println!("📊 插件初始化完成，最终可用插件总数: {}", all_clients.len());
+        println!("========================================");
+        registry.clients = all_clients;
     }
 
     // 2. 初始化三明治上下文：加载系统提示词 + 动态注入 MCP 工具
@@ -461,7 +494,8 @@ pub async fn run_agent_main_loop(
                                 "output": e.clone()
                             }
                         }),
-                    ).ok();
+                    )
+                    .ok();
                     app.emit(
                         &format!("agent-progress-{}", final_session_id),
                         json!({
@@ -470,7 +504,8 @@ pub async fn run_agent_main_loop(
                             "description": format!("AI 输出格式错误（第{}次）", retry_count),
                             "output": format!("JSON 解析失败: {}\n\n原始输出请查看终端日志", e)
                         }),
-                    ).ok();
+                    )
+                    .ok();
                     if retry_count >= max_retries {
                         app.emit(
                             &format!("agent-progress-{}", final_session_id),
@@ -479,7 +514,8 @@ pub async fn run_agent_main_loop(
                                 "message": format!("AI 持续输出非法 JSON，任务终止: {}", e),
                                 "success": false
                             }),
-                        ).ok();
+                        )
+                        .ok();
                         return Err(format!("AI 无法解析 JSON: {}", e));
                     }
                     app.emit(
@@ -599,10 +635,18 @@ pub async fn run_agent_main_loop(
                 let error_detail = format!("【❌ 执行失败】: {}", dispatch_result.stderr);
 
                 if tool_retry_count == 1 {
+                    if !model_routing.enable_rescue {
+                        // 场外救援已关闭，直接记录错误让 AI 自行重试
+                        context.add_error_feedback(&error_detail);
+                        max_retries = 4;
+                        continue;
+                    }
+
                     let _ = app.emit(
                         &format!("agent-log-{}", final_session_id),
                         "🚨 检测到指令执行失败，正在唤起 Kimi 网页专家护驾...",
                     );
+
                     println!(
                         "🚨 [Rescue] 触发 Kimi 网页专家救援模式 (Session: {})...",
                         final_session_id
@@ -712,7 +756,8 @@ pub async fn run_agent_main_loop(
                             "message": format!("执行多次失败，任务终止: {}", error_detail),
                             "success": false
                         }),
-                    ).ok();
+                    )
+                    .ok();
                     return Err(error_detail);
                 }
 

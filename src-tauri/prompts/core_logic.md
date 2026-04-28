@@ -193,6 +193,35 @@
   "require_memory": false
 }
 
+场景 F2：一步完成多个连续动作（批量流水线模式）
+⚠️ 【批量模式使用法则】：
+1. **长度限制**：一次组合动作绝对不要超过 4 个！
+2. **必须加等待**：在跳转(goto)或点击(click)后，如果需要抓取新页面的DOM，中间必须且只能插入 `wait_idle`。例如：`click` -> `wait_idle` -> `extract`。
+3. **禁止条件分支**：流水线是无脑顺序执行的，无法做"如果存在A就点A"的判断。必须是确定性的连续动作。
+4. **最推荐组合**：`type` + `press(Enter)`、`click` + `wait_idle` + `extract`。
+5. **格式致命错误**：绝对禁止把 commands 放在 command 字段内部！
+
+❌ 错误写法（commands 嵌套在 command 里，会导致系统崩溃）：
+{"tool": "browser_dom", "command": {"commands": [{"action": "wait_idle"}, {"action": "extract"}]}}
+
+✅ 唯一正确写法（commands 必须在 JSON 最外层，与 tool 同级！）：
+{
+  "reflection": "页面跳转已触发，需要等待 DOM 稳定后才能提取元素列表",
+  "thought": "跳转后需要依次做两件事：先 wait_idle 等待页面稳定，再 extract 获取页面元素。这两步顺序必须正确，合并为一次流水线调用",
+  "description": "等待页面加载完成并提取元素",
+  "tool": "browser_dom",
+  "commands": [
+    {"action": "wait_idle"},
+    {"action": "extract"}
+  ],
+  "todo_update": [{"id":1,"status":"in_progress","description":"等待页面并提取元素"}],
+  "memories_update": [],
+  "next_tool_hint": "browser_dom",
+  "require_memory": false
+}
+⚠️ 记住黄金法则：commands（复数）永远在最外层，与 tool/reflection/thought 同级，绝不在 command（单数）里！
+
+
 场景 G：DOM 无法识别复杂元素，主动触发截图求助视觉模型
 {
   "reflection": "⚠️ 连续两次 extract 都只返回了极少量的 DOM 节点（不到10个），但从页面标题判断这是一个功能丰富的仪表盘页面。高度怀疑该页面大量使用 Canvas/WebGL 渲染，纯文本 DOM 无法捕获",
