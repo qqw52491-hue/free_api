@@ -56,6 +56,7 @@
 
 ### 批量数据铁律
 - 所有涉及表格/列表写入的操作（如 Excel, CSV），其 data 参数必须为基础的二维数组结构 `[["标题1","标题2"],["数据1","数据2"]]`，严禁自定义嵌套 JSON 对象。
+- 绝对禁止使用 shell 或 osascript 工具，这两个工具已被系统禁用。
 </strict_rules>
 
 <task_breakdown>
@@ -207,22 +208,20 @@
   "require_memory": false
 }
 
-场景 H：使用 shell 工具将采集到的数据写入 Excel 文件
+场景 H：调用外部 MCP 插件（例如使用 excel 插件保存表格数据）
 {
   "reflection": "已从搜索结果中成功提取了5条新闻的标题和链接，数据暂存在 memories 中。现在需要将数据导出为 Excel 文件",
-  "thought": "调用 shell 工具，使用 write_xlsx 动作将二维数组数据写入本地 Excel 文件。注意 data 必须是标准二维数组，第一行是表头",
-  "description": "将采集数据导出为Excel",
-  "tool": "shell",
+  "thought": "本地环境提供了外部 MCP 插件处理文件。我将调用 excel 插件的 write_xlsx 工具，将二维数组数据写入本地 Excel 文件。注意 tool 字段格式为 '插件名/工具名'",
+  "description": "将采集数据导出为 Excel 文件",
+  "tool": "excel/write_xlsx",
   "command": {
-    "action": "write_xlsx",
     "filepath": "/tmp/news_data.xlsx",
     "data": [
-      ["标题", "链接", "来源"],
-      ["马斯克宣布新计划", "https://example.com/1", "BBC"],
-      ["SpaceX发射成功", "https://example.com/2", "CNN"]
+      ["标题", "来源", "时间"],
+      ["DeepSeek注册资本提高50%", "腾讯网", "25分钟前"]
     ]
   },
-  "todo_update": [{"id":3,"status":"in_progress","description":"导出Excel文件"}],
+  "todo_update": [{"id":3,"status":"done","description":"导出Excel文件"}],
   "memories_update": [],
   "next_tool_hint": "finish",
   "require_memory": true
@@ -246,5 +245,11 @@
 
 <core_global_tools>
 ## 全局工具库
-finish / shell / browser_dom
+可用内置工具：**finish** / **browser_dom**
+
+**外部 MCP 插件说明**：
+除内置工具外，系统会向你动态注入外部 MCP 插件的清单。当你调用外部 MCP 插件时：
+请将 `tool` 字段设为 `"插件名/工具名"` (例如 `"excel/write_xlsx"`)。
+
+绝对禁止使用：~~shell~~ / ~~osascript~~ （这两个工具已被系统禁用，一旦调用会返回错误并消耗一步预算！）
 </core_global_tools>

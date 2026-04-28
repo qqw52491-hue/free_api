@@ -181,24 +181,17 @@ pub fn run_builtin_step(session_id: &str, action: &str, params: &serde_json::Val
     }
 
     match action_low.as_str() {
-        "osascript" => {
-            let (stdout, stderr, success) = run_osascript(&cmd_str);
-            Some(DispatchResult {
-                stdout,
-                stderr,
-                success,
-                route: "osascript".to_string(),
-            })
-        }
-        "shell" => {
-            let (stdout, stderr, success) = run_shell(&cmd_str);
-            Some(DispatchResult {
-                stdout,
-                stderr,
-                success,
-                route: "shell".to_string(),
-            })
-        }
+        "osascript" | "shell" => Some(DispatchResult {
+            stdout: String::new(),
+            stderr: format!(
+                "❌ [shell/osascript 已禁用] 系统安全策略不允许直接执行内置命令。\n\
+                情报：你尝试使用 '{}' 工具\n\
+                解决方案：使用 browser_dom 工具完成任务。",
+                action_low
+            ),
+            success: false,
+            route: "blocked_shell".to_string(),
+        }),
         "finish" => Some(DispatchResult {
             stdout: cmd_str,
             stderr: String::new(),

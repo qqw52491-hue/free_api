@@ -444,7 +444,42 @@ pub async fn run_agent_main_loop(
                 Ok(r) => r,
                 Err(e) => {
                     retry_count += 1;
+                    // 🔑 关键修复：无论解析失败还是成功，都要让前端看到这一步
+                    let err_desc = format!("⚠️ AI 输出格式错误（第{}次）", retry_count);
+                    app.emit(
+                        &format!("agent-progress-{}", final_session_id),
+                        json!({
+                            "type": "step_new",
+                            "step": {
+                                "id": step_id,
+                                "description": err_desc,
+                                "reflection": "",
+                                "thought": e.clone(),
+                                "tool": "error",
+                                "command": "",
+                                "status": "error",
+                                "output": e.clone()
+                            }
+                        }),
+                    ).ok();
+                    app.emit(
+                        &format!("agent-progress-{}", final_session_id),
+                        json!({
+                            "type": "step_error",
+                            "step_id": step_id,
+                            "description": format!("AI 输出格式错误（第{}次）", retry_count),
+                            "output": format!("JSON 解析失败: {}\n\n原始输出请查看终端日志", e)
+                        }),
+                    ).ok();
                     if retry_count >= max_retries {
+                        app.emit(
+                            &format!("agent-progress-{}", final_session_id),
+                            json!({
+                                "type": "complete",
+                                "message": format!("AI 持续输出非法 JSON，任务终止: {}", e),
+                                "success": false
+                            }),
+                        ).ok();
                         return Err(format!("AI 无法解析 JSON: {}", e));
                     }
                     app.emit(
@@ -669,6 +704,15 @@ pub async fn run_agent_main_loop(
                 }
 
                 if retry_count >= max_retries {
+                    // 最终失败：通知前端完成（带错误）
+                    app.emit(
+                        &format!("agent-progress-{}", final_session_id),
+                        json!({
+                            "type": "complete",
+                            "message": format!("执行多次失败，任务终止: {}", error_detail),
+                            "success": false
+                        }),
+                    ).ok();
                     return Err(error_detail);
                 }
 
