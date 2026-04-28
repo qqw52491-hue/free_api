@@ -787,6 +787,12 @@ pub async fn run_agent_main_loop(
             println!("📝 AI 更新了核心记忆: {:?}", instruction.memories_update);
         }
 
+        // --- 核心增强：历史截断与缓存优化 ---
+        if instruction.clear_history.unwrap_or(false) {
+            println!("🧹 AI 主动触发了历史清理 (clear_history: true)!");
+            context.turns_history.clear();
+        }
+
         // --- 核心增强：Token 优化与冷存储检索 ---
         // AI 在本轮请求 "require_memory: true"，下一轮组装消息时就会塞入全部 Fact 内容
         context.carry_memories = instruction.require_memory.unwrap_or(false);

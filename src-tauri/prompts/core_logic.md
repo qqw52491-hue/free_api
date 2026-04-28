@@ -56,7 +56,11 @@
 
 ### 批量数据铁律
 - 所有涉及表格/列表写入的操作（如 Excel, CSV），其 data 参数必须为基础的二维数组结构 `[["标题1","标题2"],["数据1","数据2"]]`，严禁自定义嵌套 JSON 对象。
-- 绝对禁止使用 shell 或 osascript 工具，这两个工具已被系统禁用。
+### 任务长周期管理 (Long-Context Management)
+- 当对话历史过长（超过 15 轮）时，系统会向你发出警告。
+- 你必须立即将当前的关键进展、已获取的中间数据、以及下一步的线索提炼成简洁的键值对，通过 `memories_update` 保存。
+- 同时，你必须在输出的 JSON 顶层设置 `"clear_history": true`。
+- 这将会在执行完本步后清空所有过往对话历史，从而极大提升后续操作的推理速度与缓存命中率。
 </strict_rules>
 
 <task_breakdown>
@@ -87,7 +91,8 @@
   "todo_update": [{"id":1,"status":"pending|in_progress|done|canceled","description":"..."}],
   "memories_update": [{"key":"...","value":"..."}],
   "next_tool_hint": "预告下轮工具",
-  "require_memory": false
+  "require_memory": false,
+  "clear_history": false
 }
 ```
 **关键**：`reflection` 放在第一位，强迫你在生成任何指令前，先审视上一步的结果。
@@ -268,7 +273,27 @@
   "todo_update": [{"id":2,"status":"in_progress","description":"回退后重新寻找正确链接"}],
   "memories_update": [{"key": "avoid_id", "value": "ID:22是广告链接，下次跳过"}],
   "next_tool_hint": "browser_dom",
+  "next_tool_hint": "browser_dom",
   "require_memory": false
+}
+
+场景 J：历史记录过长，主动总结并清空历史（上下文优化）
+{
+  "reflection": "⚠️ 系统发出历史溢出警告。当前已成功抓取了 3 页数据，任务进度过半，但对话历史已达上下文瓶颈",
+  "thought": "为了保证后续操作不崩溃，我需要进行一次‘记忆归档’。将目前已采集的 15 条核心数据 ID 和当前所在的页码存入 memory，然后触发历史清理",
+  "description": "总结当前进度并清空历史负担",
+  "tool": "browser_dom",
+  "command": {
+    "action": "wait_idle"
+  },
+  "todo_update": [{"id":2,"status":"in_progress","description":"清空历史后继续抓取第4页"}],
+  "memories_update": [
+    {"key": "captured_ids", "value": "ID_001...ID_015"},
+    {"key": "current_page", "value": "3"},
+    {"key": "next_action", "value": "点击'下一页'按钮"}
+  ],
+  "clear_history": true,
+  "next_tool_hint": "browser_dom"
 }
 </example>
 

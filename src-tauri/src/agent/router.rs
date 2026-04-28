@@ -62,7 +62,7 @@ impl AgentRouter {
         // ================================================================
 
         // 规则 1：第一步（空历史），需要全局规划，必须用强模型
-        if context.action_history.is_empty() {
+        if context.turns_history.is_empty() {
             return RoutingDecision {
                 model_id: config.pro.clone(),
                 tier: RoutingTier::Pro,
@@ -71,30 +71,18 @@ impl AgentRouter {
         }
 
         // 规则 2：上一步执行失败 -> 升维救场
-        // 这是最关键的"自动升级"触发器：Flash 搞砸了，Pro 来擦屁股
-        if let Some(last_action) = context.action_history.last() {
-            if !last_action.success {
+        // 检查最新的 user 消息（反馈），如果包含 ❌ 说明上一步报错了
+        if let Some(last_msg) = context.turns_history.iter().rev().find(|m| m.role == "user") {
+            if last_msg.content.as_str().unwrap_or_default().contains("❌") {
                 return RoutingDecision {
                     model_id: config.pro.clone(),
                     tier: RoutingTier::Pro,
-                    reason: format!(
-                        "上一步执行失败 (Step {}：{})，升维至主力模型救场",
-                        last_action.step, last_action.action
-                    ),
+                    reason: "上一步执行失败，升维至主力模型救场".to_string(),
                 };
             }
         }
 
-        // 规则 3：连续相同动作 >= 2 次（疑似死循环），切到大模型破局
-        if Self::detect_repetition(context) {
-            return RoutingDecision {
-                model_id: config.pro.clone(),
-                tier: RoutingTier::Pro,
-                reason: "检测到重复动作模式，升维至主力模型破解死循环".to_string(),
-            };
-        }
-
-        // 规则 4：当前 DOM 观测数据极其庞大，小模型可能断片
+        // 规则 3：当前 DOM 观测数据极其庞大，小模型可能断片
         if context.current_observation.len() > 15000 {
             return RoutingDecision {
                 model_id: config.pro.clone(),
@@ -108,8 +96,6 @@ impl AgentRouter {
 
         // ================================================================
         // 兜底：一切平安，交给便宜又快的 Flash 模型干活
-        // 这就是"自动降级"机制——只要上面所有异常条件都没有触发，
-        // 系统自然而然就会回落到最经济的 Flash 模型。
         // ================================================================
         RoutingDecision {
             model_id: config.flash.clone(),
@@ -137,16 +123,5 @@ impl AgentRouter {
             break;
         }
         false
-    }
-
-    /// 检测是否存在重复动作模式（连续 >= 2 次相同动作）
-    fn detect_repetition(context: &SandwichContext) -> bool {
-        if context.action_history.len() < 2 {
-            return false;
-        }
-        let recent = &context.action_history;
-        let last = &recent[recent.len() - 1];
-        let prev = &recent[recent.len() - 2];
-        last.action == prev.action
     }
 }

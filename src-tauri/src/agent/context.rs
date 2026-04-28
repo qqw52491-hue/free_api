@@ -9,15 +9,6 @@ pub struct ChatMessage {
     pub content: serde_json::Value, // 改为 Value，支持 String 或 Array (多模态)
 }
 
-/// 精简的动作摘要，用于在底部面包片注入可读的动作轨迹
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionSummary {
-    pub step: usize,
-    pub action: String,
-    pub description: String,
-    pub success: bool,
-    pub output_preview: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandwichContext {
@@ -34,12 +25,6 @@ pub struct SandwichContext {
 
     // --- Token 优化：是否要在本轮携带全部记忆内容 ---
     pub carry_memories: bool,
-
-    // --- 结构化动作轨迹（用于循环检测和强注入） ---
-    #[serde(default)]
-    pub action_history: Vec<ActionSummary>,
-    #[serde(default)]
-    pub step_counter: usize,
 }
 
 impl SandwichContext {
@@ -54,49 +39,10 @@ impl SandwichContext {
             active_tool: None,
             active_tool_detail: String::new(),
             carry_memories: false,
-            action_history: Vec::new(),
-            step_counter: 0,
         }
     }
 
     pub fn add_step(&mut self, instruction: &AgentInstruction, output_summary: &str) {
-        self.step_counter += 1;
-
-        // 记录结构化动作摘要（用于底部面包片和循环检测）
-        let is_success = !output_summary.starts_with("❌");
-
-        // goto 类动作把 URL 也编入 key，使重复访问同一页面能被循环检测器识别
-        let raw_action = instruction.get_action();
-        let action_str = if raw_action == "goto" {
-            let params = instruction.get_params();
-            let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            format!("{}:goto:{}", instruction.get_tool(), url)
-        } else {
-            format!("{}:{}", instruction.get_tool(), raw_action)
-        };
-
-        let preview: String = output_summary
-            .lines()
-            .take(2)
-            .collect::<Vec<&str>>()
-            .join(" ")
-            .chars()
-            .take(120)
-            .collect();
-
-        self.action_history.push(ActionSummary {
-            step: self.step_counter,
-            action: action_str,
-            description: instruction.description.clone(),
-            success: is_success,
-            output_preview: preview,
-        });
-
-        // 只保留最近 10 条动作摘要
-        if self.action_history.len() > 10 {
-            self.action_history = self.action_history[self.action_history.len() - 10..].to_vec();
-        }
-
         // 我们存入 ChatHistory，AI 就能看到历史
         let msg = ChatMessage {
             role: "assistant".to_string(),
@@ -121,9 +67,9 @@ impl SandwichContext {
         };
         self.turns_history.push(feedback);
 
-        // 滑动窗口：只保留最近 15 步 (30 条对话)，进一步严防死守
-        if self.turns_history.len() > 30 {
-            self.turns_history = self.turns_history[self.turns_history.len() - 30..].to_vec();
+        // 滑动窗口：作为最后防线保留 40 条。主要依靠 AI 总结并设置 clear_history = true 来主动清理
+        if self.turns_history.len() > 40 {
+            self.turns_history = self.turns_history[self.turns_history.len() - 40..].to_vec();
         }
     }
 
@@ -163,130 +109,74 @@ impl SandwichContext {
         self.turns_history.push(msg);
     }
 
-    /// 生成人类可读的动作轨迹文本（注入到底部面包片）
-    fn format_action_trajectory(&self) -> String {
-        if self.action_history.is_empty() {
-            return String::from("（暂无历史动作，这是你的第一步）");
-        }
 
-        let mut lines = Vec::new();
-        for entry in &self.action_history {
-            let status = if entry.success { "✅" } else { "❌" };
-            lines.push(format!(
-                "  Step {}: {} {} → {} | {}",
-                entry.step, status, entry.action, entry.description, entry.output_preview
-            ));
-        }
-
-        lines.join("\n")
-    }
-
-    /// 检测是否存在循环模式（连续 N 次相同动作）
-    fn detect_loop_warning(&self) -> Option<String> {
-        if self.action_history.len() < 2 {
-            return None;
-        }
-
-        let recent = &self.action_history;
-        let last = &recent[recent.len() - 1];
-
-        // 检测连续相同动作
-        let mut consecutive_same = 0;
-        for entry in recent.iter().rev() {
-            if entry.action == last.action {
-                consecutive_same += 1;
-            } else {
-                break;
-            }
-        }
-
-        // if consecutive_same >= 3 {
-        //     return Some(format!(
-        //         "🚨🚨🚨 【系统强制警告：检测到死循环！】\n你已连续 {} 次执行相同动作 \"{}\"！\n你必须在 reflection 中承认循环，并立刻执行以下任一操作：\n1. 直接构造搜索 URL（如 https://xxx.com/search?q=关键词）跳转\n2. 换一个完全不同的网站\n3. 调用 finish 终止任务\n绝对禁止再次执行 \"{}\"！",
-        //         consecutive_same, last.action, last.action
-        //     ));
-        // }
-
-        // if consecutive_same >= 2 {
-        //     return Some(format!(
-        //         "⚠️ 【系统提醒：疑似循环】你已连续 {} 次执行 \"{}\"。如果下一步还是相同动作，系统将强制判定为死循环。请立即更换策略！",
-        //         consecutive_same, last.action
-        //     ));
-        // }
-
-        None
-    }
 
     pub fn assemble_messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
 
-        // 1. 系统角色提示词 (核心逻辑 + 动态模块)
-        let mut full_system = self.system_prompt.clone();
-        if !self.active_tool_detail.is_empty() {
-            full_system.push_str("\n\n【当前活跃工具操作手册】\n");
-            full_system.push_str(&self.active_tool_detail);
-        }
-
+        // 1. 系统角色提示词 (核心逻辑，包含全部静态工具菜单)
+        // 完全静态，位于最前排，完美命中核心缓存区
         messages.push(ChatMessage {
             role: "system".to_string(),
-            content: json!(full_system),
+            content: json!(self.system_prompt.clone()),
         });
 
-        // 2. 将历史对话加入其中
-        messages.extend(self.turns_history.clone());
-
-        // 3. 将当前任务目标和面板信息放在末尾（首尾增强）
-        let todo_json = serde_json::to_string_pretty(&self.todo_list).unwrap_or_default();
-        let facts_section = if self.memories.is_empty() {
-            String::new()
-        } else if self.carry_memories {
-            // 这里是 AI 申请了，由我们大方给出的全部细节
-            let facts: Vec<String> = self
-                .memories
-                .iter()
-                .map(|(k, v)| format!("  {}: {}", k, v))
-                .collect();
-            format!(
-                "\n\n【核心事实与数据 (载入全部细节)】\n{}",
-                facts.join("\n")
-            )
-        } else {
-            // 这里是默认状态：只给一个 Key 列表，不给数据内容
-            let keys: Vec<String> = self.memories.keys().cloned().collect();
-            format!(
-                "\n\n【冷存储档案库 (载入内容请设 require_memory: true)】\n索引清单: [{}]",
-                keys.join(", ")
-            )
-        };
-
-        // 4. 生成动作轨迹和循环预警
-        let trajectory = self.format_action_trajectory();
-        let loop_warning = self.detect_loop_warning().unwrap_or_default();
-
-        let middle = format!(
-            "【用户终极目标】\n{}\n\n【任务面板】\n{}\n\n【你的动作历史轨迹 (不可篡改，你必须审查！)】\n{}\n{}{}\n\n【近期记忆】\n(以上是历史对话){}",
-            self.user_goal,
-            todo_json,
-            trajectory,
-            if loop_warning.is_empty() { "" } else { "\n" },
-            loop_warning,
-            facts_section
-        );
+        // 2. 静态前置上下文 (用户目标 + 长期记忆库)
+        // 目标在单次任务中不会变，Memory 变动频率很低，也放入前缀缓存区
+        let mut static_prefix = format!("【用户终极任务目标】\n{}\n\n", self.user_goal);
+        
+        if !self.memories.is_empty() {
+            if self.carry_memories {
+                let facts: Vec<String> = self
+                    .memories
+                    .iter()
+                    .map(|(k, v)| format!("  {}: {}", k, v))
+                    .collect();
+                static_prefix.push_str(&format!("【核心事实与长期记忆库 (全量载入)】\n{}\n\n", facts.join("\n")));
+            } else {
+                let keys: Vec<String> = self.memories.keys().cloned().collect();
+                static_prefix.push_str(&format!("【冷存储记忆索引库 (需载入详情请设 require_memory: true)】\n包含键值: [{}]\n\n", keys.join(", ")));
+            }
+        }
+        
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: json!(middle),
+            content: json!(static_prefix.trim_end()),
         });
 
+        // 3. 线性增长区：历史对话轨迹 
+        // 随着执行一步步向后追加 (Append-only)，这正是当前各大模型 Prefix Caching 能够完美覆盖的部分
+        messages.extend(self.turns_history.clone());
+
+        // 4. 动态尾部区：极高频变动，放在最末尾避免污染前面的静态缓存
+        let mut dynamic_suffix = String::new();
+
+        if self.turns_history.len() >= 24 {
+            dynamic_suffix.push_str("🚨 【系统严重警告：历史记录即将溢出】\n你的对话历史已过长，继续执行将导致上下文超载崩溃！\n请务必在本次思考中，将前面所有的关键进展、线索和数据提炼总结，放入 `memories_update` 中永久保存。\n同时必须在 JSON 顶层输出 `\"clear_history\": true` 来清空历史负担！如果不清空，系统可能会强制截断导致你失忆！\n\n");
+        }
+
+        // 将 active_tool_detail (如具体某个MCP的操作手册) 提取到尾部。
+        // 如果放在 System Prompt 里，每次 Agent 换工具都会导致前面的全局缓存雪崩！
+        if !self.active_tool_detail.is_empty() {
+            dynamic_suffix.push_str(&format!("【当前活跃工具操作手册】\n{}\n\n", self.active_tool_detail));
+        }
+
+        let todo_json = serde_json::to_string_pretty(&self.todo_list).unwrap_or_default();
+        dynamic_suffix.push_str(&format!("【当前任务面板 (Todo List)】\n{}\n\n", todo_json));
+
         if !self.current_observation.is_empty() {
-            messages.push(ChatMessage {
-                role: "user".to_string(),
-                content: json!(format!("【当前实时观测】\n{}", self.current_observation)),
-            });
+            dynamic_suffix.push_str(&format!("\n【当前最新环境观测 (Observation)】\n{}", self.current_observation));
         }
 
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: json!("请基于提示执行下一步操作。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格符合白名单。注意：你必须先填 reflection 字段审视上一步结果。")
+            content: json!(dynamic_suffix),
+        });
+
+        // 5. 最后的强制指令
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: json!("请基于上述所有上下文环境，思考并执行下一步操作。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格符合白名单。注意：你必须先在 reflection 字段审视上一步的结果与当前环境。")
         });
 
         messages

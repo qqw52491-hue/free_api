@@ -125,6 +125,10 @@ pub struct AgentInstruction {
     pub next_tool_hint: Option<String>,
     #[serde(default)]
     pub require_memory: Option<bool>,
+    
+    /// 当历史过长时，AI 主动总结到 memories_update，并传 true 来清空历史
+    #[serde(default)]
+    pub clear_history: Option<bool>,
 
     // 终极绝招：捕获所有未定义但被平铺的外卡字段（如 element_id, val 等幻觉字段）
     #[serde(flatten)]

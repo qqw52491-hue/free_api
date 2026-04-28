@@ -15,13 +15,11 @@
 
 ## 🏗️ 三大核心架构模块
 
-### 🥪 模块 1：三明治上下文引擎 (The Sandwich Context)
-实现了层次化的 Prompt 结构，确保模型始终保持长期的目标感与短期的精确落脚点：
--   **上层 (Top Bread)**: 系统提示词 + 用户的终极宏观任务 (Ultimate Goal)。
--   **中层 (Filling)**: 
-    *   **抽象任务面板 (To-Do List)**: JSON 格式的任务进度表。
-    *   **滑动窗口记忆 (Sliding Window)**: 仅保留最近 5 步的动作摘要，节省 Token。
--   **下层 (Bottom Bread)**: 最新提取的网页 DOM 状态或 MCP 工具执行结果。
+### 🧩 模块 1：线性缓存优化上下文 (Cache-Optimized Context)
+采用了“从静态到动态”的线性追加结构，极大提升了在大模型（如 DeepSeek, Anthropic）上的 **Prompt Caching** 命中率，降低 90% 以上的重复 Token 开销：
+-   **静态头部 (Fixed Prefix)**: 系统提示词 + 用户终极目标 (Goal) + 长期事实记忆 (Memories)。
+-   **线性增长区 (Append-only History)**: 全局对话历史记录。利用历史回合的线性追加特性，确保过往决策被完美缓存。
+-   **动态尾部 (Dynamic Suffix)**: 当前工具手册 + 任务面板 (Todo List) + 环境观测 (Observation)。将变动最频繁的内容置于末尾，彻底避免缓存污染。
 
 ### 🔌 模块 2：MCP 插件管家 (Plugin Manager)
 负责管理本地 `plugins/` 目录下的所有 YAML 配置。其核心 `McpClient` 具备：
@@ -29,9 +27,9 @@
 -   **JSON-RPC 2.0 通信**: 通过 `stdin`/`stdout` 与插件进行高速标准通信。
 
 ### 🚦 模块 3：核心路由调度器 (The Main Loop Router)
-担任系统的“信号发生器”，根据 LLM 的意图决定指令去向：
--   **内置白名单路由**: 浏览器相关操作 (Click, Type, Extract) 直接在内核中高效执行。
--   **外部扩展路由**: 无法由内核处理的操作自动转发到已注册的 MCP 插件。
+担任系统的“信号发生器”，根据 LLM 的意图和上下文状态（如视觉需求、执行错误）决定指令去向：
+-   **智能分流**: 自动识别简单任务（Flash 模型）与复杂纠错/规划（Pro 模型）。
+-   **内置/外部路由**: 浏览器原生操作与 MCP 插件操作的无缝分发。
 
 ---
 
@@ -40,41 +38,41 @@
 为了应对高频率、长周期的 Agent 任务，系统已实装以下深层优化：
 
 ### 1. ⚡️ 全局插件保活 (Stateful MCP)
-*   **机制**：`PluginRegistry` 被托管在 Tauri 的全局状态 (`State`) 中，跨 Session、跨步骤共享。
-*   **价值**：MCP 插件（如数据库、Office 句柄）**只会启动一次**。后续调用为微秒级热响应，且能保持插件内部的上下文状态。
+*   **机制**：`PluginRegistry` 被托管在 Tauri 的全局状态中，插件进程（如 Excel 句柄）**只会启动一次**。后续调用为微秒级热响应，且能保持插件内部上下文。
 
-### 🛠️ 2. 进程自愈机制 (Process Self-Healing)
-*   **机制**：`McpClient` 集成了健康检查。每次发起请求前，系统会自动检测子进程是否崩溃（如由于系统资源回收）。
-*   **价值**：若发现崩溃，系统会自动 **静默重启 (Respawn)**，确保执行链路不会中断。
+### 🔄 2. 智能历史截断与归档 (AI-Driven History Flushing)
+*   **机制**：当历史接近上限时，系统发出动态预警。AI 会主动将关键信息汇总至 `memories_update` 并触发 `clear_history` 标志，由内核物理清空冗长历史。
+*   **价值**：实现了长周期任务的“无损扩容”，确保 Agent 在处理超长任务时永不掉线。
 
-### 📸 3. 视觉感知增强 (Visual Observation)
-*   **机制**：集成 `capture_screenshot` 接口。
-*   **价值**：Agent 可以随时截取页面图像。这为后续引入 **Vision** 能力的模型（如 Claude 3.5 / GPT-4o）处理复杂 UI 打下基础。
+### 🛠️ 3. 进程自愈机制 (Process Self-Healing)
+*   **机制**：集成健康检查，发起请求前自动检测子进程状态。若发现崩溃，系统会自动 **静默重启 (Respawn)**，确保执行链路不断裂。
 
-### 🧵 4. 高并发线程安全 (Async Concurrency Safety)
-*   使用 `Arc<Mutex<>>` 对全局插件注册表进行封装，确保在多 Agent 会话并发调度时，系统状态绝对安全。
+### 📸 4. 视觉感知增强 (Visual Observation)
+*   **机制**：集成 `capture_screenshot` 接口。当 DOM 抓取失败或页面复杂时，自动升维至视觉模型处理。
+
+### 🧵 5. 高并发线程安全 (Async Concurrency Safety)
+*   使用 `Arc<Mutex<>>` 封装全局注册表，确保多 Agent 会话并发调度时的绝对安全。
 
 ---
 
 ## 🛠️ 代码工程化分层 (`src/agent/`)
 
-为了防止代码过度集成导致难以维护，项目已将 Agent 模块彻底拆解：
--   `mod.rs`: 总枢纽与核心路由。
--   `context.rs`: 三明治上下文拼装逻辑。
--   `mcp.rs`: MCP 客户端与插件生命周期管理。
--   `browser.rs`: 基于 `headless_chrome` 的内置自动化逻辑。
--   `types.rs`: 全局共享的结构体定义。
--   `utils.rs`: 健壮的 JSON 暴力提取器与跨平台 Shell 调用。
+-   `mod.rs`: 总枢纽、主循环与核心路由逻辑。
+-   `context.rs`: 线性缓存上下文拼装与历史管理。
+-   `mcp.rs`: MCP 客户端协议实现。
+-   `browser.rs`: 基于 CDP 的内置自动化内核。
+-   `types.rs`: 强类型的指令协议与数据结构。
+-   `utils.rs`: JSON 暴力提取与鲁棒性工具集。
 
 ---
 
 ## 🚀 快速开始
 
 1.  在项目根目录创建 `plugins/` 目录。
-2.  放置一个 YAML 配置文件（例如 `excel.yaml`）：
+2.  放置 YAML 配置文件（如 `excel.yaml`）：
     ```yaml
     name: excel-mcp
     command: uvx
     args: ["mcp-server-excel"]
     ```
-3.  通过系统的 Agent 循环，呼叫 `excel-mcp/read_sheet` 即可启动跨进程联动。
+3.  通过 Agent 循环调用 `excel-mcp/write_xlsx` 即可。
