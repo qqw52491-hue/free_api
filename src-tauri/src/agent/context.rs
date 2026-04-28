@@ -200,19 +200,19 @@ impl SandwichContext {
             }
         }
 
-        if consecutive_same >= 3 {
-            return Some(format!(
-                "🚨🚨🚨 【系统强制警告：检测到死循环！】\n你已连续 {} 次执行相同动作 \"{}\"！\n你必须在 reflection 中承认循环，并立刻执行以下任一操作：\n1. 直接构造搜索 URL（如 https://xxx.com/search?q=关键词）跳转\n2. 换一个完全不同的网站\n3. 调用 finish 终止任务\n绝对禁止再次执行 \"{}\"！",
-                consecutive_same, last.action, last.action
-            ));
-        }
+        // if consecutive_same >= 3 {
+        //     return Some(format!(
+        //         "🚨🚨🚨 【系统强制警告：检测到死循环！】\n你已连续 {} 次执行相同动作 \"{}\"！\n你必须在 reflection 中承认循环，并立刻执行以下任一操作：\n1. 直接构造搜索 URL（如 https://xxx.com/search?q=关键词）跳转\n2. 换一个完全不同的网站\n3. 调用 finish 终止任务\n绝对禁止再次执行 \"{}\"！",
+        //         consecutive_same, last.action, last.action
+        //     ));
+        // }
 
-        if consecutive_same >= 2 {
-            return Some(format!(
-                "⚠️ 【系统提醒：疑似循环】你已连续 {} 次执行 \"{}\"。如果下一步还是相同动作，系统将强制判定为死循环。请立即更换策略！",
-                consecutive_same, last.action
-            ));
-        }
+        // if consecutive_same >= 2 {
+        //     return Some(format!(
+        //         "⚠️ 【系统提醒：疑似循环】你已连续 {} 次执行 \"{}\"。如果下一步还是相同动作，系统将强制判定为死循环。请立即更换策略！",
+        //         consecutive_same, last.action
+        //     ));
+        // }
 
         None
     }
