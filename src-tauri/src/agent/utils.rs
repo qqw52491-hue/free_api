@@ -130,6 +130,7 @@ pub async fn call_llm(
     model_id: String,
     app: Option<&tauri::AppHandle>,
     step_id: usize,
+    session_id: &str,
 ) -> Result<(AgentInstruction, TokenUsage, String), String> {
     // 获取具体数据库信息
     let (base_url, api_key, model_name, max_tokens, temperature) = {
@@ -321,7 +322,7 @@ pub async fn call_llm(
                                     use tauri::Emitter;
                                     app_handle
                                         .emit(
-                                            "agent-progress",
+                                            &format!("agent-progress-{}", session_id),
                                             json!({
                                                 "type": "thinking",
                                                 "step_id": step_id,

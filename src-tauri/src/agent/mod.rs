@@ -2,6 +2,7 @@ pub mod browser;
 pub mod builtins;
 pub mod context;
 pub mod mcp;
+pub mod router;
 pub mod types;
 pub mod utils;
 
@@ -87,7 +88,10 @@ fn execute_command_inner(
         println!("执行动作调用外部插件: {}/{}", plugin_name, tool_name);
         match plugin.call_tool(&tool_name, params.clone()) {
             Ok(out) => {
-                let is_error = out.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+                let is_error = out
+                    .get("isError")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let content = out
                     .get("content")
                     .and_then(|v| v.as_array())
@@ -161,33 +165,42 @@ pub fn run_agent_step(
     registry: &mut PluginRegistry,
 ) -> DispatchResult {
     let tool_name = instruction.get_tool().to_lowercase();
-    
+
     // --- 场景 A: 组合指令流水线 Batch Execution ---
     if !instruction.commands.is_empty() {
-        println!("🚀 [Pipeline: {}] 正在按顺序执行 {} 个组合动作...", session_id, instruction.commands.len());
+        println!(
+            "🚀 [Pipeline: {}] 正在按顺序执行 {} 个组合动作...",
+            session_id,
+            instruction.commands.len()
+        );
         let mut total_stdout = String::new();
-        
+
         for (idx, cmd_val) in instruction.commands.iter().enumerate() {
             let step_idx = idx + 1;
             // 提取单步的 action
-            let step_action = cmd_val.get("action")
+            let step_action = cmd_val
+                .get("action")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            
+
             println!("   ➡️  Step {}: 执行动作 '{}'...", step_idx, step_action);
-            
+
             // 执行单步
-            let res = execute_command_inner(session_id, &tool_name, &step_action, cmd_val, registry);
-            
+            let res =
+                execute_command_inner(session_id, &tool_name, &step_action, cmd_val, registry);
+
             // 拼接输出结果
             if !res.stdout.is_empty() {
                 total_stdout.push_str(&format!("\n[Step {} Result]: {}", step_idx, res.stdout));
             }
-            
+
             // --- 核心修复：Fail-Fast 快速失败机制 ---
             if !res.success {
-                println!("   🚫 Step {} 执行失败，流水线立即熔断！原因: {}", step_idx, res.stderr);
+                println!(
+                    "   🚫 Step {} 执行失败，流水线立即熔断！原因: {}",
+                    step_idx, res.stderr
+                );
                 return DispatchResult {
                     stdout: total_stdout,
                     stderr: format!("流水线在第 {} 步崩溃: {}", step_idx, res.stderr),
@@ -196,7 +209,7 @@ pub fn run_agent_step(
                 };
             }
         }
-        
+
         return DispatchResult {
             stdout: total_stdout,
             stderr: String::new(),
@@ -207,10 +220,14 @@ pub fn run_agent_step(
 
     // --- 场景 B: 传统单步指令 Single Execution ---
     let mut action = instruction.get_action().trim().to_lowercase();
-    
+
     // --- 幻觉纠偏：如果 action 为空但 extra_fields 里有 tool_name，尝试打捞 ---
     if action.is_empty() {
-        if let Some(name) = instruction.extra_fields.get("tool_name").and_then(|v| v.as_str()) {
+        if let Some(name) = instruction
+            .extra_fields
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+        {
             action = name.to_lowercase();
         }
     }
@@ -218,9 +235,6 @@ pub fn run_agent_step(
     let params = instruction.get_params();
     execute_command_inner(session_id, &tool_name, &action, &params, registry)
 }
-
-
-
 
 #[tauri::command]
 pub async fn dispatch_agent_step(
@@ -262,7 +276,7 @@ pub async fn run_agent_main_loop(
     app: AppHandle,
     state: State<'_, DbState>,
     registry_state: State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
-    model_id: String,
+    model_routing: crate::agent::router::ModelRoutingConfig,
     goal: String,
     auto_pilot: bool,
     session_id: Option<String>,
@@ -360,8 +374,11 @@ pub async fn run_agent_main_loop(
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
 
     for step_id in 0..MAX_STEPS {
-        app.emit("agent-log", format!("正在规划第 {} 步...", step_id + 1))
-            .map_err(|e| e.to_string())?;
+        app.emit(
+            &format!("agent-log-{}", final_session_id),
+            format!("正在规划第 {} 步...", step_id + 1),
+        )
+        .map_err(|e| e.to_string())?;
 
         // ================================================================
         // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
@@ -377,7 +394,7 @@ pub async fn run_agent_main_loop(
             // ================================================================
             if let Some(inst) = pre_computed_inst.take() {
                 app.emit(
-                    "agent-log",
+                    &format!("agent-log-{}", final_session_id),
                     "🚀 Kimi 专家指令已就绪，跳过本地 AI 思考，直接执行！",
                 )
                 .map_err(|e| e.to_string())?;
@@ -403,28 +420,46 @@ pub async fn run_agent_main_loop(
                 break (inst, dispatch_result);
             }
 
+            // --- 🚦 调用网关：动态路由 ---
+            let routing = crate::agent::router::AgentRouter::route(&context, &model_routing);
+            let _ = app.emit(
+                &format!("agent-log-{}", final_session_id),
+                format!(
+                    "🚦 [网关] {} → {} ({})",
+                    routing.tier, routing.model_id, routing.reason
+                ),
+            );
+
             // --- A. 请求 AI 规划 ---
-            let (inst, token_usage, thinking_text) =
-                match call_llm(&context, &state, model_id.clone(), Some(&app), step_id).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        retry_count += 1;
-                        if retry_count >= max_retries {
-                            return Err(format!("AI 无法解析 JSON: {}", e));
-                        }
-                        app.emit(
-                            "agent-log",
-                            format!("🔄 格式错误(第{}次)，正在自我修复...", retry_count),
-                        )
-                        .map_err(|er| er.to_string())?;
-                        context.add_error_feedback(&e);
-                        continue;
+            let (inst, token_usage, thinking_text) = match call_llm(
+                &context,
+                &state,
+                routing.model_id,
+                Some(&app),
+                step_id,
+                &final_session_id,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    retry_count += 1;
+                    if retry_count >= max_retries {
+                        return Err(format!("AI 无法解析 JSON: {}", e));
                     }
-                };
+                    app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        format!("🔄 格式错误(第{}次)，正在自我修复...", retry_count),
+                    )
+                    .map_err(|er| er.to_string())?;
+                    context.add_error_feedback(&e);
+                    continue;
+                }
+            };
 
             // 📊 发送 Token 用量统计到前端
             app.emit(
-                "agent-progress",
+                &format!("agent-progress-{}", final_session_id),
                 json!({
                     "type": "token_usage",
                     "step_id": step_id,
@@ -442,7 +477,7 @@ pub async fn run_agent_main_loop(
             // 🧠 发送最终思考完成事件到前端
             if !thinking_text.is_empty() {
                 app.emit(
-                    "agent-progress",
+                    &format!("agent-progress-{}", final_session_id),
                     json!({
                         "type": "thinking",
                         "step_id": step_id,
@@ -452,7 +487,7 @@ pub async fn run_agent_main_loop(
                 )
                 .map_err(|e| e.to_string())?;
                 app.emit(
-                    "agent-log",
+                    &format!("agent-log-{}", final_session_id),
                     format!("🧠 AI思考完毕 (共{}字)", thinking_text.len()),
                 )
                 .map_err(|e| e.to_string())?;
@@ -461,18 +496,18 @@ pub async fn run_agent_main_loop(
             // 通知前端：发现了新计划（含反思）
             if !inst.reflection.is_empty() {
                 app.emit(
-                    "agent-log",
+                    &format!("agent-log-{}", final_session_id),
                     format!("🪞 AI 反思: {}", inst.reflection),
                 )
                 .map_err(|e| e.to_string())?;
             }
             app.emit(
-                "agent-log",
+                &format!("agent-log-{}", final_session_id),
                 format!("🤖 AI 规划了新动作: {}", inst.description),
             )
             .map_err(|e| e.to_string())?;
             app.emit(
-                "agent-progress",
+                &format!("agent-progress-{}", final_session_id),
                 json!({
                     "type": "step_new",
                     "step": {
@@ -491,12 +526,12 @@ pub async fn run_agent_main_loop(
 
             // --- B. 执行动作 ---
             app.emit(
-                "agent-log",
+                &format!("agent-log-{}", final_session_id),
                 format!("▶ 步骤 {}: {}", step_id + 1, inst.description),
             )
             .map_err(|e| e.to_string())?;
             app.emit(
-                "agent-progress",
+                &format!("agent-progress-{}", final_session_id),
                 json!({
                     "type": "step_start",
                     "step_id": step_id,
@@ -530,10 +565,13 @@ pub async fn run_agent_main_loop(
 
                 if tool_retry_count == 1 {
                     let _ = app.emit(
-                        "agent-log",
+                        &format!("agent-log-{}", final_session_id),
                         "🚨 检测到指令执行失败，正在唤起 Kimi 网页专家护驾...",
                     );
-                    println!("🚨 [Rescue] 触发 Kimi 网页专家救援模式 (Session: {})...", final_session_id);
+                    println!(
+                        "🚨 [Rescue] 触发 Kimi 网页专家救援模式 (Session: {})...",
+                        final_session_id
+                    );
 
                     // 记录报错时的场景上下文，以便 Kimi 协助分析
                     // 注意：现在不需要手动记录 original_tab_id，因为动作默认就在 "main" 执行
@@ -585,7 +623,7 @@ pub async fn run_agent_main_loop(
                                     crate::agent::types::AgentInstruction,
                                 >(val)
                                 {
-                                    let _ = app.emit("agent-log", "🔥 Kimi 返回了完美的 JSON 指令格式，系统已截断本地 AI，马上自动代打本回合！");
+                                    let _ = app.emit(&format!("agent-log-{}", final_session_id), "🔥 Kimi 返回了完美的 JSON 指令格式，系统已截断本地 AI，马上自动代打本回合！");
 
                                     // 不要用 continue 重头规划，直接把这一条完美方案覆盖给本次本该让 AI 出的代码，去跑！
                                     let dispatch_result = {
@@ -613,7 +651,7 @@ pub async fn run_agent_main_loop(
                         context.add_error_feedback(&rescue_feedback);
 
                         let _ = app.emit(
-                            "agent-log",
+                            &format!("agent-log-{}", final_session_id),
                             "✅ 场外救驾对策已就绪（但非 JSON 指令），交还本地 AI 最后尝试...",
                         );
                         max_retries = 4; // 给出最后一次机会
@@ -635,7 +673,7 @@ pub async fn run_agent_main_loop(
                 }
 
                 app.emit(
-                    "agent-log",
+                    &format!("agent-log-{}", final_session_id),
                     format!(
                         "🔄 执行失败(第{}次)，正注入错误反馈给 AI 重试...",
                         retry_count
@@ -706,7 +744,8 @@ pub async fn run_agent_main_loop(
             let tab_result = crate::agent::browser::get_or_create_tab(&final_session_id);
             if let Ok(tab) = tab_result {
                 let js = "JSON.stringify({w: window.innerWidth, h: window.innerHeight})";
-                tab.evaluate(js, false).ok()
+                tab.evaluate(js, false)
+                    .ok()
                     .and_then(|r| r.value)
                     .and_then(|v| v.as_str().map(|s| s.to_string()))
                     .unwrap_or_else(|| r#"{"w":1280,"h":800}"#.to_string())
@@ -715,11 +754,15 @@ pub async fn run_agent_main_loop(
             }
         };
         // 解析 w/h
-        let vp: serde_json::Value = serde_json::from_str(&viewport_size).unwrap_or(json!({"w":1280,"h":800}));
+        let vp: serde_json::Value =
+            serde_json::from_str(&viewport_size).unwrap_or(json!({"w":1280,"h":800}));
         let vp_w = vp.get("w").and_then(|v| v.as_i64()).unwrap_or(1280);
         let vp_h = vp.get("h").and_then(|v| v.as_i64()).unwrap_or(800);
 
-        if result.success && (final_stdout.starts_with("data:image/png;base64,") || final_stdout.starts_with("data:image/jpeg;base64,")) {
+        if result.success
+            && (final_stdout.starts_with("data:image/png;base64,")
+                || final_stdout.starts_with("data:image/jpeg;base64,"))
+        {
             let base64_img = final_stdout
                 .trim_start_matches("data:image/png;base64,")
                 .trim_start_matches("data:image/jpeg;base64,");
@@ -762,7 +805,8 @@ pub async fn run_agent_main_loop(
                         return items.slice(0, 40).join('\n'); // 最多40条，防止 Token 爆炸
                     })()
                     "#;
-                    tab.evaluate(js, false).ok()
+                    tab.evaluate(js, false)
+                        .ok()
                         .and_then(|r| r.value)
                         .and_then(|v| v.as_str().map(|s| s.to_string()))
                         .unwrap_or_else(|| "（DOM坐标获取失败，请凭截图目测估算）".to_string())
@@ -830,10 +874,10 @@ pub async fn run_agent_main_loop(
         context.current_observation = output_text.clone();
 
         // --- 前端通知 ---
-        app.emit("agent-context", &context)
+        app.emit(&format!("agent-context-{}", final_session_id), &context)
             .map_err(|e| e.to_string())?;
         app.emit(
-            "agent-progress",
+            &format!("agent-progress-{}", final_session_id),
             json!({
                 "type": if result.success { "step_done" } else { "step_error" },
                 "step_id": step_id,
@@ -846,7 +890,7 @@ pub async fn run_agent_main_loop(
         // --- 任务完成判定 ---
         if instruction.get_action() == "finish" {
             app.emit(
-                "agent-progress",
+                &format!("agent-progress-{}", final_session_id),
                 json!({
                     "type": "complete",
                     "message": "任务已由 AI 标记完成",

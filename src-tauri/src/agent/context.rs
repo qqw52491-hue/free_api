@@ -108,10 +108,8 @@ impl SandwichContext {
         // 凡是带有“【可用元素清单】”的长 DOM 树全部削减，因为当前最新 DOM 已经在 `current_observation` 底部了。
         let mut history_feedback = output_summary.to_string();
         if let Some(idx) = history_feedback.find("【可用元素清单】") {
-            history_feedback.replace_range(
-                idx..,
-                "【可用元素清单】: (已折叠，详见底部当前最新观测)"
-            );
+            history_feedback
+                .replace_range(idx.., "【可用元素清单】: (已折叠，详见底部当前最新观测)");
         } else {
             // 普通日志截断到 300 字符
             history_feedback = history_feedback.chars().take(300).collect();
