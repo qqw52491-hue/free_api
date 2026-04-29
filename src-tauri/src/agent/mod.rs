@@ -20,7 +20,7 @@ use tauri::{AppHandle, Manager, State};
 use tokio::time::{sleep, Duration};
 
 /// Agent 每个任务最多执行步数（可按项目需求调整）
-const MAX_STEPS: usize = 50;
+const MAX_STEPS: usize = 300;
 
 /// 前端调用：设置浏览器启动模式
 /// mode: 0=临时(默认), 1=持久化(保留Cookie), 2=连接已有Chrome
@@ -413,6 +413,10 @@ pub async fn run_agent_main_loop(
         )
         .map_err(|e| e.to_string())?;
 
+        // 每步开始前清空上一步的视野（Observation 是"一次性消耗品"）
+        // 即便重试循环多次，AI 也不会在失败时意外看到上一步的旧 DOM
+        context.current_observation.clear();
+
         // ================================================================
         // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
         // ================================================================
@@ -425,12 +429,14 @@ pub async fn run_agent_main_loop(
             // ================================================================
             // 🔥 [Kimi 专家直达快线]：如果上一步已经拿到了 Kimi 的指令，直接跳过整个规划循环
             // ================================================================
-            if let Some(inst) = pre_computed_inst.take() {
+            if let Some(mut inst) = pre_computed_inst.take() {
                 app.emit(
                     &format!("agent-log-{}", final_session_id),
                     "🚀 Kimi 专家指令已就绪，跳过本地 AI 思考，直接执行！",
                 )
                 .map_err(|e| e.to_string())?;
+
+                inst.description = format!("[⚕️ 专家援助] {}", inst.description);
 
                 // 构造一个空的 Token 使用统计
                 let token_usage = crate::agent::types::TokenUsage::new(0, 0, 0);
@@ -464,10 +470,10 @@ pub async fn run_agent_main_loop(
             );
 
             // --- A. 请求 AI 规划 ---
-            let (inst, token_usage, thinking_text) = match call_llm(
+            let (mut inst, token_usage, thinking_text) = match call_llm(
                 &context,
                 &state,
-                routing.model_id,
+                routing.model_id.clone(),
                 Some(&app),
                 step_id,
                 &final_session_id,
@@ -527,6 +533,8 @@ pub async fn run_agent_main_loop(
                     continue;
                 }
             };
+
+            inst.description = format!("[{}] {}", routing.tier, inst.description);
 
             // 📊 发送 Token 用量统计到前端
             app.emit(
@@ -770,6 +778,12 @@ pub async fn run_agent_main_loop(
                 )
                 .map_err(|e| e.to_string())?;
                 context.add_error_feedback(&error_detail);
+
+                // --- 幻影 DOM 强制阻断 ---
+                if error_detail.contains("找不到元素") || error_detail.contains("navigated") || error_detail.contains("closed") {
+                    context.current_observation = "【🚫 当前 DOM 视野已失效】\n页面发生了重定向或底层节点刷新，你之前的元素 ID 已全部作废！\n你现在是个瞎子，绝对禁止执行任何点击动作！\n请立刻、马上输出单条命令：{\"action\": \"extract\"} 来重新睁开眼睛！".to_string();
+                }
+
                 continue; // 带着错误信息，重新规划！
             }
         };
