@@ -131,6 +131,7 @@ pub async fn call_llm(
     app: Option<&tauri::AppHandle>,
     step_id: usize,
     session_id: &str,
+    log_context: bool,
 ) -> Result<(AgentInstruction, TokenUsage, String), String> {
     // 获取具体数据库信息
     let (base_url, api_key, model_name, max_tokens, temperature) = {
@@ -168,11 +169,16 @@ pub async fn call_llm(
     // 拼接body
     let mut api_messages = messages.assemble_messages();
     let is_ollama = base_url.contains("localhost:11434") || base_url.contains("127.0.0.1:11434");
-    let is_lmstudio = base_url.contains("localhost:1234") || base_url.contains("127.0.0.1:1234")
+    let is_lmstudio = base_url.contains("localhost:1234")
+        || base_url.contains("127.0.0.1:1234")
         || base_url.contains("lmstudio");
 
     // 确定上下文窗口大小
-    let context_window: i64 = if is_ollama || is_lmstudio { 32768 } else { 128000 };
+    let context_window: i64 = if is_ollama || is_lmstudio {
+        32768
+    } else {
+        128000
+    };
 
     if is_ollama {
         println!(
@@ -189,7 +195,10 @@ pub async fn call_llm(
 
     // 🔍 调试：打印发送给模型的消息概况
     println!("═══════════════════════════════════════════");
-    println!("📤 [DEBUG] 发送给模型的消息列表 (共 {} 条):", api_messages.len());
+    println!(
+        "📤 [DEBUG] 发送给模型的消息列表 (共 {} 条):",
+        api_messages.len()
+    );
     for (i, msg) in api_messages.iter().enumerate() {
         let content_str = match &msg.content {
             serde_json::Value::String(s) => s.clone(),
@@ -197,9 +206,46 @@ pub async fn call_llm(
         };
         let char_count = content_str.len();
         let preview: String = content_str.chars().take(120).collect();
-        println!("  [{}] role={}, chars={}, preview: {}...", i, msg.role, char_count, preview);
+        println!(
+            "  [{}] role={}, chars={}, preview: {}...",
+            i, msg.role, char_count, preview
+        );
     }
     println!("═══════════════════════════════════════════");
+
+    // 📁 上下文日志开关：在前端面板开启「上下文日志」后，
+    // 每次调用 LLM 前将完整消息列表写入 agent_logs/{session_id}_{step}.json
+    // 用途：离线分析模型为什么做出某个决策，对比不同模型行为差异
+    if log_context {
+        let log_dir = std::path::PathBuf::from("../agent_logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = log_dir.join(format!("{}.json", session_id));
+
+        // 读取已有日志，如果是数组则追加，否则创建新数组
+        let mut logs_array = if let Ok(content) = std::fs::read_to_string(&log_path) {
+            serde_json::from_str::<Vec<serde_json::Value>>(&content).unwrap_or_else(|_| vec![])
+        } else {
+            vec![]
+        };
+
+        let log_data = serde_json::json!({
+            "step_id": step_id,
+            "model": model_name,
+            "messages": api_messages.iter().map(|m| {
+                serde_json::json!({
+                    "role": m.role,
+                    "content": m.content
+                })
+            }).collect::<Vec<_>>()
+        });
+
+        logs_array.push(log_data);
+
+        if let Ok(s) = serde_json::to_string_pretty(&logs_array) {
+            let _ = std::fs::write(&log_path, s);
+            println!("📁 上下文已追加到: {}", log_path.display());
+        }
+    }
 
     let mut current_agent_try = 0;
     let max_agent_retries = 3;
@@ -408,8 +454,18 @@ pub async fn call_llm(
         }
 
         // --- 解析 LLM 完整响应 ---
-        let final_json_str =
-            extract_json_from_text(&full_response).unwrap_or_else(|| full_response.clone());
+        // 尝试从正常内容中提取，如果提取失败且内容为空，且思考内容中有数据，也可尝试从思考中提取
+        let mut final_json_str_opt = extract_json_from_text(&full_response);
+        if final_json_str_opt.is_none() && full_response.trim().is_empty() {
+            final_json_str_opt = extract_json_from_text(&thinking_text);
+        }
+        let final_json_str = final_json_str_opt.unwrap_or_else(|| {
+            if full_response.trim().is_empty() && !thinking_text.trim().is_empty() {
+                thinking_text.clone()
+            } else {
+                full_response.clone()
+            }
+        });
 
         let parse_result = (|| -> Result<AgentInstruction, String> {
             let val: serde_json::Value = serde_json::from_str(&final_json_str)

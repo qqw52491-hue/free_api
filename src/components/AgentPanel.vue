@@ -72,6 +72,17 @@
                 <div class="form-tip" v-if="modelRouting.enableRescue" style="color:var(--accent-light);">开启后失败时会打开第二个浏览器窗口找 Kimi 帮忙</div>
             </div>
 
+            <!-- 上下文日志开关 -->
+            <div class="control-section">
+                <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;">
+                    <span>📁 上下文日志</span>
+                    <span style="font-size:11px;color:var(--text-4);font-weight:400;">调试用</span>
+                    <input type="checkbox" v-model="logContext" :disabled="isRunning" style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent);">
+                </label>
+                <div class="form-tip" v-if="!logContext" style="color:var(--text-4);">关闭 · 不写日志文件</div>
+                <div class="form-tip" v-if="logContext" style="color:#f5a623;">开启 · 每步将完整上下文写入项目根目录的 agent_logs/</div>
+            </div>
+
 
             <!-- 快捷预设 -->
             <div class="control-section">
@@ -416,6 +427,7 @@ interface TokenUsageInfo {
 const sessionId = props.panelId;
 const tokenUsage = ref<TokenUsageInfo | null>(null);
 const modelRouting = ref({ pro: "", flash: "", vision: "", enableRescue: false });
+const logContext = ref(false);
 const goalInput = ref("");
 const currentGoal = ref("");
 const isRunning = ref(false);
@@ -580,6 +592,7 @@ async function runAgent() {
             goal: currentGoal.value,
             autoPilot: true,
             sessionId: sessionId,  // 修复: Tauri 要求 camelCase，snake_case 会被忽略导致频道对不上
+            logContext: logContext.value,
         });
     } catch (e: any) {
         const msg = typeof e === "string" ? e : e?.message || "任务初始化失败";

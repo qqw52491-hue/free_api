@@ -290,6 +290,7 @@ pub async fn run_agent_main_loop(
     goal: String,
     auto_pilot: bool,
     session_id: Option<String>,
+    log_context: Option<bool>,
 ) -> Result<(), String> {
     let final_session_id = session_id.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -477,6 +478,7 @@ pub async fn run_agent_main_loop(
                 Some(&app),
                 step_id,
                 &final_session_id,
+                log_context.unwrap_or(false),
             )
             .await
             {
@@ -808,8 +810,8 @@ pub async fn run_agent_main_loop(
         }
 
         // --- 核心增强：Token 优化与冷存储检索 ---
-        // AI 在本轮请求 "require_memory: true"，下一轮组装消息时就会塞入全部 Fact 内容
-        context.carry_memories = instruction.require_memory.unwrap_or(false);
+        // AI 在本轮请求 "require_memory: true" 或触发了清空历史，下一轮组装消息时就会塞入全部 Fact 内容
+        context.carry_memories = instruction.require_memory.unwrap_or(false) || instruction.clear_history.unwrap_or(false);
 
         // --- 预加载下一轮工具说明书 ---
         let next_tool = instruction

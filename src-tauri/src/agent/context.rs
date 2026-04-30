@@ -134,14 +134,20 @@ impl SandwichContext {
         let mut static_prefix = format!("【用户终极任务目标】\n{}\n\n", self.user_goal);
 
         if !self.memories.is_empty() {
-            if self.carry_memories {
+            if self.carry_memories || self.turns_history.len() <= 2 {
                 let facts: Vec<String> = self
                     .memories
                     .iter()
                     .map(|(k, v)| format!("  {}: {}", k, v))
                     .collect();
+                let title = if self.turns_history.len() <= 2 {
+                    "【核心事实与长期记忆库 (刚经历历史清理，强制全量展示以防失忆)】"
+                } else {
+                    "【核心事实与长期记忆库 (全量载入)】"
+                };
                 static_prefix.push_str(&format!(
-                    "【核心事实与长期记忆库 (全量载入)】\n{}\n\n",
+                    "{}\n{}\n\n",
+                    title,
                     facts.join("\n")
                 ));
             } else {
@@ -178,17 +184,21 @@ impl SandwichContext {
         let todo_json = serde_json::to_string_pretty(&self.todo_list).unwrap_or_default();
         dynamic_suffix.push_str(&format!("【当前任务面板 (Todo List)】\n{}\n\n", todo_json));
 
-        if !self.current_observation.is_empty() {
-            dynamic_suffix.push_str(&format!(
-                "\n【当前最新环境观测 (Observation)】\n{}",
-                self.current_observation
-            ));
-        }
-
         messages.push(ChatMessage {
             role: "user".to_string(),
             content: json!(dynamic_suffix),
         });
+
+        // 4.5 独立突出最新观测 (Observation)，防止被上面 10k 字的工具手册淹没
+        if !self.current_observation.is_empty() {
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!(
+                    "【当前最新环境观测 (Observation)】\n(⚠️系统提示：这是你刚才操作后获取的最新的、未折叠的完整数据！请直接从这里读取你需要的信息，不要重复请求！)\n{}",
+                    self.current_observation
+                )),
+            });
+        }
 
         // 5. 最后的强制指令
         messages.push(ChatMessage {

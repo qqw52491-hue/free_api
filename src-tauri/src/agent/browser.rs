@@ -7,7 +7,9 @@ use tokio::time::Duration;
 
 static WORKER_BROWSER: OnceLock<Arc<Browser>> = OnceLock::new();
 static AI_BROWSER: OnceLock<Arc<Browser>> = OnceLock::new();
-static GLOBAL_TABS: OnceLock<Mutex<std::collections::HashMap<String, std::collections::HashMap<String, Arc<Tab>>>>> = OnceLock::new();
+static GLOBAL_TABS: OnceLock<
+    Mutex<std::collections::HashMap<String, std::collections::HashMap<String, Arc<Tab>>>>,
+> = OnceLock::new();
 static BROWSER_MODE: AtomicU8 = AtomicU8::new(0);
 static TAB_COUNTER: AtomicU32 = AtomicU32::new(1);
 
@@ -32,7 +34,7 @@ pub fn get_or_create_browser_instance(is_ai: bool) -> Result<Arc<Browser>, Strin
         .unwrap_or_else(|| PathBuf::from("."))
         .join("free-api-agent-browser")
         .join(if is_ai { "ai_agent" } else { "worker_agent" });
-    
+
     std::fs::create_dir_all(&data_dir).ok();
 
     // 关键修复：跨平台（Mac/Windows/Linux）真正强杀占用该目录的僵尸 Chrome 进程
@@ -41,15 +43,19 @@ pub fn get_or_create_browser_instance(is_ai: bool) -> Result<Arc<Browser>, Strin
         let mut sys = sysinfo::System::new_all();
         // 强制刷新所有进程列表
         sys.refresh_all();
-        
+
         for (_pid, process) in sys.processes() {
             // 在较新的 sysinfo 版本中，cmd() 返回 &[OsString] 或类似类型，需要迭代拼接
-            let cmd_vec: Vec<String> = process.cmd().iter().map(|oss| oss.to_string_lossy().into_owned()).collect();
+            let cmd_vec: Vec<String> = process
+                .cmd()
+                .iter()
+                .map(|oss| oss.to_string_lossy().into_owned())
+                .collect();
             let cmd_str = cmd_vec.join(" ");
-            
+
             let is_chrome = cmd_str.to_lowercase().contains("chrome");
             let contains_dir = cmd_str.contains(&dir_str);
-            
+
             if is_chrome && contains_dir {
                 println!("🔫 强杀占用数据目录的幽灵进程 (PID: {})", process.pid());
                 process.kill();
@@ -61,7 +67,7 @@ pub fn get_or_create_browser_instance(is_ai: bool) -> Result<Arc<Browser>, Strin
         if lock_file.exists() {
             let _ = std::fs::remove_file(lock_file);
         }
-        
+
         // 等待底层文件句柄彻底释放
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -111,7 +117,11 @@ pub fn get_or_create_browser_instance(is_ai: bool) -> Result<Arc<Browser>, Strin
 
     let browser_arc = Arc::new(browser);
     let _ = lock_obj.set(browser_arc.clone());
-    println!("✅ [Instance: {}] 物理浏览器实例启动成功，路径：{}", if is_ai { "AI" } else { "Worker" }, data_dir.display());
+    println!(
+        "✅ [Instance: {}] 物理浏览器实例启动成功，路径：{}",
+        if is_ai { "AI" } else { "Worker" },
+        data_dir.display()
+    );
     Ok(browser_arc)
 }
 
@@ -133,7 +143,10 @@ pub fn get_or_create_tab(session_id: &str) -> Result<Arc<Tab>, String> {
         if existing_tab.evaluate("1", false).is_ok() {
             return Ok(existing_tab.clone());
         } else {
-            println!("🔄 [Session: {}] 核心标签页 main 可能已关闭，正在尝试重连/复活...", session_id);
+            println!(
+                "🔄 [Session: {}] 核心标签页 main 可能已关闭，正在尝试重连/复活...",
+                session_id
+            );
             session_tabs.remove("main");
         }
     }
@@ -332,7 +345,9 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             let target_id = arg1.clone().unwrap_or_else(|| "main".to_string());
             GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
             let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
-            let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+            let session_tabs = all_tabs
+                .entry(session_id.to_string())
+                .or_insert_with(std::collections::HashMap::new);
             if let Some(tab) = session_tabs.get(&target_id) {
                 let _ = tab.activate();
                 return (
@@ -352,7 +367,9 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             let _ = get_or_create_browser(session_id);
             GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
             let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
-            let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+            let session_tabs = all_tabs
+                .entry(session_id.to_string())
+                .or_insert_with(std::collections::HashMap::new);
             let mut list_str = vec![];
             for (id, tab) in session_tabs.iter() {
                 let url = tab.get_url();
@@ -373,7 +390,9 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             }
             GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
             let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
-            let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+            let session_tabs = all_tabs
+                .entry(session_id.to_string())
+                .or_insert_with(std::collections::HashMap::new);
             if session_tabs.remove(&target_id).is_some() {
                 return (
                     format!("✅ 已关闭/移除辅助页: {}", target_id),
@@ -412,14 +431,18 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             let tab = {
                 GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
                 let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
-                let session_tabs = all_tabs.entry(session_id.to_string()).or_insert_with(std::collections::HashMap::new);
+                let session_tabs = all_tabs
+                    .entry(session_id.to_string())
+                    .or_insert_with(std::collections::HashMap::new);
                 if let Some(existing_tab) = session_tabs.get(&ai_type) {
                     let _ = existing_tab.activate();
                     existing_tab.clone()
                 } else {
                     let new_tab = match ai_browser.new_tab() {
                         Ok(t) => t,
-                        Err(e) => return (String::new(), format!("创建AI救援页面失败: {:?}", e), false),
+                        Err(e) => {
+                            return (String::new(), format!("创建AI救援页面失败: {:?}", e), false)
+                        }
                     };
                     let _ = new_tab.navigate_to(agent.default_url());
                     session_tabs.insert(ai_type.clone(), new_tab.clone());
@@ -435,10 +458,16 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 .replace('`', "\\`");
 
             let js_action = agent.js_send_message(&escaped_prompt);
-            println!("📡 [Session: {}] 正在将求救信号发送至网页版 Kimi，请稍候...", session_id);
+            println!(
+                "📡 [Session: {}] 正在将求救信号发送至网页版 Kimi，请稍候...",
+                session_id
+            );
             let _ = tab.evaluate(&js_action, true);
 
-            println!("⏳ [Session: {}] Kimi 正在思考诊断方案 (最长等待45秒)...", session_id);
+            println!(
+                "⏳ [Session: {}] Kimi 正在思考诊断方案 (最长等待45秒)...",
+                session_id
+            );
             let _ = tab.evaluate(agent.js_wait_response(), true);
             std::thread::sleep(Duration::from_millis(500));
 
@@ -461,12 +490,22 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 }
             }
 
-            println!("🌟 [Session: {}] Kimi 救援响应已到手 ({} 字符)", session_id, answer.len());
+            println!(
+                "🌟 [Session: {}] Kimi 救援响应已到手 ({} 字符)",
+                session_id,
+                answer.len()
+            );
             if answer.len() > 100 {
                 let preview: String = answer.chars().take(100).collect();
-                println!("--- [Kimi 建议摘要] ---\n{}...\n-----------------------", preview);
+                println!(
+                    "--- [Kimi 建议摘要] ---\n{}...\n-----------------------",
+                    preview
+                );
             } else {
-                println!("--- [Kimi 建议全文] ---\n{}\n-----------------------", &answer);
+                println!(
+                    "--- [Kimi 建议全文] ---\n{}\n-----------------------",
+                    &answer
+                );
             }
 
             return (
@@ -628,8 +667,19 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                     return !topEl || el.contains(topEl) || topEl.contains(el);
                 };
 
-                // 选择候选元素
-                let candidates = Array.from(document.querySelectorAll('a, button, input, textarea, select, [role="button"], [role="link"], [contenteditable="true"], .btn, .button')).filter(isVisible);
+                // 选择候选元素：标准交互标签 + onclick/data-href + cursor:pointer 的 JS 可点击元素
+                const candidates = Array.from(document.querySelectorAll(
+                    'a, button, input, textarea, select, [role="button"], [role="link"], [contenteditable="true"], .btn, .button, [onclick], [data-href], [data-url]'
+                )).filter(isVisible);
+
+                // 补充带有 cursor:pointer 的块元素（新闻卡片、列表项等JS驱动的可点击容器）
+                const pointerEls = Array.from(document.querySelectorAll('div, li, span, article, section, h1, h2, h3'))
+                    .filter(el => {
+                        if (!isVisible(el)) return false;
+                        const style = window.getComputedStyle(el);
+                        return style.cursor === 'pointer';
+                    });
+                const allCandidates = Array.from(new Set([...candidates, ...pointerEls]));
 
                 // 补充文本节点
                 let treeWalker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
@@ -644,7 +694,7 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                    }
                 }
 
-                let all = Array.from(new Set([...candidates, ...textNodes])).filter(isTopLevel);
+                let all = Array.from(new Set([...allCandidates, ...textNodes])).filter(isTopLevel);
 
                 let resultLines = all.map((el, index) => {
                     const id = index + 1;
@@ -734,7 +784,11 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
 
             let val = arg2.unwrap_or_default();
             if val.is_empty() {
-                return (String::new(), "❌ type 指令：输入内容为空".to_string(), false);
+                return (
+                    String::new(),
+                    "❌ type 指令：输入内容为空".to_string(),
+                    false,
+                );
             }
 
             // --- 有 id：先发 click 事件拿到物理焦点，立即 type_str（原子操作）---
@@ -758,11 +812,16 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 );
                 match tab.evaluate(&js_click, false) {
                     Ok(res) => {
-                        let status = res.value
+                        let status = res
+                            .value
                             .and_then(|v| v.as_str().map(|s| s.to_string()))
                             .unwrap_or_default();
                         if status != "OK" {
-                            return (String::new(), format!("❌ type：找不到元素 [{}]，点击失败", id), false);
+                            return (
+                                String::new(),
+                                format!("❌ type：找不到元素 [{}]，点击失败", id),
+                                false,
+                            );
                         }
                     }
                     Err(e) => return (String::new(), format!("❌ type：点击出错: {:?}", e), false),
@@ -774,7 +833,11 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
 
             // CDP 键盘事件逐字符写入
             match tab.type_str(&val) {
-                Ok(_) => (format!("✅ 输入完成 [id={}]: {}", id, val), String::new(), true),
+                Ok(_) => (
+                    format!("✅ 输入完成 [id={}]: {}", id, val),
+                    String::new(),
+                    true,
+                ),
                 Err(e) => (String::new(), format!("❌ 键盘输入失败: {:?}", e), false),
             }
         }
@@ -821,7 +884,11 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
         "press" => {
             let key = arg1.unwrap_or_else(|| "Enter".to_string());
             if let Err(e) = tab.press_key(&key) {
-                return (String::new(), format!("❌ 按键 {} 失败: {:?}", key, e), false);
+                return (
+                    String::new(),
+                    format!("❌ 按键 {} 失败: {:?}", key, e),
+                    false,
+                );
             }
             (format!("✅ 成功按下 [{}] 键", key), String::new(), true)
         }
@@ -875,7 +942,11 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             let x: f64 = arg1.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let y: f64 = arg2.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             if x == 0.0 && y == 0.0 {
-                return (String::new(), "❌ click_xy 需要 x 和 y 参数".to_string(), false);
+                return (
+                    String::new(),
+                    "❌ click_xy 需要 x 和 y 参数".to_string(),
+                    false,
+                );
             }
             // CDP 原生鼠标事件：mouseMoved → mousePressed → mouseReleased
             let js = format!(
@@ -911,7 +982,11 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             match tab.evaluate(&js, true) {
                 Ok(_) => {
                     std::thread::sleep(Duration::from_millis(500));
-                    (format!("✅ 坐标点击成功 ({}, {})", x, y), String::new(), true)
+                    (
+                        format!("✅ 坐标点击成功 ({}, {})", x, y),
+                        String::new(),
+                        true,
+                    )
                 }
                 Err(e) => (String::new(), format!("❌ 坐标点击失败: {:?}", e), false),
             }
@@ -1002,15 +1077,15 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 resolve(JSON.stringify({w, h, scale}));
             });
             "#;
-            let scale_info = tab.evaluate(scale_js, true).ok()
+            let scale_info = tab
+                .evaluate(scale_js, true)
+                .ok()
                 .and_then(|r| r.value)
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| r#"{"w":800,"h":600,"scale":1.0}"#.to_string());
 
             // 用 Jpeg + quality=50 截图，大幅压缩体积
-            use headless_chrome::protocol::cdp::Page::{
-                CaptureScreenshotFormatOption, Viewport,
-            };
+            use headless_chrome::protocol::cdp::Page::{CaptureScreenshotFormatOption, Viewport};
             // 解析宽高用于 clip（直接截全图但用 JPEG 压缩）
             match tab.capture_screenshot(
                 CaptureScreenshotFormatOption::Jpeg,
@@ -1030,8 +1105,13 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                     "#;
                     let _ = tab.evaluate(som_cleanup_js, false);
 
-                    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
-                    println!("📸 截图大小: {} bytes → base64 {} chars (带SoM视觉标记)", data.len(), b64.len());
+                    let b64 =
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+                    println!(
+                        "📸 截图大小: {} bytes → base64 {} chars (带SoM视觉标记)",
+                        data.len(),
+                        b64.len()
+                    );
                     (
                         format!("data:image/jpeg;base64,{}", b64),
                         String::new(),
