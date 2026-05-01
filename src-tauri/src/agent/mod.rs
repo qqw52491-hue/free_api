@@ -820,16 +820,19 @@ pub async fn run_agent_main_loop(
 
         // --- 网关层硬拦截：死循环检测 ---
         action_history.push_back(instruction.get_action().to_lowercase());
-        if action_history.len() > 3 {
+        if action_history.len() > 4 {
             action_history.pop_front();
         }
         
-        let is_loop = if action_history.len() >= 2 {
+        // 连续 3 次 extract 才触发（放宽阈值，避免合理的"extract→等待→extract"被误判）
+        let is_loop = if action_history.len() >= 3 {
             let len = action_history.len();
-            let last_two = (&action_history[len - 2], &action_history[len - 1]);
-            last_two.0 == "extract" && last_two.1 == "extract"
+            action_history[len - 3] == "extract"
+                && action_history[len - 2] == "extract"
+                && action_history[len - 1] == "extract"
         } else { false };
-        
+
+        // extract → scroll → extract 这个死循环模式依然保留
         let is_loop_3 = if action_history.len() >= 3 {
             let len = action_history.len();
             let last_three = (&action_history[len - 3], &action_history[len - 2], &action_history[len - 1]);
