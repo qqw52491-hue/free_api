@@ -406,6 +406,7 @@ pub async fn run_agent_main_loop(
         system_prompt
     );
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
+    let mut action_history: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     for step_id in 0..MAX_STEPS {
         app.emit(
@@ -414,10 +415,7 @@ pub async fn run_agent_main_loop(
         )
         .map_err(|e| e.to_string())?;
 
-        // 每步开始前清空上一步的视野（Observation 是"一次性消耗品"）
-        // 即便重试循环多次，AI 也不会在失败时意外看到上一步的旧 DOM
-        context.current_observation.clear();
-
+        // 修复：绝不可以在这里清空 current_observation，因为这会导致 AI 看不到刚获取的页面数据
         // ================================================================
         // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
         // ================================================================
@@ -531,6 +529,8 @@ pub async fn run_agent_main_loop(
                         format!("🔄 格式错误(第{}次)，正在自我修复...", retry_count),
                     )
                     .map_err(|er| er.to_string())?;
+                    // 【修复失忆死循环Bug】: 必须记录引发报错的原始错误输出，否则 AI 下一轮根本不知道自己犯了什么格式错误
+                    context.add_assistant_raw_message(&raw_output);
                     context.add_error_feedback(&e);
                     continue;
                 }
@@ -643,6 +643,42 @@ pub async fn run_agent_main_loop(
                 retry_count += 1;
                 tool_retry_count += 1;
                 let error_detail = format!("【❌ 执行失败】: {}", dispatch_result.stderr);
+
+                if let Ok(raw_json) = serde_json::to_string(&inst) {
+                    context.add_assistant_raw_message(&raw_json);
+                }
+
+                // 【修复：重试时的工具盲区】如果 AI 尝试使用的工具和当前加载的说明书不一致，立即为其加载正确的说明书，防止它在 retry 时因为看不到语法而继续瞎猜报错。
+                let attempted_tool = inst.get_action();
+                if context.active_tool.as_deref() != Some(&attempted_tool) && attempted_tool != "finish" {
+                    context.active_tool = Some(attempted_tool.clone());
+                    let tool_filename = format!("{}.md", attempted_tool);
+                    let resource_dir = app.path().resource_dir().unwrap_or_default();
+                    let tool_path_production = resource_dir.join("prompts/tools").join(&tool_filename);
+                    let tool_path_dev = std::path::PathBuf::from("prompts/tools").join(&tool_filename);
+                    
+                    if let Ok(tool_md) = std::fs::read_to_string(&tool_path_production)
+                        .or_else(|_| std::fs::read_to_string(&tool_path_dev))
+                    {
+                        context.active_tool_detail = tool_md;
+                        println!("🔄 [重试修正] 为 AI 紧急加载了工具说明书: {}", attempted_tool);
+                    } else {
+                        // 尝试从 MCP 插件中获取
+                        let plugin_name = attempted_tool.split('/').next().unwrap_or(&attempted_tool);
+                        let detail = {
+                            let mut registry = futures::executor::block_on(registry_state.inner().lock());
+                            if registry.plugin_names().contains(&plugin_name) {
+                                registry.format_tool_detail(plugin_name)
+                            } else {
+                                String::new()
+                            }
+                        };
+                        if !detail.is_empty() {
+                            context.active_tool_detail = detail;
+                            println!("🔄 [重试修正] 为 AI 紧急加载了 MCP 插件说明书: {}", attempted_tool);
+                        }
+                    }
+                }
 
                 if tool_retry_count == 1 {
                     if !model_routing.enable_rescue {
@@ -794,6 +830,34 @@ pub async fn run_agent_main_loop(
         // 以下是成功跳出规划+执行重试循环后的处理逻辑
         // ================================================================
 
+        // --- 网关层硬拦截：死循环检测 ---
+        action_history.push_back(instruction.get_action().to_lowercase());
+        if action_history.len() > 3 {
+            action_history.pop_front();
+        }
+        
+        let is_loop = if action_history.len() >= 2 {
+            let len = action_history.len();
+            let last_two = (&action_history[len - 2], &action_history[len - 1]);
+            last_two.0 == "extract" && last_two.1 == "extract"
+        } else { false };
+        
+        let is_loop_3 = if action_history.len() >= 3 {
+            let len = action_history.len();
+            let last_three = (&action_history[len - 3], &action_history[len - 2], &action_history[len - 1]);
+            last_three.0 == "extract" && last_three.1 == "scroll" && last_three.2 == "extract"
+        } else { false };
+
+        if is_loop || is_loop_3 {
+            let error_detail = "【🚨 网关强制阻断】: 系统检测到你陷入了认知死胡同（连续无意义的 extract 循环）！当前页面的目标元素大概率不存在，或者你理解错了页面状态！请立刻通过 `back` 返回上一页，或者更改搜索关键词重新 `goto`，严禁再次执行 extract！";
+            context.add_error_feedback(error_detail);
+            app.emit(
+                &format!("agent-log-{}", final_session_id),
+                "🚨 网关层拦截：发现违规连续 extract 操作，强制注入纠偏机制！",
+            ).ok();
+            action_history.clear(); // 阻断后清空历史，重新积累
+        }
+
         // --- 更新任务规划 + 核心记忆 ---
         if !instruction.todo_update.is_empty() {
             context.todo_list = instruction.todo_update.clone();
@@ -820,7 +884,8 @@ pub async fn run_agent_main_loop(
             .unwrap_or_else(|| instruction.get_action());
         context.active_tool = Some(next_tool.clone());
 
-        let tool_filename = format!("{}.md", next_tool);
+        // --- 加载下一轮工具说明书 ---
+        let tool_filename = format!("{}.md", context.active_tool.as_deref().unwrap_or("core"));
         let resource_dir = app.path().resource_dir().unwrap_or_default();
         let tool_path_production = resource_dir.join("prompts/tools").join(&tool_filename);
         let tool_path_dev = std::path::PathBuf::from("prompts/tools").join(&tool_filename);

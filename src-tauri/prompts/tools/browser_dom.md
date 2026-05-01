@@ -40,9 +40,18 @@
 - **死胡同撤退策略 (Dead-End Retreat)**：如果你点击了一个分类或链接，发现里面没有你要的数据，必须立刻调用 `back` 返回上一页，并在 TODO 中将该尝试标记为 `canceled`，然后换搜索词或其他策略。
 - **抗门口效应 (Sign-In Wall)**：如果 `read` 结果包含过多"Login", "Sign In"，且当前滚动高度为 0，说明数据被折叠或在视口下方。你必须先 `scroll down` 两次来探测真实正文。
 
+## 🔥 多标签页自动管理 (Tab Auto-Tracking)
+> **系统会自动检测 click/click_xy 后弹出的新标签页，并帮你切换过去！**
+
+- 当你点击一个 `target="_blank"` 的链接时，系统会自动捕获新打开的标签页（命名为 `popup_1`, `popup_2` 等），并立刻将你的视野切换到新页面。
+- 你在 `extract` 输出中会看到 `【📂 标签页管理器】` 区块，显示所有打开的标签页及当前活跃页。
+- **核心规则：读完弹出页的数据后，必须立刻执行 `close_tab popup_X` 关闭它！** 否则标签页越积越多会导致混乱。
+- 关闭弹出页后，系统会自动切回 `main` 主页面，你可以继续浏览列表。
+- 如需手动切换，使用 `switch_tab <id>` 和 `list_tabs` 查看所有标签页。
+
 ## DOM 刷新铁律 (Critical State Rules)
 - **ID 必定失效规则**：每次发生 `goto`、`click`(导致跳转)、`back` 或 `refresh` 后，当前页面的所有元素 ID **瞬间作废**！你必须在下一步立即执行 `extract` 生成新 ID，严禁凭记忆点击旧 ID。
-- **列表循环范式 (List-Detail-Back)**：`extract` -> `click` (进详情) -> `read`/`extract` (抓数据并存 memory) -> `back` (退回列表) -> `wait_idle` (等 DOM 稳定) -> **必杀技**：重新 `extract` (获取新列表ID)。
+- **列表循环范式 (新标签页版)**：`extract` -> `click` (进详情，如弹出新标签页系统自动切换) -> `read`/`extract` (抓数据并存 memory) -> `close_tab popup_X` (关闭弹出页，自动回到 main 列表页) -> `extract` (重新获取列表 ID)。
 
 ## ⚡ type 原子指令铁律（重要升级）
 > **`type` 指令现在是"点击+输入"的原子操作，不需要，也不应该在 type 前单独调 click！**

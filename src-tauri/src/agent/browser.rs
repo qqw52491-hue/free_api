@@ -12,6 +12,8 @@ static GLOBAL_TABS: OnceLock<
 > = OnceLock::new();
 static BROWSER_MODE: AtomicU8 = AtomicU8::new(0);
 static TAB_COUNTER: AtomicU32 = AtomicU32::new(1);
+/// 每个 session 当前激活的标签页历史栈 (栈顶为当前页)
+static ACTIVE_TAB: OnceLock<Mutex<std::collections::HashMap<String, Vec<String>>>> = OnceLock::new();
 
 /// 外部调用：设置浏览器模式（在首次使用浏览器之前调用）
 pub fn set_browser_mode(mode: u8) {
@@ -129,6 +131,158 @@ pub fn get_or_create_browser(session_id: &str) -> Result<Arc<Browser>, String> {
     get_or_create_browser_instance(false)
 }
 
+// ========================= 标签页追踪系统 =========================
+
+/// 获取当前 session 的活跃标签页名称
+pub fn get_active_tab_name(session_id: &str) -> String {
+    ACTIVE_TAB
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap()
+        .get(session_id)
+        .and_then(|stack| stack.last().cloned())
+        .unwrap_or_else(|| "main".to_string())
+}
+
+/// 设置当前 session 的活跃标签页 (压入历史栈)
+pub fn set_active_tab_name(session_id: &str, name: &str) {
+    let mut map = ACTIVE_TAB
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap();
+    let stack = map.entry(session_id.to_string()).or_insert_with(|| vec!["main".to_string()]);
+    if stack.last().map(|s| s.as_str()) != Some(name) {
+        stack.push(name.to_string());
+    }
+}
+
+/// 移除指定的标签页历史记录
+pub fn remove_active_tab_history(session_id: &str, name: &str) {
+    let mut map = ACTIVE_TAB
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap();
+    if let Some(stack) = map.get_mut(session_id) {
+        stack.retain(|x| x != name);
+        if stack.is_empty() {
+            stack.push("main".to_string());
+        }
+    }
+}
+
+/// 快照当前所有物理标签页的 target_id，用于 click 前后的差异检测
+pub fn snapshot_physical_tab_ids(session_id: &str) -> std::collections::HashSet<String> {
+    let browser = match get_or_create_browser(session_id) {
+        Ok(b) => b,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+    let ids = match browser.get_tabs().lock() {
+        Ok(tabs) => tabs.iter().map(|t| t.get_target_id().to_string()).collect(),
+        Err(_) => std::collections::HashSet::new(),
+    };
+    ids
+}
+
+/// 检测 click/click_xy 后是否弹出了新标签页，自动注册并切换
+/// 返回 (新标签名, 标题, URL) 列表
+pub fn sync_new_tabs(
+    session_id: &str,
+    before_ids: &std::collections::HashSet<String>,
+) -> Vec<(String, String, String)> {
+    let mut new_tabs = vec![];
+
+    // 最多重试 2 次，处理 Ajax 延迟弹窗的情况
+    for i in 0..2 {
+        if i == 0 {
+            std::thread::sleep(Duration::from_millis(600));
+        } else {
+            std::thread::sleep(Duration::from_millis(800)); // 再次等待
+        }
+
+        let browser = match get_or_create_browser(session_id) {
+            Ok(b) => b,
+            Err(_) => return vec![],
+        };
+        let physical_tabs = match browser.get_tabs().lock() {
+            Ok(tabs) => tabs.clone(),
+            Err(_) => return vec![],
+        };
+
+        GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+        let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
+        let session_tabs = all_tabs
+            .entry(session_id.to_string())
+            .or_insert_with(std::collections::HashMap::new);
+
+        for tab in physical_tabs.iter() {
+            let target_id = tab.get_target_id().to_string();
+            // 只关注 click 后新增的标签页
+            if before_ids.contains(&target_id) {
+                continue;
+            }
+            // 过滤掉空白页
+            let url = tab.get_url();
+            if url == "about:blank" || url.is_empty() {
+                continue;
+            }
+            // 检查是否已经在我们的逻辑注册表里
+            let already_registered = session_tabs
+                .values()
+                .any(|t| t.get_target_id() == tab.get_target_id());
+            if already_registered {
+                continue;
+            }
+            let tab_name = format!("popup_{}", TAB_COUNTER.fetch_add(1, Ordering::Relaxed));
+            let title = tab.get_title().unwrap_or_else(|_| String::new());
+            println!(
+                "📂 [Session: {}] 自动捕获新标签页 [{}]: {} ({})",
+                session_id, tab_name, title, url
+            );
+            session_tabs.insert(tab_name.clone(), tab.clone());
+            new_tabs.push((tab_name, title, url));
+        }
+
+        if !new_tabs.is_empty() {
+            break;
+        }
+    }
+
+    // 如果有新标签页，自动切换到第一个（最可能是用户想看的那个）
+    if let Some((ref name, _, _)) = new_tabs.first() {
+        set_active_tab_name(session_id, name);
+        println!(
+            "🔄 [Session: {}] 已自动切换到新标签页 [{}]",
+            session_id, name
+        );
+    }
+
+    new_tabs
+}
+
+/// 生成当前 session 的标签页状态摘要（注入到 extract/read 输出中）
+pub fn format_tab_status(session_id: &str) -> String {
+    GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
+    let active_name = get_active_tab_name(session_id);
+    if let Some(session_tabs) = all_tabs.get(session_id) {
+        if session_tabs.len() <= 1 {
+            return String::new(); // 只有 main 一个页面，不需要显示
+        }
+        let mut lines = vec![format!("【📂 标签页管理器】当前活跃: [{}]", active_name)];
+        for (id, tab) in session_tabs.iter() {
+            let url = tab.get_url();
+            let title = tab.get_title().unwrap_or_else(|_| String::new());
+            let short_title: String = title.chars().take(30).collect();
+            let marker = if *id == active_name { " 👈 当前" } else { "" };
+            lines.push(format!("  - [{}]: {} ({}){}" , id, short_title, url, marker));
+        }
+        lines.push("提示: 用 switch_tab <id> 切换，close_tab <id> 关闭（读完详情后请及时关闭弹出页！）".to_string());
+        lines.join("\n")
+    } else {
+        String::new()
+    }
+}
+
 pub fn get_or_create_tab(session_id: &str) -> Result<Arc<Tab>, String> {
     let browser = get_or_create_browser(session_id)?;
 
@@ -138,29 +292,42 @@ pub fn get_or_create_tab(session_id: &str) -> Result<Arc<Tab>, String> {
         .entry(session_id.to_string())
         .or_insert_with(std::collections::HashMap::new);
 
-    if let Some(existing_tab) = session_tabs.get("main") {
-        // 心跳检测：通过尝试执行 JS 来探测连接是否还活着
-        if existing_tab.evaluate("1", false).is_ok() {
-            return Ok(existing_tab.clone());
+    let active_name = get_active_tab_name(session_id);
+
+    // 优先返回当前活跃标签页
+    if let Some(active_tab) = session_tabs.get(&active_name) {
+        if active_tab.evaluate("1", false).is_ok() {
+            return Ok(active_tab.clone());
         } else {
             println!(
-                "🔄 [Session: {}] 核心标签页 main 可能已关闭，正在尝试重连/复活...",
-                session_id
+                "🔄 [Session: {}] 活跃标签页 [{}] 已失效，回退到 main",
+                session_id, active_name
             );
-            session_tabs.remove("main");
+            session_tabs.remove(&active_name);
+            set_active_tab_name(session_id, "main");
         }
     }
 
-    if !session_tabs.contains_key("main") {
-        println!("🚀 [Session: {}] 正在拉起业务工作现场 main...", session_id);
-        let tab = browser
-            .new_tab()
-            .map_err(|e| format!("新建主标签页失败: {:?}", e))?;
-        session_tabs.insert("main".to_string(), tab.clone());
-        Ok(tab)
-    } else {
-        Ok(session_tabs.get("main").unwrap().clone())
+    // 回退到 main
+    if let Some(main_tab) = session_tabs.get("main") {
+        if main_tab.evaluate("1", false).is_ok() {
+            return Ok(main_tab.clone());
+        }
+        println!(
+            "🔄 [Session: {}] 核心标签页 main 也已失效，正在重建...",
+            session_id
+        );
+        session_tabs.remove("main");
     }
+
+    // 重建 main
+    println!("🚀 [Session: {}] 正在拉起业务工作现场 main...", session_id);
+    let tab = browser
+        .new_tab()
+        .map_err(|e| format!("新建主标签页失败: {:?}", e))?;
+    session_tabs.insert("main".to_string(), tab.clone());
+    set_active_tab_name(session_id, "main");
+    Ok(tab)
 }
 
 /// 通过 HTTP 获取 Chrome 的 WebSocket debugger URL
@@ -350,15 +517,19 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 .or_insert_with(std::collections::HashMap::new);
             if let Some(tab) = session_tabs.get(&target_id) {
                 let _ = tab.activate();
+                set_active_tab_name(session_id, &target_id);
+                let title = tab.get_title().unwrap_or_else(|_| String::new());
+                let url = tab.get_url();
                 return (
-                    format!("✅ 已物理切换焦点至标签页: {}", target_id),
+                    format!("✅ 已切换至标签页 [{}]: {} ({})", target_id, title, url),
                     String::new(),
                     true,
                 );
             } else {
                 return (
                     String::new(),
-                    format!("❌ 标签页: {} 不存在", target_id),
+                    format!("❌ 标签页 [{}] 不存在。可用: {}", target_id, 
+                        session_tabs.keys().cloned().collect::<Vec<_>>().join(", ")),
                     false,
                 );
             }
@@ -386,23 +557,62 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             let _ = get_or_create_browser(session_id);
             let target_id = arg1.clone().unwrap_or_else(|| "main".to_string());
             if target_id == "main" {
-                return (String::new(), "❌ 不能关闭主工作页 main".to_string(), false);
+                // 给出有指导意义的错误：告诉模型当前在哪个页面、可以关闭哪些 popup
+                let current = get_active_tab_name(session_id);
+                let popups: Vec<String> = {
+                    GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+                    let all = GLOBAL_TABS.get().unwrap().lock().unwrap();
+                    all.get(session_id)
+                        .map(|tabs| {
+                            tabs.keys()
+                                .filter(|k| k.as_str() != "main")
+                                .cloned()
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let hint = if popups.is_empty() {
+                    format!(
+                        "❌ 不能关闭主工作页 main。当前活跃页是 [{}]，目前没有弹出标签页，无需关闭。",
+                        current
+                    )
+                } else {
+                    format!(
+                        "❌ 不能关闭主工作页 main。当前活跃页是 [{}]，可关闭的弹出页为: {}。请改用 close_tab {} 。",
+                        current,
+                        popups.join(", "),
+                        popups[0]
+                    )
+                };
+                return (String::new(), hint, false);
             }
             GLOBAL_TABS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
             let mut all_tabs = GLOBAL_TABS.get().unwrap().lock().unwrap();
             let session_tabs = all_tabs
                 .entry(session_id.to_string())
                 .or_insert_with(std::collections::HashMap::new);
-            if session_tabs.remove(&target_id).is_some() {
+            if let Some(closed_tab) = session_tabs.remove(&target_id) {
+                // 真正物理关闭标签页（调用 headless_chrome 的 close 方法销毁 target）
+                let _ = closed_tab.close(true);
+                
+                // 从历史栈中剔除该页
+                remove_active_tab_history(session_id, &target_id);
+                
+                // 获取当前新的栈顶（即父页面）
+                let new_active = get_active_tab_name(session_id);
+                if let Some(active_tab) = session_tabs.get(&new_active) {
+                    let _ = active_tab.activate();
+                }
+                
                 return (
-                    format!("✅ 已关闭/移除辅助页: {}", target_id),
+                    format!("✅ 已关闭标签页 [{}]，自动切回父页面 [{}]", target_id, new_active),
                     String::new(),
                     true,
                 );
             } else {
                 return (
                     String::new(),
-                    format!("❌ 角色页: {} 不存在", target_id),
+                    format!("❌ 标签页 [{}] 不存在", target_id),
                     false,
                 );
             }
@@ -655,7 +865,7 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                     const style = window.getComputedStyle(el);
                     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || style.pointerEvents === 'none') return false;
                     const rect = el.getBoundingClientRect();
-                    return rect.width > 2 && rect.height > 2; // 过滤掉太小的元素
+                    return rect.width > 2 && rect.height > 2;
                 };
 
                 const isTopLevel = (el) => {
@@ -667,12 +877,10 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                     return !topEl || el.contains(topEl) || topEl.contains(el);
                 };
 
-                // 选择候选元素：标准交互标签 + onclick/data-href + cursor:pointer 的 JS 可点击元素
                 const candidates = Array.from(document.querySelectorAll(
                     'a, button, input, textarea, select, [role="button"], [role="link"], [contenteditable="true"], .btn, .button, [onclick], [data-href], [data-url]'
                 )).filter(isVisible);
 
-                // 补充带有 cursor:pointer 的块元素（新闻卡片、列表项等JS驱动的可点击容器）
                 const pointerEls = Array.from(document.querySelectorAll('div, li, span, article, section, h1, h2, h3'))
                     .filter(el => {
                         if (!isVisible(el)) return false;
@@ -681,7 +889,6 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                     });
                 const allCandidates = Array.from(new Set([...candidates, ...pointerEls]));
 
-                // 补充文本节点
                 let treeWalker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
                 let textNodes = [];
                 let node;
@@ -699,10 +906,10 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 let resultLines = all.map((el, index) => {
                     const id = index + 1;
                     const rect = el.getBoundingClientRect();
-                    if (rect.top > window.innerHeight || rect.bottom < 0) return null; // 视口外的不显示，但保留 ID
+                    if (rect.top > window.innerHeight || rect.bottom < 0) return null;
 
                     el.setAttribute('data-tauri-agent-id', id);
-                    el.style.outline = "2px solid rgba(255, 0, 0, 0.5)"; // 红色虚线框
+                    el.style.outline = "2px solid rgba(255, 0, 0, 0.5)";
 
                     let text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || el.placeholder || "").trim();
                     if (!text) {
@@ -711,23 +918,27 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                         else text = "交互元素";
                     }
 
-                    // 优化：清理多余的换行和连续空格，限制最高30字符
                     text = text.replace(/[\r\n\s]+/g, ' ').trim();
                     const shortText = text.substring(0, 30) + (text.length > 30 ? "..." : "");
 
                     return `[${id}] <${el.tagName.toLowerCase()}> ${shortText} (X:${Math.round(rect.left + rect.width/2)}, Y:${Math.round(rect.top + rect.height/2)})`;
                 }).filter(l => l !== null);
 
-                let status = `【页面状态】: 视口 ${window.innerWidth}x${window.innerHeight}, 滚动 ${Math.round(window.scrollY)}/${document.body.scrollHeight}`;
+                let status = `【页面状态】: 标题 [${document.title}], URL [${window.location.href}], 视口 ${window.innerWidth}x${window.innerHeight}, 滚动 ${Math.round(window.scrollY)}/${document.body.scrollHeight}`;
                 return status + "\n【可用元素清单】:\n" + resultLines.join('\n');
             })();
             "#;
             match tab.evaluate(js, false) {
                 Ok(remote_obj) => {
-                    let text = remote_obj
+                    let mut text = remote_obj
                         .value
                         .and_then(|v| v.as_str().map(|s| s.to_string()))
                         .unwrap_or_default();
+                    // 追加标签页状态
+                    let tab_info = format_tab_status(session_id);
+                    if !tab_info.is_empty() {
+                        text.push_str(&format!("\n{}", tab_info));
+                    }
                     (text, String::new(), true)
                 }
                 Err(e) => (String::new(), format!("提取失败: {}", e), false),
@@ -738,6 +949,8 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                 .as_deref()
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(0);
+            // --- 动作前快照物理标签页 ---
+            let pre_ids = snapshot_physical_tab_ids(session_id);
             let js = format!(
                 r#"
                 (function() {{
@@ -746,15 +959,18 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
 
                     el.scrollIntoView({{behavior: 'instant', block: 'center'}});
 
-                    // 模拟真实交互序列
-                    const events = ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click'];
-                    events.forEach(name => {{
-                        el.dispatchEvent(new MouseEvent(name, {{bubbles: true, cancelable: true, view: window}}));
-                    }});
+                    // 判断是否是链接元素
+                    let aTag = el.closest('a') || (el.tagName.toLowerCase() === 'a' ? el : null);
 
-                    // 兜底：如果是 A 标签且没跳转，强制跳转
-                    if (el.tagName.toLowerCase() === 'a' && el.href && !el.href.startsWith('javascript:')) {{
-                        setTimeout(() => {{ window.location.href = el.href; }}, 100);
+                    if (aTag && aTag.href && !aTag.href.startsWith('javascript:')) {{
+                        // 链接元素：使用原生 click()，让浏览器自己决定如何处理 target 属性
+                        aTag.click();
+                    }} else {{
+                        // 非链接元素：模拟完整交互序列
+                        const events = ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click'];
+                        events.forEach(name => {{
+                            el.dispatchEvent(new MouseEvent(name, {{bubbles: true, cancelable: true, view: window}}));
+                        }});
                     }}
                     return "OK";
                 }})();
@@ -768,7 +984,19 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                         .and_then(|v| v.as_str().map(|s| s.to_string()))
                         .unwrap_or_default();
                     if val == "OK" {
-                        (format!("✅ 成功点击元素 [{}]", id), String::new(), true)
+                        // --- 动作后检测新标签页 ---
+                        let new_tabs = sync_new_tabs(session_id, &pre_ids);
+                        if new_tabs.is_empty() {
+                            std::thread::sleep(Duration::from_millis(300));
+                            (format!("✅ 成功点击元素 [{}]", id), String::new(), true)
+                        } else {
+                            let mut msg = format!("✅ 成功点击元素 [{}]\n", id);
+                            for (name, title, url) in &new_tabs {
+                                msg.push_str(&format!("📂 检测到新标签页打开，已自动切换至 [{}]: {} ({})\n", name, title, url));
+                            }
+                            msg.push_str("⚠️ 你现在已进入弹出页面，请完成数据提取后务必执行 close_tab 关闭它返回主页！");
+                            (msg, String::new(), true)
+                        }
                     } else {
                         (String::new(), format!("❌ 找不到元素 [{}]", id), false)
                     }
@@ -799,7 +1027,17 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                         const el = document.querySelector('[data-tauri-agent-id="{}"]');
                         if (!el) return "NOT_FOUND";
                         el.scrollIntoView({{behavior: 'instant', block: 'center'}});
-                        // 发射真实点击序列，让框架感知物理交互（不调用 focus()）
+                        // 强制获取焦点，这是让 CDP type_str 生效的先决条件！
+                        el.focus();
+                        
+                        // 清空原有内容，防止多次 type 导致内容拼接
+                        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
+                            el.value = '';
+                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }}
+
+                        // 发射真实点击序列，让框架感知物理交互
                         ['mousedown', 'mouseup', 'click'].forEach(name => {{
                             el.dispatchEvent(new MouseEvent(name, {{
                                 bubbles: true, cancelable: true, view: window
@@ -937,8 +1175,6 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
         /// 坐标点击：{"action":"click_xy","x":320,"y":150}
         /// 用于 DOM 无法识别元素时，由视觉模型（Gemma 4 等）看截图给出坐标后直接点击
         "click_xy" => {
-            // 参数从 JSON command 里传入：{"action":"click_xy","x":320,"y":150}
-            // run_browser_dom 是字符串协议，格式为 "click_xy X Y"
             let x: f64 = arg1.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let y: f64 = arg2.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             if x == 0.0 && y == 0.0 {
@@ -948,15 +1184,14 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                     false,
                 );
             }
-            // CDP 原生鼠标事件：mouseMoved → mousePressed → mouseReleased
+            // --- 动作前快照物理标签页 ---
+            let pre_ids = snapshot_physical_tab_ids(session_id);
             let js = format!(
                 r#"
                 (async function() {{
                     const delay = ms => new Promise(r => setTimeout(r, ms));
-                    // 滚动到目标位置附近（确保坐标在视口内）
                     const x = {x};
                     const y = {y};
-                    // 模拟鼠标移动、按下、松开
                     const fireMouseEvent = (type) => {{
                         document.elementFromPoint(x, y)?.dispatchEvent(
                             new MouseEvent(type, {{
@@ -981,32 +1216,49 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
             );
             match tab.evaluate(&js, true) {
                 Ok(_) => {
-                    std::thread::sleep(Duration::from_millis(500));
-                    (
-                        format!("✅ 坐标点击成功 ({}, {})", x, y),
-                        String::new(),
-                        true,
-                    )
+                    // --- 动作后检测新标签页 ---
+                    let new_tabs = sync_new_tabs(session_id, &pre_ids);
+                    if new_tabs.is_empty() {
+                        std::thread::sleep(Duration::from_millis(300));
+                        (
+                            format!("✅ 坐标点击成功 ({}, {})", x, y),
+                            String::new(),
+                            true,
+                        )
+                    } else {
+                        let mut msg = format!("✅ 坐标点击成功 ({}, {})\n", x, y);
+                        for (name, title, url) in &new_tabs {
+                            msg.push_str(&format!("📂 检测到新标签页打开，已自动切换至 [{}]: {} ({})\n", name, title, url));
+                        }
+                        msg.push_str("⚠️ 你现在已进入弹出页面，请完成数据提取后务必执行 close_tab 关闭它返回主页！");
+                        (msg, String::new(), true)
+                    }
                 }
                 Err(e) => (String::new(), format!("❌ 坐标点击失败: {:?}", e), false),
             }
         }
 
         "read" => {
-            let js = "document.body.innerText;";
+            let js = "JSON.stringify({ title: document.title, url: window.location.href, text: document.body.innerText });";
             match tab.evaluate(js, false) {
                 Ok(remote_obj) => {
-                    let t = remote_obj
+                    let val_str = remote_obj
                         .value
                         .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| "{}".to_string());
+                    
+                    let parsed: serde_json::Value = serde_json::from_str(&val_str).unwrap_or(serde_json::json!({}));
+                    let title = parsed.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    let url = parsed.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    let t = parsed.get("text").and_then(|v| v.as_str()).unwrap_or("");
+
                     let preview = if t.chars().count() > 5000 {
                         t.chars().take(5000).collect::<String>() + "\n..."
                     } else {
-                        t
+                        t.to_string()
                     };
                     (
-                        format!("【当前页正文】：\n{}", preview),
+                        format!("【当前页状态】: 标题 [{}], URL [{}]\n【正文】：\n{}", title, url, preview),
                         String::new(),
                         true,
                     )

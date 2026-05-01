@@ -105,6 +105,15 @@ impl SandwichContext {
         self.turns_history.push(msg);
     }
 
+    /// 注入 AI 原始输出记录（用于保存失败时的错误输出，避免 AI 失忆死循环）
+    pub fn add_assistant_raw_message(&mut self, text: &str) {
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: json!(text),
+        };
+        self.turns_history.push(msg);
+    }
+
     /// 注入错误反馈信息，告知 AI 修正它的输出
     pub fn add_error_feedback(&mut self, error_msg: &str) {
         let msg = ChatMessage {
