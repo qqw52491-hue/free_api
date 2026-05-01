@@ -210,7 +210,7 @@ pub fn run_builtin_step(session_id: &str, action: &str, params: &serde_json::Val
             route: "blocked_shell".to_string(),
         }),
         "finish" => Some(DispatchResult {
-            stdout: cmd_str,
+            stdout: params.to_string(),
             stderr: String::new(),
             success: true,
             route: "agent".to_string(),

@@ -1074,7 +1074,8 @@ pub async fn run_agent_main_loop(
                 json!({
                     "type": "complete",
                     "message": "任务已由 AI 标记完成",
-                    "success": true
+                    "success": true,
+                    "output": output_text
                 }),
             )
             .map_err(|e| e.to_string())?;
