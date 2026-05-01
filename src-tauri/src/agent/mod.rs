@@ -60,17 +60,7 @@ fn execute_command_inner(
         final_action = format!("goto {}", final_action);
     }
 
-    // 1. 优先处理 finish 特权指令 (防止模型在 finish command 里塞 action: complete 导致报错)
-    if tool == "finish" || action == "finish" {
-        return DispatchResult {
-            stdout: "任务已由 AI 标记完成".to_string(),
-            stderr: String::new(),
-            success: true,
-            route: "agent".to_string(),
-        };
-    }
-
-    // 2. 优先尝试本地内置工具
+    // 1. 优先尝试本地内置工具
     if let Some(res) = run_builtin_step(session_id, &final_action, params) {
         println!("执行动作调用本地内置工具: {}", final_action);
         return res;
@@ -918,29 +908,30 @@ pub async fn run_agent_main_loop(
         let mut final_stdout = result.stdout.clone();
 
         // 动态获取当前视口真实尺寸（用于告知模型坐标范围）
-        let viewport_size = {
-            let tab_result = crate::agent::browser::get_or_create_tab(&final_session_id);
-            if let Ok(tab) = tab_result {
-                let js = "JSON.stringify({w: window.innerWidth, h: window.innerHeight})";
-                tab.evaluate(js, false)
-                    .ok()
-                    .and_then(|r| r.value)
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .unwrap_or_else(|| r#"{"w":1280,"h":800}"#.to_string())
-            } else {
-                r#"{"w":1280,"h":800}"#.to_string()
-            }
-        };
-        // 解析 w/h
-        let vp: serde_json::Value =
-            serde_json::from_str(&viewport_size).unwrap_or(json!({"w":1280,"h":800}));
-        let vp_w = vp.get("w").and_then(|v| v.as_i64()).unwrap_or(1280);
-        let vp_h = vp.get("h").and_then(|v| v.as_i64()).unwrap_or(800);
+
 
         if result.success
             && (final_stdout.starts_with("data:image/png;base64,")
                 || final_stdout.starts_with("data:image/jpeg;base64,"))
         {
+            let viewport_size = {
+                let tab_result = crate::agent::browser::get_or_create_tab(&final_session_id);
+                if let Ok(tab) = tab_result {
+                    let js = "JSON.stringify({w: window.innerWidth, h: window.innerHeight})";
+                    tab.evaluate(js, false)
+                        .ok()
+                        .and_then(|r| r.value)
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| r#"{"w":1280,"h":800}"#.to_string())
+                } else {
+                    r#"{"w":1280,"h":800}"#.to_string()
+                }
+            };
+            // 解析 w/h
+            let vp: serde_json::Value =
+                serde_json::from_str(&viewport_size).unwrap_or(json!({"w":1280,"h":800}));
+            let vp_w = vp.get("w").and_then(|v| v.as_i64()).unwrap_or(1280);
+            let vp_h = vp.get("h").and_then(|v| v.as_i64()).unwrap_or(800);
             let base64_img = final_stdout
                 .trim_start_matches("data:image/png;base64,")
                 .trim_start_matches("data:image/jpeg;base64,");
@@ -1053,9 +1044,41 @@ pub async fn run_agent_main_loop(
 
         context.current_observation = output_text.clone();
 
-        // --- 前端通知 ---
+        // --- 前端通知 + 任务完成判定（合并） ---
         app.emit(&format!("agent-context-{}", final_session_id), &context)
             .map_err(|e| e.to_string())?;
+
+        if instruction.tool.as_deref() == Some("finish") || instruction.get_action() == "finish" {
+            // finish 指令：直接发 complete，不走普通的 step_done
+            // 尝试从 command 里解析 finish 的结构化内容
+            let finish_payload = instruction.command.clone().unwrap_or(serde_json::Value::Null);
+
+            // 可选：如果上下文里有截图（last screenshot），可以附带过去
+            let last_screenshot = if !final_stdout.is_empty()
+                && (final_stdout.starts_with("data:image/png;base64,")
+                    || final_stdout.starts_with("data:image/jpeg;base64,"))
+            {
+                final_stdout.clone()
+            } else {
+                String::new()
+            };
+
+            app.emit(
+                &format!("agent-progress-{}", final_session_id),
+                json!({
+                    "type": "complete",
+                    "message": "任务已由 AI 标记完成",
+                    "success": true,
+                    "output": output_text,      // 原始 JSON 字符串（兼容旧逻辑）
+                    "finish": finish_payload,   // 结构化成果对象，含 details/summary/artifacts
+                    "screenshot": last_screenshot // 最后一张截图 base64（如有）
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+            break;
+        }
+
+        // 普通步骤：发 step_done / step_error
         app.emit(
             &format!("agent-progress-{}", final_session_id),
             json!({
@@ -1066,21 +1089,6 @@ pub async fn run_agent_main_loop(
             }),
         )
         .map_err(|e| e.to_string())?;
-
-        // --- 任务完成判定 ---
-        if instruction.get_action() == "finish" {
-            app.emit(
-                &format!("agent-progress-{}", final_session_id),
-                json!({
-                    "type": "complete",
-                    "message": "任务已由 AI 标记完成",
-                    "success": true,
-                    "output": output_text
-                }),
-            )
-            .map_err(|e| e.to_string())?;
-            break;
-        }
 
         sleep(Duration::from_millis(500)).await;
     }

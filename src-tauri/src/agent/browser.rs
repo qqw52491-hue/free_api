@@ -25,6 +25,7 @@ pub fn get_browser_mode() -> u8 {
 }
 
 pub fn get_or_create_browser_instance(is_ai: bool) -> Result<Arc<Browser>, String> {
+    println!("🚨 [警报] 浏览器启动触发！正在尝试定位调用者...");
     let mode = BROWSER_MODE.load(Ordering::Relaxed);
     let lock_obj = if is_ai { &AI_BROWSER } else { &WORKER_BROWSER };
 

@@ -317,7 +317,7 @@
                                     <div class="detail-block">
                                         <div class="detail-label">🔧 指令详情</div>
                                         <pre class="detail-cmd">{{
-                                            step.command
+                                            formatJson(step.command)
                                         }}</pre>
                                     </div>
                                     <div
@@ -330,7 +330,7 @@
                                             :class="{
                                                 error: step.status === 'error',
                                             }"
-                                            >{{ step.output }}</pre
+                                            >{{ formatJson(step.output) }}</pre
                                         >
                                     </div>
                                     <div
@@ -349,19 +349,53 @@
                     </div>
                 </div>
 
-                <!-- 完成 banner -->
-                <transition name="fade">
+                <!-- 任务状态与成果区域 -->
+                <transition-group name="slide-up">
+                    <!-- 方案 A: 详细成果报告卡 (优先显示) -->
+                    <div v-if="finishOutput" :key="'result-' + panelId" class="result-card" :class="{ error: hasError }">
+                        <div class="result-card-header">
+                            <span class="result-card-icon">{{ hasError ? "⚠️" : "🎉" }}</span>
+                            <span>{{ hasError ? "任务终止报告" : "任务成果报告" }}</span>
+                            <div class="result-status-tag">{{ hasError ? "FAILED" : "COMPLETED" }}</div>
+                        </div>
+                        
+                        <!-- 综合成果展示区 (聊天式富文本流) -->
+                        <div class="result-body markdown-body">
+                            <!-- 如果有 summary 且没有 details，显示 summary -->
+                            <div v-if="finishOutput.summary && !finishOutput.details" class="result-text-block" v-html="renderMarkdown(finishOutput.summary)"></div>
+                            
+                            <!-- 如果有 details，将其作为核心报告展示 -->
+                            <div v-if="finishOutput.details || finishOutput.result_table" class="result-text-block" v-html="renderMarkdown(finishOutput.details || finishOutput.result_table)"></div>
+                        </div>
+                        
+                        <!-- 附件/文件区 -->
+                        <div class="result-artifacts" v-if="finishOutput.artifacts && finishOutput.artifacts.length">
+                            <div class="result-section-label">📁 生成文件/成果</div>
+                            <div v-for="f in finishOutput.artifacts" :key="f" class="result-artifact-path">{{ f }}</div>
+                        </div>
+
+                        <!-- 最后截图区（如果任务执行了浏览器操作，带上最后的屏幕快照） -->
+                        <div class="result-screenshot" v-if="finishOutput.screenshot">
+                            <div class="result-section-label">📸 任务完成时截图</div>
+                            <img :src="finishOutput.screenshot" class="result-screenshot-img" alt="任务完成截图" />
+                        </div>
+                    </div>
+
+
+                    <!-- 方案 B: 简易提示 Banner (仅在没有结构化数据时作为保底显示) -->
                     <div
-                        v-if="completionMessage"
+                        v-else-if="completionMessage"
+                        :key="'banner-' + panelId"
                         class="completion-banner"
                         :class="{ success: !hasError, error: hasError }"
                     >
-                        <span class="completion-icon">{{
-                            hasError ? "⚠️" : "🎉"
-                        }}</span>
+                        <span class="completion-icon">{{ hasError ? "⚠️" : "🎉" }}</span>
                         <span>{{ completionMessage }}</span>
                     </div>
-                </transition>
+                </transition-group>
+
+                <!-- 底部垫片：确保滚动条能完全看到结果 -->
+                <div class="bottom-spacer"></div>
             </div>
 
             <!-- 实时日志 -->
@@ -392,6 +426,28 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { marked } from "marked";
+
+// Markdown 渲染（用于展示 result_table 等富文本结果）
+function renderMarkdown(text: string): string {
+    if (!text) return "";
+    // 配置 marked 支持表格和换行
+    return marked.parse(text, { 
+        gfm: true,
+        breaks: true 
+    }) as string;
+}
+
+// JSON 格式化工具
+function formatJson(str: string | undefined): string {
+    if (!str) return "";
+    try {
+        const obj = JSON.parse(str);
+        return JSON.stringify(obj, null, 2);
+    } catch {
+        return str;
+    }
+}
 
 // ---- Props ----
 const props = defineProps<{
@@ -436,6 +492,7 @@ const steps = ref<AgentStep[]>([]);
 const planningMessage = ref("");
 const runningStep = ref<number | null>(null);
 const completionMessage = ref("");
+const finishOutput = ref<Record<string, any> | null>(null);
 const hasError = ref(false);
 const expandedStep = ref<number | null>(null);
 const logs = ref<LogEntry[]>([]);
@@ -525,9 +582,45 @@ onMounted(async () => {
             addLog("error", `  ✕ 失败 → ${data.output}`);
         } else if (type === "complete") {
             isRunning.value = false;
+            // 强行收尾：如果还有正在运行的步骤，标记为已完成
+            if (runningStep.value !== null) {
+                const s = steps.value.find(s => s.id === runningStep.value);
+                if (s) s.status = "done";
+                runningStep.value = null;
+            }
             completionMessage.value = data.message;
             hasError.value = !data.success;
+
+            // 优先使用结构化的 finish 字段（后端直接传来的 command 对象）
+            if (data.finish && typeof data.finish === "object") {
+                finishOutput.value = {
+                    ...data.finish,
+                    screenshot: data.screenshot || null,   // 附带最后截图（如有）
+                };
+            } else if (data.output) {
+                // 兼容旧逻辑：尝试解析 JSON 字符串
+                try {
+                    const parsed = JSON.parse(data.output);
+                    finishOutput.value = {
+                        ...parsed,
+                        screenshot: data.screenshot || null,
+                    };
+                } catch {
+                    finishOutput.value = { summary: data.output };
+                }
+            }
+
             addLog(data.success ? "success" : "error", `🏁 ${data.message}`);
+            
+            // 关键：等待内容渲染完成后滚动到底部（指向正确的执行面板容器）
+            nextTick(() => {
+                const scroll = () => {
+                    const el = execPanel.value || document.querySelector(".execution-panel");
+                    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                };
+                setTimeout(scroll, 100);
+                setTimeout(scroll, 500); // 增加延迟，确保 Markdown 渲染完毕
+            });
         } else if (type === "token_usage") {
             tokenUsage.value = {
                 prompt_tokens: data.prompt_tokens,
@@ -547,7 +640,10 @@ onMounted(async () => {
                 steps.value.push(s);
                 runningStep.value = data.step_id;
                 expandedStep.value = data.step_id;
-                nextTick(() => { document.querySelector(".agent-instance")?.scrollTo({ top: 99999, behavior: "smooth" }); });
+                nextTick(() => { 
+                    const el = execPanel.value || document.querySelector(".execution-panel");
+                    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                });
             }
             s.thinking = data.content;
             if (data.done) {
@@ -583,6 +679,7 @@ async function runAgent() {
         currentGoal.value = goalInput.value.trim();
         steps.value = [];
         completionMessage.value = "";
+        finishOutput.value = null;
         hasError.value = false;
         runningStep.value = null;
 
@@ -605,6 +702,7 @@ async function runAgent() {
 function clearAll() {
     steps.value = [];
     completionMessage.value = "";
+    finishOutput.value = null;
     hasError.value = false;
     planningMessage.value = "";
     currentGoal.value = "";
@@ -687,7 +785,15 @@ defineExpose({ isRunning });
 .planning-text { color: var(--text-2); font-size: 14px; }
 
 /* 执行面板 */
-.execution-panel { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+.execution-panel { 
+    flex: 1; 
+    overflow-y: auto; 
+    padding: 24px; 
+    display: flex; 
+    flex-direction: column; 
+    gap: 16px;
+    min-height: 0; /* 关键：允许 flex 子元素在必要时收缩，防止撑破父容器 */
+}
 .progress-header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 20px; border-bottom: 1px solid var(--border-1); margin-bottom: 20px; }
 .header-left { display: flex; align-items: center; gap: 16px; }
 .progress-goal { display: flex; align-items: flex-start; gap: 10px; flex: 1; }
@@ -760,4 +866,138 @@ defineExpose({ isRunning });
 .btn-xs:hover { background: var(--surface-2); color: var(--text-1); }
 
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* ---- 任务成果报告卡 ---- */
+.result-card {
+    margin-top: 14px;
+    margin-bottom: 20px;
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    background: var(--surface-0);
+    box-shadow: 0 8px 24px -8px rgba(0,0,0,0.2);
+}
+.bottom-spacer {
+    height: 250px; /* 增加垫片高度，确保内容能被推到视图中央 */
+    width: 100%;
+    pointer-events: none;
+}
+.result-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.result-card.error {
+    border-color: color-mix(in srgb, var(--red) 40%, transparent);
+    background: color-mix(in srgb, var(--red) 5%, var(--surface-0));
+}
+.result-card.error .result-card-header {
+    color: var(--red);
+    background: color-mix(in srgb, var(--red) 10%, transparent);
+    border-bottom-color: color-mix(in srgb, var(--red) 20%, transparent);
+}
+.result-status-tag {
+    margin-left: auto;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    letter-spacing: 0.5px;
+}
+.result-card.error .result-status-tag {
+    background: color-mix(in srgb, var(--red) 20%, transparent);
+}
+.result-card-icon { font-size: 15px; }
+.result-body {
+    padding: 16px 14px;
+    background: var(--surface-0);
+}
+.result-text-block {
+    font-size: 13.5px;
+    color: var(--text-1);
+    line-height: 1.7;
+}
+/* 强化成果报告中的 Markdown 样式 */
+.result-body :deep(h3) { margin: 0 0 12px 0; font-size: 16px; color: var(--accent); border-bottom: 1px solid var(--border-1); padding-bottom: 6px; }
+.result-body :deep(h4) { margin: 16px 0 8px 0; font-size: 14px; color: var(--text-1); }
+.result-body :deep(p) { margin: 0 0 12px 0; }
+.result-body :deep(blockquote) { 
+    margin: 12px 0; 
+    padding: 8px 12px; 
+    background: color-mix(in srgb, var(--accent) 5%, var(--surface-1));
+    border-left: 4px solid var(--accent);
+    border-radius: 4px;
+    color: var(--text-2);
+    font-style: italic;
+}
+.result-body :deep(hr) { border: none; border-top: 1px solid var(--border-1); margin: 16px 0; }
+
+.result-artifacts {
+    padding: 10px 14px;
+    border-top: 1px solid var(--border-1);
+    background: color-mix(in srgb, var(--accent) 2%, transparent);
+}
+.result-section-label {
+    font-size: 11px;
+    color: var(--text-3);
+    margin-bottom: 5px;
+    font-weight: 500;
+}
+.result-artifact-path {
+    font-size: 12px;
+    color: var(--accent);
+    font-family: monospace;
+    background: var(--surface-1);
+    padding: 4px 8px;
+    border-radius: 5px;
+    margin-top: 3px;
+    word-break: break-all;
+}
+.result-screenshot {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+}
+.result-screenshot-img {
+    width: 100%;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    margin-top: 6px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.25);
+}
+.result-details-wrap {
+    padding: 0;
+}
+/* Markdown 表格样式增强 */
+.result-body :deep(table) {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 12px;
+    border-radius: 8px;
+    overflow: hidden;
+}
+.result-body :deep(th) {
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface-1));
+    color: var(--accent);
+    font-weight: 600;
+    padding: 10px 12px;
+    text-align: left;
+    border: 1px solid var(--border-1);
+}
+.result-body :deep(td) {
+    padding: 8px 12px;
+    border: 1px solid var(--border-1);
+}
+.result-body :deep(tr:nth-child(even) td) { background: color-mix(in srgb, var(--accent) 3%, transparent); }
+.result-body :deep(a) { color: var(--accent); text-decoration: underline; }
+
+/* slide-up 动画 */
+.slide-up-enter-active { transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+.slide-up-enter-from { opacity: 0; transform: translateY(16px); }
 </style>
