@@ -176,6 +176,21 @@ impl SandwichContext {
             content: json!(static_prefix.trim_end()),
         });
 
+        // 2.5 低频工具操作手册 (关键缓存优化！)
+        // 放在 static_prefix 之后、历史对话之前：
+        // - 同一工具连续执行多步时，此消息一字不差 → 前缀缓存完美命中
+        // - 换工具时此消息会变，但只影响从此往后的缓存，static_prefix 和 system_prompt 依然命中
+        // - 放在历史对话之后（之前的做法）会导致每轮都因历史变长而缓存失效！
+        if !self.active_tool_detail.is_empty() {
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!(
+                    "【当前活跃工具操作手册】\n{}\n",
+                    self.active_tool_detail
+                )),
+            });
+        }
+
         // 3. 线性增长区：历史对话轨迹
         // 随着执行一步步向后追加 (Append-only)，这正是当前各大模型 Prefix Caching 能够完美覆盖的部分
         messages.extend(self.turns_history.clone());
@@ -185,15 +200,6 @@ impl SandwichContext {
 
         if self.turns_history.len() >= 24 {
             dynamic_suffix.push_str("🚨 【系统严重警告：历史记录即将溢出】\n你的对话历史已过长，继续执行将导致上下文超载崩溃！\n请务必在本次思考中，将前面所有的关键进展、线索和数据提炼总结，放入 `memories_update` 中永久保存。同时必须在 JSON 顶层输出 `\"clear_history\": true` 来清空历史负担！如果不清空，系统可能会强制截断导致你失忆！\n\n");
-        }
-
-        // 将 active_tool_detail (如具体某个MCP的操作手册) 提取到尾部。
-        // 如果放在 System Prompt 里，每次 Agent 换工具都会导致前面的全局缓存雪崩！
-        if !self.active_tool_detail.is_empty() {
-            dynamic_suffix.push_str(&format!(
-                "【当前活跃工具操作手册】\n{}\n\n",
-                self.active_tool_detail
-            ));
         }
 
         let todo_json = serde_json::to_string_pretty(&self.todo_list).unwrap_or_default();
