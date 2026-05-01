@@ -921,7 +921,13 @@ pub fn run_browser_dom(session_id: &str, command_str: &str) -> (String, String, 
                     text = text.replace(/[\r\n\s]+/g, ' ').trim();
                     const shortText = text.substring(0, 30) + (text.length > 30 ? "..." : "");
 
-                    return `[${id}] <${el.tagName.toLowerCase()}> ${shortText} (X:${Math.round(rect.left + rect.width/2)}, Y:${Math.round(rect.top + rect.height/2)})`;
+                    let extra = "";
+                    if (el.tagName === 'A' && el.href) {
+                        let url = el.href;
+                        extra = " url:" + (url.length > 55 ? url.substring(0, 52) + "..." : url);
+                    }
+
+                    return `[${id}] <${el.tagName.toLowerCase()}> ${shortText}${extra} (X:${Math.round(rect.left + rect.width/2)}, Y:${Math.round(rect.top + rect.height/2)})`;
                 }).filter(l => l !== null);
 
                 let status = `【页面状态】: 标题 [${document.title}], URL [${window.location.href}], 视口 ${window.innerWidth}x${window.innerHeight}, 滚动 ${Math.round(window.scrollY)}/${document.body.scrollHeight}`;

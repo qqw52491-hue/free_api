@@ -17,12 +17,12 @@ pub struct SandwichContext {
     pub todo_list: Vec<TodoItem>,
     pub turns_history: Vec<ChatMessage>,
     pub current_observation: String,
+    pub progress_summary: String,
 
     // --- 动态载入的工具详情 ---
     pub active_tool: Option<String>,
     pub active_tool_detail: String,
 
-    // --- Token 优化：是否要在本轮携带全部记忆内容 ---
     pub carry_memories: bool,
 }
 
@@ -35,6 +35,7 @@ impl SandwichContext {
             todo_list: Vec::new(),
             turns_history: Vec::new(),
             current_observation: String::new(),
+            progress_summary: String::new(),
             active_tool: None,
             active_tool_detail: String::new(),
             carry_memories: false,
@@ -87,6 +88,7 @@ impl SandwichContext {
     pub fn update_observation(&mut self, obs: String) {
         self.current_observation = obs;
     }
+
 
     /// 注入截图/图片反馈信息 (多模态)
     pub fn add_image_feedback(&mut self, text: &str, base64_image: &str) {
@@ -142,26 +144,30 @@ impl SandwichContext {
         // 目标在单次任务中不会变，Memory 变动频率很低，也放入前缀缓存区
         let mut static_prefix = format!("【用户终极任务目标】\n{}\n\n", self.user_goal);
 
+        if !self.progress_summary.is_empty() {
+            static_prefix.push_str(&format!(
+                "【全局进度与策略摘要 (Progress Summary)】\n{}\n\n",
+                self.progress_summary
+            ));
+        }
+
         if !self.memories.is_empty() {
-            if self.carry_memories || self.turns_history.len() <= 2 {
+            if self.carry_memories {
                 let facts: Vec<String> = self
                     .memories
                     .iter()
                     .map(|(k, v)| format!("  {}: {}", k, v))
                     .collect();
-                let title = if self.turns_history.len() <= 2 {
-                    "【核心事实与长期记忆库 (刚经历历史清理，强制全量展示以防失忆)】"
-                } else {
-                    "【核心事实与长期记忆库 (全量载入)】"
-                };
                 static_prefix.push_str(&format!(
-                    "{}\n{}\n\n",
-                    title,
+                    "【冷存储记忆库 (已全量载入)】\n{}\n\n",
                     facts.join("\n")
                 ));
             } else {
                 let keys: Vec<String> = self.memories.keys().cloned().collect();
-                static_prefix.push_str(&format!("【冷存储记忆索引库 (需载入详情请设 require_memory: true)】\n包含键值: [{}]\n\n", keys.join(", ")));
+                static_prefix.push_str(&format!(
+                    "【冷存储记忆库索引 (当前已折叠)】\n当前包含键值: [{}]\n(如需提取具体数据进行处理，请在 JSON 中设置 \"require_memory\": true，下一轮将全量展开)\n\n",
+                    keys.join(", ")
+                ));
             }
         }
 
@@ -178,7 +184,7 @@ impl SandwichContext {
         let mut dynamic_suffix = String::new();
 
         if self.turns_history.len() >= 24 {
-            dynamic_suffix.push_str("🚨 【系统严重警告：历史记录即将溢出】\n你的对话历史已过长，继续执行将导致上下文超载崩溃！\n请务必在本次思考中，将前面所有的关键进展、线索和数据提炼总结，放入 `memories_update` 中永久保存。\n同时必须在 JSON 顶层输出 `\"clear_history\": true` 来清空历史负担！如果不清空，系统可能会强制截断导致你失忆！\n\n");
+            dynamic_suffix.push_str("🚨 【系统严重警告：历史记录即将溢出】\n你的对话历史已过长，继续执行将导致上下文超载崩溃！\n请务必在本次思考中，将前面所有的关键进展、线索和数据提炼总结，放入 `memories_update` 中永久保存。同时必须在 JSON 顶层输出 `\"clear_history\": true` 来清空历史负担！如果不清空，系统可能会强制截断导致你失忆！\n\n");
         }
 
         // 将 active_tool_detail (如具体某个MCP的操作手册) 提取到尾部。

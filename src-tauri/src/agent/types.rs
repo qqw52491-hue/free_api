@@ -117,6 +117,9 @@ pub struct AgentInstruction {
     pub todo_update: Vec<TodoItem>,
     #[serde(default)]
     pub memories_update: Vec<MemoryItem>,
+    /// AI 主动维护的全局进度摘要（写日记），覆盖更新。
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     /// 【指令流水线】支持单回合执行多条连续动作
     #[serde(default)]
     pub commands: Vec<serde_json::Value>,

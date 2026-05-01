@@ -138,8 +138,10 @@ pub fn run_builtin_step(session_id: &str, action: &str, params: &serde_json::Val
             }
             // 输入 —— 需要 id + text
             "type" => format!("type {} {}", safe_id, text),
-            // 点击/悬停/选择 —— 需要 id
-            "click" | "hover" | "wait_for" => format!("{} {}", final_verb, safe_id),
+            // 点击/悬停/选择/切换关闭标签页 —— 需要 id
+            "click" | "hover" | "wait_for" | "switch_tab" | "close_tab" => {
+                format!("{} {}", final_verb, safe_id)
+            }
             // 坐标点击 —— 需要 x 和 y 字段
             "click_xy" => {
                 let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -157,7 +159,7 @@ pub fn run_builtin_step(session_id: &str, action: &str, params: &serde_json::Val
             // 无参数指令
             "extract" | "look" | "read" | "screenshot" | "tab_url" | "url"
             | "back" | "forward" | "refresh" | "wait_idle"
-            | "list_tabs" | "new_tab" | "switch_tab" | "close_tab" => final_verb.to_string(),
+            | "list_tabs" | "new_tab" => final_verb.to_string(),
             // 兜底：直接把 verb 原样传下去
             _ => final_verb.to_string(),
         };

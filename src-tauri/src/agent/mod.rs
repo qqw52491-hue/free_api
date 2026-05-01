@@ -529,8 +529,6 @@ pub async fn run_agent_main_loop(
                         format!("🔄 格式错误(第{}次)，正在自我修复...", retry_count),
                     )
                     .map_err(|er| er.to_string())?;
-                    // 【修复失忆死循环Bug】: 必须记录引发报错的原始错误输出，否则 AI 下一轮根本不知道自己犯了什么格式错误
-                    context.add_assistant_raw_message(&raw_output);
                     context.add_error_feedback(&e);
                     continue;
                 }
@@ -866,6 +864,10 @@ pub async fn run_agent_main_loop(
             context.update_memories(instruction.memories_update.clone());
             println!("📝 AI 更新了核心记忆: {:?}", instruction.memories_update);
         }
+        if let Some(ref summary) = instruction.progress_summary {
+            context.progress_summary = summary.clone();
+            println!("📝 AI 更新了进度摘要: {}", summary);
+        }
 
         // --- 核心增强：历史截断与缓存优化 ---
         if instruction.clear_history.unwrap_or(false) {
@@ -1046,6 +1048,8 @@ pub async fn run_agent_main_loop(
         if !result.stdout.contains("[Screenshot Saved as Base64]: ") {
             context.add_step(&instruction, &output_text);
         }
+
+
 
         context.current_observation = output_text.clone();
 
