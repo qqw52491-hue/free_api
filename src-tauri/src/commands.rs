@@ -1,7 +1,7 @@
 use crate::agent::mcp::PluginConfig;
 use crate::db::{ChatMessage, ChatSession, DbState, Model, Platform};
+use crate::llm::{self, ModelConfig, StreamEvent};
 use chrono::Utc;
-use futures_util::StreamExt;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -64,7 +64,7 @@ pub async fn save_mcp_plugin(
 
     // UPSERT: 如果 name 已存在就更新
     conn.execute(
-        "INSERT INTO mcp_plugins (id, name, command, args, env, enabled, created_at) 
+        "INSERT INTO mcp_plugins (id, name, command, args, env, enabled, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
          ON CONFLICT(name) DO UPDATE SET command=?3, args=?4, env=?5",
         params![id, name, command, args_json, env_json, now],
@@ -518,29 +518,9 @@ pub async fn send_chat(
     messages: Vec<serde_json::Value>,
     attachments: Option<Vec<AttachmentInfo>>,
 ) -> Result<String, String> {
-    // 获取平台+模型信息
-    let (base_url, api_key, model_name, max_tokens, temperature) = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT p.base_url, p.api_key, m.name, m.max_tokens, m.temperature
-             FROM models m JOIN platforms p ON p.id = m.platform_id
-             WHERE m.id = ?1",
-            )
-            .map_err(|e| e.to_string())?;
-        stmt.query_row(params![model_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, f64>(4)?,
-            ))
-        })
-        .map_err(|e| format!("模型不存在: {}", e))?
-    };
+    let config = ModelConfig::from_db(&state, &model_id)?;
 
-    // 构建消息（处理附件/图片）
+    // 处理附件/图片
     let mut api_messages = messages.clone();
     if let Some(ref files) = attachments {
         if !files.is_empty() {
@@ -553,7 +533,9 @@ pub async fn send_chat(
                         if file.mime_type.starts_with("image/") {
                             parts.push(json!({
                                 "type": "image_url",
-                                "image_url": { "url": format!("data:{};base64,{}", file.mime_type, file.data_base64) }
+                                "image_url": {
+                                    "url": format!("data:{};base64,{}", file.mime_type, file.data_base64)
+                                }
                             }));
                         }
                     }
@@ -563,213 +545,106 @@ pub async fn send_chat(
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let is_ollama = base_url.contains("localhost:11434") || base_url.contains("127.0.0.1:11434");
-    let mut body = json!({
-        "model": model_name,
-        "messages": api_messages,
-        "max_tokens": max_tokens,
-        "temperature": if is_ollama { 0.0 } else { temperature },
-        "top_p": if is_ollama { 0.9 } else { 1.0 },
-        "stream": true,
-        "stream_options": { "include_usage": true }
-    });
-
-    // 确定上下文窗口大小
-    let context_window: i64;
-    // 🔓 Ollama 智能解封：检测到本地 Ollama 时，自动注入大上下文窗口
-    if is_ollama {
-        context_window = 65536;
-        body["options"] = json!({
-            "num_ctx": context_window,
-            "temperature": 0.0,
-            "top_p": 0.9
-        });
-    } else {
-        context_window = 128000;
-    }
-
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("HTTP-Referer", "https://free-api-chat.app")
-        .header("X-OpenRouter-Title", "Free API Chat")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("API 错误 {}: {}", status, body));
-    }
-
-    let mut stream = resp.bytes_stream();
-    let mut full_text = String::new();
-    let mut thinking_text = String::new();
-    let mut buffer = String::new();
-    let mut usage_prompt: i64 = 0;
-    let mut usage_completion: i64 = 0;
+    // 实时事件回调
     let mut is_thinking = false;
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        let text = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&text);
-
-        while let Some(pos) = buffer.find('\n') {
-            let line = buffer[..pos].trim().to_string();
-            buffer = buffer[pos + 1..].to_string();
-
-            if line.starts_with("data: ") {
-                let data = &line[6..];
-                if data == "[DONE]" {
-                    break;
-                }
-                if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
-                    let delta = &j["choices"][0]["delta"];
-
-                    // 🧠 解析 thinking/reasoning 内容（兼容多种字段名）
-                    let reasoning = delta
-                        .get("reasoning_content")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| delta.get("reasoning").and_then(|v| v.as_str()))
-                        .or_else(|| {
-                            j.get("message")
-                                .and_then(|m| m.get("thinking"))
-                                .and_then(|v| v.as_str())
-                        });
-
-                    if let Some(think_chunk) = reasoning {
-                        if !think_chunk.is_empty() {
-                            if !is_thinking {
-                                is_thinking = true;
-                                app.emit(
-                                    "chat-thinking",
-                                    json!({
-                                        "session_id": session_id,
-                                        "status": "start"
-                                    }),
-                                )
-                                .ok();
-                            }
-                            thinking_text.push_str(think_chunk);
-                            app.emit(
-                                "chat-thinking",
-                                json!({
-                                    "session_id": session_id,
-                                    "content": think_chunk,
-                                    "status": "streaming"
-                                }),
-                            )
-                            .ok();
-                        }
-                    }
-
-                    // 📝 解析正常内容
-                    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-                        if !content.is_empty() {
-                            // 如果之前在思考，现在开始输出正文，标记思考结束
-                            if is_thinking {
-                                is_thinking = false;
-                                app.emit(
-                                    "chat-thinking",
-                                    json!({
-                                        "session_id": session_id,
-                                        "status": "done",
-                                        "full_thinking": &thinking_text
-                                    }),
-                                )
-                                .ok();
-                            }
-                            full_text.push_str(content);
-                            app.emit(
-                                "chat-stream",
-                                json!({
-                                    "session_id": session_id,
-                                    "content": content,
-                                    "done": false
-                                }),
-                            )
-                            .ok();
-                        }
-                    }
-
-                    // 解析 usage 信息（通常在最后一个 chunk 中）
-                    if let Some(usage) = j.get("usage") {
-                        if let Some(p) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
-                            usage_prompt = p;
-                        }
-                        if let Some(c) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
-                            usage_completion = c;
-                        }
-                    }
-                }
+    let mut on_event = |event: StreamEvent| match event {
+        StreamEvent::Thinking {
+            chunk,
+            accumulated: _,
+        } => {
+            if !is_thinking {
+                is_thinking = true;
+                app.emit(
+                    "chat-thinking",
+                    json!({"session_id": session_id, "status": "start"}),
+                )
+                .ok();
             }
+            app.emit(
+                "chat-thinking",
+                json!({
+                    "session_id": session_id,
+                    "content": chunk,
+                    "status": "streaming"
+                }),
+            )
+            .ok();
         }
-    }
+        StreamEvent::Content {
+            chunk,
+            full_thinking,
+            ..
+        } => {
+            if is_thinking {
+                is_thinking = false;
+                app.emit(
+                    "chat-thinking",
+                    json!({
+                        "session_id": session_id,
+                        "status": "done",
+                        "full_thinking": full_thinking
+                    }),
+                )
+                .ok();
+            }
+            app.emit(
+                "chat-stream",
+                json!({
+                    "session_id": session_id,
+                    "content": chunk,
+                    "done": false
+                }),
+            )
+            .ok();
+        }
+    };
 
-    // 如果思考还在进行中就结束了（某些模型只有 thinking 没有 content）
-    if is_thinking && !thinking_text.is_empty() {
+    let result = llm::stream_once(&config, &api_messages, &mut on_event).await?;
+
+    // 思考结束通知
+    if is_thinking && !result.thinking_text.is_empty() {
         app.emit(
             "chat-thinking",
             json!({
                 "session_id": session_id,
                 "status": "done",
-                "full_thinking": &thinking_text
+                "full_thinking": &result.thinking_text
             }),
         )
         .ok();
     }
 
-    if !thinking_text.is_empty() {
+    if !result.thinking_text.is_empty() {
         println!(
             "🧠 思考过程 ({} 字符): {}...",
-            thinking_text.len(),
-            thinking_text.chars().take(200).collect::<String>()
+            result.thinking_text.len(),
+            result.thinking_text.chars().take(200).collect::<String>()
         );
     }
 
+    // 流结束通知
     app.emit(
         "chat-stream",
         json!({
             "session_id": session_id,
             "content": "",
             "done": true,
-            "thinking": if thinking_text.is_empty() { None } else { Some(&thinking_text) }
+            "thinking": if result.thinking_text.is_empty() { None } else { Some(&result.thinking_text) }
         }),
     )
     .ok();
 
-    // 📊 发送 Token 用量统计到前端
-    let total_tokens = usage_prompt + usage_completion;
-    let usage_percent = if context_window > 0 {
-        (total_tokens as f64 / context_window as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    // 如果 API 没返回 usage，做粗略估算
-    let (final_prompt, final_completion) = if usage_prompt > 0 || usage_completion > 0 {
-        (usage_prompt, usage_completion)
-    } else {
-        let est_prompt = (api_messages
-            .iter()
-            .map(|m| serde_json::to_string(m).unwrap_or_default().len())
-            .sum::<usize>()
-            / 3) as i64;
-        let est_completion = (full_text.len() / 3) as i64;
-        (est_prompt, est_completion)
-    };
+    // Token 用量统计
+    let (final_prompt, final_completion) = result.usage.unwrap_or_else(|| {
+        llm::estimate_usage(
+            &api_messages,
+            result.full_response.len(),
+            config.context_window,
+        )
+    });
     let final_total = final_prompt + final_completion;
-    let final_percent = if context_window > 0 {
-        (final_total as f64 / context_window as f64) * 100.0
+    let final_percent = if config.context_window > 0 {
+        (final_total as f64 / config.context_window as f64) * 100.0
     } else {
         0.0
     };
@@ -781,7 +656,7 @@ pub async fn send_chat(
             "prompt_tokens": final_prompt,
             "completion_tokens": final_completion,
             "total_tokens": final_total,
-            "context_window": context_window,
+            "context_window": config.context_window,
             "usage_percent": final_percent
         }),
     )
@@ -789,8 +664,13 @@ pub async fn send_chat(
 
     println!(
         "📊 Chat Token: 输入={}, 输出={}, 合计={} | 上下文: {}/{} ({:.1}%)",
-        final_prompt, final_completion, final_total, final_total, context_window, final_percent
+        final_prompt,
+        final_completion,
+        final_total,
+        final_total,
+        config.context_window,
+        final_percent
     );
 
-    Ok(full_text)
+    Ok(result.full_response)
 }
