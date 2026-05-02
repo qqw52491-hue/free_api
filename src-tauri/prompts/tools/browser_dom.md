@@ -74,6 +74,36 @@
 - **懒加载探测**：如果 extract 列表过短或页面底部有"加载更多"，请执行 `scroll down` 并结合 `wait_idle`，随后立即 `extract` 以获取新加载的元素。
 - **防遮挡策略**：若点击元素后无反应，可能是被悬浮导航栏遮挡。请尝试 `scroll down` 少量距离后再点击。
 
+## 🚧 弹窗/遮挡层处理范式 (Overlay Handling)
+> **遇到 'element is not clickable' 报错时的标准处置流程。**
+
+### 判断是否被遮挡
+- `click` 后返回 `"element is not clickable"` 或 `"ElementClickInterceptedException"`
+- `extract` 返回的元素列表顶部存在含 "Cookie"、"同意"、"接受"、"隐私" 等字样的横幅或对话框
+
+### 标准清除流程（3步范式）
+```
+第1步：extract（重新扫描当前视口，不要依赖任何旧 ID）
+第2步：在 extract 结果中，按语义特征定位遮挡物的关闭控件：
+       - 文字特征：包含 "接受"、"同意"、"关闭"、"×"、"Accept"、"Agree"、"Dismiss" 的按钮
+       - 位置特征：通常是 fixed 定位的横幅（页面顶部/底部）或居中弹窗
+第3步：click <新ID>（点击关闭后立即再次 extract，获取遮挡物消失后的干净页面 ID）
+```
+
+### 🔑 铁律：永远用语义特征，不传旧 ID
+| ❌ 错误做法 | ✅ 正确做法 |
+|---|---|
+| `reflection` 里写 "关闭 ID:3 的横幅" | `reflection` 里写 "extract 发现含'接受Cookie'文字的横幅区域" |
+| 直接 `click id:3`（历史里的旧 ID） | 先 `extract`，再 `click` 新获得的 ID |
+| `progress_summary` 里传 `ID:3` | `progress_summary` 里写"寻找含'接受/同意/×'语义的按钮" |
+
+### 兜底方案：DOM 找不到关闭按钮
+```
+1. scroll down → 检查横幅是否会随滚动消失（部分 Cookie 横幅滚动后自动收起）
+2. screenshot → 让视觉模型目视识别关闭按钮位置 → click_xy
+3. 如果以上均失败 → press Escape → 再次 extract 确认状态
+```
+
 ## 命令手册 (Commands Reference)
 **重要**：系统支持"单指令"或"批量指令流水线 (Pipeline)"。
 
@@ -112,52 +142,133 @@
 - `{"action": "ask_web_ai", "url": "kimi", "text": "问题"}`: **【杀手锏】** 遇到极难处理的混淆代码、报错或验证逻辑，立刻调用场外 Kimi 援助！
 - `{"action": "new_tab", "url": "https..."}` / `{"action": "switch_tab", "id": 2}` / `{"action": "close_tab", "id": 2}`: 标签页管理
 
-## 经典实操范式 (Few-Shot Strategy)
+## 经典实操范式 (JSON Few-Shot Strategy)
+以下是针对常见网页交互困境的标准 JSON 响应，请严格照抄思路与格式。
 
-**场景 1：在新闻网站搜索（URL 直达术 + 兜底）**
-```
-第1步：直接 goto "https://www.bbc.co.uk/search?q=马斯克" （优先 URL 直达）
-第2步：wait_idle（等待搜索结果页加载）
-第3步：extract（获取搜索结果列表 ID）
-第4步：如果结果为空 → reflection 声明"该站搜索无结果"，todo canceled，换站
-```
-
-**场景 2：在百度搜索框输入并搜索**（展示 type 原子能力，URL 直达公式不确定时的兜底）
-```
-第1步：extract（找搜索框 ID，假设是 12）
-第2步：commands: [{"action":"type","id":12,"text":"今天新闻"}, {"action":"press","key":"Enter"}]
-```
-⚠️ 注意：**没有单独的 click 步骤**！type 已经内置点击。
-
-**场景 3：抓取首页前 2 篇文章内容**
-```
-第1步：extract（找出前2条链接 ID）
-第2步：click id=15（点进第1条，这里 click 用于导航跳转）
-第3步：read → memories_update（存数据）→ back（退回）
-第4步：extract（⚠️ 必须！back 后所有 ID 失效，必须重新 extract）
-第5步：click id=18（点进第2条）
+### 1. 目标元素不在视窗内 (Scroll)
+```json
+{
+  "reflection": "extract 返回的 DOM 中没有找到含'提交'文字的按钮，但页面标题已正确显示。按钮大概率在页面底部",
+  "thought": "先向下滚动页面，然后重新 extract 检查是否出现含'提交'语义的按钮",
+  "description": "向下滚动页面寻找提交按钮",
+  "tool": "browser_dom",
+  "commands": [
+    {"action": "scroll", "direction": "down"},
+    {"action": "wait_idle"},
+    {"action": "extract"}
+  ],
+  "todo_update": [],
+  "memories_update": [],
+  "next_tool_hint": "browser_dom"
+}
 ```
 
-**场景 4：DOM 无法识别按钮 → 截图+DOM双锚点定位 → 坐标点击（终极兜底）**
-> 适用：按钮被 Canvas 渲染、Shadow DOM 嵌套、或 extract 返回空
+### 2. 页面被弹窗/Cookie横幅遮挡 (Overlay)
+⚠️ 关键原则：禁止传递旧 DOM ID，必须用语义特征描述目标元素。
+```json
+{
+  "reflection": "上一步点击搜索按钮失败，报错 'element is not clickable'。发现一个含'接受 Cookie'文字的横幅正在遮挡操作区",
+  "thought": "必须先清除遮挡物。寻找语义特征为'接受/关闭/×' 的按钮并点击，清除后再重新 extract 继续原操作",
+  "description": "定位并点击 Cookie 横幅的关闭按钮",
+  "tool": "browser_dom",
+  "commands": [
+    {"action": "extract"},
+    {"action": "wait", "seconds": 0.3}
+  ],
+  "todo_update": [],
+  "memories_update": [],
+  "progress_summary": "页面被 Cookie 横幅遮挡，正在 extract 寻找含'接受/×'文字的关闭按钮",
+  "next_tool_hint": "browser_dom"
+}
 ```
-第1步：screenshot（系统自动同时获取截图 + 当前页面DOM精确坐标表，打包发给视觉模型）
 
-第2步（收到【📸 截图 + DOM坐标双锚点分析】消息后）：
-  ✅ 优先查坐标表，找到目标元素的 cx/cy（例如 [5] "发送" => cx:427, cy:312）
-  ✅ 直接使用坐标表里的值，禁止从截图重新估算！
-  ⚠️ 若坐标表中找不到目标，再凭截图估算（这是最后手段）
+### 3. 一步完成多个连续动作 (Pipeline)
+```json
+{
+  "reflection": "页面跳转已触发，需要等待 DOM 稳定后才能提取元素列表",
+  "thought": "跳转后需要依次做两件事：先 wait_idle 等待页面稳定，再 extract 获取页面元素。合并为一次流水线调用",
+  "description": "等待页面加载完成并提取元素",
+  "tool": "browser_dom",
+  "commands": [
+    {"action": "wait_idle"},
+    {"action": "extract"}
+  ],
+  "todo_update": [],
+  "memories_update": [],
+  "next_tool_hint": "browser_dom"
+}
+```
+⚠️ 记住：commands（复数）在最外层，绝不能嵌套在 command（单数）里！
 
-第3步：{"action": "click_xy", "x": 427, "y": 312}（坐标来自DOM，精确零误差）
-第4步：wait_idle（等待点击后的页面响应）
+### 4. 翻页采集循环 (Pagination)
+⚠️ 每次 back 回列表页后，所有 ID 全部作废！必须重新 extract！
+```json
+{
+  "reflection": "已完成第1篇详情页的 read。执行 back 回到列表页后，旧ID全部失效",
+  "thought": "必须重新 extract 列表页获取新 ID。下一目标是找第2条文章链接：列表中第二个包含文章标题的 a 元素",
+  "description": "back 后重新 extract，定位第2篇文章",
+  "tool": "browser_dom",
+  "commands": [
+    {"action": "back"},
+    {"action": "wait_idle"},
+    {"action": "extract"}
+  ],
+  "todo_update": [],
+  "memories_update": [],
+  "next_tool_hint": "browser_dom"
+}
 ```
 
-⚠️ **坐标系说明**：
-- 坐标为**视口坐标**，左上角 (0,0)，右下角约 (1280,800)
-- 坐标表里的 `cx/cy` 与 click_xy 的 `x/y` **完全同一坐标系，直接复用即可**
-- 页面滚动后坐标会变！scroll 之后必须重新 screenshot 更新坐标表
+### 5. DOM 无法识别复杂元素 (Screenshot/Vision)
+```json
+{
+  "reflection": "连续两次 extract 都只返回极少节点，怀疑页面是 Canvas 渲染",
+  "thought": "纯文本 DOM 已失效。必须触发截图，下一轮系统会交给视觉大模型识别位置并使用 click_xy 点击",
+  "description": "DOM失效，请求截图升维到视觉模型",
+  "tool": "browser_dom",
+  "command": {
+    "action": "screenshot"
+  },
+  "todo_update": [],
+  "progress_summary": "页面是 Canvas 渲染，已请求视觉模型协助看图",
+  "memories_update": [],
+  "next_tool_hint": "browser_dom"
+}
+```
+⚠️ 坐标系说明：收到带坐标表的截图后，优先使用坐标表（cx/cy）调用 `click_xy`，误差为0。
 
-**为什么坐标表比截图估算准？**
-- 截图传输给大模型时会自动缩放，模型凭图估算有 ±30~80px 误差
-- 坐标表的 cx/cy 是 JS 从 DOM 实时计算出的精确像素值，误差为 0
+### 6. 误点广告/错误链接 (Back)
+```json
+{
+  "reflection": "上一步点击了一个标题含'热门推荐'的链接，实际页面标题显示'广告推广页'。这是一个误导性广告链接",
+  "thought": "使用 back 动作立即回退到上一个列表页，重新 extract 获取新 ID，跳过带广告特征的链接",
+  "description": "误入广告页，立即回退",
+  "tool": "browser_dom",
+  "command": {
+    "action": "back"
+  },
+  "todo_update": [],
+  "memories_update": [],
+  "next_tool_hint": "browser_dom"
+}
+```
+
+### 7. 遇到登录墙/付费墙 (Paywall)
+⚠️ 切记：遇到登录墙不要浪费步骤尝试登录，直接放弃并换站！
+```json
+{
+  "reflection": "goto 进入页面后，read 返回的内容充斥'请登录后查看'，有效正文不足10字",
+  "thought": "该站点对目标内容设有付费墙，继续挣扎是死路。立刻将此站标记为黑名单，切换到其他可以免费访问的站点",
+  "description": "放弃付费墙站点，换用其他公开来源",
+  "tool": "browser_dom",
+  "command": {
+    "action": "goto",
+    "url": "https://www.bing.com/search?q=马斯克+SpaceX+site:reuters.com"
+  },
+  "todo_update": [],
+  "progress_summary": "【排雷黑名单】\n❌ wsj.com: 付费订阅墙 → 永久拉黑，改用 Reuters/BBC",
+  "memories_update": [],
+  "next_tool_hint": "browser_dom"
+}
+```
 </tool_specific_instructions>
