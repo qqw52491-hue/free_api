@@ -18,6 +18,26 @@ use std::sync::atomic::Ordering;
 use tauri::Emitter;
 use tauri::{AppHandle, Manager, State};
 use tokio::time::{sleep, Duration};
+use std::sync::{Arc, OnceLock};
+use tokio::sync::{mpsc, Mutex};
+use std::collections::HashMap;
+
+// 维护每个 session_id 对应的干预消息接收通道
+pub fn intervention_channels() -> &'static Arc<Mutex<HashMap<String, mpsc::Sender<String>>>> {
+    static CHANNELS: OnceLock<Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>> = OnceLock::new();
+    CHANNELS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+#[tauri::command]
+pub async fn send_human_intervention(session_id: String, message: String) -> Result<(), String> {
+    let channels = intervention_channels().lock().await;
+    if let Some(sender) = channels.get(&session_id) {
+        sender.send(message).await.map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("任务已结束或通道不存在".to_string())
+    }
+}
 
 /// Agent 每个任务最多执行步数（可按项目需求调整）
 const MAX_STEPS: usize = 300;
@@ -398,12 +418,37 @@ pub async fn run_agent_main_loop(
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
     let mut action_history: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
+    // 注册人类干预接收器
+    let (tx, mut rx) = mpsc::channel::<String>(5);
+    {
+        let mut channels = intervention_channels().lock().await;
+        channels.insert(final_session_id.clone(), tx);
+    }
+
     for step_id in 0..MAX_STEPS {
         app.emit(
             &format!("agent-log-{}", final_session_id),
             format!("正在规划第 {} 步...", step_id + 1),
         )
         .map_err(|e| e.to_string())?;
+
+        // ======== [核心注入：人类干预监听点] ========
+        while let Ok(human_msg) = rx.try_recv() {
+            println!("🚨 收到人类干预指令: {}", human_msg);
+            let intervention_format = format!(
+                "🚨【系统最高警报：人类干预】🚨\n\
+                请立即放弃原计划并彻底服从以下人类最新指令：\n\
+                “{}”\n\
+                要求：在下一轮 reflection 中承认收到指令，并在 todo_update 中重写计划！",
+                human_msg
+            );
+            context.turns_history.push(crate::agent::context::ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!(intervention_format),
+            });
+            app.emit(&format!("agent-log-{}", final_session_id), "👑 人类干预指令已成功注入 AI 视野！").ok();
+        }
+        // ==========================================
 
         // 修复：绝不可以在这里清空 current_observation，因为这会导致 AI 看不到刚获取的页面数据
         // ================================================================
@@ -609,8 +654,46 @@ pub async fn run_agent_main_loop(
             )
             .map_err(|e| e.to_string())?;
 
-            // 具体和本地工具交互
-            let dispatch_result = {
+            // --- B1. 特殊拦截：AI 主动挂起呼叫人类 ---
+            let dispatch_result = if inst.get_tool().to_lowercase() == "ask_human" {
+                let ask_msg = inst.get_params().get("message").and_then(|v| v.as_str()).unwrap_or("AI遇到了麻烦，请求人类协助！").to_string();
+                
+                app.emit(
+                    &format!("agent-log-{}", final_session_id),
+                    format!("⏸️ AI 已挂起，等待人类协助: {}", ask_msg),
+                ).ok();
+                
+                // 通知前端进入暂停状态
+                app.emit(
+                    &format!("agent-progress-{}", final_session_id),
+                    json!({
+                        "type": "agent_paused",
+                        "message": ask_msg
+                    })
+                ).ok();
+
+                println!("⏸️ [阻塞点] 模型触发 ask_human 挂起，正在死等前端人类唤醒...");
+                
+                // 真正的阻塞点：死等人类回复！
+                // rx 被我们在外层定义过了，这里可以直接 `.recv().await`
+                let reply = rx.recv().await.unwrap_or_else(|| "人类未回复，通道异常关闭".to_string());
+                
+                println!("▶️ [唤醒] 人类回复: {}", reply);
+                
+                app.emit(
+                    &format!("agent-log-{}", final_session_id),
+                    format!("▶️ AI 已被唤醒，人类回复: {}", reply),
+                ).ok();
+
+                // 伪造一个成功的执行结果，把人类的话当作工具输出返回给大模型
+                crate::agent::types::DispatchResult {
+                    success: true,
+                    stdout: format!("人类的回复是: {}", reply),
+                    stderr: String::new(),
+                    route: "ask_human_resolved".to_string(),
+                }
+            } else {
+                // 具体和本地工具交互 (非 ask_human 走普通逻辑)
                 let inst_c = inst.clone();
                 let registry_arc = registry_state.inner().clone();
                 let sid = final_session_id.clone();
@@ -1094,6 +1177,11 @@ pub async fn run_agent_main_loop(
         .map_err(|e| e.to_string())?;
 
         sleep(Duration::from_millis(500)).await;
+    }
+
+    {
+        let mut channels = intervention_channels().lock().await;
+        channels.remove(&final_session_id);
     }
 
     Ok(())

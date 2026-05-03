@@ -235,6 +235,29 @@
                     </div>
                 </div>
 
+                <!-- 🦸‍♂️ 人类干预面板 -->
+                <div class="intervention-panel" :class="{ 'paused-mode': isPaused }" v-if="steps.length > 0 && !finishOutput && isRunning">
+                    <div class="intervention-header" v-if="!isPaused">
+                        <span class="icon-pulse">🚨</span> 随时改变主意？给 AI 下达强行干预指令：
+                    </div>
+                    <div class="intervention-header paused-header" v-else>
+                        <span class="icon-pulse">🛑</span> <strong>AI 已被挂起，正在等待您的协助：</strong><br/>
+                        <span style="font-weight: normal; margin-top: 4px; display: block; color: var(--text-1);">{{ pauseReason }}</span>
+                    </div>
+                    <div class="intervention-input-group">
+                        <input 
+                            v-model="interventionMsg" 
+                            type="text" 
+                            :placeholder="isPaused ? '请输入您的协助结果，以唤醒 AI...' : '例如：放弃当前页面，直接去查下一页...'"
+                            @keyup.enter="sendIntervention"
+                            :disabled="isSendingIntervention"
+                        />
+                        <button class="btn-intervene" @click="sendIntervention" :disabled="!interventionMsg || isSendingIntervention">
+                            {{ isSendingIntervention ? '发送中...' : (isPaused ? '回复并唤醒 AI' : '强行干预') }}
+                        </button>
+                    </div>
+                </div>
+
                 <!-- 进度条 -->
                 <div class="progress-bar-wrap">
                     <div
@@ -438,7 +461,6 @@ function renderMarkdown(text: string): string {
     }) as string;
 }
 
-// JSON 格式化工具
 function formatJson(str: string | undefined): string {
     if (!str) return "";
     try {
@@ -448,6 +470,44 @@ function formatJson(str: string | undefined): string {
         return str;
     }
 }
+
+// --- 🦸‍♂️ 人类干预逻辑 ---
+const interventionMsg = ref("");
+const isSendingIntervention = ref(false);
+const isPaused = ref(false);
+const pauseReason = ref("");
+
+async function sendIntervention() {
+    if (!interventionMsg.value.trim()) return;
+    
+    isSendingIntervention.value = true;
+    try {
+        await invoke('send_human_intervention', { 
+            sessionId: props.panelId,
+            message: interventionMsg.value 
+        });
+        
+        interventionMsg.value = "";
+        logs.value.push({
+            type: "warn",
+            time: new Date().toLocaleTimeString(),
+            message: isPaused.value ? "✅ 已唤醒 AI 并发送人类协助！" : "🚨 已向 AI 发送最高优先级干预指令！"
+        });
+        isPaused.value = false;
+        pauseReason.value = "";
+    } catch (err: any) {
+        console.error("发送干预指令失败:", err);
+        logs.value.push({
+            type: "error",
+            time: new Date().toLocaleTimeString(),
+            message: `发送失败: ${err}`
+        });
+    } finally {
+        isSendingIntervention.value = false;
+    }
+}
+// -------------------------
+
 
 // ---- Props ----
 const props = defineProps<{
@@ -580,6 +640,15 @@ onMounted(async () => {
             if (s) { s.status = "error"; s.output = data.output; }
             runningStep.value = null;
             addLog("error", `  ✕ 失败 → ${data.output}`);
+        } else if (type === "agent_paused") {
+            // AI 请求协助并挂起
+            isPaused.value = true;
+            pauseReason.value = data.message;
+            addLog("warn", `🛑 AI 主动挂起: ${data.message}`);
+            nextTick(() => { 
+                const el = execPanel.value || document.querySelector(".execution-panel");
+                if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+            });
         } else if (type === "complete") {
             isRunning.value = false;
             // 强行收尾：如果还有正在运行的步骤，标记为已完成
@@ -1002,6 +1071,80 @@ defineExpose({ isRunning });
 }
 .result-body :deep(tr:nth-child(even) td) { background: color-mix(in srgb, var(--accent) 3%, transparent); }
 .result-body :deep(a) { color: var(--accent); text-decoration: underline; }
+
+/* --- 人类干预面板样式 --- */
+.intervention-panel {
+    margin: 12px 0;
+    padding: 12px 16px;
+    background: color-mix(in srgb, var(--orange) 10%, var(--surface-1));
+    border: 1px solid color-mix(in srgb, var(--orange) 30%, transparent);
+    border-radius: 8px;
+    transition: all 0.3s ease;
+}
+.intervention-panel.paused-mode {
+    background: color-mix(in srgb, var(--red) 10%, var(--surface-1));
+    border-color: var(--red);
+    box-shadow: 0 0 15px color-mix(in srgb, var(--red) 20%, transparent);
+}
+.intervention-header {
+    font-size: 13px;
+    color: var(--orange);
+    font-weight: 700;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.paused-header {
+    color: var(--red);
+    flex-direction: column;
+    align-items: flex-start;
+}
+.icon-pulse {
+    font-size: 16px;
+    animation: pulse-icon 2s infinite;
+}
+@keyframes pulse-icon {
+    0% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.15); opacity: 0.8; }
+    100% { transform: scale(1); opacity: 1; }
+}
+.intervention-input-group {
+    display: flex;
+    gap: 8px;
+}
+.intervention-input-group input {
+    flex: 1;
+    background: var(--surface-0);
+    border: 1px solid var(--border-2);
+    color: var(--text-1);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+}
+.intervention-input-group input:focus {
+    border-color: var(--orange);
+    outline: none;
+}
+.btn-intervene {
+    background: var(--orange);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 0 16px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.btn-intervene:hover:not(:disabled) {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+.btn-intervene:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
 
 /* slide-up 动画 */
 .slide-up-enter-active { transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
