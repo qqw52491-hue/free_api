@@ -885,7 +885,7 @@ defineExpose({ isRunning });
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 14px;
+    padding: 12px 24px;
     font-size: 13px;
     font-weight: 600;
     color: var(--accent);
@@ -914,8 +914,14 @@ defineExpose({ isRunning });
 }
 .result-card-icon { font-size: 15px; }
 .result-body {
-    padding: 16px 14px;
+    padding: 20px 24px;
     background: var(--surface-0);
+}
+.result-body :deep(table) {
+    display: block;
+    width: 100%;
+    overflow-x: auto; /* 让宽表格可以在内部滚动，而不挤坏边框 */
+    -webkit-overflow-scrolling: touch;
 }
 .result-text-block {
     font-size: 13.5px;
@@ -938,7 +944,7 @@ defineExpose({ isRunning });
 .result-body :deep(hr) { border: none; border-top: 1px solid var(--border-1); margin: 16px 0; }
 
 .result-artifacts {
-    padding: 10px 14px;
+    padding: 16px 24px;
     border-top: 1px solid var(--border-1);
     background: color-mix(in srgb, var(--accent) 2%, transparent);
 }
