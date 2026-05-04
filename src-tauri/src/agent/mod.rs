@@ -1071,31 +1071,11 @@ pub async fn run_agent_main_loop(
             };
 
             // === 升级版 Vision Prompt：DOM坐标 + 截图双锚点 ===
-            let vision_prompt = format!(
-                "【📸 截图 + DOM坐标双锚点分析】\n\
-                当前目标任务：{}\n\
-                视口真实尺寸：{}×{} 像素\n\n\
-                ✅ 【精确坐标表 (来自DOM实时计算，优先使用！)】\n\
-                {}\n\n\
-                📋 【操作规则 - 严格遵守】\\n\
-                 2. 🚨 【最高优先级 - 拦截器检测】：首先检查截图中是否出现了【人机验证、滑块验证码、登录弹窗、安全拦截弹出层】等居中遮挡元素！如果存在，这是第一优先级任务，必须先处理！处理方式：\\n\
-                    - 简单复选框验证：目视估算坐标，直接 click_xy 点击\\n\
-                    - 复杂滑块/拼图验证码：立即调用 ask_human 让用户手动完成\\n\
-                    - 注意：验证码通常是 Canvas 渲染的，坐标表中不会有它，此时必须凭截图目视估算坐标！\\n\
-                 3. 如果没有拦截层，在上方坐标表中找到与任务目标最匹配的元素\\n\
-                 4. 直接使用表中的 cx/cy 值作为 click_xy 的坐标参数，尽量不自行估算！\\n\
-                 5. 如果坐标表中确实没有目标元素（如元素被遮挡或在视口外），才允许凭截图目视估算坐标\\n\\n\
-                 ✅ 正确输出示例（坐标直接来自坐标表）：\n\
-                {{\n\
-                  \"reflection\": \"截图显示评论输入框可见，坐标表[3]\\\"下面我简单唠两句\\\" => cx:648, cy:329，直接使用\",\n\
-                  \"thought\": \"使用 DOM 精确坐标 click_xy 点击评论框\",\n\
-                  \"tool\": \"browser_dom\",\n\
-                  \"command\": {{\"action\": \"click_xy\", \"x\": 648, \"y\": 329}}\n\
-                }}",
-                goal,
-                vp_w, vp_h,
-                dom_coord_snapshot
-            );
+            let vision_prompt = include_str!("../../prompts/vision_cot.md")
+                .replace("{goal}", &goal)
+                .replace("{vp_w}", &vp_w.to_string())
+                .replace("{vp_h}", &vp_h.to_string())
+                .replace("{dom_coord_snapshot}", &dom_coord_snapshot);
 
             context.add_image_feedback(&vision_prompt, base64_img);
             final_stdout = format!(
