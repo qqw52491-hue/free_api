@@ -118,6 +118,17 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             enabled INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         );
+        -- 一条记录保存完整、自洽的 Agent checkpoint：phase + data + pending。
+        CREATE TABLE IF NOT EXISTS agent_checkpoints (
+            run_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_checkpoints_phase
+            ON agent_checkpoints(phase, updated_at DESC);
     ",
     )?;
 

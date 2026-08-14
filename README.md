@@ -23,7 +23,6 @@
 | 🛑 **AI 主动挂起求助** | 遇到扫码登录、验证码时，AI 会主动停下来并告诉你需要做什么，你处理完后它继续 |
 | 🔌 **MCP 插件扩展** | 通过 `uvx` / `npx` 免环境动态加载 Excel、数据库等本地工具，即插即用 |
 | 🧠 **长任务不失忆** | AI 自驱的记忆归档与历史压缩，任务跑 100 步也不会上下文溢出 |
-| 🆘 **Kimi 场外救援** | 执行失败后，自动打开第二个浏览器窗口向 Kimi 求救并获取修复建议 |
 
 ---
 
@@ -113,7 +112,6 @@ args: ["mcp-server-excel"]
 | **插件全局保活** | `PluginRegistry` 托管于 Tauri State，进程只启动一次 |
 | **AI 自驱历史归档** | AI 主动 `clear_history: true` 触发物理清空，配合 `memories_update` 永不失忆 |
 | **视觉感知升级** | DOM 解析失败时自动截图，交给多模态大模型看图操作 |
-| **Kimi 场外救援** | 执行失败后动态调用网页版 Kimi 获取急救建议 |
 | **多会话并发安全** | `Arc<Mutex<HashMap<SessionId, Sender>>>` 保证多 Agent 并发隔离 |
 
 ---
@@ -159,8 +157,6 @@ src-tauri/src/agent/
 src-tauri/prompts/
 ├── core_logic.md        # AI 行为总纲（含 HITL 规范）
 ├── tools/ask_human.md   # AI 主动挂起工具手册（热拔插加载）
-├── tools/browser_dom.md # 浏览器操控工具手册
-└── rescue.md            # Kimi 场外救援模板
 ```
 
 ---

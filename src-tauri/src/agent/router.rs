@@ -7,9 +7,6 @@ pub struct ModelRoutingConfig {
     pub pro: String,
     pub flash: String,
     pub vision: String,
-    /// 是否开启 Kimi 场外救援功能（默认关）
-    #[serde(default)]
-    pub enable_rescue: bool,
 }
 
 /// 路由判定结果（对外暴露，方便主循环获取判定理由并打日志）
@@ -72,7 +69,12 @@ impl AgentRouter {
 
         // 规则 2：上一步执行失败 -> 升维救场
         // 检查最新的 user 消息（反馈），如果包含 ❌ 说明上一步报错了
-        if let Some(last_msg) = context.turns_history.iter().rev().find(|m| m.role == "user") {
+        if let Some(last_msg) = context
+            .turns_history
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+        {
             if last_msg.content.as_str().unwrap_or_default().contains("❌") {
                 return RoutingDecision {
                     model_id: config.pro.clone(),

@@ -128,7 +128,7 @@ pub struct AgentInstruction {
     pub next_tool_hint: Option<String>,
     #[serde(default)]
     pub require_memory: Option<bool>,
-    
+
     /// 当历史过长时，AI 主动总结到 memories_update，并传 true 来清空历史
     #[serde(default)]
     pub clear_history: Option<bool>,
