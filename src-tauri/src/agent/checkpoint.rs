@@ -184,6 +184,9 @@ pub struct AgentCheckpoint {
     pub phase: AgentPhase,
     pub data: DurableAgentContext,
     pub pending: Option<PendingToolCall>,
+    /// LLM 已返回且已确认的结构化决策；工具开始前也必须可恢复。
+    #[serde(default)]
+    pub prepared_instruction: Option<AgentInstruction>,
     pub step_id: usize,
     pub retry_count: u32,
     pub last_error: Option<String>,
@@ -201,6 +204,7 @@ impl AgentCheckpoint {
             phase: AgentPhase::CallLlm,
             data: DurableAgentContext::capture(context),
             pending: None,
+            prepared_instruction: None,
             step_id: 0,
             retry_count: 0,
             last_error: None,
@@ -222,6 +226,17 @@ impl AgentCheckpoint {
         self.phase = AgentPhase::CallLlm;
         self.step_id = step_id;
         self.pending = None;
+        self.prepared_instruction = None;
+        self.last_error = None;
+        self.refresh_context(context);
+    }
+
+    /// LLM 的结构化回复已完整到达。先提交决策，再发任何工具调用。
+    /// 即使工具尚未开始，崩溃恢复也能从 RunTool 直接续接该 instruction。
+    pub fn record_instruction(&mut self, instruction: AgentInstruction, context: &SandwichContext) {
+        self.phase = AgentPhase::RunTool;
+        self.pending = None;
+        self.prepared_instruction = Some(instruction);
         self.last_error = None;
         self.refresh_context(context);
     }
@@ -233,15 +248,15 @@ impl AgentCheckpoint {
         context: &SandwichContext,
     ) -> RecoveryPolicy {
         let policy = recovery_policy_for(&instruction);
+        self.phase = AgentPhase::RunTool;
+        self.prepared_instruction = Some(instruction.clone());
         self.refresh_context(context);
         self.last_error = None;
 
         if policy.requires_pending() {
-            self.phase = AgentPhase::RunTool;
             self.pending = Some(PendingToolCall::new(instruction, policy));
         } else {
-            // 不记录 safe action 的意图；崩溃后由 CallLlm 安全地重新规划。
-            self.phase = AgentPhase::CallLlm;
+            // 安全读不需要 pending；但保留已确认 instruction，崩溃后可直接续接。
             self.pending = None;
         }
 
@@ -254,6 +269,7 @@ impl AgentCheckpoint {
         self.phase = AgentPhase::CallLlm;
         self.step_id = completed_step_id.saturating_add(1);
         self.pending = None;
+        self.prepared_instruction = None;
         self.last_error = None;
         self.refresh_context(context);
     }
@@ -261,6 +277,7 @@ impl AgentCheckpoint {
     pub fn record_recoverable_error(&mut self, error: String, context: &SandwichContext) {
         self.phase = AgentPhase::CallLlm;
         self.pending = None;
+        self.prepared_instruction = None;
         self.retry_count += 1;
         self.last_error = Some(error);
         self.refresh_context(context);
@@ -268,6 +285,8 @@ impl AgentCheckpoint {
 
     pub fn wait_for_human(&mut self, reason: String, context: &SandwichContext) {
         self.phase = AgentPhase::WaitUser;
+        // pending 保留给人工审计；prepared instruction 已由 pending 覆盖或不再需要。
+        self.prepared_instruction = None;
         self.last_error = Some(reason);
         self.refresh_context(context);
     }
@@ -275,12 +294,15 @@ impl AgentCheckpoint {
     pub fn mark_done(&mut self, context: &SandwichContext) {
         self.phase = AgentPhase::Done;
         self.pending = None;
+        self.prepared_instruction = None;
         self.last_error = None;
         self.refresh_context(context);
     }
 
     pub fn mark_failed(&mut self, reason: String, context: &SandwichContext) {
         self.phase = AgentPhase::Failed;
+        self.pending = None;
+        self.prepared_instruction = None;
         self.last_error = Some(reason);
         self.refresh_context(context);
     }
@@ -300,6 +322,8 @@ impl AgentCheckpoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryDecision {
     ResumePlanning,
+    /// LLM instruction 已落盘，但工具尚未形成 pending；可从工具处理器直接续接。
+    ResumeTool,
     ResumeWaiting,
     RetryPending,
     ProbePending,
@@ -318,6 +342,11 @@ pub fn recovery_decision(checkpoint: &AgentCheckpoint) -> RecoveryDecision {
         }
         Some(RecoveryPolicy::Probeable) => RecoveryDecision::ProbePending,
         Some(RecoveryPolicy::HumanReview) => RecoveryDecision::RequireHumanReview,
+        None if checkpoint.phase == AgentPhase::RunTool
+            && checkpoint.prepared_instruction.is_some() =>
+        {
+            RecoveryDecision::ResumeTool
+        }
         None if checkpoint.phase == AgentPhase::WaitUser => RecoveryDecision::ResumeWaiting,
         None => RecoveryDecision::ResumePlanning,
     }
@@ -447,13 +476,21 @@ mod tests {
     }
 
     #[test]
-    fn safe_actions_do_not_create_pending_records() {
+    fn safe_actions_keep_a_prepared_instruction_without_pending() {
         let context = SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("run-1".to_string(), &context);
         checkpoint.prepare_tool(instruction("extract"), &context);
 
         assert!(checkpoint.pending.is_none());
-        assert_eq!(checkpoint.phase, AgentPhase::CallLlm);
+        assert_eq!(checkpoint.phase, AgentPhase::RunTool);
+        assert_eq!(
+            checkpoint
+                .prepared_instruction
+                .as_ref()
+                .map(AgentInstruction::get_action),
+            Some("extract".to_string())
+        );
+        assert_eq!(recovery_decision(&checkpoint), RecoveryDecision::ResumeTool);
     }
 
     #[test]
@@ -499,13 +536,31 @@ mod tests {
     }
 
     #[test]
-    fn safe_read_recovery_returns_to_planning_without_pending_side_effect() {
+    fn safe_read_recovery_resumes_the_saved_instruction_without_a_new_llm_call() {
         let context = SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("run-1".to_string(), &context);
         checkpoint.prepare_tool(instruction("extract"), &context);
 
         assert!(checkpoint.pending.is_none());
+        assert_eq!(checkpoint.phase, AgentPhase::RunTool);
+        assert!(checkpoint.prepared_instruction.is_some());
+        assert_eq!(recovery_decision(&checkpoint), RecoveryDecision::ResumeTool);
+    }
+
+    #[test]
+    fn llm_instruction_is_persisted_before_tool_execution_and_cleared_on_completion() {
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("run-1".to_string(), &context);
+        checkpoint.record_instruction(instruction("submit_order"), &context);
+
+        assert_eq!(checkpoint.phase, AgentPhase::RunTool);
+        assert!(checkpoint.pending.is_none());
+        assert_eq!(recovery_decision(&checkpoint), RecoveryDecision::ResumeTool);
+
+        checkpoint.complete_step(3, &context);
         assert_eq!(checkpoint.phase, AgentPhase::CallLlm);
+        assert_eq!(checkpoint.step_id, 4);
+        assert!(checkpoint.prepared_instruction.is_none());
         assert_eq!(
             recovery_decision(&checkpoint),
             RecoveryDecision::ResumePlanning

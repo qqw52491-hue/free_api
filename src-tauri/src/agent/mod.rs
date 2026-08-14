@@ -426,6 +426,8 @@ pub async fn run_agent_main_loop(
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
     save_checkpoint(state.inner(), &mut checkpoint)?;
+    // 仅在从 phase=RunTool 且尚无 pending 的 checkpoint 恢复时使用。
+    let mut recovered_instruction: Option<AgentInstruction> = None;
     let mut action_history: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     // 注册人类干预接收器
@@ -444,6 +446,12 @@ pub async fn run_agent_main_loop(
     // WaitUser 与 pending 调用不能从普通上下文可靠反推；恢复时显式读取 checkpoint。
     match recovery_decision(&checkpoint) {
         RecoveryDecision::ResumePlanning | RecoveryDecision::Terminal => {}
+        RecoveryDecision::ResumeTool => {
+            recovered_instruction = checkpoint.prepared_instruction.clone();
+            if recovered_instruction.is_none() {
+                return Err("checkpoint phase=run_tool 但缺少 prepared instruction".to_string());
+            }
+        }
         RecoveryDecision::ResumeWaiting
         | RecoveryDecision::RequireHumanReview
         | RecoveryDecision::RetryPending
@@ -503,8 +511,11 @@ pub async fn run_agent_main_loop(
     // 不再使用启动瞬间捕获范围的 for-loop，避免 checkpoint 更新后调度器仍沿旧游标运行。
     while checkpoint.step_id < MAX_STEPS {
         let step_id = checkpoint.step_id;
-        checkpoint.begin_planning(step_id, &context);
-        save_checkpoint(state.inner(), &mut checkpoint)?;
+        let resume_instruction = recovered_instruction.take();
+        if resume_instruction.is_none() {
+            checkpoint.begin_planning(step_id, &context);
+            save_checkpoint(state.inner(), &mut checkpoint)?;
+        }
         advance_run_state(
             &app,
             &final_session_id,
@@ -558,6 +569,7 @@ pub async fn run_agent_main_loop(
             &mut checkpoint,
             &mut run_machine,
             &mut rx,
+            resume_instruction,
         )
         .await?;
 
@@ -779,9 +791,58 @@ async fn run_call_llm_and_run_tool_phases(
     mut checkpoint: &mut AgentCheckpoint,
     mut run_machine: &mut AgentRunMachine,
     rx: &mut mpsc::Receiver<String>,
+    resume_instruction: Option<AgentInstruction>,
 ) -> Result<(AgentInstruction, DispatchResult), String> {
     let mut retry_count = 0;
     let max_retries = 3;
+
+    // LLM 回复已落盘但工具尚未开始时，恢复直接进入同一工具处理器。
+    // 这样不会为同一个决策额外消耗一次模型调用，也不会绕过工具前的 pending 提交。
+    if let Some(inst) = resume_instruction {
+        advance_run_state(
+            &app,
+            &final_session_id,
+            &mut run_machine,
+            AgentRunEvent::InstructionReady {
+                action: inst.get_action(),
+            },
+        )?;
+        let dispatch_result = run_tool_phase(
+            app,
+            state,
+            registry_state,
+            final_session_id,
+            step_id,
+            &inst,
+            context,
+            checkpoint,
+            run_machine,
+            rx,
+        )
+        .await?;
+        if dispatch_result.success || inst.get_action() == "finish" {
+            return Ok((inst, dispatch_result));
+        }
+
+        let error_detail = format!("【❌ 恢复后工具执行失败】: {}", dispatch_result.stderr);
+        advance_run_state(
+            &app,
+            &final_session_id,
+            &mut run_machine,
+            AgentRunEvent::ToolFailed {
+                reason: error_detail.clone(),
+            },
+        )?;
+        context.add_error_feedback(&error_detail);
+        checkpoint.record_recoverable_error(error_detail, context);
+        save_checkpoint(state.inner(), checkpoint)?;
+        advance_run_state(
+            &app,
+            &final_session_id,
+            &mut run_machine,
+            AgentRunEvent::RetryPlanning,
+        )?;
+    }
 
     let (instruction, result) = loop {
         // --- 🚦 调用网关：动态路由 ---
@@ -884,6 +945,9 @@ async fn run_call_llm_and_run_tool_phases(
         };
 
         inst.description = format!("[{}] {}", routing.tier, inst.description);
+        // LLM 的结构化决策已经完整到达；在任何 UI 通知或工具调用之前提交它。
+        checkpoint.record_instruction(inst.clone(), context);
+        save_checkpoint(state.inner(), checkpoint)?;
         advance_run_state(
             &app,
             &final_session_id,
