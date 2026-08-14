@@ -45,33 +45,6 @@
                 </div>
             </div>
 
-            <!-- 浏览器模式选择 -->
-            <div class="control-section">
-                <label class="form-label">浏览器模式</label>
-                <select
-                    class="form-select"
-                    v-model="selectedBrowserMode"
-                    :disabled="isRunning"
-                >
-                    <option :value="0">🧹 临时模式 (无痕/干净)</option>
-                    <option :value="1">💾 持久化模式 (保留登录态)</option>
-                    <option :value="2">🔗 连接模式 (接管 Chrome:9222)</option>
-                </select>
-                <div class="form-tip" v-if="selectedBrowserMode === 1">建议：首次登录后自动保持，无需重复扫码。</div>
-                <div class="form-tip connect-tip" v-if="selectedBrowserMode === 2">提示：请先以远程调试模式启动 Chrome。</div>
-            </div>
-
-            <!-- Kimi 场外救援开关 -->
-            <div class="control-section">
-                <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;">
-                    <span>🆘 Kimi 场外救援</span>
-                    <span style="font-size:11px;color:var(--text-4);font-weight:400;">执行失败时呼叫 Kimi</span>
-                    <input type="checkbox" v-model="modelRouting.enableRescue" :disabled="isRunning" style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent);">
-                </label>
-                <div class="form-tip" v-if="!modelRouting.enableRescue" style="color:var(--text-4);">当前已关闭，失败时 AI 自行重试</div>
-                <div class="form-tip" v-if="modelRouting.enableRescue" style="color:var(--accent-light);">开启后失败时会打开第二个浏览器窗口找 Kimi 帮忙</div>
-            </div>
-
             <!-- 上下文日志开关 -->
             <div class="control-section">
                 <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;">
@@ -542,12 +515,11 @@ interface TokenUsageInfo {
 // ---- 独立状态（每个面板完全隔离） ----
 const sessionId = props.panelId;
 const tokenUsage = ref<TokenUsageInfo | null>(null);
-const modelRouting = ref({ pro: "", flash: "", vision: "", enableRescue: false });
+const modelRouting = ref({ pro: "", flash: "", vision: "" });
 const logContext = ref(false);
 const goalInput = ref("");
 const currentGoal = ref("");
 const isRunning = ref(false);
-const selectedBrowserMode = ref(1);
 const steps = ref<AgentStep[]>([]);
 const planningMessage = ref("");
 const runningStep = ref<number | null>(null);
@@ -561,15 +533,12 @@ const logList = ref<HTMLElement>();
 
 // ---- 预设 ----
 const presets = [
-    { icon: "🚀", label: "自动查Github", goal: "去 github.com 搜索关于 tauri 的最新项目，并阅读搜索结果页面的正文内容" },
     { icon: "📄", label: "创建笔记", goal: "在桌面创建一个名为 notes.txt 的文件，写入当前日期和时间，然后显示文件内容" },
     { icon: "📂", label: "查看桌面", goal: "列出桌面上所有文件和文件夹，统计数量" },
     { icon: "💧", label: "喝水提醒", goal: "用 osascript 弹出对话框提醒我喝水，然后再播放一个系统声音" },
     { icon: "📊", label: "磁盘信息", goal: "查看当前磁盘使用情况，以及 CPU 和内存占用信息" },
     { icon: "🗂️", label: "整理下载", goal: "列出下载文件夹中最近修改的 5 个文件，以及其大小" },
     { icon: "🖥️", label: "系统信息", goal: "获取 macOS 版本、主机名、当前用户名和 IP 地址" },
-    { icon: "🤖", label: "调戏 Kimi", goal: "使用 browser_kimi 工具，自动去问 Kimi：请用一句话夸夸我的编程技术" },
-    { icon: "🕸️", label: "长任务测试", goal: "去百度搜索“订婚准备清单 详细版”，找到知乎的相关页面并进入，仔细阅读后提取男方和女方分别需要准备的物品清单，最后将提取结果保存到桌面的 订婚准备.md 文件中" },
 ];
 
 // ---- 计算 ----
@@ -593,6 +562,7 @@ const progressPercent = computed(() => {
 
 // ---- 事件监听器（挂载时注册，卸载时销毁） ----
 let unlistenProgress: UnlistenFn | null = null;
+let unlistenRunState: UnlistenFn | null = null;
 
 onMounted(async () => {
     // 默认选中第一个模型
@@ -726,11 +696,47 @@ onMounted(async () => {
             addLog("error", `❌ ${data.message}`);
         }
     });
+
+    // 新状态快照与旧 agent-progress-* 事件并行：只同步生命周期展示，不改写步骤详情。
+    unlistenRunState = await listen<any>(`agent-run-state-${sessionId}`, (event) => {
+        const snapshot = event.payload || {};
+        const message = snapshot.message || "";
+
+        switch (snapshot.state) {
+            case "planning":
+                isPaused.value = false;
+                planningMessage.value = message || `正在规划第 ${(snapshot.step_id ?? 0) + 1} 步...`;
+                break;
+            case "executing":
+            case "recovering":
+            case "rescuing":
+            case "finalizing":
+                isPaused.value = false;
+                break;
+            case "waiting_for_human":
+                isPaused.value = true;
+                pauseReason.value = message || "AI 正在等待人工确认";
+                break;
+            case "succeeded":
+                isRunning.value = false;
+                isPaused.value = false;
+                if (message) completionMessage.value = message;
+                break;
+            case "failed":
+            case "cancelled":
+                isRunning.value = false;
+                isPaused.value = false;
+                hasError.value = true;
+                if (message) completionMessage.value = message;
+                break;
+        }
+    });
 });
 
 onUnmounted(() => {
     // 清理事件监听，防止内存泄漏
     if (unlistenProgress) unlistenProgress();
+    if (unlistenRunState) unlistenRunState();
 });
 
 // ---- 方法 ----
@@ -741,9 +747,6 @@ async function runAgent() {
     isRunning.value = true;
 
     try {
-        const modeDesc = await invoke<string>("set_browser_launch_mode", { 
-            mode: selectedBrowserMode.value 
-        });
 
         currentGoal.value = goalInput.value.trim();
         steps.value = [];
@@ -752,7 +755,7 @@ async function runAgent() {
         hasError.value = false;
         runningStep.value = null;
 
-        addLog("info", `🚀 开启特工大脑 (${modeDesc}): ${currentGoal.value}`);
+        addLog("info", `🚀 启动 Agent: ${currentGoal.value}`);
 
         await invoke("run_agent_main_loop", {
             modelRouting: modelRouting.value,

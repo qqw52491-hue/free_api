@@ -89,7 +89,6 @@ impl SandwichContext {
         self.current_observation = obs;
     }
 
-
     /// 注入截图/图片反馈信息 (多模态)
     pub fn add_image_feedback(&mut self, text: &str, base64_image: &str) {
         let msg = ChatMessage {

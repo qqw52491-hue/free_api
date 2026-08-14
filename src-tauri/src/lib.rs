@@ -49,7 +49,6 @@ pub fn run() {
             agent::execute_command,
             agent::run_agent_main_loop,
             agent::dispatch_agent_step,
-            agent::set_browser_launch_mode,
             agent::send_human_intervention,
         ])
         .run(tauri::generate_context!())
