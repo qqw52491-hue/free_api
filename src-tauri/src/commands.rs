@@ -419,6 +419,17 @@ pub async fn create_session(
 #[tauri::command]
 pub async fn delete_session(state: State<'_, DbState>, id: String) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    // 任务数据区允许临时 session，因此由会话删除流程显式清理。
+    conn.execute(
+        "DELETE FROM agent_task_resources WHERE session_id=?1",
+        params![&id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM agent_checkpoints WHERE run_id=?1",
+        params![&id],
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM chat_sessions WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())

@@ -1,4 +1,5 @@
 use crate::agent::context::{ChatMessage, SandwichContext};
+use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
 use crate::db::DbState;
 use chrono::Utc;
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
 const MAX_PERSISTED_TURNS: usize = 40;
 const MAX_OBSERVATION_CHARS: usize = 4_000;
 
@@ -60,6 +61,17 @@ impl RecoveryPolicy {
 pub fn recovery_policy_for(instruction: &AgentInstruction) -> RecoveryPolicy {
     let action = instruction.get_action().to_ascii_lowercase();
     let tool = instruction.get_tool().to_ascii_lowercase();
+
+    if tool == "task_store" {
+        return match action.as_str() {
+            "list_resources" | "get_resource" | "list_records" | "get_record" => {
+                RecoveryPolicy::SafeRetry
+            }
+            // create_resource 使用 session/kind/label 生成确定性 ID；upsert 以 record_key UPSERT。
+            "create_resource" | "upsert_records" | "update_resource" => RecoveryPolicy::Idempotent,
+            _ => RecoveryPolicy::HumanReview,
+        };
+    }
 
     let safe_actions = [
         "extract",
@@ -125,6 +137,9 @@ impl PendingToolCall {
 pub struct DurableAgentContext {
     pub user_goal: String,
     pub memories: HashMap<String, String>,
+    /// 任务数据区目录，数据行仍由 agent_task_records 独立实时持久化。
+    #[serde(default)]
+    pub task_resources: Vec<TaskResourceRef>,
     pub todo_list: Vec<TodoItem>,
     pub turns_history: Vec<ChatMessage>,
     pub progress_summary: String,
@@ -144,6 +159,7 @@ impl DurableAgentContext {
         Self {
             user_goal: context.user_goal.clone(),
             memories: context.memories.clone(),
+            task_resources: context.task_resources.clone(),
             todo_list: context.todo_list.clone(),
             turns_history,
             progress_summary: context.progress_summary.clone(),
@@ -160,6 +176,7 @@ impl DurableAgentContext {
     pub fn restore_into(&self, context: &mut SandwichContext) {
         context.user_goal = self.user_goal.clone();
         context.memories = self.memories.clone();
+        context.task_resources = self.task_resources.clone();
         context.todo_list = self.todo_list.clone();
         context.turns_history = self.turns_history.clone();
         context.progress_summary = self.progress_summary.clone();
@@ -564,6 +581,57 @@ mod tests {
         assert_eq!(
             recovery_decision(&checkpoint),
             RecoveryDecision::ResumePlanning
+        );
+    }
+
+    #[test]
+    fn task_store_resource_references_survive_checkpoint_context_recovery() {
+        let mut context = SandwichContext::new("system".to_string(), "goal".to_string());
+        context.set_task_resources(vec![crate::agent::task_store::TaskResourceRef {
+            resource_id: "people-dataset".to_string(),
+            kind: "people".to_string(),
+            label: "候选人资料".to_string(),
+            summary: "已持久化 100 人，已补全 42 人".to_string(),
+            status: "active".to_string(),
+            row_count: 100,
+            cursor: Some(serde_json::json!({"enriched": 42})),
+            updated_at: "2026-08-14T00:00:00Z".to_string(),
+        }]);
+        let checkpoint = AgentCheckpoint::new("run-1".to_string(), &context);
+
+        assert_eq!(checkpoint.data.task_resources.len(), 1);
+        assert_eq!(checkpoint.data.task_resources[0].row_count, 100);
+
+        let mut restored =
+            SandwichContext::new("other-system".to_string(), "other-goal".to_string());
+        checkpoint.restore_context(&mut restored);
+        assert_eq!(restored.task_resources, checkpoint.data.task_resources);
+        assert_eq!(restored.task_resources[0].resource_id, "people-dataset");
+        assert_eq!(
+            restored.task_resources[0].cursor,
+            Some(serde_json::json!({"enriched": 42}))
+        );
+    }
+
+    #[test]
+    fn task_store_upsert_uses_idempotent_pending_recovery() {
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut instruction = instruction("upsert_records");
+        instruction.tool = Some("task_store".to_string());
+        let mut checkpoint = AgentCheckpoint::new("run-1".to_string(), &context);
+
+        assert_eq!(
+            recovery_policy_for(&instruction),
+            RecoveryPolicy::Idempotent
+        );
+        checkpoint.prepare_tool(instruction, &context);
+        assert_eq!(
+            checkpoint.pending.as_ref().map(|pending| pending.policy),
+            Some(RecoveryPolicy::Idempotent)
+        );
+        assert_eq!(
+            recovery_decision(&checkpoint),
+            RecoveryDecision::RetryPending
         );
     }
 }

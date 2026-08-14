@@ -1,3 +1,4 @@
+use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -18,6 +19,9 @@ pub struct SandwichContext {
     pub turns_history: Vec<ChatMessage>,
     pub current_observation: String,
     pub progress_summary: String,
+    /// 仅保存 session 任务数据区的目录；资源记录本体不进入 LLM 上下文。
+    #[serde(default)]
+    pub task_resources: Vec<TaskResourceRef>,
 
     // --- 动态载入的工具详情 ---
     pub active_tool: Option<String>,
@@ -36,6 +40,7 @@ impl SandwichContext {
             turns_history: Vec::new(),
             current_observation: String::new(),
             progress_summary: String::new(),
+            task_resources: Vec::new(),
             active_tool: None,
             active_tool_detail: String::new(),
             carry_memories: false,
@@ -77,6 +82,10 @@ impl SandwichContext {
         if self.turns_history.len() > 40 {
             self.turns_history = self.turns_history[self.turns_history.len() - 40..].to_vec();
         }
+    }
+
+    pub fn set_task_resources(&mut self, resources: Vec<TaskResourceRef>) {
+        self.task_resources = resources;
     }
 
     pub fn update_memories(&mut self, updates: Vec<crate::agent::types::MemoryItem>) {
@@ -147,6 +156,30 @@ impl SandwichContext {
             static_prefix.push_str(&format!(
                 "【全局进度与策略摘要 (Progress Summary)】\n{}\n\n",
                 self.progress_summary
+            ));
+        }
+
+        if !self.task_resources.is_empty() {
+            let resources: Vec<String> = self
+                .task_resources
+                .iter()
+                .take(20)
+                .map(|resource| {
+                    let summary: String = resource.summary.chars().take(240).collect();
+                    format!(
+                        "- id={} | kind={} | label={} | rows={} | status={} | summary={}",
+                        resource.resource_id,
+                        resource.kind,
+                        resource.label,
+                        resource.row_count,
+                        resource.status,
+                        summary
+                    )
+                })
+                .collect();
+            static_prefix.push_str(&format!(
+                "【会话任务数据区目录】\n{}\n(记录本体已独立持久化，默认不会发给你；需要时调用内部 task_store 的 list_records 或 get_record 分页查询。)\n\n",
+                resources.join("\n")
             ));
         }
 

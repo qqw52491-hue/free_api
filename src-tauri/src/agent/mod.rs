@@ -3,6 +3,7 @@ pub mod context;
 pub mod mcp;
 pub mod router;
 pub mod run_state;
+pub mod task_store;
 pub mod types;
 pub mod utils;
 
@@ -58,7 +59,8 @@ fn advance_run_state(
 
 /// 执行单条指令的内部路由逻辑
 fn execute_command_inner(
-    _session_id: &str,
+    db: &DbState,
+    session_id: &str,
     tool: &str,
     action: &str,
     params: &serde_json::Value,
@@ -73,6 +75,10 @@ fn execute_command_inner(
         } else if let Some(a) = params.get("command").and_then(|v| v.as_str()) {
             final_action = a.to_string();
         }
+    }
+
+    if tool.eq_ignore_ascii_case("task_store") {
+        return task_store::dispatch(db, session_id, &final_action, params);
     }
 
     let (plugin_name, tool_name) = if tool.contains('/') {
@@ -158,6 +164,7 @@ fn execute_command_inner(
 
 // 根据指令执行具体动作
 pub fn run_agent_step(
+    db: &DbState,
     session_id: &str,
     instruction: &AgentInstruction,
     registry: &mut PluginRegistry,
@@ -196,7 +203,7 @@ pub fn run_agent_step(
 
             // 执行单步
             let res =
-                execute_command_inner(session_id, &tool_name, &step_action, cmd_val, registry);
+                execute_command_inner(db, session_id, &tool_name, &step_action, cmd_val, registry);
 
             // 拼接输出结果
             if !res.stdout.is_empty() {
@@ -241,12 +248,13 @@ pub fn run_agent_step(
     }
 
     let params = instruction.get_params();
-    execute_command_inner(session_id, &tool_name, &action, &params, registry)
+    execute_command_inner(db, session_id, &tool_name, &action, &params, registry)
 }
 
 #[tauri::command]
 pub async fn dispatch_agent_step(
     instruction_json: String,
+    state: State<'_, DbState>,
     registry_state: State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
     session_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
@@ -254,12 +262,13 @@ pub async fn dispatch_agent_step(
         serde_json::from_str(&instruction_json).map_err(|e| e.to_string())?;
 
     let registry_arc = registry_state.inner().clone();
+    let db = state.inner().clone();
     let sid = session_id.unwrap_or_else(|| "default".to_string());
 
     let result = tokio::task::spawn_blocking(move || {
         // 在阻塞线程内部加锁
         let mut registry = futures::executor::block_on(registry_arc.lock());
-        run_agent_step(&sid, &instruction, &mut registry)
+        run_agent_step(&db, &sid, &instruction, &mut registry)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -368,6 +377,18 @@ pub async fn run_agent_main_loop(
         .unwrap_or_else(|_| "你是一个全自动 Web Agent。".to_string());
 
     // 2. 动态扫描所有内置工具 (Built-in Tools)
+    let task_store_menu = r#"
+## 会话任务数据区（内部工具，不是 MCP）
+当采集、解析或批处理会产生后续仍要使用的结构化中间数据时，先写入 task_store；不要把完整数据放入 memories、历史或 prompt。
+调用格式：tool 固定为 "task_store"，action 为下列动作，参数放在 command 或 params 对象中。
+- create_resource：创建数据集。参数 kind、label，可选 resource_id、schema、summary、cursor。
+- upsert_records：实时写入或更新记录。参数 resource_id、records 数组；每条记录宜提供 id、record_key 或 key，以保证幂等更新；可同时写 summary、cursor、status。
+- list_resources / get_resource：读取数据集目录和元数据。
+- list_records：分页读取数据行。参数 resource_id，可选 limit（最多 100）、offset。
+- get_record：读取一条记录。参数 resource_id、record_key。
+- update_resource：更新资源 label、summary、status、cursor 或 schema。
+数据行会在工具返回时立刻持久化，并按当前 session 隔离；模型默认只看到资源目录与摘要，需要具体数据时再分页查询。
+"#;
     let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
     let tools_dir = app
         .path()
@@ -405,7 +426,10 @@ pub async fn run_agent_main_loop(
         registry.format_tools_menu()
     };
 
-    let system_prompt = format!("{}\n{}\n{}", base_prompt, local_tools_menu, mcp_tools_menu);
+    let system_prompt = format!(
+        "{}\n{}\n{}\n{}",
+        base_prompt, task_store_menu, local_tools_menu, mcp_tools_menu
+    );
     println!(
         "--- 最终系统提示词 (级联菜单模式) ---\n{}\n------------------",
         system_prompt
@@ -425,6 +449,12 @@ pub async fn run_agent_main_loop(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
+    // 数据区本体是权威来源；每次启动都刷新目录，checkpoint 仅保留这份目录快照。
+    context.set_task_resources(task_store::list_resource_refs(
+        state.inner(),
+        &final_session_id,
+    )?);
+    checkpoint.refresh_context(&context);
     save_checkpoint(state.inner(), &mut checkpoint)?;
     // 仅在从 phase=RunTool 且尚无 pending 的 checkpoint 恢复时使用。
     let mut recovered_instruction: Option<AgentInstruction> = None;
@@ -674,6 +704,13 @@ pub async fn run_agent_main_loop(
                 context.active_tool_detail = detail;
             }
         }
+
+        // --- 刷新独立任务数据区目录，再把轻量引用写进 checkpoint ---
+        // 数据行早已由 task_store 自己实时持久化，绝不复制到 context。
+        context.set_task_resources(task_store::list_resource_refs(
+            state.inner(),
+            &final_session_id,
+        )?);
 
         // --- 记录历史 + 更新观测 ---
         let final_stdout = result.stdout.clone();
@@ -1250,11 +1287,12 @@ async fn run_tool_phase(
         // 具体和本地工具交互 (非 ask_human 走普通逻辑)
         let inst_c = inst.clone();
         let registry_arc = registry_state.inner().clone();
+        let db = state.inner().clone();
         let sid = final_session_id.clone();
         tokio::task::spawn_blocking(move || {
             let mut registry = futures::executor::block_on(registry_arc.lock());
             println!("执行动作: {:?}", inst_c);
-            run_agent_step(&sid, &inst_c, &mut registry)
+            run_agent_step(&db, &sid, &inst_c, &mut registry)
         })
         .await
         .map_err(|e| e.to_string())?

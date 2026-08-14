@@ -16,7 +16,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .manage(DbState(std::sync::Mutex::new(conn)))
+        .manage(DbState(std::sync::Arc::new(std::sync::Mutex::new(conn))))
         .manage(registry)
         .invoke_handler(tauri::generate_handler![
             // 平台

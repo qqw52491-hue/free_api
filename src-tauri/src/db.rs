@@ -1,10 +1,11 @@
 use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// 全局数据库状态 (Tauri managed state)
-pub struct DbState(pub Mutex<Connection>);
+#[derive(Clone)]
+pub struct DbState(pub Arc<Mutex<Connection>>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Platform {
@@ -118,6 +119,37 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             enabled INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         );
+
+        -- Session 内部任务数据区：记录本体与 checkpoint 分离，允许工具实时写入。
+        -- 不设 chat_sessions 外键，兼容 Agent 自动创建的临时 session_id。
+        CREATE TABLE IF NOT EXISTS agent_task_resources (
+            resource_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            label TEXT NOT NULL,
+            schema_json TEXT NOT NULL DEFAULT '{}',
+            summary TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            row_count INTEGER NOT NULL DEFAULT 0,
+            cursor_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_task_resources_session
+            ON agent_task_resources(session_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS agent_task_records (
+            resource_id TEXT NOT NULL,
+            record_key TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (resource_id, record_key),
+            FOREIGN KEY (resource_id) REFERENCES agent_task_resources(resource_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_task_records_resource
+            ON agent_task_records(resource_id, record_key);
+
         -- 一条记录保存完整、自洽的 Agent checkpoint：phase + data + pending。
         CREATE TABLE IF NOT EXISTS agent_checkpoints (
             run_id TEXT PRIMARY KEY,
