@@ -15,9 +15,12 @@ use crate::agent::run_state::{AgentRunEvent, AgentRunMachine, AgentRunState};
 use crate::agent::types::*;
 use crate::agent::utils::*;
 use crate::db::DbState;
+use chrono::Utc;
+use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tauri::Emitter;
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::{mpsc, Mutex};
@@ -55,6 +58,59 @@ fn advance_run_state(
     app.emit(&format!("agent-run-state-{}", session_id), snapshot)
         .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+/// 面向 AgentPanel 的轻量工具生命周期事件。只发送参数和输出摘要；完整大对象
+/// 仍由 task_store / 文件系统持久化，不能被事件流或模型上下文重复承载。
+#[derive(Debug, Clone, Serialize)]
+struct AgentToolEvent {
+    event_type: String,
+    step_id: usize,
+    description: String,
+    tool: String,
+    action: String,
+    route: Option<String>,
+    success: Option<bool>,
+    params_summary: String,
+    result_summary: String,
+    duration_ms: Option<u128>,
+    timestamp: String,
+}
+
+fn event_summary(value: &str, limit: usize) -> String {
+    let normalized = value.trim();
+    if normalized.chars().count() <= limit {
+        normalized.to_string()
+    } else {
+        format!("{}…", normalized.chars().take(limit).collect::<String>())
+    }
+}
+
+fn emit_tool_event(
+    app: &AppHandle,
+    session_id: &str,
+    step_id: usize,
+    inst: &AgentInstruction,
+    event_type: &str,
+    route: Option<String>,
+    success: Option<bool>,
+    result: &str,
+    duration_ms: Option<u128>,
+) {
+    let payload = AgentToolEvent {
+        event_type: event_type.to_string(),
+        step_id,
+        description: inst.description.clone(),
+        tool: inst.get_tool(),
+        action: inst.get_action(),
+        route,
+        success,
+        params_summary: event_summary(&inst.get_params().to_string(), 480),
+        result_summary: event_summary(result, 960),
+        duration_ms,
+        timestamp: Utc::now().to_rfc3339(),
+    };
+    let _ = app.emit(&format!("agent-tool-event-{}", session_id), payload);
 }
 
 /// 执行单条指令的内部路由逻辑
@@ -359,6 +415,29 @@ pub async fn run_agent_main_loop(
                     println!("🔌 成功挂载插件: {} (来自 {})", name, path.display());
                     all_clients.insert(name, client);
                 }
+            }
+        }
+
+        // SQLite 是 UI 管理插件启用状态的权威来源；同名配置会覆盖 YAML，
+        // disabled 记录则显式卸载同名 YAML 插件。
+        for managed in crate::commands::load_managed_mcp_plugins(state.inner())? {
+            let name = managed.config.name.clone();
+            if !managed.enabled {
+                println!("⏸️ 插件已在 UI 中禁用: {}", name);
+                all_clients.remove(&name);
+                continue;
+            }
+            match McpClient::spawn(managed.config) {
+                Ok(mut client) => {
+                    let _ = client.initialize();
+                    let tool_count = client.list_tools().map(|tools| tools.len()).unwrap_or(0);
+                    println!(
+                        "🔌 成功挂载 UI 管理插件: {} (共 {} 个工具)",
+                        name, tool_count
+                    );
+                    all_clients.insert(name, client);
+                }
+                Err(error) => println!("❌ UI 管理插件启动失败 [{}]: {}", name, error),
             }
         }
         println!("📊 插件初始化完成，最终可用插件总数: {}", all_clients.len());
@@ -1208,6 +1287,18 @@ async fn run_tool_phase(
         }),
     )
     .map_err(|e| e.to_string())?;
+    let tool_started_at = Instant::now();
+    emit_tool_event(
+        app,
+        final_session_id,
+        step_id,
+        inst,
+        "started",
+        None,
+        None,
+        "",
+        None,
+    );
 
     // --- B1. 特殊拦截：AI 主动挂起呼叫人类 ---
     let dispatch_result = if inst.get_tool().to_lowercase() == "ask_human" {
@@ -1297,6 +1388,28 @@ async fn run_tool_phase(
         .await
         .map_err(|e| e.to_string())?
     };
+
+    let event_type = if dispatch_result.success {
+        "succeeded"
+    } else {
+        "failed"
+    };
+    let result_text = if dispatch_result.success {
+        dispatch_result.stdout.as_str()
+    } else {
+        dispatch_result.stderr.as_str()
+    };
+    emit_tool_event(
+        app,
+        final_session_id,
+        step_id,
+        inst,
+        event_type,
+        Some(dispatch_result.route.clone()),
+        Some(dispatch_result.success),
+        result_text,
+        Some(tool_started_at.elapsed().as_millis()),
+    );
 
     Ok(dispatch_result)
 }

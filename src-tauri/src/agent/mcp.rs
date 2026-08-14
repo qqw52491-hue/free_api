@@ -12,6 +12,19 @@ pub struct PluginConfig {
     pub env: std::collections::HashMap<String, String>,
 }
 
+/// 允许插件 YAML 使用 `${ENV_VAR}` 引用桌面进程环境中的密钥，
+/// 避免把 Bearer token 写入可提交的配置文件。
+fn resolve_env_value(value: &str) -> Result<String, String> {
+    match value
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+    {
+        Some(key) => std::env::var(key)
+            .map_err(|_| format!("MCP 插件要求环境变量 '{}'，但当前桌面进程未设置它", key)),
+        None => Ok(value.to_string()),
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct JsonRpcRequest {
     jsonrpc: &'static str,
@@ -53,7 +66,7 @@ impl McpClient {
             .stderr(Stdio::null());
 
         for (k, v) in &config.env {
-            cmd.env(k, v);
+            cmd.env(k, resolve_env_value(v)?);
         }
 
         let mut child = cmd

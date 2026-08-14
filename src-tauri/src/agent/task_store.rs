@@ -35,6 +35,25 @@ pub fn list_resource_refs(db: &DbState, session_id: &str) -> Result<Vec<TaskReso
     list_resource_refs_conn(&conn, session_id)
 }
 
+/// 前端只读分页入口，复用与 Agent 内部工具相同的 session 所有权校验与页大小上限。
+pub fn list_records_page(
+    db: &DbState,
+    session_id: &str,
+    resource_id: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut params_value = json!({
+        "resource_id": resource_id,
+        "offset": offset.unwrap_or(0),
+    });
+    if let Some(limit) = limit {
+        params_value["limit"] = json!(limit);
+    }
+    list_records(&conn, session_id, &params_value)
+}
+
 /// 内部工具入口。它仅操作当前 session 的任务数据，不能跨 session 读取资源。
 pub fn dispatch(
     db: &DbState,
@@ -669,5 +688,47 @@ mod tests {
         );
         assert!(result.success);
         assert!(result.stdout.contains("新值"));
+    }
+
+    #[test]
+    fn frontend_page_api_is_session_scoped_and_paginates_records() {
+        let db = memory_db();
+        assert!(
+            dispatch(
+                &db,
+                "session-a",
+                "create_resource",
+                &json!({
+                    "resource_id": "people",
+                    "kind": "people",
+                    "label": "候选人资料"
+                }),
+            )
+            .success
+        );
+        assert!(
+            dispatch(
+                &db,
+                "session-a",
+                "upsert_records",
+                &json!({
+                    "resource_id": "people",
+                    "records": [
+                        {"id": "p-1", "name": "甲"},
+                        {"id": "p-2", "name": "乙"},
+                        {"id": "p-3", "name": "丙"}
+                    ]
+                }),
+            )
+            .success
+        );
+
+        let page = list_records_page(&db, "session-a", "people", Some(1), Some(1)).unwrap();
+        assert_eq!(page["page"]["offset"], 1);
+        assert_eq!(page["page"]["total"], 3);
+        assert_eq!(page["records"].as_array().unwrap().len(), 1);
+        assert_eq!(page["records"][0]["key"], "p-2");
+
+        assert!(list_records_page(&db, "session-b", "people", Some(0), Some(1)).is_err());
     }
 }

@@ -1,4 +1,5 @@
 use crate::agent::mcp::PluginConfig;
+use crate::agent::task_store;
 use crate::db::{ChatMessage, ChatSession, DbState, Model, Platform};
 use crate::llm::{self, ModelConfig, StreamEvent};
 use chrono::Utc;
@@ -19,6 +20,62 @@ pub struct McpPluginRow {
     pub env: std::collections::HashMap<String, String>,
     pub enabled: bool,
     pub created_at: String,
+}
+
+/// Agent Runtime 直接读取的插件配置。SQLite 中的 enabled 标志优先于同名 YAML。
+#[derive(Debug, Clone)]
+pub struct ManagedMcpPlugin {
+    pub config: PluginConfig,
+    pub enabled: bool,
+}
+
+pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, command, args, env, enabled FROM mcp_plugins ORDER BY created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            let args_json: String = row.get(2)?;
+            let env_json: String = row.get(3)?;
+            Ok(ManagedMcpPlugin {
+                config: PluginConfig {
+                    name: row.get(0)?,
+                    command: row.get(1)?,
+                    args: serde_json::from_str(&args_json).unwrap_or_default(),
+                    env: serde_json::from_str(&env_json).unwrap_or_default(),
+                },
+                enabled: row.get::<_, i64>(4)? == 1,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let plugins = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(plugins)
+}
+
+/// 列出当前 session 的任务资源目录。资源记录本体不会混入 Agent prompt。
+#[tauri::command]
+pub async fn get_agent_task_resources(
+    state: State<'_, DbState>,
+    session_id: String,
+) -> Result<Vec<task_store::TaskResourceRef>, String> {
+    task_store::list_resource_refs(state.inner(), &session_id)
+}
+
+/// 分页读取当前 session 任务资源中的记录；底层会执行资源归属校验和 100 条上限。
+#[tauri::command]
+pub async fn get_agent_task_records(
+    state: State<'_, DbState>,
+    session_id: String,
+    resource_id: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    task_store::list_records_page(state.inner(), &session_id, &resource_id, offset, limit)
 }
 
 #[tauri::command]
@@ -71,7 +128,7 @@ pub async fn save_mcp_plugin(
     )
     .map_err(|e| e.to_string())?;
 
-    // 同时写一个 yaml 文件到 plugins/ 目录（双重保险）
+    // UI 管理的配置写入本地忽略文件，避免把 bridge token 写进可提交的 YAML。
     let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
     let _ = std::fs::create_dir_all(&plugins_dir);
     let config = PluginConfig {
@@ -81,7 +138,7 @@ pub async fn save_mcp_plugin(
         env: env_map.clone(),
     };
     let yaml = serde_yaml::to_string(&config).unwrap_or_default();
-    let _ = std::fs::write(plugins_dir.join(format!("{}.yaml", name)), yaml);
+    let _ = std::fs::write(plugins_dir.join(format!("{}.local.yaml", name)), yaml);
 
     Ok(McpPluginRow {
         id,
@@ -100,9 +157,9 @@ pub async fn delete_mcp_plugin(state: State<'_, DbState>, name: String) -> Resul
     conn.execute("DELETE FROM mcp_plugins WHERE name=?1", params![name])
         .map_err(|e| e.to_string())?;
 
-    // 同时删 yaml
+    // 仅删 UI 写入的本地配置；项目自带 YAML 不由 UI 删除。
     let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
-    let yaml_path = plugins_dir.join(format!("{}.yaml", name));
+    let yaml_path = plugins_dir.join(format!("{}.local.yaml", name));
     if yaml_path.exists() {
         let _ = std::fs::remove_file(yaml_path);
     }

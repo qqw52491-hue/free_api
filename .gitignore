@@ -25,3 +25,7 @@ dist-ssr
 
 # Agent Logs
 agent_logs/
+
+# Local MCP bridge credentials / machine-specific plugin configuration
+plugins/*.local.yaml
+plugins/*.local.yml
