@@ -1,509 +1,318 @@
 <template>
-    <div class="agent-instance">
-        <!-- 左侧：控制面板 -->
-        <aside class="agent-sidebar">
-            <div class="sidebar-header">
-                <div class="sidebar-title">
-                    <span class="title-icon">🤖</span>
-                    <span>Agent #{{ panelId.slice(-4) }}</span>
-                </div>
-                <div class="sidebar-subtitle">独立任务执行单元</div>
-            </div>
+    <div class="agent-console">
+        <aside class="console-controls">
+            <header class="console-brand">
+                <span class="eyebrow">AGENT CONSOLE</span>
+                <h1>任务执行台</h1>
+                <p>会话 {{ panelId.slice(-6) }}</p>
+            </header>
 
-            <!-- 模型配置面板 -->
-            <div class="control-section">
-                <label class="form-label" style="margin-bottom: 8px;">模型网关配置</label>
-                
-                <div class="routing-item">
-                    <span class="routing-label" style="font-size: 12px; color: #666;">🧠 主力推理模型 (Pro)</span>
-                    <select class="form-select" v-model="modelRouting.pro" :disabled="isRunning">
-                        <option value="" disabled>选择复杂推理模型…</option>
-                        <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
-                            <option v-for="m in group.models" :key="m.id" :value="m.id">{{ m.display_name || m.name }}</option>
-                        </optgroup>
-                    </select>
+            <section class="control-section">
+                <div class="section-heading">
+                    <span>模型路由</span>
+                    <small>运行期间锁定</small>
                 </div>
+                <label class="field-label" for="model-pro">推理模型</label>
+                <select id="model-pro" v-model="modelRouting.pro" :disabled="isRunning">
+                    <option value="" disabled>选择复杂推理模型</option>
+                    <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
+                        <option v-for="model in group.models" :key="model.id" :value="model.id">
+                            {{ model.display_name || model.name }}
+                        </option>
+                    </optgroup>
+                </select>
 
-                <div class="routing-item" style="margin-top: 8px;">
-                    <span class="routing-label" style="font-size: 12px; color: #666;">⚡ 极速执行模型 (Flash)</span>
-                    <select class="form-select" v-model="modelRouting.flash" :disabled="isRunning">
-                        <option value="" disabled>选择快速执行模型…</option>
-                        <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
-                            <option v-for="m in group.models" :key="m.id" :value="m.id">{{ m.display_name || m.name }}</option>
-                        </optgroup>
-                    </select>
-                </div>
+                <label class="field-label" for="model-flash">执行模型</label>
+                <select id="model-flash" v-model="modelRouting.flash" :disabled="isRunning">
+                    <option value="" disabled>选择快速执行模型</option>
+                    <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
+                        <option v-for="model in group.models" :key="model.id" :value="model.id">
+                            {{ model.display_name || model.name }}
+                        </option>
+                    </optgroup>
+                </select>
 
-                <div class="routing-item" style="margin-top: 8px;">
-                    <span class="routing-label" style="font-size: 12px; color: #666;">👁️ 视觉多模态模型 (Vision)</span>
-                    <select class="form-select" v-model="modelRouting.vision" :disabled="isRunning">
-                        <option value="" disabled>选择多模态看图模型…</option>
-                        <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
-                            <option v-for="m in group.models" :key="m.id" :value="m.id">{{ m.display_name || m.name }}</option>
-                        </optgroup>
-                    </select>
-                </div>
-            </div>
+                <label class="field-label" for="model-vision">视觉模型</label>
+                <select id="model-vision" v-model="modelRouting.vision" :disabled="isRunning">
+                    <option value="" disabled>选择多模态模型</option>
+                    <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
+                        <option v-for="model in group.models" :key="model.id" :value="model.id">
+                            {{ model.display_name || model.name }}
+                        </option>
+                    </optgroup>
+                </select>
+            </section>
 
-            <!-- 上下文日志开关 -->
-            <div class="control-section">
-                <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;">
-                    <span>📁 上下文日志</span>
-                    <span style="font-size:11px;color:var(--text-4);font-weight:400;">调试用</span>
-                    <input type="checkbox" v-model="logContext" :disabled="isRunning" style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent);">
+            <section class="control-section compact-section">
+                <label class="toggle-row" for="context-log">
+                    <span>
+                        <strong>记录完整上下文</strong>
+                        <small>用于任务复盘与调试</small>
+                    </span>
+                    <input id="context-log" v-model="logContext" :disabled="isRunning" type="checkbox" />
                 </label>
-                <div class="form-tip" v-if="!logContext" style="color:var(--text-4);">关闭 · 不写日志文件</div>
-                <div class="form-tip" v-if="logContext" style="color:#f5a623;">开启 · 每步将完整上下文写入项目根目录的 agent_logs/</div>
-            </div>
+            </section>
 
-
-            <!-- 快捷预设 -->
-            <div class="control-section">
-                <label class="form-label">快捷预设</label>
-                <div class="preset-list">
+            <section class="control-section">
+                <div class="section-heading">
+                    <span>任务预设</span>
+                    <small>一键填充</small>
+                </div>
+                <div class="preset-grid">
                     <button
                         v-for="preset in presets"
                         :key="preset.label"
-                        class="preset-btn"
+                        class="preset-button"
                         :class="{ active: goalInput === preset.goal }"
-                        @click="goalInput = preset.goal"
                         :disabled="isRunning"
+                        type="button"
+                        @click="goalInput = preset.goal"
                     >
-                        <span class="preset-icon">{{ preset.icon }}</span>
-                        <span>{{ preset.label }}</span>
+                        {{ preset.label }}
                     </button>
                 </div>
-            </div>
+            </section>
 
-            <!-- 目标输入 -->
-            <div
-                class="control-section"
-                style="flex: 1; display: flex; flex-direction: column; gap: 8px"
-            >
-                <label class="form-label">任务目标</label>
+            <section class="control-section goal-section">
+                <label class="field-label" for="agent-goal">任务目标</label>
                 <textarea
-                    class="form-textarea goal-input"
+                    id="agent-goal"
                     v-model="goalInput"
-                    placeholder="描述你想让 AI 完成的任务…&#10;&#10;例如：&#10;• 在桌面创建一个 notes.txt 文件并写入当前时间&#10;• 显示当前目录下所有文件&#10;• 弹窗提醒我去喝水"
                     :disabled="isRunning"
-                    rows="6"
-                ></textarea>
-            </div>
+                    placeholder="描述希望 Agent 完成的任务。建议明确目标、范围和期望结果。"
+                    rows="7"
+                />
+            </section>
 
-            <!-- 执行按钮 -->
-            <div class="control-section">
+            <footer class="control-actions">
                 <button
-                    class="btn btn-primary run-btn"
+                    class="action-button primary"
+                    type="button"
+                    :disabled="!canStart"
                     @click="runAgent"
-                    :disabled="
-                        !modelRouting.pro || !modelRouting.flash || !modelRouting.vision || !goalInput.trim() || isRunning
-                    "
                 >
-                    <span v-if="isRunning" class="spinning">⟳</span>
-                    <span v-else>▶</span>
-                    {{ isRunning ? "执行中…" : "开始执行" }}
+                    {{ isRunning ? "任务运行中" : "开始执行" }}
                 </button>
                 <button
-                    v-if="steps.length > 0 && !isRunning"
-                    class="btn btn-ghost clear-btn"
+                    v-if="isRunning"
+                    class="action-button danger"
+                    type="button"
+                    :disabled="stopRequested"
+                    @click="requestStop"
+                >
+                    {{ stopRequested ? "停止请求已发送" : "请求停止" }}
+                </button>
+                <button
+                    v-else-if="timeline.length > 0"
+                    class="action-button secondary"
+                    type="button"
                     @click="clearAll"
                 >
-                    清空记录
+                    清空本次记录
                 </button>
-            </div>
+                <p class="control-hint">
+                    {{ isRunning ? "停止请求将作为高优先级人工指令发送给 Agent。" : "开始后将在右侧持续显示状态和工具活动。" }}
+                </p>
+            </footer>
         </aside>
 
-        <!-- 右侧：执行面板 -->
-        <main class="agent-main">
-            <!-- 空状态 -->
-            <div
-                v-if="steps.length === 0 && !isRunning && !planningMessage"
-                class="empty-state"
-            >
-                <div class="empty-icon">🤖</div>
-                <h2 class="empty-title">AI Agent 执行台</h2>
-                <p class="empty-desc">
-                    选择一个 AI 模型，输入你的目标，<br />
-                    Agent 会自动规划步骤并执行
-                </p>
-                <div class="capability-grid">
-                    <div class="cap-card">
-                        <span class="cap-icon">📁</span>
-                        <div class="cap-title">文件系统操作</div>
-                        <div class="cap-desc">
-                            创建、读取、移动、删除文件和文件夹
+        <main class="console-workspace">
+            <section class="run-status" :class="`state-${runState}`">
+                <div class="status-main">
+                    <div class="state-marker" aria-hidden="true"><span></span></div>
+                    <div>
+                        <span class="eyebrow">当前运行状态</span>
+                        <div class="state-line">
+                            <h2>{{ stateMeta.label }}</h2>
+                            <span class="state-chip">{{ stateMeta.category }}</span>
                         </div>
-                    </div>
-                    <div class="cap-card">
-                        <span class="cap-icon">🌐</span>
-                        <div class="cap-title">浏览器自动化</div>
-                        <div class="cap-desc">
-                            自动控制 Chrome 浏览器操作网页
-                        </div>
-                    </div>
-                    <div class="cap-card">
-                        <span class="cap-icon">⚡</span>
-                        <div class="cap-title">Shell 命令</div>
-                        <div class="cap-desc">
-                            执行任意 bash 命令，获取系统信息
-                        </div>
-                    </div>
-                    <div class="cap-card">
-                        <span class="cap-icon">🔄</span>
-                        <div class="cap-title">循环检测</div>
-                        <div class="cap-desc">
-                            每步完成后自动检测状态，失败即停止
-                        </div>
+                        <p>{{ statusDescription }}</p>
                     </div>
                 </div>
-            </div>
+                <dl class="run-metadata">
+                    <div>
+                        <dt>当前任务</dt>
+                        <dd :title="currentGoal || goalInput">{{ activeGoalLabel }}</dd>
+                    </div>
+                    <div>
+                        <dt>已运行</dt>
+                        <dd class="metric-value">{{ elapsedLabel }}</dd>
+                    </div>
+                    <div>
+                        <dt>活动记录</dt>
+                        <dd class="metric-value">{{ timeline.length }}</dd>
+                    </div>
+                </dl>
+            </section>
 
-            <!-- 规划中状态 -->
-            <div
-                v-if="planningMessage && steps.length === 0"
-                class="planning-state"
-            >
-                <div class="planning-spinner">
-                    <div class="spinner-ring"></div>
-                    <span class="spinner-icon">🧠</span>
+            <section v-if="isRunning" class="live-metrics">
+                <span><strong>{{ toolCount }}</strong> 工具调用</span>
+                <span><strong>{{ successCount }}</strong> 已完成</span>
+                <span v-if="failureCount"><strong>{{ failureCount }}</strong> 异常</span>
+                <span v-if="tokenUsage"><strong>{{ formatNumber(tokenUsage.total_tokens) }}</strong> Token</span>
+                <span v-if="tokenUsage" class="context-metric">上下文 {{ tokenUsage.usage_percent.toFixed(1) }}%</span>
+            </section>
+
+            <section v-if="isRunning || isWaitingForHuman" class="human-input-card" :class="{ waiting: isWaitingForHuman }">
+                <div class="human-input-header">
+                    <div>
+                        <span class="eyebrow">HUMAN INPUT</span>
+                        <h2>{{ isWaitingForHuman ? "需要人工输入后才能继续" : "向运行中的 Agent 发送补充说明" }}</h2>
+                        <p>{{ isWaitingForHuman ? pauseReason || "请提供确认、选择或补充信息。" : "该输入会作为高优先级上下文发送，不会覆盖已有目标。" }}</p>
+                    </div>
+                    <span v-if="isWaitingForHuman" class="waiting-badge">WaitingForHuman</span>
                 </div>
-                <div class="planning-text">{{ planningMessage }}</div>
-            </div>
-
-            <!-- 任务执行面板 -->
-            <div
-                v-if="steps.length > 0"
-                class="execution-panel"
-                ref="execPanel"
-            >
-                <!-- 进度概览 -->
-                <div class="progress-header">
-                    <div class="header-left">
-                        <div class="progress-goal">
-                            <span class="goal-badge">目标</span>
-                            <span class="goal-text">{{ currentGoal }}</span>
-                        </div>
-                        <div class="progress-stats">
-                            <span class="stat done">✓ {{ doneCount }}</span>
-                            <span class="stat fail" v-if="errorCount > 0"
-                                >✕ {{ errorCount }}</span
-                            >
-                            <span class="stat total">/ {{ steps.length }}</span>
-                        </div>
-                    </div>
-
-                    <!-- 📊 Token 用量统计栏 -->
-                    <div v-if="tokenUsage" class="agent-token-bar">
-                        <div class="agent-token-stats">
-                            <span class="token-label">Token</span>
-                            <span class="token-item">⬆️{{ tokenUsage.prompt_tokens }}</span>
-                            <span class="token-item">⬇️{{ tokenUsage.completion_tokens }}</span>
-                        </div>
-                        <div class="agent-token-ctx">
-                            <div class="ctx-bar">
-                                <div class="ctx-fill" :style="{ width: Math.min(tokenUsage.usage_percent, 100) + '%' }" :class="{ warning: tokenUsage.usage_percent > 70, danger: tokenUsage.usage_percent > 90 }"></div>
-                            </div>
-                            <span class="ctx-text">{{ tokenUsage.total_tokens }}/{{ tokenUsage.context_window }} ({{ tokenUsage.usage_percent.toFixed(1) }}%)</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 🦸‍♂️ 人类干预面板 -->
-                <div class="intervention-panel" :class="{ 'paused-mode': isPaused }" v-if="steps.length > 0 && !finishOutput && isRunning">
-                    <div class="intervention-header" v-if="!isPaused">
-                        <span class="icon-pulse">🚨</span> 随时改变主意？给 AI 下达强行干预指令：
-                    </div>
-                    <div class="intervention-header paused-header" v-else>
-                        <span class="icon-pulse">🛑</span> <strong>AI 已被挂起，正在等待您的协助：</strong><br/>
-                        <span style="font-weight: normal; margin-top: 4px; display: block; color: var(--text-1);">{{ pauseReason }}</span>
-                    </div>
-                    <div class="intervention-input-group">
-                        <input 
-                            v-model="interventionMsg" 
-                            type="text" 
-                            :placeholder="isPaused ? '请输入您的协助结果，以唤醒 AI...' : '例如：放弃当前页面，直接去查下一页...'"
-                            @keyup.enter="sendIntervention"
-                            :disabled="isSendingIntervention"
-                        />
-                        <button class="btn-intervene" @click="sendIntervention" :disabled="!interventionMsg || isSendingIntervention">
-                            {{ isSendingIntervention ? '发送中...' : (isPaused ? '回复并唤醒 AI' : '强行干预') }}
-                        </button>
-                    </div>
-                </div>
-
-                <!-- 进度条 -->
-                <div class="progress-bar-wrap">
-                    <div
-                        class="progress-bar-fill"
-                        :style="{
-                            width: progressPercent + '%',
-                            background: hasError
-                                ? 'var(--red)'
-                                : 'var(--accent)',
-                        }"
-                    ></div>
-                </div>
-
-                <!-- 步骤列表 -->
-                <div class="steps-list">
-                    <div
-                        v-for="step in steps"
-                        :key="step.id"
-                        class="step-card"
-                        :class="[
-                            step.status,
-                            { expanded: expandedStep === step.id },
-                        ]"
-                        @click="toggleExpand(step.id)"
-                    >
-                        <div class="step-icon-wrap">
-                            <div class="step-icon" :class="step.status">
-                                <span v-if="step.status === 'pending'">{{
-                                    step.id + 1
-                                }}</span>
-                                <span
-                                    v-else-if="step.status === 'running'"
-                                    class="spinning"
-                                    >⟳</span
-                                >
-                                <span v-else-if="step.status === 'done'"
-                                    >✓</span
-                                >
-                                <span v-else-if="step.status === 'error'"
-                                    >✕</span
-                                >
-                            </div>
-                            <div
-                                class="step-connector"
-                                v-if="step.id < steps.length - 1"
-                                :class="step.status === 'done' ? 'filled' : ''"
-                            ></div>
-                        </div>
-
-                        <div class="step-content">
-                            <div class="step-header">
-                                <span class="step-desc">{{
-                                    step.description
-                                }}</span>
-                                <div class="step-meta">
-                                    <span
-                                        class="step-tool-badge"
-                                        :class="step.tool"
-                                        >{{ step.tool }}</span
-                                    >
-                                    <span class="step-expand-icon">{{
-                                        expandedStep === step.id ? "▲" : "▼"
-                                    }}</span>
-                                </div>
-                            </div>
-
-                            <transition name="expand">
-                                <div
-                                    v-if="expandedStep === step.id"
-                                    class="step-details"
-                                >
-                                    <div class="detail-block" v-if="step.thought">
-                                        <div class="detail-label">💭 思考过程</div>
-                                        <div class="detail-thought text-accent-light">{{ step.thought }}</div>
-                                    </div>
-                                    <div class="detail-block" v-if="step.thinking">
-                                        <div class="detail-label">🧠 模型思考</div>
-                                        <pre class="detail-thinking">{{ step.thinking }}</pre>
-                                    </div>
-                                    <div class="detail-block">
-                                        <div class="detail-label">🔧 指令详情</div>
-                                        <pre class="detail-cmd">{{
-                                            formatJson(step.command)
-                                        }}</pre>
-                                    </div>
-                                    <div
-                                        class="detail-block"
-                                        v-if="step.output"
-                                    >
-                                        <div class="detail-label">输出</div>
-                                        <pre
-                                            class="detail-output"
-                                            :class="{
-                                                error: step.status === 'error',
-                                            }"
-                                            >{{ formatJson(step.output) }}</pre
-                                        >
-                                    </div>
-                                    <div
-                                        v-if="step.status === 'running'"
-                                        class="detail-running"
-                                    >
-                                        <div class="loading-dots">
-                                            <span></span><span></span
-                                            ><span></span>
-                                        </div>
-                                        <span>正在执行…</span>
-                                    </div>
-                                </div>
-                            </transition>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 任务状态与成果区域 -->
-                <transition-group name="slide-up">
-                    <!-- 方案 A: 详细成果报告卡 (优先显示) -->
-                    <div v-if="finishOutput" :key="'result-' + panelId" class="result-card" :class="{ error: hasError }">
-                        <div class="result-card-header">
-                            <span class="result-card-icon">{{ hasError ? "⚠️" : "🎉" }}</span>
-                            <span>{{ hasError ? "任务终止报告" : "任务成果报告" }}</span>
-                            <div class="result-status-tag">{{ hasError ? "FAILED" : "COMPLETED" }}</div>
-                        </div>
-                        
-                        <!-- 综合成果展示区 (聊天式富文本流) -->
-                        <div class="result-body markdown-body">
-                            <!-- 如果有 summary 且没有 details，显示 summary -->
-                            <div v-if="finishOutput.summary && !finishOutput.details" class="result-text-block" v-html="renderMarkdown(finishOutput.summary)"></div>
-                            
-                            <!-- 如果有 details，将其作为核心报告展示 -->
-                            <div v-if="finishOutput.details || finishOutput.result_table" class="result-text-block" v-html="renderMarkdown(finishOutput.details || finishOutput.result_table)"></div>
-                        </div>
-                        
-                        <!-- 附件/文件区 -->
-                        <div class="result-artifacts" v-if="finishOutput.artifacts && finishOutput.artifacts.length">
-                            <div class="result-section-label">📁 生成文件/成果</div>
-                            <div v-for="f in finishOutput.artifacts" :key="f" class="result-artifact-path">{{ f }}</div>
-                        </div>
-
-                        <!-- 最后截图区（如果任务执行了浏览器操作，带上最后的屏幕快照） -->
-                        <div class="result-screenshot" v-if="finishOutput.screenshot">
-                            <div class="result-section-label">📸 任务完成时截图</div>
-                            <img :src="finishOutput.screenshot" class="result-screenshot-img" alt="任务完成截图" />
-                        </div>
-                    </div>
-
-
-                    <!-- 方案 B: 简易提示 Banner (仅在没有结构化数据时作为保底显示) -->
-                    <div
-                        v-else-if="completionMessage"
-                        :key="'banner-' + panelId"
-                        class="completion-banner"
-                        :class="{ success: !hasError, error: hasError }"
-                    >
-                        <span class="completion-icon">{{ hasError ? "⚠️" : "🎉" }}</span>
-                        <span>{{ completionMessage }}</span>
-                    </div>
-                </transition-group>
-
-                <!-- 底部垫片：确保滚动条能完全看到结果 -->
-                <div class="bottom-spacer"></div>
-            </div>
-
-            <!-- 实时日志 -->
-            <div v-if="logs.length > 0" class="log-panel">
-                <div class="log-header">
-                    <span>实时日志</span>
-                    <button class="btn-icon btn-xs" @click="logs = []">
-                        清空
+                <div class="human-input-form">
+                    <textarea
+                        v-model="humanInput"
+                        :placeholder="isWaitingForHuman ? '输入确认、选择结果或补充信息…' : '例如：优先处理当前错误，或将范围限制为指定目录…'"
+                        rows="3"
+                        @keydown.ctrl.enter.prevent="sendHumanInput"
+                        @keydown.meta.enter.prevent="sendHumanInput"
+                    />
+                    <button class="continue-button" type="button" :disabled="!humanInput.trim() || isSendingHuman" @click="sendHumanInput">
+                        {{ isSendingHuman ? "正在发送" : isWaitingForHuman ? "继续执行" : "发送说明" }}
                     </button>
                 </div>
-                <div class="log-list" ref="logList">
-                    <div
-                        v-for="(log, i) in logs"
-                        :key="i"
-                        class="log-line"
-                        :class="log.type"
-                    >
-                        <span class="log-time">{{ log.time }}</span>
-                        <span class="log-msg">{{ log.message }}</span>
+            </section>
+
+            <section class="content-grid">
+                <article class="timeline-panel">
+                    <header class="panel-header">
+                        <div>
+                            <span class="eyebrow">LIVE TIMELINE</span>
+                            <h2>运行时间线</h2>
+                        </div>
+                        <span class="panel-count">{{ timeline.length }} 条</span>
+                    </header>
+
+                    <div v-if="timeline.length === 0" class="timeline-empty">
+                        <div class="empty-grid" aria-hidden="true"></div>
+                        <h3>等待任务启动</h3>
+                        <p>配置模型与目标后，规划、调用、恢复和最终结果会按时间顺序显示在这里。</p>
                     </div>
+
+                    <ol v-else ref="timelineElement" class="timeline-list">
+                        <li v-for="item in timeline" :key="item.id" class="timeline-entry" :class="[`kind-${item.kind}`, item.status ? `item-${item.status}` : '']">
+                            <div class="timeline-rail" aria-hidden="true"><span></span></div>
+                            <div class="timeline-content">
+                                <div v-if="item.kind !== 'tool'" class="event-card">
+                                    <div class="event-header">
+                                        <div>
+                                            <span class="event-kind">{{ kindLabel(item.kind) }}</span>
+                                            <h3>{{ item.title }}</h3>
+                                        </div>
+                                        <time :datetime="new Date(item.timestamp).toISOString()">{{ formatClock(item.timestamp) }}</time>
+                                    </div>
+                                    <p v-if="item.detail">{{ item.detail }}</p>
+                                </div>
+
+                                <article v-else-if="item.tool" class="tool-card" :class="`tool-${item.tool.status}`">
+                                    <header class="tool-header">
+                                        <div class="tool-title-wrap">
+                                            <span class="event-kind">TOOL</span>
+                                            <h3>{{ item.tool.name }}</h3>
+                                            <span class="tool-action">{{ item.tool.action }}</span>
+                                        </div>
+                                        <div class="tool-header-meta">
+                                            <span class="source-tag" :class="item.tool.source === 'MCP' ? 'mcp' : 'internal'">{{ item.tool.source }}</span>
+                                            <span class="tool-status" :class="item.tool.status">{{ toolStatusLabel(item.tool.status) }}</span>
+                                        </div>
+                                    </header>
+                                    <div class="tool-summary-row">
+                                        <p>{{ item.detail || "等待工具返回结果" }}</p>
+                                        <span v-if="item.tool.durationMs !== undefined" class="duration">{{ formatMilliseconds(item.tool.durationMs) }}</span>
+                                    </div>
+                                    <div class="tool-details">
+                                        <button class="detail-toggle" type="button" @click.stop="toggleToolDetail(item.id, 'params')">
+                                            <span>参数{{ item.tool.params ? "摘要" : "" }}</span>
+                                            <span>{{ isToolDetailExpanded(item.id, 'params') ? "收起" : "展开" }}</span>
+                                        </button>
+                                        <pre v-if="isToolDetailExpanded(item.id, 'params')">{{ formatPayload(item.tool.rawParams ?? item.tool.params) }}</pre>
+                                        <button class="detail-toggle" type="button" @click.stop="toggleToolDetail(item.id, 'result')">
+                                            <span>结果{{ item.tool.result ? "摘要" : "" }}</span>
+                                            <span>{{ isToolDetailExpanded(item.id, 'result') ? "收起" : "展开" }}</span>
+                                        </button>
+                                        <pre v-if="isToolDetailExpanded(item.id, 'result')">{{ formatPayload(item.tool.rawResult ?? item.tool.result) }}</pre>
+                                    </div>
+                                </article>
+                            </div>
+                        </li>
+                    </ol>
+                </article>
+
+                <aside class="resource-panel">
+                    <header class="panel-header">
+                        <div>
+                            <span class="eyebrow">TASK DATA</span>
+                            <h2>任务资源</h2>
+                        </div>
+                        <span class="panel-count">{{ resources.length }}</span>
+                    </header>
+                    <p class="resource-intro">来自运行上下文的可选资源快照。长内容将以摘要形式展示。</p>
+                    <div v-if="resources.length === 0" class="resource-empty">
+                        <span>尚未收到资源上下文</span>
+                        <small>资源卡会在 Agent 提供数据、游标或任务上下文时自动出现。</small>
+                    </div>
+                    <div v-else class="resource-list">
+                        <article v-for="resource in resources" :key="resource.resourceId" class="resource-card">
+                            <header>
+                                <span class="resource-kind">{{ resource.kind }}</span>
+                                <span class="resource-status" :class="resource.status">{{ resource.status }}</span>
+                            </header>
+                            <h3>{{ resource.label }}</h3>
+                            <dl>
+                                <div><dt>resource_id</dt><dd :title="resource.resourceId">{{ resource.resourceId }}</dd></div>
+                                <div><dt>row_count</dt><dd>{{ resource.rowCount ?? "—" }}</dd></div>
+                                <div><dt>cursor</dt><dd :title="resource.cursor || ''">{{ resource.cursor || "—" }}</dd></div>
+                            </dl>
+                            <p>{{ resource.summary || "暂无资源摘要。" }}</p>
+                        </article>
+                    </div>
+                </aside>
+            </section>
+
+            <section v-if="finalSummary || completionMessage" class="final-result" :class="hasError ? 'failed' : 'succeeded'">
+                <div class="final-result-label">{{ hasError ? "执行结束：存在异常" : "执行结束：已返回结果" }}</div>
+                <h2>{{ completionMessage || (hasError ? "任务未能完成" : "任务已完成") }}</h2>
+                <p v-if="finalSummary">{{ finalSummary }}</p>
+                <div v-if="finalArtifacts.length" class="artifact-list">
+                    <span>产出文件</span>
+                    <code v-for="artifact in finalArtifacts" :key="artifact">{{ artifact }}</code>
                 </div>
-            </div>
+            </section>
         </main>
     </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { marked } from "marked";
 
-// Markdown 渲染（用于展示 result_table 等富文本结果）
-function renderMarkdown(text: string): string {
-    if (!text) return "";
-    // 配置 marked 支持表格和换行
-    return marked.parse(text, { 
-        gfm: true,
-        breaks: true 
-    }) as string;
+interface ModelOption {
+    id: string;
+    name: string;
+    display_name: string;
+    platform_id: string;
+    platform_name: string;
 }
 
-function formatJson(str: string | undefined): string {
-    if (!str) return "";
-    try {
-        const obj = JSON.parse(str);
-        return JSON.stringify(obj, null, 2);
-    } catch {
-        return str;
-    }
-}
+type RunState =
+    | "idle"
+    | "preparing"
+    | "planning"
+    | "executing"
+    | "waiting_for_human"
+    | "recovering"
+    | "finalizing"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+type TimelineKind = "system" | "planning" | "tool" | "success" | "error" | "human" | "recovery";
+type ToolStatus = "running" | "succeeded" | "failed" | "pending";
+type DetailSection = "params" | "result";
 
-// --- 🦸‍♂️ 人类干预逻辑 ---
-const interventionMsg = ref("");
-const isSendingIntervention = ref(false);
-const isPaused = ref(false);
-const pauseReason = ref("");
-
-async function sendIntervention() {
-    if (!interventionMsg.value.trim()) return;
-    
-    isSendingIntervention.value = true;
-    try {
-        await invoke('send_human_intervention', { 
-            sessionId: props.panelId,
-            message: interventionMsg.value 
-        });
-        
-        interventionMsg.value = "";
-        logs.value.push({
-            type: "warn",
-            time: new Date().toLocaleTimeString(),
-            message: isPaused.value ? "✅ 已唤醒 AI 并发送人类协助！" : "🚨 已向 AI 发送最高优先级干预指令！"
-        });
-        isPaused.value = false;
-        pauseReason.value = "";
-    } catch (err: any) {
-        console.error("发送干预指令失败:", err);
-        logs.value.push({
-            type: "error",
-            time: new Date().toLocaleTimeString(),
-            message: `发送失败: ${err}`
-        });
-    } finally {
-        isSendingIntervention.value = false;
-    }
-}
-// -------------------------
-
-
-// ---- Props ----
-const props = defineProps<{
-    panelId: string;
-    allModels: { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }[];
-}>();
-
-// ---- Types ----
-interface AgentStep {
-    id: number;
-    description: string;
-    thought: string;
-    thinking: string;
-    tool: string;
-    command: string;
-    status: "pending" | "running" | "done" | "error";
-    output: string;
-}
-interface LogEntry {
-    time: string;
-    message: string;
-    type: "info" | "success" | "error" | "warn";
-}
 interface TokenUsageInfo {
     prompt_tokens: number;
     completion_tokens: number;
@@ -512,644 +321,1627 @@ interface TokenUsageInfo {
     usage_percent: number;
 }
 
-// ---- 独立状态（每个面板完全隔离） ----
+interface ToolCall {
+    name: string;
+    action: string;
+    source: "内部" | "MCP";
+    status: ToolStatus;
+    durationMs?: number;
+    params?: unknown;
+    result?: unknown;
+    rawParams?: unknown;
+    rawResult?: unknown;
+}
+
+interface TimelineItem {
+    id: string;
+    kind: TimelineKind;
+    title: string;
+    detail?: string;
+    timestamp: number;
+    status?: "running" | "succeeded" | "failed";
+    tool?: ToolCall;
+}
+
+interface TaskResource {
+    resourceId: string;
+    kind: string;
+    label: string;
+    rowCount?: number | string;
+    status: string;
+    summary?: string;
+    cursor?: string;
+}
+
+const props = defineProps<{
+    panelId: string;
+    allModels: ModelOption[];
+}>();
+
+const stateCatalog: Record<RunState, { label: string; category: string; description: string }> = {
+    idle: { label: "Idle", category: "就绪", description: "等待新的任务目标。" },
+    preparing: { label: "Preparing", category: "准备", description: "正在初始化会话、模型路由和运行上下文。" },
+    planning: { label: "Planning", category: "规划", description: "正在分析目标并生成下一步行动。" },
+    executing: { label: "Executing", category: "执行", description: "正在调用工具并处理执行结果。" },
+    waiting_for_human: { label: "WaitingForHuman", category: "等待输入", description: "Agent 暂停执行，等待人工确认或补充信息。" },
+    recovering: { label: "Recovering", category: "恢复", description: "正在处理异常、重试或恢复任务状态。" },
+    finalizing: { label: "Finalizing", category: "收尾", description: "正在整理结果、资源和最终任务状态。" },
+    succeeded: { label: "Succeeded", category: "完成", description: "任务已成功结束。" },
+    failed: { label: "Failed", category: "失败", description: "任务因错误而结束。" },
+    cancelled: { label: "Cancelled", category: "已取消", description: "任务已停止。" },
+};
+
+const presets = [
+    { label: "创建笔记", goal: "在桌面创建一个名为 notes.txt 的文件，写入当前日期和时间，然后显示文件内容。" },
+    { label: "查看桌面", goal: "列出桌面上所有文件和文件夹，并统计数量。" },
+    { label: "磁盘信息", goal: "查看当前磁盘使用情况，以及 CPU 和内存占用信息。" },
+    { label: "整理下载", goal: "列出下载文件夹中最近修改的 5 个文件，以及其大小。" },
+    { label: "系统信息", goal: "获取系统版本、主机名、当前用户名和 IP 地址。" },
+];
+
 const sessionId = props.panelId;
-const tokenUsage = ref<TokenUsageInfo | null>(null);
 const modelRouting = ref({ pro: "", flash: "", vision: "" });
 const logContext = ref(false);
 const goalInput = ref("");
 const currentGoal = ref("");
+const runState = ref<RunState>("idle");
+const statusDescription = ref(stateCatalog.idle.description);
 const isRunning = ref(false);
-const steps = ref<AgentStep[]>([]);
-const planningMessage = ref("");
-const runningStep = ref<number | null>(null);
+const pauseReason = ref("");
+const humanInput = ref("");
+const isSendingHuman = ref(false);
+const stopRequested = ref(false);
+const elapsedSeconds = ref(0);
+const runStartedAt = ref<number | null>(null);
+const timeline = ref<TimelineItem[]>([]);
+const resources = ref<TaskResource[]>([]);
+const tokenUsage = ref<TokenUsageInfo | null>(null);
 const completionMessage = ref("");
-const finishOutput = ref<Record<string, any> | null>(null);
+const finishOutput = ref<Record<string, unknown> | null>(null);
 const hasError = ref(false);
-const expandedStep = ref<number | null>(null);
-const logs = ref<LogEntry[]>([]);
-const execPanel = ref<HTMLElement>();
-const logList = ref<HTMLElement>();
+const expandedToolDetails = ref(new Set<string>());
+const timelineElement = ref<HTMLOListElement>();
 
-// ---- 预设 ----
-const presets = [
-    { icon: "📄", label: "创建笔记", goal: "在桌面创建一个名为 notes.txt 的文件，写入当前日期和时间，然后显示文件内容" },
-    { icon: "📂", label: "查看桌面", goal: "列出桌面上所有文件和文件夹，统计数量" },
-    { icon: "💧", label: "喝水提醒", goal: "用 osascript 弹出对话框提醒我喝水，然后再播放一个系统声音" },
-    { icon: "📊", label: "磁盘信息", goal: "查看当前磁盘使用情况，以及 CPU 和内存占用信息" },
-    { icon: "🗂️", label: "整理下载", goal: "列出下载文件夹中最近修改的 5 个文件，以及其大小" },
-    { icon: "🖥️", label: "系统信息", goal: "获取 macOS 版本、主机名、当前用户名和 IP 地址" },
-];
+let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+let unlisteners: UnlistenFn[] = [];
+let timelineSequence = 0;
+const activeToolItems = new Map<string, string>();
 
-// ---- 计算 ----
 const groupedModels = computed(() => {
-    const map = new Map<string, typeof props.allModels>();
-    for (const m of props.allModels) {
-        if (!map.has(m.platform_name)) map.set(m.platform_name, []);
-        map.get(m.platform_name)!.push(m);
+    const groups = new Map<string, ModelOption[]>();
+    for (const model of props.allModels) {
+        const platform = model.platform_name || "未分类平台";
+        groups.set(platform, [...(groups.get(platform) || []), model]);
     }
-    const groups: { platform: string; models: typeof props.allModels }[] = [];
-    for (const [platform, models] of map) groups.push({ platform, models });
-    return groups;
+    return [...groups.entries()].map(([platform, models]) => ({ platform, models }));
 });
 
-const doneCount = computed(() => steps.value.filter((s) => s.status === "done").length);
-const errorCount = computed(() => steps.value.filter((s) => s.status === "error").length);
-const progressPercent = computed(() => {
-    if (steps.value.length === 0) return 0;
-    return Math.round(((doneCount.value + errorCount.value) / steps.value.length) * 100);
+const stateMeta = computed(() => stateCatalog[runState.value]);
+const activeGoalLabel = computed(() => shortText(currentGoal.value || goalInput.value || "尚未启动任务", 96));
+const elapsedLabel = computed(() => formatDuration(elapsedSeconds.value));
+const isWaitingForHuman = computed(() => runState.value === "waiting_for_human");
+const canStart = computed(() => Boolean(
+    !isRunning.value
+        && goalInput.value.trim()
+        && modelRouting.value.pro
+        && modelRouting.value.flash
+        && modelRouting.value.vision,
+));
+const toolCount = computed(() => timeline.value.filter((item) => item.kind === "tool").length);
+const successCount = computed(() => timeline.value.filter((item) => item.status === "succeeded").length);
+const failureCount = computed(() => timeline.value.filter((item) => item.status === "failed").length);
+const finalSummary = computed(() => {
+    const payload = finishOutput.value;
+    if (!payload) return "";
+    const text = payload.details || payload.summary || payload.result_table || payload.output || "";
+    return shortText(toText(text), 4000);
+});
+const finalArtifacts = computed(() => {
+    const artifacts = finishOutput.value?.artifacts;
+    return Array.isArray(artifacts) ? artifacts.map((item) => toText(item)).filter(Boolean).slice(0, 12) : [];
 });
 
-// ---- 事件监听器（挂载时注册，卸载时销毁） ----
-let unlistenProgress: UnlistenFn | null = null;
-let unlistenRunState: UnlistenFn | null = null;
+function applyDefaultModels() {
+    const firstModel = props.allModels[0]?.id;
+    if (!firstModel) return;
+    if (!modelRouting.value.pro) modelRouting.value.pro = firstModel;
+    if (!modelRouting.value.flash) modelRouting.value.flash = firstModel;
+    if (!modelRouting.value.vision) modelRouting.value.vision = firstModel;
+}
 
-onMounted(async () => {
-    // 默认选中第一个模型
-    if (props.allModels.length > 0) {
-        const defaultId = props.allModels[0].id;
-        modelRouting.value.pro = defaultId;
-        modelRouting.value.flash = defaultId;
-        modelRouting.value.vision = defaultId;
+watch(() => props.allModels, applyDefaultModels, { immediate: true });
+
+function setRunState(nextState: RunState, description?: string) {
+    runState.value = nextState;
+    statusDescription.value = description || stateCatalog[nextState].description;
+    const terminal = ["succeeded", "failed", "cancelled"].includes(nextState);
+    if (terminal) {
+        isRunning.value = false;
+        stopElapsedTimer();
     }
+}
 
-    // 监听属于自己 sessionId 的事件
-    unlistenProgress = await listen<any>(`agent-progress-${sessionId}`, (event) => {
-        const { type, ...data } = event.payload;
+function normalizeState(value: unknown): RunState {
+    const normalized = String(value || "").replace(/[\s-]/g, "_").replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase();
+    const aliases: Record<string, RunState> = {
+        idle: "idle",
+        preparing: "preparing",
+        starting: "preparing",
+        planning: "planning",
+        executing: "executing",
+        waiting_for_human: "waiting_for_human",
+        waitingforhuman: "waiting_for_human",
+        awaiting_human: "waiting_for_human",
+        recovering: "recovering",
+        rescuing: "recovering",
+        finalizing: "finalizing",
+        succeeded: "succeeded",
+        success: "succeeded",
+        failed: "failed",
+        cancelled: "cancelled",
+        canceled: "cancelled",
+    };
+    return aliases[normalized] || "executing";
+}
 
-        if (type === "planning") {
-            planningMessage.value = data.message;
-            addLog("info", data.message);
-        } else if (type === "plan") {
-            planningMessage.value = "";
-            steps.value = data.steps;
-            expandedStep.value = null;
-            addLog("info", `AI 规划了 ${data.steps.length} 个执行步骤`);
-            nextTick(() => execPanel.value?.scrollTo({ top: 0, behavior: "smooth" }));
-        } else if (type === "step_new") {
-            const idx = steps.value.findIndex(s => s.id === data.step.id);
-            if (idx !== -1) {
-                steps.value[idx] = { ...steps.value[idx], ...data.step, thinking: steps.value[idx].thinking };
-            } else {
-                steps.value.push(data.step);
-            }
-            addLog("info", `🤖 AI 规划了新动作: ${data.step.description}`);
-        } else if (type === "step_start") {
-            const s = steps.value.find((s) => s.id === data.step_id);
-            if (s) s.status = "running";
-            runningStep.value = data.step_id;
-            expandedStep.value = data.step_id;
-            addLog("info", `▶ 步骤 ${data.step_id + 1}: ${data.description}`);
-        } else if (type === "step_done") {
-            const s = steps.value.find((s) => s.id === data.step_id);
-            if (s) { s.status = "done"; s.output = data.output; }
-            runningStep.value = null;
-            addLog("success", `  ✓ 完成 → ${data.output?.slice(0, 100) || "(无输出)"}`);
-        } else if (type === "step_error") {
-            const s = steps.value.find((s) => s.id === data.step_id);
-            if (s) { s.status = "error"; s.output = data.output; }
-            runningStep.value = null;
-            addLog("error", `  ✕ 失败 → ${data.output}`);
-        } else if (type === "agent_paused") {
-            // AI 请求协助并挂起
-            isPaused.value = true;
-            pauseReason.value = data.message;
-            addLog("warn", `🛑 AI 主动挂起: ${data.message}`);
-            nextTick(() => { 
-                const el = execPanel.value || document.querySelector(".execution-panel");
-                if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-            });
-        } else if (type === "complete") {
-            isRunning.value = false;
-            // 强行收尾：如果还有正在运行的步骤，标记为已完成
-            if (runningStep.value !== null) {
-                const s = steps.value.find(s => s.id === runningStep.value);
-                if (s) s.status = "done";
-                runningStep.value = null;
-            }
-            completionMessage.value = data.message;
-            hasError.value = !data.success;
+function startElapsedTimer() {
+    stopElapsedTimer();
+    elapsedTimer = setInterval(() => {
+        if (runStartedAt.value) elapsedSeconds.value = Math.max(0, Math.floor((Date.now() - runStartedAt.value) / 1000));
+    }, 1000);
+}
 
-            // 优先使用结构化的 finish 字段（后端直接传来的 command 对象）
-            if (data.finish && typeof data.finish === "object") {
-                finishOutput.value = {
-                    ...data.finish,
-                    screenshot: data.screenshot || null,   // 附带最后截图（如有）
-                };
-            } else if (data.output) {
-                // 兼容旧逻辑：尝试解析 JSON 字符串
-                try {
-                    const parsed = JSON.parse(data.output);
-                    finishOutput.value = {
-                        ...parsed,
-                        screenshot: data.screenshot || null,
-                    };
-                } catch {
-                    finishOutput.value = { summary: data.output };
-                }
-            }
+function stopElapsedTimer() {
+    if (elapsedTimer) clearInterval(elapsedTimer);
+    elapsedTimer = null;
+}
 
-            addLog(data.success ? "success" : "error", `🏁 ${data.message}`);
-            
-            // 关键：等待内容渲染完成后滚动到底部（指向正确的执行面板容器）
-            nextTick(() => {
-                const scroll = () => {
-                    const el = execPanel.value || document.querySelector(".execution-panel");
-                    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-                };
-                setTimeout(scroll, 100);
-                setTimeout(scroll, 500); // 增加延迟，确保 Markdown 渲染完毕
-            });
-        } else if (type === "token_usage") {
-            tokenUsage.value = {
-                prompt_tokens: data.prompt_tokens,
-                completion_tokens: data.completion_tokens,
-                total_tokens: data.total_tokens,
-                context_window: data.context_window,
-                usage_percent: data.usage_percent,
-            };
-            addLog("info", `📊 Token: ⬆️${data.prompt_tokens} ⬇️${data.completion_tokens} ∑${data.total_tokens} | 上下文: ${data.total_tokens}/${data.context_window} (${data.usage_percent.toFixed(1)}%)`);
-        } else if (type === "thinking") {
-            let s = steps.value.find((s) => s.id === data.step_id);
-            if (!s) {
-                s = {
-                    id: data.step_id, description: "正在深入思考...", thought: "", thinking: "",
-                    tool: "thinking", command: "", status: "running", output: ""
-                };
-                steps.value.push(s);
-                runningStep.value = data.step_id;
-                expandedStep.value = data.step_id;
-                nextTick(() => { 
-                    const el = execPanel.value || document.querySelector(".execution-panel");
-                    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-                });
-            }
-            s.thinking = data.content;
-            if (data.done) {
-                addLog("info", `🧠 AI思考完毕 (约 ${data.content.length} 字)`);
-            }
-        } else if (type === "error") {
-            isRunning.value = false;
-            planningMessage.value = "";
-            completionMessage.value = data.message;
-            hasError.value = true;
-            addLog("error", `❌ ${data.message}`);
-        }
+function addTimeline(item: Omit<TimelineItem, "id" | "timestamp"> & Partial<Pick<TimelineItem, "id" | "timestamp">>) {
+    const next: TimelineItem = {
+        id: item.id || `timeline-${Date.now()}-${timelineSequence++}`,
+        timestamp: item.timestamp || Date.now(),
+        kind: item.kind,
+        title: item.title,
+        detail: item.detail,
+        status: item.status,
+        tool: item.tool,
+    };
+    timeline.value.push(next);
+    if (timeline.value.length > 160) timeline.value.splice(0, timeline.value.length - 160);
+    nextTick(() => timelineElement.value?.scrollTo({ top: timelineElement.value.scrollHeight, behavior: "smooth" }));
+    return next.id;
+}
+
+function updateTimeline(id: string, patch: Partial<TimelineItem>) {
+    const index = timeline.value.findIndex((item) => item.id === id);
+    if (index < 0) return;
+    const previous = timeline.value[index];
+    timeline.value[index] = { ...previous, ...patch, tool: patch.tool ? { ...previous.tool, ...patch.tool } : previous.tool };
+}
+
+function upsertTool(key: string, tool: ToolCall, detail: string, timestamp?: number) {
+    const existingId = activeToolItems.get(key);
+    if (existingId) {
+        updateTimeline(existingId, { tool, detail, status: tool.status === "succeeded" ? "succeeded" : tool.status === "failed" ? "failed" : "running", timestamp: timestamp || Date.now() });
+        return existingId;
+    }
+    const id = addTimeline({
+        kind: "tool",
+        title: tool.name,
+        detail,
+        tool,
+        status: tool.status === "succeeded" ? "succeeded" : tool.status === "failed" ? "failed" : "running",
+        timestamp,
     });
+    activeToolItems.set(key, id);
+    return id;
+}
 
-    // 新状态快照与旧 agent-progress-* 事件并行：只同步生命周期展示，不改写步骤详情。
-    unlistenRunState = await listen<any>(`agent-run-state-${sessionId}`, (event) => {
-        const snapshot = event.payload || {};
-        const message = snapshot.message || "";
+function handleRunState(payload: Record<string, unknown>) {
+    const state = normalizeState(payload.state);
+    const message = toText(payload.message || payload.description);
+    setRunState(state, message || undefined);
+    if (state === "waiting_for_human") pauseReason.value = message || stateCatalog.waiting_for_human.description;
+    if (state !== "waiting_for_human") pauseReason.value = "";
+    if (state === "failed" || state === "cancelled") hasError.value = state === "failed";
+    if (message || state !== "executing") {
+        addTimeline({
+            kind: state === "recovering" ? "recovery" : state === "failed" || state === "cancelled" ? "error" : state === "succeeded" ? "success" : state === "waiting_for_human" ? "human" : "system",
+            title: stateMetaFor(state),
+            detail: message || stateCatalog[state].description,
+            status: state === "succeeded" ? "succeeded" : state === "failed" || state === "cancelled" ? "failed" : undefined,
+            timestamp: toTimestamp(payload.timestamp),
+        });
+    }
+}
 
-        switch (snapshot.state) {
-            case "planning":
-                isPaused.value = false;
-                planningMessage.value = message || `正在规划第 ${(snapshot.step_id ?? 0) + 1} 步...`;
-                break;
-            case "executing":
-            case "recovering":
-            case "rescuing":
-            case "finalizing":
-                isPaused.value = false;
-                break;
-            case "waiting_for_human":
-                isPaused.value = true;
-                pauseReason.value = message || "AI 正在等待人工确认";
-                break;
-            case "succeeded":
-                isRunning.value = false;
-                isPaused.value = false;
-                if (message) completionMessage.value = message;
-                break;
-            case "failed":
-            case "cancelled":
-                isRunning.value = false;
-                isPaused.value = false;
-                hasError.value = true;
-                if (message) completionMessage.value = message;
-                break;
-        }
-    });
-});
+function handleProgress(payload: Record<string, unknown>) {
+    const type = String(payload.type || "").toLowerCase();
+    const step = asRecord(payload.step);
+    const stepId = payload.step_id ?? step.id;
+    const toolName = toText(step.tool || payload.tool || "内部工具") || "内部工具";
+    const action = toText(step.description || payload.description || payload.action || "执行操作") || "执行操作";
+    const key = `legacy:${String(stepId ?? `${toolName}:${action}`)}`;
 
-onUnmounted(() => {
-    // 清理事件监听，防止内存泄漏
-    if (unlistenProgress) unlistenProgress();
-    if (unlistenRunState) unlistenRunState();
-});
-
-// ---- 方法 ----
-async function runAgent() {
-    if (!modelRouting.value.pro || !modelRouting.value.flash || !modelRouting.value.vision || !goalInput.value.trim() || isRunning.value)
+    if (type === "planning") {
+        setRunState("planning", toText(payload.message) || undefined);
+        addTimeline({ kind: "planning", title: "正在规划", detail: toText(payload.message) || stateCatalog.planning.description, timestamp: toTimestamp(payload.timestamp) });
         return;
+    }
+    if (type === "plan") {
+        setRunState("executing");
+        const plannedSteps = Array.isArray(payload.steps) ? payload.steps.length : 0;
+        addTimeline({ kind: "planning", title: "计划已生成", detail: plannedSteps ? `已生成 ${plannedSteps} 个执行步骤。` : "Agent 已生成执行计划。", timestamp: toTimestamp(payload.timestamp) });
+        return;
+    }
+    if (type === "step_new") {
+        addTimeline({ kind: "planning", title: "新增执行步骤", detail: action, timestamp: toTimestamp(payload.timestamp) });
+        return;
+    }
+    if (type === "step_start") {
+        setRunState("executing");
+        upsertTool(key, {
+            name: toolName,
+            action,
+            source: sourceFrom(step.route || payload.route, toolName),
+            status: "running",
+            params: step.command || payload.params_summary || payload.params,
+            rawParams: step.command || payload.params,
+        }, shortText(toText(step.thought || payload.message || action), 280), toTimestamp(payload.timestamp));
+        return;
+    }
+    if (type === "step_done" || type === "step_error") {
+        const succeeded = type === "step_done";
+        const existing = timeline.value.find((item) => item.id === activeToolItems.get(key))?.tool;
+        upsertTool(key, {
+            name: existing?.name || toolName,
+            action: existing?.action || action,
+            source: existing?.source || sourceFrom(step.route || payload.route, toolName),
+            status: succeeded ? "succeeded" : "failed",
+            params: existing?.params || step.command || payload.params_summary,
+            rawParams: existing?.rawParams || step.command || payload.params,
+            result: payload.output || step.output || payload.result_summary,
+            rawResult: payload.output || step.output || payload.result,
+            durationMs: numberOrUndefined(payload.duration_ms),
+        }, shortText(toText(payload.output || step.output || (succeeded ? "工具已完成。" : "工具执行失败。")), 280), toTimestamp(payload.timestamp));
+        return;
+    }
+    if (type === "agent_paused") {
+        const reason = toText(payload.message) || stateCatalog.waiting_for_human.description;
+        pauseReason.value = reason;
+        setRunState("waiting_for_human", reason);
+        addTimeline({ kind: "human", title: "等待人工输入", detail: reason, timestamp: toTimestamp(payload.timestamp) });
+        return;
+    }
+    if (type === "thinking") {
+        setRunState("planning", toText(payload.message) || undefined);
+        if (payload.done) addTimeline({ kind: "planning", title: "规划分析已完成", detail: shortText(toText(payload.content), 280), timestamp: toTimestamp(payload.timestamp) });
+        return;
+    }
+    if (type === "token_usage") {
+        tokenUsage.value = {
+            prompt_tokens: Number(payload.prompt_tokens || 0),
+            completion_tokens: Number(payload.completion_tokens || 0),
+            total_tokens: Number(payload.total_tokens || 0),
+            context_window: Number(payload.context_window || 0),
+            usage_percent: Number(payload.usage_percent || 0),
+        };
+        return;
+    }
+    if (type === "complete") {
+        completeRun(payload, Boolean(payload.success));
+        return;
+    }
+    if (type === "error") {
+        const message = toText(payload.message) || "任务执行出现错误。";
+        completionMessage.value = message;
+        hasError.value = true;
+        setRunState("failed", message);
+        addTimeline({ kind: "error", title: "任务错误", detail: message, status: "failed", timestamp: toTimestamp(payload.timestamp) });
+        return;
+    }
+    if (type) addTimeline({ kind: "system", title: "运行事件", detail: shortText(toText(payload.message || payload.detail || type), 280), timestamp: toTimestamp(payload.timestamp) });
+}
 
+function handleToolEvent(payload: Record<string, unknown>) {
+    const eventType = String(payload.event_type || payload.type || "started").toLowerCase();
+    const name = toText(payload.tool) || "未命名工具";
+    const action = toText(payload.action) || "执行操作";
+    const key = `tool:${name}:${action}`;
+    const status: ToolStatus = eventType === "succeeded" || payload.success === true ? "succeeded" : eventType === "failed" || payload.success === false ? "failed" : "running";
+    const result = payload.result ?? payload.result_summary;
+    upsertTool(key, {
+        name,
+        action,
+        source: sourceFrom(payload.route, name),
+        status,
+        durationMs: numberOrUndefined(payload.duration_ms),
+        params: payload.params_summary ?? payload.params,
+        result,
+        rawParams: payload.params ?? payload.params_summary,
+        rawResult: payload.result ?? payload.result_summary,
+    }, shortText(toText(result || payload.params_summary || (status === "running" ? "工具调用已开始。" : "工具事件已更新。")), 280), toTimestamp(payload.timestamp));
+}
+
+function handleLog(payload: unknown) {
+    const data = asRecord(payload);
+    const message = toText(typeof payload === "string" ? payload : data.message || data.log || data.content || payload);
+    if (!message) return;
+    const lower = message.toLowerCase();
+    const kind: TimelineKind = /error|failed|失败|错误/.test(lower) ? "error" : /recover|retry|重试|恢复/.test(lower) ? "recovery" : "system";
+    addTimeline({ kind, title: kind === "error" ? "运行日志：异常" : kind === "recovery" ? "运行日志：恢复" : "运行日志", detail: shortText(message, 280), timestamp: toTimestamp(data.timestamp) });
+}
+
+function handleContext(payload: unknown) {
+    const data = asRecord(payload);
+    const candidates = [data.resources, data.resource, asRecord(data.context).resources, asRecord(data.data).resources].flatMap((entry) => Array.isArray(entry) ? entry : entry ? [entry] : []);
+    const nextResources = candidates.map((entry, index) => normalizeResource(asRecord(entry), index)).filter((item): item is TaskResource => Boolean(item));
+    if (nextResources.length) {
+        const merged = new Map(resources.value.map((resource) => [resource.resourceId, resource]));
+        nextResources.forEach((resource) => merged.set(resource.resourceId, { ...merged.get(resource.resourceId), ...resource }));
+        resources.value = [...merged.values()].slice(0, 40);
+    }
+    const summary = toText(data.summary || data.message || asRecord(data.context).summary);
+    if (summary || nextResources.length) addTimeline({ kind: "system", title: "任务上下文已更新", detail: shortText(summary || `已更新 ${nextResources.length} 个资源卡片。`, 280), timestamp: toTimestamp(data.timestamp) });
+}
+
+function completeRun(payload: Record<string, unknown>, succeeded: boolean) {
+    const message = toText(payload.message) || (succeeded ? "任务已完成。" : "任务未能完成。")
+    completionMessage.value = message;
+    hasError.value = !succeeded;
+    if (asRecord(payload.finish) && Object.keys(asRecord(payload.finish)).length) {
+        finishOutput.value = { ...asRecord(payload.finish), screenshot: payload.screenshot };
+    } else if (payload.output) {
+        const output = toText(payload.output);
+        try {
+            const parsed = JSON.parse(output);
+            finishOutput.value = typeof parsed === "object" && parsed ? { ...parsed, screenshot: payload.screenshot } : { summary: output };
+        } catch {
+            finishOutput.value = { summary: output };
+        }
+    }
+    setRunState(succeeded ? "succeeded" : "failed", message);
+    addTimeline({ kind: succeeded ? "success" : "error", title: succeeded ? "任务已完成" : "任务结束：失败", detail: message, status: succeeded ? "succeeded" : "failed", timestamp: toTimestamp(payload.timestamp) });
+}
+
+async function runAgent() {
+    if (!canStart.value) return;
+    currentGoal.value = goalInput.value.trim();
+    timeline.value = [];
+    resources.value = [];
+    tokenUsage.value = null;
+    completionMessage.value = "";
+    finishOutput.value = null;
+    hasError.value = false;
+    pauseReason.value = "";
+    humanInput.value = "";
+    stopRequested.value = false;
+    expandedToolDetails.value = new Set();
+    activeToolItems.clear();
+    runStartedAt.value = Date.now();
+    elapsedSeconds.value = 0;
     isRunning.value = true;
+    setRunState("preparing", "正在建立任务会话并加载模型路由。")
+    startElapsedTimer();
+    addTimeline({ kind: "system", title: "任务已提交", detail: shortText(currentGoal.value, 280) });
 
     try {
-
-        currentGoal.value = goalInput.value.trim();
-        steps.value = [];
-        completionMessage.value = "";
-        finishOutput.value = null;
-        hasError.value = false;
-        runningStep.value = null;
-
-        addLog("info", `🚀 启动 Agent: ${currentGoal.value}`);
-
         await invoke("run_agent_main_loop", {
             modelRouting: modelRouting.value,
             goal: currentGoal.value,
             autoPilot: true,
-            sessionId: sessionId,  // 修复: Tauri 要求 camelCase，snake_case 会被忽略导致频道对不上
+            sessionId,
             logContext: logContext.value,
         });
-    } catch (e: any) {
-        const msg = typeof e === "string" ? e : e?.message || "任务初始化失败";
-        addLog("error", `❌ 启动失败: ${msg}`);
-        isRunning.value = false;
+    } catch (error) {
+        const message = toText(error) || "任务初始化失败。";
+        completionMessage.value = message;
+        hasError.value = true;
+        setRunState("failed", message);
+        addTimeline({ kind: "error", title: "启动失败", detail: message, status: "failed" });
+    }
+}
+
+async function requestStop() {
+    if (!isRunning.value || stopRequested.value) return;
+    stopRequested.value = true;
+    const message = "用户请求停止当前任务。请立即停止后续工具调用，简要整理当前已完成的工作并结束任务。";
+    try {
+        await invoke("send_human_intervention", { sessionId, message });
+        addTimeline({ kind: "human", title: "已发送停止请求", detail: "停止请求已作为高优先级人工指令提交，等待 Agent 确认。" });
+    } catch (error) {
+        stopRequested.value = false;
+        addTimeline({ kind: "error", title: "停止请求发送失败", detail: toText(error) || "无法发送停止请求。", status: "failed" });
+    }
+}
+
+async function sendHumanInput() {
+    const message = humanInput.value.trim();
+    if (!message || isSendingHuman.value) return;
+    isSendingHuman.value = true;
+    try {
+        await invoke("send_human_intervention", { sessionId, message });
+        addTimeline({ kind: "human", title: "已提交人工输入", detail: shortText(message, 280) });
+        humanInput.value = "";
+        pauseReason.value = "";
+        if (isWaitingForHuman.value) setRunState("executing", "已发送人工输入，等待 Agent 继续执行。")
+    } catch (error) {
+        addTimeline({ kind: "error", title: "人工输入发送失败", detail: toText(error) || "无法将输入发送给 Agent。", status: "failed" });
+    } finally {
+        isSendingHuman.value = false;
     }
 }
 
 function clearAll() {
-    steps.value = [];
+    timeline.value = [];
+    resources.value = [];
+    tokenUsage.value = null;
     completionMessage.value = "";
     finishOutput.value = null;
     hasError.value = false;
-    planningMessage.value = "";
     currentGoal.value = "";
-    runningStep.value = null;
-    isRunning.value = false;
+    pauseReason.value = "";
+    stopRequested.value = false;
+    elapsedSeconds.value = 0;
+    runStartedAt.value = null;
+    expandedToolDetails.value = new Set();
+    activeToolItems.clear();
+    setRunState("idle");
 }
 
-function toggleExpand(id: number) {
-    expandedStep.value = expandedStep.value === id ? null : id;
+function toggleToolDetail(id: string, section: DetailSection) {
+    const key = `${id}:${section}`;
+    const next = new Set(expandedToolDetails.value);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    expandedToolDetails.value = next;
 }
 
-function addLog(type: LogEntry["type"], message: string) {
-    const time = new Date().toLocaleTimeString("zh-CN", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-    });
-    logs.value.push({ time, message, type });
-    nextTick(() => {
-        if (logList.value) logList.value.scrollTop = logList.value.scrollHeight;
-    });
+function isToolDetailExpanded(id: string, section: DetailSection) {
+    return expandedToolDetails.value.has(`${id}:${section}`);
 }
 
-// 暴露 isRunning 给父组件（用于标签页状态指示）
+function normalizeResource(data: Record<string, unknown>, index: number): TaskResource | null {
+    const resourceId = toText(data.resource_id || data.resourceId || data.id || `context-resource-${index + 1}`);
+    if (!resourceId) return null;
+    return {
+        resourceId,
+        kind: toText(data.kind || data.type || "resource"),
+        label: toText(data.label || data.name || data.title || resourceId),
+        rowCount: data.row_count as number | string | undefined ?? data.rowCount as number | string | undefined,
+        status: toText(data.status || "available"),
+        summary: shortText(toText(data.summary || data.description || ""), 360),
+        cursor: toText(data.cursor || data.next_cursor || data.nextCursor || ""),
+    };
+}
+
+function sourceFrom(route: unknown, name: string): "内部" | "MCP" {
+    return /mcp/i.test(`${toText(route)} ${name}`) ? "MCP" : "内部";
+}
+
+function kindLabel(kind: TimelineKind) {
+    return { system: "SYSTEM", planning: "PLANNING", tool: "TOOL", success: "SUCCESS", error: "ERROR", human: "HUMAN", recovery: "RECOVERY" }[kind];
+}
+
+function toolStatusLabel(status: ToolStatus) {
+    return { pending: "等待", running: "运行中", succeeded: "成功", failed: "失败" }[status];
+}
+
+function stateMetaFor(state: RunState) {
+    return stateCatalog[state].label;
+}
+
+function formatDuration(seconds: number) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainder = seconds % 60;
+    return hours ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}` : `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function formatMilliseconds(milliseconds: number) {
+    return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(milliseconds >= 10000 ? 0 : 1)} 秒` : `${milliseconds} 毫秒`;
+}
+
+function formatClock(timestamp: number) {
+    return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(timestamp);
+}
+
+function formatNumber(value: number) {
+    return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function formatPayload(value: unknown) {
+    if (value === undefined || value === null || value === "") return "未提供。";
+    let text: string;
+    if (typeof value === "string") {
+        try {
+            text = JSON.stringify(JSON.parse(value), null, 2);
+        } catch {
+            text = value;
+        }
+    } else {
+        try {
+            text = JSON.stringify(value, null, 2);
+        } catch {
+            text = toText(value);
+        }
+    }
+    return shortText(text, 12000);
+}
+
+function shortText(value: string, max: number) {
+    const compact = value.replace(/\s+/g, " ").trim();
+    return compact.length > max ? `${compact.slice(0, max)}…（已截断）` : compact;
+}
+
+function toText(value: unknown): string {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    try {
+        return JSON.stringify(value);
+    } catch {
+        return String(value);
+    }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function toTimestamp(value: unknown) {
+    if (typeof value === "number" && Number.isFinite(value)) return value > 10_000_000_000 ? value : value * 1000;
+    if (typeof value === "string") {
+        const parsed = Date.parse(value);
+        if (!Number.isNaN(parsed)) return parsed;
+    }
+    return Date.now();
+}
+
+function numberOrUndefined(value: unknown) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : undefined;
+}
+
+onMounted(async () => {
+    const register = async (channel: string, handler: (payload: unknown) => void) => {
+        try {
+            unlisteners.push(await listen<unknown>(channel, (event) => handler(event.payload)));
+        } catch (error) {
+            addTimeline({ kind: "error", title: "事件监听不可用", detail: `${channel}：${toText(error) || "无法注册监听。"}`, status: "failed" });
+        }
+    };
+
+    await register(`agent-run-state-${sessionId}`, (payload) => handleRunState(asRecord(payload)));
+    await register(`agent-progress-${sessionId}`, (payload) => handleProgress(asRecord(payload)));
+    await register(`agent-log-${sessionId}`, handleLog);
+    await register(`agent-context-${sessionId}`, handleContext);
+    // 后端尚未发送该事件时，监听器保持空闲；一旦可用则自动增强工具卡片信息。
+    await register(`agent-tool-event-${sessionId}`, (payload) => handleToolEvent(asRecord(payload)));
+});
+
+onUnmounted(() => {
+    stopElapsedTimer();
+    unlisteners.forEach((unlisten) => unlisten());
+    unlisteners = [];
+});
+
 defineExpose({ isRunning });
 </script>
 
 <style scoped>
-.agent-instance {
-    display: flex;
+.agent-console {
+    --console-bg: #090d14;
+    --surface-1: #101722;
+    --surface-2: #151e2b;
+    --surface-3: #1a2636;
+    --line: rgba(148, 163, 184, 0.16);
+    --line-strong: rgba(148, 163, 184, 0.28);
+    --text: #e7edf6;
+    --text-soft: #9daabd;
+    --text-faint: #64748b;
+    --accent: #61a8ff;
+    --accent-soft: rgba(97, 168, 255, 0.14);
+    --success: #4bd19a;
+    --warning: #e7b25c;
+    --danger: #ff707d;
+    display: grid;
+    grid-template-columns: minmax(276px, 318px) minmax(0, 1fr);
     height: 100%;
+    min-height: 0;
     overflow: hidden;
+    color: var(--text);
+    background: var(--console-bg);
+    font-variant-numeric: tabular-nums;
 }
 
-/* ── 左侧控制面板 ── */
-.agent-sidebar {
-    width: 300px;
-    min-width: 300px;
-    background: var(--bg-1);
-    border-right: 1px solid var(--border-1);
+.console-controls {
     display: flex;
     flex-direction: column;
+    gap: 18px;
+    min-height: 0;
+    padding: 22px 18px 18px;
     overflow-y: auto;
-    padding: 20px;
-    gap: 16px;
+    background: linear-gradient(180deg, #0f1621 0%, #0b1018 100%);
+    border-right: 1px solid var(--line);
 }
-.sidebar-header { padding-bottom: 16px; border-bottom: 1px solid var(--border-1); }
-.sidebar-title { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 700; color: var(--text-1); }
-.title-icon { font-size: 20px; }
-.sidebar-subtitle { font-size: 12px; color: var(--text-4); margin-top: 4px; padding-left: 30px; }
-.control-section { display: flex; flex-direction: column; gap: 8px; }
-.preset-list { display: flex; flex-direction: column; gap: 4px; }
-.preset-btn { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--surface-1); border: 1px solid var(--border-1); color: var(--text-2); font-family: var(--font); font-size: 12px; cursor: pointer; transition: all var(--transition); text-align: left; }
-.preset-btn:hover { background: var(--surface-2); color: var(--text-1); border-color: var(--border-2); }
-.preset-btn.active { background: rgba(108, 99, 255, 0.1); border-color: rgba(108, 99, 255, 0.3); color: var(--accent-light); }
-.preset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.preset-icon { font-size: 14px; flex-shrink: 0; }
-.goal-input { resize: none; flex: 1; font-size: 13px; min-height: 120px; }
-.run-btn { width: 100%; justify-content: center; font-size: 14px; padding: 12px; }
-.clear-btn { width: 100%; justify-content: center; margin-top: 6px; font-size: 12px; }
 
-/* ── 右侧主区 ── */
-.agent-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg-0); }
-.empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 40px; }
-.empty-icon { font-size: 56px; filter: drop-shadow(0 0 20px rgba(108, 99, 255, 0.4)); animation: pulse 3s ease infinite; }
-.empty-title { font-size: 24px; font-weight: 700; background: linear-gradient(135deg, var(--text-1), var(--accent-light)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
-.empty-desc { color: var(--text-3); font-size: 14px; text-align: center; line-height: 1.8; }
-.capability-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 24px; max-width: 600px; width: 100%; }
-.cap-card { background: var(--bg-1); border: 1px solid var(--border-1); border-radius: var(--radius-md); padding: 16px; display: flex; flex-direction: column; gap: 6px; transition: all 0.2s; }
-.cap-card:hover { border-color: var(--accent-glow); background: var(--bg-2); }
-.cap-icon { font-size: 24px; }
-.cap-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
-.cap-desc { font-size: 11px; color: var(--text-3); line-height: 1.5; }
-
-/* 规划中 */
-.planning-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; }
-.planning-spinner { position: relative; width: 64px; height: 64px; display: flex; align-items: center; justify-content: center; }
-.spinner-ring { position: absolute; inset: 0; border-radius: 50%; border: 3px solid transparent; border-top-color: var(--accent); border-right-color: var(--accent-light); animation: spin 0.8s linear infinite; }
-.spinner-icon { font-size: 28px; }
-.planning-text { color: var(--text-2); font-size: 14px; }
-
-/* 执行面板 */
-.execution-panel { 
-    flex: 1; 
-    overflow-y: auto; 
-    padding: 24px; 
-    display: flex; 
-    flex-direction: column; 
-    gap: 16px;
-    min-height: 0; /* 关键：允许 flex 子元素在必要时收缩，防止撑破父容器 */
+.console-brand {
+    padding: 0 4px 4px;
 }
-.progress-header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 20px; border-bottom: 1px solid var(--border-1); margin-bottom: 20px; }
-.header-left { display: flex; align-items: center; gap: 16px; }
-.progress-goal { display: flex; align-items: flex-start; gap: 10px; flex: 1; }
-.goal-badge { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; padding: 3px 8px; background: rgba(108, 99, 255, 0.15); color: var(--accent-light); border-radius: 6px; border: 1px solid rgba(108, 99, 255, 0.25); flex-shrink: 0; margin-top: 2px; }
-.goal-text { font-size: 14px; font-weight: 500; color: var(--text-1); line-height: 1.5; }
-.progress-stats { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.stat { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 99px; }
-.stat.done { background: var(--green-dim); color: var(--green); }
-.stat.fail { background: rgba(255, 71, 87, 0.1); color: var(--red-light); }
-.stat.total { color: var(--text-3); background: var(--surface-1); }
-.progress-bar-wrap { height: 3px; background: var(--bg-3); border-radius: 99px; overflow: hidden; }
-.progress-bar-fill { height: 100%; border-radius: 99px; transition: width 0.4s ease, background 0.3s ease; box-shadow: 0 0 8px var(--accent-glow); }
 
-/* 步骤列表 */
-.steps-list { display: flex; flex-direction: column; gap: 0; }
-.step-card { display: flex; gap: 16px; cursor: pointer; }
-.step-icon-wrap { display: flex; flex-direction: column; align-items: center; gap: 0; flex-shrink: 0; }
-.step-icon { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex-shrink: 0; border: 2px solid; transition: all 0.3s ease; }
-.step-icon.pending { border-color: var(--border-2); color: var(--text-4); background: var(--bg-2); }
-.step-icon.running { border-color: var(--accent); color: var(--accent-light); background: rgba(108, 99, 255, 0.1); box-shadow: 0 0 16px var(--accent-glow); }
-.step-icon.done { border-color: var(--green); color: var(--green); background: var(--green-dim); }
-.step-icon.error { border-color: var(--red); color: var(--red-light); background: rgba(255, 71, 87, 0.1); }
-.step-connector { width: 2px; flex: 1; min-height: 16px; background: var(--border-1); margin: 4px 0; transition: background 0.3s; }
-.step-connector.filled { background: var(--green); }
-.step-content { flex: 1; padding-bottom: 12px; min-width: 0; }
-.step-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; }
-.step-desc { font-size: 13px; font-weight: 500; color: var(--text-1); flex: 1; }
-.step-card.pending .step-desc { color: var(--text-3); }
-.step-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.step-tool-badge { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 99px; letter-spacing: 0.04em; }
-.step-tool-badge.shell { background: rgba(0, 212, 170, 0.1); color: var(--teal); border: 1px solid rgba(0, 212, 170, 0.2); }
-.step-tool-badge.osascript { background: rgba(255, 164, 61, 0.1); color: var(--orange); border: 1px solid rgba(255, 164, 61, 0.2); }
-.step-expand-icon { font-size: 10px; color: var(--text-4); }
+.eyebrow {
+    display: block;
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: 0.13em;
+    line-height: 1.25;
+}
 
-/* 展开详情 */
-.step-details { background: var(--bg-1); border: 1px solid var(--border-1); border-radius: var(--radius-sm); padding: 14px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 12px; }
-.detail-block { display: flex; flex-direction: column; gap: 6px; }
-.detail-label { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-4); }
-.detail-thought { font-size: 13px; line-height: 1.6; color: var(--text-2); background: rgba(108, 99, 255, 0.05); border-left: 3px solid var(--accent); padding: 10px 14px; border-radius: 4px; margin-bottom: 4px; }
-.text-accent-light { color: var(--accent-light); }
-.detail-thinking { font-family: "JetBrains Mono", "Fira Code", monospace; font-size: 11px; line-height: 1.6; color: var(--text-3); background: rgba(0, 212, 170, 0.04); border: 1px solid rgba(0, 212, 170, 0.12); border-left: 3px solid var(--teal, #00d4aa); padding: 10px 14px; border-radius: 4px; white-space: pre-wrap; word-break: break-word; max-height: 250px; overflow-y: auto; font-style: italic; }
-.detail-cmd { font-family: "JetBrains Mono", "Fira Code", monospace; font-size: 12px; color: var(--teal); background: var(--bg-0); border: 1px solid var(--border-2); border-radius: 6px; padding: 10px 14px; white-space: pre-wrap; word-break: break-all; line-height: 1.6; }
-.detail-output { font-family: "JetBrains Mono", "Fira Code", monospace; font-size: 12px; color: var(--text-2); background: var(--bg-0); border: 1px solid var(--border-2); border-radius: 6px; padding: 10px 14px; white-space: pre-wrap; word-break: break-all; line-height: 1.6; max-height: 200px; overflow-y: auto; }
-.detail-output.error { color: var(--red-light); border-color: rgba(255, 71, 87, 0.2); }
-.detail-running { display: flex; align-items: center; gap: 10px; color: var(--accent-light); font-size: 12px; }
+.console-brand h1,
+.panel-header h2,
+.run-status h2,
+.human-input-card h2,
+.final-result h2 {
+    margin: 5px 0 0;
+    color: var(--text);
+    font-size: 19px;
+    font-weight: 690;
+    letter-spacing: -0.018em;
+}
 
-/* 完成 Banner */
-.completion-banner { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-radius: var(--radius-md); font-size: 14px; font-weight: 500; }
-.completion-banner.success { background: var(--green-dim); color: var(--green); border: 1px solid rgba(46, 213, 115, 0.2); }
-.completion-banner.error { background: rgba(255, 71, 87, 0.08); color: var(--red-light); border: 1px solid rgba(255, 71, 87, 0.2); }
-.completion-icon { font-size: 20px; }
+.console-brand p {
+    margin: 6px 0 0;
+    color: var(--text-faint);
+    font-size: 12px;
+}
 
-/* 日志面板 */
-.log-panel { border-top: 1px solid var(--border-1); background: var(--bg-1); display: flex; flex-direction: column; max-height: 200px; min-height: 100px; flex-shrink: 0; }
-.log-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; border-bottom: 1px solid var(--border-1); font-size: 11px; font-weight: 600; letter-spacing: 0.05em; color: var(--text-4); text-transform: uppercase; }
-.log-list { flex: 1; overflow-y: auto; padding: 8px 16px; display: flex; flex-direction: column; gap: 3px; }
-.log-line { display: flex; gap: 12px; font-size: 11px; font-family: "JetBrains Mono", "Fira Code", monospace; line-height: 1.6; }
-.log-time { font-size: 11px; color: var(--text-4); min-width: 55px; font-family: "JetBrains Mono", "Fira Code", monospace; }
-.log-msg { color: var(--text-2); }
-.log-line.success .log-msg { color: var(--green); }
-.log-line.error .log-msg { color: var(--red-light); }
-.log-line.warn .log-msg { color: var(--orange); }
-.log-line.info .log-msg { color: var(--text-2); }
-
-/* 过渡动画 */
-.expand-enter-active, .expand-leave-active { transition: all 0.25s ease; overflow: hidden; }
-.expand-enter-from, .expand-leave-to { opacity: 0; max-height: 0; padding-top: 0; margin-bottom: 0; }
-.expand-enter-to, .expand-leave-from { opacity: 1; max-height: 600px; }
-.btn-xs { padding: 3px 8px; font-size: 11px; border-radius: 4px; background: var(--surface-1); border: 1px solid var(--border-1); color: var(--text-3); cursor: pointer; }
-.btn-xs:hover { background: var(--surface-2); color: var(--text-1); }
-
-@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-
-/* ---- 任务成果报告卡 ---- */
-.result-card {
-    margin-top: 14px;
-    margin-bottom: 20px;
+.control-section {
+    padding: 15px;
+    border: 1px solid var(--line);
     border-radius: 12px;
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-    background: var(--surface-0);
-    box-shadow: 0 8px 24px -8px rgba(0,0,0,0.2);
+    background: rgba(21, 30, 43, 0.68);
 }
-.bottom-spacer {
-    height: 250px; /* 增加垫片高度，确保内容能被推到视图中央 */
-    width: 100%;
-    pointer-events: none;
+
+.compact-section {
+    padding-block: 12px;
 }
-.result-card-header {
+
+.section-heading,
+.toggle-row,
+.panel-header,
+.tool-header,
+.event-header,
+.human-input-header,
+.resource-card header,
+.tool-summary-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 12px 24px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--accent);
-    border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    justify-content: space-between;
+    gap: 12px;
 }
-.result-card.error {
-    border-color: color-mix(in srgb, var(--red) 40%, transparent);
-    background: color-mix(in srgb, var(--red) 5%, var(--surface-0));
-}
-.result-card.error .result-card-header {
-    color: var(--red);
-    background: color-mix(in srgb, var(--red) 10%, transparent);
-    border-bottom-color: color-mix(in srgb, var(--red) 20%, transparent);
-}
-.result-status-tag {
-    margin-left: auto;
-    font-size: 10px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    letter-spacing: 0.5px;
-}
-.result-card.error .result-status-tag {
-    background: color-mix(in srgb, var(--red) 20%, transparent);
-}
-.result-card-icon { font-size: 15px; }
-.result-body {
-    padding: 20px 24px;
-    background: var(--surface-0);
-}
-.result-body :deep(table) {
-    display: block;
-    width: 100%;
-    overflow-x: auto; /* 让宽表格可以在内部滚动，而不挤坏边框 */
-    -webkit-overflow-scrolling: touch;
-}
-.result-text-block {
-    font-size: 13.5px;
-    color: var(--text-1);
-    line-height: 1.7;
-}
-/* 强化成果报告中的 Markdown 样式 */
-.result-body :deep(h3) { margin: 0 0 12px 0; font-size: 16px; color: var(--accent); border-bottom: 1px solid var(--border-1); padding-bottom: 6px; }
-.result-body :deep(h4) { margin: 16px 0 8px 0; font-size: 14px; color: var(--text-1); }
-.result-body :deep(p) { margin: 0 0 12px 0; }
-.result-body :deep(blockquote) { 
-    margin: 12px 0; 
-    padding: 8px 12px; 
-    background: color-mix(in srgb, var(--accent) 5%, var(--surface-1));
-    border-left: 4px solid var(--accent);
-    border-radius: 4px;
-    color: var(--text-2);
-    font-style: italic;
-}
-.result-body :deep(hr) { border: none; border-top: 1px solid var(--border-1); margin: 16px 0; }
 
-.result-artifacts {
-    padding: 16px 24px;
-    border-top: 1px solid var(--border-1);
-    background: color-mix(in srgb, var(--accent) 2%, transparent);
+.section-heading {
+    margin-bottom: 12px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
 }
-.result-section-label {
+
+.section-heading small,
+.toggle-row small {
+    color: var(--text-faint);
     font-size: 11px;
-    color: var(--text-3);
-    margin-bottom: 5px;
     font-weight: 500;
 }
-.result-artifact-path {
-    font-size: 12px;
-    color: var(--accent);
-    font-family: monospace;
-    background: var(--surface-1);
-    padding: 4px 8px;
-    border-radius: 5px;
-    margin-top: 3px;
-    word-break: break-all;
-}
-.result-screenshot {
-    margin-top: 12px;
-    padding-top: 10px;
-    border-top: 1px solid var(--border);
-}
-.result-screenshot-img {
-    width: 100%;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    margin-top: 6px;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.25);
-}
-.result-details-wrap {
-    padding: 0;
-}
-/* Markdown 表格样式增强 */
-.result-body :deep(table) {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 14px 0;
-    font-size: 12px;
-    border-radius: 8px;
-    overflow: hidden;
-}
-.result-body :deep(th) {
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface-1));
-    color: var(--accent);
-    font-weight: 600;
-    padding: 10px 12px;
-    text-align: left;
-    border: 1px solid var(--border-1);
-}
-.result-body :deep(td) {
-    padding: 8px 12px;
-    border: 1px solid var(--border-1);
-}
-.result-body :deep(tr:nth-child(even) td) { background: color-mix(in srgb, var(--accent) 3%, transparent); }
-.result-body :deep(a) { color: var(--accent); text-decoration: underline; }
 
-/* --- 人类干预面板样式 --- */
-.intervention-panel {
-    margin: 12px 0;
-    padding: 12px 16px;
-    background: color-mix(in srgb, var(--orange) 10%, var(--surface-1));
-    border: 1px solid color-mix(in srgb, var(--orange) 30%, transparent);
+.field-label {
+    display: block;
+    margin: 12px 0 6px;
+    color: var(--text-soft);
+    font-size: 11px;
+    font-weight: 650;
+}
+
+.field-label:first-of-type {
+    margin-top: 0;
+}
+
+select,
+textarea {
+    box-sizing: border-box;
+    width: 100%;
+    border: 1px solid var(--line-strong);
     border-radius: 8px;
-    transition: all 0.3s ease;
-}
-.intervention-panel.paused-mode {
-    background: color-mix(in srgb, var(--red) 10%, var(--surface-1));
-    border-color: var(--red);
-    box-shadow: 0 0 15px color-mix(in srgb, var(--red) 20%, transparent);
-}
-.intervention-header {
-    font-size: 13px;
-    color: var(--orange);
-    font-weight: 700;
-    margin-bottom: 10px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-.paused-header {
-    color: var(--red);
-    flex-direction: column;
-    align-items: flex-start;
-}
-.icon-pulse {
-    font-size: 16px;
-    animation: pulse-icon 2s infinite;
-}
-@keyframes pulse-icon {
-    0% { transform: scale(1); opacity: 1; }
-    50% { transform: scale(1.15); opacity: 0.8; }
-    100% { transform: scale(1); opacity: 1; }
-}
-.intervention-input-group {
-    display: flex;
-    gap: 8px;
-}
-.intervention-input-group input {
-    flex: 1;
-    background: var(--surface-0);
-    border: 1px solid var(--border-2);
-    color: var(--text-1);
-    padding: 6px 12px;
-    border-radius: 6px;
-    font-size: 13px;
-}
-.intervention-input-group input:focus {
-    border-color: var(--orange);
     outline: none;
-}
-.btn-intervene {
-    background: var(--orange);
-    color: #fff;
-    border: none;
-    border-radius: 6px;
-    padding: 0 16px;
+    color: var(--text);
+    background: #0b111a;
+    font: inherit;
     font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
+    transition: border-color 160ms ease, box-shadow 160ms ease;
 }
-.btn-intervene:hover:not(:disabled) {
-    opacity: 0.9;
+
+select {
+    height: 34px;
+    padding: 0 10px;
+}
+
+textarea {
+    resize: vertical;
+    padding: 10px;
+    line-height: 1.55;
+}
+
+select:focus,
+textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+select:disabled,
+textarea:disabled,
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.48;
+}
+
+.toggle-row {
+    cursor: pointer;
+}
+
+.toggle-row span {
+    display: grid;
+    gap: 3px;
+}
+
+.toggle-row strong {
+    color: var(--text-soft);
+    font-size: 12px;
+}
+
+.toggle-row input {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
+}
+
+.preset-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px;
+}
+
+.preset-button,
+.action-button,
+.continue-button,
+.detail-toggle {
+    border: 0;
+    font: inherit;
+    cursor: pointer;
+}
+
+.preset-button {
+    min-height: 31px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--text-soft);
+    background: rgba(10, 16, 25, 0.78);
+    font-size: 11px;
+    transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.preset-button:hover,
+.preset-button.active {
+    border-color: rgba(97, 168, 255, 0.6);
+    color: #dbeafe;
+    background: var(--accent-soft);
+}
+
+.goal-section {
+    flex: 1;
+    min-height: 166px;
+}
+
+.goal-section textarea {
+    min-height: 140px;
+}
+
+.control-actions {
+    display: grid;
+    gap: 8px;
+    margin-top: auto;
+}
+
+.action-button,
+.continue-button {
+    min-height: 38px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 720;
+    transition: transform 160ms ease, filter 160ms ease, background 160ms ease;
+}
+
+.action-button:not(:disabled):hover,
+.continue-button:not(:disabled):hover {
+    filter: brightness(1.08);
     transform: translateY(-1px);
 }
-.btn-intervene:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+
+.action-button.primary,
+.continue-button {
+    color: #07111f;
+    background: linear-gradient(135deg, #76b8ff, #4c8df2);
 }
 
-/* slide-up 动画 */
-.slide-up-enter-active { transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
-.slide-up-enter-from { opacity: 0; transform: translateY(16px); }
+.action-button.secondary {
+    color: var(--text-soft);
+    background: transparent;
+    border: 1px solid var(--line-strong);
+}
+
+.action-button.danger {
+    color: #ffd8dc;
+    background: rgba(255, 112, 125, 0.12);
+    border: 1px solid rgba(255, 112, 125, 0.36);
+}
+
+.control-hint {
+    margin: 1px 1px 0;
+    color: var(--text-faint);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.console-workspace {
+    min-width: 0;
+    min-height: 0;
+    padding: 20px;
+    overflow: auto;
+    background:
+        radial-gradient(circle at 92% -10%, rgba(65, 125, 211, 0.13), transparent 32%),
+        var(--console-bg);
+}
+
+.run-status {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 22px;
+    padding: 18px 20px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: linear-gradient(110deg, rgba(20, 31, 46, 0.96), rgba(15, 22, 33, 0.91));
+}
+
+.status-main {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 13px;
+}
+
+.state-marker {
+    display: grid;
+    width: 36px;
+    height: 36px;
+    flex: 0 0 auto;
+    place-items: center;
+    border: 1px solid var(--line-strong);
+    border-radius: 50%;
+    background: rgba(8, 14, 23, 0.72);
+}
+
+.state-marker span {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--text-faint);
+}
+
+.state-preparing .state-marker span,
+.state-planning .state-marker span,
+.state-executing .state-marker span,
+.state-finalizing .state-marker span { background: var(--accent); box-shadow: 0 0 0 5px rgba(97, 168, 255, 0.1); }
+.state-waiting_for_human .state-marker span { background: var(--warning); box-shadow: 0 0 0 5px rgba(231, 178, 92, 0.1); }
+.state-recovering .state-marker span { background: #b48cff; box-shadow: 0 0 0 5px rgba(180, 140, 255, 0.1); }
+.state-succeeded .state-marker span { background: var(--success); box-shadow: 0 0 0 5px rgba(75, 209, 154, 0.1); }
+.state-failed .state-marker span,
+.state-cancelled .state-marker span { background: var(--danger); box-shadow: 0 0 0 5px rgba(255, 112, 125, 0.1); }
+
+.state-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.state-line h2 {
+    font-size: 21px;
+}
+
+.state-chip,
+.event-kind,
+.source-tag,
+.tool-status,
+.waiting-badge,
+.resource-kind,
+.resource-status,
+.panel-count {
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: 0.035em;
+    line-height: 1;
+}
+
+.state-chip {
+    padding: 5px 7px;
+    color: #c7dcfa;
+    background: var(--accent-soft);
+}
+
+.status-main p {
+    margin: 5px 0 0;
+    overflow: hidden;
+    color: var(--text-soft);
+    font-size: 12px;
+    line-height: 1.45;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.run-metadata {
+    display: grid;
+    grid-template-columns: minmax(150px, 1.7fr) repeat(2, minmax(72px, auto));
+    gap: 22px;
+    margin: 0;
+}
+
+.run-metadata div {
+    min-width: 0;
+}
+
+.run-metadata dt {
+    margin-bottom: 5px;
+    color: var(--text-faint);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.run-metadata dd {
+    max-width: 240px;
+    margin: 0;
+    overflow: hidden;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.metric-value {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.live-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px 17px;
+    padding: 10px 2px 0;
+    color: var(--text-faint);
+    font-size: 11px;
+}
+
+.live-metrics strong {
+    color: var(--text-soft);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-weight: 700;
+}
+
+.context-metric {
+    color: #d8b471;
+}
+
+.human-input-card {
+    margin-top: 16px;
+    padding: 17px;
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    background: rgba(21, 30, 43, 0.78);
+}
+
+.human-input-card.waiting {
+    border-color: rgba(231, 178, 92, 0.62);
+    background: linear-gradient(120deg, rgba(83, 59, 26, 0.48), rgba(22, 29, 37, 0.92));
+}
+
+.human-input-header {
+    align-items: flex-start;
+}
+
+.human-input-card h2 {
+    font-size: 15px;
+}
+
+.human-input-card p {
+    margin: 5px 0 0;
+    color: var(--text-soft);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.waiting-badge {
+    padding: 6px 8px;
+    color: #ffe2a8;
+    background: rgba(231, 178, 92, 0.15);
+}
+
+.human-input-form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 116px;
+    gap: 10px;
+    margin-top: 13px;
+}
+
+.human-input-form textarea {
+    min-height: 72px;
+}
+
+.content-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(252px, 310px);
+    align-items: start;
+    gap: 16px;
+    margin-top: 16px;
+}
+
+.timeline-panel,
+.resource-panel,
+.final-result {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: rgba(15, 22, 33, 0.84);
+}
+
+.timeline-panel {
+    min-width: 0;
+    overflow: hidden;
+}
+
+.panel-header {
+    padding: 17px 18px;
+    border-bottom: 1px solid var(--line);
+}
+
+.panel-header h2 {
+    font-size: 15px;
+}
+
+.panel-count {
+    min-width: 25px;
+    justify-content: center;
+    padding: 5px 7px;
+    color: var(--text-soft);
+    background: rgba(148, 163, 184, 0.1);
+}
+
+.timeline-empty {
+    position: relative;
+    min-height: 310px;
+    padding: 78px 30px 30px;
+    overflow: hidden;
+    text-align: center;
+}
+
+.empty-grid {
+    position: absolute;
+    top: 43px;
+    left: 50%;
+    width: 50px;
+    height: 50px;
+    border: 1px solid rgba(97, 168, 255, 0.46);
+    border-radius: 8px;
+    transform: translateX(-50%) rotate(45deg);
+    background:
+        linear-gradient(90deg, transparent 48%, rgba(97, 168, 255, 0.23) 49%, rgba(97, 168, 255, 0.23) 51%, transparent 52%),
+        linear-gradient(transparent 48%, rgba(97, 168, 255, 0.23) 49%, rgba(97, 168, 255, 0.23) 51%, transparent 52%);
+}
+
+.timeline-empty h3 {
+    margin: 0;
+    color: var(--text-soft);
+    font-size: 14px;
+}
+
+.timeline-empty p {
+    max-width: 380px;
+    margin: 9px auto 0;
+    color: var(--text-faint);
+    font-size: 12px;
+    line-height: 1.65;
+}
+
+.timeline-list {
+    max-height: min(68vh, 760px);
+    margin: 0;
+    padding: 18px 18px 24px;
+    overflow: auto;
+    list-style: none;
+    scroll-behavior: smooth;
+}
+
+.timeline-entry {
+    position: relative;
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    min-width: 0;
+}
+
+.timeline-entry:not(:last-child) {
+    padding-bottom: 11px;
+}
+
+.timeline-rail {
+    position: relative;
+    display: flex;
+    justify-content: center;
+}
+
+.timeline-rail::before {
+    position: absolute;
+    top: 16px;
+    bottom: -11px;
+    width: 1px;
+    background: var(--line-strong);
+    content: "";
+}
+
+.timeline-entry:last-child .timeline-rail::before {
+    display: none;
+}
+
+.timeline-rail span {
+    position: relative;
+    z-index: 1;
+    width: 9px;
+    height: 9px;
+    margin-top: 14px;
+    border: 3px solid #111925;
+    border-radius: 50%;
+    background: #7d8ca1;
+}
+
+.kind-planning .timeline-rail span { background: var(--accent); }
+.kind-tool .timeline-rail span { background: #8f7cff; }
+.kind-success .timeline-rail span { background: var(--success); }
+.kind-error .timeline-rail span { background: var(--danger); }
+.kind-human .timeline-rail span { background: var(--warning); }
+.kind-recovery .timeline-rail span { background: #bc8dff; }
+
+.event-card,
+.tool-card {
+    min-width: 0;
+    padding: 13px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(22, 31, 45, 0.74);
+}
+
+.event-card:hover,
+.tool-card:hover {
+    border-color: rgba(148, 163, 184, 0.3);
+}
+
+.event-header {
+    align-items: flex-start;
+}
+
+.event-kind {
+    padding: 4px 6px;
+    color: var(--text-faint);
+    background: rgba(148, 163, 184, 0.1);
+}
+
+.kind-success .event-kind { color: #a6f2d0; background: rgba(75, 209, 154, 0.1); }
+.kind-error .event-kind { color: #ffc0c6; background: rgba(255, 112, 125, 0.1); }
+.kind-human .event-kind { color: #ffe1a5; background: rgba(231, 178, 92, 0.11); }
+.kind-planning .event-kind { color: #c8e0ff; background: var(--accent-soft); }
+.kind-recovery .event-kind { color: #d8c1ff; background: rgba(180, 140, 255, 0.12); }
+
+.event-card h3,
+.tool-card h3,
+.resource-card h3 {
+    margin: 6px 0 0;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 670;
+    line-height: 1.35;
+}
+
+.event-card time {
+    color: var(--text-faint);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.event-card p,
+.tool-summary-row p,
+.resource-intro,
+.resource-card p {
+    margin: 9px 0 0;
+    color: var(--text-soft);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.tool-card {
+    border-left: 3px solid #8f7cff;
+}
+
+.tool-card.tool-succeeded { border-left-color: var(--success); }
+.tool-card.tool-failed { border-left-color: var(--danger); }
+
+.tool-header {
+    align-items: flex-start;
+}
+
+.tool-title-wrap {
+    min-width: 0;
+}
+
+.tool-title-wrap h3 {
+    display: inline-block;
+    margin-right: 7px;
+}
+
+.tool-action {
+    color: var(--text-faint);
+    font-size: 11px;
+}
+
+.tool-header-meta {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 5px;
+}
+
+.source-tag,
+.tool-status,
+.resource-kind,
+.resource-status {
+    padding: 5px 7px;
+}
+
+.source-tag.internal { color: #c6d2e4; background: rgba(148, 163, 184, 0.11); }
+.source-tag.mcp { color: #d3c2ff; background: rgba(180, 140, 255, 0.12); }
+.tool-status.running { color: #c8e0ff; background: var(--accent-soft); }
+.tool-status.succeeded { color: #a6f2d0; background: rgba(75, 209, 154, 0.1); }
+.tool-status.failed { color: #ffc0c6; background: rgba(255, 112, 125, 0.1); }
+.tool-status.pending { color: #d1d9e5; background: rgba(148, 163, 184, 0.1); }
+
+.tool-summary-row {
+    align-items: flex-start;
+    margin-top: 1px;
+}
+
+.tool-summary-row p {
+    min-width: 0;
+    margin-right: 10px;
+}
+
+.duration {
+    margin-top: 9px;
+    color: var(--text-faint);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.tool-details {
+    display: grid;
+    gap: 6px;
+    margin-top: 12px;
+}
+
+.detail-toggle {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    padding: 7px 8px;
+    border-radius: 6px;
+    color: var(--text-soft);
+    background: rgba(5, 10, 16, 0.42);
+    font-size: 11px;
+    text-align: left;
+}
+
+.detail-toggle:hover {
+    color: var(--text);
+    background: rgba(97, 168, 255, 0.1);
+}
+
+.tool-details pre {
+    max-height: 250px;
+    margin: 0;
+    padding: 10px;
+    overflow: auto;
+    border: 1px solid rgba(148, 163, 184, 0.13);
+    border-radius: 6px;
+    color: #c5d1e2;
+    background: #080d14;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.resource-panel {
+    padding-bottom: 11px;
+}
+
+.resource-intro {
+    margin: 13px 14px 10px;
+    color: var(--text-faint);
+    font-size: 11px;
+}
+
+.resource-empty {
+    display: grid;
+    gap: 7px;
+    padding: 40px 18px;
+    color: var(--text-soft);
+    font-size: 12px;
+    text-align: center;
+}
+
+.resource-empty small {
+    color: var(--text-faint);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.resource-list {
+    display: grid;
+    gap: 9px;
+    padding: 0 11px;
+}
+
+.resource-card {
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: rgba(23, 32, 46, 0.65);
+}
+
+.resource-card h3 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.resource-kind {
+    color: #c8e0ff;
+    background: var(--accent-soft);
+    text-transform: uppercase;
+}
+
+.resource-status {
+    max-width: 100px;
+    overflow: hidden;
+    color: #bcefd6;
+    background: rgba(75, 209, 154, 0.1);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.resource-card dl {
+    display: grid;
+    gap: 6px;
+    margin: 12px 0 0;
+}
+
+.resource-card dl div {
+    display: grid;
+    grid-template-columns: 70px minmax(0, 1fr);
+    gap: 7px;
+}
+
+.resource-card dt {
+    color: var(--text-faint);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10px;
+}
+
+.resource-card dd {
+    margin: 0;
+    overflow: hidden;
+    color: var(--text-soft);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.resource-card p {
+    display: -webkit-box;
+    overflow: hidden;
+    margin-top: 10px;
+    color: var(--text-faint);
+    font-size: 11px;
+    line-height: 1.5;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+}
+
+.final-result {
+    margin-top: 16px;
+    padding: 18px;
+    border-left: 3px solid var(--success);
+}
+
+.final-result.failed {
+    border-left-color: var(--danger);
+}
+
+.final-result-label {
+    color: var(--success);
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.final-result.failed .final-result-label {
+    color: #ffc0c6;
+}
+
+.final-result h2 {
+    font-size: 15px;
+}
+
+.final-result p {
+    max-height: 250px;
+    margin: 9px 0 0;
+    overflow: auto;
+    color: var(--text-soft);
+    font-size: 12px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+}
+
+.artifact-list {
+    display: grid;
+    gap: 6px;
+    margin-top: 13px;
+}
+
+.artifact-list span {
+    color: var(--text-faint);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.artifact-list code {
+    overflow: hidden;
+    padding: 7px 8px;
+    border-radius: 5px;
+    color: #c9d5e5;
+    background: rgba(5, 10, 16, 0.46);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@media (max-width: 1120px) {
+    .agent-console {
+        grid-template-columns: 280px minmax(0, 1fr);
+    }
+
+    .content-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .resource-panel {
+        max-height: 440px;
+        overflow: auto;
+    }
+
+    .resource-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 820px) {
+    .agent-console {
+        display: block;
+        height: auto;
+        overflow: visible;
+    }
+
+    .console-controls,
+    .console-workspace {
+        overflow: visible;
+    }
+
+    .console-controls {
+        gap: 14px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+    }
+
+    .goal-section {
+        min-height: 0;
+    }
+
+    .run-status {
+        grid-template-columns: 1fr;
+        gap: 17px;
+    }
+
+    .run-metadata {
+        grid-template-columns: minmax(0, 1fr) repeat(2, auto);
+        gap: 14px;
+    }
+
+    .console-workspace {
+        padding: 15px;
+    }
+}
+
+@media (max-width: 540px) {
+    .console-controls {
+        padding: 16px 13px;
+    }
+
+    .console-workspace {
+        padding: 12px;
+    }
+
+    .run-status,
+    .human-input-card,
+    .panel-header,
+    .timeline-list {
+        padding-left: 13px;
+        padding-right: 13px;
+    }
+
+    .run-metadata {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .run-metadata div:first-child {
+        grid-column: 1 / -1;
+    }
+
+    .human-input-form {
+        grid-template-columns: 1fr;
+    }
+
+    .continue-button {
+        min-height: 36px;
+    }
+
+    .resource-list {
+        grid-template-columns: 1fr;
+    }
+
+    .tool-header {
+        display: grid;
+        grid-template-columns: 1fr;
+    }
+
+    .tool-header-meta {
+        justify-content: flex-start;
+    }
+}
 </style>
