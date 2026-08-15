@@ -1,8 +1,11 @@
 pub mod checkpoint;
 pub mod context;
+pub mod conversation;
 pub mod mcp;
+pub mod mcp_catalog;
 pub mod router;
 pub mod run_state;
+pub mod skill_context;
 pub mod task_store;
 pub mod types;
 pub mod utils;
@@ -33,9 +36,14 @@ pub fn intervention_channels() -> &'static Arc<Mutex<HashMap<String, mpsc::Sende
 }
 
 #[tauri::command]
-pub async fn send_human_intervention(session_id: String, message: String) -> Result<(), String> {
+pub async fn send_human_intervention(
+    state: State<'_, DbState>,
+    session_id: String,
+    message: String,
+) -> Result<(), String> {
     let channels = intervention_channels().lock().await;
     if let Some(sender) = channels.get(&session_id) {
+        crate::agent::conversation::append_human_intervention(state.inner(), &session_id, &message)?;
         sender.send(message).await.map_err(|e| e.to_string())?;
         Ok(())
     } else {
@@ -368,9 +376,11 @@ pub async fn run_agent_main_loop(
         &mut run_machine,
         AgentRunEvent::Start,
     )?;
+    // Skill、插件与 shell 工具共享本轮运行时工作目录；恢复时会重新读取并按哈希复用未变更的 Skill。
+    let workspace_dir = std::env::current_dir().unwrap_or_default();
     // 1. 自动加载插件（强制探测模式）
     {
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = workspace_dir.clone();
         println!("========================================");
         println!(
             "🔍 [插件探测] 强制执行开始！当前工作目录 cwd = {}",
@@ -499,23 +509,48 @@ pub async fn run_agent_main_loop(
         }
     }
 
-    // 3. 查询所有 MCP Server 的工具列表，追加到菜单里
+    // 3. 从当前工作区向上读取 AGENTS.md / HUB.md；内容未变时走进程内哈希缓存。
+    let skill_context = crate::agent::skill_context::workspace_skill_context(&workspace_dir);
+    // 4. 查询所有 MCP Server 的工具列表，追加到菜单里
     let mcp_tools_menu = {
         let mut registry = registry_state.lock().await;
         registry.format_tools_menu()
     };
 
     let system_prompt = format!(
-        "{}\n{}\n{}\n{}",
-        base_prompt, task_store_menu, local_tools_menu, mcp_tools_menu
+        "{}{}\n{}\n{}\n{}",
+        base_prompt, skill_context, task_store_menu, local_tools_menu, mcp_tools_menu
     );
     println!(
         "--- 最终系统提示词 (级联菜单模式) ---\n{}\n------------------",
         system_prompt
     );
+    let conversation_model_id = if !model_routing.pro.trim().is_empty() {
+        model_routing.pro.clone()
+    } else if !model_routing.flash.trim().is_empty() {
+        model_routing.flash.clone()
+    } else {
+        model_routing.vision.clone()
+    };
+    // 每轮都是独立 Agent 运行，但同一 session_id 始终归属同一个长期对话。
+    // 崩溃恢复会沿用既有 checkpoint，不能重复追加用户消息；只有新轮次才写入消息历史。
+    let existing_checkpoint = load_checkpoint(state.inner(), &final_session_id)?;
+    let is_resuming_existing = !crate::agent::conversation::should_start_new_turn(
+        existing_checkpoint.as_ref(),
+        &goal,
+    );
+    if !is_resuming_existing {
+        crate::agent::conversation::begin_turn(
+            state.inner(),
+            &final_session_id,
+            &conversation_model_id,
+            &goal,
+        )?;
+    }
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
+    context.turns_history = crate::agent::conversation::recent_history(state.inner(), &final_session_id)?;
     // checkpoint 是恢复的权威来源：只还原可持久化事实，连接、插件与工具详情由 Runtime 重建。
-    let mut checkpoint = match load_checkpoint(state.inner(), &final_session_id)? {
+    let mut checkpoint = match existing_checkpoint {
         Some(existing) if !existing.phase.is_terminal() && existing.data.user_goal == goal => {
             existing.restore_context(&mut context);
             existing
@@ -831,6 +866,18 @@ pub async fn run_agent_main_loop(
                 .clone()
                 .unwrap_or(serde_json::Value::Null);
 
+            let persisted_summary = finish_payload
+                .get("summary")
+                .and_then(|value| value.as_str())
+                .or_else(|| finish_payload.get("details").and_then(|value| value.as_str()))
+                .unwrap_or(&output_text)
+                .to_string();
+            crate::agent::conversation::complete_turn(
+                state.inner(),
+                &final_session_id,
+                &conversation_model_id,
+                &persisted_summary,
+            )?;
             app.emit(
                 &format!("agent-progress-{}", final_session_id),
                 json!({

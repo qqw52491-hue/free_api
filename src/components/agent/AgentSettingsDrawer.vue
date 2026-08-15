@@ -43,6 +43,28 @@
                         <span><strong>记录完整上下文</strong><small>用于任务复盘与调试。</small></span>
                     </label>
                 </section>
+                <section class="mcp-connection-section">
+                    <div class="section-heading"><h3>MCP 连接</h3><small>{{ catalogSummary }}</small></div>
+                    <p class="section-description">工具目录会按插件配置缓存；刷新会验证 stdio 连接并重新发现工具。</p>
+                    <div v-if="catalogLoading" class="mcp-empty">正在读取已启用连接…</div>
+                    <div v-else-if="mcpCatalog.length" class="mcp-connection-list">
+                        <article v-for="entry in mcpCatalog" :key="entry.name" class="mcp-connection-card">
+                            <div class="mcp-connection-main">
+                                <span class="mcp-status-dot" :class="connectionState[entry.name] || (entry.cached ? 'ready' : 'idle')"></span>
+                                <div>
+                                    <strong>{{ entry.name }}</strong>
+                                    <small>{{ entry.tool_count ? `${entry.tool_count} 个工具` : '尚未发现工具' }} · {{ entry.cached ? '目录已缓存' : '等待验证' }}</small>
+                                </div>
+                            </div>
+                            <button type="button" class="mcp-refresh" :disabled="connectionState[entry.name] === 'testing'" @click="refreshConnection(entry.name)">
+                                {{ connectionState[entry.name] === 'testing' ? '连接中…' : '刷新连接' }}
+                            </button>
+                            <p v-if="connectionError[entry.name]" class="mcp-error">{{ connectionError[entry.name] }}</p>
+                        </article>
+                    </div>
+                    <div v-else class="mcp-empty">当前没有已启用的 MCP 连接。</div>
+                    <button type="button" class="manage-mcp" @click="$emit('open-plugins')">管理 MCP 连接</button>
+                </section>
                 <section>
                     <div class="section-heading"><h3>快捷任务</h3><small>一键填充</small></div>
                     <div class="preset-list">
@@ -57,7 +79,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { AGENT_TASK_PRESETS, type AgentModelOption } from "./types";
 
 const props = defineProps<{
@@ -73,9 +96,50 @@ const emit = defineEmits<{
     "update:model-routing": [value: { pro: string; flash: string; vision: string }];
     "update:log-context": [value: boolean];
     "apply-preset": [goal: string];
+    "open-plugins": [];
 }>();
 
 const presets = AGENT_TASK_PRESETS;
+type McpConnectionState = "idle" | "testing" | "ready" | "error";
+interface McpCatalogEntry {
+    name: string;
+    tool_count: number;
+    cached: boolean;
+}
+const mcpCatalog = ref<McpCatalogEntry[]>([]);
+const catalogLoading = ref(false);
+const connectionState = ref<Record<string, McpConnectionState>>({});
+const connectionError = ref<Record<string, string>>({});
+const catalogSummary = computed(() => {
+    if (catalogLoading.value) return "读取中";
+    return mcpCatalog.value.length ? `${mcpCatalog.value.length} 个已启用连接` : "未配置";
+});
+async function loadMcpCatalog() {
+    catalogLoading.value = true;
+    try {
+        mcpCatalog.value = await invoke<McpCatalogEntry[]>("get_mcp_tool_catalog", { name: null });
+    } catch (error) {
+        mcpCatalog.value = [];
+        console.warn("无法读取 MCP 工具目录", error);
+    } finally {
+        catalogLoading.value = false;
+    }
+}
+async function refreshConnection(name: string) {
+    connectionState.value = { ...connectionState.value, [name]: "testing" };
+    connectionError.value = { ...connectionError.value, [name]: "" };
+    try {
+        await invoke("refresh_mcp_plugin_connection", { name });
+        connectionState.value = { ...connectionState.value, [name]: "ready" };
+        await loadMcpCatalog();
+    } catch (error) {
+        connectionState.value = { ...connectionState.value, [name]: "error" };
+        connectionError.value = { ...connectionError.value, [name]: String(error) };
+    }
+}
+watch(() => props.open, (open) => {
+    if (open) void loadMcpCatalog();
+}, { immediate: true });
 const groupedModels = computed(() => {
     const groups = new Map<string, AgentModelOption[]>();
     for (const model of props.allModels) {
@@ -118,4 +182,25 @@ function updateRoute(key: "pro" | "flash" | "vision", event: Event) {
 .preset-list button:disabled { cursor: not-allowed; opacity: .5; }
 .preset-list strong { color: var(--chat-text-soft); font-size: 12px; }
 .preset-list span { overflow: hidden; color: var(--chat-text-faint); font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-connection-section { display: grid; gap: 10px; }
+.section-description { margin: -4px 0 1px; color: var(--chat-text-faint); font-size: 11px; line-height: 1.55; }
+.mcp-connection-list { display: grid; gap: 7px; }
+.mcp-connection-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; padding: 9px; border: 1px solid var(--chat-line); border-radius: 9px; background: var(--chat-tool-bg); }
+.mcp-connection-main { display: flex; min-width: 0; align-items: flex-start; gap: 8px; }
+.mcp-connection-main > div { display: grid; min-width: 0; gap: 3px; }
+.mcp-connection-main strong { overflow: hidden; color: var(--chat-text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-connection-main small { color: var(--chat-text-faint); font-size: 10px; }
+.mcp-status-dot { width: 7px; height: 7px; margin-top: 4px; flex: 0 0 auto; border-radius: 50%; background: #6f7785; }
+.mcp-status-dot.ready { background: #61c096; box-shadow: 0 0 0 3px rgba(97,192,150,.12); }
+.mcp-status-dot.testing { background: var(--chat-accent); animation: mcp-pulse 1.05s ease-in-out infinite; }
+.mcp-status-dot.error { background: #df7b80; }
+.mcp-refresh,.manage-mcp { border: 1px solid var(--chat-line-strong); border-radius: 7px; color: var(--chat-text-soft); cursor: pointer; background: #0d1420; font: 600 10px inherit; }
+.mcp-refresh { align-self: start; padding: 6px 7px; }
+.mcp-refresh:hover:not(:disabled),.manage-mcp:hover { border-color: var(--chat-accent); color: var(--chat-text); background: var(--chat-hover); }
+.mcp-refresh:disabled { cursor: wait; opacity: .65; }
+.mcp-error { grid-column: 1 / -1; margin: 0; color: #df8b91; font-size: 10px; line-height: 1.45; word-break: break-word; }
+.mcp-empty { padding: 9px; border: 1px dashed var(--chat-line-strong); border-radius: 8px; color: var(--chat-text-faint); font-size: 11px; }
+.manage-mcp { width: 100%; padding: 8px; }
+@keyframes mcp-pulse { 50% { opacity: .35; transform: scale(.82); } }
+
 </style>

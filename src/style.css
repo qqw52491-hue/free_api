@@ -466,6 +466,70 @@ body {
   color: var(--text-2);
   font-size: 13px;
 }
+
+/* ---- Code Block Wrapper & Syntax Highlighting ---- */
+.code-block-wrapper {
+  margin: 14px 0;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-2);
+  background: #090d16;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+}
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 14px;
+  background: #131724;
+  border-bottom: 1px solid var(--border-1);
+}
+.code-lang-label {
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-weight: 700;
+  color: var(--text-3);
+  text-transform: lowercase;
+}
+.code-copy-btn {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.code-copy-btn:hover {
+  background: var(--surface-3);
+  color: var(--text-1);
+}
+.code-block-wrapper pre {
+  margin: 0 !important;
+  padding: 14px !important;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+}
+.code-block-wrapper code {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* Syntax Tokens */
+.hljs-keyword, .hljs-built_in, .hljs-selector-tag { color: #ff7b72; font-weight: 600; }
+.hljs-string, .hljs-regexp, .hljs-addition { color: #a5d6ff; }
+.hljs-comment, .hljs-quote { color: #8b949e; font-style: italic; }
+.hljs-function, .hljs-title, .hljs-section { color: #d2a8ff; font-weight: 600; }
+.hljs-number, .hljs-literal { color: #79c0ff; }
+.hljs-attr, .hljs-attribute, .hljs-variable { color: #79c0ff; }
+.hljs-tag, .hljs-name { color: #7ee787; }
+.hljs-deletion { color: #ffa198; background: rgba(255,129,130,0.15); }
 .md-content ul, .md-content ol {
   margin: 10px 0;
   padding-left: 22px;

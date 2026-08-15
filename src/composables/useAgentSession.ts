@@ -2,19 +2,19 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentTaskResources } from "./useAgentTaskResources";
+import { usePersistedAgentConversation } from "./usePersistedAgentConversation";
 import {
     AGENT_RUN_STATE_CATALOG,
-    type AgentDetailSection,
+    type AgentLogEntry,
+    type AgentModelOption,
     type AgentRunState,
-    type AgentTimelineItem,
-    type AgentTimelineKind,
+    type AgentStepItem,
     type AgentTokenUsage,
-    type AgentToolCall,
     type AgentToolStatus,
 } from "../components/agent/types";
-import { asRecord, numberOrUndefined, shortText, toText, toTimestamp } from "../components/agent/format";
+import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
 
-const MAX_TIMELINE_ITEMS = 160;
+const MAX_LOGS = 600;
 
 function normalizeState(value: unknown): AgentRunState {
     const normalized = String(value || "")
@@ -40,15 +40,6 @@ function normalizeState(value: unknown): AgentRunState {
         canceled: "cancelled",
     };
     return aliases[normalized] || "executing";
-}
-
-function stateTimelineKind(state: AgentRunState): AgentTimelineKind {
-    if (state === "recovering") return "recovery";
-    if (state === "failed" || state === "cancelled") return "error";
-    if (state === "succeeded") return "success";
-    if (state === "waiting_for_human") return "human";
-    if (state === "planning") return "planning";
-    return "system";
 }
 
 function sourceFrom(route: unknown, name: string): "内部" | "MCP" {
@@ -84,14 +75,28 @@ export function useAgentSession(sessionId: string) {
     const stopRequested = ref(false);
     const elapsedSeconds = ref(0);
     const runStartedAt = ref<number | null>(null);
-    const timeline = ref<AgentTimelineItem[]>([]);
-    const selectedTimelineId = ref<string | null>(null);
+
+    // 结构化对话状态（解决反复添加和闪烁的关键数据结构）
+    const steps = ref<AgentStepItem[]>([]);
+    const selectedStepId = ref<string | null>(null);
+    const thought = ref("");
+    const isThinking = ref(false);
+    const thinkingCollapsed = ref(false);
+    const thinkingStartTime = ref<number | null>(null);
+    const thinkingDurationMs = ref(0);
+    const logs = ref<AgentLogEntry[]>([]);
+    const humanInterventions = ref<Array<{ message: string; timestamp: number }>>([]);
+
     const tokenUsage = ref<AgentTokenUsage | null>(null);
     const completionMessage = ref("");
+    const { conversationMessages, isConversationLoading, loadConversation } = usePersistedAgentConversation(
+        sessionId,
+        (message) => appendLog(`[会话历史加载失败] ${message}`),
+    );
     const finishOutput = ref<Record<string, unknown> | null>(null);
     const hasError = ref(false);
-    const activeToolItems = new Map<string, string>();
-    const timelineElement = ref<HTMLElement | null>(null);
+    const scrollContainerElement = ref<HTMLElement | null>(null);
+
     const {
         resources,
         isResourcesLoading,
@@ -110,9 +115,10 @@ export function useAgentSession(sessionId: string) {
         clearResources,
         disposeResources,
     } = useAgentTaskResources(sessionId);
+
     let elapsedTimer: ReturnType<typeof setInterval> | null = null;
     let unlisteners: UnlistenFn[] = [];
-    let timelineSequence = 0;
+    let logSequence = 0;
 
     const stateMeta = computed(() => AGENT_RUN_STATE_CATALOG[runState.value]);
     const isWaitingForHuman = computed(() => runState.value === "waiting_for_human");
@@ -121,16 +127,10 @@ export function useAgentSession(sessionId: string) {
         const seconds = elapsedSeconds.value % 60;
         return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
     });
-    const canStart = computed(() => Boolean(
-        !isRunning.value
-        && goalInput.value.trim()
-        && modelRouting.value.pro
-        && modelRouting.value.flash
-        && modelRouting.value.vision,
-    ));
-    const selectedTimelineItem = computed(() => timeline.value.find((item) => item.id === selectedTimelineId.value) || null);
-    const completedToolCount = computed(() => timeline.value.filter((item) => item.tool?.status === "succeeded").length);
-    const failedToolCount = computed(() => timeline.value.filter((item) => item.tool?.status === "failed").length);
+    const canStart = computed(() => Boolean(!isRunning.value && goalInput.value.trim()));
+    const selectedStep = computed(() => steps.value.find((item) => item.id === selectedStepId.value) || null);
+    const completedToolCount = computed(() => steps.value.filter((item) => item.status === "succeeded").length);
+    const failedToolCount = computed(() => steps.value.filter((item) => item.status === "failed").length);
     const finalSummary = computed(() => {
         const output = finishOutput.value || {};
         return toText(output.summary || output.message || output.result || output.content || "");
@@ -141,8 +141,39 @@ export function useAgentSession(sessionId: string) {
         return candidates.flatMap((candidate) => Array.isArray(candidate) ? candidate.map((value) => toText(value)).filter(Boolean) : []);
     });
 
-    function setTimelineElement(element: HTMLElement | null) {
-        timelineElement.value = element;
+    function setScrollElement(element: HTMLElement | null) {
+        scrollContainerElement.value = element;
+    }
+
+    function autoScrollToBottom(smooth = true) {
+        nextTick(() => {
+            const el = scrollContainerElement.value;
+            if (el) {
+                el.scrollTo({
+                    top: el.scrollHeight,
+                    behavior: smooth ? "smooth" : "auto",
+                });
+            }
+        });
+    }
+
+    function ensureModelRouting(availableModels: AgentModelOption[]) {
+        if (!availableModels || availableModels.length === 0) return;
+        const first = availableModels[0]?.id || "";
+        const findModel = (predicate: (m: AgentModelOption) => boolean) => {
+            const found = availableModels.find(predicate);
+            return found ? found.id : first;
+        };
+
+        if (!modelRouting.value.pro) {
+            modelRouting.value.pro = findModel(m => /pro|opus|claude-3-5|gpt-4o|deepseek/i.test(`${m.display_name} ${m.name}`));
+        }
+        if (!modelRouting.value.flash) {
+            modelRouting.value.flash = findModel(m => /flash|mini|haiku|speed|turbo/i.test(`${m.display_name} ${m.name}`));
+        }
+        if (!modelRouting.value.vision) {
+            modelRouting.value.vision = findModel(m => /vision|vl|multimodal|gpt-4o/i.test(`${m.display_name} ${m.name}`));
+        }
     }
 
     function setRunState(nextState: AgentRunState, description?: string) {
@@ -152,13 +183,22 @@ export function useAgentSession(sessionId: string) {
         if (terminal) {
             isRunning.value = false;
             stopElapsedTimer();
+            if (isThinking.value) {
+                isThinking.value = false;
+                thinkingCollapsed.value = true;
+            }
         }
     }
 
     function startElapsedTimer() {
         stopElapsedTimer();
         elapsedTimer = setInterval(() => {
-            if (runStartedAt.value) elapsedSeconds.value = Math.max(0, Math.floor((Date.now() - runStartedAt.value) / 1000));
+            if (runStartedAt.value) {
+                elapsedSeconds.value = Math.max(0, Math.floor((Date.now() - runStartedAt.value) / 1000));
+            }
+            if (isThinking.value && thinkingStartTime.value) {
+                thinkingDurationMs.value = Date.now() - thinkingStartTime.value;
+            }
         }, 1000);
     }
 
@@ -167,77 +207,53 @@ export function useAgentSession(sessionId: string) {
         elapsedTimer = null;
     }
 
-    function addTimeline(item: Omit<AgentTimelineItem, "id" | "timestamp"> & Partial<Pick<AgentTimelineItem, "id" | "timestamp">>) {
-        const next: AgentTimelineItem = {
-            id: item.id || `timeline-${Date.now()}-${timelineSequence++}`,
-            timestamp: item.timestamp || Date.now(),
-            kind: item.kind,
-            title: item.title,
-            detail: item.detail,
-            status: item.status,
-            tool: item.tool,
-        };
-        timeline.value.push(next);
-        if (timeline.value.length > MAX_TIMELINE_ITEMS) timeline.value.splice(0, timeline.value.length - MAX_TIMELINE_ITEMS);
-        if (!selectedTimelineId.value && next.tool) selectedTimelineId.value = next.id;
-        nextTick(() => timelineElement.value?.scrollTo({ top: timelineElement.value.scrollHeight, behavior: "smooth" }));
-        return next.id;
-    }
+    function appendLog(rawMessage: unknown) {
+        const message = toText(typeof rawMessage === "string" ? rawMessage : asRecord(rawMessage).message || rawMessage);
+        if (!message) return;
+        let level: AgentLogEntry["level"] = "info";
+        const lower = message.toLowerCase();
+        if (/error|failed|失败|错误|exception/.test(lower)) level = "error";
+        else if (/warn|警告|retry|重试|熔断/.test(lower)) level = "warn";
+        else if (/\[网关\]|route|路由/.test(lower)) level = "route";
+        else if (/🧠|思考|反思/.test(lower)) level = "thought";
 
-    function updateTimeline(id: string, patch: Partial<AgentTimelineItem>) {
-        const index = timeline.value.findIndex((item) => item.id === id);
-        if (index < 0) return;
-        const previous = timeline.value[index];
-        timeline.value[index] = {
-            ...previous,
-            ...patch,
-            tool: patch.tool ? { ...previous.tool, ...patch.tool } : previous.tool,
-        };
-    }
-
-    function upsertTool(key: string, tool: AgentToolCall, detail: string, timestamp?: number) {
-        const existingId = activeToolItems.get(key);
-        const status = tool.status === "succeeded" ? "succeeded" : tool.status === "failed" ? "failed" : "running";
-        if (existingId) {
-            updateTimeline(existingId, { tool, detail, status, timestamp: timestamp || Date.now() });
-            selectedTimelineId.value = existingId;
-            return existingId;
-        }
-        const id = addTimeline({
-            kind: "tool",
-            title: tool.name,
-            detail,
-            tool,
-            status,
-            timestamp,
+        logs.value.push({
+            id: `log-${Date.now()}-${logSequence++}`,
+            message,
+            level,
+            timestamp: Date.now(),
         });
-        activeToolItems.set(key, id);
-        selectedTimelineId.value = id;
-        return id;
+        if (logs.value.length > MAX_LOGS) {
+            logs.value.splice(0, logs.value.length - MAX_LOGS);
+        }
     }
 
     function handleRunState(payload: Record<string, unknown>) {
         const state = normalizeState(payload.state);
         const message = toText(payload.message || payload.description);
         setRunState(state, message || undefined);
-        if (state === "waiting_for_human") pauseReason.value = message || AGENT_RUN_STATE_CATALOG.waiting_for_human.description;
-        if (state !== "waiting_for_human") pauseReason.value = "";
-        if (state === "failed" || state === "cancelled") hasError.value = state === "failed";
-        if (message || state !== "executing") {
-            addTimeline({
-                kind: stateTimelineKind(state),
-                title: AGENT_RUN_STATE_CATALOG[state].label,
-                detail: message || AGENT_RUN_STATE_CATALOG[state].description,
-                status: state === "succeeded" ? "succeeded" : state === "failed" || state === "cancelled" ? "failed" : undefined,
-                timestamp: toTimestamp(payload.timestamp),
-            });
+        if (state === "waiting_for_human") {
+            pauseReason.value = message || AGENT_RUN_STATE_CATALOG.waiting_for_human.description;
+        } else {
+            pauseReason.value = "";
         }
+        if (state === "failed" || state === "cancelled") {
+            hasError.value = state === "failed";
+        }
+        appendLog(`[状态变更] ${AGENT_RUN_STATE_CATALOG[state].label}${message ? `: ${message}` : ""}`);
     }
 
     function handleToolEvent(payload: Record<string, unknown>) {
         const eventType = String(payload.event_type || payload.type || "started").toLowerCase();
-        const name = toText(payload.tool || payload.name) || "未命名工具";
+        const stepId = numberOrUndefined(payload.step_id) ?? 0;
+        const name = toText(payload.tool || payload.name) || "内置工具";
         const action = toText(payload.action || payload.operation) || "执行操作";
+        const durationMs = numberOrUndefined(payload.duration_ms);
+        const params = payload.params_summary ?? payload.params;
+        const result = payload.result_summary ?? payload.result;
+        const rawParams = payload.params ?? payload.params_summary;
+        const rawResult = payload.result ?? payload.result_summary;
+
         const status: AgentToolStatus = eventType === "succeeded" || payload.success === true
             ? "succeeded"
             : eventType === "failed" || payload.success === false
@@ -245,22 +261,50 @@ export function useAgentSession(sessionId: string) {
                 : eventType === "pending"
                     ? "pending"
                     : "running";
-        const result = payload.result ?? payload.result_summary;
-        upsertTool(`${name}:${action}`, {
-            name,
-            action,
-            source: sourceFrom(payload.route, name),
-            status,
-            durationMs: numberOrUndefined(payload.duration_ms),
-            params: payload.params_summary ?? payload.params,
-            result,
-            rawParams: payload.params ?? payload.params_summary,
-            rawResult: payload.result ?? payload.result_summary,
-        }, shortText(toText(result || payload.params_summary || (status === "running" ? "工具调用已开始。" : "工具事件已更新。")), 280), toTimestamp(payload.timestamp));
+
+        // 原地查找或更新 step
+        const existingIdx = steps.value.findIndex(s => s.stepId === stepId);
+        if (existingIdx >= 0) {
+            const current = steps.value[existingIdx];
+            steps.value[existingIdx] = {
+                ...current,
+                tool: name || current.tool,
+                action: action || current.action,
+                source: sourceFrom(payload.route, name),
+                status,
+                durationMs: durationMs ?? current.durationMs,
+                params: params !== undefined ? params : current.params,
+                result: result !== undefined ? result : current.result,
+                rawParams: rawParams !== undefined ? rawParams : current.rawParams,
+                rawResult: rawResult !== undefined ? rawResult : current.rawResult,
+            };
+        } else {
+            const newStep: AgentStepItem = {
+                id: `step-${stepId}`,
+                stepId,
+                description: toText(payload.description) || `${name}: ${action}`,
+                tool: name,
+                action,
+                source: sourceFrom(payload.route, name),
+                status,
+                durationMs,
+                params,
+                result,
+                rawParams,
+                rawResult,
+                timestamp: toTimestamp(payload.timestamp),
+            };
+            steps.value.push(newStep);
+            if (!selectedStepId.value) {
+                selectedStepId.value = newStep.id;
+            }
+        }
+
+        appendLog(`[工具执行] ${name}/${action} (${status})${durationMs ? ` ${durationMs}ms` : ""}`);
     }
 
     function completeRun(payload: Record<string, unknown>, succeeded: boolean) {
-        const message = toText(payload.message) || (succeeded ? "任务已完成。" : "任务未能完成。");
+        const message = toText(payload.message) || (succeeded ? "任务已全部完成。" : "任务未能顺利完成。");
         completionMessage.value = message;
         hasError.value = !succeeded;
         const finish = asRecord(payload.finish);
@@ -277,60 +321,146 @@ export function useAgentSession(sessionId: string) {
         }
         scheduleResourceRefresh();
         setRunState(succeeded ? "succeeded" : "failed", message);
-        addTimeline({
-            kind: succeeded ? "success" : "error",
-            title: succeeded ? "任务已完成" : "任务结束：失败",
-            detail: message,
-            status: succeeded ? "succeeded" : "failed",
-            timestamp: toTimestamp(payload.timestamp),
-        });
+        appendLog(`[任务结束] ${succeeded ? "✅ 成功" : "❌ 失败"}: ${message}`);
+        autoScrollToBottom();
     }
 
     function handleProgress(payload: Record<string, unknown>) {
         const usage = normalizeUsage(payload);
         if (usage) tokenUsage.value = usage;
+
         const eventType = String(payload.event_type || payload.type || payload.stage || "").toLowerCase();
+
+        // 思考事件
+        if (eventType === "thinking") {
+            const content = toText(payload.content);
+            const done = payload.done === true;
+            if (content) {
+                thought.value = content;
+            }
+            if (done) {
+                isThinking.value = false;
+                thinkingCollapsed.value = true;
+                if (thinkingStartTime.value) {
+                    thinkingDurationMs.value = Date.now() - thinkingStartTime.value;
+                }
+            } else {
+                if (!isThinking.value) {
+                    isThinking.value = true;
+                    thinkingStartTime.value = Date.now();
+                    thinkingCollapsed.value = false;
+                }
+            }
+            return;
+        }
+
+        // 工具事件直接走专用 handler
         if (eventType.includes("tool")) {
             handleToolEvent(payload);
             return;
         }
+
+        // 任务完成
         if (eventType.includes("finish") || eventType.includes("complete") || eventType.includes("success")) {
             completeRun(payload, true);
             return;
         }
+
+        // 任务失败
         if (eventType.includes("fail") || eventType.includes("error")) {
             completeRun(payload, false);
             return;
         }
+
+        // 新规划步骤 step_new
+        if (eventType === "step_new") {
+            const rawStep = asRecord(payload.step);
+            const stepId = numberOrUndefined(rawStep.id) ?? steps.value.length;
+            const description = toText(rawStep.description) || "执行新步骤";
+            const tool = toText(rawStep.tool) || "action";
+            const command = rawStep.command;
+            const thoughtText = toText(rawStep.thought);
+            const reflection = toText(rawStep.reflection);
+
+            const existingIdx = steps.value.findIndex(s => s.stepId === stepId);
+            const stepItem: AgentStepItem = {
+                id: `step-${stepId}`,
+                stepId,
+                description,
+                reflection,
+                thought: thoughtText,
+                tool,
+                action: tool,
+                source: sourceFrom("", tool),
+                status: "pending",
+                params: command,
+                rawParams: command,
+                timestamp: Date.now(),
+            };
+
+            if (existingIdx >= 0) {
+                steps.value[existingIdx] = { ...steps.value[existingIdx], ...stepItem };
+            } else {
+                steps.value.push(stepItem);
+            }
+            if (!selectedStepId.value) {
+                selectedStepId.value = stepItem.id;
+            }
+            appendLog(`[规划新步骤 #${stepId + 1}] ${description}`);
+            autoScrollToBottom();
+            return;
+        }
+
+        // 步骤开始 step_start
+        if (eventType === "step_start") {
+            const stepId = numberOrUndefined(payload.step_id) ?? 0;
+            const existing = steps.value.find(s => s.stepId === stepId);
+            if (existing) {
+                existing.status = "running";
+                if (payload.description) existing.description = toText(payload.description);
+            }
+            appendLog(`[步骤开始 #${stepId + 1}] ${existing?.description || ""}`);
+            return;
+        }
+
+        // 步骤完成 step_done
+        if (eventType === "step_done") {
+            const stepId = numberOrUndefined(payload.step_id) ?? 0;
+            const existing = steps.value.find(s => s.stepId === stepId);
+            if (existing) {
+                existing.status = "succeeded";
+                if (payload.output) {
+                    existing.result = payload.output;
+                    existing.rawResult = payload.output;
+                }
+            }
+            appendLog(`[步骤完成 #${stepId + 1}] ${existing?.description || ""}`);
+            autoScrollToBottom();
+            return;
+        }
+
+        // 步骤异常 step_error
+        if (eventType === "step_error") {
+            const stepId = numberOrUndefined(payload.step_id) ?? 0;
+            const existing = steps.value.find(s => s.stepId === stepId);
+            if (existing) {
+                existing.status = "failed";
+                if (payload.output) {
+                    existing.result = payload.output;
+                    existing.rawResult = payload.output;
+                }
+            }
+            appendLog(`[步骤失败 #${stepId + 1}] ${existing?.description || ""}`);
+            autoScrollToBottom();
+            return;
+        }
+
         const state = payload.state ? normalizeState(payload.state) : undefined;
         if (state) setRunState(state, toText(payload.message || payload.description) || undefined);
-        const message = toText(payload.message || payload.detail || payload.content || payload.summary);
-        if (!message) return;
-        const kind: AgentTimelineKind = /plan|think|分析|规划/.test(eventType) ? "planning" : "system";
-        addTimeline({
-            kind,
-            title: kind === "planning" ? "Agent 正在规划" : "运行进度",
-            detail: shortText(message, 420),
-            timestamp: toTimestamp(payload.timestamp),
-        });
     }
 
     function handleLog(payload: unknown) {
-        const data = asRecord(payload);
-        const message = toText(typeof payload === "string" ? payload : data.message || data.log || data.content || payload);
-        if (!message) return;
-        const lower = message.toLowerCase();
-        const kind: AgentTimelineKind = /error|failed|失败|错误/.test(lower)
-            ? "error"
-            : /recover|retry|重试|恢复/.test(lower)
-                ? "recovery"
-                : "system";
-        addTimeline({
-            kind,
-            title: kind === "error" ? "运行日志：异常" : kind === "recovery" ? "运行日志：恢复" : "运行日志",
-            detail: shortText(message, 280),
-            timestamp: toTimestamp(data.timestamp),
-        });
+        appendLog(payload);
     }
 
     function handleContext(payload: unknown) {
@@ -340,19 +470,21 @@ export function useAgentSession(sessionId: string) {
         const nextResources = mergeContextResources(candidates);
         if (nextResources.length) scheduleResourceRefresh();
         const summary = toText(data.summary || data.message || asRecord(data.context).summary);
-        if (summary || nextResources.length) {
-            addTimeline({
-                kind: "system",
-                title: "任务上下文已更新",
-                detail: shortText(summary || `已更新 ${nextResources.length} 个资源。`, 280),
-                timestamp: toTimestamp(data.timestamp),
-            });
+        if (summary) {
+            appendLog(`[上下文更新] ${summary}`);
         }
     }
 
     function clearSession() {
-        timeline.value = [];
-        selectedTimelineId.value = null;
+        steps.value = [];
+        selectedStepId.value = null;
+        thought.value = "";
+        isThinking.value = false;
+        thinkingCollapsed.value = false;
+        thinkingStartTime.value = null;
+        thinkingDurationMs.value = 0;
+        logs.value = [];
+        humanInterventions.value = [];
         clearResources();
         tokenUsage.value = null;
         completionMessage.value = "";
@@ -364,7 +496,6 @@ export function useAgentSession(sessionId: string) {
         stopRequested.value = false;
         elapsedSeconds.value = 0;
         runStartedAt.value = null;
-        activeToolItems.clear();
         setRunState("idle");
     }
 
@@ -372,11 +503,13 @@ export function useAgentSession(sessionId: string) {
         if (!canStart.value) return;
         clearSession();
         currentGoal.value = goalInput.value.trim();
+        goalInput.value = "";
         runStartedAt.value = Date.now();
         isRunning.value = true;
         setRunState("preparing", "正在建立任务会话并加载模型路由。");
         startElapsedTimer();
-        addTimeline({ kind: "human", title: "你发起了一个任务", detail: shortText(currentGoal.value, 420) });
+        autoScrollToBottom();
+
         try {
             await invoke("run_agent_main_loop", {
                 modelRouting: modelRouting.value,
@@ -390,20 +523,22 @@ export function useAgentSession(sessionId: string) {
             completionMessage.value = message;
             hasError.value = true;
             setRunState("failed", message);
-            addTimeline({ kind: "error", title: "启动失败", detail: message, status: "failed" });
+            appendLog(`[启动异常] ${message}`);
+        } finally {
+            // 主循环返回时，本轮最终摘要已由后端写入 chat_messages；刷新长期会话即可继续对话。
+            void loadConversation();
         }
     }
-
     async function requestStop() {
         if (!isRunning.value || stopRequested.value) return;
         stopRequested.value = true;
         const message = "用户请求停止当前任务。请立即停止后续工具调用，简要整理当前已完成的工作并结束任务。";
         try {
             await invoke("send_human_intervention", { sessionId, message });
-            addTimeline({ kind: "human", title: "已发送停止请求", detail: "停止请求已作为高优先级人工指令提交，等待 Agent 确认。" });
+            appendLog("[人工干预] 已发送立即停止指令。");
         } catch (error) {
             stopRequested.value = false;
-            addTimeline({ kind: "error", title: "停止请求发送失败", detail: toText(error) || "无法发送停止请求。", status: "failed" });
+            appendLog(`[停止指令失败] ${toText(error)}`);
         }
     }
 
@@ -413,33 +548,33 @@ export function useAgentSession(sessionId: string) {
         isSendingHuman.value = true;
         try {
             await invoke("send_human_intervention", { sessionId, message });
-            addTimeline({ kind: "human", title: "你补充了说明", detail: shortText(message, 420) });
+            humanInterventions.value.push({ message, timestamp: Date.now() });
             humanInput.value = "";
             pauseReason.value = "";
-            if (isWaitingForHuman.value) setRunState("executing", "已发送人工输入，等待 Agent 继续执行。");
+            appendLog(`[用户补充] ${message}`);
+            if (isWaitingForHuman.value) {
+                setRunState("executing", "已发送人工输入，等待 Agent 继续执行。");
+            }
+            autoScrollToBottom();
         } catch (error) {
-            addTimeline({ kind: "error", title: "人工输入发送失败", detail: toText(error) || "无法将输入发送给 Agent。", status: "failed" });
+            appendLog(`[人工输入失败] ${toText(error)}`);
         } finally {
             isSendingHuman.value = false;
         }
     }
 
-    function selectTimelineItem(id: string) {
-        selectedTimelineId.value = id;
-    }
-
-    function detailSectionAvailable(item: AgentTimelineItem | null, section: AgentDetailSection) {
-        if (!item?.tool) return false;
-        return section === "params" ? item.tool.rawParams !== undefined : item.tool.rawResult !== undefined;
+    function selectStep(id: string) {
+        selectedStepId.value = id;
     }
 
     onMounted(async () => {
+        void loadConversation();
         void refreshResources();
         const register = async (channel: string, handler: (payload: unknown) => void) => {
             try {
                 unlisteners.push(await listen<unknown>(channel, (event) => handler(event.payload)));
             } catch (error) {
-                addTimeline({ kind: "error", title: "事件监听不可用", detail: `${channel}：${toText(error) || "无法注册监听。"}`, status: "failed" });
+                appendLog(`[监听失败] ${channel}: ${toText(error)}`);
             }
         };
         await register(`agent-run-state-${sessionId}`, (payload) => handleRunState(asRecord(payload)));
@@ -470,11 +605,19 @@ export function useAgentSession(sessionId: string) {
         stopRequested,
         elapsedSeconds,
         elapsedLabel,
-        timeline,
-        selectedTimelineId,
-        selectedTimelineItem,
+        steps,
+        selectedStepId,
+        selectedStep,
+        thought,
+        isThinking,
+        thinkingCollapsed,
+        thinkingDurationMs,
+        logs,
+        humanInterventions,
         tokenUsage,
         completionMessage,
+        conversationMessages,
+        isConversationLoading,
         hasError,
         stateMeta,
         isWaitingForHuman,
@@ -490,13 +633,14 @@ export function useAgentSession(sessionId: string) {
         isRecordsLoading,
         recordLoadError,
         recordPage,
-        setTimelineElement,
+        setScrollElement,
+        ensureModelRouting,
         runAgent,
         requestStop,
         sendHumanInput,
         clearSession,
-        selectTimelineItem,
-        detailSectionAvailable,
+        loadConversation,
+        selectStep,
         refreshResources,
         openResourcePreview,
         closeResourcePreview,

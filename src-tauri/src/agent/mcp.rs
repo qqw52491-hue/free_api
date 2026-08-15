@@ -147,6 +147,8 @@ impl McpClient {
             self._child = new_client._child;
             self.stdin = new_client.stdin;
             self.stdout = new_client.stdout;
+            crate::agent::mcp_catalog::invalidate_plugin(&self.config.name);
+            let _ = self.initialize();
         }
         Ok(())
     }
@@ -175,7 +177,7 @@ impl McpClient {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let defs = tools
+        let defs: Vec<McpToolDef> = tools
             .into_iter()
             .filter_map(|t| {
                 let name = t.get("name")?.as_str()?.to_string();
@@ -192,6 +194,7 @@ impl McpClient {
                 })
             })
             .collect();
+        crate::agent::mcp_catalog::remember_tools(&self.config, &defs);
         Ok(defs)
     }
 }
@@ -252,10 +255,11 @@ impl PluginRegistry {
     pub fn list_all_tools(&mut self) -> Vec<(String, McpToolDef)> {
         let mut result = Vec::new();
         for (plugin_name, client) in &mut self.clients {
-            if let Ok(tools) = client.list_tools() {
-                for tool in tools {
-                    result.push((plugin_name.clone(), tool));
-                }
+            let tools = crate::agent::mcp_catalog::cached_tools(&client.config)
+                .or_else(|| client.list_tools().ok())
+                .unwrap_or_default();
+            for tool in tools {
+                result.push((plugin_name.clone(), tool));
             }
         }
         result
@@ -267,12 +271,19 @@ impl PluginRegistry {
         lines
             .push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\")".to_string());
 
+        let mut catalogs = Vec::new();
         for (name, client) in &mut self.clients {
-            if let Ok(tools) = client.list_tools() {
-                let tool_names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
-                lines.push(format!("- {}: [{}]", name, tool_names.join(", ")));
-            }
+            let tools = crate::agent::mcp_catalog::cached_tools(&client.config)
+                .or_else(|| client.list_tools().ok())
+                .unwrap_or_default();
+            catalogs.push((name.clone(), tools));
         }
+        lines.extend(
+            crate::agent::mcp_catalog::concise_menu(catalogs)
+                .trim_start_matches("\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）")
+                .lines()
+                .map(str::to_string),
+        );
 
         lines
             .push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}".to_string());

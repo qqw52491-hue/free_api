@@ -1,4 +1,5 @@
-use crate::agent::mcp::PluginConfig;
+use crate::agent::mcp::{McpClient, PluginConfig};
+use crate::agent::mcp_catalog::{invalidate_plugin, status as catalog_status, McpCatalogStatus};
 use crate::agent::task_store;
 use crate::db::{ChatMessage, ChatSession, DbState, Model, Platform};
 use crate::llm::{self, ModelConfig, StreamEvent};
@@ -104,6 +105,48 @@ pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginR
     Ok(list)
 }
 
+fn enabled_mcp_config(db: &DbState, name: &str) -> Result<PluginConfig, String> {
+    load_managed_mcp_plugins(db)?
+        .into_iter()
+        .find(|plugin| plugin.enabled && plugin.config.name == name)
+        .map(|plugin| plugin.config)
+        .ok_or_else(|| format!("未找到已启用的 MCP 插件: {}", name))
+}
+
+#[tauri::command]
+pub async fn get_mcp_tool_catalog(
+    state: State<'_, DbState>,
+    name: Option<String>,
+) -> Result<Vec<McpCatalogStatus>, String> {
+    Ok(load_managed_mcp_plugins(state.inner())?
+        .into_iter()
+        .filter(|plugin| plugin.enabled)
+        .filter(|plugin| name.as_ref().map(|target| target == &plugin.config.name).unwrap_or(true))
+        .map(|plugin| catalog_status(&plugin.config))
+        .collect())
+}
+
+/// 显式验证 MCP stdio 连接并强制重新发现工具。成功后目录缓存立即更新，
+/// 下一次 Agent 运行会使用摘要菜单而非重复读取全部 schema。
+#[tauri::command]
+pub async fn refresh_mcp_plugin_connection(
+    state: State<'_, DbState>,
+    name: String,
+) -> Result<McpCatalogStatus, String> {
+    let config = enabled_mcp_config(state.inner(), &name)?;
+    invalidate_plugin(&name);
+    let mut client = McpClient::spawn(config.clone())?;
+    client.initialize()?;
+    let tools = client.list_tools()?;
+    Ok(McpCatalogStatus {
+        name,
+        tool_count: tools.len(),
+        tools,
+        cached: false,
+        refreshed_at_ms: Some(Utc::now().timestamp_millis() as u128),
+    })
+}
+
 #[tauri::command]
 pub async fn save_mcp_plugin(
     state: State<'_, DbState>,
@@ -139,6 +182,7 @@ pub async fn save_mcp_plugin(
     };
     let yaml = serde_yaml::to_string(&config).unwrap_or_default();
     let _ = std::fs::write(plugins_dir.join(format!("{}.local.yaml", name)), yaml);
+    invalidate_plugin(&name);
 
     Ok(McpPluginRow {
         id,
@@ -154,7 +198,7 @@ pub async fn save_mcp_plugin(
 #[tauri::command]
 pub async fn delete_mcp_plugin(state: State<'_, DbState>, name: String) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM mcp_plugins WHERE name=?1", params![name])
+    conn.execute("DELETE FROM mcp_plugins WHERE name=?1", params![&name])
         .map_err(|e| e.to_string())?;
 
     // 仅删 UI 写入的本地配置；项目自带 YAML 不由 UI 删除。
@@ -164,6 +208,7 @@ pub async fn delete_mcp_plugin(state: State<'_, DbState>, name: String) -> Resul
         let _ = std::fs::remove_file(yaml_path);
     }
 
+    invalidate_plugin(&name);
     Ok(())
 }
 
@@ -176,9 +221,10 @@ pub async fn toggle_mcp_plugin(
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE mcp_plugins SET enabled=?1 WHERE name=?2",
-        params![enabled as i64, name],
+        params![enabled as i64, &name],
     )
     .map_err(|e| e.to_string())?;
+    invalidate_plugin(&name);
     Ok(())
 }
 

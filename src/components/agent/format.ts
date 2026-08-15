@@ -1,3 +1,6 @@
+import { marked } from "marked";
+import hljs from "highlight.js";
+
 export function asRecord(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -55,20 +58,72 @@ export function formatDuration(seconds: number): string {
 }
 
 export function formatMilliseconds(milliseconds?: number): string {
-    if (!milliseconds || milliseconds <= 0) return "—";
-    if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`;
-    return `${(milliseconds / 1000).toFixed(milliseconds >= 10_000 ? 0 : 1)} s`;
+    if (!milliseconds || milliseconds <= 0) return "";
+    if (milliseconds < 1000) return `${milliseconds}ms`;
+    return `${(milliseconds / 1000).toFixed(1)}s`;
 }
 
 export function formatClock(timestamp: number): string {
-    return new Intl.DateTimeFormat("zh-CN", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-    }).format(new Date(timestamp));
+    const d = new Date(timestamp);
+    const h = String(d.getHours()).padStart(2, "0");
+    const m = String(d.getMinutes()).padStart(2, "0");
+    const s = String(d.getSeconds()).padStart(2, "0");
+    return `${h}:${m}:${s}`;
+}
+
+export function cleanStepTitle(desc: string, tool: string, action: string): string {
+    let t = (desc || "").replace(/\[(?:🧠|⚡|👁️)?\s*(?:Pro|Flash|Vision)\]/gi, "").trim();
+    if (!t) {
+        if (tool === "ask_human" || action === "ask_human") return "请求用户确认与输入";
+        if (tool === "shell" || tool === "bash") return `执行命令: ${action}`;
+        if (tool === "browser") return `浏览器操作: ${action}`;
+        if (tool === "task_store") return `数据存储操作: ${action}`;
+        return action && action !== tool ? `${tool}: ${action}` : tool || "执行步骤";
+    }
+    return t;
+}
+
+export function extractStepModelBadge(desc: string, source: string): string | null {
+    const match = (desc || "").match(/\[((?:🧠|⚡|👁️)?\s*(?:Pro|Flash|Vision))\]/i);
+    if (match) return match[1].trim();
+    if (source && source !== "内置") return source;
+    return null;
 }
 
 export function formatNumber(value?: number): string {
     return new Intl.NumberFormat("zh-CN").format(value || 0);
+}
+
+export function renderMarkdown(content: string): string {
+    if (!content) return "";
+    try {
+        const renderer = new marked.Renderer();
+        renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
+            const validLang = lang && hljs.getLanguage(lang) ? lang : "";
+            let highlighted = "";
+            try {
+                highlighted = validLang
+                    ? hljs.highlight(text, { language: validLang, ignoreIllegals: true }).value
+                    : hljs.highlightAuto(text).value;
+            } catch {
+                highlighted = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            }
+            const langLabel = validLang || "code";
+            return `<div class="code-block-wrapper">
+                <div class="code-block-header">
+                    <span class="code-lang-label">${langLabel}</span>
+                    <button class="code-copy-btn" onclick="navigator.clipboard.writeText(decodeURIComponent('${encodeURIComponent(text)}')).then(()=>{this.innerText='已复制';setTimeout(()=>this.innerText='复制',1800)})">复制</button>
+                </div>
+                <pre><code class="hljs language-${langLabel}">${highlighted}</code></pre>
+            </div>`;
+        };
+
+        return marked.parse(content, {
+            breaks: true,
+            gfm: true,
+            renderer,
+        }) as string;
+    } catch {
+        return content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+    }
 }

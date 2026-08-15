@@ -48,6 +48,60 @@ export interface AgentToolCall {
     rawResult?: unknown;
 }
 
+export interface AgentSubAction {
+    id: string;
+    actionId: number;
+    title: string;
+    explanation?: string;
+    reflection?: string;
+    icon?: string;
+    tool: string;
+    action: string;
+    source: "内部" | "MCP";
+    status: AgentToolStatus;
+    durationMs?: number;
+    params?: unknown;
+    result?: unknown;
+    rawParams?: unknown;
+    rawResult?: unknown;
+    timestamp: number;
+}
+
+export interface AgentMilestoneGoal {
+    id: string;
+    goalId: number;
+    title: string;
+    status: AgentToolStatus;
+    subActions: AgentSubAction[];
+    expanded?: boolean;
+}
+
+export interface AgentStepItem {
+    id: string;
+    stepId: number;
+    description: string;
+    reflection?: string;
+    thought?: string;
+    explanation?: string;
+    tool: string;
+    action: string;
+    source: "内部" | "MCP";
+    status: AgentToolStatus;
+    durationMs?: number;
+    params?: unknown;
+    result?: unknown;
+    rawParams?: unknown;
+    rawResult?: unknown;
+    timestamp: number;
+}
+
+export interface AgentLogEntry {
+    id: string;
+    message: string;
+    level: "info" | "warn" | "error" | "route" | "thought";
+    timestamp: number;
+}
+
 export interface AgentTimelineItem {
     id: string;
     kind: AgentTimelineKind;

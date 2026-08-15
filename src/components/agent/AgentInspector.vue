@@ -1,88 +1,75 @@
 <template>
-    <aside class="agent-inspector" aria-label="Agent 执行详情">
-        <header class="inspector-header">
+    <aside class="manus-inspector" aria-label="执行详情">
+        <header class="inspector-top">
             <div>
-                <span class="inspector-kicker">AGENT SESSION</span>
+                <span>EXECUTION</span>
                 <h2>{{ stateMeta.category }}</h2>
                 <p>{{ statusDescription }}</p>
             </div>
-            <span class="state-chip" :class="`state-${runState}`">{{ stateMeta.label }}</span>
+            <span class="state-badge" :class="`state-${runState}`">{{ stateMeta.label }}</span>
         </header>
 
-        <section class="session-facts">
+        <div class="inspector-metrics">
             <div><span>运行</span><strong>{{ elapsedLabel }}</strong></div>
-            <div><span>工具</span><strong>{{ completedToolCount }}</strong></div>
+            <div><span>完成</span><strong>{{ completedToolCount }}</strong></div>
             <div><span>异常</span><strong :class="{ danger: failedToolCount }">{{ failedToolCount }}</strong></div>
             <div v-if="tokenUsage"><span>上下文</span><strong>{{ tokenUsage.usage_percent.toFixed(1) }}%</strong></div>
-        </section>
+        </div>
 
-        <nav class="inspector-tabs" aria-label="详情分区">
-            <button type="button" :class="{ active: activeTab === 'details' }" @click="activeTab = 'details'">执行详情</button>
-            <button type="button" :class="{ active: activeTab === 'resources' }" @click="activeTab = 'resources'">
-                资源 <span>{{ resources.length }}</span>
-            </button>
+        <nav class="detail-tabs">
+            <button type="button" :class="{ active: activeTab === 'detail' }" @click="activeTab = 'detail'">调用详情</button>
+            <button type="button" :class="{ active: activeTab === 'resources' }" @click="activeTab = 'resources'">资源 <i>{{ resources.length }}</i></button>
         </nav>
 
-        <section v-if="activeTab === 'details'" class="inspector-scroll">
-            <div v-if="!selectedItem" class="inspector-empty">
-                <div class="empty-mark">↗</div>
-                <h3>选择一条执行过程</h3>
-                <p>聊天流里的工具行和状态消息都可以点击。工具行会显示真实的调用参数与返回结果。</p>
+        <section v-if="activeTab === 'detail'" class="inspector-scroll">
+            <div v-if="selectedHuman" class="narrative-detail">
+                <div class="selected-step-heading"><span>人工交互</span><h3>你补充了说明</h3><div class="step-meta"><b class="human">人工输入</b><em>{{ formatClock(selectedHuman.timestamp) }}</em></div></div>
+                <p class="narrative-copy">{{ selectedHuman.message }}</p>
             </div>
-            <template v-else-if="selectedItem.tool">
-                <div class="detail-heading">
-                    <span class="detail-source">{{ selectedItem.tool.source }}</span>
-                    <h3>{{ selectedItem.tool.name }}</h3>
-                    <p>{{ selectedItem.tool.action }}</p>
-                    <div class="detail-meta">
-                        <span :class="`detail-status status-${selectedItem.tool.status}`">{{ toolStatusLabel(selectedItem.tool.status) }}</span>
-                        <span v-if="selectedItem.tool.durationMs">{{ formatMilliseconds(selectedItem.tool.durationMs) }}</span>
-                        <span>{{ formatClock(selectedItem.timestamp) }}</span>
-                    </div>
-                </div>
-                <p v-if="selectedItem.detail" class="detail-summary">{{ selectedItem.detail }}</p>
-                <section class="payload-section">
-                    <h4>输入参数</h4>
-                    <pre>{{ formatPayload(selectedItem.tool.rawParams ?? selectedItem.tool.params ?? {}) }}</pre>
-                </section>
-                <section class="payload-section">
-                    <h4>执行输出</h4>
-                    <pre>{{ formatPayload(selectedItem.tool.rawResult ?? selectedItem.tool.result ?? {}) }}</pre>
-                </section>
-            </template>
+            <div v-else-if="selectedActiveThought" class="narrative-detail">
+                <div class="selected-step-heading"><span>实时思考</span><h3>正在思考</h3><div class="step-meta"><b class="thought">思考中</b></div></div>
+                <p class="narrative-copy">{{ activeThoughtText || '正在等待模型返回思考内容…' }}</p>
+            </div>
+            <div v-else-if="selectedStep && selectedSubpart === 'thought'" class="narrative-detail">
+                <div class="selected-step-heading"><span>步骤 {{ selectedStep.stepId + 1 }} · 思考过程</span><h3>{{ selectedStep.description || '执行步骤' }}</h3><div class="step-meta"><b class="thought">已分析</b><em>{{ formatClock(selectedStep.timestamp) }}</em></div></div>
+                <p class="narrative-copy">{{ selectedStep.thought || selectedStep.reflection || '该步骤没有单独的思考内容。' }}</p>
+            </div>
+            <div v-else-if="!selectedStep" class="detail-placeholder">
+                <div class="placeholder-glyph">›_</div>
+                <h3>选择一个过程步骤</h3>
+                <p>中间对话流中的每个工具步骤都可点击。这里会显示该次真实调用的参数和返回结果。</p>
+            </div>
             <template v-else>
-                <div class="detail-heading">
-                    <span class="detail-source">{{ kindLabel(selectedItem.kind) }}</span>
-                    <h3>{{ selectedItem.title }}</h3>
-                    <div class="detail-meta"><span>{{ formatClock(selectedItem.timestamp) }}</span></div>
+                <div class="selected-step-heading">
+                    <span>{{ selectedStep.source }} · 步骤 {{ selectedStep.stepId + 1 }}</span>
+                    <h3>{{ selectedStep.tool || 'Agent 操作' }}</h3>
+                    <p>{{ selectedStep.description || selectedStep.action }}</p>
+                    <div class="step-meta"><b :class="`status-${selectedStep.status}`">{{ statusLabel(selectedStep.status) }}</b><em v-if="selectedStep.durationMs">{{ formatMilliseconds(selectedStep.durationMs) }}</em><em>{{ formatClock(selectedStep.timestamp) }}</em></div>
                 </div>
-                <p class="detail-summary large">{{ selectedItem.detail || '此事件没有附加说明。' }}</p>
+                <p v-if="selectedStep.reflection || selectedStep.explanation" class="step-explanation">{{ selectedStep.reflection || selectedStep.explanation }}</p>
+                <section class="data-section">
+                    <h4>调用输入</h4>
+                    <pre>{{ formatPayload(selectedStep.rawParams ?? selectedStep.params ?? {}) }}</pre>
+                </section>
+                <section class="data-section">
+                    <h4>执行输出</h4>
+                    <pre>{{ formatPayload(selectedStep.rawResult ?? selectedStep.result ?? {}) }}</pre>
+                </section>
             </template>
         </section>
 
-        <section v-else class="inspector-scroll resource-panel">
-            <div class="resource-panel-heading">
-                <div>
-                    <h3>持久化资源</h3>
-                    <p>来自当前 session 的任务数据存储。</p>
-                </div>
-                <button class="refresh-button" type="button" :disabled="isResourcesLoading" @click="$emit('refresh-resources')">
-                    {{ isResourcesLoading ? '刷新中' : '刷新' }}
-                </button>
+        <section v-else class="inspector-scroll resources-pane">
+            <div class="resources-heading">
+                <div><h3>任务资源</h3><p>当前会话的持久化数据。</p></div>
+                <button type="button" :disabled="isResourcesLoading" @click="$emit('refresh-resources')">{{ isResourcesLoading ? '刷新中' : '刷新' }}</button>
             </div>
             <p v-if="resourceLoadError" class="resource-error">{{ resourceLoadError }}</p>
-            <div v-if="resources.length === 0 && !isResourcesLoading" class="resource-empty">任务执行后生成的表格、列表和中间数据会出现在这里。</div>
-            <article v-for="resource in resources" :key="resource.resourceId" class="resource-card">
-                <div class="resource-card-top">
-                    <span>{{ resource.kind }}</span>
-                    <small>{{ resource.status }}</small>
-                </div>
+            <p v-else-if="!resources.length && !isResourcesLoading" class="resource-placeholder">任务产生的文件、表格和中间数据会显示在这里。</p>
+            <article v-for="resource in resources" :key="resource.resourceId" class="resource-row">
+                <span>{{ resource.kind }}</span>
                 <h4>{{ resource.label }}</h4>
-                <p>{{ resource.summary || '暂无资源摘要。' }}</p>
-                <footer>
-                    <span v-if="resource.rowCount !== undefined">{{ formatNumber(Number(resource.rowCount)) }} 条记录</span>
-                    <button type="button" @click="$emit('preview-resource', resource)">查看记录</button>
-                </footer>
+                <p>{{ resource.summary || '暂无摘要。' }}</p>
+                <footer><small v-if="resource.rowCount !== undefined">{{ formatNumber(Number(resource.rowCount)) }} 条记录</small><button type="button" @click="$emit('preview-resource', resource)">查看记录</button></footer>
             </article>
         </section>
     </aside>
@@ -90,14 +77,7 @@
 
 <script setup lang="ts">
 import { ref } from "vue";
-import type {
-    AgentRunState,
-    AgentRunStateMeta,
-    AgentTaskResource,
-    AgentTimelineItem,
-    AgentTokenUsage,
-    AgentToolStatus,
-} from "./types";
+import type { AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTokenUsage, AgentToolStatus } from "./types";
 import { formatClock, formatMilliseconds, formatNumber, formatPayload } from "./format";
 
 defineProps<{
@@ -108,7 +88,11 @@ defineProps<{
     tokenUsage: AgentTokenUsage | null;
     completedToolCount: number;
     failedToolCount: number;
-    selectedItem: AgentTimelineItem | null;
+    selectedStep: AgentStepItem | null;
+    selectedSubpart: "thought" | "tool" | null;
+    selectedHuman: { message: string; timestamp: number } | null;
+    selectedActiveThought: boolean;
+    activeThoughtText: string;
     resources: AgentTaskResource[];
     isResourcesLoading: boolean;
     resourceLoadError: string;
@@ -119,76 +103,18 @@ defineEmits<{
     "preview-resource": [resource: AgentTaskResource];
 }>();
 
-const activeTab = ref<"details" | "resources">("details");
-
-function toolStatusLabel(status: AgentToolStatus) {
-    return { pending: "等待", running: "执行中", succeeded: "已完成", failed: "失败" }[status];
-}
-
-function kindLabel(kind: AgentTimelineItem["kind"]) {
-    return { system: "运行状态", planning: "规划", tool: "工具", success: "完成", error: "异常", human: "人工输入", recovery: "恢复" }[kind];
-}
+const activeTab = ref<"detail" | "resources">("detail");
+function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败" }[status]; }
 </script>
 
 <style scoped>
-.agent-inspector {
-    display: flex;
-    min-width: 0;
-    min-height: 0;
-    flex-direction: column;
-    border-left: 1px solid var(--chat-line);
-    background: var(--chat-inspector-bg);
-}
-.inspector-header { display: flex; justify-content: space-between; gap: 14px; padding: 20px 18px 14px; border-bottom: 1px solid var(--chat-line); }
-.inspector-kicker { display: block; color: var(--chat-text-faint); font-size: 10px; font-weight: 800; letter-spacing: .1em; }
-.inspector-header h2 { margin: 5px 0 3px; color: var(--chat-text); font-size: 17px; letter-spacing: -.02em; }
-.inspector-header p { margin: 0; color: var(--chat-text-muted); font-size: 11px; line-height: 1.5; }
-.state-chip { align-self: flex-start; padding: 5px 7px; border: 1px solid var(--chat-line-strong); border-radius: 7px; color: var(--chat-text-soft); font-size: 10px; font-weight: 750; }
-.state-executing, .state-planning { color: var(--chat-accent); border-color: color-mix(in srgb, var(--chat-accent) 46%, transparent); }
-.state-succeeded { color: var(--chat-success); }
-.state-failed { color: var(--chat-danger); }
-.session-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-bottom: 1px solid var(--chat-line); background: var(--chat-line); }
-.session-facts div { display: grid; gap: 3px; padding: 11px 10px; background: var(--chat-inspector-bg); }
-.session-facts span { color: var(--chat-text-faint); font-size: 10px; }
-.session-facts strong { color: var(--chat-text); font-size: 12px; }
-.session-facts strong.danger { color: var(--chat-danger); }
-.inspector-tabs { display: grid; grid-template-columns: 1fr 1fr; padding: 8px 10px; border-bottom: 1px solid var(--chat-line); gap: 4px; }
-.inspector-tabs button { padding: 7px 8px; border: 0; border-radius: 7px; color: var(--chat-text-muted); cursor: pointer; background: transparent; font: inherit; font-size: 12px; }
-.inspector-tabs button.active { color: var(--chat-text); background: var(--chat-hover); }
-.inspector-tabs span { margin-left: 4px; color: var(--chat-text-faint); font-size: 10px; }
-.inspector-scroll { min-height: 0; flex: 1; padding: 18px; overflow-y: auto; }
-.inspector-empty { display: grid; min-height: 240px; place-content: center; text-align: center; }
-.empty-mark { width: 30px; height: 30px; margin: 0 auto 12px; border: 1px solid var(--chat-line-strong); border-radius: 9px; color: var(--chat-accent); font-size: 18px; line-height: 28px; }
-.inspector-empty h3 { margin: 0; color: var(--chat-text); font-size: 14px; }
-.inspector-empty p { max-width: 240px; margin: 8px auto 0; color: var(--chat-text-muted); font-size: 12px; line-height: 1.65; }
-.detail-heading { padding-bottom: 15px; border-bottom: 1px solid var(--chat-line); }
-.detail-source { color: var(--chat-accent); font-size: 10px; font-weight: 800; letter-spacing: .08em; }
-.detail-heading h3 { margin: 7px 0 3px; color: var(--chat-text); font-size: 17px; word-break: break-word; }
-.detail-heading p { margin: 0; color: var(--chat-text-muted); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.detail-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; color: var(--chat-text-faint); font-size: 11px; }
-.detail-status { padding: 2px 5px; border-radius: 4px; font-weight: 700; }
-.status-running { color: var(--chat-warning); background: color-mix(in srgb, var(--chat-warning) 12%, transparent); }
-.status-succeeded { color: var(--chat-success); background: color-mix(in srgb, var(--chat-success) 12%, transparent); }
-.status-failed { color: var(--chat-danger); background: color-mix(in srgb, var(--chat-danger) 12%, transparent); }
-.detail-summary { margin: 15px 0; color: var(--chat-text-soft); font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
-.detail-summary.large { font-size: 13px; }
-.payload-section { margin-top: 14px; }
-.payload-section h4 { margin: 0 0 7px; color: var(--chat-text-muted); font-size: 11px; font-weight: 750; }
-.payload-section pre { max-height: 260px; margin: 0; padding: 11px; overflow: auto; border: 1px solid var(--chat-line); border-radius: 9px; color: #c7d4e8; background: #0c111b; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
-.resource-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.resource-panel-heading h3 { margin: 0; color: var(--chat-text); font-size: 14px; }
-.resource-panel-heading p { margin: 4px 0 0; color: var(--chat-text-muted); font-size: 11px; line-height: 1.45; }
-.refresh-button, .resource-card button { border: 1px solid var(--chat-line-strong); border-radius: 7px; color: var(--chat-text-soft); cursor: pointer; background: var(--chat-tool-bg); font: inherit; font-size: 11px; }
-.refresh-button { padding: 6px 8px; }
-.refresh-button:hover:not(:disabled), .resource-card button:hover { border-color: var(--chat-accent); color: var(--chat-text); }
-.refresh-button:disabled { cursor: wait; opacity: .6; }
-.resource-error { margin: 12px 0; color: var(--chat-danger); font-size: 12px; line-height: 1.5; }
-.resource-empty { padding: 24px 4px; color: var(--chat-text-muted); font-size: 12px; line-height: 1.7; }
-.resource-card { margin-top: 12px; padding: 12px; border: 1px solid var(--chat-line); border-radius: 10px; background: var(--chat-tool-bg); }
-.resource-card-top { display: flex; justify-content: space-between; gap: 10px; color: var(--chat-text-faint); font-size: 10px; font-weight: 750; }
-.resource-card h4 { margin: 9px 0 4px; color: var(--chat-text); font-size: 13px; }
-.resource-card p { margin: 0; color: var(--chat-text-muted); font-size: 11px; line-height: 1.6; }
-.resource-card footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 11px; color: var(--chat-text-faint); font-size: 10px; }
-.resource-card button { padding: 5px 7px; }
-@media (max-width: 980px) { .agent-inspector { border-top: 1px solid var(--chat-line); border-left: 0; } }
+.manus-inspector { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-left: 1px solid #343438; color: #dedee1; background: #1a1a1d; }
+.inspector-top { display: flex; justify-content: space-between; gap: 12px; padding: 17px 16px 13px; border-bottom: 1px solid #343438; }.inspector-top span { color: #85858a; font-size: 9px; font-weight: 800; letter-spacing: .1em; }.inspector-top h2 { margin: 5px 0 3px; color: #efeff0; font-size: 16px; }.inspector-top p { max-width: 210px; margin: 0; color: #85858b; font-size: 11px; line-height: 1.45; }.state-badge { align-self: flex-start; padding: 4px 6px; border: 1px solid #4b4b50; border-radius: 5px; color: #b6b6bb !important; font-size: 9px !important; letter-spacing: 0 !important; }.state-executing, .state-planning { color: #eeeeef !important; }.state-failed { color: #df858a !important; }
+.inspector-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid #343438; }.inspector-metrics div { display: grid; gap: 3px; padding: 10px 9px; border-right: 1px solid #343438; }.inspector-metrics div:last-child { border-right: 0; }.inspector-metrics span { color: #77777d; font-size: 9px; }.inspector-metrics strong { color: #dcdcdf; font-size: 11px; }.inspector-metrics .danger { color: #dc8186; }
+.detail-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; padding: 7px 9px; border-bottom: 1px solid #343438; }.detail-tabs button { padding: 7px 5px; border: 0; border-radius: 5px; color: #919197; cursor: pointer; background: transparent; font: inherit; font-size: 11px; }.detail-tabs button.active { color: #ededee; background: #2a2a2e; }.detail-tabs i { color: #707076; font-size: 9px; font-style: normal; }
+.inspector-scroll { min-height: 0; flex: 1; padding: 15px; overflow-y: auto; }.detail-placeholder { display: grid; min-height: 250px; place-content: center; text-align: center; }.placeholder-glyph { margin-bottom: 10px; color: #a8a8ad; font: 16px ui-monospace, SFMono-Regular, Menlo, monospace; }.detail-placeholder h3 { margin: 0; color: #d8d8db; font-size: 13px; }.detail-placeholder p { max-width: 235px; margin: 8px auto 0; color: #85858b; font-size: 11px; line-height: 1.65; }
+.selected-step-heading { padding-bottom: 13px; border-bottom: 1px solid #343438; }.selected-step-heading > span { color: #8e8e94; font-size: 10px; font-weight: 700; }.selected-step-heading h3 { margin: 7px 0 3px; color: #efeff0; font-size: 15px; word-break: break-word; }.selected-step-heading p { margin: 0; color: #97979d; font-size: 11px; line-height: 1.55; }.step-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; color: #77777d; font-size: 10px; }.step-meta b { padding: 2px 4px; border-radius: 3px; font-weight: 700; }.step-meta .status-running { color: #eeeeef; background: #343438; }.step-meta .status-succeeded { color: #c8c8cd; background: #303034; }.step-meta .status-failed { color: #df858a; background: rgba(204,90,96,.13); }.step-meta em { font-style: normal; }
+.step-explanation { margin: 13px 0; color: #a5a5ab; font-size: 12px; line-height: 1.65; }.narrative-copy { margin: 15px 0 0; color: #c1c1c5; font-size: 12px; line-height: 1.75; white-space: pre-wrap; }.step-meta .thought { color: #e7e7e9; background: #343438; }.step-meta .human { color: #d4c8c8; background: #373337; }.data-section { margin-top: 14px; }.data-section h4 { margin: 0 0 7px; color: #99999f; font-size: 10px; font-weight: 800; letter-spacing: .04em; }.data-section pre { max-height: 260px; margin: 0; padding: 10px; overflow: auto; border: 1px solid #39393e; border-radius: 7px; color: #c4c4c9; background: #141416; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+.resources-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }.resources-heading h3 { margin: 0; color: #dddddf; font-size: 13px; }.resources-heading p { margin: 4px 0 0; color: #77777d; font-size: 10px; }.resources-heading button, .resource-row button { border: 1px solid #47474c; border-radius: 5px; padding: 5px 7px; color: #b7b7bc; cursor: pointer; background: #242428; font: inherit; font-size: 10px; }.resources-heading button:disabled { cursor: wait; opacity: .55; }.resource-error { color: #dc8186; font-size: 11px; line-height: 1.6; }.resource-placeholder { padding: 22px 0; color: #85858b; font-size: 11px; line-height: 1.7; }.resource-row { margin-top: 11px; padding: 10px; border: 1px solid #36363b; border-radius: 7px; background: #202024; }.resource-row > span { color: #77777d; font-size: 9px; font-weight: 700; }.resource-row h4 { margin: 6px 0 3px; color: #e2e2e5; font-size: 12px; }.resource-row p { margin: 0; color: #8a8a90; font-size: 10px; line-height: 1.55; }.resource-row footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; }.resource-row small { color: #74747a; font-size: 9px; }
+@media (max-width: 980px) { .manus-inspector { min-height: 460px; border-top: 1px solid #343438; border-left: 0; } }
 </style>

@@ -42,6 +42,8 @@ pub fn run() {
             commands::send_chat,
             // MCP 插件管理
             commands::get_mcp_plugins,
+            commands::get_mcp_tool_catalog,
+            commands::refresh_mcp_plugin_connection,
             commands::save_mcp_plugin,
             commands::delete_mcp_plugin,
             commands::toggle_mcp_plugin,

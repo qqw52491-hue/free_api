@@ -1,32 +1,44 @@
 <template>
-    <section class="agent-workspace">
-        <header class="workspace-header">
-            <div class="workspace-brand">
-                <div class="brand-mark">A</div>
-                <div>
-                    <span>FREE_API / AGENT</span>
-                    <h1>任务对话</h1>
-                </div>
-            </div>
-            <div class="workspace-status">
-                <span class="session-id">会话 {{ panelId.slice(-6) }}</span>
-                <span class="run-state" :class="`state-${session.runState.value}`"><i></i>{{ session.stateMeta.value.category }}</span>
-                <button class="header-button" type="button" :disabled="session.isRunning.value" @click="session.clearSession()">新对话</button>
-                <button class="header-button primary" type="button" @click="settingsOpen = true">设置</button>
+    <section class="manus-agent-shell">
+        <header class="manus-chat-header">
+            <button class="model-selector" type="button" title="配置模型路由" @click="settingsOpen = true">
+                <span>{{ activeProModelName }}</span>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 9l6 6 6-6" /></svg>
+            </button>
+            <div class="header-actions">
+                <span class="session-status" :class="`state-${session.runState.value}`"><i></i>{{ session.stateMeta.value.category }}</span>
+                <button v-if="session.isRunning.value" class="icon-control stop" type="button" :disabled="session.stopRequested.value" title="停止执行" @click="session.requestStop()"><span>■</span></button>
+                <button class="icon-control" type="button" :disabled="session.isRunning.value" title="新建任务" @click="session.clearSession()">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" /></svg>
+                </button>
+                <button class="icon-control" type="button" title="设置" @click="settingsOpen = true">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.37.5.62.9.62H21a2 2 0 0 1 0 4h-.7c-.4 0-.76.25-.9.62Z" /></svg>
+                </button>
             </div>
         </header>
 
-        <div class="workspace-grid">
-            <main class="conversation-pane">
+        <div class="manus-agent-grid">
+            <main class="chat-column">
                 <AgentChatStream
                     :current-goal="session.currentGoal.value"
-                    :timeline="session.timeline.value"
-                    :selected-item-id="session.selectedTimelineId.value"
+                    :conversation-messages="session.conversationMessages.value"
+                    :steps="session.steps.value"
+                    :selected-step-id="session.selectedStepId.value"
+                    :selected-subpart="selectedSubpart"
+                    :selected-narrative="selectedNarrativeId"
+                    :thought="session.thought.value"
+                    :is-thinking="session.isThinking.value"
+                    :human-interventions="session.humanInterventions.value"
+                    :state-description="session.statusDescription.value"
+                    :is-running="session.isRunning.value"
                     :completion-message="session.completionMessage.value"
                     :final-summary="session.finalSummary.value"
                     :final-artifacts="session.finalArtifacts.value"
                     :has-error="session.hasError.value"
-                    @select="session.selectTimelineItem"
+                    @select-step="handleStepSelect"
+                    @select-step-thought="handleStepThought"
+                    @select-human="handleHumanSelect"
+                    @select-active-thought="handleActiveThoughtSelect"
                 />
                 <AgentComposer
                     :draft="composerDraft"
@@ -36,7 +48,11 @@
                     :stop-requested="session.stopRequested.value"
                     :can-start="session.canStart.value"
                     :pause-reason="session.pauseReason.value"
+                    :all-models="allModels"
+                    :current-model-id="session.modelRouting.value.pro"
                     @update:draft="composerDraft = $event"
+                    @update:model="handleModelSelect"
+                    @open-settings="settingsOpen = true"
                     @submit="submitComposer"
                     @stop="session.requestStop"
                 />
@@ -50,7 +66,11 @@
                 :token-usage="session.tokenUsage.value"
                 :completed-tool-count="session.completedToolCount.value"
                 :failed-tool-count="session.failedToolCount.value"
-                :selected-item="session.selectedTimelineItem.value"
+                :selected-step="session.selectedStep.value"
+                :selected-subpart="selectedSubpart"
+                :selected-human="selectedHuman"
+                :selected-active-thought="selectedActiveThought"
+                :active-thought-text="session.thought.value"
                 :resources="session.resources.value"
                 :is-resources-loading="session.isResourcesLoading.value"
                 :resource-load-error="session.resourceLoadError.value"
@@ -68,7 +88,6 @@
             @previous="session.loadPreviousRecordPage"
             @next="session.loadNextRecordPage"
         />
-
         <AgentSettingsDrawer
             :open="settingsOpen"
             :all-models="allModels"
@@ -79,12 +98,14 @@
             @update:model-routing="session.modelRouting.value = $event"
             @update:log-context="session.logContext.value = $event"
             @apply-preset="applyPreset"
+            @open-plugins="openPluginManager"
         />
     </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import AgentChatStream from "./agent/AgentChatStream.vue";
 import AgentComposer from "./agent/AgentComposer.vue";
 import AgentInspector from "./agent/AgentInspector.vue";
@@ -93,13 +114,24 @@ import AgentSettingsDrawer from "./agent/AgentSettingsDrawer.vue";
 import type { AgentModelOption } from "./agent/types";
 import { useAgentSession } from "../composables/useAgentSession";
 
-const props = defineProps<{
-    panelId: string;
-    allModels: AgentModelOption[];
-}>();
-
+const props = defineProps<{ panelId: string; allModels: AgentModelOption[] }>();
+const router = useRouter();
 const settingsOpen = ref(false);
+const selectedSubpart = ref<"thought" | "tool" | null>(null);
+const selectedHumanEventId = ref<string | null>(null);
+const selectedActiveThought = ref(false);
 const session = useAgentSession(props.panelId);
+const selectedNarrativeId = computed(() => selectedActiveThought.value ? "active-thought" : selectedHumanEventId.value);
+const selectedHuman = computed(() => session.humanInterventions.value.find((item, index) => `human-${item.timestamp}-${index}` === selectedHumanEventId.value) || null);
+
+onMounted(() => session.ensureModelRouting(props.allModels));
+watch(() => props.allModels, (models) => session.ensureModelRouting(models), { deep: true });
+
+const activeProModelName = computed(() => {
+    const id = session.modelRouting.value.pro;
+    const model = props.allModels.find((item) => item.id === id);
+    return model?.display_name || model?.name || "Manus 1.6";
+});
 const composerDraft = computed({
     get: () => session.isRunning.value ? session.humanInput.value : session.goalInput.value,
     set: (value: string) => {
@@ -108,68 +140,54 @@ const composerDraft = computed({
     },
 });
 
+function clearNarrativeSelection() {
+    selectedHumanEventId.value = null;
+    selectedActiveThought.value = false;
+}
+function handleStepSelect(id: string) {
+    clearNarrativeSelection();
+    selectedSubpart.value = "tool";
+    session.selectStep(id);
+}
+function handleStepThought(id: string) {
+    clearNarrativeSelection();
+    selectedSubpart.value = "thought";
+    session.selectStep(id);
+}
+function handleHumanSelect(id: string) {
+    selectedHumanEventId.value = id;
+    selectedActiveThought.value = false;
+    selectedSubpart.value = null;
+    session.selectedStepId.value = null;
+}
+function handleActiveThoughtSelect() {
+    selectedActiveThought.value = true;
+    selectedHumanEventId.value = null;
+    selectedSubpart.value = null;
+    session.selectedStepId.value = null;
+}
+function handleModelSelect(modelId: string) {
+    session.modelRouting.value = { pro: modelId, flash: modelId, vision: modelId };
+}
 function submitComposer() {
     if (session.isRunning.value) void session.sendHumanInput();
     else void session.runAgent();
 }
-
 function applyPreset(goal: string) {
     session.goalInput.value = goal;
     settingsOpen.value = false;
+}
+function openPluginManager() {
+    settingsOpen.value = false;
+    void router.push("/plugins");
 }
 
 defineExpose({ isRunning: session.isRunning });
 </script>
 
 <style scoped>
-.agent-workspace {
-    --chat-bg: #0b0f16;
-    --chat-panel: #101620;
-    --chat-inspector-bg: #0f151f;
-    --chat-composer-bg: #141b26;
-    --chat-tool-bg: rgba(20, 28, 40, .72);
-    --chat-hover: rgba(93, 126, 255, .08);
-    --chat-user-bg: rgba(53, 91, 176, .18);
-    --chat-user-line: rgba(116, 157, 255, .22);
-    --chat-line: rgba(148, 163, 184, .13);
-    --chat-line-strong: rgba(148, 163, 184, .27);
-    --chat-text: #edf3fc;
-    --chat-text-soft: #c1cddd;
-    --chat-text-muted: #8d9caf;
-    --chat-text-faint: #68788f;
-    --chat-accent: #8aa7ff;
-    --chat-success: #55d6a2;
-    --chat-warning: #efbc66;
-    --chat-danger: #ff7986;
-    display: grid;
-    height: 100%;
-    min-height: 0;
-    grid-template-rows: auto minmax(0, 1fr);
-    overflow: hidden;
-    color: var(--chat-text);
-    background: var(--chat-bg);
-    font-variant-numeric: tabular-nums;
-}
-.workspace-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 20px; border-bottom: 1px solid var(--chat-line); background: color-mix(in srgb, var(--chat-panel) 90%, transparent); }
-.workspace-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.brand-mark { display: grid; width: 29px; height: 29px; flex: 0 0 auto; place-items: center; border-radius: 9px; color: #eff4ff; background: linear-gradient(145deg, #6479ff, #9c6dff); font-size: 12px; font-weight: 850; }
-.workspace-brand span { display: block; color: var(--chat-text-faint); font-size: 9px; font-weight: 800; letter-spacing: .1em; }
-.workspace-brand h1 { margin: 2px 0 0; color: var(--chat-text); font-size: 15px; letter-spacing: -.02em; }
-.workspace-status { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
-.session-id { color: var(--chat-text-faint); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
-.run-state { display: inline-flex; align-items: center; gap: 6px; color: var(--chat-text-muted); font-size: 11px; font-weight: 700; }
-.run-state i { width: 7px; height: 7px; border-radius: 50%; background: var(--chat-text-faint); }
-.run-state.state-planning, .run-state.state-executing { color: var(--chat-accent); }
-.run-state.state-planning i, .run-state.state-executing i { background: var(--chat-accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--chat-accent) 13%, transparent); }
-.run-state.state-waiting_for_human { color: var(--chat-warning); }.run-state.state-waiting_for_human i { background: var(--chat-warning); }
-.run-state.state-succeeded { color: var(--chat-success); }.run-state.state-succeeded i { background: var(--chat-success); }
-.run-state.state-failed { color: var(--chat-danger); }.run-state.state-failed i { background: var(--chat-danger); }
-.header-button { border: 1px solid var(--chat-line-strong); border-radius: 8px; padding: 6px 9px; color: var(--chat-text-muted); cursor: pointer; background: transparent; font: inherit; font-size: 11px; }
-.header-button:hover:not(:disabled) { border-color: var(--chat-accent); color: var(--chat-text); background: var(--chat-hover); }
-.header-button.primary { color: var(--chat-text-soft); background: var(--chat-tool-bg); }
-.header-button:disabled { cursor: not-allowed; opacity: .45; }
-.workspace-grid { display: grid; min-height: 0; grid-template-columns: minmax(0, 1fr) minmax(300px, 348px); }
-.conversation-pane { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; background: radial-gradient(circle at 50% -10%, rgba(101, 124, 255, .07), transparent 38%), var(--chat-bg); }
-@media (max-width: 980px) { .agent-workspace { height: auto; overflow: visible; }.workspace-grid { grid-template-columns: minmax(0, 1fr); }.conversation-pane { min-height: 600px; }.workspace-status .session-id { display: none; } }
-@media (max-width: 620px) { .workspace-header { padding: 11px 13px; }.workspace-status { gap: 6px; }.run-state { display: none; }.header-button { padding: 6px 8px; } }
+.manus-agent-shell { display: grid; height: 100%; min-height: 0; grid-template-rows: 46px minmax(0, 1fr); overflow: hidden; color: #e8e8ea; background: #202022; }
+.manus-chat-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #363638; background: #202022; }.model-selector { display: inline-flex; align-items: center; gap: 6px; border: 0; color: #e5e5e7; cursor: pointer; background: transparent; font: 600 14px inherit; }.model-selector:hover { color: #fff; }.header-actions { display: flex; align-items: center; gap: 8px; }.session-status { display: inline-flex; align-items: center; gap: 6px; color: #96969b; font-size: 11px; }.session-status i { width: 6px; height: 6px; border-radius: 50%; background: #737378; }.session-status.state-planning i,.session-status.state-executing i { background: #e8e8ea; box-shadow: 0 0 0 3px rgba(232,232,234,.1); }.session-status.state-failed { color: #e08489; }.session-status.state-failed i { background: #e08489; }.icon-control { display: grid; width: 29px; height: 29px; place-items: center; border: 1px solid transparent; border-radius: 6px; color: #a9a9ae; cursor: pointer; background: transparent; }.icon-control:hover { border-color: #49494e; color: #f0f0f1; background: #2a2a2e; }.icon-control.stop { color: #e0a2a5; }.icon-control:disabled { cursor: not-allowed; opacity: .45; }
+.manus-agent-grid { display: grid; min-height: 0; grid-template-columns: minmax(0, 1fr) minmax(300px, 342px); }.chat-column { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; background: #202022; }
+@media (max-width: 980px) { .manus-agent-shell { height: auto; overflow: visible; }.manus-agent-grid { grid-template-columns: 1fr; }.chat-column { min-height: 620px; }.session-status { display: none; } }
 </style>
