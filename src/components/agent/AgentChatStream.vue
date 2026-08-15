@@ -55,10 +55,9 @@
                 <header><span class="tree-mark"><i></i></span><b>思考</b><em>思考中</em><time>{{ formatClock(entry.timestamp) }}</time></header>
                 <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
             </article>
-            <section v-else-if="entry.type === 'completion'" class="result-line" :class="{ failed: entry.failed }">
-                <span>{{ entry.failed ? '任务结束：存在异常' : '任务已完成' }}</span>
-                <strong>{{ entry.title }}</strong>
-                <div v-if="entry.summary" class="summary-rich" aria-label="任务总结">
+            <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
+                <span class="saved-role">Agent</span>
+                <div v-if="entry.summary" class="summary-rich" aria-label="Agent 最终回复">
                     <template v-for="(block, index) in markdownBlocks(entry.summary)" :key="`${entry.id}-summary-${index}`">
                         <h3 v-if="block.kind === 'heading'" :class="`markdown-h${block.level}`">
                             <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template>
@@ -81,11 +80,13 @@
                         </div>
                     </template>
                 </div>
+                <p v-else class="final-fallback">{{ entry.title }}</p>
                 <div v-if="entry.artifacts.length" class="final-artifacts">
-                    <b>任务产物</b>
-                    <code v-for="artifact in entry.artifacts" :key="artifact" :class="{ markdown: artifact.toLowerCase().endsWith('.md') }">{{ artifact.toLowerCase().endsWith('.md') ? '任务总结 Markdown · ' : '' }}{{ artifact }}</code>
+                    <b>交付物</b>
+                    <code v-for="artifact in entry.artifacts" :key="artifact">{{ artifact }}</code>
                 </div>
-            </section>
+                <time>{{ formatClock(entry.timestamp) }}</time>
+            </article>
         </template>
         <p v-if="isRunning && !timelineEntries.length && !legacyMessages.length" class="idle-live"><i></i>{{ stateDescription }}</p>
     </div>
@@ -297,5 +298,9 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
 table.summary-table { width: 100%; min-width: 340px; border-collapse: collapse; color: #c9c9ce; font-size: 11px; line-height: 1.5; }
 .summary-table th,.summary-table td { padding: 6px 8px; border-right: 1px solid #3c3c42; border-bottom: 1px solid #3c3c42; text-align: left; vertical-align: top; white-space: nowrap; }
 .summary-table th:last-child,.summary-table td:last-child { border-right: 0; }.summary-table tr:last-child td { border-bottom: 0; }.summary-table th { color: #eeeeef; background: #2b2b2f; font-weight: 700; }.summary-table td { background: #222225; }
+
+
+/* 最终回复与普通 Agent 消息一致，只保留结果本身，不再突出固定“任务总结”系统面板。 */
+.final-response { width: min(720px, 92%); padding-bottom: 20px; }.final-response .summary-rich { margin-top: 5px; }.final-response .final-fallback { margin: 5px 0 0; color: #dedee1; font-size: 12px; line-height: 1.62; white-space: pre-wrap; }.final-response.failed { border-color: #76484c; }.final-response .final-artifacts { margin-top: 10px; }
 
 </style>
