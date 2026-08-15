@@ -29,3 +29,8 @@ agent_logs/
 # Local MCP bridge credentials / machine-specific plugin configuration
 plugins/*.local.yaml
 plugins/*.local.yml
+src-tauri/plugins/*.local.yaml
+src-tauri/plugins/*.local.yml
+# Native Tauri WebDriver screenshots, reports and local browser profile
+test-artifacts/
+src-tauri/.rpa_profile/
