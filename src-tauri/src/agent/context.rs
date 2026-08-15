@@ -19,6 +19,13 @@ pub struct SandwichContext {
     pub turns_history: Vec<ChatMessage>,
     pub current_observation: String,
     pub progress_summary: String,
+    /// 当前过程树的活动计划节点；随 checkpoint 序列化，以便恢复后继续归属。
+    #[serde(default)]
+    pub active_plan_id: Option<String>,
+    #[serde(default)]
+    pub active_plan_title: Option<String>,
+    #[serde(default)]
+    pub next_plan_index: usize,
     /// 仅保存 session 任务数据区的目录；资源记录本体不进入 LLM 上下文。
     #[serde(default)]
     pub task_resources: Vec<TaskResourceRef>,
@@ -40,6 +47,9 @@ impl SandwichContext {
             turns_history: Vec::new(),
             current_observation: String::new(),
             progress_summary: String::new(),
+            active_plan_id: None,
+            active_plan_title: None,
+            next_plan_index: 0,
             task_resources: Vec::new(),
             active_tool: None,
             active_tool_detail: String::new(),
@@ -47,11 +57,45 @@ impl SandwichContext {
         }
     }
 
+    /// 将指令归属到稳定计划节点。模型未填字段时继续最近计划；只有显式切换标题或 id 才创建新父节点。
+    pub fn resolve_plan(&mut self, instruction: &AgentInstruction) -> (String, String) {
+        let requested_id = instruction.plan_id.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+        let requested_title = instruction.plan_title.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+        if let Some(id) = requested_id {
+            let title = requested_title.or_else(|| self.active_plan_title.clone()).unwrap_or_else(|| self.user_goal.clone());
+            self.active_plan_id = Some(id.clone());
+            self.active_plan_title = Some(title.clone());
+            return (id, title);
+        }
+        if let Some(title) = requested_title {
+            if self.active_plan_title.as_deref() == Some(title.as_str()) {
+                if let Some(id) = self.active_plan_id.clone() {
+                    return (id, title);
+                }
+            }
+            self.next_plan_index = self.next_plan_index.saturating_add(1);
+            let id = format!("plan-{}", self.next_plan_index);
+            self.active_plan_id = Some(id.clone());
+            self.active_plan_title = Some(title.clone());
+            return (id, title);
+        }
+        if let (Some(id), Some(title)) = (self.active_plan_id.clone(), self.active_plan_title.clone()) {
+            return (id, title);
+        }
+        self.next_plan_index = self.next_plan_index.saturating_add(1);
+        let id = format!("plan-{}", self.next_plan_index);
+        let title = self.user_goal.clone();
+        self.active_plan_id = Some(id.clone());
+        self.active_plan_title = Some(title.clone());
+        (id, title)
+    }
+
     pub fn add_step(&mut self, instruction: &AgentInstruction, output_summary: &str) {
         // 脱水版行动纪要：只记录"做了什么"，砍掉 thought/reflection 内心戏，大幅节省 Token
         // AI 下一步只需要知道历史里发生了什么动作，完全不需要重读上一轮的心理分析
         let action_brief = format!(
-            "工具: {} | 动作: {}",
+            "计划: {} | 工具: {} | 动作: {}",
+            self.active_plan_title.as_deref().unwrap_or("未命名计划"),
             instruction.get_tool(),
             instruction.description,
         );
@@ -233,6 +277,12 @@ impl SandwichContext {
 
         // 4. 动态尾部区：极高频变动，放在最末尾避免污染前面的静态缓存
         let mut dynamic_suffix = String::new();
+        if let (Some(id), Some(title)) = (&self.active_plan_id, &self.active_plan_title) {
+            dynamic_suffix.push_str(&format!(
+                "【当前活动计划】id={} | title={}\n如下一步仍属于此阶段，复用相同 plan_id/plan_title；只有真正切换工作阶段才创建新计划。\n\n",
+                id, title
+            ));
+        }
 
         if self.turns_history.len() >= 24 {
             dynamic_suffix.push_str("🚨 【系统严重警告：历史记录即将溢出】\n你的对话历史已过长，继续执行将导致上下文超载崩溃！\n请务必在本次思考中，将前面所有的关键进展、线索和数据提炼总结，放入 `memories_update` 中永久保存。同时必须在 JSON 顶层输出 `\"clear_history\": true` 来清空历史负担！如果不清空，系统可能会强制截断导致你失忆！\n\n");

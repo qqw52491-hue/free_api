@@ -132,6 +132,12 @@ pub struct AgentInstruction {
     pub thought: String,
     #[serde(default)]
     pub description: String,
+    /// 当前动作所属的稳定计划节点。相同 plan_id 的连续动作会收敛到同一父节点。
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    /// 面向用户的计划标题；切换该标题代表开始新的工作阶段。
+    #[serde(default)]
+    pub plan_title: Option<String>,
 
     // 兼容 tool / action
     pub tool: Option<String>,

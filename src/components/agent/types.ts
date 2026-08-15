@@ -80,6 +80,9 @@ export interface AgentStepItem {
     id: string;
     stepId: number;
     description: string;
+    planId: string;
+    planTitle: string;
+    modelTier?: string;
     reflection?: string;
     thought?: string;
     explanation?: string;

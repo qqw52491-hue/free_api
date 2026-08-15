@@ -1127,7 +1127,12 @@ async fn run_call_llm_and_run_tool_phases(
             }
         };
 
-        inst.description = format!("[{}] {}", routing.tier, inst.description);
+        let model_tier = routing.tier.to_string();
+        inst.description = inst.description.trim().to_string();
+        if inst.description.is_empty() {
+            inst.description = "执行下一步操作".to_string();
+        }
+        let (plan_id, plan_title) = context.resolve_plan(&inst);
         // LLM 的结构化决策已经完整到达；在任何 UI 通知或工具调用之前提交它。
         checkpoint.record_instruction(inst.clone(), context);
         save_checkpoint(state.inner(), checkpoint)?;
@@ -1200,6 +1205,9 @@ async fn run_call_llm_and_run_tool_phases(
                     "thought": inst.thought.clone(),
                     "tool": inst.get_action(),
                     "command": inst.get_params().to_string(),
+                    "plan_id": plan_id,
+                    "plan_title": plan_title,
+                    "model_tier": model_tier,
                     "status": "pending",
                     "output": ""
                 }
