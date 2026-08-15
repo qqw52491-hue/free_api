@@ -255,15 +255,35 @@ export function useAgentSession(sessionId: string) {
             return true;
         });
     }
+    function runDeduplicationKey(run: HistoryRunSnapshot) {
+        const firstStep = run.steps[0];
+        const fingerprint = `${firstStep?.tool || ""}|${firstStep?.description || ""}`;
+        return `${run.goal.trim()}|${fingerprint}|${Math.floor(run.startedAt / 30_000)}`;
+    }
+    function runInformationScore(run: HistoryRunSnapshot) {
+        return run.steps.length * 10 + (run.summary ? 4 : 0) + run.artifacts.length * 2
+            + (["succeeded", "failed", "cancelled"].includes(run.status) ? 1 : 0);
+    }
+    function dedupeHistoryRuns(runs: HistoryRunSnapshot[]) {
+        const winners = new Map<string, HistoryRunSnapshot>();
+        for (const run of runs.sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id))) {
+            // 空轨迹没有可复盘过程，仍由已有会话消息显示，不生成折叠的空计划卡。
+            if (!run.steps.length && !run.summary && !run.artifacts.length) continue;
+            const key = runDeduplicationKey(run);
+            const existing = winners.get(key);
+            if (!existing || runInformationScore(run) >= runInformationScore(existing)) winners.set(key, run);
+        }
+        return [...winners.values()].sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+    }
     async function loadRunTraces() {
         try {
             const traces = await invoke<unknown[]>("get_session_run_traces", { sessionId });
-            const runs = (Array.isArray(traces) ? traces : []).map((trace) => normalizeRunTrace(trace));
-            await Promise.all(runs.map(async (run) => {
+            const normalized = (Array.isArray(traces) ? traces : []).map((trace) => normalizeRunTrace(trace));
+            await Promise.all(normalized.map(async (run) => {
                 const markdown = await resolveSummaryMarkdown(run.artifacts);
                 if (markdown) run.summary = markdown;
             }));
-            historyRuns.value = runs;
+            historyRuns.value = dedupeHistoryRuns(normalized);
         } catch (error) {
             appendLog(`[过程历史加载失败] ${toText(error)}`);
         }

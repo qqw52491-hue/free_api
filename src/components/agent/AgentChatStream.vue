@@ -127,7 +127,7 @@ watch(() => props.isThinking, (running, wasRunning) => { if (running && !wasRunn
 function planStatus(steps: AgentStepItem[]): AgentToolStatus { if (steps.some((step) => step.status === "running" || step.status === "pending")) return "running"; if (steps.some((step) => step.status === "failed")) return "failed"; return "succeeded"; }
 function planEntries(steps: AgentStepItem[], prefix: string, active = false): PlanEntry[] {
     const groups = new Map<string, PlanEntry>();
-    for (const step of steps) {
+    for (const step of steps.filter((item) => Boolean(item.description || item.tool || item.action))) {
         const key = step.planId || "plan-default";
         const existing = groups.get(key) || { id: `${prefix}-plan-${key}`, type: "plan" as const, timestamp: step.timestamp, title: step.planTitle || "执行任务", status: step.status, steps: [], isThinking: false };
         existing.steps.push(step);
@@ -161,6 +161,11 @@ function historyTimeline(): TimelineEntry[] {
 }
 function currentTimeline(): TimelineEntry[] {
     const timeline: TimelineEntry[] = [];
+    // 后端已写入同目标的终态回合时，绝不再同时渲染残留实时状态，避免“结束后再折叠/重复”。
+    const alreadyPersisted = !props.isRunning && props.currentGoal && props.historyTurns.some((turn) =>
+        turn.goal.trim() === props.currentGoal.trim() && ["succeeded", "failed", "cancelled"].includes(turn.status),
+    );
+    if (alreadyPersisted) return timeline;
     const plans = planEntries(props.steps, "live", props.isThinking);
     const firstTimestamp = plans[0]?.timestamp || Date.now();
     if (props.currentGoal) timeline.push({ id: "live-user-goal", type: "user", timestamp: firstTimestamp - 1, content: props.currentGoal });
@@ -215,5 +220,16 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
 .summary-rule { width: 100%; border: 0; border-top: 1px solid #44444a; margin: 7px 0; }
 .summary-table { max-width: 100%; margin: 2px 0; overflow-x: auto; color: #aeb0b8; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
 @media (max-width: 580px) { .plan-row,.plan-children { min-width: 476px; } .goal-row { min-width: 454px; } .child-row { min-width: 430px; } }
+
+
+/* 直接子计划卡是当前模板的真实布局节点：默认较窄、宽度稳定，内容过长在卡片内部滚动，绝不压成一条线。 */
+.process-tree > .plan-node { align-self: flex-start; width: min(720px, 100%); min-width: min(480px, 100%); flex: 0 0 auto; overflow: hidden; }
+.process-tree > .plan-node .plan-row { min-width: 0; grid-template-columns: 17px minmax(260px, 1fr) max-content max-content; }
+.process-tree > .plan-node .plan-children { min-width: 0; overflow-x: auto; overflow-y: visible; }
+.process-tree > .plan-node .goal-row { min-width: 440px; }
+.process-tree > .plan-node .child-row { min-width: 416px; }
+.process-tree > .plan-node .goal-node { min-width: 440px; }
+.summary-rule { display: none; }
+@media (max-width: 540px) { .process-tree > .plan-node { min-width: 100%; } .process-tree > .plan-node .goal-row,.process-tree > .plan-node .goal-node { min-width: 410px; } .process-tree > .plan-node .child-row { min-width: 386px; } }
 
 </style>
