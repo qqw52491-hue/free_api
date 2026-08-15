@@ -42,17 +42,19 @@
                                 </button>
                             </div>
                         </article>
-                        <button v-if="entry.isThinking" class="child-row active-thought" :class="{ selected: selectedNarrative === 'active-thought' }" type="button" @click="$emit('select-active-thought')">
-                            <span class="child-mark"></span><b>思考</b><span>{{ shortText(thought || '正在分析下一步操作…', 115) }}</span><em>思考中</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time>
-                        </button>
+                        <article v-if="entry.isThinking" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
+                            <header><span class="child-mark"></span><b>思考</b><em>思考中</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
+                            <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
+                        </article>
                     </div>
                 </article>
                 <button v-else-if="entry.type === 'human'" class="root-row human-row" :class="{ selected: selectedNarrative === entry.id }" type="button" @click="$emit('select-human', entry.id)">
                     <span class="tree-mark"><i></i></span><b>你补充了说明</b><span>{{ shortText(entry.message, 115) }}</span><em>人工输入</em><time>{{ formatClock(entry.timestamp) }}</time>
                 </button>
-                <button v-else class="root-row active-thought" :class="{ selected: selectedNarrative === 'active-thought' }" type="button" @click="$emit('select-active-thought')">
-                    <span class="tree-mark"><i></i></span><b>思考</b><span>{{ shortText(thought || '正在分析下一步操作…', 115) }}</span><em>思考中</em><time>{{ formatClock(entry.timestamp) }}</time>
-                </button>
+                <article v-else class="active-thought-stream root-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
+                    <header><span class="tree-mark"><i></i></span><b>思考</b><em>思考中</em><time>{{ formatClock(entry.timestamp) }}</time></header>
+                    <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
+                </article>
             </template>
         </section>
 
@@ -60,6 +62,10 @@
 
         <section v-if="(completionMessage || finalSummary) && !(conversationMessages.length && !isRunning)" class="result-line" :class="{ failed: hasError }">
             <span>{{ hasError ? '任务结束：存在异常' : '任务已完成' }}</span><strong>{{ completionMessage || (hasError ? '任务未能完成' : '任务已完成') }}</strong><p v-if="finalSummary">{{ finalSummary }}</p>
+            <div v-if="finalArtifacts.length" class="final-artifacts">
+                <b>任务产物</b>
+                <code v-for="artifact in finalArtifacts" :key="artifact" :class="{ markdown: artifact.toLowerCase().endsWith('.md') }">{{ artifact.toLowerCase().endsWith('.md') ? '任务总结 Markdown · ' : '' }}{{ artifact }}</code>
+            </div>
         </section>
     </div>
 </template>
@@ -88,6 +94,7 @@ const props = defineProps<{
     isRunning: boolean;
     completionMessage: string;
     finalSummary: string;
+    finalArtifacts: string[];
     hasError: boolean;
 }>();
 
@@ -118,6 +125,13 @@ function onStreamScroll(event: Event) {
 function resumeLiveFollow() {
     followLiveTail.value = true;
     followLatest(false);
+}
+function followThoughtTail() {
+    nextTick(() => {
+        for (const element of Array.from(document.querySelectorAll<HTMLElement>('.active-thought-content'))) {
+            element.scrollTop = element.scrollHeight;
+        }
+    });
 }
 
 watch(() => props.isThinking, (running, wasRunning) => {
@@ -164,6 +178,7 @@ const entries = computed<TreeEntry[]>(() => {
 });
 
 watch(() => [entries.value.length, props.thought, props.completionMessage, props.conversationMessages.length], () => {
+    followThoughtTail();
     followLatest();
 }, { flush: "post" });
 watch(() => props.isRunning, (running, wasRunning) => {
@@ -188,4 +203,5 @@ function formatConversationTime(value: string) {
 .idle-live { display: flex; width: min(900px,100%); align-items: center; gap: 8px; margin: 0; padding: 4px 8px; color: #85858b; font-size: 11px; }.idle-live i { width: 6px; height: 6px; border-radius: 50%; background: #eee; animation: work-pulse 1s ease-in-out infinite; }.result-line { width: min(900px,100%); align-self: flex-start; padding: 7px 9px; border-left: 2px solid #85858a; color: #aaaab0; }.result-line.failed { border-color: #d47e83; }.result-line > span { color: #85858b; font-size: 10px; font-weight: 800; letter-spacing: .05em; }.result-line strong { display: block; margin-top: 3px; color: #ececee; font-size: 13px; }.result-line p { margin: 5px 0 0; font-size: 12px; line-height: 1.6; }
 @keyframes work-pulse { 0%,100% { opacity:.35; transform:scale(.8); } 50% { opacity:1; transform:scale(1); } }
 @media (max-width:680px) { .process-tree { padding: 16px 12px 20px; }.goal-row,.root-row { grid-template-columns: 17px minmax(0,1fr) auto; }.goal-row time,.root-row time,.child-row em { display:none; }.child-row { grid-template-columns: 10px 62px minmax(0,1fr); }.human-row,.active-thought { grid-template-columns:17px minmax(0,1fr) auto; } }
+.active-thought-stream { margin: 4px 0 4px 15px; border: 1px solid #3c3c42; border-radius: 6px; cursor: pointer; background: #242428; }.active-thought-stream.selected,.active-thought-stream:hover { border-color: #61616a; background: #29292e; }.active-thought-stream header { display: grid; grid-template-columns: 10px auto minmax(0,1fr) auto; gap: 7px; align-items: center; min-height: 25px; padding: 0 8px; color: #cfcfd4; font-size: 11px; }.active-thought-stream header em { color: #94949a; font-size: 10px; font-style: normal; }.active-thought-stream header time { color: #73737a; font-size: 10px; }.active-thought-content { max-height: 124px; margin: 0; padding: 6px 8px 8px 25px; overflow: auto; color: #a9a9af; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; scrollbar-width: thin; }.root-thought-stream { margin-left: 0; }.final-artifacts { display: flex; margin-top: 8px; gap: 5px; flex-direction: column; }.final-artifacts b { color: #bdbdc4; font-size: 10px; }.final-artifacts code { overflow: hidden; color: #88888f; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }.final-artifacts code.markdown { color: #c8d5e6; }
 </style>

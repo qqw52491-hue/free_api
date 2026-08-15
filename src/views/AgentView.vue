@@ -14,7 +14,7 @@
             </header>
 
             <nav class="primary-nav">
-                <button type="button" class="nav-row new-task" title="新任务" @click="addTab"><svg viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5z"/><path d="M8 13h8M12 9v8"/></svg><span v-if="!sidebarCollapsed">New task</span></button>
+                <button type="button" class="nav-row new-task" title="新建对话" @click="addTab"><svg viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5z"/><path d="M8 13h8M12 9v8"/></svg><span v-if="!sidebarCollapsed">新建对话</span></button>
                 <button type="button" class="nav-row active" title="Agent"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M8 11h.01M16 11h.01M8 15h8"/></svg><span v-if="!sidebarCollapsed">Agent</span></button>
                 <button type="button" class="nav-row" title="Plugins" @click="$router.push('/plugins')"><svg viewBox="0 0 24 24"><path d="M8 3v6M16 3v6M8 15v6M16 15v6"/><rect x="4" y="8" width="16" height="8" rx="2"/></svg><span v-if="!sidebarCollapsed">Plugins</span></button>
                 <button type="button" class="nav-row" title="Scheduled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg><span v-if="!sidebarCollapsed">Scheduled</span></button>
@@ -23,7 +23,7 @@
 
             <div v-if="!sidebarCollapsed" class="sidebar-section">
                 <div class="section-title"><span>Projects</span><button type="button" @click="addTab">+</button></div>
-                <button type="button" class="project-row" @click="addTab"><svg viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3z"/></svg><span>New project</span></button>
+                <button type="button" class="project-row" @click="addTab"><svg viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3z"/></svg><span>新建对话</span></button>
             </div>
 
             <div v-if="!sidebarCollapsed" class="sidebar-section tasks-section">
@@ -48,6 +48,7 @@
                         :ref="(el) => { if (el) panelRefs[tab.id] = el }"
                         :panel-id="tab.id"
                         :all-models="allModels"
+                        @new-session="addTab"
                     />
                 </div>
             </template>

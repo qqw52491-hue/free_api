@@ -1,14 +1,15 @@
 <template>
     <section class="manus-agent-shell">
         <header class="manus-chat-header">
-            <button class="model-selector" type="button" title="配置模型路由" @click="settingsOpen = true">
-                <span>{{ activeProModelName }}</span>
+            <button class="model-selector" type="button" title="当前模型路由；点击配置推理、快速与视觉模型" @click="settingsOpen = true">
+                <span>推理 · {{ activeProModelName }}</span>
+                <small>快速 · {{ activeFlashModelName }}</small>
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 9l6 6 6-6" /></svg>
             </button>
             <div class="header-actions">
                 <span class="session-status" :class="`state-${session.runState.value}`"><i></i>{{ session.stateMeta.value.category }}</span>
                 <button v-if="session.isRunning.value" class="icon-control stop" type="button" :disabled="session.stopRequested.value" title="停止执行" @click="session.requestStop()"><span>■</span></button>
-                <button class="icon-control" type="button" :disabled="session.isRunning.value" title="新建任务" @click="session.clearSession()">
+                <button class="icon-control" type="button" :disabled="session.isRunning.value" title="新建对话" @click="emit('new-session')">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" /></svg>
                 </button>
                 <button class="icon-control" type="button" title="设置" @click="settingsOpen = true">
@@ -115,6 +116,7 @@ import type { AgentModelOption } from "./agent/types";
 import { useAgentSession } from "../composables/useAgentSession";
 
 const props = defineProps<{ panelId: string; allModels: AgentModelOption[] }>();
+const emit = defineEmits<{ "new-session": [] }>();
 const router = useRouter();
 const settingsOpen = ref(false);
 const selectedSubpart = ref<"thought" | "tool" | null>(null);
@@ -131,6 +133,11 @@ const activeProModelName = computed(() => {
     const id = session.modelRouting.value.pro;
     const model = props.allModels.find((item) => item.id === id);
     return model?.display_name || model?.name || "Manus 1.6";
+});
+const activeFlashModelName = computed(() => {
+    const id = session.modelRouting.value.flash;
+    const model = props.allModels.find((item) => item.id === id);
+    return model?.display_name || model?.name || "未配置";
 });
 const composerDraft = computed({
     get: () => session.isRunning.value ? session.humanInput.value : session.goalInput.value,
@@ -187,7 +194,7 @@ defineExpose({ isRunning: session.isRunning });
 
 <style scoped>
 .manus-agent-shell { display: grid; height: 100%; min-height: 0; grid-template-rows: 46px minmax(0, 1fr); overflow: hidden; color: #e8e8ea; background: #202022; }
-.manus-chat-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #363638; background: #202022; }.model-selector { display: inline-flex; align-items: center; gap: 6px; border: 0; color: #e5e5e7; cursor: pointer; background: transparent; font: 600 14px inherit; }.model-selector:hover { color: #fff; }.header-actions { display: flex; align-items: center; gap: 8px; }.session-status { display: inline-flex; align-items: center; gap: 6px; color: #96969b; font-size: 11px; }.session-status i { width: 6px; height: 6px; border-radius: 50%; background: #737378; }.session-status.state-planning i,.session-status.state-executing i { background: #e8e8ea; box-shadow: 0 0 0 3px rgba(232,232,234,.1); }.session-status.state-failed { color: #e08489; }.session-status.state-failed i { background: #e08489; }.icon-control { display: grid; width: 29px; height: 29px; place-items: center; border: 1px solid transparent; border-radius: 6px; color: #a9a9ae; cursor: pointer; background: transparent; }.icon-control:hover { border-color: #49494e; color: #f0f0f1; background: #2a2a2e; }.icon-control.stop { color: #e0a2a5; }.icon-control:disabled { cursor: not-allowed; opacity: .45; }
+.manus-chat-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #363638; background: #202022; }.model-selector { display: inline-flex; align-items: center; gap: 6px; border: 0; color: #e5e5e7; cursor: pointer; background: transparent; font: 600 13px inherit; }.model-selector small { color: #929298; font-size: 10px; font-weight: 600; }.model-selector:hover { color: #fff; }.header-actions { display: flex; align-items: center; gap: 8px; }.session-status { display: inline-flex; align-items: center; gap: 6px; color: #96969b; font-size: 11px; }.session-status i { width: 6px; height: 6px; border-radius: 50%; background: #737378; }.session-status.state-planning i,.session-status.state-executing i { background: #e8e8ea; box-shadow: 0 0 0 3px rgba(232,232,234,.1); }.session-status.state-failed { color: #e08489; }.session-status.state-failed i { background: #e08489; }.icon-control { display: grid; width: 29px; height: 29px; place-items: center; border: 1px solid transparent; border-radius: 6px; color: #a9a9ae; cursor: pointer; background: transparent; }.icon-control:hover { border-color: #49494e; color: #f0f0f1; background: #2a2a2e; }.icon-control.stop { color: #e0a2a5; }.icon-control:disabled { cursor: not-allowed; opacity: .45; }
 .manus-agent-grid { display: grid; min-height: 0; grid-template-columns: minmax(0, 1fr) minmax(300px, 342px); }.chat-column { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; background: #202022; }
 @media (max-width: 980px) { .manus-agent-shell { height: auto; overflow: visible; }.manus-agent-grid { grid-template-columns: 1fr; }.chat-column { min-height: 620px; }.session-status { display: none; } }
 </style>

@@ -7,6 +7,7 @@ pub mod router;
 pub mod run_state;
 pub mod skill_context;
 pub mod task_store;
+pub mod task_summary;
 pub mod types;
 pub mod utils;
 
@@ -898,6 +899,30 @@ pub async fn run_agent_main_loop(
                 &conversation_model_id,
                 &persisted_summary,
             )?;
+            // 总结文件是完成后的附加产物；文件系统异常不能把已成功的任务反向标为失败。
+            let summary_markdown_path = crate::agent::task_summary::write_task_summary(
+                &app,
+                &final_session_id,
+                &context.user_goal,
+                &persisted_summary,
+                &context.progress_summary,
+                &finish_payload,
+                &context.task_resources,
+            )
+            .map(|path| path.to_string_lossy().to_string())
+            .ok();
+            let mut emitted_finish = match finish_payload {
+                serde_json::Value::Object(object) => serde_json::Value::Object(object),
+                _ => json!({ "summary": persisted_summary }),
+            };
+            if let (Some(path), Some(object)) = (summary_markdown_path.as_ref(), emitted_finish.as_object_mut()) {
+                let artifacts = object
+                    .entry("artifacts".to_string())
+                    .or_insert_with(|| json!([]));
+                if let Some(items) = artifacts.as_array_mut() {
+                    items.push(json!(path));
+                }
+            }
             app.emit(
                 &format!("agent-progress-{}", final_session_id),
                 json!({
@@ -905,7 +930,8 @@ pub async fn run_agent_main_loop(
                     "message": "任务已由 AI 标记完成",
                     "success": true,
                     "output": output_text,      // 原始 JSON 字符串（兼容旧逻辑）
-                    "finish": finish_payload,   // 结构化成果对象，含 details/summary/artifacts
+                    "finish": emitted_finish,   // 结构化成果对象，含 details/summary/artifacts
+                    "summary_markdown_path": summary_markdown_path,
                 }),
             )
             .map_err(|e| e.to_string())?;

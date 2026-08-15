@@ -169,7 +169,11 @@ export function useAgentSession(sessionId: string) {
         };
 
         if (!modelRouting.value.pro) {
-            modelRouting.value.pro = findModel(m => /pro|opus|claude-3-5|gpt-4o|deepseek/i.test(`${m.display_name} ${m.name}`));
+            modelRouting.value.pro = findModel(m => {
+                const label = `${m.display_name} ${m.name}`;
+                return !/flash|mini|haiku|speed|turbo/i.test(label)
+                    && /pro|opus|claude-3-5|gpt-4o|deepseek/i.test(label);
+            });
         }
         if (!modelRouting.value.flash) {
             modelRouting.value.flash = findModel(m => /flash|mini|haiku|speed|turbo/i.test(`${m.display_name} ${m.name}`));
