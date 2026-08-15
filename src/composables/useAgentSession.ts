@@ -17,6 +17,8 @@ export interface AgentHistoryTurn {
 interface HistoryRunSnapshot extends Omit<AgentHistoryTurn, "messages"> {}
 import {
     AGENT_RUN_STATE_CATALOG,
+    type AgentHumanForm,
+    type AgentHumanFormKind,
     type AgentLogEntry,
     type AgentModelOption,
     type AgentRunState,
@@ -57,6 +59,38 @@ function normalizeState(value: unknown): AgentRunState {
 function sourceFrom(route: unknown, name: string): "内部" | "MCP" {
     return /mcp/i.test(`${toText(route)} ${name}`) ? "MCP" : "内部";
 }
+function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHumanForm | null {
+    const data = asRecord(raw);
+    const rawKind = toText(data.kind).toLowerCase();
+    const aliases: Record<string, AgentHumanFormKind> = {
+        single: "single_select", select: "single_select", single_select: "single_select", radio: "single_select",
+        multi: "multi_select", multiple: "multi_select", multi_select: "multi_select", checkbox: "multi_select",
+        confirm: "confirm", confirmation: "confirm", text: "text", input: "text",
+    };
+    const kind = aliases[rawKind];
+    if (!kind) return null;
+    const options = (Array.isArray(data.options) ? data.options : []).slice(0, 12).map((item, index) => {
+        const option = asRecord(item);
+        const id = toText(option.id || option.value || index + 1).slice(0, 80);
+        const label = toText(option.label || option.title || option.name || id).slice(0, 160);
+        const description = toText(option.description || option.detail).slice(0, 300);
+        return description ? { id, label, description } : { id, label };
+    }).filter((item) => item.id && item.label);
+    if ((kind === "single_select" || kind === "multi_select") && !options.length) return null;
+    const defaultRaw = data.default ?? data.default_value ?? data.value;
+    const defaultValue = kind === "multi_select"
+        ? (Array.isArray(defaultRaw) ? defaultRaw.map((item) => toText(item)).filter(Boolean).slice(0, 12) : undefined)
+        : kind === "confirm" ? (typeof defaultRaw === "boolean" ? defaultRaw : undefined)
+        : toText(defaultRaw) || undefined;
+    return {
+        kind,
+        title: toText(data.title || data.label || fallbackTitle).slice(0, 220) || fallbackTitle,
+        description: toText(data.description || data.help).slice(0, 600) || undefined,
+        placeholder: toText(data.placeholder).slice(0, 160) || undefined,
+        options,
+        defaultValue,
+    };
+}
 
 function normalizeUsage(payload: Record<string, unknown>): AgentTokenUsage | null {
     const usage = asRecord(payload.usage || payload.token_usage || payload.tokens);
@@ -82,7 +116,9 @@ export function useAgentSession(sessionId: string) {
     const statusDescription = ref(AGENT_RUN_STATE_CATALOG.idle.description);
     const isRunning = ref(false);
     const pauseReason = ref("");
+    const humanForm = ref<AgentHumanForm | null>(null);
     const humanInput = ref("");
+    const pendingReplacementGoal = ref("");
     const isSendingHuman = ref(false);
     const stopRequested = ref(false);
     const elapsedSeconds = ref(0);
@@ -518,6 +554,13 @@ export function useAgentSession(sessionId: string) {
             return;
         }
 
+        // ask_human 暂停：只接收受控 form JSON，未知结构退回为普通文本回答。
+        if (eventType === "agent_paused") {
+            const message = toText(payload.message) || "Agent 正在等待你的输入。";
+            pauseReason.value = message;
+            humanForm.value = normalizeHumanForm(payload.form, message);
+            return;
+        }
         // 任务完成
         if (eventType.includes("finish") || eventType.includes("complete") || eventType.includes("success")) {
             completeRun(payload, true);
@@ -656,6 +699,7 @@ export function useAgentSession(sessionId: string) {
         hasError.value = false;
         currentGoal.value = "";
         pauseReason.value = "";
+        humanForm.value = null;
         humanInput.value = "";
         stopRequested.value = false;
         elapsedSeconds.value = 0;
@@ -663,19 +707,18 @@ export function useAgentSession(sessionId: string) {
         setRunState("idle");
     }
 
-    async function runAgent() {
-        if (!canStart.value) return;
+    async function runAgent(nextGoal?: string) {
+        const requestedGoal = (nextGoal ?? goalInput.value).trim();
+        if (!requestedGoal || isRunning.value) return;
         clearSession();
-        // 在 invoke 前打开新的事件世代；上一轮的迟到消息仍被终态屏障拦截。
         runTerminal.value = false;
-        currentGoal.value = goalInput.value.trim();
-        goalInput.value = "";
+        currentGoal.value = requestedGoal;
+        if (!nextGoal) goalInput.value = "";
         runStartedAt.value = Date.now();
         isRunning.value = true;
         setRunState("preparing", "正在建立任务会话并加载模型路由。");
         startElapsedTimer();
         autoScrollToBottom();
-
         try {
             await invoke("run_agent_main_loop", {
                 modelRouting: modelRouting.value,
@@ -691,7 +734,7 @@ export function useAgentSession(sessionId: string) {
             setRunState("failed", message);
             appendLog(`[启动异常] ${message}`);
         } finally {
-            // 任务结束后立即把当前实时区域折叠为一个已持久化回合；下一轮只会在其下方追加。
+            const queuedGoal = pendingReplacementGoal.value;
             await loadConversation();
             await loadRunTraces();
             const newest = historyRuns.value[historyRuns.value.length - 1];
@@ -699,42 +742,52 @@ export function useAgentSession(sessionId: string) {
                 clearSession();
                 autoScrollToBottom(false);
             }
+            if (queuedGoal) {
+                pendingReplacementGoal.value = "";
+                await nextTick();
+                void runAgent(queuedGoal);
+            }
         }
     }
     async function requestStop() {
         if (!isRunning.value || stopRequested.value) return;
         stopRequested.value = true;
-        const message = "用户请求停止当前任务。请立即停止后续工具调用，简要整理当前已完成的工作并结束任务。";
         try {
-            await invoke("send_human_intervention", { sessionId, message });
-            appendLog("[人工干预] 已发送立即停止指令。");
+            await invoke("cancel_agent_run", { sessionId });
+            appendLog("[停止请求] 将在模型或工具的安全边界停止当前任务。");
         } catch (error) {
             stopRequested.value = false;
             appendLog(`[停止指令失败] ${toText(error)}`);
         }
     }
-
     async function sendHumanInput() {
         const message = humanInput.value.trim();
         if (!message || isSendingHuman.value) return;
         isSendingHuman.value = true;
         try {
-            await invoke("send_human_intervention", { sessionId, message });
-            humanInterventions.value.push({ message, timestamp: Date.now() });
-            humanInput.value = "";
-            pauseReason.value = "";
-            appendLog(`[用户补充] ${message}`);
             if (isWaitingForHuman.value) {
-                setRunState("executing", "已发送人工输入，等待 Agent 继续执行。");
+                // ask_human 的回答属于当前步骤的工具结果，不新增对话消息。
+                await invoke("send_human_intervention", { sessionId, message });
+                humanInput.value = "";
+                pauseReason.value = "";
+                humanForm.value = null;
+                setRunState("executing", "已收到人工回答，等待 Agent 继续执行。");
+                appendLog("[人工回答] 已写入当前 ask_human 步骤。");
+            } else {
+                // 运行中输入代表新任务；旧回合在后端安全边界取消，随后启动独立新树。
+                pendingReplacementGoal.value = message;
+                await invoke("replace_agent_goal", { sessionId, goal: message });
+                humanInput.value = "";
+                appendLog(`[目标替换] 已请求新任务：${message}`);
             }
             autoScrollToBottom();
         } catch (error) {
-            appendLog(`[人工输入失败] ${toText(error)}`);
+            pendingReplacementGoal.value = "";
+            appendLog(`[输入发送失败] ${toText(error)}`);
         } finally {
             isSendingHuman.value = false;
         }
     }
-
     function selectStep(id: string) {
         selectedStepId.value = id;
     }
@@ -764,6 +817,17 @@ export function useAgentSession(sessionId: string) {
         unlisteners = [];
     });
 
+    async function submitHumanForm(value: unknown) {
+        if (!humanForm.value || !isWaitingForHuman.value) return;
+        const response = {
+            type: "human_form_response",
+            kind: humanForm.value.kind,
+            question: humanForm.value.title,
+            value,
+        };
+        humanInput.value = JSON.stringify(response);
+        await sendHumanInput();
+    }
     return {
         modelRouting,
         logContext,
@@ -773,6 +837,7 @@ export function useAgentSession(sessionId: string) {
         statusDescription,
         isRunning,
         pauseReason,
+        humanForm,
         humanInput,
         isSendingHuman,
         stopRequested,
@@ -815,6 +880,7 @@ export function useAgentSession(sessionId: string) {
         runAgent,
         requestStop,
         sendHumanInput,
+        submitHumanForm,
         clearSession,
         loadConversation,
         loadRunTraces,

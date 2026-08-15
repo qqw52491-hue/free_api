@@ -50,12 +50,14 @@
                     :stop-requested="session.stopRequested.value"
                     :can-start="session.canStart.value"
                     :pause-reason="session.pauseReason.value"
+                    :human-form="session.humanForm.value"
                     :all-models="allModels"
                     :current-model-id="session.modelRouting.value.pro"
                     @update:draft="composerDraft = $event"
                     @update:model="handleModelSelect"
                     @open-settings="settingsOpen = true"
                     @submit="submitComposer"
+                    @submit-form="(value) => void session.submitHumanForm(value)"
                     @stop="session.requestStop"
                 />
             </main>

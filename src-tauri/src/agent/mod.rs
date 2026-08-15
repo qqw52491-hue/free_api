@@ -31,28 +31,64 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep, Duration};
 
-// 维护每个 session_id 对应的干预消息接收通道
-pub fn intervention_channels() -> &'static Arc<Mutex<HashMap<String, mpsc::Sender<String>>>> {
-    static CHANNELS: OnceLock<Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>> = OnceLock::new();
+// 每个 session 的控制通道区分 ask_human 回答、替换目标与停止请求。
+// 替换只在模型/工具/等待人工三个安全边界消费，绝不硬杀未知副作用工具。
+#[derive(Debug, Clone)]
+pub(crate) enum HumanControl { Answer(String), ReplaceGoal(String), Cancel }
+const RUN_INTERRUPTED_ROUTE: &str = "run_interrupted";
+
+pub fn intervention_channels() -> &'static Arc<Mutex<HashMap<String, mpsc::Sender<HumanControl>>>> {
+    static CHANNELS: OnceLock<Arc<Mutex<HashMap<String, mpsc::Sender<HumanControl>>>>> = OnceLock::new();
     CHANNELS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
-
 #[tauri::command]
-pub async fn send_human_intervention(
-    state: State<'_, DbState>,
-    session_id: String,
-    message: String,
-) -> Result<(), String> {
+pub async fn send_human_intervention(_state: State<'_, DbState>, session_id: String, message: String) -> Result<(), String> {
+    let message = message.trim().to_string();
+    if message.is_empty() { return Err("人工回答不能为空".to_string()); }
     let channels = intervention_channels().lock().await;
-    if let Some(sender) = channels.get(&session_id) {
-        crate::agent::conversation::append_human_intervention(state.inner(), &session_id, &message)?;
-        sender.send(message).await.map_err(|e| e.to_string())?;
-        Ok(())
-    } else {
-        Err("任务已结束或通道不存在".to_string())
+    let sender = channels.get(&session_id).ok_or_else(|| "任务已结束或通道不存在".to_string())?;
+    sender.send(HumanControl::Answer(message)).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn replace_agent_goal(session_id: String, goal: String) -> Result<(), String> {
+    let goal = goal.trim().to_string();
+    if goal.is_empty() { return Err("新目标不能为空".to_string()); }
+    let channels = intervention_channels().lock().await;
+    let sender = channels.get(&session_id).ok_or_else(|| "任务已结束或通道不存在".to_string())?;
+    sender.send(HumanControl::ReplaceGoal(goal)).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn cancel_agent_run(session_id: String) -> Result<(), String> {
+    let channels = intervention_channels().lock().await;
+    let sender = channels.get(&session_id).ok_or_else(|| "任务已结束或通道不存在".to_string())?;
+    sender.send(HumanControl::Cancel).await.map_err(|e| e.to_string())
+}
+fn take_pending_interrupt(rx: &mut mpsc::Receiver<HumanControl>) -> Option<String> {
+    loop {
+        match rx.try_recv() {
+            Ok(HumanControl::ReplaceGoal(goal)) => return Some(format!("用户提交了新的任务目标：{}", goal)),
+            Ok(HumanControl::Cancel) => return Some("用户请求停止当前任务。".to_string()),
+            Ok(HumanControl::Answer(_)) => continue,
+            Err(_) => return None,
+        }
     }
 }
-
+async fn finish_interrupted_run(
+    app: &AppHandle, db: &DbState, session_id: &str, run_id: &str, goal: &str,
+    trace_steps: &[serde_json::Value], checkpoint: &mut AgentCheckpoint,
+    context: &context::SandwichContext, machine: &mut AgentRunMachine, reason: String,
+) -> Result<(), String> {
+    let message = format!("{} 已在安全边界停止旧任务。", reason);
+    checkpoint.mark_failed(message.clone(), context);
+    save_checkpoint(db, checkpoint)?;
+    advance_run_state(app, session_id, machine, AgentRunEvent::Cancel { reason: message.clone() })?;
+    if let Err(error) = crate::agent::run_trace::upsert_snapshot(db, run_id, session_id, goal, "cancelled", trace_steps, None) {
+        eprintln!("[run-trace] 无法保存取消轨迹: {error}");
+    }
+    app.emit(&format!("agent-log-{}", session_id), format!("⏹️ {} 不再派发旧计划。", message)).ok();
+    intervention_channels().lock().await.remove(session_id);
+    Ok(())
+}
 /// Agent 每个任务最多执行步数（可按项目需求调整）
 const MAX_STEPS: usize = 300;
 
@@ -515,6 +551,15 @@ pub async fn run_agent_main_loop(
 - get_record：读取一条记录。参数 resource_id、record_key。
 - update_resource：更新资源 label、summary、status、cursor 或 schema。
 数据行会在工具返回时立刻持久化，并按当前 session 隔离；模型默认只看到资源目录与摘要，需要具体数据时再分页查询。
+
+## ask_human 受控交互（内部工具）
+当确实需要用户决定时，使用 tool 为 "ask_human"，并在 command/params 中提供 message。不要输出 HTML、JavaScript 或任意页面代码。
+可选 form 对象仅允许以下安全结构：
+- kind: "single_select" | "multi_select" | "confirm" | "text"。
+- title、description、placeholder：短文本。
+- options：单选/多选可用，最多 12 项；每项仅含 id、label、可选 description。
+- default：单选/确认/文本的默认值，或多选的 id 数组。
+confirm 不需要 options，前端固定提供确认与取消。用户提交后，你会收到 JSON 工具结果：{type:"human_form_response", kind, value}；根据 value 继续规划。
 "#;
     let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
     let tools_dir = app
@@ -613,7 +658,7 @@ pub async fn run_agent_main_loop(
     let mut action_history: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     // 注册人类干预接收器
-    let (tx, mut rx) = mpsc::channel::<String>(5);
+    let (tx, mut rx) = mpsc::channel::<HumanControl>(5);
     {
         let mut channels = intervention_channels().lock().await;
         channels.insert(final_session_id.clone(), tx);
@@ -673,10 +718,25 @@ pub async fn run_agent_main_loop(
             )
             .map_err(|error| error.to_string())?;
 
-            let reply = rx
-                .recv()
-                .await
-                .unwrap_or_else(|| "人类未回复，通道异常关闭".to_string());
+            let reply = match rx.recv().await {
+                Some(HumanControl::Answer(reply)) => reply,
+                Some(HumanControl::ReplaceGoal(next_goal)) => {
+                    let reason = format!("用户提交了新的任务目标：{}", next_goal);
+                    finish_interrupted_run(
+                        &app, state.inner(), &final_session_id, &run_id, &goal, &run_trace_steps,
+                        &mut checkpoint, &context, &mut run_machine, reason,
+                    ).await?;
+                    return Ok(());
+                }
+                Some(HumanControl::Cancel) => {
+                    finish_interrupted_run(
+                        &app, state.inner(), &final_session_id, &run_id, &goal, &run_trace_steps,
+                        &mut checkpoint, &context, &mut run_machine, "用户请求停止当前任务。".to_string(),
+                    ).await?;
+                    return Ok(());
+                }
+                None => "人类未回复，通道异常关闭".to_string(),
+            };
             context.add_error_feedback(&format!("【checkpoint 恢复后的人工确认】{}", reply));
             checkpoint.begin_planning(checkpoint.step_id, &context);
             save_checkpoint(state.inner(), &mut checkpoint)?;
@@ -710,29 +770,11 @@ pub async fn run_agent_main_loop(
         )
         .map_err(|e| e.to_string())?;
 
-        // ======== [核心注入：人类干预监听点] ========
-        while let Ok(human_msg) = rx.try_recv() {
-            println!("🚨 收到人类干预指令: {}", human_msg);
-            let intervention_format = format!(
-                "🚨【系统最高警报：人类干预】🚨\n\
-                请立即放弃原计划并彻底服从以下人类最新指令：\n\
-                “{}”\n\
-                要求：在下一轮 reflection 中承认收到指令，并在 todo_update 中重写计划！",
-                human_msg
-            );
-            context
-                .turns_history
-                .push(crate::agent::context::ChatMessage {
-                    role: "user".to_string(),
-                    content: serde_json::json!(intervention_format),
-                });
-            app.emit(
-                &format!("agent-log-{}", final_session_id),
-                "👑 人类干预指令已成功注入 AI 视野！",
-            )
-            .ok();
+        // 安全边界一：尚未请求模型时直接收束旧运行。
+        if let Some(reason) = take_pending_interrupt(&mut rx) {
+            finish_interrupted_run(&app, state.inner(), &final_session_id, &run_id, &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason).await?;
+            return Ok(());
         }
-        // ==========================================
 
         // 修复：绝不可以在这里清空 current_observation，因为这会导致 AI 看不到刚获取的页面数据
         // ================================================================
@@ -754,6 +796,10 @@ pub async fn run_agent_main_loop(
             resume_instruction,
         )
         .await?;
+        if result.route == RUN_INTERRUPTED_ROUTE {
+            finish_interrupted_run(&app, state.inner(), &final_session_id, &run_id, &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, result.stdout).await?;
+            return Ok(());
+        }
 
         // ================================================================
         // 以下是成功跳出规划+执行重试循环后的处理逻辑
@@ -1044,7 +1090,7 @@ async fn run_call_llm_and_run_tool_phases(
     context: &mut context::SandwichContext,
     mut checkpoint: &mut AgentCheckpoint,
     mut run_machine: &mut AgentRunMachine,
-    rx: &mut mpsc::Receiver<String>,
+    rx: &mut mpsc::Receiver<HumanControl>,
     resume_instruction: Option<AgentInstruction>,
 ) -> Result<(AgentInstruction, DispatchResult), String> {
     let mut retry_count = 0;
@@ -1252,6 +1298,10 @@ async fn run_call_llm_and_run_tool_phases(
             .map_err(|e| e.to_string())?;
         }
 
+        // 安全边界二：模型结果已返回、工具尚未派发时丢弃旧指令。
+        if let Some(reason) = take_pending_interrupt(rx) {
+            return Ok((inst, DispatchResult { success: true, stdout: reason, stderr: String::new(), route: RUN_INTERRUPTED_ROUTE.to_string() }));
+        }
         // 通知前端：发现了新计划（含反思）
         if !inst.reflection.is_empty() {
             app.emit(
@@ -1300,6 +1350,10 @@ async fn run_call_llm_and_run_tool_phases(
         )
         .await?;
 
+        // 安全边界三：工具已返回，保留结果但不让旧回合继续规划。
+        if let Some(reason) = take_pending_interrupt(rx) {
+            return Ok((inst, DispatchResult { success: true, stdout: reason, stderr: String::new(), route: RUN_INTERRUPTED_ROUTE.to_string() }));
+        }
         // --- C. 判断执行结果 ---
         if dispatch_result.success || inst.get_action() == "finish" {
             break (inst, dispatch_result); // 成功！
@@ -1416,7 +1470,7 @@ async fn run_tool_phase(
     context: &mut context::SandwichContext,
     mut checkpoint: &mut AgentCheckpoint,
     mut run_machine: &mut AgentRunMachine,
-    rx: &mut mpsc::Receiver<String>,
+    rx: &mut mpsc::Receiver<HumanControl>,
 ) -> Result<DispatchResult, String> {
     // --- B. 执行动作 ---
     app.emit(
@@ -1493,7 +1547,8 @@ async fn run_tool_phase(
             &format!("agent-progress-{}", final_session_id),
             json!({
                 "type": "agent_paused",
-                "message": ask_msg
+                "message": ask_msg,
+                "form": inst.get_params().get("form").cloned().unwrap_or(serde_json::Value::Null)
             }),
         )
         .ok();
@@ -1512,10 +1567,12 @@ async fn run_tool_phase(
                 question: ask_msg.clone(),
             },
         )?;
-        let reply = rx
-            .recv()
-            .await
-            .unwrap_or_else(|| "人类未回复，通道异常关闭".to_string());
+        let reply = match rx.recv().await {
+            Some(HumanControl::Answer(reply)) => reply,
+            Some(HumanControl::ReplaceGoal(goal)) => return Ok(DispatchResult { success: true, stdout: format!("用户提交了新的任务目标：{}", goal), stderr: String::new(), route: RUN_INTERRUPTED_ROUTE.to_string() }),
+            Some(HumanControl::Cancel) => return Ok(DispatchResult { success: true, stdout: "用户请求停止当前任务。".to_string(), stderr: String::new(), route: RUN_INTERRUPTED_ROUTE.to_string() }),
+            None => "人类未回复，通道异常关闭".to_string(),
+        };
         context.add_error_feedback(&format!("【人类回复】{}", reply));
         checkpoint.begin_planning(step_id, &context);
         save_checkpoint(state.inner(), &mut checkpoint)?;

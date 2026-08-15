@@ -35,6 +35,20 @@ export interface AgentTokenUsage {
     context_window: number;
     usage_percent: number;
 }
+export type AgentHumanFormKind = "single_select" | "multi_select" | "confirm" | "text";
+export interface AgentHumanFormOption {
+    id: string;
+    label: string;
+    description?: string;
+}
+export interface AgentHumanForm {
+    kind: AgentHumanFormKind;
+    title: string;
+    description?: string;
+    placeholder?: string;
+    options: AgentHumanFormOption[];
+    defaultValue?: string | string[] | boolean;
+}
 
 export interface AgentToolCall {
     name: string;
