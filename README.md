@@ -101,6 +101,16 @@ args: ["mcp-server-excel"]
 
 系统通过 `uvx`（Python）或 `npx`（Node.js）动态拉起隔离进程，**你不需要安装任何依赖**。
 
+### 远端 HTTP MCP
+
+插件中心的“远端 HTTP MCP 快速桥接”会生成现有运行时可识别的 stdio 插件配置：
+
+```text
+uvx mcp-stdio <远端_URL> --transport streamable-http
+```
+
+它同时兼容标准 **Streamable HTTP**（推荐）与旧版 **SSE** 端点。若服务使用 Bearer Token，填写后只保存到本机插件数据库和被 Git 忽略的 `.local.yaml`，不会写入可提交的项目配置；没有 Token 时可按远端服务要求走 OAuth。
+
 ---
 
 ## 🚀 工程亮点

@@ -58,6 +58,22 @@
       <div class="modal-content">
         <h2>添加 MCP 插件</h2>
         <p class="modal-hint">填入 MCP Server 的启动配置，保存后 Agent 下次启动时自动加载。</p>
+        <section class="http-bridge-preset">
+          <div class="preset-heading">
+            <strong>远端 HTTP MCP 快速桥接</strong>
+            <span>通过 uvx mcp-stdio 转换为本地 stdio，无需改动 Agent 运行时。</span>
+          </div>
+          <input v-model.trim="form.remoteUrl" type="url" placeholder="https://example.com/mcp" />
+          <div class="preset-controls">
+            <select v-model="form.httpTransport">
+              <option value="streamable-http">Streamable HTTP（推荐）</option>
+              <option value="sse">Legacy SSE</option>
+            </select>
+            <input v-model="form.bearerToken" type="password" autocomplete="off" placeholder="Bearer Token（可选）" />
+            <button type="button" class="preset-btn" @click="useHttpBridgePreset">填入桥接配置</button>
+          </div>
+          <p class="form-tip">若留空 token，桥接器会按远端要求使用 OAuth；填写 token 后仅写入本机忽略的插件配置，不会提交到 Git。</p>
+        </section>
 
         <div class="form-group">
           <label>插件名称</label>
@@ -102,6 +118,9 @@ const form = ref({
   command: '',
   argsText: '',
   envText: '',
+  remoteUrl: '',
+  httpTransport: 'streamable-http',
+  bearerToken: '',
 });
 
 const loadPlugins = async () => {
@@ -112,6 +131,23 @@ const loadPlugins = async () => {
   }
 };
 
+const useHttpBridgePreset = () => {
+  const url = form.value.remoteUrl.trim();
+  if (!url) {
+    alert('请先填写远端 MCP URL');
+    return;
+  }
+  form.value.name = form.value.name.trim() || 'remote-http-mcp';
+  form.value.command = 'uvx';
+  form.value.argsText = ['mcp-stdio', url, '--transport', form.value.httpTransport].join('\n');
+  const lines = form.value.envText
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('MCP_BEARER_TOKEN='));
+  if (form.value.bearerToken.trim()) {
+    lines.push(`MCP_BEARER_TOKEN=${form.value.bearerToken.trim()}`);
+  }
+  form.value.envText = lines.filter(Boolean).join('\n');
+};
 const savePlugin = async () => {
   try {
     const args = form.value.argsText.split('\n').map(a => a.trim()).filter(a => a.length > 0);
@@ -131,7 +167,15 @@ const savePlugin = async () => {
     });
     
     showAddModal.value = false;
-    form.value = { name: '', command: '', argsText: '', envText: '' };
+    form.value = {
+      name: '',
+      command: '',
+      argsText: '',
+      envText: '',
+      remoteUrl: '',
+      httpTransport: 'streamable-http',
+      bearerToken: '',
+    };
     await loadPlugins();
   } catch (err) {
     alert('保存失败: ' + err);
@@ -444,6 +488,56 @@ input:checked + .slider::before {
   font-size: 0.8rem;
   color: #555;
   margin: 6px 0 0 0;
+}
+.http-bridge-preset {
+  margin: 0 0 20px;
+  padding: 14px;
+  border: 1px solid rgba(61, 90, 254, 0.35);
+  border-radius: 12px;
+  background: rgba(61, 90, 254, 0.06);
+}
+.preset-heading {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.preset-heading strong {
+  color: #d8ddff;
+  font-size: 0.9rem;
+}
+.preset-heading span {
+  color: #787c8a;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.preset-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto;
+  gap: 8px;
+  margin-top: 8px;
+}
+select {
+  width: 100%;
+  background: #111;
+  border: 1px solid #333;
+  color: white;
+  padding: 10px 14px;
+  border-radius: 10px;
+  outline: none;
+  font-size: 0.85rem;
+}
+.preset-btn {
+  border: 1px solid rgba(61, 90, 254, 0.6);
+  border-radius: 10px;
+  padding: 0 14px;
+  color: #e5e7ff;
+  background: rgba(61, 90, 254, 0.22);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.preset-btn:hover {
+  background: rgba(61, 90, 254, 0.38);
 }
 
 input, textarea {
