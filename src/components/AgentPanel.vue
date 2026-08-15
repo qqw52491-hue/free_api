@@ -247,9 +247,15 @@
                             <span class="eyebrow">TASK DATA</span>
                             <h2>任务资源</h2>
                         </div>
-                        <span class="panel-count">{{ resources.length }}</span>
+                        <div class="resource-header-actions">
+                            <button class="resource-refresh" type="button" :disabled="isResourcesLoading" @click="refreshResources">
+                                {{ isResourcesLoading ? "刷新中" : "刷新" }}
+                            </button>
+                            <span class="panel-count">{{ resources.length }}</span>
+                        </div>
                     </header>
-                    <p class="resource-intro">来自运行上下文的可选资源快照。长内容将以摘要形式展示。</p>
+                    <p class="resource-intro">资源目录来自 session 的持久化任务数据区；只在需要时分页读取记录，不会把大数据塞进模型上下文。</p>
+                    <p v-if="resourceLoadError" class="resource-load-error">{{ resourceLoadError }}</p>
                     <div v-if="resources.length === 0" class="resource-empty">
                         <span>尚未收到资源上下文</span>
                         <small>资源卡会在 Agent 提供数据、游标或任务上下文时自动出现。</small>
@@ -267,11 +273,43 @@
                                 <div><dt>cursor</dt><dd :title="resource.cursor || ''">{{ resource.cursor || "—" }}</dd></div>
                             </dl>
                             <p>{{ resource.summary || "暂无资源摘要。" }}</p>
+                            <button class="resource-preview-button" type="button" @click="openResourcePreview(resource)">查看记录</button>
                         </article>
                     </div>
                 </aside>
             </section>
 
+            <div v-if="selectedResource" class="resource-preview-backdrop" @click.self="closeResourcePreview">
+                <section class="resource-preview-dialog" role="dialog" aria-modal="true" :aria-label="`${selectedResource.label} 的任务记录`">
+                    <header class="resource-preview-header">
+                        <div>
+                            <span class="eyebrow">PERSISTED RECORDS</span>
+                            <h2>{{ selectedResource.label }}</h2>
+                            <p>{{ selectedResource.resourceId }}</p>
+                        </div>
+                        <button class="resource-preview-close" type="button" @click="closeResourcePreview">关闭</button>
+                    </header>
+                    <div v-if="isRecordsLoading" class="resource-preview-loading">正在读取持久化记录…</div>
+                    <p v-else-if="recordLoadError" class="resource-load-error">{{ recordLoadError }}</p>
+                    <div v-else-if="recordPage.records.length === 0" class="resource-preview-empty">当前资源还没有可展示的记录。</div>
+                    <ol v-else class="resource-record-list">
+                        <li v-for="record in recordPage.records" :key="record.key">
+                            <header>
+                                <strong>{{ record.key }}</strong>
+                                <time>{{ record.updatedAt || "—" }}</time>
+                            </header>
+                            <pre>{{ formatPayload(record.data) }}</pre>
+                        </li>
+                    </ol>
+                    <footer class="resource-pagination">
+                        <span>{{ recordRangeLabel }}</span>
+                        <div>
+                            <button type="button" :disabled="isRecordsLoading || recordPage.offset === 0" @click="loadPreviousRecordPage">上一页</button>
+                            <button type="button" :disabled="isRecordsLoading || !recordPage.hasMore" @click="loadNextRecordPage">下一页</button>
+                        </div>
+                    </footer>
+                </section>
+            </div>
             <section v-if="finalSummary || completionMessage" class="final-result" :class="hasError ? 'failed' : 'succeeded'">
                 <div class="final-result-label">{{ hasError ? "执行结束：存在异常" : "执行结束：已返回结果" }}</div>
                 <h2>{{ completionMessage || (hasError ? "任务未能完成" : "任务已完成") }}</h2>
@@ -352,6 +390,19 @@ interface TaskResource {
     summary?: string;
     cursor?: string;
 }
+interface TaskRecordPreview {
+    key: string;
+    data: unknown;
+    updatedAt: string;
+}
+interface TaskRecordPage {
+    resourceId: string;
+    records: TaskRecordPreview[];
+    offset: number;
+    limit: number;
+    total: number;
+    hasMore: boolean;
+}
 
 const props = defineProps<{
     panelId: string;
@@ -395,6 +446,12 @@ const elapsedSeconds = ref(0);
 const runStartedAt = ref<number | null>(null);
 const timeline = ref<TimelineItem[]>([]);
 const resources = ref<TaskResource[]>([]);
+const isResourcesLoading = ref(false);
+const resourceLoadError = ref("");
+const selectedResource = ref<TaskResource | null>(null);
+const isRecordsLoading = ref(false);
+const recordLoadError = ref("");
+const recordPage = ref<TaskRecordPage>({ resourceId: "", records: [], offset: 0, limit: 20, total: 0, hasMore: false });
 const tokenUsage = ref<TokenUsageInfo | null>(null);
 const completionMessage = ref("");
 const finishOutput = ref<Record<string, unknown> | null>(null);
@@ -405,6 +462,8 @@ const timelineElement = ref<HTMLOListElement>();
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 let unlisteners: UnlistenFn[] = [];
 let timelineSequence = 0;
+let resourceRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+const RESOURCE_PAGE_SIZE = 20;
 const activeToolItems = new Map<string, string>();
 
 const groupedModels = computed(() => {
@@ -419,6 +478,12 @@ const groupedModels = computed(() => {
 const stateMeta = computed(() => stateCatalog[runState.value]);
 const activeGoalLabel = computed(() => shortText(currentGoal.value || goalInput.value || "尚未启动任务", 96));
 const elapsedLabel = computed(() => formatDuration(elapsedSeconds.value));
+const recordRangeLabel = computed(() => {
+    if (recordPage.value.total === 0) return "0 条记录";
+    const start = recordPage.value.offset + 1;
+    const end = recordPage.value.offset + recordPage.value.records.length;
+    return `第 ${start}–${end} 条，共 ${recordPage.value.total} 条`;
+});
 const isWaitingForHuman = computed(() => runState.value === "waiting_for_human");
 const canStart = computed(() => Boolean(
     !isRunning.value
@@ -680,11 +745,95 @@ function handleContext(payload: unknown) {
         const merged = new Map(resources.value.map((resource) => [resource.resourceId, resource]));
         nextResources.forEach((resource) => merged.set(resource.resourceId, { ...merged.get(resource.resourceId), ...resource }));
         resources.value = [...merged.values()].slice(0, 40);
+        scheduleResourceRefresh();
     }
     const summary = toText(data.summary || data.message || asRecord(data.context).summary);
     if (summary || nextResources.length) addTimeline({ kind: "system", title: "任务上下文已更新", detail: shortText(summary || `已更新 ${nextResources.length} 个资源卡片。`, 280), timestamp: toTimestamp(data.timestamp) });
 }
 
+function mergePersistedResources(nextResources: TaskResource[]) {
+    const merged = new Map(resources.value.map((resource) => [resource.resourceId, resource]));
+    nextResources.forEach((resource) => merged.set(resource.resourceId, { ...merged.get(resource.resourceId), ...resource }));
+    resources.value = [...merged.values()].slice(0, 40);
+}
+async function refreshResources() {
+    if (isResourcesLoading.value) return;
+    isResourcesLoading.value = true;
+    resourceLoadError.value = "";
+    try {
+        const payload = await invoke<unknown[]>("get_agent_task_resources", { sessionId });
+        const nextResources = (Array.isArray(payload) ? payload : [])
+            .map((entry, index) => normalizeResource(asRecord(entry), index))
+            .filter((resource): resource is TaskResource => resource !== null);
+        mergePersistedResources(nextResources);
+    } catch (error) {
+        resourceLoadError.value = toText(error) || "无法读取当前 session 的任务资源。";
+    } finally {
+        isResourcesLoading.value = false;
+    }
+}
+function scheduleResourceRefresh() {
+    if (resourceRefreshTimer) return;
+    resourceRefreshTimer = setTimeout(() => {
+        resourceRefreshTimer = null;
+        void refreshResources();
+    }, 250);
+}
+function normalizeRecordPage(payload: unknown, fallbackResourceId: string): TaskRecordPage {
+    const data = asRecord(payload);
+    const page = asRecord(data.page);
+    const records = (Array.isArray(data.records) ? data.records : []).map((entry, index) => {
+        const record = asRecord(entry);
+        return {
+            key: toText(record.key || `record-${index + 1}`),
+            data: record.data ?? record,
+            updatedAt: toText(record.updated_at || record.updatedAt || ""),
+        };
+    });
+    return {
+        resourceId: toText(data.resource_id || data.resourceId || fallbackResourceId),
+        records,
+        offset: numberOrUndefined(page.offset) ?? 0,
+        limit: numberOrUndefined(page.limit) ?? RESOURCE_PAGE_SIZE,
+        total: numberOrUndefined(page.total) ?? records.length,
+        hasMore: page.has_more === true || page.hasMore === true,
+    };
+}
+async function loadResourceRecords(offset = 0) {
+    const resource = selectedResource.value;
+    if (!resource || isRecordsLoading.value) return;
+    isRecordsLoading.value = true;
+    recordLoadError.value = "";
+    try {
+        const payload = await invoke<unknown>("get_agent_task_records", {
+            sessionId,
+            resourceId: resource.resourceId,
+            offset,
+            limit: RESOURCE_PAGE_SIZE,
+        });
+        recordPage.value = normalizeRecordPage(payload, resource.resourceId);
+    } catch (error) {
+        recordLoadError.value = toText(error) || "无法读取该资源的记录。";
+    } finally {
+        isRecordsLoading.value = false;
+    }
+}
+function openResourcePreview(resource: TaskResource) {
+    selectedResource.value = resource;
+    recordPage.value = { resourceId: resource.resourceId, records: [], offset: 0, limit: RESOURCE_PAGE_SIZE, total: 0, hasMore: false };
+    recordLoadError.value = "";
+    void loadResourceRecords(0);
+}
+function closeResourcePreview() {
+    selectedResource.value = null;
+    recordLoadError.value = "";
+}
+function loadPreviousRecordPage() {
+    void loadResourceRecords(Math.max(0, recordPage.value.offset - recordPage.value.limit));
+}
+function loadNextRecordPage() {
+    if (recordPage.value.hasMore) void loadResourceRecords(recordPage.value.offset + recordPage.value.records.length);
+}
 function completeRun(payload: Record<string, unknown>, succeeded: boolean) {
     const message = toText(payload.message) || (succeeded ? "任务已完成。" : "任务未能完成。")
     completionMessage.value = message;
@@ -700,6 +849,7 @@ function completeRun(payload: Record<string, unknown>, succeeded: boolean) {
             finishOutput.value = { summary: output };
         }
     }
+    scheduleResourceRefresh();
     setRunState(succeeded ? "succeeded" : "failed", message);
     addTimeline({ kind: succeeded ? "success" : "error", title: succeeded ? "任务已完成" : "任务结束：失败", detail: message, status: succeeded ? "succeeded" : "failed", timestamp: toTimestamp(payload.timestamp) });
 }
@@ -709,6 +859,10 @@ async function runAgent() {
     currentGoal.value = goalInput.value.trim();
     timeline.value = [];
     resources.value = [];
+    resourceLoadError.value = "";
+    selectedResource.value = null;
+    recordLoadError.value = "";
+    recordPage.value = { resourceId: "", records: [], offset: 0, limit: RESOURCE_PAGE_SIZE, total: 0, hasMore: false };
     tokenUsage.value = null;
     completionMessage.value = "";
     finishOutput.value = null;
@@ -775,6 +929,10 @@ async function sendHumanInput() {
 function clearAll() {
     timeline.value = [];
     resources.value = [];
+    resourceLoadError.value = "";
+    selectedResource.value = null;
+    recordLoadError.value = "";
+    recordPage.value = { resourceId: "", records: [], offset: 0, limit: RESOURCE_PAGE_SIZE, total: 0, hasMore: false };
     tokenUsage.value = null;
     completionMessage.value = "";
     finishOutput.value = null;
@@ -904,6 +1062,7 @@ function numberOrUndefined(value: unknown) {
 }
 
 onMounted(async () => {
+    void refreshResources();
     const register = async (channel: string, handler: (payload: unknown) => void) => {
         try {
             unlisteners.push(await listen<unknown>(channel, (event) => handler(event.payload)));
@@ -922,6 +1081,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
     stopElapsedTimer();
+    if (resourceRefreshTimer) clearTimeout(resourceRefreshTimer);
     unlisteners.forEach((unlisten) => unlisten());
     unlisteners = [];
 });
@@ -1943,5 +2103,157 @@ button:disabled {
     .tool-header-meta {
         justify-content: flex-start;
     }
+}
+.resource-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+.resource-refresh,
+.resource-preview-button,
+.resource-preview-close,
+.resource-pagination button {
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    color: var(--text-soft);
+    background: rgba(15, 23, 34, 0.84);
+    cursor: pointer;
+    font: inherit;
+}
+.resource-refresh,
+.resource-preview-close,
+.resource-pagination button {
+    padding: 6px 9px;
+    font-size: 12px;
+}
+.resource-preview-button {
+    width: 100%;
+    margin-top: 4px;
+    padding: 8px 10px;
+    color: var(--accent);
+    font-size: 12px;
+}
+.resource-refresh:hover:not(:disabled),
+.resource-preview-button:hover,
+.resource-preview-close:hover,
+.resource-pagination button:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--text);
+    background: var(--accent-soft);
+}
+.resource-refresh:disabled,
+.resource-pagination button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+.resource-load-error {
+    margin: -2px 0 10px;
+    color: var(--danger);
+    font-size: 12px;
+    line-height: 1.55;
+}
+.resource-preview-backdrop {
+    position: fixed;
+    z-index: 30;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: rgba(2, 6, 13, 0.72);
+    backdrop-filter: blur(5px);
+}
+.resource-preview-dialog {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    width: min(860px, 100%);
+    max-height: min(760px, calc(100vh - 48px));
+    overflow: hidden;
+    border: 1px solid var(--line-strong);
+    border-radius: 16px;
+    background: #0d1520;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.46);
+}
+.resource-preview-header,
+.resource-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--line);
+}
+.resource-preview-header h2 {
+    margin: 4px 0 0;
+    font-size: 18px;
+}
+.resource-preview-header p {
+    margin: 5px 0 0;
+    overflow: hidden;
+    color: var(--text-faint);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.resource-preview-loading,
+.resource-preview-empty {
+    display: grid;
+    min-height: 180px;
+    place-items: center;
+    padding: 28px;
+    color: var(--text-faint);
+}
+.resource-record-list {
+    min-height: 0;
+    margin: 0;
+    padding: 12px 18px;
+    overflow: auto;
+    list-style: none;
+}
+.resource-record-list li {
+    margin-bottom: 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+    background: rgba(21, 30, 43, 0.62);
+}
+.resource-record-list header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 11px;
+    border-bottom: 1px solid var(--line);
+    color: var(--text-soft);
+    font-size: 12px;
+}
+.resource-record-list time {
+    color: var(--text-faint);
+    font-size: 11px;
+}
+.resource-record-list pre {
+    max-height: 220px;
+    margin: 0;
+    padding: 11px;
+    overflow: auto;
+    color: #cbd8e8;
+    font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.resource-pagination {
+    border-top: 1px solid var(--line);
+    border-bottom: 0;
+    color: var(--text-faint);
+    font-size: 12px;
+}
+.resource-pagination > div {
+    display: inline-flex;
+    gap: 8px;
+}
+@media (max-width: 720px) {
+    .resource-preview-backdrop { padding: 12px; }
+    .resource-preview-dialog { max-height: calc(100vh - 24px); }
+    .resource-preview-header,
+    .resource-pagination { align-items: flex-start; flex-direction: column; }
 }
 </style>
