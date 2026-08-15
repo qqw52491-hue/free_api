@@ -1,5 +1,5 @@
 use crate::agent::mcp::{McpClient, PluginConfig};
-use crate::agent::mcp_catalog::{invalidate_plugin, status as catalog_status, McpCatalogStatus};
+use crate::agent::mcp_catalog::{invalidate_plugin, remember_tools, status as catalog_status, McpCatalogStatus};
 use crate::agent::task_store;
 use crate::db::{ChatMessage, ChatSession, DbState, Model, Platform};
 use crate::llm::{self, ModelConfig, StreamEvent};
@@ -138,11 +138,12 @@ pub async fn refresh_mcp_plugin_connection(
     let mut client = McpClient::spawn(config.clone())?;
     client.initialize()?;
     let tools = client.list_tools()?;
+    remember_tools(&config, &tools);
     Ok(McpCatalogStatus {
         name,
         tool_count: tools.len(),
         tools,
-        cached: false,
+        cached: true,
         refreshed_at_ms: Some(Utc::now().timestamp_millis() as u128),
     })
 }

@@ -95,6 +95,9 @@ export function useAgentSession(sessionId: string) {
     );
     const finishOutput = ref<Record<string, unknown> | null>(null);
     const hasError = ref(false);
+    // 每次运行只有首次终态可改变 UI；终态后的异步流事件必须被丢弃，
+    // 避免“已完成”之后又显示思考中、工具执行中或新的失败步骤。
+    const runTerminal = ref(true);
     const scrollContainerElement = ref<HTMLElement | null>(null);
 
     const {
@@ -181,6 +184,7 @@ export function useAgentSession(sessionId: string) {
         statusDescription.value = description || AGENT_RUN_STATE_CATALOG[nextState].description;
         const terminal = ["succeeded", "failed", "cancelled"].includes(nextState);
         if (terminal) {
+            runTerminal.value = true;
             isRunning.value = false;
             stopElapsedTimer();
             if (isThinking.value) {
@@ -229,6 +233,7 @@ export function useAgentSession(sessionId: string) {
     }
 
     function handleRunState(payload: Record<string, unknown>) {
+        if (runTerminal.value) return;
         const state = normalizeState(payload.state);
         const message = toText(payload.message || payload.description);
         setRunState(state, message || undefined);
@@ -244,6 +249,7 @@ export function useAgentSession(sessionId: string) {
     }
 
     function handleToolEvent(payload: Record<string, unknown>) {
+        if (runTerminal.value) return;
         const eventType = String(payload.event_type || payload.type || "started").toLowerCase();
         const stepId = numberOrUndefined(payload.step_id) ?? 0;
         const name = toText(payload.tool || payload.name) || "内置工具";
@@ -304,6 +310,7 @@ export function useAgentSession(sessionId: string) {
     }
 
     function completeRun(payload: Record<string, unknown>, succeeded: boolean) {
+        if (runTerminal.value) return;
         const message = toText(payload.message) || (succeeded ? "任务已全部完成。" : "任务未能顺利完成。");
         completionMessage.value = message;
         hasError.value = !succeeded;
@@ -326,6 +333,7 @@ export function useAgentSession(sessionId: string) {
     }
 
     function handleProgress(payload: Record<string, unknown>) {
+        if (runTerminal.value) return;
         const usage = normalizeUsage(payload);
         if (usage) tokenUsage.value = usage;
 
@@ -460,10 +468,12 @@ export function useAgentSession(sessionId: string) {
     }
 
     function handleLog(payload: unknown) {
+        if (runTerminal.value) return;
         appendLog(payload);
     }
 
     function handleContext(payload: unknown) {
+        if (runTerminal.value) return;
         const data = asRecord(payload);
         const candidates = [data.resources, data.resource, asRecord(data.context).resources, asRecord(data.data).resources]
             .flatMap((entry) => Array.isArray(entry) ? entry : entry ? [entry] : []);
@@ -476,6 +486,7 @@ export function useAgentSession(sessionId: string) {
     }
 
     function clearSession() {
+        runTerminal.value = true;
         steps.value = [];
         selectedStepId.value = null;
         thought.value = "";
@@ -502,6 +513,8 @@ export function useAgentSession(sessionId: string) {
     async function runAgent() {
         if (!canStart.value) return;
         clearSession();
+        // 在 invoke 前打开新的事件世代；上一轮的迟到消息仍被终态屏障拦截。
+        runTerminal.value = false;
         currentGoal.value = goalInput.value.trim();
         goalInput.value = "";
         runStartedAt.value = Date.now();
