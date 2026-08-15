@@ -51,6 +51,7 @@ pub fn run() {
             commands::get_agent_task_resources,
             commands::get_agent_task_records,
             commands::get_session_run_traces,
+            commands::read_agent_summary_markdown,
             // Agent 执行
             agent::execute_command,
             agent::run_agent_main_loop,

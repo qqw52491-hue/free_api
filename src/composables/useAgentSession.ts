@@ -115,6 +115,7 @@ export function useAgentSession(sessionId: string) {
     // 仅保留没有任何运行轨迹可归属的早期旧消息；有轨迹的消息由对应回合原位显示。
     const legacyConversationMessages = computed(() => conversationMessages.value.filter((message) => !historyRuns.value.some((run) => isMessageInsideRun(message, run))));
     const finishOutput = ref<Record<string, unknown> | null>(null);
+    const completionMarkdown = ref("");
     const hasError = ref(false);
     // 每次运行只有首次终态可改变 UI；终态后的异步流事件必须被丢弃，
     // 避免“已完成”之后又显示思考中、工具执行中或新的失败步骤。
@@ -156,6 +157,7 @@ export function useAgentSession(sessionId: string) {
     const completedToolCount = computed(() => steps.value.filter((item) => item.status === "succeeded").length);
     const failedToolCount = computed(() => steps.value.filter((item) => item.status === "failed").length);
     const finalSummary = computed(() => {
+        if (completionMarkdown.value) return completionMarkdown.value;
         const output = finishOutput.value || {};
         return toText(output.summary || output.message || output.result || output.content || "");
     });
@@ -164,6 +166,16 @@ export function useAgentSession(sessionId: string) {
         const candidates = [output.artifacts, output.files, output.created_files, output.paths];
         return candidates.flatMap((candidate) => Array.isArray(candidate) ? candidate.map((value) => toText(value)).filter(Boolean) : []);
     });
+    async function resolveSummaryMarkdown(artifacts: string[]) {
+        const markdownPath = artifacts.find((artifact) => artifact.toLowerCase().endsWith(".md"));
+        if (!markdownPath) return "";
+        try {
+            return await invoke<string>("read_agent_summary_markdown", { path: markdownPath });
+        } catch (error) {
+            appendLog(`[任务总结读取失败] ${toText(error)}`);
+            return "";
+        }
+    }
     function traceStepStatus(value: unknown): AgentToolStatus {
         const normalized = toText(value).toLowerCase();
         if (normalized === "failed" || normalized === "error") return "failed";
@@ -246,7 +258,12 @@ export function useAgentSession(sessionId: string) {
     async function loadRunTraces() {
         try {
             const traces = await invoke<unknown[]>("get_session_run_traces", { sessionId });
-            historyRuns.value = (Array.isArray(traces) ? traces : []).map((trace) => normalizeRunTrace(trace));
+            const runs = (Array.isArray(traces) ? traces : []).map((trace) => normalizeRunTrace(trace));
+            await Promise.all(runs.map(async (run) => {
+                const markdown = await resolveSummaryMarkdown(run.artifacts);
+                if (markdown) run.summary = markdown;
+            }));
+            historyRuns.value = runs;
         } catch (error) {
             appendLog(`[过程历史加载失败] ${toText(error)}`);
         }
@@ -441,6 +458,9 @@ export function useAgentSession(sessionId: string) {
             }
         }
         scheduleResourceRefresh();
+        void resolveSummaryMarkdown(finalArtifacts.value).then((markdown) => {
+            if (markdown) completionMarkdown.value = markdown;
+        });
         setRunState(succeeded ? "succeeded" : "failed", message);
         appendLog(`[任务结束] ${succeeded ? "✅ 成功" : "❌ 失败"}: ${message}`);
         autoScrollToBottom();
@@ -617,6 +637,7 @@ export function useAgentSession(sessionId: string) {
         tokenUsage.value = null;
         completionMessage.value = "";
         finishOutput.value = null;
+        completionMarkdown.value = "";
         hasError.value = false;
         currentGoal.value = "";
         pauseReason.value = "";

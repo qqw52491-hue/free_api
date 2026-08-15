@@ -63,6 +63,8 @@
                         <h3 v-if="line.kind === 'heading'">{{ line.content }}</h3>
                         <li v-else-if="line.kind === 'list'">{{ line.content }}</li>
                         <blockquote v-else-if="line.kind === 'quote'">{{ line.content }}</blockquote>
+                        <hr v-else-if="line.kind === 'rule'" class="summary-rule" />
+                        <pre v-else-if="line.kind === 'table'" class="summary-table">{{ line.content }}</pre>
                         <p v-else>{{ line.content }}</p>
                     </template>
                 </div>
@@ -179,6 +181,8 @@ function summaryBlocks(value: string) {
         if (/^#{1,6}\s+/.test(line)) return { kind: "heading", content: line.replace(/^#{1,6}\s+/, "") };
         if (/^[-*+]\s+/.test(line)) return { kind: "list", content: line.replace(/^[-*+]\s+/, "") };
         if (/^>\s?/.test(line)) return { kind: "quote", content: line.replace(/^>\s?/, "") };
+        if (/^-{3,}$/.test(line)) return { kind: "rule", content: "" };
+        if (/^\|.*\|$/.test(line)) return { kind: "table", content: line };
         return { kind: "paragraph", content: line };
     });
 }
@@ -197,4 +201,19 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
 .active-thought-stream { margin: 4px 0 4px 15px; border: 1px solid #3c3c42; border-radius: 6px; cursor: pointer; background: #242428; }.active-thought-stream.selected,.active-thought-stream:hover { border-color: #61616a; background: #29292e; }.active-thought-stream header { display: grid; grid-template-columns: 10px auto minmax(0,1fr) auto; gap: 7px; align-items: center; min-height: 25px; padding: 0 8px; color: #cfcfd4; font-size: 11px; }.active-thought-stream header em { color: #94949a; font-size: 10px; font-style: normal; }.active-thought-stream header time { color: #73737a; font-size: 10px; }.active-thought-content { max-height: 124px; margin: 0; padding: 6px 8px 8px 25px; overflow: auto; color: #a9a9af; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; scrollbar-width: thin; }.root-thought-stream { margin-left: 0; }.final-artifacts { display: flex; margin-top: 8px; gap: 5px; flex-direction: column; }.final-artifacts b { color: #bdbdc4; font-size: 10px; }.final-artifacts code { overflow: hidden; color: #88888f; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }.final-artifacts code.markdown { color: #c8d5e6; }
 
 .summary-rich { display: flex; margin-top: 9px; gap: 5px; flex-direction: column; color: #d6d6da; }.summary-rich h3 { margin: 3px 0 1px; color: #ececef; font-size: 13px; }.summary-rich p,.summary-rich li,.summary-rich blockquote { margin: 0; color: #b9b9bf; font-size: 12px; line-height: 1.68; white-space: pre-wrap; }.summary-rich li { margin-left: 18px; }.summary-rich blockquote { border-left: 2px solid #63636b; padding-left: 9px; color: #c7c7cc; }.result-line strong + .summary-rich { margin-top: 7px; }
+
+/* 窄窗口中外框保持收敛，内部网格保持稳定最小宽度并在卡片内横向滚动，绝不再把文字挤成碎片。 */
+.process-tree { padding: 14px clamp(12px, 2.4vw, 30px) 20px; gap: 8px; }
+.tree-list { width: min(760px, 100%); min-width: 0; }
+.plan-node { width: min(760px, 100%); overflow-x: auto; scrollbar-width: thin; }
+.plan-row,.plan-children { min-width: 510px; }
+.goal-row { min-width: 486px; }
+.child-row { min-width: 460px; }
+.plan-row,.goal-row,.child-row { box-sizing: border-box; }
+.plan-title,.goal-label,.child-row > span:not(.child-mark) { min-width: 0; }
+.result-line { width: min(760px, 100%); box-sizing: border-box; }
+.summary-rule { width: 100%; border: 0; border-top: 1px solid #44444a; margin: 7px 0; }
+.summary-table { max-width: 100%; margin: 2px 0; overflow-x: auto; color: #aeb0b8; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+@media (max-width: 580px) { .plan-row,.plan-children { min-width: 476px; } .goal-row { min-width: 454px; } .child-row { min-width: 430px; } }
+
 </style>
