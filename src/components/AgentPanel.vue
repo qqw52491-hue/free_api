@@ -22,7 +22,8 @@
             <main class="chat-column">
                 <AgentChatStream
                     :current-goal="session.currentGoal.value"
-                    :conversation-messages="session.conversationMessages.value"
+                    :legacy-messages="session.legacyConversationMessages.value"
+                    :history-turns="session.historyTurns.value"
                     :steps="session.steps.value"
                     :selected-step-id="session.selectedStepId.value"
                     :selected-subpart="selectedSubpart"

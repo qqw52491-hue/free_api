@@ -2,7 +2,19 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentTaskResources } from "./useAgentTaskResources";
-import { usePersistedAgentConversation } from "./usePersistedAgentConversation";
+import { usePersistedAgentConversation, type PersistedConversationMessage } from "./usePersistedAgentConversation";
+export interface AgentHistoryTurn {
+    id: string;
+    goal: string;
+    status: string;
+    steps: AgentStepItem[];
+    messages: Array<PersistedConversationMessage & { timestamp: number }>;
+    summary: string;
+    artifacts: string[];
+    startedAt: number;
+    completedAt: number;
+}
+interface HistoryRunSnapshot extends Omit<AgentHistoryTurn, "messages"> {}
 import {
     AGENT_RUN_STATE_CATALOG,
     type AgentLogEntry,
@@ -77,10 +89,10 @@ export function useAgentSession(sessionId: string) {
     const runStartedAt = ref<number | null>(null);
 
     // 结构化对话状态（解决反复添加和闪烁的关键数据结构）
-    // 当前实时运行与历史复盘分开保存；开始新任务时只重置实时数组。
+    // 当前实时运行与已完成回合分开保存；新任务只重置实时数组。
     const steps = ref<AgentStepItem[]>([]);
-    const historicalSteps = ref<AgentStepItem[]>([]);
-    const displayedSteps = computed(() => [...historicalSteps.value, ...steps.value]);
+    const historyRuns = ref<HistoryRunSnapshot[]>([]);
+    const displayedSteps = computed(() => [...historyTurns.value.flatMap((turn) => turn.steps), ...steps.value]);
     const selectedStepId = ref<string | null>(null);
     const thought = ref("");
     const isThinking = ref(false);
@@ -96,6 +108,12 @@ export function useAgentSession(sessionId: string) {
         sessionId,
         (message) => appendLog(`[会话历史加载失败] ${message}`),
     );
+    const historyTurns = computed<AgentHistoryTurn[]>(() => historyRuns.value.map((run) => ({
+        ...run,
+        messages: messagesForRun(run).map((message) => ({ ...message, timestamp: traceTimestamp(message.created_at) })),
+    })));
+    // 仅保留没有任何运行轨迹可归属的早期旧消息；有轨迹的消息由对应回合原位显示。
+    const legacyConversationMessages = computed(() => conversationMessages.value.filter((message) => !historyRuns.value.some((run) => isMessageInsideRun(message, run))));
     const finishOutput = ref<Record<string, unknown> | null>(null);
     const hasError = ref(false);
     // 每次运行只有首次终态可改变 UI；终态后的异步流事件必须被丢弃，
@@ -153,12 +171,24 @@ export function useAgentSession(sessionId: string) {
         if (normalized === "running") return "running";
         return "pending";
     }
-    function normalizeRunTraceSteps(value: unknown): AgentStepItem[] {
+    function traceTimestamp(value: unknown, fallback = Date.now()) {
+        const parsed = Date.parse(toText(value));
+        return Number.isFinite(parsed) ? parsed : fallback;
+    }
+    function artifactPaths(value: Record<string, unknown>) {
+        return [value.artifacts, value.files, value.created_files, value.paths]
+            .flatMap((candidate) => Array.isArray(candidate) ? candidate.map((item) => toText(item)).filter(Boolean) : []);
+    }
+    function normalizeRunTrace(value: unknown): HistoryRunSnapshot {
         const trace = asRecord(value);
         const runId = toText(trace.id) || "unknown-run";
         const goal = toText(trace.goal) || "历史任务";
+        const startedAt = traceTimestamp(trace.started_at);
+        const updatedAt = traceTimestamp(trace.updated_at, startedAt);
+        const completedAt = traceTimestamp(trace.completed_at, updatedAt);
+        const completion = asRecord(trace.completion);
         const rawSteps = Array.isArray(trace.steps) ? trace.steps : [];
-        return rawSteps.map((rawStep, index) => {
+        const steps = rawSteps.map((rawStep, index): AgentStepItem => {
             const step = asRecord(rawStep);
             const stepId = numberOrUndefined(step.id ?? step.step_id) ?? index;
             const tool = toText(step.tool || step.action) || "action";
@@ -170,7 +200,6 @@ export function useAgentSession(sessionId: string) {
                 id: `history-${runId}-step-${stepId}-${index}`,
                 stepId,
                 description: toText(step.description) || "已执行步骤",
-                // 多个已完成回合可能都含 plan-1；前缀确保树节点永不合并。
                 planId: `history-run-${runId}-${sourcePlanId}`,
                 planTitle,
                 modelTier: toText(step.model_tier || step.modelTier) || undefined,
@@ -185,31 +214,43 @@ export function useAgentSession(sessionId: string) {
                 result,
                 rawParams: params,
                 rawResult: result,
-                timestamp: toTimestamp(step.timestamp),
+                timestamp: numberOrUndefined(step.timestamp) ?? startedAt,
             };
+        });
+        return {
+            id: runId,
+            goal,
+            status: toText(trace.status) || "running",
+            steps,
+            summary: toText(completion.summary || completion.details || completion.message || completion.result || completion.content),
+            artifacts: artifactPaths(completion),
+            startedAt,
+            completedAt,
+        };
+    }
+    function isMessageInsideRun(message: PersistedConversationMessage, run: HistoryRunSnapshot) {
+        const timestamp = traceTimestamp(message.created_at, 0);
+        return timestamp >= run.startedAt - 5000 && timestamp <= run.completedAt + 5000;
+    }
+    function messagesForRun(run: HistoryRunSnapshot) {
+        const normalizedGoal = run.goal.trim();
+        const normalizedSummary = run.summary.trim();
+        return conversationMessages.value.filter((message) => {
+            if (!isMessageInsideRun(message, run)) return false;
+            const content = message.content.trim();
+            if (message.role === "user" && content === normalizedGoal) return false;
+            if (message.role !== "user" && normalizedSummary && content === normalizedSummary) return false;
+            return true;
         });
     }
     async function loadRunTraces() {
         try {
             const traces = await invoke<unknown[]>("get_session_run_traces", { sessionId });
-            const list = Array.isArray(traces) ? traces : [];
-            historicalSteps.value = list.flatMap((trace) => normalizeRunTraceSteps(trace));
-            const latestTerminal = [...list].reverse().map((trace) => asRecord(trace)).find((trace) => {
-                const status = toText(trace.status).toLowerCase();
-                return ["succeeded", "failed", "cancelled"].includes(status);
-            });
-            if (!latestTerminal || isRunning.value || completionMessage.value) return;
-            const completion = asRecord(latestTerminal.completion);
-            if (!Object.keys(completion).length) return;
-            finishOutput.value = completion;
-            const restoredSummary = toText(completion.summary || completion.message || completion.details || completion.result);
-            completionMessage.value = restoredSummary || (toText(latestTerminal.status) === "succeeded" ? "任务已完成" : "任务未能完成");
-            hasError.value = toText(latestTerminal.status) === "failed";
+            historyRuns.value = (Array.isArray(traces) ? traces : []).map((trace) => normalizeRunTrace(trace));
         } catch (error) {
             appendLog(`[过程历史加载失败] ${toText(error)}`);
         }
     }
-
     function setScrollElement(element: HTMLElement | null) {
         scrollContainerElement.value = element;
     }
@@ -614,8 +655,14 @@ export function useAgentSession(sessionId: string) {
             setRunState("failed", message);
             appendLog(`[启动异常] ${message}`);
         } finally {
-            // 主循环返回时，本轮最终摘要已由后端写入 chat_messages；刷新长期会话即可继续对话。
-            void loadConversation();
+            // 任务结束后立即把当前实时区域折叠为一个已持久化回合；下一轮只会在其下方追加。
+            await loadConversation();
+            await loadRunTraces();
+            const newest = historyRuns.value[historyRuns.value.length - 1];
+            if (newest && newest.goal === currentGoal.value && ["succeeded", "failed", "cancelled"].includes(newest.status)) {
+                clearSession();
+                autoScrollToBottom(false);
+            }
         }
     }
     async function requestStop() {
@@ -657,8 +704,8 @@ export function useAgentSession(sessionId: string) {
     }
 
     onMounted(async () => {
-        void loadConversation();
-        void loadRunTraces();
+        await loadConversation();
+        await loadRunTraces();
         void refreshResources();
         const register = async (channel: string, handler: (payload: unknown) => void) => {
             try {
@@ -696,6 +743,8 @@ export function useAgentSession(sessionId: string) {
         elapsedSeconds,
         elapsedLabel,
         steps: displayedSteps,
+        historyTurns,
+        legacyConversationMessages,
         selectedStepId,
         selectedStep,
         thought,
