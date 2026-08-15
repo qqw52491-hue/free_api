@@ -90,6 +90,10 @@ impl SandwichContext {
 
     pub fn update_memories(&mut self, updates: Vec<crate::agent::types::MemoryItem>) {
         for item in updates {
+            if item.key.trim().is_empty() || item.value.trim().is_empty() {
+                println!("⚠️ 跳过缺少 key 或 value 的无效记忆项");
+                continue;
+            }
             self.memories.insert(item.key, item.value);
         }
     }

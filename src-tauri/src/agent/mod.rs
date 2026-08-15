@@ -68,6 +68,13 @@ fn advance_run_state(
     Ok(())
 }
 
+/// `finish` 是 Agent 协议的终态动作，不是本地工具或 MCP 工具。
+/// 统一判定可防止某个调用路径把已完成任务派发为未知 action。
+fn is_finish_instruction(instruction: &AgentInstruction) -> bool {
+    instruction.get_tool().eq_ignore_ascii_case("finish")
+        || instruction.get_action().eq_ignore_ascii_case("finish")
+}
+
 /// 面向 AgentPanel 的轻量工具生命周期事件。只发送参数和输出摘要；完整大对象
 /// 仍由 task_store / 文件系统持久化，不能被事件流或模型上下文重复承载。
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +241,20 @@ pub fn run_agent_step(
     registry: &mut PluginRegistry,
 ) -> DispatchResult {
     let tool_name = instruction.get_tool().to_lowercase();
+    if is_finish_instruction(instruction) {
+        return DispatchResult {
+            stdout: instruction
+                .command
+                .as_ref()
+                .and_then(|value| value.get("summary").or_else(|| value.get("details")))
+                .and_then(|value| value.as_str())
+                .unwrap_or("任务已完成")
+                .to_string(),
+            stderr: String::new(),
+            success: true,
+            route: "finish".to_string(),
+        };
+    }
 
     // --- 核心修复：兼容 root.commands 和 root.command.commands ---
     let mut batch_commands = instruction.commands.clone();
@@ -839,8 +860,7 @@ pub async fn run_agent_main_loop(
         context.current_observation = output_text.clone();
         // 工具结果已经进入可恢复上下文。先提交 durable phase/cursor，再通知前端；
         // 这样崩溃恢复不会把已经完成的普通步骤当作待执行，也不会把 finish 误续跑。
-        let is_finish =
-            instruction.tool.as_deref() == Some("finish") || instruction.get_action() == "finish";
+        let is_finish = is_finish_instruction(&instruction);
         if is_finish {
             checkpoint.mark_done(&context);
         } else {
@@ -1347,7 +1367,34 @@ async fn run_tool_phase(
         None,
     );
 
-    // --- B1. 特殊拦截：AI 主动挂起呼叫人类 ---
+    // --- B1. 协议终态：finish 不创建 pending、不派发工具，直接交由主循环完成 checkpoint 和状态收敛。 ---
+    if is_finish_instruction(inst) {
+        let result = DispatchResult {
+            stdout: inst
+                .command
+                .as_ref()
+                .and_then(|value| value.get("summary").or_else(|| value.get("details")))
+                .and_then(|value| value.as_str())
+                .unwrap_or("任务已完成")
+                .to_string(),
+            stderr: String::new(),
+            success: true,
+            route: "finish".to_string(),
+        };
+        emit_tool_event(
+            app,
+            final_session_id,
+            step_id,
+            inst,
+            "succeeded",
+            Some(result.route.clone()),
+            Some(true),
+            &result.stdout,
+            Some(tool_started_at.elapsed().as_millis()),
+        );
+        return Ok(result);
+    }
+    // --- B2. 特殊拦截：AI 主动挂起呼叫人类 ---
     let dispatch_result = if inst.get_tool().to_lowercase() == "ask_human" {
         let ask_msg = inst
             .get_params()
@@ -1459,4 +1506,48 @@ async fn run_tool_phase(
     );
 
     Ok(dispatch_result)
+}
+
+
+#[cfg(test)]
+mod finish_instruction_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn finish_is_recognized_from_tool_or_action_without_tool_dispatch() {
+        let by_tool: AgentInstruction = serde_json::from_value(json!({
+            "tool": "finish",
+            "command": { "summary": "已完成" }
+        }))
+        .unwrap();
+        let by_action: AgentInstruction = serde_json::from_value(json!({
+            "tool": "core",
+            "action": "finish",
+            "command": { "summary": "已完成" }
+        }))
+        .unwrap();
+
+        assert!(is_finish_instruction(&by_tool));
+        assert!(is_finish_instruction(&by_action));
+    }
+
+    #[test]
+    fn run_agent_step_short_circuits_finish_before_unknown_dispatch() {
+        let instruction: AgentInstruction = serde_json::from_value(json!({
+            "tool": "finish",
+            "command": { "summary": "Excel 已创建" }
+        }))
+        .unwrap();
+        let db = crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )));
+        let mut registry = PluginRegistry::new();
+
+        let result = run_agent_step(&db, "finish-regression", &instruction, &mut registry);
+        assert!(result.success);
+        assert_eq!(result.route, "finish");
+        assert_eq!(result.stdout, "Excel 已创建");
+        assert!(result.stderr.is_empty());
+    }
 }

@@ -43,10 +43,43 @@ pub struct ShortMemory {
     pub success: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MemoryItem {
     pub key: String,
     pub value: String,
+}
+
+/// 兼容新旧模型输出的记忆载荷。执行上下文最终只存 `key -> value`，但此前
+/// 部分提示会诱导模型输出 `summary/detail`；这种可规范化差异不能使整轮规划失败。
+impl<'de> Deserialize<'de> for MemoryItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawMemoryItem {
+            #[serde(default)]
+            key: String,
+            #[serde(default)]
+            value: String,
+            #[serde(default)]
+            summary: String,
+            #[serde(default)]
+            detail: String,
+        }
+
+        let raw = RawMemoryItem::deserialize(deserializer)?;
+        let value = if !raw.value.trim().is_empty() {
+            raw.value
+        } else {
+            [raw.summary.trim(), raw.detail.trim()]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        Ok(Self { key: raw.key, value })
+    }
 }
 
 // ==================== Token 用量统计 ====================
@@ -232,4 +265,43 @@ pub struct DispatchResult {
     pub stderr: String,
     pub success: bool,
     pub route: String,
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_summary_and_detail_are_normalized_without_rejecting_instruction() {
+        let instruction: AgentInstruction = serde_json::from_value(json!({
+            "tool": "finish",
+            "command": { "summary": "done" },
+            "memories_update": [{
+                "key": "workbook",
+                "summary": "工作簿已创建",
+                "detail": "路径: /tmp/report.xlsx"
+            }],
+            "clear_history": true
+        }))
+        .expect("legacy memory fields should remain parseable");
+
+        assert_eq!(instruction.get_action(), "finish");
+        assert_eq!(instruction.memories_update.len(), 1);
+        assert_eq!(instruction.memories_update[0].key, "workbook");
+        assert_eq!(instruction.memories_update[0].value, "工作簿已创建\n路径: /tmp/report.xlsx");
+    }
+
+    #[test]
+    fn canonical_value_takes_precedence_over_legacy_fields() {
+        let memory: MemoryItem = serde_json::from_value(json!({
+            "key": "goal",
+            "value": "canonical",
+            "summary": "ignored",
+            "detail": "ignored"
+        }))
+        .expect("canonical memory should parse");
+        assert_eq!(memory.value, "canonical");
+    }
 }
