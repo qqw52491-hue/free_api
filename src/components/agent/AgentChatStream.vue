@@ -1,74 +1,96 @@
 <template>
     <div ref="streamElement" class="process-tree" aria-label="Agent 分层执行过程" @scroll.passive="onStreamScroll">
         <button v-if="isRunning && !followLiveTail" type="button" class="follow-latest" @click="resumeLiveFollow">跟随最新输出</button>
-        <section v-if="!currentGoal && !timelineEntries.length && !legacyMessages.length" class="empty-conversation">
-            <div class="empty-logo">m</div>
-            <h2>有什么可以帮你的？</h2>
-            <p>输入一个任务。每个回合会保留自己的过程、成果与总结。</p>
-        </section>
-        <!-- 旧版本没有过程轨迹的消息仍按原样显示；已覆盖的消息会进入对应回合，不再被整体堆到页面顶部。 -->
-        <section v-if="legacyMessages.length" class="conversation-history" aria-label="早期对话记录">
-            <article v-for="message in legacyMessages" :key="message.id" class="saved-message" :class="message.role === 'user' ? 'from-user' : 'from-agent'">
-                <span class="saved-role">{{ message.role === 'user' ? '你' : 'Agent' }}</span>
-                <p>{{ message.content }}</p>
-                <time>{{ formatConversationTime(message.created_at) }}</time>
-            </article>
-        </section>
-        <template v-for="entry in timelineEntries" :key="entry.id">
-            <article v-if="entry.type === 'user'" class="user-message">{{ entry.content }}</article>
-            <article v-else-if="entry.type === 'message'" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
-                <span class="saved-role">{{ entry.role === 'user' ? '你' : 'Agent' }}</span>
-                <p>{{ entry.content }}</p>
-                <time>{{ formatClock(entry.timestamp) }}</time>
-            </article>
-            <article v-else-if="entry.type === 'plan'" class="plan-node" :class="`status-${entry.status}`">
-                <div class="plan-row">
-                    <span class="plan-mark"><i></i></span>
-                    <span class="plan-title"><small>计划</small>{{ entry.title }}</span>
-                    <span class="row-status">{{ statusLabel(entry.status) }}</span>
-                    <time>{{ formatClock(entry.timestamp) }}</time>
-                </div>
-                <div class="plan-children">
-                    <article v-for="step in entry.steps" :key="step.id" class="goal-node" :class="`status-${step.status}`">
-                        <button class="goal-row" :class="{ selected: step.id === selectedStepId }" type="button" @click="$emit('select-step', step.id)">
-                            <span class="tree-mark"><i></i></span>
-                            <span class="goal-label">{{ step.description || '执行步骤' }}<small v-if="step.modelTier" class="model-tier">{{ step.modelTier }}</small></span>
-                            <span class="row-status">{{ statusLabel(step.status) }}</span>
-                            <time>{{ formatClock(step.timestamp) }}</time>
-                        </button>
-                        <div class="node-children">
-                            <button v-if="step.thought" class="child-row thought-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'thought' }" type="button" @click="$emit('select-step-thought', step.id)">
-                                <span class="child-mark"></span><b>思考</b><span>{{ shortText(step.thought, 110) }}</span><em>已分析</em>
-                            </button>
-                            <button class="child-row tool-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'tool' }" type="button" @click="$emit('select-step', step.id)">
-                                <span class="child-mark"></span><b>{{ step.tool || '工具' }}</b><span>{{ shortText(step.action || step.explanation || '执行操作', 110) }}</span><em>{{ step.source }}</em>
-                            </button>
+
+        <div class="stream-centered-content">
+            <section v-if="!currentGoal && !timelineEntries.length && !legacyMessages.length" class="empty-conversation">
+                <div class="empty-logo">m</div>
+                <h2>有什么可以帮你的？</h2>
+                <p>输入一个任务。每个回合会保留自己的过程、成果与总结。</p>
+            </section>
+
+            <!-- 早期对话记录 -->
+            <section v-if="legacyMessages.length" class="conversation-history" aria-label="早期对话记录">
+                <article v-for="message in legacyMessages" :key="message.id" class="saved-message" :class="message.role === 'user' ? 'from-user' : 'from-agent'">
+                    <template v-if="message.role === 'agent' || message.role === 'assistant'">
+                        <div class="agent-msg-header">
+                            <span class="agent-logo-pill">⚡ manus</span>
+                            <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
                         </div>
-                    </article>
-                    <article v-if="entry.isThinking" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
-                        <header><span class="child-mark"></span><b>思考</b><em>思考中</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
-                        <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
-                    </article>
-                </div>
-            </article>
-            <article v-else-if="entry.type === 'active-thought'" class="active-thought-stream root-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
-                <header><span class="tree-mark"><i></i></span><b>思考</b><em>思考中</em><time>{{ formatClock(entry.timestamp) }}</time></header>
-                <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
-            </article>
-            <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
-                <span class="saved-role">Agent</span>
-                <div v-if="entry.summary" class="summary-rich" aria-label="Agent 最终回复">
-                    <div class="markdown-content" v-html="renderFinalMarkdown(entry.summary)"></div>
-                </div>
-                <p v-else class="final-fallback">{{ entry.title }}</p>
-                <div v-if="entry.artifacts.length" class="final-artifacts">
-                    <b>交付物</b>
-                    <code v-for="artifact in entry.artifacts" :key="artifact">{{ artifact }}</code>
-                </div>
-                <time>{{ formatClock(entry.timestamp) }}</time>
-            </article>
-        </template>
-        <p v-if="isRunning && !timelineEntries.length && !legacyMessages.length" class="idle-live"><i></i>{{ stateDescription }}</p>
+                        <div class="agent-text-body markdown-content" v-html="renderFinalMarkdown(message.content)"></div>
+                    </template>
+                    <template v-else>
+                        <p class="user-text-content">{{ message.content }}</p>
+                        <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
+                    </template>
+                </article>
+            </section>
+
+            <template v-for="entry in timelineEntries" :key="entry.id">
+                <article v-if="entry.type === 'user'" class="user-message">{{ entry.content }}</article>
+                <article v-else-if="entry.type === 'message'" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
+                    <template v-if="entry.role === 'agent' || entry.role === 'assistant'">
+                        <div class="agent-msg-header">
+                            <span class="agent-logo-pill">⚡ manus</span>
+                            <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                        </div>
+                        <div class="agent-text-body markdown-content" v-html="renderFinalMarkdown(entry.content)"></div>
+                    </template>
+                    <template v-else>
+                        <span v-if="entry.isHuman" class="intervention-indicator">人工干预输入</span>
+                        <p class="user-text-content">{{ entry.content }}</p>
+                        <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                    </template>
+                </article>
+                <article v-else-if="entry.type === 'plan'" class="plan-node" :class="`status-${entry.status}`">
+                    <div class="plan-row">
+                        <span class="plan-mark"><i></i></span>
+                        <span class="plan-title"><small>计划</small>{{ entry.title }}</span>
+                        <span class="row-status">{{ statusLabel(entry.status) }}</span>
+                        <time>{{ formatClock(entry.timestamp) }}</time>
+                    </div>
+                    <div class="plan-children">
+                        <article v-for="step in entry.steps" :key="step.id" class="goal-node" :class="`status-${step.status}`">
+                            <button class="goal-row" :class="{ selected: step.id === selectedStepId }" type="button" @click="$emit('select-step', step.id)">
+                                <span class="tree-mark"><i></i></span>
+                                <span class="goal-label">{{ step.description || '执行步骤' }}<small v-if="step.modelTier" class="model-tier">{{ step.modelTier }}</small></span>
+                                <span class="row-status">{{ statusLabel(step.status) }}</span>
+                                <time>{{ formatClock(step.timestamp) }}</time>
+                            </button>
+                            <div class="node-children">
+                                <button v-if="step.thought" class="child-row thought-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'thought' }" type="button" @click="$emit('select-step-thought', step.id)">
+                                    <span class="child-mark"></span><b>思考</b><span>{{ shortText(step.thought, 110) }}</span><em>已分析</em>
+                                </button>
+                                <button class="child-row tool-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'tool' }" type="button" @click="$emit('select-step', step.id)">
+                                    <span class="child-mark"></span><b>{{ step.tool || '工具' }}</b><span>{{ shortText(step.action || step.explanation || '执行操作', 110) }}</span><em>{{ step.source }}</em>
+                                </button>
+                            </div>
+                        </article>
+                        <article v-if="entry.isThinking" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
+                            <header><span class="child-mark"></span><b>思考</b><em>思考中</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
+                            <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
+                        </article>
+                    </div>
+                </article>
+                <article v-else-if="entry.type === 'active-thought'" class="active-thought-stream root-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
+                    <header><span class="tree-mark"><i></i></span><b>思考</b><em>思考中</em><time>{{ formatClock(entry.timestamp) }}</time></header>
+                    <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
+                </article>
+                <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
+                    <div class="agent-msg-header">
+                        <span class="agent-logo-pill">⚡ manus</span>
+                        <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                    </div>
+                    <div v-if="entry.summary" class="summary-rich markdown-content" aria-label="Agent 最终回复" v-html="renderFinalMarkdown(entry.summary)"></div>
+                    <div v-else class="agent-text-body markdown-content" v-html="renderFinalMarkdown(entry.title)"></div>
+                    <div v-if="entry.artifacts.length" class="final-artifacts">
+                        <b>交付物</b>
+                        <code v-for="artifact in entry.artifacts" :key="artifact">{{ artifact }}</code>
+                    </div>
+                </article>
+            </template>
+            <p v-if="isRunning && !timelineEntries.length && !legacyMessages.length" class="idle-live"><i></i>{{ stateDescription }}</p>
+        </div>
     </div>
 </template>
 <script setup lang="ts">
@@ -188,121 +210,636 @@ watch(() => [timelineEntries.value.length, props.thought, props.completionMessag
 watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunning) { followLiveTail.value = true; followLatest(false); } if (!running && wasRunning) followLatest(); });
 </script>
 <style scoped>
-.process-tree { position: relative; display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 10px; padding: 18px clamp(22px, 4vw, 58px) 22px; overflow-y: auto; overscroll-behavior: contain; }.follow-latest { position: sticky; z-index: 4; top: 8px; align-self: flex-end; border: 1px solid #4a566b; border-radius: 999px; padding: 6px 10px; color: #d9e7ff; cursor: pointer; background: rgba(19, 31, 49, .94); box-shadow: 0 4px 16px rgba(0,0,0,.22); font: 600 11px inherit; }.follow-latest:hover { border-color: #7aa8e8; background: #203552; }.empty-conversation { display: grid; min-height: 100%; align-content: center; justify-items: center; text-align: center; }.empty-logo { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 10px; color: #18181a; background: #ececef; font-family: Georgia, serif; font-size: 20px; font-weight: 800; }.empty-conversation h2 { margin: 14px 0 6px; color: #f1f1f1; font-size: 23px; letter-spacing: -.035em; }.empty-conversation p { max-width: 480px; margin: 0; color: #8b8b8f; font-size: 12px; line-height: 1.7; }
-.conversation-history { display: flex; width: min(820px, 100%); flex-direction: column; gap: 12px; align-self: flex-start; margin-bottom: 6px; }.saved-message { position: relative; max-width: min(720px, calc(100% - 12px)); padding: 13px 15px 29px; border: 1px solid #3a3b43; border-radius: 12px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.16); }.saved-message.from-user { align-self: flex-end; border-color: #414149; border-bottom-right-radius: 5px; background: linear-gradient(135deg, #303035, #29292e); }.saved-message.from-agent { align-self: flex-start; border-bottom-left-radius: 5px; background: linear-gradient(135deg, #303238, #27282d); }.saved-role { display: inline-flex; align-items: center; min-height: 16px; color: #c2c4ce; font-size: 10px; font-weight: 750; letter-spacing: 0.03em; }.saved-message p { margin: 6px 0 0; color: #f0f0f2; font-size: 12px; line-height: 1.7; white-space: pre-wrap; }.saved-message time { position: absolute; right: 13px; bottom: 9px; color: #9496a1; font-size: 9px; letter-spacing: 0.02em; }.user-message { align-self: flex-end; max-width: min(720px, 90%); padding: 9px 12px; border-radius: 10px 10px 3px 10px; color: #eeeeef; background: #2b2b2f; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }.tree-list { display: flex; width: min(920px, 100%); flex-direction: column; align-self: flex-start; gap: 8px; }.plan-node { overflow: hidden; border: 1px solid #35353a; border-radius: 8px; background: #1f2023; }.plan-row { display: grid; grid-template-columns: 17px minmax(0,1fr) auto auto; gap: 8px; align-items: center; min-height: 33px; padding: 0 9px; color: #e1e1e4; background: #27282c; font-size: 12px; }.plan-mark { display: grid; width: 14px; height: 14px; place-items: center; border: 1px solid #74747a; border-radius: 4px; }.plan-mark i { width: 5px; height: 5px; border-radius: 50%; background: #c6c6cb; }.plan-title { overflow: hidden; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }.plan-title small,.model-tier { margin-right: 7px; color: #9292a0; font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }.model-tier { margin-left: 7px; }.plan-children { padding: 4px 8px 7px 20px; }.goal-node { margin: 0; }.goal-row,.root-row,.child-row { display: grid; width: 100%; align-items: center; border: 1px solid transparent; color: #a9a9ae; cursor: pointer; background: transparent; font: inherit; text-align: left; }.goal-row,.root-row { grid-template-columns: 17px minmax(0,1fr) auto auto; gap: 8px; min-height: 29px; padding: 4px 8px; border-radius: 5px; font-size: 12px; }.goal-row:hover,.goal-row.selected,.root-row:hover,.root-row.selected,.child-row:hover,.child-row.selected { border-color: #3b3b40; background: #29292d; }.tree-mark { display: grid; width: 15px; height: 15px; place-items: center; border: 1px solid #65656a; border-radius: 4px; }.tree-mark i { width: 5px; height: 5px; border-radius: 50%; background: #b5b5ba; }.goal-label { overflow: hidden; color: #e4e4e6; font-weight: 630; text-overflow: ellipsis; white-space: nowrap; }.row-status,.root-row em { color: #8e8e94; font-size: 10px; font-style: normal; }.goal-row time,.root-row time { color: #6d6d73; font-size: 10px; }.status-running .tree-mark,.active-thought .tree-mark { border-color: #dfdfe2; }.status-running .tree-mark i,.active-thought .tree-mark i { background: #f1f1f2; animation: work-pulse 1s ease-in-out infinite; }.status-failed .tree-mark { border-color: #b76e73; }.status-failed .tree-mark i { background: #dc858a; }
-.node-children { position: relative; display: flex; margin: 0 0 2px 15px; padding: 1px 0 1px 14px; flex-direction: column; gap: 1px; }.node-children::before { position: absolute; top: 0; bottom: 0; left: 1px; width: 1px; background: #3b3b40; content: ""; }.child-row { grid-template-columns: 10px 74px minmax(0,1fr) auto; gap: 7px; min-height: 25px; padding: 3px 7px; border-radius: 4px; font-size: 11px; }.child-mark { width: 6px; height: 6px; border-radius: 50%; background: #737378; }.thought-child .child-mark { background: #bebec3; }.child-row b { overflow: hidden; color: #c7c7cb; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }.child-row span:not(.child-mark) { overflow: hidden; color: #87878d; text-overflow: ellipsis; white-space: nowrap; }.child-row em { color: #74747a; font-size: 10px; font-style: normal; }.human-row { grid-template-columns: 17px minmax(100px,auto) minmax(0,1fr) auto auto; }.human-row b { color: #d8d3d3; font-weight: 600; }.human-row > span:not(.tree-mark) { overflow: hidden; color: #8d8989; text-overflow: ellipsis; white-space: nowrap; }.human-row .tree-mark { border-radius: 50%; }.human-row .tree-mark i { background: #d0c5c5; }.active-thought { grid-template-columns: 17px 74px minmax(0,1fr) auto auto; }.active-thought b { color: #e5e5e7; font-weight: 600; }.active-thought > span:not(.tree-mark) { overflow: hidden; color: #a5a5aa; text-overflow: ellipsis; white-space: nowrap; }.active-thought em { color: #e4e4e7; font-size: 10px; font-style: normal; }
-.idle-live { display: flex; width: min(900px,100%); align-items: center; gap: 8px; margin: 0; padding: 4px 8px; color: #85858b; font-size: 11px; }.idle-live i { width: 6px; height: 6px; border-radius: 50%; background: #eee; animation: work-pulse 1s ease-in-out infinite; }.result-line { width: min(900px,100%); align-self: flex-start; padding: 7px 9px; border-left: 2px solid #85858a; color: #aaaab0; }.result-line.failed { border-color: #d47e83; }.result-line > span { color: #85858b; font-size: 10px; font-weight: 800; letter-spacing: .05em; }.result-line strong { display: block; margin-top: 3px; color: #ececee; font-size: 13px; }.result-line p { margin: 5px 0 0; font-size: 12px; line-height: 1.6; }
-@keyframes work-pulse { 0%,100% { opacity:.35; transform:scale(.8); } 50% { opacity:1; transform:scale(1); } }
-@media (max-width:680px) { .process-tree { padding: 16px 12px 20px; }.goal-row,.root-row { grid-template-columns: 17px minmax(0,1fr) auto; }.goal-row time,.root-row time,.child-row em { display:none; }.child-row { grid-template-columns: 10px 62px minmax(0,1fr); }.human-row,.active-thought { grid-template-columns:17px minmax(0,1fr) auto; } }
-.active-thought-stream { margin: 4px 0 4px 15px; border: 1px solid #3c3c42; border-radius: 6px; cursor: pointer; background: #242428; }.active-thought-stream.selected,.active-thought-stream:hover { border-color: #61616a; background: #29292e; }.active-thought-stream header { display: grid; grid-template-columns: 10px auto minmax(0,1fr) auto; gap: 7px; align-items: center; min-height: 25px; padding: 0 8px; color: #cfcfd4; font-size: 11px; }.active-thought-stream header em { color: #94949a; font-size: 10px; font-style: normal; }.active-thought-stream header time { color: #73737a; font-size: 10px; }.active-thought-content { max-height: 124px; margin: 0; padding: 6px 8px 8px 25px; overflow: auto; color: #a9a9af; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; scrollbar-width: thin; }.root-thought-stream { margin-left: 0; }.final-artifacts { display: flex; margin-top: 8px; gap: 5px; flex-direction: column; }.final-artifacts b { color: #bdbdc4; font-size: 10px; }.final-artifacts code { overflow: hidden; color: #88888f; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }.final-artifacts code.markdown { color: #c8d5e6; }
+.process-tree {
+    position: relative;
+    display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+    padding: 18px clamp(16px, 4vw, 48px) 24px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: #141416;
+    color: #e4e4e7;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
 
-.summary-rich { display: flex; margin-top: 9px; gap: 5px; flex-direction: column; color: #d6d6da; }.summary-rich h3 { margin: 3px 0 1px; color: #ececef; font-size: 13px; }.summary-rich p,.summary-rich li,.summary-rich blockquote { margin: 0; color: #b9b9bf; font-size: 12px; line-height: 1.68; white-space: pre-wrap; }.summary-rich li { margin-left: 18px; }.summary-rich blockquote { border-left: 2px solid #63636b; padding-left: 9px; color: #c7c7cc; }.result-line strong + .summary-rich { margin-top: 7px; }
+/* 居中阅读流容器 (彻底解决左侧靠边偏离问题) */
+.stream-centered-content {
+    width: 100%;
+    max-width: 820px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
 
-/* 窄窗口中外框保持收敛，内部网格保持稳定最小宽度并在卡片内横向滚动，绝不再把文字挤成碎片。 */
-.process-tree { padding: 14px clamp(12px, 2.4vw, 30px) 20px; gap: 8px; }
-.tree-list { width: min(760px, 100%); min-width: 0; }
-.plan-node { width: min(760px, 100%); overflow-x: auto; scrollbar-width: thin; }
-.plan-row,.plan-children { min-width: 510px; }
-.goal-row { min-width: 486px; }
-.child-row { min-width: 460px; }
-.plan-row,.goal-row,.child-row { box-sizing: border-box; }
-.plan-title,.goal-label,.child-row > span:not(.child-mark) { min-width: 0; }
-.result-line { width: min(760px, 100%); box-sizing: border-box; }
-.summary-rule { width: 100%; border: 0; border-top: 1px solid #44444a; margin: 7px 0; }
-.summary-table { max-width: 100%; margin: 2px 0; overflow-x: auto; color: #aeb0b8; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
-@media (max-width: 580px) { .plan-row,.plan-children { min-width: 476px; } .goal-row { min-width: 454px; } .child-row { min-width: 430px; } }
+/* 浮动跟随最新 */
+.follow-latest {
+    position: sticky;
+    z-index: 4;
+    top: 8px;
+    align-self: flex-end;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 999px;
+    padding: 4px 10px;
+    color: #d9e7ff;
+    cursor: pointer;
+    background: rgba(19, 31, 49, 0.94);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    font-size: 11px;
+    font-weight: 600;
+}
+.follow-latest:hover {
+    border-color: #7aa8e8;
+    background: #203552;
+}
 
+/* 空状态 */
+.empty-conversation {
+    display: grid;
+    min-height: 60vh;
+    align-content: center;
+    justify-items: center;
+    text-align: center;
+    padding: 40px 0;
+}
+.empty-logo {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    border-radius: 8px;
+    color: #18181a;
+    background: #ececef;
+    font-family: Georgia, serif;
+    font-size: 18px;
+    font-weight: 800;
+}
+.empty-conversation h2 {
+    margin: 12px 0 4px;
+    color: #f1f1f1;
+    font-size: 20px;
+    letter-spacing: -0.03em;
+}
+.empty-conversation p {
+    max-width: 440px;
+    margin: 0;
+    color: #8b8b8f;
+    font-size: 12px;
+    line-height: 1.6;
+}
 
-/* 直接子计划卡是当前模板的真实布局节点：默认较窄、宽度稳定，内容过长在卡片内部滚动，绝不压成一条线。 */
-.process-tree > .plan-node { align-self: flex-start; width: min(720px, 100%); min-width: min(480px, 100%); flex: 0 0 auto; overflow: hidden; }
-.process-tree > .plan-node .plan-row { min-width: 0; grid-template-columns: 17px minmax(260px, 1fr) max-content max-content; }
-.process-tree > .plan-node .plan-children { min-width: 0; overflow-x: auto; overflow-y: visible; }
-.process-tree > .plan-node .goal-row { min-width: 440px; }
-.process-tree > .plan-node .child-row { min-width: 416px; }
-.process-tree > .plan-node .goal-node { min-width: 440px; }
-.summary-rule { display: none; }
-@media (max-width: 540px) { .process-tree > .plan-node { min-width: 100%; } .process-tree > .plan-node .goal-row,.process-tree > .plan-node .goal-node { min-width: 410px; } .process-tree > .plan-node .child-row { min-width: 386px; } }
+/* 对话历史 */
+.conversation-history {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 4px;
+}
 
+.saved-message {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    width: 100%;
+}
 
-/* 任务总结 Markdown：使用结构化节点渲染，表格与行内代码均不依赖危险的 HTML 注入。 */
-.summary-rich code { padding: 1px 4px; border: 1px solid #44444a; border-radius: 4px; color: #d9d9de; background: #28282c; font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.summary-rich .markdown-h1 { margin-top: 3px; font-size: 15px; }.summary-rich .markdown-h2 { margin-top: 10px; font-size: 13px; }.summary-rich .markdown-h3,.summary-rich .markdown-h4,.summary-rich .markdown-h5,.summary-rich .markdown-h6 { margin-top: 8px; font-size: 12px; }
-.summary-table-wrap { max-width: 100%; overflow-x: auto; margin: 4px 0 8px; border: 1px solid #414147; border-radius: 6px; }
-table.summary-table { width: 100%; min-width: 340px; border-collapse: collapse; color: #c9c9ce; font-size: 11px; line-height: 1.5; }
-.summary-table th,.summary-table td { padding: 6px 8px; border-right: 1px solid #3c3c42; border-bottom: 1px solid #3c3c42; text-align: left; vertical-align: top; white-space: nowrap; }
-.summary-table th:last-child,.summary-table td:last-child { border-right: 0; }.summary-table tr:last-child td { border-bottom: 0; }.summary-table th { color: #eeeeef; background: #2b2b2f; font-weight: 700; }.summary-table td { background: #222225; }
+/* 👤 用户消息气泡 (深色精致圆角气泡) */
+.saved-message.from-user, .user-message {
+    align-self: flex-end;
+    max-width: min(680px, 88%);
+    padding: 9px 15px;
+    border-radius: 16px 16px 4px 16px;
+    background: #27272a;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+    color: #f4f4f5;
+    margin: 2px 0;
+}
 
+.user-text-content {
+    margin: 0;
+    color: #f4f4f5;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
 
-/* 最终回复与普通 Agent 消息一致，只保留结果本身，不再突出固定“任务总结”系统面板。 */
-.final-response { width: min(720px, 92%); padding-bottom: 20px; }.final-response .summary-rich { margin-top: 5px; }.final-response .final-fallback { margin: 5px 0 0; color: #dedee1; font-size: 12px; line-height: 1.62; white-space: pre-wrap; }.final-response.failed { border-color: #76484c; }.final-response .final-artifacts { margin-top: 10px; }
+/* 🤖 Agent 消息：彻底透明无框排版 */
+.saved-message.from-agent {
+    align-self: flex-start;
+    width: 100%;
+    max-width: 100%;
+    padding: 4px 0 12px;
+    border: none !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
 
+.agent-msg-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.agent-logo-pill {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #f4f4f5;
+    letter-spacing: -0.01em;
+}
+
+.msg-clock {
+    font-size: 10px;
+    color: #71717a;
+}
+
+.from-user .msg-clock {
+    text-align: right;
+    margin-top: 3px;
+}
+
+.intervention-indicator {
+    display: block;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--orange);
+    margin-bottom: 3px;
+}
+
+/* ── 📝 Markdown 优雅排版 (标题/段落/列表/表格/代码) ── */
+.markdown-content,
+.summary-rich,
+.agent-text-body {
+    width: 100%;
+    color: #e4e4e7;
+    font-size: 13.5px;
+    line-height: 1.78;
+    letter-spacing: 0.003em;
+    overflow-wrap: anywhere;
+}
+
+.markdown-content :deep(h1),
+.markdown-content :deep(h2),
+.markdown-content :deep(h3),
+.markdown-content :deep(h4),
+.markdown-content :deep(h5),
+.markdown-content :deep(h6) {
+    color: #f4f4f5;
+    font-weight: 700;
+    line-height: 1.35;
+    letter-spacing: -0.015em;
+    margin: 16px 0 8px;
+}
+.markdown-content :deep(h1:first-child),
+.markdown-content :deep(h2:first-child),
+.markdown-content :deep(h3:first-child) {
+    margin-top: 2px;
+}
+.markdown-content :deep(h1) { font-size: 19px; }
+.markdown-content :deep(h2) { font-size: 16.5px; }
+.markdown-content :deep(h3) { font-size: 14.5px; }
+.markdown-content :deep(h4) { font-size: 13.5px; }
+
+.markdown-content :deep(p) {
+    margin: 0 0 10px;
+    color: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    white-space: normal;
+}
+.markdown-content :deep(p:last-child) {
+    margin-bottom: 0;
+}
+
+.markdown-content :deep(ul),
+.markdown-content :deep(ol) {
+    margin: 6px 0 12px;
+    padding-left: 20px;
+}
+.markdown-content :deep(li) {
+    margin: 3px 0;
+    line-height: 1.68;
+}
+.markdown-content :deep(li > ul),
+.markdown-content :deep(li > ol) {
+    margin: 2px 0 4px;
+}
+
+/* 引用块 */
+.markdown-content :deep(blockquote) {
+    margin: 10px 0;
+    padding: 6px 14px;
+    border-left: 3px solid var(--accent);
+    background: rgba(255, 255, 255, 0.025);
+    border-radius: 0 6px 6px 0;
+    color: #a1a1aa;
+}
+
+/* 表格 (精细边框与悬停) */
+.markdown-content :deep(table) {
+    width: 100%;
+    margin: 12px 0 16px;
+    border-collapse: separate;
+    border-spacing: 0;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12.5px;
+}
+.markdown-content :deep(th) {
+    padding: 7px 12px;
+    background: #1f2025;
+    color: #f4f4f5;
+    font-weight: 600;
+    text-align: left;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+.markdown-content :deep(th:last-child) {
+    border-right: none;
+}
+.markdown-content :deep(td) {
+    padding: 6px 12px;
+    background: #161619;
+    color: #d4d4d8;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
+}
+.markdown-content :deep(td:last-child) {
+    border-right: none;
+}
+.markdown-content :deep(tr:last-child td) {
+    border-bottom: none;
+}
+.markdown-content :deep(tr:hover td) {
+    background: #1e1e24;
+}
+
+/* 行内代码与代码块 */
+.markdown-content :deep(code) {
+    padding: 2px 5px;
+    border-radius: 4px;
+    color: #e5c07b;
+    background: #1e1e23;
+    font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.markdown-content :deep(.code-block-wrapper) {
+    margin: 12px 0 16px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: #18181c;
+}
+.markdown-content :deep(.code-block-header) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 30px;
+    padding: 0 12px;
+    background: #202026;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    color: #8e8e93;
+    font-size: 11px;
+}
+.markdown-content :deep(pre) {
+    margin: 0;
+    padding: 12px 14px;
+    overflow: auto;
+    background: transparent;
+}
+.markdown-content :deep(pre code) {
+    padding: 0;
+    color: #d9dde5;
+    background: transparent;
+    font-size: 12.5px;
+    line-height: 1.6;
+}
+
+/* 链接 */
+.markdown-content :deep(a) {
+    color: #60a5fa;
+    text-decoration: none;
+}
+.markdown-content :deep(a:hover) {
+    text-decoration: underline;
+}
+
+/* ── ⚡ 紧凑分层执行树 ── */
+.plan-node {
+    width: 100%;
+    margin: 3px 0;
+    background: transparent !important;
+    border: none !important;
+}
+
+/* 计划大标题行 (极紧凑，高 24px) */
+.plan-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 24px;
+    padding: 2px 4px;
+    color: #f4f4f5;
+    font-size: 12px;
+}
+
+.plan-mark {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    flex-shrink: 0;
+}
+
+.plan-mark i {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #a1a1aa;
+}
+
+.plan-title {
+    font-weight: 600;
+    color: #e4e4e7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.plan-title small {
+    margin-right: 6px;
+    color: var(--accent-light);
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.model-tier {
+    margin-left: 6px;
+    color: #71717a;
+    font-size: 9px;
+    font-weight: 600;
+}
+
+.plan-children {
+    margin-left: 7px;
+    padding-left: 12px;
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 2px;
+}
+
+.goal-node {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* 所有交互按钮重置 */
+button.goal-row,
+button.child-row,
+button.root-row {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+}
+
+/* 具体执行步骤行 (极紧凑，高 22px) */
+.goal-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 22px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: #d4d4d8;
+    font-size: 12px;
+    width: 100%;
+    transition: background 0.12s;
+}
+
+.goal-row:hover {
+    background: rgba(255, 255, 255, 0.04) !important;
+}
+
+.goal-row.selected {
+    background: rgba(108, 99, 255, 0.12) !important;
+    color: #ffffff !important;
+}
+
+.tree-mark {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.tree-mark i {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #a1a1aa;
+}
+
+.status-succeeded .tree-mark i { background: #55d6a2; }
+.status-running .tree-mark i { background: var(--orange); animation: work-pulse 1s ease-in-out infinite; }
+.status-failed .tree-mark i { background: var(--red-light); }
+
+.goal-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+}
+
+.row-status {
+    margin-left: auto;
+    font-size: 10px;
+    color: #71717a;
+    font-style: normal;
+    flex-shrink: 0;
+}
+
+.goal-row time,
+.plan-row time,
+.child-row time {
+    font-size: 9.5px;
+    color: #52525b;
+    font-family: ui-monospace, monospace;
+    flex-shrink: 0;
+    margin-left: 6px;
+}
+
+/* 子步骤与思考 (极紧凑，高 20px) */
+.node-children {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin-left: 6px;
+    padding-left: 10px;
+    border-left: 1px solid rgba(255, 255, 255, 0.06);
+    margin-bottom: 2px;
+}
+
+.child-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 20px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: #8e8e93;
+    width: 100%;
+    transition: background 0.12s;
+}
+
+.child-row:hover {
+    background: rgba(255, 255, 255, 0.03) !important;
+    color: #d4d4d8 !important;
+}
+
+.child-row.selected {
+    background: rgba(108, 99, 255, 0.1) !important;
+    color: #ffffff !important;
+}
+
+.child-mark {
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: #71717a;
+    flex-shrink: 0;
+}
+
+.child-row b {
+    font-weight: 600;
+    color: #b4b4b9;
+    flex-shrink: 0;
+}
+
+.child-row span:not(.child-mark) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.child-row em {
+    color: #636368;
+    font-size: 9.5px;
+    font-style: normal;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+
+/* 实时思考流 */
+.active-thought-stream {
+    margin: 2px 0 2px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px dashed rgba(255, 255, 255, 0.08);
+}
+
+.active-thought-stream header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: #cfcfd4;
+}
+
+.active-thought-stream header b { color: var(--accent-light); }
+.active-thought-stream header em { color: #94949a; font-size: 10px; font-style: normal; margin-left: auto; }
+.active-thought-stream header time { color: #73737a; font-size: 10px; }
+
+.active-thought-content {
+    max-height: 90px;
+    margin: 0;
+    padding: 4px 8px 6px;
+    overflow: auto;
+    color: #a9a9af;
+    font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap;
+}
+
+/* 交付物与总结 */
 .final-response {
-  width: min(860px, 100%);
-  max-width: 100%;
-  padding: 9px 0 23px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
+    width: 100%;
+    max-width: 100%;
+    padding: 4px 0 16px;
+    border: 0;
+    background: transparent;
 }
-.final-response .saved-role {
-  display: block;
-  margin: 0 0 7px;
-  color: #b1b5bd;
-  font-size: 11px;
-  letter-spacing: .02em;
+
+.final-artifacts {
+    display: flex;
+    margin-top: 8px;
+    gap: 4px;
+    flex-direction: column;
 }
-.final-response > time { right: 0; bottom: 4px; }
-.summary-rich {
-  margin: 0;
-  color: #e6e7eb;
-  font-size: 15px;
-  line-height: 1.82;
-  letter-spacing: .003em;
-  overflow-wrap: anywhere;
+
+.final-artifacts b { color: #bdbdc4; font-size: 10px; }
+.final-artifacts code {
+    color: #88888f;
+    font: 10px ui-monospace, monospace;
+    background: #1c1c20;
+    padding: 2px 6px;
+    border-radius: 4px;
 }
-.summary-rich :deep(h1),
-.summary-rich :deep(h2),
-.summary-rich :deep(h3),
-.summary-rich :deep(h4),
-.summary-rich :deep(h5),
-.summary-rich :deep(h6) {
-  color: #f6f7fa;
-  line-height: 1.28;
-  letter-spacing: -.018em;
+
+.idle-live {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    padding: 2px 4px;
+    color: #85858b;
+    font-size: 11px;
 }
-.summary-rich :deep(h1) { margin: 24px 0 12px; font-size: 25px; }
-.summary-rich :deep(h2) { margin: 22px 0 10px; font-size: 21px; }
-.summary-rich :deep(h3) { margin: 19px 0 8px; font-size: 18px; }
-.summary-rich :deep(h4) { margin: 17px 0 7px; font-size: 16px; }
-.summary-rich :deep(h5), .summary-rich :deep(h6) { margin: 15px 0 6px; font-size: 15px; }
-.summary-rich :deep(h1:first-child), .summary-rich :deep(h2:first-child), .summary-rich :deep(h3:first-child) { margin-top: 2px; }
-.summary-rich :deep(p) { margin: 0 0 13px; color: inherit; font-size: inherit; line-height: inherit; white-space: normal; }
-.summary-rich :deep(ul), .summary-rich :deep(ol) { margin: 7px 0 14px; padding-left: 1.65em; }
-.summary-rich :deep(li) { margin: 4px 0; padding-left: 3px; }
-.summary-rich :deep(li > ul), .summary-rich :deep(li > ol) { margin: 5px 0 3px; }
-.summary-rich :deep(input[type="checkbox"]) { width: 14px; height: 14px; margin: 0 7px 0 0; vertical-align: -2px; accent-color: #84b8ff; }
-.summary-rich :deep(blockquote) { margin: 14px 0; padding: 5px 0 5px 15px; border-left: 3px solid #6186b8; color: #b9c5d5; }
-.summary-rich :deep(blockquote p:last-child) { margin-bottom: 0; }
-.summary-rich :deep(hr) { margin: 21px 0; border: 0; border-top: 1px solid #3a3d44; }
-.summary-rich :deep(a) { color: #9dcbff; text-decoration: none; }
-.summary-rich :deep(a:hover) { text-decoration: underline; }
-.summary-rich :deep(code) { padding: .12em .38em; border-radius: 5px; color: #f0d7a1; background: #202126; font: .88em ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-.summary-rich :deep(.code-block-wrapper) { margin: 15px 0 18px; overflow: hidden; border: 1px solid #373942; border-radius: 10px; background: #17181c; }
-.summary-rich :deep(.code-block-header) { display: flex; align-items: center; min-height: 30px; padding: 0 11px; border-bottom: 1px solid #30323a; color: #aab2bd; background: #202126; font: 600 11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-.summary-rich :deep(pre) { margin: 0; padding: 14px 16px; overflow: auto; background: transparent; }
-.summary-rich :deep(pre code) { display: block; padding: 0; color: #d9dde5; background: transparent; font-size: 13px; line-height: 1.66; }
-.summary-rich :deep(table) { display: block; width: max-content; min-width: min(100%, 520px); max-width: 100%; margin: 15px 0 18px; overflow-x: auto; border-collapse: separate; border-spacing: 0; border: 1px solid #3a3d45; border-radius: 9px; }
-.summary-rich :deep(th), .summary-rich :deep(td) { padding: 9px 12px; border-right: 1px solid #353840; border-bottom: 1px solid #353840; text-align: left; vertical-align: top; white-space: nowrap; }
-.summary-rich :deep(th) { color: #eef3fa; background: #25282f; font-weight: 700; }
-.summary-rich :deep(tr:last-child td) { border-bottom: 0; }
-.summary-rich :deep(th:last-child), .summary-rich :deep(td:last-child) { border-right: 0; }
-@media (max-width: 640px) {
-  .final-response { width: 100%; }
-  .summary-rich { font-size: 14px; }
-  .summary-rich :deep(h1) { font-size: 22px; }
-  .summary-rich :deep(h2) { font-size: 19px; }
-  .summary-rich :deep(h3) { font-size: 17px; }
-  .summary-rich :deep(.code-block-wrapper) { border-radius: 8px; }
-  .summary-rich :deep(pre) { padding: 12px; }
+
+.idle-live i {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #eee;
+    animation: work-pulse 1s ease-in-out infinite;
+}
+
+@keyframes work-pulse {
+    0%, 100% { opacity: 0.35; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1); }
 }
 </style>
+
