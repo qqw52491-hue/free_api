@@ -58,27 +58,7 @@
             <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
                 <span class="saved-role">Agent</span>
                 <div v-if="entry.summary" class="summary-rich" aria-label="Agent 最终回复">
-                    <template v-for="(block, index) in markdownBlocks(entry.summary)" :key="`${entry.id}-summary-${index}`">
-                        <h3 v-if="block.kind === 'heading'" :class="`markdown-h${block.level}`">
-                            <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template>
-                        </h3>
-                        <p v-else-if="block.kind === 'paragraph'">
-                            <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template>
-                        </p>
-                        <li v-else-if="block.kind === 'list'">
-                            <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template>
-                        </li>
-                        <blockquote v-else-if="block.kind === 'quote'">
-                            <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template>
-                        </blockquote>
-                        <hr v-else-if="block.kind === 'rule'" class="summary-rule" />
-                        <div v-else-if="block.kind === 'table'" class="summary-table-wrap">
-                            <table class="summary-table">
-                                <thead><tr><th v-for="(cell, cellIndex) in block.header" :key="cellIndex"><template v-for="(token, tokenIndex) in cell" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template></th></tr></thead>
-                                <tbody><tr v-for="(row, rowIndex) in block.rows" :key="rowIndex"><td v-for="(cell, cellIndex) in row" :key="cellIndex"><template v-for="(token, tokenIndex) in cell" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template></td></tr></tbody>
-                            </table>
-                        </div>
-                    </template>
+                    <div class="markdown-content" v-html="renderFinalMarkdown(entry.summary)"></div>
                 </div>
                 <p v-else class="final-fallback">{{ entry.title }}</p>
                 <div v-if="entry.artifacts.length" class="final-artifacts">
@@ -92,9 +72,10 @@
     </div>
 </template>
 <script setup lang="ts">
+import DOMPurify from "dompurify";
 import { computed, nextTick, ref, watch } from "vue";
 import type { AgentStepItem, AgentToolStatus } from "./types";
-import { formatClock, shortText } from "./format";
+import { formatClock, renderMarkdown, shortText } from "./format";
 type HistoryMessage = { id: string; role: string; content: string; created_at: string; timestamp: number };
 type HistoryTurn = { id: string; goal: string; status: string; steps: AgentStepItem[]; messages: HistoryMessage[]; summary: string; artifacts: string[]; startedAt: number; completedAt: number };
 type PlanEntry = { id: string; type: "plan"; timestamp: number; title: string; status: AgentToolStatus; steps: AgentStepItem[]; isThinking: boolean; thinkingTimestamp?: number };
@@ -104,12 +85,6 @@ type TimelineEntry =
     | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean }
     | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: string[]; failed: boolean }
     | { id: "active-thought"; type: "active-thought"; timestamp: number };
-type MarkdownToken = { kind: "text" | "code"; value: string };
-type MarkdownBlock =
-    | { kind: "heading"; level: number; tokens: MarkdownToken[] }
-    | { kind: "paragraph" | "list" | "quote"; tokens: MarkdownToken[] }
-    | { kind: "rule" }
-    | { kind: "table"; header: MarkdownToken[][]; rows: MarkdownToken[][][] };
 const props = defineProps<{
     currentGoal: string;
     legacyMessages: { id: string; role: string; content: string; created_at: string }[];
@@ -201,53 +176,11 @@ function currentTimeline(): TimelineEntry[] {
     return timeline;
 }
 const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimeline(), ...currentTimeline()]);
-function inlineTokens(value: string): MarkdownToken[] {
-    const tokens: MarkdownToken[] = [];
-    const expression = /`([^`]+)`/g;
-    let cursor = 0;
-    for (let match = expression.exec(value); match; match = expression.exec(value)) {
-        if (match.index > cursor) tokens.push({ kind: "text", value: value.slice(cursor, match.index) });
-        tokens.push({ kind: "code", value: match[1] });
-        cursor = match.index + match[0].length;
-    }
-    if (cursor < value.length || !tokens.length) tokens.push({ kind: "text", value: value.slice(cursor) });
-    return tokens;
-}
-function tableCells(line: string) {
-    return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => inlineTokens(cell.trim()));
-}
-function isTableDivider(line: string) {
-    const cells = line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
-    return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
-}
-function markdownBlocks(value: string): MarkdownBlock[] {
-    const lines = value.replace(/\\n/g, "\n").replace(/\r/g, "").split("\n");
-    const blocks: MarkdownBlock[] = [];
-    for (let index = 0; index < lines.length; index += 1) {
-        const line = lines[index].trim();
-        if (!line) continue;
-        if (/^\|.*\|$/.test(line) && index + 1 < lines.length && isTableDivider(lines[index + 1])) {
-            const header = tableCells(line);
-            const rows: MarkdownToken[][][] = [];
-            index += 2;
-            while (index < lines.length && /^\|.*\|$/.test(lines[index].trim())) {
-                rows.push(tableCells(lines[index]));
-                index += 1;
-            }
-            index -= 1;
-            blocks.push({ kind: "table", header, rows });
-            continue;
-        }
-        const heading = line.match(/^(#{1,6})\s+(.+)$/);
-        if (heading) { blocks.push({ kind: "heading", level: heading[1].length, tokens: inlineTokens(heading[2]) }); continue; }
-        const list = line.match(/^[-*+]\s+(.+)$/);
-        if (list) { blocks.push({ kind: "list", tokens: inlineTokens(list[1]) }); continue; }
-        const quote = line.match(/^>\s?(.+)$/);
-        if (quote) { blocks.push({ kind: "quote", tokens: inlineTokens(quote[1]) }); continue; }
-        if (/^-{3,}$/.test(line)) { blocks.push({ kind: "rule" }); continue; }
-        blocks.push({ kind: "paragraph", tokens: inlineTokens(line) });
-    }
-    return blocks;
+function renderFinalMarkdown(content: string): string {
+    return DOMPurify.sanitize(renderMarkdown(content), {
+        FORBID_TAGS: ["button", "form", "iframe", "object", "embed", "script", "style"],
+        FORBID_ATTR: ["style"],
+    });
 }
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败" }[status]; }
 function formatConversationTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "numeric", day: "numeric" }); }
@@ -303,4 +236,73 @@ table.summary-table { width: 100%; min-width: 340px; border-collapse: collapse; 
 /* 最终回复与普通 Agent 消息一致，只保留结果本身，不再突出固定“任务总结”系统面板。 */
 .final-response { width: min(720px, 92%); padding-bottom: 20px; }.final-response .summary-rich { margin-top: 5px; }.final-response .final-fallback { margin: 5px 0 0; color: #dedee1; font-size: 12px; line-height: 1.62; white-space: pre-wrap; }.final-response.failed { border-color: #76484c; }.final-response .final-artifacts { margin-top: 10px; }
 
+.final-response {
+  width: min(860px, 100%);
+  max-width: 100%;
+  padding: 9px 0 23px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.final-response .saved-role {
+  display: block;
+  margin: 0 0 7px;
+  color: #b1b5bd;
+  font-size: 11px;
+  letter-spacing: .02em;
+}
+.final-response > time { right: 0; bottom: 4px; }
+.summary-rich {
+  margin: 0;
+  color: #e6e7eb;
+  font-size: 15px;
+  line-height: 1.82;
+  letter-spacing: .003em;
+  overflow-wrap: anywhere;
+}
+.summary-rich :deep(h1),
+.summary-rich :deep(h2),
+.summary-rich :deep(h3),
+.summary-rich :deep(h4),
+.summary-rich :deep(h5),
+.summary-rich :deep(h6) {
+  color: #f6f7fa;
+  line-height: 1.28;
+  letter-spacing: -.018em;
+}
+.summary-rich :deep(h1) { margin: 24px 0 12px; font-size: 25px; }
+.summary-rich :deep(h2) { margin: 22px 0 10px; font-size: 21px; }
+.summary-rich :deep(h3) { margin: 19px 0 8px; font-size: 18px; }
+.summary-rich :deep(h4) { margin: 17px 0 7px; font-size: 16px; }
+.summary-rich :deep(h5), .summary-rich :deep(h6) { margin: 15px 0 6px; font-size: 15px; }
+.summary-rich :deep(h1:first-child), .summary-rich :deep(h2:first-child), .summary-rich :deep(h3:first-child) { margin-top: 2px; }
+.summary-rich :deep(p) { margin: 0 0 13px; color: inherit; font-size: inherit; line-height: inherit; white-space: normal; }
+.summary-rich :deep(ul), .summary-rich :deep(ol) { margin: 7px 0 14px; padding-left: 1.65em; }
+.summary-rich :deep(li) { margin: 4px 0; padding-left: 3px; }
+.summary-rich :deep(li > ul), .summary-rich :deep(li > ol) { margin: 5px 0 3px; }
+.summary-rich :deep(input[type="checkbox"]) { width: 14px; height: 14px; margin: 0 7px 0 0; vertical-align: -2px; accent-color: #84b8ff; }
+.summary-rich :deep(blockquote) { margin: 14px 0; padding: 5px 0 5px 15px; border-left: 3px solid #6186b8; color: #b9c5d5; }
+.summary-rich :deep(blockquote p:last-child) { margin-bottom: 0; }
+.summary-rich :deep(hr) { margin: 21px 0; border: 0; border-top: 1px solid #3a3d44; }
+.summary-rich :deep(a) { color: #9dcbff; text-decoration: none; }
+.summary-rich :deep(a:hover) { text-decoration: underline; }
+.summary-rich :deep(code) { padding: .12em .38em; border-radius: 5px; color: #f0d7a1; background: #202126; font: .88em ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.summary-rich :deep(.code-block-wrapper) { margin: 15px 0 18px; overflow: hidden; border: 1px solid #373942; border-radius: 10px; background: #17181c; }
+.summary-rich :deep(.code-block-header) { display: flex; align-items: center; min-height: 30px; padding: 0 11px; border-bottom: 1px solid #30323a; color: #aab2bd; background: #202126; font: 600 11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.summary-rich :deep(pre) { margin: 0; padding: 14px 16px; overflow: auto; background: transparent; }
+.summary-rich :deep(pre code) { display: block; padding: 0; color: #d9dde5; background: transparent; font-size: 13px; line-height: 1.66; }
+.summary-rich :deep(table) { display: block; width: max-content; min-width: min(100%, 520px); max-width: 100%; margin: 15px 0 18px; overflow-x: auto; border-collapse: separate; border-spacing: 0; border: 1px solid #3a3d45; border-radius: 9px; }
+.summary-rich :deep(th), .summary-rich :deep(td) { padding: 9px 12px; border-right: 1px solid #353840; border-bottom: 1px solid #353840; text-align: left; vertical-align: top; white-space: nowrap; }
+.summary-rich :deep(th) { color: #eef3fa; background: #25282f; font-weight: 700; }
+.summary-rich :deep(tr:last-child td) { border-bottom: 0; }
+.summary-rich :deep(th:last-child), .summary-rich :deep(td:last-child) { border-right: 0; }
+@media (max-width: 640px) {
+  .final-response { width: 100%; }
+  .summary-rich { font-size: 14px; }
+  .summary-rich :deep(h1) { font-size: 22px; }
+  .summary-rich :deep(h2) { font-size: 19px; }
+  .summary-rich :deep(h3) { font-size: 17px; }
+  .summary-rich :deep(.code-block-wrapper) { border-radius: 8px; }
+  .summary-rich :deep(pre) { padding: 12px; }
+}
 </style>

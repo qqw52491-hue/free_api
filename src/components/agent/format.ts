@@ -1,5 +1,5 @@
 import { marked } from "marked";
-import hljs from "highlight.js";
+import hljs from "highlight.js/lib/common";
 
 export function asRecord(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
