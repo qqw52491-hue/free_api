@@ -28,7 +28,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tauri::Emitter;
 use tauri::{AppHandle, Manager, State};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep, Duration};
 
 // 每个 session 的控制通道区分 ask_human 回答、替换目标与停止请求。
@@ -40,6 +40,15 @@ const RUN_INTERRUPTED_ROUTE: &str = "run_interrupted";
 pub fn intervention_channels() -> &'static Arc<Mutex<HashMap<String, mpsc::Sender<HumanControl>>>> {
     static CHANNELS: OnceLock<Arc<Mutex<HashMap<String, mpsc::Sender<HumanControl>>>>> = OnceLock::new();
     CHANNELS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+pub fn stream_interrupt_channels() -> &'static Arc<Mutex<HashMap<String, watch::Sender<u64>>>> {
+    static CHANNELS: OnceLock<Arc<Mutex<HashMap<String, watch::Sender<u64>>>>> = OnceLock::new();
+    CHANNELS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+async fn notify_stream_interrupt(session_id: &str) {
+    if let Some(sender) = stream_interrupt_channels().lock().await.get(session_id).cloned() {
+        sender.send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
 }
 #[tauri::command]
 pub async fn send_human_intervention(_state: State<'_, DbState>, session_id: String, message: String) -> Result<(), String> {
@@ -53,15 +62,17 @@ pub async fn send_human_intervention(_state: State<'_, DbState>, session_id: Str
 pub async fn replace_agent_goal(session_id: String, goal: String) -> Result<(), String> {
     let goal = goal.trim().to_string();
     if goal.is_empty() { return Err("新目标不能为空".to_string()); }
-    let channels = intervention_channels().lock().await;
-    let sender = channels.get(&session_id).ok_or_else(|| "任务已结束或通道不存在".to_string())?;
-    sender.send(HumanControl::ReplaceGoal(goal)).await.map_err(|e| e.to_string())
+    let sender = intervention_channels().lock().await.get(&session_id).cloned().ok_or_else(|| "任务已结束或通道不存在".to_string())?;
+    sender.send(HumanControl::ReplaceGoal(goal)).await.map_err(|e| e.to_string())?;
+    notify_stream_interrupt(&session_id).await;
+    Ok(())
 }
 #[tauri::command]
 pub async fn cancel_agent_run(session_id: String) -> Result<(), String> {
-    let channels = intervention_channels().lock().await;
-    let sender = channels.get(&session_id).ok_or_else(|| "任务已结束或通道不存在".to_string())?;
-    sender.send(HumanControl::Cancel).await.map_err(|e| e.to_string())
+    let sender = intervention_channels().lock().await.get(&session_id).cloned().ok_or_else(|| "任务已结束或通道不存在".to_string())?;
+    sender.send(HumanControl::Cancel).await.map_err(|e| e.to_string())?;
+    notify_stream_interrupt(&session_id).await;
+    Ok(())
 }
 fn take_pending_interrupt(rx: &mut mpsc::Receiver<HumanControl>) -> Option<String> {
     loop {
@@ -87,6 +98,7 @@ async fn finish_interrupted_run(
     }
     app.emit(&format!("agent-log-{}", session_id), format!("⏹️ {} 不再派发旧计划。", message)).ok();
     intervention_channels().lock().await.remove(session_id);
+    stream_interrupt_channels().lock().await.remove(session_id);
     Ok(())
 }
 /// Agent 每个任务最多执行步数（可按项目需求调整）
@@ -659,10 +671,12 @@ confirm 不需要 options，前端固定提供确认与取消。用户提交后�
 
     // 注册人类干预接收器
     let (tx, mut rx) = mpsc::channel::<HumanControl>(5);
+    let (interrupt_tx, mut interrupt_rx) = watch::channel(0u64);
     {
         let mut channels = intervention_channels().lock().await;
         channels.insert(final_session_id.clone(), tx);
     }
+    stream_interrupt_channels().lock().await.insert(final_session_id.clone(), interrupt_tx);
 
     advance_run_state(
         &app,
@@ -793,6 +807,7 @@ confirm 不需要 options，前端固定提供确认与取消。用户提交后�
             &mut checkpoint,
             &mut run_machine,
             &mut rx,
+            &mut interrupt_rx,
             resume_instruction,
         )
         .await?;
@@ -1069,6 +1084,7 @@ confirm 不需要 options，前端固定提供确认与取消。用户提交后�
     {
         let mut channels = intervention_channels().lock().await;
         channels.remove(&final_session_id);
+    stream_interrupt_channels().lock().await.remove(&final_session_id);
     }
 
     Ok(())
@@ -1091,6 +1107,7 @@ async fn run_call_llm_and_run_tool_phases(
     mut checkpoint: &mut AgentCheckpoint,
     mut run_machine: &mut AgentRunMachine,
     rx: &mut mpsc::Receiver<HumanControl>,
+    interrupt_rx: &mut watch::Receiver<u64>,
     resume_instruction: Option<AgentInstruction>,
 ) -> Result<(AgentInstruction, DispatchResult), String> {
     let mut retry_count = 0;
@@ -1164,10 +1181,16 @@ async fn run_call_llm_and_run_tool_phases(
             step_id,
             &final_session_id,
             log_context.unwrap_or(false),
+            &model_routing.reasoning_effort,
+            interrupt_rx,
         )
         .await
         {
             Ok(r) => r,
+            Err(e) if e == crate::llm::STREAM_INTERRUPTED_ERROR => {
+                let reason = take_pending_interrupt(rx).unwrap_or_else(|| "用户请求中断当前模型输出。".to_string());
+                return Ok((AgentInstruction::default(), DispatchResult { success: true, stdout: reason, stderr: String::new(), route: RUN_INTERRUPTED_ROUTE.to_string() }));
+            }
             Err(e) => {
                 retry_count += 1;
                 advance_run_state(

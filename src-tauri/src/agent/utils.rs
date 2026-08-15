@@ -9,6 +9,7 @@ use crate::{
     llm::{self, ModelConfig, StreamEvent},
 };
 use serde_json::json;
+use tokio::sync::watch;
 use tauri::State;
 
 // ==================== Shell 工具 ====================
@@ -178,6 +179,8 @@ pub async fn call_llm(
     step_id: usize,
     session_id: &str,
     log_context: bool,
+    reasoning_effort: &str,
+    interrupt_rx: &mut watch::Receiver<u64>,
 ) -> Result<(AgentInstruction, TokenUsage, String), String> {
     // 1. 从数据库解析模型配置
     let config = ModelConfig::from_db(state, &model_id)?;
@@ -225,7 +228,7 @@ pub async fn call_llm(
         };
 
         // 5. 调用 llm 层发送请求（含 HTTP 重试）
-        let result = llm::stream_with_retry(&config, &api_values, 3, &mut on_event).await?;
+        let result = llm::stream_with_retry(&config, &api_values, reasoning_effort, interrupt_rx, 3, &mut on_event).await?;
 
         // 6. Token 用量统计
         let token_usage = match result.usage {

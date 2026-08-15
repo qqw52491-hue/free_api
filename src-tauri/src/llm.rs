@@ -5,6 +5,7 @@
 
 use crate::db::DbState;
 use futures_util::StreamExt;
+use tokio::sync::watch;
 use rusqlite::params;
 use serde_json::json;
 use tauri::State;
@@ -87,7 +88,7 @@ impl ModelConfig {
     }
 
     /// 构建 OpenAI 兼容的请求体
-    pub fn build_body(&self, messages: &[serde_json::Value]) -> serde_json::Value {
+    pub fn build_body(&self, messages: &[serde_json::Value], reasoning_effort: &str) -> serde_json::Value {
         let local_temp = if self.temperature == 0.0 {
             0.6
         } else {
@@ -115,6 +116,16 @@ impl ModelConfig {
             body["stream_options"] = json!({ "include_usage": true });
         }
 
+        let is_deepseek = self.base_url.contains("api.deepseek.com") || self.model_name.to_ascii_lowercase().contains("deepseek");
+        if is_deepseek {
+            let effort = match reasoning_effort { "low" | "max" => reasoning_effort, _ => "high" };
+            body["thinking"] = json!({ "type": "enabled" });
+            body["reasoning_effort"] = json!(effort);
+            if let Some(object) = body.as_object_mut() {
+                object.remove("temperature");
+                object.remove("top_p");
+            }
+        }
         // Ollama 需要通过 options 注入 num_ctx
         if self.is_ollama {
             body["options"] = json!({
@@ -284,6 +295,8 @@ fn process_sse_line<F: FnMut(StreamEvent)>(
 // 核心流式请求
 // ========================================================================
 
+pub const STREAM_INTERRUPTED_ERROR: &str = "agent_stream_interrupted";
+
 /// 发送一次流式请求，解析 SSE 事件并通过回调实时通知调用方。
 ///
 /// `on_event` 在每个 thinking/content chunk 到达时被调用，
@@ -291,20 +304,25 @@ fn process_sse_line<F: FnMut(StreamEvent)>(
 pub async fn stream_once<F: FnMut(StreamEvent)>(
     config: &ModelConfig,
     messages: &[serde_json::Value],
+    reasoning_effort: &str,
+    interrupt_rx: &mut watch::Receiver<u64>,
     on_event: &mut F,
 ) -> Result<StreamResult, String> {
     let client = config.build_client()?;
-    let body = config.build_body(messages);
+    if interrupt_rx.has_changed().unwrap_or(false) { return Err(STREAM_INTERRUPTED_ERROR.to_string()); }
+    let body = config.build_body(messages, reasoning_effort);
     let url = config.endpoint_url();
     let headers = config.auth_headers();
 
-    let resp = client
-        .post(&url)
-        .headers(headers)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
+    let request = client.post(&url).headers(headers).json(&body).send();
+    tokio::pin!(request);
+    let resp = tokio::select! {
+        result = &mut request => result.map_err(|e| format!("请求失败: {}", e))?,
+        changed = interrupt_rx.changed() => {
+            let _ = changed;
+            return Err(STREAM_INTERRUPTED_ERROR.to_string());
+        }
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -318,7 +336,15 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
     let mut line_buf = String::new();
     let mut usage_data: Option<(i64, i64)> = None;
 
-    while let Some(item) = stream.next().await {
+    loop {
+        let item = tokio::select! {
+            next = stream.next() => next,
+            changed = interrupt_rx.changed() => {
+                let _ = changed;
+                return Err(STREAM_INTERRUPTED_ERROR.to_string());
+            }
+        };
+        let Some(item) = item else { break; };
         let chunk = item.map_err(|e| e.to_string())?;
         line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -358,14 +384,17 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
 pub async fn stream_with_retry<F: FnMut(StreamEvent)>(
     config: &ModelConfig,
     messages: &[serde_json::Value],
+    reasoning_effort: &str,
+    interrupt_rx: &mut watch::Receiver<u64>,
     max_retries: u32,
     on_event: &mut F,
 ) -> Result<StreamResult, String> {
     let mut last_error = String::new();
     for i in 0..max_retries {
-        match stream_once(config, messages, on_event).await {
+        match stream_once(config, messages, reasoning_effort, interrupt_rx, on_event).await {
             Ok(result) => return Ok(result),
             Err(e) => {
+                if e == STREAM_INTERRUPTED_ERROR { return Err(e); }
                 last_error = e;
                 println!("⚠️ LLM 请求失败 (第 {} 次): {}", i + 1, last_error);
                 if i < max_retries - 1 {

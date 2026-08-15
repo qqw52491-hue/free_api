@@ -7,7 +7,11 @@ pub struct ModelRoutingConfig {
     pub pro: String,
     pub flash: String,
     pub vision: String,
+    /// DeepSeek OpenAI 兼容接口的推理强度：low / high / max。旧客户端默认 high。
+    #[serde(default = "default_reasoning_effort")]
+    pub reasoning_effort: String,
 }
+fn default_reasoning_effort() -> String { "high".to_string() }
 
 /// 路由判定结果（对外暴露，方便主循环获取判定理由并打日志）
 #[derive(Debug, Clone)]

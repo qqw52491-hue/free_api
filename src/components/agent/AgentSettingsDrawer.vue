@@ -36,6 +36,14 @@
                             </optgroup>
                         </select>
                     </label>
+                    <label>DeepSeek 思考层级
+                        <select :value="modelRouting.reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort($event)">
+                            <option value="low">低：更快、更省</option>
+                            <option value="high">高：默认推荐</option>
+                            <option value="max">最高：复杂任务</option>
+                        </select>
+                        <small>仅发送给 DeepSeek；其他模型保持原有参数。</small>
+                    </label>
                 </section>
                 <section>
                     <label class="context-toggle">
@@ -86,14 +94,14 @@ import { AGENT_TASK_PRESETS, type AgentModelOption } from "./types";
 const props = defineProps<{
     open: boolean;
     allModels: AgentModelOption[];
-    modelRouting: { pro: string; flash: string; vision: string };
+    modelRouting: { pro: string; flash: string; vision: string; reasoning_effort: "low" | "high" | "max" };
     logContext: boolean;
     isRunning: boolean;
 }>();
 
 const emit = defineEmits<{
     close: [];
-    "update:model-routing": [value: { pro: string; flash: string; vision: string }];
+    "update:model-routing": [value: { pro: string; flash: string; vision: string; reasoning_effort: "low" | "high" | "max" }];
     "update:log-context": [value: boolean];
     "apply-preset": [goal: string];
     "open-plugins": [];
@@ -152,6 +160,10 @@ const groupedModels = computed(() => {
 function updateRoute(key: "pro" | "flash" | "vision", event: Event) {
     const value = (event.target as HTMLSelectElement).value;
     emit("update:model-routing", { ...props.modelRouting, [key]: value });
+}
+function updateReasoningEffort(event: Event) {
+    const value = (event.target as HTMLSelectElement).value as "low" | "high" | "max";
+    emit("update:model-routing", { ...props.modelRouting, reasoning_effort: value });
 }
 </script>
 

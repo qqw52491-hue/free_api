@@ -177,7 +177,7 @@ function handleActiveThoughtSelect() {
     session.selectedStepId.value = null;
 }
 function handleModelSelect(modelId: string) {
-    session.modelRouting.value = { pro: modelId, flash: modelId, vision: modelId };
+    session.modelRouting.value = { pro: modelId, flash: modelId, vision: modelId, reasoning_effort: "high" };
 }
 function submitComposer() {
     if (session.isRunning.value) void session.sendHumanInput();

@@ -743,7 +743,8 @@ pub async fn send_chat(
         }
     };
 
-    let result = llm::stream_once(&config, &api_messages, &mut on_event).await?;
+    let (_interrupt_tx, mut interrupt_rx) = tokio::sync::watch::channel(0u64);
+    let result = llm::stream_once(&config, &api_messages, "high", &mut interrupt_rx, &mut on_event).await?;
 
     // 思考结束通知
     if is_thinking && !result.thinking_text.is_empty() {

@@ -108,7 +108,7 @@ function normalizeUsage(payload: Record<string, unknown>): AgentTokenUsage | nul
 }
 
 export function useAgentSession(sessionId: string) {
-    const modelRouting = ref({ pro: "", flash: "", vision: "" });
+    const modelRouting = ref({ pro: "", flash: "", vision: "", reasoning_effort: "high" as "low" | "high" | "max" });
     const logContext = ref(false);
     const goalInput = ref("");
     const currentGoal = ref("");
@@ -348,14 +348,16 @@ export function useAgentSession(sessionId: string) {
         };
 
         if (!modelRouting.value.pro) {
-            modelRouting.value.pro = findModel(m => {
+            const deepSeekPro = availableModels.find(m => /deepseek.*v4.*pro|v4.*pro.*deepseek/i.test(`${m.display_name} ${m.name}`));
+            modelRouting.value.pro = deepSeekPro?.id || findModel(m => {
                 const label = `${m.display_name} ${m.name}`;
                 return !/flash|mini|haiku|speed|turbo/i.test(label)
                     && /pro|opus|claude-3-5|gpt-4o|deepseek/i.test(label);
             });
         }
         if (!modelRouting.value.flash) {
-            modelRouting.value.flash = findModel(m => /flash|mini|haiku|speed|turbo/i.test(`${m.display_name} ${m.name}`));
+            const deepSeekFlash = availableModels.find(m => /deepseek.*v4.*flash|v4.*flash.*deepseek/i.test(`${m.display_name} ${m.name}`));
+            modelRouting.value.flash = deepSeekFlash?.id || findModel(m => /flash|mini|haiku|speed|turbo/i.test(`${m.display_name} ${m.name}`));
         }
         if (!modelRouting.value.vision) {
             modelRouting.value.vision = findModel(m => /vision|vl|multimodal|gpt-4o/i.test(`${m.display_name} ${m.name}`));
