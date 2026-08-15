@@ -67,6 +67,14 @@ pub async fn get_agent_task_resources(
     task_store::list_resource_refs(state.inner(), &session_id)
 }
 
+/// 返回指定会话全部已落盘的运行过程树。该数据仅用于历史复盘，不影响运行态恢复。
+#[tauri::command]
+pub async fn get_session_run_traces(
+    state: State<'_, DbState>,
+    session_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    crate::agent::run_trace::list_session_traces(state.inner(), &session_id)
+}
 /// 分页读取当前 session 任务资源中的记录；底层会执行资源归属校验和 100 条上限。
 #[tauri::command]
 pub async fn get_agent_task_records(

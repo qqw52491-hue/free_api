@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod mcp_catalog;
 pub mod router;
 pub mod run_state;
+pub mod run_trace;
 pub mod skill_context;
 pub mod task_store;
 pub mod task_summary;
@@ -391,6 +392,10 @@ pub async fn run_agent_main_loop(
             .map(|d| d.as_millis().to_string())
             .unwrap_or_else(|_| "default".to_string())
     });
+    // 每次用户发送任务（包括在同一会话中继续对话）都是一个独立的可复盘运行。
+    // 该轨迹只服务历史 UI，不参与 checkpoint 恢复或模型上下文。
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let mut run_trace_steps: Vec<serde_json::Value> = Vec::new();
     let mut run_machine = AgentRunMachine::new();
     advance_run_state(
         &app,
@@ -398,6 +403,17 @@ pub async fn run_agent_main_loop(
         &mut run_machine,
         AgentRunEvent::Start,
     )?;
+    if let Err(error) = crate::agent::run_trace::upsert_snapshot(
+        state.inner(),
+        &run_id,
+        &final_session_id,
+        &goal,
+        "running",
+        &run_trace_steps,
+        None,
+    ) {
+        eprintln!("[run-trace] 无法创建运行轨迹: {error}");
+    }
     // Skill、插件与 shell 工具共享本轮运行时工作目录；恢复时会重新读取并按哈希复用未变更的 Skill。
     let workspace_dir = std::env::current_dir().unwrap_or_default();
     // 1. 自动加载插件（强制探测模式）
@@ -859,6 +875,32 @@ pub async fn run_agent_main_loop(
         context.add_step(&instruction, &output_text);
 
         context.current_observation = output_text.clone();
+        // 复盘轨迹使用与 step_new 相同的语义字段，但与 Agent prompt/checkpoint 隔离。
+        // 这使历史会话既能恢复思考、计划和工具调用，又不会放大运行时上下文。
+        run_trace_steps.push(json!({
+            "id": step_id,
+            "description": instruction.description.clone(),
+            "reflection": instruction.reflection.clone(),
+            "thought": instruction.thought.clone(),
+            "tool": instruction.get_action(),
+            "command": instruction.get_params().to_string(),
+            "plan_id": context.active_plan_id.clone().unwrap_or_default(),
+            "plan_title": context.active_plan_title.clone().unwrap_or_else(|| context.user_goal.clone()),
+            "status": if result.success { "succeeded" } else { "failed" },
+            "output": output_text.clone(),
+            "timestamp": Utc::now().timestamp_millis(),
+        }));
+        if let Err(error) = crate::agent::run_trace::upsert_snapshot(
+            state.inner(),
+            &run_id,
+            &final_session_id,
+            &goal,
+            "running",
+            &run_trace_steps,
+            None,
+        ) {
+            eprintln!("[run-trace] 无法保存步骤快照: {error}");
+        }
         // 工具结果已经进入可恢复上下文。先提交 durable phase/cursor，再通知前端；
         // 这样崩溃恢复不会把已经完成的普通步骤当作待执行，也不会把 finish 误续跑。
         let is_finish = is_finish_instruction(&instruction);
@@ -923,6 +965,17 @@ pub async fn run_agent_main_loop(
                     items.push(json!(path));
                 }
             }
+            if let Err(error) = crate::agent::run_trace::upsert_snapshot(
+                state.inner(),
+                &run_id,
+                &final_session_id,
+                &goal,
+                "succeeded",
+                &run_trace_steps,
+                Some(&emitted_finish),
+            ) {
+                eprintln!("[run-trace] 无法保存完成快照: {error}");
+            }
             app.emit(
                 &format!("agent-progress-{}", final_session_id),
                 json!({
@@ -972,8 +1025,20 @@ pub async fn run_agent_main_loop(
                 reason: terminal_error.clone(),
             },
         )?;
-        checkpoint.mark_failed(terminal_error, &context);
+        checkpoint.mark_failed(terminal_error.clone(), &context);
         save_checkpoint(state.inner(), &mut checkpoint)?;
+        let failure_completion = json!({ "summary": terminal_error });
+        if let Err(error) = crate::agent::run_trace::upsert_snapshot(
+            state.inner(),
+            &run_id,
+            &final_session_id,
+            &goal,
+            "failed",
+            &run_trace_steps,
+            Some(&failure_completion),
+        ) {
+            eprintln!("[run-trace] 无法保存失败快照: {error}");
+        }
     }
     {
         let mut channels = intervention_channels().lock().await;

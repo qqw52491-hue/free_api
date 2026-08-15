@@ -77,7 +77,10 @@ export function useAgentSession(sessionId: string) {
     const runStartedAt = ref<number | null>(null);
 
     // 结构化对话状态（解决反复添加和闪烁的关键数据结构）
+    // 当前实时运行与历史复盘分开保存；开始新任务时只重置实时数组。
     const steps = ref<AgentStepItem[]>([]);
+    const historicalSteps = ref<AgentStepItem[]>([]);
+    const displayedSteps = computed(() => [...historicalSteps.value, ...steps.value]);
     const selectedStepId = ref<string | null>(null);
     const thought = ref("");
     const isThinking = ref(false);
@@ -131,7 +134,7 @@ export function useAgentSession(sessionId: string) {
         return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
     });
     const canStart = computed(() => Boolean(!isRunning.value && goalInput.value.trim()));
-    const selectedStep = computed(() => steps.value.find((item) => item.id === selectedStepId.value) || null);
+    const selectedStep = computed(() => displayedSteps.value.find((item) => item.id === selectedStepId.value) || null);
     const completedToolCount = computed(() => steps.value.filter((item) => item.status === "succeeded").length);
     const failedToolCount = computed(() => steps.value.filter((item) => item.status === "failed").length);
     const finalSummary = computed(() => {
@@ -143,6 +146,69 @@ export function useAgentSession(sessionId: string) {
         const candidates = [output.artifacts, output.files, output.created_files, output.paths];
         return candidates.flatMap((candidate) => Array.isArray(candidate) ? candidate.map((value) => toText(value)).filter(Boolean) : []);
     });
+    function traceStepStatus(value: unknown): AgentToolStatus {
+        const normalized = toText(value).toLowerCase();
+        if (normalized === "failed" || normalized === "error") return "failed";
+        if (normalized === "succeeded" || normalized === "success" || normalized === "complete") return "succeeded";
+        if (normalized === "running") return "running";
+        return "pending";
+    }
+    function normalizeRunTraceSteps(value: unknown): AgentStepItem[] {
+        const trace = asRecord(value);
+        const runId = toText(trace.id) || "unknown-run";
+        const goal = toText(trace.goal) || "历史任务";
+        const rawSteps = Array.isArray(trace.steps) ? trace.steps : [];
+        return rawSteps.map((rawStep, index) => {
+            const step = asRecord(rawStep);
+            const stepId = numberOrUndefined(step.id ?? step.step_id) ?? index;
+            const tool = toText(step.tool || step.action) || "action";
+            const sourcePlanId = toText(step.plan_id || step.planId) || "plan-default";
+            const planTitle = toText(step.plan_title || step.planTitle) || goal;
+            const params = step.command ?? step.params;
+            const result = step.output ?? step.result;
+            return {
+                id: `history-${runId}-step-${stepId}-${index}`,
+                stepId,
+                description: toText(step.description) || "已执行步骤",
+                // 多个已完成回合可能都含 plan-1；前缀确保树节点永不合并。
+                planId: `history-run-${runId}-${sourcePlanId}`,
+                planTitle,
+                modelTier: toText(step.model_tier || step.modelTier) || undefined,
+                reflection: toText(step.reflection) || undefined,
+                thought: toText(step.thought) || undefined,
+                explanation: toText(step.explanation) || undefined,
+                tool,
+                action: toText(step.action) || tool,
+                source: sourceFrom(step.route, tool),
+                status: traceStepStatus(step.status),
+                params,
+                result,
+                rawParams: params,
+                rawResult: result,
+                timestamp: toTimestamp(step.timestamp),
+            };
+        });
+    }
+    async function loadRunTraces() {
+        try {
+            const traces = await invoke<unknown[]>("get_session_run_traces", { sessionId });
+            const list = Array.isArray(traces) ? traces : [];
+            historicalSteps.value = list.flatMap((trace) => normalizeRunTraceSteps(trace));
+            const latestTerminal = [...list].reverse().map((trace) => asRecord(trace)).find((trace) => {
+                const status = toText(trace.status).toLowerCase();
+                return ["succeeded", "failed", "cancelled"].includes(status);
+            });
+            if (!latestTerminal || isRunning.value || completionMessage.value) return;
+            const completion = asRecord(latestTerminal.completion);
+            if (!Object.keys(completion).length) return;
+            finishOutput.value = completion;
+            const restoredSummary = toText(completion.summary || completion.message || completion.details || completion.result);
+            completionMessage.value = restoredSummary || (toText(latestTerminal.status) === "succeeded" ? "任务已完成" : "任务未能完成");
+            hasError.value = toText(latestTerminal.status) === "failed";
+        } catch (error) {
+            appendLog(`[过程历史加载失败] ${toText(error)}`);
+        }
+    }
 
     function setScrollElement(element: HTMLElement | null) {
         scrollContainerElement.value = element;
@@ -592,6 +658,7 @@ export function useAgentSession(sessionId: string) {
 
     onMounted(async () => {
         void loadConversation();
+        void loadRunTraces();
         void refreshResources();
         const register = async (channel: string, handler: (payload: unknown) => void) => {
             try {
@@ -628,7 +695,7 @@ export function useAgentSession(sessionId: string) {
         stopRequested,
         elapsedSeconds,
         elapsedLabel,
-        steps,
+        steps: displayedSteps,
         selectedStepId,
         selectedStep,
         thought,
@@ -663,6 +730,7 @@ export function useAgentSession(sessionId: string) {
         sendHumanInput,
         clearSession,
         loadConversation,
+        loadRunTraces,
         selectStep,
         refreshResources,
         openResourcePreview,

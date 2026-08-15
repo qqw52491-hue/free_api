@@ -47,9 +47,10 @@ pub fn run() {
             commands::save_mcp_plugin,
             commands::delete_mcp_plugin,
             commands::toggle_mcp_plugin,
-            // Agent 任务数据区（前端只读）
+            // Agent 任务数据区与历史复盘（前端只读）
             commands::get_agent_task_resources,
             commands::get_agent_task_records,
+            commands::get_session_run_traces,
             // Agent 执行
             agent::execute_command,
             agent::run_agent_main_loop,

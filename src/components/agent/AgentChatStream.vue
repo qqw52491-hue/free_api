@@ -60,7 +60,7 @@
 
         <p v-if="isRunning && !entries.length" class="idle-live"><i></i>{{ stateDescription }}</p>
 
-        <section v-if="(completionMessage || finalSummary) && !(conversationMessages.length && !isRunning)" class="result-line" :class="{ failed: hasError }">
+        <section v-if="completionMessage || finalSummary" class="result-line" :class="{ failed: hasError }">
             <span>{{ hasError ? '任务结束：存在异常' : '任务已完成' }}</span><strong>{{ completionMessage || (hasError ? '任务未能完成' : '任务已完成') }}</strong><p v-if="finalSummary">{{ finalSummary }}</p>
             <div v-if="finalArtifacts.length" class="final-artifacts">
                 <b>任务产物</b>

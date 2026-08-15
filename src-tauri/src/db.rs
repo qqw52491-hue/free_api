@@ -161,6 +161,20 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_agent_checkpoints_phase
             ON agent_checkpoints(phase, updated_at DESC);
+        -- 每个会话回合的可复盘过程树快照；不同于 checkpoint，即使任务完成也会保留。
+        CREATE TABLE IF NOT EXISTS agent_run_traces (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            goal TEXT NOT NULL,
+            status TEXT NOT NULL,
+            steps_json TEXT NOT NULL,
+            completion_json TEXT,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_run_traces_session
+            ON agent_run_traces(session_id, started_at ASC);
     ",
     )?;
 
