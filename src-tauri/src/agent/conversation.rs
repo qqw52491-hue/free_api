@@ -10,9 +10,17 @@ const HISTORY_LIMIT: usize = 24;
 
 fn title_from_goal(goal: &str) -> String {
     let normalized = goal.split_whitespace().collect::<Vec<_>>().join(" ");
-    let candidate = if normalized.is_empty() { "新 Agent 对话" } else { normalized.as_str() };
+    let candidate = if normalized.is_empty() {
+        "新 Agent 对话"
+    } else {
+        normalized.as_str()
+    };
     let clipped: String = candidate.chars().take(48).collect();
-    if candidate.chars().count() > 48 { format!("{}…", clipped) } else { clipped }
+    if candidate.chars().count() > 48 {
+        format!("{}…", clipped)
+    } else {
+        clipped
+    }
 }
 
 pub fn ensure_conversation(
@@ -77,7 +85,13 @@ pub fn complete_turn(
     model_id: &str,
     assistant_message: &str,
 ) -> Result<(), String> {
-    append_message(db, session_id, "assistant", assistant_message, Some(model_id))
+    append_message(
+        db,
+        session_id,
+        "assistant",
+        assistant_message,
+        Some(model_id),
+    )
 }
 
 pub fn append_human_intervention(
@@ -105,10 +119,14 @@ pub fn recent_history(db: &DbState, session_id: &str) -> Result<Vec<ChatMessage>
         .query_map(params![session_id, HISTORY_LIMIT], |row| {
             let role: String = row.get(0)?;
             let content: String = row.get(1)?;
-            Ok(ChatMessage { role, content: json!(content) })
+            Ok(ChatMessage {
+                role,
+                content: json!(content),
+            })
         })
         .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -146,14 +164,23 @@ mod tests {
         append_human_intervention(&db, "session-b", "暂停，先保留中文版本").unwrap();
         let history = recent_history(&db, "session-b").unwrap();
         assert_eq!(history.len(), 4);
-        assert_eq!(history.iter().map(|item| item.role.as_str()).collect::<Vec<_>>(), vec!["user", "assistant", "user", "user"]);
+        assert_eq!(
+            history
+                .iter()
+                .map(|item| item.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user", "assistant", "user", "user"]
+        );
         assert_eq!(history[2].content.as_str(), Some("把报告改成英文"));
         assert_eq!(history[3].content.as_str(), Some("暂停，先保留中文版本"));
     }
 
     #[test]
     fn unfinished_checkpoint_resumes_without_duplicate_user_turn() {
-        let context = crate::agent::context::SandwichContext::new("system".to_string(), "继续整理报告".to_string());
+        let context = crate::agent::context::SandwichContext::new(
+            "system".to_string(),
+            "继续整理报告".to_string(),
+        );
         let mut unfinished = AgentCheckpoint::new("run-a".to_string(), &context);
         assert!(!should_start_new_turn(Some(&unfinished), "继续整理报告"));
         assert!(should_start_new_turn(Some(&unfinished), "换一个新任务"));

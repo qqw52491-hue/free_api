@@ -59,7 +59,8 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
         })
         .map_err(|error| error.to_string())?;
     rows.map(|row| {
-        let (id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at) = row.map_err(|error| error.to_string())?;
+        let (id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at) =
+            row.map_err(|error| error.to_string())?;
         let steps = serde_json::from_str::<Value>(&steps_json).unwrap_or_else(|_| json!([]));
         let completion = completion_json
             .as_deref()
@@ -87,8 +88,9 @@ mod tests {
 
     fn test_db() -> DbState {
         let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch(
-            "CREATE TABLE agent_run_traces (
+        connection
+            .execute_batch(
+                "CREATE TABLE agent_run_traces (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 goal TEXT NOT NULL,
@@ -99,15 +101,34 @@ mod tests {
                 updated_at TEXT NOT NULL,
                 completed_at TEXT
             );",
-        ).unwrap();
+            )
+            .unwrap();
         DbState(Arc::new(Mutex::new(connection)))
     }
 
     #[test]
     fn saves_and_loads_steps_in_session_order() {
         let db = test_db();
-        upsert_snapshot(&db, "run-a", "session-1", "创建成绩单", "running", &[json!({"id": 0, "description": "创建工作簿"})], None).unwrap();
-        upsert_snapshot(&db, "run-a", "session-1", "创建成绩单", "succeeded", &[json!({"id": 0, "status": "succeeded"})], Some(&json!({"summary": "完成"}))).unwrap();
+        upsert_snapshot(
+            &db,
+            "run-a",
+            "session-1",
+            "创建成绩单",
+            "running",
+            &[json!({"id": 0, "description": "创建工作簿"})],
+            None,
+        )
+        .unwrap();
+        upsert_snapshot(
+            &db,
+            "run-a",
+            "session-1",
+            "创建成绩单",
+            "succeeded",
+            &[json!({"id": 0, "status": "succeeded"})],
+            Some(&json!({"summary": "完成"})),
+        )
+        .unwrap();
         let traces = list_session_traces(&db, "session-1").unwrap();
         assert_eq!(traces.len(), 1);
         assert_eq!(traces[0]["status"], "succeeded");

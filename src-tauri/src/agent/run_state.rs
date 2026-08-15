@@ -294,11 +294,25 @@ mod tests {
         let mut machine = AgentRunMachine::new();
         machine.transition(AgentRunEvent::Start).unwrap();
         machine.transition(AgentRunEvent::RuntimeReady).unwrap();
-        machine.transition(AgentRunEvent::InstructionReady { action: "ask_human".to_string() }).unwrap();
-        machine.transition(AgentRunEvent::WaitForHuman { question: "confirm".to_string() }).unwrap();
-        let snapshot = machine.transition(AgentRunEvent::Cancel { reason: "replaced".to_string() }).unwrap();
+        machine
+            .transition(AgentRunEvent::InstructionReady {
+                action: "ask_human".to_string(),
+            })
+            .unwrap();
+        machine
+            .transition(AgentRunEvent::WaitForHuman {
+                question: "confirm".to_string(),
+            })
+            .unwrap();
+        let snapshot = machine
+            .transition(AgentRunEvent::Cancel {
+                reason: "replaced".to_string(),
+            })
+            .unwrap();
         assert_eq!(snapshot.state, AgentRunState::Cancelled);
-        assert!(machine.transition(AgentRunEvent::HumanReplyReceived).is_err());
+        assert!(machine
+            .transition(AgentRunEvent::HumanReplyReceived)
+            .is_err());
     }
     #[test]
     fn human_reply_only_resumes_a_paused_run() {

@@ -347,10 +347,12 @@ body {
 .nav-bar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 10px 16px;
-  background: var(--bg-1);
-  border-bottom: 1px solid var(--border-1);
+  gap: 24px;
+  min-height: 58px;
+  padding: 10px 20px;
+  background: linear-gradient(180deg, rgba(24, 28, 40, .98), rgba(18, 21, 31, .98));
+  border-bottom: 1px solid var(--border-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .16);
   position: relative;
   z-index: 10;
   flex-shrink: 0;
@@ -360,50 +362,74 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-right: 16px;
+  margin-right: auto;
+  min-width: max-content;
 }
 
 .nav-logo-icon {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   background: linear-gradient(135deg, var(--accent), var(--teal));
-  border-radius: 8px;
+  border-radius: 9px;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 14px;
-  box-shadow: 0 2px 12px var(--accent-glow);
+  box-shadow: 0 4px 16px var(--accent-glow);
 }
 
 .nav-logo-text {
   font-size: 15px;
-  font-weight: 700;
+  font-weight: 750;
+  letter-spacing: -.01em;
   background: linear-gradient(135deg, var(--text-1), var(--accent-light));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-.nav-link {
+.nav-tabs {
   display: flex;
   align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid var(--border-1);
+  border-radius: 11px;
+  background: rgba(8, 10, 16, .34);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+}
+
+.nav-link {
+  display: inline-flex;
+  align-items: center;
   gap: 7px;
-  padding: 7px 14px;
-  border-radius: var(--radius-sm);
-  color: var(--text-3);
+  min-height: 32px;
+  padding: 7px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-2);
   text-decoration: none;
-  font-size: 13px;
-  font-weight: 500;
-  transition: all var(--transition);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: .01em;
+  transition: color var(--transition), background var(--transition), border-color var(--transition), box-shadow var(--transition), transform var(--transition);
+}
+
+.nav-link svg {
+  flex: 0 0 auto;
 }
 
 .nav-link:hover {
+  border-color: var(--border-2);
   background: var(--surface-2);
   color: var(--text-1);
+  transform: translateY(-1px);
 }
 
 .nav-link.router-link-active {
-  background: rgba(108, 99, 255, 0.12);
-  color: var(--accent-light);
+  border-color: rgba(139, 131, 255, .32);
+  background: linear-gradient(135deg, rgba(108, 99, 255, .24), rgba(0, 212, 170, .10));
+  box-shadow: 0 3px 12px rgba(108, 99, 255, .16), inset 0 1px 0 rgba(255, 255, 255, .07);
+  color: var(--text-1);
 }
 
 /* ---- Divider ---- */

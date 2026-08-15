@@ -5,12 +5,7 @@
         <div class="nav-logo-icon">⚡</div>
         <span class="nav-logo-text">Free API Chat</span>
       </div>
-      <RouterLink to="/chat" class="nav-link">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-        </svg>
-        AI 对话
-      </RouterLink>
+      <div class="nav-tabs" aria-label="功能导航">
       <RouterLink to="/apis" class="nav-link">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="2" y="3" width="20" height="14" rx="2"/>
@@ -25,14 +20,7 @@
         </svg>
         AI Agent
       </RouterLink>
-      <RouterLink to="/plugins" class="nav-link">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-          <path d="M2 17l10 5 10-5"/>
-          <path d="M2 12l10 5 10-5"/>
-        </svg>
-        插件中心
-      </RouterLink>
+      </div>
     </nav>
     <main class="main-content">
       <RouterView />

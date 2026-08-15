@@ -120,6 +120,20 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             created_at TEXT NOT NULL
         );
 
+        -- 用户维护的自定义提示词与 Skill。它们作为普通上下文追加，不能替换内置系统约束。
+        CREATE TABLE IF NOT EXISTS agent_custom_instructions (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK(kind IN ('prompt', 'skill')),
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_custom_instructions_enabled
+            ON agent_custom_instructions(enabled, updated_at DESC);
+
         -- Session 内部任务数据区：记录本体与 checkpoint 分离，允许工具实时写入。
         -- 不设 chat_sessions 外键，兼容 Agent 自动创建的临时 session_id。
         CREATE TABLE IF NOT EXISTS agent_task_resources (

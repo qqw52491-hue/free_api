@@ -1,10 +1,10 @@
 <template>
     <section class="manus-agent-shell">
         <header class="manus-chat-header">
-            <button class="model-selector" type="button" title="当前模型路由；点击配置推理、快速与视觉模型" @click="settingsOpen = true">
+            <button class="model-selector" data-testid="agent-model-routing-trigger" type="button" title="当前模型路由；点击配置推理、快速与视觉模型" @click="settingsOpen = true">
                 <span>推理 · {{ activeProModelName }}</span>
                 <small>快速 · {{ activeFlashModelName }}</small>
-                <small>思考 · {{ activeReasoningProfileLabel }}</small>
+                <small data-testid="active-reasoning-policy">档位 · {{ activeReasoningProfileLabel }}</small>
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 9l6 6 6-6" /></svg>
             </button>
             <div class="header-actions">
@@ -143,13 +143,18 @@ const activeFlashModelName = computed(() => {
     const model = props.allModels.find((item) => item.id === id);
     return model?.display_name || model?.name || "未配置";
 });
-const activeReasoningProfileLabel = computed(() => ({
+const reasoningEffortLabel = (value: string) => ({
     auto: "自动",
     off: "关闭",
     low: "低",
+    medium: "中",
     high: "高",
-    max: "最高",
-}[session.modelRouting.value.reasoning_effort] || "自动"));
+    max: "高",
+}[value] || "自动");
+const activeReasoningProfileLabel = computed(() => {
+    const routing = session.modelRouting.value;
+    return `推理 ${reasoningEffortLabel(routing.pro_reasoning_effort)} · 执行 ${reasoningEffortLabel(routing.flash_reasoning_effort)} · 视觉 ${reasoningEffortLabel(routing.vision_reasoning_effort)}`;
+});
 const composerDraft = computed({
     get: () => session.isRunning.value ? session.humanInput.value : session.goalInput.value,
     set: (value: string) => {
@@ -185,7 +190,15 @@ function handleActiveThoughtSelect() {
     session.selectedStepId.value = null;
 }
 function handleModelSelect(modelId: string) {
-    session.modelRouting.value = { pro: modelId, flash: modelId, vision: modelId, reasoning_effort: "auto" };
+    session.modelRouting.value = {
+        reasoning_effort_version: 2,
+        pro: modelId,
+        flash: modelId,
+        vision: modelId,
+        pro_reasoning_effort: "auto",
+        flash_reasoning_effort: "auto",
+        vision_reasoning_effort: "auto",
+    };
 }
 function submitComposer() {
     if (session.isRunning.value) void session.sendHumanInput();

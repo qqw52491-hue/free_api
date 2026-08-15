@@ -43,11 +43,26 @@
 
     <!-- 右侧: 模型列表 -->
     <section class="model-panel">
+      <div v-if="!selectedPlatformId || !currentPlatform" class="panel-header">
+        <div>
+          <h3 class="panel-title">模型管理</h3>
+          <p class="panel-subtitle">请先从左侧选择一个平台，再管理其模型与连通性。</p>
+        </div>
+        <div class="model-header-actions">
+          <button class="btn btn-primary btn-sm" type="button" data-testid="test-current-platform" disabled>检测当前平台</button>
+        </div>
+      </div>
       <template v-if="selectedPlatformId && currentPlatform">
         <div class="panel-header">
           <div>
             <h3 class="panel-title">{{ currentPlatform.name }} — 模型管理</h3>
             <p class="panel-subtitle">添加模型名称即可，Key 和地址会自动继承平台配置</p>
+          </div>
+          <div class="model-header-actions">
+            <span v-if="batchTestSummary && batchTestPlatformId === selectedPlatformId" class="batch-test-summary" data-testid="batch-test-summary" role="status" aria-live="polite">{{ batchTestSummary }}</span>
+            <button class="btn btn-primary btn-sm" type="button" data-testid="test-current-platform" :disabled="isTestingCurrentPlatform || models.length === 0" :aria-busy="isTestingCurrentPlatform ? 'true' : 'false'" @click="testCurrentPlatform">
+              {{ isTestingCurrentPlatform ? `检测中 ${batchTestCompleted}/${batchTestTotal}` : '检测当前平台' }}
+            </button>
           </div>
         </div>
 
@@ -204,6 +219,11 @@ const deletingPlatform = ref<PlatformData | null>(null)
 const newModelName = ref('')
 const showKey = ref(false)
 const formError = ref('')
+const isTestingCurrentPlatform = ref(false)
+const batchTestCompleted = ref(0)
+const batchTestTotal = ref(0)
+const batchTestSummary = ref('')
+const batchTestPlatformId = ref('')
 
 const pForm = ref({ name: '', base_url: '', api_key: '' })
 const currentPlatform = computed(() => platforms.value.find(p => p.id === selectedPlatformId.value))
@@ -307,7 +327,7 @@ async function deleteModel(id: string) {
   await selectPlatform(selectedPlatformId.value)
 }
 
-async function testSingleModel(m: ModelData) {
+async function testSingleModel(m: ModelData): Promise<boolean> {
   const idx = models.value.findIndex(x => x.id === m.id)
   if (idx >= 0) models.value[idx].status = 'testing'
   try {
@@ -316,11 +336,34 @@ async function testSingleModel(m: ModelData) {
       models.value[idx].status = result.status
       models.value[idx].latency_ms = result.latency_ms
     }
+    return result.status === 'online'
   } catch {
     if (idx >= 0) models.value[idx].status = 'offline'
+    return false
   }
 }
 
+async function testCurrentPlatform() {
+  if (isTestingCurrentPlatform.value || !selectedPlatformId.value) return
+  const platformId = selectedPlatformId.value
+  const targets = [...models.value]
+  isTestingCurrentPlatform.value = true
+  batchTestCompleted.value = 0
+  batchTestTotal.value = targets.length
+  batchTestSummary.value = ''
+  batchTestPlatformId.value = platformId
+  let onlineCount = 0
+  try {
+    for (const model of targets) {
+      if (await testSingleModel(model)) onlineCount += 1
+      batchTestCompleted.value += 1
+    }
+    batchTestSummary.value = `已检测 ${targets.length} 个：${onlineCount} 可用，${targets.length - onlineCount} 不可用`
+  } finally {
+    isTestingCurrentPlatform.value = false
+    if (selectedPlatformId.value === platformId) await selectPlatform(platformId)
+  }
+}
 onMounted(loadPlatforms)
 </script>
 
@@ -350,6 +393,16 @@ onMounted(loadPlatforms)
   flex-shrink: 0;
 }
 
+.model-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.batch-test-summary {
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
 .panel-title {
   font-size: 15px;
   font-weight: 600;

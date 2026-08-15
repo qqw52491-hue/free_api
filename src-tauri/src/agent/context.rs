@@ -59,10 +59,22 @@ impl SandwichContext {
 
     /// 将指令归属到稳定计划节点。模型未填字段时继续最近计划；只有显式切换标题或 id 才创建新父节点。
     pub fn resolve_plan(&mut self, instruction: &AgentInstruction) -> (String, String) {
-        let requested_id = instruction.plan_id.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
-        let requested_title = instruction.plan_title.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+        let requested_id = instruction
+            .plan_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let requested_title = instruction
+            .plan_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         if let Some(id) = requested_id {
-            let title = requested_title.or_else(|| self.active_plan_title.clone()).unwrap_or_else(|| self.user_goal.clone());
+            let title = requested_title
+                .or_else(|| self.active_plan_title.clone())
+                .unwrap_or_else(|| self.user_goal.clone());
             self.active_plan_id = Some(id.clone());
             self.active_plan_title = Some(title.clone());
             return (id, title);
@@ -79,7 +91,9 @@ impl SandwichContext {
             self.active_plan_title = Some(title.clone());
             return (id, title);
         }
-        if let (Some(id), Some(title)) = (self.active_plan_id.clone(), self.active_plan_title.clone()) {
+        if let (Some(id), Some(title)) =
+            (self.active_plan_id.clone(), self.active_plan_title.clone())
+        {
             return (id, title);
         }
         self.next_plan_index = self.next_plan_index.saturating_add(1);

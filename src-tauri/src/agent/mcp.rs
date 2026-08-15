@@ -280,7 +280,9 @@ impl PluginRegistry {
         }
         lines.extend(
             crate::agent::mcp_catalog::concise_menu(catalogs)
-                .trim_start_matches("\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）")
+                .trim_start_matches(
+                    "\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）",
+                )
                 .lines()
                 .map(str::to_string),
         );
@@ -309,10 +311,5 @@ impl PluginRegistry {
             ));
         }
         detail
-    }
-
-    /// 兼容旧接口（合并菜单+详情，用于首次启动时）
-    pub fn format_tools_for_prompt(&mut self) -> String {
-        self.format_tools_menu()
     }
 }

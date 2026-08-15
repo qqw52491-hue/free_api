@@ -52,7 +52,10 @@ pub fn render_task_summary_markdown(
         markdown.push_str(&format!("\n## 详细说明\n\n{}\n", clean_text(details)));
     }
     if !clean_text(progress_summary).is_empty() {
-        markdown.push_str(&format!("\n## 执行进度摘要\n\n{}\n", clean_text(progress_summary)));
+        markdown.push_str(&format!(
+            "\n## 执行进度摘要\n\n{}\n",
+            clean_text(progress_summary)
+        ));
     }
     if !artifacts.is_empty() {
         markdown.push_str("\n## 交付物\n\n");
@@ -93,7 +96,13 @@ pub fn write_task_summary(
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let safe_session = session_id
         .chars()
-        .map(|character| if character.is_ascii_alphanumeric() || character == '-' { character } else { '_' })
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
     let path = root.join(format!("{}-{}.md", safe_session, timestamp));
     fs::write(

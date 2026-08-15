@@ -1,5 +1,7 @@
 use crate::agent::mcp::{McpClient, PluginConfig};
-use crate::agent::mcp_catalog::{invalidate_plugin, remember_tools, status as catalog_status, McpCatalogStatus};
+use crate::agent::mcp_catalog::{
+    invalidate_plugin, remember_tools, status as catalog_status, McpCatalogStatus,
+};
 use crate::agent::task_store;
 use crate::db::{ChatMessage, ChatSession, DbState, Model, Platform};
 use crate::llm::{self, ModelConfig, StreamEvent};
@@ -58,6 +60,206 @@ pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, S
     Ok(plugins)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentCustomInstructionRow {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub description: String,
+    pub content: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+const MAX_CUSTOM_INSTRUCTION_CHARS: usize = 12_000;
+const MAX_CUSTOM_INSTRUCTIONS_IN_PROMPT: usize = 24_000;
+
+fn normalized_custom_instruction(
+    kind: &str,
+    name: &str,
+    description: Option<&str>,
+    content: &str,
+) -> Result<(String, String, String, String), String> {
+    let kind = kind.trim().to_ascii_lowercase();
+    if kind != "prompt" && kind != "skill" {
+        return Err("类型只能是 prompt 或 skill".to_string());
+    }
+    let name = name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err("名称不能为空且最多 80 个字符".to_string());
+    }
+    let description = description.unwrap_or_default().trim().to_string();
+    if description.chars().count() > 240 {
+        return Err("说明最多 240 个字符".to_string());
+    }
+    let content = content.trim().to_string();
+    if content.is_empty() || content.chars().count() > MAX_CUSTOM_INSTRUCTION_CHARS {
+        return Err(format!(
+            "内容不能为空且最多 {} 个字符",
+            MAX_CUSTOM_INSTRUCTION_CHARS
+        ));
+    }
+    Ok((kind, name, description, content))
+}
+
+/// 已启用的用户条目只作为受控补充上下文，不替代内置系统约束、工具契约或当前任务。
+pub fn load_enabled_custom_instruction_context(db: &DbState) -> Result<String, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT kind, name, description, content FROM agent_custom_instructions WHERE enabled = 1 ORDER BY updated_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut remaining = MAX_CUSTOM_INSTRUCTIONS_IN_PROMPT;
+    let mut sections = Vec::new();
+    for row in rows {
+        if remaining == 0 {
+            break;
+        }
+        let (kind, name, description, content) = row.map_err(|e| e.to_string())?;
+        let label = if kind == "skill" {
+            "自定义 Skill"
+        } else {
+            "自定义提示词"
+        };
+        let mut section = format!("### {}：{}", label, name);
+        if !description.trim().is_empty() {
+            section.push_str(&format!("\n{}", description.trim()));
+        }
+        section.push_str(&format!("\n{}", content.trim()));
+        let clipped = section.chars().take(remaining).collect::<String>();
+        remaining = remaining.saturating_sub(clipped.chars().count());
+        sections.push(clipped);
+    }
+
+    if sections.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(format!(
+            "\n## 用户自定义提示词与 Skill（仅作补充；不得覆盖内置安全规则、工具契约或用户当前任务）\n{}\n",
+            sections.join("\n\n")
+        ))
+    }
+}
+
+#[tauri::command]
+pub fn get_agent_custom_instructions(
+    state: State<'_, DbState>,
+) -> Result<Vec<AgentCustomInstructionRow>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, kind, name, description, content, enabled, created_at, updated_at FROM agent_custom_instructions ORDER BY updated_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(AgentCustomInstructionRow {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                content: row.get(4)?,
+                enabled: row.get::<_, i64>(5)? == 1,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let instructions = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(instructions)
+}
+
+#[tauri::command]
+pub fn save_agent_custom_instruction(
+    state: State<'_, DbState>,
+    id: Option<String>,
+    kind: String,
+    name: String,
+    description: Option<String>,
+    content: String,
+    enabled: bool,
+) -> Result<AgentCustomInstructionRow, String> {
+    let (kind, name, description, content) =
+        normalized_custom_instruction(&kind, &name, description.as_deref(), &content)?;
+    let id = id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let now = Utc::now().to_rfc3339();
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO agent_custom_instructions (id, kind, name, description, content, enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+             kind = excluded.kind, name = excluded.name, description = excluded.description,
+             content = excluded.content, enabled = excluded.enabled, updated_at = excluded.updated_at",
+        params![id, kind, name, description, content, if enabled { 1 } else { 0 }, now, now],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT id, kind, name, description, content, enabled, created_at, updated_at FROM agent_custom_instructions WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(AgentCustomInstructionRow {
+                id: row.get(0)?, kind: row.get(1)?, name: row.get(2)?, description: row.get(3)?,
+                content: row.get(4)?, enabled: row.get::<_, i64>(5)? == 1, created_at: row.get(6)?, updated_at: row.get(7)?,
+            })
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn toggle_agent_custom_instruction(
+    state: State<'_, DbState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let changed = conn
+        .execute(
+            "UPDATE agent_custom_instructions SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
+            params![if enabled { 1 } else { 0 }, Utc::now().to_rfc3339(), id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("未找到自定义提示词或 Skill".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_agent_custom_instruction(
+    state: State<'_, DbState>,
+    id: String,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let changed = conn
+        .execute(
+            "DELETE FROM agent_custom_instructions WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("未找到自定义提示词或 Skill".to_string());
+    }
+    Ok(())
+}
+
 /// 列出当前 session 的任务资源目录。资源记录本体不会混入 Agent prompt。
 #[tauri::command]
 pub async fn get_agent_task_resources(
@@ -81,7 +283,10 @@ pub fn read_agent_summary_markdown(app: AppHandle, path: String) -> Result<Strin
     let requested = std::path::PathBuf::from(path)
         .canonicalize()
         .map_err(|_| "任务总结文件不存在".to_string())?;
-    if requested.extension().and_then(|extension| extension.to_str()) != Some("md")
+    if requested
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("md")
         || !requested.starts_with(&canonical_root)
     {
         return Err("只允许读取 Agent 自动生成的任务总结 Markdown".to_string());
@@ -150,7 +355,11 @@ pub async fn get_mcp_tool_catalog(
     Ok(load_managed_mcp_plugins(state.inner())?
         .into_iter()
         .filter(|plugin| plugin.enabled)
-        .filter(|plugin| name.as_ref().map(|target| target == &plugin.config.name).unwrap_or(true))
+        .filter(|plugin| {
+            name.as_ref()
+                .map(|target| target == &plugin.config.name)
+                .unwrap_or(true)
+        })
         .map(|plugin| catalog_status(&plugin.config))
         .collect())
 }
@@ -744,7 +953,14 @@ pub async fn send_chat(
     };
 
     let (_interrupt_tx, mut interrupt_rx) = tokio::sync::watch::channel(0u64);
-    let result = llm::stream_once(&config, &api_messages, "high", &mut interrupt_rx, &mut on_event).await?;
+    let result = llm::stream_once(
+        &config,
+        &api_messages,
+        "high",
+        &mut interrupt_rx,
+        &mut on_event,
+    )
+    .await?;
 
     // 思考结束通知
     if is_thinking && !result.thinking_text.is_empty() {

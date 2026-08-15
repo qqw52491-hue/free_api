@@ -29,22 +29,52 @@ import {
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
 
 const MAX_LOGS = 600;
-type ReasoningEffort = "auto" | "off" | "low" | "high" | "max";
-type ModelRouting = { pro: string; flash: string; vision: string; reasoning_effort: ReasoningEffort };
+type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
+type StoredReasoningEffort = ReasoningEffort | "max";
+type ModelRouting = {
+    reasoning_effort_version: 2;
+    pro: string;
+    flash: string;
+    vision: string;
+    pro_reasoning_effort: ReasoningEffort;
+    flash_reasoning_effort: ReasoningEffort;
+    vision_reasoning_effort: ReasoningEffort;
+};
 const MODEL_ROUTING_STORAGE_KEY = "free-api.agent.model-routing.v1";
+const REASONING_EFFORTS: ReasoningEffort[] = ["auto", "off", "low", "medium", "high"];
+const STORED_REASONING_EFFORTS: StoredReasoningEffort[] = [...REASONING_EFFORTS, "max"];
+
+function migrateReasoningEffort(value: unknown, fallback: ReasoningEffort, isLegacy: boolean): ReasoningEffort {
+    const stored = STORED_REASONING_EFFORTS.includes(value as StoredReasoningEffort)
+        ? value as StoredReasoningEffort
+        : fallback;
+    if (stored === "max") return "high";
+    if (isLegacy && stored === "high") return "medium";
+    return stored;
+}
 
 function loadModelRouting(): ModelRouting {
-    const fallback: ModelRouting = { pro: "", flash: "", vision: "", reasoning_effort: "auto" };
+    const fallback: ModelRouting = {
+        reasoning_effort_version: 2,
+        pro: "",
+        flash: "",
+        vision: "",
+        pro_reasoning_effort: "auto",
+        flash_reasoning_effort: "auto",
+        vision_reasoning_effort: "auto",
+    };
     try {
-        const stored = JSON.parse(localStorage.getItem(MODEL_ROUTING_STORAGE_KEY) || "{}") as Partial<ModelRouting>;
-        const effort = ["auto", "off", "low", "high", "max"].includes(stored.reasoning_effort || "")
-            ? stored.reasoning_effort as ReasoningEffort
-            : fallback.reasoning_effort;
+        const stored = JSON.parse(localStorage.getItem(MODEL_ROUTING_STORAGE_KEY) || "{}") as Partial<ModelRouting> & { reasoning_effort?: unknown; reasoning_effort_version?: unknown };
+        const isLegacy = stored.reasoning_effort_version !== 2;
+        const legacyEffort = migrateReasoningEffort(stored.reasoning_effort, fallback.pro_reasoning_effort, isLegacy);
         return {
+            reasoning_effort_version: 2,
             pro: typeof stored.pro === "string" ? stored.pro : fallback.pro,
             flash: typeof stored.flash === "string" ? stored.flash : fallback.flash,
             vision: typeof stored.vision === "string" ? stored.vision : fallback.vision,
-            reasoning_effort: effort,
+            pro_reasoning_effort: migrateReasoningEffort(stored.pro_reasoning_effort, legacyEffort, isLegacy),
+            flash_reasoning_effort: migrateReasoningEffort(stored.flash_reasoning_effort, legacyEffort, isLegacy),
+            vision_reasoning_effort: migrateReasoningEffort(stored.vision_reasoning_effort, legacyEffort, isLegacy),
         };
     } catch {
         return fallback;

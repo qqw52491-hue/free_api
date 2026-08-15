@@ -1,6 +1,6 @@
 <template>
     <div v-if="open" class="settings-backdrop" @click.self="$emit('close')">
-        <aside class="settings-drawer" aria-label="Agent 设置">
+        <aside class="settings-drawer" data-testid="agent-settings-drawer" aria-label="Agent 设置">
             <header>
                 <div>
                     <span>AGENT SETTINGS</span>
@@ -11,41 +11,71 @@
             </header>
             <div class="settings-scroll">
                 <section>
-                    <div class="section-heading"><h3>模型路由</h3><small>{{ isRunning ? '运行中已锁定' : '任务开始前可调整' }}</small></div>
-                    <label>推理模型
-                        <select :value="modelRouting.pro" :disabled="isRunning" @change="updateRoute('pro', $event)">
-                            <option value="" disabled>选择复杂推理模型</option>
-                            <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
-                                <option v-for="model in group.models" :key="model.id" :value="model.id">{{ model.display_name || model.name }}</option>
-                            </optgroup>
-                        </select>
-                    </label>
-                    <label>执行模型
-                        <select :value="modelRouting.flash" :disabled="isRunning" @change="updateRoute('flash', $event)">
-                            <option value="" disabled>选择快速执行模型</option>
-                            <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
-                                <option v-for="model in group.models" :key="model.id" :value="model.id">{{ model.display_name || model.name }}</option>
-                            </optgroup>
-                        </select>
-                    </label>
-                    <label>视觉模型
-                        <select :value="modelRouting.vision" :disabled="isRunning" @change="updateRoute('vision', $event)">
-                            <option value="" disabled>选择多模态模型</option>
-                            <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
-                                <option v-for="model in group.models" :key="model.id" :value="model.id">{{ model.display_name || model.name }}</option>
-                            </optgroup>
-                        </select>
-                    </label>
-                    <label>思考策略
-                        <select :value="modelRouting.reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort($event)">
-                            <option value="auto">自动：Flash 低，其他 DeepSeek 高</option>
-                            <option value="off">关闭：跳过 DeepSeek 思考</option>
-                            <option value="low">低：更快、更省</option>
-                            <option value="high">高：复杂规划</option>
-                            <option value="max">最高：最难任务</option>
-                        </select>
-                        <small>仅映射到支持的 DeepSeek 参数；其他厂商保持原有请求。设置会保存到本机，下次启动继续生效。</small>
-                    </label>
+                    <div class="section-heading"><h3>模型路由与思考档位</h3><small>{{ isRunning ? '运行中已锁定' : '每个模型独立保存' }}</small></div>
+                    <p class="section-description">为规划、日常执行和视觉分析分别选择模型与档位。模型下拉与参考界面一致，配置会保存到本机。</p>
+                    <div class="routing-grid">
+                        <article class="routing-card">
+                            <div class="routing-card-heading"><strong>推理模型</strong><small>规划与故障恢复</small></div>
+                            <label><span>模型</span>
+                                <select data-testid="pro-model-select" :value="modelRouting.pro" :disabled="isRunning" @change="updateRoute('pro', $event)">
+                                    <option value="" disabled>选择复杂推理模型</option>
+                                    <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
+                                        <option v-for="model in group.models" :key="model.id" :value="model.id">{{ model.display_name || model.name }}</option>
+                                    </optgroup>
+                                </select>
+                            </label>
+                            <label><span>思考档位</span>
+                                <select data-testid="pro-reasoning-policy-select" :value="modelRouting.pro_reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort('pro', $event)">
+                                    <option value="auto">自动：按模型优化</option>
+                                    <option value="off">关闭：跳过思考</option>
+                                    <option value="low">低：更快、更省</option>
+                                    <option value="medium">中：平衡效率与质量</option>
+                                    <option value="high">高：深入规划</option>
+                                </select>
+                            </label>
+                        </article>
+                        <article class="routing-card">
+                            <div class="routing-card-heading"><strong>执行模型</strong><small>常规工具调用</small></div>
+                            <label><span>模型</span>
+                                <select data-testid="flash-model-select" :value="modelRouting.flash" :disabled="isRunning" @change="updateRoute('flash', $event)">
+                                    <option value="" disabled>选择快速执行模型</option>
+                                    <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
+                                        <option v-for="model in group.models" :key="model.id" :value="model.id">{{ model.display_name || model.name }}</option>
+                                    </optgroup>
+                                </select>
+                            </label>
+                            <label><span>思考档位</span>
+                                <select data-testid="flash-reasoning-policy-select" :value="modelRouting.flash_reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort('flash', $event)">
+                                    <option value="auto">自动：按模型优化</option>
+                                    <option value="off">关闭：跳过思考</option>
+                                    <option value="low">低：更快、更省</option>
+                                    <option value="medium">中：平衡效率与质量</option>
+                                    <option value="high">高：深入执行</option>
+                                </select>
+                            </label>
+                        </article>
+                        <article class="routing-card">
+                            <div class="routing-card-heading"><strong>视觉模型</strong><small>截图与图片分析</small></div>
+                            <label><span>模型</span>
+                                <select data-testid="vision-model-select" :value="modelRouting.vision" :disabled="isRunning" @change="updateRoute('vision', $event)">
+                                    <option value="" disabled>选择多模态模型</option>
+                                    <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
+                                        <option v-for="model in group.models" :key="model.id" :value="model.id">{{ model.display_name || model.name }}</option>
+                                    </optgroup>
+                                </select>
+                            </label>
+                            <label><span>思考档位</span>
+                                <select data-testid="vision-reasoning-policy-select" :value="modelRouting.vision_reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort('vision', $event)">
+                                    <option value="auto">自动：按模型优化</option>
+                                    <option value="off">关闭：跳过思考</option>
+                                    <option value="low">低：更快、更省</option>
+                                    <option value="medium">中：平衡效率与质量</option>
+                                    <option value="high">高：深入识别</option>
+                                </select>
+                            </label>
+                        </article>
+                    </div>
+                    <p class="routing-note">档位仅映射到支持的 DeepSeek 参数；其他厂商保持原有请求。运行期间配置会锁定，避免中途改变执行策略。</p>
                 </section>
                 <section>
                     <label class="context-toggle">
@@ -92,8 +122,17 @@
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENT_TASK_PRESETS, type AgentModelOption } from "./types";
-type ReasoningEffort = "auto" | "off" | "low" | "high" | "max";
-type ModelRouting = { pro: string; flash: string; vision: string; reasoning_effort: ReasoningEffort };
+type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
+type ModelRole = "pro" | "flash" | "vision";
+type ModelRouting = {
+    reasoning_effort_version: 2;
+    pro: string;
+    flash: string;
+    vision: string;
+    pro_reasoning_effort: ReasoningEffort;
+    flash_reasoning_effort: ReasoningEffort;
+    vision_reasoning_effort: ReasoningEffort;
+};
 
 const props = defineProps<{
     open: boolean;
@@ -165,9 +204,14 @@ function updateRoute(key: "pro" | "flash" | "vision", event: Event) {
     const value = (event.target as HTMLSelectElement).value;
     emit("update:model-routing", { ...props.modelRouting, [key]: value });
 }
-function updateReasoningEffort(event: Event) {
+function updateReasoningEffort(role: ModelRole, event: Event) {
     const value = (event.target as HTMLSelectElement).value as ReasoningEffort;
-    emit("update:model-routing", { ...props.modelRouting, reasoning_effort: value });
+    const field: Record<ModelRole, keyof Pick<ModelRouting, "pro_reasoning_effort" | "flash_reasoning_effort" | "vision_reasoning_effort">> = {
+        pro: "pro_reasoning_effort",
+        flash: "flash_reasoning_effort",
+        vision: "vision_reasoning_effort",
+    };
+    emit("update:model-routing", { ...props.modelRouting, [field[role]]: value });
 }
 </script>
 
@@ -186,7 +230,17 @@ function updateReasoningEffort(event: Event) {
 .section-heading small { color: var(--chat-text-faint); font-size: 10px; }
 .settings-scroll label { display: grid; gap: 6px; margin-top: 11px; color: var(--chat-text-muted); font-size: 11px; font-weight: 650; }
 .settings-scroll select { width: 100%; padding: 9px 10px; border: 1px solid var(--chat-line-strong); border-radius: 8px; outline: 0; color: var(--chat-text); background: #0d1420; font: 12px inherit; }
-.settings-scroll select:focus { border-color: var(--chat-accent); }
+.settings-scroll select:focus { border-color: var(--chat-accent); box-shadow: 0 0 0 3px rgba(100, 165, 255, .10); }
+.routing-grid { display: grid; gap: 10px; margin-top: 12px; }
+.routing-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--chat-line); border-radius: 10px; background: linear-gradient(135deg, rgba(255,255,255,.025), rgba(255,255,255,.01)); }
+.routing-card:hover { border-color: var(--chat-line-strong); }
+.routing-card-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.routing-card-heading strong { color: var(--chat-text); font-size: 12px; }
+.routing-card-heading small { color: var(--chat-text-faint); font-size: 10px; }
+.routing-card label { margin: 0; }
+.routing-card label > span { color: var(--chat-text-faint); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.routing-card select { min-height: 36px; padding: 8px 10px; background: rgba(7, 11, 18, .72); }
+.routing-note { margin: 12px 0 0; color: var(--chat-text-faint); font-size: 10px; line-height: 1.55; }
 .context-toggle { grid-template-columns: auto 1fr; align-items: center; gap: 10px !important; margin: 0 !important; cursor: pointer; }
 .context-toggle input { width: 15px; height: 15px; accent-color: var(--chat-accent); }
 .context-toggle span { display: grid; gap: 3px; }

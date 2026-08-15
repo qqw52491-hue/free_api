@@ -51,7 +51,9 @@ fn trim_for_prompt(content: &str, limit: usize) -> String {
 
 fn discover_skill_files(workspace: &Path) -> Vec<PathBuf> {
     let mut layers = Vec::new();
-    let mut current = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let mut current = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
 
     loop {
         let files = SKILL_FILES
@@ -158,7 +160,9 @@ mod tests {
         assert!(first.contains("root instruction"));
         assert!(first.contains("root hub instruction"));
         assert!(first.contains("nested instruction"));
-        assert!(first.find("root instruction").unwrap() < first.find("nested instruction").unwrap());
+        assert!(
+            first.find("root instruction").unwrap() < first.find("nested instruction").unwrap()
+        );
 
         fs::write(workspace.join("AGENTS.md"), "root instruction changed").unwrap();
         let refreshed = workspace_skill_context(&nested);

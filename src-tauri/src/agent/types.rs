@@ -78,7 +78,10 @@ impl<'de> Deserialize<'de> for MemoryItem {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        Ok(Self { key: raw.key, value })
+        Ok(Self {
+            key: raw.key,
+            value,
+        })
     }
 }
 
@@ -273,7 +276,6 @@ pub struct DispatchResult {
     pub route: String,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,7 +298,10 @@ mod tests {
         assert_eq!(instruction.get_action(), "finish");
         assert_eq!(instruction.memories_update.len(), 1);
         assert_eq!(instruction.memories_update[0].key, "workbook");
-        assert_eq!(instruction.memories_update[0].value, "工作簿已创建\n路径: /tmp/report.xlsx");
+        assert_eq!(
+            instruction.memories_update[0].value,
+            "工作簿已创建\n路径: /tmp/report.xlsx"
+        );
     }
 
     #[test]

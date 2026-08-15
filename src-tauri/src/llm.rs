@@ -5,10 +5,10 @@
 
 use crate::db::DbState;
 use futures_util::StreamExt;
-use tokio::sync::watch;
 use rusqlite::params;
 use serde_json::json;
 use tauri::State;
+use tokio::sync::watch;
 
 // ========================================================================
 // ModelConfig — 从数据库解析的模型配置，含平台适配参数
@@ -88,7 +88,11 @@ impl ModelConfig {
     }
 
     /// 构建 OpenAI 兼容的请求体
-    pub fn build_body(&self, messages: &[serde_json::Value], reasoning_effort: &str) -> serde_json::Value {
+    pub fn build_body(
+        &self,
+        messages: &[serde_json::Value],
+        reasoning_effort: &str,
+    ) -> serde_json::Value {
         let local_temp = if self.temperature == 0.0 {
             0.6
         } else {
@@ -147,13 +151,13 @@ impl ModelConfig {
             || self.model_name.to_ascii_lowercase().contains("deepseek")
     }
 
-    /// 将界面通用策略映射为 DeepSeek 官方接受的 low / high / max。
+    /// 将界面高 / 中 / 低映射为 DeepSeek 官方接受的 max / high / low。
     /// 自动模式优先保证 Flash 的低延迟，其他 DeepSeek 模型维持官方默认 high。
     fn deepseek_reasoning_effort(&self, preference: &str) -> &'static str {
         match preference {
             "low" => "low",
-            "max" => "max",
-            "high" => "high",
+            "medium" => "high",
+            "high" | "max" => "max",
             "auto" if self.model_name.to_ascii_lowercase().contains("flash") => "low",
             _ => "high",
         }
@@ -330,7 +334,9 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
     on_event: &mut F,
 ) -> Result<StreamResult, String> {
     let client = config.build_client()?;
-    if interrupt_rx.has_changed().unwrap_or(false) { return Err(STREAM_INTERRUPTED_ERROR.to_string()); }
+    if interrupt_rx.has_changed().unwrap_or(false) {
+        return Err(STREAM_INTERRUPTED_ERROR.to_string());
+    }
     let body = config.build_body(messages, reasoning_effort);
     let url = config.endpoint_url();
     let headers = config.auth_headers();
@@ -365,7 +371,9 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
                 return Err(STREAM_INTERRUPTED_ERROR.to_string());
             }
         };
-        let Some(item) = item else { break; };
+        let Some(item) = item else {
+            break;
+        };
         let chunk = item.map_err(|e| e.to_string())?;
         line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -415,7 +423,9 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent)>(
         match stream_once(config, messages, reasoning_effort, interrupt_rx, on_event).await {
             Ok(result) => return Ok(result),
             Err(e) => {
-                if e == STREAM_INTERRUPTED_ERROR { return Err(e); }
+                if e == STREAM_INTERRUPTED_ERROR {
+                    return Err(e);
+                }
                 last_error = e;
                 println!("⚠️ LLM 请求失败 (第 {} 次): {}", i + 1, last_error);
                 if i < max_retries - 1 {
@@ -477,6 +487,16 @@ mod tests {
         assert_eq!(body["reasoning_effort"], "high");
     }
 
+    #[test]
+    fn medium_maps_to_balanced_deepseek_effort() {
+        let body = config("deepseek-v4-pro", "https://api.deepseek.com").build_body(&[], "medium");
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+    #[test]
+    fn high_maps_to_max_deepseek_effort() {
+        let body = config("deepseek-v4-pro", "https://api.deepseek.com").build_body(&[], "high");
+        assert_eq!(body["reasoning_effort"], "max");
+    }
     #[test]
     fn off_disables_deepseek_thinking_without_an_effort() {
         let body = config("deepseek-v4-flash", "https://api.deepseek.com").build_body(&[], "off");

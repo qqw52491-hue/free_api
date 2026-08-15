@@ -7,11 +7,34 @@ pub struct ModelRoutingConfig {
     pub pro: String,
     pub flash: String,
     pub vision: String,
-    /// 统一思考策略：auto / off / low / high / max。旧客户端缺省时使用 auto。
+    /// 旧版统一思考策略；保留用于反序列化及对缺失独立字段的兼容回退。
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: String,
+    /// 三个模型角色的独立策略；空值时兼容回退到 reasoning_effort。
+    #[serde(default)]
+    pub pro_reasoning_effort: String,
+    #[serde(default)]
+    pub flash_reasoning_effort: String,
+    #[serde(default)]
+    pub vision_reasoning_effort: String,
 }
-fn default_reasoning_effort() -> String { "auto".to_string() }
+fn default_reasoning_effort() -> String {
+    "auto".to_string()
+}
+impl ModelRoutingConfig {
+    pub fn reasoning_effort_for(&self, tier: &RoutingTier) -> &str {
+        let configured = match tier {
+            RoutingTier::Pro => &self.pro_reasoning_effort,
+            RoutingTier::Flash => &self.flash_reasoning_effort,
+            RoutingTier::Vision => &self.vision_reasoning_effort,
+        };
+        if configured.is_empty() {
+            &self.reasoning_effort
+        } else {
+            configured.as_str()
+        }
+    }
+}
 
 /// 路由判定结果（对外暴露，方便主循环获取判定理由并打日志）
 #[derive(Debug, Clone)]

@@ -30,7 +30,12 @@ fn catalogs() -> &'static Mutex<HashMap<String, CachedCatalog>> {
 
 fn fingerprint(config: &PluginConfig) -> String {
     let env = serde_json::to_string(&config.env).unwrap_or_default();
-    format!("{}\u{1f}{}\u{1f}{}", config.command, config.args.join("\u{1f}"), env)
+    format!(
+        "{}\u{1f}{}\u{1f}{}",
+        config.command,
+        config.args.join("\u{1f}"),
+        env
+    )
 }
 
 pub fn remember_tools(config: &PluginConfig, tools: &[McpToolDef]) {
@@ -79,7 +84,8 @@ pub fn invalidate_plugin(name: &str) {
 }
 
 pub fn concise_menu(items: impl IntoIterator<Item = (String, Vec<McpToolDef>)>) -> String {
-    let mut lines = vec!["\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）".to_string()];
+    let mut lines =
+        vec!["\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）".to_string()];
     for (name, tools) in items {
         let tool_names = tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         lines.push(format!("- {}: [{}]", name, tool_names.join(", ")));
@@ -105,7 +111,14 @@ mod tests {
     #[test]
     fn cache_reuses_matching_config_and_invalidates_on_change() {
         let mut cfg = config();
-        remember_tools(&cfg, &[McpToolDef { name: "search".to_string(), description: "search".to_string(), schema: json!({}) }]);
+        remember_tools(
+            &cfg,
+            &[McpToolDef {
+                name: "search".to_string(),
+                description: "search".to_string(),
+                schema: json!({}),
+            }],
+        );
         assert_eq!(cached_tools(&cfg).unwrap().len(), 1);
         cfg.args.push("--changed".to_string());
         assert!(cached_tools(&cfg).is_none());

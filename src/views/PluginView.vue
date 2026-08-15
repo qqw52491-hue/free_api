@@ -2,13 +2,61 @@
   <div class="plugin-container">
     <div class="header">
       <div class="title-group">
-        <h1>MCP 插件中心</h1>
-        <p class="subtitle">让 AI 获得无限外部能力。支持 npx, uvx, 本地二进制等多种运行方式。</p>
+        <h1>能力管理</h1>
+        <p class="subtitle">集中维护 MCP 接入与工作区 Skill 指令；无需为两类能力单独切换页面。</p>
       </div>
       <button class="add-btn" @click="showAddModal = true">
-        <span class="icon">+</span> 添加插件
+        <span class="icon">+</span> 添加 MCP
       </button>
     </div>
+    <section class="capability-summary" aria-label="能力概览">
+      <article class="capability-card">
+        <div class="capability-card-heading"><span class="capability-kicker">MCP 连接</span><strong>{{ plugins.filter((plugin) => plugin.enabled).length }} 已启用</strong></div>
+        <p>通过 stdio 或 HTTP 桥接连接外部工具。修改后会在下一次 Agent 任务中重新加载。</p>
+      </article>
+      <article class="capability-card">
+        <div class="capability-card-heading"><span class="capability-kicker">WORKSPACE SKILLS</span><strong>自动加载</strong></div>
+        <p>Agent 会按工作区层级读取 <code>AGENTS.md</code> 与 <code>HUB.md</code>，内容变更会自动刷新，无需重复配置。</p>
+      </article>
+    </section>
+
+    <section class="instruction-library" aria-label="自定义提示词与 Skill 库">
+      <div class="library-heading">
+        <div>
+          <span class="library-kicker">PROMPTS &amp; SKILLS</span>
+          <h2>自定义提示词与 Skill</h2>
+          <p>保存常用的工作方式、输出规范或领域流程；启用的内容会在下一次 Agent 任务中作为补充上下文加载。</p>
+        </div>
+        <button class="library-add-btn" data-testid="custom-library-add" type="button" @click="openInstructionModal()">+ 添加内容</button>
+      </div>
+      <div v-if="customInstructions.length" class="instruction-grid" data-testid="custom-instruction-list">
+        <article v-for="item in customInstructions" :key="item.id" class="instruction-card" :class="{ disabled: !item.enabled }">
+          <div class="instruction-card-head">
+            <div>
+              <span class="instruction-kind">{{ item.kind === 'skill' ? 'CUSTOM SKILL' : 'CUSTOM PROMPT' }}</span>
+              <h3>{{ item.name }}</h3>
+            </div>
+            <label class="toggle-switch" :title="item.enabled ? '停用此条目' : '启用此条目'">
+              <input type="checkbox" :checked="item.enabled" @change="toggleCustomInstruction(item, !item.enabled)">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <p v-if="item.description" class="instruction-description">{{ item.description }}</p>
+          <pre class="instruction-preview">{{ instructionPreview(item.content) }}</pre>
+          <div class="instruction-card-footer">
+            <time>{{ formatDate(item.updated_at) }}</time>
+            <div class="instruction-actions">
+              <button type="button" class="text-btn" @click="openInstructionModal(item)">编辑</button>
+              <button type="button" class="text-btn danger" @click="confirmDeleteCustomInstruction(item)">删除</button>
+            </div>
+          </div>
+        </article>
+      </div>
+      <div v-else class="instruction-empty">
+        <strong>还没有自定义内容</strong>
+        <span>可添加“回答风格”等提示词，或添加“代码审查流程”等可复用 Skill。</span>
+      </div>
+    </section>
 
     <!-- 插件卡片网格 -->
     <div class="plugin-grid" v-if="plugins.length > 0">
@@ -51,6 +99,37 @@
       <h3>还没有加载任何 MCP 插件</h3>
       <p>MCP 插件可以让你的 AI Agent 操作 Excel、搜索网页、管理文件等</p>
       <button class="add-btn" @click="showAddModal = true">立即添加第一个</button>
+    </div>
+
+    <div v-if="showInstructionModal" class="modal-overlay" @click.self="closeInstructionModal">
+      <div class="modal-content instruction-modal">
+        <h2>{{ editingInstructionId ? '编辑自定义内容' : '添加自定义内容' }}</h2>
+        <p class="modal-hint">自定义内容仅作为补充上下文，不能覆盖内置安全规则、工具契约或当前任务。</p>
+        <div class="form-group">
+          <label>类型</label>
+          <select v-model="instructionForm.kind">
+            <option value="prompt">自定义提示词</option>
+            <option value="skill">自定义 Skill</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>名称</label>
+          <input v-model.trim="instructionForm.name" maxlength="80" :placeholder="instructionForm.kind === 'skill' ? '例如：前端代码审查' : '例如：回答风格'" />
+        </div>
+        <div class="form-group">
+          <label>说明（可选）</label>
+          <input v-model.trim="instructionForm.description" maxlength="240" placeholder="说明适用场景，便于以后查找" />
+        </div>
+        <div class="form-group">
+          <label>内容</label>
+          <textarea v-model="instructionForm.content" maxlength="12000" rows="10" :placeholder="instructionForm.kind === 'skill' ? '写清执行步骤、输入与输出要求。' : '写清希望 Agent 遵循的表达、格式或偏好。'"></textarea>
+          <p class="form-tip">{{ instructionForm.content.length }}/12000。新任务会自动读取已启用的内容。</p>
+        </div>
+        <div class="form-actions">
+          <button class="cancel-btn" type="button" @click="closeInstructionModal">取消</button>
+          <button class="save-btn" type="button" :disabled="!instructionForm.name.trim() || !instructionForm.content.trim()" @click="saveCustomInstruction">保存</button>
+        </div>
+      </div>
     </div>
 
     <!-- 添加弹窗 -->
@@ -112,7 +191,11 @@ import { ref, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 
 const plugins = ref([]);
+const customInstructions = ref([]);
 const showAddModal = ref(false);
+const showInstructionModal = ref(false);
+const editingInstructionId = ref('');
+const instructionForm = ref({ kind: 'prompt', name: '', description: '', content: '', enabled: true });
 const form = ref({
   name: '',
   command: '',
@@ -130,6 +213,66 @@ const loadPlugins = async () => {
     console.error('加载插件失败:', err);
   }
 };
+
+const loadCustomInstructions = async () => {
+  try {
+    customInstructions.value = await invoke('get_agent_custom_instructions');
+  } catch (err) {
+    console.error('加载自定义提示词与 Skill 失败:', err);
+  }
+};
+
+const closeInstructionModal = () => {
+  showInstructionModal.value = false;
+  editingInstructionId.value = '';
+  instructionForm.value = { kind: 'prompt', name: '', description: '', content: '', enabled: true };
+};
+
+const openInstructionModal = (item = null) => {
+  editingInstructionId.value = item?.id || '';
+  instructionForm.value = item
+    ? { kind: item.kind, name: item.name, description: item.description || '', content: item.content, enabled: item.enabled }
+    : { kind: 'prompt', name: '', description: '', content: '', enabled: true };
+  showInstructionModal.value = true;
+};
+
+const saveCustomInstruction = async () => {
+  try {
+    await invoke('save_agent_custom_instruction', {
+      id: editingInstructionId.value || null,
+      kind: instructionForm.value.kind,
+      name: instructionForm.value.name,
+      description: instructionForm.value.description || null,
+      content: instructionForm.value.content,
+      enabled: instructionForm.value.enabled,
+    });
+    closeInstructionModal();
+    await loadCustomInstructions();
+  } catch (err) {
+    alert('保存自定义内容失败: ' + err);
+  }
+};
+
+const toggleCustomInstruction = async (item, enabled) => {
+  try {
+    await invoke('toggle_agent_custom_instruction', { id: item.id, enabled });
+    await loadCustomInstructions();
+  } catch (err) {
+    alert('更新自定义内容失败: ' + err);
+  }
+};
+
+const confirmDeleteCustomInstruction = async (item) => {
+  if (!confirm(`确定要删除「${item.name}」吗？`)) return;
+  try {
+    await invoke('delete_agent_custom_instruction', { id: item.id });
+    await loadCustomInstructions();
+  } catch (err) {
+    alert('删除自定义内容失败: ' + err);
+  }
+};
+
+const instructionPreview = (content) => content.length > 220 ? `${content.slice(0, 220)}…` : content;
 
 const useHttpBridgePreset = () => {
   const url = form.value.remoteUrl.trim();
@@ -208,7 +351,10 @@ const formatDate = (dateStr) => {
   return `${d.getMonth()+1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
-onMounted(loadPlugins);
+onMounted(() => {
+  loadPlugins();
+  loadCustomInstructions();
+});
 </script>
 
 <style scoped>
@@ -263,6 +409,25 @@ h1 {
   box-shadow: 0 6px 24px rgba(61, 90, 254, 0.35);
 }
 
+.capability-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: -18px 0 28px;
+}
+.capability-card {
+  min-height: 86px;
+  padding: 14px 16px;
+  border: 1px solid #2a2a2e;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(61, 90, 254, 0.09), rgba(255, 255, 255, 0.02));
+}
+.capability-card-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.capability-card-heading strong { color: #c6ceff; font-size: 0.78rem; }
+.capability-kicker { color: #8e9cff; font-size: 0.68rem; font-weight: 750; letter-spacing: .08em; }
+.capability-card p { margin: 8px 0 0; color: #8b8b92; font-size: 0.8rem; line-height: 1.55; }
+.capability-card code { color: #c7ccdc; font-family: 'SF Mono', 'Fira Code', monospace; font-size: .78rem; }
+@media (max-width: 760px) { .capability-summary { grid-template-columns: 1fr; } }
 .plugin-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
@@ -623,4 +788,7 @@ textarea {
   color: #666;
   margin: 0 0 24px 0;
 }
+.instruction-library { margin: 0 0 30px; padding: 18px; border: 1px solid #2d2e35; border-radius: 16px; background: linear-gradient(135deg, rgba(61, 90, 254, 0.08), rgba(255, 255, 255, 0.018)); }.library-heading { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; margin-bottom: 16px; }.library-kicker,.instruction-kind { color: #9daaff; font-size: 0.68rem; font-weight: 750; letter-spacing: .1em; }.library-heading h2 { margin: 5px 0 6px; color: #f0f1f5; font-size: 1.12rem; }.library-heading p { max-width: 680px; margin: 0; color: #858895; font-size: .84rem; line-height: 1.55; }.library-add-btn { flex: 0 0 auto; border: 1px solid rgba(126, 143, 255, .62); border-radius: 10px; padding: 9px 13px; color: #eef0ff; cursor: pointer; background: rgba(75, 91, 218, .26); font: 650 .84rem inherit; }.library-add-btn:hover { background: rgba(88, 105, 244, .42); }.instruction-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }.instruction-card { display: flex; min-height: 220px; flex-direction: column; padding: 15px; border: 1px solid #393a43; border-radius: 12px; background: rgba(20, 21, 26, .66); }.instruction-card.disabled { opacity: .55; }.instruction-card-head { display: flex; justify-content: space-between; gap: 10px; }.instruction-card h3 { margin: 5px 0 0; color: #efeff2; font-size: .98rem; }.instruction-description { min-height: 1.3em; margin: 10px 0 0; color: #a8aab4; font-size: .78rem; line-height: 1.45; }.instruction-preview { display: -webkit-box; overflow: hidden; margin: 12px 0; color: #c9cad1; font: .76rem/1.6 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; -webkit-box-orient: vertical; -webkit-line-clamp: 5; }.instruction-card-footer { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-top: auto; padding-top: 10px; border-top: 1px solid #2d2e34; color: #6f717d; font-size: .72rem; }.instruction-actions { display: flex; gap: 6px; }.text-btn { border: 0; padding: 4px 6px; color: #afb8ff; cursor: pointer; background: transparent; font: .76rem inherit; }.text-btn:hover { color: #e5e8ff; }.text-btn.danger { color: #d9858d; }.instruction-empty { display: grid; gap: 5px; padding: 18px; border: 1px dashed #3a3b44; border-radius: 11px; color: #8d8f9a; font-size: .84rem; }.instruction-empty strong { color: #d5d6dc; }.instruction-modal { max-width: 620px; }.instruction-modal textarea { min-height: 180px; resize: vertical; }
+
+@media (max-width: 760px) { .library-heading { flex-direction: column; }.library-add-btn { width: 100%; }.instruction-grid { grid-template-columns: 1fr; } }
 </style>
