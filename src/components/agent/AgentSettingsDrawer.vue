@@ -36,13 +36,15 @@
                             </optgroup>
                         </select>
                     </label>
-                    <label>DeepSeek 思考层级
+                    <label>思考策略
                         <select :value="modelRouting.reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort($event)">
+                            <option value="auto">自动：Flash 低，其他 DeepSeek 高</option>
+                            <option value="off">关闭：跳过 DeepSeek 思考</option>
                             <option value="low">低：更快、更省</option>
-                            <option value="high">高：默认推荐</option>
-                            <option value="max">最高：复杂任务</option>
+                            <option value="high">高：复杂规划</option>
+                            <option value="max">最高：最难任务</option>
                         </select>
-                        <small>仅发送给 DeepSeek；其他模型保持原有参数。</small>
+                        <small>仅映射到支持的 DeepSeek 参数；其他厂商保持原有请求。设置会保存到本机，下次启动继续生效。</small>
                     </label>
                 </section>
                 <section>
@@ -90,18 +92,20 @@
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENT_TASK_PRESETS, type AgentModelOption } from "./types";
+type ReasoningEffort = "auto" | "off" | "low" | "high" | "max";
+type ModelRouting = { pro: string; flash: string; vision: string; reasoning_effort: ReasoningEffort };
 
 const props = defineProps<{
     open: boolean;
     allModels: AgentModelOption[];
-    modelRouting: { pro: string; flash: string; vision: string; reasoning_effort: "low" | "high" | "max" };
+    modelRouting: ModelRouting;
     logContext: boolean;
     isRunning: boolean;
 }>();
 
 const emit = defineEmits<{
     close: [];
-    "update:model-routing": [value: { pro: string; flash: string; vision: string; reasoning_effort: "low" | "high" | "max" }];
+    "update:model-routing": [value: ModelRouting];
     "update:log-context": [value: boolean];
     "apply-preset": [goal: string];
     "open-plugins": [];
@@ -162,7 +166,7 @@ function updateRoute(key: "pro" | "flash" | "vision", event: Event) {
     emit("update:model-routing", { ...props.modelRouting, [key]: value });
 }
 function updateReasoningEffort(event: Event) {
-    const value = (event.target as HTMLSelectElement).value as "low" | "high" | "max";
+    const value = (event.target as HTMLSelectElement).value as ReasoningEffort;
     emit("update:model-routing", { ...props.modelRouting, reasoning_effort: value });
 }
 </script>

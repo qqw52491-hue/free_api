@@ -1,4 +1,4 @@
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentTaskResources } from "./useAgentTaskResources";
@@ -29,6 +29,27 @@ import {
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
 
 const MAX_LOGS = 600;
+type ReasoningEffort = "auto" | "off" | "low" | "high" | "max";
+type ModelRouting = { pro: string; flash: string; vision: string; reasoning_effort: ReasoningEffort };
+const MODEL_ROUTING_STORAGE_KEY = "free-api.agent.model-routing.v1";
+
+function loadModelRouting(): ModelRouting {
+    const fallback: ModelRouting = { pro: "", flash: "", vision: "", reasoning_effort: "auto" };
+    try {
+        const stored = JSON.parse(localStorage.getItem(MODEL_ROUTING_STORAGE_KEY) || "{}") as Partial<ModelRouting>;
+        const effort = ["auto", "off", "low", "high", "max"].includes(stored.reasoning_effort || "")
+            ? stored.reasoning_effort as ReasoningEffort
+            : fallback.reasoning_effort;
+        return {
+            pro: typeof stored.pro === "string" ? stored.pro : fallback.pro,
+            flash: typeof stored.flash === "string" ? stored.flash : fallback.flash,
+            vision: typeof stored.vision === "string" ? stored.vision : fallback.vision,
+            reasoning_effort: effort,
+        };
+    } catch {
+        return fallback;
+    }
+}
 
 function normalizeState(value: unknown): AgentRunState {
     const normalized = String(value || "")
@@ -108,7 +129,10 @@ function normalizeUsage(payload: Record<string, unknown>): AgentTokenUsage | nul
 }
 
 export function useAgentSession(sessionId: string) {
-    const modelRouting = ref({ pro: "", flash: "", vision: "", reasoning_effort: "high" as "low" | "high" | "max" });
+    const modelRouting = ref<ModelRouting>(loadModelRouting());
+    watch(modelRouting, (value) => {
+        try { localStorage.setItem(MODEL_ROUTING_STORAGE_KEY, JSON.stringify(value)); } catch { /* 存储不可用时继续使用当前会话配置 */ }
+    }, { deep: true });
     const logContext = ref(false);
     const goalInput = ref("");
     const currentGoal = ref("");

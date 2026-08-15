@@ -116,14 +116,18 @@ impl ModelConfig {
             body["stream_options"] = json!({ "include_usage": true });
         }
 
-        let is_deepseek = self.base_url.contains("api.deepseek.com") || self.model_name.to_ascii_lowercase().contains("deepseek");
-        if is_deepseek {
-            let effort = match reasoning_effort { "low" | "max" => reasoning_effort, _ => "high" };
-            body["thinking"] = json!({ "type": "enabled" });
-            body["reasoning_effort"] = json!(effort);
-            if let Some(object) = body.as_object_mut() {
-                object.remove("temperature");
-                object.remove("top_p");
+        if self.is_deepseek() {
+            if reasoning_effort == "off" {
+                // DeepSeek 的非思考模式可继续使用常规采样参数。
+                body["thinking"] = json!({ "type": "disabled" });
+            } else {
+                body["thinking"] = json!({ "type": "enabled" });
+                body["reasoning_effort"] = json!(self.deepseek_reasoning_effort(reasoning_effort));
+                // DeepSeek 思考模式下这些采样参数不会生效，避免发送误导性配置。
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("temperature");
+                    object.remove("top_p");
+                }
             }
         }
         // Ollama 需要通过 options 注入 num_ctx
@@ -136,6 +140,23 @@ impl ModelConfig {
         }
 
         body
+    }
+
+    fn is_deepseek(&self) -> bool {
+        self.base_url.contains("api.deepseek.com")
+            || self.model_name.to_ascii_lowercase().contains("deepseek")
+    }
+
+    /// 将界面通用策略映射为 DeepSeek 官方接受的 low / high / max。
+    /// 自动模式优先保证 Flash 的低延迟，其他 DeepSeek 模型维持官方默认 high。
+    fn deepseek_reasoning_effort(&self, preference: &str) -> &'static str {
+        match preference {
+            "low" => "low",
+            "max" => "max",
+            "high" => "high",
+            "auto" if self.model_name.to_ascii_lowercase().contains("flash") => "low",
+            _ => "high",
+        }
     }
 
     /// API 端点 URL
@@ -422,4 +443,52 @@ pub fn estimate_usage(
         / 3) as i64;
     let est_completion = (response_len / 3) as i64;
     (est_prompt, est_completion)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelConfig;
+
+    fn config(model_name: &str, base_url: &str) -> ModelConfig {
+        ModelConfig {
+            base_url: base_url.to_string(),
+            api_key: "test".to_string(),
+            model_name: model_name.to_string(),
+            max_tokens: 512,
+            temperature: 0.7,
+            is_ollama: false,
+            is_lmstudio: false,
+            context_window: 128_000,
+            timeout_secs: 120,
+        }
+    }
+
+    #[test]
+    fn auto_uses_low_effort_for_deepseek_flash() {
+        let body = config("deepseek-v4-flash", "https://api.deepseek.com").build_body(&[], "auto");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["reasoning_effort"], "low");
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn auto_uses_high_effort_for_deepseek_pro() {
+        let body = config("deepseek-v4-pro", "https://api.deepseek.com").build_body(&[], "auto");
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn off_disables_deepseek_thinking_without_an_effort() {
+        let body = config("deepseek-v4-flash", "https://api.deepseek.com").build_body(&[], "off");
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("temperature").is_some());
+    }
+
+    #[test]
+    fn non_deepseek_models_do_not_receive_vendor_specific_fields() {
+        let body = config("gpt-4o-mini", "https://api.openai.com/v1").build_body(&[], "max");
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+    }
 }
