@@ -255,6 +255,12 @@ export function useAgentSession(sessionId: string) {
             return true;
         });
     }
+    function summaryFromConversation(run: HistoryRunSnapshot) {
+        const assistantMessages = conversationMessages.value.filter((message) =>
+            message.role !== "user" && isMessageInsideRun(message, run) && Boolean(message.content.trim()),
+        );
+        return assistantMessages.length ? assistantMessages[assistantMessages.length - 1].content.trim() : "";
+    }
     function runDeduplicationKey(run: HistoryRunSnapshot) {
         const firstStep = run.steps[0];
         const fingerprint = `${firstStep?.tool || ""}|${firstStep?.description || ""}`;
@@ -282,6 +288,7 @@ export function useAgentSession(sessionId: string) {
             await Promise.all(normalized.map(async (run) => {
                 const markdown = await resolveSummaryMarkdown(run.artifacts);
                 if (markdown) run.summary = markdown;
+                if (!run.summary) run.summary = summaryFromConversation(run);
             }));
             historyRuns.value = dedupeHistoryRuns(normalized);
         } catch (error) {
@@ -783,7 +790,9 @@ export function useAgentSession(sessionId: string) {
         stopRequested,
         elapsedSeconds,
         elapsedLabel,
-        steps: displayedSteps,
+        // 对话流只能接收当前回合步骤；历史回合通过 historyTurns 自行渲染，绝不混入新回合。
+        steps,
+        allSteps: displayedSteps,
         historyTurns,
         legacyConversationMessages,
         selectedStepId,
