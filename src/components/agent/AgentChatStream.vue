@@ -59,13 +59,26 @@
                 <span>{{ entry.failed ? '任务结束：存在异常' : '任务已完成' }}</span>
                 <strong>{{ entry.title }}</strong>
                 <div v-if="entry.summary" class="summary-rich" aria-label="任务总结">
-                    <template v-for="(line, index) in summaryBlocks(entry.summary)" :key="`${entry.id}-summary-${index}`">
-                        <h3 v-if="line.kind === 'heading'">{{ line.content }}</h3>
-                        <li v-else-if="line.kind === 'list'">{{ line.content }}</li>
-                        <blockquote v-else-if="line.kind === 'quote'">{{ line.content }}</blockquote>
-                        <hr v-else-if="line.kind === 'rule'" class="summary-rule" />
-                        <pre v-else-if="line.kind === 'table'" class="summary-table">{{ line.content }}</pre>
-                        <p v-else>{{ line.content }}</p>
+                    <template v-for="(block, index) in markdownBlocks(entry.summary)" :key="`${entry.id}-summary-${index}`">
+                        <h3 v-if="block.kind === 'heading'" :class="`markdown-h${block.level}`">
+                            <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template>
+                        </h3>
+                        <p v-else-if="block.kind === 'paragraph'">
+                            <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template>
+                        </p>
+                        <li v-else-if="block.kind === 'list'">
+                            <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template>
+                        </li>
+                        <blockquote v-else-if="block.kind === 'quote'">
+                            <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template>
+                        </blockquote>
+                        <hr v-else-if="block.kind === 'rule'" class="summary-rule" />
+                        <div v-else-if="block.kind === 'table'" class="summary-table-wrap">
+                            <table class="summary-table">
+                                <thead><tr><th v-for="(cell, cellIndex) in block.header" :key="cellIndex"><template v-for="(token, tokenIndex) in cell" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template></th></tr></thead>
+                                <tbody><tr v-for="(row, rowIndex) in block.rows" :key="rowIndex"><td v-for="(cell, cellIndex) in row" :key="cellIndex"><template v-for="(token, tokenIndex) in cell" :key="tokenIndex"><code v-if="token.kind === 'code'">{{ token.value }}</code><template v-else>{{ token.value }}</template></template></td></tr></tbody>
+                            </table>
+                        </div>
                     </template>
                 </div>
                 <div v-if="entry.artifacts.length" class="final-artifacts">
@@ -90,6 +103,12 @@ type TimelineEntry =
     | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean }
     | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: string[]; failed: boolean }
     | { id: "active-thought"; type: "active-thought"; timestamp: number };
+type MarkdownToken = { kind: "text" | "code"; value: string };
+type MarkdownBlock =
+    | { kind: "heading"; level: number; tokens: MarkdownToken[] }
+    | { kind: "paragraph" | "list" | "quote"; tokens: MarkdownToken[] }
+    | { kind: "rule" }
+    | { kind: "table"; header: MarkdownToken[][]; rows: MarkdownToken[][][] };
 const props = defineProps<{
     currentGoal: string;
     legacyMessages: { id: string; role: string; content: string; created_at: string }[];
@@ -181,15 +200,53 @@ function currentTimeline(): TimelineEntry[] {
     return timeline;
 }
 const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimeline(), ...currentTimeline()]);
-function summaryBlocks(value: string) {
-    return value.split(/\r?\n/).map((raw) => raw.trim()).filter(Boolean).map((line) => {
-        if (/^#{1,6}\s+/.test(line)) return { kind: "heading", content: line.replace(/^#{1,6}\s+/, "") };
-        if (/^[-*+]\s+/.test(line)) return { kind: "list", content: line.replace(/^[-*+]\s+/, "") };
-        if (/^>\s?/.test(line)) return { kind: "quote", content: line.replace(/^>\s?/, "") };
-        if (/^-{3,}$/.test(line)) return { kind: "rule", content: "" };
-        if (/^\|.*\|$/.test(line)) return { kind: "table", content: line };
-        return { kind: "paragraph", content: line };
-    });
+function inlineTokens(value: string): MarkdownToken[] {
+    const tokens: MarkdownToken[] = [];
+    const expression = /`([^`]+)`/g;
+    let cursor = 0;
+    for (let match = expression.exec(value); match; match = expression.exec(value)) {
+        if (match.index > cursor) tokens.push({ kind: "text", value: value.slice(cursor, match.index) });
+        tokens.push({ kind: "code", value: match[1] });
+        cursor = match.index + match[0].length;
+    }
+    if (cursor < value.length || !tokens.length) tokens.push({ kind: "text", value: value.slice(cursor) });
+    return tokens;
+}
+function tableCells(line: string) {
+    return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => inlineTokens(cell.trim()));
+}
+function isTableDivider(line: string) {
+    const cells = line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
+    return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+function markdownBlocks(value: string): MarkdownBlock[] {
+    const lines = value.replace(/\\n/g, "\n").replace(/\r/g, "").split("\n");
+    const blocks: MarkdownBlock[] = [];
+    for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index].trim();
+        if (!line) continue;
+        if (/^\|.*\|$/.test(line) && index + 1 < lines.length && isTableDivider(lines[index + 1])) {
+            const header = tableCells(line);
+            const rows: MarkdownToken[][][] = [];
+            index += 2;
+            while (index < lines.length && /^\|.*\|$/.test(lines[index].trim())) {
+                rows.push(tableCells(lines[index]));
+                index += 1;
+            }
+            index -= 1;
+            blocks.push({ kind: "table", header, rows });
+            continue;
+        }
+        const heading = line.match(/^(#{1,6})\s+(.+)$/);
+        if (heading) { blocks.push({ kind: "heading", level: heading[1].length, tokens: inlineTokens(heading[2]) }); continue; }
+        const list = line.match(/^[-*+]\s+(.+)$/);
+        if (list) { blocks.push({ kind: "list", tokens: inlineTokens(list[1]) }); continue; }
+        const quote = line.match(/^>\s?(.+)$/);
+        if (quote) { blocks.push({ kind: "quote", tokens: inlineTokens(quote[1]) }); continue; }
+        if (/^-{3,}$/.test(line)) { blocks.push({ kind: "rule" }); continue; }
+        blocks.push({ kind: "paragraph", tokens: inlineTokens(line) });
+    }
+    return blocks;
 }
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败" }[status]; }
 function formatConversationTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "numeric", day: "numeric" }); }
@@ -231,5 +288,14 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
 .process-tree > .plan-node .goal-node { min-width: 440px; }
 .summary-rule { display: none; }
 @media (max-width: 540px) { .process-tree > .plan-node { min-width: 100%; } .process-tree > .plan-node .goal-row,.process-tree > .plan-node .goal-node { min-width: 410px; } .process-tree > .plan-node .child-row { min-width: 386px; } }
+
+
+/* 任务总结 Markdown：使用结构化节点渲染，表格与行内代码均不依赖危险的 HTML 注入。 */
+.summary-rich code { padding: 1px 4px; border: 1px solid #44444a; border-radius: 4px; color: #d9d9de; background: #28282c; font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.summary-rich .markdown-h1 { margin-top: 3px; font-size: 15px; }.summary-rich .markdown-h2 { margin-top: 10px; font-size: 13px; }.summary-rich .markdown-h3,.summary-rich .markdown-h4,.summary-rich .markdown-h5,.summary-rich .markdown-h6 { margin-top: 8px; font-size: 12px; }
+.summary-table-wrap { max-width: 100%; overflow-x: auto; margin: 4px 0 8px; border: 1px solid #414147; border-radius: 6px; }
+table.summary-table { width: 100%; min-width: 340px; border-collapse: collapse; color: #c9c9ce; font-size: 11px; line-height: 1.5; }
+.summary-table th,.summary-table td { padding: 6px 8px; border-right: 1px solid #3c3c42; border-bottom: 1px solid #3c3c42; text-align: left; vertical-align: top; white-space: nowrap; }
+.summary-table th:last-child,.summary-table td:last-child { border-right: 0; }.summary-table tr:last-child td { border-bottom: 0; }.summary-table th { color: #eeeeef; background: #2b2b2f; font-weight: 700; }.summary-table td { background: #222225; }
 
 </style>
