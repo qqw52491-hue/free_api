@@ -62,6 +62,29 @@ pub fn dispatch(
     params_value: &Value,
 ) -> DispatchResult {
     let result = (|| -> Result<Value, String> {
+        if action == "get_step_output" {
+            let output_id = required_string(params_value, "output_id")?;
+            let text = crate::agent::run_trace::get_step_output(db, &output_id)?;
+            let offset = params_value.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let limit = params_value.get("limit").and_then(|v| v.as_u64()).unwrap_or(15000) as usize;
+            let chars: Vec<char> = text.chars().collect();
+            let total = chars.len();
+            let end = std::cmp::min(offset + limit, total);
+            let sliced = if offset < total {
+                chars[offset..end].iter().collect::<String>()
+            } else {
+                String::new()
+            };
+            return Ok(json!({
+                "output_id": output_id,
+                "offset": offset,
+                "limit": limit,
+                "total_chars": total,
+                "raw_output": sliced,
+                "has_more": end < total
+            }));
+        }
+
         let mut conn = db.0.lock().map_err(|e| e.to_string())?;
         match action {
             "create_resource" => create_resource(&mut conn, session_id, params_value),
@@ -74,7 +97,7 @@ pub fn dispatch(
             "get_record" => get_record(&conn, session_id, params_value),
             "update_resource" => update_resource(&mut conn, session_id, params_value),
             _ => Err(format!(
-                "task_store 不支持 action='{}'。可用动作：create_resource、upsert_records、list_resources、get_resource、list_records、get_record、update_resource",
+                "task_store 不支持 action='{}'。可用动作：create_resource、upsert_records、list_resources、get_resource、list_records、get_record、update_resource, get_step_output",
                 action
             )),
         }

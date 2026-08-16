@@ -133,6 +133,51 @@ pub fn workspace_skill_context(workspace: &Path) -> String {
     }
 }
 
+/// 扫描 skills 目录，生成轻量目录摘要（仅名称 + 单行描述）。
+/// excluded 列表中的 Skill 已固定编译进系统提示词，不再重复罗列。
+/// 完整手册内容通过 next_tool_hint: "skill_name" 按需加载到 active_tool_detail。
+pub fn skill_catalog_string(skills_dir: &Path, excluded: &[&str]) -> String {
+    let Ok(entries) = std::fs::read_dir(skills_dir) else {
+        return String::new();
+    };
+    let mut files: Vec<_> = entries.flatten().collect();
+    files.sort_by_key(|e| e.file_name());
+
+    let mut lines = Vec::new();
+    for entry in files {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let name = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => continue,
+        };
+        if excluded.contains(&name.as_str()) {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let summary = content
+            .find("<summary>")
+            .and_then(|start| {
+                content.find("</summary>").map(|end| {
+                    content[start + 9..end].trim().to_string()
+                })
+            })
+            .unwrap_or_else(|| name.clone());
+        lines.push(format!("- {}: {}", name, summary));
+    }
+
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n## 📚 可按需加载的 Skill 手册（设置 next_tool_hint: \"skill_name\" 加载完整版到当前步骤）\n{}\n",
+            lines.join("\n")
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -80,6 +80,41 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
     .collect()
 }
 
+pub fn save_step_output(
+    db: &DbState,
+    session_id: &str,
+    step_id: usize,
+    raw_output: &str,
+) -> Result<String, String> {
+    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let output_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO agent_step_logs (output_id, session_id, step_id, raw_output, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![output_id, session_id, step_id, raw_output, now],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(output_id)
+}
+
+pub fn get_step_output(
+    db: &DbState,
+    output_id: &str,
+) -> Result<String, String> {
+    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT raw_output FROM agent_step_logs WHERE output_id=?1")
+        .map_err(|error| error.to_string())?;
+    let mut rows = stmt.query(params![output_id]).map_err(|error| error.to_string())?;
+    if let Some(row) = rows.next().map_err(|error| error.to_string())? {
+        let raw_output: String = row.get(0).map_err(|error| error.to_string())?;
+        Ok(raw_output)
+    } else {
+        Err(format!("output_id {} not found", output_id))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

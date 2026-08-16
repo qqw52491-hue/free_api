@@ -189,6 +189,16 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_agent_run_traces_session
             ON agent_run_traces(session_id, started_at ASC);
+
+        CREATE TABLE IF NOT EXISTS agent_step_logs (
+            output_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            step_id INTEGER NOT NULL,
+            raw_output TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_step_logs_session
+            ON agent_step_logs(session_id, step_id);
     ",
     )?;
 

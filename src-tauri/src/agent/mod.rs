@@ -531,81 +531,71 @@ pub async fn run_agent_main_loop(
     }
     // Skill、插件与 shell 工具共享本轮运行时工作目录；恢复时会重新读取并按哈希复用未变更的 Skill。
     let workspace_dir = std::env::current_dir().unwrap_or_default();
-    // 1. 自动加载插件（强制探测模式）
+    // 1. 智能 MCP 插件同步：首次任务全量初始化，后续任务仅增量保活（彻底消除每次 spawn 的秒级延迟）
     {
         let cwd = workspace_dir.clone();
-        println!("========================================");
-        println!(
-            "🔍 [插件探测] 强制执行开始！当前工作目录 cwd = {}",
-            cwd.display()
-        );
-
         let mut registry = registry_state.lock().await;
-        registry.clients.clear();
-        let mut all_clients = std::collections::HashMap::new();
+        let is_first_init = registry.clients.is_empty();
 
-        // 多路探测：涵盖开发模式、生产模式、src-tauri 作为 cwd 的情况
-        let search_paths: Vec<std::path::PathBuf> = vec![
-            cwd.join("plugins"),       // cwd/plugins（项目根目录）
-            cwd.join("../plugins"),    // cwd/../plugins（从 src-tauri 向上）
-            cwd.join("../../plugins"), // 再向上一层保险
-            app.path()
-                .app_config_dir()
-                .unwrap_or_default()
-                .join("plugins"), // 系统配置路径
-            app.path()
-                .resource_dir()
-                .unwrap_or_default()
-                .join("plugins"), // 打包后资源路径
-        ];
-
-        for path in &search_paths {
-            println!(
-                "  探测路径: {} → {}",
-                path.display(),
+        if is_first_init {
+            // 首次：多路扫描 YAML 插件目录，全量 spawn
+            println!("🔍 [插件探测] 首次初始化，扫描 YAML 插件目录...");
+            let search_paths: Vec<std::path::PathBuf> = vec![
+                cwd.join("plugins"),
+                cwd.join("../plugins"),
+                cwd.join("../../plugins"),
+                app.path().app_config_dir().unwrap_or_default().join("plugins"),
+                app.path().resource_dir().unwrap_or_default().join("plugins"),
+            ];
+            for path in search_paths {
                 if path.exists() {
-                    "✅ 存在"
-                } else {
-                    "❌ 不存在"
+                    let reg = PluginRegistry::load_from_dir(&path);
+                    for (name, client) in reg.clients {
+                        println!("🔌 挂载 YAML 插件: {}", name);
+                        registry.clients.insert(name, client);
+                    }
                 }
-            );
-        }
-
-        for path in search_paths {
-            if path.exists() {
-                let reg = PluginRegistry::load_from_dir(&path);
-                for (name, client) in reg.clients {
-                    println!("🔌 成功挂载插件: {} (来自 {})", name, path.display());
-                    all_clients.insert(name, client);
+            }
+        } else {
+            // 后续任务：跳过 YAML 重建，仅对已有客户端做存活检查（不重新 spawn）
+            let yaml_names: Vec<String> = registry.clients.keys().cloned().collect();
+            for name in yaml_names {
+                if let Some(client) = registry.clients.get_mut(&name) {
+                    let _ = client.ensure_alive();
                 }
             }
         }
 
-        // SQLite 是 UI 管理插件启用状态的权威来源；同名配置会覆盖 YAML，
-        // disabled 记录则显式卸载同名 YAML 插件。
-        for managed in crate::commands::load_managed_mcp_plugins(state.inner())? {
+        // DB 管理插件：每次增量同步（新增 → spawn，禁用 → 移除，已有 → 仅保活）
+        let managed_plugins = crate::commands::load_managed_mcp_plugins(state.inner())?;
+        for managed in managed_plugins {
             let name = managed.config.name.clone();
             if !managed.enabled {
-                println!("⏸️ 插件已在 UI 中禁用: {}", name);
-                all_clients.remove(&name);
+                if registry.clients.remove(&name).is_some() {
+                    println!("⏸️ 卸载已禁用 DB 插件: {}", name);
+                }
                 continue;
             }
-            match McpClient::spawn(managed.config) {
-                Ok(mut client) => {
-                    let _ = client.initialize();
-                    let tool_count = client.list_tools().map(|tools| tools.len()).unwrap_or(0);
-                    println!(
-                        "🔌 成功挂载 UI 管理插件: {} (共 {} 个工具)",
-                        name, tool_count
-                    );
-                    all_clients.insert(name, client);
+            if registry.clients.contains_key(&name) {
+                // 已存在 → 仅做存活检查，不重建
+                if let Some(client) = registry.clients.get_mut(&name) {
+                    let _ = client.ensure_alive();
                 }
-                Err(error) => println!("❌ UI 管理插件启动失败 [{}]: {}", name, error),
+            } else {
+                // 新增插件 → spawn + 握手 + 查工具
+                match McpClient::spawn(managed.config) {
+                    Ok(mut client) => {
+                        let _ = client.initialize();
+                        let tool_count = client.list_tools().map(|t| t.len()).unwrap_or(0);
+                        println!("🔌 挂载新 DB 插件: {} ({} 个工具)", name, tool_count);
+                        registry.clients.insert(name, client);
+                    }
+                    Err(error) => eprintln!("❌ DB 插件启动失败 [{}]: {}", name, error),
+                }
             }
         }
-        println!("📊 插件初始化完成，最终可用插件总数: {}", all_clients.len());
-        println!("========================================");
-        registry.clients = all_clients;
+
+        println!("📊 MCP 插件就绪: {} 个（首次初始化: {}）", registry.clients.len(), is_first_init);
     }
 
     // 2. 初始化三明治上下文：加载系统提示词 + 可视化/HTML沙箱 Skill + 动态注入 MCP 工具
@@ -636,6 +626,7 @@ pub async fn run_agent_main_loop(
 - list_records：分页读取数据行。参数 resource_id，可选 limit（最多 100）、offset。
 - get_record：读取一条记录。参数 resource_id、record_key。
 - update_resource：更新资源 label、summary、status、cursor 或 schema。
+- get_step_output：根据 output_id 查询被截断的完整历史执行原文（参数: output_id, 可选 offset, limit）。
 数据行会在工具返回时立刻持久化，并按当前 session 隔离；模型默认只看到资源目录与摘要，需要具体数据时再分页查询。
 
 ## ask_human 受控交互（内部工具）
@@ -703,11 +694,22 @@ confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选
         registry.format_tools_menu()
     };
 
+    // 6. 扫描 prompts/skills/ 目录，生成动态 Skill 目录摘要（不含已固定编译的内置 Skill）
+    let skill_catalog = {
+        let resource_dir = app.path().resource_dir().unwrap_or_default();
+        let skills_dir_prod = resource_dir.join("prompts/skills");
+        let skills_dir_dev = std::path::PathBuf::from("prompts/skills");
+        let skills_dir = if skills_dir_prod.exists() { skills_dir_prod } else { skills_dir_dev };
+        // chart_visualization 已固定编译进 base_prompt，不再重复列出
+        crate::agent::skill_context::skill_catalog_string(&skills_dir, &["chart_visualization"])
+    };
+
     let system_prompt = format!(
-        "{}{}{}\n{}\n{}\n{}",
+        "{}{}{}{}\n{}\n{}\n{}",
         base_prompt,
         workspace_skill_context,
         custom_instruction_context,
+        skill_catalog,
         task_store_menu,
         local_tools_menu,
         mcp_tools_menu
@@ -1042,19 +1044,28 @@ confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选
         {
             context.active_tool_detail = tool_md;
         } else {
-            let plugin_name = next_tool.split('/').next().unwrap_or(&next_tool);
-            let detail = {
-                let mut registry = registry_state.lock().await;
-                if registry.plugin_names().contains(&plugin_name) {
-                    registry.format_tool_detail(plugin_name)
-                } else {
-                    String::new()
-                }
-            };
-            if detail.is_empty() {
-                context.active_tool_detail.clear();
+            // 同时检查 prompts/skills/ 目录（按需动态加载的 Skill 完整手册）
+            let skill_path_prod = resource_dir.join("prompts/skills").join(&tool_filename);
+            let skill_path_dev = std::path::PathBuf::from("prompts/skills").join(&tool_filename);
+            if let Ok(skill_md) = std::fs::read_to_string(&skill_path_prod)
+                .or_else(|_| std::fs::read_to_string(&skill_path_dev))
+            {
+                context.active_tool_detail = skill_md;
             } else {
-                context.active_tool_detail = detail;
+                let plugin_name = next_tool.split('/').next().unwrap_or(&next_tool);
+                let detail = {
+                    let mut registry = registry_state.lock().await;
+                    if registry.plugin_names().contains(&plugin_name) {
+                        registry.format_tool_detail(plugin_name)
+                    } else {
+                        String::new()
+                    }
+                };
+                if detail.is_empty() {
+                    context.active_tool_detail.clear();
+                } else {
+                    context.active_tool_detail = detail;
+                }
             }
         }
 
@@ -1073,7 +1084,17 @@ confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选
             format!("❌ {}\n{}", result.stderr, final_stdout)
         };
 
-        context.add_step(&instruction, &output_text);
+        let output_id = crate::agent::run_trace::save_step_output(
+            state.inner(),
+            &final_session_id,
+            step_id,
+            &output_text,
+        ).unwrap_or_else(|e| {
+            eprintln!("⚠️ 无法保存 step_output: {}", e);
+            "unknown_output_id".to_string()
+        });
+
+        context.add_step(&instruction, &output_text, &output_id);
 
         context.current_observation = output_text.clone();
         // 复盘轨迹使用与 step_new 相同的语义字段，但与 Agent prompt/checkpoint 隔离。
