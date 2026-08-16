@@ -15,10 +15,10 @@
                 </button>
                 <button
                     class="icon-control preview-toggle-btn"
-                    :class="{ active: inspectorWidth >= 520 }"
+                    :class="{ active: !inspectorCollapsed }"
                     type="button"
-                    :title="inspectorWidth >= 520 ? '收起宽屏 (360px)' : '展开宽屏 (580px)'"
-                    @click="toggleInspectorWidth"
+                    :title="inspectorCollapsed ? '展开执行侧栏' : '收起执行侧栏 (全屏对话)'"
+                    @click="toggleInspectorCollapse"
                 >
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>
                 </button>
@@ -30,8 +30,8 @@
 
         <div
             class="manus-agent-grid"
-            :class="{ 'is-resizing': isResizing }"
-            :style="{ gridTemplateColumns: `minmax(0, 1fr) 6px ${inspectorWidth}px` }"
+            :class="{ 'is-resizing': isResizing, 'is-collapsed': inspectorCollapsed }"
+            :style="{ gridTemplateColumns: inspectorCollapsed ? 'minmax(0, 1fr) 0px 0px' : `minmax(0, 1fr) 6px ${inspectorWidth}px` }"
         >
             <main class="chat-column">
                 <AgentChatStream
@@ -69,10 +69,11 @@
                     :is-sending="session.isSendingHuman.value"
                     :stop-requested="session.stopRequested.value"
                     :can-start="session.canStart.value"
-                    :pause-reason="session.pauseReason.value"
-                    :human-form="session.humanForm.value"
+                    :pauseReason="session.pauseReason.value"
+                    :humanForm="session.humanForm.value"
                     :all-models="allModels"
                     :current-model-id="session.modelRouting.value.pro"
+                    :telemetry="session.sessionTelemetry.value"
                     @update:draft="composerDraft = $event"
                     @update:model="handleModelSelect"
                     @open-settings="settingsOpen = true"
@@ -81,16 +82,18 @@
                 />
             </main>
 
-            <!-- 可拖拽调节宽度的分割条 -->
+            <!-- 可拖拽调节宽度的分割条 (侧栏打开时展示) -->
             <div
+                v-show="!inspectorCollapsed"
                 class="grid-resizer"
                 :class="{ dragging: isResizing }"
-                title="按住左右拖拽调节工作台宽度 / 双击切换宽屏"
+                title="按住左右拖拽调节工作台宽度 / 双击切换宽屏 (580px)"
                 @mousedown="startResize"
-                @dblclick="toggleInspectorWidth"
+                @dblclick="toggleInspectorWide"
             ></div>
 
             <AgentInspector
+                v-show="!inspectorCollapsed"
                 ref="inspectorRef"
                 :run-state="session.runState.value"
                 :state-meta="session.stateMeta.value"
@@ -251,10 +254,12 @@ function openPluginManager() {
 
 const inspectorRef = ref<InstanceType<typeof AgentInspector> | null>(null);
 const inspectorWidth = ref(380);
+const inspectorCollapsed = ref(false);
 const isResizing = ref(false);
 const activePreviewContent = ref("");
 
 function startResize(e: MouseEvent) {
+    if (inspectorCollapsed.value) return;
     e.preventDefault();
     e.stopPropagation();
     isResizing.value = true;
@@ -284,13 +289,28 @@ function startResize(e: MouseEvent) {
     window.addEventListener("mouseup", onMouseUp);
 }
 
-function toggleInspectorWidth() {
-    inspectorWidth.value = inspectorWidth.value >= 540 ? 360 : 580;
+function toggleInspectorCollapse() {
+    inspectorCollapsed.value = !inspectorCollapsed.value;
+    if (!inspectorCollapsed.value && inspectorWidth.value < 280) {
+        inspectorWidth.value = 380;
+    }
+}
+
+function toggleInspectorWide() {
+    if (inspectorCollapsed.value) {
+        inspectorCollapsed.value = false;
+        inspectorWidth.value = 580;
+    } else {
+        inspectorWidth.value = inspectorWidth.value >= 540 ? 380 : 580;
+    }
 }
 
 function handleOpenPreview(code?: string) {
     if (code) {
         activePreviewContent.value = code;
+    }
+    if (inspectorCollapsed.value) {
+        inspectorCollapsed.value = false;
     }
     if (inspectorWidth.value < 540) {
         inspectorWidth.value = 580;

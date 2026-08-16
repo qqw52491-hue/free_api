@@ -548,9 +548,9 @@ pub async fn get_models(
 ) -> Result<Vec<Model>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let (query, p): (String, Vec<String>) = if let Some(pid) = platform_id {
-        ("SELECT id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms FROM models WHERE platform_id = ?1 ORDER BY created_at DESC".into(), vec![pid])
+        ("SELECT id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window FROM models WHERE platform_id = ?1 ORDER BY created_at DESC".into(), vec![pid])
     } else {
-        ("SELECT id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms FROM models ORDER BY created_at DESC".into(), vec![])
+        ("SELECT id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window FROM models ORDER BY created_at DESC".into(), vec![])
     };
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
     let list = stmt
@@ -565,6 +565,7 @@ pub async fn get_models(
                 enabled: row.get::<_, i64>(6)? == 1,
                 status: row.get(7)?,
                 latency_ms: row.get(8)?,
+                context_window: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -618,7 +619,6 @@ pub async fn add_model(
         "INSERT INTO models (id, platform_id, name, display_name, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, platform_id, name, display_name, now],
     ).map_err(|e| e.to_string())?;
-    // 默认就是最大才4096
     Ok(Model {
         id,
         platform_id,
@@ -629,7 +629,39 @@ pub async fn add_model(
         enabled: true,
         status: "unknown".to_string(),
         latency_ms: 0,
+        context_window: 0,
     })
+}
+
+/// 更新模型参数（max_tokens 输出上限、context_window 上下文窗口）
+#[tauri::command]
+pub async fn update_model(
+    state: State<'_, DbState>,
+    id: String,
+    max_tokens: Option<i64>,
+    context_window: Option<i64>,
+    display_name: Option<String>,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(v) = max_tokens {
+        conn.execute(
+            "UPDATE models SET max_tokens = ?1 WHERE id = ?2",
+            params![v, id],
+        ).map_err(|e| e.to_string())?;
+    }
+    if let Some(v) = context_window {
+        conn.execute(
+            "UPDATE models SET context_window = ?1 WHERE id = ?2",
+            params![v, id],
+        ).map_err(|e| e.to_string())?;
+    }
+    if let Some(v) = display_name {
+        conn.execute(
+            "UPDATE models SET display_name = ?1 WHERE id = ?2",
+            params![v, id],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -996,16 +1028,29 @@ pub async fn send_chat(
     .ok();
 
     // Token 用量统计
-    let (final_prompt, final_completion) = result.usage.unwrap_or_else(|| {
-        llm::estimate_usage(
+    let raw_usage = result.usage.unwrap_or_else(|| {
+        let (p, c) = llm::estimate_usage(
             &api_messages,
             result.full_response.len(),
             config.context_window,
-        )
+        );
+        llm::RawUsage {
+            prompt_tokens: p,
+            completion_tokens: c,
+            cached_tokens: 0,
+        }
     });
+    let final_prompt = raw_usage.prompt_tokens;
+    let final_completion = raw_usage.completion_tokens;
+    let final_cached = raw_usage.cached_tokens;
     let final_total = final_prompt + final_completion;
     let final_percent = if config.context_window > 0 {
         (final_total as f64 / config.context_window as f64) * 100.0
+    } else {
+        0.0
+    };
+    let cache_hit_rate = if final_prompt > 0 {
+        (final_cached as f64 / final_prompt as f64) * 100.0
     } else {
         0.0
     };
@@ -1017,8 +1062,13 @@ pub async fn send_chat(
             "prompt_tokens": final_prompt,
             "completion_tokens": final_completion,
             "total_tokens": final_total,
+            "cached_tokens": final_cached,
+            "cache_hit_rate": cache_hit_rate,
             "context_window": config.context_window,
-            "usage_percent": final_percent
+            "usage_percent": final_percent,
+            "ttft_ms": result.ttft_ms,
+            "total_duration_ms": result.total_duration_ms,
+            "tokens_per_second": result.tokens_per_second
         }),
     )
     .ok();

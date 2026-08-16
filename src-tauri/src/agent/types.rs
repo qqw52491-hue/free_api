@@ -91,15 +91,33 @@ pub struct TokenUsage {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    pub cached_tokens: i64,
+    pub cache_hit_rate: f64, // cached_tokens / prompt_tokens * 100
     pub context_window: i64, // 配置的上下文窗口大小 (num_ctx)
     pub usage_percent: f64,  // total_tokens / context_window * 100
+    pub ttft_ms: u64,        // 首字延迟 (Time to First Token)
+    pub total_duration_ms: u64, // 请求总耗时
+    pub tokens_per_second: f64, // 吐字速率 (tok/s)
 }
 
 impl TokenUsage {
-    pub fn new(prompt_tokens: i64, completion_tokens: i64, context_window: i64) -> Self {
+    pub fn new(
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        cached_tokens: i64,
+        context_window: i64,
+        ttft_ms: u64,
+        total_duration_ms: u64,
+        tokens_per_second: f64,
+    ) -> Self {
         let total_tokens = prompt_tokens + completion_tokens;
         let usage_percent = if context_window > 0 {
             (total_tokens as f64 / context_window as f64) * 100.0
+        } else {
+            0.0
+        };
+        let cache_hit_rate = if prompt_tokens > 0 {
+            ((cached_tokens as f64) / (prompt_tokens as f64)) * 100.0
         } else {
             0.0
         };
@@ -107,17 +125,24 @@ impl TokenUsage {
             prompt_tokens,
             completion_tokens,
             total_tokens,
+            cached_tokens,
+            cache_hit_rate,
             context_window,
             usage_percent,
+            ttft_ms,
+            total_duration_ms,
+            tokens_per_second,
         }
     }
 
     pub fn summary(&self) -> String {
         format!(
-            "📊 Token: 输入={}, 输出={}, 合计={} | 上下文: {}/{} ({:.1}%)",
+            "📊 Token: 输入={}(缓存={:.0}%), 输出={}, 速率={:.1}tok/s, 首字={}ms | 上下文: {}/{} ({:.1}%)",
             self.prompt_tokens,
+            self.cache_hit_rate,
             self.completion_tokens,
-            self.total_tokens,
+            self.tokens_per_second,
+            self.ttft_ms,
             self.total_tokens,
             self.context_window,
             self.usage_percent

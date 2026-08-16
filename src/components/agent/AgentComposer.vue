@@ -23,13 +23,65 @@
                 </div>
             </div>
         </div>
-        <p class="composer-disclaimer">Agent 可能会出错。重要操作请先核对调用详情。</p>
+
+        <!-- 🚀 实时性能流式状态行 (连续字体排版 · 柔和间距 · 实时流式跳动) -->
+        <div class="composer-telemetry-line">
+            <!-- 1. 耗时 -->
+            <span class="telemetry-node" title="任务总运行耗时">
+                <span class="dot-running" v-if="isRunning"></span>
+                <span class="t-label">⏱️ 耗时</span>
+                <span class="t-val">{{ telemetry?.elapsedLabel || '00:00' }}</span>
+            </span>
+            <span class="t-sep">·</span>
+
+            <!-- 2. Token 实时生成速率 -->
+            <span class="telemetry-node" title="模型实时生成速率 (tok/s)">
+                <span class="t-label">⚡ 速率</span>
+                <span class="t-val text-cyan">{{ (telemetry?.tokensPerSecond && telemetry.tokensPerSecond > 0) ? `${telemetry.tokensPerSecond.toFixed(1)} tok/s` : '--' }}</span>
+            </span>
+            <span class="t-sep">·</span>
+
+            <!-- 3. 首字延迟 (TTFT) -->
+            <span class="telemetry-node" title="首字到达延迟 (TTFT)">
+                <span class="t-label">⏳ 首次</span>
+                <span class="t-val">{{ (telemetry?.lastTtftMs && telemetry.lastTtftMs > 0) ? `${telemetry.lastTtftMs}ms` : '--' }}</span>
+            </span>
+            <span class="t-sep">·</span>
+
+            <!-- 4. 前缀缓存命中率 -->
+            <span class="telemetry-node" title="前缀缓存命中率">
+                <span class="t-label">🎯 缓存</span>
+                <span class="t-val text-green">{{ (telemetry?.cacheHitRate !== undefined && telemetry.cacheHitRate > 0) ? `${telemetry.cacheHitRate.toFixed(1)}%` : '--%' }}</span>
+            </span>
+            <span class="t-sep">·</span>
+
+            <!-- 5. 上下文占用 / 窗口水位 -->
+            <span class="telemetry-node" title="当前上下文占用 / 窗口上限">
+                <span class="t-label">📦 上下文</span>
+                <span class="t-val">{{ (telemetry?.totalTokens && telemetry.totalTokens > 0) ? formatTokens(telemetry.totalTokens) : '0' }}/{{ (telemetry?.contextWindow && telemetry.contextWindow > 0) ? formatTokens(telemetry.contextWindow) : '32k' }}</span>
+                <span class="t-tag" :class="contextLevelClass">({{ (telemetry?.contextUsagePercent ?? 0).toFixed(0) }}%)</span>
+            </span>
+            <span class="t-sep">·</span>
+
+            <!-- 6. 工具调用时间 -->
+            <span class="telemetry-node" title="工具执行耗时">
+                <span class="t-label">🔧 工具</span>
+                <span class="t-val">{{ (telemetry?.lastToolDurationMs && telemetry.lastToolDurationMs > 0) ? formatMs(telemetry.lastToolDurationMs) : '--' }}</span>
+            </span>
+            <span class="t-sep">·</span>
+
+            <!-- 7. 对话轮次 / 步骤 -->
+            <span class="telemetry-node" title="当前执行轮次与步骤">
+                <span class="t-label">🔄 步骤</span>
+                <span class="t-val">{{ (telemetry?.stepCount && telemetry.stepCount > 0) ? `第 ${telemetry.stepCount} 步` : '1 轮' }}</span>
+            </span>
+        </div>
     </footer>
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
-import type { AgentHumanForm, AgentModelOption } from "./types";
+import type { AgentHumanForm, AgentModelOption, AgentSessionTelemetry } from "./types";
 
 const props = defineProps<{
     draft: string;
@@ -42,6 +94,7 @@ const props = defineProps<{
     humanForm: AgentHumanForm | null;
     allModels: AgentModelOption[];
     currentModelId: string;
+    telemetry?: AgentSessionTelemetry | null;
 }>();
 const emit = defineEmits<{
     "update:draft": [value: string];
@@ -60,11 +113,30 @@ const placeholderText = computed(() => props.isRunning
 );
 const canSubmit = computed(() => props.isRunning ? Boolean(props.draft.trim()) : props.canStart && Boolean(props.draft.trim()));
 function submit() { if (canSubmit.value && !props.isSending) emit("submit"); }
+
+function formatTokens(count: number): string {
+    if (count >= 1000000) return `${(count / 1000000).toFixed(1)}M`;
+    if (count >= 1000) return `${(count / 1000).toFixed(1)}k`;
+    return String(count);
+}
+
+function formatMs(ms?: number): string {
+    if (!ms) return "0ms";
+    if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${ms}ms`;
+}
+
+const contextLevelClass = computed(() => {
+    const p = props.telemetry?.contextUsagePercent ?? 0;
+    if (p >= 80) return "badge-danger";
+    if (p >= 60) return "badge-warn";
+    return "badge-safe";
+});
 </script>
 
 <style scoped>
 .manus-composer-wrap {
-    padding: 0 clamp(16px, 4vw, 48px) 14px;
+    padding: 0 clamp(16px, 4vw, 48px) 12px;
     background: linear-gradient(0deg, #141416 85%, transparent);
 }
 .manus-composer {
@@ -206,10 +278,96 @@ textarea::placeholder {
     fill: none;
 }
 
+/* ---- 底部实时指标连续状态行 ---- */
+.composer-telemetry-line {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: nowrap;
+    gap: 8px;
+    margin-top: 7px;
+    padding: 2px 6px;
+    font-size: 11.5px;
+    color: #71717a;
+    overflow-x: auto;
+    scrollbar-width: none;
+    white-space: nowrap;
+    user-select: none;
+}
+.composer-telemetry-line::-webkit-scrollbar {
+    display: none;
+}
+
+.telemetry-node {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4.5px;
+}
+
+.t-label {
+    color: #71717a;
+    font-size: 11px;
+}
+
+.t-val {
+    color: #e4e4e7;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    font-size: 11.5px;
+}
+
+.t-sep {
+    color: rgba(255, 255, 255, 0.15);
+    font-size: 10px;
+    font-weight: bold;
+    user-select: none;
+}
+
+.t-tag {
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    margin-left: 2px;
+}
+
+.text-cyan {
+    color: #38bdf8 !important;
+}
+
+.text-green {
+    color: #4ade80 !important;
+}
+
+.badge-safe {
+    color: #4ade80;
+}
+.badge-warn {
+    color: #fbbf24;
+}
+.badge-danger {
+    color: #f87171;
+}
+
+.dot-running {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #38bdf8;
+    box-shadow: 0 0 6px #38bdf8;
+    animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.85); }
+}
+
 .composer-disclaimer {
-    margin: 6px 0 0;
+    margin: 0;
     text-align: center;
     color: #52525b;
     font-size: 11px;
 }
 </style>
+

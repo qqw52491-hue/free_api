@@ -24,6 +24,7 @@ import {
     type AgentRunState,
     type AgentStepItem,
     type AgentTokenUsage,
+    type AgentSessionTelemetry,
     type AgentToolStatus,
 } from "../components/agent/types";
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
@@ -148,17 +149,25 @@ function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHumanForm
 }
 
 function normalizeUsage(payload: Record<string, unknown>): AgentTokenUsage | null {
-    const usage = asRecord(payload.usage || payload.token_usage || payload.tokens);
+    const usage = asRecord(payload.usage || payload.token_usage || payload.tokens || (payload.type === "token_usage" ? payload : {}));
     if (!Object.keys(usage).length) return null;
     const total = numberOrUndefined(usage.total_tokens ?? usage.total);
     const contextWindow = numberOrUndefined(usage.context_window ?? usage.contextWindow ?? usage.max_tokens);
     if (total === undefined) return null;
+    const prompt = numberOrUndefined(usage.prompt_tokens ?? usage.prompt) ?? 0;
+    const cached = numberOrUndefined(usage.cached_tokens ?? usage.cached) ?? 0;
+    const cacheHitRate = numberOrUndefined(usage.cache_hit_rate ?? usage.cacheHitRate) ?? (prompt > 0 ? (cached / prompt) * 100 : 0);
     return {
-        prompt_tokens: numberOrUndefined(usage.prompt_tokens ?? usage.prompt) ?? 0,
+        prompt_tokens: prompt,
         completion_tokens: numberOrUndefined(usage.completion_tokens ?? usage.completion) ?? 0,
         total_tokens: total,
+        cached_tokens: cached,
+        cache_hit_rate: cacheHitRate,
         context_window: contextWindow ?? 0,
         usage_percent: contextWindow ? (total / contextWindow) * 100 : numberOrUndefined(usage.usage_percent ?? usage.usagePercent) ?? 0,
+        ttft_ms: numberOrUndefined(usage.ttft_ms ?? usage.ttft),
+        total_duration_ms: numberOrUndefined(usage.total_duration_ms ?? usage.totalDurationMs),
+        tokens_per_second: numberOrUndefined(usage.tokens_per_second ?? usage.tokensPerSecond),
     };
 }
 
@@ -197,6 +206,11 @@ export function useAgentSession(sessionId: string) {
     const humanInterventions = ref<Array<{ message: string; timestamp: number }>>([]);
 
     const tokenUsage = ref<AgentTokenUsage | null>(null);
+    const liveSpeed = ref<number | null>(null);
+    const liveTtft = ref<number | null>(null);
+    const activeStepNumber = ref<number>(1);
+    const actionPhaseText = ref<string>("");
+    const lastRunTelemetry = ref<AgentSessionTelemetry | null>(null);
     const completionMessage = ref("");
     const { conversationMessages, isConversationLoading, loadConversation } = usePersistedAgentConversation(
         sessionId,
@@ -249,6 +263,69 @@ export function useAgentSession(sessionId: string) {
     const selectedStep = computed(() => displayedSteps.value.find((item) => item.id === selectedStepId.value) || null);
     const completedToolCount = computed(() => steps.value.filter((item) => item.status === "succeeded").length);
     const failedToolCount = computed(() => steps.value.filter((item) => item.status === "failed").length);
+
+    const sessionTelemetry = computed<AgentSessionTelemetry>(() => {
+        const currentSteps = steps.value;
+        const lastStepWithDuration = [...currentSteps].reverse().find(s => s.durationMs !== undefined && s.durationMs > 0);
+        const totalToolMs = currentSteps.reduce((acc, s) => acc + (s.durationMs ?? 0), 0);
+        const usage = tokenUsage.value;
+
+        const promptTokens = usage?.prompt_tokens ?? 0;
+        const completionTokens = usage?.completion_tokens ?? 0;
+        const totalTokens = usage?.total_tokens ?? 0;
+        const cachedTokens = usage?.cached_tokens ?? 0;
+        const cacheHitRate = usage?.cache_hit_rate ?? (promptTokens > 0 ? (cachedTokens / promptTokens) * 100 : 0);
+        const contextWindow = usage?.context_window ?? 0;
+        const contextUsagePercent = usage?.usage_percent ?? (contextWindow > 0 ? (totalTokens / contextWindow) * 100 : 0);
+
+        const currentStepCount = Math.max(
+            activeStepNumber.value,
+            currentSteps.length,
+            (lastRunTelemetry.value?.stepCount ?? 1)
+        );
+
+        if (isRunning.value || currentSteps.length > 0 || totalTokens > 0) {
+            return {
+                stepCount: currentStepCount,
+                completedToolCount: completedToolCount.value,
+                failedToolCount: failedToolCount.value,
+                elapsedLabel: elapsedLabel.value || (lastRunTelemetry.value?.elapsedLabel ?? "00:00"),
+                actionPhase: actionPhaseText.value,
+                lastTtftMs: isRunning.value ? (liveTtft.value ?? usage?.ttft_ms ?? lastRunTelemetry.value?.lastTtftMs) : (usage?.ttft_ms ?? lastRunTelemetry.value?.lastTtftMs),
+                lastToolDurationMs: lastStepWithDuration?.durationMs ?? lastRunTelemetry.value?.lastToolDurationMs,
+                totalToolDurationMs: totalToolMs || (lastRunTelemetry.value?.totalToolDurationMs ?? 0),
+                tokensPerSecond: isRunning.value ? (liveSpeed.value ?? usage?.tokens_per_second ?? lastRunTelemetry.value?.tokensPerSecond) : (usage?.tokens_per_second ?? lastRunTelemetry.value?.tokensPerSecond),
+                promptTokens: promptTokens || (lastRunTelemetry.value?.promptTokens ?? 0),
+                completionTokens: completionTokens || (lastRunTelemetry.value?.completionTokens ?? 0),
+                totalTokens: totalTokens || (lastRunTelemetry.value?.totalTokens ?? 0),
+                cachedTokens: cachedTokens || (lastRunTelemetry.value?.cachedTokens ?? 0),
+                cacheHitRate: cacheHitRate || (lastRunTelemetry.value?.cacheHitRate ?? 0),
+                contextWindow: contextWindow || (lastRunTelemetry.value?.contextWindow ?? 0),
+                contextUsagePercent: contextUsagePercent || (lastRunTelemetry.value?.contextUsagePercent ?? 0),
+            };
+        }
+
+        if (lastRunTelemetry.value) {
+            return lastRunTelemetry.value;
+        }
+
+        return {
+            stepCount: 0,
+            completedToolCount: 0,
+            failedToolCount: 0,
+            elapsedLabel: "00:00",
+            actionPhase: actionPhaseText.value,
+            totalToolDurationMs: 0,
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            cachedTokens: 0,
+            cacheHitRate: 0,
+            contextWindow: 0,
+            contextUsagePercent: 0,
+        };
+    });
+
     const finalSummary = computed(() => {
         const output = finishOutput.value || {};
         const summary = toText(output.summary || output.message || output.result || output.content || "");
@@ -570,6 +647,39 @@ export function useAgentSession(sessionId: string) {
         const message = toText(payload.message) || (succeeded ? "任务已全部完成。" : "任务未能顺利完成。");
         completionMessage.value = message;
         hasError.value = !succeeded;
+
+        // 终态前归档本轮全量遥测数据
+        const currentSteps = steps.value;
+        const lastStepWithDuration = [...currentSteps].reverse().find(s => s.durationMs !== undefined && s.durationMs > 0);
+        const totalToolMs = currentSteps.reduce((acc, s) => acc + (s.durationMs ?? 0), 0);
+        const usage = tokenUsage.value;
+        const promptTokens = usage?.prompt_tokens ?? 0;
+        const completionTokens = usage?.completion_tokens ?? 0;
+        const totalTokens = usage?.total_tokens ?? 0;
+        const cachedTokens = usage?.cached_tokens ?? 0;
+        const cacheHitRate = usage?.cache_hit_rate ?? (promptTokens > 0 ? (cachedTokens / promptTokens) * 100 : 0);
+        const contextWindow = usage?.context_window ?? 0;
+        const contextUsagePercent = usage?.usage_percent ?? (contextWindow > 0 ? (totalTokens / contextWindow) * 100 : 0);
+
+        lastRunTelemetry.value = {
+            stepCount: currentSteps.length || (historyRuns.value.length ? historyRuns.value[historyRuns.value.length - 1].steps.length : 0),
+            completedToolCount: completedToolCount.value,
+            failedToolCount: failedToolCount.value,
+            elapsedLabel: elapsedLabel.value,
+            actionPhase: succeeded ? "已完成" : "异常结束",
+            lastTtftMs: usage?.ttft_ms,
+            lastToolDurationMs: lastStepWithDuration?.durationMs,
+            totalToolDurationMs: totalToolMs,
+            tokensPerSecond: usage?.tokens_per_second,
+            promptTokens,
+            completionTokens,
+            totalTokens,
+            cachedTokens,
+            cacheHitRate,
+            contextWindow,
+            contextUsagePercent,
+        };
+
         const finish = asRecord(payload.finish);
         if (Object.keys(finish).length) {
             finishOutput.value = { ...finish, screenshot: payload.screenshot };
@@ -595,7 +705,32 @@ export function useAgentSession(sessionId: string) {
 
         const eventType = String(payload.event_type || payload.type || payload.stage || "").toLowerCase();
 
-        // 思考事件
+        // 动作阶段事件（如同步 MCP、装配系统提示词、等待首字）
+        if (eventType === "action_phase") {
+            const desc = toText(payload.description || payload.message);
+            if (desc) {
+                actionPhaseText.value = desc;
+                appendLog(`[执行阶段] ${desc}`);
+            }
+            return;
+        }
+
+        // 思考与流式内容事件（实时抓取每 chunk 吐字速率和首字 TTFT）
+        if (payload.step_id !== undefined && payload.step_id !== null) {
+            const parsedStep = Number(payload.step_id);
+            if (!isNaN(parsedStep)) {
+                activeStepNumber.value = Math.max(activeStepNumber.value, parsedStep + 1);
+            }
+        }
+        if (eventType === "thinking" || eventType === "content_stream") {
+            if (payload.live_speed !== undefined) {
+                liveSpeed.value = Number(payload.live_speed);
+            }
+            if (payload.ttft_ms !== undefined) {
+                liveTtft.value = Number(payload.ttft_ms);
+            }
+        }
+
         if (eventType === "thinking") {
             const content = toText(payload.content);
             const done = payload.done === true;
@@ -763,7 +898,10 @@ export function useAgentSession(sessionId: string) {
         logs.value = [];
         humanInterventions.value = [];
         clearResources();
-        tokenUsage.value = null;
+        liveSpeed.value = null;
+        liveTtft.value = null;
+        activeStepNumber.value = 1;
+        actionPhaseText.value = "";
         completionMessage.value = "";
         finishOutput.value = null;
         hasError.value = false;
@@ -945,6 +1083,7 @@ export function useAgentSession(sessionId: string) {
         logs,
         humanInterventions,
         tokenUsage,
+        sessionTelemetry,
         completionMessage,
         conversationMessages,
         isConversationLoading,

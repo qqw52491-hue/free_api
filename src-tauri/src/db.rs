@@ -27,6 +27,10 @@ pub struct Model {
     pub enabled: bool,
     pub status: String, // unknown, online, offline, testing
     pub latency_ms: i64,
+    /// 模型上下文窗口大小（tokens）。用于 Agent 历史压缩水位计算。
+    /// 0 表示未配置，后端将使用保守默认值（32768）。
+    #[serde(default)]
+    pub context_window: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +86,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             enabled INTEGER NOT NULL DEFAULT 1,
             status TEXT NOT NULL DEFAULT 'unknown',
             latency_ms INTEGER NOT NULL DEFAULT 0,
+            context_window INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             FOREIGN KEY (platform_id) REFERENCES platforms(id) ON DELETE CASCADE
         );
@@ -201,6 +206,11 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             ON agent_step_logs(session_id, step_id);
     ",
     )?;
+
+    // 滚动迁移：为旧版数据库补齐新字段，CREATE TABLE 不会重建已有表
+    let _ = conn.execute_batch(
+        "ALTER TABLE models ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0;",
+    );
 
     Ok(conn)
 }

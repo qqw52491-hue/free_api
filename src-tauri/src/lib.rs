@@ -34,6 +34,7 @@ pub fn run() {
             commands::get_models,
             commands::get_all_models_with_platform,
             commands::add_model,
+            commands::update_model,
             commands::delete_model,
             commands::test_model,
             // 会话

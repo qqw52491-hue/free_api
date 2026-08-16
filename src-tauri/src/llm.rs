@@ -31,11 +31,11 @@ pub struct ModelConfig {
 impl ModelConfig {
     /// 从数据库查询模型+平台信息，自动检测本地模型类型
     pub fn from_db(state: &State<'_, DbState>, model_id: &str) -> Result<Self, String> {
-        let (base_url, api_key, model_name, max_tokens, temperature) = {
+        let (base_url, api_key, model_name, max_tokens, temperature, context_window_db) = {
             let conn = state.0.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT p.base_url, p.api_key, m.name, m.max_tokens, m.temperature
+                    "SELECT p.base_url, p.api_key, m.name, m.max_tokens, m.temperature, m.context_window
                      FROM models m JOIN platforms p ON p.id = m.platform_id
                      WHERE m.id = ?1",
                 )
@@ -47,6 +47,7 @@ impl ModelConfig {
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, f64>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })
             .map_err(|e| format!("模型不存在: {}", e))?
@@ -59,7 +60,10 @@ impl ModelConfig {
             || base_url.contains("lmstudio");
         let is_local = base_url.contains("localhost") || base_url.contains("127.0.0.1");
 
-        let context_window = if is_ollama || is_lmstudio {
+        // 用户配置的 context_window 优先；未配置（0）时按类型使用保守默认值
+        let context_window = if context_window_db > 0 {
+            context_window_db
+        } else if is_ollama || is_lmstudio {
             32768
         } else {
             128000
@@ -229,14 +233,20 @@ pub enum StreamEvent<'a> {
     },
 }
 
-// ========================================================================
-// StreamResult — 单次流式请求的完整结果
-// ========================================================================
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RawUsage {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cached_tokens: i64,
+}
 
 pub struct StreamResult {
     pub full_response: String,
     pub thinking_text: String,
-    pub usage: Option<(i64, i64)>,
+    pub usage: Option<RawUsage>,
+    pub ttft_ms: u64,
+    pub total_duration_ms: u64,
+    pub tokens_per_second: f64,
 }
 
 // ========================================================================
@@ -246,7 +256,7 @@ pub struct StreamResult {
 /// 从 SSE JSON 中解析 content/thinking/usage
 fn parse_sse_delta<'a>(
     json: &'a serde_json::Value,
-) -> (Option<&'a str>, Option<&'a str>, Option<(i64, i64)>) {
+) -> (Option<&'a str>, Option<&'a str>, Option<RawUsage>) {
     let delta = &json["choices"][0]["delta"];
 
     let thinking = delta
@@ -266,19 +276,40 @@ fn parse_sse_delta<'a>(
     (content, thinking, usage)
 }
 
-/// 从 JSON 中提取 usage 信息
-fn parse_usage(json: &serde_json::Value) -> Option<(i64, i64)> {
+/// 从 JSON 中提取 usage 信息，支持 OpenAI / DeepSeek / Anthropic / Gemini / 硅基流动等前缀缓存字段
+fn parse_usage(json: &serde_json::Value) -> Option<RawUsage> {
     let usage = json.get("usage")?;
     let prompt = usage
         .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
     let completion = usage
         .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    if prompt > 0 || completion > 0 {
-        Some((prompt, completion))
+
+    // 多平台前缀缓存命中 Token 提取：
+    // 1. OpenAI / OpenRouter: prompt_tokens_details.cached_tokens
+    // 2. DeepSeek 官方 / 硅基流动: prompt_cache_hit_tokens
+    // 3. Anthropic Claude: cache_read_input_tokens
+    // 4. Gemini: cached_content_token_count
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_i64())
+        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(|v| v.as_i64()))
+        .or_else(|| usage.get("cache_read_input_tokens").and_then(|v| v.as_i64()))
+        .or_else(|| usage.get("cached_content_token_count").and_then(|v| v.as_i64()))
+        .unwrap_or(0);
+
+    if prompt > 0 || completion > 0 || cached > 0 {
+        Some(RawUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cached_tokens: cached,
+        })
     } else {
         None
     }
@@ -289,7 +320,8 @@ fn process_sse_line<F: FnMut(StreamEvent)>(
     line: &str,
     thinking_text: &mut String,
     full_response: &mut String,
-    usage_data: &mut Option<(i64, i64)>,
+    usage_data: &mut Option<RawUsage>,
+    first_token_instant: &mut Option<std::time::Instant>,
     on_event: &mut F,
 ) {
     if line.is_empty() || line == "data: [DONE]" {
@@ -302,6 +334,9 @@ fn process_sse_line<F: FnMut(StreamEvent)>(
 
             if let Some(t) = thinking {
                 if !t.is_empty() {
+                    if first_token_instant.is_none() {
+                        *first_token_instant = Some(std::time::Instant::now());
+                    }
                     thinking_text.push_str(t);
                     on_event(StreamEvent::Thinking {
                         chunk: t,
@@ -312,6 +347,9 @@ fn process_sse_line<F: FnMut(StreamEvent)>(
 
             if let Some(c) = content {
                 if !c.is_empty() {
+                    if first_token_instant.is_none() {
+                        *first_token_instant = Some(std::time::Instant::now());
+                    }
                     full_response.push_str(c);
                     on_event(StreamEvent::Content {
                         chunk: c,
@@ -353,6 +391,9 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
     let url = config.endpoint_url();
     let headers = config.auth_headers();
 
+    let start_instant = std::time::Instant::now();
+    let mut first_token_instant: Option<std::time::Instant> = None;
+
     let request = client.post(&url).headers(headers).json(&body).send();
     tokio::pin!(request);
     let resp = tokio::select! {
@@ -373,7 +414,7 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
     let mut full_response = String::new();
     let mut thinking_text = String::new();
     let mut line_buf = String::new();
-    let mut usage_data: Option<(i64, i64)> = None;
+    let mut usage_data: Option<RawUsage> = None;
 
     loop {
         let item = tokio::select! {
@@ -397,6 +438,7 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
                 &mut thinking_text,
                 &mut full_response,
                 &mut usage_data,
+                &mut first_token_instant,
                 on_event,
             );
         }
@@ -410,14 +452,39 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
             &mut thinking_text,
             &mut full_response,
             &mut usage_data,
+            &mut first_token_instant,
             on_event,
         );
     }
+
+    let total_duration_ms = start_instant.elapsed().as_millis() as u64;
+    let ttft_ms = first_token_instant
+        .map(|t| t.duration_since(start_instant).as_millis() as u64)
+        .unwrap_or(total_duration_ms);
+
+    let gen_duration_secs = first_token_instant
+        .map(|t| t.elapsed().as_secs_f64())
+        .unwrap_or(0.0);
+
+    let completion_count = usage_data
+        .map(|u| u.completion_tokens)
+        .unwrap_or_else(|| (full_response.len() as f64 / 3.5).ceil() as i64);
+
+    let tokens_per_second = if gen_duration_secs > 0.05 && completion_count > 0 {
+        (completion_count as f64) / gen_duration_secs
+    } else if total_duration_ms > 0 && completion_count > 0 {
+        (completion_count as f64) / (total_duration_ms as f64 / 1000.0)
+    } else {
+        0.0
+    };
 
     Ok(StreamResult {
         full_response,
         thinking_text,
         usage: usage_data,
+        ttft_ms,
+        total_duration_ms,
+        tokens_per_second,
     })
 }
 

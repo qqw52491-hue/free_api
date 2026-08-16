@@ -58,12 +58,9 @@ impl SandwichContext {
         };
         self.turns_history.push(feedback);
 
-        // 水位线滞后压缩机制 (Hysteresis Auto-Compact)：
-        // 暂时禁用 Auto-Compact，直到实现真实的 Token 预算机制。
-        /*
-        if self.turns_history.len() >= 40 {
-            self.compact_old_history(20);
-        }
-        */
+        // 水位线滞后压缩（Hysteresis Auto-Compact）：
+        // 基于实际字符数估算 Token 用量，超过高水位时自动批量归档最早的历史记录。
+        // 压缩后的每条记录仍保留 output_id 引用，AI 可通过 get_step_output 溯源完整原文。
+        self.maybe_compact_history();
     }
 }

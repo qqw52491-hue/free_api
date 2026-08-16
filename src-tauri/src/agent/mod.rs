@@ -532,6 +532,14 @@ pub async fn run_agent_main_loop(
     // Skill、插件与 shell 工具共享本轮运行时工作目录；恢复时会重新读取并按哈希复用未变更的 Skill。
     let workspace_dir = std::env::current_dir().unwrap_or_default();
     // 1. 智能 MCP 插件同步：首次任务全量初始化，后续任务仅增量保活（彻底消除每次 spawn 的秒级延迟）
+    let _ = app.emit(
+        &format!("agent-progress-{}", final_session_id),
+        json!({
+            "type": "action_phase",
+            "phase": "mcp",
+            "description": "🔍 正在同步 MCP 插件与存活状态..."
+        }),
+    );
     {
         let cwd = workspace_dir.clone();
         let mut registry = registry_state.lock().await;
@@ -599,6 +607,14 @@ pub async fn run_agent_main_loop(
     }
 
     // 2. 初始化三明治上下文：加载系统提示词 + 可视化/HTML沙箱 Skill + 动态注入 MCP 工具
+    let _ = app.emit(
+        &format!("agent-progress-{}", final_session_id),
+        json!({
+            "type": "action_phase",
+            "phase": "skills",
+            "description": "📚 正在装配系统提示词与 Skill 缓存..."
+        }),
+    );
     let core_logic_embedded = include_str!("../../prompts/core_logic.md");
     let chart_skill_embedded = include_str!("../../prompts/skills/chart_visualization.md");
 
@@ -739,6 +755,10 @@ confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选
         )?;
     }
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
+    // 注入当前路由模型的上下文窗口大小，用于历史压缩水位动态计算
+    context.context_window_tokens = crate::llm::ModelConfig::from_db(&state, &conversation_model_id)
+        .map(|cfg| cfg.context_window as usize)
+        .unwrap_or(32_768);
     context.turns_history =
         crate::agent::conversation::recent_history(state.inner(), &final_session_id)?;
     // checkpoint 是恢复的权威来源：只还原可持久化事实，连接、插件与工具详情由 Runtime 重建。
@@ -1341,6 +1361,15 @@ async fn run_call_llm_and_run_tool_phases(
         );
 
         // --- A. 请求 AI 规划 ---
+        let _ = app.emit(
+            &format!("agent-progress-{}", final_session_id),
+            json!({
+                "type": "action_phase",
+                "phase": "calling_llm",
+                "description": format!("🧠 正在调用 {} 进行决策规划...", routing.model_id),
+                "model_id": routing.model_id
+            }),
+        );
         let (mut inst, token_usage, thinking_text) = match call_llm(
             &context,
             &state,
@@ -1462,7 +1491,7 @@ async fn run_call_llm_and_run_tool_phases(
             },
         )?;
 
-        // 📊 发送 Token 用量统计到前端
+        // 📊 发送 Token 用量与速度指标统计到前端
         app.emit(
             &format!("agent-progress-{}", final_session_id),
             json!({
@@ -1471,8 +1500,13 @@ async fn run_call_llm_and_run_tool_phases(
                 "prompt_tokens": token_usage.prompt_tokens,
                 "completion_tokens": token_usage.completion_tokens,
                 "total_tokens": token_usage.total_tokens,
+                "cached_tokens": token_usage.cached_tokens,
+                "cache_hit_rate": token_usage.cache_hit_rate,
                 "context_window": token_usage.context_window,
                 "usage_percent": token_usage.usage_percent,
+                "ttft_ms": token_usage.ttft_ms,
+                "total_duration_ms": token_usage.total_duration_ms,
+                "tokens_per_second": token_usage.tokens_per_second,
                 "summary": token_usage.summary()
             }),
         )

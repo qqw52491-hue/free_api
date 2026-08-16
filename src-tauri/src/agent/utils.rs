@@ -334,22 +334,64 @@ pub async fn call_llm(
     loop {
         current_try += 1;
 
-        // Thinking 实时推送到前端
+        let stream_start = std::time::Instant::now();
+        let mut first_token_at: Option<std::time::Instant> = None;
+        let mut total_chars: usize = 0;
+
+        // 流式接收事件，实时向前端推送 Thinking/Content 以及动态速率与 TTFT
         let mut on_event = |event: StreamEvent| {
-            if let StreamEvent::Thinking { accumulated, .. } = event {
-                if let Some(app_handle) = app {
-                    use tauri::Emitter;
-                    app_handle
-                        .emit(
-                            &format!("agent-progress-{}", session_id),
-                            json!({
-                                "type": "thinking",
-                                "step_id": step_id,
-                                "content": accumulated,
-                                "done": false
-                            }),
-                        )
-                        .ok();
+            if let Some(app_handle) = app {
+                use tauri::Emitter;
+                if first_token_at.is_none() {
+                    first_token_at = Some(std::time::Instant::now());
+                }
+                let ttft_ms = first_token_at.unwrap().duration_since(stream_start).as_millis() as u64;
+                let chunk_len = match &event {
+                    StreamEvent::Thinking { chunk, .. } => chunk.len(),
+                    StreamEvent::Content { chunk, .. } => chunk.len(),
+                };
+                total_chars += chunk_len;
+                let est_tokens = (total_chars as f64 / 3.5).ceil() as i64;
+                let gen_secs = first_token_at.unwrap().elapsed().as_secs_f64();
+                let live_speed = if gen_secs > 0.05 && est_tokens > 0 {
+                    (est_tokens as f64) / gen_secs
+                } else {
+                    0.0
+                };
+
+                match event {
+                    StreamEvent::Thinking { accumulated, .. } => {
+                        app_handle
+                            .emit(
+                                &format!("agent-progress-{}", session_id),
+                                json!({
+                                    "type": "thinking",
+                                    "step_id": step_id,
+                                    "content": accumulated,
+                                    "done": false,
+                                    "live_tokens": est_tokens,
+                                    "live_speed": live_speed,
+                                    "ttft_ms": ttft_ms
+                                }),
+                            )
+                            .ok();
+                    }
+                    StreamEvent::Content { chunk, accumulated_content, .. } => {
+                        app_handle
+                            .emit(
+                                &format!("agent-progress-{}", session_id),
+                                json!({
+                                    "type": "content_stream",
+                                    "step_id": step_id,
+                                    "chunk": chunk,
+                                    "accumulated": accumulated_content,
+                                    "live_tokens": est_tokens,
+                                    "live_speed": live_speed,
+                                    "ttft_ms": ttft_ms
+                                }),
+                            )
+                            .ok();
+                    }
                 }
             }
         };
@@ -365,18 +407,32 @@ pub async fn call_llm(
         )
         .await?;
 
-        // 6. Token 用量统计
+        // 6. Token 用量与速度指标统计
         let token_usage = match result.usage {
-            Some((prompt, completion)) => {
-                TokenUsage::new(prompt, completion, config.context_window)
-            }
+            Some(raw) => TokenUsage::new(
+                raw.prompt_tokens,
+                raw.completion_tokens,
+                raw.cached_tokens,
+                config.context_window,
+                result.ttft_ms,
+                result.total_duration_ms,
+                result.tokens_per_second,
+            ),
             None => {
                 let (est_p, est_c) = llm::estimate_usage(
                     &api_values,
                     result.full_response.len(),
                     config.context_window,
                 );
-                let usage = TokenUsage::new(est_p, est_c, config.context_window);
+                let usage = TokenUsage::new(
+                    est_p,
+                    est_c,
+                    0,
+                    config.context_window,
+                    result.ttft_ms,
+                    result.total_duration_ms,
+                    result.tokens_per_second,
+                );
                 println!("⚠️ API 未返回 usage，使用估算值: {}", usage.summary());
                 usage
             }

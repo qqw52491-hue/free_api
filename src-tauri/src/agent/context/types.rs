@@ -19,22 +19,22 @@ pub struct SandwichContext {
     pub turns_history: Vec<ChatMessage>,
     pub current_observation: String,
     pub progress_summary: String,
-    /// 当前过程树的活动计划节点；随 checkpoint 序列化，以便恢复后继续归属。
     #[serde(default)]
     pub active_plan_id: Option<String>,
     #[serde(default)]
     pub active_plan_title: Option<String>,
     #[serde(default)]
     pub next_plan_index: usize,
-    /// 仅保存 session 任务数据区的目录；资源记录本体不进入 LLM 上下文。
     #[serde(default)]
     pub task_resources: Vec<TaskResourceRef>,
-
-    // --- 动态载入的工具详情 ---
     pub active_tool: Option<String>,
     pub active_tool_detail: String,
-
     pub carry_memories: bool,
+    /// 当前任务所用模型的上下文窗口（tokens）。
+    /// 由 run_agent_main_loop 在构建 context 时从 DB 读取并注入，
+    /// 用于历史压缩高低水位的动态计算。 0 表示未配置时使用保守默认。
+    #[serde(default)]
+    pub context_window_tokens: usize,
 }
 
 impl SandwichContext {
@@ -54,6 +54,7 @@ impl SandwichContext {
             active_tool: None,
             active_tool_detail: String::new(),
             carry_memories: false,
+            context_window_tokens: 0,
         }
     }
 

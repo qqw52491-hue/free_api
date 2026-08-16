@@ -32,8 +32,32 @@ export interface AgentTokenUsage {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    cached_tokens?: number;
+    cache_hit_rate?: number;
     context_window: number;
     usage_percent: number;
+    ttft_ms?: number;
+    total_duration_ms?: number;
+    tokens_per_second?: number;
+}
+
+export interface AgentSessionTelemetry {
+    stepCount: number;
+    completedToolCount: number;
+    failedToolCount: number;
+    elapsedLabel: string;
+    actionPhase?: string;
+    lastTtftMs?: number;
+    lastToolDurationMs?: number;
+    totalToolDurationMs: number;
+    tokensPerSecond?: number;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    cachedTokens: number;
+    cacheHitRate: number;
+    contextWindow: number;
+    contextUsagePercent: number;
 }
 export type AgentHumanFormKind = "single_select" | "multi_select" | "confirm" | "file_picker" | "text" | "custom_html";
 export interface AgentHumanFormOption {

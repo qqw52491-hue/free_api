@@ -46,8 +46,16 @@
             <div class="inspector-metrics">
                 <div><span>运行</span><strong>{{ elapsedLabel }}</strong></div>
                 <div><span>完成</span><strong>{{ completedToolCount }}</strong></div>
-                <div><span>异常</span><strong :class="{ danger: failedToolCount }">{{ failedToolCount }}</strong></div>
-                <div v-if="tokenUsage"><span>上下文</span><strong>{{ tokenUsage.usage_percent.toFixed(1) }}%</strong></div>
+                <div v-if="tokenUsage && tokenUsage.tokens_per_second !== undefined && tokenUsage.tokens_per_second > 0" :title="`吐字速率: ${tokenUsage.tokens_per_second.toFixed(1)} tok/s, 首字: ${tokenUsage.ttft_ms ?? 0}ms`">
+                    <span>速率</span><strong style="color:#38bdf8">{{ tokenUsage.tokens_per_second.toFixed(1) }} <small style="font-size:9px;color:#71717a">t/s</small></strong>
+                </div>
+                <div v-if="tokenUsage && tokenUsage.cache_hit_rate !== undefined && tokenUsage.cache_hit_rate > 0" :title="`前缀缓存命中: ${tokenUsage.cached_tokens ?? 0} / ${tokenUsage.prompt_tokens} tokens`">
+                    <span>缓存</span><strong style="color:#4ade80">{{ tokenUsage.cache_hit_rate.toFixed(0) }}%</strong>
+                </div>
+                <div v-if="tokenUsage" :title="`已用 ${tokenUsage.total_tokens} / 窗口 ${tokenUsage.context_window > 0 ? tokenUsage.context_window : '32k'}`">
+                    <span>上下文</span><strong>{{ tokenUsage.usage_percent.toFixed(1) }}%</strong>
+                </div>
+                <div v-else-if="failedToolCount"><span>异常</span><strong class="danger">{{ failedToolCount }}</strong></div>
             </div>
 
             <nav class="detail-tabs">

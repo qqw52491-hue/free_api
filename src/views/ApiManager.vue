@@ -94,11 +94,17 @@
                   <span v-else-if="m.status === 'offline'" class="badge badge-offline">离线</span>
                   <span v-else-if="m.status === 'testing'" class="badge badge-testing">检测中…</span>
                   <span v-else class="badge badge-unknown">未检测</span>
-                  <span class="m-tokens">{{ m.max_tokens }} tokens</span>
+                  <span class="m-tokens">输出上限: {{ m.max_tokens }} tok</span>
+                  <span class="m-tokens" :style="{ color: m.context_window > 0 ? 'var(--text-3)' : 'var(--text-4)' }">
+                    窗口: {{ m.context_window > 0 ? m.context_window.toLocaleString() + ' tok' : '未配置' }}
+                  </span>
                 </div>
               </div>
             </div>
             <div class="m-actions">
+              <button class="btn btn-ghost btn-sm" @click="editModel(m)" title="配置">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              </button>
               <button class="btn btn-success btn-sm" @click="testSingleModel(m)" :disabled="m.status === 'testing'">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" :class="{ spinning: m.status === 'testing' }">
                   <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8"/>
@@ -177,6 +183,42 @@
         </div>
       </Transition>
 
+      <!-- 编辑模型配置弹窗 -->
+      <Transition name="fade">
+        <div class="modal-overlay" v-if="editingModel" @click.self="editingModel = null">
+          <div class="modal" style="max-width:440px">
+            <div class="modal-header">
+              <span class="modal-title">配置模型 — {{ editingModel.name }}</span>
+              <button class="btn-icon" @click="editingModel = null">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+            <div class="modal-body">
+              <div class="form-group">
+                <label class="form-label">上下文窗口 (context_window) <span style="color:var(--accent)">*</span></label>
+                <input class="form-input" type="number" v-model.number="mForm.context_window"
+                  placeholder="如 128000（GPT-4o）、65536（DeepSeek-V3）、32768（本地模型）" min="0" step="1024" />
+                <div style="font-size:11px;color:var(--text-4);margin-top:4px">
+                  模型能接受的最大输入+输出 Token 总量。Agent 压缩历史时以此为基准。0 = 使用保守默认值 32768。
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label">单次最大输出 (max_tokens)</label>
+                <input class="form-input" type="number" v-model.number="mForm.max_tokens"
+                  placeholder="如 4096、8192" min="256" step="256" />
+                <div style="font-size:11px;color:var(--text-4);margin-top:4px">
+                  单次 API 调用最多生成的 Token 数。与上下文窗口无关。
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-ghost" @click="editingModel = null">取消</button>
+              <button class="btn btn-primary" @click="saveModelConfig">保存</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
       <!-- 删除确认弹窗 -->
       <Transition name="fade">
         <div class="modal-overlay" v-if="deletingPlatform" @click.self="deletingPlatform = null">
@@ -212,6 +254,7 @@ interface PlatformData {
 interface ModelData {
   id: string; platform_id: string; name: string; display_name: string;
   max_tokens: number; temperature: number; enabled: boolean; status: string; latency_ms: number;
+  context_window: number;
 }
 
 const platforms = ref<PlatformData[]>([])
@@ -219,6 +262,7 @@ const models = ref<ModelData[]>([])
 const selectedPlatformId = ref('')
 const showAddPlatform = ref(false)
 const editingPlatform = ref<PlatformData | null>(null)
+const editingModel = ref<ModelData | null>(null)
 const deletingPlatform = ref<PlatformData | null>(null)
 const newModelName = ref('')
 const showKey = ref(false)
@@ -230,6 +274,7 @@ const batchTestSummary = ref('')
 const batchTestPlatformId = ref('')
 
 const pForm = ref({ name: '', base_url: '', api_key: '' })
+const mForm = ref({ max_tokens: 4096, context_window: 0 })
 const currentPlatform = computed(() => platforms.value.find(p => p.id === selectedPlatformId.value))
 
 function getPlatformEmoji(name: string) {
@@ -326,6 +371,27 @@ async function addModel() {
   })
   newModelName.value = ''
   await selectPlatform(selectedPlatformId.value)
+  emit('models-updated')
+}
+
+function editModel(m: ModelData) {
+  editingModel.value = m
+  mForm.value = { max_tokens: m.max_tokens, context_window: m.context_window ?? 0 }
+}
+
+async function saveModelConfig() {
+  if (!editingModel.value) return
+  await invoke('update_model', {
+    id: editingModel.value.id,
+    maxTokens: mForm.value.max_tokens,
+    contextWindow: mForm.value.context_window,
+  })
+  const idx = models.value.findIndex(x => x.id === editingModel.value!.id)
+  if (idx >= 0) {
+    models.value[idx].max_tokens = mForm.value.max_tokens
+    models.value[idx].context_window = mForm.value.context_window
+  }
+  editingModel.value = null
   emit('models-updated')
 }
 
