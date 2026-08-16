@@ -4,7 +4,11 @@
 
         <div class="stream-centered-content">
             <section v-if="!currentGoal && !timelineEntries.length && !legacyMessages.length" class="empty-conversation">
-                <div class="empty-logo">m</div>
+                <div class="empty-logo">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                    </svg>
+                </div>
                 <h2>有什么可以帮你的？</h2>
                 <p>输入一个任务。每个回合会保留自己的过程、成果与总结。</p>
             </section>
@@ -326,15 +330,14 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
 }
 .empty-logo {
     display: grid;
-    width: 32px;
-    height: 32px;
+    width: 44px;
+    height: 44px;
     place-items: center;
-    border-radius: 8px;
-    color: #18181a;
-    background: #ececef;
-    font-family: Georgia, serif;
-    font-size: 18px;
-    font-weight: 800;
+    border-radius: 12px;
+    color: #fbbf24;
+    background: linear-gradient(135deg, rgba(251, 191, 36, 0.16), rgba(124, 108, 246, 0.16));
+    border: 1px solid rgba(251, 191, 36, 0.3);
+    box-shadow: 0 4px 20px rgba(251, 191, 36, 0.15);
 }
 .empty-conversation h2 {
     margin: 12px 0 4px;
