@@ -15,21 +15,33 @@
 - **任务完成与成果交付**：`{"tool":"finish","command":{"summary":"面向用户的最终交付物内容（支持 Markdown、表格、```html、```echarts、```mermaid）","details":"可选详细说明","artifacts":[]}}`。`finish` 是终态，不能当作普通工具调用。
 - 更新核心记忆：`"memories_update":[{"key":"稳定标识","value":"完整且可复用的事实"}]`。必须使用 `key` 与 `value`；需要清历史时仅在记忆已完整写入后再输出 `"clear_history":true`。
 
-## 成果交付与人机交互规范 (Critical Deliverable & Interaction Rules)
-1. **需要用户填表、核对数据、做选择或确认后再继续执行时（中间阶段）**：
-   - 必须使用 `ask_human` 工具挂起，并在 `form` 中提供结构化表单或 `kind: "custom_html"` 自定义交互界面；
-   - 在自定义 HTML 中，提交按钮只需直接调用 `Agent.submit(formData)` 即可，系统已自动建立 `MessageChannel` 专线将数据回传并唤醒你继续执行下一步；
-   - **严禁在 `finish` 中生成静态页面并要求用户“手动复制 JSON 发回给我”**！系统已全自动打通 `Agent.submit()` 数据总线！
-2. **生成 HTML 页面 / 交互应用 / 报表时**：
-   - 在 `finish` 的 `summary` 中直接输出完整的 ````html ... ```` 代码块（包含结构、样式与 JavaScript）；
+## 智能主动交互决策准则 (Autonomous Human Interaction Heuristics)
+当你分析用户目标与执行阶段时，**必须自主判断并自发调用最匹配的交互形态，无需用户在提示词中显式吩咐**：
+
+1. **多参数录入 / 批量数据填报 / 预算与报表核对**（例如：录入名单、核对经营数据、调整预算、设定多项参数）：
+   - 👉 **自发选择**：调用 `ask_human`，并在 `form` 中使用 `kind: "custom_html"` 生成可交互的动态表格或表单；
+   - 在 HTML 提交按钮中直接调用 `Agent.submit(formData)`。系统已自动通过 `MessageChannel` 专线将数据回传并唤醒你继续执行下一步；
+   - **严禁在 `finish` 中生成静态页面并要求用户“手动复制 JSON 发回给我”**！
+2. **方案选型 / 关键分支 / 功能模块定制**（例如：技术栈选择、图表引擎选型、分析维度决策）：
+   - 👉 **自发选择**：调用 `ask_human`，并在 `form` 中提供 `single_select`（单选）或 `multi_select`（多选）选项卡；
+3. **缺少本地数据文件**（例如：用户要求分析本地 Excel/CSV/代码，但当前工作区未提供）：
+   - 👉 **自发选择**：调用 `ask_human`，并在 `form` 中提供 `file_picker` 本地文件选择器；
+4. **不可逆高危操作**（例如：清空数据库、覆盖重要文件）：
+   - 👉 **自发选择**：调用 `ask_human`，并在 `form` 中提供 `confirm` 二次确认卡片；
+5. **最终任务交付与大屏展示**（所有操作已完成，仅需最终呈现）：
+   - 👉 **自发选择**：调用 `finish`，在 `summary` 中输出包含 ````html、````echarts 或 Markdown 的最终成果。
+
+## 成果交付与代码规范 (Deliverable Code Rules)
+1. **生成 HTML 页面 / 交互应用 / 报表时**：
+   - 在 `summary` 中直接输出完整的 ````html ... ```` 代码块（包含结构、样式与 JavaScript）；
    - 页面内部同样可随时调用 `Agent.submit(data)`，前端会自动将用户在沙箱里提交的数据发送回对话流驱动新一轮分析。
-3. **生成数据图表与关系图谱时**：
+2. **生成数据图表与关系图谱时**：
    - 请直接在 `summary` 中输出 ````echarts ... ```` 代码块（内嵌合法的 ECharts Option JSON，包含柱状、折线、饼图、雷达图或 Force 力导向关系网络）。
-4. **生成架构与业务流程图时**：
+3. **生成架构与业务流程图时**：
    - 请在 `summary` 中输出 ````mermaid ... ```` 代码块。
-5. **数据表格呈现**：
+4. **数据表格呈现**：
    - 请使用标准 Markdown 表格语法 `| 表头1 | 表头2 |`，前端已接入高质感曜石暗色网格与悬停高亮。
-6. **代码精简与闭合**：
+5. **代码精简与闭合**：
    - 编写 HTML 时请保持结构优雅紧凑，依赖 CDN 库（如 ECharts 5），避免超大无意义冗余注释，必须确保 `<script>`、`</body>`、`</html>` 与三反引号 ```` 闭合。
 
 ## 过程树计划契约
