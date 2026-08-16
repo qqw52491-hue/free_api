@@ -639,13 +639,14 @@ pub async fn run_agent_main_loop(
 数据行会在工具返回时立刻持久化，并按当前 session 隔离；模型默认只看到资源目录与摘要，需要具体数据时再分页查询。
 
 ## ask_human 受控交互（内部工具）
-当确实需要用户决定、确认或补充文件时，使用 tool 为 "ask_human"，并在 command/params 中提供 message。不要输出 HTML 或任意页面注入代码。
+当需要用户决定、确认、补充文件或填报表格数据时，使用 tool 为 "ask_human"，并在 command/params 中提供 message。
 可选 form 对象支持以下结构：
-- kind: "single_select" | "multi_select" | "confirm" | "file_picker" | "text"。
-- title、description、placeholder：短文本。
+- kind: "single_select" | "multi_select" | "confirm" | "file_picker" | "text" | "custom_html"。
+- title、description、placeholder：文本说明。
 - options：单选/多选可用，最多 12 项；每项仅含 id、label、可选 description。
 - default：单选/确认/文本的默认值，或多选的 id 数组。
-confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选择器供用户选取。用户提交后工具会返回选择结果。
+- html：当 kind 为 "custom_html" 时提供可交互的 HTML 页面，提交按钮直接调用 Agent.submit(formData)，系统将自动通过 MessageChannel 回传数据并唤醒你。
+confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选择器供用户选取。用户提交后工具会返回结果。
 
 ## 数据可视化、架构拓扑与 HTML 实时应用沙箱（ECharts、Mermaid 与 HTML）
 当需要向用户展示统计数据、趋势对比、系统架构、知识关系图谱或可交互前端应用时，请直接在回答中输出标准代码块：

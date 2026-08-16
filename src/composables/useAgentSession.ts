@@ -118,8 +118,10 @@ function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHumanForm
         multi: "multi_select", multiple: "multi_select", multi_select: "multi_select", checkbox: "multi_select",
         confirm: "confirm", confirmation: "confirm", text: "text", input: "text",
         file: "file_picker", file_picker: "file_picker", upload: "file_picker", files: "file_picker",
+        custom_html: "custom_html", html: "custom_html", custom: "custom_html",
     };
-    const kind = aliases[rawKind];
+    const htmlCode = toText(data.html || data.custom_html || (rawKind === "custom_html" || rawKind === "html" ? data.description : ""));
+    const kind = aliases[rawKind] || (htmlCode ? "custom_html" : undefined);
     if (!kind) return null;
     const options = (Array.isArray(data.options) ? data.options : []).slice(0, 12).map((item, index) => {
         const option = asRecord(item);
@@ -137,10 +139,11 @@ function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHumanForm
     return {
         kind,
         title: toText(data.title || data.label || fallbackTitle).slice(0, 220) || fallbackTitle,
-        description: toText(data.description || data.help).slice(0, 600) || undefined,
+        description: kind === "custom_html" ? undefined : (toText(data.description || data.help).slice(0, 600) || undefined),
         placeholder: toText(data.placeholder).slice(0, 160) || undefined,
         options,
         defaultValue,
+        html: htmlCode || undefined,
     };
 }
 
