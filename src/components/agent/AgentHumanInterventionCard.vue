@@ -96,8 +96,18 @@
       </div>
     </div>
 
-    <!-- 5. 兜底/附加补充输入框 (Write-in input) -->
-    <div class="write-in-wrap">
+    <!-- 5. 极致灵活自定义 HTML 交互微应用 (Custom HTML Mini-App) -->
+    <div v-else-if="formKind === 'custom_html' || customHtmlCode" class="options-container custom-html-box">
+      <HtmlPreviewBlock
+        :code="customHtmlCode"
+        :height="360"
+        @agent-submit="handleCustomHtmlSubmit"
+        @agent-cancel="handleCustomHtmlCancel"
+      />
+    </div>
+
+    <!-- 6. 兜底/附加补充输入框 (Write-in input) -->
+    <div v-if="formKind !== 'custom_html' && !customHtmlCode" class="write-in-wrap">
       <label class="write-in-label">
         <span>补充说明 / 自定义要求（可选）:</span>
       </label>
@@ -110,8 +120,8 @@
       />
     </div>
 
-    <!-- 提交动作栏 -->
-    <div class="intervention-actions">
+    <!-- 提交动作栏 (非自定义 HTML 时展示标准提交按钮) -->
+    <div v-if="formKind !== 'custom_html' && !customHtmlCode" class="intervention-actions">
       <button
         type="button"
         class="submit-intervention-btn"
@@ -129,6 +139,7 @@
 import { computed, ref } from "vue";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { AgentHumanForm } from "./types";
+import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 
 const props = defineProps<{
   humanForm: AgentHumanForm | null;
@@ -141,10 +152,11 @@ const emit = defineEmits<{
   cancel: [];
 }>();
 
-const formKind = computed(() => props.humanForm?.kind || "single_select");
+const formKind = computed(() => props.humanForm?.kind || (props.humanForm?.html ? "custom_html" : "single_select"));
 const formTitle = computed(() => props.humanForm?.title || props.pauseReason || "请提供反馈或确认下一步");
 const formDescription = computed(() => props.humanForm?.description || "");
 const formOptions = computed(() => props.humanForm?.options || []);
+const customHtmlCode = computed(() => props.humanForm?.html || (props.humanForm?.kind === "custom_html" ? props.humanForm.description || "" : ""));
 
 const formTypeLabel = computed(() => {
   switch (formKind.value) {
@@ -152,6 +164,7 @@ const formTypeLabel = computed(() => {
     case "single_select": return "单项选择";
     case "multi_select": return "多项选择";
     case "file_picker": return "文件上传";
+    case "custom_html": return "自定义交互应用";
     default: return "问答输入";
   }
 });
@@ -245,6 +258,24 @@ function handleFormSubmit() {
   }
 
   emit("submit", parts.join("\n"));
+}
+
+function handleCustomHtmlSubmit(data: any) {
+  let text = "";
+  if (typeof data === "string") {
+    text = data;
+  } else {
+    try {
+      text = JSON.stringify(data, null, 2);
+    } catch {
+      text = String(data);
+    }
+  }
+  emit("submit", text);
+}
+
+function handleCustomHtmlCancel(reason: string) {
+  emit("submit", `【用户取消了操作】: ${reason}`);
 }
 </script>
 

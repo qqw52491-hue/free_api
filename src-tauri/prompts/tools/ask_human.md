@@ -86,6 +86,25 @@
 }
 ```
 
+#### 范例 4：高度自由的自定义 HTML 交互界面（动态报表填报、复杂表格修改、交互选区等）
+```json
+{
+  "tool": "ask_human",
+  "commands": [
+    {
+      "action": "ask_human",
+      "message": "请在下方动态报表中调整核对数据，完成后点击提交继续：",
+      "form": {
+        "kind": "custom_html",
+        "title": "季度经营数据核对报表",
+        "html": "<div style='padding:14px;color:#eee;'><table style='width:100%;border-collapse:collapse;'><tr style='background:#262838;'><th style='padding:8px;'>月份</th><th>销售额(万元)</th><th>净利润(万元)</th></tr><tr><td style='padding:8px;text-align:center;'>6月</td><td><input id='s' value='340' style='width:90%;background:#18181b;color:#fff;border:1px solid #444;padding:4px;border-radius:4px;'></td><td><input id='p' value='95' style='width:90%;background:#18181b;color:#fff;border:1px solid #444;padding:4px;border-radius:4px;'></td></tr></table><br><button onclick='doSubmit()' style='background:#7c6cf6;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;'>确认提交并继续下一步 ➔</button></div><script>function doSubmit(){ var s = document.getElementById('s').value; var p = document.getElementById('p').value; Agent.submit({ month: '6月', sales: Number(s), profit: Number(p) }); }</script>"
+      }
+    }
+  ]
+}
+```
+* **通信契约**：系统已为所有自定义 HTML 沙箱自动建立 `MessageChannel` 通信管道并注入全局对象 `Agent.submit(data)` 和 `Agent.cancel(reason)`。用户在页面中点击按钮调用 `Agent.submit(...)` 后，系统会自动将数据回传给你并唤醒执行！
+
 ### 注意事项
 1. 涉及重大决策、多种技术路线分歧、或缺少本地数据时，积极使用带有 `form` 的 `ask_human` 引导用户做明确选择。
 2. 自动化完全受阻（如验证码拦截）时，使用纯 `message` 告知用户手动通过后唤醒你。

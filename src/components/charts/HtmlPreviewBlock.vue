@@ -70,7 +70,7 @@
     </div>
 
     <!-- 纯净展示主体 -->
-    <div class="card-body" :style="{ height: isFullscreen ? '100vh' : `${height}px` }">
+    <div class="card-body" :style="{ height: isFullscreen ? '100vh' : (typeof height === 'number' ? `${height}px` : height) }">
       <!-- 1. 实时预览 (纯净沙箱直接展示) -->
       <div v-show="activeTab === 'preview'" class="preview-container">
         <iframe
@@ -80,6 +80,7 @@
           sandbox="allow-scripts allow-modals allow-forms allow-popups"
           allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; midi; clipboard-read; clipboard-write"
           frameborder="0"
+          @load="handleIframeLoad"
         ></iframe>
       </div>
 
@@ -92,18 +93,23 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import hljs from "highlight.js/lib/common";
 
 const props = withDefaults(
   defineProps<{
     code: string;
-    height?: number;
+    height?: number | string;
   }>(),
   {
     height: 480,
   }
 );
+
+const emit = defineEmits<{
+  "agent-submit": [data: any];
+  "agent-cancel": [reason: string];
+}>();
 
 const activeTab = ref<"preview" | "code">("preview");
 const iframeRef = ref<HTMLIFrameElement | null>(null);
@@ -115,8 +121,49 @@ const documentTitle = computed(() => {
   return match ? match[1].trim() : "HTML 交互页面";
 });
 
+// 通信桥梁内置脚本 (自动注入 window.Agent SDK)
+const BRIDGE_SCRIPT = `
+<script>
+(function() {
+  var agentPort = null;
+  window.addEventListener('message', function(e) {
+    if (e.data === 'FREE_API_INIT_PORT' && e.ports && e.ports[0]) {
+      agentPort = e.ports[0];
+      agentPort.onmessage = function(event) {
+        if (window.Agent && typeof window.Agent.onMessage === 'function') {
+          window.Agent.onMessage(event.data);
+        }
+      };
+    }
+  });
+
+  window.Agent = {
+    submit: function(data) {
+      if (agentPort) {
+        agentPort.postMessage({ type: 'SUBMIT', data: data });
+      } else {
+        window.top.postMessage({ source: 'FREE_API_AGENT_BRIDGE', type: 'SUBMIT', data: data }, '*');
+      }
+    },
+    cancel: function(reason) {
+      if (agentPort) {
+        agentPort.postMessage({ type: 'CANCEL', data: reason || '用户取消操作' });
+      } else {
+        window.top.postMessage({ source: 'FREE_API_AGENT_BRIDGE', type: 'CANCEL', data: reason }, '*');
+      }
+    },
+    toast: function(msg) {
+      if (agentPort) {
+        agentPort.postMessage({ type: 'TOAST', data: msg });
+      }
+    }
+  };
+})();
+<` + `/script>`;
+
 const preparedHtml = computed(() => {
   let html = props.code.trim();
+
   if (!html.toLowerCase().includes("<!doctype html>") && !html.toLowerCase().includes("<html")) {
     html = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -124,6 +171,7 @@ const preparedHtml = computed(() => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${documentTitle.value}</title>
+  ${BRIDGE_SCRIPT}
   <style>
     body {
       margin: 0;
@@ -139,6 +187,15 @@ const preparedHtml = computed(() => {
 </body>
 </html>`;
   } else {
+    // 注入 Bridge SDK 到 <head>
+    if (html.toLowerCase().includes("<head>")) {
+      html = html.replace(/<head>/i, `<head>\n${BRIDGE_SCRIPT}\n`);
+    } else if (html.toLowerCase().includes("<html>")) {
+      html = html.replace(/<html>/i, `<html>\n<head>${BRIDGE_SCRIPT}</head>\n`);
+    } else {
+      html = `${BRIDGE_SCRIPT}\n${html}`;
+    }
+
     // 自动闭合被意外截断的 script/body/html 标签
     const lower = html.toLowerCase();
     const openScriptCount = (lower.match(/<script/g) || []).length;
@@ -161,6 +218,51 @@ const highlightedCode = computed(() => {
     return hljs.highlight(props.code, { language: "html" }).value;
   } catch {
     return props.code;
+  }
+});
+
+let currentChannel: MessageChannel | null = null;
+
+function handleIframeLoad() {
+  const iframe = iframeRef.value;
+  if (!iframe?.contentWindow) return;
+
+  // 建立全新的 MessageChannel 专线通道
+  currentChannel = new MessageChannel();
+  currentChannel.port1.onmessage = (event) => {
+    const { type, data } = event.data || {};
+    if (type === "SUBMIT") {
+      emit("agent-submit", data);
+    } else if (type === "CANCEL") {
+      emit("agent-cancel", data);
+    }
+  };
+
+  // 把 Port 2 递交给沙箱内部
+  iframe.contentWindow.postMessage("FREE_API_INIT_PORT", "*", [currentChannel.port2]);
+}
+
+// 兼容全局 window.top.postMessage 兜底通信
+function handleGlobalMessage(event: MessageEvent) {
+  if (event.data?.source === "FREE_API_AGENT_BRIDGE") {
+    const { type, data } = event.data;
+    if (type === "SUBMIT") {
+      emit("agent-submit", data);
+    } else if (type === "CANCEL") {
+      emit("agent-cancel", data);
+    }
+  }
+}
+
+onMounted(() => {
+  window.addEventListener("message", handleGlobalMessage);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("message", handleGlobalMessage);
+  if (currentChannel) {
+    currentChannel.port1.close();
+    currentChannel = null;
   }
 });
 
@@ -220,6 +322,7 @@ function exportHtml() {
   transition: all 0.25s ease;
 }
 
+/* 全屏沉浸模式 */
 .html-preview-card.is-fullscreen {
   position: fixed;
   top: 0;
@@ -228,49 +331,42 @@ function exportHtml() {
   height: 100vh;
   z-index: 9999;
   border-radius: 0;
-  border: none;
   margin: 0;
+  border: none;
 }
 
-/* 右上角悬浮毛玻璃操作坞 (Floating Glass Action Dock) */
+/* 右上角极简半透明毛玻璃悬浮操作坞 */
 .floating-dock {
   position: absolute;
   top: 10px;
   right: 12px;
-  z-index: 20;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 6px;
-  border-radius: 8px;
-  background: rgba(24, 24, 27, 0.85);
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 20px;
+  background: rgba(24, 24, 27, 0.75);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  opacity: 0.88;
-  transition: all 0.2s ease;
+  z-index: 100;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
-.html-preview-card:hover .floating-dock,
-.floating-dock:hover {
+.html-preview-card:hover .floating-dock {
   opacity: 1;
-  background: rgba(24, 24, 27, 0.95);
-  border-color: rgba(255, 255, 255, 0.2);
 }
 
 .dock-tag {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 0 6px 0 2px;
+  color: #fbbf24;
   font-size: 11px;
-  font-weight: 550;
-  color: #a1a1aa;
+  font-weight: 600;
+  padding-right: 6px;
   border-right: 1px solid rgba(255, 255, 255, 0.1);
-  margin-right: 2px;
-}
-.dock-tag span {
-  max-width: 120px;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -281,53 +377,54 @@ function exportHtml() {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  height: 24px;
-  min-width: 24px;
-  padding: 0 6px;
-  border: 0;
-  border-radius: 5px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  border: none;
   background: transparent;
-  color: #d4d4d8;
+  color: #a1a1aa;
   cursor: pointer;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 550;
   transition: all 0.15s ease;
 }
 .dock-btn:hover {
   color: #ffffff;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.1);
 }
-.dock-btn.mode-switch-btn {
-  background: rgba(255, 255, 255, 0.08);
-  font-weight: 600;
-}
-.dock-btn.mode-switch-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
-}
-
 .dock-btn svg {
   width: 13px;
   height: 13px;
+  fill: none;
   stroke: currentColor;
   stroke-width: 2;
-  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mode-switch-btn {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.08);
+}
+.mode-switch-btn:hover {
+  color: #ffffff;
+  background: rgba(56, 189, 248, 0.2);
 }
 
 .copied-badge {
   font-size: 10px;
-  color: #2ed573;
+  color: #4ade80;
   font-weight: 600;
 }
 
-/* 展示主体 */
+/* 主体内容 */
 .card-body {
-  position: relative;
   width: 100%;
-  overflow: hidden;
+  position: relative;
   background: #141416;
 }
 
-.preview-container {
+.preview-container,
+.code-container {
   width: 100%;
   height: 100%;
 }
@@ -336,26 +433,18 @@ function exportHtml() {
   width: 100%;
   height: 100%;
   border: none;
-  background: #ffffff;
+  background: #141416;
 }
 
 .code-container {
-  width: 100%;
-  height: 100%;
   overflow: auto;
   padding: 16px;
-  box-sizing: border-box;
-  background: #121214;
+  background: #101012;
 }
-
 .code-container pre {
   margin: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   line-height: 1.6;
-}
-
-.code-container code {
-  color: #e4e4e7;
 }
 </style>
