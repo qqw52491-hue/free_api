@@ -1,7 +1,6 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import App from './App.vue'
-import ApiManager from './views/ApiManager.vue'
 import AgentView from './views/AgentView.vue'
 import PluginView from './views/PluginView.vue'
 import './style.css'
@@ -9,9 +8,9 @@ import './style.css'
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', redirect: '/apis' },
-    { path: '/chat', redirect: '/apis' },
-    { path: '/apis', component: ApiManager },
+    { path: '/', redirect: '/agent' },
+    { path: '/chat', redirect: '/agent' },
+    { path: '/apis', redirect: '/agent' },
     { path: '/agent', component: AgentView },
     { path: '/plugins', component: PluginView },
   ]

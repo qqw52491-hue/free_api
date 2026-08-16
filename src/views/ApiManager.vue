@@ -202,6 +202,10 @@
 import { ref, computed, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
+const emit = defineEmits<{
+  'models-updated': []
+}>()
+
 interface PlatformData {
   id: string; name: string; base_url: string; api_key: string; created_at: string;
 }
@@ -290,6 +294,7 @@ async function savePlatform() {
     }
     closePlatformModal()
     await loadPlatforms()
+    emit('models-updated')
   } catch (e: any) {
     formError.value = '保存失败: ' + (e?.message || e)
   }
@@ -308,6 +313,7 @@ async function doDeletePlatform() {
   }
   deletingPlatform.value = null
   await loadPlatforms()
+  emit('models-updated')
 }
 
 // ---- 模型 ----
@@ -320,11 +326,13 @@ async function addModel() {
   })
   newModelName.value = ''
   await selectPlatform(selectedPlatformId.value)
+  emit('models-updated')
 }
 
 async function deleteModel(id: string) {
   await invoke('delete_model', { id })
   await selectPlatform(selectedPlatformId.value)
+  emit('models-updated')
 }
 
 async function testSingleModel(m: ModelData): Promise<boolean> {
@@ -438,8 +446,8 @@ onMounted(loadPlatforms)
 }
 
 .platform-item.active {
-  background: rgba(108, 99, 255, 0.1);
-  border-color: rgba(108, 99, 255, 0.2);
+  background: #27272a;
+  border-color: rgba(255, 255, 255, 0.12);
 }
 
 .p-left {
@@ -536,8 +544,8 @@ onMounted(loadPlatforms)
 }
 
 .add-model-input-wrap:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-glow);
+  border-color: rgba(255, 255, 255, 0.25);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.06);
 }
 
 .add-model-input {

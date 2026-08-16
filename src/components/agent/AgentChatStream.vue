@@ -14,7 +14,7 @@
                 <article v-for="message in legacyMessages" :key="message.id" class="saved-message" :class="message.role === 'user' ? 'from-user' : 'from-agent'">
                     <template v-if="message.role === 'agent' || message.role === 'assistant'">
                         <div class="agent-msg-header">
-                            <span class="agent-logo-pill">⚡ manus</span>
+                            <span class="agent-logo-pill">⚡ Free API</span>
                             <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
                         </div>
                         <div class="agent-text-body markdown-content" v-html="renderFinalMarkdown(message.content)"></div>
@@ -31,7 +31,7 @@
                 <article v-else-if="entry.type === 'message'" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
                     <template v-if="entry.role === 'agent' || entry.role === 'assistant'">
                         <div class="agent-msg-header">
-                            <span class="agent-logo-pill">⚡ manus</span>
+                            <span class="agent-logo-pill">⚡ Free API</span>
                             <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                         </div>
                         <div class="agent-text-body markdown-content" v-html="renderFinalMarkdown(entry.content)"></div>
@@ -78,7 +78,7 @@
                 </article>
                 <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
                     <div class="agent-msg-header">
-                        <span class="agent-logo-pill">⚡ manus</span>
+                        <span class="agent-logo-pill">⚡ Free API</span>
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                     </div>
                     <div v-if="entry.summary" class="summary-rich markdown-content" aria-label="Agent 最终回复" v-html="renderFinalMarkdown(entry.summary)"></div>

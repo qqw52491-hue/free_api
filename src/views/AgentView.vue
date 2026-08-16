@@ -1,57 +1,175 @@
 <template>
-    <div class="manus-app-layout">
-        <aside class="manus-sidebar" :class="{ collapsed: sidebarCollapsed }">
+    <div class="app-layout">
+        <!-- 侧边栏：集成对话、LLM 平台管理、插件、定时任务与技能库 -->
+        <aside class="app-sidebar" :class="{ collapsed: sidebarCollapsed }">
             <header class="sidebar-brand-row">
-                <div class="brand-lockup">
-                    <span class="brand-symbol">m</span>
-                    <strong v-if="!sidebarCollapsed">manus</strong>
+                <div v-if="!sidebarCollapsed" class="brand-lockup">
+                    <span class="brand-symbol">⚡</span>
+                    <strong>free api</strong>
                 </div>
-                <div v-if="!sidebarCollapsed" class="brand-controls">
-                    <button type="button" title="搜索"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg></button>
-                    <button type="button" title="收起侧栏" @click="sidebarCollapsed = true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
-                </div>
-                <button v-else class="expand-control" type="button" title="展开侧栏" @click="sidebarCollapsed = false"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
+                <button
+                    v-if="!sidebarCollapsed"
+                    class="brand-toggle-btn"
+                    type="button"
+                    title="收起侧栏"
+                    @click="sidebarCollapsed = true"
+                >
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="4" width="18" height="16" rx="2"/>
+                        <path d="M9 4v16"/>
+                    </svg>
+                </button>
+                <button
+                    v-else
+                    class="brand-collapsed-logo"
+                    type="button"
+                    title="展开侧边栏"
+                    @click="sidebarCollapsed = false"
+                >
+                    <span class="brand-symbol">⚡</span>
+                    <span class="expand-icon-wrap" aria-label="展开侧边栏">
+                        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+                    </span>
+                </button>
             </header>
 
             <nav class="primary-nav">
-                <button type="button" class="nav-row new-task" title="新建对话" @click="addTab"><svg viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5z"/><path d="M8 13h8M12 9v8"/></svg><span v-if="!sidebarCollapsed">新建对话</span></button>
-                <button type="button" class="nav-row active" title="Agent"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M8 11h.01M16 11h.01M8 15h8"/></svg><span v-if="!sidebarCollapsed">Agent</span></button>
-                <button type="button" class="nav-row" title="Plugins" @click="$router.push('/plugins')"><svg viewBox="0 0 24 24"><path d="M8 3v6M16 3v6M8 15v6M16 15v6"/><rect x="4" y="8" width="16" height="8" rx="2"/></svg><span v-if="!sidebarCollapsed">Plugins</span></button>
-                <button type="button" class="nav-row" title="Scheduled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg><span v-if="!sidebarCollapsed">Scheduled</span></button>
-                <button type="button" class="nav-row" title="Library"><svg viewBox="0 0 24 24"><path d="M5 4h10a4 4 0 0 1 4 4v12H9a4 4 0 0 0-4 0z"/><path d="M9 4v16"/></svg><span v-if="!sidebarCollapsed">Library</span></button>
+                <button
+                    type="button"
+                    class="nav-row new-task"
+                    :class="{ 'icon-only': sidebarCollapsed }"
+                    title="新建对话"
+                    @click="createNewTask"
+                >
+                    <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                    <span v-if="!sidebarCollapsed">新建对话</span>
+                </button>
+                <button
+                    type="button"
+                    class="nav-row"
+                    :class="{ active: currentNavView === 'agent', 'icon-only': sidebarCollapsed }"
+                    title="Agent 对话"
+                    @click="currentNavView = 'agent'"
+                >
+                    <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><circle cx="9" cy="10" r="1.5" fill="currentColor"/><circle cx="15" cy="10" r="1.5" fill="currentColor"/><path d="M9 15h6"/></svg>
+                    <span v-if="!sidebarCollapsed">Agent</span>
+                </button>
+                <button
+                    type="button"
+                    class="nav-row"
+                    :class="{ active: currentNavView === 'llm', 'icon-only': sidebarCollapsed }"
+                    title="平台与模型管理 (LLM 管理)"
+                    @click="currentNavView = 'llm'"
+                >
+                    <svg viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="4"/></svg>
+                    <span v-if="!sidebarCollapsed">LLM 管理</span>
+                </button>
+                <button
+                    type="button"
+                    class="nav-row"
+                    :class="{ active: currentNavView === 'plugins', 'icon-only': sidebarCollapsed }"
+                    title="能力与 MCP 插件"
+                    @click="currentNavView = 'plugins'"
+                >
+                    <svg viewBox="0 0 24 24"><path d="M9 2v4M15 2v4M9 18v4M15 18v4"/><rect x="5" y="6" width="14" height="12" rx="3"/></svg>
+                    <span v-if="!sidebarCollapsed">Plugins</span>
+                </button>
+                <button
+                    type="button"
+                    class="nav-row"
+                    :class="{ active: currentNavView === 'scheduled', 'icon-only': sidebarCollapsed }"
+                    title="定时任务"
+                    @click="currentNavView = 'scheduled'"
+                >
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                    <span v-if="!sidebarCollapsed">Scheduled</span>
+                </button>
+                <button
+                    type="button"
+                    class="nav-row"
+                    :class="{ active: currentNavView === 'library', 'icon-only': sidebarCollapsed }"
+                    title="提示词与技能库"
+                    @click="currentNavView = 'library'"
+                >
+                    <svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                    <span v-if="!sidebarCollapsed">Library</span>
+                </button>
             </nav>
 
             <div v-if="!sidebarCollapsed" class="sidebar-section">
-                <div class="section-title"><span>Projects</span><button type="button" @click="addTab">+</button></div>
-                <button type="button" class="project-row" @click="addTab"><svg viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3z"/></svg><span>新建对话</span></button>
+                <div class="section-title"><span>Projects</span><button type="button" title="新建任务" @click="createNewTask">+</button></div>
+                <button type="button" class="project-row" @click="createNewTask">
+                    <svg viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3z"/></svg>
+                    <span>新建对话</span>
+                </button>
             </div>
 
             <div v-if="!sidebarCollapsed" class="sidebar-section tasks-section">
                 <div class="section-title"><span>Tasks</span><span class="list-control">☷</span></div>
                 <div class="task-list">
-                    <div v-for="tab in tabs" :key="tab.id" class="task-row" :class="{ active: activeTabId === tab.id }" @click="activeTabId = tab.id" @dblclick="startRename(tab)">
+                    <div
+                        v-for="tab in tabs"
+                        :key="tab.id"
+                        class="task-row"
+                        :class="{ active: currentNavView === 'agent' && activeTabId === tab.id }"
+                        @click="selectTask(tab.id)"
+                        @dblclick="startRename(tab)"
+                    >
                         <span class="task-state" :class="{ running: tab.running }"></span>
-                        <input v-if="renamingId === tab.id" v-model="renameText" class="task-rename-box" @blur="doRename(tab.id)" @keydown.enter.prevent="doRename(tab.id)" @click.stop />
+                        <input
+                            v-if="renamingId === tab.id"
+                            v-model="renameText"
+                            class="task-rename-box"
+                            @blur="doRename(tab.id)"
+                            @keydown.enter.prevent="doRename(tab.id)"
+                            @click.stop
+                        />
                         <span v-else class="task-label">{{ tab.label }}</span>
-                        <button type="button" class="task-close" title="关闭" @click.stop="closeTab(tab.id)">×</button>
+                        <button type="button" class="task-close" title="关闭任务" @click.stop="closeTab(tab.id)">×</button>
                     </div>
                 </div>
             </div>
 
-            <footer v-if="!sidebarCollapsed" class="sidebar-footer"><span class="profile-dot">f</span><span>free_api</span><button type="button">···</button></footer>
+            <footer class="sidebar-footer">
+                <span class="profile-dot">⚡</span>
+                <span v-if="!sidebarCollapsed" class="profile-name">free_api</span>
+            </footer>
         </aside>
 
-        <main class="agent-main-area">
-            <template v-for="tab in tabs" :key="tab.id">
-                <div v-show="activeTabId === tab.id" class="agent-panel-frame">
-                    <AgentPanel
-                        :ref="(el) => { if (el) panelRefs[tab.id] = el }"
-                        :panel-id="tab.id"
-                        :all-models="allModels"
-                        @new-session="addTab"
-                    />
+        <!-- 右侧主工作区 (动态切换 Agent、LLM 管理、插件或技能库) -->
+        <main class="app-main-content">
+            <!-- 1. 🤖 Agent 对话主面板 -->
+            <div v-show="currentNavView === 'agent'" class="full-view-panel">
+                <template v-for="tab in tabs" :key="tab.id">
+                    <div v-show="activeTabId === tab.id" class="agent-panel-frame">
+                        <AgentPanel
+                            :ref="(el) => { if (el) panelRefs[tab.id] = el }"
+                            :panel-id="tab.id"
+                            :all-models="allModels"
+                            @new-session="createNewTask"
+                        />
+                    </div>
+                </template>
+            </div>
+
+            <!-- 2. ⚙️ LLM 平台与模型管理面板 (原平台管理) -->
+            <div v-if="currentNavView === 'llm'" class="full-view-panel">
+                <ApiManager @models-updated="loadAllModels" />
+            </div>
+
+            <!-- 3. 🔌 插件 / 提示词与 Skill 库 -->
+            <div v-if="currentNavView === 'plugins' || currentNavView === 'library'" class="full-view-panel">
+                <PluginView />
+            </div>
+
+            <!-- 4. ⏱️ Scheduled 定时任务 -->
+            <div v-if="currentNavView === 'scheduled'" class="full-view-panel scheduled-view">
+                <div class="scheduled-card">
+                    <span class="scheduled-icon">⏱️</span>
+                    <h3>定时任务中心</h3>
+                    <p>支持配置定时巡检、自动化总结或定期 Agent 运行计划。任务会在后台准时触发。</p>
                 </div>
-            </template>
+            </div>
         </main>
     </div>
 </template>
@@ -60,9 +178,14 @@
 import { nextTick, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AgentPanel from "../components/AgentPanel.vue";
+import ApiManager from "./ApiManager.vue";
+import PluginView from "./PluginView.vue";
+
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
 interface TabInfo { id: string; label: string; running: boolean; }
+
+const currentNavView = ref<"agent" | "llm" | "plugins" | "scheduled" | "library">("agent");
 const allModels = ref<ModelOption[]>([]);
 const sidebarCollapsed = ref(false);
 const renamingId = ref<string | null>(null);
@@ -71,8 +194,14 @@ const tabs = ref<TabInfo[]>([]);
 const activeTabId = ref("");
 const panelRefs = reactive<Record<string, any>>({});
 
-function asTab(session: ChatSessionRow): TabInfo { return { id: session.id, label: session.title || "未命名对话", running: false }; }
-function defaultTitle() { return `Agent 任务 #${tabs.value.length + 1}`; }
+function asTab(session: ChatSessionRow): TabInfo {
+    return { id: session.id, label: session.title || "未命名对话", running: false };
+}
+
+function defaultTitle() {
+    return `Agent 任务 #${tabs.value.length + 1}`;
+}
+
 async function addTab() {
     const created = await invoke<ChatSessionRow>("create_session", {
         title: defaultTitle(),
@@ -81,12 +210,32 @@ async function addTab() {
     tabs.value.unshift(asTab(created));
     activeTabId.value = created.id;
 }
+
+async function createNewTask() {
+    currentNavView.value = "agent";
+    await addTab();
+}
+
+function selectTask(tabId: string) {
+    activeTabId.value = tabId;
+    currentNavView.value = "agent";
+}
+
+async function loadAllModels() {
+    try {
+        allModels.value = await invoke<ModelOption[]>("get_all_models_with_platform");
+    } catch {
+        allModels.value = [];
+    }
+}
+
 async function loadSessions() {
     const sessions = await invoke<ChatSessionRow[]>("get_sessions");
     tabs.value = sessions.map(asTab);
     if (!tabs.value.length) { await addTab(); return; }
     if (!tabs.value.some((tab) => tab.id === activeTabId.value)) activeTabId.value = tabs.value[0].id;
 }
+
 async function closeTab(id: string) {
     const index = tabs.value.findIndex((tab) => tab.id === id);
     if (index < 0) return;
@@ -96,11 +245,13 @@ async function closeTab(id: string) {
     if (!tabs.value.length) { await addTab(); return; }
     if (activeTabId.value === id) activeTabId.value = tabs.value[Math.max(0, index - 1)].id;
 }
+
 function startRename(tab: TabInfo) {
     renamingId.value = tab.id;
     renameText.value = tab.label;
     nextTick(() => (document.querySelector(".task-rename-box") as HTMLInputElement | null)?.focus());
 }
+
 async function doRename(id: string) {
     if (renamingId.value !== id) return;
     const title = renameText.value.trim();
@@ -110,14 +261,468 @@ async function doRename(id: string) {
     const tab = tabs.value.find((item) => item.id === id);
     if (tab) tab.label = title;
 }
-watch(panelRefs, () => { for (const tab of tabs.value) { const panel = panelRefs[tab.id]; if (panel) tab.running = panel.isRunning; } }, { deep: true });
+
+watch(panelRefs, () => {
+    for (const tab of tabs.value) {
+        const panel = panelRefs[tab.id];
+        if (panel) tab.running = panel.isRunning;
+    }
+}, { deep: true });
+
 onMounted(async () => {
-    try { allModels.value = await invoke<ModelOption[]>("get_all_models_with_platform"); } catch { allModels.value = []; }
-    try { await loadSessions(); } catch { tabs.value = []; await addTab(); }
+    await loadAllModels();
+    try {
+        await loadSessions();
+    } catch {
+        tabs.value = [];
+        await addTab();
+    }
 });
 </script>
 
 <style scoped>
-.manus-app-layout { display: flex; width: 100%; height: 100%; overflow: hidden; color: #e7e7e9; background: #202022; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }.manus-sidebar { display: flex; width: 244px; flex: 0 0 244px; flex-direction: column; border-right: 1px solid #353537; background: #1b1b1d; transition: width .16s ease, flex-basis .16s ease; }.manus-sidebar.collapsed { width: 52px; flex-basis: 52px; }.sidebar-brand-row { display: flex; height: 54px; align-items: center; justify-content: space-between; padding: 0 14px; }.brand-lockup { display: flex; align-items: center; gap: 8px; }.brand-symbol { display: grid; width: 21px; height: 21px; place-items: center; border-radius: 7px; color: #1b1b1d; background: #efeff0; font-family: Georgia, serif; font-size: 14px; font-weight: 900; }.brand-lockup strong { color: #f0f0f1; font-family: Georgia, serif; font-size: 17px; letter-spacing: -.04em; }.brand-controls { display: flex; gap: 3px; }.brand-controls button,.expand-control { display: grid; width: 27px; height: 27px; place-items: center; border: 0; border-radius: 6px; color: #a2a2a8; cursor: pointer; background: transparent; }.brand-controls button:hover,.expand-control:hover { color: #eeeef0; background: #29292c; }.brand-controls svg,.expand-control svg,.nav-row svg,.project-row svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }.primary-nav { display: grid; gap: 2px; padding: 7px 9px 14px; }.nav-row { display: flex; height: 34px; align-items: center; gap: 11px; padding: 0 9px; border: 0; border-radius: 7px; color: #a5a5ab; cursor: pointer; background: transparent; font: 13px inherit; text-align: left; }.nav-row:hover,.nav-row.active { color: #ededee; background: #2a2a2d; }.nav-row.new-task { margin-bottom: 4px; color: #e3e3e5; border: 1px solid #3b3b3f; background: #262629; }.manus-sidebar.collapsed .nav-row { justify-content: center; padding: 0; }.sidebar-section { padding: 7px 9px 0; }.section-title { display: flex; align-items: center; justify-content: space-between; padding: 0 7px 7px; color: #77777c; font-size: 11px; }.section-title button { border: 0; color: #9c9ca2; cursor: pointer; background: transparent; font-size: 17px; line-height: 1; }.list-control { color: #76767c; }.project-row { display: flex; width: 100%; align-items: center; gap: 9px; padding: 8px 7px; border: 0; border-radius: 6px; color: #adadb3; cursor: pointer; background: transparent; font: 12px inherit; text-align: left; }.project-row:hover { background: #27272a; color: #eeeeef; }.tasks-section { min-height: 0; flex: 1; padding-top: 20px; overflow: auto; }.task-list { display: grid; gap: 2px; }.task-row { display: flex; height: 33px; align-items: center; gap: 7px; padding: 0 7px; border-radius: 6px; color: #9b9ba1; cursor: pointer; }.task-row:hover,.task-row.active { color: #e7e7e9; background: #303033; }.task-state { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #69696f; }.task-state.running { background: #e5e5e8; box-shadow: 0 0 0 3px rgba(229,229,232,.1); }.task-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }.task-close { display: none; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; color: #a5a5ab; cursor: pointer; background: transparent; font-size: 15px; }.task-row:hover .task-close { display: block; }.task-close:hover { color: #fff; background: #444449; }.task-rename-box { min-width: 0; flex: 1; border: 1px solid #5a5a60; border-radius: 4px; outline: 0; padding: 3px 5px; color: #e8e8ea; background: #1d1d1f; font: 12px inherit; }.sidebar-footer { display: flex; align-items: center; gap: 8px; padding: 14px; border-top: 1px solid #343436; color: #a5a5aa; font-size: 12px; }.profile-dot { display: grid; width: 21px; height: 21px; place-items: center; border-radius: 50%; color: #1c1c1e; background: #d9d9dc; font-size: 11px; font-weight: 800; }.sidebar-footer button { margin-left: auto; border: 0; color: #87878d; background: transparent; }.agent-main-area { min-width: 0; min-height: 0; flex: 1; overflow: hidden; }.agent-panel-frame { width: 100%; height: 100%; }.manus-sidebar.collapsed .sidebar-brand-row { justify-content: center; padding: 0; }
-@media (max-width: 760px) { .manus-sidebar { width: 52px; flex-basis: 52px; }.manus-sidebar .brand-controls,.manus-sidebar .brand-lockup strong,.manus-sidebar .nav-row span,.manus-sidebar .sidebar-section,.manus-sidebar .sidebar-footer { display: none; }.manus-sidebar .nav-row { justify-content: center; padding: 0; }.sidebar-brand-row { justify-content: center; padding: 0; } }
+.app-layout {
+    display: flex;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    color: #e4e4e7;
+    background: #141416;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* ── 侧边栏 ── */
+.app-sidebar {
+    display: flex;
+    width: 254px;
+    flex: 0 0 254px;
+    flex-direction: column;
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    background: #18181b;
+    transition: width 0.18s cubic-bezier(0.4, 0, 0.2, 1), flex-basis 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 10;
+}
+
+/* 折叠状态更宽敞、更舒适 (64px) */
+.app-sidebar.collapsed {
+    width: 64px;
+    flex: 0 0 64px;
+}
+
+.sidebar-brand-row {
+    display: flex;
+    height: 52px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.app-sidebar.collapsed .sidebar-brand-row {
+    justify-content: center;
+    padding: 0;
+}
+
+.brand-lockup {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.brand-symbol {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border-radius: 7px;
+    color: #fbbf24;
+    background: rgba(251, 191, 36, 0.1);
+    border: 1px solid rgba(251, 191, 36, 0.22);
+    font-size: 14px;
+    transition: all 0.15s;
+}
+
+.brand-lockup strong {
+    color: #f4f4f5;
+    font-size: 15.5px;
+    font-weight: 750;
+    letter-spacing: -0.02em;
+}
+
+.brand-toggle-btn {
+    display: grid;
+    width: 30px;
+    height: 30px;
+    place-items: center;
+    border: 0;
+    border-radius: 6px;
+    color: #a1a1aa;
+    cursor: pointer;
+    background: transparent;
+    transition: all 0.15s;
+}
+.brand-toggle-btn:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.08);
+}
+.brand-toggle-btn svg {
+    width: 17px;
+    height: 17px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.brand-collapsed-logo {
+    position: relative;
+    display: grid;
+    width: 42px;
+    height: 42px;
+    place-items: center;
+    border: 0;
+    border-radius: 9px;
+    cursor: pointer;
+    background: transparent;
+    transition: all 0.15s;
+}
+
+.brand-collapsed-logo .expand-icon-wrap {
+    display: none;
+    position: absolute;
+    inset: 0;
+    align-items: center;
+    justify-content: center;
+    background: #27272a;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #ffffff;
+}
+
+.brand-collapsed-logo .expand-icon-wrap svg {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+}
+
+.brand-collapsed-logo:hover .brand-symbol {
+    opacity: 0;
+}
+
+.brand-collapsed-logo:hover .expand-icon-wrap {
+    display: flex;
+}
+
+/* 导航项 */
+.primary-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 10px 8px 14px;
+}
+
+.app-sidebar.collapsed .primary-nav {
+    padding: 10px 0;
+    align-items: center;
+    gap: 4px;
+}
+
+.nav-row {
+    display: flex;
+    height: 36px;
+    align-items: center;
+    gap: 11px;
+    padding: 0 12px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: #a1a1aa;
+    cursor: pointer;
+    background: transparent;
+    font-size: 13.5px;
+    font-weight: 500;
+    text-align: left;
+    transition: all 0.15s;
+}
+
+.nav-row svg {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.8;
+}
+
+.nav-row:hover {
+    color: #f4f4f5;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.nav-row.active {
+    color: #ffffff;
+    background: #27272a;
+    border-color: rgba(255, 255, 255, 0.08);
+    font-weight: 600;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
+.nav-row.new-task {
+    margin-bottom: 6px;
+    color: #f4f4f5;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.05);
+    font-weight: 600;
+}
+.nav-row.new-task:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+/* 折叠状态下的单图标模式 */
+.nav-row.icon-only {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    justify-content: center;
+    border-radius: 10px;
+    margin: 0 auto;
+}
+
+.nav-row.icon-only svg {
+    width: 20px;
+    height: 20px;
+}
+
+.nav-row.icon-only.new-task {
+    margin-bottom: 6px;
+}
+
+/* 侧边栏项目和任务 */
+.sidebar-section {
+    padding: 6px 8px 0;
+}
+
+.section-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 8px 6px;
+    color: #71717a;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.section-title button {
+    border: 0;
+    color: #a1a1aa;
+    cursor: pointer;
+    background: transparent;
+    font-size: 16px;
+    line-height: 1;
+}
+
+.list-control { color: #71717a; }
+
+.project-row {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 7px;
+    color: #a1a1aa;
+    cursor: pointer;
+    background: transparent;
+    font-size: 12.5px;
+    text-align: left;
+    transition: all 0.15s;
+}
+.project-row svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+}
+.project-row:hover {
+    background: rgba(255, 255, 255, 0.04);
+    color: #f4f4f5;
+}
+
+.tasks-section {
+    min-height: 0;
+    flex: 1;
+    padding-top: 12px;
+    overflow-y: auto;
+}
+
+.task-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.task-row {
+    display: flex;
+    height: 34px;
+    align-items: center;
+    gap: 8px;
+    padding: 0 10px;
+    border-radius: 7px;
+    color: #a1a1aa;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.task-row:hover {
+    color: #f4f4f5;
+    background: rgba(255, 255, 255, 0.04);
+}
+.task-row.active {
+    color: #ffffff;
+    background: #27272a;
+    font-weight: 500;
+}
+
+.task-state {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: #52525b;
+}
+.task-state.running {
+    background: var(--orange);
+    box-shadow: 0 0 0 2px rgba(255, 164, 61, 0.2);
+}
+
+.task-label {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12.5px;
+}
+
+.task-close {
+    display: none;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    color: #71717a;
+    cursor: pointer;
+    background: transparent;
+    font-size: 14px;
+    line-height: 1;
+}
+.task-row:hover .task-close { display: block; }
+.task-close:hover { color: #fff; background: rgba(255, 255, 255, 0.15); }
+
+.task-rename-box {
+    min-width: 0;
+    flex: 1;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 5px;
+    outline: 0;
+    padding: 3px 6px;
+    color: #f4f4f5;
+    background: #18181b;
+    font-size: 12px;
+}
+
+/* 底部状态 */
+.sidebar-footer {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    color: #a1a1aa;
+    font-size: 12px;
+}
+
+.app-sidebar.collapsed .sidebar-footer {
+    justify-content: center;
+    padding: 12px 0;
+}
+
+.profile-dot {
+    display: grid;
+    width: 22px;
+    height: 22px;
+    place-items: center;
+    border-radius: 6px;
+    color: #fbbf24;
+    background: rgba(251, 191, 36, 0.1);
+    border: 1px solid rgba(251, 191, 36, 0.2);
+    font-size: 11px;
+    font-weight: 800;
+}
+
+.profile-name {
+    font-weight: 500;
+}
+
+/* 主内容区域 */
+.app-main-content {
+    min-width: 0;
+    min-height: 0;
+    flex: 1;
+    height: 100%;
+    overflow: hidden;
+    background: #141416;
+}
+
+.full-view-panel {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
+.agent-panel-frame {
+    width: 100%;
+    height: 100%;
+}
+
+/* 定时任务占位 */
+.scheduled-view {
+    display: grid;
+    height: 100%;
+    place-items: center;
+    padding: 30px;
+}
+.scheduled-card {
+    display: grid;
+    gap: 10px;
+    max-width: 420px;
+    padding: 28px;
+    border-radius: 12px;
+    background: #18181b;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    text-align: center;
+    justify-items: center;
+}
+.scheduled-icon { font-size: 32px; }
+.scheduled-card h3 { color: #f4f4f5; font-size: 16px; margin: 0; }
+.scheduled-card p { color: #8e8e93; font-size: 13px; line-height: 1.6; margin: 0; }
+
+@media (max-width: 760px) {
+    .app-sidebar { width: 64px; flex-basis: 64px; }
+    .app-sidebar .brand-lockup,
+    .app-sidebar .brand-toggle-btn,
+    .app-sidebar .nav-row span,
+    .app-sidebar .sidebar-section,
+    .app-sidebar .profile-name { display: none; }
+    .app-sidebar .sidebar-brand-row { justify-content: center; padding: 0; }
+    .app-sidebar .primary-nav { padding: 10px 0; align-items: center; }
+    .app-sidebar .sidebar-footer { justify-content: center; padding: 12px 0; }
+}
 </style>
