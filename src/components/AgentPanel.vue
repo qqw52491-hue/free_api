@@ -320,21 +320,6 @@ async function handleInspectorAgentSubmit(data: any) {
     }
 }
 
-// 当生成完成且包含 HTML 或图表时，自动展开为宽屏预览模式以提供最佳视觉体验
-watch(
-    () => [session.finalSummary.value, session.finalArtifacts.value],
-    ([summary, artifacts]) => {
-        const text = `${summary || ""}\n${((artifacts as string[]) || []).join("\n")}`;
-        if (text.includes("```html") || text.includes("```echarts") || text.includes("```chart")) {
-            activePreviewContent.value = text;
-            if (inspectorWidth.value < 540) {
-                inspectorWidth.value = 580;
-            }
-            inspectorRef.value?.switchTab("preview");
-        }
-    }
-);
-
 defineExpose({ isRunning: session.isRunning });
 </script>
 

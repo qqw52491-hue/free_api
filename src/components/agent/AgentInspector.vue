@@ -1,17 +1,16 @@
 <template>
     <aside class="manus-inspector" :class="{ 'pure-preview-mode': activeTab === 'preview' }" aria-label="执行详情与成果画布">
-        <!-- 模式 A：纯净成果画布模式 (当选中预览且有内容时，无任何思维链或杂乱参数干扰) -->
+        <!-- 模式 A：纯净成果画布模式 (仅在用户显式点击“展开预览”时进入) -->
         <template v-if="activeTab === 'preview'">
             <header class="canvas-top-bar">
                 <div class="canvas-title">
                     <span class="pulse-dot">●</span>
-                    <span>成果画布</span>
+                    <span>成果画布 · 独立预览</span>
                 </div>
-                <nav class="canvas-tabs">
-                    <button type="button" class="tab-btn active">🌐 实时成果</button>
-                    <button type="button" class="tab-btn" @click="activeTab = 'detail'">调用详情</button>
-                    <button type="button" class="tab-btn" @click="activeTab = 'resources'">资源 ({{ resources.length }})</button>
-                </nav>
+                <button type="button" class="btn-exit-canvas" @click="activeTab = 'detail'" title="退出画布并返回调用详情">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    <span>返回执行详情</span>
+                </button>
             </header>
 
             <div class="canvas-viewport">
@@ -33,7 +32,7 @@
             </div>
         </template>
 
-        <!-- 模式 B：标准调用详情与执行状态模式 -->
+        <!-- 模式 B：标准调用详情与执行状态模式 (专注思维链、参数与结果) -->
         <template v-else>
             <header class="inspector-top">
                 <div>
@@ -51,13 +50,9 @@
                 <div v-if="tokenUsage"><span>上下文</span><strong>{{ tokenUsage.usage_percent.toFixed(1) }}%</strong></div>
             </div>
 
-            <nav class="detail-tabs" :class="{ 'has-preview': hasPreviewContent }">
+            <nav class="detail-tabs">
                 <button type="button" :class="{ active: activeTab === 'detail' }" @click="activeTab = 'detail'">调用详情</button>
                 <button type="button" :class="{ active: activeTab === 'resources' }" @click="activeTab = 'resources'">资源 <i>{{ resources.length }}</i></button>
-                <button v-if="hasPreviewContent" type="button" class="preview-tab-btn" @click="activeTab = 'preview'">
-                    <span>🌐 成果画布</span>
-                    <i class="preview-dot">●</i>
-                </button>
             </nav>
 
             <!-- 1. 调用详情 Tab (默认) -->
@@ -196,17 +191,14 @@ const hasPreviewContent = computed(() => {
     );
 });
 
-// 当有新的预览内容（无论是实时生成还是点击历史成果）时，自动切到预览 Tab
+// 仅当用户在左侧点击了“展开预览”传入 activePreviewContent 时，才切换到 preview 模式
 watch(
-    () => [props.finalSummary, props.finalArtifacts, props.activePreviewContent],
-    () => {
-        if (hasPreviewContent.value) {
+    () => props.activePreviewContent,
+    (val) => {
+        if (val && val.trim()) {
             activeTab.value = "preview";
-        } else if (!hasPreviewContent.value && activeTab.value === "preview") {
-            activeTab.value = "detail";
         }
-    },
-    { immediate: true }
+    }
 );
 
 // 当用户在左侧对话流中点击了某个步骤、思维链或介入记录时，自动切换回详情视图
@@ -241,6 +233,24 @@ defineExpose({
     height: 38px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     background: #18181b;
+}
+.btn-exit-canvas {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.06);
+    color: #d4d4d8;
+    font-size: 11px;
+    font-weight: 550;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.btn-exit-canvas:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: #ffffff;
 }
 .canvas-title {
     display: flex;
