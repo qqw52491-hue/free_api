@@ -19,6 +19,8 @@
                     v-if="pureHtmlCode"
                     :code="pureHtmlCode"
                     class="full-height-preview"
+                    @agent-submit="$emit('agent-submit', $event)"
+                    @agent-cancel="$emit('agent-cancel', $event)"
                 />
                 <div v-else-if="hasPreviewContent" class="canvas-scroll-content">
                     <RichContentRenderer :content="combinedPreviewContent" />
@@ -153,6 +155,8 @@ const props = withDefaults(
 defineEmits<{
     "refresh-resources": [];
     "preview-resource": [resource: AgentTaskResource];
+    "agent-submit": [data: any];
+    "agent-cancel": [reason: string];
 }>();
 
 const activeTab = ref<"preview" | "detail" | "resources">("detail");

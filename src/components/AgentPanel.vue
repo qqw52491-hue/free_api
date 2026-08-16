@@ -112,6 +112,7 @@
                 :active-preview-content="activePreviewContent"
                 @refresh-resources="session.refreshResources"
                 @preview-resource="session.openResourcePreview"
+                @agent-submit="handleInspectorAgentSubmit"
             />
         </div>
 
@@ -293,6 +294,26 @@ function handleOpenPreview(code?: string) {
     nextTick(() => {
         inspectorRef.value?.switchTab("preview");
     });
+}
+
+async function handleInspectorAgentSubmit(data: any) {
+    let text = "";
+    if (typeof data === "string") {
+        text = data;
+    } else {
+        try {
+            text = JSON.stringify(data, null, 2);
+        } catch {
+            text = String(data);
+        }
+    }
+
+    if (session.isWaitingForHuman.value) {
+        await session.answerHuman(text);
+    } else {
+        // 如果当前并非暂停等待状态，自动将用户在沙箱中提交的数据发送给 Agent 作为新一轮目标
+        await session.runAgent(`【用户在交互应用中提交了数据】:\n\`\`\`json\n${text}\n\`\`\`\n请基于以上数据继续执行后续分析或入库处理。`);
+    }
 }
 
 // 当生成完成且包含 HTML 或图表时，自动展开为宽屏预览模式以提供最佳视觉体验
