@@ -209,6 +209,16 @@ watch(
     { immediate: true }
 );
 
+// 当用户在左侧对话流中点击了某个步骤、思维链或介入记录时，自动切换回详情视图
+watch(
+    () => [props.selectedStep, props.selectedHuman, props.selectedActiveThought],
+    ([step, human, thought]) => {
+        if (step || human || thought) {
+            activeTab.value = "detail";
+        }
+    }
+);
+
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败" }[status]; }
 
 defineExpose({

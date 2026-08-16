@@ -203,23 +203,27 @@ function handleStepSelect(id: string) {
     clearNarrativeSelection();
     selectedSubpart.value = "tool";
     session.selectStep(id);
+    inspectorRef.value?.switchTab("detail");
 }
 function handleStepThought(id: string) {
     clearNarrativeSelection();
     selectedSubpart.value = "thought";
     session.selectStep(id);
+    inspectorRef.value?.switchTab("detail");
 }
 function handleHumanSelect(id: string) {
     selectedHumanEventId.value = id;
     selectedActiveThought.value = false;
     selectedSubpart.value = null;
     session.selectedStepId.value = null;
+    inspectorRef.value?.switchTab("detail");
 }
 function handleActiveThoughtSelect() {
     selectedActiveThought.value = true;
     selectedHumanEventId.value = null;
     selectedSubpart.value = null;
     session.selectedStepId.value = null;
+    inspectorRef.value?.switchTab("detail");
 }
 function handleModelSelect(modelId: string) {
     session.modelRouting.value = {
