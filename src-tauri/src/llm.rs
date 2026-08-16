@@ -106,14 +106,25 @@ impl ModelConfig {
             (self.temperature, 1.0)
         };
 
+        let effective_max_tokens = if self.max_tokens < 8192 {
+            8192
+        } else {
+            self.max_tokens
+        };
+
         let mut body = json!({
             "model": self.model_name,
             "messages": messages,
-            "max_tokens": self.max_tokens,
+            "max_tokens": effective_max_tokens,
             "temperature": use_temp,
             "top_p": use_top_p,
             "stream": true,
         });
+
+        // 兼容支持 max_completion_tokens 的现代模型 (如 o1, o3-mini, gpt-4o 等)
+        if self.model_name.contains("o1") || self.model_name.contains("o3") || self.model_name.contains("gpt-4o") {
+            body["max_completion_tokens"] = json!(effective_max_tokens);
+        }
 
         // stream_options 只有 OpenAI/OpenRouter 支持，本地模型不加
         if !self.is_ollama && !self.is_lmstudio {
@@ -134,10 +145,11 @@ impl ModelConfig {
                 }
             }
         }
-        // Ollama 需要通过 options 注入 num_ctx
+        // Ollama 需要通过 options 注入 num_ctx 与 num_predict
         if self.is_ollama {
             body["options"] = json!({
-                "num_ctx": self.context_window,
+                "num_ctx": self.context_window.max(32768),
+                "num_predict": effective_max_tokens,
                 "temperature": 0.0,
                 "top_p": 0.9,
             });

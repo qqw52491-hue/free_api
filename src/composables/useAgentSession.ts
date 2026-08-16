@@ -117,6 +117,7 @@ function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHumanForm
         single: "single_select", select: "single_select", single_select: "single_select", radio: "single_select",
         multi: "multi_select", multiple: "multi_select", multi_select: "multi_select", checkbox: "multi_select",
         confirm: "confirm", confirmation: "confirm", text: "text", input: "text",
+        file: "file_picker", file_picker: "file_picker", upload: "file_picker", files: "file_picker",
     };
     const kind = aliases[rawKind];
     if (!kind) return null;
@@ -247,7 +248,12 @@ export function useAgentSession(sessionId: string) {
     const failedToolCount = computed(() => steps.value.filter((item) => item.status === "failed").length);
     const finalSummary = computed(() => {
         const output = finishOutput.value || {};
-        return toText(output.summary || output.message || output.result || output.content || "");
+        const summary = toText(output.summary || output.message || output.result || output.content || "");
+        const details = toText(output.details || "");
+        if (summary && details && summary !== details) {
+            return `${summary}\n\n${details}`;
+        }
+        return summary || details || "";
     });
     const finalArtifacts = computed(() => {
         const output = finishOutput.value || {};
@@ -318,7 +324,12 @@ export function useAgentSession(sessionId: string) {
             goal,
             status: toText(trace.status) || "running",
             steps,
-            summary: toText(completion.summary || completion.details || completion.message || completion.result || completion.content),
+            summary: (() => {
+                const s = toText(completion.summary || completion.message || completion.result || completion.content);
+                const d = toText(completion.details || "");
+                if (s && d && s !== d) return `${s}\n\n${d}`;
+                return s || d || "";
+            })(),
             artifacts: artifactPaths(completion),
             startedAt,
             completedAt,
@@ -816,6 +827,24 @@ export function useAgentSession(sessionId: string) {
             appendLog(`[停止指令失败] ${toText(error)}`);
         }
     }
+    async function answerHuman(answer: string) {
+        const message = answer.trim();
+        if (!message || isSendingHuman.value) return;
+        isSendingHuman.value = true;
+        try {
+            await invoke("send_human_intervention", { sessionId, message });
+            humanInput.value = "";
+            pauseReason.value = "";
+            humanForm.value = null;
+            setRunState("executing", "已收到人工回答，等待 Agent 继续执行。");
+            appendLog(`[人工回答] ${message}`);
+            autoScrollToBottom();
+        } catch (error) {
+            appendLog(`[人工回答失败] ${toText(error)}`);
+        } finally {
+            isSendingHuman.value = false;
+        }
+    }
     async function sendHumanInput() {
         const message = humanInput.value.trim();
         if (!message || isSendingHuman.value) return;
@@ -935,6 +964,7 @@ export function useAgentSession(sessionId: string) {
         ensureModelRouting,
         runAgent,
         requestStop,
+        answerHuman,
         sendHumanInput,
         submitHumanForm,
         clearSession,

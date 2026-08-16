@@ -17,7 +17,9 @@
                             <span class="agent-logo-pill">⚡ Free API</span>
                             <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
                         </div>
-                        <div class="agent-text-body markdown-content" v-html="renderFinalMarkdown(message.content)"></div>
+                        <div class="agent-text-body">
+                            <RichContentRenderer :content="message.content" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
+                        </div>
                     </template>
                     <template v-else>
                         <p class="user-text-content">{{ message.content }}</p>
@@ -34,7 +36,9 @@
                             <span class="agent-logo-pill">⚡ Free API</span>
                             <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                         </div>
-                        <div class="agent-text-body markdown-content" v-html="renderFinalMarkdown(entry.content)"></div>
+                        <div class="agent-text-body">
+                            <RichContentRenderer :content="entry.content" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
+                        </div>
                     </template>
                     <template v-else>
                         <span v-if="entry.isHuman" class="intervention-indicator">人工干预输入</span>
@@ -81,23 +85,41 @@
                         <span class="agent-logo-pill">⚡ Free API</span>
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                     </div>
-                    <div v-if="entry.summary" class="summary-rich markdown-content" aria-label="Agent 最终回复" v-html="renderFinalMarkdown(entry.summary)"></div>
-                    <div v-else class="agent-text-body markdown-content" v-html="renderFinalMarkdown(entry.title)"></div>
+                    <div class="summary-rich">
+                        <RichContentRenderer :content="entry.summary || entry.title" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
+                    </div>
                     <div v-if="entry.artifacts.length" class="final-artifacts">
                         <b>交付物</b>
-                        <code v-for="artifact in entry.artifacts" :key="artifact">{{ artifact }}</code>
+                        <div class="artifacts-items">
+                            <template v-for="artifact in entry.artifacts" :key="artifact">
+                                <RichContentRenderer v-if="isRichArtifact(artifact)" :content="artifact" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
+                                <code v-else>{{ artifact }}</code>
+                            </template>
+                        </div>
                     </div>
                 </article>
             </template>
+
+            <!-- 人工干预/交互选择卡片 (单选/多选/确认/传文件/补充输入) -->
+            <AgentHumanInterventionCard
+                v-if="isWaitingForHuman"
+                :human-form="humanForm"
+                :pause-reason="pauseReason"
+                :is-sending="isSendingHuman"
+                @submit="$emit('submit-human', $event)"
+            />
+
             <p v-if="isRunning && !timelineEntries.length && !legacyMessages.length" class="idle-live"><i></i>{{ stateDescription }}</p>
         </div>
     </div>
 </template>
 <script setup lang="ts">
-import DOMPurify from "dompurify";
 import { computed, nextTick, ref, watch } from "vue";
-import type { AgentStepItem, AgentToolStatus } from "./types";
-import { formatClock, renderMarkdown, shortText } from "./format";
+import type { AgentHumanForm, AgentStepItem, AgentToolStatus } from "./types";
+import { formatClock, shortText } from "./format";
+import RichContentRenderer from "../charts/RichContentRenderer.vue";
+import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
+
 type HistoryMessage = { id: string; role: string; content: string; created_at: string; timestamp: number };
 type HistoryTurn = { id: string; goal: string; status: string; steps: AgentStepItem[]; messages: HistoryMessage[]; summary: string; artifacts: string[]; startedAt: number; completedAt: number };
 type PlanEntry = { id: string; type: "plan"; timestamp: number; title: string; status: AgentToolStatus; steps: AgentStepItem[]; isThinking: boolean; thinkingTimestamp?: number };
@@ -107,29 +129,45 @@ type TimelineEntry =
     | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean }
     | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: string[]; failed: boolean }
     | { id: "active-thought"; type: "active-thought"; timestamp: number };
-const props = defineProps<{
-    currentGoal: string;
-    legacyMessages: { id: string; role: string; content: string; created_at: string }[];
-    historyTurns: HistoryTurn[];
-    steps: AgentStepItem[];
-    selectedStepId: string | null;
-    selectedSubpart: "thought" | "tool" | null;
-    selectedNarrative: string | null;
-    thought: string;
-    isThinking: boolean;
-    humanInterventions: { message: string; timestamp: number }[];
-    stateDescription: string;
-    isRunning: boolean;
-    completionMessage: string;
-    finalSummary: string;
-    finalArtifacts: string[];
-    hasError: boolean;
-}>();
+
+const props = withDefaults(
+    defineProps<{
+        currentGoal: string;
+        legacyMessages: { id: string; role: string; content: string; created_at: string }[];
+        historyTurns: HistoryTurn[];
+        steps: AgentStepItem[];
+        selectedStepId: string | null;
+        selectedSubpart: "thought" | "tool" | null;
+        selectedNarrative: string | null;
+        thought: string;
+        isThinking: boolean;
+        humanInterventions: { message: string; timestamp: number }[];
+        stateDescription: string;
+        isRunning: boolean;
+        completionMessage: string;
+        finalSummary: string;
+        finalArtifacts: string[];
+        hasError: boolean;
+        humanForm?: AgentHumanForm | null;
+        pauseReason?: string;
+        isWaitingForHuman?: boolean;
+        isSendingHuman?: boolean;
+    }>(),
+    {
+        humanForm: null,
+        pauseReason: "",
+        isWaitingForHuman: false,
+        isSendingHuman: false,
+    }
+);
+
 defineEmits<{
     "select-step": [id: string];
     "select-step-thought": [id: string];
     "select-human": [id: string];
     "select-active-thought": [];
+    "submit-human": [answer: string];
+    "open-preview": [code: string];
 }>();
 const streamElement = ref<HTMLElement | null>(null);
 const activeThoughtStartedAt = ref<number | null>(null);
@@ -164,23 +202,41 @@ function historyTimeline(): TimelineEntry[] {
     const timeline: TimelineEntry[] = [];
     for (const turn of [...props.historyTurns].sort((a, b) => a.startedAt - b.startedAt)) {
         timeline.push({ id: `history-user-${turn.id}`, type: "user", timestamp: turn.startedAt, content: turn.goal });
+        // 过滤掉最终已由 completion 展示的助手消息，只保留人工干预记录
+        const humanMessages = turn.messages.filter((m) => m.role === "user");
         const middle: TimelineEntry[] = [
             ...planEntries(turn.steps, `history-${turn.id}`),
-            ...turn.messages.map((message) => ({ id: `history-message-${turn.id}-${message.id}`, type: "message" as const, timestamp: message.timestamp, role: message.role, content: message.content, isHuman: message.role === "user" })),
+            ...humanMessages.map((message) => ({
+                id: `history-message-${turn.id}-${message.id}`,
+                type: "message" as const,
+                timestamp: message.timestamp,
+                role: message.role,
+                content: message.content,
+                isHuman: true,
+            })),
         ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
         timeline.push(...middle);
         if (turn.summary || turn.artifacts.length || ["succeeded", "failed", "cancelled"].includes(turn.status)) {
             const failed = turn.status === "failed";
-            timeline.push({ id: `history-completion-${turn.id}`, type: "completion", timestamp: turn.completedAt, title: failed ? "任务未能顺利完成" : "任务已由 AI 标记完成", summary: turn.summary, artifacts: completionArtifacts(turn.artifacts), failed });
+            timeline.push({
+                id: `history-completion-${turn.id}`,
+                type: "completion",
+                timestamp: turn.completedAt,
+                title: failed ? "任务未能顺利完成" : "任务已由 AI 标记完成",
+                summary: turn.summary,
+                artifacts: completionArtifacts(turn.artifacts),
+                failed,
+            });
         }
     }
     return timeline;
 }
 function currentTimeline(): TimelineEntry[] {
     const timeline: TimelineEntry[] = [];
-    // 后端已写入同目标的终态回合时，绝不再同时渲染残留实时状态，避免“结束后再折叠/重复”。
-    const alreadyPersisted = !props.isRunning && props.currentGoal && props.historyTurns.some((turn) =>
-        turn.goal.trim() === props.currentGoal.trim() && ["succeeded", "failed", "cancelled"].includes(turn.status),
+    // 后端已写入终态回合时，绝不再同时渲染实时状态，避免“重复输出两次”
+    const alreadyPersisted = !props.isRunning && props.historyTurns.length > 0 && props.historyTurns.some((turn) =>
+        (props.currentGoal && turn.goal.trim() === props.currentGoal.trim()) ||
+        ["succeeded", "failed", "cancelled"].includes(turn.status)
     );
     if (alreadyPersisted) return timeline;
     const plans = planEntries(props.steps, "live", props.isThinking);
@@ -198,11 +254,15 @@ function currentTimeline(): TimelineEntry[] {
     return timeline;
 }
 const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimeline(), ...currentTimeline()]);
-function renderFinalMarkdown(content: string): string {
-    return DOMPurify.sanitize(renderMarkdown(content), {
-        FORBID_TAGS: ["button", "form", "iframe", "object", "embed", "script", "style"],
-        FORBID_ATTR: ["style"],
-    });
+function isRichArtifact(artifact: string): boolean {
+    if (!artifact) return false;
+    return (
+        artifact.includes("```echarts") ||
+        artifact.includes("```chart") ||
+        artifact.includes("```mermaid") ||
+        artifact.includes("```html") ||
+        (artifact.startsWith("```") && artifact.endsWith("```"))
+    );
 }
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败" }[status]; }
 function formatConversationTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "numeric", day: "numeric" }); }

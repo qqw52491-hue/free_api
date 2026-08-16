@@ -608,15 +608,22 @@ pub async fn run_agent_main_loop(
         registry.clients = all_clients;
     }
 
-    // 2. 初始化三明治上下文：加载系统提示词 + 动态注入 MCP 工具
+    // 2. 初始化三明治上下文：加载系统提示词 + 可视化/HTML沙箱 Skill + 动态注入 MCP 工具
+    let core_logic_embedded = include_str!("../../prompts/core_logic.md");
+    let chart_skill_embedded = include_str!("../../prompts/skills/chart_visualization.md");
+
     let prompt_path = app
         .path()
         .resource_dir()
         .unwrap_or_default()
         .join("prompts/core_logic.md");
-    let base_prompt = std::fs::read_to_string(&prompt_path)
+    let mut base_prompt = std::fs::read_to_string(&prompt_path)
+        .or_else(|_| std::fs::read_to_string("src-tauri/prompts/core_logic.md"))
         .or_else(|_| std::fs::read_to_string("prompts/core_logic.md"))
-        .unwrap_or_else(|_| "你是一个全自动 Web Agent。".to_string());
+        .unwrap_or_else(|_| core_logic_embedded.to_string());
+
+    base_prompt.push_str("\n\n---\n\n");
+    base_prompt.push_str(chart_skill_embedded);
 
     // 2. 动态扫描所有内置工具 (Built-in Tools)
     let task_store_menu = r#"
@@ -632,13 +639,20 @@ pub async fn run_agent_main_loop(
 数据行会在工具返回时立刻持久化，并按当前 session 隔离；模型默认只看到资源目录与摘要，需要具体数据时再分页查询。
 
 ## ask_human 受控交互（内部工具）
-当确实需要用户决定时，使用 tool 为 "ask_human"，并在 command/params 中提供 message。不要输出 HTML、JavaScript 或任意页面代码。
-可选 form 对象仅允许以下安全结构：
-- kind: "single_select" | "multi_select" | "confirm" | "text"。
+当确实需要用户决定、确认或补充文件时，使用 tool 为 "ask_human"，并在 command/params 中提供 message。不要输出 HTML 或任意页面注入代码。
+可选 form 对象支持以下结构：
+- kind: "single_select" | "multi_select" | "confirm" | "file_picker" | "text"。
 - title、description、placeholder：短文本。
 - options：单选/多选可用，最多 12 项；每项仅含 id、label、可选 description。
 - default：单选/确认/文本的默认值，或多选的 id 数组。
-confirm 不需要 options，前端固定提供确认与取消。用户提交后，你会收到 JSON 工具结果：{type:"human_form_response", kind, value}；根据 value 继续规划。
+confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选择器供用户选取。用户提交后工具会返回选择结果。
+
+## 数据可视化、架构拓扑与 HTML 实时应用沙箱（ECharts、Mermaid 与 HTML）
+当需要向用户展示统计数据、趋势对比、系统架构、知识关系图谱或可交互前端应用时，请直接在回答中输出标准代码块：
+1. ECharts 图表（折线/柱状/饼图/雷达/桑基/力导向关系网络）：输出 ```echarts ... ``` 代码块，包含标准的 ECharts Option JSON（支持 graph 关系拓扑图）。
+2. Mermaid 架构图（流程图/时序图/状态图/思维导图）：输出 ```mermaid ... ``` 代码块。
+3. HTML 单页应用与交互原型：输出 ```html ... ``` 代码块（包含完整 HTML+CSS+JS）。
+前端会自动将其编译并渲染为可交互图表、或带有 [实时预览 / 源代码] Tab 切换与全屏操作的动态沙箱。
 "#;
     let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
     let tools_dir = app

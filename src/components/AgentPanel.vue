@@ -13,13 +13,26 @@
                 <button class="icon-control" type="button" :disabled="session.isRunning.value" title="新建对话" @click="emit('new-session')">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" /></svg>
                 </button>
+                <button
+                    class="icon-control preview-toggle-btn"
+                    :class="{ active: inspectorWidth >= 520 }"
+                    type="button"
+                    :title="inspectorWidth >= 520 ? '收起宽屏 (360px)' : '展开宽屏 (580px)'"
+                    @click="toggleInspectorWidth"
+                >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>
+                </button>
                 <button class="icon-control" type="button" title="设置" @click="settingsOpen = true">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.37.5.62.9.62H21a2 2 0 0 1 0 4h-.7c-.4 0-.76.25-.9.62Z" /></svg>
                 </button>
             </div>
         </header>
 
-        <div class="manus-agent-grid">
+        <div
+            class="manus-agent-grid"
+            :class="{ 'is-resizing': isResizing }"
+            :style="{ gridTemplateColumns: `minmax(0, 1fr) 6px ${inspectorWidth}px` }"
+        >
             <main class="chat-column">
                 <AgentChatStream
                     :current-goal="session.currentGoal.value"
@@ -38,10 +51,16 @@
                     :final-summary="session.finalSummary.value"
                     :final-artifacts="session.finalArtifacts.value"
                     :has-error="session.hasError.value"
+                    :human-form="session.humanForm.value"
+                    :pause-reason="session.pauseReason.value"
+                    :is-waiting-for-human="session.isWaitingForHuman.value"
+                    :is-sending-human="session.isSendingHuman.value"
                     @select-step="handleStepSelect"
                     @select-step-thought="handleStepThought"
                     @select-human="handleHumanSelect"
                     @select-active-thought="handleActiveThoughtSelect"
+                    @submit-human="session.answerHuman($event)"
+                    @open-preview="handleOpenPreview"
                 />
                 <AgentComposer
                     :draft="composerDraft"
@@ -58,12 +77,21 @@
                     @update:model="handleModelSelect"
                     @open-settings="settingsOpen = true"
                     @submit="submitComposer"
-                    @submit-form="(value) => void session.submitHumanForm(value)"
                     @stop="session.requestStop"
                 />
             </main>
 
+            <!-- 可拖拽调节宽度的分割条 -->
+            <div
+                class="grid-resizer"
+                :class="{ dragging: isResizing }"
+                title="按住左右拖拽调节工作台宽度 / 双击切换宽屏"
+                @mousedown="startResize"
+                @dblclick="toggleInspectorWidth"
+            ></div>
+
             <AgentInspector
+                ref="inspectorRef"
                 :run-state="session.runState.value"
                 :state-meta="session.stateMeta.value"
                 :status-description="session.statusDescription.value"
@@ -79,6 +107,9 @@
                 :resources="session.resources.value"
                 :is-resources-loading="session.isResourcesLoading.value"
                 :resource-load-error="session.resourceLoadError.value"
+                :final-summary="session.finalSummary.value"
+                :final-artifacts="session.finalArtifacts.value"
+                :active-preview-content="activePreviewContent"
                 @refresh-resources="session.refreshResources"
                 @preview-resource="session.openResourcePreview"
             />
@@ -109,7 +140,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import AgentChatStream from "./agent/AgentChatStream.vue";
 import AgentComposer from "./agent/AgentComposer.vue";
@@ -213,6 +244,72 @@ function openPluginManager() {
     void router.push("/plugins");
 }
 
+const inspectorRef = ref<InstanceType<typeof AgentInspector> | null>(null);
+const inspectorWidth = ref(380);
+const isResizing = ref(false);
+const activePreviewContent = ref("");
+
+function startResize(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    isResizing.value = true;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    const startX = e.clientX;
+    const startWidth = inspectorWidth.value;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+        moveEvent.preventDefault();
+        const delta = startX - moveEvent.clientX;
+        const newWidth = Math.min(Math.max(startWidth + delta, 280), window.innerWidth - 380);
+        inspectorWidth.value = newWidth;
+    };
+
+    const onMouseUp = (upEvent: MouseEvent) => {
+        upEvent.preventDefault();
+        isResizing.value = false;
+        document.body.style.userSelect = "";
+        document.body.style.cursor = "";
+        window.removeEventListener("mousemove", onMouseMove);
+        window.removeEventListener("mouseup", onMouseUp);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+}
+
+function toggleInspectorWidth() {
+    inspectorWidth.value = inspectorWidth.value >= 540 ? 360 : 580;
+}
+
+function handleOpenPreview(code?: string) {
+    if (code) {
+        activePreviewContent.value = code;
+    }
+    if (inspectorWidth.value < 540) {
+        inspectorWidth.value = 580;
+    }
+    nextTick(() => {
+        inspectorRef.value?.switchTab("preview");
+    });
+}
+
+// 当生成完成且包含 HTML 或图表时，自动展开为宽屏预览模式以提供最佳视觉体验
+watch(
+    () => [session.finalSummary.value, session.finalArtifacts.value],
+    ([summary, artifacts]) => {
+        const text = `${summary || ""}\n${((artifacts as string[]) || []).join("\n")}`;
+        if (text.includes("```html") || text.includes("```echarts") || text.includes("```chart")) {
+            activePreviewContent.value = text;
+            if (inspectorWidth.value < 540) {
+                inspectorWidth.value = 580;
+            }
+            inspectorRef.value?.switchTab("preview");
+        }
+    }
+);
+
 defineExpose({ isRunning: session.isRunning });
 </script>
 
@@ -231,34 +328,41 @@ defineExpose({ isRunning: session.isRunning });
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
     padding: 0 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     background: #18181b;
 }
 
-.model-selector {
+.session-picker-btn {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 12px;
-    border-radius: 7px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.04);
-    color: #f4f4f5;
+    padding: 6px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    color: #dedee1;
     cursor: pointer;
-    font: 600 12.5px inherit;
+    background: rgba(255, 255, 255, 0.04);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 550;
     transition: all 0.15s;
 }
-.model-selector small {
-    color: #a1a1aa;
-    font-size: 11px;
-    font-weight: 500;
-}
-.model-selector:hover {
+.session-picker-btn:hover {
+    border-color: rgba(255, 255, 255, 0.2);
     color: #ffffff;
     background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.16);
+}
+.session-picker-btn small {
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.06);
+    font-size: 11px;
+}
+.session-picker-btn svg {
+    color: #71717a;
+    transition: transform 0.2s;
 }
 
 .header-actions {
@@ -271,11 +375,12 @@ defineExpose({ isRunning: session.isRunning });
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    padding: 4px 8px;
+    border-radius: 5px;
     color: #a1a1aa;
-    font-size: 11.5px;
-    padding: 3px 8px;
-    border-radius: 4px;
     background: rgba(255, 255, 255, 0.03);
+    font-size: 11.5px;
+    font-weight: 500;
 }
 .session-status i {
     width: 6px;
@@ -283,13 +388,10 @@ defineExpose({ isRunning: session.isRunning });
     border-radius: 50%;
     background: #71717a;
 }
-.session-status.state-planning i,
-.session-status.state-executing i {
-    background: var(--orange);
-    box-shadow: 0 0 0 2px rgba(255, 164, 61, 0.2);
-}
-.session-status.state-failed { color: var(--red-light); }
-.session-status.state-failed i { background: var(--red-light); }
+.session-status.state-running i { background: #3b82f6; box-shadow: 0 0 6px rgba(59, 130, 246, 0.6); }
+.session-status.state-waiting_human i { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, 0.6); }
+.session-status.state-succeeded i { background: #10b981; box-shadow: 0 0 6px rgba(16, 185, 129, 0.6); }
+.session-status.state-failed i { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, 0.6); }
 
 .icon-control {
     display: grid;
@@ -308,6 +410,11 @@ defineExpose({ isRunning: session.isRunning });
     color: #ffffff;
     background: rgba(255, 255, 255, 0.08);
 }
+.icon-control.active {
+    color: #fbbf24;
+    background: rgba(251, 191, 36, 0.12);
+    border-color: rgba(251, 191, 36, 0.3);
+}
 .icon-control.stop {
     color: var(--red-light);
     border-color: rgba(255, 71, 87, 0.3);
@@ -321,7 +428,47 @@ defineExpose({ isRunning: session.isRunning });
 .manus-agent-grid {
     display: grid;
     min-height: 0;
-    grid-template-columns: minmax(0, 1fr) minmax(300px, 342px);
+    position: relative;
+    grid-template-columns: minmax(0, 1fr) v-bind('inspectorWidth + "px"');
+}
+.manus-agent-grid.is-resizing {
+    user-select: none !important;
+    cursor: col-resize !important;
+}
+.manus-agent-grid.is-resizing * {
+    user-select: none !important;
+}
+.manus-agent-grid.is-resizing :deep(iframe) {
+    pointer-events: none !important;
+}
+
+/* 分隔拖拽条 */
+.grid-resizer {
+    position: relative;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease;
+}
+.grid-resizer:hover, .grid-resizer.dragging {
+    background: rgba(251, 191, 36, 0.25);
+}
+.grid-resizer::after {
+    content: "";
+    width: 2px;
+    height: 32px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.15);
+    transition: all 0.15s ease;
+}
+.grid-resizer:hover::after, .grid-resizer.dragging::after {
+    height: 48px;
+    background: #fbbf24;
 }
 
 .chat-column {
@@ -335,7 +482,8 @@ defineExpose({ isRunning: session.isRunning });
 
 @media (max-width: 980px) {
     .manus-agent-shell { height: auto; overflow: visible; }
-    .manus-agent-grid { grid-template-columns: 1fr; }
+    .manus-agent-grid { grid-template-columns: 1fr !important; }
+    .grid-resizer { display: none; }
     .chat-column { min-height: 620px; }
     .session-status { display: none; }
 }

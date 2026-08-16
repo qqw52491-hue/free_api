@@ -48,9 +48,97 @@ pub fn chars_preview(s: &str, limit: usize) -> String {
     }
 }
 
-// ==================== JSON 提取 ====================
+// ==================== JSON 提取与智能容错修复 ====================
 
-/// Robustly extract JSON object from AI reply.
+/// 智能修复模型输出的不完整或截断的 JSON 结构 (如未闭合引号、括号或 EOF 截断)
+pub fn repair_json(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return Some(trimmed.to_string());
+    }
+
+    let start = trimmed.find('{')?;
+    let slice = &trimmed[start..];
+
+    let mut candidate = slice.to_string();
+    if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
+        return Some(candidate);
+    }
+
+    let mut in_str = false;
+    let mut escape = false;
+    let mut open_braces = 0i32;
+    let mut open_brackets = 0i32;
+
+    for ch in candidate.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' && in_str {
+            escape = true;
+            continue;
+        }
+        if ch == '"' {
+            in_str = !in_str;
+            continue;
+        }
+        if !in_str {
+            if ch == '{' {
+                open_braces += 1;
+            } else if ch == '}' {
+                open_braces = (open_braces - 1).max(0);
+            } else if ch == '[' {
+                open_brackets += 1;
+            } else if ch == ']' {
+                open_brackets = (open_brackets - 1).max(0);
+            }
+        }
+    }
+
+    if in_str {
+        candidate.push('"');
+    }
+    for _ in 0..open_brackets {
+        candidate.push(']');
+    }
+    for _ in 0..open_braces {
+        candidate.push('}');
+    }
+
+    if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
+        return Some(candidate);
+    }
+
+    // 终极兜底：如果是 finish 工具的超长 HTML / summary 产生截断或控制字符转义问题，直接救赎提取
+    if candidate.contains(r#""finish""#) || candidate.contains(r#""summary""#) {
+        if let Some(pos) = candidate.find(r#""summary""#) {
+            let after = &candidate[pos + 9..];
+            if let Some(colon_pos) = after.find(':') {
+                let val_part = after[colon_pos + 1..].trim_start();
+                if val_part.starts_with('"') {
+                    let summary_content = &val_part[1..];
+                    let clean_summary = summary_content
+                        .trim_end_matches('}')
+                        .trim_end_matches(']')
+                        .trim_end_matches('"')
+                        .trim();
+                    let rescued = serde_json::json!({
+                        "tool": "finish",
+                        "command": {
+                            "summary": clean_summary
+                        }
+                    });
+                    return Some(rescued.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Robustly extract JSON object from AI reply with automatic repair.
 pub fn extract_json_from_text(text: &str) -> Option<String> {
     let cleaned = text
         .trim()
@@ -59,8 +147,8 @@ pub fn extract_json_from_text(text: &str) -> Option<String> {
         .trim_end_matches("```")
         .trim();
 
-    if serde_json::from_str::<serde_json::Value>(cleaned).is_ok() {
-        return Some(cleaned.to_string());
+    if let Some(repaired) = repair_json(cleaned) {
+        return Some(repaired);
     }
 
     let chars: Vec<char> = cleaned.chars().collect();
@@ -101,8 +189,8 @@ pub fn extract_json_from_text(text: &str) -> Option<String> {
 
     if depth == 0 && end > start {
         let json_str: String = chars[start..=end].iter().collect();
-        if serde_json::from_str::<serde_json::Value>(&json_str).is_ok() {
-            return Some(json_str);
+        if let Some(repaired) = repair_json(&json_str) {
+            return Some(repaired);
         }
     }
 
@@ -277,9 +365,10 @@ pub async fn call_llm(
             }
         });
 
-        // 8. 解析 AgentInstruction
+        // 8. 解析 AgentInstruction (带智能容错与修复)
         let parse_result = (|| -> Result<AgentInstruction, String> {
-            let val: serde_json::Value = serde_json::from_str(&final_json_str)
+            let json_to_parse = repair_json(&final_json_str).unwrap_or_else(|| final_json_str.clone());
+            let val: serde_json::Value = serde_json::from_str(&json_to_parse)
                 .map_err(|e| format!("基础 JSON 语法错误: {}", e))?;
             let inst: AgentInstruction =
                 serde_json::from_value(val).map_err(|e| format!("数据结构转换失败: {}", e))?;
@@ -310,8 +399,9 @@ pub async fn call_llm(
                          RULES:\n\
                          1. 遇到问题必须且只能在 <think> 标签内完成逻辑推导。\n\
                          2. <think> 结束后的最终输出，必须且只能是一个有效的 JSON 对象来调用对应的工具函数。\n\
-                         3. 绝对禁止在 JSON 外输出任何解释性文本。违反此规则将导致系统崩溃。\n\n\
-                         Fix the syntax error and generate again.",
+                         3. 如果在 JSON 字符串字段（如 summary/details）中包含 HTML 或双引号，必须严格转义为 `\\\"`，绝对不能输出未闭合或损坏的 JSON。\n\
+                         4. 绝对禁止在 JSON 外输出任何解释性文本。\n\n\
+                         Fix the syntax error and generate valid JSON again.",
                         e
                     )
                 }));
