@@ -48,6 +48,45 @@ pub fn chars_preview(s: &str, limit: usize) -> String {
     }
 }
 
+/// 智能采样历史执行日志 (Head + Tail 采样 + 关键错误行保留)
+/// 保证命令行与代码执行输出中的关键头部环境与尾部致命报错 (panic/error/exit code) 完整保留
+pub fn sample_execution_log(raw: &str, head_chars: usize, tail_chars: usize) -> String {
+    let char_count = raw.chars().count();
+    let safe_threshold = head_chars + tail_chars + 60;
+    if char_count <= safe_threshold {
+        return raw.to_string();
+    }
+
+    let head: String = raw.chars().take(head_chars).collect();
+    let tail: String = raw.chars().skip(char_count.saturating_sub(tail_chars)).collect();
+    let middle_omitted = char_count.saturating_sub(head_chars + tail_chars);
+
+    // 从中间被裁剪的文本中提取可能存在的关键错误行 (如 error:, panic:, fatal:, failed:)
+    let mut critical_lines = Vec::new();
+    let middle_text: String = raw.chars().skip(head_chars).take(middle_omitted).collect();
+    for line in middle_text.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("error:") || lower.contains("panic:") || lower.contains("fatal:") || lower.contains("exception:") {
+            let clean = line.trim();
+            if !clean.is_empty() && clean.len() < 200 && critical_lines.len() < 3 {
+                critical_lines.push(format!("  ⚠️ [捕获关键行] {}", clean));
+            }
+        }
+    }
+
+    let middle_note = if critical_lines.is_empty() {
+        format!("\n\n[... 已折叠中间 {} 字符，核心首尾已完整保留 ...]\n\n", middle_omitted)
+    } else {
+        format!(
+            "\n\n[... 已折叠中间 {} 字符 ...]\n{}\n[... 尾部诊断输出如下 ...]\n\n",
+            middle_omitted,
+            critical_lines.join("\n")
+        )
+    };
+
+    format!("{}{}{}", head, middle_note, tail)
+}
+
 // ==================== JSON 提取与智能容错修复 ====================
 
 /// 智能修复模型输出的不完整或截断的 JSON 结构 (如未闭合引号、括号或 EOF 截断)
@@ -407,5 +446,39 @@ pub async fn call_llm(
                 }));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sample_execution_log_short() {
+        let short = "Everything is ok! Exit code 0.";
+        let sampled = sample_execution_log(short, 300, 500);
+        assert_eq!(sampled, short);
+    }
+
+    #[test]
+    fn test_sample_execution_log_long_with_errors() {
+        let mut long_text = String::from("Compiling crate xyz v0.1.0...\n");
+        for i in 0..50 {
+            if i == 25 {
+                long_text.push_str("error: failed to resolve type FooBar\n");
+            } else if i == 30 {
+                long_text.push_str("panic: index out of bounds at main.rs:42\n");
+            } else {
+                long_text.push_str(&format!("warning: unused variable var_{}\n", i));
+            }
+        }
+        long_text.push_str("Finished with error code 101.\n");
+
+        let sampled = sample_execution_log(&long_text, 50, 60);
+        assert!(sampled.contains("Compiling crate"));
+        assert!(sampled.contains("error: failed to resolve type FooBar"));
+        assert!(sampled.contains("panic: index out of bounds"));
+        assert!(sampled.contains("Finished with error code 101"));
+        assert!(sampled.contains("折叠中间"));
     }
 }

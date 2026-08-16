@@ -119,15 +119,13 @@ impl SandwichContext {
         };
         self.turns_history.push(msg);
 
-        // 为防止历史上下文爆炸导致 Ollama 超出 4096 token 而阶段提示词，历史对话中的执行结果应该被极致压缩。
-        // 凡是带有“【可用元素清单】”的长 DOM 树全部削减，因为当前最新 DOM 已经在 `current_observation` 底部了。
+        // 历史对话中的执行结果采用智能 Head + Tail 采样（头 300 + 尾 500 + 关键报错行保留）
         let mut history_feedback = output_summary.to_string();
         if let Some(idx) = history_feedback.find("【可用元素清单】") {
             history_feedback
                 .replace_range(idx.., "【可用元素清单】: (已折叠，详见底部当前最新观测)");
         } else {
-            // 普通日志截断到 300 字符
-            history_feedback = history_feedback.chars().take(300).collect();
+            history_feedback = crate::agent::utils::sample_execution_log(&history_feedback, 300, 500);
         }
 
         let feedback = ChatMessage {
@@ -136,9 +134,42 @@ impl SandwichContext {
         };
         self.turns_history.push(feedback);
 
-        // 滑动窗口：作为最后防线保留 40 条。主要依靠 AI 总结并设置 clear_history = true 来主动清理
-        if self.turns_history.len() > 40 {
-            self.turns_history = self.turns_history[self.turns_history.len() - 40..].to_vec();
+        // 水位线滞后压缩机制 (Hysteresis Auto-Compact)：
+        // 当历史消息达到高水位线 40 条（20 个 Step）时，触发一次批量压缩，将最旧的 20 条消息压缩为紧凑单行定型摘要，
+        // 历史长度回落至低水位线 20 条，随后进入连续 20 步的纯 Append-only 缓存安全期（期间前缀缓存 100% 命中！）。
+        if self.turns_history.len() >= 40 {
+            self.compact_old_history(20);
+        }
+    }
+
+    /// 水位线批量压缩老历史记录为不可变的定型单行摘要
+    pub fn compact_old_history(&mut self, compact_count: usize) {
+        if self.turns_history.len() <= compact_count {
+            return;
+        }
+        let to_compact: Vec<ChatMessage> = self.turns_history.drain(0..compact_count).collect();
+        let mut compacted_lines = Vec::new();
+        for msg in to_compact {
+            let content_str = match &msg.content {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let first_line = content_str.lines().next().unwrap_or("").trim();
+            if !first_line.is_empty() {
+                let line_preview: String = first_line.chars().take(120).collect();
+                compacted_lines.push(format!("- [{}] {}", msg.role, line_preview));
+            }
+        }
+
+        if !compacted_lines.is_empty() {
+            let compact_card = ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!(
+                    "【历史早期执行归档 (已定型压缩)】\n{}\n(早期执行摘要已归档，当前窗口专注于近期步骤与终极目标)",
+                    compacted_lines.join("\n")
+                )),
+            };
+            self.turns_history.insert(0, compact_card);
         }
     }
 
@@ -200,27 +231,61 @@ impl SandwichContext {
         self.turns_history.push(msg);
     }
 
+    /// 组装发给大模型的消息体（真·三明治架构：顶层面包真静态 + 中间夹心纯追加 + 底层面包状态卡）
     pub fn assemble_messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
 
-        // 1. 系统角色提示词 (核心逻辑，包含全部静态工具菜单)
-        // 完全静态，位于最前排，完美命中核心缓存区
+        // ════════════════════════════════════════════════════════════════
+        // 🍞 1. 顶层面包（100% 静态前缀，任务期内绝对不变，稳吃 Prefix Cache）
+        // ════════════════════════════════════════════════════════════════
         messages.push(ChatMessage {
             role: "system".to_string(),
             content: json!(self.system_prompt.clone()),
         });
 
-        // 2. 静态前置上下文 (用户目标 + 长期记忆库)
-        // 目标在单次任务中不会变，Memory 变动频率很低，也放入前缀缓存区
-        let mut static_prefix = format!("【用户终极任务目标】\n{}\n\n", self.user_goal);
+        // 活跃工具或 Skill 手册（次静态，同一工具连续调用时完全不变）
+        if !self.active_tool_detail.is_empty() {
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!(
+                    "【当前活跃工具/Skill 操作手册】\n{}\n",
+                    self.active_tool_detail
+                )),
+            });
+        }
 
+        // ════════════════════════════════════════════════════════════════
+        // 🥩 2. 中间夹心（纯 Append-only 线性历史流水）
+        // 随着任务一步步向后追加，无动态插入，完美覆盖主流大模型的前缀缓存
+        // ════════════════════════════════════════════════════════════════
+        messages.extend(self.turns_history.clone());
+
+        // ════════════════════════════════════════════════════════════════
+        // 🍞 3. 底层面包（状态卡 + 任务目标 + 最新观测）
+        // 变化点钉死在末尾，绝对不砸前面的长缓存；且离输出端最近，强化注意力防遗忘
+        // ════════════════════════════════════════════════════════════════
+        let mut bottom_state_card = String::new();
+
+        // (1) 终极目标（置于末尾状态卡首位，近因效应强化）
+        bottom_state_card.push_str(&format!("【用户终极任务目标】\n{}\n\n", self.user_goal));
+
+        // (2) 阶段计划
+        if let (Some(id), Some(title)) = (&self.active_plan_id, &self.active_plan_title) {
+            bottom_state_card.push_str(&format!(
+                "【当前活动计划】id={} | title={}\n如下一步仍属于此阶段，复用相同 plan_id/plan_title；只有真正切换工作阶段才创建新计划。\n\n",
+                id, title
+            ));
+        }
+
+        // (3) 全局进度摘要
         if !self.progress_summary.is_empty() {
-            static_prefix.push_str(&format!(
-                "【全局进度与策略摘要 (Progress Summary)】\n{}\n\n",
+            bottom_state_card.push_str(&format!(
+                "【全局进度与策略摘要】\n{}\n\n",
                 self.progress_summary
             ));
         }
 
+        // (4) 会话任务数据区目录 (TaskStore 资源摘要)
         if !self.task_resources.is_empty() {
             let resources: Vec<String> = self
                 .task_resources
@@ -239,12 +304,13 @@ impl SandwichContext {
                     )
                 })
                 .collect();
-            static_prefix.push_str(&format!(
+            bottom_state_card.push_str(&format!(
                 "【会话任务数据区目录】\n{}\n(记录本体已独立持久化，默认不会发给你；需要时调用内部 task_store 的 list_records 或 get_record 分页查询。)\n\n",
                 resources.join("\n")
             ));
         }
 
+        // (5) 冷存储记忆库 (L1 Key-Value)
         if !self.memories.is_empty() {
             if self.carry_memories {
                 let facts: Vec<String> = self
@@ -252,76 +318,40 @@ impl SandwichContext {
                     .iter()
                     .map(|(k, v)| format!("  {}: {}", k, v))
                     .collect();
-                static_prefix.push_str(&format!(
-                    "【冷存储记忆库 (已全量载入)】\n{}\n\n",
+                bottom_state_card.push_str(&format!(
+                    "【冷存储记忆库 (已全量展开)】\n{}\n\n",
                     facts.join("\n")
                 ));
             } else {
                 let keys: Vec<String> = self.memories.keys().cloned().collect();
-                static_prefix.push_str(&format!(
+                bottom_state_card.push_str(&format!(
                     "【冷存储记忆库索引 (当前已折叠)】\n当前包含键值: [{}]\n(如需提取具体数据进行处理，请在 JSON 中设置 \"require_memory\": true，下一轮将全量展开)\n\n",
                     keys.join(", ")
                 ));
             }
         }
 
-        messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: json!(static_prefix.trim_end()),
-        });
-
-        // 2.5 低频工具操作手册 (关键缓存优化！)
-        // 放在 static_prefix 之后、历史对话之前：
-        // - 同一工具连续执行多步时，此消息一字不差 → 前缀缓存完美命中
-        // - 换工具时此消息会变，但只影响从此往后的缓存，static_prefix 和 system_prompt 依然命中
-        // - 放在历史对话之后（之前的做法）会导致每轮都因历史变长而缓存失效！
-        if !self.active_tool_detail.is_empty() {
-            messages.push(ChatMessage {
-                role: "user".to_string(),
-                content: json!(format!(
-                    "【当前活跃工具操作手册】\n{}\n",
-                    self.active_tool_detail
-                )),
-            });
-        }
-
-        // 3. 线性增长区：历史对话轨迹
-        // 随着执行一步步向后追加 (Append-only)，这正是当前各大模型 Prefix Caching 能够完美覆盖的部分
-        messages.extend(self.turns_history.clone());
-
-        // 4. 动态尾部区：极高频变动，放在最末尾避免污染前面的静态缓存
-        let mut dynamic_suffix = String::new();
-        if let (Some(id), Some(title)) = (&self.active_plan_id, &self.active_plan_title) {
-            dynamic_suffix.push_str(&format!(
-                "【当前活动计划】id={} | title={}\n如下一步仍属于此阶段，复用相同 plan_id/plan_title；只有真正切换工作阶段才创建新计划。\n\n",
-                id, title
-            ));
-        }
-
-        if self.turns_history.len() >= 24 {
-            dynamic_suffix.push_str("🚨 【系统严重警告：历史记录即将溢出】\n你的对话历史已过长，继续执行将导致上下文超载崩溃！\n请务必在本次思考中，将前面所有的关键进展、线索和数据提炼总结，放入 `memories_update` 中永久保存。同时必须在 JSON 顶层输出 `\"clear_history\": true` 来清空历史负担！如果不清空，系统可能会强制截断导致你失忆！\n\n");
-        }
-
+        // (6) 任务清单 (Todo List)
         let todo_json = serde_json::to_string_pretty(&self.todo_list).unwrap_or_default();
-        dynamic_suffix.push_str(&format!("【当前任务面板 (Todo List)】\n{}\n\n", todo_json));
+        bottom_state_card.push_str(&format!("【当前任务面板 (Todo List)】\n{}\n\n", todo_json));
 
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: json!(dynamic_suffix),
+            content: json!(bottom_state_card.trim_end()),
         });
 
-        // 4.5 独立突出最新观测 (Observation)，防止被上面 10k 字的工具手册淹没
+        // (7) 当前最新环境观测 (Observation)
         if !self.current_observation.is_empty() {
             messages.push(ChatMessage {
                 role: "user".to_string(),
                 content: json!(format!(
-                    "【当前最新环境观测 (Observation)】\n(⚠️系统提示：这是你刚才操作后获取的最新的、未折叠的完整数据！请直接从这里读取你需要的信息，不要重复请求！)\n{}",
+                    "【当前最新环境观测 (Observation)】\n(⚠️系统提示：这是你刚才操作后获取的最新的完整数据！请直接从这里读取你需要的信息，不要重复请求！)\n{}",
                     self.current_observation
                 )),
             });
         }
 
-        // 5. 最后的强制指令
+        // (8) 最终行动约束与决策指令
         messages.push(ChatMessage {
             role: "user".to_string(),
             content: json!("请基于上述所有上下文环境，思考并执行下一步操作。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格符合白名单。注意：你必须先在 reflection 字段审视上一步的结果与当前环境。")
