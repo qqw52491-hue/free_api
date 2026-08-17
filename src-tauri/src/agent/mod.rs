@@ -270,14 +270,13 @@ fn execute_command_inner(
         return task_store::dispatch(db, session_id, &final_action, params);
     }
 
-    // --- 内置联邦检索工具：支持跨历史执行日志 (SQLite FTS5) 与实时项目代码 (ripgrep) ---
+    // --- 内置联邦检索工具：跨历史执行日志 (SQLite FTS5 trigram) 与实时代码 (ripgrep) ---
+    // 只按 tool 名匹配：不拦截 action，避免劫持浏览器插件等外部工具的同名 action
     if tool.eq_ignore_ascii_case("search")
         || tool.eq_ignore_ascii_case("search_knowledge")
         || tool.eq_ignore_ascii_case("search_history")
-        || final_action.eq_ignore_ascii_case("search")
     {
-        let workspace_root = dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        return retrieval::dispatch_search(db, session_id, params, &workspace_root);
+        return retrieval::dispatch_search(db, session_id, params);
     }
 
     let (plugin_name, tool_name) = if tool.contains('/') {
@@ -657,12 +656,14 @@ pub async fn run_agent_main_loop(
 数据行会在工具返回时立刻持久化，并按当前 session 隔离；模型默认只看到资源目录与摘要，需要具体数据时再分页查询。
 
 ## 联邦知识检索 search（内部工具）
-当需要主动跨历史执行日志查找早期报错、决策细节，或需要检索项目代码时，使用 tool 为 "search"：
-- 参数 `query`: 搜索关键词或错误特征串（必填）
-- 参数 `kinds`: 可选 `["history"]` (查历史执行日志/SQLite FTS5), `["code"]` (查实时项目代码), 默认两者都查
-- 参数 `outcome`: 可选 `"failed"` (专门查失败排错历史), `"succeeded"`, 默认全部
-- 参数 `since_step`: 可选起始步骤编号
-- 参数 `limit`: 返回条数限制 (默认 10)
+当需要主动跨历史执行日志查找早期报错、决策细节，或需要检索代码文件时，使用 tool 为 "search"：
+- 参数 `query`: 搜索关键词或错误特征串（必填；trigram 分词下限 3 个字符，中文子串可直接命中，如「数据库连接」）
+- 参数 `kinds`: 可选 `["history"]`（默认，查历史执行日志/SQLite FTS5）、`["code"]`（实时 ripgrep 检索代码）、`["all"]`
+- 参数 `outcome`: 可选 `"failed"`（专门查失败排错历史）/ `"succeeded"`，大小写不敏感
+- 参数 `since_step`: 可选起始步骤编号下界
+- 参数 `path`: kinds 含 `code` 时必填，要检索的目录绝对路径（禁止对系统根目录或超大目录发起检索）
+- 参数 `limit`: 返回条数限制（默认 10）
+注意：若返回 errors 字段说明某个检索分支失败（如缺少 path、rg 未安装），0 命中与搜索失败是不同信号，请勿混同。
 
 ## ask_human 受控交互（内部工具）
 当需要用户决定、确认、补充文件或填报表格数据时，使用 tool 为 "ask_human"，并在 command/params 中提供 message。

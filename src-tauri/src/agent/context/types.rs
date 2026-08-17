@@ -240,10 +240,10 @@ mod tests {
     #[test]
     fn test_update_memory_blocks_sensitive_secrets() {
         let mut ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
-        ctx.update_memory("api_key".to_string(), "sk-1234567890abcdef".to_string());
+        let _ = ctx.update_memory("api_key".to_string(), "sk-1234567890abcdef".to_string());
         assert!(!ctx.memories.contains_key("api_key"), "Sensitive API key must be blocked!");
 
-        ctx.update_memory("db_port".to_string(), "5432".to_string());
+        let _ = ctx.update_memory("db_port".to_string(), "5432".to_string());
         assert_eq!(ctx.memories.get("db_port").map(|s| s.as_str()), Some("5432"));
     }
 }

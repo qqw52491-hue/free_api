@@ -89,54 +89,6 @@ pub fn get_outputs_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("./data/outputs"))
 }
 
-pub fn save_step_output(
-    db: &DbState,
-    session_id: &str,
-    step_id: usize,
-    raw_output: &str,
-) -> Result<String, String> {
-    let conn = db.0.lock().map_err(|error| error.to_string())?;
-    let output_id = uuid::Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
-
-    // 超过阈值时自动落盘到本地独立文件，SQLite 只存文件路径标记（避免数据库双份冗余膨胀）
-    let sqlite_content = if raw_output.chars().count() > DISK_SPILL_THRESHOLD_CHARS {
-        let outputs_dir = get_outputs_dir();
-        let _ = std::fs::create_dir_all(&outputs_dir);
-        let log_file = outputs_dir.join(format!("{}.log", output_id));
-        if std::fs::write(&log_file, raw_output).is_ok() {
-            // SQLite 只存一个短小的路径标记，不再存大文本
-            format!("[[spilled_to_disk:{}]]", log_file.display())
-        } else {
-            // 磁盘写入失败则降级回全量存 SQLite（确保数据不丢）
-            raw_output.to_string()
-        }
-    } else {
-        raw_output.to_string()
-    };
-
-    conn.execute(
-        "INSERT INTO agent_step_logs (output_id, session_id, step_id, raw_output, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![output_id, session_id, step_id, sqlite_content, now],
-    )
-    .map_err(|error| error.to_string())?;
-
-    // 同步将步骤日志写入 SQLite FTS5 全文索引（忽略重复或错误，保证主流程不中断）
-    let _ = crate::agent::retrieval::index_step_fts(
-        &conn,
-        &output_id,
-        session_id,
-        step_id,
-        "",
-        "",
-        "",
-        raw_output,
-    );
-
-    Ok(output_id)
-}
-
 pub fn save_step_output_with_meta(
     db: &DbState,
     session_id: &str,

@@ -122,9 +122,9 @@ mod tests {
             "SYSTEM: You are Free API Agent".to_string(),
             "Build a Rust app".to_string(),
         );
-        ctx.update_memory("db_port".to_string(), "5432".to_string());
-        ctx.update_memory("db_user".to_string(), "postgres".to_string());
-        ctx.update_memory("api_env".to_string(), "production".to_string());
+        let _ = ctx.update_memory("db_port".to_string(), "5432".to_string());
+        let _ = ctx.update_memory("db_user".to_string(), "postgres".to_string());
+        let _ = ctx.update_memory("api_env".to_string(), "production".to_string());
 
         let base_fp = ContextFingerprint::capture(&ctx);
 

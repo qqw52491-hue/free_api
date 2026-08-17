@@ -206,6 +206,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             ON agent_step_logs(session_id, step_id);
 
         -- FTS5 全文检索引擎：支持按 tool, action, outcome, raw_output 快速 BM25 检索
+        -- tokenize='trigram'：支持中文子串与代码标识符子串检索（unicode61 会把连续中文当成单 token，中文召回率≈0）
         CREATE VIRTUAL TABLE IF NOT EXISTS agent_step_logs_fts USING fts5(
             output_id UNINDEXED,
             session_id UNINDEXED,
@@ -213,10 +214,17 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             tool,
             action,
             outcome,
-            content
+            content,
+            tokenize='trigram'
         );
     ",
     )?;
+
+    // 滚动迁移：早期版本的 FTS 表用默认 unicode61 分词器（中文子串检索全部失效），
+    // 检测到旧表时重建为 trigram，并从 agent_step_logs 主表回填索引（失败不阻断主流程）
+    if let Err(e) = crate::agent::retrieval::ensure_trigram_fts(&conn) {
+        eprintln!("⚠️ FTS5 trigram 迁移失败（不影响主流程，历史检索降级）: {}", e);
+    }
 
     // 滚动迁移：为旧版数据库补齐新字段，CREATE TABLE 不会重建已有表
     let _ = conn.execute_batch(
