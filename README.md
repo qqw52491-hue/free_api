@@ -18,9 +18,10 @@
 ## 📖 目录
 
 - [一、设计哲学与理论背景](#一设计哲学与理论背景)
-  - [1. 记忆的闭环：Write–Manage–Read](#1-记忆的闭环writemanageread)
+  - [1. 记忆的闭环：Write–Manage–Read 与三阶段演化](#1-记忆的闭环writemanageread-与三阶段演化)
   - [2. 为什么拒绝「统一存储大杂烩 (God Table)」？](#2-为什么拒绝统一存储大杂烩-god-table)
   - [3. 为什么坚守「写入即定型 (Immutable on Write)」？](#3-为什么坚守写入即定型-immutable-on-write)
+  - [4. 前缀缓存的工业级真相与监控指标降级](#4-前缀缓存的工业级真相与监控指标降级)
 - [二、真·三明治上下文引擎 (Sandwich Context Engine)](#二真三明治上下文引擎-sandwich-context-engine)
   - [1. 上下文三层拓扑结构](#1-上下文三层拓扑结构)
   - [2. 字节级确定性保证 (Byte-Level Determinism)](#2-字节级确定性保证-byte-level-determinism)
@@ -28,18 +29,29 @@
   - [4. 混合落盘与零冗余存储 (Hybrid Storage & Disk Spilling)](#4-混合落盘与零冗余存储-hybrid-storage--disk-spilling)
   - [5. 核心记忆安检门与双向反馈 (Memory Security Gatekeeper)](#5-核心记忆安检门与双向反馈-memory-security-gatekeeper)
   - [6. 出口级消息角色合并 (Same-Role Consolidation)](#6-出口级消息角色合并-same-role-consolidation)
-- [三、双模式人机协同 (Human-in-the-Loop)](#三双模式人机协同-human-in-the-loop)
+- [三、三级读路径检索体系与联邦检索 (Federated Retrieval)](#三三级读路径检索体系与联邦检索-federated-retrieval)
+  - [1. 检索上限由“写”决定：定长路标 (Signpost)](#1-检索上限由写决定定长路标-signpost)
+  - [2. 三级读路径拓扑 (Three-Tier Read Path)](#2-三级读路径拓扑-three-tier-read-path)
+  - [3. 统一检索接口设计 `search(...)`](#3-统一检索接口设计-search)
+- [四、自我改进闭环：经验蒸馏与淘汰门禁 (Experience Distillation)](#四自我改进闭环经验蒸馏与淘汰门禁-experience-distillation)
+  - [1. Sleep-Time Compute（睡眠期异步计算）](#1-sleep-time-compute睡眠期异步计算)
+  - [2. Hindsight Lesson 结构化抽取](#2-hindsight-lesson-结构化抽取)
+  - [3. 淘汰门禁与防止自我污染](#3-淘汰门禁与防止自我污染)
+- [五、双模式人机协同 (Human-in-the-Loop)](#五双模式人机协同-human-in-the-loop)
   - [模式 A：人类主动抢方向盘（异步安全点拦截）](#模式-a人类主动抢方向盘异步安全点拦截)
   - [模式 B：AI 主动挂起求助（真正的阻塞等待）](#模式-bai-主动挂起求助真正的阻塞等待)
-- [四、模块结构与代码索引](#四模块结构与代码索引)
-- [五、快速上手与运行](#五快速上手与运行)
+- [六、模块结构与代码索引](#六模块结构与代码索引)
+- [七、快速上手与运行](#七快速上手与运行)
 
 ---
 
 ## 一、设计哲学与理论背景
 
-### 1. 记忆的闭环：Write–Manage–Read
-根据最新的 Agent 记忆体系形式化理论（*Memory for Autonomous LLM Agents, arXiv 2603.07670*），自主 Agent 的记忆由 **写入 (Write) → 管理 (Manage) → 读取 (Read)** 的闭环驱动。
+### 1. 记忆的闭环：Write–Manage–Read 与三阶段演化
+根据最新的 Agent 记忆体系形式化理论（*Memory for Autonomous LLM Agents, arXiv 2603.07670* 与 *ACL 2026 综述 From Storage to Experience*），自主 Agent 的演化经历三个阶段：
+1. **Storage（轨迹保存）**：保存执行流水与产出。
+2. **Reflection（轨迹精炼）**：提炼局部摘要与避坑教训。
+3. **Experience（轨迹抽象）**：跨任务沉淀可复用的策略与知识。
 
 ```
        ┌────────────────────────────────────────────────────────┐
@@ -68,10 +80,7 @@ SandwichAgent 在该闭环上的核心工程定位：
 > **核心判断**：*统一检索接口 ≠ 统一存储表。Rust 强大的类型系统是最大的工程资产，God Table 会把编译期类型安全赶进 SQL 和 JSON 字符串里。*
 
 - **生命周期完全不同**：系统规则是**静态不可变**的；代码是**高频被编辑**的；执行历史是**只追加 (Append-only)** 的；记忆卡是**键值更新**的。强行合并只会导致索引失效和失效级联。
-- **检索策略各司其职**：
-  - 历史日志检索 → 走 **SQLite FTS5 / BM25 结构化分词**。
-  - 代码检索 → 走 **实时 ripgrep / AST 图分析**（避免代码过时失效）。
-  - 系统规则与避坑指南 → **直接 Pin 在上下文状态区**，绝不进行概率性模糊检索。
+- **避免过期快照污染**：代码是鲜活的，预建代码摘要树会随着文件修改迅速过期（Claude Code 也因此转向实时 JIT 代码检索）。因此代码检索直接走实时 `ripgrep` / AST，历史检索走 SQLite FTS5，规则常驻上下文，绝不强行混库。
 
 ---
 
@@ -80,6 +89,19 @@ SandwichAgent 在该闭环上的核心工程定位：
 
 - **一旦前缀中哪怕一个标点发生变化，该位置之后的所有 KV Cache 全部击穿**，推理延迟暴增 3~5 倍，Token 计费直接按原价全额收取。
 - **SandwichAgent 原则**：任何工具输出在产生的瞬间（`add_step`）完成采样、脱水、截断与结构化。生成不可变的 `ChatMessage` 压入历史队列后，**后续轮次绝不再对其进行动态修改**。
+
+---
+
+### 4. 前缀缓存的工业级真相与监控指标降级
+
+#### (1) 缓存机制的物理限制
+- **块对齐 (Block Alignment)**：DeepSeek 按 64 tokens 对齐，OpenAI 按 128 tokens 对齐（且需 $\ge 1024$ tokens 才触发），Anthropic 需显式设置 `cache_control` 断点。前缀末尾不满一块的部分天然存在块级抖动。
+- **缓存生命周期 (TTL)**：各厂商缓存通常保留 5~10 分钟。用户离开后再交互出现 Cache Miss 是底层物理机制，无需做误报处理；多节点请求需使用 Sticky Session 锁定同一推理实例。
+- **Prefill 节省真相**：缓存命中省掉的是 Prefill 阶段庞大的矩阵乘法（$O(N^2)$ 计算），但 KV Cache 仍需从内存或 SSD 搬运，TTFT 仍包含网络、排队与调度开销。
+
+#### (2) 告别“虚荣命中率”
+当上下文堆叠到 128k 时，哪怕浪费严重，命中率也能轻易达到 99.9%（分母效应）。因此我们将监控指标从百分比降级，采用工业级真实 KPI：
+$$\text{核心监控} = \text{每步重算的 Miss Token 绝对数量} + \text{每步实际调用单价 (\$) } + \text{TTFT 首字延迟}$$
 
 ---
 
@@ -179,7 +201,85 @@ SandwichAgent 在 `assemble_messages()` 的最终出口处，通过纯函数 `co
 
 ---
 
-## 三、双模式人机协同 (Human-in-the-Loop)
+## 三、三级读路径检索体系与联邦检索 (Federated Retrieval)
+
+### 1. 检索上限由“写”决定：定长路标 (Signpost)
+检索的召回率并不取决于搜索算法有多玄妙，而是取决于**写入时是否已经是结构化信息**。
+在每步执行完成写入时，系统自动生成定长路标（Signpost，约 30 Tokens）：
+```text
+[S12] shell_exec · cargo test · FAILED · link_error/openssl · out=89a7 · +2 files
+```
+定长、可正则检索、字节绝对确定，彻底替代散文化长篇日志。
+
+---
+
+### 2. 三级读路径拓扑 (Three-Tier Read Path)
+
+```
+┌─ 第 0 级：常驻区 (0 次网络往返，永远在上下文) ──────────────────┐
+│ • Pinned 事实 / Constraints / Side-effects 不可逆台账           │
+│ • Todo 状态 + 当前子目标 + 最新 Observation                      │
+│ • 【最近路标索引】定长结构化签名                                │
+└──────────────────────────────────────────────────────────────┘
+                               │ 模型看到路标，决定下钻
+┌─ 第 1 级：索引区 (1 次工具调用) ────────────────────────────┐
+│ search(kinds=["history"], outcome=failed, query="openssl")   │
+│ → 返回匹配的历史路标列表 + output_id (不返回正文)             │
+└──────────────────────────────────────────────────────────────┘
+                               │
+┌─ 第 2 级：归档区 (按需精确切片) ──────────────────────────┐
+│ get_step_output(output_id="89a7") 或 grep/切片读取             │
+└──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 3. 统一检索接口设计 `search(...)`
+模型只需要面对一个统一入口，但通过强类型参数表达精准意图：
+
+```rust
+pub struct SearchQuery {
+    pub query: String,                         // 自由文本 / 关键词
+    pub kinds: Option<Vec<SearchKind>>,       // ["history", "doc", "code"]
+    pub outcome: Option<OutcomeFilter>,       // Failed | Succeeded (找踩坑记录的杀手级参数)
+    pub path_prefix: Option<String>,          // "src-tauri/src/"
+    pub since_step: Option<usize>,            // 步骤下界
+    pub limit: Option<usize>,                 // 返回条数限制
+}
+```
+**内部实现**：通过**联邦检索**并行路由：
+- `kinds: ["history"]` → 路由至本地 SQLite FTS5 / BM25 分词索引。
+- `kinds: ["code"]` → 路由至实时 `ripgrep` / AST 符号分析（绝不返回过期代码快照）。
+
+---
+
+## 四、自我改进闭环：经验蒸馏与淘汰门禁 (Experience Distillation)
+
+### 1. Sleep-Time Compute（睡眠期异步计算）
+避免在 Agent 热路径（Turn-Loop）中进行耗时的反思与记忆重构。在用户阅读回复或空闲的“睡眠期”，后台异步任务触发经验提炼，将主流程开销降为 0。
+
+### 2. Hindsight Lesson 结构化抽取
+当检测到执行链路经历 **[Step N 失败] → [Step M 成功修正]** 时，自动蒸馏为定长经验（Lesson）：
+
+```rust
+pub struct Lesson {
+    pub symptom: String,              // "cargo test 报链接器错误: -lssl not found"
+    pub root_cause: String,           // "系统缺少 openssl 开发包"
+    pub fix: String,                  // "先执行 pacman -S openssl，再 cargo clean"
+    pub scope: LessonScope,           // Session | Project | Global
+    pub applied_count: u32,           // 应用计数器
+    pub success_when_applied: u32,    // 应用后成功计数器
+}
+```
+
+### 3. 淘汰门禁与防止自我污染
+为防止 Agent 产生错误的自负偏见（“上次改这个文件报错了，以后绝不碰它”），引入硬性统计门禁：
+- **淘汰准则**：当 `applied_count >= 5` 且 $\frac{\text{success\_when\_applied}}{\text{applied\_count}} < 0.5$ 时，自动标记为无效经验并淘汰降权。
+- **Global 级人工审核**：跨项目级的全局规则必须在桌面 UI 经人类确认后方可常驻。
+
+---
+
+## 五、双模式人机协同 (Human-in-the-Loop)
 
 这是市面上绝大多数 Agent 框架都不具备的工程级人机交互能力。
 
@@ -195,7 +295,7 @@ AI 运行途中，你可以随时在干预框输入指令（如 *"换个思路�
 
 ---
 
-## 四、模块结构与代码索引
+## 六、模块结构与代码索引
 
 上下文引擎模块全面解耦，按单一职责划分（11 个子文件，平均约 100 行）：
 
@@ -216,7 +316,7 @@ src-tauri/src/agent/context/
 
 ---
 
-## 五、快速上手与运行
+## 七、快速上手与运行
 
 ### 1. 环境依赖
 - **Rust** 1.78+ (`cargo`)
@@ -244,4 +344,5 @@ npm run tauri dev
 ## 📄 License
 本项目采用 **MIT License** 开源协议。
 欢迎提交 Issue 与 Pull Request 共同完善新一代 Agent 架构！⭐
+
 
