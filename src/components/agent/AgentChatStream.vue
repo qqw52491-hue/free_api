@@ -90,7 +90,7 @@
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                     </div>
                     <div class="summary-rich">
-                        <RichContentRenderer :content="entry.summary || entry.title" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
+                        <RichContentRenderer :content="(entry.summary || entry.title) + (entry.id === 'live-completion' && isStreamingSummary ? ' ▌' : '')" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
                     </div>
                     <div v-if="entry.artifacts.length" class="final-artifacts">
                         <b>交付物</b>
@@ -183,6 +183,19 @@ function onStreamScroll(event: Event) { followLiveTail.value = isNearBottom(even
 function resumeLiveFollow() { followLiveTail.value = true; followLatest(false); }
 function followThoughtTail() { nextTick(() => Array.from(document.querySelectorAll<HTMLElement>(".active-thought-content")).forEach((element) => { element.scrollTop = element.scrollHeight; })); }
 watch(() => props.isThinking, (running, wasRunning) => { if (running && !wasRunning) activeThoughtStartedAt.value = Date.now(); if (!running && wasRunning) activeThoughtStartedAt.value = null; }, { immediate: true });
+
+// --- 🌟 真正的实时流式 Markdown 增量渲染与光标 ---
+const isStreamingSummary = computed(() => props.isRunning && Boolean(props.finalSummary));
+
+watch(
+    () => props.finalSummary,
+    () => {
+        if (followLiveTail.value) {
+            followLatest();
+        }
+    }
+);
+
 function planStatus(steps: AgentStepItem[]): AgentToolStatus { if (steps.some((step) => step.status === "running" || step.status === "pending")) return "running"; if (steps.some((step) => step.status === "failed")) return "failed"; return "succeeded"; }
 function planEntries(steps: AgentStepItem[], prefix: string, active = false): PlanEntry[] {
     const groups = new Map<string, PlanEntry>();
@@ -237,10 +250,9 @@ function historyTimeline(): TimelineEntry[] {
 }
 function currentTimeline(): TimelineEntry[] {
     const timeline: TimelineEntry[] = [];
-    // 后端已写入终态回合时，绝不再同时渲染实时状态，避免“重复输出两次”
+    // 只有当当前 goal 已经在 historyTurns 中被持久化（且状态已终结）时才隐藏 live，防止因之前的历史回合导致 live 误提前销毁引起闪烁/跳动
     const alreadyPersisted = !props.isRunning && props.historyTurns.length > 0 && props.historyTurns.some((turn) =>
-        (props.currentGoal && turn.goal.trim() === props.currentGoal.trim()) ||
-        ["succeeded", "failed", "cancelled"].includes(turn.status)
+        Boolean(props.currentGoal && turn.goal.trim() === props.currentGoal.trim() && ["succeeded", "failed", "cancelled"].includes(turn.status))
     );
     if (alreadyPersisted) return timeline;
     const plans = planEntries(props.steps, "live", props.isThinking);
@@ -253,7 +265,7 @@ function currentTimeline(): TimelineEntry[] {
     timeline.push(...middle);
     if (props.isThinking && activeThoughtStartedAt.value && !plans.length) timeline.push({ id: "active-thought", type: "active-thought", timestamp: activeThoughtStartedAt.value });
     if (props.completionMessage || props.finalSummary || props.finalArtifacts.length) {
-        timeline.push({ id: "live-completion", type: "completion", timestamp: Date.now(), title: props.completionMessage || (props.hasError ? "任务未能完成" : "任务已完成"), summary: props.finalSummary, artifacts: props.finalArtifacts, failed: props.hasError });
+        timeline.push({ id: "live-completion", type: "completion", timestamp: Date.now(), title: props.completionMessage || (props.hasError ? "任务未能完成" : "任务已完成"), summary: props.finalSummary || props.completionMessage, artifacts: props.finalArtifacts, failed: props.hasError });
     }
     return timeline;
 }
@@ -903,6 +915,21 @@ button.root-row {
 @keyframes work-pulse {
     0%, 100% { opacity: 0.35; transform: scale(0.8); }
     50% { opacity: 1; transform: scale(1); }
+}
+
+.typing-cursor {
+    display: inline-block;
+    color: #fbbf24;
+    font-size: 14px;
+    font-weight: 700;
+    margin-left: 2px;
+    vertical-align: baseline;
+    animation: typing-blink 0.7s infinite;
+}
+
+@keyframes typing-blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
 }
 </style>
 

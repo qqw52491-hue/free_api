@@ -212,6 +212,7 @@ export function useAgentSession(sessionId: string) {
     const actionPhaseText = ref<string>("");
     const lastRunTelemetry = ref<AgentSessionTelemetry | null>(null);
     const completionMessage = ref("");
+    const streamingSummary = ref("");
     const { conversationMessages, isConversationLoading, loadConversation } = usePersistedAgentConversation(
         sessionId,
         (message) => appendLog(`[会话历史加载失败] ${message}`),
@@ -333,7 +334,7 @@ export function useAgentSession(sessionId: string) {
         if (summary && details && summary !== details) {
             return `${summary}\n\n${details}`;
         }
-        return summary || details || "";
+        return summary || details || streamingSummary.value || "";
     });
     const finalArtifacts = computed(() => {
         const output = finishOutput.value || {};
@@ -722,12 +723,23 @@ export function useAgentSession(sessionId: string) {
                 activeStepNumber.value = Math.max(activeStepNumber.value, parsedStep + 1);
             }
         }
-        if (eventType === "thinking" || eventType === "content_stream") {
+        if (eventType === "thinking" || eventType === "content_stream" || eventType === "summary_stream") {
             if (payload.live_speed !== undefined) {
                 liveSpeed.value = Number(payload.live_speed);
             }
             if (payload.ttft_ms !== undefined) {
                 liveTtft.value = Number(payload.ttft_ms);
+            }
+        }
+
+        // 实时捕获增量流式 Markdown 总结
+        if (eventType === "summary_stream" || payload.streaming_summary) {
+            const content = toText(payload.content || payload.streaming_summary);
+            if (content) {
+                streamingSummary.value = content;
+            }
+            if (eventType === "summary_stream") {
+                return;
             }
         }
 
@@ -903,6 +915,7 @@ export function useAgentSession(sessionId: string) {
         activeStepNumber.value = 1;
         actionPhaseText.value = "";
         completionMessage.value = "";
+        streamingSummary.value = "";
         finishOutput.value = null;
         hasError.value = false;
         currentGoal.value = "";
@@ -1085,6 +1098,7 @@ export function useAgentSession(sessionId: string) {
         tokenUsage,
         sessionTelemetry,
         completionMessage,
+        streamingSummary,
         conversationMessages,
         isConversationLoading,
         hasError,

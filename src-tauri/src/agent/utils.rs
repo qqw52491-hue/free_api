@@ -296,6 +296,89 @@ fn log_context_to_file(
     }
 }
 
+// ==================== 流式 JSON 增量字段提取器 ====================
+
+/// 从未闭合或已闭合的流式 JSON 字符串中，实时提取指定字段的文本内容（自动解码转义字符）
+pub fn extract_streaming_json_field(json_text: &str, field_names: &[&str]) -> Option<String> {
+    for field in field_names {
+        let pattern = format!("\"{}\"", field);
+        if let Some(field_idx) = json_text.find(&pattern) {
+            let after_field = &json_text[field_idx + pattern.len()..];
+            let mut colon_found = false;
+            let mut start_quote_offset = None;
+
+            for (idx, ch) in after_field.char_indices() {
+                if !colon_found {
+                    if ch == ':' {
+                        colon_found = true;
+                    }
+                } else {
+                    if ch == '"' {
+                        start_quote_offset = Some(field_idx + pattern.len() + idx + 1);
+                        break;
+                    } else if !ch.is_whitespace() {
+                        break;
+                    }
+                }
+            }
+
+            if let Some(start_pos) = start_quote_offset {
+                if start_pos >= json_text.len() {
+                    return Some(String::new());
+                }
+                let content_slice = &json_text[start_pos..];
+                let mut decoded = String::with_capacity(content_slice.len());
+                let mut is_escaped = false;
+                let mut chars = content_slice.chars().peekable();
+
+                while let Some(c) = chars.next() {
+                    if is_escaped {
+                        match c {
+                            'n' => decoded.push('\n'),
+                            'r' => decoded.push('\r'),
+                            't' => decoded.push('\t'),
+                            '\\' => decoded.push('\\'),
+                            '"' => decoded.push('"'),
+                            '/' => decoded.push('/'),
+                            'u' => {
+                                let mut hex = String::new();
+                                for _ in 0..4 {
+                                    if let Some(&hc) = chars.peek() {
+                                        if hc.is_ascii_hexdigit() {
+                                            hex.push(hc);
+                                            chars.next();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                                if hex.len() == 4 {
+                                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                                        if let Some(unicode_char) = char::from_u32(code) {
+                                            decoded.push(unicode_char);
+                                        }
+                                    }
+                                }
+                            }
+                            other => decoded.push(other),
+                        }
+                        is_escaped = false;
+                    } else if c == '\\' {
+                        is_escaped = true;
+                    } else if c == '"' {
+                        return Some(decoded);
+                    } else {
+                        decoded.push(c);
+                    }
+                }
+
+                return Some(decoded);
+            }
+        }
+    }
+    None
+}
+
 // ==================== Agent LLM 调用 ====================
 
 pub async fn call_llm(
@@ -377,6 +460,8 @@ pub async fn call_llm(
                             .ok();
                     }
                     StreamEvent::Content { chunk, accumulated_content, .. } => {
+                        let streaming_summary = extract_streaming_json_field(accumulated_content, &["summary", "answer", "details"]);
+
                         app_handle
                             .emit(
                                 &format!("agent-progress-{}", session_id),
@@ -385,12 +470,31 @@ pub async fn call_llm(
                                     "step_id": step_id,
                                     "chunk": chunk,
                                     "accumulated": accumulated_content,
+                                    "streaming_summary": streaming_summary,
                                     "live_tokens": est_tokens,
                                     "live_speed": live_speed,
                                     "ttft_ms": ttft_ms
                                 }),
                             )
                             .ok();
+
+                        if let Some(ref summary_text) = streaming_summary {
+                            if !summary_text.is_empty() {
+                                app_handle
+                                    .emit(
+                                        &format!("agent-progress-{}", session_id),
+                                        json!({
+                                            "type": "summary_stream",
+                                            "step_id": step_id,
+                                            "content": summary_text,
+                                            "live_tokens": est_tokens,
+                                            "live_speed": live_speed,
+                                            "ttft_ms": ttft_ms
+                                        }),
+                                    )
+                                    .ok();
+                            }
+                        }
                     }
                 }
             }
@@ -536,5 +640,19 @@ mod tests {
         assert!(sampled.contains("panic: index out of bounds"));
         assert!(sampled.contains("Finished with error code 101"));
         assert!(sampled.contains("折叠中间"));
+    }
+
+    #[test]
+    fn test_extract_streaming_json_field() {
+        let partial_json = "{\"tool\": \"finish\", \"command\": {\"summary\": \"### 报告\\n- 第一行\\n- 带有\\\"引号\\\"的内容";
+        let extracted = extract_streaming_json_field(partial_json, &["summary"]);
+        assert_eq!(
+            extracted,
+            Some("### 报告\n- 第一行\n- 带有\"引号\"的内容".to_string())
+        );
+
+        let closed_json = "{\"tool\": \"finish\", \"command\": {\"summary\": \"完成了！\", \"other\": 123}}";
+        let extracted_closed = extract_streaming_json_field(closed_json, &["summary"]);
+        assert_eq!(extracted_closed, Some("完成了！".to_string()));
     }
 }

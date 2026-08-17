@@ -87,6 +87,10 @@ impl ModelConfig {
     pub fn build_client(&self) -> Result<reqwest::Client, String> {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(self.timeout_secs))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .tcp_keepalive(Some(std::time::Duration::from_secs(15)))
+            .tcp_nodelay(true)
+            .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
             .build()
             .map_err(|e| e.to_string())
     }
@@ -427,7 +431,23 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
         let Some(item) = item else {
             break;
         };
-        let chunk = item.map_err(|e| e.to_string())?;
+        let chunk = match item {
+            Ok(c) => c,
+            Err(e) => {
+                let err_str = e.to_string();
+                // 如果上游在输出完成前意外掐断了连接 (unexpected EOF)，但本地已接收到了完整 JSON 或实质内容，尝试优雅自愈
+                if (err_str.contains("unexpected EOF") || err_str.contains("UnexpectedEof"))
+                    && (!full_response.trim().is_empty() || !thinking_text.trim().is_empty())
+                {
+                    println!(
+                        "⚠️ [LLM 流式告警] 上游 API 服务商提前断开连接 (unexpected EOF)，已接收 {} 字符内容，尝试自愈解析...",
+                        full_response.len()
+                    );
+                    break;
+                }
+                return Err(format!("上游服务商流式连接意外中断 (unexpected EOF): {}", err_str));
+            }
+        };
         line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(pos) = line_buf.find('\n') {
