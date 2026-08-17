@@ -80,6 +80,9 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
     .collect()
 }
 
+/// 超过该字符阈值（约 2,000 字符 / ~500 Tokens）时自动溢出落盘到本地独立文件
+pub const DISK_SPILL_THRESHOLD_CHARS: usize = 2_000;
+
 pub fn get_outputs_dir() -> std::path::PathBuf {
     dirs_next::data_dir()
         .map(|d| d.join("free-api-chat").join("outputs"))
@@ -96,11 +99,13 @@ pub fn save_step_output(
     let output_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
-    // 1. 同时落盘到本地普通文本文件（方便原生命令行 grep/head/tail 与用户直接打开）
-    let outputs_dir = get_outputs_dir();
-    let _ = std::fs::create_dir_all(&outputs_dir);
-    let log_file = outputs_dir.join(format!("{}.log", output_id));
-    let _ = std::fs::write(&log_file, raw_output);
+    // 1. 只有当输出长度超过阈值时才自动创建本地磁盘文件（短输出直接留在 SQLite，不产生小文件碎片）
+    if raw_output.chars().count() > DISK_SPILL_THRESHOLD_CHARS {
+        let outputs_dir = get_outputs_dir();
+        let _ = std::fs::create_dir_all(&outputs_dir);
+        let log_file = outputs_dir.join(format!("{}.log", output_id));
+        let _ = std::fs::write(&log_file, raw_output);
+    }
 
     // 2. 写入 SQLite 索引与备份
     conn.execute(
