@@ -1,7 +1,7 @@
 # 🤖 SandwichAgent (Free API Agent)
 
 <p align="center">
-  <strong>基于 Rust + Tauri 2.0 构建的高性能、高确定性本地原生自主 Web & 系统级 Agent 平台</strong>
+  <strong>基于 Rust + Tauri 2.0 构建的高性能、高确定性本地原生自主系统级 Agent 平台</strong>
 </p>
 
 <p align="center">
@@ -336,7 +336,6 @@ src-tauri/src/agent/context/
 ### 1. 环境依赖
 - **Rust** 1.78+ (`cargo`)
 - **Node.js** 20+ (`npm` / `pnpm`)
-- **Google Chrome**（用于 CDP 浏览器自主控制）
 
 ### 2. 本地开发与测试
 ```bash
@@ -347,7 +346,7 @@ cd free_api
 # 2. 安装前端依赖
 npm install
 
-# 3. 运行全量单元测试（验证 48 个上下文与状态机测试套件）
+# 3. 运行全量单元测试（验证 49 个上下文、检索与状态机测试套件）
 cargo test --manifest-path src-tauri/Cargo.toml
 
 # 4. 启动本地桌面客户端
