@@ -22,8 +22,12 @@ pub struct SearchParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
-    pub kind: String, // "history" | "code"
+    pub kind: String, // "history" | "code" | "lesson" | "summary"
     pub id_or_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step_id: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,6 +37,64 @@ pub struct SearchHit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
     pub snippet: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>, // 命中的上下文佐证或关联总结
+}
+
+/// 浅层三级记忆节点模型 (Level 0: 事件, Level 1: Episode片段, Level 2: 阶段摘要/Lesson)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryNode {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub level: u8, // 0 | 1 | 2
+    pub kind: String, // "event" | "episode" | "lesson" | "decision"
+    pub session_id: String,
+    pub plan_id: Option<String>,
+    pub step_index: Option<usize>,
+    pub content: String,
+    pub metadata_json: String,
+    pub created_at: String,
+}
+
+/// 插入三级记忆节点并同步写入 FTS5 trigram 索引
+pub fn insert_memory_node(
+    conn: &Connection,
+    node: &MemoryNode,
+    trigger_keywords: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO agent_memory_nodes (id, parent_id, level, kind, session_id, plan_id, step_index, content, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            node.id,
+            node.parent_id,
+            node.level as i64,
+            node.kind,
+            node.session_id,
+            node.plan_id,
+            node.step_index.map(|s| s as i64),
+            node.content,
+            node.metadata_json,
+            node.created_at,
+        ],
+    ).map_err(|e| format!("Memory node insert error: {}", e))?;
+
+    let content_capped: String = node.content.chars().take(4_000).collect();
+    conn.execute(
+        "INSERT INTO agent_memory_nodes_fts (node_id, session_id, level, kind, plan_id, content, trigger_keywords)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            node.id,
+            node.session_id,
+            node.level as i64,
+            node.kind,
+            node.plan_id,
+            content_capped,
+            trigger_keywords,
+        ],
+    ).map_err(|e| format!("Memory node FTS5 insert error: {}", e))?;
+
+    Ok(())
 }
 
 /// 写入或更新单步执行日志的 FTS5 索引
@@ -217,11 +279,14 @@ pub fn search_history(
             Ok(SearchHit {
                 kind: "history".to_string(),
                 id_or_path: output_id,
+                parent_id: None,
+                level: Some(0),
                 step_id: Some(step_id as usize),
                 tool: Some(tool),
                 action: Some(action),
                 outcome: Some(outcome),
                 snippet,
+                evidence: Vec::new(),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -303,11 +368,14 @@ fn search_history_short_like(
             Ok(SearchHit {
                 kind: "history".to_string(),
                 id_or_path: output_id,
+                parent_id: None,
+                level: Some(0),
                 step_id: Some(step_id as usize),
                 tool: Some(tool),
                 action: Some(action),
                 outcome: Some(outcome),
                 snippet,
+                evidence: Vec::new(),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -398,14 +466,127 @@ pub fn search_code(search_root: &Path, query: &str, limit: usize) -> Result<Vec<
                     hits.push(SearchHit {
                         kind: "code".to_string(),
                         id_or_path: format!("{}:{}", rel_path, line_num),
+                        parent_id: None,
+                        level: None,
                         step_id: None,
                         tool: None,
                         action: None,
                         outcome: None,
                         snippet: match_lines.to_string(),
+                        evidence: Vec::new(),
                     });
                 }
             }
+        }
+    }
+
+    Ok(hits)
+}
+
+/// 跨层折叠检索与上下文补齐 (Cross-Tier Memory Search with Context Enrichment)
+/// 1. 查询全部 Level 0/1/2 记忆节点
+/// 2. 上下文补齐：命中原始事件则补对应阶段总结；命中 Lesson/总结则补 2~3 条底层执行证据
+pub fn search_memory_nodes_enriched(
+    conn: &Connection,
+    session_id: &str,
+    query: &str,
+    kind_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SearchHit>, String> {
+    let clean_query = query.trim();
+    if clean_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let escaped_query = clean_query.replace('"', "\"\"");
+    let match_pattern = format!("\"{}\"", escaped_query);
+
+    let mut sql = String::from(
+        "SELECT n.id, n.parent_id, n.level, n.kind, n.step_index, n.content,
+                snippet(agent_memory_nodes_fts, 5, '<b>', '</b>', '...', 25), rank
+         FROM agent_memory_nodes_fts fts
+         JOIN agent_memory_nodes n ON fts.node_id = n.id
+         WHERE agent_memory_nodes_fts MATCH ?1",
+    );
+
+    let mut params_vec: Vec<rusqlite::types::Value> = vec![match_pattern.into()];
+
+    if !session_id.is_empty() {
+        sql.push_str(" AND n.session_id = ?2");
+        params_vec.push(session_id.to_string().into());
+    }
+
+    if let Some(kind) = kind_filter {
+        if !kind.is_empty() && kind != "all" {
+            let next_idx = params_vec.len() + 1;
+            sql.push_str(&format!(" AND n.kind = ?{}", next_idx));
+            params_vec.push(kind.to_string().into());
+        }
+    }
+
+    let next_idx = params_vec.len() + 1;
+    sql.push_str(&format!(" ORDER BY rank ASC LIMIT ?{}", next_idx));
+    params_vec.push((limit as i64).into());
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rusqlite_params = rusqlite::params_from_iter(params_vec);
+
+    let rows = stmt
+        .query_map(rusqlite_params, |row| {
+            let id: String = row.get(0)?;
+            let parent_id: Option<String> = row.get(1)?;
+            let level: i64 = row.get(2)?;
+            let kind: String = row.get(3)?;
+            let step_index: Option<i64> = row.get(4)?;
+            let content: String = row.get(5)?;
+            let snippet: String = row.get(6)?;
+            Ok((id, parent_id, level as u8, kind, step_index.map(|s| s as usize), content, snippet))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut hits = Vec::new();
+    for r in rows {
+        if let Ok((id, parent_id, level, kind, step_index, content, snippet)) = r {
+            let mut evidence = Vec::new();
+
+            // 上下文补齐 (Context Enrichment)
+            if level == 0 {
+                // 命中原始事件：尝试补齐其所属的阶段总结 (Parent Summary)
+                if let Some(ref p_id) = parent_id {
+                    if let Ok(parent_content) = conn.query_row(
+                        "SELECT content FROM agent_memory_nodes WHERE id = ?1",
+                        params![p_id],
+                        |row| row.get::<_, String>(0),
+                    ) {
+                        evidence.push(format!("所属阶段总结: {}", parent_content));
+                    }
+                }
+            } else if level == 2 {
+                // 命中 Lesson/阶段总结：自动抓取 2 条子节点证据 (Child Evidence)
+                if let Ok(mut child_stmt) = conn.prepare(
+                    "SELECT content FROM agent_memory_nodes WHERE parent_id = ?1 LIMIT 2",
+                ) {
+                    if let Ok(child_rows) = child_stmt.query_map(params![id], |row| row.get::<_, String>(0)) {
+                        for c in child_rows.flatten() {
+                            let short_c: String = c.chars().take(80).collect();
+                            evidence.push(format!("关联证据: {}", short_c));
+                        }
+                    }
+                }
+            }
+
+            hits.push(SearchHit {
+                kind,
+                id_or_path: id,
+                parent_id,
+                level: Some(level),
+                step_id: step_index,
+                tool: None,
+                action: None,
+                outcome: None,
+                snippet: if snippet.is_empty() { content.chars().take(80).collect() } else { snippet },
+                evidence,
+            });
         }
     }
 
@@ -465,7 +646,8 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
     let mut history_ok = !wants_history;
     if wants_history {
         if let Ok(conn) = db.0.lock() {
-            match search_history(
+            let mut history_branch_hits = Vec::new();
+            if let Ok(hits) = search_history(
                 &conn,
                 session_id,
                 &params.query,
@@ -473,12 +655,31 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
                 params.since_step,
                 limit,
             ) {
-                Ok(hits) => {
-                    all_hits.extend(hits);
-                    history_ok = true;
-                }
-                Err(e) => errors.push(format!("history 检索失败: {}", e)),
+                history_branch_hits.extend(hits);
             }
+
+            // 联动查询三级记忆节点库 (Level 0~2 知识、Episode 与 Lesson)
+            if let Ok(mem_hits) = search_memory_nodes_enriched(
+                &conn,
+                session_id,
+                &params.query,
+                None,
+                limit,
+            ) {
+                history_branch_hits.extend(mem_hits);
+            }
+
+            // 去重并限制返回条数 (优先保留高等级 Lesson / Summary 及最新结果)
+            let mut seen_ids = std::collections::HashSet::new();
+            for hit in history_branch_hits {
+                if seen_ids.insert(hit.id_or_path.clone()) {
+                    all_hits.push(hit);
+                    if all_hits.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            history_ok = true;
         } else {
             errors.push("history 检索失败: 数据库锁获取失败".to_string());
         }
@@ -553,6 +754,30 @@ mod tests {
                 action,
                 outcome,
                 content,
+                tokenize='trigram'
+            );
+
+            CREATE TABLE agent_memory_nodes (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                level INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                plan_id TEXT,
+                step_index INTEGER,
+                content TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE VIRTUAL TABLE agent_memory_nodes_fts USING fts5(
+                node_id UNINDEXED,
+                session_id UNINDEXED,
+                level UNINDEXED,
+                kind UNINDEXED,
+                plan_id UNINDEXED,
+                content,
+                trigger_keywords,
                 tokenize='trigram'
             );
             ",
@@ -660,6 +885,56 @@ mod tests {
         // 空 session_id 显式表示跨会话检索
         let all = search_history(&conn, "", "openssl", None, None, 10).unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    /// 浅层三级记忆模型测试：Level 0 原始事件写入、Level 2 Lesson 提炼、跨层上下文补齐
+    #[test]
+    fn test_shallow_three_tier_memory_and_context_enrichment() {
+        let conn = setup_test_db();
+
+        // 1. 写入 Level 2 阶段总结节点
+        let summary_node = MemoryNode {
+            id: "phase-1".to_string(),
+            parent_id: None,
+            level: 2,
+            kind: "summary".to_string(),
+            session_id: "sess-tier".to_string(),
+            plan_id: Some("plan-1".to_string()),
+            step_index: Some(1),
+            content: "阶段总结: 完成 PostgreSQL 驱动替换并修复跨域问题".to_string(),
+            metadata_json: "{}".to_string(),
+            created_at: "2026-08-17".to_string(),
+        };
+        insert_memory_node(&conn, &summary_node, "PostgreSQL, 跨域, 阶段总结").unwrap();
+
+        // 2. 写入 Level 0 原始报错事件（指向父阶段）
+        let event_node = MemoryNode {
+            id: "step-10".to_string(),
+            parent_id: Some("phase-1".to_string()),
+            level: 0,
+            kind: "event".to_string(),
+            session_id: "sess-tier".to_string(),
+            plan_id: Some("plan-1".to_string()),
+            step_index: Some(10),
+            content: "执行 cargo build 失败: error linking with cc failed: -lpq not found".to_string(),
+            metadata_json: "{}".to_string(),
+            created_at: "2026-08-17".to_string(),
+        };
+        insert_memory_node(&conn, &event_node, "linking error, lpq, PostgreSQL").unwrap();
+
+        // 3. 检索 Level 0 原始事件 -> 验证自动补齐了父阶段总结
+        let hits = search_memory_nodes_enriched(&conn, "sess-tier", "lpq", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id_or_path, "step-10");
+        assert!(!hits[0].evidence.is_empty(), "命中原始事件应自动带出父阶段总结");
+        assert!(hits[0].evidence[0].contains("PostgreSQL 驱动替换"));
+
+        // 4. 检索 Level 2 总结 -> 验证自动带出了子节点证据
+        let summary_hits = search_memory_nodes_enriched(&conn, "sess-tier", "跨域问题", None, 10).unwrap();
+        assert_eq!(summary_hits.len(), 1);
+        assert_eq!(summary_hits[0].id_or_path, "phase-1");
+        assert!(!summary_hits[0].evidence.is_empty(), "命中阶段总结应自动带出子证据");
+        assert!(summary_hits[0].evidence[0].contains("linking with cc failed"));
     }
 
     /// 分发层：默认只查 history；短查询携带 notes 提示；code 检索缺 path 时显式报错

@@ -133,6 +133,27 @@ pub fn save_step_output_with_meta(
         raw_output,
     );
 
+    // 写入三级记忆模型的 Level 0 原始事件节点 (带语义关键词)
+    let node = crate::agent::retrieval::MemoryNode {
+        id: format!("step-{}", step_id),
+        parent_id: None,
+        level: 0,
+        kind: "event".to_string(),
+        session_id: session_id.to_string(),
+        plan_id: None,
+        step_index: Some(step_id),
+        content: format!("工具: {} | 动作: {} | 状态: {}\n输出: {}", tool, action, outcome, raw_output.chars().take(500).collect::<String>()),
+        metadata_json: serde_json::json!({
+            "output_id": output_id,
+            "tool": tool,
+            "action": action,
+            "outcome": outcome,
+        }).to_string(),
+        created_at: now,
+    };
+    let trigger_keywords = format!("{}, {}, {}", tool, action, outcome);
+    let _ = crate::agent::retrieval::insert_memory_node(&conn, &node, &trigger_keywords);
+
     Ok(output_id)
 }
 

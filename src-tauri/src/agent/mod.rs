@@ -1,6 +1,7 @@
 pub mod checkpoint;
 pub mod context;
 pub mod conversation;
+pub mod lesson;
 pub mod mcp;
 pub mod mcp_catalog;
 pub mod retrieval;

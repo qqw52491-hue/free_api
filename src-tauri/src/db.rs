@@ -217,6 +217,35 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             content,
             tokenize='trigram'
         );
+
+        -- 浅层三级记忆节点表 (Level 0: 原始事件, Level 1: Episode片段, Level 2: 阶段摘要/Lesson)
+        CREATE TABLE IF NOT EXISTS agent_memory_nodes (
+            id TEXT PRIMARY KEY,
+            parent_id TEXT,
+            level INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            plan_id TEXT,
+            step_index INTEGER,
+            content TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_memory_nodes_session
+            ON agent_memory_nodes(session_id, level, step_index);
+        CREATE INDEX IF NOT EXISTS idx_agent_memory_nodes_parent
+            ON agent_memory_nodes(parent_id);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS agent_memory_nodes_fts USING fts5(
+            node_id UNINDEXED,
+            session_id UNINDEXED,
+            level UNINDEXED,
+            kind UNINDEXED,
+            plan_id UNINDEXED,
+            content,
+            trigger_keywords,
+            tokenize='trigram'
+        );
     ",
     )?;
 
