@@ -229,8 +229,36 @@ function updateReasoningEffort(role: ModelRole, event: Event) {
 .section-heading h3 { margin: 0; color: var(--chat-text); font-size: 13px; }
 .section-heading small { color: var(--chat-text-faint); font-size: 10px; }
 .settings-scroll label { display: grid; gap: 6px; margin-top: 11px; color: var(--chat-text-muted); font-size: 11px; font-weight: 650; }
-.settings-scroll select { width: 100%; padding: 9px 10px; border: 1px solid var(--chat-line-strong); border-radius: 8px; outline: 0; color: var(--chat-text); background: #0d1420; font: 12px inherit; }
-.settings-scroll select:focus { border-color: var(--chat-accent); box-shadow: 0 0 0 3px rgba(100, 165, 255, .10); }
+.settings-scroll select {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    width: 100%;
+    padding: 9px 32px 9px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    outline: none;
+    color: #f4f4f5;
+    background-color: #0d1420;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238f9bb3' stroke-width='2.2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    font: 12px inherit;
+    transition: all 0.15s ease;
+    cursor: pointer;
+}
+.settings-scroll select:hover:not(:disabled) {
+    border-color: rgba(255, 255, 255, 0.22);
+    background-color: #111a28;
+}
+.settings-scroll select:focus {
+    border-color: var(--chat-accent);
+    box-shadow: 0 0 0 3px rgba(100, 165, 255, .15);
+}
+.settings-scroll select option, .settings-scroll select optgroup {
+    background-color: #101722;
+    color: #f4f4f5;
+}
 .routing-grid { display: grid; gap: 10px; margin-top: 12px; }
 .routing-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--chat-line); border-radius: 10px; background: linear-gradient(135deg, rgba(255,255,255,.025), rgba(255,255,255,.01)); }
 .routing-card:hover { border-color: var(--chat-line-strong); }
@@ -239,7 +267,7 @@ function updateReasoningEffort(role: ModelRole, event: Event) {
 .routing-card-heading small { color: var(--chat-text-faint); font-size: 10px; }
 .routing-card label { margin: 0; }
 .routing-card label > span { color: var(--chat-text-faint); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-.routing-card select { min-height: 36px; padding: 8px 10px; background: rgba(7, 11, 18, .72); }
+.routing-card select { min-height: 38px; padding: 8px 32px 8px 10px; background-color: rgba(7, 11, 18, .85); }
 .routing-note { margin: 12px 0 0; color: var(--chat-text-faint); font-size: 10px; line-height: 1.55; }
 .context-toggle { grid-template-columns: auto 1fr; align-items: center; gap: 10px !important; margin: 0 !important; cursor: pointer; }
 .context-toggle input { width: 15px; height: 15px; accent-color: var(--chat-accent); }

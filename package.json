@@ -8,6 +8,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "dev:wayland": "WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri dev",
+    "dev:x11": "GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri dev",
     "test:e2e:build": "tauri build --debug --features wdio --bundles app --no-sign --config src-tauri/tauri.test.conf.json",
     "test:e2e": "npm run test:e2e:build && wdio run wdio.conf.mjs"
   },

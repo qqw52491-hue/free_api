@@ -184,6 +184,9 @@ body {
 }
 
 .form-input, .form-select, .form-textarea {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
   background: var(--bg-2);
   border: 1px solid var(--border-2);
   border-radius: var(--radius-sm);
@@ -206,16 +209,24 @@ body {
 }
 
 .form-select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235a6080' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238f9bb3' stroke-width='2.2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;
   padding-right: 36px;
   cursor: pointer;
 }
 
-.form-select option {
-  background: var(--bg-2);
+.form-select option, .form-select optgroup, select option, select optgroup {
+  background-color: #141b26 !important;
+  color: #f4f4f5 !important;
+}
+
+input[type="checkbox"], input[type="radio"] {
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 /* ---- Cards ---- */

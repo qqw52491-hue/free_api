@@ -455,11 +455,21 @@ defineExpose({ isRunning: session.isRunning });
     opacity: 0.4;
 }
 
+.manus-agent-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    background: #141416;
+}
+
 .manus-agent-grid {
     display: grid;
+    flex: 1;
     min-height: 0;
+    min-width: 0;
     position: relative;
-    grid-template-columns: minmax(0, 1fr) v-bind('inspectorWidth + "px"');
+    overflow: hidden;
 }
 .manus-agent-grid.is-resizing {
     user-select: none !important;
@@ -510,11 +520,36 @@ defineExpose({ isRunning: session.isRunning });
     background: #141416;
 }
 
-@media (max-width: 980px) {
-    .manus-agent-shell { height: auto; overflow: visible; }
-    .manus-agent-grid { grid-template-columns: 1fr !important; }
-    .grid-resizer { display: none; }
-    .chat-column { min-height: 620px; }
-    .session-status { display: none; }
+/* 窄屏自适应：禁止向下堆叠！保持 100% 满高单列，展开时以抽屉浮层覆盖在右侧 */
+@media (max-width: 900px) {
+    .manus-agent-shell {
+        height: 100% !important;
+        overflow: hidden !important;
+    }
+    .manus-agent-grid {
+        grid-template-columns: 1fr 0px 0px !important;
+        position: relative !important;
+    }
+    .grid-resizer {
+        display: none !important;
+    }
+    .chat-column {
+        height: 100% !important;
+        min-height: 0 !important;
+    }
+    .session-status {
+        display: none;
+    }
+    .manus-agent-grid:not(.is-collapsed) :deep(.agent-inspector) {
+        position: absolute !important;
+        top: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        width: min(520px, 94vw) !important;
+        z-index: 35 !important;
+        box-shadow: -16px 0 40px rgba(0, 0, 0, 0.75) !important;
+        border-left: 1px solid rgba(255, 255, 255, 0.15) !important;
+        background: #121824 !important;
+    }
 }
 </style>
