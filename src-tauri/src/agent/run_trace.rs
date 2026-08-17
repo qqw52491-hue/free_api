@@ -159,8 +159,12 @@ pub fn get_step_output(
 
         // 处理溢出标记：[[spilled_to_disk:/path/to/file.log]]
         if let Some(path_str) = raw.strip_prefix("[[spilled_to_disk:").and_then(|s| s.strip_suffix("]]")) {
-            return std::fs::read_to_string(path_str)
-                .map_err(|e| format!("spilled log file '{}' not found: {}", path_str, e));
+            return Ok(std::fs::read_to_string(path_str).unwrap_or_else(|_| {
+                format!(
+                    "[⚠️ 原始日志落盘文件已缺失或已移动 (output_id: {}, path: {})]",
+                    output_id, path_str
+                )
+            }));
         }
 
         Ok(raw)

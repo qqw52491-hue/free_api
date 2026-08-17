@@ -117,22 +117,53 @@ mod tests {
     }
 
     #[test]
-    fn test_context_fingerprint_deterministic_1000_iterations() {
-        let mut ctx = SandwichContext::new(
+    fn test_context_fingerprint_invariant_under_input_shuffle() {
+        let entries = vec![
+            ("db_port", "5432"),
+            ("db_user", "postgres"),
+            ("api_env", "production"),
+            ("jwt_secret", "s3cr3t"),
+            ("cache_ttl", "3600"),
+        ];
+
+        // 基准指纹：按初始顺序插入
+        let mut baseline_ctx = SandwichContext::new(
             "SYSTEM: You are Free API Agent".to_string(),
             "Build a Rust app".to_string(),
         );
-        let _ = ctx.update_memory("db_port".to_string(), "5432".to_string());
-        let _ = ctx.update_memory("db_user".to_string(), "postgres".to_string());
-        let _ = ctx.update_memory("api_env".to_string(), "production".to_string());
+        for (k, v) in &entries {
+            let _ = baseline_ctx.update_memory(k.to_string(), v.to_string());
+        }
+        let baseline_fp = ContextFingerprint::capture(&baseline_ctx);
 
-        let base_fp = ContextFingerprint::capture(&ctx);
+        // 进行 50 次完全打乱顺序的上下文重新构建，验证 BTreeMap 确保指纹 100% 相同
+        for i in 1..=50 {
+            let mut shuffled = entries.clone();
+            // 简单的确定性置换算法，避免依赖外部 rand crate
+            let len = shuffled.len();
+            shuffled.rotate_left(i % len);
+            if i % 2 == 0 {
+                shuffled.reverse();
+            }
 
-        for _ in 0..1000 {
-            let current_fp = ContextFingerprint::capture(&ctx);
+            let mut fresh_ctx = SandwichContext::new(
+                "SYSTEM: You are Free API Agent".to_string(),
+                "Build a Rust app".to_string(),
+            );
+            for (k, v) in &shuffled {
+                let _ = fresh_ctx.update_memory(k.to_string(), v.to_string());
+            }
+
+            let fresh_fp = ContextFingerprint::capture(&fresh_ctx);
             assert_eq!(
-                base_fp.combined_prefix_hash, current_fp.combined_prefix_hash,
-                "Prefix hash must be 100% byte-for-byte deterministic across 1000 iterations!"
+                baseline_fp.combined_prefix_hash, fresh_fp.combined_prefix_hash,
+                "Prefix hash must be identical regardless of insertion order (iteration {})",
+                i
+            );
+            assert_eq!(
+                baseline_fp.bottom_state_hash, fresh_fp.bottom_state_hash,
+                "Bottom state hash must be identical regardless of insertion order (iteration {})",
+                i
             );
         }
     }

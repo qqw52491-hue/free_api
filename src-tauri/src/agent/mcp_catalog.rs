@@ -86,7 +86,13 @@ pub fn invalidate_plugin(name: &str) {
 pub fn concise_menu(items: impl IntoIterator<Item = (String, Vec<McpToolDef>)>) -> String {
     let mut lines =
         vec!["\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）".to_string()];
-    for (name, tools) in items {
+    let mut sorted_items: Vec<(String, Vec<McpToolDef>)> = items.into_iter().collect();
+    // 严格按插件名称字母序排序，消除 HashMap 遍历导致的随机性与前缀缓存击穿
+    sorted_items.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (name, mut tools) in sorted_items {
+        // 工具列表也严格按名称字母序排序
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
         let tool_names = tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         lines.push(format!("- {}: [{}]", name, tool_names.join(", ")));
     }

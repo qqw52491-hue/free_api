@@ -1149,6 +1149,34 @@ confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选
 
         context.add_step(&instruction, &output_text, &output_id);
 
+        // --- 记录不可逆副作用安全台账 (Side-Effects Ledger) ---
+        // 关键不可逆操作（如 shell_exec、写入文件、修改数据库等）成功执行后记录台账，
+        // 确保历史压缩后模型依然清楚自己已修改过哪些外部资源，避免重复执行或误操作
+        let tool_name = instruction.get_tool().to_lowercase();
+        let is_side_effect = result.success && (
+            tool_name.contains("shell")
+            || tool_name.contains("write")
+            || tool_name.contains("edit")
+            || tool_name.contains("move")
+            || tool_name.contains("delete")
+            || tool_name.contains("create")
+            || tool_name.contains("upsert")
+            || tool_name.contains("git")
+        );
+        if is_side_effect {
+            let target = instruction.get_params().to_string();
+            let short_target = if target.chars().count() > 80 {
+                format!("{}...", target.chars().take(80).collect::<String>())
+            } else {
+                target
+            };
+            context.record_side_effect(
+                step_id,
+                instruction.get_tool(),
+                format!("{}: {}", instruction.description, short_target),
+            );
+        }
+
         context.current_observation = output_text.clone();
         // 复盘轨迹使用与 step_new 相同的语义字段，但与 Agent prompt/checkpoint 隔离。
         // 这使历史会话既能恢复思考、计划和工具调用，又不会放大运行时上下文。

@@ -159,9 +159,10 @@ pub fn search_history(
     if clean_query.is_empty() {
         return Ok(Vec::new());
     }
-    // trigram 分词器下限为 3 字符，短查询直接返回空（由调用方负责给出提示）
+    // trigram 分词器下限为 3 字符。若查询少于 3 字符（如「报错」「端口」「超时」等常见两字词），
+    // 自动平滑降级为 SQL LIKE 子串查询，确保短中文词绝不落空
     if clean_query.chars().count() < 3 {
-        return Ok(Vec::new());
+        return search_history_short_like(conn, session_id, clean_query, outcome_filter, since_step, limit);
     }
 
     // FTS5 简单转义（处理特殊字符）
@@ -232,6 +233,91 @@ pub fn search_history(
         }
     }
 
+    Ok(hits)
+}
+
+/// 针对 < 3 字符的短查询降级走 SQL LIKE（处理「报错」「端口」等两字高频词）
+fn search_history_short_like(
+    conn: &Connection,
+    session_id: &str,
+    clean_query: &str,
+    outcome_filter: Option<&str>,
+    since_step: Option<usize>,
+    limit: usize,
+) -> Result<Vec<SearchHit>, String> {
+    let like_pattern = format!("%{}%", clean_query);
+    let mut sql = String::from(
+        "SELECT output_id, step_id, tool, action, outcome, content
+         FROM agent_step_logs_fts
+         WHERE (content LIKE ?1 OR action LIKE ?1 OR tool LIKE ?1)",
+    );
+
+    let mut params_vec: Vec<rusqlite::types::Value> = vec![like_pattern.into()];
+
+    if !session_id.is_empty() {
+        let next_idx = params_vec.len() + 1;
+        sql.push_str(&format!(" AND session_id = ?{}", next_idx));
+        params_vec.push(session_id.to_string().into());
+    }
+
+    let normalized_outcome = outcome_filter
+        .map(str::trim)
+        .filter(|o| !o.is_empty() && !o.eq_ignore_ascii_case("any"))
+        .map(str::to_lowercase);
+    if let Some(outcome) = normalized_outcome {
+        let next_idx = params_vec.len() + 1;
+        sql.push_str(&format!(" AND outcome = ?{}", next_idx));
+        params_vec.push(outcome.into());
+    }
+
+    if let Some(since) = since_step {
+        let next_idx = params_vec.len() + 1;
+        sql.push_str(&format!(" AND step_id >= ?{}", next_idx));
+        params_vec.push((since as i64).into());
+    }
+
+    let next_idx = params_vec.len() + 1;
+    sql.push_str(&format!(" ORDER BY step_id DESC LIMIT ?{}", next_idx));
+    params_vec.push((limit as i64).into());
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rusqlite_params = rusqlite::params_from_iter(params_vec);
+    let rows = stmt
+        .query_map(rusqlite_params, |row| {
+            let output_id: String = row.get(0)?;
+            let step_id: i64 = row.get(1)?;
+            let tool: String = row.get(2)?;
+            let action: String = row.get(3)?;
+            let outcome: String = row.get(4)?;
+            let content: String = row.get(5)?;
+            // 字符安全地截取包含关键词的 snippet 片段（防止 UTF-8 字节截断 panic）
+            let chars: Vec<char> = content.chars().collect();
+            let query_chars: Vec<char> = clean_query.chars().collect();
+            let snippet = if let Some(char_idx) = chars.windows(query_chars.len()).position(|w| w == query_chars.as_slice()) {
+                let start = char_idx.saturating_sub(15);
+                let end = (char_idx + query_chars.len() + 25).min(chars.len());
+                format!("...{}...", chars[start..end].iter().collect::<String>())
+            } else {
+                chars.iter().take(60).collect::<String>()
+            };
+            Ok(SearchHit {
+                kind: "history".to_string(),
+                id_or_path: output_id,
+                step_id: Some(step_id as usize),
+                tool: Some(tool),
+                action: Some(action),
+                outcome: Some(outcome),
+                snippet,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut hits = Vec::new();
+    for r in rows {
+        if let Ok(hit) = r {
+            hits.push(hit);
+        }
+    }
     Ok(hits)
 }
 
@@ -552,9 +638,10 @@ mod tests {
         let hits2 = search_history(&conn, "session-cn", "网络配置", None, None, 10).unwrap();
         assert_eq!(hits2.len(), 1, "中文子串「网络配置」必须可命中");
 
-        // 不足 3 字符的查询在 trigram 下无法命中，返回空（不报错）
+        // 不足 3 字符的短查询（如「网络」）自动平滑降级为 SQL LIKE 子串查询，成功命中！
         let short = search_history(&conn, "session-cn", "网络", None, None, 10).unwrap();
-        assert!(short.is_empty());
+        assert_eq!(short.len(), 1, "2 字短中文「网络」应通过 LIKE 降级命中");
+        assert_eq!(short[0].id_or_path, "out-cn-001");
     }
 
     /// 会话隔离：检索不得跨 session 泄漏
@@ -602,12 +689,11 @@ mod tests {
         let payload: Value = serde_json::from_str(&result.stdout).unwrap();
         assert_eq!(payload["total_hits"], 1);
 
-        // 2. 短查询：命中 0 但带 notes 提示，不算失败
+        // 2. 短查询（2 字）：通过 SQL LIKE 降级无缝命中，且不再需要 notes 提示
         let short = dispatch_search(&db, "session-dispatch", &json!({"query": "数据"}));
         assert!(short.success);
         let short_payload: Value = serde_json::from_str(&short.stdout).unwrap();
-        assert_eq!(short_payload["total_hits"], 0);
-        assert!(short_payload["notes"].is_array());
+        assert_eq!(short_payload["total_hits"], 1, "2 字短中文「数据」应通过 LIKE 降级命中");
 
         // 3. code 检索缺 path：显式失败并说明原因（而非伪装成 0 命中）
         let code_missing = dispatch_search(
