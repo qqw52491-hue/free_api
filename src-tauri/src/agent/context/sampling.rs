@@ -18,7 +18,7 @@ impl SandwichContext {
         // 脱水版行动纪要：只记录"做了什么"，砍掉 thought/reflection 内心戏，大幅节省 Token
         let action_brief = format!(
             "计划: {} | 工具: {} | 动作: {}",
-            self.active_plan_title.as_deref().unwrap_or("未命名计划"),
+            self.active_plan_title().unwrap_or("未命名计划"),
             instruction.get_tool(),
             instruction.description,
         );

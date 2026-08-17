@@ -21,7 +21,6 @@ pub struct FailedAttempt {
     pub output_id: Option<String>,
 }
 
-/// 不可逆动作台账（已执行的破坏性或外部影响操作，绝不淘汰）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SideEffectRecord {
     pub step_id: usize,
@@ -30,30 +29,106 @@ pub struct SideEffectRecord {
     pub timestamp: String,
 }
 
+/// 阶段计划状态机：自包含管理计划 ID、标题与自增编号
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanState {
+    pub active_id: Option<String>,
+    pub active_title: Option<String>,
+    pub next_index: usize,
+}
+
+impl PlanState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 推进或激活指定计划（如果模型未传 ID，自动按 plan-1, plan-2 自增分配）
+    pub fn resolve_plan(
+        &mut self,
+        requested_id: Option<String>,
+        requested_title: Option<String>,
+        default_title: &str,
+    ) -> (String, String) {
+        if let Some(id) = requested_id {
+            let title = requested_title
+                .or_else(|| self.active_title.clone())
+                .unwrap_or_else(|| default_title.to_string());
+            self.active_id = Some(id.clone());
+            self.active_title = Some(title.clone());
+            return (id, title);
+        }
+        if let Some(title) = requested_title {
+            if self.active_title.as_deref() == Some(title.as_str()) {
+                if let Some(id) = self.active_id.clone() {
+                    return (id, title);
+                }
+            }
+            self.next_index = self.next_index.saturating_add(1);
+            let id = format!("plan-{}", self.next_index);
+            self.active_id = Some(id.clone());
+            self.active_title = Some(title.clone());
+            return (id, title);
+        }
+        if let (Some(id), Some(title)) = (self.active_id.clone(), self.active_title.clone()) {
+            return (id, title);
+        }
+        self.next_index = self.next_index.saturating_add(1);
+        let id = format!("plan-{}", self.next_index);
+        let title = default_title.to_string();
+        self.active_id = Some(id.clone());
+        self.active_title = Some(title.clone());
+        (id, title)
+    }
+}
+
+/// 核心三明治上下文总控结构体 (State Root)
+/// 严格遵循三明治分层拓扑，将静态不可变前缀、只追加对话流水与动态尾部状态卡解耦。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandwichContext {
+    // ════════════════════════════════════════════════════════════════════
+    // 🍞 1. 顶层面包 (Static Prefix Zone - 100% 静态，锁死前缀缓存)
+    // ════════════════════════════════════════════════════════════════════
+    /// 系统核心契约与安全规则 (core_logic.md + 内置工具手册)
     pub system_prompt: String,
+    /// 用户的终极任务目标 (如 "部署 Rust + PostgreSQL 项目并在 8080 启动")
     pub user_goal: String,
-    /// 核心记忆库：严格采用 BTreeMap 保证跨平台与跨进程序列化字节绝对确定！
-    pub memories: BTreeMap<String, String>,
-    pub failed_attempts: Vec<FailedAttempt>,
-    pub side_effects: Vec<SideEffectRecord>,
-    pub todo_list: Vec<TodoItem>,
+    /// 当前按需展开的活跃工具/Skill 规格详情 (通过 next_tool_hint 懒加载，其余时间为空)
+    pub active_tool_detail: String,
+
+    // ════════════════════════════════════════════════════════════════════
+    // 🥩 2. 中间夹心 (Append-Only Conversation Stream - 线性追加流水)
+    // ════════════════════════════════════════════════════════════════════
+    /// 历史对话回合流 (仅包含 action_brief 与脱水采样后的 execution feedback)
     pub turns_history: Vec<ChatMessage>,
-    pub current_observation: String,
+
+    // ════════════════════════════════════════════════════════════════════
+    // 🍞 3. 底层面包 (Dynamic Tail State Card - 动态聚合状态卡，压在最末端)
+    // ════════════════════════════════════════════════════════════════════
+    /// 活动计划状态机 (聚合 plan_id, title 与自增计数器)
+    #[serde(default)]
+    pub plan_state: PlanState,
+    /// 核心事实便签库 (严格 BTreeMap 字典序，保证序列化字节绝对确定)
+    pub memories: BTreeMap<String, String>,
+    /// 避坑指南 (记录近期失败原因与规避策略，最多保留 6 条)
+    pub failed_attempts: Vec<FailedAttempt>,
+    /// 不可逆外部操作安全台账 (记录 shell_exec/文件修改等写操作)
+    pub side_effects: Vec<SideEffectRecord>,
+    /// 当前任务待办清单 (Todo items)
+    pub todo_list: Vec<TodoItem>,
+    /// 全局阶段进度与策略宏观摘要 (~100 tokens，每轮更新)
     pub progress_summary: String,
-    #[serde(default)]
-    pub active_plan_id: Option<String>,
-    #[serde(default)]
-    pub active_plan_title: Option<String>,
-    #[serde(default)]
-    pub next_plan_index: usize,
+    /// 外部独立任务数据区目录引用 (轻量 schema 与行数，完整数据行在 SQLite)
     #[serde(default)]
     pub task_resources: Vec<TaskResourceRef>,
+    /// 当前最新一次工具执行的环境观测结果 (Observation)
+    pub current_observation: String,
+
+    // ════════════════════════════════════════════════════════════════════
+    // ⚙️ 4. 运行时调度元数据 (Runtime Metadata)
+    // ════════════════════════════════════════════════════════════════════
     pub active_tool: Option<String>,
-    pub active_tool_detail: String,
     pub carry_memories: bool,
-    /// 当前任务所用模型的上下文窗口（tokens）。
+    /// 当前任务所用模型的上下文窗口（tokens）
     #[serde(default)]
     pub context_window_tokens: usize,
 }
@@ -70,9 +145,7 @@ impl SandwichContext {
             turns_history: Vec::new(),
             current_observation: String::new(),
             progress_summary: String::new(),
-            active_plan_id: None,
-            active_plan_title: None,
-            next_plan_index: 0,
+            plan_state: PlanState::new(),
             task_resources: Vec::new(),
             active_tool: None,
             active_tool_detail: String::new(),
@@ -81,8 +154,19 @@ impl SandwichContext {
         }
     }
 
-    /// 将指令归属到稳定计划节点。模型未填字段时继续最近计划；只有显式切换标题或 id 才创建新父节点。
+    pub fn active_plan_id(&self) -> Option<&str> {
+        self.plan_state.active_id.as_deref()
+    }
+
+    pub fn active_plan_title(&self) -> Option<&str> {
+        self.plan_state.active_title.as_deref()
+    }
+
     pub fn resolve_plan(&mut self, instruction: &AgentInstruction) -> (String, String) {
+        self.ensure_plan(instruction)
+    }
+
+    pub fn ensure_plan(&mut self, instruction: &AgentInstruction) -> (String, String) {
         let requested_id = instruction
             .plan_id
             .as_deref()
@@ -95,37 +179,8 @@ impl SandwichContext {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        if let Some(id) = requested_id {
-            let title = requested_title
-                .or_else(|| self.active_plan_title.clone())
-                .unwrap_or_else(|| self.user_goal.clone());
-            self.active_plan_id = Some(id.clone());
-            self.active_plan_title = Some(title.clone());
-            return (id, title);
-        }
-        if let Some(title) = requested_title {
-            if self.active_plan_title.as_deref() == Some(title.as_str()) {
-                if let Some(id) = self.active_plan_id.clone() {
-                    return (id, title);
-                }
-            }
-            self.next_plan_index = self.next_plan_index.saturating_add(1);
-            let id = format!("plan-{}", self.next_plan_index);
-            self.active_plan_id = Some(id.clone());
-            self.active_plan_title = Some(title.clone());
-            return (id, title);
-        }
-        if let (Some(id), Some(title)) =
-            (self.active_plan_id.clone(), self.active_plan_title.clone())
-        {
-            return (id, title);
-        }
-        self.next_plan_index = self.next_plan_index.saturating_add(1);
-        let id = format!("plan-{}", self.next_plan_index);
-        let title = self.user_goal.clone();
-        self.active_plan_id = Some(id.clone());
-        self.active_plan_title = Some(title.clone());
-        (id, title)
+
+        self.plan_state.resolve_plan(requested_id, requested_title, &self.user_goal)
     }
 
     pub fn set_task_resources(&mut self, resources: Vec<TaskResourceRef>) {

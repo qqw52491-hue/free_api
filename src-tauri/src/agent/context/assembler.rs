@@ -49,7 +49,7 @@ impl SandwichContext {
         let mut bottom_state_card = String::new();
 
         // (1) 阶段计划
-        if let (Some(id), Some(title)) = (&self.active_plan_id, &self.active_plan_title) {
+        if let (Some(id), Some(title)) = (&self.plan_state.active_id, &self.plan_state.active_title) {
             bottom_state_card.push_str(&format!(
                 "【当前活动计划】id={} | title={}\n如下一步仍属于此阶段，复用相同 plan_id/plan_title；只有真正切换工作阶段才创建新计划。\n\n",
                 id, title
