@@ -15,6 +15,18 @@
 
 ---
 
+## 🚦 系统各模块实现状态 (Implementation Status)
+
+| 架构分层 | 核心模块 | 状态 | 验证与测试 |
+|:---|:---|:---:|:---|
+| **一、设计哲学与基座** | 理论分层、拒 God Table、确定性前缀 | ✅ **生产就绪** | 1,000 次指纹测试 |
+| **二、三明治上下文引擎** | 冻结静态区 + 纯追加流水 + 尾部状态卡 | ✅ **生产就绪** | 48 个单元测试全绿 |
+| **三、三级检索体系** | 定长路标 + SQLite FTS5 + 统一 `search` | 🚧 **设计定稿 (Roadmap RFC)** | 规划中，下一步落地 |
+| **四、自我改进闭环** | Sleep-Time Compute + Lesson 抽取与门禁 | 🚧 **设计定稿 (Roadmap RFC)** | 规划中，下两步落地 |
+| **五、人机协同 (HITL)** | 异步抢方向盘 (`try_recv`) + AI 阻塞求助 | ✅ **生产就绪** | 状态机测试覆盖 |
+
+---
+
 ## 📖 目录
 
 - [一、设计哲学与理论背景](#一设计哲学与理论背景)
@@ -29,11 +41,11 @@
   - [4. 混合落盘与零冗余存储 (Hybrid Storage & Disk Spilling)](#4-混合落盘与零冗余存储-hybrid-storage--disk-spilling)
   - [5. 核心记忆安检门与双向反馈 (Memory Security Gatekeeper)](#5-核心记忆安检门与双向反馈-memory-security-gatekeeper)
   - [6. 出口级消息角色合并 (Same-Role Consolidation)](#6-出口级消息角色合并-same-role-consolidation)
-- [三、三级读路径检索体系与联邦检索 (Federated Retrieval)](#三三级读路径检索体系与联邦检索-federated-retrieval)
+- [三、🚧【规划中】三级读路径检索体系与联邦检索 (Federated Retrieval RFC)](#三🚧规划中三级读路径检索体系与联邦检索-federated-retrieval-rfc)
   - [1. 检索上限由“写”决定：定长路标 (Signpost)](#1-检索上限由写决定定长路标-signpost)
   - [2. 三级读路径拓扑 (Three-Tier Read Path)](#2-三级读路径拓扑-three-tier-read-path)
   - [3. 统一检索接口设计 `search(...)`](#3-统一检索接口设计-search)
-- [四、自我改进闭环：经验蒸馏与淘汰门禁 (Experience Distillation)](#四自我改进闭环经验蒸馏与淘汰门禁-experience-distillation)
+- [四、🚧【规划中】自我改进闭环：经验蒸馏与淘汰门禁 (Experience Distillation RFC)](#四🚧规划中自我改进闭环经验蒸馏与淘汰门禁-experience-distillation-rfc)
   - [1. Sleep-Time Compute（睡眠期异步计算）](#1-sleep-time-compute睡眠期异步计算)
   - [2. Hindsight Lesson 结构化抽取](#2-hindsight-lesson-结构化抽取)
   - [3. 淘汰门禁与防止自我污染](#3-淘汰门禁与防止自我污染)
@@ -145,7 +157,7 @@ $$\text{核心监控} = \text{每步重算的 Miss Token 绝对数量} + \text{�
 ### 2. 字节级确定性保证 (Byte-Level Determinism)
 - **从根源消除 Hash 随机性**：Rust 标准库的 `HashMap` 采用 SipHash 带有随机种子，同一结构体在不同进程或不同运行中序列化出的 JSON Key 顺序完全随机，会导致前缀缓存命中率暴跌为 0。
 - **全面的 `BTreeMap` 迁移**：所有暴露给 Prompt 序列化的键值对（如 `memories`）统一采用 `BTreeMap<String, String>`，保证内存与序列化层面的绝对字母序。
-- **分段指纹压力测试**：内置 `ContextFingerprint`（SHA-256 分段快照），经过 **1,000 次高并发迭代测试**，确保组装出的 Prompt 前缀字节级一致（100% Deterministic）。
+- **分段指纹压力测试**：内置 `ContextFingerprint`（SHA-256 分段快照），经过 **1,000 次顺序迭代压力测试**，确保组装出的 Prompt 前缀字节级一致（100% Deterministic）。
 
 ---
 
@@ -174,7 +186,7 @@ $$\text{核心监控} = \text{每步重算的 Miss Token 绝对数量} + \text{�
 ### 4. 混合落盘与零冗余存储 (Hybrid Storage & Disk Spilling)
 单步工具执行可能产生数十万字符的原始日志（如庞大的 DOM 树或编译输出）：
 
-1. **入口硬截断 (Ingress Hard-Cap)**：单步输出超过 **12,000 字符 (~4,000 Tokens)** 立即进行安全截断。
+1. **入口硬截断 (Ingress Hard-Cap)**：单步输出超过 **12,000 字符 (约 4,000~9,000 Tokens)** 立即进行安全截断。
 2. **Head + Tail 智能采样**：提取头部 300 字符 + 尾部 500 字符 + 关键报错行，注入历史上下文，并附带唯一的 `output_id`。
 3. **条件式磁盘溢出落盘**：
    - 输出 > 2,000 字符时，全量写入系统本地文件：`~/.local/share/free-api-chat/outputs/{output_id}.log`。
@@ -201,7 +213,10 @@ SandwichAgent 在 `assemble_messages()` 的最终出口处，通过纯函数 `co
 
 ---
 
-## 三、三级读路径检索体系与联邦检索 (Federated Retrieval)
+## 三、🚧【规划中】三级读路径检索体系与联邦检索 (Federated Retrieval RFC)
+
+> [!NOTE]
+> 本章为系统下一阶段的**架构设计蓝图 (Design RFC)**。定义了后续从“ID 反查”向“主动联邦检索”演进的完整技术规范。
 
 ### 1. 检索上限由“写”决定：定长路标 (Signpost)
 检索的召回率并不取决于搜索算法有多玄妙，而是取决于**写入时是否已经是结构化信息**。
@@ -253,7 +268,10 @@ pub struct SearchQuery {
 
 ---
 
-## 四、自我改进闭环：经验蒸馏与淘汰门禁 (Experience Distillation)
+## 四、🚧【规划中】自我改进闭环：经验蒸馏与淘汰门禁 (Experience Distillation RFC)
+
+> [!NOTE]
+> 本章为系统的**经验提炼与反思闭环设计蓝图 (Design RFC)**。旨在解决长程任务中的自我纠错与经验跨任务复用问题。
 
 ### 1. Sleep-Time Compute（睡眠期异步计算）
 避免在 Agent 热路径（Turn-Loop）中进行耗时的反思与记忆重构。在用户阅读回复或空闲的“睡眠期”，后台异步任务触发经验提炼，将主流程开销降为 0。
