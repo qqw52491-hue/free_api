@@ -34,6 +34,7 @@ dirs-next = "2"
 serde_yaml = "0.9"
 futures = "0.3"
 sysinfo = "0.38.4"
+sha2 = "0.10"
 
 # 仅 `cargo build --features wdio` 的测试构建载入；正常开发与发布版均不包含 WebDriver。
 [features]

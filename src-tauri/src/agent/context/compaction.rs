@@ -1,68 +1,81 @@
+use crate::agent::context::budget::{estimate_tokens, ContextBudget};
 use crate::agent::context::types::{ChatMessage, SandwichContext};
 use serde_json::json;
 
-/// 中英文混合内容的字符数 → Token 估算系数
-/// 纯代码: char/4；纯中文: char*1.5；混合取中间值 3.5（稍微高估，保证安全）
-const CHARS_PER_TOKEN: f64 = 3.5;
+/// 离线可单测的 Summarizer Trait
+pub trait Summarizer: Send + Sync {
+    fn summarize(&self, messages: &[ChatMessage]) -> Result<String, String>;
+}
 
-/// 历史消息占整个上下文窗口的比例上限
-/// 剩余留给系统提示词、状态卡、输出余量
-const HISTORY_BUDGET_RATIO: f64 = 0.60;
-/// 高水位：历史占用超过分配预算的 80% 时触发压缩
-const HIGH_WATERMARK_RATIO: f64 = 0.80;
-/// 低水位：压缩目标，降至分配预算的 50%
-const LOW_WATERMARK_RATIO: f64 = 0.50;
-/// 未配置 context_window 时的保守默认小窗口（32K tokens）
-const DEFAULT_CONTEXT_WINDOW: usize = 32_768;
+/// 默认的 0 外部依赖规则型总结器（100% 永不失败的硬保底降级路径）
+pub struct RuleBasedSummarizer;
 
-fn history_char_count(history: &[ChatMessage]) -> usize {
-    history
-        .iter()
-        .map(|m| match &m.content {
-            serde_json::Value::String(s) => s.len(),
-            other => other.to_string().len(),
-        })
-        .sum()
+impl Summarizer for RuleBasedSummarizer {
+    fn summarize(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        let mut lines = Vec::new();
+        for msg in messages {
+            let content_str = match &msg.content {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let mut out_ref = String::new();
+            if let Some(pos) = content_str.find("output_id: ") {
+                let after = &content_str[pos + 11..];
+                let id = after.lines().next().unwrap_or("").trim();
+                if !id.is_empty() {
+                    out_ref = format!(" (output_id={})", id);
+                }
+            }
+            let first_line = content_str.lines().next().unwrap_or("").trim();
+            if !first_line.is_empty() {
+                let preview: String = first_line.chars().take(100).collect();
+                lines.push(format!("- [{}]{} {}", msg.role, out_ref, preview));
+            }
+        }
+        Ok(lines.join("\n"))
+    }
 }
 
 impl SandwichContext {
     /// 计算当前属于历史的有效 Token 估算量
     pub fn history_estimated_tokens(&self) -> usize {
-        let chars = history_char_count(&self.turns_history);
-        (chars as f64 / CHARS_PER_TOKEN).ceil() as usize
+        self.turns_history
+            .iter()
+            .map(|m| match &m.content {
+                serde_json::Value::String(s) => estimate_tokens(s),
+                other => estimate_tokens(&other.to_string()),
+            })
+            .sum()
     }
 
-    /// 根据模型上下文窗口动态计算压缩阈值（单位：Token）
-    fn history_budget_tokens(&self) -> usize {
-        let window = if self.context_window_tokens > 0 {
-            self.context_window_tokens
-        } else {
-            DEFAULT_CONTEXT_WINDOW
-        };
-        (window as f64 * HISTORY_BUDGET_RATIO) as usize
+    /// 动态计算当前会话的安全预算
+    pub fn current_budget(&self) -> ContextBudget {
+        ContextBudget::derive(
+            self.context_window_tokens,
+            ContextBudget::DEFAULT_MAX_OUTPUT_TOKENS,
+            self.system_prompt.len(),
+        )
     }
 
-    /// 滞后满载检查 + 请求外层在 add_step 后调用。
-    /// 当历史 Token 超过高水位时，自动将最早的消息批量定型压缩为不可变的单行摘要。
+    /// 滞后高低水位 + 规则降级压缩引擎
     pub fn maybe_compact_history(&mut self) {
-        let budget = self.history_budget_tokens();
-        let high_mark = (budget as f64 * HIGH_WATERMARK_RATIO) as usize;
-        let low_mark = (budget as f64 * LOW_WATERMARK_RATIO) as usize;
+        let budget = self.current_budget();
+        let current_tokens = self.history_estimated_tokens();
 
-        let current = self.history_estimated_tokens();
-        if current <= high_mark {
-            return; // 在安全范围内，无需压缩
+        // 未达高水位，绝不轻易压缩（保护前缀缓存）
+        if current_tokens <= budget.high_watermark_tokens {
+            return;
         }
 
         println!(
-            "📦 [Hysteresis Compact] 历史 ~{} tokens 超过高水位 {} tokens，开始定型压缩...",
-            current, high_mark
+            "📦 [Compaction Engine] 历史 ~{} tokens 触碰高水位线 ({} tokens)，启动自适应归档压缩...",
+            current_tokens, budget.high_watermark_tokens
         );
 
         let mut to_compact: Vec<ChatMessage> = Vec::new();
-        // 自前往后移除最早的消息，直到降至低水位
+        // 自前往后移除最早的消息，直到降至安全低水位
         while !self.turns_history.is_empty() {
-            if self.history_estimated_tokens() <= low_mark {
+            if self.history_estimated_tokens() <= budget.low_watermark_tokens {
                 break;
             }
             to_compact.push(self.turns_history.remove(0));
@@ -72,43 +85,53 @@ impl SandwichContext {
             return;
         }
 
-        // 生成定型归档卡：每条消息取第一行预览，截到 120 字符
-        let mut lines = Vec::new();
-        for msg in &to_compact {
-            let content_str = match &msg.content {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            let first_line = content_str.lines().next().unwrap_or("").trim();
-            if !first_line.is_empty() {
-                let preview: String = first_line.chars().take(120).collect();
-                lines.push(format!("- [{}] {}", msg.role, preview));
-            }
-        }
+        // 使用零依赖规则型生成器进行安全归档（永不崩溃）
+        let summarizer = RuleBasedSummarizer;
+        let archive_text = summarizer
+            .summarize(&to_compact)
+            .unwrap_or_else(|_| "- [历史执行记录已安全落盘 SQLite]".to_string());
 
-        if !lines.is_empty() {
+        if !archive_text.is_empty() {
             let compact_card = ChatMessage {
                 role: "user".to_string(),
                 content: json!(format!(
-                    "【历史早期执行归档（已定型压缩，完整原文可通过 output_id + get_step_output 查询）】\n{}\n（归档 {} 条，当前窗口周期: {} tokens）",
-                    lines.join("\n"),
+                    "【历史早期执行归档（已定型压缩，完整原文可通过 output_id 查询）】\n{}\n（已归档 {} 条步骤，当前上下文窗口: {} tokens）",
+                    archive_text,
                     to_compact.len(),
-                    self.context_window_tokens
+                    budget.context_window_tokens
                 )),
             };
             self.turns_history.insert(0, compact_card);
         }
 
+        let after_tokens = self.history_estimated_tokens();
         println!(
-            "✅ [Compact 完成] {} 条 → 1 归档卡，压缩后历史约 {} tokens（预算 {} tokens）",
-            to_compact.len(),
-            self.history_estimated_tokens(),
-            budget
+            "✅ [Compaction Engine] 压缩完成：历史 Tokens 从 {} 降至 {} (低水位目标: {})",
+            current_tokens, after_tokens, budget.low_watermark_tokens
         );
     }
+}
 
-    /// 已废弃：保留签名实现兼容旧调用者（目前未使用）
-    pub fn compact_old_history(&mut self, _compact_count: usize) {
-        self.maybe_compact_history();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rule_based_summarizer_never_fails() {
+        let summarizer = RuleBasedSummarizer;
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: json!("计划: 测试 | 工具: shell_exec | 动作: cargo test"),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: json!("【执行输出】\noutput_id: 89a7\nFinished 0 errors"),
+            },
+        ];
+
+        let summary = summarizer.summarize(&messages).unwrap();
+        assert!(summary.contains("shell_exec"));
+        assert!(summary.contains("output_id=89a7"));
     }
 }

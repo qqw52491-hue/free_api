@@ -5,7 +5,6 @@ use crate::db::DbState;
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
@@ -136,7 +135,7 @@ impl PendingToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DurableAgentContext {
     pub user_goal: String,
-    pub memories: HashMap<String, String>,
+    pub memories: std::collections::BTreeMap<String, String>,
     /// 任务数据区目录，数据行仍由 agent_task_records 独立实时持久化。
     #[serde(default)]
     pub task_resources: Vec<TaskResourceRef>,

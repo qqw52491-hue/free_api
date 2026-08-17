@@ -2,19 +2,42 @@ use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: serde_json::Value, // 改为 Value，支持 String 或 Array (多模态)
+    pub content: serde_json::Value, // 支持 String 或 Array (多模态)
+}
+
+/// 失败教训记录（用于防止大模型在长任务中重复尝试已知失败的方法）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FailedAttempt {
+    pub step_id: usize,
+    pub tool: String,
+    pub action: String,
+    pub error_summary: String,
+    #[serde(default)]
+    pub output_id: Option<String>,
+}
+
+/// 不可逆动作台账（已执行的破坏性或外部影响操作，绝不淘汰）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SideEffectRecord {
+    pub step_id: usize,
+    pub tool: String,
+    pub description: String,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandwichContext {
     pub system_prompt: String,
     pub user_goal: String,
-    pub memories: HashMap<String, String>,
+    /// 核心记忆库：严格采用 BTreeMap 保证跨平台与跨进程序列化字节绝对确定！
+    pub memories: BTreeMap<String, String>,
+    pub failed_attempts: Vec<FailedAttempt>,
+    pub side_effects: Vec<SideEffectRecord>,
     pub todo_list: Vec<TodoItem>,
     pub turns_history: Vec<ChatMessage>,
     pub current_observation: String,
@@ -31,8 +54,6 @@ pub struct SandwichContext {
     pub active_tool_detail: String,
     pub carry_memories: bool,
     /// 当前任务所用模型的上下文窗口（tokens）。
-    /// 由 run_agent_main_loop 在构建 context 时从 DB 读取并注入，
-    /// 用于历史压缩高低水位的动态计算。 0 表示未配置时使用保守默认。
     #[serde(default)]
     pub context_window_tokens: usize,
 }
@@ -42,7 +63,9 @@ impl SandwichContext {
         Self {
             system_prompt,
             user_goal,
-            memories: HashMap::new(),
+            memories: BTreeMap::new(),
+            failed_attempts: Vec::new(),
+            side_effects: Vec::new(),
             todo_list: Vec::new(),
             turns_history: Vec::new(),
             current_observation: String::new(),
@@ -109,6 +132,12 @@ impl SandwichContext {
         self.task_resources = resources;
     }
 
+    pub fn update_memory(&mut self, key: String, value: String) {
+        if !key.trim().is_empty() && !value.trim().is_empty() {
+            self.memories.insert(key, value);
+        }
+    }
+
     pub fn update_memories(&mut self, updates: Vec<crate::agent::types::MemoryItem>) {
         for item in updates {
             if item.key.trim().is_empty() || item.value.trim().is_empty() {
@@ -117,6 +146,40 @@ impl SandwichContext {
             }
             self.memories.insert(item.key, item.value);
         }
+    }
+
+    pub fn record_failed_attempt(
+        &mut self,
+        step_id: usize,
+        tool: String,
+        action: String,
+        error_summary: String,
+        output_id: Option<String>,
+    ) {
+        self.failed_attempts.push(FailedAttempt {
+            step_id,
+            tool,
+            action,
+            error_summary,
+            output_id,
+        });
+        if self.failed_attempts.len() > 6 {
+            self.failed_attempts.remove(0);
+        }
+    }
+
+    pub fn record_side_effect(
+        &mut self,
+        step_id: usize,
+        tool: String,
+        description: String,
+    ) {
+        self.side_effects.push(SideEffectRecord {
+            step_id,
+            tool,
+            description,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        });
     }
 
     pub fn update_observation(&mut self, obs: String) {

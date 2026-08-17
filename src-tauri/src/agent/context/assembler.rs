@@ -1,3 +1,6 @@
+use crate::agent::context::audit::AuditLedger;
+use crate::agent::context::memory::MemoryManager;
+use crate::agent::context::render::ContextRenderer;
 use crate::agent::context::types::{ChatMessage, SandwichContext};
 use serde_json::json;
 
@@ -25,6 +28,14 @@ impl SandwichContext {
             });
         }
 
+        // 终极目标（在单次回合内绝对静态，置于静态区末尾稳吃长缓存）
+        if !self.user_goal.is_empty() {
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!("【用户终极任务目标】\n{}\n", self.user_goal)),
+            });
+        }
+
         // ════════════════════════════════════════════════════════════════
         // 🥩 2. 中间夹心（纯 Append-only 线性历史流水）
         // 随着任务一步步向后追加，无动态插入，完美覆盖主流大模型的前缀缓存
@@ -32,15 +43,12 @@ impl SandwichContext {
         messages.extend(self.turns_history.clone());
 
         // ════════════════════════════════════════════════════════════════
-        // 🍞 3. 底层面包（状态卡 + 任务目标 + 最新观测）
-        // 变化点钉死在末尾，绝对不砸前面的长缓存；且离输出端最近，强化注意力防遗忘
+        // 🍞 3. 底层面包（动态状态卡 + 避坑台账 + 不可逆操作 + 最新观测）
+        // 变化点集中在末尾，绝对不砸前面的长缓存；且离输出端最近，强化注意力防遗忘
         // ════════════════════════════════════════════════════════════════
         let mut bottom_state_card = String::new();
 
-        // (1) 终极目标（置于末尾状态卡首位，近因效应强化）
-        bottom_state_card.push_str(&format!("【用户终极任务目标】\n{}\n\n", self.user_goal));
-
-        // (2) 阶段计划
+        // (1) 阶段计划
         if let (Some(id), Some(title)) = (&self.active_plan_id, &self.active_plan_title) {
             bottom_state_card.push_str(&format!(
                 "【当前活动计划】id={} | title={}\n如下一步仍属于此阶段，复用相同 plan_id/plan_title；只有真正切换工作阶段才创建新计划。\n\n",
@@ -48,7 +56,7 @@ impl SandwichContext {
             ));
         }
 
-        // (3) 全局进度摘要
+        // (2) 全局进度摘要
         if !self.progress_summary.is_empty() {
             bottom_state_card.push_str(&format!(
                 "【全局进度与策略摘要】\n{}\n\n",
@@ -56,62 +64,30 @@ impl SandwichContext {
             ));
         }
 
-        // (4) 会话任务数据区目录 (TaskStore 资源摘要)
-        if !self.task_resources.is_empty() {
-            let resources: Vec<String> = self
-                .task_resources
-                .iter()
-                .take(20)
-                .map(|resource| {
-                    let summary: String = resource.summary.chars().take(240).collect();
-                    format!(
-                        "- id={} | kind={} | label={} | rows={} | status={} | summary={}",
-                        resource.resource_id,
-                        resource.kind,
-                        resource.label,
-                        resource.row_count,
-                        resource.status,
-                        summary
-                    )
-                })
-                .collect();
-            bottom_state_card.push_str(&format!(
-                "【会话任务数据区目录】\n{}\n(记录本体已独立持久化，默认不会发给你；需要时调用内部 task_store 的 list_records 或 get_record 分页查询。)\n\n",
-                resources.join("\n")
-            ));
+        // (3) 避坑指南（失败教训）
+        bottom_state_card.push_str(&ContextRenderer::render_failed_attempts(&self.failed_attempts));
+
+        // (4) 不可逆操作安全台账
+        bottom_state_card.push_str(&AuditLedger::render_ledger(&self.side_effects));
+
+        // (5) 核心事实记忆库（按 BTreeMap 严格确定性字母序）
+        bottom_state_card.push_str(&MemoryManager::render_memory_card(&self.memories));
+
+        // (6) 会话任务数据区目录 (TaskStore 资源摘要)
+        bottom_state_card.push_str(&ContextRenderer::render_task_resources(&self.task_resources));
+
+        // (7) 任务清单 (Todo List)
+        bottom_state_card.push_str(&ContextRenderer::render_todo_list(&self.todo_list));
+
+        let trimmed_bottom = bottom_state_card.trim_end();
+        if !trimmed_bottom.is_empty() {
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(trimmed_bottom),
+            });
         }
 
-        // (5) 冷存储记忆库 (L1 Key-Value)
-        if !self.memories.is_empty() {
-            if self.carry_memories {
-                let facts: Vec<String> = self
-                    .memories
-                    .iter()
-                    .map(|(k, v)| format!("  {}: {}", k, v))
-                    .collect();
-                bottom_state_card.push_str(&format!(
-                    "【冷存储记忆库 (已全量展开)】\n{}\n\n",
-                    facts.join("\n")
-                ));
-            } else {
-                let keys: Vec<String> = self.memories.keys().cloned().collect();
-                bottom_state_card.push_str(&format!(
-                    "【冷存储记忆库索引 (当前已折叠)】\n当前包含键值: [{}]\n(如需提取具体数据进行处理，请在 JSON 中设置 \"require_memory\": true，下一轮将全量展开)\n\n",
-                    keys.join(", ")
-                ));
-            }
-        }
-
-        // (6) 任务清单 (Todo List)
-        let todo_json = serde_json::to_string_pretty(&self.todo_list).unwrap_or_default();
-        bottom_state_card.push_str(&format!("【当前任务面板 (Todo List)】\n{}\n\n", todo_json));
-
-        messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: json!(bottom_state_card.trim_end()),
-        });
-
-        // (7) 当前最新环境观测 (Observation)
+        // (8) 当前最新环境观测 (Observation)
         if !self.current_observation.is_empty() {
             messages.push(ChatMessage {
                 role: "user".to_string(),
@@ -122,10 +98,10 @@ impl SandwichContext {
             });
         }
 
-        // (8) 最终行动约束与决策指令
+        // (9) 最终行动约束与决策指令
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: json!("请基于上述所有上下文环境，思考并执行下一步操作。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格符合白名单。注意：你必须先在 reflection 字段审视上一步的结果与当前环境。")
+            content: json!(ContextRenderer::render_decision_instruction()),
         });
 
         messages
