@@ -133,15 +133,17 @@ impl SandwichContext {
     }
 
     pub fn update_memory(&mut self, key: String, value: String) {
-        if !key.trim().is_empty() && !value.trim().is_empty() {
-            self.memories.insert(key, value);
+        if let Err(reason) = crate::agent::context::memory::MemoryManager::is_safe_memory(&key, &value) {
+            println!("⚠️ 记忆项写入被安全拦截: {} (key: '{}')", reason, key);
+            return;
         }
+        self.memories.insert(key, value);
     }
 
     pub fn update_memories(&mut self, updates: Vec<crate::agent::types::MemoryItem>) {
         for item in updates {
-            if item.key.trim().is_empty() || item.value.trim().is_empty() {
-                println!("⚠️ 跳过缺少 key 或 value 的无效记忆项");
+            if let Err(reason) = crate::agent::context::memory::MemoryManager::is_safe_memory(&item.key, &item.value) {
+                println!("⚠️ 记忆项写入被安全拦截: {} (key: '{}')", reason, item.key);
                 continue;
             }
             self.memories.insert(item.key, item.value);
@@ -226,3 +228,19 @@ impl SandwichContext {
         self.turns_history.push(msg);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_memory_blocks_sensitive_secrets() {
+        let mut ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        ctx.update_memory("api_key".to_string(), "sk-1234567890abcdef".to_string());
+        assert!(!ctx.memories.contains_key("api_key"), "Sensitive API key must be blocked!");
+
+        ctx.update_memory("db_port".to_string(), "5432".to_string());
+        assert_eq!(ctx.memories.get("db_port").map(|s| s.as_str()), Some("5432"));
+    }
+}
+

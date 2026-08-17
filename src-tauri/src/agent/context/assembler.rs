@@ -100,11 +100,33 @@ impl SandwichContext {
 
         final_user_parts.push(ContextRenderer::render_decision_instruction().to_string());
 
-        messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: json!(final_user_parts.join("\n\n")),
-        });
-
-        messages
+        // ════════════════════════════════════════════════════════════════
+        // 🔄 出口统一合并：对所有相邻的同 role 消息做单趟无损归并
+        // 彻底杜绝连续 2 条 user 或连续 2 条 assistant 导致 Anthropic 422 报错
+        // ════════════════════════════════════════════════════════════════
+        consolidate_consecutive_messages(messages)
     }
+}
+
+/// 纯函数：将消息队列中连续相同角色的文本消息用换行合并为一条
+fn consolidate_consecutive_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut consolidated: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+
+    for msg in messages {
+        if let Some(last) = consolidated.last_mut() {
+            if last.role == msg.role {
+                match (&mut last.content, &msg.content) {
+                    (serde_json::Value::String(prev_str), serde_json::Value::String(curr_str)) => {
+                        prev_str.push_str("\n\n");
+                        prev_str.push_str(curr_str);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        consolidated.push(msg);
+    }
+
+    consolidated
 }

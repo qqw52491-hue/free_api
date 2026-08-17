@@ -69,7 +69,7 @@ impl ContextBudget {
     pub fn derive(
         context_window: usize,
         max_output: usize,
-        static_prefix_chars: usize,
+        static_prefix_tokens: usize,
     ) -> Self {
         let window = if context_window > 0 {
             context_window
@@ -82,10 +82,6 @@ impl ContextBudget {
             Self::DEFAULT_MAX_OUTPUT_TOKENS
         };
 
-        // 直接算术估算：system_prompt 字符数 → token 数
-        // 采用与 estimate_tokens() 一致的 ASCII 比例（0.28 tok/char）+ 15% 安全冗余
-        // 避免分配一个巨大的空格字符串只为走一次 estimate_tokens
-        let static_prefix_tokens = ((static_prefix_chars as f64 * 0.28) * 1.15).ceil() as usize;
         let tail_state_tokens = Self::DEFAULT_TAIL_STATE_TOKENS;
 
         // 安全余量：总窗口的 15%

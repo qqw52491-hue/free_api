@@ -50,10 +50,11 @@ impl SandwichContext {
 
     /// 动态计算当前会话的安全预算
     pub fn current_budget(&self) -> ContextBudget {
+        let static_prefix_tokens = estimate_tokens(&self.system_prompt);
         ContextBudget::derive(
             self.context_window_tokens,
             ContextBudget::DEFAULT_MAX_OUTPUT_TOKENS,
-            self.system_prompt.len(),
+            static_prefix_tokens,
         )
     }
 

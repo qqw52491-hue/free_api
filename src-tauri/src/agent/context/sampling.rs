@@ -55,8 +55,8 @@ impl SandwichContext {
 
         let feedback_str = if is_truncated {
             format!(
-                "【执行输出采样 (v{})】\noutput_id: {}\noriginal_chars: {}\ntruncated: true\n{}\n\n[省略了部分字符。完整原始输出已落盘至本地文本文件 (outputs/{}.log)，可使用 grep/read 或 internal_tool: get_step_output(output_id=\"{}\") 精准查看]",
-                SAMPLER_VERSION, output_id, original_chars, history_feedback, output_id, output_id
+                "【执行输出采样 (v{})】\noutput_id: {}\noriginal_chars: {}\ntruncated: true\n{}\n\n[提示: 输出已采样折叠部分字符。完整原始输出可在需要时调用 internal_tool: get_step_output(output_id=\"{}\") 精准获取]",
+                SAMPLER_VERSION, output_id, original_chars, history_feedback, output_id
             )
         } else {
             format!(

@@ -26,9 +26,8 @@ impl ContextFingerprint {
         let mut history_step_hashes = Vec::new();
         let mut prefix_buffer = String::new();
 
-        let mut system_prompt_hash = String::new();
-        let mut active_tool_hash = String::new();
-        let mut bottom_state_hash = String::new();
+        let system_prompt_hash = sha256_hex(&context.system_prompt);
+        let active_tool_hash = sha256_hex(&context.active_tool_detail);
 
         for (idx, msg) in messages.iter().enumerate() {
             let content_str = match &msg.content {
@@ -37,20 +36,19 @@ impl ContextFingerprint {
             };
 
             let step_hash = sha256_hex(&content_str);
-
-            if idx == 0 {
-                system_prompt_hash = step_hash.clone();
+            if idx < messages.len().saturating_sub(1) {
                 prefix_buffer.push_str(&content_str);
-            } else if idx == 1 && !context.active_tool_detail.is_empty() {
-                active_tool_hash = step_hash.clone();
-                prefix_buffer.push_str(&content_str);
-            } else if idx == messages.len() - 1 {
-                bottom_state_hash = step_hash.clone();
-            } else {
                 history_step_hashes.push(step_hash);
-                prefix_buffer.push_str(&content_str);
             }
         }
+
+        let bottom_state_hash = messages
+            .last()
+            .map(|m| match &m.content {
+                serde_json::Value::String(s) => sha256_hex(s),
+                other => sha256_hex(&other.to_string()),
+            })
+            .unwrap_or_default();
 
         let combined_prefix_hash = sha256_hex(&prefix_buffer);
 
