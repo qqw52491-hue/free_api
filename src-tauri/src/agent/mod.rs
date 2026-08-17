@@ -1027,7 +1027,16 @@ confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选
             context.todo_list = instruction.todo_update.clone();
         }
         if !instruction.memories_update.is_empty() {
-            context.update_memories(instruction.memories_update.clone());
+            let rejections = context.update_memories(instruction.memories_update.clone());
+            if !rejections.is_empty() {
+                context.turns_history.push(crate::agent::context::types::ChatMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!(format!(
+                        "【⚠️ 记忆安全提示】\n以下记忆项未能存入核心记忆卡：\n{}\n（请勿在记忆中保存明文密钥或超长文本；长数据请存入 TaskStore 数据区）",
+                        rejections.iter().map(|r| format!("- {}", r)).collect::<Vec<_>>().join("\n")
+                    )),
+                });
+            }
             println!("📝 AI 更新了核心记忆: {:?}", instruction.memories_update);
         }
         if let Some(ref summary) = instruction.progress_summary {

@@ -132,22 +132,26 @@ impl SandwichContext {
         self.task_resources = resources;
     }
 
-    pub fn update_memory(&mut self, key: String, value: String) {
+    pub fn update_memory(&mut self, key: String, value: String) -> Result<(), &'static str> {
         if let Err(reason) = crate::agent::context::memory::MemoryManager::is_safe_memory(&key, &value) {
             println!("⚠️ 记忆项写入被安全拦截: {} (key: '{}')", reason, key);
-            return;
+            return Err(reason);
         }
         self.memories.insert(key, value);
+        Ok(())
     }
 
-    pub fn update_memories(&mut self, updates: Vec<crate::agent::types::MemoryItem>) {
+    pub fn update_memories(&mut self, updates: Vec<crate::agent::types::MemoryItem>) -> Vec<String> {
+        let mut rejections = Vec::new();
         for item in updates {
             if let Err(reason) = crate::agent::context::memory::MemoryManager::is_safe_memory(&item.key, &item.value) {
                 println!("⚠️ 记忆项写入被安全拦截: {} (key: '{}')", reason, item.key);
+                rejections.push(format!("记忆项 '{}' 未保存: {}", item.key, reason));
                 continue;
             }
             self.memories.insert(item.key, item.value);
         }
+        rejections
     }
 
     pub fn record_failed_attempt(

@@ -48,9 +48,11 @@ impl SandwichContext {
             .sum()
     }
 
-    /// 动态计算当前会话的安全预算
+    /// 动态计算当前会话的安全预算（全量考虑系统提示词、活跃工具手册及终极目标）
     pub fn current_budget(&self) -> ContextBudget {
-        let static_prefix_tokens = estimate_tokens(&self.system_prompt);
+        let static_prefix_tokens = estimate_tokens(&self.system_prompt)
+            + estimate_tokens(&self.active_tool_detail)
+            + estimate_tokens(&self.user_goal);
         ContextBudget::derive(
             self.context_window_tokens,
             ContextBudget::DEFAULT_MAX_OUTPUT_TOKENS,

@@ -33,10 +33,10 @@ impl MemoryManager {
         if trimmed_key.is_empty() || trimmed_val.is_empty() {
             return Err("Key 或 Value 不能为空");
         }
-        if trimmed_key.len() > 40 {
+        if trimmed_key.chars().count() > 40 {
             return Err("Key 长度不能超过 40 字符");
         }
-        if trimmed_val.len() > 300 {
+        if trimmed_val.chars().count() > 300 {
             return Err("Value 长度不能超过 300 字符（超长数据请存入 TaskStore 数据区）");
         }
 
