@@ -204,6 +204,17 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_agent_step_logs_session
             ON agent_step_logs(session_id, step_id);
+
+        -- FTS5 全文检索引擎：支持按 tool, action, outcome, raw_output 快速 BM25 检索
+        CREATE VIRTUAL TABLE IF NOT EXISTS agent_step_logs_fts USING fts5(
+            output_id UNINDEXED,
+            session_id UNINDEXED,
+            step_id UNINDEXED,
+            tool,
+            action,
+            outcome,
+            content
+        );
     ",
     )?;
 
