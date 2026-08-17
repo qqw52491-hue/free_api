@@ -80,6 +80,12 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
     .collect()
 }
 
+pub fn get_outputs_dir() -> std::path::PathBuf {
+    dirs_next::data_dir()
+        .map(|d| d.join("free-api-chat").join("outputs"))
+        .unwrap_or_else(|| std::path::PathBuf::from("./data/outputs"))
+}
+
 pub fn save_step_output(
     db: &DbState,
     session_id: &str,
@@ -89,6 +95,14 @@ pub fn save_step_output(
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let output_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+
+    // 1. 同时落盘到本地普通文本文件（方便原生命令行 grep/head/tail 与用户直接打开）
+    let outputs_dir = get_outputs_dir();
+    let _ = std::fs::create_dir_all(&outputs_dir);
+    let log_file = outputs_dir.join(format!("{}.log", output_id));
+    let _ = std::fs::write(&log_file, raw_output);
+
+    // 2. 写入 SQLite 索引与备份
     conn.execute(
         "INSERT INTO agent_step_logs (output_id, session_id, step_id, raw_output, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -102,6 +116,15 @@ pub fn get_step_output(
     db: &DbState,
     output_id: &str,
 ) -> Result<String, String> {
+    // 优先尝试从本地文本文件读取（避免大对象走 SQLite 内存转换）
+    let log_file = get_outputs_dir().join(format!("{}.log", output_id));
+    if log_file.exists() {
+        if let Ok(content) = std::fs::read_to_string(&log_file) {
+            return Ok(content);
+        }
+    }
+
+    // 降级从 SQLite 读取
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare("SELECT raw_output FROM agent_step_logs WHERE output_id=?1")
