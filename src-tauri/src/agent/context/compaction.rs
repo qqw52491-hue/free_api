@@ -72,18 +72,28 @@ impl SandwichContext {
             current_tokens, budget.high_watermark_tokens
         );
 
-        let mut to_compact: Vec<ChatMessage> = Vec::new();
-        // 自前往后移除最早的消息，直到降至安全低水位
-        while !self.turns_history.is_empty() {
-            if self.history_estimated_tokens() <= budget.low_watermark_tokens {
+        // 从前往后算出需要压缩的条数：一次性确定 compact_count，
+        // 然后用 drain(0..compact_count) 单次批量移除，避免 remove(0) 反复 O(n) 移动
+        let mut running_tokens: usize = 0;
+        let mut compact_count = 0;
+        for msg in &self.turns_history {
+            let msg_tokens = match &msg.content {
+                serde_json::Value::String(s) => estimate_tokens(s),
+                other => estimate_tokens(&other.to_string()),
+            };
+            if current_tokens.saturating_sub(running_tokens) <= budget.low_watermark_tokens {
                 break;
             }
-            to_compact.push(self.turns_history.remove(0));
+            running_tokens += msg_tokens;
+            compact_count += 1;
         }
 
-        if to_compact.is_empty() {
+        if compact_count == 0 {
             return;
         }
+
+        // 单次 drain：O(n) 一次完成，无论删多少条都只移动一次内存
+        let to_compact: Vec<ChatMessage> = self.turns_history.drain(0..compact_count).collect();
 
         // 使用零依赖规则型生成器进行安全归档（永不崩溃）
         let summarizer = RuleBasedSummarizer;

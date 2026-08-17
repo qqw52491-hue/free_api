@@ -99,19 +99,26 @@ pub fn save_step_output(
     let output_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
-    // 1. 只有当输出长度超过阈值时才自动创建本地磁盘文件（短输出直接留在 SQLite，不产生小文件碎片）
-    if raw_output.chars().count() > DISK_SPILL_THRESHOLD_CHARS {
+    // 超过阈值时自动落盘到本地独立文件，SQLite 只存文件路径标记（避免数据库双份冗余膨胀）
+    let sqlite_content = if raw_output.chars().count() > DISK_SPILL_THRESHOLD_CHARS {
         let outputs_dir = get_outputs_dir();
         let _ = std::fs::create_dir_all(&outputs_dir);
         let log_file = outputs_dir.join(format!("{}.log", output_id));
-        let _ = std::fs::write(&log_file, raw_output);
-    }
+        if std::fs::write(&log_file, raw_output).is_ok() {
+            // SQLite 只存一个短小的路径标记，不再存大文本
+            format!("[[spilled_to_disk:{}]]", log_file.display())
+        } else {
+            // 磁盘写入失败则降级回全量存 SQLite（确保数据不丢）
+            raw_output.to_string()
+        }
+    } else {
+        raw_output.to_string()
+    };
 
-    // 2. 写入 SQLite 索引与备份
     conn.execute(
         "INSERT INTO agent_step_logs (output_id, session_id, step_id, raw_output, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![output_id, session_id, step_id, raw_output, now],
+        params![output_id, session_id, step_id, sqlite_content, now],
     )
     .map_err(|error| error.to_string())?;
     Ok(output_id)
@@ -121,7 +128,7 @@ pub fn get_step_output(
     db: &DbState,
     output_id: &str,
 ) -> Result<String, String> {
-    // 优先尝试从本地文本文件读取（避免大对象走 SQLite 内存转换）
+    // 先尝试从磁盘文件读（直接命中，最快）
     let log_file = get_outputs_dir().join(format!("{}.log", output_id));
     if log_file.exists() {
         if let Ok(content) = std::fs::read_to_string(&log_file) {
@@ -129,15 +136,22 @@ pub fn get_step_output(
         }
     }
 
-    // 降级从 SQLite 读取
+    // 从 SQLite 读取
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare("SELECT raw_output FROM agent_step_logs WHERE output_id=?1")
         .map_err(|error| error.to_string())?;
     let mut rows = stmt.query(params![output_id]).map_err(|error| error.to_string())?;
     if let Some(row) = rows.next().map_err(|error| error.to_string())? {
-        let raw_output: String = row.get(0).map_err(|error| error.to_string())?;
-        Ok(raw_output)
+        let raw: String = row.get(0).map_err(|error| error.to_string())?;
+
+        // 处理溢出标记：[[spilled_to_disk:/path/to/file.log]]
+        if let Some(path_str) = raw.strip_prefix("[[spilled_to_disk:").and_then(|s| s.strip_suffix("]]")) {
+            return std::fs::read_to_string(path_str)
+                .map_err(|e| format!("spilled log file '{}' not found: {}", path_str, e));
+        }
+
+        Ok(raw)
     } else {
         Err(format!("output_id {} not found", output_id))
     }

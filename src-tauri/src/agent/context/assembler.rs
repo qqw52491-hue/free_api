@@ -87,21 +87,22 @@ impl SandwichContext {
             });
         }
 
-        // (8) 当前最新环境观测 (Observation)
+        // (8) 当前最新环境观测 + (9) 决策指令
+        // 合并为单条 user 消息，避免连续多条 user 消息触发 Anthropic 等 provider 的 422 错误
+        let mut final_user_parts = Vec::new();
+
         if !self.current_observation.is_empty() {
-            messages.push(ChatMessage {
-                role: "user".to_string(),
-                content: json!(format!(
-                    "【当前最新环境观测 (Observation)】\n(⚠️系统提示：这是你刚才操作后获取的最新的完整数据！请直接从这里读取你需要的信息，不要重复请求！)\n{}",
-                    self.current_observation
-                )),
-            });
+            final_user_parts.push(format!(
+                "【当前最新环境观测 (Observation)】\n(⚠️系统提示：这是你刚才操作后获取的最新的完整数据！请直接从这里读取你需要的信息，不要重复请求！)\n{}",
+                self.current_observation
+            ));
         }
 
-        // (9) 最终行动约束与决策指令
+        final_user_parts.push(ContextRenderer::render_decision_instruction().to_string());
+
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: json!(ContextRenderer::render_decision_instruction()),
+            content: json!(final_user_parts.join("\n\n")),
         });
 
         messages

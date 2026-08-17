@@ -82,7 +82,7 @@ impl ContextBudget {
             Self::DEFAULT_MAX_OUTPUT_TOKENS
         };
 
-        let static_prefix_tokens = estimate_tokens_chars(static_prefix_chars);
+        let static_prefix_tokens = estimate_tokens(&" ".repeat(static_prefix_chars.min(100_000)));
         let tail_state_tokens = Self::DEFAULT_TAIL_STATE_TOKENS;
 
         // 安全余量：总窗口的 15%
@@ -108,9 +108,7 @@ impl ContextBudget {
     }
 }
 
-fn estimate_tokens_chars(char_count: usize) -> usize {
-    ((char_count as f64 / 3.0) * 1.15).ceil() as usize
-}
+
 
 #[cfg(test)]
 mod tests {

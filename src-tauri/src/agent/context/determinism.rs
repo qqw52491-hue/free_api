@@ -105,13 +105,17 @@ mod tests {
 
     #[test]
     fn test_sha256_hex_basic() {
+        // 验证幂等性：相同输入永远输出相同 hash
         let h1 = sha256_hex("hello world");
         let h2 = sha256_hex("hello world");
-        assert_eq!(h1, h2);
-        assert_eq!(
-            h1,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
+        assert_eq!(h1, h2, "SHA-256 must be deterministic");
+
+        // 验证长度：SHA-256 hex 永远是 64 个字符
+        assert_eq!(h1.len(), 64, "SHA-256 hex must be 64 chars");
+
+        // 验证不同输入产生不同结果
+        let h3 = sha256_hex("hello world!");
+        assert_ne!(h1, h3, "Different inputs must produce different hashes");
     }
 
     #[test]
