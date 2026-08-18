@@ -17,27 +17,8 @@ impl SandwichContext {
             content: json!(self.system_prompt.clone()),
         });
 
-        // 活跃工具或 Skill 手册（次静态，同一工具连续调用时完全不变）
-        if !self.active_tool_detail.is_empty() {
-            messages.push(ChatMessage {
-                role: "user".to_string(),
-                content: json!(format!(
-                    "【当前活跃工具/Skill 操作手册】\n{}\n",
-                    self.active_tool_detail
-                )),
-            });
-        }
-
-        // 终极目标（在单次回合内绝对静态，置于静态区末尾稳吃长缓存）
-        if !self.user_goal.is_empty() {
-            messages.push(ChatMessage {
-                role: "user".to_string(),
-                content: json!(format!("【用户终极任务目标】\n{}\n", self.user_goal)),
-            });
-        }
-
         // ════════════════════════════════════════════════════════════════
-        // 🥩 2. 中间夹心（纯 Append-only 线性历史流水）
+        // 🥩 2. 中间夹心（纯 Append-only 线性历史流水：用户任务、工具手册事件、执行流水）
         // 随着任务一步步向后追加，无动态插入，完美覆盖主流大模型的前缀缓存
         // ════════════════════════════════════════════════════════════════
         messages.extend(self.turns_history.clone());
@@ -47,6 +28,14 @@ impl SandwichContext {
         // 变化点集中在末尾，绝对不砸前面的长缓存；且离输出端最近，强化注意力防遗忘
         // ════════════════════════════════════════════════════════════════
         let mut bottom_state_card = String::new();
+
+        // (0) 活跃目标指引与活跃工具指针（轻量锚点，不改动前缀）
+        if !self.user_goal.is_empty() {
+            bottom_state_card.push_str(&format!("【当前任务目标】\n{}\n\n", self.user_goal));
+        }
+        if let Some(tool) = &self.active_tool {
+            bottom_state_card.push_str(&format!("【当前活跃工具】: {}\n\n", tool));
+        }
 
         // (1) 阶段计划
         if let (Some(id), Some(title)) = (&self.plan_state.active_id, &self.plan_state.active_title) {
@@ -129,4 +118,60 @@ fn consolidate_consecutive_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessa
     }
 
     consolidated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_assemble_messages_zero_mutation_top_prefix() {
+        let mut ctx = SandwichContext::new(
+            "SYSTEM_PROMPT_STATIC_CONTRACT".to_string(),
+            "Initial Goal 1".to_string(),
+        );
+        ctx.active_tool = Some("excel".to_string());
+
+        let msgs1 = ctx.assemble_messages();
+        assert_eq!(msgs1[0].role, "system");
+        assert_eq!(msgs1[0].content, json!("SYSTEM_PROMPT_STATIC_CONTRACT"));
+
+        // Now simulate user adding a new goal in multi-turn chat
+        ctx.user_goal = "New Goal 2 (Updated)".to_string();
+        ctx.active_tool = Some("remote-hub".to_string());
+
+        let msgs2 = ctx.assemble_messages();
+        // Top prefix MUST be 100% invariant!
+        assert_eq!(msgs2[0].role, "system");
+        assert_eq!(msgs2[0].content, json!("SYSTEM_PROMPT_STATIC_CONTRACT"));
+
+        // Bottom card reflects the updated active goal and tool pointers
+        let bottom_card = msgs2.last().unwrap().content.as_str().unwrap();
+        assert!(bottom_card.contains("【当前任务目标】\nNew Goal 2 (Updated)"));
+        assert!(bottom_card.contains("【当前活跃工具】: remote-hub"));
+    }
+
+    #[test]
+    fn test_fetched_tools_compaction_reset() {
+        let mut ctx = SandwichContext::new(
+            "SYS".to_string(),
+            "Goal".to_string(),
+        );
+        ctx.context_window_tokens = 8000;
+        ctx.fetched_tools.insert("excel".to_string());
+        ctx.fetched_tools.insert("remote-hub".to_string());
+
+        // Add enough history (> 5000 tokens) to trigger compaction
+        let big_chunk = "A".repeat(500);
+        for i in 0..60 {
+            ctx.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!("Step {} output data: {}", i, big_chunk)),
+            });
+        }
+
+        ctx.maybe_compact_history();
+        // Compaction must reset fetched_tools to prevent stale references
+        assert!(ctx.fetched_tools.is_empty());
+    }
 }

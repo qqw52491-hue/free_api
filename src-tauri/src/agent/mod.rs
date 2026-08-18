@@ -1083,38 +1083,47 @@ confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选
             .unwrap_or_else(|| instruction.get_action());
         context.active_tool = Some(next_tool.clone());
 
-        // --- 加载下一轮工具说明书 ---
-        let tool_filename = format!("{}.md", context.active_tool.as_deref().unwrap_or("core"));
-        let resource_dir = app.path().resource_dir().unwrap_or_default();
-        let tool_path_production = resource_dir.join("prompts/tools").join(&tool_filename);
-        let tool_path_dev = std::path::PathBuf::from("prompts/tools").join(&tool_filename);
+        // --- 加载工具说明书 (Write-Once 按需追加至历史流并去重，稳吃 99% 前缀缓存) ---
+        let tool_key = next_tool.split('/').next().unwrap_or(&next_tool).to_string();
+        if !tool_key.is_empty() && tool_key != "finish" && tool_key != "core" {
+            if !context.fetched_tools.contains(&tool_key) {
+                let tool_filename = format!("{}.md", tool_key);
+                let resource_dir = app.path().resource_dir().unwrap_or_default();
+                let tool_path_production = resource_dir.join("prompts/tools").join(&tool_filename);
+                let tool_path_dev = std::path::PathBuf::from("prompts/tools").join(&tool_filename);
 
-        if let Ok(tool_md) = std::fs::read_to_string(&tool_path_production)
-            .or_else(|_| std::fs::read_to_string(&tool_path_dev))
-        {
-            context.active_tool_detail = tool_md;
-        } else {
-            // 同时检查 prompts/skills/ 目录（按需动态加载的 Skill 完整手册）
-            let skill_path_prod = resource_dir.join("prompts/skills").join(&tool_filename);
-            let skill_path_dev = std::path::PathBuf::from("prompts/skills").join(&tool_filename);
-            if let Ok(skill_md) = std::fs::read_to_string(&skill_path_prod)
-                .or_else(|_| std::fs::read_to_string(&skill_path_dev))
-            {
-                context.active_tool_detail = skill_md;
-            } else {
-                let plugin_name = next_tool.split('/').next().unwrap_or(&next_tool);
-                let detail = {
-                    let mut registry = registry_state.lock().await;
-                    if registry.plugin_names().contains(&plugin_name) {
-                        registry.format_tool_detail(plugin_name)
-                    } else {
-                        String::new()
-                    }
-                };
-                if detail.is_empty() {
-                    context.active_tool_detail.clear();
+                let mut tool_detail = String::new();
+                if let Ok(tool_md) = std::fs::read_to_string(&tool_path_production)
+                    .or_else(|_| std::fs::read_to_string(&tool_path_dev))
+                {
+                    tool_detail = tool_md;
                 } else {
-                    context.active_tool_detail = detail;
+                    // 同时检查 prompts/skills/ 目录（按需动态加载的 Skill 完整手册）
+                    let skill_path_prod = resource_dir.join("prompts/skills").join(&tool_filename);
+                    let skill_path_dev = std::path::PathBuf::from("prompts/skills").join(&tool_filename);
+                    if let Ok(skill_md) = std::fs::read_to_string(&skill_path_prod)
+                        .or_else(|_| std::fs::read_to_string(&skill_path_dev))
+                    {
+                        tool_detail = skill_md;
+                    } else {
+                        let mut registry = registry_state.lock().await;
+                        if registry.plugin_names().contains(&tool_key.as_str()) {
+                            tool_detail = registry.format_tool_detail(&tool_key);
+                        }
+                    }
+                }
+
+                if !tool_detail.trim().is_empty() {
+                    context.turns_history.push(crate::agent::context::types::ChatMessage {
+                        role: "user".to_string(),
+                        content: json!(format!(
+                            "【工具/Skill 操作手册: {}】\n{}\n(已写入历史流，后续调用可直接参考此规格)",
+                            tool_key,
+                            tool_detail.trim()
+                        )),
+                    });
+                    context.fetched_tools.insert(tool_key.clone());
+                    println!("📖 [Tool Manifest Cache] 首次引入工具手册 [{}] 并作为事件追加至历史流 (已标记 fetched)", tool_key);
                 }
             }
         }
@@ -1685,42 +1694,49 @@ async fn run_call_llm_and_run_tool_phases(
                 context.add_assistant_raw_message(&raw_json);
             }
 
-            // 【修复：重试时的工具盲区】如果 AI 尝试使用的工具和当前加载的说明书不一致，立即为其加载正确的说明书，防止它在 retry 时因为看不到语法而继续瞎猜报错。
+            // 【修复：重试时的工具盲区】如果 AI 尝试使用的工具尚未在历史流中，立即为其追加说明书，防止它在 retry 时因为看不到语法而继续瞎猜报错。
             let attempted_tool = inst.get_action();
-            if context.active_tool.as_deref() != Some(&attempted_tool) && attempted_tool != "finish"
-            {
-                context.active_tool = Some(attempted_tool.clone());
-                let tool_filename = format!("{}.md", attempted_tool);
-                let resource_dir = app.path().resource_dir().unwrap_or_default();
-                let tool_path_production = resource_dir.join("prompts/tools").join(&tool_filename);
-                let tool_path_dev = std::path::PathBuf::from("prompts/tools").join(&tool_filename);
+            let tool_key = attempted_tool.split('/').next().unwrap_or(&attempted_tool).to_string();
+            if attempted_tool != "finish" && attempted_tool != "core" && !tool_key.is_empty() {
+                context.active_tool = Some(tool_key.clone());
+                if !context.fetched_tools.contains(&tool_key) {
+                    let tool_filename = format!("{}.md", tool_key);
+                    let resource_dir = app.path().resource_dir().unwrap_or_default();
+                    let tool_path_production = resource_dir.join("prompts/tools").join(&tool_filename);
+                    let tool_path_dev = std::path::PathBuf::from("prompts/tools").join(&tool_filename);
 
-                if let Ok(tool_md) = std::fs::read_to_string(&tool_path_production)
-                    .or_else(|_| std::fs::read_to_string(&tool_path_dev))
-                {
-                    context.active_tool_detail = tool_md;
-                    println!(
-                        "🔄 [重试修正] 为 AI 紧急加载了工具说明书: {}",
-                        attempted_tool
-                    );
-                } else {
-                    // 尝试从 MCP 插件中获取
-                    let plugin_name = attempted_tool.split('/').next().unwrap_or(&attempted_tool);
-                    let detail = {
-                        let mut registry =
-                            futures::executor::block_on(registry_state.inner().lock());
-                        if registry.plugin_names().contains(&plugin_name) {
-                            registry.format_tool_detail(plugin_name)
-                        } else {
-                            String::new()
+                    let mut tool_detail = String::new();
+                    if let Ok(tool_md) = std::fs::read_to_string(&tool_path_production)
+                        .or_else(|_| std::fs::read_to_string(&tool_path_dev))
+                    {
+                        tool_detail = tool_md;
+                    } else {
+                        // 尝试从 MCP 插件中获取
+                        let detail = {
+                            let mut registry =
+                                futures::executor::block_on(registry_state.inner().lock());
+                            if registry.plugin_names().contains(&tool_key.as_str()) {
+                                registry.format_tool_detail(&tool_key)
+                            } else {
+                                String::new()
+                            }
+                        };
+                        if !detail.is_empty() {
+                            tool_detail = detail;
                         }
-                    };
-                    if !detail.is_empty() {
-                        context.active_tool_detail = detail;
-                        println!(
-                            "🔄 [重试修正] 为 AI 紧急加载了 MCP 插件说明书: {}",
-                            attempted_tool
-                        );
+                    }
+
+                    if !tool_detail.trim().is_empty() {
+                        context.turns_history.push(crate::agent::context::types::ChatMessage {
+                            role: "user".to_string(),
+                            content: json!(format!(
+                                "【工具/Skill 操作手册: {}】\n{}\n(已写入历史流，后续调用可直接参考此规格)",
+                                tool_key,
+                                tool_detail.trim()
+                            )),
+                        });
+                        context.fetched_tools.insert(tool_key.clone());
+                        println!("🔄 [重试修正] 为 AI 紧急追加了工具说明书至历史流: {}", tool_key);
                     }
                 }
             }

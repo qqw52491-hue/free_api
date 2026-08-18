@@ -48,11 +48,9 @@ impl SandwichContext {
             .sum()
     }
 
-    /// 动态计算当前会话的安全预算（全量考虑系统提示词、活跃工具手册及终极目标）
+    /// 动态计算当前会话的安全预算（顶层 System 提示词 100% 静态锁死）
     pub fn current_budget(&self) -> ContextBudget {
-        let static_prefix_tokens = estimate_tokens(&self.system_prompt)
-            + estimate_tokens(&self.active_tool_detail)
-            + estimate_tokens(&self.user_goal);
+        let static_prefix_tokens = estimate_tokens(&self.system_prompt);
         ContextBudget::derive(
             self.context_window_tokens,
             ContextBudget::DEFAULT_MAX_OUTPUT_TOKENS,
@@ -116,6 +114,9 @@ impl SandwichContext {
             };
             self.turns_history.insert(0, compact_card);
         }
+
+        // 压缩断代：把旧工具已加载标记清空，若新周期继续使用会自动重新追加最新手册
+        self.fetched_tools.clear();
 
         let after_tokens = self.history_estimated_tokens();
         println!(

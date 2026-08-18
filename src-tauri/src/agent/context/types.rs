@@ -2,7 +2,7 @@ use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatMessage {
@@ -131,6 +131,9 @@ pub struct SandwichContext {
     /// 当前任务所用模型的上下文窗口（tokens）
     #[serde(default)]
     pub context_window_tokens: usize,
+    /// 已加载并写入历史的工具手册集合（字典序 BTreeSet 保证确定性序列化）
+    #[serde(default)]
+    pub fetched_tools: BTreeSet<String>,
 }
 
 impl SandwichContext {
@@ -151,6 +154,7 @@ impl SandwichContext {
             active_tool_detail: String::new(),
             carry_memories: false,
             context_window_tokens: 0,
+            fetched_tools: BTreeSet::new(),
         }
     }
 
