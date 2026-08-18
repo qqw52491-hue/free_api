@@ -92,6 +92,7 @@ impl ModelConfig {
             .connect_timeout(std::time::Duration::from_secs(15))
             .tcp_keepalive(Some(std::time::Duration::from_secs(15)))
             .tcp_nodelay(true)
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
             .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
             .build()
             .map_err(|e| e.to_string())

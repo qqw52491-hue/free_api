@@ -92,10 +92,13 @@
                 <div class="m-meta">
                   <span v-if="m.status === 'online'" class="badge badge-online">在线 {{ m.latency_ms }}ms</span>
                   <span v-else-if="m.status === 'offline'" class="badge badge-offline" :title="m.error_msg || '离线'">
-                    离线<span v-if="m.error_msg" style="margin-left: 4px; font-size: 11px; opacity: 0.9;">({{ m.error_msg.length > 50 ? m.error_msg.slice(0, 50) + '...' : m.error_msg }})</span>
+                    离线<span v-if="m.error_msg" style="margin-left: 4px; font-size: 11px; opacity: 0.9;">({{ m.error_msg.length > 30 ? m.error_msg.slice(0, 30) + '...' : m.error_msg }})</span>
                   </span>
                   <span v-else-if="m.status === 'testing'" class="badge badge-testing">检测中…</span>
                   <span v-else class="badge badge-unknown">未检测</span>
+                  <button v-if="m.diagnostics || m.error_msg" type="button" class="btn-diag-badge" @click="openDiagnostics(m)" title="查看详细网络与请求头诊断">
+                    🔍 诊断详情
+                  </button>
                   <span class="m-tokens">输出上限: {{ m.max_tokens }} tok</span>
                   <span class="m-tokens" :style="{ color: m.context_window > 0 ? 'var(--text-3)' : 'var(--text-4)' }">
                     窗口: {{ m.context_window > 0 ? m.context_window.toLocaleString() + ' tok' : '未配置' }}
@@ -238,6 +241,85 @@
           </div>
         </div>
       </Transition>
+
+      <!-- 请求与连通性诊断详情弹窗 -->
+      <Transition name="fade">
+        <div class="modal-overlay" v-if="diagModalModel" @click.self="diagModalModel = null">
+          <div class="modal diag-modal" style="max-width:680px">
+            <div class="modal-header">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:18px">🔍</span>
+                <span class="modal-title">API 请求诊断 — {{ diagModalModel.name }}</span>
+              </div>
+              <button class="btn-icon btn-xs" @click="diagModalModel = null">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+            <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;max-height:75vh;overflow-y:auto">
+              <!-- 概览栏 -->
+              <div class="diag-overview-box">
+                <div class="diag-row">
+                  <span class="diag-label">目标地址:</span>
+                  <code class="diag-code">{{ diagModalModel.diagnostics?.endpoint_url || '未知' }}</code>
+                </div>
+                <div class="diag-row">
+                  <span class="diag-label">HTTP 状态:</span>
+                  <span :class="diagModalModel.status === 'online' ? 'status-text-online' : 'status-text-offline'">
+                    {{ diagModalModel.diagnostics?.http_status ? `HTTP ${diagModalModel.diagnostics.http_status}` : (diagModalModel.status === 'online' ? 'HTTP 200 OK' : '连接失败 (网络/超时/拒绝)') }}
+                  </span>
+                  <span style="margin-left:auto;font-size:11.5px;color:var(--text-3)">耗时: {{ diagModalModel.latency_ms }} ms</span>
+                </div>
+              </div>
+
+              <!-- 智能排查建议 -->
+              <div class="diag-suggestion-box">
+                <div class="diag-suggestion-title">💡 排查分析与建议:</div>
+                <ul class="diag-suggestion-list">
+                  <li v-if="diagModalModel.diagnostics?.http_status === 401">
+                    <strong>401 Unauthorized</strong>: API Key 错误或已过期。请确认中转站填写的令牌是否正确。
+                  </li>
+                  <li v-else-if="diagModalModel.diagnostics?.http_status === 404">
+                    <strong>404 Not Found</strong>: 接口路径不存在。请检查平台 Base URL 是否遗漏了 <code>/v1</code>（应形如 <code>https://域名/v1</code>）。
+                  </li>
+                  <li v-else-if="diagModalModel.diagnostics?.http_status === 429">
+                    <strong>429 Rate Limit / Quota</strong>: 触发频率限制或中转站账户余额不足，请前往中转站控制台充值或领取额度。
+                  </li>
+                  <li v-else-if="diagModalModel.diagnostics?.raw_error?.includes('error sending request') || !diagModalModel.diagnostics?.http_status">
+                    <strong>网络连接异常</strong>: 请求未能到达目标服务器。请检查：① 该中转站域名是否被拦截或需梯子/代理；② 域名拼写是否正确；③ 目标服务器是否处于维护中。
+                  </li>
+                  <li v-else>
+                    请检查下方服务器返回的原始响应，核对模型名称是否与中转站后台一致。
+                  </li>
+                </ul>
+              </div>
+
+              <!-- 请求头与认证 -->
+              <div class="diag-section">
+                <div class="diag-section-header">📋 发送的 HTTP 请求头 (Headers)</div>
+                <pre class="diag-pre"><code>{{ JSON.stringify(diagModalModel.diagnostics?.headers || {}, null, 2) }}</code></pre>
+              </div>
+
+              <!-- 请求体 Payload -->
+              <div class="diag-section">
+                <div class="diag-section-header">📦 发送的请求体 (JSON Body)</div>
+                <pre class="diag-pre"><code>{{ JSON.stringify(diagModalModel.diagnostics?.payload || {}, null, 2) }}</code></pre>
+              </div>
+
+              <!-- 服务端原始响应 / 错误详情 -->
+              <div class="diag-section">
+                <div class="diag-section-header">💬 服务端返回 / 底层报错详情</div>
+                <pre class="diag-pre error-pre"><code>{{ diagModalModel.diagnostics?.response_body || diagModalModel.diagnostics?.raw_error || diagModalModel.error_msg || '无响应内容' }}</code></pre>
+              </div>
+            </div>
+            <div class="modal-footer" style="justify-content:space-between">
+              <button class="btn btn-ghost btn-sm" @click="copyDiagnosticsText">
+                <span>{{ copiedDiag ? '✅ 已复制完整诊断 JSON' : '📋 复制完整诊断数据' }}</span>
+              </button>
+              <button class="btn btn-primary btn-sm" @click="diagModalModel = null">关闭</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
     </Teleport>
   </div>
 </template>
@@ -253,11 +335,22 @@ const emit = defineEmits<{
 interface PlatformData {
   id: string; name: string; base_url: string; api_key: string; created_at: string;
 }
+interface DiagnosticsData {
+  endpoint_url: string;
+  method: string;
+  headers: Record<string, string>;
+  payload: any;
+  http_status: number | null;
+  response_body: string;
+  raw_error: string | null;
+  latency_ms: number;
+}
 interface ModelData {
   id: string; platform_id: string; name: string; display_name: string;
   max_tokens: number; temperature: number; enabled: boolean; status: string; latency_ms: number;
   context_window: number;
   error_msg?: string;
+  diagnostics?: DiagnosticsData;
 }
 
 const platforms = ref<PlatformData[]>([])
@@ -267,6 +360,8 @@ const showAddPlatform = ref(false)
 const editingPlatform = ref<PlatformData | null>(null)
 const editingModel = ref<ModelData | null>(null)
 const deletingPlatform = ref<PlatformData | null>(null)
+const diagModalModel = ref<ModelData | null>(null)
+const copiedDiag = ref(false)
 const newModelName = ref('')
 const showKey = ref(false)
 const formError = ref('')
@@ -404,6 +499,26 @@ async function deleteModel(id: string) {
   emit('models-updated')
 }
 
+function openDiagnostics(m: ModelData) {
+  diagModalModel.value = m
+  copiedDiag.value = false
+}
+
+function copyDiagnosticsText() {
+  if (!diagModalModel.value) return
+  const data = {
+    model: diagModalModel.value.name,
+    status: diagModalModel.value.status,
+    latency_ms: diagModalModel.value.latency_ms,
+    error_msg: diagModalModel.value.error_msg,
+    diagnostics: diagModalModel.value.diagnostics
+  }
+  navigator.clipboard.writeText(JSON.stringify(data, null, 2)).then(() => {
+    copiedDiag.value = true
+    setTimeout(() => { copiedDiag.value = false }, 2000)
+  })
+}
+
 async function testSingleModel(m: ModelData): Promise<boolean> {
   const idx = models.value.findIndex(x => x.id === m.id)
   if (idx >= 0) {
@@ -411,11 +526,12 @@ async function testSingleModel(m: ModelData): Promise<boolean> {
     models.value[idx].error_msg = ''
   }
   try {
-    const result = await invoke<{ status: string; latency_ms: number; message: string }>('test_model', { modelId: m.id })
+    const result = await invoke<{ status: string; latency_ms: number; message: string; diagnostics?: DiagnosticsData }>('test_model', { modelId: m.id })
     if (idx >= 0) {
       models.value[idx].status = result.status
       models.value[idx].latency_ms = result.latency_ms
       models.value[idx].error_msg = result.status === 'offline' ? result.message : ''
+      models.value[idx].diagnostics = result.diagnostics
     }
     return result.status === 'online'
   } catch (err: any) {
@@ -796,4 +912,127 @@ onMounted(loadPlatforms)
 }
 
 .btn-sm { padding: 5px 11px; font-size: 12px; }
+
+/* ---- Diagnostics Badge & Modal Styles ---- */
+.btn-diag-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: rgba(108, 99, 255, 0.16);
+  border: 1px solid rgba(108, 99, 255, 0.35);
+  color: #a5b4fc;
+  font-size: 11px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-diag-badge:hover {
+  background: rgba(108, 99, 255, 0.3);
+  color: #ffffff;
+  border-color: #818cf8;
+}
+
+.diag-modal {
+  background: #18181c;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.diag-overview-box {
+  background: #1f1f26;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diag-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.diag-label {
+  color: var(--text-3);
+  font-size: 12px;
+  min-width: 65px;
+}
+
+.diag-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  color: #e4e4e7;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.status-text-online {
+  color: #10b981;
+  font-weight: 600;
+  font-size: 12.5px;
+}
+
+.status-text-offline {
+  color: #f87171;
+  font-weight: 600;
+  font-size: 12.5px;
+}
+
+.diag-suggestion-box {
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.diag-suggestion-title {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: #fbbf24;
+  margin-bottom: 6px;
+}
+
+.diag-suggestion-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #e4e4e7;
+  line-height: 1.6;
+}
+
+.diag-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diag-section-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.diag-pre {
+  background: #131316;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 11.5px;
+  color: #d4d4d8;
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.error-pre {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.2);
+}
 </style>

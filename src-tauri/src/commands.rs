@@ -691,12 +691,6 @@ pub async fn test_model(
         .map_err(|e| e.to_string())?
     };
 
-    let start = std::time::Instant::now();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
-
     let clean_base = platform.0.trim().trim_end_matches('/');
     let clean_key = platform.1.trim();
     let auth_header = if clean_key.starts_with("Bearer ") {
@@ -704,6 +698,21 @@ pub async fn test_model(
     } else {
         format!("Bearer {}", clean_key)
     };
+
+    let masked_key = if clean_key.len() > 10 {
+        format!("{}...{}", &clean_key[..6], &clean_key[clean_key.len() - 4..])
+    } else {
+        "***".to_string()
+    };
+    let masked_auth = format!("Bearer {}", masked_key);
+
+    let start = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| e.to_string())?;
 
     let url = format!("{}/chat/completions", clean_base);
     let body = json!({
@@ -722,22 +731,45 @@ pub async fn test_model(
         .await;
 
     let latency = start.elapsed().as_millis() as i64;
-    let (status, msg) = match resp {
-        Ok(r) if r.status().is_success() => ("online", "连接正常".to_string()),
+    let (status, msg, http_code, resp_body, raw_err) = match resp {
+        Ok(r) if r.status().is_success() => {
+            let s = r.status().as_u16();
+            let b = r.text().await.unwrap_or_default();
+            ("online", "连接正常".to_string(), Some(s), b, None)
+        }
         Ok(r) => {
-            let s = r.status();
-            let body = r.text().await.unwrap_or_default();
+            let s = r.status().as_u16();
+            let b = r.text().await.unwrap_or_default();
             (
                 "offline",
-                format!(
-                    "HTTP {} - {}",
-                    s,
-                    body.chars().take(200).collect::<String>()
-                ),
+                format!("HTTP {} - {}", s, b),
+                Some(s),
+                b,
+                None,
             )
         }
-        Err(e) => ("offline", e.to_string()),
+        Err(e) => {
+            let err_str = e.to_string();
+            ("offline", err_str.clone(), None, String::new(), Some(err_str))
+        }
     };
+
+    let diagnostics = json!({
+        "endpoint_url": url,
+        "method": "POST",
+        "headers": {
+            "Authorization": masked_auth,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128.0.0.0",
+            "HTTP-Referer": "https://free-api-chat.app",
+            "X-OpenRouter-Title": "Free API Chat"
+        },
+        "payload": body,
+        "http_status": http_code,
+        "response_body": resp_body,
+        "raw_error": raw_err,
+        "latency_ms": latency
+    });
 
     // 更新数据库
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -747,7 +779,12 @@ pub async fn test_model(
     )
     .map_err(|e| e.to_string())?;
 
-    Ok(json!({ "status": status, "latency_ms": latency, "message": msg }))
+    Ok(json!({
+        "status": status,
+        "latency_ms": latency,
+        "message": msg,
+        "diagnostics": diagnostics
+    }))
 }
 
 // ==================== SESSION COMMANDS ====================
