@@ -420,6 +420,9 @@ pub async fn call_llm(
         let stream_start = std::time::Instant::now();
         let mut first_token_at: Option<std::time::Instant> = None;
         let mut total_chars: usize = 0;
+        let mut last_thinking_emit_at = std::time::Instant::now();
+        let mut last_content_emit_at = std::time::Instant::now();
+        const EMIT_THROTTLE_MS: u128 = 50; // 20 FPS 平滑节流，防止超长 Thinking (数万字) 造成 IPC 消息轰炸与前端 CPU 100% 锁死
 
         // 流式接收事件，实时向前端推送 Thinking/Content 以及动态速率与 TTFT
         let mut on_event = |event: StreamEvent| {
@@ -442,57 +445,64 @@ pub async fn call_llm(
                     0.0
                 };
 
+                let now = std::time::Instant::now();
                 match event {
                     StreamEvent::Thinking { accumulated, .. } => {
-                        app_handle
-                            .emit(
-                                &format!("agent-progress-{}", session_id),
-                                json!({
-                                    "type": "thinking",
-                                    "step_id": step_id,
-                                    "content": accumulated,
-                                    "done": false,
-                                    "live_tokens": est_tokens,
-                                    "live_speed": live_speed,
-                                    "ttft_ms": ttft_ms
-                                }),
-                            )
-                            .ok();
+                        if now.duration_since(last_thinking_emit_at).as_millis() >= EMIT_THROTTLE_MS {
+                            last_thinking_emit_at = now;
+                            app_handle
+                                .emit(
+                                    &format!("agent-progress-{}", session_id),
+                                    json!({
+                                        "type": "thinking",
+                                        "step_id": step_id,
+                                        "content": accumulated,
+                                        "done": false,
+                                        "live_tokens": est_tokens,
+                                        "live_speed": live_speed,
+                                        "ttft_ms": ttft_ms
+                                    }),
+                                )
+                                .ok();
+                        }
                     }
                     StreamEvent::Content { chunk, accumulated_content, .. } => {
-                        let streaming_summary = extract_streaming_json_field(accumulated_content, &["summary", "answer", "details"]);
+                        if now.duration_since(last_content_emit_at).as_millis() >= EMIT_THROTTLE_MS {
+                            last_content_emit_at = now;
+                            let streaming_summary = extract_streaming_json_field(accumulated_content, &["summary", "answer", "details"]);
 
-                        app_handle
-                            .emit(
-                                &format!("agent-progress-{}", session_id),
-                                json!({
-                                    "type": "content_stream",
-                                    "step_id": step_id,
-                                    "chunk": chunk,
-                                    "accumulated": accumulated_content,
-                                    "streaming_summary": streaming_summary,
-                                    "live_tokens": est_tokens,
-                                    "live_speed": live_speed,
-                                    "ttft_ms": ttft_ms
-                                }),
-                            )
-                            .ok();
+                            app_handle
+                                .emit(
+                                    &format!("agent-progress-{}", session_id),
+                                    json!({
+                                        "type": "content_stream",
+                                        "step_id": step_id,
+                                        "chunk": chunk,
+                                        "accumulated": accumulated_content,
+                                        "streaming_summary": streaming_summary,
+                                        "live_tokens": est_tokens,
+                                        "live_speed": live_speed,
+                                        "ttft_ms": ttft_ms
+                                    }),
+                                )
+                                .ok();
 
-                        if let Some(ref summary_text) = streaming_summary {
-                            if !summary_text.is_empty() {
-                                app_handle
-                                    .emit(
-                                        &format!("agent-progress-{}", session_id),
-                                        json!({
-                                            "type": "summary_stream",
-                                            "step_id": step_id,
-                                            "content": summary_text,
-                                            "live_tokens": est_tokens,
-                                            "live_speed": live_speed,
-                                            "ttft_ms": ttft_ms
-                                        }),
-                                    )
-                                    .ok();
+                            if let Some(ref summary_text) = streaming_summary {
+                                if !summary_text.is_empty() {
+                                    app_handle
+                                        .emit(
+                                            &format!("agent-progress-{}", session_id),
+                                            json!({
+                                                "type": "summary_stream",
+                                                "step_id": step_id,
+                                                "content": summary_text,
+                                                "live_tokens": est_tokens,
+                                                "live_speed": live_speed,
+                                                "ttft_ms": ttft_ms
+                                            }),
+                                        )
+                                        .ok();
+                                }
                             }
                         }
                     }
