@@ -247,7 +247,7 @@ fn emit_tool_event(
     let _ = app.emit(&format!("agent-tool-event-{}", session_id), payload);
 }
 
-/// 执行单条指令的内部路由逻辑
+/// 执行单条指令的内部路由逻辑（4大核心原生工具 + MCP 插件路由，彻底杜绝历史兼容包袱）
 fn execute_command_inner(
     db: &DbState,
     session_id: &str,
@@ -256,51 +256,32 @@ fn execute_command_inner(
     params: &serde_json::Value,
     registry: &mut PluginRegistry,
 ) -> DispatchResult {
-    let mut final_action = action.to_string();
-
-    // --- 兼容性修复：如果 action 为空但 params 里有参数，尝试从 params 里捞 action ---
-    if final_action.is_empty() {
-        if let Some(a) = params.get("action").and_then(|v| v.as_str()) {
-            final_action = a.to_string();
-        } else if let Some(a) = params.get("command").and_then(|v| v.as_str()) {
-            final_action = a.to_string();
-        }
+    // 1. 核心原生工具 A: get_step_output (精准取回截断历史原文)
+    if tool.eq_ignore_ascii_case("get_step_output") {
+        return task_store::dispatch(db, session_id, "get_step_output", params);
     }
 
-    // --- 兼容内置工具与快捷调用：task_store, get_step_output, get_output, internal_tool ---
-    if tool.eq_ignore_ascii_case("task_store")
-        || tool.eq_ignore_ascii_case("get_step_output")
-        || tool.eq_ignore_ascii_case("get_output")
-        || tool.eq_ignore_ascii_case("internal_tool")
-        || tool.ends_with("/get_step_output")
-        || final_action.eq_ignore_ascii_case("get_step_output")
-        || final_action.eq_ignore_ascii_case("get_output")
-    {
-        let effective_action = if final_action.is_empty()
-            || final_action.eq_ignore_ascii_case("internal_tool")
-            || final_action.eq_ignore_ascii_case("none")
-        {
-            "get_step_output"
+    // 2. 核心原生工具 B: task_store (会话任务数据区结构化操作)
+    if tool.eq_ignore_ascii_case("task_store") {
+        let final_action = if action.is_empty() {
+            params.get("action").and_then(|v| v.as_str()).unwrap_or("list_resources")
         } else {
-            &final_action
+            action
         };
-        return task_store::dispatch(db, session_id, effective_action, params);
+        return task_store::dispatch(db, session_id, final_action, params);
     }
 
-    // --- 内置联邦检索工具：跨历史执行日志 (SQLite FTS5 trigram) 与实时代码 (ripgrep) ---
-    // 只按 tool 名匹配：不拦截 action，避免劫持浏览器插件等外部工具的同名 action
-    if tool.eq_ignore_ascii_case("search")
-        || tool.eq_ignore_ascii_case("search_knowledge")
-        || tool.eq_ignore_ascii_case("search_history")
-    {
+    // 3. 核心原生工具 C: search (跨执行日志 FTS5 与实时代码 ripgrep 联邦检索)
+    if tool.eq_ignore_ascii_case("search") {
         return retrieval::dispatch_search(db, session_id, params);
     }
 
+    // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
     let (plugin_name, tool_name) = if tool.contains('/') {
         let parts: Vec<&str> = tool.split('/').collect();
         (parts[0].to_string(), parts[1].to_string())
     } else {
-        (tool.to_string(), final_action.to_string())
+        (tool.to_string(), action.to_string())
     };
 
     if let Some(plugin) = registry.get_mut(&plugin_name) {
@@ -347,31 +328,13 @@ fn execute_command_inner(
         }
     }
 
-    // 专项检测：model 幻觉成了内置函数调用格式（tool_name / tool_input）
-    let is_function_calling_hallucination = params.get("tool_name").is_some()
-        || params.get("tool_input").is_some()
-        || params.get("function_call").is_some()
-        || final_action == "none"
-        || final_action.is_empty();
-
-    if is_function_calling_hallucination {
-        return DispatchResult {
-            stdout: String::new(),
-            stderr: format!(
-                "❌ 【幻觉纠正】你输出了错误的函数调用格式（tool_name/tool_input）！\n\
-                这不是我们的协议。正确格式必须是：\n\
-                {{\"tool\": \"动态 MCP 工具\", \"command\": {{\"action\": \"具体动作\"}}}}\n\
-                或者任务完成时：{{\"tool\": \"finish\", \"command\": {{}}}}\n\
-                绝对禁止输出 tool_name / tool_input / function_call 等字段！"
-            ),
-            success: false,
-            route: "hallucination_detected".to_string(),
-        };
-    }
-
+    // 5. 未知工具或格式错误报错
     DispatchResult {
         stdout: String::new(),
-        stderr: format!("❌ 未知 action='{}', params={:?}", final_action, params),
+        stderr: format!(
+            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！可用原生内置工具：finish, ask_human, search, get_step_output, task_store；外部 MCP 工具格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
+            tool, action
+        ),
         success: false,
         route: "unknown".to_string(),
     }
