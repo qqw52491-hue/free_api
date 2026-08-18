@@ -1085,3 +1085,30 @@ pub async fn send_chat(
 
     Ok(result.full_response)
 }
+
+/// 微信式原生独立 WebView 窗口预览
+/// 在桌面端创建一个独立的 WebviewWindow，无视任何 X-Frame-Options/CSP 限制（Google、B站、GitHub 均可直接完整浏览交互）
+#[tauri::command]
+pub async fn open_in_webview_window(
+    app: tauri::AppHandle,
+    url: String,
+    title: Option<String>,
+) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let parsed_url = tauri::Url::parse(&url).map_err(|e| format!("无效 URL: {}", e))?;
+    let short_uuid = uuid::Uuid::new_v4().to_string().replace('-', "")[..12].to_string();
+    let window_label = format!("preview-{}", short_uuid);
+    let window_title = title.unwrap_or_else(|| "网页预览".to_string());
+
+    WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::External(parsed_url))
+        .title(&window_title)
+        .inner_size(1120.0, 780.0)
+        .center()
+        .resizable(true)
+        .focused(true)
+        .build()
+        .map_err(|e| format!("创建原生 WebView 窗口失败: {}", e))?;
+
+    Ok(())
+}

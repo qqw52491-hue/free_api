@@ -8,7 +8,7 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted } from "vue";
-import { openExternalUrl } from "./composables/useBrowserPreview";
+import { openWebviewWindow } from "./composables/useBrowserPreview";
 
 function handleGlobalLinkClick(e: MouseEvent) {
   // 向上查找最近的 <a> 链接元素
@@ -22,8 +22,9 @@ function handleGlobalLinkClick(e: MouseEvent) {
   e.preventDefault();
   e.stopPropagation();
 
-  // 2. 所有外链、邮件、文件路径一律直接调起系统默认浏览器/外部新窗口打开
-  openExternalUrl(href);
+  // 2. 微信模式：新建专属独立原生 WebView 窗口打开网页
+  const title = target.getAttribute("title") || target.textContent?.trim() || "网页预览";
+  openWebviewWindow(href, title);
 }
 
 onMounted(() => {
