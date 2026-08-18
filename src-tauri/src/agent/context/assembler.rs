@@ -96,6 +96,14 @@ impl SandwichContext {
 
         final_user_parts.push(ContextRenderer::render_decision_instruction().to_string());
 
+        let final_user_str = final_user_parts.join("\n\n");
+        if !final_user_str.trim().is_empty() {
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(final_user_str),
+            });
+        }
+
         // ════════════════════════════════════════════════════════════════
         // 🔄 出口统一合并：对所有相邻的同 role 消息做单趟无损归并
         // 彻底杜绝连续 2 条 user 或连续 2 条 assistant 导致 Anthropic 422 报错

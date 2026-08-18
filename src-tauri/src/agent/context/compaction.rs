@@ -219,7 +219,10 @@ impl SandwichContext {
         )
     }
 
-    /// 滞后高低水位 + 双层混合压缩引擎（AI 语义摘要 + 规则事实索引）
+    /// 分阶段自适应压缩引擎
+    ///
+    /// Phase 1: 轻量折叠旧工具输出（保留近期 K=3 批次完整，无 LLM 调用）
+    /// Phase 2: 全量 drain + 双层混合 LLM 摘要（仅当 Phase 1 不够时）
     pub fn maybe_compact_history(&mut self) {
         let budget = self.current_budget();
         let current_tokens = self.history_estimated_tokens();
@@ -232,6 +235,30 @@ impl SandwichContext {
         println!(
             "📦 [Compaction Engine] 历史 ~{} tokens 触碰高水位线 ({} tokens)，启动自适应归档压缩...",
             current_tokens, budget.high_watermark_tokens
+        );
+
+        // ── Phase 1: 轻量折叠旧工具输出 ──────────────────────────────────────
+        // 保留最近 K=3 个工具批次完整，更老的超长输出折叠为预览+句柄
+        let folded_count = self.fold_old_tool_results(
+            crate::agent::context::sampling::RECENT_TOOL_WINDOW,
+        );
+        let after_phase1 = self.history_estimated_tokens();
+        if folded_count > 0 {
+            println!(
+                "📦 [Phase 1] 轻量折叠了 {} 条旧工具输出，Tokens: {} → {}",
+                folded_count, current_tokens, after_phase1
+            );
+        }
+
+        if after_phase1 <= budget.low_watermark_tokens {
+            println!("✅ [Phase 1] 轻量折叠已足够，跳过 Phase 2 LLM 摘要压缩");
+            return;
+        }
+
+        // ── Phase 2: 全量 drain + 双层混合 LLM 摘要 ──────────────────────────
+        println!(
+            "📦 [Phase 2] Phase 1 后仍有 {} tokens (低水位: {})，启动全量 LLM 摘要压缩...",
+            after_phase1, budget.low_watermark_tokens
         );
 
         // 从前往后算出需要压缩的条数：一次性确定 compact_count，
@@ -409,4 +436,54 @@ mod tests {
             "compaction 应从历史事件中提取并提升最新任务目标到 M1"
         );
     }
+
+    #[test]
+    fn test_phase1_fold_old_tool_results_k3() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+        ctx.context_window_tokens = 32768;
+
+        // 模拟依次执行 5 个工具输出，每个都是 5000 字符的大输出
+        let big_payload = "Data line content\n".repeat(300); // ~5400 chars
+        for i in 1..=5 {
+            ctx.turns_history.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: json!(format!("计划: 测试 | 工具: tool_{} | 动作: exec", i)),
+            });
+            ctx.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!("【执行输出 (v1)】\noutput_id: out_{}\n{}", i, big_payload)),
+            });
+        }
+
+        // 刚写入时，所有 5 个工具输出都是未折叠的完整输出
+        assert_eq!(ctx.turns_history.len(), 10);
+
+        // 执行 Phase 1: 保留最近 K=3 个完整，更老（第 1、2 个）应被折叠
+        let folded = ctx.fold_old_tool_results(3);
+        assert_eq!(folded, 2, "应只折叠最老的 2 个大工具输出");
+
+        // 检查第 1 个工具输出 (index 1)：应已被折叠为采样
+        let out1 = ctx.turns_history[1].content.as_str().unwrap();
+        assert!(out1.contains("【执行输出采样 (v1)】"));
+        assert!(out1.contains("output_id: out_1"));
+
+        // 检查第 2 个工具输出 (index 3)：应已被折叠为采样
+        let out2 = ctx.turns_history[3].content.as_str().unwrap();
+        assert!(out2.contains("【执行输出采样 (v1)】"));
+        assert!(out2.contains("output_id: out_2"));
+
+        // 检查最近 3 个 (index 5, 7, 9)：必须 100% 保持完整未折叠！
+        let out3 = ctx.turns_history[5].content.as_str().unwrap();
+        assert!(out3.contains("【执行输出 (v1)】"));
+        assert!(!out3.contains("【执行输出采样"));
+
+        let out4 = ctx.turns_history[7].content.as_str().unwrap();
+        assert!(out4.contains("【执行输出 (v1)】"));
+        assert!(!out4.contains("【执行输出采样"));
+
+        let out5 = ctx.turns_history[9].content.as_str().unwrap();
+        assert!(out5.contains("【执行输出 (v1)】"));
+        assert!(!out5.contains("【执行输出采样"));
+    }
 }
+
