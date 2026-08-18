@@ -792,6 +792,20 @@ confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选
             // 同一 session 已结束或目标改变时，以乐观锁 revision 覆盖为新的运行快照。
             let mut fresh = AgentCheckpoint::new(final_session_id.clone(), &context);
             fresh.version = existing.version;
+            // ── 目标变更事件 ─────────────────────────────────────────────────────────
+            // 将新目标以 Write-Once 事件追加到历史流水，供两个用途：
+            //   1. 让模型在历史中能看到"任务目标已从 X 更新为 Y"的完整轨迹
+            //   2. 供 compaction 压缩时扫描【任务目标更新】标记，提升最新目标到 M1 静态区
+            if existing.data.user_goal != goal && !existing.data.user_goal.is_empty() {
+                context.turns_history.push(crate::agent::context::types::ChatMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!(format!(
+                        "【任务目标更新】\n{}\n（原目标: {}）",
+                        goal, existing.data.user_goal
+                    )),
+                });
+            }
+            // ─────────────────────────────────────────────────────────────────────────
             fresh
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),

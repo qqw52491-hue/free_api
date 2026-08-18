@@ -11,14 +11,24 @@ impl SandwichContext {
 
         // ════════════════════════════════════════════════════════════════
         // 🍞 1. 顶层面包（100% 静态前缀，任务期内绝对不变，稳吃 Prefix Cache）
+        //    M0: System Prompt — 跨整个 Epoch 绝不改动
+        //    M1: 当前 Epoch 的任务目标 — 压缩断代时才可能更新，其余步骤只读
         // ════════════════════════════════════════════════════════════════
         messages.push(ChatMessage {
             role: "system".to_string(),
             content: json!(self.system_prompt.clone()),
         });
 
+        // M1: 任务目标静态锚点（epoch 内不变，压缩时由 compaction 提升最新目标写入 ctx.user_goal）
+        if !self.user_goal.is_empty() {
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!("【任务目标】\n{}", self.user_goal)),
+            });
+        }
+
         // ════════════════════════════════════════════════════════════════
-        // 🥩 2. 中间夹心（纯 Append-only 线性历史流水：用户任务、工具手册事件、执行流水）
+        // 🥩 2. 中间夹心（纯 Append-only 线性历史流水：工具手册事件、执行流水、目标变更事件）
         // 随着任务一步步向后追加，无动态插入，完美覆盖主流大模型的前缀缓存
         // ════════════════════════════════════════════════════════════════
         messages.extend(self.turns_history.clone());
@@ -29,10 +39,7 @@ impl SandwichContext {
         // ════════════════════════════════════════════════════════════════
         let mut bottom_state_card = String::new();
 
-        // (0) 活跃目标指引与活跃工具指针（轻量锚点，不改动前缀）
-        if !self.user_goal.is_empty() {
-            bottom_state_card.push_str(&format!("【当前任务目标】\n{}\n\n", self.user_goal));
-        }
+        // (0) 活跃工具指针（任务目标已静态锚定在 M1，底部卡片仅保留动态变化的指针）
         if let Some(tool) = &self.active_tool {
             bottom_state_card.push_str(&format!("【当前活跃工具】: {}\n\n", tool));
         }
@@ -133,22 +140,28 @@ mod tests {
         ctx.active_tool = Some("excel".to_string());
 
         let msgs1 = ctx.assemble_messages();
+        // M0: System Prompt — 永不改动
         assert_eq!(msgs1[0].role, "system");
         assert_eq!(msgs1[0].content, json!("SYSTEM_PROMPT_STATIC_CONTRACT"));
+        // M1: 初始任务目标静态锚点
+        assert_eq!(msgs1[1].role, "user");
+        assert!(msgs1[1].content.as_str().unwrap().contains("Initial Goal 1"));
 
-        // Now simulate user adding a new goal in multi-turn chat
+        // 模拟会话中目标发生变更（压缩时 compaction 会把 ctx.user_goal 提升为最新目标）
         ctx.user_goal = "New Goal 2 (Updated)".to_string();
         ctx.active_tool = Some("remote-hub".to_string());
 
         let msgs2 = ctx.assemble_messages();
-        // Top prefix MUST be 100% invariant!
+        // M0 绝对不变
         assert_eq!(msgs2[0].role, "system");
         assert_eq!(msgs2[0].content, json!("SYSTEM_PROMPT_STATIC_CONTRACT"));
+        // M1 随 ctx.user_goal 更新（压缩断代才发生）
+        assert!(msgs2[1].content.as_str().unwrap().contains("New Goal 2 (Updated)"));
 
-        // Bottom card reflects the updated active goal and tool pointers
+        // 底部动态卡只有活跃工具，user_goal 已由 M1 承载，不重复
         let bottom_card = msgs2.last().unwrap().content.as_str().unwrap();
-        assert!(bottom_card.contains("【当前任务目标】\nNew Goal 2 (Updated)"));
         assert!(bottom_card.contains("【当前活跃工具】: remote-hub"));
+        assert!(!bottom_card.contains("【当前任务目标】"), "user_goal 不应再出现在底部卡片");
     }
 
     #[test]

@@ -96,6 +96,39 @@ impl SandwichContext {
         // 单次 drain：O(n) 一次完成，无论删多少条都只移动一次内存
         let to_compact: Vec<ChatMessage> = self.turns_history.drain(0..compact_count).collect();
 
+        // ── 目标提升：扫描被压缩的历史，找到最后一条目标变更事件 ──────────────────────────
+        // 约定格式：mod.rs 追加目标变更事件时使用 "【任务目标更新】\n<new_goal>" 标记
+        // compaction 找到最新的一条后，将其提升到 ctx.user_goal，使下个 epoch 的 M1 自动更新
+        const GOAL_UPDATE_MARKER: &str = "【任务目标更新】";
+        let promoted_goal: Option<String> = to_compact.iter().rev().find_map(|msg| {
+            let text = match &msg.content {
+                serde_json::Value::String(s) => s.as_str(),
+                _ => return None,
+            };
+            if let Some(pos) = text.find(GOAL_UPDATE_MARKER) {
+                // 提取标记后第一行的有效目标文本
+                let after_marker = &text[pos + GOAL_UPDATE_MARKER.len()..];
+                let goal = after_marker
+                    .trim_start_matches('\n')
+                    .lines()
+                    .next()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string());
+                goal
+            } else {
+                None
+            }
+        });
+        if let Some(new_goal) = promoted_goal {
+            println!(
+                "🎯 [Compaction] 提升最新任务目标到 M1 静态区: {:?}",
+                new_goal
+            );
+            self.user_goal = new_goal;
+        }
+        // ────────────────────────────────────────────────────────────────────────────────────
+
         // 使用零依赖规则型生成器进行安全归档（永不崩溃）
         let summarizer = RuleBasedSummarizer;
         let archive_text = summarizer
@@ -147,5 +180,46 @@ mod tests {
         let summary = summarizer.summarize(&messages).unwrap();
         assert!(summary.contains("shell_exec"));
         assert!(summary.contains("output_id=89a7"));
+    }
+
+    #[test]
+    fn test_compaction_promotes_latest_goal_to_m1() {
+        use crate::agent::context::types::{ChatMessage, SandwichContext};
+
+        let mut ctx = SandwichContext::new("SYS".to_string(), "初始目标：审计项目依赖".to_string());
+        ctx.context_window_tokens = 8000;
+
+        // 初始大量历史
+        let big = "X".repeat(400);
+        for i in 0..40 {
+            ctx.turns_history.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: json!(format!("Step {}: {}", i, big)),
+            });
+        }
+
+        // 模拟用户在第 20 步后更新了任务目标（append 事件到历史流水）
+        ctx.turns_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: json!("【任务目标更新】\n生成执行报告并写入 report.xlsx\n（原目标: 审计项目依赖）"),
+        });
+
+        // 更多后续历史
+        for i in 40..60 {
+            ctx.turns_history.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: json!(format!("Step {}: {}", i, big)),
+            });
+        }
+
+        // 触发压缩
+        ctx.maybe_compact_history();
+
+        // 压缩后 user_goal 应被提升为最新目标
+        assert_eq!(
+            ctx.user_goal,
+            "生成执行报告并写入 report.xlsx",
+            "compaction 应从历史事件中提取并提升最新任务目标到 M1"
+        );
     }
 }
