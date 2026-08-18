@@ -91,12 +91,10 @@
                 <div class="m-name">{{ m.name }}</div>
                 <div class="m-meta">
                   <span v-if="m.status === 'online'" class="badge badge-online">在线 {{ m.latency_ms }}ms</span>
-                  <span v-else-if="m.status === 'offline'" class="badge badge-offline" :title="m.error_msg || '离线'">
-                    离线<span v-if="m.error_msg" style="margin-left: 4px; font-size: 11px; opacity: 0.9;">({{ m.error_msg.length > 30 ? m.error_msg.slice(0, 30) + '...' : m.error_msg }})</span>
-                  </span>
+                  <span v-else-if="m.status === 'offline'" class="badge badge-offline" :title="m.error_msg || '离线'">离线</span>
                   <span v-else-if="m.status === 'testing'" class="badge badge-testing">检测中…</span>
                   <span v-else class="badge badge-unknown">未检测</span>
-                  <button v-if="m.diagnostics || m.error_msg" type="button" class="btn-diag-badge" @click="openDiagnostics(m)" title="查看详细网络与请求头诊断">
+                  <button v-if="m.status === 'offline' || m.diagnostics" type="button" class="btn-diag-badge" @click="openDiagnostics(m)" title="查看详细网络与请求头诊断">
                     🔍 诊断详情
                   </button>
                   <span class="m-tokens">输出上限: {{ m.max_tokens }} tok</span>
@@ -286,6 +284,9 @@
                   </li>
                   <li v-else-if="diagModalModel.diagnostics?.http_status === 429">
                     <strong>429 Rate Limit / Quota</strong>: 触发频率限制或中转站额度耗尽，请前往中转站控制台查看额度。
+                  </li>
+                  <li v-else-if="diagModalModel.diagnostics?.response_body?.includes('upstream_unavailable') || diagModalModel.diagnostics?.response_body?.includes('routed upstreams failed')">
+                    <strong>502 / Upstream Unavailable (中转站自身上游故障)</strong>: 你的请求已完全正确到达中转站，但<strong>中转站自己配置的官方 OpenAI/Claude 渠道全部失效、被封号或宕机了</strong>。请更换该中转站的其他模型或联系中转站站长。
                   </li>
                   <li v-else-if="diagModalModel.diagnostics?.raw_error?.includes('error sending request') || !diagModalModel.diagnostics?.http_status">
                     <strong>网络连接异常</strong>: 请求未能到达目标服务器。请检查：① 该中转站域名是否被拦截或需梯子/代理；② 域名拼写是否正确；③ 目标服务器是否处于维护中。
