@@ -37,7 +37,7 @@ impl Summarizer for RuleBasedSummarizer {
     }
 }
 
-/// 异步调用 LLM 生成语义级继续工作摘要
+/// 异步调用 LLM 生成语义级继续工作摘要（带 20s 硬超时与多格式兼容提取）
 pub async fn generate_llm_summary(
     config: &ModelConfig,
     archived_history_text: &str,
@@ -45,6 +45,9 @@ pub async fn generate_llm_summary(
     let client = config.build_client()?;
     let url = config.endpoint_url();
     let headers = config.auth_headers();
+
+    // 限制送入摘要模型的历史文本上限（最多取前 12,000 字符），防止单次摘要 Prompt 爆窗
+    let capped_history: String = archived_history_text.chars().take(12_000).collect();
 
     let prompt = format!(
         "你是一个自主 Agent 的上下文归档与状态压缩专家。\n\
@@ -60,7 +63,7 @@ pub async fn generate_llm_summary(
         - 基于前面的进展，明确指出当前尚未完成的工作点与建议方向\n\n\
         ⚠️ 注意：禁止流水账重复，只保留具有决策指导意义的硬事实与结论；如有 output_id 引用请准确保留。\n\n\
         【待压缩历史记录】\n{}",
-        archived_history_text
+        capped_history
     );
 
     let messages = vec![
@@ -74,26 +77,36 @@ pub async fn generate_llm_summary(
         }),
     ];
 
+    let effective_max_tokens = if config.max_tokens > 0 && config.max_tokens < 4096 {
+        4096
+    } else {
+        2048
+    };
+
     let body = json!({
         "model": config.model_name,
         "messages": messages,
-        "max_tokens": 2048,
+        "max_tokens": effective_max_tokens,
         "temperature": 0.3,
         "stream": false
     });
 
-    let resp = client
+    // 叠加 20 秒硬超时：即使远端 LLM 网络抖动或代理挂起，绝不拖慢 Agent 主执行流水
+    let request_future = client
         .post(&url)
         .headers(headers)
         .json(&body)
-        .send()
+        .send();
+
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(20), request_future)
         .await
-        .map_err(|e| format!("LLM 摘要请求失败: {}", e))?;
+        .map_err(|_| "LLM 摘要请求超时 (超过 20s)".to_string())?
+        .map_err(|e| format!("LLM 摘要网络请求失败: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let err_text = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM 摘要 API 错误 {}: {}", status, err_text));
+        return Err(format!("LLM 摘要 API 返回错误状态码 {}: {}", status, err_text));
     }
 
     let json_resp: serde_json::Value = resp
@@ -101,16 +114,41 @@ pub async fn generate_llm_summary(
         .await
         .map_err(|e| format!("解析 LLM 摘要返回 JSON 失败: {}", e))?;
 
-    let content = json_resp["choices"][0]["message"]["content"]
+    // 容错提取 content：兼容标准 message.content、text 字段、数组型 content、或 reasoning_content
+    let extracted_content = json_resp["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or_else(|| "LLM 摘要返回内容为空".to_string())?
-        .trim();
+        .map(|s| s.to_string())
+        .or_else(|| {
+            json_resp["choices"][0]["text"].as_str().map(|s| s.to_string())
+        })
+        .or_else(|| {
+            // 处理数组型 content: [{type: "text", text: "..."}]
+            if let Some(arr) = json_resp["choices"][0]["message"]["content"].as_array() {
+                let parts: Vec<String> = arr.iter().filter_map(|item| {
+                    item["text"].as_str().map(|s| s.to_string())
+                }).collect();
+                if !parts.is_empty() {
+                    Some(parts.join("\n"))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            json_resp["choices"][0]["message"]["reasoning_content"]
+                .as_str()
+                .map(|s| s.to_string())
+        })
+        .ok_or_else(|| "LLM 摘要返回 JSON 中未找到有效的 content 字段".to_string())?;
 
-    if content.is_empty() {
+    let trimmed = extracted_content.trim();
+    if trimmed.is_empty() {
         return Err("LLM 摘要返回为空文本".to_string());
     }
 
-    Ok(content.to_string())
+    Ok(trimmed.to_string())
 }
 
 /// 双层混合总结器：
