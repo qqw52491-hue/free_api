@@ -193,9 +193,15 @@ impl ModelConfig {
     /// 构建认证 HeaderMap
     pub fn auth_headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
+        let clean_key = self.api_key.trim();
+        let auth_val = if clean_key.starts_with("Bearer ") {
+            clean_key.to_string()
+        } else {
+            format!("Bearer {}", clean_key)
+        };
         headers.insert(
             "Authorization",
-            format!("Bearer {}", self.api_key).parse().unwrap(),
+            auth_val.parse().unwrap_or_else(|_| "Bearer invalid".parse().unwrap()),
         );
         headers.insert("HTTP-Referer", "https://free-api-chat.app".parse().unwrap());
         headers.insert("X-OpenRouter-Title", "Free API Chat".parse().unwrap());

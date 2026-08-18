@@ -91,7 +91,9 @@
                 <div class="m-name">{{ m.name }}</div>
                 <div class="m-meta">
                   <span v-if="m.status === 'online'" class="badge badge-online">在线 {{ m.latency_ms }}ms</span>
-                  <span v-else-if="m.status === 'offline'" class="badge badge-offline">离线</span>
+                  <span v-else-if="m.status === 'offline'" class="badge badge-offline" :title="m.error_msg || '离线'">
+                    离线<span v-if="m.error_msg" style="margin-left: 4px; font-size: 11px; opacity: 0.9;">({{ m.error_msg.length > 50 ? m.error_msg.slice(0, 50) + '...' : m.error_msg }})</span>
+                  </span>
                   <span v-else-if="m.status === 'testing'" class="badge badge-testing">检测中…</span>
                   <span v-else class="badge badge-unknown">未检测</span>
                   <span class="m-tokens">输出上限: {{ m.max_tokens }} tok</span>
@@ -255,6 +257,7 @@ interface ModelData {
   id: string; platform_id: string; name: string; display_name: string;
   max_tokens: number; temperature: number; enabled: boolean; status: string; latency_ms: number;
   context_window: number;
+  error_msg?: string;
 }
 
 const platforms = ref<PlatformData[]>([])
@@ -403,16 +406,23 @@ async function deleteModel(id: string) {
 
 async function testSingleModel(m: ModelData): Promise<boolean> {
   const idx = models.value.findIndex(x => x.id === m.id)
-  if (idx >= 0) models.value[idx].status = 'testing'
+  if (idx >= 0) {
+    models.value[idx].status = 'testing'
+    models.value[idx].error_msg = ''
+  }
   try {
     const result = await invoke<{ status: string; latency_ms: number; message: string }>('test_model', { modelId: m.id })
     if (idx >= 0) {
       models.value[idx].status = result.status
       models.value[idx].latency_ms = result.latency_ms
+      models.value[idx].error_msg = result.status === 'offline' ? result.message : ''
     }
     return result.status === 'online'
-  } catch {
-    if (idx >= 0) models.value[idx].status = 'offline'
+  } catch (err: any) {
+    if (idx >= 0) {
+      models.value[idx].status = 'offline'
+      models.value[idx].error_msg = String(err)
+    }
     return false
   }
 }

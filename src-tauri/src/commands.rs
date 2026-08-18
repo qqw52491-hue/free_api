@@ -697,16 +697,24 @@ pub async fn test_model(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let url = format!("{}/chat/completions", platform.0.trim_end_matches('/'));
+    let clean_base = platform.0.trim().trim_end_matches('/');
+    let clean_key = platform.1.trim();
+    let auth_header = if clean_key.starts_with("Bearer ") {
+        clean_key.to_string()
+    } else {
+        format!("Bearer {}", clean_key)
+    };
+
+    let url = format!("{}/chat/completions", clean_base);
     let body = json!({
         "model": model_name,
         "messages": [{"role": "user", "content": "Hi"}],
-        "max_tokens": 5
+        "max_tokens": 16
     });
 
     let resp = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", platform.1))
+        .header("Authorization", &auth_header)
         .header("HTTP-Referer", "https://free-api-chat.app")
         .header("X-OpenRouter-Title", "Free API Chat")
         .json(&body)
