@@ -62,7 +62,7 @@ pub fn dispatch(
     params_value: &Value,
 ) -> DispatchResult {
     let result = (|| -> Result<Value, String> {
-        if action == "get_step_output" {
+        if action == "get_step_output" || action == "get_output" {
             let output_id = required_string(params_value, "output_id")?;
             let text = crate::agent::run_trace::get_step_output(db, &output_id)?;
             let offset = params_value.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;

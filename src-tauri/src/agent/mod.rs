@@ -267,8 +267,24 @@ fn execute_command_inner(
         }
     }
 
-    if tool.eq_ignore_ascii_case("task_store") {
-        return task_store::dispatch(db, session_id, &final_action, params);
+    // --- 兼容内置工具与快捷调用：task_store, get_step_output, get_output, internal_tool ---
+    if tool.eq_ignore_ascii_case("task_store")
+        || tool.eq_ignore_ascii_case("get_step_output")
+        || tool.eq_ignore_ascii_case("get_output")
+        || tool.eq_ignore_ascii_case("internal_tool")
+        || tool.ends_with("/get_step_output")
+        || final_action.eq_ignore_ascii_case("get_step_output")
+        || final_action.eq_ignore_ascii_case("get_output")
+    {
+        let effective_action = if final_action.is_empty()
+            || final_action.eq_ignore_ascii_case("internal_tool")
+            || final_action.eq_ignore_ascii_case("none")
+        {
+            "get_step_output"
+        } else {
+            &final_action
+        };
+        return task_store::dispatch(db, session_id, effective_action, params);
     }
 
     // --- 内置联邦检索工具：跨历史执行日志 (SQLite FTS5 trigram) 与实时代码 (ripgrep) ---

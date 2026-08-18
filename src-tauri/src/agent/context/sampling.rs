@@ -31,7 +31,7 @@ impl SandwichContext {
         // 1. 入口硬截断 (Ingress Hard-Cap: 单步超过 12,000 字符立刻硬截断，原文已在 SQLite)
         let ingress_trimmed = if output_summary.chars().count() > MAX_INGRESS_CHARS {
             let truncated_head: String = output_summary.chars().take(MAX_INGRESS_CHARS).collect();
-            format!("{}\n\n[⚠️ 入口硬截断: 单步输出超过 4,000 Tokens 上限，完整原始数据请使用 get_step_output(output_id=\"{}\")]", truncated_head, output_id)
+            format!("{}\n\n[⚠️ 入口硬截断: 单步输出超过 4,000 Tokens 上限，完整原始数据可调用: {{\"tool\": \"get_step_output\", \"command\": {{\"output_id\": \"{}\"}}}} 精准获取]", truncated_head, output_id)
         } else {
             output_summary.to_string()
         };
@@ -55,7 +55,7 @@ impl SandwichContext {
 
         let feedback_str = if is_truncated {
             format!(
-                "【执行输出采样 (v{})】\noutput_id: {}\noriginal_chars: {}\ntruncated: true\n{}\n\n[提示: 输出已采样折叠部分字符。完整原始输出可在需要时调用 internal_tool: get_step_output(output_id=\"{}\") 精准获取]",
+                "【执行输出采样 (v{})】\noutput_id: {}\noriginal_chars: {}\ntruncated: true\n{}\n\n[提示: 输出已采样折叠。需要完整原始数据可调用: {{\"tool\": \"get_step_output\", \"command\": {{\"output_id\": \"{}\"}}}} 精准获取]",
                 SAMPLER_VERSION, output_id, original_chars, history_feedback, output_id
             )
         } else {
