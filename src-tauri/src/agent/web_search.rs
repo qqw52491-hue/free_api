@@ -30,7 +30,14 @@ pub async fn execute_web_search(
 
     let limit = if max_results == 0 { 5 } else { max_results.min(10) };
 
-    // 1. 检查是否有用户配置或环境变量中的 Tavily API Key
+    // 1. 优先免 Key 实时全网搜索 (基于 Bing 开放 RSS 协议，0 成本 0 配置 实时全网检索)
+    if let Ok(res) = search_bing_free(q, limit).await {
+        if !res.is_empty() {
+            return Ok(res);
+        }
+    }
+
+    // 2. 检查是否有用户配置或环境变量中的 Tavily API Key (高阶可选增强)
     if let Ok(key) = std::env::var("TAVILY_API_KEY") {
         if !key.trim().is_empty() {
             if let Ok(res) = search_tavily(q, key.trim(), limit).await {
@@ -41,7 +48,7 @@ pub async fn execute_web_search(
         }
     }
 
-    // 2. 检查是否有 Brave Search API Key
+    // 3. 检查是否有 Brave Search API Key (高阶可选增强)
     if let Ok(key) = std::env::var("BRAVE_API_KEY") {
         if !key.trim().is_empty() {
             if let Ok(res) = search_brave(q, key.trim(), limit).await {
@@ -52,16 +59,16 @@ pub async fn execute_web_search(
         }
     }
 
-    // 3. 兜底与公共权威知识检索: Wikipedia OpenSearch + 权威条目检索
+    // 4. 百科权威知识库检索 (免 Key)
     let wiki_res = search_wikipedia(q, limit).await.unwrap_or_default();
     if !wiki_res.is_empty() {
         return Ok(wiki_res);
     }
 
-    // 4. 若无结果，返回友好提示
+    // 5. 若无结果，返回友好提示
     Ok(vec![WebSearchResultItem {
         title: format!("关于 '{}' 的网络检索建议", q),
-        url: format!("https://duckduckgo.com/?q={}", urlencoding(q)),
+        url: format!("https://cn.bing.com/search?q={}", urlencoding(q)),
         snippet: format!("未检索到关于 '{}' 的即时权威摘要。如需高精度全局网络搜索，可配置 TAVILY_API_KEY 或 BRAVE_API_KEY。", q),
         source: "Aggregated Search".to_string(),
     }])
@@ -260,6 +267,108 @@ fn parse_wikipedia_opensearch(val: &serde_json::Value, limit: usize) -> Option<V
     }
     Some(results)
 }
+
+/// 100% 免 API Key 的实时全网搜索引擎 (基于 Bing 开放 RSS 协议)
+async fn search_bing_free(query: &str, limit: usize) -> Result<Vec<WebSearchResultItem>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 优先中文 Bing，支持全球内容
+    let url = format!(
+        "https://cn.bing.com/search?q={}&format=rss",
+        urlencoding(query)
+    );
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Bing 请求失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Bing HTTP 状态异常: {}", resp.status()));
+    }
+
+    let xml = resp.text().await.unwrap_or_default();
+    let results = parse_bing_rss_xml(&xml, limit);
+    if results.is_empty() {
+        // 后备国际站
+        let en_url = format!(
+            "https://www.bing.com/search?q={}&format=rss",
+            urlencoding(query)
+        );
+        if let Ok(r) = client.get(&en_url).send().await {
+            if r.status().is_success() {
+                let en_xml = r.text().await.unwrap_or_default();
+                return Ok(parse_bing_rss_xml(&en_xml, limit));
+            }
+        }
+    }
+    Ok(results)
+}
+
+/// 解析 Bing RSS XML 格式的实时全网结果
+pub fn parse_bing_rss_xml(xml: &str, limit: usize) -> Vec<WebSearchResultItem> {
+    let mut results = Vec::new();
+    let mut remaining = xml;
+
+    while let Some(start_idx) = remaining.find("<item>") {
+        let after_item = &remaining[start_idx + 6..];
+        let end_idx = match after_item.find("</item>") {
+            Some(idx) => idx,
+            None => break,
+        };
+        let item_content = &after_item[..end_idx];
+        remaining = &after_item[end_idx + 7..];
+
+        let title = extract_xml_tag(item_content, "title");
+        let link = extract_xml_tag(item_content, "link");
+        let description = extract_xml_tag(item_content, "description");
+
+        if !title.is_empty() && !link.is_empty() {
+            results.push(WebSearchResultItem {
+                title: clean_xml_text(&title),
+                url: link.trim().to_string(),
+                snippet: clean_xml_text(&description),
+                source: "Bing (免Key直连)".to_string(),
+            });
+            if results.len() >= limit {
+                break;
+            }
+        }
+    }
+    results
+}
+
+fn extract_xml_tag(content: &str, tag: &str) -> String {
+    let open_tag = format!("<{}>", tag);
+    let close_tag = format!("</{}>", tag);
+    if let Some(start) = content.find(&open_tag) {
+        if let Some(end) = content[start + open_tag.len()..].find(&close_tag) {
+            return content[start + open_tag.len()..start + open_tag.len() + end].to_string();
+        }
+    }
+    String::new()
+}
+
+fn clean_xml_text(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("<strong>", "")
+        .replace("</strong>", "")
+        .replace("<b>", "")
+        .replace("</b>", "")
+        .trim()
+        .to_string()
+}
+
 
 /// 抓取任意 URL 并提纯为干净的 Markdown 正文
 pub async fn fetch_url_markdown(url: &str) -> Result<String, String> {
@@ -547,6 +656,16 @@ mod tests {
         assert_eq!(items[1].source, "Wikipedia");
     }
 
+    #[test]
+    fn test_parse_bing_rss_xml() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel><item><title>Rust 编程语言官网</title><link>https://www.rust-lang.org/</link><description>一门赋予每个人构建可靠且高效软件能力的语言。</description></item></channel></rss>"#;
+        let items = parse_bing_rss_xml(xml, 5);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Rust 编程语言官网");
+        assert_eq!(items[0].url, "https://www.rust-lang.org/");
+        assert_eq!(items[0].source, "Bing (免Key直连)");
+    }
+
     #[tokio::test]
     async fn test_dispatch_web_search_and_fetch() {
         let search_res = dispatch("web_search", &json!({ "query": "Rust" }));
@@ -558,4 +677,5 @@ mod tests {
         assert!(fetch_res.stderr.contains("缺少必填参数"));
     }
 }
+
 
