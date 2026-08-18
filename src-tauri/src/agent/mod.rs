@@ -776,10 +776,14 @@ confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选
         )?;
     }
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
-    // 注入当前路由模型的上下文窗口大小，用于历史压缩水位动态计算
-    context.context_window_tokens = crate::llm::ModelConfig::from_db(&state, &conversation_model_id)
-        .map(|cfg| cfg.context_window as usize)
-        .unwrap_or(32_768);
+    // 注入当前路由模型的上下文窗口大小与压缩配置，用于历史压缩水位动态计算与双层智能归档
+    let model_cfg_res = crate::llm::ModelConfig::from_db(&state, &conversation_model_id);
+    if let Ok(cfg) = &model_cfg_res {
+        context.context_window_tokens = cfg.context_window as usize;
+        context.compaction_model_config = Some(cfg.clone());
+    } else {
+        context.context_window_tokens = 32_768;
+    }
     context.turns_history =
         crate::agent::conversation::recent_history(state.inner(), &final_session_id)?;
     // checkpoint 是恢复的权威来源：只还原可持久化事实，连接、插件与工具详情由 Runtime 重建。

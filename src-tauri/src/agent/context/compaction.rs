@@ -1,5 +1,6 @@
 use crate::agent::context::budget::{estimate_tokens, ContextBudget};
 use crate::agent::context::types::{ChatMessage, SandwichContext};
+use crate::llm::ModelConfig;
 use serde_json::json;
 
 /// 离线可单测的 Summarizer Trait
@@ -7,7 +8,7 @@ pub trait Summarizer: Send + Sync {
     fn summarize(&self, messages: &[ChatMessage]) -> Result<String, String>;
 }
 
-/// 默认的 0 外部依赖规则型总结器（100% 永不失败的硬保底降级路径）
+/// 默认的 0 外部依赖规则型总结器（100% 永不失败的事实索引与保底降级路径）
 pub struct RuleBasedSummarizer;
 
 impl Summarizer for RuleBasedSummarizer {
@@ -28,11 +29,133 @@ impl Summarizer for RuleBasedSummarizer {
             }
             let first_line = content_str.lines().next().unwrap_or("").trim();
             if !first_line.is_empty() {
-                let preview: String = first_line.chars().take(100).collect();
+                let preview: String = first_line.chars().take(120).collect();
                 lines.push(format!("- [{}]{} {}", msg.role, out_ref, preview));
             }
         }
         Ok(lines.join("\n"))
+    }
+}
+
+/// 异步调用 LLM 生成语义级继续工作摘要
+pub async fn generate_llm_summary(
+    config: &ModelConfig,
+    archived_history_text: &str,
+) -> Result<String, String> {
+    let client = config.build_client()?;
+    let url = config.endpoint_url();
+    let headers = config.auth_headers();
+
+    let prompt = format!(
+        "你是一个自主 Agent 的上下文归档与状态压缩专家。\n\
+        以下是 Agent 在执行长程任务期间早期历史的流水记录（包含步骤计划、工具调用、执行输出与报错）。\n\
+        请提取并生成一份高度凝练的【阶段性任务继续摘要】，严格包含以下 4 个结构化板块：\n\n\
+        ## 1. 已完成事项与关键产物\n\
+        - 简明列出已成功完成的阶段、生成的文件路径、创建的数据表等\n\n\
+        ## 2. 关键事实与架构决策\n\
+        - 列出执行中确认的关键环境信息、配置项、发现的约束条件\n\n\
+        ## 3. 踩坑记录与教训\n\
+        - 列出失败过的操作、错误的参数/action、服务端报错及后续如何纠正的（避免后续步骤重蹈覆辙）\n\n\
+        ## 4. 未完成事项与下一步建议\n\
+        - 基于前面的进展，明确指出当前尚未完成的工作点与建议方向\n\n\
+        ⚠️ 注意：禁止流水账重复，只保留具有决策指导意义的硬事实与结论；如有 output_id 引用请准确保留。\n\n\
+        【待压缩历史记录】\n{}",
+        archived_history_text
+    );
+
+    let messages = vec![
+        json!({
+            "role": "system",
+            "content": "你是资深的 AI Agent 上下文工程专家，擅长从复杂的执行历史中提炼高密度的状态恢复摘要。"
+        }),
+        json!({
+            "role": "user",
+            "content": prompt
+        }),
+    ];
+
+    let body = json!({
+        "model": config.model_name,
+        "messages": messages,
+        "max_tokens": 2048,
+        "temperature": 0.3,
+        "stream": false
+    });
+
+    let resp = client
+        .post(&url)
+        .headers(headers)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("LLM 摘要请求失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_text = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM 摘要 API 错误 {}: {}", status, err_text));
+    }
+
+    let json_resp: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析 LLM 摘要返回 JSON 失败: {}", e))?;
+
+    let content = json_resp["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "LLM 摘要返回内容为空".to_string())?
+        .trim();
+
+    if content.is_empty() {
+        return Err("LLM 摘要返回为空文本".to_string());
+    }
+
+    Ok(content.to_string())
+}
+
+/// 双层混合总结器：
+/// 第一层：Rust 提取确定性事实索引 (output_id、工具、路径、状态)
+/// 第二层：LLM 提炼语义摘要 (目标、决策、教训、待办)；失败时优雅降级
+pub struct HybridSummarizer<'a> {
+    pub model_config: Option<&'a ModelConfig>,
+}
+
+impl<'a> Summarizer for HybridSummarizer<'a> {
+    fn summarize(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        let rule_index = RuleBasedSummarizer.summarize(messages)?;
+
+        // 尝试通过 LLM 生成语义摘要
+        let mut llm_summary_opt: Option<String> = None;
+        if let Some(cfg) = self.model_config {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let cfg_clone = cfg.clone();
+                let raw_text = rule_index.clone();
+                let llm_res = tokio::task::block_in_place(|| {
+                    handle.block_on(async {
+                        generate_llm_summary(&cfg_clone, &raw_text).await
+                    })
+                });
+                match llm_res {
+                    Ok(summary) => {
+                        println!("🧠 [Compaction Engine] LLM 语义摘要生成成功 ({} 字符)", summary.len());
+                        llm_summary_opt = Some(summary);
+                    }
+                    Err(e) => {
+                        println!("⚠️ [Compaction Engine] LLM 摘要失败，平滑降级至规则事实索引: {}", e);
+                    }
+                }
+            }
+        }
+
+        if let Some(llm_summary) = llm_summary_opt {
+            Ok(format!(
+                "### 🤖 AI 任务推进与状态摘要\n{}\n\n### 📋 关键事实索引（完整原文可通过 output_id 从 SQLite 查询）\n{}",
+                llm_summary.trim(),
+                rule_index.trim()
+            ))
+        } else {
+            Ok(rule_index)
+        }
     }
 }
 
@@ -58,7 +181,7 @@ impl SandwichContext {
         )
     }
 
-    /// 滞后高低水位 + 规则降级压缩引擎
+    /// 滞后高低水位 + 双层混合压缩引擎（AI 语义摘要 + 规则事实索引）
     pub fn maybe_compact_history(&mut self) {
         let budget = self.current_budget();
         let current_tokens = self.history_estimated_tokens();
@@ -129,8 +252,10 @@ impl SandwichContext {
         }
         // ────────────────────────────────────────────────────────────────────────────────────
 
-        // 使用零依赖规则型生成器进行安全归档（永不崩溃）
-        let summarizer = RuleBasedSummarizer;
+        // 使用双层混合总结器进行安全归档（AI 语义摘要 + 确定性事实索引，永不崩溃）
+        let summarizer = HybridSummarizer {
+            model_config: self.compaction_model_config.as_ref(),
+        };
         let archive_text = summarizer
             .summarize(&to_compact)
             .unwrap_or_else(|_| "- [历史执行记录已安全落盘 SQLite]".to_string());
@@ -139,7 +264,7 @@ impl SandwichContext {
             let compact_card = ChatMessage {
                 role: "user".to_string(),
                 content: json!(format!(
-                    "【历史早期执行归档（已定型压缩，完整原文可通过 output_id 查询）】\n{}\n（已归档 {} 条步骤，当前上下文窗口: {} tokens）",
+                    "【历史早期执行归档（双层压缩：已定型压缩，完整原文可通过 output_id 查询）】\n{}\n（已归档 {} 条历史消息，当前上下文窗口: {} tokens）",
                     archive_text,
                     to_compact.len(),
                     budget.context_window_tokens
@@ -180,6 +305,25 @@ mod tests {
         let summary = summarizer.summarize(&messages).unwrap();
         assert!(summary.contains("shell_exec"));
         assert!(summary.contains("output_id=89a7"));
+    }
+
+    #[test]
+    fn test_hybrid_summarizer_falls_back_gracefully() {
+        let summarizer = HybridSummarizer { model_config: None };
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: json!("计划: 依赖分析 | 工具: remote-hub | 动作: read_file"),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: json!("【执行输出】\noutput_id: c8db17f5\nCargo.toml contents..."),
+            },
+        ];
+
+        let summary = summarizer.summarize(&messages).unwrap();
+        assert!(summary.contains("remote-hub"));
+        assert!(summary.contains("output_id=c8db17f5"));
     }
 
     #[test]

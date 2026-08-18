@@ -1,5 +1,6 @@
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
+use crate::llm::ModelConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -134,6 +135,9 @@ pub struct SandwichContext {
     /// 已加载并写入历史的工具手册集合（字典序 BTreeSet 保证确定性序列化）
     #[serde(default)]
     pub fetched_tools: BTreeSet<String>,
+    /// 压缩引擎专用 LLM 配置（运行时注入，不参与 checkpoint 序列化）
+    #[serde(skip)]
+    pub compaction_model_config: Option<ModelConfig>,
 }
 
 impl SandwichContext {
@@ -155,6 +159,7 @@ impl SandwichContext {
             carry_memories: false,
             context_window_tokens: 0,
             fetched_tools: BTreeSet::new(),
+            compaction_model_config: None,
         }
     }
 

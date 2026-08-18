@@ -6,6 +6,7 @@
 use crate::db::DbState;
 use futures_util::StreamExt;
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::State;
 use tokio::sync::watch;
@@ -14,6 +15,7 @@ use tokio::sync::watch;
 // ModelConfig — 从数据库解析的模型配置，含平台适配参数
 // ========================================================================
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub base_url: String,
     pub api_key: String,
