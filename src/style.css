@@ -593,11 +593,54 @@ input[type="checkbox"], input[type="radio"] {
   color: var(--text-2);
   font-weight: 600;
 }
-.md-content a {
-  color: var(--accent-light);
+.md-content a,
+.markdown-rich-link,
+a.markdown-rich-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #a5b4fc;
+  font-weight: 550;
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(165, 180, 252, 0.45);
+  padding: 0 2px;
+  border-radius: 3px;
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.md-content a:hover,
+.markdown-rich-link:hover,
+a.markdown-rich-link:hover {
+  color: #ffffff;
+  background: rgba(108, 99, 255, 0.22);
+  border-bottom-color: #818cf8;
   text-decoration: none;
 }
-.md-content a:hover { text-decoration: underline; }
+.link-arrow-icon {
+  opacity: 0.75;
+  transition: transform 0.15s ease;
+  vertical-align: middle;
+}
+.markdown-rich-link:hover .link-arrow-icon,
+a:hover .link-arrow-icon {
+  opacity: 1;
+  transform: translate(1px, -1px);
+}
+
+/* npm 依赖包版本胶囊标签 (解决 marked 误把 @version 识别为 mailto) */
+.pkg-version-tag {
+  display: inline-block;
+  padding: 1px 5px;
+  margin: 0 1px;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.14);
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  color: #c7d2fe;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 500;
+  vertical-align: baseline;
+}
 
 /* ---- Transitions ---- */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.15s; }

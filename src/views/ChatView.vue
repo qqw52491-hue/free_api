@@ -184,7 +184,7 @@
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { marked } from 'marked'
+import { renderMarkdown } from '../components/agent/format'
 
 interface ModelOption {
   id: string; name: string; display_name: string; platform_id: string; platform_name: string;
@@ -397,7 +397,7 @@ async function pickFile() {
 function onKeydown(e: KeyboardEvent) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }
 function scrollToBottom() { nextTick(() => { const el = messagesContainer.value; if (el) el.scrollTop = el.scrollHeight }) }
 function formatTime(iso: string) { try { return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) } catch { return '' } }
-function renderMarkdown(text: string) { if (!text) return ''; try { return marked.parse(text, { breaks: true }) } catch { return text.replace(/\n/g, '<br>') } }
+
 function parseAttachments(json: string | null): { name: string }[] { if (!json) return []; try { return JSON.parse(json) } catch { return [] } }
 
 watch(userInput, () => { nextTick(() => { const el = inputRef.value; if (el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 150) + 'px' } }) })
