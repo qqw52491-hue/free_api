@@ -229,6 +229,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             step_index INTEGER,
             content TEXT NOT NULL,
             metadata_json TEXT NOT NULL DEFAULT '{}',
+            confidence_score INTEGER NOT NULL DEFAULT 100,
+            hit_count INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_agent_memory_nodes_session
@@ -246,6 +248,19 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             trigger_keywords,
             tokenize='trigram'
         );
+
+        -- Lesson 召回与采纳血缘追踪表 (精确因果归因与负反馈打分)
+        CREATE TABLE IF NOT EXISTS agent_lesson_recalls (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            step_id INTEGER NOT NULL,
+            recalled_lesson_ids TEXT NOT NULL DEFAULT '[]',
+            applied_lesson_ids TEXT NOT NULL DEFAULT '[]',
+            outcome TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_lesson_recalls_session
+            ON agent_lesson_recalls(session_id, step_id);
     ",
     )?;
 
@@ -257,7 +272,9 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
 
     // 滚动迁移：为旧版数据库补齐新字段，CREATE TABLE 不会重建已有表
     let _ = conn.execute_batch(
-        "ALTER TABLE models ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0;",
+        "ALTER TABLE models ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE agent_memory_nodes ADD COLUMN confidence_score INTEGER NOT NULL DEFAULT 100;
+         ALTER TABLE agent_memory_nodes ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;",
     );
 
     Ok(conn)

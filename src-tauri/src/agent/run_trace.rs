@@ -149,6 +149,8 @@ pub fn save_step_output_with_meta(
             "action": action,
             "outcome": outcome,
         }).to_string(),
+        confidence_score: 100,
+        hit_count: 0,
         created_at: now,
     };
     let trigger_keywords = format!("{}, {}, {}", tool, action, outcome);

@@ -43,13 +43,15 @@ impl PlanState {
         Self::default()
     }
 
-    /// 推进或激活指定计划（如果模型未传 ID，自动按 plan-1, plan-2 自增分配）
-    pub fn resolve_plan(
+    /// 推进或激活指定计划（支持显式 new_plan 标志与 plan_id 回显，防止标题微小抖动导致 Episode 碎片化）
+    pub fn resolve_plan_explicit(
         &mut self,
         requested_id: Option<String>,
         requested_title: Option<String>,
+        is_new_plan: bool,
         default_title: &str,
     ) -> (String, String) {
+        // 1. 如果模型明确指定了 ID
         if let Some(id) = requested_id {
             let title = requested_title
                 .or_else(|| self.active_title.clone())
@@ -58,27 +60,45 @@ impl PlanState {
             self.active_title = Some(title.clone());
             return (id, title);
         }
-        if let Some(title) = requested_title {
-            if self.active_title.as_deref() == Some(title.as_str()) {
-                if let Some(id) = self.active_id.clone() {
-                    return (id, title);
-                }
-            }
+
+        // 2. 如果模型显式申明开启新阶段 (new_plan: true)
+        if is_new_plan {
             self.next_index = self.next_index.saturating_add(1);
             let id = format!("plan-{}", self.next_index);
+            let title = requested_title
+                .or_else(|| self.active_title.clone())
+                .unwrap_or_else(|| default_title.to_string());
             self.active_id = Some(id.clone());
             self.active_title = Some(title.clone());
             return (id, title);
         }
-        if let (Some(id), Some(title)) = (self.active_id.clone(), self.active_title.clone()) {
-            return (id, title);
+
+        // 3. 如果已有活跃阶段，且未显式声明 new_plan，则保持当前 ID，仅平滑更新标题（防止措辞微调导致 Episode 碎片化）
+        if let Some(existing_id) = self.active_id.clone() {
+            let title = requested_title
+                .or_else(|| self.active_title.clone())
+                .unwrap_or_else(|| default_title.to_string());
+            self.active_title = Some(title.clone());
+            return (existing_id, title);
         }
+
+        // 4. 初次启动自动分配 plan-1
         self.next_index = self.next_index.saturating_add(1);
         let id = format!("plan-{}", self.next_index);
-        let title = default_title.to_string();
+        let title = requested_title.unwrap_or_else(|| default_title.to_string());
         self.active_id = Some(id.clone());
         self.active_title = Some(title.clone());
         (id, title)
+    }
+
+    /// 兼容旧版调用入口
+    pub fn resolve_plan(
+        &mut self,
+        requested_id: Option<String>,
+        requested_title: Option<String>,
+        default_title: &str,
+    ) -> (String, String) {
+        self.resolve_plan_explicit(requested_id, requested_title, false, default_title)
     }
 }
 
@@ -188,8 +208,9 @@ impl SandwichContext {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let is_new_plan = instruction.new_plan.unwrap_or(false);
 
-        self.plan_state.resolve_plan(requested_id, requested_title, &self.user_goal)
+        self.plan_state.resolve_plan_explicit(requested_id, requested_title, is_new_plan, &self.user_goal)
     }
 
     pub fn set_task_resources(&mut self, resources: Vec<TaskResourceRef>) {
@@ -197,10 +218,8 @@ impl SandwichContext {
     }
 
     pub fn update_memory(&mut self, key: String, value: String) -> Result<(), &'static str> {
-        if let Err(reason) = crate::agent::context::memory::MemoryManager::is_safe_memory(&key, &value) {
-            println!("⚠️ 记忆项写入被安全拦截: {} (key: '{}')", reason, key);
-            return Err(reason);
-        }
+        crate::agent::context::memory::MemoryManager::is_safe_memory(&key, &value)?;
+        crate::agent::context::memory::MemoryManager::check_capacity(self.memories.len(), &key, &self.memories)?;
         self.memories.insert(key, value);
         Ok(())
     }
@@ -210,6 +229,11 @@ impl SandwichContext {
         for item in updates {
             if let Err(reason) = crate::agent::context::memory::MemoryManager::is_safe_memory(&item.key, &item.value) {
                 println!("⚠️ 记忆项写入被安全拦截: {} (key: '{}')", reason, item.key);
+                rejections.push(format!("记忆项 '{}' 未保存: {}", item.key, reason));
+                continue;
+            }
+            if let Err(reason) = crate::agent::context::memory::MemoryManager::check_capacity(self.memories.len(), &item.key, &self.memories) {
+                println!("⚠️ 记忆项容量拦截: {} (key: '{}')", reason, item.key);
                 rejections.push(format!("记忆项 '{}' 未保存: {}", item.key, reason));
                 continue;
             }

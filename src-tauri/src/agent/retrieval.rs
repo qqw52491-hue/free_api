@@ -41,6 +41,10 @@ pub struct SearchHit {
     pub evidence: Vec<String>, // 命中的上下文佐证或关联总结
 }
 
+fn default_confidence() -> i64 {
+    100
+}
+
 /// 浅层三级记忆节点模型 (Level 0: 事件, Level 1: Episode片段, Level 2: 阶段摘要/Lesson)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryNode {
@@ -53,6 +57,10 @@ pub struct MemoryNode {
     pub step_index: Option<usize>,
     pub content: String,
     pub metadata_json: String,
+    #[serde(default = "default_confidence")]
+    pub confidence_score: i64,
+    #[serde(default)]
+    pub hit_count: i64,
     pub created_at: String,
 }
 
@@ -63,8 +71,8 @@ pub fn insert_memory_node(
     trigger_keywords: &str,
 ) -> Result<(), String> {
     conn.execute(
-        "INSERT OR REPLACE INTO agent_memory_nodes (id, parent_id, level, kind, session_id, plan_id, step_index, content, metadata_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT OR REPLACE INTO agent_memory_nodes (id, parent_id, level, kind, session_id, plan_id, step_index, content, metadata_json, confidence_score, hit_count, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             node.id,
             node.parent_id,
@@ -75,6 +83,8 @@ pub fn insert_memory_node(
             node.step_index.map(|s| s as i64),
             node.content,
             node.metadata_json,
+            node.confidence_score,
+            node.hit_count,
             node.created_at,
         ],
     ).map_err(|e| format!("Memory node insert error: {}", e))?;
@@ -503,10 +513,11 @@ pub fn search_memory_nodes_enriched(
 
     let mut sql = String::from(
         "SELECT n.id, n.parent_id, n.level, n.kind, n.step_index, n.content,
-                snippet(agent_memory_nodes_fts, 5, '<b>', '</b>', '...', 25), rank
+                snippet(agent_memory_nodes_fts, 5, '<b>', '</b>', '...', 25), rank, n.confidence_score
          FROM agent_memory_nodes_fts fts
          JOIN agent_memory_nodes n ON fts.node_id = n.id
-         WHERE agent_memory_nodes_fts MATCH ?1",
+         WHERE agent_memory_nodes_fts MATCH ?1
+           AND n.confidence_score >= 30",
     );
 
     let mut params_vec: Vec<rusqlite::types::Value> = vec![match_pattern.into()];
@@ -525,7 +536,7 @@ pub fn search_memory_nodes_enriched(
     }
 
     let next_idx = params_vec.len() + 1;
-    sql.push_str(&format!(" ORDER BY rank ASC LIMIT ?{}", next_idx));
+    sql.push_str(&format!(" ORDER BY n.confidence_score DESC, rank ASC LIMIT ?{}", next_idx));
     params_vec.push((limit as i64).into());
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -621,7 +632,7 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
         }
     };
 
-    let limit = params.limit.unwrap_or(10).min(30);
+    let limit = params.limit.unwrap_or(3).min(10); // 默认限制 Top-3 召回预算，防止平庸经验稀释关键上下文
     // 默认只查历史：代码检索必须显式请求并提供 path（避免盲目扫盘）
     let kinds = params
         .kinds
@@ -767,6 +778,8 @@ mod tests {
                 step_index INTEGER,
                 content TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
+                confidence_score INTEGER NOT NULL DEFAULT 100,
+                hit_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -903,6 +916,8 @@ mod tests {
             step_index: Some(1),
             content: "阶段总结: 完成 PostgreSQL 驱动替换并修复跨域问题".to_string(),
             metadata_json: "{}".to_string(),
+            confidence_score: 100,
+            hit_count: 0,
             created_at: "2026-08-17".to_string(),
         };
         insert_memory_node(&conn, &summary_node, "PostgreSQL, 跨域, 阶段总结").unwrap();
@@ -918,6 +933,8 @@ mod tests {
             step_index: Some(10),
             content: "执行 cargo build 失败: error linking with cc failed: -lpq not found".to_string(),
             metadata_json: "{}".to_string(),
+            confidence_score: 100,
+            hit_count: 0,
             created_at: "2026-08-17".to_string(),
         };
         insert_memory_node(&conn, &event_node, "linking error, lpq, PostgreSQL").unwrap();

@@ -32,6 +32,9 @@ pub struct TodoItem {
     pub status: String, // "pending" | "in_progress" | "done" | "failed"
     #[serde(default)]
     pub description: String,
+    /// 完成该 Todo 所依据的执行产物 output_id 证据（防虚假勾选）
+    #[serde(default)]
+    pub evidence_output_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +169,12 @@ pub struct AgentInstruction {
     /// 面向用户的计划标题；切换该标题代表开始新的工作阶段。
     #[serde(default)]
     pub plan_title: Option<String>,
+    /// 显式申明开始新工作阶段（结合 plan_id 切换 Episode）
+    #[serde(default)]
+    pub new_plan: Option<bool>,
+    /// 模型决策中显式采纳的 Lesson ID 列表（用于血缘追踪与精准负反馈归因）
+    #[serde(default)]
+    pub applied_lessons: Option<Vec<String>>,
 
     // 兼容 tool / action
     pub tool: Option<String>,

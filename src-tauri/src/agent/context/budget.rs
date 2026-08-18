@@ -64,12 +64,29 @@ impl ContextBudget {
     pub const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
     pub const DEFAULT_TAIL_STATE_TOKENS: usize = 1_000;
     pub const SINGLE_OBSERVATION_INGRESS_CAP: usize = 4_000; // 单条观测入口硬截断 4k tokens
+    pub const DEFAULT_HIGH_WATERMARK_RATIO: f64 = 0.80;
+    pub const DEFAULT_LOW_WATERMARK_RATIO: f64 = 0.35; // 深度压缩至 35%，每次为长任务留出 45% 的平稳运行空间，击穿频率砍半
 
     /// 根据当前模型的真实窗口和静态区大小，动态推导出绝对预算（在会话内是常量且确定）
     pub fn derive(
         context_window: usize,
         max_output: usize,
         static_prefix_tokens: usize,
+    ) -> Self {
+        Self::derive_with_depth(
+            context_window,
+            max_output,
+            static_prefix_tokens,
+            Self::DEFAULT_LOW_WATERMARK_RATIO,
+        )
+    }
+
+    /// 支持自定义压缩深度的推导入口（长任务可设为 0.35，极短任务可设为 0.50）
+    pub fn derive_with_depth(
+        context_window: usize,
+        max_output: usize,
+        static_prefix_tokens: usize,
+        low_watermark_ratio: f64,
     ) -> Self {
         let window = if context_window > 0 {
             context_window
@@ -91,9 +108,10 @@ impl ContextBudget {
         let reserved = max_out + static_prefix_tokens + tail_state_tokens + safety_margin;
         let max_allowed_history = window.saturating_sub(reserved).max(2_048);
 
-        // 高低水位（80% 触发，50% 目标）
-        let high_watermark = (max_allowed_history as f64 * 0.80) as usize;
-        let low_watermark = (max_allowed_history as f64 * 0.50) as usize;
+        // 高低水位（80% 触发，深度压缩目标通常为 35%）
+        let safe_low_ratio = low_watermark_ratio.clamp(0.20, 0.70);
+        let high_watermark = (max_allowed_history as f64 * Self::DEFAULT_HIGH_WATERMARK_RATIO) as usize;
+        let low_watermark = (max_allowed_history as f64 * safe_low_ratio) as usize;
 
         Self {
             context_window_tokens: window,

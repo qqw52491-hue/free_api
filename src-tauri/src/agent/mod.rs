@@ -937,7 +937,7 @@ pub async fn run_agent_main_loop(
         // ================================================================
         // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
         // ================================================================
-        let (instruction, result) = run_call_llm_and_run_tool_phases(
+        let (mut instruction, result) = run_call_llm_and_run_tool_phases(
             &app,
             &state,
             &registry_state,
@@ -1130,6 +1130,61 @@ pub async fn run_agent_main_loop(
         });
 
         context.add_step(&instruction, &output_text, &output_id);
+
+        // ── 防虚假勾选：将当步真实 output_id 回填到标记为 done 但缺少证据的 Todo（需在 output_id 已知后执行）
+        if !instruction.todo_update.is_empty() {
+            for item in &mut instruction.todo_update {
+                if item.status == "done" && item.evidence_output_id.is_none() {
+                    item.evidence_output_id = Some(output_id.clone());
+                }
+            }
+            // 证据关联后同步更新 todo_list
+            context.todo_list = instruction.todo_update.clone();
+        }
+
+        // ── Lesson 血缘召回记录：若当步工具是 search，将命中的 lesson 类型结果写入血缘表 ───────
+        if instruction.get_tool().eq_ignore_ascii_case("search") && result.success {
+            if let Ok(search_result) = serde_json::from_str::<serde_json::Value>(&result.stdout) {
+                let recalled_lesson_ids: Vec<String> = search_result
+                    .get("hits")
+                    .and_then(|h| h.as_array())
+                    .map(|hits| {
+                        hits.iter()
+                            .filter_map(|h| {
+                                let kind = h.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                                if kind == "lesson" || kind == "summary" {
+                                    h.get("id_or_path").and_then(|id| id.as_str()).map(String::from)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !recalled_lesson_ids.is_empty() {
+                    crate::agent::lesson::record_lesson_recall(
+                        state.inner(),
+                        &final_session_id,
+                        step_id,
+                        &recalled_lesson_ids,
+                    );
+                }
+            }
+        }
+
+        // ── Lesson 显式血缘因果反馈打分 ────────────────────────────────────
+        if let Some(ref applied) = instruction.applied_lessons {
+            if !applied.is_empty() {
+                crate::agent::lesson::feedback_on_applied_lessons(
+                    state.inner(),
+                    &final_session_id,
+                    step_id,
+                    applied,
+                    result.success,
+                );
+            }
+        }
+        // ──────────────────────────────────────────────────────────────────
 
         // --- 记录不可逆副作用安全台账 (Side-Effects Ledger) ---
         // 关键不可逆操作（如 shell_exec、写入文件、修改数据库等）成功执行后记录台账，

@@ -61,14 +61,30 @@ pub fn sample_execution_log(raw: &str, head_chars: usize, tail_chars: usize) -> 
     let tail: String = raw.chars().skip(char_count.saturating_sub(tail_chars)).collect();
     let middle_omitted = char_count.saturating_sub(head_chars + tail_chars);
 
-    // 从中间被裁剪的文本中提取可能存在的关键错误行 (如 error:, panic:, fatal:, failed:)
+    // 从中间被裁剪的文本中提取可能存在的关键错误行 (如 error:, panic:, fatal:, failed:, HTTP 5xx, 权限拒绝等)
     let mut critical_lines = Vec::new();
     let middle_text: String = raw.chars().skip(head_chars).take(middle_omitted).collect();
     for line in middle_text.lines() {
         let lower = line.to_lowercase();
-        if lower.contains("error:") || lower.contains("panic:") || lower.contains("fatal:") || lower.contains("exception:") {
+        let is_critical = lower.contains("error:")
+            || lower.contains("panic:")
+            || lower.contains("fatal:")
+            || lower.contains("exception:")
+            || lower.contains("failed")
+            || lower.contains("failure")
+            || lower.contains("assert")
+            || lower.contains("✗")
+            || lower.contains("500 internal")
+            || lower.contains("403 forbidden")
+            || lower.contains("拒绝访问")
+            || lower.contains("权限不足")
+            || lower.contains("未找到")
+            || lower.contains("命令不存在")
+            || lower.contains("编译失败");
+
+        if is_critical {
             let clean = line.trim();
-            if !clean.is_empty() && clean.len() < 200 && critical_lines.len() < 3 {
+            if !clean.is_empty() && clean.len() < 250 && critical_lines.len() < 4 {
                 critical_lines.push(format!("  ⚠️ [捕获关键行] {}", clean));
             }
         }
