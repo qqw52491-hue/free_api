@@ -10,9 +10,15 @@
 ## JSON 输出契约
 每一轮只能输出一个 JSON 对象，不要使用 `tool_name`、`tool_input` 或函数调用包装格式。
 
-- 调用 MCP 工具：`{"tool":"插件名/工具名","command":{...参数...}}`。
-- 等待用户补充/选择：`{"tool":"ask_human","command":{"message":"提示文本","form":{...可选单选多选确认表单...}}}`。
+### 1. 核心内置工具 (Built-in Tools)
 - **任务完成与成果交付**：`{"tool":"finish","command":{"summary":"面向用户的最终交付物内容（支持 Markdown、表格、```html、```echarts、```mermaid）","details":"可选详细说明","artifacts":[]}}`。`finish` 是终态，不能当作普通工具调用。
+- **用户受控交互**：`{"tool":"ask_human","command":{"message":"提示文本","form":{...可选单选多选确认表单...}}}`。
+- **联邦知识与历史检索**：`{"tool":"search","command":{"query":"搜索关键词","kinds":["history","code"]}}`。
+- **获取历史完整截断原文**：`{"tool":"get_step_output","command":{"output_id":"步骤output_id","offset":0,"limit":15000}}`。
+- **会话任务数据区操作**：`{"tool":"task_store","command":{"action":"create_resource|upsert_records|list_records|...","resource_id":"..."}}`。
+
+### 2. 外部 MCP 插件工具
+- 调用格式：`{"tool":"插件名/工具名","command":{...参数对象...}}`。
 - 更新核心记忆：`"memories_update":[{"key":"稳定标识","value":"完整且可复用的事实"}]`。必须使用 `key` 与 `value`；需要清历史时仅在记忆已完整写入后再输出 `"clear_history":true`。
 
 ## 智能主动交互决策准则 (Autonomous Human Interaction Heuristics)

@@ -292,24 +292,64 @@ impl PluginRegistry {
         lines.join("\n")
     }
 
-    /// 核心参数规格（按需加载）
-    pub fn format_tool_detail(&mut self, plugin_name: &str) -> String {
+    /// 核心参数规格（按需加载，支持按插件全量加载或按单个工具精准加载，并压缩冗余 Schema 元数据）
+    pub fn format_tool_detail(&mut self, requested_name: &str) -> String {
         let all = self.list_all_tools();
-        let matched: Vec<_> = all.iter().filter(|(p, _)| p == plugin_name).collect();
+        let (target_plugin, target_tool) = if requested_name.contains('/') {
+            let parts: Vec<&str> = requested_name.split('/').collect();
+            (parts[0], Some(parts[1]))
+        } else {
+            (requested_name, None)
+        };
+
+        let matched: Vec<_> = all
+            .iter()
+            .filter(|(p, t)| {
+                if p != target_plugin {
+                    return false;
+                }
+                if let Some(tool_name) = target_tool {
+                    t.name == tool_name
+                } else {
+                    true
+                }
+            })
+            .collect();
+
         if matched.is_empty() {
-            return format!("\n❌ 未找到插件 [{}] 的说明书。", plugin_name);
+            return format!("\n❌ 未找到工具/插件 [{}] 的说明书。", requested_name);
         }
 
         let mut detail = format!(
             "\n## 📦 [{}] 工具规格 (严格遵守 JSON Schema)\n",
-            plugin_name
+            requested_name
         );
-        for (_, tool) in &matched {
+        for (plugin, tool) in &matched {
+            let compact_schema = clean_tool_schema(&tool.schema);
             detail.push_str(&format!(
                 "### {}/{}\n- 描述: {}\n- 参数: {}\n",
-                plugin_name, tool.name, tool.description, tool.schema
+                plugin, tool.name, tool.description.trim(), compact_schema
             ));
         }
         detail
+    }
+}
+
+/// 精简 JSON Schema，剔除 $schema/title/additionalProperties 等无意义冗余字段，大幅削减 Token 消耗
+fn clean_tool_schema(schema: &serde_json::Value) -> String {
+    if let serde_json::Value::Object(map) = schema {
+        let mut cleaned = serde_json::Map::new();
+        for (k, v) in map {
+            if k == "$schema" || k == "title" {
+                continue;
+            }
+            if k == "additionalProperties" && v.as_bool() == Some(false) {
+                continue;
+            }
+            cleaned.insert(k.clone(), v.clone());
+        }
+        serde_json::to_string(&serde_json::Value::Object(cleaned)).unwrap_or_default()
+    } else {
+        schema.to_string()
     }
 }
