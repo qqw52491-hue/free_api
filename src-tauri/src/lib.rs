@@ -67,6 +67,8 @@ pub fn run() {
             commands::get_session_run_traces,
             commands::read_agent_summary_markdown,
             commands::open_in_webview_window,
+            commands::search_web,
+            commands::fetch_url_markdown,
             // Agent 执行
             agent::execute_command,
             agent::run_agent_main_loop,

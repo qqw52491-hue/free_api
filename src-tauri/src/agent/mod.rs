@@ -13,6 +13,7 @@ pub mod task_store;
 pub mod task_summary;
 pub mod types;
 pub mod utils;
+pub mod web_search;
 
 use crate::agent::checkpoint::{
     load_checkpoint, recovery_decision, save_checkpoint, AgentCheckpoint, RecoveryDecision,
@@ -276,6 +277,11 @@ fn execute_command_inner(
         return retrieval::dispatch_search(db, session_id, params);
     }
 
+    // 3.5 核心原生工具 D: web_search / web_fetch (互联网全网检索与网页正文 Markdown 提取)
+    if tool.eq_ignore_ascii_case("web_search") || tool.eq_ignore_ascii_case("web_fetch") {
+        return web_search::dispatch(tool, params);
+    }
+
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
     let (plugin_name, tool_name) = if tool.contains('/') {
         let parts: Vec<&str> = tool.split('/').collect();
@@ -332,7 +338,7 @@ fn execute_command_inner(
     DispatchResult {
         stdout: String::new(),
         stderr: format!(
-            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！可用原生内置工具：finish, ask_human, search, get_step_output, task_store；外部 MCP 工具格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
+            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！可用原生内置工具：finish, ask_human, web_search, web_fetch, search, get_step_output, task_store；外部 MCP 工具格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
             tool, action
         ),
         success: false,

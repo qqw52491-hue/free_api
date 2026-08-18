@@ -1179,3 +1179,19 @@ pub async fn open_in_webview_window(
 
     Ok(())
 }
+
+/// 原生聚合互联网搜索
+#[tauri::command]
+pub async fn search_web(
+    query: String,
+    max_results: Option<usize>,
+) -> Result<Vec<crate::agent::web_search::WebSearchResultItem>, String> {
+    crate::agent::web_search::execute_web_search(&query, max_results.unwrap_or(5)).await
+}
+
+/// 原生抓取并提取网页 Markdown
+#[tauri::command]
+pub async fn fetch_url_markdown(url: String) -> Result<String, String> {
+    crate::agent::web_search::fetch_url_markdown(&url).await
+}
+
