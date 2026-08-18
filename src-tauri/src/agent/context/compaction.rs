@@ -250,6 +250,11 @@ impl SandwichContext {
             compact_count += 1;
         }
 
+        // 关键对齐 (Pitfall 1 保护)：确保 drain 边界对齐到完整轮次，绝不把 (assistant, user) 工具调用对拆散
+        if compact_count < self.turns_history.len() && self.turns_history[compact_count].role == "user" {
+            compact_count += 1;
+        }
+
         if compact_count == 0 {
             return;
         }
