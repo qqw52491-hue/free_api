@@ -778,17 +778,6 @@ export function useAgentSession(sessionId: string) {
             humanForm.value = normalizeHumanForm(payload.form, message);
             return;
         }
-        // 任务完成
-        if (eventType.includes("finish") || eventType.includes("complete") || eventType.includes("success")) {
-            completeRun(payload, true);
-            return;
-        }
-
-        // 任务失败
-        if (eventType.includes("fail") || eventType.includes("error")) {
-            completeRun(payload, false);
-            return;
-        }
 
         // 新规划步骤 step_new
         if (eventType === "step_new") {
@@ -860,7 +849,7 @@ export function useAgentSession(sessionId: string) {
             return;
         }
 
-        // 步骤异常 step_error
+        // 步骤异常 step_error (单步报错重试，不是整个任务终态)
         if (eventType === "step_error") {
             const stepId = numberOrUndefined(payload.step_id) ?? 0;
             const existing = steps.value.find(s => s.stepId === stepId);
@@ -871,8 +860,20 @@ export function useAgentSession(sessionId: string) {
                     existing.rawResult = payload.output;
                 }
             }
-            appendLog(`[步骤失败 #${stepId + 1}] ${existing?.description || ""}`);
+            appendLog(`[步骤遇到错误 #${stepId + 1}] ${existing?.description || ""}`);
             autoScrollToBottom();
+            return;
+        }
+
+        // 任务终态：完成 complete / 终态失败 fatal_error
+        if (eventType === "complete" || eventType === "finish") {
+            const isSuccess = payload.success !== false;
+            completeRun(payload, isSuccess);
+            return;
+        }
+
+        if (eventType === "fatal_error" || eventType === "task_failed") {
+            completeRun(payload, false);
             return;
         }
 
