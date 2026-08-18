@@ -3,18 +3,12 @@
     <main class="main-content">
       <RouterView />
     </main>
-
-    <!-- 全局应用内浏览器与链接预览窗口 -->
-    <BrowserPreviewModal />
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, onUnmounted } from "vue";
-import BrowserPreviewModal from "./components/common/BrowserPreviewModal.vue";
-import { useBrowserPreview } from "./composables/useBrowserPreview";
-
-const browserPreview = useBrowserPreview();
+import { openExternalUrl } from "./composables/useBrowserPreview";
 
 function handleGlobalLinkClick(e: MouseEvent) {
   // 向上查找最近的 <a> 链接元素
@@ -28,24 +22,8 @@ function handleGlobalLinkClick(e: MouseEvent) {
   e.preventDefault();
   e.stopPropagation();
 
-  // 2. HTTP / HTTPS 网页链接：呼起内置浏览器预览窗口
-  if (/^https?:\/\//i.test(href)) {
-    const title = target.getAttribute("title") || target.textContent?.trim() || href;
-    browserPreview.open(href, title);
-    return;
-  }
-
-  // 3. mailto: 邮件链接：通过 Tauri Opener 调用系统默认邮件客户端
-  if (/^mailto:/i.test(href)) {
-    browserPreview.openInExternalBrowser(href);
-    return;
-  }
-
-  // 4. file:/// 或系统路径：通过外部应用打开
-  if (/^file:\/\//i.test(href) || href.startsWith("/")) {
-    browserPreview.openInExternalBrowser(href);
-    return;
-  }
+  // 2. 所有外链、邮件、文件路径一律直接调起系统默认浏览器/外部新窗口打开
+  openExternalUrl(href);
 }
 
 onMounted(() => {

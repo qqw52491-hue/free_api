@@ -7,6 +7,17 @@ const previewTitle = ref("");
 const isLoading = ref(false);
 const loadFailed = ref(false);
 
+export async function openExternalUrl(target: string) {
+  if (!target) return;
+  try {
+    await tauriOpenUrl(target);
+  } catch (err) {
+    console.error("无法在系统浏览器中打开链接:", err);
+    // Fallback: 尝试原生 window.open
+    window.open(target, "_blank", "noopener,noreferrer");
+  }
+}
+
 export function useBrowserPreview() {
   function open(url: string, title?: string) {
     if (!url) return;
@@ -27,14 +38,7 @@ export function useBrowserPreview() {
 
   async function openInExternalBrowser(urlToOpen?: string) {
     const target = urlToOpen || previewUrl.value;
-    if (!target) return;
-    try {
-      await tauriOpenUrl(target);
-    } catch (err) {
-      console.error("无法在系统浏览器中打开链接:", err);
-      // Fallback: 尝试原生 window.open
-      window.open(target, "_blank", "noopener,noreferrer");
-    }
+    await openExternalUrl(target);
   }
 
   function onIframeLoad() {
