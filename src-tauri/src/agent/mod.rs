@@ -623,44 +623,15 @@ pub async fn run_agent_main_loop(
 
     // 2. 动态扫描所有内置工具 (Built-in Tools)
     let task_store_menu = r#"
-## 会话任务数据区（内部工具，不是 MCP）
-当采集、解析或批处理会产生后续仍要使用的结构化中间数据时，先写入 task_store；不要把完整数据放入 memories、历史或 prompt。
-调用格式：tool 固定为 "task_store"，action 为下列动作，参数放在 command 或 params 对象中。
+## 会话任务数据区 task_store 动作详情
+当采集、解析或批处理产生结构化中间数据时，写入 task_store（tool: "task_store"），参数放在 command 对象中：
 - create_resource：创建数据集。参数 kind、label，可选 resource_id、schema、summary、cursor。
-- upsert_records：实时写入或更新记录。参数 resource_id、records 数组；每条记录宜提供 id、record_key 或 key，以保证幂等更新；可同时写 summary、cursor、status。
+- upsert_records：实时写入或更新记录。参数 resource_id、records 数组；每条记录宜提供 id 或 record_key，以保证幂等更新；可同时写 summary、cursor、status。
 - list_resources / get_resource：读取数据集目录和元数据。
 - list_records：分页读取数据行。参数 resource_id，可选 limit（最多 100）、offset。
 - get_record：读取一条记录。参数 resource_id、record_key。
 - update_resource：更新资源 label、summary、status、cursor 或 schema。
-- get_step_output：根据 output_id 查询被截断的完整历史执行原文（参数: output_id, 可选 offset, limit）。
 数据行会在工具返回时立刻持久化，并按当前 session 隔离；模型默认只看到资源目录与摘要，需要具体数据时再分页查询。
-
-## 联邦知识检索 search（内部工具）
-当需要主动跨历史执行日志查找早期报错、决策细节，或需要检索代码文件时，使用 tool 为 "search"：
-- 参数 `query`: 搜索关键词或错误特征串（必填；trigram 分词下限 3 个字符，中文子串可直接命中，如「数据库连接」）
-- 参数 `kinds`: 可选 `["history"]`（默认，查历史执行日志/SQLite FTS5）、`["code"]`（实时 ripgrep 检索代码）、`["all"]`
-- 参数 `outcome`: 可选 `"failed"`（专门查失败排错历史）/ `"succeeded"`，大小写不敏感
-- 参数 `since_step`: 可选起始步骤编号下界
-- 参数 `path`: kinds 含 `code` 时必填，要检索的目录绝对路径（禁止对系统根目录或超大目录发起检索）
-- 参数 `limit`: 返回条数限制（默认 10）
-注意：若返回 errors 字段说明某个检索分支失败（如缺少 path、rg 未安装），0 命中与搜索失败是不同信号，请勿混同。
-
-## ask_human 受控交互（内部工具）
-当需要用户决定、确认、补充文件或填报表格数据时，使用 tool 为 "ask_human"，并在 command/params 中提供 message。
-可选 form 对象支持以下结构：
-- kind: "single_select" | "multi_select" | "confirm" | "file_picker" | "text" | "custom_html"。
-- title、description、placeholder：文本说明。
-- options：单选/多选可用，最多 12 项；每项仅含 id、label、可选 description。
-- default：单选/确认/文本的默认值，或多选的 id 数组。
-- html：当 kind 为 "custom_html" 时提供可交互的 HTML 页面，提交按钮直接调用 Agent.submit(formData)，系统将自动通过 MessageChannel 回传数据并唤醒你。
-confirm 固定提供确认与取消；file_picker 前端会唤起本地文件选择器供用户选取。用户提交后工具会返回结果。
-
-## 数据可视化、架构拓扑与 HTML 实时应用沙箱（ECharts、Mermaid 与 HTML）
-当需要向用户展示统计数据、趋势对比、系统架构、知识关系图谱或可交互前端应用时，请直接在回答中输出标准代码块：
-1. ECharts 图表（折线/柱状/饼图/雷达/桑基/力导向关系网络）：输出 ```echarts ... ``` 代码块，包含标准的 ECharts Option JSON（支持 graph 关系拓扑图）。
-2. Mermaid 架构图（流程图/时序图/状态图/思维导图）：输出 ```mermaid ... ``` 代码块。
-3. HTML 单页应用与交互原型：输出 ```html ... ``` 代码块（包含完整 HTML+CSS+JS）。
-前端会自动将其编译并渲染为可交互图表、或带有 [实时预览 / 源代码] Tab 切换与全屏操作的动态沙箱。
 "#;
     let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
     let tools_dir = app
