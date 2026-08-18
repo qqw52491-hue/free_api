@@ -36,20 +36,25 @@ impl SandwichContext {
             output_summary.to_string()
         };
 
-        // 2. 智能 Head + Tail 采样（头 300 + 尾 500 + 关键报错行保留）
+        // 2. 智能 Head + Tail 采样
+        // 关键保护：当工具是 get_step_output 或输出在 3500 字符以内时，绝不进行二次采样折叠（彻底杜绝无限取回死循环）
+        let tool_name = instruction.get_tool().to_lowercase();
+        let is_unfolding_tool = tool_name == "get_step_output";
         let mut history_feedback = ingress_trimmed;
         let original_chars = history_feedback.chars().count();
         let mut is_truncated = false;
 
-        if let Some(idx) = history_feedback.find("【可用元素清单】") {
-            history_feedback
-                .replace_range(idx.., "【可用元素清单】: (已折叠，详见底部当前最新观测)");
-            is_truncated = true;
-        } else {
-            let sampled = crate::agent::utils::sample_execution_log(&history_feedback, 300, 500);
-            if sampled.len() < history_feedback.len() {
-                history_feedback = sampled;
+        if !is_unfolding_tool {
+            if let Some(idx) = history_feedback.find("【可用元素清单】") {
+                history_feedback
+                    .replace_range(idx.., "【可用元素清单】: (已折叠，详见底部当前最新观测)");
                 is_truncated = true;
+            } else if original_chars > 3500 {
+                let sampled = crate::agent::utils::sample_execution_log(&history_feedback, 1200, 1500);
+                if sampled.len() < history_feedback.len() {
+                    history_feedback = sampled;
+                    is_truncated = true;
+                }
             }
         }
 
