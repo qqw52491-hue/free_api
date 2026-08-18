@@ -278,11 +278,14 @@
                   <li v-if="diagModalModel.diagnostics?.http_status === 401">
                     <strong>401 Unauthorized</strong>: API Key 错误或已过期。请确认中转站填写的令牌是否正确。
                   </li>
+                  <li v-else-if="diagModalModel.diagnostics?.http_status === 402 || diagModalModel.diagnostics?.response_body?.includes('insufficient')">
+                    <strong>402 Insufficient Balance</strong>: <strong>中转站账户钱包余额不足</strong>（{{ diagModalModel.diagnostics?.response_body }}）。请前往中转站网页控制台充值或领取免费额度。
+                  </li>
                   <li v-else-if="diagModalModel.diagnostics?.http_status === 404">
                     <strong>404 Not Found</strong>: 接口路径不存在。请检查平台 Base URL 是否遗漏了 <code>/v1</code>（应形如 <code>https://域名/v1</code>）。
                   </li>
                   <li v-else-if="diagModalModel.diagnostics?.http_status === 429">
-                    <strong>429 Rate Limit / Quota</strong>: 触发频率限制或中转站账户余额不足，请前往中转站控制台充值或领取额度。
+                    <strong>429 Rate Limit / Quota</strong>: 触发频率限制或中转站额度耗尽，请前往中转站控制台查看额度。
                   </li>
                   <li v-else-if="diagModalModel.diagnostics?.raw_error?.includes('error sending request') || !diagModalModel.diagnostics?.http_status">
                     <strong>网络连接异常</strong>: 请求未能到达目标服务器。请检查：① 该中转站域名是否被拦截或需梯子/代理；② 域名拼写是否正确；③ 目标服务器是否处于维护中。
