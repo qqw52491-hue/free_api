@@ -199,6 +199,7 @@ impl McpClient {
     }
 }
 
+#[derive(Default)]
 pub struct PluginRegistry {
     pub clients: std::collections::HashMap<String, McpClient>,
 }

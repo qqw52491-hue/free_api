@@ -1,20 +1,17 @@
+use crate::agent::context::budget::{conservative_token_estimate, ContextBudget};
 use crate::agent::context::types::{ChatMessage, SandwichContext};
 use crate::agent::types::AgentInstruction;
 use serde_json::json;
 
-pub const SAMPLER_VERSION: u32 = 1;
-pub const MAX_INGRESS_CHARS: usize = 12_000; // ~4,000 tokens 入口硬截断
-pub const RECENT_TOOL_WINDOW: usize = 3; // 保留最近 K=3 个工具批次完整可见
-pub const FOLD_CHAR_THRESHOLD: usize = 3_500; // 超过此字符数的旧工具输出才折叠
+pub const SAMPLER_VERSION: u32 = 3;
 
 impl SandwichContext {
-    /// 写入工具执行结果（只写入，不折叠）
+    /// 写入工具执行结果（Append-only 线性历史追加，最大化 Prompt Cache 命中率）
     ///
-    /// 设计原则（对齐 Anthropic Context Editing / OpenAI Compaction / LangChain Deep Agents）：
-    /// - 当前步输出**完整写入**，模型需要完整阅读刚请求的数据
-    /// - 折叠不在写入时发生，而是由 compaction 引擎在 Token 高水位触发时批量处理
-    /// - 最近 K=3 个工具批次保持完整，更老的才有资格被折叠
-    /// - 全文始终持久化在 SQLite，凭 output_id 随时可取回
+    /// 设计原则（对齐 Claude Code / Codex 长任务架构）：
+    /// - 历史在平时保持严格 Append-Only，绝不在历史中间就地随机篡改，避免打爆 KV 前缀缓存
+    /// - 单步入口依据 Token 精确计量（支持中文 CJK 准确评估），超过 Cap 时采用 Head (1200) + Errors (800) + Tail (1800) 显式分账采样
+    /// - 全量原文始终持久化在 SQLite，凭 output_id 随时可通过 get_step_output(offset, limit) 分段回取
     pub fn add_step(
         &mut self,
         instruction: &AgentInstruction,
@@ -34,107 +31,44 @@ impl SandwichContext {
             content: json!(action_brief),
         });
 
-        // ── 2. 入口硬截断 (12,000 字符绝对上限，防止单条输出撑爆上下文) ──
-        let ingress_trimmed = if output_summary.chars().count() > MAX_INGRESS_CHARS {
-            let truncated_head: String = output_summary.chars().take(MAX_INGRESS_CHARS).collect();
-            format!("{}\n\n[⚠️ 入口硬截断: 单步输出超过 {} 字符上限，完整原始数据可调用: {{\"tool\": \"get_step_output\", \"command\": {{\"output_id\": \"{}\"}}}} 精准获取]",
-                truncated_head, MAX_INGRESS_CHARS, output_id)
-        } else {
-            output_summary.to_string()
-        };
+        // ── 2. 入口硬截断 (基于悲观安全 Token 估算，支持中文/英文/密集 JSON/代码) ──
+        let ingress_tokens = conservative_token_estimate(output_summary);
+        let ingress_cap = ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP;
 
-        // ── 3. 当前步完整写入（不折叠）──
-        let feedback_str = format!(
-            "【执行输出 (v{})】\noutput_id: {}\n{}",
-            SAMPLER_VERSION, output_id, ingress_trimmed
-        );
+        let feedback_str = if ingress_tokens > ingress_cap {
+            let mut head_chars = 1200;
+            let mut tail_chars = 1800;
+            let mut sampled = crate::agent::utils::sample_execution_log(output_summary, head_chars, tail_chars);
+            let mut candidate = format!(
+                "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: {}\ntruncated: true\n{}\n\n[⚠️ 入口硬截断: 原始输出约 {} Tokens (上限 {} Tokens)。完整数据已在 SQLite。\n🔍 搜索关键词: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"search_step_output\", \"output_id\": \"{}\", \"pattern\": \"error\", \"context_lines\": 3}}}}\n📑 分段读取: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"get_step_output\", \"output_id\": \"{}\", \"offset\": 0, \"limit\": 3000}}}}] ",
+                SAMPLER_VERSION, output_id, ingress_tokens, sampled, ingress_tokens, ingress_cap, output_id, output_id
+            );
+
+            // 闭环出口复检 (Sample -> Measure -> Trim 闭环保证)：
+            // 无论全中文、特殊字符或转义多密集，确保进入历史的消息在 conservative_token_estimate 下绝对 <= ingress_cap
+            while conservative_token_estimate(&candidate) > ingress_cap && (head_chars > 150 || tail_chars > 200) {
+                head_chars = (head_chars as f64 * 0.70) as usize;
+                tail_chars = (tail_chars as f64 * 0.70) as usize;
+                sampled = crate::agent::utils::sample_execution_log(output_summary, head_chars, tail_chars);
+                candidate = format!(
+                    "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: {}\ntruncated: true\n{}\n\n[⚠️ 入口硬截断: 原始输出约 {} Tokens (上限 {} Tokens)。完整数据已在 SQLite。\n🔍 搜索关键词: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"search_step_output\", \"output_id\": \"{}\", \"pattern\": \"error\", \"context_lines\": 3}}}}\n📑 分段读取: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"get_step_output\", \"output_id\": \"{}\", \"offset\": 0, \"limit\": 3000}}}}] ",
+                    SAMPLER_VERSION, output_id, ingress_tokens, sampled, ingress_tokens, ingress_cap, output_id, output_id
+                );
+            }
+            candidate
+        } else {
+            format!(
+                "【执行输出 (v{})】\noutput_id: {}\n{}",
+                SAMPLER_VERSION, output_id, output_summary
+            )
+        };
 
         self.turns_history.push(ChatMessage {
             role: "user".to_string(),
             content: json!(feedback_str),
         });
 
-        // ── 4. 触发自适应水位检查（折叠和压缩都在这里按需批量执行）──
+        // ── 3. 触发自适应水位检查（仅在高水位时从头部一次性批量收纳，保护前缀缓存）──
         self.maybe_compact_history();
-    }
-
-    /// Phase 1 轻量收纳：批量折叠旧工具输出
-    ///
-    /// 保留最近 keep_recent_k 个工具批次完整可见，更老的超长输出折叠为预览+句柄。
-    /// 这是低成本操作（纯字符串处理，无 LLM 调用），在 Phase 2 全量 LLM 摘要之前优先执行。
-    pub fn fold_old_tool_results(&mut self, keep_recent_k: usize) -> usize {
-        // 从新到旧收集所有未折叠的完整工具输出索引
-        let unfolded_indices: Vec<usize> = self
-            .turns_history
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, m)| {
-                if m.role != "user" {
-                    return false;
-                }
-                let s = match &m.content {
-                    serde_json::Value::String(s) => s.as_str(),
-                    _ => return false,
-                };
-                s.contains("【执行输出 (v") && !s.contains("【执行输出采样")
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        // 近期窗口内的批次不足 K 个，全部保留
-        if unfolded_indices.len() <= keep_recent_k {
-            return 0;
-        }
-
-        let mut folded_count = 0;
-
-        // 对近期窗口之外的逐个检查并折叠
-        for &idx in &unfolded_indices[keep_recent_k..] {
-            let content_str = match &self.turns_history[idx].content {
-                serde_json::Value::String(s) => s.clone(),
-                _ => continue,
-            };
-
-            // 浏览器 DOM 元素清单：特殊语义折叠
-            if let Some(fold_pos) = content_str.find("【可用元素清单】") {
-                let mut folded = content_str.clone();
-                folded.replace_range(
-                    fold_pos..,
-                    "【可用元素清单】: (已折叠，详见底部当前最新观测)",
-                );
-                self.turns_history[idx].content = json!(folded);
-                folded_count += 1;
-                continue;
-            }
-
-            // 小结果不折叠
-            let char_count = content_str.chars().count();
-            if char_count <= FOLD_CHAR_THRESHOLD {
-                continue;
-            }
-
-            // 提取 output_id
-            let output_id = content_str
-                .lines()
-                .find(|l| l.starts_with("output_id: "))
-                .map(|l| l.trim_start_matches("output_id: ").trim().to_string())
-                .unwrap_or_default();
-
-            // Head 1200 + Tail 1500 采样
-            let sampled =
-                crate::agent::utils::sample_execution_log(&content_str, 1200, 1500);
-
-            if sampled.len() < content_str.len() {
-                let folded = format!(
-                    "【执行输出采样 (v{})】\noutput_id: {}\noriginal_chars: {}\ntruncated: true\n{}\n\n[提示: 历史工具输出已收纳。需要完整原始数据可调用: {{\"tool\": \"get_step_output\", \"command\": {{\"output_id\": \"{}\"}}}} 精准获取]",
-                    SAMPLER_VERSION, output_id, char_count, sampled, output_id
-                );
-                self.turns_history[idx].content = json!(folded);
-                folded_count += 1;
-            }
-        }
-
-        folded_count
     }
 }

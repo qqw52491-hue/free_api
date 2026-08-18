@@ -199,6 +199,12 @@ pub struct AgentInstruction {
     /// 【指令流水线】支持单回合执行多条连续动作
     #[serde(default)]
     pub commands: Vec<serde_json::Value>,
+    /// 【并行扇出】支持单回合并发执行多个子任务 (allSettled 语义)
+    #[serde(default)]
+    pub parallel: Option<Vec<serde_json::Value>>,
+    /// 【嵌套计划树】支持串行/并行任意嵌套的高阶计划树
+    #[serde(default)]
+    pub plan_tree: Option<serde_json::Value>,
     /// 【预加载优化】AI 预告下一轮想用的工具，系统会提前加载该工具的详细说明书
     #[serde(default)]
     pub next_tool_hint: Option<String>,

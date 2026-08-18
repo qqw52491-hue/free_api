@@ -47,6 +47,17 @@ fn is_cjk_character(ch: char) -> bool {
     )
 }
 
+/// 悲观安全防御型 Token 估算器（专用于上下文硬不爆窗防御）
+/// 针对转义密集的 JSON、长代码、特殊符号与 Base64，叠加 byte_floor (bytes / 2.8)，取两者最大值
+pub fn conservative_token_estimate(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let regular = estimate_tokens(text);
+    let byte_floor = (text.len() as f64 / 2.8).ceil() as usize;
+    regular.max(byte_floor)
+}
+
 /// 动态上下文预算推导
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextBudget {
@@ -64,8 +75,9 @@ impl ContextBudget {
     pub const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
     pub const DEFAULT_TAIL_STATE_TOKENS: usize = 1_000;
     pub const SINGLE_OBSERVATION_INGRESS_CAP: usize = 4_000; // 单条观测入口硬截断 4k tokens
-    pub const DEFAULT_HIGH_WATERMARK_RATIO: f64 = 0.80;
-    pub const DEFAULT_LOW_WATERMARK_RATIO: f64 = 0.35; // 深度压缩至 35%，每次为长任务留出 45% 的平稳运行空间，击穿频率砍半
+    pub const DEFAULT_HIGH_WATERMARK_RATIO: f64 = 0.80;      // 80% 高水位触发
+    pub const DEFAULT_LOW_WATERMARK_RATIO: f64 = 0.50;       // 50% 目标回落水位
+    pub const RECENT_PROTECTED_RATIO: f64 = 0.25;            // 25% 近期保护区（保证 low_watermark 50% > protected 25% + 卡片 5% + 余量 20%）
 
     /// 根据当前模型的真实窗口和静态区大小，动态推导出绝对预算（在会话内是常量且确定）
     pub fn derive(
@@ -81,7 +93,7 @@ impl ContextBudget {
         )
     }
 
-    /// 支持自定义压缩深度的推导入口（长任务可设为 0.35，极短任务可设为 0.50）
+    /// 支持自定义压缩深度的推导入口
     pub fn derive_with_depth(
         context_window: usize,
         max_output: usize,
@@ -108,8 +120,10 @@ impl ContextBudget {
         let reserved = max_out + static_prefix_tokens + tail_state_tokens + safety_margin;
         let max_allowed_history = window.saturating_sub(reserved).max(2_048);
 
-        // 高低水位（80% 触发，深度压缩目标通常为 35%）
-        let safe_low_ratio = low_watermark_ratio.clamp(0.20, 0.70);
+        // 硬不变量保证：低水位必须严格大于（近期保护区 + 归档卡片预留 + 安全缓冲）
+        let min_safe_low_ratio = Self::RECENT_PROTECTED_RATIO + 0.15; // 至少 40%
+        let safe_low_ratio = low_watermark_ratio.clamp(min_safe_low_ratio, 0.75);
+
         let high_watermark = (max_allowed_history as f64 * Self::DEFAULT_HIGH_WATERMARK_RATIO) as usize;
         let low_watermark = (max_allowed_history as f64 * safe_low_ratio) as usize;
 
@@ -147,5 +161,22 @@ mod tests {
         let budget = ContextBudget::derive(128_000, 4_096, 5_000);
         assert!(budget.max_allowed_history_tokens > 80_000);
         assert!(budget.high_watermark_tokens > budget.low_watermark_tokens);
+    }
+
+    #[test]
+    fn test_conservative_estimate_beats_regular_for_dense_content() {
+        // 密集 JSON/base64 场景：保守估算必须 >= 普通估算
+        let dense_json = r#"{"key":"aGVsbG8gd29ybGQgdGhpcyBpcyBiYXNlNjQ=","foo":1234567890,"bar":true}"#;
+        let conservative = conservative_token_estimate(dense_json);
+        let regular = estimate_tokens(dense_json);
+        // 保守估算必须始终 >= 常规估算
+        assert!(
+            conservative >= regular,
+            "conservative={} should be >= regular={}",
+            conservative, regular
+        );
+        // 对于此类 ASCII 密集 JSON，byte_floor 应该生效并超出 weighted 估算
+        let byte_floor = (dense_json.len() as f64 / 2.8).ceil() as usize;
+        assert_eq!(conservative, regular.max(byte_floor));
     }
 }

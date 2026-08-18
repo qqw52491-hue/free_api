@@ -85,6 +85,42 @@ pub fn dispatch(
             }));
         }
 
+        if action == "search_step_output" || action == "grep_step_output" || action == "search_output" {
+            let output_id = required_string(params_value, "output_id")?;
+            let pattern = required_string(params_value, "pattern")?;
+            let context_lines = params_value.get("context_lines").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+            let max_matches = params_value.get("max_matches").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+            let text = crate::agent::run_trace::get_step_output(db, &output_id)?;
+
+            let lines: Vec<&str> = text.lines().collect();
+            let lower_pattern = pattern.to_lowercase();
+            let mut matches = Vec::new();
+            let mut total_match_count = 0usize;
+
+            for (idx, line) in lines.iter().enumerate() {
+                if line.to_lowercase().contains(&lower_pattern) {
+                    total_match_count += 1;
+                    if matches.len() < max_matches {
+                        let start = idx.saturating_sub(context_lines);
+                        let end = std::cmp::min(idx + context_lines + 1, lines.len());
+                        let snippet = lines[start..end].join("\n");
+                        matches.push(json!({
+                            "line_number": idx + 1,
+                            "snippet": snippet
+                        }));
+                    }
+                }
+            }
+
+            return Ok(json!({
+                "output_id": output_id,
+                "pattern": pattern,
+                "total_matches": total_match_count,
+                "returned_matches": matches.len(),
+                "matches": matches
+            }));
+        }
+
         let mut conn = db.0.lock().map_err(|e| e.to_string())?;
         match action {
             "create_resource" => create_resource(&mut conn, session_id, params_value),
@@ -97,7 +133,7 @@ pub fn dispatch(
             "get_record" => get_record(&conn, session_id, params_value),
             "update_resource" => update_resource(&mut conn, session_id, params_value),
             _ => Err(format!(
-                "task_store 不支持 action='{}'。可用动作：create_resource、upsert_records、list_resources、get_resource、list_records、get_record、update_resource, get_step_output",
+                "task_store 不支持 action='{}'。可用动作：create_resource、upsert_records、list_resources、get_resource、list_records、get_record、update_resource, get_step_output, search_step_output",
                 action
             )),
         }

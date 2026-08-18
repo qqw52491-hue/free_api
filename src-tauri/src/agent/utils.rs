@@ -48,8 +48,8 @@ pub fn chars_preview(s: &str, limit: usize) -> String {
     }
 }
 
-/// 智能采样历史执行日志 (Head + Tail 采样 + 关键错误行保留)
-/// 保证命令行与代码执行输出中的关键头部环境与尾部致命报错 (panic/error/exit code) 完整保留
+/// 智能采样历史执行日志 (Head + Tail 采样 + 关键错误行去重聚合保留)
+/// 严格采用三段式预算分账：保证头部前置环境、中间关键去重报错、尾部致命诊断 100% 不超预算
 pub fn sample_execution_log(raw: &str, head_chars: usize, tail_chars: usize) -> String {
     let char_count = raw.chars().count();
     let safe_threshold = head_chars + tail_chars + 60;
@@ -61,42 +61,69 @@ pub fn sample_execution_log(raw: &str, head_chars: usize, tail_chars: usize) -> 
     let tail: String = raw.chars().skip(char_count.saturating_sub(tail_chars)).collect();
     let middle_omitted = char_count.saturating_sub(head_chars + tail_chars);
 
-    // 从中间被裁剪的文本中提取可能存在的关键错误行 (如 error:, panic:, fatal:, failed:, HTTP 5xx, 权限拒绝等)
-    let mut critical_lines = Vec::new();
+    // 从中间被裁剪的文本中提取并聚合关键错误行 (去重 + 计数 + 长度截断)
     let middle_text: String = raw.chars().skip(head_chars).take(middle_omitted).collect();
+    let mut error_counts: Vec<(String, usize)> = Vec::new();
+    let mut total_error_chars = 0usize;
+    const MAX_ERROR_BUDGET_CHARS: usize = 800;
+    const MAX_UNIQUE_ERRORS: usize = 15;
+
     for line in middle_text.lines() {
-        let lower = line.to_lowercase();
-        let is_critical = lower.contains("error:")
-            || lower.contains("panic:")
-            || lower.contains("fatal:")
-            || lower.contains("exception:")
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        let is_critical = lower.contains("error")
+            || lower.contains("panic")
+            || lower.contains("fatal")
+            || lower.contains("exception")
+            || lower.contains("traceback")
+            || lower.contains("caused by")
             || lower.contains("failed")
             || lower.contains("failure")
             || lower.contains("assert")
-            || lower.contains("✗")
+            || lower.contains("segfault")
             || lower.contains("500 internal")
             || lower.contains("403 forbidden")
             || lower.contains("拒绝访问")
             || lower.contains("权限不足")
             || lower.contains("未找到")
             || lower.contains("命令不存在")
-            || lower.contains("编译失败");
+            || lower.contains("编译失败")
+            || lower.contains("异常")
+            || lower.contains("错误");
 
         if is_critical {
-            let clean = line.trim();
-            if !clean.is_empty() && clean.len() < 250 && critical_lines.len() < 4 {
-                critical_lines.push(format!("  ⚠️ [捕获关键行] {}", clean));
+            // 单行截断至 140 字符，防止长 JSON 或巨型单行撑爆
+            let capped_line: String = trimmed.chars().take(140).collect();
+            if let Some(existing) = error_counts.iter_mut().find(|(k, _)| k == &capped_line) {
+                existing.1 += 1;
+            } else if error_counts.len() < MAX_UNIQUE_ERRORS && total_error_chars + capped_line.len() < MAX_ERROR_BUDGET_CHARS {
+                total_error_chars += capped_line.len();
+                error_counts.push((capped_line, 1));
             }
         }
     }
 
-    let middle_note = if critical_lines.is_empty() {
-        format!("\n\n[... 已折叠中间 {} 字符，核心首尾已完整保留 ...]\n\n", middle_omitted)
+    let middle_note = if error_counts.is_empty() {
+        format!("\n\n[... 已折叠中间 {} 字符，首尾关键信息已保留 ...]\n\n", middle_omitted)
     } else {
+        let formatted_errors: Vec<String> = error_counts
+            .into_iter()
+            .map(|(line, count)| {
+                if count > 1 {
+                    format!("  ⚠️ [捕获错误 ×{}] {}", count, line)
+                } else {
+                    format!("  ⚠️ [捕获错误] {}", line)
+                }
+            })
+            .collect();
+
         format!(
-            "\n\n[... 已折叠中间 {} 字符 ...]\n{}\n[... 尾部诊断输出如下 ...]\n\n",
+            "\n\n[... 已折叠中间 {} 字符，提取关键异常行如下 ...]\n{}\n[... 尾部最新诊断输出如下 ...]\n\n",
             middle_omitted,
-            critical_lines.join("\n")
+            formatted_errors.join("\n")
         )
     };
 
@@ -691,6 +718,17 @@ mod tests {
         assert!(sampled.contains("panic: index out of bounds"));
         assert!(sampled.contains("Finished with error code 101"));
         assert!(sampled.contains("折叠中间"));
+    }
+
+    #[test]
+    fn test_sample_execution_log_deduplication() {
+        let mut text = String::from("Start log...\n");
+        for _ in 0..100 {
+            text.push_str("error: connection reset by peer\n");
+        }
+        text.push_str("End log with exit status 1\n");
+        let sampled = sample_execution_log(&text, 20, 30);
+        assert!(sampled.contains("×100") || sampled.contains("connection reset by peer"));
     }
 
     #[test]

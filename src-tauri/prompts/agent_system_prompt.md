@@ -5,8 +5,10 @@
 {
   "thought": "简短说明当前判断",
   "description": "面向用户的本步描述",
-  "tool": "当前上下文提供的 MCP 工具名、ask_human 或 finish",
+  "tool": "当前上下文提供的 MCP 工具名、ask_human 或 finish (单步时必填)",
   "command": {},
+  "parallel": [ "可选：单回合并发执行多个子任务" ],
+  "plan_tree": "可选：串行+并行复合计划树",
   "todo_update": [],
   "memories_update": []
 }

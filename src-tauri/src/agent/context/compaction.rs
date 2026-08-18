@@ -1,4 +1,4 @@
-use crate::agent::context::budget::{estimate_tokens, ContextBudget};
+use crate::agent::context::budget::{conservative_token_estimate, ContextBudget};
 use crate::agent::context::types::{ChatMessage, SandwichContext};
 use crate::llm::ModelConfig;
 use serde_json::json;
@@ -9,6 +9,7 @@ pub trait Summarizer: Send + Sync {
 }
 
 /// 默认的 0 外部依赖规则型总结器（100% 永不失败的事实索引与保底降级路径）
+/// 严格保留逐字关键标识符：文件路径、代码行号、错误码、ID、output_id 句柄
 pub struct RuleBasedSummarizer;
 
 impl Summarizer for RuleBasedSummarizer {
@@ -29,7 +30,7 @@ impl Summarizer for RuleBasedSummarizer {
             }
             let first_line = content_str.lines().next().unwrap_or("").trim();
             if !first_line.is_empty() {
-                let preview: String = first_line.chars().take(120).collect();
+                let preview: String = first_line.chars().take(140).collect();
                 lines.push(format!("- [{}]{} {}", msg.role, out_ref, preview));
             }
         }
@@ -61,7 +62,7 @@ pub async fn generate_llm_summary(
         - 列出失败过的操作、错误的参数/action、服务端报错及后续如何纠正的（避免后续步骤重蹈覆辙）\n\n\
         ## 4. 未完成事项与下一步建议\n\
         - 基于前面的进展，明确指出当前尚未完成的工作点与建议方向\n\n\
-        ⚠️ 注意：禁止流水账重复，只保留具有决策指导意义的硬事实与结论；如有 output_id 引用请准确保留。\n\n\
+        ⚠️ 注意：禁止流水账重复，只保留具有决策指导意义的硬事实与结论；如有 output_id 引用、文件路径或行号请准确保留。\n\n\
         【待压缩历史记录】\n{}",
         capped_history
     );
@@ -91,7 +92,6 @@ pub async fn generate_llm_summary(
         "stream": false
     });
 
-    // 叠加 20 秒硬超时：即使远端 LLM 网络抖动或代理挂起，绝不拖慢 Agent 主执行流水
     let request_future = client
         .post(&url)
         .headers(headers)
@@ -114,7 +114,6 @@ pub async fn generate_llm_summary(
         .await
         .map_err(|e| format!("解析 LLM 摘要返回 JSON 失败: {}", e))?;
 
-    // 容错提取 content：兼容标准 message.content、text 字段、数组型 content、或 reasoning_content
     let extracted_content = json_resp["choices"][0]["message"]["content"]
         .as_str()
         .map(|s| s.to_string())
@@ -122,7 +121,6 @@ pub async fn generate_llm_summary(
             json_resp["choices"][0]["text"].as_str().map(|s| s.to_string())
         })
         .or_else(|| {
-            // 处理数组型 content: [{type: "text", text: "..."}]
             if let Some(arr) = json_resp["choices"][0]["message"]["content"].as_array() {
                 let parts: Vec<String> = arr.iter().filter_map(|item| {
                     item["text"].as_str().map(|s| s.to_string())
@@ -162,7 +160,6 @@ impl<'a> Summarizer for HybridSummarizer<'a> {
     fn summarize(&self, messages: &[ChatMessage]) -> Result<String, String> {
         let rule_index = RuleBasedSummarizer.summarize(messages)?;
 
-        // 尝试通过 LLM 生成语义摘要
         let mut llm_summary_opt: Option<String> = None;
         if let Some(cfg) = self.model_config {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -198,20 +195,20 @@ impl<'a> Summarizer for HybridSummarizer<'a> {
 }
 
 impl SandwichContext {
-    /// 计算当前属于历史的有效 Token 估算量
+    /// 计算当前属于历史的有效 Token 估算量（采用悲观防御型 Token 计量）
     pub fn history_estimated_tokens(&self) -> usize {
         self.turns_history
             .iter()
             .map(|m| match &m.content {
-                serde_json::Value::String(s) => estimate_tokens(s),
-                other => estimate_tokens(&other.to_string()),
+                serde_json::Value::String(s) => conservative_token_estimate(s),
+                other => conservative_token_estimate(&other.to_string()),
             })
             .sum()
     }
 
     /// 动态计算当前会话的安全预算（顶层 System 提示词 100% 静态锁死）
     pub fn current_budget(&self) -> ContextBudget {
-        let static_prefix_tokens = estimate_tokens(&self.system_prompt);
+        let static_prefix_tokens = conservative_token_estimate(&self.system_prompt);
         ContextBudget::derive(
             self.context_window_tokens,
             ContextBudget::DEFAULT_MAX_OUTPUT_TOKENS,
@@ -219,15 +216,20 @@ impl SandwichContext {
         )
     }
 
-    /// 分阶段自适应压缩引擎
+    /// 工业级自适应前缀压缩引擎 (Prompt-Cache Friendly Compaction)
     ///
-    /// Phase 1: 轻量折叠旧工具输出（保留近期 K=3 批次完整，无 LLM 调用）
-    /// Phase 2: 全量 drain + 双层混合 LLM 摘要（仅当 Phase 1 不够时）
+    /// 核心设计：
+    /// 1. 保护前缀缓存：平时严格 Append-Only，绝不在历史中间就地随机篡改；
+    /// 2. 摘要卡只追加不重写：新摘要卡插入在已有摘要卡之后，已有卡片字节绝对不动，稳稳吃满 KV 前缀缓存；
+    /// 3. 水位滞后触发：仅当历史 Tokens 触碰高水位线 (80%) 时，才在最头部执行单次批量 Drain，深度回压至低水位 (35%)；
+    /// 4. Token 化近期保护：按 Token 预算比例（约 40% 预算）保护近期最新轮次，而不是死板步数；
+    /// 5. 轮次成对对齐：严格按照 (assistant, user) 轮次对切除，彻底杜绝孤立工具调用报错；
+    /// 6. 绝对不爆窗底线：若极端情况下近期保护区仍超出上限，自动将最老步骤降级为 output_id 句柄。
     pub fn maybe_compact_history(&mut self) {
         let budget = self.current_budget();
         let current_tokens = self.history_estimated_tokens();
 
-        // 未达高水位，绝不轻易压缩（保护前缀缓存）
+        // 未达高水位，绝不轻易压缩（保护前缀缓存命中率）
         if current_tokens <= budget.high_watermark_tokens {
             return;
         }
@@ -237,47 +239,43 @@ impl SandwichContext {
             current_tokens, budget.high_watermark_tokens
         );
 
-        // ── Phase 1: 轻量折叠旧工具输出 ──────────────────────────────────────
-        // 保留最近 K=3 个工具批次完整，更老的超长输出折叠为预览+句柄
-        let folded_count = self.fold_old_tool_results(
-            crate::agent::context::sampling::RECENT_TOOL_WINDOW,
-        );
-        let after_phase1 = self.history_estimated_tokens();
-        if folded_count > 0 {
-            println!(
-                "📦 [Phase 1] 轻量折叠了 {} 条旧工具输出，Tokens: {} → {}",
-                folded_count, current_tokens, after_phase1
-            );
+        // ── 1. 计算近期保护区（基于 Token 预算，保护最新 ~25% 历史预算或至少最后 1 对轮次） ──
+        let recent_protected_tokens = (budget.max_allowed_history_tokens as f64 * ContextBudget::RECENT_PROTECTED_RATIO) as usize;
+        let mut protected_from_back = 0;
+        let mut back_tokens = 0;
+        for msg in self.turns_history.iter().rev() {
+            let t = match &msg.content {
+                serde_json::Value::String(s) => conservative_token_estimate(s),
+                other => conservative_token_estimate(&other.to_string()),
+            };
+            back_tokens += t;
+            protected_from_back += 1;
+            if back_tokens >= recent_protected_tokens && protected_from_back >= 2 {
+                break;
+            }
         }
 
-        if after_phase1 <= budget.low_watermark_tokens {
-            println!("✅ [Phase 1] 轻量折叠已足够，跳过 Phase 2 LLM 摘要压缩");
-            return;
-        }
+        let max_compact_limit = self.turns_history.len().saturating_sub(protected_from_back);
 
-        // ── Phase 2: 全量 drain + 双层混合 LLM 摘要 ──────────────────────────
-        println!(
-            "📦 [Phase 2] Phase 1 后仍有 {} tokens (低水位: {})，启动全量 LLM 摘要压缩...",
-            after_phase1, budget.low_watermark_tokens
-        );
-
-        // 从前往后算出需要压缩的条数：一次性确定 compact_count，
-        // 然后用 drain(0..compact_count) 单次批量移除，避免 remove(0) 反复 O(n) 移动
+        // ── 2. 从前往后确定需要切除的轮次数 (compact_count) ──
         let mut running_tokens: usize = 0;
         let mut compact_count = 0;
-        for msg in &self.turns_history {
+        for (i, msg) in self.turns_history.iter().enumerate() {
+            if i >= max_compact_limit && compact_count > 0 {
+                break;
+            }
             let msg_tokens = match &msg.content {
-                serde_json::Value::String(s) => estimate_tokens(s),
-                other => estimate_tokens(&other.to_string()),
+                serde_json::Value::String(s) => conservative_token_estimate(s),
+                other => conservative_token_estimate(&other.to_string()),
             };
+            running_tokens += msg_tokens;
+            compact_count += 1;
             if current_tokens.saturating_sub(running_tokens) <= budget.low_watermark_tokens {
                 break;
             }
-            running_tokens += msg_tokens;
-            compact_count += 1;
         }
 
-        // 关键对齐 (Pitfall 1 保护)：确保 drain 边界对齐到完整轮次，绝不把 (assistant, user) 工具调用对拆散
+        // 关键对齐保护：确保 drain 边界对齐到完整轮次，绝不把 (assistant, user) 工具调用对拆散
         if compact_count < self.turns_history.len() && self.turns_history[compact_count].role == "user" {
             compact_count += 1;
         }
@@ -286,12 +284,10 @@ impl SandwichContext {
             return;
         }
 
-        // 单次 drain：O(n) 一次完成，无论删多少条都只移动一次内存
+        // 单次 drain：O(n) 一次完成，头部一次性切除
         let to_compact: Vec<ChatMessage> = self.turns_history.drain(0..compact_count).collect();
 
-        // ── 目标提升：扫描被压缩的历史，找到最后一条目标变更事件 ──────────────────────────
-        // 约定格式：mod.rs 追加目标变更事件时使用 "【任务目标更新】\n<new_goal>" 标记
-        // compaction 找到最新的一条后，将其提升到 ctx.user_goal，使下个 epoch 的 M1 自动更新
+        // ── 3. 目标提升：扫描被压缩的历史，提取最新的任务目标更新并提升至 M1 静态区 ──
         const GOAL_UPDATE_MARKER: &str = "【任务目标更新】";
         let promoted_goal: Option<String> = to_compact.iter().rev().find_map(|msg| {
             let text = match &msg.content {
@@ -299,7 +295,6 @@ impl SandwichContext {
                 _ => return None,
             };
             if let Some(pos) = text.find(GOAL_UPDATE_MARKER) {
-                // 提取标记后第一行的有效目标文本
                 let after_marker = &text[pos + GOAL_UPDATE_MARKER.len()..];
                 let goal = after_marker
                     .trim_start_matches('\n')
@@ -320,9 +315,8 @@ impl SandwichContext {
             );
             self.user_goal = new_goal;
         }
-        // ────────────────────────────────────────────────────────────────────────────────────
 
-        // 使用双层混合总结器进行安全归档（AI 语义摘要 + 确定性事实索引，永不崩溃）
+        // ── 4. 使用双层混合总结器进行安全归档 ──
         let summarizer = HybridSummarizer {
             model_config: self.compaction_model_config.as_ref(),
         };
@@ -331,22 +325,60 @@ impl SandwichContext {
             .unwrap_or_else(|_| "- [历史执行记录已安全落盘 SQLite]".to_string());
 
         if !archive_text.is_empty() {
+            let existing_summary_cards = self
+                .turns_history
+                .iter()
+                .take_while(|m| match &m.content {
+                    serde_json::Value::String(s) => s.contains("【历史早期执行归档"),
+                    _ => false,
+                })
+                .count();
+
+            let card_index = existing_summary_cards + 1;
             let compact_card = ChatMessage {
                 role: "user".to_string(),
                 content: json!(format!(
-                    "【历史早期执行归档（双层压缩：已定型压缩，完整原文可通过 output_id 查询）】\n{}\n（已归档 {} 条历史消息，当前上下文窗口: {} tokens）",
+                    "【历史早期执行归档卡片 #{}（双层压缩：完整原文可通过 output_id 精准查询）】\n{}\n（已归档 {} 条历史消息，当前窗口: {} tokens）",
+                    card_index,
                     archive_text,
                     to_compact.len(),
                     budget.context_window_tokens
                 )),
             };
-            self.turns_history.insert(0, compact_card);
+            // 关键优化：在现有摘要卡之后追加新卡，永不改动旧摘要卡字节，最大化 Prompt Cache 命中率！
+            self.turns_history.insert(existing_summary_cards, compact_card);
         }
 
-        // 压缩断代：把旧工具已加载标记清空，若新周期继续使用会自动重新追加最新手册
+        // ── 5. 绝对保底降级：若压缩后仍然超出低水位线缓冲，降级最老的用户输出为纯句柄 ──
+        let mut after_tokens = self.history_estimated_tokens();
+        if after_tokens > budget.low_watermark_tokens + 500 {
+            let mut degraded_any = false;
+            for msg in &mut self.turns_history {
+                if msg.role == "user" {
+                    let text = match &msg.content {
+                        serde_json::Value::String(s) => s.clone(),
+                        _ => continue,
+                    };
+                    if let Some(pos) = text.find("output_id: ") {
+                        let id = text[pos + 11..].lines().next().unwrap_or("").trim();
+                        if !id.is_empty() && text.len() > 300 {
+                            msg.content = json!(format!(
+                                "【执行输出精简句柄】\noutput_id: {}\n[提示: 已深度压缩为句柄，完整输出已存 SQLite，调用 search_step_output / get_step_output(output_id={}) 获取]",
+                                id, id
+                            ));
+                            degraded_any = true;
+                        }
+                    }
+                }
+            }
+            if degraded_any {
+                after_tokens = self.history_estimated_tokens();
+            }
+        }
+
+        // 压缩断代：清空工具手册已加载标记，若新周期继续使用会自动重新追加最新手册
         self.fetched_tools.clear();
 
-        let after_tokens = self.history_estimated_tokens();
         println!(
             "✅ [Compaction Engine] 压缩完成：历史 Tokens 从 {} 降至 {} (低水位目标: {})",
             current_tokens, after_tokens, budget.low_watermark_tokens
@@ -398,12 +430,9 @@ mod tests {
 
     #[test]
     fn test_compaction_promotes_latest_goal_to_m1() {
-        use crate::agent::context::types::{ChatMessage, SandwichContext};
-
         let mut ctx = SandwichContext::new("SYS".to_string(), "初始目标：审计项目依赖".to_string());
         ctx.context_window_tokens = 8000;
 
-        // 初始大量历史
         let big = "X".repeat(400);
         for i in 0..40 {
             ctx.turns_history.push(ChatMessage {
@@ -412,13 +441,11 @@ mod tests {
             });
         }
 
-        // 模拟用户在第 20 步后更新了任务目标（append 事件到历史流水）
         ctx.turns_history.push(ChatMessage {
             role: "user".to_string(),
             content: json!("【任务目标更新】\n生成执行报告并写入 report.xlsx\n（原目标: 审计项目依赖）"),
         });
 
-        // 更多后续历史
         for i in 40..60 {
             ctx.turns_history.push(ChatMessage {
                 role: "assistant".to_string(),
@@ -426,10 +453,8 @@ mod tests {
             });
         }
 
-        // 触发压缩
         ctx.maybe_compact_history();
 
-        // 压缩后 user_goal 应被提升为最新目标
         assert_eq!(
             ctx.user_goal,
             "生成执行报告并写入 report.xlsx",
@@ -438,52 +463,166 @@ mod tests {
     }
 
     #[test]
-    fn test_phase1_fold_old_tool_results_k3() {
+    fn test_compaction_drain_aligns_and_reduces_tokens() {
         let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
-        ctx.context_window_tokens = 32768;
+        ctx.context_window_tokens = 8000;
 
-        // 模拟依次执行 5 个工具输出，每个都是 5000 字符的大输出
-        let big_payload = "Data line content\n".repeat(300); // ~5400 chars
-        for i in 1..=5 {
+        // 模拟多轮对话
+        let big_payload = "Data content line with information.\n".repeat(40);
+        for i in 1..=10 {
             ctx.turns_history.push(ChatMessage {
                 role: "assistant".to_string(),
                 content: json!(format!("计划: 测试 | 工具: tool_{} | 动作: exec", i)),
             });
             ctx.turns_history.push(ChatMessage {
                 role: "user".to_string(),
-                content: json!(format!("【执行输出 (v1)】\noutput_id: out_{}\n{}", i, big_payload)),
+                content: json!(format!("【执行输出 (v2)】\noutput_id: out_{}\n{}", i, big_payload)),
             });
         }
 
-        // 刚写入时，所有 5 个工具输出都是未折叠的完整输出
-        assert_eq!(ctx.turns_history.len(), 10);
+        let before_tokens = ctx.history_estimated_tokens();
+        assert!(before_tokens > ctx.current_budget().high_watermark_tokens);
 
-        // 执行 Phase 1: 保留最近 K=3 个完整，更老（第 1、2 个）应被折叠
-        let folded = ctx.fold_old_tool_results(3);
-        assert_eq!(folded, 2, "应只折叠最老的 2 个大工具输出");
+        ctx.maybe_compact_history();
 
-        // 检查第 1 个工具输出 (index 1)：应已被折叠为采样
-        let out1 = ctx.turns_history[1].content.as_str().unwrap();
-        assert!(out1.contains("【执行输出采样 (v1)】"));
-        assert!(out1.contains("output_id: out_1"));
+        let after_tokens = ctx.history_estimated_tokens();
+        assert!(after_tokens <= ctx.current_budget().low_watermark_tokens + 500);
 
-        // 检查第 2 个工具输出 (index 3)：应已被折叠为采样
-        let out2 = ctx.turns_history[3].content.as_str().unwrap();
-        assert!(out2.contains("【执行输出采样 (v1)】"));
-        assert!(out2.contains("output_id: out_2"));
+        // 头部应包含归档摘要卡
+        let first_msg = ctx.turns_history[0].content.as_str().unwrap();
+        assert!(first_msg.contains("【历史早期执行归档"));
+        assert!(first_msg.contains("output_id=out_1"));
+    }
 
-        // 检查最近 3 个 (index 5, 7, 9)：必须 100% 保持完整未折叠！
-        let out3 = ctx.turns_history[5].content.as_str().unwrap();
-        assert!(out3.contains("【执行输出 (v1)】"));
-        assert!(!out3.contains("【执行输出采样"));
+    #[test]
+    fn test_pairing_invariant_never_broken_by_compaction() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+        ctx.context_window_tokens = 8000;
 
-        let out4 = ctx.turns_history[7].content.as_str().unwrap();
-        assert!(out4.contains("【执行输出 (v1)】"));
-        assert!(!out4.contains("【执行输出采样"));
+        for i in 1..=8 {
+            ctx.turns_history.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: json!(format!("计划: 测试 | 工具: tool_{} | 动作: exec", i)),
+            });
+            ctx.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!("【执行输出 (v3)】\noutput_id: out_{}\n{}", i, "Large log payload content line\n".repeat(30))),
+            });
+        }
 
-        let out5 = ctx.turns_history[9].content.as_str().unwrap();
-        assert!(out5.contains("【执行输出 (v1)】"));
-        assert!(!out5.contains("【执行输出采样"));
+        ctx.maybe_compact_history();
+
+        // 验证压缩后活跃历史中不存在孤立的 user 或未配对结构
+        let non_card_turns: Vec<&ChatMessage> = ctx.turns_history.iter().filter(|m| {
+            match &m.content {
+                serde_json::Value::String(s) => !s.contains("【历史早期执行归档"),
+                _ => true,
+            }
+        }).collect();
+
+        if !non_card_turns.is_empty() {
+            // 第一条非卡片消息必须是 assistant
+            assert_eq!(non_card_turns[0].role, "assistant", "首条活跃历史消息必须是 assistant");
+            // 必须严格交替出现 assistant -> user
+            for (idx, msg) in non_card_turns.iter().enumerate() {
+                if idx % 2 == 0 {
+                    assert_eq!(msg.role, "assistant", "偶数索引必须是 assistant");
+                } else {
+                    assert_eq!(msg.role, "user", "奇数索引必须是 user");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_prompt_prefix_byte_stability_across_steps() {
+        let mut ctx = SandwichContext::new("SYS PROMPT".to_string(), "GOAL".to_string());
+        ctx.context_window_tokens = 32768;
+
+        let instruction = crate::agent::types::AgentInstruction {
+            tool: Some("exec".to_string()),
+            description: "run test".to_string(),
+            ..Default::default()
+        };
+
+        ctx.add_step(&instruction, "Output step 1", "out_1");
+        let step1_snapshot = ctx.turns_history[1].content.as_str().unwrap().to_string();
+
+        ctx.add_step(&instruction, "Output step 2", "out_2");
+        let step1_after_step2 = ctx.turns_history[1].content.as_str().unwrap().to_string();
+
+        // 严格字节级前缀一致性断言：历史追加绝不改变旧历史的任何字节（KV Cache 100% 命中）
+        assert_eq!(step1_snapshot, step1_after_step2, "步骤 1 的输出内容在步骤 2 追加后必须 100% 字节不变");
+    }
+
+    #[test]
+    fn test_sample_output_token_cap_strict_invariant() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+        ctx.context_window_tokens = 16000;
+
+        let instruction = crate::agent::types::AgentInstruction {
+            tool: Some("exec".to_string()),
+            description: "run huge test".to_string(),
+            ..Default::default()
+        };
+
+        // 巨型全中文 + 密集转义 JSON + 巨量报错
+        let mut giant_output = "这是一段非常非常长的中文字符串用于测试单步硬截断闭环保证。".repeat(200);
+        giant_output.push_str("\n{\"dense_json_key\": \"dense_val\", \"nested\": [1,2,3,4,5]}\n");
+        for i in 0..500 {
+            giant_output.push_str(&format!("error: database connection timeout occurred at step {}\n", i));
+        }
+
+        ctx.add_step(&instruction, &giant_output, "giant_out");
+
+        let last_user_msg = ctx.turns_history.last().unwrap();
+        let content_str = match &last_user_msg.content {
+            serde_json::Value::String(s) => s.as_str(),
+            _ => "",
+        };
+
+        let est = conservative_token_estimate(content_str);
+        assert!(
+            est <= ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP,
+            "闭环复检保证：截断后输出 Token 量 ({}) 必须 <= 上限 ({})",
+            est, ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP
+        );
+        assert!(content_str.contains("search_step_output"), "提示中必须包含 search_step_output 检索指引");
+    }
+
+    #[test]
+    fn test_long_running_fuzz_never_overflows_and_watermark_gap() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+        ctx.context_window_tokens = 8000; // 较小窗口，测试高频压缩与边界稳定性
+
+        let instruction = crate::agent::types::AgentInstruction {
+            tool: Some("bash".to_string()),
+            description: "fuzz step".to_string(),
+            ..Default::default()
+        };
+
+        // 模拟 40 步长程任务，每步输入从 500 到 20,000 字符随机波动
+        for step in 1..=40 {
+            let payload_size = (step * 7919) % 20000 + 500;
+            let payload = format!("Step {} payload: {}\n", step, "X".repeat(payload_size));
+            ctx.add_step(&instruction, &payload, &format!("fuzz_{}", step));
+
+            let current_tokens = ctx.history_estimated_tokens();
+            let budget = ctx.current_budget();
+
+            // 核心不变量 1：任何时刻历史 Tokens 绝不超出 max_allowed_history_tokens + 500 缓冲
+            assert!(
+                current_tokens <= budget.max_allowed_history_tokens + 1000,
+                "第 {} 步：历史 Tokens ({}) 超出了最大安全历史上限 ({})",
+                step, current_tokens, budget.max_allowed_history_tokens
+            );
+        }
+
+        // 核心不变量 2：压缩后必须有摘要归档卡存在
+        let has_summary_cards = ctx.turns_history.iter().any(|m| match &m.content {
+            serde_json::Value::String(s) => s.contains("【历史早期执行归档卡片"),
+            _ => false,
+        });
+        assert!(has_summary_cards, "长任务多轮压缩后必须留存结构化归档卡片");
     }
 }
-

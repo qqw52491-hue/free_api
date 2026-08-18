@@ -4,6 +4,7 @@ pub mod conversation;
 pub mod lesson;
 pub mod mcp;
 pub mod mcp_catalog;
+pub mod plan_tree;
 pub mod retrieval;
 pub mod router;
 pub mod run_state;
@@ -346,6 +347,73 @@ fn execute_command_inner(
     }
 }
 
+fn run_plan_tree_sync(
+    db: &DbState,
+    session_id: &str,
+    plan_node: &crate::agent::plan_tree::PlanNode,
+    registry: &mut PluginRegistry,
+) -> DispatchResult {
+    let registry_mutex = Arc::new(tokio::sync::Mutex::new(std::mem::take(registry)));
+    let db_clone = db.clone();
+    let sid = session_id.to_string();
+    let reg_for_invoker = registry_mutex.clone();
+
+    let invoker: crate::agent::plan_tree::ToolInvoker = Arc::new(move |tool, args| {
+        let db_c = db_clone.clone();
+        let sid_c = sid.clone();
+        let reg_arc = reg_for_invoker.clone();
+
+        Box::pin(async move {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut reg_guard = reg_arc.lock().await;
+            let res = execute_command_inner(&db_c, &sid_c, &tool, &action, &args, &mut reg_guard);
+            if res.success {
+                let parsed_val: serde_json::Value = serde_json::from_str(&res.stdout)
+                    .unwrap_or_else(|_| serde_json::json!({ "output": res.stdout }));
+                Ok(parsed_val)
+            } else {
+                Err(if !res.stderr.is_empty() {
+                    res.stderr
+                } else {
+                    "工具执行返回失败".to_string()
+                })
+            }
+        })
+    });
+
+    let report = futures::executor::block_on(crate::agent::plan_tree::execute_plan_tree(
+        plan_node, invoker, None,
+    ));
+
+    // 把 registry 放回
+    let mut reg_guard = futures::executor::block_on(registry_mutex.lock());
+    *registry = std::mem::take(&mut *reg_guard);
+
+    let success = report.success;
+    let feedback = report.to_llm_feedback();
+
+    DispatchResult {
+        stdout: feedback,
+        stderr: if success {
+            String::new()
+        } else {
+            report
+                .error_summary
+                .unwrap_or_else(|| "Plan execution failed".to_string())
+        },
+        success,
+        route: if success {
+            "plan_tree_success".to_string()
+        } else {
+            "plan_tree_failed".to_string()
+        },
+    }
+}
+
 // 根据指令执行具体动作
 pub fn run_agent_step(
     db: &DbState,
@@ -367,6 +435,42 @@ pub fn run_agent_step(
             success: true,
             route: "finish".to_string(),
         };
+    }
+
+    // --- 场景 A0: 树形/并行计划树 PlanTree Execution ---
+    if let Some(ref par_cmds) = instruction.parallel {
+        println!(
+            "🌳 [PlanTree: {}] 检测到 parallel 并行指令，启动 {} 路并发执行...",
+            session_id,
+            par_cmds.len()
+        );
+        let plan_node = crate::agent::plan_tree::PlanNode::Obj(crate::agent::plan_tree::PlanNodeObj {
+            parallel: Some(
+                par_cmds
+                    .iter()
+                    .map(|c| {
+                        serde_json::from_value(c.clone()).unwrap_or_else(|_| {
+                            crate::agent::plan_tree::PlanNode::Obj(
+                                serde_json::from_value(c.clone()).unwrap_or_default(),
+                            )
+                        })
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        return run_plan_tree_sync(db, session_id, &plan_node, registry);
+    }
+    if let Some(ref tree_val) = instruction.plan_tree {
+        if let Ok(plan_node) =
+            serde_json::from_value::<crate::agent::plan_tree::PlanNode>(tree_val.clone())
+        {
+            println!(
+                "🌳 [PlanTree: {}] 检测到 plan_tree 复合树形计划，启动树形解释器...",
+                session_id
+            );
+            return run_plan_tree_sync(db, session_id, &plan_node, registry);
+        }
     }
 
     // --- 核心修复：兼容 root.commands 和 root.command.commands ---
