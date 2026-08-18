@@ -384,18 +384,22 @@ pub fn run_agent_step(
 
         for (idx, cmd_val) in batch_commands.iter().enumerate() {
             let step_idx = idx + 1;
-            // 提取单步的 action
+            // 提取单步的 tool 与 action (优先使用子命令自带的 tool，缺省退回根 tool_name)
+            let step_tool = cmd_val
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&tool_name);
             let step_action = cmd_val
                 .get("action")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
 
-            println!("   ➡️  Step {}: 执行动作 '{}'...", step_idx, step_action);
+            println!("   ➡️  Step {}: 执行 [{}] 动作 '{}'...", step_idx, step_tool, step_action);
 
             // 执行单步
             let res =
-                execute_command_inner(db, session_id, &tool_name, &step_action, cmd_val, registry);
+                execute_command_inner(db, session_id, step_tool, &step_action, cmd_val, registry);
 
             // 拼接输出结果
             if !res.stdout.is_empty() {
