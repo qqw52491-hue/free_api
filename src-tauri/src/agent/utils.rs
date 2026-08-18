@@ -179,12 +179,37 @@ pub fn repair_json(text: &str) -> Option<String> {
 
 /// Robustly extract JSON object from AI reply with automatic repair.
 pub fn extract_json_from_text(text: &str) -> Option<String> {
-    let cleaned = text
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
+    // 1. 过滤可能混入正文的 <think>...</think> 思考标签
+    let without_think = if let Some(start_think) = text.find("<think>") {
+        if let Some(end_think) = text.find("</think>") {
+            format!("{}{}", &text[..start_think], &text[end_think + 8..])
+        } else {
+            text.to_string()
+        }
+    } else {
+        text.to_string()
+    };
+
+    let cleaned = without_think.trim();
+
+    // 2. 优先提取 ```json ... ``` 或 ``` ... ``` 代码块中的内容
+    if let Some(start_code) = cleaned.find("```json") {
+        let after_code = &cleaned[start_code + 7..];
+        if let Some(end_code) = after_code.find("```") {
+            let inner = after_code[..end_code].trim();
+            if let Some(repaired) = repair_json(inner) {
+                return Some(repaired);
+            }
+        }
+    } else if let Some(start_code) = cleaned.find("```") {
+        let after_code = &cleaned[start_code + 3..];
+        if let Some(end_code) = after_code.find("```") {
+            let inner = after_code[..end_code].trim();
+            if let Some(repaired) = repair_json(inner) {
+                return Some(repaired);
+            }
+        }
+    }
 
     if let Some(repaired) = repair_json(cleaned) {
         return Some(repaired);
@@ -226,7 +251,7 @@ pub fn extract_json_from_text(text: &str) -> Option<String> {
         }
     }
 
-    if depth == 0 && end > start {
+    if depth == 0 && end >= start {
         let json_str: String = chars[start..=end].iter().collect();
         if let Some(repaired) = repair_json(&json_str) {
             return Some(repaired);
