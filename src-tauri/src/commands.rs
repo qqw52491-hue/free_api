@@ -1101,12 +1101,34 @@ pub async fn open_in_webview_window(
     let window_label = format!("preview-{}", short_uuid);
     let window_title = title.unwrap_or_else(|| "网页预览".to_string());
 
+    let init_script = r#"
+        (function() {
+            // 修复 Webview 中 target="_blank" 和 window.open 点不动的问题（百度/Google/B站 搜索结果默认都是 _blank）
+            document.addEventListener('click', function(e) {
+                var a = e.target.closest('a');
+                if (a && (a.target === '_blank' || a.getAttribute('target') === '_blank')) {
+                    a.target = '_self';
+                }
+            }, true);
+
+            var origOpen = window.open;
+            window.open = function(url) {
+                if (url && typeof url === 'string') {
+                    window.location.href = url;
+                    return window;
+                }
+                return origOpen ? origOpen.apply(window, arguments) : window;
+            };
+        })();
+    "#;
+
     WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::External(parsed_url))
         .title(&window_title)
         .inner_size(1120.0, 780.0)
         .center()
         .resizable(true)
         .focused(true)
+        .initialization_script(init_script)
         .build()
         .map_err(|e| format!("创建原生 WebView 窗口失败: {}", e))?;
 
