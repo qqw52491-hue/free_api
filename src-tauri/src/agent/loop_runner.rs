@@ -417,6 +417,17 @@ pub async fn run_call_llm_and_run_tool_phases(
                 },
             )?;
 
+            // 🌟 立即将失败尝试的完整报错写入 SQLite (agent_step_logs & FTS5)，确保错误历史有据可查
+            let _ = crate::agent::run_trace::save_step_output_with_meta(
+                state.inner(),
+                final_session_id,
+                step_id,
+                &inst.get_tool(),
+                &inst.description,
+                "failed",
+                &error_detail,
+            );
+
             // 🌟 立即向前端广播步骤失败事件，确保错误尝试保留在时间线上供用户查看
             app.emit(
                 &format!("agent-progress-{}", final_session_id),
