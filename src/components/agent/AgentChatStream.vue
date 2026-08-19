@@ -728,10 +728,12 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
 
 .plan-node.status-failed > .plan-row .plan-mark {
     background: #f87171;
-    animation: none;
+    box-shadow: 0 0 8px rgba(248, 113, 113, 0.85);
+    animation: error-pulse 1.2s ease-in-out infinite;
 }
 .plan-node.status-failed > .plan-row .row-status {
     color: #f87171;
+    font-weight: 600;
 }
 
 .plan-title {
@@ -878,12 +880,15 @@ button.root-row {
     color: #f4f4f5;
 }
 
-/* 🌟 失败状态 */
-.goal-node.status-failed > .goal-row .tree-mark {
+/* 🌟 失败/重试状态：红色呼吸闪烁脉冲警示 */
+.goal-node.status-failed > .goal-row .tree-mark,
+.goal-node.status-error > .goal-row .tree-mark {
     background: #f87171;
-    animation: none;
+    box-shadow: 0 0 8px rgba(248, 113, 113, 0.9);
+    animation: error-pulse 1.2s ease-in-out infinite;
 }
-.goal-node.status-failed > .goal-row .row-status {
+.goal-node.status-failed > .goal-row .row-status,
+.goal-node.status-error > .goal-row .row-status {
     color: #f87171;
     font-weight: 600;
 }
@@ -1120,6 +1125,19 @@ button.root-row {
         transform: scale(1.35);
         opacity: 1;
         box-shadow: 0 0 12px rgba(56, 189, 248, 1);
+    }
+}
+
+@keyframes error-pulse {
+    0%, 100% {
+        transform: scale(0.8);
+        opacity: 0.5;
+        box-shadow: 0 0 3px rgba(248, 113, 113, 0.4);
+    }
+    50% {
+        transform: scale(1.35);
+        opacity: 1;
+        box-shadow: 0 0 12px rgba(248, 113, 113, 1);
     }
 }
 
