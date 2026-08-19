@@ -32,7 +32,47 @@ pub struct ManagedMcpPlugin {
     pub enabled: bool,
 }
 
+fn scan_yaml_plugins() -> Vec<PluginConfig> {
+    let mut list = Vec::new();
+    let search_paths = vec![
+        std::path::PathBuf::from("plugins"),
+        std::path::PathBuf::from("../plugins"),
+        std::path::PathBuf::from("../../plugins"),
+    ];
+    for dir in search_paths {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("yaml")
+                    || path.extension().and_then(|e| e.to_str()) == Some("yml")
+                {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(config) = serde_yaml::from_str::<PluginConfig>(&content) {
+                            if !list.iter().any(|c: &PluginConfig| c.name == config.name) {
+                                list.push(config);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    list
+}
+
 pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, String> {
+    let mut map: std::collections::HashMap<String, ManagedMcpPlugin> = std::collections::HashMap::new();
+
+    // 1. 先扫描 YAML 本地文件插件（默认启用）
+    for config in scan_yaml_plugins() {
+        let name = config.name.clone();
+        map.insert(name, ManagedMcpPlugin {
+            config,
+            enabled: true,
+        });
+    }
+
+    // 2. 再读取 SQLite 数据库中的插件（数据库优先覆盖 enabled 状态）
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
@@ -43,22 +83,37 @@ pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, S
         .query_map([], |row| {
             let args_json: String = row.get(2)?;
             let env_json: String = row.get(3)?;
-            Ok(ManagedMcpPlugin {
+            let name: String = row.get(0)?;
+            let command: String = row.get(1)?;
+            let enabled = row.get::<_, i64>(4)? == 1;
+            Ok((name, command, args_json, env_json, enabled))
+        })
+        .map_err(|e| e.to_string())?;
+
+    for row in rows.flatten() {
+        let (name, command, args_json, env_json, enabled) = row;
+        if let Some(existing) = map.get_mut(&name) {
+            existing.enabled = enabled;
+            if !command.is_empty() {
+                existing.config.command = command;
+            }
+        } else {
+            map.insert(name.clone(), ManagedMcpPlugin {
                 config: PluginConfig {
-                    name: row.get(0)?,
-                    command: row.get(1)?,
+                    name,
+                    command,
                     args: serde_json::from_str(&args_json).unwrap_or_default(),
                     url: None,
                     headers: std::collections::HashMap::new(),
                     env: serde_json::from_str(&env_json).unwrap_or_default(),
                 },
-                enabled: row.get::<_, i64>(4)? == 1,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    let plugins = rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+                enabled,
+            });
+        }
+    }
+
+    let mut plugins: Vec<ManagedMcpPlugin> = map.into_values().collect();
+    plugins.sort_by(|a, b| a.config.name.cmp(&b.config.name));
     Ok(plugins)
 }
 
@@ -317,28 +372,28 @@ pub async fn get_agent_task_records(
 
 #[tauri::command]
 pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginRow>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT id, name, command, args, env, enabled, created_at FROM mcp_plugins ORDER BY created_at DESC"
-    ).map_err(|e| e.to_string())?;
-    let list = stmt
-        .query_map([], |row| {
-            let args_str: String = row.get(3)?;
-            let env_str: String = row.get(4)?;
-            Ok(McpPluginRow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                command: row.get(2)?,
-                args: serde_json::from_str(&args_str).unwrap_or_default(),
-                env: serde_json::from_str(&env_str).unwrap_or_default(),
-                enabled: row.get::<_, i64>(5)? == 1,
-                created_at: row.get(6)?,
-            })
+    let managed = load_managed_mcp_plugins(state.inner())?;
+    let rows = managed
+        .into_iter()
+        .map(|m| McpPluginRow {
+            id: format!("mcp-{}", m.config.name),
+            name: m.config.name.clone(),
+            command: if let Some(ref url) = m.config.url {
+                format!("HTTP直连: {}", url)
+            } else {
+                m.config.command.clone()
+            },
+            args: m.config.args.clone(),
+            env: m.config.env.clone(),
+            enabled: m.enabled,
+            created_at: if m.config.url.is_some() {
+                "远程 HTTP/SSE".to_string()
+            } else {
+                "本地 stdio 进程".to_string()
+            },
         })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    Ok(list)
+        .collect();
+    Ok(rows)
 }
 
 fn enabled_mcp_config(db: &DbState, name: &str) -> Result<PluginConfig, String> {
