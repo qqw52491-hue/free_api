@@ -337,8 +337,10 @@ pub async fn run_call_llm_and_run_tool_phases(
                     "description": inst.description.clone(),
                     "reflection": inst.reflection.clone(),
                     "thought": inst.thought.clone(),
-                    "tool": inst.get_action(),
-                    "command": inst.get_params().to_string(),
+                    "tool": inst.get_tool(),
+                    "action": inst.get_action(),
+                    "command": inst.get_params(),
+                    "params": inst.get_params(),
                     "plan_id": plan_id,
                     "plan_title": plan_title,
                     "model_tier": model_tier,
@@ -725,7 +727,7 @@ pub async fn run_tool_phase(
     } else {
         "failed"
     };
-    let result_text = if dispatch_result.success {
+    let result_text = if !dispatch_result.stdout.is_empty() {
         dispatch_result.stdout.as_str()
     } else {
         dispatch_result.stderr.as_str()

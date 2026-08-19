@@ -800,11 +800,11 @@ export function useAgentSession(sessionId: string) {
                 reflection,
                 thought: thoughtText,
                 tool,
-                action: tool,
+                action: toText(rawStep.action) || tool,
                 source: sourceFrom("", tool),
                 status: "pending",
-                params: command,
-                rawParams: command,
+                params: rawStep.params ?? command,
+                rawParams: rawStep.params ?? command,
                 timestamp: Date.now(),
             };
 

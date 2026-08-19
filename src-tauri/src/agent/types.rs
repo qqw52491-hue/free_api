@@ -224,6 +224,15 @@ pub struct AgentInstruction {
 
 impl AgentInstruction {
     pub fn get_action(&self) -> String {
+        if self.parallel.is_some() {
+            return "parallel".to_string();
+        }
+        if self.plan_tree.is_some() {
+            return "plan_tree".to_string();
+        }
+        if !self.commands.is_empty() {
+            return "pipeline".to_string();
+        }
         if let Some(ref a) = self.action {
             return a.to_string();
         }
@@ -245,10 +254,29 @@ impl AgentInstruction {
     }
 
     pub fn get_tool(&self) -> String {
+        if self.parallel.is_some() {
+            return "parallel".to_string();
+        }
+        if self.plan_tree.is_some() {
+            return "plan_tree".to_string();
+        }
+        if !self.commands.is_empty() {
+            return "pipeline".to_string();
+        }
         self.tool.clone().unwrap_or_else(|| "core".to_string())
     }
 
     pub fn get_params(&self) -> serde_json::Value {
+        if let Some(ref par) = self.parallel {
+            return serde_json::json!({ "parallel": par });
+        }
+        if let Some(ref tree) = self.plan_tree {
+            return serde_json::json!({ "plan_tree": tree });
+        }
+        if !self.commands.is_empty() {
+            return serde_json::json!({ "commands": self.commands });
+        }
+
         // 发现 AI 有时会将动词（如 "type"）放在 command 字段，把其余参数放在 params 字段
         let c_is_verb = self.command.as_ref().map_or(false, |c| {
             c.is_string() && !c.as_str().unwrap().contains(' ') && !c.as_str().unwrap().is_empty()

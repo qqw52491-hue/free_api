@@ -23,8 +23,19 @@ export function shortText(value: string, max: number): string {
 
 export function formatPayload(value: unknown): string {
     let text = "";
-    if (typeof value === "string") text = value;
-    else {
+    if (typeof value === "string") {
+        const trimmed = value.trim();
+        if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+            try {
+                const parsed = JSON.parse(trimmed);
+                text = JSON.stringify(parsed, null, 2);
+            } catch {
+                text = value;
+            }
+        } else {
+            text = value;
+        }
+    } else {
         try {
             text = JSON.stringify(value, null, 2);
         } catch {

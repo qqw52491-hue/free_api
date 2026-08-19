@@ -105,8 +105,8 @@ pub fn emit_tool_event(
         action: inst.get_action(),
         route,
         success,
-        params_summary: event_summary(&inst.get_params().to_string(), 480),
-        result_summary: event_summary(result, 960),
+        params_summary: event_summary(&inst.get_params().to_string(), 8000),
+        result_summary: event_summary(result, 16000),
         duration_ms,
         timestamp: Utc::now().to_rfc3339(),
     };
