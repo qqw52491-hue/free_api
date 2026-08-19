@@ -279,12 +279,16 @@ function historyTimeline(): TimelineEntry[] {
         ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
         timeline.push(...middle);
         if (turn.summary || turn.artifacts.length || ["succeeded", "failed", "cancelled"].includes(turn.status)) {
-            const failed = turn.status === "failed";
+            const isCancelled = turn.status === "cancelled";
+            const failed = turn.status === "failed" || isCancelled;
+            const title = isCancelled
+                ? "任务已手动停止"
+                : (turn.status === "failed" ? (turn.summary || "任务未能顺利完成") : "任务已由 AI 标记完成");
             timeline.push({
                 id: `history-completion-${turn.id}`,
                 type: "completion",
-                timestamp: turn.completedAt,
-                title: failed ? "任务未能顺利完成" : "任务已由 AI 标记完成",
+                timestamp: turn.completedAt || turn.startedAt,
+                title,
                 summary: turn.summary,
                 artifacts: completionArtifacts(turn.artifacts),
                 failed,

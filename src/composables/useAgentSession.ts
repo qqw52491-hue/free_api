@@ -437,25 +437,16 @@ export function useAgentSession(sessionId: string) {
         );
         return assistantMessages.length ? assistantMessages[assistantMessages.length - 1].content.trim() : "";
     }
-    function runDeduplicationKey(run: HistoryRunSnapshot) {
-        const firstStep = run.steps[0];
-        const fingerprint = `${firstStep?.tool || ""}|${firstStep?.description || ""}`;
-        return `${run.goal.trim()}|${fingerprint}|${Math.floor(run.startedAt / 30_000)}`;
-    }
-    function runInformationScore(run: HistoryRunSnapshot) {
-        return run.steps.length * 10 + (run.summary ? 4 : 0) + run.artifacts.length * 2
-            + (["succeeded", "failed", "cancelled"].includes(run.status) ? 1 : 0);
-    }
     function dedupeHistoryRuns(runs: HistoryRunSnapshot[]) {
-        const winners = new Map<string, HistoryRunSnapshot>();
-        for (const run of runs.sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id))) {
-            // 空轨迹没有可复盘过程，仍由已有会话消息显示，不生成折叠的空计划卡。
-            if (!run.steps.length && !run.summary && !run.artifacts.length) continue;
-            const key = runDeduplicationKey(run);
-            const existing = winners.get(key);
-            if (!existing || runInformationScore(run) >= runInformationScore(existing)) winners.set(key, run);
+        const byId = new Map<string, HistoryRunSnapshot>();
+        for (const run of runs) {
+            // 只要有步骤、有总结、有交付物或有明确终态（无论成功、失败还是已停止），都是真实独立历史回合，完整保留！
+            if (!run.steps.length && !run.summary && !run.artifacts.length && !["succeeded", "failed", "cancelled"].includes(run.status)) {
+                continue;
+            }
+            byId.set(run.id, run);
         }
-        return [...winners.values()].sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+        return [...byId.values()].sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
     }
     async function loadRunTraces() {
         try {
