@@ -2111,16 +2111,33 @@ async fn run_tool_phase(
         let registry_arc = registry_state.inner().clone();
         let db = state.inner().clone();
         let sid = final_session_id.clone();
-        tokio::task::spawn_blocking(move || {
+        let tool_task = tokio::task::spawn_blocking(move || {
             let registry = {
                 let guard = futures::executor::block_on(registry_arc.lock());
                 (*guard).clone()
             };
             println!("执行动作: {:?}", inst_c);
             run_agent_step(&db, &sid, &inst_c, &registry)
-        })
-        .await
-        .map_err(|e| e.to_string())?
+        });
+
+        tokio::select! {
+            res = tool_task => {
+                res.map_err(|e| e.to_string())?
+            }
+            control = rx.recv() => {
+                let interrupt_reason = match control {
+                    Some(HumanControl::Cancel) => "用户请求立即停止当前任务。".to_string(),
+                    Some(HumanControl::ReplaceGoal(goal)) => format!("用户提交了新的任务目标：{}（已立即中断前序工具）", goal),
+                    Some(HumanControl::Answer(_)) | None => "用户请求中断当前任务。".to_string(),
+                };
+                return Ok(DispatchResult {
+                    success: false,
+                    stdout: interrupt_reason,
+                    stderr: String::new(),
+                    route: RUN_INTERRUPTED_ROUTE.to_string(),
+                });
+            }
+        }
     };
 
     let event_type = if dispatch_result.success {
