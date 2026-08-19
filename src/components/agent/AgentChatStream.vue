@@ -203,14 +203,23 @@ function isPlanExpanded(plan: PlanEntry): boolean {
     if (planExpandedState[plan.id] !== undefined) {
         return planExpandedState[plan.id];
     }
-    // 默认行为：仅当前正在运行或正在思考中的计划展开；已完成/历史计划默认收起折叠
-    return plan.status === "running" || plan.isThinking;
+    // 1. 如果当前任务正在执行中（isRunning），计划链条始终保持展开，杜绝步骤切换时的反复收缩与弹跳
+    if (props.isRunning) {
+        return true;
+    }
+    // 2. 当前回合的最新计划（live-）或正在运行/思考中的计划，默认保持展开供用户查看执行细节
+    if (plan.id.startsWith("live-") || plan.status === "running" || plan.isThinking) {
+        return true;
+    }
+    // 3. 只有历史轮次的已完成归档计划（history-），默认收起
+    return false;
 }
 
 function togglePlan(planId: string, currentStatus: AgentToolStatus, isThinking: boolean) {
+    const defaultState = props.isRunning || planId.startsWith("live-") || currentStatus === "running" || isThinking;
     const currentState = planExpandedState[planId] !== undefined
         ? planExpandedState[planId]
-        : (currentStatus === "running" || isThinking);
+        : defaultState;
     planExpandedState[planId] = !currentState;
 }
 
