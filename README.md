@@ -355,6 +355,24 @@ npm run tauri dev
 
 ---
 
+## 🚀 待办与演进路线 (Roadmap & TODO)
+
+### 1. 🛡️ 双向零信任安全护栏引擎 (Bidirectional Zero-Trust Guardrails)
+- [ ] **大模型调用前（上下文隔离）**：对 `web_fetch`、外部代码仓库读取等不可信数据自动包裹 `<untrusted_content_boundary>` 隔离沙箱，防止间接提示注入（Indirect Prompt Injection）。
+- [ ] **工具物理执行前（物理闸门）**：
+  - 拦截破坏性命令（如 `rm -rf /`、`mkfs`、`truncate`）；
+  - 拦截特权提权（`sudo`、`chmod 777`）；
+  - 工作区路径牢笼约束（`canonicalize` 物理防越界读取 `~/.ssh/`、`/etc/shadow`）；
+  - 自动降级为 `ask_human (kind: "confirm")` 弹窗由用户手动授权。
+- [ ] **出站渲染脱敏（Anti-Exfiltration）**：过滤模型输出中的 API Key 明文，剥离不可信外部 Markdown 隐蔽外带图片。
+
+### 2. 👥 轻量级子 Agent 调度架构 (Sub-Agent Dispatcher & Scoped Context)
+- [ ] **沙箱化子任务派发**：父 Agent 通过 `spawn_subagent` 工具派发长耗时或高 Token 消耗的专项任务（如批量爬取、长篇代码审校、数据清洗）。
+- [ ] **上下文无污染隔离**：子 Agent 在独立的会话沙箱和 Token 预算中循环推进，完成后仅向父 Agent 交付精炼结论与 Artifacts，彻底解决父会话上下文爆炸问题。
+- [ ] **父子状态联动**：前端树形展示主子任务关联与进度流转。
+
+---
+
 ## 📄 License
 本项目采用 **MIT License** 开源协议。
 欢迎提交 Issue 与 Pull Request 共同完善新一代 Agent 架构！⭐
