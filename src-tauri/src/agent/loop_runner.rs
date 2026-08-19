@@ -483,8 +483,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     } else {
                         // 尝试从 MCP 插件中获取
                         let detail = {
-                            let registry =
-                                futures::executor::block_on(registry_state.inner().lock());
+                            let registry = registry_state.inner().lock().await;
                             if registry.plugin_names().contains(&tool_key.as_str()) {
                                 registry.format_tool_detail(&tool_key)
                             } else {
@@ -727,11 +726,12 @@ pub async fn run_tool_phase(
         let sid = final_session_id.clone();
         let is_write_tool = is_write_or_side_effect_tool(inst);
 
+        let registry = {
+            let guard = registry_arc.lock().await;
+            (*guard).clone()
+        };
+
         let mut tool_task = tokio::task::spawn_blocking(move || {
-            let registry = {
-                let guard = futures::executor::block_on(registry_arc.lock());
-                (*guard).clone()
-            };
             println!("执行动作: {:?}", inst_c);
             run_agent_step(&db, &sid, &inst_c, &registry)
         });

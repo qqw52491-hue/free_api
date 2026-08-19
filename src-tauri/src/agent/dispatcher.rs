@@ -157,7 +157,12 @@ pub fn execute_command_inner(
 
     if let Some(plugin) = registry.get(&plugin_name) {
         println!("执行动作调用外部插件: {}/{}", plugin_name, tool_name);
-        match futures::executor::block_on(plugin.call_tool(&tool_name, params.clone())) {
+        let call_res = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.block_on(plugin.call_tool(&tool_name, params.clone()))
+        } else {
+            futures::executor::block_on(plugin.call_tool(&tool_name, params.clone()))
+        };
+        match call_res {
             Ok(out) => {
                 let is_error = out
                     .get("isError")
@@ -429,11 +434,12 @@ pub async fn dispatch_agent_step(
     let db = state.inner().clone();
     let sid = session_id.unwrap_or_else(|| "default".to_string());
 
+    let registry = {
+        let guard = registry_arc.lock().await;
+        (*guard).clone()
+    };
+
     let result = tokio::task::spawn_blocking(move || {
-        let registry = {
-            let guard = futures::executor::block_on(registry_arc.lock());
-            (*guard).clone()
-        };
         run_agent_step(&db, &sid, &instruction, &registry)
     })
     .await
