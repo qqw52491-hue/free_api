@@ -1110,6 +1110,19 @@ button.root-row {
     50% { opacity: 1; transform: scale(1); }
 }
 
+@keyframes task-pulse {
+    0%, 100% {
+        transform: scale(0.8);
+        opacity: 0.5;
+        box-shadow: 0 0 3px rgba(56, 189, 248, 0.4);
+    }
+    50% {
+        transform: scale(1.35);
+        opacity: 1;
+        box-shadow: 0 0 12px rgba(56, 189, 248, 1);
+    }
+}
+
 .typing-cursor {
     display: inline-block;
     color: #fbbf24;
