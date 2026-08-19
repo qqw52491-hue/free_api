@@ -316,12 +316,11 @@ impl McpClient {
                 req_builder = req_builder.header(k, val);
             }
 
-            if let Some(ref sid) = *self.session_id.read().await {
-                req_builder = req_builder
-                    .header("mcp-session-id", sid)
-                    .header("Mcp-Session-Id", sid)
-                    .header("x-session-id", sid);
+            let current_sid = self.session_id.read().await.clone();
+            if let Some(ref sid) = current_sid {
+                req_builder = req_builder.header("mcp-session-id", sid);
             }
+            println!("🚀 [MCP:{}] 发送 HTTP 请求: method={}, id={}, has_sid={:?}", self.config.name, method, id, current_sid);
 
             let resp = match tokio::time::timeout(Duration::from_secs(60), req_builder.send()).await {
                 Ok(Ok(r)) => r,
@@ -329,12 +328,16 @@ impl McpClient {
                 Err(_) => return Err(format!("[MCP:{}] HTTP 请求超时 (60s 熔断)", self.config.name)),
             };
 
+            let resp_status = resp.status();
+            let resp_headers = resp.headers().clone();
+
             // 1. 从 HTTP Response Headers 提取会话 ID
             for hname in &["mcp-session-id", "mcp_session_id", "x-session-id", "session-id"] {
-                if let Some(sid_header) = resp.headers().get(*hname) {
+                if let Some(sid_header) = resp_headers.get(*hname) {
                     if let Ok(sid_str) = sid_header.to_str() {
                         let clean = sid_str.trim().to_string();
                         if !clean.is_empty() {
+                            println!("🔑 [MCP:{}] 捕获到 Response Header Session ID: {}", self.config.name, clean);
                             let mut guard = self.session_id.write().await;
                             *guard = Some(clean);
                             break;
@@ -347,6 +350,10 @@ impl McpClient {
                 .text()
                 .await
                 .map_err(|e| format!("[MCP:{}] 读取响应体失败: {}", self.config.name, e))?;
+
+            println!("📥 [MCP:{}] 收到 HTTP 响应 (Status {}): len={}, body_preview={}", 
+                self.config.name, resp_status, raw_body.len(), 
+                if raw_body.len() > 120 { &raw_body[..120] } else { &raw_body });
 
             let json_resp = parse_mcp_response_text(&raw_body)
                 .map_err(|e| format!("[MCP:{}] {}", self.config.name, e))?;
@@ -426,10 +433,7 @@ impl McpClient {
                     req_builder = req_builder.header(k, val);
                 }
                 if let Some(ref sid) = *self.session_id.read().await {
-                    req_builder = req_builder
-                        .header("mcp-session-id", sid)
-                        .header("Mcp-Session-Id", sid)
-                        .header("x-session-id", sid);
+                    req_builder = req_builder.header("mcp-session-id", sid);
                 }
                 let _ = req_builder.send().await;
             }
@@ -657,18 +661,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mcp_client_http_initialization() {
+    async fn test_remote_hub_real_connection() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer 7a237f4951af018156c723862fb988a50555ae3dd39ab2f29ef2290109209a58".to_string(),
+        );
         let config = PluginConfig {
-            name: "test-http".to_string(),
+            name: "remote-hub".to_string(),
             command: String::new(),
             args: Vec::new(),
-            url: Some("http://127.0.0.1:9999/rpc".to_string()),
-            headers: HashMap::new(),
+            url: Some("https://mcp.wxhjy.dpdns.org/mcp".to_string()),
+            headers,
             env: HashMap::new(),
         };
 
-        let client = McpClient::spawn(config).expect("spawn http client");
-        assert!(client.request_tx.is_none());
-        assert_eq!(client.config.name, "test-http");
+        let client = McpClient::spawn(config).expect("spawn remote-hub");
+        let init_res = client.initialize().await;
+        println!("Init result: {:?}", init_res);
+        assert!(init_res.is_ok());
+
+        let tools_res = client.list_tools().await;
+        println!("Tools result count: {:?}", tools_res.as_ref().map(|t| t.len()));
+        assert!(tools_res.is_ok());
     }
 }
