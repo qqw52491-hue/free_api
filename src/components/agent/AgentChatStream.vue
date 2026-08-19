@@ -50,14 +50,22 @@
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                     </template>
                 </article>
-                <article v-else-if="entry.type === 'plan'" class="plan-node" :class="[`status-${entry.status}`, { 'is-active-plan': entry.status === 'running' || entry.isThinking }]">
-                    <div class="plan-row">
+                <article v-else-if="entry.type === 'plan'" class="plan-node" :class="[`status-${entry.status}`, { 'is-active-plan': entry.status === 'running' || entry.isThinking, 'is-collapsed': !isPlanExpanded(entry) }]">
+                    <div class="plan-row" role="button" tabindex="0" title="点击展开/折叠执行过程" @click="togglePlan(entry.id, entry.status, entry.isThinking)" @keydown.enter="togglePlan(entry.id, entry.status, entry.isThinking)">
+                        <span class="plan-expand-arrow" :class="{ open: isPlanExpanded(entry) }">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="9 18 15 12 9 6"></polyline>
+                            </svg>
+                        </span>
                         <span class="plan-mark"><i></i></span>
-                        <span class="plan-title"><small>计划</small>{{ entry.title }}</span>
+                        <span class="plan-title">
+                            <small>计划</small>{{ entry.title }}
+                            <span v-if="!isPlanExpanded(entry)" class="plan-collapsed-hint">（{{ entry.steps.length }} 个步骤 · 点击展开）</span>
+                        </span>
                         <span class="row-status">{{ statusLabel(entry.status) }}</span>
                         <time>{{ formatClock(entry.timestamp) }}</time>
                     </div>
-                    <div class="plan-children">
+                    <div v-show="isPlanExpanded(entry)" class="plan-children">
                         <article v-for="step in entry.steps" :key="step.id" class="goal-node" :class="`status-${step.status}`">
                             <button class="goal-row" :class="{ selected: step.id === selectedStepId }" type="button" @click="$emit('select-step', step.id)">
                                 <span class="tree-mark"><i></i></span>
@@ -127,7 +135,7 @@
     </div>
 </template>
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import type { AgentHumanForm, AgentStepItem, AgentToolStatus } from "./types";
 import { formatClock, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
@@ -185,6 +193,23 @@ defineEmits<{
 const streamElement = ref<HTMLElement | null>(null);
 const activeThoughtStartedAt = ref<number | null>(null);
 const followLiveTail = ref(true);
+const planExpandedState = reactive<Record<string, boolean>>({});
+
+function isPlanExpanded(plan: PlanEntry): boolean {
+    if (planExpandedState[plan.id] !== undefined) {
+        return planExpandedState[plan.id];
+    }
+    // 默认行为：如果该计划正在运行或者当前处于全局运行中，则默认展开；一旦任务结束返回结果后，默认折叠收起
+    return plan.status === "running" || plan.isThinking || props.isRunning;
+}
+
+function togglePlan(planId: string, currentStatus: AgentToolStatus, isThinking: boolean) {
+    const currentState = planExpandedState[planId] !== undefined
+        ? planExpandedState[planId]
+        : (currentStatus === "running" || isThinking || props.isRunning);
+    planExpandedState[planId] = !currentState;
+}
+
 const BOTTOM_THRESHOLD_PX = 56;
 function isNearBottom(element: HTMLElement) { return element.scrollHeight - element.scrollTop - element.clientHeight <= BOTTOM_THRESHOLD_PX; }
 function followLatest(smooth = true) { if (followLiveTail.value) nextTick(() => streamElement.value?.scrollTo({ top: streamElement.value.scrollHeight, behavior: smooth ? "smooth" : "auto" })); }
@@ -623,15 +648,44 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     border: none !important;
 }
 
-/* 计划大标题行 (极紧凑，高 24px) */
+/* 计划大标题行 (极紧凑，高 26px，支持点击展开/折叠) */
 .plan-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-height: 24px;
-    padding: 2px 4px;
+    gap: 6px;
+    min-height: 26px;
+    padding: 3px 6px;
+    border-radius: 6px;
     color: #f4f4f5;
     font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.plan-row:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.plan-expand-arrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #71717a;
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), color 0.15s ease;
+    flex-shrink: 0;
+}
+
+.plan-expand-arrow.open {
+    transform: rotate(90deg);
+    color: #38bdf8;
+}
+
+.plan-collapsed-hint {
+    margin-left: 6px;
+    font-size: 10.5px;
+    color: #71717a;
+    font-weight: normal;
 }
 
 .plan-mark {
