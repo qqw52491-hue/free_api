@@ -267,7 +267,27 @@ impl McpClient {
         if method != "initialize" && self.config.url.is_some() {
             let _ = self.ensure_session_initialized().await;
         }
-        self.send_raw_request(method, params).await
+        let first_res = self.send_raw_request(method, params.clone()).await;
+
+        // 🌟 自动自愈重试：当远程 MCP 提示 Session 过期或未找到（如 -32001 / -32000 / expired），自动重新握手并重试一次
+        if method != "initialize" && self.config.url.is_some() {
+            if let Err(ref err_msg) = first_res {
+                if err_msg.contains("-32001")
+                    || err_msg.contains("-32000")
+                    || err_msg.contains("Session not found")
+                    || err_msg.contains("expired")
+                    || err_msg.contains("No valid session ID")
+                {
+                    println!("🔄 [MCP:{}] 检测到 Session 过期，自动重新握手自愈...", self.config.name);
+                    *self.session_id.write().await = None;
+                    if let Ok(()) = self.initialize().await {
+                        return self.send_raw_request(method, params).await;
+                    }
+                }
+            }
+        }
+
+        first_res
     }
 
     async fn send_raw_request(
