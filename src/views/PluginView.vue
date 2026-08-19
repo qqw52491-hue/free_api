@@ -1,9 +1,18 @@
 <template>
   <div class="plugin-container">
     <div class="header">
-      <div class="title-group">
-        <h1>能力管理</h1>
-        <p class="subtitle">集中维护 MCP 接入与工作区 Skill 指令；无需为两类能力单独切换页面。</p>
+      <div class="header-left">
+        <button class="back-btn" type="button" title="返回对话" @click="goBack">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="19" y1="12" x2="5" y2="12"></line>
+            <polyline points="12 19 5 12 12 5"></polyline>
+          </svg>
+          <span>返回对话</span>
+        </button>
+        <div class="title-group">
+          <h1>能力管理</h1>
+          <p class="subtitle">集中维护 MCP 接入与工作区 Skill 指令；无需为两类能力单独切换页面。</p>
+        </div>
       </div>
       <button class="add-btn" @click="showAddModal = true">
         <span class="icon">+</span> 添加 MCP
@@ -188,7 +197,19 @@
 
 <script setup>
 import { ref, onMounted } from 'vue';
+import { useRouter, useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
+
+const emit = defineEmits(['back']);
+const router = useRouter();
+const route = useRoute();
+
+const goBack = () => {
+  emit('back');
+  if (route.path === '/plugins') {
+    router.push('/agent');
+  }
+};
 
 const plugins = ref([]);
 const customInstructions = ref([]);
@@ -375,6 +396,35 @@ onMounted(() => {
   margin-bottom: 24px;
   padding-bottom: 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e4e4e7;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap;
+}
+
+.back-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  transform: translateX(-2px);
 }
 
 h1 {

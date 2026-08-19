@@ -147,6 +147,7 @@
                             :panel-id="tab.id"
                             :all-models="allModels"
                             @new-session="createNewTask"
+                            @open-plugins="currentNavView = 'plugins'"
                         />
                     </div>
                 </template>
@@ -159,7 +160,7 @@
 
             <!-- 3. 🔌 插件 / 提示词与 Skill 库 -->
             <div v-if="currentNavView === 'plugins' || currentNavView === 'library'" class="full-view-panel">
-                <PluginView />
+                <PluginView @back="currentNavView = 'agent'" />
             </div>
 
             <!-- 4. ⏱️ Scheduled 定时任务 -->

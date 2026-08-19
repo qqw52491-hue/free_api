@@ -145,7 +145,6 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
 import AgentChatStream from "./agent/AgentChatStream.vue";
 import AgentComposer from "./agent/AgentComposer.vue";
 import AgentInspector from "./agent/AgentInspector.vue";
@@ -155,8 +154,10 @@ import type { AgentModelOption } from "./agent/types";
 import { useAgentSession } from "../composables/useAgentSession";
 
 const props = defineProps<{ panelId: string; allModels: AgentModelOption[] }>();
-const emit = defineEmits<{ "new-session": [] }>();
-const router = useRouter();
+const emit = defineEmits<{
+    "new-session": [];
+    "open-plugins": [];
+}>();
 const settingsOpen = ref(false);
 const selectedSubpart = ref<"thought" | "tool" | null>(null);
 const selectedHumanEventId = ref<string | null>(null);
@@ -249,7 +250,7 @@ function applyPreset(goal: string) {
 }
 function openPluginManager() {
     settingsOpen.value = false;
-    void router.push("/plugins");
+    emit("open-plugins");
 }
 
 const inspectorRef = ref<InstanceType<typeof AgentInspector> | null>(null);
