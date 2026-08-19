@@ -758,8 +758,11 @@ pub async fn test_model(
         format!("Bearer {}", clean_key)
     };
 
-    let masked_key = if clean_key.len() > 10 {
-        format!("{}...{}", &clean_key[..6], &clean_key[clean_key.len() - 4..])
+    let key_chars: Vec<char> = clean_key.chars().collect();
+    let masked_key = if key_chars.len() > 10 {
+        let prefix: String = key_chars[..6].iter().collect();
+        let suffix: String = key_chars[key_chars.len() - 4..].iter().collect();
+        format!("{}...{}", prefix, suffix)
     } else {
         "***".to_string()
     };
