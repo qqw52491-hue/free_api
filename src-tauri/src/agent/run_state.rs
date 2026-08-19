@@ -237,13 +237,13 @@ impl AgentRunMachine {
                 self.message = Some(summary);
                 true
             }
-            AgentRunEvent::Fail { reason } if !self.state.is_terminal() => {
+            AgentRunEvent::Fail { reason } => {
                 self.state = AgentRunState::Failed;
                 self.action = None;
                 self.message = Some(reason);
                 true
             }
-            AgentRunEvent::Cancel { reason } if !self.state.is_terminal() => {
+            AgentRunEvent::Cancel { reason } => {
                 self.state = AgentRunState::Cancelled;
                 self.action = None;
                 self.message = Some(reason);
@@ -356,5 +356,18 @@ mod tests {
         assert_eq!(snapshot.state, AgentRunState::Recovering);
         assert_eq!(snapshot.retry_count, 1);
         assert_eq!(snapshot.tool_retry_count, 1);
+    }
+
+    #[test]
+    fn fail_transitions_are_idempotent() {
+        let mut machine = AgentRunMachine::new();
+        machine.transition(AgentRunEvent::Start).unwrap();
+        machine.transition(AgentRunEvent::Fail { reason: "first error".to_string() }).unwrap();
+        assert_eq!(machine.state(), AgentRunState::Failed);
+
+        // Calling Fail again on already failed machine should succeed idempotently and update the message
+        let second_snapshot = machine.transition(AgentRunEvent::Fail { reason: "refined error".to_string() }).unwrap();
+        assert_eq!(second_snapshot.state, AgentRunState::Failed);
+        assert_eq!(second_snapshot.message.as_deref(), Some("refined error"));
     }
 }

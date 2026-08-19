@@ -237,7 +237,14 @@ pub fn run_plan_tree_sync(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let res = execute_command_inner(&db_c, &sid_c, &tool, &action, &args, &reg_c);
+            // 修复: 并行分支在 tokio worker 线程上调用 invoker，而 execute_command_inner
+            // 对 MCP 插件使用 handle.block_on，在 runtime 内嵌套 block_on 会直接 panic。
+            // 用 spawn_blocking 把同步分发放到 blocking 线程执行，消除 runtime 嵌套。
+            let res = tokio::task::spawn_blocking(move || {
+                execute_command_inner(&db_c, &sid_c, &tool, &action, &args, &reg_c)
+            })
+            .await
+            .map_err(|e| format!("工具执行任务崩溃: {}", e))?;
             if res.success {
                 let parsed_val: serde_json::Value = serde_json::from_str(&res.stdout)
                     .unwrap_or_else(|_| serde_json::json!({ "output": res.stdout }));
