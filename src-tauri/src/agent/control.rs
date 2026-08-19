@@ -126,10 +126,11 @@ pub(crate) async fn finish_interrupted_run(
         app,
         session_id,
         machine,
-        AgentRunEvent::Cancel {
+        crate::agent::run_state::AgentRunEvent::Cancel {
             reason: message.clone(),
         },
     )?;
+    let failure_completion = serde_json::json!({ "summary": message });
     if let Err(error) = crate::agent::run_trace::upsert_snapshot(
         db,
         run_id,
@@ -137,7 +138,7 @@ pub(crate) async fn finish_interrupted_run(
         goal,
         "cancelled",
         trace_steps,
-        None,
+        Some(&failure_completion),
     ) {
         eprintln!("[run-trace] 无法保存取消轨迹: {error}");
     }

@@ -249,7 +249,28 @@ impl McpClient {
         })
     }
 
+    pub async fn ensure_session_initialized(&self) -> Result<(), String> {
+        if self.config.url.is_some() {
+            let has_session = self.session_id.read().await.is_some();
+            if !has_session {
+                self.initialize().await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn send_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if method != "initialize" && self.config.url.is_some() {
+            let _ = self.ensure_session_initialized().await;
+        }
+        self.send_raw_request(method, params).await
+    }
+
+    async fn send_raw_request(
         &self,
         method: &str,
         params: serde_json::Value,
@@ -276,7 +297,10 @@ impl McpClient {
             }
 
             if let Some(ref sid) = *self.session_id.read().await {
-                req_builder = req_builder.header("mcp-session-id", sid);
+                req_builder = req_builder
+                    .header("mcp-session-id", sid)
+                    .header("Mcp-Session-Id", sid)
+                    .header("x-session-id", sid);
             }
 
             let resp = match tokio::time::timeout(Duration::from_secs(60), req_builder.send()).await {
@@ -285,10 +309,17 @@ impl McpClient {
                 Err(_) => return Err(format!("[MCP:{}] HTTP 请求超时 (60s 熔断)", self.config.name)),
             };
 
-            if let Some(sid_header) = resp.headers().get("mcp-session-id") {
-                if let Ok(sid_str) = sid_header.to_str() {
-                    let mut guard = self.session_id.write().await;
-                    *guard = Some(sid_str.to_string());
+            // 1. 从 HTTP Response Headers 提取会话 ID
+            for hname in &["mcp-session-id", "mcp_session_id", "x-session-id", "session-id"] {
+                if let Some(sid_header) = resp.headers().get(*hname) {
+                    if let Ok(sid_str) = sid_header.to_str() {
+                        let clean = sid_str.trim().to_string();
+                        if !clean.is_empty() {
+                            let mut guard = self.session_id.write().await;
+                            *guard = Some(clean);
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -299,6 +330,17 @@ impl McpClient {
 
             let json_resp = parse_mcp_response_text(&raw_body)
                 .map_err(|e| format!("[MCP:{}] {}", self.config.name, e))?;
+
+            // 2. 从 Response JSON 提取会话 ID（兼容 FastMCP / TS MCP SDK）
+            if let Some(res_obj) = json_resp.result.as_ref().and_then(|r| r.as_object()) {
+                if let Some(sid_val) = res_obj.get("sessionId").and_then(|v| v.as_str()) {
+                    let mut guard = self.session_id.write().await;
+                    *guard = Some(sid_val.to_string());
+                } else if let Some(meta_sid) = res_obj.get("_meta").and_then(|m| m.get("sessionId")).and_then(|v| v.as_str()) {
+                    let mut guard = self.session_id.write().await;
+                    *guard = Some(meta_sid.to_string());
+                }
+            }
 
             if let Some(err) = json_resp.error {
                 return Err(format!("[MCP:{}] RPC 错误: {}", self.config.name, err));
@@ -336,8 +378,8 @@ impl McpClient {
     }
 
     pub async fn initialize(&self) -> Result<(), String> {
-        let _ = self
-            .send_request(
+        let res = self
+            .send_raw_request(
                 "initialize",
                 json!({
                     "protocolVersion": "2024-11-05",
@@ -346,7 +388,33 @@ impl McpClient {
                 }),
             )
             .await;
-        Ok(())
+        
+        // 若为原生 HTTP 远程服务，在握手成功后发送 initialized 通知
+        if self.config.url.is_some() {
+            if let Some(ref url) = self.config.url {
+                let mut req_builder = self
+                    .http_client
+                    .post(url)
+                    .header("Accept", "application/json, text/event-stream")
+                    .json(&json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized",
+                        "params": {}
+                    }));
+                for (k, v) in &self.config.headers {
+                    let val = resolve_env_value(v).unwrap_or_else(|_| v.clone());
+                    req_builder = req_builder.header(k, val);
+                }
+                if let Some(ref sid) = *self.session_id.read().await {
+                    req_builder = req_builder
+                        .header("mcp-session-id", sid)
+                        .header("Mcp-Session-Id", sid)
+                        .header("x-session-id", sid);
+                }
+                let _ = req_builder.send().await;
+            }
+        }
+        res.map(|_| ())
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>, String> {

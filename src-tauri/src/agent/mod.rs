@@ -500,7 +500,7 @@ pub async fn run_agent_main_loop(
         // ================================================================
         // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
         // ================================================================
-        let (mut instruction, result) = run_call_llm_and_run_tool_phases(
+        let (mut instruction, result) = match run_call_llm_and_run_tool_phases(
             &app,
             &state,
             &registry_state,
@@ -516,7 +516,33 @@ pub async fn run_agent_main_loop(
             &mut interrupt_rx,
             resume_instruction,
         )
-        .await?;
+        .await {
+            Ok(res) => res,
+            Err(error) => {
+                let terminal_error = format!("任务执行失败: {}", error);
+                advance_run_state(
+                    &app,
+                    &final_session_id,
+                    &mut run_machine,
+                    AgentRunEvent::Fail {
+                        reason: terminal_error.clone(),
+                    },
+                )?;
+                checkpoint.mark_failed(terminal_error.clone(), &context);
+                save_checkpoint(state.inner(), &mut checkpoint)?;
+                let failure_completion = json!({ "summary": terminal_error });
+                let _ = crate::agent::run_trace::upsert_snapshot(
+                    state.inner(),
+                    &run_id,
+                    &final_session_id,
+                    &goal,
+                    "failed",
+                    &run_trace_steps,
+                    Some(&failure_completion),
+                );
+                return Err(error);
+            }
+        };
         if result.route == RUN_INTERRUPTED_ROUTE {
             finish_interrupted_run(
                 &app,
