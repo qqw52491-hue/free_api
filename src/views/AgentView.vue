@@ -694,11 +694,24 @@ onMounted(async () => {
     width: 100%;
     height: 100%;
     overflow: hidden;
+    animation: panel-enter 0.24s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .agent-panel-frame {
     width: 100%;
     height: 100%;
+    animation: panel-enter 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes panel-enter {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 /* 定时任务占位 */

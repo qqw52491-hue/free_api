@@ -65,36 +65,40 @@
                         <span class="row-status">{{ statusLabel(entry.status) }}</span>
                         <time>{{ formatClock(entry.timestamp) }}</time>
                     </div>
-                    <div v-show="isPlanExpanded(entry)" class="plan-children">
-                        <article v-for="step in entry.steps" :key="step.id" class="goal-node" :class="`status-${step.status}`">
-                            <button class="goal-row" :class="{ selected: step.id === selectedStepId }" type="button" @click="$emit('select-step', step.id)">
-                                <span class="tree-mark"><i></i></span>
-                                <span class="step-tool-emoji">{{ getToolIcon(step.tool, step.action).emoji }}</span>
-                                <span class="goal-label">{{ step.description || '执行步骤' }}<small v-if="step.modelTier" class="model-tier">{{ step.modelTier }}</small></span>
-                                <span class="row-status">{{ statusLabel(step.status) }}</span>
-                                <time>{{ formatClock(step.timestamp) }}</time>
-                            </button>
-                            <div class="node-children">
-                                <button v-if="step.thought" class="child-row thought-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'thought' }" type="button" @click="$emit('select-step-thought', step.id)">
-                                    <span class="child-mark"></span>
-                                    <span class="tool-tag thought-tag">🧠 思考</span>
-                                    <span>{{ shortText(step.thought, 110) }}</span>
-                                    <em>已分析</em>
-                                </button>
-                                <button class="child-row tool-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'tool' }" type="button" @click="$emit('select-step', step.id)">
-                                    <span class="child-mark"></span>
-                                    <span class="tool-tag" :style="{ color: getToolIcon(step.tool, step.action).color, background: `${getToolIcon(step.tool, step.action).color}18` }">
-                                        {{ getToolIcon(step.tool, step.action).emoji }} {{ step.tool || '工具' }}
-                                    </span>
-                                    <span>{{ shortText(step.action || step.explanation || '执行操作', 110) }}</span>
-                                    <em>{{ step.source }}</em>
-                                </button>
+                    <div class="plan-children-wrapper" :class="{ expanded: isPlanExpanded(entry) }">
+                        <div class="plan-children-inner">
+                            <div class="plan-children">
+                                <article v-for="step in entry.steps" :key="step.id" class="goal-node" :class="`status-${step.status}`">
+                                    <button class="goal-row" :class="{ selected: step.id === selectedStepId }" type="button" @click="$emit('select-step', step.id)">
+                                        <span class="tree-mark"><i></i></span>
+                                        <span class="step-tool-emoji">{{ getToolIcon(step.tool, step.action).emoji }}</span>
+                                        <span class="goal-label">{{ step.description || '执行步骤' }}<small v-if="step.modelTier" class="model-tier">{{ step.modelTier }}</small></span>
+                                        <span class="row-status">{{ statusLabel(step.status) }}</span>
+                                        <time>{{ formatClock(step.timestamp) }}</time>
+                                    </button>
+                                    <div class="node-children">
+                                        <button v-if="step.thought" class="child-row thought-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'thought' }" type="button" @click="$emit('select-step-thought', step.id)">
+                                            <span class="child-mark"></span>
+                                            <span class="tool-tag thought-tag">🧠 思考</span>
+                                            <span>{{ shortText(step.thought, 110) }}</span>
+                                            <em>已分析</em>
+                                        </button>
+                                        <button class="child-row tool-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'tool' }" type="button" @click="$emit('select-step', step.id)">
+                                            <span class="child-mark"></span>
+                                            <span class="tool-tag" :style="{ color: getToolIcon(step.tool, step.action).color, background: `${getToolIcon(step.tool, step.action).color}18` }">
+                                                {{ getToolIcon(step.tool, step.action).emoji }} {{ step.tool || '工具' }}
+                                            </span>
+                                            <span>{{ shortText(step.action || step.explanation || '执行操作', 110) }}</span>
+                                            <em>{{ step.source }}</em>
+                                        </button>
+                                    </div>
+                                </article>
+                                <article v-if="entry.isThinking" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
+                                    <header><span class="thought-pulse-dot"><i></i></span><b>思考</b><em>思考中…</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
+                                    <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
+                                </article>
                             </div>
-                        </article>
-                        <article v-if="entry.isThinking" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
-                            <header><span class="thought-pulse-dot"><i></i></span><b>思考</b><em>思考中…</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
-                            <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
-                        </article>
+                        </div>
                     </div>
                 </article>
                 <article v-else-if="entry.type === 'active-thought'" class="active-thought-stream root-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
@@ -773,6 +777,28 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     font-weight: 600;
 }
 
+.plan-children-wrapper {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: grid-template-rows 0.35s cubic-bezier(0.16, 1, 0.3, 1), 
+                opacity 0.28s cubic-bezier(0.16, 1, 0.3, 1), 
+                transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: grid-template-rows, opacity, transform;
+}
+
+.plan-children-wrapper.expanded {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.plan-children-inner {
+    overflow: hidden;
+    min-height: 0;
+}
+
 .plan-children {
     margin-left: 7px;
     padding-left: 12px;
@@ -787,6 +813,12 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     margin: 0;
     display: flex;
     flex-direction: column;
+    animation: step-appear 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes step-appear {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 /* 所有交互按钮重置 */
