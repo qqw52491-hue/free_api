@@ -935,6 +935,7 @@ export function useAgentSession(sessionId: string) {
     async function runAgent(nextGoal?: string) {
         const requestedGoal = (nextGoal ?? goalInput.value).trim();
         if (!requestedGoal || isRunning.value) return;
+        await loadRunTraces();
         clearSession();
         runTerminal.value = false;
         currentGoal.value = requestedGoal;
@@ -977,6 +978,7 @@ export function useAgentSession(sessionId: string) {
     async function requestStop() {
         if (!isRunning.value || stopRequested.value) return;
         stopRequested.value = true;
+        isThinking.value = false;
         try {
             await invoke("cancel_agent_run", { sessionId });
             appendLog("[停止请求] 将在模型或工具的安全边界停止当前任务。");

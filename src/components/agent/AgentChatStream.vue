@@ -1,5 +1,5 @@
 <template>
-    <div ref="streamElement" class="process-tree" aria-label="Agent 分层执行过程" @scroll.passive="onStreamScroll">
+    <div ref="streamElement" class="process-tree" :class="{ 'is-running': isRunning }" aria-label="Agent 分层执行过程" @scroll.passive="onStreamScroll">
         <button v-if="isRunning && !followLiveTail" type="button" class="follow-latest" @click="resumeLiveFollow">跟随最新输出</button>
 
         <div class="stream-centered-content">
@@ -93,8 +93,8 @@
                                         </button>
                                     </div>
                                 </article>
-                                <article v-if="entry.isThinking" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
-                                    <header><span class="thought-pulse-dot"><i></i></span><b>思考</b><em>思考中…</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
+                                <article v-if="entry.isThinking && (thought || isRunning)" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
+                                    <header><span class="thought-pulse-dot" :class="{ 'is-running': isRunning }"><i></i></span><b>思考</b><em>{{ isRunning ? '思考中…' : '思考过程' }}</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
                                     <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
                                 </article>
                             </div>
@@ -102,7 +102,7 @@
                     </div>
                 </article>
                 <article v-else-if="entry.type === 'active-thought'" class="active-thought-stream root-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
-                    <header><span class="thought-pulse-dot"><i></i></span><b>思考</b><em>思考中…</em><time>{{ formatClock(entry.timestamp) }}</time></header>
+                    <header><span class="thought-pulse-dot" :class="{ 'is-running': isRunning }"><i></i></span><b>思考</b><em>{{ isRunning ? '思考中…' : '思考过程' }}</em><time>{{ formatClock(entry.timestamp) }}</time></header>
                     <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
                 </article>
                 <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
@@ -250,9 +250,12 @@ function planEntries(steps: AgentStepItem[], prefix: string, active = false): Pl
         groups.set(key, existing);
     }
     const plans = [...groups.values()].map((plan) => ({ ...plan, status: planStatus(plan.steps) }));
-    if (active && activeThoughtStartedAt.value) {
+    if (active || Boolean(props.thought)) {
         const last = plans[plans.length - 1];
-        if (last) { last.isThinking = true; last.thinkingTimestamp = activeThoughtStartedAt.value; }
+        if (last && (props.isThinking || !last.steps.some(s => s.thought))) {
+            last.isThinking = true;
+            last.thinkingTimestamp = activeThoughtStartedAt.value || Date.now();
+        }
     }
     return plans;
 }
@@ -305,7 +308,9 @@ function currentTimeline(): TimelineEntry[] {
         ...props.humanInterventions.map((item, index) => ({ id: `live-human-${item.timestamp}-${index}`, type: "message" as const, timestamp: item.timestamp, role: "user", content: item.message, isHuman: true })),
     ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
     timeline.push(...middle);
-    if (props.isThinking && activeThoughtStartedAt.value && !plans.length) timeline.push({ id: "active-thought", type: "active-thought", timestamp: activeThoughtStartedAt.value });
+    if ((props.isThinking || Boolean(props.thought)) && !plans.length) {
+        timeline.push({ id: "active-thought", type: "active-thought", timestamp: activeThoughtStartedAt.value || Date.now() });
+    }
     if (props.completionMessage || props.finalSummary || props.finalArtifacts.length) {
         timeline.push({ id: "live-completion", type: "completion", timestamp: Date.now(), title: props.completionMessage || (props.hasError ? "任务未能完成" : "任务已完成"), summary: props.finalSummary || props.completionMessage, artifacts: props.finalArtifacts, failed: props.hasError });
     }
@@ -732,6 +737,10 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
 
 .plan-node.status-failed > .plan-row .plan-mark {
     background: #f87171;
+    box-shadow: 0 0 4px rgba(248, 113, 113, 0.5);
+    animation: none;
+}
+.process-tree.is-running .plan-node.status-failed > .plan-row .plan-mark {
     box-shadow: 0 0 8px rgba(248, 113, 113, 0.85);
     animation: error-pulse 1.2s ease-in-out infinite;
 }
@@ -884,10 +893,15 @@ button.root-row {
     color: #f4f4f5;
 }
 
-/* 🌟 失败/重试状态：红色呼吸闪烁脉冲警示 */
+/* 🌟 失败/重试状态：若在运行中闪烁警示，若已停止则静态常亮 */
 .goal-node.status-failed > .goal-row .tree-mark,
 .goal-node.status-error > .goal-row .tree-mark {
     background: #f87171;
+    box-shadow: 0 0 4px rgba(248, 113, 113, 0.5);
+    animation: none;
+}
+.process-tree.is-running .goal-node.status-failed > .goal-row .tree-mark,
+.process-tree.is-running .goal-node.status-error > .goal-row .tree-mark {
     box-shadow: 0 0 8px rgba(248, 113, 113, 0.9);
     animation: error-pulse 1.2s ease-in-out infinite;
 }
