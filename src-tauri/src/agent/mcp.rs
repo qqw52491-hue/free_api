@@ -12,8 +12,14 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginConfig {
     pub name: String,
+    #[serde(default)]
     pub command: String,
+    #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
 }
@@ -59,17 +65,43 @@ type RequestEnvelope = (
     oneshot::Sender<Result<serde_json::Value, String>>,
 );
 
-/// 🚀 基于 Tokio 的真异步多路复用 MCP 客户端
-/// 支持多 Agent 并发调用、单请求 ID 异步派发与 30s 熔断保护
+/// 🚀 双轨统一 MCP 客户端
+/// 支持 1) 本地 stdio 进程多路复用 (uvx / npx / node / python)
+///      2) 原生 HTTP / SSE 直连 (0 环境依赖，无需 uv)
 pub struct McpClient {
     pub config: PluginConfig,
-    request_tx: mpsc::Sender<RequestEnvelope>,
+    request_tx: Option<mpsc::Sender<RequestEnvelope>>,
+    http_client: reqwest::Client,
     next_id: Arc<AtomicU64>,
     pub cached_tools: Arc<RwLock<Vec<McpToolDef>>>,
 }
 
 impl McpClient {
     pub fn spawn(config: PluginConfig) -> Result<Self, String> {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|e| format!("[MCP:{}] 构建 HTTP 客户端失败: {}", config.name, e))?;
+
+        // 🌟 场景 1: 原生 HTTP / SSE 直连 (无需本地 uv / python 进程)
+        if let Some(ref url) = config.url {
+            if !url.trim().is_empty() {
+                println!("🌐 [MCP:{}] 初始化原生 HTTP 直连客户端: {}", config.name, url);
+                return Ok(Self {
+                    config,
+                    request_tx: None,
+                    http_client,
+                    next_id: Arc::new(AtomicU64::new(1)),
+                    cached_tools: Arc::new(RwLock::new(Vec::new())),
+                });
+            }
+        }
+
+        // 🌟 场景 2: 本地 stdio 进程模式 (uvx / npx / node / python)
+        if config.command.trim().is_empty() {
+            return Err(format!("[MCP:{}] 既未指定 url 也未指定 command", config.name));
+        }
+
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args)
             .stdin(Stdio::piped())
@@ -180,7 +212,8 @@ impl McpClient {
 
         Ok(Self {
             config,
-            request_tx,
+            request_tx: Some(request_tx),
+            http_client,
             next_id: Arc::new(AtomicU64::new(1)),
             cached_tools: Arc::new(RwLock::new(Vec::new())),
         })
@@ -192,7 +225,6 @@ impl McpClient {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (resp_tx, resp_rx) = oneshot::channel();
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
             id,
@@ -200,16 +232,42 @@ impl McpClient {
             params,
         };
 
-        self.request_tx
-            .send((req, resp_tx))
-            .await
-            .map_err(|_| format!("[MCP:{}] 插件后台通信通道已断开", self.config.name))?;
+        // 🌟 模式 A: 原生 HTTP 直连发送 (0 外部进程)
+        if let Some(ref url) = self.config.url {
+            let mut req_builder = self.http_client.post(url).json(&req);
+            for (k, v) in &self.config.headers {
+                let val = resolve_env_value(v).unwrap_or_else(|_| v.clone());
+                req_builder = req_builder.header(k, val);
+            }
+            let resp = match tokio::time::timeout(Duration::from_secs(60), req_builder.send()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => return Err(format!("[MCP:{}] HTTP 请求失败: {}", self.config.name, e)),
+                Err(_) => return Err(format!("[MCP:{}] HTTP 请求超时 (60s 熔断)", self.config.name)),
+            };
+            let json_resp = resp
+                .json::<JsonRpcResponse>()
+                .await
+                .map_err(|e| format!("[MCP:{}] HTTP 响应解析失败: {}", self.config.name, e))?;
+            if let Some(err) = json_resp.error {
+                return Err(format!("[MCP:{}] RPC 错误: {}", self.config.name, err));
+            }
+            return Ok(json_resp.result.unwrap_or(serde_json::Value::Null));
+        }
 
-        // 默认 60s 超时熔断保护，防止任何 MCP 子进程无限期挂起主线程
-        match tokio::time::timeout(Duration::from_secs(60), resp_rx).await {
-            Ok(Ok(res)) => res,
-            Ok(Err(_)) => Err(format!("[MCP:{}] 响应通道在接收前断开", self.config.name)),
-            Err(_) => Err(format!("[MCP:{}] 请求超时 (60s 熔断)", self.config.name)),
+        // 🌟 模式 B: stdio 管道多路复用发送
+        if let Some(ref tx) = self.request_tx {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            tx.send((req, resp_tx))
+                .await
+                .map_err(|_| format!("[MCP:{}] 插件后台通信通道已断开", self.config.name))?;
+
+            match tokio::time::timeout(Duration::from_secs(60), resp_rx).await {
+                Ok(Ok(res)) => res,
+                Ok(Err(_)) => Err(format!("[MCP:{}] 响应通道在接收前断开", self.config.name)),
+                Err(_) => Err(format!("[MCP:{}] 请求超时 (60s 熔断)", self.config.name)),
+            }
+        } else {
+            Err(format!("[MCP:{}] 未找到可用通信通道", self.config.name))
         }
     }
 
@@ -430,12 +488,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_mcp_client_parallel_multiplexing() {
-        // 创建一个把请求 id 原样回声的 mock shell 脚本
         let mock_cmd = r#"while IFS= read -r line; do id=$(echo "$line" | grep -o '"id":[0-9]*' | cut -d: -f2); echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"echo\":$id}}"; done"#;
         let config = PluginConfig {
             name: "test-echo".to_string(),
             command: "sh".to_string(),
             args: vec!["-c".to_string(), mock_cmd.to_string()],
+            url: None,
+            headers: HashMap::new(),
             env: HashMap::new(),
         };
 
@@ -456,5 +515,20 @@ mod tests {
             h.await.expect("join handle");
         }
     }
-}
 
+    #[tokio::test]
+    async fn test_mcp_client_http_initialization() {
+        let config = PluginConfig {
+            name: "test-http".to_string(),
+            command: String::new(),
+            args: Vec::new(),
+            url: Some("http://127.0.0.1:9999/rpc".to_string()),
+            headers: HashMap::new(),
+            env: HashMap::new(),
+        };
+
+        let client = McpClient::spawn(config).expect("spawn http client");
+        assert!(client.request_tx.is_none());
+        assert_eq!(client.config.name, "test-http");
+    }
+}

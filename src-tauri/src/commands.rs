@@ -48,6 +48,8 @@ pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, S
                     name: row.get(0)?,
                     command: row.get(1)?,
                     args: serde_json::from_str(&args_json).unwrap_or_default(),
+                    url: None,
+                    headers: std::collections::HashMap::new(),
                     env: serde_json::from_str(&env_json).unwrap_or_default(),
                 },
                 enabled: row.get::<_, i64>(4)? == 1,
@@ -417,6 +419,8 @@ pub async fn save_mcp_plugin(
         name: name.clone(),
         command: command.clone(),
         args: args.clone(),
+        url: None,
+        headers: std::collections::HashMap::new(),
         env: env_map.clone(),
     };
     let yaml = serde_yaml::to_string(&config).unwrap_or_default();

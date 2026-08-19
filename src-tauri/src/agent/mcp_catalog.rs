@@ -30,10 +30,13 @@ fn catalogs() -> &'static Mutex<HashMap<String, CachedCatalog>> {
 
 fn fingerprint(config: &PluginConfig) -> String {
     let env = serde_json::to_string(&config.env).unwrap_or_default();
+    let headers = serde_json::to_string(&config.headers).unwrap_or_default();
     format!(
-        "{}\u{1f}{}\u{1f}{}",
+        "{:?}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        config.url,
         config.command,
         config.args.join("\u{1f}"),
+        headers,
         env
     )
 }
@@ -110,6 +113,8 @@ mod tests {
             name: "demo".to_string(),
             command: "demo-server".to_string(),
             args: vec!["--stdio".to_string()],
+            url: None,
+            headers: HashMap::new(),
             env: HashMap::new(),
         }
     }
