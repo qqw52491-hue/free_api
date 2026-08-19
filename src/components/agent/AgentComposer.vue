@@ -6,7 +6,7 @@
                 :value="draft"
                 :disabled="isSending"
                 :placeholder="placeholderText"
-                rows="2"
+                rows="1"
                 @input="handleInput"
                 @keydown.ctrl.enter.prevent="submit"
                 @keydown.meta.enter.prevent="submit"
@@ -112,8 +112,7 @@ function autoResizeTextarea() {
         const el = textareaRef.value;
         if (!el) return;
         el.style.height = "auto";
-        const targetHeight = Math.min(Math.max(el.scrollHeight, 48), 180);
-        el.style.height = `${targetHeight}px`;
+        el.style.height = `${Math.min(Math.max(el.scrollHeight, 40), 160)}px`;
     });
 }
 
@@ -182,8 +181,8 @@ const contextLevelClass = computed(() => {
 
 textarea {
     width: 100%;
-    min-height: 48px;
-    max-height: 180px;
+    min-height: 40px;
+    max-height: 160px;
     border: 0;
     padding: 2px 0;
     resize: none;
@@ -191,8 +190,9 @@ textarea {
     background: transparent;
     font: inherit;
     font-size: 13.5px;
-    line-height: 1.6;
+    line-height: 1.5;
     outline: none;
+    overflow-y: auto;
 }
 textarea::placeholder {
     color: #71717a;

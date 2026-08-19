@@ -203,20 +203,24 @@ function isPlanExpanded(plan: PlanEntry): boolean {
     if (planExpandedState[plan.id] !== undefined) {
         return planExpandedState[plan.id];
     }
-    // 默认行为：如果该计划正在运行或者当前处于全局运行中，则默认展开；一旦任务结束返回结果后，默认折叠收起
-    return plan.status === "running" || plan.isThinking || props.isRunning;
+    // 默认行为：仅当前正在运行或正在思考中的计划展开；已完成/历史计划默认收起折叠
+    return plan.status === "running" || plan.isThinking;
 }
 
 function togglePlan(planId: string, currentStatus: AgentToolStatus, isThinking: boolean) {
     const currentState = planExpandedState[planId] !== undefined
         ? planExpandedState[planId]
-        : (currentStatus === "running" || isThinking || props.isRunning);
+        : (currentStatus === "running" || isThinking);
     planExpandedState[planId] = !currentState;
 }
 
 const BOTTOM_THRESHOLD_PX = 56;
 function isNearBottom(element: HTMLElement) { return element.scrollHeight - element.scrollTop - element.clientHeight <= BOTTOM_THRESHOLD_PX; }
-function followLatest(smooth = true) { if (followLiveTail.value) nextTick(() => streamElement.value?.scrollTo({ top: streamElement.value.scrollHeight, behavior: smooth ? "smooth" : "auto" })); }
+function followLatest(smooth = true) {
+    if (followLiveTail.value && props.isRunning) {
+        nextTick(() => streamElement.value?.scrollTo({ top: streamElement.value.scrollHeight, behavior: smooth ? "smooth" : "auto" }));
+    }
+}
 function onStreamScroll(event: Event) { followLiveTail.value = isNearBottom(event.currentTarget as HTMLElement); }
 function resumeLiveFollow() { followLiveTail.value = true; followLatest(false); }
 function followThoughtTail() { nextTick(() => Array.from(document.querySelectorAll<HTMLElement>(".active-thought-content")).forEach((element) => { element.scrollTop = element.scrollHeight; })); }
@@ -226,13 +230,12 @@ watch(() => props.isThinking, (running, wasRunning) => { if (running && !wasRunn
 const isStreamingSummary = computed(() => props.isRunning && Boolean(props.finalSummary));
 
 watch(
-    () => [props.steps.length, props.historyTurns.length, props.isRunning, props.finalSummary, props.thought],
+    () => [props.steps.length, props.isRunning, props.finalSummary, props.thought],
     () => {
-        if (followLiveTail.value) {
+        if (props.isRunning && followLiveTail.value) {
             followLatest();
         }
-    },
-    { deep: true }
+    }
 );
 
 function planStatus(steps: AgentStepItem[]): AgentToolStatus { if (steps.some((step) => step.status === "running" || step.status === "pending")) return "running"; if (steps.some((step) => step.status === "failed")) return "failed"; return "succeeded"; }
