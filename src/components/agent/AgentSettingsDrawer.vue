@@ -168,7 +168,16 @@ const catalogSummary = computed(() => {
 async function loadMcpCatalog() {
     catalogLoading.value = true;
     try {
-        mcpCatalog.value = await invoke<McpCatalogEntry[]>("get_mcp_tool_catalog", { name: null });
+        const entries = await invoke<McpCatalogEntry[]>("get_mcp_tool_catalog", { name: null });
+        mcpCatalog.value = entries;
+        // 自动探测未缓存/新挂载的插件连接状态，无需用户手动逐个点击刷新
+        for (const entry of entries) {
+            if (!entry.cached || entry.tool_count === 0) {
+                void refreshConnection(entry.name, false);
+            } else {
+                connectionState.value[entry.name] = "ready";
+            }
+        }
     } catch (error) {
         mcpCatalog.value = [];
         console.warn("无法读取 MCP 工具目录", error);
@@ -176,13 +185,19 @@ async function loadMcpCatalog() {
         catalogLoading.value = false;
     }
 }
-async function refreshConnection(name: string) {
+async function refreshConnection(name: string, reloadAfter = true) {
     connectionState.value = { ...connectionState.value, [name]: "testing" };
     connectionError.value = { ...connectionError.value, [name]: "" };
     try {
-        await invoke("refresh_mcp_plugin_connection", { name });
+        const updated = await invoke<McpCatalogEntry>("refresh_mcp_plugin_connection", { name });
         connectionState.value = { ...connectionState.value, [name]: "ready" };
-        await loadMcpCatalog();
+        const idx = mcpCatalog.value.findIndex(e => e.name === name);
+        if (idx >= 0) {
+            mcpCatalog.value[idx] = updated;
+        } else if (reloadAfter) {
+            const entries = await invoke<McpCatalogEntry[]>("get_mcp_tool_catalog", { name: null });
+            mcpCatalog.value = entries;
+        }
     } catch (error) {
         connectionState.value = { ...connectionState.value, [name]: "error" };
         connectionError.value = { ...connectionError.value, [name]: String(error) };
