@@ -40,7 +40,12 @@
                     <h2>{{ stateMeta.category }}</h2>
                     <p>{{ statusDescription }}</p>
                 </div>
-                <span class="state-badge" :class="`state-${runState}`">{{ stateMeta.label }}</span>
+                <div class="inspector-top-controls">
+                    <span class="state-badge" :class="`state-${runState}`">{{ stateMeta.label }}</span>
+                    <button type="button" class="btn-close-inspector" title="收起面板" @click="$emit('close')">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
             </header>
 
             <div class="inspector-metrics">
@@ -160,6 +165,7 @@ defineEmits<{
     "preview-resource": [resource: AgentTaskResource];
     "agent-submit": [data: any];
     "agent-cancel": [reason: string];
+    "close": [];
 }>();
 
 const activeTab = ref<"preview" | "detail" | "resources">("detail");
@@ -332,7 +338,26 @@ defineExpose({
 .inspector-top span { color: #71717a; font-size: 9px; font-weight: 800; letter-spacing: .1em; }
 .inspector-top h2 { margin: 4px 0 2px; color: #f4f4f5; font-size: 15px; font-weight: 650; }
 .inspector-top p { max-width: 210px; margin: 0; color: #a1a1aa; font-size: 11px; line-height: 1.45; }
-.state-badge { align-self: flex-start; padding: 3px 6px; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 5px; color: #a1a1aa !important; font-size: 9.5px !important; }
+.inspector-top-controls { display: flex; align-items: center; gap: 8px; }
+.btn-close-inspector {
+    display: grid;
+    width: 22px;
+    height: 22px;
+    place-items: center;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.04);
+    color: #a1a1aa;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    padding: 0;
+}
+.btn-close-inspector:hover {
+    border-color: rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.12);
+}
+.state-badge { align-self: center; padding: 3px 6px; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 5px; color: #a1a1aa !important; font-size: 9.5px !important; }
 
 .inspector-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid rgba(255, 255, 255, 0.06); background: rgba(0, 0, 0, 0.15); }
 .inspector-metrics div { display: grid; gap: 2px; padding: 8px 6px; text-align: center; border-right: 1px solid rgba(255, 255, 255, 0.05); }

@@ -84,39 +84,40 @@
 
             <!-- 可拖拽调节宽度的分割条 (侧栏打开时展示) -->
             <div
-                v-show="!inspectorCollapsed"
                 class="grid-resizer"
-                :class="{ dragging: isResizing }"
+                :class="{ dragging: isResizing, 'is-hidden': inspectorCollapsed }"
                 title="按住左右拖拽调节工作台宽度 / 双击切换宽屏 (580px)"
                 @mousedown="startResize"
                 @dblclick="toggleInspectorWide"
             ></div>
 
-            <AgentInspector
-                v-show="!inspectorCollapsed"
-                ref="inspectorRef"
-                :run-state="session.runState.value"
-                :state-meta="session.stateMeta.value"
-                :status-description="session.statusDescription.value"
-                :elapsed-label="session.elapsedLabel.value"
-                :token-usage="session.tokenUsage.value"
-                :completed-tool-count="session.completedToolCount.value"
-                :failed-tool-count="session.failedToolCount.value"
-                :selected-step="session.selectedStep.value"
-                :selected-subpart="selectedSubpart"
-                :selected-human="selectedHuman"
-                :selected-active-thought="selectedActiveThought"
-                :active-thought-text="session.thought.value"
-                :resources="session.resources.value"
-                :is-resources-loading="session.isResourcesLoading.value"
-                :resource-load-error="session.resourceLoadError.value"
-                :final-summary="session.finalSummary.value"
-                :final-artifacts="session.finalArtifacts.value"
-                :active-preview-content="activePreviewContent"
-                @refresh-resources="session.refreshResources"
-                @preview-resource="session.openResourcePreview"
-                @agent-submit="handleInspectorAgentSubmit"
-            />
+            <div class="inspector-wrapper" :class="{ 'is-hidden': inspectorCollapsed }">
+                <AgentInspector
+                    ref="inspectorRef"
+                    :run-state="session.runState.value"
+                    :state-meta="session.stateMeta.value"
+                    :status-description="session.statusDescription.value"
+                    :elapsed-label="session.elapsedLabel.value"
+                    :token-usage="session.tokenUsage.value"
+                    :completed-tool-count="session.completedToolCount.value"
+                    :failed-tool-count="session.failedToolCount.value"
+                    :selected-step="session.selectedStep.value"
+                    :selected-subpart="selectedSubpart"
+                    :selected-human="selectedHuman"
+                    :selected-active-thought="selectedActiveThought"
+                    :active-thought-text="session.thought.value"
+                    :resources="session.resources.value"
+                    :is-resources-loading="session.isResourcesLoading.value"
+                    :resource-load-error="session.resourceLoadError.value"
+                    :final-summary="session.finalSummary.value"
+                    :final-artifacts="session.finalArtifacts.value"
+                    :active-preview-content="activePreviewContent"
+                    @refresh-resources="session.refreshResources"
+                    @preview-resource="session.openResourcePreview"
+                    @agent-submit="handleInspectorAgentSubmit"
+                    @close="inspectorCollapsed = true"
+                />
+            </div>
         </div>
 
         <AgentRecordPreview
@@ -212,12 +213,14 @@ function handleStepSelect(id: string) {
     clearNarrativeSelection();
     selectedSubpart.value = "tool";
     session.selectStep(id);
+    inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("detail");
 }
 function handleStepThought(id: string) {
     clearNarrativeSelection();
     selectedSubpart.value = "thought";
     session.selectStep(id);
+    inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("detail");
 }
 function handleHumanSelect(id: string) {
@@ -225,6 +228,7 @@ function handleHumanSelect(id: string) {
     selectedActiveThought.value = false;
     selectedSubpart.value = null;
     session.selectedStepId.value = null;
+    inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("detail");
 }
 function handleActiveThoughtSelect() {
@@ -232,6 +236,7 @@ function handleActiveThoughtSelect() {
     selectedHumanEventId.value = null;
     selectedSubpart.value = null;
     session.selectedStepId.value = null;
+    inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("detail");
 }
 function handleModelSelect(modelId: string) {
@@ -260,7 +265,7 @@ function openPluginManager() {
 
 const inspectorRef = ref<InstanceType<typeof AgentInspector> | null>(null);
 const inspectorWidth = ref(380);
-const inspectorCollapsed = ref(false);
+const inspectorCollapsed = ref(true);
 const isResizing = ref(false);
 const activePreviewContent = ref("");
 
@@ -476,8 +481,11 @@ defineExpose({ isRunning: session.isRunning });
     min-width: 0;
     position: relative;
     overflow: hidden;
+    transition: grid-template-columns 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: grid-template-columns;
 }
 .manus-agent-grid.is-resizing {
+    transition: none !important;
     user-select: none !important;
     cursor: col-resize !important;
 }
@@ -499,7 +507,12 @@ defineExpose({ isRunning: session.isRunning });
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.15s ease;
+    transition: opacity 0.25s ease, background 0.15s ease;
+    opacity: 1;
+}
+.grid-resizer.is-hidden {
+    opacity: 0;
+    pointer-events: none;
 }
 .grid-resizer:hover, .grid-resizer.dragging {
     background: rgba(251, 191, 36, 0.25);
@@ -515,6 +528,22 @@ defineExpose({ isRunning: session.isRunning });
 .grid-resizer:hover::after, .grid-resizer.dragging::after {
     height: 48px;
     background: #fbbf24;
+}
+
+/* 侧栏包裹器与平滑展开/收起过渡 */
+.inspector-wrapper {
+    height: 100%;
+    min-width: 0;
+    overflow: hidden;
+    opacity: 1;
+    transform: translateX(0);
+    transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: opacity, transform;
+}
+.inspector-wrapper.is-hidden {
+    opacity: 0;
+    transform: translateX(24px);
+    pointer-events: none;
 }
 
 .chat-column {
