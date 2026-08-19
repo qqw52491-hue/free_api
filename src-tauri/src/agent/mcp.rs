@@ -106,7 +106,9 @@ impl McpClient {
         cmd.args(&config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .env("PYTHONUNBUFFERED", "1")
+            .env("NODE_NO_WARNINGS", "1");
 
         for (k, v) in &config.env {
             cmd.env(k, resolve_env_value(v)?);
