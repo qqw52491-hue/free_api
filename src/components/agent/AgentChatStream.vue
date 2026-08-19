@@ -750,12 +750,8 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
 
 .plan-node.status-failed > .plan-row .plan-mark {
     background: #f87171;
-    box-shadow: 0 0 4px rgba(248, 113, 113, 0.5);
-    animation: none;
-}
-.process-tree.is-running .plan-node.status-failed > .plan-row .plan-mark {
-    box-shadow: 0 0 8px rgba(248, 113, 113, 0.85);
-    animation: error-pulse 1.2s ease-in-out infinite;
+    box-shadow: 0 0 6px rgba(248, 113, 113, 0.6);
+    animation: none !important;
 }
 .plan-node.status-failed > .plan-row .row-status {
     color: #f87171;
@@ -910,13 +906,8 @@ button.root-row {
 .goal-node.status-failed > .goal-row .tree-mark,
 .goal-node.status-error > .goal-row .tree-mark {
     background: #f87171;
-    box-shadow: 0 0 4px rgba(248, 113, 113, 0.5);
-    animation: none;
-}
-.process-tree.is-running .goal-node.status-failed > .goal-row .tree-mark,
-.process-tree.is-running .goal-node.status-error > .goal-row .tree-mark {
-    box-shadow: 0 0 8px rgba(248, 113, 113, 0.9);
-    animation: error-pulse 1.2s ease-in-out infinite;
+    box-shadow: 0 0 6px rgba(248, 113, 113, 0.6);
+    animation: none !important;
 }
 .goal-node.status-failed > .goal-row .row-status,
 .goal-node.status-error > .goal-row .row-status {

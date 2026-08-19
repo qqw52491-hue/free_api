@@ -22,7 +22,8 @@ pub async fn run_call_llm_and_run_tool_phases(
     state: &State<'_, DbState>,
     registry_state: &State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
     model_routing: &crate::agent::router::ModelRoutingConfig,
-    _goal: &String,
+    run_id: &str,
+    goal: &str,
     log_context: Option<bool>,
     final_session_id: &String,
     step_id: usize,
@@ -32,6 +33,7 @@ pub async fn run_call_llm_and_run_tool_phases(
     rx: &mut mpsc::Receiver<HumanControl>,
     interrupt_rx: &mut watch::Receiver<u64>,
     resume_instruction: Option<AgentInstruction>,
+    run_trace_steps: &mut Vec<serde_json::Value>,
 ) -> Result<(AgentInstruction, DispatchResult), String> {
     let mut retry_count = 0;
     let max_retries = 3;
@@ -179,35 +181,31 @@ pub async fn run_call_llm_and_run_tool_phases(
                     &mut run_machine,
                     AgentRunEvent::PlanningFailed { reason: e.clone() },
                 )?;
-                // 🔑 关键修复：无论解析失败还是成功，都要让前端看到这一步
-                let err_desc = format!("⚠️ AI 输出格式错误（第{}次）", retry_count);
+                
                 app.emit(
-                    &format!("agent-progress-{}", final_session_id),
-                    json!({
-                        "type": "step_new",
-                        "step": {
-                            "id": step_id,
-                            "description": err_desc,
-                            "reflection": "",
-                            "thought": e.clone(),
-                            "tool": "error",
-                            "command": "",
-                            "status": "error",
-                            "output": e.clone()
-                        }
-                    }),
+                    &format!("agent-log-{}", final_session_id),
+                    format!(
+                        "🔄 规划解析失败(第{}次)，正在注入修正提示让 AI 重新输出...",
+                        retry_count
+                    ),
                 )
-                .ok();
-                app.emit(
-                    &format!("agent-progress-{}", final_session_id),
-                    json!({
-                        "type": "step_error",
-                        "step_id": step_id,
-                        "description": format!("AI 输出格式错误（第{}次）", retry_count),
-                        "output": format!("JSON 解析失败: {}\n\n原始输出请查看终端日志", e)
-                    }),
-                )
-                .ok();
+                .map_err(|e| e.to_string())?;
+                context.add_error_feedback(&format!(
+                    "你的输出未能通过 JSON 校验，解析报错为: {}\n请严格按照 System Prompt 要求输出纯合法 JSON！",
+                    e
+                ));
+                checkpoint.record_recoverable_error(
+                    format!("JSON 解析失败: {}", e),
+                    &context,
+                );
+                save_checkpoint(state.inner(), &mut checkpoint)?;
+                crate::agent::advance_run_state(
+                    &app,
+                    &final_session_id,
+                    &mut run_machine,
+                    AgentRunEvent::RetryPlanning,
+                )?;
+
                 if retry_count >= max_retries {
                     let terminal_error = format!("AI 持续输出非法格式，任务终止: {}", e);
                     app.emit(
@@ -231,18 +229,6 @@ pub async fn run_call_llm_and_run_tool_phases(
                     save_checkpoint(state.inner(), &mut checkpoint)?;
                     return Err(terminal_error);
                 }
-                app.emit(
-                    &format!("agent-log-{}", final_session_id),
-                    format!("🔄 格式错误(第{}次)，正在自我修复...", retry_count),
-                )
-                .map_err(|er| er.to_string())?;
-                context.add_error_feedback(&e);
-                crate::agent::advance_run_state(
-                    &app,
-                    &final_session_id,
-                    &mut run_machine,
-                    AgentRunEvent::RetryPlanning,
-                )?;
                 continue;
             }
         };
@@ -426,6 +412,33 @@ pub async fn run_call_llm_and_run_tool_phases(
                 &inst.description,
                 "failed",
                 &error_detail,
+            );
+
+            // 🌟 立即将失败尝试写入复盘轨迹 run_trace_steps 并持久化到 agent_run_traces，保证页面刷新后红色的失败步骤不丢失
+            run_trace_steps.push(json!({
+                "id": format!("{}-attempt-{}", step_id, retry_count),
+                "step_id": step_id,
+                "description": format!("{} (失败重试 #{})", inst.description, retry_count),
+                "reflection": inst.reflection.clone(),
+                "thought": inst.thought.clone(),
+                "tool": inst.get_tool(),
+                "action": inst.get_action(),
+                "command": inst.get_params(),
+                "params": inst.get_params(),
+                "plan_id": plan_id,
+                "plan_title": plan_title,
+                "status": "failed",
+                "output": error_detail,
+                "timestamp": chrono::Utc::now().timestamp_millis(),
+            }));
+            let _ = crate::agent::run_trace::upsert_snapshot(
+                state.inner(),
+                run_id,
+                final_session_id,
+                goal,
+                "running",
+                run_trace_steps,
+                None,
             );
 
             // 🌟 立即向前端广播步骤失败事件，确保错误尝试保留在时间线上供用户查看

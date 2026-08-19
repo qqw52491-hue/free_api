@@ -505,6 +505,7 @@ pub async fn run_agent_main_loop(
             &state,
             &registry_state,
             &model_routing,
+            &run_id,
             &goal,
             log_context,
             &final_session_id,
@@ -515,6 +516,7 @@ pub async fn run_agent_main_loop(
             &mut rx,
             &mut interrupt_rx,
             resume_instruction,
+            &mut run_trace_steps,
         )
         .await {
             Ok(res) => res,
