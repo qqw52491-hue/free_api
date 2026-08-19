@@ -159,12 +159,40 @@ const emit = defineEmits<{
     "new-session": [];
     "open-plugins": [];
     "update:running": [running: boolean];
+    "update:title": [title: string];
 }>();
 const settingsOpen = ref(false);
 const selectedSubpart = ref<"thought" | "tool" | null>(null);
 const selectedHumanEventId = ref<string | null>(null);
 const selectedActiveThought = ref(false);
 const session = useAgentSession(props.panelId);
+
+function extractSmartTitle(text: string): string {
+    const trimmed = text.trim();
+    if (!trimmed) return "";
+    const clean = trimmed
+        .replace(/^[\{\[\"\'\s#\->`]+/, "")
+        .replace(/[\r\n]+/g, " ")
+        .trim();
+    if (clean.length <= 18) return clean;
+    return `${clean.slice(0, 16)}…`;
+}
+
+watch(session.currentGoal, (newGoal) => {
+    if (newGoal && newGoal.trim()) {
+        const title = extractSmartTitle(newGoal);
+        if (title) emit("update:title", title);
+    }
+}, { immediate: true });
+
+watch(session.finalSummary, (summary) => {
+    if (summary && summary.trim()) {
+        const firstLine = summary.split("\n")[0].replace(/^[#\s\-*`>]+/, "").trim();
+        if (firstLine && firstLine.length >= 3 && firstLine.length <= 25) {
+            emit("update:title", firstLine);
+        }
+    }
+});
 
 watch(session.isRunning, (val) => {
     emit("update:running", val);

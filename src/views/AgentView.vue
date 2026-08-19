@@ -149,6 +149,7 @@
                             @new-session="createNewTask"
                             @open-plugins="currentNavView = 'plugins'"
                             @update:running="(val) => { tab.running = val; }"
+                            @update:title="(title) => { updateTabTitle(tab.id, title); }"
                         />
                     </div>
                 </template>
@@ -262,6 +263,18 @@ async function doRename(id: string) {
     await invoke("rename_session", { id, title });
     const tab = tabs.value.find((item) => item.id === id);
     if (tab) tab.label = title;
+}
+
+async function updateTabTitle(id: string, newTitle: string) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab) return;
+    const cleanTitle = newTitle.trim();
+    if (!cleanTitle || tab.label === cleanTitle) return;
+    // 仅当当前标签仍为默认名称（如 Agent 任务 #1 或 未命名对话）时自动提炼更新
+    if (tab.label.startsWith("Agent 任务") || tab.label.startsWith("未命名") || tab.label.includes("#")) {
+        tab.label = cleanTitle;
+        await invoke("rename_session", { id, title: cleanTitle });
+    }
 }
 
 watch(panelRefs, () => {
