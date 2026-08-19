@@ -21,6 +21,7 @@
 ### 形态 A：标准单步执行 (Single Step)
 ```json
 {
+  "session_title": "任务全局精炼主旨（仅在人类发起新任务或人工干预的首次规划中提供4~12字，后续普通循环无需输出）",
   "description": "读取会话资源列表以分析当前数据",
   "plan_id": "inspect-env",
   "plan_title": "分析项目环境",

@@ -172,10 +172,12 @@ function extractSmartTitle(text: string): string {
     if (!trimmed) return "";
     const clean = trimmed
         .replace(/^[\{\[\"\'\s#\->`]+/, "")
+        .replace(/^(你好[呀啊吗~！!，,]*|请问[一下]*|请帮我[一下]*|帮我[一下]*|我想[要]*|请[您]*)+/i, "")
         .replace(/[\r\n]+/g, " ")
         .trim();
-    if (clean.length <= 18) return clean;
-    return `${clean.slice(0, 16)}…`;
+    if (!clean) return trimmed.slice(0, 18);
+    if (clean.length <= 20) return clean;
+    return `${clean.slice(0, 19)}…`;
 }
 
 watch(session.currentGoal, (newGoal) => {
@@ -184,6 +186,12 @@ watch(session.currentGoal, (newGoal) => {
         if (title) emit("update:title", title);
     }
 }, { immediate: true });
+
+watch(session.sessionTitle, (newTitle) => {
+    if (newTitle && newTitle.trim()) {
+        emit("update:title", newTitle.trim());
+    }
+});
 
 watch(session.finalSummary, (summary) => {
     if (summary && summary.trim()) {

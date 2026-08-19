@@ -250,6 +250,28 @@ pub async fn run_call_llm_and_run_tool_phases(
             inst.description = "执行下一步操作".to_string();
         }
         let (plan_id, plan_title) = context.resolve_plan(&inst);
+
+        // 🌟 捕获大模型输出的全局精炼任务标题并实时持久化到 SQLite
+        if let Some(session_title) = &inst.session_title {
+            let clean = session_title.trim();
+            if !clean.is_empty() && clean.chars().count() <= 25 {
+                if let Ok(conn) = state.0.lock() {
+                    let _ = conn.execute(
+                        "UPDATE chat_sessions SET title=?1 WHERE id=?2",
+                        rusqlite::params![clean, final_session_id],
+                    );
+                }
+                app.emit(
+                    &format!("agent-progress-{}", final_session_id),
+                    json!({
+                        "type": "session_title_updated",
+                        "title": clean,
+                    }),
+                )
+                .ok();
+            }
+        }
+
         // LLM 的结构化决策已经完整到达；在任何 UI 通知或工具调用之前提交它。
         checkpoint.record_instruction(inst.clone(), context);
         save_checkpoint(state.inner(), checkpoint)?;

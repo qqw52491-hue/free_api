@@ -179,6 +179,7 @@ export function useAgentSession(sessionId: string) {
     const logContext = ref(false);
     const goalInput = ref("");
     const currentGoal = ref("");
+    const sessionTitle = ref("");
     const runState = ref<AgentRunState>("idle");
     const statusDescription = ref(AGENT_RUN_STATE_CATALOG.idle.description);
     const isRunning = ref(false);
@@ -707,6 +708,15 @@ export function useAgentSession(sessionId: string) {
             return;
         }
 
+        // 大模型提炼的全局精炼任务标题更新
+        if (eventType === "session_title_updated" && payload.title) {
+            const newTitle = toText(payload.title);
+            if (newTitle) {
+                sessionTitle.value = newTitle;
+            }
+            return;
+        }
+
         // 思考与流式内容事件（实时抓取每 chunk 吐字速率和首字 TTFT）
         if (payload.step_id !== undefined && payload.step_id !== null) {
             const parsedStep = Number(payload.step_id);
@@ -1069,6 +1079,7 @@ export function useAgentSession(sessionId: string) {
         logContext,
         goalInput,
         currentGoal,
+        sessionTitle,
         runState,
         statusDescription,
         isRunning,

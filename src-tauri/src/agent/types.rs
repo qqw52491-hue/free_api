@@ -171,6 +171,9 @@ pub struct AgentInstruction {
     /// 面向用户的计划标题；切换该标题代表开始新的工作阶段。
     #[serde(default)]
     pub plan_title: Option<String>,
+    /// 全局任务会话精炼主旨（仅在人类发起新任务或干预指令的首次规划中提供，4~12字名词短语）
+    #[serde(default)]
+    pub session_title: Option<String>,
     /// 显式申明开始新工作阶段（结合 plan_id 切换 Episode）
     #[serde(default)]
     pub new_plan: Option<bool>,

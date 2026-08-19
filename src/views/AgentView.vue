@@ -124,7 +124,7 @@
                             @keydown.enter.prevent="doRename(tab.id)"
                             @click.stop
                         />
-                        <span v-else class="task-label">{{ tab.label }}</span>
+                        <span v-else class="task-label" :title="tab.label">{{ tab.label }}</span>
                         <button type="button" class="task-close" title="关闭任务" @click.stop="closeTab(tab.id)">×</button>
                     </div>
                 </div>
@@ -237,10 +237,12 @@ function extractSmartTitle(text: string): string {
     if (!trimmed) return "";
     const clean = trimmed
         .replace(/^[\{\[\"\'\s#\->`]+/, "")
+        .replace(/^(你好[呀啊吗~！!，,]*|请问[一下]*|请帮我[一下]*|帮我[一下]*|我想[要]*|请[您]*)+/i, "")
         .replace(/[\r\n]+/g, " ")
         .trim();
-    if (clean.length <= 18) return clean;
-    return `${clean.slice(0, 16)}…`;
+    if (!clean) return trimmed.slice(0, 18);
+    if (clean.length <= 20) return clean;
+    return `${clean.slice(0, 19)}…`;
 }
 
 async function backfillSessionTitles(sessions: ChatSessionRow[]) {
@@ -322,11 +324,8 @@ async function updateTabTitle(id: string, newTitle: string) {
     if (!tab) return;
     const cleanTitle = newTitle.trim();
     if (!cleanTitle || tab.label === cleanTitle) return;
-    // 仅当当前标签仍为默认名称（如 Agent 任务 #1 或 未命名对话）时自动提炼更新
-    if (tab.label.startsWith("Agent 任务") || tab.label.startsWith("未命名") || tab.label.includes("#")) {
-        tab.label = cleanTitle;
-        await invoke("rename_session", { id, title: cleanTitle });
-    }
+    tab.label = cleanTitle;
+    await invoke("rename_session", { id, title: cleanTitle });
 }
 
 watch(panelRefs, () => {
