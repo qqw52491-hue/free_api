@@ -152,25 +152,6 @@ pub async fn run_call_llm_and_run_tool_phases(
                         format!("❌ API 致命错误: {}", e)
                     };
 
-                    app.emit(
-                        &format!("agent-progress-{}", final_session_id),
-                        json!({
-                            "type": "complete",
-                            "message": friendly_reason,
-                            "success": false
-                        }),
-                    )
-                    .ok();
-                    crate::agent::advance_run_state(
-                        &app,
-                        &final_session_id,
-                        &mut run_machine,
-                        AgentRunEvent::Fail {
-                            reason: friendly_reason.clone(),
-                        },
-                    )?;
-                    checkpoint.mark_failed(friendly_reason.clone(), &context);
-                    save_checkpoint(state.inner(), &mut checkpoint)?;
                     return Err(friendly_reason);
                 }
 
@@ -208,25 +189,6 @@ pub async fn run_call_llm_and_run_tool_phases(
 
                 if retry_count >= max_retries {
                     let terminal_error = format!("AI 持续输出非法格式，任务终止: {}", e);
-                    app.emit(
-                        &format!("agent-progress-{}", final_session_id),
-                        json!({
-                            "type": "complete",
-                            "message": terminal_error,
-                            "success": false
-                        }),
-                    )
-                    .ok();
-                    crate::agent::advance_run_state(
-                        &app,
-                        &final_session_id,
-                        &mut run_machine,
-                        AgentRunEvent::Fail {
-                            reason: terminal_error.clone(),
-                        },
-                    )?;
-                    checkpoint.mark_failed(terminal_error.clone(), &context);
-                    save_checkpoint(state.inner(), &mut checkpoint)?;
                     return Err(terminal_error);
                 }
                 continue;
@@ -514,27 +476,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             }
 
             if retry_count >= max_retries {
-                // 最终失败：通知前端完成（带错误）
-                app.emit(
-                    &format!("agent-progress-{}", final_session_id),
-                    json!({
-                        "type": "complete",
-                        "message": format!("执行多次失败，任务终止: {}", error_detail),
-                        "success": false
-                    }),
-                )
-                .ok();
-                crate::agent::advance_run_state(
-                    &app,
-                    &final_session_id,
-                    &mut run_machine,
-                    AgentRunEvent::Fail {
-                        reason: error_detail.clone(),
-                    },
-                )?;
-                checkpoint.mark_failed(error_detail.clone(), &context);
-                save_checkpoint(state.inner(), &mut checkpoint)?;
-                return Err(error_detail);
+                return Err(format!("执行多次失败，任务终止: {}", error_detail));
             }
 
             app.emit(
