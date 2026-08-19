@@ -720,20 +720,16 @@ pub async fn run_agent_main_loop(
         }),
     );
     let core_logic_embedded = include_str!("../../prompts/core_logic.md");
-    let chart_skill_embedded = include_str!("../../prompts/skills/chart_visualization.md");
 
     let prompt_path = app
         .path()
         .resource_dir()
         .unwrap_or_default()
         .join("prompts/core_logic.md");
-    let mut base_prompt = std::fs::read_to_string(&prompt_path)
+    let base_prompt = std::fs::read_to_string(&prompt_path)
         .or_else(|_| std::fs::read_to_string("src-tauri/prompts/core_logic.md"))
         .or_else(|_| std::fs::read_to_string("prompts/core_logic.md"))
         .unwrap_or_else(|_| core_logic_embedded.to_string());
-
-    base_prompt.push_str("\n\n---\n\n");
-    base_prompt.push_str(chart_skill_embedded);
 
     // 2. 动态扫描所有内置工具 (Built-in Tools)
     let task_store_menu = r#"
@@ -801,8 +797,8 @@ pub async fn run_agent_main_loop(
         let skills_dir_prod = resource_dir.join("prompts/skills");
         let skills_dir_dev = std::path::PathBuf::from("prompts/skills");
         let skills_dir = if skills_dir_prod.exists() { skills_dir_prod } else { skills_dir_dev };
-        // chart_visualization 已固定编译进 base_prompt，不再重复列出
-        crate::agent::skill_context::skill_catalog_string(&skills_dir, &["chart_visualization"])
+        // 全量动态扫描 prompts/skills/ 目录下所有 Skill 手册
+        crate::agent::skill_context::skill_catalog_string(&skills_dir, &[])
     };
 
     let system_prompt = format!(

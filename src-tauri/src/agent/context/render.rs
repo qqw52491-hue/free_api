@@ -62,6 +62,6 @@ impl ContextRenderer {
     }
 
     pub fn render_decision_instruction() -> &'static str {
-        "请基于上述所有上下文环境，思考并执行下一步操作。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格符合白名单。注意：你必须先在 reflection 字段审视上一步的结果与当前环境。"
+        "请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自上方工具菜单。在 description 字段给出面向用户的一句话进度；仅当上一步失败或被拦截时，才在 reflection 中补一句原因与改法。"
     }
 }

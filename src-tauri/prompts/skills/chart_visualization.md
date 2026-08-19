@@ -1,5 +1,7 @@
 # 数据与架构图表可视化规范 (Data Visualization & Architecture Skill)
 
+<summary>ECharts 交互图表、Mermaid 架构流程图与 HTML 动态沙箱报表规范与组件模板。</summary>
+
 当你在回答用户、总结分析结果、呈现数据对比、系统架构设计或实体关系分析时，请优先使用结构化代码块输出可视化图表。前端渲染器会自动将其编译为交互式的高质感图表。
 
 ---
