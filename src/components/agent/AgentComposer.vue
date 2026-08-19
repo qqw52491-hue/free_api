@@ -2,11 +2,12 @@
     <footer class="manus-composer-wrap">
         <div class="manus-composer" :class="{ waiting: isWaitingForHuman }">
             <textarea
+                ref="textareaRef"
                 :value="draft"
                 :disabled="isSending"
                 :placeholder="placeholderText"
                 rows="2"
-                @input="$emit('update:draft', ($event.target as HTMLTextAreaElement).value)"
+                @input="handleInput"
                 @keydown.ctrl.enter.prevent="submit"
                 @keydown.meta.enter.prevent="submit"
             />
@@ -80,7 +81,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import type { AgentHumanForm, AgentModelOption, AgentSessionTelemetry } from "./types";
 
 const props = defineProps<{
@@ -103,6 +104,27 @@ const emit = defineEmits<{
     stop: [];
     "open-settings": [];
 }>();
+
+const textareaRef = ref<HTMLTextAreaElement | null>(null);
+
+function autoResizeTextarea() {
+    nextTick(() => {
+        const el = textareaRef.value;
+        if (!el) return;
+        el.style.height = "auto";
+        const targetHeight = Math.min(Math.max(el.scrollHeight, 48), 180);
+        el.style.height = `${targetHeight}px`;
+    });
+}
+
+function handleInput(e: Event) {
+    const val = (e.target as HTMLTextAreaElement).value;
+    emit("update:draft", val);
+    autoResizeTextarea();
+}
+
+watch(() => props.draft, autoResizeTextarea);
+onMounted(autoResizeTextarea);
 
 const currentModelName = computed(() => props.allModels.find((model) => model.id === props.currentModelId)?.display_name || "Manus Desktop");
 const placeholderText = computed(() => props.isRunning

@@ -226,12 +226,13 @@ watch(() => props.isThinking, (running, wasRunning) => { if (running && !wasRunn
 const isStreamingSummary = computed(() => props.isRunning && Boolean(props.finalSummary));
 
 watch(
-    () => props.finalSummary,
+    () => [props.steps.length, props.historyTurns.length, props.isRunning, props.finalSummary, props.thought],
     () => {
         if (followLiveTail.value) {
             followLatest();
         }
-    }
+    },
+    { deep: true }
 );
 
 function planStatus(steps: AgentStepItem[]): AgentToolStatus { if (steps.some((step) => step.status === "running" || step.status === "pending")) return "running"; if (steps.some((step) => step.status === "failed")) return "failed"; return "succeeded"; }
