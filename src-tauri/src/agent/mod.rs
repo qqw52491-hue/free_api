@@ -129,6 +129,48 @@ fn take_pending_interrupt(rx: &mut mpsc::Receiver<HumanControl>) -> Option<Strin
         }
     }
 }
+
+fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
+    let tool = inst.get_tool().to_ascii_lowercase();
+    let action = inst.get_action().to_ascii_lowercase();
+
+    // 显式排除网络抓取/搜索/文件读取等纯只读操作
+    if tool == "web_fetch"
+        || tool == "web_search"
+        || tool == "read_file"
+        || tool == "search_files"
+        || tool == "ripgrep_search"
+        || tool.starts_with("read_")
+        || tool.starts_with("get_")
+        || tool.starts_with("list_")
+        || tool.starts_with("search_")
+        || action.starts_with("read_")
+        || action.starts_with("get_")
+        || action.starts_with("list_")
+        || action.starts_with("search_")
+    {
+        return false;
+    }
+
+    // 显式匹配写盘/Excel/代码修改/数据库写入/系统脚本执行等写操作
+    tool.contains("excel")
+        || tool.contains("write")
+        || tool.contains("edit")
+        || tool.contains("shell")
+        || tool.contains("bash")
+        || tool.contains("exec")
+        || (tool == "task_store"
+            && (action.contains("create")
+                || action.contains("upsert")
+                || action.contains("update")))
+        || action.starts_with("write")
+        || action.starts_with("edit")
+        || action.starts_with("create")
+        || action.starts_with("delete")
+        || action.starts_with("save")
+        || action.starts_with("exec")
+        || action.starts_with("run")
+}
 async fn finish_interrupted_run(
     app: &AppHandle,
     db: &DbState,
@@ -2111,7 +2153,9 @@ async fn run_tool_phase(
         let registry_arc = registry_state.inner().clone();
         let db = state.inner().clone();
         let sid = final_session_id.clone();
-        let tool_task = tokio::task::spawn_blocking(move || {
+        let is_write_tool = is_write_or_side_effect_tool(inst);
+
+        let mut tool_task = tokio::task::spawn_blocking(move || {
             let registry = {
                 let guard = futures::executor::block_on(registry_arc.lock());
                 (*guard).clone()
@@ -2120,24 +2164,61 @@ async fn run_tool_phase(
             run_agent_step(&db, &sid, &inst_c, &registry)
         });
 
-        tokio::select! {
-            res = tool_task => {
+        let dispatch_result = tokio::select! {
+            res = &mut tool_task => {
                 res.map_err(|e| e.to_string())?
             }
             control = rx.recv() => {
                 let interrupt_reason = match control {
-                    Some(HumanControl::Cancel) => "用户请求立即停止当前任务。".to_string(),
-                    Some(HumanControl::ReplaceGoal(goal)) => format!("用户提交了新的任务目标：{}（已立即中断前序工具）", goal),
+                    Some(HumanControl::Cancel) => "用户请求停止当前任务。".to_string(),
+                    Some(HumanControl::ReplaceGoal(goal)) => format!("用户提交了新的任务目标：{}（已中断前序工具）", goal),
                     Some(HumanControl::Answer(_)) | None => "用户请求中断当前任务。".to_string(),
                 };
-                return Ok(DispatchResult {
-                    success: false,
-                    stdout: interrupt_reason,
-                    stderr: String::new(),
-                    route: RUN_INTERRUPTED_ROUTE.to_string(),
-                });
+
+                if is_write_tool {
+                    // 写盘/事务类工具：给予最多 1.5 秒安全落盘缓冲期，避免破坏正在保存的文件
+                    app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        "⏳ 收到停止指令，正在给予写盘/事务操作 1.5s 安全保存缓冲期...".to_string(),
+                    ).ok();
+
+                    tokio::select! {
+                        res = &mut tool_task => {
+                            app.emit(
+                                &format!("agent-log-{}", final_session_id),
+                                "✅ 写盘操作已安全完成，任务即将终止。".to_string(),
+                            ).ok();
+                            res.map_err(|e| e.to_string())?
+                        }
+                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(1500)) => {
+                            app.emit(
+                                &format!("agent-log-{}", final_session_id),
+                                "⚠️ 写盘操作耗时超 1.5s，已强制安全终止。".to_string(),
+                            ).ok();
+                            DispatchResult {
+                                success: false,
+                                stdout: interrupt_reason,
+                                stderr: String::new(),
+                                route: RUN_INTERRUPTED_ROUTE.to_string(),
+                            }
+                        }
+                    }
+                } else {
+                    // 只读/网络/查询类工具：0 毫秒立刻中断退出
+                    DispatchResult {
+                        success: false,
+                        stdout: interrupt_reason,
+                        stderr: String::new(),
+                        route: RUN_INTERRUPTED_ROUTE.to_string(),
+                    }
+                }
             }
+        };
+
+        if dispatch_result.route == RUN_INTERRUPTED_ROUTE {
+            return Ok(dispatch_result);
         }
+        dispatch_result
     };
 
     let event_type = if dispatch_result.success {
