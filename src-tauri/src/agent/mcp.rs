@@ -205,11 +205,11 @@ impl McpClient {
             .await
             .map_err(|_| format!("[MCP:{}] 插件后台通信通道已断开", self.config.name))?;
 
-        // 默认 30s 超时熔断保护，防止任何 MCP 子进程无限期挂起主线程
-        match tokio::time::timeout(Duration::from_secs(30), resp_rx).await {
+        // 默认 60s 超时熔断保护，防止任何 MCP 子进程无限期挂起主线程
+        match tokio::time::timeout(Duration::from_secs(60), resp_rx).await {
             Ok(Ok(res)) => res,
             Ok(Err(_)) => Err(format!("[MCP:{}] 响应通道在接收前断开", self.config.name)),
-            Err(_) => Err(format!("[MCP:{}] 请求超时 (30s 熔断)", self.config.name)),
+            Err(_) => Err(format!("[MCP:{}] 请求超时 (60s 熔断)", self.config.name)),
         }
     }
 
@@ -423,3 +423,38 @@ fn clean_tool_schema(schema: &serde_json::Value) -> String {
         schema.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_mcp_client_parallel_multiplexing() {
+        // 创建一个把请求 id 原样回声的 mock shell 脚本
+        let mock_cmd = r#"while IFS= read -r line; do id=$(echo "$line" | grep -o '"id":[0-9]*' | cut -d: -f2); echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"echo\":$id}}"; done"#;
+        let config = PluginConfig {
+            name: "test-echo".to_string(),
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), mock_cmd.to_string()],
+            env: HashMap::new(),
+        };
+
+        let client = Arc::new(McpClient::spawn(config).expect("spawn mock"));
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let c = client.clone();
+            handles.push(tokio::spawn(async move {
+                let res = c.send_request("test_method", json!({ "req_idx": i })).await;
+                assert!(res.is_ok(), "Request {} failed: {:?}", i, res);
+                let val = res.unwrap();
+                assert!(val.get("echo").is_some(), "No echo for {}", i);
+            }));
+        }
+
+        for h in handles {
+            h.await.expect("join handle");
+        }
+    }
+}
+

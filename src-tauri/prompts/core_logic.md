@@ -64,7 +64,7 @@
 1. `ask_human` 与 `finish` **只能作为顶层单步调用，绝对禁止放入 parallel 或 plan_tree 中**。
 2. 计划树叶子节点必须具备完全确定性（Decision Complete），参数只能是常量或 `$node_id.path` 引用；禁止留有 TODO 或待定占位符。
 3. 并行分支之间不得互相依赖，且不得写入同一个文件或共享资源。
-4. **超时阶梯感知**：工具默认超时自动推断（名字含 `search` 为 15s，`fetch/http` 为 25s，`bash/shell` 为 60s，其余 30s）。对全库索引、长耗时扫描等较慢节点，必须在节点中显式指定 `"timeout_secs": 120`。
+4. **超时阶梯感知**：工具默认超时自动推断（名字含 `search` 为 15s，`fetch/http` 为 25s，`tree/arch/index/scan/bash` 为 60s，其余 30s）。对全库索引、长耗时扫描等较慢节点，必须在节点中显式指定 `"timeout_secs": 120`。大型项目结构探索优先使用 `list_directory` 单层查看，避免无限制深度全量递归。
 5. 修改文件前**必须先通过专用读取工具建立版本基线**；严禁在代码中写机器废话注释，严禁把代码注释作为思考草稿。
 
 ## 5. 图表与可视化交付硬红线 (Chart Delivery Baseline)
