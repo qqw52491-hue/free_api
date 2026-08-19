@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub const RUN_INTERRUPTED_ROUTE: &str = "run_interrupted";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
