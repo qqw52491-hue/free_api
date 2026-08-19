@@ -1,13 +1,20 @@
 # 复制为 plugins/remote-hub.local.yaml 后使用。
 # 该 local 文件已被 .gitignore 忽略；不要把真实 token 写进可提交的 YAML。
+
+# 🌟 推荐方式：原生 Rust HTTP 直连 (0 本地外部进程、0 uv 依赖、毫秒级响应)
 name: remote-hub
-command: uvx
-args:
-  - mcp-stdio
-  - https://mcp.wxhjy.dpdns.org/mcp
-  - --transport
-  - streamable-http
-env:
-  # 启动 free_api 前在桌面环境中设置：
-  # export FREE_API_REMOTE_MCP_TOKEN='你的 Bearer token'
-  MCP_BEARER_TOKEN: "${FREE_API_REMOTE_MCP_TOKEN}"
+url: "https://mcp.wxhjy.dpdns.org/mcp"
+headers:
+  Authorization: "Bearer ${FREE_API_REMOTE_MCP_TOKEN}"
+
+# 备用方式：本地 stdio 进程模式 (uvx / npx)
+# name: remote-hub
+# command: uvx
+# args:
+#   - mcp-stdio
+#   - https://mcp.wxhjy.dpdns.org/mcp
+#   - --transport
+#   - streamable-http
+# env:
+#   MCP_BEARER_TOKEN: "${FREE_API_REMOTE_MCP_TOKEN}"
+#   PYTHONUNBUFFERED: "1"

@@ -65,6 +65,31 @@ type RequestEnvelope = (
     oneshot::Sender<Result<serde_json::Value, String>>,
 );
 
+fn parse_mcp_response_text(raw_text: &str) -> Result<JsonRpcResponse, String> {
+    let trimmed = raw_text.trim();
+    if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
+        return Ok(resp);
+    }
+    // 处理 SSE 事件流格式: "data: { ... }"
+    for line in trimmed.lines() {
+        let line_trimmed = line.trim();
+        if let Some(data_content) = line_trimmed.strip_prefix("data:") {
+            let json_str = data_content.trim();
+            if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(json_str) {
+                return Ok(resp);
+            }
+        }
+    }
+    Err(format!(
+        "无法解析 MCP 响应内容: {}",
+        if trimmed.len() > 200 {
+            &trimmed[..200]
+        } else {
+            trimmed
+        }
+    ))
+}
+
 /// 🚀 双轨统一 MCP 客户端
 /// 支持 1) 本地 stdio 进程多路复用 (uvx / npx / node / python)
 ///      2) 原生 HTTP / SSE 直连 (0 环境依赖，无需 uv)
@@ -72,6 +97,7 @@ pub struct McpClient {
     pub config: PluginConfig,
     request_tx: Option<mpsc::Sender<RequestEnvelope>>,
     http_client: reqwest::Client,
+    session_id: Arc<RwLock<Option<String>>>,
     next_id: Arc<AtomicU64>,
     pub cached_tools: Arc<RwLock<Vec<McpToolDef>>>,
 }
@@ -91,6 +117,7 @@ impl McpClient {
                     config,
                     request_tx: None,
                     http_client,
+                    session_id: Arc::new(RwLock::new(None)),
                     next_id: Arc::new(AtomicU64::new(1)),
                     cached_tools: Arc::new(RwLock::new(Vec::new())),
                 });
@@ -216,6 +243,7 @@ impl McpClient {
             config,
             request_tx: Some(request_tx),
             http_client,
+            session_id: Arc::new(RwLock::new(None)),
             next_id: Arc::new(AtomicU64::new(1)),
             cached_tools: Arc::new(RwLock::new(Vec::new())),
         })
@@ -234,22 +262,44 @@ impl McpClient {
             params,
         };
 
-        // 🌟 模式 A: 原生 HTTP 直连发送 (0 外部进程)
+        // 🌟 模式 A: 原生 HTTP / SSE Streamable 直连发送 (0 外部进程)
         if let Some(ref url) = self.config.url {
-            let mut req_builder = self.http_client.post(url).json(&req);
+            let mut req_builder = self
+                .http_client
+                .post(url)
+                .header("Accept", "application/json, text/event-stream")
+                .json(&req);
+
             for (k, v) in &self.config.headers {
                 let val = resolve_env_value(v).unwrap_or_else(|_| v.clone());
                 req_builder = req_builder.header(k, val);
             }
+
+            if let Some(ref sid) = *self.session_id.read().await {
+                req_builder = req_builder.header("mcp-session-id", sid);
+            }
+
             let resp = match tokio::time::timeout(Duration::from_secs(60), req_builder.send()).await {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => return Err(format!("[MCP:{}] HTTP 请求失败: {}", self.config.name, e)),
                 Err(_) => return Err(format!("[MCP:{}] HTTP 请求超时 (60s 熔断)", self.config.name)),
             };
-            let json_resp = resp
-                .json::<JsonRpcResponse>()
+
+            if let Some(sid_header) = resp.headers().get("mcp-session-id") {
+                if let Ok(sid_str) = sid_header.to_str() {
+                    let mut guard = self.session_id.write().await;
+                    *guard = Some(sid_str.to_string());
+                }
+            }
+
+            let raw_body = resp
+                .text()
                 .await
-                .map_err(|e| format!("[MCP:{}] HTTP 响应解析失败: {}", self.config.name, e))?;
+                .map_err(|e| format!("[MCP:{}] 读取响应体失败: {}", self.config.name, e))?;
+
+            let json_resp = parse_mcp_response_text(&raw_body)
+                .map_err(|e| format!("[MCP:{}] {}", self.config.name, e))?;
+
             if let Some(err) = json_resp.error {
                 return Err(format!("[MCP:{}] RPC 错误: {}", self.config.name, err));
             }
