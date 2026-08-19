@@ -135,7 +135,10 @@ pub async fn run_call_llm_and_run_tool_phases(
             Err(e) => {
                 // 🛑 智能拦截不可重试的致命错误（401 Key失效、402 余额不足、403 权限不足、404 模型不存在等）
                 if crate::llm::is_non_retryable_error(&e) {
-                    let friendly_reason = if e.contains("401") || e.contains("invalid_api_key") || e.contains("Incorrect API key") {
+                    let friendly_reason = if e.contains("401")
+                        || e.contains("invalid_api_key")
+                        || e.contains("Incorrect API key")
+                    {
                         "🔑 API 认证失败：API Key 无效或已过期，请在设置中检查 API Key".to_string()
                     } else if e.contains("402") || e.contains("insufficient_quota") {
                         "💳 账户额度不足：API 账户余额已耗尽，请充值后重试".to_string()
@@ -420,14 +423,20 @@ pub async fn run_call_llm_and_run_tool_phases(
 
             // 【修复：重试时的工具盲区】如果 AI 尝试使用的工具尚未在历史流中，立即为其追加说明书，防止它在 retry 时因为看不到语法而继续瞎猜报错。
             let attempted_tool = inst.get_action();
-            let tool_key = attempted_tool.split('/').next().unwrap_or(&attempted_tool).to_string();
+            let tool_key = attempted_tool
+                .split('/')
+                .next()
+                .unwrap_or(&attempted_tool)
+                .to_string();
             if attempted_tool != "finish" && attempted_tool != "core" && !tool_key.is_empty() {
                 context.active_tool = Some(tool_key.clone());
                 if !context.fetched_tools.contains(&tool_key) {
                     let tool_filename = format!("{}.md", tool_key);
                     let resource_dir = app.path().resource_dir().unwrap_or_default();
-                    let tool_path_production = resource_dir.join("prompts/tools").join(&tool_filename);
-                    let tool_path_dev = std::path::PathBuf::from("prompts/tools").join(&tool_filename);
+                    let tool_path_production =
+                        resource_dir.join("prompts/tools").join(&tool_filename);
+                    let tool_path_dev =
+                        std::path::PathBuf::from("prompts/tools").join(&tool_filename);
 
                     let mut tool_detail = String::new();
                     if let Ok(tool_md) = std::fs::read_to_string(&tool_path_production)
@@ -460,7 +469,10 @@ pub async fn run_call_llm_and_run_tool_phases(
                             )),
                         });
                         context.fetched_tools.insert(tool_key.clone());
-                        println!("🔄 [重试修正] 为 AI 紧急追加了工具说明书至历史流: {}", tool_key);
+                        println!(
+                            "🔄 [重试修正] 为 AI 紧急追加了工具说明书至历史流: {}",
+                            tool_key
+                        );
                     }
                 }
             }

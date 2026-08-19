@@ -105,10 +105,18 @@
             </div>
 
             <div v-if="!sidebarCollapsed" class="sidebar-section tasks-section">
-                <div class="section-title"><span>Tasks</span><span class="list-control">☷</span></div>
+                <div class="section-title">
+                    <span>Tasks ({{ filteredTabs.length }})</span>
+                    <button v-if="taskSearchQuery" type="button" class="clear-search-btn" title="清空搜索" @click="taskSearchQuery = ''">✕</button>
+                    <span v-else class="list-control">☷</span>
+                </div>
+                <div v-if="tabs.length > 2 || taskSearchQuery" class="task-search-bar">
+                    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <input v-model="taskSearchQuery" type="text" placeholder="搜索历史任务..." class="task-search-input" />
+                </div>
                 <div class="task-list">
                     <div
-                        v-for="tab in tabs"
+                        v-for="tab in filteredTabs"
                         :key="tab.id"
                         class="task-row"
                         :class="{ active: currentNavView === 'agent' && activeTabId === tab.id }"
@@ -178,7 +186,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AgentPanel from "../components/AgentPanel.vue";
 import ApiManager from "./ApiManager.vue";
@@ -195,7 +203,14 @@ const renamingId = ref<string | null>(null);
 const renameText = ref("");
 const tabs = ref<TabInfo[]>([]);
 const activeTabId = ref("");
+const taskSearchQuery = ref("");
 const panelRefs = reactive<Record<string, any>>({});
+
+const filteredTabs = computed(() => {
+    const query = taskSearchQuery.value.trim().toLowerCase();
+    if (!query) return tabs.value;
+    return tabs.value.filter((tab) => tab.label.toLowerCase().includes(query) || tab.id.toLowerCase().includes(query));
+});
 
 function asTab(session: ChatSessionRow): TabInfo {
     return { id: session.id, label: session.title || "未命名对话", running: false };
@@ -626,6 +641,52 @@ onMounted(async () => {
     flex: 1;
     padding-top: 12px;
     overflow-y: auto;
+}
+
+.task-search-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 4px 8px;
+    padding: 4px 8px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    transition: all 0.15s ease;
+}
+.task-search-bar:focus-within {
+    border-color: rgba(99, 102, 241, 0.5);
+    background: rgba(255, 255, 255, 0.07);
+}
+.task-search-bar svg {
+    width: 12px;
+    height: 12px;
+    stroke: #71717a;
+    stroke-width: 2;
+    fill: none;
+    flex-shrink: 0;
+}
+.task-search-input {
+    width: 100%;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: #f4f4f5;
+    font-size: 11.5px;
+}
+.task-search-input::placeholder {
+    color: #71717a;
+}
+.clear-search-btn {
+    border: none;
+    background: transparent;
+    color: #71717a;
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 4px;
+}
+.clear-search-btn:hover {
+    color: #e4e4e7;
 }
 
 .task-list {

@@ -842,18 +842,18 @@ pub async fn create_session(
 #[tauri::command]
 pub async fn delete_session(state: State<'_, DbState>, id: String) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    // 任务数据区允许临时 session，因此由会话删除流程显式清理。
-    conn.execute(
-        "DELETE FROM agent_task_resources WHERE session_id=?1",
-        params![&id],
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM agent_checkpoints WHERE run_id=?1",
-        params![&id],
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM chat_sessions WHERE id=?1", params![id])
+    // 彻底级联清理该会话在所有 SQLite 业务表、大文本日志表与 FTS5 索引表中的历史数据
+    let _ = conn.execute("DELETE FROM agent_task_records WHERE session_id=?1", params![&id]);
+    let _ = conn.execute("DELETE FROM agent_task_resources WHERE session_id=?1", params![&id]);
+    let _ = conn.execute("DELETE FROM agent_checkpoints WHERE run_id=?1", params![&id]);
+    let _ = conn.execute("DELETE FROM agent_run_traces WHERE session_id=?1", params![&id]);
+    let _ = conn.execute("DELETE FROM agent_step_logs WHERE session_id=?1", params![&id]);
+    let _ = conn.execute("DELETE FROM agent_memory_nodes WHERE session_id=?1", params![&id]);
+    let _ = conn.execute("DELETE FROM agent_lesson_recalls WHERE session_id=?1", params![&id]);
+    let _ = conn.execute("DELETE FROM chat_messages WHERE session_id=?1", params![&id]);
+    let _ = conn.execute("DELETE FROM agent_step_logs_fts WHERE session_id=?1", params![&id]);
+    let _ = conn.execute("DELETE FROM agent_memory_nodes_fts WHERE session_id=?1", params![&id]);
+    conn.execute("DELETE FROM chat_sessions WHERE id=?1", params![&id])
         .map_err(|e| e.to_string())?;
     Ok(())
 }
