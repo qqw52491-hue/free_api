@@ -50,7 +50,7 @@
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                     </template>
                 </article>
-                <article v-else-if="entry.type === 'plan'" class="plan-node" :class="`status-${entry.status}`">
+                <article v-else-if="entry.type === 'plan'" class="plan-node" :class="[`status-${entry.status}`, { 'is-active-plan': entry.status === 'running' || entry.isThinking }]">
                     <div class="plan-row">
                         <span class="plan-mark"><i></i></span>
                         <span class="plan-title"><small>计划</small>{{ entry.title }}</span>
@@ -75,13 +75,13 @@
                             </div>
                         </article>
                         <article v-if="entry.isThinking" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
-                            <header><span class="child-mark"></span><b>思考</b><em>思考中</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
+                            <header><span class="thought-pulse-dot"><i></i></span><b>思考</b><em>思考中…</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
                             <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
                         </article>
                     </div>
                 </article>
                 <article v-else-if="entry.type === 'active-thought'" class="active-thought-stream root-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
-                    <header><span class="tree-mark"><i></i></span><b>思考</b><em>思考中</em><time>{{ formatClock(entry.timestamp) }}</time></header>
+                    <header><span class="thought-pulse-dot"><i></i></span><b>思考</b><em>思考中…</em><time>{{ formatClock(entry.timestamp) }}</time></header>
                     <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
                 </article>
                 <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
@@ -646,28 +646,31 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     transition: all 0.2s ease;
 }
 
-.status-running .plan-mark {
+.status-running .plan-mark,
+.is-active-plan .plan-mark {
     background: rgba(56, 189, 248, 0.15);
 }
-.status-running .plan-mark i {
+.status-running .plan-mark i,
+.is-active-plan .plan-mark i {
     background: #38bdf8;
     box-shadow: 0 0 8px rgba(56, 189, 248, 0.8);
     animation: work-pulse 1.2s ease-in-out infinite;
 }
-.status-running > .plan-row .row-status {
+.status-running > .plan-row .row-status,
+.is-active-plan > .plan-row .row-status {
     color: #38bdf8;
     font-weight: 600;
 }
 
-.status-succeeded .plan-mark {
+.status-succeeded:not(.is-active-plan) .plan-mark {
     background: rgba(85, 214, 162, 0.15);
 }
-.status-succeeded .plan-mark i {
+.status-succeeded:not(.is-active-plan) .plan-mark i {
     background: #55d6a2;
     animation: none;
     box-shadow: 0 0 4px rgba(85, 214, 162, 0.4);
 }
-.status-succeeded > .plan-row .row-status {
+.status-succeeded:not(.is-active-plan) > .plan-row .row-status {
     color: #55d6a2;
 }
 
@@ -930,8 +933,34 @@ button.root-row {
     margin: 2px 0 2px 6px;
     border-radius: 4px;
     cursor: pointer;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px dashed rgba(255, 255, 255, 0.08);
+    background: rgba(56, 189, 248, 0.03);
+    border: 1px dashed rgba(56, 189, 248, 0.35);
+    animation: thought-border-glow 2s ease-in-out infinite;
+}
+
+@keyframes thought-border-glow {
+    0%, 100% { border-color: rgba(56, 189, 248, 0.2); background: rgba(56, 189, 248, 0.02); }
+    50% { border-color: rgba(56, 189, 248, 0.55); background: rgba(56, 189, 248, 0.05); }
+}
+
+.thought-pulse-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: rgba(56, 189, 248, 0.16);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.thought-pulse-dot i {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #38bdf8;
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.9);
+    animation: work-pulse 1s ease-in-out infinite;
 }
 
 .active-thought-stream header {
@@ -944,7 +973,7 @@ button.root-row {
 }
 
 .active-thought-stream header b { color: var(--accent-light); }
-.active-thought-stream header em { color: #94949a; font-size: 10px; font-style: normal; margin-left: auto; }
+.active-thought-stream header em { color: #38bdf8; font-size: 10px; font-style: normal; margin-left: auto; font-weight: 600; }
 .active-thought-stream header time { color: #73737a; font-size: 10px; }
 
 .active-thought-content {

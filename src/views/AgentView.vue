@@ -148,6 +148,7 @@
                             :all-models="allModels"
                             @new-session="createNewTask"
                             @open-plugins="currentNavView = 'plugins'"
+                            @update:running="(val) => { tab.running = val; }"
                         />
                     </div>
                 </template>

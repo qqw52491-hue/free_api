@@ -157,12 +157,17 @@ const props = defineProps<{ panelId: string; allModels: AgentModelOption[] }>();
 const emit = defineEmits<{
     "new-session": [];
     "open-plugins": [];
+    "update:running": [running: boolean];
 }>();
 const settingsOpen = ref(false);
 const selectedSubpart = ref<"thought" | "tool" | null>(null);
 const selectedHumanEventId = ref<string | null>(null);
 const selectedActiveThought = ref(false);
 const session = useAgentSession(props.panelId);
+
+watch(session.isRunning, (val) => {
+    emit("update:running", val);
+}, { immediate: true });
 const selectedNarrativeId = computed(() => selectedActiveThought.value ? "active-thought" : selectedHumanEventId.value);
 const selectedHuman = computed(() => session.humanInterventions.value.find((item, index) => `human-${item.timestamp}-${index}` === selectedHumanEventId.value) || null);
 
