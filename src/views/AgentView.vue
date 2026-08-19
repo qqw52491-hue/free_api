@@ -232,11 +232,63 @@ async function loadAllModels() {
     }
 }
 
+function extractSmartTitle(text: string): string {
+    const trimmed = text.trim();
+    if (!trimmed) return "";
+    const clean = trimmed
+        .replace(/^[\{\[\"\'\s#\->`]+/, "")
+        .replace(/[\r\n]+/g, " ")
+        .trim();
+    if (clean.length <= 18) return clean;
+    return `${clean.slice(0, 16)}…`;
+}
+
+async function backfillSessionTitles(sessions: ChatSessionRow[]) {
+    for (const session of sessions) {
+        if (!session.title || session.title.startsWith("Agent 任务") || session.title.startsWith("未命名") || session.title.includes("#")) {
+            try {
+                // 1. 优先从 run_traces 获取历史首个任务目标
+                const traces = await invoke<any[]>("get_session_run_traces", { sessionId: session.id });
+                if (traces && traces.length > 0) {
+                    const firstGoal = traces[0]?.goal || "";
+                    if (firstGoal) {
+                        const smartTitle = extractSmartTitle(firstGoal);
+                        if (smartTitle && smartTitle !== session.title) {
+                            session.title = smartTitle;
+                            await invoke("rename_session", { id: session.id, title: smartTitle });
+                            const tab = tabs.value.find((t) => t.id === session.id);
+                            if (tab) tab.label = smartTitle;
+                            continue;
+                        }
+                    }
+                }
+                // 2. 备用从 messages 获取首条用户消息
+                const msgs = await invoke<any[]>("get_messages", { sessionId: session.id });
+                if (msgs && msgs.length > 0) {
+                    const userMsg = msgs.find((m) => m.role === "user");
+                    if (userMsg && userMsg.content) {
+                        const smartTitle = extractSmartTitle(userMsg.content);
+                        if (smartTitle && smartTitle !== session.title) {
+                            session.title = smartTitle;
+                            await invoke("rename_session", { id: session.id, title: smartTitle });
+                            const tab = tabs.value.find((t) => t.id === session.id);
+                            if (tab) tab.label = smartTitle;
+                        }
+                    }
+                }
+            } catch {
+                // 忽略单个读取错误
+            }
+        }
+    }
+}
+
 async function loadSessions() {
     const sessions = await invoke<ChatSessionRow[]>("get_sessions");
     tabs.value = sessions.map(asTab);
     if (!tabs.value.length) { await addTab(); return; }
     if (!tabs.value.some((tab) => tab.id === activeTabId.value)) activeTabId.value = tabs.value[0].id;
+    void backfillSessionTitles(sessions);
 }
 
 async function closeTab(id: string) {
