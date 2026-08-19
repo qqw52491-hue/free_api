@@ -591,11 +591,19 @@ export function useAgentSession(sessionId: string) {
                     ? "pending"
                     : "running";
 
-        // 原地查找或更新 step
-        const existingIdx = steps.value.findIndex(s => s.stepId === stepId);
-        if (existingIdx >= 0) {
-            const current = steps.value[existingIdx];
-            steps.value[existingIdx] = {
+        // 查找最新的匹配步骤：若前一个步骤已失败/成功，而新事件重新下发，保留历史错误尝试并追加新条目
+        let targetIdx = -1;
+        for (let i = steps.value.length - 1; i >= 0; i--) {
+            if (steps.value[i].stepId === stepId) {
+                targetIdx = i;
+                break;
+            }
+        }
+
+        const isPreviousCompleted = targetIdx >= 0 && (steps.value[targetIdx].status === "failed" || steps.value[targetIdx].status === "succeeded");
+        if (targetIdx >= 0 && (!isPreviousCompleted || status === "failed" || status === "succeeded")) {
+            const current = steps.value[targetIdx];
+            steps.value[targetIdx] = {
                 ...current,
                 tool: name || current.tool,
                 action: action || current.action,
@@ -609,7 +617,7 @@ export function useAgentSession(sessionId: string) {
             };
         } else {
             const newStep: AgentStepItem = {
-                id: `step-${stepId}`,
+                id: `step-${stepId}-${Date.now()}`,
                 stepId,
                 description: toText(payload.description) || `${name}: ${action}`,
                 planId: toText(payload.plan_id) || "plan-default",
@@ -790,9 +798,17 @@ export function useAgentSession(sessionId: string) {
             const thoughtText = toText(rawStep.thought);
             const reflection = toText(rawStep.reflection);
 
-            const existingIdx = steps.value.findIndex(s => s.stepId === stepId);
+            let lastIdx = -1;
+            for (let i = steps.value.length - 1; i >= 0; i--) {
+                if (steps.value[i].stepId === stepId) {
+                    lastIdx = i;
+                    break;
+                }
+            }
+            const isRetry = lastIdx >= 0 && (steps.value[lastIdx].status === "failed" || steps.value[lastIdx].status === "succeeded");
+
             const stepItem: AgentStepItem = {
-                id: `step-${stepId}`,
+                id: isRetry ? `step-${stepId}-attempt-${steps.value.length}` : `step-${stepId}`,
                 stepId,
                 description,
                 planId: toText(rawStep.plan_id) || "plan-default",
@@ -809,8 +825,8 @@ export function useAgentSession(sessionId: string) {
                 timestamp: Date.now(),
             };
 
-            if (existingIdx >= 0) {
-                steps.value[existingIdx] = { ...steps.value[existingIdx], ...stepItem };
+            if (lastIdx >= 0 && !isRetry) {
+                steps.value[lastIdx] = { ...steps.value[lastIdx], ...stepItem };
             } else {
                 steps.value.push(stepItem);
             }

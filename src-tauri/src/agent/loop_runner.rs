@@ -417,6 +417,19 @@ pub async fn run_call_llm_and_run_tool_phases(
                 },
             )?;
 
+            // 🌟 立即向前端广播步骤失败事件，确保错误尝试保留在时间线上供用户查看
+            app.emit(
+                &format!("agent-progress-{}", final_session_id),
+                json!({
+                    "type": "step_error",
+                    "step_id": step_id,
+                    "description": inst.description.clone(),
+                    "tool": inst.get_tool(),
+                    "output": error_detail,
+                }),
+            )
+            .ok();
+
             if let Ok(raw_json) = serde_json::to_string(&inst) {
                 context.add_assistant_raw_message(&raw_json);
             }
