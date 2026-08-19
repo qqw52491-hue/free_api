@@ -540,6 +540,14 @@ pub async fn run_agent_main_loop(
                     &run_trace_steps,
                     Some(&failure_completion),
                 );
+                let _ = app.emit(
+                    &format!("agent-progress-{}", final_session_id),
+                    json!({
+                        "type": "complete",
+                        "message": terminal_error,
+                        "success": false
+                    }),
+                );
                 return Err(error);
             }
         };

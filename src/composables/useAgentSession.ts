@@ -980,6 +980,9 @@ export function useAgentSession(sessionId: string) {
             setRunState("failed", message);
             appendLog(`[启动异常] ${message}`);
         } finally {
+            isRunning.value = false;
+            isThinking.value = false;
+            stopElapsedTimer();
             const queuedGoal = pendingReplacementGoal.value;
             await loadConversation();
             await loadRunTraces();

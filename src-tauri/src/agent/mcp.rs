@@ -80,14 +80,8 @@ fn parse_mcp_response_text(raw_text: &str) -> Result<JsonRpcResponse, String> {
             }
         }
     }
-    Err(format!(
-        "无法解析 MCP 响应内容: {}",
-        if trimmed.len() > 200 {
-            &trimmed[..200]
-        } else {
-            trimmed
-        }
-    ))
+    let preview: String = trimmed.chars().take(200).collect();
+    Err(format!("无法解析 MCP 响应内容: {}", preview))
 }
 
 /// 🚀 双轨统一 MCP 客户端
@@ -351,9 +345,9 @@ impl McpClient {
                 .await
                 .map_err(|e| format!("[MCP:{}] 读取响应体失败: {}", self.config.name, e))?;
 
+            let body_preview: String = raw_body.chars().take(120).collect();
             println!("📥 [MCP:{}] 收到 HTTP 响应 (Status {}): len={}, body_preview={}", 
-                self.config.name, resp_status, raw_body.len(), 
-                if raw_body.len() > 120 { &raw_body[..120] } else { &raw_body });
+                self.config.name, resp_status, raw_body.len(), body_preview);
 
             let json_resp = parse_mcp_response_text(&raw_body)
                 .map_err(|e| format!("[MCP:{}] {}", self.config.name, e))?;
