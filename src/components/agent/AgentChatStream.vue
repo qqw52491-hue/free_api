@@ -61,16 +61,25 @@
                         <article v-for="step in entry.steps" :key="step.id" class="goal-node" :class="`status-${step.status}`">
                             <button class="goal-row" :class="{ selected: step.id === selectedStepId }" type="button" @click="$emit('select-step', step.id)">
                                 <span class="tree-mark"><i></i></span>
+                                <span class="step-tool-emoji">{{ getToolIcon(step.tool, step.action).emoji }}</span>
                                 <span class="goal-label">{{ step.description || '执行步骤' }}<small v-if="step.modelTier" class="model-tier">{{ step.modelTier }}</small></span>
                                 <span class="row-status">{{ statusLabel(step.status) }}</span>
                                 <time>{{ formatClock(step.timestamp) }}</time>
                             </button>
                             <div class="node-children">
                                 <button v-if="step.thought" class="child-row thought-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'thought' }" type="button" @click="$emit('select-step-thought', step.id)">
-                                    <span class="child-mark"></span><b>思考</b><span>{{ shortText(step.thought, 110) }}</span><em>已分析</em>
+                                    <span class="child-mark"></span>
+                                    <span class="tool-tag thought-tag">🧠 思考</span>
+                                    <span>{{ shortText(step.thought, 110) }}</span>
+                                    <em>已分析</em>
                                 </button>
                                 <button class="child-row tool-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'tool' }" type="button" @click="$emit('select-step', step.id)">
-                                    <span class="child-mark"></span><b>{{ step.tool || '工具' }}</b><span>{{ shortText(step.action || step.explanation || '执行操作', 110) }}</span><em>{{ step.source }}</em>
+                                    <span class="child-mark"></span>
+                                    <span class="tool-tag" :style="{ color: getToolIcon(step.tool, step.action).color, background: `${getToolIcon(step.tool, step.action).color}18` }">
+                                        {{ getToolIcon(step.tool, step.action).emoji }} {{ step.tool || '工具' }}
+                                    </span>
+                                    <span>{{ shortText(step.action || step.explanation || '执行操作', 110) }}</span>
+                                    <em>{{ step.source }}</em>
                                 </button>
                             </div>
                         </article>
@@ -120,7 +129,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import type { AgentHumanForm, AgentStepItem, AgentToolStatus } from "./types";
-import { formatClock, shortText } from "./format";
+import { formatClock, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
 
@@ -898,6 +907,13 @@ button.root-row {
     color: #ffffff !important;
 }
 
+.step-tool-emoji {
+    font-size: 11.5px;
+    line-height: 1;
+    flex-shrink: 0;
+    margin-right: 1px;
+}
+
 .child-mark {
     width: 3px;
     height: 3px;
@@ -906,13 +922,27 @@ button.root-row {
     flex-shrink: 0;
 }
 
-.child-row b {
+.tool-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
     font-weight: 600;
-    color: #b4b4b9;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     flex-shrink: 0;
+    line-height: 1.35;
+    border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.child-row span:not(.child-mark) {
+.thought-tag {
+    color: #e879f9;
+    background: rgba(232, 121, 249, 0.12);
+    border-color: rgba(232, 121, 249, 0.2);
+}
+
+.child-row span:not(.child-mark):not(.tool-tag) {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

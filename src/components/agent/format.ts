@@ -157,3 +157,66 @@ export function renderMarkdown(content: string): string {
         return content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
     }
 }
+
+export function getToolIcon(tool?: string, action?: string): { emoji: string; color: string } {
+    const t = (tool || "").toLowerCase();
+    const a = (action || "").toLowerCase();
+
+    // 1. 网络与网页
+    if (t.includes("web_search") || t.includes("bing") || t.includes("google") || t.includes("duckduckgo")) {
+        return { emoji: "🌐", color: "#38bdf8" };
+    }
+    if (t.includes("web_fetch") || t.includes("fetch") || t.includes("http") || t.includes("download") || t.includes("curl") || a.includes("fetch")) {
+        return { emoji: "🌍", color: "#60a5fa" };
+    }
+
+    // 2. 终端命令与脚本
+    if (t.includes("bash") || t.includes("shell") || t.includes("exec") || t.includes("cmd") || t.includes("terminal") || a.includes("exec")) {
+        return { emoji: "⚡", color: "#facc15" };
+    }
+
+    // 3. 文件读写与代码
+    if (t.includes("read_file") || t.includes("read_text") || t.includes("get_code") || a.includes("read")) {
+        return { emoji: "📖", color: "#a78bfa" };
+    }
+    if (t.includes("write_file") || t.includes("edit_file") || t.includes("create_file") || t.includes("modify") || a.includes("write")) {
+        return { emoji: "📝", color: "#f472b6" };
+    }
+    if (t.includes("search") || t.includes("ripgrep") || t.includes("grep") || t.includes("find") || a.includes("search")) {
+        return { emoji: "🔍", color: "#fbbf24" };
+    }
+    if (t.includes("directory") || t.includes("tree") || t.includes("list_files") || t.includes("filesystem") || a.includes("list")) {
+        return { emoji: "📁", color: "#fb923c" };
+    }
+
+    // 4. 表格、Excel 与图表
+    if (t.includes("excel") || t.includes("workbook") || t.includes("sheet") || t.includes("chart") || a.includes("excel") || a.includes("chart")) {
+        return { emoji: "📊", color: "#34d399" };
+    }
+
+    // 5. 数据集与数据库
+    if (t.includes("task_store") || t.includes("sqlite") || t.includes("sql") || t.includes("db") || t.includes("database") || t.includes("get_step_output")) {
+        return { emoji: "💾", color: "#2dd4bf" };
+    }
+
+    // 6. 人工干预与终态
+    if (t.includes("ask_human") || t.includes("human") || t.includes("confirm")) {
+        return { emoji: "👤", color: "#c084fc" };
+    }
+    if (t.includes("finish") || t.includes("done") || t.includes("deliver")) {
+        return { emoji: "🎉", color: "#4ade80" };
+    }
+
+    // 7. 思考分析
+    if (t.includes("thought") || t.includes("think") || t.includes("reason") || t.includes("arch")) {
+        return { emoji: "🧠", color: "#e879f9" };
+    }
+
+    // 8. 默认 MCP 外部插件
+    if (t.includes("/")) {
+        return { emoji: "🧩", color: "#818cf8" };
+    }
+
+    return { emoji: "🔧", color: "#94a3b8" };
+}
+
