@@ -256,7 +256,7 @@ fn execute_command_inner(
     tool: &str,
     action: &str,
     params: &serde_json::Value,
-    registry: &mut PluginRegistry,
+    registry: &PluginRegistry,
 ) -> DispatchResult {
     // 1. 核心原生工具 A: get_step_output (精准取回截断历史原文)
     if tool.eq_ignore_ascii_case("get_step_output") {
@@ -291,9 +291,9 @@ fn execute_command_inner(
         (tool.to_string(), action.to_string())
     };
 
-    if let Some(plugin) = registry.get_mut(&plugin_name) {
+    if let Some(plugin) = registry.get(&plugin_name) {
         println!("执行动作调用外部插件: {}/{}", plugin_name, tool_name);
-        match plugin.call_tool(&tool_name, params.clone()) {
+        match futures::executor::block_on(plugin.call_tool(&tool_name, params.clone())) {
             Ok(out) => {
                 let is_error = out
                     .get("isError")
@@ -351,17 +351,16 @@ fn run_plan_tree_sync(
     db: &DbState,
     session_id: &str,
     plan_node: &crate::agent::plan_tree::PlanNode,
-    registry: &mut PluginRegistry,
+    registry: &PluginRegistry,
 ) -> DispatchResult {
-    let registry_mutex = Arc::new(tokio::sync::Mutex::new(std::mem::take(registry)));
     let db_clone = db.clone();
     let sid = session_id.to_string();
-    let reg_for_invoker = registry_mutex.clone();
+    let reg_clone = registry.clone();
 
     let invoker: crate::agent::plan_tree::ToolInvoker = Arc::new(move |tool, args| {
         let db_c = db_clone.clone();
         let sid_c = sid.clone();
-        let reg_arc = reg_for_invoker.clone();
+        let reg_c = reg_clone.clone();
 
         Box::pin(async move {
             let action = args
@@ -369,8 +368,7 @@ fn run_plan_tree_sync(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut reg_guard = reg_arc.lock().await;
-            let res = execute_command_inner(&db_c, &sid_c, &tool, &action, &args, &mut reg_guard);
+            let res = execute_command_inner(&db_c, &sid_c, &tool, &action, &args, &reg_c);
             if res.success {
                 let parsed_val: serde_json::Value = serde_json::from_str(&res.stdout)
                     .unwrap_or_else(|_| serde_json::json!({ "output": res.stdout }));
@@ -388,10 +386,6 @@ fn run_plan_tree_sync(
     let report = futures::executor::block_on(crate::agent::plan_tree::execute_plan_tree(
         plan_node, invoker, None,
     ));
-
-    // 把 registry 放回
-    let mut reg_guard = futures::executor::block_on(registry_mutex.lock());
-    *registry = std::mem::take(&mut *reg_guard);
 
     let success = report.success;
     let feedback = report.to_llm_feedback();
@@ -419,7 +413,7 @@ pub fn run_agent_step(
     db: &DbState,
     session_id: &str,
     instruction: &AgentInstruction,
-    registry: &mut PluginRegistry,
+    registry: &PluginRegistry,
 ) -> DispatchResult {
     let tool_name = instruction.get_tool().to_lowercase();
     if is_finish_instruction(instruction) {
@@ -572,9 +566,11 @@ pub async fn dispatch_agent_step(
     let sid = session_id.unwrap_or_else(|| "default".to_string());
 
     let result = tokio::task::spawn_blocking(move || {
-        // 在阻塞线程内部加锁
-        let mut registry = futures::executor::block_on(registry_arc.lock());
-        run_agent_step(&db, &sid, &instruction, &mut registry)
+        let registry = {
+            let guard = futures::executor::block_on(registry_arc.lock());
+            (*guard).clone()
+        };
+        run_agent_step(&db, &sid, &instruction, &registry)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -668,17 +664,9 @@ pub async fn run_agent_main_loop(
                     }
                 }
             }
-        } else {
-            // 后续任务：跳过 YAML 重建，仅对已有客户端做存活检查（不重新 spawn）
-            let yaml_names: Vec<String> = registry.clients.keys().cloned().collect();
-            for name in yaml_names {
-                if let Some(client) = registry.clients.get_mut(&name) {
-                    let _ = client.ensure_alive();
-                }
-            }
         }
 
-        // DB 管理插件：每次增量同步（新增 → spawn，禁用 → 移除，已有 → 仅保活）
+        // DB 管理插件：每次增量同步（新增 → spawn，禁用 → 移除，已有保留）
         let managed_plugins = crate::commands::load_managed_mcp_plugins(state.inner())?;
         for managed in managed_plugins {
             let name = managed.config.name.clone();
@@ -688,19 +676,21 @@ pub async fn run_agent_main_loop(
                 }
                 continue;
             }
-            if registry.clients.contains_key(&name) {
-                // 已存在 → 仅做存活检查，不重建
-                if let Some(client) = registry.clients.get_mut(&name) {
-                    let _ = client.ensure_alive();
-                }
-            } else {
-                // 新增插件 → spawn + 握手 + 查工具
+            if !registry.clients.contains_key(&name) {
+                // 新增插件 → spawn
                 match McpClient::spawn(managed.config) {
-                    Ok(mut client) => {
-                        let _ = client.initialize();
-                        let tool_count = client.list_tools().map(|t| t.len()).unwrap_or(0);
-                        println!("🔌 挂载新 DB 插件: {} ({} 个工具)", name, tool_count);
-                        registry.clients.insert(name, client);
+                    Ok(client) => {
+                        let client_arc = Arc::new(client);
+                        let c = client_arc.clone();
+                        let n = name.clone();
+                        tokio::spawn(async move {
+                            let _ = c.initialize().await;
+                            if let Ok(tools) = c.list_tools().await {
+                                println!("🔌 DB 插件就绪: {} ({} 个工具)", n, tools.len());
+                            }
+                        });
+                        println!("🔌 挂载新 DB 插件: {}", name);
+                        registry.clients.insert(name, client_arc);
                     }
                     Err(error) => eprintln!("❌ DB 插件启动失败 [{}]: {}", name, error),
                 }
@@ -787,7 +777,7 @@ pub async fn run_agent_main_loop(
     });
     // 5. 查询所有 MCP Server 的工具列表，追加到菜单里
     let mcp_tools_menu = {
-        let mut registry = registry_state.lock().await;
+        let registry = registry_state.lock().await;
         registry.format_tools_menu()
     };
 
@@ -1184,7 +1174,7 @@ pub async fn run_agent_main_loop(
                     {
                         tool_detail = skill_md;
                     } else {
-                        let mut registry = registry_state.lock().await;
+                        let registry = registry_state.lock().await;
                         if registry.plugin_names().contains(&tool_key.as_str()) {
                             tool_detail = registry.format_tool_detail(&tool_key);
                         }
@@ -1882,7 +1872,7 @@ async fn run_call_llm_and_run_tool_phases(
                     } else {
                         // 尝试从 MCP 插件中获取
                         let detail = {
-                            let mut registry =
+                            let registry =
                                 futures::executor::block_on(registry_state.inner().lock());
                             if registry.plugin_names().contains(&tool_key.as_str()) {
                                 registry.format_tool_detail(&tool_key)
@@ -2122,9 +2112,12 @@ async fn run_tool_phase(
         let db = state.inner().clone();
         let sid = final_session_id.clone();
         tokio::task::spawn_blocking(move || {
-            let mut registry = futures::executor::block_on(registry_arc.lock());
+            let registry = {
+                let guard = futures::executor::block_on(registry_arc.lock());
+                (*guard).clone()
+            };
             println!("执行动作: {:?}", inst_c);
-            run_agent_step(&db, &sid, &inst_c, &mut registry)
+            run_agent_step(&db, &sid, &inst_c, &registry)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -2188,9 +2181,9 @@ mod finish_instruction_tests {
         let db = crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(
             rusqlite::Connection::open_in_memory().unwrap(),
         )));
-        let mut registry = PluginRegistry::new();
+        let registry = PluginRegistry::new();
 
-        let result = run_agent_step(&db, "finish-regression", &instruction, &mut registry);
+        let result = run_agent_step(&db, "finish-regression", &instruction, &registry);
         assert!(result.success);
         assert_eq!(result.route, "finish");
         assert_eq!(result.stdout, "Excel 已创建");

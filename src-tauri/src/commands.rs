@@ -373,9 +373,9 @@ pub async fn refresh_mcp_plugin_connection(
 ) -> Result<McpCatalogStatus, String> {
     let config = enabled_mcp_config(state.inner(), &name)?;
     invalidate_plugin(&name);
-    let mut client = McpClient::spawn(config.clone())?;
-    client.initialize()?;
-    let tools = client.list_tools()?;
+    let client = McpClient::spawn(config.clone())?;
+    client.initialize().await?;
+    let tools = client.list_tools().await?;
     remember_tools(&config, &tools);
     Ok(McpCatalogStatus {
         name,

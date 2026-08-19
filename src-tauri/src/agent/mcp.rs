@@ -1,7 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::collections::HashMap;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginConfig {
@@ -9,7 +15,7 @@ pub struct PluginConfig {
     pub command: String,
     pub args: Vec<String>,
     #[serde(default)]
-    pub env: std::collections::HashMap<String, String>,
+    pub env: HashMap<String, String>,
 }
 
 /// 允许插件 YAML 使用 `${ENV_VAR}` 引用桌面进程环境中的密钥，
@@ -35,7 +41,6 @@ struct JsonRpcRequest {
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
-    #[allow(dead_code)]
     pub id: Option<serde_json::Value>,
     pub result: Option<serde_json::Value>,
     pub error: Option<serde_json::Value>,
@@ -49,17 +54,23 @@ pub struct McpToolDef {
     pub schema: serde_json::Value,
 }
 
+type RequestEnvelope = (
+    JsonRpcRequest,
+    oneshot::Sender<Result<serde_json::Value, String>>,
+);
+
+/// 🚀 基于 Tokio 的真异步多路复用 MCP 客户端
+/// 支持多 Agent 并发调用、单请求 ID 异步派发与 30s 熔断保护
 pub struct McpClient {
     pub config: PluginConfig,
-    _child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    next_id: u64,
+    request_tx: mpsc::Sender<RequestEnvelope>,
+    next_id: Arc<AtomicU64>,
+    pub cached_tools: Arc<RwLock<Vec<McpToolDef>>>,
 }
 
 impl McpClient {
     pub fn spawn(config: PluginConfig) -> Result<Self, String> {
-        let mut cmd = std::process::Command::new(&config.command);
+        let mut cmd = Command::new(&config.command);
         cmd.args(&config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -76,102 +87,160 @@ impl McpClient {
             .stdin
             .take()
             .ok_or_else(|| format!("[MCP:{}] 无法获取 stdin", config.name))?;
-        let stdout_raw = child
+        let stdout = child
             .stdout
             .take()
             .ok_or_else(|| format!("[MCP:{}] 无法获取 stdout", config.name))?;
 
+        let (request_tx, mut request_rx) = mpsc::channel::<RequestEnvelope>(64);
+        let plugin_name = config.name.clone();
+
+        // 启动后台多路复用协调任务 (Actor)
+        tokio::spawn(async move {
+            let mut async_stdin = stdin;
+            let mut async_stdout = BufReader::new(stdout);
+            let mut line_buf = String::new();
+            let mut pending: HashMap<
+                u64,
+                oneshot::Sender<Result<serde_json::Value, String>>,
+            > = HashMap::new();
+
+            loop {
+                tokio::select! {
+                    // 1. 发送端消息入队并原子写入子进程 stdin
+                    req_opt = request_rx.recv() => {
+                        match req_opt {
+                            Some((req, resp_tx)) => {
+                                let id = req.id;
+                                pending.insert(id, resp_tx);
+                                match serde_json::to_vec(&req) {
+                                    Ok(mut json_bytes) => {
+                                        json_bytes.push(b'\n');
+                                        if let Err(e) = async_stdin.write_all(&json_bytes).await {
+                                            if let Some(tx) = pending.remove(&id) {
+                                                let _ = tx.send(Err(format!("[MCP:{}] stdin 写入失败: {}", plugin_name, e)));
+                                            }
+                                        }
+                                        let _ = async_stdin.flush().await;
+                                    }
+                                    Err(e) => {
+                                        if let Some(tx) = pending.remove(&id) {
+                                            let _ = tx.send(Err(format!("[MCP:{}] JSON 序列化失败: {}", plugin_name, e)));
+                                        }
+                                    }
+                                }
+                            }
+                            None => break, // 所有发送端被 drop，正常退出
+                        }
+                    }
+                    // 2. 接收端按行解析并按 id 多路派发响应
+                    read_res = async_stdout.read_line(&mut line_buf) => {
+                        match read_res {
+                            Ok(0) => {
+                                println!("[MCP:{}] 子进程输出流已关闭 (EOF)", plugin_name);
+                                break;
+                            }
+                            Ok(_) => {
+                                let trimmed = line_buf.trim();
+                                if !trimmed.is_empty() {
+                                    if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
+                                        let resp_id = match resp.id {
+                                            Some(serde_json::Value::Number(n)) => n.as_u64(),
+                                            Some(serde_json::Value::String(s)) => s.parse::<u64>().ok(),
+                                            _ => None,
+                                        };
+                                        if let Some(id) = resp_id {
+                                            if let Some(tx) = pending.remove(&id) {
+                                                if let Some(err) = resp.error {
+                                                    let _ = tx.send(Err(format!("[MCP:{}] RPC 错误: {}", plugin_name, err)));
+                                                } else {
+                                                    let _ = tx.send(Ok(resp.result.unwrap_or(serde_json::Value::Null)));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                line_buf.clear();
+                            }
+                            Err(e) => {
+                                eprintln!("[MCP:{}] 读取 stdout 出错: {}", plugin_name, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 子进程退出时，唤醒所有滞留的 pending 请求
+            for (_, tx) in pending.drain() {
+                let _ = tx.send(Err(format!("[MCP:{}] 插件进程已退出/断开", plugin_name)));
+            }
+            let _ = child.kill().await;
+        });
+
         Ok(Self {
             config,
-            _child: child,
-            stdin,
-            stdout: BufReader::new(stdout_raw),
-            next_id: 1,
+            request_tx,
+            next_id: Arc::new(AtomicU64::new(1)),
+            cached_tools: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
-    pub fn send_request(
-        &mut self,
+    pub async fn send_request(
+        &self,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (resp_tx, resp_rx) = oneshot::channel();
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
-            id: self.next_id,
+            id,
             method: method.to_string(),
             params,
         };
-        self.next_id += 1;
-        let req_str = serde_json::to_string(&req)
-            .map_err(|e| format!("[MCP:{}] 序列化失败: {}", self.config.name, e))?;
-        writeln!(self.stdin, "{}", req_str)
-            .map_err(|e| format!("[MCP:{}] 写入失败: {}", self.config.name, e))?;
-        self.stdin
-            .flush()
-            .map_err(|e| format!("[MCP:{}] flush 失败: {}", self.config.name, e))?;
 
-        let mut line = String::new();
-        self.stdout
-            .read_line(&mut line)
-            .map_err(|e| format!("[MCP:{}] 读取失败: {}", self.config.name, e))?;
-        let resp: JsonRpcResponse = serde_json::from_str(line.trim())
-            .map_err(|e| format!("[MCP:{}] 反序列化失败: {}", self.config.name, e))?;
-        if let Some(err) = resp.error {
-            return Err(format!("[MCP:{}] RPC 错误: {}", self.config.name, err));
+        self.request_tx
+            .send((req, resp_tx))
+            .await
+            .map_err(|_| format!("[MCP:{}] 插件后台通信通道已断开", self.config.name))?;
+
+        // 默认 30s 超时熔断保护，防止任何 MCP 子进程无限期挂起主线程
+        match tokio::time::timeout(Duration::from_secs(30), resp_rx).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(_)) => Err(format!("[MCP:{}] 响应通道在接收前断开", self.config.name)),
+            Err(_) => Err(format!("[MCP:{}] 请求超时 (30s 熔断)", self.config.name)),
         }
-        Ok(resp.result.unwrap_or(serde_json::Value::Null))
     }
 
-    pub fn call_tool(
-        &mut self,
+    pub async fn call_tool(
+        &self,
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        self.ensure_alive()?;
         self.send_request(
             "tools/call",
             json!({ "name": tool_name, "arguments": arguments }),
         )
+        .await
     }
 
-    /// 检查并确保子进程存活，如果已退出则尝试重启
-    pub fn ensure_alive(&mut self) -> Result<(), String> {
-        let needs_restart = match self._child.try_wait() {
-            Ok(Some(_)) => true,
-            Ok(None) => false,
-            Err(_) => true,
-        };
-        if needs_restart {
-            println!("[MCP:{}] 进程已退出，正在重启...", self.config.name);
-            let new_client = Self::spawn(self.config.clone())?;
-            self._child = new_client._child;
-            self.stdin = new_client.stdin;
-            self.stdout = new_client.stdout;
-            crate::agent::mcp_catalog::invalidate_plugin(&self.config.name);
-            let _ = self.initialize();
-        }
+    pub async fn initialize(&self) -> Result<(), String> {
+        let _ = self
+            .send_request(
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "clientInfo": { "name": "free-api-agent", "version": "0.1.0" }
+                }),
+            )
+            .await;
         Ok(())
     }
 
-    /// MCP 握手（有些 Server 强依赖这一步）
-    pub fn initialize(&mut self) -> Result<(), String> {
-        let result = self.send_request(
-            "initialize",
-            json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": { "tools": {} },
-                "clientInfo": { "name": "free-api-agent", "version": "0.1.0" }
-            }),
-        );
-        // 握手可能有的 server 不需要，所以忽略错误
-        let _ = result;
-        Ok(())
-    }
-
-    /// 查询 MCP Server 提供的所有工具（说明书）
-    pub fn list_tools(&mut self) -> Result<Vec<McpToolDef>, String> {
-        self.ensure_alive()?;
-        let result = self.send_request("tools/list", json!({}))?;
+    pub async fn list_tools(&self) -> Result<Vec<McpToolDef>, String> {
+        let result = self.send_request("tools/list", json!({})).await?;
         let tools = result
             .get("tools")
             .and_then(|v| v.as_array())
@@ -194,20 +263,21 @@ impl McpClient {
                 })
             })
             .collect();
+        *self.cached_tools.write().await = defs.clone();
         crate::agent::mcp_catalog::remember_tools(&self.config, &defs);
         Ok(defs)
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PluginRegistry {
-    pub clients: std::collections::HashMap<String, McpClient>,
+    pub clients: HashMap<String, Arc<McpClient>>,
 }
 
 impl PluginRegistry {
     pub fn new() -> Self {
         Self {
-            clients: std::collections::HashMap::new(),
+            clients: HashMap::new(),
         }
     }
 
@@ -232,12 +302,18 @@ impl PluginRegistry {
                 }
             };
             let name = config.name.clone();
-            if let Ok(mut client) = McpClient::spawn(config) {
-                // 加载时顺便握手并查询一次工具，确保存活
-                let _ = client.initialize();
-                let tool_count = client.list_tools().map(|t| t.len()).unwrap_or(0);
-                println!("🚀 插件加载成功: {} (共 {} 个工具)", name, tool_count);
-                registry.clients.insert(name, client);
+            if let Ok(client) = McpClient::spawn(config) {
+                let client_arc = Arc::new(client);
+                // 异步握手与工具探测
+                let c = client_arc.clone();
+                let n = name.clone();
+                tokio::spawn(async move {
+                    let _ = c.initialize().await;
+                    if let Ok(tools) = c.list_tools().await {
+                        println!("🚀 插件就绪: {} (共 {} 个工具)", n, tools.len());
+                    }
+                });
+                registry.clients.insert(name, client_arc);
             } else {
                 println!("❌ 插件启动失败: {}", name);
             }
@@ -245,19 +321,18 @@ impl PluginRegistry {
         registry
     }
 
-    pub fn get_mut(&mut self, name: &str) -> Option<&mut McpClient> {
-        self.clients.get_mut(name)
+    pub fn get(&self, name: &str) -> Option<Arc<McpClient>> {
+        self.clients.get(name).cloned()
     }
+
     pub fn plugin_names(&self) -> Vec<&str> {
         self.clients.keys().map(String::as_str).collect()
     }
 
-    /// 查询所有已加载的 MCP Server 的工具列表
-    pub fn list_all_tools(&mut self) -> Vec<(String, McpToolDef)> {
+    pub fn list_all_tools(&self) -> Vec<(String, McpToolDef)> {
         let mut result = Vec::new();
-        for (plugin_name, client) in &mut self.clients {
+        for (plugin_name, client) in &self.clients {
             let tools = crate::agent::mcp_catalog::cached_tools(&client.config)
-                .or_else(|| client.list_tools().ok())
                 .unwrap_or_default();
             for tool in tools {
                 result.push((plugin_name.clone(), tool));
@@ -266,35 +341,29 @@ impl PluginRegistry {
         result
     }
 
-    /// 【黄金平衡版】工具映射索引 (极简 Token，明确能力)
-    pub fn format_tools_menu(&mut self) -> String {
+    /// 【黄金平衡版】工具映射索引 (极简 Token，明确能力，只读无锁零等待)
+    pub fn format_tools_menu(&self) -> String {
         let mut lines: Vec<String> = Vec::new();
-        lines
-            .push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\")".to_string());
+        lines.push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\")".to_string());
 
         let mut catalogs = Vec::new();
-        for (name, client) in &mut self.clients {
+        for (name, client) in &self.clients {
             let tools = crate::agent::mcp_catalog::cached_tools(&client.config)
-                .or_else(|| client.list_tools().ok())
                 .unwrap_or_default();
             catalogs.push((name.clone(), tools));
         }
         lines.extend(
             crate::agent::mcp_catalog::concise_menu(catalogs)
-                .trim_start_matches(
-                    "\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）",
-                )
+                .trim_start_matches("\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）")
                 .lines()
                 .map(str::to_string),
         );
 
-        lines
-            .push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}".to_string());
+        lines.push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}".to_string());
         lines.join("\n")
     }
 
-    /// 核心参数规格（按需加载，支持按插件全量加载或按单个工具精准加载，并压缩冗余 Schema 元数据）
-    pub fn format_tool_detail(&mut self, requested_name: &str) -> String {
+    pub fn format_tool_detail(&self, requested_name: &str) -> String {
         let all = self.list_all_tools();
         let (target_plugin, target_tool) = if requested_name.contains('/') {
             let parts: Vec<&str> = requested_name.split('/').collect();
