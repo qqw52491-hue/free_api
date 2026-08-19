@@ -167,25 +167,6 @@ const selectedHumanEventId = ref<string | null>(null);
 const selectedActiveThought = ref(false);
 const session = useAgentSession(props.panelId);
 
-function extractSmartTitle(text: string): string {
-    const trimmed = text.trim();
-    if (!trimmed) return "";
-    const clean = trimmed
-        .replace(/^[\{\[\"\'\s#\->`]+/, "")
-        .replace(/^(你好[呀啊吗~！!，,]*|请问[一下]*|请帮我[一下]*|帮我[一下]*|我想[要]*|请[您]*)+/i, "")
-        .replace(/[\r\n]+/g, " ")
-        .trim();
-    if (!clean) return trimmed.slice(0, 18);
-    if (clean.length <= 20) return clean;
-    return `${clean.slice(0, 19)}…`;
-}
-
-watch(session.currentGoal, (newGoal) => {
-    if (newGoal && newGoal.trim()) {
-        const title = extractSmartTitle(newGoal);
-        if (title) emit("update:title", title);
-    }
-}, { immediate: true });
 
 watch(session.sessionTitle, (newTitle) => {
     if (newTitle && newTitle.trim()) {

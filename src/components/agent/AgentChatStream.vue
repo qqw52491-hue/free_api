@@ -250,7 +250,7 @@ function planEntries(steps: AgentStepItem[], prefix: string, active = false): Pl
         groups.set(key, existing);
     }
     const plans = [...groups.values()].map((plan) => ({ ...plan, status: planStatus(plan.steps) }));
-    if (active || Boolean(props.thought)) {
+    if (active && (props.isThinking || Boolean(props.thought))) {
         const last = plans[plans.length - 1];
         if (last && (props.isThinking || !last.steps.some(s => s.thought))) {
             last.isThinking = true;

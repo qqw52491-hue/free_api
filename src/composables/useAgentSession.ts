@@ -817,6 +817,9 @@ export function useAgentSession(sessionId: string) {
             if (!selectedStepId.value) {
                 selectedStepId.value = stepItem.id;
             }
+            if (!sessionTitle.value && stepItem.planTitle && stepItem.planTitle !== "执行任务" && stepItem.planTitle !== "分析项目环境") {
+                sessionTitle.value = stepItem.planTitle;
+            }
             if (tool !== "finish") {
                 streamingSummary.value = "";
             }
