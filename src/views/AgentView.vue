@@ -591,15 +591,22 @@ onMounted(async () => {
 }
 
 .task-state {
-    width: 6px;
-    height: 6px;
+    width: 7px;
+    height: 7px;
     flex: 0 0 auto;
     border-radius: 50%;
     background: #52525b;
+    transition: all 0.2s ease;
 }
 .task-state.running {
-    background: var(--orange);
-    box-shadow: 0 0 0 2px rgba(255, 164, 61, 0.2);
+    background: #38bdf8;
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.8);
+    animation: task-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes task-pulse {
+    0%, 100% { transform: scale(0.85); opacity: 0.6; }
+    50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 10px rgba(56, 189, 248, 1); }
 }
 
 .task-label {

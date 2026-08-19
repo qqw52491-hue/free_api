@@ -635,13 +635,51 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     justify-content: center;
     font-size: 9px;
     flex-shrink: 0;
+    transition: all 0.2s ease;
 }
 
 .plan-mark i {
-    width: 4px;
-    height: 4px;
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
     background: #a1a1aa;
+    transition: all 0.2s ease;
+}
+
+.status-running .plan-mark {
+    background: rgba(56, 189, 248, 0.15);
+}
+.status-running .plan-mark i {
+    background: #38bdf8;
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.8);
+    animation: work-pulse 1.2s ease-in-out infinite;
+}
+.status-running > .plan-row .row-status {
+    color: #38bdf8;
+    font-weight: 600;
+}
+
+.status-succeeded .plan-mark {
+    background: rgba(85, 214, 162, 0.15);
+}
+.status-succeeded .plan-mark i {
+    background: #55d6a2;
+    animation: none;
+    box-shadow: 0 0 4px rgba(85, 214, 162, 0.4);
+}
+.status-succeeded > .plan-row .row-status {
+    color: #55d6a2;
+}
+
+.status-failed .plan-mark {
+    background: rgba(248, 113, 113, 0.15);
+}
+.status-failed .plan-mark i {
+    background: #f87171;
+    animation: none;
+}
+.status-failed > .plan-row .row-status {
+    color: #f87171;
 }
 
 .plan-title {
@@ -724,26 +762,76 @@ button.root-row {
 }
 
 .tree-mark {
-    width: 12px;
-    height: 12px;
+    width: 14px;
+    height: 14px;
     border-radius: 50%;
     background: rgba(255, 255, 255, 0.06);
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    transition: all 0.2s ease;
 }
 
 .tree-mark i {
-    width: 4px;
-    height: 4px;
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
     background: #a1a1aa;
+    transition: all 0.2s ease;
 }
 
-.status-succeeded .tree-mark i { background: #55d6a2; }
-.status-running .tree-mark i { background: var(--orange); animation: work-pulse 1s ease-in-out infinite; }
-.status-failed .tree-mark i { background: var(--red-light); }
+/* 🌟 执行完成：稳稳常亮绿色，静止不闪 */
+.status-succeeded .tree-mark {
+    background: rgba(85, 214, 162, 0.12);
+}
+.status-succeeded .tree-mark i {
+    background: #55d6a2;
+    animation: none;
+    box-shadow: 0 0 4px rgba(85, 214, 162, 0.5);
+}
+.status-succeeded .row-status {
+    color: #55d6a2;
+}
+
+/* 🌟 正在执行：单独高亮呼吸闪烁，并带光环 */
+.status-running .tree-mark {
+    background: rgba(56, 189, 248, 0.16);
+}
+.status-running .tree-mark i {
+    background: #38bdf8;
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.9);
+    animation: work-pulse 1.2s ease-in-out infinite;
+}
+.status-running .row-status {
+    color: #38bdf8;
+    font-weight: 600;
+}
+.status-running .goal-label {
+    color: #f4f4f5;
+}
+
+/* 🌟 失败状态 */
+.status-failed .tree-mark {
+    background: rgba(248, 113, 113, 0.14);
+}
+.status-failed .tree-mark i {
+    background: #f87171;
+    animation: none;
+}
+.status-failed .row-status {
+    color: #f87171;
+    font-weight: 600;
+}
+
+/* 🌟 等待中 */
+.status-pending .tree-mark i {
+    background: #52525b;
+    animation: none;
+}
+.status-pending .row-status {
+    color: #71717a;
+}
 
 .goal-label {
     flex: 1;
