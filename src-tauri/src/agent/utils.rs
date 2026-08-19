@@ -489,7 +489,7 @@ pub async fn call_llm(
         let mut first_token_at: Option<std::time::Instant> = None;
         let mut total_chars: usize = 0;
         let mut last_thinking_emit_at = std::time::Instant::now();
-        let mut last_content_emit_at = std::time::Instant::now();
+        let last_content_emit_at = std::time::Instant::now();
         const EMIT_THROTTLE_MS: u128 = 50; // 20 FPS 平滑节流，防止超长 Thinking (数万字) 造成 IPC 消息轰炸与前端 CPU 100% 锁死
 
         // 流式接收事件，实时向前端推送 Thinking/Content 以及动态速率与 TTFT
@@ -536,8 +536,15 @@ pub async fn call_llm(
                     }
                     StreamEvent::Content { chunk, accumulated_content, .. } => {
                         if now.duration_since(last_content_emit_at).as_millis() >= EMIT_THROTTLE_MS {
-                            last_content_emit_at = now;
-                            let streaming_summary = extract_streaming_json_field(accumulated_content, &["summary", "answer", "details"]);
+                            // 仅当大模型在输出 finish 交付指令或纯文本总结时，才提取 streaming_summary 进行终态流式呈现；
+                            // 避免中间普通工具调用（如 task_store、save_file 的参数里恰好也有 summary 字段）被误识别为终态成果流式
+                            let is_intermediate_tool = accumulated_content.contains("\"tool\"") 
+                                && !accumulated_content.contains("\"finish\"");
+                            let streaming_summary = if is_intermediate_tool {
+                                None
+                            } else {
+                                extract_streaming_json_field(accumulated_content, &["summary", "answer", "details"])
+                            };
 
                             app_handle
                                 .emit(

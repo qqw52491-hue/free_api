@@ -816,6 +816,9 @@ export function useAgentSession(sessionId: string) {
             if (!selectedStepId.value) {
                 selectedStepId.value = stepItem.id;
             }
+            if (tool !== "finish") {
+                streamingSummary.value = "";
+            }
             appendLog(`[规划新步骤 #${stepId + 1}] ${description}`);
             autoScrollToBottom();
             return;
