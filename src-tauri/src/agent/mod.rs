@@ -1029,4 +1029,56 @@ mod finish_instruction_tests {
         assert_eq!(result.stdout, "Excel 已创建");
         assert!(result.stderr.is_empty());
     }
+
+    #[test]
+    fn test_built_in_tools_menu_contains_model_manager() {
+        let candidate_dirs = [
+            std::path::PathBuf::from("src-tauri/prompts/tools"),
+            std::path::PathBuf::from("prompts/tools"),
+            std::path::PathBuf::from("../src-tauri/prompts/tools"),
+        ];
+
+        let mut found_dir = None;
+        for d in &candidate_dirs {
+            if d.exists() && d.is_dir() {
+                found_dir = Some(d.clone());
+                break;
+            }
+        }
+
+        let dir = found_dir.expect("prompts/tools directory must exist in candidate paths");
+        let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut files: Vec<_> = entries.flatten().collect();
+            files.sort_by_key(|e| e.file_name());
+            for entry in files {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let summary = content
+                            .find("<summary>")
+                            .and_then(|start| {
+                                content
+                                    .find("</summary>")
+                                    .map(|end| &content[start + 9..end])
+                            })
+                            .unwrap_or("无详细描述");
+                        local_tools_menu.push_str(&format!("- {}: {}\n", name, summary));
+                    }
+                }
+            }
+        }
+
+        // 必须包含 model_manager, ask_human, web_search, web_fetch
+        assert!(local_tools_menu.contains("- model_manager:"), "menu must contain model_manager: {}", local_tools_menu);
+        assert!(local_tools_menu.contains("- ask_human:"), "menu must contain ask_human: {}", local_tools_menu);
+        assert!(local_tools_menu.contains("- web_search:"), "menu must contain web_search: {}", local_tools_menu);
+        assert!(local_tools_menu.contains("- web_fetch:"), "menu must contain web_fetch: {}", local_tools_menu);
+
+        // 绝不能包含旧的虚构/残留工具
+        assert!(!local_tools_menu.contains("code_editor"), "menu must not contain ghost code_editor");
+        assert!(!local_tools_menu.contains("browser_dom"), "menu must not contain ghost browser_dom");
+        assert!(!local_tools_menu.contains("project_analyzer"), "menu must not contain ghost project_analyzer");
+    }
 }
