@@ -28,15 +28,64 @@ pub struct MainContent {
     pub now_content: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TodoItem {
     pub id: usize,
     pub status: String, // "pending" | "in_progress" | "done" | "failed"
-    #[serde(default)]
     pub description: String,
-    /// 完成该 Todo 所依据的执行产物 output_id 证据（防虚假勾选）
-    #[serde(default)]
     pub evidence_output_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for TodoItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawTodoItem {
+            #[serde(default)]
+            id: Option<serde_json::Value>,
+            #[serde(default)]
+            status: Option<String>,
+            #[serde(default)]
+            description: Option<String>,
+            #[serde(default)]
+            task: Option<String>,
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            text: Option<String>,
+            #[serde(default)]
+            content: Option<String>,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            evidence_output_id: Option<String>,
+        }
+
+        let raw = RawTodoItem::deserialize(deserializer)?;
+        let id = match raw.id {
+            Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0) as usize,
+            Some(serde_json::Value::String(s)) => s.parse::<usize>().unwrap_or(0),
+            _ => 0,
+        };
+        let description = raw
+            .description
+            .or(raw.task)
+            .or(raw.title)
+            .or(raw.text)
+            .or(raw.content)
+            .or(raw.name)
+            .unwrap_or_default();
+        let status = raw.status.unwrap_or_else(|| "pending".to_string());
+
+        Ok(Self {
+            id,
+            status,
+            description,
+            evidence_output_id: raw.evidence_output_id,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

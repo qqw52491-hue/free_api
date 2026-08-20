@@ -775,12 +775,26 @@ impl PluginRegistry {
             "\n## 📦 [{}] 工具规格 (严格遵守 JSON Schema)\n",
             requested_name
         );
-        for (plugin, tool) in &matched {
-            let compact_schema = clean_tool_schema(&tool.schema);
+        if target_tool.is_none() && matched.len() > 8 {
+            // 当插件工具过多（如 remote-hub 含有 60+ 工具）且未指定具体工具时，输出高密度紧凑清单，避免单步 50KB 撑爆模型上下文
             detail.push_str(&format!(
-                "### {}/{}\n- 描述: {}\n- 参数: {}\n",
-                plugin, tool.name, tool.description.trim(), compact_schema
+                "该插件共包含 {} 个工具。在调用具体动作（如 {}/{}）时系统将自动精确提供该工具的参数 Schema：\n",
+                matched.len(),
+                target_plugin,
+                matched.first().map(|(_, t)| t.name.as_str()).unwrap_or("tool_name")
             ));
+            for (plugin, tool) in &matched {
+                let desc = tool.description.lines().next().unwrap_or("").trim();
+                detail.push_str(&format!("- {}/{}: {}\n", plugin, tool.name, desc));
+            }
+        } else {
+            for (plugin, tool) in &matched {
+                let compact_schema = clean_tool_schema(&tool.schema);
+                detail.push_str(&format!(
+                    "### {}/{}\n- 描述: {}\n- 参数: {}\n",
+                    plugin, tool.name, tool.description.trim(), compact_schema
+                ));
+            }
         }
         detail
     }

@@ -143,21 +143,178 @@ pub fn sample_execution_log(raw: &str, head_chars: usize, tail_chars: usize) -> 
 
 // ==================== JSON 提取与智能容错修复 ====================
 
-/// 智能修复模型输出的不完整或截断的 JSON 结构 (如未闭合引号、括号或 EOF 截断)
+/// 清洗单行/多行注释、Python 特殊常量，规范化单引号与未转义控制字符等
+pub fn sanitize_json_tokens(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let chars: Vec<char> = raw.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut in_double_str = false;
+    let mut in_single_str = false;
+    let mut escape = false;
+
+    while i < len {
+        let ch = chars[i];
+
+        if escape {
+            escape = false;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        if ch == '\\' && (in_double_str || in_single_str) {
+            escape = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // 双引号字符串边界
+        if ch == '"' && !in_single_str {
+            in_double_str = !in_double_str;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // 单引号字符串转换成双引号 (在非双引号内)
+        if ch == '\'' && !in_double_str {
+            in_single_str = !in_single_str;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+
+        // 字符串内部的原始控制字符与换行符自动转义
+        if in_double_str || in_single_str {
+            if ch == '\n' {
+                out.push_str("\\n");
+            } else if ch == '\r' {
+                out.push_str("\\r");
+            } else if ch == '\t' {
+                out.push_str("\\t");
+            } else if (ch as u32) < 0x20 {
+                // 忽略非标准低位控制字符
+            } else {
+                out.push(ch);
+            }
+            i += 1;
+            continue;
+        }
+
+        // 非字符串区域：剥离 // 单行注释
+        if ch == '/' && i + 1 < len && chars[i + 1] == '/' {
+            i += 2;
+            while i < len && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // 非字符串区域：剥离 /* 多行注释 */
+        if ch == '/' && i + 1 < len && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            continue;
+        }
+
+        // 非字符串区域：替换 Python 式布尔与 None
+        if ch.is_alphabetic() {
+            let start_word = i;
+            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let word: String = chars[start_word..i].iter().collect();
+            match word.as_str() {
+                "True" => out.push_str("true"),
+                "False" => out.push_str("false"),
+                "None" => out.push_str("null"),
+                other => out.push_str(other),
+            }
+            continue;
+        }
+
+        out.push(ch);
+        i += 1;
+    }
+
+    out
+}
+
+/// 消除对象或数组尾部多余的逗号 (Trailing Comma), 如 `{"a": 1,}` -> `{"a": 1}`
+pub fn sanitize_trailing_commas(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut in_str = false;
+    let mut escape = false;
+
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escape {
+            escape = false;
+            result.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '\\' && in_str {
+            escape = true;
+            result.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_str = !in_str;
+            result.push(ch);
+            i += 1;
+            continue;
+        }
+        if !in_str && ch == ',' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                i += 1;
+                continue;
+            }
+        }
+        result.push(ch);
+        i += 1;
+    }
+    result
+}
+
+/// 智能修复模型输出的不完整或截断的 JSON 结构 (如未闭合引号、括号、Trailing Comma 或 EOF 截断)
 pub fn repair_json(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
         return Some(trimmed.to_string());
     }
 
-    let start = trimmed.find('{')?;
-    let slice = &trimmed[start..];
-
-    let mut candidate = slice.to_string();
-    if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
-        return Some(candidate);
+    // 1. 深度清洗 Token (注释、换行转义、单引号、Python 关键字)
+    let sanitized = sanitize_json_tokens(trimmed);
+    let clean_trailing = sanitize_trailing_commas(&sanitized);
+    if serde_json::from_str::<serde_json::Value>(&clean_trailing).is_ok() {
+        return Some(clean_trailing);
     }
 
+    // 2. 截取最外层 '{'
+    let start = match clean_trailing.find('{') {
+        Some(s) => s,
+        None => return None,
+    };
+    let slice = &clean_trailing[start..];
+    if serde_json::from_str::<serde_json::Value>(slice).is_ok() {
+        return Some(slice.to_string());
+    }
+
+    // 3. 处理括号与字符串未闭合的截断情况
+    let mut candidate = slice.to_string();
     let mut in_str = false;
     let mut escape = false;
     let mut open_braces = 0i32;
@@ -190,23 +347,29 @@ pub fn repair_json(text: &str) -> Option<String> {
     }
 
     if in_str {
+        if candidate.ends_with('\\') && !candidate.ends_with("\\\\") {
+            candidate.pop();
+        }
         candidate.push('"');
     }
+
+    let mut closed = sanitize_trailing_commas(&candidate);
     for _ in 0..open_brackets {
-        candidate.push(']');
+        closed.push(']');
     }
     for _ in 0..open_braces {
-        candidate.push('}');
+        closed.push('}');
+    }
+    let final_candidate = sanitize_trailing_commas(&closed);
+
+    if serde_json::from_str::<serde_json::Value>(&final_candidate).is_ok() {
+        return Some(final_candidate);
     }
 
-    if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
-        return Some(candidate);
-    }
-
-    // 终极兜底：如果是 finish 工具的超长 HTML / summary 产生截断或控制字符转义问题，直接救赎提取
-    if candidate.contains(r#""finish""#) || candidate.contains(r#""summary""#) {
-        if let Some(pos) = candidate.find(r#""summary""#) {
-            let after = &candidate[pos + 9..];
+    // 4. 终极兜底：针对 finish 工具 summary 内容被截断时的救赎逻辑
+    if final_candidate.contains(r#""finish""#) || final_candidate.contains(r#""summary""#) {
+        if let Some(pos) = final_candidate.find(r#""summary""#) {
+            let after = &final_candidate[pos + 9..];
             if let Some(colon_pos) = after.find(':') {
                 let val_part = after[colon_pos + 1..].trim_start();
                 if val_part.starts_with('"') {
@@ -231,9 +394,9 @@ pub fn repair_json(text: &str) -> Option<String> {
     None
 }
 
-/// Robustly extract JSON object from AI reply with automatic repair.
+/// 从大模型回复中稳健提取 JSON 纯文本（过滤思考标签与 Markdown 代码块，支持环绕说明文本）
 pub fn extract_json_from_text(text: &str) -> Option<String> {
-    // 1. 过滤可能混入正文的 <think>...</think> 思考标签
+    // 1. 过滤可能混入正文的 <think>...</think> 思考标签或未闭合的前置 <think>
     let without_think = if let Some(start_think) = text.find("<think>") {
         if let Some(end_think) = text.find("</think>") {
             format!("{}{}", &text[..start_think], &text[end_think + 8..])
@@ -269,6 +432,7 @@ pub fn extract_json_from_text(text: &str) -> Option<String> {
         return Some(repaired);
     }
 
+    // 3. 寻找最外层匹配的 '{' 与 '}'
     let chars: Vec<char> = cleaned.chars().collect();
     let start = chars.iter().position(|c| *c == '{')?;
 
@@ -312,7 +476,44 @@ pub fn extract_json_from_text(text: &str) -> Option<String> {
         }
     }
 
-    None
+    // 4. 尝试从第一个 '{' 到字符串结尾整体修复
+    let from_first_brace: String = chars[start..].iter().collect();
+    repair_json(&from_first_brace)
+}
+
+/// 智能规范化大模型生成的未整理 Value 对象
+pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
+    if let serde_json::Value::Object(map) = val {
+        // 1. 如果 command 是字符串形式的 JSON，尝试解析成 Object
+        if let Some(serde_json::Value::String(cmd_str)) = map.get("command") {
+            if let Ok(parsed_cmd) = serde_json::from_str::<serde_json::Value>(cmd_str) {
+                map.insert("command".to_string(), parsed_cmd);
+            }
+        }
+
+        // 2. 如果 command 缺失但 params 存在，提升 params 到 command
+        if !map.contains_key("command") || map.get("command") == Some(&serde_json::Value::Null) {
+            if let Some(params_val) = map.get("params") {
+                if !params_val.is_null() {
+                    map.insert("command".to_string(), params_val.clone());
+                }
+            }
+        }
+
+        // 3. 如果 todo_update 是字符串形式（如 "[]"），解析或转为空数组
+        if let Some(serde_json::Value::String(todo_str)) = map.get("todo_update") {
+            if let Ok(parsed_todo) = serde_json::from_str::<serde_json::Value>(todo_str) {
+                map.insert("todo_update".to_string(), parsed_todo);
+            } else {
+                map.insert("todo_update".to_string(), serde_json::json!([]));
+            }
+        }
+
+        // 4. 如果 applied_lessons 是单个字符串，转为数组
+        if let Some(serde_json::Value::String(lesson_str)) = map.get("applied_lessons") {
+            map.insert("applied_lessons".to_string(), serde_json::json!([lesson_str]));
+        }
+    }
 }
 
 // ==================== 调试与日志辅助函数 ====================
@@ -663,8 +864,9 @@ pub async fn call_llm(
         // 8. 解析 AgentInstruction (带智能容错与修复)
         let parse_result = (|| -> Result<AgentInstruction, String> {
             let json_to_parse = repair_json(&final_json_str).unwrap_or_else(|| final_json_str.clone());
-            let val: serde_json::Value = serde_json::from_str(&json_to_parse)
-                .map_err(|e| format!("基础 JSON 语法错误: {}", e))?;
+            let mut val: serde_json::Value = serde_json::from_str(&json_to_parse)
+                .map_err(|e| format!("基础 JSON 语法错误: {} (处理前: {})", e, final_json_str))?;
+            normalize_raw_instruction_value(&mut val);
             let inst: AgentInstruction =
                 serde_json::from_value(val).map_err(|e| format!("数据结构转换失败: {}", e))?;
             Ok(inst)
@@ -708,6 +910,77 @@ pub async fn call_llm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_repair_json_trailing_commas_and_comments() {
+        let raw = r#"{
+            // 这是一个测试动作
+            "tool": "ask_human",
+            "command": {
+                "message": "hello",
+            },
+        }"#;
+        let repaired = repair_json(raw).expect("should repair trailing commas and comments");
+        let val: serde_json::Value = serde_json::from_str(&repaired).expect("must parse valid JSON");
+        assert_eq!(val["tool"], "ask_human");
+        assert_eq!(val["command"]["message"], "hello");
+    }
+
+    #[test]
+    fn test_repair_json_unescaped_newlines_in_strings() {
+        let raw = "{\n\"tool\": \"ask_human\",\n\"command\": {\n\"message\": \"Line 1\nLine 2 with \ttab\"\n}\n}";
+        let repaired = repair_json(raw).expect("should repair unescaped newlines in strings");
+        let val: serde_json::Value = serde_json::from_str(&repaired).expect("must parse valid JSON");
+        assert_eq!(val["tool"], "ask_human");
+        assert!(val["command"]["message"].as_str().unwrap().contains("Line 1"));
+    }
+
+    #[test]
+    fn test_repair_json_python_literals_and_single_quotes() {
+        let raw = "{'tool': 'model_manager', 'command': {'confirm': True, 'null_field': None, 'flag': False}}";
+        let repaired = repair_json(raw).expect("should repair single quotes and python literals");
+        let val: serde_json::Value = serde_json::from_str(&repaired).expect("must parse valid JSON");
+        assert_eq!(val["tool"], "model_manager");
+        assert_eq!(val["command"]["confirm"], true);
+        assert_eq!(val["command"]["flag"], false);
+        assert!(val["command"]["null_field"].is_null());
+    }
+
+    #[test]
+    fn test_repair_json_eof_truncation() {
+        let raw = r#"{"tool": "ask_human", "command": {"message": "Incomplete text that was cut off"#;
+        let repaired = repair_json(raw).expect("should repair truncated JSON");
+        let val: serde_json::Value = serde_json::from_str(&repaired).expect("must parse valid JSON");
+        assert_eq!(val["tool"], "ask_human");
+        assert!(val["command"]["message"].as_str().unwrap().contains("Incomplete text"));
+    }
+
+    #[test]
+    fn test_extract_json_from_markdown_with_extra_text() {
+        let raw = "Here is my response:\n```json\n{\n  \"tool\": \"web_search\",\n  \"command\": {\"query\": \"rust\"}\n}\n```\nHope that helps!";
+        let extracted = extract_json_from_text(raw).expect("should extract json from markdown");
+        let val: serde_json::Value = serde_json::from_str(&extracted).expect("must parse valid JSON");
+        assert_eq!(val["tool"], "web_search");
+        assert_eq!(val["command"]["query"], "rust");
+    }
+
+    #[test]
+    fn test_normalize_raw_instruction_value() {
+        let mut val = serde_json::json!({
+            "tool": "web_search",
+            "command": "{\"query\": \"rust agent\"}",
+            "todo_update": "[{\"id\": \"1\", \"task\": \"Search web\", \"status\": \"done\"}]",
+            "applied_lessons": "lesson_cache_1"
+        });
+        normalize_raw_instruction_value(&mut val);
+        let inst: AgentInstruction = serde_json::from_value(val).expect("must deserialize AgentInstruction");
+        assert_eq!(inst.tool, Some("web_search".to_string()));
+        assert_eq!(inst.command.unwrap()["query"], "rust agent");
+        assert_eq!(inst.todo_update.len(), 1);
+        assert_eq!(inst.todo_update[0].id, 1);
+        assert_eq!(inst.todo_update[0].description, "Search web");
+        assert_eq!(inst.applied_lessons, Some(vec!["lesson_cache_1".to_string()]));
+    }
 
     #[test]
     fn test_sample_execution_log_short() {
@@ -763,3 +1036,4 @@ mod tests {
         assert_eq!(extracted_closed, Some("完成了！".to_string()));
     }
 }
+
