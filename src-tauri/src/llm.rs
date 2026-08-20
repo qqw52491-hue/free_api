@@ -87,15 +87,23 @@ impl ModelConfig {
 
     /// 构建 reqwest HTTP 客户端
     pub fn build_client(&self) -> Result<reqwest::Client, String> {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(self.timeout_secs))
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .tcp_keepalive(Some(std::time::Duration::from_secs(15)))
-            .tcp_nodelay(true)
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-            .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
-            .build()
-            .map_err(|e| e.to_string())
+        static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        
+        // 我们在全局复用连接池，至于 per-request 的 timeout 可以交给调用者 req_builder.timeout() 设置
+        // 但这里为了向后兼容且兼顾连接池，我们优先保留一个超时较长（或默认）的共享客户端。
+        let client = HTTP_CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                // 设置一个最长允许的超时，实际单次请求可以在 send 之前用 timeout(std::time::Duration::from_secs(self.timeout_secs)) 覆盖
+                .timeout(std::time::Duration::from_secs(300))
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .tcp_keepalive(Some(std::time::Duration::from_secs(15)))
+                .tcp_nodelay(true)
+                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+                .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+                .build()
+                .expect("Failed to build global HTTP client")
+        });
+        Ok(client.clone())
     }
 
     /// 构建 OpenAI 兼容的请求体

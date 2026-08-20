@@ -47,7 +47,26 @@ pub async fn execute_plan_tree(
             elapsed_total_ms: elapsed,
             status: "completed".to_string(),
             error_summary: if fail > 0 || timed > 0 {
-                Some(format!("并行分支中有 {} 个失败或超时", fail + timed))
+                let mut err_details = Vec::new();
+                fn extract_errs(val: &serde_json::Value, errs: &mut Vec<String>) {
+                    if let serde_json::Value::Array(arr) = val {
+                        for item in arr { extract_errs(item, errs); }
+                    } else if let serde_json::Value::Object(obj) = val {
+                        if obj.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+                            let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                            let tool = obj.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
+                            let err_msg = obj.get("error").and_then(|v| v.as_str()).unwrap_or("未知错误");
+                            errs.push(format!("- 分支 [{}] ({}) 报错: {}", id, tool, err_msg));
+                        }
+                    }
+                }
+                extract_errs(&results_val, &mut err_details);
+                
+                if err_details.is_empty() {
+                    Some(format!("并行分支中有 {} 个失败或超时", fail + timed))
+                } else {
+                    Some(format!("并行分支中有 {} 个失败或超时:\n{}", fail + timed, err_details.join("\n")))
+                }
             } else {
                 None
             },

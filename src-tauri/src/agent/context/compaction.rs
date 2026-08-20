@@ -352,8 +352,21 @@ impl SandwichContext {
             if archive_text.contains("关键事实") || archive_text.contains("踩坑记录") || archive_text.contains("架构决策") {
                 for line in archive_text.lines() {
                     let trimmed = line.trim();
+                    
+                    let mut is_fact = false;
+                    let mut fact_body = "";
+                    
                     if (trimmed.starts_with("- ") || trimmed.starts_with("* ")) && trimmed.len() > 6 {
-                        let fact_body = trimmed.trim_start_matches("- ").trim_start_matches("* ").trim();
+                        is_fact = true;
+                        fact_body = trimmed[2..].trim();
+                    } else if let Some(idx) = trimmed.find(". ") {
+                        if idx > 0 && trimmed[..idx].chars().all(|c| c.is_ascii_digit()) && trimmed.len() > idx + 4 {
+                            is_fact = true;
+                            fact_body = trimmed[idx + 2..].trim();
+                        }
+                    }
+                    
+                    if is_fact {
                         if !fact_body.is_empty() && fact_body.len() <= 200 && self.memories.len() < 8 {
                             let key = format!("auto_fact_{}", self.memories.len() + 1);
                             self.memories.entry(key).or_insert_with(|| fact_body.to_string());

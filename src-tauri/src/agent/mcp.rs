@@ -481,7 +481,7 @@ impl McpClient {
                 || tool_name_in_params.contains("compile");
             let timeout_secs = if is_slow_tool { 180 } else { 60 };
 
-            let resp = match tokio::time::timeout(Duration::from_secs(timeout_secs), req_builder.send()).await {
+            let mut resp = match tokio::time::timeout(Duration::from_secs(timeout_secs), req_builder.send()).await {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => return Err(format!("[MCP:{}] HTTP 请求失败: {}", self.config.name, e)),
                 Err(_) => return Err(format!("[MCP:{}] HTTP 请求超时 ({}s 熔断)", self.config.name, timeout_secs)),
@@ -504,10 +504,22 @@ impl McpClient {
                 }
             }
 
-            let raw_body = resp
-                .text()
-                .await
-                .map_err(|e| format!("[MCP:{}] 读取响应体失败: {}", self.config.name, e))?;
+            let mut raw_body_bytes = Vec::new();
+            let max_bytes = 10 * 1024 * 1024; // 10MB
+            let mut truncated = false;
+
+            while let Some(chunk) = resp.chunk().await.map_err(|e| format!("[MCP:{}] 读取块失败: {}", self.config.name, e))? {
+                raw_body_bytes.extend_from_slice(&chunk);
+                if raw_body_bytes.len() > max_bytes {
+                    println!("⚠️ [MCP:{}] 响应体过大 (超过 10MB)，触发安全截断!", self.config.name);
+                    truncated = true;
+                    break;
+                }
+            }
+            let mut raw_body = String::from_utf8_lossy(&raw_body_bytes).into_owned();
+            if truncated {
+                raw_body.push_str("\n\n[ERROR: MCP 响应超过 10MB 大小限制，已被截断以保护内存，请分段读取或检查工具调用]");
+            }
 
             let body_preview: String = raw_body.chars().take(120).collect();
             println!("📥 [MCP:{}] 收到 HTTP 响应 (Status {}): len={}, body_preview={}", 
