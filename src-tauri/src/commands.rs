@@ -3,7 +3,10 @@ use crate::agent::mcp_catalog::{
     invalidate_plugin, remember_tools, status as catalog_status, McpCatalogStatus,
 };
 use crate::agent::task_store;
-use crate::db::{ChatMessage, ChatSession, DbState, Model, Platform};
+use crate::db::{
+    delete_model_spec_record, get_all_model_specs, upsert_model_spec_record, ChatMessage,
+    ChatSession, DbState, Model, ModelSpec, Platform,
+};
 use crate::llm::{self, ModelConfig, StreamEvent};
 use chrono::Utc;
 use rusqlite::params;
@@ -730,6 +733,84 @@ pub async fn delete_model(state: State<'_, DbState>, id: String) -> Result<(), S
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+// ==================== MODEL SPECS COMMANDS ====================
+
+#[tauri::command]
+pub async fn get_model_specs(state: State<'_, DbState>) -> Result<Vec<ModelSpec>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_all_model_specs(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn upsert_model_spec(
+    state: State<'_, DbState>,
+    id: Option<String>,
+    name: String,
+    context_window: i64,
+    max_tokens: i64,
+    supports_thinking: bool,
+    default_temperature: f64,
+    description: Option<String>,
+) -> Result<ModelSpec, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let final_id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let now = Utc::now().to_rfc3339();
+    let spec = ModelSpec {
+        id: final_id,
+        name,
+        context_window,
+        max_tokens,
+        supports_thinking,
+        default_temperature,
+        description: description.unwrap_or_default(),
+        created_at: now,
+    };
+    upsert_model_spec_record(&conn, &spec).map_err(|e| e.to_string())?;
+    Ok(spec)
+}
+
+#[tauri::command]
+pub async fn delete_model_spec(
+    state: State<'_, DbState>,
+    id_or_name: String,
+) -> Result<usize, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    delete_model_spec_record(&conn, &id_or_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn add_model_with_spec(
+    state: State<'_, DbState>,
+    platform_id: String,
+    name: String,
+    display_name: String,
+    max_tokens: i64,
+    temperature: f64,
+    context_window: i64,
+) -> Result<Model, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO models (id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'unknown', 0, ?7, ?8)",
+        params![id, platform_id, name, display_name, max_tokens, temperature, context_window, now],
+    ).map_err(|e| e.to_string())?;
+    Ok(Model {
+        id,
+        platform_id,
+        name,
+        display_name,
+        max_tokens,
+        temperature,
+        enabled: true,
+        status: "unknown".to_string(),
+        latency_ms: 0,
+        context_window,
+    })
+}
+
 
 #[tauri::command]
 pub async fn test_model(

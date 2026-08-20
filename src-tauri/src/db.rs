@@ -17,6 +17,18 @@ pub struct Platform {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSpec {
+    pub id: String,
+    pub name: String,
+    pub context_window: i64,
+    pub max_tokens: i64,
+    pub supports_thinking: bool,
+    pub default_temperature: f64,
+    pub description: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
     pub platform_id: String,
@@ -261,6 +273,18 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_agent_lesson_recalls_session
             ON agent_lesson_recalls(session_id, step_id);
+
+        -- 全局模型规格词典表 (Model Specs 预设库，与渠道解耦)
+        CREATE TABLE IF NOT EXISTS model_specs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            context_window INTEGER NOT NULL,
+            max_tokens INTEGER NOT NULL,
+            supports_thinking BOOLEAN NOT NULL DEFAULT 0,
+            default_temperature REAL NOT NULL DEFAULT 0.7,
+            description TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        );
     ",
     )?;
 
@@ -277,5 +301,90 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
          ALTER TABLE agent_memory_nodes ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;",
     );
 
+    // 初始化预置常用模型规格库
+    let spec_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM model_specs", [], |r| r.get(0))
+        .unwrap_or(0);
+    if spec_count == 0 {
+        let default_specs = vec![
+            ("DeepSeek-V3", 128000, 8192, false, 0.7, "DeepSeek 官方最新通用多模态/大模型 (128k 上下文)"),
+            ("DeepSeek-R1", 128000, 8192, true, 0.6, "DeepSeek 深度思考/推理模型 (128k 上下文，支持思维链)"),
+            ("DeepSeek-V4-Flash", 128000, 8192, false, 0.7, "DeepSeek 超高速轻量级模型 (128k 上下文)"),
+            ("Claude-3.5-Sonnet", 200000, 8192, false, 0.5, "Anthropic 业界顶级编程与推理模型 (200k 上下文)"),
+            ("Claude-3.7-Sonnet", 200000, 8192, true, 0.7, "Anthropic 混合推理模型 (200k 上下文，支持混合思考)"),
+            ("GPT-4o", 128000, 16384, false, 0.7, "OpenAI 旗舰全能模型 (128k 上下文，16k 输出)"),
+            ("GPT-4o-mini", 128000, 16384, false, 0.7, "OpenAI 轻量高性价比模型 (128k 上下文)"),
+            ("Gemini-2.0-Flash", 1048576, 8192, false, 0.7, "Google 100万超大上下文极速模型 (1M 上下文)"),
+            ("Gemini-1.5-Pro", 2097152, 8192, false, 0.7, "Google 200万超大上下文旗舰模型 (2M 上下文)"),
+            ("Qwen-2.5-Coder-32B", 32768, 4096, false, 0.7, "通义千问代码专精开源大模型 (32k 上下文)"),
+            ("Llama-3.3-70B", 128000, 4096, false, 0.7, "Meta 最强开源大模型 (128k 上下文)"),
+        ];
+        let now = chrono::Utc::now().to_rfc3339();
+        for (name, ctx, max_tok, thinking, temp, desc) in default_specs {
+            let id = uuid::Uuid::new_v4().to_string();
+            let _ = conn.execute(
+                "INSERT INTO model_specs (id, name, context_window, max_tokens, supports_thinking, default_temperature, description, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![id, name, ctx, max_tok, thinking, temp, desc, now],
+            );
+        }
+    }
+
     Ok(conn)
 }
+
+// ==================== MODEL SPECS CRUD HELPERS ====================
+
+pub fn get_all_model_specs(conn: &Connection) -> Result<Vec<ModelSpec>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, context_window, max_tokens, supports_thinking, default_temperature, description, created_at 
+         FROM model_specs ORDER BY name ASC"
+    )?;
+    let list = stmt
+        .query_map([], |row| {
+            Ok(ModelSpec {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                context_window: row.get(2)?,
+                max_tokens: row.get(3)?,
+                supports_thinking: row.get(4)?,
+                default_temperature: row.get(5)?,
+                description: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(list)
+}
+
+pub fn upsert_model_spec_record(conn: &Connection, spec: &ModelSpec) -> Result<()> {
+    conn.execute(
+        "INSERT INTO model_specs (id, name, context_window, max_tokens, supports_thinking, default_temperature, description, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(name) DO UPDATE SET
+            context_window = excluded.context_window,
+            max_tokens = excluded.max_tokens,
+            supports_thinking = excluded.supports_thinking,
+            default_temperature = excluded.default_temperature,
+            description = excluded.description",
+        rusqlite::params![
+            spec.id,
+            spec.name,
+            spec.context_window,
+            spec.max_tokens,
+            spec.supports_thinking,
+            spec.default_temperature,
+            spec.description,
+            spec.created_at
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_model_spec_record(conn: &Connection, id_or_name: &str) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM model_specs WHERE id = ?1 OR name = ?1",
+        rusqlite::params![id_or_name],
+    )
+}
+

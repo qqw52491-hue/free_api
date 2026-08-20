@@ -44,6 +44,10 @@ pub fn run() {
             commands::update_model,
             commands::delete_model,
             commands::test_model,
+            commands::get_model_specs,
+            commands::upsert_model_spec,
+            commands::delete_model_spec,
+            commands::add_model_with_spec,
             // 会话
             commands::get_sessions,
             commands::create_session,

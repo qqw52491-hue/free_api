@@ -180,6 +180,11 @@ pub fn execute_command_inner(
         return web_search::dispatch(tool, params);
     }
 
+    // 3.6 核心原生工具 E: model_manager (自主管理模型规格与渠道绑定，支持增删改查与安全确认)
+    if tool.eq_ignore_ascii_case("model_manager") {
+        return dispatch_model_manager(db, action, params);
+    }
+
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
     let (plugin_name, tool_name) = if tool.contains('/') {
         let parts: Vec<&str> = tool.split('/').collect();
@@ -498,3 +503,316 @@ pub async fn execute_command(tool: String, command: String) -> Result<serde_json
     };
     Ok(json!({ "success": success, "stdout": stdout.trim(), "stderr": stderr.trim() }))
 }
+
+// ==================== MODEL MANAGER DISPATCHER ====================
+
+fn dispatch_model_manager(
+    db: &DbState,
+    action: &str,
+    params: &serde_json::Value,
+) -> DispatchResult {
+    let conn = match db.0.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return DispatchResult {
+                stdout: String::new(),
+                stderr: format!("数据库锁获取失败: {}", e),
+                success: false,
+                route: "model_manager".to_string(),
+            }
+        }
+    };
+
+    let act = if !action.is_empty() {
+        action
+    } else {
+        params.get("action").and_then(|v| v.as_str()).unwrap_or("list_specs")
+    };
+
+    match act {
+        "list_specs" => {
+            match crate::db::get_all_model_specs(&conn) {
+                Ok(specs) => DispatchResult {
+                    stdout: serde_json::to_string_pretty(&specs).unwrap_or_else(|_| "[]".to_string()),
+                    stderr: String::new(),
+                    success: true,
+                    route: "model_manager:list_specs".to_string(),
+                },
+                Err(e) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("查询模型规格库失败: {}", e),
+                    success: false,
+                    route: "model_manager:list_specs".to_string(),
+                },
+            }
+        }
+        "upsert_spec" => {
+            let name = match params.get("name").and_then(|v| v.as_str()) {
+                Some(n) => n.to_string(),
+                None => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: "缺少必填参数: name (规格名称，如 DeepSeek-V4)".to_string(),
+                        success: false,
+                        route: "model_manager:upsert_spec".to_string(),
+                    }
+                }
+            };
+            let context_window = params.get("context_window").and_then(|v| v.as_i64()).unwrap_or(128000);
+            let max_tokens = params.get("max_tokens").and_then(|v| v.as_i64()).unwrap_or(8192);
+            let supports_thinking = params.get("supports_thinking").and_then(|v| v.as_bool()).unwrap_or(false);
+            let default_temperature = params.get("default_temperature").and_then(|v| v.as_f64()).unwrap_or(0.7);
+            let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = params.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let created_at = chrono::Utc::now().to_rfc3339();
+
+            let spec = crate::db::ModelSpec {
+                id,
+                name: name.clone(),
+                context_window,
+                max_tokens,
+                supports_thinking,
+                default_temperature,
+                description,
+                created_at,
+            };
+
+            match crate::db::upsert_model_spec_record(&conn, &spec) {
+                Ok(_) => DispatchResult {
+                    stdout: format!("✅ 成功保存模型规格: {} (上下文: {} tokens, 最大输出: {} tokens)", name, context_window, max_tokens),
+                    stderr: String::new(),
+                    success: true,
+                    route: "model_manager:upsert_spec".to_string(),
+                },
+                Err(e) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("保存模型规格失败: {}", e),
+                    success: false,
+                    route: "model_manager:upsert_spec".to_string(),
+                },
+            }
+        }
+        "delete_spec" => {
+            let target = match params.get("name").or_else(|| params.get("id")).and_then(|v| v.as_str()) {
+                Some(t) => t,
+                None => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: "缺少必填参数: name 或 id".to_string(),
+                        success: false,
+                        route: "model_manager:delete_spec".to_string(),
+                    }
+                }
+            };
+            let confirm = params.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !confirm {
+                return DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("⚠️ 安全保护：删除模型规格 [{}] 是破坏性操作。若确认删除，请在参数中附加 {{\"confirm\": true}}。", target),
+                    success: false,
+                    route: "model_manager:delete_spec".to_string(),
+                };
+            }
+
+            match crate::db::delete_model_spec_record(&conn, target) {
+                Ok(count) => {
+                    if count > 0 {
+                        DispatchResult {
+                            stdout: format!("✅ 已成功删除模型规格: {}", target),
+                            stderr: String::new(),
+                            success: true,
+                            route: "model_manager:delete_spec".to_string(),
+                        }
+                    } else {
+                        DispatchResult {
+                            stdout: String::new(),
+                            stderr: format!("未找到名称或ID为 [{}] 的模型规格", target),
+                            success: false,
+                            route: "model_manager:delete_spec".to_string(),
+                        }
+                    }
+                }
+                Err(e) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("删除模型规格失败: {}", e),
+                    success: false,
+                    route: "model_manager:delete_spec".to_string(),
+                },
+            }
+        }
+        "list_platforms" => {
+            let mut stmt = match conn.prepare("SELECT id, name, base_url, created_at FROM platforms ORDER BY created_at DESC") {
+                Ok(s) => s,
+                Err(e) => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: format!("查询平台失败: {}", e),
+                        success: false,
+                        route: "model_manager:list_platforms".to_string(),
+                    }
+                }
+            };
+            let platforms = stmt.query_map([], |row| {
+                let pid: String = row.get(0)?;
+                let pname: String = row.get(1)?;
+                let purl: String = row.get(2)?;
+                Ok(json!({ "id": pid, "name": pname, "base_url": purl }))
+            }).and_then(|iter| iter.collect::<Result<Vec<_>, _>>());
+
+            match platforms {
+                Ok(list) => DispatchResult {
+                    stdout: serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".to_string()),
+                    stderr: String::new(),
+                    success: true,
+                    route: "model_manager:list_platforms".to_string(),
+                },
+                Err(e) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("解析平台数据失败: {}", e),
+                    success: false,
+                    route: "model_manager:list_platforms".to_string(),
+                },
+            }
+        }
+        "add_model" => {
+            let platform_query = match params.get("platform_id").or_else(|| params.get("platform_name")).and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: "缺少必填参数: platform_id 或 platform_name".to_string(),
+                        success: false,
+                        route: "model_manager:add_model".to_string(),
+                    }
+                }
+            };
+
+            let platform_id: String = match conn.query_row(
+                "SELECT id FROM platforms WHERE id = ?1 OR name = ?1",
+                rusqlite::params![platform_query],
+                |r| r.get(0),
+            ) {
+                Ok(id) => id,
+                Err(_) => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: format!("未找到平台 [{}]，请先检查平台名称或使用 list_platforms 查询", platform_query),
+                        success: false,
+                        route: "model_manager:add_model".to_string(),
+                    }
+                }
+            };
+
+            let model_name = match params.get("model_name").or_else(|| params.get("name")).and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: "缺少必填参数: model_name (API模型标识)".to_string(),
+                        success: false,
+                        route: "model_manager:add_model".to_string(),
+                    }
+                }
+            };
+
+            // 如果指定了 spec_name，自动从规格库补齐参数
+            let spec_opt: Option<(i64, i64, f64)> = if let Some(sname) = params.get("spec_name").and_then(|v| v.as_str()) {
+                conn.query_row(
+                    "SELECT context_window, max_tokens, default_temperature FROM model_specs WHERE name = ?1 OR id = ?1",
+                    rusqlite::params![sname],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                ).ok()
+            } else {
+                None
+            };
+
+            let context_window = params.get("context_window").and_then(|v| v.as_i64())
+                .or(spec_opt.map(|s| s.0))
+                .unwrap_or(128000);
+            let max_tokens = params.get("max_tokens").and_then(|v| v.as_i64())
+                .or(spec_opt.map(|s| s.1))
+                .unwrap_or(4096);
+            let temperature = params.get("temperature").and_then(|v| v.as_f64())
+                .or(spec_opt.map(|s| s.2))
+                .unwrap_or(0.7);
+            let display_name = params.get("display_name").and_then(|v| v.as_str()).unwrap_or(model_name);
+
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+
+            match conn.execute(
+                "INSERT INTO models (id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'unknown', 0, ?7, ?8)",
+                rusqlite::params![id, platform_id, model_name, display_name, max_tokens, temperature, context_window, now],
+            ) {
+                Ok(_) => DispatchResult {
+                    stdout: format!("✅ 成功添加模型: [{}] (显示名: {}, 上下文: {} tokens, 输出上限: {} tokens)", model_name, display_name, context_window, max_tokens),
+                    stderr: String::new(),
+                    success: true,
+                    route: "model_manager:add_model".to_string(),
+                },
+                Err(e) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("添加模型失败: {}", e),
+                    success: false,
+                    route: "model_manager:add_model".to_string(),
+                },
+            }
+        }
+        "delete_model" => {
+            let model_query = match params.get("model_id").or_else(|| params.get("model_name")).or_else(|| params.get("name")).and_then(|v| v.as_str()) {
+                Some(m) => m,
+                None => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: "缺少必填参数: model_id 或 model_name".to_string(),
+                        success: false,
+                        route: "model_manager:delete_model".to_string(),
+                    }
+                }
+            };
+            let confirm = params.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !confirm {
+                return DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("⚠️ 安全保护：删除模型 [{}] 将连带删除配置。若确认删除，请在参数中附加 {{\"confirm\": true}}。", model_query),
+                    success: false,
+                    route: "model_manager:delete_model".to_string(),
+                };
+            }
+
+            match conn.execute("DELETE FROM models WHERE id = ?1 OR name = ?1", rusqlite::params![model_query]) {
+                Ok(count) => {
+                    if count > 0 {
+                        DispatchResult {
+                            stdout: format!("✅ 已成功删除模型: {}", model_query),
+                            stderr: String::new(),
+                            success: true,
+                            route: "model_manager:delete_model".to_string(),
+                        }
+                    } else {
+                        DispatchResult {
+                            stdout: String::new(),
+                            stderr: format!("未找到模型 [{}]", model_query),
+                            success: false,
+                            route: "model_manager:delete_model".to_string(),
+                        }
+                    }
+                }
+                Err(e) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("删除模型失败: {}", e),
+                    success: false,
+                    route: "model_manager:delete_model".to_string(),
+                },
+            }
+        }
+        _ => DispatchResult {
+            stdout: String::new(),
+            stderr: format!("❌ 未知的 model_manager 动作 action='{}'。支持的动作: list_specs, upsert_spec, delete_spec, list_platforms, add_model, delete_model", act),
+            success: false,
+            route: "model_manager:unknown".to_string(),
+        },
+    }
+}
+
