@@ -156,11 +156,11 @@ pub fn execute_command_inner(
     };
 
     if let Some(plugin) = registry.get(&plugin_name) {
-        println!("执行动作调用外部插件: {}/{}", plugin_name, tool_name);
+        println!("执行动作调用外部插件: {}/{} (会话: {})", plugin_name, tool_name, session_id);
         let call_res = if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.block_on(plugin.call_tool(&tool_name, params.clone()))
+            handle.block_on(plugin.call_tool_for_session(Some(session_id), &tool_name, params.clone()))
         } else {
-            futures::executor::block_on(plugin.call_tool(&tool_name, params.clone()))
+            futures::executor::block_on(plugin.call_tool_for_session(Some(session_id), &tool_name, params.clone()))
         };
         match call_res {
             Ok(out) => {

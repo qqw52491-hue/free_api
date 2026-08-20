@@ -242,9 +242,10 @@ pub async fn run_agent_main_loop(
         eprintln!("加载自定义提示词与 Skill 失败: {}", error);
         String::new()
     });
-    // 5. 查询所有 MCP Server 的工具列表，追加到菜单里
+    // 5. 查询所有 MCP Server 的工具列表并异步提前预热当前会话专属连接池 (Ahead of Time Prewarm)
     let mcp_tools_menu = {
         let registry = registry_state.lock().await;
+        registry.prewarm_all_for_session(&final_session_id);
         registry.format_tools_menu()
     };
 

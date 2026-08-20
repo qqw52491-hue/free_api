@@ -92,8 +92,13 @@ pub struct McpClient {
     pub config: PluginConfig,
     request_tx: Option<mpsc::Sender<RequestEnvelope>>,
     http_client: reqwest::Client,
-    session_id: Arc<RwLock<Option<String>>>,
-    init_lock: Arc<Mutex<()>>,
+    // 会话级 Session 池：key 为 chat_session_id，value 为该会话专属的远程 MCP Session ID
+    session_pool: Arc<RwLock<HashMap<String, String>>>,
+    // 全局默认 session_id（用于无具体会话上下文的探测与工具列表加载）
+    global_session_id: Arc<RwLock<Option<String>>>,
+    // 按会话隔离的异步初始化互斥锁：确保同一会话并发排队，不同会话互不阻塞
+    session_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
+    global_init_lock: Arc<Mutex<()>>,
     next_id: Arc<AtomicU64>,
     pub cached_tools: Arc<RwLock<Vec<McpToolDef>>>,
 }
@@ -113,8 +118,10 @@ impl McpClient {
                     config,
                     request_tx: None,
                     http_client,
-                    session_id: Arc::new(RwLock::new(None)),
-                    init_lock: Arc::new(Mutex::new(())),
+                    session_pool: Arc::new(RwLock::new(HashMap::new())),
+                    global_session_id: Arc::new(RwLock::new(None)),
+                    session_locks: Arc::new(RwLock::new(HashMap::new())),
+                    global_init_lock: Arc::new(Mutex::new(())),
                     next_id: Arc::new(AtomicU64::new(1)),
                     cached_tools: Arc::new(RwLock::new(Vec::new())),
                 });
@@ -240,40 +247,87 @@ impl McpClient {
             config,
             request_tx: Some(request_tx),
             http_client,
-            session_id: Arc::new(RwLock::new(None)),
-            init_lock: Arc::new(Mutex::new(())),
+            session_pool: Arc::new(RwLock::new(HashMap::new())),
+            global_session_id: Arc::new(RwLock::new(None)),
+            session_locks: Arc::new(RwLock::new(HashMap::new())),
+            global_init_lock: Arc::new(Mutex::new(())),
             next_id: Arc::new(AtomicU64::new(1)),
             cached_tools: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
-    pub async fn ensure_session_initialized(&self) -> Result<(), String> {
+    pub async fn get_session_lock(&self, chat_session_id: Option<&str>) -> Arc<Mutex<()>> {
+        match chat_session_id {
+            Some(sid) if !sid.trim().is_empty() => {
+                let r = self.session_locks.read().await;
+                if let Some(lock) = r.get(sid) {
+                    return lock.clone();
+                }
+                drop(r);
+                let mut w = self.session_locks.write().await;
+                w.entry(sid.to_string())
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone()
+            }
+            _ => self.global_init_lock.clone(),
+        }
+    }
+
+    pub async fn get_session_id(&self, chat_session_id: Option<&str>) -> Option<String> {
+        if let Some(sid) = chat_session_id {
+            if !sid.trim().is_empty() {
+                if let Some(mcp_sid) = self.session_pool.read().await.get(sid) {
+                    return Some(mcp_sid.clone());
+                }
+            }
+        }
+        self.global_session_id.read().await.clone()
+    }
+
+    pub async fn set_session_id(&self, chat_session_id: Option<&str>, new_sid: Option<String>) {
+        if let Some(sid) = chat_session_id {
+            if !sid.trim().is_empty() {
+                let mut w = self.session_pool.write().await;
+                if let Some(ref val) = new_sid {
+                    w.insert(sid.to_string(), val.clone());
+                } else {
+                    w.remove(sid);
+                }
+            }
+        }
+        let mut g = self.global_session_id.write().await;
+        *g = new_sid;
+    }
+
+    pub async fn ensure_session_initialized(&self, chat_session_id: Option<&str>) -> Result<(), String> {
         if self.config.url.is_some() {
-            // 快速路径：已就绪时无锁零等待
-            if self.session_id.read().await.is_some() {
+            // 快速路径：该会话专属 session 已就绪时无锁零等待
+            if self.get_session_id(chat_session_id).await.is_some() {
                 return Ok(());
             }
 
-            // 慢速路径：获取初始化互斥锁（排队执行，彻底杜绝并发 TOCTOU 竞态）
-            let _guard = self.init_lock.lock().await;
-            if self.session_id.read().await.is_some() {
+            // 慢速路径：获取该会话专属初始化互斥锁（排队执行，彻底杜绝并发 TOCTOU 竞态）
+            let lock = self.get_session_lock(chat_session_id).await;
+            let _guard = lock.lock().await;
+            if self.get_session_id(chat_session_id).await.is_some() {
                 return Ok(());
             }
 
-            self.initialize().await?;
+            self.initialize_for_session(chat_session_id).await?;
         }
         Ok(())
     }
 
-    pub async fn send_request(
+    pub async fn send_request_for_session(
         &self,
+        chat_session_id: Option<&str>,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         if method != "initialize" && self.config.url.is_some() {
-            let _ = self.ensure_session_initialized().await;
+            let _ = self.ensure_session_initialized(chat_session_id).await;
         }
-        let first_res = self.send_raw_request(method, params.clone()).await;
+        let first_res = self.send_raw_request_with_session(chat_session_id, method, params.clone()).await;
 
         // 🌟 自动自愈重试：仅当远程 MCP 明确提示 Session 真正失效时才重新握手
         // ⚠️ 绝不能把通用的 -32000 (Tool 内部执行报错，如正则格式不正确) 误判为 Session 丢失！
@@ -287,11 +341,12 @@ impl McpClient {
                     || err_msg.contains("401 Unauthorized");
 
                 if is_session_lost {
-                    println!("🔄 [MCP:{}] 检测到 Session 真正失效，持锁重新握手自愈...", self.config.name);
-                    let _guard = self.init_lock.lock().await;
-                    *self.session_id.write().await = None;
-                    if let Ok(()) = self.initialize().await {
-                        return self.send_raw_request(method, params).await;
+                    println!("🔄 [MCP:{}] 会话 {:?} Session 真正失效，持锁重新握手自愈...", self.config.name, chat_session_id);
+                    let lock = self.get_session_lock(chat_session_id).await;
+                    let _guard = lock.lock().await;
+                    self.set_session_id(chat_session_id, None).await;
+                    if let Ok(()) = self.initialize_for_session(chat_session_id).await {
+                        return self.send_raw_request_with_session(chat_session_id, method, params).await;
                     }
                 }
             }
@@ -300,8 +355,82 @@ impl McpClient {
         first_res
     }
 
-    async fn send_raw_request(
+    pub async fn send_request(
         &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.send_request_for_session(None, method, params).await
+    }
+
+    pub async fn call_tool_for_session(
+        &self,
+        chat_session_id: Option<&str>,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.send_request_for_session(
+            chat_session_id,
+            "tools/call",
+            json!({ "name": tool_name, "arguments": arguments }),
+        )
+        .await
+    }
+
+    pub async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.call_tool_for_session(None, tool_name, arguments).await
+    }
+
+    pub async fn initialize(&self) -> Result<(), String> {
+        self.initialize_for_session(None).await
+    }
+
+    pub async fn initialize_for_session(&self, chat_session_id: Option<&str>) -> Result<(), String> {
+        let res = self
+            .send_raw_request_with_session(
+                chat_session_id,
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "clientInfo": { "name": "free-api-agent", "version": "0.1.0" }
+                }),
+            )
+            .await;
+        
+        // 若为原生 HTTP 远程服务，在握手成功后发送 initialized 通知
+        if self.config.url.is_some() {
+            if let Some(ref url) = self.config.url {
+                let mut req_builder = self
+                    .http_client
+                    .post(url)
+                    .header("Accept", "application/json, text/event-stream")
+                    .json(&json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized",
+                        "params": {}
+                    }));
+                for (k, v) in &self.config.headers {
+                    let val = resolve_env_value(v).unwrap_or_else(|_| v.clone());
+                    req_builder = req_builder.header(k, val);
+                }
+                if let Some(sid) = self.get_session_id(chat_session_id).await {
+                    req_builder = req_builder.header("mcp-session-id", sid);
+                }
+                let _ = req_builder.send().await;
+            }
+        }
+
+        res.map(|_| ())
+    }
+
+    async fn send_raw_request_with_session(
+        &self,
+        chat_session_id: Option<&str>,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
@@ -326,11 +455,11 @@ impl McpClient {
                 req_builder = req_builder.header(k, val);
             }
 
-            let current_sid = self.session_id.read().await.clone();
+            let current_sid = self.get_session_id(chat_session_id).await;
             if let Some(ref sid) = current_sid {
                 req_builder = req_builder.header("mcp-session-id", sid);
             }
-            println!("🚀 [MCP:{}] 发送 HTTP 请求: method={}, id={}, has_sid={:?}", self.config.name, method, id, current_sid);
+            println!("🚀 [MCP:{}] 发送 HTTP 请求 ({:?}): method={}, id={}, has_sid={:?}", self.config.name, chat_session_id, method, id, current_sid);
 
             let resp = match tokio::time::timeout(Duration::from_secs(60), req_builder.send()).await {
                 Ok(Ok(r)) => r,
@@ -347,9 +476,8 @@ impl McpClient {
                     if let Ok(sid_str) = sid_header.to_str() {
                         let clean = sid_str.trim().to_string();
                         if !clean.is_empty() {
-                            println!("🔑 [MCP:{}] 捕获到 Response Header Session ID: {}", self.config.name, clean);
-                            let mut guard = self.session_id.write().await;
-                            *guard = Some(clean);
+                            println!("🔑 [MCP:{}] 捕获到 Session ID ({:?}): {}", self.config.name, chat_session_id, clean);
+                            self.set_session_id(chat_session_id, Some(clean)).await;
                             break;
                         }
                     }
@@ -371,11 +499,9 @@ impl McpClient {
             // 2. 从 Response JSON 提取会话 ID（兼容 FastMCP / TS MCP SDK）
             if let Some(res_obj) = json_resp.result.as_ref().and_then(|r| r.as_object()) {
                 if let Some(sid_val) = res_obj.get("sessionId").and_then(|v| v.as_str()) {
-                    let mut guard = self.session_id.write().await;
-                    *guard = Some(sid_val.to_string());
+                    self.set_session_id(chat_session_id, Some(sid_val.to_string())).await;
                 } else if let Some(meta_sid) = res_obj.get("_meta").and_then(|m| m.get("sessionId")).and_then(|v| v.as_str()) {
-                    let mut guard = self.session_id.write().await;
-                    *guard = Some(meta_sid.to_string());
+                    self.set_session_id(chat_session_id, Some(meta_sid.to_string())).await;
                 }
             }
 
@@ -402,53 +528,12 @@ impl McpClient {
         }
     }
 
-    pub async fn call_tool(
+    pub async fn send_raw_request(
         &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
+        method: &str,
+        params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        self.send_request(
-            "tools/call",
-            json!({ "name": tool_name, "arguments": arguments }),
-        )
-        .await
-    }
-
-    pub async fn initialize(&self) -> Result<(), String> {
-        let res = self
-            .send_raw_request(
-                "initialize",
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": { "tools": {} },
-                    "clientInfo": { "name": "free-api-agent", "version": "0.1.0" }
-                }),
-            )
-            .await;
-        
-        // 若为原生 HTTP 远程服务，在握手成功后发送 initialized 通知
-        if self.config.url.is_some() {
-            if let Some(ref url) = self.config.url {
-                let mut req_builder = self
-                    .http_client
-                    .post(url)
-                    .header("Accept", "application/json, text/event-stream")
-                    .json(&json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/initialized",
-                        "params": {}
-                    }));
-                for (k, v) in &self.config.headers {
-                    let val = resolve_env_value(v).unwrap_or_else(|_| v.clone());
-                    req_builder = req_builder.header(k, val);
-                }
-                if let Some(ref sid) = *self.session_id.read().await {
-                    req_builder = req_builder.header("mcp-session-id", sid);
-                }
-                let _ = req_builder.send().await;
-            }
-        }
-        res.map(|_| ())
+        self.send_raw_request_with_session(None, method, params).await
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>, String> {
@@ -535,6 +620,19 @@ impl PluginRegistry {
 
     pub fn get(&self, name: &str) -> Option<Arc<McpClient>> {
         self.clients.get(name).cloned()
+    }
+
+    /// 🚀 提前异步预热指定会话专属的远程 MCP 连接池 (Ahead of Time Warm-up)
+    pub fn prewarm_all_for_session(&self, chat_session_id: &str) {
+        for client in self.clients.values() {
+            if client.config.url.is_some() {
+                let c = client.clone();
+                let sid = chat_session_id.to_string();
+                tokio::spawn(async move {
+                    let _ = c.ensure_session_initialized(Some(&sid)).await;
+                });
+            }
+        }
     }
 
     pub fn plugin_names(&self) -> Vec<&str> {
