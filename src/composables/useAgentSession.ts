@@ -504,7 +504,13 @@ export function useAgentSession(sessionId: string) {
 
     function setRunState(nextState: AgentRunState, description?: string) {
         runState.value = nextState;
-        statusDescription.value = description || AGENT_RUN_STATE_CATALOG[nextState].description;
+        let cleanDesc = description?.trim();
+        if (cleanDesc) {
+            // 防止长 JSON 或巨型错误报告撑爆顶栏，仅保留首行简要
+            const firstLine = cleanDesc.split("\n")[0].trim();
+            cleanDesc = firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine;
+        }
+        statusDescription.value = cleanDesc || AGENT_RUN_STATE_CATALOG[nextState].description;
         const terminal = ["succeeded", "failed", "cancelled"].includes(nextState);
         if (terminal) {
             runTerminal.value = true;

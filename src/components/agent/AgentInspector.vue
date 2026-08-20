@@ -337,7 +337,19 @@ defineExpose({
 .inspector-top { display: flex; justify-content: space-between; gap: 12px; padding: 14px 16px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); background: rgba(255, 255, 255, 0.015); }
 .inspector-top span { color: #71717a; font-size: 9px; font-weight: 800; letter-spacing: .1em; }
 .inspector-top h2 { margin: 4px 0 2px; color: #f4f4f5; font-size: 15px; font-weight: 650; }
-.inspector-top p { max-width: 210px; margin: 0; color: #a1a1aa; font-size: 11px; line-height: 1.45; }
+.inspector-top p { 
+    max-width: 210px; 
+    margin: 0; 
+    color: #a1a1aa; 
+    font-size: 11px; 
+    line-height: 1.45; 
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: break-all;
+}
 .inspector-top-controls { display: flex; align-items: center; gap: 8px; }
 .btn-close-inspector {
     display: grid;
