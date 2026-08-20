@@ -437,17 +437,25 @@ pub async fn run_call_llm_and_run_tool_phases(
                 if !context.fetched_tools.contains(&attempted_tool) {
                     let tool_filename = format!("{}.md", plugin_name);
                     let resource_dir = app.path().resource_dir().unwrap_or_default();
-                    let tool_path_production =
-                        resource_dir.join("prompts/tools").join(&tool_filename);
-                    let tool_path_dev =
-                        std::path::PathBuf::from("prompts/tools").join(&tool_filename);
+                    let candidate_paths = [
+                        resource_dir.join("prompts/tools").join(&tool_filename),
+                        std::path::PathBuf::from("src-tauri/prompts/tools").join(&tool_filename),
+                        std::path::PathBuf::from("prompts/tools").join(&tool_filename),
+                        std::path::PathBuf::from("../src-tauri/prompts/tools").join(&tool_filename),
+                        resource_dir.join("prompts/skills").join(&tool_filename),
+                        std::path::PathBuf::from("src-tauri/prompts/skills").join(&tool_filename),
+                        std::path::PathBuf::from("prompts/skills").join(&tool_filename),
+                        std::path::PathBuf::from("../src-tauri/prompts/skills").join(&tool_filename),
+                    ];
 
                     let mut tool_detail = String::new();
-                    if let Ok(tool_md) = std::fs::read_to_string(&tool_path_production)
-                        .or_else(|_| std::fs::read_to_string(&tool_path_dev))
-                    {
-                        tool_detail = tool_md;
-                    } else {
+                    for cp in &candidate_paths {
+                        if let Ok(tool_md) = std::fs::read_to_string(cp) {
+                            tool_detail = tool_md;
+                            break;
+                        }
+                    }
+                    if tool_detail.is_empty() {
                         // 尝试从 MCP 插件中获取准确的 JSON Schema 规格
                         let detail = {
                             let registry = registry_state.inner().lock().await;

@@ -201,34 +201,43 @@ pub async fn run_agent_main_loop(
 数据行会在工具返回时立刻持久化，并按当前 session 隔离；模型默认只看到资源目录与摘要，需要具体数据时再分页查询。
 "#;
     let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
-    let tools_dir = app
-        .path()
-        .resource_dir()
-        .unwrap_or_default()
-        .join("prompts/tools");
-    let tools_dir_dev = std::path::PathBuf::from("prompts/tools");
+    let candidate_dirs = [
+        app.path().resource_dir().unwrap_or_default().join("prompts/tools"),
+        std::path::PathBuf::from("src-tauri/prompts/tools"),
+        std::path::PathBuf::from("prompts/tools"),
+        std::path::PathBuf::from("../src-tauri/prompts/tools"),
+    ];
 
-    let entries = std::fs::read_dir(&tools_dir)
-        .or_else(|_| std::fs::read_dir(&tools_dir_dev))
-        .unwrap_or_else(|_| return std::fs::read_dir(".").unwrap()); // 容错处理
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("md") {
-            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                // 抓取简短的 summary 标签内容
-                let summary = content
-                    .find("<summary>")
-                    .and_then(|start| {
-                        content
-                            .find("</summary>")
-                            .map(|end| &content[start + 9..end])
-                    })
-                    .unwrap_or("无详细描述");
-                local_tools_menu.push_str(&format!("- {}: {}\n", name, summary));
+    let mut found_any = false;
+    for dir in &candidate_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut read_count = 0;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let summary = content
+                            .find("<summary>")
+                            .and_then(|start| {
+                                content
+                                    .find("</summary>")
+                                    .map(|end| &content[start + 9..end])
+                            })
+                            .unwrap_or("无详细描述");
+                        local_tools_menu.push_str(&format!("- {}: {}\n", name, summary));
+                        read_count += 1;
+                    }
+                }
+            }
+            if read_count > 0 {
+                found_any = true;
+                break;
             }
         }
+    }
+    if !found_any {
+        local_tools_menu.push_str("- finish: 终态交付动作\n- ask_human: 询问人类或请求确认\n- model_manager: 模型规格与渠道配置管理工具\n- web_search: 全网实时搜索引擎\n- web_fetch: 网页正文 Markdown 提取工具\n- task_store: 结构化数据存储与分页检索\n- search: 代码与历史日志联邦检索\n");
     }
 
     // 3. 从当前工作区向上读取 AGENTS.md / HUB.md；内容未变时走进程内哈希缓存。
@@ -661,27 +670,28 @@ pub async fn run_agent_main_loop(
             if !context.fetched_tools.contains(&tool_key) {
                 let tool_filename = format!("{}.md", tool_key);
                 let resource_dir = app.path().resource_dir().unwrap_or_default();
-                let tool_path_production = resource_dir.join("prompts/tools").join(&tool_filename);
-                let tool_path_dev = std::path::PathBuf::from("prompts/tools").join(&tool_filename);
+                let candidate_paths = [
+                    resource_dir.join("prompts/tools").join(&tool_filename),
+                    std::path::PathBuf::from("src-tauri/prompts/tools").join(&tool_filename),
+                    std::path::PathBuf::from("prompts/tools").join(&tool_filename),
+                    std::path::PathBuf::from("../src-tauri/prompts/tools").join(&tool_filename),
+                    resource_dir.join("prompts/skills").join(&tool_filename),
+                    std::path::PathBuf::from("src-tauri/prompts/skills").join(&tool_filename),
+                    std::path::PathBuf::from("prompts/skills").join(&tool_filename),
+                    std::path::PathBuf::from("../src-tauri/prompts/skills").join(&tool_filename),
+                ];
 
                 let mut tool_detail = String::new();
-                if let Ok(tool_md) = std::fs::read_to_string(&tool_path_production)
-                    .or_else(|_| std::fs::read_to_string(&tool_path_dev))
-                {
-                    tool_detail = tool_md;
-                } else {
-                    // 同时检查 prompts/skills/ 目录（按需动态加载的 Skill 完整手册）
-                    let skill_path_prod = resource_dir.join("prompts/skills").join(&tool_filename);
-                    let skill_path_dev = std::path::PathBuf::from("prompts/skills").join(&tool_filename);
-                    if let Ok(skill_md) = std::fs::read_to_string(&skill_path_prod)
-                        .or_else(|_| std::fs::read_to_string(&skill_path_dev))
-                    {
-                        tool_detail = skill_md;
-                    } else {
-                        let registry = registry_state.lock().await;
-                        if registry.plugin_names().contains(&tool_key.as_str()) {
-                            tool_detail = registry.format_tool_detail(&tool_key);
-                        }
+                for cp in &candidate_paths {
+                    if let Ok(content) = std::fs::read_to_string(cp) {
+                        tool_detail = content;
+                        break;
+                    }
+                }
+                if tool_detail.is_empty() {
+                    let registry = registry_state.lock().await;
+                    if registry.plugin_names().contains(&tool_key.as_str()) {
+                        tool_detail = registry.format_tool_detail(&tool_key);
                     }
                 }
 
