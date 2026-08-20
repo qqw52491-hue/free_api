@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginConfig {
@@ -38,15 +38,16 @@ fn resolve_env_value(value: &str) -> Result<String, String> {
 }
 
 #[derive(Debug, Serialize)]
-struct JsonRpcRequest {
-    jsonrpc: &'static str,
-    id: u64,
-    method: String,
-    params: serde_json::Value,
+pub struct JsonRpcRequest {
+    pub jsonrpc: &'static str,
+    pub id: u64,
+    pub method: String,
+    pub params: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
-struct JsonRpcResponse {
+pub struct JsonRpcResponse {
+    pub jsonrpc: Option<String>,
     pub id: Option<serde_json::Value>,
     pub result: Option<serde_json::Value>,
     pub error: Option<serde_json::Value>,
@@ -92,6 +93,7 @@ pub struct McpClient {
     request_tx: Option<mpsc::Sender<RequestEnvelope>>,
     http_client: reqwest::Client,
     session_id: Arc<RwLock<Option<String>>>,
+    init_lock: Arc<Mutex<()>>,
     next_id: Arc<AtomicU64>,
     pub cached_tools: Arc<RwLock<Vec<McpToolDef>>>,
 }
@@ -112,6 +114,7 @@ impl McpClient {
                     request_tx: None,
                     http_client,
                     session_id: Arc::new(RwLock::new(None)),
+                    init_lock: Arc::new(Mutex::new(())),
                     next_id: Arc::new(AtomicU64::new(1)),
                     cached_tools: Arc::new(RwLock::new(Vec::new())),
                 });
@@ -238,6 +241,7 @@ impl McpClient {
             request_tx: Some(request_tx),
             http_client,
             session_id: Arc::new(RwLock::new(None)),
+            init_lock: Arc::new(Mutex::new(())),
             next_id: Arc::new(AtomicU64::new(1)),
             cached_tools: Arc::new(RwLock::new(Vec::new())),
         })
@@ -245,10 +249,18 @@ impl McpClient {
 
     pub async fn ensure_session_initialized(&self) -> Result<(), String> {
         if self.config.url.is_some() {
-            let has_session = self.session_id.read().await.is_some();
-            if !has_session {
-                self.initialize().await?;
+            // 快速路径：已就绪时无锁零等待
+            if self.session_id.read().await.is_some() {
+                return Ok(());
             }
+
+            // 慢速路径：获取初始化互斥锁（排队执行，彻底杜绝并发 TOCTOU 竞态）
+            let _guard = self.init_lock.lock().await;
+            if self.session_id.read().await.is_some() {
+                return Ok(());
+            }
+
+            self.initialize().await?;
         }
         Ok(())
     }
@@ -263,16 +275,20 @@ impl McpClient {
         }
         let first_res = self.send_raw_request(method, params.clone()).await;
 
-        // 🌟 自动自愈重试：当远程 MCP 提示 Session 过期或未找到（如 -32001 / -32000 / expired），自动重新握手并重试一次
+        // 🌟 自动自愈重试：仅当远程 MCP 明确提示 Session 真正失效时才重新握手
+        // ⚠️ 绝不能把通用的 -32000 (Tool 内部执行报错，如正则格式不正确) 误判为 Session 丢失！
         if method != "initialize" && self.config.url.is_some() {
             if let Err(ref err_msg) = first_res {
-                if err_msg.contains("-32001")
-                    || err_msg.contains("-32000")
-                    || err_msg.contains("Session not found")
-                    || err_msg.contains("expired")
+                let is_session_lost = err_msg.contains("Session not found")
                     || err_msg.contains("No valid session ID")
-                {
-                    println!("🔄 [MCP:{}] 检测到 Session 过期，自动重新握手自愈...", self.config.name);
+                    || err_msg.contains("session expired")
+                    || err_msg.contains("Invalid session")
+                    || err_msg.contains("session destroyed")
+                    || err_msg.contains("401 Unauthorized");
+
+                if is_session_lost {
+                    println!("🔄 [MCP:{}] 检测到 Session 真正失效，持锁重新握手自愈...", self.config.name);
+                    let _guard = self.init_lock.lock().await;
                     *self.session_id.write().await = None;
                     if let Ok(()) = self.initialize().await {
                         return self.send_raw_request(method, params).await;
