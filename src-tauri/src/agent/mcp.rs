@@ -450,7 +450,7 @@ impl McpClient {
             jsonrpc: "2.0",
             id,
             method: method.to_string(),
-            params,
+            params: params.clone(),
         };
 
         // 🌟 模式 A: 原生 HTTP / SSE Streamable 直连发送 (0 外部进程)
@@ -472,10 +472,19 @@ impl McpClient {
             }
             println!("🚀 [MCP:{}] 发送 HTTP 请求 ({:?}): method={}, id={}, has_sid={:?}", self.config.name, chat_session_id, method, id, current_sid);
 
-            let resp = match tokio::time::timeout(Duration::from_secs(60), req_builder.send()).await {
+            // 动态计算该工具的超时时长：慢操作（如全库索引/深层扫描/构建任务）放宽至 180s，常规工具 60s
+            let tool_name_in_params = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let is_slow_tool = tool_name_in_params.contains("index_")
+                || tool_name_in_params.contains("search_code")
+                || tool_name_in_params.contains("build_")
+                || tool_name_in_params.contains("clone")
+                || tool_name_in_params.contains("compile");
+            let timeout_secs = if is_slow_tool { 180 } else { 60 };
+
+            let resp = match tokio::time::timeout(Duration::from_secs(timeout_secs), req_builder.send()).await {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => return Err(format!("[MCP:{}] HTTP 请求失败: {}", self.config.name, e)),
-                Err(_) => return Err(format!("[MCP:{}] HTTP 请求超时 (60s 熔断)", self.config.name)),
+                Err(_) => return Err(format!("[MCP:{}] HTTP 请求超时 ({}s 熔断)", self.config.name, timeout_secs)),
             };
 
             let resp_status = resp.status();
@@ -524,15 +533,23 @@ impl McpClient {
 
         // 🌟 模式 B: stdio 管道多路复用发送
         if let Some(ref tx) = self.request_tx {
+            let tool_name_in_params = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let is_slow_tool = tool_name_in_params.contains("index_")
+                || tool_name_in_params.contains("search_code")
+                || tool_name_in_params.contains("build_")
+                || tool_name_in_params.contains("clone")
+                || tool_name_in_params.contains("compile");
+            let timeout_secs = if is_slow_tool { 180 } else { 60 };
+
             let (resp_tx, resp_rx) = oneshot::channel();
             tx.send((req, resp_tx))
                 .await
                 .map_err(|_| format!("[MCP:{}] 插件后台通信通道已断开", self.config.name))?;
 
-            match tokio::time::timeout(Duration::from_secs(60), resp_rx).await {
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), resp_rx).await {
                 Ok(Ok(res)) => res,
                 Ok(Err(_)) => Err(format!("[MCP:{}] 响应通道在接收前断开", self.config.name)),
-                Err(_) => Err(format!("[MCP:{}] 请求超时 (60s 熔断)", self.config.name)),
+                Err(_) => Err(format!("[MCP:{}] 请求超时 ({}s 熔断)", self.config.name, timeout_secs)),
             }
         } else {
             Err(format!("[MCP:{}] 未找到可用通信通道", self.config.name))

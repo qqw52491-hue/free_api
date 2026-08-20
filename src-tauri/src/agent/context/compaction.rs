@@ -347,6 +347,20 @@ impl SandwichContext {
             };
             // 关键优化：在现有摘要卡之后追加新卡，永不改动旧摘要卡字节，最大化 Prompt Cache 命中率！
             self.turns_history.insert(existing_summary_cards, compact_card);
+
+            // 🌟 核心增强：从压缩归档中提取高价值架构事实与踩坑教训，沉淀至工作台事实卡 (Memories)
+            if archive_text.contains("关键事实") || archive_text.contains("踩坑记录") || archive_text.contains("架构决策") {
+                for line in archive_text.lines() {
+                    let trimmed = line.trim();
+                    if (trimmed.starts_with("- ") || trimmed.starts_with("* ")) && trimmed.len() > 6 {
+                        let fact_body = trimmed.trim_start_matches("- ").trim_start_matches("* ").trim();
+                        if !fact_body.is_empty() && fact_body.len() <= 200 && self.memories.len() < 8 {
+                            let key = format!("auto_fact_{}", self.memories.len() + 1);
+                            self.memories.entry(key).or_insert_with(|| fact_body.to_string());
+                        }
+                    }
+                }
+            }
         }
 
         // ── 5. 绝对保底降级：若压缩后仍然超出低水位线缓冲，降级最老的用户输出为纯句柄 ──

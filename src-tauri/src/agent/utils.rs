@@ -61,14 +61,25 @@ pub fn sample_execution_log(raw: &str, head_chars: usize, tail_chars: usize) -> 
     let tail: String = raw.chars().skip(char_count.saturating_sub(tail_chars)).collect();
     let middle_omitted = char_count.saturating_sub(head_chars + tail_chars);
 
-    // 从中间被裁剪的文本中提取并聚合关键错误行 (去重 + 计数 + 长度截断)
-    let middle_text: String = raw.chars().skip(head_chars).take(middle_omitted).collect();
+    // 零堆内存中间分配：通过行迭代器直接在原字符串切片上扫描中间被省略区间的关键错误行 (去重 + 计数 + 长度截断)
     let mut error_counts: Vec<(String, usize)> = Vec::new();
     let mut total_error_chars = 0usize;
     const MAX_ERROR_BUDGET_CHARS: usize = 800;
     const MAX_UNIQUE_ERRORS: usize = 15;
 
-    for line in middle_text.lines() {
+    let tail_start_char = char_count.saturating_sub(tail_chars);
+    let mut current_char_idx = 0;
+
+    for line in raw.lines() {
+        let line_len = line.chars().count();
+        let line_start = current_char_idx;
+        let line_end = current_char_idx + line_len;
+        current_char_idx = line_end + 1; // 计入换行符
+
+        // 跳过完全落在头部已展示或尾部已展示区间的行
+        if line_end <= head_chars || line_start >= tail_start_char {
+            continue;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;

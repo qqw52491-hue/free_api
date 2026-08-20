@@ -185,9 +185,12 @@ impl DurableAgentContext {
         context.active_tool_detail.clear();
         context.carry_memories = false;
 
+        // 🌟 核心防超窗保护：恢复后主动执行自适应 Token 预算压缩，确保历史不超模型上下文
+        context.maybe_compact_history();
+
         if self.needs_observation_refresh {
             context.add_error_feedback(
-                "【系统恢复提示】任务从 checkpoint 恢复。浏览器连接和 DOM 可能已变化，之前保存的元素 ID 不可信；执行交互前必须先 extract 重新获取页面状态。",
+                "【系统恢复提示】任务从 checkpoint 恢复。请确认当前工作区状态并继续执行。",
             );
         }
     }
