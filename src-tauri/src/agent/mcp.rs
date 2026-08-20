@@ -385,6 +385,17 @@ impl McpClient {
         self.call_tool_for_session(None, tool_name, arguments).await
     }
 
+    /// 📡 MCP 官方标准心跳探测 (Ping Probe)
+    pub async fn ping_for_session(&self, chat_session_id: Option<&str>) -> Result<(), String> {
+        self.send_request_for_session(chat_session_id, "ping", json!({}))
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn ping(&self) -> Result<(), String> {
+        self.ping_for_session(None).await
+    }
+
     pub async fn initialize(&self) -> Result<(), String> {
         self.initialize_for_session(None).await
     }
@@ -632,6 +643,15 @@ impl PluginRegistry {
                     let _ = c.ensure_session_initialized(Some(&sid)).await;
                 });
             }
+        }
+    }
+
+    /// 📡 探测指定插件在当前会话下是否健康存活
+    pub async fn ping_plugin(&self, name: &str, chat_session_id: Option<&str>) -> Result<(), String> {
+        if let Some(client) = self.get(name) {
+            client.ping_for_session(chat_session_id).await
+        } else {
+            Err(format!("未找到插件: {}", name))
         }
     }
 
