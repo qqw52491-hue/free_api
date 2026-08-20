@@ -601,7 +601,7 @@ export function useAgentSession(sessionId: string) {
         }
 
         const isPreviousCompleted = targetIdx >= 0 && (steps.value[targetIdx].status === "failed" || steps.value[targetIdx].status === "succeeded");
-        if (targetIdx >= 0 && (!isPreviousCompleted || status === "failed" || status === "succeeded")) {
+        if (targetIdx >= 0 && !isPreviousCompleted) {
             const current = steps.value[targetIdx];
             steps.value[targetIdx] = {
                 ...current,
@@ -617,7 +617,7 @@ export function useAgentSession(sessionId: string) {
             };
         } else {
             const newStep: AgentStepItem = {
-                id: `step-${stepId}-${Date.now()}`,
+                id: `step-${stepId}-attempt-${steps.value.length}`,
                 stepId,
                 description: toText(payload.description) || `${name}: ${action}`,
                 planId: toText(payload.plan_id) || "plan-default",
@@ -844,10 +844,19 @@ export function useAgentSession(sessionId: string) {
             return;
         }
 
+        function getLatestStep(stepId: number): AgentStepItem | undefined {
+            for (let i = steps.value.length - 1; i >= 0; i--) {
+                if (steps.value[i].stepId === stepId) {
+                    return steps.value[i];
+                }
+            }
+            return undefined;
+        }
+
         // 步骤开始 step_start
         if (eventType === "step_start") {
             const stepId = numberOrUndefined(payload.step_id) ?? 0;
-            const existing = steps.value.find(s => s.stepId === stepId);
+            const existing = getLatestStep(stepId);
             if (existing) {
                 existing.status = "running";
                 if (payload.description) existing.description = toText(payload.description);
@@ -859,7 +868,7 @@ export function useAgentSession(sessionId: string) {
         // 步骤完成 step_done
         if (eventType === "step_done") {
             const stepId = numberOrUndefined(payload.step_id) ?? 0;
-            const existing = steps.value.find(s => s.stepId === stepId);
+            const existing = getLatestStep(stepId);
             if (existing) {
                 existing.status = "succeeded";
                 if (payload.output) {
@@ -875,7 +884,7 @@ export function useAgentSession(sessionId: string) {
         // 步骤异常 step_error (单步报错重试，不是整个任务终态)
         if (eventType === "step_error") {
             const stepId = numberOrUndefined(payload.step_id) ?? 0;
-            const existing = steps.value.find(s => s.stepId === stepId);
+            const existing = getLatestStep(stepId);
             if (existing) {
                 existing.status = "failed";
                 if (payload.output) {

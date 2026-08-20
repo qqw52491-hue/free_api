@@ -139,7 +139,7 @@
     </div>
 </template>
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import type { AgentHumanForm, AgentStepItem, AgentToolStatus } from "./types";
 import { formatClock, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
@@ -225,14 +225,26 @@ function togglePlan(planId: string, currentStatus: AgentToolStatus, isThinking: 
 
 const BOTTOM_THRESHOLD_PX = 56;
 function isNearBottom(element: HTMLElement) { return element.scrollHeight - element.scrollTop - element.clientHeight <= BOTTOM_THRESHOLD_PX; }
-function followLatest(smooth = true) {
-    if (followLiveTail.value && props.isRunning) {
-        nextTick(() => streamElement.value?.scrollTo({ top: streamElement.value.scrollHeight, behavior: smooth ? "smooth" : "auto" }));
+let scrollRafId: number | null = null;
+function followLatest() {
+    if (followLiveTail.value && props.isRunning && streamElement.value) {
+        if (scrollRafId !== null) cancelAnimationFrame(scrollRafId);
+        scrollRafId = requestAnimationFrame(() => {
+            if (streamElement.value) {
+                streamElement.value.scrollTop = streamElement.value.scrollHeight;
+            }
+            scrollRafId = null;
+        });
     }
 }
 function onStreamScroll(event: Event) { followLiveTail.value = isNearBottom(event.currentTarget as HTMLElement); }
-function resumeLiveFollow() { followLiveTail.value = true; followLatest(false); }
-function followThoughtTail() { nextTick(() => Array.from(document.querySelectorAll<HTMLElement>(".active-thought-content")).forEach((element) => { element.scrollTop = element.scrollHeight; })); }
+function resumeLiveFollow() { followLiveTail.value = true; followLatest(); }
+function followThoughtTail() {
+    const el = streamElement.value?.querySelector<HTMLElement>(".active-thought-content");
+    if (el) {
+        el.scrollTop = el.scrollHeight;
+    }
+}
 watch(() => props.isThinking, (running, wasRunning) => { if (running && !wasRunning) activeThoughtStartedAt.value = Date.now(); if (!running && wasRunning) activeThoughtStartedAt.value = null; }, { immediate: true });
 
 // --- 🌟 真正的实时流式 Markdown 增量渲染与光标 ---
@@ -242,6 +254,7 @@ watch(
     () => [props.steps.length, props.isRunning, props.finalSummary, props.thought],
     () => {
         if (props.isRunning && followLiveTail.value) {
+            followThoughtTail();
             followLatest();
         }
     }
@@ -342,8 +355,8 @@ function isRichArtifact(artifact: string): boolean {
 }
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败" }[status]; }
 function formatConversationTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "numeric", day: "numeric" }); }
-watch(() => [timelineEntries.value.length, props.thought, props.completionMessage, props.historyTurns.length], () => { followThoughtTail(); followLatest(); }, { flush: "post" });
-watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunning) { followLiveTail.value = true; followLatest(false); } if (!running && wasRunning) followLatest(); });
+watch(() => [timelineEntries.value.length, props.completionMessage, props.historyTurns.length], () => { followLatest(); }, { flush: "post" });
+watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunning) { followLiveTail.value = true; followLatest(); } if (!running && wasRunning) followLatest(); });
 </script>
 <style scoped>
 .process-tree {

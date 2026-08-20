@@ -312,10 +312,9 @@ impl SandwichContext {
             role: "user".to_string(),
             content: json!(format!(
                 "【❌ 格式或执行错误】\n{}\n\
-                🚨 警告：如果是找不到元素或页面发生过跳转，说明你眼前的 DOM 清单已失效！你必须立刻使用 `extract` 命令重新获取最新页面元素，绝对禁止继续盲目尝试点击其他旧 ID！\n\
-                请检查格式规则（勿用 XML/```），修正后立即重新输出正确 JSON。", 
+                请根据上述错误反思原因并调整策略，严格按照 System Prompt 要求输出合法的纯 JSON 格式！", 
                 error_msg
-            ))
+            )),
         };
         self.turns_history.push(msg);
     }
