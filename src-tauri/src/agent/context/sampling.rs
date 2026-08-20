@@ -35,23 +35,32 @@ impl SandwichContext {
         let ingress_tokens = conservative_token_estimate(output_summary);
         let ingress_cap = ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP;
 
+        let char_count = output_summary.chars().count();
+        let token_char_ratio = if char_count > 0 {
+            ingress_tokens as f64 / char_count as f64
+        } else {
+            1.0
+        };
+
         let feedback_str = if ingress_tokens > ingress_cap {
-            let mut head_chars = 1200;
-            let mut tail_chars = 1800;
+            let safe_cap_tokens = ingress_cap.saturating_sub(600) as f64; // Reserve for boilerplate & errors
+            let safe_cap_chars = (safe_cap_tokens / token_char_ratio).max(100.0) as usize;
+            let mut head_chars = (safe_cap_chars as f64 * 0.4) as usize;
+            let mut tail_chars = (safe_cap_chars as f64 * 0.6) as usize;
+
             let mut sampled = crate::agent::utils::sample_execution_log(output_summary, head_chars, tail_chars);
             let mut candidate = format!(
-                "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: {}\ntruncated: true\n{}\n\n[⚠️ 入口硬截断: 原始输出约 {} Tokens (上限 {} Tokens)。完整数据已在 SQLite。\n🔍 搜索关键词: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"search_step_output\", \"output_id\": \"{}\", \"pattern\": \"error\", \"context_lines\": 3}}}}\n📑 分段读取: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"get_step_output\", \"output_id\": \"{}\", \"offset\": 0, \"limit\": 3000}}}}] ",
+                "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: {}\ntruncated: true\n{}\n\n[⚠️ 入口硬截断: 原始输出约 {} Tokens (上限 {} Tokens)。完整数据已在 SQLite。\n⛔ 严格纪律警告: 结果包含 truncated: true，【绝对禁止】基于以上不完整的前缀/后缀信息直接下结论或认定任务成功！遇到此标记，你必须首先使用 get_step_output 或分页参数续读中间缺失的关键部分！\n🔍 搜索关键词: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"search_step_output\", \"output_id\": \"{}\", \"pattern\": \"error\", \"context_lines\": 3}}}}\n📑 分段读取: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"get_step_output\", \"output_id\": \"{}\", \"offset\": 0, \"limit\": 3000}}}}] ",
                 SAMPLER_VERSION, output_id, ingress_tokens, sampled, ingress_tokens, ingress_cap, output_id, output_id
             );
 
             // 闭环出口复检 (Sample -> Measure -> Trim 闭环保证)：
-            // 无论全中文、特殊字符或转义多密集，确保进入历史的消息在 conservative_token_estimate 下绝对 <= ingress_cap
-            while conservative_token_estimate(&candidate) > ingress_cap && (head_chars > 150 || tail_chars > 200) {
+            while conservative_token_estimate(&candidate) > ingress_cap && (head_chars > 100 || tail_chars > 150) {
                 head_chars = (head_chars as f64 * 0.70) as usize;
                 tail_chars = (tail_chars as f64 * 0.70) as usize;
                 sampled = crate::agent::utils::sample_execution_log(output_summary, head_chars, tail_chars);
                 candidate = format!(
-                    "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: {}\ntruncated: true\n{}\n\n[⚠️ 入口硬截断: 原始输出约 {} Tokens (上限 {} Tokens)。完整数据已在 SQLite。\n🔍 搜索关键词: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"search_step_output\", \"output_id\": \"{}\", \"pattern\": \"error\", \"context_lines\": 3}}}}\n📑 分段读取: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"get_step_output\", \"output_id\": \"{}\", \"offset\": 0, \"limit\": 3000}}}}] ",
+                    "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: {}\ntruncated: true\n{}\n\n[⚠️ 入口硬截断: 原始输出约 {} Tokens (上限 {} Tokens)。完整数据已在 SQLite。\n⛔ 严格纪律警告: 结果包含 truncated: true，【绝对禁止】基于以上不完整的前缀/后缀信息直接下结论或认定任务成功！遇到此标记，你必须首先使用 get_step_output 或分页参数续读中间缺失的关键部分！\n🔍 搜索关键词: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"search_step_output\", \"output_id\": \"{}\", \"pattern\": \"error\", \"context_lines\": 3}}}}\n📑 分段读取: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"get_step_output\", \"output_id\": \"{}\", \"offset\": 0, \"limit\": 3000}}}}] ",
                     SAMPLER_VERSION, output_id, ingress_tokens, sampled, ingress_tokens, ingress_cap, output_id, output_id
                 );
             }
