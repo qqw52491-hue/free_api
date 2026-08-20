@@ -267,13 +267,11 @@ pub fn run_plan_tree_sync(
     let feedback = report.to_llm_feedback();
 
     DispatchResult {
-        stdout: feedback,
+        stdout: feedback.clone(),
         stderr: if success {
             String::new()
         } else {
-            report
-                .error_summary
-                .unwrap_or_else(|| "Plan execution failed".to_string())
+            feedback
         },
         success,
         route: if success {
