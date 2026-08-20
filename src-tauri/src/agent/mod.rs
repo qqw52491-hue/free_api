@@ -19,12 +19,14 @@ pub mod types;
 pub mod utils;
 pub mod web_search;
 
+pub use checkpoint::*;
 pub use control::*;
 pub use dispatcher::*;
 pub use loop_runner::*;
 
 use crate::agent::checkpoint::{
-    load_checkpoint, recovery_decision, save_checkpoint, AgentCheckpoint, RecoveryDecision,
+    load_checkpoint, recovery_decision, save_checkpoint, AgentCheckpoint, AgentPhase,
+    RecoveryDecision,
 };
 use crate::agent::mcp::*;
 use crate::agent::run_state::{AgentRunEvent, AgentRunMachine, AgentRunState};
@@ -293,7 +295,7 @@ pub async fn run_agent_main_loop(
     // 崩溃恢复会沿用既有 checkpoint，不能重复追加用户消息；只有新轮次才写入消息历史。
     let existing_checkpoint = load_checkpoint(state.inner(), &final_session_id)?;
     let is_resuming_existing =
-        !crate::agent::conversation::should_start_new_turn(existing_checkpoint.as_ref(), &goal);
+        !crate::agent::conversation::should_start_new_turn(existing_checkpoint.as_ref());
     if !is_resuming_existing {
         crate::agent::conversation::begin_turn(
             state.inner(),
@@ -313,30 +315,25 @@ pub async fn run_agent_main_loop(
     }
     context.turns_history =
         crate::agent::conversation::recent_history(state.inner(), &final_session_id)?;
-    // checkpoint 是恢复的权威来源：只还原可持久化事实，连接、插件与工具详情由 Runtime 重建。
+    // checkpoint 是恢复的权威来源：只要上一轮任务尚未到终态 (Done/Failed)，一律无缝续接！
     let mut checkpoint = match existing_checkpoint {
-        Some(existing) if !existing.phase.is_terminal() && existing.data.user_goal == goal => {
+        Some(existing) if !existing.phase.is_terminal() => {
             existing.restore_context(&mut context);
-            existing
+            let mut cp = existing;
+            if cp.phase == AgentPhase::WaitUser {
+                if !goal.trim().is_empty() && cp.data.user_goal != goal {
+                    context.add_error_feedback(&format!("【人类回复】{}", goal));
+                }
+                // 保持原本的任务主目标不变
+                context.user_goal = cp.data.user_goal.clone();
+                cp.begin_planning(cp.step_id, &context);
+            }
+            cp
         }
         Some(existing) => {
-            // 同一 session 已结束或目标改变时，以乐观锁 revision 覆盖为新的运行快照。
+            // 同一 session 已达终态时，以乐观锁 revision 覆盖为新的运行快照。
             let mut fresh = AgentCheckpoint::new(final_session_id.clone(), &context);
             fresh.version = existing.version;
-            // ── 目标变更事件 ─────────────────────────────────────────────────────────
-            // 将新目标以 Write-Once 事件追加到历史流水，供两个用途：
-            //   1. 让模型在历史中能看到"任务目标已从 X 更新为 Y"的完整轨迹
-            //   2. 供 compaction 压缩时扫描【任务目标更新】标记，提升最新目标到 M1 静态区
-            if existing.data.user_goal != goal && !existing.data.user_goal.is_empty() {
-                context.turns_history.push(crate::agent::context::types::ChatMessage {
-                    role: "user".to_string(),
-                    content: serde_json::json!(format!(
-                        "【任务目标更新】\n{}\n（原目标: {}）",
-                        goal, existing.data.user_goal
-                    )),
-                });
-            }
-            // ─────────────────────────────────────────────────────────────────────────
             fresh
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),

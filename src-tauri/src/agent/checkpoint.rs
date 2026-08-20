@@ -5,6 +5,7 @@ use crate::db::DbState;
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use tauri::State;
 use uuid::Uuid;
 
 const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
@@ -433,6 +434,32 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentCheckpointSummary {
+    pub run_id: String,
+    pub phase: String,
+    pub step_id: usize,
+    pub user_goal: String,
+    pub last_error: Option<String>,
+    pub is_waiting_human: bool,
+}
+
+#[tauri::command]
+pub async fn get_agent_checkpoint(
+    state: State<'_, DbState>,
+    session_id: String,
+) -> Result<Option<AgentCheckpointSummary>, String> {
+    let checkpoint = load_checkpoint(state.inner(), &session_id)?;
+    Ok(checkpoint.map(|cp| AgentCheckpointSummary {
+        run_id: cp.run_id,
+        phase: cp.phase.as_str().to_string(),
+        step_id: cp.step_id,
+        user_goal: cp.data.user_goal,
+        last_error: cp.last_error,
+        is_waiting_human: cp.phase == AgentPhase::WaitUser,
+    }))
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {

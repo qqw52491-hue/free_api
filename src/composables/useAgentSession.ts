@@ -1025,37 +1025,77 @@ export function useAgentSession(sessionId: string) {
             appendLog(`[停止指令失败] ${toText(error)}`);
         }
     }
+    async function checkAndRestoreCheckpointState() {
+        try {
+            const cp = await invoke<{
+                run_id: string;
+                phase: string;
+                step_id: number;
+                user_goal: string;
+                last_error: string | null;
+                is_waiting_human: boolean;
+            } | null>("get_agent_checkpoint", { sessionId });
+            if (cp && cp.is_waiting_human) {
+                runTerminal.value = false;
+                setRunState("waiting_for_human", "Agent 正在等待你的输入。");
+                pauseReason.value = cp.last_error || "Agent 正在等待你的输入。";
+                currentGoal.value = cp.user_goal;
+                appendLog(`⏸️ [状态恢复] 会话正处于人工交互挂起状态 (步骤 #${cp.step_id + 1}): ${pauseReason.value}`);
+            }
+        } catch (e) {
+            console.error("检查 Checkpoint 状态失败:", e);
+        }
+    }
+
     async function answerHuman(answer: string) {
         const message = answer.trim();
         if (!message || isSendingHuman.value) return;
         isSendingHuman.value = true;
         try {
-            await invoke("send_human_intervention", { sessionId, message });
-            humanInput.value = "";
-            pauseReason.value = "";
-            humanForm.value = null;
-            setRunState("executing", "已收到人工回答，等待 Agent 继续执行。");
-            appendLog(`[人工回答] ${message}`);
-            autoScrollToBottom();
+            try {
+                await invoke("send_human_intervention", { sessionId, message });
+                humanInput.value = "";
+                pauseReason.value = "";
+                humanForm.value = null;
+                setRunState("executing", "已收到人工回答，等待 Agent 继续执行。");
+                appendLog(`[人工回答] ${message}`);
+                autoScrollToBottom();
+            } catch {
+                // 内存通道不存在（应用曾重启过），无缝唤醒主循环续跑
+                appendLog(`[人工回答] 正在携带回答唤醒并继续任务: ${message}`);
+                humanInput.value = "";
+                pauseReason.value = "";
+                humanForm.value = null;
+                await runAgent(message);
+            }
         } catch (error) {
             appendLog(`[人工回答失败] ${toText(error)}`);
         } finally {
             isSendingHuman.value = false;
         }
     }
+
     async function sendHumanInput() {
         const message = humanInput.value.trim();
         if (!message || isSendingHuman.value) return;
         isSendingHuman.value = true;
         try {
             if (isWaitingForHuman.value) {
-                // ask_human 的回答属于当前步骤的工具结果，不新增对话消息。
-                await invoke("send_human_intervention", { sessionId, message });
-                humanInput.value = "";
-                pauseReason.value = "";
-                humanForm.value = null;
-                setRunState("executing", "已收到人工回答，等待 Agent 继续执行。");
-                appendLog("[人工回答] 已写入当前 ask_human 步骤。");
+                try {
+                    await invoke("send_human_intervention", { sessionId, message });
+                    humanInput.value = "";
+                    pauseReason.value = "";
+                    humanForm.value = null;
+                    setRunState("executing", "已收到人工回答，等待 Agent 继续执行。");
+                    appendLog("[人工回答] 已写入当前 ask_human 步骤。");
+                } catch {
+                    // 内存通道失效（应用曾重启过），无缝唤醒主循环续跑
+                    appendLog(`[人工回答] 正在携带回答唤醒并继续任务: ${message}`);
+                    humanInput.value = "";
+                    pauseReason.value = "";
+                    humanForm.value = null;
+                    await runAgent(message);
+                }
             } else {
                 // 运行中输入代表新任务；旧回合在后端安全边界取消，随后启动独立新树。
                 pendingReplacementGoal.value = message;
@@ -1071,6 +1111,7 @@ export function useAgentSession(sessionId: string) {
             isSendingHuman.value = false;
         }
     }
+
     function selectStep(id: string) {
         selectedStepId.value = id;
     }
@@ -1078,6 +1119,7 @@ export function useAgentSession(sessionId: string) {
     onMounted(async () => {
         await loadConversation();
         await loadRunTraces();
+        await checkAndRestoreCheckpointState();
         void refreshResources();
         const register = async (channel: string, handler: (payload: unknown) => void) => {
             try {

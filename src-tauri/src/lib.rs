@@ -82,6 +82,7 @@ pub fn run() {
             agent::execute_command,
             agent::run_agent_main_loop,
             agent::dispatch_agent_step,
+            agent::get_agent_checkpoint,
             agent::send_human_intervention,
             agent::replace_agent_goal,
             agent::cancel_agent_run,

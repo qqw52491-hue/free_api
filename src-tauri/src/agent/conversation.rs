@@ -64,9 +64,9 @@ fn append_message(
     Ok(())
 }
 
-/// 未终态且目标一致的 checkpoint 属于崩溃恢复，不能再次写入相同用户回合。
-pub fn should_start_new_turn(existing: Option<&AgentCheckpoint>, goal: &str) -> bool {
-    !matches!(existing, Some(checkpoint) if !checkpoint.phase.is_terminal() && checkpoint.data.user_goal == goal)
+/// 只要 checkpoint 存在且未达终态 (Done/Failed)，一律属于【任务未结束的续接】，不开启新回合。
+pub fn should_start_new_turn(existing: Option<&AgentCheckpoint>) -> bool {
+    !matches!(existing, Some(checkpoint) if !checkpoint.phase.is_terminal())
 }
 
 pub fn begin_turn(
@@ -182,10 +182,9 @@ mod tests {
             "继续整理报告".to_string(),
         );
         let mut unfinished = AgentCheckpoint::new("run-a".to_string(), &context);
-        assert!(!should_start_new_turn(Some(&unfinished), "继续整理报告"));
-        assert!(should_start_new_turn(Some(&unfinished), "换一个新任务"));
+        assert!(!should_start_new_turn(Some(&unfinished)));
         unfinished.mark_done(&context);
-        assert!(should_start_new_turn(Some(&unfinished), "继续整理报告"));
-        assert!(should_start_new_turn(None, "继续整理报告"));
+        assert!(should_start_new_turn(Some(&unfinished)));
+        assert!(should_start_new_turn(None));
     }
 }
