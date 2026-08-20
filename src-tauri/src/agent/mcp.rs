@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use crate::task_registry::{TaskKind, TaskRegistry};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,8 +161,13 @@ impl McpClient {
         let (request_tx, mut request_rx) = mpsc::channel::<RequestEnvelope>(64);
         let plugin_name = config.name.clone();
 
-        // 启动后台多路复用协调任务 (Actor)
-        tokio::spawn(async move {
+        // 启动后台多路复用协调任务 (Actor)，注册进全局 TaskRegistry 以便优雅停机
+        let mut shutdown_rx = TaskRegistry::global().shutdown_signal();
+        let plugin_name_for_task = plugin_name.clone();
+        TaskRegistry::global().spawn(
+            TaskKind::McpActor,
+            format!("mcp-actor:{}", plugin_name),
+            async move {
             let mut async_stdin = stdin;
             let mut async_stdout = BufReader::new(stdout);
             let mut line_buf = String::new();
@@ -172,6 +178,13 @@ impl McpClient {
 
             loop {
                 tokio::select! {
+                    // 0. 停机信号：应用退出时主动收束 Actor，避免子进程泄漏
+                    shutdown_res = shutdown_rx.changed() => {
+                        if shutdown_res.is_ok() && *shutdown_rx.borrow() {
+                            println!("[MCP:{}] 收到停机信号，Actor 退出", plugin_name_for_task);
+                            break;
+                        }
+                    }
                     // 1. 发送端消息入队并原子写入子进程 stdin
                     req_opt = request_rx.recv() => {
                         match req_opt {
@@ -241,7 +254,8 @@ impl McpClient {
                 let _ = tx.send(Err(format!("[MCP:{}] 插件进程已退出/断开", plugin_name)));
             }
             let _ = child.kill().await;
-        });
+            },
+        );
 
         Ok(Self {
             config,
@@ -644,12 +658,16 @@ impl PluginRegistry {
                 // 异步握手与工具探测
                 let c = client_arc.clone();
                 let n = name.clone();
-                tokio::spawn(async move {
-                    let _ = c.initialize().await;
-                    if let Ok(tools) = c.list_tools().await {
-                        println!("🚀 插件就绪: {} (共 {} 个工具)", n, tools.len());
-                    }
-                });
+                TaskRegistry::global().spawn(
+                    TaskKind::McpInit,
+                    format!("mcp-init:{}", n),
+                    async move {
+                        let _ = c.initialize().await;
+                        if let Ok(tools) = c.list_tools().await {
+                            println!("🚀 插件就绪: {} (共 {} 个工具)", n, tools.len());
+                        }
+                    },
+                );
                 registry.clients.insert(name, client_arc);
             } else {
                 println!("❌ 插件启动失败: {}", name);
@@ -668,9 +686,13 @@ impl PluginRegistry {
             if client.config.url.is_some() {
                 let c = client.clone();
                 let sid = chat_session_id.to_string();
-                tokio::spawn(async move {
-                    let _ = c.ensure_session_initialized(Some(&sid)).await;
-                });
+                TaskRegistry::global().spawn(
+                    TaskKind::McpSessionInit,
+                    format!("mcp-session-init:{}", sid),
+                    async move {
+                        let _ = c.ensure_session_initialized(Some(&sid)).await;
+                    },
+                );
             }
         }
     }

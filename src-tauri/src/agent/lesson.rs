@@ -110,7 +110,10 @@ pub fn distill_lesson_async(
     lesson_summary: String,
     trigger_keywords: Vec<String>,
 ) {
-    tokio::spawn(async move {
+    crate::task_registry::TaskRegistry::global().spawn(
+        crate::task_registry::TaskKind::LessonWrite,
+        format!("lesson-write:{}", session_id),
+        async move {
         if let Ok(conn) = db.0.lock() {
             // 1. 写入前去重检查：若同 session 下已有类似总结，直接更新命中计数，避免重复膨胀
             let clean_summary = lesson_summary.trim();
@@ -165,5 +168,6 @@ pub fn distill_lesson_async(
                 println!("💡 [Lesson] 成功沉淀避坑经验: {}", node.content);
             }
         }
-    });
+    },
+    );
 }

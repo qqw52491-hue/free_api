@@ -133,18 +133,26 @@ fn run_node_recursive<'a>(
                         let time_c = timeout_steps.clone();
                         let child_owned = child.clone();
 
-                        handles.push(tokio::spawn(async move {
-                            run_node_recursive(
-                                &child_owned,
-                                invoker_c,
-                                scope_c,
-                                total_c,
-                                succ_c,
-                                fail_c,
-                                time_c,
-                            )
-                            .await
-                        }));
+                        handles.push(
+                            crate::task_registry::TaskRegistry::global()
+                                .spawn_with_handle(
+                                    crate::task_registry::TaskKind::PlanLeaf,
+                                    format!("plan-leaf:{}", assigned_id),
+                                    async move {
+                                        run_node_recursive(
+                                            &child_owned,
+                                            invoker_c,
+                                            scope_c,
+                                            total_c,
+                                            succ_c,
+                                            fail_c,
+                                            time_c,
+                                        )
+                                        .await
+                                    },
+                                )
+                                .1,
+                        );
                     }
 
                     // 全部等待完毕

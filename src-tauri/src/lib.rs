@@ -4,6 +4,11 @@ mod agent;
 mod commands;
 mod db;
 mod llm;
+pub(crate) mod task_registry;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use db::{get_db_path, init_db, DbState};
 
@@ -77,6 +82,25 @@ pub fn run() {
             agent::replace_agent_goal,
             agent::cancel_agent_run,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // 仅首次 ExitRequested 触发优雅停机；后续（如 app_handle.exit 再次触发）直接放行
+            static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if SHUTDOWN_STARTED.swap(true, Ordering::SeqCst) {
+                    return; // 已在停机流程中，允许默认退出
+                }
+                api.prevent_exit();
+                let registry = task_registry::TaskRegistry::global();
+                registry.trigger_shutdown();
+                let app_handle = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    registry
+                        .graceful_shutdown(Duration::from_secs(5))
+                        .await;
+                    app_handle.exit(0);
+                });
+            }
+        });
 }
