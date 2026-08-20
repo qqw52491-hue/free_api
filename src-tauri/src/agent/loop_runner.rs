@@ -421,16 +421,21 @@ pub async fn run_call_llm_and_run_tool_phases(
             }
 
             // 【修复：重试时的工具盲区】如果 AI 尝试使用的工具尚未在历史流中，立即为其追加说明书，防止它在 retry 时因为看不到语法而继续瞎猜报错。
-            let attempted_tool = inst.get_action();
-            let tool_key = attempted_tool
+            let attempted_tool = if !inst.get_tool().is_empty() {
+                inst.get_tool()
+            } else {
+                inst.get_action()
+            };
+            let plugin_name = attempted_tool
                 .split('/')
                 .next()
                 .unwrap_or(&attempted_tool)
                 .to_string();
-            if attempted_tool != "finish" && attempted_tool != "core" && !tool_key.is_empty() {
-                context.active_tool = Some(tool_key.clone());
-                if !context.fetched_tools.contains(&tool_key) {
-                    let tool_filename = format!("{}.md", tool_key);
+
+            if attempted_tool != "finish" && attempted_tool != "core" && !attempted_tool.is_empty() {
+                context.active_tool = Some(attempted_tool.clone());
+                if !context.fetched_tools.contains(&attempted_tool) {
+                    let tool_filename = format!("{}.md", plugin_name);
                     let resource_dir = app.path().resource_dir().unwrap_or_default();
                     let tool_path_production =
                         resource_dir.join("prompts/tools").join(&tool_filename);
@@ -443,16 +448,17 @@ pub async fn run_call_llm_and_run_tool_phases(
                     {
                         tool_detail = tool_md;
                     } else {
-                        // 尝试从 MCP 插件中获取
+                        // 尝试从 MCP 插件中获取准确的 JSON Schema 规格
                         let detail = {
                             let registry = registry_state.inner().lock().await;
-                            if registry.plugin_names().contains(&tool_key.as_str()) {
-                                registry.format_tool_detail(&tool_key)
+                            let exact = registry.format_tool_detail(&attempted_tool);
+                            if !exact.contains("未找到工具") {
+                                exact
                             } else {
-                                String::new()
+                                registry.format_tool_detail(&plugin_name)
                             }
                         };
-                        if !detail.is_empty() {
+                        if !detail.is_empty() && !detail.contains("未找到工具") {
                             tool_detail = detail;
                         }
                     }
@@ -461,15 +467,15 @@ pub async fn run_call_llm_and_run_tool_phases(
                         context.turns_history.push(crate::agent::context::types::ChatMessage {
                             role: "user".to_string(),
                             content: json!(format!(
-                                "【工具/Skill 操作手册: {}】\n{}\n(已写入历史流，后续调用可直接参考此规格)",
-                                tool_key,
+                                "【工具/Skill 操作手册与准确参数规格: {}】\n{}\n(已写入历史流，后续调用请严格遵守上述 JSON Schema 字段规格与参数名！)",
+                                attempted_tool,
                                 tool_detail.trim()
                             )),
                         });
-                        context.fetched_tools.insert(tool_key.clone());
+                        context.fetched_tools.insert(attempted_tool.clone());
                         println!(
                             "🔄 [重试修正] 为 AI 紧急追加了工具说明书至历史流: {}",
-                            tool_key
+                            attempted_tool
                         );
                     }
                 }

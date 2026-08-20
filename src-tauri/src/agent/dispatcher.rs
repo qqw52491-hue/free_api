@@ -113,6 +113,39 @@ pub fn emit_tool_event(
     let _ = app.emit(&format!("agent-tool-event-{}", session_id), payload);
 }
 
+/// 🌟 智能规范化 MCP 参数（自动解包嵌套层级，自动映射 path/filePath 等常见别名）
+fn normalize_mcp_params(params: &serde_json::Value) -> serde_json::Value {
+    let mut obj = match params {
+        serde_json::Value::Object(map) => map.clone(),
+        _ => return params.clone(),
+    };
+
+    // 1. 如果大模型把参数多包了一层 (如 command: {...} 或 args: {...} 或 params: {...})，自动解包展开
+    if obj.len() == 1 {
+        if let Some(inner) = obj.get("command").or_else(|| obj.get("args")).or_else(|| obj.get("params")) {
+            if let Some(inner_map) = inner.as_object() {
+                obj = inner_map.clone();
+            }
+        }
+    }
+
+    // 2. 常见文件路径别名自动规范化 (filePath / file_path / file / filename / dirPath / dir_path -> path)
+    if !obj.contains_key("path") {
+        if let Some(v) = obj.get("filePath")
+            .or_else(|| obj.get("file_path"))
+            .or_else(|| obj.get("file"))
+            .or_else(|| obj.get("filename"))
+            .or_else(|| obj.get("dirPath"))
+            .or_else(|| obj.get("dir_path"))
+            .or_else(|| obj.get("directory"))
+        {
+            obj.insert("path".to_string(), v.clone());
+        }
+    }
+
+    serde_json::Value::Object(obj)
+}
+
 /// 执行单条指令的内部路由逻辑（4大核心原生工具 + MCP 插件路由，彻底杜绝历史兼容包袱）
 pub fn execute_command_inner(
     db: &DbState,
@@ -156,11 +189,12 @@ pub fn execute_command_inner(
     };
 
     if let Some(plugin) = registry.get(&plugin_name) {
-        println!("执行动作调用外部插件: {}/{} (会话: {})", plugin_name, tool_name, session_id);
+        let clean_params = normalize_mcp_params(params);
+        println!("执行动作调用外部插件: {}/{} (会话: {}, 参数: {:?})", plugin_name, tool_name, session_id, clean_params);
         let call_res = if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.block_on(plugin.call_tool_for_session(Some(session_id), &tool_name, params.clone()))
+            handle.block_on(plugin.call_tool_for_session(Some(session_id), &tool_name, clean_params))
         } else {
-            futures::executor::block_on(plugin.call_tool_for_session(Some(session_id), &tool_name, params.clone()))
+            futures::executor::block_on(plugin.call_tool_for_session(Some(session_id), &tool_name, clean_params))
         };
         match call_res {
             Ok(out) => {
