@@ -260,7 +260,17 @@ watch(
     }
 );
 
-function planStatus(steps: AgentStepItem[]): AgentToolStatus { if (steps.some((step) => step.status === "running" || step.status === "pending")) return "running"; if (steps.some((step) => step.status === "failed")) return "failed"; return "succeeded"; }
+function planStatus(steps: AgentStepItem[]): AgentToolStatus {
+    // 聚合每个逻辑 stepId 的最新尝试状态（若重试已成功，阶段整体应为成功）
+    const latestStatusByStep = new Map<number, AgentToolStatus>();
+    for (const step of steps) {
+        latestStatusByStep.set(step.stepId, step.status);
+    }
+    const statuses = Array.from(latestStatusByStep.values());
+    if (statuses.some((s) => s === "running" || s === "pending")) return "running";
+    if (statuses.some((s) => s === "failed")) return "failed";
+    return "succeeded";
+}
 function planEntries(steps: AgentStepItem[], prefix: string, active = false): PlanEntry[] {
     const groups = new Map<string, PlanEntry>();
     for (const step of steps.filter((item) => Boolean(item.description || item.tool || item.action))) {
