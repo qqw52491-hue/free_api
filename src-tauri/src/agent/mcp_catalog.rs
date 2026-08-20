@@ -86,68 +86,20 @@ pub fn invalidate_plugin(name: &str) {
     }
 }
 
-/// 提取紧凑的参数签名（如 (path: string, startLine?: number)）
-fn format_compact_schema_signature(schema: &serde_json::Value) -> String {
-    if let Some(obj) = schema.as_object() {
-        if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
-            let required: Vec<&str> = obj
-                .get("required")
-                .and_then(|r| r.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-                .unwrap_or_default();
-
-            let mut parts = Vec::new();
-            for (key, val) in props {
-                let is_req = required.contains(&key.as_str());
-                let ty = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                if is_req {
-                    if !ty.is_empty() {
-                        parts.push(format!("{}: {}", key, ty));
-                    } else {
-                        parts.push(format!("*{}", key));
-                    }
-                } else if !ty.is_empty() {
-                    parts.push(format!("{}?: {}", key, ty));
-                } else {
-                    parts.push(format!("{}?", key));
-                }
-            }
-            if !parts.is_empty() {
-                return format!("({})", parts.join(", "));
-            }
-        }
-    }
-    String::new()
-}
-
 pub fn concise_menu(items: impl IntoIterator<Item = (String, Vec<McpToolDef>)>) -> String {
     let mut lines =
-        vec!["\n## 🛠️ MCP 外部插件工具规格 (严格遵守各工具参数名)".to_string()];
+        vec!["\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）".to_string()];
     let mut sorted_items: Vec<(String, Vec<McpToolDef>)> = items.into_iter().collect();
     // 严格按插件名称字母序排序，消除 HashMap 遍历导致的随机性与前缀缓存击穿
     sorted_items.sort_by(|a, b| a.0.cmp(&b.0));
 
-    for (plugin_name, mut tools) in sorted_items {
+    for (name, mut tools) in sorted_items {
         // 工具列表也严格按名称字母序排序
         tools.sort_by(|a, b| a.name.cmp(&b.name));
-        for tool in tools {
-            let desc = tool.description.lines().next().unwrap_or("").trim();
-            let desc_summary = if desc.len() > 60 {
-                format!("{}...", &desc.chars().take(57).collect::<String>())
-            } else if !desc.is_empty() {
-                desc.to_string()
-            } else {
-                "无描述".to_string()
-            };
-
-            let param_sig = format_compact_schema_signature(&tool.schema);
-            lines.push(format!(
-                "- `{}/{}`{}: {}",
-                plugin_name, tool.name, param_sig, desc_summary
-            ));
-        }
+        let tool_names = tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+        lines.push(format!("- {}: [{}]", name, tool_names.join(", ")));
     }
-    lines.push("\n- 外部工具调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}".to_string());
+    lines.push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}".to_string());
     lines.join("\n")
 }
 

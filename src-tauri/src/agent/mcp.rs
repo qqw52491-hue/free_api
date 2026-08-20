@@ -688,15 +688,26 @@ impl PluginRegistry {
         result
     }
 
-    /// 【完整参数规格版】工具映射索引（参数名一目了然，常驻静态提示词，永不压缩）
+    /// 【黄金平衡版】工具映射索引 (极简 Token，明确能力，只读无锁零等待)
     pub fn format_tools_menu(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        lines.push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\")".to_string());
+
         let mut catalogs = Vec::new();
         for (name, client) in &self.clients {
             let tools = crate::agent::mcp_catalog::cached_tools(&client.config)
                 .unwrap_or_default();
             catalogs.push((name.clone(), tools));
         }
-        crate::agent::mcp_catalog::concise_menu(catalogs)
+        lines.extend(
+            crate::agent::mcp_catalog::concise_menu(catalogs)
+                .trim_start_matches("\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）")
+                .lines()
+                .map(str::to_string),
+        );
+
+        lines.push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}".to_string());
+        lines.join("\n")
     }
 
     pub fn format_tool_detail(&self, requested_name: &str) -> String {
