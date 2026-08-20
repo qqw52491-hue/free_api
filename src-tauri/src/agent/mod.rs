@@ -202,10 +202,10 @@ pub async fn run_agent_main_loop(
 "#;
     let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
     let candidate_dirs = [
-        app.path().resource_dir().unwrap_or_default().join("prompts/tools"),
         std::path::PathBuf::from("src-tauri/prompts/tools"),
         std::path::PathBuf::from("prompts/tools"),
         std::path::PathBuf::from("../src-tauri/prompts/tools"),
+        app.path().resource_dir().unwrap_or_default().join("prompts/tools"),
     ];
 
     let mut found_any = false;
@@ -671,14 +671,14 @@ pub async fn run_agent_main_loop(
                 let tool_filename = format!("{}.md", tool_key);
                 let resource_dir = app.path().resource_dir().unwrap_or_default();
                 let candidate_paths = [
-                    resource_dir.join("prompts/tools").join(&tool_filename),
                     std::path::PathBuf::from("src-tauri/prompts/tools").join(&tool_filename),
                     std::path::PathBuf::from("prompts/tools").join(&tool_filename),
                     std::path::PathBuf::from("../src-tauri/prompts/tools").join(&tool_filename),
-                    resource_dir.join("prompts/skills").join(&tool_filename),
+                    resource_dir.join("prompts/tools").join(&tool_filename),
                     std::path::PathBuf::from("src-tauri/prompts/skills").join(&tool_filename),
                     std::path::PathBuf::from("prompts/skills").join(&tool_filename),
                     std::path::PathBuf::from("../src-tauri/prompts/skills").join(&tool_filename),
+                    resource_dir.join("prompts/skills").join(&tool_filename),
                 ];
 
                 let mut tool_detail = String::new();

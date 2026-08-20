@@ -247,7 +247,7 @@ pub fn execute_command_inner(
     DispatchResult {
         stdout: String::new(),
         stderr: format!(
-            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！可用原生内置工具：finish, ask_human, web_search, web_fetch, search, get_step_output, task_store；外部 MCP 工具格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
+            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！可用原生内置工具：finish, ask_human, model_manager, web_search, web_fetch, search, get_step_output, task_store；外部 MCP 工具格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
             tool, action
         ),
         success: false,
@@ -593,12 +593,12 @@ fn dispatch_model_manager(
             }
         }
         "delete_spec" => {
-            let target = match params.get("name").or_else(|| params.get("id")).and_then(|v| v.as_str()) {
+            let target = match params.get("name").or_else(|| params.get("id")).or_else(|| params.get("id_or_name")).and_then(|v| v.as_str()) {
                 Some(t) => t,
                 None => {
                     return DispatchResult {
                         stdout: String::new(),
-                        stderr: "缺少必填参数: name 或 id".to_string(),
+                        stderr: "缺少必填参数: name, id 或 id_or_name".to_string(),
                         success: false,
                         route: "model_manager:delete_spec".to_string(),
                     }
@@ -608,7 +608,7 @@ fn dispatch_model_manager(
             if !confirm {
                 return DispatchResult {
                     stdout: String::new(),
-                    stderr: format!("⚠️ 安全保护：删除模型规格 [{}] 是破坏性操作。若确认删除，请在参数中附加 {{\"confirm\": true}}。", target),
+                    stderr: format!("⚠️ 安全保护：删除模型规格 [{}] 是破坏性操作。必须显式提供 confirm: true 才能执行。", target),
                     success: false,
                     route: "model_manager:delete_spec".to_string(),
                 };
@@ -813,6 +813,78 @@ fn dispatch_model_manager(
             success: false,
             route: "model_manager:unknown".to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{init_db, DbState};
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn test_model_manager_crud_and_safety_confirm() {
+        let conn = init_db(&PathBuf::from(":memory:")).expect("init memory db");
+        let db = DbState(Arc::new(Mutex::new(conn)));
+
+        // 1. 测试 list_specs
+        let p_list = serde_json::json!({});
+        let res = dispatch_model_manager(&db, "list_specs", &p_list);
+        assert!(res.success, "list_specs should succeed: {}", res.stderr);
+        assert!(res.stdout.contains("DeepSeek-V3") || res.stdout.contains("DeepSeek"), "should contain default specs");
+
+        // 2. 测试 upsert_spec
+        let p_upsert = serde_json::json!({
+            "name": "Custom-Test-Model",
+            "context_window": 65536,
+            "max_tokens": 8192,
+            "supports_thinking": true,
+            "default_temperature": 0.6,
+            "description": "A unit test model spec"
+        });
+        let res = dispatch_model_manager(&db, "upsert_spec", &p_upsert);
+        assert!(res.success, "upsert_spec should succeed: {}", res.stderr);
+
+        // 3. 测试 delete_spec 无 confirm 拦截
+        let p_del_no_confirm = serde_json::json!({ "id_or_name": "Custom-Test-Model" });
+        let res = dispatch_model_manager(&db, "delete_spec", &p_del_no_confirm);
+        assert!(!res.success, "delete_spec without confirm must fail for safety");
+        assert!(res.stderr.contains("必须显式提供 confirm: true"));
+
+        // 4. 测试 delete_spec 带 confirm: true
+        let p_del_confirm = serde_json::json!({ "id_or_name": "Custom-Test-Model", "confirm": true });
+        let res = dispatch_model_manager(&db, "delete_spec", &p_del_confirm);
+        assert!(res.success, "delete_spec with confirm must succeed: {}", res.stderr);
+
+        // 5. 测试 list_platforms
+        let p_platforms = serde_json::json!({});
+        let res = dispatch_model_manager(&db, "list_platforms", &p_platforms);
+        assert!(res.success, "list_platforms should succeed: {}", res.stderr);
+    }
+
+    #[test]
+    fn test_prompts_tools_files_exist() {
+        let candidate_dirs = [
+            std::path::PathBuf::from("src-tauri/prompts/tools"),
+            std::path::PathBuf::from("prompts/tools"),
+            std::path::PathBuf::from("../src-tauri/prompts/tools"),
+        ];
+
+        let mut found_dir = None;
+        for d in &candidate_dirs {
+            if d.exists() && d.is_dir() {
+                found_dir = Some(d.clone());
+                break;
+            }
+        }
+
+        let dir = found_dir.expect("prompts/tools directory must exist in candidate paths");
+        let model_manager_path = dir.join("model_manager.md");
+        assert!(model_manager_path.exists(), "model_manager.md must exist in {:?}", dir);
+        let content = std::fs::read_to_string(&model_manager_path).expect("read model_manager.md");
+        assert!(content.contains("<summary>"), "model_manager.md must contain <summary>");
+        assert!(content.contains("upsert_spec"), "model_manager.md must describe upsert_spec");
     }
 }
 

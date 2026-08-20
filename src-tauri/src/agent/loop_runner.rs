@@ -438,14 +438,14 @@ pub async fn run_call_llm_and_run_tool_phases(
                     let tool_filename = format!("{}.md", plugin_name);
                     let resource_dir = app.path().resource_dir().unwrap_or_default();
                     let candidate_paths = [
-                        resource_dir.join("prompts/tools").join(&tool_filename),
                         std::path::PathBuf::from("src-tauri/prompts/tools").join(&tool_filename),
                         std::path::PathBuf::from("prompts/tools").join(&tool_filename),
                         std::path::PathBuf::from("../src-tauri/prompts/tools").join(&tool_filename),
-                        resource_dir.join("prompts/skills").join(&tool_filename),
+                        resource_dir.join("prompts/tools").join(&tool_filename),
                         std::path::PathBuf::from("src-tauri/prompts/skills").join(&tool_filename),
                         std::path::PathBuf::from("prompts/skills").join(&tool_filename),
                         std::path::PathBuf::from("../src-tauri/prompts/skills").join(&tool_filename),
+                        resource_dir.join("prompts/skills").join(&tool_filename),
                     ];
 
                     let mut tool_detail = String::new();
