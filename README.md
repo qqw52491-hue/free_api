@@ -52,8 +52,11 @@
 - [五、双模式人机协同 (Human-in-the-Loop)](#五双模式人机协同-human-in-the-loop)
   - [模式 A：人类主动抢方向盘（异步安全点拦截）](#模式-a人类主动抢方向盘异步安全点拦截)
   - [模式 B：AI 主动挂起求助（真正的阻塞等待）](#模式-bai-主动挂起求助真正的阻塞等待)
-- [六、模块结构与代码索引](#六模块结构与代码索引)
-- [七、快速上手与运行](#七快速上手与运行)
+- [六、双轮驱动架构与工具体系 (Dual-Engine Architecture: Commands & Agent Tools)](#六双轮驱动架构与工具体系-dual-engine-architecture-commands--agent-tools)
+- [七、全代码库目录与文件深度索引 (Exhaustive Codebase & File Index)](#七全代码库目录与文件深度索引-exhaustive-codebase--file-index)
+- [八、快速上手与运行](#八快速上手与运行)
+- [九、待办与演进路线 (Roadmap & TODO)](#-待办与演进路线-roadmap--todo)
+
 
 ---
 
@@ -310,28 +313,233 @@ AI 运行途中，你可以随时在干预框输入指令（如 *"换个思路�
 
 ---
 
-## 六、模块结构与代码索引
+---
 
-上下文引擎模块全面解耦，按单一职责划分（11 个子文件，平均约 100 行）：
+## 六、双轮驱动架构与工具体系 (Dual-Engine Architecture: Commands & Agent Tools)
+
+系统采用现代化桌面 AI 应用的**双轮驱动解耦架构**，将“人类手动操作”与“Agent 自主执行”彻底按单一职责分离，底层 100% 共享 SQLite 数据与业务状态：
 
 ```
-src-tauri/src/agent/context/
-├── mod.rs          # 模块对外统一 re-export 出口
-├── types.rs        # 核心数据结构 (SandwichContext, ChatMessage, FailedAttempt, SideEffectRecord)
-├── assembler.rs    # 三明治组装器 (静态前缀 -> 历史流水 -> 动态状态卡 -> 出口角色合并)
-├── sampling.rs     # 写入即定型 (4k 硬截断 + 智能 Head/Tail 采样 + output_id 生成)
-├── compaction.rs   # 压缩引擎 (80%/50% 滞后高低水位 + drain 批量截断 + Summarizer trait)
-├── budget.rs       # 零依赖 Token 估算器与动态 ContextBudget 预算推导
-├── determinism.rs  # SHA-256 语义切片指纹快照与 1000 次确定性测试套件
-├── memory.rs       # 核心事实记忆安全安检门 (正则拦截 + 长度校验 + BTreeMap 字母序渲染)
-├── audit.rs        # 不可逆外部动作安全永久台账 (SideEffectRecord 自动聚合折叠)
-├── render.rs       # 避坑指南、TaskStore 目录、Todo 面板与决策指令渲染器
-└── cache_policy.rs # Provider 差异化缓存块对齐策略扩展接口 (DeepSeek/OpenAI/Default)
+┌────────────────────────────────────────────────────────┐
+│                   Vue 前端 UI 界面                      │
+└────────────────────────────────────────────────────────┘
+          │                                  ▲
+   (用户手动操作 invoke)               (Agent 动态表单交互)
+          ▼                                  │
+┌──────────────────────┐          ┌──────────────────────┐
+│  src/commands/       │          │  src/agent/tools/    │
+│  ├─ models.rs (模型) │          │  ├─ model_manager.rs │
+│  ├─ mcp.rs    (插件) │          │  ├─ mcp_manager.rs   │
+│  ├─ skills.rs (技能) │          │  ├─ skill_manager.rs │
+│  ├─ chat.rs   (对话) │          │  └─ ... (原生AI工具)  │
+│  └─ tasks.rs  (复盘) │          └──────────────────────┘
+└──────────────────────┘                     ▲
+          │                                  │
+          │         ┌───────────────┐        │ (模型输出 JSON 规划)
+          └────────►│ SQLite 数据库 ├────────┘
+                    └───────────────┘
 ```
+
+### 1. 通道分工与设计定位
+
+| 架构层 | 目录位置 | 面向对象 | 职责与触发机制 |
+|:---|:---|:---|:---|
+| **UI 交互控制器** | `src-tauri/src/commands/` | **人类用户 & Vue 前端** | 响应页面点击、表单提交、测速测试与会话管理，充当桌面端 API Controller。 |
+| **Agent 原生工具箱** | `src-tauri/src/agent/tools/` | **大模型 Agent 自身** | 统一实现 `dispatch(db, action, params)` 契约，赋予 AI 自主查改模型、动态接入 MCP 与提纯 Skill 的能力。 |
+
+### 2. 统一工具执行契约 (Universal Tool Contract)
+
+所有内置 Agent 工具均实现标准单一入口契约：
+
+```rust
+pub fn dispatch(
+    db: &DbState,
+    action: &str,
+    params: &serde_json::Value,
+) -> DispatchResult
+```
+
+- **`stdout`**：成功信息（如 `✅ 成功接入 MCP 插件 [excel]，能力卡:...`），自动作为下一轮 **Observation (观察结果)** 喂给模型；
+- **`stderr`**：失败原因或破坏性安全拦截（如 `⚠️ 安全保护：必须附带 confirm: true`），引导模型立即纠错或向用户求助；
+- **`route`**：用于全链路审计与运行轨迹追踪（Run Trace）。
+
+### 3. 水平扩展新工具标准流程 (3-Step Tool Pipeline)
+
+后续若需增加新的内置工具（如 `db_manager`、`git_manager`）：
+1. **定义规范**：在 `src-tauri/prompts/tools/xxx.md` 编写供 Agent 理解的参数与使用说明；
+2. **实现分发**：在 `src-tauri/src/agent/tools/xxx.rs` 实现 `pub fn dispatch(...)`；
+3. **注册路由**：在 `src-tauri/src/agent/dispatcher.rs` 中添加一行单流分发路由；
+4. *(可选)* 如前端需配套可视化按钮，在 `src-tauri/src/commands/` 对应子模块暴露 Tauri Command。
 
 ---
 
-## 七、快速上手与运行
+## 七、全代码库目录与文件深度索引 (Exhaustive Codebase & File Index)
+
+本节对项目内**每一个核心文件夹与文件**的具体职责、技术实现与设计定位进行详尽说明：
+
+### 1. 后端核心架构 (`src-tauri/src/agent/`)
+
+`agent/` 是整个 SandwichAgent 自主推理、状态机管理、三明治上下文装配与工具调度的核心内核：
+
+| 子目录 / 文件路径 | 模块性质 | 核心职责与设计说明 |
+| :--- | :--- | :--- |
+| [`checkpoint.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/checkpoint.rs) | 状态容灾 | **幂等断点快照与故障自愈状态机**：负责每一步执行前后持久化快照，通过 `RecoveryDecision` 判定是直接续跑、等待人类确认还是重试未决副作用，确保崩溃后 0 丢失、0 重复执行。 |
+| [`control.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/control.rs) | 人机通信 | **人机干预与实时打断控制中心**：维护跨线程 `HumanControl` 通道（Cancel/ReplaceGoal/Answer），支持毫秒级流式打断与写盘事务 1.5s 安全落盘缓冲期。 |
+| [`conversation.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/conversation.rs) | 会话流 | **长期对话生命周期与多轮历史流管理**：负责将多轮任务有序归档进 SQLite 会话历史，保证恢复阶段不会重复向模型追加相同轮次。 |
+| [`dispatcher.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/dispatcher.rs) | 路由中枢 | **Agent 工具分发中枢与代码安全预算守卫**：统一接收模型的 JSON 决策，内置只读代码预算拦截（超出范围自动注入纠偏），并统一派发至内置或 MCP 工具。 |
+| [`lesson.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/lesson.rs) | 避坑经验 | **经验避坑库 (Failed Attempts) 与血缘反馈**：自动收集工具报错并生成精炼教训；在后续步骤检索命中后记录血缘因果，并根据任务成败进行显式打分。 |
+| [`loop_runner.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/loop_runner.rs) | 单步执行 | **单步原子流水线 (CallLlm + RunTool)**：封装大模型动态路由规划、流式 Token 计量、工具执行、超时控制、自愈重试与优雅退出逻辑。 |
+| [`main_loop.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/main_loop.rs) | 主生命周期 | **任务顶层调度器与运行状态机**：驱动 Agent 跨步流转、前缀缓存预热、死循环硬拦截、状态卡刷新、TaskStore 目录同步与任务完成结算。 |
+| [`mcp_catalog.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/mcp_catalog.rs) | 能力提取 | **MCP 工具清单缓存与智能能力卡提纯**：首次扫描或变更时调用选定大模型，将几千行冗长 JSON Schema 提炼为几十 Token 的结构化能力卡，极大缩减 Prompt。 |
+| [`mod.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/mod.rs) | 模块根 | **Agent 模块聚合导出与终态指令回归测试**：精简的 Hub 根，集中导出子模块并包含核心终态判定与工具菜单单元测试。 |
+| [`project_map.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/project_map.rs) | 项目地图 | **工作区轻量项目地图生成器**：在代码审查或跨文件任务启动时，提取目录拓扑、入口文件与 Git 差异元数据（不读大文件正文），避免上下文膨胀。 |
+| [`router.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/router.rs) | 模型路由 | **动态分级路由器**：根据当前任务目标与上下文复杂度（视觉图表、长篇代码、轻量步骤），动态在 Fast / Pro / Vision 模型阶梯间切换。 |
+| [`run_state.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/run_state.rs) | 状态快照 | **权威运行状态机 (`AgentRunMachine`)**：维护严格的状态机流转图（Idle → Planning → ToolExecution → Finalizing → Done），向前端推送权威事件。 |
+| [`run_trace.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/run_trace.rs) | 历史复盘 | **运行轨迹快照持久化**：独立保存包含思考过程、工具参数、中间结果与 Artifacts 的完整运行轨迹，供历史复盘与离线回放。 |
+| [`skill_context.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/skill_context.rs) | 技能装载 | **工作区 Skill 与 AGENTS.md 规范加载器**：自动向上寻找工作区提示词文件，基于文件哈希缓存，避免每步重复读取。 |
+| [`task_store.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/task_store.rs) | 结构化数据 | **会话独立任务数据区**：针对抓取/批量处理产生的长篇结构化数据，提供数据集创建、分页查询与键值存储，模型仅按需分页读取，杜绝上下文爆炸。 |
+| [`task_summary.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/task_summary.rs) | 交付结算 | **任务成果提纯与交付物汇总**：在任务终态自动汇总产生的文件、图表、数据集与操作结论，生成高质量交付卡片。 |
+| [`types.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/types.rs) | 类型定义 | **Agent 核心数据模型**：定义 `AgentInstruction`（模型返回的统一决策结构体）、`DispatchResult`、`TaskResourceRef` 等核心类型。 |
+| [`web_search.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/web_search.rs) | 联网搜索 | **原生搜索引擎与网页正文提取器**：集成多源实时搜索，内置 HTML 转 Markdown 清洗流水线，剥离广告与噪声。 |
+
+#### (1) 三明治上下文子引擎 (`src-tauri/src/agent/context/`)
+- [`mod.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/mod.rs)：上下文聚合入口，定义核心结构体 `SandwichContext`。
+- [`assembler.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/assembler.rs)：三明治拓扑拼装器（绝对静态前缀 + 纯追加流水 + 动态状态卡）。
+- [`audit.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/audit.rs)：不可逆副作用安全台账 (`AuditLedger`)，永久记录写入/删除等关键操作。
+- [`budget.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/budget.rs)：Token 动态预算与多语言/代码稠密度评估算法。
+- [`cache_policy.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/cache_policy.rs)：前缀缓存物理对齐策略（64 / 128 / 1024 Token 门槛适配）。
+- [`compaction.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/compaction.rs)：滞后高低水位自适应压缩器，保证历史流水平滑压缩，绝不破坏前缀稳定性。
+- [`determinism.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/determinism.rs)：字节级确定性保证，提供 SHA256 指纹校验与字典序规范化。
+- [`memory.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/memory.rs)：核心事实记忆卡（严格按 BTreeMap 字母序对齐，内置明文密钥过滤阻断）。
+- [`render.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/render.rs)：动态状态卡（Todo、避坑教训、台账、数据目录）Markdown 模板渲染。
+- [`sampling.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/sampling.rs)：大文本定向证据采样（Head/Tail 智能保留 + 错误堆栈优先提取）。
+- [`types.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/types.rs)：定义 `ChatMessage`, `TokenBudget`, `MemoryCard`, `UsageMetrics` 等数据结构。
+
+#### (2) Agent 原生内置工具箱 (`src-tauri/src/agent/tools/`)
+- [`mod.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/tools/mod.rs)：定义 `BuiltinTool` 统一 Trait（规范 `name`, `dispatch`, `prompt_path`）与派发分流器。
+- [`model_manager.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/tools/model_manager.rs)：大模型自主管理工具，支持 AI 自主查询/新增模型平台、调整推理参数与连通性验证。
+- [`mcp_manager.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/tools/mcp_manager.rs)：MCP 插件热插拔工具，支持 URL+Token、本地 Stdio、JSON 清单批量导入与能力卡提炼。
+- [`skill_manager.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/tools/skill_manager.rs)：Skill 技能管理工具，支持单条/多段 Markdown 导入与触发卡落库。
+
+#### (3) 外部 MCP 协议调度中心 (`src-tauri/src/agent/mcp/`)
+- [`mod.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/mcp/mod.rs)：模块聚合与多路复用并行测试。
+- [`client.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/mcp/client.rs)：双轨客户端实现（Stdio 异步 Actor 通道 + HTTP/SSE 直连连接池）。
+- [`registry.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/mcp/registry.rs)：插件注册中心，负责本地 YAML 目录扫描与 DB 动态插件挂载。
+- [`types.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/mcp/types.rs)：JSON-RPC 2.0 请求/响应规范与插件配置定义。
+
+#### (4) 动态检索与工作区搜索 (`src-tauri/src/agent/retrieval/`)
+- [`mod.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/retrieval/mod.rs)：检索模块聚合与中英文检索单元测试。
+- [`fts_engine.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/retrieval/fts_engine.rs)：SQLite FTS5 / Trigram 全文检索与自愈迁移引擎。
+- [`memory_signpost.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/retrieval/memory_signpost.rs)：三层记忆路标召回与 Context 动态关联。
+- [`workspace_search.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/retrieval/workspace_search.rs)：代码符号与文件系统联邦搜索。
+- [`types.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/retrieval/types.rs)：检索请求、召回结果与元数据模型。
+
+#### (5) 基础工具与流处理流水线 (`src-tauri/src/agent/utils/`)
+- [`mod.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/utils/mod.rs)：工具模块聚合与测试。
+- [`json_pipeline.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/utils/json_pipeline.rs)：JSON 流式提取、Markdown 围栏剥离、截断/单引号/尾逗号智能容错修复。
+- [`llm_client.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/utils/llm_client.rs)：兼容 OpenAI 协议的流式客户端与 Token 计量统计器。
+- [`log_sampler.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/utils/log_sampler.rs)：超长日志智能采样器（首尾保留 + 错误堆栈捕获 + 语义去重）。
+- [`subprocess.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/utils/subprocess.rs)：跨平台异步子进程派生与超时控制。
+
+#### (6) 复合计划树引擎 (`src-tauri/src/agent/plan_tree/`)
+- [`executor.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/plan_tree/executor.rs)：串行 (`seq`) / 并行 (`par`) 计划树调度执行引擎。
+- [`scope.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/plan_tree/scope.rs)：计划树变量作用域与依赖输出引用解析。
+- [`timeout.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/plan_tree/timeout.rs)：节点级故障隔离与超时保护。
+- [`types.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/plan_tree/types.rs)：计划树节点、状态与拓扑模型。
+
+---
+
+### 2. Tauri 前端 API 交互控制器 (`src-tauri/src/commands/`)
+
+`commands/` 专为 Vue 前端提供高性能异步 Tauri Command 路由接口：
+
+| 文件路径 | 交互领域 | 暴露的主要功能 |
+| :--- | :--- | :--- |
+| [`chat.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/commands/chat.rs) | 对话与运行 | 会话生命周期、消息持久化、实时流式推理通信、原生独立 WebView 窗口创建、人类干预打断。 |
+| [`models.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/commands/models.rs) | 模型渠道 | 平台提供商 CRUD、模型规格词典、实时流式连通性测试与延迟诊断。 |
+| [`mcp.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/commands/mcp.rs) | MCP 插件 | MCP 插件列表、单条/批量导入、启用/禁用、热插拔探测与大模型能力卡提炼。 |
+| [`skills.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/commands/skills.rs) | 技能中心 | 自定义提示词与 Skill CRUD、批量导入与大模型能力卡智能提纯。 |
+| [`tasks.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/commands/tasks.rs) | 任务数据 | TaskStore 数据集目录查询、分页读取记录、历史运行轨迹与复盘快照导出。 |
+| [`mod.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/commands/mod.rs) | 统一汇聚 | 统一汇聚并对外导出所有命令处理函数。 |
+
+---
+
+### 3. Rust 基座与系统核心 (`src-tauri/src/`)
+
+- [`db.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/db.rs)：SQLite 数据库连接池初始化、数据库表 Schema 迁移与索引管理。
+- [`llm.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/llm.rs)：底层模型平台参数、深度思考档位、重试策略与 OpenAI 协议标准封装。
+- [`lib.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/lib.rs)：Tauri 应用构建入口、插件注册、状态初始化与 Command 路由挂载。
+- [`main.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/main.rs)：桌面应用主程序二进制入口。
+- [`task_registry.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/task_registry.rs)：长耗时后台异步任务注册与生命周期追踪。
+
+---
+
+### 4. 提示词工程与工具规范 (`src-tauri/prompts/`)
+
+- [`core_logic.md`](file:///Users/wx/Documents/free_api/src-tauri/prompts/core_logic.md)：Agent 主决策规划系统提示词（思维链、工具调用格式、安全边界与 JSON 协议）。
+- [`agent_system_prompt.md`](file:///Users/wx/Documents/free_api/src-tauri/prompts/agent_system_prompt.md)：通用助手基准系统提示词。
+- `skills/`:
+  - [`chart_visualization.md`](file:///Users/wx/Documents/free_api/src-tauri/prompts/skills/chart_visualization.md)：图表与可视化交付规范（ECharts / Mermaid / HTML 沙箱）。
+- `tools/`:
+  - [`ask_human.md`](file:///Users/wx/Documents/free_api/src-tauri/prompts/tools/ask_human.md)：人机协同工具说明（确认、动态表单与求助）。
+  - [`model_manager.md`](file:///Users/wx/Documents/free_api/src-tauri/prompts/tools/model_manager.md)：大模型平台与模型规格管理工具规范。
+  - [`mcp_manager.md`](file:///Users/wx/Documents/free_api/src-tauri/prompts/tools/mcp_manager.md)：MCP 插件接入与能力卡管理工具规范。
+  - [`skill_manager.md`](file:///Users/wx/Documents/free_api/src-tauri/prompts/tools/skill_manager.md)：工作区 Skill 与提示词管理工具规范。
+  - [`web_search.md`](file:///Users/wx/Documents/free_api/src-tauri/prompts/tools/web_search.md)：全网实时搜索引擎规范。
+  - [`web_fetch.md`](file:///Users/wx/Documents/free_api/src-tauri/prompts/tools/web_fetch.md)：网页正文提取工具规范。
+
+---
+
+### 5. Vue 3 前端界面与交互层 (`src/`)
+
+`src/` 采用 Vue 3 + TypeScript + Vite 构建，提供专业级桌面交互体验：
+
+| 目录 / 文件路径 | 分类 | 核心功能 |
+| :--- | :--- | :--- |
+| [`App.vue`](file:///Users/wx/Documents/free_api/src/App.vue) | 根组件 | 桌面主窗口容器、顶部导航与全局通知管理。 |
+| [`main.ts`](file:///Users/wx/Documents/free_api/src/main.ts) | 入口 | Vue 应用初始化、Pinia 状态挂载与样式加载。 |
+| [`style.css`](file:///Users/wx/Documents/free_api/src/style.css) | 样式 | 全局设计系统、暗黑/明亮主题与原子化 CSS 变量。 |
+| **`views/`** | **页面视图** | |
+| [`AgentView.vue`](file:///Users/wx/Documents/free_api/src/views/AgentView.vue) | 主工作台 | Agent 自动化任务核心视图（会话列表 + 执行时间线 + 人机干预 + 深度检查器）。 |
+| [`ApiManager.vue`](file:///Users/wx/Documents/free_api/src/views/ApiManager.vue) | 模型管理 | 模型渠道配置、API Key 维护、流式连通性测试与延迟可视化诊断。 |
+| [`ChatView.vue`](file:///Users/wx/Documents/free_api/src/views/ChatView.vue) | 纯净对话 | 经典多轮对话视图（支持思维链折叠、Token 速率统计与多模型切换）。 |
+| [`PluginView.vue`](file:///Users/wx/Documents/free_api/src/views/PluginView.vue) | 能力中心 | MCP 插件与工作区 Skill 综合管理、批量导入与大模型能力卡智能提炼。 |
+| **`components/agent/`** | **Agent 组件** | |
+| [`AgentChatStream.vue`](file:///Users/wx/Documents/free_api/src/components/agent/AgentChatStream.vue) | 时间线 | 任务执行流水线组件（展示思考、计划、动作、工具输出折叠与代码高亮）。 |
+| [`AgentComposer.vue`](file:///Users/wx/Documents/free_api/src/components/agent/AgentComposer.vue) | 输入框 | 任务输入面板（支持模型路由、深度思考档位、自动清历史开关）。 |
+| [`AgentHumanInterventionCard.vue`](file:///Users/wx/Documents/free_api/src/components/agent/AgentHumanInterventionCard.vue) | 人机干预 | 人机交互卡片（AI 阻塞提问、动态表单填写、随时打断抢方向盘）。 |
+| [`AgentInspector.vue`](file:///Users/wx/Documents/free_api/src/components/agent/AgentInspector.vue) | 深度检查器 | 运行时检查面板（查看核心记忆卡、不可逆操作台账、避坑教训、Todo 清单与 Token 明细）。 |
+| [`AgentRecordPreview.vue`](file:///Users/wx/Documents/free_api/src/components/agent/AgentRecordPreview.vue) | 数据预览 | TaskStore 结构化任务数据区分页表格与 JSON 数据预览抽屉。 |
+| [`AgentSettingsDrawer.vue`](file:///Users/wx/Documents/free_api/src/components/agent/AgentSettingsDrawer.vue) | 运行配置 | 全局执行参数抽屉（模型分级阶梯、超时控制、上下文窗口大小）。 |
+| **`components/charts/`** | **可视化沙箱** | |
+| [`EChartsBlock.vue`](file:///Users/wx/Documents/free_api/src/components/charts/EChartsBlock.vue) | 图表沙箱 | ECharts 图表动态渲染沙箱。 |
+| [`HtmlPreviewBlock.vue`](file:///Users/wx/Documents/free_api/src/components/charts/HtmlPreviewBlock.vue) | 网页沙箱 | 原生 HTML/JS/CSS 独立安全沙箱渲染器。 |
+| [`MermaidBlock.vue`](file:///Users/wx/Documents/free_api/src/components/charts/MermaidBlock.vue) | 架构图 | Mermaid 流程图、时序图与架构拓扑渲染器。 |
+| [`MultiTabArtifactCard.vue`](file:///Users/wx/Documents/free_api/src/components/charts/MultiTabArtifactCard.vue) | 交付卡片 | 多标签页交付物容器（支持代码/图表/网页即时切换）。 |
+| [`RichContentRenderer.vue`](file:///Users/wx/Documents/free_api/src/components/charts/RichContentRenderer.vue) | 富媒体 | 混合富媒体渲染器（自动识别 Markdown、数学公式与图表组件）。 |
+| **`composables/`** | **组合式 API** | |
+| [`useAgentSession.ts`](file:///Users/wx/Documents/free_api/src/composables/useAgentSession.ts) | 会话与事件 | 状态机流转与 Tauri 进度/状态/日志事件监听。 |
+| [`useAgentTaskResources.ts`](file:///Users/wx/Documents/free_api/src/composables/useAgentTaskResources.ts) | 任务数据区 | TaskStore 前端状态同步与分页查询。 |
+| [`useBrowserPreview.ts`](file:///Users/wx/Documents/free_api/src/composables/useBrowserPreview.ts) | 独立窗口 | 原生独立浏览器窗口与外部页面预览控制。 |
+| [`usePersistedAgentConversation.ts`](file:///Users/wx/Documents/free_api/src/composables/usePersistedAgentConversation.ts) | 草稿持久化 | 本地草稿与会话持久化管理。 |
+
+---
+
+### 6. 插件、脚本与测试套件
+
+- `plugins/`:
+  - [`excel.yaml`](file:///Users/wx/Documents/free_api/plugins/excel.yaml)：本地 Excel 自动化处理 MCP 插件配置文件。
+  - [`remote-hub.yaml.example`](file:///Users/wx/Documents/free_api/plugins/remote-hub.yaml.example)：远程 HTTP/SSE MCP 服务接入范例。
+- `scripts/`:
+  - [`test-configured-platforms.mjs`](file:///Users/wx/Documents/free_api/scripts/test-configured-platforms.mjs)：全平台模型批量测速与流式连通性诊断脚本。
+- `test/e2e/`:
+  - [`agent-thinking-policy.e2e.mjs`](file:///Users/wx/Documents/free_api/test/e2e/agent-thinking-policy.e2e.mjs)：Agent 深度思考策略与状态机端到端自动化测试。
+  - [`capability-center.e2e.mjs`](file:///Users/wx/Documents/free_api/test/e2e/capability-center.e2e.mjs)：能力中心（MCP + Skill）批量导入与能力卡提炼端到端测试。
+
+
+---
+
+## 八、快速上手与运行
 
 ### 1. 环境依赖
 - **Rust** 1.78+ (`cargo`)

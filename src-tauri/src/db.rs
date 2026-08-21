@@ -133,6 +133,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             command TEXT NOT NULL,
             args TEXT NOT NULL DEFAULT '[]',
             env TEXT NOT NULL DEFAULT '{}',
+            capability_card TEXT NOT NULL DEFAULT '',
             enabled INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         );
@@ -297,12 +298,11 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         );
     }
 
-    // 滚动迁移：为旧版数据库补齐新字段，CREATE TABLE 不会重建已有表
-    let _ = conn.execute_batch(
-        "ALTER TABLE models ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0;
-         ALTER TABLE agent_memory_nodes ADD COLUMN confidence_score INTEGER NOT NULL DEFAULT 100;
-         ALTER TABLE agent_memory_nodes ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;",
-    );
+    // 滚动迁移：为旧版数据库补齐新字段，CREATE TABLE 不会重建已有表（每个 ALTER TABLE 独立执行，防止单个已存在字段中断整个批处理）
+    let _ = conn.execute("ALTER TABLE models ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0;", []);
+    let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN capability_card TEXT NOT NULL DEFAULT '';", []);
+    let _ = conn.execute("ALTER TABLE agent_memory_nodes ADD COLUMN confidence_score INTEGER NOT NULL DEFAULT 100;", []);
+    let _ = conn.execute("ALTER TABLE agent_memory_nodes ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;", []);
 
     // 初始化预置常用模型规格库
     let spec_count: i64 = conn

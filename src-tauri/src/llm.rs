@@ -33,8 +33,16 @@ pub struct ModelConfig {
 impl ModelConfig {
     /// 从数据库查询模型+平台信息，自动检测本地模型类型
     pub fn from_db(state: &State<'_, DbState>, model_id: &str) -> Result<Self, String> {
+        Self::from_db_state(state.inner(), model_id)
+    }
+
+    pub fn from_db_state(db: &DbState, model_id: &str) -> Result<Self, String> {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        Self::from_conn(&conn, model_id)
+    }
+
+    pub fn from_conn(conn: &rusqlite::Connection, model_id: &str) -> Result<Self, String> {
         let (base_url, api_key, model_name, max_tokens, temperature, context_window_db) = {
-            let conn = state.0.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn
                 .prepare(
                     "SELECT p.base_url, p.api_key, m.name, m.max_tokens, m.temperature, m.context_window
@@ -180,7 +188,7 @@ impl ModelConfig {
         body
     }
 
-    fn is_deepseek(&self) -> bool {
+    pub fn is_deepseek(&self) -> bool {
         self.base_url.contains("api.deepseek.com")
             || self.model_name.to_ascii_lowercase().contains("deepseek")
     }

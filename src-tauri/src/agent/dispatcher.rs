@@ -1,4 +1,5 @@
 use crate::agent::mcp::PluginRegistry;
+use crate::agent::mcp_catalog::invalidate_plugin;
 use crate::agent::retrieval;
 use crate::agent::task_store;
 use crate::agent::types::{AgentInstruction, DispatchResult};
@@ -6,6 +7,7 @@ use crate::agent::utils::{run_osascript, run_shell};
 use crate::agent::web_search;
 use crate::db::DbState;
 use chrono::Utc;
+use reqwest::Url;
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -165,14 +167,15 @@ fn normalize_mcp_params(params: &serde_json::Value) -> serde_json::Value {
 const MAX_CODE_READ_LINES: u64 = 240;
 
 /// 为常见源码读取工具补上可见、稳定的行范围护栏。
-/// 它不会拒绝读取，而是把无范围或过大的请求改写为一个可继续扩展的局部窗口。
+/// 它不会拒绝读取，而是把无范围、过大或参数别名（offset/limit）的请求改写为一个可继续扩展的局部窗口。
 fn guard_code_read_range(
     tool_name: &str,
     params: serde_json::Value,
 ) -> (serde_json::Value, Option<String>) {
+    let lower_tool = tool_name.to_ascii_lowercase();
     let reads_text = matches!(
-        tool_name.to_ascii_lowercase().as_str(),
-        "read_text_file" | "read_file" | "get_file_content"
+        lower_tool.as_str(),
+        "read_text_file" | "read_file" | "get_file_content" | "get_code_snippet"
     );
     let serde_json::Value::Object(mut obj) = params else {
         return (params, None);
@@ -184,23 +187,39 @@ fn guard_code_read_range(
     let requested_start = obj
         .get("startLine")
         .or_else(|| obj.get("start_line"))
+        .or_else(|| obj.get("offset"))
         .and_then(|value| value.as_u64());
     let requested_end = obj
         .get("endLine")
         .or_else(|| obj.get("end_line"))
-        .and_then(|value| value.as_u64());
+        .and_then(|value| value.as_u64())
+        .or_else(|| {
+            obj.get("limit").and_then(|lim| {
+                let s = requested_start.unwrap_or(1).max(1);
+                lim.as_u64().map(|l| s.saturating_add(l).saturating_sub(1))
+            })
+        });
+
     let start_line = requested_start.unwrap_or(1).max(1);
     let max_end = start_line.saturating_add(MAX_CODE_READ_LINES - 1);
     let end_line = requested_end.unwrap_or(max_end).min(max_end);
-    let constrained =
-        requested_start.is_none() || requested_end.map(|end| end > max_end).unwrap_or(true);
+    let constrained = requested_start.is_none()
+        || requested_end.is_none()
+        || requested_end.map(|end| end > max_end).unwrap_or(true);
+
+    obj.insert("startLine".to_string(), json!(start_line));
+    obj.insert("endLine".to_string(), json!(end_line));
+    if obj.contains_key("start_line") {
+        obj.insert("start_line".to_string(), json!(start_line));
+    }
+    if obj.contains_key("end_line") {
+        obj.insert("end_line".to_string(), json!(end_line));
+    }
 
     if !constrained {
         return (serde_json::Value::Object(obj), None);
     }
 
-    obj.insert("startLine".to_string(), json!(start_line));
-    obj.insert("endLine".to_string(), json!(end_line));
     let path = obj
         .get("path")
         .and_then(|value| value.as_str())
@@ -221,6 +240,25 @@ pub fn execute_command_inner(
     params: &serde_json::Value,
     registry: &PluginRegistry,
 ) -> DispatchResult {
+    // 0. 宿主层硬拦截 (Host Security Rejection Layer)：
+    // 严禁模型自作主张越界切换工作区（例如试图调用 switch_workspace、set_workspace 等已被禁用的特权命令）
+    let lower_tool = tool.to_ascii_lowercase();
+    let lower_action = action.to_ascii_lowercase();
+    if lower_tool.contains("switch_workspace")
+        || lower_tool.contains("switchworkspace")
+        || lower_tool.contains("set_workspace")
+        || lower_tool.contains("change_workspace")
+        || lower_action.contains("switch_workspace")
+        || lower_action.contains("switchworkspace")
+        || lower_action.contains("set_workspace")
+    {
+        return DispatchResult {
+            stdout: String::new(),
+            stderr: "❌ [宿主层安全拦截 (Host Security Rejection)] switch_workspace / 切换工作区已被宿主安全策略禁止。当前任务严格限定在初始工作区上下文中执行。请使用 search 或 read_file 等只读工具在当前工作区内完成代码定位，严禁越界切换。".to_string(),
+            success: false,
+            route: "host_rejection:forbidden_workspace_switch".to_string(),
+        };
+    }
     // 1. 核心原生工具 A: get_step_output (精准取回截断历史原文)
     if tool.eq_ignore_ascii_case("get_step_output") {
         return task_store::dispatch(db, session_id, "get_step_output", params);
@@ -251,7 +289,17 @@ pub fn execute_command_inner(
 
     // 3.6 核心原生工具 E: model_manager (自主管理模型规格与渠道绑定，支持增删改查与安全确认)
     if tool.eq_ignore_ascii_case("model_manager") {
-        return dispatch_model_manager(db, action, params);
+        return crate::agent::tools::model_manager::dispatch(db, action, params);
+    }
+
+    // 3.7 核心原生工具 F: mcp_manager (MCP 外部插件接入、批量导入与能力卡维护)
+    if tool.eq_ignore_ascii_case("mcp_manager") {
+        return crate::agent::tools::mcp_manager::dispatch(db, action, params);
+    }
+
+    // 3.8 核心原生工具 G: skill_manager (工作区自定义技能与提示词库维护)
+    if tool.eq_ignore_ascii_case("skill_manager") {
+        return crate::agent::tools::skill_manager::dispatch(db, action, params);
     }
 
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
@@ -588,321 +636,6 @@ pub async fn execute_command(tool: String, command: String) -> Result<serde_json
     Ok(json!({ "success": success, "stdout": stdout.trim(), "stderr": stderr.trim() }))
 }
 
-// ==================== MODEL MANAGER DISPATCHER ====================
-
-fn dispatch_model_manager(
-    db: &DbState,
-    action: &str,
-    params: &serde_json::Value,
-) -> DispatchResult {
-    let conn = match db.0.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return DispatchResult {
-                stdout: String::new(),
-                stderr: format!("数据库锁获取失败: {}", e),
-                success: false,
-                route: "model_manager".to_string(),
-            }
-        }
-    };
-
-    let act = if !action.is_empty() {
-        action
-    } else {
-        params
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("list_specs")
-    };
-
-    match act {
-        "list_specs" => {
-            match crate::db::get_all_model_specs(&conn) {
-                Ok(specs) => DispatchResult {
-                    stdout: serde_json::to_string_pretty(&specs).unwrap_or_else(|_| "[]".to_string()),
-                    stderr: String::new(),
-                    success: true,
-                    route: "model_manager:list_specs".to_string(),
-                },
-                Err(e) => DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("查询模型规格库失败: {}", e),
-                    success: false,
-                    route: "model_manager:list_specs".to_string(),
-                },
-            }
-        }
-        "upsert_spec" => {
-            let name = match params.get("name").and_then(|v| v.as_str()) {
-                Some(n) => n.to_string(),
-                None => {
-                    return DispatchResult {
-                        stdout: String::new(),
-                        stderr: "缺少必填参数: name (规格名称，如 DeepSeek-V4)".to_string(),
-                        success: false,
-                        route: "model_manager:upsert_spec".to_string(),
-                    }
-                }
-            };
-            let context_window = params.get("context_window").and_then(|v| v.as_i64()).unwrap_or(128000);
-            let max_tokens = params.get("max_tokens").and_then(|v| v.as_i64()).unwrap_or(8192);
-            let supports_thinking = params.get("supports_thinking").and_then(|v| v.as_bool()).unwrap_or(false);
-            let default_temperature = params.get("default_temperature").and_then(|v| v.as_f64()).unwrap_or(0.7);
-            let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let id = params.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let created_at = chrono::Utc::now().to_rfc3339();
-
-            let spec = crate::db::ModelSpec {
-                id,
-                name: name.clone(),
-                context_window,
-                max_tokens,
-                supports_thinking,
-                default_temperature,
-                description,
-                created_at,
-            };
-
-            match crate::db::upsert_model_spec_record(&conn, &spec) {
-                Ok(_) => DispatchResult {
-                    stdout: format!("✅ 成功保存模型规格: {} (上下文: {} tokens, 最大输出: {} tokens)", name, context_window, max_tokens),
-                    stderr: String::new(),
-                    success: true,
-                    route: "model_manager:upsert_spec".to_string(),
-                },
-                Err(e) => DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("保存模型规格失败: {}", e),
-                    success: false,
-                    route: "model_manager:upsert_spec".to_string(),
-                },
-            }
-        }
-        "delete_spec" => {
-            let target = match params.get("name").or_else(|| params.get("id")).or_else(|| params.get("id_or_name")).and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => {
-                    return DispatchResult {
-                        stdout: String::new(),
-                        stderr: "缺少必填参数: name, id 或 id_or_name".to_string(),
-                        success: false,
-                        route: "model_manager:delete_spec".to_string(),
-                    }
-                }
-            };
-            let confirm = params.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
-            if !confirm {
-                return DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("⚠️ 安全保护：删除模型规格 [{}] 是破坏性操作。必须显式提供 confirm: true 才能执行。", target),
-                    success: false,
-                    route: "model_manager:delete_spec".to_string(),
-                };
-            }
-
-            match crate::db::delete_model_spec_record(&conn, target) {
-                Ok(count) => {
-                    if count > 0 {
-                        DispatchResult {
-                            stdout: format!("✅ 已成功删除模型规格: {}", target),
-                            stderr: String::new(),
-                            success: true,
-                            route: "model_manager:delete_spec".to_string(),
-                        }
-                    } else {
-                        DispatchResult {
-                            stdout: String::new(),
-                            stderr: format!("未找到名称或ID为 [{}] 的模型规格", target),
-                            success: false,
-                            route: "model_manager:delete_spec".to_string(),
-                        }
-                    }
-                }
-                Err(e) => DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("删除模型规格失败: {}", e),
-                    success: false,
-                    route: "model_manager:delete_spec".to_string(),
-                },
-            }
-        }
-        "list_platforms" => {
-            let mut stmt = match conn.prepare("SELECT id, name, base_url, created_at FROM platforms ORDER BY created_at DESC") {
-                Ok(s) => s,
-                Err(e) => {
-                    return DispatchResult {
-                        stdout: String::new(),
-                        stderr: format!("查询平台失败: {}", e),
-                        success: false,
-                        route: "model_manager:list_platforms".to_string(),
-                    }
-                }
-            };
-            let platforms = stmt.query_map([], |row| {
-                let pid: String = row.get(0)?;
-                let pname: String = row.get(1)?;
-                let purl: String = row.get(2)?;
-                Ok(json!({ "id": pid, "name": pname, "base_url": purl }))
-            }).and_then(|iter| iter.collect::<Result<Vec<_>, _>>());
-
-            match platforms {
-                Ok(list) => DispatchResult {
-                    stdout: serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".to_string()),
-                    stderr: String::new(),
-                    success: true,
-                    route: "model_manager:list_platforms".to_string(),
-                },
-                Err(e) => DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("解析平台数据失败: {}", e),
-                    success: false,
-                    route: "model_manager:list_platforms".to_string(),
-                },
-            }
-        }
-        "add_model" => {
-            let platform_query = match params.get("platform_id").or_else(|| params.get("platform_name")).and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => {
-                    return DispatchResult {
-                        stdout: String::new(),
-                        stderr: "缺少必填参数: platform_id 或 platform_name".to_string(),
-                        success: false,
-                        route: "model_manager:add_model".to_string(),
-                    }
-                }
-            };
-
-            let platform_id: String = match conn.query_row(
-                "SELECT id FROM platforms WHERE id = ?1 OR name = ?1",
-                rusqlite::params![platform_query],
-                |r| r.get(0),
-            ) {
-                Ok(id) => id,
-                Err(_) => {
-                    return DispatchResult {
-                        stdout: String::new(),
-                        stderr: format!("未找到平台 [{}]，请先检查平台名称或使用 list_platforms 查询", platform_query),
-                        success: false,
-                        route: "model_manager:add_model".to_string(),
-                    }
-                }
-            };
-
-            let model_name = match params.get("model_name").or_else(|| params.get("name")).and_then(|v| v.as_str()) {
-                Some(n) => n,
-                None => {
-                    return DispatchResult {
-                        stdout: String::new(),
-                        stderr: "缺少必填参数: model_name (API模型标识)".to_string(),
-                        success: false,
-                        route: "model_manager:add_model".to_string(),
-                    }
-                }
-            };
-
-            // 如果指定了 spec_name，自动从规格库补齐参数
-            let spec_opt: Option<(i64, i64, f64)> = if let Some(sname) = params.get("spec_name").and_then(|v| v.as_str()) {
-                conn.query_row(
-                    "SELECT context_window, max_tokens, default_temperature FROM model_specs WHERE name = ?1 OR id = ?1",
-                    rusqlite::params![sname],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                ).ok()
-            } else {
-                None
-            };
-
-            let context_window = params.get("context_window").and_then(|v| v.as_i64())
-                .or(spec_opt.map(|s| s.0))
-                .unwrap_or(128000);
-            let max_tokens = params.get("max_tokens").and_then(|v| v.as_i64())
-                .or(spec_opt.map(|s| s.1))
-                .unwrap_or(4096);
-            let temperature = params.get("temperature").and_then(|v| v.as_f64())
-                .or(spec_opt.map(|s| s.2))
-                .unwrap_or(0.7);
-            let display_name = params.get("display_name").and_then(|v| v.as_str()).unwrap_or(model_name);
-
-            let id = uuid::Uuid::new_v4().to_string();
-            let now = chrono::Utc::now().to_rfc3339();
-
-            match conn.execute(
-                "INSERT INTO models (id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'unknown', 0, ?7, ?8)",
-                rusqlite::params![id, platform_id, model_name, display_name, max_tokens, temperature, context_window, now],
-            ) {
-                Ok(_) => DispatchResult {
-                    stdout: format!("✅ 成功添加模型: [{}] (显示名: {}, 上下文: {} tokens, 输出上限: {} tokens)", model_name, display_name, context_window, max_tokens),
-                    stderr: String::new(),
-                    success: true,
-                    route: "model_manager:add_model".to_string(),
-                },
-                Err(e) => DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("添加模型失败: {}", e),
-                    success: false,
-                    route: "model_manager:add_model".to_string(),
-                },
-            }
-        }
-        "delete_model" => {
-            let model_query = match params.get("model_id").or_else(|| params.get("model_name")).or_else(|| params.get("name")).and_then(|v| v.as_str()) {
-                Some(m) => m,
-                None => {
-                    return DispatchResult {
-                        stdout: String::new(),
-                        stderr: "缺少必填参数: model_id 或 model_name".to_string(),
-                        success: false,
-                        route: "model_manager:delete_model".to_string(),
-                    }
-                }
-            };
-            let confirm = params.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
-            if !confirm {
-                return DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("⚠️ 安全保护：删除模型 [{}] 将连带删除配置。若确认删除，请在参数中附加 {{\"confirm\": true}}。", model_query),
-                    success: false,
-                    route: "model_manager:delete_model".to_string(),
-                };
-            }
-
-            match conn.execute("DELETE FROM models WHERE id = ?1 OR name = ?1", rusqlite::params![model_query]) {
-                Ok(count) => {
-                    if count > 0 {
-                        DispatchResult {
-                            stdout: format!("✅ 已成功删除模型: {}", model_query),
-                            stderr: String::new(),
-                            success: true,
-                            route: "model_manager:delete_model".to_string(),
-                        }
-                    } else {
-                        DispatchResult {
-                            stdout: String::new(),
-                            stderr: format!("未找到模型 [{}]", model_query),
-                            success: false,
-                            route: "model_manager:delete_model".to_string(),
-                        }
-                    }
-                }
-                Err(e) => DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("删除模型失败: {}", e),
-                    success: false,
-                    route: "model_manager:delete_model".to_string(),
-                },
-            }
-        }
-        _ => DispatchResult {
-            stdout: String::new(),
-            stderr: format!("❌ 未知的 model_manager 动作 action='{}'。支持的动作: list_specs, upsert_spec, delete_spec, list_platforms, add_model, delete_model", act),
-            success: false,
-            route: "model_manager:unknown".to_string(),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,7 +676,7 @@ mod tests {
 
         // 1. 测试 list_specs
         let p_list = serde_json::json!({});
-        let res = dispatch_model_manager(&db, "list_specs", &p_list);
+        let res = crate::agent::tools::model_manager::dispatch(&db, "list_specs", &p_list);
         assert!(res.success, "list_specs should succeed: {}", res.stderr);
         assert!(
             res.stdout.contains("DeepSeek-V3") || res.stdout.contains("DeepSeek"),
@@ -959,22 +692,22 @@ mod tests {
             "default_temperature": 0.6,
             "description": "A unit test model spec"
         });
-        let res = dispatch_model_manager(&db, "upsert_spec", &p_upsert);
+        let res = crate::agent::tools::model_manager::dispatch(&db, "upsert_spec", &p_upsert);
         assert!(res.success, "upsert_spec should succeed: {}", res.stderr);
 
         // 3. 测试 delete_spec 无 confirm 拦截
-        let p_del_no_confirm = serde_json::json!({ "id_or_name": "Custom-Test-Model" });
-        let res = dispatch_model_manager(&db, "delete_spec", &p_del_no_confirm);
+        let p_del_no_confirm = serde_json::json!({ "name": "Custom-Test-Model" });
+        let res = crate::agent::tools::model_manager::dispatch(&db, "delete_spec", &p_del_no_confirm);
         assert!(
             !res.success,
             "delete_spec without confirm must fail for safety"
         );
-        assert!(res.stderr.contains("必须显式提供 confirm: true"));
+        assert!(res.stderr.contains("confirm: true"));
 
         // 4. 测试 delete_spec 带 confirm: true
         let p_del_confirm =
-            serde_json::json!({ "id_or_name": "Custom-Test-Model", "confirm": true });
-        let res = dispatch_model_manager(&db, "delete_spec", &p_del_confirm);
+            serde_json::json!({ "name": "Custom-Test-Model", "confirm": true });
+        let res = crate::agent::tools::model_manager::dispatch(&db, "delete_spec", &p_del_confirm);
         assert!(
             res.success,
             "delete_spec with confirm must succeed: {}",
@@ -983,7 +716,7 @@ mod tests {
 
         // 5. 测试 list_platforms
         let p_platforms = serde_json::json!({});
-        let res = dispatch_model_manager(&db, "list_platforms", &p_platforms);
+        let res = crate::agent::tools::model_manager::dispatch(&db, "list_platforms", &p_platforms);
         assert!(res.success, "list_platforms should succeed: {}", res.stderr);
     }
 
@@ -1019,5 +752,94 @@ mod tests {
             content.contains("upsert_spec"),
             "model_manager.md must describe upsert_spec"
         );
+
+        let mcp_manager_path = dir.join("mcp_manager.md");
+        assert!(mcp_manager_path.exists(), "mcp_manager.md must exist in {:?}", dir);
+        let mcp_content = std::fs::read_to_string(&mcp_manager_path).expect("read mcp_manager.md");
+        assert!(mcp_content.contains("add_http"), "mcp_manager.md must describe add_http");
+
+        let skill_manager_path = dir.join("skill_manager.md");
+        assert!(skill_manager_path.exists(), "skill_manager.md must exist in {:?}", dir);
+        let skill_content = std::fs::read_to_string(&skill_manager_path).expect("read skill_manager.md");
+        assert!(skill_content.contains("add"), "skill_manager.md must describe add");
+    }
+
+    #[test]
+    fn test_mcp_and_skill_manager_crud() {
+        let conn = init_db(&PathBuf::from(":memory:")).expect("init memory db");
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        // 1. MCP Manager List & Toggle & Delete
+        let res_list = crate::agent::tools::mcp_manager::dispatch(&db, "list", &serde_json::json!({}));
+        assert!(res_list.success);
+
+        // Delete without confirm
+        let res_del_fail = crate::agent::tools::mcp_manager::dispatch(&db, "delete", &serde_json::json!({ "name": "fake_mcp" }));
+        assert!(!res_del_fail.success);
+        assert!(res_del_fail.stderr.contains("confirm: true"));
+
+        // Delete with confirm
+        let res_del_ok = crate::agent::tools::mcp_manager::dispatch(&db, "delete", &serde_json::json!({ "name": "fake_mcp", "confirm": true }));
+        assert!(res_del_ok.success);
+
+        // 2. Skill Manager Add & List & Delete
+        let res_add_skill = crate::agent::tools::skill_manager::dispatch(&db, "add", &serde_json::json!({
+            "name": "单元测试技能",
+            "content": "编写高覆盖率的 Rust 与 Vue 单元测试",
+            "kind": "skill",
+            "description": "用于编写单元测试"
+        }));
+        assert!(res_add_skill.success);
+        assert!(res_add_skill.stdout.contains("单元测试技能"));
+
+        let res_skill_list = crate::agent::tools::skill_manager::dispatch(&db, "list", &serde_json::json!({}));
+        assert!(res_skill_list.success);
+        assert!(res_skill_list.stdout.contains("单元测试技能"));
+
+        let res_skill_del = crate::agent::tools::skill_manager::dispatch(&db, "delete", &serde_json::json!({ "name": "单元测试技能", "confirm": true }));
+        assert!(res_skill_del.success);
+    }
+
+    #[test]
+    fn test_host_security_rejection_forbidden_workspace_switch() {
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )));
+        let registry = PluginRegistry::new();
+        let p = serde_json::json!({ "path": "/some/other/workspace" });
+
+        let res = execute_command_inner(&db, "test-session", "switch_workspace", "", &p, &registry);
+        assert!(!res.success);
+        assert!(res.stderr.contains("宿主层安全拦截"));
+        assert_eq!(res.route, "host_rejection:forbidden_workspace_switch");
+
+        let res2 = execute_command_inner(&db, "test-session", "vscode_switchworkspace", "", &p, &registry);
+        assert!(!res2.success);
+        assert!(res2.stderr.contains("宿主层安全拦截"));
+    }
+
+    #[test]
+    fn test_code_read_guard_supports_offset_and_snippet() {
+        // 1. 预算内的 offset + limit (50..149 共 100 行 <= 240)
+        let p_within = serde_json::json!({
+            "path": "src/main.rs",
+            "offset": 50,
+            "limit": 100
+        });
+        let (guarded_within, notice_within) = guard_code_read_range("get_code_snippet", p_within);
+        assert_eq!(guarded_within.get("startLine").and_then(|v| v.as_u64()), Some(50));
+        assert_eq!(guarded_within.get("endLine").and_then(|v| v.as_u64()), Some(149));
+        assert!(notice_within.is_none(), "within-budget range should not need truncation notice");
+
+        // 2. 超出预算的 offset + limit (50..5000)
+        let p_over = serde_json::json!({
+            "path": "src/main.rs",
+            "offset": 50,
+            "limit": 5000
+        });
+        let (guarded_over, notice_over) = guard_code_read_range("get_code_snippet", p_over);
+        assert_eq!(guarded_over.get("startLine").and_then(|v| v.as_u64()), Some(50));
+        assert_eq!(guarded_over.get("endLine").and_then(|v| v.as_u64()), Some(289)); // 50 + 240 - 1
+        assert!(notice_over.is_some(), "over-budget range must include truncation guard notice");
     }
 }

@@ -133,10 +133,149 @@ pub fn workspace_skill_context(workspace: &Path) -> String {
     }
 }
 
-/// 扫描 skills 目录，生成轻量目录摘要（仅名称 + 单行描述）。
+use crate::llm::ModelConfig;
+
+#[derive(Debug, Clone)]
+struct CachedSkillSummary {
+    fingerprint: u64,
+    summary: String,
+}
+
+static SKILL_SUMMARY_CACHE: OnceLock<Mutex<HashMap<String, CachedSkillSummary>>> = OnceLock::new();
+
+fn skill_summary_cache() -> &'static Mutex<HashMap<String, CachedSkillSummary>> {
+    SKILL_SUMMARY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 异步调用 LLM 从 Skill 文档中提炼高密度触发与能力卡片
+pub async fn generate_llm_skill_summary(
+    skill_name: &str,
+    content: &str,
+    config: &ModelConfig,
+) -> Result<String, String> {
+    let client = config.build_client()?;
+    let url = config.endpoint_url();
+    let headers = config.auth_headers();
+
+    let capped: String = content.chars().take(4000).collect();
+    let prompt = format!(
+        "你是一个 AI Agent 技能架构专家。请根据以下 Skill 规范文档 [{}]，生成一份供 Agent 在任务规划时快速识别触发条件的【精炼技能卡片摘要】（严格控制在 1~2 句话、60 字以内）。\n\
+        必须说明：1) 核心用途；2) 何时/什么场景下触发预载（next_tool_hint）。\n\
+        禁止客套话与 Markdown 代码块，直接输出纯文本内容。\n\n\
+        【Skill 文档】\n{}",
+        skill_name, capped
+    );
+
+    let messages = vec![
+        serde_json::json!({
+            "role": "system",
+            "content": "你是资深的 AI Agent 技能索引专家，擅长将复杂流程提炼为精准的触发卡片。"
+        }),
+        serde_json::json!({
+            "role": "user",
+            "content": prompt
+        }),
+    ];
+
+    let mut body = serde_json::json!({
+        "model": config.model_name,
+        "messages": messages,
+        "max_tokens": 1000,
+        "temperature": 0.3,
+        "stream": false
+    });
+
+    if config.is_deepseek() {
+        body["thinking"] = serde_json::json!({ "type": "disabled" });
+    }
+
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.post(&url).headers(headers).json(&body).send(),
+    )
+    .await
+    .map_err(|_| "LLM 生成 Skill 卡片超时".to_string())?
+    .map_err(|e| format!("LLM 生成 Skill 卡片网络请求失败: {}", e))?;
+
+    let json_resp: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    let message = json_resp
+        .get("choices")
+        .and_then(|arr| arr.get(0))
+        .and_then(|c| c.get("message"));
+
+    let summary_opt = message
+        .and_then(|m| {
+            if let Some(s) = m.get("content").and_then(|v| v.as_str()) {
+                Some(s.to_string())
+            } else if let Some(arr) = m.get("content").and_then(|v| v.as_array()) {
+                let parts: Vec<String> = arr
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                    .collect();
+                if !parts.is_empty() {
+                    Some(parts.join("\n"))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let summary = if let Some(s) = summary_opt {
+        s
+    } else if let Some(reasoning) = message.and_then(|m| m.get("reasoning_content")).and_then(|v| v.as_str()) {
+        let r = reasoning.trim();
+        if !r.is_empty() {
+            r.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(r).to_string()
+        } else {
+            return Err("LLM 生成 Skill 卡片返回内容为空".to_string());
+        }
+    } else {
+        return Err(format!(
+            "LLM 响应中缺少 content 字段: {}",
+            serde_json::to_string(&json_resp).unwrap_or_default()
+        ));
+    };
+
+    Ok(summary)
+}
+
+pub fn cached_skill_summary(name: &str, content: &str) -> Option<String> {
+    let fp = fingerprint(content);
+    let cache = skill_summary_cache().lock().ok()?;
+    let entry = cache.get(name)?;
+    if entry.fingerprint == fp {
+        Some(entry.summary.clone())
+    } else {
+        None
+    }
+}
+
+pub fn set_cached_skill_summary(name: &str, content: &str, summary: String) {
+    let fp = fingerprint(content);
+    if let Ok(mut cache) = skill_summary_cache().lock() {
+        cache.insert(
+            name.to_string(),
+            CachedSkillSummary {
+                fingerprint: fp,
+                summary,
+            },
+        );
+    }
+}
+
+/// 扫描 skills 目录，生成轻量目录摘要（仅名称 + 智能能力卡描述）。
 /// excluded 列表中的 Skill 已固定编译进系统提示词，不再重复罗列。
 /// 完整手册内容通过 next_tool_hint: "skill_name" 按需加载到 active_tool_detail。
-pub fn skill_catalog_string(skills_dir: &Path, excluded: &[&str]) -> String {
+pub fn skill_catalog_string(
+    skills_dir: &Path,
+    excluded: &[&str],
+    model_config: Option<&ModelConfig>,
+) -> String {
     let Ok(entries) = std::fs::read_dir(skills_dir) else {
         return String::new();
     };
@@ -157,14 +296,43 @@ pub fn skill_catalog_string(skills_dir: &Path, excluded: &[&str]) -> String {
             continue;
         }
         let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let summary = content
-            .find("<summary>")
-            .and_then(|start| {
-                content
-                    .find("</summary>")
-                    .map(|end| content[start + 9..end].trim().to_string())
-            })
-            .unwrap_or_else(|| name.clone());
+        let summary = if let Some(cached) = cached_skill_summary(&name, &content) {
+            cached
+        } else if let Some(tag_summary) = content.find("<summary>").and_then(|start| {
+            content
+                .find("</summary>")
+                .map(|end| content[start + 9..end].trim().to_string())
+        }) {
+            set_cached_skill_summary(&name, &content, tag_summary.clone());
+            tag_summary
+        } else {
+            let rule_summary = content
+                .lines()
+                .map(str::trim)
+                .find(|line| {
+                    !line.is_empty() && !line.starts_with('#') && !line.starts_with("<!--")
+                })
+                .map(|line| line.chars().take(80).collect())
+                .unwrap_or_else(|| name.clone());
+
+            set_cached_skill_summary(&name, &content, rule_summary.clone());
+
+            // 若有模型配置，后台异步升级为 LLM 智能能力卡
+            if let Some(cfg) = model_config {
+                let name_clone = name.clone();
+                let content_clone = content.clone();
+                let cfg_clone = cfg.clone();
+                tokio::spawn(async move {
+                    if let Ok(llm_sum) =
+                        generate_llm_skill_summary(&name_clone, &content_clone, &cfg_clone).await
+                    {
+                        set_cached_skill_summary(&name_clone, &content_clone, llm_sum);
+                    }
+                });
+            }
+
+            rule_summary
+        };
         lines.push(format!("- {}: {}", name, summary));
     }
 
@@ -213,6 +381,38 @@ mod tests {
         let refreshed = workspace_skill_context(&nested);
         assert!(refreshed.contains("root instruction changed"));
         assert!(!refreshed.contains("root instruction\n"));
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn test_skill_catalog_summary_caching() {
+        let workspace = temporary_workspace();
+        let skills_dir = workspace.join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+
+        // 1. 带 <summary> 的 Skill
+        fs::write(
+            skills_dir.join("chart.md"),
+            "# Chart\n<summary>图表可视化指南</summary>\n正文内容...",
+        )
+        .unwrap();
+
+        // 2. 不带 <summary> 的 Skill（自动走第一行有效描述提炼与指纹缓存）
+        fs::write(
+            skills_dir.join("git_flow.md"),
+            "# Git Flow Guide\n用于规范团队分支与提交发布规范。\n## 步骤\n...",
+        )
+        .unwrap();
+
+        let catalog = skill_catalog_string(&skills_dir, &[], None);
+        assert!(catalog.contains("- chart: 图表可视化指南"));
+        assert!(catalog.contains("- git_flow: 用于规范团队分支与提交发布规范。"));
+
+        // 验证缓存命中
+        let git_content = fs::read_to_string(skills_dir.join("git_flow.md")).unwrap();
+        let cached = cached_skill_summary("git_flow", &git_content);
+        assert_eq!(cached.as_deref(), Some("用于规范团队分支与提交发布规范。"));
 
         let _ = fs::remove_dir_all(workspace);
     }

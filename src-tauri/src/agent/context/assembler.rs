@@ -156,7 +156,9 @@ fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
     };
 
     // 1. 如果是早期执行输出且较长（> 400 字符），提取 output_id 和结果状态，将正文脱水为结构化证据句柄
-    if text.starts_with("【执行输出") && text.len() > 400 {
+    if (text.starts_with("【执行输出") || text.starts_with("[代码阅读护栏]") || text.contains("output_id: "))
+        && text.len() > 400
+    {
         let mut output_id = "";
         let mut status_line = "";
         for line in text.lines() {
