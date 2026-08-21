@@ -270,6 +270,9 @@ pub async fn run_agent_main_loop(
     // 5. 查询所有 MCP Server 的工具列表并异步提前预热当前会话专属连接池 (Ahead of Time Prewarm)
     let mcp_tools_menu = {
         let registry = registry_state.lock().await;
+        registry
+            .prime_tool_catalog_for_session(&final_session_id)
+            .await;
         registry.prewarm_all_for_session(&final_session_id);
         registry.format_tools_menu()
     };

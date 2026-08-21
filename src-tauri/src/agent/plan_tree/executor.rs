@@ -7,87 +7,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-const MAX_PARALLEL_CODE_EVIDENCE_LINES: u64 = 120;
-
-/// 只读检查并行组的源码证据总量；绝不补齐、覆盖或改写 MCP 参数。
-/// 多个局部范围可以并行，但未知范围或合计超预算的源码读取必须由模型拆分。
-fn validate_parallel_code_evidence_budget(children: &[PlanNode]) -> Result<(), String> {
-    fn collect(node: &PlanNode, reads: &mut Vec<(String, Option<u64>)>) {
-        match node {
-            PlanNode::Seq(children) => {
-                for child in children {
-                    collect(child, reads);
-                }
-            }
-            PlanNode::Obj(obj) => {
-                if let Some(children) = &obj.parallel {
-                    for child in children {
-                        collect(child, reads);
-                    }
-                    return;
-                }
-
-                let tool = obj.get_tool();
-                let normalized = tool.to_ascii_lowercase();
-                let is_source_body = matches!(
-                    normalized.rsplit('/').next().unwrap_or(normalized.as_str()),
-                    "read_text_file" | "read_file" | "get_file_content" | "get_code_snippet"
-                );
-                if !is_source_body {
-                    return;
-                }
-
-                let args = obj.get_args();
-                let start = args
-                    .get("startLine")
-                    .or_else(|| args.get("start_line"))
-                    .and_then(|value| value.as_u64());
-                let end = args
-                    .get("endLine")
-                    .or_else(|| args.get("end_line"))
-                    .and_then(|value| value.as_u64());
-                let lines = match (start, end) {
-                    (Some(start), Some(end)) if end >= start => Some(end - start + 1),
-                    _ => None,
-                };
-                reads.push((tool, lines));
-            }
-        }
-    }
-
-    let mut reads = Vec::new();
-    for child in children {
-        collect(child, &mut reads);
-    }
-    if reads.len() <= 1 {
-        return Ok(());
-    }
-
-    let unknown_tools: Vec<String> = reads
-        .iter()
-        .filter(|(_, lines)| lines.is_none())
-        .map(|(tool, _)| tool.clone())
-        .collect();
-    if !unknown_tools.is_empty() {
-        return Err(format!(
-            "并行源码证据未执行：{} 缺少明确 startLine/endLine，无法确认本批总量。请改为单个读取，或为每项提供有限行范围；宿主未改写任何 MCP 参数。",
-            unknown_tools.join(", ")
-        ));
-    }
-
-    let total_lines: u64 = reads.iter().filter_map(|(_, lines)| *lines).sum();
-    if total_lines > MAX_PARALLEL_CODE_EVIDENCE_LINES {
-        return Err(format!(
-            "并行源码证据未执行：{} 项合计 {} 行，超过本轮 {} 行预算。请拆分为更小批次；宿主未改写任何 MCP 参数。",
-            reads.len(),
-            total_lines,
-            MAX_PARALLEL_CODE_EVIDENCE_LINES
-        ));
-    }
-
-    Ok(())
-}
-
 /// 执行计划树的主入口
 pub async fn execute_plan_tree(
     plan: &PlanNode,
@@ -211,7 +130,6 @@ fn run_node_recursive<'a>(
             PlanNode::Obj(obj) => {
                 // 分支 2.1：并行组 (allSettled 语义，等所有人完成，单点失败不中断其他)
                 if let Some(ref parallel_children) = obj.parallel {
-                    validate_parallel_code_evidence_budget(parallel_children)?;
                     let assigned_id = obj.id.clone().unwrap_or_else(|| scope.next_index_id());
 
                     let mut handles = Vec::with_capacity(parallel_children.len());

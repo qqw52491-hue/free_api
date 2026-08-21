@@ -742,6 +742,32 @@ impl PluginRegistry {
         self.clients.get(name).cloned()
     }
 
+    /// 在首轮系统提示词生成前，尽力填充现有 MCP 的工具摘要缓存。
+    /// 这只等待标准 tools/list，不注入、覆盖或改写任何后续工具调用参数。
+    pub async fn prime_tool_catalog_for_session(&self, chat_session_id: &str) {
+        for client in self.clients.values() {
+            let client = client.clone();
+            let session_id = chat_session_id.to_string();
+            let needs_catalog = crate::agent::mcp_catalog::cached_tools(&client.config)
+                .map_or(true, |tools| tools.is_empty());
+            if !needs_catalog {
+                continue;
+            }
+
+            let plugin_name = client.config.name.clone();
+            let outcome = tokio::time::timeout(Duration::from_secs(3), async move {
+                client.ensure_session_initialized(Some(&session_id)).await?;
+                client.list_tools().await.map(|_| ())
+            })
+            .await;
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("MCP 工具目录预热失败 [{}]: {}", plugin_name, error),
+                Err(_) => eprintln!("MCP 工具目录预热超时 [{}]", plugin_name),
+            }
+        }
+    }
+
     /// 🚀 提前异步预热指定会话专属的远程 MCP 连接池 (Ahead of Time Warm-up)
     pub fn prewarm_all_for_session(&self, chat_session_id: &str) {
         for client in self.clients.values() {
