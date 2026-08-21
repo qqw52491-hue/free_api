@@ -31,7 +31,17 @@ impl SandwichContext {
         // 🥩 2. 中间夹心（纯 Append-only 线性历史流水：工具手册事件、执行流水、目标变更事件）
         // 随着任务一步步向后追加，无动态插入，完美覆盖主流大模型的前缀缓存
         // ════════════════════════════════════════════════════════════════
-        messages.extend(self.turns_history.clone());
+        // 若 turns_history 首条消息与 M1 静态目标完全相同，则跳过首条，避免 M1 与历史首条合并产生重复目标
+        let history_slice = if let Some(first) = self.turns_history.first() {
+            if first.role == "user" && first.content.as_str() == Some(&self.user_goal) {
+                &self.turns_history[1..]
+            } else {
+                &self.turns_history[..]
+            }
+        } else {
+            &self.turns_history[..]
+        };
+        messages.extend(history_slice.iter().cloned());
 
         // ════════════════════════════════════════════════════════════════
         // 🍞 3. 底层面包（动态状态卡 + 避坑台账 + 不可逆操作 + 最新观测）
@@ -87,7 +97,9 @@ impl SandwichContext {
         // 合并为单条 user 消息，避免连续多条 user 消息触发 Anthropic 等 provider 的 422 错误
         let mut final_user_parts = Vec::new();
 
-        if !self.current_observation.is_empty() {
+        // 仅在历史流为空（如外部直接注入初始观测）且 current_observation 非空时才补充，
+        // 避免与 turns_history 中的【执行输出】重复注入导致同一份结果出现两遍
+        if self.turns_history.is_empty() && !self.current_observation.is_empty() {
             final_user_parts.push(format!(
                 "【当前最新环境观测 (Observation)】\n(⚠️系统提示：这是你刚才操作后获取的最新的完整数据！请直接从这里读取你需要的信息，不要重复请求！)\n{}",
                 self.current_observation
@@ -195,4 +207,42 @@ mod tests {
         // Compaction must reset fetched_tools to prevent stale references
         assert!(ctx.fetched_tools.is_empty());
     }
+
+    #[test]
+    fn test_no_duplicate_goal_and_observation() {
+        let mut ctx = SandwichContext::new(
+            "SYSTEM_PROMPT".to_string(),
+            "My User Goal".to_string(),
+        );
+
+        // 模拟 turns_history 第一条就是用户的原始 prompt (与 user_goal 相同)
+        ctx.turns_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: json!("My User Goal"),
+        });
+        ctx.turns_history.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: json!("计划: Test | 工具: remote-hub/shell_exec | 动作: Run"),
+        });
+        ctx.turns_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: json!("【执行输出 (v3)】\noutput_id: 123\noutput content"),
+        });
+
+        ctx.current_observation = "output content".to_string();
+
+        let msgs = ctx.assemble_messages();
+
+        // 验证用户目标只出现了一次（由 M1 提供）
+        let m1_user_msg = msgs[1].content.as_str().unwrap();
+        assert!(m1_user_msg.contains("【任务目标】\nMy User Goal"));
+        assert!(!m1_user_msg.contains("My User Goal\n\nMy User Goal"));
+
+        // 验证底部的 user 消息中不包含重复的【当前最新环境观测 (Observation)】
+        let last_msg = msgs.last().unwrap().content.as_str().unwrap();
+        assert!(!last_msg.contains("【当前最新环境观测 (Observation)】"));
+        // 决策指令依然正常输出
+        assert!(last_msg.contains("请基于上述上下文执行下一步"));
+    }
 }
+

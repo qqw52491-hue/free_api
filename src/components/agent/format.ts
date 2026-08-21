@@ -17,8 +17,8 @@ export function toText(value: unknown): string {
 }
 
 export function shortText(value: string, max: number): string {
-    const compact = value.replace(/\s+/g, " ").trim();
-    return compact.length > max ? `${compact.slice(0, max)}…（已截断）` : compact;
+    const trimmed = value.trim();
+    return trimmed.length > max ? `${trimmed.slice(0, max)}\n\n…（内容较长，已截断显示剩余 ${trimmed.length - max} 字符）` : trimmed;
 }
 
 export function formatPayload(value: unknown): string {
@@ -42,7 +42,7 @@ export function formatPayload(value: unknown): string {
             text = toText(value);
         }
     }
-    return shortText(text, 12000);
+    return shortText(text, 24000);
 }
 
 export function toTimestamp(value: unknown): number {

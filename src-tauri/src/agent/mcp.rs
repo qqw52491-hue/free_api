@@ -740,7 +740,6 @@ impl PluginRegistry {
                 .map(str::to_string),
         );
 
-        lines.push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}".to_string());
         lines.join("\n")
     }
 
@@ -854,6 +853,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live remote MCP server"]
     async fn test_remote_hub_real_connection() {
         let mut headers = HashMap::new();
         headers.insert(

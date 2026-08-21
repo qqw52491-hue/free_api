@@ -26,6 +26,7 @@ import {
     type AgentTokenUsage,
     type AgentSessionTelemetry,
     type AgentToolStatus,
+    type LlmParseErrorItem,
 } from "../components/agent/types";
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
 
@@ -177,6 +178,7 @@ export function useAgentSession(sessionId: string) {
         try { localStorage.setItem(MODEL_ROUTING_STORAGE_KEY, JSON.stringify(value)); } catch { /* 存储不可用时继续使用当前会话配置 */ }
     }, { deep: true });
     const logContext = ref(false);
+    const latestContext = ref<Record<string, unknown> | null>(null);
     const goalInput = ref("");
     const currentGoal = ref("");
     const sessionTitle = ref("");
@@ -205,6 +207,7 @@ export function useAgentSession(sessionId: string) {
     const thinkingDurationMs = ref(0);
     const logs = ref<AgentLogEntry[]>([]);
     const humanInterventions = ref<Array<{ message: string; timestamp: number }>>([]);
+    const llmParseErrors = ref<LlmParseErrorItem[]>([]);
 
     const tokenUsage = ref<AgentTokenUsage | null>(null);
     const liveSpeed = ref<number | null>(null);
@@ -786,6 +789,21 @@ export function useAgentSession(sessionId: string) {
             return;
         }
 
+        // 大模型输出格式/语法错误拦截
+        if (eventType === "llm_parse_error") {
+            const errItem: LlmParseErrorItem = {
+                stepId: numberOrUndefined(payload.step_id) ?? 0,
+                tryIndex: numberOrUndefined(payload.try_index) ?? 1,
+                error: toText(payload.error) || "模型未能输出合法 JSON 格式",
+                rawResponse: toText(payload.raw_response) || "",
+                thinkingText: toText(payload.thinking_text) || undefined,
+                timestamp: Date.now(),
+            };
+            llmParseErrors.value.push(errItem);
+            appendLog(`[⚠️ 模型格式异常·尝试${errItem.tryIndex}] ${errItem.error}`);
+            return;
+        }
+
         // ask_human 暂停：只接收受控 form JSON，未知结构退回为普通文本回答。
         if (eventType === "agent_paused") {
             const message = toText(payload.message) || "Agent 正在等待你的输入。";
@@ -927,6 +945,7 @@ export function useAgentSession(sessionId: string) {
     function handleContext(payload: unknown) {
         if (runTerminal.value) return;
         const data = asRecord(payload);
+        latestContext.value = data;
         const candidates = [data.resources, data.resource, asRecord(data.context).resources, asRecord(data.data).resources]
             .flatMap((entry) => Array.isArray(entry) ? entry : entry ? [entry] : []);
         const nextResources = mergeContextResources(candidates);
@@ -948,6 +967,7 @@ export function useAgentSession(sessionId: string) {
         thinkingDurationMs.value = 0;
         logs.value = [];
         humanInterventions.value = [];
+        llmParseErrors.value = [];
         clearResources();
         liveSpeed.value = null;
         liveTtft.value = null;
@@ -1156,6 +1176,7 @@ export function useAgentSession(sessionId: string) {
     return {
         modelRouting,
         logContext,
+        latestContext,
         goalInput,
         currentGoal,
         sessionTitle,
@@ -1182,6 +1203,7 @@ export function useAgentSession(sessionId: string) {
         thinkingDurationMs,
         logs,
         humanInterventions,
+        llmParseErrors,
         tokenUsage,
         sessionTelemetry,
         completionMessage,

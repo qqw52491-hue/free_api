@@ -182,11 +182,59 @@ impl PlanExecutionReport {
             md.push_str(&format!("⚠️ 错误原因: {}\n\n", err));
         }
 
+        // 🌟 防爆窗保护：如果执行失败，对返回数据做脱水与瘦身处理，防止成功分支的超大 Payload（如 3.7w 的 git_diff）全量回灌上下文
+        let sanitized_results = if !self.success {
+            self.sanitize_failure_results()
+        } else {
+            self.results.clone()
+        };
+
         md.push_str("详细返回数据 (JSON):\n```json\n");
-        md.push_str(
-            &serde_json::to_string_pretty(&self.results).unwrap_or_else(|_| "{}".to_string()),
-        );
+        let json_str = serde_json::to_string_pretty(&sanitized_results).unwrap_or_else(|_| "{}".to_string());
+        // 二次防御：单次报告结果若仍超出 3000 字符，执行安全截断
+        if json_str.chars().count() > 3000 {
+            let truncated: String = json_str.chars().take(2800).collect();
+            md.push_str(&truncated);
+            md.push_str("\n...（详细输出较长已自动截断，完整数据已安全持久化至 SQLite）");
+        } else {
+            md.push_str(&json_str);
+        }
         md.push_str("\n```\n");
         md
+    }
+
+    /// 失败报告专用脱水器：成功分支仅保留工具名与状态，彻底剔除巨大数据体；失败分支保留核心错误
+    fn sanitize_failure_results(&self) -> Value {
+        if let Value::Array(ref arr) = self.results {
+            let sanitized_arr: Vec<Value> = arr.iter().map(|item| {
+                if let Value::Object(ref map) = item {
+                    let mut new_map = serde_json::Map::new();
+                    let is_ok = map.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                    
+                    for (k, v) in map {
+                        if is_ok && (k == "data" || k == "stdout" || k == "patch" || k == "output") {
+                            // 成功分支的重型数据直接替换为轻量标记
+                            new_map.insert(k.clone(), serde_json::json!("(已执行成功，数据已落盘 SQLite)"));
+                        } else if let Value::String(ref s) = v {
+                            // 字符串过长时进行单字段截断
+                            if s.chars().count() > 500 {
+                                let short_s: String = s.chars().take(480).collect();
+                                new_map.insert(k.clone(), serde_json::json!(format!("{}...（已截断）", short_s)));
+                            } else {
+                                new_map.insert(k.clone(), v.clone());
+                            }
+                        } else {
+                            new_map.insert(k.clone(), v.clone());
+                        }
+                    }
+                    Value::Object(new_map)
+                } else {
+                    item.clone()
+                }
+            }).collect();
+            Value::Array(sanitized_arr)
+        } else {
+            self.results.clone()
+        }
     }
 }

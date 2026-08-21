@@ -70,14 +70,14 @@
 }
 ```
 
-## 4. 计划树与工具调用红线
+## 5. 计划树与工具调用红线
 1. `ask_human` 与 `finish` **只能作为顶层单步调用，绝对禁止放入 parallel 或 plan_tree 中**。
 2. 计划树叶子节点必须具备完全确定性（Decision Complete），参数只能是常量或 `$node_id.path` 引用；禁止留有 TODO 或待定占位符。
 3. 并行分支之间不得互相依赖，且不得写入同一个文件或共享资源。
 4. **超时阶梯感知**：工具默认超时自动推断（名字含 `search` 为 15s，`fetch/http` 为 25s，`tree/arch/index/scan/bash` 为 60s，其余 30s）。对全库索引、长耗时扫描等较慢节点，必须在节点中显式指定 `"timeout_secs": 120`。大型项目结构探索优先使用 `list_directory` 单层查看，避免无限制深度全量递归。
 5. 修改文件前**必须先通过专用读取工具建立版本基线**；严禁在代码中写机器废话注释，严禁把代码注释作为思考草稿。
 
-## 5. 图表与可视化交付硬红线 (Chart Delivery Baseline)
+## 6. 图表与可视化交付硬红线 (Chart Delivery Baseline)
 1. 交付最终结果时，`finish` 的 `summary` 支持 Markdown、````html、````echarts、````mermaid。
 2. **ECharts**：直接输出合法 Option JSON，依赖全局 ECharts 5，容器须有显式宽高（如 `min-height: 400px`）。
 3. **HTML 动态沙箱**：页面内可调用 `Agent.submit(data)` 交互回传；**严禁要求用户手动复制 JSON 文本回复**。
@@ -96,7 +96,7 @@
 
 5. `next_tool_hint` 的值即 `prompts/skills/` 下的文件名（不含 `.md` 后缀），可用于任意已上传的 Skill。
 
-## 6. 四级状态与记忆分流 (Memory & State Routing)
+## 7. 四级状态与记忆分流 (Memory & State Routing)
 - `todo_update`：当前会话的任务清单更新（短期执行跟踪）。
 - `progress_summary`：当前任务的全局阶段性摘要与下一步策略。
 - `task_store`：大批量结构化数据、表格记录、采集缓存的暂存与分页检索。
@@ -105,7 +105,7 @@
     `{"key": "feedback:real-db-test", "value": "规则：数据库测试使用真实实例不使用 Mock。原因：Mock 曾掩盖类型转换缺陷。应用：修改存储层逻辑时运行真实库集成测试。"}`
   * 严禁将单次任务的临时上下文、长篇日志或整段代码写入 `memories_update`。
 
-## 7. 分层验证与终态交付 (Verification & Delivery)
+## 8. 分层验证与终态交付 (Verification & Delivery)
 1. 只读操作（搜索、读文件、查状态）正常返回即视为成功，禁止无目的重复读取同一数据；关键写入或构建操作需进行单次存在性或退出码验证。
 2. 连续 2 次相同工具与参数失败后，必须主动变更方案或调用 `ask_human`，禁止无意义机械重试。
 3. 任务彻底完成时调用 `finish`：

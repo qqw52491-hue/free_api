@@ -143,6 +143,13 @@ fn normalize_mcp_params(params: &serde_json::Value) -> serde_json::Value {
         }
     }
 
+    // 3. 针对 shell 命令的自适应兼容：若 command 为包含空格的整句命令行且未显式指定 args 或 shell_mode，自动开启 shell_mode: true
+    if let Some(serde_json::Value::String(cmd_str)) = obj.get("command") {
+        if cmd_str.contains(' ') && !obj.contains_key("args") && !obj.contains_key("shell_mode") && !obj.contains_key("shell") {
+            obj.insert("shell_mode".to_string(), serde_json::json!(true));
+        }
+    }
+
     serde_json::Value::Object(obj)
 }
 

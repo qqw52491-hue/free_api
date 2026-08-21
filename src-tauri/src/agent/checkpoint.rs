@@ -9,7 +9,6 @@ use tauri::State;
 use uuid::Uuid;
 
 const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
-const MAX_PERSISTED_TURNS: usize = 40;
 const MAX_OBSERVATION_CHARS: usize = 4_000;
 
 /// 可恢复调度只保留真正决定下一步处理器的阶段。
@@ -150,18 +149,12 @@ pub struct DurableAgentContext {
 
 impl DurableAgentContext {
     pub fn capture(context: &SandwichContext) -> Self {
-        let turns_history = if context.turns_history.len() > MAX_PERSISTED_TURNS {
-            context.turns_history[context.turns_history.len() - MAX_PERSISTED_TURNS..].to_vec()
-        } else {
-            context.turns_history.clone()
-        };
-
         Self {
             user_goal: context.user_goal.clone(),
             memories: context.memories.clone(),
             task_resources: context.task_resources.clone(),
             todo_list: context.todo_list.clone(),
-            turns_history,
+            turns_history: context.turns_history.clone(),
             progress_summary: context.progress_summary.clone(),
             observation_summary: truncate_chars(
                 &context.current_observation,
@@ -185,6 +178,7 @@ impl DurableAgentContext {
         // 工具说明书是派生缓存，必须依照当前 Runtime 重新加载。
         context.active_tool_detail.clear();
         context.carry_memories = false;
+        context.sync_fetched_tools_from_history();
 
         // 🌟 核心防超窗保护：恢复后主动执行自适应 Token 预算压缩，确保历史不超模型上下文
         context.maybe_compact_history();

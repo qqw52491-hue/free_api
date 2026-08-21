@@ -315,6 +315,7 @@ pub async fn run_agent_main_loop(
     }
     context.turns_history =
         crate::agent::conversation::recent_history(state.inner(), &final_session_id)?;
+    context.sync_fetched_tools_from_history();
     // checkpoint 是恢复的权威来源：只要上一轮任务尚未到终态 (Done/Failed)，一律无缝续接！
     let mut checkpoint = match existing_checkpoint {
         Some(existing) if !existing.phase.is_terminal() => {
@@ -664,7 +665,7 @@ pub async fn run_agent_main_loop(
         // --- 加载工具说明书 (Write-Once 按需追加至历史流并去重，稳吃 99% 前缀缓存) ---
         let tool_key = next_tool.split('/').next().unwrap_or(&next_tool).to_string();
         if !tool_key.is_empty() && tool_key != "finish" && tool_key != "core" {
-            if !context.fetched_tools.contains(&tool_key) {
+            if !context.has_tool_manual(&tool_key) {
                 let tool_filename = format!("{}.md", tool_key);
                 let resource_dir = app.path().resource_dir().unwrap_or_default();
                 let candidate_paths = [
@@ -736,6 +737,27 @@ pub async fn run_agent_main_loop(
             "unknown_output_id".to_string()
         });
 
+        // 🌟 工具执行失败时，自动沉淀到「避坑教训库 (Failed Attempts)」，供后续步骤长效避坑
+        if !result.success {
+            let error_summary = if !result.stderr.trim().is_empty() {
+                result.stderr.trim().to_string()
+            } else {
+                result.stdout.lines().take(3).collect::<Vec<_>>().join(" ")
+            };
+            let short_error = if error_summary.chars().count() > 160 {
+                format!("{}...", error_summary.chars().take(160).collect::<String>())
+            } else {
+                error_summary
+            };
+            context.record_failed_attempt(
+                step_id,
+                instruction.get_tool(),
+                instruction.get_action(),
+                short_error,
+                Some(output_id.clone()),
+            );
+        }
+
         context.add_step(&instruction, &output_text, &output_id);
 
         // ── 防虚假勾选：将当步真实 output_id 回填到标记为 done 但缺少证据的 Todo（需在 output_id 已知后执行）
@@ -794,30 +816,14 @@ pub async fn run_agent_main_loop(
         // ──────────────────────────────────────────────────────────────────
 
         // --- 记录不可逆副作用安全台账 (Side-Effects Ledger) ---
-        // 关键不可逆操作（如 shell_exec、写入文件、修改数据库等）成功执行后记录台账，
-        // 确保历史压缩后模型依然清楚自己已修改过哪些外部资源，避免重复执行或误操作
-        let tool_name = instruction.get_tool().to_lowercase();
-        let is_side_effect = result.success && (
-            tool_name.contains("shell")
-            || tool_name.contains("write")
-            || tool_name.contains("edit")
-            || tool_name.contains("move")
-            || tool_name.contains("delete")
-            || tool_name.contains("create")
-            || tool_name.contains("upsert")
-            || tool_name.contains("git")
-        );
-        if is_side_effect {
-            let target = instruction.get_params().to_string();
-            let short_target = if target.chars().count() > 80 {
-                format!("{}...", target.chars().take(80).collect::<String>())
-            } else {
-                target
-            };
+        // 关键不可逆操作（如写入文件、修改数据库、执行写操作命令等）成功执行后记录台账，
+        // 纯只读命令（如 git log/show/diff, search 等）不入台账；参数保持完整合法 JSON，绝不使用 ... 截断元数据
+        if result.success && crate::agent::context::AuditLedger::is_mutating_side_effect(&instruction.get_tool(), &instruction.get_params()) {
+            let safe_params = crate::agent::context::AuditLedger::format_side_effect_params(&instruction.get_params());
             context.record_side_effect(
                 step_id,
                 instruction.get_tool(),
-                format!("{}: {}", instruction.description, short_target),
+                format!("{}: {}", instruction.description, safe_params),
             );
         }
 

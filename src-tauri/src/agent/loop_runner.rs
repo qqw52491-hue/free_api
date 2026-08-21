@@ -434,7 +434,7 @@ pub async fn run_call_llm_and_run_tool_phases(
 
             if attempted_tool != "finish" && attempted_tool != "core" && !attempted_tool.is_empty() {
                 context.active_tool = Some(attempted_tool.clone());
-                if !context.fetched_tools.contains(&attempted_tool) {
+                if !context.has_tool_manual(&plugin_name) {
                     let tool_filename = format!("{}.md", plugin_name);
                     let resource_dir = app.path().resource_dir().unwrap_or_default();
                     let candidate_paths = [
@@ -475,22 +475,31 @@ pub async fn run_call_llm_and_run_tool_phases(
                         context.turns_history.push(crate::agent::context::types::ChatMessage {
                             role: "user".to_string(),
                             content: json!(format!(
-                                "【工具/Skill 操作手册与准确参数规格: {}】\n{}\n(已写入历史流，后续调用请严格遵守上述 JSON Schema 字段规格与参数名！)",
-                                attempted_tool,
+                                "【工具/Skill 操作手册: {}】\n{}\n(已写入历史流，后续调用可直接参考此规格)",
+                                plugin_name,
                                 tool_detail.trim()
                             )),
                         });
-                        context.fetched_tools.insert(attempted_tool.clone());
+                        context.fetched_tools.insert(plugin_name.clone());
                         println!(
                             "🔄 [重试修正] 为 AI 紧急追加了工具说明书至历史流: {}",
-                            attempted_tool
+                            plugin_name
                         );
                     }
                 }
             }
 
             if retry_count >= max_retries {
-                return Err(format!("执行多次失败，任务终止: {}", error_detail));
+                println!(
+                    "⚠️ [工具重试超限] 工具重试达到 {} 次上限，不再强行中断任务，将错误信息作为 Observation 返回给主 Agent 决策",
+                    max_retries
+                );
+                // 将重试超限的错误详情注入上下文，以便模型在下一步决策中反思并调整策略或进行总结交付
+                context.add_error_feedback(&format!(
+                    "{}\n\n⚠️ 注意：该工具动作连续重试 {} 次均失败，请勿再重复调用相同参数！请调整方案、使用其他工具或根据已知信息进行总结。",
+                    error_detail, max_retries
+                ));
+                break (inst, dispatch_result);
             }
 
             app.emit(

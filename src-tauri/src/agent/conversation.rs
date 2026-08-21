@@ -6,7 +6,6 @@ use rusqlite::params;
 use serde_json::json;
 use uuid::Uuid;
 
-const HISTORY_LIMIT: usize = 24;
 
 fn title_from_goal(goal: &str) -> String {
     let normalized = goal.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -106,17 +105,14 @@ pub fn recent_history(db: &DbState, session_id: &str) -> Result<Vec<ChatMessage>
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT role, content FROM (
-                SELECT role, content, created_at
-                FROM chat_messages
-                WHERE session_id=?1
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?2
-             ) ORDER BY created_at ASC",
+            "SELECT role, content
+             FROM chat_messages
+             WHERE session_id=?1
+             ORDER BY created_at ASC, id ASC",
         )
         .map_err(|error| error.to_string())?;
     let rows = stmt
-        .query_map(params![session_id, HISTORY_LIMIT], |row| {
+        .query_map(params![session_id], |row| {
             let role: String = row.get(0)?;
             let content: String = row.get(1)?;
             Ok(ChatMessage {

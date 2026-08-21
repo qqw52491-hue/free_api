@@ -179,6 +179,15 @@ export interface AgentTaskRecordPage {
     hasMore: boolean;
 }
 
+export interface LlmParseErrorItem {
+    stepId: number;
+    tryIndex: number;
+    error: string;
+    rawResponse: string;
+    thinkingText?: string;
+    timestamp: number;
+}
+
 export const AGENT_RUN_STATE_CATALOG: Record<AgentRunState, AgentRunStateMeta> = {
     idle: { label: "Idle", category: "就绪", description: "等待新的任务目标。" },
     preparing: { label: "Preparing", category: "准备", description: "正在初始化会话、模型路由和运行上下文。" },

@@ -540,14 +540,20 @@ fn print_debug_messages(api_messages: &[ChatMessage]) {
     println!("═══════════════════════════════════════════");
 }
 
-/// 将上下文日志写入文件（用于离线分析模型决策）
-fn log_context_to_file(
+/// 将上下文与 LLM 交互记录写入文件（包含完整 Prompt、思考过程、原始返回与报错原因，方便离线复盘）
+fn log_llm_exchange_to_file(
     session_id: &str,
     step_id: usize,
+    try_index: usize,
     model_name: &str,
-    api_messages: &[ChatMessage],
+    api_messages: &[serde_json::Value],
+    thinking_text: &str,
+    raw_response: &str,
+    parse_error: Option<&str>,
 ) {
-    let log_dir = std::path::PathBuf::from("../agent_logs");
+    let log_dir = std::env::current_dir()
+        .map(|p| p.join("agent_logs"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("agent_logs"));
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join(format!("{}.json", session_id));
 
@@ -559,20 +565,25 @@ fn log_context_to_file(
 
     let log_data = serde_json::json!({
         "step_id": step_id,
+        "try_index": try_index,
         "model": model_name,
-        "messages": api_messages.iter().map(|m| {
-            serde_json::json!({
-                "role": m.role,
-                "content": m.content
-            })
-        }).collect::<Vec<_>>()
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "parse_status": if parse_error.is_none() { "success" } else { "parse_error" },
+        "parse_error": parse_error,
+        "thinking_text": thinking_text,
+        "raw_response": raw_response,
+        "messages_sent_to_model": api_messages,
     });
 
     logs_array.push(log_data);
 
     if let Ok(s) = serde_json::to_string_pretty(&logs_array) {
         let _ = std::fs::write(&log_path, s);
-        println!("📁 上下文已追加到: {}", log_path.display());
+        if let Some(err) = parse_error {
+            println!("📁 [模型异常已记录] 步骤 #{} (尝试 {}) 报错已归档到 {}: {}", step_id, try_index, log_path.display(), err);
+        } else {
+            println!("📁 [步骤日志已记录] 步骤 #{} 交互已归档到 {}", step_id, log_path.display());
+        }
     }
 }
 
@@ -679,10 +690,6 @@ pub async fn call_llm(
     // 2. 组装消息
     let api_messages = messages.assemble_messages();
     print_debug_messages(&api_messages);
-
-    if log_context {
-        log_context_to_file(session_id, step_id, &config.model_name, &api_messages);
-    }
 
     // 3. 转为 serde_json::Value 供 llm 层使用
     let mut api_values: Vec<serde_json::Value> = api_messages
@@ -874,9 +881,55 @@ pub async fn call_llm(
 
         match parse_result {
             Ok(inst) => {
+                if log_context {
+                    log_llm_exchange_to_file(
+                        session_id,
+                        step_id,
+                        current_try,
+                        &config.model_name,
+                        &api_values,
+                        &result.thinking_text,
+                        &final_json_str,
+                        None,
+                    );
+                }
                 return Ok((inst, token_usage, result.thinking_text));
             }
             Err(e) => {
+                // 无论是否开启调试模式，模型格式崩溃时强制落盘归档，确保排查证据 100% 保留
+                log_llm_exchange_to_file(
+                    session_id,
+                    step_id,
+                    current_try,
+                    &config.model_name,
+                    &api_values,
+                    &result.thinking_text,
+                    &final_json_str,
+                    Some(&e),
+                );
+
+                if let Some(app_handle) = app {
+                    use tauri::Emitter;
+                    let _ = app_handle.emit(
+                        &format!("agent-progress-{}", session_id),
+                        json!({
+                            "type": "llm_parse_error",
+                            "step_id": step_id,
+                            "try_index": current_try,
+                            "error": &e,
+                            "raw_response": &final_json_str,
+                            "thinking_text": &result.thinking_text,
+                        }),
+                    );
+                    let _ = app_handle.emit(
+                        &format!("agent-log-{}", session_id),
+                        format!(
+                            "⚠️ [模型格式异常·第{}次尝试] 报错: {}\n📄 模型原始输出:\n{}",
+                            current_try, e, final_json_str
+                        ),
+                    );
+                }
+
                 if current_try >= max_retries {
                     return Err(format!("{} \n原文: {}", e, final_json_str));
                 }

@@ -306,17 +306,65 @@ impl SandwichContext {
         self.turns_history.push(msg);
     }
 
-    /// 注入错误反馈信息，告知 AI 修正它的输出
+    /// 注入错误反馈信息，告知 AI 修正它的输出（带安全截断，防止海量报错或异常全量 JSON 打爆上下文）
     pub fn add_error_feedback(&mut self, error_msg: &str) {
+        let trimmed_msg = if error_msg.chars().count() > 3000 {
+            let head: String = error_msg.chars().take(1500).collect();
+            let tail: String = error_msg.chars().rev().take(1000).collect::<String>().chars().rev().collect();
+            format!("{}\n\n... [⚠️ 错误详情较长，已截断中间 {} 字符。请重点依据上述错误原因与最后输出进行修正] ...\n\n{}", head, error_msg.chars().count() - 2500, tail)
+        } else {
+            error_msg.to_string()
+        };
+
         let msg = ChatMessage {
             role: "user".to_string(),
             content: json!(format!(
                 "【❌ 格式或执行错误】\n{}\n\
                 请根据上述错误反思原因并调整策略，严格按照 System Prompt 要求输出合法的纯 JSON 格式！", 
-                error_msg
+                trimmed_msg
             )),
         };
         self.turns_history.push(msg);
+    }
+
+    /// 检查历史流或当前会话中是否已经注入过该工具/插件的手册说明（避免重复塞入 20k 文档）
+    pub fn has_tool_manual(&self, tool_key: &str) -> bool {
+        let clean_key = tool_key.trim();
+        let prefix = clean_key.split('/').next().unwrap_or(clean_key).trim();
+        if self.fetched_tools.contains(clean_key) || self.fetched_tools.contains(prefix) {
+            return true;
+        }
+        self.turns_history.iter().any(|m| match &m.content {
+            serde_json::Value::String(s) => {
+                s.contains(&format!(": {}】", prefix))
+                    || s.contains(&format!(": {}/", prefix))
+                    || s.contains(&format!(": {}】", clean_key))
+                    || s.contains(&format!(": {}/", clean_key))
+                    || (s.contains("【工具/Skill 操作手册") && s.contains(&format!("[{}]", prefix)))
+            }
+            _ => false,
+        })
+    }
+
+    /// 从已有的历史消息流水中反向扫描并同步已加载的手册集合（防止会话续接或重跑时重复注入 20k 文档）
+    pub fn sync_fetched_tools_from_history(&mut self) {
+        for msg in &self.turns_history {
+            if let serde_json::Value::String(s) = &msg.content {
+                if s.contains("【工具/Skill 操作手册") {
+                    if let Some(start) = s.find("【工具/Skill 操作手册") {
+                        if let Some(colon_pos) = s[start..].find(": ") {
+                            let after_colon = &s[start + colon_pos + 2..];
+                            if let Some(end_bracket) = after_colon.find("】") {
+                                let key = after_colon[..end_bracket].trim();
+                                if !key.is_empty() {
+                                    self.fetched_tools.insert(key.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -332,6 +380,41 @@ mod tests {
 
         let _ = ctx.update_memory("db_port".to_string(), "5432".to_string());
         assert_eq!(ctx.memories.get("db_port").map(|s| s.as_str()), Some("5432"));
+    }
+
+    #[test]
+    fn test_tool_manual_deduplication_and_prefix_matching() {
+        let mut ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+
+        // 初始状态：未加载
+        assert!(!ctx.has_tool_manual("remote-hub"));
+        assert!(!ctx.has_tool_manual("remote-hub/list_repos"));
+        assert!(!ctx.has_tool_manual("remote-hub/read_text_file"));
+
+        // 1. 模拟重试层注入了带子动作的手册或纯插件手册
+        ctx.fetched_tools.insert("remote-hub".to_string());
+
+        // 验证：无论是查纯插件名，还是查具体的子工具，全部命中已存在
+        assert!(ctx.has_tool_manual("remote-hub"));
+        assert!(ctx.has_tool_manual("remote-hub/list_repos"));
+        assert!(ctx.has_tool_manual("remote-hub/read_text_file"));
+        assert!(ctx.has_tool_manual("remote-hub/shell_exec"));
+
+        // 2. 模拟从数据库恢复（内存集合为空，但历史流中包含手册文本）
+        let mut restored_ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        restored_ctx.turns_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: json!("【工具/Skill 操作手册: remote-hub】\n60 个工具说明\n(已写入历史流)"),
+        });
+
+        // 即使没有显式 sync，穿透文本查重也能直接拦截
+        assert!(restored_ctx.has_tool_manual("remote-hub"));
+        assert!(restored_ctx.has_tool_manual("remote-hub/read_text_file"));
+
+        // 执行反向同步后，内存集合也自动填满
+        restored_ctx.sync_fetched_tools_from_history();
+        assert!(restored_ctx.fetched_tools.contains("remote-hub"));
+        assert!(restored_ctx.has_tool_manual("remote-hub/search_code"));
     }
 }
 
