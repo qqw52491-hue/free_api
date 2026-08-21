@@ -540,7 +540,7 @@ fn print_debug_messages(api_messages: &[ChatMessage]) {
     println!("═══════════════════════════════════════════");
 }
 
-/// 将上下文与 LLM 交互记录写入文件（包含完整 Prompt、思考过程、原始返回与报错原因，方便离线复盘）
+/// 将上下文与 LLM 交互记录写入文件（包含完整 Prompt、思考过程、原始返回、Token 真实用量与报错原因，方便离线精准复盘）
 fn log_llm_exchange_to_file(
     session_id: &str,
     step_id: usize,
@@ -549,6 +549,7 @@ fn log_llm_exchange_to_file(
     api_messages: &[serde_json::Value],
     thinking_text: &str,
     raw_response: &str,
+    token_usage: Option<&TokenUsage>,
     parse_error: Option<&str>,
 ) {
     let log_dir = std::env::current_dir()
@@ -563,11 +564,28 @@ fn log_llm_exchange_to_file(
         vec![]
     };
 
+    let usage_val = token_usage.map(|u| {
+        serde_json::json!({
+            "prompt_tokens": u.prompt_tokens,
+            "completion_tokens": u.completion_tokens,
+            "total_tokens": u.total_tokens,
+            "cached_tokens": u.cached_tokens,
+            "cache_hit_rate": u.cache_hit_rate,
+            "context_window": u.context_window,
+            "usage_percent": u.usage_percent,
+            "ttft_ms": u.ttft_ms,
+            "total_duration_ms": u.total_duration_ms,
+            "tokens_per_second": u.tokens_per_second,
+            "summary": u.summary(),
+        })
+    });
+
     let log_data = serde_json::json!({
         "step_id": step_id,
         "try_index": try_index,
         "model": model_name,
         "timestamp": chrono::Utc::now().to_rfc3339(),
+        "usage": usage_val,
         "parse_status": if parse_error.is_none() { "success" } else { "parse_error" },
         "parse_error": parse_error,
         "thinking_text": thinking_text,
@@ -890,6 +908,7 @@ pub async fn call_llm(
                         &api_values,
                         &result.thinking_text,
                         &final_json_str,
+                        Some(&token_usage),
                         None,
                     );
                 }
@@ -905,6 +924,7 @@ pub async fn call_llm(
                     &api_values,
                     &result.thinking_text,
                     &final_json_str,
+                    Some(&token_usage),
                     Some(&e),
                 );
 

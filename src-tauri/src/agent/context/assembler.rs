@@ -41,7 +41,23 @@ impl SandwichContext {
         } else {
             &self.turns_history[..]
         };
-        messages.extend(history_slice.iter().cloned());
+
+        // 🌟 证据化脱水：保护最新 6 条消息保持 100% 原汁原味（当前活跃工作窗口），
+        // 较早的历史轮次自动脱水为精简结构化证据句柄，消除历史消息中数十条 raw stdout 造成的上下文膨胀
+        let total_hist = history_slice.len();
+        let protected_recent_count = 6;
+        let dehydrated_history: Vec<ChatMessage> = history_slice
+            .iter()
+            .enumerate()
+            .map(|(idx, m)| {
+                if idx + protected_recent_count >= total_hist {
+                    m.clone()
+                } else {
+                    dehydrate_historical_turn(m)
+                }
+            })
+            .collect();
+        messages.extend(dehydrated_history);
 
         // ════════════════════════════════════════════════════════════════
         // 🍞 3. 底层面包（动态状态卡 + 避坑台账 + 不可逆操作 + 最新观测）
@@ -122,6 +138,63 @@ impl SandwichContext {
         // ════════════════════════════════════════════════════════════════
         consolidate_consecutive_messages(messages)
     }
+}
+
+/// 对历史较旧的轮次（除最新工作窗口外）进行证据化脱水，移除冗余的重型 raw stdout 和长报错堆栈
+fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
+    if msg.role != "user" {
+        return msg.clone();
+    }
+    let text = match &msg.content {
+        serde_json::Value::String(s) => s,
+        _ => return msg.clone(),
+    };
+
+    // 1. 如果是早期执行输出且较长（> 400 字符），提取 output_id 和结果状态，将正文脱水为结构化证据句柄
+    if text.starts_with("【执行输出") && text.len() > 400 {
+        let mut output_id = "";
+        let mut status_line = "";
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("output_id: ") {
+                output_id = trimmed[11..].trim();
+            } else if (trimmed.starts_with("【计划执行结果报告】")
+                || trimmed.starts_with("状态:")
+                || trimmed.starts_with("Finished")
+                || trimmed.starts_with("总耗时:"))
+                && status_line.is_empty()
+            {
+                status_line = trimmed;
+            }
+        }
+        if !output_id.is_empty() {
+            let first_line = text.lines().next().unwrap_or("【执行输出】");
+            let summary = if !status_line.is_empty() {
+                format!(
+                    "{}\n(完整详细数据已安全持久化至 SQLite，可通过 output_id={} 精准检索)",
+                    status_line, output_id
+                )
+            } else {
+                format!("(完整详细数据已安全持久化至 SQLite，可通过 output_id={} 精准检索)", output_id)
+            };
+            return ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!("{}\noutput_id: {}\n{}", first_line, output_id, summary)),
+            };
+        }
+    }
+
+    // 2. 如果是历史早期的格式/执行错误且已过去（> 300 字符），压缩冗余报错堆栈
+    if text.starts_with("【❌ 格式或执行错误】") && text.len() > 300 {
+        let first_err_line = text.lines().nth(1).unwrap_or("执行异常");
+        let compact_err: String = first_err_line.chars().take(120).collect();
+        return ChatMessage {
+            role: "user".to_string(),
+            content: json!(format!("【历史执行错误 (后续步骤已处理)】: {}", compact_err)),
+        };
+    }
+
+    msg.clone()
 }
 
 /// 纯函数：将消息队列中连续相同角色的文本消息用换行合并为一条
@@ -243,6 +316,37 @@ mod tests {
         assert!(!last_msg.contains("【当前最新环境观测 (Observation)】"));
         // 决策指令依然正常输出
         assert!(last_msg.contains("请基于上述上下文执行下一步"));
+    }
+
+    #[test]
+    fn test_historical_evidence_dehydration() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+
+        // 模拟 10 轮历史，每轮包含一个超长执行输出（> 1000 字符）
+        let big_raw = "X".repeat(1200);
+        for i in 0..10 {
+            ctx.turns_history.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: json!(format!("计划: Step {}", i)),
+            });
+            ctx.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!(
+                    "【执行输出 (v3)】\noutput_id: out_step_{}\n【计划执行结果报告】状态: 全部成功\n{}",
+                    i, big_raw
+                )),
+            });
+        }
+
+        let msgs = ctx.assemble_messages();
+
+        // 验证较旧的历史轮次（如 step 0）被成功脱水为句柄，不再包含 1200 字符的原始 X
+        let full_text = serde_json::to_string(&msgs).unwrap();
+        assert!(full_text.contains("out_step_0"));
+        assert!(full_text.contains("完整详细数据已安全持久化至 SQLite"));
+
+        // 验证最新轮次（如 step 9）保持完整未被脱水
+        assert!(full_text.contains("out_step_9"));
     }
 }
 

@@ -78,6 +78,7 @@ impl ContextBudget {
     pub const DEFAULT_HIGH_WATERMARK_RATIO: f64 = 0.80;      // 80% 高水位触发
     pub const DEFAULT_LOW_WATERMARK_RATIO: f64 = 0.50;       // 50% 目标回落水位
     pub const RECENT_PROTECTED_RATIO: f64 = 0.25;            // 25% 近期保护区（保证 low_watermark 50% > protected 25% + 卡片 5% + 余量 20%）
+    pub const MAX_ACTIVE_HISTORY_TOKENS_CAP: usize = 48_000; // 活跃历史工作集上限（即使 128k/1M 窗口也将活跃历史控制在 48k tokens 以内，防止注意力稀释）
 
     /// 根据当前模型的真实窗口和静态区大小，动态推导出绝对预算（在会话内是常量且确定）
     pub fn derive(
@@ -116,9 +117,12 @@ impl ContextBudget {
         // 安全余量：总窗口的 15%
         let safety_margin = (window as f64 * 0.15).ceil() as usize;
 
-        // 可供历史分配的最大容量
+        // 可供历史分配的最大容量（叠加 MAX_ACTIVE_HISTORY_TOKENS_CAP 保护，杜绝长任务上下文过度膨胀）
         let reserved = max_out + static_prefix_tokens + tail_state_tokens + safety_margin;
-        let max_allowed_history = window.saturating_sub(reserved).max(2_048);
+        let max_allowed_history = window
+            .saturating_sub(reserved)
+            .min(Self::MAX_ACTIVE_HISTORY_TOKENS_CAP)
+            .max(2_048);
 
         // 硬不变量保证：低水位必须严格大于（近期保护区 + 归档卡片预留 + 安全缓冲）
         let min_safe_low_ratio = Self::RECENT_PROTECTED_RATIO + 0.15; // 至少 40%
@@ -159,8 +163,12 @@ mod tests {
     #[test]
     fn test_budget_derivation_deterministic() {
         let budget = ContextBudget::derive(128_000, 4_096, 5_000);
-        assert!(budget.max_allowed_history_tokens > 80_000);
+        assert_eq!(budget.max_allowed_history_tokens, ContextBudget::MAX_ACTIVE_HISTORY_TOKENS_CAP);
         assert!(budget.high_watermark_tokens > budget.low_watermark_tokens);
+
+        let small_budget = ContextBudget::derive(16_000, 2_048, 1_000);
+        assert!(small_budget.max_allowed_history_tokens < 16_000);
+        assert!(small_budget.high_watermark_tokens > small_budget.low_watermark_tokens);
     }
 
     #[test]
