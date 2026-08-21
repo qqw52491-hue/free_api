@@ -1,3 +1,4 @@
+use crate::task_registry::{TaskKind, TaskRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -7,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use crate::task_registry::{TaskKind, TaskRegistry};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,7 +114,10 @@ impl McpClient {
         // 🌟 场景 1: 原生 HTTP / SSE 直连 (无需本地 uv / python 进程)
         if let Some(ref url) = config.url {
             if !url.trim().is_empty() {
-                println!("🌐 [MCP:{}] 初始化原生 HTTP 直连客户端: {}", config.name, url);
+                println!(
+                    "🌐 [MCP:{}] 初始化原生 HTTP 直连客户端: {}",
+                    config.name, url
+                );
                 return Ok(Self {
                     config,
                     request_tx: None,
@@ -131,7 +134,10 @@ impl McpClient {
 
         // 🌟 场景 2: 本地 stdio 进程模式 (uvx / npx / node / python)
         if config.command.trim().is_empty() {
-            return Err(format!("[MCP:{}] 既未指定 url 也未指定 command", config.name));
+            return Err(format!(
+                "[MCP:{}] 既未指定 url 也未指定 command",
+                config.name
+            ));
         }
 
         let mut cmd = Command::new(&config.command);
@@ -313,7 +319,10 @@ impl McpClient {
         *g = new_sid;
     }
 
-    pub async fn ensure_session_initialized(&self, chat_session_id: Option<&str>) -> Result<(), String> {
+    pub async fn ensure_session_initialized(
+        &self,
+        chat_session_id: Option<&str>,
+    ) -> Result<(), String> {
         if self.config.url.is_some() {
             // 快速路径：该会话专属 session 已就绪时无锁零等待
             if self.get_session_id(chat_session_id).await.is_some() {
@@ -341,7 +350,9 @@ impl McpClient {
         if method != "initialize" && self.config.url.is_some() {
             let _ = self.ensure_session_initialized(chat_session_id).await;
         }
-        let first_res = self.send_raw_request_with_session(chat_session_id, method, params.clone()).await;
+        let first_res = self
+            .send_raw_request_with_session(chat_session_id, method, params.clone())
+            .await;
 
         // 🌟 自动自愈重试：仅当远程 MCP 明确提示 Session 真正失效时才重新握手
         // ⚠️ 绝不能把通用的 -32000 (Tool 内部执行报错，如正则格式不正确) 误判为 Session 丢失！
@@ -355,12 +366,17 @@ impl McpClient {
                     || err_msg.contains("401 Unauthorized");
 
                 if is_session_lost {
-                    println!("🔄 [MCP:{}] 会话 {:?} Session 真正失效，持锁重新握手自愈...", self.config.name, chat_session_id);
+                    println!(
+                        "🔄 [MCP:{}] 会话 {:?} Session 真正失效，持锁重新握手自愈...",
+                        self.config.name, chat_session_id
+                    );
                     let lock = self.get_session_lock(chat_session_id).await;
                     let _guard = lock.lock().await;
                     self.set_session_id(chat_session_id, None).await;
                     if let Ok(()) = self.initialize_for_session(chat_session_id).await {
-                        return self.send_raw_request_with_session(chat_session_id, method, params).await;
+                        return self
+                            .send_raw_request_with_session(chat_session_id, method, params)
+                            .await;
                     }
                 }
             }
@@ -414,7 +430,10 @@ impl McpClient {
         self.initialize_for_session(None).await
     }
 
-    pub async fn initialize_for_session(&self, chat_session_id: Option<&str>) -> Result<(), String> {
+    pub async fn initialize_for_session(
+        &self,
+        chat_session_id: Option<&str>,
+    ) -> Result<(), String> {
         let res = self
             .send_raw_request_with_session(
                 chat_session_id,
@@ -426,7 +445,7 @@ impl McpClient {
                 }),
             )
             .await;
-        
+
         // 若为原生 HTTP 远程服务，在握手成功后发送 initialized 通知
         if self.config.url.is_some() {
             if let Some(ref url) = self.config.url {
@@ -484,7 +503,10 @@ impl McpClient {
             if let Some(ref sid) = current_sid {
                 req_builder = req_builder.header("mcp-session-id", sid);
             }
-            println!("🚀 [MCP:{}] 发送 HTTP 请求 ({:?}): method={}, id={}, has_sid={:?}", self.config.name, chat_session_id, method, id, current_sid);
+            println!(
+                "🚀 [MCP:{}] 发送 HTTP 请求 ({:?}): method={}, id={}, has_sid={:?}",
+                self.config.name, chat_session_id, method, id, current_sid
+            );
 
             // 动态计算该工具的超时时长：慢操作（如全库索引/深层扫描/构建任务）放宽至 180s，常规工具 60s
             let tool_name_in_params = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -495,22 +517,40 @@ impl McpClient {
                 || tool_name_in_params.contains("compile");
             let timeout_secs = if is_slow_tool { 180 } else { 60 };
 
-            let mut resp = match tokio::time::timeout(Duration::from_secs(timeout_secs), req_builder.send()).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => return Err(format!("[MCP:{}] HTTP 请求失败: {}", self.config.name, e)),
-                Err(_) => return Err(format!("[MCP:{}] HTTP 请求超时 ({}s 熔断)", self.config.name, timeout_secs)),
-            };
+            let mut resp =
+                match tokio::time::timeout(Duration::from_secs(timeout_secs), req_builder.send())
+                    .await
+                {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
+                        return Err(format!("[MCP:{}] HTTP 请求失败: {}", self.config.name, e))
+                    }
+                    Err(_) => {
+                        return Err(format!(
+                            "[MCP:{}] HTTP 请求超时 ({}s 熔断)",
+                            self.config.name, timeout_secs
+                        ))
+                    }
+                };
 
             let resp_status = resp.status();
             let resp_headers = resp.headers().clone();
 
             // 1. 从 HTTP Response Headers 提取会话 ID
-            for hname in &["mcp-session-id", "mcp_session_id", "x-session-id", "session-id"] {
+            for hname in &[
+                "mcp-session-id",
+                "mcp_session_id",
+                "x-session-id",
+                "session-id",
+            ] {
                 if let Some(sid_header) = resp_headers.get(*hname) {
                     if let Ok(sid_str) = sid_header.to_str() {
                         let clean = sid_str.trim().to_string();
                         if !clean.is_empty() {
-                            println!("🔑 [MCP:{}] 捕获到 Session ID ({:?}): {}", self.config.name, chat_session_id, clean);
+                            println!(
+                                "🔑 [MCP:{}] 捕获到 Session ID ({:?}): {}",
+                                self.config.name, chat_session_id, clean
+                            );
                             self.set_session_id(chat_session_id, Some(clean)).await;
                             break;
                         }
@@ -522,10 +562,17 @@ impl McpClient {
             let max_bytes = 10 * 1024 * 1024; // 10MB
             let mut truncated = false;
 
-            while let Some(chunk) = resp.chunk().await.map_err(|e| format!("[MCP:{}] 读取块失败: {}", self.config.name, e))? {
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| format!("[MCP:{}] 读取块失败: {}", self.config.name, e))?
+            {
                 raw_body_bytes.extend_from_slice(&chunk);
                 if raw_body_bytes.len() > max_bytes {
-                    println!("⚠️ [MCP:{}] 响应体过大 (超过 10MB)，触发安全截断!", self.config.name);
+                    println!(
+                        "⚠️ [MCP:{}] 响应体过大 (超过 10MB)，触发安全截断!",
+                        self.config.name
+                    );
                     truncated = true;
                     break;
                 }
@@ -536,8 +583,13 @@ impl McpClient {
             }
 
             let body_preview: String = raw_body.chars().take(120).collect();
-            println!("📥 [MCP:{}] 收到 HTTP 响应 (Status {}): len={}, body_preview={}", 
-                self.config.name, resp_status, raw_body.len(), body_preview);
+            println!(
+                "📥 [MCP:{}] 收到 HTTP 响应 (Status {}): len={}, body_preview={}",
+                self.config.name,
+                resp_status,
+                raw_body.len(),
+                body_preview
+            );
 
             let json_resp = parse_mcp_response_text(&raw_body)
                 .map_err(|e| format!("[MCP:{}] {}", self.config.name, e))?;
@@ -545,9 +597,15 @@ impl McpClient {
             // 2. 从 Response JSON 提取会话 ID（兼容 FastMCP / TS MCP SDK）
             if let Some(res_obj) = json_resp.result.as_ref().and_then(|r| r.as_object()) {
                 if let Some(sid_val) = res_obj.get("sessionId").and_then(|v| v.as_str()) {
-                    self.set_session_id(chat_session_id, Some(sid_val.to_string())).await;
-                } else if let Some(meta_sid) = res_obj.get("_meta").and_then(|m| m.get("sessionId")).and_then(|v| v.as_str()) {
-                    self.set_session_id(chat_session_id, Some(meta_sid.to_string())).await;
+                    self.set_session_id(chat_session_id, Some(sid_val.to_string()))
+                        .await;
+                } else if let Some(meta_sid) = res_obj
+                    .get("_meta")
+                    .and_then(|m| m.get("sessionId"))
+                    .and_then(|v| v.as_str())
+                {
+                    self.set_session_id(chat_session_id, Some(meta_sid.to_string()))
+                        .await;
                 }
             }
 
@@ -575,7 +633,10 @@ impl McpClient {
             match tokio::time::timeout(Duration::from_secs(timeout_secs), resp_rx).await {
                 Ok(Ok(res)) => res,
                 Ok(Err(_)) => Err(format!("[MCP:{}] 响应通道在接收前断开", self.config.name)),
-                Err(_) => Err(format!("[MCP:{}] 请求超时 ({}s 熔断)", self.config.name, timeout_secs)),
+                Err(_) => Err(format!(
+                    "[MCP:{}] 请求超时 ({}s 熔断)",
+                    self.config.name, timeout_secs
+                )),
             }
         } else {
             Err(format!("[MCP:{}] 未找到可用通信通道", self.config.name))
@@ -587,7 +648,8 @@ impl McpClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        self.send_raw_request_with_session(None, method, params).await
+        self.send_raw_request_with_session(None, method, params)
+            .await
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>, String> {
@@ -698,7 +760,11 @@ impl PluginRegistry {
     }
 
     /// 📡 探测指定插件在当前会话下是否健康存活
-    pub async fn ping_plugin(&self, name: &str, chat_session_id: Option<&str>) -> Result<(), String> {
+    pub async fn ping_plugin(
+        &self,
+        name: &str,
+        chat_session_id: Option<&str>,
+    ) -> Result<(), String> {
         if let Some(client) = self.get(name) {
             client.ping_for_session(chat_session_id).await
         } else {
@@ -713,8 +779,7 @@ impl PluginRegistry {
     pub fn list_all_tools(&self) -> Vec<(String, McpToolDef)> {
         let mut result = Vec::new();
         for (plugin_name, client) in &self.clients {
-            let tools = crate::agent::mcp_catalog::cached_tools(&client.config)
-                .unwrap_or_default();
+            let tools = crate::agent::mcp_catalog::cached_tools(&client.config).unwrap_or_default();
             for tool in tools {
                 result.push((plugin_name.clone(), tool));
             }
@@ -725,17 +790,19 @@ impl PluginRegistry {
     /// 【黄金平衡版】工具映射索引 (极简 Token，明确能力，只读无锁零等待)
     pub fn format_tools_menu(&self) -> String {
         let mut lines: Vec<String> = Vec::new();
-        lines.push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\")".to_string());
+        lines
+            .push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\")".to_string());
 
         let mut catalogs = Vec::new();
         for (name, client) in &self.clients {
-            let tools = crate::agent::mcp_catalog::cached_tools(&client.config)
-                .unwrap_or_default();
+            let tools = crate::agent::mcp_catalog::cached_tools(&client.config).unwrap_or_default();
             catalogs.push((name.clone(), tools));
         }
         lines.extend(
             crate::agent::mcp_catalog::concise_menu(catalogs)
-                .trim_start_matches("\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）")
+                .trim_start_matches(
+                    "\n## MCP 工具目录（摘要缓存；需要参数规格时使用 next_tool_hint）",
+                )
                 .lines()
                 .map(str::to_string),
         );
@@ -791,7 +858,10 @@ impl PluginRegistry {
                 let compact_schema = clean_tool_schema(&tool.schema);
                 detail.push_str(&format!(
                     "### {}/{}\n- 描述: {}\n- 参数: {}\n",
-                    plugin, tool.name, tool.description.trim(), compact_schema
+                    plugin,
+                    tool.name,
+                    tool.description.trim(),
+                    compact_schema
                 ));
             }
         }
@@ -875,7 +945,10 @@ mod tests {
         assert!(init_res.is_ok());
 
         let tools_res = client.list_tools().await;
-        println!("Tools result count: {:?}", tools_res.as_ref().map(|t| t.len()));
+        println!(
+            "Tools result count: {:?}",
+            tools_res.as_ref().map(|t| t.len())
+        );
         assert!(tools_res.is_ok());
     }
 }

@@ -64,15 +64,19 @@ fn scan_yaml_plugins() -> Vec<PluginConfig> {
 }
 
 pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, String> {
-    let mut map: std::collections::HashMap<String, ManagedMcpPlugin> = std::collections::HashMap::new();
+    let mut map: std::collections::HashMap<String, ManagedMcpPlugin> =
+        std::collections::HashMap::new();
 
     // 1. 先扫描 YAML 本地文件插件（默认启用）
     for config in scan_yaml_plugins() {
         let name = config.name.clone();
-        map.insert(name, ManagedMcpPlugin {
-            config,
-            enabled: true,
-        });
+        map.insert(
+            name,
+            ManagedMcpPlugin {
+                config,
+                enabled: true,
+            },
+        );
     }
 
     // 2. 再读取 SQLite 数据库中的插件（数据库优先覆盖 enabled 状态）
@@ -101,17 +105,20 @@ pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, S
                 existing.config.command = command;
             }
         } else {
-            map.insert(name.clone(), ManagedMcpPlugin {
-                config: PluginConfig {
-                    name,
-                    command,
-                    args: serde_json::from_str(&args_json).unwrap_or_default(),
-                    url: None,
-                    headers: std::collections::HashMap::new(),
-                    env: serde_json::from_str(&env_json).unwrap_or_default(),
+            map.insert(
+                name.clone(),
+                ManagedMcpPlugin {
+                    config: PluginConfig {
+                        name,
+                        command,
+                        args: serde_json::from_str(&args_json).unwrap_or_default(),
+                        url: None,
+                        headers: std::collections::HashMap::new(),
+                        env: serde_json::from_str(&env_json).unwrap_or_default(),
+                    },
+                    enabled,
                 },
-                enabled,
-            });
+            );
         }
     }
 
@@ -709,19 +716,22 @@ pub async fn update_model(
         conn.execute(
             "UPDATE models SET max_tokens = ?1 WHERE id = ?2",
             params![v, id],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
     }
     if let Some(v) = context_window {
         conn.execute(
             "UPDATE models SET context_window = ?1 WHERE id = ?2",
             params![v, id],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
     }
     if let Some(v) = display_name {
         conn.execute(
             "UPDATE models SET display_name = ?1 WHERE id = ?2",
             params![v, id],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -811,7 +821,6 @@ pub async fn add_model_with_spec(
     })
 }
 
-
 #[tauri::command]
 pub async fn test_model(
     state: State<'_, DbState>,
@@ -883,17 +892,17 @@ pub async fn test_model(
         Ok(r) => {
             let s = r.status().as_u16();
             let b = r.text().await.unwrap_or_default();
-            (
-                "offline",
-                format!("HTTP {} - {}", s, b),
-                Some(s),
-                b,
-                None,
-            )
+            ("offline", format!("HTTP {} - {}", s, b), Some(s), b, None)
         }
         Err(e) => {
             let err_str = e.to_string();
-            ("offline", err_str.clone(), None, String::new(), Some(err_str))
+            (
+                "offline",
+                err_str.clone(),
+                None,
+                String::new(),
+                Some(err_str),
+            )
         }
     };
 
@@ -982,16 +991,46 @@ pub async fn create_session(
 pub async fn delete_session(state: State<'_, DbState>, id: String) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     // 彻底级联清理该会话在所有 SQLite 业务表、大文本日志表与 FTS5 索引表中的历史数据
-    let _ = conn.execute("DELETE FROM agent_task_records WHERE session_id=?1", params![&id]);
-    let _ = conn.execute("DELETE FROM agent_task_resources WHERE session_id=?1", params![&id]);
-    let _ = conn.execute("DELETE FROM agent_checkpoints WHERE run_id=?1", params![&id]);
-    let _ = conn.execute("DELETE FROM agent_run_traces WHERE session_id=?1", params![&id]);
-    let _ = conn.execute("DELETE FROM agent_step_logs WHERE session_id=?1", params![&id]);
-    let _ = conn.execute("DELETE FROM agent_memory_nodes WHERE session_id=?1", params![&id]);
-    let _ = conn.execute("DELETE FROM agent_lesson_recalls WHERE session_id=?1", params![&id]);
-    let _ = conn.execute("DELETE FROM chat_messages WHERE session_id=?1", params![&id]);
-    let _ = conn.execute("DELETE FROM agent_step_logs_fts WHERE session_id=?1", params![&id]);
-    let _ = conn.execute("DELETE FROM agent_memory_nodes_fts WHERE session_id=?1", params![&id]);
+    let _ = conn.execute(
+        "DELETE FROM agent_task_records WHERE session_id=?1",
+        params![&id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM agent_task_resources WHERE session_id=?1",
+        params![&id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM agent_checkpoints WHERE run_id=?1",
+        params![&id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM agent_run_traces WHERE session_id=?1",
+        params![&id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM agent_step_logs WHERE session_id=?1",
+        params![&id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM agent_memory_nodes WHERE session_id=?1",
+        params![&id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM agent_lesson_recalls WHERE session_id=?1",
+        params![&id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM chat_messages WHERE session_id=?1",
+        params![&id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM agent_step_logs_fts WHERE session_id=?1",
+        params![&id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM agent_memory_nodes_fts WHERE session_id=?1",
+        params![&id],
+    );
     conn.execute("DELETE FROM chat_sessions WHERE id=?1", params![&id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1337,4 +1376,3 @@ pub async fn search_web(
 pub async fn fetch_url_markdown(url: String) -> Result<String, String> {
     crate::agent::web_search::fetch_url_markdown(&url).await
 }
-

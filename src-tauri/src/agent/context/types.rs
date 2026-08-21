@@ -210,7 +210,12 @@ impl SandwichContext {
             .map(str::to_string);
         let is_new_plan = instruction.new_plan.unwrap_or(false);
 
-        self.plan_state.resolve_plan_explicit(requested_id, requested_title, is_new_plan, &self.user_goal)
+        self.plan_state.resolve_plan_explicit(
+            requested_id,
+            requested_title,
+            is_new_plan,
+            &self.user_goal,
+        )
     }
 
     pub fn set_task_resources(&mut self, resources: Vec<TaskResourceRef>) {
@@ -219,20 +224,33 @@ impl SandwichContext {
 
     pub fn update_memory(&mut self, key: String, value: String) -> Result<(), &'static str> {
         crate::agent::context::memory::MemoryManager::is_safe_memory(&key, &value)?;
-        crate::agent::context::memory::MemoryManager::check_capacity(self.memories.len(), &key, &self.memories)?;
+        crate::agent::context::memory::MemoryManager::check_capacity(
+            self.memories.len(),
+            &key,
+            &self.memories,
+        )?;
         self.memories.insert(key, value);
         Ok(())
     }
 
-    pub fn update_memories(&mut self, updates: Vec<crate::agent::types::MemoryItem>) -> Vec<String> {
+    pub fn update_memories(
+        &mut self,
+        updates: Vec<crate::agent::types::MemoryItem>,
+    ) -> Vec<String> {
         let mut rejections = Vec::new();
         for item in updates {
-            if let Err(reason) = crate::agent::context::memory::MemoryManager::is_safe_memory(&item.key, &item.value) {
+            if let Err(reason) =
+                crate::agent::context::memory::MemoryManager::is_safe_memory(&item.key, &item.value)
+            {
                 println!("⚠️ 记忆项写入被安全拦截: {} (key: '{}')", reason, item.key);
                 rejections.push(format!("记忆项 '{}' 未保存: {}", item.key, reason));
                 continue;
             }
-            if let Err(reason) = crate::agent::context::memory::MemoryManager::check_capacity(self.memories.len(), &item.key, &self.memories) {
+            if let Err(reason) = crate::agent::context::memory::MemoryManager::check_capacity(
+                self.memories.len(),
+                &item.key,
+                &self.memories,
+            ) {
                 println!("⚠️ 记忆项容量拦截: {} (key: '{}')", reason, item.key);
                 rejections.push(format!("记忆项 '{}' 未保存: {}", item.key, reason));
                 continue;
@@ -262,12 +280,7 @@ impl SandwichContext {
         }
     }
 
-    pub fn record_side_effect(
-        &mut self,
-        step_id: usize,
-        tool: String,
-        description: String,
-    ) {
+    pub fn record_side_effect(&mut self, step_id: usize, tool: String, description: String) {
         self.side_effects.push(SideEffectRecord {
             step_id,
             tool,
@@ -310,7 +323,14 @@ impl SandwichContext {
     pub fn add_error_feedback(&mut self, error_msg: &str) {
         let trimmed_msg = if error_msg.chars().count() > 3000 {
             let head: String = error_msg.chars().take(1500).collect();
-            let tail: String = error_msg.chars().rev().take(1000).collect::<String>().chars().rev().collect();
+            let tail: String = error_msg
+                .chars()
+                .rev()
+                .take(1000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
             format!("{}\n\n... [⚠️ 错误详情较长，已截断中间 {} 字符。请重点依据上述错误原因与最后输出进行修正] ...\n\n{}", head, error_msg.chars().count() - 2500, tail)
         } else {
             error_msg.to_string()
@@ -376,10 +396,16 @@ mod tests {
     fn test_update_memory_blocks_sensitive_secrets() {
         let mut ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
         let _ = ctx.update_memory("api_key".to_string(), "sk-1234567890abcdef".to_string());
-        assert!(!ctx.memories.contains_key("api_key"), "Sensitive API key must be blocked!");
+        assert!(
+            !ctx.memories.contains_key("api_key"),
+            "Sensitive API key must be blocked!"
+        );
 
         let _ = ctx.update_memory("db_port".to_string(), "5432".to_string());
-        assert_eq!(ctx.memories.get("db_port").map(|s| s.as_str()), Some("5432"));
+        assert_eq!(
+            ctx.memories.get("db_port").map(|s| s.as_str()),
+            Some("5432")
+        );
     }
 
     #[test]
@@ -417,4 +443,3 @@ mod tests {
         assert!(restored_ctx.has_tool_manual("remote-hub/search_code"));
     }
 }
-

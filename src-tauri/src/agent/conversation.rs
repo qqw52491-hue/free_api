@@ -6,7 +6,6 @@ use rusqlite::params;
 use serde_json::json;
 use uuid::Uuid;
 
-
 fn title_from_goal(goal: &str) -> String {
     let normalized = goal.split_whitespace().collect::<Vec<_>>().join(" ");
     let candidate = if normalized.is_empty() {

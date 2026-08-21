@@ -50,7 +50,7 @@ fn default_confidence() -> i64 {
 pub struct MemoryNode {
     pub id: String,
     pub parent_id: Option<String>,
-    pub level: u8, // 0 | 1 | 2
+    pub level: u8,    // 0 | 1 | 2
     pub kind: String, // "event" | "episode" | "lesson" | "decision"
     pub session_id: String,
     pub plan_id: Option<String>,
@@ -210,11 +210,23 @@ fn rebuild_fts_from_step_logs(conn: &Connection) -> Result<usize, String> {
             },
             None => raw,
         };
-        let _ = index_step_fts(conn, &output_id, &session_id, step_id as usize, "", "", "", &content);
+        let _ = index_step_fts(
+            conn,
+            &output_id,
+            &session_id,
+            step_id as usize,
+            "",
+            "",
+            "",
+            &content,
+        );
         indexed += 1;
     }
 
-    println!("✅ [FTS5 Migration] trigram 索引回填完成，共 {} 行", indexed);
+    println!(
+        "✅ [FTS5 Migration] trigram 索引回填完成，共 {} 行",
+        indexed
+    );
     Ok(indexed)
 }
 
@@ -234,7 +246,14 @@ pub fn search_history(
     // trigram 分词器下限为 3 字符。若查询少于 3 字符（如「报错」「端口」「超时」等常见两字词），
     // 自动平滑降级为 SQL LIKE 子串查询，确保短中文词绝不落空
     if clean_query.chars().count() < 3 {
-        return search_history_short_like(conn, session_id, clean_query, outcome_filter, since_step, limit);
+        return search_history_short_like(
+            conn,
+            session_id,
+            clean_query,
+            outcome_filter,
+            since_step,
+            limit,
+        );
     }
 
     // FTS5 简单转义（处理特殊字符）
@@ -368,7 +387,10 @@ fn search_history_short_like(
             // 字符安全地截取包含关键词的 snippet 片段（防止 UTF-8 字节截断 panic）
             let chars: Vec<char> = content.chars().collect();
             let query_chars: Vec<char> = clean_query.chars().collect();
-            let snippet = if let Some(char_idx) = chars.windows(query_chars.len()).position(|w| w == query_chars.as_slice()) {
+            let snippet = if let Some(char_idx) = chars
+                .windows(query_chars.len())
+                .position(|w| w == query_chars.as_slice())
+            {
                 let start = char_idx.saturating_sub(15);
                 let end = (char_idx + query_chars.len() + 25).min(chars.len());
                 format!("...{}...", chars[start..end].iter().collect::<String>())
@@ -400,7 +422,11 @@ fn search_history_short_like(
 }
 
 /// 实时代码与文件搜索（避免过期快照；必须显式传入检索目录，由调用方校验）
-pub fn search_code(search_root: &Path, query: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
+pub fn search_code(
+    search_root: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<SearchHit>, String> {
     let clean_query = query.trim();
     if clean_query.is_empty() {
         return Ok(Vec::new());
@@ -536,7 +562,10 @@ pub fn search_memory_nodes_enriched(
     }
 
     let next_idx = params_vec.len() + 1;
-    sql.push_str(&format!(" ORDER BY n.confidence_score DESC, rank ASC LIMIT ?{}", next_idx));
+    sql.push_str(&format!(
+        " ORDER BY n.confidence_score DESC, rank ASC LIMIT ?{}",
+        next_idx
+    ));
     params_vec.push((limit as i64).into());
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -551,7 +580,15 @@ pub fn search_memory_nodes_enriched(
             let step_index: Option<i64> = row.get(4)?;
             let content: String = row.get(5)?;
             let snippet: String = row.get(6)?;
-            Ok((id, parent_id, level as u8, kind, step_index.map(|s| s as usize), content, snippet))
+            Ok((
+                id,
+                parent_id,
+                level as u8,
+                kind,
+                step_index.map(|s| s as usize),
+                content,
+                snippet,
+            ))
         })
         .map_err(|e| e.to_string())?;
 
@@ -574,10 +611,12 @@ pub fn search_memory_nodes_enriched(
                 }
             } else if level == 2 {
                 // 命中 Lesson/阶段总结：自动抓取 2 条子节点证据 (Child Evidence)
-                if let Ok(mut child_stmt) = conn.prepare(
-                    "SELECT content FROM agent_memory_nodes WHERE parent_id = ?1 LIMIT 2",
-                ) {
-                    if let Ok(child_rows) = child_stmt.query_map(params![id], |row| row.get::<_, String>(0)) {
+                if let Ok(mut child_stmt) = conn
+                    .prepare("SELECT content FROM agent_memory_nodes WHERE parent_id = ?1 LIMIT 2")
+                {
+                    if let Ok(child_rows) =
+                        child_stmt.query_map(params![id], |row| row.get::<_, String>(0))
+                    {
                         for c in child_rows.flatten() {
                             let short_c: String = c.chars().take(80).collect();
                             evidence.push(format!("关联证据: {}", short_c));
@@ -595,7 +634,11 @@ pub fn search_memory_nodes_enriched(
                 tool: None,
                 action: None,
                 outcome: None,
-                snippet: if snippet.is_empty() { content.chars().take(80).collect() } else { snippet },
+                snippet: if snippet.is_empty() {
+                    content.chars().take(80).collect()
+                } else {
+                    snippet
+                },
                 evidence,
             });
         }
@@ -633,7 +676,7 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
     };
 
     let limit = params.limit.unwrap_or(3).min(10); // 默认限制 Top-3 召回预算，防止平庸经验稀释关键上下文
-    // 默认只查历史：代码检索必须显式请求并提供 path（避免盲目扫盘）
+                                                   // 默认只查历史：代码检索必须显式请求并提供 path（避免盲目扫盘）
     let kinds = params
         .kinds
         .clone()
@@ -670,13 +713,9 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
             }
 
             // 联动查询三级记忆节点库 (Level 0~2 知识、Episode 与 Lesson)
-            if let Ok(mem_hits) = search_memory_nodes_enriched(
-                &conn,
-                session_id,
-                &params.query,
-                None,
-                limit,
-            ) {
+            if let Ok(mem_hits) =
+                search_memory_nodes_enriched(&conn, session_id, &params.query, None, limit)
+            {
                 history_branch_hits.extend(mem_hits);
             }
 
@@ -698,7 +737,12 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
 
     let mut code_ok = !wants_code;
     if wants_code {
-        match params.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        match params
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
             None => {
                 errors.push("code 检索需要显式 path 参数（要检索的目录绝对路径）".to_string());
             }
@@ -887,8 +931,17 @@ mod tests {
     fn test_session_isolation() {
         let conn = setup_test_db();
         for (out_id, session) in [("out-a", "session-a"), ("out-b", "session-b")] {
-            index_step_fts(&conn, out_id, session, 1, "shell_exec", "cargo test", "failed",
-                "linking error openssl not found").unwrap();
+            index_step_fts(
+                &conn,
+                out_id,
+                session,
+                1,
+                "shell_exec",
+                "cargo test",
+                "failed",
+                "linking error openssl not found",
+            )
+            .unwrap();
         }
 
         let hits = search_history(&conn, "session-a", "openssl", None, None, 10).unwrap();
@@ -931,7 +984,8 @@ mod tests {
             session_id: "sess-tier".to_string(),
             plan_id: Some("plan-1".to_string()),
             step_index: Some(10),
-            content: "执行 cargo build 失败: error linking with cc failed: -lpq not found".to_string(),
+            content: "执行 cargo build 失败: error linking with cc failed: -lpq not found"
+                .to_string(),
             metadata_json: "{}".to_string(),
             confidence_score: 100,
             hit_count: 0,
@@ -943,14 +997,21 @@ mod tests {
         let hits = search_memory_nodes_enriched(&conn, "sess-tier", "lpq", None, 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id_or_path, "step-10");
-        assert!(!hits[0].evidence.is_empty(), "命中原始事件应自动带出父阶段总结");
+        assert!(
+            !hits[0].evidence.is_empty(),
+            "命中原始事件应自动带出父阶段总结"
+        );
         assert!(hits[0].evidence[0].contains("PostgreSQL 驱动替换"));
 
         // 4. 检索 Level 2 总结 -> 验证自动带出了子节点证据
-        let summary_hits = search_memory_nodes_enriched(&conn, "sess-tier", "跨域问题", None, 10).unwrap();
+        let summary_hits =
+            search_memory_nodes_enriched(&conn, "sess-tier", "跨域问题", None, 10).unwrap();
         assert_eq!(summary_hits.len(), 1);
         assert_eq!(summary_hits[0].id_or_path, "phase-1");
-        assert!(!summary_hits[0].evidence.is_empty(), "命中阶段总结应自动带出子证据");
+        assert!(
+            !summary_hits[0].evidence.is_empty(),
+            "命中阶段总结应自动带出子证据"
+        );
         assert!(summary_hits[0].evidence[0].contains("linking with cc failed"));
     }
 
@@ -972,11 +1033,7 @@ mod tests {
         let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
 
         // 1. 默认 kinds=history，中文子串命中
-        let result = dispatch_search(
-            &db,
-            "session-dispatch",
-            &json!({"query": "数据库服务器"}),
-        );
+        let result = dispatch_search(&db, "session-dispatch", &json!({"query": "数据库服务器"}));
         assert!(result.success);
         let payload: Value = serde_json::from_str(&result.stdout).unwrap();
         assert_eq!(payload["total_hits"], 1);
@@ -985,7 +1042,10 @@ mod tests {
         let short = dispatch_search(&db, "session-dispatch", &json!({"query": "数据"}));
         assert!(short.success);
         let short_payload: Value = serde_json::from_str(&short.stdout).unwrap();
-        assert_eq!(short_payload["total_hits"], 1, "2 字短中文「数据」应通过 LIKE 降级命中");
+        assert_eq!(
+            short_payload["total_hits"], 1,
+            "2 字短中文「数据」应通过 LIKE 降级命中"
+        );
 
         // 3. code 检索缺 path：显式失败并说明原因（而非伪装成 0 命中）
         let code_missing = dispatch_search(
@@ -1019,7 +1079,13 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO agent_step_logs VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params!["out-mig", "s-mig", 1i64, "错误: 无法连接到数据库服务器", "2026-08-17"],
+            rusqlite::params![
+                "out-mig",
+                "s-mig",
+                1i64,
+                "错误: 无法连接到数据库服务器",
+                "2026-08-17"
+            ],
         )
         .unwrap();
 

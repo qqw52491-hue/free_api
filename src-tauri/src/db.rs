@@ -291,7 +291,10 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     // 滚动迁移：早期版本的 FTS 表用默认 unicode61 分词器（中文子串检索全部失效），
     // 检测到旧表时重建为 trigram，并从 agent_step_logs 主表回填索引（失败不阻断主流程）
     if let Err(e) = crate::agent::retrieval::ensure_trigram_fts(&conn) {
-        eprintln!("⚠️ FTS5 trigram 迁移失败（不影响主流程，历史检索降级）: {}", e);
+        eprintln!(
+            "⚠️ FTS5 trigram 迁移失败（不影响主流程，历史检索降级）: {}",
+            e
+        );
     }
 
     // 滚动迁移：为旧版数据库补齐新字段，CREATE TABLE 不会重建已有表
@@ -307,17 +310,94 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         .unwrap_or(0);
     if spec_count == 0 {
         let default_specs = vec![
-            ("DeepSeek-V3", 128000, 8192, false, 0.7, "DeepSeek 官方最新通用多模态/大模型 (128k 上下文)"),
-            ("DeepSeek-R1", 128000, 8192, true, 0.6, "DeepSeek 深度思考/推理模型 (128k 上下文，支持思维链)"),
-            ("DeepSeek-V4-Flash", 128000, 8192, false, 0.7, "DeepSeek 超高速轻量级模型 (128k 上下文)"),
-            ("Claude-3.5-Sonnet", 200000, 8192, false, 0.5, "Anthropic 业界顶级编程与推理模型 (200k 上下文)"),
-            ("Claude-3.7-Sonnet", 200000, 8192, true, 0.7, "Anthropic 混合推理模型 (200k 上下文，支持混合思考)"),
-            ("GPT-4o", 128000, 16384, false, 0.7, "OpenAI 旗舰全能模型 (128k 上下文，16k 输出)"),
-            ("GPT-4o-mini", 128000, 16384, false, 0.7, "OpenAI 轻量高性价比模型 (128k 上下文)"),
-            ("Gemini-2.0-Flash", 1048576, 8192, false, 0.7, "Google 100万超大上下文极速模型 (1M 上下文)"),
-            ("Gemini-1.5-Pro", 2097152, 8192, false, 0.7, "Google 200万超大上下文旗舰模型 (2M 上下文)"),
-            ("Qwen-2.5-Coder-32B", 32768, 4096, false, 0.7, "通义千问代码专精开源大模型 (32k 上下文)"),
-            ("Llama-3.3-70B", 128000, 4096, false, 0.7, "Meta 最强开源大模型 (128k 上下文)"),
+            (
+                "DeepSeek-V3",
+                128000,
+                8192,
+                false,
+                0.7,
+                "DeepSeek 官方最新通用多模态/大模型 (128k 上下文)",
+            ),
+            (
+                "DeepSeek-R1",
+                128000,
+                8192,
+                true,
+                0.6,
+                "DeepSeek 深度思考/推理模型 (128k 上下文，支持思维链)",
+            ),
+            (
+                "DeepSeek-V4-Flash",
+                128000,
+                8192,
+                false,
+                0.7,
+                "DeepSeek 超高速轻量级模型 (128k 上下文)",
+            ),
+            (
+                "Claude-3.5-Sonnet",
+                200000,
+                8192,
+                false,
+                0.5,
+                "Anthropic 业界顶级编程与推理模型 (200k 上下文)",
+            ),
+            (
+                "Claude-3.7-Sonnet",
+                200000,
+                8192,
+                true,
+                0.7,
+                "Anthropic 混合推理模型 (200k 上下文，支持混合思考)",
+            ),
+            (
+                "GPT-4o",
+                128000,
+                16384,
+                false,
+                0.7,
+                "OpenAI 旗舰全能模型 (128k 上下文，16k 输出)",
+            ),
+            (
+                "GPT-4o-mini",
+                128000,
+                16384,
+                false,
+                0.7,
+                "OpenAI 轻量高性价比模型 (128k 上下文)",
+            ),
+            (
+                "Gemini-2.0-Flash",
+                1048576,
+                8192,
+                false,
+                0.7,
+                "Google 100万超大上下文极速模型 (1M 上下文)",
+            ),
+            (
+                "Gemini-1.5-Pro",
+                2097152,
+                8192,
+                false,
+                0.7,
+                "Google 200万超大上下文旗舰模型 (2M 上下文)",
+            ),
+            (
+                "Qwen-2.5-Coder-32B",
+                32768,
+                4096,
+                false,
+                0.7,
+                "通义千问代码专精开源大模型 (32k 上下文)",
+            ),
+            (
+                "Llama-3.3-70B",
+                128000,
+                4096,
+                false,
+                0.7,
+                "Meta 最强开源大模型 (128k 上下文)",
+            ),
         ];
         let now = chrono::Utc::now().to_rfc3339();
         for (name, ctx, max_tok, thinking, temp, desc) in default_specs {
@@ -387,4 +467,3 @@ pub fn delete_model_spec_record(conn: &Connection, id_or_name: &str) -> Result<u
         rusqlite::params![id_or_name],
     )
 }
-

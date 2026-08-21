@@ -182,13 +182,18 @@ mod tests {
     #[tokio::test]
     async fn test_complex_path_extraction() {
         let scope = Scope::new();
-        scope.set("step1".to_string(), json!({
-            "users": [
-                { "name": "Tom", "score": 90 },
-                { "name": "Jerry", "score": 95 }
-            ],
-            "meta": { "total": 2 }
-        })).await;
+        scope
+            .set(
+                "step1".to_string(),
+                json!({
+                    "users": [
+                        { "name": "Tom", "score": 90 },
+                        { "name": "Jerry", "score": 95 }
+                    ],
+                    "meta": { "total": 2 }
+                }),
+            )
+            .await;
 
         let res1 = scope.resolve_value(&json!("$step1.users[1].name")).await;
         assert_eq!(res1, json!("Jerry"));
@@ -196,7 +201,87 @@ mod tests {
         let res2 = scope.resolve_value(&json!("$step1.meta.total")).await;
         assert_eq!(res2, json!(2));
 
-        let res3 = scope.resolve_value(&json!("Hello $step1.users[0].name!")).await;
+        let res3 = scope
+            .resolve_value(&json!("Hello $step1.users[0].name!"))
+            .await;
         assert!(res3.as_str().unwrap().contains("Tom") || res3.is_string());
+    }
+
+    #[tokio::test]
+    async fn test_parallel_small_code_evidence_budget_is_allowed() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_invoker = calls.clone();
+        let invoker: ToolInvoker = Arc::new(move |_tool, _args| {
+            let calls = calls_for_invoker.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(json!({ "ok": true }))
+            })
+        });
+        let plan: PlanNode = serde_json::from_value(json!({
+            "parallel": [
+                { "tool": "remote-hub/read_text_file", "command": { "path": "a.rs", "startLine": 1, "endLine": 25 } },
+                { "tool": "remote-hub/read_text_file", "command": { "path": "b.rs", "startLine": 10, "endLine": 34 } }
+            ]
+        })).unwrap();
+
+        let report = execute_plan_tree(&plan, invoker, None).await;
+        assert!(report.success);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_parallel_unknown_or_large_code_evidence_is_rejected_before_invocation() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_invoker = calls.clone();
+        let invoker: ToolInvoker = Arc::new(move |_tool, _args| {
+            let calls = calls_for_invoker.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(json!({ "ok": true }))
+            })
+        });
+        let plan: PlanNode = serde_json::from_value(json!({
+            "parallel": [
+                { "tool": "remote-hub/read_text_file", "command": { "path": "a.rs", "startLine": 1, "endLine": 80 } },
+                { "tool": "remote-hub/get_code_snippet", "command": { "project": "free_api", "qualified_name": "agent.dispatch" } }
+            ]
+        })).unwrap();
+
+        let report = execute_plan_tree(&plan, invoker, None).await;
+        assert!(!report.success);
+        assert!(report
+            .error_summary
+            .unwrap_or_default()
+            .contains("并行源码证据未执行"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_parallel_code_evidence_over_budget_is_rejected_before_invocation() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_invoker = calls.clone();
+        let invoker: ToolInvoker = Arc::new(move |_tool, _args| {
+            let calls = calls_for_invoker.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(json!({ "ok": true }))
+            })
+        });
+        let plan: PlanNode = serde_json::from_value(json!({
+            "parallel": [
+                { "tool": "remote-hub/read_text_file", "command": { "path": "a.rs", "startLine": 1, "endLine": 50 } },
+                { "tool": "remote-hub/read_text_file", "command": { "path": "b.rs", "startLine": 1, "endLine": 50 } },
+                { "tool": "remote-hub/read_text_file", "command": { "path": "c.rs", "startLine": 1, "endLine": 50 } }
+            ]
+        })).unwrap();
+
+        let report = execute_plan_tree(&plan, invoker, None).await;
+        assert!(!report.success);
+        assert!(report
+            .error_summary
+            .unwrap_or_default()
+            .contains("超过本轮 120 行预算"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

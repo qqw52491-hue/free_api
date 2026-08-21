@@ -122,7 +122,11 @@ fn normalize_mcp_params(params: &serde_json::Value) -> serde_json::Value {
 
     // 1. 如果大模型把参数多包了一层 (如 command: {...} 或 args: {...} 或 params: {...})，自动解包展开
     if obj.len() == 1 {
-        if let Some(inner) = obj.get("command").or_else(|| obj.get("args")).or_else(|| obj.get("params")) {
+        if let Some(inner) = obj
+            .get("command")
+            .or_else(|| obj.get("args"))
+            .or_else(|| obj.get("params"))
+        {
             if let Some(inner_map) = inner.as_object() {
                 obj = inner_map.clone();
             }
@@ -131,7 +135,8 @@ fn normalize_mcp_params(params: &serde_json::Value) -> serde_json::Value {
 
     // 2. 常见文件路径别名自动规范化 (filePath / file_path / file / filename / dirPath / dir_path -> path)
     if !obj.contains_key("path") {
-        if let Some(v) = obj.get("filePath")
+        if let Some(v) = obj
+            .get("filePath")
             .or_else(|| obj.get("file_path"))
             .or_else(|| obj.get("file"))
             .or_else(|| obj.get("filename"))
@@ -145,12 +150,66 @@ fn normalize_mcp_params(params: &serde_json::Value) -> serde_json::Value {
 
     // 3. 针对 shell 命令的自适应兼容：若 command 为包含空格的整句命令行且未显式指定 args 或 shell_mode，自动开启 shell_mode: true
     if let Some(serde_json::Value::String(cmd_str)) = obj.get("command") {
-        if cmd_str.contains(' ') && !obj.contains_key("args") && !obj.contains_key("shell_mode") && !obj.contains_key("shell") {
+        if cmd_str.contains(' ')
+            && !obj.contains_key("args")
+            && !obj.contains_key("shell_mode")
+            && !obj.contains_key("shell")
+        {
             obj.insert("shell_mode".to_string(), serde_json::json!(true));
         }
     }
 
     serde_json::Value::Object(obj)
+}
+
+const MAX_CODE_READ_LINES: u64 = 240;
+
+/// 为常见源码读取工具补上可见、稳定的行范围护栏。
+/// 它不会拒绝读取，而是把无范围或过大的请求改写为一个可继续扩展的局部窗口。
+fn guard_code_read_range(
+    tool_name: &str,
+    params: serde_json::Value,
+) -> (serde_json::Value, Option<String>) {
+    let reads_text = matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "read_text_file" | "read_file" | "get_file_content"
+    );
+    let serde_json::Value::Object(mut obj) = params else {
+        return (params, None);
+    };
+    if !reads_text || !obj.contains_key("path") {
+        return (serde_json::Value::Object(obj), None);
+    }
+
+    let requested_start = obj
+        .get("startLine")
+        .or_else(|| obj.get("start_line"))
+        .and_then(|value| value.as_u64());
+    let requested_end = obj
+        .get("endLine")
+        .or_else(|| obj.get("end_line"))
+        .and_then(|value| value.as_u64());
+    let start_line = requested_start.unwrap_or(1).max(1);
+    let max_end = start_line.saturating_add(MAX_CODE_READ_LINES - 1);
+    let end_line = requested_end.unwrap_or(max_end).min(max_end);
+    let constrained =
+        requested_start.is_none() || requested_end.map(|end| end > max_end).unwrap_or(true);
+
+    if !constrained {
+        return (serde_json::Value::Object(obj), None);
+    }
+
+    obj.insert("startLine".to_string(), json!(start_line));
+    obj.insert("endLine".to_string(), json!(end_line));
+    let path = obj
+        .get("path")
+        .and_then(|value| value.as_str())
+        .unwrap_or("<unknown>");
+    let notice = format!(
+        "[代码阅读护栏] {} 的请求已限定为第 {}–{} 行（最多 {} 行）。这是正常预算边界而非工具故障；如需更多证据，请按函数/符号、错误码或 diff hunk 选择相邻范围继续读取，而非重复全文请求。",
+        path, start_line, end_line, MAX_CODE_READ_LINES
+    );
+    (serde_json::Value::Object(obj), Some(notice))
 }
 
 /// 执行单条指令的内部路由逻辑（4大核心原生工具 + MCP 插件路由，彻底杜绝历史兼容包袱）
@@ -170,7 +229,10 @@ pub fn execute_command_inner(
     // 2. 核心原生工具 B: task_store (会话任务数据区结构化操作)
     if tool.eq_ignore_ascii_case("task_store") {
         let final_action = if action.is_empty() {
-            params.get("action").and_then(|v| v.as_str()).unwrap_or("list_resources")
+            params
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("list_resources")
         } else {
             action
         };
@@ -201,12 +263,25 @@ pub fn execute_command_inner(
     };
 
     if let Some(plugin) = registry.get(&plugin_name) {
-        let clean_params = normalize_mcp_params(params);
-        println!("执行动作调用外部插件: {}/{} (会话: {}, 参数: {:?})", plugin_name, tool_name, session_id, clean_params);
+        let normalized_params = normalize_mcp_params(params);
+        let (clean_params, read_guard_notice) =
+            guard_code_read_range(&tool_name, normalized_params);
+        println!(
+            "执行动作调用外部插件: {}/{} (会话: {}, 参数: {:?})",
+            plugin_name, tool_name, session_id, clean_params
+        );
         let call_res = if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.block_on(plugin.call_tool_for_session(Some(session_id), &tool_name, clean_params))
+            handle.block_on(plugin.call_tool_for_session(
+                Some(session_id),
+                &tool_name,
+                clean_params,
+            ))
         } else {
-            futures::executor::block_on(plugin.call_tool_for_session(Some(session_id), &tool_name, clean_params))
+            futures::executor::block_on(plugin.call_tool_for_session(
+                Some(session_id),
+                &tool_name,
+                clean_params,
+            ))
         };
         match call_res {
             Ok(out) => {
@@ -222,6 +297,9 @@ pub fn execute_command_inner(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let content = read_guard_notice
+                    .map(|notice| format!("{}\n\n{}", notice, content))
+                    .unwrap_or(content);
 
                 if is_error {
                     return DispatchResult {
@@ -314,11 +392,7 @@ pub fn run_plan_tree_sync(
 
     DispatchResult {
         stdout: feedback.clone(),
-        stderr: if success {
-            String::new()
-        } else {
-            feedback
-        },
+        stderr: if success { String::new() } else { feedback },
         success,
         route: if success {
             "plan_tree_success".to_string()
@@ -358,21 +432,22 @@ pub fn run_agent_step(
             session_id,
             par_cmds.len()
         );
-        let plan_node = crate::agent::plan_tree::PlanNode::Obj(crate::agent::plan_tree::PlanNodeObj {
-            parallel: Some(
-                par_cmds
-                    .iter()
-                    .map(|c| {
-                        serde_json::from_value(c.clone()).unwrap_or_else(|_| {
-                            crate::agent::plan_tree::PlanNode::Obj(
-                                serde_json::from_value(c.clone()).unwrap_or_default(),
-                            )
+        let plan_node =
+            crate::agent::plan_tree::PlanNode::Obj(crate::agent::plan_tree::PlanNodeObj {
+                parallel: Some(
+                    par_cmds
+                        .iter()
+                        .map(|c| {
+                            serde_json::from_value(c.clone()).unwrap_or_else(|_| {
+                                crate::agent::plan_tree::PlanNode::Obj(
+                                    serde_json::from_value(c.clone()).unwrap_or_default(),
+                                )
+                            })
                         })
-                    })
-                    .collect(),
-            ),
-            ..Default::default()
-        });
+                        .collect(),
+                ),
+                ..Default::default()
+            });
         return run_plan_tree_sync(db, session_id, &plan_node, registry);
     }
     if let Some(ref tree_val) = instruction.plan_tree {
@@ -419,7 +494,10 @@ pub fn run_agent_step(
                 .unwrap_or_default()
                 .to_string();
 
-            println!("   ➡️  Step {}: 执行 [{}] 动作 '{}'...", step_idx, step_tool, step_action);
+            println!(
+                "   ➡️  Step {}: 执行 [{}] 动作 '{}'...",
+                step_idx, step_tool, step_action
+            );
 
             // 执行单步
             let res =
@@ -490,11 +568,10 @@ pub async fn dispatch_agent_step(
         (*guard).clone()
     };
 
-    let result = tokio::task::spawn_blocking(move || {
-        run_agent_step(&db, &sid, &instruction, &registry)
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let result =
+        tokio::task::spawn_blocking(move || run_agent_step(&db, &sid, &instruction, &registry))
+            .await
+            .map_err(|e| e.to_string())?;
 
     Ok(
         json!({ "route": result.route, "success": result.success, "stdout": result.stdout, "stderr": result.stderr }),
@@ -533,7 +610,10 @@ fn dispatch_model_manager(
     let act = if !action.is_empty() {
         action
     } else {
-        params.get("action").and_then(|v| v.as_str()).unwrap_or("list_specs")
+        params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list_specs")
     };
 
     match act {
@@ -831,6 +911,32 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
+    fn code_read_guard_bounds_unscoped_and_large_requests() {
+        let (unscoped, notice) = guard_code_read_range(
+            "read_text_file",
+            json!({"path": "src/agent/context/sampling.rs"}),
+        );
+        assert_eq!(unscoped["startLine"], 1);
+        assert_eq!(unscoped["endLine"], MAX_CODE_READ_LINES);
+        assert!(notice.unwrap().contains("正常预算边界"));
+
+        let (large, notice) = guard_code_read_range(
+            "read_text_file",
+            json!({"path": "src/agent/context/sampling.rs", "startLine": 500, "endLine": 1000}),
+        );
+        assert_eq!(large["startLine"], 500);
+        assert_eq!(large["endLine"], 739);
+        assert!(notice.is_some());
+
+        let (bounded, notice) = guard_code_read_range(
+            "read_text_file",
+            json!({"path": "src/agent/context/sampling.rs", "startLine": 40, "endLine": 100}),
+        );
+        assert_eq!(bounded["endLine"], 100);
+        assert!(notice.is_none());
+    }
+
+    #[test]
     fn test_model_manager_crud_and_safety_confirm() {
         let conn = init_db(&PathBuf::from(":memory:")).expect("init memory db");
         let db = DbState(Arc::new(Mutex::new(conn)));
@@ -839,7 +945,10 @@ mod tests {
         let p_list = serde_json::json!({});
         let res = dispatch_model_manager(&db, "list_specs", &p_list);
         assert!(res.success, "list_specs should succeed: {}", res.stderr);
-        assert!(res.stdout.contains("DeepSeek-V3") || res.stdout.contains("DeepSeek"), "should contain default specs");
+        assert!(
+            res.stdout.contains("DeepSeek-V3") || res.stdout.contains("DeepSeek"),
+            "should contain default specs"
+        );
 
         // 2. 测试 upsert_spec
         let p_upsert = serde_json::json!({
@@ -856,13 +965,21 @@ mod tests {
         // 3. 测试 delete_spec 无 confirm 拦截
         let p_del_no_confirm = serde_json::json!({ "id_or_name": "Custom-Test-Model" });
         let res = dispatch_model_manager(&db, "delete_spec", &p_del_no_confirm);
-        assert!(!res.success, "delete_spec without confirm must fail for safety");
+        assert!(
+            !res.success,
+            "delete_spec without confirm must fail for safety"
+        );
         assert!(res.stderr.contains("必须显式提供 confirm: true"));
 
         // 4. 测试 delete_spec 带 confirm: true
-        let p_del_confirm = serde_json::json!({ "id_or_name": "Custom-Test-Model", "confirm": true });
+        let p_del_confirm =
+            serde_json::json!({ "id_or_name": "Custom-Test-Model", "confirm": true });
         let res = dispatch_model_manager(&db, "delete_spec", &p_del_confirm);
-        assert!(res.success, "delete_spec with confirm must succeed: {}", res.stderr);
+        assert!(
+            res.success,
+            "delete_spec with confirm must succeed: {}",
+            res.stderr
+        );
 
         // 5. 测试 list_platforms
         let p_platforms = serde_json::json!({});
@@ -888,10 +1005,19 @@ mod tests {
 
         let dir = found_dir.expect("prompts/tools directory must exist in candidate paths");
         let model_manager_path = dir.join("model_manager.md");
-        assert!(model_manager_path.exists(), "model_manager.md must exist in {:?}", dir);
+        assert!(
+            model_manager_path.exists(),
+            "model_manager.md must exist in {:?}",
+            dir
+        );
         let content = std::fs::read_to_string(&model_manager_path).expect("read model_manager.md");
-        assert!(content.contains("<summary>"), "model_manager.md must contain <summary>");
-        assert!(content.contains("upsert_spec"), "model_manager.md must describe upsert_spec");
+        assert!(
+            content.contains("<summary>"),
+            "model_manager.md must contain <summary>"
+        );
+        assert!(
+            content.contains("upsert_spec"),
+            "model_manager.md must describe upsert_spec"
+        );
     }
 }
-

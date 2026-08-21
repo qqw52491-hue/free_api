@@ -92,11 +92,7 @@ pub async fn generate_llm_summary(
         "stream": false
     });
 
-    let request_future = client
-        .post(&url)
-        .headers(headers)
-        .json(&body)
-        .send();
+    let request_future = client.post(&url).headers(headers).json(&body).send();
 
     let resp = tokio::time::timeout(std::time::Duration::from_secs(20), request_future)
         .await
@@ -106,7 +102,10 @@ pub async fn generate_llm_summary(
     if !resp.status().is_success() {
         let status = resp.status();
         let err_text = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM 摘要 API 返回错误状态码 {}: {}", status, err_text));
+        return Err(format!(
+            "LLM 摘要 API 返回错误状态码 {}: {}",
+            status, err_text
+        ));
     }
 
     let json_resp: serde_json::Value = resp
@@ -118,13 +117,16 @@ pub async fn generate_llm_summary(
         .as_str()
         .map(|s| s.to_string())
         .or_else(|| {
-            json_resp["choices"][0]["text"].as_str().map(|s| s.to_string())
+            json_resp["choices"][0]["text"]
+                .as_str()
+                .map(|s| s.to_string())
         })
         .or_else(|| {
             if let Some(arr) = json_resp["choices"][0]["message"]["content"].as_array() {
-                let parts: Vec<String> = arr.iter().filter_map(|item| {
-                    item["text"].as_str().map(|s| s.to_string())
-                }).collect();
+                let parts: Vec<String> = arr
+                    .iter()
+                    .filter_map(|item| item["text"].as_str().map(|s| s.to_string()))
+                    .collect();
                 if !parts.is_empty() {
                     Some(parts.join("\n"))
                 } else {
@@ -166,17 +168,21 @@ impl<'a> Summarizer for HybridSummarizer<'a> {
                 let cfg_clone = cfg.clone();
                 let raw_text = rule_index.clone();
                 let llm_res = tokio::task::block_in_place(|| {
-                    handle.block_on(async {
-                        generate_llm_summary(&cfg_clone, &raw_text).await
-                    })
+                    handle.block_on(async { generate_llm_summary(&cfg_clone, &raw_text).await })
                 });
                 match llm_res {
                     Ok(summary) => {
-                        println!("🧠 [Compaction Engine] LLM 语义摘要生成成功 ({} 字符)", summary.len());
+                        println!(
+                            "🧠 [Compaction Engine] LLM 语义摘要生成成功 ({} 字符)",
+                            summary.len()
+                        );
                         llm_summary_opt = Some(summary);
                     }
                     Err(e) => {
-                        println!("⚠️ [Compaction Engine] LLM 摘要失败，平滑降级至规则事实索引: {}", e);
+                        println!(
+                            "⚠️ [Compaction Engine] LLM 摘要失败，平滑降级至规则事实索引: {}",
+                            e
+                        );
                     }
                 }
             }
@@ -240,7 +246,8 @@ impl SandwichContext {
         );
 
         // ── 1. 计算近期保护区（基于 Token 预算，保护最新 ~25% 历史预算或至少最后 1 对轮次） ──
-        let recent_protected_tokens = (budget.max_allowed_history_tokens as f64 * ContextBudget::RECENT_PROTECTED_RATIO) as usize;
+        let recent_protected_tokens = (budget.max_allowed_history_tokens as f64
+            * ContextBudget::RECENT_PROTECTED_RATIO) as usize;
         let mut protected_from_back = 0;
         let mut back_tokens = 0;
         for msg in self.turns_history.iter().rev() {
@@ -276,7 +283,9 @@ impl SandwichContext {
         }
 
         // 关键对齐保护：确保 drain 边界对齐到完整轮次，绝不把 (assistant, user) 工具调用对拆散
-        if compact_count < self.turns_history.len() && self.turns_history[compact_count].role == "user" {
+        if compact_count < self.turns_history.len()
+            && self.turns_history[compact_count].role == "user"
+        {
             compact_count += 1;
         }
 
@@ -346,30 +355,43 @@ impl SandwichContext {
                 )),
             };
             // 关键优化：在现有摘要卡之后追加新卡，永不改动旧摘要卡字节，最大化 Prompt Cache 命中率！
-            self.turns_history.insert(existing_summary_cards, compact_card);
+            self.turns_history
+                .insert(existing_summary_cards, compact_card);
 
             // 🌟 核心增强：从压缩归档中提取高价值架构事实与踩坑教训，沉淀至工作台事实卡 (Memories)
-            if archive_text.contains("关键事实") || archive_text.contains("踩坑记录") || archive_text.contains("架构决策") {
+            if archive_text.contains("关键事实")
+                || archive_text.contains("踩坑记录")
+                || archive_text.contains("架构决策")
+            {
                 for line in archive_text.lines() {
                     let trimmed = line.trim();
-                    
+
                     let mut is_fact = false;
                     let mut fact_body = "";
-                    
-                    if (trimmed.starts_with("- ") || trimmed.starts_with("* ")) && trimmed.len() > 6 {
+
+                    if (trimmed.starts_with("- ") || trimmed.starts_with("* ")) && trimmed.len() > 6
+                    {
                         is_fact = true;
                         fact_body = trimmed[2..].trim();
                     } else if let Some(idx) = trimmed.find(". ") {
-                        if idx > 0 && trimmed[..idx].chars().all(|c| c.is_ascii_digit()) && trimmed.len() > idx + 4 {
+                        if idx > 0
+                            && trimmed[..idx].chars().all(|c| c.is_ascii_digit())
+                            && trimmed.len() > idx + 4
+                        {
                             is_fact = true;
                             fact_body = trimmed[idx + 2..].trim();
                         }
                     }
-                    
+
                     if is_fact {
-                        if !fact_body.is_empty() && fact_body.len() <= 200 && self.memories.len() < 8 {
+                        if !fact_body.is_empty()
+                            && fact_body.len() <= 200
+                            && self.memories.len() < 8
+                        {
                             let key = format!("auto_fact_{}", self.memories.len() + 1);
-                            self.memories.entry(key).or_insert_with(|| fact_body.to_string());
+                            self.memories
+                                .entry(key)
+                                .or_insert_with(|| fact_body.to_string());
                         }
                     }
                 }
@@ -470,7 +492,9 @@ mod tests {
 
         ctx.turns_history.push(ChatMessage {
             role: "user".to_string(),
-            content: json!("【任务目标更新】\n生成执行报告并写入 report.xlsx\n（原目标: 审计项目依赖）"),
+            content: json!(
+                "【任务目标更新】\n生成执行报告并写入 report.xlsx\n（原目标: 审计项目依赖）"
+            ),
         });
 
         for i in 40..60 {
@@ -483,8 +507,7 @@ mod tests {
         ctx.maybe_compact_history();
 
         assert_eq!(
-            ctx.user_goal,
-            "生成执行报告并写入 report.xlsx",
+            ctx.user_goal, "生成执行报告并写入 report.xlsx",
             "compaction 应从历史事件中提取并提升最新任务目标到 M1"
         );
     }
@@ -503,7 +526,10 @@ mod tests {
             });
             ctx.turns_history.push(ChatMessage {
                 role: "user".to_string(),
-                content: json!(format!("【执行输出 (v2)】\noutput_id: out_{}\n{}", i, big_payload)),
+                content: json!(format!(
+                    "【执行输出 (v2)】\noutput_id: out_{}\n{}",
+                    i, big_payload
+                )),
             });
         }
 
@@ -533,23 +559,32 @@ mod tests {
             });
             ctx.turns_history.push(ChatMessage {
                 role: "user".to_string(),
-                content: json!(format!("【执行输出 (v3)】\noutput_id: out_{}\n{}", i, "Large log payload content line\n".repeat(30))),
+                content: json!(format!(
+                    "【执行输出 (v3)】\noutput_id: out_{}\n{}",
+                    i,
+                    "Large log payload content line\n".repeat(30)
+                )),
             });
         }
 
         ctx.maybe_compact_history();
 
         // 验证压缩后活跃历史中不存在孤立的 user 或未配对结构
-        let non_card_turns: Vec<&ChatMessage> = ctx.turns_history.iter().filter(|m| {
-            match &m.content {
+        let non_card_turns: Vec<&ChatMessage> = ctx
+            .turns_history
+            .iter()
+            .filter(|m| match &m.content {
                 serde_json::Value::String(s) => !s.contains("【历史早期执行归档"),
                 _ => true,
-            }
-        }).collect();
+            })
+            .collect();
 
         if !non_card_turns.is_empty() {
             // 第一条非卡片消息必须是 assistant
-            assert_eq!(non_card_turns[0].role, "assistant", "首条活跃历史消息必须是 assistant");
+            assert_eq!(
+                non_card_turns[0].role, "assistant",
+                "首条活跃历史消息必须是 assistant"
+            );
             // 必须严格交替出现 assistant -> user
             for (idx, msg) in non_card_turns.iter().enumerate() {
                 if idx % 2 == 0 {
@@ -579,7 +614,10 @@ mod tests {
         let step1_after_step2 = ctx.turns_history[1].content.as_str().unwrap().to_string();
 
         // 严格字节级前缀一致性断言：历史追加绝不改变旧历史的任何字节（KV Cache 100% 命中）
-        assert_eq!(step1_snapshot, step1_after_step2, "步骤 1 的输出内容在步骤 2 追加后必须 100% 字节不变");
+        assert_eq!(
+            step1_snapshot, step1_after_step2,
+            "步骤 1 的输出内容在步骤 2 追加后必须 100% 字节不变"
+        );
     }
 
     #[test]
@@ -594,10 +632,14 @@ mod tests {
         };
 
         // 巨型全中文 + 密集转义 JSON + 巨量报错
-        let mut giant_output = "这是一段非常非常长的中文字符串用于测试单步硬截断闭环保证。".repeat(200);
+        let mut giant_output =
+            "这是一段非常非常长的中文字符串用于测试单步硬截断闭环保证。".repeat(200);
         giant_output.push_str("\n{\"dense_json_key\": \"dense_val\", \"nested\": [1,2,3,4,5]}\n");
         for i in 0..500 {
-            giant_output.push_str(&format!("error: database connection timeout occurred at step {}\n", i));
+            giant_output.push_str(&format!(
+                "error: database connection timeout occurred at step {}\n",
+                i
+            ));
         }
 
         ctx.add_step(&instruction, &giant_output, "giant_out");
@@ -612,9 +654,13 @@ mod tests {
         assert!(
             est <= ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP,
             "闭环复检保证：截断后输出 Token 量 ({}) 必须 <= 上限 ({})",
-            est, ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP
+            est,
+            ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP
         );
-        assert!(content_str.contains("search_step_output"), "提示中必须包含 search_step_output 检索指引");
+        assert!(
+            content_str.contains("search_step_output"),
+            "提示中必须包含 search_step_output 检索指引"
+        );
     }
 
     #[test]
@@ -641,7 +687,9 @@ mod tests {
             assert!(
                 current_tokens <= budget.max_allowed_history_tokens + 1000,
                 "第 {} 步：历史 Tokens ({}) 超出了最大安全历史上限 ({})",
-                step, current_tokens, budget.max_allowed_history_tokens
+                step,
+                current_tokens,
+                budget.max_allowed_history_tokens
             );
         }
 

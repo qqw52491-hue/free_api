@@ -44,7 +44,9 @@ impl MemoryManager {
 
         for pattern in SENSITIVE_PATTERNS {
             if trimmed_val.contains(pattern) {
-                return Err("拒绝写入敏感 API Key / Token 明文！请仅存储环境变量名引用 (如 env:API_KEY)");
+                return Err(
+                    "拒绝写入敏感 API Key / Token 明文！请仅存储环境变量名引用 (如 env:API_KEY)",
+                );
             }
         }
 
@@ -52,7 +54,11 @@ impl MemoryManager {
     }
 
     /// 检查记忆卡容量是否已满
-    pub fn check_capacity(current_count: usize, new_key: &str, memories: &BTreeMap<String, String>) -> Result<(), &'static str> {
+    pub fn check_capacity(
+        current_count: usize,
+        new_key: &str,
+        memories: &BTreeMap<String, String>,
+    ) -> Result<(), &'static str> {
         if !memories.contains_key(new_key) && current_count >= Self::MAX_MEMORIES_SLOTS {
             return Err("核心事实槽位已达上限 (最多 8 条)，请覆盖已有 key 或将持久数据存入 TaskStore 数据区");
         }

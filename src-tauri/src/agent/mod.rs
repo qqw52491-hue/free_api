@@ -8,6 +8,7 @@ pub mod loop_runner;
 pub mod mcp;
 pub mod mcp_catalog;
 pub mod plan_tree;
+pub mod project_map;
 pub mod retrieval;
 pub mod router;
 pub mod run_state;
@@ -121,8 +122,14 @@ pub async fn run_agent_main_loop(
                 cwd.join("plugins"),
                 cwd.join("../plugins"),
                 cwd.join("../../plugins"),
-                app.path().app_config_dir().unwrap_or_default().join("plugins"),
-                app.path().resource_dir().unwrap_or_default().join("plugins"),
+                app.path()
+                    .app_config_dir()
+                    .unwrap_or_default()
+                    .join("plugins"),
+                app.path()
+                    .resource_dir()
+                    .unwrap_or_default()
+                    .join("plugins"),
             ];
             for path in search_paths {
                 if path.exists() {
@@ -166,7 +173,11 @@ pub async fn run_agent_main_loop(
             }
         }
 
-        println!("📊 MCP 插件就绪: {} 个（首次初始化: {}）", registry.clients.len(), is_first_init);
+        println!(
+            "📊 MCP 插件就绪: {} 个（首次初始化: {}）",
+            registry.clients.len(),
+            is_first_init
+        );
     }
 
     // 2. 初始化三明治上下文：加载系统提示词 + 可视化/HTML沙箱 Skill + 动态注入 MCP 工具
@@ -207,7 +218,10 @@ pub async fn run_agent_main_loop(
         std::path::PathBuf::from("src-tauri/prompts/tools"),
         std::path::PathBuf::from("prompts/tools"),
         std::path::PathBuf::from("../src-tauri/prompts/tools"),
-        app.path().resource_dir().unwrap_or_default().join("prompts/tools"),
+        app.path()
+            .resource_dir()
+            .unwrap_or_default()
+            .join("prompts/tools"),
     ];
 
     let mut found_any = false;
@@ -265,7 +279,11 @@ pub async fn run_agent_main_loop(
         let resource_dir = app.path().resource_dir().unwrap_or_default();
         let skills_dir_prod = resource_dir.join("prompts/skills");
         let skills_dir_dev = std::path::PathBuf::from("prompts/skills");
-        let skills_dir = if skills_dir_prod.exists() { skills_dir_prod } else { skills_dir_dev };
+        let skills_dir = if skills_dir_prod.exists() {
+            skills_dir_prod
+        } else {
+            skills_dir_dev
+        };
         // 全量动态扫描 prompts/skills/ 目录下所有 Skill 手册
         crate::agent::skill_context::skill_catalog_string(&skills_dir, &[])
     };
@@ -315,6 +333,17 @@ pub async fn run_agent_main_loop(
     }
     context.turns_history =
         crate::agent::conversation::recent_history(state.inner(), &final_session_id)?;
+    // 审查任务在首次模型调用前注入轻量项目地图。它只包含目录、入口和 Git 元数据，
+    // 不读取源码正文；恢复中的运行沿用 checkpoint，避免反复追加同一张地图。
+    if !is_resuming_existing {
+        if let Some(review_map) = crate::agent::project_map::review_bootstrap(&goal, &workspace_dir)
+        {
+            context.turns_history.push(context::types::ChatMessage {
+                role: "user".to_string(),
+                content: json!(review_map),
+            });
+        }
+    }
     context.sync_fetched_tools_from_history();
     // checkpoint 是恢复的权威来源：只要上一轮任务尚未到终态 (Done/Failed)，一律无缝续接！
     let mut checkpoint = match existing_checkpoint {
@@ -526,7 +555,8 @@ pub async fn run_agent_main_loop(
             resume_instruction,
             &mut run_trace_steps,
         )
-        .await {
+        .await
+        {
             Ok(res) => res,
             Err(error) => {
                 let terminal_error = format!("任务执行失败: {}", error);
@@ -663,7 +693,11 @@ pub async fn run_agent_main_loop(
         context.active_tool = Some(next_tool.clone());
 
         // --- 加载工具说明书 (Write-Once 按需追加至历史流并去重，稳吃 99% 前缀缓存) ---
-        let tool_key = next_tool.split('/').next().unwrap_or(&next_tool).to_string();
+        let tool_key = next_tool
+            .split('/')
+            .next()
+            .unwrap_or(&next_tool)
+            .to_string();
         if !tool_key.is_empty() && tool_key != "finish" && tool_key != "core" {
             if !context.has_tool_manual(&tool_key) {
                 let tool_filename = format!("{}.md", tool_key);
@@ -723,7 +757,11 @@ pub async fn run_agent_main_loop(
             format!("❌ {}\n{}", result.stderr, final_stdout)
         };
 
-        let outcome_str = if result.success { "succeeded" } else { "failed" };
+        let outcome_str = if result.success {
+            "succeeded"
+        } else {
+            "failed"
+        };
         let output_id = crate::agent::run_trace::save_step_output_with_meta(
             state.inner(),
             &final_session_id,
@@ -732,7 +770,8 @@ pub async fn run_agent_main_loop(
             &instruction.description,
             outcome_str,
             &output_text,
-        ).unwrap_or_else(|e| {
+        )
+        .unwrap_or_else(|e| {
             eprintln!("⚠️ 无法保存 step_output: {}", e);
             "unknown_output_id".to_string()
         });
@@ -782,7 +821,9 @@ pub async fn run_agent_main_loop(
                             .filter_map(|h| {
                                 let kind = h.get("kind").and_then(|k| k.as_str()).unwrap_or("");
                                 if kind == "lesson" || kind == "summary" {
-                                    h.get("id_or_path").and_then(|id| id.as_str()).map(String::from)
+                                    h.get("id_or_path")
+                                        .and_then(|id| id.as_str())
+                                        .map(String::from)
                                 } else {
                                     None
                                 }
@@ -818,8 +859,15 @@ pub async fn run_agent_main_loop(
         // --- 记录不可逆副作用安全台账 (Side-Effects Ledger) ---
         // 关键不可逆操作（如写入文件、修改数据库、执行写操作命令等）成功执行后记录台账，
         // 纯只读命令（如 git log/show/diff, search 等）不入台账；参数保持完整合法 JSON，绝不使用 ... 截断元数据
-        if result.success && crate::agent::context::AuditLedger::is_mutating_side_effect(&instruction.get_tool(), &instruction.get_params()) {
-            let safe_params = crate::agent::context::AuditLedger::format_side_effect_params(&instruction.get_params());
+        if result.success
+            && crate::agent::context::AuditLedger::is_mutating_side_effect(
+                &instruction.get_tool(),
+                &instruction.get_params(),
+            )
+        {
+            let safe_params = crate::agent::context::AuditLedger::format_side_effect_params(
+                &instruction.get_params(),
+            );
             context.record_side_effect(
                 step_id,
                 instruction.get_tool(),
@@ -1074,14 +1122,39 @@ mod finish_instruction_tests {
         }
 
         // 必须包含 model_manager, ask_human, web_search, web_fetch
-        assert!(local_tools_menu.contains("- model_manager:"), "menu must contain model_manager: {}", local_tools_menu);
-        assert!(local_tools_menu.contains("- ask_human:"), "menu must contain ask_human: {}", local_tools_menu);
-        assert!(local_tools_menu.contains("- web_search:"), "menu must contain web_search: {}", local_tools_menu);
-        assert!(local_tools_menu.contains("- web_fetch:"), "menu must contain web_fetch: {}", local_tools_menu);
+        assert!(
+            local_tools_menu.contains("- model_manager:"),
+            "menu must contain model_manager: {}",
+            local_tools_menu
+        );
+        assert!(
+            local_tools_menu.contains("- ask_human:"),
+            "menu must contain ask_human: {}",
+            local_tools_menu
+        );
+        assert!(
+            local_tools_menu.contains("- web_search:"),
+            "menu must contain web_search: {}",
+            local_tools_menu
+        );
+        assert!(
+            local_tools_menu.contains("- web_fetch:"),
+            "menu must contain web_fetch: {}",
+            local_tools_menu
+        );
 
         // 绝不能包含旧的虚构/残留工具
-        assert!(!local_tools_menu.contains("code_editor"), "menu must not contain ghost code_editor");
-        assert!(!local_tools_menu.contains("browser_dom"), "menu must not contain ghost browser_dom");
-        assert!(!local_tools_menu.contains("project_analyzer"), "menu must not contain ghost project_analyzer");
+        assert!(
+            !local_tools_menu.contains("code_editor"),
+            "menu must not contain ghost code_editor"
+        );
+        assert!(
+            !local_tools_menu.contains("browser_dom"),
+            "menu must not contain ghost browser_dom"
+        );
+        assert!(
+            !local_tools_menu.contains("project_analyzer"),
+            "menu must not contain ghost project_analyzer"
+        );
     }
 }

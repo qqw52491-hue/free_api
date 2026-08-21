@@ -8,6 +8,10 @@ use uuid::Uuid;
 
 const DEFAULT_PAGE_SIZE: usize = 25;
 const MAX_PAGE_SIZE: usize = 100;
+const DEFAULT_STEP_OUTPUT_PAGE_CHARS: usize = 3_000;
+const MAX_STEP_OUTPUT_PAGE_CHARS: usize = 6_000;
+const MAX_STEP_OUTPUT_CONTEXT_LINES: usize = 8;
+const MAX_STEP_OUTPUT_MATCHES: usize = 8;
 
 /// Checkpoint 与提示词中保存的只是资源目录，不保存资源记录本体。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -64,33 +68,53 @@ pub fn dispatch(
     let result = (|| -> Result<Value, String> {
         if action == "get_step_output" || action == "get_output" {
             let output_id = required_string(params_value, "output_id")?;
-            let text = crate::agent::run_trace::get_step_output(db, &output_id)?;
-            let offset = params_value.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let limit = params_value.get("limit").and_then(|v| v.as_u64()).unwrap_or(15000) as usize;
-            let chars: Vec<char> = text.chars().collect();
-            let total = chars.len();
-            let end = std::cmp::min(offset + limit, total);
-            let sliced = if offset < total {
-                chars[offset..end].iter().collect::<String>()
-            } else {
-                String::new()
-            };
+            let text = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
+            let offset = params_value
+                .get("offset")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let requested_limit = params_value
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(DEFAULT_STEP_OUTPUT_PAGE_CHARS as u64)
+                as usize;
+            let effective_limit = requested_limit.clamp(1, MAX_STEP_OUTPUT_PAGE_CHARS);
+            let total = text.chars().count();
+            let sliced = text
+                .chars()
+                .skip(offset)
+                .take(effective_limit)
+                .collect::<String>();
+            let returned_chars = sliced.chars().count();
             return Ok(json!({
                 "output_id": output_id,
                 "offset": offset,
-                "limit": limit,
+                "requested_limit": requested_limit,
+                "effective_limit": effective_limit,
                 "total_chars": total,
                 "raw_output": sliced,
-                "has_more": end < total
+                "has_more": offset.saturating_add(returned_chars) < total,
+                "notice": "工件回查按页返回。若仍需证据，请先用关键词、文件路径、函数/符号或 diff hunk 缩小范围，再请求下一个最小片段。"
             }));
         }
 
-        if action == "search_step_output" || action == "grep_step_output" || action == "search_output" {
+        if action == "search_step_output"
+            || action == "grep_step_output"
+            || action == "search_output"
+        {
             let output_id = required_string(params_value, "output_id")?;
             let pattern = required_string(params_value, "pattern")?;
-            let context_lines = params_value.get("context_lines").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
-            let max_matches = params_value.get("max_matches").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-            let text = crate::agent::run_trace::get_step_output(db, &output_id)?;
+            let requested_context_lines = params_value
+                .get("context_lines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3) as usize;
+            let requested_max_matches = params_value
+                .get("max_matches")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(4) as usize;
+            let context_lines = requested_context_lines.min(MAX_STEP_OUTPUT_CONTEXT_LINES);
+            let max_matches = requested_max_matches.clamp(1, MAX_STEP_OUTPUT_MATCHES);
+            let text = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
 
             let lines: Vec<&str> = text.lines().collect();
             let lower_pattern = pattern.to_lowercase();
@@ -117,7 +141,12 @@ pub fn dispatch(
                 "pattern": pattern,
                 "total_matches": total_match_count,
                 "returned_matches": matches.len(),
-                "matches": matches
+                "requested_context_lines": requested_context_lines,
+                "effective_context_lines": context_lines,
+                "requested_max_matches": requested_max_matches,
+                "effective_max_matches": max_matches,
+                "matches": matches,
+                "notice": "搜索结果已受预算限制。若命中过多，请使用更具体的函数名、路径、错误码或 diff hunk 再次定向检索。"
             }));
         }
 

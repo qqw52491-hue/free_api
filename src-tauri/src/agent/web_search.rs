@@ -1,5 +1,5 @@
 //! 原生内置互联网搜索与网页正文 Markdown 提取模块 (web_search & web_fetch)
-//! 
+//!
 //! 设计哲学：
 //! 1. 0 外部 Node/Python 进程依赖，纯 Rust 异步并发与零进程膨胀；
 //! 2. 支持多搜索引擎聚合与优雅自动降级 (Tavily -> Brave -> Wikipedia/Public Knowledge)；
@@ -28,7 +28,11 @@ pub async fn execute_web_search(
         return Err("搜索关键词不能为空".to_string());
     }
 
-    let limit = if max_results == 0 { 5 } else { max_results.min(10) };
+    let limit = if max_results == 0 {
+        5
+    } else {
+        max_results.min(10)
+    };
 
     // 1. 优先免 Key 实时全网搜索 (基于 Bing 开放 RSS 协议，0 成本 0 配置 实时全网检索)
     if let Ok(res) = search_bing_free(q, limit).await {
@@ -113,9 +117,21 @@ async fn search_tavily(
     let mut results = Vec::new();
     if let Some(arr) = data.get("results").and_then(|v| v.as_array()) {
         for item in arr.iter().take(limit) {
-            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let snippet = item.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = item
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let snippet = item
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if !title.is_empty() && !url.is_empty() {
                 results.push(WebSearchResultItem {
                     title,
@@ -172,8 +188,16 @@ async fn search_brave(
         .and_then(|v| v.as_array())
     {
         for item in arr.iter().take(limit) {
-            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = item
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let snippet = item
                 .get("description")
                 .and_then(|v| v.as_str())
@@ -242,7 +266,10 @@ async fn search_wikipedia(query: &str, limit: usize) -> Result<Vec<WebSearchResu
     Ok(Vec::new())
 }
 
-fn parse_wikipedia_opensearch(val: &serde_json::Value, limit: usize) -> Option<Vec<WebSearchResultItem>> {
+fn parse_wikipedia_opensearch(
+    val: &serde_json::Value,
+    limit: usize,
+) -> Option<Vec<WebSearchResultItem>> {
     let arr = val.as_array()?;
     if arr.len() < 4 {
         return None;
@@ -253,14 +280,30 @@ fn parse_wikipedia_opensearch(val: &serde_json::Value, limit: usize) -> Option<V
 
     let mut results = Vec::new();
     for i in 0..titles.len().min(limit) {
-        let title = titles.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let snippet = snippets.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let url = urls.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let title = titles
+            .get(i)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let snippet = snippets
+            .get(i)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let url = urls
+            .get(i)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if !title.is_empty() && !url.is_empty() {
             results.push(WebSearchResultItem {
                 title,
                 url,
-                snippet: if snippet.is_empty() { format!("维基百科关于该主题的条目档案") } else { snippet },
+                snippet: if snippet.is_empty() {
+                    format!("维基百科关于该主题的条目档案")
+                } else {
+                    snippet
+                },
                 source: "Wikipedia".to_string(),
             });
         }
@@ -369,7 +412,6 @@ fn clean_xml_text(text: &str) -> String {
         .to_string()
 }
 
-
 /// 抓取任意 URL 并提纯为干净的 Markdown 正文
 pub async fn fetch_url_markdown(url: &str) -> Result<String, String> {
     let target_url = url.trim();
@@ -416,7 +458,9 @@ pub async fn fetch_url_markdown(url: &str) -> Result<String, String> {
 pub fn clean_html_to_markdown(html: &str) -> String {
     // 1. 去除无用的 script, style, svg, noscript, nav, header, footer 标签及内部内容
     let mut text = html.to_string();
-    let unwanted_tags = ["script", "style", "svg", "noscript", "nav", "header", "footer", "iframe"];
+    let unwanted_tags = [
+        "script", "style", "svg", "noscript", "nav", "header", "footer", "iframe",
+    ];
     for tag in unwanted_tags {
         let open_pattern = format!("<{}", tag);
         let close_pattern = format!("</{}>", tag);
@@ -433,7 +477,10 @@ pub fn clean_html_to_markdown(html: &str) -> String {
 
     // 2. 将段落与标题标签转换为换行
     text = text.replace("<p>", "\n\n").replace("</p>", "\n");
-    text = text.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n");
+    text = text
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n");
     text = text.replace("<h1>", "\n# ").replace("</h1>", "\n");
     text = text.replace("<h2>", "\n## ").replace("</h2>", "\n");
     text = text.replace("<h3>", "\n### ").replace("</h3>", "\n");
@@ -647,7 +694,10 @@ mod tests {
             "Rust",
             ["Rust", "Rust (编程语言)"],
             ["化学概念", "一门注重安全与性能的系统语言"],
-            ["https://zh.wikipedia.org/wiki/Rust", "https://zh.wikipedia.org/wiki/Rust_(编程语言)"]
+            [
+                "https://zh.wikipedia.org/wiki/Rust",
+                "https://zh.wikipedia.org/wiki/Rust_(编程语言)"
+            ]
         ]);
         let items = parse_wikipedia_opensearch(&raw, 5).unwrap();
         assert_eq!(items.len(), 2);
@@ -677,5 +727,3 @@ mod tests {
         assert!(fetch_res.stderr.contains("缺少必填参数"));
     }
 }
-
-

@@ -101,9 +101,7 @@ pub fn run() {
                 registry.trigger_shutdown();
                 let app_handle = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    registry
-                        .graceful_shutdown(Duration::from_secs(5))
-                        .await;
+                    registry.graceful_shutdown(Duration::from_secs(5)).await;
                     app_handle.exit(0);
                 });
             }

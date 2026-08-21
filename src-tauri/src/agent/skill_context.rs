@@ -160,9 +160,9 @@ pub fn skill_catalog_string(skills_dir: &Path, excluded: &[&str]) -> String {
         let summary = content
             .find("<summary>")
             .and_then(|start| {
-                content.find("</summary>").map(|end| {
-                    content[start + 9..end].trim().to_string()
-                })
+                content
+                    .find("</summary>")
+                    .map(|end| content[start + 9..end].trim().to_string())
             })
             .unwrap_or_else(|| name.clone());
         lines.push(format!("- {}: {}", name, summary));

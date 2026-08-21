@@ -162,7 +162,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     &mut run_machine,
                     AgentRunEvent::PlanningFailed { reason: e.clone() },
                 )?;
-                
+
                 app.emit(
                     &format!("agent-log-{}", final_session_id),
                     format!(
@@ -175,10 +175,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     "你的输出未能通过 JSON 校验，解析报错为: {}\n请严格按照 System Prompt 要求输出纯合法 JSON！",
                     e
                 ));
-                checkpoint.record_recoverable_error(
-                    format!("JSON 解析失败: {}", e),
-                    &context,
-                );
+                checkpoint.record_recoverable_error(format!("JSON 解析失败: {}", e), &context);
                 save_checkpoint(state.inner(), &mut checkpoint)?;
                 crate::agent::advance_run_state(
                     &app,
@@ -432,7 +429,8 @@ pub async fn run_call_llm_and_run_tool_phases(
                 .unwrap_or(&attempted_tool)
                 .to_string();
 
-            if attempted_tool != "finish" && attempted_tool != "core" && !attempted_tool.is_empty() {
+            if attempted_tool != "finish" && attempted_tool != "core" && !attempted_tool.is_empty()
+            {
                 context.active_tool = Some(attempted_tool.clone());
                 if !context.has_tool_manual(&plugin_name) {
                     let tool_filename = format!("{}.md", plugin_name);
@@ -444,7 +442,8 @@ pub async fn run_call_llm_and_run_tool_phases(
                         resource_dir.join("prompts/tools").join(&tool_filename),
                         std::path::PathBuf::from("src-tauri/prompts/skills").join(&tool_filename),
                         std::path::PathBuf::from("prompts/skills").join(&tool_filename),
-                        std::path::PathBuf::from("../src-tauri/prompts/skills").join(&tool_filename),
+                        std::path::PathBuf::from("../src-tauri/prompts/skills")
+                            .join(&tool_filename),
                         resource_dir.join("prompts/skills").join(&tool_filename),
                     ];
 

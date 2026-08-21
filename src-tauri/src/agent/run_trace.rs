@@ -1,6 +1,6 @@
 use crate::db::DbState;
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 pub fn upsert_snapshot(
@@ -123,14 +123,7 @@ pub fn save_step_output_with_meta(
     .map_err(|error| error.to_string())?;
 
     let _ = crate::agent::retrieval::index_step_fts(
-        &conn,
-        &output_id,
-        session_id,
-        step_id,
-        tool,
-        action,
-        outcome,
-        raw_output,
+        &conn, &output_id, session_id, step_id, tool, action, outcome, raw_output,
     );
 
     // 写入三级记忆模型的 Level 0 原始事件节点 (带语义关键词)
@@ -142,13 +135,20 @@ pub fn save_step_output_with_meta(
         session_id: session_id.to_string(),
         plan_id: None,
         step_index: Some(step_id),
-        content: format!("工具: {} | 动作: {} | 状态: {}\n输出: {}", tool, action, outcome, raw_output.chars().take(500).collect::<String>()),
+        content: format!(
+            "工具: {} | 动作: {} | 状态: {}\n输出: {}",
+            tool,
+            action,
+            outcome,
+            raw_output.chars().take(500).collect::<String>()
+        ),
         metadata_json: serde_json::json!({
             "output_id": output_id,
             "tool": tool,
             "action": action,
             "outcome": outcome,
-        }).to_string(),
+        })
+        .to_string(),
         confidence_score: 100,
         hit_count: 0,
         created_at: now,
@@ -159,41 +159,33 @@ pub fn save_step_output_with_meta(
     Ok(output_id)
 }
 
-pub fn get_step_output(
-    db: &DbState,
-    output_id: &str,
-) -> Result<String, String> {
-    // 先尝试从磁盘文件读（直接命中，最快）
-    let log_file = get_outputs_dir().join(format!("{}.log", output_id));
-    if log_file.exists() {
-        if let Ok(content) = std::fs::read_to_string(&log_file) {
-            return Ok(content);
-        }
+pub fn get_step_output(db: &DbState, session_id: &str, output_id: &str) -> Result<String, String> {
+    // 先通过 SQLite 校验 output_id 归属，再读取可能的溢出文件，避免跨 session 工件泄露。
+    let raw: Option<String> = {
+        let conn = db.0.lock().map_err(|error| error.to_string())?;
+        conn.query_row(
+            "SELECT raw_output FROM agent_step_logs WHERE output_id=?1 AND session_id=?2",
+            params![output_id, session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    };
+
+    let raw = raw.ok_or_else(|| "当前 session 中未找到该 output_id".to_string())?;
+    if let Some(path_str) = raw
+        .strip_prefix("[[spilled_to_disk:")
+        .and_then(|value| value.strip_suffix("]]"))
+    {
+        return std::fs::read_to_string(path_str).map_err(|error| {
+            format!(
+                "工件原文不可用 (output_id: {}, path: {}): {}",
+                output_id, path_str, error
+            )
+        });
     }
 
-    // 从 SQLite 读取
-    let conn = db.0.lock().map_err(|error| error.to_string())?;
-    let mut stmt = conn
-        .prepare("SELECT raw_output FROM agent_step_logs WHERE output_id=?1")
-        .map_err(|error| error.to_string())?;
-    let mut rows = stmt.query(params![output_id]).map_err(|error| error.to_string())?;
-    if let Some(row) = rows.next().map_err(|error| error.to_string())? {
-        let raw: String = row.get(0).map_err(|error| error.to_string())?;
-
-        // 处理溢出标记：[[spilled_to_disk:/path/to/file.log]]
-        if let Some(path_str) = raw.strip_prefix("[[spilled_to_disk:").and_then(|s| s.strip_suffix("]]")) {
-            return Ok(std::fs::read_to_string(path_str).unwrap_or_else(|_| {
-                format!(
-                    "[⚠️ 原始日志落盘文件已缺失或已移动 (output_id: {}, path: {})]",
-                    output_id, path_str
-                )
-            }));
-        }
-
-        Ok(raw)
-    } else {
-        Err(format!("output_id {} not found", output_id))
-    }
+    Ok(raw)
 }
 
 #[cfg(test)]

@@ -138,7 +138,9 @@ impl TaskRegistry {
     pub async fn cancel(&self, id: TaskId) {
         let mut tasks = self.tasks.lock().unwrap();
         if let Some(entry) = tasks.get_mut(&id) {
-            entry.status.store(TaskStatus::Finishing.as_u8(), Ordering::SeqCst);
+            entry
+                .status
+                .store(TaskStatus::Finishing.as_u8(), Ordering::SeqCst);
             if let Some(tx) = entry.cancel_tx.take() {
                 let _ = tx.send(());
             } else {
@@ -150,7 +152,9 @@ impl TaskRegistry {
     pub async fn cancel_all(&self) {
         let mut tasks = self.tasks.lock().unwrap();
         for entry in tasks.values_mut() {
-            entry.status.store(TaskStatus::Finishing.as_u8(), Ordering::SeqCst);
+            entry
+                .status
+                .store(TaskStatus::Finishing.as_u8(), Ordering::SeqCst);
             if let Some(tx) = entry.cancel_tx.take() {
                 let _ = tx.send(());
             } else {
@@ -192,7 +196,9 @@ impl TaskRegistry {
         let mut tasks = self.tasks.lock().unwrap();
         for entry in tasks.values_mut() {
             if !entry.finished.load(Ordering::SeqCst) {
-                entry.status.store(TaskStatus::Finishing.as_u8(), Ordering::SeqCst);
+                entry
+                    .status
+                    .store(TaskStatus::Finishing.as_u8(), Ordering::SeqCst);
                 entry.abort.abort();
             }
         }
@@ -201,7 +207,9 @@ impl TaskRegistry {
 
     pub async fn mark_done(&self, id: TaskId) {
         if let Some(entry) = self.tasks.lock().unwrap().get_mut(&id) {
-            entry.status.store(TaskStatus::Done.as_u8(), Ordering::SeqCst);
+            entry
+                .status
+                .store(TaskStatus::Done.as_u8(), Ordering::SeqCst);
         }
     }
 

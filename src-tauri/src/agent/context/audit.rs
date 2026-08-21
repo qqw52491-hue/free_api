@@ -15,14 +15,23 @@ impl AuditLedger {
 
         if total <= 8 {
             for r in records {
-                lines.push(format!("- [Step {}] {} · {}", r.step_id, r.tool, r.description));
+                lines.push(format!(
+                    "- [Step {}] {} · {}",
+                    r.step_id, r.tool, r.description
+                ));
             }
         } else {
             // 早期记录聚合
             let omitted = total - 6;
-            lines.push(format!("- [... 早期已安全执行 {} 项不可逆动作 (完整记录在 SQLite) ...]", omitted));
+            lines.push(format!(
+                "- [... 早期已安全执行 {} 项不可逆动作 (完整记录在 SQLite) ...]",
+                omitted
+            ));
             for r in &records[omitted..] {
-                lines.push(format!("- [Step {}] {} · {}", r.step_id, r.tool, r.description));
+                lines.push(format!(
+                    "- [Step {}] {} · {}",
+                    r.step_id, r.tool, r.description
+                ));
             }
         }
 
@@ -107,10 +116,7 @@ impl AuditLedger {
 
     /// 检测 shell 命令是否为只读查询（如 git log/show/diff, ls, cat, grep 等）
     pub fn is_readonly_shell_command(params: &serde_json::Value) -> bool {
-        let cmd = params
-            .get("command")
-            .and_then(|c| c.as_str())
-            .unwrap_or("");
+        let cmd = params.get("command").and_then(|c| c.as_str()).unwrap_or("");
         let args: Vec<&str> = params
             .get("args")
             .and_then(|a| a.as_array())
@@ -154,7 +160,18 @@ impl AuditLedger {
 
         matches!(
             base_cmd,
-            "ls" | "cat" | "grep" | "rg" | "ripgrep" | "find" | "head" | "tail" | "wc" | "echo" | "pwd" | "which" | "whereis"
+            "ls" | "cat"
+                | "grep"
+                | "rg"
+                | "ripgrep"
+                | "find"
+                | "head"
+                | "tail"
+                | "wc"
+                | "echo"
+                | "pwd"
+                | "which"
+                | "whereis"
         )
     }
 
@@ -165,7 +182,10 @@ impl AuditLedger {
             // 如果包含庞大的正文内容（如 write_file 的整个文件 content），精简 content 字段避免打爆台账，但保留 path 等核心参数
             if let Some(content) = cleaned.get("content") {
                 if content.as_str().map(|s| s.len() > 120).unwrap_or(false) {
-                    cleaned.insert("content".to_string(), serde_json::json!("[...已写入内容已持久化...]"));
+                    cleaned.insert(
+                        "content".to_string(),
+                        serde_json::json!("[...已写入内容已持久化...]"),
+                    );
                 }
             }
             serde_json::to_string(&cleaned).unwrap_or_else(|_| params.to_string())
@@ -187,14 +207,12 @@ mod tests {
 
     #[test]
     fn test_render_ledger_small() {
-        let records = vec![
-            SideEffectRecord {
-                step_id: 1,
-                tool: "code_editor".to_string(),
-                description: "created src/main.rs".to_string(),
-                timestamp: "2026-08-17T00:00:00Z".to_string(),
-            }
-        ];
+        let records = vec![SideEffectRecord {
+            step_id: 1,
+            tool: "code_editor".to_string(),
+            description: "created src/main.rs".to_string(),
+            timestamp: "2026-08-17T00:00:00Z".to_string(),
+        }];
         let rendered = AuditLedger::render_ledger(&records);
         assert!(rendered.contains("created src/main.rs"));
         assert!(rendered.contains("Step 1"));

@@ -3,23 +3,32 @@ use crate::agent::context::types::{ChatMessage, SandwichContext};
 use crate::agent::types::AgentInstruction;
 use serde_json::json;
 
-pub const SAMPLER_VERSION: u32 = 3;
+pub const SAMPLER_VERSION: u32 = 4;
+
+fn targeted_verification_guidance(
+    output_id: &str,
+    original_tokens: usize,
+    ingress_cap: usize,
+) -> String {
+    format!(
+        "[宿主提示：本次执行输出约 {} Tokens，超过单条上下文上限 {} Tokens，已保存为工件 output_id={} 并仅展示采样。当前片段不能证明未展示部分的细节；但无需通读全文。只有当结论确实依赖缺失内容时，才按文件路径、函数/符号、错误码、关键词或 diff hunk 定向搜索，再通过 task_store/search_step_output 或带 offset 的 get_step_output 获取最小必要片段。大范围回查会消耗工作集预算。]",
+        original_tokens, ingress_cap, output_id
+    )
+}
 
 impl SandwichContext {
-    /// 写入工具执行结果（Append-only 线性历史追加，最大化 Prompt Cache 命中率）
+    /// 写入工具执行结果（Append-only 线性历史追加，最大化 Prompt Cache 命中率）。
     ///
-    /// 设计原则（对齐 Claude Code / Codex 长任务架构）：
-    /// - 历史在平时保持严格 Append-Only，绝不在历史中间就地随机篡改，避免打爆 KV 前缀缓存
-    /// - 单步入口依据 Token 精确计量（支持中文 CJK 准确评估），超过 Cap 时采用 Head (1200) + Errors (800) + Tail (1800) 显式分账采样
-    /// - 全量原文始终持久化在 SQLite，凭 output_id 随时可通过 get_step_output(offset, limit) 分段回取
+    /// 设计原则：
+    /// - 历史在平时保持严格 Append-Only，避免在历史中间随机篡改而破坏前缀缓存。
+    /// - 单步入口依据保守 Token 估算；超过上限时保留头尾采样，并把完整原文持久化为工件。
+    /// - 截断仅表示当前证据不完整，不强迫模型通读原文；应先按符号、关键词或行范围定向核验。
     pub fn add_step(
         &mut self,
         instruction: &AgentInstruction,
         output_summary: &str,
         output_id: &str,
     ) {
-        // ── 1. 写入 assistant 行动纪要 ──
-        // 脱水版：只记录"做了什么"，砍掉 thought/reflection 内心戏，大幅节省 Token
         let action_brief = format!(
             "计划: {} | 工具: {} | 动作: {}",
             self.active_plan_title().unwrap_or("未命名计划"),
@@ -31,10 +40,8 @@ impl SandwichContext {
             content: json!(action_brief),
         });
 
-        // ── 2. 入口硬截断 (基于悲观安全 Token 估算，支持中文/英文/密集 JSON/代码) ──
         let ingress_tokens = conservative_token_estimate(output_summary);
         let ingress_cap = ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP;
-
         let char_count = output_summary.chars().count();
         let token_char_ratio = if char_count > 0 {
             ingress_tokens as f64 / char_count as f64
@@ -43,25 +50,38 @@ impl SandwichContext {
         };
 
         let feedback_str = if ingress_tokens > ingress_cap {
-            let safe_cap_tokens = ingress_cap.saturating_sub(600) as f64; // Reserve for boilerplate & errors
+            let safe_cap_tokens = ingress_cap.saturating_sub(600) as f64;
             let safe_cap_chars = (safe_cap_tokens / token_char_ratio).max(100.0) as usize;
             let mut head_chars = (safe_cap_chars as f64 * 0.4) as usize;
             let mut tail_chars = (safe_cap_chars as f64 * 0.6) as usize;
-
-            let mut sampled = crate::agent::utils::sample_execution_log(output_summary, head_chars, tail_chars);
+            let mut sampled =
+                crate::agent::utils::sample_execution_log(output_summary, head_chars, tail_chars);
             let mut candidate = format!(
-                "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: {}\ntruncated: true\n{}\n\n[⚠️ 入口硬截断: 原始输出约 {} Tokens (上限 {} Tokens)。完整数据已在 SQLite。\n⛔ 严格纪律警告: 结果包含 truncated: true，【绝对禁止】基于以上不完整的前缀/后缀信息直接下结论或认定任务成功！遇到此标记，你必须首先使用 get_step_output 或分页参数续读中间缺失的关键部分！\n🔍 搜索关键词: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"search_step_output\", \"output_id\": \"{}\", \"pattern\": \"error\", \"context_lines\": 3}}}}\n📑 分段读取: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"get_step_output\", \"output_id\": \"{}\", \"offset\": 0, \"limit\": 3000}}}}] ",
-                SAMPLER_VERSION, output_id, ingress_tokens, sampled, ingress_tokens, ingress_cap, output_id, output_id
+                "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: {}\ntruncated: true\n{}\n\n{}",
+                SAMPLER_VERSION,
+                output_id,
+                ingress_tokens,
+                sampled,
+                targeted_verification_guidance(output_id, ingress_tokens, ingress_cap),
             );
 
-            // 闭环出口复检 (Sample -> Measure -> Trim 闭环保证)：
-            while conservative_token_estimate(&candidate) > ingress_cap && (head_chars > 100 || tail_chars > 150) {
+            while conservative_token_estimate(&candidate) > ingress_cap
+                && (head_chars > 100 || tail_chars > 150)
+            {
                 head_chars = (head_chars as f64 * 0.70) as usize;
                 tail_chars = (tail_chars as f64 * 0.70) as usize;
-                sampled = crate::agent::utils::sample_execution_log(output_summary, head_chars, tail_chars);
+                sampled = crate::agent::utils::sample_execution_log(
+                    output_summary,
+                    head_chars,
+                    tail_chars,
+                );
                 candidate = format!(
-                    "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: {}\ntruncated: true\n{}\n\n[⚠️ 入口硬截断: 原始输出约 {} Tokens (上限 {} Tokens)。完整数据已在 SQLite。\n⛔ 严格纪律警告: 结果包含 truncated: true，【绝对禁止】基于以上不完整的前缀/后缀信息直接下结论或认定任务成功！遇到此标记，你必须首先使用 get_step_output 或分页参数续读中间缺失的关键部分！\n🔍 搜索关键词: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"search_step_output\", \"output_id\": \"{}\", \"pattern\": \"error\", \"context_lines\": 3}}}}\n📑 分段读取: {{\"tool\": \"task_store\", \"command\": {{\"action\": \"get_step_output\", \"output_id\": \"{}\", \"offset\": 0, \"limit\": 3000}}}}] ",
-                    SAMPLER_VERSION, output_id, ingress_tokens, sampled, ingress_tokens, ingress_cap, output_id, output_id
+                    "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: {}\ntruncated: true\n{}\n\n{}",
+                    SAMPLER_VERSION,
+                    output_id,
+                    ingress_tokens,
+                    sampled,
+                    targeted_verification_guidance(output_id, ingress_tokens, ingress_cap),
                 );
             }
             candidate
@@ -76,8 +96,21 @@ impl SandwichContext {
             role: "user".to_string(),
             content: json!(feedback_str),
         });
-
-        // ── 3. 触发自适应水位检查（仅在高水位时从头部一次性批量收纳，保护前缀缓存）──
         self.maybe_compact_history();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_guidance_requires_targeted_evidence_not_full_replay() {
+        let guidance = targeted_verification_guidance("out-1", 10_000, 4_000);
+        assert!(guidance.contains("无需通读全文"));
+        assert!(guidance.contains("定向搜索"));
+        assert!(guidance.contains("output_id=out-1"));
+        assert!(!guidance.contains("必须首先"));
+        assert!(!guidance.contains("绝对禁止"));
     }
 }

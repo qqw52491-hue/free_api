@@ -71,7 +71,8 @@ impl SandwichContext {
         }
 
         // (1) 阶段计划
-        if let (Some(id), Some(title)) = (&self.plan_state.active_id, &self.plan_state.active_title) {
+        if let (Some(id), Some(title)) = (&self.plan_state.active_id, &self.plan_state.active_title)
+        {
             bottom_state_card.push_str(&format!(
                 "【当前活动计划】id={} | title={}\n如下一步仍属于此阶段，复用相同 plan_id/plan_title；只有真正切换工作阶段才创建新计划。\n\n",
                 id, title
@@ -87,7 +88,9 @@ impl SandwichContext {
         }
 
         // (3) 避坑指南（失败教训）
-        bottom_state_card.push_str(&ContextRenderer::render_failed_attempts(&self.failed_attempts));
+        bottom_state_card.push_str(&ContextRenderer::render_failed_attempts(
+            &self.failed_attempts,
+        ));
 
         // (4) 不可逆操作安全台账
         bottom_state_card.push_str(&AuditLedger::render_ledger(&self.side_effects));
@@ -96,7 +99,9 @@ impl SandwichContext {
         bottom_state_card.push_str(&MemoryManager::render_memory_card(&self.memories));
 
         // (6) 会话任务数据区目录 (TaskStore 资源摘要)
-        bottom_state_card.push_str(&ContextRenderer::render_task_resources(&self.task_resources));
+        bottom_state_card.push_str(&ContextRenderer::render_task_resources(
+            &self.task_resources,
+        ));
 
         // (7) 任务清单 (Todo List)
         bottom_state_card.push_str(&ContextRenderer::render_todo_list(&self.todo_list));
@@ -175,11 +180,17 @@ fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
                     status_line, output_id
                 )
             } else {
-                format!("(完整详细数据已安全持久化至 SQLite，可通过 output_id={} 精准检索)", output_id)
+                format!(
+                    "(完整详细数据已安全持久化至 SQLite，可通过 output_id={} 精准检索)",
+                    output_id
+                )
             };
             return ChatMessage {
                 role: "user".to_string(),
-                content: json!(format!("{}\noutput_id: {}\n{}", first_line, output_id, summary)),
+                content: json!(format!(
+                    "{}\noutput_id: {}\n{}",
+                    first_line, output_id, summary
+                )),
             };
         }
     }
@@ -190,7 +201,10 @@ fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
         let compact_err: String = first_err_line.chars().take(120).collect();
         return ChatMessage {
             role: "user".to_string(),
-            content: json!(format!("【历史执行错误 (后续步骤已处理)】: {}", compact_err)),
+            content: json!(format!(
+                "【历史执行错误 (后续步骤已处理)】: {}",
+                compact_err
+            )),
         };
     }
 
@@ -238,7 +252,11 @@ mod tests {
         assert_eq!(msgs1[0].content, json!("SYSTEM_PROMPT_STATIC_CONTRACT"));
         // M1: 初始任务目标静态锚点
         assert_eq!(msgs1[1].role, "user");
-        assert!(msgs1[1].content.as_str().unwrap().contains("Initial Goal 1"));
+        assert!(msgs1[1]
+            .content
+            .as_str()
+            .unwrap()
+            .contains("Initial Goal 1"));
 
         // 模拟会话中目标发生变更（压缩时 compaction 会把 ctx.user_goal 提升为最新目标）
         ctx.user_goal = "New Goal 2 (Updated)".to_string();
@@ -249,20 +267,24 @@ mod tests {
         assert_eq!(msgs2[0].role, "system");
         assert_eq!(msgs2[0].content, json!("SYSTEM_PROMPT_STATIC_CONTRACT"));
         // M1 随 ctx.user_goal 更新（压缩断代才发生）
-        assert!(msgs2[1].content.as_str().unwrap().contains("New Goal 2 (Updated)"));
+        assert!(msgs2[1]
+            .content
+            .as_str()
+            .unwrap()
+            .contains("New Goal 2 (Updated)"));
 
         // 底部动态卡只有活跃工具，user_goal 已由 M1 承载，不重复
         let bottom_card = msgs2.last().unwrap().content.as_str().unwrap();
         assert!(bottom_card.contains("【当前活跃工具】: remote-hub"));
-        assert!(!bottom_card.contains("【当前任务目标】"), "user_goal 不应再出现在底部卡片");
+        assert!(
+            !bottom_card.contains("【当前任务目标】"),
+            "user_goal 不应再出现在底部卡片"
+        );
     }
 
     #[test]
     fn test_fetched_tools_compaction_reset() {
-        let mut ctx = SandwichContext::new(
-            "SYS".to_string(),
-            "Goal".to_string(),
-        );
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
         ctx.context_window_tokens = 8000;
         ctx.fetched_tools.insert("excel".to_string());
         ctx.fetched_tools.insert("remote-hub".to_string());
@@ -283,10 +305,7 @@ mod tests {
 
     #[test]
     fn test_no_duplicate_goal_and_observation() {
-        let mut ctx = SandwichContext::new(
-            "SYSTEM_PROMPT".to_string(),
-            "My User Goal".to_string(),
-        );
+        let mut ctx = SandwichContext::new("SYSTEM_PROMPT".to_string(), "My User Goal".to_string());
 
         // 模拟 turns_history 第一条就是用户的原始 prompt (与 user_goal 相同)
         ctx.turns_history.push(ChatMessage {
@@ -349,4 +368,3 @@ mod tests {
         assert!(full_text.contains("out_step_9"));
     }
 }
-

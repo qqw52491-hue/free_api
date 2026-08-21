@@ -146,10 +146,10 @@ pub struct TokenUsage {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub cached_tokens: i64,
-    pub cache_hit_rate: f64, // cached_tokens / prompt_tokens * 100
-    pub context_window: i64, // 配置的上下文窗口大小 (num_ctx)
-    pub usage_percent: f64,  // total_tokens / context_window * 100
-    pub ttft_ms: u64,        // 首字延迟 (Time to First Token)
+    pub cache_hit_rate: f64,    // cached_tokens / prompt_tokens * 100
+    pub context_window: i64,    // 配置的上下文窗口大小 (num_ctx)
+    pub usage_percent: f64,     // total_tokens / context_window * 100
+    pub ttft_ms: u64,           // 首字延迟 (Time to First Token)
     pub total_duration_ms: u64, // 请求总耗时
     pub tokens_per_second: f64, // 吐字速率 (tok/s)
 }

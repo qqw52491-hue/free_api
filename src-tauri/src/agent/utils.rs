@@ -58,7 +58,10 @@ pub fn sample_execution_log(raw: &str, head_chars: usize, tail_chars: usize) -> 
     }
 
     let head: String = raw.chars().take(head_chars).collect();
-    let tail: String = raw.chars().skip(char_count.saturating_sub(tail_chars)).collect();
+    let tail: String = raw
+        .chars()
+        .skip(char_count.saturating_sub(tail_chars))
+        .collect();
     let middle_omitted = char_count.saturating_sub(head_chars + tail_chars);
 
     // 零堆内存中间分配：通过行迭代器直接在原字符串切片上扫描中间被省略区间的关键错误行 (去重 + 计数 + 长度截断)
@@ -110,7 +113,9 @@ pub fn sample_execution_log(raw: &str, head_chars: usize, tail_chars: usize) -> 
             let capped_line: String = trimmed.chars().take(140).collect();
             if let Some(existing) = error_counts.iter_mut().find(|(k, _)| k == &capped_line) {
                 existing.1 += 1;
-            } else if error_counts.len() < MAX_UNIQUE_ERRORS && total_error_chars + capped_line.len() < MAX_ERROR_BUDGET_CHARS {
+            } else if error_counts.len() < MAX_UNIQUE_ERRORS
+                && total_error_chars + capped_line.len() < MAX_ERROR_BUDGET_CHARS
+            {
                 total_error_chars += capped_line.len();
                 error_counts.push((capped_line, 1));
             }
@@ -118,7 +123,10 @@ pub fn sample_execution_log(raw: &str, head_chars: usize, tail_chars: usize) -> 
     }
 
     let middle_note = if error_counts.is_empty() {
-        format!("\n\n[... 已折叠中间 {} 字符，首尾关键信息已保留 ...]\n\n", middle_omitted)
+        format!(
+            "\n\n[... 已折叠中间 {} 字符，首尾关键信息已保留 ...]\n\n",
+            middle_omitted
+        )
     } else {
         let formatted_errors: Vec<String> = error_counts
             .into_iter()
@@ -511,7 +519,10 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
 
         // 4. 如果 applied_lessons 是单个字符串，转为数组
         if let Some(serde_json::Value::String(lesson_str)) = map.get("applied_lessons") {
-            map.insert("applied_lessons".to_string(), serde_json::json!([lesson_str]));
+            map.insert(
+                "applied_lessons".to_string(),
+                serde_json::json!([lesson_str]),
+            );
         }
     }
 }
@@ -598,9 +609,19 @@ fn log_llm_exchange_to_file(
     if let Ok(s) = serde_json::to_string_pretty(&logs_array) {
         let _ = std::fs::write(&log_path, s);
         if let Some(err) = parse_error {
-            println!("📁 [模型异常已记录] 步骤 #{} (尝试 {}) 报错已归档到 {}: {}", step_id, try_index, log_path.display(), err);
+            println!(
+                "📁 [模型异常已记录] 步骤 #{} (尝试 {}) 报错已归档到 {}: {}",
+                step_id,
+                try_index,
+                log_path.display(),
+                err
+            );
         } else {
-            println!("📁 [步骤日志已记录] 步骤 #{} 交互已归档到 {}", step_id, log_path.display());
+            println!(
+                "📁 [步骤日志已记录] 步骤 #{} 交互已归档到 {}",
+                step_id,
+                log_path.display()
+            );
         }
     }
 }
@@ -736,7 +757,10 @@ pub async fn call_llm(
                 if first_token_at.is_none() {
                     first_token_at = Some(std::time::Instant::now());
                 }
-                let ttft_ms = first_token_at.unwrap().duration_since(stream_start).as_millis() as u64;
+                let ttft_ms = first_token_at
+                    .unwrap()
+                    .duration_since(stream_start)
+                    .as_millis() as u64;
                 let chunk_len = match &event {
                     StreamEvent::Thinking { chunk, .. } => chunk.len(),
                     StreamEvent::Content { chunk, .. } => chunk.len(),
@@ -753,7 +777,8 @@ pub async fn call_llm(
                 let now = std::time::Instant::now();
                 match event {
                     StreamEvent::Thinking { accumulated, .. } => {
-                        if now.duration_since(last_thinking_emit_at).as_millis() >= EMIT_THROTTLE_MS {
+                        if now.duration_since(last_thinking_emit_at).as_millis() >= EMIT_THROTTLE_MS
+                        {
                             last_thinking_emit_at = now;
                             app_handle
                                 .emit(
@@ -771,16 +796,24 @@ pub async fn call_llm(
                                 .ok();
                         }
                     }
-                    StreamEvent::Content { chunk, accumulated_content, .. } => {
-                        if now.duration_since(last_content_emit_at).as_millis() >= EMIT_THROTTLE_MS {
+                    StreamEvent::Content {
+                        chunk,
+                        accumulated_content,
+                        ..
+                    } => {
+                        if now.duration_since(last_content_emit_at).as_millis() >= EMIT_THROTTLE_MS
+                        {
                             // 仅当大模型在输出 finish 交付指令或纯文本总结时，才提取 streaming_summary 进行终态流式呈现；
                             // 避免中间普通工具调用（如 task_store、save_file 的参数里恰好也有 summary 字段）被误识别为终态成果流式
-                            let is_intermediate_tool = accumulated_content.contains("\"tool\"") 
+                            let is_intermediate_tool = accumulated_content.contains("\"tool\"")
                                 && !accumulated_content.contains("\"finish\"");
                             let streaming_summary = if is_intermediate_tool {
                                 None
                             } else {
-                                extract_streaming_json_field(accumulated_content, &["summary", "answer", "details"])
+                                extract_streaming_json_field(
+                                    accumulated_content,
+                                    &["summary", "answer", "details"],
+                                )
                             };
 
                             app_handle
@@ -888,7 +921,8 @@ pub async fn call_llm(
 
         // 8. 解析 AgentInstruction (带智能容错与修复)
         let parse_result = (|| -> Result<AgentInstruction, String> {
-            let json_to_parse = repair_json(&final_json_str).unwrap_or_else(|| final_json_str.clone());
+            let json_to_parse =
+                repair_json(&final_json_str).unwrap_or_else(|| final_json_str.clone());
             let mut val: serde_json::Value = serde_json::from_str(&json_to_parse)
                 .map_err(|e| format!("基础 JSON 语法错误: {} (处理前: {})", e, final_json_str))?;
             normalize_raw_instruction_value(&mut val);
@@ -994,7 +1028,8 @@ mod tests {
             },
         }"#;
         let repaired = repair_json(raw).expect("should repair trailing commas and comments");
-        let val: serde_json::Value = serde_json::from_str(&repaired).expect("must parse valid JSON");
+        let val: serde_json::Value =
+            serde_json::from_str(&repaired).expect("must parse valid JSON");
         assert_eq!(val["tool"], "ask_human");
         assert_eq!(val["command"]["message"], "hello");
     }
@@ -1003,16 +1038,21 @@ mod tests {
     fn test_repair_json_unescaped_newlines_in_strings() {
         let raw = "{\n\"tool\": \"ask_human\",\n\"command\": {\n\"message\": \"Line 1\nLine 2 with \ttab\"\n}\n}";
         let repaired = repair_json(raw).expect("should repair unescaped newlines in strings");
-        let val: serde_json::Value = serde_json::from_str(&repaired).expect("must parse valid JSON");
+        let val: serde_json::Value =
+            serde_json::from_str(&repaired).expect("must parse valid JSON");
         assert_eq!(val["tool"], "ask_human");
-        assert!(val["command"]["message"].as_str().unwrap().contains("Line 1"));
+        assert!(val["command"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Line 1"));
     }
 
     #[test]
     fn test_repair_json_python_literals_and_single_quotes() {
         let raw = "{'tool': 'model_manager', 'command': {'confirm': True, 'null_field': None, 'flag': False}}";
         let repaired = repair_json(raw).expect("should repair single quotes and python literals");
-        let val: serde_json::Value = serde_json::from_str(&repaired).expect("must parse valid JSON");
+        let val: serde_json::Value =
+            serde_json::from_str(&repaired).expect("must parse valid JSON");
         assert_eq!(val["tool"], "model_manager");
         assert_eq!(val["command"]["confirm"], true);
         assert_eq!(val["command"]["flag"], false);
@@ -1021,18 +1061,24 @@ mod tests {
 
     #[test]
     fn test_repair_json_eof_truncation() {
-        let raw = r#"{"tool": "ask_human", "command": {"message": "Incomplete text that was cut off"#;
+        let raw =
+            r#"{"tool": "ask_human", "command": {"message": "Incomplete text that was cut off"#;
         let repaired = repair_json(raw).expect("should repair truncated JSON");
-        let val: serde_json::Value = serde_json::from_str(&repaired).expect("must parse valid JSON");
+        let val: serde_json::Value =
+            serde_json::from_str(&repaired).expect("must parse valid JSON");
         assert_eq!(val["tool"], "ask_human");
-        assert!(val["command"]["message"].as_str().unwrap().contains("Incomplete text"));
+        assert!(val["command"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Incomplete text"));
     }
 
     #[test]
     fn test_extract_json_from_markdown_with_extra_text() {
         let raw = "Here is my response:\n```json\n{\n  \"tool\": \"web_search\",\n  \"command\": {\"query\": \"rust\"}\n}\n```\nHope that helps!";
         let extracted = extract_json_from_text(raw).expect("should extract json from markdown");
-        let val: serde_json::Value = serde_json::from_str(&extracted).expect("must parse valid JSON");
+        let val: serde_json::Value =
+            serde_json::from_str(&extracted).expect("must parse valid JSON");
         assert_eq!(val["tool"], "web_search");
         assert_eq!(val["command"]["query"], "rust");
     }
@@ -1046,13 +1092,17 @@ mod tests {
             "applied_lessons": "lesson_cache_1"
         });
         normalize_raw_instruction_value(&mut val);
-        let inst: AgentInstruction = serde_json::from_value(val).expect("must deserialize AgentInstruction");
+        let inst: AgentInstruction =
+            serde_json::from_value(val).expect("must deserialize AgentInstruction");
         assert_eq!(inst.tool, Some("web_search".to_string()));
         assert_eq!(inst.command.unwrap()["query"], "rust agent");
         assert_eq!(inst.todo_update.len(), 1);
         assert_eq!(inst.todo_update[0].id, 1);
         assert_eq!(inst.todo_update[0].description, "Search web");
-        assert_eq!(inst.applied_lessons, Some(vec!["lesson_cache_1".to_string()]));
+        assert_eq!(
+            inst.applied_lessons,
+            Some(vec!["lesson_cache_1".to_string()])
+        );
     }
 
     #[test]
@@ -1104,9 +1154,9 @@ mod tests {
             Some("### 报告\n- 第一行\n- 带有\"引号\"的内容".to_string())
         );
 
-        let closed_json = "{\"tool\": \"finish\", \"command\": {\"summary\": \"完成了！\", \"other\": 123}}";
+        let closed_json =
+            "{\"tool\": \"finish\", \"command\": {\"summary\": \"完成了！\", \"other\": 123}}";
         let extracted_closed = extract_streaming_json_field(closed_json, &["summary"]);
         assert_eq!(extracted_closed, Some("完成了！".to_string()));
     }
 }
-

@@ -88,7 +88,7 @@ impl ModelConfig {
     /// 构建 reqwest HTTP 客户端
     pub fn build_client(&self) -> Result<reqwest::Client, String> {
         static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-        
+
         // 我们在全局复用连接池，至于 per-request 的 timeout 可以交给调用者 req_builder.timeout() 设置
         // 但这里为了向后兼容且兼顾连接池，我们优先保留一个超时较长（或默认）的共享客户端。
         let client = HTTP_CLIENT.get_or_init(|| {
@@ -141,7 +141,10 @@ impl ModelConfig {
         });
 
         // 兼容支持 max_completion_tokens 的现代模型 (如 o1, o3-mini, gpt-4o 等)
-        if self.model_name.contains("o1") || self.model_name.contains("o3") || self.model_name.contains("gpt-4o") {
+        if self.model_name.contains("o1")
+            || self.model_name.contains("o3")
+            || self.model_name.contains("gpt-4o")
+        {
             body["max_completion_tokens"] = json!(effective_max_tokens);
         }
 
@@ -210,7 +213,9 @@ impl ModelConfig {
         };
         headers.insert(
             "Authorization",
-            auth_val.parse().unwrap_or_else(|_| "Bearer invalid".parse().unwrap()),
+            auth_val
+                .parse()
+                .unwrap_or_else(|_| "Bearer invalid".parse().unwrap()),
         );
         headers.insert("HTTP-Referer", "https://free-api-chat.app".parse().unwrap());
         headers.insert("X-OpenRouter-Title", "Free API Chat".parse().unwrap());
@@ -320,9 +325,21 @@ fn parse_usage(json: &serde_json::Value) -> Option<RawUsage> {
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_i64())
-        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(|v| v.as_i64()))
-        .or_else(|| usage.get("cache_read_input_tokens").and_then(|v| v.as_i64()))
-        .or_else(|| usage.get("cached_content_token_count").and_then(|v| v.as_i64()))
+        .or_else(|| {
+            usage
+                .get("prompt_cache_hit_tokens")
+                .and_then(|v| v.as_i64())
+        })
+        .or_else(|| {
+            usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_i64())
+        })
+        .or_else(|| {
+            usage
+                .get("cached_content_token_count")
+                .and_then(|v| v.as_i64())
+        })
         .unwrap_or(0);
 
     if prompt > 0 || completion > 0 || cached > 0 {
@@ -462,7 +479,10 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
                     );
                     break;
                 }
-                return Err(format!("上游服务商流式连接意外中断 (unexpected EOF): {}", err_str));
+                return Err(format!(
+                    "上游服务商流式连接意外中断 (unexpected EOF): {}",
+                    err_str
+                ));
             }
         };
         line_buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -572,7 +592,10 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent)>(
                 }
                 // 🛑 智能状态码感知：客户端不可恢复错误（401 Key失效、403 无权、400 格式非法等）立即终止重试，杜绝浪费
                 if is_non_retryable_error(&e) {
-                    println!("❌ LLM 遇到不可恢复的客户端/认证错误 ({}): 立即终止重试！", e);
+                    println!(
+                        "❌ LLM 遇到不可恢复的客户端/认证错误 ({}): 立即终止重试！",
+                        e
+                    );
                     return Err(e);
                 }
 
@@ -674,19 +697,37 @@ mod tests {
         use super::is_non_retryable_error;
 
         // 不可重试的客户端致命错误
-        assert!(is_non_retryable_error("API 错误 401 Unauthorized: invalid_api_key"));
-        assert!(is_non_retryable_error("API 错误 403 Forbidden: user suspended"));
-        assert!(is_non_retryable_error("API 错误 400 Bad Request: unsupported parameter"));
-        assert!(is_non_retryable_error("API 错误 404 Not Found: model_not_found"));
-        assert!(is_non_retryable_error("AuthenticationError: Incorrect API key provided"));
+        assert!(is_non_retryable_error(
+            "API 错误 401 Unauthorized: invalid_api_key"
+        ));
+        assert!(is_non_retryable_error(
+            "API 错误 403 Forbidden: user suspended"
+        ));
+        assert!(is_non_retryable_error(
+            "API 错误 400 Bad Request: unsupported parameter"
+        ));
+        assert!(is_non_retryable_error(
+            "API 错误 404 Not Found: model_not_found"
+        ));
+        assert!(is_non_retryable_error(
+            "AuthenticationError: Incorrect API key provided"
+        ));
         assert!(is_non_retryable_error("insufficient_quota: out of credits"));
 
         // 必须退避重试的临时/服务端错误
-        assert!(!is_non_retryable_error("API 错误 429 Too Many Requests: rate limit exceeded"));
-        assert!(!is_non_retryable_error("API 错误 500 Internal Server Error"));
+        assert!(!is_non_retryable_error(
+            "API 错误 429 Too Many Requests: rate limit exceeded"
+        ));
+        assert!(!is_non_retryable_error(
+            "API 错误 500 Internal Server Error"
+        ));
         assert!(!is_non_retryable_error("API 错误 502 Bad Gateway"));
         assert!(!is_non_retryable_error("API 错误 503 Service Unavailable"));
-        assert!(!is_non_retryable_error("请求失败: connection reset by peer"));
-        assert!(!is_non_retryable_error("上游服务商流式连接意外中断 (unexpected EOF)"));
+        assert!(!is_non_retryable_error(
+            "请求失败: connection reset by peer"
+        ));
+        assert!(!is_non_retryable_error(
+            "上游服务商流式连接意外中断 (unexpected EOF)"
+        ));
     }
 }

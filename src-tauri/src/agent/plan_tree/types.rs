@@ -144,10 +144,7 @@ impl NodeResult {
 
 /// 执行器函数签名：接收 (tool, resolved_args) -> Result<Value, String>
 pub type ToolInvoker = Arc<
-    dyn Fn(
-            String,
-            Value,
-        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>
+    dyn Fn(String, Value) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>
         + Send
         + Sync,
 >;
@@ -190,7 +187,8 @@ impl PlanExecutionReport {
         };
 
         md.push_str("详细返回数据 (JSON):\n```json\n");
-        let json_str = serde_json::to_string_pretty(&sanitized_results).unwrap_or_else(|_| "{}".to_string());
+        let json_str =
+            serde_json::to_string_pretty(&sanitized_results).unwrap_or_else(|_| "{}".to_string());
         // 二次防御：单次报告结果若仍超出 3000 字符，执行安全截断
         if json_str.chars().count() > 3000 {
             let truncated: String = json_str.chars().take(2800).collect();
@@ -206,32 +204,43 @@ impl PlanExecutionReport {
     /// 失败报告专用脱水器：成功分支仅保留工具名与状态，彻底剔除巨大数据体；失败分支保留核心错误
     fn sanitize_failure_results(&self) -> Value {
         if let Value::Array(ref arr) = self.results {
-            let sanitized_arr: Vec<Value> = arr.iter().map(|item| {
-                if let Value::Object(ref map) = item {
-                    let mut new_map = serde_json::Map::new();
-                    let is_ok = map.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    
-                    for (k, v) in map {
-                        if is_ok && (k == "data" || k == "stdout" || k == "patch" || k == "output") {
-                            // 成功分支的重型数据直接替换为轻量标记
-                            new_map.insert(k.clone(), serde_json::json!("(已执行成功，数据已落盘 SQLite)"));
-                        } else if let Value::String(ref s) = v {
-                            // 字符串过长时进行单字段截断
-                            if s.chars().count() > 500 {
-                                let short_s: String = s.chars().take(480).collect();
-                                new_map.insert(k.clone(), serde_json::json!(format!("{}...（已截断）", short_s)));
+            let sanitized_arr: Vec<Value> = arr
+                .iter()
+                .map(|item| {
+                    if let Value::Object(ref map) = item {
+                        let mut new_map = serde_json::Map::new();
+                        let is_ok = map.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                        for (k, v) in map {
+                            if is_ok
+                                && (k == "data" || k == "stdout" || k == "patch" || k == "output")
+                            {
+                                // 成功分支的重型数据直接替换为轻量标记
+                                new_map.insert(
+                                    k.clone(),
+                                    serde_json::json!("(已执行成功，数据已落盘 SQLite)"),
+                                );
+                            } else if let Value::String(ref s) = v {
+                                // 字符串过长时进行单字段截断
+                                if s.chars().count() > 500 {
+                                    let short_s: String = s.chars().take(480).collect();
+                                    new_map.insert(
+                                        k.clone(),
+                                        serde_json::json!(format!("{}...（已截断）", short_s)),
+                                    );
+                                } else {
+                                    new_map.insert(k.clone(), v.clone());
+                                }
                             } else {
                                 new_map.insert(k.clone(), v.clone());
                             }
-                        } else {
-                            new_map.insert(k.clone(), v.clone());
                         }
+                        Value::Object(new_map)
+                    } else {
+                        item.clone()
                     }
-                    Value::Object(new_map)
-                } else {
-                    item.clone()
-                }
-            }).collect();
+                })
+                .collect();
             Value::Array(sanitized_arr)
         } else {
             self.results.clone()

@@ -15,7 +15,8 @@ pub fn record_lesson_recall(
     }
     if let Ok(conn) = db.0.lock() {
         let recall_id = uuid::Uuid::new_v4().to_string();
-        let recalled_json = serde_json::to_string(recalled_ids).unwrap_or_else(|_| "[]".to_string());
+        let recalled_json =
+            serde_json::to_string(recalled_ids).unwrap_or_else(|_| "[]".to_string());
         let _ = conn.execute(
             "INSERT INTO agent_lesson_recalls (id, session_id, step_id, recalled_lesson_ids, applied_lesson_ids, outcome, created_at)
              VALUES (?1, ?2, ?3, ?4, '[]', 'pending', ?5)",
@@ -48,12 +49,14 @@ pub fn feedback_on_applied_lessons(
         let outcome_str = if is_success { "succeeded" } else { "failed" };
 
         // 1. 更新或补录血缘记录（确保无论当步是否调用 search，采纳事实与执行因果 100% 落盘）
-        let updated_rows = conn.execute(
-            "UPDATE agent_lesson_recalls
+        let updated_rows = conn
+            .execute(
+                "UPDATE agent_lesson_recalls
              SET applied_lesson_ids = ?1, outcome = ?2
              WHERE session_id = ?3 AND step_id = ?4",
-            params![applied_json, outcome_str, session_id, step_id as i64],
-        ).unwrap_or(0);
+                params![applied_json, outcome_str, session_id, step_id as i64],
+            )
+            .unwrap_or(0);
 
         if updated_rows == 0 {
             let recall_id = uuid::Uuid::new_v4().to_string();
@@ -83,7 +86,10 @@ pub fn feedback_on_applied_lessons(
                      WHERE id = ?1",
                     params![lesson_id],
                 );
-                println!("💡 [Lesson 血缘正反馈] Lesson '{}' 显式采纳且当步成功，置信度提升 +5", lesson_id);
+                println!(
+                    "💡 [Lesson 血缘正反馈] Lesson '{}' 显式采纳且当步成功，置信度提升 +5",
+                    lesson_id
+                );
             } else {
                 // 负反馈：采纳但报错失败 -> 扣减置信度 (-30)
                 let _ = conn.execute(
@@ -92,7 +98,10 @@ pub fn feedback_on_applied_lessons(
                      WHERE id = ?1",
                     params![lesson_id],
                 );
-                println!("⚠️ [Lesson 负反馈降权] Lesson '{}' 显式采纳但执行失败，因果扣除 30 分", lesson_id);
+                println!(
+                    "⚠️ [Lesson 负反馈降权] Lesson '{}' 显式采纳但执行失败，因果扣除 30 分",
+                    lesson_id
+                );
             }
         }
     }
