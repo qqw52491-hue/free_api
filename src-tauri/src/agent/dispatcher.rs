@@ -20,6 +20,13 @@ pub fn is_finish_instruction(instruction: &AgentInstruction) -> bool {
         || instruction.get_action().eq_ignore_ascii_case("finish")
 }
 
+/// MCP 服务总名本身不是可调用工具。调用必须指定 `服务/具体工具`，或以服务名配合不同的具体 action。
+/// 该检查只拒绝无效形态，不从参数中猜测或迁移任何工具、cwd、path 或 project。
+fn mcp_service_requires_concrete_tool(tool: &str, action: &str) -> bool {
+    !tool.contains('/')
+        && (action.trim().is_empty() || tool.trim().eq_ignore_ascii_case(action.trim()))
+}
+
 pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
     let tool = inst.get_tool().to_ascii_lowercase();
     let action = inst.get_action().to_ascii_lowercase();
@@ -311,6 +318,17 @@ pub fn execute_command_inner(
     };
 
     if let Some(plugin) = registry.get(&plugin_name) {
+        if mcp_service_requires_concrete_tool(tool, action) {
+            return DispatchResult {
+                stdout: String::new(),
+                stderr: format!(
+                    "❌ [工具契约] MCP 服务‘{}’不是具体工具。请显式调用‘{}/具体工具’，或保留 tool=‘{}’并将 action 设为具体工具名；不要把子工具名只放在参数里。宿主不会自动补全或改写 tool、cwd、path、project 参数。",
+                    plugin_name, plugin_name, plugin_name
+                ),
+                success: false,
+                route: "host_rejection:mcp_service_requires_subtool".to_string(),
+            };
+        }
         let normalized_params = normalize_mcp_params(params);
         let (clean_params, read_guard_notice) =
             guard_code_read_range(&tool_name, normalized_params);
@@ -658,6 +676,20 @@ mod tests {
     use crate::db::{init_db, DbState};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn mcp_service_name_requires_an_explicit_subtool_without_parameter_inference() {
+        assert!(mcp_service_requires_concrete_tool("remote-http-mcp", ""));
+        assert!(mcp_service_requires_concrete_tool("remote-http-mcp", "remote-http-mcp"));
+        assert!(!mcp_service_requires_concrete_tool(
+            "remote-http-mcp/read_text_file",
+            ""
+        ));
+        assert!(!mcp_service_requires_concrete_tool(
+            "remote-http-mcp",
+            "read_text_file"
+        ));
+    }
 
     #[test]
     fn code_read_guard_bounds_unscoped_and_large_requests() {

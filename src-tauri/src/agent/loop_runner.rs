@@ -433,41 +433,39 @@ pub async fn run_call_llm_and_run_tool_phases(
             if attempted_tool != "finish" && attempted_tool != "core" && !attempted_tool.is_empty()
             {
                 context.active_tool = Some(attempted_tool.clone());
-                if !context.has_tool_manual(&plugin_name) {
-                    let tool_filename = format!("{}.md", plugin_name);
-                    let resource_dir = app.path().resource_dir().unwrap_or_default();
-                    let candidate_paths = [
-                        std::path::PathBuf::from("src-tauri/prompts/tools").join(&tool_filename),
-                        std::path::PathBuf::from("prompts/tools").join(&tool_filename),
-                        std::path::PathBuf::from("../src-tauri/prompts/tools").join(&tool_filename),
-                        resource_dir.join("prompts/tools").join(&tool_filename),
-                        std::path::PathBuf::from("src-tauri/prompts/skills").join(&tool_filename),
-                        std::path::PathBuf::from("prompts/skills").join(&tool_filename),
-                        std::path::PathBuf::from("../src-tauri/prompts/skills")
-                            .join(&tool_filename),
-                        resource_dir.join("prompts/skills").join(&tool_filename),
-                    ];
-
-                    let mut tool_detail = String::new();
-                    for cp in &candidate_paths {
-                        if let Ok(tool_md) = std::fs::read_to_string(cp) {
-                            tool_detail = tool_md;
-                            break;
+                // 服务级能力目录不能替代具体 MCP 子工具的参数 schema。
+                // 失败后只为当前失败的完整工具名披露一次精确规格，不改写模型参数。
+                if !context.has_tool_manual(&attempted_tool) {
+                    let mut tool_detail = {
+                        let registry = registry_state.inner().lock().await;
+                        let exact = registry.format_tool_detail(&attempted_tool);
+                        if exact.contains("未找到工具") {
+                            String::new()
+                        } else {
+                            exact
                         }
-                    }
+                    };
+
+                    // 非 MCP 原生工具或目录中不存在的工具，仍按原路径查找本地手册。
                     if tool_detail.is_empty() {
-                        // 尝试从 MCP 插件中获取准确的 JSON Schema 规格
-                        let detail = {
-                            let registry = registry_state.inner().lock().await;
-                            let exact = registry.format_tool_detail(&attempted_tool);
-                            if !exact.contains("未找到工具") {
-                                exact
-                            } else {
-                                registry.format_tool_detail(&plugin_name)
+                        let tool_filename = format!("{}.md", plugin_name);
+                        let resource_dir = app.path().resource_dir().unwrap_or_default();
+                        let candidate_paths = [
+                            std::path::PathBuf::from("src-tauri/prompts/tools").join(&tool_filename),
+                            std::path::PathBuf::from("prompts/tools").join(&tool_filename),
+                            std::path::PathBuf::from("../src-tauri/prompts/tools").join(&tool_filename),
+                            resource_dir.join("prompts/tools").join(&tool_filename),
+                            std::path::PathBuf::from("src-tauri/prompts/skills").join(&tool_filename),
+                            std::path::PathBuf::from("prompts/skills").join(&tool_filename),
+                            std::path::PathBuf::from("../src-tauri/prompts/skills")
+                                .join(&tool_filename),
+                            resource_dir.join("prompts/skills").join(&tool_filename),
+                        ];
+                        for cp in &candidate_paths {
+                            if let Ok(tool_md) = std::fs::read_to_string(cp) {
+                                tool_detail = tool_md;
+                                break;
                             }
-                        };
-                        if !detail.is_empty() && !detail.contains("未找到工具") {
-                            tool_detail = detail;
                         }
                     }
 
@@ -476,14 +474,14 @@ pub async fn run_call_llm_and_run_tool_phases(
                             role: "user".to_string(),
                             content: json!(format!(
                                 "【工具/Skill 操作手册: {}】\n{}\n(已写入历史流，后续调用可直接参考此规格)",
-                                plugin_name,
+                                attempted_tool,
                                 tool_detail.trim()
                             )),
                         });
-                        context.fetched_tools.insert(plugin_name.clone());
+                        context.fetched_tools.insert(attempted_tool.clone());
                         println!(
                             "🔄 [重试修正] 为 AI 紧急追加了工具说明书至历史流: {}",
-                            plugin_name
+                            attempted_tool
                         );
                     }
                 }

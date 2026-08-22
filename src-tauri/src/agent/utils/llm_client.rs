@@ -25,6 +25,12 @@ fn append_final_json_output_anchor(api_values: &mut Vec<serde_json::Value>) {
     }));
 }
 
+/// 自由文本没有可局部修复的 JSON 候选；应立刻返回外层，让路由器按失败信号选择恢复模型。
+/// 这只改变模型恢复顺序，不推断工具、cwd、path 或项目参数。
+fn requires_outer_protocol_recovery(final_json_str: &str) -> bool {
+    !final_json_str.trim_start().starts_with('{')
+}
+
 fn replace_with_isolated_json_repair_context(
     api_values: &mut Vec<serde_json::Value>,
     raw_output: &str,
@@ -455,6 +461,12 @@ pub async fn call_llm(
                     );
                 }
 
+                if requires_outer_protocol_recovery(&final_json_str) {
+                    return Err(format!(
+                        "❌ [协议恢复] 模型未返回可局部修复的 JSON 对象；交由外层路由选择恢复模型。{}",
+                        e
+                    ));
+                }
                 if current_try >= max_retries {
                     return Err(format!("{} \n原文: {}", e, final_json_str));
                 }
@@ -483,18 +495,13 @@ pub async fn call_llm(
                 }));
                 append_final_json_output_anchor(&mut api_values);
                 */
-                // 已有 JSON 候选时，修复请求只携带候选、错误和通用协议，避免重发整段任务历史。
-                // 纯文本计划没有可局部修复的 JSON，保留当前任务上下文并只追加简短的重新生成反馈。
-                if final_json_str.trim_start().starts_with('{') {
-                    replace_with_isolated_json_repair_context(
-                        &mut api_values,
-                        &final_json_str,
-                        &e,
-                    );
-                } else {
-                    api_values.push(json!({"role": "assistant", "content": result.full_response}));
-                    append_json_regeneration_feedback(&mut api_values, &e);
-                }
+                // JSON 候选的修复请求只携带候选、错误和通用协议，避免重发整段任务历史。
+                // 自由文本响应已在上方交由外层路由恢复，不在同一模型内机械重试。
+                replace_with_isolated_json_repair_context(
+                    &mut api_values,
+                    &final_json_str,
+                    &e,
+                );
             }
         }
     }
@@ -561,5 +568,11 @@ mod tests {
         assert!(!feedback.contains("<think>"));
         assert!(!feedback.contains("HTML"));
         assert_eq!(messages[2]["content"], FINAL_JSON_OUTPUT_ANCHOR);
+    }
+    #[test]
+    fn pure_text_protocol_failures_escalate_to_outer_recovery() {
+        assert!(requires_outer_protocol_recovery("计划：先建立项目地图"));
+        assert!(requires_outer_protocol_recovery("I will inspect the repository first."));
+        assert!(!requires_outer_protocol_recovery("{\"tool\":\"read_text_file\"}"));
     }
 }

@@ -347,21 +347,22 @@ impl SandwichContext {
         self.turns_history.push(msg);
     }
 
-    /// 检查历史流或当前会话中是否已经注入过该工具/插件的手册说明（避免重复塞入 20k 文档）
+    /// 检查历史流或当前会话中是否已注入过同一份工具/插件手册。
+    ///
+    /// MCP 服务目录只说明可用能力，不等同于任一子工具的 JSON Schema。
+    /// 因此 `remote-http-mcp` 与 `remote-http-mcp/read_text_file` 必须按不同键去重：
+    /// 前者可防止重复注入整个服务目录，后者则允许在首次调用失败时追加一次精确参数契约。
     pub fn has_tool_manual(&self, tool_key: &str) -> bool {
         let clean_key = tool_key.trim();
-        let prefix = clean_key.split('/').next().unwrap_or(clean_key).trim();
-        if self.fetched_tools.contains(clean_key) || self.fetched_tools.contains(prefix) {
+        if clean_key.is_empty() {
+            return false;
+        }
+        if self.fetched_tools.contains(clean_key) {
             return true;
         }
+        let header = format!("【工具/Skill 操作手册: {}】", clean_key);
         self.turns_history.iter().any(|m| match &m.content {
-            serde_json::Value::String(s) => {
-                s.contains(&format!(": {}】", prefix))
-                    || s.contains(&format!(": {}/", prefix))
-                    || s.contains(&format!(": {}】", clean_key))
-                    || s.contains(&format!(": {}/", clean_key))
-                    || (s.contains("【工具/Skill 操作手册") && s.contains(&format!("[{}]", prefix)))
-            }
+            serde_json::Value::String(s) => s.contains(&header),
             _ => false,
         })
     }
@@ -409,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_manual_deduplication_and_prefix_matching() {
+    fn test_tool_manual_deduplication_keeps_service_catalog_and_subtool_schema_distinct() {
         let mut ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
 
         // 初始状态：未加载
@@ -417,14 +418,17 @@ mod tests {
         assert!(!ctx.has_tool_manual("remote-hub/list_repos"));
         assert!(!ctx.has_tool_manual("remote-hub/read_text_file"));
 
-        // 1. 模拟重试层注入了带子动作的手册或纯插件手册
+        // 服务级目录不应被误认为已提供某个具体子工具的参数 schema。
         ctx.fetched_tools.insert("remote-hub".to_string());
-
-        // 验证：无论是查纯插件名，还是查具体的子工具，全部命中已存在
         assert!(ctx.has_tool_manual("remote-hub"));
-        assert!(ctx.has_tool_manual("remote-hub/list_repos"));
+        assert!(!ctx.has_tool_manual("remote-hub/list_repos"));
+        assert!(!ctx.has_tool_manual("remote-hub/read_text_file"));
+
+        // 精确子工具手册仅覆盖自身，仍允许其他子工具按需披露。
+        ctx.fetched_tools
+            .insert("remote-hub/read_text_file".to_string());
         assert!(ctx.has_tool_manual("remote-hub/read_text_file"));
-        assert!(ctx.has_tool_manual("remote-hub/shell_exec"));
+        assert!(!ctx.has_tool_manual("remote-hub/shell_exec"));
 
         // 2. 模拟从数据库恢复（内存集合为空，但历史流中包含手册文本）
         let mut restored_ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
@@ -433,13 +437,13 @@ mod tests {
             content: json!("【工具/Skill 操作手册: remote-hub】\n60 个工具说明\n(已写入历史流)"),
         });
 
-        // 即使没有显式 sync，穿透文本查重也能直接拦截
+        // 服务级持久化手册只覆盖服务级目录，不覆盖任意子工具。
         assert!(restored_ctx.has_tool_manual("remote-hub"));
-        assert!(restored_ctx.has_tool_manual("remote-hub/read_text_file"));
+        assert!(!restored_ctx.has_tool_manual("remote-hub/read_text_file"));
 
-        // 执行反向同步后，内存集合也自动填满
+        // 执行反向同步后，内存集合也保留精确键语义。
         restored_ctx.sync_fetched_tools_from_history();
         assert!(restored_ctx.fetched_tools.contains("remote-hub"));
-        assert!(restored_ctx.has_tool_manual("remote-hub/search_code"));
+        assert!(!restored_ctx.has_tool_manual("remote-hub/search_code"));
     }
 }
