@@ -14,6 +14,52 @@ use serde_json::json;
 use tauri::State;
 use tokio::sync::watch;
 
+// 将格式约束放在每次模型调用的最后一条消息，避免长系统契约被模型的临时计划文本淹没。
+// 它不改变工具参数、会话工作区或任务目标，仅要求最终外层输出可被宿主解析。
+const FINAL_JSON_OUTPUT_ANCHOR: &str = "【本轮最终输出】现在直接输出一个合法 JSON 对象。首字符必须是 `{`；禁止先输出‘计划：…｜工具：…｜动作：…’、解释文字、Markdown 或代码围栏。";
+
+fn append_final_json_output_anchor(api_values: &mut Vec<serde_json::Value>) {
+    api_values.push(json!({
+        "role": "user",
+        "content": FINAL_JSON_OUTPUT_ANCHOR,
+    }));
+}
+
+fn replace_with_isolated_json_repair_context(
+    api_values: &mut Vec<serde_json::Value>,
+    raw_output: &str,
+    parse_error: &str,
+) {
+    *api_values = vec![
+        json!({
+            "role": "system",
+            "content": "You repair only the outer AgentInstruction JSON protocol. Preserve the intended action and arguments; do not introduce a new task, tool, path, cwd, or project parameter.",
+        }),
+        json!({
+            "role": "user",
+            "content": format!(
+                "The candidate below did not satisfy the AgentInstruction JSON contract. Return only one corrected JSON object.\n\nParse error: {}\n\nCandidate:\n{}",
+                parse_error, raw_output
+            ),
+        }),
+    ];
+    append_final_json_output_anchor(api_values);
+}
+
+fn append_json_regeneration_feedback(
+    api_values: &mut Vec<serde_json::Value>,
+    parse_error: &str,
+) {
+    api_values.push(json!({
+        "role": "user",
+        "content": format!(
+            "The previous response was not a valid AgentInstruction JSON object ({}). Preserve the intended next action and return only one valid JSON object now.",
+            parse_error
+        ),
+    }));
+    append_final_json_output_anchor(api_values);
+}
+
 /// 打印发送给模型的消息概况（调试用）
 pub fn print_debug_messages(api_messages: &[ChatMessage]) {
     println!("═══════════════════════════════════════════");
@@ -41,12 +87,13 @@ pub fn log_llm_exchange_to_file(
     session_id: &str,
     step_id: usize,
     try_index: usize,
-    model_name: &str,
+    model_config: &ModelConfig,
     api_messages: &[serde_json::Value],
     thinking_text: &str,
     raw_response: &str,
     token_usage: Option<&TokenUsage>,
-    parse_error: Option<&str>,
+    status: &str,
+    error: Option<&str>,
 ) {
     let log_dir = std::env::current_dir()
         .map(|p| p.join("agent_logs"))
@@ -79,11 +126,15 @@ pub fn log_llm_exchange_to_file(
     let log_data = serde_json::json!({
         "step_id": step_id,
         "try_index": try_index,
-        "model": model_name,
+        "model": &model_config.model_name,
+        "model_id": &model_config.model_id,
+        "platform_name": &model_config.platform_name,
+        "base_url": model_config.redacted_base_url(),
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "usage": usage_val,
-        "parse_status": if parse_error.is_none() { "success" } else { "parse_error" },
-        "parse_error": parse_error,
+        "parse_status": status,
+        "parse_error": if status == "parse_error" { error } else { None },
+        "request_error": if status == "request_error" { error } else { None },
         "thinking_text": thinking_text,
         "raw_response": raw_response,
         "messages_sent_to_model": api_messages,
@@ -93,7 +144,7 @@ pub fn log_llm_exchange_to_file(
 
     if let Ok(s) = serde_json::to_string_pretty(&logs_array) {
         let _ = std::fs::write(&log_path, s);
-        if let Some(err) = parse_error {
+        if let Some(err) = error {
             println!(
                 "📁 [模型异常已记录] 步骤 #{} (尝试 {}) 报错已归档到 {}: {}",
                 step_id,
@@ -135,6 +186,7 @@ pub async fn call_llm(
         .iter()
         .map(|m| json!({"role": m.role, "content": &m.content}))
         .collect();
+    append_final_json_output_anchor(&mut api_values);
 
     // 4. JSON 解析重试循环
     let mut current_try = 0;
@@ -254,7 +306,7 @@ pub async fn call_llm(
         };
 
         // 5. 调用 llm 层发送请求（含 HTTP 重试）
-        let result = llm::stream_with_retry(
+        let result = match llm::stream_with_retry(
             &config,
             &api_values,
             reasoning_effort,
@@ -262,7 +314,27 @@ pub async fn call_llm(
             3,
             &mut on_event,
         )
-        .await?;
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if log_context {
+                    log_llm_exchange_to_file(
+                        session_id,
+                        step_id,
+                        current_try,
+                        &config,
+                        &api_values,
+                        "",
+                        "",
+                        None,
+                        "request_error",
+                        Some(&error),
+                    );
+                }
+                return Err(error);
+            }
+        };
 
         // 6. Token 用量与速度指标统计
         let token_usage = match result.usage {
@@ -336,11 +408,12 @@ pub async fn call_llm(
                         session_id,
                         step_id,
                         current_try,
-                        &config.model_name,
+                        &config,
                         &api_values,
                         &result.thinking_text,
                         &final_json_str,
                         Some(&token_usage),
+                        "success",
                         None,
                     );
                 }
@@ -351,11 +424,12 @@ pub async fn call_llm(
                     session_id,
                     step_id,
                     current_try,
-                    &config.model_name,
+                    &config,
                     &api_values,
                     &result.thinking_text,
                     &final_json_str,
                     Some(&token_usage),
+                    "parse_error",
                     Some(&e),
                 );
 
@@ -389,6 +463,7 @@ pub async fn call_llm(
                     current_try, max_retries, e
                 );
 
+                /* Legacy verbose retry feedback retained below for reference but disabled.
                 // 将助手的错误输出加入上下文
                 api_values.push(json!({"role": "assistant", "content": result.full_response}));
 
@@ -406,7 +481,85 @@ pub async fn call_llm(
                         e
                     )
                 }));
+                append_final_json_output_anchor(&mut api_values);
+                */
+                // 已有 JSON 候选时，修复请求只携带候选、错误和通用协议，避免重发整段任务历史。
+                // 纯文本计划没有可局部修复的 JSON，保留当前任务上下文并只追加简短的重新生成反馈。
+                if final_json_str.trim_start().starts_with('{') {
+                    replace_with_isolated_json_repair_context(
+                        &mut api_values,
+                        &final_json_str,
+                        &e,
+                    );
+                } else {
+                    api_values.push(json!({"role": "assistant", "content": result.full_response}));
+                    append_json_regeneration_feedback(&mut api_values, &e);
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appends_final_json_anchor_after_existing_history() {
+        let mut messages = vec![json!({"role": "system", "content": "contract"})];
+
+        append_final_json_output_anchor(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], FINAL_JSON_OUTPUT_ANCHOR);
+        assert!(FINAL_JSON_OUTPUT_ANCHOR.contains("首字符必须是 `{`"));
+    }
+
+    #[test]
+    fn isolated_json_repair_context_drops_task_history() {
+        let mut messages = vec![
+            json!({"role": "system", "content": "large task contract"}),
+            json!({"role": "user", "content": "large user goal"}),
+        ];
+
+        replace_with_isolated_json_repair_context(
+            &mut messages,
+            "{\"tool\": \"read_text_file\"",
+            "unexpected end of JSON input",
+        );
+
+        assert_eq!(messages.len(), 3);
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("outer AgentInstruction JSON protocol"));
+        assert!(messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("unexpected end of JSON input"));
+        assert!(messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("read_text_file"));
+        assert!(!messages
+            .iter()
+            .any(|message| message["content"].as_str() == Some("large task contract")));
+        assert_eq!(messages[2]["content"], FINAL_JSON_OUTPUT_ANCHOR);
+    }
+
+    #[test]
+    fn regeneration_feedback_keeps_context_without_legacy_format_rules() {
+        let mut messages = vec![json!({"role": "system", "content": "task contract"})];
+
+        append_json_regeneration_feedback(&mut messages, "expected value at line 1 column 1");
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["content"], "task contract");
+        let feedback = messages[1]["content"].as_str().unwrap();
+        assert!(feedback.contains("valid AgentInstruction JSON object"));
+        assert!(!feedback.contains("<think>"));
+        assert!(!feedback.contains("HTML"));
+        assert_eq!(messages[2]["content"], FINAL_JSON_OUTPUT_ANCHOR);
     }
 }

@@ -88,7 +88,8 @@ pub async fn run_call_llm_and_run_tool_phases(
 
     let (instruction, result) = loop {
         // --- 🚦 调用网关：动态路由 ---
-        let routing = crate::agent::router::AgentRouter::route(&context, &model_routing);
+        let routing =
+            crate::agent::router::AgentRouter::route_for_step(&context, &model_routing, step_id);
         let _ = app.emit(
             &format!("agent-log-{}", final_session_id),
             format!(

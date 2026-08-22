@@ -3,6 +3,8 @@ pub mod context;
 pub mod control;
 pub mod conversation;
 pub mod dispatcher;
+pub mod evaluation;
+pub mod evaluation_runner;
 pub mod lesson;
 pub mod loop_runner;
 pub mod main_loop;

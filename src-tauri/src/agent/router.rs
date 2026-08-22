@@ -17,6 +17,10 @@ pub struct ModelRoutingConfig {
     pub flash_reasoning_effort: String,
     #[serde(default)]
     pub vision_reasoning_effort: String,
+    /// 仅供受控后台评测启用：第 0 步（及其内部重试）固定使用 Pro 建立推理基线。
+    /// 普通会话不传该字段时默认 `false`，保持原有自动路由。
+    #[serde(default)]
+    pub force_pro_on_first_step: bool,
 }
 fn default_reasoning_effort() -> String {
     "auto".to_string()
@@ -65,6 +69,22 @@ impl std::fmt::Display for RoutingTier {
 pub struct AgentRouter;
 
 impl AgentRouter {
+    /// 在需要可复现的评测中，第 0 步由 Pro 建立推理基线；其他步骤保留原有动态分流。
+    pub fn route_for_step(
+        context: &SandwichContext,
+        config: &ModelRoutingConfig,
+        step_id: usize,
+    ) -> RoutingDecision {
+        if config.force_pro_on_first_step && step_id == 0 {
+            return RoutingDecision {
+                model_id: config.pro.clone(),
+                tier: RoutingTier::Pro,
+                reason: "受控评测首轮规划，固定使用 Pro 建立推理基线".to_string(),
+            };
+        }
+        Self::route(context, config)
+    }
+
     /// 核心网关路由：根据当前上下文，智能决定该用哪个模型
     /// 返回一个包含模型 ID、层级和判定理由的结构体
     pub fn route(context: &SandwichContext, config: &ModelRoutingConfig) -> RoutingDecision {

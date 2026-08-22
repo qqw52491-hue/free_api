@@ -15,6 +15,16 @@
                 </button>
                 <button
                     class="icon-control"
+                    type="button"
+                    :disabled="session.isRunning.value"
+                    data-testid="run-readonly-regression"
+                    title="运行约 30 分钟的只读 Agent 回归评测，并自动生成本地报告"
+                    @click="session.runReadOnlyRegression()"
+                >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3h6"/><path d="M10 3v5.5l-4.7 7.8A3.2 3.2 0 0 0 8 21h8a3.2 3.2 0 0 0 2.7-4.7L14 8.5V3"/><path d="M8.5 16h7"/></svg>
+                </button>
+                <button
+                    class="icon-control"
                     :class="{ active: session.logContext.value }"
                     type="button"
                     :title="session.logContext.value ? '调试模式已开启 (记录并展示完整上下文)' : '开启调试模式 (记录并展示完整上下文)'"

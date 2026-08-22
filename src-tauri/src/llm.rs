@@ -17,6 +17,10 @@ use tokio::sync::watch;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
+    /// SQLite `models.id`：路由唯一标识，避免同名模型跨平台混淆。
+    pub model_id: String,
+    /// SQLite `platforms.name`：用于日志和评测报告中的实际来源审计。
+    pub platform_name: String,
     pub base_url: String,
     pub api_key: String,
     pub model_name: String,
@@ -42,10 +46,19 @@ impl ModelConfig {
     }
 
     pub fn from_conn(conn: &rusqlite::Connection, model_id: &str) -> Result<Self, String> {
-        let (base_url, api_key, model_name, max_tokens, temperature, context_window_db) = {
+        let (
+            model_id,
+            platform_name,
+            base_url,
+            api_key,
+            model_name,
+            max_tokens,
+            temperature,
+            context_window_db,
+        ) = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT p.base_url, p.api_key, m.name, m.max_tokens, m.temperature, m.context_window
+                    "SELECT m.id, p.name, p.base_url, p.api_key, m.name, m.max_tokens, m.temperature, m.context_window
                      FROM models m JOIN platforms p ON p.id = m.platform_id
                      WHERE m.id = ?1",
                 )
@@ -55,9 +68,11 @@ impl ModelConfig {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, f64>(4)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
+                    row.get::<_, f64>(6)?,
+                    row.get::<_, i64>(7)?,
                 ))
             })
             .map_err(|e| format!("模型不存在: {}", e))?
@@ -81,6 +96,8 @@ impl ModelConfig {
         let timeout_secs = if is_local { 300 } else { 120 };
 
         Ok(Self {
+            model_id,
+            platform_name,
             base_url,
             api_key,
             model_name,
@@ -160,6 +177,11 @@ impl ModelConfig {
         if !self.is_ollama && !self.is_lmstudio {
             body["stream_options"] = json!({ "include_usage": true });
         }
+        // 火山方舟 Chat API 原生支持 response_format；以请求级协议确保最终正文为合法 JSON。
+        // 这不改变任务提示、工具参数或模型路由，仅约束机器可解析的外层输出。
+        if self.is_volcengine_ark() {
+            body["response_format"] = json!({ "type": "json_object" });
+        }
 
         if self.is_deepseek() {
             if reasoning_effort == "off" {
@@ -193,6 +215,11 @@ impl ModelConfig {
             || self.model_name.to_ascii_lowercase().contains("deepseek")
     }
 
+    /// 火山方舟 OpenAI 兼容 Chat 端点。
+    fn is_volcengine_ark(&self) -> bool {
+        self.base_url.contains("volces.com")
+    }
+
     /// 将界面高 / 中 / 低映射为 DeepSeek 官方接受的 max / high / low。
     /// 自动模式优先保证 Flash 的低延迟，其他 DeepSeek 模型维持官方默认 high。
     fn deepseek_reasoning_effort(&self, preference: &str) -> &'static str {
@@ -205,6 +232,21 @@ impl ModelConfig {
         }
     }
 
+    /// 供评测与诊断日志持久化的脱敏基础地址。
+    /// 移除查询串、片段与可能嵌入 URL 的用户信息，绝不记录 API Key。
+    pub fn redacted_base_url(&self) -> String {
+        let without_query = self.base_url.split('?').next().unwrap_or(&self.base_url);
+        let without_fragment = without_query.split('#').next().unwrap_or(without_query);
+        if let Some((scheme, rest)) = without_fragment.split_once("://") {
+            let host_and_path = rest
+                .rsplit_once('@')
+                .map(|(_, host_and_path)| host_and_path)
+                .unwrap_or(rest);
+            format!("{}://{}", scheme, host_and_path)
+        } else {
+            without_fragment.to_string()
+        }
+    }
     /// API 端点 URL
     pub fn endpoint_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
@@ -649,6 +691,8 @@ mod tests {
 
     fn config(model_name: &str, base_url: &str) -> ModelConfig {
         ModelConfig {
+            model_id: "test-model-id".to_string(),
+            platform_name: "test-platform".to_string(),
             base_url: base_url.to_string(),
             api_key: "test".to_string(),
             model_name: model_name.to_string(),
@@ -659,6 +703,16 @@ mod tests {
             context_window: 128_000,
             timeout_secs: 120,
         }
+    }
+
+    #[test]
+    fn volcengine_chat_requests_json_object_format() {
+        let body = config(
+            "minimax-m3",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
+        )
+        .build_body(&[], "low");
+        assert_eq!(body["response_format"]["type"], "json_object");
     }
 
     #[test]

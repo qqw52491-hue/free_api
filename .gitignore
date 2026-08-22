@@ -23,8 +23,9 @@ dist-ssr
 *.sln
 *.sw?
 
-# Agent Logs
+# Agent runtime and evaluation artifacts (local-only)
 agent_logs/
+agent_evaluations/
 
 # Local MCP bridge credentials / machine-specific plugin configuration
 plugins/*.local.yaml

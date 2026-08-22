@@ -607,6 +607,22 @@ pub async fn dispatch_agent_step(
     let instruction: AgentInstruction =
         serde_json::from_str(&instruction_json).map_err(|e| e.to_string())?;
 
+    // --- Strict JSON Schema Mutual Exclusivity Check ---
+    let mut modes = 0;
+    if instruction.tool.is_some() || instruction.action.is_some() { modes += 1; }
+    if instruction.parallel.is_some() { modes += 1; }
+    if instruction.plan_tree.is_some() { modes += 1; }
+    if !instruction.commands.is_empty() { modes += 1; }
+
+    if modes > 1 {
+        return Ok(json!({
+            "route": "schema_validation_failed",
+            "success": false,
+            "stdout": "",
+            "stderr": "请选择单一步 (tool/action)、parallel 并行数组 或 plan_tree 计划树之一，严禁在同一 JSON 中混用！"
+        }));
+    }
+
     let registry_arc = registry_state.inner().clone();
     let db = state.inner().clone();
     let sid = session_id.unwrap_or_else(|| "default".to_string());

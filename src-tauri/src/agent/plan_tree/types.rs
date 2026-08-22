@@ -220,6 +220,12 @@ impl PlanExecutionReport {
                                     k.clone(),
                                     serde_json::json!("(已执行成功，数据已落盘 SQLite)"),
                                 );
+                            } else if !is_ok && (k == "error" || k == "stderr") {
+                                // 失败分支的重型错误栈替换为轻量标记，因为已经在 error_summary 中详细展示过
+                                new_map.insert(
+                                    k.clone(),
+                                    serde_json::json!("(详细错误已在上方 error_summary 中展示，为节省上下文已截断)"),
+                                );
                             } else if let Value::String(ref s) = v {
                                 // 字符串过长时进行单字段截断
                                 if s.chars().count() > 500 {

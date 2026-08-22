@@ -1033,6 +1033,23 @@ export function useAgentSession(sessionId: string) {
             }
         }
     }
+    async function runReadOnlyRegression() {
+        if (isRunning.value) return;
+        try {
+            const started = asRecord(await invoke<unknown>("start_background_agent_evaluation", {
+                modelRouting: modelRouting.value,
+            }));
+            const backgroundSessionId = toText(started.session_id || started.sessionId);
+            const evaluationId = toText(started.evaluation_id || started.evaluationId);
+            const minutes = numberOrUndefined(started.max_duration_minutes || started.maxDurationMinutes) ?? 30;
+            if (!backgroundSessionId || !evaluationId) {
+                throw new Error("后台评测启动命令未返回会话标识。");
+            }
+            appendLog(`[后台回归评测] 已启动独立会话 ${backgroundSessionId}（评测 ${evaluationId}，最长 ${minutes} 分钟）。运行不依赖当前页面；报告将自动写入本地评测目录。`);
+        } catch (error) {
+            appendLog(`[后台回归评测启动失败] ${toText(error)}`);
+        }
+    }
     async function requestStop() {
         if (!isRunning.value || stopRequested.value) return;
         stopRequested.value = true;
@@ -1228,6 +1245,7 @@ export function useAgentSession(sessionId: string) {
         setScrollElement,
         ensureModelRouting,
         runAgent,
+        runReadOnlyRegression,
         requestStop,
         answerHuman,
         sendHumanInput,

@@ -376,6 +376,13 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
                 serde_json::json!([lesson_str]),
             );
         }
+        // 5. 这些字段在指令协议中是集合；模型输出 null 与省略字段语义相同，统一为空数组。
+        // 仅处理白名单集合，绝不改写 command/params 等工具参数。
+        for field in ["todo_update", "memories_update", "commands"] {
+            if map.get(field).is_some_and(serde_json::Value::is_null) {
+                map.insert(field.to_string(), serde_json::json!([]));
+            }
+        }
     }
 }
 

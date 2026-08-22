@@ -58,3 +58,31 @@ pub async fn get_agent_task_records(
 ) -> Result<serde_json::Value, String> {
     task_store::list_records_page(state.inner(), &session_id, &resource_id, offset, limit)
 }
+
+/// 返回内置的只读 Agent 回归评测目标。该目标不修改工作区，只用于真实执行链的行为验证。
+#[tauri::command]
+pub fn get_agent_read_only_regression_goal() -> String {
+    crate::agent::evaluation::READ_ONLY_REGRESSION_GOAL.to_string()
+}
+
+/// 创建一次只读回归评测的启动标记，并返回固定评测目标。标记用于隔离同一会话的历史日志。
+#[tauri::command]
+pub fn begin_agent_read_only_regression(
+    session_id: String,
+) -> Result<crate::agent::evaluation::AgentEvaluationRun, String> {
+    crate::agent::evaluation::begin_agent_evaluation(&session_id)
+}
+
+/// 基于已落盘的 LLM 交换日志与运行轨迹，生成指定评测的本地回归报告。
+#[tauri::command]
+pub fn generate_agent_evaluation_report(
+    state: State<'_, DbState>,
+    session_id: String,
+    evaluation_id: Option<String>,
+) -> Result<crate::agent::evaluation::AgentEvaluationReport, String> {
+    crate::agent::evaluation::build_and_persist_report(
+        state.inner(),
+        &session_id,
+        evaluation_id.as_deref(),
+    )
+}
