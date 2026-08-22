@@ -54,7 +54,15 @@ pub struct EvaluationMetrics {
     pub parallel_batch_count: usize,
     pub max_parallel_branches: usize,
     pub read_intent_count: usize,
+    #[serde(default)]
+    pub unique_read_intent_count: usize,
     pub repeated_read_intent_count: usize,
+    #[serde(default)]
+    pub repeated_failed_action_count: usize,
+    #[serde(default)]
+    pub plan_title_transition_count: usize,
+    #[serde(default)]
+    pub parallel_without_rationale_count: usize,
     pub max_prompt_tokens: i64,
     pub total_prompt_tokens: i64,
     pub total_completion_tokens: i64,
@@ -80,6 +88,12 @@ pub struct EvaluationBaselineComparison {
     pub parse_error_delta: i64,
     pub tool_failure_delta: i64,
     pub repeated_read_intent_delta: i64,
+    #[serde(default)]
+    pub repeated_failed_action_delta: i64,
+    #[serde(default)]
+    pub plan_title_transition_delta: i64,
+    #[serde(default)]
+    pub parallel_without_rationale_delta: i64,
     pub max_parallel_branches_delta: i64,
     pub max_prompt_tokens_delta: i64,
     pub max_context_usage_percent_delta: f64,
@@ -100,6 +114,8 @@ struct ParsedAction {
     signature: String,
     is_read_intent: bool,
     parallel_branches: usize,
+    parallel_without_rationale: bool,
+    plan_title: Option<String>,
 }
 
 pub fn begin_agent_evaluation(session_id: &str) -> Result<AgentEvaluationRun, String> {
@@ -252,6 +268,12 @@ fn compare_metrics(
         tool_failure_delta: current.tool_failure_count as i64 - previous.tool_failure_count as i64,
         repeated_read_intent_delta: current.repeated_read_intent_count as i64
             - previous.repeated_read_intent_count as i64,
+        repeated_failed_action_delta: current.repeated_failed_action_count as i64
+            - previous.repeated_failed_action_count as i64,
+        plan_title_transition_delta: current.plan_title_transition_count as i64
+            - previous.plan_title_transition_count as i64,
+        parallel_without_rationale_delta: current.parallel_without_rationale_count as i64
+            - previous.parallel_without_rationale_count as i64,
         max_parallel_branches_delta: current.max_parallel_branches as i64
             - previous.max_parallel_branches as i64,
         max_prompt_tokens_delta: current.max_prompt_tokens - previous.max_prompt_tokens,
@@ -323,6 +345,7 @@ fn analyze(
     let mut signatures = BTreeMap::new();
     let mut first_timestamp: Option<DateTime<Utc>> = None;
     let mut last_timestamp: Option<DateTime<Utc>> = None;
+    let mut previous_plan_title: Option<String> = None;
 
     for log in logs {
         let parse_status = log
@@ -363,6 +386,18 @@ fn analyze(
                 metrics.parallel_batch_count += 1;
                 metrics.max_parallel_branches =
                     metrics.max_parallel_branches.max(action.parallel_branches);
+                if action.parallel_without_rationale {
+                    metrics.parallel_without_rationale_count += 1;
+                }
+            }
+            if let Some(plan_title) = action.plan_title {
+                if previous_plan_title
+                    .as_deref()
+                    .is_some_and(|previous| previous != plan_title)
+                {
+                    metrics.plan_title_transition_count += 1;
+                }
+                previous_plan_title = Some(plan_title);
             }
             if action.is_read_intent {
                 metrics.read_intent_count += 1;
@@ -379,6 +414,7 @@ fn analyze(
         }
     }
 
+    metrics.unique_read_intent_count = signatures.len();
     let repeated_action_signatures: Vec<RepeatedActionSignature> = signatures
         .into_iter()
         .filter(|(_, count)| *count > 1)
@@ -387,6 +423,19 @@ fn analyze(
     metrics.repeated_read_intent_count = repeated_action_signatures
         .iter()
         .map(|entry| entry.count - 1)
+        .sum();
+    let mut failed_signatures = BTreeMap::new();
+    for trace in traces {
+        if let Some(steps) = trace.get("steps").and_then(Value::as_array) {
+            for step in steps {
+                count_trace_step(step, &mut metrics, &mut failed_signatures);
+            }
+        }
+    }
+    metrics.repeated_failed_action_count = failed_signatures
+        .values()
+        .filter(|count| **count > 1)
+        .map(|count| count - 1)
         .sum();
     metrics.parse_success_rate_percent =
         percentage(metrics.parse_success_count, metrics.llm_call_count);
@@ -400,13 +449,6 @@ fn analyze(
         _ => 0,
     };
 
-    for trace in traces {
-        if let Some(steps) = trace.get("steps").and_then(Value::as_array) {
-            for step in steps {
-                count_trace_step(step, &mut metrics);
-            }
-        }
-    }
     metrics.tool_failure_rate_percent =
         percentage(metrics.tool_failure_count, metrics.tool_step_count);
 
@@ -435,16 +477,32 @@ fn analyze(
             metrics.max_context_usage_percent
         ));
     }
-    if metrics.max_parallel_branches > 6 {
+    if metrics.repeated_failed_action_count > 0 {
         warnings.push(format!(
-            "最大并行分支为 {}；应复核各分支是否真的决策独立。",
+            "检测到 {} 次相同失败调用重犯；应确认失败假设已被结构化吸收，而非仅在自然语言中重复解释。",
+            metrics.repeated_failed_action_count
+        ));
+    }
+    if metrics.parallel_without_rationale_count > 0 {
+        warnings.push(format!(
+            "检测到 {} 个并行批次未给出独立性理由；应确认每个分支的工具契约与待验证问题已经稳定。",
+            metrics.parallel_without_rationale_count
+        ));
+    }
+    if metrics.max_parallel_branches > 2 {
+        warnings.push(format!(
+            "最大并行分支为 {}，超过受控上限 2；应复核宿主拒绝路径是否生效。",
             metrics.max_parallel_branches
         ));
     }
     (metrics, action_counts, repeated_action_signatures, warnings)
 }
 
-fn count_trace_step(step: &Value, metrics: &mut EvaluationMetrics) {
+fn count_trace_step(
+    step: &Value,
+    metrics: &mut EvaluationMetrics,
+    failed_signatures: &mut BTreeMap<String, usize>,
+) {
     let Some(object) = step.as_object() else {
         return;
     };
@@ -453,21 +511,33 @@ fn count_trace_step(step: &Value, metrics: &mut EvaluationMetrics) {
         .any(|key| object.contains_key(*key));
     if has_tool_shape {
         metrics.tool_step_count += 1;
-        if object.get("success").and_then(Value::as_bool) == Some(false)
+        let failed = object.get("success").and_then(Value::as_bool) == Some(false)
             || object.get("status").and_then(Value::as_str) == Some("failed")
             || object
                 .get("result")
                 .and_then(|value| value.get("success"))
                 .and_then(Value::as_bool)
-                == Some(false)
-        {
+                == Some(false);
+        if failed {
             metrics.tool_failure_count += 1;
+            let tool = object
+                .get("tool")
+                .or_else(|| object.get("action"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let params = object
+                .get("params")
+                .or_else(|| object.get("command"))
+                .map(Value::to_string)
+                .unwrap_or_default();
+            let signature = format!("{} | {}", tool, params.chars().take(360).collect::<String>());
+            *failed_signatures.entry(signature).or_insert(0) += 1;
         }
     }
     for value in object.values() {
         if let Some(items) = value.as_array() {
             for item in items {
-                count_trace_step(item, metrics);
+                count_trace_step(item, metrics, failed_signatures);
             }
         }
     }
@@ -511,6 +581,17 @@ fn parse_action(raw_response: &str) -> Option<ParsedAction> {
         .get("command")
         .map(Value::to_string)
         .unwrap_or_default();
+    let parallel_without_rationale = parallel_branches > 0
+        && value
+            .get("parallel_reason")
+            .and_then(Value::as_str)
+            .is_none_or(|reason| reason.trim().is_empty());
+    let plan_title = value
+        .get("plan_title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string);
     let signature = if is_read_intent {
         format!(
             "{} | {}",
@@ -525,6 +606,8 @@ fn parse_action(raw_response: &str) -> Option<ParsedAction> {
         signature,
         is_read_intent,
         parallel_branches,
+        parallel_without_rationale,
+        plan_title,
     })
 }
 
@@ -579,6 +662,7 @@ fn verdict(metrics: &EvaluationMetrics, warnings: &[String]) -> String {
 fn render_markdown(report: &AgentEvaluationReport) -> String {
     let metrics = &report.metrics;
     let mut document = format!("# Agent 只读回归评测报告\n\n评测会话：`{}`。生成时间：{}。运行轨迹状态：`{}`。综合判定：**{}**。\n\n## 核心指标\n\n| 指标 | 值 |\n| --- | ---: |\n| 模型调用数 | {} |\n| JSON 解析成功率 | {:.1}% |\n| JSON 解析错误 | {} |\n| 工具步骤 / 失败 | {} / {} |\n| 并行批次 / 最大分支 | {} / {} |\n| 读取意图 / 重复读取意图 | {} / {} |\n| Prompt Token 总量 / 峰值 | {} / {} |\n| 完成 Token 总量 | {} |\n| 缓存命中率 | {:.1}% |\n| 最大上下文使用率 | {:.1}% |\n| 最大发送上下文字符数 | {} |\n| 观测时长（秒） | {} |\n", report.session_id, report.generated_at, report.trace_status, report.verdict, metrics.llm_call_count, metrics.parse_success_rate_percent, metrics.parse_error_count, metrics.tool_step_count, metrics.tool_failure_count, metrics.parallel_batch_count, metrics.max_parallel_branches, metrics.read_intent_count, metrics.repeated_read_intent_count, metrics.total_prompt_tokens, metrics.max_prompt_tokens, metrics.total_completion_tokens, metrics.cache_hit_rate_percent, metrics.max_context_usage_percent, metrics.max_messages_char_count, metrics.observed_duration_seconds);
+    document.push_str(&format!("| 独特读取意图 / 重复读取意图 | {} / {} |\n| 重复失败调用 | {} |\n| 计划标题切换 | {} |\n| 未说明独立性的并行批次 | {} |\n", metrics.unique_read_intent_count, metrics.repeated_read_intent_count, metrics.repeated_failed_action_count, metrics.plan_title_transition_count, metrics.parallel_without_rationale_count));
     document.push_str("\n## 与上一份评测的差异\n\n");
     if let Some(baseline) = &report.baseline {
         document.push_str(&format!("基线评测：`{}`，生成于 {}。正值表示本轮较基线增加；对解析错误、工具失败、重复读取和最大并行分支而言，负值通常更好。\n\n| 指标 | 本轮相对基线变化 |\n| --- | ---: |\n| 模型调用数 | {:+} |\n| JSON 解析错误 | {:+} |\n| 工具失败 | {:+} |\n| 重复读取意图 | {:+} |\n| 最大并行分支 | {:+} |\n| Prompt Token 峰值 | {:+} |\n| 上下文使用率峰值 | {:+.1}% |\n", baseline.baseline_evaluation_id.as_deref().unwrap_or("unknown"), baseline.baseline_generated_at, baseline.llm_call_delta, baseline.parse_error_delta, baseline.tool_failure_delta, baseline.repeated_read_intent_delta, baseline.max_parallel_branches_delta, baseline.max_prompt_tokens_delta, baseline.max_context_usage_percent_delta));
@@ -586,6 +670,9 @@ fn render_markdown(report: &AgentEvaluationReport) -> String {
         document.push_str(
             "这是首份有效评测报告，已建立比较基线。后续通过同一入口运行评测时会自动显示变化。\n",
         );
+    }
+    if let Some(baseline) = &report.baseline {
+        document.push_str(&format!("\n### 收敛指标差异\n\n| 指标 | 本轮相对基线变化 |\n| --- | ---: |\n| 重复失败调用 | {:+} |\n| 计划标题切换 | {:+} |\n| 未说明独立性的并行批次 | {:+} |\n", baseline.repeated_failed_action_delta, baseline.plan_title_transition_delta, baseline.parallel_without_rationale_delta));
     }
     document.push_str("\n## 动作分布\n\n| 动作 | 次数 |\n| --- | ---: |\n");
     for (action, count) in &report.action_counts {
@@ -641,5 +728,55 @@ mod tests {
         assert_eq!(metrics.max_parallel_branches, 2);
         assert_eq!(metrics.repeated_read_intent_count, 1);
         assert_eq!(repeated.len(), 1);
+        assert_eq!(metrics.unique_read_intent_count, 1);
+        assert_eq!(metrics.parallel_without_rationale_count, 1);
+    }
+
+    #[test]
+    fn tracks_repeated_failures_and_plan_title_transitions() {
+        let logs = vec![
+            json!({"parse_status": "success", "raw_response": "{\"plan_title\":\"地图\",\"tool\":\"filesystem\",\"action\":\"read_text_file\",\"command\":{\"path\":\"a.rs\"}}"}),
+            json!({"parse_status": "success", "raw_response": "{\"plan_title\":\"证据链\",\"parallel\":[{\"tool\":\"filesystem\"},{\"tool\":\"filesystem\"}],\"parallel_reason\":\"两条已定位且互不依赖的验证问题\"}"}),
+        ];
+        let traces = vec![json!({"steps":[
+            {"tool":"filesystem/read_text_file","params":{"path":"a.rs"},"status":"failed"},
+            {"tool":"filesystem/read_text_file","params":{"path":"a.rs"},"status":"failed"}
+        ]})];
+        let (metrics, _, _, warnings) = analyze(&logs, &traces);
+        assert_eq!(metrics.plan_title_transition_count, 1);
+        assert_eq!(metrics.parallel_without_rationale_count, 0);
+        assert_eq!(metrics.repeated_failed_action_count, 1);
+        assert!(warnings.iter().any(|warning| warning.contains("相同失败调用重犯")));
+    }
+
+    #[test]
+    fn deserializes_metrics_from_reports_created_before_convergence_fields() {
+        let legacy_metrics = json!({
+            "llm_call_count": 8,
+            "parse_success_count": 7,
+            "parse_error_count": 1,
+            "parse_success_rate_percent": 87.5,
+            "tool_step_count": 6,
+            "tool_failure_count": 1,
+            "tool_failure_rate_percent": 16.7,
+            "parallel_batch_count": 1,
+            "max_parallel_branches": 2,
+            "read_intent_count": 4,
+            "repeated_read_intent_count": 1,
+            "max_prompt_tokens": 1200,
+            "total_prompt_tokens": 5000,
+            "total_completion_tokens": 800,
+            "total_cached_tokens": 3000,
+            "cache_hit_rate_percent": 60.0,
+            "max_context_usage_percent": 12.5,
+            "max_messages_char_count": 8000,
+            "max_raw_response_char_count": 3000,
+            "observed_duration_seconds": 90
+        });
+        let metrics: EvaluationMetrics = serde_json::from_value(legacy_metrics).unwrap();
+        assert_eq!(metrics.unique_read_intent_count, 0);
+        assert_eq!(metrics.repeated_failed_action_count, 0);
+        assert_eq!(metrics.plan_title_transition_count, 0);
+        assert_eq!(metrics.parallel_without_rationale_count, 0);
     }
 }

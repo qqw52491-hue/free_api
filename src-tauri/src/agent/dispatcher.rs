@@ -468,6 +468,21 @@ pub fn run_plan_tree_sync(
     }
 }
 
+const MAX_CONTROLLED_PARALLEL_BRANCHES: usize = 2;
+
+/// 并行仅接受少量、已经由模型明确给出的独立分支。
+/// 该校验不推断、补充或改写任何 MCP 子步骤参数。
+fn validate_controlled_parallel_batch(parallel_steps: &[serde_json::Value]) -> Result<(), String> {
+    match parallel_steps.len() {
+        0 => Err("parallel 必须至少包含一个已确定的独立分支；未知范围请使用单步取证。".to_string()),
+        1..=MAX_CONTROLLED_PARALLEL_BRANCHES => Ok(()),
+        actual => Err(format!(
+            "parallel 单批最多允许 {} 个独立分支，当前为 {}。请先串行收缩范围与工具契约，再保留至多两个互不依赖、参数已确定的分支。宿主不会改写子步骤参数。",
+            MAX_CONTROLLED_PARALLEL_BRANCHES, actual
+        )),
+    }
+}
+
 // 根据指令执行具体动作
 pub fn run_agent_step(
     db: &DbState,
@@ -493,6 +508,14 @@ pub fn run_agent_step(
 
     // --- 场景 A0: 树形/并行计划树 PlanTree Execution ---
     if let Some(ref par_cmds) = instruction.parallel {
+        if let Err(error) = validate_controlled_parallel_batch(par_cmds) {
+            return DispatchResult {
+                stdout: String::new(),
+                stderr: error,
+                success: false,
+                route: "parallel_contract_rejected".to_string(),
+            };
+        }
         println!(
             "🌳 [PlanTree: {}] 检测到 parallel 并行指令，启动 {} 路并发执行...",
             session_id,
@@ -676,6 +699,22 @@ mod tests {
     use crate::db::{init_db, DbState};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn controlled_parallel_allows_at_most_two_explicit_branches_without_parameter_rewrite() {
+        let one = vec![serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"path": "/repo/a.rs"}})];
+        let two = vec![
+            serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"cwd": "/repo", "path": "a.rs"}}),
+            serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"cwd": "/repo", "path": "b.rs"}}),
+        ];
+        let three = vec![serde_json::json!({}), serde_json::json!({}), serde_json::json!({})];
+
+        assert!(validate_controlled_parallel_batch(&one).is_ok());
+        assert!(validate_controlled_parallel_batch(&two).is_ok());
+        assert!(validate_controlled_parallel_batch(&three).unwrap_err().contains("最多允许 2"));
+        assert_eq!(two[0]["command"]["cwd"], serde_json::json!("/repo"));
+        assert_eq!(two[1]["command"]["path"], serde_json::json!("b.rs"));
+    }
 
     #[test]
     fn mcp_service_name_requires_an_explicit_subtool_without_parameter_inference() {
