@@ -138,7 +138,7 @@ pub async fn run_agent_main_loop(
                         let c = client_arc.clone();
                         let n = name.clone();
                         tokio::spawn(async move {
-                            let _ = c.initialize().await;
+                            let _ = c.ensure_session_initialized(None).await;
                             if let Ok(tools) = c.list_tools().await {
                                 println!("🔌 DB 插件就绪: {} ({} 个工具)", n, tools.len());
                             }
@@ -167,72 +167,11 @@ pub async fn run_agent_main_loop(
             "description": "📚 正在装配系统提示词与 Skill 缓存..."
         }),
     );
-    let core_logic_embedded = include_str!("../../prompts/core_logic.md");
+    let base_prompt = crate::agent::prompt_assembly::load_base_prompt(&app);
 
-    let prompt_path = app
-        .path()
-        .resource_dir()
-        .unwrap_or_default()
-        .join("prompts/core_logic.md");
-    let base_prompt = std::fs::read_to_string(&prompt_path)
-        .or_else(|_| std::fs::read_to_string("src-tauri/prompts/core_logic.md"))
-        .or_else(|_| std::fs::read_to_string("prompts/core_logic.md"))
-        .unwrap_or_else(|_| core_logic_embedded.to_string());
-
-    // 2. 动态扫描所有内置工具 (Built-in Tools)
-    let task_store_menu = r#"
-## 会话任务数据区 task_store 动作详情
-当采集、解析或批处理产生结构化中间数据时，写入 task_store（tool: "task_store"），参数放在 command 对象中：
-- create_resource：创建数据集。参数 kind、label，可选 resource_id、schema、summary、cursor。
-- upsert_records：实时写入或更新记录。参数 resource_id、records 数组；每条记录宜提供 id 或 record_key，以保证幂等更新；可同时写 summary、cursor、status。
-- list_resources / get_resource：读取数据集目录和元数据。
-- list_records：分页读取数据行。参数 resource_id，可选 limit（最多 100）、offset。
-- get_record：读取一条记录。参数 resource_id、record_key。
-- update_resource：更新资源 label、summary、status、cursor 或 schema。
-数据行会在工具返回时立刻持久化，并按当前 session 隔离；模型默认只看到资源目录与摘要，需要具体数据时再分页查询。
-"#;
-    let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
-    let candidate_dirs = [
-        std::path::PathBuf::from("src-tauri/prompts/tools"),
-        std::path::PathBuf::from("prompts/tools"),
-        std::path::PathBuf::from("../src-tauri/prompts/tools"),
-        app.path()
-            .resource_dir()
-            .unwrap_or_default()
-            .join("prompts/tools"),
-    ];
-
-    let mut found_any = false;
-    for dir in &candidate_dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            let mut read_count = 0;
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        let summary = content
-                            .find("<summary>")
-                            .and_then(|start| {
-                                content
-                                    .find("</summary>")
-                                    .map(|end| &content[start + 9..end])
-                            })
-                            .unwrap_or("无详细描述");
-                        local_tools_menu.push_str(&format!("- {}: {}\n", name, summary));
-                        read_count += 1;
-                    }
-                }
-            }
-            if read_count > 0 {
-                found_any = true;
-                break;
-            }
-        }
-    }
-    if !found_any {
-        local_tools_menu.push_str("- finish: 终态交付动作\n- ask_human: 询问人类或请求确认\n- model_manager: 模型规格与渠道配置管理工具\n- mcp_manager: 外部 MCP 插件接入与能力卡管理工具\n- skill_manager: 工作区 Skill 与自定义提示词管理工具\n- web_search: 全网实时搜索引擎\n- web_fetch: 网页正文 Markdown 提取工具\n- task_store: 结构化数据存储与分页检索\n- search: 代码与历史日志联邦检索\n");
-    }
+    // 2. 内置工具菜单：由 prompt_assembly 模块组装（tools/*.md 扫描 + 内置回退清单）
+    let task_store_menu = crate::agent::prompt_assembly::task_store_menu();
+    let local_tools_menu = crate::agent::prompt_assembly::build_local_tools_menu(&app);
 
     // 3. 从当前工作区向上读取 AGENTS.md / HUB.md；内容未变时走进程内哈希缓存。
     let workspace_skill_context =
@@ -307,9 +246,17 @@ pub async fn run_agent_main_loop(
         )?;
     }
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
-    // 注入当前路由模型的上下文窗口大小与压缩配置，用于历史压缩水位动态计算与双层智能归档
+    // 注入当前路由模型的上下文窗口大小与压缩配置，用于历史压缩水位动态计算与双层智能归档。
+    // 双模型路由下同一段历史会分别发给推理与执行模型，预算必须按两者窗口的
+    // 较小者计算，否则执行模型会先于推理模型触碰爆窗边界。
     if let Ok(cfg) = &model_cfg_res {
-        context.context_window_tokens = cfg.context_window as usize;
+        let mut effective_window = cfg.context_window as usize;
+        if !model_routing.flash.trim().is_empty() {
+            if let Ok(flash_cfg) = crate::llm::ModelConfig::from_db(&state, &model_routing.flash) {
+                effective_window = effective_window.min(flash_cfg.context_window as usize);
+            }
+        }
+        context.context_window_tokens = effective_window;
         context.compaction_model_config = Some(cfg.clone());
     } else {
         context.context_window_tokens = 32_768;
@@ -723,14 +670,73 @@ pub async fn run_agent_main_loop(
                         break;
                     }
                 }
+                let mut hint_miss_feedback: Option<String> = None;
                 if tool_detail.is_empty() {
-                    let registry = registry_state.lock().await;
-                    if registry.plugin_names().contains(&tool_key.as_str()) {
+                    let is_registered_plugin = {
+                        let registry = registry_state.lock().await;
+                        registry.plugin_names().contains(&tool_key.as_str())
+                    };
+                    if is_registered_plugin {
+                        // 命中插件但目录缓存为空/过期：现场刷新一次再生成说明书，
+                        // 让懒加载在长会话中依旧有效，而不是静默返回空。
+                        let client = {
+                            let registry = registry_state.lock().await;
+                            registry.get(&tool_key)
+                        };
+                        if let Some(client) = client {
+                            if crate::agent::mcp_catalog::cached_tools(&client.config)
+                                .map_or(true, |tools| tools.is_empty())
+                            {
+                                match client.list_tools().await {
+                                    Ok(tools) => println!(
+                                        "🔄 [Tool Manifest] 目录缓存为空，已现场刷新 [{}]（{} 个工具）",
+                                        tool_key,
+                                        tools.len()
+                                    ),
+                                    Err(error) => eprintln!(
+                                        "⚠️ [Tool Manifest] 现场刷新 [{}] 失败: {}",
+                                        tool_key, error
+                                    ),
+                                }
+                            }
+                        }
+                        let registry = registry_state.lock().await;
                         tool_detail = registry.format_tool_detail(&tool_key);
+                    } else if instruction.next_tool_hint.is_some() {
+                        // 显式 hint 未命中任何手册/Skill/插件时必须给模型可行动的纠错事实，
+                        // 否则它会重复猜测不存在的名字，永远拿不到工具契约。
+                        let plugin_names = {
+                            let registry = registry_state.lock().await;
+                            registry.plugin_names().join(", ")
+                        };
+                        if !context
+                            .fetched_tools
+                            .contains(&format!("miss:{}", tool_key))
+                        {
+                            hint_miss_feedback = Some(format!(
+                                "【next_tool_hint 未命中: {}】不存在名为「{}」的内置工具手册、Skill 或 MCP 插件。当前已连接的 MCP 插件：{}。请改用上述确切插件名重新设置 next_tool_hint，或直接按 MCP 工具目录中的「插件名/工具名」格式调用。",
+                                tool_key,
+                                tool_key,
+                                if plugin_names.is_empty() {
+                                    "（无）".to_string()
+                                } else {
+                                    plugin_names
+                                }
+                            ));
+                        }
                     }
                 }
 
-                if !tool_detail.trim().is_empty() {
+                if let Some(feedback) = hint_miss_feedback {
+                    context.turns_history.push(crate::agent::context::types::ChatMessage {
+                        role: "user".to_string(),
+                        content: json!(feedback),
+                    });
+                    context
+                        .fetched_tools
+                        .insert(format!("miss:{}", tool_key));
+                    println!("🧭 [Tool Manifest] next_tool_hint 未命中 [{}]，已注入可用插件名纠错反馈", tool_key);
+                } else if !tool_detail.trim().is_empty() {
                     context.turns_history.push(crate::agent::context::types::ChatMessage {
                         role: "user".to_string(),
                         content: json!(format!(
@@ -922,7 +928,7 @@ pub async fn run_agent_main_loop(
         app.emit(&format!("agent-context-{}", final_session_id), &context)
             .map_err(|e| e.to_string())?;
 
-        if is_finish {
+        if is_finish && result.success {
             advance_run_state(
                 &app,
                 &final_session_id,

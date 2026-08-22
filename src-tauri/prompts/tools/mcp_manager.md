@@ -6,7 +6,7 @@
 
 ### 支持的动作 (action)
 1. `list`: 查看当前所有已配置的 MCP 插件列表（包含连接状态与能力卡）。
-2. `add_http`: 极速接入远端 HTTP MCP（自动建立 stdio 桥接、测试握手并调用 LLM 生成能力卡保存进数据库）。
+2. `add_http`: 极速接入远端 HTTP MCP（原生 Rust HTTP 直连，零外部进程依赖；自动测试握手并调用 LLM 生成能力卡保存进数据库）。
    - `url` (String, 必填): 远端 MCP 服务的完整 URL，如 `https://mcp.example.com/mcp`。
    - `bearer_token` 或 `token` (String, 可选): 鉴权 Bearer Token。
    - `name` (String, 可选): 插件标识名，留空将自动从 URL 解析。

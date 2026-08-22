@@ -78,7 +78,18 @@ impl ContextBudget {
     pub const DEFAULT_HIGH_WATERMARK_RATIO: f64 = 0.80; // 80% 高水位触发
     pub const DEFAULT_LOW_WATERMARK_RATIO: f64 = 0.50; // 50% 目标回落水位
     pub const RECENT_PROTECTED_RATIO: f64 = 0.25; // 25% 近期保护区（保证 low_watermark 50% > protected 25% + 卡片 5% + 余量 20%）
-    pub const MAX_ACTIVE_HISTORY_TOKENS_CAP: usize = 48_000; // 活跃历史工作集上限（即使 128k/1M 窗口也将活跃历史控制在 48k tokens 以内，防止注意力稀释）
+    // 活跃历史工作集上限随模型窗口动态伸缩：窗口 × 40%，夹在 [24K, 128K]。
+    // 此前固定 48K——在大窗口（如 200K）下 compaction 过于频繁，前缀缓存反复重置。
+    pub const ACTIVE_HISTORY_WINDOW_RATIO: f64 = 0.40;
+    pub const ACTIVE_HISTORY_CAP_MIN_TOKENS: usize = 24_000;
+    pub const ACTIVE_HISTORY_CAP_MAX_TOKENS: usize = 128_000;
+
+    /// 按模型上下文窗口推导活跃历史工作集上限。
+    /// 双模型路由场景应传入两个模型窗口的较小值（见 main_loop 的窗口注入）。
+    pub fn active_history_cap_for(window: usize) -> usize {
+        ((window as f64 * Self::ACTIVE_HISTORY_WINDOW_RATIO) as usize)
+            .clamp(Self::ACTIVE_HISTORY_CAP_MIN_TOKENS, Self::ACTIVE_HISTORY_CAP_MAX_TOKENS)
+    }
 
     /// 根据当前模型的真实窗口和静态区大小，动态推导出绝对预算（在会话内是常量且确定）
     pub fn derive(context_window: usize, max_output: usize, static_prefix_tokens: usize) -> Self {
@@ -113,11 +124,11 @@ impl ContextBudget {
         // 安全余量：总窗口的 15%
         let safety_margin = (window as f64 * 0.15).ceil() as usize;
 
-        // 可供历史分配的最大容量（叠加 MAX_ACTIVE_HISTORY_TOKENS_CAP 保护，杜绝长任务上下文过度膨胀）
+        // 可供历史分配的最大容量（叠加按窗口伸缩的活跃工作集上限保护，杜绝长任务上下文过度膨胀）
         let reserved = max_out + static_prefix_tokens + tail_state_tokens + safety_margin;
         let max_allowed_history = window
             .saturating_sub(reserved)
-            .min(Self::MAX_ACTIVE_HISTORY_TOKENS_CAP)
+            .min(Self::active_history_cap_for(window))
             .max(2_048);
 
         // 硬不变量保证：低水位必须严格大于（近期保护区 + 归档卡片预留 + 安全缓冲）
@@ -160,8 +171,12 @@ mod tests {
         let budget = ContextBudget::derive(128_000, 4_096, 5_000);
         assert_eq!(
             budget.max_allowed_history_tokens,
-            ContextBudget::MAX_ACTIVE_HISTORY_TOKENS_CAP
+            ContextBudget::active_history_cap_for(128_000)
         );
+        // 动态上限：窗口 × 40%，夹在 [24K, 128K]
+        assert_eq!(ContextBudget::active_history_cap_for(200_000), 80_000);
+        assert_eq!(ContextBudget::active_history_cap_for(1_000_000), 128_000);
+        assert_eq!(ContextBudget::active_history_cap_for(32_000), 24_000);
         assert!(budget.high_watermark_tokens > budget.low_watermark_tokens);
 
         let small_budget = ContextBudget::derive(16_000, 2_048, 1_000);

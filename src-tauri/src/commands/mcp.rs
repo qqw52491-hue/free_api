@@ -81,32 +81,42 @@ pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, S
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT name, command, args, env, capability_card, enabled FROM mcp_plugins ORDER BY created_at ASC",
+            "SELECT name, command, args, env, capability_card, enabled, url, headers FROM mcp_plugins ORDER BY created_at ASC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
-            let args_json: String = row.get(2)?;
-            let env_json: String = row.get(3)?;
             let name: String = row.get(0)?;
             let command: String = row.get(1)?;
+            let args_json: String = row.get(2)?;
+            let env_json: String = row.get(3)?;
             let capability_card: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
             let enabled = row.get::<_, i64>(5)? == 1;
-            Ok((name, command, args_json, env_json, capability_card, enabled))
+            let url: String = row.get::<_, Option<String>>(6)?.unwrap_or_default();
+            let headers_json: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
+            Ok((name, command, args_json, env_json, capability_card, enabled, url, headers_json))
         })
         .map_err(|e| e.to_string())?;
 
     for row in rows.flatten() {
-        let (name, command, args_json, env_json, capability_card, enabled) = row;
+        let (name, command, args_json, env_json, capability_card, enabled, url, headers_json) = row;
         let card_opt = if capability_card.trim().is_empty() {
             None
         } else {
             Some(capability_card.trim().to_string())
         };
+        let url_opt = if url.trim().is_empty() { None } else { Some(url.trim().to_string()) };
+        let headers: std::collections::HashMap<String, String> =
+            serde_json::from_str(&headers_json).unwrap_or_default();
         if let Some(existing) = map.get_mut(&name) {
             existing.enabled = enabled;
             if !command.is_empty() {
                 existing.config.command = command;
+            }
+            if url_opt.is_some() {
+                // DB 的原生 HTTP 配置优先于同名 YAML 的传输层定义
+                existing.config.url = url_opt.clone();
+                existing.config.headers = headers.clone();
             }
             if card_opt.is_some() {
                 existing.config.capability_card = card_opt;
@@ -119,8 +129,8 @@ pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, S
                         name,
                         command,
                         args: serde_json::from_str(&args_json).unwrap_or_default(),
-                        url: None,
-                        headers: std::collections::HashMap::new(),
+                        url: url_opt,
+                        headers,
                         env: serde_json::from_str(&env_json).unwrap_or_default(),
                         capability_card: card_opt,
                     },
@@ -292,25 +302,23 @@ pub async fn quick_connect_and_save_mcp(
             .unwrap_or_else(|| "remote-mcp".to_string())
     };
 
-    let command = "uvx".to_string();
-    let args = vec![
-        "mcp-stdio".to_string(),
-        raw_url,
-        "--transport".to_string(),
-        transport,
-    ];
+    // 原生 HTTP 直连：不经 uvx/mcp-stdio 桥，消除子进程依赖与 stdio 握手竞态。
+    let _ = transport; // 传输协议由 McpClient 按 streamable-http 处理，无需桥参数
+    let command = String::new();
+    let args: Vec<String> = Vec::new();
 
-    let mut env_map = std::collections::HashMap::new();
+    let mut headers_map = std::collections::HashMap::new();
     if let Some(token) = bearer_token.filter(|t| !t.trim().is_empty()) {
-        env_map.insert("MCP_BEARER_TOKEN".to_string(), token.trim().to_string());
+        headers_map.insert("Authorization".to_string(), format!("Bearer {}", token.trim()));
     }
+    let env_map = std::collections::HashMap::new();
 
     let config = PluginConfig {
         name: plugin_name.clone(),
         command: command.clone(),
         args: args.clone(),
-        url: None,
-        headers: std::collections::HashMap::new(),
+        url: Some(raw_url.clone()),
+        headers: headers_map.clone(),
         env: env_map.clone(),
         capability_card: None,
     };
@@ -355,18 +363,21 @@ pub async fn quick_connect_and_save_mcp(
     let now = chrono::Utc::now().to_rfc3339();
     let args_json = serde_json::to_string(&args).unwrap_or_default();
     let env_json = serde_json::to_string(&env_map).unwrap_or_default();
+    let headers_json = serde_json::to_string(&headers_map).unwrap_or_default();
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT INTO mcp_plugins (id, name, command, args, env, capability_card, enabled, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
+        "INSERT INTO mcp_plugins (id, name, command, args, env, capability_card, enabled, created_at, url, headers)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9)
          ON CONFLICT(name) DO UPDATE SET
              command = excluded.command,
              args = excluded.args,
              env = excluded.env,
              capability_card = excluded.capability_card,
-             enabled = 1",
-        rusqlite::params![id, plugin_name, command, args_json, env_json, capability_card, now],
+             enabled = 1,
+             url = excluded.url,
+             headers = excluded.headers",
+        rusqlite::params![id, plugin_name, command, args_json, env_json, capability_card, now, raw_url, headers_json],
     ).map_err(|e| format!("保存插件到数据库失败: {}", e))?;
 
     invalidate_plugin(&plugin_name);
@@ -434,18 +445,18 @@ pub async fn batch_import_mcp_plugins(
                             capability_card: None,
                         });
                     } else if let Some(url_str) = item.get("url").and_then(|v| v.as_str()) {
-                        let mut env = std::collections::HashMap::new();
-                        if let Some(token) = item.get("token").or_else(|| item.get("bearer_token")).and_then(|v| v.as_str()) {
-                            env.insert("MCP_BEARER_TOKEN".to_string(), token.to_string());
+                        // 原生 HTTP 直连：token 进 Authorization 头，不再搭 uvx/mcp-stdio 桥
+                        let mut headers = std::collections::HashMap::new();
+                        if let Some(token) = item.get("token").or_else(|| item.get("bearer_token")).and_then(|v| v.as_str()).filter(|t| !t.trim().is_empty()) {
+                            headers.insert("Authorization".to_string(), format!("Bearer {}", token.trim()));
                         }
-                        let transport = item.get("transport").and_then(|v| v.as_str()).unwrap_or("streamable-http");
                         parsed_configs.push(PluginConfig {
                             name: name.clone(),
-                            command: "uvx".to_string(),
-                            args: vec!["mcp-stdio".to_string(), url_str.to_string(), "--transport".to_string(), transport.to_string()],
-                            url: None,
-                            headers: std::collections::HashMap::new(),
-                            env,
+                            command: String::new(),
+                            args: Vec::new(),
+                            url: Some(url_str.to_string()),
+                            headers,
+                            env: std::collections::HashMap::new(),
                             capability_card: None,
                         });
                     }
@@ -469,18 +480,18 @@ pub async fn batch_import_mcp_plugins(
                     .unwrap_or_else(|| "remote-mcp".to_string());
                 let name = parts.get(2).map(|s| s.to_string()).unwrap_or(host_name);
 
-                let mut env = std::collections::HashMap::new();
-                if let Some(t) = token {
-                    env.insert("MCP_BEARER_TOKEN".to_string(), t);
+                let mut headers = std::collections::HashMap::new();
+                if let Some(t) = token.filter(|t| !t.trim().is_empty()) {
+                    headers.insert("Authorization".to_string(), format!("Bearer {}", t.trim()));
                 }
 
                 parsed_configs.push(PluginConfig {
                     name,
-                    command: "uvx".to_string(),
-                    args: vec!["mcp-stdio".to_string(), first.to_string(), "--transport".to_string(), "streamable-http".to_string()],
-                    url: None,
-                    headers: std::collections::HashMap::new(),
-                    env,
+                    command: String::new(),
+                    args: Vec::new(),
+                    url: Some(first.to_string()),
+                    headers,
+                    env: std::collections::HashMap::new(),
                     capability_card: None,
                 });
             }
@@ -542,18 +553,22 @@ pub async fn batch_import_mcp_plugins(
                         let now = chrono::Utc::now().to_rfc3339();
                         let args_json = serde_json::to_string(&config.args).unwrap_or_default();
                         let env_json = serde_json::to_string(&config.env).unwrap_or_default();
+                        let url_saved = config.url.clone().unwrap_or_default();
+                        let headers_json = serde_json::to_string(&config.headers).unwrap_or_default();
 
                         if let Ok(conn) = state.0.lock() {
                             let _ = conn.execute(
-                                "INSERT INTO mcp_plugins (id, name, command, args, env, capability_card, enabled, created_at)
-                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
+                                "INSERT INTO mcp_plugins (id, name, command, args, env, capability_card, enabled, created_at, url, headers)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9)
                                  ON CONFLICT(name) DO UPDATE SET
                                      command = excluded.command,
                                      args = excluded.args,
                                      env = excluded.env,
                                      capability_card = excluded.capability_card,
-                                     enabled = 1",
-                                rusqlite::params![id, name, config.command, args_json, env_json, capability_card, now],
+                                     enabled = 1,
+                                     url = excluded.url,
+                                     headers = excluded.headers",
+                                rusqlite::params![id, name, config.command, args_json, env_json, capability_card, now, url_saved, headers_json],
                             );
                             invalidate_plugin(&name);
                         }

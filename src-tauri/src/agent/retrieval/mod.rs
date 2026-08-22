@@ -98,6 +98,7 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
     }
 
     let mut code_ok = !wants_code;
+    let mut resolved_root: Option<String> = None;
     if wants_code {
         match params
             .path
@@ -106,15 +107,30 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
             .filter(|p| !p.is_empty())
         {
             None => {
-                errors.push("code 检索需要显式 path 参数（要检索的目录绝对路径）".to_string());
+                errors.push("code 检索需要显式 path 参数（要检索的目录或文件路径）".to_string());
             }
             Some(raw_path) => {
                 let root = Path::new(raw_path);
-                if !root.is_dir() {
-                    errors.push(format!("path 不是有效目录: {}", raw_path));
+                if !root.is_dir() && !root.is_file() {
+                    errors.push(format!("path 不是有效目录或文件: {}", raw_path));
                 } else {
+                    // 把真实解析出的检索根（绝对路径）投影进结果：资源作用域契约
+                    // 依据它判定 inside/outside，相对路径不再永远落入 unknown。
+                    resolved_root = root
+                        .canonicalize()
+                        .ok()
+                        .or_else(|| {
+                            std::env::current_dir().ok().map(|cwd| cwd.join(root))
+                        })
+                        .map(|absolute| absolute.to_string_lossy().to_string());
                     match search_code(root, &params.query, limit) {
-                        Ok(hits) => {
+                        Ok((hits, literal_fallback)) => {
+                            if literal_fallback {
+                                notes.push(
+                                    "query 含无效正则（如未转义的 ( 或 {），已自动降级为字面量匹配；如需正则语义请转义元字符"
+                                        .to_string(),
+                                );
+                            }
                             all_hits.extend(hits);
                             code_ok = true;
                         }
@@ -132,6 +148,9 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
         "total_hits": all_hits.len(),
         "hits": all_hits
     });
+    if let Some(root) = resolved_root {
+        result_payload["resolved_root"] = json!(root);
+    }
     if !errors.is_empty() {
         result_payload["errors"] = json!(errors);
     }
@@ -444,5 +463,128 @@ mod tests {
         let hits = search_history(&conn, "s-mig", "服务器", None, None, 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id_or_path, "out-mig");
+    }
+
+    struct TempSearchDir(std::path::PathBuf);
+
+    impl TempSearchDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "free-api-search-{}-{}",
+                tag,
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempSearchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_code_search_accepts_file_path_and_reports_resolved_root() {
+        let temp = TempSearchDir::new("file-path");
+        let file = temp.0.join("sample_scope.rs");
+        std::fs::write(&file, "pub fn observe_tool_result() {}\n").unwrap();
+
+        let conn = setup_test_db();
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            "session-file-path",
+            &json!({
+                "query": "observe_tool_result",
+                "kinds": ["code"],
+                "path": file.to_str().unwrap(),
+            }),
+        );
+
+        assert!(result.success, "文件路径应可作为 code 检索目标: {}", result.stderr);
+        let payload: Value = serde_json::from_str(&result.stdout).unwrap();
+        assert_eq!(payload["total_hits"], 1);
+        let hit_path = payload["hits"][0]["id_or_path"].as_str().unwrap();
+        assert!(
+            hit_path.starts_with("sample_scope.rs:"),
+            "单文件检索的命中应使用文件名，实际: {}",
+            hit_path
+        );
+        let resolved = payload["resolved_root"].as_str().unwrap();
+        assert!(
+            Path::new(resolved).is_absolute(),
+            "resolved_root 必须是绝对路径，实际: {}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn test_code_search_regex_parse_error_falls_back_to_literal_match() {
+        let temp = TempSearchDir::new("literal");
+        std::fs::write(
+            temp.0.join("parser.rs"),
+            "fn parse_repetition() {\n    let q = 1;\n}\n",
+        )
+        .unwrap();
+
+        let conn = setup_test_db();
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        // 含未转义元字符的查询在正则模式下必然 exit=2；应降级为字面量命中而不是失败。
+        let result = dispatch_search(
+            &db,
+            "session-literal",
+            &json!({
+                "query": "fn parse_repetition() {",
+                "kinds": ["code"],
+                "path": temp.0.to_str().unwrap(),
+            }),
+        );
+
+        assert!(result.success, "正则解析失败应降级重试: {}", result.stderr);
+        let payload: Value = serde_json::from_str(&result.stdout).unwrap();
+        assert_eq!(payload["total_hits"], 1);
+        let notes = payload["notes"].as_array().unwrap();
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.as_str().unwrap().contains("字面量")),
+            "降级必须以 note 告知，实际: {:?}",
+            notes
+        );
+    }
+
+    #[test]
+    fn test_code_search_reports_resolved_root_for_relative_directory() {
+        let temp = TempSearchDir::new("rel-root");
+        std::fs::write(temp.0.join("leaf.rs"), "pub struct Marker;\n").unwrap();
+
+        let conn = setup_test_db();
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        // 相对目录：resolved_root 应解析为进程 cwd 下的绝对路径并出现在结果里，
+        // 供资源作用域契约把此类访问判为 inside 而不是 unknown。
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp.0).unwrap();
+        let result = dispatch_search(
+            &db,
+            "session-rel-root",
+            &json!({
+                "query": "Marker",
+                "kinds": ["code"],
+                "path": ".",
+            }),
+        );
+        std::env::set_current_dir(original_cwd).unwrap();
+
+        assert!(result.success, "相对目录检索应成功: {}", result.stderr);
+        let payload: Value = serde_json::from_str(&result.stdout).unwrap();
+        assert_eq!(payload["total_hits"], 1);
+        let resolved = payload["resolved_root"].as_str().unwrap();
+        assert!(
+            Path::new(resolved).is_absolute(),
+            "相对路径必须投影出绝对 resolved_root，实际: {}",
+            resolved
+        );
     }
 }

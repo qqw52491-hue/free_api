@@ -783,14 +783,14 @@ pub async fn run_tool_phase(
             return Ok(dispatch_result);
         }
         let output = if dispatch_result.success {
-            dispatch_result.stdout.as_str()
+            dispatch_result.stdout.clone()
         } else {
-            dispatch_result.stderr.as_str()
+            dispatch_result.stderr.clone()
         };
         if let Some(scope_observation) = context.resource_scope.observe_tool_result(
             &inst.get_tool(),
             &inst.get_params(),
-            output,
+            &output,
             if is_write_tool {
                 ResourceOperation::Write
             } else {
@@ -803,6 +803,20 @@ pub async fn run_tool_phase(
             } else {
                 dispatch_result.stderr = format!("{}\n\n{}", dispatch_result.stderr, annotation);
             }
+        }
+        // 无进展重复检测：只在"相同工具+相同参数+相同输出/失败"反复发生时注入
+        // 策略级提示；不修改、不补全、不拒绝模型提交的参数。
+        if let Some(no_progress_notice) = context.no_progress.record(
+            &inst.get_tool(),
+            &inst.get_params(),
+            dispatch_result.success,
+            &output,
+        ) {
+            context.turns_history.push(crate::agent::context::types::ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!(no_progress_notice),
+            });
+            println!("🔁 [No-Progress] 注入无进展提示: {}", inst.get_tool());
         }
         dispatch_result
     };

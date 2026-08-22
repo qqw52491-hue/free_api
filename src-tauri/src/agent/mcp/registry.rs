@@ -46,7 +46,7 @@ impl PluginRegistry {
                     TaskKind::McpInit,
                     format!("mcp-init:{}", n),
                     async move {
-                        let _ = c.initialize().await;
+                        let _ = c.ensure_session_initialized(None).await;
                         if let Ok(tools) = c.list_tools().await {
                             println!("🚀 插件就绪: {} (共 {} 个工具)", n, tools.len());
                         }
@@ -105,20 +105,25 @@ impl PluginRegistry {
             let plugin_name_log = client.config.name.clone();
             let outcome = tokio::time::timeout(Duration::from_secs(8), async move {
                 client.ensure_session_initialized(Some(&session_id)).await?;
-                if let Ok(tools) = client.list_tools().await {
-                    if let Some(cfg) = &m_cfg {
-                        if let Ok(card) = crate::agent::mcp_catalog::generate_llm_mcp_card(
-                            &plugin_name,
-                            &tools,
-                            cfg,
-                        )
-                        .await
-                        {
-                            crate::agent::mcp_catalog::set_cached_capability_card(
-                                &plugin_cfg,
-                                card,
-                            );
-                        }
+                let tools = match client.list_tools().await {
+                    Ok(tools) => tools,
+                    Err(first_error) => {
+                        // 吸收握手竞态与瞬时抖动：短退避后重试一次，仍失败才向上报错。
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        client.list_tools().await.map_err(|retry_error| {
+                            format!("tools/list 首次失败: {first_error}; 重试失败: {retry_error}")
+                        })?
+                    }
+                };
+                if let Some(cfg) = &m_cfg {
+                    if let Ok(card) = crate::agent::mcp_catalog::generate_llm_mcp_card(
+                        &plugin_name,
+                        &tools,
+                        cfg,
+                    )
+                    .await
+                    {
+                        crate::agent::mcp_catalog::set_cached_capability_card(&plugin_cfg, card);
                     }
                 }
                 Ok::<(), String>(())
@@ -126,8 +131,14 @@ impl PluginRegistry {
             .await;
             match outcome {
                 Ok(Ok(())) => {}
-                Ok(Err(error)) => eprintln!("MCP 工具目录预热失败 [{}]: {}", plugin_name_log, error),
-                Err(_) => eprintln!("MCP 工具目录预热超时 [{}]", plugin_name_log),
+                Ok(Err(error)) => eprintln!(
+                    "❌ MCP 工具目录预热失败 [{}]：{}（该插件在模型目录中将显示为空）",
+                    plugin_name_log, error
+                ),
+                Err(_) => eprintln!(
+                    "⏰ MCP 工具目录预热超时 [{}]（该插件在模型目录中将显示为空）",
+                    plugin_name_log
+                ),
             }
         }
     }
@@ -167,7 +178,10 @@ impl PluginRegistry {
     pub fn list_all_tools(&self) -> Vec<(String, McpToolDef)> {
         let mut result = Vec::new();
         for (plugin_name, client) in &self.clients {
-            let tools = crate::agent::mcp_catalog::cached_tools(&client.config).unwrap_or_default();
+            // TTL 过期不等于能力消失：回退到本进程内最近一次成功的 tools/list，
+            // 避免长会话中模型重新请求说明书时拿到空目录。
+            let tools = crate::agent::mcp_catalog::cached_tools(&client.config)
+                .unwrap_or_else(|| client.last_known_tools());
             for tool in tools {
                 result.push((plugin_name.clone(), tool));
             }
@@ -182,7 +196,8 @@ impl PluginRegistry {
 
         let mut catalogs = Vec::new();
         for (name, client) in &self.clients {
-            let tools = crate::agent::mcp_catalog::cached_tools(&client.config).unwrap_or_default();
+            let tools = crate::agent::mcp_catalog::cached_tools(&client.config)
+                .unwrap_or_else(|| client.last_known_tools());
             let card = crate::agent::mcp_catalog::cached_capability_card(&client.config);
             catalogs.push((name.clone(), tools, card));
         }

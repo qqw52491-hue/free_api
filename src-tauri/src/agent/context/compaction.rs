@@ -233,19 +233,16 @@ impl SandwichContext {
     /// 6. 绝对不爆窗底线：若极端情况下近期保护区仍超出上限，自动将最老步骤降级为 output_id 句柄。
     pub fn maybe_compact_history(&mut self) {
         let budget = self.current_budget();
-        let current_tokens = self.history_estimated_tokens();
+        let mut current_tokens = self.history_estimated_tokens();
 
         // 未达高水位，绝不轻易压缩（保护前缀缓存命中率）
         if current_tokens <= budget.high_watermark_tokens {
             return;
         }
 
-        println!(
-            "📦 [Compaction Engine] 历史 ~{} tokens 触碰高水位线 ({} tokens)，启动自适应归档压缩...",
-            current_tokens, budget.high_watermark_tokens
-        );
-
-        // ── 1. 计算近期保护区（基于 Token 预算，保护最新 ~25% 历史预算或至少最后 1 对轮次） ──
+        // ── 0. 先做一次性脱水定型：把保护区之外的历史消息就地替换为证据句柄 ──
+        // 这是旧输出"变成存根"的唯一时机：只在 compaction 事件内发生，
+        // 平时组装严格 append-only，前缀缓存不会因脱水边界滑动而每轮断裂。
         let recent_protected_tokens = (budget.max_allowed_history_tokens as f64
             * ContextBudget::RECENT_PROTECTED_RATIO) as usize;
         let mut protected_from_back = 0;
@@ -261,6 +258,27 @@ impl SandwichContext {
                 break;
             }
         }
+        let dehydrate_limit = self
+            .turns_history
+            .len()
+            .saturating_sub(protected_from_back);
+        for msg in self.turns_history.iter_mut().take(dehydrate_limit) {
+            *msg = crate::agent::context::assembler::dehydrate_historical_turn(msg);
+        }
+        let tokens_after_dehydrate = self.history_estimated_tokens();
+        if tokens_after_dehydrate <= budget.high_watermark_tokens {
+            println!(
+                "🧊 [Dehydration] 保护区外 {} 条历史消息已一次性脱水定型（~{} → ~{} tokens），无需归档压缩",
+                dehydrate_limit, current_tokens, tokens_after_dehydrate
+            );
+            return;
+        }
+        current_tokens = tokens_after_dehydrate;
+
+        println!(
+            "📦 [Compaction Engine] 历史 ~{} tokens 触碰高水位线 ({} tokens)，启动自适应归档压缩...",
+            current_tokens, budget.high_watermark_tokens
+        );
 
         let max_compact_limit = self.turns_history.len().saturating_sub(protected_from_back);
 
@@ -517,7 +535,7 @@ mod tests {
         let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
         ctx.context_window_tokens = 8000;
 
-        // 模拟多轮对话
+        // 模拟多轮对话：大输出带 output_id（可被脱水定型）
         let big_payload = "Data content line with information.\n".repeat(40);
         for i in 1..=10 {
             ctx.turns_history.push(ChatMessage {
@@ -539,12 +557,46 @@ mod tests {
         ctx.maybe_compact_history();
 
         let after_tokens = ctx.history_estimated_tokens();
-        assert!(after_tokens <= ctx.current_budget().low_watermark_tokens + 500);
+        // 新契约：高水位事件内先一次性脱水定型；本场景脱水即可回到水位线下，
+        // 无需归档切除（保持历史的字节连续性优先）。
+        assert!(after_tokens <= ctx.current_budget().high_watermark_tokens);
+        assert!(after_tokens < before_tokens);
 
-        // 头部应包含归档摘要卡
+        // 保护区外的旧输出已定型为证据句柄（存根），原文不再驻留上下文
+        let full_text = serde_json::to_string(&ctx.turns_history).unwrap();
+        assert!(full_text.contains("完整详细数据已安全持久化至 SQLite"));
+    }
+
+    #[test]
+    fn test_compaction_drains_when_dehydration_is_insufficient() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+        ctx.context_window_tokens = 8000;
+
+        // 不可脱水的重型纯文本（无 output_id 标记）：脱水无法缩小，
+        // 必须走归档切除 + 摘要卡路径。
+        let heavy = "Plain heavy narrative without output markers. ".repeat(30);
+        for i in 1..=10 {
+            ctx.turns_history.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: json!(format!("计划: 阶段 {}", i)),
+            });
+            ctx.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!("step {} {}", i, heavy)),
+            });
+        }
+        assert!(ctx.history_estimated_tokens() > ctx.current_budget().high_watermark_tokens);
+
+        ctx.maybe_compact_history();
+
+        let after_tokens = ctx.history_estimated_tokens();
+        assert!(after_tokens <= ctx.current_budget().low_watermark_tokens + 800);
         let first_msg = ctx.turns_history[0].content.as_str().unwrap();
-        assert!(first_msg.contains("【历史早期执行归档"));
-        assert!(first_msg.contains("output_id=out_1"));
+        assert!(
+            first_msg.contains("【历史早期执行归档"),
+            "脱水不足时必须产生归档摘要卡，实际头部: {}",
+            first_msg.chars().take(80).collect::<String>()
+        );
     }
 
     #[test]

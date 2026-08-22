@@ -83,19 +83,22 @@ pub fn dispatch(
                     .unwrap_or_else(|| "remote-mcp".to_string())
             };
 
-            let command = "uvx".to_string();
-            let args = vec!["mcp-stdio".to_string(), raw_url.to_string(), "--transport".to_string(), transport.to_string()];
-            let mut env_map = std::collections::HashMap::new();
+            // 原生 HTTP 直连：不经 uvx/mcp-stdio 桥，消除子进程依赖与 stdio 握手竞态。
+            let _ = transport; // McpClient 按 streamable-http 处理，无需桥参数
+            let command = String::new();
+            let args: Vec<String> = Vec::new();
+            let mut headers_map = std::collections::HashMap::new();
             if let Some(t) = token.filter(|s| !s.trim().is_empty()) {
-                env_map.insert("MCP_BEARER_TOKEN".to_string(), t.trim().to_string());
+                headers_map.insert("Authorization".to_string(), format!("Bearer {}", t.trim()));
             }
+            let env_map = std::collections::HashMap::new();
 
             let config = crate::agent::mcp::PluginConfig {
                 name: plugin_name.clone(),
                 command: command.clone(),
                 args: args.clone(),
-                url: None,
-                headers: std::collections::HashMap::new(),
+                url: Some(raw_url.to_string()),
+                headers: headers_map.clone(),
                 env: env_map.clone(),
                 capability_card: None,
             };
@@ -166,12 +169,13 @@ pub fn dispatch(
                     let now = chrono::Utc::now().to_rfc3339();
                     let args_json = serde_json::to_string(&args).unwrap_or("[]".to_string());
                     let env_json = serde_json::to_string(&env_map).unwrap_or("{}".to_string());
+                    let headers_json = serde_json::to_string(&headers_map).unwrap_or("{}".to_string());
 
                     let _ = conn.execute(
-                        "INSERT INTO mcp_plugins (id, name, command, args, env, capability_card, enabled, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
-                         ON CONFLICT(name) DO UPDATE SET command=?3, args=?4, env=?5, capability_card=?6",
-                        rusqlite::params![id, plugin_name, command, args_json, env_json, card, now],
+                        "INSERT INTO mcp_plugins (id, name, command, args, env, capability_card, enabled, created_at, url, headers)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9)
+                         ON CONFLICT(name) DO UPDATE SET command=?3, args=?4, env=?5, capability_card=?6, url=?8, headers=?9",
+                        rusqlite::params![id, plugin_name, command, args_json, env_json, card, now, raw_url, headers_json],
                     );
                     invalidate_plugin(&plugin_name);
 

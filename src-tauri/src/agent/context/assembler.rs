@@ -42,22 +42,11 @@ impl SandwichContext {
             &self.turns_history[..]
         };
 
-        // 🌟 证据化脱水：保护最新 6 条消息保持 100% 原汁原味（当前活跃工作窗口），
-        // 较早的历史轮次自动脱水为精简结构化证据句柄，消除历史消息中数十条 raw stdout 造成的上下文膨胀
-        let total_hist = history_slice.len();
-        let protected_recent_count = 6;
-        let dehydrated_history: Vec<ChatMessage> = history_slice
-            .iter()
-            .enumerate()
-            .map(|(idx, m)| {
-                if idx + protected_recent_count >= total_hist {
-                    m.clone()
-                } else {
-                    dehydrate_historical_turn(m)
-                }
-            })
-            .collect();
-        messages.extend(dehydrated_history);
+        // 🥩 中间夹心：纯 Append-only 线性历史，组装时绝不改写历史字节。
+        // 旧轮次的重型输出由 compaction 在触发高水位时一次性脱水定型（见 compaction.rs），
+        // 平时相邻两轮请求的前缀差异只来自追加的新消息，最大化增量前缀缓存；
+        // 此前"每轮按保护窗口改写旧消息"的方案会让前缀缓存每轮在窗口边界断裂。
+        messages.extend(history_slice.iter().cloned());
 
         // ════════════════════════════════════════════════════════════════
         // 🍞 3. 底层面包（动态状态卡 + 避坑台账 + 不可逆操作 + 最新观测）
@@ -151,8 +140,10 @@ impl SandwichContext {
     }
 }
 
-/// 对历史较旧的轮次（除最新工作窗口外）进行证据化脱水，移除冗余的重型 raw stdout 和长报错堆栈
-fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
+/// 对历史较旧的轮次进行证据化脱水，移除冗余的重型 raw stdout 和长报错堆栈。
+/// 唯一调用方是 compaction（高水位事件内一次性定型）；日常组装绝不调用，
+/// 以保证相邻请求之间前缀字节稳定（增量前缀缓存的前提）。
+pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
     if msg.role != "user" {
         return msg.clone();
     }
@@ -346,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn test_historical_evidence_dehydration() {
+    fn test_assemble_keeps_history_verbatim_without_runtime_dehydration() {
         let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
 
         // 模拟 10 轮历史，每轮包含一个超长执行输出（> 1000 字符）
@@ -366,13 +357,18 @@ mod tests {
         }
 
         let msgs = ctx.assemble_messages();
-
-        // 验证较旧的历史轮次（如 step 0）被成功脱水为句柄，不再包含 1200 字符的原始 X
         let full_text = serde_json::to_string(&msgs).unwrap();
-        assert!(full_text.contains("out_step_0"));
-        assert!(full_text.contains("完整详细数据已安全持久化至 SQLite"));
 
-        // 验证最新轮次（如 step 9）保持完整未被脱水
-        assert!(full_text.contains("out_step_9"));
+        // 新契约：组装时严格 append-only，旧轮次的原始字节必须原样保留；
+        // 脱水只允许发生在 compaction 高水位事件内（见 compaction 测试）。
+        // 否则每轮按保护窗口改写旧消息会让前缀缓存在窗口边界反复断裂。
+        assert!(
+            full_text.contains(&big_raw),
+            "组装不得改写历史消息（旧输出必须原样保留）"
+        );
+        assert!(
+            !full_text.contains("完整详细数据已安全持久化至 SQLite"),
+            "组装路径不得产生脱水存根"
+        );
     }
 }

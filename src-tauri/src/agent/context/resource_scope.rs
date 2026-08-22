@@ -140,6 +140,15 @@ pub struct ToolDefaultResolution {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceResolutionMismatch {
+    pub tool_or_service_identity: String,
+    pub requested: String,
+    pub resolved: String,
+    pub relation: ResourceRelation,
+    pub occurrences: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceScopeObservation {
     pub requested: Option<String>,
     pub resolved: Option<String>,
@@ -180,6 +189,8 @@ pub struct ResourceScopeContract {
     pub bindings: Vec<ResourceScopeBinding>,
     #[serde(default)]
     pub tool_default_resolution: Vec<ToolDefaultResolution>,
+    #[serde(default)]
+    pub resolution_mismatches: Vec<ResourceResolutionMismatch>,
 }
 
 impl Default for ResourceScopeContract {
@@ -188,6 +199,7 @@ impl Default for ResourceScopeContract {
             revision: 0,
             bindings: Vec::new(),
             tool_default_resolution: Vec::new(),
+            resolution_mismatches: Vec::new(),
         }
     }
 }
@@ -311,6 +323,13 @@ impl ResourceScopeContract {
             resolved_locator,
             relation.clone(),
         );
+        self.record_resolution_mismatch(
+            tool_identity,
+            requested.as_deref(),
+            resolved_locator,
+            primary.as_deref(),
+            relation.clone(),
+        );
         ResourceScopeObservation {
             requested,
             resolved: resolved_locator.map(str::to_string),
@@ -374,8 +393,57 @@ impl ResourceScopeContract {
                 default_resolution.when_omitted_or_relative.as_str()
             ));
         }
+        if let Some(mismatch) = self.resolution_mismatches.last() {
+            lines.push(format!(
+                "resolution mismatch: {} requested {} but resolved {}; relation: {}; occurrences: {}",
+                mismatch.tool_or_service_identity,
+                mismatch.requested,
+                mismatch.resolved,
+                mismatch.relation.as_str(),
+                mismatch.occurrences
+            ));
+        }
         lines.push("relative resource locators: preserve; resolved relation must be checked".to_string());
         lines.join("\n")
+    }
+
+    fn record_resolution_mismatch(
+        &mut self,
+        tool_identity: &str,
+        requested: Option<&str>,
+        resolved: Option<&str>,
+        primary: Option<&str>,
+        relation: ResourceRelation,
+    ) {
+        let (Some(requested), Some(resolved), Some(primary)) = (requested, resolved, primary) else {
+            return;
+        };
+        if !Path::new(requested).is_absolute()
+            || !Path::new(resolved).is_absolute()
+            || filesystem_relation(primary, requested) != ResourceRelation::Inside
+            || relation != ResourceRelation::Outside
+        {
+            return;
+        }
+        if let Some(existing) = self.resolution_mismatches.iter_mut().find(|mismatch| {
+            mismatch.tool_or_service_identity == tool_identity
+                && mismatch.requested == requested
+                && mismatch.resolved == resolved
+        }) {
+            existing.occurrences = existing.occurrences.saturating_add(1);
+            return;
+        }
+        self.revision = self.revision.saturating_add(1);
+        self.resolution_mismatches.push(ResourceResolutionMismatch {
+            tool_or_service_identity: tool_identity.to_string(),
+            requested: requested.to_string(),
+            resolved: resolved.to_string(),
+            relation,
+            occurrences: 1,
+        });
+        if self.resolution_mismatches.len() > 4 {
+            self.resolution_mismatches.remove(0);
+        }
     }
 
     fn record_default_resolution(
@@ -423,7 +491,9 @@ pub fn is_known_filesystem_tool(tool_identity: &str) -> bool {
 }
 
 impl ResourceScopeContract {
-    /// 对已知文件系统工具只做结果侧观测；未知工具仅在传入资源定位符时产生 unknown 结论。
+    /// 优先依据工具执行结果中的事实分类：已知文件系统工具解析输出中的定位符，
+    /// 其余工具若在结果中自报了绝对解析根（如 resolved_root 约定字段）同样按事实分类；
+    /// 只有既不在已知清单、结果又无定位符时才产生 unknown 结论。
     pub fn observe_tool_result(
         &mut self,
         tool_identity: &str,
@@ -432,8 +502,8 @@ impl ResourceScopeContract {
         operation: ResourceOperation,
     ) -> Option<ResourceScopeObservation> {
         let requested = requested_locator(params);
+        let resolved_from_output = resolved_locator_from_output(output);
         if is_known_filesystem_tool(tool_identity) {
-            let resolved_from_output = resolved_locator_from_output(output);
             let resolved = resolved_from_output.as_deref().or_else(|| {
                 requested
                     .as_deref()
@@ -443,6 +513,14 @@ impl ResourceScopeContract {
                 tool_identity,
                 params,
                 resolved,
+                operation,
+            ));
+        }
+        if let Some(resolved) = resolved_from_output.as_deref() {
+            return Some(self.observe_filesystem_tool(
+                tool_identity,
+                params,
+                Some(resolved),
                 operation,
             ));
         }
@@ -480,7 +558,16 @@ fn resolved_locator_from_output(output: &str) -> Option<String> {
 fn find_absolute_locator(value: &Value) -> Option<String> {
     match value {
         Value::Object(object) => {
-            for key in ["resolved", "resolved_path", "cwd", "path", "workspace"] {
+            // resolved_root 是进程内工具（如联邦检索）自报的真实解析根：
+            // 依据工具自己的执行事实分类，而不是按工具名硬编码语义。
+            for key in [
+                "resolved",
+                "resolved_path",
+                "resolved_root",
+                "cwd",
+                "path",
+                "workspace",
+            ] {
                 if let Some(locator) = object.get(key).and_then(Value::as_str) {
                     if Path::new(locator).is_absolute() {
                         return Some(locator.to_string());
@@ -688,5 +775,72 @@ mod tests {
         let projection = contract.render_projection();
         assert!(projection.contains("[Active resource contract v"));
         assert!(projection.contains("primary filesystem: /workspace/free_api"));
+    }
+
+    #[test]
+    fn absolute_target_resolved_outside_becomes_persistent_mismatch_fact() {
+        let mut contract = primary_contract();
+        let params = json!({"path": "/workspace/free_api/src-tauri"});
+        let observation = contract.observe_filesystem_tool(
+            "ripgrep_search",
+            &params,
+            Some("/workspace/mcp-default/hub.js"),
+            ResourceOperation::Read,
+        );
+        contract.observe_filesystem_tool(
+            "ripgrep_search",
+            &params,
+            Some("/workspace/mcp-default/hub.js"),
+            ResourceOperation::Read,
+        );
+
+        assert_eq!(params, json!({"path": "/workspace/free_api/src-tauri"}));
+        assert_eq!(observation.relation, ResourceRelation::Outside);
+        assert_eq!(contract.resolution_mismatches.len(), 1);
+        assert_eq!(contract.resolution_mismatches[0].occurrences, 2);
+        let projection = contract.render_projection();
+        assert!(projection.contains("resolution mismatch: ripgrep_search requested /workspace/free_api/src-tauri but resolved /workspace/mcp-default/hub.js"));
+
+        let restored: ResourceScopeContract = serde_json::from_value(serde_json::to_value(&contract).unwrap()).unwrap();
+        assert_eq!(restored.resolution_mismatches[0].occurrences, 2);
+        let legacy: ResourceScopeContract = serde_json::from_value(json!({"revision": 0, "bindings": [], "tool_default_resolution": []})).unwrap();
+        assert!(legacy.resolution_mismatches.is_empty());
+    }
+
+    #[test]
+    fn tool_reporting_resolved_root_classifies_relative_locator_as_inside() {
+        let mut contract = primary_contract();
+        // 内置联邦检索在结果中自报 resolved_root（绝对路径），即使工具不在
+        // 已知文件系统清单内也按结果侧事实分类；相对 path 不再永远 unknown。
+        let output = r#"{"query":"Marker","total_hits":1,"hits":[{"id_or_path":"src/lib.rs:3"}],"resolved_root":"/workspace/free_api/src"}"#;
+        let observation = contract
+            .observe_tool_result(
+                "search",
+                &json!({"query": "Marker", "path": "src"}),
+                output,
+                ResourceOperation::Read,
+            )
+            .expect("应产生观察");
+
+        assert_eq!(observation.relation, ResourceRelation::Inside);
+        assert!(!observation.should_guard);
+        assert!(observation.render().contains("relation: inside"));
+    }
+
+    #[test]
+    fn tool_without_result_locator_keeps_unknown_relation() {
+        let mut contract = primary_contract();
+        let output = r#"{"query":"x","total_hits":0,"hits":[]}"#;
+        let observation = contract
+            .observe_tool_result(
+                "opaque_service/query",
+                &json!({"path": "data/feed"}),
+                output,
+                ResourceOperation::Read,
+            )
+            .expect("传入定位符的未知工具应产生观察");
+
+        assert_eq!(observation.relation, ResourceRelation::Unknown);
+        assert!(!observation.should_guard);
     }
 }

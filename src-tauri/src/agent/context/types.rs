@@ -1,3 +1,4 @@
+use crate::agent::context::no_progress::NoProgressTracker;
 use crate::agent::context::resource_scope::ResourceScopeContract;
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
@@ -142,6 +143,9 @@ pub struct SandwichContext {
     /// 活跃资源作用域契约；独立于历史压缩，持续投影到每轮上下文。
     #[serde(default)]
     pub resource_scope: ResourceScopeContract,
+    /// 无进展重复检测：相同工具+相同参数+相同输出/失败的运行时事实（策略级提示用）。
+    #[serde(default)]
+    pub no_progress: NoProgressTracker,
     /// 外部独立任务数据区目录引用 (轻量 schema 与行数，完整数据行在 SQLite)
     #[serde(default)]
     pub task_resources: Vec<TaskResourceRef>,
@@ -178,6 +182,7 @@ impl SandwichContext {
             progress_summary: String::new(),
             plan_state: PlanState::new(),
             resource_scope: ResourceScopeContract::default(),
+            no_progress: NoProgressTracker::default(),
             task_resources: Vec::new(),
             active_tool: None,
             active_tool_detail: String::new(),

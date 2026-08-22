@@ -135,7 +135,9 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             env TEXT NOT NULL DEFAULT '{}',
             capability_card TEXT NOT NULL DEFAULT '',
             enabled INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            url TEXT NOT NULL DEFAULT '',
+            headers TEXT NOT NULL DEFAULT '{}'
         );
 
         -- 用户维护的自定义提示词与 Skill。它们作为普通上下文追加，不能替换内置系统约束。
@@ -303,6 +305,11 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN capability_card TEXT NOT NULL DEFAULT '';", []);
     let _ = conn.execute("ALTER TABLE agent_memory_nodes ADD COLUMN confidence_score INTEGER NOT NULL DEFAULT 100;", []);
     let _ = conn.execute("ALTER TABLE agent_memory_nodes ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;", []);
+    let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN url TEXT NOT NULL DEFAULT '';", []);
+    let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN headers TEXT NOT NULL DEFAULT '{}';", []);
+    if let Err(error) = migrate_uvx_bridge_plugins_to_native(&conn) {
+        eprintln!("⚠️ mcp_plugins uvx 桥转原生 HTTP 迁移失败（保留原配置继续可用）: {}", error);
+    }
 
     // 初始化预置常用模型规格库
     let spec_count: i64 = conn
@@ -466,4 +473,116 @@ pub fn delete_model_spec_record(conn: &Connection, id_or_name: &str) -> Result<u
         "DELETE FROM model_specs WHERE id = ?1 OR name = ?1",
         rusqlite::params![id_or_name],
     )
+}
+
+/// 把历史遗留的 `uvx mcp-stdio <url> --transport ...` 桥接插件一次性转为原生 HTTP 直连。
+/// 只识别精确的桥接形态（command=uvx 且 args[0]=mcp-stdio 且带 URL），从 args 提取
+/// URL、从 env 的 MCP_BEARER_TOKEN 提取鉴权头；转换失败或形态不符的行原样保留。
+/// 原生直连消除 uvx 子进程依赖与 stdio 会话桥的握手竞态，是配置层的推荐形态。
+pub fn migrate_uvx_bridge_plugins_to_native(conn: &Connection) -> Result<usize, String> {
+    let rows: Vec<(String, String, String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT name, command, args, env FROM mcp_plugins WHERE url = ''")
+            .map_err(|e| e.to_string())?;
+        let collected = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .collect();
+        collected
+    };
+
+    let mut migrated = 0usize;
+    for (name, command, args_json, env_json) in rows {
+        if command.trim() != "uvx" {
+            continue;
+        }
+        let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+        if args.first().map(String::as_str) != Some("mcp-stdio") {
+            continue;
+        }
+        let Some(url) = args.get(1).filter(|u| u.starts_with("http")) else {
+            continue;
+        };
+        let env: std::collections::HashMap<String, String> =
+            serde_json::from_str(&env_json).unwrap_or_default();
+        let mut headers = std::collections::HashMap::new();
+        if let Some(token) = env.get("MCP_BEARER_TOKEN").filter(|t| !t.trim().is_empty()) {
+            headers.insert("Authorization".to_string(), format!("Bearer {}", token.trim()));
+        }
+        let headers_json = serde_json::to_string(&headers).map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE mcp_plugins SET url = ?2, headers = ?3, command = '', args = '[]', env = '{}'
+             WHERE name = ?1",
+            rusqlite::params![name, url, headers_json],
+        )
+        .map_err(|e| e.to_string())?;
+        migrated += 1;
+    }
+    if migrated > 0 {
+        println!("🔌 [DB 迁移] {} 个 uvx mcp-stdio 桥接插件已转为原生 HTTP 直连", migrated);
+    }
+    Ok(migrated)
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn uvx_bridge_rows_convert_to_native_http_and_others_untouched() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mcp_plugins (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                command TEXT NOT NULL, args TEXT NOT NULL DEFAULT '[]',
+                env TEXT NOT NULL DEFAULT '{}', capability_card TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+                url TEXT NOT NULL DEFAULT '', headers TEXT NOT NULL DEFAULT '{}');",
+        )
+        .unwrap();
+
+        // 1) 典型 uvx 桥：应转为原生 HTTP
+        conn.execute(
+            "INSERT INTO mcp_plugins (id, name, command, args, env, created_at) VALUES ('1', 'remote', 'uvx', ?1, ?2, '2026-01-01')",
+            rusqlite::params![
+                r#"["mcp-stdio","https://mcp.example.com/mcp","--transport","streamable-http"]"#,
+                r#"{"MCP_BEARER_TOKEN":"tok-123"}"#
+            ],
+        ).unwrap();
+        // 2) 本地 stdio 插件：必须原样保留
+        conn.execute(
+            "INSERT INTO mcp_plugins (id, name, command, args, env, created_at) VALUES ('2', 'excel', 'uvx', ?1, '{}', '2026-01-01')",
+            rusqlite::params![r#"["excel-mcp-server","stdio"]"#],
+        ).unwrap();
+
+        let migrated = migrate_uvx_bridge_plugins_to_native(&conn).unwrap();
+        assert_eq!(migrated, 1);
+
+        let (url, headers, command, args, env): (String, String, String, String, String) = conn
+            .query_row(
+                "SELECT url, headers, command, args, env FROM mcp_plugins WHERE name = 'remote'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(url, "https://mcp.example.com/mcp");
+        assert!(headers.contains("Bearer tok-123"));
+        assert_eq!(command, "");
+        assert_eq!(args, "[]");
+        assert_eq!(env, "{}");
+
+        // excel 未被改动
+        let excel_command: String = conn
+            .query_row("SELECT command FROM mcp_plugins WHERE name = 'excel'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(excel_command, "uvx");
+    }
 }

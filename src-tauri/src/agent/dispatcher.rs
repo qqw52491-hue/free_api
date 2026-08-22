@@ -389,12 +389,19 @@ pub fn execute_command_inner(
         }
     }
 
-    // 5. 未知工具或格式错误报错
+    // 5. 未知工具或格式错误报错（附上当前真实存在的 MCP 插件名，让模型可自行纠错）
+    let plugin_names = registry.plugin_names().join(", ");
     DispatchResult {
         stdout: String::new(),
         stderr: format!(
-            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！可用原生内置工具：finish, ask_human, model_manager, web_search, web_fetch, search, get_step_output, task_store；外部 MCP 工具格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
-            tool, action
+            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！可用原生内置工具：finish, ask_human, model_manager, web_search, web_fetch, search, get_step_output, task_store；当前已连接 MCP 插件：{}；外部 MCP 工具格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
+            tool,
+            action,
+            if plugin_names.is_empty() {
+                "（无）".to_string()
+            } else {
+                plugin_names
+            }
         ),
         success: false,
         route: "unknown".to_string(),

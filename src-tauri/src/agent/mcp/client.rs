@@ -21,8 +21,11 @@ pub struct McpClient {
     global_session_id: Arc<RwLock<Option<String>>>,
     session_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
     global_init_lock: Arc<Mutex<()>>,
+    // stdio 进程生命周期内只允许一次 initialize 握手；ready 标志让并发调用方
+    // （目录预热、后台保活、工具调用）串行等待首次握手，而不是各自重发 initialize。
+    stdio_ready: Arc<std::sync::atomic::AtomicBool>,
     next_id: Arc<AtomicU64>,
-    pub cached_tools: Arc<RwLock<Vec<McpToolDef>>>,
+    pub cached_tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
 }
 
 impl McpClient {
@@ -46,8 +49,9 @@ impl McpClient {
                     global_session_id: Arc::new(RwLock::new(None)),
                     session_locks: Arc::new(RwLock::new(HashMap::new())),
                     global_init_lock: Arc::new(Mutex::new(())),
+                    stdio_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     next_id: Arc::new(AtomicU64::new(1)),
-                    cached_tools: Arc::new(RwLock::new(Vec::new())),
+                    cached_tools: Arc::new(std::sync::RwLock::new(Vec::new())),
                 });
             }
         }
@@ -185,8 +189,9 @@ impl McpClient {
             global_session_id: Arc::new(RwLock::new(None)),
             session_locks: Arc::new(RwLock::new(HashMap::new())),
             global_init_lock: Arc::new(Mutex::new(())),
+            stdio_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             next_id: Arc::new(AtomicU64::new(1)),
-            cached_tools: Arc::new(RwLock::new(Vec::new())),
+            cached_tools: Arc::new(std::sync::RwLock::new(Vec::new())),
         })
     }
 
@@ -249,6 +254,24 @@ impl McpClient {
             }
 
             self.initialize_for_session(chat_session_id).await?;
+            return Ok(());
+        }
+        // stdio 插件：握手只做一次，所有并发调用方在此串行等待。
+        // 若不等待，目录预热会在后台保活任务握手完成前发出 tools/list，
+        // 服务端按协议拒绝未初始化请求，模型可见工具目录将定格为空。
+        if !self
+            .stdio_ready
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let _guard = self.global_init_lock.lock().await;
+            if !self
+                .stdio_ready
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                self.initialize_for_session(chat_session_id).await?;
+                self.stdio_ready
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
         }
         Ok(())
     }
@@ -259,7 +282,7 @@ impl McpClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        if method != "initialize" && self.config.url.is_some() {
+        if method != "initialize" {
             let _ = self.ensure_session_initialized(chat_session_id).await;
         }
         let first_res = self
@@ -574,8 +597,20 @@ impl McpClient {
                 })
             })
             .collect();
-        *self.cached_tools.write().await = defs.clone();
+        *self
+            .cached_tools
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = defs.clone();
         crate::agent::mcp_catalog::remember_tools(&self.config, &defs);
         Ok(defs)
+    }
+
+    /// 目录缓存 TTL 过期后的兜底：返回本进程内最近一次成功 tools/list 的结果。
+    /// 它不代表当前即时状态，只用于让说明书/菜单在长会话中不退化为空。
+    pub fn last_known_tools(&self) -> Vec<McpToolDef> {
+        self.cached_tools
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }

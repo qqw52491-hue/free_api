@@ -283,11 +283,35 @@ pub fn invalidate_plugin(name: &str) {
     }
 }
 
+fn concise_schema_fields(schema: &serde_json::Value) -> String {
+    let Some(properties) = schema.get("properties").and_then(serde_json::Value::as_object) else {
+        return "参数未声明".to_string();
+    };
+    if properties.is_empty() {
+        return "无参数".to_string();
+    }
+
+    let required: std::collections::HashSet<&str> = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    let mut names = properties.keys().map(String::as_str).collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+        .into_iter()
+        .map(|name| if required.contains(name) { format!("{}*", name) } else { format!("{}?", name) })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn concise_menu(
     items: impl IntoIterator<Item = (String, Vec<McpToolDef>, Option<String>)>,
 ) -> String {
     let mut lines = vec![
-        "\n## MCP 工具目录（动态能力卡缓存；如需完整参数规范请使用 next_tool_hint）"
+        "\n## MCP 工具目录（字段来自服务声明的 JSON Schema；* 为必填，? 为可选；需要约束细节请使用 next_tool_hint）"
             .to_string(),
     ];
     let mut sorted_items: Vec<(String, Vec<McpToolDef>, Option<String>)> =
@@ -295,19 +319,17 @@ pub fn concise_menu(
     // 严格按插件名称字母序排序，消除 HashMap 遍历导致的随机性与前缀缓存击穿
     sorted_items.sort_by(|a, b| a.0.cmp(&b.0));
 
-    for (name, mut tools, card_opt) in sorted_items {
-        // 工具列表也严格按名称字母序排序
+    for (name, mut tools, _card_opt) in sorted_items {
+        // 工具列表也严格按名称字母序排序。能力卡由模型生成，不能充当参数契约，
+        // 因此不投影到执行提示词；模型只能看到服务声明的字段。
         tools.sort_by(|a, b| a.name.cmp(&b.name));
-        let tool_names = tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>();
-        lines.push(format!("- {}: [{}]", name, tool_names.join(", ")));
-        if let Some(card) = card_opt {
-            let trimmed = card.trim();
-            if !trimmed.is_empty() {
-                lines.push(format!("  💡 能力卡: {}", trimmed));
-            }
-        }
+        let tool_summaries = tools
+            .iter()
+            .map(|tool| format!("{}({})", tool.name, concise_schema_fields(&tool.schema)))
+            .collect::<Vec<_>>();
+        lines.push(format!("- {}: [{}]", name, tool_summaries.join("; ")));
     }
-    lines.push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}".to_string());
+    lines.push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}；仅使用上列服务声明字段。".to_string());
     lines.join("\n")
 }
 
@@ -356,5 +378,30 @@ mod tests {
         assert!(cached_capability_card(&cfg).is_none());
         invalidate_plugin("demo");
         assert!(cached_tools(&config()).is_none());
+    }
+
+    #[test]
+    fn concise_menu_projects_declared_schema_fields_without_inventing_ones() {
+        let menu = concise_menu(vec![(
+            "workspace".to_string(),
+            vec![McpToolDef {
+                name: "ripgrep_search".to_string(),
+                description: "Search files".to_string(),
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string"},
+                        "cwd": {"type": "string"},
+                        "glob": {"type": "string"}
+                    },
+                    "required": ["pattern"]
+                }),
+            }],
+            None,
+        )]);
+
+        assert!(menu.contains("ripgrep_search(cwd?, glob?, pattern*)"));
+        assert!(!menu.contains("path?"));
+        assert!(!menu.contains("include?"));
     }
 }
