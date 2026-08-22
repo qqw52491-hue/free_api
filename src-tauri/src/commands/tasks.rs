@@ -84,5 +84,6 @@ pub fn generate_agent_evaluation_report(
         state.inner(),
         &session_id,
         evaluation_id.as_deref(),
+        None,
     )
 }

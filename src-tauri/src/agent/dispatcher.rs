@@ -329,9 +329,8 @@ pub fn execute_command_inner(
                 route: "host_rejection:mcp_service_requires_subtool".to_string(),
             };
         }
-        let normalized_params = normalize_mcp_params(params);
-        let (clean_params, read_guard_notice) =
-            guard_code_read_range(&tool_name, normalized_params);
+        // MCP 子工具参数必须逐字按模型提供的契约透传；宿主不得补全、别名映射或截断。
+        let clean_params = params.clone();
         println!(
             "执行动作调用外部插件: {}/{} (会话: {}, 参数: {:?})",
             plugin_name, tool_name, session_id, clean_params
@@ -363,10 +362,6 @@ pub fn execute_command_inner(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let content = read_guard_notice
-                    .map(|notice| format!("{}\n\n{}", notice, content))
-                    .unwrap_or(content);
-
                 if is_error {
                     return DispatchResult {
                         stdout: String::new(),

@@ -45,7 +45,7 @@ pub async fn run_agent_main_loop(
     registry_state: State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
     model_routing: crate::agent::router::ModelRoutingConfig,
     goal: String,
-    _auto_pilot: bool,
+    auto_pilot: bool,
     session_id: Option<String>,
     log_context: Option<bool>,
 ) -> Result<(), String> {
@@ -351,6 +351,26 @@ pub async fn run_agent_main_loop(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
+    // 初始工作区是会话选择的已声明资源；恢复时保留 checkpoint 中已有的显式契约。
+    if context.resource_scope.primary_filesystem().is_none() {
+        let validation = if workspace_dir.is_dir() {
+            context::resource_scope::ResourceScopeValidation::Valid
+        } else {
+            context::resource_scope::ResourceScopeValidation::Invalid
+        };
+        let source = if auto_pilot {
+            context::resource_scope::ResourceScopeSource::EvaluationConfig
+        } else {
+            context::resource_scope::ResourceScopeSource::SessionSelected
+        };
+        context.resource_scope.bind_filesystem_with_validation(
+            context::resource_scope::ResourceScopeRole::Primary,
+            &workspace_dir.to_string_lossy(),
+            source,
+            validation,
+        );
+    }
+
     // 数据区本体是权威来源；每次启动都刷新目录，checkpoint 仅保留这份目录快照。
     context.set_task_resources(task_store::list_resource_refs(
         state.inner(),
@@ -874,6 +894,7 @@ pub async fn run_agent_main_loop(
             "plan_title": context.active_plan_title().unwrap_or(&context.user_goal),
             "status": if result.success { "succeeded" } else { "failed" },
             "output": output_text.clone(),
+            "resource_scope_revision": context.resource_scope.revision,
             "timestamp": Utc::now().timestamp_millis(),
         }));
         if let Err(error) = crate::agent::run_trace::upsert_snapshot(

@@ -1,0 +1,692 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::path::{Component, Path};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceScopeRole {
+    Primary,
+    Source,
+    Destination,
+    Reference,
+}
+
+impl ResourceScopeRole {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Source => "source",
+            Self::Destination => "destination",
+            Self::Reference => "reference",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceScopeKind {
+    Filesystem,
+    Opaque,
+}
+
+impl ResourceScopeKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Filesystem => "filesystem",
+            Self::Opaque => "opaque",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceScopeSource {
+    UserExplicit,
+    SessionSelected,
+    EvaluationConfig,
+    ToolVerified,
+    Inferred,
+}
+
+impl ResourceScopeSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::UserExplicit => "user_explicit",
+            Self::SessionSelected => "session_selected",
+            Self::EvaluationConfig => "evaluation_config",
+            Self::ToolVerified => "tool_verified",
+            Self::Inferred => "inferred",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceScopeConfidence {
+    Verified,
+    Declared,
+    Provisional,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceScopeValidation {
+    Pending,
+    Valid,
+    Invalid,
+}
+
+impl ResourceScopeValidation {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceScopeLifecycle {
+    Bound,
+    Expanded,
+    Invalidated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceRelation {
+    Inside,
+    Outside,
+    Unknown,
+}
+
+impl ResourceRelation {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inside => "inside",
+            Self::Outside => "outside",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceOperation {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceScopeBinding {
+    pub role: ResourceScopeRole,
+    pub kind: ResourceScopeKind,
+    pub locator: String,
+    pub source: ResourceScopeSource,
+    pub confidence: ResourceScopeConfidence,
+    pub validation: ResourceScopeValidation,
+    pub lifecycle: ResourceScopeLifecycle,
+    pub observed_at: String,
+    pub validated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolDefaultResolution {
+    pub tool_or_service_identity: String,
+    pub when_omitted_or_relative: ResourceRelation,
+    pub locator: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceScopeObservation {
+    pub requested: Option<String>,
+    pub resolved: Option<String>,
+    pub primary: Option<String>,
+    pub relation: ResourceRelation,
+    pub operation: ResourceOperation,
+    pub should_guard: bool,
+}
+
+impl ResourceScopeObservation {
+    pub fn render(&self) -> String {
+        let requested = self.requested.as_deref().unwrap_or("unprovided");
+        let resolved = self
+            .resolved
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| "unresolved(default semantics unknown)".to_string());
+        let primary = self.primary.as_deref().unwrap_or("unbound");
+        let mut output = format!(
+            "[Resource scope]\nrequested: {}\nresolved: {}\nprimary: {}\nrelation: {}",
+            requested,
+            resolved,
+            primary,
+            self.relation.as_str(),
+        );
+        if self.should_guard {
+            output.push_str("\nwrite guard: outside declared resource scope");
+        }
+        output
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceScopeContract {
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub bindings: Vec<ResourceScopeBinding>,
+    #[serde(default)]
+    pub tool_default_resolution: Vec<ToolDefaultResolution>,
+}
+
+impl Default for ResourceScopeContract {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            bindings: Vec::new(),
+            tool_default_resolution: Vec::new(),
+        }
+    }
+}
+
+impl ResourceScopeContract {
+    pub fn bind_primary_filesystem(locator: &str, source: ResourceScopeSource) -> Self {
+        let mut contract = Self::default();
+        contract.bind_filesystem(ResourceScopeRole::Primary, locator, source);
+        contract
+    }
+
+    pub fn bind_filesystem(
+        &mut self,
+        role: ResourceScopeRole,
+        locator: &str,
+        source: ResourceScopeSource,
+    ) {
+        self.bind_filesystem_with_validation(role, locator, source, ResourceScopeValidation::Pending);
+    }
+
+    pub fn bind_filesystem_with_validation(
+        &mut self,
+        role: ResourceScopeRole,
+        locator: &str,
+        source: ResourceScopeSource,
+        validation: ResourceScopeValidation,
+    ) {
+        if role == ResourceScopeRole::Primary
+            && self
+                .bindings
+                .iter()
+                .any(|binding| binding.role == ResourceScopeRole::Primary && binding.lifecycle != ResourceScopeLifecycle::Invalidated)
+        {
+            self.rebind_primary_filesystem(locator, source);
+            if let Some(primary) = self.primary_filesystem_mut() {
+                primary.validation = validation.clone();
+                primary.confidence = confidence_for(&primary.source, &validation);
+                primary.validated_at = validation_timestamp(&validation);
+            }
+            return;
+        }
+
+        self.revision = self.revision.saturating_add(1);
+        self.bindings.push(ResourceScopeBinding {
+            role,
+            kind: ResourceScopeKind::Filesystem,
+            locator: locator.to_string(),
+            source: source.clone(),
+            confidence: confidence_for(&source, &validation),
+            validation: validation.clone(),
+            lifecycle: ResourceScopeLifecycle::Bound,
+            observed_at: now_marker(),
+            validated_at: validation_timestamp(&validation),
+        });
+    }
+
+    pub fn rebind_primary_filesystem(&mut self, locator: &str, source: ResourceScopeSource) {
+        for binding in &mut self.bindings {
+            if binding.role == ResourceScopeRole::Primary
+                && binding.lifecycle != ResourceScopeLifecycle::Invalidated
+            {
+                binding.lifecycle = ResourceScopeLifecycle::Invalidated;
+            }
+        }
+        self.revision = self.revision.saturating_add(1);
+        self.bindings.push(ResourceScopeBinding {
+            role: ResourceScopeRole::Primary,
+            kind: ResourceScopeKind::Filesystem,
+            locator: locator.to_string(),
+            source: source.clone(),
+            confidence: confidence_for(&source, &ResourceScopeValidation::Pending),
+            validation: ResourceScopeValidation::Pending,
+            lifecycle: ResourceScopeLifecycle::Bound,
+            observed_at: now_marker(),
+            validated_at: None,
+        });
+    }
+
+    pub fn primary_filesystem(&self) -> Option<&ResourceScopeBinding> {
+        self.bindings.iter().rev().find(|binding| {
+            binding.role == ResourceScopeRole::Primary
+                && binding.kind == ResourceScopeKind::Filesystem
+                && binding.lifecycle != ResourceScopeLifecycle::Invalidated
+        })
+    }
+
+    fn primary_filesystem_mut(&mut self) -> Option<&mut ResourceScopeBinding> {
+        self.bindings.iter_mut().rev().find(|binding| {
+            binding.role == ResourceScopeRole::Primary
+                && binding.kind == ResourceScopeKind::Filesystem
+                && binding.lifecycle != ResourceScopeLifecycle::Invalidated
+        })
+    }
+
+    pub fn observe_filesystem_tool(
+        &mut self,
+        tool_identity: &str,
+        params: &Value,
+        resolved_locator: Option<&str>,
+        operation: ResourceOperation,
+    ) -> ResourceScopeObservation {
+        let requested = requested_locator(params);
+        let primary = self.primary_filesystem().map(|binding| binding.locator.clone());
+        let relation = match (primary.as_deref(), resolved_locator) {
+            (Some(primary), Some(resolved)) => filesystem_relation(primary, resolved),
+            _ => ResourceRelation::Unknown,
+        };
+        let should_guard = operation == ResourceOperation::Write
+            && relation == ResourceRelation::Outside
+            && self
+                .primary_filesystem()
+                .is_some_and(|binding| {
+                    matches!(
+                        binding.confidence,
+                        ResourceScopeConfidence::Verified | ResourceScopeConfidence::Declared
+                    )
+                });
+        self.record_default_resolution(
+            tool_identity,
+            &requested,
+            resolved_locator,
+            relation.clone(),
+        );
+        ResourceScopeObservation {
+            requested,
+            resolved: resolved_locator.map(str::to_string),
+            primary,
+            relation,
+            operation,
+            should_guard,
+        }
+    }
+
+    pub fn observe_unknown_tool(
+        &mut self,
+        tool_identity: &str,
+        params: &Value,
+        operation: ResourceOperation,
+    ) -> ResourceScopeObservation {
+        let requested = requested_locator(params);
+        self.record_default_resolution(
+            tool_identity,
+            &requested,
+            None,
+            ResourceRelation::Unknown,
+        );
+        ResourceScopeObservation {
+            requested,
+            resolved: None,
+            primary: self.primary_filesystem().map(|binding| binding.locator.clone()),
+            relation: ResourceRelation::Unknown,
+            operation,
+            should_guard: false,
+        }
+    }
+
+    pub fn render_projection(&self) -> String {
+        if self.bindings.is_empty() {
+            return String::new();
+        }
+        let mut lines = vec![format!("[Active resource contract v{}]", self.revision)];
+        for binding in self
+            .bindings
+            .iter()
+            .filter(|binding| binding.lifecycle != ResourceScopeLifecycle::Invalidated)
+        {
+            lines.push(format!(
+                "{} {}: {}",
+                binding.role.as_str(),
+                binding.kind.as_str(),
+                binding.locator
+            ));
+            lines.push(format!(
+                "binding: {}; validation: {}",
+                binding.source.as_str(),
+                binding.validation.as_str()
+            ));
+        }
+        if let Some(default_resolution) = self.tool_default_resolution.last() {
+            let locator = default_resolution.locator.as_deref().unwrap_or("unknown");
+            lines.push(format!(
+                "service default filesystem context: {}; relation: {}",
+                locator,
+                default_resolution.when_omitted_or_relative.as_str()
+            ));
+        }
+        lines.push("relative resource locators: preserve; resolved relation must be checked".to_string());
+        lines.join("\n")
+    }
+
+    fn record_default_resolution(
+        &mut self,
+        tool_identity: &str,
+        requested: &Option<String>,
+        resolved_locator: Option<&str>,
+        relation: ResourceRelation,
+    ) {
+        let is_relative_or_omitted = requested
+            .as_deref()
+            .map(|locator| !Path::new(locator).is_absolute())
+            .unwrap_or(true);
+        if is_relative_or_omitted {
+            self.tool_default_resolution.push(ToolDefaultResolution {
+                tool_or_service_identity: tool_identity.to_string(),
+                when_omitted_or_relative: relation,
+                locator: resolved_locator.map(str::to_string),
+            });
+            if self.tool_default_resolution.len() > 4 {
+                self.tool_default_resolution.remove(0);
+            }
+        }
+    }
+}
+
+pub fn is_known_filesystem_tool(tool_identity: &str) -> bool {
+    let leaf = tool_identity.rsplit('/').next().unwrap_or(tool_identity);
+    matches!(
+        leaf,
+        "read_text_file"
+            | "read_file"
+            | "read_multiple_files"
+            | "list_directory"
+            | "list_directory_with_sizes"
+            | "directory_tree"
+            | "search_files"
+            | "ripgrep_search"
+            | "ripgrep_search_files"
+            | "write_file"
+            | "edit_file"
+            | "move_file"
+            | "create_directory"
+    )
+}
+
+impl ResourceScopeContract {
+    /// 对已知文件系统工具只做结果侧观测；未知工具仅在传入资源定位符时产生 unknown 结论。
+    pub fn observe_tool_result(
+        &mut self,
+        tool_identity: &str,
+        params: &Value,
+        output: &str,
+        operation: ResourceOperation,
+    ) -> Option<ResourceScopeObservation> {
+        let requested = requested_locator(params);
+        if is_known_filesystem_tool(tool_identity) {
+            let resolved_from_output = resolved_locator_from_output(output);
+            let resolved = resolved_from_output.as_deref().or_else(|| {
+                requested
+                    .as_deref()
+                    .filter(|locator| Path::new(locator).is_absolute())
+            });
+            return Some(self.observe_filesystem_tool(
+                tool_identity,
+                params,
+                resolved,
+                operation,
+            ));
+        }
+        requested.map(|_| self.observe_unknown_tool(tool_identity, params, operation))
+    }
+
+    /// 仅在已知文件系统写工具且请求已明确为绝对越界定位符时守卫；不推测相对路径。
+    pub fn guard_known_outside_write(
+        &mut self,
+        tool_identity: &str,
+        params: &Value,
+    ) -> Option<ResourceScopeObservation> {
+        if !is_known_filesystem_tool(tool_identity) {
+            return None;
+        }
+        let requested = requested_locator(params)?;
+        if !Path::new(&requested).is_absolute() {
+            return None;
+        }
+        let observation = self.observe_filesystem_tool(
+            tool_identity,
+            params,
+            Some(&requested),
+            ResourceOperation::Write,
+        );
+        observation.should_guard.then_some(observation)
+    }
+}
+
+fn resolved_locator_from_output(output: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(output).ok()?;
+    find_absolute_locator(&value)
+}
+
+fn find_absolute_locator(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            for key in ["resolved", "resolved_path", "cwd", "path", "workspace"] {
+                if let Some(locator) = object.get(key).and_then(Value::as_str) {
+                    if Path::new(locator).is_absolute() {
+                        return Some(locator.to_string());
+                    }
+                }
+            }
+            object.values().find_map(find_absolute_locator)
+        }
+        Value::Array(items) => items.iter().find_map(find_absolute_locator),
+        _ => None,
+    }
+}
+
+fn confidence_for(
+    source: &ResourceScopeSource,
+    validation: &ResourceScopeValidation,
+) -> ResourceScopeConfidence {
+    match validation {
+        ResourceScopeValidation::Invalid => ResourceScopeConfidence::Provisional,
+        ResourceScopeValidation::Valid if *source == ResourceScopeSource::ToolVerified => {
+            ResourceScopeConfidence::Verified
+        }
+        _ => ResourceScopeConfidence::Declared,
+    }
+}
+
+fn validation_timestamp(validation: &ResourceScopeValidation) -> Option<String> {
+    match validation {
+        ResourceScopeValidation::Pending => None,
+        ResourceScopeValidation::Valid | ResourceScopeValidation::Invalid => Some(now_marker()),
+    }
+}
+
+fn now_marker() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn requested_locator(params: &Value) -> Option<String> {
+    let object = params.as_object()?;
+    ["path", "cwd", "source", "destination", "locator"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str).map(str::to_string))
+}
+
+fn filesystem_relation(primary: &str, resolved: &str) -> ResourceRelation {
+    let primary_path = Path::new(primary);
+    let resolved_path = Path::new(resolved);
+    if !primary_path.is_absolute() || !resolved_path.is_absolute() {
+        return ResourceRelation::Unknown;
+    }
+    if is_path_within(resolved_path, primary_path) {
+        ResourceRelation::Inside
+    } else {
+        ResourceRelation::Outside
+    }
+}
+
+fn is_path_within(candidate: &Path, root: &Path) -> bool {
+    let candidate_components: Vec<Component<'_>> = candidate.components().collect();
+    let root_components: Vec<Component<'_>> = root.components().collect();
+    candidate_components.starts_with(&root_components)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn primary_contract() -> ResourceScopeContract {
+        ResourceScopeContract::bind_primary_filesystem(
+            "/workspace/free_api",
+            ResourceScopeSource::UserExplicit,
+        )
+    }
+
+    #[test]
+    fn known_filesystem_read_at_primary_is_inside_without_parameter_rewrite() {
+        let mut contract = primary_contract();
+        let params = json!({"path": "."});
+        let observation = contract.observe_filesystem_tool(
+            "read_text_file",
+            &params,
+            Some("/workspace/free_api"),
+            ResourceOperation::Read,
+        );
+
+        assert_eq!(params, json!({"path": "."}));
+        assert_eq!(observation.relation, ResourceRelation::Inside);
+        assert!(!observation.should_guard);
+        assert!(observation.render().contains("relation: inside"));
+    }
+
+    #[test]
+    fn known_filesystem_read_outside_is_annotated_but_not_blocked() {
+        let mut contract = primary_contract();
+        let params = json!({"path": "."});
+        let observation = contract.observe_filesystem_tool(
+            "read_text_file",
+            &params,
+            Some("/workspace/other_project"),
+            ResourceOperation::Read,
+        );
+
+        assert_eq!(observation.relation, ResourceRelation::Outside);
+        assert!(!observation.should_guard);
+        assert!(observation.render().contains("relation: outside"));
+    }
+
+    #[test]
+    fn unknown_default_semantics_stay_unknown_and_do_not_block() {
+        let mut contract = primary_contract();
+        let params = json!({"path": "."});
+        let observation = contract.observe_unknown_tool("custom_mcp/opaque", &params, ResourceOperation::Read);
+
+        assert_eq!(observation.relation, ResourceRelation::Unknown);
+        assert!(!observation.should_guard);
+        assert!(observation.render().contains("unresolved(default semantics unknown)"));
+    }
+
+    #[test]
+    fn source_destination_and_reference_bindings_project_without_role_loss() {
+        let mut contract = primary_contract();
+        contract.bind_filesystem(ResourceScopeRole::Destination, "/workspace/target", ResourceScopeSource::UserExplicit);
+        contract.bind_filesystem(ResourceScopeRole::Reference, "/workspace/reference", ResourceScopeSource::ToolVerified);
+
+        let projection = contract.render_projection();
+        assert!(projection.contains("primary filesystem: /workspace/free_api"));
+        assert!(projection.contains("destination filesystem: /workspace/target"));
+        assert!(projection.contains("reference filesystem: /workspace/reference"));
+    }
+
+    #[test]
+    fn explicit_rebind_increments_revision_and_invalidates_old_primary() {
+        let mut contract = primary_contract();
+        let previous = contract.revision;
+        contract.rebind_primary_filesystem("/workspace/second", ResourceScopeSource::EvaluationConfig);
+
+        assert_eq!(contract.revision, previous + 1);
+        assert_eq!(contract.primary_filesystem().unwrap().locator, "/workspace/second");
+        assert!(contract.bindings.iter().any(|binding| {
+            binding.locator == "/workspace/free_api" && binding.lifecycle == ResourceScopeLifecycle::Invalidated
+        }));
+    }
+
+    #[test]
+    fn failed_binding_validation_never_becomes_verified() {
+        let mut contract = ResourceScopeContract::default();
+        contract.bind_filesystem_with_validation(
+            ResourceScopeRole::Primary,
+            "/workspace/missing",
+            ResourceScopeSource::UserExplicit,
+            ResourceScopeValidation::Invalid,
+        );
+
+        let binding = contract.primary_filesystem().unwrap();
+        assert_eq!(binding.validation, ResourceScopeValidation::Invalid);
+        assert_ne!(binding.confidence, ResourceScopeConfidence::Verified);
+    }
+
+    #[test]
+    fn unknown_tool_schema_never_generates_a_false_guard() {
+        let mut contract = primary_contract();
+        let observation = contract.observe_unknown_tool(
+            "opaque_service/mutate",
+            &json!({"project": "elsewhere"}),
+            ResourceOperation::Write,
+        );
+
+        assert_eq!(observation.relation, ResourceRelation::Unknown);
+        assert!(!observation.should_guard);
+    }
+
+    #[test]
+    fn outside_write_is_guarded_without_mutating_parameters_but_read_is_not() {
+        let mut contract = primary_contract();
+        let params = json!({"path": "/workspace/outside/file.txt"});
+        let write = contract.observe_filesystem_tool(
+            "write_file",
+            &params,
+            Some("/workspace/outside/file.txt"),
+            ResourceOperation::Write,
+        );
+        let read = contract.observe_filesystem_tool(
+            "read_text_file",
+            &params,
+            Some("/workspace/outside/file.txt"),
+            ResourceOperation::Read,
+        );
+
+        assert_eq!(params, json!({"path": "/workspace/outside/file.txt"}));
+        assert!(write.should_guard);
+        assert!(!read.should_guard);
+    }
+
+    #[test]
+    fn active_contract_projection_survives_history_dehydration() {
+        let mut contract = primary_contract();
+        contract.observe_filesystem_tool(
+            "read_text_file",
+            &json!({"path": "."}),
+            Some("/workspace/free_api/src/lib.rs"),
+            ResourceOperation::Read,
+        );
+
+        let projection = contract.render_projection();
+        assert!(projection.contains("[Active resource contract v"));
+        assert!(projection.contains("primary filesystem: /workspace/free_api"));
+    }
+}

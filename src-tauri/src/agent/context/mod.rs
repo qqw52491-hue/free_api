@@ -6,6 +6,7 @@ pub mod compaction;
 pub mod determinism;
 pub mod memory;
 pub mod render;
+pub mod resource_scope;
 pub mod sampling;
 pub mod types;
 

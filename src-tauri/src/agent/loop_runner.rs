@@ -1,4 +1,5 @@
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
+use crate::agent::context::resource_scope::ResourceOperation;
 use crate::agent::control::{take_pending_interrupt, HumanControl};
 use crate::agent::dispatcher::{
     emit_tool_event, is_finish_instruction, is_write_or_side_effect_tool, run_agent_step,
@@ -676,6 +677,36 @@ pub async fn run_tool_phase(
             route: "ask_human_resolved".to_string(),
         }
     } else {
+        let is_write_tool = is_write_or_side_effect_tool(inst);
+        if is_write_tool {
+            if let Some(scope_guard) = context
+                .resource_scope
+                .guard_known_outside_write(&inst.get_tool(), &inst.get_params())
+            {
+                let result = DispatchResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: format!(
+                        "{}\nNo tool call was issued; original parameters were not changed.",
+                        scope_guard.render()
+                    ),
+                    route: "scope_guard:outside".to_string(),
+                };
+                emit_tool_event(
+                    app,
+                    final_session_id,
+                    step_id,
+                    inst,
+                    "failed",
+                    Some(result.route.clone()),
+                    Some(false),
+                    &result.stderr,
+                    Some(tool_started_at.elapsed().as_millis()),
+                );
+                return Ok(result);
+            }
+        }
+
         // 外部副作用前先持久化 pending；未知/写操作默认 HumanReview。
         let recovery_policy = checkpoint.prepare_tool(inst.clone(), &context);
         if recovery_policy.requires_pending() {
@@ -687,8 +718,6 @@ pub async fn run_tool_phase(
         let registry_arc = registry_state.inner().clone();
         let db = state.inner().clone();
         let sid = final_session_id.clone();
-        let is_write_tool = is_write_or_side_effect_tool(inst);
-
         let registry = {
             let guard = registry_arc.lock().await;
             (*guard).clone()
@@ -699,7 +728,7 @@ pub async fn run_tool_phase(
             run_agent_step(&db, &sid, &inst_c, &registry)
         });
 
-        let dispatch_result = tokio::select! {
+        let mut dispatch_result = tokio::select! {
             res = &mut tool_task => {
                 res.map_err(|e| e.to_string())?
             }
@@ -752,6 +781,28 @@ pub async fn run_tool_phase(
 
         if dispatch_result.route == RUN_INTERRUPTED_ROUTE {
             return Ok(dispatch_result);
+        }
+        let output = if dispatch_result.success {
+            dispatch_result.stdout.as_str()
+        } else {
+            dispatch_result.stderr.as_str()
+        };
+        if let Some(scope_observation) = context.resource_scope.observe_tool_result(
+            &inst.get_tool(),
+            &inst.get_params(),
+            output,
+            if is_write_tool {
+                ResourceOperation::Write
+            } else {
+                ResourceOperation::Read
+            },
+        ) {
+            let annotation = scope_observation.render();
+            if dispatch_result.success {
+                dispatch_result.stdout = format!("{}\n\n{}", dispatch_result.stdout, annotation);
+            } else {
+                dispatch_result.stderr = format!("{}\n\n{}", dispatch_result.stderr, annotation);
+            }
         }
         dispatch_result
     };

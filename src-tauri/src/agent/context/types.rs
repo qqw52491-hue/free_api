@@ -1,3 +1,4 @@
+use crate::agent::context::resource_scope::ResourceScopeContract;
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
 use crate::llm::ModelConfig;
@@ -138,6 +139,9 @@ pub struct SandwichContext {
     pub todo_list: Vec<TodoItem>,
     /// 全局阶段进度与策略宏观摘要 (~100 tokens，每轮更新)
     pub progress_summary: String,
+    /// 活跃资源作用域契约；独立于历史压缩，持续投影到每轮上下文。
+    #[serde(default)]
+    pub resource_scope: ResourceScopeContract,
     /// 外部独立任务数据区目录引用 (轻量 schema 与行数，完整数据行在 SQLite)
     #[serde(default)]
     pub task_resources: Vec<TaskResourceRef>,
@@ -173,6 +177,7 @@ impl SandwichContext {
             current_observation: String::new(),
             progress_summary: String::new(),
             plan_state: PlanState::new(),
+            resource_scope: ResourceScopeContract::default(),
             task_resources: Vec::new(),
             active_tool: None,
             active_tool_detail: String::new(),

@@ -23,9 +23,40 @@ const STOP_GRACE_PERIOD: Duration = Duration::from_secs(120);
 const HUMAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 // 回归评测固定使用本机 SQLite 中的火山订阅模型，避免同名模型跨平台串路由。
+const DEFAULT_EVALUATION_ROUTE_PRESET: &str = "default";
+const GPT56_TERRA_LUNA_ROUTE_PRESET: &str = "gpt56_terra_luna";
 const EVALUATION_PLATFORM_NAME: &str = "火山订阅";
 const EVALUATION_REASONING_MODEL_NAME: &str = "deepseek-v4-pro";
 const EVALUATION_EXECUTION_MODEL_NAME: &str = "minimax-m3";
+const GPT56_PLATFORM_NAME: &str = "中转站";
+const GPT56_TERRA_MODEL_NAME: &str = "gpt-5.6-terra";
+const GPT56_LUNA_MODEL_NAME: &str = "gpt-5.6-luna";
+
+#[derive(Debug, Clone, Copy)]
+struct EvaluationRouteSpec {
+    name: &'static str,
+    platform_name: &'static str,
+    reasoning_model_name: &'static str,
+    execution_model_name: &'static str,
+}
+
+fn evaluation_route_spec(requested: Option<&str>) -> Result<EvaluationRouteSpec, String> {
+    match requested.unwrap_or(DEFAULT_EVALUATION_ROUTE_PRESET) {
+        DEFAULT_EVALUATION_ROUTE_PRESET => Ok(EvaluationRouteSpec {
+            name: DEFAULT_EVALUATION_ROUTE_PRESET,
+            platform_name: EVALUATION_PLATFORM_NAME,
+            reasoning_model_name: EVALUATION_REASONING_MODEL_NAME,
+            execution_model_name: EVALUATION_EXECUTION_MODEL_NAME,
+        }),
+        GPT56_TERRA_LUNA_ROUTE_PRESET => Ok(EvaluationRouteSpec {
+            name: GPT56_TERRA_LUNA_ROUTE_PRESET,
+            platform_name: GPT56_PLATFORM_NAME,
+            reasoning_model_name: GPT56_TERRA_MODEL_NAME,
+            execution_model_name: GPT56_LUNA_MODEL_NAME,
+        }),
+        unknown => Err(format!("未知评测路由预设：{}", unknown)),
+    }
+}
 
 /// 独立后台评测的启动回执。会话 ID 与评测 ID 均可用于定位实时事件、日志与最终报告。
 #[derive(Debug, Clone, Serialize)]
@@ -33,6 +64,7 @@ pub struct BackgroundEvaluationStart {
     pub session_id: String,
     pub evaluation_id: String,
     pub scenario_id: String,
+    pub route_preset: String,
     pub max_duration_minutes: u64,
     /// SQLite 模型 UUID：固定为火山订阅的 DeepSeek V4 Pro。
     pub reasoning_model_id: String,
@@ -100,24 +132,33 @@ fn resolve_enabled_model_id(
 fn fixed_evaluation_model_routing(
     db: &DbState,
     mut requested: ModelRoutingConfig,
-) -> Result<ModelRoutingConfig, String> {
+    route_preset: Option<&str>,
+) -> Result<(ModelRoutingConfig, evaluation::EvaluationRoutingMetadata), String> {
+    let spec = evaluation_route_spec(route_preset)?;
     let reasoning_model_id = resolve_enabled_model_id(
         db,
-        EVALUATION_PLATFORM_NAME,
-        EVALUATION_REASONING_MODEL_NAME,
+        spec.platform_name,
+        spec.reasoning_model_name,
     )?;
     let execution_model_id = resolve_enabled_model_id(
         db,
-        EVALUATION_PLATFORM_NAME,
-        EVALUATION_EXECUTION_MODEL_NAME,
+        spec.platform_name,
+        spec.execution_model_name,
     )?;
 
     requested.pro = reasoning_model_id.clone();
-    requested.flash = execution_model_id;
-    // 该只读评测不含图像；如意外出现视觉分流，仍落到受核验的 Pro，而非外部同名配置。
-    requested.vision = reasoning_model_id;
+    requested.flash = execution_model_id.clone();
+    // 该只读评测不含图像；如意外出现视觉分流，仍落到受核验的推理模型。
+    requested.vision = reasoning_model_id.clone();
     requested.force_pro_on_first_step = true;
-    Ok(requested)
+    Ok((
+        requested,
+        evaluation::EvaluationRoutingMetadata {
+            preset: spec.name.to_string(),
+            reasoning_model_id,
+            execution_model_id,
+        },
+    ))
 }
 
 /// 启动独立的真实只读 Agent 回归评测。
@@ -134,13 +175,15 @@ pub async fn start_background_agent_evaluation(
     model_routing: ModelRoutingConfig,
     max_duration_minutes: Option<u64>,
     scenario: Option<String>,
+    routing_preset: Option<String>,
 ) -> Result<BackgroundEvaluationStart, String> {
-    let evaluation_model_routing = {
+    let (evaluation_model_routing, routing_metadata) = {
         let state = app.state::<DbState>();
-        fixed_evaluation_model_routing(state.inner(), model_routing)?
+        fixed_evaluation_model_routing(state.inner(), model_routing, routing_preset.as_deref())?
     };
-    let reasoning_model_id = evaluation_model_routing.pro.clone();
-    let execution_model_id = evaluation_model_routing.flash.clone();
+    let reasoning_model_id = routing_metadata.reasoning_model_id.clone();
+    let execution_model_id = routing_metadata.execution_model_id.clone();
+    let resolved_route_preset = routing_metadata.preset.clone();
     let duration_minutes = max_duration_minutes
         .unwrap_or(DEFAULT_EVALUATION_DURATION_MINUTES)
         .clamp(1, MAX_EVALUATION_DURATION_MINUTES);
@@ -164,6 +207,7 @@ pub async fn start_background_agent_evaluation(
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
     let worker_evaluation_id = evaluation_id.clone();
+    let worker_routing_metadata = routing_metadata.clone();
     let human_wait_detected = Arc::new(AtomicBool::new(false));
     let human_wait_for_listener = human_wait_detected.clone();
     let progress_event = format!("agent-progress-{}", session_id);
@@ -228,6 +272,7 @@ pub async fn start_background_agent_evaluation(
             report_state.inner(),
             &worker_session_id,
             Some(&worker_evaluation_id),
+            Some(worker_routing_metadata),
         ) {
             Ok(report) => {
                 let _ = event_app.emit(
@@ -251,6 +296,7 @@ pub async fn start_background_agent_evaluation(
         session_id,
         evaluation_id,
         scenario_id,
+        route_preset: resolved_route_preset,
         max_duration_minutes: duration_minutes,
         reasoning_model_id,
         execution_model_id,
@@ -308,5 +354,19 @@ mod tests {
 
         assert!(timed_out);
         assert!(stop_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn named_route_presets_keep_default_and_reject_unknown_names() {
+        let default = evaluation_route_spec(None).unwrap();
+        assert_eq!(default.name, DEFAULT_EVALUATION_ROUTE_PRESET);
+        assert_eq!(default.reasoning_model_name, EVALUATION_REASONING_MODEL_NAME);
+        assert_eq!(default.execution_model_name, EVALUATION_EXECUTION_MODEL_NAME);
+
+        let terra_luna = evaluation_route_spec(Some(GPT56_TERRA_LUNA_ROUTE_PRESET)).unwrap();
+        assert_eq!(terra_luna.platform_name, GPT56_PLATFORM_NAME);
+        assert_eq!(terra_luna.reasoning_model_name, GPT56_TERRA_MODEL_NAME);
+        assert_eq!(terra_luna.execution_model_name, GPT56_LUNA_MODEL_NAME);
+        assert!(evaluation_route_spec(Some("arbitrary-model-id")).is_err());
     }
 }

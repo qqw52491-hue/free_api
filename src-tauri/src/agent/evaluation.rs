@@ -29,6 +29,8 @@ pub struct AgentEvaluationReport {
     pub generated_at: String,
     pub session_id: String,
     pub evaluation_id: Option<String>,
+    #[serde(default)]
+    pub routing: Option<EvaluationRoutingMetadata>,
     pub log_path: String,
     pub trace_status: String,
     pub metrics: EvaluationMetrics,
@@ -63,6 +65,12 @@ pub struct EvaluationMetrics {
     pub plan_title_transition_count: usize,
     #[serde(default)]
     pub parallel_without_rationale_count: usize,
+    #[serde(default)]
+    pub resource_scope_outside_count: usize,
+    #[serde(default)]
+    pub resource_scope_unknown_count: usize,
+    #[serde(default)]
+    pub scope_rebind_count: usize,
     pub max_prompt_tokens: i64,
     pub total_prompt_tokens: i64,
     pub total_completion_tokens: i64,
@@ -78,6 +86,13 @@ pub struct EvaluationMetrics {
 pub struct RepeatedActionSignature {
     pub signature: String,
     pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvaluationRoutingMetadata {
+    pub preset: String,
+    pub reasoning_model_id: String,
+    pub execution_model_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +170,7 @@ pub fn build_and_persist_report(
     db: &DbState,
     session_id: &str,
     evaluation_id: Option<&str>,
+    routing: Option<EvaluationRoutingMetadata>,
 ) -> Result<AgentEvaluationReport, String> {
     let project_dir = std::env::current_dir().map_err(|error| error.to_string())?;
     let cutoff = evaluation_id
@@ -202,6 +218,7 @@ pub fn build_and_persist_report(
         generated_at: Utc::now().to_rfc3339(),
         session_id: session_id.to_string(),
         evaluation_id: evaluation_id.map(str::to_string),
+        routing,
         log_path: log_path.display().to_string(),
         trace_status,
         metrics,
@@ -509,6 +526,24 @@ fn count_trace_step(
     let has_tool_shape = ["tool", "action", "route", "result", "success"]
         .iter()
         .any(|key| object.contains_key(*key));
+    if let Some(output) = object.get("output").and_then(Value::as_str) {
+        if output.contains("[Resource scope]") {
+            if output.contains("relation: outside") {
+                metrics.resource_scope_outside_count += 1;
+            }
+            if output.contains("relation: unknown") {
+                metrics.resource_scope_unknown_count += 1;
+            }
+        }
+    }
+    if let Some(revision) = object
+        .get("resource_scope_revision")
+        .and_then(Value::as_u64)
+    {
+        metrics.scope_rebind_count = metrics
+            .scope_rebind_count
+            .max(revision.saturating_sub(1) as usize);
+    }
     if has_tool_shape {
         metrics.tool_step_count += 1;
         let failed = object.get("success").and_then(Value::as_bool) == Some(false)
@@ -662,7 +697,10 @@ fn verdict(metrics: &EvaluationMetrics, warnings: &[String]) -> String {
 fn render_markdown(report: &AgentEvaluationReport) -> String {
     let metrics = &report.metrics;
     let mut document = format!("# Agent 只读回归评测报告\n\n评测会话：`{}`。生成时间：{}。运行轨迹状态：`{}`。综合判定：**{}**。\n\n## 核心指标\n\n| 指标 | 值 |\n| --- | ---: |\n| 模型调用数 | {} |\n| JSON 解析成功率 | {:.1}% |\n| JSON 解析错误 | {} |\n| 工具步骤 / 失败 | {} / {} |\n| 并行批次 / 最大分支 | {} / {} |\n| 读取意图 / 重复读取意图 | {} / {} |\n| Prompt Token 总量 / 峰值 | {} / {} |\n| 完成 Token 总量 | {} |\n| 缓存命中率 | {:.1}% |\n| 最大上下文使用率 | {:.1}% |\n| 最大发送上下文字符数 | {} |\n| 观测时长（秒） | {} |\n", report.session_id, report.generated_at, report.trace_status, report.verdict, metrics.llm_call_count, metrics.parse_success_rate_percent, metrics.parse_error_count, metrics.tool_step_count, metrics.tool_failure_count, metrics.parallel_batch_count, metrics.max_parallel_branches, metrics.read_intent_count, metrics.repeated_read_intent_count, metrics.total_prompt_tokens, metrics.max_prompt_tokens, metrics.total_completion_tokens, metrics.cache_hit_rate_percent, metrics.max_context_usage_percent, metrics.max_messages_char_count, metrics.observed_duration_seconds);
-    document.push_str(&format!("| 独特读取意图 / 重复读取意图 | {} / {} |\n| 重复失败调用 | {} |\n| 计划标题切换 | {} |\n| 未说明独立性的并行批次 | {} |\n", metrics.unique_read_intent_count, metrics.repeated_read_intent_count, metrics.repeated_failed_action_count, metrics.plan_title_transition_count, metrics.parallel_without_rationale_count));
+    document.push_str(&format!("| 独特读取意图 / 重复读取意图 | {} / {} |\n| 重复失败调用 | {} |\n| 计划标题切换 | {} |\n| 未说明独立性的并行批次 | {} |\n| 资源作用域 outside / unknown / 重绑 | {} / {} / {} |\n", metrics.unique_read_intent_count, metrics.repeated_read_intent_count, metrics.repeated_failed_action_count, metrics.plan_title_transition_count, metrics.parallel_without_rationale_count, metrics.resource_scope_outside_count, metrics.resource_scope_unknown_count, metrics.scope_rebind_count));
+    if let Some(routing) = &report.routing {
+        document.push_str(&format!("\n评测路由：`{}`；推理模型：`{}`；执行模型：`{}`。\n", routing.preset, routing.reasoning_model_id, routing.execution_model_id));
+    }
     document.push_str("\n## 与上一份评测的差异\n\n");
     if let Some(baseline) = &report.baseline {
         document.push_str(&format!("基线评测：`{}`，生成于 {}。正值表示本轮较基线增加；对解析错误、工具失败、重复读取和最大并行分支而言，负值通常更好。\n\n| 指标 | 本轮相对基线变化 |\n| --- | ---: |\n| 模型调用数 | {:+} |\n| JSON 解析错误 | {:+} |\n| 工具失败 | {:+} |\n| 重复读取意图 | {:+} |\n| 最大并行分支 | {:+} |\n| Prompt Token 峰值 | {:+} |\n| 上下文使用率峰值 | {:+.1}% |\n", baseline.baseline_evaluation_id.as_deref().unwrap_or("unknown"), baseline.baseline_generated_at, baseline.llm_call_delta, baseline.parse_error_delta, baseline.tool_failure_delta, baseline.repeated_read_intent_delta, baseline.max_parallel_branches_delta, baseline.max_prompt_tokens_delta, baseline.max_context_usage_percent_delta));
@@ -778,5 +816,31 @@ mod tests {
         assert_eq!(metrics.repeated_failed_action_count, 0);
         assert_eq!(metrics.plan_title_transition_count, 0);
         assert_eq!(metrics.parallel_without_rationale_count, 0);
+    }
+
+    #[test]
+    fn tracks_scope_observations_and_defaults_them_for_legacy_reports() {
+        let traces = vec![json!({"steps":[
+            {"tool":"filesystem/read_text_file","status":"succeeded","output":"[Resource scope]\nrelation: outside","resource_scope_revision": 2},
+            {"tool":"filesystem/read_text_file","status":"succeeded","output":"[Resource scope]\nrelation: unknown","resource_scope_revision": 3}
+        ]})];
+        let (metrics, _, _, _) = analyze(&[], &traces);
+
+        assert_eq!(metrics.resource_scope_outside_count, 1);
+        assert_eq!(metrics.resource_scope_unknown_count, 1);
+        assert_eq!(metrics.scope_rebind_count, 2);
+
+        let legacy: EvaluationMetrics = serde_json::from_value(json!({
+            "llm_call_count": 0, "parse_success_count": 0, "parse_error_count": 0,
+            "parse_success_rate_percent": 0.0, "tool_step_count": 0, "tool_failure_count": 0,
+            "tool_failure_rate_percent": 0.0, "parallel_batch_count": 0, "max_parallel_branches": 0,
+            "read_intent_count": 0, "repeated_read_intent_count": 0, "max_prompt_tokens": 0,
+            "total_prompt_tokens": 0, "total_completion_tokens": 0, "total_cached_tokens": 0,
+            "cache_hit_rate_percent": 0.0, "max_context_usage_percent": 0.0,
+            "max_messages_char_count": 0, "max_raw_response_char_count": 0, "observed_duration_seconds": 0
+        })).unwrap();
+        assert_eq!(legacy.resource_scope_outside_count, 0);
+        assert_eq!(legacy.resource_scope_unknown_count, 0);
+        assert_eq!(legacy.scope_rebind_count, 0);
     }
 }

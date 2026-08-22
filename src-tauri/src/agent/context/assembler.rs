@@ -98,12 +98,18 @@ impl SandwichContext {
         // (5) 核心事实记忆库（按 BTreeMap 严格确定性字母序）
         bottom_state_card.push_str(&MemoryManager::render_memory_card(&self.memories));
 
-        // (6) 会话任务数据区目录 (TaskStore 资源摘要)
+        // (6) 活跃资源作用域契约；独立于历史与压缩，每轮均从事实状态投影。
+        let resource_scope_projection = self.resource_scope.render_projection();
+        if !resource_scope_projection.is_empty() {
+            bottom_state_card.push_str(&format!("{}\n\n", resource_scope_projection));
+        }
+
+        // (7) 会话任务数据区目录 (TaskStore 资源摘要)
         bottom_state_card.push_str(&ContextRenderer::render_task_resources(
             &self.task_resources,
         ));
 
-        // (7) 任务清单 (Todo List)
+        // (8) 任务清单 (Todo List)
         bottom_state_card.push_str(&ContextRenderer::render_todo_list(&self.todo_list));
 
         let trimmed_bottom = bottom_state_card.trim_end();
