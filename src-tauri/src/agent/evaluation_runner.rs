@@ -32,6 +32,7 @@ const STRUCTURED_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_EVALUATION_ROUTE_PRESET: &str = "default";
 const GPT56_TERRA_LUNA_ROUTE_PRESET: &str = "gpt56_terra_luna";
 const VOLC_K2_PRO_ROUTE_PRESET: &str = "volc_k2_pro";
+const VOLC_SINGLE_PRO_ROUTE_PRESET: &str = "volc_single_pro";
 const EVALUATION_PLATFORM_NAME: &str = "火山订阅";
 const EVALUATION_REASONING_MODEL_NAME: &str = "deepseek-v4-pro";
 const EVALUATION_EXECUTION_MODEL_NAME: &str = "minimax-m3";
@@ -76,6 +77,22 @@ fn evaluation_route_spec(requested: Option<&str>) -> Result<EvaluationRouteSpec,
             ],
             execution_candidates: &[
                 (EVALUATION_PLATFORM_NAME, EVALUATION_KIMI_CODE_MODEL_NAME),
+                (GPT56_PLATFORM_NAME, GPT56_LUNA_MODEL_NAME),
+            ],
+        }),
+        // 单模型路由：规划与执行都用 DeepSeek V4 Pro。消除双模型轮换的缓存分账
+        // （v5 实测：连续同模型 82% vs 切换后 65%），代价是执行步也用 pro 价，
+        // 但高缓存命中下 cached tokens 便宜，长任务总成本未必更高——适合 A/B 对比。
+        VOLC_SINGLE_PRO_ROUTE_PRESET => Ok(EvaluationRouteSpec {
+            name: VOLC_SINGLE_PRO_ROUTE_PRESET,
+            reasoning_candidates: &[
+                (EVALUATION_PLATFORM_NAME, EVALUATION_REASONING_MODEL_NAME),
+                (EVALUATION_PLATFORM_NAME, EVALUATION_GLM_MODEL_NAME),
+                (EVALUATION_PLATFORM_NAME, EVALUATION_GLM_ALIAS_MODEL_NAME),
+                (GPT56_PLATFORM_NAME, GPT56_TERRA_MODEL_NAME),
+            ],
+            execution_candidates: &[
+                (EVALUATION_PLATFORM_NAME, EVALUATION_REASONING_MODEL_NAME),
                 (GPT56_PLATFORM_NAME, GPT56_LUNA_MODEL_NAME),
             ],
         }),
