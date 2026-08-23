@@ -183,8 +183,12 @@ pub async fn call_llm(
     let config = ModelConfig::from_db(state, &model_id)?;
     config.log_platform_info();
 
-    // 2. 组装消息
-    let api_messages = messages.assemble_messages();
+    // 2. 组装消息（保持原始序列）+ provider 能力归一化。
+    // OpenAI 兼容路由（火山/DeepSeek/中转站/Ollama 等）直接发送原序列：
+    // 历史尾部字节跨轮稳定，前缀缓存不被每轮重渲染的状态卡打断。
+    // 仅要求严格 user/assistant 交替的 provider（Anthropic 系）才归并。
+    let api_messages =
+        normalize_messages_for_provider(messages.assemble_messages(), &config);
     let history_estimate_at_request = messages.history_estimated_tokens();
     print_debug_messages(&api_messages);
 
@@ -585,5 +589,87 @@ mod tests {
         assert!(requires_outer_protocol_recovery("计划：先建立项目地图"));
         assert!(requires_outer_protocol_recovery("I will inspect the repository first."));
         assert!(!requires_outer_protocol_recovery("{\"tool\":\"read_text_file\"}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provider 消息能力归一化
+//
+// 通用组装器（assembler）输出原始消息序列，历史与动态尾部各自独立成条；
+// 是否把连续同角色消息归并为一条，由这里的 provider 能力决定——
+// 这是发送适配层的职责，不允许进入通用上下文组装路径。
+// ---------------------------------------------------------------------------
+
+/// 判断 provider 是否要求严格 user/assistant 交替（需要在发送前归并连续
+/// 同角色消息）。Anthropic Messages API 以交替 turn 训练（现行服务端会把
+/// 连续 turn 自动合并为单 turn，历史上曾直接 422，保守起见仍客户端归并）。
+/// OpenAI 兼容路由接受连续同角色消息，保持原序列以稳定前缀缓存。
+fn provider_requires_alternating_roles(config: &crate::llm::ModelConfig) -> bool {
+    config.base_url.to_ascii_lowercase().contains("anthropic")
+}
+
+fn normalize_messages_for_provider(
+    messages: Vec<crate::agent::context::types::ChatMessage>,
+    config: &crate::llm::ModelConfig,
+) -> Vec<crate::agent::context::types::ChatMessage> {
+    if provider_requires_alternating_roles(config) {
+        crate::agent::context::assembler::consolidate_consecutive_messages(messages)
+    } else {
+        messages
+    }
+}
+
+#[cfg(test)]
+mod provider_normalization_tests {
+    use super::*;
+    use crate::agent::context::types::ChatMessage;
+    use serde_json::json;
+
+    fn config_with_base_url(url: &str) -> crate::llm::ModelConfig {
+        crate::llm::ModelConfig {
+            model_id: "m".to_string(),
+            platform_name: "p".to_string(),
+            base_url: url.to_string(),
+            api_key: "k".to_string(),
+            model_name: "n".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            is_ollama: false,
+            is_lmstudio: false,
+            context_window: 200_000,
+            timeout_secs: 60,
+        }
+    }
+
+    fn sample_messages() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage { role: "user".to_string(), content: json!("历史输出 C") },
+            ChatMessage { role: "user".to_string(), content: json!("【状态卡】") },
+            ChatMessage { role: "user".to_string(), content: json!("【决策指令】") },
+        ]
+    }
+
+    #[test]
+    fn openai_compatible_routes_keep_original_sequence() {
+        for url in [
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "https://api.deepseek.com",
+            "https://zhandou.online/v1",
+        ] {
+            let normalized = normalize_messages_for_provider(sample_messages(), &config_with_base_url(url));
+            assert_eq!(normalized.len(), 3, "OpenAI 兼容路由不得归并：{}", url);
+            assert_eq!(normalized[0].content, json!("历史输出 C"), "历史消息必须保持独立");
+        }
+    }
+
+    #[test]
+    fn anthropic_routes_consolidate_consecutive_same_role() {
+        let normalized = normalize_messages_for_provider(
+            sample_messages(),
+            &config_with_base_url("https://api.anthropic.com/v1"),
+        );
+        assert_eq!(normalized.len(), 1, "Anthropic 系必须归并为单条");
+        let text = normalized[0].content.as_str().unwrap();
+        assert!(text.contains("历史输出 C") && text.contains("【状态卡】") && text.contains("【决策指令】"));
     }
 }

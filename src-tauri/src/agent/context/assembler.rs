@@ -133,10 +133,14 @@ impl SandwichContext {
         }
 
         // ════════════════════════════════════════════════════════════════
-        // 🔄 出口统一合并：对所有相邻的同 role 消息做单趟无损归并
-        // 彻底杜绝连续 2 条 user 或连续 2 条 assistant 导致 Anthropic 422 报错
+        // 出口保持原始消息序列：组装层不做角色归并。
+        // 归并是 provider 适配层的职责（见 llm_client 的
+        // normalize_messages_for_provider）：OpenAI 兼容路由接受连续同角色
+        // 消息，保持原序列可让历史尾部字节跨轮稳定，前缀缓存不会被每轮
+        // 重新渲染的状态卡/决策指令打断；只有要求严格交替角色的 provider
+        // （如 Anthropic 系）才在发送前归并。
         // ════════════════════════════════════════════════════════════════
-        consolidate_consecutive_messages(messages)
+        messages
     }
 }
 
@@ -210,8 +214,12 @@ pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
     msg.clone()
 }
 
-/// 纯函数：将消息队列中连续相同角色的文本消息用换行合并为一条
-fn consolidate_consecutive_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+/// 纯函数：将消息队列中连续相同角色的文本消息用换行合并为一条。
+/// 仅供 provider 适配层（llm_client）在目标 provider 要求严格
+/// user/assistant 交替时调用；通用组装路径不得调用——那会把每轮变化的
+/// 状态卡拼进稳定的 历史 消息，使其在下一轮恢复原始字节，
+/// 从而打断逐字节前缀缓存。
+pub(crate) fn consolidate_consecutive_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut consolidated: Vec<ChatMessage> = Vec::with_capacity(messages.len());
 
     for msg in messages {
@@ -272,12 +280,24 @@ mod tests {
             .unwrap()
             .contains("New Goal 2 (Updated)"));
 
-        // 底部动态卡只有活跃工具，user_goal 已由 M1 承载，不重复
-        let bottom_card = msgs2.last().unwrap().content.as_str().unwrap();
-        assert!(bottom_card.contains("【当前活跃工具】: remote-hub"));
+        // 底部动态卡是独立消息（组装出口不合并），user_goal 已由 M1 承载
+        let bottom_card = msgs2
+            .iter()
+            .find(|m| {
+                m.content
+                    .as_str()
+                    .map(|c| c.contains("【当前活跃工具】"))
+                    .unwrap_or(false)
+            })
+            .expect("应存在独立的状态卡消息");
+        assert!(bottom_card.content.as_str().unwrap().contains("【当前活跃工具】: remote-hub"));
         assert!(
-            !bottom_card.contains("【当前任务目标】"),
+            !bottom_card.content.as_str().unwrap().contains("【当前任务目标】"),
             "user_goal 不应再出现在底部卡片"
+        );
+        assert!(
+            msgs2.len() >= 3,
+            "历史、状态卡、决策指令应各自独立成条（OpenAI 兼容路由不合并）"
         );
     }
 
@@ -334,6 +354,58 @@ mod tests {
         assert!(!last_msg.contains("【当前最新环境观测 (Observation)】"));
         // 决策指令依然正常输出
         assert!(last_msg.contains("请基于上述上下文执行下一步"));
+    }
+
+    #[test]
+    fn history_tail_bytes_stable_across_turns_without_provider_merge() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+        ctx.active_tool = Some("t".to_string());
+
+        // 第一轮：历史尾部 (assistant, user 执行输出 C)，其后是临时渲染的状态卡与指令
+        ctx.turns_history.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: json!("计划: 检索 | 工具: t | 动作: run"),
+        });
+        ctx.turns_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: json!("【执行输出 C】\noutput_id: c-1\npayload line"),
+        });
+        let round1 = ctx.assemble_messages();
+
+        // 执行输出 C 必须独立成条，不得与状态卡/指令拼接
+        let c1 = round1
+            .iter()
+            .find(|m| m.content.as_str().map(|c| c.starts_with("【执行输出 C】")).unwrap_or(false))
+            .expect("round1 应含执行输出 C");
+        assert_eq!(
+            c1.content,
+            json!("【执行输出 C】\noutput_id: c-1\npayload line"),
+            "历史消息不得被尾部动态内容改写字节"
+        );
+
+        // 第二轮：追加新轮次，状态卡/指令在新尾部重新渲染
+        ctx.turns_history.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: json!("计划: 继续 | 工具: t | 动作: next"),
+        });
+        ctx.turns_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: json!("【执行输出 D】\noutput_id: d-1\nother payload"),
+        });
+        let round2 = ctx.assemble_messages();
+
+        // 核心断言：round1 去掉末尾两条动态尾部（状态卡+指令）后的序列，
+        // 必须是 round2 的逐字节前缀——服务端前缀缓存可复用的充要条件。
+        let stable_len = round1.len() - 2;
+        let prefix1: Vec<String> = round1[..stable_len]
+            .iter()
+            .map(|m| serde_json::to_string(m).unwrap())
+            .collect();
+        let prefix2: Vec<String> = round2[..stable_len]
+            .iter()
+            .map(|m| serde_json::to_string(m).unwrap())
+            .collect();
+        assert_eq!(prefix1, prefix2, "上一轮稳定前缀必须在下一轮逐字节复现");
     }
 
     #[test]
