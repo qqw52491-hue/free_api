@@ -68,12 +68,28 @@ impl SandwichContext {
             ));
         }
 
-        // (2) 全局进度摘要
+        // (2) 全局进度摘要：完整版已事件化入历史（set_progress_summary），
+        // 尾部只携带首行+版本指针；事件缺失（旧会话/异常路径）回退全文。
         if !self.progress_summary.is_empty() {
-            bottom_state_card.push_str(&format!(
-                "【全局进度与策略摘要】\n{}\n\n",
-                self.progress_summary
-            ));
+            if self.last_persisted_summary.as_deref() == Some(self.progress_summary.as_str()) {
+                let first_line: String = self
+                    .progress_summary
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(160)
+                    .collect();
+                bottom_state_card.push_str(&format!(
+                    "【全局进度摘要】当前 v{}（首行）：{}… 完整版见历史事件 v{}\n\n",
+                    self.persisted_summary_revision, first_line, self.persisted_summary_revision
+                ));
+            } else {
+                bottom_state_card.push_str(&format!(
+                    "【全局进度与策略摘要】\n{}\n\n",
+                    self.progress_summary
+                ));
+            }
         }
 
         // (3) 避坑指南（失败教训）
@@ -354,6 +370,47 @@ mod tests {
         assert!(!last_msg.contains("【当前最新环境观测 (Observation)】"));
         // 决策指令依然正常输出
         assert!(last_msg.contains("请基于上述上下文执行下一步"));
+    }
+
+    #[test]
+    fn progress_summary_versions_as_write_once_history_event_with_digest_tail() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+
+        // 第一版：完整全文作为历史事件追加，版本号 1
+        ctx.set_progress_summary("v1 阶段总结：完成拓扑分析。\n细节 A。\n细节 B。");
+        assert_eq!(ctx.persisted_summary_revision, 1);
+        let history_text = serde_json::to_string(&ctx.turns_history).unwrap();
+        assert!(history_text.contains("【全局进度与策略摘要 v1（write-once 历史事件"));
+        assert!(history_text.contains("细节 B"), "完整版必须进历史事件");
+
+        // 尾部只携带首行摘要 + 版本指针（不再全量重发）
+        let msgs = ctx.assemble_messages();
+        let tail_card = msgs
+            .iter()
+            .find(|m| {
+                m.content
+                    .as_str()
+                    .map(|c| c.contains("【全局进度摘要】"))
+                    .unwrap_or(false)
+            })
+            .expect("尾部应存在摘要指针");
+        let tail_text = tail_card.content.as_str().unwrap();
+        assert!(tail_text.contains("v1（首行）"));
+        assert!(tail_text.contains("完整版见历史事件 v1"));
+        assert!(!tail_text.contains("细节 B"), "尾部不得再全量重发");
+
+        // 未变化的更新：不追加新事件（历史 append-only 稳定）
+        let history_before = serde_json::to_string(&ctx.turns_history).unwrap();
+        ctx.set_progress_summary("v1 阶段总结：完成拓扑分析。\n细节 A。\n细节 B。");
+        assert_eq!(ctx.persisted_summary_revision, 1, "未变化不得新版本");
+        assert_eq!(history_before, serde_json::to_string(&ctx.turns_history).unwrap());
+
+        // 变化的更新：追加 v2 事件
+        ctx.set_progress_summary("v2 阶段总结：进入压缩链路审查。");
+        assert_eq!(ctx.persisted_summary_revision, 2);
+        assert!(serde_json::to_string(&ctx.turns_history)
+            .unwrap()
+            .contains("【全局进度与策略摘要 v2"));
     }
 
     #[test]

@@ -601,11 +601,17 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 /// 判断 provider 是否要求严格 user/assistant 交替（需要在发送前归并连续
-/// 同角色消息）。Anthropic Messages API 以交替 turn 训练（现行服务端会把
-/// 连续 turn 自动合并为单 turn，历史上曾直接 422，保守起见仍客户端归并）。
-/// OpenAI 兼容路由接受连续同角色消息，保持原序列以稳定前缀缓存。
+/// 同角色消息）。优先读 platforms.requires_alternating_roles 显式配置
+///（1=要求归并、0=接受原序列）；未设置（-1，含旧库）时按 base_url 推断：
+/// Anthropic Messages API 以交替 turn 训练（现行服务端会把连续 turn 自动
+/// 合并为单 turn，历史上曾直接 422，保守起见仍客户端归并）。OpenAI 兼容
+/// 路由接受连续同角色消息，保持原序列以稳定前缀缓存。
 fn provider_requires_alternating_roles(config: &crate::llm::ModelConfig) -> bool {
-    config.base_url.to_ascii_lowercase().contains("anthropic")
+    match config.requires_alternating_roles {
+        1 => true,
+        0 => false,
+        _ => config.base_url.to_ascii_lowercase().contains("anthropic"),
+    }
 }
 
 fn normalize_messages_for_provider(
@@ -638,6 +644,7 @@ mod provider_normalization_tests {
             is_lmstudio: false,
             context_window: 200_000,
             timeout_secs: 60,
+            requires_alternating_roles: -1,
         }
     }
 
@@ -660,6 +667,26 @@ mod provider_normalization_tests {
             assert_eq!(normalized.len(), 3, "OpenAI 兼容路由不得归并：{}", url);
             assert_eq!(normalized[0].content, json!("历史输出 C"), "历史消息必须保持独立");
         }
+    }
+
+    #[test]
+    fn explicit_platform_capability_overrides_url_guess() {
+        // 显式 0：即使 URL 含 anthropic 也保持原序列（兼容层/代理场景）
+        let mut cfg = config_with_base_url("https://proxy.example.com/anthropic/v1");
+        cfg.requires_alternating_roles = 0;
+        let normalized = normalize_messages_for_provider(sample_messages(), &cfg);
+        assert_eq!(normalized.len(), 3, "显式 0 必须压过 URL 猜测");
+
+        // 显式 1：非 anthropic URL 也归并
+        let mut cfg2 = config_with_base_url("https://ark.cn-beijing.volces.com/api/coding/v3");
+        cfg2.requires_alternating_roles = 1;
+        let normalized2 = normalize_messages_for_provider(sample_messages(), &cfg2);
+        assert_eq!(normalized2.len(), 1, "显式 1 必须归并");
+
+        // -1（未设置/旧库）：回落 URL 推断
+        let mut cfg3 = config_with_base_url("https://api.anthropic.com");
+        cfg3.requires_alternating_roles = -1;
+        assert!(provider_requires_alternating_roles(&cfg3));
     }
 
     #[test]

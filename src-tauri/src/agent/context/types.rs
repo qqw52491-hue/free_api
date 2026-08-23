@@ -156,6 +156,13 @@ pub struct SandwichContext {
     /// 依赖固定单步余量。
     #[serde(default)]
     pub last_reported_history_estimate_tokens: Option<usize>,
+    /// 已事件化写入历史的进度摘要全文（write-once）：变化才追加完整版进
+    /// 历史，尾部状态卡此后只携带首行摘要+版本指针，削减每轮全量重发。
+    #[serde(default)]
+    pub last_persisted_summary: Option<String>,
+    /// 进度摘要的历史事件版本号。
+    #[serde(default)]
+    pub persisted_summary_revision: u64,
     /// 外部独立任务数据区目录引用 (轻量 schema 与行数，完整数据行在 SQLite)
     #[serde(default)]
     pub task_resources: Vec<TaskResourceRef>,
@@ -194,6 +201,8 @@ impl SandwichContext {
             resource_scope: ResourceScopeContract::default(),
             no_progress: NoProgressTracker::default(),
             last_reported_prompt_tokens: None,
+            last_persisted_summary: None,
+            persisted_summary_revision: 0,
             last_reported_history_estimate_tokens: None,
             task_resources: Vec::new(),
             active_tool: None,
@@ -374,6 +383,30 @@ impl SandwichContext {
     /// MCP 服务目录只说明可用能力，不等同于任一子工具的 JSON Schema。
     /// 因此 `remote-http-mcp` 与 `remote-http-mcp/read_text_file` 必须按不同键去重：
     /// 前者可防止重复注入整个服务目录，后者则允许在首次调用失败时追加一次精确参数契约。
+    /// 更新全局进度摘要；内容变化时把完整版作为 write-once 历史事件追加。
+    /// 状态卡尾部此后只携带首行摘要+版本指针（见 assembler），实测该块
+    /// 占状态卡 ~86% 体积且 18 轮仅变化 3 次，事件化收益显著。
+    pub fn set_progress_summary(&mut self, summary: &str) {
+        let trimmed = summary.trim();
+        if trimmed.is_empty() {
+            self.progress_summary = summary.to_string();
+            return;
+        }
+        let unchanged = self.last_persisted_summary.as_deref() == Some(trimmed);
+        if !unchanged {
+            self.persisted_summary_revision = self.persisted_summary_revision.saturating_add(1);
+            self.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!(format!(
+                    "【全局进度与策略摘要 v{}（write-once 历史事件，后续轮次以此为准）】\n{}",
+                    self.persisted_summary_revision, trimmed
+                )),
+            });
+            self.last_persisted_summary = Some(trimmed.to_string());
+        }
+        self.progress_summary = trimmed.to_string();
+    }
+
     pub fn has_tool_manual(&self, tool_key: &str) -> bool {
         let clean_key = tool_key.trim();
         if clean_key.is_empty() {

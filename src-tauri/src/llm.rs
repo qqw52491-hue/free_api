@@ -32,6 +32,9 @@ pub struct ModelConfig {
     // pub is_local: bool,
     pub context_window: i64,
     pub timeout_secs: u64,
+    /// 消息角色规约：-1 未设置（按 base_url 推断）、0 显式接受连续同角色、
+    /// 1 显式要求 user/assistant 交替（发送前归并连续同角色消息）。
+    pub requires_alternating_roles: i64,
 }
 
 impl ModelConfig {
@@ -55,10 +58,11 @@ impl ModelConfig {
             max_tokens,
             temperature,
             context_window_db,
+            requires_alternating_roles_db,
         ) = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT m.id, p.name, p.base_url, p.api_key, m.name, m.max_tokens, m.temperature, m.context_window
+                    "SELECT m.id, p.name, p.base_url, p.api_key, m.name, m.max_tokens, m.temperature, m.context_window, p.requires_alternating_roles
                      FROM models m JOIN platforms p ON p.id = m.platform_id
                      WHERE m.id = ?1",
                 )
@@ -73,6 +77,7 @@ impl ModelConfig {
                     row.get::<_, i64>(5)?,
                     row.get::<_, f64>(6)?,
                     row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })
             .map_err(|e| format!("模型不存在: {}", e))?
@@ -107,6 +112,7 @@ impl ModelConfig {
             is_lmstudio,
             context_window,
             timeout_secs,
+            requires_alternating_roles: requires_alternating_roles_db,
         })
     }
 
@@ -702,6 +708,7 @@ mod tests {
             is_lmstudio: false,
             context_window: 128_000,
             timeout_secs: 120,
+            requires_alternating_roles: -1,
         }
     }
 

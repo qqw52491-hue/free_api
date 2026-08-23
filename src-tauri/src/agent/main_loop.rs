@@ -551,7 +551,7 @@ pub async fn run_agent_main_loop(
             println!("📝 AI 更新了核心记忆: {:?}", instruction.memories_update);
         }
         if let Some(ref summary) = instruction.progress_summary {
-            context.progress_summary = summary.clone();
+            context.set_progress_summary(summary);
             println!("📝 AI 更新了进度摘要: {}", summary);
         }
 

@@ -148,6 +148,8 @@ pub struct DurableAgentContext {
     pub last_reported_prompt_tokens: Option<usize>,
     #[serde(default)]
     pub last_reported_history_estimate_tokens: Option<usize>,
+    pub last_persisted_summary: Option<String>,
+    pub persisted_summary_revision: u64,
     pub needs_observation_refresh: bool,
 }
 
@@ -168,6 +170,8 @@ impl DurableAgentContext {
             last_reported_prompt_tokens: context.last_reported_prompt_tokens,
             last_reported_history_estimate_tokens: context
                 .last_reported_history_estimate_tokens,
+            last_persisted_summary: context.last_persisted_summary.clone(),
+            persisted_summary_revision: context.persisted_summary_revision,
             // 浏览器/DOM 可能已变化，恢复后不能相信旧观测。
             needs_observation_refresh: !context.current_observation.is_empty(),
         }
@@ -185,6 +189,8 @@ impl DurableAgentContext {
         context.last_reported_prompt_tokens = self.last_reported_prompt_tokens;
         context.last_reported_history_estimate_tokens = self
             .last_reported_history_estimate_tokens;
+        context.last_persisted_summary = self.last_persisted_summary.clone();
+        context.persisted_summary_revision = self.persisted_summary_revision;
         // 工具说明书是派生缓存，必须依照当前 Runtime 重新加载。
         context.active_tool_detail.clear();
         context.carry_memories = false;
