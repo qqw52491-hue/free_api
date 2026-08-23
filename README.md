@@ -417,6 +417,7 @@ pub fn dispatch(
 | [`main_loop.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/main_loop.rs) | 主生命周期 | **任务顶层调度器与运行状态机**：驱动 Agent 跨步流转、前缀缓存预热、死循环硬拦截、状态卡刷新、TaskStore 目录同步与任务完成结算。 |
 | [`mcp_catalog.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/mcp_catalog.rs) | 能力提取 | **MCP 工具清单缓存与智能能力卡提纯**：首次扫描或变更时调用选定大模型，将几千行冗长 JSON Schema 提炼为几十 Token 的结构化能力卡，极大缩减 Prompt。 |
 | [`mod.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/mod.rs) | 模块根 | **Agent 模块聚合导出与终态指令回归测试**：精简的 Hub 根，集中导出子模块并包含核心终态判定与工具菜单单元测试。 |
+| [`plan_tree_dispatch.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/plan_tree_dispatch.rs) | 并行执行 | **计划树与受控并行分发**：把模型的 parallel/plan_tree 指令转换为 PlanNode 树并同步执行；validate_controlled_parallel_batch 校验单批分支数不超过 2（响亮拒绝）。从 dispatcher 抽出。 |
 | [`prompt_assembly.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/prompt_assembly.rs) | 提示词组装 | **静态提示词与内置工具菜单组装器**：核心系统提示词三级回退加载、task_store 数据区说明、tools/*.md 扫描；从 main_loop 抽出，输出与内联实现字节级一致（保护前缀缓存）。 |
 | [`project_map.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/project_map.rs) | 项目地图 | **工作区轻量项目地图生成器**：在代码审查或跨文件任务启动时，提取目录拓扑、入口文件与 Git 差异元数据（不读大文件正文），避免上下文膨胀。 |
 | [`router.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/router.rs) | 模型路由 | **动态分级路由器**：根据当前任务目标与上下文复杂度（视觉图表、长篇代码、轻量步骤），动态在 Fast / Pro / Vision 模型阶梯间切换。 |
