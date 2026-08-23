@@ -1,5 +1,6 @@
 pub mod client;
 pub mod registry;
+pub mod session_bootstrap;
 pub mod types;
 
 pub use client::*;

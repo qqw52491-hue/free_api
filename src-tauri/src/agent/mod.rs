@@ -13,6 +13,7 @@ pub mod mcp_catalog;
 pub mod plan_tree;
 pub mod project_map;
 pub mod prompt_assembly;
+pub mod tool_manual;
 pub mod retrieval;
 pub mod router;
 pub mod run_state;
