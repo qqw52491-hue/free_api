@@ -146,6 +146,11 @@ pub struct SandwichContext {
     /// 无进展重复检测：相同工具+相同参数+相同输出/失败的运行时事实（策略级提示用）。
     #[serde(default)]
     pub no_progress: NoProgressTracker,
+    /// 服务端回传的最近一次真实 prompt tokens（总口径：system+goal+历史+尾部）。
+    /// 用于校准压缩水位：本地保守估算对中文按字节地板超计约 40-60%，曾把
+    /// 真实占用仅 16-26% 判成高水位而过早脱水，无谓打断服务端前缀缓存。
+    #[serde(default)]
+    pub last_reported_prompt_tokens: Option<usize>,
     /// 外部独立任务数据区目录引用 (轻量 schema 与行数，完整数据行在 SQLite)
     #[serde(default)]
     pub task_resources: Vec<TaskResourceRef>,
@@ -183,6 +188,7 @@ impl SandwichContext {
             plan_state: PlanState::new(),
             resource_scope: ResourceScopeContract::default(),
             no_progress: NoProgressTracker::default(),
+            last_reported_prompt_tokens: None,
             task_resources: Vec::new(),
             active_tool: None,
             active_tool_detail: String::new(),

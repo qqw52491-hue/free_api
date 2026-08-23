@@ -234,6 +234,11 @@ pub async fn run_call_llm_and_run_tool_phases(
             },
         )?;
 
+        // 记录服务端回传的真实 prompt tokens，供压缩水位校准（见 compaction.rs）。
+        if token_usage.prompt_tokens > 0 {
+            context.last_reported_prompt_tokens = Some(token_usage.prompt_tokens as usize);
+        }
+
         // 📊 发送 Token 用量与速度指标统计到前端
         app.emit(
             &format!("agent-progress-{}", final_session_id),

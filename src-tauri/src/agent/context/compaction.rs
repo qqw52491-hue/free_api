@@ -235,6 +235,21 @@ impl SandwichContext {
         let budget = self.current_budget();
         let mut current_tokens = self.history_estimated_tokens();
 
+        // 真实校准（缓存友好）：本地保守估算对中文按字节地板超计约 40-60%，
+        // 曾在服务端真实占用仅 16-26% 时触发脱水、打断已建立的前缀缓存
+        // （单次回归实测两次断裂共损 28,546 未命中 tokens）。有服务端回传的
+        // 真实总 prompt 时以它为准：真实历史 ≈ 真实总 prompt − 静态前缀 − 尾部，
+        // 再留一步增长余量；本地估算仅在尚无真实数据的最初几步兜底。
+        const REALITY_HEADROOM_TOKENS: usize = 6_000;
+        if let Some(real_total) = self.last_reported_prompt_tokens {
+            let calibrated = real_total
+                .saturating_sub(budget.static_prefix_tokens + budget.tail_state_tokens)
+                .saturating_add(REALITY_HEADROOM_TOKENS);
+            if calibrated > 0 {
+                current_tokens = calibrated;
+            }
+        }
+
         // 未达高水位，绝不轻易压缩（保护前缀缓存命中率）
         if current_tokens <= budget.high_watermark_tokens {
             return;
@@ -565,6 +580,48 @@ mod tests {
         // 保护区外的旧输出已定型为证据句柄（存根），原文不再驻留上下文
         let full_text = serde_json::to_string(&ctx.turns_history).unwrap();
         assert!(full_text.contains("完整详细数据已安全持久化至 SQLite"));
+    }
+
+    #[test]
+    fn reality_anchored_watermark_prevents_premature_dehydration() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+        ctx.context_window_tokens = 200_000;
+
+        // 本地估算视角：塞入大量中文文本（保守估算约 100K+ tokens）
+        let big_cjk = "审查要点覆盖资源作用域契约、上下文压缩水位与工具参数契约等领域的细节描述。".repeat(600);
+        for i in 0..12 {
+            ctx.turns_history.push(crate::agent::context::types::ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!("step {} {}", i, big_cjk)),
+            });
+        }
+        let local_estimate = ctx.history_estimated_tokens();
+        assert!(
+            local_estimate > ctx.current_budget().high_watermark_tokens,
+            "前置条件：本地估算应已超高水位（实际 {}）",
+            local_estimate
+        );
+
+        // 服务端真实回传：总 prompt 仅 30K（真实占用很低）→ 不得触发脱水/压缩
+        ctx.last_reported_prompt_tokens = Some(30_000);
+        let before = ctx.turns_history.clone();
+        ctx.maybe_compact_history();
+        assert_eq!(
+            serde_json::to_string(&ctx.turns_history).unwrap(),
+            serde_json::to_string(&before).unwrap(),
+            "真实占用远低于水位时不得脱水（历史必须字节不变）"
+        );
+
+        // 真实回传接近上限（总 prompt 78K，扣除静态后 ≈ 历史 71K > 高水位 64K）→ 触发。
+        // 触发形态随内容而异：带 output_id 的消息走脱水存根，纯文本走切除+摘要卡。
+        let before_high = serde_json::to_string(&ctx.turns_history).unwrap();
+        ctx.last_reported_prompt_tokens = Some(78_000);
+        ctx.maybe_compact_history();
+        let after_high = serde_json::to_string(&ctx.turns_history).unwrap();
+        assert_ne!(
+            before_high, after_high,
+            "真实占用超高水位时必须触发压缩（脱水或归档其一）"
+        );
     }
 
     #[test]
