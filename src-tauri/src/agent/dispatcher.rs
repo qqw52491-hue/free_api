@@ -1,3 +1,4 @@
+use crate::agent::plan_tree_dispatch::{run_plan_tree_sync, validate_controlled_parallel_batch, MAX_CONTROLLED_PARALLEL_BRANCHES};
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::mcp_catalog::invalidate_plugin;
 use crate::agent::retrieval;
@@ -123,58 +124,8 @@ pub fn emit_tool_event(
 }
 
 /// 🌟 智能规范化 MCP 参数（自动解包嵌套层级，自动映射 path/filePath 等常见别名）
-fn normalize_mcp_params(params: &serde_json::Value) -> serde_json::Value {
-    let mut obj = match params {
-        serde_json::Value::Object(map) => map.clone(),
-        _ => return params.clone(),
-    };
-
-    // 1. 如果大模型把参数多包了一层 (如 command: {...} 或 args: {...} 或 params: {...})，自动解包展开
-    if obj.len() == 1 {
-        if let Some(inner) = obj
-            .get("command")
-            .or_else(|| obj.get("args"))
-            .or_else(|| obj.get("params"))
-        {
-            if let Some(inner_map) = inner.as_object() {
-                obj = inner_map.clone();
-            }
-        }
-    }
-
-    // 2. 常见文件路径别名自动规范化 (filePath / file_path / file / filename / dirPath / dir_path -> path)
-    if !obj.contains_key("path") {
-        if let Some(v) = obj
-            .get("filePath")
-            .or_else(|| obj.get("file_path"))
-            .or_else(|| obj.get("file"))
-            .or_else(|| obj.get("filename"))
-            .or_else(|| obj.get("dirPath"))
-            .or_else(|| obj.get("dir_path"))
-            .or_else(|| obj.get("directory"))
-        {
-            obj.insert("path".to_string(), v.clone());
-        }
-    }
-
-    // 3. 针对 shell 命令的自适应兼容：若 command 为包含空格的整句命令行且未显式指定 args 或 shell_mode，自动开启 shell_mode: true
-    if let Some(serde_json::Value::String(cmd_str)) = obj.get("command") {
-        if cmd_str.contains(' ')
-            && !obj.contains_key("args")
-            && !obj.contains_key("shell_mode")
-            && !obj.contains_key("shell")
-        {
-            obj.insert("shell_mode".to_string(), serde_json::json!(true));
-        }
-    }
-
-    serde_json::Value::Object(obj)
-}
-
 const MAX_CODE_READ_LINES: u64 = 240;
 
-/// 为常见源码读取工具补上可见、稳定的行范围护栏。
-/// 它不会拒绝读取，而是把无范围、过大或参数别名（offset/limit）的请求改写为一个可继续扩展的局部窗口。
 fn guard_code_read_range(
     tool_name: &str,
     params: serde_json::Value,
@@ -239,7 +190,7 @@ fn guard_code_read_range(
 }
 
 /// 执行单条指令的内部路由逻辑（4大核心原生工具 + MCP 插件路由，彻底杜绝历史兼容包袱）
-pub fn execute_command_inner(
+pub(crate) fn execute_command_inner(
     db: &DbState,
     session_id: &str,
     tool: &str,
@@ -408,84 +359,6 @@ pub fn execute_command_inner(
     }
 }
 
-pub fn run_plan_tree_sync(
-    db: &DbState,
-    session_id: &str,
-    plan_node: &crate::agent::plan_tree::PlanNode,
-    registry: &PluginRegistry,
-) -> DispatchResult {
-    let db_clone = db.clone();
-    let sid = session_id.to_string();
-    let reg_clone = registry.clone();
-
-    let invoker: crate::agent::plan_tree::ToolInvoker = Arc::new(move |tool, args| {
-        let db_c = db_clone.clone();
-        let sid_c = sid.clone();
-        let reg_c = reg_clone.clone();
-
-        Box::pin(async move {
-            let action = args
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            // 修复: 并行分支在 tokio worker 线程上调用 invoker，而 execute_command_inner
-            // 对 MCP 插件使用 handle.block_on，在 runtime 内嵌套 block_on 会直接 panic。
-            // 用 spawn_blocking 把同步分发放到 blocking 线程执行，消除 runtime 嵌套。
-            let res = tokio::task::spawn_blocking(move || {
-                execute_command_inner(&db_c, &sid_c, &tool, &action, &args, &reg_c)
-            })
-            .await
-            .map_err(|e| format!("工具执行任务崩溃: {}", e))?;
-            if res.success {
-                let parsed_val: serde_json::Value = serde_json::from_str(&res.stdout)
-                    .unwrap_or_else(|_| serde_json::json!({ "output": res.stdout }));
-                Ok(parsed_val)
-            } else {
-                Err(if !res.stderr.is_empty() {
-                    res.stderr
-                } else {
-                    "工具执行返回失败".to_string()
-                })
-            }
-        })
-    });
-
-    let report = futures::executor::block_on(crate::agent::plan_tree::execute_plan_tree(
-        plan_node, invoker, None,
-    ));
-
-    let success = report.success;
-    let feedback = report.to_llm_feedback();
-
-    DispatchResult {
-        stdout: feedback.clone(),
-        stderr: if success { String::new() } else { feedback },
-        success,
-        route: if success {
-            "plan_tree_success".to_string()
-        } else {
-            "plan_tree_failed".to_string()
-        },
-    }
-}
-
-const MAX_CONTROLLED_PARALLEL_BRANCHES: usize = 2;
-
-/// 并行仅接受少量、已经由模型明确给出的独立分支。
-/// 该校验不推断、补充或改写任何 MCP 子步骤参数。
-fn validate_controlled_parallel_batch(parallel_steps: &[serde_json::Value]) -> Result<(), String> {
-    match parallel_steps.len() {
-        0 => Err("parallel 必须至少包含一个已确定的独立分支；未知范围请使用单步取证。".to_string()),
-        1..=MAX_CONTROLLED_PARALLEL_BRANCHES => Ok(()),
-        actual => Err(format!(
-            "parallel 单批最多允许 {} 个独立分支，当前为 {}。请先串行收缩范围与工具契约，再保留至多两个互不依赖、参数已确定的分支。宿主不会改写子步骤参数。",
-            MAX_CONTROLLED_PARALLEL_BRANCHES, actual
-        )),
-    }
-}
-
-// 根据指令执行具体动作
 pub fn run_agent_step(
     db: &DbState,
     session_id: &str,
@@ -702,21 +575,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
-    #[test]
-    fn controlled_parallel_allows_at_most_two_explicit_branches_without_parameter_rewrite() {
-        let one = vec![serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"path": "/repo/a.rs"}})];
-        let two = vec![
-            serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"cwd": "/repo", "path": "a.rs"}}),
-            serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"cwd": "/repo", "path": "b.rs"}}),
-        ];
-        let three = vec![serde_json::json!({}), serde_json::json!({}), serde_json::json!({})];
-
-        assert!(validate_controlled_parallel_batch(&one).is_ok());
-        assert!(validate_controlled_parallel_batch(&two).is_ok());
-        assert!(validate_controlled_parallel_batch(&three).unwrap_err().contains("最多允许 2"));
-        assert_eq!(two[0]["command"]["cwd"], serde_json::json!("/repo"));
-        assert_eq!(two[1]["command"]["path"], serde_json::json!("b.rs"));
-    }
 
     #[test]
     fn mcp_service_name_requires_an_explicit_subtool_without_parameter_inference() {
