@@ -116,9 +116,7 @@ pub async fn generate_llm_mcp_card(
         "stream": false
     });
 
-    if config.is_deepseek() {
-        body["thinking"] = serde_json::json!({ "type": "disabled" });
-    }
+    config.apply_provider_capabilities(&mut body, "off");
 
     println!(
         "🤖 [LLM 能力卡生成] 正在为插件 [{}] 调用模型 [{}]...",

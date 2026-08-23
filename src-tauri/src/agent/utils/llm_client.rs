@@ -643,6 +643,7 @@ mod provider_normalization_tests {
             is_ollama: false,
             is_lmstudio: false,
             context_window: 200_000,
+            provider_capabilities: "{}".to_string(),
             timeout_secs: 60,
             requires_alternating_roles: -1,
         }

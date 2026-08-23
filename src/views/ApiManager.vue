@@ -378,6 +378,15 @@
                   <span class="quick-pill" @click="mForm.max_tokens = 16384">16k</span>
                 </div>
               </div>
+              <div class="form-group">
+                <label class="form-label">Provider 能力配置（JSON）</label>
+                <textarea class="form-input" v-model="mForm.provider_capabilities" rows="11" spellcheck="false"
+                  placeholder='{"thinking":{"enabled_value":{"type":"enabled"},"force_enabled":true,"effort":{"field":"reasoning_effort","map":{"high":"high","max":"max"}}}}'></textarea>
+                <div style="font-size:11px;color:var(--text-4);margin-top:4px;line-height:1.5">
+                  每个模型独立保存。空对象 <code>{}</code> 表示只发送通用 OpenAI 兼容字段；<code>thinking</code> 可配置 <code>field</code>、<code>enabled_value</code>、<code>disabled_value</code>、<code>force_enabled</code>、<code>remove_sampling_when_enabled</code>，以及 <code>effort.field</code>、<code>effort.map</code>、<code>effort.default</code>。
+                </div>
+              </div>
+              <div v-if="modelConfigError" class="form-error">⚠️ {{ modelConfigError }}</div>
             </div>
             <div class="modal-footer">
               <button class="btn btn-ghost" @click="editingModel = null">取消</button>
@@ -611,6 +620,7 @@ interface ModelData {
   id: string; platform_id: string; name: string; display_name: string;
   max_tokens: number; temperature: number; enabled: boolean; status: string; latency_ms: number;
   context_window: number;
+  provider_capabilities: string;
   error_msg?: string;
   diagnostics?: DiagnosticsData;
 }
@@ -651,10 +661,11 @@ const batchTestCompleted = ref(0)
 const batchTestTotal = ref(0)
 const batchTestSummary = ref('')
 const batchTestPlatformId = ref('')
+const modelConfigError = ref('')
 
 // 表单对象
 const pForm = ref({ name: '', base_url: '', api_key: '' })
-const mForm = ref({ display_name: '', max_tokens: 4096, context_window: 0 })
+const mForm = ref({ display_name: '', max_tokens: 4096, context_window: 0, provider_capabilities: '{}' })
 const specForm = ref({
   name: '',
   context_window: 128000,
@@ -803,7 +814,9 @@ function editModel(m: ModelData) {
     display_name: m.display_name || m.name,
     max_tokens: m.max_tokens,
     context_window: m.context_window ?? 0,
+    provider_capabilities: m.provider_capabilities || '{}',
   }
+  modelConfigError.value = ''
 }
 
 function onApplySpecToEditModel(e: Event) {
@@ -820,20 +833,37 @@ function onApplySpecToEditModel(e: Event) {
 
 async function saveModelConfig() {
   if (!editingModel.value) return
-  await invoke('update_model', {
-    id: editingModel.value.id,
-    maxTokens: mForm.value.max_tokens,
-    contextWindow: mForm.value.context_window,
-    displayName: mForm.value.display_name,
-  })
-  const idx = models.value.findIndex(x => x.id === editingModel.value!.id)
-  if (idx >= 0) {
-    models.value[idx].display_name = mForm.value.display_name
-    models.value[idx].max_tokens = mForm.value.max_tokens
-    models.value[idx].context_window = mForm.value.context_window
+  const providerCapabilities = mForm.value.provider_capabilities.trim() || '{}'
+  try {
+    const parsed = JSON.parse(providerCapabilities)
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+      throw new Error('必须是 JSON 对象')
+    }
+  } catch (error: any) {
+    modelConfigError.value = `Provider 能力配置无效：${error?.message || error}`
+    return
   }
-  editingModel.value = null
-  emit('models-updated')
+  modelConfigError.value = ''
+  try {
+    await invoke('update_model', {
+      id: editingModel.value.id,
+      maxTokens: mForm.value.max_tokens,
+      contextWindow: mForm.value.context_window,
+      displayName: mForm.value.display_name,
+      providerCapabilities,
+    })
+    const idx = models.value.findIndex(x => x.id === editingModel.value!.id)
+    if (idx >= 0) {
+      models.value[idx].display_name = mForm.value.display_name
+      models.value[idx].max_tokens = mForm.value.max_tokens
+      models.value[idx].context_window = mForm.value.context_window
+      models.value[idx].provider_capabilities = providerCapabilities
+    }
+    editingModel.value = null
+    emit('models-updated')
+  } catch (error: any) {
+    modelConfigError.value = `保存失败：${error?.message || error}`
+  }
 }
 
 function confirmDeleteModel(m: ModelData) {

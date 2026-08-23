@@ -4,7 +4,7 @@ use crate::db::{
 };
 use chrono::Utc;
 use rusqlite::params;
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::State;
 use uuid::Uuid;
 
@@ -82,6 +82,20 @@ pub async fn delete_platform(state: State<'_, DbState>, id: String) -> Result<()
 
 // ==================== MODEL COMMANDS ====================
 
+fn normalize_provider_capabilities(raw: String) -> Result<String, String> {
+    let normalized = if raw.trim().is_empty() {
+        "{}".to_string()
+    } else {
+        raw
+    };
+    let value: Value = serde_json::from_str(&normalized)
+        .map_err(|error| format!("Provider 能力配置必须是合法 JSON: {}", error))?;
+    if !value.is_object() {
+        return Err("Provider 能力配置必须是 JSON 对象".to_string());
+    }
+    Ok(value.to_string())
+}
+
 #[tauri::command]
 pub async fn get_models(
     state: State<'_, DbState>,
@@ -89,9 +103,9 @@ pub async fn get_models(
 ) -> Result<Vec<Model>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let (query, p): (String, Vec<String>) = if let Some(pid) = platform_id {
-        ("SELECT id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window FROM models WHERE platform_id = ?1 ORDER BY created_at DESC".into(), vec![pid])
+        ("SELECT id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window, provider_capabilities FROM models WHERE platform_id = ?1 ORDER BY created_at DESC".into(), vec![pid])
     } else {
-        ("SELECT id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window FROM models ORDER BY created_at DESC".into(), vec![])
+        ("SELECT id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window, provider_capabilities FROM models ORDER BY created_at DESC".into(), vec![])
     };
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
     let list = stmt
@@ -107,6 +121,7 @@ pub async fn get_models(
                 status: row.get(7)?,
                 latency_ms: row.get(8)?,
                 context_window: row.get(9)?,
+                provider_capabilities: row.get(10)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -171,10 +186,11 @@ pub async fn add_model(
         status: "unknown".to_string(),
         latency_ms: 0,
         context_window: 0,
+        provider_capabilities: "{}".to_string(),
     })
 }
 
-/// 更新模型参数（max_tokens 输出上限、context_window 上下文窗口）
+/// 更新模型参数（输出/窗口与 provider capability profile）。
 #[tauri::command]
 pub async fn update_model(
     state: State<'_, DbState>,
@@ -182,6 +198,7 @@ pub async fn update_model(
     max_tokens: Option<i64>,
     context_window: Option<i64>,
     display_name: Option<String>,
+    provider_capabilities: Option<String>,
 ) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(v) = max_tokens {
@@ -202,6 +219,14 @@ pub async fn update_model(
         conn.execute(
             "UPDATE models SET display_name = ?1 WHERE id = ?2",
             params![v, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if let Some(v) = provider_capabilities {
+        let normalized = normalize_provider_capabilities(v)?;
+        conn.execute(
+            "UPDATE models SET provider_capabilities = ?1 WHERE id = ?2",
+            params![normalized, id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -290,6 +315,7 @@ pub async fn add_model_with_spec(
         status: "unknown".to_string(),
         latency_ms: 0,
         context_window,
+        provider_capabilities: "{}".to_string(),
     })
 }
 

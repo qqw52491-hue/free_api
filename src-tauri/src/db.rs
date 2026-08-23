@@ -43,6 +43,13 @@ pub struct Model {
     /// 0 表示未配置，后端将使用保守默认值（32768）。
     #[serde(default)]
     pub context_window: i64,
+    /// 每模型的 provider 能力配置（JSON）。空对象表示仅使用通用 OpenAI 兼容字段。
+    #[serde(default = "default_provider_capabilities")]
+    pub provider_capabilities: String,
+}
+
+fn default_provider_capabilities() -> String {
+    "{}".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +107,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             status TEXT NOT NULL DEFAULT 'unknown',
             latency_ms INTEGER NOT NULL DEFAULT 0,
             context_window INTEGER NOT NULL DEFAULT 0,
+            provider_capabilities TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             FOREIGN KEY (platform_id) REFERENCES platforms(id) ON DELETE CASCADE
         );
@@ -303,6 +311,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
 
     // 滚动迁移：为旧版数据库补齐新字段，CREATE TABLE 不会重建已有表（每个 ALTER TABLE 独立执行，防止单个已存在字段中断整个批处理）
     let _ = conn.execute("ALTER TABLE models ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0;", []);
+    let _ = conn.execute("ALTER TABLE models ADD COLUMN provider_capabilities TEXT NOT NULL DEFAULT '{}';", []);
     let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN capability_card TEXT NOT NULL DEFAULT '';", []);
     let _ = conn.execute("ALTER TABLE agent_memory_nodes ADD COLUMN confidence_score INTEGER NOT NULL DEFAULT 100;", []);
     let _ = conn.execute("ALTER TABLE agent_memory_nodes ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;", []);

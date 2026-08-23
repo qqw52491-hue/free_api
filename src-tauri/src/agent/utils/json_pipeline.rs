@@ -383,6 +383,20 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
                 map.insert(field.to_string(), serde_json::json!([]));
             }
         }
+
+        // 6. serde 的 default 仅处理缺失字段；对默认字符串字段，null 与省略同义。
+        for field in ["reflection", "thought", "description"] {
+            if map.get(field).is_some_and(serde_json::Value::is_null) {
+                map.insert(field.to_string(), serde_json::Value::String(String::new()));
+            }
+        }
+
+        // 7. parallel 是可选集合；false 是模型常见的“未并行”表示，归一为 None。
+        if map.get("parallel").is_some_and(|value| {
+            value.is_null() || value == &serde_json::Value::Bool(false)
+        }) {
+            map.insert("parallel".to_string(), serde_json::Value::Null);
+        }
     }
 }
 

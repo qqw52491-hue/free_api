@@ -7,7 +7,7 @@ use crate::db::DbState;
 use futures_util::StreamExt;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::State;
 use tokio::sync::watch;
 
@@ -31,6 +31,8 @@ pub struct ModelConfig {
     // is_local 可用于未来扩展，目前通过 is_ollama/is_lmstudio 已足够
     // pub is_local: bool,
     pub context_window: i64,
+    /// 模型级 provider capability profile（JSON）。空对象表示无额外厂商字段。
+    pub provider_capabilities: String,
     pub timeout_secs: u64,
     /// 消息角色规约：-1 未设置（按 base_url 推断）、0 显式接受连续同角色、
     /// 1 显式要求 user/assistant 交替（发送前归并连续同角色消息）。
@@ -49,19 +51,27 @@ impl ModelConfig {
     }
 
     pub fn from_conn(conn: &rusqlite::Connection, model_id: &str) -> Result<Self, String> {
-        match Self::query_model_row(conn, model_id) {
-            Ok(result) => Ok(result),
-            Err(error) if error.contains("no such column: p.requires_alternating_roles") => {
-                // 自愈：老库缺列（迁移未跑/被并发跳过）时当场补列并重试一次。
-                // 曾因迁移写入丢失导致线上"AI 持续输出非法格式"级联失败。
-                let _ = conn.execute(
-                    "ALTER TABLE platforms ADD COLUMN requires_alternating_roles INTEGER NOT NULL DEFAULT -1;",
-                    [],
-                );
-                Self::query_model_row(conn, model_id)
+        // 自愈：滚动迁移可能在旧库或并发启动时尚未补齐。每种缺列只尝试一次，
+        // 并保留原始查询错误，避免把数据库故障静默吞掉。
+        for _ in 0..=2 {
+            match Self::query_model_row(conn, model_id) {
+                Ok(result) => return Ok(result),
+                Err(error) if error.contains("no such column: m.provider_capabilities") => {
+                    let _ = conn.execute(
+                        "ALTER TABLE models ADD COLUMN provider_capabilities TEXT NOT NULL DEFAULT '{}';",
+                        [],
+                    );
+                }
+                Err(error) if error.contains("no such column: p.requires_alternating_roles") => {
+                    let _ = conn.execute(
+                        "ALTER TABLE platforms ADD COLUMN requires_alternating_roles INTEGER NOT NULL DEFAULT -1;",
+                        [],
+                    );
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => Err(error),
         }
+        Self::query_model_row(conn, model_id)
     }
 
     fn query_model_row(conn: &rusqlite::Connection, model_id: &str) -> Result<Self, String> {
@@ -74,11 +84,12 @@ impl ModelConfig {
             max_tokens,
             temperature,
             context_window_db,
+            provider_capabilities_db,
             requires_alternating_roles_db,
         ) = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT m.id, p.name, p.base_url, p.api_key, m.name, m.max_tokens, m.temperature, m.context_window, p.requires_alternating_roles
+                    "SELECT m.id, p.name, p.base_url, p.api_key, m.name, m.max_tokens, m.temperature, m.context_window, m.provider_capabilities, p.requires_alternating_roles
                      FROM models m JOIN platforms p ON p.id = m.platform_id
                      WHERE m.id = ?1",
                 )
@@ -93,7 +104,8 @@ impl ModelConfig {
                     row.get::<_, i64>(5)?,
                     row.get::<_, f64>(6)?,
                     row.get::<_, i64>(7)?,
-                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             })
             .map_err(|e| format!("模型不存在: {}", e))?
@@ -127,6 +139,7 @@ impl ModelConfig {
             is_ollama,
             is_lmstudio,
             context_window,
+            provider_capabilities: provider_capabilities_db,
             timeout_secs,
             requires_alternating_roles: requires_alternating_roles_db,
         })
@@ -205,20 +218,7 @@ impl ModelConfig {
             body["response_format"] = json!({ "type": "json_object" });
         }
 
-        if self.is_deepseek() {
-            if reasoning_effort == "off" {
-                // DeepSeek 的非思考模式可继续使用常规采样参数。
-                body["thinking"] = json!({ "type": "disabled" });
-            } else {
-                body["thinking"] = json!({ "type": "enabled" });
-                body["reasoning_effort"] = json!(self.deepseek_reasoning_effort(reasoning_effort));
-                // DeepSeek 思考模式下这些采样参数不会生效，避免发送误导性配置。
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("temperature");
-                    object.remove("top_p");
-                }
-            }
-        }
+        self.apply_provider_capabilities(&mut body, reasoning_effort);
         // Ollama 需要通过 options 注入 num_ctx 与 num_predict
         if self.is_ollama {
             body["options"] = json!({
@@ -232,26 +232,76 @@ impl ModelConfig {
         body
     }
 
-    pub fn is_deepseek(&self) -> bool {
-        self.base_url.contains("api.deepseek.com")
-            || self.model_name.to_ascii_lowercase().contains("deepseek")
+    /// 将模型级 capability profile 映射到 OpenAI 兼容请求字段。
+    /// profile 缺失、不是对象或字段无效时安全降级为通用请求，不按模型名猜测供应商能力。
+    pub fn apply_provider_capabilities(&self, body: &mut Value, preference: &str) {
+        let profile: Value = match serde_json::from_str::<Value>(&self.provider_capabilities) {
+            Ok(value) if value.is_object() => value,
+            Ok(_) => {
+                eprintln!("⚠️ 模型 {} 的 provider_capabilities 不是对象，已忽略", self.model_id);
+                return;
+            }
+            Err(error) => {
+                eprintln!("⚠️ 模型 {} 的 provider_capabilities 无法解析，已忽略: {}", self.model_id, error);
+                return;
+            }
+        };
+        let Some(thinking) = profile.get("thinking").and_then(Value::as_object) else {
+            return;
+        };
+        let field = thinking
+            .get("field")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("thinking");
+        let force_enabled = thinking
+            .get("force_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let enabled = force_enabled || preference != "off";
+        let value_key = if enabled { "enabled_value" } else { "disabled_value" };
+        if let Some(value) = thinking.get(value_key) {
+            if let Some(object) = body.as_object_mut() {
+                object.insert(field.to_string(), value.clone());
+            }
+        }
+        if !enabled {
+            return;
+        }
+        if thinking
+            .get("remove_sampling_when_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            if let Some(object) = body.as_object_mut() {
+                object.remove("temperature");
+                object.remove("top_p");
+            }
+        }
+        let Some(effort) = thinking.get("effort").and_then(Value::as_object) else {
+            return;
+        };
+        let effort_field = effort
+            .get("field")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("reasoning_effort");
+        let mapped = effort
+            .get("map")
+            .and_then(Value::as_object)
+            .and_then(|mapping| mapping.get(preference).or_else(|| mapping.get("default")))
+            .cloned()
+            .or_else(|| effort.get("default").cloned());
+        if let Some(value) = mapped {
+            if let Some(object) = body.as_object_mut() {
+                object.insert(effort_field.to_string(), value);
+            }
+        }
     }
 
     /// 火山方舟 OpenAI 兼容 Chat 端点。
     fn is_volcengine_ark(&self) -> bool {
         self.base_url.contains("volces.com")
-    }
-
-    /// 将界面高 / 中 / 低映射为 DeepSeek 官方接受的 max / high / low。
-    /// 自动模式优先保证 Flash 的低延迟，其他 DeepSeek 模型维持官方默认 high。
-    fn deepseek_reasoning_effort(&self, preference: &str) -> &'static str {
-        match preference {
-            "low" => "low",
-            "medium" => "high",
-            "high" | "max" => "max",
-            "auto" if self.model_name.to_ascii_lowercase().contains("flash") => "low",
-            _ => "high",
-        }
     }
 
     /// 供评测与诊断日志持久化的脱敏基础地址。
@@ -748,6 +798,7 @@ mod tests {
             is_ollama: false,
             is_lmstudio: false,
             context_window: 128_000,
+            provider_capabilities: "{}".to_string(),
             timeout_secs: 120,
             requires_alternating_roles: -1,
         }
@@ -763,40 +814,67 @@ mod tests {
         assert_eq!(body["response_format"]["type"], "json_object");
     }
 
-    #[test]
-    fn auto_uses_low_effort_for_deepseek_flash() {
-        let body = config("deepseek-v4-flash", "https://api.deepseek.com").build_body(&[], "auto");
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["reasoning_effort"], "low");
-        assert!(body.get("temperature").is_none());
+    fn with_capabilities(profile: &str) -> ModelConfig {
+        let mut config = config("configured-model", "https://example.invalid/v1");
+        config.provider_capabilities = profile.to_string();
+        config
     }
 
     #[test]
-    fn auto_uses_high_effort_for_deepseek_pro() {
-        let body = config("deepseek-v4-pro", "https://api.deepseek.com").build_body(&[], "auto");
-        assert_eq!(body["reasoning_effort"], "high");
+    fn configured_profile_maps_effort_and_removes_sampling_when_enabled() {
+        let profile = r#"{
+            "thinking": {
+                "field": "thinking",
+                "enabled_value": { "type": "enabled" },
+                "disabled_value": { "type": "disabled" },
+                "remove_sampling_when_enabled": true,
+                "effort": {
+                    "field": "reasoning_effort",
+                    "map": { "auto": "low", "medium": "high", "high": "max" },
+                    "default": "high"
+                }
+            }
+        }"#;
+        let auto = with_capabilities(profile).build_body(&[], "auto");
+        assert_eq!(auto["thinking"]["type"], "enabled");
+        assert_eq!(auto["reasoning_effort"], "low");
+        assert!(auto.get("temperature").is_none());
+        assert!(auto.get("top_p").is_none());
+
+        let high = with_capabilities(profile).build_body(&[], "high");
+        assert_eq!(high["reasoning_effort"], "max");
+
+        let off = with_capabilities(profile).build_body(&[], "off");
+        assert_eq!(off["thinking"]["type"], "disabled");
+        assert!(off.get("reasoning_effort").is_none());
+        assert!(off.get("temperature").is_some());
     }
 
     #[test]
-    fn medium_maps_to_balanced_deepseek_effort() {
-        let body = config("deepseek-v4-pro", "https://api.deepseek.com").build_body(&[], "medium");
-        assert_eq!(body["reasoning_effort"], "high");
-    }
-    #[test]
-    fn high_maps_to_max_deepseek_effort() {
-        let body = config("deepseek-v4-pro", "https://api.deepseek.com").build_body(&[], "high");
-        assert_eq!(body["reasoning_effort"], "max");
-    }
-    #[test]
-    fn off_disables_deepseek_thinking_without_an_effort() {
-        let body = config("deepseek-v4-flash", "https://api.deepseek.com").build_body(&[], "off");
-        assert_eq!(body["thinking"]["type"], "disabled");
-        assert!(body.get("reasoning_effort").is_none());
-        assert!(body.get("temperature").is_some());
+    fn configured_profile_can_force_thinking_and_keep_ui_high_below_max() {
+        let profile = r#"{
+            "thinking": {
+                "enabled_value": { "type": "enabled" },
+                "force_enabled": true,
+                "effort": {
+                    "map": { "off": "low", "low": "low", "medium": "high", "high": "high", "max": "max", "auto": "high" }
+                }
+            }
+        }"#;
+        let high = with_capabilities(profile).build_body(&[], "high");
+        assert_eq!(high["thinking"]["type"], "enabled");
+        assert_eq!(high["reasoning_effort"], "high");
+
+        let max = with_capabilities(profile).build_body(&[], "max");
+        assert_eq!(max["reasoning_effort"], "max");
+
+        let off = with_capabilities(profile).build_body(&[], "off");
+        assert_eq!(off["thinking"]["type"], "enabled");
+        assert_eq!(off["reasoning_effort"], "low");
     }
 
     #[test]
-    fn non_deepseek_models_do_not_receive_vendor_specific_fields() {
+    fn unconfigured_models_do_not_receive_vendor_specific_fields() {
         let body = config("gpt-4o-mini", "https://api.openai.com/v1").build_body(&[], "max");
         assert!(body.get("thinking").is_none());
         assert!(body.get("reasoning_effort").is_none());

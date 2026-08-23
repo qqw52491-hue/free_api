@@ -185,9 +185,7 @@ pub async fn generate_llm_skill_summary(
         "stream": false
     });
 
-    if config.is_deepseek() {
-        body["thinking"] = serde_json::json!({ "type": "disabled" });
-    }
+    config.apply_provider_capabilities(&mut body, "off");
 
     let resp = tokio::time::timeout(
         std::time::Duration::from_secs(15),

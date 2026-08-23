@@ -83,9 +83,13 @@ mod tests {
         let mut val = serde_json::json!({
             "tool": "web_search",
             "command": "{\"query\": \"rust agent\"}",
+            "reflection": null,
+            "thought": null,
+            "description": null,
             "todo_update": "[{\"id\": \"1\", \"task\": \"Search web\", \"status\": \"done\"}]",
             "memories_update": null,
             "commands": null,
+            "parallel": false,
             "applied_lessons": "lesson_cache_1"
         });
         normalize_raw_instruction_value(&mut val);
@@ -93,9 +97,13 @@ mod tests {
             serde_json::from_value(val).expect("must deserialize AgentInstruction");
         assert_eq!(inst.tool, Some("web_search".to_string()));
         assert_eq!(inst.command.unwrap()["query"], "rust agent");
+        assert_eq!(inst.reflection, "");
+        assert_eq!(inst.thought, "");
+        assert_eq!(inst.description, "");
         assert_eq!(inst.todo_update.len(), 1);
         assert!(inst.memories_update.is_empty());
         assert!(inst.commands.is_empty());
+        assert_eq!(inst.parallel, None);
         assert_eq!(inst.todo_update[0].id, 1);
         assert_eq!(inst.todo_update[0].description, "Search web");
         assert_eq!(
