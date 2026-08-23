@@ -178,13 +178,14 @@ pub async fn call_llm(
     log_context: bool,
     reasoning_effort: &str,
     interrupt_rx: &mut watch::Receiver<u64>,
-) -> Result<(AgentInstruction, TokenUsage, String), String> {
+) -> Result<(AgentInstruction, TokenUsage, String, Option<usize>), String> {
     // 1. 从数据库解析模型配置
     let config = ModelConfig::from_db(state, &model_id)?;
     config.log_platform_info();
 
     // 2. 组装消息
     let api_messages = messages.assemble_messages();
+    let history_estimate_at_request = messages.history_estimated_tokens();
     print_debug_messages(&api_messages);
 
     // 3. 转为 serde_json::Value 供 llm 层使用
@@ -197,6 +198,8 @@ pub async fn call_llm(
     // 4. JSON 解析重试循环
     let mut current_try = 0;
     let max_retries = 3;
+    // 隔离 JSON 修复的短 prompt 不能覆盖完整 Agent 上下文的校准基线。
+    let mut uses_primary_prompt = true;
 
     loop {
         current_try += 1;
@@ -423,7 +426,14 @@ pub async fn call_llm(
                         None,
                     );
                 }
-                return Ok((inst, token_usage, result.thinking_text));
+                let calibration_history_estimate =
+                    uses_primary_prompt.then_some(history_estimate_at_request);
+                return Ok((
+                    inst,
+                    token_usage,
+                    result.thinking_text,
+                    calibration_history_estimate,
+                ));
             }
             Err(e) => {
                 log_llm_exchange_to_file(
@@ -502,6 +512,7 @@ pub async fn call_llm(
                     &final_json_str,
                     &e,
                 );
+                uses_primary_prompt = false;
             }
         }
     }

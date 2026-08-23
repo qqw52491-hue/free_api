@@ -109,7 +109,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 "model_id": routing.model_id
             }),
         );
-        let (mut inst, token_usage, thinking_text) = match call_llm(
+        let (mut inst, token_usage, thinking_text, history_estimate_at_request) = match call_llm(
             &context,
             &state,
             routing.model_id.clone(),
@@ -222,6 +222,14 @@ pub async fn run_call_llm_and_run_tool_phases(
             }
         }
 
+        // 真实 usage 只能与发出该完整上下文请求时的历史快照成对保存。
+        // 隔离 JSON 修复请求返回 None，保留已有完整上下文基线。
+        if token_usage.prompt_tokens > 0 {
+            if let Some(history_tokens) = history_estimate_at_request {
+                context.last_reported_prompt_tokens = Some(token_usage.prompt_tokens as usize);
+                context.last_reported_history_estimate_tokens = Some(history_tokens);
+            }
+        }
         // LLM 的结构化决策已经完整到达；在任何 UI 通知或工具调用之前提交它。
         checkpoint.record_instruction(inst.clone(), context);
         save_checkpoint(state.inner(), checkpoint)?;
@@ -234,10 +242,6 @@ pub async fn run_call_llm_and_run_tool_phases(
             },
         )?;
 
-        // 记录服务端回传的真实 prompt tokens，供压缩水位校准（见 compaction.rs）。
-        if token_usage.prompt_tokens > 0 {
-            context.last_reported_prompt_tokens = Some(token_usage.prompt_tokens as usize);
-        }
 
         // 📊 发送 Token 用量与速度指标统计到前端
         app.emit(
