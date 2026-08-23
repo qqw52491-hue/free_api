@@ -20,10 +20,26 @@
 | 架构分层 | 核心模块 | 状态 | 验证与测试 |
 |:---|:---|:---:|:---|
 | **一、设计哲学与基座** | 理论分层、拒 God Table、确定性前缀 | ✅ **生产就绪** | 1,000 次指纹测试 |
-| **二、三明治上下文引擎** | 冻结静态区 + 纯追加流水 + 尾部状态卡 | ✅ **生产就绪** | 49 个单元测试全绿 |
+| **二、三明治上下文引擎** | 冻结静态区 + 纯追加流水 + 尾部状态卡 + 真实值校准水位 | ✅ **生产就绪** | 142 项库测试全绿；真实回归缓存命中 74-85%（校准前因过早脱水损失 29% 未命中） |
 | **三、三级检索体系** | 定长路标 + SQLite FTS5 + 统一 `search` | ✅ **生产就绪** | FTS5 + ripgrep 联邦检索 |
 | **四、自我改进闭环** | Sleep-Time Compute + Lesson 抽取与门禁 | 🚧 **设计定稿 (Roadmap RFC)** | 规划中，下一步落地 |
 | **五、人机协同 (HITL)** | 异步抢方向盘 (`try_recv`) + AI 阻塞求助 | ✅ **生产就绪** | 状态机测试覆盖 |
+
+---
+
+## 🔧 2026-08 修复基线 (Verified Fix Baseline)
+
+以下改动已通过真实完整回归验收（`agent-readonly-0e36dc53`：succeeded / outside=0 / 唯一 finish / 249s / 缓存 74.4%），构成当前可信基线：
+
+| 提交 | 内容 | 关键验证 |
+| :--- | :--- | :--- |
+| `bddc0c9` | **MCP 能力链修复**：stdio 握手赛跑消除（stdio_ready 标志）、预热失败显式化+重试、hint 未命中纠错反馈、目录 TTL 回退、**原生 HTTP 直连**（DB 迁移 uvx 桥→原生）、资源作用域按结果事实分类、内置 search 文件路径/字面量降级、无进展重复运行时提示、组装纯 append-only、脱水仅在压缩事件内定型、动态历史上限（窗口×40%，双模型取小）、`volc_k2_pro` 评测预设 | 模型从 157 次 search 空转 → 25 步真实读源码完成审查；unknown 158→0；缓存 17.7%→74%+ |
+| `b5db55a` | `volc_single_pro` 单模型预设：消除双模型轮换的缓存分账（实测同模型步 82% vs 切换后 65%） | A/B：单 Pro 命中 84.76% vs 双模型 79.65% |
+| `cf9f508` → `1daebb8` | **压缩水位真实值校准**：触发以服务端回传真实 prompt 为锚（成对基线 + 请求后保守增量），替代超计 40-60% 的本地估算；JSON 修复请求不污染基线 | 单测：低真实占用历史字节不变、双分支增量（>8K）正确触发、零 usage 回退 |
+
+配套 Hub 侧（`wxhjy-mcp` 仓库 `6e18ba9`）：tools/call 按声明 Schema 拒绝未声明字段（附同义别名提示）+ 目录启动预热——模型字段笔误从静默漂移（曾返回错误工作区数据）变为响亮报错一步自愈。
+
+**遗留后续项**：MCP roots 标准工作区绑定（根治省略 cwd 类）、状态卡差量化、尾部合并条件化、`main_loop.rs` 继续拆分、并行分支 >2 的契约拦截。
 
 ---
 
@@ -183,6 +199,12 @@ $$\text{核心监控} = \text{每步重算的 Miss Token 绝对数量} + \text{�
 - **动态预算推导**：`ContextBudget::derive(window, max_output, static_prefix_tokens)`，全量扣除系统提示、活跃工具手册、终极目标与 15% 绝对安全缓冲区。
 - **滞后高低水位**：当历史 Token 触碰 **80% 高水位线** 时触发压缩；压缩引擎一次性计算出需要归档的步数，通过单次 `drain(0..compact_count)` 批量移除早期历史（$O(n)$ 单趟完成，避免循环 `remove(0)` 的 $O(n^2)$ 内存抖动），直至历史降至 **50% 低水位线**。
 - **0 依赖硬保底**：内置 `RuleBasedSummarizer`，无需向 LLM 发起异步总结请求，100% 永不失败、永不 Crash。
+- **真实值校准触发（2026-08）**：本地保守估算对中文/JSON/代码按字节地板超计约 40-60%，曾把服务端真实占用仅 16-26% 判成高水位而过早脱水、打断已建立的前缀缓存（单次回归实测两次断裂共损 28,546 未命中 tokens，占 29%）。现在触发以**服务端回传的真实总 prompt** 为主锚：
+  ```
+  校准完整 prompt = 上次完整请求的真实总 prompt + max(当前历史保守估算 − 该请求时的历史快照, 0)
+  触发条件：校准值 > 静态前缀预算 + 尾部预算 + 活跃历史高水位
+  ```
+  真实值与快照**成对**保存（隔离 JSON 修复请求的短 prompt 不覆盖基线）、随 checkpoint 持久化；缺任一快照或 usage=0 时回退本地估算。该公式同时消除"固定单步余量盖不住合法双分支并行（约 8-10K 新增）"的缺口。
 
 ---
 
@@ -392,6 +414,7 @@ pub fn dispatch(
 | [`main_loop.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/main_loop.rs) | 主生命周期 | **任务顶层调度器与运行状态机**：驱动 Agent 跨步流转、前缀缓存预热、死循环硬拦截、状态卡刷新、TaskStore 目录同步与任务完成结算。 |
 | [`mcp_catalog.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/mcp_catalog.rs) | 能力提取 | **MCP 工具清单缓存与智能能力卡提纯**：首次扫描或变更时调用选定大模型，将几千行冗长 JSON Schema 提炼为几十 Token 的结构化能力卡，极大缩减 Prompt。 |
 | [`mod.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/mod.rs) | 模块根 | **Agent 模块聚合导出与终态指令回归测试**：精简的 Hub 根，集中导出子模块并包含核心终态判定与工具菜单单元测试。 |
+| [`prompt_assembly.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/prompt_assembly.rs) | 提示词组装 | **静态提示词与内置工具菜单组装器**：核心系统提示词三级回退加载、task_store 数据区说明、tools/*.md 扫描；从 main_loop 抽出，输出与内联实现字节级一致（保护前缀缓存）。 |
 | [`project_map.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/project_map.rs) | 项目地图 | **工作区轻量项目地图生成器**：在代码审查或跨文件任务启动时，提取目录拓扑、入口文件与 Git 差异元数据（不读大文件正文），避免上下文膨胀。 |
 | [`router.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/router.rs) | 模型路由 | **动态分级路由器**：根据当前任务目标与上下文复杂度（视觉图表、长篇代码、轻量步骤），动态在 Fast / Pro / Vision 模型阶梯间切换。 |
 | [`run_state.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/run_state.rs) | 状态快照 | **权威运行状态机 (`AgentRunMachine`)**：维护严格的状态机流转图（Idle → Planning → ToolExecution → Finalizing → Done），向前端推送权威事件。 |
@@ -410,6 +433,7 @@ pub fn dispatch(
 - [`cache_policy.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/cache_policy.rs)：前缀缓存物理对齐策略（64 / 128 / 1024 Token 门槛适配）。
 - [`compaction.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/compaction.rs)：滞后高低水位自适应压缩器，保证历史流水平滑压缩，绝不破坏前缀稳定性。
 - [`determinism.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/determinism.rs)：字节级确定性保证，提供 SHA256 指纹校验与字典序规范化。
+- [`no_progress.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/no_progress.rs)：无进展重复运行时检测——相同工具+相同参数+相同输出指纹连续第 3 次（或相同失败第 2 次）时注入策略级提示；不修改、不拒绝模型参数，只补充可行动事实。
 - [`memory.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/memory.rs)：核心事实记忆卡（严格按 BTreeMap 字母序对齐，内置明文密钥过滤阻断）。
 - [`render.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/render.rs)：动态状态卡（Todo、避坑教训、台账、数据目录）Markdown 模板渲染。
 - [`sampling.rs`](file:///Users/wx/Documents/free_api/src-tauri/src/agent/context/sampling.rs)：大文本定向证据采样（Head/Tail 智能保留 + 错误堆栈优先提取）。
