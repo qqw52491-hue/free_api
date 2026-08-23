@@ -49,6 +49,22 @@ impl ModelConfig {
     }
 
     pub fn from_conn(conn: &rusqlite::Connection, model_id: &str) -> Result<Self, String> {
+        match Self::query_model_row(conn, model_id) {
+            Ok(result) => Ok(result),
+            Err(error) if error.contains("no such column: p.requires_alternating_roles") => {
+                // 自愈：老库缺列（迁移未跑/被并发跳过）时当场补列并重试一次。
+                // 曾因迁移写入丢失导致线上"AI 持续输出非法格式"级联失败。
+                let _ = conn.execute(
+                    "ALTER TABLE platforms ADD COLUMN requires_alternating_roles INTEGER NOT NULL DEFAULT -1;",
+                    [],
+                );
+                Self::query_model_row(conn, model_id)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn query_model_row(conn: &rusqlite::Connection, model_id: &str) -> Result<Self, String> {
         let (
             model_id,
             platform_name,
@@ -694,6 +710,31 @@ pub fn estimate_usage(
 #[cfg(test)]
 mod tests {
     use super::ModelConfig;
+
+    #[test]
+    fn from_conn_self_heals_missing_platform_capability_column() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        // 老库结构：platforms 没有 requires_alternating_roles 列
+        conn.execute_batch(
+            "CREATE TABLE platforms (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, base_url TEXT NOT NULL,
+                api_key TEXT NOT NULL, created_at TEXT NOT NULL);
+             CREATE TABLE models (
+                id TEXT PRIMARY KEY, platform_id TEXT NOT NULL, name TEXT NOT NULL,
+                max_tokens INTEGER, temperature REAL, context_window INTEGER, enabled INTEGER DEFAULT 1);
+             INSERT INTO platforms VALUES ('p1', '火山订阅', 'https://ark.cn-beijing.volces.com/api/coding/v3', 'k', '2026');
+             INSERT INTO models VALUES ('m1', 'p1', 'deepseek-v4-pro', 4096, 0.7, 200000, 1);",
+        )
+        .unwrap();
+
+        // 老代码在这里会报 no such column；自愈后应成功且取默认值 -1
+        let cfg = ModelConfig::from_conn(&conn, "m1").expect("缺列时应自愈补列并成功");
+        assert_eq!(cfg.requires_alternating_roles, -1);
+
+        // 列已真实补上：再次查询稳定成功
+        let cfg2 = ModelConfig::from_conn(&conn, "m1").unwrap();
+        assert_eq!(cfg2.model_name, "deepseek-v4-pro");
+    }
 
     fn config(model_name: &str, base_url: &str) -> ModelConfig {
         ModelConfig {

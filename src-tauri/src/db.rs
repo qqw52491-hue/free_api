@@ -85,7 +85,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             name TEXT NOT NULL,
             base_url TEXT NOT NULL,
             api_key TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            requires_alternating_roles INTEGER NOT NULL DEFAULT -1
         );
 
         CREATE TABLE IF NOT EXISTS models (
@@ -307,6 +308,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     let _ = conn.execute("ALTER TABLE agent_memory_nodes ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;", []);
     let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN url TEXT NOT NULL DEFAULT '';", []);
     let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN headers TEXT NOT NULL DEFAULT '{}';", []);
+    // -1 = 未设置（按 base_url 推断），0 = 显式不要求交替，1 = 显式要求归并连续同角色消息
+    let _ = conn.execute("ALTER TABLE platforms ADD COLUMN requires_alternating_roles INTEGER NOT NULL DEFAULT -1;", []);
     if let Err(error) = migrate_uvx_bridge_plugins_to_native(&conn) {
         eprintln!("⚠️ mcp_plugins uvx 桥转原生 HTTP 迁移失败（保留原配置继续可用）: {}", error);
     }
