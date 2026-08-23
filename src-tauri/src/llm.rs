@@ -214,10 +214,6 @@ impl ModelConfig {
         }
         // 火山方舟 Chat API 原生支持 response_format；以请求级协议确保最终正文为合法 JSON。
         // 这不改变任务提示、工具参数或模型路由，仅约束机器可解析的外层输出。
-        if self.is_volcengine_ark() {
-            body["response_format"] = json!({ "type": "json_object" });
-        }
-
         self.apply_provider_capabilities(&mut body, reasoning_effort);
         // Ollama 需要通过 options 注入 num_ctx 与 num_predict
         if self.is_ollama {
@@ -246,6 +242,14 @@ impl ModelConfig {
                 return;
             }
         };
+        // 平台级 API 格式：如火山方舟需要 response_format: json_object 强制 JSON 输出模式。
+        // 之前按 URL contains("volces.com") 硬编码，现在由 profile 声明。
+        if let Some(response_format) = profile.get("response_format") {
+            if let Some(object) = body.as_object_mut() {
+                object.insert("response_format".to_string(), response_format.clone());
+            }
+        }
+
         let Some(thinking) = profile.get("thinking").and_then(Value::as_object) else {
             return;
         };
@@ -300,9 +304,6 @@ impl ModelConfig {
     }
 
     /// 火山方舟 OpenAI 兼容 Chat 端点。
-    fn is_volcengine_ark(&self) -> bool {
-        self.base_url.contains("volces.com")
-    }
 
     /// 供评测与诊断日志持久化的脱敏基础地址。
     /// 移除查询串、片段与可能嵌入 URL 的用户信息，绝不记录 API Key。
@@ -805,12 +806,9 @@ mod tests {
     }
 
     #[test]
-    fn volcengine_chat_requests_json_object_format() {
-        let body = config(
-            "minimax-m3",
-            "https://ark.cn-beijing.volces.com/api/coding/v3",
-        )
-        .build_body(&[], "low");
+    fn configured_profile_injects_response_format_without_url_matching() {
+        let body = with_capabilities(r#"{"response_format":{"type":"json_object"}}"#)
+            .build_body(&[], "low");
         assert_eq!(body["response_format"]["type"], "json_object");
     }
 
