@@ -12,7 +12,7 @@ use crate::agent::loop_runner::run_call_llm_and_run_tool_phases;
 use crate::agent::mcp::{McpClient, PluginRegistry};
 use crate::agent::run_state::{AgentRunEvent, AgentRunMachine, AgentRunState};
 use crate::agent::task_store;
-use crate::agent::types::{AgentInstruction, RUN_INTERRUPTED_ROUTE};
+use crate::agent::types::{AgentInstruction, TodoItem, RUN_INTERRUPTED_ROUTE};
 use crate::db::DbState;
 use chrono::Utc;
 use serde_json::json;
@@ -23,6 +23,88 @@ use tokio::time::{sleep, Duration};
 
 /// Agent 每个任务最多执行步数（可按项目需求调整）
 const MAX_STEPS: usize = 300;
+
+/// 仅将协议明确定义为未完成的 Todo 视为终态质询信号。
+/// 未知状态不做猜测，`done` 与 `failed` 则已是模型显式关闭的事项。
+fn open_todo_descriptions(todos: &[TodoItem]) -> Vec<String> {
+    todos
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.status.trim().to_ascii_lowercase().as_str(),
+                "pending" | "in_progress"
+            )
+        })
+        .map(|item| {
+            let description = item.description.trim();
+            if description.is_empty() {
+                format!("Todo #{}", item.id)
+            } else {
+                description.to_string()
+            }
+        })
+        .collect()
+}
+
+fn should_challenge_finish(
+    is_finish: bool,
+    succeeded: bool,
+    finish_reviewed: bool,
+    todos: &[TodoItem],
+) -> bool {
+    is_finish && succeeded && !finish_reviewed && !open_todo_descriptions(todos).is_empty()
+}
+
+#[cfg(test)]
+mod finish_guard_tests {
+    use super::*;
+
+    fn todo(id: usize, status: &str, description: &str) -> TodoItem {
+        TodoItem {
+            id,
+            status: status.to_string(),
+            description: description.to_string(),
+            evidence_output_id: None,
+        }
+    }
+
+    #[test]
+    fn only_explicit_open_todos_trigger_a_first_finish_challenge() {
+        let todos = vec![
+            todo(1, "pending", "核验 dispatcher"),
+            todo(2, "in_progress", "核验 checkpoint"),
+            todo(3, "done", "已读 main_loop"),
+            todo(4, "failed", "已记录不可用命令"),
+        ];
+
+        assert_eq!(
+            open_todo_descriptions(&todos),
+            vec!["核验 dispatcher", "核验 checkpoint"]
+        );
+        assert!(should_challenge_finish(true, true, false, &todos));
+    }
+
+    #[test]
+    fn closed_or_unknown_todos_do_not_block_finish() {
+        let todos = vec![
+            todo(1, "done", "已完成"),
+            todo(2, "failed", "已失败并记录"),
+            todo(3, "maybe", "旧格式未知状态"),
+        ];
+
+        assert!(open_todo_descriptions(&todos).is_empty());
+        assert!(!should_challenge_finish(true, true, false, &todos));
+    }
+
+    #[test]
+    fn a_reviewed_finish_or_failed_finish_is_not_challenged_again() {
+        let todos = vec![todo(1, "pending", "尚未核验")];
+
+        assert!(!should_challenge_finish(true, true, true, &todos));
+        assert!(!should_challenge_finish(true, false, false, &todos));
+        assert!(!should_challenge_finish(false, true, false, &todos));
+    }
+}
 
 /// 推进后端运行状态，并向前端发送独立于旧进度事件的权威状态快照。
 /// 旧的 agent-progress-* 事件保持不变，以便前端逐步迁移。
@@ -619,7 +701,31 @@ pub async fn run_agent_main_loop(
             format!("❌ {}\n{}", result.stderr, final_stdout)
         };
 
-        let outcome_str = if result.success {
+        let is_finish = is_finish_instruction(&instruction);
+        let open_todos = open_todo_descriptions(&context.todo_list);
+        let finish_challenged = should_challenge_finish(
+            is_finish,
+            result.success,
+            checkpoint.finish_reviewed,
+            &context.todo_list,
+        );
+        if finish_challenged {
+            checkpoint.finish_reviewed = true;
+            context.add_error_feedback(&format!(
+                "【终态自检】检测到以下 Todo 仍明确标为 pending/in_progress：\n{}\n本次 finish 已记录为一次可审计的质询，任务不会在此终止。下一轮请继续完成这些事项；若某项已不再适用，请在 todo_update 中显式标为 done/failed 并在总结中说明理由。若你确认已有足够证据，也可在说明覆盖边界后再次 finish；系统不会无限阻断。",
+                open_todos
+                    .iter()
+                    .map(|todo| format!("- {todo}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        } else if !is_finish {
+            // 新的常规步骤提供了新增证据，之后若仍有 open Todo 可重新进行一次质询。
+            checkpoint.finish_reviewed = false;
+        }
+        let outcome_str = if finish_challenged {
+            "finish_challenged"
+        } else if result.success {
             "succeeded"
         } else {
             "failed"
@@ -751,7 +857,7 @@ pub async fn run_agent_main_loop(
             "params": instruction.get_params(),
             "plan_id": context.active_plan_id().unwrap_or_default(),
             "plan_title": context.active_plan_title().unwrap_or(&context.user_goal),
-            "status": if result.success { "succeeded" } else { "failed" },
+            "status": if finish_challenged { "finish_challenged" } else if result.success { "succeeded" } else { "failed" },
             "output": output_text.clone(),
             "resource_scope_revision": context.resource_scope.revision,
             "timestamp": Utc::now().timestamp_millis(),
@@ -769,10 +875,10 @@ pub async fn run_agent_main_loop(
         }
         // 工具结果已经进入可恢复上下文。先提交 durable phase/cursor，再通知前端；
         // 这样崩溃恢复不会把已经完成的普通步骤当作待执行，也不会把 finish 误续跑。
-        let is_finish = is_finish_instruction(&instruction);
-        if is_finish {
+        if is_finish && result.success && !finish_challenged {
             checkpoint.mark_done(&context);
         } else {
+            // 被质询或失败的 finish 也要推进 durable cursor，恢复后继续下一轮而不是误判终态。
             checkpoint.complete_step(step_id, &context);
         }
         save_checkpoint(state.inner(), &mut checkpoint)?;
@@ -781,7 +887,7 @@ pub async fn run_agent_main_loop(
         app.emit(&format!("agent-context-{}", final_session_id), &context)
             .map_err(|e| e.to_string())?;
 
-        if is_finish && result.success {
+        if is_finish && result.success && !finish_challenged {
             advance_run_state(
                 &app,
                 &final_session_id,

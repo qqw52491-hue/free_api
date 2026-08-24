@@ -282,6 +282,9 @@ pub struct AgentCheckpoint {
     pub prepared_instruction: Option<AgentInstruction>,
     pub step_id: usize,
     pub retry_count: u32,
+    /// 对显式未完成 Todo 的终态质询已经发出一次，避免一次质询变成无限循环。
+    #[serde(default)]
+    pub finish_reviewed: bool,
     pub last_error: Option<String>,
     pub version: i64,
     pub created_at: String,
@@ -300,6 +303,7 @@ impl AgentCheckpoint {
             prepared_instruction: None,
             step_id: 0,
             retry_count: 0,
+            finish_reviewed: false,
             last_error: None,
             version: 0,
             created_at: now.clone(),
@@ -822,5 +826,19 @@ mod tests {
             1,
             "已在夹心里的 user 消息不重复追加"
         );
+    }
+
+    #[test]
+    fn old_checkpoint_without_finish_reviewed_defaults_to_false() {
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let checkpoint = AgentCheckpoint::new("run-1".to_string(), &context);
+        let mut legacy = serde_json::to_value(checkpoint).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("finish_reviewed");
+
+        let restored: AgentCheckpoint = serde_json::from_value(legacy).unwrap();
+        assert!(!restored.finish_reviewed);
     }
 }
