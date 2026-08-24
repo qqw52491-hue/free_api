@@ -2,7 +2,46 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DB_PATH = '/home/w/.local/share/free-api-chat/data_v2.db';
+const DB_PATH = process.env.FREE_API_DB_PATH || [
+  path.join(process.env.HOME || '', 'Library', 'Application Support', 'free-api-chat', 'data_v2.db'),
+  '/home/w/.local/share/free-api-chat/data_v2.db',
+].find((candidate) => fs.existsSync(candidate));
+
+if (!DB_PATH) {
+  throw new Error('未找到 FreeAPI SQLite 数据库；请通过 FREE_API_DB_PATH 显式指定。');
+}
+
+function resolveToolIndex(override) {
+  const toolIndex = override || process.env.FREE_API_LIVE_EVAL_TOOL_INDEX;
+  if (!toolIndex) {
+    throw new Error('缺少当前会话工具快照；请通过 FREE_API_LIVE_EVAL_TOOL_INDEX 或 runAgentLiveTest({ toolIndex }) 提供。');
+  }
+  return toolIndex;
+}
+
+function parseProviderCapabilities(raw) {
+  try {
+    const parsed = JSON.parse(raw || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function applyProviderCapabilities(requestBody, rawCapabilities, reasoningEffort = 'high') {
+  const capabilities = parseProviderCapabilities(rawCapabilities);
+  if (capabilities.response_format && typeof capabilities.response_format === 'object' && !Array.isArray(capabilities.response_format)) {
+    requestBody.response_format = capabilities.response_format;
+  }
+  const thinking = capabilities.thinking;
+  if (!thinking || typeof thinking !== 'object' || !thinking.field) return;
+  requestBody[thinking.field] = thinking.enabled_value ?? true;
+  const effort = thinking.effort;
+  if (effort && typeof effort === 'object' && effort.field) {
+    const value = effort.map?.[reasoningEffort] ?? effort.default;
+    if (value !== undefined) requestBody[effort.field] = value;
+  }
+}
 
 // 1. 从数据库读取指定模型或默认优选模型
 export function getModelConfig(targetModelName, platformFilter) {
@@ -13,7 +52,7 @@ export function getModelConfig(targetModelName, platformFilter) {
   if (targetModelName) {
     where += ` AND m.name LIKE '%${targetModelName}%'`;
   }
-  const query = `SELECT p.name, p.base_url, p.api_key, m.name, m.context_window, m.temperature
+  const query = `SELECT p.name, p.base_url, p.api_key, m.name, m.context_window, m.temperature, m.provider_capabilities
        FROM platforms p JOIN models m ON m.platform_id = p.id
        WHERE ${where} LIMIT 1;`;
 
@@ -21,33 +60,21 @@ export function getModelConfig(targetModelName, platformFilter) {
   if (res.status !== 0 || !res.stdout.trim()) {
     throw new Error(`未能在数据库中找到可用模型 (${platformFilter || ''} / ${targetModelName || '默认'}): ` + (res.stderr || '空数据'));
   }
-  const [platform, baseUrl, apiKey, modelName, contextWindow, temperature] = res.stdout.trim().split('\n')[0].split('|');
-  return { platform, baseUrl, apiKey, modelName, contextWindow: Number(contextWindow) || 128000, temperature: Number(temperature) || 0.3 };
+  const [platform, baseUrl, apiKey, modelName, contextWindow, temperature, providerCapabilities] = res.stdout.trim().split('\n')[0].split('|');
+  return { platform, baseUrl, apiKey, modelName, contextWindow: Number(contextWindow) || 128000, temperature: Number(temperature) || 0.3, providerCapabilities: providerCapabilities || '{}' };
 }
 
 // 2. 构造五大极端复杂生产级三明治上下文
-export function buildSimulatedSandwichContext({ userGoal, scenario = 'code_investigation' }) {
+export function buildSimulatedSandwichContext({ userGoal, scenario = 'code_investigation', toolIndex } = {}) {
   const systemPromptPath = path.resolve('src-tauri/prompts/core_logic.md');
-  let baseContract = fs.existsSync(systemPromptPath) ? fs.readFileSync(systemPromptPath, 'utf8') : '';
-
-  const mcpMenu = `
-## 外部 MCP 插件工具目录
-- remote-hub: remote-hub/read_text_file, remote-hub/write_file, remote-hub/shell_exec, remote-hub/ripgrep_search, remote-hub/list_directory
-- excel: excel/read_data_from_excel, excel/write_data_to_excel
-`;
-
-  const topBread = `${baseContract}\n\n${mcpMenu}`;
+  const baseContract = fs.existsSync(systemPromptPath) ? fs.readFileSync(systemPromptPath, 'utf8') : '';
+  const activeToolIndex = resolveToolIndex(toolIndex);
+  const topBread = `${baseContract}\n\n${activeToolIndex}`;
 
   let turnsHistory = [];
   let bottomTail = '';
 
-  const toolIndexTail = `【当前可用工具快速索引】(只能从以下调用，严禁臆造 core/bash 等未声明工具)
-- 原生内置: finish, ask_human, search, task_store, get_step_output, web_search, web_fetch, model_manager
-- MCP 插件:
-  * remote-hub: remote-hub/shell_exec, remote-hub/read_text_file, remote-hub/write_file, remote-hub/ripgrep_search, remote-hub/list_directory
-  * excel: excel/read_data_from_excel, excel/write_data_to_excel
-
-请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 \`\`\`），tool 名必须严格来自可用工具清单。在 description 字段给出面向用户的一句话进度；仅当上一步失败或被拦截时，才在 reflection 中补一句原因与改法。`;
+  const toolIndexTail = activeToolIndex;
 
   if (scenario === 'code_investigation') {
     // 场景 1：排查死锁与文件定位
@@ -60,13 +87,13 @@ export function buildSimulatedSandwichContext({ userGoal, scenario = 'code_inves
         role: 'assistant',
         content: JSON.stringify({
           description: "使用 ripgrep 搜索 CaseLockService.java",
-          tool: "remote-hub/ripgrep_search",
+          tool: "mcp/ripgrep_search",
           command: { "query": "sweepExpiredLocks", "path": "." }
         })
       },
       {
         role: 'user',
-        content: `【工具执行结果 (remote-hub/ripgrep_search)】:\nFound 1 match in src/main/java/com/graph/cases/service/CaseLockService.java:255: Db.find("select * from case_lock where expire_time < ?", now);`
+        content: `【工具执行结果 (mcp/ripgrep_search)】:\nFound 1 match in src/main/java/com/graph/cases/service/CaseLockService.java:255: Db.find("select * from case_lock where expire_time < ?", now);`
       }
     ];
 
@@ -135,7 +162,7 @@ ${toolIndexTail}`;
     ];
 
     bottomTail = `【避坑指南 (Failed Attempts)】
-- [Step 1] 工具: core · 原因: 臆造了不存在的系统工具 core，必须改用已连接的 remote-hub/shell_exec
+- [Step 1] 工具: core · 原因: 臆造了不存在的系统工具 core，必须改用已连接的 mcp/shell_exec
 
 【当前任务面板 (Todo List)】
 - [/] 使用合规工具重新获取网络连接状态
@@ -151,14 +178,14 @@ ${toolIndexTail}`;
       {
         role: 'assistant',
         content: JSON.stringify({
-          description: "使用 remote-hub/edit_file 将拼接 SQL 改为预编译参数化查询",
-          tool: "remote-hub/edit_file",
+          description: "使用 mcp/edit_file 将拼接 SQL 改为预编译参数化查询",
+          tool: "mcp/edit_file",
           command: { "path": "src/api/auth.js", "content": "..." }
         })
       },
       {
         role: 'user',
-        content: `【工具执行结果 (remote-hub/edit_file)】: 文件 src/api/auth.js 已成功保存，单测运行通过（10/10 passed）。`
+        content: `【工具执行结果 (mcp/edit_file)】: 文件 src/api/auth.js 已成功保存，单测运行通过（10/10 passed）。`
       }
     ];
 
@@ -181,12 +208,12 @@ ${toolIndexTail}`;
 }
 
 // 3. 运行单轮或多轮 Agent 实时交互评估
-export async function runAgentLiveTest({ modelName, platformName, userGoal, scenario } = {}) {
+export async function runAgentLiveTest({ modelName, platformName, userGoal, scenario, toolIndex, reasoningEffort = 'high' } = {}) {
   const config = getModelConfig(modelName, platformName);
   console.log(`\n🚀 [Agent 生产级三明治实时测试启动] 平台: ${config.platform} | 模型: ${config.modelName}`);
   console.log(`🎯 场景: ${scenario || 'code_investigation'} | 目标: ${userGoal || '排查锁巡检线程死锁 NPE'}\n`);
 
-  const messages = buildSimulatedSandwichContext({ userGoal, scenario });
+  const messages = buildSimulatedSandwichContext({ userGoal, scenario, toolIndex });
 
   const endpoint = config.baseUrl.replace(/\/$/, '') + '/chat/completions';
   const startTime = Date.now();
@@ -199,6 +226,7 @@ export async function runAgentLiveTest({ modelName, platformName, userGoal, scen
     temperature: config.temperature,
     max_tokens: 8192,
   };
+  applyProviderCapabilities(requestBody, config.providerCapabilities, reasoningEffort);
 
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -306,6 +334,8 @@ export async function runAgentLiveTest({ modelName, platformName, userGoal, scen
 const targetModel = process.argv[2] || 'glm-5.3';
 const targetPlatform = process.argv[3] || '火山';
 const targetScenario = process.argv[4] || '';
+const targetToolIndex = process.env.FREE_API_LIVE_EVAL_TOOL_INDEX;
+const targetReasoningEffort = process.env.FREE_API_LIVE_EVAL_REASONING_EFFORT || 'high';
 
 async function main() {
   const scenarios = targetScenario
@@ -320,7 +350,9 @@ async function main() {
       const res = await runAgentLiveTest({
         modelName: targetModel,
         platformName: targetPlatform,
-        scenario: scen
+        scenario: scen,
+        toolIndex: targetToolIndex,
+        reasoningEffort: targetReasoningEffort
       });
       results.push(res);
     } catch (err) {
@@ -340,8 +372,12 @@ async function main() {
     决策工具: r.toolCalled || 'none'
   })));
   console.log('█'.repeat(70) + '\n');
+  if (results.some((result) => result.error)) {
+    process.exitCode = 1;
+  }
 }
 
 main().catch(err => {
   console.error('\n❌ 测试流程异常终止:', err);
+  process.exitCode = 1;
 });

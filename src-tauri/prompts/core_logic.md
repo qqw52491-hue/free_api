@@ -73,25 +73,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
   "command": { "action": "list_resources" }
 }
 ```
-外部 MCP 插件工具调用示例（文件读取 / 命令行执行）：
-```json
-{
-  "description": "读取服务端配置文件内容",
-  "plan_id": "read-config",
-  "plan_title": "检查配置项",
-  "tool": "remote-hub/read_text_file",
-  "command": { "path": "src/main/resources/config.properties" }
-}
-```
-```json
-{
-  "description": "执行单元测试验证修改结果",
-  "plan_id": "verify-code",
-  "plan_title": "运行测试套件",
-  "tool": "remote-hub/shell_exec",
-  "command": { "command": "cargo", "args": ["test", "--", "test_filter"] }
-}
-```
+外部 MCP 插件调用：**只可从每轮尾部的“当前可用工具快速索引”逐字复制实际 `tool` 名**。静态规范不保证任何插件、命令、字段或路径在当前会话存在；不得复用旧会话、旧示例或记忆中的 MCP 前缀。先依据当前工具 schema 确认 `command` 所需字段，再输出单步 JSON。
 向用户提问或请求表单交互 (ask_human) 示例：
 ```json
 {
@@ -161,9 +143,9 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
       },
       {
         "id": "step2",
-        "description": "基于第一步找到的文件读取源码",
-        "tool": "remote-hub/read_text_file",
-        "command": { "path": "$step1.path" }
+        "description": "基于第一步找到的文件继续定位巡检函数",
+        "tool": "search",
+        "command": { "query": "sweepExpiredLocks", "path": "$step1.path" }
       }
     ]
   }
