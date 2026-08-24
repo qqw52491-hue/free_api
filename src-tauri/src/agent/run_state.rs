@@ -179,13 +179,23 @@ impl AgentRunMachine {
                 self.message = Some("正在执行指令".to_string());
                 true
             }
-            AgentRunEvent::PlanningFailed { reason } if self.state == AgentRunState::Planning => {
+            AgentRunEvent::PlanningFailed { reason }
+                if matches!(
+                    self.state,
+                    AgentRunState::Planning | AgentRunState::Recovering | AgentRunState::Preparing
+                ) =>
+            {
                 self.state = AgentRunState::Recovering;
                 self.retry_count += 1;
                 self.message = Some(reason);
                 true
             }
-            AgentRunEvent::ToolFailed { reason } if self.state == AgentRunState::Executing => {
+            AgentRunEvent::ToolFailed { reason }
+                if matches!(
+                    self.state,
+                    AgentRunState::Executing | AgentRunState::Recovering
+                ) =>
+            {
                 self.state = AgentRunState::Recovering;
                 self.retry_count += 1;
                 self.tool_retry_count += 1;

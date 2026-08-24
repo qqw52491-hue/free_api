@@ -33,7 +33,9 @@
             </section>
 
             <template v-for="entry in timelineEntries" :key="entry.id">
-                <article v-if="entry.type === 'user'" class="user-message">{{ entry.content }}</article>
+                <article v-if="entry.type === 'user'" class="user-message">
+                    <p class="user-text-content">{{ entry.content }}</p>
+                </article>
                 <article v-else-if="entry.type === 'message'" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
                     <template v-if="entry.role === 'agent' || entry.role === 'assistant'">
                         <div class="agent-msg-header">
@@ -476,6 +478,9 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
     color: #f4f4f5;
     margin: 2px 0;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    box-sizing: border-box;
 }
 
 .user-text-content {
@@ -485,6 +490,7 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     line-height: 1.6;
     white-space: pre-wrap;
     word-break: break-word;
+    overflow-wrap: anywhere;
 }
 
 /* 🤖 Agent 消息：彻底透明无框排版 */
