@@ -197,6 +197,7 @@ export async function runAgentLiveTest({ modelName, platformName, userGoal, scen
     messages,
     stream: true,
     temperature: config.temperature,
+    max_tokens: 8192,
   };
 
   const response = await fetch(endpoint, {
@@ -206,7 +207,7 @@ export async function runAgentLiveTest({ modelName, platformName, userGoal, scen
       'Authorization': `Bearer ${config.apiKey}`
     },
     body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(60_000)
+    signal: AbortSignal.timeout(300_000)
   });
 
   if (!response.ok) {

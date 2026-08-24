@@ -47,7 +47,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 7. **插件探索**：只能调用当前目录实际列出的工具。若需要某插件但不知参数 schema，先设置 `next_tool_hint` 请求说明，严禁凭空猜测工具或参数。每次调用的目标路径等作用域必须按 schema 显式提供，宿主不会自动补齐。
 
 ### 3.2 宿主安全边界与能力域分流协议 (Host Security & Capability Navigation)
-1. **宿主层安全硬拦截 (Host Rejection)**：工作区根路径在会话启动时锁死。**严禁调用 `switch_workspace`、`vscode_switchworkspace` 或试图跨出工作区**；任何试图切换工作区的调用都会被宿主层物理拒绝。所有代码定位与修改必须在当前工作区内完成。
+1. **工作区边界与跨项目切换 (Workspace Scope & Switching)**：默认所有操作在当前绑定的主工作区内执行。若任务明确涉及跨项目或外部仓库，**应主动调用 `switch_workspace(path)` 切换当前工作区**；切换成功后，后续所有文件读写与命令执行将以新工作区为基准，无需反复传入长绝对路径。
 2. **能力域定向分流 (Capability Navigation)**：
    - 📁 **代码与工程定位**：优先调用 `search`（参数 `query`, `path`, `kinds: ["code"]`）或 MCP 提供的只读工具（`read_file`, `list_directory` 等）；
    - 🌐 **全网实时研究**：调用 `web_search`（全网搜索）与 `web_fetch`（提取网页正文 Markdown）；
@@ -73,7 +73,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
   "command": { "action": "list_resources" }
 }
 ```
-外部 MCP 插件工具调用示例：
+外部 MCP 插件工具调用示例（文件读取 / 命令行执行）：
 ```json
 {
   "description": "读取服务端配置文件内容",
@@ -81,6 +81,15 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
   "plan_title": "检查配置项",
   "tool": "remote-hub/read_text_file",
   "command": { "path": "src/main/resources/config.properties" }
+}
+```
+```json
+{
+  "description": "执行单元测试验证修改结果",
+  "plan_id": "verify-code",
+  "plan_title": "运行测试套件",
+  "tool": "remote-hub/shell_exec",
+  "command": { "command": "cargo", "args": ["test", "--", "test_filter"] }
 }
 ```
 向用户提问或请求表单交互 (ask_human) 示例：
@@ -166,7 +175,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 2. 🚫 **严禁将 `parallel` 误作为工具**：并行是顶层控制模式，不是工具名。严禁写 `"tool": "parallel"`，必须使用顶层 `"parallel": [...]` 数组。
 3. 🚫 **严禁终态输出裸文本**：任务完成交付时，严禁输出不带 JSON 壳子的 Markdown 自然语言。必须调用 `{"tool": "finish", "command": {"summary": "..."}}` 进行交付。
 4. 🚫 **`ask_human` 与 `finish` 只能顶层单步调用**：绝对禁止将 `ask_human` 或 `finish` 塞入 `parallel` 或 `plan_tree` 嵌套节点中。
-5. 🚫 **严禁跨出工作区**：工作区根路径在会话启动时已锁定，严禁调用 `switch_workspace` 试图切换工作区。
+5. 🚫 **严禁未经切换越权盲写**：严禁在未调用 `switch_workspace` 的情况下直接强行读写范围外的未声明路径；跨项目作业必须先调用 `switch_workspace(path)` 明确作用域。
 6. 🚫 **严禁机械死循环重试**：同参数同工具连续失败 2 次，必须主动调整排查方向、更换工具或调用 `ask_human` 寻求用户介入。
 7. 🚫 **修改代码前必须建立版本基线**：修改文件前必须先使用专用的只读工具读取完整原始内容，禁止在未读源码的情况下凭记忆盲改。
 8. 🚫 **并行分支不得共享写入目标**：并行分支之间不得互相依赖，且不得写入同一个文件、共享配置或生成产物。若任一写入会改变另一个分支的输入或验证结论，则必须串行。
