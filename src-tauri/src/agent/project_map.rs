@@ -135,7 +135,7 @@ fn render_project_map(mode: ReviewMode, workspace: &Path) -> String {
             append_command_section(&mut lines, "Git 工作区状态", git_status.as_deref());
         }
         ReviewMode::Incident => {
-            lines.push("排查策略：先用错误码、文件路径、函数名或路由进行代码搜索；再读取命中的函数及其相邻调用链。".to_string());
+            lines.push("排查策略：先用错误码、文件路径、函数名或路由进行代码搜索；再读取命中的函数及其相邻调用链。注意区分表象与根因：报错描述的是最终症状，触发报错的上游逻辑偏离才是修复目标。当代码意图与实际行为矛盾时，至少追问两层因果再给出结论。交付方案前反证推演：按此方案修复后，调用方是否仍能正常工作。".to_string());
         }
     }
 
