@@ -46,7 +46,7 @@
         <article v-for="item in customInstructions" :key="item.id" class="instruction-card" :class="{ disabled: !item.enabled }">
           <div class="instruction-card-head">
             <div>
-              <span class="instruction-kind">{{ item.kind === 'skill' ? 'CUSTOM SKILL' : 'CUSTOM PROMPT' }}</span>
+              <span class="instruction-kind" :class="instructionKindClass(item.kind)">{{ instructionKindLabel(item.kind) }}</span>
               <h3>{{ item.name }}</h3>
             </div>
             <label class="toggle-switch" :title="item.enabled ? '停用此条目' : '启用此条目'">
@@ -158,6 +158,7 @@
             <select v-model="instructionForm.kind">
               <option value="prompt">自定义提示词</option>
               <option value="skill">自定义 Skill</option>
+              <option v-if="instructionForm.kind === 'system_skill'" value="system_skill">系统内置 Skill (Markdown 文件)</option>
             </select>
           </div>
           <div class="form-group">
@@ -750,6 +751,18 @@ const confirmDeleteCustomInstruction = async (item) => {
   }
 };
 
+const instructionKindLabel = (kind) => {
+  if (kind === 'system_skill') return 'BUILTIN SKILL';
+  if (kind === 'skill') return 'CUSTOM SKILL';
+  return 'CUSTOM PROMPT';
+};
+
+const instructionKindClass = (kind) => {
+  if (kind === 'system_skill') return 'system-skill';
+  if (kind === 'skill') return 'custom-skill';
+  return 'custom-prompt';
+};
+
 const instructionPreview = (content) => content.length > 220 ? `${content.slice(0, 220)}…` : content;
 
 const togglePlugin = async (name, enabled) => {
@@ -908,6 +921,27 @@ h1 {
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+.instruction-kind.system-skill {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.instruction-kind.custom-skill {
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.28);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.instruction-kind.custom-prompt {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.12);
+  border: 1px solid rgba(52, 211, 153, 0.28);
+  padding: 2px 6px;
+  border-radius: 4px;
 }
 .library-heading h2 {
   margin: 3px 0 4px;

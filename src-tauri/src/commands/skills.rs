@@ -3,7 +3,7 @@ use crate::llm::ModelConfig;
 use chrono::Utc;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 use uuid::Uuid;
 
 // ==================== SKILL & INSTRUCTION STRUCTS & HELPERS ====================
@@ -23,6 +23,98 @@ pub struct AgentCustomInstructionRow {
 const MAX_CUSTOM_INSTRUCTION_CHARS: usize = 12_000;
 const MAX_CUSTOM_INSTRUCTIONS_IN_PROMPT: usize = 24_000;
 
+fn resolve_skills_dir(app_handle: Option<&tauri::AppHandle>) -> Option<std::path::PathBuf> {
+    let mut candidate_dirs = vec![
+        std::path::PathBuf::from("src-tauri/prompts/skills"),
+        std::path::PathBuf::from("prompts/skills"),
+        std::path::PathBuf::from("../src-tauri/prompts/skills"),
+    ];
+    if let Some(app) = app_handle {
+        if let Ok(res_dir) = app.path().resource_dir() {
+            candidate_dirs.push(res_dir.join("prompts/skills"));
+        }
+    }
+    candidate_dirs.into_iter().find(|d| d.is_dir())
+}
+
+pub fn scan_system_skills(app_handle: Option<&tauri::AppHandle>) -> Vec<AgentCustomInstructionRow> {
+    let mut skills = Vec::new();
+    let Some(skills_dir) = resolve_skills_dir(app_handle) else {
+        return skills;
+    };
+
+    let Ok(entries) = std::fs::read_dir(skills_dir) else {
+        return skills;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+
+        let mut description = String::new();
+        if content.starts_with("---") {
+            if let Some(end_idx) = content[3..].find("---") {
+                let frontmatter = &content[3..3 + end_idx];
+                for line in frontmatter.lines() {
+                    let line = line.trim();
+                    if line.starts_with("description:") {
+                        description = line["description:".len()..].trim().to_string();
+                        break;
+                    }
+                }
+            }
+        }
+        if description.is_empty() {
+            if let Some(start) = content.find("<summary>") {
+                if let Some(end) = content.find("</summary>") {
+                    if start + 9 < end {
+                        description = content[start + 9..end].trim().to_string();
+                    }
+                }
+            }
+        }
+        if description.is_empty() {
+            description = content
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("<!--") && !l.starts_with("---"))
+                .map(|l| l.chars().take(120).collect())
+                .unwrap_or_else(|| format!("系统内置技能: {}", stem));
+        }
+
+        let updated_at = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+        skills.push(AgentCustomInstructionRow {
+            id: format!("system:{}", stem),
+            kind: "system_skill".to_string(),
+            name: stem,
+            description,
+            content,
+            enabled: true,
+            created_at: updated_at.clone(),
+            updated_at,
+        });
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
 fn normalized_custom_instruction(
     kind: &str,
     name: &str,
@@ -30,8 +122,8 @@ fn normalized_custom_instruction(
     content: &str,
 ) -> Result<(String, String, String, String), String> {
     let kind = kind.trim().to_ascii_lowercase();
-    if kind != "prompt" && kind != "skill" {
-        return Err("类型只能是 prompt 或 skill".to_string());
+    if kind != "prompt" && kind != "skill" && kind != "system_skill" {
+        return Err("类型只能是 prompt, skill 或 system_skill".to_string());
     }
     let name = name.trim().to_string();
     if name.is_empty() || name.chars().count() > 80 {
@@ -106,8 +198,11 @@ pub fn load_enabled_custom_instruction_context(db: &DbState) -> Result<String, S
 
 #[tauri::command]
 pub fn get_agent_custom_instructions(
+    app_handle: tauri::AppHandle,
     state: State<'_, DbState>,
 ) -> Result<Vec<AgentCustomInstructionRow>, String> {
+    let mut system_skills = scan_system_skills(Some(&app_handle));
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
@@ -128,14 +223,18 @@ pub fn get_agent_custom_instructions(
             })
         })
         .map_err(|e| e.to_string())?;
-    let instructions = rows
+    let mut custom_instructions = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    Ok(instructions)
+
+    // Combine: system skills first or custom instructions first
+    custom_instructions.append(&mut system_skills);
+    Ok(custom_instructions)
 }
 
 #[tauri::command]
 pub fn save_agent_custom_instruction(
+    app_handle: tauri::AppHandle,
     state: State<'_, DbState>,
     id: Option<String>,
     kind: String,
@@ -146,6 +245,30 @@ pub fn save_agent_custom_instruction(
 ) -> Result<AgentCustomInstructionRow, String> {
     let (kind, name, description, content) =
         normalized_custom_instruction(&kind, &name, description.as_deref(), &content)?;
+
+    if let Some(ref id_val) = id {
+        if id_val.starts_with("system:") {
+            let stem = id_val.trim_start_matches("system:");
+            let skills_dir = resolve_skills_dir(Some(&app_handle))
+                .ok_or_else(|| "未找到系统 Skill 存储目录 prompts/skills/".to_string())?;
+            let file_path = skills_dir.join(format!("{}.md", stem));
+            std::fs::write(&file_path, &content)
+                .map_err(|e| format!("写入系统 Skill 文件失败: {}", e))?;
+
+            let now = Utc::now().to_rfc3339();
+            return Ok(AgentCustomInstructionRow {
+                id: id_val.clone(),
+                kind: "system_skill".to_string(),
+                name,
+                description,
+                content,
+                enabled: true,
+                created_at: now.clone(),
+                updated_at: now,
+            });
+        }
+    }
+
     let id = id
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -179,6 +302,10 @@ pub fn toggle_agent_custom_instruction(
     id: String,
     enabled: bool,
 ) -> Result<(), String> {
+    if id.starts_with("system:") {
+        return Ok(());
+    }
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let changed = conn
         .execute(
@@ -194,9 +321,22 @@ pub fn toggle_agent_custom_instruction(
 
 #[tauri::command]
 pub fn delete_agent_custom_instruction(
+    app_handle: tauri::AppHandle,
     state: State<'_, DbState>,
     id: String,
 ) -> Result<(), String> {
+    if id.starts_with("system:") {
+        let stem = id.trim_start_matches("system:");
+        let skills_dir = resolve_skills_dir(Some(&app_handle))
+            .ok_or_else(|| "未找到系统 Skill 存储目录 prompts/skills/".to_string())?;
+        let file_path = skills_dir.join(format!("{}.md", stem));
+        if file_path.exists() {
+            std::fs::remove_file(&file_path)
+                .map_err(|e| format!("删除系统 Skill 文件失败: {}", e))?;
+        }
+        return Ok(());
+    }
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let changed = conn
         .execute(
@@ -255,6 +395,7 @@ pub struct BatchSkillImportResult {
 
 #[tauri::command]
 pub async fn batch_import_skills(
+    app_handle: tauri::AppHandle,
     state: State<'_, DbState>,
     import_payload: String,
     model_id: Option<String>,
@@ -351,6 +492,7 @@ pub async fn batch_import_skills(
         };
 
         match save_agent_custom_instruction(
+            app_handle.clone(),
             state.clone(),
             None,
             "skill".to_string(),
