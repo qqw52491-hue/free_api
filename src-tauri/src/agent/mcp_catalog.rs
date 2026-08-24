@@ -124,11 +124,11 @@ pub async fn generate_llm_mcp_card(
     );
 
     let resp = tokio::time::timeout(
-        Duration::from_secs(20),
+        Duration::from_secs(120),
         client.post(&url).headers(headers).json(&body).send(),
     )
     .await
-    .map_err(|_| "LLM 生成 MCP 能力卡超时 (20s)".to_string())?
+    .map_err(|_| "LLM 生成 MCP 能力卡超时 (120s)".to_string())?
     .map_err(|e| format!("LLM 生成 MCP 能力卡网络请求失败: {}", e))?;
 
     if !resp.status().is_success() {

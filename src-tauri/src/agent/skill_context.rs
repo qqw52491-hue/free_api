@@ -188,11 +188,11 @@ pub async fn generate_llm_skill_summary(
     config.apply_provider_capabilities(&mut body, "off");
 
     let resp = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(120),
         client.post(&url).headers(headers).json(&body).send(),
     )
     .await
-    .map_err(|_| "LLM 生成 Skill 卡片超时".to_string())?
+    .map_err(|_| "LLM 生成 Skill 卡片超时 (120s)".to_string())?
     .map_err(|e| format!("LLM 生成 Skill 卡片网络请求失败: {}", e))?;
 
     let json_resp: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
