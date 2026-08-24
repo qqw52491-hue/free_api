@@ -1,6 +1,8 @@
-use crate::agent::plan_tree_dispatch::{run_plan_tree_sync, validate_controlled_parallel_batch, MAX_CONTROLLED_PARALLEL_BRANCHES};
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::mcp_catalog::invalidate_plugin;
+use crate::agent::plan_tree_dispatch::{
+    run_plan_tree_sync, validate_controlled_parallel_batch, MAX_CONTROLLED_PARALLEL_BRANCHES,
+};
 use crate::agent::retrieval;
 use crate::agent::task_store;
 use crate::agent::types::{AgentInstruction, DispatchResult};
@@ -260,40 +262,13 @@ pub(crate) fn execute_command_inner(
         return crate::agent::tools::skill_manager::dispatch(db, action, params);
     }
 
-    // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action，支持自动反查与别名路由)
-    let (mut plugin_name, mut tool_name) = if tool.contains('/') {
+    // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
+    let (plugin_name, tool_name) = if tool.contains('/') {
         let parts: Vec<&str> = tool.split('/').collect();
         (parts[0].to_string(), parts[1].to_string())
     } else {
         (tool.to_string(), action.to_string())
     };
-
-    // 4.1 自动反查与别名映射：当模型省略插件名或使用了常见别名时，自动在已连接 MCP 中定位
-    if registry.get(&plugin_name).is_none() {
-        let target_subtool = if tool == "core" || tool == "system" || tool == "terminal" {
-            if !action.is_empty() { action.to_string() } else { "shell_exec".to_string() }
-        } else if tool == "bash" || tool == "sh" || tool == "shell" || tool == "exec" {
-            "shell_exec".to_string()
-        } else if tool == "read_file" {
-            "read_text_file".to_string()
-        } else {
-            tool.to_string()
-        };
-
-        for (p_name, p_client) in &registry.clients {
-            let tools = crate::agent::mcp_catalog::cached_tools(&p_client.config)
-                .unwrap_or_else(|| p_client.last_known_tools());
-            if tools.iter().any(|t| t.name == target_subtool || (target_subtool == "shell_exec" && (t.name == "shell_exec" || t.name == "bash" || t.name == "execute_command"))) {
-                plugin_name = p_name.clone();
-                tool_name = if target_subtool == "shell_exec" && !tools.iter().any(|t| t.name == "shell_exec") {
-                    tools.iter().find(|t| t.name == "bash" || t.name == "execute_command").map(|t| t.name.clone()).unwrap_or(target_subtool)
-                } else {
-                    target_subtool
-                };
-                break;
-            }
-        }
-    }
 
     if let Some(plugin) = registry.get(&plugin_name) {
         if mcp_service_requires_concrete_tool(tool, action) {
@@ -367,7 +342,7 @@ pub(crate) fn execute_command_inner(
         }
     }
 
-    // 5. 未知工具报错：附带所有可用工具与标准格式，协助模型一轮纠偏
+    // 5. 未知工具或格式错误报错（动态生成当前所有已连接 MCP 插件及子工具清单，协助模型无硬编码纠错）
     let mut mcp_tool_hints = Vec::new();
     for (p_name, p_client) in &registry.clients {
         let tools = crate::agent::mcp_catalog::cached_tools(&p_client.config)
@@ -381,14 +356,16 @@ pub(crate) fn execute_command_inner(
     let mcp_guide = if mcp_tool_hints.is_empty() {
         "（当前未连接任何 MCP 插件）".to_string()
     } else {
-        format!("\n🔌 当前已连接的 MCP 插件及可用工具：\n{}", mcp_tool_hints.join("\n"))
+        format!("\n当前已连接的 MCP 插件及可用工具：\n{}", mcp_tool_hints.join("\n"))
     };
 
     DispatchResult {
         stdout: String::new(),
         stderr: format!(
-            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n👉 如需执行终端/Git 命令，请使用：{{\"tool\": \"remote-hub/shell_exec\", \"command\": {{\"command\": \"git status\"}}}}\n📚 可用原生内置工具：finish, ask_human, model_manager, mcp_manager, skill_manager, web_search, web_fetch, search, get_step_output, task_store{}\n外部 MCP 工具标准格式：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}",
-            tool, action, mcp_guide
+            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n可用原生内置工具：finish, ask_human, model_manager, mcp_manager, skill_manager, web_search, web_fetch, search, get_step_output, task_store；{}\n外部 MCP 工具调用格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
+            tool,
+            action,
+            mcp_guide
         ),
         success: false,
         route: "unknown".to_string(),
@@ -561,10 +538,18 @@ pub async fn dispatch_agent_step(
 
     // --- Strict JSON Schema Mutual Exclusivity Check ---
     let mut modes = 0;
-    if instruction.tool.is_some() || instruction.action.is_some() { modes += 1; }
-    if instruction.parallel.is_some() { modes += 1; }
-    if instruction.plan_tree.is_some() { modes += 1; }
-    if !instruction.commands.is_empty() { modes += 1; }
+    if instruction.tool.is_some() || instruction.action.is_some() {
+        modes += 1;
+    }
+    if instruction.parallel.is_some() {
+        modes += 1;
+    }
+    if instruction.plan_tree.is_some() {
+        modes += 1;
+    }
+    if !instruction.commands.is_empty() {
+        modes += 1;
+    }
 
     if modes > 1 {
         return Ok(json!({
@@ -611,11 +596,13 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
-
     #[test]
     fn mcp_service_name_requires_an_explicit_subtool_without_parameter_inference() {
         assert!(mcp_service_requires_concrete_tool("remote-http-mcp", ""));
-        assert!(mcp_service_requires_concrete_tool("remote-http-mcp", "remote-http-mcp"));
+        assert!(mcp_service_requires_concrete_tool(
+            "remote-http-mcp",
+            "remote-http-mcp"
+        ));
         assert!(!mcp_service_requires_concrete_tool(
             "remote-http-mcp/read_text_file",
             ""
@@ -680,7 +667,8 @@ mod tests {
 
         // 3. 测试 delete_spec 无 confirm 拦截
         let p_del_no_confirm = serde_json::json!({ "name": "Custom-Test-Model" });
-        let res = crate::agent::tools::model_manager::dispatch(&db, "delete_spec", &p_del_no_confirm);
+        let res =
+            crate::agent::tools::model_manager::dispatch(&db, "delete_spec", &p_del_no_confirm);
         assert!(
             !res.success,
             "delete_spec without confirm must fail for safety"
@@ -688,8 +676,7 @@ mod tests {
         assert!(res.stderr.contains("confirm: true"));
 
         // 4. 测试 delete_spec 带 confirm: true
-        let p_del_confirm =
-            serde_json::json!({ "name": "Custom-Test-Model", "confirm": true });
+        let p_del_confirm = serde_json::json!({ "name": "Custom-Test-Model", "confirm": true });
         let res = crate::agent::tools::model_manager::dispatch(&db, "delete_spec", &p_del_confirm);
         assert!(
             res.success,
@@ -737,14 +724,29 @@ mod tests {
         );
 
         let mcp_manager_path = dir.join("mcp_manager.md");
-        assert!(mcp_manager_path.exists(), "mcp_manager.md must exist in {:?}", dir);
+        assert!(
+            mcp_manager_path.exists(),
+            "mcp_manager.md must exist in {:?}",
+            dir
+        );
         let mcp_content = std::fs::read_to_string(&mcp_manager_path).expect("read mcp_manager.md");
-        assert!(mcp_content.contains("add_http"), "mcp_manager.md must describe add_http");
+        assert!(
+            mcp_content.contains("add_http"),
+            "mcp_manager.md must describe add_http"
+        );
 
         let skill_manager_path = dir.join("skill_manager.md");
-        assert!(skill_manager_path.exists(), "skill_manager.md must exist in {:?}", dir);
-        let skill_content = std::fs::read_to_string(&skill_manager_path).expect("read skill_manager.md");
-        assert!(skill_content.contains("add"), "skill_manager.md must describe add");
+        assert!(
+            skill_manager_path.exists(),
+            "skill_manager.md must exist in {:?}",
+            dir
+        );
+        let skill_content =
+            std::fs::read_to_string(&skill_manager_path).expect("read skill_manager.md");
+        assert!(
+            skill_content.contains("add"),
+            "skill_manager.md must describe add"
+        );
     }
 
     #[test]
@@ -753,33 +755,51 @@ mod tests {
         let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
 
         // 1. MCP Manager List & Toggle & Delete
-        let res_list = crate::agent::tools::mcp_manager::dispatch(&db, "list", &serde_json::json!({}));
+        let res_list =
+            crate::agent::tools::mcp_manager::dispatch(&db, "list", &serde_json::json!({}));
         assert!(res_list.success);
 
         // Delete without confirm
-        let res_del_fail = crate::agent::tools::mcp_manager::dispatch(&db, "delete", &serde_json::json!({ "name": "fake_mcp" }));
+        let res_del_fail = crate::agent::tools::mcp_manager::dispatch(
+            &db,
+            "delete",
+            &serde_json::json!({ "name": "fake_mcp" }),
+        );
         assert!(!res_del_fail.success);
         assert!(res_del_fail.stderr.contains("confirm: true"));
 
         // Delete with confirm
-        let res_del_ok = crate::agent::tools::mcp_manager::dispatch(&db, "delete", &serde_json::json!({ "name": "fake_mcp", "confirm": true }));
+        let res_del_ok = crate::agent::tools::mcp_manager::dispatch(
+            &db,
+            "delete",
+            &serde_json::json!({ "name": "fake_mcp", "confirm": true }),
+        );
         assert!(res_del_ok.success);
 
         // 2. Skill Manager Add & List & Delete
-        let res_add_skill = crate::agent::tools::skill_manager::dispatch(&db, "add", &serde_json::json!({
-            "name": "单元测试技能",
-            "content": "编写高覆盖率的 Rust 与 Vue 单元测试",
-            "kind": "skill",
-            "description": "用于编写单元测试"
-        }));
+        let res_add_skill = crate::agent::tools::skill_manager::dispatch(
+            &db,
+            "add",
+            &serde_json::json!({
+                "name": "单元测试技能",
+                "content": "编写高覆盖率的 Rust 与 Vue 单元测试",
+                "kind": "skill",
+                "description": "用于编写单元测试"
+            }),
+        );
         assert!(res_add_skill.success);
         assert!(res_add_skill.stdout.contains("单元测试技能"));
 
-        let res_skill_list = crate::agent::tools::skill_manager::dispatch(&db, "list", &serde_json::json!({}));
+        let res_skill_list =
+            crate::agent::tools::skill_manager::dispatch(&db, "list", &serde_json::json!({}));
         assert!(res_skill_list.success);
         assert!(res_skill_list.stdout.contains("单元测试技能"));
 
-        let res_skill_del = crate::agent::tools::skill_manager::dispatch(&db, "delete", &serde_json::json!({ "name": "单元测试技能", "confirm": true }));
+        let res_skill_del = crate::agent::tools::skill_manager::dispatch(
+            &db,
+            "delete",
+            &serde_json::json!({ "name": "单元测试技能", "confirm": true }),
+        );
         assert!(res_skill_del.success);
     }
 
@@ -796,7 +816,14 @@ mod tests {
         assert!(res.stderr.contains("宿主层安全拦截"));
         assert_eq!(res.route, "host_rejection:forbidden_workspace_switch");
 
-        let res2 = execute_command_inner(&db, "test-session", "vscode_switchworkspace", "", &p, &registry);
+        let res2 = execute_command_inner(
+            &db,
+            "test-session",
+            "vscode_switchworkspace",
+            "",
+            &p,
+            &registry,
+        );
         assert!(!res2.success);
         assert!(res2.stderr.contains("宿主层安全拦截"));
     }
@@ -810,9 +837,18 @@ mod tests {
             "limit": 100
         });
         let (guarded_within, notice_within) = guard_code_read_range("get_code_snippet", p_within);
-        assert_eq!(guarded_within.get("startLine").and_then(|v| v.as_u64()), Some(50));
-        assert_eq!(guarded_within.get("endLine").and_then(|v| v.as_u64()), Some(149));
-        assert!(notice_within.is_none(), "within-budget range should not need truncation notice");
+        assert_eq!(
+            guarded_within.get("startLine").and_then(|v| v.as_u64()),
+            Some(50)
+        );
+        assert_eq!(
+            guarded_within.get("endLine").and_then(|v| v.as_u64()),
+            Some(149)
+        );
+        assert!(
+            notice_within.is_none(),
+            "within-budget range should not need truncation notice"
+        );
 
         // 2. 超出预算的 offset + limit (50..5000)
         let p_over = serde_json::json!({
@@ -821,8 +857,17 @@ mod tests {
             "limit": 5000
         });
         let (guarded_over, notice_over) = guard_code_read_range("get_code_snippet", p_over);
-        assert_eq!(guarded_over.get("startLine").and_then(|v| v.as_u64()), Some(50));
-        assert_eq!(guarded_over.get("endLine").and_then(|v| v.as_u64()), Some(289)); // 50 + 240 - 1
-        assert!(notice_over.is_some(), "over-budget range must include truncation guard notice");
+        assert_eq!(
+            guarded_over.get("startLine").and_then(|v| v.as_u64()),
+            Some(50)
+        );
+        assert_eq!(
+            guarded_over.get("endLine").and_then(|v| v.as_u64()),
+            Some(289)
+        ); // 50 + 240 - 1
+        assert!(
+            notice_over.is_some(),
+            "over-budget range must include truncation guard notice"
+        );
     }
 }
