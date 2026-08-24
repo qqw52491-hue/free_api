@@ -201,6 +201,55 @@ pub fn dispatch(
                 route: "model_manager:list_platforms".to_string(),
             }
         }
+        "add_platform" => {
+            let name = match params.get("name").and_then(|v| v.as_str()) {
+                Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+                _ => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: "❌ 缺少必填参数 name (平台名称，如 OpenRouter)".to_string(),
+                        success: false,
+                        route: "model_manager:add_platform".to_string(),
+                    }
+                }
+            };
+            let base_url = match params.get("base_url").and_then(|v| v.as_str()) {
+                Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+                _ => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: "❌ 缺少必填参数 base_url (API 基础地址，如 https://openrouter.ai/api/v1)".to_string(),
+                        success: false,
+                        route: "model_manager:add_platform".to_string(),
+                    }
+                }
+            };
+            let api_key = params.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+            let platform_id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+
+            match conn.execute(
+                "INSERT INTO platforms (id, name, base_url, api_key, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![platform_id, name, base_url, api_key, now],
+            ) {
+                Ok(_) => DispatchResult {
+                    stdout: format!(
+                        "✅ 成功添加平台 [{}] (base_url: {}, ID: {})",
+                        name, base_url, platform_id
+                    ),
+                    stderr: String::new(),
+                    success: true,
+                    route: "model_manager:add_platform".to_string(),
+                },
+                Err(e) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("添加平台失败: {}", e),
+                    success: false,
+                    route: "model_manager:add_platform".to_string(),
+                },
+            }
+        }
         "add_model" => {
             let platform_target = match params
                 .get("platform_id")
@@ -370,7 +419,7 @@ pub fn dispatch(
         }
         _ => DispatchResult {
             stdout: String::new(),
-            stderr: format!("❌ 未知的 model_manager 动作 action='{}'。支持的动作: list_specs, upsert_spec, delete_spec, list_platforms, add_model, delete_model", act),
+            stderr: format!("❌ 未知的 model_manager 动作 action='{}'。支持的动作: list_specs, upsert_spec, delete_spec, list_platforms, add_platform, add_model, delete_model", act),
             success: false,
             route: "model_manager:unknown".to_string(),
         },
