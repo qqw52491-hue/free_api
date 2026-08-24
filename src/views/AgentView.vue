@@ -165,7 +165,7 @@
 
             <!-- 2. ⚙️ LLM 平台与模型管理面板 (原平台管理) -->
             <div v-if="currentNavView === 'llm'" class="full-view-panel">
-                <ApiManager @models-updated="loadAllModels" />
+                <ApiManager @models-updated="loadAllModels" @back="currentNavView = 'agent'" />
             </div>
 
             <!-- 3. 🔌 插件 / 提示词与 Skill 库 -->

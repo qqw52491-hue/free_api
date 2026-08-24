@@ -2,23 +2,32 @@
   <div class="manager-layout">
     <!-- 顶部主标签页切换 -->
     <header class="top-nav-bar">
-      <div class="nav-tabs">
-        <button
-          class="nav-tab-btn"
-          :class="{ active: activeTab === 'platforms' }"
-          @click="activeTab = 'platforms'"
-        >
-          <span>🌐 渠道与模型管理</span>
-          <span class="tab-badge">{{ platforms.length }} 平台</span>
+      <div class="nav-left-group">
+        <button class="back-btn" type="button" title="返回对话" @click="goBack">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="19" y1="12" x2="5" y2="12"></line>
+            <polyline points="12 19 5 12 12 5"></polyline>
+          </svg>
+          <span>返回对话</span>
         </button>
-        <button
-          class="nav-tab-btn"
-          :class="{ active: activeTab === 'specs' }"
-          @click="activeTab = 'specs'"
-        >
-          <span>📚 模型物理规格词典</span>
-          <span class="tab-badge">{{ modelSpecs.length }} 预设</span>
-        </button>
+        <div class="nav-tabs">
+          <button
+            class="nav-tab-btn"
+            :class="{ active: activeTab === 'platforms' }"
+            @click="activeTab = 'platforms'"
+          >
+            <span>🌐 渠道与模型管理</span>
+            <span class="tab-badge">{{ platforms.length }} 平台</span>
+          </button>
+          <button
+            class="nav-tab-btn"
+            :class="{ active: activeTab === 'specs' }"
+            @click="activeTab = 'specs'"
+          >
+            <span>📚 模型物理规格词典</span>
+            <span class="tab-badge">{{ modelSpecs.length }} 预设</span>
+          </button>
+        </div>
       </div>
       <div class="nav-right-tip" v-if="activeTab === 'platforms'">
         <span>💡 提示：添加模型时可直接引用【规格词典】，免去重复填写上下文大小</span>
@@ -584,8 +593,13 @@ import { ref, computed, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
 const emit = defineEmits<{
-  'models-updated': []
+  'models-updated': [];
+  'back': [];
 }>()
+
+const goBack = () => {
+  emit('back');
+}
 
 // 标签页状态
 const activeTab = ref<'platforms' | 'specs'>('platforms')
@@ -1072,6 +1086,35 @@ onMounted(async () => {
   background: var(--bg-1);
   border-bottom: 1px solid var(--border-1);
   flex-shrink: 0;
+}
+
+.nav-left-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e4e4e7;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap;
+}
+
+.back-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.24);
+  color: #fff;
+  transform: translateX(-1px);
 }
 
 .nav-tabs {

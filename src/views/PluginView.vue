@@ -803,7 +803,9 @@ const formatDate = (dateStr) => {
   padding: 24px;
   max-width: 1080px;
   margin: 0 auto;
-  min-height: 100vh;
+  height: 100%;
+  width: 100%;
+  overflow-y: auto;
   box-sizing: border-box;
 }
 
