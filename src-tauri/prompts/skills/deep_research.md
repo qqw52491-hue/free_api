@@ -29,3 +29,39 @@ description: 深度全网调研与多源事实求证专家（Deep Research & Fac
 - 生成层级分明、结论先行的结构化研报。
 - 所有关键论点必须带上真实 Markdown 超链接引用（`[来源名称](URL)`）。
 - 在报告末尾总结“核心确定性事实”与“剩余不确定性/未来趋势”。
+
+## 2. 深度调研标准执行流黄金范例 (Golden Trajectory)
+
+### 第一步：发起多维度发散搜索
+```json
+{
+  "description": "搜索业界前沿 Agent 上下文压缩与注意力保持方案",
+  "plan_id": "explore-literature",
+  "plan_title": "多源交叉事实检索",
+  "tool": "web_search",
+  "command": { "query": "LLM long context attention sink recency anchor agent" }
+}
+```
+
+### 第二步：抓取核心一手资料正文 Markdown (web_fetch)
+```json
+{
+  "description": "提取 Anthropic 官方长上下文与工具调用指南正文",
+  "plan_id": "fetch-evidence",
+  "plan_title": "提取一手权威论据",
+  "tool": "web_fetch",
+  "command": { "url": "https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/long-context-tips" }
+}
+```
+
+### 第三步：交付带权威引用的结构化深度研报 (finish)
+```json
+{
+  "description": "交付长上下文 Agent 架构深度调研报告",
+  "tool": "finish",
+  "command": {
+    "summary": "# 大模型长上下文与工具调用注意力保持架构研报\n\n### 1. 核心技术痛点\n- **Lost in the Middle**：随着对话和推导进入 10k+ Tokens，顶部工具定义注意力权重发生物理衰减。\n\n### 2. 业界标杆工程实践\n- **Anthropic Claude Code**：在末尾使用 `<system-reminder>` 动态刷新工作区与工具约束。\n- **三明治上下文架构**：顶层静态契约 + 中间线性脱水流水 + 尾部精简工具白名单强锚定。\n\n### 3. 权威引用与信源\n- [Anthropic Long Context Tips](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/long-context-tips)\n- [Attention Sinks in Large Language Models (StreamingLLM)](https://arxiv.org/abs/2309.17453)",
+    "artifacts": []
+  }
+}
+```

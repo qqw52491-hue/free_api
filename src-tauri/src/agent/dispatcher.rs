@@ -342,7 +342,17 @@ pub(crate) fn execute_command_inner(
         }
     }
 
-    // 5. 未知工具或格式错误报错（动态生成当前所有已连接 MCP 插件及子工具清单，协助模型无硬编码纠错）
+    // 5. 针对将 parallel 误写为独立工具的精准纠错
+    if tool == "parallel" || action == "parallel" {
+        return DispatchResult {
+            stdout: String::new(),
+            stderr: "❌ 'parallel' 不是独立工具名，而是顶层并行执行模式字段。\n正确格式示例：{\"plan_title\": \"...\", \"parallel_reason\": \"...\", \"parallel\": [{\"tool\": \"工具1\", \"command\": {...}}, {\"tool\": \"工具2\", \"command\": {...}}]}。\n请重新按标准 JSON 格式输出！".to_string(),
+            success: false,
+            route: "unknown".to_string(),
+        };
+    }
+
+    // 6. 未知工具或格式错误报错（动态生成当前所有已连接 MCP 插件及子工具清单，协助模型无硬编码纠错）
     let mut mcp_tool_hints = Vec::new();
     for (p_name, p_client) in &registry.clients {
         let tools = crate::agent::mcp_catalog::cached_tools(&p_client.config)

@@ -138,7 +138,9 @@ impl SandwichContext {
             ));
         }
 
-        final_user_parts.push(ContextRenderer::render_decision_instruction().to_string());
+        final_user_parts.push(ContextRenderer::render_decision_instruction(
+            self.compact_tools_index.as_deref(),
+        ));
 
         let final_user_str = final_user_parts.join("\n\n");
         if !final_user_str.trim().is_empty() {

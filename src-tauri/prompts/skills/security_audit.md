@@ -30,3 +30,42 @@ description: 代码安全审计专家（Security Audit & Threat Modeling Expert�
 4. **内部运维脚本与测试用例**：单测文件（`*test*`、`*spec*`）以及纯本地 CLI 脚本中的硬编码假数据或拼字符串，不构成生产环境安全漏洞。
 5. **理论性的拒绝服务 (DoS) 与性能损耗**：常规算法复杂度或未限制并发数属于性能问题，除非存在明确的 ReDoS 攻击路径，否则不报为安全漏洞。
 6. **未加盐但已哈希/环境变量配置**：通过环境变量（Env Var）传入的配置项视为受信任输入，不报漏洞。
+
+## 4. 标准安全审计黄金范例 (Golden Trajectory)
+
+### 第一步：排查不可信输入与 SQL 拼接点
+```json
+{
+  "description": "搜索 API 层直接拼接 SQL 的高危调用点",
+  "plan_id": "audit-injection",
+  "plan_title": "排查 SQL 注入漏洞",
+  "tool": "remote-hub/ripgrep_search",
+  "command": { "query": "SELECT .* WHERE .* \\+", "path": "src/api" }
+}
+```
+
+### 第二步：参数化安全改写 (edit_file / write_file)
+```json
+{
+  "description": "将拼接 SQL 改写为数据库预编译绑定参数查询",
+  "plan_id": "patch-vulnerability",
+  "plan_title": "参数化防御修复",
+  "tool": "remote-hub/write_file",
+  "command": {
+    "path": "src/api/auth.js",
+    "content": "const query = 'SELECT id, username, role FROM users WHERE username = ? AND status = ?';\nconst [rows] = await db.execute(query, [username, 'active']);"
+  }
+}
+```
+
+### 第三步：交付高可信漏洞审计与修复报告 (finish)
+```json
+{
+  "description": "交付 SQL 注入漏洞修复与全库扫描报告",
+  "tool": "finish",
+  "command": {
+    "summary": "# 认证模块 SQL 注入高危漏洞审计与修复报告\n\n### 1. 漏洞详情与位置\n- **位置**：`src/api/auth.js:42`\n- **等级**：HIGH (CWE-89 SQL Injection)\n- **利用场景**：未经过滤的 `username` 可注入 `' OR '1'='1` 绕过密码验证登录管理员账号。\n\n### 2. 修复方案\n- 改用 `db.execute` 预编译参数化绑定，输入严格作为数据层解析，杜绝指令提权。\n- 保持调用方接口返回值不变，无破坏性改动。\n\n### 3. 全库扫描结论\n- 全库其余 14 处查询均已使用 ORM 参数化构建，未发现同类残留漏洞。",
+    "artifacts": ["src/api/auth.js"]
+  }
+}
+```

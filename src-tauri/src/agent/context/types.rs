@@ -173,6 +173,9 @@ pub struct SandwichContext {
     // ⚙️ 4. 运行时调度元数据 (Runtime Metadata)
     // ════════════════════════════════════════════════════════════════════
     pub active_tool: Option<String>,
+    /// 尾部轻量可用工具快速索引（~50 tokens，紧邻模型输出端强化注意力防幻觉）
+    #[serde(default)]
+    pub compact_tools_index: Option<String>,
     pub carry_memories: bool,
     /// 当前任务所用模型的上下文窗口（tokens）
     #[serde(default)]
@@ -206,6 +209,7 @@ impl SandwichContext {
             last_reported_history_estimate_tokens: None,
             task_resources: Vec::new(),
             active_tool: None,
+            compact_tools_index: None,
             active_tool_detail: String::new(),
             carry_memories: false,
             context_window_tokens: 0,

@@ -40,3 +40,43 @@ description: 深度故障排查与根因分析（Deep Debug & Root Cause Analysi
 1. **最终结论（真正根因）**：用一句话说清楚，到底是上游哪一个环节的失效，引发了下游的报错。
 2. **证据链还原**：列出你是如何从报错行一步步顺藤摸瓜找到根因的（最好精确到具体文件名和行号）。
 3. **副作用评估（反证推演）**：提供修复方案前，说明该方案是否会影响调用方（上游消费端）的正常逻辑。绝不能用破坏调用契约的方式来消除报错。
+
+## 6. 标准执行流黄金范例 (Golden Trajectory)
+
+### 第一步：精准检索报错符号定位触发点
+```json
+{
+  "description": "检索锁巡检服务中 sweepExpiredLocks 方法定义",
+  "plan_id": "locate-cause",
+  "plan_title": "定位死锁巡检异常触发点",
+  "tool": "remote-hub/ripgrep_search",
+  "command": { "query": "sweepExpiredLocks", "path": "." }
+}
+```
+
+### 第二步：带行号安全窗口深入阅读调用方生命周期（前后 30 行）
+```json
+{
+  "description": "阅读 CaseLockService.java 异常点上下文与初始化逻辑",
+  "plan_id": "trace-lifecycle",
+  "plan_title": "逆向溯源 Db.find 初始化时机",
+  "tool": "remote-hub/read_text_file",
+  "command": {
+    "path": "src/main/java/com/graph/cases/service/CaseLockService.java",
+    "start_line": 230,
+    "end_line": 280
+  }
+}
+```
+
+### 第三步：交付根因分析与反证修复报告 (finish)
+```json
+{
+  "description": "完成根因溯源与反证推演，交付最终排查报告",
+  "tool": "finish",
+  "command": {
+    "summary": "# 案件锁巡检死锁 NPE 根因分析与修复建议\n\n### 1. 根因分析\n- 触发点位于 `CaseLockService.java:255` 的 `Db.find(...)` 调用。\n- 根因：定时线程由 `ScheduledExecutor` 独立触发，早于 `ActiveRecordPlugin.start()` 完成初始化，导致当前线程未能获取到默认数据源实例。\n\n### 2. 修复建议\n- 在 `CaseLockService.java` 中增加数据源准备就绪守卫（Guard Check），未就绪时跳过本轮巡检并记录 debug 日志。\n\n### 3. 反证与副作用评估\n- 该修复不改变下游锁释放语义，避免了定时任务因未捕获异常而静默终止。",
+    "artifacts": ["src/main/java/com/graph/cases/service/CaseLockService.java"]
+  }
+}
+```

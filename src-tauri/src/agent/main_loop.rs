@@ -126,13 +126,32 @@ pub async fn run_agent_main_loop(
     let maybe_model_cfg = model_cfg_res.as_ref().ok();
 
     // 5. 查询所有 MCP Server 的工具列表并提前预热/升级当前会话的智能能力卡
-    let mcp_tools_menu = {
+    let (mcp_tools_menu, compact_tools_index) = {
         let registry = registry_state.lock().await;
         registry
             .prime_tool_catalog_for_session(&final_session_id, maybe_model_cfg)
             .await;
         registry.prewarm_all_for_session(&final_session_id);
-        registry.format_tools_menu()
+
+        let mut mcp_lines = Vec::new();
+        for (p_name, p_client) in &registry.clients {
+            let tools = crate::agent::mcp_catalog::cached_tools(&p_client.config)
+                .unwrap_or_else(|| p_client.last_known_tools());
+            let names = tools.iter().map(|t| format!("{}/{}", p_name, t.name)).collect::<Vec<_>>();
+            if !names.is_empty() {
+                mcp_lines.push(format!("  * {}: {}", p_name, names.join(", ")));
+            }
+        }
+        let mcp_part = if mcp_lines.is_empty() {
+            "  * （当前未连接任何外部 MCP 插件）".to_string()
+        } else {
+            mcp_lines.join("\n")
+        };
+        let compact = format!(
+            "- 原生内置: finish, ask_human, search, task_store, get_step_output, web_search, web_fetch, model_manager, mcp_manager, skill_manager\n- MCP 插件:\n{}",
+            mcp_part
+        );
+        (registry.format_tools_menu(), compact)
     };
 
     // 6. 扫描 prompts/skills/ 目录，生成动态 Skill 目录摘要（不含已固定编译的内置 Skill）
@@ -177,6 +196,7 @@ pub async fn run_agent_main_loop(
         )?;
     }
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
+    context.compact_tools_index = Some(compact_tools_index);
     // 注入当前路由模型的上下文窗口大小与压缩配置，用于历史压缩水位动态计算与双层智能归档。
     // 双模型路由下同一段历史会分别发给推理与执行模型，预算必须按两者窗口的
     // 较小者计算，否则执行模型会先于推理模型触碰爆窗边界。

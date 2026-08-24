@@ -61,7 +61,14 @@ impl ContextRenderer {
         format!("【当前任务面板 (Todo List)】\n{}\n\n", json_str)
     }
 
-    pub fn render_decision_instruction() -> &'static str {
-        "请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自上方工具菜单。在 description 字段给出面向用户的一句话进度；仅当上一步失败或被拦截时，才在 reflection 中补一句原因与改法。"
+    pub fn render_decision_instruction(compact_tools: Option<&str>) -> String {
+        if let Some(tools) = compact_tools.filter(|s| !s.trim().is_empty()) {
+            format!(
+                "【当前可用工具快速索引】(只能从以下调用，严禁臆造 core/bash 等未声明工具)\n{}\n\n请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自可用工具清单。在 description 字段给出面向用户的一句话进度；仅当上一步失败或被拦截时，才在 reflection 中补一句原因与改法。",
+                tools
+            )
+        } else {
+            "请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自上方工具菜单。在 description 字段给出面向用户的一句话进度；仅当上一步失败或被拦截时，才在 reflection 中补一句原因与改法。".to_string()
+        }
     }
 }
