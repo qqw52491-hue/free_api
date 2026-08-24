@@ -1,3 +1,4 @@
+use crate::agent::change_verification::ChangeVerification;
 use crate::agent::context::no_progress::NoProgressTracker;
 use crate::agent::context::resource_scope::ResourceScopeContract;
 use crate::agent::review_contract::ReviewContract;
@@ -142,6 +143,9 @@ pub struct SandwichContext {
     /// 复杂审查、诊断或研究任务的可审计完成契约；普通任务保持 None。
     #[serde(default)]
     pub review_contract: Option<ReviewContract>,
+    /// 最近一批真实写入的验证状态；每次新的成功写入都会自动清空。
+    #[serde(default)]
+    pub change_verification: Option<ChangeVerification>,
     /// 全局阶段进度与策略宏观摘要 (~100 tokens，每轮更新)
     pub progress_summary: String,
     /// 活跃资源作用域契约；独立于历史压缩，持续投影到每轮上下文。
@@ -202,6 +206,7 @@ impl SandwichContext {
             side_effects: Vec::new(),
             todo_list: Vec::new(),
             review_contract: None,
+            change_verification: None,
             turns_history: Vec::new(),
             current_observation: String::new(),
             progress_summary: String::new(),
@@ -321,6 +326,8 @@ impl SandwichContext {
     }
 
     pub fn record_side_effect(&mut self, step_id: usize, tool: String, description: String) {
+        // 旧验证只能覆盖其前已知的写入；新的真实写入必须重新验证或豁免。
+        self.change_verification = None;
         self.side_effects.push(SideEffectRecord {
             step_id,
             tool,
@@ -509,5 +516,18 @@ mod tests {
         restored_ctx.sync_fetched_tools_from_history();
         assert!(restored_ctx.fetched_tools.contains("remote-hub"));
         assert!(!restored_ctx.has_tool_manual("remote-hub/search_code"));
+    }
+    #[test]
+    fn record_side_effect_invalidates_prior_change_verification() {
+        let mut ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        ctx.record_side_effect(1, "edit_file".to_string(), "首次写入".to_string());
+        ctx.change_verification = Some(ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["output_id: check-first".to_string()],
+            waived_reason: None,
+        });
+        ctx.record_side_effect(2, "edit_file".to_string(), "后续写入".to_string());
+        assert!(ctx.change_verification.is_none());
+        assert_eq!(ctx.side_effects.len(), 2);
     }
 }

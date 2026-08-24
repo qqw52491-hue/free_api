@@ -1,3 +1,4 @@
+use crate::agent::change_verification::ChangeVerification;
 use crate::agent::context::{ChatMessage, FailedAttempt, SandwichContext, SideEffectRecord};
 use crate::agent::review_contract::ReviewContract;
 use crate::agent::task_store::TaskResourceRef;
@@ -145,6 +146,9 @@ pub struct DurableAgentContext {
     pub todo_list: Vec<TodoItem>,
     #[serde(default)]
     pub review_contract: Option<ReviewContract>,
+    /// 最近一批真实写入的验证状态；旧 checkpoint 缺字段时默认 None。
+    #[serde(default)]
+    pub change_verification: Option<ChangeVerification>,
     pub turns_history: Vec<ChatMessage>,
     /// 避坑教训；嵌入字段以兼容旧 checkpoint JSON。
     #[serde(default)]
@@ -172,6 +176,7 @@ impl DurableAgentContext {
             task_resources: context.task_resources.clone(),
             todo_list: context.todo_list.clone(),
             review_contract: context.review_contract.clone(),
+            change_verification: context.change_verification.clone(),
             turns_history: context.turns_history.clone(),
             failed_attempts: context.failed_attempts.clone(),
             side_effects: context.side_effects.clone(),
@@ -197,6 +202,7 @@ impl DurableAgentContext {
         context.task_resources = self.task_resources.clone();
         context.todo_list = self.todo_list.clone();
         context.review_contract = self.review_contract.clone();
+        context.change_verification = self.change_verification.clone();
         context.turns_history = self.turns_history.clone();
         context.failed_attempts = self.failed_attempts.clone();
         context.side_effects = self.side_effects.clone();
@@ -878,5 +884,30 @@ mod tests {
         let mut next_task = SandwichContext::new("system".to_string(), "新任务".to_string());
         checkpoint.data.inherit_filling_into(&mut next_task);
         assert!(next_task.review_contract.is_none());
+    }
+    #[test]
+    fn change_verification_persists_on_restore_but_does_not_cross_new_task_boundary() {
+        let mut source = SandwichContext::new("system".to_string(), "修改上下文".to_string());
+        source.record_side_effect(1, "edit_file".to_string(), "更新配置".to_string());
+        source.change_verification = Some(ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["output_id: cargo-test-42".to_string()],
+            waived_reason: None,
+        });
+        let checkpoint = AgentCheckpoint::new("run-verification".to_string(), &source);
+        let mut resumed = SandwichContext::new("system".to_string(), "resume".to_string());
+        checkpoint.data.restore_into(&mut resumed);
+        assert_eq!(resumed.change_verification, source.change_verification);
+        let mut legacy = serde_json::to_value(&checkpoint).unwrap();
+        legacy
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("change_verification");
+        let restored_legacy: AgentCheckpoint = serde_json::from_value(legacy).unwrap();
+        assert!(restored_legacy.data.change_verification.is_none());
+        let mut next_task = SandwichContext::new("system".to_string(), "新任务".to_string());
+        checkpoint.data.inherit_filling_into(&mut next_task);
+        assert!(next_task.change_verification.is_none());
     }
 }

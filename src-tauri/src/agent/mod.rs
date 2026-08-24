@@ -1,3 +1,4 @@
+pub mod change_verification;
 pub mod checkpoint;
 pub mod context;
 pub mod control;

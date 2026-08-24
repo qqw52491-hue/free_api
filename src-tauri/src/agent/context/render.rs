@@ -1,3 +1,4 @@
+use crate::agent::change_verification::{change_verification_blocker, ChangeVerification};
 use crate::agent::context::types::FailedAttempt;
 use crate::agent::review_contract::ReviewContract;
 use crate::agent::task_store::TaskResourceRef;
@@ -92,6 +93,24 @@ impl ContextRenderer {
         )
     }
 
+    pub fn render_change_verification(
+        side_effect_count: usize,
+        verification: Option<&ChangeVerification>,
+    ) -> String {
+        if side_effect_count == 0 {
+            return String::new();
+        }
+        if let Some(blocker) = change_verification_blocker(side_effect_count, verification) {
+            return format!(
+                "【写入后验证】\n- {}\n下一步：运行适用的测试/检查，并在 change_verification_update 中记录 verified + evidence_refs；若明确不验证，则记录 waived + waived_reason。\n\n",
+                blocker
+            );
+        }
+        format!(
+            "【写入后验证】\n- 最近写入：{}\n终态前：新的真实写入会自动使此闭合失效。\n\n",
+            verification.map(ChangeVerification::summary).unwrap_or_default()
+        )
+    }
     pub fn render_decision_instruction(compact_tools: Option<&str>) -> String {
         if let Some(tools) = compact_tools.filter(|s| !s.trim().is_empty()) {
             format!(

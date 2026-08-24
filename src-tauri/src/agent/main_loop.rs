@@ -1,3 +1,6 @@
+use crate::agent::change_verification::{
+    apply_change_verification_update, change_verification_blocker,
+};
 use crate::agent::checkpoint::{
     load_checkpoint, recovery_decision, save_checkpoint, AgentCheckpoint, AgentPhase,
     RecoveryDecision,
@@ -168,6 +171,22 @@ mod finish_guard_tests {
             false,
             &finish_blockers(&[], Some(&closed_contract), false),
         ));
+    }
+    #[test]
+    fn unverified_real_write_is_added_to_finish_blockers() {
+        let mut blockers = finish_blockers(&[], None, false);
+        if let Some(blocker) = change_verification_blocker(1, None) {
+            blockers.push(blocker);
+        }
+        assert_eq!(blockers.len(), 1);
+        assert!(blockers[0].contains("尚无验证证据或明确豁免"));
+        assert!(should_challenge_finish_with_blockers(true, true, false, &blockers));
+        let verified = crate::agent::change_verification::ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["output_id: check-42".to_string()],
+            waived_reason: None,
+        };
+        assert!(change_verification_blocker(1, Some(&verified)).is_none());
     }
 }
 
@@ -712,6 +731,16 @@ pub async fn run_agent_main_loop(
                     "【审查契约更新未采纳】{}\n请保留既有义务；每项必须为 open，或以 evidenced + evidence_refs、waived + waived_reason 闭合。",
                     error
                 ));
+        if let Some(update) = instruction.change_verification_update.clone() {
+            if let Err(error) =
+                apply_change_verification_update(&mut context.change_verification, update)
+            {
+                context.add_error_feedback(&format!(
+                    "【写入验证更新未采纳】{}\n真实写入后，必须以 verified + evidence_refs 或 waived + waived_reason 闭合；新写入会自动使旧验证失效。",
+                    error
+                ));
+            }
+        }
             }
         }
         let review_contract_started_this_turn =
@@ -778,11 +807,17 @@ pub async fn run_agent_main_loop(
         };
 
         let is_finish = is_finish_instruction(&instruction);
-        let open_todos = finish_blockers(
+        let mut open_todos = finish_blockers(
             &context.todo_list,
             context.review_contract.as_ref(),
             review_contract_started_this_turn,
         );
+        if let Some(blocker) = change_verification_blocker(
+            context.side_effects.len(),
+            context.change_verification.as_ref(),
+        ) {
+            open_todos.push(blocker);
+        }
         let finish_challenged = should_challenge_finish_with_blockers(
             is_finish,
             result.success,
@@ -792,7 +827,7 @@ pub async fn run_agent_main_loop(
         if finish_challenged {
             checkpoint.finish_reviewed = true;
             context.add_error_feedback(&format!(
-                "【终态自检】检测到以下未闭合事项（Todo / 审查契约）：\n{}\n本次 finish 已记录为一次可审计的质询，任务不会在此终止。下一轮请继续完成这些事项；若某项已不再适用，请在 todo_update 中显式标为 done/failed，或在 review_contract_update 中显式标为 waived 并说明理由。审查义务标为 evidenced 时必须保留 evidence_refs。若你确认已有足够证据，也可在说明覆盖边界后再次 finish；系统不会无限阻断。",
+                "【终态自检】检测到以下未闭合事项（Todo / 审查契约 / 写入后验证）：\n{}\n本次 finish 已记录为一次可审计的质询，任务不会在此终止。下一轮请继续完成这些事项；若某项已不再适用，请在 todo_update 中显式标为 done/failed，或在 review_contract_update 中显式标为 waived 并说明理由。审查义务标为 evidenced 时必须保留 evidence_refs。对于真实写入，需在 change_verification_update 中以 verified + evidence_refs 或 waived + waived_reason 闭合。若你确认已有足够证据，也可在说明覆盖边界后再次 finish；系统不会无限阻断。",
                 open_todos
                     .iter()
                     .map(|todo| format!("- {todo}"))

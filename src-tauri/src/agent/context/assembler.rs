@@ -121,6 +121,11 @@ impl SandwichContext {
         bottom_state_card.push_str(&ContextRenderer::render_review_contract(
             self.review_contract.as_ref(),
         ));
+        // (10) 仅在已有成功写入时显示；将验证闭合的下一步保持在模型当前上下文内。
+        bottom_state_card.push_str(&ContextRenderer::render_change_verification(
+            self.side_effects.len(),
+            self.change_verification.as_ref(),
+        ));
         let trimmed_bottom = bottom_state_card.trim_end();
         if !trimmed_bottom.is_empty() {
             messages.push(ChatMessage {
@@ -528,5 +533,23 @@ mod tests {
         assert!(rendered.contains("核验 finish 到 checkpoint 的调用链"));
         assert!(rendered.contains("[open] terminal：finish 是否由宿主语义门控？"));
         assert!(rendered.contains("等待核验或显式豁免"));
+    }
+    #[test]
+    fn change_verification_card_only_tracks_real_writes_and_their_closure() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "修改上下文".to_string());
+        let plain = serde_json::to_string(&ctx.assemble_messages()).unwrap();
+        assert!(!plain.contains("【写入后验证】"));
+        ctx.record_side_effect(1, "edit_file".to_string(), "更新配置".to_string());
+        let pending = serde_json::to_string(&ctx.assemble_messages()).unwrap();
+        assert!(pending.contains("【写入后验证】"));
+        assert!(pending.contains("尚无验证证据或明确豁免"));
+        ctx.change_verification = Some(crate::agent::change_verification::ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["output_id: check-42".to_string()],
+            waived_reason: None,
+        });
+        let closed = serde_json::to_string(&ctx.assemble_messages()).unwrap();
+        assert!(closed.contains("最近写入：已验证：output_id: check-42"));
+        assert!(!closed.contains("尚无验证证据或明确豁免"));
     }
 }
