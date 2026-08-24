@@ -170,7 +170,9 @@ pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginR
             },
             args: m.config.args.clone(),
             env: m.config.env.clone(),
-            capability_card: m.config.capability_card.clone().unwrap_or_default(),
+            capability_card: m.config.capability_card.clone()
+                .or_else(|| crate::agent::mcp_catalog::cached_capability_card(&m.config))
+                .unwrap_or_default(),
             enabled: m.enabled,
             created_at: if m.config.url.is_some() {
                 "远程 HTTP/SSE".to_string()

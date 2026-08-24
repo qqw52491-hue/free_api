@@ -1139,7 +1139,8 @@ input:checked + .slider::before { background: #ffffff; transform: translateX(16p
 .preset-heading strong { color: #f4f4f5; font-size: 12.5px; }
 .preset-heading span { color: #8e8e93; font-size: 11px; line-height: 1.4; }
 .preset-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 6px; margin-top: 8px; }
-select, input, textarea { width: 100%; background: #121214; border: 1px solid rgba(255, 255, 255, 0.12); color: #f4f4f5; padding: 7px 10px; border-radius: 6px; outline: none; font-size: 12.5px; box-sizing: border-box; }
+select, input, textarea { width: 100%; background: #121214; border: 1px solid rgba(255, 255, 255, 0.12); color: #f4f4f5; padding: 7px 10px; border-radius: 6px; outline: none; font-size: 12.5px; box-sizing: border-box; color-scheme: dark; }
+select option { background-color: #18181b !important; color: #f4f4f5 !important; }
 .preset-btn { border: 1px solid var(--accent); border-radius: 6px; padding: 0 10px; color: #ffffff; background: var(--accent); font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; }
 .preset-btn:hover { background: var(--accent-dark); }
 .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }

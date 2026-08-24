@@ -9,6 +9,7 @@
 }
 
 :root {
+  color-scheme: dark;
   /* Color Palette - Obsidian Dark Slate */
   --bg-0: #141416;
   --bg-1: #18181b;
@@ -83,6 +84,15 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 99px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
+
+/* ---- Form Select & Options ---- */
+select, option, input, textarea {
+  color-scheme: dark;
+}
+select option {
+  background-color: #18181b !important;
+  color: #f4f4f5 !important;
+}
 
 /* ---- Buttons ---- */
 .btn {
