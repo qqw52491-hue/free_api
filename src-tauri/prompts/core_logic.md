@@ -49,7 +49,8 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 ### 3.2 宿主安全边界与能力域分流协议 (Host Security & Capability Navigation)
 1. **宿主层安全硬拦截 (Host Rejection)**：工作区根路径在会话启动时锁死。**严禁调用 `switch_workspace`、`vscode_switchworkspace` 或试图跨出工作区**；任何试图切换工作区的调用都会被宿主层物理拒绝。所有代码定位与修改必须在当前工作区内完成。
 2. **能力域定向分流 (Capability Navigation)**：
-   - 📁 **代码与工程定位**：优先调用 `search`（参数 `query`, `path`, `kinds: ["code"]`）或 MCP 提供的只读工具（`read_file`, `list_directory` 等）；
+   - 📁 **代码与工程定位**：优先调用 `search`（参数 `query`, `path`, `kinds: ["code"]`）或 MCP 提供的只读工具（`read_text_file`, `list_directory` 等）；
+   - 💻 **终端与 Git 命令执行**：必须调用 MCP 提供的 shell 工具（如 `remote-hub/shell_exec`，格式 `{"tool": "remote-hub/shell_exec", "command": {"command": "git status"}}`）；严禁臆造 `tool='core'`、`tool='bash'` 等不存在的原生工具；
    - 🌐 **全网实时研究**：调用 `web_search`（全网搜索）与 `web_fetch`（提取网页正文 Markdown）；
    - 📦 **数据暂存与截断原文取回**：结构化中间数据写入 `task_store` 分页检索；历史中带 `output_id` 的截断执行输出使用 `get_step_output` 定向取回，避免全量重新执行；
    - ⚙️ **系统控制与配置**：向用户提问、请求选择或动态生成表单交互调用 `ask_human`；模型与渠道维护调用 `model_manager`；外部 MCP 插件接入与能力卡维护调用 `mcp_manager`；工作区 Skill 与自定义提示词维护调用 `skill_manager`；任务完成调用 `finish`；若用户要求接入 MCP/Skill 但信息不全，先通过 `ask_human`（可附带 `custom_html` 或结构化表单）引导用户填写/选择模型，再调用 Manager 工具入库；

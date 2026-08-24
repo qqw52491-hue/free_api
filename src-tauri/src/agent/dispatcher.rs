@@ -260,13 +260,40 @@ pub(crate) fn execute_command_inner(
         return crate::agent::tools::skill_manager::dispatch(db, action, params);
     }
 
-    // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
-    let (plugin_name, tool_name) = if tool.contains('/') {
+    // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action，支持自动反查与别名路由)
+    let (mut plugin_name, mut tool_name) = if tool.contains('/') {
         let parts: Vec<&str> = tool.split('/').collect();
         (parts[0].to_string(), parts[1].to_string())
     } else {
         (tool.to_string(), action.to_string())
     };
+
+    // 4.1 自动反查与别名映射：当模型省略插件名或使用了常见别名时，自动在已连接 MCP 中定位
+    if registry.get(&plugin_name).is_none() {
+        let target_subtool = if tool == "core" || tool == "system" || tool == "terminal" {
+            if !action.is_empty() { action.to_string() } else { "shell_exec".to_string() }
+        } else if tool == "bash" || tool == "sh" || tool == "shell" || tool == "exec" {
+            "shell_exec".to_string()
+        } else if tool == "read_file" {
+            "read_text_file".to_string()
+        } else {
+            tool.to_string()
+        };
+
+        for (p_name, p_client) in &registry.clients {
+            let tools = crate::agent::mcp_catalog::cached_tools(&p_client.config)
+                .unwrap_or_else(|| p_client.last_known_tools());
+            if tools.iter().any(|t| t.name == target_subtool || (target_subtool == "shell_exec" && (t.name == "shell_exec" || t.name == "bash" || t.name == "execute_command"))) {
+                plugin_name = p_name.clone();
+                tool_name = if target_subtool == "shell_exec" && !tools.iter().any(|t| t.name == "shell_exec") {
+                    tools.iter().find(|t| t.name == "bash" || t.name == "execute_command").map(|t| t.name.clone()).unwrap_or(target_subtool)
+                } else {
+                    target_subtool
+                };
+                break;
+            }
+        }
+    }
 
     if let Some(plugin) = registry.get(&plugin_name) {
         if mcp_service_requires_concrete_tool(tool, action) {
@@ -340,19 +367,28 @@ pub(crate) fn execute_command_inner(
         }
     }
 
-    // 5. 未知工具或格式错误报错（附上当前真实存在的 MCP 插件名，让模型可自行纠错）
-    let plugin_names = registry.plugin_names().join(", ");
+    // 5. 未知工具报错：附带所有可用工具与标准格式，协助模型一轮纠偏
+    let mut mcp_tool_hints = Vec::new();
+    for (p_name, p_client) in &registry.clients {
+        let tools = crate::agent::mcp_catalog::cached_tools(&p_client.config)
+            .unwrap_or_else(|| p_client.last_known_tools());
+        let tool_names = tools.iter().map(|t| format!("{}/{}", p_name, t.name)).collect::<Vec<_>>();
+        if !tool_names.is_empty() {
+            mcp_tool_hints.push(format!("- {}: {}", p_name, tool_names.join(", ")));
+        }
+    }
+
+    let mcp_guide = if mcp_tool_hints.is_empty() {
+        "（当前未连接任何 MCP 插件）".to_string()
+    } else {
+        format!("\n🔌 当前已连接的 MCP 插件及可用工具：\n{}", mcp_tool_hints.join("\n"))
+    };
+
     DispatchResult {
         stdout: String::new(),
         stderr: format!(
-            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！可用原生内置工具：finish, ask_human, model_manager, web_search, web_fetch, search, get_step_output, task_store；当前已连接 MCP 插件：{}；外部 MCP 工具格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
-            tool,
-            action,
-            if plugin_names.is_empty() {
-                "（无）".to_string()
-            } else {
-                plugin_names
-            }
+            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n👉 如需执行终端/Git 命令，请使用：{{\"tool\": \"remote-hub/shell_exec\", \"command\": {{\"command\": \"git status\"}}}}\n📚 可用原生内置工具：finish, ask_human, model_manager, mcp_manager, skill_manager, web_search, web_fetch, search, get_step_output, task_store{}\n外部 MCP 工具标准格式：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}",
+            tool, action, mcp_guide
         ),
         success: false,
         route: "unknown".to_string(),
