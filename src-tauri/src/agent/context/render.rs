@@ -1,4 +1,5 @@
 use crate::agent::context::types::FailedAttempt;
+use crate::agent::review_contract::ReviewContract;
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::TodoItem;
 
@@ -59,6 +60,36 @@ impl ContextRenderer {
 
         let json_str = serde_json::to_string_pretty(todos).unwrap_or_else(|_| "[]".to_string());
         format!("【当前任务面板 (Todo List)】\n{}\n\n", json_str)
+    }
+
+    pub fn render_review_contract(contract: Option<&ReviewContract>) -> String {
+        let Some(contract) = contract else {
+            return String::new();
+        };
+        let obligations = contract
+            .obligations
+            .iter()
+            .map(|item| {
+                let status = item.status.trim().to_ascii_lowercase();
+                let detail = match status.as_str() {
+                    "evidenced" => format!(
+                        "证据: {}",
+                        item.evidence_refs.iter().take(2).cloned().collect::<Vec<_>>().join("; ")
+                    ),
+                    "waived" => format!(
+                        "豁免: {}",
+                        item.waived_reason.as_deref().unwrap_or("未说明")
+                    ),
+                    _ => "等待核验或显式豁免".to_string(),
+                };
+                format!("- [{}] {}：{}（{}）", status, item.id, item.question, detail)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "【审查契约】\n范围：{}\n{}\n终态前：每项必须以 evidenced + evidence_refs 或 waived + waived_reason 闭合。\n\n",
+            contract.scope_statement, obligations
+        )
     }
 
     pub fn render_decision_instruction(compact_tools: Option<&str>) -> String {

@@ -15,6 +15,7 @@ pub mod plan_tree;
 pub mod project_map;
 pub mod plan_tree_dispatch;
 pub mod prompt_assembly;
+pub mod review_contract;
 pub mod tool_manual;
 pub mod retrieval;
 pub mod router;

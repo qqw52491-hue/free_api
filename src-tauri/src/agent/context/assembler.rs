@@ -117,6 +117,10 @@ impl SandwichContext {
         // (8) 任务清单 (Todo List)
         bottom_state_card.push_str(&ContextRenderer::render_todo_list(&self.todo_list));
 
+        // (9) 审查契约仅在复杂审查/诊断任务显式建立时出现，普通任务不增加状态卡。
+        bottom_state_card.push_str(&ContextRenderer::render_review_contract(
+            self.review_contract.as_ref(),
+        ));
         let trimmed_bottom = bottom_state_card.trim_end();
         if !trimmed_bottom.is_empty() {
             messages.push(ChatMessage {
@@ -501,5 +505,28 @@ mod tests {
             !full_text.contains("完整详细数据已安全持久化至 SQLite"),
             "组装路径不得产生脱水存根"
         );
+    }
+
+    #[test]
+    fn review_contract_card_is_only_rendered_when_present() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "审查上下文".to_string());
+        let plain = serde_json::to_string(&ctx.assemble_messages()).unwrap();
+        assert!(!plain.contains("【审查契约】"));
+
+        ctx.review_contract = Some(crate::agent::review_contract::ReviewContract {
+            scope_statement: "核验 finish 到 checkpoint 的调用链".to_string(),
+            obligations: vec![crate::agent::review_contract::ReviewObligation {
+                id: "terminal".to_string(),
+                question: "finish 是否由宿主语义门控？".to_string(),
+                status: "open".to_string(),
+                evidence_refs: Vec::new(),
+                waived_reason: None,
+            }],
+        });
+        let rendered = serde_json::to_string(&ctx.assemble_messages()).unwrap();
+        assert!(rendered.contains("【审查契约】"));
+        assert!(rendered.contains("核验 finish 到 checkpoint 的调用链"));
+        assert!(rendered.contains("[open] terminal：finish 是否由宿主语义门控？"));
+        assert!(rendered.contains("等待核验或显式豁免"));
     }
 }

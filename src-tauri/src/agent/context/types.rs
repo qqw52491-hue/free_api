@@ -1,5 +1,6 @@
 use crate::agent::context::no_progress::NoProgressTracker;
 use crate::agent::context::resource_scope::ResourceScopeContract;
+use crate::agent::review_contract::ReviewContract;
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
 use crate::llm::ModelConfig;
@@ -138,6 +139,9 @@ pub struct SandwichContext {
     pub side_effects: Vec<SideEffectRecord>,
     /// 当前任务待办清单 (Todo items)
     pub todo_list: Vec<TodoItem>,
+    /// 复杂审查、诊断或研究任务的可审计完成契约；普通任务保持 None。
+    #[serde(default)]
+    pub review_contract: Option<ReviewContract>,
     /// 全局阶段进度与策略宏观摘要 (~100 tokens，每轮更新)
     pub progress_summary: String,
     /// 活跃资源作用域契约；独立于历史压缩，持续投影到每轮上下文。
@@ -197,6 +201,7 @@ impl SandwichContext {
             failed_attempts: Vec::new(),
             side_effects: Vec::new(),
             todo_list: Vec::new(),
+            review_contract: None,
             turns_history: Vec::new(),
             current_observation: String::new(),
             progress_summary: String::new(),

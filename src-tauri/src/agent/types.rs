@@ -1,3 +1,4 @@
+use crate::agent::review_contract::ReviewContract;
 use serde::{Deserialize, Serialize};
 
 pub const RUN_INTERRUPTED_ROUTE: &str = "run_interrupted";
@@ -245,6 +246,9 @@ pub struct AgentInstruction {
 
     #[serde(default)]
     pub todo_update: Vec<TodoItem>,
+    /// 仅复杂审查、诊断或研究任务使用的完整审查契约更新。
+    #[serde(default)]
+    pub review_contract_update: Option<ReviewContract>,
     #[serde(default)]
     pub memories_update: Vec<MemoryItem>,
     /// AI 主动维护的全局进度摘要（写日记），覆盖更新。

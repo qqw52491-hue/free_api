@@ -1,4 +1,5 @@
 use crate::agent::context::{ChatMessage, FailedAttempt, SandwichContext, SideEffectRecord};
+use crate::agent::review_contract::ReviewContract;
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
 use crate::db::DbState;
@@ -142,6 +143,8 @@ pub struct DurableAgentContext {
     #[serde(default)]
     pub task_resources: Vec<TaskResourceRef>,
     pub todo_list: Vec<TodoItem>,
+    #[serde(default)]
+    pub review_contract: Option<ReviewContract>,
     pub turns_history: Vec<ChatMessage>,
     /// 避坑教训；嵌入字段以兼容旧 checkpoint JSON。
     #[serde(default)]
@@ -168,6 +171,7 @@ impl DurableAgentContext {
             memories: context.memories.clone(),
             task_resources: context.task_resources.clone(),
             todo_list: context.todo_list.clone(),
+            review_contract: context.review_contract.clone(),
             turns_history: context.turns_history.clone(),
             failed_attempts: context.failed_attempts.clone(),
             side_effects: context.side_effects.clone(),
@@ -192,6 +196,7 @@ impl DurableAgentContext {
         context.memories = self.memories.clone();
         context.task_resources = self.task_resources.clone();
         context.todo_list = self.todo_list.clone();
+        context.review_contract = self.review_contract.clone();
         context.turns_history = self.turns_history.clone();
         context.failed_attempts = self.failed_attempts.clone();
         context.side_effects = self.side_effects.clone();
@@ -840,5 +845,38 @@ mod tests {
 
         let restored: AgentCheckpoint = serde_json::from_value(legacy).unwrap();
         assert!(!restored.finish_reviewed);
+    }
+
+    #[test]
+    fn review_contract_persists_on_restore_but_does_not_cross_new_task_boundary() {
+        let mut source = SandwichContext::new("system".to_string(), "审查上下文".to_string());
+        source.review_contract = Some(ReviewContract {
+            scope_statement: "核验终态恢复".to_string(),
+            obligations: vec![crate::agent::review_contract::ReviewObligation {
+                id: "restore".to_string(),
+                question: "checkpoint 是否恢复审查契约？".to_string(),
+                status: "evidenced".to_string(),
+                evidence_refs: vec!["checkpoint.rs:168-204".to_string()],
+                waived_reason: None,
+            }],
+        });
+        let checkpoint = AgentCheckpoint::new("run-contract".to_string(), &source);
+
+        let mut resumed = SandwichContext::new("system".to_string(), "resume".to_string());
+        checkpoint.data.restore_into(&mut resumed);
+        assert_eq!(resumed.review_contract, source.review_contract);
+
+        let mut legacy = serde_json::to_value(&checkpoint).unwrap();
+        legacy
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("review_contract");
+        let restored_legacy: AgentCheckpoint = serde_json::from_value(legacy).unwrap();
+        assert!(restored_legacy.data.review_contract.is_none());
+
+        let mut next_task = SandwichContext::new("system".to_string(), "新任务".to_string());
+        checkpoint.data.inherit_filling_into(&mut next_task);
+        assert!(next_task.review_contract.is_none());
     }
 }

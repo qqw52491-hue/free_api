@@ -10,6 +10,7 @@ use crate::agent::control::{
 use crate::agent::dispatcher::is_finish_instruction;
 use crate::agent::loop_runner::run_call_llm_and_run_tool_phases;
 use crate::agent::mcp::{McpClient, PluginRegistry};
+use crate::agent::review_contract::{apply_review_contract_update, ReviewContract};
 use crate::agent::run_state::{AgentRunEvent, AgentRunMachine, AgentRunState};
 use crate::agent::task_store;
 use crate::agent::types::{AgentInstruction, TodoItem, RUN_INTERRUPTED_ROUTE};
@@ -53,6 +54,30 @@ fn should_challenge_finish(
     todos: &[TodoItem],
 ) -> bool {
     is_finish && succeeded && !finish_reviewed && !open_todo_descriptions(todos).is_empty()
+}
+
+fn finish_blockers(
+    todos: &[TodoItem],
+    review_contract: Option<&ReviewContract>,
+    review_contract_started_this_turn: bool,
+) -> Vec<String> {
+    let mut blockers = open_todo_descriptions(todos);
+    if review_contract_started_this_turn {
+        blockers.push("审查契约刚在本轮建立，尚未执行任何契约义务".to_string());
+    }
+    if let Some(contract) = review_contract {
+        blockers.extend(contract.open_descriptions());
+    }
+    blockers
+}
+
+fn should_challenge_finish_with_blockers(
+    is_finish: bool,
+    succeeded: bool,
+    finish_reviewed: bool,
+    blockers: &[String],
+) -> bool {
+    is_finish && succeeded && !finish_reviewed && !blockers.is_empty()
 }
 
 #[cfg(test)]
@@ -103,6 +128,46 @@ mod finish_guard_tests {
         assert!(!should_challenge_finish(true, true, true, &todos));
         assert!(!should_challenge_finish(true, false, false, &todos));
         assert!(!should_challenge_finish(false, true, false, &todos));
+    }
+
+    #[test]
+    fn review_contract_blocks_first_finish_without_forcing_step_counts() {
+        let open_contract = ReviewContract {
+            scope_statement: "审查上下文设计".to_string(),
+            obligations: vec![crate::agent::review_contract::ReviewObligation {
+                id: "implementation".to_string(),
+                question: "实现调用链是否真实接通？".to_string(),
+                status: "open".to_string(),
+                evidence_refs: Vec::new(),
+                waived_reason: None,
+            }],
+        };
+        let blockers = finish_blockers(&[], Some(&open_contract), false);
+        assert_eq!(blockers, vec!["审查义务 implementation：实现调用链是否真实接通？"]);
+        assert!(should_challenge_finish_with_blockers(true, true, false, &blockers));
+
+        let closed_contract = ReviewContract {
+            scope_statement: "仅解释完整 diff".to_string(),
+            obligations: vec![crate::agent::review_contract::ReviewObligation {
+                id: "diff".to_string(),
+                question: "变更意图是否明确？".to_string(),
+                status: "evidenced".to_string(),
+                evidence_refs: vec!["git diff --stat".to_string()],
+                waived_reason: None,
+            }],
+        };
+        assert!(should_challenge_finish_with_blockers(
+            true,
+            true,
+            false,
+            &finish_blockers(&[], Some(&closed_contract), true),
+        ));
+        assert!(!should_challenge_finish_with_blockers(
+            true,
+            true,
+            false,
+            &finish_blockers(&[], Some(&closed_contract), false),
+        ));
     }
 }
 
@@ -640,6 +705,17 @@ pub async fn run_agent_main_loop(
         if !instruction.todo_update.is_empty() {
             context.todo_list = instruction.todo_update.clone();
         }
+        let review_contract_was_present = context.review_contract.is_some();
+        if let Some(update) = instruction.review_contract_update.clone() {
+            if let Err(error) = apply_review_contract_update(&mut context.review_contract, update) {
+                context.add_error_feedback(&format!(
+                    "【审查契约更新未采纳】{}\n请保留既有义务；每项必须为 open，或以 evidenced + evidence_refs、waived + waived_reason 闭合。",
+                    error
+                ));
+            }
+        }
+        let review_contract_started_this_turn =
+            !review_contract_was_present && context.review_contract.is_some();
         if !instruction.memories_update.is_empty() {
             let rejections = context.update_memories(instruction.memories_update.clone());
             if !rejections.is_empty() {
@@ -702,17 +778,21 @@ pub async fn run_agent_main_loop(
         };
 
         let is_finish = is_finish_instruction(&instruction);
-        let open_todos = open_todo_descriptions(&context.todo_list);
-        let finish_challenged = should_challenge_finish(
+        let open_todos = finish_blockers(
+            &context.todo_list,
+            context.review_contract.as_ref(),
+            review_contract_started_this_turn,
+        );
+        let finish_challenged = should_challenge_finish_with_blockers(
             is_finish,
             result.success,
             checkpoint.finish_reviewed,
-            &context.todo_list,
+            &open_todos,
         );
         if finish_challenged {
             checkpoint.finish_reviewed = true;
             context.add_error_feedback(&format!(
-                "【终态自检】检测到以下 Todo 仍明确标为 pending/in_progress：\n{}\n本次 finish 已记录为一次可审计的质询，任务不会在此终止。下一轮请继续完成这些事项；若某项已不再适用，请在 todo_update 中显式标为 done/failed 并在总结中说明理由。若你确认已有足够证据，也可在说明覆盖边界后再次 finish；系统不会无限阻断。",
+                "【终态自检】检测到以下未闭合事项（Todo / 审查契约）：\n{}\n本次 finish 已记录为一次可审计的质询，任务不会在此终止。下一轮请继续完成这些事项；若某项已不再适用，请在 todo_update 中显式标为 done/failed，或在 review_contract_update 中显式标为 waived 并说明理由。审查义务标为 evidenced 时必须保留 evidence_refs。若你确认已有足够证据，也可在说明覆盖边界后再次 finish；系统不会无限阻断。",
                 open_todos
                     .iter()
                     .map(|todo| format!("- {todo}"))
