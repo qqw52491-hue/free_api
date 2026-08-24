@@ -3,6 +3,11 @@ import { fileURLToPath } from "node:url";
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const appBinaryPath = path.join(rootDir, "src-tauri", "target", "debug", "bundle", "macos", "Free API Chat.app", "Contents", "MacOS", "free-api-chat");
+const defaultMochaTimeoutMs = 180_000;
+const requestedMochaTimeoutMs = Number(process.env.FREE_API_WDIO_MOCHA_TIMEOUT_MS);
+const mochaTimeoutMs = Number.isFinite(requestedMochaTimeoutMs)
+  ? Math.max(defaultMochaTimeoutMs, Math.min(requestedMochaTimeoutMs, 1_200_000))
+  : defaultMochaTimeoutMs;
 
 /**
  * 原生 Tauri 窗口 E2E：macOS 使用嵌入式 WebDriver。
@@ -31,6 +36,7 @@ export const config = {
   reporters: ["spec"],
   mochaOpts: {
     ui: "bdd",
-    timeout: 180_000,
+    // 默认保持短 E2E 的三分钟上限；长 Agent 回归显式设置环境变量，最大二十分钟。
+    timeout: mochaTimeoutMs,
   },
 };
