@@ -614,10 +614,10 @@ pub async fn save_mcp_plugin(
     state: State<'_, DbState>,
     name: String,
     command: String,
-    args: Vec<String>,
-    env: std::collections::HashMap<String, String>,
+    args: Option<Vec<String>>,
+    env: Option<std::collections::HashMap<String, String>>,
     capability_card: Option<String>,
-    enabled: bool,
+    enabled: Option<bool>,
 ) -> Result<McpPluginRow, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -627,11 +627,15 @@ pub async fn save_mcp_plugin(
         return Err("插件可执行命令不能为空".to_string());
     }
 
+    let actual_args = args.unwrap_or_default();
+    let actual_env = env.unwrap_or_default();
+    let is_enabled = enabled.unwrap_or(true);
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    let args_json = serde_json::to_string(&args).map_err(|e| e.to_string())?;
-    let env_json = serde_json::to_string(&env).map_err(|e| e.to_string())?;
+    let args_json = serde_json::to_string(&actual_args).map_err(|e| e.to_string())?;
+    let env_json = serde_json::to_string(&actual_env).map_err(|e| e.to_string())?;
     let cap_card = capability_card.unwrap_or_default();
 
     conn.execute(
@@ -643,7 +647,7 @@ pub async fn save_mcp_plugin(
              env = excluded.env,
              capability_card = excluded.capability_card,
              enabled = excluded.enabled",
-        params![id, name, command, args_json, env_json, cap_card, if enabled { 1 } else { 0 }, now],
+        params![id, name, command, args_json, env_json, cap_card, if is_enabled { 1 } else { 0 }, now],
     )
     .map_err(|e| e.to_string())?;
 
@@ -653,10 +657,10 @@ pub async fn save_mcp_plugin(
         id,
         name,
         command,
-        args,
-        env,
+        args: actual_args,
+        env: actual_env,
         capability_card: cap_card,
-        enabled,
+        enabled: is_enabled,
         created_at: now,
     })
 }

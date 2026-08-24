@@ -602,8 +602,9 @@ const savePlugin = async () => {
       name: form.value.name,
       command: form.value.command,
       args,
-      env: Object.keys(env).length > 0 ? env : null,
+      env,
       capabilityCard: form.value.capabilityCard || null,
+      enabled: true,
     });
     
     showAddModal.value = false;
