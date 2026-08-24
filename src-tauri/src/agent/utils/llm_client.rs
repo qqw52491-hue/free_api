@@ -59,7 +59,7 @@ fn append_json_regeneration_feedback(
     api_values.push(json!({
         "role": "user",
         "content": format!(
-            "The previous response was not a valid AgentInstruction JSON object ({}). Preserve the intended next action and return only one valid JSON object now.",
+            "The previous response was not a valid AgentInstruction JSON object ({}).\n请严格遵循系统契约，仅输出一个纯合法的 JSON 对象！\n- 若需调用工具，请输出对应工具的 JSON（如 {{\"tool\": \"task_store\", \"command\": {{...}}}}）；\n- 若任务已全部完成并交付结论，请输出 {{\"description\": \"交付排查结论\", \"tool\": \"finish\", \"command\": {{\"summary\": \"...\"}}}}。\n严禁在 JSON 外部输出任何前缀、闲聊或解释文本！",
             parse_error
         ),
     }));
@@ -406,29 +406,12 @@ pub async fn call_llm(
         let parse_result = (|| -> Result<AgentInstruction, String> {
             let json_to_parse =
                 repair_json(&final_json_str).unwrap_or_else(|| final_json_str.clone());
-            match serde_json::from_str::<serde_json::Value>(&json_to_parse) {
-                Ok(mut val) => {
-                    normalize_raw_instruction_value(&mut val);
-                    serde_json::from_value(val).map_err(|e| format!("数据结构转换失败: {}", e))
-                }
-                Err(e) => {
-                    // 🌟 智能兜底：如果模型没有输出任何 JSON，而是直接输出了完整的 Markdown/自然语言解答，
-                    // 自动将其转换为终态交付 (finish)，直接把模型深思熟虑的分析报告交付给用户！
-                    let trimmed = final_json_str.trim();
-                    if !trimmed.is_empty() && !trimmed.starts_with('{') && !trimmed.contains("{\"tool\"") && !trimmed.contains("\"action\"") {
-                        let mut fallback_inst = AgentInstruction::default();
-                        fallback_inst.tool = Some("finish".to_string());
-                        fallback_inst.action = Some("finish".to_string());
-                        fallback_inst.command = Some(serde_json::json!({
-                            "summary": trimmed,
-                            "details": trimmed
-                        }));
-                        fallback_inst.description = "交付分析结论与排查结果".to_string();
-                        return Ok(fallback_inst);
-                    }
-                    Err(format!("基础 JSON 语法错误: {} (处理前: {})", e, final_json_str))
-                }
-            }
+            let mut val: serde_json::Value = serde_json::from_str(&json_to_parse)
+                .map_err(|e| format!("基础 JSON 语法错误: {} (处理前: {})", e, final_json_str))?;
+            normalize_raw_instruction_value(&mut val);
+            let inst: AgentInstruction =
+                serde_json::from_value(val).map_err(|e| format!("数据结构转换失败: {}", e))?;
+            Ok(inst)
         })();
 
         match parse_result {
@@ -520,11 +503,9 @@ pub async fn call_llm(
                 }));
                 append_final_json_output_anchor(&mut api_values);
                 */
-                // JSON 候选的修复请求只携带候选、错误和通用协议，避免重发整段任务历史。
-                // 自由文本响应已在上方交由外层路由恢复，不在同一模型内机械重试。
-                replace_with_isolated_json_repair_context(
+                // 保留完整任务历史与工具定义，追加精准纠偏提示让模型在原位上下文重新生成合规 JSON
+                append_json_regeneration_feedback(
                     &mut api_values,
-                    &final_json_str,
                     &e,
                 );
                 uses_primary_prompt = false;

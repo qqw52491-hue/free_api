@@ -143,6 +143,30 @@ impl AgentRunMachine {
         &mut self,
         event: AgentRunEvent,
     ) -> Result<AgentRunSnapshot, InvalidTransition> {
+        let from = self.state;
+        let event_name = event.name();
+
+        if self.state.is_terminal() {
+            match event {
+                AgentRunEvent::Fail { reason } => {
+                    self.state = AgentRunState::Failed;
+                    self.message = Some(reason);
+                    return Ok(self.snapshot());
+                }
+                AgentRunEvent::Cancel { reason } => {
+                    self.state = AgentRunState::Cancelled;
+                    self.message = Some(reason);
+                    return Ok(self.snapshot());
+                }
+                _ => {
+                    return Err(InvalidTransition {
+                        from,
+                        event: event_name,
+                    });
+                }
+            }
+        }
+
         match event {
             AgentRunEvent::Start => {
                 self.state = AgentRunState::Preparing;
@@ -179,6 +203,12 @@ impl AgentRunMachine {
                 self.message = Some(question);
             }
             AgentRunEvent::HumanReplyReceived => {
+                if self.state != AgentRunState::WaitingForHuman {
+                    return Err(InvalidTransition {
+                        from,
+                        event: event_name,
+                    });
+                }
                 self.state = AgentRunState::Executing;
                 self.message = Some("已收到人类回复，继续执行".to_string());
             }
