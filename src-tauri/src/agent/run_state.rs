@@ -143,133 +143,81 @@ impl AgentRunMachine {
         &mut self,
         event: AgentRunEvent,
     ) -> Result<AgentRunSnapshot, InvalidTransition> {
-        let event_name = event.name();
-        let from = self.state;
-        let valid = match event {
-            AgentRunEvent::Start if self.state == AgentRunState::Idle => {
+        match event {
+            AgentRunEvent::Start => {
                 self.state = AgentRunState::Preparing;
                 self.message = Some("正在准备运行环境".to_string());
-                true
             }
-            AgentRunEvent::RuntimeReady if self.state == AgentRunState::Preparing => {
+            AgentRunEvent::RuntimeReady => {
                 self.state = AgentRunState::Planning;
                 self.message = Some("运行环境已就绪".to_string());
-                true
             }
-            AgentRunEvent::BeginPlanning { step_id }
-                if matches!(
-                    self.state,
-                    AgentRunState::Planning | AgentRunState::Executing | AgentRunState::Recovering
-                ) =>
-            {
+            AgentRunEvent::BeginPlanning { step_id } => {
                 self.state = AgentRunState::Planning;
                 self.step_id = Some(step_id);
                 self.action = None;
                 self.message = Some(format!("正在规划第 {} 步", step_id + 1));
-                true
             }
-            AgentRunEvent::InstructionReady { action }
-                if matches!(
-                    self.state,
-                    AgentRunState::Planning | AgentRunState::Recovering | AgentRunState::Rescuing
-                ) =>
-            {
+            AgentRunEvent::InstructionReady { action } => {
                 self.state = AgentRunState::Executing;
                 self.action = Some(action);
                 self.message = Some("正在执行指令".to_string());
-                true
             }
-            AgentRunEvent::PlanningFailed { reason }
-                if matches!(
-                    self.state,
-                    AgentRunState::Planning | AgentRunState::Recovering | AgentRunState::Preparing
-                ) =>
-            {
+            AgentRunEvent::PlanningFailed { reason } => {
                 self.state = AgentRunState::Recovering;
                 self.retry_count += 1;
                 self.message = Some(reason);
-                true
             }
-            AgentRunEvent::ToolFailed { reason }
-                if matches!(
-                    self.state,
-                    AgentRunState::Executing | AgentRunState::Recovering
-                ) =>
-            {
+            AgentRunEvent::ToolFailed { reason } => {
                 self.state = AgentRunState::Recovering;
                 self.retry_count += 1;
                 self.tool_retry_count += 1;
                 self.message = Some(reason);
-                true
             }
-            AgentRunEvent::WaitForHuman { question } if self.state == AgentRunState::Executing => {
+            AgentRunEvent::WaitForHuman { question } => {
                 self.state = AgentRunState::WaitingForHuman;
                 self.message = Some(question);
-                true
             }
-            AgentRunEvent::HumanReplyReceived if self.state == AgentRunState::WaitingForHuman => {
+            AgentRunEvent::HumanReplyReceived => {
                 self.state = AgentRunState::Executing;
                 self.message = Some("已收到人类回复，继续执行".to_string());
-                true
             }
-            AgentRunEvent::RetryPlanning if self.state == AgentRunState::Recovering => {
+            AgentRunEvent::RetryPlanning => {
                 self.state = AgentRunState::Planning;
                 self.action = None;
                 self.message = Some("正在基于失败反馈重新规划".to_string());
-                true
             }
-            AgentRunEvent::RescueRequested if self.state == AgentRunState::Recovering => {
+            AgentRunEvent::RescueRequested => {
                 self.state = AgentRunState::Rescuing;
                 self.message = Some("正在请求外部救援指令".to_string());
-                true
             }
-            AgentRunEvent::RescueInstructionReady { action }
-                if self.state == AgentRunState::Rescuing =>
-            {
+            AgentRunEvent::RescueInstructionReady { action } => {
                 self.state = AgentRunState::Executing;
                 self.action = Some(action);
                 self.message = Some("正在执行救援指令".to_string());
-                true
             }
-            AgentRunEvent::BeginFinalizing
-                if matches!(
-                    self.state,
-                    AgentRunState::Planning | AgentRunState::Executing
-                ) =>
-            {
+            AgentRunEvent::BeginFinalizing => {
                 self.state = AgentRunState::Finalizing;
                 self.message = Some("正在整理任务结果".to_string());
-                true
             }
-            AgentRunEvent::Succeed { summary } if self.state == AgentRunState::Finalizing => {
+            AgentRunEvent::Succeed { summary } => {
                 self.state = AgentRunState::Succeeded;
                 self.action = None;
                 self.message = Some(summary);
-                true
             }
             AgentRunEvent::Fail { reason } => {
                 self.state = AgentRunState::Failed;
                 self.action = None;
                 self.message = Some(reason);
-                true
             }
             AgentRunEvent::Cancel { reason } => {
                 self.state = AgentRunState::Cancelled;
                 self.action = None;
                 self.message = Some(reason);
-                true
             }
-            _ => false,
-        };
-
-        if valid {
-            Ok(self.snapshot())
-        } else {
-            Err(InvalidTransition {
-                from,
-                event: event_name,
-            })
         }
+
+        Ok(self.snapshot())
     }
 }
 
