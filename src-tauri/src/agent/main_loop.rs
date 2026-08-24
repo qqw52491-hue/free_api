@@ -222,7 +222,8 @@ pub async fn run_agent_main_loop(
             cp
         }
         Some(existing) => {
-            // 同一 session 已达终态时，以乐观锁 revision 覆盖为新的运行快照。
+            // 同一 session 上一轮已 finish/终态后，新用户消息仍继承脱水夹心与状态索引（Claude/Codex 会话内前缀追加）。
+            existing.data.inherit_filling_into(&mut context);
             let mut fresh = AgentCheckpoint::new(final_session_id.clone(), &context);
             fresh.version = existing.version;
             fresh

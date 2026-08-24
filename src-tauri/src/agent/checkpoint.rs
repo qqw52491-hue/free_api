@@ -1,4 +1,4 @@
-use crate::agent::context::{ChatMessage, SandwichContext};
+use crate::agent::context::{ChatMessage, FailedAttempt, SandwichContext, SideEffectRecord};
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
 use crate::db::DbState;
@@ -10,6 +10,8 @@ use uuid::Uuid;
 
 const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
 const MAX_OBSERVATION_CHARS: usize = 4_000;
+/// 跨 finish 继承时台账只保留最近 N 条，避免底部状态卡随轮次线性膨胀。
+const MAX_INHERITED_SIDE_EFFECTS: usize = 12;
 
 /// 可恢复调度只保留真正决定下一步处理器的阶段。
 /// Planning / Executing / Recovering 仍可作为 UI 运行态，但不需要全部落盘。
@@ -141,6 +143,12 @@ pub struct DurableAgentContext {
     pub task_resources: Vec<TaskResourceRef>,
     pub todo_list: Vec<TodoItem>,
     pub turns_history: Vec<ChatMessage>,
+    /// 避坑教训；嵌入字段以兼容旧 checkpoint JSON。
+    #[serde(default)]
+    pub failed_attempts: Vec<FailedAttempt>,
+    /// 不可逆改动台账；嵌入字段以兼容旧 checkpoint JSON。
+    #[serde(default)]
+    pub side_effects: Vec<SideEffectRecord>,
     pub progress_summary: String,
     pub observation_summary: String,
     pub active_tool: Option<String>,
@@ -161,6 +169,8 @@ impl DurableAgentContext {
             task_resources: context.task_resources.clone(),
             todo_list: context.todo_list.clone(),
             turns_history: context.turns_history.clone(),
+            failed_attempts: context.failed_attempts.clone(),
+            side_effects: context.side_effects.clone(),
             progress_summary: context.progress_summary.clone(),
             observation_summary: truncate_chars(
                 &context.current_observation,
@@ -183,6 +193,8 @@ impl DurableAgentContext {
         context.task_resources = self.task_resources.clone();
         context.todo_list = self.todo_list.clone();
         context.turns_history = self.turns_history.clone();
+        context.failed_attempts = self.failed_attempts.clone();
+        context.side_effects = self.side_effects.clone();
         context.progress_summary = self.progress_summary.clone();
         context.current_observation = self.observation_summary.clone();
         context.active_tool = self.active_tool.clone();
@@ -205,6 +217,57 @@ impl DurableAgentContext {
             );
         }
     }
+
+    /// 同一 session 上一轮已 finish 后，新用户消息仍 append 脱水夹心（Claude/Codex 会话内继承）。
+    ///
+    /// 不恢复旧 `user_goal` / todo / progress / observation（那是新任务）。
+    /// 恢复：`turns_history`（与最新 chat_messages 去重追加）、memories、
+    /// failed_attempts、side_effects。工具正文仍以磁盘 / output_id 为准。
+    pub fn inherit_filling_into(&self, context: &mut SandwichContext) {
+        // 保持 M1 静态目标锚点不变（跨轮前缀 100% 缓存命中），新提问已作为 user 消息追加在 chat_tail 尾部。
+        if !self.user_goal.is_empty() {
+            context.user_goal = self.user_goal.clone();
+        }
+        let chat_tail = std::mem::take(&mut context.turns_history);
+        context.turns_history = merge_chat_onto_filling(self.turns_history.clone(), chat_tail);
+
+        for (key, value) in &self.memories {
+            context
+                .memories
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+
+        if context.failed_attempts.is_empty() {
+            context.failed_attempts = self.failed_attempts.clone();
+        }
+        if context.side_effects.is_empty() {
+            let mut effects = self.side_effects.clone();
+            if effects.len() > MAX_INHERITED_SIDE_EFFECTS {
+                let skip = effects.len() - MAX_INHERITED_SIDE_EFFECTS;
+                effects.drain(..skip);
+            }
+            context.side_effects = effects;
+        }
+
+        context.sync_fetched_tools_from_history();
+        context.maybe_compact_history();
+    }
+}
+
+fn merge_chat_onto_filling(
+    mut filling: Vec<ChatMessage>,
+    chat: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    for msg in chat {
+        let already = filling
+            .iter()
+            .any(|existing| existing.role == msg.role && existing.content == msg.content);
+        if !already {
+            filling.push(msg);
+        }
+    }
+    filling
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -671,6 +734,93 @@ mod tests {
         assert_eq!(
             recovery_decision(&checkpoint),
             RecoveryDecision::RetryPending
+        );
+    }
+
+    #[test]
+    fn inherit_filling_keeps_dehydrated_tool_trace_and_new_user_goal() {
+        use crate::agent::context::{FailedAttempt, SideEffectRecord};
+        use serde_json::json;
+
+        let mut previous = SandwichContext::new("system".to_string(), "配置 OpenRouter".to_string());
+        previous.turns_history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: json!("配置 OpenRouter"),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: json!("计划: 配置 | 工具: model_manager | 动作: list_models"),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: json!("【执行输出 (v4)】\noutput_id: out_err\n❌ 未知动作 list_models"),
+            },
+        ];
+        previous.failed_attempts.push(FailedAttempt {
+            step_id: 1,
+            tool: "model_manager".to_string(),
+            action: "list_models".to_string(),
+            error_summary: "未知动作".to_string(),
+            output_id: Some("out_err".to_string()),
+        });
+        previous.side_effects.push(SideEffectRecord {
+            step_id: 4,
+            tool: "edit_file".to_string(),
+            description: "model_manager.rs 新增 add_platform".to_string(),
+            timestamp: "2026-08-24T00:00:00Z".to_string(),
+        });
+        previous
+            .memories
+            .insert("platform".to_string(), "OpenRouter".to_string());
+        previous.todo_list = vec![crate::agent::types::TodoItem {
+            id: 1,
+            description: "旧任务待办".to_string(),
+            status: "completed".to_string(),
+            evidence_output_id: None,
+        }];
+        let mut done = AgentCheckpoint::new("session-a".to_string(), &previous);
+        done.mark_done(&previous);
+
+        let mut next = SandwichContext::new("system".to_string(), "为什么 list_models 报错".to_string());
+        next.turns_history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: json!("配置 OpenRouter"),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: json!("OpenRouter 已就绪"),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: json!("为什么 list_models 报错"),
+            },
+        ];
+        done.data.inherit_filling_into(&mut next);
+
+        assert_eq!(next.user_goal, "配置 OpenRouter", "M1 静态锚点跨轮不变，确保 100% 前缀缓存命中");
+        assert!(next.todo_list.is_empty(), "新任务不继承旧 todo");
+        assert_eq!(next.memories.get("platform").map(String::as_str), Some("OpenRouter"));
+        assert_eq!(next.failed_attempts.len(), 1);
+        assert_eq!(next.failed_attempts[0].action, "list_models");
+        assert_eq!(next.failed_attempts[0].output_id.as_deref(), Some("out_err"));
+        assert_eq!(next.side_effects.len(), 1);
+        assert!(next
+            .turns_history
+            .iter()
+            .any(|m| m.content.as_str() == Some("计划: 配置 | 工具: model_manager | 动作: list_models")));
+        assert!(next
+            .turns_history
+            .iter()
+            .any(|m| m.content.as_str() == Some("为什么 list_models 报错")));
+        assert_eq!(
+            next.turns_history
+                .iter()
+                .filter(|m| m.content.as_str() == Some("配置 OpenRouter"))
+                .count(),
+            1,
+            "已在夹心里的 user 消息不重复追加"
         );
     }
 }
