@@ -323,110 +323,84 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         eprintln!("⚠️ mcp_plugins uvx 桥转原生 HTTP 迁移失败（保留原配置继续可用）: {}", error);
     }
 
-    // 初始化预置常用模型规格库
-    let spec_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM model_specs", [], |r| r.get(0))
-        .unwrap_or(0);
-    if spec_count == 0 {
-        let default_specs = vec![
-            (
-                "DeepSeek-V3",
-                128000,
-                8192,
-                false,
-                0.7,
-                "DeepSeek 官方最新通用多模态/大模型 (128k 上下文)",
-            ),
-            (
-                "DeepSeek-R1",
-                128000,
-                8192,
-                true,
-                0.6,
-                "DeepSeek 深度思考/推理模型 (128k 上下文，支持思维链)",
-            ),
-            (
-                "DeepSeek-V4-Flash",
-                128000,
-                8192,
-                false,
-                0.7,
-                "DeepSeek 超高速轻量级模型 (128k 上下文)",
-            ),
-            (
-                "Claude-3.5-Sonnet",
-                200000,
-                8192,
-                false,
-                0.5,
-                "Anthropic 业界顶级编程与推理模型 (200k 上下文)",
-            ),
-            (
-                "Claude-3.7-Sonnet",
-                200000,
-                8192,
-                true,
-                0.7,
-                "Anthropic 混合推理模型 (200k 上下文，支持混合思考)",
-            ),
-            (
-                "GPT-4o",
-                128000,
-                16384,
-                false,
-                0.7,
-                "OpenAI 旗舰全能模型 (128k 上下文，16k 输出)",
-            ),
-            (
-                "GPT-4o-mini",
-                128000,
-                16384,
-                false,
-                0.7,
-                "OpenAI 轻量高性价比模型 (128k 上下文)",
-            ),
-            (
-                "Gemini-2.0-Flash",
-                1048576,
-                8192,
-                false,
-                0.7,
-                "Google 100万超大上下文极速模型 (1M 上下文)",
-            ),
-            (
-                "Gemini-1.5-Pro",
-                2097152,
-                8192,
-                false,
-                0.7,
-                "Google 200万超大上下文旗舰模型 (2M 上下文)",
-            ),
-            (
-                "Qwen-2.5-Coder-32B",
-                32768,
-                4096,
-                false,
-                0.7,
-                "通义千问代码专精开源大模型 (32k 上下文)",
-            ),
-            (
-                "Llama-3.3-70B",
-                128000,
-                4096,
-                false,
-                0.7,
-                "Meta 最强开源大模型 (128k 上下文)",
-            ),
-        ];
-        let now = chrono::Utc::now().to_rfc3339();
-        for (name, ctx, max_tok, thinking, temp, desc) in default_specs {
-            let id = uuid::Uuid::new_v4().to_string();
-            let _ = conn.execute(
-                "INSERT INTO model_specs (id, name, context_window, max_tokens, supports_thinking, default_temperature, description, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![id, name, ctx, max_tok, thinking, temp, desc, now],
-            );
-        }
+    // 初始化与更新预置标准物理规格库（纯净容量档位，与品牌型号解耦）
+    let standard_specs = vec![
+        (
+            "32k 轻量/本地档",
+            32768,
+            4096,
+            false,
+            0.7,
+            "适用于 7B/8B 小型模型、Ollama 本地模型与端侧轻量任务 (32k 上下文 / 4k 输出)",
+        ),
+        (
+            "128k 主流标配档",
+            128000,
+            8192,
+            false,
+            0.7,
+            "适用于 DeepSeek-V3、GPT-4o、商汤、通义等 90% 主流大模型 (128k 上下文 / 8k 输出)",
+        ),
+        (
+            "128k 深度思考档",
+            128000,
+            8192,
+            true,
+            0.6,
+            "适用于 DeepSeek-R1、o1/o3 等深度推理/思维链模型 (128k 上下文 / 8k 输出 / 思考模式)",
+        ),
+        (
+            "200k 长上下文档",
+            200000,
+            8192,
+            false,
+            0.7,
+            "适用于 Claude 3.5/3.7、Kimi 等长文档与大型代码库模型 (200k 上下文 / 8k 输出)",
+        ),
+        (
+            "1M 超长窗口档",
+            1048576,
+            8192,
+            false,
+            0.7,
+            "适用于 Google Gemini Flash、MiniMax 等百万 Token 级超大窗口模型 (1M 上下文 / 8k 输出)",
+        ),
+        (
+            "2M 极致窗口档",
+            2097152,
+            16384,
+            false,
+            0.7,
+            "适用于 Google Gemini Pro 等 200万 Token 极致超长上下文模型 (2M 上下文 / 16k 输出)",
+        ),
+    ];
+
+    // 清理旧版本按具体品牌命名的历史规格（避免混淆）
+    let _ = conn.execute(
+        "DELETE FROM model_specs WHERE name IN (
+            'DeepSeek-V3', 'DeepSeek-R1', 'DeepSeek-V4-Flash', 
+            'Claude-3.5-Sonnet', 'Claude-3.7-Sonnet', 
+            'GPT-4o', 'GPT-4o-mini', 
+            'Gemini-2.0-Flash', 'Gemini-1.5-Pro', 
+            'Qwen-2.5-Coder-32B', 'Llama-3.3-70B'
+        );",
+        [],
+    );
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for (name, ctx, max_tok, thinking, temp, desc) in standard_specs {
+        let id = uuid::Uuid::new_v4().to_string();
+        let _ = conn.execute(
+            "INSERT INTO model_specs (id, name, context_window, max_tokens, supports_thinking, default_temperature, description, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(name) DO UPDATE SET 
+                context_window = excluded.context_window,
+                max_tokens = excluded.max_tokens,
+                supports_thinking = excluded.supports_thinking,
+                default_temperature = excluded.default_temperature,
+                description = excluded.description",
+            rusqlite::params![id, name, ctx, max_tok, thinking, temp, desc, now],
+        );
     }
 
     Ok(conn)

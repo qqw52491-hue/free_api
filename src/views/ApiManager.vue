@@ -442,8 +442,8 @@
             </div>
             <div class="modal-body">
               <div class="form-group">
-                <label class="form-label">规格名称 / 基础型号 *</label>
-                <input class="form-input" v-model="specForm.name" placeholder="例如：DeepSeek-V4、Claude-3.7-Sonnet、Qwen-2.5-Coder" />
+                <label class="form-label">规格名称 / 容量档位 *</label>
+                <input class="form-input" v-model="specForm.name" placeholder="例如：128k 主流标配档、200k 长上下文档、32k 本地轻量档" />
               </div>
 
               <div class="form-group">
@@ -1021,9 +1021,6 @@ function onApplySpecToEditModel(e: Event) {
   if (spec) {
     mForm.value.context_window = spec.context_window
     mForm.value.max_tokens = spec.max_tokens
-    if (!mForm.value.display_name || mForm.value.display_name === editingModel.value?.name) {
-      mForm.value.display_name = spec.name
-    }
   }
 }
 

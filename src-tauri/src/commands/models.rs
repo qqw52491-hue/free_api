@@ -531,35 +531,45 @@ fn extract_model_ids_from_json(val: &Value) -> Vec<String> {
 
 fn find_best_spec_match<'a>(model_id: &str, specs: &'a [ModelSpec]) -> Option<&'a ModelSpec> {
     let lower_id = model_id.to_lowercase();
-
-    // 1. Exact match
-    if let Some(spec) = specs.iter().find(|s| s.name.to_lowercase() == lower_id) {
-        return Some(spec);
-    }
-
     let normalized = lower_id.replace('_', "-").replace('.', "-").replace(':', "-");
 
-    // 2. Specific aliases
-    if normalized.contains("deepseek-reasoner") {
-        if let Some(s) = specs.iter().find(|s| s.name.to_lowercase().contains("deepseek-r1")) {
-            return Some(s);
-        }
-    }
-    if normalized.contains("deepseek-chat") {
-        if let Some(s) = specs.iter().find(|s| s.name.to_lowercase().contains("deepseek-v3")) {
+    // 1. 优先根据模型特征匹配标准容量档位
+    if normalized.contains("gemini-1-5-pro") || normalized.contains("gemini-1.5-pro") || normalized.contains("gemini-pro") || normalized.contains("2m") {
+        if let Some(s) = specs.iter().find(|s| s.name.contains("2M")) {
             return Some(s);
         }
     }
 
-    // 3. Substring match
-    for spec in specs {
-        let spec_norm = spec.name.to_lowercase().replace('_', "-").replace('.', "-").replace(':', "-");
-        if normalized.contains(&spec_norm) {
-            return Some(spec);
+    if normalized.contains("gemini") || normalized.contains("1m") || normalized.contains("minimax") {
+        if let Some(s) = specs.iter().find(|s| s.name.contains("1M")) {
+            return Some(s);
         }
     }
 
-    None
+    if normalized.contains("claude") || normalized.contains("kimi") || normalized.contains("moonshot") || normalized.contains("200k") {
+        if let Some(s) = specs.iter().find(|s| s.name.contains("200k")) {
+            return Some(s);
+        }
+    }
+
+    if normalized.contains("r1") || normalized.contains("reasoner") || normalized.contains("o1") || normalized.contains("o3") || normalized.contains("thinking") {
+        if let Some(s) = specs.iter().find(|s| s.name.contains("深度思考") || (s.supports_thinking && s.context_window >= 128000)) {
+            return Some(s);
+        }
+    }
+
+    if normalized.contains("7b") || normalized.contains("8b") || normalized.contains("32k") || normalized.contains("ollama") || normalized.contains("small") {
+        if let Some(s) = specs.iter().find(|s| s.name.contains("32k")) {
+            return Some(s);
+        }
+    }
+
+    // 2. 兜底匹配最常见的主流 128k 标配档
+    if let Some(s) = specs.iter().find(|s| s.name.contains("128k") && !s.supports_thinking) {
+        return Some(s);
+    }
+
+    specs.first()
 }
 
 /// 从远程 OpenAI 兼容接口拉取模型列表，并自动对照规格词典进行参数解析与匹配
@@ -747,7 +757,7 @@ pub async fn fetch_remote_models(
             (None, None, ctx, max_tok, temp, thinking, None)
         };
 
-        let disp_name = spec_name.clone().unwrap_or_else(|| id.clone());
+        let disp_name = id.clone();
 
         items.push(RemoteModelItem {
             id: id.clone(),
