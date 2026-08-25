@@ -92,6 +92,41 @@ fn should_challenge_finish_with_blockers(
     is_finish && succeeded && !finish_reviewed && !blockers.is_empty()
 }
 
+/// 应用模型本轮提出的状态更新。
+/// ReviewContract 与 ChangeVerification 是两套正交账本，必须独立处理：
+/// 前者是否存在或是否被拒绝，都不能阻止后者闭合最近写入的验证责任。
+fn apply_instruction_state_updates(
+    context: &mut context::SandwichContext,
+    instruction: &AgentInstruction,
+) -> bool {
+    if !instruction.todo_update.is_empty() {
+        context.todo_list = instruction.todo_update.clone();
+    }
+
+    let review_contract_was_present = context.review_contract.is_some();
+    if let Some(update) = instruction.review_contract_update.clone() {
+        if let Err(error) = apply_review_contract_update(&mut context.review_contract, update) {
+            context.add_error_feedback(&format!(
+                "【审查契约更新未采纳】{}\n请保留既有义务；每项必须为 open，或以 evidenced + evidence_refs、waived + waived_reason 闭合。",
+                error
+            ));
+        }
+    }
+
+    if let Some(update) = instruction.change_verification_update.clone() {
+        if let Err(error) =
+            apply_change_verification_update(&mut context.change_verification, update)
+        {
+            context.add_error_feedback(&format!(
+                "【写入验证更新未采纳】{}\n真实写入后，必须以 verified + evidence_refs 或 waived + waived_reason 闭合；新写入会自动使旧验证失效。",
+                error
+            ));
+        }
+    }
+
+    !review_contract_was_present && context.review_contract.is_some()
+}
+
 #[cfg(test)]
 mod finish_guard_tests {
     use super::*;
@@ -155,8 +190,13 @@ mod finish_guard_tests {
             }],
         };
         let blockers = finish_blockers(&[], Some(&open_contract), false, 0, None);
-        assert_eq!(blockers, vec!["审查义务 implementation：实现调用链是否真实接通？"]);
-        assert!(should_challenge_finish_with_blockers(true, true, false, &blockers));
+        assert_eq!(
+            blockers,
+            vec!["审查义务 implementation：实现调用链是否真实接通？"]
+        );
+        assert!(should_challenge_finish_with_blockers(
+            true, true, false, &blockers
+        ));
 
         let closed_contract = ReviewContract {
             scope_statement: "仅解释完整 diff".to_string(),
@@ -205,6 +245,27 @@ mod finish_guard_tests {
             waived_reason: Some("当前环境缺少集成服务".to_string()),
         };
         assert!(finish_blockers(&[], None, false, 3, Some(&waived)).is_empty());
+    }
+
+    #[test]
+    fn change_verification_update_is_independent_of_review_contract_update() {
+        let mut context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let expected = ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["output_id: test-42".to_string()],
+            waived_reason: None,
+        };
+        let instruction = AgentInstruction {
+            tool: Some("read_text_file".to_string()),
+            change_verification_update: Some(expected.clone()),
+            ..Default::default()
+        };
+
+        let review_started = apply_instruction_state_updates(&mut context, &instruction);
+
+        assert!(!review_started);
+        assert!(context.review_contract.is_none());
+        assert_eq!(context.change_verification, Some(expected));
     }
 }
 
@@ -321,7 +382,10 @@ pub async fn run_agent_main_loop(
         for (p_name, p_client) in &registry.clients {
             let tools = crate::agent::mcp_catalog::cached_tools(&p_client.config)
                 .unwrap_or_else(|| p_client.last_known_tools());
-            let names = tools.iter().map(|t| format!("{}/{}", p_name, t.name)).collect::<Vec<_>>();
+            let names = tools
+                .iter()
+                .map(|t| format!("{}/{}", p_name, t.name))
+                .collect::<Vec<_>>();
             if !names.is_empty() {
                 mcp_lines.push(format!("  * {}: {}", p_name, names.join(", ")));
             }
@@ -739,30 +803,9 @@ pub async fn run_agent_main_loop(
         }
 
         // --- 更新任务规划 + 核心记忆 ---
-        if !instruction.todo_update.is_empty() {
-            context.todo_list = instruction.todo_update.clone();
-        }
-        let review_contract_was_present = context.review_contract.is_some();
-        if let Some(update) = instruction.review_contract_update.clone() {
-            if let Err(error) = apply_review_contract_update(&mut context.review_contract, update) {
-                context.add_error_feedback(&format!(
-                    "【审查契约更新未采纳】{}\n请保留既有义务；每项必须为 open，或以 evidenced + evidence_refs、waived + waived_reason 闭合。",
-                    error
-                ));
-        if let Some(update) = instruction.change_verification_update.clone() {
-            if let Err(error) =
-                apply_change_verification_update(&mut context.change_verification, update)
-            {
-                context.add_error_feedback(&format!(
-                    "【写入验证更新未采纳】{}\n真实写入后，必须以 verified + evidence_refs 或 waived + waived_reason 闭合；新写入会自动使旧验证失效。",
-                    error
-                ));
-            }
-        }
-            }
-        }
+        // 两类责任账本独立更新，避免审查契约的拒绝路径吞掉写入验证更新。
         let review_contract_started_this_turn =
-            !review_contract_was_present && context.review_contract.is_some();
+            apply_instruction_state_updates(&mut context, &instruction);
         if !instruction.memories_update.is_empty() {
             let rejections = context.update_memories(instruction.memories_update.clone());
             if !rejections.is_empty() {
@@ -798,7 +841,6 @@ pub async fn run_agent_main_loop(
             .clone()
             .unwrap_or_else(|| instruction.get_action());
         context.active_tool = Some(next_tool.clone());
-
 
         // --- 加载工具说明书（Write-Once 历史事件 + 未命中纠错 + 现场刷新，见 tool_manual.rs）---
         crate::agent::tool_manual::load_tool_manual_for_next_step(

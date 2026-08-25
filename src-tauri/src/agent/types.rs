@@ -283,6 +283,53 @@ pub struct AgentInstruction {
 }
 
 impl AgentInstruction {
+    /// 反序列化成功并不代表模型给出了可执行指令。
+    /// 计划、反思、Todo、审查契约等状态字段可以随动作一起出现，
+    /// 但不能单独作为一个会被主循环执行的回合。
+    ///
+    /// 不在此处复制动态工具目录或各工具的参数 schema：这些仍由
+    /// 工具注册表/宿主安全层校验。这里只拒绝会退化为隐式 `core` 的
+    /// 无动作对象，并保留 parallel、plan_tree 与 pipeline 三类高阶动作。
+    pub fn validate_executable_shape(&self) -> Result<(), String> {
+        if self.parallel.is_some() || self.plan_tree.is_some() || !self.commands.is_empty() {
+            return Ok(());
+        }
+
+        let has_tool = self
+            .tool
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|tool| !tool.is_empty());
+        let has_legacy_action = self
+            .action
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|action| !action.is_empty())
+            || self.command.as_ref().is_some_and(|command| {
+                if let Some(object) = command.as_object() {
+                    object
+                        .get("action")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .is_some_and(|action| !action.is_empty())
+                } else {
+                    command.as_str().is_some_and(|action| {
+                        let action = action.trim();
+                        !action.is_empty() && !action.contains(' ')
+                    })
+                }
+            });
+
+        if has_tool || has_legacy_action {
+            return Ok(());
+        }
+
+        Err(
+            "AgentInstruction 缺少可执行入口（tool/action）。计划、反思、Todo、审查契约或进度摘要可以保留，但必须同时输出非空 tool、兼容 action，或 parallel、plan_tree、commands；宿主不会把无动作对象默认为 core。"
+                .to_string(),
+        )
+    }
+
     pub fn get_action(&self) -> String {
         if self.parallel.is_some() {
             return "parallel".to_string();
@@ -444,5 +491,49 @@ mod tests {
         }))
         .expect("canonical memory should parse");
         assert_eq!(memory.value, "canonical");
+    }
+
+    #[test]
+    fn executable_shape_rejects_state_only_instruction() {
+        let instruction: AgentInstruction = serde_json::from_value(json!({
+            "plan_title": "核验完成语义",
+            "description": "下一步应读取主循环",
+            "progress_summary": "已建立审查义务"
+        }))
+        .expect("state-only JSON remains deserializable for recoverable validation");
+
+        let error = instruction
+            .validate_executable_shape()
+            .expect_err("state-only object must not execute as implicit core");
+        assert!(error.contains("缺少可执行入口"));
+    }
+
+    #[test]
+    fn executable_shape_keeps_existing_action_forms_compatible() {
+        let tool: AgentInstruction = serde_json::from_value(json!({
+            "tool": "read_text_file",
+            "command": {"path": "src/lib.rs"}
+        }))
+        .expect("tool instruction should deserialize");
+        assert!(tool.validate_executable_shape().is_ok());
+
+        let legacy_action: AgentInstruction = serde_json::from_value(json!({
+            "action": "finish",
+            "command": {"summary": "done"}
+        }))
+        .expect("legacy action instruction should deserialize");
+        assert!(legacy_action.validate_executable_shape().is_ok());
+
+        let pipeline: AgentInstruction = serde_json::from_value(json!({
+            "commands": [{"tool": "read_text_file", "command": {"path": "src/lib.rs"}}]
+        }))
+        .expect("pipeline instruction should deserialize");
+        assert!(pipeline.validate_executable_shape().is_ok());
+
+        let plan_tree: AgentInstruction = serde_json::from_value(json!({
+            "plan_tree": {"mode": "serial", "children": []}
+        }))
+        .expect("plan tree instruction should deserialize");
+        assert!(plan_tree.validate_executable_shape().is_ok());
     }
 }

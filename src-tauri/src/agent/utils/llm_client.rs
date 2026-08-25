@@ -52,10 +52,7 @@ fn replace_with_isolated_json_repair_context(
     append_final_json_output_anchor(api_values);
 }
 
-fn append_json_regeneration_feedback(
-    api_values: &mut Vec<serde_json::Value>,
-    parse_error: &str,
-) {
+fn append_json_regeneration_feedback(api_values: &mut Vec<serde_json::Value>, parse_error: &str) {
     api_values.push(json!({
         "role": "user",
         "content": format!(
@@ -64,6 +61,22 @@ fn append_json_regeneration_feedback(
         ),
     }));
     append_final_json_output_anchor(api_values);
+}
+
+/// 将模型文本转换为“可执行”的 AgentInstruction。
+/// JSON 语法、serde 结构与可执行形状三层都通过，才允许进入主循环。
+/// 失败统一返回到既有 regeneration feedback，不能默默退化为 `core` 动作。
+fn parse_executable_instruction(final_json_str: &str) -> Result<AgentInstruction, String> {
+    let json_to_parse = repair_json(final_json_str).unwrap_or_else(|| final_json_str.to_string());
+    let mut value: serde_json::Value = serde_json::from_str(&json_to_parse)
+        .map_err(|error| format!("基础 JSON 语法错误: {} (处理前: {})", error, final_json_str))?;
+    normalize_raw_instruction_value(&mut value);
+    let instruction: AgentInstruction =
+        serde_json::from_value(value).map_err(|error| format!("数据结构转换失败: {}", error))?;
+    instruction
+        .validate_executable_shape()
+        .map_err(|error| format!("指令可执行性校验失败: {}", error))?;
+    Ok(instruction)
 }
 
 /// 打印发送给模型的消息概况（调试用）
@@ -187,8 +200,7 @@ pub async fn call_llm(
     // OpenAI 兼容路由（火山/DeepSeek/中转站/Ollama 等）直接发送原序列：
     // 历史尾部字节跨轮稳定，前缀缓存不被每轮重渲染的状态卡打断。
     // 仅要求严格 user/assistant 交替的 provider（Anthropic 系）才归并。
-    let api_messages =
-        normalize_messages_for_provider(messages.assemble_messages(), &config);
+    let api_messages = normalize_messages_for_provider(messages.assemble_messages(), &config);
     let history_estimate_at_request = messages.history_estimated_tokens();
     print_debug_messages(&api_messages);
 
@@ -402,17 +414,8 @@ pub async fn call_llm(
             }
         });
 
-        // 8. 解析 AgentInstruction (带智能容错与修复)
-        let parse_result = (|| -> Result<AgentInstruction, String> {
-            let json_to_parse =
-                repair_json(&final_json_str).unwrap_or_else(|| final_json_str.clone());
-            let mut val: serde_json::Value = serde_json::from_str(&json_to_parse)
-                .map_err(|e| format!("基础 JSON 语法错误: {} (处理前: {})", e, final_json_str))?;
-            normalize_raw_instruction_value(&mut val);
-            let inst: AgentInstruction =
-                serde_json::from_value(val).map_err(|e| format!("数据结构转换失败: {}", e))?;
-            Ok(inst)
-        })();
+        // 8. 解析并校验可执行 AgentInstruction；任何失败都走同一恢复反馈循环。
+        let parse_result = parse_executable_instruction(&final_json_str);
 
         match parse_result {
             Ok(inst) => {
@@ -504,10 +507,7 @@ pub async fn call_llm(
                 append_final_json_output_anchor(&mut api_values);
                 */
                 // 保留完整任务历史与工具定义，追加精准纠偏提示让模型在原位上下文重新生成合规 JSON
-                append_json_regeneration_feedback(
-                    &mut api_values,
-                    &e,
-                );
+                append_json_regeneration_feedback(&mut api_values, &e);
                 uses_primary_prompt = false;
             }
         }
@@ -579,8 +579,32 @@ mod tests {
     #[test]
     fn pure_text_protocol_failures_escalate_to_outer_recovery() {
         assert!(requires_outer_protocol_recovery("计划：先建立项目地图"));
-        assert!(requires_outer_protocol_recovery("I will inspect the repository first."));
-        assert!(!requires_outer_protocol_recovery("{\"tool\":\"read_text_file\"}"));
+        assert!(requires_outer_protocol_recovery(
+            "I will inspect the repository first."
+        ));
+        assert!(!requires_outer_protocol_recovery(
+            "{\"tool\":\"read_text_file\"}"
+        ));
+    }
+
+    #[test]
+    fn executable_parser_rejects_valid_json_without_action() {
+        let error =
+            parse_executable_instruction(r#"{"plan_title":"审查上下文","description":"继续读取"}"#)
+                .expect_err("state-only JSON must enter recoverable validation");
+
+        assert!(error.contains("指令可执行性校验失败"));
+        assert!(error.contains("缺少可执行入口"));
+    }
+
+    #[test]
+    fn executable_parser_accepts_valid_tool_instruction() {
+        let instruction = parse_executable_instruction(
+            r#"{"tool":"read_text_file","command":{"path":"src/lib.rs"}}"#,
+        )
+        .expect("tool instruction should remain executable");
+
+        assert_eq!(instruction.get_tool(), "read_text_file");
     }
 }
 
@@ -643,9 +667,18 @@ mod provider_normalization_tests {
 
     fn sample_messages() -> Vec<ChatMessage> {
         vec![
-            ChatMessage { role: "user".to_string(), content: json!("历史输出 C") },
-            ChatMessage { role: "user".to_string(), content: json!("【状态卡】") },
-            ChatMessage { role: "user".to_string(), content: json!("【决策指令】") },
+            ChatMessage {
+                role: "user".to_string(),
+                content: json!("历史输出 C"),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: json!("【状态卡】"),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: json!("【决策指令】"),
+            },
         ]
     }
 
@@ -656,9 +689,14 @@ mod provider_normalization_tests {
             "https://api.deepseek.com",
             "https://zhandou.online/v1",
         ] {
-            let normalized = normalize_messages_for_provider(sample_messages(), &config_with_base_url(url));
+            let normalized =
+                normalize_messages_for_provider(sample_messages(), &config_with_base_url(url));
             assert_eq!(normalized.len(), 3, "OpenAI 兼容路由不得归并：{}", url);
-            assert_eq!(normalized[0].content, json!("历史输出 C"), "历史消息必须保持独立");
+            assert_eq!(
+                normalized[0].content,
+                json!("历史输出 C"),
+                "历史消息必须保持独立"
+            );
         }
     }
 
@@ -690,6 +728,10 @@ mod provider_normalization_tests {
         );
         assert_eq!(normalized.len(), 1, "Anthropic 系必须归并为单条");
         let text = normalized[0].content.as_str().unwrap();
-        assert!(text.contains("历史输出 C") && text.contains("【状态卡】") && text.contains("【决策指令】"));
+        assert!(
+            text.contains("历史输出 C")
+                && text.contains("【状态卡】")
+                && text.contains("【决策指令】")
+        );
     }
 }
