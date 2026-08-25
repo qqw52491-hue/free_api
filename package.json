@@ -8,6 +8,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "dev:nowatch": "tauri dev --no-watch",
     "dev:wayland": "WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri dev",
     "dev:wayland:nowatch": "WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri dev --no-watch",
     "dev:x11": "GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri dev",

@@ -462,66 +462,110 @@ pub fn recovery_decision(checkpoint: &AgentCheckpoint) -> RecoveryDecision {
 
 pub fn load_checkpoint(db: &DbState, run_id: &str) -> Result<Option<AgentCheckpoint>, String> {
     let conn = db.0.lock().map_err(|_| "数据库锁已中毒".to_string())?;
-    let snapshot_json: Option<String> = conn
+    let row: Option<(String, i64)> = conn
         .query_row(
-            "SELECT snapshot_json FROM agent_checkpoints WHERE run_id = ?1",
+            "SELECT snapshot_json, version FROM agent_checkpoints WHERE run_id = ?1",
             params![run_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|error| error.to_string())?;
 
-    snapshot_json
-        .map(|json| serde_json::from_str(&json).map_err(|error| error.to_string()))
-        .transpose()
+    if let Some((json, db_version)) = row {
+        let mut checkpoint: AgentCheckpoint =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        checkpoint.version = db_version;
+        Ok(Some(checkpoint))
+    } else {
+        Ok(None)
+    }
 }
 
 /// 通过 revision 进行乐观锁更新；一次 UPDATE 同时写 phase、pending 和 data，避免恢复到不自洽状态。
+///
+/// 当检测到乐观锁冲突（rows != 1）时，自动重新加载最新 checkpoint，
+/// 将调用方当前持有的关键字段（data/phase/pending/prepared_instruction/step_id/last_error）
+/// 合并到最新的快照上，然后重试。最多重试 3 次；仍失败则回退到原始错误。
 pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result<(), String> {
-    checkpoint.updated_at = Utc::now().to_rfc3339();
-    let conn = db.0.lock().map_err(|_| "数据库锁已中毒".to_string())?;
+    let mut attempt = 0;
+    let max_attempts = 3;
 
-    if checkpoint.version == 0 {
-        // snapshot JSON 与表中 revision 必须一致；否则第一次恢复会错误地再次 INSERT。
-        checkpoint.version = 1;
-        let snapshot_json = serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
-        conn.execute(
-            "INSERT INTO agent_checkpoints (run_id, phase, snapshot_json, version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                checkpoint.run_id,
-                checkpoint.phase.as_str(),
-                snapshot_json,
-                checkpoint.version,
-                checkpoint.created_at,
-                checkpoint.updated_at
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-    } else {
-        let previous_version = checkpoint.version;
-        checkpoint.version += 1;
-        let snapshot_json = serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
-        let rows = conn
-            .execute(
-                "UPDATE agent_checkpoints SET phase = ?1, snapshot_json = ?2, version = ?3, updated_at = ?4 WHERE run_id = ?5 AND version = ?6",
+    loop {
+        attempt += 1;
+        checkpoint.updated_at = Utc::now().to_rfc3339();
+        let conn = db.0.lock().map_err(|_| "数据库锁已中毒".to_string())?;
+
+        if checkpoint.version == 0 {
+            // snapshot JSON 与表中 revision 必须一致；否则第一次恢复会错误地再次 INSERT。
+            checkpoint.version = 1;
+            let snapshot_json = serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+            conn.execute(
+                "INSERT INTO agent_checkpoints (run_id, phase, snapshot_json, version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
+                    checkpoint.run_id,
                     checkpoint.phase.as_str(),
                     snapshot_json,
                     checkpoint.version,
-                    checkpoint.updated_at,
-                    checkpoint.run_id,
-                    previous_version
+                    checkpoint.created_at,
+                    checkpoint.updated_at
                 ],
             )
             .map_err(|error| error.to_string())?;
+            return Ok(());
+        } else {
+            let previous_version = checkpoint.version;
+            checkpoint.version += 1;
+            let snapshot_json = serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+            let rows = conn
+                .execute(
+                    "UPDATE agent_checkpoints SET phase = ?1, snapshot_json = ?2, version = ?3, updated_at = ?4 WHERE run_id = ?5 AND version = ?6",
+                    params![
+                        checkpoint.phase.as_str(),
+                        snapshot_json,
+                        checkpoint.version,
+                        checkpoint.updated_at,
+                        checkpoint.run_id,
+                        previous_version
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
 
-        if rows != 1 {
+            if rows == 1 {
+                return Ok(());
+            }
+
+            // 乐观锁冲突：数据库中的 version 已被其他保存者推进。
             checkpoint.version = previous_version;
-            return Err("checkpoint 已被另一条任务更新，请重新加载后再保存".to_string());
+
+            if attempt >= max_attempts {
+                return Err("checkpoint 已被另一条任务更新，请重新加载后再保存".to_string());
+            }
+
+            // 自动重试：重新加载最新 checkpoint 并合并当前关键状态。
+            let reloaded = load_checkpoint(db, &checkpoint.run_id)?;
+            match reloaded {
+                Some(mut latest) => {
+                    latest.data = checkpoint.data.clone();
+                    latest.phase = checkpoint.phase;
+                    latest.pending = checkpoint.pending.clone();
+                    latest.prepared_instruction = checkpoint.prepared_instruction.clone();
+                    latest.step_id = checkpoint.step_id;
+                    latest.last_error = checkpoint.last_error.clone();
+                    checkpoint.version = latest.version;
+                    checkpoint.data = latest.data;
+                    checkpoint.phase = latest.phase;
+                    checkpoint.pending = latest.pending;
+                    checkpoint.prepared_instruction = latest.prepared_instruction;
+                    checkpoint.step_id = latest.step_id;
+                    checkpoint.last_error = latest.last_error;
+                }
+                None => {
+                    // 记录已被删除，重置为首次写入。
+                    checkpoint.version = 0;
+                }
+            }
         }
     }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
