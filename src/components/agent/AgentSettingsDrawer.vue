@@ -17,12 +17,14 @@
                         <article class="routing-card">
                             <div class="routing-card-heading"><strong>推理模型</strong><small>规划与故障恢复</small></div>
                             <label><span>模型</span>
-                                <select data-testid="pro-model-select" :value="modelRouting.pro" :disabled="isRunning" @change="updateRoute('pro', $event)">
-                                    <option value="" disabled>选择复杂推理模型</option>
-                                    <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
-                                        <option v-for="model in group.models" :key="model.id" :value="model.id">{{ model.display_name || model.name }}</option>
-                                    </optgroup>
-                                </select>
+                                <ModelSelectDropdown
+                                    :model-value="modelRouting.pro"
+                                    :models="allModels"
+                                    :disabled="isRunning"
+                                    placeholder="选择复杂推理模型..."
+                                    @update:model-value="updateRouteValue('pro', $event)"
+                                    size="sm"
+                                />
                             </label>
                             <label><span>思考档位</span>
                                 <select data-testid="pro-reasoning-policy-select" :value="modelRouting.pro_reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort('pro', $event)">
@@ -37,12 +39,14 @@
                         <article class="routing-card">
                             <div class="routing-card-heading"><strong>执行模型</strong><small>常规工具调用</small></div>
                             <label><span>模型</span>
-                                <select data-testid="flash-model-select" :value="modelRouting.flash" :disabled="isRunning" @change="updateRoute('flash', $event)">
-                                    <option value="" disabled>选择快速执行模型</option>
-                                    <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
-                                        <option v-for="model in group.models" :key="model.id" :value="model.id">{{ model.display_name || model.name }}</option>
-                                    </optgroup>
-                                </select>
+                                <ModelSelectDropdown
+                                    :model-value="modelRouting.flash"
+                                    :models="allModels"
+                                    :disabled="isRunning"
+                                    placeholder="选择快速执行模型..."
+                                    @update:model-value="updateRouteValue('flash', $event)"
+                                    size="sm"
+                                />
                             </label>
                             <label><span>思考档位</span>
                                 <select data-testid="flash-reasoning-policy-select" :value="modelRouting.flash_reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort('flash', $event)">
@@ -57,12 +61,14 @@
                         <article class="routing-card">
                             <div class="routing-card-heading"><strong>视觉模型</strong><small>截图与图片分析</small></div>
                             <label><span>模型</span>
-                                <select data-testid="vision-model-select" :value="modelRouting.vision" :disabled="isRunning" @change="updateRoute('vision', $event)">
-                                    <option value="" disabled>选择多模态模型</option>
-                                    <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
-                                        <option v-for="model in group.models" :key="model.id" :value="model.id">{{ model.display_name || model.name }}</option>
-                                    </optgroup>
-                                </select>
+                                <ModelSelectDropdown
+                                    :model-value="modelRouting.vision"
+                                    :models="allModels"
+                                    :disabled="isRunning"
+                                    placeholder="选择多模态模型..."
+                                    @update:model-value="updateRouteValue('vision', $event)"
+                                    size="sm"
+                                />
                             </label>
                             <label><span>思考档位</span>
                                 <select data-testid="vision-reasoning-policy-select" :value="modelRouting.vision_reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort('vision', $event)">
@@ -122,6 +128,7 @@
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENT_TASK_PRESETS, type AgentModelOption } from "./types";
+import ModelSelectDropdown from "../common/ModelSelectDropdown.vue";
 type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
 type ModelRole = "pro" | "flash" | "vision";
 type ModelRouting = {
@@ -206,17 +213,7 @@ async function refreshConnection(name: string, reloadAfter = true) {
 watch(() => props.open, (open) => {
     if (open) void loadMcpCatalog();
 }, { immediate: true });
-const groupedModels = computed(() => {
-    const groups = new Map<string, AgentModelOption[]>();
-    for (const model of props.allModels) {
-        const platform = model.platform_name || "未分类平台";
-        groups.set(platform, [...(groups.get(platform) || []), model]);
-    }
-    return [...groups.entries()].map(([platform, models]) => ({ platform, models }));
-});
-
-function updateRoute(key: "pro" | "flash" | "vision", event: Event) {
-    const value = (event.target as HTMLSelectElement).value;
+function updateRouteValue(key: "pro" | "flash" | "vision", value: string) {
     emit("update:model-routing", { ...props.modelRouting, [key]: value });
 }
 function updateReasoningEffort(role: ModelRole, event: Event) {

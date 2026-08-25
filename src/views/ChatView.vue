@@ -42,12 +42,13 @@
           <span class="toolbar-title dim" v-else>选择或创建一个对话</span>
         </div>
         <div class="toolbar-right">
-          <select class="form-select toolbar-select" v-model="selectedModelId" @change="onModelSwitch">
-            <option value="" disabled>选择模型</option>
-            <optgroup v-for="group in groupedModels" :key="group.platform" :label="group.platform">
-              <option v-for="m in group.models" :key="m.id" :value="m.id">{{ m.name }}</option>
-            </optgroup>
-          </select>
+          <ModelSelectDropdown
+            v-model="selectedModelId"
+            :models="allModels"
+            placeholder="选择对话模型..."
+            @change="onModelSwitch"
+            size="sm"
+          />
         </div>
       </div>
 
@@ -185,6 +186,7 @@ import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { renderMarkdown } from '../components/agent/format'
+import ModelSelectDropdown from '../components/common/ModelSelectDropdown.vue'
 
 interface ModelOption {
   id: string; name: string; display_name: string; platform_id: string; platform_name: string;
@@ -231,19 +233,7 @@ const inputRef = ref<HTMLTextAreaElement>()
 
 const currentSession = computed(() => sessions.value.find(s => s.id === currentSessionId.value))
 
-// 按平台分组
-const groupedModels = computed(() => {
-  const groups: { platform: string; models: ModelOption[] }[] = []
-  const map = new Map<string, ModelOption[]>()
-  for (const m of allModels.value) {
-    if (!map.has(m.platform_name)) map.set(m.platform_name, [])
-    map.get(m.platform_name)!.push(m)
-  }
-  for (const [platform, models] of map) {
-    groups.push({ platform, models })
-  }
-  return groups
-})
+
 
 onMounted(async () => {
   allModels.value = await invoke<ModelOption[]>('get_all_models_with_platform')
