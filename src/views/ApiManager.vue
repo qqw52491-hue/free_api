@@ -403,11 +403,21 @@
                 </div>
               </div>
               <div class="form-group">
-                <label class="form-label">Provider 能力配置（JSON）</label>
-                <textarea class="form-input" v-model="mForm.provider_capabilities" rows="11" spellcheck="false"
-                  placeholder='{"thinking":{"enabled_value":{"type":"enabled"},"force_enabled":true,"effort":{"field":"reasoning_effort","map":{"high":"high","max":"max"}}}}'></textarea>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                  <label class="form-label" style="margin:0">Provider 能力配置（JSON）</label>
+                  <span style="font-size:11px;color:var(--text-3)">标准协议流派模板：</span>
+                </div>
+                <div class="quick-pills" style="margin-bottom:8px">
+                  <span class="quick-pill" @click="applyStandardCapability('standard')" title="无额外字段，最纯粹的 OpenAI 兼容模式">⚡ 纯净标准 ({})</span>
+                  <span class="quick-pill" @click="applyStandardCapability('reasoning_effort')" title="OpenAI o1/o3 及商汤等支持 reasoning_effort 档位的模型">🧠 思考档位 (o1/o3/商汤)</span>
+                  <span class="quick-pill" @click="applyStandardCapability('budget_tokens')" title="Claude 3.7 Sonnet 等按 Token 预算控制思考深度的模型">🎯 思考预算 (Claude 3.7)</span>
+                  <span class="quick-pill" @click="applyStandardCapability('thinking_bool')" title="支持 thinking: true/false 简单开关的模型">🔘 思考布尔 (thinking: true)</span>
+                  <span class="quick-pill" @click="applyStandardCapability('json_mode')" title="火山方舟及要求强制结构化 JSON 输出的平台">📦 JSON输出 (Volcengine)</span>
+                </div>
+                <textarea class="form-input" v-model="mForm.provider_capabilities" rows="10" spellcheck="false"
+                  placeholder='{}'></textarea>
                 <div style="font-size:11px;color:var(--text-4);margin-top:4px;line-height:1.5">
-                  每个模型独立保存。空对象 <code>{}</code> 表示只发送通用 OpenAI 兼容字段；<code>thinking</code> 可配置 <code>field</code>、<code>enabled_value</code>、<code>disabled_value</code>、<code>force_enabled</code>、<code>remove_sampling_when_enabled</code>，以及 <code>effort.field</code>、<code>effort.map</code>、<code>effort.default</code>。
+                  空对象 <code>{}</code> 为纯净标准请求；点击上方标准模板可一键载入参数规约（如思考档位映射、Token 预算控制、自动清除冲突参数等）。
                 </div>
               </div>
               <div v-if="modelConfigError" class="form-error">⚠️ {{ modelConfigError }}</div>
@@ -1014,6 +1024,59 @@ function onApplySpecToEditModel(e: Event) {
     if (!mForm.value.display_name || mForm.value.display_name === editingModel.value?.name) {
       mForm.value.display_name = spec.name
     }
+  }
+}
+
+function applyStandardCapability(type: 'standard' | 'reasoning_effort' | 'budget_tokens' | 'thinking_bool' | 'json_mode') {
+  if (type === 'standard') {
+    mForm.value.provider_capabilities = '{}'
+  } else if (type === 'reasoning_effort') {
+    mForm.value.provider_capabilities = JSON.stringify({
+      thinking: {
+        field: "reasoning_effort",
+        enabled_value: "medium",
+        disabled_value: "none",
+        effort: {
+          field: "reasoning_effort",
+          map: {
+            off: "none",
+            low: "low",
+            medium: "medium",
+            high: "high"
+          }
+        },
+        remove_sampling_when_enabled: true
+      }
+    }, null, 2)
+  } else if (type === 'budget_tokens') {
+    mForm.value.provider_capabilities = JSON.stringify({
+      thinking: {
+        field: "thinking",
+        enabled_value: { type: "enabled" },
+        disabled_value: { type: "disabled" },
+        effort: {
+          field: "budget_tokens",
+          map: {
+            low: 2048,
+            medium: 8192,
+            high: 32768
+          }
+        },
+        remove_sampling_when_enabled: true
+      }
+    }, null, 2)
+  } else if (type === 'thinking_bool') {
+    mForm.value.provider_capabilities = JSON.stringify({
+      thinking: {
+        field: "thinking",
+        enabled_value: true,
+        disabled_value: false
+      }
+    }, null, 2)
+  } else if (type === 'json_mode') {
+    mForm.value.provider_capabilities = JSON.stringify({
+      response_format: { type: "json_object" }
+    }, null, 2)
   }
 }
 
