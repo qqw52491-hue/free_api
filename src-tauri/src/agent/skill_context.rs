@@ -242,11 +242,57 @@ pub async fn generate_llm_skill_summary(
     Ok(summary)
 }
 
+fn is_usable_skill_summary(summary: &str) -> bool {
+    let normalized = summary.trim();
+    !normalized.is_empty() && normalized != "---"
+}
+
+fn front_matter_description(content: &str) -> Option<String> {
+    let mut lines = content.lines().map(str::trim);
+    if lines.next()? != "---" {
+        return None;
+    }
+
+    for line in lines {
+        if line == "---" {
+            break;
+        }
+        if let Some(description) = line.strip_prefix("description:") {
+            let description = description.trim().trim_matches(['\"', '\'']).trim();
+            if !description.is_empty() {
+                return Some(description.chars().take(160).collect());
+            }
+        }
+    }
+    None
+}
+
+fn fallback_skill_summary(content: &str, name: &str) -> String {
+    let mut lines = content.lines().map(str::trim);
+    if lines.next() == Some("---") {
+        for line in lines.by_ref() {
+            if line == "---" {
+                break;
+            }
+        }
+    }
+
+    lines
+        .find(|line| {
+            !line.is_empty()
+                && !line.starts_with('#')
+                && !line.starts_with("<!--")
+                && *line != "---"
+        })
+        .map(|line| line.chars().take(80).collect())
+        .unwrap_or_else(|| name.to_string())
+}
+
 pub fn cached_skill_summary(name: &str, content: &str) -> Option<String> {
     let fp = fingerprint(content);
     let cache = skill_summary_cache().lock().ok()?;
     let entry = cache.get(name)?;
-    if entry.fingerprint == fp {
+    if entry.fingerprint == fp && is_usable_skill_summary(&entry.summary) {
         Some(entry.summary.clone())
     } else {
         None
@@ -303,15 +349,11 @@ pub fn skill_catalog_string(
         }) {
             set_cached_skill_summary(&name, &content, tag_summary.clone());
             tag_summary
+        } else if let Some(front_matter_summary) = front_matter_description(&content) {
+            set_cached_skill_summary(&name, &content, front_matter_summary.clone());
+            front_matter_summary
         } else {
-            let rule_summary = content
-                .lines()
-                .map(str::trim)
-                .find(|line| {
-                    !line.is_empty() && !line.starts_with('#') && !line.starts_with("<!--")
-                })
-                .map(|line| line.chars().take(80).collect())
-                .unwrap_or_else(|| name.clone());
+            let rule_summary = fallback_skill_summary(&content, &name);
 
             set_cached_skill_summary(&name, &content, rule_summary.clone());
 
@@ -411,6 +453,27 @@ mod tests {
         let git_content = fs::read_to_string(skills_dir.join("git_flow.md")).unwrap();
         let cached = cached_skill_summary("git_flow", &git_content);
         assert_eq!(cached.as_deref(), Some("用于规范团队分支与提交发布规范。"));
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn front_matter_description_replaces_placeholder_summary_cache() {
+        let workspace = temporary_workspace();
+        let skills_dir = workspace.join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        let content = "---\nname: diagnosis\ndescription: 深度根因排查，适用于运行时异常与调用链故障。\n---\n# 诊断专家\n正文";
+        fs::write(skills_dir.join("diagnosis.md"), content).unwrap();
+
+        set_cached_skill_summary("diagnosis", content, "---".to_string());
+        let catalog = skill_catalog_string(&skills_dir, &[], None);
+
+        assert!(catalog.contains("- diagnosis: 深度根因排查，适用于运行时异常与调用链故障。"));
+        assert!(!catalog.contains("- diagnosis: ---"));
+        assert_eq!(
+            cached_skill_summary("diagnosis", content).as_deref(),
+            Some("深度根因排查，适用于运行时异常与调用链故障。")
+        );
 
         let _ = fs::remove_dir_all(workspace);
     }
