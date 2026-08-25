@@ -71,6 +71,9 @@
               </div>
               <div class="p-actions">
                 <span class="p-model-count">{{ getModelCount(p.id) }} 个模型</span>
+                <button class="btn-icon btn-xs" @click.stop="openFetchRemoteModelsModal(p.id)" title="从接口拉取模型">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+                </button>
                 <button class="btn-icon btn-xs" @click.stop="editPlatform(p)" title="编辑">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                 </button>
@@ -100,6 +103,12 @@
                 <p class="panel-subtitle">Key 和请求地址自动继承平台配置，参数可直接套用规格词典</p>
               </div>
               <div class="model-header-actions">
+                <button class="btn btn-accent btn-sm btn-fetch-models" type="button" :disabled="isFetchingRemoteModels" @click="openFetchRemoteModelsModal(selectedPlatformId)" title="通过 GET /v1/models 自动拉取平台所有可用模型">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" :class="{ spinning: isFetchingRemoteModels }">
+                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                  </svg>
+                  <span>{{ isFetchingRemoteModels ? '正在拉取…' : '🔄 从接口拉取模型' }}</span>
+                </button>
                 <span v-if="batchTestSummary && batchTestPlatformId === selectedPlatformId" class="batch-test-summary" data-testid="batch-test-summary" role="status" aria-live="polite">{{ batchTestSummary }}</span>
                 <button class="btn btn-primary btn-sm" type="button" data-testid="test-current-platform" :disabled="isTestingCurrentPlatform || models.length === 0" :aria-busy="isTestingCurrentPlatform ? 'true' : 'false'" @click="testCurrentPlatform">
                   {{ isTestingCurrentPlatform ? `检测中 ${batchTestCompleted}/${batchTestTotal}` : '检测当前平台' }}
@@ -191,7 +200,13 @@
             <div v-else class="empty-models">
               <span style="font-size:36px;opacity:0.3">🤖</span>
               <p>此平台下暂无模型</p>
-              <p style="font-size:12px;color:var(--text-4)">在上方从规格词典选择或输入模型标识后点击添加</p>
+              <p style="font-size:12px;color:var(--text-4)">你可以手动输入模型标识，或者直接点击下方按钮从平台接口自动拉取并写入</p>
+              <button class="btn btn-primary" style="margin-top:14px;gap:8px" @click="openFetchRemoteModelsModal(selectedPlatformId)" :disabled="isFetchingRemoteModels">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" :class="{ spinning: isFetchingRemoteModels }">
+                  <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                </svg>
+                <span>{{ isFetchingRemoteModels ? '正在拉取远端模型…' : '🔄 从接口一键拉取全部模型' }}</span>
+              </button>
             </div>
           </template>
 
@@ -584,6 +599,130 @@
           </div>
         </div>
       </Transition>
+
+      <!-- 弹窗: 从接口拉取与批量导入模型 -->
+      <Transition name="fade">
+        <div class="modal-overlay" v-if="showRemoteModelsModal" @click.self="showRemoteModelsModal = false">
+          <div class="modal remote-models-modal">
+            <div class="modal-header">
+              <div class="modal-title-wrap">
+                <span class="modal-title">🔄 从接口同步可用模型</span>
+                <span class="platform-badge" v-if="targetPlatformForFetch">{{ targetPlatformForFetch.name }}</span>
+              </div>
+              <button class="btn-icon" @click="showRemoteModelsModal = false">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+
+            <!-- Loading 状态 -->
+            <div class="modal-body modal-loading-state" v-if="isFetchingRemoteModels">
+              <div class="loading-spinner-large"></div>
+              <h4>正在向平台接口获取模型列表…</h4>
+              <p class="text-sub">正在请求 <code>{{ targetPlatformForFetch?.base_url }}/models</code></p>
+              <p class="text-sub-hint">系统将自动结合本地【规格词典】匹配上下文容量与推荐参数</p>
+            </div>
+
+            <!-- 报错状态 -->
+            <div class="modal-body modal-error-state" v-else-if="remoteModelFetchError">
+              <div class="error-icon">⚠️</div>
+              <h4>拉取模型列表失败</h4>
+              <p class="error-detail">{{ remoteModelFetchError }}</p>
+              <div class="error-actions">
+                <button class="btn btn-ghost" @click="showRemoteModelsModal = false">关闭</button>
+                <button class="btn btn-primary" @click="retryFetchRemoteModels">重新拉取</button>
+              </div>
+            </div>
+
+            <!-- 成功获取到模型列表 -->
+            <div class="modal-body remote-models-body" v-else-if="remoteFetchResult">
+              <div class="fetch-summary-bar">
+                <div class="endpoint-indicator">
+                  <span class="method-tag">GET</span>
+                  <span class="endpoint-url" :title="remoteFetchResult.endpoint_url">{{ remoteFetchResult.endpoint_url }}</span>
+                </div>
+                <div class="fetch-stats">
+                  <span>共检索到 <strong>{{ remoteFetchResult.total }}</strong> 个模型</span>
+                  <span class="badge-new-count" v-if="remoteFetchResult.new_count > 0">新模型 +{{ remoteFetchResult.new_count }}</span>
+                </div>
+              </div>
+
+              <div class="remote-toolbar">
+                <div class="remote-search-box">
+                  <input
+                    v-model="remoteModelSearchQuery"
+                    class="form-input remote-search-input"
+                    placeholder="🔍 搜索过滤模型标识或名称..."
+                  />
+                </div>
+                <div class="remote-batch-buttons">
+                  <button type="button" class="btn-tool" @click="selectAllRemoteModels(true)">全选</button>
+                  <button type="button" class="btn-tool" @click="selectAllRemoteModels(false)">全不选</button>
+                  <button type="button" class="btn-tool" @click="selectOnlyNewRemoteModels" v-if="remoteFetchResult.new_count > 0">
+                    仅选新模型 ({{ remoteFetchResult.new_count }})
+                  </button>
+                </div>
+              </div>
+
+              <!-- 模型列表卡片 -->
+              <div class="remote-models-list">
+                <div
+                  v-for="m in filteredRemoteModels"
+                  :key="m.id"
+                  class="remote-model-row"
+                  :class="{ 'is-selected': m.selected, 'is-existing': m.exists }"
+                  @click="m.selected = !m.selected"
+                >
+                  <div class="remote-col-check">
+                    <input type="checkbox" v-model="m.selected" @click.stop class="custom-checkbox" />
+                  </div>
+
+                  <div class="remote-col-info">
+                    <div class="remote-model-name-row">
+                      <span class="remote-model-id">{{ m.name }}</span>
+                      <span v-if="!m.exists" class="badge-tag badge-tag-new">✨ 新增</span>
+                      <span v-else class="badge-tag badge-tag-exist">✓ 已在库中</span>
+                      <span v-if="m.supports_thinking" class="badge-tag badge-tag-thinking">🧠 深度思考</span>
+                    </div>
+                    <div class="remote-model-sub-row">
+                      <span v-if="m.matched_spec_name" class="spec-match-tag">
+                        ⚡ 匹配规格: <strong>{{ m.matched_spec_name }}</strong>
+                      </span>
+                      <span class="param-tag">窗口: {{ formatTok(m.context_window) }}</span>
+                      <span class="param-tag">输出: {{ formatTok(m.max_tokens) }}</span>
+                      <span class="param-tag">温度: {{ m.temperature }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="filteredRemoteModels.length === 0" class="empty-search-hint">
+                  未找到匹配 "{{ remoteModelSearchQuery }}" 的模型
+                </div>
+              </div>
+
+              <div v-if="importSuccessMsg" class="import-success-toast">
+                {{ importSuccessMsg }}
+              </div>
+            </div>
+
+            <!-- Footer -->
+            <div class="modal-footer remote-modal-footer" v-if="!isFetchingRemoteModels && !remoteModelFetchError">
+              <div class="footer-left-hint">
+                <span>已选中 <strong>{{ selectedRemoteModelsCount }}</strong> / {{ remoteFetchResult?.total || 0 }} 个模型</span>
+              </div>
+              <div class="footer-actions">
+                <button class="btn btn-ghost" @click="showRemoteModelsModal = false">取消</button>
+                <button
+                  class="btn btn-primary"
+                  :disabled="selectedRemoteModelsCount === 0 || isImportingRemoteModels"
+                  @click="executeImportRemoteModels"
+                >
+                  <svg v-if="isImportingRemoteModels" class="spinning" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                  <span>{{ isImportingRemoteModels ? '正在写入数据库…' : `导入选中的 ${selectedRemoteModelsCount} 个模型到 SQLite` }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
     </Teleport>
   </div>
 </template>
@@ -639,12 +778,45 @@ interface ModelData {
   diagnostics?: DiagnosticsData;
 }
 
+interface RemoteModelItem {
+  id: string;
+  name: string;
+  display_name: string;
+  exists: boolean;
+  existing_id: string | null;
+  matched_spec_id: string | null;
+  matched_spec_name: string | null;
+  context_window: number;
+  max_tokens: number;
+  temperature: number;
+  supports_thinking: boolean;
+  description?: string | null;
+  selected?: boolean;
+}
+
+interface FetchRemoteModelsResult {
+  endpoint_url: string;
+  total: number;
+  new_count: number;
+  models: RemoteModelItem[];
+}
+
 // 响应式数据
 const platforms = ref<PlatformData[]>([])
 const models = ref<ModelData[]>([])
 const modelSpecs = ref<ModelSpecData[]>([])
 const specSearchQuery = ref('')
 const selectedPlatformId = ref('')
+
+// 远程拉取模型状态
+const showRemoteModelsModal = ref(false)
+const isFetchingRemoteModels = ref(false)
+const isImportingRemoteModels = ref(false)
+const remoteFetchPlatformId = ref('')
+const remoteFetchResult = ref<FetchRemoteModelsResult | null>(null)
+const remoteModelSearchQuery = ref('')
+const remoteModelFetchError = ref('')
+const importSuccessMsg = ref('')
 
 // 模态弹窗状态
 const showAddPlatform = ref(false)
@@ -1057,10 +1229,122 @@ async function testCurrentPlatform() {
       if (await testSingleModel(model)) onlineCount += 1
       batchTestCompleted.value += 1
     }
-    batchTestSummary.value = `已检测 ${targets.length} 个：${onlineCount} 可用，${targets.length - onlineCount} 不可用`
   } finally {
     isTestingCurrentPlatform.value = false
     if (selectedPlatformId.value === platformId) await selectPlatform(platformId)
+  }
+}
+
+const targetPlatformForFetch = computed(() => {
+  const pId = remoteFetchPlatformId.value || selectedPlatformId.value
+  return platforms.value.find(p => p.id === pId)
+})
+
+const filteredRemoteModels = computed(() => {
+  if (!remoteFetchResult.value) return []
+  if (!remoteModelSearchQuery.value.trim()) return remoteFetchResult.value.models
+  const q = remoteModelSearchQuery.value.toLowerCase()
+  return remoteFetchResult.value.models.filter(m =>
+    m.name.toLowerCase().includes(q) ||
+    m.display_name.toLowerCase().includes(q) ||
+    (m.matched_spec_name && m.matched_spec_name.toLowerCase().includes(q))
+  )
+})
+
+const selectedRemoteModelsCount = computed(() => {
+  if (!remoteFetchResult.value) return 0
+  return remoteFetchResult.value.models.filter(m => m.selected).length
+})
+
+async function openFetchRemoteModelsModal(targetPlatformId?: string) {
+  const pId = targetPlatformId || selectedPlatformId.value
+  if (!pId) return
+
+  remoteFetchPlatformId.value = pId
+  showRemoteModelsModal.value = true
+  isFetchingRemoteModels.value = true
+  remoteModelFetchError.value = ''
+  remoteFetchResult.value = null
+  importSuccessMsg.value = ''
+  remoteModelSearchQuery.value = ''
+
+  try {
+    const res = await invoke<FetchRemoteModelsResult>('fetch_remote_models', {
+      platformId: pId,
+      baseUrl: null,
+      apiKey: null,
+    })
+    const hasNew = res.models.some(m => !m.exists)
+    res.models.forEach(m => {
+      m.selected = hasNew ? !m.exists : true
+    })
+    remoteFetchResult.value = res
+  } catch (err: any) {
+    remoteModelFetchError.value = typeof err === 'string' ? err : (err?.message || JSON.stringify(err))
+  } finally {
+    isFetchingRemoteModels.value = false
+  }
+}
+
+async function retryFetchRemoteModels() {
+  if (remoteFetchPlatformId.value) {
+    await openFetchRemoteModelsModal(remoteFetchPlatformId.value)
+  }
+}
+
+function selectAllRemoteModels(select: boolean) {
+  if (!remoteFetchResult.value) return
+  filteredRemoteModels.value.forEach(m => {
+    m.selected = select
+  })
+}
+
+function selectOnlyNewRemoteModels() {
+  if (!remoteFetchResult.value) return
+  remoteFetchResult.value.models.forEach(m => {
+    m.selected = !m.exists
+  })
+}
+
+async function executeImportRemoteModels() {
+  const pId = remoteFetchPlatformId.value || selectedPlatformId.value
+  if (!remoteFetchResult.value || !pId) return
+  const selected = remoteFetchResult.value.models.filter(m => m.selected)
+  if (selected.length === 0) return
+
+  isImportingRemoteModels.value = true
+  remoteModelFetchError.value = ''
+  importSuccessMsg.value = ''
+
+  try {
+    const payload = selected.map(m => ({
+      name: m.name,
+      display_name: m.display_name,
+      context_window: m.context_window,
+      max_tokens: m.max_tokens,
+      temperature: m.temperature,
+      provider_capabilities: '{}',
+    }))
+
+    const res = await invoke<{ added_count: number; updated_count: number; total_processed: number }>('import_remote_models', {
+      platformId: pId,
+      models: payload,
+    })
+
+    importSuccessMsg.value = `🎉 成功新增 ${res.added_count} 个模型，更新 ${res.updated_count} 个已有模型！已保存至 SQLite 数据库`
+
+    if (selectedPlatformId.value === pId) {
+      await selectPlatform(pId)
+    }
+    emit('models-updated')
+
+    setTimeout(() => {
+      showRemoteModelsModal.value = false
+    }, 1200)
+  } catch (err: any) {
+    remoteModelFetchError.value = `导入失败: ${typeof err === 'string' ? err : (err?.message || JSON.stringify(err))}`
+  } finally {
+    isImportingRemoteModels.value = false
   }
 }
 
@@ -1930,5 +2214,372 @@ onMounted(async () => {
   color: #fca5a5;
   background: rgba(239, 68, 68, 0.06);
   border-color: rgba(239, 68, 68, 0.2);
+}
+
+/* ---- 远程拉取模型弹窗样式 ---- */
+.btn-accent {
+  background: rgba(99, 102, 241, 0.16);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 550;
+  transition: all 0.2s ease;
+}
+
+.btn-accent:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.28);
+  border-color: #818cf8;
+  color: #fff;
+}
+
+.remote-models-modal {
+  max-width: 680px;
+  width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.platform-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 99px;
+  color: #e4e4e7;
+}
+
+.modal-loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.loading-spinner-large {
+  width: 38px;
+  height: 38px;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 16px;
+}
+
+.text-sub {
+  font-size: 13px;
+  color: var(--text-3);
+  margin-top: 6px;
+}
+
+.text-sub code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #a5b4fc;
+}
+
+.text-sub-hint {
+  font-size: 12px;
+  color: var(--text-4);
+  margin-top: 4px;
+}
+
+.modal-error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 36px 20px;
+  text-align: center;
+}
+
+.error-icon {
+  font-size: 32px;
+  margin-bottom: 10px;
+}
+
+.error-detail {
+  font-size: 12.5px;
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 6px;
+  padding: 10px 14px;
+  max-height: 140px;
+  overflow-y: auto;
+  word-break: break-all;
+  white-space: pre-wrap;
+  margin: 12px 0 16px;
+  width: 100%;
+}
+
+.error-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.remote-models-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+  max-height: 60vh;
+}
+
+.fetch-summary-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--surface-1);
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-1);
+  font-size: 12px;
+}
+
+.endpoint-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 65%;
+}
+
+.method-tag {
+  background: #10b981;
+  color: #064e3b;
+  font-weight: 700;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.endpoint-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fetch-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+}
+
+.badge-new-count {
+  background: rgba(16, 185, 129, 0.16);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 99px;
+}
+
+.remote-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.remote-search-box {
+  flex: 1;
+}
+
+.remote-search-input {
+  font-size: 12.5px;
+  padding: 6px 10px;
+  height: 32px;
+}
+
+.remote-batch-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-tool {
+  background: var(--surface-2);
+  border: 1px solid var(--border-1);
+  color: var(--text-2);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn-tool:hover {
+  background: var(--surface-3);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.remote-models-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 4px;
+  min-height: 180px;
+  max-height: 320px;
+}
+
+.remote-model-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-1);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.remote-model-row:hover {
+  background: var(--surface-2);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.remote-model-row.is-selected {
+  background: rgba(99, 102, 241, 0.09);
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
+.remote-model-row.is-existing {
+  opacity: 0.85;
+}
+
+.remote-col-check {
+  display: flex;
+  align-items: center;
+}
+
+.custom-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.remote-col-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.remote-model-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.remote-model-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-weight: 600;
+  font-size: 13px;
+  color: #f4f4f5;
+}
+
+.badge-tag {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.badge-tag-new {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-tag-exist {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.badge-tag-thinking {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.remote-model-sub-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+}
+
+.spec-match-tag {
+  color: #818cf8;
+  background: rgba(99, 102, 241, 0.1);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.param-tag {
+  color: var(--text-3);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.empty-search-hint {
+  text-align: center;
+  padding: 30px;
+  color: var(--text-4);
+  font-size: 13px;
+}
+
+.import-success-toast {
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #34d399;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 550;
+  text-align: center;
+  animation: fadeIn 0.2s ease;
+}
+
+.remote-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.footer-left-hint {
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+.footer-actions {
+  display: flex;
+  gap: 10px;
 }
 </style>

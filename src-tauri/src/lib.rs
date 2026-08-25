@@ -48,6 +48,8 @@ pub fn run() {
             commands::upsert_model_spec,
             commands::delete_model_spec,
             commands::add_model_with_spec,
+            commands::fetch_remote_models,
+            commands::import_remote_models,
             // 会话
             commands::get_sessions,
             commands::create_session,

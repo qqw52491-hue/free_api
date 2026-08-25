@@ -436,3 +436,417 @@ pub async fn test_model(
         "diagnostics": diagnostics
     }))
 }
+
+// ==================== REMOTE MODEL SYNC & IMPORT ====================
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoteModelItem {
+    pub id: String,
+    pub name: String,
+    pub display_name: String,
+    pub exists: bool,
+    pub existing_id: Option<String>,
+    pub matched_spec_id: Option<String>,
+    pub matched_spec_name: Option<String>,
+    pub context_window: i64,
+    pub max_tokens: i64,
+    pub temperature: f64,
+    pub supports_thinking: bool,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FetchRemoteModelsResult {
+    pub endpoint_url: String,
+    pub total: usize,
+    pub new_count: usize,
+    pub models: Vec<RemoteModelItem>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ImportRemoteModelPayload {
+    pub name: String,
+    pub display_name: String,
+    pub context_window: i64,
+    pub max_tokens: i64,
+    pub temperature: f64,
+    pub provider_capabilities: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ImportRemoteModelsResult {
+    pub added_count: usize,
+    pub updated_count: usize,
+    pub total_processed: usize,
+}
+
+fn extract_model_ids_from_json(val: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+
+    if let Some(arr) = val.get("data").and_then(|d| d.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                ids.push(s.trim().to_string());
+            } else if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                ids.push(id.trim().to_string());
+            } else if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                ids.push(name.trim().to_string());
+            } else if let Some(model) = item.get("model").and_then(|v| v.as_str()) {
+                ids.push(model.trim().to_string());
+            }
+        }
+    } else if let Some(arr) = val.get("models").and_then(|d| d.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                ids.push(s.trim().to_string());
+            } else if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                ids.push(name.trim().to_string());
+            } else if let Some(model) = item.get("model").and_then(|v| v.as_str()) {
+                ids.push(model.trim().to_string());
+            } else if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                ids.push(id.trim().to_string());
+            }
+        }
+    } else if let Some(arr) = val.as_array() {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                ids.push(s.trim().to_string());
+            } else if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                ids.push(id.trim().to_string());
+            } else if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                ids.push(name.trim().to_string());
+            }
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for id in ids {
+        if !id.is_empty() && seen.insert(id.clone()) {
+            result.push(id);
+        }
+    }
+    result
+}
+
+fn find_best_spec_match<'a>(model_id: &str, specs: &'a [ModelSpec]) -> Option<&'a ModelSpec> {
+    let lower_id = model_id.to_lowercase();
+
+    // 1. Exact match
+    if let Some(spec) = specs.iter().find(|s| s.name.to_lowercase() == lower_id) {
+        return Some(spec);
+    }
+
+    let normalized = lower_id.replace('_', "-").replace('.', "-").replace(':', "-");
+
+    // 2. Specific aliases
+    if normalized.contains("deepseek-reasoner") {
+        if let Some(s) = specs.iter().find(|s| s.name.to_lowercase().contains("deepseek-r1")) {
+            return Some(s);
+        }
+    }
+    if normalized.contains("deepseek-chat") {
+        if let Some(s) = specs.iter().find(|s| s.name.to_lowercase().contains("deepseek-v3")) {
+            return Some(s);
+        }
+    }
+
+    // 3. Substring match
+    for spec in specs {
+        let spec_norm = spec.name.to_lowercase().replace('_', "-").replace('.', "-").replace(':', "-");
+        if normalized.contains(&spec_norm) {
+            return Some(spec);
+        }
+    }
+
+    None
+}
+
+/// 从远程 OpenAI 兼容接口拉取模型列表，并自动对照规格词典进行参数解析与匹配
+#[tauri::command]
+pub async fn fetch_remote_models(
+    state: State<'_, DbState>,
+    platform_id: Option<String>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+) -> Result<FetchRemoteModelsResult, String> {
+    let (eff_base_url, eff_api_key, existing_models, specs) = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+
+        let (b_url, a_key) = if let Some(ref pid) = platform_id {
+            let mut stmt = conn
+                .prepare("SELECT base_url, api_key FROM platforms WHERE id = ?1")
+                .map_err(|e| e.to_string())?;
+            stmt.query_row(params![pid], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("未找到指定平台: {}", e))?
+        } else {
+            let b = base_url.ok_or_else(|| "缺少 base_url".to_string())?;
+            let k = api_key.unwrap_or_default();
+            (b, k)
+        };
+
+        let mut existing = std::collections::HashMap::new();
+        if let Some(ref pid) = platform_id {
+            let mut stmt = conn
+                .prepare("SELECT id, name FROM models WHERE platform_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![pid], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, String>(0)?))
+                })
+                .map_err(|e| e.to_string())?;
+            for r in rows.flatten() {
+                existing.insert(r.0, r.1);
+            }
+        }
+
+        let specs = get_all_model_specs(&conn).unwrap_or_default();
+        (b_url, a_key, existing, specs)
+    };
+
+    let clean_base = eff_base_url.trim().trim_end_matches('/');
+    let clean_key = eff_api_key.trim();
+    let auth_header = if clean_key.is_empty() {
+        "".to_string()
+    } else if clean_key.starts_with("Bearer ") {
+        clean_key.to_string()
+    } else {
+        format!("Bearer {}", clean_key)
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128.0.0.0")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let base_trimmed = if clean_base.ends_with("/chat/completions") {
+        clean_base.trim_end_matches("/chat/completions")
+    } else if clean_base.ends_with("/models") {
+        clean_base.trim_end_matches("/models")
+    } else {
+        clean_base
+    };
+
+    let mut candidate_urls = vec![format!("{}/models", base_trimmed)];
+    if !base_trimmed.contains("/v1") {
+        candidate_urls.push(format!("{}/v1/models", base_trimmed));
+    }
+    if base_trimmed.contains("11434") {
+        candidate_urls.push(format!("{}/api/tags", base_trimmed));
+    }
+
+    let mut last_error = String::new();
+    let mut successful_body: Option<(String, Value)> = None;
+
+    for url in &candidate_urls {
+        let mut req = client
+            .get(url)
+            .header("HTTP-Referer", "https://free-api-chat.app")
+            .header("X-OpenRouter-Title", "Free API Chat");
+        if !auth_header.is_empty() {
+            req = req.header("Authorization", &auth_header);
+        }
+
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    match resp.json::<Value>().await {
+                        Ok(json_val) => {
+                            successful_body = Some((url.clone(), json_val));
+                            break;
+                        }
+                        Err(e) => {
+                            last_error = format!("URL {} 响应解析 JSON 失败: {}", url, e);
+                        }
+                    }
+                } else {
+                    let err_text = resp.text().await.unwrap_or_default();
+                    last_error = format!("HTTP {} ({}): {}", status.as_u16(), url, err_text);
+                }
+            }
+            Err(e) => {
+                last_error = format!("请求 {} 失败: {}", url, e);
+            }
+        }
+    }
+
+    let (used_url, json_val) = match successful_body {
+        Some(val) => val,
+        None => {
+            return Err(format!(
+                "无法从接口拉取模型列表。尝试端点: {}。错误原因: {}",
+                candidate_urls.join(", "),
+                last_error
+            ));
+        }
+    };
+
+    let model_ids = extract_model_ids_from_json(&json_val);
+    if model_ids.is_empty() {
+        return Err(format!(
+            "从接口 {} 成功获取响应，但未能解析到任何有效模型标识。",
+            used_url
+        ));
+    }
+
+    let mut items = Vec::new();
+    let mut new_count = 0;
+
+    for id in model_ids {
+        let exists = existing_models.contains_key(&id);
+        let existing_id = existing_models.get(&id).cloned();
+        if !exists {
+            new_count += 1;
+        }
+
+        let matched_spec = find_best_spec_match(&id, &specs);
+        let (spec_id, spec_name, ctx, max_tok, temp, thinking, desc) = if let Some(s) = matched_spec {
+            (
+                Some(s.id.clone()),
+                Some(s.name.clone()),
+                s.context_window,
+                s.max_tokens,
+                s.default_temperature,
+                s.supports_thinking,
+                Some(s.description.clone()),
+            )
+        } else {
+            let lower = id.to_lowercase();
+            let (ctx, max_tok, temp, thinking) = if lower.contains("deepseek-r1") || lower.contains("reasoner") || lower.contains("thinking") || lower.contains("r1") {
+                (128000, 8192, 0.6, true)
+            } else if lower.contains("deepseek") {
+                (128000, 8192, 0.7, false)
+            } else if lower.contains("gemini-2.0") || lower.contains("gemini-2") {
+                (1048576, 8192, 0.7, false)
+            } else if lower.contains("gemini-1.5-pro") {
+                (2097152, 8192, 0.7, false)
+            } else if lower.contains("gemini") {
+                (1048576, 8192, 0.7, false)
+            } else if lower.contains("claude-3-7") || lower.contains("claude-3.7") {
+                (200000, 8192, 0.7, true)
+            } else if lower.contains("claude-3-5") || lower.contains("claude-3.5") {
+                (200000, 8192, 0.5, false)
+            } else if lower.contains("claude") {
+                (200000, 4096, 0.7, false)
+            } else if lower.contains("gpt-4o-mini") {
+                (128000, 16384, 0.7, false)
+            } else if lower.contains("gpt-4o") || lower.contains("o1") || lower.contains("o3") {
+                (128000, 16384, 0.7, true)
+            } else if lower.contains("sensenova") {
+                (128000, 8192, 0.7, false)
+            } else if lower.contains("qwen") {
+                (32768, 4096, 0.7, false)
+            } else {
+                (32768, 4096, 0.7, false)
+            };
+            (None, None, ctx, max_tok, temp, thinking, None)
+        };
+
+        let disp_name = spec_name.clone().unwrap_or_else(|| id.clone());
+
+        items.push(RemoteModelItem {
+            id: id.clone(),
+            name: id.clone(),
+            display_name: disp_name,
+            exists,
+            existing_id,
+            matched_spec_id: spec_id,
+            matched_spec_name: spec_name,
+            context_window: ctx,
+            max_tokens: max_tok,
+            temperature: temp,
+            supports_thinking: thinking,
+            description: desc,
+        });
+    }
+
+    Ok(FetchRemoteModelsResult {
+        endpoint_url: used_url,
+        total: items.len(),
+        new_count,
+        models: items,
+    })
+}
+
+/// 批量将远程拉取到的模型写入 / 更新至 SQLite 数据库
+#[tauri::command]
+pub async fn import_remote_models(
+    state: State<'_, DbState>,
+    platform_id: String,
+    models: Vec<ImportRemoteModelPayload>,
+) -> Result<ImportRemoteModelsResult, String> {
+    if models.is_empty() {
+        return Ok(ImportRemoteModelsResult {
+            added_count: 0,
+            updated_count: 0,
+            total_processed: 0,
+        });
+    }
+
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+
+    let mut check_stmt = conn
+        .prepare("SELECT id FROM platforms WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let platform_exists: bool = check_stmt
+        .exists(params![platform_id])
+        .map_err(|e| e.to_string())?;
+    if !platform_exists {
+        return Err("所选平台不存在，无法导入模型".to_string());
+    }
+
+    let mut added_count = 0;
+    let mut updated_count = 0;
+    let now = Utc::now().to_rfc3339();
+
+    for m in &models {
+        let name = m.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let disp = if m.display_name.trim().is_empty() {
+            name.to_string()
+        } else {
+            m.display_name.trim().to_string()
+        };
+        let prov_cap = m
+            .provider_capabilities
+            .clone()
+            .unwrap_or_else(|| "{}".to_string());
+
+        let mut find_stmt = conn
+            .prepare("SELECT id FROM models WHERE platform_id = ?1 AND name = ?2")
+            .map_err(|e| e.to_string())?;
+        let existing_id: Option<String> = find_stmt
+            .query_row(params![platform_id, name], |r| r.get(0))
+            .ok();
+
+        if let Some(id) = existing_id {
+            conn.execute(
+                "UPDATE models SET display_name = ?1, max_tokens = ?2, temperature = ?3, context_window = ?4, provider_capabilities = ?5 WHERE id = ?6",
+                params![disp, m.max_tokens, m.temperature, m.context_window, prov_cap, id],
+            ).map_err(|e| e.to_string())?;
+            updated_count += 1;
+        } else {
+            let new_id = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO models (id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window, provider_capabilities, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'unknown', 0, ?7, ?8, ?9)",
+                params![new_id, platform_id, name, disp, m.max_tokens, m.temperature, m.context_window, prov_cap, now],
+            ).map_err(|e| e.to_string())?;
+            added_count += 1;
+        }
+    }
+
+    Ok(ImportRemoteModelsResult {
+        added_count,
+        updated_count,
+        total_processed: added_count + updated_count,
+    })
+}
+
