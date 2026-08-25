@@ -1,5 +1,5 @@
 use crate::agent::change_verification::{
-    apply_change_verification_update, change_verification_blocker,
+    apply_change_verification_update, change_verification_blocker, ChangeVerification,
 };
 use crate::agent::checkpoint::{
     load_checkpoint, recovery_decision, save_checkpoint, AgentCheckpoint, AgentPhase,
@@ -59,10 +59,16 @@ fn should_challenge_finish(
     is_finish && succeeded && !finish_reviewed && !open_todo_descriptions(todos).is_empty()
 }
 
+/// 汇总 finish 时仍未闭合的责任。
+///
+/// 真实写入只产生一项"最近写入批次待验证"义务，不按文件或编辑次数逐条要求测试；
+/// 无成功写入的只读任务不会因此产生 blocker。
 fn finish_blockers(
     todos: &[TodoItem],
     review_contract: Option<&ReviewContract>,
     review_contract_started_this_turn: bool,
+    side_effect_count: usize,
+    change_verification: Option<&ChangeVerification>,
 ) -> Vec<String> {
     let mut blockers = open_todo_descriptions(todos);
     if review_contract_started_this_turn {
@@ -70,6 +76,9 @@ fn finish_blockers(
     }
     if let Some(contract) = review_contract {
         blockers.extend(contract.open_descriptions());
+    }
+    if let Some(blocker) = change_verification_blocker(side_effect_count, change_verification) {
+        blockers.push(blocker);
     }
     blockers
 }
@@ -145,7 +154,7 @@ mod finish_guard_tests {
                 waived_reason: None,
             }],
         };
-        let blockers = finish_blockers(&[], Some(&open_contract), false);
+        let blockers = finish_blockers(&[], Some(&open_contract), false, 0, None);
         assert_eq!(blockers, vec!["审查义务 implementation：实现调用链是否真实接通？"]);
         assert!(should_challenge_finish_with_blockers(true, true, false, &blockers));
 
@@ -163,30 +172,39 @@ mod finish_guard_tests {
             true,
             true,
             false,
-            &finish_blockers(&[], Some(&closed_contract), true),
+            &finish_blockers(&[], Some(&closed_contract), true, 0, None),
         ));
         assert!(!should_challenge_finish_with_blockers(
             true,
             true,
             false,
-            &finish_blockers(&[], Some(&closed_contract), false),
+            &finish_blockers(&[], Some(&closed_contract), false, 0, None),
         ));
     }
     #[test]
-    fn unverified_real_write_is_added_to_finish_blockers() {
-        let mut blockers = finish_blockers(&[], None, false);
-        if let Some(blocker) = change_verification_blocker(1, None) {
-            blockers.push(blocker);
-        }
+    fn change_verification_only_blocks_unclosed_real_writes() {
+        assert!(finish_blockers(&[], None, false, 0, None).is_empty());
+
+        let blockers = finish_blockers(&[], None, false, 3, None);
         assert_eq!(blockers.len(), 1);
         assert!(blockers[0].contains("尚无验证证据或明确豁免"));
-        assert!(should_challenge_finish_with_blockers(true, true, false, &blockers));
-        let verified = crate::agent::change_verification::ChangeVerification {
+        assert!(should_challenge_finish_with_blockers(
+            true, true, false, &blockers
+        ));
+
+        let verified = ChangeVerification {
             status: "verified".to_string(),
             evidence_refs: vec!["output_id: check-42".to_string()],
             waived_reason: None,
         };
-        assert!(change_verification_blocker(1, Some(&verified)).is_none());
+        assert!(finish_blockers(&[], None, false, 3, Some(&verified)).is_empty());
+
+        let waived = ChangeVerification {
+            status: "waived".to_string(),
+            evidence_refs: Vec::new(),
+            waived_reason: Some("当前环境缺少集成服务".to_string()),
+        };
+        assert!(finish_blockers(&[], None, false, 3, Some(&waived)).is_empty());
     }
 }
 
@@ -807,17 +825,13 @@ pub async fn run_agent_main_loop(
         };
 
         let is_finish = is_finish_instruction(&instruction);
-        let mut open_todos = finish_blockers(
+        let open_todos = finish_blockers(
             &context.todo_list,
             context.review_contract.as_ref(),
             review_contract_started_this_turn,
-        );
-        if let Some(blocker) = change_verification_blocker(
             context.side_effects.len(),
             context.change_verification.as_ref(),
-        ) {
-            open_todos.push(blocker);
-        }
+        );
         let finish_challenged = should_challenge_finish_with_blockers(
             is_finish,
             result.success,
