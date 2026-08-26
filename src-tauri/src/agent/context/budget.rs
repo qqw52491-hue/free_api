@@ -58,6 +58,78 @@ pub fn conservative_token_estimate(text: &str) -> usize {
     regular.max(byte_floor)
 }
 
+use serde::{Deserialize, Serialize};
+
+/// 上下文预算与水位配置模型
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ContextBudgetConfig {
+    /// 活跃历史工作集占总窗口的比例（例如 0.75 表示允许历史占 75% 窗口）
+    pub active_history_ratio: f64,
+    /// 活跃历史容量硬上限（tokens），防止超大窗口（如 1M）无休止膨胀
+    pub active_history_cap_max: usize,
+    /// 活跃历史容量保底（tokens）
+    pub active_history_cap_min: usize,
+    /// 触发压缩的高水位比例（占最大允许历史的比例，例如 0.85）
+    pub high_watermark_ratio: f64,
+    /// 压缩后回落的低水位目标比例（例如 0.50）
+    pub low_watermark_ratio: f64,
+    /// 近期严格保护区比例（例如 0.25）
+    pub recent_protected_ratio: f64,
+    /// 防爆窗安全防御余量比例（例如 0.10）
+    pub safety_margin_ratio: f64,
+}
+
+impl Default for ContextBudgetConfig {
+    /// 默认长程编码模式（Deep Coding Preset）：对齐 Claude Code / Cursor，最大化长上下文记忆
+    fn default() -> Self {
+        Self::deep_coding()
+    }
+}
+
+impl ContextBudgetConfig {
+    /// 预设 1：长程深度编码模式（Deep Coding，推荐默认）
+    /// 允许使用 75% 窗口，85% 高水位触发，50% 低水位回落，充分保留数十步的完整代码上下文
+    pub const fn deep_coding() -> Self {
+        Self {
+            active_history_ratio: 0.75,
+            active_history_cap_max: 300_000,
+            active_history_cap_min: 24_000,
+            high_watermark_ratio: 0.85,
+            low_watermark_ratio: 0.50,
+            recent_protected_ratio: 0.25,
+            safety_margin_ratio: 0.10,
+        }
+    }
+
+    /// 预设 2：省流均衡模式（Cost Saving）
+    /// 适合按 Token 计费昂贵的模型，更积极地归档压缩以节省费用
+    pub const fn cost_saving() -> Self {
+        Self {
+            active_history_ratio: 0.50,
+            active_history_cap_max: 128_000,
+            active_history_cap_min: 16_000,
+            high_watermark_ratio: 0.75,
+            low_watermark_ratio: 0.35,
+            recent_protected_ratio: 0.20,
+            safety_margin_ratio: 0.15,
+        }
+    }
+
+    /// 预设 3：极致响应模式（Ultra Fast）
+    /// 维持紧凑上下文，追求极快首字延迟（TTFT）
+    pub const fn ultra_fast() -> Self {
+        Self {
+            active_history_ratio: 0.35,
+            active_history_cap_max: 64_000,
+            active_history_cap_min: 12_000,
+            high_watermark_ratio: 0.65,
+            low_watermark_ratio: 0.25,
+            recent_protected_ratio: 0.15,
+            safety_margin_ratio: 0.15,
+        }
+    }
+}
+
 /// 动态上下文预算推导
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextBudget {
@@ -77,27 +149,26 @@ impl ContextBudget {
     pub const SINGLE_OBSERVATION_INGRESS_CAP: usize = 4_000; // 单条观测入口硬截断 4k tokens
     pub const DEFAULT_HIGH_WATERMARK_RATIO: f64 = 0.85; // 85% 高水位触发
     pub const DEFAULT_LOW_WATERMARK_RATIO: f64 = 0.50; // 50% 目标回落水位
-    pub const RECENT_PROTECTED_RATIO: f64 = 0.25; // 25% 近期保护区（保证 low_watermark 50% > protected 25% + 卡片 5% + 余量 20%）
-    // 活跃历史工作集上限随模型窗口动态伸缩：对齐行业标准（Claude Code / Cursor），窗口 × 75%，夹在 [24K, 300K]。
-    // 充分利用现代大模型强大的长文本能力，避免过早脱水压缩损失代码细节。
-    pub const ACTIVE_HISTORY_WINDOW_RATIO: f64 = 0.75;
-    pub const ACTIVE_HISTORY_CAP_MIN_TOKENS: usize = 24_000;
-    pub const ACTIVE_HISTORY_CAP_MAX_TOKENS: usize = 300_000;
+    pub const RECENT_PROTECTED_RATIO: f64 = 0.25; // 25% 近期保护区
 
-    /// 按模型上下文窗口推导活跃历史工作集上限。
-    /// 双模型路由场景应传入两个模型窗口的较小值（见 main_loop 的窗口注入）。
+    /// 按模型上下文窗口推导活跃历史工作集上限（使用默认配置）。
     pub fn active_history_cap_for(window: usize) -> usize {
-        ((window as f64 * Self::ACTIVE_HISTORY_WINDOW_RATIO) as usize)
-            .clamp(Self::ACTIVE_HISTORY_CAP_MIN_TOKENS, Self::ACTIVE_HISTORY_CAP_MAX_TOKENS)
+        Self::active_history_cap_with_config(window, &ContextBudgetConfig::default())
     }
 
-    /// 根据当前模型的真实窗口和静态区大小，动态推导出绝对预算（在会话内是常量且确定）
+    /// 根据自定义配置推导活跃历史工作集上限。
+    pub fn active_history_cap_with_config(window: usize, config: &ContextBudgetConfig) -> usize {
+        ((window as f64 * config.active_history_ratio) as usize)
+            .clamp(config.active_history_cap_min, config.active_history_cap_max)
+    }
+
+    /// 根据当前模型的真实窗口和静态区大小，动态推导出绝对预算（使用默认 Deep Coding 模式）
     pub fn derive(context_window: usize, max_output: usize, static_prefix_tokens: usize) -> Self {
-        Self::derive_with_depth(
+        Self::derive_with_config(
             context_window,
             max_output,
             static_prefix_tokens,
-            Self::DEFAULT_LOW_WATERMARK_RATIO,
+            &ContextBudgetConfig::default(),
         )
     }
 
@@ -107,6 +178,18 @@ impl ContextBudget {
         max_output: usize,
         static_prefix_tokens: usize,
         low_watermark_ratio: f64,
+    ) -> Self {
+        let mut config = ContextBudgetConfig::default();
+        config.low_watermark_ratio = low_watermark_ratio;
+        Self::derive_with_config(context_window, max_output, static_prefix_tokens, &config)
+    }
+
+    /// 支持传入完整结构化配置的推导入口
+    pub fn derive_with_config(
+        context_window: usize,
+        max_output: usize,
+        static_prefix_tokens: usize,
+        config: &ContextBudgetConfig,
     ) -> Self {
         let window = if context_window > 0 {
             context_window
@@ -121,22 +204,18 @@ impl ContextBudget {
 
         let tail_state_tokens = Self::DEFAULT_TAIL_STATE_TOKENS;
 
-        // 安全余量：总窗口的 10%（在大窗口如 200k 下预留 20k tokens，足够硬防御任何边缘溢出）
-        let safety_margin = (window as f64 * 0.10).ceil() as usize;
-
-        // 可供历史分配的最大容量（叠加按窗口伸缩的活跃工作集上限保护，杜绝长任务上下文过度膨胀）
+        let safety_margin = (window as f64 * config.safety_margin_ratio).ceil() as usize;
         let reserved = max_out + static_prefix_tokens + tail_state_tokens + safety_margin;
         let max_allowed_history = window
             .saturating_sub(reserved)
-            .min(Self::active_history_cap_for(window))
+            .min(Self::active_history_cap_with_config(window, config))
             .max(2_048);
 
-        // 硬不变量保证：低水位必须严格大于（近期保护区 + 归档卡片预留 + 安全缓冲）
-        let min_safe_low_ratio = Self::RECENT_PROTECTED_RATIO + 0.15; // 至少 40%
-        let safe_low_ratio = low_watermark_ratio.clamp(min_safe_low_ratio, 0.75);
+        let min_safe_low_ratio = config.recent_protected_ratio + 0.15;
+        let safe_low_ratio = config.low_watermark_ratio.clamp(min_safe_low_ratio, 0.75);
 
         let high_watermark =
-            (max_allowed_history as f64 * Self::DEFAULT_HIGH_WATERMARK_RATIO) as usize;
+            (max_allowed_history as f64 * config.high_watermark_ratio) as usize;
         let low_watermark = (max_allowed_history as f64 * safe_low_ratio) as usize;
 
         Self {

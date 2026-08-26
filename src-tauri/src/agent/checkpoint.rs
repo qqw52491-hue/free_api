@@ -820,6 +820,7 @@ mod tests {
             step_id: 1,
             tool: "model_manager".to_string(),
             action: "list_models".to_string(),
+            params_fingerprint: String::new(),
             error_summary: "未知动作".to_string(),
             output_id: Some("out_err".to_string()),
         });

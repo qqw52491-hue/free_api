@@ -14,6 +14,8 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch};
 
+const REPEATED_FAILURE_BLOCKED_ROUTE: &str = "repeated_deterministic_failure";
+
 /// 执行一个可恢复步骤的 CallLlm 与 RunTool 阶段。
 ///
 /// 该 handler 封装模型规划、工具派发、人工等待、重试和救援；每个外部副作用
@@ -385,6 +387,17 @@ pub async fn run_call_llm_and_run_tool_phases(
         if dispatch_result.success || inst.get_action() == "finish" {
             break (inst, dispatch_result); // 成功！
         } else {
+            let repeat_failure_blocked = dispatch_result.route == REPEATED_FAILURE_BLOCKED_ROUTE;
+            if !repeat_failure_blocked {
+                context.record_failed_attempt(
+                    step_id,
+                    inst.get_tool(),
+                    inst.get_action(),
+                    &inst.get_params(),
+                    dispatch_result.stderr.clone(),
+                    None,
+                );
+            }
             retry_count += 1;
             let error_detail = format!("【❌ 执行失败】: {}", dispatch_result.stderr);
             crate::agent::advance_run_state(
@@ -449,6 +462,11 @@ pub async fn run_call_llm_and_run_tool_phases(
 
             if let Ok(raw_json) = serde_json::to_string(&inst) {
                 context.add_assistant_raw_message(&raw_json);
+            }
+
+            if repeat_failure_blocked {
+                context.add_error_feedback(&error_detail);
+                break (inst, dispatch_result);
             }
 
             // 【修复：重试时的工具盲区】如果 AI 尝试使用的工具尚未在历史流中，立即为其追加说明书，防止它在 retry 时因为看不到语法而继续瞎猜报错。
@@ -569,6 +587,19 @@ pub async fn run_tool_phase(
     rx: &mut mpsc::Receiver<HumanControl>,
 ) -> Result<DispatchResult, String> {
     // --- B. 执行动作 ---
+    if let Some(reason) = context.repeated_failure_blocker(
+        &inst.get_tool(),
+        &inst.get_action(),
+        &inst.get_params(),
+    ) {
+        return Ok(DispatchResult {
+            success: false,
+            stdout: String::new(),
+            stderr: reason,
+            route: REPEATED_FAILURE_BLOCKED_ROUTE.to_string(),
+        });
+    }
+
     app.emit(
         &format!("agent-log-{}", final_session_id),
         format!("▶ 步骤 {}: {}", step_id + 1, inst.description),

@@ -953,6 +953,7 @@ pub async fn run_agent_main_loop(
                 step_id,
                 instruction.get_tool(),
                 instruction.get_action(),
+                &instruction.get_params(),
                 short_error,
                 Some(output_id.clone()),
             );

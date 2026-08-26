@@ -12,7 +12,7 @@ pub mod sampling;
 pub mod types;
 
 pub use audit::AuditLedger;
-pub use budget::{estimate_tokens, ContextBudget};
+pub use budget::{estimate_tokens, ContextBudget, ContextBudgetConfig};
 pub use cache_policy::{get_cache_policy, CachePolicy};
 pub use determinism::ContextFingerprint;
 pub use memory::MemoryManager;
