@@ -31,7 +31,11 @@
 
     <!-- Dropdown Popover -->
     <Transition name="scale-fade">
-      <div class="model-dropdown-popover" v-if="isOpen">
+      <div
+        class="model-dropdown-popover"
+        :class="[`placement-${actualPlacement}`, { 'align-right': alignRight }]"
+        v-if="isOpen"
+      >
         <!-- Search Input Bar -->
         <div class="dropdown-search-bar">
           <div class="search-input-wrap">
@@ -158,6 +162,7 @@ const props = withDefaults(
     placeholder?: string;
     disabled?: boolean;
     size?: 'sm' | 'md' | 'lg';
+    placement?: 'auto' | 'top' | 'bottom';
   }>(),
   {
     modelValue: '',
@@ -165,6 +170,7 @@ const props = withDefaults(
     placeholder: '选择模型...',
     disabled: false,
     size: 'md',
+    placement: 'auto',
   }
 )
 
@@ -177,6 +183,35 @@ const isOpen = ref(false)
 const searchQuery = ref('')
 const wrapperRef = ref<HTMLElement | null>(null)
 const searchInputRef = ref<HTMLInputElement | null>(null)
+const actualPlacement = ref<'top' | 'bottom'>('bottom')
+const alignRight = ref(false)
+
+function calculatePlacement() {
+  if (!wrapperRef.value) return
+  const rect = wrapperRef.value.getBoundingClientRect()
+  const spaceBelow = window.innerHeight - rect.bottom
+  const spaceAbove = rect.top
+
+  if (props.placement === 'top') {
+    actualPlacement.value = 'top'
+  } else if (props.placement === 'bottom') {
+    actualPlacement.value = 'bottom'
+  } else {
+    // 弹窗高度大约 360-400px，若下方空间不足且上方空间更大则自适应向上弹出
+    if (spaceBelow < 380 && spaceAbove > spaceBelow) {
+      actualPlacement.value = 'top'
+    } else {
+      actualPlacement.value = 'bottom'
+    }
+  }
+
+  // 水平右对齐自适应：若右侧距离屏幕边缘较近，则贴右对齐防止溢出
+  if (rect.left + 380 > window.innerWidth && rect.right >= 340) {
+    alignRight.value = true
+  } else {
+    alignRight.value = false
+  }
+}
 
 const selectedModel = computed(() => {
   if (!props.modelValue) return null
@@ -266,6 +301,7 @@ function selectFirstMatch() {
 
 watch(isOpen, async (val) => {
   if (val) {
+    calculatePlacement()
     searchQuery.value = ''
     await nextTick()
     searchInputRef.value?.focus()
@@ -417,14 +453,14 @@ onBeforeUnmount(() => {
 .model-dropdown-popover {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  left: 0;
   min-width: 320px;
-  max-width: 420px;
+  max-width: min(440px, calc(100vw - 32px));
   width: max-content;
   background: #18181b;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: var(--radius-md, 12px);
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08);
   z-index: 1000;
   display: flex;
   flex-direction: column;
@@ -433,10 +469,32 @@ onBeforeUnmount(() => {
   animation: popoverFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.model-dropdown-popover.align-right {
+  left: auto;
+  right: 0;
+}
+
+.model-dropdown-popover.placement-top {
+  top: auto;
+  bottom: calc(100% + 6px);
+  animation: popoverFadeInUp 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
 @keyframes popoverFadeIn {
   from {
     opacity: 0;
     transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes popoverFadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
   }
   to {
     opacity: 1;
@@ -523,7 +581,7 @@ onBeforeUnmount(() => {
 
 /* Models List Area */
 .dropdown-models-list {
-  max-height: 360px;
+  max-height: min(340px, 42vh);
   overflow-y: auto;
   padding: 6px;
   display: flex;
