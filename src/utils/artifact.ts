@@ -417,65 +417,7 @@ export function parseArtifactPathAndDesc(raw: string): { cleanPath: string; desc
   return { cleanPath: text };
 }
 
-/**
- * 从 Agent 的最终 Summary 文本中智能提取“交付文件/成果”小节中提及的产物列表
- */
-export function extractArtifactsFromSummaryText(summary: string): string[] {
-  if (!summary || typeof summary !== "string") return [];
-  const lines = summary.split("\n");
-  const extracted: string[] = [];
-  let inDeliverableSection = false;
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    // 1. 如果行首带有显式文件图标或显式交付前缀，且包含有效扩展名，直接提取！
-    if (/^[📄📑📝📦📁]/.test(trimmed) || /^(?:生成文件|交付文件|交付物文件|交付产物|文件路径)[：:]/i.test(trimmed)) {
-      if (/[^\s—–:："'`()[\]{}、]+\.(?:md|markdown|html|htm|pdf|docx|xlsx|csv|png|jpg|jpeg|json|ts|rs|py|vue|txt|css|svg)/iu.test(trimmed)) {
-        const parsed = parseArtifactPathAndDesc(trimmed);
-        if (parsed.cleanPath && parsed.cleanPath.includes(".")) {
-          extracted.push(trimmed);
-          continue;
-        }
-      }
-    }
-
-    // 2. 检查是否进入交付物小节标题
-    if (/(?:交付说明|交付文件|交付产物|交付成果|交付物|生成文件|产物列表|已生成文件|Artifacts?|Generated Files?)/i.test(trimmed)) {
-      inDeliverableSection = true;
-      continue;
-    }
-
-    // 3. 如果进入了下一个其他标题或小节，退出交付物小节
-    if (trimmed.startsWith("#") || trimmed.startsWith("---") || /^(?:最危险隐患|隐患|建议|后续工作|验证证据|核验范围|一、|二、|三、|四、|六、)/.test(trimmed)) {
-      inDeliverableSection = false;
-      continue;
-    }
-
-    // 4. 在交付物小节内部逐行提取列表项
-    if (inDeliverableSection) {
-      // 排除叙述性解释语句（如 "报告内容基于项目公开结构（package.json...）进行模拟审查"）
-      if (/^(?:报告内容|基于|参考|如需|请注意|说明[：:]|注[：:])/i.test(trimmed) || trimmed.includes("进行模拟审查") || trimmed.includes("深度代码审查")) {
-        continue;
-      }
-
-      // 只有格式化为列表项、包含图标或显式路径的行才判定为交付物
-      const isListItemOrExplicit = /^[-*•\d.]/.test(trimmed) || trimmed.startsWith("/") || trimmed.startsWith("./");
-      if (isListItemOrExplicit) {
-        const hasFilePath = /[^\s—–:："'`()[\]{}、]+\.(?:md|markdown|html|htm|pdf|docx|xlsx|csv|png|jpg|jpeg|json|ts|rs|py|vue|txt|css|svg)/iu.test(trimmed);
-        if (hasFilePath) {
-          const parsed = parseArtifactPathAndDesc(trimmed);
-          if (parsed.cleanPath && parsed.cleanPath.includes(".")) {
-            extracted.push(trimmed);
-          }
-        }
-      }
-    }
-  }
-
-  return extracted;
-}
 
 
 /**
