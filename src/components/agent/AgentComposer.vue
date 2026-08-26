@@ -544,12 +544,12 @@ textarea::placeholder {
     position: absolute;
     bottom: calc(100% + 8px);
     left: 0;
-    width: 360px;
+    width: min(520px, calc(100vw - 48px));
     background: #18181c;
     border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 12px;
     box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
-    padding: 12px;
+    padding: 14px;
     z-index: 100;
     display: flex;
     flex-direction: column;
@@ -581,13 +581,13 @@ textarea::placeholder {
     display: inline-flex !important;
     align-items: center !important;
     width: auto !important;
-    height: 24px !important;
-    padding: 0 8px !important;
-    border-radius: 4px !important;
+    height: 26px !important;
+    padding: 0 10px !important;
+    border-radius: 5px !important;
     background: rgba(99, 102, 241, 0.15) !important;
     border: 1px solid rgba(99, 102, 241, 0.3) !important;
     color: #a5b4fc !important;
-    font-size: 11px !important;
+    font-size: 11.5px !important;
     font-weight: 500 !important;
     cursor: pointer;
     transition: all 0.15s;
@@ -610,9 +610,9 @@ textarea::placeholder {
     flex-direction: column;
     gap: 6px;
     background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: 8px;
-    padding: 8px 10px;
+    padding: 9px 12px;
 }
 
 .route-item-head {
@@ -645,26 +645,41 @@ textarea::placeholder {
 
 .route-controls {
     display: grid;
-    grid-template-columns: 1fr 100px;
-    gap: 6px;
+    grid-template-columns: minmax(0, 1fr) 120px;
+    gap: 8px;
     align-items: center;
+    width: 100%;
+}
+
+.route-controls :deep(.model-select-wrapper) {
+    width: 100% !important;
+    min-width: 0 !important;
+    display: block !important;
+}
+
+.route-controls :deep(.model-select-trigger) {
+    width: 100% !important;
+    min-width: 0 !important;
 }
 
 .effort-select {
-    height: 30px;
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    height: 32px;
+    width: 100%;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 6px;
-    color: #d4d4d8;
-    font-size: 11px;
-    padding: 0 4px;
+    color: #e4e4e7;
+    font-size: 11.5px;
+    padding: 0 8px;
     outline: none;
     cursor: pointer;
+    flex-shrink: 0;
     transition: all 0.15s;
 }
 
 .effort-select:hover:not(:disabled) {
-    border-color: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.22);
+    background: rgba(255, 255, 255, 0.07);
     color: #ffffff;
 }
 
