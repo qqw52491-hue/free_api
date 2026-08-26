@@ -145,6 +145,12 @@ export function renderMarkdown(content: string): string {
             </div>`;
         };
 
+        renderer.heading = function ({ text, depth }: { text: string; depth: number }) {
+            const cleanText = (text || "").replace(/<[^>]+>/g, "").trim();
+            const id = cleanText.toLowerCase().replace(/[^\w\u4e00-\u9fa5]+/g, "-");
+            return `<h${depth} id="${id}">${text}</h${depth}>`;
+        };
+
         renderer.link = function ({ href, title, text }: { href: string; title?: string | null; text: string }) {
             // 过滤 marked 对 npm 依赖包版本号（如 @vitejs/plugin-vue@5.2.4 或 vue@3.5.26）的邮箱误判
             if (href.startsWith("mailto:") && isNpmPackageVersion(href)) {
@@ -152,6 +158,20 @@ export function renderMarkdown(content: string): string {
             }
 
             const titleAttr = title ? ` title="${title}"` : "";
+
+            // 1. 文档大纲/目录锚点跳转 (TOC, 如 #1-架构概述)
+            if (href.startsWith("#")) {
+                return `<a href="${href}"${titleAttr} class="markdown-rich-link markdown-anchor-link">${text}</a>`;
+            }
+
+            // 2. 本地文件与目录 (file:// 或 /Users/... 或 C:\...)
+            const isLocal = href.startsWith("file://") || /^\/?[A-Za-z]:[\\/]/.test(href);
+            if (isLocal) {
+                const folderIconSvg = `<svg class="link-arrow-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+                return `<a href="${href}" data-local-path="${href}"${titleAttr} class="markdown-rich-link markdown-local-link">${folderIconSvg}${text}</a>`;
+            }
+
+            // 3. 外部网络链接
             const isHttp = /^https?:\/\//i.test(href);
             const iconSvg = isHttp
                 ? `<svg class="link-arrow-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`

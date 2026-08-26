@@ -637,6 +637,32 @@ a:hover .link-arrow-icon {
   transform: translate(1px, -1px);
 }
 
+/* 本地文件与目录链接专属样式 (琥珀/橙色系微高亮，指示系统原生文件) */
+.markdown-local-link,
+a.markdown-local-link {
+  color: #fbbf24;
+  border-bottom-color: rgba(251, 191, 36, 0.45);
+}
+.markdown-local-link:hover,
+a.markdown-local-link:hover {
+  color: #fffbeb;
+  background: rgba(251, 191, 36, 0.18);
+  border-bottom-color: #f59e0b;
+}
+
+/* Markdown 文档大纲/目录锚点专属样式 (青色/蓝绿色系) */
+.markdown-anchor-link,
+a.markdown-anchor-link {
+  color: #38bdf8;
+  border-bottom-color: rgba(56, 189, 248, 0.45);
+}
+.markdown-anchor-link:hover,
+a.markdown-anchor-link:hover {
+  color: #f0f9ff;
+  background: rgba(56, 189, 248, 0.18);
+  border-bottom-color: #0284c7;
+}
+
 /* npm 依赖包版本胶囊标签 (解决 marked 误把 @version 识别为 mailto) */
 .pkg-version-tag {
   display: inline-block;
