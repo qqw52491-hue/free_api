@@ -147,8 +147,8 @@ function getHtmlTitle(htmlCode: string): string {
 
 function renderSegmentMarkdown(segment: string): string {
   return DOMPurify.sanitize(renderMarkdown(segment), {
-    FORBID_TAGS: ["button", "form", "iframe", "object", "embed", "script", "style"],
-    FORBID_ATTR: ["style"],
+    FORBID_TAGS: ["form", "iframe", "object", "embed", "script", "style"],
+    USE_PROFILES: { html: true, svg: true, mathMl: true },
   });
 }
 </script>

@@ -1,5 +1,52 @@
 import { marked } from "marked";
+import katex from "katex";
 import hljs from "highlight.js/lib/common";
+
+// 注册 KaTeX 数学公式解析扩展 ($行内公式$ 与 $$独立块级公式$$)
+marked.use({
+    extensions: [
+        {
+            name: "inlineKatex",
+            level: "inline" as const,
+            start(src: string) {
+                return src.indexOf("$");
+            },
+            tokenizer(src: string) {
+                // 1. 块级公式: $$ ... $$
+                const blockMatch = src.match(/^\$\$([\s\S]+?)\$\$/);
+                if (blockMatch) {
+                    return {
+                        type: "inlineKatex",
+                        raw: blockMatch[0],
+                        text: blockMatch[1].trim(),
+                        displayMode: true,
+                    };
+                }
+                // 2. 行内公式: $ ... $ (防止转义 \$ 以及纯货币符号 $50)
+                const inlineMatch = src.match(/^\$((?:\\\$|[^\$\n])+?)\$/);
+                if (inlineMatch && !/^\s*\d+/.test(inlineMatch[1])) {
+                    return {
+                        type: "inlineKatex",
+                        raw: inlineMatch[0],
+                        text: inlineMatch[1].trim(),
+                        displayMode: false,
+                    };
+                }
+                return undefined;
+            },
+            renderer(token: any) {
+                try {
+                    return katex.renderToString(token.text, {
+                        displayMode: !!token.displayMode,
+                        throwOnError: false,
+                    });
+                } catch {
+                    return token.raw;
+                }
+            },
+        },
+    ],
+});
 
 export function asRecord(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -126,6 +173,46 @@ export function renderMarkdown(content: string): string {
     try {
         const renderer = new marked.Renderer();
         renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
+            const normalizedLang = (lang || "").trim().toLowerCase();
+
+            // 1. 专业 Diff 代码变更对比代码块
+            if (normalizedLang === "diff") {
+                const lines = text.split("\n");
+                let addCount = 0;
+                let delCount = 0;
+
+                const renderedLines = lines.map((line) => {
+                    const escaped = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                    if (line.startsWith("+") && !line.startsWith("+++")) {
+                        addCount++;
+                        return `<div class="diff-line diff-add"><span class="diff-sign">+</span><span class="diff-content">${escaped.slice(1)}</span></div>`;
+                    }
+                    if (line.startsWith("-") && !line.startsWith("---")) {
+                        delCount++;
+                        return `<div class="diff-line diff-del"><span class="diff-sign">-</span><span class="diff-content">${escaped.slice(1)}</span></div>`;
+                    }
+                    if (line.startsWith("@@")) {
+                        return `<div class="diff-line diff-hunk"><span class="diff-sign"> </span><span class="diff-content">${escaped}</span></div>`;
+                    }
+                    if (line.startsWith("+++") || line.startsWith("---")) {
+                        return `<div class="diff-line diff-header"><span class="diff-sign"> </span><span class="diff-content">${escaped}</span></div>`;
+                    }
+                    return `<div class="diff-line diff-ctx"><span class="diff-sign"> </span><span class="diff-content">${escaped}</span></div>`;
+                }).join("");
+
+                return `<div class="code-block-wrapper diff-block-wrapper">
+                    <div class="code-block-header diff-block-header">
+                        <div class="diff-header-left">
+                            <span class="code-lang-label diff-label">DIFF 变更对比</span>
+                            <span class="diff-stat-badge diff-stat-add">+${addCount}</span>
+                            <span class="diff-stat-badge diff-stat-del">-${delCount}</span>
+                        </div>
+                        <button class="code-copy-btn" onclick="navigator.clipboard.writeText(decodeURIComponent('${encodeURIComponent(text)}')).then(()=>{this.innerText='已复制';setTimeout(()=>this.innerText='复制',1800)})">复制补丁</button>
+                    </div>
+                    <div class="diff-code-body">${renderedLines}</div>
+                </div>`;
+            }
+
             const validLang = lang && hljs.getLanguage(lang) ? lang : "";
             let highlighted = "";
             try {
@@ -143,6 +230,55 @@ export function renderMarkdown(content: string): string {
                 </div>
                 <pre><code class="hljs language-${langLabel}">${highlighted}</code></pre>
             </div>`;
+        };
+
+        // 2. GitHub Alerts 规范呼出提示块 (> [!NOTE] / > [!TIP] / > [!IMPORTANT] / > [!WARNING] / > [!CAUTION])
+        renderer.blockquote = function (this: any, arg: any) {
+            const innerHtml = arg.tokens && this.parser ? this.parser.parse(arg.tokens) : (arg.text || "");
+            const alertMatch = innerHtml.match(/^\s*<p>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(?:<br\s*\/?>|\n)?([\s\S]*?)<\/p>([\s\S]*)$/i);
+            if (alertMatch) {
+                const type = alertMatch[1].toUpperCase();
+                const firstPara = alertMatch[2].trim();
+                const rest = alertMatch[3] || "";
+                const contentHtml = (firstPara ? `<p>${firstPara}</p>` : "") + rest;
+
+                const alertConfigs: Record<string, { label: string; cls: string; icon: string }> = {
+                    NOTE: {
+                        label: "提示 (Note)",
+                        cls: "alert-note",
+                        icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`,
+                    },
+                    TIP: {
+                        label: "建议 (Tip)",
+                        cls: "alert-tip",
+                        icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>`,
+                    },
+                    IMPORTANT: {
+                        label: "重要 (Important)",
+                        cls: "alert-important",
+                        icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><polygon points="12 8 8 12 12 16 16 12 12 8"/></svg>`,
+                    },
+                    WARNING: {
+                        label: "警告 (Warning)",
+                        cls: "alert-warning",
+                        icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+                    },
+                    CAUTION: {
+                        label: "危险 (Caution)",
+                        cls: "alert-caution",
+                        icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+                    },
+                };
+                const config = alertConfigs[type] || alertConfigs.NOTE;
+                return `<div class="markdown-alert ${config.cls}">
+                    <div class="markdown-alert-header">
+                        <span class="markdown-alert-icon">${config.icon}</span>
+                        <span class="markdown-alert-title">${config.label}</span>
+                    </div>
+                    <div class="markdown-alert-body">${contentHtml}</div>
+                </div>`;
+            }
+            return `<blockquote>${innerHtml}</blockquote>`;
         };
 
         renderer.heading = function ({ text, depth }: { text: string; depth: number }) {
