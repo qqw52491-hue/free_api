@@ -32,26 +32,56 @@
 
                         <div v-if="modelMenuOpen" class="model-routing-popover" @click.stop>
                             <div class="popover-header">
-                                <div>
+                                <div class="header-left">
                                     <div class="popover-title">Agent 模型路由</div>
-                                    <div class="popover-sub">规划、工具执行与视觉分析独立路由</div>
+                                    <div class="popover-sub">规划、工具执行与视觉分析独立配置</div>
                                 </div>
-                                <button
-                                    type="button"
-                                    class="sync-all-btn"
-                                    :title="`将执行与视觉模型也一键设为当前推理模型 (${currentModelName})`"
-                                    @click="syncAllToPro"
-                                >
-                                    一键同款
-                                </button>
+                                <div class="header-actions">
+                                    <button
+                                        type="button"
+                                        class="sync-all-btn"
+                                        :title="`将执行与视觉模型一键设为当前推理模型 (${currentModelName})`"
+                                        @click="syncAllToPro"
+                                    >
+                                        一键同款
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="close-popover-btn"
+                                        title="关闭 (Esc)"
+                                        @click="modelMenuOpen = false"
+                                    >
+                                        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                                    </button>
+                                </div>
                             </div>
 
                             <div class="popover-body">
                                 <!-- 1. 推理模型 (Pro) -->
                                 <div class="route-item">
                                     <div class="route-item-head">
-                                        <span class="route-badge pro">🧠 推理模型</span>
-                                        <small>规划与故障恢复</small>
+                                        <div class="head-left">
+                                            <span class="route-badge pro">🧠 推理模型</span>
+                                            <small>负责长程规划与故障恢复</small>
+                                        </div>
+                                        <!-- 🎯 Codex / Claude 风格档位切换器 -->
+                                        <div class="effort-segmented-wrap" title="思考档位切换">
+                                            <span class="effort-label">思考:</span>
+                                            <div class="effort-slider-group">
+                                                <button
+                                                    v-for="eff in reasoningEffortOptions"
+                                                    :key="eff.value"
+                                                    type="button"
+                                                    class="effort-step-btn"
+                                                    :class="{ active: (modelRouting.pro_reasoning_effort || 'auto') === eff.value }"
+                                                    :title="eff.tooltip"
+                                                    :disabled="isRunning"
+                                                    @click="setReasoningEffort('pro', eff.value)"
+                                                >
+                                                    {{ eff.label }}
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
                                     <div class="route-controls">
                                         <ModelSelectDropdown
@@ -62,27 +92,34 @@
                                             @update:model-value="updateRouteValue('pro', $event)"
                                             size="sm"
                                         />
-                                        <select
-                                            class="effort-select"
-                                            :value="modelRouting.pro_reasoning_effort"
-                                            :disabled="isRunning"
-                                            @change="updateReasoningEffort('pro', $event)"
-                                            title="思考档位"
-                                        >
-                                            <option value="auto">思考: 自动</option>
-                                            <option value="off">思考: 关闭</option>
-                                            <option value="low">思考: 低</option>
-                                            <option value="medium">思考: 中</option>
-                                            <option value="high">思考: 高</option>
-                                        </select>
                                     </div>
                                 </div>
 
                                 <!-- 2. 执行模型 (Flash) -->
                                 <div class="route-item">
                                     <div class="route-item-head">
-                                        <span class="route-badge flash">⚡ 执行模型</span>
-                                        <small>常规工具快速执行</small>
+                                        <div class="head-left">
+                                            <span class="route-badge flash">⚡ 执行模型</span>
+                                            <small>负责常规工具快速执行</small>
+                                        </div>
+                                        <!-- 🎯 Codex / Claude 风格档位切换器 -->
+                                        <div class="effort-segmented-wrap" title="思考档位切换">
+                                            <span class="effort-label">思考:</span>
+                                            <div class="effort-slider-group">
+                                                <button
+                                                    v-for="eff in reasoningEffortOptions"
+                                                    :key="eff.value"
+                                                    type="button"
+                                                    class="effort-step-btn"
+                                                    :class="{ active: (modelRouting.flash_reasoning_effort || 'auto') === eff.value }"
+                                                    :title="eff.tooltip"
+                                                    :disabled="isRunning"
+                                                    @click="setReasoningEffort('flash', eff.value)"
+                                                >
+                                                    {{ eff.label }}
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
                                     <div class="route-controls">
                                         <ModelSelectDropdown
@@ -93,27 +130,34 @@
                                             @update:model-value="updateRouteValue('flash', $event)"
                                             size="sm"
                                         />
-                                        <select
-                                            class="effort-select"
-                                            :value="modelRouting.flash_reasoning_effort"
-                                            :disabled="isRunning"
-                                            @change="updateReasoningEffort('flash', $event)"
-                                            title="思考档位"
-                                        >
-                                            <option value="auto">思考: 自动</option>
-                                            <option value="off">思考: 关闭</option>
-                                            <option value="low">思考: 低</option>
-                                            <option value="medium">思考: 中</option>
-                                            <option value="high">思考: 高</option>
-                                        </select>
                                     </div>
                                 </div>
 
                                 <!-- 3. 视觉模型 (Vision) -->
                                 <div class="route-item">
                                     <div class="route-item-head">
-                                        <span class="route-badge vision">👁️ 视觉模型</span>
-                                        <small>截图与多模态分析</small>
+                                        <div class="head-left">
+                                            <span class="route-badge vision">👁️ 视觉模型</span>
+                                            <small>负责截图与多模态分析</small>
+                                        </div>
+                                        <!-- 🎯 Codex / Claude 风格档位切换器 -->
+                                        <div class="effort-segmented-wrap" title="思考档位切换">
+                                            <span class="effort-label">思考:</span>
+                                            <div class="effort-slider-group">
+                                                <button
+                                                    v-for="eff in reasoningEffortOptions"
+                                                    :key="eff.value"
+                                                    type="button"
+                                                    class="effort-step-btn"
+                                                    :class="{ active: (modelRouting.vision_reasoning_effort || 'auto') === eff.value }"
+                                                    :title="eff.tooltip"
+                                                    :disabled="isRunning"
+                                                    @click="setReasoningEffort('vision', eff.value)"
+                                                >
+                                                    {{ eff.label }}
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
                                     <div class="route-controls">
                                         <ModelSelectDropdown
@@ -124,19 +168,6 @@
                                             @update:model-value="updateRouteValue('vision', $event)"
                                             size="sm"
                                         />
-                                        <select
-                                            class="effort-select"
-                                            :value="modelRouting.vision_reasoning_effort"
-                                            :disabled="isRunning"
-                                            @change="updateReasoningEffort('vision', $event)"
-                                            title="思考档位"
-                                        >
-                                            <option value="auto">思考: 自动</option>
-                                            <option value="off">思考: 关闭</option>
-                                            <option value="low">思考: 低</option>
-                                            <option value="medium">思考: 中</option>
-                                            <option value="high">思考: 高</option>
-                                        </select>
                                     </div>
                                 </div>
                             </div>
@@ -311,6 +342,14 @@ function toggleBudgetMenu() {
     }
 }
 
+const reasoningEffortOptions: Array<{ value: ReasoningEffort; label: string; tooltip: string }> = [
+    { value: "auto", label: "自", tooltip: "自动：按模型自适应" },
+    { value: "off", label: "关", tooltip: "关闭思考" },
+    { value: "low", label: "低", tooltip: "低思考：更快、更省 Token" },
+    { value: "medium", label: "中", tooltip: "中思考：平衡效率与质量" },
+    { value: "high", label: "高", tooltip: "高思考：深入推理与规划" },
+];
+
 function updateRouteValue(role: "pro" | "flash" | "vision", modelId: string) {
     emit("update:model-routing", {
         ...props.modelRouting,
@@ -318,8 +357,7 @@ function updateRouteValue(role: "pro" | "flash" | "vision", modelId: string) {
     });
 }
 
-function updateReasoningEffort(role: "pro" | "flash" | "vision", e: Event) {
-    const value = (e.target as HTMLSelectElement).value as ReasoningEffort;
+function setReasoningEffort(role: "pro" | "flash" | "vision", value: ReasoningEffort) {
     const field = `${role}_reasoning_effort` as const;
     emit("update:model-routing", {
         ...props.modelRouting,
@@ -350,11 +388,20 @@ function handleClickOutside(e: MouseEvent) {
     }
 }
 
+function handleKeyDown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+        if (modelMenuOpen.value) modelMenuOpen.value = false;
+        if (budgetMenuOpen.value) budgetMenuOpen.value = false;
+    }
+}
+
 onMounted(() => {
     document.addEventListener("click", handleClickOutside);
+    window.addEventListener("keydown", handleKeyDown);
 });
 onBeforeUnmount(() => {
     document.removeEventListener("click", handleClickOutside);
+    window.removeEventListener("keydown", handleKeyDown);
 });
 
 function autoResizeTextarea() {
@@ -566,6 +613,12 @@ textarea::placeholder {
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.header-left {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
 .popover-title {
     font-size: 13px;
     font-weight: 600;
@@ -577,17 +630,23 @@ textarea::placeholder {
     color: #71717a;
 }
 
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .sync-all-btn {
     display: inline-flex !important;
     align-items: center !important;
     width: auto !important;
-    height: 26px !important;
-    padding: 0 10px !important;
+    height: 24px !important;
+    padding: 0 9px !important;
     border-radius: 5px !important;
     background: rgba(99, 102, 241, 0.15) !important;
     border: 1px solid rgba(99, 102, 241, 0.3) !important;
     color: #a5b4fc !important;
-    font-size: 11.5px !important;
+    font-size: 11px !important;
     font-weight: 500 !important;
     cursor: pointer;
     transition: all 0.15s;
@@ -599,26 +658,60 @@ textarea::placeholder {
     color: #ffffff !important;
 }
 
+.close-popover-btn {
+    display: grid !important;
+    place-items: center !important;
+    width: 24px !important;
+    height: 24px !important;
+    border-radius: 5px !important;
+    background: rgba(255, 255, 255, 0.04) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    color: #a1a1aa !important;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.close-popover-btn:hover {
+    background: rgba(255, 255, 255, 0.1) !important;
+    border-color: rgba(255, 255, 255, 0.2) !important;
+    color: #ffffff !important;
+}
+
+.close-popover-btn svg {
+    width: 12px;
+    height: 12px;
+    stroke: currentColor;
+    stroke-width: 2.2;
+    fill: none;
+}
+
 .popover-body {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 9px;
 }
 
 .route-item {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 7px;
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: 8px;
-    padding: 9px 12px;
+    padding: 10px 12px;
 }
 
 .route-item-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
+}
+
+.head-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .route-badge {
@@ -643,11 +736,62 @@ textarea::placeholder {
     color: #71717a;
 }
 
-.route-controls {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 120px;
-    gap: 8px;
+/* 🎯 Codex / Claude 风格平滑档位滑动切换器 */
+.effort-segmented-wrap {
+    display: flex;
     align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+}
+
+.effort-label {
+    font-size: 10.5px;
+    color: #71717a;
+    font-weight: 500;
+}
+
+.effort-slider-group {
+    display: inline-flex;
+    background: rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 6px;
+    padding: 2px;
+    gap: 2px;
+}
+
+.effort-step-btn {
+    width: 22px !important;
+    height: 20px !important;
+    padding: 0 !important;
+    display: grid !important;
+    place-items: center !important;
+    border: 0 !important;
+    border-radius: 4px !important;
+    background: transparent !important;
+    color: #71717a !important;
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    cursor: pointer;
+    transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.effort-step-btn:hover:not(:disabled) {
+    color: #e4e4e7 !important;
+    background: rgba(255, 255, 255, 0.07) !important;
+}
+
+.effort-step-btn.active {
+    background: rgba(99, 102, 241, 0.28) !important;
+    color: #c7d2fe !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+.effort-step-btn.active:hover {
+    background: rgba(99, 102, 241, 0.4) !important;
+    color: #ffffff !important;
+}
+
+.route-controls {
     width: 100%;
 }
 
@@ -660,36 +804,6 @@ textarea::placeholder {
 .route-controls :deep(.model-select-trigger) {
     width: 100% !important;
     min-width: 0 !important;
-}
-
-.effort-select {
-    height: 32px;
-    width: 100%;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 6px;
-    color: #e4e4e7;
-    font-size: 11.5px;
-    padding: 0 8px;
-    outline: none;
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: all 0.15s;
-}
-
-.effort-select:hover:not(:disabled) {
-    border-color: rgba(255, 255, 255, 0.22);
-    background: rgba(255, 255, 255, 0.07);
-    color: #ffffff;
-}
-
-.effort-select:focus {
-    border-color: #6366f1;
-}
-
-.effort-select option {
-    background: #18181b;
-    color: #f4f4f5;
 }
 
 .budget-mode-picker {
