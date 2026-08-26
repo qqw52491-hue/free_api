@@ -20,109 +20,129 @@ pub fn load_base_prompt(app: &AppHandle) -> String {
         .unwrap_or_else(|_| core_logic_embedded.to_string())
 }
 
-/// task_store 数据区动作说明（静态常量文本）。
-pub fn task_store_menu() -> &'static str {
-    r#"
-## 会话任务数据区 task_store 动作详情
-当采集、解析或批处理产生结构化中间数据时，写入 task_store（tool: "task_store"），参数放在 command 对象中：
-- create_resource：创建数据集。参数 kind、label，可选 resource_id、schema、summary、cursor。
-- upsert_records：实时写入或更新记录。参数 resource_id、records 数组；每条记录宜提供 id 或 record_key，以保证幂等更新；可同时写 summary、cursor、status。
-- list_resources / get_resource：读取数据集目录和元数据。
-- list_records：分页读取数据行。参数 resource_id，可选 limit（最多 100）、offset。
-- get_record：读取一条记录。参数 resource_id、record_key。
-- update_resource：更新资源 label、summary、status、cursor 或 schema。
-数据行会在工具返回时立刻持久化，并按当前 session 隔离；模型默认只看到资源目录与摘要，需要具体数据时再分页查询。
-"#
+#[derive(Clone, Copy)]
+struct BuiltinToolSpec {
+    name: &'static str,
+    summary: &'static str,
+    actions: &'static [&'static str],
 }
 
-fn compact_action_index(content: &str) -> Option<String> {
-    let actions_section = content
-        .split_once("### 支持的动作")
-        .map(|(_, rest)| rest.split("\n### ").next().unwrap_or(rest))?;
+/// 内置工具的首轮最小可执行契约。
+///
+/// 它只承载稳定的工具名、动作、必填字段与确认条件；长范例、罕见边界
+/// 和外部 MCP schema 仍由 tool_manual 按需加载。真实 handler 继续负责最终校验。
+const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
+    BuiltinToolSpec {
+        name: "finish",
+        summary: "终态交付；仅在所有完成门控已闭合时使用",
+        actions: &["finish(summary: string)"],
+    },
+    BuiltinToolSpec {
+        name: "ask_human",
+        summary: "请求人类输入、选择或高风险确认",
+        actions: &["ask_human(message: string, form?: object)"],
+    },
+    BuiltinToolSpec {
+        name: "get_step_output",
+        summary: "分页取回已有工具输出的原文",
+        actions: &["get_step_output(output_id: string, offset?: number, limit?: number)"],
+    },
+    BuiltinToolSpec {
+        name: "search",
+        summary: "检索会话历史、记忆与工作区代码",
+        actions: &["search(query: string, kinds?: history|code|all, path?: string for code)"],
+    },
+    BuiltinToolSpec {
+        name: "task_store",
+        summary: "会话内结构化数据写入、分页读取与状态更新",
+        actions: &[
+            "create_resource(kind: string, label: string)",
+            "upsert_records(resource_id: string, records: array)",
+            "list_resources()",
+            "get_resource(resource_id: string)",
+            "list_records(resource_id: string, limit?: <=100, offset?: number)",
+            "get_record(resource_id: string, record_key: string)",
+            "update_resource(resource_id: string, label?|summary?|status?|cursor?|schema?)",
+        ],
+    },
+    BuiltinToolSpec {
+        name: "web_search",
+        summary: "全网检索并返回带来源的结果",
+        actions: &["web_search(query: string, max_results?: <=10)"],
+    },
+    BuiltinToolSpec {
+        name: "web_fetch",
+        summary: "提取网页正文为 Markdown",
+        actions: &["web_fetch(url: string)"],
+    },
+    BuiltinToolSpec {
+        name: "model_manager",
+        summary: "维护模型规格与平台模型绑定",
+        actions: &[
+            "list_specs()",
+            "upsert_spec(name: string, context_window?|max_tokens?|supports_thinking?|default_temperature?|description?)",
+            "delete_spec(name|id: string, confirm: true)",
+            "list_platforms()",
+            "add_model(platform_id|platform_name: string, model_name: string, ...)",
+            "delete_model(model_id|model_name: string, confirm: true)",
+        ],
+    },
+    BuiltinToolSpec {
+        name: "mcp_manager",
+        summary: "接入、启停、批量导入和删除外部 MCP 插件",
+        actions: &[
+            "list()",
+            "add_http(url: string, bearer_token?|token?|name?|transport?|model_id?)",
+            "add_stdio(name: string, command: string, args?|env?|capability_card?)",
+            "batch_import(input_text: string, model_id?)",
+            "toggle(name: string, enabled: boolean)",
+            "delete(name: string, confirm: true)",
+        ],
+    },
+    BuiltinToolSpec {
+        name: "skill_manager",
+        summary: "管理工作区自定义 Skill 与提示词",
+        actions: &[
+            "list()",
+            "add(name: string, content: string, kind?|description?|model_id?)",
+            "batch_import(input_text: string, model_id?)",
+            "toggle(id|name: string, enabled: boolean)",
+            "delete(id|name: string, confirm: true)",
+        ],
+    },
+];
 
-    let actions = actions_section
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if !line
-                .chars()
-                .next()
-                .is_some_and(|first| first.is_ascii_digit())
-            {
-                return None;
-            }
-            let action = line.split('`').nth(1)?.trim();
-            (!action.is_empty() && !action.contains(char::is_whitespace)).then_some(action)
-        })
-        .take(8)
-        .collect::<Vec<_>>();
-
-    (!actions.is_empty()).then(|| format!("；actions: {}", actions.join(", ")))
-}
-
-/// 扫描 prompts/tools/*.md 生成内置本地工具菜单；一个目录都没读到时回退到内置清单。
-pub fn build_local_tools_menu(app: &AppHandle) -> String {
+/// 从稳定的内置契约渲染首轮工具目录。
+///
+/// 目录不再解析 Markdown，因此手册格式和资源目录可用性不会改变可执行工具集。
+pub fn build_local_tools_menu() -> String {
     let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
-    let candidate_dirs = [
-        std::path::PathBuf::from("src-tauri/prompts/tools"),
-        std::path::PathBuf::from("prompts/tools"),
-        std::path::PathBuf::from("../src-tauri/prompts/tools"),
-        app.path()
-            .resource_dir()
-            .unwrap_or_default()
-            .join("prompts/tools"),
-    ];
-
-    let mut found_any = false;
-    for dir in &candidate_dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            let mut read_count = 0;
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        let summary = content
-                            .find("<summary>")
-                            .and_then(|start| {
-                                content
-                                    .find("</summary>")
-                                    .map(|end| &content[start + 9..end])
-                            })
-                            .unwrap_or("无详细描述");
-                        let actions = compact_action_index(&content).unwrap_or_default();
-                        local_tools_menu.push_str(&format!("- {}: {}{}\n", name, summary, actions));
-                        read_count += 1;
-                    }
-                }
-            }
-            if read_count > 0 {
-                found_any = true;
-                break;
-            }
+    for tool in BUILTIN_TOOL_SPECS {
+        local_tools_menu.push_str(&format!("- {}: {}\n", tool.name, tool.summary));
+        for action in tool.actions {
+            local_tools_menu.push_str(&format!("  - {}\n", action));
         }
-    }
-    if !found_any {
-        local_tools_menu.push_str("- finish: 终态交付动作\n- ask_human: 询问人类或请求确认\n- model_manager: 模型规格与渠道配置管理工具\n- mcp_manager: 外部 MCP 插件接入与能力卡管理工具\n- skill_manager: 工作区 Skill 与自定义提示词管理工具\n- web_search: 全网实时搜索引擎\n- web_fetch: 网页正文 Markdown 提取工具\n- task_store: 结构化数据存储与分页检索\n- search: 代码与历史日志联邦检索\n");
     }
     local_tools_menu
 }
 
 #[cfg(test)]
 mod tests {
-    use super::compact_action_index;
+    use super::{build_local_tools_menu, BUILTIN_TOOL_SPECS};
 
     #[test]
-    fn action_index_exposes_declared_actions_without_full_manual() {
-        let manual = "<summary>Skill 管理</summary>\n### 支持的动作 (action)\n1. `list`: 列表\n2. `add`: 新增\n3. `batch_import`: 批量导入\n### 使用范例";
-        assert_eq!(
-            compact_action_index(manual).as_deref(),
-            Some("；actions: list, add, batch_import")
-        );
+    fn builtin_catalog_exposes_first_turn_required_fields_and_confirmation() {
+        let menu = build_local_tools_menu();
+        assert!(menu.contains("add(name: string, content: string"));
+        assert!(menu.contains("delete(id|name: string, confirm: true)"));
+        assert!(menu.contains("upsert_records(resource_id: string, records: array)"));
+        assert!(menu.contains("get_step_output(output_id: string"));
     }
 
     #[test]
-    fn action_index_ignores_manuals_without_declared_actions() {
-        assert_eq!(compact_action_index("<summary>只读工具</summary>"), None);
+    fn every_builtin_contract_has_a_summary_and_action() {
+        assert!(BUILTIN_TOOL_SPECS.iter().all(|tool| {
+            !tool.name.is_empty() && !tool.summary.is_empty() && !tool.actions.is_empty()
+        }));
     }
 }

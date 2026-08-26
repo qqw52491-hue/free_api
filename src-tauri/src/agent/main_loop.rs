@@ -345,9 +345,8 @@ pub async fn run_agent_main_loop(
     );
     let base_prompt = crate::agent::prompt_assembly::load_base_prompt(&app);
 
-    // 2. 内置工具菜单：由 prompt_assembly 模块组装（tools/*.md 扫描 + 内置回退清单）
-    let task_store_menu = crate::agent::prompt_assembly::task_store_menu();
-    let local_tools_menu = crate::agent::prompt_assembly::build_local_tools_menu(&app);
+    // 2. 稳定的内置工具契约首轮常驻；长范例与外部 MCP schema 仍按需加载。
+    let local_tools_menu = crate::agent::prompt_assembly::build_local_tools_menu();
 
     // 3. 从当前工作区向上读取 AGENTS.md / HUB.md；内容未变时走进程内哈希缓存。
     let workspace_skill_context =
@@ -417,12 +416,11 @@ pub async fn run_agent_main_loop(
     };
 
     let system_prompt = format!(
-        "{}{}{}{}\n{}\n{}\n{}",
+        "{}{}{}{}\n{}\n{}",
         base_prompt,
         workspace_skill_context,
         custom_instruction_context,
         skill_catalog,
-        task_store_menu,
         local_tools_menu,
         mcp_tools_menu
     );
