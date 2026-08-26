@@ -3,6 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentTaskResources } from "./useAgentTaskResources";
 import { usePersistedAgentConversation, type PersistedConversationMessage } from "./usePersistedAgentConversation";
+import type { ArtifactDescriptor } from "../types/artifact";
+import { normalizeArtifactList } from "../utils/artifact";
+
 export interface AgentHistoryTurn {
     id: string;
     goal: string;
@@ -10,7 +13,7 @@ export interface AgentHistoryTurn {
     steps: AgentStepItem[];
     messages: Array<PersistedConversationMessage & { timestamp: number }>;
     summary: string;
-    artifacts: string[];
+    artifacts: ArtifactDescriptor[];
     startedAt: number;
     completedAt: number;
 }
@@ -348,12 +351,20 @@ export function useAgentSession(sessionId: string) {
         }
         return summary || details || streamingSummary.value || "";
     });
-    const finalArtifacts = computed(() => {
+    const finalArtifacts = computed<ArtifactDescriptor[]>(() => {
         const output = finishOutput.value || {};
         const candidates = [output.artifacts, output.files, output.created_files, output.paths];
-        return candidates
-            .flatMap((candidate) => Array.isArray(candidate) ? candidate.map((value) => toText(value)).filter(Boolean) : [])
-            .filter((path) => !isLegacySystemSummary(path));
+        const flatList = candidates
+            .flatMap((candidate) => Array.isArray(candidate) ? candidate : candidate ? [candidate] : [])
+            .filter((item) => {
+                if (typeof item === "string") return !isLegacySystemSummary(item);
+                if (item && typeof item === "object") {
+                    const path = (item as any).localPath || (item as any).local_path || (item as any).name || "";
+                    return !isLegacySystemSummary(String(path));
+                }
+                return true;
+            });
+        return normalizeArtifactList(flatList);
     });
     function traceStepStatus(value: unknown): AgentToolStatus {
         const normalized = toText(value).toLowerCase();
@@ -370,10 +381,19 @@ export function useAgentSession(sessionId: string) {
     function isLegacySystemSummary(path: string) {
         return /(?:^|[/\\])task_summaries(?:[/\\]|$)/i.test(path) || /task[_ -]?summary.*\.md$/i.test(path);
     }
-    function artifactPaths(value: Record<string, unknown>) {
-        return [value.artifacts, value.files, value.created_files, value.paths]
-            .flatMap((candidate) => Array.isArray(candidate) ? candidate.map((item) => toText(item)).filter(Boolean) : [])
-            .filter((path) => !isLegacySystemSummary(path));
+    function artifactPaths(value: Record<string, unknown>): ArtifactDescriptor[] {
+        const candidates = [value.artifacts, value.files, value.created_files, value.paths];
+        const flatList = candidates
+            .flatMap((candidate) => Array.isArray(candidate) ? candidate : candidate ? [candidate] : [])
+            .filter((item) => {
+                if (typeof item === "string") return !isLegacySystemSummary(item);
+                if (item && typeof item === "object") {
+                    const path = (item as any).localPath || (item as any).local_path || (item as any).name || "";
+                    return !isLegacySystemSummary(String(path));
+                }
+                return true;
+            });
+        return normalizeArtifactList(flatList);
     }
     function normalizeRunTrace(value: unknown): HistoryRunSnapshot {
         const trace = asRecord(value);

@@ -115,14 +115,12 @@
                     <div class="summary-rich">
                         <RichContentRenderer :content="(entry.summary || entry.title) + (entry.id === 'live-completion' && isStreamingSummary ? ' ▌' : '')" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
                     </div>
-                    <div v-if="entry.artifacts.length" class="final-artifacts">
-                        <b>交付物</b>
-                        <div class="artifacts-items">
-                            <template v-for="artifact in entry.artifacts" :key="artifact">
-                                <RichContentRenderer v-if="isRichArtifact(artifact)" :content="artifact" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
-                                <code v-else>{{ artifact }}</code>
-                            </template>
-                        </div>
+                    <div v-if="entry.artifacts && entry.artifacts.length" class="final-artifacts">
+                        <ArtifactList
+                            :artifacts="entry.artifacts"
+                            @preview="handlePreviewArtifact"
+                            @download="handleDownloadArtifact"
+                        />
                     </div>
                 </article>
             </template>
@@ -138,23 +136,33 @@
 
             <p v-if="isRunning && !timelineEntries.length && !legacyMessages.length" class="idle-live"><i></i>{{ stateDescription }}</p>
         </div>
+
+        <!-- 产物预览弹窗 (支持 HTML 沙箱、Markdown、图片、代码等) -->
+        <ArtifactPreviewDialog
+            :open="previewDialogOpen"
+            :artifact="selectedPreviewArtifact"
+            @close="previewDialogOpen = false"
+        />
     </div>
 </template>
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import type { AgentHumanForm, AgentStepItem, AgentToolStatus } from "./types";
+import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
 import { formatClock, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
+import ArtifactList from "../artifacts/ArtifactList.vue";
+import ArtifactPreviewDialog from "../artifacts/ArtifactPreviewDialog.vue";
 
 type HistoryMessage = { id: string; role: string; content: string; created_at: string; timestamp: number };
-type HistoryTurn = { id: string; goal: string; status: string; steps: AgentStepItem[]; messages: HistoryMessage[]; summary: string; artifacts: string[]; startedAt: number; completedAt: number };
+type HistoryTurn = { id: string; goal: string; status: string; steps: AgentStepItem[]; messages: HistoryMessage[]; summary: string; artifacts: AgentArtifactInput[]; startedAt: number; completedAt: number };
 type PlanEntry = { id: string; type: "plan"; timestamp: number; title: string; status: AgentToolStatus; steps: AgentStepItem[]; isThinking: boolean; thinkingTimestamp?: number };
 type TimelineEntry =
     | PlanEntry
     | { id: string; type: "user"; timestamp: number; content: string }
     | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean }
-    | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: string[]; failed: boolean }
+    | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: AgentArtifactInput[]; failed: boolean }
     | { id: "active-thought"; type: "active-thought"; timestamp: number };
 
 const props = withDefaults(
@@ -173,7 +181,7 @@ const props = withDefaults(
         isRunning: boolean;
         completionMessage: string;
         finalSummary: string;
-        finalArtifacts: string[];
+        finalArtifacts: AgentArtifactInput[];
         hasError: boolean;
         humanForm?: AgentHumanForm | null;
         pauseReason?: string;
@@ -185,10 +193,11 @@ const props = withDefaults(
         pauseReason: "",
         isWaitingForHuman: false,
         isSendingHuman: false,
+        finalArtifacts: () => [],
     }
 );
 
-defineEmits<{
+const emit = defineEmits<{
     "select-step": [id: string];
     "select-step-thought": [id: string];
     "select-human": [id: string];
@@ -196,6 +205,21 @@ defineEmits<{
     "submit-human": [answer: string];
     "open-preview": [code: string];
 }>();
+
+const previewDialogOpen = ref(false);
+const selectedPreviewArtifact = ref<ArtifactDescriptor | null>(null);
+
+function handlePreviewArtifact(artifact: ArtifactDescriptor) {
+    if (artifact.kind === "web" && artifact.content) {
+        emit("open-preview", artifact.content);
+    }
+    selectedPreviewArtifact.value = artifact;
+    previewDialogOpen.value = true;
+}
+
+function handleDownloadArtifact(_artifact: ArtifactDescriptor) {
+    // 下载逻辑由 ArtifactCard 自带处理，此处保留钩子
+}
 const streamElement = ref<HTMLElement | null>(null);
 const activeThoughtStartedAt = ref<number | null>(null);
 const followLiveTail = ref(true);
@@ -355,16 +379,6 @@ function currentTimeline(): TimelineEntry[] {
     return timeline;
 }
 const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimeline(), ...currentTimeline()]);
-function isRichArtifact(artifact: string): boolean {
-    if (!artifact) return false;
-    return (
-        artifact.includes("```echarts") ||
-        artifact.includes("```chart") ||
-        artifact.includes("```mermaid") ||
-        artifact.includes("```html") ||
-        (artifact.startsWith("```") && artifact.endsWith("```"))
-    );
-}
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败", challenged: "验证未闭合" }[status] || "未知"; }
 function formatConversationTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "numeric", day: "numeric" }); }
 watch(() => [timelineEntries.value.length, props.completionMessage, props.historyTurns.length], () => { followLatest(); }, { flush: "post" });

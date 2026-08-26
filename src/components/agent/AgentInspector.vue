@@ -395,6 +395,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTokenUsage, AgentToolStatus, LlmParseErrorItem } from "./types";
+import type { AgentArtifactInput } from "../../types/artifact";
 import { formatClock, formatMilliseconds, formatNumber, formatPayload } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
@@ -417,7 +418,7 @@ const props = withDefaults(
         isResourcesLoading: boolean;
         resourceLoadError: string;
         finalSummary?: string;
-        finalArtifacts?: string[];
+        finalArtifacts?: AgentArtifactInput[];
         activePreviewContent?: string;
         latestContext?: Record<string, unknown> | null;
         currentGoal?: string;
@@ -636,7 +637,8 @@ const combinedPreviewContent = computed(() => {
     if (props.finalSummary) parts.push(props.finalSummary);
     if (props.finalArtifacts && props.finalArtifacts.length) {
         for (const art of props.finalArtifacts) {
-            if (!parts.includes(art)) parts.push(art);
+            const str = typeof art === "string" ? art : (art.content || art.localPath || art.name || "");
+            if (str && !parts.includes(str)) parts.push(str);
         }
     }
     return parts.join("\n\n");
