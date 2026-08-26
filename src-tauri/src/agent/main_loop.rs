@@ -882,14 +882,38 @@ pub async fn run_agent_main_loop(
         );
         if finish_challenged {
             checkpoint.finish_reviewed = true;
+            let blocker_summary = open_todos
+                .iter()
+                .map(|todo| format!("- {todo}"))
+                .collect::<Vec<_>>()
+                .join("\n");
             context.add_error_feedback(&format!(
-                "【终态自检】检测到以下未闭合事项（Todo / 审查契约 / 写入后验证）：\n{}\n本次 finish 已记录为一次可审计的质询，任务不会在此终止。下一轮请继续完成这些事项；若某项已不再适用，请在 todo_update 中显式标为 done/failed，或在 review_contract_update 中显式标为 waived 并说明理由。审查义务标为 evidenced 时必须保留 evidence_refs。对于真实写入，需在 change_verification_update 中以 verified + evidence_refs 或 waived + waived_reason 闭合。若你确认已有足够证据，也可在说明覆盖边界后再次 finish；系统不会无限阻断。",
-                open_todos
-                    .iter()
-                    .map(|todo| format!("- {todo}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                "【🚨 终态拦截：验证未闭合】检测到当前任务尚未完成闭合验证（Todo / 审查契约 / 写入后验证）：\n{}\n本次 finish 已被系统拦截，任务不会在此终止。请直接针对上述未闭合项进行验证与状态更新：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新后请再次提交 finish 交付。",
+                blocker_summary
             ));
+            crate::agent::dispatcher::emit_tool_event(
+                &app,
+                &final_session_id,
+                step_id,
+                &instruction,
+                "finish_challenged",
+                Some("finish".to_string()),
+                Some(false),
+                &format!("终态拦截：检测到 {} 项未闭合事项，请先行验证", open_todos.len()),
+                None,
+            );
+        } else if is_finish && result.success {
+            crate::agent::dispatcher::emit_tool_event(
+                &app,
+                &final_session_id,
+                step_id,
+                &instruction,
+                "succeeded",
+                Some("finish".to_string()),
+                Some(true),
+                &output_text,
+                None,
+            );
         } else if !is_finish {
             // 新的常规步骤提供了新增证据，之后若仍有 open Todo 可重新进行一次质询。
             checkpoint.finish_reviewed = false;

@@ -683,7 +683,7 @@ watch(
     }
 );
 
-function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败" }[status]; }
+function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败", challenged: "验证未闭合" }[status] || "未知"; }
 
 defineExpose({
     switchTab: (tab: "preview" | "detail" | "context" | "resources") => {
@@ -864,6 +864,7 @@ defineExpose({
 .step-meta .status-running { color: #f4f4f5; background: #27272a; }
 .step-meta .status-succeeded { color: #2ed573; background: rgba(46, 213, 115, 0.12); }
 .step-meta .status-failed { color: #ff4757; background: rgba(255, 71, 87, 0.12); }
+.step-meta .status-challenged { color: #e6a23c; background: rgba(230, 162, 60, 0.14); border: 1px solid rgba(230, 162, 60, 0.28); }
 .step-meta em { font-style: normal; }
 
 .step-explanation { margin: 12px 0; color: #a1a1aa; font-size: 12px; line-height: 1.65; }

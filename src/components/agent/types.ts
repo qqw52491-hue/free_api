@@ -19,7 +19,7 @@ export type AgentRunState =
     | "cancelled";
 
 export type AgentTimelineKind = "system" | "planning" | "tool" | "success" | "error" | "human" | "recovery";
-export type AgentToolStatus = "running" | "succeeded" | "failed" | "pending";
+export type AgentToolStatus = "running" | "succeeded" | "failed" | "pending" | "challenged";
 export type AgentDetailSection = "params" | "result";
 
 export interface AgentRunStateMeta {

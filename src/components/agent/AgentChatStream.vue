@@ -269,7 +269,7 @@ function planStatus(steps: AgentStepItem[]): AgentToolStatus {
         latestStatusByStep.set(step.stepId, step.status);
     }
     const statuses = Array.from(latestStatusByStep.values());
-    if (statuses.some((s) => s === "running" || s === "pending")) return "running";
+    if (statuses.some((s) => s === "running" || s === "pending" || s === "challenged")) return "running";
     if (statuses.some((s) => s === "failed")) return "failed";
     return "succeeded";
 }
@@ -365,7 +365,7 @@ function isRichArtifact(artifact: string): boolean {
         (artifact.startsWith("```") && artifact.endsWith("```"))
     );
 }
-function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败" }[status]; }
+function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败", challenged: "验证未闭合" }[status] || "未知"; }
 function formatConversationTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "numeric", day: "numeric" }); }
 watch(() => [timelineEntries.value.length, props.completionMessage, props.historyTurns.length], () => { followLatest(); }, { flush: "post" });
 watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunning) { followLiveTail.value = true; followLatest(); } if (!running && wasRunning) followLatest(); });
@@ -942,6 +942,20 @@ button.root-row {
 .goal-node.status-error > .goal-row .row-status {
     color: #f87171;
     font-weight: 600;
+}
+
+/* 🌟 终态自检拦截（验证未闭合）：醒目警示橙黄 */
+.goal-node.status-challenged > .goal-row .tree-mark {
+    background: #e6a23c;
+    box-shadow: 0 0 6px rgba(230, 162, 60, 0.6);
+    animation: none !important;
+}
+.goal-node.status-challenged > .goal-row .row-status {
+    color: #e6a23c;
+    font-weight: 600;
+}
+.goal-node.status-challenged > .goal-row .goal-label {
+    color: #fcd34d;
 }
 
 /* 🌟 等待中 */

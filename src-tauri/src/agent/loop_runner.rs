@@ -573,7 +573,7 @@ pub async fn run_tool_phase(
         None,
     );
 
-    // --- B1. 协议终态：finish 不创建 pending、不派发工具，直接交由主循环完成 checkpoint 和状态收敛。 ---
+    // --- B1. 协议终态：finish 不创建 pending、不派发工具，由主循环在终态自检裁决后统一收敛状态与发送事件。 ---
     if is_finish_instruction(inst) {
         let result = DispatchResult {
             stdout: inst
@@ -587,17 +587,7 @@ pub async fn run_tool_phase(
             success: true,
             route: "finish".to_string(),
         };
-        emit_tool_event(
-            app,
-            final_session_id,
-            step_id,
-            inst,
-            "succeeded",
-            Some(result.route.clone()),
-            Some(true),
-            &result.stdout,
-            Some(tool_started_at.elapsed().as_millis()),
-        );
+        // 不在此处盲目广播 "succeeded"，交由 main_loop 的 finish guard 判定是否为 finish_challenged 统一发射事件
         return Ok(result);
     }
     // --- B2. 特殊拦截：AI 主动挂起呼叫人类 ---

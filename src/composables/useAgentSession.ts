@@ -351,6 +351,7 @@ export function useAgentSession(sessionId: string) {
         const normalized = toText(value).toLowerCase();
         if (normalized === "failed" || normalized === "error") return "failed";
         if (normalized === "succeeded" || normalized === "success" || normalized === "complete") return "succeeded";
+        if (normalized === "finish_challenged" || normalized === "challenged") return "challenged";
         if (normalized === "running") return "running";
         return "pending";
     }
@@ -592,15 +593,17 @@ export function useAgentSession(sessionId: string) {
         const rawParams = payload.params ?? payload.params_summary;
         const rawResult = payload.result ?? payload.result_summary;
 
-        const status: AgentToolStatus = eventType === "succeeded" || payload.success === true
-            ? "succeeded"
-            : eventType === "failed" || payload.success === false
-                ? "failed"
-                : eventType === "pending"
-                    ? "pending"
-                    : "running";
+        const status: AgentToolStatus = eventType === "finish_challenged" || eventType === "challenged"
+            ? "challenged"
+            : eventType === "succeeded" || payload.success === true
+                ? "succeeded"
+                : eventType === "failed" || payload.success === false
+                    ? "failed"
+                    : eventType === "pending"
+                        ? "pending"
+                        : "running";
 
-        // 查找最新的匹配步骤：若前一个步骤已失败/成功，而新事件重新下发，保留历史错误尝试并追加新条目
+        // 查找最新的匹配步骤：若前一个步骤已失败/成功/被质询，而新事件重新下发，保留历史错误尝试并追加新条目
         let targetIdx = -1;
         for (let i = steps.value.length - 1; i >= 0; i--) {
             if (steps.value[i].stepId === stepId) {
@@ -609,7 +612,7 @@ export function useAgentSession(sessionId: string) {
             }
         }
 
-        const isPreviousCompleted = targetIdx >= 0 && (steps.value[targetIdx].status === "failed" || steps.value[targetIdx].status === "succeeded");
+        const isPreviousCompleted = targetIdx >= 0 && (steps.value[targetIdx].status === "failed" || steps.value[targetIdx].status === "succeeded" || steps.value[targetIdx].status === "challenged");
         if (targetIdx >= 0 && !isPreviousCompleted) {
             const current = steps.value[targetIdx];
             steps.value[targetIdx] = {
@@ -829,7 +832,7 @@ export function useAgentSession(sessionId: string) {
                     break;
                 }
             }
-            const isRetry = lastIdx >= 0 && (steps.value[lastIdx].status === "failed" || steps.value[lastIdx].status === "succeeded");
+            const isRetry = lastIdx >= 0 && (steps.value[lastIdx].status === "failed" || steps.value[lastIdx].status === "succeeded" || steps.value[lastIdx].status === "challenged");
 
             const stepItem: AgentStepItem = {
                 id: isRetry ? `step-${stepId}-attempt-${steps.value.length}` : `step-${stepId}`,
