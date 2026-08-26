@@ -593,9 +593,9 @@ mod tests {
         let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
         ctx.context_window_tokens = 200_000;
 
-        // 本地估算视角：塞入大量中文文本（保守估算约 100K+ tokens）
+        // 本地估算视角：塞入大量中文文本（保守估算约 150K+ tokens）
         let big_cjk = "审查要点覆盖资源作用域契约、上下文压缩水位与工具参数契约等领域的细节描述。".repeat(600);
-        for i in 0..12 {
+        for i in 0..18 {
             ctx.turns_history.push(crate::agent::context::types::ChatMessage {
                 role: "user".to_string(),
                 content: json!(format!("step {} {}", i, big_cjk)),
@@ -622,7 +622,7 @@ mod tests {
 
         // 同一请求边界的真实总 prompt 接近上限时，必须触发并回压。
         let before_high = serde_json::to_string(&ctx.turns_history).unwrap();
-        ctx.last_reported_prompt_tokens = Some(78_000);
+        ctx.last_reported_prompt_tokens = Some(140_000);
         ctx.maybe_compact_history();
         let after_high = serde_json::to_string(&ctx.turns_history).unwrap();
         assert_ne!(
@@ -658,7 +658,7 @@ mod tests {
             });
             ctx.turns_history.push(ChatMessage {
                 role: "user".to_string(),
-                content: json!(format!("【执行输出】\noutput_id: branch_{}\n{}", branch, "x".repeat(12_000))),
+                content: json!(format!("【执行输出】\noutput_id: branch_{}\n{}", branch, "x".repeat(16_000))),
             });
         }
 

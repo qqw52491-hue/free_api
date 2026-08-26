@@ -75,14 +75,14 @@ impl ContextBudget {
     pub const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
     pub const DEFAULT_TAIL_STATE_TOKENS: usize = 1_000;
     pub const SINGLE_OBSERVATION_INGRESS_CAP: usize = 4_000; // 单条观测入口硬截断 4k tokens
-    pub const DEFAULT_HIGH_WATERMARK_RATIO: f64 = 0.80; // 80% 高水位触发
+    pub const DEFAULT_HIGH_WATERMARK_RATIO: f64 = 0.85; // 85% 高水位触发
     pub const DEFAULT_LOW_WATERMARK_RATIO: f64 = 0.50; // 50% 目标回落水位
     pub const RECENT_PROTECTED_RATIO: f64 = 0.25; // 25% 近期保护区（保证 low_watermark 50% > protected 25% + 卡片 5% + 余量 20%）
-    // 活跃历史工作集上限随模型窗口动态伸缩：窗口 × 40%，夹在 [24K, 128K]。
-    // 此前固定 48K——在大窗口（如 200K）下 compaction 过于频繁，前缀缓存反复重置。
-    pub const ACTIVE_HISTORY_WINDOW_RATIO: f64 = 0.40;
+    // 活跃历史工作集上限随模型窗口动态伸缩：对齐行业标准（Claude Code / Cursor），窗口 × 75%，夹在 [24K, 300K]。
+    // 充分利用现代大模型强大的长文本能力，避免过早脱水压缩损失代码细节。
+    pub const ACTIVE_HISTORY_WINDOW_RATIO: f64 = 0.75;
     pub const ACTIVE_HISTORY_CAP_MIN_TOKENS: usize = 24_000;
-    pub const ACTIVE_HISTORY_CAP_MAX_TOKENS: usize = 128_000;
+    pub const ACTIVE_HISTORY_CAP_MAX_TOKENS: usize = 300_000;
 
     /// 按模型上下文窗口推导活跃历史工作集上限。
     /// 双模型路由场景应传入两个模型窗口的较小值（见 main_loop 的窗口注入）。
@@ -121,8 +121,8 @@ impl ContextBudget {
 
         let tail_state_tokens = Self::DEFAULT_TAIL_STATE_TOKENS;
 
-        // 安全余量：总窗口的 15%
-        let safety_margin = (window as f64 * 0.15).ceil() as usize;
+        // 安全余量：总窗口的 10%（在大窗口如 200k 下预留 20k tokens，足够硬防御任何边缘溢出）
+        let safety_margin = (window as f64 * 0.10).ceil() as usize;
 
         // 可供历史分配的最大容量（叠加按窗口伸缩的活跃工作集上限保护，杜绝长任务上下文过度膨胀）
         let reserved = max_out + static_prefix_tokens + tail_state_tokens + safety_margin;
@@ -173,9 +173,9 @@ mod tests {
             budget.max_allowed_history_tokens,
             ContextBudget::active_history_cap_for(128_000)
         );
-        // 动态上限：窗口 × 40%，夹在 [24K, 128K]
-        assert_eq!(ContextBudget::active_history_cap_for(200_000), 80_000);
-        assert_eq!(ContextBudget::active_history_cap_for(1_000_000), 128_000);
+        // 动态上限：窗口 × 75%，夹在 [24K, 300K]
+        assert_eq!(ContextBudget::active_history_cap_for(200_000), 150_000);
+        assert_eq!(ContextBudget::active_history_cap_for(1_000_000), 300_000);
         assert_eq!(ContextBudget::active_history_cap_for(32_000), 24_000);
         assert!(budget.high_watermark_tokens > budget.low_watermark_tokens);
 
