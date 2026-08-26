@@ -315,12 +315,20 @@ function handleClickOutside(event: MouseEvent) {
   }
 }
 
+function handleKeyDown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && isOpen.value) {
+    closeDropdown()
+  }
+}
+
 onMounted(() => {
-  document.addEventListener('click', handleClickOutside)
+  document.addEventListener('click', handleClickOutside, true)
+  window.addEventListener('keydown', handleKeyDown)
 })
 
 onBeforeUnmount(() => {
-  document.removeEventListener('click', handleClickOutside)
+  document.removeEventListener('click', handleClickOutside, true)
+  window.removeEventListener('keydown', handleKeyDown)
 })
 </script>
 

@@ -30,7 +30,7 @@
                             <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
                         </button>
 
-                        <div v-if="modelMenuOpen" class="model-routing-popover" @click.stop>
+                        <div v-if="modelMenuOpen" class="model-routing-popover">
                             <div class="popover-header">
                                 <div class="header-left">
                                     <div class="popover-title">Agent 模型路由</div>
@@ -189,7 +189,7 @@
                             <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
                         </button>
 
-                        <div v-if="budgetMenuOpen" class="budget-dropdown-menu" @click.stop>
+                        <div v-if="budgetMenuOpen" class="budget-dropdown-menu">
                             <div class="budget-menu-header">上下文与压缩策略</div>
                             <button
                                 v-for="opt in budgetModes"
@@ -396,11 +396,11 @@ function handleKeyDown(e: KeyboardEvent) {
 }
 
 onMounted(() => {
-    document.addEventListener("click", handleClickOutside);
+    document.addEventListener("click", handleClickOutside, true);
     window.addEventListener("keydown", handleKeyDown);
 });
 onBeforeUnmount(() => {
-    document.removeEventListener("click", handleClickOutside);
+    document.removeEventListener("click", handleClickOutside, true);
     window.removeEventListener("keydown", handleKeyDown);
 });
 
