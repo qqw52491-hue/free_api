@@ -77,7 +77,15 @@
 
         <!-- 消息列表 -->
         <div v-else class="messages-list">
-          <div v-for="msg in messages" :key="msg.id" class="message-row" :class="msg.role">
+          <!-- 长会话历史消息分批加载 -->
+          <div v-if="hasHiddenEarlierMessages" class="load-more-history-row">
+            <button type="button" class="load-more-history-btn" @click="loadEarlierMessages">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="18 15 12 9 6 15"/></svg>
+              <span>展开更早的 {{ hiddenMessagesCount }} 条历史消息</span>
+            </button>
+          </div>
+
+          <div v-for="msg in displayedMessages" :key="msg.id" class="message-row" :class="msg.role">
             <div class="message-avatar">
               <span v-if="msg.role === 'user'">👤</span>
               <span v-else>🤖</span>
@@ -207,6 +215,19 @@ const messages = ref<ChatMessage[]>([])
 const currentSessionId = ref('')
 const selectedModelId = ref('')
 
+// 长会话分页/分批懒加载状态 (默认只挂载最近 30 条消息到 DOM)
+const visibleMessageLimit = ref(30)
+const displayedMessages = computed(() => {
+  if (messages.value.length <= visibleMessageLimit.value) return messages.value
+  return messages.value.slice(messages.value.length - visibleMessageLimit.value)
+})
+const hasHiddenEarlierMessages = computed(() => messages.value.length > visibleMessageLimit.value)
+const hiddenMessagesCount = computed(() => messages.value.length - visibleMessageLimit.value)
+
+function loadEarlierMessages() {
+  visibleMessageLimit.value += 30
+}
+
 const userInput = ref('')
 const streaming = ref(false)
 const streamContent = ref('')
@@ -278,6 +299,7 @@ onMounted(async () => {
 
 async function selectSession(id: string) {
   currentSessionId.value = id
+  visibleMessageLimit.value = 30
   messages.value = await invoke<ChatMessage[]>('get_messages', { sessionId: id })
   const s = sessions.value.find(s => s.id === id)
   if (s?.model_id) selectedModelId.value = s.model_id
@@ -291,6 +313,7 @@ async function newSession() {
   const session = await invoke<ChatSession>('create_session', { title: '新对话', modelId: selectedModelId.value })
   sessions.value.unshift(session)
   currentSessionId.value = session.id
+  visibleMessageLimit.value = 30
   messages.value = []
   chatError.value = ''
   await nextTick()

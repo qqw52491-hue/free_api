@@ -168,9 +168,46 @@ function isNpmPackageVersion(str: string): boolean {
     return false;
 }
 
+/**
+ * 流式输出平滑预处理器：在编译前虚拟补全未闭合的代码块、数学公式与排版标记，防止打字机流式输出时界面剧烈抖动与闪白
+ */
+export function normalizeStreamingMarkdown(raw: string): string {
+    if (!raw) return "";
+    let processed = raw;
+
+    // 1. 预测并补全未闭合的代码块 (```)
+    const codeBlockMatches = processed.match(/```/g);
+    if (codeBlockMatches && codeBlockMatches.length % 2 !== 0) {
+        // 如果有奇数个 ```，说明末尾有一个正在流式输出的代码块，虚拟追加闭合符
+        processed += "\n```";
+    }
+
+    // 2. 预测并补全未闭合的独立块级数学公式 ($$)
+    const blockMathMatches = processed.match(/\$\$/g);
+    if (blockMathMatches && blockMathMatches.length % 2 !== 0) {
+        processed += "\n$$";
+    }
+
+    // 3. 预测并补全未闭合的单美元行内公式 ($ ... $)
+    const strippedBlock = processed.replace(/\$\$[\s\S]*?\$\$/g, "");
+    const singleDollarMatches = strippedBlock.match(/(?<!\\)\$/g);
+    if (singleDollarMatches && singleDollarMatches.length % 2 !== 0) {
+        processed += "$";
+    }
+
+    // 4. 预测并补全未闭合的加粗标记 (**)
+    const boldMatches = processed.match(/\*\*/g);
+    if (boldMatches && boldMatches.length % 2 !== 0) {
+        processed += "**";
+    }
+
+    return processed;
+}
+
 export function renderMarkdown(content: string): string {
     if (!content) return "";
     try {
+        const sanitizedContent = normalizeStreamingMarkdown(content);
         const renderer = new marked.Renderer();
         renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
             const normalizedLang = (lang || "").trim().toLowerCase();
@@ -315,7 +352,7 @@ export function renderMarkdown(content: string): string {
             return `<a href="${href}"${titleAttr} class="markdown-rich-link" target="_blank" rel="noopener noreferrer">${text}${iconSvg}</a>`;
         };
 
-        return marked.parse(content, {
+        return marked.parse(sanitizedContent, {
             breaks: true,
             gfm: true,
             renderer,
