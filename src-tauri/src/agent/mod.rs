@@ -1,3 +1,4 @@
+pub mod artifact_manager;
 pub mod change_verification;
 pub mod checkpoint;
 pub mod context;

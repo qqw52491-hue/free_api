@@ -110,6 +110,15 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
             "delete(id|name: string, confirm: true)",
         ],
     },
+    BuiltinToolSpec {
+        name: "artifact_manager",
+        summary: "生成独立受管交付产物（Markdown分析报告、网页看板、数据导出）并登记持久化账本供用户预览/导出",
+        actions: &[
+            "create_document(title: string, content: string, format: md|html|json|csv|txt)",
+            "list_artifacts()",
+            "read_artifact(artifact_id: string)",
+        ],
+    },
 ];
 
 /// 从稳定的内置契约渲染首轮工具目录。

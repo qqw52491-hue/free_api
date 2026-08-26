@@ -317,7 +317,15 @@ function planEntries(steps: AgentStepItem[], prefix: string, active = false): Pl
     }
     return plans;
 }
-function completionArtifacts(value: unknown): string[] { return Array.isArray(value) ? value.map((item) => String(item || "").trim()).filter(Boolean) : []; }
+
+function completionArtifacts(value: unknown): AgentArtifactInput[] {
+    if (!Array.isArray(value)) return [];
+    return value.filter((item) => {
+        if (!item) return false;
+        if (typeof item === "string" && (item.trim() === "[object Object]" || !item.trim())) return false;
+        return true;
+    });
+}
 function historyTimeline(): TimelineEntry[] {
     const timeline: TimelineEntry[] = [];
     for (const turn of [...props.historyTurns].sort((a, b) => a.startedAt - b.startedAt)) {

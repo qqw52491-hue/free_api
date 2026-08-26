@@ -871,6 +871,7 @@ pub async fn run_tool_phase(
             });
             println!("🔁 [No-Progress] 注入无进展提示: {}", inst.get_tool());
         }
+
         dispatch_result
     };
 

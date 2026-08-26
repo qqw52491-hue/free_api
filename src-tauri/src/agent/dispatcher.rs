@@ -262,6 +262,11 @@ pub(crate) fn execute_command_inner(
         return crate::agent::tools::skill_manager::dispatch(db, action, params);
     }
 
+    // 3.9 核心原生工具 H: artifact_manager (受管产物物理写入、元数据登记与产物账本管理)
+    if tool.eq_ignore_ascii_case("artifact_manager") || tool.eq_ignore_ascii_case("artifact_store") {
+        return crate::agent::artifact_manager::dispatch(db, session_id, action, params);
+    }
+
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
     let (plugin_name, tool_name) = if tool.contains('/') {
         let parts: Vec<&str> = tool.split('/').collect();

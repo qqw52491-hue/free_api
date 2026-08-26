@@ -87,3 +87,168 @@ pub fn generate_agent_evaluation_report(
         None,
     )
 }
+
+// ==================== MANAGED ARTIFACT COMMANDS ====================
+
+/// 查询指定会话的全部有效受管产物记录
+#[tauri::command]
+pub async fn list_session_artifacts(
+    state: State<'_, DbState>,
+    session_id: String,
+) -> Result<Vec<crate::agent::artifact_manager::ArtifactRecord>, String> {
+    crate::agent::artifact_manager::list_session_artifacts(state.inner(), &session_id)
+}
+
+/// 根据 artifact_id 读取产物文本内容（用于前端富文本/代码/HTML渲染）
+#[tauri::command]
+pub async fn read_artifact_by_id(
+    state: State<'_, DbState>,
+    artifact_id: String,
+) -> Result<String, String> {
+    crate::agent::artifact_manager::read_artifact_content(state.inner(), &artifact_id)
+}
+
+/// 根据 artifact_id 用操作系统默认程序打开文件
+#[tauri::command]
+pub async fn open_artifact_by_id(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    artifact_id: String,
+) -> Result<(), String> {
+    crate::agent::artifact_manager::open_artifact(&app, state.inner(), &artifact_id)
+}
+
+/// 根据 artifact_id 在系统文件管理器中高亮定位
+#[tauri::command]
+pub async fn reveal_artifact_by_id(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    artifact_id: String,
+) -> Result<(), String> {
+    crate::agent::artifact_manager::reveal_artifact(&app, state.inner(), &artifact_id)
+}
+
+/// 根据 artifact_id 安全删除产物记录与对应磁盘物理文件
+#[tauri::command]
+pub async fn delete_artifact_by_id(
+    state: State<'_, DbState>,
+    artifact_id: String,
+) -> Result<(), String> {
+    crate::agent::artifact_manager::delete_artifact(state.inner(), &artifact_id)
+}
+
+/// 将产物或文本另存为到用户指定的外部物理路径 (Native Save As)
+#[tauri::command]
+pub async fn export_artifact_to_file(
+    state: State<'_, DbState>,
+    artifact_id: Option<String>,
+    source_path: Option<String>,
+    content: Option<String>,
+    target_path: String,
+) -> Result<(), String> {
+    let clean_target = if let Some(target) = target_path.strip_prefix("file://") {
+        target.to_string()
+    } else {
+        target_path
+    };
+
+    if let Some(text) = content {
+        if !text.is_empty() {
+            std::fs::write(&clean_target, text.as_bytes())
+                .map_err(|e| format!("写入文件失败: {}", e))?;
+            return Ok(());
+        }
+    }
+
+    if let Some(art_id) = artifact_id {
+        if let Ok(rec) = crate::agent::artifact_manager::get_artifact_record(state.inner(), &art_id) {
+            std::fs::copy(&rec.canonical_path, &clean_target)
+                .map_err(|e| format!("保存文件失败: {}", e))?;
+            return Ok(());
+        }
+    }
+
+    if let Some(src) = source_path {
+        if let Ok(safe_src) = crate::commands::chat::resolve_safe_artifact_path(&src) {
+            std::fs::copy(&safe_src, &clean_target)
+                .map_err(|e| format!("保存文件失败: {}", e))?;
+            return Ok(());
+        }
+    }
+
+    Err("无法导出文件: 未找到有效的源文件或内容".to_string())
+}
+
+/// 将真实文件以原生文件对象形式注入系统剪贴板 (支持在操作系统文件管理器、桌面或聊天软件中 Ctrl+V 粘贴文件)
+#[tauri::command]
+pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
+    let safe_path = crate::commands::chat::resolve_safe_artifact_path(&path)?;
+    let canonical = safe_path.canonicalize().map_err(|e| format!("路径无效: {}", e))?;
+    let path_str = canonical.to_string_lossy().to_string();
+    let file_uri = format!("file://{}", path_str);
+
+    #[cfg(target_os = "linux")]
+    {
+        let gnome_data = format!("copy\n{}", file_uri);
+
+        // 1. 尝试 wl-copy (Wayland 环境)
+        if let Ok(mut child) = std::process::Command::new("wl-copy")
+            .arg("--type")
+            .arg("text/uri-list")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(file_uri.as_bytes());
+            }
+            let _ = child.wait();
+        }
+
+        // 2. 尝试 xclip 写入 text/uri-list (X11 / KDE / 通用)
+        if let Ok(mut child) = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "text/uri-list"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(format!("{}\r\n", file_uri).as_bytes());
+            }
+            let _ = child.wait();
+        }
+
+        // 3. 尝试 xclip 写入 x-special/gnome-copied-files (GNOME Nautilus 深度支持)
+        if let Ok(mut child) = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "x-special/gnome-copied-files"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(gnome_data.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!("Set-Clipboard -Path '{}'", path_str)])
+            .spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!("set the clipboard to (POSIX file \"{}\")", path_str);
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
+
+    Ok(())
+}
+
+
+

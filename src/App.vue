@@ -15,16 +15,21 @@ function handleGlobalLinkClick(e: MouseEvent) {
   const target = (e.target as HTMLElement)?.closest("a");
   if (!target) return;
 
+  // 1. 如果带有 download 属性（如导出下载文件）或 blob/javascript/锚点，直接放行
+  if (target.hasAttribute("download")) return;
+
   const href = target.getAttribute("href") || target.getAttribute("data-url");
-  if (!href) return;
+  if (!href || href === "#" || href.startsWith("#") || href.startsWith("javascript:") || href.startsWith("blob:") || href.startsWith("data:")) {
+    return;
+  }
 
-  // 1. 强制阻止 WebKit 原生重定向，100% 根除 "The URL can't be shown" 报错
-  e.preventDefault();
-  e.stopPropagation();
-
-  // 2. 微信模式：新建专属独立原生 WebView 窗口打开网页
-  const title = target.getAttribute("title") || target.textContent?.trim() || "网页预览";
-  openWebviewWindow(href, title);
+  // 2. 只有普通的外部网络链接才拦截并以微信模式独立窗口打开
+  if (/^https?:\/\//i.test(href) || /^mailto:/i.test(href)) {
+    e.preventDefault();
+    e.stopPropagation();
+    const title = target.getAttribute("title") || target.textContent?.trim() || "网页预览";
+    openWebviewWindow(href, title);
+  }
 }
 
 onMounted(() => {

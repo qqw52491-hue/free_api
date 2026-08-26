@@ -219,6 +219,26 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_agent_run_traces_session
             ON agent_run_traces(session_id, started_at ASC);
 
+        -- 受管产物持久化账本：记录由 Agent 生成或登记的文件元数据，统一按 artifact_id 管理
+        CREATE TABLE IF NOT EXISTS agent_artifacts (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            run_id TEXT,
+            display_name TEXT NOT NULL,
+            format TEXT NOT NULL,
+            mime_type TEXT,
+            kind TEXT NOT NULL,
+            canonical_path TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            sha256 TEXT,
+            origin TEXT NOT NULL DEFAULT 'managed_generated',
+            status TEXT NOT NULL DEFAULT 'ready',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_session
+            ON agent_artifacts(session_id, created_at ASC);
+
         CREATE TABLE IF NOT EXISTS agent_step_logs (
             output_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,

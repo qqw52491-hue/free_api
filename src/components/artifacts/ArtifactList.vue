@@ -92,14 +92,9 @@ const normalizedList = computed(() => normalizeArtifactList(props.artifacts));
 }
 
 .artifact-cards-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-}
-
-@media (max-width: 640px) {
-  .artifact-cards-grid {
-    grid-template-columns: 1fr;
-  }
+  width: 100%;
 }
 </style>

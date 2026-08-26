@@ -163,8 +163,11 @@ pub struct DurableAgentContext {
     pub last_reported_prompt_tokens: Option<usize>,
     #[serde(default)]
     pub last_reported_history_estimate_tokens: Option<usize>,
+    #[serde(default)]
     pub last_persisted_summary: Option<String>,
+    #[serde(default)]
     pub persisted_summary_revision: u64,
+    #[serde(default)]
     pub needs_observation_refresh: bool,
 }
 
