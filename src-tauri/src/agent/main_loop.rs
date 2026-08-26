@@ -27,6 +27,9 @@ use tokio::time::{sleep, Duration};
 
 /// Agent 每个任务最多执行步数（可按项目需求调整）
 const MAX_STEPS: usize = 300;
+/// 正常会话只做短暂态请求重试；后台回归可显式提高到上限以避免 Provider 波动中断取证。
+const DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 3;
+const MAX_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 20;
 
 /// 仅将协议明确定义为未完成的 Todo 视为终态质询信号。
 /// 未知状态不做猜测，`done` 与 `failed` 则已是模型显式关闭的事项。
@@ -293,7 +296,11 @@ pub async fn run_agent_main_loop(
     auto_pilot: bool,
     session_id: Option<String>,
     log_context: Option<bool>,
+    transient_llm_request_retries: Option<u32>,
 ) -> Result<(), String> {
+    let transient_llm_request_retries = transient_llm_request_retries
+        .unwrap_or(DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
+        .clamp(1, MAX_TRANSIENT_LLM_REQUEST_RETRIES);
     let final_session_id = session_id.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -698,6 +705,7 @@ pub async fn run_agent_main_loop(
             &run_id,
             &goal,
             log_context,
+            transient_llm_request_retries,
             &final_session_id,
             step_id,
             &mut context,

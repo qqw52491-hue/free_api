@@ -703,6 +703,15 @@ pub fn is_non_retryable_error(err: &str) -> bool {
     false
 }
 
+/// 单次暂态请求重试的最大等待时间。上限允许长流程在 429/网络波动时持续恢复，
+/// 同时避免 20 次尝试沿用无界指数退避而等待数小时。
+const MAX_TRANSIENT_RETRY_BACKOFF_MS: u64 = 15_000;
+
+fn transient_retry_backoff_ms(attempt_index: u32) -> u64 {
+    let exponent = attempt_index.min(4);
+    (1_000u64 * (1u64 << exponent)).min(MAX_TRANSIENT_RETRY_BACKOFF_MS)
+}
+
 /// 带自动重试与状态码感知的流式请求
 pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     config: &ModelConfig,
@@ -737,8 +746,8 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                     last_error
                 );
                 if i < max_retries - 1 {
-                    // 指数退避 (1s, 2s, 4s...) 给服务端恢复窗口
-                    let backoff_ms = 1000u64 * (1 << i);
+                    // 有界指数退避（1s、2s、4s、8s、15s...）给服务端恢复窗口。
+                    let backoff_ms = transient_retry_backoff_ms(i);
                     tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
                 }
             }
@@ -883,6 +892,15 @@ mod tests {
         let body = config("gpt-4o-mini", "https://api.openai.com/v1").build_body(&[], "max");
         assert!(body.get("thinking").is_none());
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn transient_retry_backoff_is_exponential_but_bounded() {
+        use super::transient_retry_backoff_ms;
+        assert_eq!(transient_retry_backoff_ms(0), 1_000);
+        assert_eq!(transient_retry_backoff_ms(3), 8_000);
+        assert_eq!(transient_retry_backoff_ms(4), 15_000);
+        assert_eq!(transient_retry_backoff_ms(19), 15_000);
     }
 
     #[test]

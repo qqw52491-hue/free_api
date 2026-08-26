@@ -30,6 +30,9 @@ const STRUCTURED_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
 
 // 回归评测固定使用本机 SQLite 中的火山订阅模型，避免同名模型跨平台串路由。
 const DEFAULT_EVALUATION_ROUTE_PRESET: &str = "default";
+/// 不传具名预设时，后台回归必须尊重调用方当前选择的 UUID 路由。
+/// 这让模型对比不再依赖每新增一个模型都改一次常量表。
+const REQUESTED_EVALUATION_ROUTE_PRESET: &str = "requested";
 const GPT56_TERRA_LUNA_ROUTE_PRESET: &str = "gpt56_terra_luna";
 const VOLC_K2_PRO_ROUTE_PRESET: &str = "volc_k2_pro";
 const VOLC_SINGLE_PRO_ROUTE_PRESET: &str = "volc_single_pro";
@@ -260,6 +263,28 @@ fn resolve_enabled_model_id(
 
 /// 按候选链依次解析首个已启用的模型；全部不可用时汇总报错，
 /// 让调用方清楚知道尝试过哪些 (平台, 模型) 组合。
+fn validate_requested_model_id(
+    db: &DbState,
+    model_id: &str,
+    role: &str,
+) -> Result<(), String> {
+    if model_id.trim().is_empty() {
+        return Err(format!("回归评测未配置 {} 模型", role));
+    }
+    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let enabled: i64 = conn
+        .query_row(
+            "SELECT enabled FROM models WHERE id = ?1",
+            params![model_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("回归评测 {} 模型不可用：{}", role, error))?;
+    if enabled != 1 {
+        return Err(format!("回归评测 {} 模型未启用", role));
+    }
+    Ok(())
+}
+
 fn resolve_first_enabled_model_id(
     db: &DbState,
     candidates: &[(&str, &str)],
@@ -282,6 +307,21 @@ fn fixed_evaluation_model_routing(
     mut requested: ModelRoutingConfig,
     route_preset: Option<&str>,
 ) -> Result<(ModelRoutingConfig, evaluation::EvaluationRoutingMetadata), String> {
+    if route_preset.is_none() {
+        validate_requested_model_id(db, &requested.pro, "Pro")?;
+        validate_requested_model_id(db, &requested.flash, "Flash")?;
+        validate_requested_model_id(db, &requested.vision, "Vision")?;
+        requested.force_pro_on_first_step = true;
+        return Ok((
+            requested.clone(),
+            evaluation::EvaluationRoutingMetadata {
+                preset: REQUESTED_EVALUATION_ROUTE_PRESET.to_string(),
+                reasoning_model_id: requested.pro,
+                execution_model_id: requested.flash,
+            },
+        ));
+    }
+
     let spec = evaluation_route_spec(route_preset)?;
     let reasoning_model_id = resolve_first_enabled_model_id(db, spec.reasoning_candidates)?;
     let execution_model_id = resolve_first_enabled_model_id(db, spec.execution_candidates)?;
@@ -375,6 +415,7 @@ pub async fn start_background_agent_evaluation(
             true,
             Some(worker_session_id.clone()),
             Some(true),
+            Some(20),
         ));
 
         let monitor_app = event_app.clone();
@@ -573,6 +614,38 @@ mod tests {
 
         assert!(timed_out);
         assert!(stop_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn requested_enabled_model_ids_are_preserved_without_a_named_preset() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE models (id TEXT PRIMARY KEY, enabled INTEGER NOT NULL);\n                 INSERT INTO models (id, enabled) VALUES ('glm-test', 1), ('sense-test', 1);",
+            )
+            .unwrap();
+        let db = DbState(Arc::new(StdMutex::new(connection)));
+        let requested = ModelRoutingConfig {
+            pro: "glm-test".to_string(),
+            flash: "sense-test".to_string(),
+            vision: "glm-test".to_string(),
+            reasoning_effort: "auto".to_string(),
+            pro_reasoning_effort: String::new(),
+            flash_reasoning_effort: String::new(),
+            vision_reasoning_effort: String::new(),
+            force_pro_on_first_step: false,
+            context_budget_mode: "deep_coding".to_string(),
+        };
+
+        let (resolved, metadata) = fixed_evaluation_model_routing(&db, requested, None).unwrap();
+
+        assert_eq!(metadata.preset, REQUESTED_EVALUATION_ROUTE_PRESET);
+        assert_eq!(metadata.reasoning_model_id, "glm-test");
+        assert_eq!(metadata.execution_model_id, "sense-test");
+        assert_eq!(resolved.pro, "glm-test");
+        assert_eq!(resolved.flash, "sense-test");
+        assert_eq!(resolved.vision, "glm-test");
+        assert!(resolved.force_pro_on_first_step);
     }
 
     #[test]

@@ -189,6 +189,7 @@ pub async fn call_llm(
     step_id: usize,
     session_id: &str,
     log_context: bool,
+    transient_request_retries: u32,
     reasoning_effort: &str,
     can_early_challenge_finish: bool,
     interrupt_rx: &mut watch::Receiver<u64>,
@@ -359,7 +360,7 @@ pub async fn call_llm(
             &api_values,
             reasoning_effort,
             interrupt_rx,
-            3,
+            transient_request_retries,
             &mut on_event,
         )
         .await
