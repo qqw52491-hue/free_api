@@ -186,6 +186,7 @@ export function isSafeArtifactUrl(value?: string): boolean {
 export function isArtifactPreviewable(artifact: ArtifactDescriptor): boolean {
   if (artifact.content && artifact.content.trim().length > 0) return true;
   if (isSafeArtifactUrl(artifact.previewUrl)) return true;
+  if (artifact.artifactId) return true;
   if (artifact.localPath) {
     const fmt = (artifact.format || "").toLowerCase().replace(/^\./, "");
     const previewableExts = [
@@ -283,9 +284,11 @@ export function normalizeArtifact(input: AgentArtifactInput, index = 0): Artifac
   // 4. 如果是结构化对象 (安全深度解构，防止任何 [object Object] 污染)
   const obj = (input || {}) as Record<string, any>;
   
-  // 安全提取 path / localPath
+  // 安全提取 path / localPath / canonicalPath
   const safeLocalPath = extractSafeString(obj.localPath) ||
                         extractSafeString(obj.local_path) ||
+                        extractSafeString(obj.canonicalPath) ||
+                        extractSafeString(obj.canonical_path) ||
                         extractSafeString(obj.path) ||
                         extractSafeString(obj.filePath) ||
                         extractSafeString(obj.file_path) ||
@@ -372,8 +375,15 @@ export function parseArtifactPathAndDesc(raw: string): { cleanPath: string; desc
   let text = raw.trim();
   // 去除前导列表符号如 `- `, `* `, `1. `
   text = text.replace(/^[-*•]\s+/, "").replace(/^\d+\.\s+/, "").trim();
+  // 去除前导文件图标
+  text = text.replace(/^[📄📑📝📦📁]\s*/, "").trim();
   // 去除常见前缀标签如 `生成文件：`, `文件路径：`, `交付成果：`, `产物：`, `文件：`
-  text = text.replace(/^(?:生成文件|文件路径|交付成果|交付物|产物|文件)\s*[:：]\s*/i, "").trim();
+  text = text.replace(/^(?:生成文件|文件路径|交付成果|交付产物|交付物文件|交付物|产物|文件)\s*[:：]\s*/i, "").trim();
+
+  // 如果字符串包含中英文括号内的枚举（如 "结构（package.json、vite.config.ts）"），不是单一交付物路径
+  if (/[(（][^()（）]*[、,][^()（）]*[)）]/.test(text)) {
+    return { cleanPath: "" };
+  }
 
   // 1. 如果带有反引号包裹 `path` ...
   const backtickMatch = text.match(/^`([^`]+)`\s*(?:[—–\-:：]\s*(.*))?$/);
@@ -384,7 +394,7 @@ export function parseArtifactPathAndDesc(raw: string): { cleanPath: string; desc
     };
   }
 
-  // 2. 如果包含分隔符: ` — `, ` – `, ` - `, ` : `, `：`
+  // 2. 如果包含标准分隔符: ` — `, ` – `, ` - `, ` : `, `：`
   const separatorMatch = text.match(/^([^\s—–:："'`()[\]{}]+(?:\/[^\s—–:："'`()[\]{}]+)*\.[a-zA-Z0-9]{1,10})\s*(?:[—–\-:：]\s*(.*))?$/u);
   if (separatorMatch) {
     return {
@@ -394,10 +404,9 @@ export function parseArtifactPathAndDesc(raw: string): { cleanPath: string; desc
   }
 
   // 3. 通用正则匹配首个像文件路径的 token (支持中文字符与 Unicode 路径)
-  const pathMatch = text.match(/([^\s—–:："'`()[\]{}]+\.[a-zA-Z0-9]{1,10})/u);
+  const pathMatch = text.match(/([^\s—–:："'`()[\]{}、]+\.[a-zA-Z0-9]{1,10})/u);
   if (pathMatch && pathMatch.index !== undefined) {
     const matchedPath = pathMatch[1].trim();
-    // 剩下的部分作为描述
     const remainder = text.slice(pathMatch.index + matchedPath.length).replace(/^[—–\-:：\s]+/, "").trim();
     return {
       cleanPath: matchedPath,
@@ -421,29 +430,46 @@ export function extractArtifactsFromSummaryText(summary: string): string[] {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // 检查是否进入交付物小节
-    if (/(?:交付文件|交付产物|交付成果|生成文件|产物列表|已生成|Artifacts?|Generated Files?)/i.test(trimmed)) {
-      inDeliverableSection = true;
-      // 如果本行本身就带有冒号和文件路径 (例如 "生成文件：/home/w/文档/hello.md")，直接提取
-      if (/[.:：]/.test(trimmed) && trimmed.includes(".")) {
+    // 1. 如果行首带有显式文件图标或显式交付前缀，且包含有效扩展名，直接提取！
+    if (/^[📄📑📝📦📁]/.test(trimmed) || /^(?:生成文件|交付文件|交付物文件|交付产物|文件路径)[：:]/i.test(trimmed)) {
+      if (/[^\s—–:："'`()[\]{}、]+\.(?:md|markdown|html|htm|pdf|docx|xlsx|csv|png|jpg|jpeg|json|ts|rs|py|vue|txt|css|svg)/iu.test(trimmed)) {
         const parsed = parseArtifactPathAndDesc(trimmed);
         if (parsed.cleanPath && parsed.cleanPath.includes(".")) {
           extracted.push(trimmed);
+          continue;
         }
       }
+    }
+
+    // 2. 检查是否进入交付物小节标题
+    if (/(?:交付说明|交付文件|交付产物|交付成果|交付物|生成文件|产物列表|已生成文件|Artifacts?|Generated Files?)/i.test(trimmed)) {
+      inDeliverableSection = true;
       continue;
     }
-    // 如果进入了下一个其他标题 (例如 `### 最危险隐患` / `### 建议` / `---` / `### 验证证据`), 退出交付物小节
-    if (trimmed.startsWith("#") || trimmed.startsWith("---") || /^(?:最危险隐患|隐患|建议|后续工作|验证证据|核验范围)/.test(trimmed)) {
+
+    // 3. 如果进入了下一个其他标题或小节，退出交付物小节
+    if (trimmed.startsWith("#") || trimmed.startsWith("---") || /^(?:最危险隐患|隐患|建议|后续工作|验证证据|核验范围|一、|二、|三、|四、|六、)/.test(trimmed)) {
       inDeliverableSection = false;
       continue;
     }
 
+    // 4. 在交付物小节内部逐行提取列表项
     if (inDeliverableSection) {
-      // 匹配行内的文件路径 (支持中文目录路径)
-      const hasFilePath = /[^\s—–:："'`()[\]{}]+\.(?:md|markdown|html|htm|pdf|docx|xlsx|csv|png|jpg|jpeg|json|ts|rs|py|vue|txt|css|svg)/iu.test(trimmed);
-      if (hasFilePath) {
-        extracted.push(trimmed);
+      // 排除叙述性解释语句（如 "报告内容基于项目公开结构（package.json...）进行模拟审查"）
+      if (/^(?:报告内容|基于|参考|如需|请注意|说明[：:]|注[：:])/i.test(trimmed) || trimmed.includes("进行模拟审查") || trimmed.includes("深度代码审查")) {
+        continue;
+      }
+
+      // 只有格式化为列表项、包含图标或显式路径的行才判定为交付物
+      const isListItemOrExplicit = /^[-*•\d.]/.test(trimmed) || trimmed.startsWith("/") || trimmed.startsWith("./");
+      if (isListItemOrExplicit) {
+        const hasFilePath = /[^\s—–:："'`()[\]{}、]+\.(?:md|markdown|html|htm|pdf|docx|xlsx|csv|png|jpg|jpeg|json|ts|rs|py|vue|txt|css|svg)/iu.test(trimmed);
+        if (hasFilePath) {
+          const parsed = parseArtifactPathAndDesc(trimmed);
+          if (parsed.cleanPath && parsed.cleanPath.includes(".")) {
+            extracted.push(trimmed);
+          }
+        }
       }
     }
   }

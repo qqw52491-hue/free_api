@@ -145,18 +145,22 @@ const canDownload = computed(() => Boolean(
   props.artifact.artifactId ||
   props.artifact.localPath
 ));
-const hasLocalPath = computed(() => Boolean(props.artifact.localPath && typeof props.artifact.localPath === "string" && props.artifact.localPath.trim().length > 0 && props.artifact.localPath.trim() !== "[object Object]"));
+const hasLocalPath = computed(() => Boolean(
+  (props.artifact.localPath && typeof props.artifact.localPath === "string" && props.artifact.localPath.trim().length > 0 && props.artifact.localPath.trim() !== "[object Object]") ||
+  props.artifact.artifactId
+));
 
 const copied = ref(false);
 const downloaded = ref(false);
 
 async function copyFile() {
   const rawPath = props.artifact.localPath;
-  if (!rawPath) return;
   try {
-    const absPath = await resolveArtifactAbsolutePath(rawPath);
+    const absPath = rawPath ? await resolveArtifactAbsolutePath(rawPath) : (props.artifact.artifactId ? await resolveArtifactAbsolutePath(props.artifact.artifactId) : "");
+    if (!absPath && !rawPath) return;
+
     // 1. 写入绝对路径到常规文本剪贴板
-    await navigator.clipboard.writeText(absPath || rawPath);
+    await navigator.clipboard.writeText(absPath || rawPath || "");
 
     // 2. 调用 Rust 将文件对象自身注入系统文件剪贴板（支持在文件管理器/微信/桌面直接 Ctrl+V 粘贴物理文件）
     const { invoke } = await import("@tauri-apps/api/core");
@@ -169,11 +173,13 @@ async function copyFile() {
   } catch (err) {
     console.warn("注入文件剪贴板失败，降级为常规文本复制", err);
     try {
-      await navigator.clipboard.writeText(rawPath);
-      copied.value = true;
-      setTimeout(() => {
-        copied.value = false;
-      }, 2000);
+      if (rawPath) {
+        await navigator.clipboard.writeText(rawPath);
+        copied.value = true;
+        setTimeout(() => {
+          copied.value = false;
+        }, 2000);
+      }
     } catch {
       // ignore
     }

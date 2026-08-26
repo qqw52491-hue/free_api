@@ -5,12 +5,63 @@
             <header class="canvas-top-bar">
                 <div class="canvas-title">
                     <span class="pulse-dot">●</span>
-                    <span>成果画布 · 独立预览</span>
+                    <span>成果画布 · 预览</span>
                 </div>
-                <button type="button" class="btn-exit-canvas" @click="activeTab = 'detail'" title="退出画布并返回调用详情">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                    <span>返回执行详情</span>
-                </button>
+                <div class="canvas-actions">
+                    <!-- 独立窗口 / 浏览器打开 (HTML专属) -->
+                    <button
+                        v-if="pureHtmlCode"
+                        type="button"
+                        class="btn-canvas-action"
+                        title="在独立窗口中打开运行此网页"
+                        @click="handleOpenCanvasStandalone"
+                    >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+                        <span>单独页面打开</span>
+                    </button>
+
+                    <!-- Markdown 专属：导出为 Word (.doc) -->
+                    <button
+                        v-if="isMarkdownPreview"
+                        type="button"
+                        class="btn-canvas-action"
+                        :title="canvasWordExported ? '已成功导出 Word' : '将当前 Markdown 文档导出为 Word (.doc)'"
+                        @click="exportCanvasToWord"
+                    >
+                        <svg v-if="!canvasWordExported" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                        <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                        <span>{{ canvasWordExported ? "已导出Word" : "导出Word" }}</span>
+                    </button>
+
+                    <!-- Markdown 专属：导出为 PDF / 打印 -->
+                    <button
+                        v-if="isMarkdownPreview"
+                        type="button"
+                        class="btn-canvas-action"
+                        title="将当前文档打印或另存为 PDF"
+                        @click="exportCanvasToPdf"
+                    >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>
+                        <span>导出PDF</span>
+                    </button>
+
+                    <!-- 另存为 -->
+                    <button
+                        type="button"
+                        class="btn-canvas-action"
+                        title="另存为本地文件"
+                        @click="handleSaveCanvas"
+                    >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4M7 10l5 5 5-5M12 15V3"/></svg>
+                        <span>{{ canvasSaved ? '已保存' : '另存为' }}</span>
+                    </button>
+
+                    <!-- 返回详情 -->
+                    <button type="button" class="btn-exit-canvas" @click="activeTab = 'detail'" title="退出画布并返回调用详情">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        <span>返回详情</span>
+                    </button>
+                </div>
             </header>
 
             <div class="canvas-viewport">
@@ -656,14 +707,199 @@ const pureHtmlCode = computed(() => {
 
 const hasPreviewContent = computed(() => {
     const text = combinedPreviewContent.value;
-    return Boolean(
-        text.includes("```html") ||
-        text.includes("```echarts") ||
-        text.includes("```chart") ||
-        text.includes("```mermaid") ||
-        pureHtmlCode.value
-    );
+    return Boolean(text && text.trim().length > 0);
 });
+
+const isMarkdownPreview = computed(() => {
+    return !pureHtmlCode.value && Boolean(hasPreviewContent.value);
+});
+
+const canvasSaved = ref(false);
+const canvasWordExported = ref(false);
+
+async function handleOpenCanvasStandalone() {
+    if (pureHtmlCode.value) {
+        const { openWebviewWindow } = await import("../../composables/useBrowserPreview");
+        const blob = new Blob([pureHtmlCode.value], { type: "text/html" });
+        const url = URL.createObjectURL(blob);
+        await openWebviewWindow(url, "成果画布 · 独立窗口");
+    }
+}
+
+async function exportCanvasToWord() {
+    const rawContent = combinedPreviewContent.value;
+    if (!rawContent) return;
+
+    let contentHtml = rawContent;
+    try {
+        const { marked } = await import("marked");
+        const DOMPurify = (await import("dompurify")).default;
+        contentHtml = DOMPurify.sanitize(marked.parse(rawContent) as string);
+    } catch {
+        contentHtml = `<pre>${rawContent}</pre>`;
+    }
+
+    const title = props.currentGoal || "文档成果导出";
+
+    const wordDocContent = `<!DOCTYPE html>
+<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+<head>
+<meta charset='utf-8'>
+<title>${title}</title>
+<!--[if gte mso 9]>
+<xml>
+<w:WordDocument>
+<w:View>Print</w:View>
+<w:Zoom>100</w:Zoom>
+<w:DoNotOptimizeForBrowser/>
+</w:WordDocument>
+</xml>
+<![endif]-->
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 11pt;
+    line-height: 1.6;
+    color: #1e293b;
+    padding: 20px;
+  }
+  h1 { font-size: 20pt; font-weight: bold; color: #0f172a; border-bottom: 2px solid #6366f1; padding-bottom: 6px; margin-bottom: 16px; }
+  h2 { font-size: 15pt; font-weight: bold; color: #1e293b; margin-top: 20px; margin-bottom: 10px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }
+  h3 { font-size: 13pt; font-weight: 600; color: #334155; margin-top: 14px; margin-bottom: 8px; }
+  p { margin: 8px 0; }
+  ul, ol { padding-left: 24px; margin: 8px 0; }
+  li { margin: 4px 0; }
+  code { font-family: Consolas, Monaco, "Courier New", monospace; font-size: 10pt; background: #f1f5f9; padding: 2px 5px; border-radius: 4px; color: #475569; }
+  pre { background: #0f172a; color: #f8fafc; padding: 14px; border-radius: 6px; font-family: Consolas, monospace; font-size: 9.5pt; line-height: 1.4; overflow-x: auto; }
+  pre code { background: transparent; color: inherit; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 10pt; }
+  th, td { border: 1px solid #cbd5e1; padding: 8px 12px; text-align: left; }
+  th { background-color: #f8fafc; font-weight: 600; color: #334155; }
+  tr:nth-child(even) { background-color: #f8fafc; }
+  blockquote { border-left: 4px solid #6366f1; margin: 12px 0; padding: 8px 16px; background: #f8fafc; color: #64748b; }
+  hr { border: none; border-top: 1px solid #e2e8f0; margin: 20px 0; }
+</style>
+</head>
+<body>
+  <h1>${title}</h1>
+  ${contentHtml}
+</body>
+</html>`;
+
+    try {
+        const { save } = await import("@tauri-apps/plugin-dialog");
+        const targetPath = await save({
+            defaultPath: `${title}.doc`,
+            filters: [{ name: "Word Document (*.doc)", extensions: ["doc"] }],
+        });
+        if (!targetPath) return;
+
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("export_artifact_to_file", {
+            artifactId: null,
+            sourcePath: null,
+            content: wordDocContent,
+            targetPath,
+        });
+
+        canvasWordExported.value = true;
+        setTimeout(() => {
+            canvasWordExported.value = false;
+        }, 2500);
+    } catch (err) {
+        console.warn("导出 Word 失败:", err);
+    }
+}
+
+async function exportCanvasToPdf() {
+    const rawContent = combinedPreviewContent.value;
+    if (!rawContent) return;
+
+    let contentHtml = rawContent;
+    try {
+        const { marked } = await import("marked");
+        const DOMPurify = (await import("dompurify")).default;
+        contentHtml = DOMPurify.sanitize(marked.parse(rawContent) as string);
+    } catch {
+        contentHtml = `<pre>${rawContent}</pre>`;
+    }
+
+    const title = props.currentGoal || "文档成果导出";
+
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+        window.print();
+        return;
+    }
+
+    printWindow.document.write(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>${title}</title>
+<style>
+  @page { margin: 20mm 15mm; size: A4; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 11pt;
+    line-height: 1.6;
+    color: #111827;
+    margin: 0;
+    padding: 0;
+  }
+  h1 { font-size: 22pt; font-weight: bold; color: #111827; border-bottom: 2px solid #4f46e5; padding-bottom: 8px; margin-bottom: 20px; }
+  h2 { font-size: 16pt; font-weight: bold; color: #1f2937; margin-top: 24px; margin-bottom: 12px; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }
+  h3 { font-size: 13pt; font-weight: 600; color: #374151; margin-top: 16px; margin-bottom: 8px; }
+  p { margin: 8px 0; }
+  ul, ol { padding-left: 24px; margin: 8px 0; }
+  code { font-family: Consolas, monospace; font-size: 9.5pt; background: #f3f4f6; padding: 2px 5px; border-radius: 4px; }
+  pre { background: #f8fafc; border: 1px solid #e2e8f0; color: #0f172a; padding: 12px; border-radius: 6px; font-family: Consolas, monospace; font-size: 9pt; page-break-inside: avoid; }
+  pre code { background: transparent; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 9.5pt; page-break-inside: avoid; }
+  th, td { border: 1px solid #d1d5db; padding: 8px 12px; text-align: left; }
+  th { background-color: #f9fafb; font-weight: 600; }
+  blockquote { border-left: 4px solid #4f46e5; margin: 12px 0; padding: 6px 14px; background: #f9fafb; color: #4b5563; }
+</style>
+</head>
+<body>
+  <h1>${title}</h1>
+  ${contentHtml}
+</body>
+</html>`);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+        printWindow.print();
+        printWindow.close();
+    }, 250);
+}
+
+async function handleSaveCanvas() {
+    try {
+        const { save } = await import("@tauri-apps/plugin-dialog");
+        const isHtml = Boolean(pureHtmlCode.value);
+        const targetPath = await save({
+            defaultPath: isHtml ? "dashboard.html" : "document.md",
+            filters: isHtml
+                ? [{ name: "HTML Document (*.html)", extensions: ["html", "htm"] }]
+                : [{ name: "Markdown Document (*.md)", extensions: ["md", "txt"] }],
+        });
+        if (!targetPath) return;
+
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("export_artifact_to_file", {
+            artifactId: null,
+            sourcePath: null,
+            content: pureHtmlCode.value || combinedPreviewContent.value,
+            targetPath,
+        });
+
+        canvasSaved.value = true;
+        setTimeout(() => { canvasSaved.value = false; }, 2000);
+    } catch (err) {
+        console.warn("另存为失败:", err);
+    }
+}
 
 // 仅当用户在左侧点击了“展开预览”传入 activePreviewContent 时，才切换到 preview 模式
 watch(
@@ -717,6 +953,30 @@ defineExpose({
     height: 38px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     background: #18181b;
+}
+.canvas-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.btn-canvas-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.05);
+    color: #e4e4e7;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.btn-canvas-action:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: #ffffff;
+    border-color: rgba(255, 255, 255, 0.2);
 }
 .btn-exit-canvas {
     display: inline-flex;

@@ -68,12 +68,12 @@
               <span>{{ copied ? "已复制" : "复制文件" }}</span>
             </button>
 
-            <!-- 导出为 Word -->
+            <!-- Markdown 专属：导出为 Word (.doc) -->
             <button
-              v-if="isMarkdownFormat || isHtmlPreview"
+              v-if="isMarkdownFormat"
               type="button"
               class="action-btn"
-              :title="wordExported ? '已成功导出 Word' : '将当前文档导出为 Word (.doc)'"
+              :title="wordExported ? '已成功导出 Word' : '将当前 Markdown 文档导出为 Word (.doc)'"
               @click="exportToWord"
             >
               <svg v-if="!wordExported" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
@@ -81,9 +81,9 @@
               <span>{{ wordExported ? "已导出Word" : "导出Word" }}</span>
             </button>
 
-            <!-- 导出为 PDF / 打印 -->
+            <!-- Markdown 专属：导出为 PDF / 打印 -->
             <button
-              v-if="isMarkdownFormat || isHtmlPreview"
+              v-if="isMarkdownFormat"
               type="button"
               class="action-btn"
               title="将当前文档打印或另存为 PDF"
@@ -91,6 +91,18 @@
             >
               <svg viewBox="0 0 24 24"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>
               <span>导出PDF</span>
+            </button>
+
+            <!-- HTML 专属：在外部独立浏览器中打开 -->
+            <button
+              v-if="isHtmlPreview && hasLocalPath"
+              type="button"
+              class="action-btn"
+              title="在系统默认浏览器中打开运行此网页应用"
+              @click="handleOpenInSystem"
+            >
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+              <span>浏览器打开</span>
             </button>
 
             <!-- 另存为 / 导出源文件 -->

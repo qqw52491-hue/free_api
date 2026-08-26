@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentTaskResources } from "./useAgentTaskResources";
 import { usePersistedAgentConversation, type PersistedConversationMessage } from "./usePersistedAgentConversation";
 import type { ArtifactDescriptor, AgentArtifactInput } from "../types/artifact";
-import { extractArtifactsFromSummaryText, listSessionArtifacts, normalizeArtifactList } from "../utils/artifact";
+import { listSessionArtifacts, normalizeArtifact, normalizeArtifactList } from "../utils/artifact";
 
 export interface AgentHistoryTurn {
     id: string;
@@ -234,6 +234,7 @@ export function useAgentSession(sessionId: string) {
     );
     const historyTurns = computed<AgentHistoryTurn[]>(() => historyRuns.value.map((run) => ({
         ...run,
+        artifacts: normalizeArtifactList(run.artifacts),
         messages: messagesForRun(run).map((message) => ({ ...message, timestamp: traceTimestamp(message.created_at) })),
     })));
     // 仅保留没有任何运行轨迹可归属的早期旧消息；有轨迹的消息由对应回合原位显示。
@@ -380,27 +381,27 @@ export function useAgentSession(sessionId: string) {
         reloadManagedArtifacts();
     });
 
+    const currentRunArtifacts = ref<ArtifactDescriptor[]>([]);
+
     const finalArtifacts = computed<ArtifactDescriptor[]>(() => {
         const output = finishOutput.value || {};
-        const candidates = [output.artifacts, output.files, output.created_files, output.paths];
-        const flatList: AgentArtifactInput[] = [
-            ...managedSessionArtifacts.value,
-            ...candidates.flatMap((candidate) => Array.isArray(candidate) ? candidate : candidate ? [candidate] : []),
-        ].filter((item) => {
-            if (typeof item === "string") return !isLegacySystemSummary(item);
-            if (item && typeof item === "object") {
-                const path = (item as any).localPath || (item as any).local_path || (item as any).path || (item as any).name || "";
-                return !isLegacySystemSummary(String(path));
-            }
-            return true;
-        });
-        
-        // 智能补充：如果大模型在总结正文中提及了交付文件，自动抓取补全
-        const summaryText = finalSummary.value || "";
-        const fromSummary = extractArtifactsFromSummaryText(summaryText);
-        for (const line of fromSummary) {
-            flatList.push(line);
-        }
+        const candidates = [
+            ...currentRunArtifacts.value,
+            output.artifacts,
+            output.files,
+            output.created_files,
+            output.paths,
+        ];
+        const flatList: AgentArtifactInput[] = candidates
+            .flatMap((candidate) => Array.isArray(candidate) ? candidate : candidate ? [candidate] : [])
+            .filter((item) => {
+                if (typeof item === "string") return !isLegacySystemSummary(item);
+                if (item && typeof item === "object") {
+                    const path = (item as any).localPath || (item as any).local_path || (item as any).path || (item as any).name || "";
+                    return !isLegacySystemSummary(String(path));
+                }
+                return true;
+            });
 
         return normalizeArtifactList(flatList);
     });
@@ -419,7 +420,7 @@ export function useAgentSession(sessionId: string) {
     function isLegacySystemSummary(path: string) {
         return /(?:^|[/\\])task_summaries(?:[/\\]|$)/i.test(path) || /task[_ -]?summary.*\.md$/i.test(path);
     }
-    function artifactPaths(value: Record<string, unknown>, summaryText?: string): ArtifactDescriptor[] {
+    function artifactPaths(value: Record<string, unknown>): ArtifactDescriptor[] {
         const candidates = [value.artifacts, value.files, value.created_files, value.paths];
         const flatList: AgentArtifactInput[] = candidates
             .flatMap((candidate) => Array.isArray(candidate) ? candidate : candidate ? [candidate] : [])
@@ -431,13 +432,6 @@ export function useAgentSession(sessionId: string) {
                 }
                 return true;
             });
-
-        if (summaryText) {
-            const fromSummary = extractArtifactsFromSummaryText(summaryText);
-            for (const line of fromSummary) {
-                flatList.push(line);
-            }
-        }
 
         return normalizeArtifactList(flatList);
     }
@@ -491,10 +485,18 @@ export function useAgentSession(sessionId: string) {
                 return s || d || "";
             })(),
             artifacts: (() => {
-                const s = toText(completion.summary || completion.message || completion.result || completion.content);
-                const d = toText(completion.details || "");
-                const sum = (s && d && s !== d) ? `${s}\n\n${d}` : (s || d || "");
-                return artifactPaths(completion, sum);
+                const list = [...artifactPaths(completion)];
+                for (const step of steps) {
+                    if (step.tool === "artifact_manager" || step.action === "create_document") {
+                        try {
+                            const parsed = typeof step.result === "string" ? JSON.parse(step.result) : step.result;
+                            if (parsed && (parsed.artifact_id || parsed.canonical_path)) {
+                                list.push(normalizeArtifact(parsed));
+                            }
+                        } catch {}
+                    }
+                }
+                return normalizeArtifactList(list);
             })(),
             startedAt,
             completedAt,
@@ -981,6 +983,17 @@ export function useAgentSession(sessionId: string) {
                 if (payload.output) {
                     existing.result = payload.output;
                     existing.rawResult = payload.output;
+                    if (existing.tool === "artifact_manager" || existing.action === "create_document") {
+                        try {
+                            const parsed = typeof payload.output === "string" ? JSON.parse(payload.output) : payload.output;
+                            if (parsed && (parsed.artifact_id || parsed.canonical_path)) {
+                                const desc = normalizeArtifact(parsed);
+                                if (desc && !currentRunArtifacts.value.some(a => a.id === desc.id || a.artifactId === desc.artifactId)) {
+                                    currentRunArtifacts.value.push(desc);
+                                }
+                            }
+                        } catch {}
+                    }
                 }
             }
             appendLog(`[步骤完成 #${stepId + 1}] ${existing?.description || ""}`);
@@ -1059,6 +1072,7 @@ export function useAgentSession(sessionId: string) {
         completionMessage.value = "";
         streamingSummary.value = "";
         finishOutput.value = null;
+        currentRunArtifacts.value = [];
         hasError.value = false;
         currentGoal.value = "";
         pauseReason.value = "";

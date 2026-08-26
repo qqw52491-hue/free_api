@@ -136,13 +136,6 @@
 
             <p v-if="isRunning && !timelineEntries.length && !legacyMessages.length" class="idle-live"><i></i>{{ stateDescription }}</p>
         </div>
-
-        <!-- 产物预览弹窗 (支持 HTML 沙箱、Markdown、图片、代码等) -->
-        <ArtifactPreviewDialog
-            :open="previewDialogOpen"
-            :artifact="selectedPreviewArtifact"
-            @close="previewDialogOpen = false"
-        />
     </div>
 </template>
 <script setup lang="ts">
@@ -153,7 +146,6 @@ import { formatClock, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
 import ArtifactList from "../artifacts/ArtifactList.vue";
-import ArtifactPreviewDialog from "../artifacts/ArtifactPreviewDialog.vue";
 
 type HistoryMessage = { id: string; role: string; content: string; created_at: string; timestamp: number };
 type HistoryTurn = { id: string; goal: string; status: string; steps: AgentStepItem[]; messages: HistoryMessage[]; summary: string; artifacts: AgentArtifactInput[]; startedAt: number; completedAt: number };
@@ -206,15 +198,20 @@ const emit = defineEmits<{
     "open-preview": [code: string];
 }>();
 
-const previewDialogOpen = ref(false);
-const selectedPreviewArtifact = ref<ArtifactDescriptor | null>(null);
-
-function handlePreviewArtifact(artifact: ArtifactDescriptor) {
-    if (artifact.kind === "web" && artifact.content) {
-        emit("open-preview", artifact.content);
+async function handlePreviewArtifact(artifact: ArtifactDescriptor) {
+    if (!artifact.content) {
+        if (artifact.artifactId) {
+            const { readArtifactById } = await import("../../utils/artifact");
+            const text = await readArtifactById(artifact.artifactId);
+            if (text) artifact.content = text;
+        } else if (artifact.localPath) {
+            const { readArtifactFile } = await import("../../utils/artifact");
+            const text = await readArtifactFile(artifact.localPath);
+            if (text) artifact.content = text;
+        }
     }
-    selectedPreviewArtifact.value = artifact;
-    previewDialogOpen.value = true;
+    const content = artifact.content || artifact.localPath || "";
+    emit("open-preview", content);
 }
 
 function handleDownloadArtifact(_artifact: ArtifactDescriptor) {
@@ -365,10 +362,13 @@ function historyTimeline(): TimelineEntry[] {
 }
 function currentTimeline(): TimelineEntry[] {
     const timeline: TimelineEntry[] = [];
-    // 只有当当前 goal 已经在 historyTurns 中被持久化（且状态已终结）时才隐藏 live，防止因之前的历史回合导致 live 误提前销毁引起闪烁/跳动
-    const alreadyPersisted = !props.isRunning && props.historyTurns.length > 0 && props.historyTurns.some((turn) =>
-        Boolean(props.currentGoal && turn.goal.trim() === props.currentGoal.trim() && ["succeeded", "failed", "cancelled"].includes(turn.status))
-    );
+    // 只有当当前 goal 已经在 historyTurns 中被持久化（且状态已终结）时才隐藏 live，防止重复渲染双份 completion
+    const alreadyPersisted = !props.isRunning && props.historyTurns.length > 0 && props.historyTurns.some((turn) => {
+        if (!props.currentGoal) return true;
+        const cleanGoal = props.currentGoal.trim();
+        const turnGoal = turn.goal.trim();
+        return (cleanGoal === turnGoal || cleanGoal.includes(turnGoal) || turnGoal.includes(cleanGoal)) && ["succeeded", "failed", "cancelled"].includes(turn.status);
+    });
     if (alreadyPersisted) return timeline;
     const plans = planEntries(props.steps, "live", props.isThinking);
     const firstTimestamp = plans[0]?.timestamp || Date.now();
