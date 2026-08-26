@@ -458,6 +458,11 @@ pub async fn run_agent_main_loop(
     } else {
         context.context_window_tokens = 32_768;
     }
+    context.budget_config = match model_routing.context_budget_mode.as_str() {
+        "cost_saving" => crate::agent::context::budget::ContextBudgetConfig::cost_saving(),
+        "ultra_fast" => crate::agent::context::budget::ContextBudgetConfig::ultra_fast(),
+        _ => crate::agent::context::budget::ContextBudgetConfig::deep_coding(),
+    };
     context.turns_history =
         crate::agent::conversation::recent_history(state.inner(), &final_session_id)?;
     // 审查任务在首次模型调用前注入轻量项目地图。它只包含目录、入口和 Git 元数据，

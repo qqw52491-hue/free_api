@@ -208,3 +208,41 @@ export const AGENT_TASK_PRESETS = [
     { label: "整理下载", goal: "列出下载文件夹中最近修改的 5 个文件，以及其大小。" },
     { label: "系统信息", goal: "获取系统版本、主机名、当前用户名和 IP 地址。" },
 ] as const;
+
+export type ContextBudgetMode = "deep_coding" | "cost_saving" | "ultra_fast";
+
+export interface ContextBudgetModeOption {
+    id: ContextBudgetMode;
+    label: string;
+    icon: string;
+    tag: string;
+    description: string;
+    tooltip: string;
+}
+
+export const CONTEXT_BUDGET_MODES: ContextBudgetModeOption[] = [
+    {
+        id: "deep_coding",
+        label: "长程",
+        icon: "🚀",
+        tag: "75% 窗口",
+        description: "长程沉浸 (推荐)",
+        tooltip: "🚀 长程深度编码：75% 窗口 / 85% 触发 / 50% 回落，保留几十步完整代码记忆",
+    },
+    {
+        id: "cost_saving",
+        label: "省流",
+        icon: "💰",
+        tag: "50% 窗口",
+        description: "省流均衡",
+        tooltip: "💰 省流均衡模式：50% 窗口 / 75% 触发 / 35% 回落，更积极归档以节省 Token 费用",
+    },
+    {
+        id: "ultra_fast",
+        label: "极速",
+        icon: "🏎️",
+        tag: "35% 窗口",
+        description: "极致响应",
+        tooltip: "🏎️ 极致响应模式：35% 窗口 / 65% 触发 / 25% 回落，极低首字延迟",
+    },
+];

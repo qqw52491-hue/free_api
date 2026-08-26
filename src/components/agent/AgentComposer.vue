@@ -15,6 +15,44 @@
                 <div class="composer-tools">
                     <button type="button" title="模型与任务设置" @click="$emit('open-settings')"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
                     <button class="model-chip" type="button" title="切换模型" @click="$emit('open-settings')"><span>{{ currentModelName }}</span><svg viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></svg></button>
+                    
+                    <!-- 🚀 上下文压缩模式胶囊 (左下角与模型并排) -->
+                    <div class="budget-mode-picker" ref="budgetPickerRef">
+                        <button
+                            class="budget-chip"
+                            type="button"
+                            :class="{ active: budgetMenuOpen }"
+                            :disabled="isRunning"
+                            :title="currentBudgetTooltip"
+                            @click="toggleBudgetMenu"
+                        >
+                            <span class="budget-icon">{{ currentBudgetIcon }}</span>
+                            <span class="budget-label">{{ currentBudgetLabel }}</span>
+                            <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
+                        </button>
+
+                        <div v-if="budgetMenuOpen" class="budget-dropdown-menu" @click.stop>
+                            <div class="budget-menu-header">上下文与压缩策略</div>
+                            <button
+                                v-for="opt in budgetModes"
+                                :key="opt.id"
+                                type="button"
+                                class="budget-menu-item"
+                                :class="{ selected: opt.id === (budgetMode || 'deep_coding') }"
+                                @click="selectBudgetMode(opt.id)"
+                            >
+                                <span class="opt-icon">{{ opt.icon }}</span>
+                                <div class="opt-text">
+                                    <div class="opt-title">
+                                        <strong>{{ opt.description }}</strong>
+                                        <span class="opt-tag">{{ opt.tag }}</span>
+                                    </div>
+                                    <small class="opt-sub">{{ opt.tooltip }}</small>
+                                </div>
+                                <svg v-if="opt.id === (budgetMode || 'deep_coding')" class="check-icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+                            </button>
+                        </div>
+                    </div>
                 </div>
                 <div class="composer-actions">
                     <button v-if="isRunning" class="stop-control" type="button" :disabled="stopRequested" @click="$emit('stop')">{{ stopRequested ? '停止中' : '停止' }}</button>
@@ -81,8 +119,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
-import type { AgentHumanForm, AgentModelOption, AgentSessionTelemetry } from "./types";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { CONTEXT_BUDGET_MODES, type AgentHumanForm, type AgentModelOption, type AgentSessionTelemetry, type ContextBudgetMode } from "./types";
 
 const props = defineProps<{
     draft: string;
@@ -95,17 +133,53 @@ const props = defineProps<{
     humanForm: AgentHumanForm | null;
     allModels: AgentModelOption[];
     currentModelId: string;
+    budgetMode?: ContextBudgetMode;
     telemetry?: AgentSessionTelemetry | null;
 }>();
 const emit = defineEmits<{
     "update:draft": [value: string];
     "update:model": [modelId: string];
+    "update:budget-mode": [mode: ContextBudgetMode];
     submit: [];
     stop: [];
     "open-settings": [];
 }>();
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
+const budgetPickerRef = ref<HTMLElement | null>(null);
+const budgetMenuOpen = ref(false);
+
+const budgetModes = CONTEXT_BUDGET_MODES;
+const currentBudgetModeObj = computed(() => {
+    const mode = props.budgetMode || "deep_coding";
+    return budgetModes.find((item) => item.id === mode) || budgetModes[0];
+});
+const currentBudgetIcon = computed(() => currentBudgetModeObj.value.icon);
+const currentBudgetLabel = computed(() => currentBudgetModeObj.value.label);
+const currentBudgetTooltip = computed(() => currentBudgetModeObj.value.tooltip);
+
+function toggleBudgetMenu() {
+    if (props.isRunning) return;
+    budgetMenuOpen.value = !budgetMenuOpen.value;
+}
+
+function selectBudgetMode(mode: ContextBudgetMode) {
+    emit("update:budget-mode", mode);
+    budgetMenuOpen.value = false;
+}
+
+function handleClickOutside(e: MouseEvent) {
+    if (budgetPickerRef.value && !budgetPickerRef.value.contains(e.target as Node)) {
+        budgetMenuOpen.value = false;
+    }
+}
+
+onMounted(() => {
+    document.addEventListener("click", handleClickOutside);
+});
+onBeforeUnmount(() => {
+    document.removeEventListener("click", handleClickOutside);
+});
 
 function autoResizeTextarea() {
     nextTick(() => {
@@ -248,6 +322,166 @@ textarea::placeholder {
     font-size: 12px !important;
     font-weight: 500 !important;
     color: #d4d4d8 !important;
+}
+
+.budget-mode-picker {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.budget-chip {
+    width: auto !important;
+    height: 28px !important;
+    padding: 0 9px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 5px !important;
+    font-size: 12px !important;
+    font-weight: 500 !important;
+    color: #e4e4e7 !important;
+    background: rgba(255, 255, 255, 0.05) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 6px !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.budget-chip:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.09) !important;
+    border-color: rgba(255, 255, 255, 0.18) !important;
+}
+
+.budget-chip.active {
+    background: rgba(59, 130, 246, 0.15) !important;
+    border-color: rgba(59, 130, 246, 0.4) !important;
+    color: #93c5fd !important;
+}
+
+.budget-chip .budget-icon {
+    font-size: 13px;
+    line-height: 1;
+}
+
+.budget-chip .chevron-icon {
+    width: 12px;
+    height: 12px;
+    stroke: currentColor;
+    stroke-width: 2;
+    fill: none;
+    opacity: 0.7;
+}
+
+.budget-dropdown-menu {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    width: 260px;
+    background: #1e1e24;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    padding: 6px;
+    z-index: 99;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    backdrop-filter: blur(12px);
+    animation: popIn 0.15s ease-out;
+}
+
+@keyframes popIn {
+    from { opacity: 0; transform: translateY(4px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.budget-menu-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: #71717a;
+    padding: 4px 8px 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    margin-bottom: 2px;
+}
+
+.budget-menu-item {
+    display: flex !important;
+    align-items: center !important;
+    width: 100% !important;
+    height: auto !important;
+    padding: 8px 10px !important;
+    gap: 10px !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 6px !important;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.15s ease;
+}
+
+.budget-menu-item:hover {
+    background: rgba(255, 255, 255, 0.06) !important;
+}
+
+.budget-menu-item.selected {
+    background: rgba(59, 130, 246, 0.12) !important;
+    border-color: rgba(59, 130, 246, 0.25) !important;
+}
+
+.opt-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+}
+
+.opt-text {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.opt-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.opt-title strong {
+    font-size: 12px;
+    font-weight: 600;
+    color: #f4f4f5;
+}
+
+.opt-tag {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #a1a1aa;
+}
+
+.budget-menu-item.selected .opt-tag {
+    background: rgba(59, 130, 246, 0.2);
+    color: #93c5fd;
+}
+
+.opt-sub {
+    font-size: 10px;
+    color: #71717a;
+    line-height: 1.3;
+    white-space: normal;
+}
+
+.check-icon {
+    width: 14px;
+    height: 14px;
+    stroke: #60a5fa;
+    stroke-width: 2.5;
+    fill: none;
+    flex-shrink: 0;
 }
 
 .composer-actions {

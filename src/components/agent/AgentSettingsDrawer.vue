@@ -127,7 +127,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { AGENT_TASK_PRESETS, type AgentModelOption } from "./types";
+import { AGENT_TASK_PRESETS, type AgentModelOption, type ContextBudgetMode } from "./types";
 import ModelSelectDropdown from "../common/ModelSelectDropdown.vue";
 type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
 type ModelRole = "pro" | "flash" | "vision";
@@ -139,6 +139,7 @@ type ModelRouting = {
     pro_reasoning_effort: ReasoningEffort;
     flash_reasoning_effort: ReasoningEffort;
     vision_reasoning_effort: ReasoningEffort;
+    context_budget_mode: ContextBudgetMode;
 };
 
 const props = defineProps<{

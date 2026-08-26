@@ -21,9 +21,15 @@ pub struct ModelRoutingConfig {
     /// 普通会话不传该字段时默认 `false`，保持原有自动路由。
     #[serde(default)]
     pub force_pro_on_first_step: bool,
+    /// 上下文预算与压缩策略模式：deep_coding (长程默认) | cost_saving (省流) | ultra_fast (极速)
+    #[serde(default = "default_context_budget_mode")]
+    pub context_budget_mode: String,
 }
 fn default_reasoning_effort() -> String {
     "auto".to_string()
+}
+fn default_context_budget_mode() -> String {
+    "deep_coding".to_string()
 }
 impl ModelRoutingConfig {
     pub fn reasoning_effort_for(&self, tier: &RoutingTier) -> &str {

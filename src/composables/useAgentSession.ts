@@ -26,6 +26,7 @@ import {
     type AgentTokenUsage,
     type AgentSessionTelemetry,
     type AgentToolStatus,
+    type ContextBudgetMode,
     type LlmParseErrorItem,
 } from "../components/agent/types";
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
@@ -41,6 +42,7 @@ type ModelRouting = {
     pro_reasoning_effort: ReasoningEffort;
     flash_reasoning_effort: ReasoningEffort;
     vision_reasoning_effort: ReasoningEffort;
+    context_budget_mode: ContextBudgetMode;
 };
 const MODEL_ROUTING_STORAGE_KEY = "free-api.agent.model-routing.v1";
 const REASONING_EFFORTS: ReasoningEffort[] = ["auto", "off", "low", "medium", "high"];
@@ -64,11 +66,16 @@ function loadModelRouting(): ModelRouting {
         pro_reasoning_effort: "auto",
         flash_reasoning_effort: "auto",
         vision_reasoning_effort: "auto",
+        context_budget_mode: "deep_coding",
     };
     try {
         const stored = JSON.parse(localStorage.getItem(MODEL_ROUTING_STORAGE_KEY) || "{}") as Partial<ModelRouting> & { reasoning_effort?: unknown; reasoning_effort_version?: unknown };
         const isLegacy = stored.reasoning_effort_version !== 2;
         const legacyEffort = migrateReasoningEffort(stored.reasoning_effort, fallback.pro_reasoning_effort, isLegacy);
+        const validBudgetModes: ContextBudgetMode[] = ["deep_coding", "cost_saving", "ultra_fast"];
+        const budgetMode = validBudgetModes.includes(stored.context_budget_mode as ContextBudgetMode)
+            ? (stored.context_budget_mode as ContextBudgetMode)
+            : "deep_coding";
         return {
             reasoning_effort_version: 2,
             pro: typeof stored.pro === "string" ? stored.pro : fallback.pro,
@@ -77,6 +84,7 @@ function loadModelRouting(): ModelRouting {
             pro_reasoning_effort: migrateReasoningEffort(stored.pro_reasoning_effort, legacyEffort, isLegacy),
             flash_reasoning_effort: migrateReasoningEffort(stored.flash_reasoning_effort, legacyEffort, isLegacy),
             vision_reasoning_effort: migrateReasoningEffort(stored.vision_reasoning_effort, legacyEffort, isLegacy),
+            context_budget_mode: budgetMode,
         };
     } catch {
         return fallback;
@@ -1193,8 +1201,17 @@ export function useAgentSession(sessionId: string) {
         humanInput.value = JSON.stringify(response);
         await sendHumanInput();
     }
+
+    function updateBudgetMode(mode: ContextBudgetMode) {
+        modelRouting.value = {
+            ...modelRouting.value,
+            context_budget_mode: mode,
+        };
+    }
+
     return {
         modelRouting,
+        updateBudgetMode,
         logContext,
         latestContext,
         goalInput,

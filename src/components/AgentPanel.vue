@@ -92,9 +92,11 @@
                     :humanForm="session.humanForm.value"
                     :all-models="allModels"
                     :current-model-id="session.modelRouting.value.pro"
+                    :budget-mode="session.modelRouting.value.context_budget_mode"
                     :telemetry="session.sessionTelemetry.value"
                     @update:draft="composerDraft = $event"
                     @update:model="handleModelSelect"
+                    @update:budget-mode="session.updateBudgetMode($event)"
                     @open-settings="settingsOpen = true"
                     @submit="submitComposer"
                     @stop="session.requestStop"
@@ -281,13 +283,10 @@ function handleActiveThoughtSelect() {
 }
 function handleModelSelect(modelId: string) {
     session.modelRouting.value = {
-        reasoning_effort_version: 2,
+        ...session.modelRouting.value,
         pro: modelId,
         flash: modelId,
         vision: modelId,
-        pro_reasoning_effort: "auto",
-        flash_reasoning_effort: "auto",
-        vision_reasoning_effort: "auto",
     };
 }
 function submitComposer() {
