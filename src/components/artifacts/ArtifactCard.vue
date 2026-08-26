@@ -71,7 +71,13 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { ArtifactDescriptor } from "../../types/artifact";
-import { formatFileSize, getArtifactIcon, getArtifactKindLabel, isArtifactPreviewable } from "../../utils/artifact";
+import {
+  formatFileSize,
+  getArtifactIcon,
+  getArtifactKindLabel,
+  isArtifactPreviewable,
+  isSafeArtifactUrl,
+} from "../../utils/artifact";
 
 const props = defineProps<{
   artifact: ArtifactDescriptor;
@@ -86,7 +92,7 @@ const icon = computed(() => getArtifactIcon(props.artifact.kind, props.artifact.
 const kindLabel = computed(() => getArtifactKindLabel(props.artifact.kind, props.artifact.format));
 const formattedSize = computed(() => formatFileSize(props.artifact.sizeBytes));
 const canPreview = computed(() => isArtifactPreviewable(props.artifact));
-const canDownload = computed(() => Boolean(props.artifact.downloadUrl || props.artifact.content));
+const canDownload = computed(() => Boolean(isSafeArtifactUrl(props.artifact.downloadUrl) || props.artifact.content));
 
 const copied = ref(false);
 
@@ -104,8 +110,8 @@ async function copyPath() {
 }
 
 function handleDownload() {
-  if (props.artifact.downloadUrl) {
-    window.open(props.artifact.downloadUrl, "_blank");
+  if (isSafeArtifactUrl(props.artifact.downloadUrl)) {
+    window.open(props.artifact.downloadUrl, "_blank", "noopener,noreferrer");
     return;
   }
   if (props.artifact.content) {

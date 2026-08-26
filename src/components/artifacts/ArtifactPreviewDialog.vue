@@ -21,7 +21,7 @@
           <div class="dialog-header-actions">
             <!-- 外部独立 Webview 打开 (如果是网页或 URL) -->
             <button
-              v-if="artifact.kind === 'web' || artifact.previewUrl"
+              v-if="canOpenInExternalWindow"
               type="button"
               class="action-btn"
               title="在独立窗口中打开"
@@ -66,9 +66,9 @@
           </template>
 
           <!-- 2. 图片产物：高清图展示 -->
-          <template v-else-if="artifact.kind === 'image' && (artifact.previewUrl || artifact.content)">
+          <template v-else-if="artifact.kind === 'image' && (isSafeArtifactUrl(artifact.previewUrl) || artifact.content)">
             <div class="image-preview-container">
-              <img :src="artifact.previewUrl || artifact.content" :alt="artifact.name" class="preview-image" />
+              <img :src="isSafeArtifactUrl(artifact.previewUrl) ? artifact.previewUrl : artifact.content" :alt="artifact.name" class="preview-image" />
             </div>
           </template>
 
@@ -114,7 +114,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import type { ArtifactDescriptor } from "../../types/artifact";
-import { formatFileSize, getArtifactIcon, getArtifactKindLabel } from "../../utils/artifact";
+import {
+  formatFileSize,
+  getArtifactIcon,
+  getArtifactKindLabel,
+  isSafeArtifactUrl,
+} from "../../utils/artifact";
 import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import { openWebviewWindow } from "../../composables/useBrowserPreview";
@@ -132,7 +137,11 @@ const emit = defineEmits<{
 const icon = computed(() => (props.artifact ? getArtifactIcon(props.artifact.kind, props.artifact.format) : "📦"));
 const kindLabel = computed(() => (props.artifact ? getArtifactKindLabel(props.artifact.kind, props.artifact.format) : ""));
 const formattedSize = computed(() => (props.artifact ? formatFileSize(props.artifact.sizeBytes) : ""));
-const canDownload = computed(() => Boolean(props.artifact?.downloadUrl || props.artifact?.content));
+const canDownload = computed(() => Boolean(isSafeArtifactUrl(props.artifact?.downloadUrl) || props.artifact?.content));
+const canOpenInExternalWindow = computed(() => {
+  if (!props.artifact) return false;
+  return isSafeArtifactUrl(props.artifact.previewUrl) || (props.artifact.kind === "web" && Boolean(props.artifact.content));
+});
 
 const isHtmlPreview = computed(() => {
   if (!props.artifact) return false;
@@ -169,8 +178,8 @@ async function copyPath() {
 
 function handleDownload() {
   if (!props.artifact) return;
-  if (props.artifact.downloadUrl) {
-    window.open(props.artifact.downloadUrl, "_blank");
+  if (isSafeArtifactUrl(props.artifact.downloadUrl)) {
+    window.open(props.artifact.downloadUrl, "_blank", "noopener,noreferrer");
     return;
   }
   if (props.artifact.content) {
@@ -190,12 +199,13 @@ function handleDownload() {
 
 function openInExternalWindow() {
   if (!props.artifact) return;
-  if (props.artifact.previewUrl) {
-    void openWebviewWindow(props.artifact.previewUrl, props.artifact.name);
+  const previewUrl = props.artifact.previewUrl;
+  if (previewUrl && isSafeArtifactUrl(previewUrl)) {
+    void openWebviewWindow(previewUrl, props.artifact.name);
     return;
   }
-  if (props.artifact.content) {
-    // 创建本地 Blob URL 并在新窗口打开
+  if (props.artifact.kind === "web" && props.artifact.content) {
+    // HTML 内容创建本地 Blob URL 并在新窗口打开
     const blob = new Blob([props.artifact.content], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     void openWebviewWindow(url, props.artifact.name);

@@ -164,25 +164,28 @@ export function formatFileSize(bytes?: number): string {
 }
 
 /**
- * 判断产物是否支持前端直接预览
+ * 产物 URL 只允许交由浏览器/系统打开的 HTTP(S) 地址。
+ * artifact 输入来自模型或外部工具，不能把 javascript:、file: 等协议直接传给副作用 API。
+ */
+export function isSafeArtifactUrl(value?: string): boolean {
+  const raw = value?.trim();
+  if (!raw) return false;
+
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 判断产物是否具备当前前端可以真实呈现的内容。
+ * 本地路径只说明文件存在于宿主侧；在尚未提供读取 API 前，不应显示为可预览。
  */
 export function isArtifactPreviewable(artifact: ArtifactDescriptor): boolean {
-  if (artifact.previewUrl) return true;
   if (artifact.content && artifact.content.trim().length > 0) return true;
-
-  const fmt = artifact.format.toLowerCase();
-  // 支持预览的格式：html, md, txt, svg, json, js, ts, vue, py, rs, css, 图片等
-  const textOrWebFmts = [
-    "html", "htm", "md", "markdown", "txt", "svg", "json", "yaml", "yml", "toml",
-    "js", "ts", "jsx", "tsx", "vue", "py", "rs", "go", "java", "c", "cpp", "css", "sh"
-  ];
-  const imageFmts = ["png", "jpg", "jpeg", "gif", "webp", "ico", "bmp"];
-  
-  if (textOrWebFmts.includes(fmt) || imageFmts.includes(fmt)) {
-    return Boolean(artifact.content || artifact.localPath || artifact.previewUrl);
-  }
-
-  return false;
+  return isSafeArtifactUrl(artifact.previewUrl);
 }
 
 /**
