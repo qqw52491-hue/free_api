@@ -246,3 +246,16 @@ export const CONTEXT_BUDGET_MODES: ContextBudgetModeOption[] = [
         tooltip: "🏎️ 极致响应模式：35% 窗口 / 65% 触发 / 25% 回落，极低首字延迟",
     },
 ];
+
+export type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
+
+export interface ModelRouting {
+    reasoning_effort_version: 2;
+    pro: string;
+    flash: string;
+    vision: string;
+    pro_reasoning_effort: ReasoningEffort;
+    flash_reasoning_effort: ReasoningEffort;
+    vision_reasoning_effort: ReasoningEffort;
+    context_budget_mode: ContextBudgetMode;
+}

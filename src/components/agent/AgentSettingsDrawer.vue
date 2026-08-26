@@ -4,91 +4,12 @@
             <header>
                 <div>
                     <span>AGENT SETTINGS</span>
-                    <h2>模型与运行配置</h2>
-                    <p>运行期间模型路由会锁定，避免中途改变执行策略。</p>
+                    <h2>系统与运行配置</h2>
+                    <p>管理 MCP 连接、工具发现与调试记录。</p>
                 </div>
                 <button type="button" @click="$emit('close')">关闭</button>
             </header>
             <div class="settings-scroll">
-                <section>
-                    <div class="section-heading"><h3>模型路由与思考档位</h3><small>{{ isRunning ? '运行中已锁定' : '每个模型独立保存' }}</small></div>
-                    <p class="section-description">为规划、日常执行和视觉分析分别选择模型与档位。模型下拉与参考界面一致，配置会保存到本机。</p>
-                    <div class="routing-grid">
-                        <article class="routing-card">
-                            <div class="routing-card-heading"><strong>推理模型</strong><small>规划与故障恢复</small></div>
-                            <label><span>模型</span>
-                                <ModelSelectDropdown
-                                    :model-value="modelRouting.pro"
-                                    :models="allModels"
-                                    :disabled="isRunning"
-                                    placeholder="选择复杂推理模型..."
-                                    @update:model-value="updateRouteValue('pro', $event)"
-                                    size="sm"
-                                />
-                            </label>
-                            <label><span>思考档位</span>
-                                <select data-testid="pro-reasoning-policy-select" :value="modelRouting.pro_reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort('pro', $event)">
-                                    <option value="auto">自动：按模型优化</option>
-                                    <option value="off">关闭：跳过思考</option>
-                                    <option value="low">低：更快、更省</option>
-                                    <option value="medium">中：平衡效率与质量</option>
-                                    <option value="high">高：深入规划</option>
-                                </select>
-                            </label>
-                        </article>
-                        <article class="routing-card">
-                            <div class="routing-card-heading"><strong>执行模型</strong><small>常规工具调用</small></div>
-                            <label><span>模型</span>
-                                <ModelSelectDropdown
-                                    :model-value="modelRouting.flash"
-                                    :models="allModels"
-                                    :disabled="isRunning"
-                                    placeholder="选择快速执行模型..."
-                                    @update:model-value="updateRouteValue('flash', $event)"
-                                    size="sm"
-                                />
-                            </label>
-                            <label><span>思考档位</span>
-                                <select data-testid="flash-reasoning-policy-select" :value="modelRouting.flash_reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort('flash', $event)">
-                                    <option value="auto">自动：按模型优化</option>
-                                    <option value="off">关闭：跳过思考</option>
-                                    <option value="low">低：更快、更省</option>
-                                    <option value="medium">中：平衡效率与质量</option>
-                                    <option value="high">高：深入执行</option>
-                                </select>
-                            </label>
-                        </article>
-                        <article class="routing-card">
-                            <div class="routing-card-heading"><strong>视觉模型</strong><small>截图与图片分析</small></div>
-                            <label><span>模型</span>
-                                <ModelSelectDropdown
-                                    :model-value="modelRouting.vision"
-                                    :models="allModels"
-                                    :disabled="isRunning"
-                                    placeholder="选择多模态模型..."
-                                    @update:model-value="updateRouteValue('vision', $event)"
-                                    size="sm"
-                                />
-                            </label>
-                            <label><span>思考档位</span>
-                                <select data-testid="vision-reasoning-policy-select" :value="modelRouting.vision_reasoning_effort" :disabled="isRunning" @change="updateReasoningEffort('vision', $event)">
-                                    <option value="auto">自动：按模型优化</option>
-                                    <option value="off">关闭：跳过思考</option>
-                                    <option value="low">低：更快、更省</option>
-                                    <option value="medium">中：平衡效率与质量</option>
-                                    <option value="high">高：深入识别</option>
-                                </select>
-                            </label>
-                        </article>
-                    </div>
-                    <p class="routing-note">档位仅映射到支持的 DeepSeek 参数；其他厂商保持原有请求。运行期间配置会锁定，避免中途改变执行策略。</p>
-                </section>
-                <section>
-                    <label class="context-toggle">
-                        <input :checked="logContext" :disabled="isRunning" type="checkbox" @change="$emit('update:log-context', ($event.target as HTMLInputElement).checked)" />
-                        <span><strong>记录完整上下文</strong><small>用于任务复盘与调试。</small></span>
-                    </label>
-                </section>
                 <section class="mcp-connection-section">
                     <div class="section-heading"><h3>MCP 连接</h3><small>{{ catalogSummary }}</small></div>
                     <p class="section-description">工具目录会按插件配置缓存；刷新会验证 stdio 连接并重新发现工具。</p>
@@ -112,12 +33,11 @@
                     <button type="button" class="manage-mcp" @click="$emit('open-plugins')">管理 MCP 连接</button>
                 </section>
                 <section>
-                    <div class="section-heading"><h3>快捷任务</h3><small>一键填充</small></div>
-                    <div class="preset-list">
-                        <button v-for="preset in presets" :key="preset.label" type="button" :disabled="isRunning" @click="$emit('apply-preset', preset.goal)">
-                            <strong>{{ preset.label }}</strong><span>{{ preset.goal }}</span>
-                        </button>
-                    </div>
+                    <div class="section-heading"><h3>调试配置</h3><small>{{ isRunning ? '运行中已锁定' : '可随时切换' }}</small></div>
+                    <label class="context-toggle">
+                        <input :checked="logContext" :disabled="isRunning" type="checkbox" @change="$emit('update:log-context', ($event.target as HTMLInputElement).checked)" />
+                        <span><strong>记录完整上下文</strong><small>用于任务复盘与调试。</small></span>
+                    </label>
                 </section>
             </div>
         </aside>
@@ -127,38 +47,19 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { AGENT_TASK_PRESETS, type AgentModelOption, type ContextBudgetMode } from "./types";
-import ModelSelectDropdown from "../common/ModelSelectDropdown.vue";
-type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
-type ModelRole = "pro" | "flash" | "vision";
-type ModelRouting = {
-    reasoning_effort_version: 2;
-    pro: string;
-    flash: string;
-    vision: string;
-    pro_reasoning_effort: ReasoningEffort;
-    flash_reasoning_effort: ReasoningEffort;
-    vision_reasoning_effort: ReasoningEffort;
-    context_budget_mode: ContextBudgetMode;
-};
 
 const props = defineProps<{
     open: boolean;
-    allModels: AgentModelOption[];
-    modelRouting: ModelRouting;
     logContext: boolean;
     isRunning: boolean;
 }>();
 
-const emit = defineEmits<{
+defineEmits<{
     close: [];
-    "update:model-routing": [value: ModelRouting];
     "update:log-context": [value: boolean];
-    "apply-preset": [goal: string];
     "open-plugins": [];
 }>();
 
-const presets = AGENT_TASK_PRESETS;
 type McpConnectionState = "idle" | "testing" | "ready" | "error";
 interface McpCatalogEntry {
     name: string;
@@ -214,18 +115,6 @@ async function refreshConnection(name: string, reloadAfter = true) {
 watch(() => props.open, (open) => {
     if (open) void loadMcpCatalog();
 }, { immediate: true });
-function updateRouteValue(key: "pro" | "flash" | "vision", value: string) {
-    emit("update:model-routing", { ...props.modelRouting, [key]: value });
-}
-function updateReasoningEffort(role: ModelRole, event: Event) {
-    const value = (event.target as HTMLSelectElement).value as ReasoningEffort;
-    const field: Record<ModelRole, keyof Pick<ModelRouting, "pro_reasoning_effort" | "flash_reasoning_effort" | "vision_reasoning_effort">> = {
-        pro: "pro_reasoning_effort",
-        flash: "flash_reasoning_effort",
-        vision: "vision_reasoning_effort",
-    };
-    emit("update:model-routing", { ...props.modelRouting, [field[role]]: value });
-}
 </script>
 
 <style scoped>

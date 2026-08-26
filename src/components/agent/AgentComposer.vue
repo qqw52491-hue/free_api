@@ -13,8 +13,135 @@
             />
             <div class="composer-bottom-row">
                 <div class="composer-tools">
-                    <button type="button" title="模型与任务设置" @click="$emit('open-settings')"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
-                    <button class="model-chip" type="button" title="切换模型" @click="$emit('open-settings')"><span>{{ currentModelName }}</span><svg viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></svg></button>
+                    <button type="button" title="MCP 与运行设置" @click="$emit('open-settings')"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+                    
+                    <!-- 🤖 模型路由精简浮层卡片 (左下角与上下文模式并排) -->
+                    <div class="model-picker-wrap" ref="modelPickerRef">
+                        <button
+                            class="model-chip"
+                            type="button"
+                            :class="{ active: modelMenuOpen }"
+                            title="配置模型路由 (推理 / 执行 / 视觉)"
+                            :disabled="isRunning"
+                            @click="toggleModelMenu"
+                        >
+                            <span class="model-icon">🤖</span>
+                            <span>{{ currentModelName }}</span>
+                            <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
+                        </button>
+
+                        <div v-if="modelMenuOpen" class="model-routing-popover" @click.stop>
+                            <div class="popover-header">
+                                <div>
+                                    <div class="popover-title">Agent 模型路由</div>
+                                    <div class="popover-sub">规划、工具执行与视觉分析独立路由</div>
+                                </div>
+                                <button
+                                    type="button"
+                                    class="sync-all-btn"
+                                    :title="`将执行与视觉模型也一键设为当前推理模型 (${currentModelName})`"
+                                    @click="syncAllToPro"
+                                >
+                                    一键同款
+                                </button>
+                            </div>
+
+                            <div class="popover-body">
+                                <!-- 1. 推理模型 (Pro) -->
+                                <div class="route-item">
+                                    <div class="route-item-head">
+                                        <span class="route-badge pro">🧠 推理模型</span>
+                                        <small>规划与故障恢复</small>
+                                    </div>
+                                    <div class="route-controls">
+                                        <ModelSelectDropdown
+                                            :model-value="modelRouting.pro"
+                                            :models="allModels"
+                                            :disabled="isRunning"
+                                            placeholder="选择推理模型..."
+                                            @update:model-value="updateRouteValue('pro', $event)"
+                                            size="sm"
+                                        />
+                                        <select
+                                            class="effort-select"
+                                            :value="modelRouting.pro_reasoning_effort"
+                                            :disabled="isRunning"
+                                            @change="updateReasoningEffort('pro', $event)"
+                                            title="思考档位"
+                                        >
+                                            <option value="auto">思考: 自动</option>
+                                            <option value="off">思考: 关闭</option>
+                                            <option value="low">思考: 低</option>
+                                            <option value="medium">思考: 中</option>
+                                            <option value="high">思考: 高</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <!-- 2. 执行模型 (Flash) -->
+                                <div class="route-item">
+                                    <div class="route-item-head">
+                                        <span class="route-badge flash">⚡ 执行模型</span>
+                                        <small>常规工具快速执行</small>
+                                    </div>
+                                    <div class="route-controls">
+                                        <ModelSelectDropdown
+                                            :model-value="modelRouting.flash"
+                                            :models="allModels"
+                                            :disabled="isRunning"
+                                            placeholder="选择执行模型..."
+                                            @update:model-value="updateRouteValue('flash', $event)"
+                                            size="sm"
+                                        />
+                                        <select
+                                            class="effort-select"
+                                            :value="modelRouting.flash_reasoning_effort"
+                                            :disabled="isRunning"
+                                            @change="updateReasoningEffort('flash', $event)"
+                                            title="思考档位"
+                                        >
+                                            <option value="auto">思考: 自动</option>
+                                            <option value="off">思考: 关闭</option>
+                                            <option value="low">思考: 低</option>
+                                            <option value="medium">思考: 中</option>
+                                            <option value="high">思考: 高</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <!-- 3. 视觉模型 (Vision) -->
+                                <div class="route-item">
+                                    <div class="route-item-head">
+                                        <span class="route-badge vision">👁️ 视觉模型</span>
+                                        <small>截图与多模态分析</small>
+                                    </div>
+                                    <div class="route-controls">
+                                        <ModelSelectDropdown
+                                            :model-value="modelRouting.vision"
+                                            :models="allModels"
+                                            :disabled="isRunning"
+                                            placeholder="选择视觉模型..."
+                                            @update:model-value="updateRouteValue('vision', $event)"
+                                            size="sm"
+                                        />
+                                        <select
+                                            class="effort-select"
+                                            :value="modelRouting.vision_reasoning_effort"
+                                            :disabled="isRunning"
+                                            @change="updateReasoningEffort('vision', $event)"
+                                            title="思考档位"
+                                        >
+                                            <option value="auto">思考: 自动</option>
+                                            <option value="off">思考: 关闭</option>
+                                            <option value="low">思考: 低</option>
+                                            <option value="medium">思考: 中</option>
+                                            <option value="high">思考: 高</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     
                     <!-- 🚀 上下文压缩模式胶囊 (左下角与模型并排) -->
                     <div class="budget-mode-picker" ref="budgetPickerRef">
@@ -38,7 +165,7 @@
                                 :key="opt.id"
                                 type="button"
                                 class="budget-menu-item"
-                                :class="{ selected: opt.id === (budgetMode || 'deep_coding') }"
+                                :class="{ selected: opt.id === (modelRouting.context_budget_mode || 'deep_coding') }"
                                 @click="selectBudgetMode(opt.id)"
                             >
                                 <span class="opt-icon">{{ opt.icon }}</span>
@@ -49,7 +176,7 @@
                                     </div>
                                     <small class="opt-sub">{{ opt.tooltip }}</small>
                                 </div>
-                                <svg v-if="opt.id === (budgetMode || 'deep_coding')" class="check-icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+                                <svg v-if="opt.id === (modelRouting.context_budget_mode || 'deep_coding')" class="check-icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
                             </button>
                         </div>
                     </div>
@@ -120,7 +247,16 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { CONTEXT_BUDGET_MODES, type AgentHumanForm, type AgentModelOption, type AgentSessionTelemetry, type ContextBudgetMode } from "./types";
+import ModelSelectDropdown from "../common/ModelSelectDropdown.vue";
+import {
+    CONTEXT_BUDGET_MODES,
+    type AgentHumanForm,
+    type AgentModelOption,
+    type AgentSessionTelemetry,
+    type ContextBudgetMode,
+    type ModelRouting,
+    type ReasoningEffort,
+} from "./types";
 
 const props = defineProps<{
     draft: string;
@@ -132,13 +268,12 @@ const props = defineProps<{
     pauseReason: string;
     humanForm: AgentHumanForm | null;
     allModels: AgentModelOption[];
-    currentModelId: string;
-    budgetMode?: ContextBudgetMode;
+    modelRouting: ModelRouting;
     telemetry?: AgentSessionTelemetry | null;
 }>();
 const emit = defineEmits<{
     "update:draft": [value: string];
-    "update:model": [modelId: string];
+    "update:model-routing": [routing: ModelRouting];
     "update:budget-mode": [mode: ContextBudgetMode];
     submit: [];
     stop: [];
@@ -146,21 +281,58 @@ const emit = defineEmits<{
 }>();
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
+const modelPickerRef = ref<HTMLElement | null>(null);
+const modelMenuOpen = ref(false);
 const budgetPickerRef = ref<HTMLElement | null>(null);
 const budgetMenuOpen = ref(false);
 
 const budgetModes = CONTEXT_BUDGET_MODES;
 const currentBudgetModeObj = computed(() => {
-    const mode = props.budgetMode || "deep_coding";
+    const mode = props.modelRouting?.context_budget_mode || "deep_coding";
     return budgetModes.find((item) => item.id === mode) || budgetModes[0];
 });
 const currentBudgetIcon = computed(() => currentBudgetModeObj.value.icon);
 const currentBudgetLabel = computed(() => currentBudgetModeObj.value.label);
 const currentBudgetTooltip = computed(() => currentBudgetModeObj.value.tooltip);
 
+function toggleModelMenu() {
+    if (props.isRunning) return;
+    modelMenuOpen.value = !modelMenuOpen.value;
+    if (modelMenuOpen.value) {
+        budgetMenuOpen.value = false;
+    }
+}
+
 function toggleBudgetMenu() {
     if (props.isRunning) return;
     budgetMenuOpen.value = !budgetMenuOpen.value;
+    if (budgetMenuOpen.value) {
+        modelMenuOpen.value = false;
+    }
+}
+
+function updateRouteValue(role: "pro" | "flash" | "vision", modelId: string) {
+    emit("update:model-routing", {
+        ...props.modelRouting,
+        [role]: modelId,
+    });
+}
+
+function updateReasoningEffort(role: "pro" | "flash" | "vision", e: Event) {
+    const value = (e.target as HTMLSelectElement).value as ReasoningEffort;
+    const field = `${role}_reasoning_effort` as const;
+    emit("update:model-routing", {
+        ...props.modelRouting,
+        [field]: value,
+    });
+}
+
+function syncAllToPro() {
+    emit("update:model-routing", {
+        ...props.modelRouting,
+        flash: props.modelRouting.pro,
+        vision: props.modelRouting.pro,
+    });
 }
 
 function selectBudgetMode(mode: ContextBudgetMode) {
@@ -169,8 +341,12 @@ function selectBudgetMode(mode: ContextBudgetMode) {
 }
 
 function handleClickOutside(e: MouseEvent) {
-    if (budgetPickerRef.value && !budgetPickerRef.value.contains(e.target as Node)) {
+    const target = e.target as Node;
+    if (budgetPickerRef.value && !budgetPickerRef.value.contains(target)) {
         budgetMenuOpen.value = false;
+    }
+    if (modelPickerRef.value && !modelPickerRef.value.contains(target)) {
+        modelMenuOpen.value = false;
     }
 }
 
@@ -199,7 +375,11 @@ function handleInput(e: Event) {
 watch(() => props.draft, autoResizeTextarea);
 onMounted(autoResizeTextarea);
 
-const currentModelName = computed(() => props.allModels.find((model) => model.id === props.currentModelId)?.display_name || "Manus Desktop");
+const currentModelName = computed(() => {
+    const proId = props.modelRouting?.pro;
+    const model = props.allModels.find((m) => m.id === proId);
+    return model?.display_name || model?.name || "Manus Desktop";
+});
 const placeholderText = computed(() => props.isRunning
     ? props.isWaitingForHuman
         ? "补充自定义说明后按回车提交…"
@@ -312,6 +492,12 @@ textarea::placeholder {
     fill: none;
 }
 
+.model-picker-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
 .model-chip {
     width: auto !important;
     height: 28px !important;
@@ -321,7 +507,174 @@ textarea::placeholder {
     gap: 6px !important;
     font-size: 12px !important;
     font-weight: 500 !important;
-    color: #d4d4d8 !important;
+    color: #e4e4e7 !important;
+    background: rgba(255, 255, 255, 0.05) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 6px !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.model-chip:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.09) !important;
+    border-color: rgba(255, 255, 255, 0.18) !important;
+}
+
+.model-chip.active {
+    background: rgba(99, 102, 241, 0.18) !important;
+    border-color: rgba(99, 102, 241, 0.4) !important;
+    color: #a5b4fc !important;
+}
+
+.model-chip .model-icon {
+    font-size: 13px;
+    line-height: 1;
+}
+
+.model-chip .chevron-icon {
+    width: 12px;
+    height: 12px;
+    stroke: currentColor;
+    stroke-width: 2;
+    fill: none;
+    opacity: 0.7;
+}
+
+.model-routing-popover {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    width: 360px;
+    background: #18181c;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    padding: 12px;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    backdrop-filter: blur(16px);
+    animation: popIn 0.15s ease-out;
+}
+
+.popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.popover-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #f4f4f5;
+}
+
+.popover-sub {
+    font-size: 11px;
+    color: #71717a;
+}
+
+.sync-all-btn {
+    display: inline-flex !important;
+    align-items: center !important;
+    width: auto !important;
+    height: 24px !important;
+    padding: 0 8px !important;
+    border-radius: 4px !important;
+    background: rgba(99, 102, 241, 0.15) !important;
+    border: 1px solid rgba(99, 102, 241, 0.3) !important;
+    color: #a5b4fc !important;
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.sync-all-btn:hover {
+    background: rgba(99, 102, 241, 0.25) !important;
+    border-color: rgba(99, 102, 241, 0.5) !important;
+    color: #ffffff !important;
+}
+
+.popover-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.route-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+
+.route-item-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.route-badge {
+    font-size: 11.5px;
+    font-weight: 600;
+}
+
+.route-badge.pro {
+    color: #a5b4fc;
+}
+
+.route-badge.flash {
+    color: #67e8f9;
+}
+
+.route-badge.vision {
+    color: #fcd34d;
+}
+
+.route-item-head small {
+    font-size: 10.5px;
+    color: #71717a;
+}
+
+.route-controls {
+    display: grid;
+    grid-template-columns: 1fr 100px;
+    gap: 6px;
+    align-items: center;
+}
+
+.effort-select {
+    height: 30px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    color: #d4d4d8;
+    font-size: 11px;
+    padding: 0 4px;
+    outline: none;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.effort-select:hover:not(:disabled) {
+    border-color: rgba(255, 255, 255, 0.2);
+    color: #ffffff;
+}
+
+.effort-select:focus {
+    border-color: #6366f1;
+}
+
+.effort-select option {
+    background: #18181b;
+    color: #f4f4f5;
 }
 
 .budget-mode-picker {

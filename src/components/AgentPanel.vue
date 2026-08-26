@@ -91,11 +91,10 @@
                     :pauseReason="session.pauseReason.value"
                     :humanForm="session.humanForm.value"
                     :all-models="allModels"
-                    :current-model-id="session.modelRouting.value.pro"
-                    :budget-mode="session.modelRouting.value.context_budget_mode"
+                    :model-routing="session.modelRouting.value"
                     :telemetry="session.sessionTelemetry.value"
                     @update:draft="composerDraft = $event"
-                    @update:model="handleModelSelect"
+                    @update:model-routing="session.modelRouting.value = $event"
                     @update:budget-mode="session.updateBudgetMode($event)"
                     @open-settings="settingsOpen = true"
                     @submit="submitComposer"
@@ -156,14 +155,10 @@
         />
         <AgentSettingsDrawer
             :open="settingsOpen"
-            :all-models="allModels"
-            :model-routing="session.modelRouting.value"
             :log-context="session.logContext.value"
             :is-running="session.isRunning.value"
             @close="settingsOpen = false"
-            @update:model-routing="session.modelRouting.value = $event"
             @update:log-context="session.logContext.value = $event"
-            @apply-preset="applyPreset"
             @open-plugins="openPluginManager"
         />
     </section>
@@ -281,21 +276,9 @@ function handleActiveThoughtSelect() {
     inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("detail");
 }
-function handleModelSelect(modelId: string) {
-    session.modelRouting.value = {
-        ...session.modelRouting.value,
-        pro: modelId,
-        flash: modelId,
-        vision: modelId,
-    };
-}
 function submitComposer() {
     if (session.isRunning.value) void session.sendHumanInput();
     else void session.runAgent();
-}
-function applyPreset(goal: string) {
-    session.goalInput.value = goal;
-    settingsOpen.value = false;
 }
 function openPluginManager() {
     settingsOpen.value = false;
