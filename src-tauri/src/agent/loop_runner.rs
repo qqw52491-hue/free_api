@@ -109,6 +109,16 @@ pub async fn run_call_llm_and_run_tool_phases(
                 "model_id": routing.model_id
             }),
         );
+        let open_todos_for_early_check = crate::agent::main_loop::finish_blockers(
+            &context.todo_list,
+            context.review_contract.as_ref(),
+            false,
+            context.side_effects.len(),
+            context.change_verification.as_ref(),
+        );
+        let can_early_challenge_finish =
+            !checkpoint.finish_reviewed && !open_todos_for_early_check.is_empty();
+
         let (mut inst, token_usage, thinking_text, history_estimate_at_request) = match call_llm(
             &context,
             &state,
@@ -118,6 +128,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             &final_session_id,
             log_context.unwrap_or(false),
             model_routing.reasoning_effort_for(&routing.tier),
+            can_early_challenge_finish,
             interrupt_rx,
         )
         .await
@@ -143,15 +154,27 @@ pub async fn run_call_llm_and_run_tool_phases(
                         || e.contains("invalid_api_key")
                         || e.contains("Incorrect API key")
                     {
-                        "🔑 API 认证失败：API Key 无效或已过期，请在设置中检查 API Key".to_string()
+                        format!(
+                            "🔑 API 认证失败 [模型: {}]: API Key 无效或已过期，请在设置中检查 API Key。\n上游原始错误: {}",
+                            routing.model_id, e
+                        )
                     } else if e.contains("402") || e.contains("insufficient_quota") {
-                        "💳 账户额度不足：API 账户余额已耗尽，请充值后重试".to_string()
+                        format!(
+                            "💳 账户额度不足 [模型: {}]: API 账户余额已耗尽，请在设置中切换模型或充值。\n上游原始错误: {}",
+                            routing.model_id, e
+                        )
                     } else if e.contains("403") {
-                        "🚫 权限不足：当前 API Key 无权访问所选模型".to_string()
+                        format!(
+                            "🚫 权限不足 [模型: {}]: 当前 API Key 无权访问所选模型。\n上游原始错误: {}",
+                            routing.model_id, e
+                        )
                     } else if e.contains("404") || e.contains("model_not_found") {
-                        "🔍 模型未找到：所选模型名称在上游服务商处不存在".to_string()
+                        format!(
+                            "🔍 模型未找到 [模型: {}]: 所选模型名称在上游服务商处不存在。\n上游原始错误: {}",
+                            routing.model_id, e
+                        )
                     } else {
-                        format!("❌ API 致命错误: {}", e)
+                        format!("❌ API 致命错误 [模型: {}]: {}", routing.model_id, e)
                     };
 
                     return Err(friendly_reason);

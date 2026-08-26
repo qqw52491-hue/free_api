@@ -63,7 +63,7 @@ fn should_challenge_finish(
 ///
 /// 真实写入只产生一项"最近写入批次待验证"义务，不按文件或编辑次数逐条要求测试；
 /// 无成功写入的只读任务不会因此产生 blocker。
-fn finish_blockers(
+pub(crate) fn finish_blockers(
     todos: &[TodoItem],
     review_contract: Option<&ReviewContract>,
     review_contract_started_this_turn: bool,

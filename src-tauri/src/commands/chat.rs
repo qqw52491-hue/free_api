@@ -227,56 +227,59 @@ pub async fn send_chat(
 
     // 实时事件回调
     let mut is_thinking = false;
-    let mut on_event = |event: StreamEvent| match event {
-        StreamEvent::Thinking {
-            chunk,
-            accumulated: _,
-        } => {
-            if !is_thinking {
-                is_thinking = true;
-                app.emit(
-                    "chat-thinking",
-                    json!({"session_id": session_id, "status": "start"}),
-                )
-                .ok();
-            }
-            app.emit(
-                "chat-thinking",
-                json!({
-                    "session_id": session_id,
-                    "content": chunk,
-                    "status": "streaming"
-                }),
-            )
-            .ok();
-        }
-        StreamEvent::Content {
-            chunk,
-            full_thinking,
-            ..
-        } => {
-            if is_thinking {
-                is_thinking = false;
+    let mut on_event = |event: StreamEvent| {
+        match event {
+            StreamEvent::Thinking {
+                chunk,
+                accumulated: _,
+            } => {
+                if !is_thinking {
+                    is_thinking = true;
+                    app.emit(
+                        "chat-thinking",
+                        json!({"session_id": session_id, "status": "start"}),
+                    )
+                    .ok();
+                }
                 app.emit(
                     "chat-thinking",
                     json!({
                         "session_id": session_id,
-                        "status": "done",
-                        "full_thinking": full_thinking
+                        "content": chunk,
+                        "status": "streaming"
                     }),
                 )
                 .ok();
             }
-            app.emit(
-                "chat-stream",
-                json!({
-                    "session_id": session_id,
-                    "content": chunk,
-                    "done": false
-                }),
-            )
-            .ok();
+            StreamEvent::Content {
+                chunk,
+                full_thinking,
+                ..
+            } => {
+                if is_thinking {
+                    is_thinking = false;
+                    app.emit(
+                        "chat-thinking",
+                        json!({
+                            "session_id": session_id,
+                            "status": "done",
+                            "full_thinking": full_thinking
+                        }),
+                    )
+                    .ok();
+                }
+                app.emit(
+                    "chat-stream",
+                    json!({
+                        "session_id": session_id,
+                        "content": chunk,
+                        "done": false
+                    }),
+                )
+                .ok();
+            }
         }
+        true
     };
 
     let (_interrupt_tx, mut interrupt_rx) = tokio::sync::watch::channel(0u64);

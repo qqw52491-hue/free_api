@@ -477,16 +477,16 @@ fn parse_usage(json: &serde_json::Value) -> Option<RawUsage> {
 }
 
 /// 处理一行 SSE 数据
-fn process_sse_line<F: FnMut(StreamEvent)>(
+fn process_sse_line<F: FnMut(StreamEvent) -> bool>(
     line: &str,
     thinking_text: &mut String,
     full_response: &mut String,
     usage_data: &mut Option<RawUsage>,
     first_token_instant: &mut Option<std::time::Instant>,
     on_event: &mut F,
-) {
+) -> bool {
     if line.is_empty() || line == "data: [DONE]" {
-        return;
+        return true;
     }
 
     if let Some(data_str) = line.strip_prefix("data: ") {
@@ -499,10 +499,12 @@ fn process_sse_line<F: FnMut(StreamEvent)>(
                         *first_token_instant = Some(std::time::Instant::now());
                     }
                     thinking_text.push_str(t);
-                    on_event(StreamEvent::Thinking {
+                    if !on_event(StreamEvent::Thinking {
                         chunk: t,
                         accumulated: thinking_text,
-                    });
+                    }) {
+                        return false;
+                    }
                 }
             }
 
@@ -512,11 +514,13 @@ fn process_sse_line<F: FnMut(StreamEvent)>(
                         *first_token_instant = Some(std::time::Instant::now());
                     }
                     full_response.push_str(c);
-                    on_event(StreamEvent::Content {
+                    if !on_event(StreamEvent::Content {
                         chunk: c,
                         accumulated_content: full_response,
                         full_thinking: thinking_text,
-                    });
+                    }) {
+                        return false;
+                    }
                 }
             }
 
@@ -525,6 +529,7 @@ fn process_sse_line<F: FnMut(StreamEvent)>(
             }
         }
     }
+    true
 }
 
 // ========================================================================
@@ -537,7 +542,7 @@ pub const STREAM_INTERRUPTED_ERROR: &str = "agent_stream_interrupted";
 ///
 /// `on_event` 在每个 thinking/content chunk 到达时被调用，
 /// 调用方可以借此实现实时 UI 推送。
-pub async fn stream_once<F: FnMut(StreamEvent)>(
+pub async fn stream_once<F: FnMut(StreamEvent) -> bool>(
     config: &ModelConfig,
     messages: &[serde_json::Value],
     reasoning_effort: &str,
@@ -577,7 +582,7 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
     let mut line_buf = String::new();
     let mut usage_data: Option<RawUsage> = None;
 
-    loop {
+    'stream_loop: loop {
         let item = tokio::select! {
             next = stream.next() => next,
             changed = interrupt_rx.changed() => {
@@ -613,21 +618,23 @@ pub async fn stream_once<F: FnMut(StreamEvent)>(
         while let Some(pos) = line_buf.find('\n') {
             let line = line_buf[..pos].trim().to_string();
             line_buf = line_buf[pos + 1..].to_string();
-            process_sse_line(
+            if !process_sse_line(
                 &line,
                 &mut thinking_text,
                 &mut full_response,
                 &mut usage_data,
                 &mut first_token_instant,
                 on_event,
-            );
+            ) {
+                break 'stream_loop;
+            }
         }
     }
 
     // 处理缓冲区中残留的数据
     let remaining = line_buf.trim().to_string();
     if !remaining.is_empty() && remaining != "data: [DONE]" {
-        process_sse_line(
+        let _ = process_sse_line(
             &remaining,
             &mut thinking_text,
             &mut full_response,
@@ -697,7 +704,7 @@ pub fn is_non_retryable_error(err: &str) -> bool {
 }
 
 /// 带自动重试与状态码感知的流式请求
-pub async fn stream_with_retry<F: FnMut(StreamEvent)>(
+pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     config: &ModelConfig,
     messages: &[serde_json::Value],
     reasoning_effort: &str,

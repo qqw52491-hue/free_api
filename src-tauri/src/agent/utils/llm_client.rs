@@ -190,6 +190,7 @@ pub async fn call_llm(
     session_id: &str,
     log_context: bool,
     reasoning_effort: &str,
+    can_early_challenge_finish: bool,
     interrupt_rx: &mut watch::Receiver<u64>,
 ) -> Result<(AgentInstruction, TokenUsage, String, Option<usize>), String> {
     // 1. 从数据库解析模型配置
@@ -227,8 +228,29 @@ pub async fn call_llm(
         let last_content_emit_at = std::time::Instant::now();
         const EMIT_THROTTLE_MS: u128 = 50; // 20 FPS 平滑节流
 
+        let mut early_finish_aborted = false;
+
         // 流式接收事件，实时向前端推送 Thinking/Content 以及动态速率与 TTFT
-        let mut on_event = |event: StreamEvent| {
+        let mut on_event = |event: StreamEvent| -> bool {
+            // ⚡ 流式早期熔断嗅探：如果本轮存在未闭合事项，一旦在流式输出中检测到 finish 意图，立刻中断流式
+            if can_early_challenge_finish {
+                if let StreamEvent::Content {
+                    accumulated_content,
+                    ..
+                } = &event
+                {
+                    if accumulated_content.contains("\"tool\": \"finish\"")
+                        || accumulated_content.contains("\"tool\":\"finish\"")
+                        || accumulated_content.contains("\"action\": \"finish\"")
+                        || accumulated_content.contains("\"action\":\"finish\"")
+                    {
+                        println!("⚡ [流式早期熔断] 存在未闭合事项时检测到 finish 调用意图，提前终止流式接收！");
+                        early_finish_aborted = true;
+                        return false;
+                    }
+                }
+            }
+
             if let Some(app_handle) = app {
                 use tauri::Emitter;
                 if first_token_at.is_none() {
@@ -328,6 +350,7 @@ pub async fn call_llm(
                     }
                 }
             }
+            true
         };
 
         // 5. 调用 llm 层发送请求（含 HTTP 重试）
@@ -360,6 +383,27 @@ pub async fn call_llm(
                 return Err(error);
             }
         };
+
+        // ⚡ 若早期熔断已触发，直接返回合成的 finish 指令，交由主循环终态质询拦截并秒级进入下一轮
+        if early_finish_aborted {
+            let synthetic_instruction = AgentInstruction {
+                description: "尝试调用 finish 交付（已被系统流式早期熔断拦截）".to_string(),
+                thought: "准备结束任务".to_string(),
+                tool: Some("finish".to_string()),
+                action: Some("finish".to_string()),
+                command: Some(json!({
+                    "summary": "【终态自检拦截】系统在流式输出早期检测到 finish 意图，因存在未闭合事项，已提前熔断输出并转入验证。"
+                })),
+                ..Default::default()
+            };
+            let token_usage = TokenUsage::default();
+            return Ok((
+                synthetic_instruction,
+                token_usage,
+                result.thinking_text,
+                Some(history_estimate_at_request),
+            ));
+        }
 
         // 6. Token 用量与速度指标统计
         let token_usage = match result.usage {
