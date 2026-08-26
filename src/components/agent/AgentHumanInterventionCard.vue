@@ -636,13 +636,17 @@ function handleCustomHtmlCancel(reason: string) {
   user-select: none;
 }
 .write-in-input {
+  display: block;
   width: 100%;
   padding: 8px 10px;
   border-radius: 6px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: #121214;
   color: #f4f4f5;
+  font-family: inherit;
   font-size: 12.5px;
+  line-height: 1.5;
+  min-height: 36px;
   outline: none;
   box-sizing: border-box;
   transition: all 0.15s ease;
