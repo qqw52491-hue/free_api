@@ -21,6 +21,9 @@ pub struct FailedAttempt {
     pub step_id: usize,
     pub tool: String,
     pub action: String,
+    /// 规范化参数的稳定指纹；旧 checkpoint 缺失时保持空串以兼容恢复。
+    #[serde(default)]
+    pub params_fingerprint: String,
     pub error_summary: String,
     #[serde(default)]
     pub output_id: Option<String>,
@@ -191,6 +194,9 @@ pub struct SandwichContext {
     /// 已加载并写入历史的工具手册集合（字典序 BTreeSet 保证确定性序列化）
     #[serde(default)]
     pub fetched_tools: BTreeSet<String>,
+    /// 上下文预算与压缩策略配置
+    #[serde(default)]
+    pub budget_config: crate::agent::context::budget::ContextBudgetConfig,
     /// 压缩引擎专用 LLM 配置（运行时注入，不参与 checkpoint 序列化）
     #[serde(skip)]
     pub compaction_model_config: Option<ModelConfig>,
@@ -224,6 +230,7 @@ impl SandwichContext {
             carry_memories: false,
             context_window_tokens: 0,
             fetched_tools: BTreeSet::new(),
+            budget_config: crate::agent::context::budget::ContextBudgetConfig::default(),
             compaction_model_config: None,
         }
     }
@@ -305,19 +312,101 @@ impl SandwichContext {
         rejections
     }
 
+    fn failed_attempt_params_fingerprint(params: &serde_json::Value) -> String {
+        crate::agent::context::determinism::sha256_hex(&params.to_string())
+    }
+
+    fn is_deterministic_tool_failure(error: &str) -> bool {
+        let normalized = error.to_ascii_lowercase();
+        let transient = [
+            "429",
+            "rate limit",
+            "timeout",
+            "timed out",
+            "network",
+            "connection",
+            "temporarily",
+        ];
+        if transient.iter().any(|needle| normalized.contains(needle)) {
+            return false;
+        }
+        [
+            "hub 参数契约",
+            "未声明参数",
+            "unknown action",
+            "未知的",
+            "required",
+            "缺少",
+            "enoent",
+            "no such file or directory",
+            "not a directory",
+            "host security rejection",
+            "relation: outside",
+        ]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+    }
+
+    /// 若同一工具、动作和参数已经出现确定性失败，则拒绝再次派发。
+    /// 网络/限流等暂态失败不在此处阻断，仍由既有恢复策略处理。
+    pub fn repeated_failure_blocker(
+        &self,
+        tool: &str,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> Option<String> {
+        let params_fingerprint = Self::failed_attempt_params_fingerprint(params);
+        self.failed_attempts
+            .iter()
+            .rev()
+            .find(|attempt| {
+                attempt.tool.eq_ignore_ascii_case(tool)
+                    && attempt.action.eq_ignore_ascii_case(action)
+                    && attempt.params_fingerprint == params_fingerprint
+                    && Self::is_deterministic_tool_failure(&attempt.error_summary)
+            })
+            .map(|attempt| {
+                let output_ref = attempt
+                    .output_id
+                    .as_deref()
+                    .map(|id| format!(" 详情见 output_id={}。", id))
+                    .unwrap_or_default();
+                format!(
+                    "【重复确定性失败拦截】{} / {} 已以相同参数失败（Step {}）：{}。禁止再次派发同一命令；必须更换工具、动作或参数，必要时 ask_human。{}",
+                    tool, action, attempt.step_id, attempt.error_summary, output_ref
+                )
+            })
+    }
+
     pub fn record_failed_attempt(
         &mut self,
         step_id: usize,
         tool: String,
         action: String,
+        params: &serde_json::Value,
         error_summary: String,
         output_id: Option<String>,
     ) {
+        let params_fingerprint = Self::failed_attempt_params_fingerprint(params);
+        let short_error: String = error_summary.chars().take(160).collect();
+        if let Some(existing) = self.failed_attempts.iter_mut().rev().find(|attempt| {
+            attempt.step_id == step_id
+                && attempt.tool.eq_ignore_ascii_case(&tool)
+                && attempt.action.eq_ignore_ascii_case(&action)
+                && attempt.params_fingerprint == params_fingerprint
+        }) {
+            existing.error_summary = short_error;
+            if output_id.is_some() {
+                existing.output_id = output_id;
+            }
+            return;
+        }
         self.failed_attempts.push(FailedAttempt {
             step_id,
             tool,
             action,
-            error_summary,
+            params_fingerprint,
+            error_summary: short_error,
             output_id,
         });
         if self.failed_attempts.len() > 6 {
@@ -517,6 +606,43 @@ mod tests {
         assert!(restored_ctx.fetched_tools.contains("remote-hub"));
         assert!(!restored_ctx.has_tool_manual("remote-hub/search_code"));
     }
+    #[test]
+    fn repeated_deterministic_failure_blocks_same_parameters_but_not_transient_or_changed_calls() {
+        let mut ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let params = json!({"path": "/missing/project"});
+        ctx.record_failed_attempt(
+            1,
+            "remote-hub/list_directory".to_string(),
+            "list_directory".to_string(),
+            &params,
+            "ENOENT: no such file or directory".to_string(),
+            Some("out-1".to_string()),
+        );
+        assert!(ctx
+            .repeated_failure_blocker("remote-hub/list_directory", "list_directory", &params)
+            .is_some());
+        assert!(ctx
+            .repeated_failure_blocker(
+                "remote-hub/list_directory",
+                "list_directory",
+                &json!({"path": "/different/project"}),
+            )
+            .is_none());
+
+        let transient = json!({"query": "retry me"});
+        ctx.record_failed_attempt(
+            2,
+            "web_search".to_string(),
+            "search".to_string(),
+            &transient,
+            "HTTP 429 rate limit".to_string(),
+            None,
+        );
+        assert!(ctx
+            .repeated_failure_blocker("web_search", "search", &transient)
+            .is_none());
+    }
+
     #[test]
     fn record_side_effect_invalidates_prior_change_verification() {
         let mut ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
