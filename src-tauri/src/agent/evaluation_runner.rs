@@ -1,7 +1,7 @@
 use crate::agent::checkpoint::{load_checkpoint, AgentPhase};
 use crate::agent::control::cancel_agent_run;
 use crate::agent::evaluation;
-use crate::agent::main_loop::run_agent_main_loop;
+use crate::agent::main_loop::run_agent_main_loop_in_workspace;
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::router::ModelRoutingConfig;
 use crate::agent::run_trace;
@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::fs;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -27,6 +28,7 @@ const MAX_EVALUATION_DURATION_MINUTES: u64 = 20;
 const STOP_GRACE_PERIOD: Duration = Duration::from_secs(120);
 const HUMAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const STRUCTURED_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
+const EVALUATION_ARTIFACTS_DIR: &str = "test-artifacts";
 
 // 回归评测固定使用本机 SQLite 中的火山订阅模型，避免同名模型跨平台串路由。
 const DEFAULT_EVALUATION_ROUTE_PRESET: &str = "default";
@@ -341,7 +343,40 @@ fn fixed_evaluation_model_routing(
     ))
 }
 
-/// 启动独立的真实只读 Agent 回归评测。
+fn resolve_isolated_evaluation_workspace(
+    workspace_override: Option<String>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(raw_path) = workspace_override.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let requested = PathBuf::from(raw_path.trim());
+    if !requested.is_absolute() {
+        return Err("评测隔离工作区必须是绝对路径".to_string());
+    }
+    let workspace = requested
+        .canonicalize()
+        .map_err(|error| format!("评测隔离工作区不可用：{error}"))?;
+    if !workspace.is_dir() {
+        return Err("评测隔离工作区必须是目录".to_string());
+    }
+    let project_root = std::env::current_dir()
+        .map_err(|error| format!("无法确定项目工作区：{error}"))?
+        .canonicalize()
+        .map_err(|error| format!("项目工作区不可用：{error}"))?;
+    let allowed_root = project_root
+        .join(EVALUATION_ARTIFACTS_DIR)
+        .canonicalize()
+        .map_err(|error| format!("评测工件目录不可用：{error}"))?;
+    if !workspace.starts_with(&allowed_root) {
+        return Err(format!(
+            "评测隔离工作区必须位于 {} 下",
+            allowed_root.display()
+        ));
+    }
+    Ok(Some(workspace))
+}
+
+/// 启动独立的真实 Agent 回归评测。
 ///
 /// 此命令不走图形化页面，也不复制或改写普通会话主循环。后台任务从 AppHandle
 /// 取得已托管的数据库与 MCP 注册表，并直接复用 run_agent_main_loop；运行结束后只读
@@ -356,6 +391,7 @@ pub async fn start_background_agent_evaluation(
     max_duration_minutes: Option<u64>,
     scenario: Option<String>,
     routing_preset: Option<String>,
+    workspace_override: Option<String>,
 ) -> Result<BackgroundEvaluationStart, String> {
     let (evaluation_model_routing, routing_metadata) = {
         let state = app.state::<DbState>();
@@ -367,6 +403,7 @@ pub async fn start_background_agent_evaluation(
     let duration_minutes = max_duration_minutes
         .unwrap_or(DEFAULT_EVALUATION_DURATION_MINUTES)
         .clamp(1, MAX_EVALUATION_DURATION_MINUTES);
+    let evaluation_workspace = resolve_isolated_evaluation_workspace(workspace_override)?;
     let session_id = format!("agent-evaluation-{}", uuid::Uuid::new_v4());
     // 普通入口不传场景时保持标准回归；本地自动化可显式用环境变量选择
     // 已注册的只读场景，避免为了测试额外改动 UI 或普通会话。
@@ -375,6 +412,11 @@ pub async fn start_background_agent_evaluation(
             .ok()
             .filter(|value| !value.trim().is_empty())
     });
+    if requested_scenario.as_deref() == Some(evaluation::ISOLATED_WRITE_FIXTURE_SCENARIO)
+        && evaluation_workspace.is_none()
+    {
+        return Err("写入型评测必须提供位于 test-artifacts 下的隔离工作区".to_string());
+    }
     let evaluation_run = evaluation::begin_agent_evaluation_for_scenario(
         &session_id,
         requested_scenario.as_deref(),
@@ -388,6 +430,7 @@ pub async fn start_background_agent_evaluation(
     let worker_session_id = session_id.clone();
     let worker_evaluation_id = evaluation_id.clone();
     let worker_routing_metadata = routing_metadata.clone();
+    let worker_workspace = evaluation_workspace.clone();
     let human_wait_detected = Arc::new(AtomicBool::new(false));
     let human_wait_reason = Arc::new(StdMutex::new(None::<String>));
     let human_wait_for_listener = human_wait_detected.clone();
@@ -406,7 +449,7 @@ pub async fn start_background_agent_evaluation(
         let state_owner = worker_app.clone();
         let state = state_owner.state::<DbState>();
         let registry = state_owner.state::<Arc<Mutex<PluginRegistry>>>();
-        let mut worker = Box::pin(run_agent_main_loop(
+        let mut worker = Box::pin(run_agent_main_loop_in_workspace(
             worker_app.clone(),
             state,
             registry,
@@ -416,6 +459,7 @@ pub async fn start_background_agent_evaluation(
             Some(worker_session_id.clone()),
             Some(true),
             Some(20),
+            worker_workspace,
         ));
 
         let monitor_app = event_app.clone();
@@ -699,5 +743,15 @@ mod tests {
             // 候选链里的每一项都必须是真实平台/模型名常量，不允许占位符。
             assert!(!candidate.0.is_empty() && !candidate.1.is_empty());
         }
+    }
+    #[test]
+    fn evaluation_workspace_omitted_keeps_current_workspace_behavior() {
+        assert_eq!(resolve_isolated_evaluation_workspace(None).unwrap(), None);
+    }
+    #[test]
+    fn isolated_evaluation_workspace_rejects_relative_paths() {
+        let error = resolve_isolated_evaluation_workspace(Some("fixture".to_string()))
+            .unwrap_err();
+        assert!(error.contains("绝对路径"));
     }
 }

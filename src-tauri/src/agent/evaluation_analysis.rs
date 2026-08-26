@@ -351,19 +351,70 @@ fn percentage(part: usize, total: usize) -> f64 {
     }
 }
 
-pub(crate) fn verdict(metrics: &EvaluationMetrics, warnings: &[String]) -> String {
+pub(crate) fn verdict(
+    metrics: &EvaluationMetrics,
+    warnings: &[String],
+    trace_status: &str,
+) -> String {
     if metrics.llm_call_count == 0 {
         return "inconclusive".to_string();
     }
-    if metrics.parse_error_count > 0
-        || metrics.tool_failure_count > 0
+    let has_failure = metrics.parse_error_count > 0 || metrics.tool_failure_count > 0;
+    let unresolved_failure = has_failure && trace_status != "succeeded";
+    if unresolved_failure
+        || metrics.repeated_failed_action_count > 0
         || metrics.max_parallel_branches > 6
     {
         return "needs_attention".to_string();
     }
-    if warnings.is_empty() {
-        "passes_observed_guardrails".to_string()
+    if has_failure || warnings.is_empty() {
+        if has_failure {
+            "review_recommended".to_string()
+        } else {
+            "passes_observed_guardrails".to_string()
+        }
     } else {
         "review_recommended".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metrics_with_single_tool_failure() -> EvaluationMetrics {
+        EvaluationMetrics {
+            llm_call_count: 1,
+            tool_failure_count: 1,
+            ..EvaluationMetrics::default()
+        }
+    }
+
+    #[test]
+    fn succeeded_trace_with_single_changed_strategy_failure_is_review_recommended() {
+        let metrics = metrics_with_single_tool_failure();
+        assert_eq!(
+            verdict(&metrics, &["工具失败已记录".to_string()], "succeeded"),
+            "review_recommended"
+        );
+    }
+
+    #[test]
+    fn non_succeeded_trace_with_failure_still_needs_attention() {
+        let metrics = metrics_with_single_tool_failure();
+        assert_eq!(
+            verdict(&metrics, &["工具失败已记录".to_string()], "cancelled"),
+            "needs_attention"
+        );
+    }
+
+    #[test]
+    fn repeated_failure_still_needs_attention_after_succeeded_trace() {
+        let mut metrics = metrics_with_single_tool_failure();
+        metrics.repeated_failed_action_count = 1;
+        assert_eq!(
+            verdict(&metrics, &["相同失败调用重犯".to_string()], "succeeded"),
+            "needs_attention"
+        );
     }
 }

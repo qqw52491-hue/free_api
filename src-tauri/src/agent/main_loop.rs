@@ -298,6 +298,34 @@ pub async fn run_agent_main_loop(
     log_context: Option<bool>,
     transient_llm_request_retries: Option<u32>,
 ) -> Result<(), String> {
+    run_agent_main_loop_in_workspace(
+        app,
+        state,
+        registry_state,
+        model_routing,
+        goal,
+        auto_pilot,
+        session_id,
+        log_context,
+        transient_llm_request_retries,
+        None,
+    )
+    .await
+}
+
+/// 仅供受宿主校验的后台评测使用；普通会话始终沿用进程当前工作区。
+pub(crate) async fn run_agent_main_loop_in_workspace(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    registry_state: State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
+    model_routing: crate::agent::router::ModelRoutingConfig,
+    goal: String,
+    auto_pilot: bool,
+    session_id: Option<String>,
+    log_context: Option<bool>,
+    transient_llm_request_retries: Option<u32>,
+    workspace_override: Option<std::path::PathBuf>,
+) -> Result<(), String> {
     let transient_llm_request_retries = transient_llm_request_retries
         .unwrap_or(DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
         .clamp(1, MAX_TRANSIENT_LLM_REQUEST_RETRIES);
@@ -330,7 +358,11 @@ pub async fn run_agent_main_loop(
         eprintln!("[run-trace] 无法创建运行轨迹: {error}");
     }
     // Skill、插件与 shell 工具共享本轮运行时工作目录；恢复时会重新读取并按哈希复用未变更的 Skill。
-    let workspace_dir = std::env::current_dir().unwrap_or_default();
+    let workspace_dir =
+        workspace_override.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    if !workspace_dir.is_dir() {
+        return Err(format!("Agent 工作区不可用：{}", workspace_dir.display()));
+    }
     // 1. 智能 MCP 插件同步：首次任务全量初始化，后续任务仅增量保活（见 mcp/session_bootstrap.rs）
     crate::agent::mcp::session_bootstrap::sync_mcp_plugins_for_session(
         &app,

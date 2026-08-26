@@ -11,6 +11,7 @@ pub const READ_ONLY_REGRESSION_GOAL: &str = r#"你是一名证据驱动的只读
 
 /// 复杂取消一致性审查的独立评测场景标识。
 pub const COMPLEX_CANCELLATION_DIAGNOSTIC_SCENARIO: &str = "complex_cancellation_diagnostic";
+pub const ISOLATED_WRITE_FIXTURE_SCENARIO: &str = "isolated_write_fixture";
 
 /// 该场景测试跨模块的状态机取证能力，而不是要求模型通读整个项目。
 /// 它只用于独立后台评测，绝不注入普通会话的系统提示词。
@@ -23,6 +24,10 @@ pub const COMPLEX_CANCELLATION_DIAGNOSTIC_GOAL: &str = r#"你是一名证据驱�
 对每条路径给出“触发事件 → 状态变化 → 取消/恢复信号 → 持久化/清理 → 后续写入阻断”的证据链；每个核心结论至少引用两个相关文件、函数或行窗口。明确区分代码已证明的保证、仍依赖时序而未证明的假设、以及可能的竞态或遗留写入风险。若线索不一致，回到状态地图或补读必要调用方，不得猜测。
 
 最终交付：状态地图、四条路径的证据链、风险、反证或不确定性、优先级和最小可验证修复建议。证据足够时立即收束，不要为了通读更多文件而继续探索。"#;
+
+pub const ISOLATED_WRITE_FIXTURE_GOAL: &str = r#"你正在一个隔离的、可销毁的工程 fixture 中执行真实写入任务。先阅读当前目录的 README、package.json、源码和可见测试，建立最小问题地图；定位实现与测试失败之间的因果关系后，只修改生产源码以修复问题。不得修改、删除、跳过或弱化测试、package.json、README 和验证脚本；不得访问或修改工作区外的任何路径；不得提交 Git。
+
+完成修改后必须运行项目声明的测试命令，读取测试结果，并在失败时依据输出继续定位和修复。可见测试通过并不等于契约已覆盖：请把 README 或任务中每条显式输入、输出和不变性要求各自转为至少一个正常、边界或无效输入的验证；必要时可添加临时本地检查，但不得改动受保护测试或验证脚本。最终交付必须说明：实际修改的文件、每个修复对应的行为、运行过的验证命令及其结果、已覆盖的契约及仍未验证的边界。没有成功测试证据不得宣称任务完成。"#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentEvaluationReport {
@@ -139,7 +144,11 @@ pub fn begin_agent_evaluation_for_scenario(
             "agent-complex-cancellation",
             COMPLEX_CANCELLATION_DIAGNOSTIC_GOAL,
         ),
-        other => return Err(format!("未知的只读评测场景：{}", other)),
+        ISOLATED_WRITE_FIXTURE_SCENARIO => (
+            "agent-write-fixture",
+            ISOLATED_WRITE_FIXTURE_GOAL,
+        ),
+        other => return Err(format!("未知的评测场景：{}", other)),
     };
     let project_dir = std::env::current_dir().map_err(|error| error.to_string())?;
     let run = AgentEvaluationRun {
@@ -193,7 +202,7 @@ pub fn build_and_persist_report(
     if trace_status == "missing" {
         warnings.push("未找到运行轨迹，因此工具成功/失败指标不可判定。".to_string());
     }
-    let verdict = verdict(&metrics, &warnings);
+    let verdict = verdict(&metrics, &warnings, &trace_status);
 
     let report_dir = project_dir.join("agent_evaluations");
     fs::create_dir_all(&report_dir).map_err(|error| error.to_string())?;
