@@ -35,6 +35,31 @@ pub fn task_store_menu() -> &'static str {
 "#
 }
 
+fn compact_action_index(content: &str) -> Option<String> {
+    let actions_section = content
+        .split_once("### 支持的动作")
+        .map(|(_, rest)| rest.split("\n### ").next().unwrap_or(rest))?;
+
+    let actions = actions_section
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if !line
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_digit())
+            {
+                return None;
+            }
+            let action = line.split('`').nth(1)?.trim();
+            (!action.is_empty() && !action.contains(char::is_whitespace)).then_some(action)
+        })
+        .take(8)
+        .collect::<Vec<_>>();
+
+    (!actions.is_empty()).then(|| format!("；actions: {}", actions.join(", ")))
+}
+
 /// 扫描 prompts/tools/*.md 生成内置本地工具菜单；一个目录都没读到时回退到内置清单。
 pub fn build_local_tools_menu(app: &AppHandle) -> String {
     let mut local_tools_menu = String::from("\n## 内置本地工具 (Built-in Tools)\n");
@@ -65,7 +90,8 @@ pub fn build_local_tools_menu(app: &AppHandle) -> String {
                                     .map(|end| &content[start + 9..end])
                             })
                             .unwrap_or("无详细描述");
-                        local_tools_menu.push_str(&format!("- {}: {}\n", name, summary));
+                        let actions = compact_action_index(&content).unwrap_or_default();
+                        local_tools_menu.push_str(&format!("- {}: {}{}\n", name, summary, actions));
                         read_count += 1;
                     }
                 }
@@ -80,4 +106,23 @@ pub fn build_local_tools_menu(app: &AppHandle) -> String {
         local_tools_menu.push_str("- finish: 终态交付动作\n- ask_human: 询问人类或请求确认\n- model_manager: 模型规格与渠道配置管理工具\n- mcp_manager: 外部 MCP 插件接入与能力卡管理工具\n- skill_manager: 工作区 Skill 与自定义提示词管理工具\n- web_search: 全网实时搜索引擎\n- web_fetch: 网页正文 Markdown 提取工具\n- task_store: 结构化数据存储与分页检索\n- search: 代码与历史日志联邦检索\n");
     }
     local_tools_menu
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_action_index;
+
+    #[test]
+    fn action_index_exposes_declared_actions_without_full_manual() {
+        let manual = "<summary>Skill 管理</summary>\n### 支持的动作 (action)\n1. `list`: 列表\n2. `add`: 新增\n3. `batch_import`: 批量导入\n### 使用范例";
+        assert_eq!(
+            compact_action_index(manual).as_deref(),
+            Some("；actions: list, add, batch_import")
+        );
+    }
+
+    #[test]
+    fn action_index_ignores_manuals_without_declared_actions() {
+        assert_eq!(compact_action_index("<summary>只读工具</summary>"), None);
+    }
 }
