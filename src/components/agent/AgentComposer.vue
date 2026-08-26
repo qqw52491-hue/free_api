@@ -1,6 +1,6 @@
 <template>
     <footer class="manus-composer-wrap">
-        <div class="manus-composer" :class="{ waiting: isWaitingForHuman }">
+        <div class="manus-composer" :class="{ waiting: isWaitingForHuman }" @click="handleComposerClick">
             <textarea
                 ref="textareaRef"
                 :value="draft"
@@ -331,6 +331,13 @@ function toggleModelMenu() {
     modelMenuOpen.value = !modelMenuOpen.value;
     if (modelMenuOpen.value) {
         budgetMenuOpen.value = false;
+    }
+}
+
+function handleComposerClick(e: MouseEvent) {
+    const target = e.target as HTMLElement | null;
+    if (target && !target.closest("button") && !target.closest(".model-routing-popover") && !target.closest(".budget-dropdown-menu")) {
+        textareaRef.value?.focus();
     }
 }
 

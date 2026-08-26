@@ -96,7 +96,19 @@
       </div>
     </div>
 
-    <!-- 5. 极致灵活自定义 HTML 交互微应用 (Custom HTML Mini-App) -->
+    <!-- 5. 纯文本问答输入 (Text Prompt / 问答) -->
+    <div v-else-if="formKind === 'text'" class="options-container text-input-box">
+      <textarea
+        ref="textInputRef"
+        v-model="customWriteInText"
+        class="intervention-textarea"
+        :placeholder="props.humanForm?.placeholder || '请输入你的回复或指示… (按 Enter 提交，Shift+Enter 换行)'"
+        rows="3"
+        @keydown.enter.exact.prevent="handleFormSubmit"
+      />
+    </div>
+
+    <!-- 6. 极致灵活自定义 HTML 交互微应用 (Custom HTML Mini-App) -->
     <div v-else-if="formKind === 'custom_html' || customHtmlCode" class="options-container custom-html-box">
       <HtmlPreviewBlock
         :code="customHtmlCode"
@@ -106,12 +118,18 @@
       />
     </div>
 
-    <!-- 6. 兜底/附加补充输入框 (Write-in input) -->
-    <div v-if="formKind !== 'custom_html' && !customHtmlCode" class="write-in-wrap">
-      <label class="write-in-label">
+    <!-- 7. 兜底/附加补充输入框 (在选择题/确认题下方提供可选补充说明) -->
+    <div
+      v-if="formKind !== 'custom_html' && formKind !== 'text' && !customHtmlCode"
+      class="write-in-wrap"
+      @click="focusWriteInInput"
+    >
+      <label class="write-in-label" for="intervention-write-in-field">
         <span>补充说明 / 自定义要求（可选）:</span>
       </label>
       <input
+        id="intervention-write-in-field"
+        ref="writeInInputRef"
         v-model="customWriteInText"
         type="text"
         class="write-in-input"
@@ -136,9 +154,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import type { AgentHumanForm } from "./types";
+import type { AgentHumanForm, AgentHumanFormKind } from "./types";
 import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 
 const props = defineProps<{
@@ -152,7 +170,13 @@ const emit = defineEmits<{
   cancel: [];
 }>();
 
-const formKind = computed(() => props.humanForm?.kind || (props.humanForm?.html ? "custom_html" : "single_select"));
+const formKind = computed<AgentHumanFormKind>(() => {
+  if (props.humanForm?.kind) return props.humanForm.kind;
+  if (props.humanForm?.html) return "custom_html";
+  if (props.humanForm?.options && props.humanForm.options.length > 0) return "single_select";
+  return "text";
+});
+
 const formTitle = computed(() => props.humanForm?.title || props.pauseReason || "请提供反馈或确认下一步");
 const formDescription = computed(() => props.humanForm?.description || "");
 const formOptions = computed(() => props.humanForm?.options || []);
@@ -165,11 +189,15 @@ const formTypeLabel = computed(() => {
     case "multi_select": return "多项选择";
     case "file_picker": return "文件上传";
     case "custom_html": return "自定义交互应用";
+    case "text": return "问答输入";
     default: return "问答输入";
   }
 });
 
-// 状态
+// 状态与引用
+const textInputRef = ref<HTMLTextAreaElement | null>(null);
+const writeInInputRef = ref<HTMLInputElement | null>(null);
+
 const confirmValue = ref<boolean | null>(
   typeof props.humanForm?.defaultValue === "boolean" ? props.humanForm.defaultValue : true
 );
@@ -182,7 +210,23 @@ const multiSelectedIds = ref<string[]>(
   Array.isArray(props.humanForm?.defaultValue) ? props.humanForm.defaultValue : []
 );
 const selectedFilePaths = ref<string[]>([]);
-const customWriteInText = ref("");
+const customWriteInText = ref(
+  formKind.value === "text" && typeof props.humanForm?.defaultValue === "string"
+    ? props.humanForm.defaultValue
+    : ""
+);
+
+function focusWriteInInput() {
+  writeInInputRef.value?.focus();
+}
+
+onMounted(() => {
+  nextTick(() => {
+    if (formKind.value === "text") {
+      textInputRef.value?.focus();
+    }
+  });
+});
 
 function toggleMultiOption(id: string) {
   const index = multiSelectedIds.value.indexOf(id);
@@ -225,6 +269,7 @@ function removeFile(index: number) {
 }
 
 const canSubmit = computed(() => {
+  if (formKind.value === "text") return customWriteInText.value.trim().length > 0;
   if (customWriteInText.value.trim()) return true;
   if (formKind.value === "confirm") return confirmValue.value !== null;
   if (formKind.value === "single_select") return !!singleSelectedId.value;
@@ -235,6 +280,11 @@ const canSubmit = computed(() => {
 
 function handleFormSubmit() {
   if (!canSubmit.value || props.isSending) return;
+
+  if (formKind.value === "text") {
+    emit("submit", customWriteInText.value.trim());
+    return;
+  }
 
   const parts: string[] = [];
 
@@ -543,30 +593,63 @@ function handleCustomHtmlCancel(reason: string) {
 }
 .file-chip-del:hover { color: #ff4757; }
 
+/* 纯文本问答输入框 */
+.text-input-box {
+  margin-bottom: 8px;
+}
+.intervention-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: #121214;
+  color: #f4f4f5;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+  min-height: 76px;
+  box-sizing: border-box;
+  transition: all 0.15s ease;
+}
+.intervention-textarea:focus {
+  border-color: #fbbf24;
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.15);
+}
+.intervention-textarea::placeholder {
+  color: #71717a;
+}
+
 /* 自定义补充输入 */
 .write-in-wrap {
   margin-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  cursor: text;
 }
 .write-in-label {
   color: #8e8e93;
   font-size: 11px;
+  cursor: pointer;
+  user-select: none;
 }
 .write-in-input {
   width: 100%;
-  padding: 7px 10px;
+  padding: 8px 10px;
   border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   background: #121214;
   color: #f4f4f5;
   font-size: 12.5px;
   outline: none;
-  transition: border-color 0.15s;
+  box-sizing: border-box;
+  transition: all 0.15s ease;
 }
 .write-in-input:focus {
-  border-color: rgba(255, 255, 255, 0.3);
+  border-color: #fbbf24;
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.12);
 }
 
 /* 提交按钮 */
