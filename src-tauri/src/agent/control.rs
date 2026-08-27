@@ -80,16 +80,15 @@ pub async fn replace_agent_goal(session_id: String, goal: String) -> Result<(), 
 
 #[tauri::command]
 pub async fn cancel_agent_run(session_id: String) -> Result<(), String> {
-    let sender = intervention_channels()
-        .lock()
-        .await
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| "任务已结束或通道不存在".to_string())?;
-    sender
-        .send(HumanControl::Cancel)
-        .await
-        .map_err(|e| e.to_string())?;
+    // 快速自旋轮询最多 300ms（防止前端刚发起任务立即点击停止时通道尚在注册中的微小窗口）
+    for _ in 0..6 {
+        if let Some(sender) = intervention_channels().lock().await.get(&session_id).cloned() {
+            let _ = sender.send(HumanControl::Cancel).await;
+            notify_stream_interrupt(&session_id).await;
+            return Ok(());
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
     notify_stream_interrupt(&session_id).await;
     Ok(())
 }

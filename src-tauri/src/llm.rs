@@ -563,7 +563,12 @@ pub async fn stream_once<F: FnMut(StreamEvent) -> bool>(
     let start_instant = std::time::Instant::now();
     let mut first_token_instant: Option<std::time::Instant> = None;
 
-    let request = client.post(&url).headers(headers).json(&body).send();
+    let request = client
+        .post(&url)
+        .headers(headers)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(config.timeout_secs))
+        .send();
     tokio::pin!(request);
     let resp = tokio::select! {
         result = &mut request => result.map_err(|e| format!("请求失败: {}", e))?,
@@ -756,7 +761,13 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                 if i < max_retries - 1 {
                     // 有界指数退避（1s、2s、4s、8s、15s...）给服务端恢复窗口。
                     let backoff_ms = transient_retry_backoff_ms(i);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)) => {},
+                        changed = interrupt_rx.changed() => {
+                            let _ = changed;
+                            return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                        }
+                    }
                 }
             }
         }

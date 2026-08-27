@@ -110,7 +110,11 @@
                 </article>
                 <article v-else-if="entry.type === 'active-thought'" class="active-thought-stream root-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
                     <header><span class="thought-pulse-dot" :class="{ 'is-running': isRunning }"><i></i></span><b>思考</b><em>{{ isRunning ? '思考中…' : '思考过程' }}</em><time>{{ formatClock(entry.timestamp) }}</time></header>
-                    <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
+                    <div v-if="isRunning && !thought" class="active-thought-initial">
+                        <span class="manus-spinner small"></span>
+                        <span>正在连接模型并深度思考规划执行步骤…</span>
+                    </div>
+                    <pre v-else class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
                 </article>
                 <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
                     <div class="agent-msg-header">
@@ -416,7 +420,7 @@ function currentTimeline(): TimelineEntry[] {
         ...props.humanInterventions.map((item, index) => ({ id: `live-human-${item.timestamp}-${index}`, type: "message" as const, timestamp: item.timestamp, role: "user", content: item.message, isHuman: true })),
     ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
     timeline.push(...middle);
-    if ((props.isThinking || Boolean(props.thought)) && !plans.length) {
+    if ((props.isThinking || Boolean(props.thought) || props.isRunning) && !plans.length) {
         timeline.push({ id: "active-thought", type: "active-thought", timestamp: activeThoughtStartedAt.value || Date.now() });
     }
     if (props.completionMessage || props.finalSummary || props.finalArtifacts.length) {
@@ -1203,6 +1207,15 @@ button.root-row {
     color: #a9a9af;
     font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
     white-space: pre-wrap;
+}
+
+.active-thought-initial {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px 8px;
+    font-size: 11.5px;
+    color: #93c5fd;
 }
 
 /* 交付物与总结 */

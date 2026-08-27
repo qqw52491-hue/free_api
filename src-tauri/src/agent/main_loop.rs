@@ -335,6 +335,19 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             .map(|d| d.as_millis().to_string())
             .unwrap_or_else(|_| "default".to_string())
     });
+
+    // 立即注册人类干预与流式中断接收器，确保任务启动第一毫秒即可被前端即时打断
+    let (tx, mut rx) = mpsc::channel::<HumanControl>(5);
+    let (interrupt_tx, mut interrupt_rx) = watch::channel(0u64);
+    {
+        let mut channels = intervention_channels().lock().await;
+        channels.insert(final_session_id.clone(), tx);
+    }
+    stream_interrupt_channels()
+        .lock()
+        .await
+        .insert(final_session_id.clone(), interrupt_tx);
+
     // 每次用户发送任务（包括在同一会话中继续对话）都是一个独立的可复盘运行。
     // 该轨迹只服务历史 UI，不参与 checkpoint 恢复或模型上下文。
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -570,18 +583,6 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     // 仅在从 phase=RunTool 且尚无 pending 的 checkpoint 恢复时使用。
     let mut recovered_instruction: Option<AgentInstruction> = None;
     let mut action_history: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-
-    // 注册人类干预接收器
-    let (tx, mut rx) = mpsc::channel::<HumanControl>(5);
-    let (interrupt_tx, mut interrupt_rx) = watch::channel(0u64);
-    {
-        let mut channels = intervention_channels().lock().await;
-        channels.insert(final_session_id.clone(), tx);
-    }
-    stream_interrupt_channels()
-        .lock()
-        .await
-        .insert(final_session_id.clone(), interrupt_tx);
 
     advance_run_state(
         &app,

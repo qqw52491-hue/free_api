@@ -60,6 +60,7 @@ pub fn run() {
             commands::save_message,
             // 对话
             commands::send_chat,
+            commands::cancel_chat,
             // MCP 插件管理
             commands::get_mcp_plugins,
             commands::get_mcp_tool_catalog,

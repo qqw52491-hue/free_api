@@ -180,6 +180,27 @@ pub async fn save_message(
     })
 }
 
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::{watch, Mutex};
+
+static CHAT_INTERRUPT_CHANNELS: OnceLock<Arc<Mutex<HashMap<String, watch::Sender<u64>>>>> =
+    OnceLock::new();
+
+fn chat_interrupt_channels() -> &'static Arc<Mutex<HashMap<String, watch::Sender<u64>>>> {
+    CHAT_INTERRUPT_CHANNELS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+#[tauri::command]
+pub async fn cancel_chat(session_id: String) -> Result<(), String> {
+    if let Some(sender) = chat_interrupt_channels().lock().await.get(&session_id).cloned() {
+        sender.send_modify(|generation| *generation = generation.wrapping_add(1));
+        Ok(())
+    } else {
+        Err("对话未在进行中或已结束".to_string())
+    }
+}
+
 // ==================== STREAM CHAT & UTILS ====================
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -282,15 +303,50 @@ pub async fn send_chat(
         true
     };
 
-    let (_interrupt_tx, mut interrupt_rx) = tokio::sync::watch::channel(0u64);
-    let result = llm::stream_once(
+    let (interrupt_tx, mut interrupt_rx) = tokio::sync::watch::channel(0u64);
+    chat_interrupt_channels()
+        .lock()
+        .await
+        .insert(session_id.clone(), interrupt_tx);
+
+    let stream_result = llm::stream_once(
         &config,
         &api_messages,
         "high",
         &mut interrupt_rx,
         &mut on_event,
     )
-    .await?;
+    .await;
+
+    chat_interrupt_channels().lock().await.remove(&session_id);
+
+    let result = match stream_result {
+        Ok(r) => r,
+        Err(e) if e == llm::STREAM_INTERRUPTED_ERROR => {
+            if is_thinking {
+                app.emit(
+                    "chat-thinking",
+                    json!({
+                        "session_id": session_id,
+                        "status": "done",
+                    }),
+                )
+                .ok();
+            }
+            app.emit(
+                "chat-stream",
+                json!({
+                    "session_id": session_id,
+                    "content": "",
+                    "done": true,
+                    "interrupted": true
+                }),
+            )
+            .ok();
+            return Err("用户已中断生成".to_string());
+        }
+        Err(e) => return Err(e),
+    };
 
     // 思考结束通知
     if is_thinking && !result.thinking_text.is_empty() {

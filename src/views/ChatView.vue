@@ -109,24 +109,28 @@
               <div class="message-header">
                 <span class="message-role">AI</span>
                 <span class="message-model pulsing" v-if="streaming">
-                  {{ isThinking ? '🧠 思考中…' : '生成中…' }}
+                  {{ isThinking ? '🧠 思考分析中…' : '⚡ 正在生成回复…' }}
                 </span>
               </div>
 
               <!-- 🧠 思考过程展示 -->
-              <div v-if="thinkingContent" class="thinking-block" :class="{ collapsed: thinkingCollapsed && !isThinking }">
+              <div v-if="thinkingContent || isThinking" class="thinking-block" :class="{ collapsed: thinkingCollapsed && !isThinking }">
                 <div class="thinking-header" @click="thinkingCollapsed = !thinkingCollapsed">
                   <span class="thinking-icon" :class="{ spinning: isThinking }">🧠</span>
-                  <span class="thinking-title">{{ isThinking ? '思考中...' : '思考过程' }}</span>
+                  <span class="thinking-title">{{ isThinking ? (thinkingContent ? '正在深度思考中…' : '正在连接模型并思考中…') : '思考过程' }}</span>
                   <span class="thinking-toggle">{{ thinkingCollapsed ? '▼ 展开' : '▲ 收起' }}</span>
                 </div>
                 <div v-show="!thinkingCollapsed || isThinking" class="thinking-body">
-                  <div class="thinking-content" v-html="renderMarkdown(thinkingContent)"></div>
+                  <div v-if="thinkingContent" class="thinking-content" v-html="renderMarkdown(thinkingContent)"></div>
+                  <div v-else class="thinking-placeholder">
+                    <div class="loading-dots"><span></span><span></span><span></span></div>
+                    <span>模型已接收输入，正在推理思考中…</span>
+                  </div>
                 </div>
               </div>
 
               <div class="message-content md-content" v-if="streamContent" v-html="renderMarkdown(streamContent)"></div>
-              <div class="message-content" v-else-if="!thinkingContent">
+              <div class="message-content" v-else-if="!thinkingContent && !isThinking">
                 <div class="loading-dots"><span></span><span></span><span></span></div>
               </div>
             </div>
@@ -170,14 +174,20 @@
             ref="inputRef"
             class="chat-input"
             v-model="userInput"
-            :placeholder="streaming ? 'AI 回复中…' : '输入消息，Shift+Enter 换行…'"
+            :placeholder="streaming ? 'AI 正在回复中，点击右侧按钮可中断…' : '输入消息，Shift+Enter 换行…'"
             :disabled="streaming"
             @keydown="onKeydown"
             rows="1"
           ></textarea>
-          <button class="btn-send" @click="sendMessage" :disabled="(!userInput.trim() && pendingFiles.length === 0) || streaming || !selectedModelId">
+          <button
+            class="btn-send"
+            :class="{ 'btn-stop': streaming }"
+            :title="streaming ? '停止生成 (中断模型调用)' : '发送消息 (Enter)'"
+            :disabled="!streaming && ((!userInput.trim() && pendingFiles.length === 0) || !selectedModelId)"
+            @click="streaming ? stopChat() : sendMessage()"
+          >
             <svg v-if="!streaming" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>
           </button>
         </div>
         <div class="input-hint">
@@ -366,7 +376,7 @@ async function sendMessage() {
   streamContent.value = ''
   tokenUsage.value = null
   thinkingContent.value = ''
-  isThinking.value = false
+  isThinking.value = true
   thinkingCollapsed.value = false
 
   try {
@@ -380,11 +390,32 @@ async function sendMessage() {
     messages.value.push(aiMsg)
     if (sess) sess.message_count++
   } catch (e: any) {
-    chatError.value = typeof e === 'string' ? e : (e?.message || '发送失败')
+    const errText = typeof e === 'string' ? e : (e?.message || '发送失败')
+    if (errText.includes('已中断') || errText.includes('interrupted')) {
+      if (streamContent.value.trim()) {
+        const aiMsg = await invoke<ChatMessage>('save_message', {
+          sessionId: currentSessionId.value, role: 'assistant', content: streamContent.value + '\n\n*(已手动停止生成)*', attachments: null, modelId: selectedModelId.value
+        })
+        messages.value.push(aiMsg)
+        if (sess) sess.message_count++
+      }
+    } else {
+      chatError.value = errText
+    }
   } finally {
     streaming.value = false
+    isThinking.value = false
     streamContent.value = ''
     scrollToBottom()
+  }
+}
+
+async function stopChat() {
+  if (!streaming.value || !currentSessionId.value) return
+  try {
+    await invoke('cancel_chat', { sessionId: currentSessionId.value })
+  } catch (e: any) {
+    console.warn('cancel_chat error:', e)
   }
 }
 
@@ -488,6 +519,20 @@ watch(userInput, () => { nextTick(() => { const el = inputRef.value; if (el) { e
 .btn-send { width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent-dark)); border: none; color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.18s; box-shadow: 0 2px 12px var(--accent-glow); }
 .btn-send:hover:not(:disabled) { transform: scale(1.06); box-shadow: 0 4px 20px var(--accent-glow); }
 .btn-send:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-send.btn-stop {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  box-shadow: 0 2px 12px rgba(239, 68, 68, 0.4);
+  animation: pulse-stop 1.8s infinite;
+}
+.btn-send.btn-stop:hover {
+  background: linear-gradient(135deg, #f87171, #ef4444);
+  transform: scale(1.08);
+  box-shadow: 0 4px 18px rgba(239, 68, 68, 0.6);
+}
+@keyframes pulse-stop {
+  0%, 100% { box-shadow: 0 2px 12px rgba(239, 68, 68, 0.35); }
+  50% { box-shadow: 0 2px 20px rgba(239, 68, 68, 0.65); }
+}
 .input-hint { font-size: 11px; color: var(--text-4); padding: 6px 4px 0; }
 .input-error { color: var(--red-light); }
 
@@ -623,5 +668,14 @@ watch(userInput, () => { nextTick(() => { const el = inputRef.value; if (el) { e
 }
 .thinking-content :deep(p) {
   margin: 4px 0;
+}
+.thinking-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  font-size: 12px;
+  color: var(--text-3);
+  font-style: normal;
 }
 </style>
