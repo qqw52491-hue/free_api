@@ -96,7 +96,22 @@ fn should_challenge_finish_with_blockers(
     is_finish && succeeded && !finish_reviewed && !blockers.is_empty()
 }
 
-/// 复杂诊断首次 finish 缺少边界披露时复用既有可恢复拦截。
+/// 主根因的证据边界是交付正确性的前置条件，不能因已经提醒过一次而静默放行。
+/// Todo、审查义务与写入验证仍沿用原有的一次反馈语义，避免反复广播相同状态卡。
+fn should_challenge_finish_with_complex_delivery_blocker(
+    is_finish: bool,
+    succeeded: bool,
+    finish_reviewed: bool,
+    blockers: &[String],
+    complex_delivery_unresolved: bool,
+) -> bool {
+    is_finish
+        && succeeded
+        && !blockers.is_empty()
+        && (!finish_reviewed || complex_delivery_unresolved)
+}
+
+/// 复杂诊断 finish 缺少边界披露时复用既有可恢复拦截。
 /// 该检查只消费当前内存中的 summary 生成布尔结论，既不持久化也不回显用户交付正文。
 fn complex_delivery_blocker(
     context: &context::SandwichContext,
@@ -114,11 +129,14 @@ fn complex_delivery_blocker(
     if !requires_complex_delivery {
         return None;
     }
-    let summary = instruction
+    let Some(summary) = instruction
         .command
         .as_ref()
         .and_then(|command| command.get("summary"))
-        .and_then(|summary| summary.as_str())?;
+        .and_then(|summary| summary.as_str())
+    else {
+        return Some("复杂终态缺少 summary，无法核验主根因的证据边界".to_string());
+    };
     let assessment = assess_complex_delivery_summary(summary);
     (!assessment.compliant).then_some(
         "复杂终态缺少已核验范围、未核验范围或关键假设、结论强度，或主根因就地的直接证据与结论强度".to_string(),
@@ -208,6 +226,20 @@ mod finish_guard_tests {
         assert!(!should_challenge_finish(true, true, true, &todos));
         assert!(!should_challenge_finish(true, false, false, &todos));
         assert!(!should_challenge_finish(false, true, false, &todos));
+    }
+
+    #[test]
+    fn complex_delivery_blocker_remains_active_after_an_initial_finish_challenge() {
+        let blockers = vec!["复杂终态缺少主根因直接证据与结论强度".to_string()];
+        assert!(should_challenge_finish_with_complex_delivery_blocker(
+            true, true, true, &blockers, true
+        ));
+        assert!(!should_challenge_finish_with_complex_delivery_blocker(
+            true, true, true, &blockers, false
+        ));
+        assert!(!should_challenge_finish_with_complex_delivery_blocker(
+            true, false, true, &blockers, true
+        ));
     }
 
     #[test]
@@ -949,16 +981,18 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             context.side_effects.len(),
             context.change_verification.as_ref(),
         );
-        if let Some(blocker) =
-            complex_delivery_blocker(&context, &instruction, is_finish, result.success)
-        {
+        let complex_delivery_blocker =
+            complex_delivery_blocker(&context, &instruction, is_finish, result.success);
+        let complex_delivery_unresolved = complex_delivery_blocker.is_some();
+        if let Some(blocker) = complex_delivery_blocker {
             open_todos.push(blocker);
         }
-        let finish_challenged = should_challenge_finish_with_blockers(
+        let finish_challenged = should_challenge_finish_with_complex_delivery_blocker(
             is_finish,
             result.success,
             checkpoint.finish_reviewed,
             &open_todos,
+            complex_delivery_unresolved,
         );
         if finish_challenged {
             checkpoint.finish_reviewed = true;
