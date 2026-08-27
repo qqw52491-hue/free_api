@@ -13,6 +13,28 @@ pub const READ_ONLY_REGRESSION_GOAL: &str = r#"你是一名证据驱动的只读
 pub const COMPLEX_CANCELLATION_DIAGNOSTIC_SCENARIO: &str = "complex_cancellation_diagnostic";
 pub const ISOLATED_WRITE_FIXTURE_SCENARIO: &str = "isolated_write_fixture";
 
+/// 诊断型场景共享的输出契约：唯一允许写入的是 fixture 根目录的 DIAGNOSIS.json。
+/// 这预演了"根 Agent 是唯一 writer、调查方只读"的形态，也让隐藏断言有确定的物理落点。
+const DIAGNOSTIC_OUTPUT_CONTRACT: &str = r#"输出契约：在工作区根目录创建 DIAGNOSIS.json（这是唯一允许创建或修改的文件；不得改动其他任何文件、不得提交 Git）。内容为一个 JSON 对象，字段：root_cause（一句话根因）、evidence（证据数组，每条引用具体文件与行或符号）、fix_direction（最小修复方向，不要求实现）、confidence（high/medium/low）。另有本任务要求的专用字段见下。没有证据不得下结论；证据充分即收尾。"#;
+
+pub const DIAGNOSTIC_FAKE_ACTION_SCENARIO: &str = "diagnostic_fake_action";
+pub const DIAGNOSTIC_FAKE_ACTION_GOAL: &str = r#"你正在一个隔离的、可销毁的工程 fixture 中执行只读诊断任务。现象：某 Agent 调用 skill_manager 的 batch_import 动作陷入失败循环——错误消息声称该动作受支持，重试同样调用仍失败。请阅读 fixture 内的源码与文档，找出循环的根因：能力声明（文档、错误消息）与实际实现（dispatcher/registry）之间哪里不一致、各自以什么事实为源。
+
+严格只读（除输出契约文件外）。专用字段：unimplemented_actions（字符串数组，按证据列出被声明但未实现的 action，精确到名称，顺序按源码出现顺序）。
+"#;
+
+pub const DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO: &str = "diagnostic_plugin_removal";
+pub const DIAGNOSTIC_PLUGIN_REMOVAL_GOAL: &str = r#"你正在一个隔离的、可销毁的工程 fixture 中执行只读诊断任务。现象：管理员删除了某个数据库管理的 MCP 插件（DB 行已删除、目录缓存已失效），但该插件的工具仍出现在运行中的工具菜单里，调用仍能成功，重启后才消失。请追踪"删除请求 → DB → 缓存失效 → 运行时注册表 → 工具菜单/查找"的调用链，找出哪些组件在删除后仍持有旧插件的可见性，以及缺失的同步/对账步骤在哪。
+
+严格只读（除输出契约文件外）。专用字段：stale_components（字符串数组，列出删除后仍让插件保持可见的组件或机制，用源码中的实际名称）。
+"#;
+
+pub const DIAGNOSTIC_NAME_COLLISION_SCENARIO: &str = "diagnostic_name_collision";
+pub const DIAGNOSTIC_NAME_COLLISION_GOAL: &str = r#"你正在一个隔离的、可销毁的工程 fixture 中执行只读诊断任务。现象：YAML 目录与数据库管理清单中存在同名插件时，管理员通过数据库添加的配置"看起来成功"（返回成功、DB 行存在），但运行时实际生效的是 YAML 来源的那份，且没有任何错误或日志提示冲突。请找到插件注册路径上的具体分支，说明冲突在哪里被静默吞掉、两个来源各自如何加载。
+
+严格只读（除输出契约文件外）。专用字段：collision_sources（字符串数组，值为参与冲突的两个来源标识，按源码中的实际命名）。根因结论必须指出"静默跳过/无冲突信号"这一行为，不得只说"同名冲突"。
+"#;
+
 /// 该场景测试跨模块的状态机取证能力，而不是要求模型通读整个项目。
 /// 它只用于独立后台评测，绝不注入普通会话的系统提示词。
 pub const COMPLEX_CANCELLATION_DIAGNOSTIC_GOAL: &str = r#"你是一名证据驱动的并发与状态一致性审查员。请严格只读审查当前工作区中 Agent 任务的“取消、暂停与恢复”链路：当用户主动停止任务、Agent 进入 ask_human 暂停、后台评测达到时限、或进程在工具调用后恢复时，系统是否能保证旧任务不会继续写入状态、不会被错误恢复、不会与新任务交叉污染？
@@ -129,6 +151,34 @@ pub struct AgentEvaluationRun {
     pub started_at: String,
 }
 
+/// 场景解析为（evaluation_id 前缀, 完整 goal）。纯函数不碰文件系统，便于测试。
+fn resolve_scenario(scenario_id: &str) -> Result<(&'static str, String), String> {
+    match scenario_id {
+        "read_only_regression" => Ok(("agent-readonly", READ_ONLY_REGRESSION_GOAL.to_string())),
+        COMPLEX_CANCELLATION_DIAGNOSTIC_SCENARIO => Ok((
+            "agent-complex-cancellation",
+            COMPLEX_CANCELLATION_DIAGNOSTIC_GOAL.to_string(),
+        )),
+        ISOLATED_WRITE_FIXTURE_SCENARIO => Ok((
+            "agent-write-fixture",
+            ISOLATED_WRITE_FIXTURE_GOAL.to_string(),
+        )),
+        DIAGNOSTIC_FAKE_ACTION_SCENARIO => Ok((
+            "agent-diag-fake-action",
+            format!("{}\n{}", DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_FAKE_ACTION_GOAL),
+        )),
+        DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO => Ok((
+            "agent-diag-plugin-removal",
+            format!("{}\n{}", DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_PLUGIN_REMOVAL_GOAL),
+        )),
+        DIAGNOSTIC_NAME_COLLISION_SCENARIO => Ok((
+            "agent-diag-name-collision",
+            format!("{}\n{}", DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_NAME_COLLISION_GOAL),
+        )),
+        other => Err(format!("未知的评测场景：{}", other)),
+    }
+}
+
 pub fn begin_agent_evaluation(session_id: &str) -> Result<AgentEvaluationRun, String> {
     begin_agent_evaluation_for_scenario(session_id, None)
 }
@@ -138,18 +188,7 @@ pub fn begin_agent_evaluation_for_scenario(
     requested_scenario: Option<&str>,
 ) -> Result<AgentEvaluationRun, String> {
     let scenario_id = requested_scenario.unwrap_or("read_only_regression");
-    let (evaluation_prefix, goal) = match scenario_id {
-        "read_only_regression" => ("agent-readonly", READ_ONLY_REGRESSION_GOAL),
-        COMPLEX_CANCELLATION_DIAGNOSTIC_SCENARIO => (
-            "agent-complex-cancellation",
-            COMPLEX_CANCELLATION_DIAGNOSTIC_GOAL,
-        ),
-        ISOLATED_WRITE_FIXTURE_SCENARIO => (
-            "agent-write-fixture",
-            ISOLATED_WRITE_FIXTURE_GOAL,
-        ),
-        other => return Err(format!("未知的评测场景：{}", other)),
-    };
+    let (evaluation_prefix, goal) = resolve_scenario(scenario_id)?;
     let project_dir = std::env::current_dir().map_err(|error| error.to_string())?;
     let run = AgentEvaluationRun {
         evaluation_id: format!("{}-{}", evaluation_prefix, uuid::Uuid::new_v4()),
@@ -402,6 +441,26 @@ fn render_markdown(report: &AgentEvaluationReport) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn diagnostic_scenarios_register_with_contract_and_distinct_prefixes() {
+        for (scenario, prefix, dedicated_field) in [
+            (DIAGNOSTIC_FAKE_ACTION_SCENARIO, "agent-diag-fake-action", "unimplemented_actions"),
+            (DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO, "agent-diag-plugin-removal", "stale_components"),
+            (DIAGNOSTIC_NAME_COLLISION_SCENARIO, "agent-diag-name-collision", "collision_sources"),
+        ] {
+            let (resolved_prefix, goal) = resolve_scenario(scenario).unwrap();
+            assert_eq!(resolved_prefix, prefix);
+            assert!(goal.contains("DIAGNOSIS.json"), "诊断场景必须携带输出契约");
+            assert!(goal.contains("唯一允许创建或修改的文件"), "契约必须限定写入范围");
+            assert!(goal.contains(dedicated_field), "场景 {} 缺少专用字段 {}", scenario, dedicated_field);
+        }
+        // 既有场景不受影响：goal 原样、无诊断契约混入
+        let (_, goal) = resolve_scenario(ISOLATED_WRITE_FIXTURE_SCENARIO).unwrap();
+        assert!(goal.contains("隔离的、可销毁的工程 fixture"));
+        assert!(!goal.contains("DIAGNOSIS.json"));
+        assert!(resolve_scenario("not_a_scenario").is_err());
+    }
 
     #[test]
     fn counts_parse_errors_parallelism_and_repeated_read_intents() {
