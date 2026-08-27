@@ -151,7 +151,13 @@ describeLive("诊断型隔离 fixture（真实模型）", function () {
 
         const report = JSON.parse(readFileSync(reportPath, "utf8"));
         assert.equal(report.trace_status, "succeeded", "诊断任务必须正常收束");
-
+        assert.equal(report.scenario_id, scenario, "报告必须保留评测场景，而不是按文件名前缀猜测");
+        assert.ok(report.complex_delivery, "复杂诊断必须生成终态交付边界检查");
+        assert.equal(
+          report.complex_delivery.compliant,
+          true,
+          "最终交付必须明确披露已核验范围、未核验范围或关键假设、以及结论强度",
+        );
         // 受保护文件 byte 级不变：诊断只允许写 DIAGNOSIS.json
         for (const [pathname, original] of protectedFiles) {
           assert.equal(

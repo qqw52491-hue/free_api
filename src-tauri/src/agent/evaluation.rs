@@ -1,4 +1,6 @@
-use crate::agent::evaluation_analysis::{analyze, verdict, parse_time, parse_action};
+use crate::agent::evaluation_analysis::{
+    analyze, assess_complex_delivery, parse_action, parse_time, verdict,
+};
 use crate::agent::run_trace;
 use crate::db::DbState;
 use chrono::{DateTime, Utc};
@@ -58,6 +60,10 @@ pub struct AgentEvaluationReport {
     pub session_id: String,
     pub evaluation_id: Option<String>,
     #[serde(default)]
+    pub scenario_id: Option<String>,
+    #[serde(default)]
+    pub complex_delivery: Option<ComplexDeliveryAssessment>,
+    #[serde(default)]
     pub routing: Option<EvaluationRoutingMetadata>,
     pub log_path: String,
     pub trace_status: String,
@@ -70,6 +76,38 @@ pub struct AgentEvaluationReport {
     pub verdict: String,
     pub report_json_path: String,
     pub report_markdown_path: String,
+}
+
+/// 复杂诊断最终交付的结构性检查结果。
+///
+/// 这些字段只说明最终 `finish` 是否明确区分了已核验范围、
+/// 未核验/假设与结论强度；不保存 summary 正文，也不替代语义审查。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ComplexDeliveryAssessment {
+    pub finish_found: bool,
+    pub verified_scope_present: bool,
+    pub assumptions_or_unverified_present: bool,
+    pub conclusion_strength_present: bool,
+    pub compliant: bool,
+}
+
+impl ComplexDeliveryAssessment {
+    fn missing_sections(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.finish_found {
+            missing.push("finish 交付");
+        }
+        if !self.verified_scope_present {
+            missing.push("已核验范围");
+        }
+        if !self.assumptions_or_unverified_present {
+            missing.push("未核验范围或关键假设");
+        }
+        if !self.conclusion_strength_present {
+            missing.push("结论强度");
+        }
+        missing
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -152,6 +190,17 @@ pub struct AgentEvaluationRun {
 }
 
 /// 场景解析为（evaluation_id 前缀, 完整 goal）。纯函数不碰文件系统，便于测试。
+fn scenario_requires_complex_delivery(scenario_id: &str) -> bool {
+    matches!(
+        scenario_id,
+        "read_only_regression"
+            | COMPLEX_CANCELLATION_DIAGNOSTIC_SCENARIO
+            | DIAGNOSTIC_FAKE_ACTION_SCENARIO
+            | DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO
+            | DIAGNOSTIC_NAME_COLLISION_SCENARIO
+    )
+}
+
 fn resolve_scenario(scenario_id: &str) -> Result<(&'static str, String), String> {
     match scenario_id {
         "read_only_regression" => Ok(("agent-readonly", READ_ONLY_REGRESSION_GOAL.to_string())),
@@ -212,8 +261,12 @@ pub fn build_and_persist_report(
     routing: Option<EvaluationRoutingMetadata>,
 ) -> Result<AgentEvaluationReport, String> {
     let project_dir = std::env::current_dir().map_err(|error| error.to_string())?;
-    let cutoff = evaluation_id
-        .map(|id| load_evaluation_started_at(&project_dir, id, session_id))
+    let evaluation_run = evaluation_id
+        .map(|id| load_evaluation_run(&project_dir, id, session_id))
+        .transpose()?;
+    let cutoff = evaluation_run
+        .as_ref()
+        .map(|run| parse_time(&run.started_at).ok_or_else(|| "评测启动标记时间无效".to_string()))
         .transpose()?;
     let log_path = project_dir
         .join("agent_logs")
@@ -233,6 +286,10 @@ pub fn build_and_persist_report(
 
     let (metrics, action_counts, repeated_action_signatures, mut warnings) =
         analyze(&logs, &traces);
+    let complex_delivery = evaluation_run
+        .as_ref()
+        .filter(|run| scenario_requires_complex_delivery(&run.scenario_id))
+        .map(|_| assess_complex_delivery(&logs));
     if logs.is_empty() {
         warnings.push(
             "未找到模型交换日志。请以调试模式运行评测，或确认会话未在首轮前失败。".to_string(),
@@ -241,7 +298,25 @@ pub fn build_and_persist_report(
     if trace_status == "missing" {
         warnings.push("未找到运行轨迹，因此工具成功/失败指标不可判定。".to_string());
     }
-    let verdict = verdict(&metrics, &warnings, &trace_status);
+    if let Some(delivery) = &complex_delivery {
+        if !delivery.compliant {
+            warnings.push(format!(
+                "复杂诊断终态交付缺少：{}。该检查只判断结构是否披露边界，不判断结论语义是否正确。",
+                delivery.missing_sections().join("、")
+            ));
+        }
+    }
+    let base_verdict = verdict(&metrics, &warnings, &trace_status);
+    let verdict = if !logs.is_empty()
+        && trace_status == "succeeded"
+        && complex_delivery
+            .as_ref()
+            .is_some_and(|delivery| !delivery.compliant)
+    {
+        "needs_attention".to_string()
+    } else {
+        base_verdict
+    };
 
     let report_dir = project_dir.join("agent_evaluations");
     fs::create_dir_all(&report_dir).map_err(|error| error.to_string())?;
@@ -257,6 +332,8 @@ pub fn build_and_persist_report(
         generated_at: Utc::now().to_rfc3339(),
         session_id: session_id.to_string(),
         evaluation_id: evaluation_id.map(str::to_string),
+        scenario_id: evaluation_run.as_ref().map(|run| run.scenario_id.clone()),
+        complex_delivery,
         routing,
         log_path: log_path.display().to_string(),
         trace_status,
@@ -338,11 +415,11 @@ fn compare_metrics(
     }
 }
 
-fn load_evaluation_started_at(
+fn load_evaluation_run(
     project_dir: &std::path::Path,
     evaluation_id: &str,
     expected_session_id: &str,
-) -> Result<DateTime<Utc>, String> {
+) -> Result<AgentEvaluationRun, String> {
     let marker_path = project_dir
         .join("agent_evaluations")
         .join("runs")
@@ -354,7 +431,7 @@ fn load_evaluation_started_at(
     if run.session_id != expected_session_id {
         return Err("评测启动标记与请求会话不一致".to_string());
     }
-    parse_time(&run.started_at).ok_or_else(|| "评测启动标记时间无效".to_string())
+    Ok(run)
 }
 
 fn entries_since(
@@ -384,12 +461,37 @@ fn read_log_entries(path: &std::path::Path) -> Result<Vec<Value>, String> {
         .map_err(|error| format!("无法解析评测日志 {}: {}", path.display(), error))
 }
 
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "是"
+    } else {
+        "否"
+    }
+}
+
 fn render_markdown(report: &AgentEvaluationReport) -> String {
     let metrics = &report.metrics;
     let mut document = format!("# Agent 只读回归评测报告\n\n评测会话：`{}`。生成时间：{}。运行轨迹状态：`{}`。综合判定：**{}**。\n\n## 核心指标\n\n| 指标 | 值 |\n| --- | ---: |\n| 模型调用数 | {} |\n| JSON 解析成功率 | {:.1}% |\n| JSON 解析错误 | {} |\n| 工具步骤 / 失败 | {} / {} |\n| 并行批次 / 最大分支 | {} / {} |\n| 读取意图 / 相同签名重复调用 | {} / {} |\n| Prompt Token 总量 / 峰值 | {} / {} |\n| 完成 Token 总量 | {} |\n| 缓存命中率 | {:.1}% |\n| 最大上下文使用率 | {:.1}% |\n| 最大发送上下文字符数 | {} |\n| 观测时长（秒） | {} |\n", report.session_id, report.generated_at, report.trace_status, report.verdict, metrics.llm_call_count, metrics.parse_success_rate_percent, metrics.parse_error_count, metrics.tool_step_count, metrics.tool_failure_count, metrics.parallel_batch_count, metrics.max_parallel_branches, metrics.read_intent_count, metrics.repeated_read_intent_count, metrics.total_prompt_tokens, metrics.max_prompt_tokens, metrics.total_completion_tokens, metrics.cache_hit_rate_percent, metrics.max_context_usage_percent, metrics.max_messages_char_count, metrics.observed_duration_seconds);
     document.push_str(&format!("\n> 口径：相同签名重复调用 = 完全相同的工具与参数被再次执行；同文件不同行窗口/字段级分段读取不计入（属合理取证）。运行时另有无进展提示（相同调用+相同输出第 3 次连续触发）。\n\n| 独特读取意图 / 相同签名重复调用 | {} / {} |\n| 重复失败调用 | {} |\n| 计划标题切换 | {} |\n| 未说明独立性的并行批次 | {} |\n| 资源作用域 outside / unknown / 重绑 | {} / {} / {} |\n", metrics.unique_read_intent_count, metrics.repeated_read_intent_count, metrics.repeated_failed_action_count, metrics.plan_title_transition_count, metrics.parallel_without_rationale_count, metrics.resource_scope_outside_count, metrics.resource_scope_unknown_count, metrics.scope_rebind_count));
     if let Some(routing) = &report.routing {
         document.push_str(&format!("\n评测路由：`{}`；推理模型：`{}`；执行模型：`{}`。\n", routing.preset, routing.reasoning_model_id, routing.execution_model_id));
+    }
+    if let Some(delivery) = &report.complex_delivery {
+        let result = if delivery.compliant { "通过" } else { "缺失边界声明" };
+        let missing = if delivery.compliant {
+            "无".to_string()
+        } else {
+            delivery.missing_sections().join("、")
+        };
+        document.push_str(&format!(
+            "\n## 复杂诊断终态交付边界\n\n| 检查 | 结果 |\n| --- | --- |\n| 是否找到 `finish` | {} |\n| 已核验范围 | {} |\n| 未核验范围或关键假设 | {} |\n| 结论强度 | {} |\n| 结构性合规 | **{}** |\n| 缺失段落 | {} |\n\n> 此项只检查是否向用户披露证据边界，不保存最终摘要正文，也不证明结论语义正确。\n",
+            yes_no(delivery.finish_found),
+            yes_no(delivery.verified_scope_present),
+            yes_no(delivery.assumptions_or_unverified_present),
+            yes_no(delivery.conclusion_strength_present),
+            result,
+            missing,
+        ));
     }
     document.push_str("\n## 与上一份评测的差异\n\n");
     if let Some(baseline) = &report.baseline {
@@ -460,6 +562,20 @@ mod tests {
         assert!(goal.contains("隔离的、可销毁的工程 fixture"));
         assert!(!goal.contains("DIAGNOSIS.json"));
         assert!(resolve_scenario("not_a_scenario").is_err());
+    }
+
+    #[test]
+    fn complex_delivery_is_required_only_for_diagnostic_and_read_only_scenarios() {
+        for scenario in [
+            "read_only_regression",
+            COMPLEX_CANCELLATION_DIAGNOSTIC_SCENARIO,
+            DIAGNOSTIC_FAKE_ACTION_SCENARIO,
+            DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO,
+            DIAGNOSTIC_NAME_COLLISION_SCENARIO,
+        ] {
+            assert!(scenario_requires_complex_delivery(scenario), "{} should require disclosure", scenario);
+        }
+        assert!(!scenario_requires_complex_delivery(ISOLATED_WRITE_FIXTURE_SCENARIO));
     }
 
     #[test]

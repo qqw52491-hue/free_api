@@ -3,7 +3,9 @@
 //! 从原始模型日志与运行轨迹中提取结构化指标（工具步骤/失败率/并行分支/
 //! 重复签名/资源作用域/token 用量），供正式报告与基线对比使用。
 
-use super::evaluation::{AgentEvaluationReport, EvaluationMetrics, RepeatedActionSignature};
+use super::evaluation::{
+    AgentEvaluationReport, ComplexDeliveryAssessment, EvaluationMetrics, RepeatedActionSignature,
+};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -320,6 +322,65 @@ pub(crate) fn parse_action(raw_response: &str) -> Option<ParsedAction> {
     })
 }
 
+/// 从最后一个 finish 指令只提取复杂诊断交付的结构性边界。
+///
+/// 评测报告只保存布尔值和缺失段落，不保存模型的 summary 正文，
+/// 避免将用户内容或敏感工具输出重新写入评测产物。
+pub(crate) fn assess_complex_delivery(logs: &[Value]) -> ComplexDeliveryAssessment {
+    let mut assessment = ComplexDeliveryAssessment::default();
+    let Some(summary) = logs
+        .iter()
+        .rev()
+        .find_map(|log| {
+            log.get("raw_response")
+                .and_then(Value::as_str)
+                .and_then(finish_summary)
+        })
+    else {
+        return assessment;
+    };
+
+    assessment.finish_found = true;
+    assessment.verified_scope_present = contains_any(&summary, &["已核验范围", "已验证范围"]);
+    assessment.assumptions_or_unverified_present =
+        contains_any(&summary, &["未核验范围", "关键假设"]);
+    assessment.conclusion_strength_present = summary.contains("结论强度")
+        && contains_any(&summary, &["已证实", "部分支持", "未验证"]);
+    assessment.compliant = assessment.verified_scope_present
+        && assessment.assumptions_or_unverified_present
+        && assessment.conclusion_strength_present;
+    assessment
+}
+
+fn finish_summary(raw_response: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(raw_response).ok()?;
+    let tool = value.get("tool").and_then(Value::as_str).unwrap_or_default();
+    let action = value
+        .get("action")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("command")
+                .and_then(|command| command.get("action"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_default();
+    if tool != "finish" && action != "finish" {
+        return None;
+    }
+    value
+        .get("command")
+        .and_then(Value::as_object)
+        .and_then(|command| command.get("summary"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("summary").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn contains_any(text: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| text.contains(marker))
+}
+
 fn number(value: &Value, key: &str) -> i64 {
     value.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
@@ -416,5 +477,57 @@ mod tests {
             verdict(&metrics, &["相同失败调用重犯".to_string()], "succeeded"),
             "needs_attention"
         );
+    }
+
+    fn finish_log(summary: &str) -> Vec<Value> {
+        vec![serde_json::json!({
+            "raw_response": serde_json::json!({
+                "tool": "finish",
+                "command": { "summary": summary },
+            })
+            .to_string(),
+        })]
+    }
+
+    #[test]
+    fn complex_delivery_passes_only_when_all_three_boundary_sections_exist() {
+        let logs = finish_log(
+            "# 审查报告\n\n### 已核验范围\n- A\n\n### 未核验范围或关键假设\n- B\n\n### 结论强度\n- 已证实：A；部分支持：B；未验证：C",
+        );
+        let assessment = assess_complex_delivery(&logs);
+        assert!(assessment.finish_found);
+        assert!(assessment.verified_scope_present);
+        assert!(assessment.assumptions_or_unverified_present);
+        assert!(assessment.conclusion_strength_present);
+        assert!(assessment.compliant);
+    }
+
+    #[test]
+    fn complex_delivery_flags_missing_uncertainty_boundary() {
+        let logs = finish_log(
+            "# 审查报告\n\n### 已核验范围\n- A\n\n### 结论强度\n- 已证实：A",
+        );
+        let assessment = assess_complex_delivery(&logs);
+        assert!(assessment.finish_found);
+        assert!(assessment.verified_scope_present);
+        assert!(!assessment.assumptions_or_unverified_present);
+        assert!(assessment.conclusion_strength_present);
+        assert!(!assessment.compliant);
+    }
+
+    #[test]
+    fn complex_delivery_uses_latest_finish_even_if_later_logs_are_not_finish() {
+        let mut logs = finish_log(
+            "# 审查报告\n\n### 已验证范围\n- A\n\n### 关键假设\n- B\n\n### 结论强度\n- 已证实：A",
+        );
+        logs.push(serde_json::json!({
+            "raw_response": serde_json::json!({
+                "tool": "filesystem",
+                "action": "read_text_file",
+                "command": { "path": "later.rs" },
+            })
+            .to_string(),
+        }));
+        assert!(assess_complex_delivery(&logs).compliant);
     }
 }
