@@ -67,9 +67,9 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "child_reviewer",
-        summary: "受限只读子审查：仅审查父 Agent 已收缩的证据包；最多两次；不会调用工具或读写文件",
+        summary: "受限只读子调查：审查父证据，或读取当前项目会话明确登记的资源；最多两次；不会调用工具或写入文件",
         actions: &[
-            "investigate(question: string, evidence_refs?: string[] <=6, evidence_excerpt?: string <=6000 chars)",
+            "investigate(question: string, evidence_refs?: string[] <=6, evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径])",
         ],
     },
     BuiltinToolSpec {

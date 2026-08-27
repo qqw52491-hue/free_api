@@ -584,3 +584,175 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 }
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectResourceExcerpt {
+    pub resource_id: String,
+    pub relative_path: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+pub(crate) fn read_project_resource_excerpts_for_session(
+    conn: &Connection,
+    session_id: &str,
+    resource_ids: &[String],
+    max_total_chars: usize,
+) -> Result<Vec<ProjectResourceExcerpt>, String> {
+    if resource_ids.is_empty() || resource_ids.len() > 2 {
+        return Err("child investigator 必须指定 1–2 个受管资源 ID".to_string());
+    }
+    if max_total_chars == 0 {
+        return Err("child investigator 资源摘录预算必须大于零".to_string());
+    }
+    let Some(project) = project_for_session(conn, session_id)? else {
+        return Err("当前会话未关联项目，无法读取项目资源".to_string());
+    };
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut remaining = max_total_chars;
+    let mut excerpts = Vec::with_capacity(resource_ids.len());
+    for raw_resource_id in resource_ids {
+        if remaining == 0 {
+            return Err("child investigator 受管资源总摘录超过预算".to_string());
+        }
+        let resource_id = raw_resource_id.trim();
+        if resource_id.is_empty() || resource_id.chars().count() > 160 || !seen.insert(resource_id) {
+            return Err("child investigator 的资源 ID 无效或重复".to_string());
+        }
+        let resource = conn
+            .query_row(
+                "SELECT resource_id, project_id, label, relative_path, canonical_path, kind, size_bytes, created_at
+                 FROM agent_project_resources WHERE project_id=?1 AND resource_id=?2",
+                params![project.id, resource_id],
+                map_resource,
+            )
+            .map_err(|_| "项目资源不存在或不属于当前会话项目".to_string())?;
+        let (_, canonical_path) = canonical_project_file(conn, &project.id, &resource.canonical_path)?;
+        let metadata = std::fs::metadata(&canonical_path)
+            .map_err(|_| "项目资源当前不可读取".to_string())?;
+        if metadata.len() > 256 * 1024 {
+            return Err("child investigator 单个受管资源不能超过 256 KiB".to_string());
+        }
+        let content = std::fs::read_to_string(canonical_path)
+            .map_err(|_| "child investigator 只支持 UTF-8 文本资源".to_string())?;
+        let total_chars = content.chars().count();
+        let excerpt: String = content.chars().take(remaining).collect();
+        let excerpt_chars = excerpt.chars().count();
+        remaining = remaining.saturating_sub(excerpt_chars);
+        excerpts.push(ProjectResourceExcerpt {
+            resource_id: resource.resource_id,
+            relative_path: resource.relative_path,
+            truncated: excerpt_chars < total_chars,
+            content: excerpt,
+        });
+    }
+    Ok(excerpts)
+}
+
+    #[test]
+    fn child_resource_excerpts_require_same_project_session_and_valid_ids() {
+        let base = std::env::temp_dir().join(format!("free-api-project-excerpts-{}", Uuid::new_v4()));
+        let root_a = base.join("project-a");
+        let root_b = base.join("project-b");
+        let resource_a = root_a.join("a.md");
+        let resource_b = root_b.join("b.md");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        std::fs::write(&resource_a, "alpha resource").unwrap();
+        std::fs::write(&resource_b, "bravo resource").unwrap();
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+        let project_a = create_project_row(&conn, "项目 A", root_a.to_string_lossy().as_ref()).unwrap();
+        let project_b = create_project_row(&conn, "项目 B", root_b.to_string_lossy().as_ref()).unwrap();
+        let session_a = create_project_session_row(&conn, &project_a.id, "会话 A", "model-a").unwrap();
+        let resource_a = add_project_resource_row(&conn, &project_a.id, resource_a.to_string_lossy().as_ref()).unwrap();
+        let resource_b = add_project_resource_row(&conn, &project_b.id, resource_b.to_string_lossy().as_ref()).unwrap();
+
+        let own = vec![resource_a.resource_id.clone()];
+        assert_eq!(
+            read_project_resource_excerpts_for_session(&conn, &session_a.id, &own, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(read_project_resource_excerpts_for_session(
+            &conn,
+            &session_a.id,
+            &[resource_b.resource_id.clone()],
+            100,
+        )
+        .unwrap_err()
+        .contains("不属于当前会话项目"));
+        assert!(read_project_resource_excerpts_for_session(&conn, "detached-session", &own, 100)
+            .unwrap_err()
+            .contains("未关联项目"));
+        assert!(read_project_resource_excerpts_for_session(
+            &conn,
+            &session_a.id,
+            &[resource_a.resource_id.clone(), resource_a.resource_id.clone()],
+            100,
+        )
+        .is_err());
+        assert!(read_project_resource_excerpts_for_session(
+            &conn,
+            &session_a.id,
+            &["one".to_string(), "two".to_string(), "three".to_string()],
+            100,
+        )
+        .is_err());
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn child_resource_excerpts_truncate_and_recanonicalize_every_read() {
+        let base = std::env::temp_dir().join(format!("free-api-project-excerpt-budget-{}", Uuid::new_v4()));
+        let root = base.join("project");
+        let first_path = root.join("first.md");
+        let second_path = root.join("second.md");
+        let outside_path = base.join("outside.md");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&first_path, "abcdef").unwrap();
+        std::fs::write(&second_path, "second resource").unwrap();
+        std::fs::write(&outside_path, "outside resource").unwrap();
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+        let project = create_project_row(&conn, "项目预算", root.to_string_lossy().as_ref()).unwrap();
+        let session = create_project_session_row(&conn, &project.id, "预算会话", "model-a").unwrap();
+        let first = add_project_resource_row(&conn, &project.id, first_path.to_string_lossy().as_ref()).unwrap();
+        let second = add_project_resource_row(&conn, &project.id, second_path.to_string_lossy().as_ref()).unwrap();
+
+        let single = read_project_resource_excerpts_for_session(
+            &conn,
+            &session.id,
+            &[first.resource_id.clone()],
+            4,
+        )
+        .unwrap();
+        assert_eq!(single[0].content, "abcd");
+        assert!(single[0].truncated);
+        assert!(read_project_resource_excerpts_for_session(
+            &conn,
+            &session.id,
+            &[first.resource_id.clone(), second.resource_id.clone()],
+            4,
+        )
+        .unwrap_err()
+        .contains("总摘录超过预算"));
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&first_path).unwrap();
+            std::os::unix::fs::symlink(&outside_path, &first_path).unwrap();
+            assert!(read_project_resource_excerpts_for_session(
+                &conn,
+                &session.id,
+                &[first.resource_id],
+                100,
+            )
+            .unwrap_err()
+            .contains("项目根目录外"));
+        }
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(base);
+    }
