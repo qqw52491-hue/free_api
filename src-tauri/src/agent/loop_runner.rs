@@ -932,6 +932,21 @@ pub async fn run_tool_phase(
             });
             println!("🔁 [No-Progress] 注入无进展提示: {}", inst.get_tool());
         }
+        // 检索零命中偏航：换措辞换关键词连续零命中不会触发上面的重复检测
+        // （签名各不相同）；这里按（工具族×作用域）组计数，只提示一次，
+        // 同样只注入事实提示，不修改、不拒绝、不强制 finish。
+        if let Some(zero_hit_notice) = context.zero_hit.record(
+            &inst.get_tool(),
+            &inst.get_params(),
+            dispatch_result.success,
+            &output,
+        ) {
+            context.turns_history.push(crate::agent::context::types::ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!(zero_hit_notice),
+            });
+            println!("🎯 [Zero-Hit] 注入检索零命中偏航提示: {}", inst.get_tool());
+        }
 
         dispatch_result
     };

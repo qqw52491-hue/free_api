@@ -1,6 +1,7 @@
 use crate::agent::change_verification::ChangeVerification;
 use crate::agent::context::no_progress::NoProgressTracker;
 use crate::agent::context::resource_scope::ResourceScopeContract;
+use crate::agent::context::zero_hit::ZeroHitTracker;
 use crate::agent::review_contract::ReviewContract;
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
@@ -157,6 +158,10 @@ pub struct SandwichContext {
     /// 无进展重复检测：相同工具+相同参数+相同输出/失败的运行时事实（策略级提示用）。
     #[serde(default)]
     pub no_progress: NoProgressTracker,
+    /// 受限检索偏航提示：已声明检索工具族在同一作用域连续结构化零命中
+    /// 的运行时事实（换措辞盲搜的空洞检测，每组只提示一次）。
+    #[serde(default)]
+    pub zero_hit: ZeroHitTracker,
     /// 服务端回传的最近一次完整 Agent prompt tokens（总口径：system+goal+历史+尾部）。
     /// 它必须与同一完整请求发送时的历史估算快照成对使用；隔离 JSON 修复请求
     /// 不覆盖这组基线，避免将短修复 prompt 误用于下一次完整上下文的水位校准。
@@ -219,6 +224,7 @@ impl SandwichContext {
             plan_state: PlanState::new(),
             resource_scope: ResourceScopeContract::default(),
             no_progress: NoProgressTracker::default(),
+            zero_hit: ZeroHitTracker::default(),
             last_reported_prompt_tokens: None,
             last_persisted_summary: None,
             persisted_summary_revision: 0,

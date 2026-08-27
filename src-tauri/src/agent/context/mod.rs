@@ -10,6 +10,7 @@ pub mod render;
 pub mod resource_scope;
 pub mod sampling;
 pub mod types;
+pub mod zero_hit;
 
 pub use audit::AuditLedger;
 pub use budget::{estimate_tokens, ContextBudget, ContextBudgetConfig};
@@ -18,4 +19,5 @@ pub use determinism::ContextFingerprint;
 pub use memory::MemoryManager;
 pub use render::ContextRenderer;
 pub use no_progress::NoProgressTracker;
+pub use zero_hit::ZeroHitTracker;
 pub use types::{ChatMessage, FailedAttempt, SandwichContext, SideEffectRecord};
