@@ -470,6 +470,22 @@ export function useAgentSession(sessionId: string) {
                 result,
                 rawParams: params,
                 rawResult: result,
+                metrics: (() => {
+                    const rawM = asRecord(step.metrics || step.token_usage);
+                    if (!Object.keys(rawM).length) return undefined;
+                    return {
+                        promptTokens: numberOrUndefined(rawM.prompt_tokens ?? rawM.promptTokens),
+                        completionTokens: numberOrUndefined(rawM.completion_tokens ?? rawM.completionTokens),
+                        totalTokens: numberOrUndefined(rawM.total_tokens ?? rawM.totalTokens),
+                        cachedTokens: numberOrUndefined(rawM.cached_tokens ?? rawM.cachedTokens),
+                        cacheHitRate: numberOrUndefined(rawM.cache_hit_rate ?? rawM.cacheHitRate),
+                        tokensPerSecond: numberOrUndefined(rawM.tokens_per_second ?? rawM.tokensPerSecond),
+                        ttftMs: numberOrUndefined(rawM.ttft_ms ?? rawM.ttftMs),
+                        thinkingDurationMs: numberOrUndefined(rawM.thinking_duration_ms ?? rawM.thinkingDurationMs),
+                        toolDurationMs: numberOrUndefined(rawM.tool_duration_ms ?? rawM.toolDurationMs),
+                        totalDurationMs: numberOrUndefined(rawM.total_duration_ms ?? rawM.totalDurationMs),
+                    };
+                })(),
                 timestamp: numberOrUndefined(step.timestamp) ?? startedAt,
             };
         });
@@ -796,7 +812,26 @@ export function useAgentSession(sessionId: string) {
     function handleProgress(payload: Record<string, unknown>) {
         if (runTerminal.value) return;
         const usage = normalizeUsage(payload);
-        if (usage) tokenUsage.value = usage;
+        if (usage) {
+            tokenUsage.value = usage;
+            if (payload.step_id !== undefined && payload.step_id !== null) {
+                const stepId = Number(payload.step_id);
+                const step = getLatestStep(stepId);
+                if (step) {
+                    step.metrics = {
+                        ...step.metrics,
+                        promptTokens: usage.prompt_tokens,
+                        completionTokens: usage.completion_tokens,
+                        totalTokens: usage.total_tokens,
+                        cachedTokens: usage.cached_tokens,
+                        cacheHitRate: usage.cache_hit_rate,
+                        tokensPerSecond: usage.tokens_per_second,
+                        ttftMs: usage.ttft_ms,
+                        totalDurationMs: usage.total_duration_ms,
+                    };
+                }
+            }
+        }
 
         const eventType = String(payload.event_type || payload.type || payload.stage || "").toLowerCase();
 
@@ -980,6 +1015,22 @@ export function useAgentSession(sessionId: string) {
             const existing = getLatestStep(stepId);
             if (existing) {
                 existing.status = "succeeded";
+                if (payload.metrics || payload.token_usage) {
+                    const rawM = asRecord(payload.metrics || payload.token_usage);
+                    existing.metrics = {
+                        ...existing.metrics,
+                        promptTokens: numberOrUndefined(rawM.prompt_tokens ?? rawM.promptTokens) ?? existing.metrics?.promptTokens,
+                        completionTokens: numberOrUndefined(rawM.completion_tokens ?? rawM.completionTokens) ?? existing.metrics?.completionTokens,
+                        totalTokens: numberOrUndefined(rawM.total_tokens ?? rawM.totalTokens) ?? existing.metrics?.totalTokens,
+                        cachedTokens: numberOrUndefined(rawM.cached_tokens ?? rawM.cachedTokens) ?? existing.metrics?.cachedTokens,
+                        cacheHitRate: numberOrUndefined(rawM.cache_hit_rate ?? rawM.cacheHitRate) ?? existing.metrics?.cacheHitRate,
+                        tokensPerSecond: numberOrUndefined(rawM.tokens_per_second ?? rawM.tokensPerSecond) ?? existing.metrics?.tokensPerSecond,
+                        ttftMs: numberOrUndefined(rawM.ttft_ms ?? rawM.ttftMs) ?? existing.metrics?.ttftMs,
+                        thinkingDurationMs: numberOrUndefined(rawM.thinking_duration_ms ?? rawM.thinkingDurationMs) ?? existing.metrics?.thinkingDurationMs,
+                        toolDurationMs: numberOrUndefined(rawM.tool_duration_ms ?? rawM.toolDurationMs) ?? existing.metrics?.toolDurationMs,
+                        totalDurationMs: numberOrUndefined(rawM.total_duration_ms ?? rawM.totalDurationMs) ?? existing.metrics?.totalDurationMs,
+                    };
+                }
                 if (payload.output) {
                     existing.result = payload.output;
                     existing.rawResult = payload.output;
@@ -1007,6 +1058,22 @@ export function useAgentSession(sessionId: string) {
             const existing = getLatestStep(stepId);
             if (existing) {
                 existing.status = "failed";
+                if (payload.metrics || payload.token_usage) {
+                    const rawM = asRecord(payload.metrics || payload.token_usage);
+                    existing.metrics = {
+                        ...existing.metrics,
+                        promptTokens: numberOrUndefined(rawM.prompt_tokens ?? rawM.promptTokens) ?? existing.metrics?.promptTokens,
+                        completionTokens: numberOrUndefined(rawM.completion_tokens ?? rawM.completionTokens) ?? existing.metrics?.completionTokens,
+                        totalTokens: numberOrUndefined(rawM.total_tokens ?? rawM.totalTokens) ?? existing.metrics?.totalTokens,
+                        cachedTokens: numberOrUndefined(rawM.cached_tokens ?? rawM.cachedTokens) ?? existing.metrics?.cachedTokens,
+                        cacheHitRate: numberOrUndefined(rawM.cache_hit_rate ?? rawM.cacheHitRate) ?? existing.metrics?.cacheHitRate,
+                        tokensPerSecond: numberOrUndefined(rawM.tokens_per_second ?? rawM.tokensPerSecond) ?? existing.metrics?.tokensPerSecond,
+                        ttftMs: numberOrUndefined(rawM.ttft_ms ?? rawM.ttftMs) ?? existing.metrics?.ttftMs,
+                        thinkingDurationMs: numberOrUndefined(rawM.thinking_duration_ms ?? rawM.thinkingDurationMs) ?? existing.metrics?.thinkingDurationMs,
+                        toolDurationMs: numberOrUndefined(rawM.tool_duration_ms ?? rawM.toolDurationMs) ?? existing.metrics?.toolDurationMs,
+                        totalDurationMs: numberOrUndefined(rawM.total_duration_ms ?? rawM.totalDurationMs) ?? existing.metrics?.totalDurationMs,
+                    };
+                }
                 if (payload.output) {
                     existing.result = payload.output;
                     existing.rawResult = payload.output;
@@ -1324,6 +1391,8 @@ export function useAgentSession(sessionId: string) {
         isThinking,
         thinkingCollapsed,
         thinkingDurationMs,
+        actionPhaseText,
+        activeStepNumber,
         logs,
         humanInterventions,
         llmParseErrors,

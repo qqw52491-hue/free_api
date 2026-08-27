@@ -75,6 +75,9 @@
                                         <span class="tree-mark"><i></i></span>
                                         <span class="step-tool-emoji">{{ getToolIcon(step.tool, step.action).emoji }}</span>
                                         <span class="goal-label">{{ step.description || '执行步骤' }}<small v-if="step.modelTier" class="model-tier">{{ step.modelTier }}</small></span>
+                                        <span v-if="getStepMetricsPill(step)" class="step-metrics-badge" :title="getStepMetricsTooltip(step)">
+                                            {{ getStepMetricsPill(step) }}
+                                        </span>
                                         <span class="row-status">{{ statusLabel(step.status) }}</span>
                                         <time>{{ formatClock(step.timestamp) }}</time>
                                     </button>
@@ -83,7 +86,8 @@
                                             <span class="child-mark"></span>
                                             <span class="tool-tag thought-tag">🧠 思考</span>
                                             <span>{{ shortText(step.thought, 110) }}</span>
-                                            <em>已分析</em>
+                                            <em v-if="step.metrics?.thinkingDurationMs">{{ (step.metrics.thinkingDurationMs / 1000).toFixed(1) }}s</em>
+                                            <em v-else>已分析</em>
                                         </button>
                                         <button class="child-row tool-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'tool' }" type="button" @click="$emit('select-step', step.id)">
                                             <span class="child-mark"></span>
@@ -91,7 +95,8 @@
                                                 {{ getToolIcon(step.tool, step.action).emoji }} {{ step.tool || '工具' }}
                                             </span>
                                             <span>{{ shortText(step.action || step.explanation || '执行操作', 110) }}</span>
-                                            <em>{{ step.source }}</em>
+                                            <em v-if="step.metrics?.toolDurationMs">{{ (step.metrics.toolDurationMs / 1000).toFixed(1) }}s · {{ step.source }}</em>
+                                            <em v-else>{{ step.source }}</em>
                                         </button>
                                     </div>
                                 </article>
@@ -269,6 +274,39 @@ function followThoughtTail() {
     }
 }
 watch(() => props.isThinking, (running, wasRunning) => { if (running && !wasRunning) activeThoughtStartedAt.value = Date.now(); if (!running && wasRunning) activeThoughtStartedAt.value = null; }, { immediate: true });
+
+function formatMetricTokenCount(n: number): string {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+    return String(n);
+}
+
+function getStepMetricsPill(step: AgentStepItem): string {
+    const m = step.metrics;
+    if (!m && !step.durationMs) return '';
+    const parts: string[] = [];
+    if (m?.completionTokens) {
+        parts.push(`${formatMetricTokenCount(m.completionTokens)} tok`);
+    }
+    if (m?.totalDurationMs) {
+        parts.push(m.totalDurationMs < 1000 ? `${m.totalDurationMs}ms` : `${(m.totalDurationMs / 1000).toFixed(1)}s`);
+    } else if (step.durationMs) {
+        parts.push(step.durationMs < 1000 ? `${step.durationMs}ms` : `${(step.durationMs / 1000).toFixed(1)}s`);
+    }
+    return parts.join(' · ');
+}
+
+function getStepMetricsTooltip(step: AgentStepItem): string {
+    const m = step.metrics;
+    if (!m) return '';
+    const lines: string[] = [];
+    if (m.promptTokens) lines.push(`📥 输入上下文: ${m.promptTokens.toLocaleString()} tok (缓存命中: ${m.cacheHitRate || 0}%)`);
+    if (m.completionTokens) lines.push(`📤 输出生成: ${m.completionTokens.toLocaleString()} tok`);
+    if (m.thinkingDurationMs) lines.push(`🧠 思考耗时: ${(m.thinkingDurationMs / 1000).toFixed(1)}s`);
+    if (m.toolDurationMs) lines.push(`⚡ 工具耗时: ${(m.toolDurationMs / 1000).toFixed(1)}s`);
+    if (m.tokensPerSecond) lines.push(`💨 吐字速率: ${m.tokensPerSecond.toFixed(1)} tok/s`);
+    return lines.join('\n');
+}
 
 // --- 🌟 真正的实时流式 Markdown 增量渲染与光标 ---
 const isStreamingSummary = computed(() => props.isRunning && Boolean(props.finalSummary));
@@ -998,8 +1036,21 @@ button.root-row {
     font-weight: 500;
 }
 
-.row-status {
+.step-metrics-badge {
+    font-size: 10px;
+    padding: 0 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    color: #a1a1aa;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     margin-left: auto;
+    margin-right: 6px;
+    flex-shrink: 0;
+}
+
+.row-status {
+    margin-left: 0;
     font-size: 10px;
     color: #71717a;
     font-style: normal;

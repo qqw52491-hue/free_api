@@ -16,6 +16,15 @@ use tokio::sync::{mpsc, watch};
 
 const REPEATED_FAILURE_BLOCKED_ROUTE: &str = "repeated_deterministic_failure";
 
+#[derive(Debug, Clone)]
+pub struct StepExecutionOutcome {
+    pub instruction: AgentInstruction,
+    pub result: DispatchResult,
+    pub token_usage: Option<crate::agent::types::TokenUsage>,
+    pub thinking_duration_ms: u64,
+    pub tool_duration_ms: u64,
+}
+
 /// 执行一个可恢复步骤的 CallLlm 与 RunTool 阶段。
 ///
 /// 该 handler 封装模型规划、工具派发、人工等待、重试和救援；每个外部副作用
@@ -38,9 +47,12 @@ pub async fn run_call_llm_and_run_tool_phases(
     interrupt_rx: &mut watch::Receiver<u64>,
     resume_instruction: Option<AgentInstruction>,
     run_trace_steps: &mut Vec<serde_json::Value>,
-) -> Result<(AgentInstruction, DispatchResult), String> {
+) -> Result<StepExecutionOutcome, String> {
     let mut retry_count = 0;
     let max_retries = 3;
+    let mut last_token_usage: Option<crate::agent::types::TokenUsage>;
+    let mut last_thinking_duration_ms: u64 = 0;
+    let mut last_tool_duration_ms: u64;
 
     // LLM 回复已落盘但工具尚未开始时，恢复直接进入同一工具处理器。
     // 这样不会为同一个决策额外消耗一次模型调用，也不会绕过工具前的 pending 提交。
@@ -53,6 +65,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 action: inst.get_action(),
             },
         )?;
+        let tool_start = Instant::now();
         let dispatch_result = run_tool_phase(
             app,
             state,
@@ -66,8 +79,15 @@ pub async fn run_call_llm_and_run_tool_phases(
             rx,
         )
         .await?;
+        let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
         if dispatch_result.success || inst.get_action() == "finish" {
-            return Ok((inst, dispatch_result));
+            return Ok(StepExecutionOutcome {
+                instruction: inst,
+                result: dispatch_result,
+                token_usage: None,
+                thinking_duration_ms: 0,
+                tool_duration_ms,
+            });
         }
 
         let error_detail = format!("【❌ 恢复后工具执行失败】: {}", dispatch_result.stderr);
@@ -122,6 +142,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         let can_early_challenge_finish =
             !checkpoint.finish_reviewed && !open_todos_for_early_check.is_empty();
 
+        let planning_start = Instant::now();
         let (mut inst, token_usage, thinking_text, history_estimate_at_request) = match call_llm(
             &context,
             &state,
@@ -137,19 +158,26 @@ pub async fn run_call_llm_and_run_tool_phases(
         )
         .await
         {
-            Ok(r) => r,
+            Ok(r) => {
+                last_thinking_duration_ms = planning_start.elapsed().as_millis() as u64;
+                last_token_usage = Some(r.1.clone());
+                r
+            }
             Err(e) if e == crate::llm::STREAM_INTERRUPTED_ERROR => {
                 let reason = take_pending_interrupt(rx)
                     .unwrap_or_else(|| "用户请求中断当前模型输出。".to_string());
-                return Ok((
-                    AgentInstruction::default(),
-                    DispatchResult {
+                return Ok(StepExecutionOutcome {
+                    instruction: AgentInstruction::default(),
+                    result: DispatchResult {
                         success: true,
                         stdout: reason,
                         stderr: String::new(),
                         route: RUN_INTERRUPTED_ROUTE.to_string(),
                     },
-                ));
+                    token_usage: None,
+                    thinking_duration_ms: last_thinking_duration_ms,
+                    tool_duration_ms: 0,
+                });
             }
             Err(e) => {
                 // 🛑 智能拦截不可重试的致命错误（401 Key失效、402 余额不足、403 权限不足、404 模型不存在等）
@@ -313,15 +341,18 @@ pub async fn run_call_llm_and_run_tool_phases(
 
         // 安全边界二：模型结果已返回、工具尚未派发时丢弃旧指令。
         if let Some(reason) = take_pending_interrupt(rx) {
-            return Ok((
-                inst,
-                DispatchResult {
+            return Ok(StepExecutionOutcome {
+                instruction: inst,
+                result: DispatchResult {
                     success: true,
                     stdout: reason,
                     stderr: String::new(),
                     route: RUN_INTERRUPTED_ROUTE.to_string(),
                 },
-            ));
+                token_usage: last_token_usage,
+                thinking_duration_ms: last_thinking_duration_ms,
+                tool_duration_ms: 0,
+            });
         }
         // 通知前端：发现了新计划（含反思）
         if !inst.reflection.is_empty() {
@@ -359,6 +390,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         )
         .map_err(|e| e.to_string())?;
 
+        let tool_start = Instant::now();
         let dispatch_result = run_tool_phase(
             app,
             state,
@@ -372,18 +404,22 @@ pub async fn run_call_llm_and_run_tool_phases(
             rx,
         )
         .await?;
+        last_tool_duration_ms = tool_start.elapsed().as_millis() as u64;
 
         // 安全边界三：工具已返回，保留结果但不让旧回合继续规划。
         if let Some(reason) = take_pending_interrupt(rx) {
-            return Ok((
-                inst,
-                DispatchResult {
+            return Ok(StepExecutionOutcome {
+                instruction: inst,
+                result: DispatchResult {
                     success: true,
                     stdout: reason,
                     stderr: String::new(),
                     route: RUN_INTERRUPTED_ROUTE.to_string(),
                 },
-            ));
+                token_usage: last_token_usage,
+                thinking_duration_ms: last_thinking_duration_ms,
+                tool_duration_ms: last_tool_duration_ms,
+            });
         }
         // --- C. 判断执行结果 ---
         if dispatch_result.success || inst.get_action() == "finish" {
@@ -423,6 +459,20 @@ pub async fn run_call_llm_and_run_tool_phases(
             );
 
             // 🌟 立即将失败尝试写入复盘轨迹 run_trace_steps 并持久化到 agent_run_traces，保证页面刷新后红色的失败步骤不丢失
+            let total_dur = last_thinking_duration_ms + last_tool_duration_ms;
+            let metrics_val = json!({
+                "prompt_tokens": last_token_usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                "completion_tokens": last_token_usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                "total_tokens": last_token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0),
+                "cached_tokens": last_token_usage.as_ref().map(|u| u.cached_tokens).unwrap_or(0),
+                "cache_hit_rate": last_token_usage.as_ref().map(|u| u.cache_hit_rate).unwrap_or(0.0),
+                "tokens_per_second": last_token_usage.as_ref().map(|u| u.tokens_per_second).unwrap_or(0.0),
+                "ttft_ms": last_token_usage.as_ref().map(|u| u.ttft_ms).unwrap_or(0),
+                "thinking_duration_ms": last_thinking_duration_ms,
+                "tool_duration_ms": last_tool_duration_ms,
+                "total_duration_ms": total_dur,
+            });
+
             run_trace_steps.push(json!({
                 "id": format!("{}-attempt-{}", step_id, retry_count),
                 "step_id": step_id,
@@ -437,6 +487,8 @@ pub async fn run_call_llm_and_run_tool_phases(
                 "plan_title": plan_title,
                 "status": "failed",
                 "output": error_detail,
+                "metrics": metrics_val.clone(),
+                "duration_ms": total_dur,
                 "timestamp": chrono::Utc::now().timestamp_millis(),
             }));
             let _ = crate::agent::run_trace::upsert_snapshot(
@@ -458,6 +510,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     "description": inst.description.clone(),
                     "tool": inst.get_tool(),
                     "output": error_detail,
+                    "metrics": metrics_val,
                 }),
             )
             .ok();
@@ -569,7 +622,13 @@ pub async fn run_call_llm_and_run_tool_phases(
         }
     };
 
-    Ok((instruction, result))
+    Ok(StepExecutionOutcome {
+        instruction,
+        result,
+        token_usage: last_token_usage,
+        thinking_duration_ms: last_thinking_duration_ms,
+        tool_duration_ms: last_tool_duration_ms,
+    })
 }
 
 /// 执行持久化状态机的 RunTool 阶段。

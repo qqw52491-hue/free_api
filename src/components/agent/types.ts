@@ -115,6 +115,19 @@ export interface AgentMilestoneGoal {
     expanded?: boolean;
 }
 
+export interface AgentStepMetrics {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+    cachedTokens?: number;
+    cacheHitRate?: number;
+    tokensPerSecond?: number;
+    ttftMs?: number;
+    thinkingDurationMs?: number;
+    toolDurationMs?: number;
+    totalDurationMs?: number;
+}
+
 export interface AgentStepItem {
     id: string;
     stepId: number;
@@ -134,6 +147,7 @@ export interface AgentStepItem {
     result?: unknown;
     rawParams?: unknown;
     rawResult?: unknown;
+    metrics?: AgentStepMetrics;
     timestamp: number;
 }
 

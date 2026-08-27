@@ -729,7 +729,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         // ================================================================
         // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
         // ================================================================
-        let (mut instruction, result) = match run_call_llm_and_run_tool_phases(
+        let outcome = match run_call_llm_and_run_tool_phases(
             &app,
             &state,
             &registry_state,
@@ -784,6 +784,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
                 return Err(error);
             }
         };
+        let (mut instruction, result) = (outcome.instruction, outcome.result);
         if result.route == RUN_INTERRUPTED_ROUTE {
             finish_interrupted_run(
                 &app,
@@ -1085,6 +1086,19 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         context.current_observation = output_text.clone();
         // 复盘轨迹使用与 step_new 相同的语义字段，但与 Agent prompt/checkpoint 隔离。
         // 这使历史会话既能恢复思考、计划和工具调用，又不会放大运行时上下文。
+        let metrics_json = outcome.token_usage.as_ref().map(|u| json!({
+            "prompt_tokens": u.prompt_tokens,
+            "completion_tokens": u.completion_tokens,
+            "total_tokens": u.total_tokens,
+            "cached_tokens": u.cached_tokens,
+            "cache_hit_rate": u.cache_hit_rate,
+            "tokens_per_second": u.tokens_per_second,
+            "ttft_ms": u.ttft_ms,
+            "thinking_duration_ms": outcome.thinking_duration_ms,
+            "tool_duration_ms": outcome.tool_duration_ms,
+            "total_duration_ms": outcome.thinking_duration_ms + outcome.tool_duration_ms,
+        }));
+
         run_trace_steps.push(json!({
             "id": step_id,
             "description": instruction.description.clone(),
@@ -1099,6 +1113,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             "status": if finish_challenged { "finish_challenged" } else if result.success { "succeeded" } else { "failed" },
             "output": output_text.clone(),
             "resource_scope_revision": context.resource_scope.revision,
+            "metrics": metrics_json,
+            "token_usage": metrics_json,
             "timestamp": Utc::now().timestamp_millis(),
         }));
         if let Err(error) = crate::agent::run_trace::upsert_snapshot(
@@ -1193,7 +1209,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
                 "type": if result.success { "step_done" } else { "step_error" },
                 "step_id": step_id,
                 "description": instruction.description,
-                "output": output_text
+                "output": output_text,
+                "metrics": metrics_json,
+                "token_usage": metrics_json
             }),
         )
         .map_err(|e| e.to_string())?;

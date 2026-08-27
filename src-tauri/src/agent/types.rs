@@ -445,7 +445,7 @@ pub struct HistoryStep {
     pub output_summary: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DispatchResult {
     pub stdout: String,
     pub stderr: String,

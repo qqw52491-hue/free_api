@@ -81,6 +81,18 @@
                     @submit-human="session.answerHuman($event)"
                     @open-preview="handleOpenPreview"
                 />
+                <AgentProgressDeck
+                    :steps="activeDeckSteps"
+                    :is-running="session.isRunning.value"
+                    :is-thinking="session.isThinking.value"
+                    :thought="session.thought.value"
+                    :action-phase-text="session.actionPhaseText.value"
+                    :token-usage="session.tokenUsage.value"
+                    :active-step-number="session.activeStepNumber.value"
+                    :session-title="deckSessionTitle"
+                    :summary="deckSummary"
+                    @select-step="handleStepSelect($event.id)"
+                />
                 <AgentComposer
                     :draft="composerDraft"
                     :is-running="session.isRunning.value"
@@ -168,6 +180,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import AgentChatStream from "./agent/AgentChatStream.vue";
 import AgentComposer from "./agent/AgentComposer.vue";
+import AgentProgressDeck from "./agent/AgentProgressDeck.vue";
 import AgentInspector from "./agent/AgentInspector.vue";
 import AgentRecordPreview from "./agent/AgentRecordPreview.vue";
 import AgentSettingsDrawer from "./agent/AgentSettingsDrawer.vue";
@@ -208,6 +221,28 @@ watch(session.isRunning, (val) => {
 }, { immediate: true });
 const selectedNarrativeId = computed(() => selectedActiveThought.value ? "active-thought" : selectedHumanEventId.value);
 const selectedHuman = computed(() => session.humanInterventions.value.find((item, index) => `human-${item.timestamp}-${index}` === selectedHumanEventId.value) || null);
+
+const activeDeckSteps = computed(() => {
+    if (session.steps.value.length > 0) return session.steps.value;
+    const turns = session.historyTurns.value;
+    if (turns && turns.length > 0) {
+        return turns[turns.length - 1].steps || [];
+    }
+    return [];
+});
+
+const deckSessionTitle = computed(() => {
+    return session.sessionTitle.value || session.currentGoal.value || "";
+});
+
+const deckSummary = computed(() => {
+    if (session.finalSummary.value) return session.finalSummary.value;
+    const turns = session.historyTurns.value;
+    if (turns && turns.length > 0) {
+        return turns[turns.length - 1].summary || turns[turns.length - 1].goal || "";
+    }
+    return "";
+});
 
 onMounted(() => session.ensureModelRouting(props.allModels));
 watch(() => props.allModels, (models) => session.ensureModelRouting(models), { deep: true });
