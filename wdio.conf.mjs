@@ -2,7 +2,23 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
-const appBinaryPath = path.join(rootDir, "src-tauri", "target", "debug", "bundle", "macos", "Free API Chat.app", "Contents", "MacOS", "free-api-chat");
+
+// Linux desktop E2E may run under Wayland while the WebKitGTK test stack uses
+// X11 automation. Preserve explicit user choices, otherwise use the same
+// compatibility defaults as the project’s `dev:x11` scripts.
+if (process.platform === "linux") {
+  process.env.GDK_BACKEND ??= "x11";
+  process.env.WEBKIT_DISABLE_DMABUF_RENDERER ??= "1";
+}
+// The cross-platform test build uses `tauri build --no-bundle`, which emits
+// this executable on macOS and Linux. Windows keeps its native suffix.
+const appBinaryPath = path.join(
+  rootDir,
+  "src-tauri",
+  "target",
+  "debug",
+  process.platform === "win32" ? "free-api-chat.exe" : "free-api-chat",
+);
 const defaultMochaTimeoutMs = 180_000;
 const requestedMochaTimeoutMs = Number(process.env.FREE_API_WDIO_MOCHA_TIMEOUT_MS);
 const mochaTimeoutMs = Number.isFinite(requestedMochaTimeoutMs)
