@@ -213,6 +213,11 @@ pub async fn run_call_llm_and_run_tool_phases(
                     return Err(friendly_reason);
                 }
 
+                // 🛑 如果是网络/API 传输层经过重试后仍彻底失败，直接终止并上报，杜绝误当作 JSON 格式错误翻倍重试 3x3 轮
+                if e.contains("LLM 请求最终失败") || e.contains("请求失败") || e.contains("API 错误") {
+                    return Err(format!("❌ LLM 请求失败 (已达重试上限): {}", e));
+                }
+
                 retry_count += 1;
                 crate::agent::advance_run_state(
                     &app,

@@ -168,9 +168,11 @@
         <AgentSettingsDrawer
             :open="settingsOpen"
             :log-context="session.logContext.value"
+            :retry-attempts="session.retryAttempts.value"
             :is-running="session.isRunning.value"
             @close="settingsOpen = false"
             @update:log-context="session.logContext.value = $event"
+            @update:retry-attempts="session.retryAttempts.value = $event"
             @open-plugins="openPluginManager"
         />
     </section>

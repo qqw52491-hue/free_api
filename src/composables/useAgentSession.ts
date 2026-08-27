@@ -223,6 +223,19 @@ export function useAgentSession(sessionId: string) {
     const tokenUsage = ref<AgentTokenUsage | null>(null);
     const liveSpeed = ref<number | null>(null);
     const liveTtft = ref<number | null>(null);
+
+    const savedRetries = Number(localStorage.getItem("agent_llm_retries"));
+    const retryAttempts = ref<number>(
+        Number.isFinite(savedRetries) && savedRetries >= 0 && savedRetries <= 20 ? savedRetries : 3
+    );
+    watch(retryAttempts, (val) => {
+        try {
+            localStorage.setItem("agent_llm_retries", String(val));
+        } catch {
+            // Ignore storage errors
+        }
+    });
+
     const activeStepNumber = ref<number>(1);
     const actionPhaseText = ref<string>("");
     const lastRunTelemetry = ref<AgentSessionTelemetry | null>(null);
@@ -1173,6 +1186,7 @@ export function useAgentSession(sessionId: string) {
                 autoPilot: true,
                 sessionId,
                 logContext: logContext.value,
+                transientLlmRequestRetries: retryAttempts.value === 0 ? 1 : Math.min(20, Math.max(1, retryAttempts.value + 1)),
             });
         } catch (error) {
             const message = toText(error) || "任务初始化失败。";
@@ -1398,6 +1412,7 @@ export function useAgentSession(sessionId: string) {
         humanInterventions,
         llmParseErrors,
         tokenUsage,
+        retryAttempts,
         sessionTelemetry,
         completionMessage,
         streamingSummary,

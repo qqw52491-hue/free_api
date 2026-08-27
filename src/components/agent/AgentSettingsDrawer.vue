@@ -32,6 +32,42 @@
                     <div v-else class="mcp-empty">当前没有已启用的 MCP 连接。</div>
                     <button type="button" class="manage-mcp" @click="$emit('open-plugins')">管理 MCP 连接</button>
                 </section>
+                <section class="retry-config-section">
+                    <div class="section-heading"><h3>模型请求重试</h3><small>{{ isRunning ? '运行中已锁定' : '支持 0 ~ 20 次' }}</small></div>
+                    <p class="section-description">当 API 遇到 429 速率限制、网络连接超时或上游抖动时自动退避重试。</p>
+                    <div class="retry-input-row">
+                        <label for="llm-retry-input"><strong>最大重试次数</strong></label>
+                        <div class="retry-control-box">
+                            <input
+                                id="llm-retry-input"
+                                type="number"
+                                min="0"
+                                max="20"
+                                class="retry-number-input"
+                                :value="retryAttempts"
+                                :disabled="isRunning"
+                                @input="onRetryInput(($event.target as HTMLInputElement).value)"
+                            />
+                            <span class="unit-label">次</span>
+                        </div>
+                    </div>
+                    <div class="retry-presets">
+                        <button
+                            v-for="preset in [0, 1, 3, 5, 10, 20]"
+                            :key="preset"
+                            type="button"
+                            class="preset-chip"
+                            :class="{ active: retryAttempts === preset }"
+                            :disabled="isRunning"
+                            @click="$emit('update:retry-attempts', preset)"
+                        >
+                            {{ preset === 0 ? '0 (不重试)' : preset === 3 ? '3 (默认)' : `${preset} 次` }}
+                        </button>
+                    </div>
+                    <p class="retry-policy-note">
+                        ⏳ <strong>指数退避机制</strong>：重试间隔按 1s → 2s → 4s → 8s 递增（单次封顶 15s）。使用共享/免费高并发接口时，可调大重试次数（如 10~20 次）持续排队直到可用。
+                    </p>
+                </section>
                 <section>
                     <div class="section-heading"><h3>调试配置</h3><small>{{ isRunning ? '运行中已锁定' : '可随时切换' }}</small></div>
                     <label class="context-toggle">
@@ -48,17 +84,29 @@
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
     open: boolean;
     logContext: boolean;
+    retryAttempts?: number;
     isRunning: boolean;
-}>();
+}>(), {
+    retryAttempts: 3,
+});
 
-defineEmits<{
+const emit = defineEmits<{
     close: [];
     "update:log-context": [value: boolean];
+    "update:retry-attempts": [value: number];
     "open-plugins": [];
 }>();
+
+function onRetryInput(raw: string) {
+    const parsed = parseInt(raw, 10);
+    if (!Number.isNaN(parsed)) {
+        const clamped = Math.max(0, Math.min(20, parsed));
+        emit("update:retry-attempts", clamped);
+    }
+}
 
 type McpConnectionState = "idle" | "testing" | "ready" | "error";
 interface McpCatalogEntry {
@@ -202,5 +250,62 @@ watch(() => props.open, (open) => {
 .mcp-empty { padding: 9px; border: 1px dashed var(--chat-line-strong); border-radius: 8px; color: var(--chat-text-faint); font-size: 11px; }
 .manage-mcp { width: 100%; padding: 8px; }
 @keyframes mcp-pulse { 50% { opacity: .35; transform: scale(.82); } }
+
+/* 重试配置样式 */
+.retry-config-section { display: grid; gap: 10px; }
+.retry-input-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; }
+.retry-input-row label { margin: 0; color: var(--chat-text); font-size: 12px; }
+.retry-control-box { display: flex; align-items: center; gap: 8px; }
+.retry-number-input {
+    width: 70px;
+    padding: 7px 10px;
+    border: 1px solid var(--chat-line-strong);
+    border-radius: 7px;
+    background: #0d1420;
+    color: #f4f4f5;
+    font: 600 13px inherit;
+    text-align: center;
+    outline: none;
+    transition: all 0.15s ease;
+}
+.retry-number-input:focus {
+    border-color: var(--chat-accent);
+    box-shadow: 0 0 0 3px rgba(100, 165, 255, .15);
+}
+.unit-label { font-size: 11px; color: var(--chat-text-faint); }
+.retry-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.preset-chip {
+    padding: 4px 9px;
+    border: 1px solid var(--chat-line);
+    border-radius: 6px;
+    background: var(--chat-tool-bg);
+    color: var(--chat-text-muted);
+    font: 500 10.5px inherit;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.preset-chip:hover:not(:disabled) {
+    border-color: var(--chat-line-strong);
+    color: var(--chat-text);
+    background: var(--chat-hover);
+}
+.preset-chip.active {
+    border-color: var(--chat-accent);
+    background: rgba(100, 165, 255, 0.15);
+    color: var(--chat-accent);
+    font-weight: 700;
+}
+.preset-chip:disabled { opacity: 0.5; cursor: not-allowed; }
+.retry-policy-note {
+    margin: 4px 0 0;
+    padding: 8px 10px;
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--chat-line);
+    color: var(--chat-text-faint);
+    font-size: 10.5px;
+    line-height: 1.5;
+}
+.retry-policy-note strong { color: var(--chat-text-muted); }
 
 </style>
