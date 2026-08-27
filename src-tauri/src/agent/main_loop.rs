@@ -122,11 +122,10 @@ fn complex_delivery_blocker(
     if !is_finish || !succeeded {
         return None;
     }
-    let requires_complex_delivery = context.review_contract.is_some()
-        || ["复杂审查", "诊断", "评估", "研究"]
-            .iter()
-            .any(|marker| context.user_goal.contains(marker));
-    if !requires_complex_delivery {
+    // ReviewContract 是模型首轮规划后持久化的显式复杂任务声明。
+    // 不再依赖少数自然语言关键词：复杂 Bug、架构变更、公式证明等跨领域任务
+    // 只要建立契约，就共享同一套依据—验证—交付闭环；普通任务保持轻量。
+    if context.review_contract.is_none() {
         return None;
     }
     let Some(summary) = instruction
@@ -240,6 +239,31 @@ mod finish_guard_tests {
         assert!(!should_challenge_finish_with_complex_delivery_blocker(
             true, false, true, &blockers, true
         ));
+    }
+
+    #[test]
+    fn complex_delivery_uses_explicit_review_contract_instead_of_goal_keywords() {
+        let instruction = AgentInstruction {
+            command: Some(serde_json::json!({ "summary": "# 简短交付" })),
+            ..Default::default()
+        };
+        let mut context = context::SandwichContext::new(
+            "system".to_string(),
+            "请诊断缓存问题".to_string(),
+        );
+        assert!(complex_delivery_blocker(&context, &instruction, true, true).is_none());
+
+        context.review_contract = Some(ReviewContract {
+            scope_statement: "核验缓存调用链".to_string(),
+            obligations: vec![crate::agent::review_contract::ReviewObligation {
+                id: "cache".to_string(),
+                question: "缓存失效是否真实触发？".to_string(),
+                status: "evidenced".to_string(),
+                evidence_refs: vec!["output_id:cache-read".to_string()],
+                waived_reason: None,
+            }],
+        });
+        assert!(complex_delivery_blocker(&context, &instruction, true, true).is_some());
     }
 
     #[test]
