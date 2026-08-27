@@ -29,7 +29,7 @@ use tokio::time::{sleep, Duration};
 const MAX_STEPS: usize = 300;
 /// 正常会话只做短暂态请求重试；后台回归可显式提高到上限以避免 Provider 波动中断取证。
 const DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 3;
-const MAX_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 20;
+const MAX_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 100;
 
 /// 仅将协议明确定义为未完成的 Todo 视为终态质询信号。
 /// 未知状态不做猜测，`done` 与 `failed` 则已是模型显式关闭的事项。

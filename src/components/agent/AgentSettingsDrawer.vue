@@ -33,7 +33,7 @@
                     <button type="button" class="manage-mcp" @click="$emit('open-plugins')">管理 MCP 连接</button>
                 </section>
                 <section class="retry-config-section">
-                    <div class="section-heading"><h3>模型请求重试</h3><small>{{ isRunning ? '运行中已锁定' : '支持 0 ~ 20 次' }}</small></div>
+                    <div class="section-heading"><h3>模型请求重试</h3><small>{{ isRunning ? '运行中已锁定' : '可自定义输入 (0 ~ 100)' }}</small></div>
                     <p class="section-description">当 API 遇到 429 速率限制、网络连接超时或上游抖动时自动退避重试。</p>
                     <div class="retry-input-row">
                         <label for="llm-retry-input"><strong>最大重试次数</strong></label>
@@ -42,7 +42,7 @@
                                 id="llm-retry-input"
                                 type="number"
                                 min="0"
-                                max="20"
+                                max="100"
                                 class="retry-number-input"
                                 :value="retryAttempts"
                                 :disabled="isRunning"
@@ -53,7 +53,7 @@
                     </div>
                     <div class="retry-presets">
                         <button
-                            v-for="preset in [0, 1, 3, 5, 10, 20]"
+                            v-for="preset in [0, 1, 3, 5, 10, 20, 50]"
                             :key="preset"
                             type="button"
                             class="preset-chip"
@@ -65,7 +65,7 @@
                         </button>
                     </div>
                     <p class="retry-policy-note">
-                        ⏳ <strong>指数退避机制</strong>：重试间隔按 1s → 2s → 4s → 8s 递增（单次封顶 15s）。使用共享/免费高并发接口时，可调大重试次数（如 10~20 次）持续排队直到可用。
+                        ⏳ <strong>指数退避机制</strong>：重试间隔按 1s → 2s → 4s → 8s 递增（单次封顶 15s）。使用共享/公共免费高并发接口时，可调大重试次数（如 20~50 次）持续排队直到可用。
                     </p>
                 </section>
                 <section>
@@ -103,7 +103,7 @@ const emit = defineEmits<{
 function onRetryInput(raw: string) {
     const parsed = parseInt(raw, 10);
     if (!Number.isNaN(parsed)) {
-        const clamped = Math.max(0, Math.min(20, parsed));
+        const clamped = Math.max(0, Math.min(100, parsed));
         emit("update:retry-attempts", clamped);
     }
 }

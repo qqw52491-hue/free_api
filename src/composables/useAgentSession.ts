@@ -226,7 +226,7 @@ export function useAgentSession(sessionId: string) {
 
     const savedRetries = Number(localStorage.getItem("agent_llm_retries"));
     const retryAttempts = ref<number>(
-        Number.isFinite(savedRetries) && savedRetries >= 0 && savedRetries <= 20 ? savedRetries : 3
+        Number.isFinite(savedRetries) && savedRetries >= 0 && savedRetries <= 100 ? savedRetries : 3
     );
     watch(retryAttempts, (val) => {
         try {
@@ -1186,7 +1186,7 @@ export function useAgentSession(sessionId: string) {
                 autoPilot: true,
                 sessionId,
                 logContext: logContext.value,
-                transientLlmRequestRetries: retryAttempts.value === 0 ? 1 : Math.min(20, Math.max(1, retryAttempts.value + 1)),
+                transientLlmRequestRetries: retryAttempts.value === 0 ? 1 : Math.min(100, Math.max(1, retryAttempts.value + 1)),
             });
         } catch (error) {
             const message = toText(error) || "任务初始化失败。";
