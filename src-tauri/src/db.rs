@@ -317,6 +317,39 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             description TEXT DEFAULT '',
             created_at TEXT NOT NULL
         );
+
+        -- 逐调用 LLM usage telemetry（纯观测，零行为参与）：
+        -- 为调优对照（单/多 Agent、提示版本、采样策略）提供可 SQL 查询的事实账本。
+        -- 只存计数、标识与派生指标；严禁存储 API key、base URL、完整 prompt、
+        -- 模型正文或工具输出（原始证据继续走 agent_step_logs 的 output_id 回查）。
+        -- compaction 痕迹不由本表直接判定：history_message_count 下降 +
+        -- fetched_tools_count 归零（compaction 会重置已加载工具手册集合）
+        -- 即可从本表自身事后推断，避免侵入压缩模块。
+        CREATE TABLE IF NOT EXISTS agent_llm_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            step_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            model_id TEXT,
+            model_tier TEXT,
+            reasoning_effort TEXT,
+            route TEXT NOT NULL DEFAULT 'full_context',
+            retry_index INTEGER NOT NULL DEFAULT 0,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_hit_rate REAL NOT NULL DEFAULT 0,
+            context_window INTEGER NOT NULL DEFAULT 0,
+            usage_percent REAL NOT NULL DEFAULT 0,
+            history_message_count INTEGER NOT NULL DEFAULT 0,
+            fetched_tools_count INTEGER NOT NULL DEFAULT 0,
+            prefix_fingerprint TEXT,
+            ttft_ms INTEGER NOT NULL DEFAULT 0,
+            total_duration_ms INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_llm_calls_session
+            ON agent_llm_calls(session_id, step_id);
     ",
     )?;
 

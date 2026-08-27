@@ -26,6 +26,7 @@ pub mod run_trace;
 pub mod skill_context;
 pub mod task_store;
 pub mod task_summary;
+pub mod telemetry;
 pub mod tools;
 pub mod types;
 pub mod utils;
