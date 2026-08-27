@@ -193,7 +193,12 @@ fn chat_interrupt_channels() -> &'static Arc<Mutex<HashMap<String, watch::Sender
 
 #[tauri::command]
 pub async fn cancel_chat(session_id: String) -> Result<(), String> {
-    if let Some(sender) = chat_interrupt_channels().lock().await.get(&session_id).cloned() {
+    if let Some(sender) = chat_interrupt_channels()
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+    {
         sender.send_modify(|generation| *generation = generation.wrapping_add(1));
         Ok(())
     } else {
@@ -511,19 +516,25 @@ pub fn resolve_safe_artifact_path(raw: &str) -> Result<std::path::PathBuf, Strin
 
     let path_buf = std::path::PathBuf::from(clean);
     if path_buf.exists() {
-        return path_buf.canonicalize().map_err(|e| format!("无法解析路径: {}", e));
+        return path_buf
+            .canonicalize()
+            .map_err(|e| format!("无法解析路径: {}", e));
     }
 
     // 尝试基于当前工作目录以及父级工作区目录查找相对路径
     if let Ok(current_dir) = std::env::current_dir() {
         let candidate = current_dir.join(clean);
         if candidate.exists() {
-            return candidate.canonicalize().map_err(|e| format!("无法解析路径: {}", e));
+            return candidate
+                .canonicalize()
+                .map_err(|e| format!("无法解析路径: {}", e));
         }
         if let Some(parent) = current_dir.parent() {
             let candidate_parent = parent.join(clean);
             if candidate_parent.exists() {
-                return candidate_parent.canonicalize().map_err(|e| format!("无法解析路径: {}", e));
+                return candidate_parent
+                    .canonicalize()
+                    .map_err(|e| format!("无法解析路径: {}", e));
             }
         }
     }
@@ -533,10 +544,7 @@ pub fn resolve_safe_artifact_path(raw: &str) -> Result<std::path::PathBuf, Strin
 
 /// 原生安全在系统中打开交付物文件 (使用系统关联默认程序如 PDF 查看器/Excel/代码编辑器)
 #[tauri::command]
-pub async fn open_artifact_in_system(
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<(), String> {
+pub async fn open_artifact_in_system(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
 
     let canonical = resolve_safe_artifact_path(&path)?;
@@ -551,10 +559,7 @@ pub async fn open_artifact_in_system(
 
 /// 在系统文件管理器中高亮定位交付物文件
 #[tauri::command]
-pub async fn show_artifact_in_folder(
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<(), String> {
+pub async fn show_artifact_in_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
 
     let canonical = resolve_safe_artifact_path(&path)?;
@@ -571,7 +576,7 @@ pub async fn show_artifact_in_folder(
 #[tauri::command]
 pub async fn read_artifact_file(path: String) -> Result<String, String> {
     let canonical = resolve_safe_artifact_path(&path)?;
-    
+
     // 限制读取文本类文件，防止误读超大二进制导致内存溢出 (上限 10MB)
     let metadata = std::fs::metadata(&canonical).map_err(|e| format!("无法获取文件信息: {}", e))?;
     if metadata.len() > 10 * 1024 * 1024 {
@@ -587,6 +592,3 @@ pub async fn resolve_artifact_absolute_path(path: String) -> Result<String, Stri
     let canonical = resolve_safe_artifact_path(&path)?;
     Ok(canonical.to_string_lossy().to_string())
 }
-
-
-

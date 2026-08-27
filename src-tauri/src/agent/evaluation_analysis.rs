@@ -241,7 +241,11 @@ fn count_trace_step(
                 .or_else(|| object.get("command"))
                 .map(Value::to_string)
                 .unwrap_or_default();
-            let signature = format!("{} | {}", tool, params.chars().take(360).collect::<String>());
+            let signature = format!(
+                "{} | {}",
+                tool,
+                params.chars().take(360).collect::<String>()
+            );
             *failed_signatures.entry(signature).or_insert(0) += 1;
         }
     }
@@ -328,15 +332,11 @@ pub(crate) fn parse_action(raw_response: &str) -> Option<ParsedAction> {
 /// 避免将用户内容或敏感工具输出重新写入评测产物。
 pub(crate) fn assess_complex_delivery(logs: &[Value]) -> ComplexDeliveryAssessment {
     let mut assessment = ComplexDeliveryAssessment::default();
-    let Some(summary) = logs
-        .iter()
-        .rev()
-        .find_map(|log| {
-            log.get("raw_response")
-                .and_then(Value::as_str)
-                .and_then(finish_summary)
-        })
-    else {
+    let Some(summary) = logs.iter().rev().find_map(|log| {
+        log.get("raw_response")
+            .and_then(Value::as_str)
+            .and_then(finish_summary)
+    }) else {
         return assessment;
     };
 
@@ -344,8 +344,8 @@ pub(crate) fn assess_complex_delivery(logs: &[Value]) -> ComplexDeliveryAssessme
     assessment.verified_scope_present = contains_any(&summary, &["已核验范围", "已验证范围"]);
     assessment.assumptions_or_unverified_present =
         contains_any(&summary, &["未核验范围", "关键假设"]);
-    assessment.conclusion_strength_present = summary.contains("结论强度")
-        && contains_any(&summary, &["已证实", "部分支持", "未验证"]);
+    assessment.conclusion_strength_present =
+        summary.contains("结论强度") && contains_any(&summary, &["已证实", "部分支持", "未验证"]);
     let root_cause_window = root_cause_claim_window(&summary);
     assessment.root_cause_calibrated = root_cause_window.is_none_or(|window| {
         contains_any(&window, &["直接证据", "根因证据"])
@@ -367,8 +367,8 @@ pub(crate) fn assess_complex_delivery_summary(summary: &str) -> ComplexDeliveryA
     assessment.verified_scope_present = contains_any(summary, &["已核验范围", "已验证范围"]);
     assessment.assumptions_or_unverified_present =
         contains_any(summary, &["未核验范围", "关键假设"]);
-    assessment.conclusion_strength_present = summary.contains("结论强度")
-        && contains_any(summary, &["已证实", "部分支持", "未验证"]);
+    assessment.conclusion_strength_present =
+        summary.contains("结论强度") && contains_any(summary, &["已证实", "部分支持", "未验证"]);
     let root_cause_window = root_cause_claim_window(summary);
     assessment.root_cause_calibrated = root_cause_window.is_none_or(|window| {
         contains_any(&window, &["直接证据", "根因证据"])
@@ -393,7 +393,10 @@ fn root_cause_claim_window(summary: &str) -> Option<String> {
 
 fn finish_summary(raw_response: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(raw_response).ok()?;
-    let tool = value.get("tool").and_then(Value::as_str).unwrap_or_default();
+    let tool = value
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let action = value
         .get("action")
         .and_then(Value::as_str)

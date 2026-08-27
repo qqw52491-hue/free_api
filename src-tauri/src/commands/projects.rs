@@ -330,8 +330,74 @@ pub(crate) fn read_project_resource_for_session(
     })
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectResourceExcerpt {
+    pub resource_id: String,
+    pub relative_path: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+pub(crate) fn read_project_resource_excerpts_for_session(
+    conn: &Connection,
+    session_id: &str,
+    resource_ids: &[String],
+    max_total_chars: usize,
+) -> Result<Vec<ProjectResourceExcerpt>, String> {
+    if resource_ids.is_empty() || resource_ids.len() > 2 {
+        return Err("child investigator 必须指定 1–2 个受管资源 ID".to_string());
+    }
+    if max_total_chars == 0 {
+        return Err("child investigator 资源摘录预算必须大于零".to_string());
+    }
+    let Some(project) = project_for_session(conn, session_id)? else {
+        return Err("当前会话未关联项目，无法读取项目资源".to_string());
+    };
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut remaining = max_total_chars;
+    let mut excerpts = Vec::with_capacity(resource_ids.len());
+    for raw_resource_id in resource_ids {
+        if remaining == 0 {
+            return Err("child investigator 受管资源总摘录超过预算".to_string());
+        }
+        let resource_id = raw_resource_id.trim();
+        if resource_id.is_empty() || resource_id.chars().count() > 160 || !seen.insert(resource_id) {
+            return Err("child investigator 的资源 ID 无效或重复".to_string());
+        }
+        let resource = conn
+            .query_row(
+                "SELECT resource_id, project_id, label, relative_path, canonical_path, kind, size_bytes, created_at
+                 FROM agent_project_resources WHERE project_id=?1 AND resource_id=?2",
+                params![project.id, resource_id],
+                map_resource,
+            )
+            .map_err(|_| "项目资源不存在或不属于当前会话项目".to_string())?;
+        let (_, canonical_path) = canonical_project_file(conn, &project.id, &resource.canonical_path)?;
+        let metadata = std::fs::metadata(&canonical_path)
+            .map_err(|_| "项目资源当前不可读取".to_string())?;
+        if metadata.len() > 256 * 1024 {
+            return Err("child investigator 单个受管资源不能超过 256 KiB".to_string());
+        }
+        let content = std::fs::read_to_string(canonical_path)
+            .map_err(|_| "child investigator 只支持 UTF-8 文本资源".to_string())?;
+        let total_chars = content.chars().count();
+        let excerpt: String = content.chars().take(remaining).collect();
+        let excerpt_chars = excerpt.chars().count();
+        remaining = remaining.saturating_sub(excerpt_chars);
+        excerpts.push(ProjectResourceExcerpt {
+            resource_id: resource.resource_id,
+            relative_path: resource.relative_path,
+            truncated: excerpt_chars < total_chars,
+            content: excerpt,
+        });
+    }
+    Ok(excerpts)
+}
+
 #[tauri::command]
 pub async fn list_agent_projects(state: State<'_, DbState>) -> Result<Vec<AgentProject>, String> {
+
     let conn = state.0.lock().map_err(|error| error.to_string())?;
     let mut statement = conn
         .prepare("SELECT id, name, root_path, created_at, updated_at FROM agent_projects ORDER BY updated_at DESC")
@@ -540,116 +606,6 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_project_cascades_resources_and_session_mapping_but_keeps_chat_history() {
-        let base = std::env::temp_dir().join(format!("free-api-project-delete-{}", Uuid::new_v4()));
-        let root = base.join("project");
-        let resource_path = root.join("readme.md");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&resource_path, "registered project resource").unwrap();
-        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
-
-        let project = create_project_row(&conn, "项目 B", root.to_string_lossy().as_ref()).unwrap();
-        let session = create_project_session_row(&conn, &project.id, "会话 B", "model-b").unwrap();
-        add_project_resource_row(&conn, &project.id, resource_path.to_string_lossy().as_ref())
-            .unwrap();
-
-        conn.execute(
-            "DELETE FROM agent_projects WHERE id=?1",
-            params![project.id],
-        )
-        .unwrap();
-
-        assert!(project_for_session(&conn, &session.id).unwrap().is_none());
-        assert!(project_resources_for_session(&conn, &session.id)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM agent_project_resources", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM chat_sessions WHERE id=?1",
-                params![session.id],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            1
-        );
-
-        drop(conn);
-        let _ = std::fs::remove_dir_all(base);
-    }
-}
-#[derive(Debug, Clone)]
-pub(crate) struct ProjectResourceExcerpt {
-    pub resource_id: String,
-    pub relative_path: String,
-    pub content: String,
-    pub truncated: bool,
-}
-
-pub(crate) fn read_project_resource_excerpts_for_session(
-    conn: &Connection,
-    session_id: &str,
-    resource_ids: &[String],
-    max_total_chars: usize,
-) -> Result<Vec<ProjectResourceExcerpt>, String> {
-    if resource_ids.is_empty() || resource_ids.len() > 2 {
-        return Err("child investigator 必须指定 1–2 个受管资源 ID".to_string());
-    }
-    if max_total_chars == 0 {
-        return Err("child investigator 资源摘录预算必须大于零".to_string());
-    }
-    let Some(project) = project_for_session(conn, session_id)? else {
-        return Err("当前会话未关联项目，无法读取项目资源".to_string());
-    };
-
-    let mut seen = std::collections::BTreeSet::new();
-    let mut remaining = max_total_chars;
-    let mut excerpts = Vec::with_capacity(resource_ids.len());
-    for raw_resource_id in resource_ids {
-        if remaining == 0 {
-            return Err("child investigator 受管资源总摘录超过预算".to_string());
-        }
-        let resource_id = raw_resource_id.trim();
-        if resource_id.is_empty() || resource_id.chars().count() > 160 || !seen.insert(resource_id) {
-            return Err("child investigator 的资源 ID 无效或重复".to_string());
-        }
-        let resource = conn
-            .query_row(
-                "SELECT resource_id, project_id, label, relative_path, canonical_path, kind, size_bytes, created_at
-                 FROM agent_project_resources WHERE project_id=?1 AND resource_id=?2",
-                params![project.id, resource_id],
-                map_resource,
-            )
-            .map_err(|_| "项目资源不存在或不属于当前会话项目".to_string())?;
-        let (_, canonical_path) = canonical_project_file(conn, &project.id, &resource.canonical_path)?;
-        let metadata = std::fs::metadata(&canonical_path)
-            .map_err(|_| "项目资源当前不可读取".to_string())?;
-        if metadata.len() > 256 * 1024 {
-            return Err("child investigator 单个受管资源不能超过 256 KiB".to_string());
-        }
-        let content = std::fs::read_to_string(canonical_path)
-            .map_err(|_| "child investigator 只支持 UTF-8 文本资源".to_string())?;
-        let total_chars = content.chars().count();
-        let excerpt: String = content.chars().take(remaining).collect();
-        let excerpt_chars = excerpt.chars().count();
-        remaining = remaining.saturating_sub(excerpt_chars);
-        excerpts.push(ProjectResourceExcerpt {
-            resource_id: resource.resource_id,
-            relative_path: resource.relative_path,
-            truncated: excerpt_chars < total_chars,
-            content: excerpt,
-        });
-    }
-    Ok(excerpts)
-}
-
-    #[test]
     fn child_resource_excerpts_require_same_project_session_and_valid_ids() {
         let base = std::env::temp_dir().join(format!("free-api-project-excerpts-{}", Uuid::new_v4()));
         let root_a = base.join("project-a");
@@ -756,3 +712,49 @@ pub(crate) fn read_project_resource_excerpts_for_session(
         drop(conn);
         let _ = std::fs::remove_dir_all(base);
     }
+
+    #[test]
+    fn deleting_a_project_cascades_resources_and_session_mapping_but_keeps_chat_history() {
+        let base = std::env::temp_dir().join(format!("free-api-project-delete-{}", Uuid::new_v4()));
+        let root = base.join("project");
+        let resource_path = root.join("readme.md");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&resource_path, "registered project resource").unwrap();
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+
+        let project = create_project_row(&conn, "项目 B", root.to_string_lossy().as_ref()).unwrap();
+        let session = create_project_session_row(&conn, &project.id, "会话 B", "model-b").unwrap();
+        add_project_resource_row(&conn, &project.id, resource_path.to_string_lossy().as_ref())
+            .unwrap();
+
+        conn.execute(
+            "DELETE FROM agent_projects WHERE id=?1",
+            params![project.id],
+        )
+        .unwrap();
+
+        assert!(project_for_session(&conn, &session.id).unwrap().is_none());
+        assert!(project_resources_for_session(&conn, &session.id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM agent_project_resources", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_sessions WHERE id=?1",
+                params![session.id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(base);
+    }
+}

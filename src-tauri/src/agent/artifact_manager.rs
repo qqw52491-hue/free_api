@@ -33,7 +33,9 @@ pub fn get_managed_artifacts_root() -> PathBuf {
 
 /// 清理并获取安全的文件名
 fn sanitize_filename(input: &str, fallback_format: &str) -> (String, String) {
-    let clean = input.trim().replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    let clean = input
+        .trim()
+        .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
     let (name_part, format_part) = if let Some(dot_idx) = clean.rfind('.') {
         let ext = &clean[dot_idx + 1..].to_ascii_lowercase();
         let name = &clean[..dot_idx];
@@ -59,16 +61,30 @@ fn sanitize_filename(input: &str, fallback_format: &str) -> (String, String) {
 /// 根据文件格式推断 MIME 类型与卡片 Kind
 fn infer_mime_and_kind(format: &str) -> (String, String) {
     match format.to_ascii_lowercase().as_str() {
-        "md" | "markdown" => ("text/markdown;charset=utf-8".to_string(), "document".to_string()),
+        "md" | "markdown" => (
+            "text/markdown;charset=utf-8".to_string(),
+            "document".to_string(),
+        ),
         "html" | "htm" => ("text/html;charset=utf-8".to_string(), "web".to_string()),
-        "json" => ("application/json;charset=utf-8".to_string(), "chart".to_string()),
+        "json" => (
+            "application/json;charset=utf-8".to_string(),
+            "chart".to_string(),
+        ),
         "pdf" => ("application/pdf".to_string(), "document".to_string()),
-        "docx" => ("application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(), "document".to_string()),
-        "xlsx" => ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string(), "file".to_string()),
+        "docx" => (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(),
+            "document".to_string(),
+        ),
+        "xlsx" => (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string(),
+            "file".to_string(),
+        ),
         "png" => ("image/png".to_string(), "image".to_string()),
         "jpg" | "jpeg" => ("image/jpeg".to_string(), "image".to_string()),
         "svg" => ("image/svg+xml".to_string(), "image".to_string()),
-        "rs" | "ts" | "js" | "py" | "vue" | "css" | "sql" => ("text/plain;charset=utf-8".to_string(), "file".to_string()),
+        "rs" | "ts" | "js" | "py" | "vue" | "css" | "sql" => {
+            ("text/plain;charset=utf-8".to_string(), "file".to_string())
+        }
         _ => ("text/plain;charset=utf-8".to_string(), "file".to_string()),
     }
 }
@@ -85,7 +101,10 @@ pub fn save_managed_artifact(
     origin_opt: Option<&str>,
 ) -> Result<ArtifactRecord, String> {
     let now = Utc::now().to_rfc3339();
-    let artifact_id = format!("art_{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]);
+    let artifact_id = format!(
+        "art_{}",
+        &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
+    );
     let fallback_format = format_opt.unwrap_or("md");
     let (filename, format) = sanitize_filename(title, fallback_format);
     let (mime_type, default_kind) = infer_mime_and_kind(&format);
@@ -95,8 +114,7 @@ pub fn save_managed_artifact(
     // 1. 确定会话受管目录
     let root = get_managed_artifacts_root();
     let session_dir = root.join(session_id).join(&artifact_id);
-    std::fs::create_dir_all(&session_dir)
-        .map_err(|e| format!("无法创建产物存储目录: {}", e))?;
+    std::fs::create_dir_all(&session_dir).map_err(|e| format!("无法创建产物存储目录: {}", e))?;
 
     let session_dir_canonical = session_dir
         .canonicalize()
@@ -174,7 +192,8 @@ pub fn save_managed_artifact(
             record.created_at,
             record.updated_at,
         ],
-    ).map_err(|e| format!("记录产物账本失败: {}", e))?;
+    )
+    .map_err(|e| format!("记录产物账本失败: {}", e))?;
 
     Ok(record)
 }
@@ -210,22 +229,31 @@ pub fn register_workspace_artifact(
         return Err(format!("文件不存在: {}", clean));
     }
 
-    let canonical = path_buf.canonicalize().map_err(|e| format!("无法规范化路径: {}", e))?;
+    let canonical = path_buf
+        .canonicalize()
+        .map_err(|e| format!("无法规范化路径: {}", e))?;
     let canonical_str = canonical.to_string_lossy().to_string();
-    let filename = canonical.file_name()
+    let filename = canonical
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("file")
         .to_string();
 
-    let ext = canonical.extension()
+    let ext = canonical
+        .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("file")
         .to_ascii_lowercase();
 
     let (mime_type, kind) = infer_mime_and_kind(&ext);
-    let size_bytes = std::fs::metadata(&canonical).map(|m| m.len() as i64).unwrap_or(0);
+    let size_bytes = std::fs::metadata(&canonical)
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
     let now = Utc::now().to_rfc3339();
-    let artifact_id = format!("art_{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]);
+    let artifact_id = format!(
+        "art_{}",
+        &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
+    );
 
     let record = ArtifactRecord {
         id: artifact_id,
@@ -283,13 +311,17 @@ pub fn register_workspace_artifact(
             record.created_at,
             record.updated_at,
         ],
-    ).map_err(|e| format!("登记工作区产物失败: {}", e))?;
+    )
+    .map_err(|e| format!("登记工作区产物失败: {}", e))?;
 
     Ok(record)
 }
 
 /// 查询会话下的所有有效产物记录
-pub fn list_session_artifacts(db: &DbState, session_id: &str) -> Result<Vec<ArtifactRecord>, String> {
+pub fn list_session_artifacts(
+    db: &DbState,
+    session_id: &str,
+) -> Result<Vec<ArtifactRecord>, String> {
     list_artifacts_by_scope(db, session_id, None)
 }
 
@@ -301,31 +333,35 @@ pub fn list_artifacts_by_scope(
 ) -> Result<Vec<ArtifactRecord>, String> {
     let conn = db.0.lock().unwrap();
     if let Some(r_id) = run_id {
-        let mut stmt = conn.prepare(
-            "SELECT id, session_id, run_id, display_name, format, mime_type, kind,
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_id, run_id, display_name, format, mime_type, kind,
                     canonical_path, size_bytes, sha256, origin, status, created_at, updated_at
              FROM agent_artifacts
              WHERE session_id = ?1 AND run_id = ?2 AND status != 'deleted'
              ORDER BY created_at ASC",
-        ).map_err(|e| format!("查询产物列表失败: {}", e))?;
-        let rows = stmt.query_map(params![session_id, r_id], |row| {
-            Ok(ArtifactRecord {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                run_id: row.get(2)?,
-                display_name: row.get(3)?,
-                format: row.get(4)?,
-                mime_type: row.get(5)?,
-                kind: row.get(6)?,
-                canonical_path: row.get(7)?,
-                size_bytes: row.get(8)?,
-                sha256: row.get(9)?,
-                origin: row.get(10)?,
-                status: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+            )
+            .map_err(|e| format!("查询产物列表失败: {}", e))?;
+        let rows = stmt
+            .query_map(params![session_id, r_id], |row| {
+                Ok(ArtifactRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    run_id: row.get(2)?,
+                    display_name: row.get(3)?,
+                    format: row.get(4)?,
+                    mime_type: row.get(5)?,
+                    kind: row.get(6)?,
+                    canonical_path: row.get(7)?,
+                    size_bytes: row.get(8)?,
+                    sha256: row.get(9)?,
+                    origin: row.get(10)?,
+                    status: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
+                })
             })
-        }).map_err(|e| format!("读取产物行失败: {}", e))?;
+            .map_err(|e| format!("读取产物行失败: {}", e))?;
         let mut result = Vec::new();
         for row in rows {
             if let Ok(item) = row {
@@ -334,31 +370,35 @@ pub fn list_artifacts_by_scope(
         }
         Ok(result)
     } else {
-        let mut stmt = conn.prepare(
-            "SELECT id, session_id, run_id, display_name, format, mime_type, kind,
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_id, run_id, display_name, format, mime_type, kind,
                     canonical_path, size_bytes, sha256, origin, status, created_at, updated_at
              FROM agent_artifacts
              WHERE session_id = ?1 AND status != 'deleted'
              ORDER BY created_at ASC",
-        ).map_err(|e| format!("查询产物列表失败: {}", e))?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            Ok(ArtifactRecord {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                run_id: row.get(2)?,
-                display_name: row.get(3)?,
-                format: row.get(4)?,
-                mime_type: row.get(5)?,
-                kind: row.get(6)?,
-                canonical_path: row.get(7)?,
-                size_bytes: row.get(8)?,
-                sha256: row.get(9)?,
-                origin: row.get(10)?,
-                status: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+            )
+            .map_err(|e| format!("查询产物列表失败: {}", e))?;
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                Ok(ArtifactRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    run_id: row.get(2)?,
+                    display_name: row.get(3)?,
+                    format: row.get(4)?,
+                    mime_type: row.get(5)?,
+                    kind: row.get(6)?,
+                    canonical_path: row.get(7)?,
+                    size_bytes: row.get(8)?,
+                    sha256: row.get(9)?,
+                    origin: row.get(10)?,
+                    status: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
+                })
             })
-        }).map_err(|e| format!("读取产物行失败: {}", e))?;
+            .map_err(|e| format!("读取产物行失败: {}", e))?;
         let mut result = Vec::new();
         for row in rows {
             if let Ok(item) = row {
@@ -508,7 +548,10 @@ pub fn dispatch(
     params: &serde_json::Value,
 ) -> DispatchResult {
     let sub_action = if action.is_empty() {
-        params.get("action").and_then(|v| v.as_str()).unwrap_or("create_document")
+        params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("create_document")
     } else {
         action
     };

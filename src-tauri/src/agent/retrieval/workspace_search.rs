@@ -16,25 +16,23 @@ pub fn search_code(
 
     let max_hits = limit.min(20);
 
-    let mut output = run_ripgrep(clean_query, search_root, max_hits, false)
-        .map_err(|e| {
-            format!(
-                "无法启动 ripgrep (rg)：{}。代码检索依赖系统安装的 rg，历史检索不受影响",
-                e
-            )
-        })?;
+    let mut output = run_ripgrep(clean_query, search_root, max_hits, false).map_err(|e| {
+        format!(
+            "无法启动 ripgrep (rg)：{}。代码检索依赖系统安装的 rg，历史检索不受影响",
+            e
+        )
+    })?;
 
     let mut literal_fallback = false;
     // exit=2 是 rg 的用法/正则解析错误：模型常把 fn foo() 这类含元字符的串当查询词。
     // 降级为 -F 字面量匹配重试一次，而不是把原始正则错误原样抛回引发重复失败。
     if !output.status.success() && output.status.code() == Some(2) {
-        output = run_ripgrep(clean_query, search_root, max_hits, true)
-            .map_err(|e| {
-                format!(
-                    "无法启动 ripgrep (rg)：{}。代码检索依赖系统安装的 rg，历史检索不受影响",
-                    e
-                )
-            })?;
+        output = run_ripgrep(clean_query, search_root, max_hits, true).map_err(|e| {
+            format!(
+                "无法启动 ripgrep (rg)：{}。代码检索依赖系统安装的 rg，历史检索不受影响",
+                e
+            )
+        })?;
         literal_fallback = true;
     }
 
@@ -129,8 +127,5 @@ fn run_ripgrep(
     if fixed_strings {
         command.arg("--fixed-strings");
     }
-    command
-        .arg(query)
-        .arg(search_root)
-        .output()
+    command.arg(query).arg(search_root).output()
 }

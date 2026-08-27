@@ -259,15 +259,9 @@ impl McpClient {
         // stdio 插件：握手只做一次，所有并发调用方在此串行等待。
         // 若不等待，目录预热会在后台保活任务握手完成前发出 tools/list，
         // 服务端按协议拒绝未初始化请求，模型可见工具目录将定格为空。
-        if !self
-            .stdio_ready
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if !self.stdio_ready.load(std::sync::atomic::Ordering::Acquire) {
             let _guard = self.global_init_lock.lock().await;
-            if !self
-                .stdio_ready
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
+            if !self.stdio_ready.load(std::sync::atomic::Ordering::Acquire) {
                 self.initialize_for_session(chat_session_id).await?;
                 self.stdio_ready
                     .store(true, std::sync::atomic::Ordering::Release);

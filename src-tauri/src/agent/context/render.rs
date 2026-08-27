@@ -75,7 +75,12 @@ impl ContextRenderer {
                 let detail = match status.as_str() {
                     "evidenced" => format!(
                         "证据: {}",
-                        item.evidence_refs.iter().take(2).cloned().collect::<Vec<_>>().join("; ")
+                        item.evidence_refs
+                            .iter()
+                            .take(2)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("; ")
                     ),
                     "waived" => format!(
                         "豁免: {}",
@@ -83,7 +88,10 @@ impl ContextRenderer {
                     ),
                     _ => "等待核验或显式豁免".to_string(),
                 };
-                format!("- [{}] {}：{}（{}）", status, item.id, item.question, detail)
+                format!(
+                    "- [{}] {}：{}（{}）",
+                    status, item.id, item.question, detail
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -108,7 +116,9 @@ impl ContextRenderer {
         }
         format!(
             "【写入后验证】\n- 最近写入：{}\n终态前：新的真实写入会自动使此闭合失效。\n\n",
-            verification.map(ChangeVerification::summary).unwrap_or_default()
+            verification
+                .map(ChangeVerification::summary)
+                .unwrap_or_default()
         )
     }
     pub fn render_decision_instruction(compact_tools: Option<&str>) -> String {

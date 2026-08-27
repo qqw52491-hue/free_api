@@ -241,12 +241,13 @@ impl SandwichContext {
         // 完整 prompt 已含静态前缀、尾部和请求时历史；只叠加该请求之后
         // 新追加历史的正向保守增量。缺少任一同源快照时回退到本地安全估算。
         let calibrated_prompt_tokens = match (
-            self.last_reported_prompt_tokens.filter(|tokens| *tokens > 0),
+            self.last_reported_prompt_tokens
+                .filter(|tokens| *tokens > 0),
             self.last_reported_history_estimate_tokens,
         ) {
-            (Some(real_total), Some(history_at_request)) => Some(
-                real_total.saturating_add(current_tokens.saturating_sub(history_at_request)),
-            ),
+            (Some(real_total), Some(history_at_request)) => {
+                Some(real_total.saturating_add(current_tokens.saturating_sub(history_at_request)))
+            }
             _ => None,
         };
         let prompt_high_watermark = budget
@@ -280,10 +281,7 @@ impl SandwichContext {
                 break;
             }
         }
-        let dehydrate_limit = self
-            .turns_history
-            .len()
-            .saturating_sub(protected_from_back);
+        let dehydrate_limit = self.turns_history.len().saturating_sub(protected_from_back);
         for msg in self.turns_history.iter_mut().take(dehydrate_limit) {
             *msg = crate::agent::context::assembler::dehydrate_historical_turn(msg);
         }
@@ -595,12 +593,14 @@ mod tests {
         ctx.context_window_tokens = 200_000;
 
         // 本地估算视角：塞入大量中文文本（保守估算约 150K+ tokens）
-        let big_cjk = "审查要点覆盖资源作用域契约、上下文压缩水位与工具参数契约等领域的细节描述。".repeat(600);
+        let big_cjk = "审查要点覆盖资源作用域契约、上下文压缩水位与工具参数契约等领域的细节描述。"
+            .repeat(600);
         for i in 0..18 {
-            ctx.turns_history.push(crate::agent::context::types::ChatMessage {
-                role: "user".to_string(),
-                content: json!(format!("step {} {}", i, big_cjk)),
-            });
+            ctx.turns_history
+                .push(crate::agent::context::types::ChatMessage {
+                    role: "user".to_string(),
+                    content: json!(format!("step {} {}", i, big_cjk)),
+                });
         }
         let local_estimate = ctx.history_estimated_tokens();
         assert!(
@@ -646,7 +646,10 @@ mod tests {
         });
         ctx.turns_history.push(ChatMessage {
             role: "user".to_string(),
-            content: json!(format!("【执行输出】\noutput_id: baseline\n{}", "seed ".repeat(2_400))),
+            content: json!(format!(
+                "【执行输出】\noutput_id: baseline\n{}",
+                "seed ".repeat(2_400)
+            )),
         });
         let history_at_request = ctx.history_estimated_tokens();
         ctx.last_reported_prompt_tokens = Some(12_000);
@@ -659,7 +662,11 @@ mod tests {
             });
             ctx.turns_history.push(ChatMessage {
                 role: "user".to_string(),
-                content: json!(format!("【执行输出】\noutput_id: branch_{}\n{}", branch, "x".repeat(16_000))),
+                content: json!(format!(
+                    "【执行输出】\noutput_id: branch_{}\n{}",
+                    branch,
+                    "x".repeat(16_000)
+                )),
             });
         }
 
@@ -686,7 +693,11 @@ mod tests {
         for i in 0..10 {
             ctx.turns_history.push(ChatMessage {
                 role: "user".to_string(),
-                content: json!(format!("step {} {}", i, "plain heavy narrative ".repeat(1_200))),
+                content: json!(format!(
+                    "step {} {}",
+                    i,
+                    "plain heavy narrative ".repeat(1_200)
+                )),
             });
         }
         let before = ctx.history_estimated_tokens();

@@ -82,7 +82,12 @@ pub async fn replace_agent_goal(session_id: String, goal: String) -> Result<(), 
 pub async fn cancel_agent_run(session_id: String) -> Result<(), String> {
     // 快速自旋轮询最多 300ms（防止前端刚发起任务立即点击停止时通道尚在注册中的微小窗口）
     for _ in 0..6 {
-        if let Some(sender) = intervention_channels().lock().await.get(&session_id).cloned() {
+        if let Some(sender) = intervention_channels()
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+        {
             let _ = sender.send(HumanControl::Cancel).await;
             notify_stream_interrupt(&session_id).await;
             return Ok(());

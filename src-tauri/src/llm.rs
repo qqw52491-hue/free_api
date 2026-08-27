@@ -234,11 +234,17 @@ impl ModelConfig {
         let profile: Value = match serde_json::from_str::<Value>(&self.provider_capabilities) {
             Ok(value) if value.is_object() => value,
             Ok(_) => {
-                eprintln!("⚠️ 模型 {} 的 provider_capabilities 不是对象，已忽略", self.model_id);
+                eprintln!(
+                    "⚠️ 模型 {} 的 provider_capabilities 不是对象，已忽略",
+                    self.model_id
+                );
                 return;
             }
             Err(error) => {
-                eprintln!("⚠️ 模型 {} 的 provider_capabilities 无法解析，已忽略: {}", self.model_id, error);
+                eprintln!(
+                    "⚠️ 模型 {} 的 provider_capabilities 无法解析，已忽略: {}",
+                    self.model_id, error
+                );
                 return;
             }
         };
@@ -263,7 +269,11 @@ impl ModelConfig {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let enabled = force_enabled || preference != "off";
-        let value_key = if enabled { "enabled_value" } else { "disabled_value" };
+        let value_key = if enabled {
+            "enabled_value"
+        } else {
+            "disabled_value"
+        };
         if let Some(value) = thinking.get(value_key) {
             if let Some(object) = body.as_object_mut() {
                 object.insert(field.to_string(), value.clone());

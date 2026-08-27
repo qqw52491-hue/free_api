@@ -1,11 +1,7 @@
 use crate::agent::types::DispatchResult;
 use crate::db::DbState;
 
-pub fn dispatch(
-    db: &DbState,
-    action: &str,
-    params: &serde_json::Value,
-) -> DispatchResult {
+pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> DispatchResult {
     let conn = match db.0.lock() {
         Ok(c) => c,
         Err(e) => {

@@ -392,9 +392,10 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
         }
 
         // 7. parallel 是可选集合；false 是模型常见的“未并行”表示，归一为 None。
-        if map.get("parallel").is_some_and(|value| {
-            value.is_null() || value == &serde_json::Value::Bool(false)
-        }) {
+        if map
+            .get("parallel")
+            .is_some_and(|value| value.is_null() || value == &serde_json::Value::Bool(false))
+        {
             map.insert("parallel".to_string(), serde_json::Value::Null);
         }
     }

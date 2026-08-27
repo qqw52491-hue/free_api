@@ -71,7 +71,9 @@ pub async fn sync_mcp_plugins_for_session(
 
         let removed = {
             // 解构一次性可变借用整个 registry，再拆分两个字段引用给纯函数
-            let crate::agent::mcp::registry::PluginRegistry { clients, sources, .. } = &mut *registry;
+            let crate::agent::mcp::registry::PluginRegistry {
+                clients, sources, ..
+            } = &mut *registry;
             crate::agent::mcp::registry::reconcile_managed_plugins(clients, sources, &desired)
         };
         for name in &removed {
@@ -105,7 +107,11 @@ pub async fn sync_mcp_plugins_for_session(
                                     tokio::spawn(async move {
                                         let _ = c.ensure_session_initialized(None).await;
                                         if let Ok(tools) = c.list_tools().await {
-                                            println!("🔌 DB 插件就绪: {} ({} 个工具)", n, tools.len());
+                                            println!(
+                                                "🔌 DB 插件就绪: {} ({} 个工具)",
+                                                n,
+                                                tools.len()
+                                            );
                                         }
                                     });
                                     println!("🔌 挂载新 DB 插件: {}", name);

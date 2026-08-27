@@ -87,7 +87,12 @@ pub fn scan_system_skills(app_handle: Option<&tauri::AppHandle>) -> Vec<AgentCus
             description = content
                 .lines()
                 .map(str::trim)
-                .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("<!--") && !l.starts_with("---"))
+                .find(|l| {
+                    !l.is_empty()
+                        && !l.starts_with('#')
+                        && !l.starts_with("<!--")
+                        && !l.starts_with("---")
+                })
                 .map(|l| l.chars().take(120).collect())
                 .unwrap_or_else(|| format!("系统内置技能: {}", stem));
         }
@@ -422,7 +427,10 @@ pub async fn batch_import_skills(
                     item.get("name").and_then(|v| v.as_str()),
                     item.get("content").and_then(|v| v.as_str()),
                 ) {
-                    let desc = item.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let desc = item
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                     parsed_skills.push((name.trim().to_string(), desc, content.trim().to_string()));
                 }
             }
@@ -436,7 +444,11 @@ pub async fn batch_import_skills(
         for line in trimmed.lines() {
             if line.starts_with("### ") || line.starts_with("## ") || line.starts_with("# ") {
                 if !cur_title.is_empty() && !cur_lines.is_empty() {
-                    parsed_skills.push((cur_title.clone(), None, cur_lines.join("\n").trim().to_string()));
+                    parsed_skills.push((
+                        cur_title.clone(),
+                        None,
+                        cur_lines.join("\n").trim().to_string(),
+                    ));
                     cur_lines.clear();
                 }
                 cur_title = line.trim_start_matches('#').trim().to_string();
@@ -483,7 +495,11 @@ pub async fn batch_import_skills(
         let desc = match desc_opt {
             Some(d) if !d.trim().is_empty() => d.trim().to_string(),
             _ => {
-                if let Ok(summary) = crate::agent::skill_context::generate_llm_skill_summary(&name, &content, &model_cfg).await {
+                if let Ok(summary) = crate::agent::skill_context::generate_llm_skill_summary(
+                    &name, &content, &model_cfg,
+                )
+                .await
+                {
                     summary
                 } else {
                     String::new()
@@ -497,7 +513,11 @@ pub async fn batch_import_skills(
             None,
             "skill".to_string(),
             name.clone(),
-            if desc.is_empty() { None } else { Some(desc.clone()) },
+            if desc.is_empty() {
+                None
+            } else {
+                Some(desc.clone())
+            },
             content,
             true,
         ) {

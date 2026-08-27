@@ -184,7 +184,9 @@ pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
     };
 
     // 1. 如果是早期执行输出且较长（> 400 字符），提取 output_id 和结果状态，将正文脱水为结构化证据句柄
-    if (text.starts_with("【执行输出") || text.starts_with("[代码阅读护栏]") || text.contains("output_id: "))
+    if (text.starts_with("【执行输出")
+        || text.starts_with("[代码阅读护栏]")
+        || text.contains("output_id: "))
         && text.len() > 400
     {
         let mut output_id = "";
@@ -317,9 +319,17 @@ mod tests {
                     .unwrap_or(false)
             })
             .expect("应存在独立的状态卡消息");
-        assert!(bottom_card.content.as_str().unwrap().contains("【当前活跃工具】: remote-hub"));
+        assert!(bottom_card
+            .content
+            .as_str()
+            .unwrap()
+            .contains("【当前活跃工具】: remote-hub"));
         assert!(
-            !bottom_card.content.as_str().unwrap().contains("【当前任务目标】"),
+            !bottom_card
+                .content
+                .as_str()
+                .unwrap()
+                .contains("【当前任务目标】"),
             "user_goal 不应再出现在底部卡片"
         );
         assert!(
@@ -414,7 +424,10 @@ mod tests {
         let history_before = serde_json::to_string(&ctx.turns_history).unwrap();
         ctx.set_progress_summary("v1 阶段总结：完成拓扑分析。\n细节 A。\n细节 B。");
         assert_eq!(ctx.persisted_summary_revision, 1, "未变化不得新版本");
-        assert_eq!(history_before, serde_json::to_string(&ctx.turns_history).unwrap());
+        assert_eq!(
+            history_before,
+            serde_json::to_string(&ctx.turns_history).unwrap()
+        );
 
         // 变化的更新：追加 v2 事件
         ctx.set_progress_summary("v2 阶段总结：进入压缩链路审查。");
@@ -443,7 +456,12 @@ mod tests {
         // 执行输出 C 必须独立成条，不得与状态卡/指令拼接
         let c1 = round1
             .iter()
-            .find(|m| m.content.as_str().map(|c| c.starts_with("【执行输出 C】")).unwrap_or(false))
+            .find(|m| {
+                m.content
+                    .as_str()
+                    .map(|c| c.starts_with("【执行输出 C】"))
+                    .unwrap_or(false)
+            })
             .expect("round1 应含执行输出 C");
         assert_eq!(
             c1.content,

@@ -9,7 +9,6 @@ pub trait CachePolicy: Send + Sync {
     fn provider_name(&self) -> &str;
 }
 
-
 pub struct DefaultCachePolicy;
 impl CachePolicy for DefaultCachePolicy {
     fn block_size(&self) -> usize {

@@ -55,7 +55,14 @@ fn is_explicit_zero_hit(output: &str) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
-    for key in ["total_hits", "total", "count", "num_hits", "hit_count", "matches_count"] {
+    for key in [
+        "total_hits",
+        "total",
+        "count",
+        "num_hits",
+        "hit_count",
+        "matches_count",
+    ] {
         if object
             .get(key)
             .and_then(Value::as_i64)
@@ -86,7 +93,14 @@ fn is_explicit_hit(output: &str) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
-    for key in ["total_hits", "total", "count", "num_hits", "hit_count", "matches_count"] {
+    for key in [
+        "total_hits",
+        "total",
+        "count",
+        "num_hits",
+        "hit_count",
+        "matches_count",
+    ] {
         if let Some(n) = object.get(key).and_then(Value::as_i64) {
             if n > 0 {
                 return true;
@@ -165,10 +179,13 @@ impl ZeroHitTracker {
             return None;
         }
 
-        let state = self.states.entry(group_key.clone()).or_insert(ZeroHitState {
-            consecutive_zero_hits: 0,
-            notice_issued: false,
-        });
+        let state = self
+            .states
+            .entry(group_key.clone())
+            .or_insert(ZeroHitState {
+                consecutive_zero_hits: 0,
+                notice_issued: false,
+            });
         state.consecutive_zero_hits = state.consecutive_zero_hits.saturating_add(1);
         if state.consecutive_zero_hits >= ZERO_HIT_NOTICE_THRESHOLD && !state.notice_issued {
             state.notice_issued = true;
@@ -268,14 +285,20 @@ mod tests {
         let repo_b = json!({"query": "q", "path": "/repo_b"});
         // 不同作用域各自计数：A 积累 3 次不触发
         for _ in 0..ZERO_HIT_NOTICE_THRESHOLD - 1 {
-            assert!(tracker.record("p/search", &repo_a, true, zero_output()).is_none());
+            assert!(tracker
+                .record("p/search", &repo_a, true, zero_output())
+                .is_none());
         }
         // B 作用域从零开始：3 次也不触发
         for _ in 0..ZERO_HIT_NOTICE_THRESHOLD - 1 {
-            assert!(tracker.record("p/search", &repo_b, true, zero_output()).is_none());
+            assert!(tracker
+                .record("p/search", &repo_b, true, zero_output())
+                .is_none());
         }
         // A 再 1 次达到阈值触发（组内累计，未被 B 干扰）
-        assert!(tracker.record("p/search", &repo_a, true, zero_output()).is_some());
+        assert!(tracker
+            .record("p/search", &repo_a, true, zero_output())
+            .is_some());
 
         // 换工具族（内容→文件名）：新组从零计数，不继承旧族计数
         let mut tracker2 = ZeroHitTracker::default();
@@ -306,7 +329,9 @@ mod tests {
         // 空文本成功输出（如命令无 stdout、目录为空的文本报告）不可判定为零命中
         for _ in 0..10 {
             assert!(tracker.record("p/search", &params, true, "").is_none());
-            assert!(tracker.record("p/search", &params, true, "(no output)").is_none());
+            assert!(tracker
+                .record("p/search", &params, true, "(no output)")
+                .is_none());
         }
         // 无计数/结果集字段的 JSON 不臆测为零命中
         for _ in 0..10 {
@@ -329,9 +354,7 @@ mod tests {
             assert!(tracker
                 .record("p/list_directory", &params, true, r#"{"items":[]}"#)
                 .is_none());
-            assert!(tracker
-                .record("p/shell_exec", &params, true, "")
-                .is_none());
+            assert!(tracker.record("p/shell_exec", &params, true, "").is_none());
             // 分页/继续读取（read 类）不属于检索族
             assert!(tracker
                 .record("p/read_multiple_files", &params, true, r#"{"results":[]}"#)

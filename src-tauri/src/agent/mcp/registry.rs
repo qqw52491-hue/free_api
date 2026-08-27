@@ -220,12 +220,9 @@ impl PluginRegistry {
                     }
                 };
                 if let Some(cfg) = &m_cfg {
-                    if let Ok(card) = crate::agent::mcp_catalog::generate_llm_mcp_card(
-                        &plugin_name,
-                        &tools,
-                        cfg,
-                    )
-                    .await
+                    if let Ok(card) =
+                        crate::agent::mcp_catalog::generate_llm_mcp_card(&plugin_name, &tools, cfg)
+                            .await
                     {
                         crate::agent::mcp_catalog::set_cached_capability_card(&plugin_cfg, card);
                     }
@@ -394,7 +391,9 @@ mod tests {
         Arc::new(McpClient::spawn(config).expect("url 型 spawn 不联网，必然成功"))
     }
 
-    fn registry_with(entries: &[(&str, PluginSource)]) -> (
+    fn registry_with(
+        entries: &[(&str, PluginSource)],
+    ) -> (
         HashMap<String, Arc<McpClient>>,
         HashMap<String, PluginSource>,
     ) {
@@ -410,8 +409,10 @@ mod tests {
 
     #[test]
     fn reconcile_removes_deleted_managed_plugin() {
-        let (mut clients, mut sources) =
-            registry_with(&[("managed-a", PluginSource::ManagedDb), ("managed-b", PluginSource::ManagedDb)]);
+        let (mut clients, mut sources) = registry_with(&[
+            ("managed-a", PluginSource::ManagedDb),
+            ("managed-b", PluginSource::ManagedDb),
+        ]);
         let desired = HashMap::from([("managed-a".to_string(), true)]);
 
         let removed = reconcile_managed_plugins(&mut clients, &mut sources, &desired);
@@ -424,8 +425,7 @@ mod tests {
 
     #[test]
     fn reconcile_removes_disabled_managed_plugin() {
-        let (mut clients, mut sources) =
-            registry_with(&[("managed-a", PluginSource::ManagedDb)]);
+        let (mut clients, mut sources) = registry_with(&[("managed-a", PluginSource::ManagedDb)]);
         // desired 里存在但 enabled=false → 必须移除
         let desired = HashMap::from([("managed-a".to_string(), false)]);
 
@@ -448,7 +448,10 @@ mod tests {
         let removed = reconcile_managed_plugins(&mut clients, &mut sources, &desired);
 
         assert_eq!(removed, vec!["managed-a".to_string()]);
-        assert!(clients.contains_key("yaml-x"), "Yaml 来源项绝不能被 DB 对账移除");
+        assert!(
+            clients.contains_key("yaml-x"),
+            "Yaml 来源项绝不能被 DB 对账移除"
+        );
         assert_eq!(sources.get("yaml-x"), Some(&PluginSource::Yaml));
     }
 
@@ -481,7 +484,11 @@ mod tests {
         // 必须同时合并 sources，否则 YAML 项无来源标记（对账与冲突判定失效）
         let mut yaml_registry = PluginRegistry::new();
         yaml_registry
-            .insert_with_source("yaml-a".to_string(), make_client("yaml-a"), PluginSource::Yaml)
+            .insert_with_source(
+                "yaml-a".to_string(),
+                make_client("yaml-a"),
+                PluginSource::Yaml,
+            )
             .unwrap();
 
         let mut main_registry = PluginRegistry::new();
@@ -501,7 +508,11 @@ mod tests {
         // 主 registry 已有 ManagedDb 项时，YAML 扫描遇到同名 → 拒绝合并，保留 DB 项
         let mut main_registry = PluginRegistry::new();
         main_registry
-            .insert_with_source("dup".to_string(), make_client("dup"), PluginSource::ManagedDb)
+            .insert_with_source(
+                "dup".to_string(),
+                make_client("dup"),
+                PluginSource::ManagedDb,
+            )
             .unwrap();
 
         let mut yaml_registry = PluginRegistry::new();
@@ -527,10 +538,18 @@ mod tests {
         assert_eq!(registry.classify("fresh"), None);
 
         registry
-            .insert_with_source("yaml-x".to_string(), make_client("yaml-x"), PluginSource::Yaml)
+            .insert_with_source(
+                "yaml-x".to_string(),
+                make_client("yaml-x"),
+                PluginSource::Yaml,
+            )
             .unwrap();
         registry
-            .insert_with_source("db-a".to_string(), make_client("db-a"), PluginSource::ManagedDb)
+            .insert_with_source(
+                "db-a".to_string(),
+                make_client("db-a"),
+                PluginSource::ManagedDb,
+            )
             .unwrap();
         // 构造孤儿：直接塞 client 不带来源（模拟违反同步约束的防御态）
         registry

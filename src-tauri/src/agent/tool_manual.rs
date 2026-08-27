@@ -77,10 +77,9 @@ pub async fn load_tool_manual_for_next_step(
                             tool_key,
                             tools.len()
                         ),
-                        Err(error) => eprintln!(
-                            "⚠️ [Tool Manifest] 现场刷新 [{}] 失败: {}",
-                            tool_key, error
-                        ),
+                        Err(error) => {
+                            eprintln!("⚠️ [Tool Manifest] 现场刷新 [{}] 失败: {}", tool_key, error)
+                        }
                     }
                 }
             }
@@ -116,10 +115,11 @@ pub async fn load_tool_manual_for_next_step(
             role: "user".to_string(),
             content: json!(feedback),
         });
-        context
-            .fetched_tools
-            .insert(format!("miss:{}", tool_key));
-        println!("🧭 [Tool Manifest] next_tool_hint 未命中 [{}]，已注入可用插件名纠错反馈", tool_key);
+        context.fetched_tools.insert(format!("miss:{}", tool_key));
+        println!(
+            "🧭 [Tool Manifest] next_tool_hint 未命中 [{}]，已注入可用插件名纠错反馈",
+            tool_key
+        );
     } else if !tool_detail.trim().is_empty() {
         context.turns_history.push(ChatMessage {
             role: "user".to_string(),

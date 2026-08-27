@@ -5,9 +5,9 @@
 //! 不超过 MAX_CONTROLLED_PARALLEL_BRANCHES（响亮拒绝而非静默截断）。
 
 use crate::agent::dispatcher::{emit_tool_event, execute_command_inner};
-use crate::agent::types::DispatchResult;
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::plan_tree::PlanNode;
+use crate::agent::types::DispatchResult;
 use crate::db::DbState;
 use serde_json::Value;
 use std::sync::Arc;
@@ -84,7 +84,9 @@ pub(crate) const MAX_CONTROLLED_PARALLEL_BRANCHES: usize = 2;
 
 /// 并行仅接受少量、已经由模型明确给出的独立分支。
 /// 该校验不推断、补充或改写任何 MCP 子步骤参数。
-pub(crate) fn validate_controlled_parallel_batch(parallel_steps: &[serde_json::Value]) -> Result<(), String> {
+pub(crate) fn validate_controlled_parallel_batch(
+    parallel_steps: &[serde_json::Value],
+) -> Result<(), String> {
     match parallel_steps.len() {
         0 => Err("parallel 必须至少包含一个已确定的独立分支；未知范围请使用单步取证。".to_string()),
         1..=MAX_CONTROLLED_PARALLEL_BRANCHES => Ok(()),
@@ -102,18 +104,26 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-#[test]
+    #[test]
     fn controlled_parallel_allows_at_most_two_explicit_branches_without_parameter_rewrite() {
-        let one = vec![serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"path": "/repo/a.rs"}})];
+        let one = vec![
+            serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"path": "/repo/a.rs"}}),
+        ];
         let two = vec![
             serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"cwd": "/repo", "path": "a.rs"}}),
             serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"cwd": "/repo", "path": "b.rs"}}),
         ];
-        let three = vec![serde_json::json!({}), serde_json::json!({}), serde_json::json!({})];
+        let three = vec![
+            serde_json::json!({}),
+            serde_json::json!({}),
+            serde_json::json!({}),
+        ];
 
         assert!(validate_controlled_parallel_batch(&one).is_ok());
         assert!(validate_controlled_parallel_batch(&two).is_ok());
-        assert!(validate_controlled_parallel_batch(&three).unwrap_err().contains("最多允许 2"));
+        assert!(validate_controlled_parallel_batch(&three)
+            .unwrap_err()
+            .contains("最多允许 2"));
         assert_eq!(two[0]["command"]["cwd"], serde_json::json!("/repo"));
         assert_eq!(two[1]["command"]["path"], serde_json::json!("b.rs"));
     }

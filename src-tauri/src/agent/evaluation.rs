@@ -224,19 +224,31 @@ fn resolve_scenario(scenario_id: &str) -> Result<(&'static str, String), String>
         )),
         DIAGNOSTIC_FAKE_ACTION_SCENARIO => Ok((
             "agent-diag-fake-action",
-            format!("{}\n{}", DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_FAKE_ACTION_GOAL),
+            format!(
+                "{}\n{}",
+                DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_FAKE_ACTION_GOAL
+            ),
         )),
         DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO => Ok((
             "agent-diag-plugin-removal",
-            format!("{}\n{}", DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_PLUGIN_REMOVAL_GOAL),
+            format!(
+                "{}\n{}",
+                DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_PLUGIN_REMOVAL_GOAL
+            ),
         )),
         DIAGNOSTIC_FALSE_LEAK_SCENARIO => Ok((
             "agent-diag-false-leak",
-            format!("{}\n{}", DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_FALSE_LEAK_GOAL),
+            format!(
+                "{}\n{}",
+                DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_FALSE_LEAK_GOAL
+            ),
         )),
         DIAGNOSTIC_NAME_COLLISION_SCENARIO => Ok((
             "agent-diag-name-collision",
-            format!("{}\n{}", DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_NAME_COLLISION_GOAL),
+            format!(
+                "{}\n{}",
+                DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_NAME_COLLISION_GOAL
+            ),
         )),
         other => Err(format!("未知的评测场景：{}", other)),
     }
@@ -488,10 +500,17 @@ fn render_markdown(report: &AgentEvaluationReport) -> String {
     let mut document = format!("# Agent 只读回归评测报告\n\n评测会话：`{}`。生成时间：{}。运行轨迹状态：`{}`。综合判定：**{}**。\n\n## 核心指标\n\n| 指标 | 值 |\n| --- | ---: |\n| 模型调用数 | {} |\n| JSON 解析成功率 | {:.1}% |\n| JSON 解析错误 | {} |\n| 工具步骤 / 失败 | {} / {} |\n| 并行批次 / 最大分支 | {} / {} |\n| 读取意图 / 相同签名重复调用 | {} / {} |\n| Prompt Token 总量 / 峰值 | {} / {} |\n| 完成 Token 总量 | {} |\n| 缓存命中率 | {:.1}% |\n| 最大上下文使用率 | {:.1}% |\n| 最大发送上下文字符数 | {} |\n| 观测时长（秒） | {} |\n", report.session_id, report.generated_at, report.trace_status, report.verdict, metrics.llm_call_count, metrics.parse_success_rate_percent, metrics.parse_error_count, metrics.tool_step_count, metrics.tool_failure_count, metrics.parallel_batch_count, metrics.max_parallel_branches, metrics.read_intent_count, metrics.repeated_read_intent_count, metrics.total_prompt_tokens, metrics.max_prompt_tokens, metrics.total_completion_tokens, metrics.cache_hit_rate_percent, metrics.max_context_usage_percent, metrics.max_messages_char_count, metrics.observed_duration_seconds);
     document.push_str(&format!("\n> 口径：相同签名重复调用 = 完全相同的工具与参数被再次执行；同文件不同行窗口/字段级分段读取不计入（属合理取证）。运行时另有无进展提示（相同调用+相同输出第 3 次连续触发）。\n\n| 独特读取意图 / 相同签名重复调用 | {} / {} |\n| 重复失败调用 | {} |\n| 计划标题切换 | {} |\n| 未说明独立性的并行批次 | {} |\n| 资源作用域 outside / unknown / 重绑 | {} / {} / {} |\n", metrics.unique_read_intent_count, metrics.repeated_read_intent_count, metrics.repeated_failed_action_count, metrics.plan_title_transition_count, metrics.parallel_without_rationale_count, metrics.resource_scope_outside_count, metrics.resource_scope_unknown_count, metrics.scope_rebind_count));
     if let Some(routing) = &report.routing {
-        document.push_str(&format!("\n评测路由：`{}`；推理模型：`{}`；执行模型：`{}`。\n", routing.preset, routing.reasoning_model_id, routing.execution_model_id));
+        document.push_str(&format!(
+            "\n评测路由：`{}`；推理模型：`{}`；执行模型：`{}`。\n",
+            routing.preset, routing.reasoning_model_id, routing.execution_model_id
+        ));
     }
     if let Some(delivery) = &report.complex_delivery {
-        let result = if delivery.compliant { "通过" } else { "缺失边界声明" };
+        let result = if delivery.compliant {
+            "通过"
+        } else {
+            "缺失边界声明"
+        };
         let missing = if delivery.compliant {
             "无".to_string()
         } else {
@@ -561,16 +580,40 @@ mod tests {
     #[test]
     fn diagnostic_scenarios_register_with_contract_and_distinct_prefixes() {
         for (scenario, prefix, dedicated_field) in [
-            (DIAGNOSTIC_FAKE_ACTION_SCENARIO, "agent-diag-fake-action", "unimplemented_actions"),
-            (DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO, "agent-diag-plugin-removal", "stale_components"),
-            (DIAGNOSTIC_FALSE_LEAK_SCENARIO, "agent-diag-false-leak", "visible_components"),
-            (DIAGNOSTIC_NAME_COLLISION_SCENARIO, "agent-diag-name-collision", "collision_sources"),
+            (
+                DIAGNOSTIC_FAKE_ACTION_SCENARIO,
+                "agent-diag-fake-action",
+                "unimplemented_actions",
+            ),
+            (
+                DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO,
+                "agent-diag-plugin-removal",
+                "stale_components",
+            ),
+            (
+                DIAGNOSTIC_FALSE_LEAK_SCENARIO,
+                "agent-diag-false-leak",
+                "visible_components",
+            ),
+            (
+                DIAGNOSTIC_NAME_COLLISION_SCENARIO,
+                "agent-diag-name-collision",
+                "collision_sources",
+            ),
         ] {
             let (resolved_prefix, goal) = resolve_scenario(scenario).unwrap();
             assert_eq!(resolved_prefix, prefix);
             assert!(goal.contains("DIAGNOSIS.json"), "诊断场景必须携带输出契约");
-            assert!(goal.contains("唯一允许创建或修改的文件"), "契约必须限定写入范围");
-            assert!(goal.contains(dedicated_field), "场景 {} 缺少专用字段 {}", scenario, dedicated_field);
+            assert!(
+                goal.contains("唯一允许创建或修改的文件"),
+                "契约必须限定写入范围"
+            );
+            assert!(
+                goal.contains(dedicated_field),
+                "场景 {} 缺少专用字段 {}",
+                scenario,
+                dedicated_field
+            );
         }
         // 既有场景不受影响：goal 原样、无诊断契约混入
         let (_, goal) = resolve_scenario(ISOLATED_WRITE_FIXTURE_SCENARIO).unwrap();
@@ -589,9 +632,15 @@ mod tests {
             DIAGNOSTIC_FALSE_LEAK_SCENARIO,
             DIAGNOSTIC_NAME_COLLISION_SCENARIO,
         ] {
-            assert!(scenario_requires_complex_delivery(scenario), "{} should require disclosure", scenario);
+            assert!(
+                scenario_requires_complex_delivery(scenario),
+                "{} should require disclosure",
+                scenario
+            );
         }
-        assert!(!scenario_requires_complex_delivery(ISOLATED_WRITE_FIXTURE_SCENARIO));
+        assert!(!scenario_requires_complex_delivery(
+            ISOLATED_WRITE_FIXTURE_SCENARIO
+        ));
     }
 
     #[test]
@@ -626,7 +675,9 @@ mod tests {
         assert_eq!(metrics.plan_title_transition_count, 1);
         assert_eq!(metrics.parallel_without_rationale_count, 0);
         assert_eq!(metrics.repeated_failed_action_count, 1);
-        assert!(warnings.iter().any(|warning| warning.contains("相同失败调用重犯")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("相同失败调用重犯")));
     }
 
     #[test]

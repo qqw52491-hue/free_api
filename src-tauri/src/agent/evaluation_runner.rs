@@ -191,7 +191,9 @@ fn read_structured_monitor_snapshot(
         .and_then(|trace| trace.get("steps"))
         .and_then(Value::as_array);
     let checkpoint = load_checkpoint(db, session_id)?;
-    let checkpoint_phase = checkpoint.as_ref().map(|checkpoint| checkpoint.phase.as_str().to_string());
+    let checkpoint_phase = checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.phase.as_str().to_string());
     let checkpoint_reason = checkpoint
         .as_ref()
         .filter(|checkpoint| checkpoint.phase == AgentPhase::WaitUser)
@@ -230,7 +232,8 @@ fn persist_structured_monitor_snapshot(
     session_id: &str,
     event_pause_reason: Option<String>,
 ) -> Result<EvaluationMonitorSnapshot, String> {
-    let snapshot = read_structured_monitor_snapshot(db, evaluation_id, session_id, event_pause_reason)?;
+    let snapshot =
+        read_structured_monitor_snapshot(db, evaluation_id, session_id, event_pause_reason)?;
     let project_dir = std::env::current_dir().map_err(|error| error.to_string())?;
     let monitor_dir = project_dir.join("agent_evaluations").join("monitor");
     fs::create_dir_all(&monitor_dir).map_err(|error| error.to_string())?;
@@ -265,11 +268,7 @@ fn resolve_enabled_model_id(
 
 /// 按候选链依次解析首个已启用的模型；全部不可用时汇总报错，
 /// 让调用方清楚知道尝试过哪些 (平台, 模型) 组合。
-fn validate_requested_model_id(
-    db: &DbState,
-    model_id: &str,
-    role: &str,
-) -> Result<(), String> {
+fn validate_requested_model_id(db: &DbState, model_id: &str, role: &str) -> Result<(), String> {
     if model_id.trim().is_empty() {
         return Err(format!("回归评测未配置 {} 模型", role));
     }
@@ -468,7 +467,10 @@ pub async fn start_background_agent_evaluation(
         let monitor_pause_reason = human_wait_reason.clone();
         let structured_monitor = tauri::async_runtime::spawn(async move {
             loop {
-                let event_reason = monitor_pause_reason.lock().ok().and_then(|reason| reason.clone());
+                let event_reason = monitor_pause_reason
+                    .lock()
+                    .ok()
+                    .and_then(|reason| reason.clone());
                 let monitor_state = monitor_app.state::<DbState>();
                 match persist_structured_monitor_snapshot(
                     monitor_state.inner(),
@@ -519,7 +521,10 @@ pub async fn start_background_agent_evaluation(
                     }
                     let _ = human_wait_app.emit(
                         &format!("agent-log-{}", human_wait_session_id),
-                        format!("[回归评测] 检测到 ask_human：{}；已保存最新结构化记录，正在安全停止。", reason),
+                        format!(
+                            "[回归评测] 检测到 ask_human：{}；已保存最新结构化记录，正在安全停止。",
+                            reason
+                        ),
                     );
                     let _ = cancel_agent_run(human_wait_session_id.clone()).await;
                     break;
@@ -738,7 +743,10 @@ mod tests {
             spec.execution_candidates.last().unwrap(),
             &(GPT56_PLATFORM_NAME, GPT56_LUNA_MODEL_NAME)
         );
-        for candidate in spec.reasoning_candidates.iter().chain(spec.execution_candidates.iter())
+        for candidate in spec
+            .reasoning_candidates
+            .iter()
+            .chain(spec.execution_candidates.iter())
         {
             // 候选链里的每一项都必须是真实平台/模型名常量，不允许占位符。
             assert!(!candidate.0.is_empty() && !candidate.1.is_empty());
@@ -750,8 +758,7 @@ mod tests {
     }
     #[test]
     fn isolated_evaluation_workspace_rejects_relative_paths() {
-        let error = resolve_isolated_evaluation_workspace(Some("fixture".to_string()))
-            .unwrap_err();
+        let error = resolve_isolated_evaluation_workspace(Some("fixture".to_string())).unwrap_err();
         assert!(error.contains("绝对路径"));
     }
 }

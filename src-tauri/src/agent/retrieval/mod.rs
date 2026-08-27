@@ -119,9 +119,7 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
                     resolved_root = root
                         .canonicalize()
                         .ok()
-                        .or_else(|| {
-                            std::env::current_dir().ok().map(|cwd| cwd.join(root))
-                        })
+                        .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(root)))
                         .map(|absolute| absolute.to_string_lossy().to_string());
                     match search_code(root, &params.query, limit) {
                         Ok((hits, literal_fallback)) => {
@@ -503,7 +501,11 @@ mod tests {
             }),
         );
 
-        assert!(result.success, "文件路径应可作为 code 检索目标: {}", result.stderr);
+        assert!(
+            result.success,
+            "文件路径应可作为 code 检索目标: {}",
+            result.stderr
+        );
         let payload: Value = serde_json::from_str(&result.stdout).unwrap();
         assert_eq!(payload["total_hits"], 1);
         let hit_path = payload["hits"][0]["id_or_path"].as_str().unwrap();

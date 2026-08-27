@@ -94,7 +94,16 @@ pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, S
             let enabled = row.get::<_, i64>(5)? == 1;
             let url: String = row.get::<_, Option<String>>(6)?.unwrap_or_default();
             let headers_json: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
-            Ok((name, command, args_json, env_json, capability_card, enabled, url, headers_json))
+            Ok((
+                name,
+                command,
+                args_json,
+                env_json,
+                capability_card,
+                enabled,
+                url,
+                headers_json,
+            ))
         })
         .map_err(|e| e.to_string())?;
 
@@ -105,7 +114,11 @@ pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, S
         } else {
             Some(capability_card.trim().to_string())
         };
-        let url_opt = if url.trim().is_empty() { None } else { Some(url.trim().to_string()) };
+        let url_opt = if url.trim().is_empty() {
+            None
+        } else {
+            Some(url.trim().to_string())
+        };
         let headers: std::collections::HashMap<String, String> =
             serde_json::from_str(&headers_json).unwrap_or_default();
         if let Some(existing) = map.get_mut(&name) {
@@ -170,7 +183,10 @@ pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginR
             },
             args: m.config.args.clone(),
             env: m.config.env.clone(),
-            capability_card: m.config.capability_card.clone()
+            capability_card: m
+                .config
+                .capability_card
+                .clone()
                 .or_else(|| crate::agent::mcp_catalog::cached_capability_card(&m.config))
                 .unwrap_or_default(),
             enabled: m.enabled,
@@ -311,7 +327,10 @@ pub async fn quick_connect_and_save_mcp(
 
     let mut headers_map = std::collections::HashMap::new();
     if let Some(token) = bearer_token.filter(|t| !t.trim().is_empty()) {
-        headers_map.insert("Authorization".to_string(), format!("Bearer {}", token.trim()));
+        headers_map.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", token.trim()),
+        );
     }
     let env_map = std::collections::HashMap::new();
 
@@ -325,11 +344,15 @@ pub async fn quick_connect_and_save_mcp(
         capability_card: None,
     };
 
-    let client = McpClient::spawn(config.clone())
-        .map_err(|e| format!("启动 MCP 客户端失败: {}", e))?;
-    client.initialize().await
+    let client =
+        McpClient::spawn(config.clone()).map_err(|e| format!("启动 MCP 客户端失败: {}", e))?;
+    client
+        .initialize()
+        .await
         .map_err(|e| format!("MCP 握手失败: {}", e))?;
-    let tools = client.list_tools().await
+    let tools = client
+        .list_tools()
+        .await
         .map_err(|e| format!("获取工具列表失败: {}", e))?;
 
     let model_cfg = if let Some(ref mid) = model_id.filter(|s| !s.trim().is_empty()) {
@@ -357,9 +380,10 @@ pub async fn quick_connect_and_save_mcp(
         found.ok_or_else(|| "未找到可用的大模型配置，请先在模型管理中配置 API Key".to_string())?
     };
 
-    let capability_card = crate::agent::mcp_catalog::generate_llm_mcp_card(&plugin_name, &tools, &model_cfg)
-        .await
-        .unwrap_or_default();
+    let capability_card =
+        crate::agent::mcp_catalog::generate_llm_mcp_card(&plugin_name, &tools, &model_cfg)
+            .await
+            .unwrap_or_default();
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -429,13 +453,25 @@ pub async fn batch_import_mcp_plugins(
             if let Some(obj) = servers_obj {
                 for (name, item) in obj {
                     if let Some(cmd) = item.get("command").and_then(|v| v.as_str()) {
-                        let args = item.get("args")
+                        let args = item
+                            .get("args")
                             .and_then(|v| v.as_array())
-                            .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|x| x.to_string())).collect())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|s| s.as_str().map(|x| x.to_string()))
+                                    .collect()
+                            })
                             .unwrap_or_default();
-                        let env = item.get("env")
+                        let env = item
+                            .get("env")
                             .and_then(|v| v.as_object())
-                            .map(|obj| obj.iter().filter_map(|(k, v)| v.as_str().map(|val| (k.clone(), val.to_string()))).collect())
+                            .map(|obj| {
+                                obj.iter()
+                                    .filter_map(|(k, v)| {
+                                        v.as_str().map(|val| (k.clone(), val.to_string()))
+                                    })
+                                    .collect()
+                            })
                             .unwrap_or_default();
                         parsed_configs.push(PluginConfig {
                             name: name.clone(),
@@ -449,8 +485,16 @@ pub async fn batch_import_mcp_plugins(
                     } else if let Some(url_str) = item.get("url").and_then(|v| v.as_str()) {
                         // 原生 HTTP 直连：token 进 Authorization 头，不再搭 uvx/mcp-stdio 桥
                         let mut headers = std::collections::HashMap::new();
-                        if let Some(token) = item.get("token").or_else(|| item.get("bearer_token")).and_then(|v| v.as_str()).filter(|t| !t.trim().is_empty()) {
-                            headers.insert("Authorization".to_string(), format!("Bearer {}", token.trim()));
+                        if let Some(token) = item
+                            .get("token")
+                            .or_else(|| item.get("bearer_token"))
+                            .and_then(|v| v.as_str())
+                            .filter(|t| !t.trim().is_empty())
+                        {
+                            headers.insert(
+                                "Authorization".to_string(),
+                                format!("Bearer {}", token.trim()),
+                            );
                         }
                         parsed_configs.push(PluginConfig {
                             name: name.clone(),
@@ -501,7 +545,10 @@ pub async fn batch_import_mcp_plugins(
     }
 
     if parsed_configs.is_empty() {
-        return Err("未能解析出有效的 MCP 配置，请确保是标准 mcpServers JSON 格式或 HTTP URL 清单".to_string());
+        return Err(
+            "未能解析出有效的 MCP 配置，请确保是标准 mcpServers JSON 格式或 HTTP URL 清单"
+                .to_string(),
+        );
     }
 
     let model_cfg = if let Some(ref mid) = model_id.filter(|s| !s.trim().is_empty()) {
@@ -547,16 +594,19 @@ pub async fn batch_import_mcp_plugins(
                 match client.list_tools().await {
                     Ok(tools) => {
                         let tool_count = tools.len();
-                        let capability_card = crate::agent::mcp_catalog::generate_llm_mcp_card(&name, &tools, &model_cfg)
-                            .await
-                            .unwrap_or_default();
-                        
+                        let capability_card = crate::agent::mcp_catalog::generate_llm_mcp_card(
+                            &name, &tools, &model_cfg,
+                        )
+                        .await
+                        .unwrap_or_default();
+
                         let id = uuid::Uuid::new_v4().to_string();
                         let now = chrono::Utc::now().to_rfc3339();
                         let args_json = serde_json::to_string(&config.args).unwrap_or_default();
                         let env_json = serde_json::to_string(&config.env).unwrap_or_default();
                         let url_saved = config.url.clone().unwrap_or_default();
-                        let headers_json = serde_json::to_string(&config.headers).unwrap_or_default();
+                        let headers_json =
+                            serde_json::to_string(&config.headers).unwrap_or_default();
 
                         if let Ok(conn) = state.0.lock() {
                             let _ = conn.execute(

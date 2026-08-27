@@ -161,7 +161,8 @@ pub async fn export_artifact_to_file(
     }
 
     if let Some(art_id) = artifact_id {
-        if let Ok(rec) = crate::agent::artifact_manager::get_artifact_record(state.inner(), &art_id) {
+        if let Ok(rec) = crate::agent::artifact_manager::get_artifact_record(state.inner(), &art_id)
+        {
             std::fs::copy(&rec.canonical_path, &clean_target)
                 .map_err(|e| format!("保存文件失败: {}", e))?;
             return Ok(());
@@ -170,8 +171,7 @@ pub async fn export_artifact_to_file(
 
     if let Some(src) = source_path {
         if let Ok(safe_src) = crate::commands::chat::resolve_safe_artifact_path(&src) {
-            std::fs::copy(&safe_src, &clean_target)
-                .map_err(|e| format!("保存文件失败: {}", e))?;
+            std::fs::copy(&safe_src, &clean_target).map_err(|e| format!("保存文件失败: {}", e))?;
             return Ok(());
         }
     }
@@ -183,7 +183,9 @@ pub async fn export_artifact_to_file(
 #[tauri::command]
 pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
     let safe_path = crate::commands::chat::resolve_safe_artifact_path(&path)?;
-    let canonical = safe_path.canonicalize().map_err(|e| format!("路径无效: {}", e))?;
+    let canonical = safe_path
+        .canonicalize()
+        .map_err(|e| format!("路径无效: {}", e))?;
     let path_str = canonical.to_string_lossy().to_string();
     let file_uri = format!("file://{}", path_str);
 
@@ -220,7 +222,12 @@ pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
 
         // 3. 尝试 xclip 写入 x-special/gnome-copied-files (GNOME Nautilus 深度支持)
         if let Ok(mut child) = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard", "-t", "x-special/gnome-copied-files"])
+            .args([
+                "-selection",
+                "clipboard",
+                "-t",
+                "x-special/gnome-copied-files",
+            ])
             .stdin(std::process::Stdio::piped())
             .spawn()
         {
@@ -235,7 +242,11 @@ pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let _ = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &format!("Set-Clipboard -Path '{}'", path_str)])
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("Set-Clipboard -Path '{}'", path_str),
+            ])
             .spawn();
     }
 
@@ -249,6 +260,3 @@ pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
 
     Ok(())
 }
-
-
-

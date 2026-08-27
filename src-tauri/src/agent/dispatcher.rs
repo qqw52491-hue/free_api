@@ -515,7 +515,10 @@ pub(crate) fn execute_command_inner(
     for (p_name, p_client) in &registry.clients {
         let tools = crate::agent::mcp_catalog::cached_tools(&p_client.config)
             .unwrap_or_else(|| p_client.last_known_tools());
-        let tool_names = tools.iter().map(|t| format!("{}/{}", p_name, t.name)).collect::<Vec<_>>();
+        let tool_names = tools
+            .iter()
+            .map(|t| format!("{}/{}", p_name, t.name))
+            .collect::<Vec<_>>();
         if !tool_names.is_empty() {
             mcp_tool_hints.push(format!("- {}: {}", p_name, tool_names.join(", ")));
         }
@@ -524,7 +527,10 @@ pub(crate) fn execute_command_inner(
     let mcp_guide = if mcp_tool_hints.is_empty() {
         "（当前未连接任何 MCP 插件）".to_string()
     } else {
-        format!("\n当前已连接的 MCP 插件及可用工具：\n{}", mcp_tool_hints.join("\n"))
+        format!(
+            "\n当前已连接的 MCP 插件及可用工具：\n{}",
+            mcp_tool_hints.join("\n")
+        )
     };
 
     DispatchResult {

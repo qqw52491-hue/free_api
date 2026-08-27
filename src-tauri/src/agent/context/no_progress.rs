@@ -51,7 +51,11 @@ fn output_fingerprint(success: bool, output: &str) -> u64 {
 
 fn action_signature(tool: &str, params: &Value) -> String {
     let params_text = params.to_string();
-    format!("{} | {}", tool, params_text.chars().take(360).collect::<String>())
+    format!(
+        "{} | {}",
+        tool,
+        params_text.chars().take(360).collect::<String>()
+    )
 }
 
 impl NoProgressTracker {

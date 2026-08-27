@@ -217,7 +217,12 @@ impl ResourceScopeContract {
         locator: &str,
         source: ResourceScopeSource,
     ) {
-        self.bind_filesystem_with_validation(role, locator, source, ResourceScopeValidation::Pending);
+        self.bind_filesystem_with_validation(
+            role,
+            locator,
+            source,
+            ResourceScopeValidation::Pending,
+        );
     }
 
     pub fn bind_filesystem_with_validation(
@@ -228,10 +233,10 @@ impl ResourceScopeContract {
         validation: ResourceScopeValidation,
     ) {
         if role == ResourceScopeRole::Primary
-            && self
-                .bindings
-                .iter()
-                .any(|binding| binding.role == ResourceScopeRole::Primary && binding.lifecycle != ResourceScopeLifecycle::Invalidated)
+            && self.bindings.iter().any(|binding| {
+                binding.role == ResourceScopeRole::Primary
+                    && binding.lifecycle != ResourceScopeLifecycle::Invalidated
+            })
         {
             self.rebind_primary_filesystem(locator, source);
             if let Some(primary) = self.primary_filesystem_mut() {
@@ -302,21 +307,21 @@ impl ResourceScopeContract {
         operation: ResourceOperation,
     ) -> ResourceScopeObservation {
         let requested = requested_locator(params);
-        let primary = self.primary_filesystem().map(|binding| binding.locator.clone());
+        let primary = self
+            .primary_filesystem()
+            .map(|binding| binding.locator.clone());
         let relation = match (primary.as_deref(), resolved_locator) {
             (Some(primary), Some(resolved)) => filesystem_relation(primary, resolved),
             _ => ResourceRelation::Unknown,
         };
         let should_guard = operation == ResourceOperation::Write
             && relation == ResourceRelation::Outside
-            && self
-                .primary_filesystem()
-                .is_some_and(|binding| {
-                    matches!(
-                        binding.confidence,
-                        ResourceScopeConfidence::Verified | ResourceScopeConfidence::Declared
-                    )
-                });
+            && self.primary_filesystem().is_some_and(|binding| {
+                matches!(
+                    binding.confidence,
+                    ResourceScopeConfidence::Verified | ResourceScopeConfidence::Declared
+                )
+            });
         self.record_default_resolution(
             tool_identity,
             &requested,
@@ -347,16 +352,13 @@ impl ResourceScopeContract {
         operation: ResourceOperation,
     ) -> ResourceScopeObservation {
         let requested = requested_locator(params);
-        self.record_default_resolution(
-            tool_identity,
-            &requested,
-            None,
-            ResourceRelation::Unknown,
-        );
+        self.record_default_resolution(tool_identity, &requested, None, ResourceRelation::Unknown);
         ResourceScopeObservation {
             requested,
             resolved: None,
-            primary: self.primary_filesystem().map(|binding| binding.locator.clone()),
+            primary: self
+                .primary_filesystem()
+                .map(|binding| binding.locator.clone()),
             relation: ResourceRelation::Unknown,
             operation,
             should_guard: false,
@@ -403,7 +405,9 @@ impl ResourceScopeContract {
                 mismatch.occurrences
             ));
         }
-        lines.push("relative resource locators: preserve; resolved relation must be checked".to_string());
+        lines.push(
+            "relative resource locators: preserve; resolved relation must be checked".to_string(),
+        );
         lines.join("\n")
     }
 
@@ -415,7 +419,8 @@ impl ResourceScopeContract {
         primary: Option<&str>,
         relation: ResourceRelation,
     ) {
-        let (Some(requested), Some(resolved), Some(primary)) = (requested, resolved, primary) else {
+        let (Some(requested), Some(resolved), Some(primary)) = (requested, resolved, primary)
+        else {
             return;
         };
         if !Path::new(requested).is_absolute()
@@ -509,12 +514,7 @@ impl ResourceScopeContract {
                     .as_deref()
                     .filter(|locator| Path::new(locator).is_absolute())
             });
-            return Some(self.observe_filesystem_tool(
-                tool_identity,
-                params,
-                resolved,
-                operation,
-            ));
+            return Some(self.observe_filesystem_tool(tool_identity, params, resolved, operation));
         }
         if let Some(resolved) = resolved_from_output.as_deref() {
             return Some(self.observe_filesystem_tool(
@@ -680,18 +680,29 @@ mod tests {
     fn unknown_default_semantics_stay_unknown_and_do_not_block() {
         let mut contract = primary_contract();
         let params = json!({"path": "."});
-        let observation = contract.observe_unknown_tool("custom_mcp/opaque", &params, ResourceOperation::Read);
+        let observation =
+            contract.observe_unknown_tool("custom_mcp/opaque", &params, ResourceOperation::Read);
 
         assert_eq!(observation.relation, ResourceRelation::Unknown);
         assert!(!observation.should_guard);
-        assert!(observation.render().contains("unresolved(default semantics unknown)"));
+        assert!(observation
+            .render()
+            .contains("unresolved(default semantics unknown)"));
     }
 
     #[test]
     fn source_destination_and_reference_bindings_project_without_role_loss() {
         let mut contract = primary_contract();
-        contract.bind_filesystem(ResourceScopeRole::Destination, "/workspace/target", ResourceScopeSource::UserExplicit);
-        contract.bind_filesystem(ResourceScopeRole::Reference, "/workspace/reference", ResourceScopeSource::ToolVerified);
+        contract.bind_filesystem(
+            ResourceScopeRole::Destination,
+            "/workspace/target",
+            ResourceScopeSource::UserExplicit,
+        );
+        contract.bind_filesystem(
+            ResourceScopeRole::Reference,
+            "/workspace/reference",
+            ResourceScopeSource::ToolVerified,
+        );
 
         let projection = contract.render_projection();
         assert!(projection.contains("primary filesystem: /workspace/free_api"));
@@ -703,12 +714,17 @@ mod tests {
     fn explicit_rebind_increments_revision_and_invalidates_old_primary() {
         let mut contract = primary_contract();
         let previous = contract.revision;
-        contract.rebind_primary_filesystem("/workspace/second", ResourceScopeSource::EvaluationConfig);
+        contract
+            .rebind_primary_filesystem("/workspace/second", ResourceScopeSource::EvaluationConfig);
 
         assert_eq!(contract.revision, previous + 1);
-        assert_eq!(contract.primary_filesystem().unwrap().locator, "/workspace/second");
+        assert_eq!(
+            contract.primary_filesystem().unwrap().locator,
+            "/workspace/second"
+        );
         assert!(contract.bindings.iter().any(|binding| {
-            binding.locator == "/workspace/free_api" && binding.lifecycle == ResourceScopeLifecycle::Invalidated
+            binding.locator == "/workspace/free_api"
+                && binding.lifecycle == ResourceScopeLifecycle::Invalidated
         }));
     }
 
@@ -801,9 +817,13 @@ mod tests {
         let projection = contract.render_projection();
         assert!(projection.contains("resolution mismatch: ripgrep_search requested /workspace/free_api/src-tauri but resolved /workspace/mcp-default/hub.js"));
 
-        let restored: ResourceScopeContract = serde_json::from_value(serde_json::to_value(&contract).unwrap()).unwrap();
+        let restored: ResourceScopeContract =
+            serde_json::from_value(serde_json::to_value(&contract).unwrap()).unwrap();
         assert_eq!(restored.resolution_mismatches[0].occurrences, 2);
-        let legacy: ResourceScopeContract = serde_json::from_value(json!({"revision": 0, "bindings": [], "tool_default_resolution": []})).unwrap();
+        let legacy: ResourceScopeContract = serde_json::from_value(
+            json!({"revision": 0, "bindings": [], "tool_default_resolution": []}),
+        )
+        .unwrap();
         assert!(legacy.resolution_mismatches.is_empty());
     }
 

@@ -6,12 +6,12 @@ use crate::agent::checkpoint::{
     RecoveryDecision,
 };
 use crate::agent::context;
-use crate::agent::evaluation_analysis::assess_complex_delivery_summary;
 use crate::agent::control::{
     finish_interrupted_run, intervention_channels, stream_interrupt_channels,
     take_pending_interrupt, HumanControl,
 };
 use crate::agent::dispatcher::is_finish_instruction;
+use crate::agent::evaluation_analysis::assess_complex_delivery_summary;
 use crate::agent::loop_runner::run_call_llm_and_run_tool_phases;
 use crate::agent::mcp::{McpClient, PluginRegistry};
 use crate::agent::review_contract::{apply_review_contract_update, ReviewContract};
@@ -138,7 +138,8 @@ fn complex_delivery_blocker(
     };
     let assessment = assess_complex_delivery_summary(summary);
     (!assessment.compliant).then_some(
-        "复杂终态缺少已核验范围、未核验范围或关键假设、结论强度，或主根因就地的直接证据与结论强度".to_string(),
+        "复杂终态缺少已核验范围、未核验范围或关键假设、结论强度，或主根因就地的直接证据与结论强度"
+            .to_string(),
     )
 }
 
@@ -247,10 +248,8 @@ mod finish_guard_tests {
             command: Some(serde_json::json!({ "summary": "# 简短交付" })),
             ..Default::default()
         };
-        let mut context = context::SandwichContext::new(
-            "system".to_string(),
-            "请诊断缓存问题".to_string(),
-        );
+        let mut context =
+            context::SandwichContext::new("system".to_string(), "请诊断缓存问题".to_string());
         assert!(complex_delivery_blocker(&context, &instruction, true, true).is_none());
 
         context.review_contract = Some(ReviewContract {
@@ -1061,7 +1060,10 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
                 "finish_challenged",
                 Some("finish".to_string()),
                 Some(false),
-                &format!("终态拦截：检测到 {} 项未闭合事项，请先行验证", open_todos.len()),
+                &format!(
+                    "终态拦截：检测到 {} 项未闭合事项，请先行验证",
+                    open_todos.len()
+                ),
                 None,
             );
         } else if is_finish && result.success {
@@ -1204,18 +1206,20 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         context.current_observation = output_text.clone();
         // 复盘轨迹使用与 step_new 相同的语义字段，但与 Agent prompt/checkpoint 隔离。
         // 这使历史会话既能恢复思考、计划和工具调用，又不会放大运行时上下文。
-        let metrics_json = outcome.token_usage.as_ref().map(|u| json!({
-            "prompt_tokens": u.prompt_tokens,
-            "completion_tokens": u.completion_tokens,
-            "total_tokens": u.total_tokens,
-            "cached_tokens": u.cached_tokens,
-            "cache_hit_rate": u.cache_hit_rate,
-            "tokens_per_second": u.tokens_per_second,
-            "ttft_ms": u.ttft_ms,
-            "thinking_duration_ms": outcome.thinking_duration_ms,
-            "tool_duration_ms": outcome.tool_duration_ms,
-            "total_duration_ms": outcome.thinking_duration_ms + outcome.tool_duration_ms,
-        }));
+        let metrics_json = outcome.token_usage.as_ref().map(|u| {
+            json!({
+                "prompt_tokens": u.prompt_tokens,
+                "completion_tokens": u.completion_tokens,
+                "total_tokens": u.total_tokens,
+                "cached_tokens": u.cached_tokens,
+                "cache_hit_rate": u.cache_hit_rate,
+                "tokens_per_second": u.tokens_per_second,
+                "ttft_ms": u.ttft_ms,
+                "thinking_duration_ms": outcome.thinking_duration_ms,
+                "tool_duration_ms": outcome.tool_duration_ms,
+                "total_duration_ms": outcome.thinking_duration_ms + outcome.tool_duration_ms,
+            })
+        });
 
         run_trace_steps.push(json!({
             "id": step_id,

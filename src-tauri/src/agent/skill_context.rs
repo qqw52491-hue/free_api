@@ -209,7 +209,11 @@ pub async fn generate_llm_skill_summary(
             } else if let Some(arr) = m.get("content").and_then(|v| v.as_array()) {
                 let parts: Vec<String> = arr
                     .iter()
-                    .filter_map(|item| item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                    .filter_map(|item| {
+                        item.get("text")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .collect();
                 if !parts.is_empty() {
                     Some(parts.join("\n"))
@@ -225,10 +229,17 @@ pub async fn generate_llm_skill_summary(
 
     let summary = if let Some(s) = summary_opt {
         s
-    } else if let Some(reasoning) = message.and_then(|m| m.get("reasoning_content")).and_then(|v| v.as_str()) {
+    } else if let Some(reasoning) = message
+        .and_then(|m| m.get("reasoning_content"))
+        .and_then(|v| v.as_str())
+    {
         let r = reasoning.trim();
         if !r.is_empty() {
-            r.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(r).to_string()
+            r.lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or(r)
+                .to_string()
         } else {
             return Err("LLM 生成 Skill 卡片返回内容为空".to_string());
         }

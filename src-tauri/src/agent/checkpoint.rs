@@ -190,8 +190,7 @@ impl DurableAgentContext {
             ),
             active_tool: context.active_tool.clone(),
             last_reported_prompt_tokens: context.last_reported_prompt_tokens,
-            last_reported_history_estimate_tokens: context
-                .last_reported_history_estimate_tokens,
+            last_reported_history_estimate_tokens: context.last_reported_history_estimate_tokens,
             last_persisted_summary: context.last_persisted_summary.clone(),
             persisted_summary_revision: context.persisted_summary_revision,
             // 浏览器/DOM 可能已变化，恢复后不能相信旧观测。
@@ -213,8 +212,7 @@ impl DurableAgentContext {
         context.current_observation = self.observation_summary.clone();
         context.active_tool = self.active_tool.clone();
         context.last_reported_prompt_tokens = self.last_reported_prompt_tokens;
-        context.last_reported_history_estimate_tokens = self
-            .last_reported_history_estimate_tokens;
+        context.last_reported_history_estimate_tokens = self.last_reported_history_estimate_tokens;
         context.last_persisted_summary = self.last_persisted_summary.clone();
         context.persisted_summary_revision = self.persisted_summary_revision;
         // 工具说明书是派生缓存，必须依照当前 Runtime 重新加载。
@@ -501,7 +499,8 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
         if checkpoint.version == 0 {
             // snapshot JSON 与表中 revision 必须一致；否则第一次恢复会错误地再次 INSERT。
             checkpoint.version = 1;
-            let snapshot_json = serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+            let snapshot_json =
+                serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
             conn.execute(
                 "INSERT INTO agent_checkpoints (run_id, phase, snapshot_json, version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
@@ -518,7 +517,8 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
         } else {
             let previous_version = checkpoint.version;
             checkpoint.version += 1;
-            let snapshot_json = serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+            let snapshot_json =
+                serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
             let rows = conn
                 .execute(
                     "UPDATE agent_checkpoints SET phase = ?1, snapshot_json = ?2, version = ?3, updated_at = ?4 WHERE run_id = ?5 AND version = ?6",
@@ -804,7 +804,8 @@ mod tests {
         use crate::agent::context::{FailedAttempt, SideEffectRecord};
         use serde_json::json;
 
-        let mut previous = SandwichContext::new("system".to_string(), "配置 OpenRouter".to_string());
+        let mut previous =
+            SandwichContext::new("system".to_string(), "配置 OpenRouter".to_string());
         previous.turns_history = vec![
             ChatMessage {
                 role: "user".to_string(),
@@ -845,7 +846,8 @@ mod tests {
         let mut done = AgentCheckpoint::new("session-a".to_string(), &previous);
         done.mark_done(&previous);
 
-        let mut next = SandwichContext::new("system".to_string(), "为什么 list_models 报错".to_string());
+        let mut next =
+            SandwichContext::new("system".to_string(), "为什么 list_models 报错".to_string());
         next.turns_history = vec![
             ChatMessage {
                 role: "user".to_string(),
@@ -862,17 +864,27 @@ mod tests {
         ];
         done.data.inherit_filling_into(&mut next);
 
-        assert_eq!(next.user_goal, "配置 OpenRouter", "M1 静态锚点跨轮不变，确保 100% 前缀缓存命中");
+        assert_eq!(
+            next.user_goal, "配置 OpenRouter",
+            "M1 静态锚点跨轮不变，确保 100% 前缀缓存命中"
+        );
         assert!(next.todo_list.is_empty(), "新任务不继承旧 todo");
-        assert_eq!(next.memories.get("platform").map(String::as_str), Some("OpenRouter"));
+        assert_eq!(
+            next.memories.get("platform").map(String::as_str),
+            Some("OpenRouter")
+        );
         assert_eq!(next.failed_attempts.len(), 1);
         assert_eq!(next.failed_attempts[0].action, "list_models");
-        assert_eq!(next.failed_attempts[0].output_id.as_deref(), Some("out_err"));
+        assert_eq!(
+            next.failed_attempts[0].output_id.as_deref(),
+            Some("out_err")
+        );
         assert_eq!(next.side_effects.len(), 1);
         assert!(next
             .turns_history
             .iter()
-            .any(|m| m.content.as_str() == Some("计划: 配置 | 工具: model_manager | 动作: list_models")));
+            .any(|m| m.content.as_str()
+                == Some("计划: 配置 | 工具: model_manager | 动作: list_models")));
         assert!(next
             .turns_history
             .iter()
@@ -892,10 +904,7 @@ mod tests {
         let context = SandwichContext::new("system".to_string(), "goal".to_string());
         let checkpoint = AgentCheckpoint::new("run-1".to_string(), &context);
         let mut legacy = serde_json::to_value(checkpoint).unwrap();
-        legacy
-            .as_object_mut()
-            .unwrap()
-            .remove("finish_reviewed");
+        legacy.as_object_mut().unwrap().remove("finish_reviewed");
 
         let restored: AgentCheckpoint = serde_json::from_value(legacy).unwrap();
         assert!(!restored.finish_reviewed);

@@ -418,26 +418,68 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     }
 
     // 滚动迁移：为旧版数据库补齐新字段，CREATE TABLE 不会重建已有表（每个 ALTER TABLE 独立执行，防止单个已存在字段中断整个批处理）
-    let _ = conn.execute("ALTER TABLE models ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0;", []);
-    let _ = conn.execute("ALTER TABLE models ADD COLUMN provider_capabilities TEXT NOT NULL DEFAULT '{}';", []);
-    let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN capability_card TEXT NOT NULL DEFAULT '';", []);
-    let _ = conn.execute("ALTER TABLE agent_memory_nodes ADD COLUMN confidence_score INTEGER NOT NULL DEFAULT 100;", []);
-    let _ = conn.execute("ALTER TABLE agent_memory_nodes ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;", []);
-    let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN url TEXT NOT NULL DEFAULT '';", []);
-    let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN headers TEXT NOT NULL DEFAULT '{}';", []);
+    let _ = conn.execute(
+        "ALTER TABLE models ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0;",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE models ADD COLUMN provider_capabilities TEXT NOT NULL DEFAULT '{}';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE mcp_plugins ADD COLUMN capability_card TEXT NOT NULL DEFAULT '';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_memory_nodes ADD COLUMN confidence_score INTEGER NOT NULL DEFAULT 100;",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_memory_nodes ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE mcp_plugins ADD COLUMN url TEXT NOT NULL DEFAULT '';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE mcp_plugins ADD COLUMN headers TEXT NOT NULL DEFAULT '{}';",
+        [],
+    );
     // -1 = 未设置（按 base_url 推断），0 = 显式不要求交替，1 = 显式要求归并连续同角色消息
-    let _ = conn.execute("ALTER TABLE platforms ADD COLUMN requires_alternating_roles INTEGER NOT NULL DEFAULT -1;", []);
+    let _ = conn.execute(
+        "ALTER TABLE platforms ADD COLUMN requires_alternating_roles INTEGER NOT NULL DEFAULT -1;",
+        [],
+    );
 
     // agent_llm_calls 逐调用口径扩展（旧库自愈）：从"成功返回的快照"升级为
     // "每一次实际请求尝试的记录"——失败、JSON 修复重发、中断均各占一行。
-    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN session_call_index INTEGER NOT NULL DEFAULT 0;", []);
-    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN request_kind TEXT NOT NULL DEFAULT 'full_context';", []);
-    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN usage_source TEXT NOT NULL DEFAULT 'unavailable';", []);
-    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN outcome TEXT NOT NULL DEFAULT 'instruction_ready';", []);
-    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN request_try INTEGER NOT NULL DEFAULT 1;", []);
+    let _ = conn.execute(
+        "ALTER TABLE agent_llm_calls ADD COLUMN session_call_index INTEGER NOT NULL DEFAULT 0;",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_llm_calls ADD COLUMN request_kind TEXT NOT NULL DEFAULT 'full_context';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_llm_calls ADD COLUMN usage_source TEXT NOT NULL DEFAULT 'unavailable';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_llm_calls ADD COLUMN outcome TEXT NOT NULL DEFAULT 'instruction_ready';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_llm_calls ADD COLUMN request_try INTEGER NOT NULL DEFAULT 1;",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN transport_attempt_count INTEGER NOT NULL DEFAULT 0;", []);
     if let Err(error) = migrate_uvx_bridge_plugins_to_native(&conn) {
-        eprintln!("⚠️ mcp_plugins uvx 桥转原生 HTTP 迁移失败（保留原配置继续可用）: {}", error);
+        eprintln!(
+            "⚠️ mcp_plugins uvx 桥转原生 HTTP 迁移失败（保留原配置继续可用）: {}",
+            error
+        );
     }
 
     // 初始化与更新预置标准物理规格库（纯净容量档位，与品牌型号解耦）
@@ -618,7 +660,10 @@ pub fn migrate_uvx_bridge_plugins_to_native(conn: &Connection) -> Result<usize, 
             serde_json::from_str(&env_json).unwrap_or_default();
         let mut headers = std::collections::HashMap::new();
         if let Some(token) = env.get("MCP_BEARER_TOKEN").filter(|t| !t.trim().is_empty()) {
-            headers.insert("Authorization".to_string(), format!("Bearer {}", token.trim()));
+            headers.insert(
+                "Authorization".to_string(),
+                format!("Bearer {}", token.trim()),
+            );
         }
         let headers_json = serde_json::to_string(&headers).map_err(|e| e.to_string())?;
         conn.execute(
@@ -630,7 +675,10 @@ pub fn migrate_uvx_bridge_plugins_to_native(conn: &Connection) -> Result<usize, 
         migrated += 1;
     }
     if migrated > 0 {
-        println!("🔌 [DB 迁移] {} 个 uvx mcp-stdio 桥接插件已转为原生 HTTP 直连", migrated);
+        println!(
+            "🔌 [DB 迁移] {} 个 uvx mcp-stdio 桥接插件已转为原生 HTTP 直连",
+            migrated
+        );
     }
     Ok(migrated)
 }
@@ -684,7 +732,11 @@ mod migration_tests {
 
         // excel 未被改动
         let excel_command: String = conn
-            .query_row("SELECT command FROM mcp_plugins WHERE name = 'excel'", [], |r| r.get(0))
+            .query_row(
+                "SELECT command FROM mcp_plugins WHERE name = 'excel'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(excel_command, "uvx");
     }

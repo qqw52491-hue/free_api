@@ -531,41 +531,68 @@ fn extract_model_ids_from_json(val: &Value) -> Vec<String> {
 
 fn find_best_spec_match<'a>(model_id: &str, specs: &'a [ModelSpec]) -> Option<&'a ModelSpec> {
     let lower_id = model_id.to_lowercase();
-    let normalized = lower_id.replace('_', "-").replace('.', "-").replace(':', "-");
+    let normalized = lower_id
+        .replace('_', "-")
+        .replace('.', "-")
+        .replace(':', "-");
 
     // 1. 优先根据模型特征匹配标准容量档位
-    if normalized.contains("gemini-1-5-pro") || normalized.contains("gemini-1.5-pro") || normalized.contains("gemini-pro") || normalized.contains("2m") {
+    if normalized.contains("gemini-1-5-pro")
+        || normalized.contains("gemini-1.5-pro")
+        || normalized.contains("gemini-pro")
+        || normalized.contains("2m")
+    {
         if let Some(s) = specs.iter().find(|s| s.name.contains("2M")) {
             return Some(s);
         }
     }
 
-    if normalized.contains("gemini") || normalized.contains("1m") || normalized.contains("minimax") {
+    if normalized.contains("gemini") || normalized.contains("1m") || normalized.contains("minimax")
+    {
         if let Some(s) = specs.iter().find(|s| s.name.contains("1M")) {
             return Some(s);
         }
     }
 
-    if normalized.contains("claude") || normalized.contains("kimi") || normalized.contains("moonshot") || normalized.contains("200k") {
+    if normalized.contains("claude")
+        || normalized.contains("kimi")
+        || normalized.contains("moonshot")
+        || normalized.contains("200k")
+    {
         if let Some(s) = specs.iter().find(|s| s.name.contains("200k")) {
             return Some(s);
         }
     }
 
-    if normalized.contains("r1") || normalized.contains("reasoner") || normalized.contains("o1") || normalized.contains("o3") || normalized.contains("thinking") {
-        if let Some(s) = specs.iter().find(|s| s.name.contains("深度思考") || (s.supports_thinking && s.context_window >= 128000)) {
+    if normalized.contains("r1")
+        || normalized.contains("reasoner")
+        || normalized.contains("o1")
+        || normalized.contains("o3")
+        || normalized.contains("thinking")
+    {
+        if let Some(s) = specs.iter().find(|s| {
+            s.name.contains("深度思考") || (s.supports_thinking && s.context_window >= 128000)
+        }) {
             return Some(s);
         }
     }
 
-    if normalized.contains("7b") || normalized.contains("8b") || normalized.contains("32k") || normalized.contains("ollama") || normalized.contains("small") {
+    if normalized.contains("7b")
+        || normalized.contains("8b")
+        || normalized.contains("32k")
+        || normalized.contains("ollama")
+        || normalized.contains("small")
+    {
         if let Some(s) = specs.iter().find(|s| s.name.contains("32k")) {
             return Some(s);
         }
     }
 
     // 2. 兜底匹配最常见的主流 128k 标配档
-    if let Some(s) = specs.iter().find(|s| s.name.contains("128k") && !s.supports_thinking) {
+    if let Some(s) = specs
+        .iter()
+        .find(|s| s.name.contains("128k") && !s.supports_thinking)
+    {
         return Some(s);
     }
 
@@ -715,7 +742,8 @@ pub async fn fetch_remote_models(
         }
 
         let matched_spec = find_best_spec_match(&id, &specs);
-        let (spec_id, spec_name, ctx, max_tok, temp, thinking, desc) = if let Some(s) = matched_spec {
+        let (spec_id, spec_name, ctx, max_tok, temp, thinking, desc) = if let Some(s) = matched_spec
+        {
             (
                 Some(s.id.clone()),
                 Some(s.name.clone()),
@@ -727,7 +755,11 @@ pub async fn fetch_remote_models(
             )
         } else {
             let lower = id.to_lowercase();
-            let (ctx, max_tok, temp, thinking) = if lower.contains("deepseek-r1") || lower.contains("reasoner") || lower.contains("thinking") || lower.contains("r1") {
+            let (ctx, max_tok, temp, thinking) = if lower.contains("deepseek-r1")
+                || lower.contains("reasoner")
+                || lower.contains("thinking")
+                || lower.contains("r1")
+            {
                 (128000, 8192, 0.6, true)
             } else if lower.contains("deepseek") {
                 (128000, 8192, 0.7, false)
@@ -859,4 +891,3 @@ pub async fn import_remote_models(
         total_processed: added_count + updated_count,
     })
 }
-

@@ -138,7 +138,7 @@ pub async fn generate_llm_mcp_card(
     }
 
     let json_resp: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    
+
     let message = json_resp
         .get("choices")
         .and_then(|arr| arr.get(0))
@@ -151,7 +151,11 @@ pub async fn generate_llm_mcp_card(
             } else if let Some(arr) = m.get("content").and_then(|v| v.as_array()) {
                 let parts: Vec<String> = arr
                     .iter()
-                    .filter_map(|item| item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                    .filter_map(|item| {
+                        item.get("text")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .collect();
                 if !parts.is_empty() {
                     Some(parts.join("\n"))
@@ -167,10 +171,17 @@ pub async fn generate_llm_mcp_card(
 
     let content = if let Some(c) = content_opt {
         c
-    } else if let Some(reasoning) = message.and_then(|m| m.get("reasoning_content")).and_then(|v| v.as_str()) {
+    } else if let Some(reasoning) = message
+        .and_then(|m| m.get("reasoning_content"))
+        .and_then(|v| v.as_str())
+    {
         let r = reasoning.trim();
         if !r.is_empty() {
-            r.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(r).to_string()
+            r.lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or(r)
+                .to_string()
         } else {
             return Err("LLM 生成能力卡返回内容为空".to_string());
         }
@@ -181,7 +192,10 @@ pub async fn generate_llm_mcp_card(
         ));
     };
 
-    println!("✨ [LLM 能力卡生成] [{}] 提炼成功: {}", plugin_name, content);
+    println!(
+        "✨ [LLM 能力卡生成] [{}] 提炼成功: {}",
+        plugin_name, content
+    );
     Ok(content)
 }
 
@@ -282,7 +296,10 @@ pub fn invalidate_plugin(name: &str) {
 }
 
 fn concise_schema_fields(schema: &serde_json::Value) -> String {
-    let Some(properties) = schema.get("properties").and_then(serde_json::Value::as_object) else {
+    let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
         return "参数未声明".to_string();
     };
     if properties.is_empty() {
@@ -300,7 +317,13 @@ fn concise_schema_fields(schema: &serde_json::Value) -> String {
     names.sort_unstable();
     names
         .into_iter()
-        .map(|name| if required.contains(name) { format!("{}*", name) } else { format!("{}?", name) })
+        .map(|name| {
+            if required.contains(name) {
+                format!("{}*", name)
+            } else {
+                format!("{}?", name)
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }

@@ -214,8 +214,7 @@ impl ContextBudget {
         let min_safe_low_ratio = config.recent_protected_ratio + 0.15;
         let safe_low_ratio = config.low_watermark_ratio.clamp(min_safe_low_ratio, 0.75);
 
-        let high_watermark =
-            (max_allowed_history as f64 * config.high_watermark_ratio) as usize;
+        let high_watermark = (max_allowed_history as f64 * config.high_watermark_ratio) as usize;
         let low_watermark = (max_allowed_history as f64 * safe_low_ratio) as usize;
 
         Self {

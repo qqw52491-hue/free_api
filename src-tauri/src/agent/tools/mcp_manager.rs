@@ -9,7 +9,14 @@ use reqwest::Url;
 /// 返回 (脱敏后的 args, 是否发生了脱敏)。
 fn redact_sensitive_args(args: &[serde_json::Value]) -> (Vec<serde_json::Value>, bool) {
     const SENSITIVE_WORDS: [&str; 9] = [
-        "token", "secret", "key", "apikey", "authorization", "auth", "password", "passwd",
+        "token",
+        "secret",
+        "key",
+        "apikey",
+        "authorization",
+        "auth",
+        "password",
+        "passwd",
         "credential",
     ];
 
@@ -63,11 +70,7 @@ fn redact_sensitive_args(args: &[serde_json::Value]) -> (Vec<serde_json::Value>,
     (out, redacted_any)
 }
 
-pub fn dispatch(
-    db: &DbState,
-    action: &str,
-    params: &serde_json::Value,
-) -> DispatchResult {
+pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> DispatchResult {
     let act = if !action.is_empty() {
         action
     } else {
@@ -563,7 +566,11 @@ mod tests {
     #[test]
     fn toggle_missing_plugin_fails_honestly() {
         let db = test_db();
-        let result = dispatch(&db, "toggle", &json!({ "name": "ghost-plugin", "enabled": false }));
+        let result = dispatch(
+            &db,
+            "toggle",
+            &json!({ "name": "ghost-plugin", "enabled": false }),
+        );
         assert!(!result.success);
         assert!(result.stderr.contains("未找到"));
         assert_eq!(result.route, "mcp_manager:toggle:not_found");
@@ -667,7 +674,10 @@ mod tests {
 
         let result = dispatch(&db, "list", &json!({}));
         assert!(result.success);
-        assert!(!result.stdout.contains(secret_in_args), "args 中的 token 绝不能出现在 list 输出");
+        assert!(
+            !result.stdout.contains(secret_in_args),
+            "args 中的 token 绝不能出现在 list 输出"
+        );
         assert!(!result.stdout.contains("sk-env-leak-token-99"));
         assert!(result.stdout.contains("[REDACTED]"));
         assert!(result.stdout.contains("args_redacted"));

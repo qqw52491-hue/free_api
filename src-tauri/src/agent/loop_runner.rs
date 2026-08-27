@@ -189,7 +189,10 @@ pub async fn run_call_llm_and_run_tool_phases(
             }
             Err(e) => {
                 // 🛑 如果是网络/API 传输层经过重试后仍彻底失败，直接终止并上报，杜绝误当作 JSON 格式错误翻倍重试 3x3 轮
-                if e.contains("LLM 请求最终失败") || e.contains("请求失败") || e.contains("API 错误") {
+                if e.contains("LLM 请求最终失败")
+                    || e.contains("请求失败")
+                    || e.contains("API 错误")
+                {
                     return Err(format!("❌ LLM 请求失败 (已达重试上限): {}", e));
                 }
 
@@ -277,7 +280,6 @@ pub async fn run_call_llm_and_run_tool_phases(
                 action: inst.get_action(),
             },
         )?;
-
 
         // 📊 发送 Token 用量与速度指标统计到前端
         app.emit(
@@ -546,11 +548,14 @@ pub async fn run_call_llm_and_run_tool_phases(
                         let tool_filename = format!("{}.md", plugin_name);
                         let resource_dir = app.path().resource_dir().unwrap_or_default();
                         let candidate_paths = [
-                            std::path::PathBuf::from("src-tauri/prompts/tools").join(&tool_filename),
+                            std::path::PathBuf::from("src-tauri/prompts/tools")
+                                .join(&tool_filename),
                             std::path::PathBuf::from("prompts/tools").join(&tool_filename),
-                            std::path::PathBuf::from("../src-tauri/prompts/tools").join(&tool_filename),
+                            std::path::PathBuf::from("../src-tauri/prompts/tools")
+                                .join(&tool_filename),
                             resource_dir.join("prompts/tools").join(&tool_filename),
-                            std::path::PathBuf::from("src-tauri/prompts/skills").join(&tool_filename),
+                            std::path::PathBuf::from("src-tauri/prompts/skills")
+                                .join(&tool_filename),
                             std::path::PathBuf::from("prompts/skills").join(&tool_filename),
                             std::path::PathBuf::from("../src-tauri/prompts/skills")
                                 .join(&tool_filename),
@@ -641,11 +646,9 @@ pub async fn run_tool_phase(
     interrupt_rx: &mut watch::Receiver<u64>,
 ) -> Result<DispatchResult, String> {
     // --- B. 执行动作 ---
-    if let Some(reason) = context.repeated_failure_blocker(
-        &inst.get_tool(),
-        &inst.get_action(),
-        &inst.get_params(),
-    ) {
+    if let Some(reason) =
+        context.repeated_failure_blocker(&inst.get_tool(), &inst.get_action(), &inst.get_params())
+    {
         return Ok(DispatchResult {
             success: false,
             stdout: String::new(),
@@ -951,10 +954,12 @@ pub async fn run_tool_phase(
             dispatch_result.success,
             &output,
         ) {
-            context.turns_history.push(crate::agent::context::types::ChatMessage {
-                role: "user".to_string(),
-                content: serde_json::json!(no_progress_notice),
-            });
+            context
+                .turns_history
+                .push(crate::agent::context::types::ChatMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!(no_progress_notice),
+                });
             println!("🔁 [No-Progress] 注入无进展提示: {}", inst.get_tool());
         }
         // 检索零命中偏航：换措辞换关键词连续零命中不会触发上面的重复检测
@@ -966,10 +971,12 @@ pub async fn run_tool_phase(
             dispatch_result.success,
             &output,
         ) {
-            context.turns_history.push(crate::agent::context::types::ChatMessage {
-                role: "user".to_string(),
-                content: serde_json::json!(zero_hit_notice),
-            });
+            context
+                .turns_history
+                .push(crate::agent::context::types::ChatMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!(zero_hit_notice),
+                });
             println!("🎯 [Zero-Hit] 注入检索零命中偏航提示: {}", inst.get_tool());
         }
 

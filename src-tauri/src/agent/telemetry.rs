@@ -103,9 +103,7 @@ pub fn list_llm_calls(db: &DbState, session_id: &str) -> Result<Vec<Value>, Stri
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(rusqlite::params![session_id], |row| {
-            Ok(json_row(row))
-        })
+        .query_map(rusqlite::params![session_id], |row| Ok(json_row(row)))
         .map_err(|e| e.to_string())?;
     let mut calls = Vec::new();
     for row in rows {
@@ -204,7 +202,16 @@ mod tests {
         }
     }
 
-    fn record(db: &DbState, session: &str, step: i64, kind: &str, source: &str, outcome: &str, try_no: i64, usage: &TokenUsage) {
+    fn record(
+        db: &DbState,
+        session: &str,
+        step: i64,
+        kind: &str,
+        source: &str,
+        outcome: &str,
+        try_no: i64,
+        usage: &TokenUsage,
+    ) {
         record_llm_call(
             db,
             &LlmCallRecord {
@@ -234,7 +241,16 @@ mod tests {
     fn record_and_list_roundtrip_preserves_all_fields() {
         let db = test_db();
         let usage = sample_usage();
-        record(&db, "sess-a", 3, "full_context", "provider", "instruction_ready", 1, &usage);
+        record(
+            &db,
+            "sess-a",
+            3,
+            "full_context",
+            "provider",
+            "instruction_ready",
+            1,
+            &usage,
+        );
 
         let calls = list_llm_calls(&db, "sess-a").unwrap();
         assert_eq!(calls.len(), 1);
@@ -252,7 +268,10 @@ mod tests {
         assert_eq!(call["cache_hit_rate"], serde_json::json!(75.0));
         assert_eq!(call["history_message_count"], serde_json::json!(14));
         assert_eq!(call["fetched_tools_count"], serde_json::json!(4));
-        assert_eq!(call["prefix_fingerprint"], serde_json::json!("abc123def456abc1"));
+        assert_eq!(
+            call["prefix_fingerprint"],
+            serde_json::json!("abc123def456abc1")
+        );
         assert_eq!(call["ttft_ms"], serde_json::json!(420));
         assert_eq!(call["total_duration_ms"], serde_json::json!(2_100));
     }
@@ -262,17 +281,50 @@ mod tests {
         let db = test_db();
         let usage = sample_usage();
         // 完整上下文 parse 失败 → 修复重发成功：两行，不再只记最终成功快照
-        record(&db, "sess-a", 1, "full_context", "provider", "parse_error", 1, &usage);
-        record(&db, "sess-a", 1, "regeneration_retry", "provider", "instruction_ready", 2, &usage);
+        record(
+            &db,
+            "sess-a",
+            1,
+            "full_context",
+            "provider",
+            "parse_error",
+            1,
+            &usage,
+        );
+        record(
+            &db,
+            "sess-a",
+            1,
+            "regeneration_retry",
+            "provider",
+            "instruction_ready",
+            2,
+            &usage,
+        );
         // request_error 行：usage 全 0、来源 unavailable、指纹 NULL
         let zero = TokenUsage::default();
-        record(&db, "sess-a", 2, "full_context", "unavailable", "request_error", 1, &zero);
+        record(
+            &db,
+            "sess-a",
+            2,
+            "full_context",
+            "unavailable",
+            "request_error",
+            1,
+            &zero,
+        );
 
         let calls = list_llm_calls(&db, "sess-a").unwrap();
         assert_eq!(calls.len(), 3, "每次实际请求尝试各占一行");
         assert_eq!(calls[0]["outcome"], serde_json::json!("parse_error"));
-        assert_eq!(calls[1]["request_kind"], serde_json::json!("regeneration_retry"));
-        assert!(calls[1]["prefix_fingerprint"].is_null(), "修复请求不污染前缀基线");
+        assert_eq!(
+            calls[1]["request_kind"],
+            serde_json::json!("regeneration_retry")
+        );
+        assert!(
+            calls[1]["prefix_fingerprint"].is_null(),
+            "修复请求不污染前缀基线"
+        );
         assert_eq!(calls[2]["usage_source"], serde_json::json!("unavailable"));
         assert_eq!(calls[2]["prompt_tokens"], serde_json::json!(0));
         assert_eq!(calls[2]["transport_attempt_count"], serde_json::json!(0));
@@ -289,16 +341,31 @@ mod tests {
         let db = test_db();
         let usage = sample_usage();
         for step in [1i64, 2, 2] {
-            record(&db, "sess-a", step, "full_context", "provider", "instruction_ready", 1, &usage);
+            record(
+                &db,
+                "sess-a",
+                step,
+                "full_context",
+                "provider",
+                "instruction_ready",
+                1,
+                &usage,
+            );
         }
-        record(&db, "sess-b", 1, "full_context", "provider", "instruction_ready", 1, &usage);
+        record(
+            &db,
+            "sess-b",
+            1,
+            "full_context",
+            "provider",
+            "instruction_ready",
+            1,
+            &usage,
+        );
 
         let a = list_llm_calls(&db, "sess-a").unwrap();
         assert_eq!(a.len(), 3, "会话隔离：sess-b 不串入");
-        let steps: Vec<i64> = a
-            .iter()
-            .filter_map(|c| c["step_id"].as_i64())
-            .collect();
+        let steps: Vec<i64> = a.iter().filter_map(|c| c["step_id"].as_i64()).collect();
         assert_eq!(steps, vec![1, 2, 2], "按 step 升序");
         let b = list_llm_calls(&db, "sess-b").unwrap();
         assert_eq!(b.len(), 1);
@@ -310,7 +377,16 @@ mod tests {
     fn estimated_usage_source_is_marked_not_silent() {
         let db = test_db();
         let usage = TokenUsage::default();
-        record(&db, "s", 1, "full_context", "estimated", "instruction_ready", 1, &usage);
+        record(
+            &db,
+            "s",
+            1,
+            "full_context",
+            "estimated",
+            "instruction_ready",
+            1,
+            &usage,
+        );
         let calls = list_llm_calls(&db, "s").unwrap();
         assert_eq!(calls[0]["usage_source"], serde_json::json!("estimated"));
     }

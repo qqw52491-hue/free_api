@@ -1,11 +1,7 @@
 use crate::agent::types::DispatchResult;
 use crate::db::DbState;
 
-pub fn dispatch(
-    db: &DbState,
-    action: &str,
-    params: &serde_json::Value,
-) -> DispatchResult {
+pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> DispatchResult {
     let act = if !action.is_empty() {
         action
     } else {
@@ -19,12 +15,14 @@ pub fn dispatch(
         "list" => {
             let conn = match db.0.lock() {
                 Ok(c) => c,
-                Err(e) => return DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("获取数据库锁失败: {}", e),
-                    success: false,
-                    route: "skill_manager:list".to_string(),
-                },
+                Err(e) => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: format!("获取数据库锁失败: {}", e),
+                        success: false,
+                        route: "skill_manager:list".to_string(),
+                    }
+                }
             };
             let mut stmt = match conn.prepare("SELECT id, kind, name, description, content, enabled, updated_at FROM agent_custom_instructions ORDER BY updated_at DESC") {
                 Ok(s) => s,
@@ -35,17 +33,21 @@ pub fn dispatch(
                     route: "skill_manager:list".to_string(),
                 },
             };
-            let rows: Vec<serde_json::Value> = stmt.query_map([], |row| {
-                Ok(serde_json::json!({
-                    "id": row.get::<_, String>(0)?,
-                    "kind": row.get::<_, String>(1)?,
-                    "name": row.get::<_, String>(2)?,
-                    "description": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    "content": row.get::<_, String>(4)?,
-                    "enabled": row.get::<_, i64>(5)? != 0,
-                    "updated_at": row.get::<_, String>(6)?,
-                }))
-            }).ok().map(|iter| iter.flatten().collect()).unwrap_or_default();
+            let rows: Vec<serde_json::Value> = stmt
+                .query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "kind": row.get::<_, String>(1)?,
+                        "name": row.get::<_, String>(2)?,
+                        "description": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                        "content": row.get::<_, String>(4)?,
+                        "enabled": row.get::<_, i64>(5)? != 0,
+                        "updated_at": row.get::<_, String>(6)?,
+                    }))
+                })
+                .ok()
+                .map(|iter| iter.flatten().collect())
+                .unwrap_or_default();
 
             DispatchResult {
                 stdout: serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".to_string()),
@@ -55,11 +57,28 @@ pub fn dispatch(
             }
         }
         "add" => {
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("skill");
-            let custom_desc = params.get("description").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
-            let model_id = params.get("model_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let content = params
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let kind = params
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("skill");
+            let custom_desc = params
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string());
+            let model_id = params
+                .get("model_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             if name.is_empty() || content.is_empty() {
                 return DispatchResult {
@@ -78,7 +97,9 @@ pub fn dispatch(
                 let block_res: Result<String, String> = (|| {
                     let handle = tokio::runtime::Handle::try_current();
                     let f = async {
-                        let model_cfg = if let Some(ref mid) = model_id.filter(|s| !s.trim().is_empty()) {
+                        let model_cfg = if let Some(ref mid) =
+                            model_id.filter(|s| !s.trim().is_empty())
+                        {
                             crate::llm::ModelConfig::from_db_state(db, mid)?
                         } else {
                             let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -103,7 +124,10 @@ pub fn dispatch(
                             found.ok_or_else(|| "未找到可用的大模型配置".to_string())?
                         };
 
-                        crate::agent::skill_context::generate_llm_skill_summary(name, content, &model_cfg).await
+                        crate::agent::skill_context::generate_llm_skill_summary(
+                            name, content, &model_cfg,
+                        )
+                        .await
                     };
                     if let Ok(h) = handle {
                         h.block_on(f)
@@ -115,7 +139,10 @@ pub fn dispatch(
                     Ok(summary) => summary,
                     Err(error) => {
                         // 只记录错误类别，不回显模型配置等敏感内容
-                        eprintln!("⚠️ [skill_manager] Skill [{}] 触发卡提炼失败: {}", name, error);
+                        eprintln!(
+                            "⚠️ [skill_manager] Skill [{}] 触发卡提炼失败: {}",
+                            name, error
+                        );
                         card_failure = Some(error);
                         String::new()
                     }
@@ -126,12 +153,14 @@ pub fn dispatch(
 
             let conn = match db.0.lock() {
                 Ok(c) => c,
-                Err(e) => return DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("数据库锁获取失败: {}", e),
-                    success: false,
-                    route: "skill_manager:add".to_string(),
-                },
+                Err(e) => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: format!("数据库锁获取失败: {}", e),
+                        success: false,
+                        route: "skill_manager:add".to_string(),
+                    }
+                }
             };
 
             let id = uuid::Uuid::new_v4().to_string();
@@ -152,7 +181,11 @@ pub fn dispatch(
                 };
             }
 
-            let kind_label = if kind == "skill" { "Skill" } else { "自定义提示词" };
+            let kind_label = if kind == "skill" {
+                "Skill"
+            } else {
+                "自定义提示词"
+            };
             let card_note = match desc.trim() {
                 s if s.is_empty() => {
                     if card_failure.is_some() {
@@ -172,8 +205,15 @@ pub fn dispatch(
             }
         }
         "delete" => {
-            let target = params.get("id").or_else(|| params.get("name")).and_then(|v| v.as_str()).unwrap_or("");
-            let confirm = params.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+            let target = params
+                .get("id")
+                .or_else(|| params.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let confirm = params
+                .get("confirm")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if target.is_empty() {
                 return DispatchResult {
                     stdout: String::new(),
@@ -192,12 +232,14 @@ pub fn dispatch(
             }
             let conn = match db.0.lock() {
                 Ok(c) => c,
-                Err(e) => return DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!("数据库锁获取失败: {}", e),
-                    success: false,
-                    route: "skill_manager:delete".to_string(),
-                },
+                Err(e) => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: format!("数据库锁获取失败: {}", e),
+                        success: false,
+                        route: "skill_manager:delete".to_string(),
+                    }
+                }
             };
             let affected = conn.execute(
                 "DELETE FROM agent_custom_instructions WHERE id=?1 OR name=?1",
@@ -207,7 +249,10 @@ pub fn dispatch(
                 Ok(0) => {
                     return DispatchResult {
                         stdout: String::new(),
-                        stderr: format!("❌ 未找到名为 [{}] 的 Skill 或提示词；请先用 list 查看现有条目", target),
+                        stderr: format!(
+                            "❌ 未找到名为 [{}] 的 Skill 或提示词；请先用 list 查看现有条目",
+                            target
+                        ),
                         success: false,
                         route: "skill_manager:delete:not_found".to_string(),
                     };
@@ -232,7 +277,10 @@ pub fn dispatch(
         }
         _ => DispatchResult {
             stdout: String::new(),
-            stderr: format!("❌ 未知的 skill_manager 动作 action='{}'。支持的动作: list, add, delete", act),
+            stderr: format!(
+                "❌ 未知的 skill_manager 动作 action='{}'。支持的动作: list, add, delete",
+                act
+            ),
             success: false,
             route: "skill_manager:unknown".to_string(),
         },
@@ -327,9 +375,17 @@ mod tests {
                 "content": "检查所有 SQL 查询必须包含 LIMIT。"
             }),
         );
-        assert!(result.success, "卡片失败不应阻断配置保存: {}", result.stderr);
+        assert!(
+            result.success,
+            "卡片失败不应阻断配置保存: {}",
+            result.stderr
+        );
         assert!(result.stdout.contains("成功保存"));
-        assert!(result.stdout.contains("触发卡未生成"), "输出: {}", result.stdout);
+        assert!(
+            result.stdout.contains("触发卡未生成"),
+            "输出: {}",
+            result.stdout
+        );
         // 绝不出现"💡 技能触发卡: "后跟空内容这种伪造成功卡
         assert!(!result.stdout.contains("💡 技能触发卡"));
         // 内容确实入库
@@ -389,9 +445,11 @@ mod tests {
         assert!(confirmed.success);
         let conn = db.0.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM agent_custom_instructions", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM agent_custom_instructions",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(count, 0);
     }
