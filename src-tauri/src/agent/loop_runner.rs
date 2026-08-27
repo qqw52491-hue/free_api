@@ -1,4 +1,5 @@
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
+use crate::agent::child_reviewer::{result_as_dispatch_output, run_child_reviewer};
 use crate::agent::context::resource_scope::ResourceOperation;
 use crate::agent::control::{take_pending_interrupt, HumanControl};
 use crate::agent::dispatcher::{
@@ -10,6 +11,7 @@ use crate::agent::types::{AgentInstruction, DispatchResult, RUN_INTERRUPTED_ROUT
 use crate::agent::utils::call_llm;
 use crate::db::DbState;
 use serde_json::json;
+use std::path::Path;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch};
@@ -35,6 +37,7 @@ pub async fn run_call_llm_and_run_tool_phases(
     registry_state: &State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
     model_routing: &crate::agent::router::ModelRoutingConfig,
     run_id: &str,
+    workspace_dir: &Path,
     goal: &str,
     log_context: Option<bool>,
     transient_llm_request_retries: u32,
@@ -70,6 +73,9 @@ pub async fn run_call_llm_and_run_tool_phases(
             app,
             state,
             registry_state,
+            model_routing,
+            run_id,
+            workspace_dir,
             final_session_id,
             step_id,
             &inst,
@@ -77,6 +83,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             checkpoint,
             run_machine,
             rx,
+            interrupt_rx,
         )
         .await?;
         let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
@@ -373,6 +380,9 @@ pub async fn run_call_llm_and_run_tool_phases(
             app,
             state,
             registry_state,
+            model_routing,
+            run_id,
+            workspace_dir,
             final_session_id,
             step_id,
             &inst,
@@ -380,6 +390,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             &mut *checkpoint,
             &mut *run_machine,
             rx,
+            interrupt_rx,
         )
         .await?;
         last_tool_duration_ms = tool_start.elapsed().as_millis() as u64;
@@ -617,6 +628,9 @@ pub async fn run_tool_phase(
     app: &AppHandle,
     state: &State<'_, DbState>,
     registry_state: &State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
+    model_routing: &crate::agent::router::ModelRoutingConfig,
+    parent_run_id: &str,
+    workspace_dir: &Path,
     final_session_id: &String,
     step_id: usize,
     inst: &AgentInstruction,
@@ -624,6 +638,7 @@ pub async fn run_tool_phase(
     mut checkpoint: &mut AgentCheckpoint,
     mut run_machine: &mut AgentRunMachine,
     rx: &mut mpsc::Receiver<HumanControl>,
+    interrupt_rx: &mut watch::Receiver<u64>,
 ) -> Result<DispatchResult, String> {
     // --- B. 执行动作 ---
     if let Some(reason) = context.repeated_failure_blocker(
@@ -683,8 +698,40 @@ pub async fn run_tool_phase(
         // 不在此处盲目广播 "succeeded"，交由 main_loop 的 finish guard 判定是否为 finish_challenged 统一发射事件
         return Ok(result);
     }
-    // --- B2. 特殊拦截：AI 主动挂起呼叫人类 ---
-    let dispatch_result = if inst.get_tool().to_lowercase() == "ask_human" {
+    // --- B2. 受限 child reviewer：独立模型调用，但不能派发任何工具或写入父状态。 ---
+    let dispatch_result = if inst.get_tool().eq_ignore_ascii_case("child_reviewer") {
+        let routing = crate::agent::router::AgentRouter::route_for_step(context, model_routing, step_id);
+        let model_tier = routing.tier.to_string();
+        let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
+        let child_params = inst.get_params();
+        match run_child_reviewer(
+            state.inner(),
+            parent_run_id,
+            final_session_id,
+            workspace_dir,
+            &routing.model_id,
+            &model_tier,
+            &reasoning_effort,
+            &child_params,
+            interrupt_rx,
+        )
+        .await
+        {
+            Ok(result) => DispatchResult {
+                stdout: result_as_dispatch_output(result),
+                stderr: String::new(),
+                success: true,
+                route: "child_reviewer:succeeded".to_string(),
+            },
+            Err(error) => DispatchResult {
+                stdout: String::new(),
+                stderr: error,
+                success: false,
+                route: "child_reviewer:rejected_or_failed".to_string(),
+            },
+        }
+    // --- B3. 特殊拦截：AI 主动挂起呼叫人类 ---
+    } else if inst.get_tool().to_lowercase() == "ask_human" {
         let ask_msg = inst
             .get_params()
             .get("message")

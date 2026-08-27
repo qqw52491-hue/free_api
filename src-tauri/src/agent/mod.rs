@@ -1,5 +1,6 @@
 pub mod artifact_manager;
 pub mod change_verification;
+pub mod child_reviewer;
 pub mod checkpoint;
 pub mod context;
 pub mod control;

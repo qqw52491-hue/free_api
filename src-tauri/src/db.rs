@@ -167,6 +167,24 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_agent_project_sessions_project ON agent_project_sessions(project_id);
         CREATE INDEX IF NOT EXISTS idx_agent_project_resources_project ON agent_project_resources(project_id, created_at DESC);
 
+        -- child reviewer 只保存可观测运行元数据；不存 prompt、原始回复或思维文本。
+        CREATE TABLE IF NOT EXISTS agent_child_runs (
+            id TEXT PRIMARY KEY,
+            parent_run_id TEXT NOT NULL,
+            parent_session_id TEXT NOT NULL,
+            workspace_root TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            duration_ms INTEGER,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            evidence_ref_count INTEGER NOT NULL DEFAULT 0,
+            error_kind TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_child_runs_parent ON agent_child_runs(parent_run_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_child_runs_session ON agent_child_runs(parent_session_id, started_at DESC);
+
         CREATE TABLE IF NOT EXISTS mcp_plugins (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,

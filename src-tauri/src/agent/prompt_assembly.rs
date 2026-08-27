@@ -66,6 +66,13 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         ],
     },
     BuiltinToolSpec {
+        name: "child_reviewer",
+        summary: "受限只读子审查：仅审查父 Agent 已收缩的证据包；最多两次；不会调用工具或读写文件",
+        actions: &[
+            "investigate(question: string, evidence_refs?: string[] <=6, evidence_excerpt?: string <=6000 chars)",
+        ],
+    },
+    BuiltinToolSpec {
         name: "web_search",
         summary: "全网检索并返回带来源的结果",
         actions: &["web_search(query: string, max_results?: <=10)"],

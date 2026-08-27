@@ -845,6 +845,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             &registry_state,
             &model_routing,
             &run_id,
+            &workspace_dir,
             &goal,
             log_context,
             transient_llm_request_retries,
