@@ -22,6 +22,11 @@ struct NoProgressEntry {
     occurrences: u32,
     last_fingerprint: u64,
     consecutive_same: u32,
+    /// 一次性提示标记：同一签名连续重复的提示只发一次，
+    /// 直到输出指纹变化（新证据/新失败方式）才复位——
+    /// 宿主提示是状态变化信号，不是每轮广播的仪表盘。
+    #[serde(default)]
+    notice_issued: bool,
 }
 
 /// 相同调用连续第 N 次返回相同成功结果时提示（前两次复查视为合理）。
@@ -70,16 +75,23 @@ impl NoProgressTracker {
         } else {
             entry.consecutive_same = 1;
             entry.last_fingerprint = fingerprint;
+            // 输出指纹变化 = 状态变化：重新允许一次性提示
+            entry.notice_issued = false;
         }
 
+        if entry.notice_issued {
+            return None;
+        }
         let consecutive = entry.consecutive_same;
         let occurrences = entry.occurrences;
         if success && consecutive >= NO_PROGRESS_SUCCESS_THRESHOLD {
+            entry.notice_issued = true;
             return Some(format!(
                 "【无进展重复提示】工具 {tool} 以相同参数已连续 {consecutive} 次返回相同结果（累计 {occurrences} 次）。请变更参数或证据源；若结论所需证据已充分，请整理结论并收尾，不要继续原样重复同一调用。"
             ));
         }
         if !success && consecutive >= NO_PROGRESS_FAILURE_THRESHOLD {
+            entry.notice_issued = true;
             return Some(format!(
                 "【重复失败提示】工具 {tool} 以相同参数已连续 {consecutive} 次以相同方式失败。请依据错误与工具契约改换参数、改用目录中已声明的替代工具，或基于已收集证据给出受限结论；不要再次原样重试。"
             ));
@@ -111,6 +123,34 @@ mod tests {
             .expect("第三次相同成功结果必须提示");
         assert!(notice.contains("无进展重复提示"));
         assert!(notice.contains("3 次"));
+        // 第四、五次仍原样重复：一次性提示已发，不再每轮广播同一状态卡。
+        assert!(tracker
+            .record("p/ripgrep_search", &params, true, "3 hits ...")
+            .is_none());
+        assert!(tracker
+            .record("p/ripgrep_search", &params, true, "3 hits ...")
+            .is_none());
+    }
+
+    #[test]
+    fn notice_refires_only_after_fingerprint_change() {
+        let mut tracker = NoProgressTracker::default();
+        let params = json!({"pattern": "y"});
+
+        // 触发一次提示
+        for _ in 0..NO_PROGRESS_SUCCESS_THRESHOLD {
+            tracker.record("t", &params, true, "same");
+        }
+        // 输出指纹变化（带回了新证据）：状态变化，重新允许提示
+        tracker.record("t", &params, true, "new evidence");
+        // 再次连续相同满阈值：第二次提示应重新触发
+        let mut notices = 0;
+        for _ in 0..NO_PROGRESS_SUCCESS_THRESHOLD {
+            if tracker.record("t", &params, true, "same2").is_some() {
+                notices += 1;
+            }
+        }
+        assert_eq!(notices, 1, "指纹变化后重新累计应再次且仅提示一次");
     }
 
     #[test]
