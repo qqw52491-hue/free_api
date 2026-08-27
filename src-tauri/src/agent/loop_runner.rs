@@ -181,38 +181,6 @@ pub async fn run_call_llm_and_run_tool_phases(
                 });
             }
             Err(e) => {
-                // 🛑 智能拦截不可重试的致命错误（401 Key失效、402 余额不足、403 权限不足、404 模型不存在等）
-                if crate::llm::is_non_retryable_error(&e) {
-                    let friendly_reason = if e.contains("401")
-                        || e.contains("invalid_api_key")
-                        || e.contains("Incorrect API key")
-                    {
-                        format!(
-                            "🔑 API 认证失败 [模型: {}]: API Key 无效或已过期，请在设置中检查 API Key。\n上游原始错误: {}",
-                            routing.model_id, e
-                        )
-                    } else if e.contains("402") || e.contains("insufficient_quota") {
-                        format!(
-                            "💳 账户额度不足 [模型: {}]: API 账户余额已耗尽，请在设置中切换模型或充值。\n上游原始错误: {}",
-                            routing.model_id, e
-                        )
-                    } else if e.contains("403") {
-                        format!(
-                            "🚫 权限不足 [模型: {}]: 当前 API Key 无权访问所选模型。\n上游原始错误: {}",
-                            routing.model_id, e
-                        )
-                    } else if e.contains("404") || e.contains("model_not_found") {
-                        format!(
-                            "🔍 模型未找到 [模型: {}]: 所选模型名称在上游服务商处不存在。\n上游原始错误: {}",
-                            routing.model_id, e
-                        )
-                    } else {
-                        format!("❌ API 致命错误 [模型: {}]: {}", routing.model_id, e)
-                    };
-
-                    return Err(friendly_reason);
-                }
-
                 // 🛑 如果是网络/API 传输层经过重试后仍彻底失败，直接终止并上报，杜绝误当作 JSON 格式错误翻倍重试 3x3 轮
                 if e.contains("LLM 请求最终失败") || e.contains("请求失败") || e.contains("API 错误") {
                     return Err(format!("❌ LLM 请求失败 (已达重试上限): {}", e));

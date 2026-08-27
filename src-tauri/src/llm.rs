@@ -684,34 +684,6 @@ pub async fn stream_once<F: FnMut(StreamEvent) -> bool>(
     })
 }
 
-/// 判断是否为不可恢复的客户端/认证类致命错误（避免在 401/403/400/404 等错误上浪费重试配额与等待时间）
-pub fn is_non_retryable_error(err: &str) -> bool {
-    // 包含常见 HTTP 4xx 状态码（排除 429 速率限制，429 必须退避重试）
-    let non_retryable_status = [
-        "API 错误 400",
-        "API 错误 401",
-        "API 错误 402",
-        "API 错误 403",
-        "API 错误 404",
-        "API 错误 422",
-    ];
-    for status in &non_retryable_status {
-        if err.contains(status) {
-            return true;
-        }
-    }
-    // 常见明确的认证与配额不足错误关键词
-    if err.contains("invalid_api_key")
-        || err.contains("Incorrect API key")
-        || err.contains("AuthenticationError")
-        || err.contains("insufficient_quota")
-        || err.contains("model_not_found")
-    {
-        return true;
-    }
-    false
-}
-
 /// 单次暂态请求重试的最大等待时间。上限允许长流程在 429/网络波动时持续恢复，
 /// 同时避免 20 次尝试沿用无界指数退避而等待数小时。
 const MAX_TRANSIENT_RETRY_BACKOFF_MS: u64 = 15_000;
@@ -721,7 +693,7 @@ fn transient_retry_backoff_ms(attempt_index: u32) -> u64 {
     (1_000u64 * (1u64 << exponent)).min(MAX_TRANSIENT_RETRY_BACKOFF_MS)
 }
 
-/// 带自动重试与状态码感知的流式请求
+/// 带自动重试的流式请求（按配置次数重试所有错误）
 pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     config: &ModelConfig,
     messages: &[serde_json::Value],
@@ -740,14 +712,6 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
             }
             Err(e) => {
                 if e == STREAM_INTERRUPTED_ERROR {
-                    return Err(e);
-                }
-                // 🛑 智能状态码感知：客户端不可恢复错误（401 Key失效、403 无权、400 格式非法等）立即终止重试，杜绝浪费
-                if is_non_retryable_error(&e) {
-                    println!(
-                        "❌ LLM 遇到不可恢复的客户端/认证错误 ({}): 立即终止重试！",
-                        e
-                    );
                     return Err(e);
                 }
 
@@ -920,44 +884,5 @@ mod tests {
         assert_eq!(transient_retry_backoff_ms(3), 8_000);
         assert_eq!(transient_retry_backoff_ms(4), 15_000);
         assert_eq!(transient_retry_backoff_ms(19), 15_000);
-    }
-
-    #[test]
-    fn test_retry_policy_respects_status_codes() {
-        use super::is_non_retryable_error;
-
-        // 不可重试的客户端致命错误
-        assert!(is_non_retryable_error(
-            "API 错误 401 Unauthorized: invalid_api_key"
-        ));
-        assert!(is_non_retryable_error(
-            "API 错误 403 Forbidden: user suspended"
-        ));
-        assert!(is_non_retryable_error(
-            "API 错误 400 Bad Request: unsupported parameter"
-        ));
-        assert!(is_non_retryable_error(
-            "API 错误 404 Not Found: model_not_found"
-        ));
-        assert!(is_non_retryable_error(
-            "AuthenticationError: Incorrect API key provided"
-        ));
-        assert!(is_non_retryable_error("insufficient_quota: out of credits"));
-
-        // 必须退避重试的临时/服务端错误
-        assert!(!is_non_retryable_error(
-            "API 错误 429 Too Many Requests: rate limit exceeded"
-        ));
-        assert!(!is_non_retryable_error(
-            "API 错误 500 Internal Server Error"
-        ));
-        assert!(!is_non_retryable_error("API 错误 502 Bad Gateway"));
-        assert!(!is_non_retryable_error("API 错误 503 Service Unavailable"));
-        assert!(!is_non_retryable_error(
-            "请求失败: connection reset by peer"
-        ));
-        assert!(!is_non_retryable_error(
-            "上游服务商流式连接意外中断 (unexpected EOF)"
-        ));
     }
 }
