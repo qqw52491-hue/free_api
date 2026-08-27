@@ -6,6 +6,7 @@ use crate::agent::checkpoint::{
     RecoveryDecision,
 };
 use crate::agent::context;
+use crate::agent::evaluation_analysis::assess_complex_delivery_summary;
 use crate::agent::control::{
     finish_interrupted_run, intervention_channels, stream_interrupt_channels,
     take_pending_interrupt, HumanControl,
@@ -93,6 +94,35 @@ fn should_challenge_finish_with_blockers(
     blockers: &[String],
 ) -> bool {
     is_finish && succeeded && !finish_reviewed && !blockers.is_empty()
+}
+
+/// 复杂诊断首次 finish 缺少边界披露时复用既有可恢复拦截。
+/// 该检查只消费当前内存中的 summary 生成布尔结论，既不持久化也不回显用户交付正文。
+fn complex_delivery_blocker(
+    context: &context::SandwichContext,
+    instruction: &AgentInstruction,
+    is_finish: bool,
+    succeeded: bool,
+) -> Option<String> {
+    if !is_finish || !succeeded {
+        return None;
+    }
+    let requires_complex_delivery = context.review_contract.is_some()
+        || ["复杂审查", "诊断", "评估", "研究"]
+            .iter()
+            .any(|marker| context.user_goal.contains(marker));
+    if !requires_complex_delivery {
+        return None;
+    }
+    let summary = instruction
+        .command
+        .as_ref()
+        .and_then(|command| command.get("summary"))
+        .and_then(|summary| summary.as_str())?;
+    let assessment = assess_complex_delivery_summary(summary);
+    (!assessment.compliant).then_some(
+        "复杂终态缺少已核验范围、未核验范围或关键假设、结论强度，或主根因就地的直接证据与结论强度".to_string(),
+    )
 }
 
 /// 应用模型本轮提出的状态更新。
@@ -912,13 +942,18 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         };
 
         let is_finish = is_finish_instruction(&instruction);
-        let open_todos = finish_blockers(
+        let mut open_todos = finish_blockers(
             &context.todo_list,
             context.review_contract.as_ref(),
             review_contract_started_this_turn,
             context.side_effects.len(),
             context.change_verification.as_ref(),
         );
+        if let Some(blocker) =
+            complex_delivery_blocker(&context, &instruction, is_finish, result.success)
+        {
+            open_todos.push(blocker);
+        }
         let finish_challenged = should_challenge_finish_with_blockers(
             is_finish,
             result.success,
@@ -933,7 +968,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
                 .collect::<Vec<_>>()
                 .join("\n");
             context.add_error_feedback(&format!(
-                "【🚨 终态拦截：验证未闭合】检测到当前任务尚未完成闭合验证（Todo / 审查契约 / 写入后验证）：\n{}\n本次 finish 已被系统拦截，任务不会在此终止。请直接针对上述未闭合项进行验证与状态更新：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新后请再次提交 finish 交付。",
+                "【🚨 终态拦截：闭合或证据披露未完成】检测到当前任务尚未完成闭合验证或复杂结论校准（Todo / 审查契约 / 写入后验证 / 主根因证据）：\n{}\n本次 finish 已被系统拦截，任务不会在此终止。请直接针对上述未闭合项进行验证与状态更新：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新后请再次提交 finish 交付。",
                 blocker_summary
             ));
             crate::agent::dispatcher::emit_tool_event(

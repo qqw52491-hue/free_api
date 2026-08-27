@@ -17,7 +17,7 @@ pub const ISOLATED_WRITE_FIXTURE_SCENARIO: &str = "isolated_write_fixture";
 
 /// 诊断型场景共享的输出契约：唯一允许写入的是 fixture 根目录的 DIAGNOSIS.json。
 /// 这预演了"根 Agent 是唯一 writer、调查方只读"的形态，也让隐藏断言有确定的物理落点。
-const DIAGNOSTIC_OUTPUT_CONTRACT: &str = r#"输出契约：在工作区根目录创建 DIAGNOSIS.json（这是唯一允许创建或修改的文件；不得改动其他任何文件、不得提交 Git）。内容为一个 JSON 对象，字段：root_cause（一句话根因）、evidence（证据数组，每条引用具体文件与行或符号）、fix_direction（最小修复方向，不要求实现）、confidence（high/medium/low）。另有本任务要求的专用字段见下。没有证据不得下结论；证据充分即收尾。"#;
+const DIAGNOSTIC_OUTPUT_CONTRACT: &str = r#"输出契约：在工作区根目录创建 DIAGNOSIS.json（这是唯一允许创建或修改的文件；不得改动其他任何文件、不得提交 Git）。内容为一个 JSON 对象，字段：root_cause（一句话主根因）、root_cause_confidence（confirmed/likely/hypothesis）、root_cause_evidence（1–3 条直接证据，每条引用具体文件与行或符号）、evidence（证据数组）、fix_direction（最小修复方向，不要求实现）、confidence（high/medium/low）。若 root_cause_confidence 不是 confirmed，必须额外填写 root_cause_missing_evidence（仍缺哪类直接证据）和 root_cause_validation（可证伪该主根因的最小验证）。不得用文末的泛化不确定性声明替代主根因的就地校准；没有直接证据时不得将猜测写为 confirmed。另有本任务要求的专用字段见下。证据充分即收尾。"#;
 
 pub const DIAGNOSTIC_FAKE_ACTION_SCENARIO: &str = "diagnostic_fake_action";
 pub const DIAGNOSTIC_FAKE_ACTION_GOAL: &str = r#"你正在一个隔离的、可销毁的工程 fixture 中执行只读诊断任务。现象：某 Agent 调用 skill_manager 的 batch_import 动作陷入失败循环——错误消息声称该动作受支持，重试同样调用仍失败。请阅读 fixture 内的源码与文档，找出循环的根因：能力声明（文档、错误消息）与实际实现（dispatcher/registry）之间哪里不一致、各自以什么事实为源。
@@ -31,6 +31,10 @@ pub const DIAGNOSTIC_PLUGIN_REMOVAL_GOAL: &str = r#"你正在一个隔离的、�
 严格只读（除输出契约文件外）。专用字段：stale_components（字符串数组，列出删除后仍让插件保持可见的组件或机制，用源码中的实际名称）。
 "#;
 
+pub const DIAGNOSTIC_FALSE_LEAK_SCENARIO: &str = "diagnostic_false_leak";
+pub const DIAGNOSTIC_FALSE_LEAK_GOAL: &str = r#"你正在一个隔离的、可销毁的工程 fixture 中执行只读诊断任务。现象：管理员删除数据库管理的 MCP 插件后，DB 行、目录缓存与运行时 client 均显示已移除，但工具菜单在当前 UI 帧仍短暂可见，完全重启客户端后消失。请追踪“删除请求 → DB → 缓存失效 → registry/client → 菜单 snapshot/刷新”的调用链，判定可见性来自仍被持有的运行时 client，还是来自延迟刷新的菜单快照。
+严格只读（除输出契约文件外）。专用字段：visible_components（字符串数组，列出删除后仍可能显示旧工具的组件或机制，用源码中的实际名称）。若声称泄漏、zombie 或跨会话残留为主根因，必须给出该说法的直接源码证据；否则必须作为 hypothesis 并写明缺失证据。
+"#;
 pub const DIAGNOSTIC_NAME_COLLISION_SCENARIO: &str = "diagnostic_name_collision";
 pub const DIAGNOSTIC_NAME_COLLISION_GOAL: &str = r#"你正在一个隔离的、可销毁的工程 fixture 中执行只读诊断任务。现象：YAML 目录与数据库管理清单中存在同名插件时，管理员通过数据库添加的配置"看起来成功"（返回成功、DB 行存在），但运行时实际生效的是 YAML 来源的那份，且没有任何错误或日志提示冲突。请找到插件注册路径上的具体分支，说明冲突在哪里被静默吞掉、两个来源各自如何加载。
 
@@ -88,6 +92,8 @@ pub struct ComplexDeliveryAssessment {
     pub verified_scope_present: bool,
     pub assumptions_or_unverified_present: bool,
     pub conclusion_strength_present: bool,
+    /// 主根因是否在自身附近携带直接证据和明确置信度；不保存原文。
+    pub root_cause_calibrated: bool,
     pub compliant: bool,
 }
 
@@ -105,6 +111,9 @@ impl ComplexDeliveryAssessment {
         }
         if !self.conclusion_strength_present {
             missing.push("结论强度");
+        }
+        if !self.root_cause_calibrated {
+            missing.push("主根因的就地证据与结论强度");
         }
         missing
     }
@@ -197,6 +206,7 @@ fn scenario_requires_complex_delivery(scenario_id: &str) -> bool {
             | COMPLEX_CANCELLATION_DIAGNOSTIC_SCENARIO
             | DIAGNOSTIC_FAKE_ACTION_SCENARIO
             | DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO
+            | DIAGNOSTIC_FALSE_LEAK_SCENARIO
             | DIAGNOSTIC_NAME_COLLISION_SCENARIO
     )
 }
@@ -219,6 +229,10 @@ fn resolve_scenario(scenario_id: &str) -> Result<(&'static str, String), String>
         DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO => Ok((
             "agent-diag-plugin-removal",
             format!("{}\n{}", DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_PLUGIN_REMOVAL_GOAL),
+        )),
+        DIAGNOSTIC_FALSE_LEAK_SCENARIO => Ok((
+            "agent-diag-false-leak",
+            format!("{}\n{}", DIAGNOSTIC_OUTPUT_CONTRACT, DIAGNOSTIC_FALSE_LEAK_GOAL),
         )),
         DIAGNOSTIC_NAME_COLLISION_SCENARIO => Ok((
             "agent-diag-name-collision",
@@ -549,6 +563,7 @@ mod tests {
         for (scenario, prefix, dedicated_field) in [
             (DIAGNOSTIC_FAKE_ACTION_SCENARIO, "agent-diag-fake-action", "unimplemented_actions"),
             (DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO, "agent-diag-plugin-removal", "stale_components"),
+            (DIAGNOSTIC_FALSE_LEAK_SCENARIO, "agent-diag-false-leak", "visible_components"),
             (DIAGNOSTIC_NAME_COLLISION_SCENARIO, "agent-diag-name-collision", "collision_sources"),
         ] {
             let (resolved_prefix, goal) = resolve_scenario(scenario).unwrap();
@@ -571,6 +586,7 @@ mod tests {
             COMPLEX_CANCELLATION_DIAGNOSTIC_SCENARIO,
             DIAGNOSTIC_FAKE_ACTION_SCENARIO,
             DIAGNOSTIC_PLUGIN_REMOVAL_SCENARIO,
+            DIAGNOSTIC_FALSE_LEAK_SCENARIO,
             DIAGNOSTIC_NAME_COLLISION_SCENARIO,
         ] {
             assert!(scenario_requires_complex_delivery(scenario), "{} should require disclosure", scenario);

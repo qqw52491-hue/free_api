@@ -346,10 +346,49 @@ pub(crate) fn assess_complex_delivery(logs: &[Value]) -> ComplexDeliveryAssessme
         contains_any(&summary, &["未核验范围", "关键假设"]);
     assessment.conclusion_strength_present = summary.contains("结论强度")
         && contains_any(&summary, &["已证实", "部分支持", "未验证"]);
+    let root_cause_window = root_cause_claim_window(&summary);
+    assessment.root_cause_calibrated = root_cause_window.is_none_or(|window| {
+        contains_any(&window, &["直接证据", "根因证据"])
+            && contains_any(&window, &["已证实", "部分支持", "未验证"])
+    });
     assessment.compliant = assessment.verified_scope_present
         && assessment.assumptions_or_unverified_present
-        && assessment.conclusion_strength_present;
+        && assessment.conclusion_strength_present
+        && assessment.root_cause_calibrated;
     assessment
+}
+
+/// 运行期 finish 拦截复用的摘要检查；调用方只消费布尔结果，不保存或回显 summary 正文。
+pub(crate) fn assess_complex_delivery_summary(summary: &str) -> ComplexDeliveryAssessment {
+    let mut assessment = ComplexDeliveryAssessment {
+        finish_found: true,
+        ..Default::default()
+    };
+    assessment.verified_scope_present = contains_any(summary, &["已核验范围", "已验证范围"]);
+    assessment.assumptions_or_unverified_present =
+        contains_any(summary, &["未核验范围", "关键假设"]);
+    assessment.conclusion_strength_present = summary.contains("结论强度")
+        && contains_any(summary, &["已证实", "部分支持", "未验证"]);
+    let root_cause_window = root_cause_claim_window(summary);
+    assessment.root_cause_calibrated = root_cause_window.is_none_or(|window| {
+        contains_any(&window, &["直接证据", "根因证据"])
+            && contains_any(&window, &["已证实", "部分支持", "未验证"])
+    });
+    assessment.compliant = assessment.verified_scope_present
+        && assessment.assumptions_or_unverified_present
+        && assessment.conclusion_strength_present
+        && assessment.root_cause_calibrated;
+    assessment
+}
+
+/// 截取主根因附近的短窗口，避免文末的全局免责声明替代该结论自己的证据与强度。
+/// 没有明确根因结论的广义审查不适用这项检查。
+fn root_cause_claim_window(summary: &str) -> Option<String> {
+    let marker = ["主根因", "根因判断", "根因结论"]
+        .iter()
+        .filter_map(|marker| summary.find(marker))
+        .min()?;
+    Some(summary[marker..].chars().take(420).collect())
 }
 
 fn finish_summary(raw_response: &str) -> Option<String> {
@@ -492,7 +531,7 @@ mod tests {
     #[test]
     fn complex_delivery_passes_only_when_all_three_boundary_sections_exist() {
         let logs = finish_log(
-            "# 审查报告\n\n### 已核验范围\n- A\n\n### 未核验范围或关键假设\n- B\n\n### 结论强度\n- 已证实：A；部分支持：B；未验证：C",
+            "# 审查报告\n\n### 主根因\n- 部分支持：A。直接证据：a.rs 的相关调用链。\n\n### 已核验范围\n- A\n\n### 未核验范围或关键假设\n- B\n\n### 结论强度\n- 已证实：A；部分支持：B；未验证：C",
         );
         let assessment = assess_complex_delivery(&logs);
         assert!(assessment.finish_found);
@@ -505,7 +544,7 @@ mod tests {
     #[test]
     fn complex_delivery_flags_missing_uncertainty_boundary() {
         let logs = finish_log(
-            "# 审查报告\n\n### 已核验范围\n- A\n\n### 结论强度\n- 已证实：A",
+            "# 审查报告\n\n### 主根因\n- 已证实：A。直接证据：a.rs。\n\n### 已核验范围\n- A\n\n### 结论强度\n- 已证实：A",
         );
         let assessment = assess_complex_delivery(&logs);
         assert!(assessment.finish_found);
@@ -516,9 +555,18 @@ mod tests {
     }
 
     #[test]
+    fn complex_delivery_rejects_a_root_cause_without_local_evidence_and_strength() {
+        let logs = finish_log(
+            "# 审查报告\n\n### 主根因\n- registry 泄漏。\n\n### 已核验范围\n- A\n\n### 未核验范围或关键假设\n- B\n\n### 结论强度\n- 已证实：A；部分支持：B；未验证：C",
+        );
+        let assessment = assess_complex_delivery(&logs);
+        assert!(!assessment.root_cause_calibrated);
+        assert!(!assessment.compliant);
+    }
+    #[test]
     fn complex_delivery_uses_latest_finish_even_if_later_logs_are_not_finish() {
         let mut logs = finish_log(
-            "# 审查报告\n\n### 已验证范围\n- A\n\n### 关键假设\n- B\n\n### 结论强度\n- 已证实：A",
+            "# 审查报告\n\n### 根因结论\n- 已证实：A。直接证据：a.rs。\n\n### 已验证范围\n- A\n\n### 关键假设\n- B\n\n### 结论强度\n- 已证实：A",
         );
         logs.push(serde_json::json!({
             "raw_response": serde_json::json!({

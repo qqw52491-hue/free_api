@@ -32,6 +32,13 @@ function fixtureFiles() {
       ["src/registry.rs", "use std::collections::HashMap;\nuse std::sync::Mutex;\n\nstatic CLIENTS: Mutex<Option<HashMap<String, Vec<String>>>> = Mutex::new(None);\n\npub fn register(name: &str, last_known_tools: Vec<String>) {\n    let mut guard = CLIENTS.lock().unwrap();\n    guard\n        .get_or_insert_with(HashMap::new)\n        .insert(name.to_string(), last_known_tools);\n}\n\npub fn clients() -> HashMap<String, Vec<String>> {\n    CLIENTS.lock().unwrap().clone().unwrap_or_default()\n}\n\n/// 工具菜单：目录缓存缺失时回退到 client 的最近已知工具。\n/// 对 TTL 过期的长会话有价值；但配置已撤销时它让删除失效。\npub fn format_tools_menu() -> Vec<String> {\n    let mut menu = Vec::new();\n    for (name, tools) in clients() {\n        let entry = crate::catalog::list_tools(&name).unwrap_or(tools);\n        for tool in entry {\n            menu.push(format!(\"{}::{}\", name, tool));\n        }\n    }\n    menu\n}\n"],
       ["src/session_sync.rs", "/// 会话同步：遍历 DB 现存插件并建立连接。\n/// 已删除的插件不在 load_managed_plugins 的结果里，\n/// 因此这里没有任何分支会移除运行中的 client。\npub fn load_managed_plugins(db: &[String]) -> Vec<String> {\n    db.to_vec()\n}\n\npub fn sync(db: &[String]) {\n    for name in load_managed_plugins(db) {\n        crate::registry::register(&name, vec![\"search\".to_string()]);\n    }\n}\n"],
     ]),
+    "diagnostic_false_leak": new Map([
+      ["TASK.md", "# 任务：诊断删除后短暂可见的插件工具\n\n管理员删除数据库管理的 MCP 插件 github_tools：DB 行、目录缓存和运行时 client 都已移除；但当前 UI 帧的工具菜单仍短暂可见，完全重启后消失。请阅读 src/，追踪删除 → DB → 缓存 → registry/client → 菜单快照/刷新调用链。不要把泄漏、zombie 或跨会话残留当作事实，除非源码直接证明；按任务指令输出 DIAGNOSIS.json。\n"],
+      ["src/manager.rs", "pub mod catalog;\npub mod menu;\npub mod registry;\n\n/// 删除入口同时删除持久化行、缓存与运行时 client。\npub fn delete_plugin(db: &mut Vec<String>, name: &str) {\n    db.retain(|item| item != name);\n    catalog::invalidate_plugin(name);\n    registry::remove_client(name);\n    menu::schedule_refresh();\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn deletion_releases_client_before_menu_snapshot_refreshes() {\n        let mut db = vec![\"github_tools\".to_string()];\n        super::delete_plugin(&mut db, \"github_tools\");\n        assert!(!db.contains(&\"github_tools\".to_string()));\n        assert!(!super::registry::has_client(\"github_tools\"));\n        assert!(super::menu::visible_tools().contains(&\"github_tools.search\".to_string()));\n        super::menu::flush_scheduled_refresh();\n        assert!(!super::menu::visible_tools().contains(&\"github_tools.search\".to_string()));\n    }\n}\n"],
+      ["src/catalog.rs", "use std::collections::HashMap;\nuse std::sync::Mutex;\n\nstatic CACHE: Mutex<Option<HashMap<String, Vec<String>>>> = Mutex::new(None);\n\npub fn invalidate_plugin(name: &str) {\n    if let Some(cache) = CACHE.lock().unwrap().as_mut() {\n        cache.remove(name);\n    }\n}\n"],
+      ["src/registry.rs", "use std::collections::HashMap;\nuse std::sync::Mutex;\n\nstatic CLIENTS: Mutex<Option<HashMap<String, Vec<String>>>> = Mutex::new(None);\n\npub fn remove_client(name: &str) {\n    if let Some(clients) = CLIENTS.lock().unwrap().as_mut() {\n        clients.remove(name);\n    }\n}\n\npub fn has_client(name: &str) -> bool {\n    CLIENTS.lock().unwrap().as_ref().is_some_and(|clients| clients.contains_key(name))\n}\n"],
+      ["src/menu.rs", "use std::sync::Mutex;\n\nstatic MENU_SNAPSHOT: Mutex<Vec<String>> = Mutex::new(vec![\"github_tools.search\".to_string()]);\nstatic REFRESH_PENDING: Mutex<bool> = Mutex::new(false);\n\n/// 删除事件只安排下一 UI 帧刷新，不会同步改写当前渲染快照。\npub fn schedule_refresh() { *REFRESH_PENDING.lock().unwrap() = true; }\n\npub fn visible_tools() -> Vec<String> { MENU_SNAPSHOT.lock().unwrap().clone() }\n\npub fn flush_scheduled_refresh() {\n    if *REFRESH_PENDING.lock().unwrap() {\n        *MENU_SNAPSHOT.lock().unwrap() = Vec::new();\n    }\n}\n"],
+    ]),
     "diagnostic_name_collision": new Map([
       ["TASK.md", "# 任务：诊断同名插件配置被静默忽略\n\nYAML 目录与管理数据库中存在同名插件 github_tools 时，管理员通过数据库添加返回成功、\nDB 行存在，但运行时生效的是 YAML 来源的配置，没有任何错误或日志提示冲突。\n请找到 src/ 中注册路径的具体分支，说明冲突在哪里被静默吞掉，按任务指令输出 DIAGNOSIS.json。\n"],
       ["src/loader.rs", "pub mod registry;\n\n/// 来源一：YAML 目录扫描加载。\npub fn load_yaml_dir(dir: &str) -> Vec<(String, String)> {\n    let _ = dir;\n    vec![(\"github_tools\".to_string(), \"yaml-config\".to_string())]\n}\n\n/// 来源二：管理数据库（mcp_plugins 表）加载。\npub fn load_managed_db(db: &[(String, String)]) -> Vec<(String, String)> {\n    db.to_vec()\n}\n\npub fn bootstrap(dir: &str, db: &[(String, String)]) {\n    for (name, source) in load_yaml_dir(dir) {\n        registry::insert(&name, &source);\n    }\n    for (name, source) in load_managed_db(db) {\n        registry::insert(&name, &source);\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn db_config_is_silently_ignored_when_yaml_registered_first() {\n        let db = vec![(\"github_tools\".to_string(), \"managed-db-config\".to_string())];\n        super::bootstrap(\"/etc/plugins\", &db);\n        let active = super::registry::active_config(\"github_tools\");\n        assert_eq!(active, Some(\"yaml-config\".to_string()),\n            \"DB 配置被静默忽略——这正是要诊断的现象\");\n    }\n}\n"],
@@ -71,6 +78,31 @@ const hiddenAssertions = {
     assert.ok(
       /对账|移除|reconcil|remove|同步/.test(rootCause) || /对账|移除/.test(JSON.stringify(diagnosis.evidence ?? [])),
       "根因或证据必须指出运行时移除/对账缺失",
+    );
+  },
+  "diagnostic_false_leak": (diagnosis) => {
+    const visible = diagnosis.visible_components;
+    assert.ok(Array.isArray(visible) && visible.length > 0, "visible_components 必须非空");
+    assert.ok(
+      visible.join(" ").toLowerCase().includes("menu_snapshot")
+        || visible.join(" ").toLowerCase().includes("refresh_pending"),
+      "visible_components 必须识别 menu_snapshot 或 refresh_pending",
+    );
+    const rootCause = String(diagnosis.root_cause ?? "").toLowerCase();
+    assert.match(rootCause, /snapshot|快照|刷新|refresh/, "根因必须落在菜单快照/刷新，而非泛化残留");
+    const unsupportedRetentionAsCause = rootCause
+      .split(/[。；;.!?]/)
+      .some((clause) => /leak|泄漏|zombie|僵尸|跨会话/.test(clause)
+        && !/而非|不是|并非|排除|无证据|缺乏证据|not|rather than|instead of/.test(clause));
+    assert.equal(
+      unsupportedRetentionAsCause,
+      false,
+      "不得把无直接证据的泄漏/zombie/跨会话残留写成根因；明确排除这些解释是允许的",
+    );
+    assert.equal(diagnosis.root_cause_confidence, "confirmed", "直接源码证据已足够时主根因应标为 confirmed");
+    assert.ok(
+      Array.isArray(diagnosis.root_cause_evidence) && diagnosis.root_cause_evidence.length > 0,
+      "主根因必须有独立的 root_cause_evidence",
     );
   },
   "diagnostic_name_collision": (diagnosis) => {
