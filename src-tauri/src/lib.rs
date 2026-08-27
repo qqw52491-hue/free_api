@@ -55,6 +55,18 @@ pub fn run() {
             commands::create_session,
             commands::delete_session,
             commands::rename_session,
+            // 项目、项目会话与用户明确授权的项目内资源
+            commands::list_agent_projects,
+            commands::create_agent_project,
+            commands::delete_agent_project,
+            commands::create_agent_project_session,
+            commands::list_agent_project_sessions,
+            commands::list_agent_project_resources,
+            commands::add_agent_project_resource,
+            commands::remove_agent_project_resource,
+            commands::read_agent_project_resource,
+            commands::get_agent_session_project,
+            commands::get_agent_session_project_resources,
             // 消息
             commands::get_messages,
             commands::save_message,

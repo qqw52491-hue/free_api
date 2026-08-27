@@ -97,10 +97,10 @@
             </nav>
 
             <div v-if="!sidebarCollapsed" class="sidebar-section">
-                <div class="section-title"><span>Projects</span><button type="button" title="新建任务" @click="createNewTask">+</button></div>
-                <button type="button" class="project-row" @click="createNewTask">
+                <div class="section-title"><span>Projects</span><button type="button" title="打开项目与资源" @click="currentNavView = 'projects'">↗</button></div>
+                <button type="button" class="project-row" @click="currentNavView = 'projects'">
                     <svg viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3z"/></svg>
-                    <span>新建对话</span>
+                    <span>项目与资源</span>
                 </button>
             </div>
 
@@ -163,7 +163,12 @@
                 </template>
             </div>
 
-            <!-- 2. ⚙️ LLM 平台与模型管理面板 (原平台管理) -->
+            <!-- 2. 📁 项目、项目内对话与明确登记的资源 -->
+            <div v-if="currentNavView === 'projects'" class="full-view-panel">
+                <ProjectWorkspace :models="allModels" @open-session="openProjectSession" />
+            </div>
+
+            <!-- 3. ⚙️ LLM 平台与模型管理面板 (原平台管理) -->
             <div v-if="currentNavView === 'llm'" class="full-view-panel">
                 <ApiManager @models-updated="loadAllModels" @back="currentNavView = 'agent'" />
             </div>
@@ -189,6 +194,7 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AgentPanel from "../components/AgentPanel.vue";
+import ProjectWorkspace from "../components/ProjectWorkspace.vue";
 import ApiManager from "./ApiManager.vue";
 import PluginView from "./PluginView.vue";
 
@@ -196,7 +202,7 @@ interface ModelOption { id: string; name: string; display_name: string; platform
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
 interface TabInfo { id: string; label: string; running: boolean; }
 
-const currentNavView = ref<"agent" | "llm" | "plugins" | "scheduled" | "library">("agent");
+const currentNavView = ref<"agent" | "projects" | "llm" | "plugins" | "scheduled" | "library">("agent");
 const allModels = ref<ModelOption[]>([]);
 const sidebarCollapsed = ref(false);
 const renamingId = ref<string | null>(null);
@@ -232,6 +238,12 @@ async function addTab() {
 async function createNewTask() {
     currentNavView.value = "agent";
     await addTab();
+}
+
+function openProjectSession(session: ChatSessionRow) {
+    if (!tabs.value.some((tab) => tab.id === session.id)) tabs.value.unshift(asTab(session));
+    activeTabId.value = session.id;
+    currentNavView.value = "agent";
 }
 
 function selectTask(tabId: string) {

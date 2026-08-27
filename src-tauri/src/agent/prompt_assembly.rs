@@ -111,6 +111,14 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         ],
     },
     BuiltinToolSpec {
+        name: "project_resources",
+        summary: "仅项目会话可用：查看宿主登记的文件元数据，或按资源 ID 按需读取 UTF-8 文本；不接受路径参数",
+        actions: &[
+            "list_resources()",
+            "read_resource(resource_id: string)",
+        ],
+    },
+    BuiltinToolSpec {
         name: "artifact_manager",
         summary: "生成独立受管交付产物（Markdown分析报告、网页看板、数据导出）并登记持久化账本供用户预览/导出",
         actions: &[
@@ -146,6 +154,7 @@ mod tests {
         assert!(menu.contains("delete(id|name: string, confirm: true)"));
         assert!(menu.contains("upsert_records(resource_id: string, records: array)"));
         assert!(menu.contains("get_step_output(output_id: string"));
+        assert!(menu.contains("read_resource(resource_id: string)"));
     }
 
     #[test]

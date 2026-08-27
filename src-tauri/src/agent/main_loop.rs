@@ -456,9 +456,19 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     ) {
         eprintln!("[run-trace] 无法创建运行轨迹: {error}");
     }
+    // 项目会话的根目录只由服务端 session→project 关联决定，并在每轮重新 canonicalize；
+    // 普通会话与后台评测分别沿用当前工作区和显式受宿主校验的 override。
+    let project_workspace = if workspace_override.is_none() {
+        let conn = state.0.lock().map_err(|error| error.to_string())?;
+        crate::commands::projects::project_workspace_for_session(&conn, &final_session_id)?
+    } else {
+        None
+    };
+    let is_project_session = project_workspace.is_some();
     // Skill、插件与 shell 工具共享本轮运行时工作目录；恢复时会重新读取并按哈希复用未变更的 Skill。
-    let workspace_dir =
-        workspace_override.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace_dir = workspace_override
+        .or(project_workspace)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     if !workspace_dir.is_dir() {
         return Err(format!("Agent 工作区不可用：{}", workspace_dir.display()));
     }
@@ -533,7 +543,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             mcp_lines.join("\n")
         };
         let compact = format!(
-            "- 原生内置: finish, ask_human, search, task_store, get_step_output, web_search, web_fetch, model_manager, mcp_manager, skill_manager\n- MCP 插件:\n{}",
+            "- 原生内置: finish, ask_human, search, task_store, get_step_output, project_resources, web_search, web_fetch, model_manager, mcp_manager, skill_manager\n- MCP 插件:\n{}",
             mcp_part
         );
         (registry.format_tools_menu(), compact)
@@ -553,9 +563,15 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         crate::agent::skill_context::skill_catalog_string(&skills_dir, &[], maybe_model_cfg)
     };
 
+    let project_resource_boundary = if is_project_session {
+        "\n\n## 项目受管资源边界\n当前会话已绑定项目根目录，但宿主只授权读取用户明确登记的文件。先调用 `project_resources.list_resources()` 获取 resource_id；仅以该 ID 调用 `project_resources.read_resource(resource_id)`。不得用 `search`、外部 MCP 工具、相对/绝对路径或 shell 探查项目文件；资源正文仅在按需读取成功后才可据此分析。"
+    } else {
+        ""
+    };
     let system_prompt = format!(
-        "{}{}{}{}\n{}\n{}",
+        "{}{}{}{}{}\n{}\n{}",
         base_prompt,
+        project_resource_boundary,
         workspace_skill_context,
         custom_instruction_context,
         skill_catalog,
@@ -580,6 +596,13 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         )?;
     }
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
+    if is_project_session {
+        context.resource_scope =
+            context::resource_scope::ResourceScopeContract::bind_primary_filesystem(
+                &workspace_dir.to_string_lossy(),
+                context::resource_scope::ResourceScopeSource::SessionSelected,
+            );
+    }
     context.compact_tools_index = Some(compact_tools_index);
     // 注入当前路由模型的上下文窗口大小与压缩配置，用于历史压缩水位动态计算与双层智能归档。
     // 双模型路由下同一段历史会分别发给推理与执行模型，预算必须按两者窗口的

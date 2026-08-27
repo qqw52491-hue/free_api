@@ -121,6 +121,35 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             message_count INTEGER NOT NULL DEFAULT 0
         );
 
+        -- 项目只登记用户明确选择的本地根目录；它不会扫描或上传目录内容。
+        CREATE TABLE IF NOT EXISTS agent_projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            root_path TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        -- 会话归属用关系表保存，避免修改既有 chat_sessions 结构或破坏历史会话。
+        CREATE TABLE IF NOT EXISTS agent_project_sessions (
+            session_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (project_id) REFERENCES agent_projects(id) ON DELETE CASCADE
+        );
+        -- 资源只保存项目内 canonical 路径及元数据；读取时再次 canonicalize 并校验边界。
+        CREATE TABLE IF NOT EXISTS agent_project_resources (
+            resource_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            canonical_path TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(project_id, canonical_path),
+            FOREIGN KEY (project_id) REFERENCES agent_projects(id) ON DELETE CASCADE
+        );
         CREATE TABLE IF NOT EXISTS chat_messages (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -135,6 +164,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_models_platform ON models(platform_id);
         CREATE INDEX IF NOT EXISTS idx_messages_session ON chat_messages(session_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_updated ON chat_sessions(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_project_sessions_project ON agent_project_sessions(project_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_project_resources_project ON agent_project_resources(project_id, created_at DESC);
 
         CREATE TABLE IF NOT EXISTS mcp_plugins (
             id TEXT PRIMARY KEY,

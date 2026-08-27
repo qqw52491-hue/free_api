@@ -191,6 +191,135 @@ fn guard_code_read_range(
     (serde_json::Value::Object(obj), Some(notice))
 }
 
+fn is_project_session(db: &DbState, session_id: &str) -> bool {
+    let Ok(conn) = db.0.lock() else {
+        return false;
+    };
+    crate::commands::projects::project_for_session(&conn, session_id)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+fn dispatch_project_resources(
+    db: &DbState,
+    session_id: &str,
+    action: &str,
+    params: &serde_json::Value,
+) -> DispatchResult {
+    if !is_project_session(db, session_id) {
+        return DispatchResult {
+            stdout: String::new(),
+            stderr: "当前会话未关联项目，不能访问项目受管资源。".to_string(),
+            success: false,
+            route: "host_rejection:project_resources_without_project".to_string(),
+        };
+    }
+    let action = if action.trim().is_empty() {
+        params
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("list_resources")
+    } else {
+        action
+    };
+    let conn = match db.0.lock() {
+        Ok(conn) => conn,
+        Err(error) => {
+            return DispatchResult {
+                stdout: String::new(),
+                stderr: format!("项目资源账本不可用: {}", error),
+                success: false,
+                route: "internal:project_resources".to_string(),
+            }
+        }
+    };
+    match action {
+        "list_resources" => {
+            match crate::commands::projects::project_resources_for_session(&conn, session_id) {
+                Ok(resources) => {
+                    let projection = resources
+                        .into_iter()
+                        .map(|resource| {
+                            json!({
+                                "resource_id": resource.resource_id,
+                                "label": resource.label,
+                                "relative_path": resource.relative_path,
+                                "kind": resource.kind,
+                                "size_bytes": resource.size_bytes,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    DispatchResult {
+                        stdout: json!({"resources": projection}).to_string(),
+                        stderr: String::new(),
+                        success: true,
+                        route: "internal:project_resources/list".to_string(),
+                    }
+                }
+                Err(error) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: error,
+                    success: false,
+                    route: "internal:project_resources/list".to_string(),
+                },
+            }
+        }
+        "read_resource" => {
+            let Some(resource_id) = params
+                .get("resource_id")
+                .and_then(serde_json::Value::as_str)
+            else {
+                return DispatchResult {
+                    stdout: String::new(),
+                    stderr:
+                        "project_resources.read_resource 缺少 resource_id；请先 list_resources。"
+                            .to_string(),
+                    success: false,
+                    route: "host_rejection:project_resource_missing_id".to_string(),
+                };
+            };
+            match crate::commands::projects::read_project_resource_for_session(
+                &conn,
+                session_id,
+                resource_id,
+            ) {
+                Ok(preview) => DispatchResult {
+                    stdout: json!({
+                        "resource": {
+                            "resource_id": preview.resource.resource_id,
+                            "label": preview.resource.label,
+                            "relative_path": preview.resource.relative_path,
+                            "kind": preview.resource.kind,
+                            "size_bytes": preview.resource.size_bytes,
+                        },
+                        "content": preview.content,
+                        "truncated": preview.truncated,
+                    })
+                    .to_string(),
+                    stderr: String::new(),
+                    success: true,
+                    route: "internal:project_resources/read".to_string(),
+                },
+                Err(error) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: error,
+                    success: false,
+                    route: "host_rejection:project_resource_read".to_string(),
+                },
+            }
+        }
+        _ => DispatchResult {
+            stdout: String::new(),
+            stderr:
+                "project_resources 仅支持 list_resources() 或 read_resource(resource_id: string)。"
+                    .to_string(),
+            success: false,
+            route: "host_rejection:project_resource_unknown_action".to_string(),
+        },
+    }
+}
+
 /// 执行单条指令的内部路由逻辑（4大核心原生工具 + MCP 插件路由，彻底杜绝历史兼容包袱）
 pub(crate) fn execute_command_inner(
     db: &DbState,
@@ -237,8 +366,21 @@ pub(crate) fn execute_command_inner(
         return task_store::dispatch(db, session_id, final_action, params);
     }
 
+    // 2.5 项目受管资源：服务端按 session→project→resource 三重边界复核。
+    if tool.eq_ignore_ascii_case("project_resources") {
+        return dispatch_project_resources(db, session_id, action, params);
+    }
+
     // 3. 核心原生工具 C: search (跨执行日志 FTS5 与实时代码 ripgrep 联邦检索)
     if tool.eq_ignore_ascii_case("search") {
+        if is_project_session(db, session_id) {
+            return DispatchResult {
+                stdout: String::new(),
+                stderr: "项目会话不允许用通用 search 扫描项目目录。请调用 project_resources.list_resources，再以 resource_id 调用 read_resource；仅明确登记的文件可读取。".to_string(),
+                success: false,
+                route: "host_rejection:project_session_unmanaged_search".to_string(),
+            };
+        }
         return retrieval::dispatch_search(db, session_id, params);
     }
 
@@ -263,8 +405,19 @@ pub(crate) fn execute_command_inner(
     }
 
     // 3.9 核心原生工具 H: artifact_manager (受管产物物理写入、元数据登记与产物账本管理)
-    if tool.eq_ignore_ascii_case("artifact_manager") || tool.eq_ignore_ascii_case("artifact_store") {
+    if tool.eq_ignore_ascii_case("artifact_manager") || tool.eq_ignore_ascii_case("artifact_store")
+    {
         return crate::agent::artifact_manager::dispatch(db, session_id, action, params);
+    }
+
+    // 项目会话不调用外部 MCP 文件/命令插件，避免任意项目根访问绕过受管资源账本。
+    if is_project_session(db, session_id) {
+        return DispatchResult {
+            stdout: String::new(),
+            stderr: "项目会话仅授权 project_resources 中已登记的文件；外部 MCP 工具被拒绝。可继续使用 web_search、web_fetch、task_store、artifact_manager 或 finish。".to_string(),
+            success: false,
+            route: "host_rejection:project_session_external_tool".to_string(),
+        };
     }
 
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
