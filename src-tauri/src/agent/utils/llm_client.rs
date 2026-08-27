@@ -185,6 +185,7 @@ pub async fn call_llm(
     messages: &SandwichContext,
     state: &State<'_, DbState>,
     model_id: String,
+    model_tier: &str,
     app: Option<&tauri::AppHandle>,
     step_id: usize,
     session_id: &str,
@@ -205,6 +206,18 @@ pub async fn call_llm(
     let api_messages = normalize_messages_for_provider(messages.assemble_messages(), &config);
     let history_estimate_at_request = messages.history_estimated_tokens();
     print_debug_messages(&api_messages);
+
+    // 📊 逐调用 telemetry 的当轮上下文快照（循环外算一次，各请求行共用）：
+    // 前缀指纹仅在完整上下文首次请求时有效；修复重发行固定 NULL。
+    let telemetry_history_count = messages.turns_history.len() as i64;
+    let telemetry_fetched_tools_count = messages.fetched_tools.len() as i64;
+    let telemetry_prefix_fingerprint: Option<String> = Some(
+        crate::agent::context::determinism::ContextFingerprint::capture(messages)
+            .combined_prefix_hash
+            .chars()
+            .take(16)
+            .collect(),
+    );
 
     // 3. 转为 serde_json::Value 供 llm 层使用
     let mut api_values: Vec<serde_json::Value> = api_messages
@@ -367,6 +380,30 @@ pub async fn call_llm(
         {
             Ok(result) => result,
             Err(error) => {
+                // 📊 请求级失败也占一行 telemetry：失败重试成本不再从账本上消失
+                crate::agent::telemetry::record_llm_call(
+                    state.inner(),
+                    &crate::agent::telemetry::LlmCallRecord {
+                        session_id,
+                        step_id: step_id as i64,
+                        model_id: &model_id,
+                        model_tier,
+                        reasoning_effort,
+                        request_kind: if uses_primary_prompt {
+                            "full_context"
+                        } else {
+                            "regeneration_retry"
+                        },
+                        usage_source: "unavailable",
+                        outcome: "request_error",
+                        request_try: current_try as i64,
+                        transport_attempt_count: 0,
+                        usage: &TokenUsage::default(),
+                        history_message_count: telemetry_history_count,
+                        fetched_tools_count: telemetry_fetched_tools_count,
+                        prefix_fingerprint: None,
+                    },
+                );
                 if log_context {
                     log_llm_exchange_to_file(
                         session_id,
@@ -387,6 +424,30 @@ pub async fn call_llm(
 
         // ⚡ 若早期熔断已触发，直接返回合成的 finish 指令，交由主循环终态质询拦截并秒级进入下一轮
         if early_finish_aborted {
+            // 📊 中断行：熔断发生点也是真实请求成本，如实入账
+            crate::agent::telemetry::record_llm_call(
+                state.inner(),
+                &crate::agent::telemetry::LlmCallRecord {
+                    session_id,
+                    step_id: step_id as i64,
+                    model_id: &model_id,
+                    model_tier,
+                    reasoning_effort,
+                    request_kind: if uses_primary_prompt {
+                        "full_context"
+                    } else {
+                        "regeneration_retry"
+                    },
+                    usage_source: "unavailable",
+                    outcome: "interrupted",
+                    request_try: current_try as i64,
+                    transport_attempt_count: result.attempt_count as i64,
+                    usage: &TokenUsage::default(),
+                    history_message_count: telemetry_history_count,
+                    fetched_tools_count: telemetry_fetched_tools_count,
+                    prefix_fingerprint: None,
+                },
+            );
             let synthetic_instruction = AgentInstruction {
                 description: "尝试调用 finish 交付（已被系统流式早期熔断拦截）".to_string(),
                 thought: "准备结束任务".to_string(),
@@ -406,16 +467,19 @@ pub async fn call_llm(
             ));
         }
 
-        // 6. Token 用量与速度指标统计
-        let token_usage = match result.usage {
-            Some(raw) => TokenUsage::new(
-                raw.prompt_tokens,
-                raw.completion_tokens,
-                raw.cached_tokens,
-                config.context_window,
-                result.ttft_ms,
-                result.total_duration_ms,
-                result.tokens_per_second,
+        // 6. Token 用量与速度指标统计（usage 来源区分：provider 真实值 / estimated 估算）
+        let (token_usage, usage_source) = match result.usage {
+            Some(raw) => (
+                TokenUsage::new(
+                    raw.prompt_tokens,
+                    raw.completion_tokens,
+                    raw.cached_tokens,
+                    config.context_window,
+                    result.ttft_ms,
+                    result.total_duration_ms,
+                    result.tokens_per_second,
+                ),
+                "provider",
             ),
             None => {
                 let (est_p, est_c) = llm::estimate_usage(
@@ -433,7 +497,7 @@ pub async fn call_llm(
                     result.tokens_per_second,
                 );
                 println!("⚠️ API 未返回 usage，使用估算值: {}", usage.summary());
-                usage
+                (usage, "estimated")
             }
         };
 
@@ -464,6 +528,34 @@ pub async fn call_llm(
 
         match parse_result {
             Ok(inst) => {
+                // 📊 成功行：instruction_ready（含完整/修复两种请求形态，各自成行）
+                crate::agent::telemetry::record_llm_call(
+                    state.inner(),
+                    &crate::agent::telemetry::LlmCallRecord {
+                        session_id,
+                        step_id: step_id as i64,
+                        model_id: &model_id,
+                        model_tier,
+                        reasoning_effort,
+                        request_kind: if uses_primary_prompt {
+                            "full_context"
+                        } else {
+                            "regeneration_retry"
+                        },
+                        usage_source,
+                        outcome: "instruction_ready",
+                        request_try: current_try as i64,
+                        transport_attempt_count: result.attempt_count as i64,
+                        usage: &token_usage,
+                        history_message_count: telemetry_history_count,
+                        fetched_tools_count: telemetry_fetched_tools_count,
+                        prefix_fingerprint: if uses_primary_prompt {
+                            telemetry_prefix_fingerprint.as_deref()
+                        } else {
+                            None
+                        },
+                    },
+                );
                 if log_context {
                     log_llm_exchange_to_file(
                         session_id,
@@ -488,6 +580,31 @@ pub async fn call_llm(
                 ));
             }
             Err(e) => {
+                // 📊 解析失败行：格式错误的真实成本（请求已发生、token 已消耗）
+                // 各占一行，不再只被最终成功的快照掩盖
+                crate::agent::telemetry::record_llm_call(
+                    state.inner(),
+                    &crate::agent::telemetry::LlmCallRecord {
+                        session_id,
+                        step_id: step_id as i64,
+                        model_id: &model_id,
+                        model_tier,
+                        reasoning_effort,
+                        request_kind: if uses_primary_prompt {
+                            "full_context"
+                        } else {
+                            "regeneration_retry"
+                        },
+                        usage_source,
+                        outcome: "parse_error",
+                        request_try: current_try as i64,
+                        transport_attempt_count: result.attempt_count as i64,
+                        usage: &token_usage,
+                        history_message_count: telemetry_history_count,
+                        fetched_tools_count: telemetry_fetched_tools_count,
+                        prefix_fingerprint: None,
+                    },
+                );
                 log_llm_exchange_to_file(
                     session_id,
                     step_id,

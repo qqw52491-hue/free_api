@@ -396,6 +396,9 @@ pub struct StreamResult {
     pub ttft_ms: u64,
     pub total_duration_ms: u64,
     pub tokens_per_second: f64,
+    /// 本次成功历经的实际请求尝试数（含 transient 重试；首次即成功 = 1）。
+    /// 失败路径 Err(String) 不携带该值，telemetry 侧记 0 表示不可知。
+    pub attempt_count: u32,
 }
 
 // ========================================================================
@@ -672,6 +675,7 @@ pub async fn stream_once<F: FnMut(StreamEvent) -> bool>(
         ttft_ms,
         total_duration_ms,
         tokens_per_second,
+        attempt_count: 1,
     })
 }
 
@@ -724,7 +728,11 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     let mut last_error = String::new();
     for i in 0..max_retries {
         match stream_once(config, messages, reasoning_effort, interrupt_rx, on_event).await {
-            Ok(result) => return Ok(result),
+            Ok(mut result) => {
+                // 成功路径回填实际尝试次数（首次即成功 = 1，transient 重试后成功 = i+1）
+                result.attempt_count = i + 1;
+                return Ok(result);
+            }
             Err(e) => {
                 if e == STREAM_INTERRUPTED_ERROR {
                     return Err(e);

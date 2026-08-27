@@ -2,7 +2,9 @@ use crate::agent::types::TokenUsage;
 use crate::db::DbState;
 use serde_json::Value;
 
-/// 一次完整 planning 调用的纯观测记录（零行为参与）。
+/// 一次实际 LLM 请求尝试的纯观测记录（零行为参与）。
+/// 记录点在 call_llm 内每个请求结果旁：成功、parse_error、request_error、
+/// interrupted 各占一行——JSON 修复重发不再混入完整上下文的缓存基线。
 /// 所有字段均来自调用点已有事实；不含 API key、base URL、prompt、正文、工具输出。
 #[derive(Debug, Clone)]
 pub struct LlmCallRecord<'a> {
@@ -11,15 +13,22 @@ pub struct LlmCallRecord<'a> {
     pub model_id: &'a str,
     pub model_tier: &'a str,
     pub reasoning_effort: &'a str,
-    /// 完整上下文请求（full_context）或未回传 usage 的调用（no_usage_reported）。
-    /// 与主循环水位基线的既有约定一致：prompt_tokens > 0 视为完整请求。
-    pub route: &'a str,
-    /// 本次成功前经历的 JSON 修复重试次数（外层可见部分）。
-    pub retry_index: i64,
+    /// 请求形态：full_context（完整上下文）/ regeneration_retry（原位纠偏重发）。
+    /// 不再用 prompt_tokens>0 猜测——修复请求同样有 prompt tokens。
+    pub request_kind: &'a str,
+    /// usage 来源：provider / estimated（供应商未回传时的估算）/ unavailable（失败）。
+    pub usage_source: &'a str,
+    /// 结果类别：instruction_ready / parse_error / request_error / interrupted。
+    pub outcome: &'a str,
+    /// call_llm 内部请求序号（第几次发请求，JSON 修复重发递增）。
+    pub request_try: i64,
+    /// 成功路径的实际 transport 尝试数（含 transient 重试）；失败路径 0 = 不可知。
+    pub transport_attempt_count: i64,
     pub usage: &'a TokenUsage,
     pub history_message_count: i64,
     pub fetched_tools_count: i64,
     /// 稳定前缀版本（ContextFingerprint::capture 的 combined_prefix_hash 前 16 位）。
+    /// 仅 full_context 首次请求计算；regeneration_retry / 失败行固定 NULL。
     pub prefix_fingerprint: Option<&'a str>,
 }
 
@@ -39,8 +48,14 @@ pub fn record_llm_call(db: &DbState, record: &LlmCallRecord) {
             route, retry_index, prompt_tokens, completion_tokens, total_tokens,
             cached_tokens, cache_hit_rate, context_window, usage_percent,
             history_message_count, fetched_tools_count, prefix_fingerprint,
-            ttft_ms, total_duration_ms
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            ttft_ms, total_duration_ms,
+            session_call_index, request_kind, usage_source, outcome,
+            request_try, transport_attempt_count
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
+            (SELECT COALESCE(COUNT(*), 0) + 1 FROM agent_llm_calls WHERE session_id = ?20),
+            ?21, ?22, ?23, ?24, ?25
+        )",
         rusqlite::params![
             record.session_id,
             record.step_id,
@@ -48,8 +63,7 @@ pub fn record_llm_call(db: &DbState, record: &LlmCallRecord) {
             record.model_id,
             record.model_tier,
             record.reasoning_effort,
-            record.route,
-            record.retry_index,
+            record.request_kind,
             record.usage.prompt_tokens,
             record.usage.completion_tokens,
             record.usage.total_tokens,
@@ -62,6 +76,12 @@ pub fn record_llm_call(db: &DbState, record: &LlmCallRecord) {
             record.prefix_fingerprint,
             record.usage.ttft_ms as i64,
             record.usage.total_duration_ms as i64,
+            record.session_id,
+            record.request_kind,
+            record.usage_source,
+            record.outcome,
+            record.request_try,
+            record.transport_attempt_count,
         ],
     );
     if let Err(e) = result {
@@ -74,10 +94,11 @@ pub fn list_llm_calls(db: &DbState, session_id: &str) -> Result<Vec<Value>, Stri
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT step_id, model_id, model_tier, reasoning_effort, route, retry_index,
+            "SELECT step_id, model_id, model_tier, reasoning_effort, request_kind, request_try,
                     prompt_tokens, completion_tokens, cached_tokens, cache_hit_rate,
                     context_window, usage_percent, history_message_count,
-                    fetched_tools_count, prefix_fingerprint, ttft_ms, total_duration_ms, created_at
+                    fetched_tools_count, prefix_fingerprint, ttft_ms, total_duration_ms, created_at,
+                    session_call_index, usage_source, outcome, transport_attempt_count
              FROM agent_llm_calls WHERE session_id = ?1 ORDER BY step_id ASC, id ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -106,8 +127,8 @@ fn json_row(row: &rusqlite::Row<'_>) -> Value {
         "model_id": nullable(1),
         "model_tier": nullable(2),
         "reasoning_effort": nullable(3),
-        "route": nullable(4),
-        "retry_index": row.get::<_, i64>(5).unwrap_or_default(),
+        "request_kind": nullable(4),
+        "request_try": row.get::<_, i64>(5).unwrap_or_default(),
         "prompt_tokens": row.get::<_, i64>(6).unwrap_or_default(),
         "completion_tokens": row.get::<_, i64>(7).unwrap_or_default(),
         "cached_tokens": row.get::<_, i64>(8).unwrap_or_default(),
@@ -120,6 +141,10 @@ fn json_row(row: &rusqlite::Row<'_>) -> Value {
         "ttft_ms": row.get::<_, i64>(15).unwrap_or_default(),
         "total_duration_ms": row.get::<_, i64>(16).unwrap_or_default(),
         "created_at": nullable(17),
+        "session_call_index": row.get::<_, i64>(18).unwrap_or_default(),
+        "usage_source": nullable(19),
+        "outcome": nullable(20),
+        "transport_attempt_count": row.get::<_, i64>(21).unwrap_or_default(),
     })
 }
 
@@ -151,7 +176,13 @@ mod tests {
                 fetched_tools_count INTEGER NOT NULL DEFAULT 0,
                 prefix_fingerprint TEXT,
                 ttft_ms INTEGER NOT NULL DEFAULT 0,
-                total_duration_ms INTEGER NOT NULL DEFAULT 0
+                total_duration_ms INTEGER NOT NULL DEFAULT 0,
+                session_call_index INTEGER NOT NULL DEFAULT 0,
+                request_kind TEXT NOT NULL DEFAULT 'full_context',
+                usage_source TEXT NOT NULL DEFAULT 'unavailable',
+                outcome TEXT NOT NULL DEFAULT 'instruction_ready',
+                request_try INTEGER NOT NULL DEFAULT 1,
+                transport_attempt_count INTEGER NOT NULL DEFAULT 0
             );",
         )
         .unwrap();
@@ -173,26 +204,37 @@ mod tests {
         }
     }
 
+    fn record(db: &DbState, session: &str, step: i64, kind: &str, source: &str, outcome: &str, try_no: i64, usage: &TokenUsage) {
+        record_llm_call(
+            db,
+            &LlmCallRecord {
+                session_id: session,
+                step_id: step,
+                model_id: "glm-test",
+                model_tier: "primary",
+                reasoning_effort: "high",
+                request_kind: kind,
+                usage_source: source,
+                outcome,
+                request_try: try_no,
+                transport_attempt_count: if outcome == "instruction_ready" { 2 } else { 0 },
+                usage,
+                history_message_count: 14,
+                fetched_tools_count: 4,
+                prefix_fingerprint: if kind == "full_context" {
+                    Some("abc123def456abc1")
+                } else {
+                    None
+                },
+            },
+        );
+    }
+
     #[test]
     fn record_and_list_roundtrip_preserves_all_fields() {
         let db = test_db();
         let usage = sample_usage();
-        record_llm_call(
-            &db,
-            &LlmCallRecord {
-                session_id: "sess-a",
-                step_id: 3,
-                model_id: "glm-test",
-                model_tier: "primary",
-                reasoning_effort: "high",
-                route: "full_context",
-                retry_index: 0,
-                usage: &usage,
-                history_message_count: 14,
-                fetched_tools_count: 4,
-                prefix_fingerprint: Some("abc123def456abc1"),
-            },
-        );
+        record(&db, "sess-a", 3, "full_context", "provider", "instruction_ready", 1, &usage);
 
         let calls = list_llm_calls(&db, "sess-a").unwrap();
         assert_eq!(calls.len(), 1);
@@ -200,6 +242,11 @@ mod tests {
         assert_eq!(call["step_id"], serde_json::json!(3));
         assert_eq!(call["model_id"], serde_json::json!("glm-test"));
         assert_eq!(call["reasoning_effort"], serde_json::json!("high"));
+        assert_eq!(call["request_kind"], serde_json::json!("full_context"));
+        assert_eq!(call["usage_source"], serde_json::json!("provider"));
+        assert_eq!(call["outcome"], serde_json::json!("instruction_ready"));
+        assert_eq!(call["request_try"], serde_json::json!(1));
+        assert_eq!(call["transport_attempt_count"], serde_json::json!(2));
         assert_eq!(call["prompt_tokens"], serde_json::json!(12_000));
         assert_eq!(call["cached_tokens"], serde_json::json!(9_000));
         assert_eq!(call["cache_hit_rate"], serde_json::json!(75.0));
@@ -211,43 +258,40 @@ mod tests {
     }
 
     #[test]
+    fn json_repair_and_failure_rows_are_separate_records() {
+        let db = test_db();
+        let usage = sample_usage();
+        // 完整上下文 parse 失败 → 修复重发成功：两行，不再只记最终成功快照
+        record(&db, "sess-a", 1, "full_context", "provider", "parse_error", 1, &usage);
+        record(&db, "sess-a", 1, "regeneration_retry", "provider", "instruction_ready", 2, &usage);
+        // request_error 行：usage 全 0、来源 unavailable、指纹 NULL
+        let zero = TokenUsage::default();
+        record(&db, "sess-a", 2, "full_context", "unavailable", "request_error", 1, &zero);
+
+        let calls = list_llm_calls(&db, "sess-a").unwrap();
+        assert_eq!(calls.len(), 3, "每次实际请求尝试各占一行");
+        assert_eq!(calls[0]["outcome"], serde_json::json!("parse_error"));
+        assert_eq!(calls[1]["request_kind"], serde_json::json!("regeneration_retry"));
+        assert!(calls[1]["prefix_fingerprint"].is_null(), "修复请求不污染前缀基线");
+        assert_eq!(calls[2]["usage_source"], serde_json::json!("unavailable"));
+        assert_eq!(calls[2]["prompt_tokens"], serde_json::json!(0));
+        assert_eq!(calls[2]["transport_attempt_count"], serde_json::json!(0));
+        // 会话内调用序号严格递增
+        let idx: Vec<i64> = calls
+            .iter()
+            .filter_map(|c| c["session_call_index"].as_i64())
+            .collect();
+        assert_eq!(idx, vec![1, 2, 3]);
+    }
+
+    #[test]
     fn records_are_ordered_by_step_and_isolated_per_session() {
         let db = test_db();
         let usage = sample_usage();
-        for (step, retry) in [(2i64, 1i64), (1, 0), (2, 0)] {
-            record_llm_call(
-                &db,
-                &LlmCallRecord {
-                    session_id: "sess-a",
-                    step_id: step,
-                    model_id: "m",
-                    model_tier: "primary",
-                    reasoning_effort: "high",
-                    route: if retry > 0 { "full_context" } else { "full_context" },
-                    retry_index: retry,
-                    usage: &usage,
-                    history_message_count: 5,
-                    fetched_tools_count: 2,
-                    prefix_fingerprint: None,
-                },
-            );
+        for step in [1i64, 2, 2] {
+            record(&db, "sess-a", step, "full_context", "provider", "instruction_ready", 1, &usage);
         }
-        record_llm_call(
-            &db,
-            &LlmCallRecord {
-                session_id: "sess-b",
-                step_id: 1,
-                model_id: "m",
-                model_tier: "primary",
-                reasoning_effort: "high",
-                route: "full_context",
-                retry_index: 0,
-                usage: &usage,
-                history_message_count: 1,
-                fetched_tools_count: 0,
-                prefix_fingerprint: None,
-            },
-        );
+        record(&db, "sess-b", 1, "full_context", "provider", "instruction_ready", 1, &usage);
 
         let a = list_llm_calls(&db, "sess-a").unwrap();
         assert_eq!(a.len(), 3, "会话隔离：sess-b 不串入");
@@ -258,32 +302,63 @@ mod tests {
         assert_eq!(steps, vec![1, 2, 2], "按 step 升序");
         let b = list_llm_calls(&db, "sess-b").unwrap();
         assert_eq!(b.len(), 1);
+        // session_call_index 各会话独立计数
+        assert_eq!(b[0]["session_call_index"], serde_json::json!(1));
     }
 
     #[test]
-    fn nullable_identifier_fields_roundtrip_as_null() {
+    fn estimated_usage_source_is_marked_not_silent() {
         let db = test_db();
         let usage = TokenUsage::default();
-        record_llm_call(
-            &db,
-            &LlmCallRecord {
-                session_id: "s",
-                step_id: 1,
-                model_id: "",
-                model_tier: "",
-                reasoning_effort: "",
-                route: "no_usage_reported",
-                retry_index: 2,
-                usage: &usage,
-                history_message_count: 0,
-                fetched_tools_count: 0,
-                prefix_fingerprint: None,
-            },
-        );
+        record(&db, "s", 1, "full_context", "estimated", "instruction_ready", 1, &usage);
         let calls = list_llm_calls(&db, "s").unwrap();
-        // 空 usage 的隔离修复调用也如实记录（retry_index 保留经历的重试事实）
-        assert_eq!(calls[0]["route"], serde_json::json!("no_usage_reported"));
-        assert_eq!(calls[0]["retry_index"], serde_json::json!(2));
-        assert_eq!(calls[0]["prompt_tokens"], serde_json::json!(0));
+        assert_eq!(calls[0]["usage_source"], serde_json::json!("estimated"));
+    }
+
+    #[test]
+    fn old_schema_columns_still_writable_via_migration_defaults() {
+        // 旧库（875cbf5 表结构）经滚动迁移补列后，旧行默认值可读、新行完整写入
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_llm_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                step_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                model_id TEXT, model_tier TEXT, reasoning_effort TEXT,
+                route TEXT NOT NULL DEFAULT 'full_context',
+                retry_index INTEGER NOT NULL DEFAULT 0,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_hit_rate REAL NOT NULL DEFAULT 0,
+                context_window INTEGER NOT NULL DEFAULT 0,
+                usage_percent REAL NOT NULL DEFAULT 0,
+                history_message_count INTEGER NOT NULL DEFAULT 0,
+                fetched_tools_count INTEGER NOT NULL DEFAULT 0,
+                prefix_fingerprint TEXT,
+                ttft_ms INTEGER NOT NULL DEFAULT 0,
+                total_duration_ms INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO agent_llm_calls (session_id, step_id, created_at, route, prompt_tokens)
+            VALUES ('old', 1, '2026-08-26', 'full_context', 500);",
+        )
+        .unwrap();
+        for alter in [
+            "ALTER TABLE agent_llm_calls ADD COLUMN session_call_index INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE agent_llm_calls ADD COLUMN request_kind TEXT NOT NULL DEFAULT 'full_context';",
+            "ALTER TABLE agent_llm_calls ADD COLUMN usage_source TEXT NOT NULL DEFAULT 'unavailable';",
+            "ALTER TABLE agent_llm_calls ADD COLUMN outcome TEXT NOT NULL DEFAULT 'instruction_ready';",
+            "ALTER TABLE agent_llm_calls ADD COLUMN request_try INTEGER NOT NULL DEFAULT 1;",
+            "ALTER TABLE agent_llm_calls ADD COLUMN transport_attempt_count INTEGER NOT NULL DEFAULT 0;",
+        ] {
+            conn.execute(alter, []).unwrap();
+        }
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+        let rows = list_llm_calls(&db, "old").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["outcome"], serde_json::json!("instruction_ready"));
+        assert_eq!(rows[0]["usage_source"], serde_json::json!("unavailable"));
     }
 }

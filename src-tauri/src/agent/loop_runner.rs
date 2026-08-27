@@ -147,6 +147,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             &context,
             &state,
             routing.model_id.clone(),
+            &routing.tier.to_string(),
             Some(&app),
             step_id,
             &final_session_id,
@@ -320,44 +321,9 @@ pub async fn run_call_llm_and_run_tool_phases(
         .map_err(|e| e.to_string())?;
         println!("{}", token_usage.summary());
 
-        // 📊 逐调用 usage telemetry（纯观测，零行为参与）：与前端事件同源数据，
-        // 落一张可 SQL 查询的表，为调优对照（单/多 Agent、提示版本、采样）建账本。
-        // 前缀指纹只在完整请求时计算（组装消息已在本轮发生，增量成本为哈希本身）。
-        {
-            let prefix_fingerprint = if token_usage.prompt_tokens > 0 {
-                crate::agent::context::determinism::ContextFingerprint::capture(&context)
-                    .combined_prefix_hash
-                    .chars()
-                    .take(16)
-                    .collect::<String>()
-            } else {
-                String::new()
-            };
-            crate::agent::telemetry::record_llm_call(
-                state.inner(),
-                &crate::agent::telemetry::LlmCallRecord {
-                    session_id: &final_session_id,
-                    step_id: step_id as i64,
-                    model_id: &routing.model_id,
-                    model_tier: &model_tier,
-                    reasoning_effort: &model_routing.reasoning_effort_for(&routing.tier),
-                    route: if token_usage.prompt_tokens > 0 {
-                        "full_context"
-                    } else {
-                        "no_usage_reported"
-                    },
-                    retry_index: retry_count as i64,
-                    usage: &token_usage,
-                    history_message_count: context.turns_history.len() as i64,
-                    fetched_tools_count: context.fetched_tools.len() as i64,
-                    prefix_fingerprint: if prefix_fingerprint.is_empty() {
-                        None
-                    } else {
-                        Some(prefix_fingerprint.as_str())
-                    },
-                },
-            );
-        }
+        // 📊 逐调用 usage telemetry 已下沉到 call_llm 内每个请求结果旁
+        //（成功 / parse_error / request_error / interrupted 各占一行），
+        // 完整上下文与 JSON 修复重发不再共用一行成功快照。
 
         // 🧠 发送最终思考完成事件到前端
         if !thinking_text.is_empty() {

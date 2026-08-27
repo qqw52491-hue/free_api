@@ -346,7 +346,13 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             fetched_tools_count INTEGER NOT NULL DEFAULT 0,
             prefix_fingerprint TEXT,
             ttft_ms INTEGER NOT NULL DEFAULT 0,
-            total_duration_ms INTEGER NOT NULL DEFAULT 0
+            total_duration_ms INTEGER NOT NULL DEFAULT 0,
+            session_call_index INTEGER NOT NULL DEFAULT 0,
+            request_kind TEXT NOT NULL DEFAULT 'full_context',
+            usage_source TEXT NOT NULL DEFAULT 'unavailable',
+            outcome TEXT NOT NULL DEFAULT 'instruction_ready',
+            request_try INTEGER NOT NULL DEFAULT 1,
+            transport_attempt_count INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_agent_llm_calls_session
             ON agent_llm_calls(session_id, step_id);
@@ -372,6 +378,15 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     let _ = conn.execute("ALTER TABLE mcp_plugins ADD COLUMN headers TEXT NOT NULL DEFAULT '{}';", []);
     // -1 = 未设置（按 base_url 推断），0 = 显式不要求交替，1 = 显式要求归并连续同角色消息
     let _ = conn.execute("ALTER TABLE platforms ADD COLUMN requires_alternating_roles INTEGER NOT NULL DEFAULT -1;", []);
+
+    // agent_llm_calls 逐调用口径扩展（旧库自愈）：从"成功返回的快照"升级为
+    // "每一次实际请求尝试的记录"——失败、JSON 修复重发、中断均各占一行。
+    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN session_call_index INTEGER NOT NULL DEFAULT 0;", []);
+    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN request_kind TEXT NOT NULL DEFAULT 'full_context';", []);
+    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN usage_source TEXT NOT NULL DEFAULT 'unavailable';", []);
+    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN outcome TEXT NOT NULL DEFAULT 'instruction_ready';", []);
+    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN request_try INTEGER NOT NULL DEFAULT 1;", []);
+    let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN transport_attempt_count INTEGER NOT NULL DEFAULT 0;", []);
     if let Err(error) = migrate_uvx_bridge_plugins_to_native(&conn) {
         eprintln!("⚠️ mcp_plugins uvx 桥转原生 HTTP 迁移失败（保留原配置继续可用）: {}", error);
     }
