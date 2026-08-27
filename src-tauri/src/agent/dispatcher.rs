@@ -783,13 +783,14 @@ mod tests {
         assert!(!res_del_fail.success);
         assert!(res_del_fail.stderr.contains("confirm: true"));
 
-        // Delete with confirm
+        // Delete with confirm，但目标不存在：必须诚实失败而非伪报成功
         let res_del_ok = crate::agent::tools::mcp_manager::dispatch(
             &db,
             "delete",
             &serde_json::json!({ "name": "fake_mcp", "confirm": true }),
         );
-        assert!(res_del_ok.success);
+        assert!(!res_del_ok.success);
+        assert!(res_del_ok.stderr.contains("未找到"));
 
         // 2. Skill Manager Add & List & Delete
         let res_add_skill = crate::agent::tools::skill_manager::dispatch(
