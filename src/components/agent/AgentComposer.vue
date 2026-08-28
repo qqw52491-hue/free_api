@@ -340,6 +340,9 @@
             <span class="telemetry-node" title="当前执行轮次与步骤">
                 <span class="t-label">🔄 步骤</span>
                 <span class="t-val">{{ (telemetry?.stepCount && telemetry.stepCount > 0) ? `第 ${telemetry.stepCount} 步` : '1 轮' }}</span>
+            </span>
+        </div>
+
         <!-- 🖼️ 图片放大全屏预览弹窗 -->
         <Transition name="fade">
             <div v-if="previewImageModal" class="image-preview-backdrop" @click="previewImageModal = null">
