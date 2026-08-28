@@ -159,14 +159,9 @@ impl AgentRouter {
         }
     }
 
-    /// 检查最近一轮的历史记录中是否包含需要视觉模型处理的图片
-    /// 注意：只检查最后一条 user 消息，因为更早的图片已经被处理过了
+    /// 检查历史记录中是否包含需要视觉模型处理的多模态图片
     fn has_pending_vision(context: &SandwichContext) -> bool {
-        // 从后往前找最后一条 user 消息
         for msg in context.turns_history.iter().rev() {
-            if msg.role != "user" {
-                continue;
-            }
             if let Some(arr) = msg.content.as_array() {
                 for item in arr {
                     if item.get("type").and_then(|t| t.as_str()) == Some("image_url") {
@@ -174,8 +169,6 @@ impl AgentRouter {
                     }
                 }
             }
-            // 找到最后一条 user 消息后就停止，不需要再往前翻
-            break;
         }
         false
     }

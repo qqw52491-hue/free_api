@@ -243,7 +243,12 @@
             </div>
           </div>
           <div class="modal-body preview-body">
-            <pre class="code-preview-block">{{ previewModal.content }}</pre>
+            <RichContentRenderer
+              v-if="previewModal.content && isMarkdownOrDoc(previewModal.resource?.relative_path)"
+              :content="previewModal.content"
+              class="preview-rich-markdown"
+            />
+            <pre v-else class="code-preview-block">{{ previewModal.content }}</pre>
           </div>
         </div>
       </div>
@@ -255,6 +260,13 @@
 import { nextTick, onMounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import RichContentRenderer from "./charts/RichContentRenderer.vue";
+
+function isMarkdownOrDoc(path?: string): boolean {
+  if (!path) return true;
+  const ext = path.split('.').pop()?.toLowerCase() || '';
+  return ['md', 'markdown', 'mdown', 'mkdn', 'docx', 'doc', 'xlsx', 'xls', 'pdf', 'txt', 'csv', 'json'].includes(ext);
+}
 
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
@@ -1122,8 +1134,16 @@ onMounted(() => {
 
 .preview-body {
   padding: 0;
-  overflow: hidden;
-  height: 460px;
+  overflow: auto;
+  max-height: 580px;
+  background: #131316;
+}
+
+.preview-rich-markdown {
+  padding: 18px 24px;
+  color: #e4e4e7;
+  font-size: 13.5px;
+  line-height: 1.65;
 }
 
 .code-preview-block {

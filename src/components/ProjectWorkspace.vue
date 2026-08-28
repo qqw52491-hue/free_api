@@ -408,7 +408,12 @@
             </div>
           </div>
           <div class="modal-body preview-body">
-            <pre class="code-preview-block">{{ previewModal.content }}</pre>
+            <RichContentRenderer
+              v-if="previewModal.content && isMarkdownOrDoc(previewModal.resource?.relative_path)"
+              :content="previewModal.content"
+              class="preview-rich-markdown"
+            />
+            <pre v-else class="code-preview-block">{{ previewModal.content }}</pre>
           </div>
         </div>
       </div>
@@ -421,12 +426,19 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import ModelSelectDropdown from "./common/ModelSelectDropdown.vue";
+import RichContentRenderer from "./charts/RichContentRenderer.vue";
 import {
   CONTEXT_BUDGET_MODES,
   type AgentModelOption,
   type ContextBudgetMode,
   type ModelRouting,
 } from "./agent/types";
+
+function isMarkdownOrDoc(path?: string): boolean {
+  if (!path) return true;
+  const ext = path.split('.').pop()?.toLowerCase() || '';
+  return ['md', 'markdown', 'mdown', 'mkdn', 'docx', 'doc', 'xlsx', 'xls', 'pdf', 'txt', 'csv', 'json'].includes(ext);
+}
 
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
 
@@ -526,7 +538,10 @@ function loadModelRouting(): ModelRouting {
 }
 
 function updateRouteValue(route: "pro" | "flash" | "vision", modelId: string) {
-  modelRouting.value[route] = modelId;
+  modelRouting.value = {
+    ...modelRouting.value,
+    [route]: modelId,
+  };
   try {
     localStorage.setItem(MODEL_ROUTING_STORAGE_KEY, JSON.stringify(modelRouting.value));
   } catch {
@@ -727,6 +742,10 @@ function formatTime(iso?: string): string {
 
 function handleClickOutside(e: MouseEvent) {
   const target = e.target as Node;
+  // 如果点击的是被 Teleport 挂载到 body 上的模型下拉选择浮层，不要关闭外部的模型配置弹窗
+  if (target instanceof Element && (target.closest('.model-dropdown-popover') || target.closest('.is-teleported'))) {
+    return;
+  }
   if (budgetPickerRef.value && !budgetPickerRef.value.contains(target)) {
     budgetMenuOpen.value = false;
   }
@@ -1047,16 +1066,17 @@ onBeforeUnmount(() => {
 
 .model-routing-popover {
   position: absolute;
-  bottom: calc(100% + 10px);
+  top: calc(100% + 8px);
+  bottom: auto;
   left: 0;
   width: 320px;
-  max-height: min(480px, calc(100vh - 140px));
+  max-height: min(480px, calc(100vh - 200px));
   overflow-y: auto;
   background: #1c1c20;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 12px;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
-  z-index: 1050;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
+  z-index: 1200;
   display: flex;
   flex-direction: column;
 }
@@ -1097,17 +1117,18 @@ onBeforeUnmount(() => {
 
 .budget-dropdown-menu {
   position: absolute;
-  bottom: calc(100% + 8px);
+  top: calc(100% + 8px);
+  bottom: auto;
   left: 0;
   width: 260px;
-  max-height: min(400px, calc(100vh - 140px));
+  max-height: min(400px, calc(100vh - 200px));
   overflow-y: auto;
   background: #1e1e24;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6);
   padding: 6px;
-  z-index: 1050;
+  z-index: 1200;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -1846,8 +1867,16 @@ onBeforeUnmount(() => {
 
 .preview-body {
   padding: 0;
-  overflow: hidden;
-  height: 460px;
+  overflow: auto;
+  max-height: 580px;
+  background: #131316;
+}
+
+.preview-rich-markdown {
+  padding: 18px 24px;
+  color: #e4e4e7;
+  font-size: 13.5px;
+  line-height: 1.65;
 }
 
 .code-preview-block {

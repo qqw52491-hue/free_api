@@ -668,60 +668,38 @@ pub async fn fetch_remote_models(
         clean_base
     };
 
-    let mut candidate_urls = vec![format!("{}/models", base_trimmed)];
-    if !base_trimmed.contains("/v1") {
-        candidate_urls.push(format!("{}/v1/models", base_trimmed));
-    }
-    if base_trimmed.contains("11434") {
-        candidate_urls.push(format!("{}/api/tags", base_trimmed));
-    }
+    let target_url = format!("{}/models", base_trimmed);
 
-    let mut last_error = String::new();
-    let mut successful_body: Option<(String, Value)> = None;
-
-    for url in &candidate_urls {
-        let mut req = client
-            .get(url)
-            .header("HTTP-Referer", "https://free-api-chat.app")
-            .header("X-OpenRouter-Title", "Free API Chat");
-        if !auth_header.is_empty() {
-            req = req.header("Authorization", &auth_header);
-        }
-
-        match req.send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    match resp.json::<Value>().await {
-                        Ok(json_val) => {
-                            successful_body = Some((url.clone(), json_val));
-                            break;
-                        }
-                        Err(e) => {
-                            last_error = format!("URL {} 响应解析 JSON 失败: {}", url, e);
-                        }
-                    }
-                } else {
-                    let err_text = resp.text().await.unwrap_or_default();
-                    last_error = format!("HTTP {} ({}): {}", status.as_u16(), url, err_text);
-                }
-            }
-            Err(e) => {
-                last_error = format!("请求 {} 失败: {}", url, e);
-            }
-        }
+    let mut req = client
+        .get(&target_url)
+        .header("HTTP-Referer", "https://free-api-chat.app")
+        .header("X-OpenRouter-Title", "Free API Chat");
+    if !auth_header.is_empty() {
+        req = req.header("Authorization", &auth_header);
     }
 
-    let (used_url, json_val) = match successful_body {
-        Some(val) => val,
-        None => {
-            return Err(format!(
-                "无法从接口拉取模型列表。尝试端点: {}。错误原因: {}",
-                candidate_urls.join(", "),
-                last_error
-            ));
-        }
-    };
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("请求 {} 失败: {}", target_url, e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let err_text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "无法从接口拉取模型列表。端点: {}，HTTP {} 错误: {}",
+            target_url,
+            status.as_u16(),
+            err_text
+        ));
+    }
+
+    let json_val = resp
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("端点 {} 响应解析 JSON 失败: {}", target_url, e))?;
+
+    let used_url = target_url;
 
     let model_ids = extract_model_ids_from_json(&json_val);
     if model_ids.is_empty() {

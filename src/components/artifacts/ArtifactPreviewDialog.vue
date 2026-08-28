@@ -136,6 +136,7 @@
           <template v-if="isHtmlPreview">
             <HtmlPreviewBlock
               :code="previewHtmlContent"
+              height="100%"
               class="dialog-html-preview"
             />
           </template>
@@ -681,6 +682,24 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   border: none !important;
+  margin: 0 !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.dialog-html-preview :deep(.card-body) {
+  flex: 1;
+  height: 100% !important;
+  min-height: 100% !important;
+}
+
+.dialog-html-preview :deep(.preview-container),
+.dialog-html-preview :deep(.sandbox-iframe) {
+  height: 100% !important;
+  min-height: 100% !important;
 }
 
 .markdown-preview-container {

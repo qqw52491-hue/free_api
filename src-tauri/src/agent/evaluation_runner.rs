@@ -458,6 +458,7 @@ pub async fn start_background_agent_evaluation(
             Some(worker_session_id.clone()),
             Some(true),
             Some(20),
+            None,
             worker_workspace,
         ));
 

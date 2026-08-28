@@ -1,3 +1,13 @@
+export interface ParsedAttachment {
+    file_name: string;
+    file_path: string;
+    size_bytes: number;
+    content_type: string;
+    prompt_text: string;
+    image_data_url?: string | null;
+    raw_preview?: string | null;
+}
+
 export interface AgentModelOption {
     id: string;
     name: string;

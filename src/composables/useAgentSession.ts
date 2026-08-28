@@ -31,6 +31,7 @@ import {
     type AgentToolStatus,
     type ContextBudgetMode,
     type LlmParseErrorItem,
+    type ParsedAttachment,
 } from "../components/agent/types";
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
 
@@ -1209,7 +1210,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         await register(`agent-tool-event-${sid}`, (payload) => handleToolEvent(asRecord(payload)));
     }
 
-    async function runAgent(nextGoal?: string) {
+    async function runAgent(nextGoal?: string, attachments?: ParsedAttachment[]) {
         const requestedGoal = (nextGoal ?? goalInput.value).trim();
         if (!requestedGoal || isRunning.value) return;
 
@@ -1245,7 +1246,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         clearSession();
         runTerminal.value = false;
         currentGoal.value = requestedGoal;
-        if (!nextGoal) goalInput.value = "";
+        goalInput.value = "";
         runStartedAt.value = Date.now();
         isRunning.value = true;
         isThinking.value = true;
@@ -1261,6 +1262,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 sessionId: currentSessionId,
                 logContext: logContext.value,
                 transientLlmRequestRetries: retryAttempts.value === 0 ? 1 : Math.min(100, Math.max(1, retryAttempts.value + 1)),
+                attachments: attachments && attachments.length > 0 ? attachments : undefined,
             });
         } catch (error) {
             const message = toText(error) || "任务初始化失败。";

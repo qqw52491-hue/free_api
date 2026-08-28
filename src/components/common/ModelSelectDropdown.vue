@@ -29,13 +29,17 @@
       </div>
     </button>
 
-    <!-- Dropdown Popover -->
-    <Transition name="scale-fade">
-      <div
-        class="model-dropdown-popover"
-        :class="[`placement-${actualPlacement}`, { 'align-right': alignRight }]"
-        v-if="isOpen"
-      >
+    <!-- Dropdown Popover (Teleport directly to body to eliminate any overflow clipping) -->
+    <Teleport to="body">
+      <Transition name="scale-fade">
+        <div
+          ref="popoverRef"
+          class="model-dropdown-popover is-teleported"
+          :class="[`placement-${actualPlacement}`, { 'align-right': alignRight }]"
+          :style="popoverFixedStyle"
+          v-if="isOpen"
+          @click.stop
+        >
         <!-- Search Input Bar -->
         <div class="dropdown-search-bar">
           <div class="search-input-wrap">
@@ -137,7 +141,8 @@
         </div>
       </div>
     </Transition>
-  </div>
+  </Teleport>
+</div>
 </template>
 
 <script setup lang="ts">
@@ -182,9 +187,11 @@ const emit = defineEmits<{
 const isOpen = ref(false)
 const searchQuery = ref('')
 const wrapperRef = ref<HTMLElement | null>(null)
+const popoverRef = ref<HTMLElement | null>(null)
 const searchInputRef = ref<HTMLInputElement | null>(null)
 const actualPlacement = ref<'top' | 'bottom'>('bottom')
 const alignRight = ref(false)
+const popoverCoords = ref<{ top: number; left: number; minWidth: number }>({ top: 0, left: 0, minWidth: 340 })
 
 function calculatePlacement() {
   if (!wrapperRef.value) return
@@ -192,26 +199,56 @@ function calculatePlacement() {
   const spaceBelow = window.innerHeight - rect.bottom
   const spaceAbove = rect.top
 
+  let placement: 'top' | 'bottom' = 'bottom'
   if (props.placement === 'top') {
-    actualPlacement.value = 'top'
+    placement = 'top'
   } else if (props.placement === 'bottom') {
-    actualPlacement.value = 'bottom'
+    placement = 'bottom'
   } else {
     // 弹窗高度大约 360-400px，若下方空间不足且上方空间更大则自适应向上弹出
     if (spaceBelow < 380 && spaceAbove > spaceBelow) {
-      actualPlacement.value = 'top'
+      placement = 'top'
     } else {
-      actualPlacement.value = 'bottom'
+      placement = 'bottom'
     }
   }
+  actualPlacement.value = placement
 
-  // 水平右对齐自适应：若右侧距离屏幕边缘较近，则贴右对齐防止溢出
-  if (rect.left + 380 > window.innerWidth && rect.right >= 340) {
+  const minWidth = Math.max(340, rect.width)
+  let left = rect.left
+  if (left + minWidth > window.innerWidth - 16) {
+    left = Math.max(16, window.innerWidth - minWidth - 16)
     alignRight.value = true
   } else {
     alignRight.value = false
   }
+
+  const top = placement === 'top' ? (rect.top - 6) : (rect.bottom + 6)
+  popoverCoords.value = {
+    top,
+    left,
+    minWidth,
+  }
 }
+
+const popoverFixedStyle = computed(() => {
+  if (actualPlacement.value === 'top') {
+    return {
+      position: 'fixed' as const,
+      bottom: `${Math.max(10, window.innerHeight - popoverCoords.value.top)}px`,
+      left: `${Math.max(10, popoverCoords.value.left)}px`,
+      minWidth: `${popoverCoords.value.minWidth}px`,
+      zIndex: 99999,
+    }
+  }
+  return {
+    position: 'fixed' as const,
+    top: `${Math.max(10, popoverCoords.value.top)}px`,
+    left: `${Math.max(10, popoverCoords.value.left)}px`,
+    minWidth: `${popoverCoords.value.minWidth}px`,
+    zIndex: 99999,
+  }
+})
 
 const selectedModel = computed(() => {
   if (!props.modelValue) return null
@@ -310,9 +347,12 @@ watch(isOpen, async (val) => {
 
 // 点击外部区域自动关闭
 function handleClickOutside(event: MouseEvent) {
-  if (wrapperRef.value && !wrapperRef.value.contains(event.target as Node)) {
-    closeDropdown()
-  }
+  if (!isOpen.value) return;
+  const target = event.target as Node;
+  if (wrapperRef.value && wrapperRef.value.contains(target)) return;
+  if (popoverRef.value && popoverRef.value.contains(target)) return;
+  if (target instanceof Element && popoverRef.value && target.closest('.model-dropdown-popover') === popoverRef.value) return;
+  closeDropdown();
 }
 
 function handleKeyDown(event: KeyboardEvent) {
@@ -321,14 +361,22 @@ function handleKeyDown(event: KeyboardEvent) {
   }
 }
 
+function handleWindowScroll() {
+  if (isOpen.value) calculatePlacement();
+}
+
 onMounted(() => {
   document.addEventListener('click', handleClickOutside, true)
   window.addEventListener('keydown', handleKeyDown)
+  window.addEventListener('scroll', handleWindowScroll, true)
+  window.addEventListener('resize', calculatePlacement)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleClickOutside, true)
   window.removeEventListener('keydown', handleKeyDown)
+  window.removeEventListener('scroll', handleWindowScroll, true)
+  window.removeEventListener('resize', calculatePlacement)
 })
 </script>
 
@@ -469,7 +517,7 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: var(--radius-md, 12px);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08);
-  z-index: 1000;
+  z-index: 2100;
   display: flex;
   flex-direction: column;
   overflow: hidden;

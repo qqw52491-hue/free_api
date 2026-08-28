@@ -367,9 +367,75 @@ fn extract_docx(bytes: &[u8], max_chars: usize) -> Result<ExtractedContent, Stri
     })
 }
 
-/// 4. 纯文本文件提取
+fn strip_html_to_clean_text(html: &str) -> String {
+    let mut s = html.to_string();
+    while let Some(start) = s.find("<style") {
+        if let Some(end) = s[start..].find("</style>") {
+            s.replace_range(start..start + end + 8, "");
+        } else {
+            break;
+        }
+    }
+    while let Some(start) = s.find("<script") {
+        if let Some(end) = s[start..].find("</script>") {
+            s.replace_range(start..start + end + 9, "");
+        } else {
+            break;
+        }
+    }
+    while let Some(start) = s.find("<xml") {
+        if let Some(end) = s[start..].find("</xml>") {
+            s.replace_range(start..start + end + 6, "");
+        } else {
+            break;
+        }
+    }
+    while let Some(start) = s.find("<!--") {
+        if let Some(end) = s[start..].find("-->") {
+            s.replace_range(start..start + end + 3, "");
+        } else {
+            break;
+        }
+    }
+    s = s.replace("<h1>", "\n# ")
+        .replace("</h1>", "\n")
+        .replace("<h2>", "\n## ")
+        .replace("</h2>", "\n")
+        .replace("<h3>", "\n### ")
+        .replace("</h3>", "\n")
+        .replace("<p>", "\n")
+        .replace("</p>", "\n")
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("<li>", "\n- ")
+        .replace("</li>", "");
+    let mut in_tag = false;
+    let mut clean = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '<' {
+            in_tag = true;
+        } else if c == '>' {
+            in_tag = false;
+        } else if !in_tag {
+            clean.push(c);
+        }
+    }
+    clean.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 4. 纯文本与 HTML 文件提取
 fn extract_text_file(bytes: &[u8], max_chars: usize) -> Result<ExtractedContent, String> {
-    let text = String::from_utf8_lossy(bytes).to_string();
+    let raw = String::from_utf8_lossy(bytes).to_string();
+    let text = if raw.contains("<html") || raw.contains("<!DOCTYPE") || raw.contains("<body") {
+        strip_html_to_clean_text(&raw)
+    } else {
+        raw
+    };
     let total = text.chars().count();
     let truncated = total > max_chars;
     let final_text = if truncated {

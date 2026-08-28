@@ -191,9 +191,49 @@ fn canonical_project_file(
         return Err("项目资源必须是可读取的普通文件".to_string());
     }
     if !requested.starts_with(&root) {
-        return Err("资源文件位于项目根目录外，已拒绝登记".to_string());
+        return Err("资源文件位于项目根目录外，已拒绝访问".to_string());
     }
     Ok((project, requested))
+}
+
+fn prepare_and_import_project_file(
+    conn: &Connection,
+    project_id: &str,
+    raw_path: &str,
+) -> Result<(AgentProject, PathBuf), String> {
+    let project = get_project(conn, project_id)?;
+    let root = PathBuf::from(&project.root_path)
+        .canonicalize()
+        .map_err(|_| "项目根目录已不存在或无法访问".to_string())?;
+    let path = PathBuf::from(raw_path.trim());
+    let target = if path.is_relative() {
+        root.join(path)
+    } else {
+        path
+    };
+    let requested = target
+        .canonicalize()
+        .map_err(|_| "资源文件不存在或无法访问".to_string())?;
+    if !requested.is_file() {
+        return Err("项目资源必须是可读取的普通文件".to_string());
+    }
+    // 🌟 如果文件位于项目外部（例如桌面/下载目录），自动复制一份到项目工作区中并登记
+    let canonical = if !requested.starts_with(&root) {
+        let file_name = requested
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("imported_file"));
+        let target_in_root = root.join(file_name);
+        if target_in_root != requested {
+            std::fs::copy(&requested, &target_in_root)
+                .map_err(|e| format!("导入外部文件到项目目录失败: {}", e))?;
+        }
+        target_in_root
+            .canonicalize()
+            .map_err(|_| "导入后文件无法访问".to_string())?
+    } else {
+        requested
+    };
+    Ok((project, canonical))
 }
 
 fn list_project_resources_row(
@@ -220,7 +260,7 @@ fn add_project_resource_row(
     project_id: &str,
     raw_path: &str,
 ) -> Result<AgentProjectResource, String> {
-    let (project, canonical_path) = canonical_project_file(conn, project_id, raw_path)?;
+    let (project, canonical_path) = prepare_and_import_project_file(conn, project_id, raw_path)?;
     let metadata = std::fs::metadata(&canonical_path)
         .map_err(|error| format!("无法读取资源元数据: {}", error))?;
     let relative_path = canonical_path
@@ -317,7 +357,7 @@ pub(crate) fn add_project_resource_for_session(
     let Some(project) = project_for_session(conn, session_id)? else {
         return Err("当前会话未关联项目，无法登记项目受管资源。".to_string());
     };
-    let (project, canonical_path) = canonical_project_file(conn, &project.id, raw_path)?;
+    let (project, canonical_path) = prepare_and_import_project_file(conn, &project.id, raw_path)?;
     let metadata = std::fs::metadata(&canonical_path)
         .map_err(|error| format!("无法读取资源元数据: {}", error))?;
     let relative_path = canonical_path
@@ -695,16 +735,18 @@ mod tests {
             project_for_session(&conn, &session.id).unwrap().unwrap().id,
             project.id
         );
+        let imported =
+            add_project_resource_row(&conn, &project.id, outside.to_string_lossy().as_ref())
+                .unwrap();
+        assert_eq!(imported.relative_path, "outside.txt");
         assert_eq!(
             project_resources_for_session(&conn, &session.id)
                 .unwrap()
                 .len(),
-            1
+            2
         );
-        assert!(
-            add_project_resource_row(&conn, &project.id, outside.to_string_lossy().as_ref())
-                .is_err()
-        );
+        // 直接按原始外部绝对路径做项目文件检索时，canonical_project_file 仍做安全越界拦截
+        assert!(canonical_project_file(&conn, &project.id, outside.to_string_lossy().as_ref()).is_err());
 
         drop(conn);
         let _ = std::fs::remove_dir_all(base);

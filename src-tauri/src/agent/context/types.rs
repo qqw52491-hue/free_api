@@ -445,6 +445,11 @@ impl SandwichContext {
 
     /// 注入截图/图片反馈信息 (多模态)
     pub fn add_image_feedback(&mut self, text: &str, base64_image: &str) {
+        let url = if base64_image.starts_with("data:") {
+            base64_image.to_string()
+        } else {
+            format!("data:image/jpeg;base64,{}", base64_image)
+        };
         let msg = ChatMessage {
             role: "user".to_string(),
             content: json!([
@@ -452,7 +457,7 @@ impl SandwichContext {
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": format!("data:image/jpeg;base64,{}", base64_image)
+                        "url": url
                     }
                 }
             ]),

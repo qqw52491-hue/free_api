@@ -348,9 +348,9 @@ function handleActiveThoughtSelect() {
     inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("detail");
 }
-function submitComposer() {
+function submitComposer(payload?: { text: string; attachments?: any[] }) {
     if (session.isRunning.value) void session.sendHumanInput();
-    else void session.runAgent();
+    else void session.runAgent(payload?.text || session.goalInput.value, payload?.attachments);
 }
 function openPluginManager() {
     settingsOpen.value = false;

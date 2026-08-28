@@ -70,7 +70,7 @@
     </div>
 
     <!-- 纯净展示主体 -->
-    <div class="card-body" :style="{ height: isFullscreen ? '100vh' : (typeof height === 'number' ? `${height}px` : height) }">
+    <div class="card-body" :style="{ height: isFullscreen ? '100vh' : (height === '100%' ? '100%' : (typeof height === 'number' ? `${height}px` : height)), flex: height === '100%' ? '1' : undefined }">
       <!-- 1. 实时预览 (纯净沙箱直接展示) -->
       <div v-show="activeTab === 'preview'" class="preview-container">
         <iframe

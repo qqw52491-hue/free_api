@@ -10,47 +10,15 @@
         >
             <!-- 📎 附件缩略图与文件卡片预览托盘 (Attachment Tray) -->
             <div v-if="attachments.length > 0" class="composer-attachments-tray">
-                <div
+                <AttachmentCard
                     v-for="(item, idx) in attachments"
                     :key="idx"
-                    class="attachment-chip-card"
-                    :class="{ 'is-image': isImageAttachment(item) }"
-                >
-                    <!-- 1. 图片缩略图卡片 -->
-                    <template v-if="isImageAttachment(item)">
-                        <div class="thumb-wrap" title="点击放大预览图片" @click.stop="openImagePreview(item)">
-                            <img :src="item.image_data_url || ''" :alt="item.file_name" class="img-thumbnail" />
-                            <div class="thumb-overlay">
-                                <svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
-                            </div>
-                        </div>
-                        <div class="attachment-meta" @click.stop="openImagePreview(item)">
-                            <span class="file-name" :title="item.file_name">{{ item.file_name }}</span>
-                            <span class="file-size">{{ formatFileSize(item.size_bytes) }}</span>
-                        </div>
-                    </template>
-
-                    <!-- 2. 文档/表格/代码/压缩包卡片 -->
-                    <template v-else>
-                        <div class="file-icon-badge" :class="getFileBadgeClass(item)">
-                            <span>{{ getFileBadgeIcon(item) }}</span>
-                        </div>
-                        <div class="attachment-meta">
-                            <span class="file-name" :title="item.file_name">{{ item.file_name }}</span>
-                            <span class="file-size">{{ formatFileSize(item.size_bytes) }}</span>
-                        </div>
-                    </template>
-
-                    <!-- 移除附件按钮 -->
-                    <button
-                        type="button"
-                        class="remove-attachment-btn"
-                        title="移除此附件"
-                        @click.stop="removeAttachment(idx)"
-                    >
-                        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                    </button>
-                </div>
+                    :attachment="item"
+                    :removable="true"
+                    @preview-image="openImagePreview"
+                    @preview-doc="openDocPreview"
+                    @remove="removeAttachment(idx)"
+                />
             </div>
 
             <!-- 拖拽高亮提示 -->
@@ -76,14 +44,17 @@
                 <div class="composer-tools">
                     <button
                         type="button"
-                        class="composer-tool-btn"
-                        title="上传/附加数据文件 (Excel, Word, PDF, Code...)"
+                        class="composer-tool-btn attach-btn"
+                        title="上传/附加数据文件 (图片、Excel、Word、PDF、代码...)"
                         :disabled="isRunning"
                         @click="promptAttachFiles"
                     >
                         <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                        <span class="tool-btn-label">附件</span>
                     </button>
-                    
+
+                    <span class="tool-divider"></span>
+
                     <!-- 🤖 模型路由精简浮层卡片 (左下角与上下文模式并排) -->
                     <div class="model-picker-wrap" ref="modelPickerRef">
                         <button
@@ -343,20 +314,13 @@
             </span>
         </div>
 
-        <!-- 🖼️ 图片放大全屏预览弹窗 -->
-        <Transition name="fade">
-            <div v-if="previewImageModal" class="image-preview-backdrop" @click="previewImageModal = null">
-                <div class="image-preview-dialog" @click.stop>
-                    <div class="dialog-header">
-                        <span class="dialog-title">{{ previewImageModal.file_name }} ({{ formatFileSize(previewImageModal.size_bytes) }})</span>
-                        <button type="button" class="btn-close-dialog" @click="previewImageModal = null">×</button>
-                    </div>
-                    <div class="dialog-body">
-                        <img :src="previewImageModal.image_data_url || ''" :alt="previewImageModal.file_name" class="full-preview-img" />
-                    </div>
-                </div>
-            </div>
-        </Transition>
+        <!-- 📎 全局全屏附件预览弹窗 (Teleport 到 body，杜绝容器 backdrop-filter 遮挡) -->
+        <AttachmentPreviewModal
+            :image-modal="previewImageModal"
+            :doc-modal="previewDocModal"
+            @close-image="previewImageModal = null"
+            @close-doc="previewDocModal = null"
+        />
     </footer>
 </template>
 
@@ -365,6 +329,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import ModelSelectDropdown from "../common/ModelSelectDropdown.vue";
+import AttachmentCard from "./AttachmentCard.vue";
+import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
 import {
     CONTEXT_BUDGET_MODES,
     type AgentHumanForm,
@@ -392,7 +358,7 @@ const emit = defineEmits<{
     "update:draft": [value: string];
     "update:model-routing": [routing: ModelRouting];
     "update:budget-mode": [mode: ContextBudgetMode];
-    submit: [];
+    submit: [payload?: { text: string; attachments: ParsedAttachment[] }];
     stop: [];
     "open-settings": [];
     "attach-files": [paths: string[]];
@@ -413,33 +379,7 @@ interface ParsedAttachment {
 const attachments = ref<ParsedAttachment[]>([]);
 const isDraggingOver = ref(false);
 const previewImageModal = ref<ParsedAttachment | null>(null);
-
-function isImageAttachment(item: ParsedAttachment): boolean {
-    return Boolean(
-        item.image_data_url ||
-        item.content_type?.startsWith("image/") ||
-        /\.(png|jpg|jpeg|webp|gif|bmp)$/i.test(item.file_name)
-    );
-}
-
-function getFileBadgeIcon(item: ParsedAttachment): string {
-    const ext = item.file_name.split(".").pop()?.toLowerCase() || "";
-    if (["xlsx", "xls", "csv", "ods"].includes(ext)) return "📊";
-    if (["pdf"].includes(ext)) return "📄";
-    if (["docx", "doc"].includes(ext)) return "📝";
-    if (["zip", "tar", "gz"].includes(ext)) return "📦";
-    if (["rs", "ts", "js", "py", "go", "java", "c", "cpp", "html", "css", "json", "sql"].includes(ext)) return "💻";
-    return "📎";
-}
-
-function getFileBadgeClass(item: ParsedAttachment): string {
-    const ext = item.file_name.split(".").pop()?.toLowerCase() || "";
-    if (["xlsx", "xls", "csv"].includes(ext)) return "badge-excel";
-    if (["pdf"].includes(ext)) return "badge-pdf";
-    if (["docx", "doc"].includes(ext)) return "badge-word";
-    if (["zip", "tar", "gz"].includes(ext)) return "badge-zip";
-    return "badge-generic";
-}
+const previewDocModal = ref<ParsedAttachment | null>(null);
 
 function formatFileSize(bytes?: number): string {
     if (!bytes || bytes === 0) return "0 B";
@@ -449,9 +389,11 @@ function formatFileSize(bytes?: number): string {
 }
 
 function openImagePreview(item: ParsedAttachment) {
-    if (item.image_data_url) {
-        previewImageModal.value = item;
-    }
+    previewImageModal.value = item;
+}
+
+function openDocPreview(item: ParsedAttachment) {
+    previewDocModal.value = item;
 }
 
 function removeAttachment(index: number) {
@@ -614,6 +556,10 @@ function selectBudgetMode(mode: ContextBudgetMode) {
 
 function handleClickOutside(e: MouseEvent) {
     const target = e.target as Node;
+    // 如果点击的是被 Teleport 挂载到 body 上的模型下拉选择浮层，不要关闭外部的模型配置弹窗
+    if (target instanceof Element && (target.closest('.model-dropdown-popover') || target.closest('.is-teleported'))) {
+        return;
+    }
     if (budgetPickerRef.value && !budgetPickerRef.value.contains(target)) {
         budgetMenuOpen.value = false;
     }
@@ -675,18 +621,22 @@ const canSubmit = computed(() => {
 function submit() {
     if (!canSubmit.value || props.isSending) return;
 
-    let finalPrompt = props.draft.trim();
-    if (attachments.value.length > 0) {
-        const attachTexts = attachments.value.map((a) => a.prompt_text.trim()).filter(Boolean);
-        if (attachTexts.length > 0) {
-            const block = attachTexts.join("\n\n");
-            finalPrompt = finalPrompt ? `${finalPrompt}\n\n${block}` : block;
-        }
-        attachments.value = [];
-    }
+    let userText = props.draft.trim();
+    const currentAtts = [...attachments.value];
 
-    emit("update:draft", finalPrompt);
-    emit("submit");
+    if (currentAtts.length > 0) {
+        // 🌟 结构化排列附件清单：清晰标注文件名、大小与本地物理路径
+        const briefBadges = currentAtts
+            .map((a) => `📎 [附件: ${a.file_name} (${formatFileSize(a.size_bytes)}) | 路径: ${a.file_path}]`)
+            .join("\n");
+        const visiblePrompt = userText ? `${briefBadges}\n\n${userText}` : briefBadges;
+        emit("update:draft", "");
+        attachments.value = [];
+        emit("submit", { text: visiblePrompt, attachments: currentAtts });
+    } else {
+        emit("update:draft", "");
+        emit("submit", { text: userText, attachments: [] });
+    }
 }
 
 function formatTokens(count: number): string {
@@ -972,6 +922,113 @@ const contextLevelClass = computed(() => {
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
 }
 
+/* 📄 文档/PDF 在线富文本预览弹窗 */
+.doc-preview-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.82);
+    backdrop-filter: blur(10px);
+    z-index: 2000;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+}
+
+.doc-preview-dialog {
+    width: min(880px, 94vw);
+    height: min(780px, 88vh);
+    background: #18181c;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.85);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.dialog-title-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.dialog-file-icon {
+    font-size: 20px;
+    line-height: 1;
+}
+
+.dialog-file-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.dialog-file-meta h3 {
+    margin: 0;
+    font-size: 13.5px;
+    font-weight: 650;
+    color: #f4f4f5;
+}
+
+.dialog-file-meta small {
+    font-size: 11px;
+    color: #71717a;
+}
+
+.dialog-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.btn-copy-doc {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 500;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #e4e4e7;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.btn-copy-doc:hover {
+    background: rgba(255, 255, 255, 0.14);
+    color: #ffffff;
+}
+
+.doc-dialog-body {
+    flex: 1;
+    padding: 20px 24px;
+    overflow-y: auto;
+    background: #141417;
+}
+
+.doc-markdown-content {
+    color: #e4e4e7;
+    font-size: 13.5px;
+    line-height: 1.65;
+}
+
+.doc-raw-preview {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: #d4d4d8;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.doc-empty-hint {
+    padding: 40px 0;
+    text-align: center;
+    color: #71717a;
+    font-size: 13px;
+}
+
 textarea {
     width: 100%;
     min-height: 40px;
@@ -1006,7 +1063,43 @@ textarea::placeholder {
     align-items: center;
     gap: 8px;
 }
-.composer-tools button {
+
+.attach-btn {
+    width: auto !important;
+    height: 28px !important;
+    padding: 0 10px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 5px !important;
+    font-size: 12px !important;
+    font-weight: 500 !important;
+    color: #a1a1aa !important;
+    background: rgba(255, 255, 255, 0.04) !important;
+    border: 1px solid rgba(255, 255, 255, 0.09) !important;
+    border-radius: 6px !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.attach-btn:hover {
+    color: #ffffff !important;
+    background: rgba(255, 255, 255, 0.09) !important;
+    border-color: rgba(255, 255, 255, 0.18) !important;
+}
+
+.tool-btn-label {
+    font-size: 12px;
+}
+
+.tool-divider {
+    display: inline-block;
+    width: 1px;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.08);
+    margin: 0 2px;
+}
+
+.composer-tools button:not(.attach-btn):not(.model-chip):not(.budget-chip):not(.sync-all-btn):not(.close-popover-btn):not(.effort-step-btn):not(.budget-menu-item) {
     display: grid;
     place-items: center;
     width: 28px;
@@ -1091,7 +1184,7 @@ textarea::placeholder {
     border-radius: 12px;
     box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
     padding: 14px;
-    z-index: 1050;
+    z-index: 1300;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -1356,9 +1449,9 @@ textarea::placeholder {
     background: #1e1e24;
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 10px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.08);
     padding: 6px;
-    z-index: 99;
+    z-index: 1300;
     display: flex;
     flex-direction: column;
     gap: 4px;

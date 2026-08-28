@@ -26,7 +26,19 @@
                         </div>
                     </template>
                     <template v-else>
-                        <p class="user-text-content">{{ message.content }}</p>
+                        <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
+                        <div v-if="parseUserMessageAttachments(message.content).attachments.length > 0" class="stream-attachments-tray">
+                            <AttachmentCard
+                                v-for="(att, aIdx) in parseUserMessageAttachments(message.content).attachments"
+                                :key="aIdx"
+                                :attachment="att"
+                                @preview-image="openImagePreview"
+                                @preview-doc="openDocPreview"
+                            />
+                        </div>
+                        <p v-if="parseUserMessageAttachments(message.content).cleanText" class="user-text-content">
+                            {{ parseUserMessageAttachments(message.content).cleanText }}
+                        </p>
                         <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
                     </template>
                 </article>
@@ -34,7 +46,20 @@
 
             <template v-for="entry in timelineEntries" :key="entry.id">
                 <article v-if="entry.type === 'user'" class="user-message">
-                    <p class="user-text-content">{{ entry.content }}</p>
+                    <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
+                    <div v-if="parseUserMessageAttachments(entry.content).attachments.length > 0" class="stream-attachments-tray">
+                        <AttachmentCard
+                            v-for="(att, aIdx) in parseUserMessageAttachments(entry.content).attachments"
+                            :key="aIdx"
+                            :attachment="att"
+                            @preview-image="openImagePreview"
+                            @preview-doc="openDocPreview"
+                        />
+                    </div>
+                    <!-- 用户指令文本 -->
+                    <p v-if="parseUserMessageAttachments(entry.content).cleanText" class="user-text-content">
+                        {{ parseUserMessageAttachments(entry.content).cleanText }}
+                    </p>
                 </article>
                 <article v-else-if="entry.type === 'message'" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
                     <template v-if="entry.role === 'agent' || entry.role === 'assistant'">
@@ -48,7 +73,19 @@
                     </template>
                     <template v-else>
                         <span v-if="entry.isHuman" class="intervention-indicator">人工干预输入</span>
-                        <p class="user-text-content">{{ entry.content }}</p>
+                        <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
+                        <div v-if="parseUserMessageAttachments(entry.content).attachments.length > 0" class="stream-attachments-tray">
+                            <AttachmentCard
+                                v-for="(att, aIdx) in parseUserMessageAttachments(entry.content).attachments"
+                                :key="aIdx"
+                                :attachment="att"
+                                @preview-image="openImagePreview"
+                                @preview-doc="openDocPreview"
+                            />
+                        </div>
+                        <p v-if="parseUserMessageAttachments(entry.content).cleanText" class="user-text-content">
+                            {{ parseUserMessageAttachments(entry.content).cleanText }}
+                        </p>
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                     </template>
                 </article>
@@ -145,16 +182,104 @@
 
             <p v-if="isRunning && !timelineEntries.length && !legacyMessages.length" class="idle-live"><i></i>{{ stateDescription }}</p>
         </div>
+
+        <!-- 📎 全局全屏附件预览弹窗 (Teleport 到 body) -->
+        <AttachmentPreviewModal
+            :image-modal="previewImageModal"
+            :doc-modal="previewDocModal"
+            @close-image="previewImageModal = null"
+            @close-doc="previewDocModal = null"
+        />
     </div>
 </template>
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import type { AgentHumanForm, AgentStepItem, AgentToolStatus } from "./types";
+import { invoke } from "@tauri-apps/api/core";
+import AttachmentCard from "./AttachmentCard.vue";
+import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
+import type { AgentHumanForm, AgentStepItem, AgentToolStatus, ParsedAttachment } from "./types";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
 import { formatClock, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
 import ArtifactList from "../artifacts/ArtifactList.vue";
+
+function parseUserMessageAttachments(content: string): { cleanText: string; attachments: ParsedAttachment[] } {
+    if (!content) return { cleanText: "", attachments: [] };
+    const attRegex = /📎\s*\[附件:\s*([^\s()\]]+(?:\s+[^\s()\]]+)*?)(?:\s*\(([^)]+)\))?(?:\s*\|\s*路径:\s*([^\]]+))?\]/g;
+    const attachments: ParsedAttachment[] = [];
+    let match;
+    while ((match = attRegex.exec(content)) !== null) {
+        const fileName = match[1]?.trim() || "file";
+        const fileSizeStr = match[2]?.trim() || "";
+        const filePath = match[3]?.trim() || fileName;
+        const isImage = /\.(png|jpg|jpeg|webp|gif|bmp|svg)$/i.test(fileName);
+
+        let sizeBytes = 0;
+        if (fileSizeStr.includes("MB")) {
+            sizeBytes = Math.round(parseFloat(fileSizeStr) * 1024 * 1024);
+        } else if (fileSizeStr.includes("KB")) {
+            sizeBytes = Math.round(parseFloat(fileSizeStr) * 1024);
+        } else if (fileSizeStr.includes("B")) {
+            sizeBytes = Math.round(parseFloat(fileSizeStr));
+        }
+
+        attachments.push({
+            file_name: fileName,
+            file_path: filePath,
+            size_bytes: sizeBytes,
+            content_type: isImage ? "image/jpeg" : "file",
+            prompt_text: "",
+            image_data_url: null,
+            raw_preview: null,
+        });
+    }
+    let cleanText = content.replace(attRegex, "").trim();
+    return { cleanText, attachments };
+}
+
+const previewImageModal = ref<ParsedAttachment | null>(null);
+const previewDocModal = ref<ParsedAttachment | null>(null);
+
+async function openImagePreview(att: ParsedAttachment) {
+    if (att.image_data_url) {
+        previewImageModal.value = att;
+        return;
+    }
+    const path = att.file_path || att.file_name;
+    if (path) {
+        try {
+            const parsed = await invoke<ParsedAttachment>("parse_attachment_file", { path });
+            if (parsed && parsed.image_data_url) {
+                previewImageModal.value = parsed;
+                return;
+            }
+        } catch (e) {
+            console.warn("读取本地图片失败:", e);
+        }
+    }
+    previewImageModal.value = att;
+}
+
+async function openDocPreview(att: ParsedAttachment) {
+    if (att.prompt_text || att.raw_preview) {
+        previewDocModal.value = att;
+        return;
+    }
+    const path = att.file_path || att.file_name;
+    if (path) {
+        try {
+            const parsed = await invoke<ParsedAttachment>("parse_attachment_file", { path });
+            if (parsed) {
+                previewDocModal.value = parsed;
+                return;
+            }
+        } catch (e) {
+            console.warn("读取本地文档失败:", e);
+        }
+    }
+    previewDocModal.value = att;
+}
 
 type HistoryMessage = { id: string; role: string; content: string; created_at: string; timestamp: number };
 type HistoryTurn = { id: string; goal: string; status: string; steps: AgentStepItem[]; messages: HistoryMessage[]; summary: string; artifacts: AgentArtifactInput[]; startedAt: number; completedAt: number };
@@ -555,6 +680,179 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     white-space: pre-wrap;
     word-break: break-word;
     overflow-wrap: anywhere;
+}
+
+/* 📎 附件缩略图与文件卡片托盘 */
+.stream-attachments-tray {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+    width: 100%;
+}
+
+/* 图片全屏预览弹窗 */
+.image-preview-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(8px);
+    z-index: 99999;
+    display: grid;
+    place-items: center;
+    padding: 30px;
+}
+
+.image-preview-dialog {
+    max-width: 90vw;
+    max-height: 90vh;
+    background: #18181c;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    background: #1f1f24;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.dialog-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #f4f4f5;
+}
+
+.btn-close-dialog {
+    background: transparent;
+    border: 0;
+    color: #a1a1aa;
+    font-size: 18px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+}
+
+.btn-close-dialog:hover { color: #ffffff; }
+
+.dialog-body {
+    padding: 16px;
+    display: grid;
+    place-items: center;
+    overflow: auto;
+}
+
+.full-preview-img {
+    max-width: 100%;
+    max-height: calc(85vh - 70px);
+    object-fit: contain;
+    border-radius: 6px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+/* 📄 文档/PDF 在线富文本预览弹窗 */
+.doc-preview-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.82);
+    backdrop-filter: blur(10px);
+    z-index: 99999;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+}
+
+.doc-preview-dialog {
+    width: min(880px, 94vw);
+    height: min(780px, 88vh);
+    background: #18181c;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.dialog-title-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.dialog-file-icon {
+    font-size: 24px;
+}
+
+.dialog-file-meta h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: #f4f4f5;
+}
+
+.dialog-file-meta small {
+    color: #71717a;
+    font-size: 11px;
+}
+
+.dialog-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.btn-copy-doc {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: #e4e4e7;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.btn-copy-doc:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
+}
+
+.doc-dialog-body {
+    flex: 1;
+    overflow-y: auto;
+    background: #121215;
+    padding: 20px;
+    display: block !important;
+}
+
+.doc-markdown-content {
+    color: #e4e4e7;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.doc-raw-preview {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: monospace;
+    font-size: 12px;
+    color: #d4d4d8;
+}
+
+.doc-empty-hint {
+    color: #71717a;
+    font-size: 13px;
+    text-align: center;
+    padding: 40px 0;
 }
 
 /* 🤖 Agent 消息：彻底透明无框排版 */

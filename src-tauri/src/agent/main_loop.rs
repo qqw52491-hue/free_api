@@ -382,6 +382,7 @@ pub async fn run_agent_main_loop(
     session_id: Option<String>,
     log_context: Option<bool>,
     transient_llm_request_retries: Option<u32>,
+    attachments: Option<Vec<crate::commands::chat::ParsedAttachmentResult>>,
 ) -> Result<(), String> {
     run_agent_main_loop_in_workspace(
         app,
@@ -393,6 +394,7 @@ pub async fn run_agent_main_loop(
         session_id,
         log_context,
         transient_llm_request_retries,
+        attachments,
         None,
     )
     .await
@@ -409,6 +411,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     session_id: Option<String>,
     log_context: Option<bool>,
     transient_llm_request_retries: Option<u32>,
+    attachments: Option<Vec<crate::commands::chat::ParsedAttachmentResult>>,
     workspace_override: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
     let transient_llm_request_retries = transient_llm_request_retries
@@ -707,6 +710,131 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             source,
             validation,
         );
+    }
+
+    // 🌟 注入本轮用户传入的附件 (图片 Base64 多模态 / 解析文档文本)
+    let mut injected_image_paths = std::collections::HashSet::new();
+
+    // 1. 处理显式传递的 attachments 附件列表
+    if let Some(ref atts) = attachments {
+        for att in atts {
+            let is_image = att.content_type.starts_with("image/")
+                || att.file_name.ends_with(".jpg")
+                || att.file_name.ends_with(".jpeg")
+                || att.file_name.ends_with(".png")
+                || att.file_name.ends_with(".webp")
+                || att.file_name.ends_with(".gif")
+                || att.file_name.ends_with(".bmp")
+                || att.file_path.ends_with(".jpg")
+                || att.file_path.ends_with(".jpeg")
+                || att.file_path.ends_with(".png")
+                || att.file_path.ends_with(".webp");
+
+            if is_image {
+                if let Some(ref data_url) = att.image_data_url {
+                    if !data_url.is_empty() {
+                        context.add_image_feedback(
+                            &format!("【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)", att.file_name, att.file_path, att.size_bytes),
+                            data_url,
+                        );
+                        injected_image_paths.insert(att.file_path.clone());
+                        continue;
+                    }
+                }
+                if let Ok(bytes) = std::fs::read(&att.file_path) {
+                    use base64::Engine;
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    let mime = if att.content_type.is_empty() || att.content_type == "file" {
+                        if att.file_name.ends_with(".png") || att.file_path.ends_with(".png") {
+                            "image/png"
+                        } else if att.file_name.ends_with(".webp") || att.file_path.ends_with(".webp") {
+                            "image/webp"
+                        } else {
+                            "image/jpeg"
+                        }
+                    } else {
+                        &att.content_type
+                    };
+                    let data_url = format!("data:{};base64,{}", mime, b64);
+                    context.add_image_feedback(
+                        &format!("【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)", att.file_name, att.file_path, att.size_bytes),
+                        &data_url,
+                    );
+                    injected_image_paths.insert(att.file_path.clone());
+                }
+            } else if !att.prompt_text.is_empty() {
+                context.turns_history.push(crate::agent::context::ChatMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!(att.prompt_text),
+                });
+            }
+        }
+    }
+
+    // 2. 兜底扫描：若 goal 文本中带有 📎 [附件: ... | 路径: ...] 标记，自动读取本地图片或文档解析注入
+    if goal.contains("📎") || goal.contains("路径:") {
+        for segment in goal.split("📎") {
+            if let Some(att_start) = segment.find("[附件:") {
+                let rest = &segment[att_start + "[附件:".len()..];
+                if let Some(end_bracket) = rest.find(']') {
+                    let att_body = &rest[..end_bracket];
+                    let mut file_name = "file";
+                    let mut file_path = "";
+                    if let Some((name_part, path_part)) = att_body.split_once("路径:") {
+                        file_path = path_part.trim();
+                        let name_candidate = name_part.trim();
+                        if let Some((name_only, _)) = name_candidate.split_once('(') {
+                            file_name = name_only.trim();
+                        } else if let Some((name_only, _)) = name_candidate.split_once('|') {
+                            file_name = name_only.trim();
+                        } else {
+                            file_name = name_candidate;
+                        }
+                    }
+                    if !file_path.is_empty() && !injected_image_paths.contains(file_path) {
+                        let p = std::path::Path::new(file_path);
+                        if p.exists() {
+                            let is_image = file_name.ends_with(".jpg")
+                                || file_name.ends_with(".jpeg")
+                                || file_name.ends_with(".png")
+                                || file_name.ends_with(".webp")
+                                || file_name.ends_with(".gif")
+                                || file_name.ends_with(".bmp")
+                                || file_path.ends_with(".jpg")
+                                || file_path.ends_with(".jpeg")
+                                || file_path.ends_with(".png")
+                                || file_path.ends_with(".webp");
+
+                            if is_image {
+                                if let Ok(bytes) = std::fs::read(p) {
+                                    use base64::Engine;
+                                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                    let mime = if file_name.ends_with(".png") || file_path.ends_with(".png") {
+                                        "image/png"
+                                    } else if file_name.ends_with(".webp") || file_path.ends_with(".webp") {
+                                        "image/webp"
+                                    } else {
+                                        "image/jpeg"
+                                    };
+                                    let data_url = format!("data:{};base64,{}", mime, b64);
+                                    context.add_image_feedback(
+                                        &format!("【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)", file_name, file_path, bytes.len()),
+                                        &data_url,
+                                    );
+                                    injected_image_paths.insert(file_path.to_string());
+                                }
+                            } else if let Ok(extracted) = crate::agent::file_parser::parse_file(p, None) {
+                                let prompt_text = crate::agent::file_parser::format_for_prompt(&extracted, file_name);
+                                context.turns_history.push(crate::agent::context::ChatMessage {
+                                    role: "user".to_string(),
+                                    content: serde_json::json!(prompt_text),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // 数据区本体是权威来源；每次启动都刷新目录，checkpoint 仅保留这份目录快照。
