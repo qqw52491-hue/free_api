@@ -85,16 +85,20 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 向用户提问或请求表单交互 (ask_human) 示例：
 ```json
 {
-  "description": "向用户确认是否执行数据库迁移脚本",
+  "description": "请求用户选择要绑定的模型",
   "tool": "ask_human",
   "command": {
-    "action": "ask",
+    "message": "已成功创建平台，请选择需要绑定的默认模型：",
     "form": {
-      "title": "生产环境数据库迁移确认",
-      "kind": "confirm",
-      "fields": [
-        { "name": "confirm", "label": "确认操作", "type": "select", "options": [{"label": "确认执行迁移", "value": "yes"}, {"label": "取消终止", "value": "no"}] }
-      ]
+      "kind": "single_select",
+      "title": "选择模型规格",
+      "description": "我们将根据你的选择初始化默认模型渠道",
+      "options": [
+        { "id": "glm-4-flash", "label": "glm-4-flash (推荐/免费)", "description": "极速推理，适合常规交互" },
+        { "id": "glm-4-air", "label": "glm-4-air (高性价比)", "description": "性能与成本平衡" },
+        { "id": "glm-4-plus", "label": "glm-4-plus (旗舰)", "description": "最强推理能力" }
+      ],
+      "default": "glm-4-flash"
     }
   }
 }

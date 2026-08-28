@@ -39,8 +39,8 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "ask_human",
-        summary: "请求人类输入、选择或高风险确认",
-        actions: &["ask_human(message: string, form?: object)"],
+        summary: "请求人类输入、选择或确认；form支持 single_select|multi_select|confirm|text|file_picker|custom_html",
+        actions: &["ask_human(message: string, form?: {kind, title, options?: [{id, label}]})"],
     },
     BuiltinToolSpec {
         name: "get_step_output",

@@ -17,7 +17,7 @@ export interface AgentHistoryTurn {
     startedAt: number;
     completedAt: number;
 }
-interface HistoryRunSnapshot extends Omit<AgentHistoryTurn, "messages"> {}
+interface HistoryRunSnapshot extends Omit<AgentHistoryTurn, "messages"> { }
 import {
     AGENT_RUN_STATE_CATALOG,
     type AgentHumanForm,
@@ -148,7 +148,7 @@ function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHumanForm
     const defaultValue = kind === "multi_select"
         ? (Array.isArray(defaultRaw) ? defaultRaw.map((item) => toText(item)).filter(Boolean).slice(0, 12) : undefined)
         : kind === "confirm" ? (typeof defaultRaw === "boolean" ? defaultRaw : undefined)
-        : toText(defaultRaw) || undefined;
+            : toText(defaultRaw) || undefined;
     return {
         kind,
         title: toText(data.title || data.label || fallbackTitle).slice(0, 220) || fallbackTitle,
@@ -522,7 +522,7 @@ export function useAgentSession(sessionId: string) {
                             if (parsed && (parsed.artifact_id || parsed.canonical_path)) {
                                 list.push(normalizeArtifact(parsed));
                             }
-                        } catch {}
+                        } catch { }
                     }
                 }
                 return normalizeArtifactList(list);
@@ -1056,7 +1056,7 @@ export function useAgentSession(sessionId: string) {
                                     currentRunArtifacts.value.push(desc);
                                 }
                             }
-                        } catch {}
+                        } catch { }
                     }
                 }
             }

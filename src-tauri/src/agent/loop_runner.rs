@@ -734,12 +734,15 @@ pub async fn run_tool_phase(
             },
         }
     // --- B3. 特殊拦截：AI 主动挂起呼叫人类 ---
-    } else if inst.get_tool().to_lowercase() == "ask_human" {
-        let ask_msg = inst
-            .get_params()
+    } else if inst.get_tool().eq_ignore_ascii_case("ask_human") || inst.get_action().eq_ignore_ascii_case("ask") {
+        let params = inst.get_params();
+        let form_val = params.get("form");
+        let ask_msg = params
             .get("message")
+            .or_else(|| form_val.and_then(|f| f.get("title")))
+            .or_else(|| form_val.and_then(|f| f.get("description")))
             .and_then(|v| v.as_str())
-            .unwrap_or("AI遇到了麻烦，请求人类协助！")
+            .unwrap_or("AI 请求人类协助与指示")
             .to_string();
 
         app.emit(
@@ -754,7 +757,7 @@ pub async fn run_tool_phase(
             json!({
                 "type": "agent_paused",
                 "message": ask_msg,
-                "form": inst.get_params().get("form").cloned().unwrap_or(serde_json::Value::Null)
+                "form": form_val.cloned().unwrap_or(serde_json::Value::Null)
             }),
         )
         .ok();

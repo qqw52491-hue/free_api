@@ -563,7 +563,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     };
 
     let project_resource_boundary = if is_project_session {
-        "\n\n## 项目受管资源边界\n当前会话已绑定项目根目录，但宿主只授权读取用户明确登记的文件。先调用 `project_resources.list_resources()` 获取 resource_id；仅以该 ID 调用 `project_resources.read_resource(resource_id)`。不得用 `search`、外部 MCP 工具、相对/绝对路径或 shell 探查项目文件；资源正文仅在按需读取成功后才可据此分析。"
+        "\n\n## 项目受管资源边界\n当前会话已绑定项目根目录，宿主授权读取已登记的受管文件。可调用 `project_resources.list_resources()` 获取全部资源；以 resource_id 调用 `project_resources.read_resource(resource_id)` 读取内容；当生成或发现新的关键项目文件（如架构设计、数据库规范、核心接口）时，可调用 `project_resources.register_resource(path, label)` 将其登记为跨会话共享受管资源。不得用 `search`、外部 MCP 工具或 shell 越界探查未授权项目文件。"
     } else {
         ""
     };

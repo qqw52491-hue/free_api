@@ -309,10 +309,55 @@ fn dispatch_project_resources(
                 },
             }
         }
+        "register_resource" | "add_resource" | "register" => {
+            let raw_path = params
+                .get("path")
+                .or_else(|| params.get("relative_path"))
+                .or_else(|| params.get("file_path"))
+                .or_else(|| params.get("canonical_path"))
+                .and_then(serde_json::Value::as_str);
+            let Some(raw_path) = raw_path else {
+                return DispatchResult {
+                    stdout: String::new(),
+                    stderr: "project_resources.register_resource 缺少 path 参数（文件相对或绝对路径）。".to_string(),
+                    success: false,
+                    route: "host_rejection:project_resource_missing_path".to_string(),
+                };
+            };
+            let label = params.get("label").and_then(serde_json::Value::as_str);
+            match crate::commands::projects::add_project_resource_for_session(
+                &conn,
+                session_id,
+                raw_path,
+                label,
+            ) {
+                Ok(resource) => DispatchResult {
+                    stdout: json!({
+                        "message": "成功将文件登记为项目受管资源，同项目下的所有会话均可按 resource_id 读取。",
+                        "resource": {
+                            "resource_id": resource.resource_id,
+                            "label": resource.label,
+                            "relative_path": resource.relative_path,
+                            "kind": resource.kind,
+                            "size_bytes": resource.size_bytes,
+                        }
+                    }).to_string(),
+                    stderr: String::new(),
+                    success: true,
+                    route: "internal:project_resources/register".to_string(),
+                },
+                Err(error) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: error,
+                    success: false,
+                    route: "host_rejection:project_resource_register_failed".to_string(),
+                },
+            }
+        }
         _ => DispatchResult {
             stdout: String::new(),
             stderr:
-                "project_resources 仅支持 list_resources() 或 read_resource(resource_id: string)。"
+                "project_resources 支持 list_resources()、read_resource(resource_id: string) 与 register_resource(path: string, label?: string)。"
                     .to_string(),
             success: false,
             route: "host_rejection:project_resource_unknown_action".to_string(),
@@ -367,8 +412,15 @@ pub(crate) fn execute_command_inner(
     }
 
     // 2.5 项目受管资源：服务端按 session→project→resource 三重边界复核。
-    if tool.eq_ignore_ascii_case("project_resources") {
-        return dispatch_project_resources(db, session_id, action, params);
+    if tool.eq_ignore_ascii_case("project_resources")
+        || tool.eq_ignore_ascii_case("register_project_resource")
+    {
+        let final_action = if tool.eq_ignore_ascii_case("register_project_resource") {
+            "register_resource"
+        } else {
+            action
+        };
+        return dispatch_project_resources(db, session_id, final_action, params);
     }
 
     // 3. 核心原生工具 C: search (跨执行日志 FTS5 与实时代码 ripgrep 联邦检索)

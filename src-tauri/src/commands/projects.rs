@@ -178,7 +178,13 @@ fn canonical_project_file(
     let root = PathBuf::from(&project.root_path)
         .canonicalize()
         .map_err(|_| "项目根目录已不存在或无法访问".to_string())?;
-    let requested = PathBuf::from(raw_path.trim())
+    let path = PathBuf::from(raw_path.trim());
+    let target = if path.is_relative() {
+        root.join(path)
+    } else {
+        path
+    };
+    let requested = target
         .canonicalize()
         .map_err(|_| "资源文件不存在或无法访问".to_string())?;
     if !requested.is_file() {
@@ -300,6 +306,75 @@ pub(crate) fn project_resources_for_session(
         return Ok(Vec::new());
     };
     list_project_resources_row(conn, &project.id)
+}
+
+pub(crate) fn add_project_resource_for_session(
+    conn: &Connection,
+    session_id: &str,
+    raw_path: &str,
+    label_override: Option<&str>,
+) -> Result<AgentProjectResource, String> {
+    let Some(project) = project_for_session(conn, session_id)? else {
+        return Err("当前会话未关联项目，无法登记项目受管资源。".to_string());
+    };
+    let (project, canonical_path) = canonical_project_file(conn, &project.id, raw_path)?;
+    let metadata = std::fs::metadata(&canonical_path)
+        .map_err(|error| format!("无法读取资源元数据: {}", error))?;
+    let relative_path = canonical_path
+        .strip_prefix(PathBuf::from(&project.root_path))
+        .map_err(|_| "无法计算项目内相对路径".to_string())?
+        .to_string_lossy()
+        .to_string();
+    let fallback_label = canonical_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("未命名文件");
+    let label: String = label_override
+        .unwrap_or(fallback_label)
+        .trim()
+        .chars()
+        .take(MAX_RESOURCE_LABEL_CHARS)
+        .collect();
+    let label = if label.is_empty() {
+        fallback_label.to_string()
+    } else {
+        label
+    };
+    let canonical_path_text = canonical_path.to_string_lossy().to_string();
+    let existing_id: Option<String> = conn
+        .query_row(
+            "SELECT resource_id FROM agent_project_resources WHERE project_id=?1 AND canonical_path=?2",
+            params![project.id, canonical_path_text],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let resource_id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO agent_project_resources (resource_id, project_id, label, relative_path, canonical_path, kind, size_bytes, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(project_id, canonical_path) DO UPDATE SET
+            label=excluded.label, relative_path=excluded.relative_path, kind=excluded.kind, size_bytes=excluded.size_bytes",
+        params![
+            resource_id,
+            project.id,
+            label,
+            relative_path,
+            canonical_path_text,
+            resource_kind(&canonical_path),
+            metadata.len() as i64,
+            now,
+        ],
+    )
+    .map_err(|error| format!("登记项目资源失败: {}", error))?;
+    conn.query_row(
+        "SELECT resource_id, project_id, label, relative_path, canonical_path, kind, size_bytes, created_at
+         FROM agent_project_resources WHERE resource_id=?1",
+        params![resource_id],
+        map_resource,
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub(crate) fn read_project_resource_for_session(
@@ -753,6 +828,45 @@ mod tests {
             .unwrap(),
             1
         );
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn adding_project_resource_via_session_registers_cross_session_resource() {
+        let base = std::env::temp_dir().join(format!("free-api-session-resource-{}", Uuid::new_v4()));
+        let root = base.join("project");
+        let spec_path = root.join("docs").join("database_v2_spec.md");
+        std::fs::create_dir_all(spec_path.parent().unwrap()).unwrap();
+        std::fs::write(&spec_path, "# Database V2 Spec\nTables: users, orders").unwrap();
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+
+        let project = create_project_row(&conn, "电商系统", root.to_string_lossy().as_ref()).unwrap();
+        let session_a = create_project_session_row(&conn, &project.id, "设计会话 A", "model-a").unwrap();
+        let session_b = create_project_session_row(&conn, &project.id, "开发会话 B", "model-b").unwrap();
+
+        // 会话 A 调用 add_project_resource_for_session 注册新文件
+        let registered = add_project_resource_for_session(
+            &conn,
+            &session_a.id,
+            "docs/database_v2_spec.md",
+            Some("V2数据库设计规范"),
+        )
+        .unwrap();
+
+        assert_eq!(registered.relative_path, "docs/database_v2_spec.md");
+        assert_eq!(registered.label, "V2数据库设计规范");
+
+        // 会话 B 立刻能看到会话 A 注册的项目资源
+        let resources_b = project_resources_for_session(&conn, &session_b.id).unwrap();
+        assert_eq!(resources_b.len(), 1);
+        assert_eq!(resources_b[0].resource_id, registered.resource_id);
+        assert_eq!(resources_b[0].label, "V2数据库设计规范");
+
+        // 会话 B 可以读取内容
+        let preview = read_project_resource_for_session(&conn, &session_b.id, &registered.resource_id).unwrap();
+        assert!(preview.content.contains("# Database V2 Spec"));
 
         drop(conn);
         let _ = std::fs::remove_dir_all(base);
