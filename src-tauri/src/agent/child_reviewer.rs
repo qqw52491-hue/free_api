@@ -32,7 +32,7 @@ pub struct ChildReviewRequest {
     resource_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildReviewResult {
     pub child_run_id: String,
     pub status: String,
@@ -275,12 +275,13 @@ fn finish_child_run(
     duration_ms: u64,
     completion_tokens: i64,
     error_kind: Option<&str>,
+    result_json: Option<&str>,
 ) {
     let Ok(conn) = db.0.lock() else {
         return;
     };
     let _ = conn.execute(
-        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, error_kind=?6 WHERE id=?1",
+        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, error_kind=?6, result_json=?7 WHERE id=?1",
         params![
             child_run_id,
             status,
@@ -288,6 +289,7 @@ fn finish_child_run(
             duration_ms as i64,
             completion_tokens,
             error_kind,
+            result_json,
         ],
     );
 }
@@ -350,14 +352,14 @@ pub async fn run_child_reviewer(
     let stream_result = match tokio::time::timeout(Duration::from_secs(CHILD_TIMEOUT_SECS), call).await {
         Err(_) => {
             let duration_ms = started_at.elapsed().as_millis() as u64;
-            finish_child_run(db, &child_run_id, "timed_out", duration_ms, 0, Some("timeout"));
+            finish_child_run(db, &child_run_id, "timed_out", duration_ms, 0, Some("timeout"), None);
             return Err("child_reviewer 超过 45 秒上限，已回收。".to_string());
         }
         Ok(Err(error)) => {
             let duration_ms = started_at.elapsed().as_millis() as u64;
             let status = if error == llm::STREAM_INTERRUPTED_ERROR { "cancelled" } else { "failed" };
             let error_kind = if status == "cancelled" { "cancelled" } else { "request_or_stream" };
-            finish_child_run(db, &child_run_id, status, duration_ms, 0, Some(error_kind));
+            finish_child_run(db, &child_run_id, status, duration_ms, 0, Some(error_kind), None);
             return Err(if status == "cancelled" {
                 "child_reviewer 已随父任务取消。".to_string()
             } else {
@@ -382,21 +384,14 @@ pub async fn run_child_reviewer(
                 duration_ms,
                 completion_tokens,
                 Some("invalid_output"),
+                None,
             );
             return Err(error);
         }
     };
 
-    finish_child_run(
-        db,
-        &child_run_id,
-        "succeeded",
-        duration_ms,
-        completion_tokens,
-        None,
-    );
-    Ok(ChildReviewResult {
-        child_run_id,
+    let result = ChildReviewResult {
+        child_run_id: child_run_id.clone(),
         status: "succeeded".to_string(),
         findings: output.findings,
         confidence: output.confidence,
@@ -404,7 +399,18 @@ pub async fn run_child_reviewer(
         missing_evidence: output.missing_evidence,
         duration_ms,
         completion_tokens,
-    })
+    };
+    let result_json = serde_json::to_string(&result).ok();
+    finish_child_run(
+        db,
+        &child_run_id,
+        "succeeded",
+        duration_ms,
+        completion_tokens,
+        None,
+        result_json.as_deref(),
+    );
+    Ok(result)
 }
 
 pub fn result_as_dispatch_output(result: ChildReviewResult) -> String {
@@ -605,7 +611,7 @@ mod tests {
         assert_ne!(first, second);
         assert!(begin_child_run(&state, "parent-run", "parent-session", &workspace, "model-a", 0).is_err());
 
-        finish_child_run(&state, &first, "succeeded", 12, 34, None);
+        finish_child_run(&state, &first, "succeeded", 12, 34, None, None);
         let conn = state.0.lock().unwrap();
         let (status, tokens, refs, error_kind): (String, i64, i64, Option<String>) = conn
             .query_row(

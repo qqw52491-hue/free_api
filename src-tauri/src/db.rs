@@ -180,7 +180,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             duration_ms INTEGER,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
             evidence_ref_count INTEGER NOT NULL DEFAULT 0,
-            error_kind TEXT
+            error_kind TEXT,
+            result_json TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_agent_child_runs_parent ON agent_child_runs(parent_run_id, started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_agent_child_runs_session ON agent_child_runs(parent_session_id, started_at DESC);

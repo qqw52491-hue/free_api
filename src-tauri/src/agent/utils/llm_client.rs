@@ -648,26 +648,8 @@ pub async fn call_llm(
                     current_try, max_retries, e
                 );
 
-                /* Legacy verbose retry feedback retained below for reference but disabled.
-                // 将助手的错误输出加入上下文
-                api_values.push(json!({"role": "assistant", "content": result.full_response}));
-
-                // 将报错信息丢回给模型纠正
-                api_values.push(json!({
-                    "role": "user",
-                    "content": format!(
-                        "YOUR LAST OUTPUT TRIGGERED A PARSE ERROR: \n{}\n\n\
-                         RULES:\n\
-                         1. 遇到问题必须且只能在 <think> 标签内完成逻辑推导。\n\
-                         2. <think> 结束后的最终输出，必须且只能是一个有效的 JSON 对象来调用对应的工具函数。\n\
-                         3. 如果在 JSON 字符串字段（如 summary/details）中包含 HTML 或双引号，必须严格转义为 `\\\"`，绝对不能输出未闭合或损坏的 JSON。\n\
-                         4. 绝对禁止在 JSON 外输出任何解释性文本。\n\n\
-                         Fix the syntax error and generate valid JSON again.",
-                        e
-                    )
-                }));
-                append_final_json_output_anchor(&mut api_values);
-                */
+                // 将模型上一轮的原始回复作为 assistant turn 追加，保持对话轮次完整性
+                api_values.push(json!({"role": "assistant", "content": &result.full_response}));
                 // 保留完整任务历史与工具定义，追加精准纠偏提示让模型在原位上下文重新生成合规 JSON
                 append_json_regeneration_feedback(&mut api_values, &e);
                 uses_primary_prompt = false;

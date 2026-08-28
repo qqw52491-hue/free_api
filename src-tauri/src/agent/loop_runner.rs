@@ -53,6 +53,8 @@ pub async fn run_call_llm_and_run_tool_phases(
 ) -> Result<StepExecutionOutcome, String> {
     let mut retry_count = 0;
     let max_retries = 3;
+    let mut planning_retry_count = 0;
+    const MAX_PLANNING_RETRIES: usize = 1;
     let mut last_token_usage: Option<crate::agent::types::TokenUsage>;
     let mut last_thinking_duration_ms: u64 = 0;
     let mut last_tool_duration_ms: u64;
@@ -188,7 +190,45 @@ pub async fn run_call_llm_and_run_tool_phases(
                 });
             }
             Err(e) => {
-                // 🛑 call_llm 内部已完成传输层与格式层重试，若仍失败直接快速终止，杜绝外层嵌套重试产生笛卡尔积
+                // 🛑 如果是网络/API 传输层彻底失败，直接快速终止
+                if e.contains("LLM 请求最终失败")
+                    || e.contains("请求失败")
+                    || e.contains("API 错误")
+                {
+                    crate::agent::advance_run_state(
+                        &app,
+                        &final_session_id,
+                        &mut run_machine,
+                        AgentRunEvent::PlanningFailed { reason: e.clone() },
+                    )?;
+                    return Err(format!("❌ LLM 请求失败 (已达重试上限): {}", e));
+                }
+
+                // 🛡️ 容错自愈：对于模型自言自语/纯文本格式异常，允许在对话上下文中进行 1 次严格引导重试
+                if planning_retry_count < MAX_PLANNING_RETRIES {
+                    planning_retry_count += 1;
+                    crate::agent::advance_run_state(
+                        &app,
+                        &final_session_id,
+                        &mut run_machine,
+                        AgentRunEvent::RetryPlanning,
+                    )?;
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        format!(
+                            "🔄 AI 输出了非结构化文本，正在自动注入引导提示重新生成 ({}/{})...",
+                            planning_retry_count, MAX_PLANNING_RETRIES
+                        ),
+                    );
+                    context.add_error_feedback(&format!(
+                        "你的上一轮输出未能通过 JSON 协议校验（{}）。\n请严格遵循系统契约，仅输出一个合法的 JSON 工具指令（例如 task_store、finish 等）！",
+                        e
+                    ));
+                    checkpoint.record_recoverable_error(format!("规划格式异常: {}", e), &context);
+                    save_checkpoint(state.inner(), &mut checkpoint)?;
+                    continue;
+                }
+
                 crate::agent::advance_run_state(
                     &app,
                     &final_session_id,
