@@ -188,48 +188,18 @@ pub async fn run_call_llm_and_run_tool_phases(
                 });
             }
             Err(e) => {
-                // 🛑 如果是网络/API 传输层经过重试后仍彻底失败，直接终止并上报，杜绝误当作 JSON 格式错误翻倍重试 3x3 轮
-                if e.contains("LLM 请求最终失败")
-                    || e.contains("请求失败")
-                    || e.contains("API 错误")
-                {
-                    return Err(format!("❌ LLM 请求失败 (已达重试上限): {}", e));
-                }
-
-                retry_count += 1;
+                // 🛑 call_llm 内部已完成传输层与格式层重试，若仍失败直接快速终止，杜绝外层嵌套重试产生笛卡尔积
                 crate::agent::advance_run_state(
                     &app,
                     &final_session_id,
                     &mut run_machine,
                     AgentRunEvent::PlanningFailed { reason: e.clone() },
                 )?;
-
-                app.emit(
+                let _ = app.emit(
                     &format!("agent-log-{}", final_session_id),
-                    format!(
-                        "🔄 规划解析失败(第{}次)，正在注入修正提示让 AI 重新输出...",
-                        retry_count
-                    ),
-                )
-                .map_err(|e| e.to_string())?;
-                context.add_error_feedback(&format!(
-                    "你的输出未能通过 JSON 校验，解析报错为: {}\n请严格按照 System Prompt 要求输出纯合法 JSON！",
-                    e
-                ));
-                checkpoint.record_recoverable_error(format!("JSON 解析失败: {}", e), &context);
-                save_checkpoint(state.inner(), &mut checkpoint)?;
-                crate::agent::advance_run_state(
-                    &app,
-                    &final_session_id,
-                    &mut run_machine,
-                    AgentRunEvent::RetryPlanning,
-                )?;
-
-                if retry_count >= max_retries {
-                    let terminal_error = format!("AI 持续输出非法格式，任务终止: {}", e);
-                    return Err(terminal_error);
-                }
-                continue;
+                    format!("❌ AI 规划失败: {}", e),
+                );
+                return Err(format!("❌ AI 规划失败: {}", e));
             }
         };
 

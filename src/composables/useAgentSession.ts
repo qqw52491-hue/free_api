@@ -380,9 +380,18 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (!rawText) return "";
         return rawText
             .replace(/\\n/g, "\n")
+            // 过滤系统协议字段：带引号的 JSON key 格式（模型泄漏到 summary 时）
+            .replace(/,?\s*"todo_update"\s*:\s*\[[\s\S]*?\]/gi, "")
+            .replace(/,?\s*"review_contract_update"\s*:\s*\{[\s\S]*?\}/gi, "")
+            .replace(/,?\s*"change_verification_update"\s*:\s*\{[\s\S]*?\}/gi, "")
+            .replace(/,?\s*"memories_update"\s*:\s*\[[\s\S]*?\]/gi, "")
+            .replace(/,?\s*"progress_summary"\s*:\s*"[^"]*"/gi, "")
+            // 过滤不带引号的格式（旧版泄漏格式）
             .replace(/change_verification_update\s*:\s*\{[\s\S]*?\}/gi, "")
             .replace(/review_contract_update\s*:\s*\{[\s\S]*?\}/gi, "")
             .replace(/output_id\s*:\s*[a-zA-Z0-9_-]+/gi, "")
+            // 清理尾部残留的多余括号和逗号
+            .replace(/[,\s]*[}\]]+\s*$/, "")
             .replace(/\n{3,}/g, "\n\n")
             .trim();
     }

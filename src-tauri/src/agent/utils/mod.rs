@@ -69,6 +69,21 @@ mod tests {
     }
 
     #[test]
+    fn test_repair_json_finish_summary_with_trailing_system_fields() {
+        // 模拟大模型输出总结时包含未转义换行或字符，导致常规解析失败触发兜底时，不把尾部 todo_update 漏入 summary
+        let raw = r#"{"tool": "finish", "command": {"summary": "这是诊断报告正文：\n1. 无死锁\n2. 独立通道"},"todo_update":[{"id":1,"status":"done","description":"排查完毕"}],"review_contract_update":{"scope_statement":"排查根因"}}"#;
+        let repaired = repair_json(raw).expect("should repair and clean finish summary");
+        let val: serde_json::Value =
+            serde_json::from_str(&repaired).expect("must parse valid JSON");
+        assert_eq!(val["tool"], "finish");
+        let summary = val["command"]["summary"].as_str().unwrap();
+        assert!(summary.contains("这是诊断报告正文"));
+        assert!(!summary.contains("todo_update"));
+        assert!(!summary.contains("review_contract_update"));
+        assert!(val["todo_update"].is_array());
+    }
+
+    #[test]
     fn test_extract_json_from_markdown_with_extra_text() {
         let raw = "Here is my response:\n```json\n{\n  \"tool\": \"web_search\",\n  \"command\": {\"query\": \"rust\"}\n}\n```\nHope that helps!";
         let extracted = extract_json_from_text(raw).expect("should extract json from markdown");

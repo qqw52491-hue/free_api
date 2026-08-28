@@ -221,25 +221,70 @@ pub fn repair_json(text: &str) -> Option<String> {
         return Some(final_candidate);
     }
 
-    // 4. 终极兜底：针对 finish 工具 summary 内容被截断时的救赎逻辑
+    // 4. 终极兜底：针对 finish 工具 summary 内容被截断或混入未转义字符时的救赎逻辑
     if final_candidate.contains(r#""finish""#) || final_candidate.contains(r#""summary""#) {
         if let Some(pos) = final_candidate.find(r#""summary""#) {
             let after = &final_candidate[pos + 9..];
             if let Some(colon_pos) = after.find(':') {
                 let val_part = after[colon_pos + 1..].trim_start();
                 if val_part.starts_with('"') {
-                    let summary_content = &val_part[1..];
-                    let clean_summary = summary_content
+                    let raw_after_quote = &val_part[1..];
+
+                    // 寻找是否有同级的系统状态更新字段（如 todo_update, review_contract_update 等）
+                    let boundary_keywords = [
+                        r#""todo_update""#,
+                        r#""review_contract_update""#,
+                        r#""change_verification_update""#,
+                        r#""memories_update""#,
+                        r#""progress_summary""#,
+                    ];
+
+                    let mut earliest_boundary: Option<(usize, &str)> = None;
+                    for kw in boundary_keywords {
+                        if let Some(kw_pos) = raw_after_quote.find(kw) {
+                            if earliest_boundary.map(|(p, _)| kw_pos < p).unwrap_or(true) {
+                                earliest_boundary = Some((kw_pos, kw));
+                            }
+                        }
+                    }
+
+                    let (summary_text, tail_part) = if let Some((kw_pos, _)) = earliest_boundary {
+                        let summary_segment = &raw_after_quote[..kw_pos];
+                        let tail_segment = &raw_after_quote[kw_pos..];
+                        (summary_segment, Some(tail_segment))
+                    } else {
+                        (raw_after_quote, None)
+                    };
+
+                    let clean_summary = summary_text
                         .trim_end_matches('}')
                         .trim_end_matches(']')
+                        .trim_end_matches(',')
                         .trim_end_matches('"')
+                        .trim_end_matches('}')
                         .trim();
-                    let rescued = serde_json::json!({
+
+                    let mut rescued = serde_json::json!({
                         "tool": "finish",
                         "command": {
                             "summary": clean_summary
                         }
                     });
+
+                    // 若尾部包含合法的系统字段，尝试将其解析还原进 rescued 对象，避免丢失审查与 Todo 状态
+                    if let Some(tail) = tail_part {
+                        let tail_wrapped = format!("{{{}}}", tail.trim_end_matches('}').trim_end_matches(']'));
+                        if let Ok(tail_val) = serde_json::from_str::<serde_json::Value>(&tail_wrapped) {
+                            if let Some(tail_obj) = tail_val.as_object() {
+                                if let Some(rescued_obj) = rescued.as_object_mut() {
+                                    for (k, v) in tail_obj {
+                                        rescued_obj.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     return Some(rescued.to_string());
                 }
             }

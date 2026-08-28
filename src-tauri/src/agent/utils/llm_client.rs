@@ -226,9 +226,9 @@ pub async fn call_llm(
         .collect();
     append_final_json_output_anchor(&mut api_values);
 
-    // 4. JSON 解析重试循环
+    // 4. JSON 解析重试循环 (最多 2 次：1 次初试 + 1 次纠偏)
     let mut current_try = 0;
-    let max_retries = 3;
+    let max_retries = 2;
     // 隔离 JSON 修复的短 prompt 不能覆盖完整 Agent 上下文的校准基线。
     let mut uses_primary_prompt = true;
 
