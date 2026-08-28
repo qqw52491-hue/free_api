@@ -329,22 +329,60 @@ fn generate_prompt_diff_summary(old_p: &str, new_p: &str) -> String {
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect();
-    let mut added_lines = Vec::new();
-    for line in new_p.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() && !old_lines.contains(trimmed) {
-            added_lines.push(trimmed);
-        }
-    }
-    if added_lines.is_empty() {
+    let new_lines: std::collections::HashSet<&str> = new_p
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let mut added: Vec<&str> = new_p
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !old_lines.contains(*l))
+        .collect();
+    let mut removed: Vec<&str> = old_p
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !new_lines.contains(*l))
+        .collect();
+
+    added.dedup();
+    removed.dedup();
+
+    if added.is_empty() && removed.is_empty() {
         return String::new();
     }
-    let limit = 25.min(added_lines.len());
-    let mut summary = added_lines[..limit].join("\n");
-    if added_lines.len() > limit {
-        summary.push_str(&format!("\n... 及其余 {} 处细节更新", added_lines.len() - limit));
+
+    let cap = 15;
+    let mut parts = Vec::new();
+
+    if !added.is_empty() {
+        let shown = added.len().min(cap);
+        let mut block = added[..shown]
+            .iter()
+            .map(|l| format!("  + {}", l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if added.len() > cap {
+            block.push_str(&format!("\n  ... 及其余 {} 处新增", added.len() - cap));
+        }
+        parts.push(format!("【新增/变更规约】\n{}", block));
     }
-    summary
+
+    if !removed.is_empty() {
+        let shown = removed.len().min(cap);
+        let mut block = removed[..shown]
+            .iter()
+            .map(|l| format!("  - {}", l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if removed.len() > cap {
+            block.push_str(&format!("\n  ... 及其余 {} 处移除", removed.len() - cap));
+        }
+        parts.push(format!("【已移除规约】\n{}", block));
+    }
+
+    parts.join("\n\n")
 }
 
 fn merge_chat_onto_filling(

@@ -75,6 +75,25 @@ pub fn parse_file(path: &Path, max_text_chars: Option<usize>) -> Result<Extracte
         .unwrap_or("file")
         .to_string();
 
+    // 🛡️ 安全保护：文件过大直接降级为元数据，防止 OOM
+    const MAX_BINARY_BYTES: u64 = 50 * 1024 * 1024;  // 50 MB
+    const MAX_IMAGE_BYTES: u64  = 10 * 1024 * 1024;  // 10 MB
+    if let Ok(meta) = std::fs::metadata(path) {
+        let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp");
+        let size_limit = if is_image { MAX_IMAGE_BYTES } else { MAX_BINARY_BYTES };
+        if meta.len() > size_limit {
+            return Ok(ExtractedContent::Binary {
+                file_name: file_name.clone(),
+                size_bytes: meta.len() as usize,
+                mime_guess: if is_image {
+                    format!("image/{}", if ext == "jpg" { "jpeg" } else { &ext })
+                } else {
+                    "application/octet-stream".to_string()
+                },
+            });
+        }
+    }
+
     match ext.as_str() {
         // 1. 表格类文件
         "xlsx" | "xls" | "xlsm" | "xlsb" | "ods" => extract_excel(path, limit),
