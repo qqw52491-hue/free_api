@@ -156,6 +156,43 @@
                   </div>
                 </div>
               </div>
+
+              <!-- ⚡ 上下文模式与压缩策略选择 -->
+              <div class="budget-mode-picker" ref="budgetPickerRef">
+                <button
+                  class="budget-chip"
+                  type="button"
+                  :class="{ active: budgetMenuOpen }"
+                  :title="currentBudgetTooltip"
+                  @click="budgetMenuOpen = !budgetMenuOpen"
+                >
+                  <span class="budget-icon">{{ currentBudgetIcon }}</span>
+                  <span class="budget-label">{{ currentBudgetLabel }}</span>
+                  <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
+                </button>
+
+                <div v-if="budgetMenuOpen" class="budget-dropdown-menu">
+                  <div class="budget-menu-header">上下文与压缩策略</div>
+                  <button
+                    v-for="opt in budgetModes"
+                    :key="opt.id"
+                    type="button"
+                    class="budget-menu-item"
+                    :class="{ selected: opt.id === (modelRouting.context_budget_mode || 'deep_coding') }"
+                    @click="selectBudgetMode(opt.id)"
+                  >
+                    <span class="opt-icon">{{ opt.icon }}</span>
+                    <div class="opt-text">
+                      <div class="opt-title">
+                        <strong>{{ opt.description }}</strong>
+                        <span class="opt-tag">{{ opt.tag }}</span>
+                      </div>
+                      <small class="opt-sub">{{ opt.tooltip }}</small>
+                    </div>
+                    <svg v-if="opt.id === (modelRouting.context_budget_mode || 'deep_coding')" class="check-icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div class="pw-input-right-actions">
@@ -380,11 +417,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import ModelSelectDropdown from "./common/ModelSelectDropdown.vue";
-import type { AgentModelOption } from "./agent/types";
+import {
+  CONTEXT_BUDGET_MODES,
+  type AgentModelOption,
+  type ContextBudgetMode,
+  type ModelRouting,
+} from "./agent/types";
 
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
 
@@ -413,18 +455,6 @@ interface ProjectResourcePreview {
   truncated: boolean;
 }
 
-type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
-type ModelRouting = {
-  reasoning_effort_version: 2;
-  pro: string;
-  flash: string;
-  vision: string;
-  pro_reasoning_effort: ReasoningEffort;
-  flash_reasoning_effort: ReasoningEffort;
-  vision_reasoning_effort: ReasoningEffort;
-  context_budget_mode: "balanced" | "minimal" | "extended" | "full";
-};
-
 const MODEL_ROUTING_STORAGE_KEY = "free-api.agent.model-routing.v1";
 
 const props = defineProps<{
@@ -450,6 +480,28 @@ const copiedPath = ref(false);
 const showDeleteConfirm = ref(false);
 const resourceFilter = ref("");
 const modelMenuOpen = ref(false);
+const budgetMenuOpen = ref(false);
+const modelPickerRef = ref<HTMLElement | null>(null);
+const budgetPickerRef = ref<HTMLElement | null>(null);
+
+const budgetModes = CONTEXT_BUDGET_MODES;
+const currentBudgetModeObj = computed(() => {
+  const mode = modelRouting.value.context_budget_mode || "deep_coding";
+  return budgetModes.find((item) => item.id === mode) || budgetModes[0];
+});
+const currentBudgetIcon = computed(() => currentBudgetModeObj.value.icon);
+const currentBudgetLabel = computed(() => currentBudgetModeObj.value.label);
+const currentBudgetTooltip = computed(() => currentBudgetModeObj.value.tooltip);
+
+function selectBudgetMode(mode: ContextBudgetMode) {
+  modelRouting.value.context_budget_mode = mode;
+  try {
+    localStorage.setItem(MODEL_ROUTING_STORAGE_KEY, JSON.stringify(modelRouting.value));
+  } catch {
+    // 忽略
+  }
+  budgetMenuOpen.value = false;
+}
 
 // 模型路由
 const modelRouting = ref<ModelRouting>(loadModelRouting());
@@ -469,7 +521,7 @@ function loadModelRouting(): ModelRouting {
     pro_reasoning_effort: "auto",
     flash_reasoning_effort: "auto",
     vision_reasoning_effort: "auto",
-    context_budget_mode: "balanced",
+    context_budget_mode: "deep_coding",
   };
 }
 
@@ -673,12 +725,36 @@ function formatTime(iso?: string): string {
   }
 }
 
+function handleClickOutside(e: MouseEvent) {
+  const target = e.target as Node;
+  if (budgetPickerRef.value && !budgetPickerRef.value.contains(target)) {
+    budgetMenuOpen.value = false;
+  }
+  if (modelPickerRef.value && !modelPickerRef.value.contains(target)) {
+    modelMenuOpen.value = false;
+  }
+}
+
+function handleKeyDown(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    if (modelMenuOpen.value) modelMenuOpen.value = false;
+    if (budgetMenuOpen.value) budgetMenuOpen.value = false;
+  }
+}
+
 watch(() => props.projectId, () => {
   loadProject();
 });
 
 onMounted(() => {
   loadProject();
+  document.addEventListener("click", handleClickOutside, true);
+  window.addEventListener("keydown", handleKeyDown);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("click", handleClickOutside, true);
+  window.removeEventListener("keydown", handleKeyDown);
 });
 </script>
 
@@ -974,15 +1050,108 @@ onMounted(() => {
   bottom: calc(100% + 10px);
   left: 0;
   width: 320px;
+  max-height: min(480px, calc(100vh - 140px));
+  overflow-y: auto;
   background: #1c1c20;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 12px;
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
-  z-index: 100;
+  z-index: 1050;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
+
+.budget-mode-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.budget-chip {
+  width: auto;
+  height: 28px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #e4e4e7;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.budget-chip:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.budget-chip.active {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #93c5fd;
+}
+
+.budget-dropdown-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: 260px;
+  max-height: min(400px, calc(100vh - 140px));
+  overflow-y: auto;
+  background: #1e1e24;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  padding: 6px;
+  z-index: 1050;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.budget-menu-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: #71717a;
+  padding: 4px 8px 6px;
+  text-transform: uppercase;
+}
+
+.budget-menu-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #d4d4d8;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.12s ease;
+}
+
+.budget-menu-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+}
+
+.budget-menu-item.selected {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.3);
+  color: #93c5fd;
+}
+
+.budget-menu-item .opt-icon { font-size: 14px; margin-top: 1px; }
+.budget-menu-item .opt-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.budget-menu-item .opt-title { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.budget-menu-item .opt-tag { font-size: 10px; padding: 1px 4px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); color: #a1a1aa; }
+.budget-menu-item .opt-sub { font-size: 10.5px; color: #71717a; line-height: 1.3; }
+.budget-menu-item .check-icon { width: 14px; height: 14px; stroke: #3b82f6; stroke-width: 2.2; fill: none; margin-top: 2px; }
 
 .popover-header {
   display: flex;

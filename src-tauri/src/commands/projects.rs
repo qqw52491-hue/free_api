@@ -617,19 +617,36 @@ pub async fn read_agent_project_resource(
     }
     .map_err(|_| "项目资源不存在或已被删除".to_string())?;
     let (_, canonical_path) = canonical_project_file(&conn, &resource.project_id, &resource.canonical_path)?;
-    let content = match std::fs::read_to_string(&canonical_path) {
-        Ok(text) => text,
-        Err(_) => format!(
-            "[数据文件: {}，大小: {} 字节]\n该文件已作为项目受管数据，可在 Agent 会话中由相关数据工具或脚本直接处理与分析。",
-            resource.label, resource.size_bytes
-        ),
+    let (content, truncated) = match std::fs::read_to_string(&canonical_path) {
+        Ok(text) => {
+            let total = text.chars().count();
+            let is_trunc = total > MAX_RESOURCE_PREVIEW_CHARS;
+            let preview: String = text.chars().take(MAX_RESOURCE_PREVIEW_CHARS).collect();
+            (preview, is_trunc)
+        }
+        Err(_) => {
+            // 尝试使用多格式解析引擎提取 (Excel / Word / PDF / Zip 等)
+            if let Ok(extracted) = crate::agent::file_parser::parse_file(&canonical_path, Some(MAX_RESOURCE_PREVIEW_CHARS)) {
+                let prompt_text = crate::agent::file_parser::format_for_prompt(&extracted, &resource.label);
+                let total = prompt_text.chars().count();
+                let is_trunc = total > MAX_RESOURCE_PREVIEW_CHARS;
+                let preview: String = prompt_text.chars().take(MAX_RESOURCE_PREVIEW_CHARS).collect();
+                (preview, is_trunc)
+            } else {
+                (
+                    format!(
+                        "[数据文件: {}，大小: {:.1} KB]\n该文件已作为项目受管数据，可在 Agent 会话中由相关数据工具或脚本直接处理与分析。",
+                        resource.label, (resource.size_bytes as f64) / 1024.0
+                    ),
+                    false,
+                )
+            }
+        }
     };
-    let total_chars = content.chars().count();
-    let preview: String = content.chars().take(MAX_RESOURCE_PREVIEW_CHARS).collect();
     Ok(ProjectResourcePreview {
         resource,
-        truncated: total_chars > MAX_RESOURCE_PREVIEW_CHARS,
-        content: preview,
+        truncated,
+        content,
     })
 }
 

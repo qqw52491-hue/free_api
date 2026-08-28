@@ -440,6 +440,10 @@ function syncAllToPro() {
 
 function selectBudgetMode(mode: ContextBudgetMode) {
     emit("update:budget-mode", mode);
+    emit("update:model-routing", {
+        ...props.modelRouting,
+        context_budget_mode: mode,
+    });
     budgetMenuOpen.value = false;
 }
 
@@ -657,12 +661,14 @@ textarea::placeholder {
     bottom: calc(100% + 8px);
     left: 0;
     width: min(520px, calc(100vw - 48px));
+    max-height: min(480px, calc(100vh - 140px));
+    overflow-y: auto;
     background: #18181c;
     border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 12px;
     box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
     padding: 14px;
-    z-index: 100;
+    z-index: 1050;
     display: flex;
     flex-direction: column;
     gap: 10px;

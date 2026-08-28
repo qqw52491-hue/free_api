@@ -25,6 +25,14 @@
                 </button>
                 <button
                     class="icon-control"
+                    type="button"
+                    title="查看当前会话完整系统提示词与上下文流水 (Prompt & Context Debugger)"
+                    @click="openPromptContextInspector"
+                >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                </button>
+                <button
+                    class="icon-control"
                     :class="{ active: session.logContext.value }"
                     type="button"
                     :title="session.logContext.value ? '调试模式已开启 (记录并展示完整上下文)' : '开启调试模式 (记录并展示完整上下文)'"
@@ -400,6 +408,16 @@ function toggleInspectorWide() {
     } else {
         inspectorWidth.value = inspectorWidth.value >= 540 ? 380 : 580;
     }
+}
+
+function openPromptContextInspector() {
+    inspectorCollapsed.value = false;
+    if (inspectorWidth.value < 460) {
+        inspectorWidth.value = 520;
+    }
+    nextTick(() => {
+        inspectorRef.value?.switchTab("context");
+    });
 }
 
 function handleOpenPreview(code?: string) {
