@@ -1,6 +1,67 @@
 <template>
     <footer class="manus-composer-wrap">
-        <div class="manus-composer" :class="{ waiting: isWaitingForHuman }" @click="handleComposerClick">
+        <div
+            class="manus-composer"
+            :class="{ waiting: isWaitingForHuman, 'is-dragging': isDraggingOver }"
+            @click="handleComposerClick"
+            @dragover.prevent="isDraggingOver = true"
+            @dragleave.prevent="isDraggingOver = false"
+            @drop.prevent="handleFileDrop"
+        >
+            <!-- 📎 附件缩略图与文件卡片预览托盘 (Attachment Tray) -->
+            <div v-if="attachments.length > 0" class="composer-attachments-tray">
+                <div
+                    v-for="(item, idx) in attachments"
+                    :key="idx"
+                    class="attachment-chip-card"
+                    :class="{ 'is-image': isImageAttachment(item) }"
+                >
+                    <!-- 1. 图片缩略图卡片 -->
+                    <template v-if="isImageAttachment(item)">
+                        <div class="thumb-wrap" title="点击放大预览图片" @click.stop="openImagePreview(item)">
+                            <img :src="item.image_data_url || ''" :alt="item.file_name" class="img-thumbnail" />
+                            <div class="thumb-overlay">
+                                <svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+                            </div>
+                        </div>
+                        <div class="attachment-meta" @click.stop="openImagePreview(item)">
+                            <span class="file-name" :title="item.file_name">{{ item.file_name }}</span>
+                            <span class="file-size">{{ formatFileSize(item.size_bytes) }}</span>
+                        </div>
+                    </template>
+
+                    <!-- 2. 文档/表格/代码/压缩包卡片 -->
+                    <template v-else>
+                        <div class="file-icon-badge" :class="getFileBadgeClass(item)">
+                            <span>{{ getFileBadgeIcon(item) }}</span>
+                        </div>
+                        <div class="attachment-meta">
+                            <span class="file-name" :title="item.file_name">{{ item.file_name }}</span>
+                            <span class="file-size">{{ formatFileSize(item.size_bytes) }}</span>
+                        </div>
+                    </template>
+
+                    <!-- 移除附件按钮 -->
+                    <button
+                        type="button"
+                        class="remove-attachment-btn"
+                        title="移除此附件"
+                        @click.stop="removeAttachment(idx)"
+                    >
+                        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 拖拽高亮提示 -->
+            <div v-if="isDraggingOver" class="drag-drop-overlay">
+                <div class="drag-drop-content">
+                    <span class="drag-icon">📥</span>
+                    <strong>松开鼠标附加文件到会话</strong>
+                    <small>支持图片缩略预览、Excel、PDF、Word 与代码</small>
+                </div>
+            </div>
+
             <textarea
                 ref="textareaRef"
                 :value="draft"
@@ -279,8 +340,20 @@
             <span class="telemetry-node" title="当前执行轮次与步骤">
                 <span class="t-label">🔄 步骤</span>
                 <span class="t-val">{{ (telemetry?.stepCount && telemetry.stepCount > 0) ? `第 ${telemetry.stepCount} 步` : '1 轮' }}</span>
-            </span>
-        </div>
+        <!-- 🖼️ 图片放大全屏预览弹窗 -->
+        <Transition name="fade">
+            <div v-if="previewImageModal" class="image-preview-backdrop" @click="previewImageModal = null">
+                <div class="image-preview-dialog" @click.stop>
+                    <div class="dialog-header">
+                        <span class="dialog-title">{{ previewImageModal.file_name }} ({{ formatFileSize(previewImageModal.size_bytes) }})</span>
+                        <button type="button" class="btn-close-dialog" @click="previewImageModal = null">×</button>
+                    </div>
+                    <div class="dialog-body">
+                        <img :src="previewImageModal.image_data_url || ''" :alt="previewImageModal.file_name" class="full-preview-img" />
+                    </div>
+                </div>
+            </div>
+        </Transition>
     </footer>
 </template>
 
@@ -334,11 +407,59 @@ interface ParsedAttachment {
     raw_preview?: string | null;
 }
 
+const attachments = ref<ParsedAttachment[]>([]);
+const isDraggingOver = ref(false);
+const previewImageModal = ref<ParsedAttachment | null>(null);
+
+function isImageAttachment(item: ParsedAttachment): boolean {
+    return Boolean(
+        item.image_data_url ||
+        item.content_type?.startsWith("image/") ||
+        /\.(png|jpg|jpeg|webp|gif|bmp)$/i.test(item.file_name)
+    );
+}
+
+function getFileBadgeIcon(item: ParsedAttachment): string {
+    const ext = item.file_name.split(".").pop()?.toLowerCase() || "";
+    if (["xlsx", "xls", "csv", "ods"].includes(ext)) return "📊";
+    if (["pdf"].includes(ext)) return "📄";
+    if (["docx", "doc"].includes(ext)) return "📝";
+    if (["zip", "tar", "gz"].includes(ext)) return "📦";
+    if (["rs", "ts", "js", "py", "go", "java", "c", "cpp", "html", "css", "json", "sql"].includes(ext)) return "💻";
+    return "📎";
+}
+
+function getFileBadgeClass(item: ParsedAttachment): string {
+    const ext = item.file_name.split(".").pop()?.toLowerCase() || "";
+    if (["xlsx", "xls", "csv"].includes(ext)) return "badge-excel";
+    if (["pdf"].includes(ext)) return "badge-pdf";
+    if (["docx", "doc"].includes(ext)) return "badge-word";
+    if (["zip", "tar", "gz"].includes(ext)) return "badge-zip";
+    return "badge-generic";
+}
+
+function formatFileSize(bytes?: number): string {
+    if (!bytes || bytes === 0) return "0 B";
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${bytes} B`;
+}
+
+function openImagePreview(item: ParsedAttachment) {
+    if (item.image_data_url) {
+        previewImageModal.value = item;
+    }
+}
+
+function removeAttachment(index: number) {
+    attachments.value.splice(index, 1);
+}
+
 async function promptAttachFiles() {
     try {
         const selected = await openDialog({
             multiple: true,
-            title: "选择要附加到会话的文件 (Excel, Word, PDF, Code, 图片...)",
+            title: "选择要附加到会话的文件 (图片、Excel、Word、PDF、代码...)",
         });
         if (!selected) return;
         const paths = Array.isArray(selected) ? selected : [selected];
@@ -346,28 +467,69 @@ async function promptAttachFiles() {
         if (validPaths.length === 0) return;
 
         emit("attach-files", validPaths);
-        
-        // 自动调用后端多格式解析器（Excel、PDF、Word、Code、图片等）
-        const formattedBlocks: string[] = [];
+
         for (const p of validPaths) {
             try {
                 const parsed = await invoke<ParsedAttachment>("parse_attachment_file", { path: p });
-                if (parsed && parsed.prompt_text) {
-                    formattedBlocks.push(parsed.prompt_text.trim());
-                } else {
-                    formattedBlocks.push(`【附加文件】: ${p}`);
+                if (parsed) {
+                    attachments.value.push(parsed);
                 }
             } catch (err) {
                 console.warn("解析文件失败，使用路径降级:", err);
-                formattedBlocks.push(`【附加文件】: ${p}`);
+                const fileName = p.split("/").pop() || p;
+                attachments.value.push({
+                    file_name: fileName,
+                    file_path: p,
+                    size_bytes: 0,
+                    content_type: "file",
+                    prompt_text: `【附加文件】: ${p}`,
+                    image_data_url: null,
+                    raw_preview: null,
+                });
             }
         }
-
-        const fileHints = formattedBlocks.join("\n\n");
-        const newDraft = props.draft ? `${props.draft}\n\n${fileHints}` : fileHints;
-        emit("update:draft", newDraft);
     } catch (e) {
         console.error("选择文件失败:", e);
+    }
+}
+
+async function handleFileDrop(e: DragEvent) {
+    isDraggingOver.value = false;
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+            const base64Data = event.target?.result as string;
+            if (!base64Data) return;
+            try {
+                if (file.type.startsWith("image/")) {
+                    attachments.value.push({
+                        file_name: file.name,
+                        file_path: file.name,
+                        size_bytes: file.size,
+                        content_type: file.type,
+                        prompt_text: `【用户已上传图片附件: \`${file.name}\`】(格式: ${file.type}, 大小: ${(file.size / 1024).toFixed(1)} KB)\n*(图片数据已作为视觉多模态消息携带)*\n`,
+                        image_data_url: base64Data,
+                        raw_preview: null,
+                    });
+                } else {
+                    const parsed = await invoke<ParsedAttachment>("save_and_parse_uploaded_attachment", {
+                        sessionId: "temp-session",
+                        fileName: file.name,
+                        base64Data,
+                    });
+                    if (parsed) {
+                        attachments.value.push(parsed);
+                    }
+                }
+            } catch (err) {
+                console.warn("解析拖拽文件失败:", err);
+            }
+        };
+        reader.readAsDataURL(file);
     }
 }
 const modelPickerRef = ref<HTMLElement | null>(null);
@@ -502,8 +664,27 @@ const placeholderText = computed(() => props.isRunning
         : "输入新任务；旧模型/工具会在安全边界停止…"
     : "想让 Agent 帮你做什么？",
 );
-const canSubmit = computed(() => props.isRunning ? Boolean(props.draft.trim()) : props.canStart && Boolean(props.draft.trim()));
-function submit() { if (canSubmit.value && !props.isSending) emit("submit"); }
+const canSubmit = computed(() => {
+    const hasContent = Boolean(props.draft.trim()) || attachments.value.length > 0;
+    return props.isRunning ? hasContent : (props.canStart && hasContent);
+});
+
+function submit() {
+    if (!canSubmit.value || props.isSending) return;
+
+    let finalPrompt = props.draft.trim();
+    if (attachments.value.length > 0) {
+        const attachTexts = attachments.value.map((a) => a.prompt_text.trim()).filter(Boolean);
+        if (attachTexts.length > 0) {
+            const block = attachTexts.join("\n\n");
+            finalPrompt = finalPrompt ? `${finalPrompt}\n\n${block}` : block;
+        }
+        attachments.value = [];
+    }
+
+    emit("update:draft", finalPrompt);
+    emit("submit");
+}
 
 function formatTokens(count: number): string {
     if (count >= 1000000) return `${(count / 1000000).toFixed(1)}M`;
@@ -531,6 +712,7 @@ const contextLevelClass = computed(() => {
     background: linear-gradient(0deg, #141416 85%, transparent);
 }
 .manus-composer {
+    position: relative;
     display: flex;
     flex-direction: column;
     padding: 10px 14px 10px;
@@ -540,6 +722,10 @@ const contextLevelClass = computed(() => {
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
     transition: all 0.2s ease;
 }
+.manus-composer.is-dragging {
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.3);
+}
 .manus-composer:focus-within {
     border-color: rgba(255, 255, 255, 0.22);
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
@@ -547,6 +733,240 @@ const contextLevelClass = computed(() => {
 .manus-composer.waiting {
     border-color: rgba(251, 191, 36, 0.3);
     box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.15);
+}
+
+/* 📎 附件预览托盘 (Attachment Tray) */
+.composer-attachments-tray {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-bottom: 8px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.attachment-chip-card {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px 4px 6px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    max-width: 240px;
+    transition: all 0.15s ease;
+}
+
+.attachment-chip-card:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
+.attachment-chip-card.is-image {
+    padding: 3px 6px 3px 3px;
+}
+
+/* 图片缩略图容器 */
+.thumb-wrap {
+    position: relative;
+    width: 38px;
+    height: 38px;
+    border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    flex-shrink: 0;
+    background: #000;
+}
+
+.img-thumbnail {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.thumb-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: grid;
+    place-items: center;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.thumb-wrap:hover .thumb-overlay {
+    opacity: 1;
+}
+
+.thumb-overlay svg {
+    width: 14px;
+    height: 14px;
+    stroke: #ffffff;
+    stroke-width: 2;
+    fill: none;
+}
+
+.file-icon-badge {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    display: grid;
+    place-items: center;
+    font-size: 15px;
+    flex-shrink: 0;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.file-icon-badge.badge-excel { background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.3); }
+.file-icon-badge.badge-pdf   { background: rgba(239, 68, 68, 0.15);  border-color: rgba(239, 68, 68, 0.3); }
+.file-icon-badge.badge-word  { background: rgba(59, 130, 246, 0.15); border-color: rgba(59, 130, 246, 0.3); }
+.file-icon-badge.badge-zip   { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.3); }
+
+.attachment-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
+    cursor: pointer;
+}
+
+.attachment-meta .file-name {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: #f4f4f5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.2;
+}
+
+.attachment-meta .file-size {
+    font-size: 10px;
+    color: #71717a;
+}
+
+.remove-attachment-btn {
+    display: grid !important;
+    place-items: center !important;
+    width: 18px !important;
+    height: 18px !important;
+    border-radius: 50% !important;
+    border: 0 !important;
+    background: rgba(255, 255, 255, 0.08) !important;
+    color: #a1a1aa !important;
+    cursor: pointer;
+    padding: 0 !important;
+    flex-shrink: 0;
+    transition: all 0.12s;
+}
+
+.remove-attachment-btn:hover {
+    background: rgba(239, 68, 68, 0.25) !important;
+    color: #fca5a5 !important;
+}
+
+.remove-attachment-btn svg {
+    width: 10px;
+    height: 10px;
+    stroke: currentColor;
+    stroke-width: 2.5;
+}
+
+/* 拖拽上传遮罩 */
+.drag-drop-overlay {
+    position: absolute;
+    inset: 4px;
+    border-radius: 10px;
+    background: rgba(24, 24, 28, 0.95);
+    border: 2px dashed rgba(99, 102, 241, 0.6);
+    display: grid;
+    place-items: center;
+    z-index: 50;
+    pointer-events: none;
+    animation: fadeIn 0.15s ease;
+}
+
+.drag-drop-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    color: #c7d2fe;
+}
+
+.drag-drop-content .drag-icon { font-size: 24px; }
+.drag-drop-content strong { font-size: 13px; font-weight: 600; }
+.drag-drop-content small { font-size: 11px; color: #818cf8; }
+
+/* 图片全屏预览弹窗 */
+.image-preview-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(8px);
+    z-index: 2000;
+    display: grid;
+    place-items: center;
+    padding: 30px;
+}
+
+.image-preview-dialog {
+    max-width: 90vw;
+    max-height: 90vh;
+    background: #18181c;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    background: #1f1f24;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.dialog-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #f4f4f5;
+}
+
+.btn-close-dialog {
+    background: transparent;
+    border: 0;
+    color: #a1a1aa;
+    font-size: 18px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+}
+
+.btn-close-dialog:hover { color: #ffffff; }
+
+.dialog-body {
+    padding: 16px;
+    display: grid;
+    place-items: center;
+    overflow: auto;
+}
+
+.full-preview-img {
+    max-width: 100%;
+    max-height: calc(85vh - 70px);
+    object-fit: contain;
+    border-radius: 6px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
 }
 
 textarea {
