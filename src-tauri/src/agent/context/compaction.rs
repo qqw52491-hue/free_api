@@ -465,6 +465,9 @@ impl SandwichContext {
 
         // 压缩断代：清空工具手册已加载标记，若新周期继续使用会自动重新追加最新手册
         self.fetched_tools.clear();
+        // 🌟 纪元换代：将 epoch 基线刷新为当前最新的 system_prompt，
+        // 后续轮次以全新 M0 为锚点，先前在历史中追加的"规约更新事件"已被归档压缩收敛。
+        self.epoch_system_prompt = Some(self.system_prompt.clone());
 
         println!(
             "✅ [Compaction Engine] 压缩完成：历史 Tokens 从 {} 降至 {} (低水位目标: {})",
