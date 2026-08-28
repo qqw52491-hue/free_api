@@ -160,6 +160,8 @@ pub struct DurableAgentContext {
     pub observation_summary: String,
     pub active_tool: Option<String>,
     #[serde(default)]
+    pub epoch_system_prompt: Option<String>,
+    #[serde(default)]
     pub last_reported_prompt_tokens: Option<usize>,
     #[serde(default)]
     pub last_reported_history_estimate_tokens: Option<usize>,
@@ -189,6 +191,10 @@ impl DurableAgentContext {
                 MAX_OBSERVATION_CHARS,
             ),
             active_tool: context.active_tool.clone(),
+            epoch_system_prompt: context
+                .epoch_system_prompt
+                .clone()
+                .or_else(|| Some(context.system_prompt.clone())),
             last_reported_prompt_tokens: context.last_reported_prompt_tokens,
             last_reported_history_estimate_tokens: context.last_reported_history_estimate_tokens,
             last_persisted_summary: context.last_persisted_summary.clone(),
@@ -215,6 +221,32 @@ impl DurableAgentContext {
         context.last_reported_history_estimate_tokens = self.last_reported_history_estimate_tokens;
         context.last_persisted_summary = self.last_persisted_summary.clone();
         context.persisted_summary_revision = self.persisted_summary_revision;
+
+        // 🌟 统一不变性保护：保持已有会话的 M0 顶层系统提示词绝对恒定，稳吃 Prefix Cache！
+        if let Some(baseline_prompt) = &self.epoch_system_prompt {
+            if !baseline_prompt.trim().is_empty() {
+                let incoming_prompt = context.system_prompt.clone();
+                context.system_prompt = baseline_prompt.clone();
+                context.epoch_system_prompt = Some(baseline_prompt.clone());
+
+                // 若检测到外部环境/项目规约/MCP/Skill 发生了变更，作为事件追加至历史流水
+                if baseline_prompt != &incoming_prompt {
+                    let diff_summary = generate_prompt_diff_summary(baseline_prompt, &incoming_prompt);
+                    if !diff_summary.is_empty() {
+                        context.turns_history.push(ChatMessage {
+                            role: "user".to_string(),
+                            content: serde_json::json!(format!(
+                                "【系统能力/规约更新事件】\n检测到项目规约或能力配置已发生变更，最新变更如下：\n{}\n(已写入当前会话历史流，本会话自此步起遵循最新规约)",
+                                diff_summary
+                            )),
+                        });
+                    }
+                }
+            }
+        } else {
+            context.epoch_system_prompt = Some(context.system_prompt.clone());
+        }
+
         // 工具说明书是派生缓存，必须依照当前 Runtime 重新加载。
         context.active_tool_detail.clear();
         context.carry_memories = false;
@@ -243,6 +275,30 @@ impl DurableAgentContext {
         let chat_tail = std::mem::take(&mut context.turns_history);
         context.turns_history = merge_chat_onto_filling(self.turns_history.clone(), chat_tail);
 
+        // 保持已有会话的 M0 系统提示词恒定，若发生变更作为事件追加
+        if let Some(baseline_prompt) = &self.epoch_system_prompt {
+            if !baseline_prompt.trim().is_empty() {
+                let incoming_prompt = context.system_prompt.clone();
+                context.system_prompt = baseline_prompt.clone();
+                context.epoch_system_prompt = Some(baseline_prompt.clone());
+
+                if baseline_prompt != &incoming_prompt {
+                    let diff_summary = generate_prompt_diff_summary(baseline_prompt, &incoming_prompt);
+                    if !diff_summary.is_empty() {
+                        context.turns_history.push(ChatMessage {
+                            role: "user".to_string(),
+                            content: serde_json::json!(format!(
+                                "【系统能力/规约更新事件】\n检测到项目规约或能力配置已发生变更，最新变更如下：\n{}\n(已写入当前会话历史流，本会话自此步起遵循最新规约)",
+                                diff_summary
+                            )),
+                        });
+                    }
+                }
+            }
+        } else {
+            context.epoch_system_prompt = Some(context.system_prompt.clone());
+        }
+
         for (key, value) in &self.memories {
             context
                 .memories
@@ -265,6 +321,30 @@ impl DurableAgentContext {
         context.sync_fetched_tools_from_history();
         context.maybe_compact_history();
     }
+}
+
+fn generate_prompt_diff_summary(old_p: &str, new_p: &str) -> String {
+    let old_lines: std::collections::HashSet<&str> = old_p
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut added_lines = Vec::new();
+    for line in new_p.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !old_lines.contains(trimmed) {
+            added_lines.push(trimmed);
+        }
+    }
+    if added_lines.is_empty() {
+        return String::new();
+    }
+    let limit = 25.min(added_lines.len());
+    let mut summary = added_lines[..limit].join("\n");
+    if added_lines.len() > limit {
+        summary.push_str(&format!("\n... 及其余 {} 处细节更新", added_lines.len() - limit));
+    }
+    summary
 }
 
 fn merge_chat_onto_filling(

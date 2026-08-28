@@ -158,6 +158,9 @@ pub struct SandwichContext {
     /// 项目受管文件清单动态投影（放置于底层面包，保障 M0 顶层前缀绝对不变）
     #[serde(default)]
     pub project_resource_manifest: Option<String>,
+    /// 当前纪元（Epoch）锁定的 M0 顶层系统提示词基线（保住跨轮次长前缀缓存）
+    #[serde(default)]
+    pub epoch_system_prompt: Option<String>,
     /// 无进展重复检测：相同工具+相同参数+相同输出/失败的运行时事实（策略级提示用）。
     #[serde(default)]
     pub no_progress: NoProgressTracker,
@@ -227,6 +230,7 @@ impl SandwichContext {
             plan_state: PlanState::new(),
             resource_scope: ResourceScopeContract::default(),
             project_resource_manifest: None,
+            epoch_system_prompt: None,
             no_progress: NoProgressTracker::default(),
             zero_hit: ZeroHitTracker::default(),
             last_reported_prompt_tokens: None,
