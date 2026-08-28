@@ -175,6 +175,14 @@ export function normalizeStreamingMarkdown(raw: string): string {
     if (!raw) return "";
     let processed = raw;
 
+    // 💡 防御性修复：自动将文本中的字面量 \n 还原为真正的换行符
+    if (processed.includes("\\n")) {
+        processed = processed.replace(/\\n/g, "\n");
+    }
+    if (processed.includes("\\t")) {
+        processed = processed.replace(/\\t/g, "\t");
+    }
+
     // 1. 预测并补全未闭合的代码块 (```)
     const codeBlockMatches = processed.match(/```/g);
     if (codeBlockMatches && codeBlockMatches.length % 2 !== 0) {

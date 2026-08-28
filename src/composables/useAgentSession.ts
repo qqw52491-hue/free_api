@@ -379,6 +379,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     function cleanUserFacingSummary(rawText: string): string {
         if (!rawText) return "";
         return rawText
+            .replace(/\\n/g, "\n")
             .replace(/change_verification_update\s*:\s*\{[\s\S]*?\}/gi, "")
             .replace(/review_contract_update\s*:\s*\{[\s\S]*?\}/gi, "")
             .replace(/output_id\s*:\s*[a-zA-Z0-9_-]+/gi, "")
