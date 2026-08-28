@@ -633,6 +633,34 @@ pub fn poll_completed_child_runs(
     Ok(results)
 }
 
+/// 检查当前 parent_run 是否仍有正在执行中的子审查任务
+pub fn has_running_child_runs(db: &DbState, parent_run_id: &str) -> bool {
+    let Ok(conn) = db.0.lock() else { return false; };
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id = ?1 AND status = 'running'",
+            params![parent_run_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    count > 0
+}
+
+/// 将指定 parent_run 下所有仍处于 running 状态的子审查任务标记为 cancelled
+pub fn cancel_running_child_runs(db: &DbState, parent_run_id: &str) -> Result<usize, String> {
+    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows_updated = conn
+        .execute(
+            "UPDATE agent_child_runs 
+             SET status = 'cancelled', finished_at = ?2, error_kind = 'cancelled' 
+             WHERE parent_run_id = ?1 AND status = 'running'",
+            params![parent_run_id, now],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(rows_updated)
+}
+
 pub fn result_as_dispatch_output(result: ChildReviewResult) -> String {
     json!({
         "child_run_id": result.child_run_id,
@@ -879,6 +907,132 @@ mod tests {
         // 第二次轮询：因为 result_json 已置 NULL，不再重复消费
         let polled_again = poll_completed_child_runs(&state, "parent-run-poll").unwrap();
         assert_eq!(polled_again.len(), 0);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn has_running_child_runs_detects_active_and_terminal_states() {
+        let base = std::env::temp_dir().join(format!("free-api-child-active-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        // 没有任务时返回 false
+        assert!(!has_running_child_runs(&state, "parent-run-1"));
+
+        // 启动一个 child run -> 处于 running 状态
+        let child_1 = begin_child_run(&state, "parent-run-1", "session-1", &workspace, "model-a", 1).unwrap();
+        assert!(has_running_child_runs(&state, "parent-run-1"));
+        // 其他 parent_run 不受影响
+        assert!(!has_running_child_runs(&state, "parent-run-2"));
+
+        // 完成 child run -> 返回 false
+        finish_child_run(&state, &child_1, "succeeded", 100, 20, None, None);
+        assert!(!has_running_child_runs(&state, "parent-run-1"));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn cancel_running_child_runs_cancels_only_running_tasks() {
+        let base = std::env::temp_dir().join(format!("free-api-child-cancel-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        let child_1 = begin_child_run(&state, "parent-run-c", "session-c", &workspace, "model-a", 0).unwrap();
+        let child_2 = begin_child_run(&state, "parent-run-c", "session-c", &workspace, "model-a", 0).unwrap();
+
+        // child_1 正常成功完成
+        finish_child_run(&state, &child_1, "succeeded", 50, 10, None, None);
+
+        // 取消父任务下的所有 running 子任务
+        let cancelled_count = cancel_running_child_runs(&state, "parent-run-c").unwrap();
+        assert_eq!(cancelled_count, 1);
+
+        // 验证 child_1 依然保持 succeeded
+        let conn = state.0.lock().unwrap();
+        let status_1: String = conn
+            .query_row("SELECT status FROM agent_child_runs WHERE id = ?1", params![child_1], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status_1, "succeeded");
+
+        // 验证 child_2 变为 cancelled
+        let (status_2, error_kind): (String, Option<String>) = conn
+            .query_row("SELECT status, error_kind FROM agent_child_runs WHERE id = ?1", params![child_2], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(status_2, "cancelled");
+        assert_eq!(error_kind.as_deref(), Some("cancelled"));
+
+        // 此时已无 running 任务
+        drop(conn);
+        assert!(!has_running_child_runs(&state, "parent-run-c"));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn multiple_parallel_child_runs_polling_handles_interleaved_completions() {
+        let base = std::env::temp_dir().join(format!("free-api-child-interleaved-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        let child_1 = begin_child_run(&state, "parent-run-multi", "session-m", &workspace, "model-a", 1).unwrap();
+        let child_2 = begin_child_run(&state, "parent-run-multi", "session-m", &workspace, "model-a", 1).unwrap();
+
+        // 初始无完成
+        let polled_0 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
+        assert_eq!(polled_0.len(), 0);
+
+        // child_1 先完成
+        let res_1 = ChildReviewResult {
+            child_run_id: child_1.clone(),
+            status: "succeeded".to_string(),
+            findings: vec!["审查1通过".to_string()],
+            confidence: "confirmed".to_string(),
+            evidence_refs: vec!["ref-1".to_string()],
+            missing_evidence: vec![],
+            duration_ms: 200,
+            completion_tokens: 30,
+        };
+        finish_child_run(&state, &child_1, "succeeded", 200, 30, None, Some(&serde_json::to_string(&res_1).unwrap()));
+
+        // 第一轮轮询：消费 child_1
+        let polled_1 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
+        assert_eq!(polled_1.len(), 1);
+        assert_eq!(polled_1[0].child_run_id, child_1);
+
+        // child_2 后完成
+        let res_2 = ChildReviewResult {
+            child_run_id: child_2.clone(),
+            status: "succeeded".to_string(),
+            findings: vec!["审查2通过".to_string()],
+            confidence: "supported".to_string(),
+            evidence_refs: vec!["ref-2".to_string()],
+            missing_evidence: vec![],
+            duration_ms: 350,
+            completion_tokens: 40,
+        };
+        finish_child_run(&state, &child_2, "succeeded", 350, 40, None, Some(&serde_json::to_string(&res_2).unwrap()));
+
+        // 第二轮轮询：消费 child_2，不重复消费 child_1
+        let polled_2 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
+        assert_eq!(polled_2.len(), 1);
+        assert_eq!(polled_2[0].child_run_id, child_2);
+
+        // 第三轮轮询：全空
+        let polled_3 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
+        assert_eq!(polled_3.len(), 0);
 
         let _ = std::fs::remove_dir_all(base);
     }

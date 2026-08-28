@@ -1215,6 +1215,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         if let Some(blocker) = complex_delivery_blocker {
             open_todos.push(blocker);
         }
+        if is_finish && crate::agent::child_reviewer::has_running_child_runs(state.inner(), &run_id) {
+            open_todos.push("仍有后台子审查任务正在执行中，请等待其推导完成并接收结论后再提交 finish".to_string());
+        }
         let finish_challenged = should_challenge_finish_with_complex_delivery_blocker(
             is_finish,
             result.success,
