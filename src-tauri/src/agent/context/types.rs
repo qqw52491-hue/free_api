@@ -155,6 +155,9 @@ pub struct SandwichContext {
     /// 活跃资源作用域契约；独立于历史压缩，持续投影到每轮上下文。
     #[serde(default)]
     pub resource_scope: ResourceScopeContract,
+    /// 项目受管文件清单动态投影（放置于底层面包，保障 M0 顶层前缀绝对不变）
+    #[serde(default)]
+    pub project_resource_manifest: Option<String>,
     /// 无进展重复检测：相同工具+相同参数+相同输出/失败的运行时事实（策略级提示用）。
     #[serde(default)]
     pub no_progress: NoProgressTracker,
@@ -223,6 +226,7 @@ impl SandwichContext {
             progress_summary: String::new(),
             plan_state: PlanState::new(),
             resource_scope: ResourceScopeContract::default(),
+            project_resource_manifest: None,
             no_progress: NoProgressTracker::default(),
             zero_hit: ZeroHitTracker::default(),
             last_reported_prompt_tokens: None,

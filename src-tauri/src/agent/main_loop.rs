@@ -567,30 +567,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     };
 
     let project_resource_boundary = if is_project_session {
-        let mut text = format!(
-            "\n\n## 📂 项目受管工作区与资源清单 (Project Resource Manifest)\n- 项目物理工作目录: `{}`\n",
-            workspace_dir.display()
-        );
-        if project_resources.is_empty() {
-            text.push_str("- 当前项目暂无登记的受管文件。当在工作区生成重要产物或分析报告时，可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。\n");
-        } else {
-            text.push_str(&format!("- 本项目已登记受管数据文件（共 {} 个，已建立资源句柄可直接读取分析）：\n", project_resources.len()));
-            for r in &project_resources {
-                let size_kb = (r.size_bytes as f64) / 1024.0;
-                text.push_str(&format!(
-                    "  - [{}] `{}` (resource_id: `{}`, 大小: {:.1} KB, 标签: \"{}\")\n",
-                    r.kind.to_uppercase(),
-                    r.relative_path,
-                    r.resource_id,
-                    size_kb,
-                    r.label
-                ));
-            }
-            text.push_str("- 提示：调用 `project_resources.read_resource(resource_id)` 可直接读取上述文件内容；在工作区发现或生成新核心交付物时可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。\n");
-        }
-        text
+        "\n\n## 项目受管资源边界\n当前会话已绑定项目根目录，宿主授权读取已登记的受管文件。可调用 `project_resources.list_resources()` 获取全部资源；以 resource_id 调用 `project_resources.read_resource(resource_id)` 读取内容；当生成或发现新的关键项目文件（如架构设计、数据库规范、核心接口）时，可调用 `project_resources.register_resource(path, label)` 将其登记为跨会话共享受管资源。不得用 `search`、外部 MCP 工具或 shell 越界探查未授权项目文件。"
     } else {
-        String::new()
+        ""
     };
     let system_prompt = format!(
         "{}{}{}{}{}\n{}\n{}",
@@ -626,6 +605,30 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
                 &workspace_dir.to_string_lossy(),
                 context::resource_scope::ResourceScopeSource::SessionSelected,
             );
+
+        // 动态受管文件清单挂载在底层面包（M_Tail），绝不污染 M0 顶层长前缀缓存
+        let mut manifest_text = format!(
+            "【项目受管文件清单 (Project Resource Manifest)】\n- 项目物理工作目录: `{}`\n",
+            workspace_dir.display()
+        );
+        if project_resources.is_empty() {
+            manifest_text.push_str("- 当前项目暂无登记的受管文件。当在工作区生成重要产物或分析报告时，可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。");
+        } else {
+            manifest_text.push_str(&format!("- 本项目已登记受管数据文件（共 {} 个，已建立资源句柄可直接读取分析）：\n", project_resources.len()));
+            for r in &project_resources {
+                let size_kb = (r.size_bytes as f64) / 1024.0;
+                manifest_text.push_str(&format!(
+                    "  - [{}] `{}` (resource_id: `{}`, 大小: {:.1} KB, 标签: \"{}\")\n",
+                    r.kind.to_uppercase(),
+                    r.relative_path,
+                    r.resource_id,
+                    size_kb,
+                    r.label
+                ));
+            }
+            manifest_text.push_str("- 提示：调用 `project_resources.read_resource(resource_id)` 可直接读取上述文件内容；在工作区发现或生成新核心交付物时可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。");
+        }
+        context.project_resource_manifest = Some(manifest_text);
     }
     context.compact_tools_index = Some(compact_tools_index);
     // 注入当前路由模型的上下文窗口大小与压缩配置，用于历史压缩水位动态计算与双层智能归档。

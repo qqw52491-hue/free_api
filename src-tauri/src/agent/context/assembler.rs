@@ -109,6 +109,14 @@ impl SandwichContext {
             bottom_state_card.push_str(&format!("{}\n\n", resource_scope_projection));
         }
 
+        // (6.1) 项目受管文件清单与句柄 (Project Resource Manifest)
+        // 动态放在尾部状态卡，既能让模型实时感知最新文件，又绝对不破坏 M0 顶层长前缀缓存！
+        if let Some(manifest) = &self.project_resource_manifest {
+            if !manifest.is_empty() {
+                bottom_state_card.push_str(&format!("{}\n\n", manifest));
+            }
+        }
+
         // (7) 会话任务数据区目录 (TaskStore 资源摘要)
         bottom_state_card.push_str(&ContextRenderer::render_task_resources(
             &self.task_resources,
