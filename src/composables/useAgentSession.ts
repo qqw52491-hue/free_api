@@ -183,7 +183,26 @@ function normalizeUsage(payload: Record<string, unknown>): AgentTokenUsage | nul
     };
 }
 
-export function useAgentSession(sessionId: string) {
+export interface UseAgentSessionOptions {
+    projectId?: string | (() => string | undefined);
+    onPromote?: (oldId: string, newId: string, title: string, projectId?: string) => void;
+}
+
+export function extractSmartTitle(text: string): string {
+    const trimmed = text.trim();
+    if (!trimmed) return "";
+    const clean = trimmed
+        .replace(/^[\{\[\"\'\s#\->`]+/, "")
+        .replace(/^(你好[呀啊吗~！!，,]*|请问[一下]*|请帮我[一下]*|帮我[一下]*|我想[要]*|请[您]*)+/i, "")
+        .replace(/[\r\n]+/g, " ")
+        .trim();
+    if (!clean) return trimmed.slice(0, 18);
+    if (clean.length <= 20) return clean;
+    return `${clean.slice(0, 19)}…`;
+}
+
+export function useAgentSession(sessionId: string, options?: UseAgentSessionOptions) {
+    const activeSessionId = ref(sessionId);
     const modelRouting = ref<ModelRouting>(loadModelRouting());
     watch(modelRouting, (value) => {
         try { localStorage.setItem(MODEL_ROUTING_STORAGE_KEY, JSON.stringify(value)); } catch { /* 存储不可用时继续使用当前会话配置 */ }
@@ -242,7 +261,7 @@ export function useAgentSession(sessionId: string) {
     const completionMessage = ref("");
     const streamingSummary = ref("");
     const { conversationMessages, isConversationLoading, loadConversation } = usePersistedAgentConversation(
-        sessionId,
+        activeSessionId.value,
         (message) => appendLog(`[会话历史加载失败] ${message}`),
     );
     const historyTurns = computed<AgentHistoryTurn[]>(() => historyRuns.value.map((run) => ({
@@ -552,11 +571,16 @@ export function useAgentSession(sessionId: string) {
         );
         return assistantMessages.length ? assistantMessages[assistantMessages.length - 1].content.trim() : "";
     }
-    function dedupeHistoryRuns(runs: HistoryRunSnapshot[]) {
+    function dedupeHistoryRuns(runs: HistoryRunSnapshot[]): HistoryRunSnapshot[] {
         const byId = new Map<string, HistoryRunSnapshot>();
         for (const run of runs) {
-            // 只要有步骤、有总结、有交付物或有明确终态（无论成功、失败还是已停止），都是真实独立历史回合，完整保留！
-            if (!run.steps.length && !run.summary && !run.artifacts.length && !["succeeded", "failed", "cancelled"].includes(run.status)) {
+            const existing = byId.get(run.id);
+            if (existing) {
+                const combined = { ...existing, ...run };
+                combined.steps = run.steps && run.steps.length ? run.steps : existing.steps;
+                combined.artifacts = run.artifacts && run.artifacts.length ? run.artifacts : existing.artifacts;
+                combined.summary = run.summary || existing.summary;
+                byId.set(run.id, combined);
                 continue;
             }
             byId.set(run.id, run);
@@ -564,8 +588,12 @@ export function useAgentSession(sessionId: string) {
         return [...byId.values()].sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
     }
     async function loadRunTraces() {
+        if (activeSessionId.value.startsWith("draft-")) {
+            historyRuns.value = [];
+            return;
+        }
         try {
-            const traces = await invoke<unknown[]>("get_session_run_traces", { sessionId });
+            const traces = await invoke<unknown[]>("get_session_run_traces", { sessionId: activeSessionId.value });
             const normalized = (Array.isArray(traces) ? traces : []).map((trace) => normalizeRunTrace(trace));
             normalized.forEach((run) => {
                 if (!run.summary) run.summary = summaryFromConversation(run);
@@ -1164,9 +1192,55 @@ export function useAgentSession(sessionId: string) {
         setRunState("idle");
     }
 
+    async function setupListeners(sid: string) {
+        unlisteners.forEach((unlisten) => unlisten());
+        unlisteners = [];
+        const register = async (channel: string, handler: (payload: unknown) => void) => {
+            try {
+                unlisteners.push(await listen<unknown>(channel, (event) => handler(event.payload)));
+            } catch (error) {
+                appendLog(`[监听失败] ${channel}: ${toText(error)}`);
+            }
+        };
+        await register(`agent-run-state-${sid}`, (payload) => handleRunState(asRecord(payload)));
+        await register(`agent-progress-${sid}`, (payload) => handleProgress(asRecord(payload)));
+        await register(`agent-log-${sid}`, handleLog);
+        await register(`agent-context-${sid}`, handleContext);
+        await register(`agent-tool-event-${sid}`, (payload) => handleToolEvent(asRecord(payload)));
+    }
+
     async function runAgent(nextGoal?: string) {
         const requestedGoal = (nextGoal ?? goalInput.value).trim();
         if (!requestedGoal || isRunning.value) return;
+
+        let currentSessionId = activeSessionId.value;
+        if (currentSessionId.startsWith("draft-")) {
+            const rawProjectId = typeof options?.projectId === "function" ? options.projectId() : options?.projectId;
+            const initialTitle = "新对话";
+            try {
+                if (rawProjectId) {
+                    const created = await invoke<any>("create_agent_project_session", {
+                        projectId: rawProjectId,
+                        title: initialTitle,
+                        modelId: modelRouting.value?.pro || undefined,
+                    });
+                    currentSessionId = created.id;
+                } else {
+                    const created = await invoke<any>("create_session", {
+                        title: initialTitle,
+                        modelId: modelRouting.value?.pro || undefined,
+                    });
+                    currentSessionId = created.id;
+                }
+                const oldId = activeSessionId.value;
+                activeSessionId.value = currentSessionId;
+                await setupListeners(currentSessionId);
+                options?.onPromote?.(oldId, currentSessionId, initialTitle, rawProjectId);
+            } catch (err) {
+                appendLog(`[会话持久化异常] ${toText(err)}`);
+            }
+        }
+
         await loadRunTraces();
         clearSession();
         runTerminal.value = false;
@@ -1184,7 +1258,7 @@ export function useAgentSession(sessionId: string) {
                 modelRouting: modelRouting.value,
                 goal: currentGoal.value,
                 autoPilot: true,
-                sessionId,
+                sessionId: currentSessionId,
                 logContext: logContext.value,
                 transientLlmRequestRetries: retryAttempts.value === 0 ? 1 : Math.min(100, Math.max(1, retryAttempts.value + 1)),
             });
@@ -1236,13 +1310,14 @@ export function useAgentSession(sessionId: string) {
         setRunState("cancelled", "正在向模型发送中断信号并安全停止任务...");
         appendLog("[停止请求] 正在向模型与工具发送中断信号...");
         try {
-            await invoke("cancel_agent_run", { sessionId });
+            await invoke("cancel_agent_run", { sessionId: activeSessionId.value });
         } catch (error) {
             appendLog(`[停止指令] ${toText(error)}`);
         }
     }
     async function checkAndRestoreCheckpointState() {
         try {
+            if (activeSessionId.value.startsWith("draft-")) return;
             const cp = await invoke<{
                 run_id: string;
                 phase: string;
@@ -1250,7 +1325,7 @@ export function useAgentSession(sessionId: string) {
                 user_goal: string;
                 last_error: string | null;
                 is_waiting_human: boolean;
-            } | null>("get_agent_checkpoint", { sessionId });
+            } | null>("get_agent_checkpoint", { sessionId: activeSessionId.value });
             if (cp && cp.is_waiting_human) {
                 runTerminal.value = false;
                 setRunState("waiting_for_human", "Agent 正在等待你的输入。");
@@ -1269,7 +1344,7 @@ export function useAgentSession(sessionId: string) {
         isSendingHuman.value = true;
         try {
             try {
-                await invoke("send_human_intervention", { sessionId, message });
+                await invoke("send_human_intervention", { sessionId: activeSessionId.value, message });
                 humanInput.value = "";
                 pauseReason.value = "";
                 humanForm.value = null;
@@ -1298,7 +1373,7 @@ export function useAgentSession(sessionId: string) {
         try {
             if (isWaitingForHuman.value) {
                 try {
-                    await invoke("send_human_intervention", { sessionId, message });
+                    await invoke("send_human_intervention", { sessionId: activeSessionId.value, message });
                     humanInput.value = "";
                     pauseReason.value = "";
                     humanForm.value = null;
@@ -1315,7 +1390,7 @@ export function useAgentSession(sessionId: string) {
             } else {
                 // 运行中输入代表新任务；旧回合在后端安全边界取消，随后启动独立新树。
                 pendingReplacementGoal.value = message;
-                await invoke("replace_agent_goal", { sessionId, goal: message });
+                await invoke("replace_agent_goal", { sessionId: activeSessionId.value, goal: message });
                 humanInput.value = "";
                 appendLog(`[目标替换] 已请求新任务：${message}`);
             }
@@ -1333,22 +1408,13 @@ export function useAgentSession(sessionId: string) {
     }
 
     onMounted(async () => {
-        await loadConversation();
-        await loadRunTraces();
-        await checkAndRestoreCheckpointState();
-        void refreshResources();
-        const register = async (channel: string, handler: (payload: unknown) => void) => {
-            try {
-                unlisteners.push(await listen<unknown>(channel, (event) => handler(event.payload)));
-            } catch (error) {
-                appendLog(`[监听失败] ${channel}: ${toText(error)}`);
-            }
-        };
-        await register(`agent-run-state-${sessionId}`, (payload) => handleRunState(asRecord(payload)));
-        await register(`agent-progress-${sessionId}`, (payload) => handleProgress(asRecord(payload)));
-        await register(`agent-log-${sessionId}`, handleLog);
-        await register(`agent-context-${sessionId}`, handleContext);
-        await register(`agent-tool-event-${sessionId}`, (payload) => handleToolEvent(asRecord(payload)));
+        if (!activeSessionId.value.startsWith("draft-")) {
+            await loadConversation();
+            await loadRunTraces();
+            await checkAndRestoreCheckpointState();
+            void refreshResources();
+        }
+        await setupListeners(activeSessionId.value);
     });
 
     onUnmounted(() => {

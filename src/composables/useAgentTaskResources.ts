@@ -65,7 +65,7 @@ export function useAgentTaskResources(sessionId: string) {
     }
 
     async function refreshResources() {
-        if (isResourcesLoading.value) return;
+        if (sessionId.startsWith("draft-") || isResourcesLoading.value) return;
         isResourcesLoading.value = true;
         resourceLoadError.value = "";
         try {

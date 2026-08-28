@@ -455,13 +455,17 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     ) {
         eprintln!("[run-trace] 无法创建运行轨迹: {error}");
     }
-    // 项目会话的根目录只由服务端 session→project 关联决定，并在每轮重新 canonicalize；
-    // 普通会话与后台评测分别沿用当前工作区和显式受宿主校验的 override。
-    let project_workspace = if workspace_override.is_none() {
+    let (project_workspace, project_resources) = if workspace_override.is_none() {
         let conn = state.0.lock().map_err(|error| error.to_string())?;
-        crate::commands::projects::project_workspace_for_session(&conn, &final_session_id)?
+        let ws = crate::commands::projects::project_workspace_for_session(&conn, &final_session_id)?;
+        let res = if ws.is_some() {
+            crate::commands::projects::project_resources_for_session(&conn, &final_session_id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        (ws, res)
     } else {
-        None
+        (None, Vec::new())
     };
     let is_project_session = project_workspace.is_some();
     // Skill、插件与 shell 工具共享本轮运行时工作目录；恢复时会重新读取并按哈希复用未变更的 Skill。
@@ -563,9 +567,30 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     };
 
     let project_resource_boundary = if is_project_session {
-        "\n\n## 项目受管资源边界\n当前会话已绑定项目根目录，宿主授权读取已登记的受管文件。可调用 `project_resources.list_resources()` 获取全部资源；以 resource_id 调用 `project_resources.read_resource(resource_id)` 读取内容；当生成或发现新的关键项目文件（如架构设计、数据库规范、核心接口）时，可调用 `project_resources.register_resource(path, label)` 将其登记为跨会话共享受管资源。不得用 `search`、外部 MCP 工具或 shell 越界探查未授权项目文件。"
+        let mut text = format!(
+            "\n\n## 📂 项目受管工作区与资源清单 (Project Resource Manifest)\n- 项目物理工作目录: `{}`\n",
+            workspace_dir.display()
+        );
+        if project_resources.is_empty() {
+            text.push_str("- 当前项目暂无登记的受管文件。当在工作区生成重要产物或分析报告时，可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。\n");
+        } else {
+            text.push_str(&format!("- 本项目已登记受管数据文件（共 {} 个，已建立资源句柄可直接读取分析）：\n", project_resources.len()));
+            for r in &project_resources {
+                let size_kb = (r.size_bytes as f64) / 1024.0;
+                text.push_str(&format!(
+                    "  - [{}] `{}` (resource_id: `{}`, 大小: {:.1} KB, 标签: \"{}\")\n",
+                    r.kind.to_uppercase(),
+                    r.relative_path,
+                    r.resource_id,
+                    size_kb,
+                    r.label
+                ));
+            }
+            text.push_str("- 提示：调用 `project_resources.read_resource(resource_id)` 可直接读取上述文件内容；在工作区发现或生成新核心交付物时可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。\n");
+        }
+        text
     } else {
-        ""
+        String::new()
     };
     let system_prompt = format!(
         "{}{}{}{}{}\n{}\n{}",

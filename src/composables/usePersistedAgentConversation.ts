@@ -16,6 +16,10 @@ export function usePersistedAgentConversation(sessionId: string, onError?: (mess
     const isConversationLoading = ref(false);
 
     async function loadConversation() {
+        if (sessionId.startsWith("draft-")) {
+            conversationMessages.value = [];
+            return;
+        }
         isConversationLoading.value = true;
         try {
             const messages = await invoke<PersistedConversationMessage[]>("get_messages", { sessionId });

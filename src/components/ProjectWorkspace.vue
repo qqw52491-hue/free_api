@@ -1,289 +1,392 @@
 <template>
-  <section class="project-workspace">
-    <!-- 顶部导航与操作栏 -->
-    <header class="workspace-header">
-      <div class="header-info">
-        <div class="kicker-row">
-          <span class="workspace-kicker">📁 PROJECT WORKSPACE</span>
-          <span class="workspace-badge" v-if="projects.length">{{ projects.length }} 个项目</span>
-        </div>
-        <h1 class="workspace-title">项目与受管资源</h1>
-        <p class="workspace-subtitle">
-          绑定本地工作区根目录，显式登记关键文件为受管资源；Agent 与子审查员（Child Reviewer）将在对话中精准参考这些上下文。
-        </p>
+  <div class="project-workspace-view">
+    <!-- 顶部状态栏 -->
+    <header class="pw-topbar">
+      <div class="pw-breadcrumbs">
+        <span class="crumb-root">Projects</span>
+        <span class="crumb-sep">/</span>
+        <span class="crumb-current">{{ project?.name || "加载中…" }}</span>
       </div>
-      <div class="header-actions">
-        <button class="btn-primary-action" type="button" :disabled="busy" @click="createProject">
-          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="12" y1="5" x2="12" y2="19"></line>
-            <line x1="5" y1="12" x2="19" y2="12"></line>
-          </svg>
-          <span>{{ busy ? "处理中…" : "新建项目" }}</span>
+
+      <div class="pw-top-actions">
+        <div class="model-badge-chip">
+          <span class="dot"></span>
+          <span>{{ currentProModelName }}</span>
+        </div>
+        <button
+          type="button"
+          class="btn-icon-subtle"
+          title="复制项目根路径"
+          @click="copyProjectPath"
+        >
+          <svg viewBox="0 0 24 24"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
+          <span v-if="copiedPath" class="copy-hint">已复制!</span>
+        </button>
+        <button
+          type="button"
+          class="btn-icon-subtle danger"
+          title="解除项目登记"
+          @click="showDeleteConfirm = true"
+        >
+          <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
         </button>
       </div>
     </header>
 
-    <!-- 错误反馈提示条 -->
-    <transition name="fade">
-      <div v-if="errorMessage" class="error-banner">
-        <svg class="error-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"></circle>
-          <line x1="12" y1="8" x2="12" y2="12"></line>
-          <line x1="12" y1="16" x2="12.01" y2="16"></line>
-        </svg>
-        <span class="error-text">{{ errorMessage }}</span>
-        <button class="error-close" type="button" @click="errorMessage = ''">×</button>
-      </div>
-    </transition>
-
-    <!-- 主工作区分栏网格 -->
-    <div class="workspace-layout">
-      <!-- 左侧：项目列表与检索 -->
-      <aside class="project-nav-panel">
-        <div class="panel-head">
-          <div class="panel-title-wrap">
-            <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+    <!-- 主体双栏区域 (Manus Project Dashboard) -->
+    <div class="pw-main-grid">
+      <!-- 左侧：项目标题、发起任务输入框、历史任务列表 -->
+      <div class="pw-center-column">
+        <!-- 1. 项目 Hero 头部 -->
+        <div class="pw-hero-card">
+          <div class="pw-folder-icon">
+            <svg viewBox="0 0 24 24">
+              <path d="M3 7h7l2 2h9v10H3z"/>
             </svg>
-            <h2>项目列表</h2>
           </div>
-          <span class="count-pill">{{ filteredProjects.length }}</span>
+          <div class="pw-hero-meta">
+            <h1 class="pw-project-title">{{ project?.name }}</h1>
+            <div class="pw-project-sub">
+              <span>绑定工作区 · <code>{{ project?.root_path }}</code></span>
+              <span class="dot-sep">•</span>
+              <span>更新于 {{ formatTime(project?.updated_at || project?.created_at) }}</span>
+            </div>
+          </div>
         </div>
 
-        <div v-if="projects.length > 3" class="search-box">
-          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="8"></circle>
-            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-          </svg>
-          <input
-            v-model="projectFilterQuery"
-            type="text"
-            placeholder="搜索项目名称或路径..."
-            class="search-input"
-          />
+        <!-- 2. 发起任务输入框 ("Start a task in this project" - 复用与 AgentComposer 一致的模型路由选择) -->
+        <div class="pw-task-input-box" :class="{ focused: inputFocused }">
+          <textarea
+            ref="taskInputRef"
+            v-model="taskGoal"
+            class="pw-task-textarea"
+            placeholder="在本项目中发起任务... (自动挂载本项目文件与目录上下文并直接开始执行)"
+            rows="3"
+            @focus="inputFocused = true"
+            @blur="inputFocused = false"
+            @keydown.enter.exact.prevent="submitNewTask"
+          ></textarea>
+
+          <div class="pw-input-bottom-bar">
+            <div class="pw-input-left-actions">
+              <button
+                type="button"
+                class="composer-tool-btn"
+                title="添加数据文件到本项目 (Excel, Word, PDF, Code...)"
+                @click="promptAddResource"
+              >
+                <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+
+              <!-- 🤖 复用与 AgentComposer 一致的模型路由浮层选择 -->
+              <div class="model-picker-wrap" ref="modelPickerRef">
+                <button
+                  class="model-chip"
+                  type="button"
+                  :class="{ active: modelMenuOpen }"
+                  title="配置模型路由 (推理 / 执行 / 视觉)"
+                  @click="modelMenuOpen = !modelMenuOpen"
+                >
+                  <span class="model-icon">🤖</span>
+                  <span>{{ currentProModelName }}</span>
+                  <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
+                </button>
+
+                <div v-if="modelMenuOpen" class="model-routing-popover">
+                  <div class="popover-header">
+                    <div class="header-left">
+                      <div class="popover-title">Agent 模型路由</div>
+                      <div class="popover-sub">规划、工具执行与视觉分析独立配置</div>
+                    </div>
+                    <button
+                      type="button"
+                      class="close-popover-btn"
+                      title="关闭"
+                      @click="modelMenuOpen = false"
+                    >
+                      <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                    </button>
+                  </div>
+
+                  <div class="popover-body">
+                    <!-- 推理模型 -->
+                    <div class="route-item">
+                      <div class="route-item-head">
+                        <span class="route-badge pro">🧠 推理模型</span>
+                        <small>负责长程规划与步骤拆解</small>
+                      </div>
+                      <ModelSelectDropdown
+                        :model-value="modelRouting.pro"
+                        :models="allModels || []"
+                        placeholder="选择推理模型..."
+                        size="sm"
+                        @update:model-value="updateRouteValue('pro', $event)"
+                      />
+                    </div>
+
+                    <!-- 执行模型 -->
+                    <div class="route-item">
+                      <div class="route-item-head">
+                        <span class="route-badge flash">⚡ 执行模型</span>
+                        <small>负责快速工具执行与摘要</small>
+                      </div>
+                      <ModelSelectDropdown
+                        :model-value="modelRouting.flash"
+                        :models="allModels || []"
+                        placeholder="选择执行模型..."
+                        size="sm"
+                        @update:model-value="updateRouteValue('flash', $event)"
+                      />
+                    </div>
+
+                    <!-- 视觉模型 -->
+                    <div class="route-item">
+                      <div class="route-item-head">
+                        <span class="route-badge vision">👁️ 视觉模型</span>
+                        <small>负责网页与截图理解</small>
+                      </div>
+                      <ModelSelectDropdown
+                        :model-value="modelRouting.vision"
+                        :models="allModels || []"
+                        placeholder="选择视觉模型..."
+                        size="sm"
+                        @update:model-value="updateRouteValue('vision', $event)"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="pw-input-right-actions">
+              <span class="keyboard-hint">Enter ↵ 发送</span>
+              <button
+                type="button"
+                class="pw-send-btn"
+                :disabled="!taskGoal.trim() || busy"
+                title="在本项目中开启对话并直接执行"
+                @click="submitNewTask"
+              >
+                <svg viewBox="0 0 24 24"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div class="project-list-scroll">
-          <button
-            v-for="project in filteredProjects"
-            :key="project.id"
-            type="button"
-            class="project-item-card"
-            :class="{ active: activeProjectId === project.id }"
-            @click="selectProject(project.id)"
-          >
-            <div class="project-item-head">
-              <span class="project-item-icon">📂</span>
-              <strong class="project-item-name" :title="project.name">{{ project.name }}</strong>
+        <!-- 3. 本项目任务列表 (Tasks Section) -->
+        <div class="pw-tasks-section">
+          <div class="pw-tasks-header">
+            <div>
+              <h2 class="pw-section-title">Tasks ({{ sessions.length }})</h2>
+              <p class="pw-section-subtitle">本项目专属对话，数据与受管文件在项目内自动继承共享</p>
             </div>
-            <div class="project-item-meta">
-              <span class="project-item-path" :title="project.root_path">{{ project.root_path }}</span>
-            </div>
-          </button>
+            <button
+              type="button"
+              class="btn-new-chat-subtle"
+              title="在本项目下发起空白对话"
+              @click="submitNewTaskDirect"
+            >
+              <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+              <span>新建空白对话</span>
+            </button>
+          </div>
 
-          <div v-if="!projects.length" class="empty-nav-state">
-            <div class="empty-icon-wrap">📁</div>
-            <p class="empty-title">暂无项目</p>
-            <p class="empty-hint">点击右上角“新建项目”选择本地代码目录进行登记。</p>
+          <!-- 任务列表卡片 -->
+          <div v-if="sessions.length" class="pw-tasks-grid">
+            <div
+              v-for="s in sessions"
+              :key="s.id"
+              class="pw-task-card"
+              @click="emit('open-session', { id: s.id, title: s.title })"
+            >
+              <div class="pw-task-card-icon">
+                <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+              </div>
+              <div class="pw-task-card-content">
+                <div class="pw-task-card-title-row">
+                  <span class="pw-task-card-title">{{ s.title || "未命名对话" }}</span>
+                  <span class="pw-task-time">{{ formatTime(s.updated_at || s.created_at) }}</span>
+                </div>
+                <div class="pw-task-card-stats">
+                  <span>{{ s.message_count || 0 }} 条历史记录</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                class="pw-task-delete-btn"
+                title="删除会话"
+                @click.stop="deleteSession(s.id)"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+
+          <!-- 空任务提示 (Manus 风格) -->
+          <div v-else class="pw-empty-tasks" @click="focusInput">
+            <div class="empty-dashed-box">
+              <svg class="empty-icon" viewBox="0 0 24 24">
+                <rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="4 4" fill="none"/>
+                <path d="M12 8v8M8 12h8"/>
+              </svg>
+              <span class="empty-text">Create a new task to get started</span>
+              <span class="empty-sub">在上方输入框键入任务指令，即可开启首个项目 Agent 任务</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右侧：项目受管文件与数据源 (Manus Right Rail) -->
+      <aside class="pw-right-rail">
+        <!-- 1. Files & sources (项目受管数据与文件) -->
+        <div class="rail-card">
+          <div class="rail-card-head">
+            <div class="rail-card-title">
+              <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+              <span>Files & sources ({{ resources.length }})</span>
+            </div>
+            <button
+              type="button"
+              class="rail-action-btn"
+              title="添加/登记数据文件"
+              @click="promptAddResource"
+            >
+              + Upload
+            </button>
+          </div>
+          <p class="rail-desc">为本项目挂载核心数据（Excel、Word、PDF、代码），Agent 在所有任务中自动感知共享。</p>
+
+          <!-- 资源文件搜索 -->
+          <div v-if="resources.length > 3" class="rail-search-bar">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input v-model="resourceFilter" type="text" placeholder="过滤项目文件..." class="rail-search-input" />
+          </div>
+
+          <!-- 资源文件列表 -->
+          <div v-if="filteredResources.length" class="rail-file-list">
+            <div
+              v-for="res in filteredResources"
+              :key="res.resource_id"
+              class="rail-file-item"
+              @click="openResourcePreview(res.resource_id)"
+            >
+              <span class="file-type-badge">{{ kindBadge(res.relative_path) }}</span>
+              <div class="file-info-col">
+                <span class="file-label" :title="res.label">{{ res.label }}</span>
+                <span class="file-sub">{{ res.relative_path }} · {{ formatBytes(res.size_bytes) }}</span>
+              </div>
+              <button
+                type="button"
+                class="file-remove-btn"
+                title="取消登记"
+                @click.stop="removeResource(res.resource_id)"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+          <div v-else class="rail-empty-hint">
+            <span>暂无受管数据文件，点击 + Upload 添加</span>
+          </div>
+        </div>
+
+        <!-- 2. Statistics & Overview (工作区统计) -->
+        <div class="rail-card stats-card">
+          <div class="rail-card-title">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+            <span>Overview</span>
+          </div>
+          <div class="stats-grid">
+            <div class="stat-box">
+              <span class="stat-num">{{ sessions.length }}</span>
+              <span class="stat-label">总对话数</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-num">{{ resources.length }}</span>
+              <span class="stat-label">受管文件</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-num">{{ formatBytes(totalResourceBytes) }}</span>
+              <span class="stat-label">数据总体积</span>
+            </div>
           </div>
         </div>
       </aside>
+    </div>
 
-      <!-- 右侧：活动项目详情工作区 -->
-      <main v-if="activeProject" class="project-content-panel">
-        <!-- 项目详情头部 -->
-        <div class="project-banner">
-          <div class="banner-left">
-            <div class="banner-title-row">
-              <div class="project-avatar">📂</div>
-              <div>
-                <span class="banner-kicker">ACTIVE PROJECT</span>
-                <h2 class="active-project-title">{{ activeProject.name }}</h2>
-              </div>
+    <!-- ==================== 模态弹窗 ==================== -->
+
+    <!-- 1. 解除项目登记确认弹窗 -->
+    <transition name="modal-fade">
+      <div v-if="showDeleteConfirm" class="modal-overlay" @click.self="showDeleteConfirm = false">
+        <div class="modal-card modal-card-danger">
+          <div class="modal-head">
+            <div class="modal-title-row">
+              <span class="text-red">⚠️</span>
+              <h3>解除项目登记</h3>
             </div>
-            <div class="root-path-badge" :title="activeProject.root_path">
-              <svg class="path-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-                <polyline points="9 22 9 12 15 12 15 22"></polyline>
-              </svg>
-              <code>{{ activeProject.root_path }}</code>
-            </div>
+            <button type="button" class="modal-close-btn" @click="showDeleteConfirm = false">×</button>
           </div>
-          <div class="banner-right">
-            <button class="btn-danger-ghost" type="button" :disabled="busy" @click="deleteProject">
-              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="3 6 5 6 21 6"></polyline>
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-              </svg>
-              <span>解除登记</span>
+          <div class="modal-body">
+            <p class="modal-desc">
+              确定要解除项目 <strong class="text-white">“{{ project?.name }}”</strong> 的登记吗？
+            </p>
+            <p class="modal-desc-sub">
+              此操作将清除该项目的受管资源索引和会话关联，但<strong>绝不会删除本地磁盘上的任何物理文件</strong>。
+            </p>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" @click="showDeleteConfirm = false">取消</button>
+            <button
+              type="button"
+              class="btn-danger-solid"
+              :disabled="busy"
+              @click="submitDeleteProject"
+            >
+              {{ busy ? "处理中…" : "确认解除" }}
             </button>
           </div>
         </div>
+      </div>
+    </transition>
 
-        <!-- 快捷操作栏 -->
-        <div class="project-actions-bar">
-          <button
-            class="btn-sub-action"
-            type="button"
-            :disabled="busy || !models.length"
-            @click="createProjectSession"
-          >
-            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-            </svg>
-            <span>项目内新对话</span>
-          </button>
-          <button
-            class="btn-sub-action"
-            type="button"
-            :disabled="busy"
-            @click="addProjectResource"
-          >
-            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-              <polyline points="14 2 14 8 20 8"></polyline>
-              <line x1="12" y1="18" x2="12" y2="12"></line>
-              <line x1="9" y1="15" x2="15" y2="15"></line>
-            </svg>
-            <span>添加指定文件</span>
-          </button>
+    <!-- 2. 文件预览弹窗 -->
+    <transition name="modal-fade">
+      <div v-if="previewModal.visible" class="modal-overlay" @click.self="previewModal.visible = false">
+        <div class="modal-card modal-card-preview">
+          <div class="modal-head">
+            <div class="modal-title-row">
+              <svg class="modal-head-svg" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+              <div class="preview-head-text">
+                <h3>{{ previewModal.resource?.label }}</h3>
+                <code>{{ previewModal.resource?.relative_path }}</code>
+              </div>
+            </div>
+            <div class="preview-head-actions">
+              <span v-if="previewModal.truncated" class="truncated-tag">仅截取前 120,000 字符</span>
+              <button type="button" class="btn-subtle" @click="copyPreviewContent">
+                {{ previewModal.copied ? "✓ 已复制" : "复制全文" }}
+              </button>
+              <button type="button" class="modal-close-btn" @click="previewModal.visible = false">×</button>
+            </div>
+          </div>
+          <div class="modal-body preview-body">
+            <pre class="code-preview-block">{{ previewModal.content }}</pre>
+          </div>
         </div>
-
-        <!-- 双列面板：对话列表 & 受管文件 -->
-        <div class="detail-split-grid">
-          <!-- 关联对话列表 -->
-          <section class="section-card">
-            <div class="section-head">
-              <div class="section-title-wrap">
-                <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
-                </svg>
-                <h3>项目对话</h3>
-              </div>
-              <span class="count-pill">{{ sessions.length }}</span>
-            </div>
-
-            <div class="section-body">
-              <div
-                v-for="session in sessions"
-                :key="session.id"
-                class="session-card-row"
-                @click="emit('open-session', session)"
-              >
-                <div class="session-card-info">
-                  <span class="session-title">{{ session.title || "未命名对话" }}</span>
-                  <span class="session-meta">{{ session.message_count }} 条消息 · {{ formatDate(session.updated_at) }}</span>
-                </div>
-                <div class="session-arrow">↗</div>
-              </div>
-              <div v-if="!sessions.length" class="card-empty-hint">
-                <span>💬 从此项目创建的对话会自动挂载该项目上下文。</span>
-              </div>
-            </div>
-          </section>
-
-          <!-- 受管文件列表 -->
-          <section class="section-card">
-            <div class="section-head">
-              <div class="section-title-wrap">
-                <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-                  <polyline points="13 2 13 9 20 9"></polyline>
-                </svg>
-                <h3>受管文件</h3>
-              </div>
-              <span class="count-pill">{{ resources.length }}</span>
-            </div>
-
-            <div class="section-body">
-              <div
-                v-for="resource in resources"
-                :key="resource.resource_id"
-                class="resource-card-row"
-                :class="{ active: preview?.resource.resource_id === resource.resource_id }"
-              >
-                <button
-                  type="button"
-                  class="resource-info-btn"
-                  title="点击查看资源内容"
-                  @click="previewResource(resource.resource_id)"
-                >
-                  <span class="resource-kind-icon">{{ kindEmoji(resource.kind) }}</span>
-                  <div class="resource-text-col">
-                    <strong class="resource-label">{{ resource.label }}</strong>
-                    <small class="resource-rel-path">{{ resource.relative_path }} · {{ formatBytes(resource.size_bytes) }}</small>
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  class="resource-delete-btn"
-                  title="取消登记此资源"
-                  @click.stop="removeResource(resource.resource_id)"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="18" y1="6" x2="6" y2="18"></line>
-                    <line x1="6" y1="6" x2="18" y2="18"></line>
-                  </svg>
-                </button>
-              </div>
-              <div v-if="!resources.length" class="card-empty-hint">
-                <span>📑 显式登记的文件将作为高权重参考资源提供给 Agent。</span>
-              </div>
-            </div>
-          </section>
-        </div>
-
-        <!-- 资源内容实时预览面板 -->
-        <transition name="slide-up">
-          <section v-if="preview" class="resource-preview-panel">
-            <div class="preview-header">
-              <div class="preview-title-col">
-                <div class="preview-title-row">
-                  <span class="preview-icon">{{ kindEmoji(preview.resource.kind) }}</span>
-                  <h3 class="preview-label">{{ preview.resource.label }}</h3>
-                </div>
-                <code class="preview-path">{{ preview.resource.relative_path }}</code>
-              </div>
-              <div class="preview-actions">
-                <span v-if="preview.truncated" class="truncated-badge">仅截取前 {{ previewLimitLabel }} 字符</span>
-                <button class="preview-btn" type="button" @click="copyPreviewContent">
-                  {{ copied ? "✓ 已复制" : "复制全文" }}
-                </button>
-                <button class="preview-close-btn" type="button" title="关闭预览" @click="preview = null">×</button>
-              </div>
-            </div>
-            <div class="preview-code-wrap">
-              <pre class="preview-code">{{ preview.content }}</pre>
-            </div>
-          </section>
-        </transition>
-      </main>
-
-      <!-- 未选中项目时的默认引导面板 -->
-      <main v-else class="project-content-panel empty-selection-state">
-        <div class="empty-hero">
-          <div class="empty-hero-icon">📁</div>
-          <h2>选择或创建项目</h2>
-          <p>
-            绑定本地文件夹后，你可以按需添加核心代码、需求文档或 API 规范。系统不会全盘扫描无关代码，保护你的本地安全与 Token 预算。
-          </p>
-          <button class="btn-primary-action" type="button" :disabled="busy" @click="createProject">
-            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="12" y1="5" x2="12" y2="19"></line>
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
-            <span>立即登记新项目</span>
-          </button>
-        </div>
-      </main>
-    </div>
-  </section>
+      </div>
+    </transition>
+  </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import ModelSelectDropdown from "./common/ModelSelectDropdown.vue";
+import type { AgentModelOption } from "./agent/types";
+
+interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
 
 interface AgentProject {
   id: string;
@@ -310,1043 +413,1294 @@ interface ProjectResourcePreview {
   truncated: boolean;
 }
 
-interface ChatSessionRow {
-  id: string;
-  title: string;
-  model_id: string;
-  created_at: string;
-  updated_at: string;
-  message_count: number;
-}
+type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
+type ModelRouting = {
+  reasoning_effort_version: 2;
+  pro: string;
+  flash: string;
+  vision: string;
+  pro_reasoning_effort: ReasoningEffort;
+  flash_reasoning_effort: ReasoningEffort;
+  vision_reasoning_effort: ReasoningEffort;
+  context_budget_mode: "balanced" | "minimal" | "extended" | "full";
+};
 
-const props = defineProps<{ models: Array<{ id: string }> }>();
-const emit = defineEmits<{ (event: "open-session", session: ChatSessionRow): void }>();
+const MODEL_ROUTING_STORAGE_KEY = "free-api.agent.model-routing.v1";
 
-const projects = ref<AgentProject[]>([]);
+const props = defineProps<{
+  projectId: string;
+  allModels?: AgentModelOption[];
+}>();
+
+const emit = defineEmits<{
+  (event: "open-session", session: { id: string; title: string }): void;
+  (event: "start-task", projectId: string, goal: string): void;
+  (event: "project-deleted", projectId: string): void;
+  (event: "refresh-projects"): void;
+}>();
+
+const project = ref<AgentProject | null>(null);
 const sessions = ref<ChatSessionRow[]>([]);
 const resources = ref<AgentProjectResource[]>([]);
-const activeProjectId = ref<string | null>(null);
-const preview = ref<ProjectResourcePreview | null>(null);
+const taskGoal = ref("");
+const taskInputRef = ref<HTMLTextAreaElement | null>(null);
+const inputFocused = ref(false);
 const busy = ref(false);
-const errorMessage = ref("");
-const copied = ref(false);
-const projectFilterQuery = ref("");
-const previewLimitLabel = "120,000";
+const copiedPath = ref(false);
+const showDeleteConfirm = ref(false);
+const resourceFilter = ref("");
+const modelMenuOpen = ref(false);
 
-const activeProject = computed(() =>
-  projects.value.find((project) => project.id === activeProjectId.value) || null
-);
+// 模型路由
+const modelRouting = ref<ModelRouting>(loadModelRouting());
 
-const filteredProjects = computed(() => {
-  const query = projectFilterQuery.value.trim().toLowerCase();
-  if (!query) return projects.value;
-  return projects.value.filter(
-    (p) =>
-      p.name.toLowerCase().includes(query) ||
-      p.root_path.toLowerCase().includes(query)
-  );
+function loadModelRouting(): ModelRouting {
+  try {
+    const raw = localStorage.getItem(MODEL_ROUTING_STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    // 忽略
+  }
+  return {
+    reasoning_effort_version: 2,
+    pro: "",
+    flash: "",
+    vision: "",
+    pro_reasoning_effort: "auto",
+    flash_reasoning_effort: "auto",
+    vision_reasoning_effort: "auto",
+    context_budget_mode: "balanced",
+  };
+}
+
+function updateRouteValue(route: "pro" | "flash" | "vision", modelId: string) {
+  modelRouting.value[route] = modelId;
+  try {
+    localStorage.setItem(MODEL_ROUTING_STORAGE_KEY, JSON.stringify(modelRouting.value));
+  } catch {
+    // 忽略
+  }
+}
+
+const currentProModelName = computed(() => {
+  const currentId = modelRouting.value.pro;
+  if (currentId && props.allModels) {
+    const m = props.allModels.find((item) => item.id === currentId);
+    if (m) return m.display_name || m.name;
+  }
+  if (props.allModels && props.allModels.length > 0) {
+    return props.allModels[0].display_name || props.allModels[0].name;
+  }
+  return "配置模型路由";
 });
 
-function errorText(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
+const previewModal = reactive<{
+  visible: boolean;
+  resource: AgentProjectResource | null;
+  content: string;
+  truncated: boolean;
+  copied: boolean;
+}>({
+  visible: false,
+  resource: null,
+  content: "",
+  truncated: false,
+  copied: false,
+});
 
-function formatBytes(value: number) {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
+const filteredResources = computed(() => {
+  const q = resourceFilter.value.trim().toLowerCase();
+  if (!q) return resources.value;
+  return resources.value.filter((r) => r.label.toLowerCase().includes(q) || r.relative_path.toLowerCase().includes(q));
+});
 
-function formatDate(isoStr: string) {
-  if (!isoStr) return "";
+const totalResourceBytes = computed(() => {
+  return resources.value.reduce((acc, r) => acc + (r.size_bytes || 0), 0);
+});
+
+async function loadProject() {
+  if (!props.projectId) return;
   try {
-    const d = new Date(isoStr);
-    return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
-  } catch {
-    return isoStr;
+    const all = await invoke<AgentProject[]>("list_agent_projects");
+    project.value = all.find((p) => p.id === props.projectId) || null;
+    if (project.value) {
+      const [sList, rList] = await Promise.all([
+        invoke<ChatSessionRow[]>("list_agent_project_sessions", { projectId: props.projectId }),
+        invoke<AgentProjectResource[]>("list_agent_project_resources", { projectId: props.projectId }),
+      ]);
+      sessions.value = sList;
+      resources.value = rList;
+    }
+  } catch (e) {
+    console.error("加载项目详情失败:", e);
   }
 }
 
-function kindEmoji(kind: string) {
-  switch (kind) {
-    case "code":
-      return "💻";
-    case "text":
-      return "📝";
-    case "pdf":
-      return "📕";
-    case "image":
-      return "🖼️";
-    default:
-      return "📄";
-  }
+function focusInput() {
+  taskInputRef.value?.focus();
 }
 
-function nameFromPath(path: string) {
-  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
-  return parts[parts.length - 1] || "未命名项目";
+function submitNewTask() {
+  const goal = taskGoal.value.trim();
+  if (!goal || !props.projectId) return;
+  taskGoal.value = "";
+  emit("start-task", props.projectId, goal);
 }
 
-async function copyPreviewContent() {
-  if (!preview.value?.content) return;
+function submitNewTaskDirect() {
+  if (!props.projectId) return;
+  emit("start-task", props.projectId, "");
+}
+
+async function promptAddResource() {
+  if (!project.value) return;
   try {
-    await navigator.clipboard.writeText(preview.value.content);
-    copied.value = true;
-    setTimeout(() => {
-      copied.value = false;
-    }, 2000);
-  } catch {
-    // 忽略复制失败
-  }
-}
-
-async function refreshProjects(preferredId?: string) {
-  projects.value = await invoke<AgentProject[]>("list_agent_projects");
-  const nextId = preferredId || activeProjectId.value;
-  activeProjectId.value = projects.value.some((project) => project.id === nextId)
-    ? nextId || null
-    : projects.value[0]?.id || null;
-  await refreshActiveProject();
-}
-
-async function refreshActiveProject() {
-  preview.value = null;
-  if (!activeProjectId.value) {
-    sessions.value = [];
-    resources.value = [];
-    return;
-  }
-  const projectId = activeProjectId.value;
-  [sessions.value, resources.value] = await Promise.all([
-    invoke<ChatSessionRow[]>("list_agent_project_sessions", { projectId }),
-    invoke<AgentProjectResource[]>("list_agent_project_resources", { projectId }),
-  ]);
-}
-
-async function selectProject(projectId: string) {
-  activeProjectId.value = projectId;
-  errorMessage.value = "";
-  try {
-    await refreshActiveProject();
-  } catch (error) {
-    errorMessage.value = errorText(error);
-  }
-}
-
-async function createProject() {
-  const rootPath = await open({ directory: true, multiple: false, title: "选择项目根目录" });
-  if (typeof rootPath !== "string") return;
-  const requestedName = window.prompt("项目名称", nameFromPath(rootPath));
-  if (requestedName === null) return;
-  busy.value = true;
-  errorMessage.value = "";
-  try {
-    const project = await invoke<AgentProject>("create_agent_project", { name: requestedName, rootPath });
-    await refreshProjects(project.id);
-  } catch (error) {
-    errorMessage.value = errorText(error);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function deleteProject() {
-  if (!activeProject.value || !window.confirm(`确认解除“${activeProject.value.name}”的项目登记？\n此操作不会删除磁盘上的任何物理文件或对话历史。`)) return;
-  busy.value = true;
-  errorMessage.value = "";
-  try {
-    await invoke("delete_agent_project", { projectId: activeProject.value.id });
-    await refreshProjects();
-  } catch (error) {
-    errorMessage.value = errorText(error);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function createProjectSession() {
-  if (!activeProject.value || !props.models[0]) return;
-  const title = window.prompt("对话名称", `${activeProject.value.name} · 新任务`);
-  if (title === null) return;
-  busy.value = true;
-  errorMessage.value = "";
-  try {
-    const session = await invoke<ChatSessionRow>("create_agent_project_session", {
-      projectId: activeProject.value.id,
-      title,
-      modelId: props.models[0].id,
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      title: `在 ${project.value.name} 中选择数据文件 (Excel, Word, PDF, Code...)`,
+      defaultPath: project.value.root_path,
     });
-    await refreshActiveProject();
-    emit("open-session", session);
-  } catch (error) {
-    errorMessage.value = errorText(error);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function addProjectResource() {
-  if (!activeProject.value) return;
-  const path = await open({ directory: false, multiple: false, title: "选择项目内文件 (必须在项目根目录内)" });
-  if (typeof path !== "string") return;
-  busy.value = true;
-  errorMessage.value = "";
-  try {
-    await invoke("add_agent_project_resource", { projectId: activeProject.value.id, path });
-    await refreshActiveProject();
-  } catch (error) {
-    errorMessage.value = errorText(error);
+    if (typeof selected !== "string" || !selected) return;
+    busy.value = true;
+    await invoke("add_agent_project_resource", {
+      projectId: project.value.id,
+      path: selected,
+    });
+    await loadProject();
+    emit("refresh-projects");
+  } catch (e) {
+    console.error("添加资源失败:", e);
   } finally {
     busy.value = false;
   }
 }
 
 async function removeResource(resourceId: string) {
-  if (!activeProject.value) return;
-  busy.value = true;
-  errorMessage.value = "";
+  if (!props.projectId) return;
   try {
-    await invoke("remove_agent_project_resource", { projectId: activeProject.value.id, resourceId });
-    await refreshActiveProject();
-  } catch (error) {
-    errorMessage.value = errorText(error);
+    await invoke("remove_agent_project_resource", { projectId: props.projectId, resourceId });
+    await loadProject();
+    emit("refresh-projects");
+  } catch (e) {
+    console.error("移除资源失败:", e);
+  }
+}
+
+async function deleteSession(sessionId: string) {
+  try {
+    await invoke("delete_session", { id: sessionId });
+    await loadProject();
+    emit("refresh-projects");
+  } catch (e) {
+    console.error("删除会话失败:", e);
+  }
+}
+
+async function submitDeleteProject() {
+  if (!project.value) return;
+  busy.value = true;
+  try {
+    await invoke("delete_agent_project", { projectId: project.value.id });
+    showDeleteConfirm.value = false;
+    emit("project-deleted", project.value.id);
+  } catch (e) {
+    console.error("删除项目失败:", e);
   } finally {
     busy.value = false;
   }
 }
 
-async function previewResource(resourceId: string) {
-  if (!activeProject.value) return;
-  busy.value = true;
-  errorMessage.value = "";
+async function openResourcePreview(resourceId: string) {
   try {
-    preview.value = await invoke<ProjectResourcePreview>("read_agent_project_resource", {
-      projectId: activeProject.value.id,
-      resourceId,
-    });
-  } catch (error) {
-    errorMessage.value = errorText(error);
-  } finally {
-    busy.value = false;
+    const data = await invoke<ProjectResourcePreview>("read_agent_project_resource", { resourceId });
+    previewModal.resource = data.resource;
+    previewModal.content = data.content;
+    previewModal.truncated = data.truncated;
+    previewModal.copied = false;
+    previewModal.visible = true;
+  } catch (e) {
+    console.error("读取资源预览失败:", e);
   }
 }
 
-onMounted(async () => {
+async function copyPreviewContent() {
+  if (!previewModal.content) return;
   try {
-    await refreshProjects();
-  } catch (error) {
-    errorMessage.value = errorText(error);
+    await navigator.clipboard.writeText(previewModal.content);
+    previewModal.copied = true;
+    setTimeout(() => { previewModal.copied = false; }, 2000);
+  } catch {
+    // 忽略
   }
+}
+
+async function copyProjectPath() {
+  if (!project.value?.root_path) return;
+  try {
+    await navigator.clipboard.writeText(project.value.root_path);
+    copiedPath.value = true;
+    setTimeout(() => { copiedPath.value = false; }, 2000);
+  } catch {
+    // 忽略
+  }
+}
+
+function kindBadge(path: string): string {
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  if (["xlsx", "xls", "csv"].includes(ext)) return "XLS";
+  if (["docx", "doc"].includes(ext)) return "DOC";
+  if (ext === "pdf") return "PDF";
+  if (["ts", "js", "vue", "py", "rs", "go", "java", "sql"].includes(ext)) return "CODE";
+  if (["md", "txt"].includes(ext)) return "DOC";
+  return "FILE";
+}
+
+function formatBytes(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTime(iso?: string): string {
+  if (!iso) return "刚刚";
+  try {
+    const d = new Date(iso);
+    return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  } catch {
+    return iso;
+  }
+}
+
+watch(() => props.projectId, () => {
+  loadProject();
+});
+
+onMounted(() => {
+  loadProject();
 });
 </script>
 
 <style scoped>
-/* 整个工作区容器：采用 Obsidian Dark 极客色系 */
-.project-workspace {
+.project-workspace-view {
   display: flex;
   flex-direction: column;
-  height: 100%;
   width: 100%;
-  padding: 24px 28px;
-  background: var(--bg-0, #141416);
-  color: var(--text-1, #f4f4f5);
-  font-family: var(--font, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
-  overflow-y: auto;
-  box-sizing: border-box;
+  height: 100%;
+  overflow: hidden;
+  background: #141416;
+  color: #e4e4e7;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-/* 顶部信息与操作栏 */
-.workspace-header {
+/* 顶部状态栏 */
+.pw-topbar {
   display: flex;
-  align-items: flex-start;
+  height: 48px;
+  align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  margin-bottom: 20px;
-  padding-bottom: 18px;
-  border-bottom: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
+  padding: 0 24px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: #18181b;
 }
 
-.kicker-row {
+.pw-breadcrumbs {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 6px;
-}
-
-.workspace-kicker {
-  color: var(--accent-light, #8b83ff);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.workspace-badge {
-  font-size: 11px;
-  padding: 1px 7px;
-  border-radius: 99px;
-  background: rgba(108, 99, 255, 0.15);
-  color: var(--accent-light, #8b83ff);
-  border: 1px solid rgba(108, 99, 255, 0.3);
-}
-
-.workspace-title {
-  margin: 0 0 6px;
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--text-1, #f4f4f5);
-  letter-spacing: -0.02em;
-}
-
-.workspace-subtitle {
-  margin: 0;
-  color: var(--text-2, #a1a1aa);
   font-size: 13px;
-  line-height: 1.55;
-  max-width: 820px;
 }
 
-/* 按钮通用 */
-.btn-primary-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  border: 0;
-  border-radius: var(--radius-sm, 8px);
-  padding: 8px 16px;
-  color: #ffffff;
-  background: linear-gradient(135deg, var(--accent, #6c63ff), var(--accent-dark, #584fea));
-  box-shadow: 0 2px 10px rgba(108, 99, 255, 0.3);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  white-space: nowrap;
-}
+.crumb-root { color: #71717a; font-weight: 500; }
+.crumb-sep { color: #52525b; font-size: 12px; }
+.crumb-current { color: #f4f4f5; font-weight: 650; }
 
-.btn-primary-action:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 14px rgba(108, 99, 255, 0.45);
-}
-
-.btn-primary-action:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.btn-icon {
-  width: 15px;
-  height: 15px;
-}
-
-/* 错误提示横幅 */
-.error-banner {
+.pw-top-actions {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 16px;
-  padding: 10px 14px;
-  border-radius: var(--radius-sm, 8px);
-  border: 1px solid rgba(255, 71, 87, 0.3);
-  background: rgba(255, 71, 87, 0.12);
-  color: var(--red-light, #ff6b81);
-  font-size: 13px;
 }
 
-.error-icon {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-}
-
-.error-text {
-  flex: 1;
-}
-
-.error-close {
-  background: transparent;
-  border: 0;
-  color: inherit;
-  font-size: 16px;
-  cursor: pointer;
-  padding: 0 4px;
-}
-
-/* 主栅格布局 */
-.workspace-layout {
-  display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 18px;
-  flex: 1;
-  min-height: 0;
-}
-
-/* 左侧：项目导航面板 */
-.project-nav-panel {
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-1, #18181b);
-  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
-  border-radius: var(--radius-md, 12px);
-  padding: 14px;
-  min-height: 480px;
-}
-
-.panel-head {
+.model-badge-chip {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.panel-title-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.section-icon {
-  width: 16px;
-  height: 16px;
-  color: var(--accent-light, #8b83ff);
-}
-
-.panel-head h2 {
-  font-size: 14px;
-  font-weight: 650;
-  color: var(--text-1, #f4f4f5);
-  margin: 0;
-}
-
-.count-pill {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-3, #71717a);
-  background: var(--surface-2, rgba(255, 255, 255, 0.06));
-  padding: 1px 7px;
-  border-radius: 99px;
-}
-
-.search-box {
-  position: relative;
-  margin-bottom: 10px;
-}
-
-.search-icon {
-  position: absolute;
-  left: 9px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 13px;
-  height: 13px;
-  color: var(--text-3, #71717a);
-}
-
-.search-input {
-  width: 100%;
-  background: var(--bg-2, #1f1f23);
-  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
-  border-radius: var(--radius-sm, 8px);
-  padding: 6px 10px 6px 28px;
-  font-size: 12px;
-  color: var(--text-1, #f4f4f5);
-  outline: none;
-  transition: border-color 0.15s ease;
-}
-
-.search-input:focus {
-  border-color: var(--accent, #6c63ff);
-}
-
-.project-list-scroll {
-  display: flex;
-  flex-direction: column;
   gap: 6px;
-  overflow-y: auto;
-  flex: 1;
+  padding: 3px 10px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 11.5px;
+  color: #a1a1aa;
 }
 
-.project-item-card {
+.model-badge-chip .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+}
+
+.btn-icon-subtle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #a1a1aa;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.12s;
+}
+
+.btn-icon-subtle:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.btn-icon-subtle.danger:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.btn-icon-subtle svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.copy-hint {
+  font-size: 11px;
+  color: #10b981;
+}
+
+/* 主体网格 (左宽中栏 + 右侧栏) */
+.pw-main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  height: calc(100% - 48px);
+  overflow: hidden;
+}
+
+/* 左侧主体内容 */
+.pw-center-column {
+  padding: 32px 40px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+/* 1. Hero 头部 */
+.pw-hero-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.pw-folder-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #f4f4f5;
+}
+
+.pw-folder-icon svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.pw-hero-meta {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm, 8px);
-  border: 1px solid transparent;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  transition: all 0.15s ease;
 }
 
-.project-item-card:hover {
-  background: var(--surface-2, rgba(255, 255, 255, 0.06));
-}
-
-.project-item-card.active {
-  background: rgba(108, 99, 255, 0.12);
-  border-color: rgba(108, 99, 255, 0.35);
-}
-
-.project-item-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.project-item-icon {
-  font-size: 14px;
-}
-
-.project-item-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-1, #f4f4f5);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.project-item-card.active .project-item-name {
-  color: var(--accent-light, #8b83ff);
-}
-
-.project-item-meta {
-  display: flex;
-  align-items: center;
-}
-
-.project-item-path {
-  font-size: 11.5px;
-  color: var(--text-3, #71717a);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.empty-nav-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 40px 16px;
-  text-align: center;
-}
-
-.empty-icon-wrap {
-  font-size: 32px;
-  margin-bottom: 10px;
-  opacity: 0.6;
-}
-
-.empty-title {
-  margin: 0 0 6px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-2, #a1a1aa);
-}
-
-.empty-hint {
+.pw-project-title {
   margin: 0;
-  font-size: 12px;
-  color: var(--text-3, #71717a);
-  line-height: 1.45;
-}
-
-/* 右侧：活动项目详情区 */
-.project-content-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  background: var(--bg-1, #18181b);
-  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
-  border-radius: var(--radius-md, 12px);
-  padding: 20px;
-  min-height: 480px;
-}
-
-/* 详情横幅 */
-.project-banner {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
-}
-
-.banner-left {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.banner-title-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.project-avatar {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
-  background: rgba(108, 99, 255, 0.15);
-  border: 1px solid rgba(108, 99, 255, 0.3);
-  font-size: 18px;
-}
-
-.banner-kicker {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-  color: var(--accent-light, #8b83ff);
-}
-
-.active-project-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-1, #f4f4f5);
-}
-
-.root-path-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: var(--radius-sm, 8px);
-  background: var(--bg-2, #1f1f23);
-  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
-  max-width: 580px;
-}
-
-.path-icon {
-  width: 13px;
-  height: 13px;
-  color: var(--text-3, #71717a);
-  flex-shrink: 0;
-}
-
-.root-path-badge code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  color: var(--text-2, #a1a1aa);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.btn-danger-ghost {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid rgba(255, 71, 87, 0.2);
-  border-radius: var(--radius-sm, 8px);
-  padding: 6px 12px;
-  background: transparent;
-  color: var(--red-light, #ff6b81);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.btn-danger-ghost:hover:not(:disabled) {
-  background: rgba(255, 71, 87, 0.12);
-  border-color: rgba(255, 71, 87, 0.4);
-}
-
-/* 操作快捷栏 */
-.project-actions-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.btn-sub-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid var(--border-2, rgba(255, 255, 255, 0.14));
-  border-radius: var(--radius-sm, 8px);
-  padding: 7px 14px;
-  background: var(--bg-2, #1f1f23);
-  color: var(--text-1, #f4f4f5);
-  font-size: 12.5px;
-  font-weight: 550;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.btn-sub-action:hover:not(:disabled) {
-  background: var(--surface-3, rgba(255, 255, 255, 0.1));
-  border-color: var(--accent-light, #8b83ff);
+  font-size: 22px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
   color: #ffffff;
 }
 
-.btn-sub-action:disabled {
-  opacity: 0.5;
+.pw-project-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #71717a;
+}
+
+.pw-project-sub code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #a1a1aa;
+}
+
+.dot-sep { color: #52525b; }
+
+/* 2. 发起任务输入框 */
+.pw-task-input-box {
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: #18181b;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  transition: all 0.15s ease;
+  overflow: visible;
+  position: relative;
+}
+
+.pw-task-input-box.focused {
+  border-color: rgba(255, 255, 255, 0.25);
+  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.45);
+}
+
+.pw-task-textarea {
+  width: 100%;
+  padding: 16px 18px 8px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #f4f4f5;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: none;
+  box-sizing: border-box;
+}
+
+.pw-task-textarea::placeholder {
+  color: #52525b;
+}
+
+.pw-input-bottom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px 12px;
+}
+
+.pw-input-left-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+}
+
+.composer-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #a1a1aa;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.composer-tool-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.composer-tool-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+/* 🤖 模型路由选择浮层 (与 AgentComposer 风格一致) */
+.model-picker-wrap {
+  position: relative;
+}
+
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #e4e4e7;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.model-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.model-chip.active {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+}
+
+.model-icon { font-size: 12px; }
+
+.chevron-icon {
+  width: 13px;
+  height: 13px;
+  stroke: #71717a;
+  stroke-width: 2;
+  fill: none;
+}
+
+.model-routing-popover {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  width: 320px;
+  background: #1c1c20;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.popover-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #f4f4f5;
+}
+
+.popover-sub {
+  font-size: 10.5px;
+  color: #71717a;
+}
+
+.close-popover-btn {
+  background: transparent;
+  border: none;
+  color: #71717a;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.close-popover-btn svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 2;
+  fill: none;
+}
+
+.popover-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.route-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.route-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.route-badge {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.route-badge.pro { color: #818cf8; }
+.route-badge.flash { color: #38bdf8; }
+.route-badge.vision { color: #f472b6; }
+
+.route-item-head small {
+  font-size: 10px;
+  color: #71717a;
+}
+
+.pw-input-right-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.keyboard-hint {
+  font-size: 11.5px;
+  color: #52525b;
+}
+
+.pw-send-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: none;
+  background: #f4f4f5;
+  color: #141416;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.pw-send-btn:hover:not(:disabled) {
+  background: #ffffff;
+  transform: translateY(-1px);
+}
+
+.pw-send-btn:disabled {
+  opacity: 0.3;
   cursor: not-allowed;
 }
 
-/* 双列网格 */
-.detail-split-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
+.pw-send-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
 }
 
-.section-card {
+/* 3. Tasks 列表区 */
+.pw-tasks-section {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
-  border-radius: var(--radius-sm, 8px);
-  background: var(--bg-2, #1f1f23);
-  padding: 14px;
-  min-height: 200px;
+  gap: 14px;
 }
 
-.section-head {
+.pw-tasks-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
 }
 
-.section-head h3 {
+.pw-section-title {
   margin: 0;
-  font-size: 13.5px;
-  font-weight: 650;
-  color: var(--text-1, #f4f4f5);
+  font-size: 15px;
+  font-weight: 700;
+  color: #f4f4f5;
 }
 
-.section-body {
+.pw-section-subtitle {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: #71717a;
+}
+
+.btn-new-chat-subtle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #a1a1aa;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.btn-new-chat-subtle:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f4f4f5;
+}
+
+.btn-new-chat-subtle svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.pw-tasks-grid {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  overflow-y: auto;
-  max-height: 240px;
 }
 
-/* 会话卡片行 */
-.session-card-row {
+.pw-task-card {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--surface-1, rgba(255, 255, 255, 0.03));
-  border: 1px solid transparent;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #18181b;
+  border: 1px solid rgba(255, 255, 255, 0.06);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.12s ease;
 }
 
-.session-card-row:hover {
-  background: var(--surface-2, rgba(255, 255, 255, 0.06));
-  border-color: var(--border-1, rgba(255, 255, 255, 0.08));
+.pw-task-card:hover {
+  background: #202024;
+  border-color: rgba(255, 255, 255, 0.14);
 }
 
-.session-card-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.session-title {
-  font-size: 12.5px;
-  font-weight: 550;
-  color: var(--text-1, #f4f4f5);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.session-meta {
-  font-size: 11px;
-  color: var(--text-3, #71717a);
-}
-
-.session-arrow {
-  color: var(--accent-light, #8b83ff);
-  font-size: 13px;
-  font-weight: 700;
-  opacity: 0.6;
-  transition: opacity 0.15s;
-}
-
-.session-card-row:hover .session-arrow {
-  opacity: 1;
-}
-
-/* 资源卡片行 */
-.resource-card-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--surface-1, rgba(255, 255, 255, 0.03));
-  border: 1px solid transparent;
-  transition: all 0.15s ease;
-}
-
-.resource-card-row:hover,
-.resource-card-row.active {
-  background: var(--surface-2, rgba(255, 255, 255, 0.06));
-  border-color: rgba(108, 99, 255, 0.3);
-}
-
-.resource-info-btn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  padding: 0;
-}
-
-.resource-kind-icon {
-  font-size: 14px;
+.pw-task-card-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #a1a1aa;
   flex-shrink: 0;
 }
 
-.resource-text-col {
+.pw-task-card-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.pw-task-card-content {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 0;
 }
 
-.resource-label {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-1, #f4f4f5);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.resource-rel-path {
-  font-size: 11px;
-  color: var(--text-3, #71717a);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.resource-delete-btn {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-3, #71717a);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.resource-delete-btn svg {
-  width: 13px;
-  height: 13px;
-}
-
-.resource-delete-btn:hover {
-  background: rgba(255, 71, 87, 0.15);
-  color: var(--red-light, #ff6b81);
-}
-
-.card-empty-hint {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px 10px;
-  text-align: center;
-  color: var(--text-3, #71717a);
-  font-size: 12px;
-}
-
-/* 资源实时预览区 */
-.resource-preview-panel {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border-2, rgba(255, 255, 255, 0.14));
-  border-radius: var(--radius-sm, 8px);
-  background: var(--bg-0, #141416);
-  padding: 14px 16px;
-  margin-top: 4px;
-}
-
-.preview-header {
+.pw-task-card-title-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
 }
 
-.preview-title-col {
+.pw-task-card-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #f4f4f5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pw-task-time {
+  font-size: 11.5px;
+  color: #71717a;
+}
+
+.pw-task-card-stats {
+  font-size: 11.5px;
+  color: #71717a;
+}
+
+.pw-task-delete-btn {
+  display: none;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #71717a;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.pw-task-card:hover .pw-task-delete-btn {
+  display: block;
+}
+
+.pw-task-delete-btn:hover {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.15);
+}
+
+/* 空任务提示 (Manus 风格) */
+.pw-empty-tasks {
+  cursor: pointer;
+}
+
+.empty-dashed-box {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px 20px;
+  border-radius: 12px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.01);
+  text-align: center;
+  transition: all 0.15s;
 }
 
-.preview-title-row {
+.empty-dashed-box:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.empty-icon {
+  width: 32px;
+  height: 32px;
+  stroke: #52525b;
+  stroke-width: 1.6;
+}
+
+.empty-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: #a1a1aa;
+}
+
+.empty-sub {
+  font-size: 12px;
+  color: #71717a;
+}
+
+/* 右侧栏 (Manus Right Rail) */
+.pw-right-rail {
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  background: #161619;
+  padding: 24px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.rail-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 12px;
+  background: #1c1c20;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.rail-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.rail-card-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #f4f4f5;
+}
+
+.rail-card-title svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.rail-action-btn {
+  padding: 3px 8px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: #a1a1aa;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.rail-action-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+.rail-desc {
+  margin: 0;
+  font-size: 11.5px;
+  color: #71717a;
+  line-height: 1.45;
+}
+
+.rail-search-bar {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding: 4px 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
 }
 
-.preview-icon {
-  font-size: 14px;
+.rail-search-bar svg {
+  width: 12px;
+  height: 12px;
+  stroke: #71717a;
+  stroke-width: 2;
+  fill: none;
 }
 
-.preview-label {
-  margin: 0;
-  font-size: 13.5px;
-  font-weight: 650;
-  color: var(--text-1, #f4f4f5);
-}
-
-.preview-path {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.rail-search-input {
+  width: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #f4f4f5;
   font-size: 11.5px;
-  color: var(--text-3, #71717a);
 }
 
-.preview-actions {
+.rail-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.rail-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.rail-file-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.file-type-badge {
+  font-size: 9.5px;
+  font-weight: 800;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fbbf24;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.file-info-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.file-label {
+  font-size: 12px;
+  font-weight: 550;
+  color: #e4e4e7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-sub {
+  font-size: 10.5px;
+  color: #71717a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.file-remove-btn {
+  display: none;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: #71717a;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.rail-file-item:hover .file-remove-btn {
+  display: block;
+}
+
+.file-remove-btn:hover {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.rail-empty-hint {
+  padding: 10px;
+  text-align: center;
+  font-size: 11px;
+  color: #52525b;
+}
+
+/* Stats */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.stat-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 4px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.stat-num {
+  font-size: 15px;
+  font-weight: 750;
+  color: #f4f4f5;
+}
+
+.stat-label {
+  font-size: 10.5px;
+  color: #71717a;
+}
+
+/* 模态弹窗 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+  padding: 20px;
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 460px;
+  border-radius: 14px;
+  background: #1c1c20;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-card-danger {
+  max-width: 420px;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.modal-card-preview {
+  max-width: 760px;
+  max-height: 80vh;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.modal-title-row {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.truncated-badge {
-  font-size: 11px;
-  color: var(--orange, #ffa43d);
-  background: rgba(255, 164, 61, 0.12);
-  padding: 2px 7px;
-  border-radius: 4px;
-  border: 1px solid rgba(255, 164, 61, 0.25);
+.modal-head-svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
 }
 
-.preview-btn {
-  border: 1px solid var(--border-2, rgba(255, 255, 255, 0.14));
+.modal-head h3 {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 700;
+  color: #f4f4f5;
+}
+
+.modal-close-btn {
+  background: none;
+  border: none;
+  color: #71717a;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.modal-close-btn:hover {
+  color: #f4f4f5;
+}
+
+.modal-body {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-desc {
+  margin: 0;
+  font-size: 13.5px;
+  color: #e4e4e7;
+  line-height: 1.5;
+}
+
+.modal-desc-sub {
+  margin: 0;
+  font-size: 12px;
+  color: #8e8e93;
+  line-height: 1.5;
+}
+
+.text-white { color: #ffffff; }
+.text-red { color: #f87171; }
+
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  background: rgba(0, 0, 0, 0.2);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.btn-ghost {
+  padding: 6px 12px;
   border-radius: 6px;
-  padding: 4px 10px;
-  background: var(--bg-2, #1f1f23);
-  color: var(--text-1, #f4f4f5);
+  border: 1px solid transparent;
+  background: transparent;
+  color: #a1a1aa;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #f4f4f5;
+}
+
+.btn-danger-solid {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: #dc2626;
+  color: #ffffff;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.btn-danger-solid:hover:not(:disabled) {
+  background: #ef4444;
+}
+
+.preview-head-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.preview-head-text code {
+  font-size: 11px;
+  color: #8e8e93;
+}
+
+.preview-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.truncated-tag {
+  font-size: 10.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(251, 191, 36, 0.1);
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.2);
+}
+
+.btn-subtle {
+  padding: 4px 9px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f4f4f5;
   font-size: 11.5px;
   cursor: pointer;
-  transition: all 0.15s ease;
 }
 
-.preview-btn:hover {
-  background: var(--surface-3, rgba(255, 255, 255, 0.1));
-  border-color: var(--accent-light, #8b83ff);
+.btn-subtle:hover {
+  background: rgba(255, 255, 255, 0.12);
 }
 
-.preview-close-btn {
-  border: 0;
-  background: transparent;
-  color: var(--text-3, #71717a);
-  font-size: 18px;
-  line-height: 1;
-  padding: 0 4px;
-  cursor: pointer;
-  transition: color 0.15s ease;
+.preview-body {
+  padding: 0;
+  overflow: hidden;
+  height: 460px;
 }
 
-.preview-close-btn:hover {
-  color: var(--text-1, #f4f4f5);
-}
-
-.preview-code-wrap {
-  margin-top: 10px;
-  max-height: 320px;
-  overflow-y: auto;
-  border-radius: 6px;
-  background: #0d0d0f;
-  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
-}
-
-.preview-code {
+.code-preview-block {
+  height: 100%;
   margin: 0;
-  padding: 12px 14px;
-  color: #e4e4e7;
+  padding: 16px 20px;
+  overflow: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
+  color: #e4e4e7;
+  background: #131316;
 }
 
-/* 空选择态 */
-.empty-selection-state {
-  display: grid;
-  place-items: center;
-  text-align: center;
+.modal-fade-enter-active,
+.modal-fade-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
 }
 
-.empty-hero {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  max-width: 440px;
-  padding: 40px 20px;
-}
-
-.empty-hero-icon {
-  font-size: 48px;
-  opacity: 0.8;
-}
-
-.empty-hero h2 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-1, #f4f4f5);
-}
-
-.empty-hero p {
-  margin: 0 0 8px;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text-3, #71717a);
-}
-
-/* 动效 */
-.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
-
-.slide-up-enter-active, .slide-up-leave-active { transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
-.slide-up-enter-from, .slide-up-leave-to { opacity: 0; transform: translateY(8px); }
-
-/* 响应式 */
-@media (max-width: 960px) {
-  .workspace-layout {
-    grid-template-columns: 1fr;
-  }
-  .detail-split-grid {
-    grid-template-columns: 1fr;
-  }
-  .workspace-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
+.modal-fade-enter-from,
+.modal-fade-leave-to {
+  opacity: 0;
+  transform: scale(0.97);
 }
 </style>

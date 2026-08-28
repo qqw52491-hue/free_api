@@ -13,7 +13,15 @@
             />
             <div class="composer-bottom-row">
                 <div class="composer-tools">
-                    <button type="button" title="MCP 与运行设置" @click="$emit('open-settings')"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+                    <button
+                        type="button"
+                        class="composer-tool-btn"
+                        title="上传/附加数据文件 (Excel, Word, PDF, Code...)"
+                        :disabled="isRunning"
+                        @click="promptAttachFiles"
+                    >
+                        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                    </button>
                     
                     <!-- 🤖 模型路由精简浮层卡片 (左下角与上下文模式并排) -->
                     <div class="model-picker-wrap" ref="modelPickerRef">
@@ -255,8 +263,8 @@
             <!-- 5. 上下文占用 / 窗口水位 -->
             <span class="telemetry-node" title="当前上下文占用 / 窗口上限">
                 <span class="t-label">📦 上下文</span>
-                <span class="t-val">{{ (telemetry?.totalTokens && telemetry.totalTokens > 0) ? formatTokens(telemetry.totalTokens) : '0' }}/{{ (telemetry?.contextWindow && telemetry.contextWindow > 0) ? formatTokens(telemetry.contextWindow) : '32k' }}</span>
-                <span class="t-tag" :class="contextLevelClass">({{ (telemetry?.contextUsagePercent ?? 0).toFixed(0) }}%)</span>
+                <span class="t-val">{{ (telemetry?.totalTokens && telemetry.totalTokens > 0) ? `${formatTokens(telemetry.totalTokens)}/${(telemetry?.contextWindow && telemetry.contextWindow > 0) ? formatTokens(telemetry.contextWindow) : '-'}` : '- / -' }}</span>
+                <span v-if="telemetry?.totalTokens && telemetry.totalTokens > 0" class="t-tag" :class="contextLevelClass">({{ (telemetry?.contextUsagePercent ?? 0).toFixed(0) }}%)</span>
             </span>
             <span class="t-sep">·</span>
 
@@ -278,6 +286,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import ModelSelectDropdown from "../common/ModelSelectDropdown.vue";
 import {
     CONTEXT_BUDGET_MODES,
@@ -309,9 +318,30 @@ const emit = defineEmits<{
     submit: [];
     stop: [];
     "open-settings": [];
+    "attach-files": [paths: string[]];
 }>();
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
+
+async function promptAttachFiles() {
+    try {
+        const selected = await openDialog({
+            multiple: true,
+            title: "选择要附加到会话的文件 (Excel, Word, PDF, Code...)",
+        });
+        if (!selected) return;
+        const paths = Array.isArray(selected) ? selected : [selected];
+        const validPaths = paths.filter((p): p is string => typeof p === "string" && !!p);
+        if (validPaths.length === 0) return;
+
+        emit("attach-files", validPaths);
+        const fileHints = validPaths.map((p) => `【附加文件】: ${p}`).join("\n");
+        const newDraft = props.draft ? `${props.draft}\n\n${fileHints}` : fileHints;
+        emit("update:draft", newDraft);
+    } catch (e) {
+        console.error("选择文件失败:", e);
+    }
+}
 const modelPickerRef = ref<HTMLElement | null>(null);
 const modelMenuOpen = ref(false);
 const budgetPickerRef = ref<HTMLElement | null>(null);

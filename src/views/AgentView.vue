@@ -1,6 +1,6 @@
 <template>
     <div class="app-layout">
-        <!-- 侧边栏：集成对话、LLM 平台管理、插件、定时任务与技能库 -->
+        <!-- 侧边栏：集成对话、项目树、LLM 平台管理、插件、定时任务与技能库 -->
         <aside class="app-sidebar" :class="{ collapsed: sidebarCollapsed }">
             <header class="sidebar-brand-row">
                 <div v-if="!sidebarCollapsed" class="brand-lockup">
@@ -33,12 +33,13 @@
                 </button>
             </header>
 
+            <!-- 顶部主功能导航 -->
             <nav class="primary-nav">
                 <button
                     type="button"
                     class="nav-row new-task"
                     :class="{ 'icon-only': sidebarCollapsed }"
-                    title="新建对话"
+                    title="新建独立对话 (输入指令后自动持久化)"
                     @click="createNewTask"
                 >
                     <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -96,17 +97,25 @@
                 </button>
             </nav>
 
-            <div v-if="!sidebarCollapsed" class="sidebar-section">
-                <div class="section-title"><span>Projects</span><button type="button" title="打开项目与资源" @click="currentNavView = 'projects'">↗</button></div>
-                <button type="button" class="project-row" @click="currentNavView = 'projects'">
-                    <svg viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3z"/></svg>
-                    <span>项目与资源</span>
-                </button>
+            <!-- 1. 📁 项目树形区域 (Projects 树形手风琴展开) -->
+            <div v-if="!sidebarCollapsed" class="sidebar-section projects-tree-section">
+                <ProjectSidebarTree
+                    ref="projectTreeRef"
+                    :all-models="allModels"
+                    :active-session-id="activeTabId"
+                    :active-project-id="currentNavView === 'project' ? selectedProjectId : undefined"
+                    :drafts="tabs"
+                    @select-project="handleSelectProject"
+                    @open-session="openTreeSession"
+                    @new-project-session="handleNewProjectSession"
+                    @session-deleted="handleSessionDeleted"
+                />
             </div>
 
+            <!-- 2. 💬 独立任务与对话列表 (Tasks 扁平列表，仅展示独立会话) -->
             <div v-if="!sidebarCollapsed" class="sidebar-section tasks-section">
                 <div class="section-title">
-                    <span>Tasks ({{ filteredTabs.length }})</span>
+                    <span>Tasks ({{ independentTabs.length }})</span>
                     <button v-if="taskSearchQuery" type="button" class="clear-search-btn" title="清空搜索" @click="taskSearchQuery = ''">✕</button>
                     <span v-else class="list-control">☷</span>
                 </div>
@@ -116,10 +125,10 @@
                 </div>
                 <div class="task-list">
                     <div
-                        v-for="tab in filteredTabs"
+                        v-for="tab in independentTabs"
                         :key="tab.id"
                         class="task-row"
-                        :class="{ active: currentNavView === 'agent' && activeTabId === tab.id }"
+                        :class="{ active: currentNavView === 'agent' && activeTabId === tab.id, 'is-draft': tab.isDraft }"
                         @click="selectTask(tab.id)"
                         @dblclick="startRename(tab)"
                     >
@@ -144,41 +153,50 @@
             </footer>
         </aside>
 
-        <!-- 右侧主工作区 (动态切换 Agent、LLM 管理、插件或技能库) -->
+        <!-- 右侧主工作区 (动态切换 Agent 对话、Project 工作区、LLM 管理、插件或技能库) -->
         <main class="app-main-content">
             <!-- 1. 🤖 Agent 对话主面板 -->
             <div v-show="currentNavView === 'agent'" class="full-view-panel">
-                <template v-for="tab in tabs" :key="tab.id">
+                <template v-for="tab in tabs" :key="tab.uid">
                     <div v-show="activeTabId === tab.id" class="agent-panel-frame">
                         <AgentPanel
                             :ref="(el) => { if (el) panelRefs[tab.id] = el }"
                             :panel-id="tab.id"
+                            :project-id="tab.projectId"
                             :all-models="allModels"
                             @new-session="createNewTask"
                             @open-plugins="currentNavView = 'plugins'"
                             @update:running="(val) => { tab.running = val; }"
                             @update:title="(title) => { updateTabTitle(tab.id, title); }"
+                            @promoted="handleSessionPromoted"
                         />
                     </div>
                 </template>
             </div>
 
-            <!-- 2. 📁 项目、项目内对话与明确登记的资源 -->
-            <div v-if="currentNavView === 'projects'" class="full-view-panel">
-                <ProjectWorkspace :models="allModels" @open-session="openProjectSession" />
+            <!-- 2. 📁 Project 工作区面板 (类似 Manus Project Dashboard) -->
+            <div v-if="currentNavView === 'project' && selectedProjectId" class="full-view-panel">
+                <ProjectWorkspace
+                    :project-id="selectedProjectId"
+                    :all-models="allModels"
+                    @open-session="openTreeSession"
+                    @start-task="handleStartProjectTask"
+                    @project-deleted="handleProjectDeleted"
+                    @refresh-projects="projectTreeRef?.refreshProjects()"
+                />
             </div>
 
-            <!-- 3. ⚙️ LLM 平台与模型管理面板 (原平台管理) -->
+            <!-- 3. ⚙️ LLM 平台与模型管理面板 -->
             <div v-if="currentNavView === 'llm'" class="full-view-panel">
                 <ApiManager @models-updated="loadAllModels" @back="currentNavView = 'agent'" />
             </div>
 
-            <!-- 3. 🔌 插件 / 提示词与 Skill 库 -->
+            <!-- 4. 🔌 插件 / 提示词与 Skill 库 -->
             <div v-if="currentNavView === 'plugins' || currentNavView === 'library'" class="full-view-panel">
                 <PluginView @back="currentNavView = 'agent'" />
             </div>
 
-            <!-- 4. ⏱️ Scheduled 定时任务 -->
+            <!-- 5. ⏱️ Scheduled 定时任务 -->
             <div v-if="currentNavView === 'scheduled'" class="full-view-panel scheduled-view">
                 <div class="scheduled-card">
                     <span class="scheduled-icon">⏱️</span>
@@ -194,15 +212,17 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AgentPanel from "../components/AgentPanel.vue";
+import ProjectSidebarTree, { type AgentProject, type TreeSessionItem } from "../components/ProjectSidebarTree.vue";
 import ProjectWorkspace from "../components/ProjectWorkspace.vue";
 import ApiManager from "./ApiManager.vue";
 import PluginView from "./PluginView.vue";
 
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
-interface TabInfo { id: string; label: string; running: boolean; }
+interface TabInfo { uid: string; id: string; label: string; running: boolean; projectId?: string; isDraft?: boolean; }
 
-const currentNavView = ref<"agent" | "projects" | "llm" | "plugins" | "scheduled" | "library">("agent");
+const currentNavView = ref<"agent" | "project" | "llm" | "plugins" | "scheduled" | "library">("agent");
+const selectedProjectId = ref<string>("");
 const allModels = ref<ModelOption[]>([]);
 const sidebarCollapsed = ref(false);
 const renamingId = ref<string | null>(null);
@@ -211,39 +231,164 @@ const tabs = ref<TabInfo[]>([]);
 const activeTabId = ref("");
 const taskSearchQuery = ref("");
 const panelRefs = reactive<Record<string, any>>({});
+const projectTreeRef = ref<InstanceType<typeof ProjectSidebarTree> | null>(null);
 
-const filteredTabs = computed(() => {
+// 独立会话列表过滤：只保留未与任何项目绑定的独立任务
+const independentTabs = computed(() => {
+    const projectSessionIds = new Set<string>();
+    if (projectTreeRef.value?.projectSessionsMap) {
+        for (const sessions of Object.values(projectTreeRef.value.projectSessionsMap)) {
+            if (Array.isArray(sessions)) {
+                for (const s of sessions) {
+                    projectSessionIds.add(s.id);
+                }
+            }
+        }
+    }
     const query = taskSearchQuery.value.trim().toLowerCase();
-    if (!query) return tabs.value;
-    return tabs.value.filter((tab) => tab.label.toLowerCase().includes(query) || tab.id.toLowerCase().includes(query));
+    return tabs.value.filter((tab) => {
+        if (tab.projectId || projectSessionIds.has(tab.id)) return false;
+        if (!query) return true;
+        return tab.label.toLowerCase().includes(query) || tab.id.toLowerCase().includes(query);
+    });
 });
 
-function asTab(session: ChatSessionRow): TabInfo {
-    return { id: session.id, label: session.title || "未命名对话", running: false };
+function asTab(session: ChatSessionRow, projectId?: string): TabInfo {
+    return {
+        uid: `tab-${session.id}`,
+        id: session.id,
+        label: session.title || "未命名对话",
+        running: false,
+        projectId,
+        isDraft: false
+    };
 }
 
-function defaultTitle() {
-    return `Agent 任务 #${tabs.value.length + 1}`;
+// 点击项目节点：切换到 Manus 风格的 Project 工作区主面板
+function handleSelectProject(project: AgentProject) {
+    selectedProjectId.value = project.id;
+    currentNavView.value = "project";
 }
 
-async function addTab() {
-    const created = await invoke<ChatSessionRow>("create_session", {
-        title: defaultTitle(),
-        modelId: allModels.value[0]?.id || "",
+function handleProjectDeleted(deletedProjectId: string) {
+    if (selectedProjectId.value === deletedProjectId) {
+        selectedProjectId.value = "";
+        currentNavView.value = "agent";
+    }
+    projectTreeRef.value?.refreshProjects();
+}
+
+// 在 Project 工作区直接发起任务
+async function handleStartProjectTask(projectId: string, goal: string) {
+    const draftId = `draft-${Date.now()}`;
+    tabs.value.unshift({
+        uid: `tab-${draftId}`,
+        id: draftId,
+        label: "新对话",
+        running: false,
+        projectId: projectId,
+        isDraft: true,
     });
-    tabs.value.unshift(asTab(created));
-    activeTabId.value = created.id;
-}
-
-async function createNewTask() {
+    activeTabId.value = draftId;
     currentNavView.value = "agent";
-    await addTab();
+
+    if (goal.trim()) {
+        await nextTick();
+        setTimeout(() => {
+            const panel = panelRefs[draftId];
+            if (panel) {
+                if (typeof panel.runAgent === "function") {
+                    void panel.runAgent(goal.trim());
+                } else if (panel.session?.runAgent) {
+                    void panel.session.runAgent(goal.trim());
+                }
+            }
+        }, 50);
+    }
 }
 
-function openProjectSession(session: ChatSessionRow) {
-    if (!tabs.value.some((tab) => tab.id === session.id)) tabs.value.unshift(asTab(session));
+// 新建独立对话：未发消息前仅在前端保留草稿，不写数据库
+function createNewTask() {
+    currentNavView.value = "agent";
+    const existingDraft = tabs.value.find((t) => !t.projectId && t.isDraft && !t.running);
+    if (existingDraft) {
+        activeTabId.value = existingDraft.id;
+        return;
+    }
+    const draftId = `draft-${Date.now()}`;
+    tabs.value.unshift({
+        uid: `tab-${draftId}`,
+        id: draftId,
+        label: "新对话",
+        running: false,
+        isDraft: true,
+    });
+    activeTabId.value = draftId;
+}
+
+// 在项目下新建对话：未发消息前仅在前端保留草稿，绑定该项目
+function handleNewProjectSession(project: AgentProject) {
+    currentNavView.value = "agent";
+    const existingDraft = tabs.value.find((t) => t.projectId === project.id && t.isDraft && !t.running);
+    if (existingDraft) {
+        activeTabId.value = existingDraft.id;
+        return;
+    }
+    const draftId = `draft-${Date.now()}`;
+    tabs.value.unshift({
+        uid: `tab-${draftId}`,
+        id: draftId,
+        label: "新对话",
+        running: false,
+        projectId: project.id,
+        isDraft: true,
+    });
+    activeTabId.value = draftId;
+}
+
+// 打开树形菜单中的会话
+function openTreeSession(session: TreeSessionItem) {
+    if (!tabs.value.some((tab) => tab.id === session.id)) {
+        tabs.value.unshift({
+            uid: `tab-${session.id}`,
+            id: session.id,
+            label: session.title || "未命名对话",
+            running: false,
+            isDraft: session.isDraft,
+        });
+    }
     activeTabId.value = session.id;
     currentNavView.value = "agent";
+}
+
+// 草稿会话在用户发送第一条消息后成功持久化，升级为正式数据库会话
+function handleSessionPromoted(oldId: string, newId: string, title: string, projectId?: string) {
+    const tab = tabs.value.find((t) => t.id === oldId);
+    if (tab) {
+        tab.id = newId;
+        tab.label = title;
+        tab.isDraft = false;
+        if (projectId) tab.projectId = projectId;
+    }
+    if (activeTabId.value === oldId) {
+        activeTabId.value = newId;
+    }
+    if (panelRefs[oldId]) {
+        panelRefs[newId] = panelRefs[oldId];
+        delete panelRefs[oldId];
+    }
+    projectTreeRef.value?.refreshProjects();
+}
+
+function handleSessionDeleted(sessionId: string) {
+    const index = tabs.value.findIndex((t) => t.id === sessionId);
+    if (index >= 0) {
+        tabs.value.splice(index, 1);
+        delete panelRefs[sessionId];
+        if (activeTabId.value === sessionId) {
+            activeTabId.value = tabs.value[0]?.id || "";
+        }
+    }
 }
 
 function selectTask(tabId: string) {
@@ -276,7 +421,6 @@ async function backfillSessionTitles(sessions: ChatSessionRow[]) {
     for (const session of sessions) {
         if (!session.title || session.title.startsWith("Agent 任务") || session.title.startsWith("未命名") || session.title.includes("#")) {
             try {
-                // 1. 优先从 run_traces 获取历史首个任务目标
                 const traces = await invoke<any[]>("get_session_run_traces", { sessionId: session.id });
                 if (traces && traces.length > 0) {
                     const firstGoal = traces[0]?.goal || "";
@@ -291,7 +435,6 @@ async function backfillSessionTitles(sessions: ChatSessionRow[]) {
                         }
                     }
                 }
-                // 2. 备用从 messages 获取首条用户消息
                 const msgs = await invoke<any[]>("get_messages", { sessionId: session.id });
                 if (msgs && msgs.length > 0) {
                     const userMsg = msgs.find((m) => m.role === "user");
@@ -314,8 +457,11 @@ async function backfillSessionTitles(sessions: ChatSessionRow[]) {
 
 async function loadSessions() {
     const sessions = await invoke<ChatSessionRow[]>("get_sessions");
-    tabs.value = sessions.map(asTab);
-    if (!tabs.value.length) { await addTab(); return; }
+    tabs.value = sessions.map((s) => asTab(s));
+    if (!tabs.value.length) {
+        createNewTask();
+        return;
+    }
     if (!tabs.value.some((tab) => tab.id === activeTabId.value)) activeTabId.value = tabs.value[0].id;
     void backfillSessionTitles(sessions);
 }
@@ -323,14 +469,18 @@ async function loadSessions() {
 async function closeTab(id: string) {
     const index = tabs.value.findIndex((tab) => tab.id === id);
     if (index < 0) return;
-    await invoke("delete_session", { id });
+    if (!id.startsWith("draft-")) {
+        await invoke("delete_session", { id });
+    }
     tabs.value.splice(index, 1);
     delete panelRefs[id];
-    if (!tabs.value.length) { await addTab(); return; }
+    if (!tabs.value.length) { createNewTask(); return; }
     if (activeTabId.value === id) activeTabId.value = tabs.value[Math.max(0, index - 1)].id;
+    projectTreeRef.value?.refreshProjects();
 }
 
 function startRename(tab: TabInfo) {
+    if (tab.isDraft) return;
     renamingId.value = tab.id;
     renameText.value = tab.label;
     nextTick(() => (document.querySelector(".task-rename-box") as HTMLInputElement | null)?.focus());
@@ -344,6 +494,7 @@ async function doRename(id: string) {
     await invoke("rename_session", { id, title });
     const tab = tabs.value.find((item) => item.id === id);
     if (tab) tab.label = title;
+    projectTreeRef.value?.refreshProjects();
 }
 
 async function updateTabTitle(id: string, newTitle: string) {
@@ -352,7 +503,10 @@ async function updateTabTitle(id: string, newTitle: string) {
     const cleanTitle = newTitle.trim();
     if (!cleanTitle || tab.label === cleanTitle) return;
     tab.label = cleanTitle;
-    await invoke("rename_session", { id, title: cleanTitle });
+    if (!id.startsWith("draft-")) {
+        await invoke("rename_session", { id, title: cleanTitle });
+    }
+    projectTreeRef.value?.refreshProjects();
 }
 
 watch(panelRefs, () => {
@@ -368,7 +522,7 @@ onMounted(async () => {
         await loadSessions();
     } catch {
         tabs.value = [];
-        await addTab();
+        createNewTask();
     }
 });
 </script>
@@ -396,7 +550,6 @@ onMounted(async () => {
     z-index: 10;
 }
 
-/* 折叠状态更宽敞、更舒适 (64px) */
 .app-sidebar.collapsed {
     width: 64px;
     flex: 0 0 64px;
@@ -464,8 +617,6 @@ onMounted(async () => {
     fill: none;
     stroke: currentColor;
     stroke-width: 1.8;
-    stroke-linecap: round;
-    stroke-linejoin: round;
 }
 
 .brand-collapsed-logo {
@@ -514,7 +665,8 @@ onMounted(async () => {
     display: flex;
     flex-direction: column;
     gap: 3px;
-    padding: 10px 8px 14px;
+    padding: 10px 8px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .app-sidebar.collapsed .primary-nav {
@@ -525,29 +677,27 @@ onMounted(async () => {
 
 .nav-row {
     display: flex;
-    height: 36px;
+    height: 34px;
     align-items: center;
     gap: 11px;
     padding: 0 12px;
     border: 1px solid transparent;
-    border-radius: 8px;
+    border-radius: 7px;
     color: #a1a1aa;
     cursor: pointer;
     background: transparent;
-    font-size: 13.5px;
+    font-size: 13px;
     font-weight: 500;
     text-align: left;
-    transition: all 0.15s;
+    transition: all 0.12s;
 }
 
 .nav-row svg {
-    width: 18px;
-    height: 18px;
+    width: 17px;
+    height: 17px;
     flex-shrink: 0;
     fill: none;
     stroke: currentColor;
-    stroke-linecap: round;
-    stroke-linejoin: round;
     stroke-width: 1.8;
 }
 
@@ -561,11 +711,10 @@ onMounted(async () => {
     background: #27272a;
     border-color: rgba(255, 255, 255, 0.08);
     font-weight: 600;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
 }
 
 .nav-row.new-task {
-    margin-bottom: 6px;
+    margin-bottom: 4px;
     color: #f4f4f5;
     border: 1px solid rgba(255, 255, 255, 0.12);
     background: rgba(255, 255, 255, 0.05);
@@ -575,7 +724,6 @@ onMounted(async () => {
     background: rgba(255, 255, 255, 0.1);
 }
 
-/* 折叠状态下的单图标模式 */
 .nav-row.icon-only {
     width: 44px;
     height: 44px;
@@ -590,13 +738,14 @@ onMounted(async () => {
     height: 20px;
 }
 
-.nav-row.icon-only.new-task {
-    margin-bottom: 6px;
-}
-
 /* 侧边栏项目和任务 */
 .sidebar-section {
     padding: 6px 8px 0;
+}
+
+.projects-tree-section {
+    padding-top: 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .section-title {
@@ -606,52 +755,17 @@ onMounted(async () => {
     padding: 0 8px 6px;
     color: #71717a;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-}
-.section-title button {
-    border: 0;
-    color: #a1a1aa;
-    cursor: pointer;
-    background: transparent;
-    font-size: 16px;
-    line-height: 1;
 }
 
 .list-control { color: #71717a; }
 
-.project-row {
-    display: flex;
-    width: 100%;
-    align-items: center;
-    gap: 9px;
-    padding: 8px 10px;
-    border: 0;
-    border-radius: 7px;
-    color: #a1a1aa;
-    cursor: pointer;
-    background: transparent;
-    font-size: 12.5px;
-    text-align: left;
-    transition: all 0.15s;
-}
-.project-row svg {
-    width: 16px;
-    height: 16px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.8;
-}
-.project-row:hover {
-    background: rgba(255, 255, 255, 0.04);
-    color: #f4f4f5;
-}
-
 .tasks-section {
     min-height: 0;
     flex: 1;
-    padding-top: 12px;
+    padding-top: 10px;
     overflow-y: auto;
 }
 
@@ -664,12 +778,8 @@ onMounted(async () => {
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 6px;
-    transition: all 0.15s ease;
 }
-.task-search-bar:focus-within {
-    border-color: rgba(99, 102, 241, 0.5);
-    background: rgba(255, 255, 255, 0.07);
-}
+
 .task-search-bar svg {
     width: 12px;
     height: 12px;
@@ -678,6 +788,7 @@ onMounted(async () => {
     fill: none;
     flex-shrink: 0;
 }
+
 .task-search-input {
     width: 100%;
     border: none;
@@ -686,9 +797,7 @@ onMounted(async () => {
     color: #f4f4f5;
     font-size: 11.5px;
 }
-.task-search-input::placeholder {
-    color: #71717a;
-}
+
 .clear-search-btn {
     border: none;
     background: transparent;
@@ -696,9 +805,6 @@ onMounted(async () => {
     cursor: pointer;
     font-size: 11px;
     padding: 0 4px;
-}
-.clear-search-btn:hover {
-    color: #e4e4e7;
 }
 
 .task-list {
@@ -709,42 +815,50 @@ onMounted(async () => {
 
 .task-row {
     display: flex;
-    height: 34px;
+    height: 32px;
     align-items: center;
     gap: 8px;
     padding: 0 10px;
     border-radius: 7px;
     color: #a1a1aa;
     cursor: pointer;
-    transition: all 0.15s;
+    transition: all 0.12s;
 }
+
 .task-row:hover {
     color: #f4f4f5;
     background: rgba(255, 255, 255, 0.04);
 }
+
 .task-row.active {
     color: #ffffff;
     background: #27272a;
     font-weight: 500;
 }
 
+.task-row.is-draft {
+    color: #a1a1aa;
+    font-style: italic;
+}
+
 .task-state {
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     flex: 0 0 auto;
     border-radius: 50%;
     background: #52525b;
     transition: all 0.2s ease;
 }
+
 .task-state.running {
     background: #38bdf8;
-    box-shadow: 0 0 8px rgba(56, 189, 248, 0.8);
+    box-shadow: 0 0 6px rgba(56, 189, 248, 0.8);
     animation: task-pulse 1.2s ease-in-out infinite;
 }
 
 @keyframes task-pulse {
     0%, 100% { transform: scale(0.85); opacity: 0.6; }
-    50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 10px rgba(56, 189, 248, 1); }
+    50% { transform: scale(1.2); opacity: 1; }
 }
 
 .task-label {
@@ -758,17 +872,18 @@ onMounted(async () => {
 
 .task-close {
     display: none;
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     padding: 0;
     border: 0;
     border-radius: 4px;
     color: #71717a;
     cursor: pointer;
     background: transparent;
-    font-size: 14px;
+    font-size: 13px;
     line-height: 1;
 }
+
 .task-row:hover .task-close { display: block; }
 .task-close:hover { color: #fff; background: rgba(255, 255, 255, 0.15); }
 
@@ -776,12 +891,12 @@ onMounted(async () => {
     min-width: 0;
     flex: 1;
     border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 5px;
+    border-radius: 4px;
     outline: 0;
-    padding: 3px 6px;
+    padding: 2px 4px;
     color: #f4f4f5;
     background: #18181b;
-    font-size: 12px;
+    font-size: 11.5px;
 }
 
 /* 底部状态 */

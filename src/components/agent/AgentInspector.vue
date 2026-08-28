@@ -108,7 +108,7 @@
                 <div v-if="tokenUsage && tokenUsage.cache_hit_rate !== undefined && tokenUsage.cache_hit_rate > 0" :title="`前缀缓存命中: ${tokenUsage.cached_tokens ?? 0} / ${tokenUsage.prompt_tokens} tokens`">
                     <span>缓存</span><strong style="color:#4ade80">{{ tokenUsage.cache_hit_rate.toFixed(0) }}%</strong>
                 </div>
-                <div v-if="tokenUsage" :title="`已用 ${tokenUsage.total_tokens} / 窗口 ${tokenUsage.context_window > 0 ? tokenUsage.context_window : '32k'}`">
+                <div v-if="tokenUsage" :title="`已用 ${tokenUsage.total_tokens} / 窗口 ${tokenUsage.context_window > 0 ? tokenUsage.context_window : '-'}`">
                     <span>上下文</span><strong>{{ tokenUsage.usage_percent.toFixed(1) }}%</strong>
                 </div>
                 <div v-else-if="failedToolCount"><span>异常</span><strong class="danger">{{ failedToolCount }}</strong></div>

@@ -109,6 +109,7 @@
                     @update:model-routing="session.modelRouting.value = $event"
                     @update:budget-mode="session.updateBudgetMode($event)"
                     @open-settings="settingsOpen = true"
+                    @attach-files="handleAttachFiles"
                     @submit="submitComposer"
                     @stop="session.requestStop"
                 />
@@ -180,6 +181,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import AgentChatStream from "./agent/AgentChatStream.vue";
 import AgentComposer from "./agent/AgentComposer.vue";
 import AgentProgressDeck from "./agent/AgentProgressDeck.vue";
@@ -189,18 +191,28 @@ import AgentSettingsDrawer from "./agent/AgentSettingsDrawer.vue";
 import type { AgentModelOption } from "./agent/types";
 import { useAgentSession } from "../composables/useAgentSession";
 
-const props = defineProps<{ panelId: string; allModels: AgentModelOption[] }>();
+const props = defineProps<{
+    panelId: string;
+    allModels: AgentModelOption[];
+    projectId?: string;
+}>();
 const emit = defineEmits<{
     "new-session": [];
     "open-plugins": [];
     "update:running": [running: boolean];
     "update:title": [title: string];
+    "promoted": [oldId: string, newId: string, title: string, projectId?: string];
 }>();
 const settingsOpen = ref(false);
 const selectedSubpart = ref<"thought" | "tool" | null>(null);
 const selectedHumanEventId = ref<string | null>(null);
 const selectedActiveThought = ref(false);
-const session = useAgentSession(props.panelId);
+const session = useAgentSession(props.panelId, {
+    projectId: () => props.projectId,
+    onPromote: (oldId, newId, title, projectId) => {
+        emit("promoted", oldId, newId, title, projectId);
+    },
+});
 
 
 watch(session.sessionTitle, (newTitle) => {
@@ -245,6 +257,21 @@ const deckSummary = computed(() => {
     }
     return "";
 });
+
+async function handleAttachFiles(filePaths: string[]) {
+    if (props.projectId) {
+        for (const p of filePaths) {
+            try {
+                await invoke("add_agent_project_resource", {
+                    projectId: props.projectId,
+                    path: p,
+                });
+            } catch (err) {
+                console.error("注册项目受管资源失败:", err);
+            }
+        }
+    }
+}
 
 onMounted(() => session.ensureModelRouting(props.allModels));
 watch(() => props.allModels, (models) => session.ensureModelRouting(models), { deep: true });
@@ -410,7 +437,11 @@ async function handleInspectorAgentSubmit(data: any) {
     }
 }
 
-defineExpose({ isRunning: session.isRunning });
+defineExpose({
+    isRunning: session.isRunning,
+    session,
+    runAgent: (goal: string) => session.runAgent(goal),
+});
 </script>
 
 <style scoped>

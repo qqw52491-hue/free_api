@@ -596,21 +596,34 @@ pub async fn remove_agent_project_resource(
 #[tauri::command]
 pub async fn read_agent_project_resource(
     state: State<'_, DbState>,
-    project_id: String,
+    project_id: Option<String>,
     resource_id: String,
 ) -> Result<ProjectResourcePreview, String> {
     let conn = state.0.lock().map_err(|error| error.to_string())?;
-    let resource = conn
-        .query_row(
+    let resource = if let Some(pid) = project_id.as_deref().filter(|s| !s.is_empty()) {
+        conn.query_row(
             "SELECT resource_id, project_id, label, relative_path, canonical_path, kind, size_bytes, created_at
              FROM agent_project_resources WHERE project_id=?1 AND resource_id=?2",
-            params![project_id, resource_id],
+            params![pid, resource_id],
             map_resource,
         )
-        .map_err(|_| "项目资源不存在或不属于该项目".to_string())?;
-    let (_, canonical_path) = canonical_project_file(&conn, &project_id, &resource.canonical_path)?;
-    let content = std::fs::read_to_string(canonical_path)
-        .map_err(|_| "该资源不是可预览的 UTF-8 文本文件".to_string())?;
+    } else {
+        conn.query_row(
+            "SELECT resource_id, project_id, label, relative_path, canonical_path, kind, size_bytes, created_at
+             FROM agent_project_resources WHERE resource_id=?1",
+            params![resource_id],
+            map_resource,
+        )
+    }
+    .map_err(|_| "项目资源不存在或已被删除".to_string())?;
+    let (_, canonical_path) = canonical_project_file(&conn, &resource.project_id, &resource.canonical_path)?;
+    let content = match std::fs::read_to_string(&canonical_path) {
+        Ok(text) => text,
+        Err(_) => format!(
+            "[数据文件: {}，大小: {} 字节]\n该文件已作为项目受管数据，可在 Agent 会话中由相关数据工具或脚本直接处理与分析。",
+            resource.label, resource.size_bytes
+        ),
+    };
     let total_chars = content.chars().count();
     let preview: String = content.chars().take(MAX_RESOURCE_PREVIEW_CHARS).collect();
     Ok(ProjectResourcePreview {
