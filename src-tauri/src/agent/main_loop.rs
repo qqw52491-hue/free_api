@@ -951,6 +951,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         }
     }
 
+    // 🧹 会话启动时，自动收敛历史由于断电或异常退出的孤儿后台任务
+    let _ = crate::agent::job_engine::recover_orphaned_jobs_on_session_start(state.inner(), &final_session_id);
+
     // durable cursor 是调度权威：每个普通步骤提交后推进 step_id；恢复时也从这里继续。
     // 不再使用启动瞬间捕获范围的 for-loop，避免 checkpoint 更新后调度器仍沿旧游标运行。
     while checkpoint.step_id < MAX_STEPS {
@@ -976,6 +979,34 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
                     let _ = app.emit(
                         &format!("agent-log-{}", final_session_id),
                         "🔄 子审查结果已注入父 Agent 上下文".to_string()
+                    );
+                }
+            }
+        }
+
+        // ⚡ 通用后台任务信箱 (Durable Pending Inbox) 轮询：获取任意后台任务完成结果
+        if let Ok(jobs) = crate::agent::job_engine::poll_pending_inbox(state.inner(), &run_id, 5) {
+            if !jobs.is_empty() {
+                let mut job_injection = String::new();
+                for job in jobs {
+                    job_injection.push_str(&format!(
+                        "\n【⚡ 后台异步任务已完成 (ID: {}, 类型: {})】\n任务描述: {}\n执行状态: {}\n耗时: {}ms\n输出/结论:\n{}\n",
+                        job.job_id,
+                        job.job_type,
+                        job.title,
+                        job.status,
+                        job.duration_ms,
+                        if job.result_json.is_empty() { "（无附加输出）" } else { &job.result_json }
+                    ));
+                    if let Some(ref err) = job.error_kind {
+                        job_injection.push_str(&format!("异常类别: {}\n", err));
+                    }
+                }
+                if !job_injection.is_empty() {
+                    context.add_error_feedback(&job_injection);
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        "⚡ 后台异步任务结果已注入父 Agent 上下文".to_string()
                     );
                 }
             }
@@ -1215,8 +1246,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         if let Some(blocker) = complex_delivery_blocker {
             open_todos.push(blocker);
         }
-        if is_finish && crate::agent::child_reviewer::has_running_child_runs(state.inner(), &run_id) {
-            open_todos.push("仍有后台子审查任务正在执行中，请等待其推导完成并接收结论后再提交 finish".to_string());
+        if is_finish && (crate::agent::child_reviewer::has_running_child_runs(state.inner(), &run_id) || crate::agent::job_engine::has_running_jobs(state.inner(), &run_id)) {
+            open_todos.push("仍有后台异步任务正在执行中，请等待其推导或执行完成并接收结论后再提交 finish".to_string());
         }
         let finish_challenged = should_challenge_finish_with_complex_delivery_blocker(
             is_finish,

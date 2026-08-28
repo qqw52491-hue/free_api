@@ -10,6 +10,7 @@ pub mod evaluation;
 pub mod evaluation_analysis;
 pub mod evaluation_runner;
 pub mod file_parser;
+pub mod job_engine;
 pub mod lesson;
 pub mod loop_runner;
 pub mod main_loop;

@@ -186,6 +186,25 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_agent_child_runs_parent ON agent_child_runs(parent_run_id, started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_agent_child_runs_session ON agent_child_runs(parent_session_id, started_at DESC);
 
+        -- 全局后台异步任务表与持久化信箱 (Durable Pending Inbox)
+        CREATE TABLE IF NOT EXISTS agent_background_jobs (
+            id TEXT PRIMARY KEY,
+            parent_session_id TEXT NOT NULL,
+            parent_run_id TEXT NOT NULL,
+            job_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            params_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            duration_ms INTEGER,
+            result_json TEXT,
+            error_kind TEXT,
+            consumed INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_jobs_parent ON agent_background_jobs(parent_run_id, consumed, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_jobs_session ON agent_background_jobs(parent_session_id, consumed, started_at DESC);
+
         CREATE TABLE IF NOT EXISTS mcp_plugins (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
