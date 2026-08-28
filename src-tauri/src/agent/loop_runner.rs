@@ -1,5 +1,5 @@
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
-use crate::agent::child_reviewer::{result_as_dispatch_output, run_child_reviewer};
+use crate::agent::child_reviewer::{result_as_dispatch_output, spawn_child_reviewer};
 use crate::agent::context::resource_scope::ResourceOperation;
 use crate::agent::control::{take_pending_interrupt, HumanControl};
 use crate::agent::dispatcher::{
@@ -711,13 +711,14 @@ pub async fn run_tool_phase(
         // 不在此处盲目广播 "succeeded"，交由 main_loop 的 finish guard 判定是否为 finish_challenged 统一发射事件
         return Ok(result);
     }
-    // --- B2. 受限 child reviewer：独立模型调用，但不能派发任何工具或写入父状态。 ---
+    // --- B2. 受限 child reviewer：异步派发，不阻塞主循环。结果在后续 step 中由 main_loop 的 poll_completed_child_runs 注入。 ---
     let dispatch_result = if inst.get_tool().eq_ignore_ascii_case("child_reviewer") {
         let routing = crate::agent::router::AgentRouter::route_for_step(context, model_routing, step_id);
         let model_tier = routing.tier.to_string();
         let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
         let child_params = inst.get_params();
-        match run_child_reviewer(
+        match spawn_child_reviewer(
+            Some(app.clone()),
             state.inner(),
             parent_run_id,
             final_session_id,
@@ -726,15 +727,15 @@ pub async fn run_tool_phase(
             &model_tier,
             &reasoning_effort,
             &child_params,
-            interrupt_rx,
+            interrupt_rx.clone(),
         )
         .await
         {
-            Ok(result) => DispatchResult {
-                stdout: result_as_dispatch_output(result),
+            Ok(child_run_id) => DispatchResult {
+                stdout: format!("子审查任务已异步派发，child_run_id: {}。结果将在后续步骤中自动注入。", child_run_id),
                 stderr: String::new(),
                 success: true,
-                route: "child_reviewer:succeeded".to_string(),
+                route: "child_reviewer:spawned".to_string(),
             },
             Err(error) => DispatchResult {
                 stdout: String::new(),

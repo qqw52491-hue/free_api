@@ -955,6 +955,31 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     // 不再使用启动瞬间捕获范围的 for-loop，避免 checkpoint 更新后调度器仍沿旧游标运行。
     while checkpoint.step_id < MAX_STEPS {
         let step_id = checkpoint.step_id;
+
+        // 🔄 异步子审查结果轮询：检查是否有已完成的 child_reviewer 任务，自动注入结果
+        if let Ok(completed) = crate::agent::child_reviewer::poll_completed_child_runs(state.inner(), &run_id) {
+            if !completed.is_empty() {
+                let mut injection = String::new();
+                for result in completed {
+                    injection.push_str(&format!(
+                        "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
+                        result.child_run_id,
+                        result.confidence,
+                        result.findings.join("\n- ")
+                    ));
+                    if !result.missing_evidence.is_empty() {
+                        injection.push_str(&format!("缺失证据: {}\n", result.missing_evidence.join(", ")));
+                    }
+                }
+                if !injection.is_empty() {
+                    context.add_error_feedback(&injection);
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        "🔄 子审查结果已注入父 Agent 上下文".to_string()
+                    );
+                }
+            }
+        }
         let resume_instruction = recovered_instruction.take();
         if resume_instruction.is_none() {
             checkpoint.begin_planning(step_id, &context);
