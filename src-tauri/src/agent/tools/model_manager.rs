@@ -281,7 +281,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     rusqlite::params![platform_target],
                     |row| row.get(0),
                 )
-                .map_err(|e| format!("未找到平台 [{}]: {}", platform_target, e));
+                .map_err(|_| format!("未找到平台 [{}]。`add_model` 只能向已有平台添加模型；请先调用 `list_platforms` 确认已有平台，或先调用 `add_platform` 创建平台。", platform_target));
 
             let platform_id = match platform_id_res {
                 Ok(id) => id,
@@ -419,5 +419,71 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             success: false,
             route: "model_manager:unknown".to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_state() -> (std::path::PathBuf, DbState) {
+        let base =
+            std::env::temp_dir().join(format!("free-api-model-manager-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+        (
+            base,
+            DbState(std::sync::Arc::new(std::sync::Mutex::new(conn))),
+        )
+    }
+
+    #[test]
+    fn adding_model_to_missing_platform_returns_recoverable_next_action() {
+        let (base, state) = test_state();
+        let result = dispatch(
+            &state,
+            "add_model",
+            &json!({
+                "platform_name": "not-configured",
+                "model_name": "test-model",
+            }),
+        );
+
+        assert!(!result.success);
+        assert!(result.stderr.contains("未找到平台 [not-configured]"));
+        assert!(result.stderr.contains("list_platforms"));
+        assert!(result.stderr.contains("add_platform"));
+        assert!(!result.stderr.contains("Query returned no rows"));
+        drop(state);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn adding_platform_then_model_satisfies_the_platform_dependency() {
+        let (base, state) = test_state();
+        let platform = dispatch(
+            &state,
+            "add_platform",
+            &json!({
+                "name": "test-provider",
+                "base_url": "https://example.invalid/v1",
+                "api_key": "test-only-key",
+            }),
+        );
+        assert!(platform.success, "{}", platform.stderr);
+
+        let model = dispatch(
+            &state,
+            "add_model",
+            &json!({
+                "platform_name": "test-provider",
+                "model_name": "test-model",
+            }),
+        );
+        assert!(model.success, "{}", model.stderr);
+        assert_eq!(model.route, "model_manager:add_model");
+        drop(state);
+        let _ = std::fs::remove_dir_all(base);
     }
 }

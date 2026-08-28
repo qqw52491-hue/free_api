@@ -54,7 +54,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
    - 📦 **数据暂存与截断原文取回**：结构化中间数据写入 `task_store` 分页检索；历史中带 `output_id` 的截断执行输出使用 `get_step_output` 定向取回，避免全量重新执行；
    - 📑 **独立交付产物与文档生成 (Deliverables & Reports)**：当用户要求“生成一个文件给我”、“写一份报告/分析文档”、“导出数据”、“制作可视化图表/网页看板”时，**必须统一调用 `artifact_manager`（参数 `{"action": "create_document", "title": "...", "content": "...", "format": "md"|"html"|"json"}`）**；宿主会自动将交付物原子写入受管区并登记 SQLite 账本，前端会自动呈现为交付物卡片，支持一键在线预览、系统打开与定位。**严禁使用工程代码写入工具向用户的源码仓库随意抛洒临时演示或总结文件！**
    - 💻 **项目源码编辑与工程开发 (Source Code Development Only)**：只有当用户明确要求“修改项目代码”、“修复 Bug”、“向当前工程添加功能模块/组件”时，才调用 MCP 文件写入工具修改工作区代码；
-   - ⚙️ **系统控制与配置**：向用户提问、请求选择或动态生成表单交互调用 `ask_human`；模型与渠道维护调用 `model_manager`；外部 MCP 插件接入与能力卡维护调用 `mcp_manager`；工作区 Skill 与自定义提示词维护调用 `skill_manager`；任务完成调用 `finish`；若用户要求接入 MCP/Skill 但信息不全，先通过 `ask_human`（可附带 `custom_html` 或结构化表单）引导用户填写/选择模型，再调用 Manager 工具入库；
+   - ⚙️ **系统控制与配置**：向用户提问、请求选择或动态生成表单交互调用 `ask_human`；模型与渠道维护调用 `model_manager`；当用户同时给出新的提供商连接信息与模型名时，先调用 `list_platforms`，目标平台不存在则调用 `add_platform`，且仅在成功后再调用 `add_model`；`base_url` 与 `api_key` 只可传给 `add_platform`。外部 MCP 插件接入与能力卡维护调用 `mcp_manager`；工作区 Skill 与自定义提示词维护调用 `skill_manager`；任务完成调用 `finish`；若用户要求接入 MCP/Skill 但信息不全，先通过 `ask_human`（可附带 `custom_html` 或结构化表单）引导用户填写/选择模型，再调用 Manager 工具入库；
    - 🔌 **外部 MCP 插件与系统扩展**：所有工程级文件修改、命令行执行、数据库、Office 等扩展能力，**均由当前已连接的 MCP 插件提供**。必须直接查阅下方【MCP 工具目录】中的声明，严格以 `{"tool": "插件名/工具名", "command": {参数}}` 格式调用；**严禁臆造任何未在目录中声明的工具名（如 core, bash 等）**。首轮通过动态目录查阅，如需具体参数规格在当轮输出 `next_tool_hint: "插件名"` 懒加载，下一轮自动注入。
 
 ### 3.1 受限 child reviewer（仅复杂任务的第二视角）

@@ -84,13 +84,14 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "model_manager",
-        summary: "维护模型规格与平台模型绑定",
+        summary: "维护模型规格、提供商连接与平台模型绑定",
         actions: &[
             "list_specs()",
             "upsert_spec(name: string, context_window?|max_tokens?|supports_thinking?|default_temperature?|description?)",
             "delete_spec(name|id: string, confirm: true)",
             "list_platforms()",
-            "add_model(platform_id|platform_name: string, model_name: string, ...)",
+            "add_platform(name: string, base_url: string, api_key?: string) [新增提供商；成功后才能 add_model]",
+            "add_model(platform_id|platform_name: string, model_name: string, ...) [仅已有平台；不得传 base_url/api_key]",
             "delete_model(model_id|model_name: string, confirm: true)",
         ],
     },
@@ -119,10 +120,11 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "project_resources",
-        summary: "仅项目会话可用：查看宿主登记的文件元数据，或按资源 ID 按需读取 UTF-8 文本；不接受路径参数",
+        summary: "仅项目会话可用：查看或读取受管文件，支持将项目内关键文件登记为跨会话共享受管资源",
         actions: &[
             "list_resources()",
             "read_resource(resource_id: string)",
+            "register_resource(path: string, label?: string)",
         ],
     },
     BuiltinToolSpec {
@@ -162,6 +164,10 @@ mod tests {
         assert!(menu.contains("upsert_records(resource_id: string, records: array)"));
         assert!(menu.contains("get_step_output(output_id: string"));
         assert!(menu.contains("read_resource(resource_id: string)"));
+        assert!(menu.contains("add_platform(name: string, base_url: string, api_key?: string)"));
+        assert!(menu.contains(
+            "add_model(platform_id|platform_name: string, model_name: string, ...) [仅已有平台"
+        ));
     }
 
     #[test]
