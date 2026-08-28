@@ -252,7 +252,7 @@ async function handleCopy() {
 .doc-dialog-body {
     flex: 1;
     overflow-y: auto;
-    background: #121215;
+    background: #ffffff;
     padding: 0;
     display: flex !important;
     flex-direction: column;
@@ -278,12 +278,14 @@ async function handleCopy() {
     border: none !important;
     border-radius: 0 !important;
     box-shadow: none !important;
+    background: #ffffff !important;
 }
 
 .doc-dialog-body :deep(.card-body) {
     flex: 1;
     height: 100% !important;
     min-height: 100% !important;
+    background: #ffffff !important;
 }
 
 .doc-dialog-body :deep(.preview-container),
@@ -293,15 +295,29 @@ async function handleCopy() {
     min-height: 100% !important;
     border: none !important;
     border-radius: 0 !important;
+    background: #ffffff !important;
     flex: 1;
 }
 
 .doc-markdown-content {
     flex: 1;
-    color: #e4e4e7;
-    font-size: 13px;
-    line-height: 1.6;
-    padding: 20px;
+    color: #18181b;
+    background: #ffffff;
+    font-size: 13.5px;
+    line-height: 1.7;
+    padding: 28px 36px;
+}
+
+.doc-markdown-content :deep(h1),
+.doc-markdown-content :deep(h2),
+.doc-markdown-content :deep(h3),
+.doc-markdown-content :deep(strong) {
+    color: #09090b;
+}
+
+.doc-markdown-content :deep(p),
+.doc-markdown-content :deep(li) {
+    color: #27272a;
 }
 
 .doc-raw-preview {
