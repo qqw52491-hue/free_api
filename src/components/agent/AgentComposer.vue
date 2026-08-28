@@ -286,6 +286,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import ModelSelectDropdown from "../common/ModelSelectDropdown.vue";
 import {
@@ -323,11 +324,21 @@ const emit = defineEmits<{
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
+interface ParsedAttachment {
+    file_name: string;
+    file_path: string;
+    size_bytes: number;
+    content_type: string;
+    prompt_text: string;
+    image_data_url?: string | null;
+    raw_preview?: string | null;
+}
+
 async function promptAttachFiles() {
     try {
         const selected = await openDialog({
             multiple: true,
-            title: "选择要附加到会话的文件 (Excel, Word, PDF, Code...)",
+            title: "选择要附加到会话的文件 (Excel, Word, PDF, Code, 图片...)",
         });
         if (!selected) return;
         const paths = Array.isArray(selected) ? selected : [selected];
@@ -335,7 +346,24 @@ async function promptAttachFiles() {
         if (validPaths.length === 0) return;
 
         emit("attach-files", validPaths);
-        const fileHints = validPaths.map((p) => `【附加文件】: ${p}`).join("\n");
+        
+        // 自动调用后端多格式解析器（Excel、PDF、Word、Code、图片等）
+        const formattedBlocks: string[] = [];
+        for (const p of validPaths) {
+            try {
+                const parsed = await invoke<ParsedAttachment>("parse_attachment_file", { path: p });
+                if (parsed && parsed.prompt_text) {
+                    formattedBlocks.push(parsed.prompt_text.trim());
+                } else {
+                    formattedBlocks.push(`【附加文件】: ${p}`);
+                }
+            } catch (err) {
+                console.warn("解析文件失败，使用路径降级:", err);
+                formattedBlocks.push(`【附加文件】: ${p}`);
+            }
+        }
+
+        const fileHints = formattedBlocks.join("\n\n");
         const newDraft = props.draft ? `${props.draft}\n\n${fileHints}` : fileHints;
         emit("update:draft", newDraft);
     } catch (e) {

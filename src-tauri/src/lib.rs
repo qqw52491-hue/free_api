@@ -110,6 +110,8 @@ pub fn run() {
             commands::show_artifact_in_folder,
             commands::read_artifact_file,
             commands::resolve_artifact_absolute_path,
+            commands::parse_attachment_file,
+            commands::save_and_parse_uploaded_attachment,
             commands::search_web,
             commands::fetch_url_markdown,
             // Agent 执行

@@ -592,3 +592,115 @@ pub async fn resolve_artifact_absolute_path(path: String) -> Result<String, Stri
     let canonical = resolve_safe_artifact_path(&path)?;
     Ok(canonical.to_string_lossy().to_string())
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedAttachmentResult {
+    pub file_name: String,
+    pub file_path: String,
+    pub size_bytes: u64,
+    pub content_type: String,
+    pub prompt_text: String,
+    pub image_data_url: Option<String>,
+    pub raw_preview: Option<String>,
+}
+
+/// 解析用户选择或拖拽的本地文件内容
+#[tauri::command]
+pub async fn parse_attachment_file(path: String) -> Result<ParsedAttachmentResult, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("文件不存在: {}", path));
+    }
+    let metadata = std::fs::metadata(p).map_err(|e| format!("获取文件属性失败: {}", e))?;
+    let file_name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    let extracted = crate::agent::file_parser::parse_file(p, None)?;
+    let prompt_text = crate::agent::file_parser::format_for_prompt(&extracted, &file_name);
+
+    let (content_type, image_data_url, raw_preview) = match &extracted {
+        crate::agent::file_parser::ExtractedContent::Text { text, .. } => (
+            "text".to_string(),
+            None,
+            Some(text.chars().take(500).collect()),
+        ),
+        crate::agent::file_parser::ExtractedContent::Spreadsheet { summary, .. } => {
+            ("spreadsheet".to_string(), None, Some(summary.clone()))
+        }
+        crate::agent::file_parser::ExtractedContent::Document { text, .. } => (
+            "document".to_string(),
+            None,
+            Some(text.chars().take(500).collect()),
+        ),
+        crate::agent::file_parser::ExtractedContent::Pdf { text, .. } => {
+            ("pdf".to_string(), None, Some(text.chars().take(500).collect()))
+        }
+        crate::agent::file_parser::ExtractedContent::Image {
+            mime_type,
+            data_url,
+            ..
+        } => (mime_type.clone(), Some(data_url.clone()), None),
+        crate::agent::file_parser::ExtractedContent::Archive { files, .. } => (
+            "archive".to_string(),
+            None,
+            Some(
+                files
+                    .iter()
+                    .take(10)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        ),
+        crate::agent::file_parser::ExtractedContent::Binary { mime_guess, .. } => {
+            (mime_guess.clone(), None, None)
+        }
+    };
+
+    Ok(ParsedAttachmentResult {
+        file_name,
+        file_path: path,
+        size_bytes: metadata.len(),
+        content_type,
+        prompt_text,
+        image_data_url,
+        raw_preview,
+    })
+}
+
+/// 保存并解析从前端上传/拖拽的 Base64 文件
+#[tauri::command]
+pub async fn save_and_parse_uploaded_attachment(
+    app: AppHandle,
+    session_id: String,
+    file_name: String,
+    base64_data: String,
+) -> Result<ParsedAttachmentResult, String> {
+    use base64::Engine;
+    use tauri::Manager;
+
+    let clean_b64 = if let Some(pos) = base64_data.find("base64,") {
+        &base64_data[pos + 7..]
+    } else {
+        &base64_data
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(clean_b64.trim())
+        .map_err(|e| format!("Base64 解码失败: {}", e))?;
+
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let attach_dir = app_dir.join("attachments").join(&session_id);
+    std::fs::create_dir_all(&attach_dir).map_err(|e| format!("创建附件目录失败: {}", e))?;
+
+    let target_path = attach_dir.join(&file_name);
+    std::fs::write(&target_path, &bytes).map_err(|e| format!("保存附件文件失败: {}", e))?;
+
+    let path_str = target_path.to_string_lossy().to_string();
+    parse_attachment_file(path_str).await
+}
