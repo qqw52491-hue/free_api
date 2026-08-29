@@ -36,6 +36,7 @@ const COMMAND_PANEL = [
   "🆕 新会话 = 重开一个干净会话（上下文清零）",
   "🔓 解绑 = 退出项目，回到临时工作区",
   "🛑 停止 = 中断当前任务",
+  "🗑️ 清空队列 = 丢弃排队的任务",
   "❓ 帮助 = 随时调出本面板",
   "──────────────",
   "💬 Agent 提问时，直接回复即算回答",
@@ -338,8 +339,31 @@ function watchRun(conversationId, runId, num) {
     let run;
     try {
       run = await api("GET", `/channel/run/${runId}`);
-    } catch {
-      return; // 通道 API 暂不可达，下一轮重试
+      entry.failCount = 0;
+    } catch (error) {
+      // 应用重启会清空运行账本：404 = 任务已不存在，按终态处理并排水队列
+      if (String(error.message).includes("任务不存在")) {
+        clearInterval(timer);
+        activeRuns.delete(conversationId);
+        pendingQuestions.delete(conversationId);
+        await botSend(
+          `⚠️ 任务 #${num} 已随应用重启失效（未跑完）。重新派发即可，我先处理排队的任务。`
+        );
+        await drainQueue(conversationId);
+        return;
+      }
+      entry.failCount = (entry.failCount || 0) + 1;
+      if (entry.failCount >= 60) {
+        // 通道约 10 分钟不可达：放弃监听，避免永久卡住队列
+        clearInterval(timer);
+        activeRuns.delete(conversationId);
+        pendingQuestions.delete(conversationId);
+        await botSend(
+          `⚠️ 通道长时间不可达，任务 #${num} 的监听已放弃。请发送「状态」确认后重新派发。`
+        );
+        await drainQueue(conversationId);
+      }
+      return;
     }
     if (run.status === "waiting_human") {
       if (entry.status !== "waiting_human") {
@@ -452,6 +476,12 @@ const agent = {
     if (/^(帮助|指令|\/help)$/i.test(text)) {
       return { text: COMMAND_PANEL };
     }
+    if (/^(清空队列|清空排队)$/i.test(text)) {
+      const queue = taskQueues.get(conversationId);
+      const count = queue ? queue.length : 0;
+      taskQueues.delete(conversationId);
+      return { text: count ? `🗑️ 已清空队列中的 ${count} 个任务。` : "队列为空，无需清空。" };
+    }
     if (/^(新会话|新对话|\/new)$/i.test(text)) {
       if (activeRuns.has(conversationId)) {
         return {
@@ -480,12 +510,21 @@ const agent = {
     const pending = pendingQuestions.get(conversationId);
     if (pending) {
       pendingQuestions.delete(conversationId);
-      try {
-        await api("POST", `/channel/run/${pending.runId}/answer`, { text });
-        return { text: "✅ 已收到，任务继续执行。" };
-      } catch (error) {
-        return { text: `⚠️ 回答送达失败：${error.message}\n任务可能已结束，请重新派发。` };
+      let delivered = false;
+      let lastError = null;
+      for (let attempt = 0; attempt < 3 && !delivered; attempt++) {
+        try {
+          await api("POST", `/channel/run/${pending.runId}/answer`, { text });
+          delivered = true;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
       }
+      if (delivered) return { text: "✅ 已收到，任务继续执行。" };
+      return {
+        text: `⚠️ 回答送达失败：${lastError?.message || "未知错误"}\n通道可能正在重启，稍后把这条内容重发一次即可。`,
+      };
     }
 
     // ③ 状态查询
