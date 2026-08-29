@@ -107,15 +107,20 @@
                     <div class="plan-children-wrapper" :class="{ expanded: isPlanExpanded(entry) }">
                         <div class="plan-children-inner">
                             <div class="plan-children">
-                                <article v-for="step in entry.steps" :key="step.id" class="goal-node" :class="`status-${step.status}`">
-                                    <button class="goal-row" :class="{ selected: step.id === selectedStepId }" type="button" @click="$emit('select-step', step.id)">
+                                <article v-for="step in entry.steps" :key="step.id" class="goal-node" :class="[`status-${step.status}`, { 'is-subagent': isSubAgentTool(step.tool), 'is-waitjobs': isWaitJobsTool(step.tool) }]">
+                                    <button class="goal-row" :class="{ selected: step.id === selectedStepId, 'subagent-row': isSubAgentTool(step.tool), 'waitjobs-row': isWaitJobsTool(step.tool) }" type="button" @click="$emit('select-step', step.id)">
                                         <span class="tree-mark"><i></i></span>
                                         <span class="step-tool-emoji">{{ getToolIcon(step.tool, step.action).emoji }}</span>
-                                        <span class="goal-label">{{ step.description || '执行步骤' }}<small v-if="step.modelTier" class="model-tier">{{ step.modelTier }}</small></span>
+                                        <span class="goal-label">
+                                            <span v-if="isSubAgentTool(step.tool)" class="subagent-tag-badge">子智能体 · 审查</span>
+                                            <span v-else-if="isWaitJobsTool(step.tool)" class="waitjobs-tag-badge">异步挂起</span>
+                                            {{ step.description || '执行步骤' }}
+                                            <small v-if="step.modelTier" class="model-tier">{{ step.modelTier }}</small>
+                                        </span>
                                         <span v-if="getStepMetricsPill(step)" class="step-metrics-badge" :title="getStepMetricsTooltip(step)">
                                             {{ getStepMetricsPill(step) }}
                                         </span>
-                                        <span class="row-status">{{ statusLabel(step.status) }}</span>
+                                        <span class="row-status" :class="`status-tag-${step.status}`">{{ isSubAgentTool(step.tool) && step.status === 'running' ? '后台审查中' : (isWaitJobsTool(step.tool) && step.status === 'running' ? '挂起等待' : statusLabel(step.status)) }}</span>
                                         <time>{{ formatClock(step.timestamp) }}</time>
                                     </button>
                                     <div class="node-children">
@@ -126,15 +131,27 @@
                                             <em v-if="step.metrics?.thinkingDurationMs">{{ (step.metrics.thinkingDurationMs / 1000).toFixed(1) }}s</em>
                                             <em v-else>已分析</em>
                                         </button>
-                                        <button class="child-row tool-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'tool' }" type="button" @click="$emit('select-step', step.id)">
+                                        <button class="child-row tool-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'tool', 'tool-child-subagent': isSubAgentTool(step.tool), 'tool-child-wait': isWaitJobsTool(step.tool) }" type="button" @click="$emit('select-step', step.id)">
                                             <span class="child-mark"></span>
                                             <span class="tool-tag" :style="{ color: getToolIcon(step.tool, step.action).color, background: `${getToolIcon(step.tool, step.action).color}18` }">
-                                                {{ getToolIcon(step.tool, step.action).emoji }} {{ step.tool || '工具' }}
+                                                {{ getToolIcon(step.tool, step.action).emoji }} {{ isSubAgentTool(step.tool) ? '子审查代理' : (isWaitJobsTool(step.tool) ? '零 Token 挂起' : (step.tool || '工具')) }}
                                             </span>
-                                            <span>{{ shortText(step.action || step.explanation || '执行操作', 110) }}</span>
+                                            <span :class="{ 'subagent-action-text': isSubAgentTool(step.tool), 'waitjobs-action-text': isWaitJobsTool(step.tool) }">
+                                                {{ isSubAgentTool(step.tool) ? (step.status === 'running' ? '⚡ 正在后台独立执行调查审查，点击右侧抽屉可查看证据包与发现…' : (step.action || step.explanation || '已生成审查结论 · 点击查看详情')) : (isWaitJobsTool(step.tool) ? (step.status === 'running' ? '⏳ 当前协程已反应式挂起等待后台通知，0 Token 0 CPU 消耗…' : '✅ 后台任务已完成，已唤醒并回收全部结论') : shortText(step.action || step.explanation || '执行操作', 110)) }}
+                                            </span>
                                             <em v-if="step.metrics?.toolDurationMs">{{ (step.metrics.toolDurationMs / 1000).toFixed(1) }}s · {{ step.source }}</em>
                                             <em v-else>{{ step.source }}</em>
                                         </button>
+                                    </div>
+                                    <div v-if="isSubAgentTool(step.tool) || isWaitJobsTool(step.tool)" class="subagent-inline-capsule" role="button" tabindex="0" title="点击展开右侧团队协作看板" @click="$emit('open-team-deck')" @keydown.enter="$emit('open-team-deck')">
+                                        <div class="capsule-left">
+                                            <span class="capsule-pulse-dot" :class="{ 'is-running': step.status === 'running' }"></span>
+                                            <span class="capsule-text">{{ step.status === 'running' ? '⚡ 正在进行后台多 Agent 协同执行' : '✅ 团队协同任务已完成并交付' }}</span>
+                                        </div>
+                                        <div class="capsule-action">
+                                            <span>协作看板</span>
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                                        </div>
                                     </div>
                                 </article>
                                 <article v-if="entry.isThinking && (thought || isRunning)" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
@@ -197,7 +214,7 @@ import { computed, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AttachmentCard from "./AttachmentCard.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
-import type { AgentHumanForm, AgentStepItem, AgentToolStatus, ParsedAttachment } from "./types";
+import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, ParsedAttachment } from "./types";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
 import { formatClock, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
@@ -313,6 +330,7 @@ const props = withDefaults(
         pauseReason?: string;
         isWaitingForHuman?: boolean;
         isSendingHuman?: boolean;
+        teamState?: AgentTeamState;
     }>(),
     {
         humanForm: null,
@@ -330,6 +348,7 @@ const emit = defineEmits<{
     "select-active-thought": [];
     "submit-human": [answer: string];
     "open-preview": [code: string];
+    "open-team-deck": [];
 }>();
 
 async function handlePreviewArtifact(artifact: ArtifactDescriptor) {
@@ -555,6 +574,14 @@ function currentTimeline(): TimelineEntry[] {
 }
 const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimeline(), ...currentTimeline()]);
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败", challenged: "验证未闭合" }[status] || "未知"; }
+function isSubAgentTool(tool?: string): boolean {
+    const t = (tool || "").toLowerCase();
+    return t.includes("child_reviewer") || t.includes("sub_agent");
+}
+function isWaitJobsTool(tool?: string): boolean {
+    const t = (tool || "").toLowerCase();
+    return t.includes("wait_jobs") || t.includes("wait_job");
+}
 function formatConversationTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "numeric", day: "numeric" }); }
 watch(() => [timelineEntries.value.length, props.completionMessage, props.historyTurns.length], () => { followLatest(); }, { flush: "post" });
 watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunning) { followLiveTail.value = true; followLatest(); } if (!running && wasRunning) followLatest(); });
@@ -1603,6 +1630,163 @@ button.root-row {
 @keyframes typing-blink {
     0%, 100% { opacity: 1; }
     50% { opacity: 0; }
+}
+
+/* =========================================================================
+   子智能体 (Sub-Agent) 与异步挂起 (Wait-Jobs) 专属胶囊与流光样式
+   ========================================================================= */
+.subagent-tag-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 7px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #c084fc;
+    background: rgba(168, 85, 247, 0.14);
+    border: 1px solid rgba(168, 85, 247, 0.32);
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.waitjobs-tag-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 7px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fbbf24;
+    background: rgba(245, 158, 11, 0.14);
+    border: 1px solid rgba(245, 158, 11, 0.32);
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+/* 子智能体节点微光卡片 */
+.goal-node.is-subagent {
+    border-left: 2px solid #a855f7;
+    background: rgba(168, 85, 247, 0.03);
+    border-radius: 6px;
+}
+
+.goal-node.is-subagent.status-running {
+    animation: subagent-pulse-glow 2s infinite ease-in-out;
+}
+
+@keyframes subagent-pulse-glow {
+    0%, 100% {
+        background: rgba(168, 85, 247, 0.03);
+        box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.15);
+    }
+    50% {
+        background: rgba(168, 85, 247, 0.08);
+        box-shadow: 0 0 14px rgba(168, 85, 247, 0.3);
+    }
+}
+
+/* 挂起节点微光卡片 */
+.goal-node.is-waitjobs {
+    border-left: 2px solid #f59e0b;
+    background: rgba(245, 158, 11, 0.03);
+    border-radius: 6px;
+}
+
+.goal-node.is-waitjobs.status-running {
+    animation: waitjobs-pulse-glow 2.5s infinite ease-in-out;
+}
+
+@keyframes waitjobs-pulse-glow {
+    0%, 100% {
+        background: rgba(245, 158, 11, 0.03);
+        box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.15);
+    }
+    50% {
+        background: rgba(245, 158, 11, 0.07);
+        box-shadow: 0 0 12px rgba(245, 158, 11, 0.25);
+    }
+}
+
+.subagent-action-text {
+    color: #e9d5ff;
+    font-weight: 500;
+}
+
+.waitjobs-action-text {
+    color: #fef3c7;
+    font-weight: 500;
+}
+
+.tool-child-subagent {
+    border-radius: 6px;
+    background: rgba(168, 85, 247, 0.06);
+    border: 1px dashed rgba(168, 85, 247, 0.25);
+}
+
+.tool-child-wait {
+    border-radius: 6px;
+    background: rgba(245, 158, 11, 0.06);
+    border: 1px dashed rgba(245, 158, 11, 0.25);
+}
+
+.subagent-inline-capsule {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 4px 0 6px 16px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    background: rgba(56, 189, 248, 0.06);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.subagent-inline-capsule:hover {
+    background: rgba(56, 189, 248, 0.12);
+    border-color: rgba(56, 189, 248, 0.45);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(56, 189, 248, 0.15);
+}
+
+.capsule-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.capsule-pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #38bdf8;
+    box-shadow: 0 0 8px #38bdf8;
+}
+
+.capsule-pulse-dot.is-running {
+    animation: capsule-dot-pulse 1.2s infinite ease-in-out;
+}
+
+@keyframes capsule-dot-pulse {
+    0%, 100% { transform: scale(0.9); opacity: 0.6; }
+    50% { transform: scale(1.4); opacity: 1; box-shadow: 0 0 12px #38bdf8; }
+}
+
+.capsule-text {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #e0f2fe;
+}
+
+.capsule-action {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #38bdf8;
+    font-weight: 600;
 }
 </style>
 

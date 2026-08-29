@@ -283,3 +283,27 @@ export interface ModelRouting {
     vision_reasoning_effort: ReasoningEffort;
     context_budget_mode: ContextBudgetMode;
 }
+
+export interface AgentWorkerItem {
+    id: string;
+    name: string;
+    role: "reviewer" | "coder" | "researcher" | "master" | "worker";
+    roleLabel: string;
+    status: AgentToolStatus;
+    currentStep?: string;
+    currentTool?: string;
+    progress: number; // 0 - 100
+    durationMs?: number;
+    startedAt: number;
+    thought?: string;
+    output?: string;
+    summary?: string;
+}
+
+export interface AgentTeamState {
+    masterStatus: AgentToolStatus;
+    activeWorkerCount: number;
+    completedWorkerCount: number;
+    workers: AgentWorkerItem[];
+}
+

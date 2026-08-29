@@ -29,6 +29,8 @@ import {
     type AgentTokenUsage,
     type AgentSessionTelemetry,
     type AgentToolStatus,
+    type AgentTeamState,
+    type AgentWorkerItem,
     type ContextBudgetMode,
     type LlmParseErrorItem,
     type ParsedAttachment,
@@ -239,6 +241,103 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const logs = ref<AgentLogEntry[]>([]);
     const humanInterventions = ref<Array<{ message: string; timestamp: number }>>([]);
     const llmParseErrors = ref<LlmParseErrorItem[]>([]);
+    const teamWorkers = ref<AgentWorkerItem[]>([]);
+
+    const derivedWorkers = computed<AgentWorkerItem[]>(() => {
+        // 如果当前没有在运行且没有显式注册 worker，则保持清空（避免历史子 agent 堆积）
+        if (!isRunning.value && teamWorkers.value.length === 0) {
+            return [];
+        }
+
+        const list: AgentWorkerItem[] = [...teamWorkers.value];
+
+        // 仅定位当前正在运行或最新的步骤中的并发派发，避免历史多轮任务堆叠
+        const runningSteps = steps.value.filter((s) => s.status === "running" || s.status === "pending");
+        const targetSteps = runningSteps.length > 0 ? runningSteps : (isRunning.value ? steps.value.slice(-1) : []);
+
+        for (const step of targetSteps) {
+            let parallelList: any[] = [];
+            const params = step.rawParams || step.params;
+            if (params && typeof params === "object") {
+                if (Array.isArray((params as any).parallel)) parallelList = (params as any).parallel;
+                else if (Array.isArray((params as any).commands)) parallelList = (params as any).commands;
+                else if (Array.isArray((params as any).tasks)) parallelList = (params as any).tasks;
+            }
+            if (parallelList.length === 0 && typeof params === "string" && params.includes("parallel")) {
+                try {
+                    const parsed = JSON.parse(params);
+                    if (parsed && Array.isArray(parsed.parallel)) parallelList = parsed.parallel;
+                } catch {}
+            }
+
+            if (parallelList.length > 0) {
+                for (let i = 0; i < parallelList.length; i++) {
+                    const p = parallelList[i];
+                    const pDesc = toText(p.description) || toText(p.command?.command) || `并行任务 ${i + 1}`;
+                    let pName = pDesc.split(/[:：]/)[0].trim();
+                    if (!pName || pName.length > 18) pName = `Agent ${String.fromCharCode(65 + i)}`;
+                    const pTool = toText(p.tool) || "shell_exec";
+                    const workerId = `parallel-${step.id || step.stepId}-${i}`;
+
+                    if (!list.some((w) => w.name === pName && w.currentStep === pDesc)) {
+                        list.push({
+                            id: workerId,
+                            name: pName,
+                            role: pName.toLowerCase().includes("review") ? "reviewer" : (pName.toLowerCase().includes("code") ? "coder" : "worker"),
+                            roleLabel: pTool.includes("/") ? pTool.split("/")[1] : pTool,
+                            status: step.status,
+                            currentStep: pDesc,
+                            currentTool: pTool,
+                            progress: step.status === "succeeded" ? 100 : (step.status === "running" ? 65 : 15),
+                            startedAt: step.timestamp,
+                            durationMs: step.metrics?.toolDurationMs,
+                            thought: p.thought || pDesc,
+                            output: p.output || (typeof step.result === "string" ? step.result : undefined),
+                        });
+                    }
+                }
+            } else if (step.tool === "child_reviewer" || step.action === "child_reviewer") {
+                if (!list.some((w) => w.role === "reviewer")) {
+                    list.push({
+                        id: `reviewer-${step.id || step.stepId}`,
+                        name: "代码质量审查员",
+                        role: "reviewer",
+                        roleLabel: "审查员",
+                        status: step.status,
+                        currentStep: step.description || "代码质量与安全性深度审查",
+                        currentTool: "child_reviewer",
+                        progress: step.status === "succeeded" ? 100 : 65,
+                        startedAt: step.timestamp,
+                        durationMs: step.metrics?.toolDurationMs,
+                        thought: step.thought,
+                        output: typeof step.result === "string" ? step.result : undefined,
+                    });
+                }
+            }
+        }
+
+        return list;
+    });
+
+    const teamState = computed<AgentTeamState>(() => {
+        const workers = derivedWorkers.value;
+        const activeCount = workers.filter((w) => w.status === "running" || w.status === "pending").length;
+        const completedCount = workers.filter((w) => w.status === "succeeded").length;
+        let masterStatus: AgentToolStatus = "pending";
+        if (isRunning.value) {
+            masterStatus = "running";
+        } else if (hasError.value) {
+            masterStatus = "failed";
+        } else if (steps.value.length > 0) {
+            masterStatus = "succeeded";
+        }
+        return {
+            masterStatus,
+            activeWorkerCount: activeCount,
+            completedWorkerCount: completedCount,
+            workers,
+        };
+    });
 
     const tokenUsage = ref<AgentTokenUsage | null>(null);
     const liveSpeed = ref<number | null>(null);
@@ -900,15 +999,60 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         // 🔄 异步子审查代理流式事件（实时推导中指示灯）
         if (eventType === "child_reviewer_stream") {
             const streamType = toText(payload.stream_type);
-            const chunk = toText(payload.chunk).trim();
-            const childRunId = toText(payload.child_run_id);
+            const chunk = toText(payload.chunk);
+            const childRunId = toText(payload.child_run_id) || "reviewer-1";
             const shortId = childRunId ? childRunId.slice(0, 8) : "";
+            
+            let worker = teamWorkers.value.find((w) => w.id === childRunId);
+            if (!worker) {
+                worker = {
+                    id: childRunId,
+                    name: "代码质量审查员",
+                    role: "reviewer",
+                    roleLabel: "审查员",
+                    status: "running",
+                    currentStep: "正在后台分析变更并审查潜在风险...",
+                    currentTool: "child_reviewer",
+                    progress: 35,
+                    startedAt: Date.now(),
+                    thought: "",
+                };
+                teamWorkers.value.push(worker);
+            }
+
             if (streamType === "thinking") {
                 actionPhaseText.value = chunk 
                     ? `🔍 子审查独立推导中: ${chunk.slice(0, 35)}...` 
                     : `🔍 子审查代理正在独立推导 (${shortId})...`;
+                worker.thought = (worker.thought || "") + chunk;
+                worker.progress = Math.min(85, worker.progress + 1);
             } else {
                 actionPhaseText.value = `🔍 子审查代理生成结论中 (${shortId})...`;
+                worker.output = (worker.output || "") + chunk;
+                worker.progress = Math.min(95, worker.progress + 1);
+            }
+            return;
+        }
+
+        // ⏳ 挂起等待后台 Worker 任务
+        if (eventType === "agent_waiting_jobs") {
+            const jobIds = Array.isArray(payload.job_ids) ? payload.job_ids.map(toText).filter(Boolean) : [];
+            actionPhaseText.value = "⏳ 协程进入零 Token 挂起，等待后台任务中...";
+            for (const jid of jobIds) {
+                let worker = teamWorkers.value.find((w) => w.id === jid);
+                if (!worker) {
+                    teamWorkers.value.push({
+                        id: jid,
+                        name: jid.includes("reviewer") ? "代码质量审查员" : "后台协作 Worker",
+                        role: jid.includes("reviewer") ? "reviewer" : "worker",
+                        roleLabel: jid.includes("reviewer") ? "审查员" : "Worker",
+                        status: "running",
+                        currentStep: "正在后台独立处理任务...",
+                        currentTool: "wait_jobs",
+                        progress: 50,
+                        startedAt: Date.now(),
+                    });
+                }
             }
             return;
         }
@@ -1051,9 +1195,71 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             if (tool !== "finish") {
                 streamingSummary.value = "";
             }
+            syncWorkersFromStep(stepItem);
             appendLog(`[规划新步骤 #${stepId + 1}] ${description}`);
             autoScrollToBottom();
             return;
+        }
+
+        function syncWorkersFromStep(stepItem: AgentStepItem) {
+            let parallelList: any[] = [];
+            const params = stepItem.rawParams || stepItem.params;
+            if (params && typeof params === "object") {
+                if (Array.isArray((params as any).parallel)) parallelList = (params as any).parallel;
+                else if (Array.isArray((params as any).commands)) parallelList = (params as any).commands;
+                else if (Array.isArray((params as any).tasks)) parallelList = (params as any).tasks;
+            }
+            if (parallelList.length === 0 && typeof params === "string" && params.includes("parallel")) {
+                try {
+                    const parsed = JSON.parse(params);
+                    if (parsed && Array.isArray(parsed.parallel)) parallelList = parsed.parallel;
+                } catch {}
+            }
+            if (parallelList.length > 0) {
+                for (let i = 0; i < parallelList.length; i++) {
+                    const p = parallelList[i];
+                    const pDesc = toText(p.description) || toText(p.command?.command) || `并行子任务 ${i + 1}`;
+                    let pName = pDesc.split(/[:：]/)[0].trim();
+                    if (!pName || pName.length > 15) pName = `Agent ${String.fromCharCode(65 + i)}`;
+                    const pTool = toText(p.tool) || "shell_exec";
+                    const workerId = `parallel-${i}`;
+
+                    let worker = teamWorkers.value.find((w) => w.id === workerId || w.name === pName);
+                    if (!worker) {
+                        teamWorkers.value.push({
+                            id: workerId,
+                            name: pName,
+                            role: pName.toLowerCase().includes("review") ? "reviewer" : (pName.toLowerCase().includes("code") ? "coder" : "worker"),
+                            roleLabel: pTool.includes("/") ? pTool.split("/")[1] : pTool,
+                            status: stepItem.status === "succeeded" ? "succeeded" : "running",
+                            currentStep: pDesc,
+                            currentTool: pTool,
+                            progress: stepItem.status === "succeeded" ? 100 : 60,
+                            startedAt: Date.now(),
+                        });
+                    } else {
+                        if (stepItem.status === "succeeded") {
+                            worker.status = "succeeded";
+                            worker.progress = 100;
+                        }
+                    }
+                }
+            } else if (stepItem.tool === "child_reviewer" || stepItem.action === "child_reviewer") {
+                let worker = teamWorkers.value.find((w) => w.role === "reviewer");
+                if (!worker) {
+                    teamWorkers.value.push({
+                        id: "reviewer-1",
+                        name: "代码质量审查员",
+                        role: "reviewer",
+                        roleLabel: "审查员",
+                        status: stepItem.status === "succeeded" ? "succeeded" : "running",
+                        currentStep: stepItem.description || "正在后台分析审查代码…",
+                        currentTool: "child_reviewer",
+                        progress: stepItem.status === "succeeded" ? 100 : 60,
+                        startedAt: Date.now(),
+                    });
+                }
+            }
         }
 
         function getLatestStep(stepId: number): AgentStepItem | undefined {
@@ -1083,6 +1289,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const existing = getLatestStep(stepId);
             if (existing) {
                 existing.status = "succeeded";
+                syncWorkersFromStep(existing);
                 if (payload.metrics || payload.token_usage) {
                     const rawM = asRecord(payload.metrics || payload.token_usage);
                     existing.metrics = {
@@ -1112,6 +1319,19 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                                 }
                             }
                         } catch { }
+                    }
+
+                    // 如果是 wait_jobs 完成，同步更新团队中所有 running 的 Worker 为完成状态
+                    const toolName = (existing.tool || existing.action || "").toLowerCase();
+                    if (toolName.includes("wait_job")) {
+                        teamWorkers.value.forEach((w) => {
+                            if (w.status === "running" || w.status === "pending") {
+                                w.status = "succeeded";
+                                w.progress = 100;
+                                w.durationMs = Date.now() - w.startedAt;
+                                w.currentStep = "任务已完成并成功回收结论";
+                            }
+                        });
                     }
                 }
             }
@@ -1199,6 +1419,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         logs.value = [];
         humanInterventions.value = [];
         llmParseErrors.value = [];
+        teamWorkers.value = [];
         clearResources();
         liveSpeed.value = null;
         liveTtft.value = null;
@@ -1514,6 +1735,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         isConversationLoading,
         hasError,
         stateMeta,
+        teamState,
+        teamWorkers,
         isWaitingForHuman,
         canStart,
         completedToolCount,

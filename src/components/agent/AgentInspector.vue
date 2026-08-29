@@ -116,6 +116,11 @@
 
             <nav class="detail-tabs">
                 <button type="button" :class="{ active: activeTab === 'detail' }" @click="activeTab = 'detail'">调用详情</button>
+                <button type="button" :class="{ active: activeTab === 'team' }" @click="activeTab = 'team'">
+                    团队协作
+                    <i v-if="teamState?.workers?.length">({{ teamState.workers.length }})</i>
+                    <span v-else-if="teamState && teamState.activeWorkerCount > 0" class="team-tab-pulse"></span>
+                </button>
                 <button type="button" :class="{ active: activeTab === 'context' }" @click="activeTab = 'context'">
                     上下文调试 <i v-if="contextTurnsCount">({{ contextTurnsCount }})</i>
                 </button>
@@ -424,8 +429,13 @@
                 </div>
             </section>
 
-            <!-- 3. 资源 Tab -->
-            <section v-else class="inspector-scroll resources-pane">
+            <!-- 3. 团队协作 Tab -->
+            <section v-else-if="activeTab === 'team'" class="inspector-scroll team-pane">
+                <AgentTeamDeck :team-state="teamState" />
+            </section>
+
+            <!-- 4. 资源 Tab -->
+            <section v-else-if="activeTab === 'resources'" class="inspector-scroll resources-pane">
                 <div class="resources-heading">
                     <div><h3>任务资源</h3><p>当前会话的持久化数据。</p></div>
                     <button type="button" :disabled="isResourcesLoading" @click="$emit('refresh-resources')">{{ isResourcesLoading ? '刷新中' : '刷新' }}</button>
@@ -445,11 +455,12 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTokenUsage, AgentToolStatus, LlmParseErrorItem } from "./types";
+import type { AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTeamState, AgentTokenUsage, AgentToolStatus, LlmParseErrorItem } from "./types";
 import type { AgentArtifactInput } from "../../types/artifact";
 import { formatClock, formatMilliseconds, formatNumber, formatPayload } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
+import AgentTeamDeck from "./AgentTeamDeck.vue";
 
 const props = withDefaults(
     defineProps<{
@@ -475,6 +486,7 @@ const props = withDefaults(
         currentGoal?: string;
         logContext?: boolean;
         llmParseErrors?: LlmParseErrorItem[];
+        teamState?: AgentTeamState;
     }>(),
     {
         finalSummary: "",
@@ -495,7 +507,17 @@ defineEmits<{
     "close": [];
 }>();
 
-const activeTab = ref<"preview" | "detail" | "context" | "resources">("detail");
+const activeTab = ref<"preview" | "detail" | "team" | "context" | "resources">("detail");
+
+function switchTab(tab: "preview" | "detail" | "team" | "context" | "resources") {
+    activeTab.value = tab;
+}
+
+defineExpose({
+    setTab: switchTab,
+    switchTab,
+    activeTab,
+});
 const copiedKey = ref<string | null>(null);
 let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -922,12 +944,6 @@ watch(
 );
 
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败", challenged: "验证未闭合" }[status] || "未知"; }
-
-defineExpose({
-    switchTab: (tab: "preview" | "detail" | "context" | "resources") => {
-        activeTab.value = tab;
-    },
-});
 </script>
 
 <style scoped>

@@ -1,0 +1,880 @@
+<template>
+    <div class="agent-workspace-deck">
+        <!-- ================= 1. 上半部分：极简横向 Agent 拓扑分叉图 (Top Half: Horizontal Fork Topology) ================= -->
+        <section class="topology-overview-section">
+            <div class="deck-header-bar">
+                <div class="title-with-dot">
+                    <span class="live-pulse-dot" :class="`state-${teamState.masterStatus}`"></span>
+                    <span class="header-title-text">{{ isMultiAgent ? 'Agent 协同拓扑' : 'Agent 调度拓扑' }}</span>
+                </div>
+                <div class="header-status-pill" :class="`pill-${teamState.masterStatus}`">
+                    {{ statusText(teamState.masterStatus) }}
+                </div>
+            </div>
+
+            <!-- 极简连线拓扑图 -->
+            <div class="topo-diagram-card">
+                <!-- 👑 主调度 Master 根节点 -->
+                <div class="topo-master-node" :class="{ 'is-running': teamState.masterStatus === 'running' }">
+                    <div class="master-avatar">👑</div>
+                    <div class="master-info-box">
+                        <strong class="master-name">主调度 Master</strong>
+                        <span class="master-status-desc" :title="currentGoal || '自主执行全流程'">
+                            {{ isMultiAgent ? `已派发 ${workersList.length} 个并发子任务` : (currentGoal ? currentGoal.slice(0, 18) + '...' : '自主执行全流程') }}
+                        </span>
+                    </div>
+                    <span class="master-status-badge" :class="`status-${teamState.masterStatus}`">
+                        <i v-if="teamState.masterStatus === 'running'" class="spinner-dot"></i>
+                        {{ statusText(teamState.masterStatus) }}
+                    </span>
+                </div>
+
+                <!-- 横向拓扑分叉 (SVG 贝塞尔分叉连线与子 Agent 徽章) -->
+                <div v-if="isMultiAgent" class="topo-branches-flow">
+                    <!-- SVG 贝塞尔分叉连线 -->
+                    <div class="topo-svg-fork">
+                        <svg class="fork-svg" viewBox="0 0 200 24" preserveAspectRatio="none">
+                            <path d="M 100 0 L 100 8" stroke="rgba(56, 189, 248, 0.5)" stroke-width="2" fill="none" />
+                            <path
+                                v-for="(_, i) in workersList"
+                                :key="i"
+                                :d="getForkPath(i, workersList.length)"
+                                :stroke="workersList[i].status === 'running' ? '#38bdf8' : (workersList[i].status === 'succeeded' ? '#34d399' : 'rgba(255,255,255,0.2)')"
+                                stroke-width="1.8"
+                                fill="none"
+                            />
+                        </svg>
+                    </div>
+
+                    <!-- 子 Agent 横向徽章行 (点击直接联动下方 Tab) -->
+                    <div class="topo-workers-row">
+                        <div
+                            v-for="worker in workersList"
+                            :key="worker.id"
+                            class="topo-worker-pill"
+                            :class="[`status-${worker.status}`, { active: activeTab === worker.id }]"
+                            :title="`${worker.name}: ${worker.currentStep || worker.currentTool}`"
+                            @click="activeTab = worker.id"
+                        >
+                            <span class="worker-icon">{{ getRoleIcon(worker.role) }}</span>
+                            <span class="worker-pill-name">{{ formatWorkerName(worker.name) }}</span>
+                            <span class="worker-pill-status" :class="`status-${worker.status}`">
+                                <i v-if="worker.status === 'running'" class="spinner-dot"></i>
+                                {{ worker.status === 'succeeded' ? '100%' : (worker.status === 'running' ? `${worker.progress}%` : '等待') }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 单 Agent 待命或独立运行状态提示 -->
+                <div v-else class="topo-single-hint">
+                    <span class="hint-dot">●</span>
+                    <span class="hint-text">单 Agent 调度中 · 派发并发任务时自动展开分支</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================= 2. 下半部分：子 Agent 专属多 Tab 独立链路与进度 (Bottom Half: Sub-Agent Tabs) ================= -->
+        <section class="agent-chains-tabs-section">
+            <!-- 活跃子 Agent 多层/自适应流式胶囊选择栏 (支持自动换行，长名字不被遮挡) -->
+            <div v-if="isMultiAgent" class="chains-tab-nav">
+                <button
+                    v-for="worker in workersList"
+                    :key="worker.id"
+                    type="button"
+                    class="chain-tab-btn"
+                    :class="{ active: activeTab === worker.id, 'is-running': worker.status === 'running' }"
+                    :title="worker.name"
+                    @click="activeTab = worker.id"
+                >
+                    <span class="tab-icon">{{ getRoleIcon(worker.role) }}</span>
+                    <span class="tab-title">{{ formatWorkerName(worker.name) }}</span>
+                    <span class="tab-progress-tag" :class="`status-${worker.status}`">
+                        {{ worker.status === 'succeeded' ? '已完成' : `${worker.progress}%` }}
+                    </span>
+                </button>
+            </div>
+
+            <!-- Tab 内容主体区 -->
+            <div class="chain-tab-content-panel">
+                <!-- 选中的子 Agent 专属独立链路 -->
+                <div v-if="selectedWorker" class="chain-detail-view worker-view">
+                    <div class="agent-detail-header">
+                        <div class="detail-header-left">
+                            <span class="agent-big-icon">{{ getRoleIcon(selectedWorker.role) }}</span>
+                            <div class="detail-name-meta">
+                                <strong class="detail-agent-name" :title="selectedWorker.name">{{ selectedWorker.name }} 链路</strong>
+                                <span class="detail-agent-tool">{{ selectedWorker.currentTool || 'shell_exec' }} · {{ selectedWorker.roleLabel }}</span>
+                            </div>
+                        </div>
+                        <div class="detail-header-right">
+                            <span v-if="selectedWorker.durationMs" class="worker-dur-pill">
+                                ⏱ {{ (selectedWorker.durationMs / 1000).toFixed(2) }}s
+                            </span>
+                            <span class="stage-metric-pill" :class="`status-${selectedWorker.status}`">
+                                {{ selectedWorker.status === 'succeeded' ? '已完成' : (selectedWorker.status === 'running' ? '执行中' : '排队中') }}
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- 子 Agent 独立进度条 -->
+                    <div class="chain-progress-bar-wrap">
+                        <div class="chain-progress-track">
+                            <div
+                                class="chain-progress-fill worker-fill"
+                                :class="{ 'is-animated': selectedWorker.status === 'running' }"
+                                :style="{ width: `${selectedWorker.progress}%` }"
+                            ></div>
+                        </div>
+                    </div>
+
+                    <!-- 子 Agent 三阶段链路 (Pipeline) -->
+                    <div class="worker-pipeline-stages">
+                        <!-- 阶段 1: 任务拆解与派发 -->
+                        <div class="pipeline-stage-item is-done">
+                            <div class="stage-status-icon">✔</div>
+                            <div class="stage-info">
+                                <span class="stage-name">阶段 1: 队长派发与参数解析</span>
+                                <small class="stage-desc">主调度 Master 完成子任务隔离与参数注入</small>
+                            </div>
+                        </div>
+
+                        <!-- 阶段 2: 独立工具执行 -->
+                        <div class="pipeline-stage-item" :class="selectedWorker.status === 'succeeded' ? 'is-done' : (selectedWorker.status === 'running' ? 'is-running' : 'is-pending')">
+                            <div class="stage-status-icon">
+                                <i v-if="selectedWorker.status === 'running'" class="spinner-dot"></i>
+                                <span v-else-if="selectedWorker.status === 'succeeded'">✔</span>
+                                <span v-else>2</span>
+                            </div>
+                            <div class="stage-info">
+                                <span class="stage-name">阶段 2: 工具调用 [{{ selectedWorker.currentTool }}]</span>
+                                <small class="stage-desc" :title="selectedWorker.currentStep">{{ selectedWorker.currentStep || '正在执行指定指令…' }}</small>
+                            </div>
+                        </div>
+
+                        <!-- 阶段 3: 输出收集与结果汇聚 -->
+                        <div class="pipeline-stage-item" :class="selectedWorker.status === 'succeeded' ? 'is-done' : 'is-pending'">
+                            <div class="stage-status-icon">
+                                <span v-if="selectedWorker.status === 'succeeded'">✔</span>
+                                <span v-else>3</span>
+                            </div>
+                            <div class="stage-info">
+                                <span class="stage-name">阶段 3: 结果交付与汇总</span>
+                                <small class="stage-desc">{{ selectedWorker.status === 'succeeded' ? '结论已成功回传主调度' : '等待子任务执行完毕并回传' }}</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 子 Agent 实时执行输出预览 (如果有输出内容) -->
+                    <div v-if="selectedWorker.output" class="worker-output-terminal">
+                        <div class="terminal-bar">
+                            <span>执行输出</span>
+                            <button type="button" class="btn-copy-out" @click="copyOutput(selectedWorker.output)">复制</button>
+                        </div>
+                        <pre class="terminal-body">{{ selectedWorker.output }}</pre>
+                    </div>
+                </div>
+
+                <!-- 无子 Agent 时的极简占位 -->
+                <div v-else class="no-workers-standby-box">
+                    <span class="standby-icon">🤖</span>
+                    <strong class="standby-title">子 Agent 专属工作台</strong>
+                    <p class="standby-desc">当前为主调度单兵执行模式。当派发 parallel 或 child_reviewer 时，各子 Agent 的执行链路与独立进度将在此处以多 Tab 形式呈现。</p>
+                </div>
+            </div>
+        </section>
+    </div>
+</template>
+
+<script setup lang="ts">
+import { computed, ref, watch } from "vue";
+import type { AgentTeamState, AgentWorkerItem, AgentToolStatus, AgentStepItem } from "./types";
+
+const props = withDefaults(
+    defineProps<{
+        teamState?: AgentTeamState;
+        steps?: AgentStepItem[];
+        currentGoal?: string;
+        masterStepDescription?: string;
+    }>(),
+    {
+        teamState: () => ({
+            masterStatus: "pending" as AgentToolStatus,
+            activeWorkerCount: 0,
+            completedWorkerCount: 0,
+            workers: [] as AgentWorkerItem[],
+        }),
+        steps: () => [],
+        currentGoal: "",
+        masterStepDescription: "",
+    }
+);
+
+const workersList = computed(() => {
+    return props.teamState?.workers || [];
+});
+
+const isMultiAgent = computed(() => {
+    return workersList.value.length > 0;
+});
+
+const activeTab = ref<string>("");
+
+// 当有新的子 Agent 派发出来时，自动聚焦到最新的子 Agent Tab
+watch(
+    () => workersList.value,
+    (workers) => {
+        if (workers.length > 0) {
+            if (!workers.some((w) => w.id === activeTab.value)) {
+                activeTab.value = workers[0].id;
+            }
+        } else {
+            activeTab.value = "";
+        }
+    },
+    { immediate: true, deep: true }
+);
+
+const selectedWorker = computed(() => {
+    return workersList.value.find((w) => w.id === activeTab.value) || workersList.value[0];
+});
+
+function formatWorkerName(name: string): string {
+    if (!name) return "子 Agent";
+    if (name.includes("：") || name.includes(":")) {
+        const prefix = name.split(/[:：]/)[0].trim();
+        if (prefix.length <= 12) return prefix;
+    }
+    if (name.length > 10) {
+        return name.slice(0, 9) + "…";
+    }
+    return name;
+}
+
+function getRoleIcon(role: string): string {
+    switch (role) {
+        case "reviewer":
+            return "🛡️";
+        case "coder":
+            return "⚡";
+        case "researcher":
+            return "🔍";
+        case "master":
+            return "👑";
+        default:
+            return "⚡";
+    }
+}
+
+function getForkPath(idx: number, total: number): string {
+    if (total === 1) return "M 100 8 L 100 24";
+    const startX = 100;
+    const startY = 8;
+    const endX = 20 + (idx / (total - 1)) * 160;
+    const endY = 24;
+    const ctrlY = (startY + endY) / 2;
+    return `M ${startX} ${startY} C ${startX} ${ctrlY}, ${endX} ${ctrlY}, ${endX} ${endY}`;
+}
+
+function statusText(status: AgentToolStatus): string {
+    const map: Record<AgentToolStatus, string> = {
+        running: "执行中",
+        succeeded: "已完成",
+        failed: "失败",
+        pending: "待命中",
+        challenged: "验证未闭合",
+    };
+    return map[status] || "待命";
+}
+
+async function copyOutput(text?: string) {
+    if (!text) return;
+    try {
+        await navigator.clipboard.writeText(text);
+    } catch {}
+}
+</script>
+
+<style scoped>
+.agent-workspace-deck {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    background: #141419;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 10px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    user-select: none;
+}
+
+/* ================= 1. 上半部分：极简横向分叉拓扑图 ================= */
+.topology-overview-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.deck-header-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.title-with-dot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.live-pulse-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #38bdf8;
+    box-shadow: 0 0 6px #38bdf8;
+}
+
+.live-pulse-dot.state-running {
+    animation: pulse-glow 1.2s infinite ease-in-out;
+}
+
+@keyframes pulse-glow {
+    0%, 100% { transform: scale(0.85); opacity: 0.7; }
+    50% { transform: scale(1.3); opacity: 1; box-shadow: 0 0 10px #38bdf8; }
+}
+
+.header-title-text {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #f4f4f5;
+}
+
+.header-status-pill {
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #a1a1aa;
+}
+
+.header-status-pill.pill-running {
+    background: rgba(56, 189, 248, 0.18);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.35);
+}
+
+.header-status-pill.pill-succeeded {
+    background: rgba(52, 211, 153, 0.18);
+    color: #34d399;
+}
+
+.topo-diagram-card {
+    background: #191922;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 9px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.topo-master-node {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #20202c;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 8px;
+    padding: 6px 8px;
+    transition: all 0.15s ease;
+}
+
+.topo-master-node.is-running {
+    border-color: rgba(56, 189, 248, 0.4);
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.1), #20202c);
+}
+
+.master-avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    background: linear-gradient(135deg, #1e293b, #0f172a);
+    display: grid;
+    place-items: center;
+    font-size: 13px;
+    flex-shrink: 0;
+}
+
+.master-info-box {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.master-name {
+    font-size: 11px;
+    color: #f4f4f5;
+}
+
+.master-status-desc {
+    font-size: 9px;
+    color: #a1a1aa;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.master-status-badge {
+    font-size: 8.5px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #a1a1aa;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.master-status-badge.status-running {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+}
+
+.master-status-badge.status-succeeded {
+    background: rgba(52, 211, 153, 0.2);
+    color: #34d399;
+}
+
+/* 拓扑分支连线与子 Agent 徽章 */
+.topo-branches-flow {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.topo-svg-fork {
+    width: 100%;
+    height: 22px;
+}
+
+.fork-svg {
+    width: 100%;
+    height: 100%;
+}
+
+.topo-workers-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.topo-worker-pill {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 7px;
+    background: #20202a;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex: 1;
+    min-width: 75px;
+    justify-content: center;
+}
+
+.topo-worker-pill:hover {
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.topo-worker-pill.active {
+    border-color: #38bdf8;
+    background: rgba(56, 189, 248, 0.12);
+}
+
+.worker-icon {
+    font-size: 11px;
+}
+
+.worker-pill-name {
+    font-size: 9.5px;
+    font-weight: 700;
+    color: #f4f4f5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.worker-pill-status {
+    font-size: 8.5px;
+    padding: 0 4px;
+    border-radius: 3px;
+}
+
+.worker-pill-status.status-running {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+}
+
+.worker-pill-status.status-succeeded {
+    background: rgba(52, 211, 153, 0.2);
+    color: #34d399;
+}
+
+.topo-single-hint {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 6px;
+    font-size: 9px;
+    color: #71717a;
+    justify-content: center;
+}
+
+.hint-dot {
+    font-size: 6px;
+    color: #38bdf8;
+}
+
+/* ================= 2. 下半部分：子 Agent 专属多 Tab 独立链路与进度 ================= */
+.agent-chains-tabs-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* 多层/自适应流式胶囊 Tab 栏 (支持 wrap 自动换行) */
+.chains-tab-nav {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    padding-bottom: 2px;
+}
+
+.chain-tab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 7px;
+    background: #181820;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    color: #a1a1aa;
+    font-size: 9.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    max-width: 140px;
+}
+
+.chain-tab-btn:hover {
+    color: #f4f4f5;
+    background: #21212b;
+    border-color: rgba(255, 255, 255, 0.15);
+}
+
+.chain-tab-btn.active {
+    background: #252533;
+    border-color: #38bdf8;
+    color: #38bdf8;
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.15);
+}
+
+.tab-title {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tab-progress-tag {
+    font-size: 8.5px;
+    padding: 0 3px;
+    border-radius: 3px;
+}
+
+.tab-progress-tag.status-running {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+}
+
+.tab-progress-tag.status-succeeded {
+    background: rgba(52, 211, 153, 0.2);
+    color: #34d399;
+}
+
+/* Tab 面板主体 */
+.chain-tab-content-panel {
+    background: #181822;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 8px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.agent-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+.detail-header-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.agent-big-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+}
+
+.detail-name-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.detail-agent-name {
+    font-size: 11px;
+    color: #f4f4f5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.detail-agent-tool {
+    font-size: 8.5px;
+    color: #71717a;
+    font-family: ui-monospace, monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.stage-metric-pill {
+    font-size: 8.5px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #a1a1aa;
+    white-space: nowrap;
+}
+
+.stage-metric-pill.status-running {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+}
+
+.stage-metric-pill.status-succeeded {
+    background: rgba(52, 211, 153, 0.2);
+    color: #34d399;
+}
+
+.worker-dur-pill {
+    font-size: 8.5px;
+    color: #71717a;
+    margin-right: 4px;
+    white-space: nowrap;
+}
+
+/* 进度条 */
+.chain-progress-bar-wrap {
+    width: 100%;
+}
+
+.chain-progress-track {
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.07);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.chain-progress-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+}
+
+.worker-fill {
+    background: #38bdf8;
+}
+
+.worker-fill.is-animated {
+    animation: shimmer-progress 1.5s infinite linear;
+}
+
+@keyframes shimmer-progress {
+    0% { opacity: 0.8; }
+    50% { opacity: 1; filter: brightness(1.2); }
+    100% { opacity: 0.8; }
+}
+
+/* 子 Agent 三阶段 Pipeline */
+.worker-pipeline-stages {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.pipeline-stage-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 6px;
+    background: #1f1f2a;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+}
+
+.pipeline-stage-item.is-running {
+    border-color: rgba(56, 189, 248, 0.4);
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.08), #1f1f2a);
+}
+
+.pipeline-stage-item.is-done {
+    border-color: rgba(52, 211, 153, 0.2);
+}
+
+.stage-status-icon {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 9px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #a1a1aa;
+    flex-shrink: 0;
+}
+
+.pipeline-stage-item.is-done .stage-status-icon {
+    background: #34d399;
+    color: #064e3b;
+    font-weight: 700;
+}
+
+.pipeline-stage-item.is-running .stage-status-icon {
+    background: #38bdf8;
+    color: #082f49;
+}
+
+.stage-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.stage-name {
+    font-size: 9.5px;
+    font-weight: 700;
+    color: #f4f4f5;
+}
+
+.stage-desc {
+    font-size: 8.5px;
+    color: #a1a1aa;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 终端输出预览 */
+.worker-output-terminal {
+    background: #111116;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-top: 2px;
+}
+
+.terminal-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 3px 6px;
+    background: rgba(255, 255, 255, 0.04);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 8.5px;
+    color: #71717a;
+}
+
+.btn-copy-out {
+    background: transparent;
+    border: none;
+    font-size: 8.5px;
+    color: #38bdf8;
+    cursor: pointer;
+    padding: 0 2px;
+}
+
+.terminal-body {
+    margin: 0;
+    padding: 6px;
+    font-size: 8.5px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    color: #e4e4e7;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 100px;
+    overflow-y: auto;
+}
+
+/* 无子 Agent 时的极简占位 */
+.no-workers-standby-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 16px 8px;
+    gap: 4px;
+}
+
+.standby-icon {
+    font-size: 20px;
+    opacity: 0.6;
+}
+
+.standby-title {
+    font-size: 11px;
+    color: #f4f4f5;
+}
+
+.standby-desc {
+    margin: 0;
+    font-size: 9px;
+    color: #71717a;
+    line-height: 1.4;
+    max-width: 220px;
+}
+
+.spinner-dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: spin-pulse 1s infinite ease-in-out;
+}
+
+@keyframes spin-pulse {
+    0%, 100% { opacity: 0.4; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1.2); }
+}
+</style>

@@ -61,34 +61,69 @@
             :style="{ gridTemplateColumns: inspectorCollapsed ? 'minmax(0, 1fr) 0px 0px' : `minmax(0, 1fr) 6px ${inspectorWidth}px` }"
         >
             <main class="chat-column">
-                <AgentChatStream
-                    :current-goal="session.currentGoal.value"
-                    :legacy-messages="session.legacyConversationMessages.value"
-                    :history-turns="session.historyTurns.value"
-                    :steps="session.steps.value"
-                    :selected-step-id="session.selectedStepId.value"
-                    :selected-subpart="selectedSubpart"
-                    :selected-narrative="selectedNarrativeId"
-                    :thought="session.thought.value"
-                    :is-thinking="session.isThinking.value"
-                    :human-interventions="session.humanInterventions.value"
-                    :state-description="session.statusDescription.value"
-                    :is-running="session.isRunning.value"
-                    :completion-message="session.completionMessage.value"
-                    :final-summary="session.finalSummary.value"
-                    :final-artifacts="session.finalArtifacts.value"
-                    :has-error="session.hasError.value"
-                    :human-form="session.humanForm.value"
-                    :pause-reason="session.pauseReason.value"
-                    :is-waiting-for-human="session.isWaitingForHuman.value"
-                    :is-sending-human="session.isSendingHuman.value"
-                    @select-step="handleStepSelect"
-                    @select-step-thought="handleStepThought"
-                    @select-human="handleHumanSelect"
-                    @select-active-thought="handleActiveThoughtSelect"
-                    @submit-human="session.answerHuman($event)"
-                    @open-preview="handleOpenPreview"
-                />
+                <div class="chat-workspace-split">
+                    <!-- 🤖 中间左列：动态 Agent 协作流面板 (自适应竖排小框框，可折叠) -->
+                    <aside
+                        class="team-side-rail"
+                        :class="{ 'is-collapsed': teamRailCollapsed }"
+                    >
+                        <div class="team-rail-header">
+                            <span class="rail-title">⚡ 协作 Worker</span>
+                            <button
+                                type="button"
+                                class="btn-rail-collapse"
+                                :title="teamRailCollapsed ? '展开协作列' : '收起协作列'"
+                                @click="teamRailCollapsed = !teamRailCollapsed"
+                            >
+                                <svg viewBox="0 0 24 24" class="rail-chevron" :class="{ flipped: teamRailCollapsed }">
+                                    <polyline points="15 18 9 12 15 6"></polyline>
+                                </svg>
+                            </button>
+                        </div>
+                        <div v-show="!teamRailCollapsed" class="team-rail-inner">
+                            <AgentTeamDeck
+                                :team-state="session.teamState.value"
+                                :steps="session.steps.value"
+                                :current-goal="session.currentGoal.value"
+                                :master-step-description="session.statusDescription.value"
+                            />
+                        </div>
+                    </aside>
+
+                    <!-- 💬 中间右列：主对话流历史记录 (Chat Stream) -->
+                    <div class="chat-stream-column">
+                        <AgentChatStream
+                            :current-goal="session.currentGoal.value"
+                            :legacy-messages="session.legacyConversationMessages.value"
+                            :history-turns="session.historyTurns.value"
+                            :steps="session.steps.value"
+                            :selected-step-id="session.selectedStepId.value"
+                            :selected-subpart="selectedSubpart"
+                            :selected-narrative="selectedNarrativeId"
+                            :thought="session.thought.value"
+                            :is-thinking="session.isThinking.value"
+                            :human-interventions="session.humanInterventions.value"
+                            :state-description="session.statusDescription.value"
+                            :is-running="session.isRunning.value"
+                            :completion-message="session.completionMessage.value"
+                            :final-summary="session.finalSummary.value"
+                            :final-artifacts="session.finalArtifacts.value"
+                            :has-error="session.hasError.value"
+                            :human-form="session.humanForm.value"
+                            :pause-reason="session.pauseReason.value"
+                            :is-waiting-for-human="session.isWaitingForHuman.value"
+                            :is-sending-human="session.isSendingHuman.value"
+                            :team-state="session.teamState.value"
+                            @select-step="handleStepSelect"
+                            @select-step-thought="handleStepThought"
+                            @select-human="handleHumanSelect"
+                            @select-active-thought="handleActiveThoughtSelect"
+                            @submit-human="session.answerHuman($event)"
+                            @open-preview="handleOpenPreview"
+                            @open-team-deck="handleOpenTeamDeck"
+                        />
+                    </div>
+                </div>
                 <AgentProgressDeck
                     :steps="activeDeckSteps"
                     :is-running="session.isRunning.value"
@@ -157,6 +192,7 @@
                     :current-goal="session.currentGoal.value"
                     :log-context="session.logContext.value"
                     :llm-parse-errors="session.llmParseErrors.value"
+                    :team-state="session.teamState.value"
                     @refresh-resources="session.refreshResources"
                     @preview-resource="session.openResourcePreview"
                     @agent-submit="handleInspectorAgentSubmit"
@@ -196,6 +232,7 @@ import AgentProgressDeck from "./agent/AgentProgressDeck.vue";
 import AgentInspector from "./agent/AgentInspector.vue";
 import AgentRecordPreview from "./agent/AgentRecordPreview.vue";
 import AgentSettingsDrawer from "./agent/AgentSettingsDrawer.vue";
+import AgentTeamDeck from "./agent/AgentTeamDeck.vue";
 import type { AgentModelOption } from "./agent/types";
 import { useAgentSession } from "../composables/useAgentSession";
 
@@ -348,6 +385,10 @@ function handleActiveThoughtSelect() {
     inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("detail");
 }
+function handleOpenTeamDeck() {
+    inspectorCollapsed.value = false;
+    inspectorRef.value?.switchTab("team");
+}
 function submitComposer(payload?: { text: string; attachments?: any[] }) {
     if (session.isRunning.value) void session.sendHumanInput();
     else void session.runAgent(payload?.text || session.goalInput.value, payload?.attachments);
@@ -362,6 +403,16 @@ const inspectorWidth = ref(380);
 const inspectorCollapsed = ref(true);
 const isResizing = ref(false);
 const activePreviewContent = ref("");
+const teamRailCollapsed = ref(false);
+
+watch(
+    () => session.isRunning.value,
+    (running) => {
+        if (running) {
+            teamRailCollapsed.value = false;
+        }
+    }
+);
 
 function startResize(e: MouseEvent) {
     if (inspectorCollapsed.value) return;
@@ -665,6 +716,99 @@ defineExpose({
     flex-direction: column;
     overflow: hidden;
     background: #141416;
+}
+
+.chat-workspace-split {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    position: relative;
+}
+
+/* 🤖 中间左侧动态 Agent 协作列 */
+.team-side-rail {
+    width: 280px;
+    max-width: 320px;
+    flex-shrink: 0;
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    background: #16161a;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.team-side-rail.is-collapsed {
+    width: 32px;
+}
+
+.team-rail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    background: #1b1b22;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    flex-shrink: 0;
+}
+
+.rail-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #e4e4e7;
+    white-space: nowrap;
+}
+
+.is-collapsed .rail-title {
+    display: none;
+}
+
+.btn-rail-collapse {
+    background: transparent;
+    border: none;
+    color: #71717a;
+    cursor: pointer;
+    padding: 2px;
+    display: grid;
+    place-items: center;
+    border-radius: 4px;
+    transition: color 0.15s;
+}
+
+.btn-rail-collapse:hover {
+    color: #f4f4f5;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.rail-chevron {
+    width: 13px;
+    height: 13px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.2;
+    transition: transform 0.2s ease;
+}
+
+.rail-chevron.flipped {
+    transform: rotate(180deg);
+}
+
+.team-rail-inner {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px;
+}
+
+/* 💬 中间右侧主对话流列 */
+.chat-stream-column {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 
 /* 窄屏自适应：禁止向下堆叠！保持 100% 满高单列，展开时以抽屉浮层覆盖在右侧 */

@@ -419,12 +419,20 @@ export function getToolIcon(tool?: string, action?: string): { emoji: string; co
         return { emoji: "🎉", color: "#4ade80" };
     }
 
-    // 7. 思考分析
+    // 7. 子智能体与异步挂起
+    if (t.includes("child_reviewer") || t.includes("sub_agent") || t.includes("investigate")) {
+        return { emoji: "🤖", color: "#a855f7" };
+    }
+    if (t.includes("wait_jobs") || t.includes("wait_job") || a.includes("wait_jobs")) {
+        return { emoji: "⏳", color: "#f59e0b" };
+    }
+
+    // 8. 思考分析
     if (t.includes("thought") || t.includes("think") || t.includes("reason") || t.includes("arch")) {
         return { emoji: "🧠", color: "#e879f9" };
     }
 
-    // 8. 默认 MCP 外部插件
+    // 9. 默认 MCP 外部插件
     if (t.includes("/")) {
         return { emoji: "🧩", color: "#818cf8" };
     }

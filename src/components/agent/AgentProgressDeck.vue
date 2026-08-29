@@ -692,6 +692,12 @@ function formatDurationMs(ms?: number): string | null {
 .action-live {
     overflow: hidden;
     text-overflow: ellipsis;
+    animation: pulse-text 2s ease-in-out infinite;
+}
+
+@keyframes pulse-text {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
 }
 
 .step-meta-col {
