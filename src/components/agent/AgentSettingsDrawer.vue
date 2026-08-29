@@ -68,6 +68,45 @@
                         ⏳ <strong>指数退避机制</strong>：重试间隔按 1s → 2s → 4s → 8s 递增（单次封顶 15s）。使用共享/公共免费高并发接口时，可调大重试次数（如 20~50 次）持续排队直到可用。
                     </p>
                 </section>
+                <section class="role-cards-section">
+                    <div class="section-heading"><h3>专精角色池</h3><small>{{ roleCards.length ? `${roleCards.length} 张角色卡` : '未创建' }}</small></div>
+                    <p class="section-description">角色卡 = 人设提示词 + 钉死模型 + 作用域。Agent 派发子任务时按角色标识挂载；上限 8 张。</p>
+                    <div v-if="roleCardsLoading" class="mcp-empty">正在读取角色池…</div>
+                    <div v-else-if="roleCards.length" class="role-card-list">
+                        <article v-for="card in roleCards" :key="card.id" class="role-card-item" :class="{ disabled: !card.enabled }">
+                            <div class="role-card-main">
+                                <strong>{{ card.label || card.name }} <small>[{{ card.name }}]</small></strong>
+                                <small>{{ roleModelLabel(card.model_id) }} · {{ card.enabled ? '启用' : '已禁用' }}<template v-if="card.default_test_command"> · {{ card.default_test_command }}</template></small>
+                                <p v-if="card.persona_prompt">{{ card.persona_prompt.length > 90 ? card.persona_prompt.slice(0, 90) + '…' : card.persona_prompt }}</p>
+                            </div>
+                            <div class="role-card-actions">
+                                <button type="button" @click="editRoleCard(card)">编辑</button>
+                                <button type="button" @click="toggleRoleCard(card.name)">{{ card.enabled ? '禁用' : '启用' }}</button>
+                                <button type="button" class="danger" @click="deleteRoleCard(card.name)">删除</button>
+                            </div>
+                        </article>
+                    </div>
+                    <div v-else class="mcp-empty">角色池为空——创建第一张角色卡（如"前端审美大师"绑定擅长 UI 的模型）。</div>
+                    <button type="button" class="manage-mcp" @click="roleFormOpen = !roleFormOpen">{{ roleFormOpen ? '收起表单' : '+ 新增角色卡' }}</button>
+                    <div v-if="roleFormOpen" class="role-form">
+                        <label>角色标识 (ASCII)*<input v-model="roleForm.name" :disabled="!!roleForm.editingId" placeholder="frontend_designer" /></label>
+                        <label>显示名<input v-model="roleForm.label" placeholder="前端审美大师" /></label>
+                        <label>钉死模型（留空跟随档位路由）
+                            <select v-model="roleForm.model_id">
+                                <option value="">跟随档位路由</option>
+                                <option v-for="m in roleModelOptions" :key="m.id" :value="m.id">{{ m.platform_name }} / {{ m.display_name || m.name }}</option>
+                            </select>
+                        </label>
+                        <label>人设提示词*<textarea v-model="roleForm.persona_prompt" rows="4" placeholder="专精 Tailwind、暗黑玻璃拟态、微交互与响应式排版……"></textarea></label>
+                        <label>作用域提示（逗号分隔，可选）<input v-model="roleForm.scope_hints" placeholder="src/components, src/assets" /></label>
+                        <label>默认测试命令（可选）<input v-model="roleForm.default_test_command" placeholder="npm run build" /></label>
+                        <p v-if="roleFormError" class="mcp-error">{{ roleFormError }}</p>
+                        <div class="role-form-actions">
+                            <button type="button" class="manage-mcp" :disabled="roleSaving" @click="saveRoleCard">{{ roleSaving ? '保存中…' : (roleForm.editingId ? '保存修改' : '创建角色卡') }}</button>
+                            <button type="button" @click="roleFormOpen = false">取消</button>
+                        </div>
+                    </div>
+                </section>
                 <section>
                     <div class="section-heading"><h3>调试配置</h3><small>{{ isRunning ? '运行中已锁定' : '可随时切换' }}</small></div>
                     <label class="context-toggle">
@@ -160,8 +199,98 @@ async function refreshConnection(name: string, reloadAfter = true) {
         connectionError.value = { ...connectionError.value, [name]: String(error) };
     }
 }
+interface RoleCard {
+    id: string;
+    name: string;
+    label: string;
+    model_id: string;
+    persona_prompt: string;
+    scope_hints: string;
+    default_test_command: string;
+    enabled: boolean;
+}
+interface RoleModelOption { id: string; name: string; display_name: string; platform_name: string; }
+const roleCards = ref<RoleCard[]>([]);
+const roleCardsLoading = ref(false);
+const roleFormOpen = ref(false);
+const roleSaving = ref(false);
+const roleFormError = ref("");
+const roleModelOptions = ref<RoleModelOption[]>([]);
+const emptyRoleForm = { id: "", name: "", label: "", model_id: "", persona_prompt: "", scope_hints: "", default_test_command: "", editingId: "" };
+const roleForm = ref({ ...emptyRoleForm });
+
+function roleModelLabel(modelId: string): string {
+    if (!modelId) return "跟随档位路由";
+    const found = roleModelOptions.value.find((m) => m.id === modelId);
+    return found ? `钉死: ${found.display_name || found.name}` : "钉死专属模型";
+}
+
+async function loadRoleCards() {
+    roleCardsLoading.value = true;
+    try {
+        roleCards.value = await invoke<RoleCard[]>("list_role_cards");
+    } catch (error) {
+        console.warn("无法读取角色池", error);
+        roleCards.value = [];
+    } finally {
+        roleCardsLoading.value = false;
+    }
+    try {
+        roleModelOptions.value = await invoke<RoleModelOption[]>("get_all_models_with_platform");
+    } catch {
+        roleModelOptions.value = [];
+    }
+}
+
+function openRoleFormDefaults() {
+    roleForm.value = { ...emptyRoleForm };
+    roleFormError.value = "";
+}
+
+function editRoleCard(card: RoleCard) {
+    roleForm.value = { ...card, editingId: card.id };
+    roleFormError.value = "";
+    roleFormOpen.value = true;
+}
+
+async function saveRoleCard() {
+    roleSaving.value = true;
+    roleFormError.value = "";
+    try {
+        await invoke("upsert_role_card", { card: { ...roleForm.value, id: roleForm.value.editingId || undefined } });
+        roleFormOpen.value = false;
+        openRoleFormDefaults();
+        await loadRoleCards();
+    } catch (error) {
+        roleFormError.value = String(error);
+    } finally {
+        roleSaving.value = false;
+    }
+}
+
+async function toggleRoleCard(name: string) {
+    try {
+        await invoke("toggle_role_card", { name });
+        await loadRoleCards();
+    } catch (error) {
+        console.warn("切换角色卡失败", error);
+    }
+}
+
+async function deleteRoleCard(name: string) {
+    try {
+        await invoke("delete_role_card", { name });
+        await loadRoleCards();
+    } catch (error) {
+        console.warn("删除角色卡失败", error);
+    }
+}
+
 watch(() => props.open, (open) => {
-    if (open) void loadMcpCatalog();
+    if (open) {
+        void loadMcpCatalog();
+        void loadRoleCards();
+    }
 }, { immediate: true });
 </script>
 
@@ -308,4 +437,21 @@ watch(() => props.open, (open) => {
 }
 .retry-policy-note strong { color: var(--chat-text-muted); }
 
+</style>
+
+<style scoped>
+/* 🎭 专精角色池 */
+.role-card-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.role-card-item { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07); }
+.role-card-item.disabled { opacity: .5; }
+.role-card-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.role-card-main strong small { opacity: .5; font-weight: 400; }
+.role-card-main p { margin: 0; font-size: 11px; opacity: .6; }
+.role-card-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
+.role-card-actions button { font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.05); color: inherit; cursor: pointer; }
+.role-card-actions button.danger { color: #ff8b8b; border-color: rgba(255,120,120,.3); }
+.role-form { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 10px; background: rgba(0,0,0,.25); }
+.role-form label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; opacity: .85; }
+.role-form input, .role-form textarea, .role-form select { border-radius: 6px; border: 1px solid rgba(255,255,255,.12); background: rgba(0,0,0,.35); color: inherit; padding: 6px 8px; font-size: 12px; }
+.role-form-actions { display: flex; gap: 8px; }
 </style>

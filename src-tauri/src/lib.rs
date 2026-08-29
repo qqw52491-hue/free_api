@@ -40,6 +40,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             // 平台
+            commands::list_role_cards,
+            commands::upsert_role_card,
+            commands::toggle_role_card,
+            commands::delete_role_card,
             commands::get_platforms,
             commands::add_platform,
             commands::update_platform,
