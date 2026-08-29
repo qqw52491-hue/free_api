@@ -289,7 +289,7 @@ const level1Todos = computed<Level1TodoItem[]>(() => {
 });
 
 const currentExecutingSubStep = computed(() => {
-    if (props.actionPhaseText && props.isThinking) return props.actionPhaseText;
+    if (props.actionPhaseText) return props.actionPhaseText;
     const activeTodo = level1Todos.value.find(t => t.isCurrent) || level1Todos.value[level1Todos.value.length - 1];
     return activeTodo?.currentSubStepTitle || '';
 });

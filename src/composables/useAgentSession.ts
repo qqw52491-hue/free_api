@@ -897,6 +897,22 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             return;
         }
 
+        // 🔄 异步子审查代理流式事件（实时推导中指示灯）
+        if (eventType === "child_reviewer_stream") {
+            const streamType = toText(payload.stream_type);
+            const chunk = toText(payload.chunk).trim();
+            const childRunId = toText(payload.child_run_id);
+            const shortId = childRunId ? childRunId.slice(0, 8) : "";
+            if (streamType === "thinking") {
+                actionPhaseText.value = chunk 
+                    ? `🔍 子审查独立推导中: ${chunk.slice(0, 35)}...` 
+                    : `🔍 子审查代理正在独立推导 (${shortId})...`;
+            } else {
+                actionPhaseText.value = `🔍 子审查代理生成结论中 (${shortId})...`;
+            }
+            return;
+        }
+
         // 大模型提炼的全局精炼任务标题更新
         if (eventType === "session_title_updated" && payload.title) {
             const newTitle = toText(payload.title);
