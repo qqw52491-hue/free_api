@@ -38,6 +38,8 @@ const COMMAND_PANEL = [
   "🛑 停止 = 中断当前任务",
   "🗑️ 清空队列 = 丢弃排队的任务",
   "❓ 帮助 = 随时调出本面板",
+  "🎚 详细汇报 / 安静汇报 = 一键切换详略",
+  "🎚 动作汇报 N = 每 N 个动作汇报（0 关闭）",
   "──────────────",
   "💬 Agent 提问时，直接回复即算回答",
   "⏱ 进度按配置间隔自动汇报，卡住会主动提问",
@@ -331,6 +333,8 @@ function watchRun(conversationId, runId, num) {
     lastNudge: 0,
     phase: null,
     stepMilestone: 0,
+    reportEvery: null,
+    phasePush: null,
   };
   activeRuns.set(conversationId, entry);
   const timer = setInterval(async () => {
@@ -388,15 +392,17 @@ function watchRun(conversationId, runId, num) {
     }
     if (run.status === "running") {
       entry.status = "running";
-      // 阶段里程碑：环境就绪/失败恢复/外部救援/开始交付时即时汇报
-      if (run.phase && run.phase !== entry.phase) {
+      // 阶段里程碑：环境就绪/失败恢复/外部救援/开始交付时即时汇报（可按会话/任务关闭）
+      const phasePush = entry.phasePush ?? run.phase_push ?? true;
+      if (phasePush && run.phase && run.phase !== entry.phase) {
         entry.phase = run.phase;
         if (!inQuietHours()) {
           await botSend(`▸ 任务 #${num}：${run.phase}`);
         }
       }
-      // 动作里程碑：每 15 个动作汇报一次正在干啥
-      const stepMilestone = Math.floor((run.event_count || 0) / 15);
+      // 动作里程碑：按任务快照步长（可被会话覆盖）汇报正在干啥
+      const every = entry.reportEvery ?? run.report_every_actions ?? 15;
+      const stepMilestone = every > 0 ? Math.floor((run.event_count || 0) / every) : 0;
       if (stepMilestone > 0 && stepMilestone > entry.stepMilestone) {
         entry.stepMilestone = stepMilestone;
         if (!inQuietHours() && run.last_progress) {
@@ -494,6 +500,31 @@ const agent = {
     }
     if (/^(帮助|指令|\/help)$/i.test(text)) {
       return { text: COMMAND_PANEL };
+    }
+    if (/^(详细汇报|安静汇报)$/.test(text) || /^动作汇报\s*(\d{1,4})$/.test(text)) {
+      const detailed = text === "详细汇报";
+      const quiet = text === "安静汇报";
+      const match = text.match(/^动作汇报\s*(\d{1,4})$/);
+      const steps = match ? parseInt(match[1], 10) : detailed ? 15 : 0;
+      const phasePush = quiet ? false : detailed ? true : undefined;
+      // 立即作用于本会话在途任务
+      const entry = activeRuns.get(conversationId);
+      if (entry) {
+        entry.reportEvery = steps;
+        if (phasePush !== undefined) entry.phasePush = phasePush;
+      }
+      try {
+        const payload = { action_milestone_steps: steps };
+        if (phasePush !== undefined) payload.phase_pushes = phasePush;
+        await api("PUT", "/channel/config", payload);
+      } catch (error) {
+        return { text: `⚠️ 已对本会话生效，但持久化失败：${error.message}` };
+      }
+      return {
+        text: `🎚 汇报风格已切换：动作里程碑${steps > 0 ? `每 ${steps} 个动作` : "已关闭"}${
+          phasePush === undefined ? "" : phasePush ? "，阶段推送开" : "，阶段推送关"
+        }。立即生效，对之后的任务也保持。`,
+      };
     }
     if (/^(清空队列|清空排队)$/i.test(text)) {
       const queue = taskQueues.get(conversationId);

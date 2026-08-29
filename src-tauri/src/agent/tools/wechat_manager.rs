@@ -21,11 +21,12 @@ pub fn dispatch(_db: &DbState, action: &str, params: &serde_json::Value) -> Disp
         "status" => status(),
         "notify" => notify(params),
         "set_heartbeat" => set_heartbeat(params),
+        "set_report_style" => set_report_style(params),
         "recent_runs" => recent_runs(params),
         _ => DispatchResult {
             stdout: String::new(),
             stderr: format!(
-                "wechat_manager 未知 action='{}'。可用：status() / notify(text) / set_heartbeat(minutes) / recent_runs(limit?)",
+                "wechat_manager 未知 action='{}'。可用：status() / notify(text) / set_heartbeat(minutes) / set_report_style(action_milestone_steps?, phase_pushes?) / recent_runs(limit?)",
                 act
             ),
             success: false,
@@ -112,6 +113,45 @@ fn set_heartbeat(params: &serde_json::Value) -> DispatchResult {
     }
 }
 
+/// 调整汇报详略：{"action_milestone_steps": 0|1..1000, "phase_pushes": bool}
+/// 步长 0 = 关闭"每 N 个动作"汇报；phase_pushes 控制阶段里程碑推送。
+/// 只改持久默认（对之后提交的任务生效），正在运行的任务不受影响。
+fn set_report_style(params: &serde_json::Value) -> DispatchResult {
+    let steps = params.get("action_milestone_steps").and_then(|v| v.as_u64());
+    let phase = params.get("phase_pushes").and_then(|v| v.as_bool());
+    if steps.is_none() && phase.is_none() {
+        return fail(
+            "set_report_style",
+            "至少提供 action_milestone_steps（0=关闭动作汇报，1–1000）或 phase_pushes（true/false）",
+        );
+    }
+    let mut config = match crate::agent::channel::load_channel_config() {
+        Ok(config) => config,
+        Err(error) => return fail("set_report_style", &format!("读取通道配置失败: {error}")),
+    };
+    if let Some(v) = steps {
+        config.action_milestone_steps = (v.clamp(0, 1000)) as u32;
+    }
+    if let Some(v) = phase {
+        config.phase_pushes = v;
+    }
+    if let Err(error) = crate::agent::channel::save_channel_config(&config) {
+        return fail("set_report_style", &format!("保存配置失败: {error}"));
+    }
+    crate::agent::channel::sync_shared_config(&config);
+    DispatchResult {
+        stdout: format!(
+            "✅ 汇报风格已更新：动作里程碑每 {} 个动作{}；阶段里程碑{}。对之后提交的任务生效。",
+            config.action_milestone_steps,
+            if config.action_milestone_steps == 0 { "（已关闭）" } else { "" },
+            if config.phase_pushes { "开" } else { "关" }
+        ),
+        stderr: String::new(),
+        success: true,
+        route: "wechat_manager:set_report_style".to_string(),
+    }
+}
+
 fn recent_runs(params: &serde_json::Value) -> DispatchResult {
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(10).clamp(1, 50) as usize;
     let mut runs = crate::agent::channel::runs_store_snapshot();
@@ -190,5 +230,22 @@ mod tests {
         assert!(result.success);
         let parsed: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
         assert!(parsed.is_array());
+    }
+}
+
+#[cfg(test)]
+mod report_style_tests {
+    use super::*;
+    use crate::db::DbState;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn set_report_style_requires_params() {
+        let db = DbState(Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )));
+        let result = dispatch(&db, "set_report_style", &serde_json::json!({}));
+        assert!(!result.success);
+        assert!(result.stderr.contains("action_milestone_steps"));
     }
 }

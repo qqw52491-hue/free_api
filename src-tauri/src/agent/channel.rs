@@ -71,6 +71,16 @@ pub struct ChannelConfig {
     /// API 不稳定时调高：评测路径基线为 20。
     #[serde(default)]
     pub llm_retries: Option<u32>,
+    /// 动作里程碑汇报步长：每 N 个动作推一条"正在干啥"；0 = 关闭
+    #[serde(default = "default_action_milestone")]
+    pub action_milestone_steps: u32,
+    /// 阶段里程碑（环境就绪/失败恢复/救援/交付）是否推送
+    #[serde(default = "default_true")]
+    pub phase_pushes: bool,
+}
+
+fn default_action_milestone() -> u32 {
+    15
 }
 
 fn default_api_port() -> u16 {
@@ -107,6 +117,8 @@ impl Default for ChannelConfig {
             auto_start_bridge: true,
             allowlist: Vec::new(),
             llm_retries: None,
+            action_milestone_steps: default_action_milestone(),
+            phase_pushes: true,
         }
     }
 }
@@ -183,6 +195,10 @@ pub struct RunRecord {
     pub error: Option<String>,
     /// 本次 run 实际生效的 LLM 瞬时重试次数（提交时快照）
     pub llm_retries: u32,
+    /// 动作里程碑步长（提交时快照；0 = 该任务不按动作汇报）
+    pub report_every_actions: u32,
+    /// 本任务是否推送阶段里程碑（提交时快照）
+    pub phase_push: bool,
     /// 最近一次里程碑状态描述（仅环境就绪/失败恢复/外部救援/开始交付时更新，
     /// 桥据此推送阶段汇报）
     pub phase: Option<String>,
@@ -312,6 +328,8 @@ pub struct ConfigPutReq {
     auto_start_bridge: Option<bool>,
     allowlist: Option<Vec<String>>,
     llm_retries: Option<u32>,
+    action_milestone_steps: Option<u32>,
+    phase_pushes: Option<bool>,
 }
 
 // ---------------------------------------------------------------- 处理器
@@ -491,6 +509,8 @@ async fn handler_task(
         routing,
         workspace_override,
         config.llm_retries,
+        config.action_milestone_steps,
+        config.phase_pushes,
     )
     .map_err(|error| match error {
         SubmitError::InFlight => (
@@ -524,6 +544,8 @@ pub(crate) fn register_and_spawn_run(
     routing: ModelRoutingConfig,
     workspace_override: Option<std::path::PathBuf>,
     llm_retries: Option<u32>,
+    action_milestone_steps: u32,
+    phase_push: bool,
 ) -> Result<String, SubmitError> {
     {
         let runs = runs_store().lock().expect("runs store poisoned");
@@ -557,6 +579,8 @@ pub(crate) fn register_and_spawn_run(
         llm_retries: llm_retries
             .unwrap_or(crate::agent::main_loop::DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
             .clamp(1, 100),
+        report_every_actions: action_milestone_steps.clamp(0, 1000),
+        phase_push,
         phase: None,
         state_detail: None,
     });
@@ -975,6 +999,12 @@ async fn handler_config_put(
     if let Some(v) = req.llm_retries {
         config.llm_retries = Some(v.clamp(1, 100));
     }
+    if let Some(v) = req.action_milestone_steps {
+        config.action_milestone_steps = v.clamp(0, 1000);
+    }
+    if let Some(v) = req.phase_pushes {
+        config.phase_pushes = v;
+    }
     save_channel_config(&config).map_err(internal_error)?;
     *state.config.write().expect("config poisoned") = config.clone();
     Ok(Json(config_value(&config)))
@@ -994,6 +1024,8 @@ fn config_value(config: &ChannelConfig) -> Value {
         "auto_start_bridge": config.auto_start_bridge,
         "allowlist": config.allowlist,
         "llm_retries": config.llm_retries,
+        "action_milestone_steps": config.action_milestone_steps,
+        "phase_pushes": config.phase_pushes,
         "config_path": channel_config_path().to_string_lossy(),
     })
 }
@@ -1422,6 +1454,12 @@ pub async fn wechat_channel_config_set(config: ConfigPutReq) -> Result<Value, St
     if let Some(v) = config.llm_retries {
         current.llm_retries = Some(v.clamp(1, 100));
     }
+    if let Some(v) = config.action_milestone_steps {
+        current.action_milestone_steps = v.clamp(0, 1000);
+    }
+    if let Some(v) = config.phase_pushes {
+        current.phase_pushes = v;
+    }
     save_channel_config(&current)?;
     sync_shared_config(&current);
     Ok(config_value(&current))
@@ -1479,6 +1517,8 @@ mod tests {
             result: None,
             error: None,
             llm_retries: 3,
+            report_every_actions: 15,
+            phase_push: true,
             phase: None,
             state_detail: None,
         };
@@ -1508,6 +1548,8 @@ mod tests {
                 result: None,
                 error: None,
                 llm_retries: 3,
+                report_every_actions: 15,
+                phase_push: true,
                 phase: None,
                 state_detail: None,
             });
@@ -1531,6 +1573,8 @@ mod tests {
         assert!(parsed.llm_retries.is_none());
         assert!(parsed.allowlist.is_empty());
         assert!(parsed.auto_start_bridge);
+        assert_eq!(parsed.action_milestone_steps, 15);
+        assert!(parsed.phase_pushes);
         // 缺失字段/未知字段都应容忍
         let parsed2: ChannelConfig =
             serde_json::from_str(r#"{"token":"t","unknown_field":1}"#).unwrap();
