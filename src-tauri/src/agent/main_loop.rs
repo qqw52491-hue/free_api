@@ -26,6 +26,46 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
 
+// ---------------------------------------------------------------- 工作区软锁
+// 同一项目目录同时只允许一个 run，防止两个任务并发写同一堆文件。
+// 仅项目会话参与锁定（含微信 scratch 项目）；纯 GUI 无项目会话保持原有并行行为，
+// 评测工作区彼此隔离也不受影响。守卫按 RAII 随 run 结束（含早退/中断）自动释放。
+
+fn workspace_locks() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static WORKSPACE_LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    WORKSPACE_LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) struct WorkspaceRunGuard {
+    key: String,
+}
+
+impl Drop for WorkspaceRunGuard {
+    fn drop(&mut self) {
+        if let Ok(mut locks) = workspace_locks().lock() {
+            locks.remove(&self.key);
+        }
+    }
+}
+
+fn acquire_workspace_lock(workspace_dir: &std::path::Path, goal: &str) -> Result<WorkspaceRunGuard, String> {
+    let key = workspace_dir
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_dir.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let mut locks = workspace_locks().lock().map_err(|e| e.to_string())?;
+    if let Some(occupied_by) = locks.get(&key) {
+        return Err(format!(
+            "工作区已被占用：{key}（正在执行「{occupied_by}」）。同一项目目录同时只允许一个任务，请等待其完成或先停止该任务。"
+        ));
+    }
+    locks.insert(key.clone(), goal.chars().take(60).collect());
+    Ok(WorkspaceRunGuard { key })
+}
+
 /// Agent 每个任务最多执行步数（可按项目需求调整）
 const MAX_STEPS: usize = 300;
 /// 正常会话只做短暂态请求重试；后台回归可显式提高到上限以避免 Provider 波动中断取证。
@@ -520,6 +560,12 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     if !workspace_dir.is_dir() {
         return Err(format!("Agent 工作区不可用：{}", workspace_dir.display()));
     }
+    // 项目会话进入前先拿工作区软锁（独占该目录直到本次 run 结束）
+    let _workspace_run_lock = if is_project_session {
+        Some(acquire_workspace_lock(&workspace_dir, &goal)?)
+    } else {
+        None
+    };
     // 1. 智能 MCP 插件同步：首次任务全量初始化，后续任务仅增量保活（见 mcp/session_bootstrap.rs）
     crate::agent::mcp::session_bootstrap::sync_mcp_plugins_for_session(
         &app,
@@ -591,7 +637,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             mcp_lines.join("\n")
         };
         let compact = format!(
-            "- 原生内置: finish, ask_human, search, task_store, get_step_output, project_resources, web_search, web_fetch, model_manager, mcp_manager, skill_manager\n- MCP 插件:\n{}",
+            "- 原生内置: finish, ask_human, search, task_store, get_step_output, project_resources, web_search, web_fetch, model_manager, mcp_manager, skill_manager, schedule_manager\n- MCP 插件:\n{}",
             mcp_part
         );
         (registry.format_tools_menu(), compact)

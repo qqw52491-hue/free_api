@@ -64,6 +64,9 @@ pub struct ChannelConfig {
     /// 应用启动时自动拉起微信桥
     #[serde(default = "default_true")]
     pub auto_start_bridge: bool,
+    /// 微信发送者白名单（wxid 列表）；空表 = 自动锁定第一条消息的发送者为主人
+    #[serde(default)]
+    pub allowlist: Vec<String>,
 }
 
 fn default_api_port() -> u16 {
@@ -102,6 +105,7 @@ impl Default for ChannelConfig {
             heartbeat_minutes: default_heartbeat_minutes(),
             help_text: default_help_text(),
             auto_start_bridge: true,
+            allowlist: Vec::new(),
         }
     }
 }
@@ -191,6 +195,21 @@ fn truncate_chars(raw: &str, max: usize) -> String {
     raw.chars().take(max).collect()
 }
 
+/// 运行账本快照（供调度器轮询终态）
+pub(crate) fn runs_store_snapshot() -> Vec<RunRecord> {
+    runs_store()
+        .lock()
+        .expect("runs store poisoned")
+        .values()
+        .cloned()
+        .collect()
+}
+
+/// scratch 目录解析的 crate 级入口（调度器复用）
+pub(crate) fn effective_scratch_dir_pub(config: &ChannelConfig) -> std::path::PathBuf {
+    effective_scratch_dir(config)
+}
+
 fn upsert_run(record: RunRecord) {
     let mut runs = runs_store().lock().expect("runs store poisoned");
     if runs.len() >= MAX_RUN_RECORDS && !runs.contains_key(&record.run_id) {
@@ -259,9 +278,6 @@ struct TaskReq {
     session_id: String,
     goal: String,
     model_routing: Option<PartialRouting>,
-    /// 微信任务保持 false：ask_human 会真正阻塞等待应答
-    #[serde(default)]
-    auto_pilot: bool,
 }
 
 #[derive(Deserialize)]
@@ -286,6 +302,7 @@ pub struct ConfigPutReq {
     heartbeat_minutes: Option<u64>,
     help_text: Option<String>,
     auto_start_bridge: Option<bool>,
+    allowlist: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------- 处理器
@@ -367,7 +384,7 @@ async fn handler_session(
 }
 
 /// 确保 scratch 项目存在并返回其 id（未绑定任务的兜底工作区）
-fn ensure_scratch_project(
+pub(crate) fn ensure_scratch_project(
     conn: &rusqlite::Connection,
     scratch_dir: &PathBuf,
 ) -> Result<String, String> {
@@ -425,19 +442,6 @@ async fn handler_task(
         .map_err(internal_error)?
         .is_some();
 
-    // 同一会话同时只允许一个在途任务，避免微信端重复派发相互打断
-    {
-        let runs = runs_store().lock().expect("runs store poisoned");
-        if runs.values().any(|r| {
-            r.session_id == session_id && matches!(r.status.as_str(), "running" | "waiting_human")
-        }) {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(json!({"error": "该会话已有在途任务", "session_id": session_id})),
-            ));
-        }
-    }
-
     // 路由配置：默认取通道配置，允许请求覆盖三槽
     let mut routing = ModelRoutingConfig {
         pro: config.pro.clone(),
@@ -474,6 +478,53 @@ async fn handler_task(
         Some(effective_scratch_dir(&config))
     };
 
+    let run_id = register_and_spawn_run(
+        state.app.clone(),
+        session_id.clone(),
+        goal,
+        routing,
+        workspace_override,
+    )
+    .map_err(|error| match error {
+        SubmitError::InFlight => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "该会话已有在途任务", "session_id": session_id})),
+        ),
+        SubmitError::Other(message) => bad_request(&message),
+    })?;
+
+    Ok(Json(json!({
+        "run_id": run_id,
+        "session_id": session_id,
+        "workspace": if has_project { "project" } else { "scratch" },
+    })))
+}
+
+/// 提交失败的类型：会话在途（调用方映射 409）或其他原因
+pub(crate) enum SubmitError {
+    InFlight,
+    Other(String),
+}
+
+/// 统一的任务提交入口（HTTP 处理器与定时调度器共用）：
+/// 登记 RunRecord → 订阅进度事件 → 后台 spawn 主循环。
+/// 同一会话同时只允许一个在途任务（含 waiting_human）。
+pub(crate) fn register_and_spawn_run(
+    app: AppHandle,
+    session_id: String,
+    goal: String,
+    routing: ModelRoutingConfig,
+    workspace_override: Option<std::path::PathBuf>,
+) -> Result<String, SubmitError> {
+    {
+        let runs = runs_store().lock().expect("runs store poisoned");
+        if runs.values().any(|r| {
+            r.session_id == session_id && matches!(r.status.as_str(), "running" | "waiting_human")
+        }) {
+            return Err(SubmitError::InFlight);
+        }
+    }
+
     let run_id = uuid::Uuid::new_v4().to_string();
     let started_at = now_ts();
     upsert_run(RunRecord {
@@ -492,10 +543,9 @@ async fn handler_task(
 
     // 进度订阅：主循环的 agent-progress-{session} 事件原样转写进运行账本，
     // agent_paused（ask_human 阻塞）单独标记，供桥推送「卡住提问」。
-    let listen_app = state.app.clone();
     let listen_session = session_id.clone();
     let listen_run = run_id.clone();
-    let event_id = listen_app.listen(
+    let event_id = app.listen(
         format!("agent-progress-{listen_session}"),
         move |event: tauri::Event| {
             let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else {
@@ -535,12 +585,10 @@ async fn handler_task(
         },
     );
 
-    let spawn_app = state.app.clone();
+    let spawn_app = app.clone();
     let spawn_run = run_id.clone();
     let spawn_session = session_id.clone();
     let spawn_goal = goal;
-    let spawn_auto = req.auto_pilot;
-    let listen_app_for_drop = state.app.clone();
     tauri::async_runtime::spawn(async move {
         let db = spawn_app.state::<DbState>();
         let registry =
@@ -551,7 +599,7 @@ async fn handler_task(
             registry,
             routing,
             spawn_goal,
-            spawn_auto,
+            false,
             Some(spawn_session.clone()),
             None,
             None,
@@ -559,7 +607,7 @@ async fn handler_task(
             workspace_override,
         )
         .await;
-        let _ = listen_app_for_drop.unlisten(event_id);
+        let _ = app.unlisten(event_id);
         match outcome {
             Ok(()) => {
                 let result = last_assistant_message(&spawn_app, &spawn_session);
@@ -589,11 +637,85 @@ async fn handler_task(
         }
     });
 
-    Ok(Json(json!({
-        "run_id": run_id,
-        "session_id": session_id,
-        "workspace": if has_project { "project" } else { "scratch" },
-    })))
+    Ok(run_id)
+}
+
+async fn handler_models(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let models = crate::commands::get_all_models_with_platform(state.app.state::<DbState>())
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(json!({ "models": models })))
+}
+
+#[derive(Deserialize)]
+struct AttachmentReq {
+    path: String,
+    original_name: Option<String>,
+}
+
+/// 微信发来的媒体文件登记为项目受管资源（复制进 .attachments/ 隔离目录，返回句柄）
+async fn handler_session_attachment(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+    Json(req): Json<AttachmentReq>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let conn = db_conn(&state.app)?;
+    let resource_id = crate::commands::projects::register_attachment_for_session(
+        &conn,
+        &session_id,
+        std::path::Path::new(req.path.trim()),
+        req.original_name.as_deref().unwrap_or("attachment"),
+    )
+    .map_err(|e| bad_request(&e))?;
+    match resource_id {
+        Some(id) => Ok(Json(json!({ "resource_id": id }))),
+        None => Err(bad_request("该会话未关联项目，无法登记附件（请先绑定项目）")),
+    }
+}
+
+/// 会话最近产物（供微信回推文件）
+async fn handler_session_artifacts(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let db = state.app.state::<DbState>();
+    let records = crate::agent::artifact_manager::list_session_artifacts(db.inner(), &session_id)
+        .map_err(internal_error)?;
+    let mut records = records;
+    records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    records.truncate(5);
+    let artifacts: Vec<Value> = records
+        .into_iter()
+        .map(|record| {
+            json!({
+                "id": record.id,
+                "display_name": record.display_name,
+                "path": record.canonical_path,
+                "size_bytes": record.size_bytes,
+                "mime_type": record.mime_type,
+                "kind": record.kind,
+                "created_at": record.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "artifacts": artifacts })))
 }
 
 fn model_id_of_session(
@@ -792,6 +914,9 @@ async fn handler_config_put(
     if let Some(v) = req.auto_start_bridge {
         config.auto_start_bridge = v;
     }
+    if let Some(v) = req.allowlist {
+        config.allowlist = v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    }
     save_channel_config(&config).map_err(internal_error)?;
     *state.config.write().expect("config poisoned") = config.clone();
     Ok(Json(config_value(&config)))
@@ -809,6 +934,7 @@ fn config_value(config: &ChannelConfig) -> Value {
         "heartbeat_minutes": config.heartbeat_minutes,
         "help_text": config.help_text,
         "auto_start_bridge": config.auto_start_bridge,
+        "allowlist": config.allowlist,
         "config_path": channel_config_path().to_string_lossy(),
     })
 }
@@ -849,6 +975,15 @@ fn channel_router(state: Arc<ChannelState>) -> Router {
         .route("/channel/run/{run_id}/goal", post(handler_run_goal))
         .route("/channel/run/{run_id}/cancel", post(handler_run_cancel))
         .route("/channel/config", get(handler_config_get).put(handler_config_put))
+        .route("/channel/models", get(handler_models))
+        .route(
+            "/channel/session/{session_id}/attachment",
+            post(handler_session_attachment),
+        )
+        .route(
+            "/channel/session/{session_id}/artifacts",
+            get(handler_session_artifacts),
+        )
         .with_state(state)
 }
 
@@ -857,7 +992,7 @@ fn channel_router(state: Arc<ChannelState>) -> Router {
 // 两边必须共享同一份 Arc<RwLock<ChannelConfig>>，否则保存后运行中的服务仍在用
 // 应用启动时加载的旧值（表现为「未配置默认模型」）。
 
-fn channel_config_shared() -> &'static Arc<std::sync::RwLock<ChannelConfig>> {
+pub(crate) fn channel_config_shared() -> &'static Arc<std::sync::RwLock<ChannelConfig>> {
     static CONFIG: OnceLock<Arc<std::sync::RwLock<ChannelConfig>>> = OnceLock::new();
     CONFIG.get_or_init(|| {
         let config = match load_channel_config() {
@@ -969,6 +1104,7 @@ async fn bridge_call(
     config: &ChannelConfig,
     method: &str,
     path: &str,
+    body: Option<Value>,
 ) -> Result<Value, String> {
     let url = format!("{}{}", bridge_base(config), path);
     let client = bridge_http();
@@ -976,6 +1112,9 @@ async fn bridge_call(
         "POST" => client.post(&url),
         _ => client.get(&url),
     };
+    if let Some(value) = &body {
+        request = request.json(value);
+    }
     let response = request
         .header("x-channel-token", &config.token)
         .send()
@@ -985,11 +1124,19 @@ async fn bridge_call(
     Ok(value)
 }
 
+/// 主动推送文本到主人微信（经桥转发；桥未运行时只记日志不报错）
+pub(crate) async fn notify_wechat(config: &ChannelConfig, text: &str) {
+    let payload = json!({ "text": text });
+    if let Err(error) = bridge_call(config, "POST", "/bridge/notify", Some(payload)).await {
+        eprintln!("[channel] 微信推送失败: {error}");
+    }
+}
+
 /// 确保微信桥在运行：已就绪直接返回；否则拉起 node 子进程并等待就绪。
 /// 供页面「启动桥」按钮与应用启动时的自动拉起共用；重复调用不会起第二个进程。
 async fn ensure_bridge_running() -> Result<Value, String> {
     let config = load_channel_config()?;
-    if let Ok(status) = bridge_call(&config, "GET", "/bridge/status").await {
+    if let Ok(status) = bridge_call(&config, "GET", "/bridge/status", None).await {
         return Ok(json!({ "already_running": true, "status": status }));
     }
     // 已持有存活的子进程（仍在启动中）时不再重复 spawn，避免双实例抢端口。
@@ -1008,7 +1155,7 @@ async fn ensure_bridge_running() -> Result<Value, String> {
     if child_still_starting {
         for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if let Ok(status) = bridge_call(&config, "GET", "/bridge/status").await {
+            if let Ok(status) = bridge_call(&config, "GET", "/bridge/status", None).await {
                 return Ok(json!({ "already_running": false, "status": status }));
             }
         }
@@ -1018,11 +1165,24 @@ async fn ensure_bridge_running() -> Result<Value, String> {
         "未找到 wechat-bridge 目录（可设 FREE_API_WECHAT_BRIDGE_DIR 指向该目录）",
     )?;
     let index_js = dir.join("index.js");
+    // 桥日志落盘：之前 piped 后被丢弃，排障困难；现在追加写入数据目录
+    let log_path = channel_config_path()
+        .parent()
+        .map(|p| p.join("wechat-bridge.log"))
+        .ok_or_else(|| "无法定位桥日志目录".to_string())?;
+    let stdout_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("打开桥日志失败: {e}"))?;
+    let stderr_log = stdout_log
+        .try_clone()
+        .map_err(|e| format!("复用桥日志句柄失败: {e}"))?;
     let child = tokio::process::Command::new("node")
         .arg(&index_js)
         .env("CHANNEL_CONFIG_PATH", channel_config_path())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(stdout_log))
+        .stderr(std::process::Stdio::from(stderr_log))
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("启动 node 桥失败: {e}"))?;
@@ -1031,7 +1191,7 @@ async fn ensure_bridge_running() -> Result<Value, String> {
     // 等待桥就绪（最多 10s）
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if let Ok(status) = bridge_call(&config, "GET", "/bridge/status").await {
+        if let Ok(status) = bridge_call(&config, "GET", "/bridge/status", None).await {
             return Ok(json!({ "already_running": false, "status": status }));
         }
     }
@@ -1046,7 +1206,7 @@ pub async fn wechat_bridge_start() -> Result<Value, String> {
 #[tauri::command]
 pub async fn wechat_bridge_status() -> Result<Value, String> {
     let config = load_channel_config()?;
-    let bridge = bridge_call(&config, "GET", "/bridge/status")
+    let bridge = bridge_call(&config, "GET", "/bridge/status", None)
         .await
         .unwrap_or_else(|e| json!({ "running": false, "error": e }));
     Ok(json!({
@@ -1058,26 +1218,26 @@ pub async fn wechat_bridge_status() -> Result<Value, String> {
 #[tauri::command]
 pub async fn wechat_bridge_login_start() -> Result<Value, String> {
     let config = load_channel_config()?;
-    bridge_call(&config, "POST", "/bridge/login/start").await
+    bridge_call(&config, "POST", "/bridge/login/start", None).await
 }
 
 #[tauri::command]
 pub async fn wechat_bridge_qr() -> Result<Value, String> {
     let config = load_channel_config()?;
-    bridge_call(&config, "GET", "/bridge/qr").await
+    bridge_call(&config, "GET", "/bridge/qr", None).await
 }
 
 #[tauri::command]
 pub async fn wechat_bridge_relogin() -> Result<Value, String> {
     // 一键重新扫码：桥内部停监听→清凭据→发起新登录，进程不退出
     let config = load_channel_config()?;
-    bridge_call(&config, "POST", "/bridge/relogin").await
+    bridge_call(&config, "POST", "/bridge/relogin", None).await
 }
 
 #[tauri::command]
 pub async fn wechat_bridge_stop() -> Result<Value, String> {
     let config = load_channel_config()?;
-    let result = bridge_call(&config, "POST", "/bridge/stop").await;
+    let result = bridge_call(&config, "POST", "/bridge/stop", None).await;
     let mut child = bridge_child_slot()
         .lock()
         .expect("child slot poisoned")
@@ -1129,6 +1289,9 @@ pub async fn wechat_channel_config_set(config: ConfigPutReq) -> Result<Value, St
     }
     if let Some(v) = config.auto_start_bridge {
         current.auto_start_bridge = v;
+    }
+    if let Some(v) = config.allowlist {
+        current.allowlist = v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     }
     save_channel_config(&current)?;
     sync_shared_config(&current);

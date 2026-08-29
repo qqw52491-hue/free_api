@@ -28,6 +28,7 @@ pub mod review_contract;
 pub mod router;
 pub mod run_state;
 pub mod run_trace;
+pub mod scheduler;
 pub mod skill_context;
 pub mod task_store;
 pub mod task_summary;

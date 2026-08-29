@@ -34,6 +34,8 @@ pub fn run() {
         .setup(|app| {
             // 微信通道：本机 axum API（供 Node 桥调用），失败只打日志不阻断启动
             crate::agent::channel::spawn_channel_server(app.handle().clone());
+            // 定时触发器：按计划自动派发任务，结果推微信
+            crate::agent::scheduler::spawn_scheduler(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -138,6 +140,11 @@ pub fn run() {
             agent::channel::wechat_channel_config_get,
             agent::channel::wechat_channel_config_set,
             agent::channel::wechat_channel_runs,
+            // 定时触发器
+            agent::scheduler::wechat_schedule_list,
+            agent::scheduler::wechat_schedule_save,
+            agent::scheduler::wechat_schedule_delete,
+            agent::scheduler::wechat_schedule_toggle,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

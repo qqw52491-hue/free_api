@@ -207,12 +207,8 @@
             </div>
 
             <!-- 5. ⏱️ Scheduled 定时任务 -->
-            <div v-if="currentNavView === 'scheduled'" class="full-view-panel scheduled-view">
-                <div class="scheduled-card">
-                    <span class="scheduled-icon">⏱️</span>
-                    <h3>定时任务中心</h3>
-                    <p>支持配置定时巡检、自动化总结或定期 Agent 运行计划。任务会在后台准时触发。</p>
-                </div>
+            <div v-if="currentNavView === 'scheduled'" class="full-view-panel">
+                <ScheduledView />
             </div>
 
             <!-- 6. 📱 微信绑定与通道配置 -->
@@ -232,6 +228,7 @@ import ProjectWorkspace from "../components/ProjectWorkspace.vue";
 import ApiManager from "./ApiManager.vue";
 import PluginView from "./PluginView.vue";
 import WeChatBindView from "./WeChatBindView.vue";
+import ScheduledView from "./ScheduledView.vue";
 
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
