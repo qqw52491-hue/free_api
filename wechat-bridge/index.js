@@ -329,6 +329,8 @@ function watchRun(conversationId, runId, num) {
     lastHeartbeat: Date.now(),
     waitingSince: null,
     lastNudge: 0,
+    phase: null,
+    stepMilestone: 0,
   };
   activeRuns.set(conversationId, entry);
   const timer = setInterval(async () => {
@@ -386,6 +388,23 @@ function watchRun(conversationId, runId, num) {
     }
     if (run.status === "running") {
       entry.status = "running";
+      // 阶段里程碑：环境就绪/失败恢复/外部救援/开始交付时即时汇报
+      if (run.phase && run.phase !== entry.phase) {
+        entry.phase = run.phase;
+        if (!inQuietHours()) {
+          await botSend(`▸ 任务 #${num}：${run.phase}`);
+        }
+      }
+      // 动作里程碑：每 15 个动作汇报一次正在干啥
+      const stepMilestone = Math.floor((run.event_count || 0) / 15);
+      if (stepMilestone > 0 && stepMilestone > entry.stepMilestone) {
+        entry.stepMilestone = stepMilestone;
+        if (!inQuietHours() && run.last_progress) {
+          await botSend(
+            `▸ 任务 #${num} 已执行 ${run.event_count} 个动作：${run.last_progress}`
+          );
+        }
+      }
       if (Date.now() - entry.lastHeartbeat >= HEARTBEAT_MS) {
         entry.lastHeartbeat = Date.now();
         if (!inQuietHours()) {
@@ -527,17 +546,25 @@ const agent = {
       };
     }
 
-    // ③ 状态查询
+    // ③ 状态查询（在途任务实时拉取最新阶段明细）
     if (/^(状态|\/status)$/i.test(text)) {
       const lines = [];
-      const run = activeRuns.get(conversationId);
-      if (run) {
+      const entry = activeRuns.get(conversationId);
+      if (entry) {
         lines.push(
-          run.status === "waiting_human"
-            ? `▶ 任务 #${run.num}：等待你回答`
-            : `▶ 任务 #${run.num}：执行中`
+          entry.status === "waiting_human"
+            ? `▶ 任务 #${entry.num}：等待你回答`
+            : `▶ 任务 #${entry.num}：执行中`
         );
-        if (run.paused_reason) lines.push(`  ❓ ${run.paused_reason}`);
+        if (entry.paused_reason) lines.push(`  ❓ ${entry.paused_reason}`);
+        try {
+          const live = await api("GET", `/channel/run/${entry.runId}`);
+          if (live.state_detail) lines.push(`  ▸ 当前阶段：${live.state_detail}`);
+          else if (live.last_progress) lines.push(`  ▸ ${live.last_progress}`);
+          if (live.event_count) lines.push(`  已执行 ${live.event_count} 个动作`);
+        } catch {
+          /* 通道暂不可达时展示缓存信息即可 */
+        }
       } else {
         lines.push("▶ 当前无进行中任务");
       }

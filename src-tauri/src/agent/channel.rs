@@ -183,6 +183,11 @@ pub struct RunRecord {
     pub error: Option<String>,
     /// 本次 run 实际生效的 LLM 瞬时重试次数（提交时快照）
     pub llm_retries: u32,
+    /// 最近一次里程碑状态描述（仅环境就绪/失败恢复/外部救援/开始交付时更新，
+    /// 桥据此推送阶段汇报）
+    pub phase: Option<String>,
+    /// 最新状态描述（每次状态机迁移都更新，「状态」查询可见）
+    pub state_detail: Option<String>,
 }
 
 fn runs_store() -> &'static Mutex<HashMap<String, RunRecord>> {
@@ -552,6 +557,8 @@ pub(crate) fn register_and_spawn_run(
         llm_retries: llm_retries
             .unwrap_or(crate::agent::main_loop::DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
             .clamp(1, 100),
+        phase: None,
+        state_detail: None,
     });
 
     // 进度订阅：主循环的 agent-progress-{session} 事件原样转写进运行账本，
@@ -598,6 +605,40 @@ pub(crate) fn register_and_spawn_run(
         },
     );
 
+    // 状态机订阅：state_detail 每次迁移都更新；phase 仅里程碑状态更新（供桥推送阶段汇报）
+    let state_session = session_id.clone();
+    let state_run = run_id.clone();
+    let state_event_id = app.listen(
+        format!("agent-run-state-{state_session}"),
+        move |event: tauri::Event| {
+            let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else {
+                return;
+            };
+            let message = payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(|text| truncate_chars(text, 200));
+            let state = payload
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_lowercase();
+            let milestone = ["runtime", "recovering", "rescuing", "finalizing"]
+                .iter()
+                .any(|marker| state.contains(marker));
+            patch_run(&state_run, |record| {
+                if let Some(text) = &message {
+                    record.state_detail = Some(text.clone());
+                }
+                if milestone {
+                    record.phase = Some(
+                        message.unwrap_or_else(|| format!("进入阶段 {state}")),
+                    );
+                }
+            });
+        },
+    );
+
     let spawn_app = app.clone();
     let spawn_run = run_id.clone();
     let spawn_session = session_id.clone();
@@ -621,6 +662,7 @@ pub(crate) fn register_and_spawn_run(
         )
         .await;
         let _ = app.unlisten(event_id);
+        let _ = app.unlisten(state_event_id);
         match outcome {
             Ok(()) => {
                 let result = last_assistant_message(&spawn_app, &spawn_session);
@@ -1437,6 +1479,8 @@ mod tests {
             result: None,
             error: None,
             llm_retries: 3,
+            phase: None,
+            state_detail: None,
         };
         upsert_run(record);
         patch_run(&key, |r| {
@@ -1464,6 +1508,8 @@ mod tests {
                 result: None,
                 error: None,
                 llm_retries: 3,
+                phase: None,
+                state_detail: None,
             });
         }
         let runs = runs_store().lock().unwrap();
