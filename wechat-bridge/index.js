@@ -21,7 +21,27 @@ import path from "node:path";
 import QRCode from "qrcode";
 import { isLoggedIn, login, logout, start } from "weixin-agent-sdk";
 
-const BRIDGE_VERSION = "0.2.0";
+const BRIDGE_VERSION = "0.2.1";
+
+// 内置指令面板：随桥能力同步更新，首次联系与「帮助」指令时推送
+const COMMAND_PANEL = [
+  "📋 指令面板",
+  "──────────────",
+  "🚀 直接发消息 = 派任务",
+  "　支持文字/语音/图片/Excel/PDF；执行中再发会自动排队",
+  "📊 状态 = 当前进度 + 队列 + 绑定项目",
+  "📄 结果 = 回放上一次任务的结果",
+  "📁 项目 = 项目列表（回复编号绑定工作区）",
+  "🤖 模型 = 模型列表（回复编号切换默认模型）",
+  "🆕 新会话 = 重开一个干净会话（上下文清零）",
+  "🔓 解绑 = 退出项目，回到临时工作区",
+  "🛑 停止 = 中断当前任务",
+  "❓ 帮助 = 随时调出本面板",
+  "──────────────",
+  "💬 Agent 提问时，直接回复即算回答",
+  "⏱ 进度按配置间隔自动汇报，卡住会主动提问",
+  "📁 绑定项目后任务在项目目录执行，未绑定在临时工作区",
+].join("\n");
 const MAX_QUEUE = 5;
 const NUDGE_MS = 2 * 60 * 60 * 1000; // ask_human 挂起 2 小时提醒一次
 const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024; // 微信文件回推上限
@@ -393,7 +413,7 @@ const agent = {
     if (!sender.seen) {
       sender.seen = true;
       saveState();
-      await botSend(config.help_text || "SandwichAgent 微信通道已就绪。");
+      await botSend(`${config.help_text || "🤖 SandwichAgent 微信通道已就绪。"}\n\n${COMMAND_PANEL}`);
     }
 
     // ⓪ 元命令：停止 / 新会话（优先于答案路由，保证随时可用）
@@ -406,6 +426,9 @@ const agent = {
       } catch (error) {
         return { text: `⚠️ 停止失败：${error.message}` };
       }
+    }
+    if (/^(帮助|指令|\/help)$/i.test(text)) {
+      return { text: COMMAND_PANEL };
     }
     if (/^(新会话|新对话|\/new)$/i.test(text)) {
       if (activeRuns.has(conversationId)) {

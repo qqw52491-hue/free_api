@@ -83,12 +83,8 @@ fn default_heartbeat_minutes() -> u64 {
     DEFAULT_HEARTBEAT_MINUTES
 }
 fn default_help_text() -> String {
-    "🤖 SandwichAgent 微信通道已就绪。\n\
-     · 直接发消息 = 派任务（未绑定时在临时工作区执行）\n\
-     · 回复编号 = 绑定/切换项目（会话将直接进入该项目目录）\n\
-     · 「停止」= 中断当前任务；「新会话」= 重开一个干净会话\n     · Agent 提问时，直接回复即视为回答\n\
-     · 任务每 30 分钟汇报一次进度，卡住或需要你确认时会立刻提问。"
-        .to_string()
+    // 完整指令面板由桥内置（COMMAND_PANEL，随桥能力同步），此处只是可自定义的开场白
+    "🤖 SandwichAgent 微信通道已就绪。".to_string()
 }
 
 fn default_true() -> bool {
