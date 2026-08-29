@@ -456,6 +456,26 @@ pub(crate) fn execute_command_inner(
         return crate::agent::tools::skill_manager::dispatch(db, action, params);
     }
 
+    // 3.9 核心原生工具 H: schedule_manager (定时任务管理——对话内直接建计划)
+    if tool.eq_ignore_ascii_case("schedule_manager") {
+        return crate::agent::tools::schedule_manager::dispatch(db, action, params);
+    }
+
+    // 3.10 核心原生工具 I: project_manager (项目工作区管理)
+    if tool.eq_ignore_ascii_case("project_manager") {
+        return crate::agent::tools::project_manager::dispatch(db, action, params);
+    }
+
+    // 3.11 核心原生工具 J: system_info (本机运行状态)
+    if tool.eq_ignore_ascii_case("system_info") {
+        return crate::agent::tools::system_info::dispatch(db, action, params);
+    }
+
+    // 3.12 核心原生工具 K: wechat_manager (微信通道状态与主动知会)
+    if tool.eq_ignore_ascii_case("wechat_manager") {
+        return crate::agent::tools::wechat_manager::dispatch(db, action, params);
+    }
+
     // 3.9 核心原生工具 H: artifact_manager (受管产物物理写入、元数据登记与产物账本管理)
     if tool.eq_ignore_ascii_case("artifact_manager") || tool.eq_ignore_ascii_case("artifact_store")
     {
@@ -588,7 +608,7 @@ pub(crate) fn execute_command_inner(
     DispatchResult {
         stdout: String::new(),
         stderr: format!(
-            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n可用原生内置工具：finish, ask_human, model_manager, mcp_manager, skill_manager, web_search, web_fetch, search, get_step_output, task_store；{}\n外部 MCP 工具调用格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
+            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n可用原生内置工具：finish, ask_human, model_manager, mcp_manager, skill_manager, schedule_manager, project_manager, system_info, wechat_manager, web_search, web_fetch, search, get_step_output, task_store；{}\n外部 MCP 工具调用格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
             tool,
             action,
             mcp_guide

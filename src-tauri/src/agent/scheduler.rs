@@ -145,7 +145,7 @@ async fn tick(app: &tauri::AppHandle) -> Result<(), String> {
         match fire_run(app, &config, item).await {
             Ok(run_id) => {
                 println!("[scheduler] 定时任务「{}」已触发 run={run_id}", item.name);
-                spawn_completion_watcher(app.clone(), config.clone(), item.clone(), run_id);
+                spawn_completion_watcher(config.clone(), item.clone(), run_id);
             }
             Err(error) => {
                 eprintln!("[scheduler] 定时任务「{}」触发失败: {error}", item.name);
@@ -260,7 +260,6 @@ fn create_schedule_session(
 
 /// 轮询运行账本直到终态，把结果推送到主人微信
 fn spawn_completion_watcher(
-    app: tauri::AppHandle,
     config: crate::agent::channel::ChannelConfig,
     item: ScheduleItem,
     run_id: String,

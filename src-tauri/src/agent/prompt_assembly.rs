@@ -150,6 +150,42 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         ],
     },
     BuiltinToolSpec {
+        name: "schedule_manager",
+        summary: "定时任务管理：创建/维护按时间自动派发的计划任务，到点自动运行并把结果推送到主人微信",
+        actions: &[
+            "list()",
+            "save(name: string, goal: string, kind: \"daily\"|\"interval\", time?: \"HH:MM\", minutes?: number, project_id?: string, id?: string) [id 省略=新建]",
+            "toggle(id: string, enabled: boolean)",
+            "delete(id: string, confirm: true)",
+            "run_now(id: string) [立即执行一次，不等下一触发点]",
+        ],
+    },
+    BuiltinToolSpec {
+        name: "project_manager",
+        summary: "项目（工作区白名单）管理：create/delete 会改变可访问文件范围，必须先向用户确认再传 confirm: true",
+        actions: &[
+            "list()",
+            "create(name: string, root_path: string, confirm: true)",
+            "delete(project_id: string, confirm: true)",
+            "list_resources(project_id: string)",
+            "add_resource(project_id: string, path: string, label?: string)",
+        ],
+    },
+    BuiltinToolSpec {
+        name: "system_info",
+        summary: "本机运行状态：主机/系统、负载、内存、磁盘余量（回答机器状态类问题优先用本工具而非 shell）",
+        actions: &["overview()"],
+    },
+    BuiltinToolSpec {
+        name: "wechat_manager",
+        summary: "微信通道：查看桥在线/登录状态与最近任务流水；notify 可在任务执行途中主动给主人微信捎话（非阻塞知会，需要用户决定仍用 ask_human）",
+        actions: &[
+            "status()",
+            "notify(text: string)",
+            "recent_runs(limit?: <=50)",
+        ],
+    },
+    BuiltinToolSpec {
         name: "project_resources",
         summary: "仅项目会话可用：查看或读取受管文件，支持将项目内关键文件登记为跨会话共享受管资源",
         actions: &[

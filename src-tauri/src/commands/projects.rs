@@ -255,7 +255,7 @@ fn list_project_resources_row(
     resources
 }
 
-fn add_project_resource_row(
+pub(crate) fn add_project_resource_row(
     conn: &Connection,
     project_id: &str,
     raw_path: &str,
