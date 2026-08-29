@@ -7,6 +7,20 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.
 const artifactDir = path.join(rootDir, "test-artifacts");
 const modelId = process.env.FREE_API_LIVE_MODEL_ID?.trim();
 const evaluationTimeoutMs = Number(process.env.FREE_API_LIVE_EVALUATION_TIMEOUT_MS ?? 1_200_000);
+const maxDurationMinutes = Number(process.env.FREE_API_LIVE_MAX_DURATION_MINUTES ?? 20);
+const proModelId = process.env.FREE_API_LIVE_MODEL_ID_PRO?.trim() || modelId;
+const flashModelId = process.env.FREE_API_LIVE_MODEL_ID_FLASH?.trim() || modelId;
+const routingMode = process.env.FREE_API_ROUTING_MODE?.trim() || "";
+const roleModelsRaw = process.env.FREE_API_ROLE_MODELS?.trim() || "";
+const roleModels = roleModelsRaw ? JSON.parse(roleModelsRaw) : null;
+const routingConfig = {
+  pro: proModelId,
+  flash: flashModelId,
+  vision: proModelId,
+  reasoning_effort: "high",
+  ...(routingMode ? { routing_mode: routingMode } : {}),
+  ...(roleModels ? { role_models: roleModels } : {}),
+};
 const enabled = process.env.FREE_API_LIVE_LONG_CONVERGENCE === "1";
 const fixtureDir = path.join(artifactDir, `agent-long-convergence-${Date.now()}-${process.pid}`);
 const protectedFiles = new Map();
@@ -82,19 +96,19 @@ describeLong('可选真实模型多阶段长程收敛回归', function () {
     await browser.url('tauri://localhost/agent');
   });
   it('在 24 个阶段性义务中维持状态、修复、测试并通过外部断言', async () => {
-    const started = await browser.executeAsync(async (selectedModelId, workspace, done) => {
+    const started = await browser.executeAsync(async (selectedModelId, routingConfig, maxDurationMinutes, selectedWorkspace, done) => {
       try {
         const { invoke } = window.__TAURI__.core;
         const result = await invoke('start_background_agent_evaluation', {
-          modelRouting: { pro: selectedModelId, flash: selectedModelId, vision: selectedModelId, reasoning_effort: 'high' },
-          maxDurationMinutes: 20,
+          modelRouting: { pro: selectedModelId, flash: selectedModelId, vision: selectedModelId, reasoning_effort: 'high', ...(routingConfig.routing_mode ? { routing_mode: routingConfig.routing_mode } : {}), ...(routingConfig.role_models ? { role_models: routingConfig.role_models } : {}) },
+          maxDurationMinutes: maxDurationMinutes,
           scenario: 'isolated_write_fixture',
           routingPreset: null,
-          workspaceOverride: workspace,
+          workspaceOverride: selectedWorkspace,
         });
         done({ ok: true, result });
       } catch (error) { done({ ok: false, error: String(error) }); }
-    }, modelId, fixtureDir);
+    }, proModelId, routingConfig, maxDurationMinutes, fixtureDir);
     assert.equal(started?.ok, true, started?.error ?? '后台评测启动失败');
     evaluationId = started.result?.evaluation_id;
     assert.ok(evaluationId, '缺少评测 ID');

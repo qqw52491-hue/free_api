@@ -1375,6 +1375,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
                 ),
                 None,
             );
+            // 调优：finish 被质询 = 交付未达标，下一轮重写升维处理（规则模式直接升 Pro，
+            // 打分模式累加连续失败权重）。实测依据：Flash 档反复守不住交付披露纪律。
+            context.record_step_outcome(false);
         } else if is_finish && result.success {
             crate::agent::dispatcher::emit_tool_event(
                 &app,
