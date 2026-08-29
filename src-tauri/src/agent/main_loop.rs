@@ -1153,6 +1153,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             }
         };
         let (mut instruction, result) = (outcome.instruction, outcome.result);
+        // 结构化路由信号：按真实 DispatchResult 记录成功/失败（替代对反馈文本 ❌ 的脆弱匹配）
+        context.record_step_outcome(result.success);
         if result.route == RUN_INTERRUPTED_ROUTE {
             finish_interrupted_run(
                 &app,

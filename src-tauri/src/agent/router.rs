@@ -1,5 +1,6 @@
 use crate::agent::context::SandwichContext;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// 前端传入的模型路由配置表
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +25,41 @@ pub struct ModelRoutingConfig {
     /// 上下文预算与压缩策略模式：deep_coding (长程默认) | cost_saving (省流) | ultra_fast (极速)
     #[serde(default = "default_context_budget_mode")]
     pub context_budget_mode: String,
+    /// 路由模式：rules（默认，现行规则分流）| scored（难度打分制）
+    #[serde(default)]
+    pub routing_mode: String,
+    /// 角色级模型覆盖：角色名 → "pro"/"flash"/"vision"（档位别名）或具体模型 UUID。
+    /// 空串或缺省 = 跟随自动路由。用户只需维护 pro/flash/vision 三个槽，
+    /// 角色挂档位由系统默认表处理，钉死某角色才需要填这里。
+    #[serde(default)]
+    pub role_models: BTreeMap<String, String>,
+}
+
+impl Default for ModelRoutingConfig {
+    fn default() -> Self {
+        Self {
+            pro: String::new(),
+            flash: String::new(),
+            vision: String::new(),
+            reasoning_effort: "auto".to_string(),
+            pro_reasoning_effort: String::new(),
+            flash_reasoning_effort: String::new(),
+            vision_reasoning_effort: String::new(),
+            force_pro_on_first_step: false,
+            context_budget_mode: "deep_coding".to_string(),
+            routing_mode: String::new(),
+            role_models: BTreeMap::new(),
+        }
+    }
+}
+
+/// 系统固定角色名（角色集合稳定，任务千变万化都流过这些角色）。
+pub mod roles {
+    pub const PLANNER: &str = "planner";
+    pub const EXECUTOR: &str = "executor";
+    pub const REVIEWER: &str = "reviewer";
+    pub const SCOUT: &str = "scout";
+    pub const WRITER: &str = "writer";
 }
 fn default_reasoning_effort() -> String {
     "auto".to_string()
@@ -72,10 +108,43 @@ impl std::fmt::Display for RoutingTier {
     }
 }
 
+impl ModelRoutingConfig {
+    /// 角色级覆盖解析：命中返回具体模型决策；未配置（空/缺省）返回 None 走自动路由。
+    pub fn role_override(&self, role: &str) -> Option<RoutingDecision> {
+        let raw = self.role_models.get(role)?.trim().to_string();
+        if raw.is_empty() {
+            return None;
+        }
+        let decision = match raw.as_str() {
+            "pro" => RoutingDecision {
+                model_id: self.pro.clone(),
+                tier: RoutingTier::Pro,
+                reason: format!("角色 {} 手动钉在 Pro 档", role),
+            },
+            "flash" => RoutingDecision {
+                model_id: self.flash.clone(),
+                tier: RoutingTier::Flash,
+                reason: format!("角色 {} 手动钉在 Flash 档", role),
+            },
+            "vision" => RoutingDecision {
+                model_id: self.vision.clone(),
+                tier: RoutingTier::Vision,
+                reason: format!("角色 {} 手动钉在 Vision 档", role),
+            },
+            other => RoutingDecision {
+                model_id: other.to_string(),
+                tier: RoutingTier::Flash,
+                reason: format!("角色 {} 手动指定具体模型", role),
+            },
+        };
+        (!decision.model_id.is_empty()).then_some(decision)
+    }
+}
+
 pub struct AgentRouter;
 
 impl AgentRouter {
-    /// 在需要可复现的评测中，第 0 步由 Pro 建立推理基线；其他步骤保留原有动态分流。
+    /// 在需要可复现的评测中，第 0 步由 Pro 建立推理基线；其他步骤按 routing_mode 分流。
     pub fn route_for_step(
         context: &SandwichContext,
         config: &ModelRoutingConfig,
@@ -88,7 +157,33 @@ impl AgentRouter {
                 reason: "受控评测首轮规划，固定使用 Pro 建立推理基线".to_string(),
             };
         }
-        Self::route(context, config)
+        // 角色覆盖优先：首步视为 planner，其余视为 executor
+        let role = if context.turns_history.is_empty() {
+            roles::PLANNER
+        } else {
+            roles::EXECUTOR
+        };
+        if let Some(decision) = config.role_override(role) {
+            return decision;
+        }
+        if config.routing_mode.eq_ignore_ascii_case("scored") {
+            Self::route_scored(context, config)
+        } else {
+            Self::route(context, config)
+        }
+    }
+
+    /// 子 agent 派发的角色路由：先查角色覆盖，再回退自动分流。
+    pub fn route_for_role(
+        context: &SandwichContext,
+        config: &ModelRoutingConfig,
+        step_id: usize,
+        role: &str,
+    ) -> RoutingDecision {
+        if let Some(decision) = config.role_override(role) {
+            return decision;
+        }
+        Self::route_for_step(context, config, step_id)
     }
 
     /// 核心网关路由：根据当前上下文，智能决定该用哪个模型
@@ -121,20 +216,24 @@ impl AgentRouter {
         }
 
         // 规则 2：上一步执行失败 -> 升维救场
-        // 检查最新的 user 消息（反馈），如果包含 ❌ 说明上一步报错了
-        if let Some(last_msg) = context
-            .turns_history
-            .iter()
-            .rev()
-            .find(|m| m.role == "user")
+        // 结构化信号（宿主按 DispatchResult 写入）优先；历史文本 ❌ 仅作旧 checkpoint 兜底
+        if context.last_step_failed
+            || context
+                .turns_history
+                .iter()
+                .rev()
+                .find(|m| m.role == "user")
+                .map(|m| m.content.as_str().unwrap_or_default().contains("❌"))
+                .unwrap_or(false)
         {
-            if last_msg.content.as_str().unwrap_or_default().contains("❌") {
-                return RoutingDecision {
-                    model_id: config.pro.clone(),
-                    tier: RoutingTier::Pro,
-                    reason: "上一步执行失败，升维至主力模型救场".to_string(),
-                };
-            }
+            return RoutingDecision {
+                model_id: config.pro.clone(),
+                tier: RoutingTier::Pro,
+                reason: format!(
+                    "上一步执行失败（连续失败 {} 次），升维至主力模型救场",
+                    context.consecutive_failures
+                ),
+            };
         }
 
         // 规则 3：当前 DOM 观测数据极其庞大，小模型可能断片
@@ -159,6 +258,59 @@ impl AgentRouter {
         }
     }
 
+    /// 难度打分制路由：只读结构化信号，产出透明的加权分；>= 60 升维 Pro。
+    /// 视觉与首步规划仍是硬规则（前者不可覆盖，后者需建立推理基线）。
+    pub fn route_scored(context: &SandwichContext, config: &ModelRoutingConfig) -> RoutingDecision {
+        if Self::has_pending_vision(context) {
+            return RoutingDecision {
+                model_id: config.vision.clone(),
+                tier: RoutingTier::Vision,
+                reason: "当前上下文包含截图/图片，必须使用视觉模型处理".to_string(),
+            };
+        }
+        if context.turns_history.is_empty() {
+            return RoutingDecision {
+                model_id: config.pro.clone(),
+                tier: RoutingTier::Pro,
+                reason: "首步全局规划，需要强推理能力".to_string(),
+            };
+        }
+
+        let mut score = 0i32;
+        let mut factors: Vec<String> = Vec::new();
+        if context.review_contract.is_some() {
+            score += 20;
+            factors.push("复杂任务契约(+20)".to_string());
+        }
+        if context.last_step_failed {
+            let escalations = context.consecutive_failures.min(3) as i32;
+            let weight = 15 * escalations;
+            score += weight;
+            factors.push(format!("连续失败{}次(+{})", context.consecutive_failures, weight));
+        }
+        if context.current_observation.len() > 15000 {
+            score += 20;
+            factors.push(format!("观测数据过长(+20, {}字符)", context.current_observation.len()));
+        }
+        if score >= 60 {
+            RoutingDecision {
+                model_id: config.pro.clone(),
+                tier: RoutingTier::Pro,
+                reason: format!("难度分 {} ≥ 60（{}），升维强模型", score, factors.join("、")),
+            }
+        } else {
+            RoutingDecision {
+                model_id: config.flash.clone(),
+                tier: RoutingTier::Flash,
+                reason: format!(
+                    "难度分 {} < 60（{}），常规操作使用快模型",
+                    score,
+                    if factors.is_empty() { "无难度信号".to_string() } else { factors.join("、") }
+                ),
+            }
+        }
+    }
+
     /// 检查历史记录中是否包含需要视觉模型处理的多模态图片
     fn has_pending_vision(context: &SandwichContext) -> bool {
         for msg in context.turns_history.iter().rev() {
@@ -171,5 +323,142 @@ impl AgentRouter {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::context::SandwichContext;
+    use crate::agent::review_contract::ReviewContract;
+
+    fn ctx_with(contract: Option<ReviewContract>, failed: bool, failures: u32, observation: usize) -> SandwichContext {
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        if contract.is_some() {
+            context.review_contract = contract;
+        }
+        context.record_step_outcome(!failed); // failed=false 表示成功步
+        if failures > 0 {
+            // 直接设置连续失败次数（record_step_outcome 已置 1，再补足）
+            context.consecutive_failures = failures;
+        }
+        context.current_observation = "x".repeat(observation);
+        context
+    }
+
+    fn push_user_turn(context: &mut SandwichContext, text: &str) {
+        context.turns_history.push(crate::agent::context::types::ChatMessage {
+            role: "user".to_string(),
+            content: serde_json::json!(text),
+        });
+    }
+
+    fn mixed_config() -> ModelRoutingConfig {
+        ModelRoutingConfig {
+            pro: "model-pro".to_string(),
+            flash: "model-flash".to_string(),
+            vision: "model-vision".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rules_mode_keeps_legacy_escalation_and_defaults() {
+        let config = mixed_config();
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Pro, "首步必须 Pro");
+
+        push_user_turn(&mut context, "上一步反馈：执行成功");
+        context.record_step_outcome(true);
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Flash, "成功步回落 Flash");
+
+        context.record_step_outcome(false);
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Pro, "结构化失败必须升维");
+
+        context.record_step_outcome(true);
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Flash, "恢复成功回落 Flash");
+
+        context.current_observation = "x".repeat(15001);
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Pro, "超大观测升维");
+
+        // 旧 checkpoint 兜底：历史文本 ❌ 仍可触发升维（未写结构化信号的旧会话）
+        let mut legacy = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut legacy, "【❌ 执行失败】工具崩溃");
+        assert_eq!(AgentRouter::route(&legacy, &config).tier, RoutingTier::Pro, "❌ 字符串兜底升维");
+    }
+
+    #[test]
+    fn scored_mode_weights_signals_transparently() {
+        let config = ModelRoutingConfig { routing_mode: "scored".into(), ..mixed_config() };
+
+        // 简单成功步：无信号 → Flash
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut context, "上一步反馈：执行成功");
+        context.record_step_outcome(true);
+        assert_eq!(AgentRouter::route_scored(&context, &config).tier, RoutingTier::Flash);
+
+        // 契约(+20) + 单次失败(+15) = 35 < 60 → 仍 Flash
+        context.review_contract = Some(ReviewContract {
+            scope_statement: "s".into(),
+            obligations: vec![],
+        });
+        context.record_step_outcome(false);
+        assert_eq!(AgentRouter::route_scored(&context, &config).tier, RoutingTier::Flash);
+
+        // 契约(+20) + 连续失败2次(+30) = 50 < 60 → Flash
+        context.record_step_outcome(false);
+        assert_eq!(AgentRouter::route_scored(&context, &config).tier, RoutingTier::Flash);
+
+        // 契约(+20) + 连续失败3次(+45) = 65 ≥ 60 → Pro
+        context.record_step_outcome(false);
+        assert_eq!(AgentRouter::route_scored(&context, &config).tier, RoutingTier::Pro);
+
+        // 首步（空历史）无条件 Pro
+        let fresh = SandwichContext::new("system".to_string(), "目标".to_string());
+        assert_eq!(AgentRouter::route_scored(&fresh, &config).tier, RoutingTier::Pro);
+    }
+
+    #[test]
+    fn role_overrides_pin_models_and_empty_falls_through() {
+        let mut config = ModelRoutingConfig {
+            routing_mode: "rules".into(),
+            ..mixed_config()
+        };
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut context, "上一步反馈：执行成功");
+
+        // 未配置角色：走自动路由（非首步 → Flash）
+        assert_eq!(AgentRouter::route_for_role(&context, &config, 3, roles::SCOUT).tier, RoutingTier::Flash);
+
+        // 钉档位别名
+        config.role_models.insert(roles::REVIEWER.to_string(), "pro".into());
+        let decision = AgentRouter::route_for_role(&context, &config, 3, roles::REVIEWER);
+        assert_eq!(decision.model_id, "model-pro");
+        assert_eq!(decision.tier, RoutingTier::Pro);
+
+        // 钉具体模型 UUID（逃生舱）
+        config.role_models.insert(roles::WRITER.to_string(), "some-uuid-xyz".into());
+        assert_eq!(
+            AgentRouter::route_for_role(&context, &config, 3, roles::WRITER).model_id,
+            "some-uuid-xyz"
+        );
+
+        // 空串 = 跟随自动路由
+        config.role_models.insert(roles::REVIEWER.to_string(), String::new());
+        assert_eq!(AgentRouter::route_for_role(&context, &config, 3, roles::REVIEWER).tier, RoutingTier::Flash);
+
+        // planner/executor 角色钩子在 route_for_step 内生效
+        let mut context_nonempty = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut context_nonempty, "上一步反馈：执行成功");
+        context_nonempty.record_step_outcome(true);
+        config.role_models.insert(roles::EXECUTOR.to_string(), "executor-uuid".into());
+        assert_eq!(
+            AgentRouter::route_for_step(&context_nonempty, &config, 2).model_id,
+            "executor-uuid"
+        );
+        config.role_models.remove(&roles::EXECUTOR.to_string());
+        config.role_models.insert(roles::PLANNER.to_string(), "planner-uuid".into());
+        let fresh = SandwichContext::new("system".to_string(), "目标".to_string());
+        assert_eq!(AgentRouter::route_for_step(&fresh, &config, 0).model_id, "planner-uuid");
     }
 }

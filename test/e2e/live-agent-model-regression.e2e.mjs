@@ -7,6 +7,12 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.
 const evaluationDir = path.join(rootDir, "agent_evaluations");
 const artifactDir = path.join(rootDir, "test-artifacts");
 const modelId = process.env.FREE_API_LIVE_MODEL_ID?.trim();
+const proModelId = process.env.FREE_API_LIVE_MODEL_ID_PRO?.trim() || modelId;
+const flashModelId = process.env.FREE_API_LIVE_MODEL_ID_FLASH?.trim() || modelId;
+const visionModelId = process.env.FREE_API_LIVE_MODEL_ID_VISION?.trim() || modelId;
+const routingMode = process.env.FREE_API_ROUTING_MODE?.trim() || "";
+const roleModelsRaw = process.env.FREE_API_ROLE_MODELS?.trim() || "";
+const roleModels = roleModelsRaw ? JSON.parse(roleModelsRaw) : null;
 const evaluationTimeoutMs = Number(process.env.FREE_API_LIVE_EVALUATION_TIMEOUT_MS ?? 1_200_000);
 const writeFixtureEnabled = process.env.FREE_API_LIVE_WRITE_FIXTURE === "1";
 const fixtureDir = path.join(artifactDir, `agent-write-fixture-${Date.now()}-${process.pid}`);
@@ -43,15 +49,17 @@ describeLive("可选真实模型长流程回归", function () {
   });
 
   it("以调用方指定 UUID 运行真实只读工程回归并落盘可审计报告", async () => {
-    const started = await browser.executeAsync(async (selectedModelId, selectedScenario, selectedWorkspace, done) => {
+    const started = await browser.executeAsync(async (proModelId, flashModelId, visionModelId, routingMode, roleModels, selectedScenario, selectedWorkspace, done) => {
       try {
         const { invoke } = window.__TAURI__.core;
         const result = await invoke("start_background_agent_evaluation", {
           modelRouting: {
-            pro: selectedModelId,
-            flash: selectedModelId,
-            vision: selectedModelId,
+            pro: proModelId,
+            flash: flashModelId,
+            vision: visionModelId,
             reasoning_effort: "high",
+            ...(routingMode ? { routing_mode: routingMode } : {}),
+            ...(roleModels ? { role_models: roleModels } : {}),
           },
           maxDurationMinutes: 20,
           scenario: selectedScenario,
@@ -62,7 +70,7 @@ describeLive("可选真实模型长流程回归", function () {
       } catch (error) {
         done({ ok: false, error: String(error) });
       }
-    }, modelId, writeFixtureEnabled ? "isolated_write_fixture" : null, writeFixtureEnabled ? fixtureDir : null);
+    }, proModelId, flashModelId, visionModelId, routingMode, roleModels, writeFixtureEnabled ? "isolated_write_fixture" : null, writeFixtureEnabled ? fixtureDir : null);
 
     assert.equal(started.ok, true, started.error);
     evaluationId = started.result.evaluation_id;
@@ -76,8 +84,10 @@ describeLive("可选真实模型长流程回归", function () {
     });
 
     const report = JSON.parse(readFileSync(reportPath, "utf8"));
-    assert.equal(report.routing?.reasoning_model_id, modelId);
-    assert.equal(report.routing?.execution_model_id, modelId);
+    if (!process.env.FREE_API_LIVE_MODEL_ID_PRO) {
+      assert.equal(report.routing?.reasoning_model_id, modelId);
+      assert.equal(report.routing?.execution_model_id, modelId);
+    }
     assert.equal(report.routing?.preset, "requested");
     assert.ok(report.metrics?.llm_call_count >= 1, "真实评测至少应产生一次模型调用");
     if (writeFixtureEnabled) {

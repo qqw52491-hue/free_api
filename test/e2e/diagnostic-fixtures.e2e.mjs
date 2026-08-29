@@ -7,6 +7,12 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.
 const evaluationDir = path.join(rootDir, "agent_evaluations");
 const artifactDir = path.join(rootDir, "test-artifacts");
 const modelId = process.env.FREE_API_LIVE_MODEL_ID?.trim();
+const proModelId = process.env.FREE_API_LIVE_MODEL_ID_PRO?.trim() || modelId;
+const flashModelId = process.env.FREE_API_LIVE_MODEL_ID_FLASH?.trim() || modelId;
+const visionModelId = process.env.FREE_API_LIVE_MODEL_ID_VISION?.trim() || modelId;
+const routingMode = process.env.FREE_API_ROUTING_MODE?.trim() || "";
+const roleModelsRaw = process.env.FREE_API_ROLE_MODELS?.trim() || "";
+const roleModels = roleModelsRaw ? JSON.parse(roleModelsRaw) : null;
 const evaluationTimeoutMs = Number(process.env.FREE_API_LIVE_EVALUATION_TIMEOUT_MS ?? 1_200_000);
 const describeLive = modelId ? describe : describe.skip;
 
@@ -149,15 +155,17 @@ describeLive("诊断型隔离 fixture（真实模型）", function () {
       });
 
       it("在隔离工作区完成诊断并通过隐藏断言", async () => {
-        const started = await browser.executeAsync(async (selectedModelId, selectedScenario, selectedWorkspace, done) => {
+        const started = await browser.executeAsync(async (proModelId, flashModelId, visionModelId, routingMode, roleModels, selectedScenario, selectedWorkspace, done) => {
           try {
             const { invoke } = window.__TAURI__.core;
             const result = await invoke("start_background_agent_evaluation", {
               modelRouting: {
-                pro: selectedModelId,
-                flash: selectedModelId,
-                vision: selectedModelId,
+                pro: proModelId,
+                flash: flashModelId,
+                vision: visionModelId,
                 reasoning_effort: "high",
+                ...(routingMode ? { routing_mode: routingMode } : {}),
+                ...(roleModels ? { role_models: roleModels } : {}),
               },
               maxDurationMinutes: 20,
               scenario: selectedScenario,
@@ -168,7 +176,7 @@ describeLive("诊断型隔离 fixture（真实模型）", function () {
           } catch (error) {
             done({ ok: false, error: String(error) });
           }
-        }, modelId, scenario, fixtureDir);
+        }, proModelId, flashModelId, visionModelId, routingMode, roleModels, scenario, fixtureDir);
 
         assert.equal(started.ok, true, started.error);
         const evaluationId = started.result.evaluation_id;

@@ -188,6 +188,13 @@ pub struct SandwichContext {
     /// 外部独立任务数据区目录引用 (轻量 schema 与行数，完整数据行在 SQLite)
     #[serde(default)]
     pub task_resources: Vec<TaskResourceRef>,
+    /// 结构化路由信号：最近一次工具步骤是否失败（宿主按 DispatchResult 写入，
+    /// 替代对反馈文本里 ❌ 字符串的脆弱匹配）。
+    #[serde(default)]
+    pub last_step_failed: bool,
+    /// 结构化路由信号：连续失败步数（成功步清零）。供路由的难度打分与升维决策使用。
+    #[serde(default)]
+    pub consecutive_failures: u32,
     /// 当前最新一次工具执行的环境观测结果 (Observation)
     pub current_observation: String,
 
@@ -238,6 +245,8 @@ impl SandwichContext {
             persisted_summary_revision: 0,
             last_reported_history_estimate_tokens: None,
             task_resources: Vec::new(),
+            last_step_failed: false,
+            consecutive_failures: 0,
             active_tool: None,
             compact_tools_index: None,
             active_tool_detail: String::new(),
@@ -246,6 +255,16 @@ impl SandwichContext {
             fetched_tools: BTreeSet::new(),
             budget_config: crate::agent::context::budget::ContextBudgetConfig::default(),
             compaction_model_config: None,
+        }
+    }
+
+    /// 宿主在每个工具步骤收尾后调用：结构化记录成功/失败，供路由难度打分使用。
+    pub fn record_step_outcome(&mut self, success: bool) {
+        self.last_step_failed = !success;
+        if success {
+            self.consecutive_failures = 0;
+        } else {
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         }
     }
 

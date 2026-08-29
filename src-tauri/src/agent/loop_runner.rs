@@ -713,7 +713,12 @@ pub async fn run_tool_phase(
     }
     // --- B2. 受限 child reviewer：异步派发，不阻塞主循环。结果在后续 step 中由 main_loop 的 poll_completed_child_runs 注入。 ---
     let dispatch_result = if inst.get_tool().eq_ignore_ascii_case("child_reviewer") {
-        let routing = crate::agent::router::AgentRouter::route_for_step(context, model_routing, step_id);
+        let routing = crate::agent::router::AgentRouter::route_for_role(
+            context,
+            model_routing,
+            step_id,
+            crate::agent::router::roles::REVIEWER,
+        );
         let model_tier = routing.tier.to_string();
         let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
         let child_params = inst.get_params();
@@ -833,7 +838,12 @@ pub async fn run_tool_phase(
     } else if inst.get_tool().eq_ignore_ascii_case("child_writer")
         || inst.get_action().eq_ignore_ascii_case("child_writer")
     {
-        let routing = crate::agent::router::AgentRouter::route_for_step(context, model_routing, step_id);
+        let routing = crate::agent::router::AgentRouter::route_for_role(
+            context,
+            model_routing,
+            step_id,
+            crate::agent::router::roles::WRITER,
+        );
         let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
         let writer_params = inst.get_params();
         match crate::agent::child_writer::spawn_child_writer(
@@ -869,7 +879,12 @@ pub async fn run_tool_phase(
     } else if inst.get_tool().eq_ignore_ascii_case("child_worker")
         || inst.get_action().eq_ignore_ascii_case("child_worker")
     {
-        let routing = crate::agent::router::AgentRouter::route_for_step(context, model_routing, step_id);
+        let routing = crate::agent::router::AgentRouter::route_for_role(
+            context,
+            model_routing,
+            step_id,
+            crate::agent::router::roles::SCOUT,
+        );
         let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
         let worker_params = inst.get_params();
         match crate::agent::child_worker::spawn_child_worker(
