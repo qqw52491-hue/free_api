@@ -396,6 +396,41 @@ const agent = {
       await botSend(config.help_text || "SandwichAgent 微信通道已就绪。");
     }
 
+    // ⓪ 元命令：停止 / 新会话（优先于答案路由，保证随时可用）
+    if (/^(停止|取消|stop)$/i.test(text)) {
+      const run = activeRuns.get(conversationId);
+      if (!run) return { text: "当前没有进行中的任务。" };
+      try {
+        await api("POST", `/channel/run/${run.runId}/cancel`);
+        return { text: "🛑 停止请求已发送，将在最近的安全边界停下。" };
+      } catch (error) {
+        return { text: `⚠️ 停止失败：${error.message}` };
+      }
+    }
+    if (/^(新会话|新对话|\/new)$/i.test(text)) {
+      if (activeRuns.has(conversationId)) {
+        return {
+          text: "当前有任务在执行。请先发送「停止」或等它完成，再新开会话。",
+        };
+      }
+      try {
+        const session = sender.project_id
+          ? await api("POST", "/channel/session", {
+              project_id: sender.project_id,
+              title: `微信 · ${sender.project_name}`,
+            })
+          : await api("POST", "/channel/session", { title: "微信 · 临时" });
+        sender.session_id = session.session_id;
+        saveState();
+        lastResults.delete(conversationId);
+        return {
+          text: `✅ 已新开会话${sender.project_name ? `（项目：${sender.project_name}）` : "（临时工作区）"}。\n老会话的上下文不再跟随（历史仍在桌面端可查），直接说新需求即可。`,
+        };
+      } catch (error) {
+        return { text: `⚠️ 新开会话失败：${error.message}` };
+      }
+    }
+
     // ① 挂起的 ask_human 提问：这条消息就是答案
     const pending = pendingQuestions.get(conversationId);
     if (pending) {
@@ -405,18 +440,6 @@ const agent = {
         return { text: "✅ 已收到，任务继续执行。" };
       } catch (error) {
         return { text: `⚠️ 回答送达失败：${error.message}\n任务可能已结束，请重新派发。` };
-      }
-    }
-
-    // ② 停止当前任务
-    if (/^(停止|取消|stop)$/i.test(text)) {
-      const run = activeRuns.get(conversationId);
-      if (!run) return { text: "当前没有进行中的任务。" };
-      try {
-        await api("POST", `/channel/run/${run.runId}/cancel`);
-        return { text: "🛑 停止请求已发送，将在最近的安全边界停下。" };
-      } catch (error) {
-        return { text: `⚠️ 停止失败：${error.message}` };
       }
     }
 
