@@ -254,7 +254,7 @@ async function submitTask(conversationId, goalText) {
   saveState();
   const num = state.task_counter;
   watchRun(conversationId, task.run_id, num);
-  return num;
+  return { num, llmRetries: task.llm_retries ?? null };
 }
 
 /** 当前任务结束后取队列中的下一个（如有） */
@@ -274,7 +274,7 @@ async function drainQueue(conversationId) {
       sessionId = session.session_id;
     }
     const goalText = await buildGoalWithMedia(sessionId, next.text, next.media);
-    const num = await submitTask(conversationId, goalText);
+    const { num } = await submitTask(conversationId, goalText);
     await botSend(`🚀 排队任务 #${num} 已开始。`);
   } catch (error) {
     await botSend(`⚠️ 排队任务启动失败：${error.message}`);
@@ -548,9 +548,9 @@ const agent = {
         sessionId = session.session_id;
       }
       const goalText = await buildGoalWithMedia(sessionId, text, request.media);
-      const num = await submitTask(conversationId, goalText);
+      const { num, llmRetries } = await submitTask(conversationId, goalText);
       const scope = sender.project_name ? `项目：${sender.project_name}` : "临时工作区";
-      const retries = task.llm_retries != null ? `，重试上限 ${task.llm_retries}` : "";
+      const retries = llmRetries != null ? `，重试上限 ${llmRetries}` : "";
       return {
         text: `🚀 任务 #${num} 已开始（${scope}${retries}）。\n每 ${Math.round(HEARTBEAT_MS / 60000)} 分钟汇报进度；发送「停止」中断；卡住时我会直接提问，回复即算回答。`,
       };
