@@ -73,6 +73,11 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         ],
     },
     BuiltinToolSpec {
+        name: "wait_jobs",
+        summary: "挂起等待后台异步任务或子审查完成；在无其他独立前置操作时使用，不消耗大模型 Token",
+        actions: &["wait_jobs(job_ids?: string[], timeout_secs?: number)"],
+    },
+    BuiltinToolSpec {
         name: "web_search",
         summary: "全网检索并返回带来源的结果",
         actions: &["web_search(query: string, max_results?: <=10)"],

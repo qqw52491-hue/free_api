@@ -43,6 +43,8 @@ pub struct ChildReviewResult {
     pub missing_evidence: Vec<String>,
     pub duration_ms: u64,
     pub completion_tokens: i64,
+    #[serde(default)]
+    pub error_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -293,6 +295,31 @@ fn finish_child_run(
             result_json,
         ],
     );
+    // ⚡ 唤醒挂起等待中的协程（watch 版本号广播，不存在丢失通知的竞态窗口）
+    crate::agent::job_engine::notify_job_state_changed();
+}
+
+/// 为失败/超时/取消的子审查构造可被信箱消费的结果 JSON。
+/// 统一让所有终态都携带 result_json，消费机制（置 NULL）才能对所有终态生效。
+fn child_error_result_json(
+    child_run_id: &str,
+    status: &str,
+    error_kind: &str,
+    duration_ms: u64,
+    completion_tokens: i64,
+) -> String {
+    serde_json::to_string(&ChildReviewResult {
+        child_run_id: child_run_id.to_string(),
+        status: status.to_string(),
+        findings: vec![],
+        confidence: "unverified".to_string(),
+        evidence_refs: vec![],
+        missing_evidence: vec![format!("子审查任务未能产出结论（{}）", error_kind)],
+        duration_ms,
+        completion_tokens,
+        error_kind: Some(error_kind.to_string()),
+    })
+    .unwrap_or_default()
 }
 
 pub async fn run_child_reviewer(
@@ -385,7 +412,13 @@ pub async fn run_child_reviewer(
                 duration_ms,
                 completion_tokens,
                 Some("invalid_output"),
-                None,
+                Some(&child_error_result_json(
+                    &child_run_id,
+                    "invalid_output",
+                    "invalid_output",
+                    duration_ms,
+                    completion_tokens,
+                )),
             );
             return Err(error);
         }
@@ -400,6 +433,7 @@ pub async fn run_child_reviewer(
         missing_evidence: output.missing_evidence,
         duration_ms,
         completion_tokens,
+        error_kind: None,
     };
     let result_json = serde_json::to_string(&result).ok();
     finish_child_run(
@@ -524,7 +558,13 @@ pub async fn spawn_child_reviewer(
                     duration_ms,
                     0,
                     Some("timeout"),
-                    None,
+                    Some(&child_error_result_json(
+                        &child_run_id_clone,
+                        "timed_out",
+                        "timeout",
+                        duration_ms,
+                        0,
+                    )),
                 );
                 return;
             }
@@ -547,7 +587,13 @@ pub async fn spawn_child_reviewer(
                     duration_ms,
                     0,
                     Some(error_kind),
-                    None,
+                    Some(&child_error_result_json(
+                        &child_run_id_clone,
+                        status,
+                        error_kind,
+                        duration_ms,
+                        0,
+                    )),
                 );
                 return;
             }
@@ -569,7 +615,13 @@ pub async fn spawn_child_reviewer(
                     duration_ms,
                     completion_tokens,
                     Some("invalid_output"),
-                    None,
+                    Some(&child_error_result_json(
+                        &child_run_id_clone,
+                        "invalid_output",
+                        "invalid_output",
+                        duration_ms,
+                        completion_tokens,
+                    )),
                 );
                 return;
             }
@@ -584,6 +636,7 @@ pub async fn spawn_child_reviewer(
             missing_evidence: output.missing_evidence,
             duration_ms,
             completion_tokens,
+            error_kind: None,
         };
         let result_json = serde_json::to_string(&result).ok();
         finish_child_run(
@@ -600,17 +653,23 @@ pub async fn spawn_child_reviewer(
     Ok(child_run_id)
 }
 
-/// 轮询已完成的子审查任务，返回尚未被消费的结果。
-/// 消费后调用方应将 result_json 置 NULL 防止重复注入。
-pub fn poll_completed_child_runs(
+/// 轮询已到达终态（成功/失败/取消/超时/中断）的子审查任务，返回尚未被消费的结果。
+/// 消费后调用方应将 result_json 置 NULL 防止重复注入；所有终态都会携带 result_json。
+///
+/// - `targets` 为 None：消费该 parent_run 下所有未消费的终态结果。
+/// - `targets` 为 Some：只消费指定 child_run_id 的结果，其余保留给后续消费，避免误吃无关结果。
+pub fn poll_completed_child_runs_filtered(
     db: &DbState,
     parent_run_id: &str,
+    targets: Option<&[String]>,
 ) -> Result<Vec<ChildReviewResult>, String> {
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare(
             "SELECT id, result_json FROM agent_child_runs
-             WHERE parent_run_id = ?1 AND status = 'succeeded' AND result_json IS NOT NULL",
+             WHERE parent_run_id = ?1
+               AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'invalid_output')
+               AND result_json IS NOT NULL",
         )
         .map_err(|error| error.to_string())?;
     let rows: Vec<(String, String)> = stmt
@@ -622,6 +681,12 @@ pub fn poll_completed_child_runs(
         .collect();
     let mut results = Vec::new();
     for (id, json_str) in rows {
+        // 定向模式：非目标 ID 的结果不消费，保留给后续 wait_jobs 或信箱轮询
+        if let Some(targets) = targets {
+            if !targets.iter().any(|t| t == &id) {
+                continue;
+            }
+        }
         if let Ok(result) = serde_json::from_str::<ChildReviewResult>(&json_str) {
             results.push(result);
             let _ = conn.execute(
@@ -631,6 +696,14 @@ pub fn poll_completed_child_runs(
         }
     }
     Ok(results)
+}
+
+/// 轮询已完成的子审查任务，返回尚未被消费的结果（消费全部终态，供主循环自动注入）。
+pub fn poll_completed_child_runs(
+    db: &DbState,
+    parent_run_id: &str,
+) -> Result<Vec<ChildReviewResult>, String> {
+    poll_completed_child_runs_filtered(db, parent_run_id, None)
 }
 
 /// 检查当前 parent_run 是否仍有正在执行中的子审查任务
@@ -894,6 +967,7 @@ mod tests {
             missing_evidence: vec![],
             duration_ms: 150,
             completion_tokens: 45,
+            error_kind: None,
         };
         let sample_json = serde_json::to_string(&sample_result).unwrap();
         finish_child_run(&state, &run_id, "succeeded", 150, 45, None, Some(&sample_json));
@@ -1004,6 +1078,7 @@ mod tests {
             missing_evidence: vec![],
             duration_ms: 200,
             completion_tokens: 30,
+            error_kind: None,
         };
         finish_child_run(&state, &child_1, "succeeded", 200, 30, None, Some(&serde_json::to_string(&res_1).unwrap()));
 
@@ -1022,6 +1097,7 @@ mod tests {
             missing_evidence: vec![],
             duration_ms: 350,
             completion_tokens: 40,
+            error_kind: None,
         };
         finish_child_run(&state, &child_2, "succeeded", 350, 40, None, Some(&serde_json::to_string(&res_2).unwrap()));
 
@@ -1033,6 +1109,199 @@ mod tests {
         // 第三轮轮询：全空
         let polled_3 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
         assert_eq!(polled_3.len(), 0);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn sample_success_json(child_run_id: &str, finding: &str) -> String {
+        serde_json::to_string(&ChildReviewResult {
+            child_run_id: child_run_id.to_string(),
+            status: "succeeded".to_string(),
+            findings: vec![finding.to_string()],
+            confidence: "confirmed".to_string(),
+            evidence_refs: vec!["ref-1".to_string()],
+            missing_evidence: vec![],
+            duration_ms: 120,
+            completion_tokens: 25,
+            error_kind: None,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn wait_for_jobs_returns_completed_child_reviewer_results() {
+        let base = std::env::temp_dir().join(format!("free-api-child-wait-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        let child_id = begin_child_run(&state, "parent-run-wait", "session-wait", &workspace, "model-a", 1).unwrap();
+        finish_child_run(
+            &state,
+            &child_id,
+            "succeeded",
+            120,
+            25,
+            None,
+            Some(&sample_success_json(&child_id, "审查结论：主根因成立")),
+        );
+
+        // wait_jobs 定向等待 child_run_id：直接取回完整审查结论
+        let results = crate::agent::job_engine::wait_for_jobs(
+            &state,
+            "parent-run-wait",
+            Some(&[child_id.clone()]),
+            10,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].job_id, child_id);
+        assert_eq!(results[0].job_type, "child_reviewer");
+        assert_eq!(results[0].status, "succeeded");
+        assert!(results[0].result_json.contains("主根因成立"));
+
+        // 消费后不可重复获取（幂等）
+        let again = crate::agent::job_engine::wait_for_jobs(
+            &state,
+            "parent-run-wait",
+            Some(&[child_id.clone()]),
+            5,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(again.is_empty());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn wait_for_jobs_reactively_wakes_when_child_finishes() {
+        let base = std::env::temp_dir().join(format!("free-api-child-wake-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        let child_id = begin_child_run(&state, "parent-run-wake", "session-wake", &workspace, "model-a", 0).unwrap();
+
+        // 挂起等待期间子审查在后台完成，watch 版本号变更应瞬间唤醒等待者
+        let db_clone = DbState(state.0.clone());
+        let child_clone = child_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            finish_child_run(
+                &db_clone,
+                &child_clone,
+                "succeeded",
+                45,
+                20,
+                None,
+                Some(&sample_success_json(&child_clone, "后台完成的结论")),
+            );
+        });
+
+        let started = std::time::Instant::now();
+        let results = crate::agent::job_engine::wait_for_jobs(
+            &state,
+            "parent-run-wake",
+            Some(&[child_id.clone()]),
+            10,
+            None,
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].job_id, child_id);
+        assert!(results[0].result_json.contains("后台完成的结论"));
+        // 反应式唤醒：远小于超时上限，也排除 spin 快速假通过
+        assert!(elapsed.as_millis() >= 40 && elapsed.as_millis() < 3000);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn wait_for_jobs_targeting_running_child_does_not_consume_finished_sibling() {
+        let base = std::env::temp_dir().join(format!("free-api-child-target-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        let finished = begin_child_run(&state, "parent-run-t", "session-t", &workspace, "model-a", 0).unwrap();
+        let running = begin_child_run(&state, "parent-run-t", "session-t", &workspace, "model-a", 0).unwrap();
+        finish_child_run(
+            &state,
+            &finished,
+            "succeeded",
+            80,
+            15,
+            None,
+            Some(&sample_success_json(&finished, "先完成的兄弟任务")),
+        );
+
+        // 定向等待仍在 running 的 child：超时返回空，且不得消费已完成的兄弟结果
+        let results = crate::agent::job_engine::wait_for_jobs(
+            &state,
+            "parent-run-t",
+            Some(&[running.clone()]),
+            1,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(results.iter().all(|job| job.job_id != finished));
+
+        // 兄弟结果仍可被后续轮询完整取回
+        let later = crate::agent::job_engine::wait_for_jobs(
+            &state,
+            "parent-run-t",
+            Some(&[finished.clone()]),
+            5,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].job_id, finished);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn failed_child_reviewer_result_is_delivered_with_error_kind() {
+        let base = std::env::temp_dir().join(format!("free-api-child-fail-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        let child_id = begin_child_run(&state, "parent-run-fail", "session-fail", &workspace, "model-a", 0).unwrap();
+        finish_child_run(
+            &state,
+            &child_id,
+            "timed_out",
+            45_000,
+            0,
+            Some("timeout"),
+            Some(&child_error_result_json(&child_id, "timed_out", "timeout", 45_000, 0)),
+        );
+
+        // 主循环信箱轮询也能取到失败终态（此前失败结果会被静默丢弃）
+        let polled = poll_completed_child_runs(&state, "parent-run-fail").unwrap();
+        assert_eq!(polled.len(), 1);
+        assert_eq!(polled[0].status, "timed_out");
+        assert_eq!(polled[0].error_kind.as_deref(), Some("timeout"));
+        assert!(polled[0].findings.is_empty());
 
         let _ = std::fs::remove_dir_all(base);
     }

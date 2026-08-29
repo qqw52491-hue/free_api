@@ -973,6 +973,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
                     if !result.missing_evidence.is_empty() {
                         injection.push_str(&format!("缺失证据: {}\n", result.missing_evidence.join(", ")));
                     }
+                    if let Some(ref err) = result.error_kind {
+                        injection.push_str(&format!("异常类别: {}（子审查未产出有效结论，请勿当作证据使用）\n", err));
+                    }
                 }
                 if !injection.is_empty() {
                     context.add_error_feedback(&injection);
@@ -1247,7 +1250,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             open_todos.push(blocker);
         }
         if is_finish && (crate::agent::child_reviewer::has_running_child_runs(state.inner(), &run_id) || crate::agent::job_engine::has_running_jobs(state.inner(), &run_id)) {
-            open_todos.push("仍有后台异步任务正在执行中，请等待其推导或执行完成并接收结论后再提交 finish".to_string());
+            open_todos.push("仍有后台异步任务正在执行中，请调用 wait_jobs 工具挂起等待其执行完成并接收结论，或执行其他独立操作后再提交 finish".to_string());
         }
         let finish_challenged = should_challenge_finish_with_complex_delivery_blocker(
             is_finish,

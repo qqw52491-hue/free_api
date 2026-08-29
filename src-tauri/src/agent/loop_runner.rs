@@ -732,7 +732,10 @@ pub async fn run_tool_phase(
         .await
         {
             Ok(child_run_id) => DispatchResult {
-                stdout: format!("子审查任务已异步派发，child_run_id: {}。结果将在后续步骤中自动注入。", child_run_id),
+                stdout: format!(
+                    "子审查任务已异步派发，child_run_id: {}。需要结论时调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待，返回值中将直接给出完整审查结论；若先执行其他独立操作，结果也会在后续步骤自动注入。",
+                    child_run_id, child_run_id
+                ),
                 stderr: String::new(),
                 success: true,
                 route: "child_reviewer:spawned".to_string(),
@@ -742,6 +745,80 @@ pub async fn run_tool_phase(
                 stderr: error,
                 success: false,
                 route: "child_reviewer:rejected_or_failed".to_string(),
+            },
+        }
+    // --- B2.5 特殊工具：wait_jobs 反应式零 Token 挂起等待 ---
+    } else if inst.get_tool().eq_ignore_ascii_case("wait_jobs")
+        || inst.get_tool().eq_ignore_ascii_case("wait_job")
+        || inst.get_action().eq_ignore_ascii_case("wait_jobs")
+    {
+        let params = inst.get_params();
+        let target_ids: Option<Vec<String>> = params
+            .get("job_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            });
+        let timeout_secs = params
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(45);
+
+        let _ = app.emit(
+            &format!("agent-log-{}", final_session_id),
+            format!("⏳ 正在挂起等待后台异步任务完成 (超时限制: {}s)...", timeout_secs),
+        );
+        let _ = app.emit(
+            &format!("agent-progress-{}", final_session_id),
+            json!({
+                "type": "agent_waiting_jobs",
+                "message": "正在挂起等待后台任务完成...",
+                "job_ids": target_ids.clone().unwrap_or_default(),
+            }),
+        );
+
+        let mut rx_watch = interrupt_rx.clone();
+        match crate::agent::job_engine::wait_for_jobs(
+            state.inner(),
+            parent_run_id,
+            target_ids.as_deref(),
+            timeout_secs,
+            Some(&mut rx_watch),
+        )
+        .await
+        {
+            Ok(completed_jobs) => {
+                let mut out = String::new();
+                if completed_jobs.is_empty() {
+                    out.push_str("等待结束：当前无新完成的后台任务，或所有后台任务已结束。");
+                } else {
+                    out.push_str(&format!("✅ 已成功等待并接收到 {} 个后台任务结果：\n", completed_jobs.len()));
+                    for job in completed_jobs {
+                        out.push_str(&format!(
+                            "\n- 【任务 ID: {} | 类型: {}】状态: {}, 耗时: {}ms\n  描述: {}\n  输出: {}\n",
+                            job.job_id,
+                            job.job_type,
+                            job.status,
+                            job.duration_ms,
+                            job.title,
+                            if job.result_json.is_empty() { "（无附加输出）" } else { &job.result_json }
+                        ));
+                    }
+                }
+                DispatchResult {
+                    stdout: out,
+                    stderr: String::new(),
+                    success: true,
+                    route: "wait_jobs:resolved".to_string(),
+                }
+            }
+            Err(err) => DispatchResult {
+                stdout: String::new(),
+                stderr: err,
+                success: false,
+                route: "wait_jobs:interrupted_or_failed".to_string(),
             },
         }
     // --- B3. 特殊拦截：AI 主动挂起呼叫人类 ---
