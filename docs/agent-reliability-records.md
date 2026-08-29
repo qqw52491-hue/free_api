@@ -139,3 +139,54 @@
 - **AgentComposer 模型路由弹窗**新增：①路由模式切换（规则/打分）；②角色档位表——规划、执行、审查、侦察L2、写入L3 五个固定角色，每角色可选「跟随自动 / 强模型槽 / 快模型槽 / 视觉槽」，值经 role_models 透传后端，钉死优先于自动分流。
 - **配置面收敛**：用户只维护 3 个槽位（换模型=换槽），角色默认跟随系统映射表，高级钉死入口保留——与 Claude Code 的档位别名模式同构。
 - 打分模式（routing_mode=scored）实弹验证已排队后台执行，结果见后续记录。
+
+---
+
+## 附：评测运维手册（2026-08-29 白屏排查战实录，按症状查表）
+
+### 症状 1：评测启动失败「Embedded WebDriver server did not become ready on port 4445」
+
+**根因（当晚真凶）**：跑过普通 `cargo build`（不带 `wdio` feature）之后，`target/debug/free-api-chat`
+被覆盖成无驱动插件的版本——app 能起窗口但前端全白、驱动永不注册。
+**诊断命令**：`strings src-tauri/target/debug/free-api-chat | grep -c "wdio-webdriver"`（0 = 二进制坏的）。
+**修复**：`npm run test:e2e:build`（带 `--features wdio`）再重试。
+**铁律**：评测前必跑 test:e2e:build 并校验 strings；写完 Rust 代码后先 cargo test，评测前必须重新 test:e2e:build。
+
+### 症状 2：app 进程活着、窗口白屏、无障碍树读不到
+
+= app 卡死在启动早期（驱动插件注册之前）。当晚链路：二进制无 wdio feature（症状 1）→ 白屏。
+**铁律**：`pkill -9 free-api-chat` 强杀后检查 `~/Library/Application Support/free-api-chat/*.db-wal/-shm`
+残留（当晚 WAL 0 字节属正常）；重启前确认 `lsof -i :4445` 为空。
+
+### 症状 3：端口 4445 被残留进程占用（连发启动的竞态）
+
+上一轮的 app/driver 还没退干净就起新一轮 → 新 driver 绑不上端口。
+**修复**：`pkill -9 -f "wdio"; pkill -9 -f free-api-chat; sleep 5; lsof -i :4445`（必须为空）再启动。
+**铁律**：一轮评测结束后再启动下一轮，绝不并行两个 wdio。
+
+### 症状 4：评测规格静默跳过 / executeAsync 脚本超时
+
+- 规格 `describeLive = modelId ? describe : describe.skip`——**只要 FREE_API_LIVE_MODEL_ID 没设，全部场景静默 skip**；
+  加分槽变量（PRO/FLASH/VISION）时门控变量仍必须传。
+- `browser.executeAsync` 的函数体在浏览器上下文执行，**模块级变量不会带进去**——新增参数必须同步改
+  函数签名和调用实参列表，否则 `done` 被顶掉 → 30s 脚本超时（当晚 fake-action 全军覆没的根因）。
+- 判断依据：报告 mtime + 报告内 routing id 是否为本轮模型；`agent_llm_calls` 有无新增行。
+
+### 症状 5：评测「卡住」——先分清端点慢还是真死锁
+
+查 `agent_llm_calls` 最近几行：`ttft_ms` 飙到几十秒 = 端点劣化（当晚 6.8 崩、6.7 TTFT 7-62s），
+`outcome=parse_error` 反复出现 = 小模型 JSON 合规问题在烧重试。后台评测传输错误最多 20 次有界退避，不会死锁，只会长跑。
+
+### 监控速查（本轮验证有效）
+
+```bash
+# 运行状态与步骤数
+sqlite3 "$DB" "SELECT id,status,started_at FROM agent_run_traces ORDER BY started_at DESC LIMIT 3;"
+sqlite3 "$DB" "SELECT COUNT(*) FROM agent_step_logs WHERE session_id='$SESSION';"
+# 逐调用延迟/解析/重试（区分端点慢 vs 死锁）
+sqlite3 "$DB" "SELECT session_call_index,outcome,request_try,transport_attempt_count,total_duration_ms,ttft_ms FROM agent_llm_calls WHERE session_id='$SESSION' ORDER BY session_call_index DESC LIMIT 6;"
+# 子任务（reviewer/worker/writer 按 kind）
+sqlite3 "$DB" "SELECT kind,status,error_kind FROM agent_child_runs WHERE started_at>'$T';"
+```
+$DB = `~/Library/Application Support/free-api-chat/data_v2.db`；报告自述路由模型（routing.reasoning/execution_model_id），
+跨轮核对报告归属以 mtime + routing id 双重确认。
