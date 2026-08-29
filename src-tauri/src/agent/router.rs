@@ -282,6 +282,16 @@ impl AgentRouter {
             score += 20;
             factors.push("复杂任务契约(+20)".to_string());
         }
+        // 收官阶段硬升维：已收尾至少 2 项、仅剩 1–2 项未完时，收官步全部交给强模型。
+        // 依据：尾段交付错的返工代价最高（24 阶段长程在第 47 步失败的实测教训）。
+        if Self::is_endgame(&context.todo_list) {
+            factors.push("收官阶段：任务收尾 precision 优先，直接升维".to_string());
+            return RoutingDecision {
+                model_id: config.pro.clone(),
+                tier: RoutingTier::Pro,
+                reason: format!("收官步全量升维强模型（{}）", factors.join("；")),
+            };
+        }
         if context.last_step_failed {
             let escalations = context.consecutive_failures.min(3) as i32;
             let weight = 15 * escalations;
@@ -309,6 +319,18 @@ impl AgentRouter {
                 ),
             }
         }
+    }
+
+    /// 收官判定：总义务 ≥2、已完成 ≥2、剩余 0–2 项未完结（含全部完成待交付的时刻）。
+    /// "扫地机器人干粗活，最后交房验收集合老师傅。"
+    fn is_endgame(todos: &[crate::agent::types::TodoItem]) -> bool {
+        let total = todos.len();
+        let open = todos
+            .iter()
+            .filter(|t| t.status != "done" && t.status != "failed")
+            .count();
+        let done = total - open;
+        total >= 2 && done >= 2 && open <= 2
     }
 
     /// 检查历史记录中是否包含需要视觉模型处理的多模态图片
@@ -416,6 +438,39 @@ mod tests {
         // 首步（空历史）无条件 Pro
         let fresh = SandwichContext::new("system".to_string(), "目标".to_string());
         assert_eq!(AgentRouter::route_scored(&fresh, &config).tier, RoutingTier::Pro);
+    }
+
+    #[test]
+    fn endgame_stage_escalates_delivery_steps_to_pro() {
+        let config = ModelRoutingConfig { routing_mode: "scored".into(), ..mixed_config() };
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut context, "上一步反馈：执行成功");
+
+        // 任务前段：4 项义务只剩 1 项完成 —— 不是收官，走常规评分
+        context.todo_list = vec![
+            crate::agent::types::TodoItem { id: 1, status: "done".into(), description: "a".into(), evidence_output_id: None },
+            crate::agent::types::TodoItem { id: 2, status: "pending".into(), description: "b".into(), evidence_output_id: None },
+            crate::agent::types::TodoItem { id: 3, status: "pending".into(), description: "c".into(), evidence_output_id: None },
+            crate::agent::types::TodoItem { id: 4, status: "pending".into(), description: "d".into(), evidence_output_id: None },
+        ];
+        assert_eq!(AgentRouter::route_scored(&context, &config).tier, RoutingTier::Flash);
+
+        // 收官：4 项里只剩 1 项未完 —— 强制升维
+        context.todo_list[2].status = "done".into();
+        context.todo_list[3].status = "done".into();
+        assert_eq!(AgentRouter::route_scored(&context, &config).tier, RoutingTier::Pro, "收官步必须全量升维");
+
+        // 只剩最后一项时同样升维
+        context.todo_list[1].status = "done".into();
+        assert_eq!(AgentRouter::route_scored(&context, &config).tier, RoutingTier::Pro);
+
+        // 单义务任务不算收官（无从谈起"最后几项"）
+        let mut tiny = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut tiny, "ok");
+        tiny.todo_list = vec![
+            crate::agent::types::TodoItem { id: 1, status: "pending".into(), description: "x".into(), evidence_output_id: None },
+        ];
+        assert_eq!(AgentRouter::route_scored(&tiny, &config).tier, RoutingTier::Flash);
     }
 
     #[test]
