@@ -722,16 +722,41 @@ pub async fn run_tool_phase(
         let model_tier = routing.tier.to_string();
         let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
         let child_params = inst.get_params();
+        // 角色卡：派发参数可携带 "role" 命中角色池 → 钉死专属模型 + 注入人设
+        let mut reviewer_persona = String::new();
+        let mut reviewer_model = routing.model_id.clone();
+        if let Some(role_name) = child_params.get("role").and_then(|v| v.as_str()) {
+            match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
+                Ok(Some(card)) => {
+                    reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
+                    if !card.model_id.is_empty() {
+                        reviewer_model = card.model_id.clone();
+                    }
+                }
+                Ok(None) => {
+                    return Ok(DispatchResult {
+                        stdout: String::new(),
+                        stderr: format!("角色卡不存在或已禁用：{}；可用角色见角色池菜单，或先用 role_manager.upsert 创建。", role_name),
+                        success: false,
+                        route: "host_rejection:role_card_missing".to_string(),
+                    });
+                }
+                Err(error) => {
+                    return Ok(DispatchResult { stdout: String::new(), stderr: error, success: false, route: "host_rejection:role_card_lookup".to_string() });
+                }
+            }
+        }
         match spawn_child_reviewer(
             Some(app.clone()),
             state.inner(),
             parent_run_id,
             final_session_id,
             workspace_dir,
-            &routing.model_id,
+            &reviewer_model,
             &model_tier,
             &reasoning_effort,
             &child_params,
+            &reviewer_persona,
             interrupt_rx.clone(),
         )
         .await
@@ -846,15 +871,41 @@ pub async fn run_tool_phase(
         );
         let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
         let writer_params = inst.get_params();
+        let mut writer_persona = String::new();
+        let mut writer_model = routing.model_id.clone();
+        let mut effective_params = writer_params.clone();
+        if let Some(role_name) = writer_params.get("role").and_then(|v| v.as_str()) {
+            match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
+                Ok(Some(card)) => {
+                    writer_persona = crate::agent::tools::role_manager::persona_block(&card);
+                    if !card.model_id.is_empty() {
+                        writer_model = card.model_id.clone();
+                    }
+                    effective_params = crate::agent::tools::role_manager::merge_writer_defaults(&card, &writer_params);
+                }
+                Ok(None) => {
+                    return Ok(DispatchResult {
+                        stdout: String::new(),
+                        stderr: format!("角色卡不存在或已禁用：{}。", role_name),
+                        success: false,
+                        route: "host_rejection:role_card_missing".to_string(),
+                    });
+                }
+                Err(error) => {
+                    return Ok(DispatchResult { stdout: String::new(), stderr: error, success: false, route: "host_rejection:role_card_lookup".to_string() });
+                }
+            }
+        }
         match crate::agent::child_writer::spawn_child_writer(
             Some(app.clone()),
             state.inner(),
             parent_run_id,
             final_session_id,
             workspace_dir,
-            &routing.model_id,
+            &writer_model,
             &reasoning_effort,
-            &writer_params,
+            &effective_params,
+            writer_persona,
             interrupt_rx.clone(),
         )
         .await
@@ -887,15 +938,39 @@ pub async fn run_tool_phase(
         );
         let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
         let worker_params = inst.get_params();
+        let mut scout_persona = String::new();
+        let mut scout_model = routing.model_id.clone();
+        if let Some(role_name) = worker_params.get("role").and_then(|v| v.as_str()) {
+            match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
+                Ok(Some(card)) => {
+                    scout_persona = crate::agent::tools::role_manager::persona_block(&card);
+                    if !card.model_id.is_empty() {
+                        scout_model = card.model_id.clone();
+                    }
+                }
+                Ok(None) => {
+                    return Ok(DispatchResult {
+                        stdout: String::new(),
+                        stderr: format!("角色卡不存在或已禁用：{}。", role_name),
+                        success: false,
+                        route: "host_rejection:role_card_missing".to_string(),
+                    });
+                }
+                Err(error) => {
+                    return Ok(DispatchResult { stdout: String::new(), stderr: error, success: false, route: "host_rejection:role_card_lookup".to_string() });
+                }
+            }
+        }
         match crate::agent::child_worker::spawn_child_worker(
             Some(app.clone()),
             state.inner(),
             parent_run_id,
             final_session_id,
             workspace_dir,
-            &routing.model_id,
+            &scout_model,
             &reasoning_effort,
             &worker_params,
+            scout_persona,
             interrupt_rx.clone(),
         )
         .await

@@ -92,6 +92,16 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         actions: &["wait_jobs(job_ids?: string[], timeout_secs?: number)"],
     },
     BuiltinToolSpec {
+        name: "role_manager",
+        summary: "专精角色池维护：角色卡=人设提示词+钉死模型+作用域+默认测试命令；派发子任务时传 role 参数即挂载",
+        actions: &[
+            "list()",
+            "upsert(name: string, label?: string, model_id?: string, persona_prompt?: string, scope_hints?: string, default_test_command?: string)",
+            "toggle(name: string)",
+            "delete(name: string)",
+        ],
+    },
+    BuiltinToolSpec {
         name: "watch_start",
         summary: "持续监听：周期巡检工作区内文件或命令输出，仅在检测到变化时把事件自动注入上下文；finish 前必须释放全部监听",
         actions: &[

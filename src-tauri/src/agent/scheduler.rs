@@ -246,7 +246,7 @@ async fn fire_run(
     } else {
         Some(crate::agent::channel::effective_scratch_dir_pub(config))
     };
-    register_and_spawn_run(app.clone(), session_id, item.goal.clone(), routing, workspace_override, config.llm_retries).map_err(
+    register_and_spawn_run(app.clone(), session_id, item.goal.clone(), routing, workspace_override, config.llm_retries, config.action_milestone_steps, config.phase_pushes).map_err(
         |error| match error {
             crate::agent::channel::SubmitError::InFlight => {
                 "该会话已有在途任务（上一轮尚未结束，本轮跳过）".to_string()

@@ -455,6 +455,10 @@ pub(crate) fn execute_command_inner(
     if tool.eq_ignore_ascii_case("skill_manager") {
         return crate::agent::tools::skill_manager::dispatch(db, action, params);
     }
+    // 3.9 核心原生工具 H: role_manager (专精角色池维护——角色卡=人设+模型绑定+作用域)
+    if tool.eq_ignore_ascii_case("role_manager") {
+        return crate::agent::tools::role_manager::dispatch(db, action, params);
+    }
 
     // 3.9 核心原生工具 H: schedule_manager (定时任务管理——对话内直接建计划)
     if tool.eq_ignore_ascii_case("schedule_manager") {
@@ -608,7 +612,7 @@ pub(crate) fn execute_command_inner(
     DispatchResult {
         stdout: String::new(),
         stderr: format!(
-            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n可用原生内置工具：finish, ask_human, model_manager, mcp_manager, skill_manager, schedule_manager, project_manager, system_info, wechat_manager, web_search, web_fetch, search, get_step_output, task_store；{}\n外部 MCP 工具调用格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
+            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n可用原生内置工具：finish, ask_human, model_manager, mcp_manager, skill_manager, role_manager, schedule_manager, project_manager, system_info, wechat_manager, web_search, web_fetch, search, get_step_output, task_store；{}\n外部 MCP 工具调用格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
             tool,
             action,
             mcp_guide

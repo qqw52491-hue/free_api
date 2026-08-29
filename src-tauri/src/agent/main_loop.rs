@@ -589,6 +589,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
 
     // 2. 稳定的内置工具契约首轮常驻；长范例与外部 MCP schema 仍按需加载。
     let local_tools_menu = crate::agent::prompt_assembly::build_local_tools_menu();
+    // 角色池清单：主 Agent 由此知道池子里有哪些专精角色可派发（读取失败不阻断运行）
+    let role_cards_menu = crate::agent::tools::role_manager::build_role_cards_menu(state.inner())
+        .unwrap_or_default();
 
     // 3. 从当前工作区向上读取 AGENTS.md / HUB.md；内容未变时走进程内哈希缓存。
     let workspace_skill_context =
@@ -663,14 +666,15 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         ""
     };
     let system_prompt = format!(
-        "{}{}{}{}{}\n{}\n{}",
+        "{}{}{}{}{}\n{}\n{}{}",
         base_prompt,
         project_resource_boundary,
         workspace_skill_context,
         custom_instruction_context,
         skill_catalog,
         local_tools_menu,
-        mcp_tools_menu
+        mcp_tools_menu,
+        role_cards_menu
     );
     println!(
         "--- 最终系统提示词 (级联菜单模式) ---\n{}\n------------------",

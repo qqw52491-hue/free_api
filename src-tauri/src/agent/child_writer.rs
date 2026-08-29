@@ -478,6 +478,7 @@ pub async fn run_writer_loop(
     config: ModelConfig,
     reasoning_effort: String,
     request: WriterRequest,
+    persona: String,
     mut interrupt_rx: watch::Receiver<u64>,
 ) {
     let started_at = std::time::Instant::now();
@@ -499,7 +500,7 @@ pub async fn run_writer_loop(
         request.focus_paths.join(", ")
     };
     let mut messages = vec![
-        json!({"role": "system", "content": writer_system_prompt()}),
+        json!({"role": "system", "content": format!("{}{}", writer_system_prompt(), persona)}),
         json!({"role": "user", "content": format!(
             "副本工作区根目录：{}\n关注路径：{}\n必须执行的测试命令：{}\n\n修改任务：{}",
             copy_root.display(),
@@ -728,6 +729,7 @@ pub async fn spawn_child_writer(
     model_id: &str,
     reasoning_effort: &str,
     params: &Value,
+    persona: String,
     interrupt_rx: watch::Receiver<u64>,
 ) -> Result<String, String> {
     let request = parse_writer_request(params)?;
@@ -785,6 +787,7 @@ pub async fn spawn_child_writer(
         config,
         reasoning,
         request,
+        persona,
         interrupt_rx,
     ));
     Ok(child_run_id)

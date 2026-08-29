@@ -183,6 +183,19 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             error_kind TEXT,
             result_json TEXT
         );
+        CREATE TABLE IF NOT EXISTS agent_role_cards (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            label TEXT NOT NULL DEFAULT '',
+            model_id TEXT NOT NULL DEFAULT '',
+            persona_prompt TEXT NOT NULL DEFAULT '',
+            scope_hints TEXT NOT NULL DEFAULT '',
+            default_test_command TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_agent_child_runs_parent ON agent_child_runs(parent_run_id, started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_agent_child_runs_session ON agent_child_runs(parent_session_id, started_at DESC);
 

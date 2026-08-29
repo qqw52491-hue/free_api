@@ -303,6 +303,7 @@ pub async fn run_worker_loop(
     config: ModelConfig,
     reasoning_effort: String,
     request: WorkerRequest,
+    persona: String,
     mut interrupt_rx: watch::Receiver<u64>,
 ) {
     let started_at = std::time::Instant::now();
@@ -321,7 +322,7 @@ pub async fn run_worker_loop(
         request.focus_paths.join(", ")
     };
     let mut messages = vec![
-        json!({"role": "system", "content": worker_system_prompt("scout")}),
+        json!({"role": "system", "content": format!("{}{}", worker_system_prompt("scout"), persona)}),
         json!({"role": "user", "content": format!(
             "工作区根目录：{}\n关注路径（如提供）：{}\n\n侦察任务：{}",
             workspace_root.display(),
@@ -526,6 +527,7 @@ pub async fn spawn_child_worker(
     model_id: &str,
     reasoning_effort: &str,
     params: &Value,
+    persona: String,
     interrupt_rx: watch::Receiver<u64>,
 ) -> Result<String, String> {
     let request = parse_worker_request(params)?;
@@ -562,6 +564,7 @@ pub async fn spawn_child_worker(
         config,
         reasoning,
         request,
+        persona,
         interrupt_rx,
     ));
     Ok(child_run_id)
