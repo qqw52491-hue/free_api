@@ -6,6 +6,7 @@
 use crate::agent::scheduler::{load_schedules, refresh_next, save_schedules, ScheduleItem};
 use crate::agent::types::DispatchResult;
 use crate::db::DbState;
+use tauri::Manager;
 
 pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> DispatchResult {
     let act = if !action.is_empty() {
@@ -293,7 +294,23 @@ fn run_now(db: &DbState, params: &serde_json::Value) -> DispatchResult {
         routing.vision = routing.pro.clone();
     }
 
-    match crate::agent::channel::register_and_spawn_run(app, session_id, item.goal.clone(), routing, None, config.llm_retries)
+    let has_project = {
+        let state = app.state::<DbState>();
+        let conn = match state.0.lock() {
+            Ok(conn) => conn,
+            Err(e) => return fail("run_now", &e.to_string()),
+        };
+        match crate::commands::projects::project_for_session(&conn, &session_id) {
+            Ok(project) => project.is_some(),
+            Err(e) => return fail("run_now", &e),
+        }
+    };
+    let workspace_override = if has_project {
+        None
+    } else {
+        Some(crate::agent::channel::effective_scratch_dir_pub(&config))
+    };
+    match crate::agent::channel::register_and_spawn_run(app, session_id, item.goal.clone(), routing, workspace_override, config.llm_retries)
     {
         Ok(run_id) => DispatchResult {
             stdout: format!(
@@ -329,19 +346,9 @@ fn create_session(
         )
         .map(|session| session.id)
         .map_err(|e| fail("run_now", &e)),
-        None => {
-            let scratch = crate::agent::channel::effective_scratch_dir_pub(config);
-            let project_id =
-                crate::agent::channel::ensure_scratch_project(conn, &scratch).map_err(|e| fail("run_now", &e))?;
-            crate::commands::projects::create_project_session_row(
-                conn,
-                &project_id,
-                &title,
-                &config.model_id,
-            )
+        None => crate::commands::projects::create_plain_session_row(conn, &title, &config.model_id)
             .map(|session| session.id)
-            .map_err(|e| fail("run_now", &e))
-        }
+            .map_err(|e| fail("run_now", &e)),
     }
 }
 

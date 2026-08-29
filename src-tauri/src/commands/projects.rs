@@ -132,6 +132,38 @@ pub(crate) fn create_project_row(
     get_project(conn, &id)
 }
 
+/// 创建不归属任何项目的普通会话（微信未绑定任务用）：
+/// 运行时由通道层把工作区覆盖到 scratch 目录，不产生项目关联。
+pub(crate) fn create_plain_session_row(
+    conn: &Connection,
+    title: &str,
+    model_id: &str,
+) -> Result<ChatSession, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("会话标题不能为空".to_string());
+    }
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return Err("请选择会话模型".to_string());
+    }
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO chat_sessions (id, title, model_id, created_at, updated_at, message_count) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+        params![id, title, model_id, now, now],
+    )
+    .map_err(|error| format!("创建会话失败: {}", error))?;
+    Ok(ChatSession {
+        id,
+        title: title.to_string(),
+        model_id: model_id.to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+        message_count: 0,
+    })
+}
+
 pub(crate) fn create_project_session_row(
     conn: &Connection,
     project_id: &str,

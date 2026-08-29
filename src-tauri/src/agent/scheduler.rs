@@ -233,9 +233,20 @@ async fn fire_run(
         routing.vision = routing.pro.clone();
     }
 
-    // 调度器创建的会话一律绑定项目（用户项目或 scratch 项目），
-    // 工作区软锁在主循环内生效；不传 override（评测专用通道）。
-    register_and_spawn_run(app.clone(), session_id, item.goal.clone(), routing, None, config.llm_retries).map_err(
+    // 项目会话走项目工作区（软锁生效）；未绑定会话由运行时覆盖到 scratch 目录
+    let has_project = {
+        let state = app.state::<DbState>();
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        crate::commands::projects::project_for_session(&conn, &session_id)
+            .map_err(|e| e.to_string())?
+            .is_some()
+    };
+    let workspace_override = if has_project {
+        None
+    } else {
+        Some(crate::agent::channel::effective_scratch_dir_pub(config))
+    };
+    register_and_spawn_run(app.clone(), session_id, item.goal.clone(), routing, workspace_override, config.llm_retries).map_err(
         |error| match error {
             crate::agent::channel::SubmitError::InFlight => {
                 "该会话已有在途任务（上一轮尚未结束，本轮跳过）".to_string()
@@ -264,11 +275,8 @@ fn create_schedule_session(
             Ok(session.id)
         }
         None => {
-            let scratch = crate::agent::channel::effective_scratch_dir_pub(config);
-            let project_id = ensure_scratch_project(conn, &scratch)?;
-            let session = crate::commands::projects::create_project_session_row(
+            let session = crate::commands::projects::create_plain_session_row(
                 conn,
-                &project_id,
                 &format!("定时 · {}", item.name),
                 &config.model_id,
             )?;

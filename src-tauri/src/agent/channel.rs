@@ -368,15 +368,8 @@ async fn handler_session(
             )
         }
         _ => {
-            let scratch_dir = effective_scratch_dir(&config);
-            let scratch_project =
-                ensure_scratch_project(&conn, &scratch_dir).map_err(|e| bad_request(&e))?;
-            crate::commands::projects::create_project_session_row(
-                &conn,
-                &scratch_project,
-                &title,
-                &model_id,
-            )
+            // 未绑定任务：普通会话（无项目归属），工作区由运行时覆盖到 scratch 目录
+            crate::commands::projects::create_plain_session_row(&conn, &title, &model_id)
         }
     }
     .map_err(|e| bad_request(&e))?;
