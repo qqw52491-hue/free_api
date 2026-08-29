@@ -495,6 +495,17 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         [],
     );
     let _ = conn.execute("ALTER TABLE agent_llm_calls ADD COLUMN transport_attempt_count INTEGER NOT NULL DEFAULT 0;", []);
+    // 子任务类型：review = 受限只读审查者（child_reviewer）；worker = L2 只读侦察 worker（child_worker）。
+    // 两者共用 agent_child_runs 账本与信箱回收机制，按 kind 分别计数与呈现。
+    let _ = conn.execute(
+        "ALTER TABLE agent_child_runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'review';",
+        [],
+    );
+    // result_json 晚于首版建表加入：老库缺失时子任务终态结果将无法落盘/消费，必须补齐
+    let _ = conn.execute(
+        "ALTER TABLE agent_child_runs ADD COLUMN result_json TEXT;",
+        [],
+    );
     if let Err(error) = migrate_uvx_bridge_plugins_to_native(&conn) {
         eprintln!(
             "⚠️ mcp_plugins uvx 桥转原生 HTTP 迁移失败（保留原配置继续可用）: {}",
