@@ -31,6 +31,11 @@ pub fn run() {
     builder
         .manage(DbState(std::sync::Arc::new(std::sync::Mutex::new(conn))))
         .manage(registry)
+        .setup(|app| {
+            // 微信通道：本机 axum API（供 Node 桥调用），失败只打日志不阻断启动
+            crate::agent::channel::spawn_channel_server(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // 平台
             commands::get_platforms,
@@ -123,6 +128,16 @@ pub fn run() {
             agent::send_human_intervention,
             agent::replace_agent_goal,
             agent::cancel_agent_run,
+            // 微信通道（页面 ↔ Node 桥代理）
+            agent::channel::wechat_bridge_start,
+            agent::channel::wechat_bridge_status,
+            agent::channel::wechat_bridge_login_start,
+            agent::channel::wechat_bridge_relogin,
+            agent::channel::wechat_bridge_qr,
+            agent::channel::wechat_bridge_stop,
+            agent::channel::wechat_channel_config_get,
+            agent::channel::wechat_channel_config_set,
+            agent::channel::wechat_channel_runs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

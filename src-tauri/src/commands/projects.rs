@@ -114,7 +114,7 @@ fn get_project(conn: &Connection, project_id: &str) -> Result<AgentProject, Stri
     .map_err(|_| "项目不存在或已删除".to_string())
 }
 
-fn create_project_row(
+pub(crate) fn create_project_row(
     conn: &Connection,
     name: &str,
     root_path: &str,
@@ -132,7 +132,7 @@ fn create_project_row(
     get_project(conn, &id)
 }
 
-fn create_project_session_row(
+pub(crate) fn create_project_session_row(
     conn: &Connection,
     project_id: &str,
     title: &str,

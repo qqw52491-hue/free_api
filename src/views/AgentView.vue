@@ -95,6 +95,16 @@
                     <svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
                     <span v-if="!sidebarCollapsed">Library</span>
                 </button>
+                <button
+                    type="button"
+                    class="nav-row"
+                    :class="{ active: currentNavView === 'wechat', 'icon-only': sidebarCollapsed }"
+                    title="微信绑定与通道配置"
+                    @click="currentNavView = 'wechat'"
+                >
+                    <svg viewBox="0 0 24 24"><path d="M8.5 3C5 3 2 5.6 2 8.9c0 1.9 1 3.5 2.5 4.6l-.7 2.3 2.6-1.3c.7.2 1.4.3 2.1.3h.4A5.7 5.7 0 0 1 8.5 13c0-3.3 3-5.9 6.7-5.9h.3C14.8 4.6 11.9 3 8.5 3z"/><path d="M22 15.4c0-2.8-2.6-5-5.8-5s-5.8 2.2-5.8 5 2.6 5 5.8 5c.7 0 1.4-.1 2-.3l2.3 1.2-.6-2.1A5 5 0 0 0 22 15.4z"/></svg>
+                    <span v-if="!sidebarCollapsed">微信绑定</span>
+                </button>
             </nav>
 
             <!-- 1. 📁 项目树形区域 (Projects 树形手风琴展开) -->
@@ -204,6 +214,11 @@
                     <p>支持配置定时巡检、自动化总结或定期 Agent 运行计划。任务会在后台准时触发。</p>
                 </div>
             </div>
+
+            <!-- 6. 📱 微信绑定与通道配置 -->
+            <div v-if="currentNavView === 'wechat'" class="full-view-panel">
+                <WeChatBindView />
+            </div>
         </main>
     </div>
 </template>
@@ -216,12 +231,13 @@ import ProjectSidebarTree, { type AgentProject, type TreeSessionItem } from "../
 import ProjectWorkspace from "../components/ProjectWorkspace.vue";
 import ApiManager from "./ApiManager.vue";
 import PluginView from "./PluginView.vue";
+import WeChatBindView from "./WeChatBindView.vue";
 
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
 interface TabInfo { uid: string; id: string; label: string; running: boolean; projectId?: string; isDraft?: boolean; }
 
-const currentNavView = ref<"agent" | "project" | "llm" | "plugins" | "scheduled" | "library">("agent");
+const currentNavView = ref<"agent" | "project" | "llm" | "plugins" | "scheduled" | "library" | "wechat">("agent");
 const selectedProjectId = ref<string>("");
 const allModels = ref<ModelOption[]>([]);
 const sidebarCollapsed = ref(false);

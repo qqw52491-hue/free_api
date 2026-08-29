@@ -1,5 +1,6 @@
 pub mod artifact_manager;
 pub mod change_verification;
+pub mod channel;
 pub mod child_reviewer;
 pub mod child_worker;
 pub mod child_writer;
