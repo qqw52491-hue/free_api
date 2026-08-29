@@ -72,3 +72,30 @@ fn overview() -> DispatchResult {
         route: "system_info:overview".to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::DbState;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn overview_reports_memory_and_disks() {
+        let db = DbState(Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )));
+        let result = dispatch(&db, "overview", &serde_json::json!({}));
+        assert!(result.success);
+        assert!(result.stdout.contains("memory"));
+        assert!(result.stdout.contains("disks"));
+    }
+
+    #[test]
+    fn unknown_action_fails() {
+        let db = DbState(Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )));
+        let result = dispatch(&db, "nope", &serde_json::json!({}));
+        assert!(!result.success);
+    }
+}

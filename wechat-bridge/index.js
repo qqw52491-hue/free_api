@@ -42,6 +42,25 @@ const COMMAND_PANEL = [
   "⏱ 进度按配置间隔自动汇报，卡住会主动提问",
   "📁 绑定项目后任务在项目目录执行，未绑定在临时工作区",
 ].join("\n");
+
+// 夜间静默：该时段内静默心跳与等待提醒（完成任务/失败/提问等关键事件照常推送）
+const QUIET_DEFAULT = { start: "23:00", end: "08:00" };
+function inQuietHours(now = new Date()) {
+  const parse = (value) => {
+    const [h, m] = String(value || "").split(":").map(Number);
+    return Number.isFinite(h) ? h * 60 + (m || 0) : null;
+  };
+  const start = parse(config.quiet_start ?? QUIET_DEFAULT.start);
+  const end = parse(config.quiet_end ?? QUIET_DEFAULT.end);
+  if (start === null || end === null) return false;
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  return start <= end ? minutes >= start && minutes < end : minutes >= start || minutes < end;
+}
+const MAX_PUSH_CHARS = 3500;
+function truncateForPush(text) {
+  if (!text || text.length <= MAX_PUSH_CHARS) return text;
+  return text.slice(0, MAX_PUSH_CHARS) + "\n……\n\n（结果过长已截断，完整内容见桌面端会话）";
+}
 const MAX_QUEUE = 5;
 const NUDGE_MS = 2 * 60 * 60 * 1000; // ask_human 挂起 2 小时提醒一次
 const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024; // 微信文件回推上限
@@ -333,6 +352,7 @@ function watchRun(conversationId, runId, num) {
         );
       } else if (Date.now() - entry.lastNudge >= NUDGE_MS) {
         entry.lastNudge = Date.now();
+        if (inQuietHours()) return; // 夜间静默：提醒推迟到白天
         const waitedMinutes = Math.round((Date.now() - entry.waitingSince) / 60000);
         await botSend(
           `⏳ 任务 #${num} 已等你 ${waitedMinutes} 分钟：\n${run.paused_reason || ""}\n直接回复即算回答，或发送「停止」。`
@@ -344,9 +364,11 @@ function watchRun(conversationId, runId, num) {
       entry.status = "running";
       if (Date.now() - entry.lastHeartbeat >= HEARTBEAT_MS) {
         entry.lastHeartbeat = Date.now();
-        await botSend(
-          `⏳ 任务 #${num} 进行中（已 ${run.event_count} 个动作）。\n${run.last_progress || "正在继续执行……"}`
-        );
+        if (!inQuietHours()) {
+          await botSend(
+            `⏳ 任务 #${num} 进行中（已 ${run.event_count} 个动作）。\n${run.last_progress || "正在继续执行……"}`
+          );
+        }
       }
       return;
     }
@@ -358,7 +380,7 @@ function watchRun(conversationId, runId, num) {
       lastResults.set(conversationId, { num, text: run.result || "" });
       const artifact = await latestArtifact(run.session_id);
       const finishText = run.result
-        ? `🏁 任务 #${num} 完成：\n\n${run.result}`
+        ? `🏁 任务 #${num} 完成：\n\n${truncateForPush(run.result)}`
         : `🏁 任务 #${num} 完成（无文本产出，详情见桌面端会话）。`;
       if (artifact && artifact.size_bytes > 0 && artifact.size_bytes <= MAX_ARTIFACT_BYTES) {
         const mediaType = String(artifact.mime_type || "").startsWith("image/") ? "image" : "file";

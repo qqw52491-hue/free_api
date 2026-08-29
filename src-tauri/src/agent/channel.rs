@@ -1018,6 +1018,11 @@ fn channel_router(state: Arc<ChannelState>) -> Router {
 
 static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
+/// 桥 watchdog 抑制标志：页面「停止桥」置位（用户主动关闭，不自动复活），
+/// 手动「启动桥」复位。自动启动/看门狗均尊重该标志。
+static BRIDGE_WATCHDOG_SUPPRESSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// setup 时暂存 AppHandle，供无 State/AppHandle 上下文的原生工具（schedule_manager.run_now 等）取用
 pub(crate) fn stash_app_handle(app: tauri::AppHandle) {
     let _ = APP_HANDLE.set(app);
@@ -1065,7 +1070,7 @@ pub(crate) fn channel_config_shared() -> &'static Arc<std::sync::RwLock<ChannelC
     })
 }
 
-fn sync_shared_config(config: &ChannelConfig) {
+pub(crate) fn sync_shared_config(config: &ChannelConfig) {
     *channel_config_shared()
         .write()
         .expect("config poisoned") = config.clone();
@@ -1109,6 +1114,26 @@ pub fn spawn_channel_server(app: AppHandle) {
         match ensure_bridge_running().await {
             Ok(value) => println!("[channel] 微信桥已自动启动: {value}"),
             Err(error) => eprintln!("[channel] 微信桥自动启动失败（可在微信绑定页手动启动）: {error}"),
+        }
+    });
+
+    // 看门狗：低频探活，桥意外退出时自动复活（用户手动停止则保持安静）
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            if BRIDGE_WATCHDOG_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+            let auto_start = channel_config_shared()
+                .read()
+                .map(|config| config.auto_start_bridge)
+                .unwrap_or(false);
+            if !auto_start {
+                continue;
+            }
+            if let Err(error) = ensure_bridge_running().await {
+                eprintln!("[channel] 看门狗拉起微信桥失败: {error}");
+            }
         }
     });
 }
@@ -1263,6 +1288,8 @@ async fn ensure_bridge_running() -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn wechat_bridge_start() -> Result<Value, String> {
+    // 手动启动解除看门狗抑制（用户重新启用）
+    BRIDGE_WATCHDOG_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
     ensure_bridge_running().await
 }
 
@@ -1300,6 +1327,7 @@ pub async fn wechat_bridge_relogin() -> Result<Value, String> {
 #[tauri::command]
 pub async fn wechat_bridge_stop() -> Result<Value, String> {
     let config = load_channel_config()?;
+    BRIDGE_WATCHDOG_SUPPRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
     let result = bridge_call(&config, "POST", "/bridge/stop", None).await;
     let mut child = bridge_child_slot()
         .lock()
@@ -1375,4 +1403,99 @@ pub async fn wechat_channel_runs() -> Result<Value, String> {
     runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     runs.truncate(20);
     serde_json::to_value(runs).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn test_config() -> ChannelConfig {
+        ChannelConfig {
+            token: "test-token".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn authorized_accepts_only_matching_token() {
+        let config = test_config();
+        let mut headers = HeaderMap::new();
+        assert!(!authorized(&headers, &config));
+        headers.insert("x-channel-token", HeaderValue::from_static("wrong"));
+        assert!(!authorized(&headers, &config));
+        headers.insert("x-channel-token", HeaderValue::from_static("test-token"));
+        assert!(authorized(&headers, &config));
+    }
+
+    #[test]
+    fn run_store_upsert_patch_and_eviction() {
+        let key = format!("test-run-{}", uuid::Uuid::new_v4());
+        let record = RunRecord {
+            run_id: key.clone(),
+            session_id: "session-x".to_string(),
+            goal_preview: "goal".to_string(),
+            status: "running".to_string(),
+            paused_reason: None,
+            last_progress: None,
+            event_count: 0,
+            started_at: "2026-01-01T00:00:00+00:00".to_string(),
+            updated_at: "2026-01-01T00:00:00+00:00".to_string(),
+            result: None,
+            error: None,
+            llm_retries: 3,
+        };
+        upsert_run(record);
+        patch_run(&key, |r| {
+            r.event_count = 5;
+            r.last_progress = Some("进行中".to_string());
+        });
+        {
+            let runs = runs_store().lock().unwrap();
+            let stored = runs.get(&key).expect("record should exist");
+            assert_eq!(stored.event_count, 5);
+            assert_eq!(stored.last_progress.as_deref(), Some("进行中"));
+        }
+        // 淘汰路径：填满后最旧已完成记录应被挤出
+        for i in 0..(MAX_RUN_RECORDS + 10) {
+            upsert_run(RunRecord {
+                run_id: format!("evict-{i}-{}", std::process::id()),
+                session_id: "session-evict".to_string(),
+                goal_preview: "old".to_string(),
+                status: "done".to_string(),
+                paused_reason: None,
+                last_progress: None,
+                event_count: 0,
+                started_at: "2025-01-01T00:00:00+00:00".to_string(),
+                updated_at: "2025-01-01T00:00:00+00:00".to_string(),
+                result: None,
+                error: None,
+                llm_retries: 3,
+            });
+        }
+        let runs = runs_store().lock().unwrap();
+        assert!(runs.len() <= MAX_RUN_RECORDS);
+        drop(runs);
+        runs_store().lock().unwrap().remove(&key);
+    }
+
+    #[test]
+    fn scratch_dir_defaults_under_data_dir() {
+        let default_dir = effective_scratch_dir_pub(&ChannelConfig::default());
+        assert!(default_dir.ends_with("wechat-scratch"));
+    }
+
+    #[test]
+    fn config_serde_roundtrip_keeps_optional_fields() {
+        let raw = serde_json::to_string(&ChannelConfig::default()).unwrap();
+        let parsed: ChannelConfig = serde_json::from_str(&raw).unwrap();
+        assert!(parsed.llm_retries.is_none());
+        assert!(parsed.allowlist.is_empty());
+        assert!(parsed.auto_start_bridge);
+        // 缺失字段/未知字段都应容忍
+        let parsed2: ChannelConfig =
+            serde_json::from_str(r#"{"token":"t","unknown_field":1}"#).unwrap();
+        assert_eq!(parsed2.token, "t");
+        assert_eq!(parsed2.port, DEFAULT_API_PORT);
+    }
 }

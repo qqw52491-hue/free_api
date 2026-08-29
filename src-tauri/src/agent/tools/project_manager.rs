@@ -209,3 +209,51 @@ fn fail(action: &str, message: &str) -> DispatchResult {
         route: format!("project_manager:{action}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::DbState;
+    use std::sync::{Arc, Mutex};
+
+    fn dummy_db() -> DbState {
+        DbState(Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )))
+    }
+
+    #[test]
+    fn create_requires_confirm_to_expand_scope() {
+        let result = dispatch(
+            &dummy_db(),
+            "create",
+            &serde_json::json!({"name": "demo", "root_path": "/tmp/demo"}),
+        );
+        assert!(!result.success);
+        assert!(result.stderr.contains("confirm"));
+    }
+
+    #[test]
+    fn create_missing_fields_fail_early() {
+        let result = dispatch(&dummy_db(), "create", &serde_json::json!({"confirm": true}));
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn delete_requires_confirm() {
+        let result = dispatch(
+            &dummy_db(),
+            "delete",
+            &serde_json::json!({"project_id": "whatever"}),
+        );
+        assert!(!result.success);
+        assert!(result.stderr.contains("confirm"));
+    }
+
+    #[test]
+    fn unknown_action_fails_with_hint() {
+        let result = dispatch(&dummy_db(), "nope", &serde_json::json!({}));
+        assert!(!result.success);
+        assert!(result.stderr.contains("project_manager"));
+    }
+}

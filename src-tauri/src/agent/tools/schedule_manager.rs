@@ -96,19 +96,8 @@ fn save(params: &serde_json::Value) -> DispatchResult {
     if goal.is_empty() {
         return fail("save", "缺少 goal（任务内容）");
     }
-    if kind != "daily" && kind != "interval" {
-        return fail("save", "kind 仅支持 daily / interval");
-    }
-    if kind == "daily"
-        && time
-            .as_deref()
-            .map(|t| chrono::NaiveTime::parse_from_str(t, "%H:%M").is_ok())
-            != Some(true)
-    {
-        return fail("save", "daily 需要合法的 time（HH:MM）");
-    }
-    if kind == "interval" && minutes.unwrap_or(0) == 0 {
-        return fail("save", "interval 需要大于 0 的 minutes");
+    if let Err(error) = crate::agent::scheduler::validate_schedule(&kind, time.as_deref(), minutes) {
+        return fail("save", &error);
     }
 
     let mut items = match load_schedules() {
@@ -362,5 +351,45 @@ fn fail(action: &str, message: &str) -> DispatchResult {
         stderr: message.to_string(),
         success: false,
         route: format!("schedule_manager:{action}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::DbState;
+    use std::sync::{Arc, Mutex};
+
+    fn dummy_db() -> DbState {
+        DbState(Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )))
+    }
+
+    #[test]
+    fn unknown_action_fails_with_hint() {
+        let result = dispatch(&dummy_db(), "nope", &serde_json::json!({}));
+        assert!(!result.success);
+        assert!(result.stderr.contains("run_now"));
+    }
+
+    #[test]
+    fn save_missing_name_fails_before_io() {
+        let result = dispatch(&dummy_db(), "save", &serde_json::json!({"goal": "g"}));
+        assert!(!result.success);
+        assert!(result.stderr.contains("name"));
+    }
+
+    #[test]
+    fn delete_requires_confirm() {
+        let result = dispatch(&dummy_db(), "delete", &serde_json::json!({"id": "x"}));
+        assert!(!result.success);
+        assert!(result.stderr.contains("confirm"));
+    }
+
+    #[test]
+    fn run_now_missing_id_fails() {
+        let result = dispatch(&dummy_db(), "run_now", &serde_json::json!({}));
+        assert!(!result.success);
     }
 }

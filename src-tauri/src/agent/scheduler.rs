@@ -97,6 +97,25 @@ fn compute_next(item: &ScheduleItem) -> Option<DateTime<Local>> {
 }
 
 /// 对外展示/保存时补全 next_fired_at
+/// 计划字段校验（调度器保存与工具层共用）
+pub(crate) fn validate_schedule(kind: &str, time: Option<&str>, minutes: Option<u64>) -> Result<(), String> {
+    if kind != "daily" && kind != "interval" {
+        return Err("kind 仅支持 daily / interval".to_string());
+    }
+    if kind == "daily" {
+        let ok = time
+            .map(|t| chrono::NaiveTime::parse_from_str(t, "%H:%M").is_ok())
+            .unwrap_or(false);
+        if !ok {
+            return Err("daily 需要合法的 HH:MM 时间".to_string());
+        }
+    }
+    if kind == "interval" && minutes.unwrap_or(0) == 0 {
+        return Err("interval 需要大于 0 的分钟数".to_string());
+    }
+    Ok(())
+}
+
 pub(crate) fn refresh_next(item: &mut ScheduleItem) {
     item.next_fired_at = compute_next(item).map(|t| t.to_rfc3339());
 }
@@ -339,15 +358,7 @@ pub async fn wechat_schedule_save(mut item: ScheduleItem) -> Result<serde_json::
     if item.goal.trim().is_empty() {
         return Err("任务内容不能为空".to_string());
     }
-    if item.kind != "daily" && item.kind != "interval" {
-        return Err("kind 仅支持 daily / interval".to_string());
-    }
-    if item.kind == "daily" && item.time.as_deref().map(|t| NaiveTime::parse_from_str(t, "%H:%M").is_ok()) != Some(true) {
-        return Err("daily 需要合法的 HH:MM 时间".to_string());
-    }
-    if item.kind == "interval" && item.minutes.unwrap_or(0) == 0 {
-        return Err("interval 需要大于 0 的分钟数".to_string());
-    }
+    validate_schedule(&item.kind, item.time.as_deref(), item.minutes)?;
     let mut items = load_schedules()?;
     if item.id.trim().is_empty() {
         item.id = uuid::Uuid::new_v4().to_string();
@@ -393,5 +404,75 @@ pub async fn wechat_schedule_toggle(id: String, enabled: bool) -> Result<serde_j
             Ok(json!({ "schedules": items }))
         }
         None => Err("定时任务不存在".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Timelike;
+
+    fn item(kind: &str, time: Option<&str>, minutes: Option<u64>) -> ScheduleItem {
+        ScheduleItem {
+            id: "test".to_string(),
+            name: "测试".to_string(),
+            enabled: true,
+            kind: kind.to_string(),
+            time: time.map(|t| t.to_string()),
+            minutes,
+            project_id: None,
+            goal: "goal".to_string(),
+            session_id: None,
+            last_fired_at: None,
+            next_fired_at: None,
+        }
+    }
+
+    #[test]
+    fn validate_schedule_rejects_bad_fields() {
+        assert!(validate_schedule("daily", Some("09:00"), None).is_ok());
+        assert!(validate_schedule("interval", None, Some(30)).is_ok());
+        assert!(validate_schedule("weekly", None, None).is_err());
+        assert!(validate_schedule("daily", Some("25:00"), None).is_err());
+        assert!(validate_schedule("daily", None, None).is_err());
+        assert!(validate_schedule("interval", None, Some(0)).is_err());
+    }
+
+    #[test]
+    fn interval_schedules_next_from_now() {
+        let item = item("interval", None, Some(30));
+        let next = compute_next(&item).expect("interval should compute");
+        let expected = Local::now() + ChronoDuration::minutes(30);
+        let diff = (next - expected).num_seconds().abs();
+        assert!(diff < 30, "interval 偏差过大: {diff}s");
+    }
+
+    #[test]
+    fn daily_rolls_forward_when_time_in_past() {
+        let past = (Local::now() - ChronoDuration::hours(2))
+            .time()
+            .format("%H:%M")
+            .to_string();
+        let item = item("daily", Some(&past), None);
+        let next = compute_next(&item).expect("daily should compute");
+        assert!(next > Local::now(), "过去时间应滚动到未来");
+    }
+
+    #[test]
+    fn daily_stays_within_26_hours() {
+        let future = (Local::now() + ChronoDuration::hours(2))
+            .time()
+            .format("%H:%M")
+            .to_string();
+        let item = item("daily", Some(&future), None);
+        let next = compute_next(&item).expect("daily should compute");
+        let diff = (next - Local::now()).num_minutes();
+        assert!(diff > 0 && diff <= 26 * 60, "daily 候选应在 26 小时内: {diff}min");
+        assert!(next.time().hour() != Local::now().time().hour() || next > Local::now());
+    }
+
+    #[test]
+    fn invalid_kind_has_no_next() {
+        assert!(compute_next(&item("weekly", None, None)).is_none());
     }
 }

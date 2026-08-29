@@ -20,11 +20,12 @@ pub fn dispatch(_db: &DbState, action: &str, params: &serde_json::Value) -> Disp
     match act {
         "status" => status(),
         "notify" => notify(params),
+        "set_heartbeat" => set_heartbeat(params),
         "recent_runs" => recent_runs(params),
         _ => DispatchResult {
             stdout: String::new(),
             stderr: format!(
-                "wechat_manager 未知 action='{}'。可用：status() / notify(text) / recent_runs(limit?)",
+                "wechat_manager 未知 action='{}'。可用：status() / notify(text) / set_heartbeat(minutes) / recent_runs(limit?)",
                 act
             ),
             success: false,
@@ -88,6 +89,29 @@ fn notify(params: &serde_json::Value) -> DispatchResult {
     }
 }
 
+/// 对话内调整进度汇报间隔：{"minutes": 10}
+fn set_heartbeat(params: &serde_json::Value) -> DispatchResult {
+    let minutes = match params.get("minutes").and_then(|v| v.as_u64()) {
+        Some(v) if v >= 1 => v.clamp(1, 1440),
+        _ => return fail("set_heartbeat", "缺少 minutes（1–1440 分钟）"),
+    };
+    let mut config = match crate::agent::channel::load_channel_config() {
+        Ok(config) => config,
+        Err(error) => return fail("set_heartbeat", &format!("读取通道配置失败: {error}")),
+    };
+    config.heartbeat_minutes = minutes;
+    if let Err(error) = crate::agent::channel::save_channel_config(&config) {
+        return fail("set_heartbeat", &format!("保存配置失败: {error}"));
+    }
+    crate::agent::channel::sync_shared_config(&config);
+    DispatchResult {
+        stdout: format!("✅ 已调整为每 {minutes} 分钟汇报一次进度（仅影响微信侧任务）。"),
+        stderr: String::new(),
+        success: true,
+        route: "wechat_manager:set_heartbeat".to_string(),
+    }
+}
+
 fn recent_runs(params: &serde_json::Value) -> DispatchResult {
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(10).clamp(1, 50) as usize;
     let mut runs = crate::agent::channel::runs_store_snapshot();
@@ -124,5 +148,47 @@ fn fail(action: &str, message: &str) -> DispatchResult {
         stderr: message.to_string(),
         success: false,
         route: format!("wechat_manager:{action}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::DbState;
+    use std::sync::{Arc, Mutex};
+
+    fn dummy_db() -> DbState {
+        DbState(Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )))
+    }
+
+    #[test]
+    fn unknown_action_fails_with_hint() {
+        let result = dispatch(&dummy_db(), "nope", &serde_json::json!({}));
+        assert!(!result.success);
+        assert!(result.stderr.contains("set_heartbeat"));
+    }
+
+    #[test]
+    fn notify_requires_text() {
+        let result = dispatch(&dummy_db(), "notify", &serde_json::json!({"text": ""}));
+        assert!(!result.success);
+        assert!(result.stderr.contains("text"));
+    }
+
+    #[test]
+    fn set_heartbeat_requires_minutes() {
+        let result = dispatch(&dummy_db(), "set_heartbeat", &serde_json::json!({}));
+        assert!(!result.success);
+        assert!(result.stderr.contains("minutes"));
+    }
+
+    #[test]
+    fn recent_runs_returns_json_array() {
+        let result = dispatch(&dummy_db(), "recent_runs", &serde_json::json!({"limit": 3}));
+        assert!(result.success);
+        let parsed: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+        assert!(parsed.is_array());
     }
 }
