@@ -73,9 +73,28 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         ],
     },
     BuiltinToolSpec {
+        name: "child_worker",
+        summary: "L2 只读侦察 worker：独立上下文中自行读文件/列目录/执行只读命令完成侦察，回交结构化结论；每运行最多 2 个；结果经 wait_jobs 或信箱自动回收",
+        actions: &[
+            "dispatch(task: string [自包含侦察任务], focus_paths?: string[] <=3 [工作区内路径])",
+        ],
+    },
+    BuiltinToolSpec {
         name: "wait_jobs",
         summary: "挂起等待后台异步任务或子审查完成；在无其他独立前置操作时使用，不消耗大模型 Token",
         actions: &["wait_jobs(job_ids?: string[], timeout_secs?: number)"],
+    },
+    BuiltinToolSpec {
+        name: "watch_start",
+        summary: "持续监听：周期巡检工作区内文件或命令输出，仅在检测到变化时把事件自动注入上下文；finish 前必须释放全部监听",
+        actions: &[
+            "watch_start(kind: \"file\"|\"command\", target: string, interval_secs?: 5–600)",
+        ],
+    },
+    BuiltinToolSpec {
+        name: "watch_stop",
+        summary: "停止持续监听；省略 watch_id 时停止当前运行的全部监听",
+        actions: &["watch_stop(watch_id?: string)"],
     },
     BuiltinToolSpec {
         name: "web_search",

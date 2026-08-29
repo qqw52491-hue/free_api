@@ -1,6 +1,7 @@
 pub mod artifact_manager;
 pub mod change_verification;
 pub mod child_reviewer;
+pub mod child_worker;
 pub mod checkpoint;
 pub mod context;
 pub mod control;
@@ -33,6 +34,7 @@ pub mod tool_manual;
 pub mod tools;
 pub mod types;
 pub mod utils;
+pub mod watch_engine;
 pub mod web_search;
 
 pub use checkpoint::*;

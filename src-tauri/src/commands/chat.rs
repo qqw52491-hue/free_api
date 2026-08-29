@@ -675,6 +675,7 @@ pub async fn parse_attachment_file(path: String) -> Result<ParsedAttachmentResul
 #[tauri::command]
 pub async fn save_and_parse_uploaded_attachment(
     app: AppHandle,
+    state: State<'_, DbState>,
     session_id: String,
     file_name: String,
     base64_data: String,
@@ -702,5 +703,26 @@ pub async fn save_and_parse_uploaded_attachment(
     std::fs::write(&target_path, &bytes).map_err(|e| format!("保存附件文件失败: {}", e))?;
 
     let path_str = target_path.to_string_lossy().to_string();
-    parse_attachment_file(path_str).await
+    let mut parsed = parse_attachment_file(path_str.clone()).await?;
+
+    // 📎 附件全文句柄：项目会话自动登记为受管资源，模型后续可按句柄回读全文/结构化摘要
+    let handle_line = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        match crate::commands::projects::register_attachment_for_session(
+            &conn,
+            &session_id,
+            &target_path,
+            &file_name,
+        ) {
+            Ok(Some(resource_id)) => Some(resource_id),
+            _ => None,
+        }
+    };
+    if let Some(resource_id) = handle_line {
+        parsed.prompt_text = format!(
+            "{}\n📎 附件全文句柄已登记：resource_id=`{}`。上方内容若为摘要或截断预览，如需完整内容请调用 project_resources.read_resource(resource_id=\"{}\")。",
+            parsed.prompt_text, resource_id, resource_id
+        );
+    }
+    Ok(parsed)
 }

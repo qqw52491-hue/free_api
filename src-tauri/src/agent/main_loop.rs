@@ -951,8 +951,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         }
     }
 
-    // 🧹 会话启动时，自动收敛历史由于断电或异常退出的孤儿后台任务
+    // 🧹 会话启动时，自动收敛历史由于断电或异常退出的孤儿后台任务与子审查任务
     let _ = crate::agent::job_engine::recover_orphaned_jobs_on_session_start(state.inner(), &final_session_id);
+    let _ = crate::agent::child_reviewer::recover_orphaned_child_runs_on_session_start(state.inner(), &final_session_id);
 
     // durable cursor 是调度权威：每个普通步骤提交后推进 step_id；恢复时也从这里继续。
     // 不再使用启动瞬间捕获范围的 for-loop，避免 checkpoint 更新后调度器仍沿旧游标运行。
@@ -1250,7 +1251,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             open_todos.push(blocker);
         }
         if is_finish && (crate::agent::child_reviewer::has_running_child_runs(state.inner(), &run_id) || crate::agent::job_engine::has_running_jobs(state.inner(), &run_id)) {
-            open_todos.push("仍有后台异步任务正在执行中，请调用 wait_jobs 工具挂起等待其执行完成并接收结论，或执行其他独立操作后再提交 finish".to_string());
+            open_todos.push("仍有后台异步任务或持续监听正在执行中：后台任务请调用 wait_jobs 挂起等待并接收结论；持续监听（watch）请调用 watch_stop 显式释放后再提交 finish，或执行其他独立操作后重试".to_string());
         }
         let finish_challenged = should_challenge_finish_with_complex_delivery_blocker(
             is_finish,

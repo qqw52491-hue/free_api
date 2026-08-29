@@ -747,6 +747,124 @@ pub async fn run_tool_phase(
                 route: "child_reviewer:rejected_or_failed".to_string(),
             },
         }
+    // --- B2.6 持续监听：注册周期巡检，外部变化以 watch_event 经 durable inbox 自动注入 ---
+    } else if inst.get_tool().eq_ignore_ascii_case("watch_start")
+        || inst.get_action().eq_ignore_ascii_case("watch_start")
+    {
+        let params = inst.get_params();
+        let watch_outcome = async {
+            let request = crate::agent::watch_engine::parse_watch_request(&params)?;
+            crate::agent::watch_engine::begin_watch(
+                state.inner(),
+                parent_run_id,
+                final_session_id,
+                &request,
+                Some(workspace_dir),
+            )
+            .await
+        };
+        match watch_outcome.await {
+            Ok(watch_id) => {
+                if let Some(watch_state) =
+                    crate::agent::watch_engine::load_watch_state(state.inner(), &watch_id)
+                {
+                    let db_clone = crate::db::DbState(state.inner().0.clone());
+                    let session_clone = final_session_id.clone();
+                    let watch_clone = watch_id.clone();
+                    let workspace_clone = workspace_dir.to_path_buf();
+                    tokio::spawn(crate::agent::watch_engine::run_watch_loop(
+                        db_clone,
+                        Some(app.clone()),
+                        session_clone,
+                        watch_clone,
+                        watch_state.interval_secs,
+                        watch_state.last_snapshot,
+                        Some(workspace_clone),
+                    ));
+                }
+                let _ = app.emit(
+                    &format!("agent-log-{}", final_session_id),
+                    format!("👁️ 持续监听已启动: {}", watch_id),
+                );
+                DispatchResult {
+                    stdout: format!(
+                        "持续监听已启动，watch_id: {}。此后每个巡检周期内若目标发生变化，变化事件会作为 watch_event 自动注入你的上下文（无需轮询读取）；若长时间无变化则不会产生任何事件。任务收尾前请调用 watch_stop 释放该监听，否则 finish 会被拦截。",
+                        watch_id
+                    ),
+                    stderr: String::new(),
+                    success: true,
+                    route: "watch:started".to_string(),
+                }
+            }
+            Err(error) => DispatchResult {
+                stdout: String::new(),
+                stderr: error,
+                success: false,
+                route: "watch:rejected".to_string(),
+            },
+        }
+    } else if inst.get_tool().eq_ignore_ascii_case("watch_stop")
+        || inst.get_action().eq_ignore_ascii_case("watch_stop")
+    {
+        let params = inst.get_params();
+        let stop_outcome = match params.get("watch_id").and_then(|v| v.as_str()) {
+            Some(watch_id) => {
+                crate::agent::watch_engine::stop_watch(state.inner(), parent_run_id, watch_id)
+                    .map(|rows| format!("已停止监听 {}（{} 行）", watch_id, rows))
+            }
+            None => crate::agent::watch_engine::stop_all_watches(state.inner(), parent_run_id)
+                .map(|rows| format!("已停止全部持续监听（{} 行）", rows)),
+        };
+        match stop_outcome {
+            Ok(summary) => DispatchResult {
+                stdout: summary,
+                stderr: String::new(),
+                success: true,
+                route: "watch:stopped".to_string(),
+            },
+            Err(error) => DispatchResult {
+                stdout: String::new(),
+                stderr: error,
+                success: false,
+                route: "watch:stop_failed".to_string(),
+            },
+        }
+    // --- B2.1 L2 只读侦察 worker：异步派发独立动作-观测循环，结果经 durable inbox 回收 ---
+    } else if inst.get_tool().eq_ignore_ascii_case("child_worker")
+        || inst.get_action().eq_ignore_ascii_case("child_worker")
+    {
+        let routing = crate::agent::router::AgentRouter::route_for_step(context, model_routing, step_id);
+        let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
+        let worker_params = inst.get_params();
+        match crate::agent::child_worker::spawn_child_worker(
+            Some(app.clone()),
+            state.inner(),
+            parent_run_id,
+            final_session_id,
+            workspace_dir,
+            &routing.model_id,
+            &reasoning_effort,
+            &worker_params,
+            interrupt_rx.clone(),
+        )
+        .await
+        {
+            Ok(child_run_id) => DispatchResult {
+                stdout: format!(
+                    "侦察 worker 已异步派发，child_run_id: {}。worker 拥有独立上下文并自行执行只读侦察（读文件/列目录/只读命令），完成后以结构化结论（findings/confidence/evidence_refs/missing_evidence）回到你的上下文；需要结论时调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待，或先推进其他独立操作。finish 前须确认其已结束。",
+                    child_run_id, child_run_id
+                ),
+                stderr: String::new(),
+                success: true,
+                route: "child_worker:spawned".to_string(),
+            },
+            Err(error) => DispatchResult {
+                stdout: String::new(),
+                stderr: error,
+                success: false,
+                route: "child_worker:rejected_or_failed".to_string(),
+            },
+        }
     // --- B2.5 特殊工具：wait_jobs 反应式零 Token 挂起等待 ---
     } else if inst.get_tool().eq_ignore_ascii_case("wait_jobs")
         || inst.get_tool().eq_ignore_ascii_case("wait_job")

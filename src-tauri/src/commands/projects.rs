@@ -417,6 +417,39 @@ pub(crate) fn add_project_resource_for_session(
     .map_err(|error| error.to_string())
 }
 
+/// 上传附件自动登记：把附件复制进项目内隔离目录（避免与项目文件同名覆盖），
+/// 再登记为受管资源，返回全文句柄 resource_id。非项目会话返回 None（无句柄可用）。
+pub(crate) fn register_attachment_for_session(
+    conn: &Connection,
+    session_id: &str,
+    attachment_path: &Path,
+    original_name: &str,
+) -> Result<Option<String>, String> {
+    let Some(project) = project_for_session(conn, session_id)? else {
+        return Ok(None);
+    };
+    let root = PathBuf::from(&project.root_path);
+    let import_dir = root.join(".attachments");
+    std::fs::create_dir_all(&import_dir)
+        .map_err(|error| format!("创建附件导入目录失败: {}", error))?;
+    let sanitized: String = original_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .take(MAX_RESOURCE_LABEL_CHARS)
+        .collect();
+    let safe_name = format!("att-{}-{}", &Uuid::new_v4().to_string()[..8], sanitized);
+    let target = import_dir.join(safe_name);
+    std::fs::copy(attachment_path, &target)
+        .map_err(|error| format!("附件导入项目工作区失败: {}", error))?;
+    let resource = add_project_resource_for_session(
+        conn,
+        session_id,
+        &target.to_string_lossy(),
+        Some(original_name),
+    )?;
+    Ok(Some(resource.resource_id))
+}
+
 pub(crate) fn read_project_resource_for_session(
     conn: &Connection,
     session_id: &str,
@@ -434,14 +467,25 @@ pub(crate) fn read_project_resource_for_session(
         )
         .map_err(|_| "项目资源不存在或不属于当前会话项目".to_string())?;
     let (_, canonical_path) = canonical_project_file(conn, &project.id, &resource.canonical_path)?;
-    let content = std::fs::read_to_string(canonical_path)
-        .map_err(|_| "该资源不是可预览的 UTF-8 文本文件".to_string())?;
-    let total_chars = content.chars().count();
-    let preview: String = content.chars().take(MAX_RESOURCE_PREVIEW_CHARS).collect();
+    // 文本文件直接预览；非 UTF-8（Excel/PDF/Word 等）走解析引擎产出结构化摘要，保证任何句柄都可回读
+    let (content, truncated) = match std::fs::read_to_string(&canonical_path) {
+        Ok(text) => {
+            let total_chars = text.chars().count();
+            let preview: String = text.chars().take(MAX_RESOURCE_PREVIEW_CHARS).collect();
+            (preview, total_chars > MAX_RESOURCE_PREVIEW_CHARS)
+        }
+        Err(_) => {
+            let extracted = crate::agent::file_parser::parse_file(
+                &canonical_path,
+                Some(MAX_RESOURCE_PREVIEW_CHARS),
+            )?;
+            (crate::agent::file_parser::format_for_prompt(&extracted, &resource.label), false)
+        }
+    };
     Ok(ProjectResourcePreview {
         resource,
-        truncated: total_chars > MAX_RESOURCE_PREVIEW_CHARS,
-        content: preview,
+        truncated,
+        content,
     })
 }
 
@@ -711,6 +755,44 @@ pub async fn get_agent_session_project_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_registration_needs_project_and_never_overwrites_project_files() {
+        let base = std::env::temp_dir().join(format!("free-api-attach-{}", Uuid::new_v4()));
+        let root = base.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("report.txt"), "项目自带的同名文件，绝不能被附件覆盖").unwrap();
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+
+        let project = create_project_row(&conn, "附件项目", root.to_string_lossy().as_ref()).unwrap();
+        let session = create_project_session_row(&conn, &project.id, "附件会话", "model-a").unwrap();
+        let plain_session_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO chat_sessions (id, title, model_id, created_at, updated_at, message_count) VALUES (?1, '普通会话', 'model-a', ?2, ?2, 0)",
+            params![plain_session_id, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+
+        let attachment = base.join("upload.bin");
+        std::fs::write(&attachment, "attachment body").unwrap();
+
+        // 非项目会话：不登记，返回 None
+        let none = register_attachment_for_session(&conn, &plain_session_id, &attachment, "report.txt").unwrap();
+        assert!(none.is_none());
+
+        // 项目会话：登记成功，且附件被复制进隔离目录，绝不覆盖项目同名文件
+        let resource_id = register_attachment_for_session(&conn, &session.id, &attachment, "report.txt")
+            .unwrap()
+            .expect("项目会话应登记出句柄");
+        assert_eq!(std::fs::read_to_string(root.join("report.txt")).unwrap(), "项目自带的同名文件，绝不能被附件覆盖");
+        let imported_dir = root.join(".attachments");
+        assert!(imported_dir.exists());
+        let preview = read_project_resource_for_session(&conn, &session.id, &resource_id).unwrap();
+        assert!(preview.content.contains("attachment body"));
+        assert_eq!(std::fs::read_dir(&imported_dir).unwrap().count(), 1);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     #[test]
     fn project_resources_are_scoped_to_the_canonical_project_root_and_session() {
