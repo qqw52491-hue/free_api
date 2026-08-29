@@ -69,7 +69,7 @@ fn acquire_workspace_lock(workspace_dir: &std::path::Path, goal: &str) -> Result
 /// Agent 每个任务最多执行步数（可按项目需求调整）
 const MAX_STEPS: usize = 300;
 /// 正常会话只做短暂态请求重试；后台回归可显式提高到上限以避免 Provider 波动中断取证。
-const DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 3;
+pub(crate) const DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 3;
 const MAX_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 100;
 
 /// 仅将协议明确定义为未完成的 Todo 视为终态质询信号。

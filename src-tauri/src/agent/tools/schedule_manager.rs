@@ -304,7 +304,7 @@ fn run_now(db: &DbState, params: &serde_json::Value) -> DispatchResult {
         routing.vision = routing.pro.clone();
     }
 
-    match crate::agent::channel::register_and_spawn_run(app, session_id, item.goal.clone(), routing, None)
+    match crate::agent::channel::register_and_spawn_run(app, session_id, item.goal.clone(), routing, None, config.llm_retries)
     {
         Ok(run_id) => DispatchResult {
             stdout: format!(

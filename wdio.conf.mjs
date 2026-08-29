@@ -38,7 +38,7 @@ export const config = {
     driverProvider: "embedded",
     embeddedPort: 4445,
     commandTimeout: 30_000,
-    startTimeout: 60_000,
+    startTimeout: 180_000,
   }]],
   capabilities: [{
     browserName: "tauri",

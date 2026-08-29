@@ -550,8 +550,9 @@ const agent = {
       const goalText = await buildGoalWithMedia(sessionId, text, request.media);
       const num = await submitTask(conversationId, goalText);
       const scope = sender.project_name ? `项目：${sender.project_name}` : "临时工作区";
+      const retries = task.llm_retries != null ? `，重试上限 ${task.llm_retries}` : "";
       return {
-        text: `🚀 任务 #${num} 已开始（${scope}）。\n每 ${Math.round(HEARTBEAT_MS / 60000)} 分钟汇报进度；发送「停止」中断；卡住时我会直接提问，回复即算回答。`,
+        text: `🚀 任务 #${num} 已开始（${scope}${retries}）。\n每 ${Math.round(HEARTBEAT_MS / 60000)} 分钟汇报进度；发送「停止」中断；卡住时我会直接提问，回复即算回答。`,
       };
     } catch (error) {
       if (String(error.message).includes("在途任务")) {

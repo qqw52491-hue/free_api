@@ -67,6 +67,10 @@ pub struct ChannelConfig {
     /// 微信发送者白名单（wxid 列表）；空表 = 自动锁定第一条消息的发送者为主人
     #[serde(default)]
     pub allowlist: Vec<String>,
+    /// 微信任务的瞬时 LLM 请求重试次数；None = 跟随系统默认（3，上限 100）。
+    /// API 不稳定时调高：评测路径基线为 20。
+    #[serde(default)]
+    pub llm_retries: Option<u32>,
 }
 
 fn default_api_port() -> u16 {
@@ -106,6 +110,7 @@ impl Default for ChannelConfig {
             help_text: default_help_text(),
             auto_start_bridge: true,
             allowlist: Vec::new(),
+            llm_retries: None,
         }
     }
 }
@@ -180,6 +185,8 @@ pub struct RunRecord {
     pub updated_at: String,
     pub result: Option<String>,
     pub error: Option<String>,
+    /// 本次 run 实际生效的 LLM 瞬时重试次数（提交时快照）
+    pub llm_retries: u32,
 }
 
 fn runs_store() -> &'static Mutex<HashMap<String, RunRecord>> {
@@ -303,6 +310,7 @@ pub struct ConfigPutReq {
     help_text: Option<String>,
     auto_start_bridge: Option<bool>,
     allowlist: Option<Vec<String>>,
+    llm_retries: Option<u32>,
 }
 
 // ---------------------------------------------------------------- 处理器
@@ -478,12 +486,17 @@ async fn handler_task(
         Some(effective_scratch_dir(&config))
     };
 
+    let effective_retries = config
+        .llm_retries
+        .unwrap_or(crate::agent::main_loop::DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
+        .clamp(1, 100);
     let run_id = register_and_spawn_run(
         state.app.clone(),
         session_id.clone(),
         goal,
         routing,
         workspace_override,
+        config.llm_retries,
     )
     .map_err(|error| match error {
         SubmitError::InFlight => (
@@ -497,6 +510,7 @@ async fn handler_task(
         "run_id": run_id,
         "session_id": session_id,
         "workspace": if has_project { "project" } else { "scratch" },
+        "llm_retries": effective_retries,
     })))
 }
 
@@ -515,6 +529,7 @@ pub(crate) fn register_and_spawn_run(
     goal: String,
     routing: ModelRoutingConfig,
     workspace_override: Option<std::path::PathBuf>,
+    llm_retries: Option<u32>,
 ) -> Result<String, SubmitError> {
     {
         let runs = runs_store().lock().expect("runs store poisoned");
@@ -527,6 +542,12 @@ pub(crate) fn register_and_spawn_run(
 
     let run_id = uuid::Uuid::new_v4().to_string();
     let started_at = now_ts();
+    println!(
+        "[channel] run {run_id} 启动 session={session_id} 重试上限={}",
+        llm_retries
+            .unwrap_or(crate::agent::main_loop::DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
+            .clamp(1, 100)
+    );
     upsert_run(RunRecord {
         run_id: run_id.clone(),
         session_id: session_id.clone(),
@@ -539,6 +560,9 @@ pub(crate) fn register_and_spawn_run(
         updated_at: started_at,
         result: None,
         error: None,
+        llm_retries: llm_retries
+            .unwrap_or(crate::agent::main_loop::DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
+            .clamp(1, 100),
     });
 
     // 进度订阅：主循环的 agent-progress-{session} 事件原样转写进运行账本，
@@ -602,7 +626,7 @@ pub(crate) fn register_and_spawn_run(
             false,
             Some(spawn_session.clone()),
             None,
-            None,
+            llm_retries,
             None,
             workspace_override,
         )
@@ -917,6 +941,9 @@ async fn handler_config_put(
     if let Some(v) = req.allowlist {
         config.allowlist = v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     }
+    if let Some(v) = req.llm_retries {
+        config.llm_retries = Some(v.clamp(1, 100));
+    }
     save_channel_config(&config).map_err(internal_error)?;
     *state.config.write().expect("config poisoned") = config.clone();
     Ok(Json(config_value(&config)))
@@ -935,6 +962,7 @@ fn config_value(config: &ChannelConfig) -> Value {
         "help_text": config.help_text,
         "auto_start_bridge": config.auto_start_bridge,
         "allowlist": config.allowlist,
+        "llm_retries": config.llm_retries,
         "config_path": channel_config_path().to_string_lossy(),
     })
 }
@@ -1331,6 +1359,9 @@ pub async fn wechat_channel_config_set(config: ConfigPutReq) -> Result<Value, St
     }
     if let Some(v) = config.allowlist {
         current.allowlist = v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    }
+    if let Some(v) = config.llm_retries {
+        current.llm_retries = Some(v.clamp(1, 100));
     }
     save_channel_config(&current)?;
     sync_shared_config(&current);

@@ -216,7 +216,7 @@ async fn fire_run(
 
     // 调度器创建的会话一律绑定项目（用户项目或 scratch 项目），
     // 工作区软锁在主循环内生效；不传 override（评测专用通道）。
-    register_and_spawn_run(app.clone(), session_id, item.goal.clone(), routing, None).map_err(
+    register_and_spawn_run(app.clone(), session_id, item.goal.clone(), routing, None, config.llm_retries).map_err(
         |error| match error {
             crate::agent::channel::SubmitError::InFlight => {
                 "该会话已有在途任务（上一轮尚未结束，本轮跳过）".to_string()

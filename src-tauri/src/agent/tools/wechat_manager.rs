@@ -104,6 +104,7 @@ fn recent_runs(params: &serde_json::Value) -> DispatchResult {
                 "paused_reason": record.paused_reason,
                 "last_progress": record.last_progress,
                 "event_count": record.event_count,
+                "llm_retries": record.llm_retries,
                 "started_at": record.started_at,
                 "error": record.error,
             })

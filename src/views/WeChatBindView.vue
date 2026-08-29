@@ -119,6 +119,16 @@
           <span>进度心跳间隔（分钟）</span>
           <input v-model.number="form.heartbeat_minutes" type="number" min="1" max="1440" />
         </label>
+        <label class="field">
+          <span>LLM 请求重试次数（API 不稳定时调高，1–100，留空不改）</span>
+          <input
+            v-model="form.llm_retries"
+            type="number"
+            min="1"
+            max="100"
+            placeholder="系统默认 3"
+          />
+        </label>
         <div class="field check-field">
           <span>随应用自动启动桥</span>
           <label class="switch-row">
@@ -197,6 +207,7 @@ interface ChannelConfigView {
   heartbeat_minutes: number;
   help_text: string;
   auto_start_bridge: boolean;
+  llm_retries: number | null;
   config_path: string;
 }
 
@@ -236,6 +247,7 @@ const form = reactive({
   heartbeat_minutes: 30,
   help_text: "",
   auto_start_bridge: true,
+  llm_retries: "" as number | "",
 });
 
 let statusTimer: number | null = null;
@@ -306,6 +318,7 @@ async function refreshConfig() {
     form.heartbeat_minutes = value.heartbeat_minutes;
     form.help_text = value.help_text;
     form.auto_start_bridge = value.auto_start_bridge !== false;
+    form.llm_retries = value.llm_retries ?? "";
   } catch {
     /* 配置读取失败保持表单原样 */
   }
@@ -443,6 +456,7 @@ async function saveConfig() {
         heartbeat_minutes: form.heartbeat_minutes,
         help_text: form.help_text,
         auto_start_bridge: form.auto_start_bridge,
+        llm_retries: form.llm_retries === "" ? undefined : Number(form.llm_retries),
       },
     });
     saveHint.value = "已保存 ✓（端口变更需重启应用生效）";
