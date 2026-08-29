@@ -415,6 +415,7 @@ pub async fn run_worker_loop(
                 .findings
                 .into_iter()
                 .filter(|f| !f.trim().is_empty())
+                .map(|f| f.chars().take(600).collect::<String>())
                 .take(8)
                 .collect();
             confidence = if matches!(

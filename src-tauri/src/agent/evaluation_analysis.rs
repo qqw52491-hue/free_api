@@ -381,6 +381,11 @@ pub(crate) fn assess_complex_delivery_summary(summary: &str) -> ComplexDeliveryA
     assessment
 }
 
+/// 交付文本自身是否宣称了主根因结论（与窗口检测共用同一组标记词）。
+pub(crate) fn summary_makes_root_cause_claim(summary: &str) -> bool {
+    root_cause_claim_window(summary).is_some()
+}
+
 /// 截取主根因附近的短窗口，避免文末的全局免责声明替代该结论自己的证据与强度。
 /// 没有明确根因结论的广义审查不适用这项检查。
 fn root_cause_claim_window(summary: &str) -> Option<String> {

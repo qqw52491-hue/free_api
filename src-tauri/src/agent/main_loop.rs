@@ -11,7 +11,7 @@ use crate::agent::control::{
     take_pending_interrupt, HumanControl,
 };
 use crate::agent::dispatcher::is_finish_instruction;
-use crate::agent::evaluation_analysis::assess_complex_delivery_summary;
+use crate::agent::evaluation_analysis::{assess_complex_delivery_summary, summary_makes_root_cause_claim};
 use crate::agent::loop_runner::run_call_llm_and_run_tool_phases;
 use crate::agent::mcp::{McpClient, PluginRegistry};
 use crate::agent::review_contract::{apply_review_contract_update, ReviewContract};
@@ -126,7 +126,24 @@ fn complex_delivery_blocker(
     // 不再依赖少数自然语言关键词：复杂 Bug、架构变更、公式证明等跨领域任务
     // 只要建立契约，就共享同一套依据—验证—交付闭环；普通任务保持轻量。
     if context.review_contract.is_none() {
-        return None;
+        // 未建契约的交付：不要求完整四件套，但只要交付自身宣称了主根因，
+        // 就必须就地校准（直接证据 + 结论强度）——"谁宣称根因，谁就校准"，
+        // 防止把复杂诊断的边界披露漏成无契约即免检。
+        let Some(summary) = instruction
+            .command
+            .as_ref()
+            .and_then(|command| command.get("summary"))
+            .and_then(|summary| summary.as_str())
+        else {
+            return None;
+        };
+        return if summary_makes_root_cause_claim(summary)
+            && !assess_complex_delivery_summary(summary).root_cause_calibrated
+        {
+            Some("交付提出了主根因结论，但缺少就地证据与结论强度（需在主根因小节内给出直接证据并标注 已证实/部分支持/未验证）".to_string())
+        } else {
+            None
+        };
     }
     let Some(summary) = instruction
         .command
@@ -240,6 +257,31 @@ mod finish_guard_tests {
         assert!(!should_challenge_finish_with_complex_delivery_blocker(
             true, false, true, &blockers, true
         ));
+    }
+
+    #[test]
+    fn root_cause_claim_without_contract_still_requires_inplace_calibration() {
+        let mut context =
+            context::SandwichContext::new("system".to_string(), "请诊断缓存问题".to_string());
+        // 无契约 + 交付宣称主根因但未就地校准 → 拦截
+        let claiming = AgentInstruction {
+            command: Some(serde_json::json!({ "summary": "### 主根因\n缓存模块未设置过期时间导致泄漏。" })),
+            ..Default::default()
+        };
+        let blocker = complex_delivery_blocker(&context, &claiming, true, true);
+        assert!(blocker.is_some(), "宣称主根因必须就地校准，即使未建契约");
+        // 校准后（直接证据 + 结论强度）放行
+        let calibrated = AgentInstruction {
+            command: Some(serde_json::json!({ "summary": "### 主根因\n根因证据：CacheService.rs:42 未设置 TTL（直接证据）。结论强度：已证实。\n已核验范围：TTL 路径全部读取；未核验范围：第三方缓存插件；结论强度：已证实" })),
+            ..Default::default()
+        };
+        assert!(complex_delivery_blocker(&context, &calibrated, true, true).is_none());
+        // 无契约 + 普通交付（无主根因宣称）→ 不拦截，简单任务保持轻量
+        let plain = AgentInstruction {
+            command: Some(serde_json::json!({ "summary": "# 已完成文件导出" })),
+            ..Default::default()
+        };
+        assert!(complex_delivery_blocker(&context, &plain, true, true).is_none());
     }
 
     #[test]

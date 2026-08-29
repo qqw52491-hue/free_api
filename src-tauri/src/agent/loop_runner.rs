@@ -829,6 +829,42 @@ pub async fn run_tool_phase(
                 route: "watch:stop_failed".to_string(),
             },
         }
+    // --- B2.2 L3 隔离写入 worker：私有副本上改码跑测试，diff 回执，root 仍是真实工作区唯一写入者 ---
+    } else if inst.get_tool().eq_ignore_ascii_case("child_writer")
+        || inst.get_action().eq_ignore_ascii_case("child_writer")
+    {
+        let routing = crate::agent::router::AgentRouter::route_for_step(context, model_routing, step_id);
+        let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
+        let writer_params = inst.get_params();
+        match crate::agent::child_writer::spawn_child_writer(
+            Some(app.clone()),
+            state.inner(),
+            parent_run_id,
+            final_session_id,
+            workspace_dir,
+            &routing.model_id,
+            &reasoning_effort,
+            &writer_params,
+            interrupt_rx.clone(),
+        )
+        .await
+        {
+            Ok(child_run_id) => DispatchResult {
+                stdout: format!(
+                    "写入 worker 已在隔离副本上开工，child_run_id: {}。它完成修改并自行运行你指定的测试命令后，会以结构化回执（changed_files 含逐文件 diff、test_status、findings）回到你的上下文；用 wait_jobs(job_ids:[\"{}\"]) 回收。注意：你（root）才是真实工作区的唯一写入者——审阅其 diff 后由你用常规写工具落实修改并最终验证。",
+                    child_run_id, child_run_id
+                ),
+                stderr: String::new(),
+                success: true,
+                route: "child_writer:spawned".to_string(),
+            },
+            Err(error) => DispatchResult {
+                stdout: String::new(),
+                stderr: error,
+                success: false,
+                route: "child_writer:rejected_or_failed".to_string(),
+            },
+        }
     // --- B2.1 L2 只读侦察 worker：异步派发独立动作-观测循环，结果经 durable inbox 回收 ---
     } else if inst.get_tool().eq_ignore_ascii_case("child_worker")
         || inst.get_action().eq_ignore_ascii_case("child_worker")
