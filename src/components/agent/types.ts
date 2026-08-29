@@ -273,6 +273,8 @@ export const CONTEXT_BUDGET_MODES: ContextBudgetModeOption[] = [
 
 export type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
 
+export type RoutingMode = "rules" | "scored";
+
 export interface ModelRouting {
     reasoning_effort_version: 2;
     pro: string;
@@ -282,6 +284,10 @@ export interface ModelRouting {
     flash_reasoning_effort: ReasoningEffort;
     vision_reasoning_effort: ReasoningEffort;
     context_budget_mode: ContextBudgetMode;
+    /** 路由模式：rules = 规则分流（默认）；scored = 难度打分制 */
+    routing_mode: RoutingMode;
+    /** 角色档位覆盖：角色 → ""(跟随自动) | "pro"/"flash"/"vision"(档位别名) | 具体模型 UUID */
+    role_models: Record<string, string>;
 }
 
 export interface AgentWorkerItem {

@@ -34,22 +34,14 @@ import {
     type ContextBudgetMode,
     type LlmParseErrorItem,
     type ParsedAttachment,
+    type ModelRouting,
 } from "../components/agent/types";
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
 
 const MAX_LOGS = 600;
 type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
 type StoredReasoningEffort = ReasoningEffort | "max";
-type ModelRouting = {
-    reasoning_effort_version: 2;
-    pro: string;
-    flash: string;
-    vision: string;
-    pro_reasoning_effort: ReasoningEffort;
-    flash_reasoning_effort: ReasoningEffort;
-    vision_reasoning_effort: ReasoningEffort;
-    context_budget_mode: ContextBudgetMode;
-};
+
 const MODEL_ROUTING_STORAGE_KEY = "free-api.agent.model-routing.v1";
 const REASONING_EFFORTS: ReasoningEffort[] = ["auto", "off", "low", "medium", "high"];
 const STORED_REASONING_EFFORTS: StoredReasoningEffort[] = [...REASONING_EFFORTS, "max"];
@@ -73,6 +65,8 @@ function loadModelRouting(): ModelRouting {
         flash_reasoning_effort: "auto",
         vision_reasoning_effort: "auto",
         context_budget_mode: "deep_coding",
+        routing_mode: "rules",
+        role_models: {},
     };
     try {
         const stored = JSON.parse(localStorage.getItem(MODEL_ROUTING_STORAGE_KEY) || "{}") as Partial<ModelRouting> & { reasoning_effort?: unknown; reasoning_effort_version?: unknown };
@@ -91,6 +85,10 @@ function loadModelRouting(): ModelRouting {
             flash_reasoning_effort: migrateReasoningEffort(stored.flash_reasoning_effort, legacyEffort, isLegacy),
             vision_reasoning_effort: migrateReasoningEffort(stored.vision_reasoning_effort, legacyEffort, isLegacy),
             context_budget_mode: budgetMode,
+            routing_mode: stored.routing_mode === "scored" ? "scored" : "rules",
+            role_models: stored.role_models && typeof stored.role_models === "object" && !Array.isArray(stored.role_models)
+                ? stored.role_models as Record<string, string>
+                : {},
         };
     } catch {
         return fallback;

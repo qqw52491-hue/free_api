@@ -534,6 +534,8 @@ function loadModelRouting(): ModelRouting {
     flash_reasoning_effort: "auto",
     vision_reasoning_effort: "auto",
     context_budget_mode: "deep_coding",
+    routing_mode: "rules",
+    role_models: {},
   };
 }
 

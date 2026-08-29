@@ -210,6 +210,67 @@
                                         />
                                     </div>
                                 </div>
+
+                                <!-- 4. 路由模式：规则分流 / 难度打分 -->
+                                <div class="route-item routing-mode-item">
+                                    <div class="route-item-head">
+                                        <div class="head-left">
+                                            <span class="route-badge mode">🎚️ 路由模式</span>
+                                            <small>决定每一步由强模型还是快模型接管</small>
+                                        </div>
+                                        <div class="effort-slider-group">
+                                            <button
+                                                type="button"
+                                                class="effort-step-btn"
+                                                :class="{ active: routingMode === 'rules' }"
+                                                title="规则分流：首步规划与失败救场走强模型，其余走快模型"
+                                                :disabled="isRunning"
+                                                @click="setRoutingMode('rules')"
+                                            >
+                                                规则
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="effort-step-btn"
+                                                :class="{ active: routingMode === 'scored' }"
+                                                title="难度打分：按契约/连续失败/观测体量加权评分，≥阈值升维强模型"
+                                                :disabled="isRunning"
+                                                @click="setRoutingMode('scored')"
+                                            >
+                                                打分
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 5. 角色档位映射：角色固定，跟随档位或钉死 -->
+                                <div class="route-item role-mapping-item">
+                                    <div class="route-item-head">
+                                        <div class="head-left">
+                                            <span class="route-badge roles">🎭 角色档位</span>
+                                            <small>子任务角色默认跟随上方档位；钉死后无视自动分流</small>
+                                        </div>
+                                    </div>
+                                    <div class="role-mapping-grid">
+                                        <div v-for="role in roleMappingItems" :key="role.key" class="role-row">
+                                            <div class="role-cell-label" :title="role.desc">
+                                                <span class="role-name">{{ role.label }}</span>
+                                                <small class="role-desc">{{ role.desc }}</small>
+                                            </div>
+                                            <select
+                                                class="role-tier-select"
+                                                :disabled="isRunning"
+                                                :value="roleModelValue(role.key)"
+                                                @change="setRoleModel(role.key, ($event.target as HTMLSelectElement).value)"
+                                            >
+                                                <option value="">跟随自动</option>
+                                                <option value="pro">🧠 强模型槽</option>
+                                                <option value="flash">⚡ 快模型槽</option>
+                                                <option value="vision">👁️ 视觉槽</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -535,6 +596,41 @@ function setReasoningEffort(role: "pro" | "flash" | "vision", value: ReasoningEf
         ...props.modelRouting,
         [field]: value,
     });
+}
+
+type RoleKey = "planner" | "executor" | "reviewer" | "scout" | "writer";
+const roleMappingItems: Array<{ key: RoleKey; label: string; desc: string }> = [
+    { key: "planner", label: "🧭 规划", desc: "首步全局规划与任务拆解" },
+    { key: "executor", label: "⚙️ 执行", desc: "常规工具步骤" },
+    { key: "reviewer", label: "🔍 审查", desc: "受限只读子审查（质量关口）" },
+    { key: "scout", label: "🛰️ 侦察 L2", desc: "只读侦察 worker（读文件/只读命令）" },
+    { key: "writer", label: "🛠️ 写入 L3", desc: "隔离副本改码 worker（diff 回执）" },
+];
+const routingMode = computed(() => (props.modelRouting as { routing_mode?: string }).routing_mode || "rules");
+
+function setRoutingMode(mode: "rules" | "scored") {
+    emit("update:model-routing", {
+        ...props.modelRouting,
+        routing_mode: mode,
+    } as ModelRouting);
+}
+
+function roleModelValue(key: RoleKey): string {
+    const map = (props.modelRouting as { role_models?: Record<string, string> }).role_models || {};
+    return map[key] || "";
+}
+
+function setRoleModel(key: RoleKey, value: string) {
+    const map = { ...((props.modelRouting as { role_models?: Record<string, string> }).role_models || {}) };
+    if (value) {
+        map[key] = value;
+    } else {
+        delete map[key];
+    }
+    emit("update:model-routing", {
+        ...props.modelRouting,
+        role_models: map,
+    } as ModelRouting);
 }
 
 function syncAllToPro() {
@@ -1696,3 +1792,66 @@ textarea::placeholder {
 }
 </style>
 
+
+<style scoped>
+/* 🎭 角色档位映射 + 路由模式（追加区块） */
+.routing-mode-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+.role-mapping-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+}
+.role-mapping-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.role-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03);
+}
+.role-row:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+.role-cell-label {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.role-name {
+    font-size: 12px;
+    font-weight: 600;
+}
+.role-desc {
+    font-size: 10px;
+    opacity: 0.55;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.role-tier-select {
+    flex-shrink: 0;
+    min-width: 128px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(0, 0, 0, 0.35);
+    color: inherit;
+    font-size: 12px;
+}
+.route-badge.mode {
+    background: linear-gradient(135deg, #5b8def 0%, #7f5bef 100%);
+}
+.route-badge.roles {
+    background: linear-gradient(135deg, #2f9e6e 0%, #5bc48f 100%);
+}
+</style>
