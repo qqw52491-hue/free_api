@@ -722,6 +722,7 @@ fn transient_retry_backoff_ms(attempt_index: u32) -> u64 {
 
 /// 带自动重试的流式请求（按配置次数重试所有错误）。
 /// 全部尝试与退避共享单次调用总预算：预算耗尽立即放弃，避免端点挂起拖垮整个运行。
+/// 前后挂槽位健康熔断：连续失败快速失败（llm_breaker），用户中断不计入失败。
 pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     config: &ModelConfig,
     messages: &[serde_json::Value],
@@ -730,6 +731,9 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     max_retries: u32,
     on_event: &mut F,
 ) -> Result<StreamResult, String> {
+    let slot = crate::llm_breaker::slot_key(&config.platform_name, &config.model_id);
+    crate::llm_breaker::gate(&slot)?;
+
     let budget_ms = llm_call_total_budget_ms();
     let started = std::time::Instant::now();
     let budget_exhausted = || {
@@ -738,71 +742,81 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
             budget_ms / 1000
         )
     };
-    let mut last_error = String::new();
-    for i in 0..max_retries {
-        let remaining_ms =
-            budget_ms.saturating_sub(started.elapsed().as_millis() as u64);
-        if remaining_ms == 0 {
-            break;
-        }
-        // 用剩余预算封顶本次尝试：服务端接受连接但流式无输出的挂起也在死线内被切断。
-        let attempt = tokio::time::timeout(
-            tokio::time::Duration::from_millis(remaining_ms),
-            stream_once(config, messages, reasoning_effort, interrupt_rx, on_event),
-        )
-        .await;
-        match attempt {
-            Ok(Ok(mut result)) => {
-                // 成功路径回填实际尝试次数（首次即成功 = 1，transient 重试后成功 = i+1）
-                result.attempt_count = i + 1;
-                return Ok(result);
+    let outcome: Result<StreamResult, String> = async {
+        let mut last_error = String::new();
+        for i in 0..max_retries {
+            let remaining_ms =
+                budget_ms.saturating_sub(started.elapsed().as_millis() as u64);
+            if remaining_ms == 0 {
+                break;
             }
-            Ok(Err(e)) => {
-                if e == STREAM_INTERRUPTED_ERROR {
-                    return Err(e);
+            // 用剩余预算封顶本次尝试：服务端接受连接但流式无输出的挂起也在死线内被切断。
+            let attempt = tokio::time::timeout(
+                tokio::time::Duration::from_millis(remaining_ms),
+                stream_once(config, messages, reasoning_effort, interrupt_rx, on_event),
+            )
+            .await;
+            match attempt {
+                Ok(Ok(mut result)) => {
+                    // 成功路径回填实际尝试次数（首次即成功 = 1，transient 重试后成功 = i+1）
+                    result.attempt_count = i + 1;
+                    return Ok(result);
                 }
-
-                last_error = e;
-                println!(
-                    "⚠️ LLM 请求失败 (第 {} 次 / 共 {} 次): {}",
-                    i + 1,
-                    max_retries,
-                    last_error
-                );
-                if i < max_retries - 1 {
-                    // 有界指数退避（1s、2s、4s、8s、15s...）给服务端恢复窗口。
-                    let backoff_ms = transient_retry_backoff_ms(i);
-                    // 退避同样受总预算约束：睡不完就不再重试。
-                    if started.elapsed().as_millis() as u64 + backoff_ms >= budget_ms {
-                        last_error = budget_exhausted();
-                        break;
+                Ok(Err(e)) => {
+                    if e == STREAM_INTERRUPTED_ERROR {
+                        return Err(e);
                     }
-                    tokio::select! {
-                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)) => {},
-                        changed = interrupt_rx.changed() => {
-                            let _ = changed;
-                            return Err(STREAM_INTERRUPTED_ERROR.to_string());
+
+                    last_error = e;
+                    println!(
+                        "⚠️ LLM 请求失败 (第 {} 次 / 共 {} 次): {}",
+                        i + 1,
+                        max_retries,
+                        last_error
+                    );
+                    if i < max_retries - 1 {
+                        // 有界指数退避（1s、2s、4s、8s、15s...）给服务端恢复窗口。
+                        let backoff_ms = transient_retry_backoff_ms(i);
+                        // 退避同样受总预算约束：睡不完就不再重试。
+                        if started.elapsed().as_millis() as u64 + backoff_ms >= budget_ms {
+                            last_error = budget_exhausted();
+                            break;
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)) => {},
+                            changed = interrupt_rx.changed() => {
+                                let _ = changed;
+                                return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                            }
                         }
                     }
                 }
-            }
-            Err(_elapsed) => {
-                // 预算耗尽。此刻可能恰有取消请求在途：优先上报中断而非超时。
-                if interrupt_rx.has_changed().unwrap_or(false) {
-                    return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                Err(_elapsed) => {
+                    // 预算耗尽。此刻可能恰有取消请求在途：优先上报中断而非超时。
+                    if interrupt_rx.has_changed().unwrap_or(false) {
+                        return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                    }
+                    last_error = budget_exhausted();
+                    break;
                 }
-                last_error = budget_exhausted();
-                break;
             }
         }
+        if last_error.is_empty() {
+            last_error = budget_exhausted();
+        }
+        Err(format!(
+            "LLM 请求最终失败 ({}次尝试内): {}",
+            max_retries, last_error
+        ))
     }
-    if last_error.is_empty() {
-        last_error = budget_exhausted();
+    .await;
+
+    match &outcome {
+        Ok(_) => crate::llm_breaker::record(&slot, true),
+        Err(e) if e != STREAM_INTERRUPTED_ERROR => crate::llm_breaker::record(&slot, false),
+        _ => {}
     }
-    Err(format!(
-        "LLM 请求最终失败 ({}次尝试内): {}",
-        max_retries, last_error
-    ))
+    outcome
 }
 
 /// 当 API 未返回 usage 时，粗略估算 Token 用量 (1 token ≈ 3 字符)

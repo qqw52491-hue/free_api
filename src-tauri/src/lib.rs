@@ -4,6 +4,7 @@ mod agent;
 mod commands;
 mod db;
 mod llm;
+mod llm_breaker;
 pub(crate) mod task_registry;
 
 use std::sync::atomic::{AtomicBool, Ordering};
