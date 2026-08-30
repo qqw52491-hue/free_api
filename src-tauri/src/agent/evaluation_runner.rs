@@ -24,7 +24,9 @@ use tokio::time::{sleep, timeout, Duration};
 
 /// 默认运行 20 分钟；到期后通过现有取消通道在下一个安全边界停止。
 pub const DEFAULT_EVALUATION_DURATION_MINUTES: u64 = 20;
-const MAX_EVALUATION_DURATION_MINUTES: u64 = 20;
+/// 长程收敛场景需要 >20 分钟（完工后自查阶段常再花 5+ 分钟）；
+/// 交接单协议按 60 分钟预算编排，20 上限曾把 19.4 分钟的运行在 20:00 整点砍成 cancelled。
+const MAX_EVALUATION_DURATION_MINUTES: u64 = 60;
 const STOP_GRACE_PERIOD: Duration = Duration::from_secs(120);
 const HUMAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const STRUCTURED_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
