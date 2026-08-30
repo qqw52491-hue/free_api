@@ -214,6 +214,18 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
 .sheet-item .si-label{font-size:14.5px;font-weight:550}
 .sheet-item .si-sub{font-size:12px;color:var(--dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sheet-item .si-check{color:var(--accent);font-weight:700}
+
+/* 计划分组（时间线树形） */
+.plan-group{margin:8px 0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:rgba(255,255,255,.02)}
+.plan-head{display:flex;align-items:center;gap:8px;padding:10px 12px;width:100%;text-align:left;background:var(--card);cursor:pointer}
+.plan-head:hover{background:var(--card2)}
+.plan-head .chev{color:var(--dim);transition:.2s;flex:none}
+.plan-group.closed .plan-head .chev{transform:rotate(-90deg)}
+.plan-head .pt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600;font-size:13.5px}
+.plan-group.closed .plan-steps{display:none}
+.plan-steps{padding:4px 10px 8px}
+.step.is-sub{margin-left:16px;border-left:2px solid rgba(91,140,255,.35);padding-left:8px}
+.badge-sub{font-size:10.5px;color:var(--accent);border:1px solid rgba(91,140,255,.4);border-radius:5px;padding:0 5px;margin-right:4px;white-space:nowrap}
 .field .sel{width:100%;padding:10px 12px;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
   background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;background-size:5px 5px;background-repeat:no-repeat}
 .modal-foot{display:flex;gap:10px;justify-content:flex-end;margin-top:6px}
@@ -401,6 +413,7 @@ const S = {
   currentSessionId: null,
   flow: null,            // { session, run, trace, tracesMeta }
   expandedSteps: new Set(),
+  collapsedPlans: new Set(),
   lastTraceStamp: "",
   pollTimer: null, tick: 0,
   pendingFiles: [],   // 新任务弹窗待上传附件（仅项目对话）
@@ -478,6 +491,25 @@ const STATUS = {
   failed:         { cls: "failed",   label: "失败" },
   cancelled:      { cls: "cancelled",label: "已取消" },
 };
+function renderStep(st) {
+  const open = S.expandedSteps.has(String(st.id));
+  const act = (st.action && st.action !== st.tool) ? st.action : (st.description || st.action || "");
+  const desc = st.description && st.description !== act ? `<div class="narr">${esc(st.description)}</div>` : "";
+  const thought = st.thought ? `<div class="label">🧠 思考</div><pre>${esc(st.thought)}</pre>` : "";
+  const params = st.command || st.params;
+  const paramsHtml = params ? `<div class="label">⌨️ 参数</div><pre>${esc(typeof params === "string" ? params : JSON.stringify(params, null, 2))}</pre>` : "";
+  const output = st.output ? `<div class="label">📄 输出</div><pre>${esc(st.output)}</pre>` : "";
+  const isSub = /spawn|child|review|writer|worker/.test(String(st.tool || "").toLowerCase());
+  return `<div class="step ${isSub ? "is-sub" : ""}">
+    ${desc}
+    <button class="step-row" data-step="${esc(st.id)}">
+      <span class="ic">${toolIcon(st.tool)}</span>
+      <span class="body"><span class="toolname">${esc(st.tool || "工具")}</span>${isSub ? `<span class="badge-sub">🤖 子智能体</span>` : ""}<span class="act">${esc(act)}</span></span>
+      <span class="right">${st.timestamp ? `<span class="time">${esc(relTime(new Date(st.timestamp).toISOString()))}</span>` : ""}${stepChip(st.status)}</span>
+    </button>
+    ${open ? `<div class="step-detail">${thought}${paramsHtml}${output}</div>` : ""}
+  </div>`;
+}
 function chip(status, extra) {
   const meta = STATUS[status] || { cls: "", label: status ? status : "无任务" };
   return `<span class="chip ${meta.cls}">${extra || ""}<span class="cdot"></span>${esc(meta.label)}</span>`;
@@ -846,28 +878,43 @@ function renderFlow() {
     ? `<div class="result-card ${failed ? "fail" : ""}"><div class="rlabel">${failed ? "✗ 失败原因" : "✓ 执行结果"}</div>${esc(resultText)}</div>`
     : "";
 
-  // 时间线
+  // 时间线：步骤按所属计划分组（plan_id），组可折叠；子代理步骤带分支徽标
   const steps = (f.trace && f.trace.steps) || [];
+  const groups = [];
+  const byPlan = new Map();
+  steps.forEach((st) => {
+    const key = st.plan_id || "_none";
+    if (!byPlan.has(key)) {
+      byPlan.set(key, { key, title: st.plan_title || "执行过程", steps: [] });
+      groups.push(byPlan.get(key));
+    }
+    const g = byPlan.get(key);
+    if (!g.title && st.plan_title) g.title = st.plan_title;
+    g.steps.push(st);
+  });
+  const groupStatus = (g) => {
+    const failed = g.steps.filter(s => s.status === "failed").length;
+    if (failed) return { cls: "failed", text: `${failed} 失败` };
+    const challenged = g.steps.some(s => s.status === "finish_challenged");
+    if (challenged) return { cls: "waiting", text: "待确认" };
+    return { cls: "done", text: `${g.steps.length} 步` };
+  };
+  const planParts = groups.map((g) => {
+    const closed = S.collapsedPlans.has(g.key);
+    const stat = groupStatus(g);
+    const rows = g.steps.map((st) => renderStep(st)).join("");
+    return `<div class="plan-group ${closed ? "closed" : ""}" data-plan="${esc(g.key)}">
+      <button class="plan-head" data-ptoggle="${esc(g.key)}">
+        <span class="chev">⌄</span>
+        <span class="pt">📋 ${esc(g.title)}</span>
+        <span class="chip ${stat.cls}">${esc(stat.text)}</span>
+      </button>
+      <div class="plan-steps">${rows}</div>
+    </div>`;
+  }).join("");
   const parts = [];
   if (!f.trace) parts.push(`<div class="empty-tip">该会话还没有执行记录${active ? "，正在等待第一步完成…" : ""}</div>`);
-  steps.forEach((st) => {
-    const open = S.expandedSteps.has(String(st.id));
-    const act = (st.action && st.action !== st.tool) ? st.action : (st.description || st.action || "");
-    const desc = st.description && st.description !== act ? `<div class="narr">${esc(st.description)}</div>` : "";
-    const thought = st.thought ? `<div class="label">🧠 思考</div><pre>${esc(st.thought)}</pre>` : "";
-    const params = st.command || st.params;
-    const paramsHtml = params ? `<div class="label">⌨️ 参数</div><pre>${esc(typeof params === "string" ? params : JSON.stringify(params, null, 2))}</pre>` : "";
-    const output = st.output ? `<div class="label">📄 输出</div><pre>${esc(st.output)}</pre>` : "";
-    parts.push(`<div class="step">
-      ${desc}
-      <button class="step-row" data-step="${esc(st.id)}">
-        <span class="ic">${toolIcon(st.tool)}</span>
-        <span class="body"><span class="toolname">${esc(st.tool || "工具")}</span><span class="act">${esc(act)}</span></span>
-        <span class="right">${st.timestamp ? `<span class="time">${esc(relTime(new Date(st.timestamp).toISOString()))}</span>` : ""}${stepChip(st.status)}</span>
-      </button>
-      ${open ? `<div class="step-detail">${thought}${paramsHtml}${output}</div>` : ""}
-    </div>`);
-  });
+  parts.push(planParts);
   if (f.run && f.run.status === "running") {
     parts.push(`<div class="running-row"><span class="rdot"></span>${esc(f.run.state_detail || "正在执行下一步…")}</div>`);
   }
@@ -1134,6 +1181,13 @@ function bind() {
     // ＋ 按钮在卡片头内部，必须先于折叠判断，否则会被当作展开/收起
     const plus = e.target.closest("[data-new]");
     if (plus) { e.stopPropagation(); openModal(plus.dataset.new); closeSidebarMobile(); return; }
+    const ptog = e.target.closest("[data-ptoggle]");
+    if (ptog) {
+      const k = ptog.dataset.ptoggle;
+      if (S.collapsedPlans.has(k)) S.collapsedPlans.delete(k); else S.collapsedPlans.add(k);
+      renderFlow();
+      return;
+    }
     const toggle = e.target.closest("[data-toggle]");
     if (toggle) { toggleGroup(toggle.dataset.toggle); return; }
     const sessionBtn = e.target.closest("[data-session]");
@@ -1159,6 +1213,12 @@ async function boot() {
   }
   startPolling();
   connectSSE();
+  // 深链：?session=<id> 直达任务会话（微信推送点进来就是对应任务）
+  const deepSession = new URL(location.href).searchParams.get("session");
+  if (deepSession) {
+    history.replaceState(null, "", location.pathname);
+    openSession(deepSession).catch(() => {});
+  }
   // 后台切回 / 网络恢复：立即恢复连接并拉最新数据
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") resumeLive();
