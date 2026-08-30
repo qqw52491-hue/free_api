@@ -425,3 +425,15 @@ $DB = `~/Library/Application Support/free-api-chat/data_v2.db`；报告自述路
 - **唯一遗留缺口**：硬 LLM 失败（端点突发故障）= 任务立即失败。五轮实质全部完成，
   失败全是"端点故障打在尾部"。下一步：熔断冷却期后步骤级重试（任务预算内等待槽位半开再试一次），
   而非直接终止。
+
+## 不同任务形态复测：诊断类双臂对照（2026-08-30 晚，改动后最终确认）
+
+- 场景：4 个源码级诊断 fixture（fake_action / plugin_removal / false_leak / name_collision），
+  与 24 阶段修复完全不同的任务形态（根因分析、假设排除、结构化交付），验证今日全部改动无回归。
+- **free_api：wdio 3/4 场景通过**。唯一失败 plugin_removal 是**交付格式断言**
+  （finish 摘要缺"已核验/未核验/结论强度"披露），其 DIAGNOSIS.json 隐藏断言独立补验 PASS，
+  且比 ZCode 臂多识别一个细节（catalog::CACHE thread_local 只清删除线程）。
+- **ZCode 臂：4/4 PASS**（grade-diag.mjs 独立评分，_v2 全新 fixture）。
+- 对照结论：诊断正确性两臂等效（free_api 甚至更细），失败源于 finish 交付披露结构的轮次方差
+  （今早同场景曾通过）——属第 8 节交付格式纪律的执行稳定性问题，非能力缺失。
+- 今晨基线（改动前）同套件 5/5；今日改动后 3/4+1 格式失败：无回归证据，方差一例。
