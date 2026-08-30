@@ -854,8 +854,12 @@ pub async fn stream_with_resilient_retry<F: FnMut(StreamEvent) -> bool>(
         if err == STREAM_INTERRUPTED_ERROR {
             break;
         }
-        // 只对传输层彻底失败做韧性等待（stream_with_retry 的终态错误统一以该前缀出现）
-        if !err.contains("LLM 请求最终失败") {
+        // 两类可等待恢复的硬失败：传输层彻底失败（含预算耗尽），以及熔断快速失败
+        // （熔断注册表是进程级全局——上一任务打开的闸门不能让下一任务秒死，应等半开窗口）。
+        let recoverable = err.contains("LLM 请求最终失败")
+            || err.contains("熔断中")
+            || err.contains("半开探测");
+        if !recoverable {
             break;
         }
         if attempt >= RESILIENT_LLM_RETRIES {
