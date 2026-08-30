@@ -6,13 +6,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const artifactDir = path.join(rootDir, "test-artifacts");
 const modelId = process.env.FREE_API_LIVE_MODEL_ID?.trim();
+const maxDurationMinutes = Number(process.env.FREE_API_LIVE_MAX_DURATION_MINUTES ?? 20);
 // 轮询期限必须严格大于运行时限（supervise_worker 取消 → 120s 安全等待 → 报告落盘），
 // 否则 app 还没写完报告 spec 就先放弃并拆掉实例——2026-08-30 实测两期限同为 3600s 时报告丢失。
 const evaluationTimeoutMs = Math.max(
   Number(process.env.FREE_API_LIVE_EVALUATION_TIMEOUT_MS ?? 1_200_000),
   maxDurationMinutes * 60_000 + 300_000
 );
-const maxDurationMinutes = Number(process.env.FREE_API_LIVE_MAX_DURATION_MINUTES ?? 20);
 const reasoningEffort = process.env.FREE_API_LIVE_REASONING_EFFORT?.trim() || "auto";
 const proModelId = process.env.FREE_API_LIVE_MODEL_ID_PRO?.trim() || modelId;
 const flashModelId = process.env.FREE_API_LIVE_MODEL_ID_FLASH?.trim() || modelId;
