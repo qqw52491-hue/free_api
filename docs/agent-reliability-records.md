@@ -444,3 +444,14 @@ $DB = `~/Library/Application Support/free-api-chat/data_v2.db`；报告自述路
   等待可被用户取消打断；熔断开启时自动等到半开窗口。
 - 从此任务死亡策略改为：三次恢复窗口（约 14 分钟）都试过仍失败才判死，且全程受任务看门狗约束。
 - 本轮验证目标：①正常路径无回归（调用数维持 ~60 级别）②若端点再抽风，观察韧性窗口是否救回。
+
+## TinyFish 免费搜索接入（2026-08-30 深夜）
+
+- TinyFish 官方 onboarding 已跑完：Codex + Cursor 连接验证通过（无需浏览器登录）；
+  Claude Code/OpenClaw/OpenCode 因 CLI 不在 PATH 跳过；TINYFISH_API_KEY 已写入 shell profile。
+- **free_api 原生接入**：web_search.rs 回退链新增 search_tinyfish（X-API-Key + GET api.search.tinyfish.ai），
+  置顶优先于 Bing 免费抓取；实况测试通过（HN 查询返回 TinyFish 来源）。
+- **部署注意**：app 进程需能读到 TINYFISH_API_KEY 环境变量（shell 启动即可；GUI 启动需后续把 key
+  收进应用设置存储——待办）。
+- API 契约（从官方 SDK 挖出）：Search=GET api.search.tinyfish.ai/?query=；Fetch=POST api.fetch.tinyfish.ai/
+  body {urls:[...]}, 认证统一 X-API-Key 头。
