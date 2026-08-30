@@ -217,6 +217,9 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
 .sheet-item .si-label{font-size:14.5px;font-weight:550}
 .sheet-item .si-sub{font-size:12px;color:var(--dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sheet-item .si-check{color:var(--accent);font-weight:700}
+.tl-tools{display:flex;justify-content:flex-end;padding:2px 2px 6px}
+.mini-btn{font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:8px;padding:3px 10px}
+.mini-btn:hover{color:var(--accent);border-color:var(--accent)}
 
 /* 计划分组（时间线树形） */
 .plan-group{margin:8px 0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:rgba(255,255,255,.02)}
@@ -296,6 +299,7 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
         </div>
         <div class="goal-pill" id="flowGoal"></div>
         <div class="live-line" id="liveLine"></div>
+        <div class="tl-tools"><button id="btnExpandAll" class="mini-btn hidden"></button></div>
         <div id="timeline"></div>
         <div id="askCard"></div>
         <div id="resultCard"></div>
@@ -919,6 +923,20 @@ function renderFlow() {
       <div class="plan-steps">${rows}</div>
     </div>`;
   }).join("");
+  // 「展开/收起全部详情」按钮：默认收起，批量开合交给用户
+  const btnEx = $("btnExpandAll");
+  if (steps.length) {
+    const allOpen = steps.every(st => S.expandedSteps.has(String(st.id)));
+    btnEx.textContent = allOpen ? "收起全部详情" : "展开全部详情";
+    btnEx.onclick = () => {
+      if (allOpen) S.expandedSteps.clear();
+      else steps.forEach(st => S.expandedSteps.add(String(st.id)));
+      renderFlow();
+    };
+    btnEx.classList.remove("hidden");
+  } else {
+    btnEx.classList.add("hidden");
+  }
   const parts = [];
   if (!f.trace) parts.push(`<div class="empty-tip">该会话还没有执行记录${active ? "，正在等待第一步完成…" : ""}</div>`);
   parts.push(planParts);
