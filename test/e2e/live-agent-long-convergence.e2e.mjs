@@ -8,6 +8,7 @@ const artifactDir = path.join(rootDir, "test-artifacts");
 const modelId = process.env.FREE_API_LIVE_MODEL_ID?.trim();
 const evaluationTimeoutMs = Number(process.env.FREE_API_LIVE_EVALUATION_TIMEOUT_MS ?? 1_200_000);
 const maxDurationMinutes = Number(process.env.FREE_API_LIVE_MAX_DURATION_MINUTES ?? 20);
+const reasoningEffort = process.env.FREE_API_LIVE_REASONING_EFFORT?.trim() || "auto";
 const proModelId = process.env.FREE_API_LIVE_MODEL_ID_PRO?.trim() || modelId;
 const flashModelId = process.env.FREE_API_LIVE_MODEL_ID_FLASH?.trim() || modelId;
 const routingMode = process.env.FREE_API_ROUTING_MODE?.trim() || "";
@@ -17,7 +18,7 @@ const routingConfig = {
   pro: proModelId,
   flash: flashModelId,
   vision: proModelId,
-  reasoning_effort: "high",
+  reasoning_effort: reasoningEffort,
   ...(routingMode ? { routing_mode: routingMode } : {}),
   ...(roleModels ? { role_models: roleModels } : {}),
 };

@@ -16,6 +16,15 @@ pub struct ChatMessage {
     pub content: serde_json::Value, // 支持 String 或 Array (多模态)
 }
 
+/// 重复读取台账条目：同工具+同路径的内容指纹与读取次数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadLedgerEntry {
+    pub content_hash: String,
+    pub count: u32,
+    pub sample: String,
+    pub line_count: usize,
+}
+
 /// 失败教训记录（用于防止大模型在长任务中重复尝试已知失败的方法）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FailedAttempt {
@@ -195,6 +204,10 @@ pub struct SandwichContext {
     /// 结构化路由信号：连续失败步数（成功步清零）。供路由的难度打分与升维决策使用。
     #[serde(default)]
     pub consecutive_failures: u32,
+    /// 重复读取台账：key = "工具|路径"，记录内容哈希/次数/内容摘要。
+    /// 上下文压缩发生时清零（压缩后模型遗忘旧内容，重读重新合法）。
+    #[serde(default)]
+    pub read_ledger: std::collections::BTreeMap<String, ReadLedgerEntry>,
     /// 当前最新一次工具执行的环境观测结果 (Observation)
     pub current_observation: String,
 
@@ -247,6 +260,7 @@ impl SandwichContext {
             task_resources: Vec::new(),
             last_step_failed: false,
             consecutive_failures: 0,
+            read_ledger: std::collections::BTreeMap::new(),
             active_tool: None,
             compact_tools_index: None,
             active_tool_detail: String::new(),
@@ -266,6 +280,106 @@ impl SandwichContext {
         } else {
             self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         }
+    }
+
+    /// 重复读取硬拦截（四条件签名）：同工具+同路径第 3 次读取且内容未变 → 拒绝。
+    /// 返回 Some(拒绝消息) 时宿主不得执行该读取；None = 放行并记账。
+    /// 合法重读自动放行：文件内容变了（改后验证）、首次/前两次读取。
+    pub fn check_repeat_read(
+        &mut self,
+        tool: &str,
+        path: &str,
+        content: &str,
+    ) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        let key = format!("{}|{}", tool.to_lowercase(), path);
+        let line_count = content.lines().count();
+        let entry = self.read_ledger.entry(key).or_insert(ReadLedgerEntry {
+            content_hash: hash.clone(),
+            count: 0,
+            sample: content.chars().take(200).collect(),
+            line_count,
+        });
+        if entry.content_hash != hash {
+            // 内容已变化（改后重读合法）：重置指纹
+            *entry = ReadLedgerEntry {
+                content_hash: hash,
+                count: 1,
+                sample: content.chars().take(200).collect(),
+                line_count,
+            };
+            return None;
+        }
+        entry.count += 1;
+        if entry.count >= 3 {
+            let sample = entry.sample.clone();
+            let lines = entry.line_count;
+            entry.count = u32::MAX / 2; // 持续拦截直到内容变化
+            return Some(format!(
+                "【重复读取拦截】该文件你已读取 {} 次且内容未变化（哈希一致，共 {} 行）。上次读取的内容开头：\n{}\n内容仍在你此前的上下文里；要定位片段请用 grep/搜索工具按关键词提取，或先修改文件后再读取。严禁原样重读。",
+                entry.count, lines, sample
+            ));
+        }
+        None
+    }
+
+    /// 上下文压缩后调用：模型已遗忘旧读取内容，台账清零使重读重新合法。
+    pub fn reset_read_ledger(&mut self) {
+        self.read_ledger.clear();
+    }
+
+    /// 派发层入口：识别读取型指令，提取路径，宿主读文件后执行四条件判定。
+    /// 非读取型工具 / 路径不可解析 / 文件不可读 → None（放行，让工具自己报错）。
+    pub fn check_repeat_read_dispatch(
+        &mut self,
+        instruction: &crate::agent::types::AgentInstruction,
+        workspace_dir: &std::path::Path,
+    ) -> Option<String> {
+        const READ_TOOLS: &[&str] = &[
+            "read_text_file", "read_file", "get_file_content", "get_code_snippet",
+        ];
+        let tool = instruction.get_tool().to_lowercase();
+        if !READ_TOOLS.iter().any(|t| tool.contains(t)) {
+            return None;
+        }
+        let params = instruction.get_params();
+        let raw_path = params
+            .get("path")
+            .or_else(|| params.get("filePath"))
+            .or_else(|| params.get("file_path"))
+            .and_then(|v| v.as_str())?;
+        if raw_path.trim().is_empty() || raw_path.chars().count() > 1_000 {
+            return None;
+        }
+        let candidate = std::path::PathBuf::from(raw_path.trim());
+        let target = if candidate.is_relative() {
+            workspace_dir.join(candidate)
+        } else {
+            candidate
+        };
+        let Ok(canonical) = target.canonicalize() else {
+            return None;
+        };
+        if !canonical.is_file() {
+            return None;
+        }
+        // 上限保护：超大文件只取头部指纹段参与哈希，避免整读大文件
+        let Ok(metadata) = std::fs::metadata(&canonical) else { return None; };
+        let content = if metadata.len() > 1_000_000 {
+            use std::io::Read;
+            let mut file = std::fs::File::open(&canonical).ok()?;
+            let mut bytes = vec![0u8; 1_000_000];
+            let read_len = file.read(&mut bytes).ok()?;
+            bytes.truncate(read_len);
+            String::from_utf8_lossy(&bytes).to_string()
+        } else {
+            std::fs::read_to_string(&canonical).ok()?
+        };
+        let ledger_path = canonical.to_string_lossy().to_string();
+        self.check_repeat_read(&tool, &ledger_path, &content)
     }
 
     pub fn active_plan_id(&self) -> Option<&str> {
@@ -693,5 +807,43 @@ mod tests {
         ctx.record_side_effect(2, "edit_file".to_string(), "后续写入".to_string());
         assert!(ctx.change_verification.is_none());
         assert_eq!(ctx.side_effects.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod repeat_read_tests {
+    use super::*;
+
+    fn ctx() -> SandwichContext {
+        SandwichContext::new("system".to_string(), "目标".to_string())
+    }
+
+    #[test]
+    fn repeat_read_allows_first_two_blocks_third_and_resets_on_change() {
+        let mut context = ctx();
+        let content = "line1\nline2\nline3";
+        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", content).is_none(), "第 1 次放行");
+        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", content).is_none(), "第 2 次放行");
+        let blocked = context.check_repeat_read("read_text_file", "/ws/a.rs", content);
+        assert!(blocked.is_some(), "第 3 次同内容必须拦截");
+        assert!(blocked.unwrap().contains("已读取"), "拦截消息要给抓手");
+
+        // 内容变化（改后重读）→ 放行并重置
+        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_none());
+
+        // 重置后计数从 1 起：再连续两次放行，第 3 次同内容又拦（count ≥ 3）
+        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_none(), "重置后第 2 次放行");
+        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_some(), "第 3 次同内容再拦");
+    }
+
+    #[test]
+    fn ledger_keys_are_per_path_and_reset_clears() {
+        let mut context = ctx();
+        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "A").is_none());
+        assert!(context.check_repeat_read("read_text_file", "/ws/b.rs", "B").is_none(), "不同路径互不干扰");
+        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "A").is_none());
+        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "A").is_some());
+        context.reset_read_ledger();
+        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "A").is_none(), "清零后重读合法");
     }
 }

@@ -15,7 +15,7 @@ if (process.platform === "linux") {
 const appBinaryPath = path.join(
   rootDir,
   "src-tauri",
-  "target",
+  process.env.FREE_API_EVAL_TARGET_DIR || "target-eval",
   "debug",
   process.platform === "win32" ? "free-api-chat.exe" : "free-api-chat",
 );

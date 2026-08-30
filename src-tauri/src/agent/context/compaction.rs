@@ -262,6 +262,8 @@ impl SandwichContext {
         if !reached_high_watermark {
             return;
         }
+        // 压缩即将改写历史：模型对旧读取内容的记忆随之失效，读取台账清零使重读重新合法
+        self.read_ledger.clear();
 
         // ── 0. 先做一次性脱水定型：把保护区之外的历史消息就地替换为证据句柄 ──
         // 这是旧输出"变成存根"的唯一时机：只在 compaction 事件内发生，

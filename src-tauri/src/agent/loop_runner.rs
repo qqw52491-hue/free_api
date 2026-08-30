@@ -667,6 +667,20 @@ pub async fn run_tool_phase(
         });
     }
 
+    // --- B0. 重复读取硬拦截：同工具+同路径第 3 次读取且内容未变 → 拒绝并给抓手 ---
+    if let Some(block_msg) = context.check_repeat_read_dispatch(inst, workspace_dir) {
+        let _ = app.emit(
+            &format!("agent-log-{}", final_session_id),
+            "🛑 重复读取已拦截：内容未变化，强制切换策略".to_string(),
+        );
+        return Ok(DispatchResult {
+            success: false,
+            stdout: String::new(),
+            stderr: block_msg,
+            route: "host_rejection:repeat_read".to_string(),
+        });
+    }
+
     app.emit(
         &format!("agent-log-{}", final_session_id),
         format!("▶ 步骤 {}: {}", step_id + 1, inst.description),
