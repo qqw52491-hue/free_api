@@ -33,6 +33,19 @@ pub fn run() {
         .manage(DbState(std::sync::Arc::new(std::sync::Mutex::new(conn))))
         .manage(registry)
         .setup(|app| {
+            // 启动清理：上次进程遗留的 running trace 标记为已中断（无跨进程恢复，僵尸记录防堆积）
+            {
+                let state = tauri::Manager::state::<DbState>(app);
+                let lock = state.0.lock();
+                match lock {
+                    Ok(conn) => match crate::db::mark_orphan_running_traces_interrupted(&conn) {
+                        Ok(n) if n > 0 => println!("[cleanup] 已将 {n} 条遗留 running trace 标记为已中断"),
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[cleanup] 清理僵尸 running trace 失败: {e}"),
+                    },
+                    Err(e) => eprintln!("[cleanup] 数据库锁获取失败: {e}"),
+                }
+            }
             // 微信通道：本机 axum API（供 Node 桥调用），失败只打日志不阻断启动
             crate::agent::channel::spawn_channel_server(app.handle().clone());
             // 定时触发器：按计划自动派发任务，结果推微信

@@ -660,6 +660,12 @@ pub(crate) fn register_and_spawn_run(
                 .or_else(|| payload.get("message").and_then(Value::as_str))
                 .map(|s| truncate_chars(s, 400));
             let paused = payload.get("type").and_then(Value::as_str) == Some("agent_paused");
+            // 动作计数只认真实步骤完成（step_done/step_error）与交付（complete）；
+            // 规划期等热路径的高频进度事件不计数，否则微信"已执行 N 个动作"会虚高数十倍
+            let is_real_step = matches!(
+                payload.get("type").and_then(Value::as_str),
+                Some("step_done") | Some("step_error") | Some("complete")
+            );
             let paused_reason = if paused {
                 Some(
                     payload
@@ -672,7 +678,9 @@ pub(crate) fn register_and_spawn_run(
                 None
             };
             patch_run(&listen_run, |record| {
-                record.event_count += 1;
+                if is_real_step {
+                    record.event_count += 1;
+                }
                 if let Some(text) = description {
                     record.last_progress = Some(text);
                 }

@@ -86,6 +86,21 @@ pub fn get_db_path() -> PathBuf {
     home.join("free-api-chat").join("data_v2.db")
 }
 
+/// 启动清理：上次进程遗留的 running trace 标记为已中断。
+/// runs_store 不跨进程存活，应用重启后这些任务不可能再恢复执行；
+/// 不清理会让会话历史里永远挂着"运行中"的僵尸记录（微信复用会话尤其明显）。
+pub fn mark_orphan_running_traces_interrupted(conn: &Connection) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE agent_run_traces
+         SET status = 'cancelled',
+             completed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+             completion_json = COALESCE(completion_json, json_object('summary', '应用重启，任务已中断'))
+         WHERE status = 'running'",
+        [],
+    )?;
+    Ok(n)
+}
+
 pub fn init_db(path: &PathBuf) -> Result<Connection> {
     std::fs::create_dir_all(path.parent().unwrap()).ok();
     let conn = Connection::open(path)?;
@@ -738,6 +753,47 @@ pub fn migrate_uvx_bridge_plugins_to_native(conn: &Connection) -> Result<usize, 
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    #[test]
+    fn orphan_running_traces_marked_interrupted_on_cleanup() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_run_traces (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, goal TEXT,
+                status TEXT NOT NULL, steps_json TEXT NOT NULL DEFAULT '[]',
+                completion_json TEXT, started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, completed_at TEXT);",
+        )
+        .unwrap();
+        for (id, status) in [("t-running", "running"), ("t-done", "succeeded"), ("t-fail", "failed")] {
+            conn.execute(
+                "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at)
+                 VALUES (?1, 's1', 'g', ?2, '[]', '2026-08-30T00:00:00+00:00', '2026-08-30T00:00:00+00:00')",
+                rusqlite::params![id, status],
+            )
+            .unwrap();
+        }
+        let n = mark_orphan_running_traces_interrupted(&conn).unwrap();
+        assert_eq!(n, 1, "只有 running 状态应被清理");
+        let (status, has_summary, has_completed): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status,
+                        completion_json LIKE '%应用重启，任务已中断%',
+                        completed_at
+                 FROM agent_run_traces WHERE id='t-running'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "cancelled");
+        assert_eq!(has_summary, 1, "应补写中断摘要");
+        assert!(has_completed.is_some(), "应写 completed_at");
+        // 终态记录不动
+        let untouched: i64 = conn
+            .query_row("SELECT count(*) FROM agent_run_traces WHERE id IN ('t-done','t-fail') AND status NOT IN ('succeeded','failed')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(untouched, 0);
+    }
 
     #[test]
     fn uvx_bridge_rows_convert_to_native_http_and_others_untouched() {
