@@ -356,3 +356,18 @@ $DB = `~/Library/Application Support/free-api-chat/data_v2.db`；报告自述路
 - 行为规则属概率性引导，效果需跑 eval 验证：llm_call_count 79 → ~55 即生效；
   熔断可用"指向死端点"的故障注入验证开闸/半开恢复/trace 记录。
 - 327 单测全绿（+4 熔断状态机）。
+
+## 第三轮长程：正式 succeeded ✅（2026-08-30 15:22，c72e7f8 修复后）
+
+- **evaluation_id**: `agent-write-fixture-afffeec4`（run `7502c431`）· **trace_status: succeeded** · **wdio 1 passing (18m57s)**
+- 全修复首次联合生效：60min 上限、spec 轮询缓冲、调用预算 240s、熔断（未触发——端点健康）、分级并行（合规 ≤2）
+- 指标：83 调用（含规范 `finish` 交付，三次长跑首次正经收尾）/ 81 工具步 / 0 重复读取（第三次连续 0）/
+  缓存命中 91.1%（↑2.4pp）/ 观测 18 分钟（远低于 60min 上限）
+- **过程亮点**：阶段 21 首次实现错误（返回字符串而非数组），agent 重读源码定位、修复、通过——
+  真实错误下的自恢复路径被完整走通。调用 82 曾漏写 `tool` 字段被宿主指令校验拦截，下调用自行修正。
+- **诚实记录**：循环节奏规则（commands 批合并读取）**未改变调用结构**——仍是每阶段 读→写→测 3 调用，
+  llm_call_count 83 ≈ 79（含 finish 差异为噪声）。提示词级行为引导如预期是概率性的；
+  若要确定生效，需在 loop_runner 层做结构化支持（受"宿主不改写"原则约束，需权衡）。
+- spec 侧 TDZ 引用错误（c72e7f8）：evaluationTimeoutMs 在 maxDurationMinutes 声明前使用，
+  spec 加载即崩，第三轮首跑 1 秒失败暴露——教训：改 spec 后必须 `node --check` 再提交。
+- ZCode 臂 v3 同 fixture 对照：24/24 隐藏断言 PASS、受保护文件零改写、实质 8m46s（51 轮、零浪费调用）。
