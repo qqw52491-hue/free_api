@@ -34,7 +34,19 @@ pub async fn execute_web_search(
         max_results.min(10)
     };
 
-    // 1. 优先免 Key 实时全网搜索 (基于 Bing 开放 RSS 协议，0 成本 0 配置 实时全网检索)
+    // 0. TinyFish 免费 Agent 搜索 API (X-API-Key 认证，Search 免费 30 次/分钟)；
+    //    API 级稳定性远高于 Bing 免费抓取，配置了 TINYFISH_API_KEY 时永远优先。
+    if let Ok(key) = std::env::var("TINYFISH_API_KEY") {
+        if !key.trim().is_empty() {
+            if let Ok(res) = search_tinyfish(q, key.trim(), limit).await {
+                if !res.is_empty() {
+                    return Ok(res);
+                }
+            }
+        }
+    }
+
+    // 1. 免 Key 实时全网搜索兜底 (基于 Bing 开放 RSS 协议，0 成本 0 配置 实时全网检索)
     if let Ok(res) = search_bing_free(q, limit).await {
         if !res.is_empty() {
             return Ok(res);
@@ -76,6 +88,66 @@ pub async fn execute_web_search(
         snippet: format!("未检索到关于 '{}' 的即时权威摘要。如需高精度全局网络搜索，可配置 TAVILY_API_KEY 或 BRAVE_API_KEY。", q),
         source: "Aggregated Search".to_string(),
     }])
+}
+
+/// TinyFish Agent 搜索适配器 (免费档 Search 30 次/分钟；认证: X-API-Key 请求头)
+async fn search_tinyfish(
+    query: &str,
+    api_key: &str,
+    limit: usize,
+) -> Result<Vec<WebSearchResultItem>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .get("https://api.search.tinyfish.ai/")
+        .header("X-API-Key", api_key)
+        .query(&[("query", query)])
+        .send()
+        .await
+        .map_err(|e| format!("TinyFish 请求失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("TinyFish HTTP 状态码: {}", resp.status()));
+    }
+
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("TinyFish JSON 解析失败: {}", e))?;
+
+    let mut results = Vec::new();
+    if let Some(arr) = data.get("results").and_then(|v| v.as_array()) {
+        for item in arr.iter().take(limit) {
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = item
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let snippet = item
+                .get("snippet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if url.is_empty() {
+                continue;
+            }
+            results.push(WebSearchResultItem {
+                title,
+                url,
+                snippet,
+                source: "TinyFish".to_string(),
+            });
+        }
+    }
+    Ok(results)
 }
 
 /// Tavily AI 搜索引擎适配器 (每月 1000 次免费)
@@ -725,5 +797,25 @@ mod tests {
         let fetch_res = dispatch("web_fetch", &json!({ "url": "" }));
         assert!(!fetch_res.success);
         assert!(fetch_res.stderr.contains("缺少必填参数"));
+    }
+
+    /// 实况联调（需 TINYFISH_API_KEY 环境变量，默认忽略）：
+    /// cargo test search_tinyfish_live -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn search_tinyfish_live() {
+        let key = std::env::var("TINYFISH_API_KEY").unwrap_or_default();
+        if key.trim().is_empty() {
+            println!("未设置 TINYFISH_API_KEY，跳过实况验证");
+            return;
+        }
+        let res = search_tinyfish("Hacker News top story", key.trim(), 3)
+            .await
+            .expect("TinyFish 实况调用失败");
+        assert!(!res.is_empty(), "TinyFish 返回空结果");
+        for item in &res {
+            println!("· {} | {} | {}", item.title, item.url, item.source);
+        }
+        assert!(res.iter().all(|i| i.source == "TinyFish"));
     }
 }
