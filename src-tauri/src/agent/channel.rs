@@ -1086,7 +1086,10 @@ async fn handler_run_cancel(
         .await
         .map_err(|e| bad_request(&e))?;
     patch_run(&run_id, |record| {
-        record.status = "cancelled".to_string();
+        // 已到终态（done/failed/cancelled）的任务不再覆盖，避免取消请求把完成态改写
+        if matches!(record.status.as_str(), "running" | "waiting_human") {
+            record.status = "cancelled".to_string();
+        }
         record.paused_reason = None;
     });
     Ok(Json(json!({"ok": true, "session_id": session_id})))
