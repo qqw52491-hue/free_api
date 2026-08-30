@@ -91,12 +91,16 @@
                     <div v-if="roleFormOpen" class="role-form">
                         <label>角色标识 (ASCII)*<input v-model="roleForm.name" :disabled="!!roleForm.editingId" placeholder="frontend_designer" /></label>
                         <label>显示名<input v-model="roleForm.label" placeholder="前端审美大师" /></label>
-                        <label>钉死模型（留空跟随档位路由）
-                            <select v-model="roleForm.model_id">
-                                <option value="">跟随档位路由</option>
-                                <option v-for="m in roleModelOptions" :key="m.id" :value="m.id">{{ m.platform_name }} / {{ m.display_name || m.name }}</option>
-                            </select>
-                        </label>
+                        <div class="role-form-field">
+                            <span class="role-field-label">钉死模型（留空跟随档位路由）</span>
+                            <ModelSelectDropdown
+                                :model-value="roleForm.model_id"
+                                :models="roleModelOptions || []"
+                                placeholder="跟随档位路由 (可搜索指定模型)..."
+                                size="sm"
+                                @update:model-value="roleForm.model_id = $event"
+                            />
+                        </div>
                         <label>人设提示词*<textarea v-model="roleForm.persona_prompt" rows="4" placeholder="专精 Tailwind、暗黑玻璃拟态、微交互与响应式排版……"></textarea></label>
                         <label>作用域提示（逗号分隔，可选）<input v-model="roleForm.scope_hints" placeholder="src/components, src/assets" /></label>
                         <label>默认测试命令（可选）<input v-model="roleForm.default_test_command" placeholder="npm run build" /></label>
@@ -122,6 +126,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import ModelSelectDropdown from "../common/ModelSelectDropdown.vue";
 
 const props = withDefaults(defineProps<{
     open: boolean;
@@ -551,10 +556,17 @@ watch(() => props.open, (open) => {
     margin-top: 8px;
 }
 
-.role-form label {
+.role-form label,
+.role-form-field {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #d4d4d8;
+}
+
+.role-field-label {
     font-size: 11px;
     font-weight: 600;
     color: #d4d4d8;

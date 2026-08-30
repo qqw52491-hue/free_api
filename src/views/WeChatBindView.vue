@@ -75,42 +75,46 @@
       </div>
 
       <div class="form-grid">
-        <label class="field">
+        <div class="field">
           <span>默认模型（会话创建）</span>
-          <select v-model="form.model_id">
-            <option value="">请选择</option>
-            <option v-for="m in allModels" :key="m.id" :value="m.id">
-              {{ m.display_name || m.name }}（{{ m.platform_name }}）
-            </option>
-          </select>
-        </label>
-        <label class="field">
+          <ModelSelectDropdown
+            :model-value="form.model_id"
+            :models="allModels || []"
+            placeholder="搜索并选择默认模型..."
+            size="sm"
+            @update:model-value="form.model_id = $event"
+          />
+        </div>
+        <div class="field">
           <span>Pro 路由（推理）</span>
-          <select v-model="form.pro">
-            <option value="">跟随默认模型</option>
-            <option v-for="m in allModels" :key="m.id" :value="m.id">
-              {{ m.display_name || m.name }}
-            </option>
-          </select>
-        </label>
-        <label class="field">
+          <ModelSelectDropdown
+            :model-value="form.pro"
+            :models="allModels || []"
+            placeholder="跟随默认模型 (或选择 Pro)..."
+            size="sm"
+            @update:model-value="form.pro = $event"
+          />
+        </div>
+        <div class="field">
           <span>Flash 路由（执行）</span>
-          <select v-model="form.flash">
-            <option value="">跟随默认模型</option>
-            <option v-for="m in allModels" :key="m.id" :value="m.id">
-              {{ m.display_name || m.name }}
-            </option>
-          </select>
-        </label>
-        <label class="field">
+          <ModelSelectDropdown
+            :model-value="form.flash"
+            :models="allModels || []"
+            placeholder="跟随默认模型 (或选择 Flash)..."
+            size="sm"
+            @update:model-value="form.flash = $event"
+          />
+        </div>
+        <div class="field">
           <span>Vision 路由（视觉）</span>
-          <select v-model="form.vision">
-            <option value="">跟随默认模型</option>
-            <option v-for="m in allModels" :key="m.id" :value="m.id">
-              {{ m.display_name || m.name }}
-            </option>
-          </select>
-        </label>
+          <ModelSelectDropdown
+            :model-value="form.vision"
+            :models="allModels || []"
+            placeholder="跟随默认模型 (或选择 Vision)..."
+            size="sm"
+            @update:model-value="form.vision = $event"
+          />
+        </div>
         <label class="field">
           <span>临时工作区（未绑定任务）</span>
           <input v-model="form.scratch_dir" type="text" placeholder="留空使用默认目录" />
@@ -178,6 +182,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import ModelSelectDropdown from "../components/common/ModelSelectDropdown.vue";
 
 interface ModelOption {
   id: string;
