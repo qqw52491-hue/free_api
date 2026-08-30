@@ -31,6 +31,72 @@ pub fn get_managed_artifacts_root() -> PathBuf {
     base.join("free-api-chat").join("artifacts")
 }
 
+/// 任务成功后自动登记运行期间新生成的工作区文件（Excel/PDF/文档等）。
+/// 不依赖模型自觉调用 register_file——微信"完成后回推文件"链路因此不再断在模型忘记登记上。
+/// 返回本次登记成功的产物记录。
+pub fn auto_register_run_artifacts(
+    db: &DbState,
+    session_id: &str,
+    run_id: Option<&str>,
+    workspace: &std::path::Path,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> Vec<ArtifactRecord> {
+    const MAX_AUTO_ARTIFACTS: usize = 5;
+    const MAX_AUTO_BYTES: u64 = 25 * 1024 * 1024; // 与微信回推上限一致
+    const SKIP_DIRS: &[&str] = &[
+        ".git", ".attachments", "node_modules", "target", "dist",
+        ".venv", "__pycache__", ".rpa_profile", ".worktrees",
+    ];
+    const MAX_DEPTH: usize = 3;
+
+    fn walk(
+        dir: &std::path::Path,
+        depth: usize,
+        since: std::time::SystemTime,
+        out: &mut Vec<(std::path::PathBuf, std::time::SystemTime)>,
+    ) {
+        if depth > 3 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&path, depth + 1, since, out);
+            } else if meta.len() <= 25 * 1024 * 1024 {
+                let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                if mtime >= since {
+                    out.push((path, mtime));
+                }
+            }
+        }
+    }
+
+    let since: std::time::SystemTime = started_at.into();
+    let mut candidates = Vec::new();
+    walk(workspace, 0, since, &mut candidates);
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.truncate(MAX_AUTO_ARTIFACTS);
+
+    let mut registered = Vec::new();
+    for (path, _) in candidates {
+        if let Ok(record) =
+            register_workspace_artifact(db, session_id, run_id, &path.to_string_lossy())
+        {
+            registered.push(record);
+        }
+    }
+    registered
+}
+
 /// 清理并获取安全的文件名
 fn sanitize_filename(input: &str, fallback_format: &str) -> (String, String) {
     let clean = input
@@ -766,5 +832,29 @@ mod tests {
         let result = dispatch(&db, "sess-1", "register_file", &serde_json::json!({}));
         assert!(!result.success);
         assert!(result.stderr.contains("path"));
+    }
+
+    #[test]
+    fn auto_register_picks_new_files_skips_hidden_and_stale() {
+        let db = test_db();
+        let ws = std::env::temp_dir().join(format!("art-auto-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(ws.join(".git")).unwrap();
+        std::fs::write(ws.join("课程表.xlsx"), b"PK new file").unwrap();
+        std::fs::write(ws.join("报告.md"), "# 新报告").unwrap();
+        std::fs::write(ws.join(".git").join("config"), b"junk").unwrap();
+        std::fs::write(ws.join(".hidden"), b"junk").unwrap();
+
+        // since 取未来 30s 前：本轮新建文件（mtime=now）全部入选；
+        // 早于 since 的旧输入件由 walk 的 mtime >= since 判断排除（不引入 mtime 测试依赖）
+        let since = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let registered = auto_register_run_artifacts(&db, "sess-auto", Some("run-1"), &ws, since);
+
+        let names: Vec<String> = registered.iter().map(|a| a.display_name.clone()).collect();
+        assert_eq!(names.len(), 2, "应登记两个新文件: {names:?}");
+        assert!(names.contains(&"课程表.xlsx".to_string()));
+        assert!(names.contains(&"报告.md".to_string()));
+        assert!(!names.iter().any(|n| n.contains("hidden")));
+        assert!(!names.iter().any(|n| n.contains("config")));
+        std::fs::remove_dir_all(&ws).ok();
     }
 }

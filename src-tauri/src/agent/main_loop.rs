@@ -560,6 +560,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     if !workspace_dir.is_dir() {
         return Err(format!("Agent 工作区不可用：{}", workspace_dir.display()));
     }
+    // 运行起始时间：成功完成时自动登记运行期间新生成的工作区产物（微信回推文件链路）
+    let run_started_at = chrono::Utc::now();
     // 项目会话进入前先拿工作区软锁（独占该目录直到本次 run 结束）
     let _workspace_run_lock = if is_project_session {
         Some(acquire_workspace_lock(&workspace_dir, &goal)?)
@@ -1637,6 +1639,26 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
                 }),
             )
             .map_err(|e| e.to_string())?;
+            // 自动登记运行期间新生成的工作区文件为产物：微信"完成后回推文件"
+            // 不再依赖模型记得调用 register_file（漏登记 = 用户只收到文字收不到文件）
+            let registered = crate::agent::artifact_manager::auto_register_run_artifacts(
+                state.inner(),
+                &final_session_id,
+                Some(&run_id),
+                &workspace_dir,
+                run_started_at,
+            );
+            if !registered.is_empty() {
+                println!(
+                    "[run-trace] 自动登记 {} 个运行期产物: {}",
+                    registered.len(),
+                    registered
+                        .iter()
+                        .map(|a| a.display_name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             break;
         }
 
