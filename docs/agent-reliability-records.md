@@ -455,3 +455,5 @@ $DB = `~/Library/Application Support/free-api-chat/data_v2.db`；报告自述路
   收进应用设置存储——待办）。
 - API 契约（从官方 SDK 挖出）：Search=GET api.search.tinyfish.ai/?query=；Fetch=POST api.fetch.tinyfish.ai/
   body {urls:[...]}, 认证统一 X-API-Key 头。
+- 密钥策略（用户决策）：DEFAULT_TINYFISH_API_KEY 内置随仓库分发（私有仓库），env 可覆盖；
+  零配置开箱即用，无环境变量实况验证通过。
