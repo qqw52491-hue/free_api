@@ -164,6 +164,7 @@ pub fn run() {
             agent::channel::wechat_channel_config_get,
             agent::channel::wechat_channel_config_set,
             agent::channel::wechat_channel_runs,
+            agent::channel::wechat_channel_console_qr,
             // 定时触发器
             agent::scheduler::wechat_schedule_list,
             agent::scheduler::wechat_schedule_save,

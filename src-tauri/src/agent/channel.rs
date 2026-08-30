@@ -80,6 +80,10 @@ pub struct ChannelConfig {
     /// 阶段里程碑（环境就绪/失败恢复/救援/交付）是否推送
     #[serde(default = "default_true")]
     pub phase_pushes: bool,
+    /// 网页控制台对外访问基础地址（内网穿透域名，如 https://xxx.example.com）；
+    /// 空 = 自动探测局域网 IPv4。用于生成扫码直达的二维码
+    #[serde(default)]
+    pub console_base_url: Option<String>,
 }
 
 fn default_action_milestone() -> u32 {
@@ -122,6 +126,7 @@ impl Default for ChannelConfig {
             llm_retries: None,
             action_milestone_steps: default_action_milestone(),
             phase_pushes: true,
+            console_base_url: None,
         }
     }
 }
@@ -378,6 +383,7 @@ pub struct ConfigPutReq {
     llm_retries: Option<u32>,
     action_milestone_steps: Option<u32>,
     phase_pushes: Option<bool>,
+    console_base_url: Option<String>,
 }
 
 // ---------------------------------------------------------------- 处理器
@@ -1186,6 +1192,7 @@ fn config_value(config: &ChannelConfig) -> Value {
         "llm_retries": config.llm_retries,
         "action_milestone_steps": config.action_milestone_steps,
         "phase_pushes": config.phase_pushes,
+        "console_base_url": config.console_base_url,
         "config_path": channel_config_path().to_string_lossy(),
     })
 }
@@ -2110,12 +2117,84 @@ pub async fn wechat_channel_config_set(config: ConfigPutReq) -> Result<Value, St
     if let Some(v) = config.action_milestone_steps {
         current.action_milestone_steps = v.clamp(0, 1000);
     }
+    if let Some(v) = config.console_base_url.clone() {
+        let trimmed = v.trim().to_string();
+        current.console_base_url = if trimmed.is_empty() { None } else { Some(trimmed) };
+    }
     if let Some(v) = config.phase_pushes {
         current.phase_pushes = v;
     }
     save_channel_config(&current)?;
     sync_shared_config(&current);
     Ok(config_value(&current))
+}
+
+/// 探测本机局域网 IPv4（UDP connect 不发包，仅取路由选定的本地地址）
+fn lan_ipv4_addresses() -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
+        return out;
+    };
+    // 对多个公网锚点做路由探测，多网卡/多网段都能覆盖
+    for anchor in ["8.8.8.8:80", "1.1.1.1:80", "114.114.114.114:80"] {
+        if socket.connect(anchor).is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                let ip = addr.ip().to_string();
+                if !ip.starts_with("127.") && !out.contains(&ip) {
+                    out.push(ip);
+                }
+            }
+            // connect 会改 socket 的对端，重置后继续
+            let _ = socket.connect("0.0.0.0:0");
+        }
+    }
+    out
+}
+
+/// 网页控制台二维码：默认二维码指向局域网地址（扫码免输 token）；
+/// 配置了 console_base_url（内网穿透域名）则优先用它。
+#[tauri::command]
+pub async fn wechat_channel_console_qr() -> Result<Value, String> {
+    let config = channel_config_shared().read().expect("config poisoned").clone();
+    let port = config.port;
+    let token = config.token.clone();
+
+    let mut urls: Vec<String> = Vec::new();
+    let custom = config
+        .console_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.trim_end_matches('/').to_string());
+    if let Some(base) = &custom {
+        urls.push(format!("{base}/?token={token}"));
+    }
+    for ip in lan_ipv4_addresses() {
+        let url = format!("http://{ip}:{port}/?token={token}");
+        if !urls.contains(&url) {
+            urls.push(url);
+        }
+    }
+    if urls.is_empty() {
+        urls.push(format!("http://127.0.0.1:{port}/?token={token}"));
+    }
+
+    // 主二维码 = 第一个候选（自定义穿透地址优先，否则局域网）
+    use qrcode::render::svg::Color;
+    let code = qrcode::QrCode::with_error_correction_level(urls[0].as_bytes(), qrcode::EcLevel::M)
+        .map_err(|e| format!("二维码生成失败: {e}"))?;
+    let svg = code
+        .render::<Color>()
+        .min_dimensions(220, 220)
+        .quiet_zone(true)
+        .build();
+
+    Ok(json!({
+        "svg": svg,
+        "primary": urls[0],
+        "urls": urls,
+        "source": if custom.is_some() { "custom" } else { "lan" },
+    }))
 }
 
 #[tauri::command]

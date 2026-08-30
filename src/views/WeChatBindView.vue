@@ -65,6 +65,28 @@
         </div>
         <p class="qr-tip">请使用微信扫描（二维码过期会自动刷新，扫码后在微信中确认连接）</p>
       </div>
+
+      <!-- 网页控制台二维码：手机扫码直达（token 已内嵌，免输） -->
+      <div class="qr-area console-qr">
+        <h4 class="console-qr-title">📱 网页控制台（手机扫码直达）</h4>
+        <div v-if="consoleQrSvg" class="console-qr-svg" v-html="consoleQrSvg"></div>
+        <div v-else class="qr-waiting"><span>正在生成二维码…</span></div>
+        <p class="console-qr-url" :title="consoleQrPrimary">{{ consoleQrPrimary }}</p>
+        <p class="qr-tip">
+          {{ consoleQrSource === "custom"
+            ? "二维码指向你配置的穿透域名（手机任意网络可开）"
+            : "当前指向局域网地址：手机需与电脑同一 Wi-Fi" }}
+        </p>
+        <div class="console-qr-custom">
+          <input
+            v-model="consoleUrlDraft"
+            class="console-qr-input"
+            placeholder="内网穿透地址（选填，如 https://abc.example.com）"
+            @keydown.enter="saveConsoleUrl"
+          />
+          <button class="btn" :disabled="busy" @click="saveConsoleUrl">保存并刷新二维码</button>
+        </div>
+      </div>
     </section>
 
     <!-- 2. 通道配置 -->
@@ -324,8 +346,40 @@ async function refreshConfig() {
     form.help_text = value.help_text;
     form.auto_start_bridge = value.auto_start_bridge !== false;
     form.llm_retries = value.llm_retries ?? "";
+    consoleUrlDraft.value = ((value as unknown as Record<string, unknown>).console_base_url as string) || "";
+    await refreshConsoleQr();
   } catch {
     /* 配置读取失败保持表单原样 */
+  }
+}
+
+// ---- 网页控制台二维码 ----
+const consoleQrSvg = ref("");
+const consoleQrPrimary = ref("");
+const consoleQrSource = ref<"lan" | "custom">("lan");
+const consoleUrlDraft = ref("");
+
+async function refreshConsoleQr() {
+  try {
+    const value = await invoke<{ svg: string; primary: string; source: "lan" | "custom" }>(
+      "wechat_channel_console_qr"
+    );
+    consoleQrSvg.value = value.svg;
+    consoleQrPrimary.value = value.primary;
+    consoleQrSource.value = value.source;
+  } catch {
+    consoleQrSvg.value = "";
+  }
+}
+
+async function saveConsoleUrl() {
+  try {
+    await invoke("wechat_channel_config_set", {
+      config: { console_base_url: consoleUrlDraft.value.trim() },
+    });
+    await refreshConfig();
+  } catch {
+    /* 保存失败静默，二维码保持原样 */
   }
 }
 
@@ -964,5 +1018,56 @@ onUnmounted(() => {
 .run-error {
   color: #f87171;
   font-size: 11px;
+}
+
+/* 网页控制台二维码 */
+.console-qr {
+  margin-top: 14px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.12);
+  padding-top: 14px;
+}
+.console-qr-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.9;
+}
+.console-qr-svg {
+  width: 200px;
+  height: 200px;
+  background: #fff;
+  border-radius: 10px;
+  padding: 8px;
+}
+.console-qr-svg svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.console-qr-url {
+  margin: 8px 0 4px;
+  font-size: 11.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  opacity: 0.75;
+  word-break: break-all;
+}
+.console-qr-custom {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.console-qr-input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  font-size: 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  outline: none;
+}
+.console-qr-input:focus {
+  border-color: rgba(91, 140, 255, 0.55);
 }
 </style>
