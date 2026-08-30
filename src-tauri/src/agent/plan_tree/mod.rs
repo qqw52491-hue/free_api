@@ -169,7 +169,7 @@ mod tests {
             })
         });
 
-        // 3 分支并行组：超过受控上限 2，必须在 spawn 层被整体拒绝
+        // 3 分支未知工具并行组：按严格上限 2，必须在 spawn 层被整体拒绝
         let plan_json = json!({
             "id": "oversized",
             "parallel": [
@@ -189,6 +189,53 @@ mod tests {
         assert!(summary.contains("未 spawn 任何子分支"));
         assert_eq!(report.total_steps, 0);
         assert_eq!(invocations.load(Ordering::SeqCst), 0, "一个子分支都不应被执行");
+    }
+
+    #[tokio::test]
+    async fn test_readonly_fanout_spawn_allows_four_rejects_five() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        let invoker: ToolInvoker = Arc::new(move |tool, _args| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({ "tool": tool }))
+            })
+        });
+
+        // 纯只读 4 分支：放宽上限内，正常执行
+        let four: PlanNode = serde_json::from_value(json!({
+            "id": "wide_read", "parallel": [
+                { "tool": "remote-http-mcp/read_text_file", "args": {} },
+                { "tool": "remote-http-mcp/read_text_file", "args": {} },
+                { "tool": "remote-http-mcp/read_text_file", "args": {} },
+                { "tool": "remote-http-mcp/read_text_file", "args": {} }
+            ]
+        }))
+        .unwrap();
+        let report = execute_plan_tree(&four, invoker.clone(), None).await;
+        assert!(report.success, "纯只读 4 分支应放行: {:?}", report.error_summary);
+        assert_eq!(report.successful_steps, 4);
+
+        // 纯只读 5 分支：超过只读上限 4，spawn 层拒绝
+        let five: PlanNode = serde_json::from_value(json!({
+            "id": "too_wide_read", "parallel": [
+                { "tool": "remote-http-mcp/read_text_file", "args": {} },
+                { "tool": "remote-http-mcp/read_text_file", "args": {} },
+                { "tool": "remote-http-mcp/read_text_file", "args": {} },
+                { "tool": "remote-http-mcp/read_text_file", "args": {} },
+                { "tool": "remote-http-mcp/read_text_file", "args": {} }
+            ]
+        }))
+        .unwrap();
+        let report = execute_plan_tree(&five, invoker, None).await;
+        assert_eq!(report.status, "interrupted_by_error");
+        assert!(report
+            .error_summary
+            .unwrap_or_default()
+            .contains("最多允许 4"));
+        assert_eq!(invocations.load(Ordering::SeqCst), 4, "只允许此前 4 次成功执行");
     }
 
     #[tokio::test]

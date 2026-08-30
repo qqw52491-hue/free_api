@@ -130,6 +130,8 @@ pub struct EvaluationMetrics {
     pub tool_failure_rate_percent: f64,
     pub parallel_batch_count: usize,
     pub max_parallel_branches: usize,
+    #[serde(default)]
+    pub parallel_cap_exceeded_count: usize,
     pub read_intent_count: usize,
     #[serde(default)]
     pub unique_read_intent_count: usize,

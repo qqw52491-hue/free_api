@@ -17,6 +17,8 @@ pub(crate) struct ParsedAction {
     signature: String,
     is_read_intent: bool,
     parallel_branches: usize,
+    /// 本批适用的受控扇出上限（纯只读 4 / 含写入执行或未知工具 2；非并行批为 0）
+    parallel_cap: usize,
     parallel_without_rationale: bool,
     plan_title: Option<String>,
 }
@@ -79,6 +81,9 @@ pub(crate) fn analyze(
                 metrics.parallel_batch_count += 1;
                 metrics.max_parallel_branches =
                     metrics.max_parallel_branches.max(action.parallel_branches);
+                if action.parallel_branches > action.parallel_cap {
+                    metrics.parallel_cap_exceeded_count += 1;
+                }
                 if action.parallel_without_rationale {
                     metrics.parallel_without_rationale_count += 1;
                 }
@@ -182,10 +187,10 @@ pub(crate) fn analyze(
             metrics.parallel_without_rationale_count
         ));
     }
-    if metrics.max_parallel_branches > 2 {
+    if metrics.parallel_cap_exceeded_count > 0 {
         warnings.push(format!(
-            "最大并行分支为 {}，超过受控上限 2；应复核宿主拒绝路径是否生效。",
-            metrics.max_parallel_branches
+            "检测到 {} 个并行批次超过受控扇出上限（纯只读 4 / 含写入执行 2）；应复核宿主拒绝路径是否生效。",
+            metrics.parallel_cap_exceeded_count
         ));
     }
     (metrics, action_counts, repeated_action_signatures, warnings)
@@ -260,10 +265,24 @@ fn count_trace_step(
 
 pub(crate) fn parse_action(raw_response: &str) -> Option<ParsedAction> {
     let value = serde_json::from_str::<Value>(raw_response).ok()?;
-    let parallel_branches = value
+    let parallel_steps = value
         .get("parallel")
         .and_then(Value::as_array)
-        .map_or(0, Vec::len);
+        .cloned()
+        .unwrap_or_default();
+    let parallel_branches = parallel_steps.len();
+    let parallel_cap = if parallel_branches > 0 {
+        crate::agent::plan_tree_dispatch::controlled_parallel_cap_for_tools(
+            parallel_steps.iter().map(|step| {
+                step.get("tool")
+                    .and_then(Value::as_str)
+                    .or_else(|| step.get("action").and_then(Value::as_str))
+                    .unwrap_or("")
+            }),
+        )
+    } else {
+        0
+    };
     let tool = value
         .get("tool")
         .and_then(Value::as_str)
@@ -321,6 +340,7 @@ pub(crate) fn parse_action(raw_response: &str) -> Option<ParsedAction> {
         signature,
         is_read_intent,
         parallel_branches,
+        parallel_cap,
         parallel_without_rationale,
         plan_title,
     })

@@ -698,12 +698,30 @@ pub async fn stream_once<F: FnMut(StreamEvent) -> bool>(
 /// 同时避免 20 次尝试沿用无界指数退避而等待数小时。
 const MAX_TRANSIENT_RETRY_BACKOFF_MS: u64 = 15_000;
 
+/// 单次逻辑调用（含全部重试尝试与退避）的总预算。实测端点劣化时单个请求曾在
+/// 重试循环中挂起 21 分钟、吃光整个运行预算；此后任何一次调用最多消耗预算即放弃，
+/// 由上层按 request_error 处理。ask_human 不经过此路径（等人不发生 LLM 调用），不受影响。
+const DEFAULT_LLM_CALL_TOTAL_BUDGET_MS: u64 = 240_000;
+const MIN_LLM_CALL_TOTAL_BUDGET_MS: u64 = 5_000;
+
+fn parse_llm_call_total_budget_ms(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|secs| secs.saturating_mul(1000))
+        .filter(|ms| *ms >= MIN_LLM_CALL_TOTAL_BUDGET_MS)
+        .unwrap_or(DEFAULT_LLM_CALL_TOTAL_BUDGET_MS)
+}
+
+fn llm_call_total_budget_ms() -> u64 {
+    parse_llm_call_total_budget_ms(std::env::var("FREE_API_LLM_CALL_BUDGET_SECONDS").ok().as_deref())
+}
+
 fn transient_retry_backoff_ms(attempt_index: u32) -> u64 {
     let exponent = attempt_index.min(4);
     (1_000u64 * (1u64 << exponent)).min(MAX_TRANSIENT_RETRY_BACKOFF_MS)
 }
 
-/// 带自动重试的流式请求（按配置次数重试所有错误）
+/// 带自动重试的流式请求（按配置次数重试所有错误）。
+/// 全部尝试与退避共享单次调用总预算：预算耗尽立即放弃，避免端点挂起拖垮整个运行。
 pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     config: &ModelConfig,
     messages: &[serde_json::Value],
@@ -712,15 +730,34 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     max_retries: u32,
     on_event: &mut F,
 ) -> Result<StreamResult, String> {
+    let budget_ms = llm_call_total_budget_ms();
+    let started = std::time::Instant::now();
+    let budget_exhausted = || {
+        format!(
+            "单次调用总预算 {}s 耗尽（含重试），已放弃本次调用",
+            budget_ms / 1000
+        )
+    };
     let mut last_error = String::new();
     for i in 0..max_retries {
-        match stream_once(config, messages, reasoning_effort, interrupt_rx, on_event).await {
-            Ok(mut result) => {
+        let remaining_ms =
+            budget_ms.saturating_sub(started.elapsed().as_millis() as u64);
+        if remaining_ms == 0 {
+            break;
+        }
+        // 用剩余预算封顶本次尝试：服务端接受连接但流式无输出的挂起也在死线内被切断。
+        let attempt = tokio::time::timeout(
+            tokio::time::Duration::from_millis(remaining_ms),
+            stream_once(config, messages, reasoning_effort, interrupt_rx, on_event),
+        )
+        .await;
+        match attempt {
+            Ok(Ok(mut result)) => {
                 // 成功路径回填实际尝试次数（首次即成功 = 1，transient 重试后成功 = i+1）
                 result.attempt_count = i + 1;
                 return Ok(result);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 if e == STREAM_INTERRUPTED_ERROR {
                     return Err(e);
                 }
@@ -735,6 +772,11 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                 if i < max_retries - 1 {
                     // 有界指数退避（1s、2s、4s、8s、15s...）给服务端恢复窗口。
                     let backoff_ms = transient_retry_backoff_ms(i);
+                    // 退避同样受总预算约束：睡不完就不再重试。
+                    if started.elapsed().as_millis() as u64 + backoff_ms >= budget_ms {
+                        last_error = budget_exhausted();
+                        break;
+                    }
                     tokio::select! {
                         _ = tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)) => {},
                         changed = interrupt_rx.changed() => {
@@ -744,10 +786,21 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                     }
                 }
             }
+            Err(_elapsed) => {
+                // 预算耗尽。此刻可能恰有取消请求在途：优先上报中断而非超时。
+                if interrupt_rx.has_changed().unwrap_or(false) {
+                    return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                }
+                last_error = budget_exhausted();
+                break;
+            }
         }
     }
+    if last_error.is_empty() {
+        last_error = budget_exhausted();
+    }
     Err(format!(
-        "LLM 请求最终失败 ({}次尝试): {}",
+        "LLM 请求最终失败 ({}次尝试内): {}",
         max_retries, last_error
     ))
 }
