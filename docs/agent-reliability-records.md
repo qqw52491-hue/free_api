@@ -385,3 +385,15 @@ $DB = `~/Library/Application Support/free-api-chat/data_v2.db`；报告自述路
   （then_read 字段或工具层合并交付），见后续计划。
 - **韧性大考通过**：6 次解析错误（端点全天不稳）+ 34 分钟长跑，预算+重试扛住全程，零挂起，规范 finish 收尾。
 - 隐藏断言 24/24（wdio passing 内含）；受保护文件零改写。
+
+## MCP Hub 侧修复（2026-08-30 傍晚，hub 仓库 48142da）
+
+- 定位到 run_sequence 首用失败的根因（模型自诊断"带 remote-http-mcp/ 前缀导致查表失败"）：
+  hub 的 run_sequence 按子服务裸名匹配（tools/list t.name === stepTool），而 agent 侧工具目录
+  全是"插件名/工具名"全名——命名空间边界bug，模型首次组合调用必然踩坑。
+- 修复：steps.tool 按最后一个 / 截断取裸名后再匹配，全名/裸名都收；
+  not-found 报错附带 requested as 原名；schema 描述同步；+1 测试（normalizeStepToolName 9 断言）。
+- 已提交 hub 仓库（48142da）并重启上线（本地 8000，MCP 握手验证通过）。
+- 顺带确认：shell_exec 走 shell 解释（串联命令可用）；edit_file 为 diff 式（oldText/newText，
+  需先知内容——这就是每阶段多出的那次读取的来源）。
+- 待做（提示词层）：write_file 免读指南 + "cat 输出可作 oldText 基线"，落地 3→2 调用/阶段。
