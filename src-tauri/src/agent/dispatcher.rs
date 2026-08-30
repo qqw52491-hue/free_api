@@ -726,9 +726,11 @@ pub fn run_agent_step(
                 step_idx, step_tool, step_action
             );
 
-            // 执行单步
+            // 执行单步。params 只透传子步骤的 command 载荷：cmd_val 顶层的 tool/action
+            // 是本层路由字段，原样转发会被下游 MCP 的参数契约拒绝（「tool」不是声明字段）。
+            let step_params = cmd_val.get("command").cloned().unwrap_or_else(|| cmd_val.clone());
             let res =
-                execute_command_inner(db, session_id, step_tool, &step_action, cmd_val, registry);
+                execute_command_inner(db, session_id, step_tool, &step_action, &step_params, registry);
 
             // 拼接输出结果
             if !res.stdout.is_empty() {
