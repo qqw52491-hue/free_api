@@ -99,7 +99,7 @@ const hiddenAssertions = {
     const unsupportedRetentionAsCause = rootCause
       .split(/[。；;.!?]/)
       .some((clause) => /leak|泄漏|zombie|僵尸|跨会话/.test(clause)
-        && !/而非|不是|并非|排除|无证据|缺乏证据|not|rather than|instead of/.test(clause));
+        && !/而非|不是|并非|排除|无证据|缺乏证据|不成立|不存在|并无|并未|not|rather than|instead of/.test(clause));
     assert.equal(
       unsupportedRetentionAsCause,
       false,

@@ -74,6 +74,14 @@ pub struct ChatMessage {
 }
 
 pub fn get_db_path() -> PathBuf {
+    // 评测/并行实例隔离：设置 FREE_API_DB_PATH 时使用独立数据库副本，
+    // 避免与用户正在使用的日常实例争抢 SQLite 锁（曾导致评测实例启动挂死）。
+    if let Ok(path) = std::env::var("FREE_API_DB_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
     let home = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join("free-api-chat").join("data_v2.db")
 }
