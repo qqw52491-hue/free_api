@@ -634,11 +634,16 @@ async function saveSettings() {
 // ---------------------------------------------------------------- SSE 实时推送
 // 服务端把 run 的进度/状态/终态经 broadcast 总线下发（比 WebSocket 更贴合本机 HTTP +
 // 隧道穿透场景）；EventSource 断线自动重连。收到事件 → 立即拉取对应数据渲染。
-function connectSSE() {
-  if (!window.EventSource || S.es) return;
+function connectSSE(force) {
+  if (!window.EventSource) return;
+  // 已在连接/打开状态且非强制 → 不动（EventSource 自带断线重连）
+  if (S.es && S.es.readyState <= 1 && !force) return;
+  if (S.es) { try { S.es.close(); } catch (e) {} S.es = null; }
   try {
     const es = new EventSource(`/channel/events?token=${encodeURIComponent(S.token)}`);
     S.es = es;
+    S.sseFails = 0;
+    es.onopen = () => { S.sseFails = 0; };
     let lastHomeRefresh = 0;
     let flowPending = false;
     const scheduleFlowRefresh = () => {
@@ -660,7 +665,26 @@ function connectSSE() {
         }
       } catch (err) { /* 忽略坏帧 */ }
     };
+    es.onerror = () => {
+      S.sseFails = (S.sseFails || 0) + 1;
+      if (S.sseFails >= 6) {
+        // 连续失败（服务器下线/令牌失效）：停掉重连循环，校验令牌后重建
+        try { es.close(); } catch (err) {}
+        S.es = null;
+        api("/channel/config")
+          .then(() => { setTimeout(() => connectSSE(true), 2000); })
+          .catch(() => {});
+      }
+      // 其余情况交给 EventSource 内建自动重连
+    };
   } catch (e) { S.es = null; }
+}
+
+// 后台切回 / 断网恢复：立即拉最新数据 + 确保 SSE 存活
+function resumeLive() {
+  connectSSE();
+  if (S.view.name === "flow" && S.currentSessionId) loadFlow(S.currentSessionId).catch(() => {});
+  else if (S.token) loadHome().catch(() => {});
 }
 async function loadHome() {
   const [projRes, sessRes] = await Promise.all([
@@ -1032,6 +1056,8 @@ function pollTick() {
   if (document.hidden) return;
   S.tick++;
   const sseOpen = S.es && S.es.readyState === 1;
+  // 看门狗：SSE 已死（CLOSED）时定期重建
+  if (S.tick % 8 === 0 && S.es && S.es.readyState === 2) connectSSE(true);
   if (S.view.name === "flow" && S.currentSessionId) {
     // SSE 已连接时事件驱动刷新，轮询降级为安全网
     if (!sseOpen || S.tick % 4 === 0) loadFlow(S.currentSessionId).catch(() => {});
@@ -1133,6 +1159,11 @@ async function boot() {
   }
   startPolling();
   connectSSE();
+  // 后台切回 / 网络恢复：立即恢复连接并拉最新数据
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") resumeLive();
+  });
+  window.addEventListener("online", () => { connectSSE(true); resumeLive(); });
 }
 
 (function init() {
