@@ -14,6 +14,7 @@ use axum::extract::{Path as AxumPath, Query as AxumQuery, State as AxumState};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Html;
 use axum::response::sse::{Event as SseEvent, Sse};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -837,6 +838,13 @@ struct EventsQuery {
     session_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ArtifactRawQuery {
+    token: Option<String>,
+    /// dl=1 时以附件形式下发（浏览器触发下载），否则 inline 预览
+    dl: Option<String>,
+}
+
 /// GET /channel/events?token=&session_id= ：SSE 实时推送（EventSource 无法带 header，
 /// token 走 query；进度/状态/终态即时下发，网页端收到后拉取最新数据渲染）。
 async fn handler_events(
@@ -1558,6 +1566,123 @@ async fn handler_session_attachment_upload(
     })))
 }
 
+/// 极简 percent-encode（Content-Disposition 的 UTF-8 文件名用；保留 RFC 3986 非保留字符）
+fn percent_encode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// GET /channel/artifact/{id}/raw?token=&dl=1 ：产物原始字节（inline 预览 / attachment 下载）。
+/// <a> 链接带不了 header，token 允许走 query（与 SSE 一致）。
+async fn handler_artifact_raw(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(artifact_id): AxumPath<String>,
+    AxumQuery(query): AxumQuery<ArtifactRawQuery>,
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    let token_ok = authorized(&headers, &config)
+        || query
+            .token
+            .as_deref()
+            .map(|v| v == config.token)
+            .unwrap_or(false);
+    if !token_ok {
+        return Err(unauthorized());
+    }
+    let db = state.app.state::<DbState>();
+    let record = crate::agent::artifact_manager::get_artifact_record(db.inner(), artifact_id.trim())
+        .map_err(|e| not_found(&e))?;
+    if record.status == "deleted" {
+        return Err(not_found("该产物已被删除"));
+    }
+    let path = std::path::PathBuf::from(&record.canonical_path);
+    if !path.exists() {
+        return Err(not_found("产物文件在磁盘上丢失"));
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(internal_error)?;
+    if bytes.len() > 50 * 1024 * 1024 {
+        return Err(bad_request("文件超过 50MB，请从桌面端工作区直接获取"));
+    }
+    let mime = record.mime_type.clone().unwrap_or_else(|| "application/octet-stream".into());
+    let encoded = percent_encode_component(&record.display_name);
+    let disposition = if query.dl.as_deref() == Some("1") {
+        format!("attachment; filename*=UTF-8''{encoded}")
+    } else {
+        format!("inline; filename*=UTF-8''{encoded}")
+    };
+    let mut response = (
+        StatusCode::OK,
+        bytes,
+    )
+        .into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&mime) {
+        response.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
+    }
+    if let Ok(v) = axum::http::HeaderValue::from_str(&disposition) {
+        response.headers_mut().insert(axum::http::header::CONTENT_DISPOSITION, v);
+    }
+    Ok(response)
+}
+
+#[derive(Deserialize)]
+struct PreviewQuery {
+    token: Option<String>,
+}
+
+/// GET /channel/artifact/{id}/preview?token= ：解析引擎产出的预览文本
+/// （xlsx → 表结构+数据预览，pdf/docx → 全文截断，文本 → 原文；图片由 raw 端点直出）
+async fn handler_artifact_preview(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(artifact_id): AxumPath<String>,
+    AxumQuery(query): AxumQuery<PreviewQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    let token_ok = authorized(&headers, &config)
+        || query
+            .token
+            .as_deref()
+            .map(|v| v == config.token)
+            .unwrap_or(false);
+    if !token_ok {
+        return Err(unauthorized());
+    }
+    let db = state.app.state::<DbState>();
+    let record = crate::agent::artifact_manager::get_artifact_record(db.inner(), artifact_id.trim())
+        .map_err(|e| not_found(&e))?;
+    let is_image = record
+        .mime_type
+        .as_deref()
+        .map(|m| m.starts_with("image/"))
+        .unwrap_or(false);
+    if is_image {
+        return Ok(Json(json!({ "kind": "image", "name": record.display_name })));
+    }
+    let path = std::path::PathBuf::from(&record.canonical_path);
+    if !path.exists() {
+        return Err(not_found("产物文件在磁盘上丢失"));
+    }
+    match crate::agent::file_parser::parse_file(&path, Some(12_000)) {
+        Ok(content) => {
+            let text = crate::agent::file_parser::format_for_prompt(&content, &record.display_name);
+            Ok(Json(json!({ "kind": "text", "name": record.display_name, "text": text })))
+        }
+        Err(e) => Ok(Json(json!({
+            "kind": "unsupported",
+            "name": record.display_name,
+            "text": format!("该格式（{}）暂不支持网页内预览，请点击下载后本地查看：{}", record.display_name, e),
+        }))),
+    }
+}
+
 fn channel_router(state: Arc<ChannelState>) -> Router {
     Router::new()
         .route("/", get(handler_web_home))
@@ -1580,6 +1705,14 @@ fn channel_router(state: Arc<ChannelState>) -> Router {
         .route("/channel/models", get(handler_models))
         .route("/channel/role-cards", get(handler_role_cards))
         .route("/channel/events", get(handler_events))
+        .route(
+            "/channel/artifact/{artifact_id}/raw",
+            get(handler_artifact_raw),
+        )
+        .route(
+            "/channel/artifact/{artifact_id}/preview",
+            get(handler_artifact_preview),
+        )
         .route(
             "/channel/session/{session_id}/attachment",
             post(handler_session_attachment),
