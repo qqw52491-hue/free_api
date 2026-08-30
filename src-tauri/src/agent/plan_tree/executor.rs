@@ -132,6 +132,17 @@ fn run_node_recursive<'a>(
                 if let Some(ref parallel_children) = obj.parallel {
                     let assigned_id = obj.id.clone().unwrap_or_else(|| scope.next_index_id());
 
+                    // 硬拒绝第二道（spawn 层不变量）：无论入口如何绕过预校验，
+                    // 超限并行组在此直接报错，一个子分支都不 spawn。
+                    if parallel_children.len() > crate::agent::plan_tree_dispatch::MAX_CONTROLLED_PARALLEL_BRANCHES {
+                        return Err(format!(
+                            "并行组 [{}] 超过受控上限：单批最多允许 {} 个独立分支，当前为 {}。已拒绝执行，未 spawn 任何子分支。请收缩到至多两个互不依赖、参数已确定的分支，或改为串行执行。",
+                            assigned_id,
+                            crate::agent::plan_tree_dispatch::MAX_CONTROLLED_PARALLEL_BRANCHES,
+                            parallel_children.len()
+                        ));
+                    }
+
                     let mut handles = Vec::with_capacity(parallel_children.len());
                     for child in parallel_children {
                         let invoker_c = invoker.clone();

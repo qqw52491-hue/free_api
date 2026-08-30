@@ -24,6 +24,17 @@ pub fn run_plan_tree_sync(
     plan_node: &crate::agent::plan_tree::PlanNode,
     registry: &PluginRegistry,
 ) -> DispatchResult {
+    // 硬拒绝第一道：任何深度出现超限/空并行组，整棵树拒绝执行，一个分支都不跑。
+    if let Err(error) = validate_plan_tree_parallel_fanout(plan_node) {
+        println!("🚫 [PlanTree: {}] 并行扇出越界，拒绝执行: {}", session_id, error);
+        return DispatchResult {
+            stdout: String::new(),
+            stderr: error,
+            success: false,
+            route: "plan_tree_parallel_rejected".to_string(),
+        };
+    }
+
     let db_clone = db.clone();
     let sid = session_id.to_string();
     let reg_clone = registry.clone();
@@ -97,6 +108,44 @@ pub(crate) fn validate_controlled_parallel_batch(
     }
 }
 
+/// 执行前整树校验：plan_tree 指令不经过 validate_controlled_parallel_batch，
+/// 模型可以在嵌套树的任意深度塞进超限并行组，因此必须在 spawn 前递归扫描。
+pub(crate) fn validate_plan_tree_parallel_fanout(node: &PlanNode) -> Result<(), String> {
+    match node {
+        PlanNode::Seq(children) => {
+            for child in children {
+                validate_plan_tree_parallel_fanout(child)?;
+            }
+            Ok(())
+        }
+        PlanNode::Obj(obj) => {
+            if let Some(ref parallel_children) = obj.parallel {
+                match parallel_children.len() {
+                    0 => {
+                        return Err(format!(
+                            "plan_tree 并行组 [{}] 为空：parallel 必须至少包含一个已确定的独立分支；未知范围请使用单步取证。",
+                            obj.id.clone().unwrap_or_else(|| "?".to_string())
+                        ))
+                    }
+                    1..=MAX_CONTROLLED_PARALLEL_BRANCHES => {}
+                    actual => {
+                        return Err(format!(
+                            "plan_tree 并行组 [{}] 超过受控上限：单批最多允许 {} 个独立分支，当前为 {}。请将每组并行收缩到至多两个互不依赖、参数已确定的分支，或改为串行执行。宿主不会改写子步骤参数。",
+                            obj.id.clone().unwrap_or_else(|| "?".to_string()),
+                            MAX_CONTROLLED_PARALLEL_BRANCHES,
+                            actual
+                        ))
+                    }
+                }
+                for child in parallel_children {
+                    validate_plan_tree_parallel_fanout(child)?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 // 根据指令执行具体动作
 
 #[cfg(test)]
@@ -126,5 +175,42 @@ mod tests {
             .contains("最多允许 2"));
         assert_eq!(two[0]["command"]["cwd"], serde_json::json!("/repo"));
         assert_eq!(two[1]["command"]["path"], serde_json::json!("b.rs"));
+    }
+
+    #[test]
+    fn plan_tree_fanout_walker_rejects_oversized_or_empty_parallel_group_at_any_depth() {
+        let parse = |v: serde_json::Value| -> PlanNode { serde_json::from_value(v).unwrap() };
+
+        // 合法：每组并行 ≤2，嵌套任意深度都放行
+        let ok_tree = parse(json!([
+            { "tool": "a", "args": {} },
+            { "id": "g", "parallel": [
+                { "tool": "b", "args": {} },
+                [ { "tool": "c", "args": {} }, { "tool": "d", "args": {} } ]
+            ]}
+        ]));
+        assert!(validate_plan_tree_parallel_fanout(&ok_tree).is_ok());
+
+        // 越界：嵌套在串行链深处的并行组 3 分支，必须整树拒绝
+        let bad_tree = parse(json!([
+            { "tool": "a", "args": {} },
+            { "id": "deep", "parallel": [
+                { "tool": "b", "args": {} },
+                [ { "id": "inner", "parallel": [
+                    { "tool": "x", "args": {} },
+                    { "tool": "y", "args": {} },
+                    { "tool": "z", "args": {} }
+                ]}]
+            ]}
+        ]));
+        let err = validate_plan_tree_parallel_fanout(&bad_tree).unwrap_err();
+        assert!(err.contains("最多允许 2"), "错误需指明上限: {}", err);
+        assert!(err.contains("inner"), "错误需定位到越界组 id: {}", err);
+
+        // 空并行组同样拒绝
+        let empty_tree = parse(json!({ "id": "void", "parallel": [] }));
+        assert!(validate_plan_tree_parallel_fanout(&empty_tree)
+            .unwrap_err()
+            .contains("至少包含一个"));
     }
 }

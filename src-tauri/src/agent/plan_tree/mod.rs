@@ -123,25 +123,72 @@ mod tests {
             })
         });
 
+        // 受控上限为 2：allSettled 语义用两分支演示（成功 + 超时）
         let plan_json = json!({
             "parallel": [
                 { "tool": "fast_search", "args": {} },
-                { "tool": "failing_search", "args": {} },
                 // 超时设定 100ms，而该工具 sleep 500ms -> 触发超时
                 { "tool": "slow_search", "args": {}, "timeout_ms": 100 }
             ]
         });
 
         let plan: PlanNode = serde_json::from_value(plan_json).unwrap();
-        let report = execute_plan_tree(&plan, invoker, None).await;
+        let report = execute_plan_tree(&plan, invoker.clone(), None).await;
 
         println!("Report:\n{}", report.to_llm_feedback());
         assert!(!report.success);
-        assert_eq!(report.total_steps, 3);
+        assert_eq!(report.total_steps, 2);
         assert_eq!(report.successful_steps, 1);
-        assert_eq!(report.failed_steps, 1);
         assert_eq!(report.timed_out_steps, 1);
         assert_eq!(report.status, "completed");
+
+        // 单点失败不中断其他分支
+        let plan_fail: PlanNode = serde_json::from_value(json!({
+            "parallel": [
+                { "tool": "fast_search", "args": {} },
+                { "tool": "failing_search", "args": {} }
+            ]
+        }))
+        .unwrap();
+        let report_fail = execute_plan_tree(&plan_fail, invoker, None).await;
+        assert_eq!(report_fail.status, "completed");
+        assert_eq!(report_fail.successful_steps, 1);
+        assert_eq!(report_fail.failed_steps, 1);
+    }
+
+    #[tokio::test]
+    async fn test_oversized_parallel_group_hard_rejected_before_spawn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        let invoker: ToolInvoker = Arc::new(move |tool, _args| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({ "tool": tool }))
+            })
+        });
+
+        // 3 分支并行组：超过受控上限 2，必须在 spawn 层被整体拒绝
+        let plan_json = json!({
+            "id": "oversized",
+            "parallel": [
+                { "tool": "a", "args": {} },
+                { "tool": "b", "args": {} },
+                { "tool": "c", "args": {} }
+            ]
+        });
+
+        let plan: PlanNode = serde_json::from_value(plan_json).unwrap();
+        let report = execute_plan_tree(&plan, invoker, None).await;
+
+        assert!(!report.success);
+        assert_eq!(report.status, "interrupted_by_error");
+        let summary = report.error_summary.unwrap_or_default();
+        assert!(summary.contains("最多允许 2"), "错误需指明上限: {}", summary);
+        assert!(summary.contains("未 spawn 任何子分支"));
+        assert_eq!(report.total_steps, 0);
+        assert_eq!(invocations.load(Ordering::SeqCst), 0, "一个子分支都不应被执行");
     }
 
     #[tokio::test]
