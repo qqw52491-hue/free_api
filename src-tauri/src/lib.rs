@@ -35,7 +35,13 @@ pub fn run() {
             // 微信通道：本机 axum API（供 Node 桥调用），失败只打日志不阻断启动
             crate::agent::channel::spawn_channel_server(app.handle().clone());
             // 定时触发器：按计划自动派发任务，结果推微信
-            crate::agent::scheduler::spawn_scheduler(app.handle().clone());
+            // 隔离实例（测试/多开副本）设 FREE_API_DISABLE_SCHEDULER=1 停用，
+            // 防止副本库里的历史定时任务被当成真实排程执行。
+            if std::env::var("FREE_API_DISABLE_SCHEDULER").map(|v| v == "1").unwrap_or(false) {
+                println!("[scheduler] FREE_API_DISABLE_SCHEDULER=1，定时触发器未启动");
+            } else {
+                crate::agent::scheduler::spawn_scheduler(app.handle().clone());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

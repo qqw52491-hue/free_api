@@ -10,8 +10,10 @@
 use crate::agent::main_loop::run_agent_main_loop_in_workspace;
 use crate::agent::router::ModelRoutingConfig;
 use crate::db::DbState;
-use axum::extract::{Path as AxumPath, State as AxumState};
+use axum::extract::{Path as AxumPath, Query as AxumQuery, State as AxumState};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::Html;
+use axum::response::sse::{Event as SseEvent, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -124,6 +126,12 @@ impl Default for ChannelConfig {
 }
 
 pub fn channel_config_path() -> PathBuf {
+    // 与 Node 桥一致：CHANNEL_CONFIG_PATH 可指向独立配置文件（多实例隔离/测试）
+    if let Ok(path) = std::env::var("CHANNEL_CONFIG_PATH") {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path);
+        }
+    }
     let home = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join("free-api-chat").join("channel-config.json")
 }
@@ -211,6 +219,39 @@ fn runs_store() -> &'static Mutex<HashMap<String, RunRecord>> {
     RUNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// ---------------------------------------------------------------- 实时事件总线
+// 网页端 SSE 推送的数据源：run 的进度/状态/终态事件在此广播，
+// handler_events 订阅后按 session 过滤下发（网页端 EventSource 无法带 header，
+// token 走 query 参数；这比 WebSocket 更贴合本机 HTTP + 内网穿透隧道场景）。
+
+type SessionEvent = (String, Value);
+
+fn event_bus() -> &'static tokio::sync::broadcast::Sender<SessionEvent> {
+    static BUS: OnceLock<tokio::sync::broadcast::Sender<SessionEvent>> = OnceLock::new();
+    BUS.get_or_init(|| tokio::sync::broadcast::channel(512).0)
+}
+
+fn notify_session_event(session_id: &str, kind: &str) {
+    // progress 类事件走主循环热路径（实测可达 10+/s），SSE 端合并到 ≤3/s；
+    // state/提问/终态类低频且关键，即时放行。
+    static LAST_PROGRESS: OnceLock<Mutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
+    if kind == "progress" {
+        let map = LAST_PROGRESS.get_or_init(|| Mutex::new(HashMap::new()));
+        let now = std::time::Instant::now();
+        let mut guard = map.lock().expect("notify lock poisoned");
+        if let Some(last) = guard.get(session_id) {
+            if now.duration_since(*last) < std::time::Duration::from_millis(300) {
+                return;
+            }
+        }
+        guard.insert(session_id.to_string(), now);
+    }
+    let _ = event_bus().send((
+        session_id.to_string(),
+        json!({ "type": kind, "at": now_ts() }),
+    ));
+}
+
 fn now_ts() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -295,6 +336,12 @@ struct PartialRouting {
     pro: Option<String>,
     flash: Option<String>,
     vision: Option<String>,
+    /// 上下文压缩策略：deep_coding（长程）| cost_saving（省流）| ultra_fast（极速）
+    context_budget_mode: Option<String>,
+    /// 路由模式：rules | scored
+    routing_mode: Option<String>,
+    /// 角色级覆盖：系统角色名（planner/executor/...）→ 档位或模型 UUID
+    role_models: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -479,6 +526,18 @@ async fn handler_task(
         if let Some(vision) = overrides.vision.clone() {
             routing.vision = vision;
         }
+        if let Some(mode) = overrides.context_budget_mode.clone() {
+            routing.context_budget_mode = mode;
+        }
+        if let Some(mode) = overrides.routing_mode.clone() {
+            routing.routing_mode = mode;
+        }
+        if let Some(role_models) = overrides.role_models.clone() {
+            routing.role_models = role_models
+                .into_iter()
+                .filter(|(_, model)| !model.trim().is_empty())
+                .collect();
+        }
     }
     if routing.pro.is_empty() {
         routing.pro = model_id_of_session(&conn, &session_id)?;
@@ -626,6 +685,7 @@ pub(crate) fn register_and_spawn_run(
                     record.paused_reason = None;
                 }
             });
+            notify_session_event(&listen_session, if paused { "waiting_human" } else { "progress" });
         },
     );
 
@@ -660,6 +720,7 @@ pub(crate) fn register_and_spawn_run(
                     );
                 }
             });
+            notify_session_event(&state_session, "state");
         },
     );
 
@@ -703,6 +764,7 @@ pub(crate) fn register_and_spawn_run(
                     record.paused_reason = None;
                     record.result = result;
                 });
+                notify_session_event(&spawn_session, if was_cancelled { "cancelled" } else { "done" });
             }
             Err(error) => {
                 patch_run(&spawn_run, |record| {
@@ -712,6 +774,7 @@ pub(crate) fn register_and_spawn_run(
                     }
                     record.paused_reason = None;
                 });
+                notify_session_event(&spawn_session, "failed");
             }
         }
     });
@@ -731,6 +794,84 @@ async fn handler_models(
         .await
         .map_err(internal_error)?;
     Ok(Json(json!({ "models": models })))
+}
+
+/// 启用的角色卡（网页端「角色」选择器数据源；钉死 = 按作用域写 role_models）
+async fn handler_role_cards(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let db = state.app.state::<DbState>();
+    let cards = crate::agent::tools::role_manager::list_cards(db.inner(), true)
+        .map_err(internal_error)?;
+    let cards: Vec<Value> = cards
+        .into_iter()
+        .map(|card| {
+            json!({
+                "name": card.name,
+                "label": card.label,
+                "model_id": card.model_id,
+                "scope_hints": card.scope_hints,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "role_cards": cards })))
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    token: Option<String>,
+    /// 不传 = 订阅所有会话事件（首页列表刷新用）
+    session_id: Option<String>,
+}
+
+/// GET /channel/events?token=&session_id= ：SSE 实时推送（EventSource 无法带 header，
+/// token 走 query；进度/状态/终态即时下发，网页端收到后拉取最新数据渲染）。
+async fn handler_events(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    AxumQuery(query): AxumQuery<EventsQuery>,
+) -> Result<Sse<impl futures::Stream<Item = Result<SseEvent, std::convert::Infallible>>>, (StatusCode, Json<Value>)>
+{
+    let config = state.config.read().expect("config poisoned").clone();
+    let token_ok = query
+        .token
+        .as_deref()
+        .map(|v| v == config.token)
+        .unwrap_or(false);
+    if !token_ok {
+        return Err(unauthorized());
+    }
+    let filter_session = query.session_id.clone();
+    let rx = event_bus().subscribe();
+    let stream = futures::stream::unfold(
+        (rx, filter_session),
+        move |(mut rx, filter_session)| async move {
+            loop {
+                match rx.recv().await {
+                    Ok((session_id, payload)) => {
+                        if let Some(want) = &filter_session {
+                            if &session_id != want {
+                                continue;
+                            }
+                        }
+                        let data =
+                            json!({ "session_id": session_id, "event": payload }).to_string();
+                        return Some((
+                            Ok::<_, std::convert::Infallible>(SseEvent::default().data(data)),
+                            (rx, filter_session),
+                        ));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
+    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
 }
 
 #[derive(Deserialize)]
@@ -1055,11 +1196,370 @@ fn internal_error(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
     )
 }
 
+// ---------------------------------------------------------------- 网页控制台
+// ZCode 风格的浏览器控制台：工作区/临时任务选择 → 会话列表 → 执行流实时视图。
+// 与微信桥平级的第三个通道客户端；静态页内嵌进二进制（无文件系统依赖），
+// 页面本身不含数据，所有数据端点仍走 X-Channel-Token 鉴权。
+
+/// GET / 与 /web：内嵌网页控制台入口（no-cache 保证升级二进制后页面同步更新）
+async fn handler_web_home() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-cache")],
+        Html(include_str!("channel_web.html")),
+    )
+}
+
+#[derive(Deserialize)]
+struct SessionsQuery {
+    project_id: Option<String>,
+    /// scratch = 仅临时任务（未绑定项目，或绑定到 scratch 兜底项目的会话）
+    scope: Option<String>,
+}
+
+/// trace 文本字段在网页详情端点的截断上限（步骤可能带全量工具输出）
+const TRACE_FIELD_TRUNCATE: usize = 6_000;
+
+/// 会话列表（含项目绑定与最近一次 trace 概要），网页端左栏/工作区卡片数据源。
+/// 纯 SQL 便于单测；在途实时状态由 apply_run_overlay 在处理器里合并。
+fn list_channel_sessions(
+    conn: &rusqlite::Connection,
+    project_id: Option<&str>,
+    scratch_only: bool,
+) -> Result<Vec<Value>, String> {
+    // scratch 兜底项目（wechat-scratch）绑定的会话也算临时任务
+    let scratch_project_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM agent_projects WHERE name=?1 LIMIT 1",
+            rusqlite::params![SCRATCH_PROJECT_NAME],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    let where_clause = "(:pid IS NULL OR aps.project_id = :pid) \
+                        AND (:scratch = 0 OR aps.project_id IS NULL OR aps.project_id = :scratch_pid)";
+    let sql = format!(
+        "SELECT s.id, s.title, s.model_id, s.created_at, s.updated_at, s.message_count,
+                aps.project_id, p.name AS project_name, p.root_path,
+                t.id AS trace_id, t.status AS trace_status, t.goal AS trace_goal,
+                t.started_at AS trace_started_at, t.updated_at AS trace_updated_at,
+                t.completed_at AS trace_completed_at
+         FROM chat_sessions s
+         LEFT JOIN agent_project_sessions aps ON aps.session_id = s.id
+         LEFT JOIN agent_projects p ON p.id = aps.project_id
+         LEFT JOIN agent_run_traces t ON t.id = (
+             SELECT t2.id FROM agent_run_traces t2
+             WHERE t2.session_id = s.id
+             ORDER BY t2.started_at DESC, t2.id DESC LIMIT 1
+         )
+         WHERE {where_clause}
+         ORDER BY COALESCE(t.updated_at, s.updated_at) DESC
+         LIMIT 200"
+    );
+    let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut query = statement
+        .query_map(
+            rusqlite::named_params! {
+                ":pid": project_id,
+                ":scratch": scratch_only as i64,
+                ":scratch_pid": scratch_project_id,
+            },
+            |row| {
+                Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                    "title": row.get::<_, String>(1)?,
+                    "model_id": row.get::<_, String>(2)?,
+                    "created_at": row.get::<_, String>(3)?,
+                    "updated_at": row.get::<_, String>(4)?,
+                    "message_count": row.get::<_, i64>(5)?,
+                    "project_id": row.get::<_, Option<String>>(6)?,
+                    "project_name": row.get::<_, Option<String>>(7)?,
+                    "root_path": row.get::<_, Option<String>>(8)?,
+                    "trace_id": row.get::<_, Option<String>>(9)?,
+                    "status": row.get::<_, Option<String>>(10)?,
+                    "goal": row.get::<_, Option<String>>(11)?,
+                    "trace_started_at": row.get::<_, Option<String>>(12)?,
+                    "trace_updated_at": row.get::<_, Option<String>>(13)?,
+                    "trace_completed_at": row.get::<_, Option<String>>(14)?,
+                }))
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    let mut sessions = Vec::new();
+    for row in query.by_ref() {
+        sessions.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(sessions)
+}
+
+/// 把在途 RunRecord 的实时状态合并进会话列表：
+/// running/waiting_human 覆盖 trace 终态，并附带 run_id 供网页端应答/接管/取消。
+fn apply_run_overlay(mut sessions: Vec<Value>) -> Vec<Value> {
+    let runs = runs_store().lock().expect("runs store poisoned");
+    for session in sessions.iter_mut() {
+        let Some(session_id) = session.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let latest = runs
+            .values()
+            .filter(|run| run.session_id == session_id)
+            .max_by(|a, b| a.started_at.cmp(&b.started_at))
+            .cloned();
+        let Some(run) = latest else {
+            continue;
+        };
+        session["run_id"] = json!(run.run_id);
+        if matches!(run.status.as_str(), "running" | "waiting_human") {
+            session["status"] = json!(run.status);
+            if run.status == "waiting_human" {
+                session["paused_reason"] = json!(run.paused_reason);
+            }
+        }
+    }
+    sessions
+}
+
+/// GET /channel/sessions?project_id=&scope=scratch
+async fn handler_sessions(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumQuery(query): AxumQuery<SessionsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let conn = db_conn(&state.app)?;
+    let scratch_only = query.scope.as_deref() == Some("scratch");
+    let sessions = list_channel_sessions(&conn, query.project_id.as_deref(), scratch_only)
+        .map_err(|e| bad_request(&e))?;
+    drop(conn);
+    let sessions = apply_run_overlay(sessions);
+    Ok(Json(json!({ "sessions": sessions })))
+}
+
+/// GET /channel/session/{session_id}/traces：会话全部 run trace 的元数据（不含 steps）
+async fn handler_session_traces(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let db = state.app.state::<DbState>();
+    let records = crate::agent::run_trace::list_session_traces(db.inner(), session_id.trim())
+        .map_err(internal_error)?;
+    let traces: Vec<Value> = records
+        .into_iter()
+        .map(|mut trace| {
+            let step_count = trace
+                .get("steps")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            trace["step_count"] = json!(step_count);
+            if let Some(object) = trace.as_object_mut() {
+                object.remove("steps");
+            }
+            trace
+        })
+        .collect();
+    Ok(Json(json!({ "traces": traces })))
+}
+
+/// 详情端点对步骤长文本字段统一截断，避免长程任务的 trace 响应过大
+fn sanitize_trace_steps(steps: &mut Value) {
+    let Some(entries) = steps.as_array_mut() else {
+        return;
+    };
+    for entry in entries.iter_mut() {
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        for key in [
+            "output",
+            "thought",
+            "reflection",
+            "description",
+            "action",
+            "command",
+            "params",
+        ] {
+            let oversized = object
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.chars().count() > TRACE_FIELD_TRUNCATE);
+            if oversized {
+                let truncated: String = object[key]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(TRACE_FIELD_TRUNCATE)
+                    .collect();
+                object.insert(
+                    key.to_string(),
+                    json!(format!("{truncated}……（已截断，完整内容见桌面端）")),
+                );
+            }
+        }
+    }
+}
+
+/// GET /channel/trace/{trace_id}：单次 run 的完整执行流（steps）
+async fn handler_trace_detail(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(trace_id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let conn = db_conn(&state.app)?;
+    let row = conn
+        .query_row(
+            "SELECT id, session_id, goal, status, steps_json, completion_json,
+                    started_at, updated_at, completed_at
+             FROM agent_run_traces WHERE id=?1",
+            rusqlite::params![trace_id.trim()],
+            |row| {
+                Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                    "session_id": row.get::<_, String>(1)?,
+                    "goal": row.get::<_, String>(2)?,
+                    "status": row.get::<_, String>(3)?,
+                    "steps_json": row.get::<_, String>(4)?,
+                    "completion": row.get::<_, Option<String>>(5)?,
+                    "started_at": row.get::<_, String>(6)?,
+                    "updated_at": row.get::<_, String>(7)?,
+                    "completed_at": row.get::<_, Option<String>>(8)?,
+                }))
+            },
+        )
+        .optional()
+        .map_err(internal_error)?;
+    let mut trace = row.ok_or_else(|| not_found("执行记录不存在"))?;
+    let steps_json = trace["steps_json"].as_str().unwrap_or("[]").to_string();
+    let mut steps = serde_json::from_str::<Value>(&steps_json).unwrap_or_else(|_| json!([]));
+    sanitize_trace_steps(&mut steps);
+    let completion: Value = trace["completion"]
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or(Value::Null);
+    if let Some(object) = trace.as_object_mut() {
+        object.remove("steps_json");
+        object.remove("completion");
+        object.insert("steps".to_string(), steps);
+        object.insert("completion".to_string(), completion);
+    }
+    Ok(Json(json!({ "trace": trace })))
+}
+
+/// 网页端附件上限（与微信桥回推上限一致）
+const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+
+/// 极简 percent-decode（文件名经 X-File-Name 头传输，JS 侧 encodeURIComponent）
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = if bytes[i] == b'%' && i + 2 < bytes.len() {
+            bytes
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|s| u8::from_str_radix(s, 16).ok())
+        } else {
+            None
+        };
+        if let Some(byte) = hex {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// POST /channel/session/{session_id}/attachment-upload
+/// 浏览器给不了本地路径，网页端直接收字节流（raw body + X-File-Name），
+/// 落临时文件后走既有登记逻辑（复制进项目 .attachments/ 隔离目录）。
+/// 附件仅支持项目会话——临时会话没有 .attachments 落点（与微信桥约束一致）。
+async fn handler_session_attachment_upload(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    if body.is_empty() {
+        return Err(bad_request("附件内容为空"));
+    }
+    if body.len() > MAX_UPLOAD_BYTES {
+        return Err(bad_request("附件超过 25MB 上限"));
+    }
+    let original_name = headers
+        .get("x-file-name")
+        .and_then(|v| v.to_str().ok())
+        .map(percent_decode)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| bad_request("缺少 X-File-Name 文件名头"))?;
+    let session_id = session_id.trim().to_string();
+    let bound: bool = {
+        let conn = db_conn(&state.app)?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_project_sessions WHERE session_id=?1)",
+            rusqlite::params![session_id],
+            |row| row.get(0),
+        )
+        .map_err(internal_error)?
+    };
+    if !bound {
+        return Err(bad_request("附件仅支持项目对话：请选择项目后再上传"));
+    }
+    let tmp = std::env::temp_dir().join(format!("free-api-upload-{}", uuid::Uuid::new_v4()));
+    tokio::fs::write(&tmp, &body).await.map_err(internal_error)?;
+    let registered = {
+        let conn = db_conn(&state.app)?;
+        crate::commands::projects::register_attachment_for_session(
+            &conn,
+            &session_id,
+            &tmp,
+            &original_name,
+        )
+    };
+    let _ = std::fs::remove_file(&tmp);
+    let resource_id = registered
+        .map_err(|e| bad_request(&e))?
+        .ok_or_else(|| bad_request("该会话未绑定项目，无法登记附件"))?;
+    Ok(Json(json!({
+        "resource_id": resource_id,
+        "name": original_name,
+        "size_bytes": body.len(),
+    })))
+}
+
 fn channel_router(state: Arc<ChannelState>) -> Router {
     Router::new()
+        .route("/", get(handler_web_home))
+        .route("/web", get(handler_web_home))
         .route("/channel/projects", get(handler_projects))
+        .route("/channel/sessions", get(handler_sessions))
         .route("/channel/session", post(handler_session))
         .route("/channel/task", post(handler_task))
+        .route(
+            "/channel/session/{session_id}/traces",
+            get(handler_session_traces),
+        )
+        .route("/channel/trace/{trace_id}", get(handler_trace_detail))
         .route("/channel/runs", get(handler_run_list))
         .route("/channel/run/{run_id}", get(handler_run_status))
         .route("/channel/run/{run_id}/answer", post(handler_run_answer))
@@ -1067,14 +1567,23 @@ fn channel_router(state: Arc<ChannelState>) -> Router {
         .route("/channel/run/{run_id}/cancel", post(handler_run_cancel))
         .route("/channel/config", get(handler_config_get).put(handler_config_put))
         .route("/channel/models", get(handler_models))
+        .route("/channel/role-cards", get(handler_role_cards))
+        .route("/channel/events", get(handler_events))
         .route(
             "/channel/session/{session_id}/attachment",
             post(handler_session_attachment),
         )
         .route(
+            "/channel/session/{session_id}/attachment-upload",
+            post(handler_session_attachment_upload),
+        )
+        .route(
             "/channel/session/{session_id}/artifacts",
             get(handler_session_artifacts),
         )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            MAX_UPLOAD_BYTES + 64 * 1024,
+        ))
         .with_state(state)
 }
 
@@ -1580,5 +2089,163 @@ mod tests {
             serde_json::from_str(r#"{"token":"t","unknown_field":1}"#).unwrap();
         assert_eq!(parsed2.token, "t");
         assert_eq!(parsed2.port, DEFAULT_API_PORT);
+    }
+
+    // ------------------------------------------------ 网页控制台：会话列表与 trace
+
+    fn web_test_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chat_sessions (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, model_id TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                message_count INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE agent_projects (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL);
+            CREATE TABLE agent_project_sessions (
+                project_id TEXT NOT NULL, session_id TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE agent_run_traces (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, goal TEXT, status TEXT NOT NULL,
+                steps_json TEXT NOT NULL, completion_json TEXT,
+                started_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_session(conn: &rusqlite::Connection, id: &str, updated_at: &str) {
+        conn.execute(
+            "INSERT INTO chat_sessions (id, title, model_id, created_at, updated_at, message_count)
+             VALUES (?1, ?1, 'model-a', '2026-08-30T00:00:00+00:00', ?2, 0)",
+            rusqlite::params![id, updated_at],
+        )
+        .unwrap();
+    }
+
+    fn insert_trace(conn: &rusqlite::Connection, id: &str, session_id: &str, status: &str, updated_at: &str) {
+        conn.execute(
+            "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at)
+             VALUES (?1, ?2, '目标', ?3, '[]', ?4, ?4)",
+            rusqlite::params![id, session_id, status, updated_at],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn session_listing_filters_and_orders() {
+        let conn = web_test_conn();
+        conn.execute(
+            "INSERT INTO agent_projects (id, name, root_path) VALUES ('p1', 'free_api', '/tmp/free_api')",
+            [],
+        )
+        .unwrap();
+        insert_session(&conn, "s-project", "2026-08-30T01:00:00+00:00");
+        conn.execute(
+            "INSERT INTO agent_project_sessions (project_id, session_id, created_at)
+             VALUES ('p1', 's-project', '2026-08-30T01:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        insert_trace(&conn, "t-project", "s-project", "succeeded", "2026-08-30T01:05:00+00:00");
+        insert_session(&conn, "s-plain-new", "2026-08-30T02:00:00+00:00");
+        insert_trace(&conn, "t-plain", "s-plain-new", "failed", "2026-08-30T02:10:00+00:00");
+        insert_session(&conn, "s-bare", "2026-08-30T00:30:00+00:00");
+
+        // 全量：按最近活动排序（s-plain-new > s-project > s-bare）
+        let all = list_channel_sessions(&conn, None, false).unwrap();
+        let ids: Vec<&str> = all
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["s-plain-new", "s-project", "s-bare"]);
+        let plain = all.iter().find(|s| s["id"] == "s-plain-new").unwrap();
+        assert_eq!(plain["status"], "failed");
+        assert_eq!(plain["trace_id"], "t-plain");
+        assert!(plain["project_id"].is_null());
+        // 无 trace 的会话也要返回（status 为 null）
+        let bare = all.iter().find(|s| s["id"] == "s-bare").unwrap();
+        assert!(bare["status"].is_null());
+
+        // 项目过滤
+        let project = list_channel_sessions(&conn, Some("p1"), false).unwrap();
+        assert_eq!(project.len(), 1);
+        assert_eq!(project[0]["id"], "s-project");
+        assert_eq!(project[0]["project_name"], "free_api");
+
+        // 临时任务过滤：只含未绑定项目的会话
+        let scratch = list_channel_sessions(&conn, None, true).unwrap();
+        let scratch_ids: Vec<&str> = scratch.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(scratch_ids, vec!["s-plain-new", "s-bare"]);
+    }
+
+    #[test]
+    fn run_overlay_marks_active_sessions() {
+        let conn = web_test_conn();
+        insert_session(&conn, "ov-session", "2026-08-30T01:00:00+00:00");
+        insert_trace(&conn, "ov-trace", "ov-session", "succeeded", "2026-08-30T01:05:00+00:00");
+        let sessions = list_channel_sessions(&conn, None, false).unwrap();
+        assert_eq!(sessions[0]["status"], "succeeded");
+
+        let run_id = format!("ov-run-{}", uuid::Uuid::new_v4());
+        upsert_run(RunRecord {
+            run_id: run_id.clone(),
+            session_id: "ov-session".to_string(),
+            goal_preview: "goal".to_string(),
+            status: "waiting_human".to_string(),
+            paused_reason: Some("需要确认删除哪些文件？".to_string()),
+            last_progress: None,
+            event_count: 0,
+            started_at: "2026-08-30T02:00:00+00:00".to_string(),
+            updated_at: "2026-08-30T02:00:00+00:00".to_string(),
+            result: None,
+            error: None,
+            llm_retries: 3,
+            report_every_actions: 15,
+            phase_push: true,
+            phase: None,
+            state_detail: None,
+        });
+        let overlaid = apply_run_overlay(sessions);
+        assert_eq!(overlaid[0]["status"], "waiting_human");
+        assert_eq!(overlaid[0]["paused_reason"], "需要确认删除哪些文件？");
+        assert_eq!(overlaid[0]["run_id"], run_id);
+        let _ = runs_store().lock().unwrap().remove(&run_id);
+    }
+
+    #[test]
+    fn percent_decode_handles_ascii_utf8_and_invalid() {
+        assert_eq!(percent_decode("plain.txt"), "plain.txt");
+        assert_eq!(percent_decode("%E6%8A%A5%E5%91%8A.txt"), "报告.txt");
+        assert_eq!(percent_decode("a%2Fb%20c"), "a/b c");
+        // 非法序列原样保留
+        assert_eq!(percent_decode("abc%zz"), "abc%zz");
+        assert_eq!(percent_decode("trail%"), "trail%");
+    }
+
+    #[test]
+    fn trace_steps_sanitizer_truncates_long_fields() {
+        let long_output = "x".repeat(TRACE_FIELD_TRUNCATE + 500);
+        let mut steps = json!([
+            { "tool": "read_file", "output": long_output, "thought": "短思考" },
+            { "tool": "run_command", "output": "ok" }
+        ]);
+        sanitize_trace_steps(&mut steps);
+        let entries = steps.as_array().unwrap();
+        let sanitized = entries[0]["output"].as_str().unwrap();
+        assert!(sanitized.chars().count() <= TRACE_FIELD_TRUNCATE + 20);
+        assert!(sanitized.ends_with("……（已截断，完整内容见桌面端）"));
+        assert_eq!(entries[0]["thought"], "短思考");
+        assert_eq!(entries[1]["output"], "ok");
+    }
+}
+
+// handler_web_home 是 async 但无 IO，直接验证页面已内嵌且非空
+#[cfg(test)]
+mod web_page_tests {
+    #[test]
+    fn embedded_page_present() {
+        let page = include_str!("channel_web.html");
+        assert!(page.contains("远程控制"));
+        assert!(page.len() > 5_000);
     }
 }
