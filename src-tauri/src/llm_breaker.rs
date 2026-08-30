@@ -99,6 +99,22 @@ pub fn record(slot: &str, success: bool) {
     record_at(slot, success, Instant::now());
 }
 
+/// 韧性重试的等待依据：槽位熔断中返回剩余冷却时长（等它到半开窗口再重试），
+/// 健康/半开/未启用返回 None（调用方用默认最小驻留）。
+pub fn remaining_cooldown(slot: &str) -> Option<Duration> {
+    if breaker_disabled() {
+        return None;
+    }
+    let map = registry().lock().expect("llm breaker registry poisoned");
+    let health = map.get(slot)?;
+    match health.state {
+        State::Open => health
+            .cooldown_until
+            .map(|until| (until.saturating_duration_since(Instant::now())).max(Duration::ZERO)),
+        _ => None,
+    }
+}
+
 fn record_at(slot: &str, success: bool, now: Instant) {
     if breaker_disabled() {
         return;
@@ -237,5 +253,19 @@ mod tests {
         }
         record_at(&slot, true, Instant::now());
         assert!(gate_at(&slot, Instant::now()).is_ok(), "零星失败不应熔断健康槽位");
+    }
+
+    #[test]
+    fn remaining_cooldown_reflects_state() {
+        let slot = slot_key("测试平台", "m-remaining");
+        // 健康态：None
+        assert_eq!(remaining_cooldown(&slot), None);
+        // 熔断态：Some(剩余冷却，≤ 初始 60s)
+        for _ in 0..FAILURE_THRESHOLD {
+            record_at(&slot, false, Instant::now());
+        }
+        let remaining = remaining_cooldown(&slot).expect("熔断中应有剩余冷却");
+        assert!(remaining <= Duration::from_millis(INITIAL_COOLDOWN_MS));
+        assert!(remaining > Duration::ZERO);
     }
 }

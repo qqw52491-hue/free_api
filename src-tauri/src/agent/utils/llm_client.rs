@@ -367,8 +367,8 @@ pub async fn call_llm(
             true
         };
 
-        // 5. 调用 llm 层发送请求（含 HTTP 重试）
-        let result = match llm::stream_with_retry(
+        // 5. 调用 llm 层发送请求（含 HTTP 重试 + 端点韧性等待：硬失败等恢复窗口再重试，任务不再因单次端点故障即死）
+        let result = match llm::stream_with_resilient_retry(
             &config,
             &api_values,
             reasoning_effort,

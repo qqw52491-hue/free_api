@@ -819,6 +819,83 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     outcome
 }
 
+/// 韧性重试参数：硬失败后等待端点恢复窗口再重试当前逻辑调用。
+/// 等待 = max(熔断剩余冷却, 最小驻留)，封顶上限；期间响应取消信号。
+/// 整体仍受任务级看门狗（如评测 60 分钟）约束，不会造成无界挂起。
+const RESILIENT_LLM_RETRIES: u32 = 2;
+const RESILIENT_MIN_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+const RESILIENT_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// 带槽位韧性的流式请求：stream_with_retry 之上再包一层——
+/// 传输层彻底失败（含预算耗尽）时，不再把死亡直接交给上层，
+/// 而是等端点恢复窗口（熔断冷却/最小驻留）后重试当前逻辑调用，最多 RESILIENT_LLM_RETRIES 次。
+/// 实测场景：端点突发故障恰好打在任务尾部（发 finish 前），一次硬失败曾直接判死整个任务。
+pub async fn stream_with_resilient_retry<F: FnMut(StreamEvent) -> bool>(
+    config: &ModelConfig,
+    messages: &[serde_json::Value],
+    reasoning_effort: &str,
+    interrupt_rx: &mut watch::Receiver<u64>,
+    transient_request_retries: u32,
+    on_event: &mut F,
+) -> Result<StreamResult, String> {
+    let slot = crate::llm_breaker::slot_key(&config.platform_name, &config.model_id);
+    let mut result = stream_with_retry(
+        config,
+        messages,
+        reasoning_effort,
+        interrupt_rx,
+        transient_request_retries,
+        on_event,
+    )
+    .await;
+    let mut attempt = 0u32;
+    while let Err(err) = &result {
+        // 用户取消不是端点问题：立即上抛
+        if err == STREAM_INTERRUPTED_ERROR {
+            break;
+        }
+        // 只对传输层彻底失败做韧性等待（stream_with_retry 的终态错误统一以该前缀出现）
+        if !err.contains("LLM 请求最终失败") {
+            break;
+        }
+        if attempt >= RESILIENT_LLM_RETRIES {
+            break;
+        }
+        attempt += 1;
+        let wait = crate::llm_breaker::remaining_cooldown(&slot)
+            .unwrap_or_default()
+            .max(RESILIENT_MIN_WAIT)
+            .min(RESILIENT_MAX_WAIT);
+        println!(
+            "⏳ [端点韧性] {} 传输层硬失败，等待 {}s 后重试当前步骤模型调用（{}/{}）",
+            config.model_name,
+            wait.as_secs(),
+            attempt,
+            RESILIENT_LLM_RETRIES
+        );
+        let cancelled = tokio::select! {
+            _ = tokio::time::sleep(wait) => false,
+            changed = interrupt_rx.changed() => {
+                let _ = changed;
+                true
+            }
+        };
+        if cancelled {
+            return Err(STREAM_INTERRUPTED_ERROR.to_string());
+        }
+        result = stream_with_retry(
+            config,
+            messages,
+            reasoning_effort,
+            interrupt_rx,
+            transient_request_retries,
+            on_event,
+        )
+        .await;
+    }
+    result
+}
+
 /// 当 API 未返回 usage 时，粗略估算 Token 用量 (1 token ≈ 3 字符)
 pub fn estimate_usage(
     messages: &[serde_json::Value],
