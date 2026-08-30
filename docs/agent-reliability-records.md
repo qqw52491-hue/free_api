@@ -397,3 +397,16 @@ $DB = `~/Library/Application Support/free-api-chat/data_v2.db`；报告自述路
 - 顺带确认：shell_exec 走 shell 解释（串联命令可用）；edit_file 为 diff 式（oldText/newText，
   需先知内容——这就是每阶段多出的那次读取的来源）。
 - 待做（提示词层）：write_file 免读指南 + "cat 输出可作 oldText 基线"，落地 3→2 调用/阶段。
+
+## 第五轮 + hub 第二修复（2026-08-30 晚，hub 仓库 1895eae）
+
+- **效率突破确认（第五轮前 10 阶段实测）**：write_file/cat 复用规则 + 串联示例后，
+  bootstrap 从 3-4 次读取压缩为 1 条命令（cat README+package.json+工单 && find tree），
+  阶段验证一条命令全包（cat 目标文件 + cat 检查器 + npm test）。28 调用/10.5 阶段 ≈ 2.7 次/阶段
+  （此前 3.3-3.7），read_intent_count=0（读取全并入 shell）。**3→2 调用/阶段落地。**
+- 第五轮本身 failed：新形态故障——模型在超长输出（spilled_to_disk）后把 command 双重编码成
+  JSON 字符串，hub 原样透传，子服务 Zod 报天书错误 "expected record, received string"，
+  模型看不懂连犯 17 次同型失败直到任务终止（观察 4 次相同失败重犯告警生效）。
+- **hub 第二修复（1895eae）**：tools/call 入口对 string 型 arguments 自动 JSON.parse 还原
+  （审计记 args_coerce），不可解析时返回指明"双重编码"的可执行报错。7/7 测试过，已重启上线。
+- 待验证：下轮 eval 确认 ①净调用数稳定在 ~65-70 ②双重编码出现时模型凭新报错一次自愈。
