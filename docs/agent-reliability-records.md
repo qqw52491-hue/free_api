@@ -335,3 +335,12 @@ $DB = `~/Library/Application Support/free-api-chat/data_v2.db`；报告自述路
   「端点健康探测与快慢槽自动切换」要解的问题，建议加 per-call 总时限（如 3 分钟）+ 端点熔断降级。
 - 当日 glm-5.3-flash 官方端点健康度：首轮 60-80s/调用，二轮 60-100s/调用且出现 61s 解析错误
   与 21 分钟挂起（对比昨日 diag 159-230s/场景）——对照实验结论受端点健康度调制，跨日对比需谨慎。
+
+## 行为调优（2026-08-30 下午，a657e7f）
+
+- **并行扇出分级**：纯只读批次（read/search/list 等无副作用工具）上限 2→4；含写入/执行或未知工具维持 2。
+  三层校验（单批 / 整树预校验 / executor spawn 点）统一按批分级，分析器按同口径报警（parallel_cap_exceeded_count），
+  core_logic.md 提示词同步。分类保守：未知工具一律按可变处理。
+- **LLM 单次调用总预算**：240s（FREE_API_LLM_CALL_BUDGET_SECONDS 可调），覆盖全部重试与退避。
+  直接封堵"单请求挂起 21 分钟吃光运行预算"；ask_human 等人不走 LLM 调用，天然不受限。
+- 323 单测全绿。
