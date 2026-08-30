@@ -371,3 +371,17 @@ $DB = `~/Library/Application Support/free-api-chat/data_v2.db`；报告自述路
 - spec 侧 TDZ 引用错误（c72e7f8）：evaluationTimeoutMs 在 maxDurationMinutes 声明前使用，
   spec 加载即崩，第三轮首跑 1 秒失败暴露——教训：改 spec 后必须 `node --check` 再提交。
 - ZCode 臂 v3 同 fixture 对照：24/24 隐藏断言 PASS、受保护文件零改写、实质 8m46s（51 轮、零浪费调用）。
+
+## 第四轮（示例族提示词）：行为泛化验证 ✅（2026-08-30 17:00，db3684f）
+
+- **4c: trace succeeded，wdio 1 passing (34m29s)**（evaluation `321731dc` / run `5ed10365`）；4 与 4b 因端点劣化
+  快速失败（16:09 / 16:23 两个劣化窗口，240s 预算耗尽 → 按设计终止，未挂起一分钟）。
+- **行为泛化超出预期**：第一次测试即采用单命令串联 `npm test 2>&1; cat CURRENT_STAGE.md`；
+  自行发现并使用 hub 原生 `run_sequence`（首次带前缀报错后，下一步自诊断改为无前缀 + read→edit→test 顺序）；
+  edit_file 替代 write_file（diff 式编辑）；新增 directory_tree/git_diff 探索；4b 中用过 parallel:3（纯只读，分级上限内合法）。
+- **诚实记录：调用数未降（89 vs 83）**。每阶段仍 3 调用，但结构变了：工单读取已合并进测试命令（省 1 次），
+  却把原先 read_multiple_files 批量读拆成 24 次独立 read_text_file（多花 1 次）——左手省右手花。
+  结论：**提示词示例改变行为形状，不保证净成本下降**；净收益需要结构化支持
+  （then_read 字段或工具层合并交付），见后续计划。
+- **韧性大考通过**：6 次解析错误（端点全天不稳）+ 34 分钟长跑，预算+重试扛住全程，零挂起，规范 finish 收尾。
+- 隐藏断言 24/24（wdio passing 内含）；受保护文件零改写。
