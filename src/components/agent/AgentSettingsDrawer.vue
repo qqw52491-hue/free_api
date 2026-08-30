@@ -437,21 +437,185 @@ watch(() => props.open, (open) => {
 }
 .retry-policy-note strong { color: var(--chat-text-muted); }
 
-</style>
-
-<style scoped>
 /* 🎭 专精角色池 */
-.role-card-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
-.role-card-item { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07); }
-.role-card-item.disabled { opacity: .5; }
-.role-card-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.role-card-main strong small { opacity: .5; font-weight: 400; }
-.role-card-main p { margin: 0; font-size: 11px; opacity: .6; }
-.role-card-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
-.role-card-actions button { font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.05); color: inherit; cursor: pointer; }
-.role-card-actions button.danger { color: #ff8b8b; border-color: rgba(255,120,120,.3); }
-.role-form { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 10px; background: rgba(0,0,0,.25); }
-.role-form label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; opacity: .85; }
-.role-form input, .role-form textarea, .role-form select { border-radius: 6px; border: 1px solid rgba(255,255,255,.12); background: rgba(0,0,0,.35); color: inherit; padding: 6px 8px; font-size: 12px; }
-.role-form-actions { display: flex; gap: 8px; }
+.role-card-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.role-card-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #181822;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    transition: all 0.18s ease;
+}
+
+.role-card-item:hover {
+    border-color: rgba(255, 255, 255, 0.18);
+    background: #1d1d2b;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.role-card-item.disabled {
+    opacity: 0.5;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.role-card-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.role-card-main strong {
+    font-size: 12px;
+    color: #f4f4f5;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.role-card-main strong small {
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.12);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 9.5px;
+    font-family: ui-monospace, monospace;
+}
+
+.role-card-main small {
+    color: #a1a1aa;
+    font-size: 10.5px;
+}
+
+.role-card-main p {
+    margin: 2px 0 0;
+    font-size: 11px;
+    color: #71717a;
+    line-height: 1.45;
+}
+
+.role-card-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.role-card-actions button {
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: #20202c;
+    color: #e4e4e7;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.role-card-actions button:hover {
+    border-color: rgba(255, 255, 255, 0.22);
+    background: #282838;
+    color: #f4f4f5;
+}
+
+.role-card-actions button.danger {
+    color: #f87171;
+    background: rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.25);
+}
+
+.role-card-actions button.danger:hover {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: rgba(239, 68, 68, 0.4);
+}
+
+.role-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border-radius: 10px;
+    background: #14141d;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    margin-top: 8px;
+}
+
+.role-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #d4d4d8;
+}
+
+.role-form input,
+.role-form textarea,
+.role-form select {
+    border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: #1c1c28;
+    color: #f4f4f5;
+    padding: 7px 10px;
+    font-size: 11.5px;
+    outline: none;
+    transition: all 0.15s ease;
+}
+
+.role-form select {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    padding-right: 28px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2338bdf8' stroke-width='2.2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    cursor: pointer;
+}
+
+.role-form select option {
+    background-color: #161622;
+    color: #f4f4f5;
+}
+
+.role-form input:hover,
+.role-form textarea:hover,
+.role-form select:hover {
+    border-color: rgba(255, 255, 255, 0.22);
+    background: #20202e;
+}
+
+.role-form input:focus,
+.role-form textarea:focus,
+.role-form select:focus {
+    border-color: #38bdf8;
+    background: #222232;
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.15);
+}
+
+.role-form-actions {
+    display: flex;
+    gap: 8px;
+    padding-top: 4px;
+}
+
+.role-form-actions button {
+    border-radius: 7px;
+    padding: 6px 14px;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
 </style>
