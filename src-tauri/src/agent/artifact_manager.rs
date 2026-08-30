@@ -605,6 +605,51 @@ pub fn dispatch(
                 },
             }
         }
+        "register_file" | "register_workspace_file" => {
+            // 登记工作区中已写入的真实文件（如 excel 插件生成的 xlsx）入产物账本；
+            // 不登记则任务完成时桥/桌面端查不到产物，微信回推文件链路断在最后一环
+            let path = params.get("path")
+                .or_else(|| params.get("file"))
+                .or_else(|| params.get("filepath"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if path.trim().is_empty() {
+                return DispatchResult {
+                    stdout: String::new(),
+                    stderr: "❌ [产物管理错误] 必须提供 path 参数（工作区内文件路径）".to_string(),
+                    success: false,
+                    route: "artifact_manager:register_file".to_string(),
+                };
+            }
+
+            match register_workspace_artifact(db, session_id, None, path) {
+                Ok(rec) => {
+                    let result_payload = json!({
+                        "artifact_id": rec.id,
+                        "name": rec.display_name,
+                        "format": rec.format,
+                        "kind": rec.kind,
+                        "size_bytes": rec.size_bytes,
+                        "canonical_path": rec.canonical_path,
+                        "status": rec.status,
+                        "message": format!("工作区文件「{}」已登记入产物账本，任务完成时将自动回推给用户 (ID: {})", rec.display_name, rec.id),
+                    });
+                    DispatchResult {
+                        stdout: serde_json::to_string_pretty(&result_payload).unwrap_or_default(),
+                        stderr: String::new(),
+                        success: true,
+                        route: "artifact_manager:register_file".to_string(),
+                    }
+                }
+                Err(err) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("❌ [产物管理错误] 登记工作区产物失败: {}", err),
+                    success: false,
+                    route: "artifact_manager:register_file".to_string(),
+                },
+            }
+        }
         "list_artifacts" | "list" => {
             match list_session_artifacts(db, session_id) {
                 Ok(records) => {
@@ -655,9 +700,71 @@ pub fn dispatch(
         }
         unknown => DispatchResult {
             stdout: String::new(),
-            stderr: format!("❌ [产物管理错误] 未知的 action: '{}'。支持的 action: create_document, list_artifacts, read_artifact", unknown),
+            stderr: format!("❌ [产物管理错误] 未知的 action: '{}'。支持的 action: create_document, register_file, list_artifacts, read_artifact", unknown),
             success: false,
             route: "artifact_manager:unknown_action".to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> DbState {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_artifacts (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT,
+                display_name TEXT NOT NULL, format TEXT NOT NULL, mime_type TEXT,
+                kind TEXT NOT NULL, canonical_path TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL, sha256 TEXT,
+                origin TEXT NOT NULL DEFAULT 'managed_generated',
+                status TEXT NOT NULL DEFAULT 'ready',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)))
+    }
+
+    #[test]
+    fn register_file_dispatch_records_workspace_binary() {
+        let db = test_db();
+        let dir = std::env::temp_dir().join(format!("art-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("整理结果.xlsx");
+        std::fs::write(&file, b"PK\x03\x04 fake xlsx bytes").unwrap();
+
+        let result = dispatch(
+            &db,
+            "sess-1",
+            "register_file",
+            &serde_json::json!({ "path": file.to_string_lossy() }),
+        );
+        assert!(result.success, "登记应成功: {}", result.stderr);
+
+        let record: (String, String, String, i64) = db
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT display_name, format, origin, size_bytes FROM agent_artifacts WHERE session_id='sess-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(record.0, "整理结果.xlsx");
+        assert_eq!(record.1, "xlsx");
+        assert_eq!(record.2, "workspace_write");
+        assert_eq!(record.3 as u64, std::fs::metadata(&file).unwrap().len());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn register_file_dispatch_rejects_missing_path() {
+        let db = test_db();
+        let result = dispatch(&db, "sess-1", "register_file", &serde_json::json!({}));
+        assert!(!result.success);
+        assert!(result.stderr.contains("path"));
     }
 }

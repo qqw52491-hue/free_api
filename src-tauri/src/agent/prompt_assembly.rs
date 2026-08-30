@@ -209,6 +209,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         summary: "生成独立受管交付产物（Markdown分析报告、网页看板、数据导出）并登记持久化账本供用户预览/导出",
         actions: &[
             "create_document(title: string, content: string, format: md|html|json|csv|txt)",
+            "register_file(path: string) — 将工作区中已生成的二进制文件（如 Excel/PDF）登记入产物账本，任务完成时自动回推给用户",
             "list_artifacts()",
             "read_artifact(artifact_id: string)",
         ],
