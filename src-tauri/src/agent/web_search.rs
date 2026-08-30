@@ -18,6 +18,19 @@ pub struct WebSearchResultItem {
     pub source: String,
 }
 
+/// TinyFish 免费档内置密钥：随仓库分发（私有仓库），保证零配置开箱即用。
+/// 环境变量 TINYFISH_API_KEY 设置时优先于内置值（便于换 key / 多 key 轮换）。
+/// 泄露风险评估：免费档限流 30 次/分钟 Search，最坏后果是免费额度被蹭。
+const DEFAULT_TINYFISH_API_KEY: &str = "sk-tinyfish-UDFwFLn_4R2v-28ewv6CBdoh1UnThZzC";
+
+/// TinyFish 密钥解析：环境变量优先，缺省回落内置密钥。
+fn tinyfish_key() -> String {
+    match std::env::var("TINYFISH_API_KEY") {
+        Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => DEFAULT_TINYFISH_API_KEY.to_string(),
+    }
+}
+
 /// 执行聚合网络搜索
 pub async fn execute_web_search(
     query: &str,
@@ -35,13 +48,12 @@ pub async fn execute_web_search(
     };
 
     // 0. TinyFish 免费 Agent 搜索 API (X-API-Key 认证，Search 免费 30 次/分钟)；
-    //    API 级稳定性远高于 Bing 免费抓取，配置了 TINYFISH_API_KEY 时永远优先。
-    if let Ok(key) = std::env::var("TINYFISH_API_KEY") {
-        if !key.trim().is_empty() {
-            if let Ok(res) = search_tinyfish(q, key.trim(), limit).await {
-                if !res.is_empty() {
-                    return Ok(res);
-                }
+    //    API 级稳定性远高于 Bing 免费抓取，内置密钥零配置开箱即用。
+    let tinyfish_key = tinyfish_key();
+    if !tinyfish_key.is_empty() {
+        if let Ok(res) = search_tinyfish(q, &tinyfish_key, limit).await {
+            if !res.is_empty() {
+                return Ok(res);
             }
         }
     }
@@ -799,14 +811,14 @@ mod tests {
         assert!(fetch_res.stderr.contains("缺少必填参数"));
     }
 
-    /// 实况联调（需 TINYFISH_API_KEY 环境变量，默认忽略）：
+    /// 实况联调（无需环境变量，使用内置密钥；默认忽略）：
     /// cargo test search_tinyfish_live -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn search_tinyfish_live() {
-        let key = std::env::var("TINYFISH_API_KEY").unwrap_or_default();
+        let key = tinyfish_key();
         if key.trim().is_empty() {
-            println!("未设置 TINYFISH_API_KEY，跳过实况验证");
+            println!("未配置 TinyFish 密钥，跳过实况验证");
             return;
         }
         let res = search_tinyfish("Hacker News top story", key.trim(), 3)
