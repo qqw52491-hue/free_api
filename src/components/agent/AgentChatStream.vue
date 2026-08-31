@@ -511,7 +511,16 @@ function completionArtifacts(value: unknown): AgentArtifactInput[] {
 }
 function historyTimeline(): TimelineEntry[] {
     const timeline: TimelineEntry[] = [];
-    for (const turn of [...props.historyTurns].sort((a, b) => a.startedAt - b.startedAt)) {
+    // 过滤掉当前正在实时运行中的回合，防止 live 与 history 重复渲染双份用户消息
+    const turnsToRender = props.historyTurns.filter((turn) => {
+        if (props.isRunning) {
+            if (turn.status === "running") return false;
+            if (props.currentGoal && turn.goal.trim() === props.currentGoal.trim()) return false;
+        }
+        return true;
+    });
+
+    for (const turn of [...turnsToRender].sort((a, b) => a.startedAt - b.startedAt)) {
         timeline.push({ id: `history-user-${turn.id}`, type: "user", timestamp: turn.startedAt, content: turn.goal });
         // 过滤掉最终已由 completion 展示的助手消息，只保留人工干预记录
         const humanMessages = turn.messages.filter((m) => m.role === "user");
@@ -548,7 +557,7 @@ function historyTimeline(): TimelineEntry[] {
 }
 function currentTimeline(): TimelineEntry[] {
     const timeline: TimelineEntry[] = [];
-    // 只有当当前 goal 已经在 historyTurns 中被持久化（且状态已终结）时才隐藏 live，防止重复渲染双份 completion
+    // 只有当当前 goal 已经在 historyTurns 中被持久化（且状态已终结）且当前未在运行时才隐藏 live，防止重复渲染双份 completion
     const alreadyPersisted = !props.isRunning && props.historyTurns.length > 0 && props.historyTurns.some((turn) => {
         if (!props.currentGoal) return true;
         const cleanGoal = props.currentGoal.trim();
