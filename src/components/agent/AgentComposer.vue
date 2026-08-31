@@ -50,8 +50,11 @@
                 :placeholder="placeholderText"
                 rows="1"
                 @input="handleInput"
-                @keydown.ctrl.enter.prevent="submit"
-                @keydown.meta.enter.prevent="submit"
+                @keydown.ctrl.enter.exact.prevent="submit('interrupt')"
+                @keydown.meta.enter.exact.prevent="submit('interrupt')"
+                @keydown.alt.enter.prevent="submit('queue')"
+                @keydown.ctrl.shift.enter.prevent="submit('queue')"
+                @keydown.meta.shift.enter.prevent="submit('queue')"
             />
             <div class="composer-bottom-row">
                 <div class="composer-tools">
@@ -947,11 +950,13 @@ const canSubmit = computed(() => {
     return props.isRunning ? hasContent : (props.canStart && hasContent);
 });
 
-function submit() {
+function submit(explicitMode?: "interrupt" | "queue" | Event) {
     if (!canSubmit.value || props.isSending) return;
 
     let userText = props.draft.trim();
     const currentAtts = [...attachments.value];
+    const mode = (typeof explicitMode === "string" ? explicitMode : undefined)
+        || (props.isRunning && !props.isWaitingForHuman ? submitMode.value : undefined);
 
     if (currentAtts.length > 0) {
         // 🌟 结构化排列附件清单：清晰标注文件名、大小与本地物理路径
@@ -961,10 +966,10 @@ function submit() {
         const visiblePrompt = userText ? `${briefBadges}\n\n${userText}` : briefBadges;
         emit("update:draft", "");
         attachments.value = [];
-        emit("submit", { text: visiblePrompt, attachments: currentAtts, mode: submitMode.value });
+        emit("submit", { text: visiblePrompt, attachments: currentAtts, mode });
     } else {
         emit("update:draft", "");
-        emit("submit", { text: userText, attachments: [], mode: submitMode.value });
+        emit("submit", { text: userText, attachments: [], mode });
     }
 }
 
