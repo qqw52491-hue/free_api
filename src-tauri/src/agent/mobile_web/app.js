@@ -915,6 +915,15 @@ async function loadModels() {
   } catch (e) {}
 }
 
+function isAgentActive() {
+  const f = S.flow;
+  return f && f.run && ["running", "waiting_human"].includes(f.run.status);
+}
+
+function sseAlive() {
+  return !!(S.es && S.es.readyState === 1);
+}
+
 function connectSSE(force) {
   if (!window.EventSource) return;
   if (S.es && S.es.readyState <= 1 && !force) return;
@@ -923,8 +932,8 @@ function connectSSE(force) {
     const es = new EventSource(`/channel/events?token=${encodeURIComponent(S.token)}`);
     S.es = es;
     es.onopen = () => { setConn(true); };
-    es.onmessage = (e) => {
-      // 收到任何事件（来自桌面、微信桥或手机）立即全量刷新视图
+    es.onmessage = () => {
+      // SSE 推送驱动：桌面端 / 微信 / Agent 产生事件时立即刷新
       if (S.view.name === "flow" && S.currentSessionId) {
         loadFlow(S.currentSessionId).catch(() => {});
         loadHome().catch(() => {});
@@ -932,7 +941,12 @@ function connectSSE(force) {
         loadHome().catch(() => {});
       }
     };
-    es.onerror = () => { if (es.readyState === 2) setTimeout(() => connectSSE(true), 2500); };
+    es.onerror = () => {
+      if (es.readyState === 2) {
+        S.es = null;
+        setTimeout(() => connectSSE(true), 3000);
+      }
+    };
   } catch (e) {}
 }
 
@@ -942,10 +956,25 @@ async function boot() {
   await loadModels().catch(() => {});
   await loadHome().catch(() => {});
   connectSSE();
-  
-  // 活跃状态下定时保活与无感知轮询同步
+
+  // 自适应智能轮询：
+  // - Agent 运行中（running / waiting_human）→ 每 2s 轮询（需要实时看到步骤进展）
+  // - SSE 在线 + Agent 空闲 → 每 10s 心跳（SSE 负责推送，轮询只作保底）
+  // - SSE 断线 + Agent 空闲 → 每 6s 轮询（保证在隧道重连期间不漏掉更新）
   setInterval(() => {
     if (document.hidden) return;
+    const active = isAgentActive();
+    const alive = sseAlive();
+    // SSE 在线且 Agent 空闲时，轮询节流（每 10s 一次通过 lastPoll 管控）
+    if (!active && alive) {
+      const now = Date.now();
+      if (!S._lastSlowPoll || now - S._lastSlowPoll >= 10000) {
+        S._lastSlowPoll = now;
+        if (S.view.name === "home") loadHome().catch(() => {});
+      }
+      return;
+    }
+    // Agent 运行中：每次 tick 都刷新
     if (S.view.name === "flow" && S.currentSessionId) {
       loadFlow(S.currentSessionId).catch(() => {});
     } else if (S.view.name === "home") {
