@@ -1,0 +1,193 @@
+<!-- 登录门禁 -->
+<div id="gate" class="gate hidden">
+  <div class="gate-card">
+    <h1>🔐 连接远程控制</h1>
+    <p>首次使用需要通道令牌：打开桌面端 <b>微信绑定</b> 页复制 Token（与微信桥共用），或查看 <span class="mono">~/.config/free-api-chat/channel-config.json</span> 的 <span class="mono">token</span> 字段。</p>
+    <input id="gateToken" type="password" placeholder="粘贴通道 Token (X-Channel-Token)" autocomplete="off">
+    <div id="gateErr" class="err"></div>
+    <button id="gateSave" class="btn primary block">连接</button>
+  </div>
+</div>
+
+<!-- 主界面 -->
+<div id="app" class="hidden">
+  <header class="topbar">
+    <button id="btnMenu" class="icon-btn only-mobile" title="菜单">☰</button>
+    <div class="titles">
+      <h1 id="topTitle">free_api 远程控制</h1>
+      <div class="sub"><span id="connDot" class="dot"></span><span id="connText">连接中…</span></div>
+    </div>
+    <div class="top-actions">
+      <button id="btnTheme" class="icon-btn" title="切换暗色主题">🎨</button>
+      <button id="btnSettings" class="icon-btn" title="通道设置">⚙️</button>
+      <button id="btnRefresh" class="icon-btn" title="刷新">⟳</button>
+      <button id="btnNew" class="btn primary" style="flex:none">＋ 新任务</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside id="sidebar" class="sidebar"></aside>
+    <div id="sideMask" class="side-mask"></div>
+    
+    <main class="main">
+      <!-- 首页：工作区与任务管理 (View Home - 匹配截图 2) -->
+      <section id="viewHome">
+        <div class="hint-banner">本次连接可以查看当前设备上已打开的项目、任务和会话；二维码失效后需要回到桌面端重新连接。</div>
+        
+        <div class="section-title-row">
+          <div class="section-title">
+            <span>当前设备上的工作区和任务</span>
+            <span class="meta" id="homeMeta">0 个工作区 · 0 个任务</span>
+          </div>
+          <div class="section-controls">
+            <button id="btnToggleAll" class="mini-ctrl-btn" title="全部折叠/展开">⌃</button>
+            <button id="btnRefreshHome" class="mini-ctrl-btn" title="刷新">↻</button>
+          </div>
+        </div>
+
+        <div id="wsList"></div>
+      </section>
+
+      <!-- 任务执行流 (View Flow - 匹配截图 1) -->
+      <section id="viewFlow" class="hidden">
+        <div class="flow-top-bar">
+          <button class="back-btn" id="btnBack" title="返回列表">←</button>
+          <h2 id="flowTitle">任务会话</h2>
+          <span id="flowChip" class="chip"></span>
+        </div>
+
+        <div class="goal-bubble" id="flowGoal"></div>
+        <div class="live-line" id="liveLine"></div>
+        
+        <div id="timeline"></div>
+        <div id="artBox"></div>
+        <div id="askCard"></div>
+        <div id="resultCard"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 悬浮快速滚动到底部按钮 -->
+  <button id="btnScrollBottom" class="scroll-bottom-btn hidden" title="滚动到底部">↓</button>
+
+  <!-- 底部 Composer 输入底座 (匹配截图 1) -->
+  <div class="composer-wrap" id="composer">
+    <div class="composer-inner">
+      <div id="composerFiles" style="margin-bottom: 6px;"></div>
+      
+      <div class="composer-dock">
+        <div class="composer-input-row">
+          <textarea id="followInput" rows="1" placeholder="继续输入以排队后续修改…" autocomplete="off"></textarea>
+        </div>
+        
+        <div class="composer-toolbar">
+          <div class="composer-tools-left">
+            <button id="btnClip" class="dock-btn" title="添加附件">＋</button>
+            <button id="optModel" class="dock-chip-btn" title="选择模型">🤖 <span id="lblModel">跟随</span></button>
+            <button id="optBudget" class="dock-chip-btn" title="压缩模式">🧠 <span id="lblBudget">长程</span></button>
+            <button id="optRoles" class="dock-chip-btn" title="角色路由">🧭 <span id="lblRoles">默认</span></button>
+          </div>
+          
+          <div class="composer-tools-right">
+            <button id="btnStop" class="send-control-btn stop hidden" title="停止任务">■</button>
+            <button id="btnSend" class="send-control-btn" title="发送">➤</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <input id="clipInput" type="file" multiple class="hidden">
+
+  <!-- 通用选择弹层（Sheet Picker） -->
+  <div id="sheetPick" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="sheetTitle"></h3>
+      <div id="sheetList" style="display:flex; flex-direction:column; gap:6px; margin-bottom:10px;"></div>
+      <div class="modal-foot"><button class="btn" id="sheetClose">取消</button></div>
+    </div>
+  </div>
+
+  <!-- 产物预览弹层 -->
+  <div id="artPreview" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="apTitle"></h3>
+      <div id="apBody" style="max-height:55vh; overflow-y:auto; margin-bottom:12px;"></div>
+      <div class="modal-foot">
+        <button class="btn" id="apClose">关闭</button>
+        <a id="apOpenRaw" class="btn" target="_blank" rel="noopener">原始窗口打开</a>
+        <a id="apDownload" class="btn primary" download>⬇ 下载</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 通道设置抽屉 -->
+  <div id="modalSettings" class="modal hidden">
+    <div class="modal-card">
+      <h3>⚙️ 通道设置</h3>
+      <div class="field">
+        <label>默认模型（未指定时使用）</label>
+        <select id="setDefault"></select>
+      </div>
+      <div class="field">
+        <label>LLM 重试次数 (1-100)</label>
+        <input id="setRetries" type="number" min="1" max="100">
+      </div>
+      <div class="field">
+        <label>动作里程碑步长 (0 = 关闭)</label>
+        <input id="setMilestone" type="number" min="0" max="1000">
+      </div>
+      <div class="field">
+        <label>阶段里程碑推送</label>
+        <select id="setPhase">
+          <option value="1">开启</option>
+          <option value="0">关闭</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>心跳汇报间隔（分钟）</label>
+        <input id="setHeartbeat" type="number" min="1">
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="setCancel">取消</button>
+        <button class="btn primary" id="setSave">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 新建任务弹窗 -->
+<div id="modalNew" class="modal hidden">
+  <div class="modal-card">
+    <h3>🚀 发起新任务</h3>
+    <div class="field">
+      <label>对话类型</label>
+      <div style="display:flex; gap:6px; background:var(--card-inner); border:1px solid var(--line); border-radius:10px; padding:4px;">
+        <button id="typeScratch" class="btn" style="flex:1" type="button">💬 临时对话</button>
+        <button id="typeProject" class="btn" style="flex:1" type="button">📁 项目对话</button>
+      </div>
+    </div>
+    <div class="field" id="projField" style="display:none">
+      <label>选择项目</label>
+      <select id="newProj"></select>
+      <div class="field-hint" id="projHint" style="font-size:11.5px; color:var(--amber); margin-top:4px;"></div>
+    </div>
+    <div class="field" id="attField" style="display:none">
+      <label>附件（可选）</label>
+      <div id="attChips"></div>
+      <label class="btn" for="attInput" style="margin-top:4px; font-size:12px; cursor:pointer;">📎 添加附件</label>
+      <input id="attInput" type="file" multiple class="hidden">
+    </div>
+    <div class="field">
+      <label>模型</label>
+      <select id="newModel"></select>
+    </div>
+    <div class="field">
+      <label>任务内容</label>
+      <textarea id="newGoal" placeholder="描述要让 Agent 完成的目标…"></textarea>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="newCancel">取消</button>
+      <button class="btn primary" id="newSubmit">启动</button>
+    </div>
+  </div>
+</div>

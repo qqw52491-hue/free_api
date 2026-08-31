@@ -1224,14 +1224,39 @@ fn internal_error(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
 
 // ---------------------------------------------------------------- 网页控制台
 // ZCode 风格的浏览器控制台：工作区/临时任务选择 → 会话列表 → 执行流实时视图。
-// 与微信桥平级的第三个通道客户端；静态页内嵌进二进制（无文件系统依赖），
-// 页面本身不含数据，所有数据端点仍走 X-Channel-Token 鉴权。
+// 模块化管理（HTML 骨架 / CSS 样式 / JS 逻辑独立分拆在 mobile_web/ 目录下，编译期零开销嵌入二进制）
+const CHANNEL_WEB_PAGE: &str = concat!(
+    r#"<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>free_api 远程控制</title>
+<style>
+"#,
+    include_str!("mobile_web/style.css"),
+    r#"
+</style>
+</head>
+<body>
+"#,
+    include_str!("mobile_web/template.html"),
+    r#"
+<script>
+"#,
+    include_str!("mobile_web/app.js"),
+    r#"
+</script>
+</body>
+</html>"#
+);
 
 /// GET / 与 /web：内嵌网页控制台入口（no-cache 保证升级二进制后页面同步更新）
 async fn handler_web_home() -> impl axum::response::IntoResponse {
     (
         [(axum::http::header::CACHE_CONTROL, "no-cache")],
-        Html(include_str!("channel_web.html")),
+        Html(CHANNEL_WEB_PAGE),
     )
 }
 
@@ -2465,10 +2490,10 @@ mod tests {
 // handler_web_home 是 async 但无 IO，直接验证页面已内嵌且非空
 #[cfg(test)]
 mod web_page_tests {
+    use super::*;
     #[test]
     fn embedded_page_present() {
-        let page = include_str!("channel_web.html");
-        assert!(page.contains("远程控制"));
-        assert!(page.len() > 5_000);
+        assert!(CHANNEL_WEB_PAGE.contains("远程控制"));
+        assert!(CHANNEL_WEB_PAGE.len() > 5_000);
     }
 }
