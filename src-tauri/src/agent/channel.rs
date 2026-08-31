@@ -237,7 +237,7 @@ fn event_bus() -> &'static tokio::sync::broadcast::Sender<SessionEvent> {
     BUS.get_or_init(|| tokio::sync::broadcast::channel(512).0)
 }
 
-fn notify_session_event(session_id: &str, kind: &str) {
+pub(crate) fn notify_session_event(session_id: &str, kind: &str) {
     // progress 类事件走主循环热路径（实测可达 10+/s），SSE 端合并到 ≤3/s；
     // state/提问/终态类低频且关键，即时放行。
     static LAST_PROGRESS: OnceLock<Mutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
@@ -631,6 +631,196 @@ pub(crate) enum SubmitError {
 /// 统一的任务提交入口（HTTP 处理器与定时调度器共用）：
 /// 登记 RunRecord → 订阅进度事件 → 后台 spawn 主循环。
 /// 同一会话同时只允许一个在途任务（含 waiting_human）。
+pub(crate) struct SessionRunGuard {
+    app: AppHandle,
+    session_id: String,
+    run_id: String,
+    goal: String,
+    event_id: tauri::EventId,
+    state_event_id: tauri::EventId,
+}
+
+impl SessionRunGuard {
+    pub(crate) fn new(
+        app: &AppHandle,
+        session_id: &str,
+        run_id: &str,
+        goal: &str,
+        llm_retries: u32,
+    ) -> Self {
+        let started_at = now_ts();
+        upsert_run(RunRecord {
+            run_id: run_id.to_string(),
+            session_id: session_id.to_string(),
+            goal_preview: truncate_chars(goal, MAX_GOAL_PREVIEW_CHARS),
+            status: "running".to_string(),
+            paused_reason: None,
+            last_progress: None,
+            event_count: 0,
+            started_at: started_at.clone(),
+            updated_at: started_at,
+            result: None,
+            error: None,
+            llm_retries: llm_retries.clamp(1, 100),
+            report_every_actions: 0,
+            phase_push: false,
+            phase: None,
+            state_detail: None,
+        });
+        let _ = app.emit(
+            "channel-run-started",
+            json!({ "run_id": run_id, "session_id": session_id, "at": now_ts() }),
+        );
+        notify_session_event(session_id, "start");
+
+        let listen_session = session_id.to_string();
+        let listen_run = run_id.to_string();
+        let event_id = app.listen(
+            format!("agent-progress-{listen_session}"),
+            move |event: tauri::Event| {
+                let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else {
+                    return;
+                };
+                let description = payload
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .or_else(|| payload.get("message").and_then(Value::as_str))
+                    .map(|s| truncate_chars(s, 400));
+                let paused = payload.get("type").and_then(Value::as_str) == Some("agent_paused");
+                let is_real_step = matches!(
+                    payload.get("type").and_then(Value::as_str),
+                    Some("step_done") | Some("step_error") | Some("complete")
+                );
+                let paused_reason = if paused {
+                    Some(
+                        payload
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Agent 请求人工协助。")
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                patch_run(&listen_run, |record| {
+                    if is_real_step {
+                        record.event_count += 1;
+                    }
+                    if let Some(text) = description {
+                        record.last_progress = Some(text);
+                    }
+                    if let Some(reason) = paused_reason {
+                        record.status = "waiting_human".to_string();
+                        record.paused_reason = Some(reason);
+                    } else if record.status == "waiting_human" {
+                        record.status = "running".to_string();
+                        record.paused_reason = None;
+                    }
+                });
+                notify_session_event(&listen_session, if paused { "waiting_human" } else { "progress" });
+            },
+        );
+
+        let state_session = session_id.to_string();
+        let state_run = run_id.to_string();
+        let state_event_id = app.listen(
+            format!("agent-run-state-{state_session}"),
+            move |event: tauri::Event| {
+                let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else {
+                    return;
+                };
+                let message = payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(|text| truncate_chars(text, 200));
+                let state = payload
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_lowercase();
+                let milestone = ["runtime", "recovering", "rescuing", "finalizing"]
+                    .iter()
+                    .any(|marker| state.contains(marker));
+                patch_run(&state_run, |record| {
+                    if let Some(text) = &message {
+                        record.state_detail = Some(text.clone());
+                    }
+                    if milestone {
+                        record.phase = Some(
+                            message.unwrap_or_else(|| format!("进入阶段 {state}")),
+                        );
+                    }
+                });
+                notify_session_event(&state_session, "state");
+            },
+        );
+
+        Self {
+            app: app.clone(),
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            goal: goal.to_string(),
+            event_id,
+            state_event_id,
+        }
+    }
+
+    pub(crate) fn finish(self, outcome: &Result<(), String>) {
+        let _ = self.app.unlisten(self.event_id);
+        let _ = self.app.unlisten(self.state_event_id);
+        match outcome {
+            Ok(()) => {
+                let result = last_assistant_message(&self.app, &self.session_id);
+                let was_cancelled = runs_store()
+                    .lock()
+                    .expect("runs store poisoned")
+                    .get(&self.run_id)
+                    .map(|r| r.status == "cancelled")
+                    .unwrap_or(false);
+                patch_run(&self.run_id, |record| {
+                    if !was_cancelled {
+                        record.status = "done".to_string();
+                    }
+                    record.paused_reason = None;
+                    record.result = result;
+                });
+                notify_session_event(&self.session_id, if was_cancelled { "cancelled" } else { "done" });
+                let _ = self.app.emit(
+                    "channel-run-done",
+                    json!({ "run_id": self.run_id, "session_id": self.session_id, "status": "done", "at": now_ts() }),
+                );
+            }
+            Err(error) => {
+                patch_run(&self.run_id, |record| {
+                    if record.status != "cancelled" {
+                        record.status = "failed".to_string();
+                        record.error = Some(truncate_chars(error, 2_000));
+                    }
+                    record.paused_reason = None;
+                });
+                let db = self.app.state::<DbState>();
+                let _ = crate::agent::run_trace::upsert_snapshot(
+                    db.inner(),
+                    &self.run_id,
+                    &self.session_id,
+                    &self.goal,
+                    "failed",
+                    &[],
+                    Some(&json!({ "summary": error })),
+                );
+                notify_session_event(&self.session_id, "failed");
+                let _ = self.app.emit(
+                    "channel-run-done",
+                    json!({ "run_id": self.run_id, "session_id": self.session_id, "status": "failed", "at": now_ts() }),
+                );
+            }
+        }
+    }
+}
+
+/// 统一的任务提交入口（HTTP 处理器与定时调度器共用）：
+/// 登记 RunRecord → 订阅进度事件 → 后台 spawn 主循环。
+/// 同一会话同时只允许一个在途任务（含 waiting_human）。
 pub(crate) fn register_and_spawn_run(
     app: AppHandle,
     session_id: String,
@@ -638,8 +828,8 @@ pub(crate) fn register_and_spawn_run(
     routing: ModelRoutingConfig,
     workspace_override: Option<std::path::PathBuf>,
     llm_retries: Option<u32>,
-    action_milestone_steps: u32,
-    phase_push: bool,
+    _action_milestone_steps: u32,
+    _phase_push: bool,
 ) -> Result<String, SubmitError> {
     {
         let runs = runs_store().lock().expect("runs store poisoned");
@@ -677,120 +867,6 @@ pub(crate) fn register_and_spawn_run(
         );
     }
 
-    upsert_run(RunRecord {
-        run_id: run_id.clone(),
-        session_id: session_id.clone(),
-        goal_preview: truncate_chars(&goal, MAX_GOAL_PREVIEW_CHARS),
-        status: "running".to_string(),
-        paused_reason: None,
-        last_progress: None,
-        event_count: 0,
-        started_at: started_at.clone(),
-        updated_at: started_at,
-        result: None,
-        error: None,
-        llm_retries: llm_retries
-            .unwrap_or(crate::agent::main_loop::DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
-            .clamp(1, 100),
-        report_every_actions: action_milestone_steps.clamp(0, 1000),
-        phase_push,
-        phase: None,
-        state_detail: None,
-    });
-    // 通知桌面端（Vue 监听此事件立即刷新任务列表，无需等待 10s 轮询）
-    let _ = app.emit(
-        "channel-run-started",
-        json!({ "run_id": run_id, "session_id": session_id, "at": now_ts() }),
-    );
-
-    // 进度订阅：主循环的 agent-progress-{session} 事件原样转写进运行账本，
-    // agent_paused（ask_human 阻塞）单独标记，供桥推送「卡住提问」。
-    let listen_session = session_id.clone();
-    let listen_run = run_id.clone();
-    let event_id = app.listen(
-        format!("agent-progress-{listen_session}"),
-        move |event: tauri::Event| {
-            let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else {
-                return;
-            };
-            let description = payload
-                .get("description")
-                .and_then(Value::as_str)
-                .or_else(|| payload.get("message").and_then(Value::as_str))
-                .map(|s| truncate_chars(s, 400));
-            let paused = payload.get("type").and_then(Value::as_str) == Some("agent_paused");
-            // 动作计数只认真实步骤完成（step_done/step_error）与交付（complete）；
-            // 规划期等热路径的高频进度事件不计数，否则微信"已执行 N 个动作"会虚高数十倍
-            let is_real_step = matches!(
-                payload.get("type").and_then(Value::as_str),
-                Some("step_done") | Some("step_error") | Some("complete")
-            );
-            let paused_reason = if paused {
-                Some(
-                    payload
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Agent 请求人工协助。")
-                        .to_string(),
-                )
-            } else {
-                None
-            };
-            patch_run(&listen_run, |record| {
-                if is_real_step {
-                    record.event_count += 1;
-                }
-                if let Some(text) = description {
-                    record.last_progress = Some(text);
-                }
-                if let Some(reason) = paused_reason {
-                    record.status = "waiting_human".to_string();
-                    record.paused_reason = Some(reason);
-                } else if record.status == "waiting_human" {
-                    // 收到后续进度说明已恢复运行
-                    record.status = "running".to_string();
-                    record.paused_reason = None;
-                }
-            });
-            notify_session_event(&listen_session, if paused { "waiting_human" } else { "progress" });
-        },
-    );
-
-    // 状态机订阅：state_detail 每次迁移都更新；phase 仅里程碑状态更新（供桥推送阶段汇报）
-    let state_session = session_id.clone();
-    let state_run = run_id.clone();
-    let state_event_id = app.listen(
-        format!("agent-run-state-{state_session}"),
-        move |event: tauri::Event| {
-            let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else {
-                return;
-            };
-            let message = payload
-                .get("message")
-                .and_then(Value::as_str)
-                .map(|text| truncate_chars(text, 200));
-            let state = payload
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_lowercase();
-            let milestone = ["runtime", "recovering", "rescuing", "finalizing"]
-                .iter()
-                .any(|marker| state.contains(marker));
-            patch_run(&state_run, |record| {
-                if let Some(text) = &message {
-                    record.state_detail = Some(text.clone());
-                }
-                if milestone {
-                    record.phase = Some(
-                        message.unwrap_or_else(|| format!("进入阶段 {state}")),
-                    );
-                }
-            });
-            notify_session_event(&state_session, "state");
-        },
-    );
-
     let spawn_app = app.clone();
     let spawn_run = run_id.clone();
     let spawn_session = session_id.clone();
@@ -799,7 +875,7 @@ pub(crate) fn register_and_spawn_run(
         let db = spawn_app.state::<DbState>();
         let registry =
             spawn_app.state::<Arc<AsyncMutex<crate::agent::mcp::PluginRegistry>>>();
-        let outcome = run_agent_main_loop_in_workspace(
+        let _ = run_agent_main_loop_in_workspace(
             spawn_app.clone(),
             db,
             registry,
@@ -814,55 +890,6 @@ pub(crate) fn register_and_spawn_run(
             Some(spawn_run.clone()),
         )
         .await;
-        let _ = app.unlisten(event_id);
-        let _ = app.unlisten(state_event_id);
-        match outcome {
-            Ok(()) => {
-                let result = last_assistant_message(&spawn_app, &spawn_session);
-                let was_cancelled = runs_store()
-                    .lock()
-                    .expect("runs store poisoned")
-                    .get(&spawn_run)
-                    .map(|r| r.status == "cancelled")
-                    .unwrap_or(false);
-                patch_run(&spawn_run, |record| {
-                    if !was_cancelled {
-                        record.status = "done".to_string();
-                    }
-                    record.paused_reason = None;
-                    record.result = result;
-                });
-                notify_session_event(&spawn_session, if was_cancelled { "cancelled" } else { "done" });
-                let _ = spawn_app.emit(
-                    "channel-run-done",
-                    json!({ "run_id": spawn_run, "session_id": spawn_session, "status": "done", "at": now_ts() }),
-                );
-            }
-            Err(error) => {
-                patch_run(&spawn_run, |record| {
-                    if record.status != "cancelled" {
-                        record.status = "failed".to_string();
-                        record.error = Some(truncate_chars(&error, 2_000));
-                    }
-                    record.paused_reason = None;
-                });
-                let db = spawn_app.state::<DbState>();
-                let _ = crate::agent::run_trace::upsert_snapshot(
-                    db.inner(),
-                    &spawn_run,
-                    &spawn_session,
-                    &spawn_goal,
-                    "failed",
-                    &[],
-                    Some(&json!({ "summary": error })),
-                );
-                notify_session_event(&spawn_session, "failed");
-                let _ = spawn_app.emit(
-                    "channel-run-done",
-                    json!({ "run_id": spawn_run, "session_id": spawn_session, "status": "failed", "at": now_ts() }),
-                );
-            }
-        }
     });
 
     Ok(run_id)

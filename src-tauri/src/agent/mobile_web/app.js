@@ -1080,12 +1080,22 @@ function connectSSE(force) {
     const es = new EventSource(`/channel/events?token=${encodeURIComponent(S.token)}`);
     S.es = es;
     es.onopen = () => { setConn(true); };
-    es.onmessage = () => {
-      // SSE 推送驱动：桌面端 / 微信 / Agent 产生事件时立即刷新
-      if (S.view.name === "flow" && S.currentSessionId) {
-        loadFlow(S.currentSessionId).catch(() => {});
-        loadHome().catch(() => {});
-      } else {
+    es.onmessage = (ev) => {
+      // SSE 实时推送驱动：桌面端 / 微信 / Agent 产生步骤、新任务或完成时立即刷新
+      try {
+        const payload = JSON.parse(ev.data || "{}");
+        if (S.view.name === "flow" && S.currentSessionId) {
+          if (!payload.session_id || payload.session_id === S.currentSessionId) {
+            loadFlow(S.currentSessionId).catch(() => {});
+          }
+          loadHome().catch(() => {});
+        } else {
+          loadHome().catch(() => {});
+        }
+      } catch (e) {
+        if (S.view.name === "flow" && S.currentSessionId) {
+          loadFlow(S.currentSessionId).catch(() => {});
+        }
         loadHome().catch(() => {});
       }
     };

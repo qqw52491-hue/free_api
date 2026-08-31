@@ -498,16 +498,59 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     workspace_override: Option<std::path::PathBuf>,
     run_id_override: Option<String>,
 ) -> Result<(), String> {
-    let transient_llm_request_retries = transient_llm_request_retries
-        .unwrap_or(DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
-        .clamp(1, MAX_TRANSIENT_LLM_REQUEST_RETRIES);
     let final_session_id = session_id.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis().to_string())
             .unwrap_or_else(|_| "default".to_string())
     });
+    let run_id = run_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let retries = transient_llm_request_retries
+        .unwrap_or(DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
+        .clamp(1, MAX_TRANSIENT_LLM_REQUEST_RETRIES);
 
+    let run_guard = crate::agent::channel::SessionRunGuard::new(
+        &app,
+        &final_session_id,
+        &run_id,
+        &goal,
+        retries,
+    );
+
+    let result = run_agent_main_loop_in_workspace_inner(
+        app,
+        state,
+        registry_state,
+        model_routing,
+        goal,
+        auto_pilot,
+        final_session_id,
+        log_context,
+        retries,
+        attachments,
+        workspace_override,
+        run_id,
+    )
+    .await;
+
+    run_guard.finish(&result);
+    result
+}
+
+async fn run_agent_main_loop_in_workspace_inner(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    registry_state: State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
+    model_routing: crate::agent::router::ModelRoutingConfig,
+    goal: String,
+    auto_pilot: bool,
+    final_session_id: String,
+    log_context: Option<bool>,
+    transient_llm_request_retries: u32,
+    attachments: Option<Vec<crate::commands::chat::ParsedAttachmentResult>>,
+    workspace_override: Option<std::path::PathBuf>,
+    run_id: String,
+) -> Result<(), String> {
     // 立即注册人类干预与流式中断接收器，确保任务启动第一毫秒即可被前端即时打断
     let (tx, mut rx) = mpsc::channel::<HumanControl>(5);
     let (interrupt_tx, mut interrupt_rx) = watch::channel(0u64);
@@ -520,9 +563,6 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         .await
         .insert(final_session_id.clone(), interrupt_tx);
 
-    // 每次用户发送任务（包括在同一会话中继续对话）都是一个独立的可复盘运行。
-    // 该轨迹只服务历史 UI，不参与 checkpoint 恢复或模型上下文。
-    let run_id = run_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut run_trace_steps: Vec<serde_json::Value> = Vec::new();
     let mut run_machine = AgentRunMachine::new();
     advance_run_state(
