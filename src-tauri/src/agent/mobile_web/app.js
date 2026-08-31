@@ -427,6 +427,20 @@ async function loadFlow(sessionId) {
   // 并行获取该会话所有历史轮次完整步骤
   const fullTraces = await Promise.all(traceList.map(t => fetchTraceDetail(t)));
 
+  // 如果当前有正在执行的 run，无论后端是否来得及生成第一个 step，前端流立即置顶该轮问题与执行中状态
+  if (run && ["running", "waiting_human"].includes(run.status)) {
+    const exists = fullTraces.some(t => t.id === run.run_id);
+    if (!exists && run.goal_preview) {
+      fullTraces.push({
+        id: run.run_id,
+        goal: run.goal_preview,
+        status: run.status,
+        steps: [],
+        started_at: run.started_at,
+      });
+    }
+  }
+
   S.flow = {
     sessionId,
     session,
@@ -449,14 +463,15 @@ function groupsOf() {
 }
 
 function taskCard(s) {
-  // 保持会话标题稳定，优先展示 title，副标题展示最新进展
+  // 保持会话标题稳定，副标题展示最新状态与时间
   const title = esc(s.title || s.goal || "未命名会话");
   const time = esc(relTime(s.trace_updated_at || s.updated_at));
+  const isRunning = s.status === "running";
   return `
-    <div class="task-row-card" data-session="${esc(s.id)}">
+    <div class="task-row-card ${isRunning ? "running-card" : ""}" data-session="${esc(s.id)}">
       <div class="tt">
         <div class="title">${title}</div>
-        <div class="sub-line">${time} · ${esc(modelName(s.model_id))}</div>
+        <div class="sub-line">${isRunning ? '<span style="color:#38bdf8; font-weight:600;">● 工作中…</span> · ' : ''}${time} · ${esc(modelName(s.model_id))}</div>
       </div>
       ${chip(s.status)}
     </div>

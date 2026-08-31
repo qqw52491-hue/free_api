@@ -630,6 +630,25 @@ pub(crate) fn register_and_spawn_run(
             .unwrap_or(crate::agent::main_loop::DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
             .clamp(1, 100)
     );
+
+    // 立即持久化该轮任务初始状态（无论大模型是否已开始回复），保证列表与执行流立即有据可查
+    let db_state = app.state::<DbState>();
+    let _ = crate::agent::run_trace::upsert_snapshot(
+        db_state.inner(),
+        &run_id,
+        &session_id,
+        &goal,
+        "running",
+        &[],
+        None,
+    );
+    if let Ok(conn) = db_state.0.lock() {
+        let _ = conn.execute(
+            "UPDATE chat_sessions SET updated_at=?1 WHERE id=?2",
+            rusqlite::params![started_at, session_id],
+        );
+    }
+
     upsert_run(RunRecord {
         run_id: run_id.clone(),
         session_id: session_id.clone(),
@@ -757,7 +776,7 @@ pub(crate) fn register_and_spawn_run(
             db,
             registry,
             routing,
-            spawn_goal,
+            spawn_goal.clone(),
             false,
             Some(spawn_session.clone()),
             None,
@@ -798,6 +817,16 @@ pub(crate) fn register_and_spawn_run(
                     }
                     record.paused_reason = None;
                 });
+                let db = spawn_app.state::<DbState>();
+                let _ = crate::agent::run_trace::upsert_snapshot(
+                    db.inner(),
+                    &spawn_run,
+                    &spawn_session,
+                    &spawn_goal,
+                    "failed",
+                    &[],
+                    Some(&json!({ "summary": error })),
+                );
                 notify_session_event(&spawn_session, "failed");
                 let _ = spawn_app.emit(
                     "channel-run-done",
