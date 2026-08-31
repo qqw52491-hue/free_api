@@ -50,7 +50,6 @@
                         @click="promptAttachFiles"
                     >
                         <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
-                        <span class="tool-btn-label">附件</span>
                     </button>
 
                     <span class="tool-divider"></span>
@@ -70,158 +69,69 @@
                             <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
                         </button>
 
-                        <div v-if="modelMenuOpen" class="model-routing-popover">
-                            <div class="popover-header">
-                                <div class="header-left">
-                                    <div class="popover-title">Agent 模型路由</div>
-                                    <div class="popover-sub">规划、工具执行与视觉分析独立配置</div>
-                                </div>
-                                <div class="header-actions">
-                                    <button
-                                        type="button"
-                                        class="sync-all-btn"
-                                        :title="`将执行与视觉模型一键设为当前推理模型 (${currentModelName})`"
-                                        @click="syncAllToPro"
-                                    >
-                                        一键同款
-                                    </button>
-                                    <button
-                                        type="button"
-                                        class="close-popover-btn"
-                                        title="关闭 (Esc)"
-                                        @click="modelMenuOpen = false"
-                                    >
-                                        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div class="popover-body">
-                                <!-- 1. 推理模型 (Pro) -->
-                                <div class="route-item">
-                                    <div class="route-item-head">
-                                        <div class="head-left">
-                                            <span class="route-badge pro">🧠 推理模型</span>
-                                            <small>负责长程规划与故障恢复</small>
-                                        </div>
-                                        <!-- 🎯 Codex / Claude 风格档位切换器 -->
-                                        <div class="effort-segmented-wrap" title="思考档位切换">
-                                            <span class="effort-label">思考:</span>
-                                            <div class="effort-slider-group">
-                                                <button
-                                                    v-for="eff in reasoningEffortOptions"
-                                                    :key="eff.value"
-                                                    type="button"
-                                                    class="effort-step-btn"
-                                                    :class="{ active: (modelRouting.pro_reasoning_effort || 'auto') === eff.value }"
-                                                    :title="eff.tooltip"
-                                                    :disabled="isRunning"
-                                                    @click="setReasoningEffort('pro', eff.value)"
-                                                >
-                                                    {{ eff.label }}
-                                                </button>
-                                            </div>
-                                        </div>
+                        <Teleport to="body">
+                            <div
+                                v-if="modelMenuOpen"
+                                class="model-routing-popover is-teleported"
+                                :class="`placement-${popoverPlacement}`"
+                                :style="popoverFixedStyle"
+                                @click.stop
+                            >
+                                <div class="popover-header">
+                                    <div class="header-left">
+                                        <div class="popover-title">🤖 Agent 模型路由</div>
+                                        <div class="popover-sub">规划、执行与视觉独立配置</div>
                                     </div>
-                                    <div class="route-controls">
-                                        <ModelSelectDropdown
-                                            :model-value="modelRouting.pro"
-                                            :models="allModels"
-                                            :disabled="isRunning"
-                                            placeholder="选择推理模型..."
-                                            @update:model-value="updateRouteValue('pro', $event)"
-                                            size="sm"
-                                        />
+                                    <div class="header-actions">
+                                        <button
+                                            type="button"
+                                            class="sync-all-btn"
+                                            :title="`将执行与视觉模型一键设为当前推理模型 (${currentModelName})`"
+                                            @click="syncAllToPro"
+                                        >
+                                            一键同款
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="close-popover-btn"
+                                            title="关闭 (Esc)"
+                                            @click="modelMenuOpen = false"
+                                        >
+                                            <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                                        </button>
                                     </div>
                                 </div>
 
-                                <!-- 2. 执行模型 (Flash) -->
-                                <div class="route-item">
-                                    <div class="route-item-head">
-                                        <div class="head-left">
-                                            <span class="route-badge flash">⚡ 执行模型</span>
-                                            <small>负责常规工具快速执行</small>
-                                        </div>
-                                        <!-- 🎯 Codex / Claude 风格档位切换器 -->
-                                        <div class="effort-segmented-wrap" title="思考档位切换">
-                                            <span class="effort-label">思考:</span>
-                                            <div class="effort-slider-group">
-                                                <button
-                                                    v-for="eff in reasoningEffortOptions"
-                                                    :key="eff.value"
-                                                    type="button"
-                                                    class="effort-step-btn"
-                                                    :class="{ active: (modelRouting.flash_reasoning_effort || 'auto') === eff.value }"
-                                                    :title="eff.tooltip"
-                                                    :disabled="isRunning"
-                                                    @click="setReasoningEffort('flash', eff.value)"
-                                                >
-                                                    {{ eff.label }}
-                                                </button>
-                                            </div>
-                                        </div>
+                                <!-- 🌟 顶部工具条：独立分段 Tab + 横排分流模式开关 -->
+                                <div class="routing-top-toolbar">
+                                    <div class="routing-tabs-nav">
+                                        <button
+                                            type="button"
+                                            class="routing-tab-btn"
+                                            :class="{ active: activeRoutingTab === 'models' }"
+                                            @click="activeRoutingTab = 'models'"
+                                        >
+                                            <span class="tab-btn-icon">🤖</span>
+                                            <span class="tab-btn-text">模型分工</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="routing-tab-btn"
+                                            :class="{ active: activeRoutingTab === 'roles' }"
+                                            @click="activeRoutingTab = 'roles'"
+                                        >
+                                            <span class="tab-btn-icon">🎭</span>
+                                            <span class="tab-btn-text">角色档位</span>
+                                        </button>
                                     </div>
-                                    <div class="route-controls">
-                                        <ModelSelectDropdown
-                                            :model-value="modelRouting.flash"
-                                            :models="allModels"
-                                            :disabled="isRunning"
-                                            placeholder="选择执行模型..."
-                                            @update:model-value="updateRouteValue('flash', $event)"
-                                            size="sm"
-                                        />
-                                    </div>
-                                </div>
 
-                                <!-- 3. 视觉模型 (Vision) -->
-                                <div class="route-item">
-                                    <div class="route-item-head">
-                                        <div class="head-left">
-                                            <span class="route-badge vision">👁️ 视觉模型</span>
-                                            <small>负责截图与多模态分析</small>
-                                        </div>
-                                        <!-- 🎯 Codex / Claude 风格档位切换器 -->
-                                        <div class="effort-segmented-wrap" title="思考档位切换">
-                                            <span class="effort-label">思考:</span>
-                                            <div class="effort-slider-group">
-                                                <button
-                                                    v-for="eff in reasoningEffortOptions"
-                                                    :key="eff.value"
-                                                    type="button"
-                                                    class="effort-step-btn"
-                                                    :class="{ active: (modelRouting.vision_reasoning_effort || 'auto') === eff.value }"
-                                                    :title="eff.tooltip"
-                                                    :disabled="isRunning"
-                                                    @click="setReasoningEffort('vision', eff.value)"
-                                                >
-                                                    {{ eff.label }}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="route-controls">
-                                        <ModelSelectDropdown
-                                            :model-value="modelRouting.vision"
-                                            :models="allModels"
-                                            :disabled="isRunning"
-                                            placeholder="选择视觉模型..."
-                                            @update:model-value="updateRouteValue('vision', $event)"
-                                            size="sm"
-                                        />
-                                    </div>
-                                </div>
-
-                                <!-- 4. 路由模式：规则分流 / 难度打分 -->
-                                <div class="route-item routing-mode-item">
-                                    <div class="route-item-head">
-                                        <div class="head-left">
-                                            <span class="route-badge mode">🎚️ 路由模式</span>
-                                            <small>决定每一步由强模型还是快模型接管</small>
-                                        </div>
-                                        <div class="effort-slider-group">
+                                    <!-- 顶部右侧的路由分流模式开关 (横排保证文字绝不竖着折行) -->
+                                    <div class="top-mode-switch" title="分流模式：决定每步任务由强模型还是快模型处理">
+                                        <span class="mode-switch-label">🎚️ 分流:</span>
+                                        <div class="mode-switch-group">
                                             <button
                                                 type="button"
-                                                class="effort-step-btn"
+                                                class="mode-switch-btn"
                                                 :class="{ active: routingMode === 'rules' }"
                                                 title="规则分流：首步规划与失败救场走强模型，其余走快模型"
                                                 :disabled="isRunning"
@@ -231,7 +141,7 @@
                                             </button>
                                             <button
                                                 type="button"
-                                                class="effort-step-btn"
+                                                class="mode-switch-btn"
                                                 :class="{ active: routingMode === 'scored' }"
                                                 title="难度打分：按契约/连续失败/观测体量加权评分，≥阈值升维强模型"
                                                 :disabled="isRunning"
@@ -243,36 +153,158 @@
                                     </div>
                                 </div>
 
-                                <!-- 5. 角色档位映射：角色固定，跟随档位或钉死 -->
-                                <div class="route-item role-mapping-item">
-                                    <div class="route-item-head">
-                                        <div class="head-left">
-                                            <span class="route-badge roles">🎭 角色档位</span>
-                                            <small>子任务角色默认跟随上方档位；钉死后无视自动分流</small>
+                                <div class="popover-body">
+                                    <!-- Tab 1: 模型分工 (前三个推理、执行、视觉合并展示) -->
+                                    <div v-if="activeRoutingTab === 'models'" class="tab-pane-content models-unified-pane">
+                                        <!-- 1. 推理规划模型 (Pro) -->
+                                        <div class="route-item pro-tier">
+                                            <div class="route-item-head">
+                                                <div class="head-left">
+                                                    <span class="route-badge pro">🧠 推理规划模型 (Pro)</span>
+                                                    <small>长程规划与深层自愈救场</small>
+                                                </div>
+                                                <!-- 🎯 Codex / Claude 风格档位切换器 -->
+                                                <div class="effort-segmented-wrap" title="思考档位切换">
+                                                    <span class="effort-label">思考:</span>
+                                                    <div class="effort-slider-group">
+                                                        <button
+                                                            v-for="eff in reasoningEffortOptions"
+                                                            :key="eff.value"
+                                                            type="button"
+                                                            class="effort-step-btn"
+                                                            :class="{ active: (modelRouting.pro_reasoning_effort || 'auto') === eff.value }"
+                                                            :title="eff.tooltip"
+                                                            :disabled="isRunning"
+                                                            @click="setReasoningEffort('pro', eff.value)"
+                                                        >
+                                                            {{ eff.label }}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="route-controls">
+                                                <ModelSelectDropdown
+                                                    :model-value="modelRouting.pro"
+                                                    :models="allModels"
+                                                    :disabled="isRunning"
+                                                    placeholder="选择推理模型 (如 Gemini 2.5 Pro, DeepSeek-R1)..."
+                                                    @update:model-value="updateRouteValue('pro', $event)"
+                                                    size="md"
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <!-- 2. 极速执行模型 (Flash) -->
+                                        <div class="route-item flash-tier">
+                                            <div class="route-item-head">
+                                                <div class="head-left">
+                                                    <span class="route-badge flash">⚡ 极速执行模型 (Flash)</span>
+                                                    <small>高频工具调用与快速改码</small>
+                                                </div>
+                                                <!-- 🎯 Codex / Claude 风格档位切换器 -->
+                                                <div class="effort-segmented-wrap" title="思考档位切换">
+                                                    <span class="effort-label">思考:</span>
+                                                    <div class="effort-slider-group">
+                                                        <button
+                                                            v-for="eff in reasoningEffortOptions"
+                                                            :key="eff.value"
+                                                            type="button"
+                                                            class="effort-step-btn"
+                                                            :class="{ active: (modelRouting.flash_reasoning_effort || 'auto') === eff.value }"
+                                                            :title="eff.tooltip"
+                                                            :disabled="isRunning"
+                                                            @click="setReasoningEffort('flash', eff.value)"
+                                                        >
+                                                            {{ eff.label }}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="route-controls">
+                                                <ModelSelectDropdown
+                                                    :model-value="modelRouting.flash"
+                                                    :models="allModels"
+                                                    :disabled="isRunning"
+                                                    placeholder="选择执行模型 (如 Gemini 2.5 Flash, DeepSeek-V3)..."
+                                                    @update:model-value="updateRouteValue('flash', $event)"
+                                                    size="md"
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <!-- 3. 多模态视觉模型 (Vision) -->
+                                        <div class="route-item vision-tier">
+                                            <div class="route-item-head">
+                                                <div class="head-left">
+                                                    <span class="route-badge vision">👁️ 多模态视觉模型 (Vision)</span>
+                                                    <small>截图分析与图表识别</small>
+                                                </div>
+                                                <!-- 🎯 Codex / Claude 风格档位切换器 -->
+                                                <div class="effort-segmented-wrap" title="思考档位切换">
+                                                    <span class="effort-label">思考:</span>
+                                                    <div class="effort-slider-group">
+                                                        <button
+                                                            v-for="eff in reasoningEffortOptions"
+                                                            :key="eff.value"
+                                                            type="button"
+                                                            class="effort-step-btn"
+                                                            :class="{ active: (modelRouting.vision_reasoning_effort || 'auto') === eff.value }"
+                                                            :title="eff.tooltip"
+                                                            :disabled="isRunning"
+                                                            @click="setReasoningEffort('vision', eff.value)"
+                                                        >
+                                                            {{ eff.label }}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="route-controls">
+                                                <ModelSelectDropdown
+                                                    :model-value="modelRouting.vision"
+                                                    :models="allModels"
+                                                    :disabled="isRunning"
+                                                    placeholder="选择视觉模型..."
+                                                    @update:model-value="updateRouteValue('vision', $event)"
+                                                    size="md"
+                                                />
+                                            </div>
                                         </div>
                                     </div>
-                                    <div class="role-mapping-grid">
-                                        <div v-for="role in roleMappingItems" :key="role.key" class="role-row">
-                                            <div class="role-cell-label" :title="role.desc">
-                                                <span class="role-name">{{ role.label }}</span>
-                                                <small class="role-desc">{{ role.desc }}</small>
+
+                                    <!-- Tab 2: 角色档位映射 (Roles - 精美分段选择卡片) -->
+                                    <div v-else-if="activeRoutingTab === 'roles'" class="tab-pane-content roles-pane">
+                                        <div class="role-cards-grid">
+                                            <div v-for="role in roleMappingItems" :key="role.key" class="role-card">
+                                                <div class="role-card-header">
+                                                    <div class="role-card-title-group">
+                                                        <span class="role-card-name">{{ role.label }}</span>
+                                                        <span class="role-card-desc">{{ role.desc }}</span>
+                                                    </div>
+                                                    <div class="role-current-tag" :class="roleModelValue(role.key) || 'auto'">
+                                                        {{ getRoleTagLabel(role.key) }}
+                                                    </div>
+                                                </div>
+                                                <div class="role-pills-row">
+                                                    <button
+                                                        v-for="tier in roleTierOptions"
+                                                        :key="tier.value"
+                                                        type="button"
+                                                        class="role-pill-btn"
+                                                        :class="[tier.value ? `tier-${tier.value}` : 'tier-auto', { active: (roleModelValue(role.key) || '') === tier.value }]"
+                                                        :title="tier.tooltip"
+                                                        :disabled="isRunning"
+                                                        @click="setRoleModel(role.key, tier.value)"
+                                                    >
+                                                        <span class="pill-icon">{{ tier.icon }}</span>
+                                                        <span class="pill-text">{{ tier.label }}</span>
+                                                    </button>
+                                                </div>
                                             </div>
-                                            <select
-                                                class="role-tier-select"
-                                                :disabled="isRunning"
-                                                :value="roleModelValue(role.key)"
-                                                @change="setRoleModel(role.key, ($event.target as HTMLSelectElement).value)"
-                                            >
-                                                <option value="">跟随自动</option>
-                                                <option value="pro">🧠 强模型槽</option>
-                                                <option value="flash">⚡ 快模型槽</option>
-                                                <option value="vision">👁️ 视觉槽</option>
-                                            </select>
                                         </div>
                                     </div>
                                 </div>
                             </div>
-                        </div>
+                        </Teleport>
                     </div>
                     
                     <!-- 🚀 上下文压缩模式胶囊 (左下角与模型并排) -->
@@ -290,27 +322,35 @@
                             <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
                         </button>
 
-                        <div v-if="budgetMenuOpen" class="budget-dropdown-menu">
-                            <div class="budget-menu-header">上下文与压缩策略</div>
-                            <button
-                                v-for="opt in budgetModes"
-                                :key="opt.id"
-                                type="button"
-                                class="budget-menu-item"
-                                :class="{ selected: opt.id === (modelRouting.context_budget_mode || 'deep_coding') }"
-                                @click="selectBudgetMode(opt.id)"
+                        <Teleport to="body">
+                            <div
+                                v-if="budgetMenuOpen"
+                                class="budget-dropdown-menu is-teleported"
+                                :class="`placement-${budgetPlacement}`"
+                                :style="budgetFixedStyle"
+                                @click.stop
                             >
-                                <span class="opt-icon">{{ opt.icon }}</span>
-                                <div class="opt-text">
-                                    <div class="opt-title">
-                                        <strong>{{ opt.description }}</strong>
-                                        <span class="opt-tag">{{ opt.tag }}</span>
+                                <div class="budget-menu-header">上下文与压缩策略</div>
+                                <button
+                                    v-for="opt in budgetModes"
+                                    :key="opt.id"
+                                    type="button"
+                                    class="budget-menu-item"
+                                    :class="{ selected: opt.id === (modelRouting.context_budget_mode || 'deep_coding') }"
+                                    @click="selectBudgetMode(opt.id)"
+                                >
+                                    <span class="opt-icon">{{ opt.icon }}</span>
+                                    <div class="opt-text">
+                                        <div class="opt-title">
+                                            <strong>{{ opt.description }}</strong>
+                                            <span class="opt-tag">{{ opt.tag }}</span>
+                                        </div>
+                                        <small class="opt-sub">{{ opt.tooltip }}</small>
                                     </div>
-                                    <small class="opt-sub">{{ opt.tooltip }}</small>
-                                </div>
-                                <svg v-if="opt.id === (modelRouting.context_budget_mode || 'deep_coding')" class="check-icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
-                            </button>
-                        </div>
+                                    <svg v-if="opt.id === (modelRouting.context_budget_mode || 'deep_coding')" class="check-icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+                                </button>
+                            </div>
+                        </Teleport>
                     </div>
                 </div>
                 <div class="composer-actions">
@@ -540,6 +580,7 @@ async function handleFileDrop(e: DragEvent) {
 }
 const modelPickerRef = ref<HTMLElement | null>(null);
 const modelMenuOpen = ref(false);
+const activeRoutingTab = ref<"models" | "roles">("models");
 const budgetPickerRef = ref<HTMLElement | null>(null);
 const budgetMenuOpen = ref(false);
 
@@ -552,11 +593,135 @@ const currentBudgetIcon = computed(() => currentBudgetModeObj.value.icon);
 const currentBudgetLabel = computed(() => currentBudgetModeObj.value.label);
 const currentBudgetTooltip = computed(() => currentBudgetModeObj.value.tooltip);
 
+const popoverPlacement = ref<"top" | "bottom">("top");
+const popoverCoords = ref<{ top: number; left: number; width: number; maxHeight: number }>({
+    top: 0,
+    left: 0,
+    width: 520,
+    maxHeight: 480,
+});
+
+const budgetPlacement = ref<"top" | "bottom">("top");
+const budgetCoords = ref<{ top: number; left: number; width: number; maxHeight: number }>({
+    top: 0,
+    left: 0,
+    width: 260,
+    maxHeight: 400,
+});
+
+function calculatePopoverPosition(triggerEl: HTMLElement | null) {
+    if (!triggerEl) return;
+    const rect = triggerEl.getBoundingClientRect();
+    const spaceAbove = rect.top;
+    const spaceBelow = window.innerHeight - rect.bottom;
+
+    const targetWidth = Math.min(520, window.innerWidth - 24);
+    let left = rect.left;
+    if (left + targetWidth > window.innerWidth - 12) {
+        left = Math.max(12, window.innerWidth - targetWidth - 12);
+    }
+    left = Math.max(12, left);
+
+    const neededHeight = 470;
+    let placement: "top" | "bottom" = "top";
+    let top = 0;
+    let maxHeight = 480;
+
+    if (spaceAbove < neededHeight && spaceBelow > spaceAbove) {
+        placement = "bottom";
+        top = rect.bottom + 8;
+        maxHeight = Math.max(260, Math.min(500, spaceBelow - 20));
+    } else {
+        placement = "top";
+        top = rect.top - 8;
+        maxHeight = Math.max(260, Math.min(500, spaceAbove - 20));
+    }
+
+    popoverPlacement.value = placement;
+    popoverCoords.value = { top, left, width: targetWidth, maxHeight };
+}
+
+const popoverFixedStyle = computed(() => {
+    if (popoverPlacement.value === "top") {
+        return {
+            position: "fixed" as const,
+            bottom: `${Math.max(10, window.innerHeight - popoverCoords.value.top)}px`,
+            left: `${popoverCoords.value.left}px`,
+            width: `${popoverCoords.value.width}px`,
+            maxHeight: `${popoverCoords.value.maxHeight}px`,
+            zIndex: 99999,
+        };
+    }
+    return {
+        position: "fixed" as const,
+        top: `${popoverCoords.value.top}px`,
+        left: `${popoverCoords.value.left}px`,
+        width: `${popoverCoords.value.width}px`,
+        maxHeight: `${popoverCoords.value.maxHeight}px`,
+        zIndex: 99999,
+    };
+});
+
+function calculateBudgetPosition(triggerEl: HTMLElement | null) {
+    if (!triggerEl) return;
+    const rect = triggerEl.getBoundingClientRect();
+    const spaceAbove = rect.top;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const targetWidth = 260;
+
+    let left = rect.left;
+    if (left + targetWidth > window.innerWidth - 12) {
+        left = Math.max(12, window.innerWidth - targetWidth - 12);
+    }
+    left = Math.max(12, left);
+
+    let placement: "top" | "bottom" = "top";
+    let top = 0;
+    let maxHeight = 400;
+
+    if (spaceAbove < 360 && spaceBelow > spaceAbove) {
+        placement = "bottom";
+        top = rect.bottom + 8;
+        maxHeight = Math.max(200, Math.min(420, spaceBelow - 20));
+    } else {
+        placement = "top";
+        top = rect.top - 8;
+        maxHeight = Math.max(200, Math.min(420, spaceAbove - 20));
+    }
+
+    budgetPlacement.value = placement;
+    budgetCoords.value = { top, left, width: targetWidth, maxHeight };
+}
+
+const budgetFixedStyle = computed(() => {
+    if (budgetPlacement.value === "top") {
+        return {
+            position: "fixed" as const,
+            bottom: `${Math.max(10, window.innerHeight - budgetCoords.value.top)}px`,
+            left: `${budgetCoords.value.left}px`,
+            width: `${budgetCoords.value.width}px`,
+            maxHeight: `${budgetCoords.value.maxHeight}px`,
+            zIndex: 99999,
+        };
+    }
+    return {
+        position: "fixed" as const,
+        top: `${budgetCoords.value.top}px`,
+        left: `${budgetCoords.value.left}px`,
+        width: `${budgetCoords.value.width}px`,
+        maxHeight: `${budgetCoords.value.maxHeight}px`,
+        zIndex: 99999,
+    };
+});
+
 function toggleModelMenu() {
     if (props.isRunning) return;
-    modelMenuOpen.value = !modelMenuOpen.value;
-    if (modelMenuOpen.value) {
+    if (!modelMenuOpen.value) {
+        calculatePopoverPosition(modelPickerRef.value);
         budgetMenuOpen.value = false;
+        modelMenuOpen.value = true;
+    } else {
+        modelMenuOpen.value = false;
     }
 }
 
@@ -569,9 +734,12 @@ function handleComposerClick(e: MouseEvent) {
 
 function toggleBudgetMenu() {
     if (props.isRunning) return;
-    budgetMenuOpen.value = !budgetMenuOpen.value;
-    if (budgetMenuOpen.value) {
+    if (!budgetMenuOpen.value) {
+        calculateBudgetPosition(budgetPickerRef.value);
         modelMenuOpen.value = false;
+        budgetMenuOpen.value = true;
+    } else {
+        budgetMenuOpen.value = false;
     }
 }
 
@@ -606,6 +774,19 @@ const roleMappingItems: Array<{ key: RoleKey; label: string; desc: string }> = [
     { key: "scout", label: "🛰️ 侦察 L2", desc: "只读侦察 worker（读文件/只读命令）" },
     { key: "writer", label: "🛠️ 写入 L3", desc: "隔离副本改码 worker（diff 回执）" },
 ];
+
+const roleTierOptions: Array<{ value: string; label: string; icon: string; tooltip: string }> = [
+    { value: "", label: "跟随自动", icon: "⚡", tooltip: "跟随自动分流策略 (Auto)" },
+    { value: "pro", label: "强模型 Pro", icon: "🧠", tooltip: "钉死为强模型槽 (Pro)" },
+    { value: "flash", label: "快模型 Flash", icon: "⚡", tooltip: "钉死为快模型槽 (Flash)" },
+    { value: "vision", label: "视觉 Vision", icon: "👁️", tooltip: "钉死为视觉模型槽 (Vision)" },
+];
+
+function getRoleTagLabel(key: RoleKey): string {
+    const val = roleModelValue(key);
+    const found = roleTierOptions.find(t => t.value === val);
+    return found ? found.label : "跟随自动";
+}
 const routingMode = computed(() => (props.modelRouting as { routing_mode?: string }).routing_mode || "rules");
 
 function setRoutingMode(mode: "rules" | "scored") {
@@ -671,13 +852,22 @@ function handleKeyDown(e: KeyboardEvent) {
     }
 }
 
+function handleScrollOrResize() {
+    if (modelMenuOpen.value) calculatePopoverPosition(modelPickerRef.value);
+    if (budgetMenuOpen.value) calculateBudgetPosition(budgetPickerRef.value);
+}
+
 onMounted(() => {
     document.addEventListener("click", handleClickOutside, true);
     window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", handleScrollOrResize, true);
+    window.addEventListener("resize", handleScrollOrResize);
 });
 onBeforeUnmount(() => {
     document.removeEventListener("click", handleClickOutside, true);
     window.removeEventListener("keydown", handleKeyDown);
+    window.removeEventListener("scroll", handleScrollOrResize, true);
+    window.removeEventListener("resize", handleScrollOrResize);
 });
 
 function autoResizeTextarea() {
@@ -1161,13 +1351,13 @@ textarea::placeholder {
 }
 
 .attach-btn {
-    width: auto !important;
+    width: 28px !important;
     height: 28px !important;
-    padding: 0 10px !important;
+    padding: 0 !important;
     display: inline-flex !important;
     align-items: center !important;
-    gap: 5px !important;
-    font-size: 12px !important;
+    justify-content: center !important;
+    font-size: 14px !important;
     font-weight: 500 !important;
     color: #a1a1aa !important;
     background: rgba(255, 255, 255, 0.04) !important;
@@ -1177,14 +1367,34 @@ textarea::placeholder {
     transition: all 0.15s ease;
 }
 
-.attach-btn:hover {
+.attach-btn svg {
+    width: 14px;
+    height: 14px;
+    stroke: currentColor;
+    stroke-width: 2.2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    fill: none;
+}
+
+.attach-btn:hover:not(:disabled) {
     color: #ffffff !important;
     background: rgba(255, 255, 255, 0.09) !important;
     border-color: rgba(255, 255, 255, 0.18) !important;
+    transform: translateY(-1px);
 }
 
-.tool-btn-label {
-    font-size: 12px;
+.attach-btn:active:not(:disabled) {
+    transform: translateY(0);
+}
+
+.attach-btn:disabled {
+    opacity: 0.35 !important;
+    cursor: not-allowed !important;
+    pointer-events: none !important;
+    background: rgba(255, 255, 255, 0.02) !important;
+    border-color: rgba(255, 255, 255, 0.04) !important;
+    color: #52525b !important;
 }
 
 .tool-divider {
@@ -1195,7 +1405,8 @@ textarea::placeholder {
     margin: 0 2px;
 }
 
-.composer-tools button:not(.attach-btn):not(.model-chip):not(.budget-chip):not(.sync-all-btn):not(.close-popover-btn):not(.effort-step-btn):not(.budget-menu-item) {
+.composer-tools > button.composer-tool-btn,
+.composer-tools > button.attach-btn {
     display: grid;
     place-items: center;
     width: 28px;
@@ -1207,12 +1418,21 @@ textarea::placeholder {
     background: rgba(255, 255, 255, 0.03);
     transition: all 0.15s;
 }
-.composer-tools button:hover {
+
+.composer-tools > button.composer-tool-btn:hover:not(:disabled),
+.composer-tools > button.attach-btn:hover:not(:disabled) {
     color: #ffffff;
     background: rgba(255, 255, 255, 0.08);
     border-color: rgba(255, 255, 255, 0.15);
 }
-.composer-tools button svg {
+
+.composer-tools > button.composer-tool-btn:disabled,
+.composer-tools > button.attach-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+.composer-tools > button svg {
     width: 14px;
     height: 14px;
     stroke: currentColor;
@@ -1269,23 +1489,34 @@ textarea::placeholder {
 }
 
 .model-routing-popover {
-    position: absolute;
-    bottom: calc(100% + 8px);
-    left: 0;
-    width: min(520px, calc(100vw - 48px));
-    max-height: min(480px, calc(100vh - 140px));
+    box-sizing: border-box;
     overflow-y: auto;
     background: #18181c;
-    border: 1px solid rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 12px;
-    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
-    padding: 14px;
-    z-index: 1300;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.08);
+    padding: 12px;
+    z-index: 99999 !important;
     display: flex;
     flex-direction: column;
     gap: 10px;
-    backdrop-filter: blur(16px);
-    animation: popIn 0.15s ease-out;
+    backdrop-filter: blur(20px);
+    animation: popIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.model-routing-popover.placement-top {
+    transform-origin: bottom left;
+}
+
+.model-routing-popover.placement-bottom {
+    transform-origin: top left;
+}
+
+.model-routing-popover.align-right {
+    transform-origin: bottom right;
+}
+.model-routing-popover.placement-bottom.align-right {
+    transform-origin: top right;
 }
 
 .popover-header {
@@ -1423,54 +1654,58 @@ textarea::placeholder {
 .effort-segmented-wrap {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     flex-shrink: 0;
 }
 
 .effort-label {
-    font-size: 10.5px;
+    font-size: 11px;
     color: #71717a;
-    font-weight: 500;
+    font-weight: 550;
 }
 
 .effort-slider-group {
     display: inline-flex;
-    background: rgba(0, 0, 0, 0.45);
-    border: 1px solid rgba(255, 255, 255, 0.09);
-    border-radius: 6px;
-    padding: 2px;
-    gap: 2px;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 7px;
+    padding: 2px 3px;
+    gap: 3px;
 }
 
 .effort-step-btn {
-    width: 22px !important;
-    height: 20px !important;
-    padding: 0 !important;
-    display: grid !important;
-    place-items: center !important;
+    min-width: 26px !important;
+    height: 22px !important;
+    padding: 0 4px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
     border: 0 !important;
-    border-radius: 4px !important;
+    border-radius: 5px !important;
     background: transparent !important;
-    color: #71717a !important;
-    font-size: 11px !important;
+    color: #a1a1aa !important;
+    font-size: 11.5px !important;
+    line-height: 1 !important;
     font-weight: 600 !important;
     cursor: pointer;
     transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .effort-step-btn:hover:not(:disabled) {
-    color: #e4e4e7 !important;
-    background: rgba(255, 255, 255, 0.07) !important;
+    color: #ffffff !important;
+    background: rgba(255, 255, 255, 0.08) !important;
 }
 
 .effort-step-btn.active {
-    background: rgba(99, 102, 241, 0.28) !important;
-    color: #c7d2fe !important;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    background: rgba(99, 102, 241, 0.32) !important;
+    border: 1px solid rgba(99, 102, 241, 0.5) !important;
+    color: #ffffff !important;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
 
 .effort-step-btn.active:hover {
-    background: rgba(99, 102, 241, 0.4) !important;
+    background: rgba(99, 102, 241, 0.45) !important;
     color: #ffffff !important;
 }
 
@@ -1538,21 +1773,26 @@ textarea::placeholder {
 }
 
 .budget-dropdown-menu {
-    position: absolute;
-    bottom: calc(100% + 8px);
-    left: 0;
-    width: 260px;
+    box-sizing: border-box;
     background: #1e1e24;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 10px;
-    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.08);
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08);
     padding: 6px;
-    z-index: 1300;
+    z-index: 99999 !important;
     display: flex;
     flex-direction: column;
     gap: 4px;
-    backdrop-filter: blur(12px);
-    animation: popIn 0.15s ease-out;
+    backdrop-filter: blur(16px);
+    animation: popIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.budget-dropdown-menu.placement-top {
+    transform-origin: bottom left;
+}
+
+.budget-dropdown-menu.placement-bottom {
+    transform-origin: top left;
 }
 
 @keyframes popIn {
@@ -1790,64 +2030,299 @@ textarea::placeholder {
     color: #52525b;
     font-size: 11px;
 }
-</style>
 
-
-<style scoped>
-/* 🎭 角色档位映射 + 路由模式（追加区块） */
-.routing-mode-item {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-}
-.role-mapping-item {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-}
-.role-mapping-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-.role-row {
+/* 🎭 模型路由 2-Tab 顶栏导航与模式切换开关 */
+.routing-top-toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 10px;
-    padding: 6px 8px;
+    gap: 8px;
+    background: rgba(0, 0, 0, 0.4);
+    padding: 4px 6px;
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
 }
-.role-row:hover {
-    background: rgba(255, 255, 255, 0.06);
+
+.routing-tabs-nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
 }
-.role-cell-label {
+
+.routing-tab-btn {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 5px !important;
+    width: auto !important;
+    height: 28px !important;
+    padding: 0 12px !important;
+    border-radius: 6px !important;
+    border: 1px solid transparent !important;
+    background: transparent !important;
+    color: #a1a1aa !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap !important;
+}
+
+.routing-tab-btn:hover {
+    background: rgba(255, 255, 255, 0.06) !important;
+    color: #ffffff !important;
+}
+
+.routing-tab-btn.active {
+    background: #242436 !important;
+    border-color: rgba(99, 102, 241, 0.45) !important;
+    color: #ffffff !important;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.top-mode-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.mode-switch-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #8e8e9f;
+    white-space: nowrap;
+}
+
+.mode-switch-group {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 2px;
+    gap: 2px;
+}
+
+.mode-switch-btn {
+    white-space: nowrap !important;
+    display: inline-flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: auto !important;
+    height: 22px !important;
+    padding: 0 9px !important;
+    min-width: 40px !important;
+    border-radius: 4px !important;
+    border: 0 !important;
+    background: transparent !important;
+    color: #a1a1aa !important;
+    font-size: 11px !important;
+    line-height: 22px !important;
+    font-weight: 600 !important;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.mode-switch-btn:hover:not(:disabled) {
+    color: #ffffff !important;
+}
+
+.mode-switch-btn.active {
+    background: rgba(99, 102, 241, 0.35) !important;
+    border: 1px solid rgba(99, 102, 241, 0.5) !important;
+    color: #ffffff !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+.tab-pane-content {
     display: flex;
     flex-direction: column;
-    min-width: 0;
+    gap: 8px;
+    animation: tabFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
-.role-name {
+
+.models-unified-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+@keyframes tabFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(3px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* 🎭 角色档位高级卡片与胶囊开关 */
+.roles-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.role-cards-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.role-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    transition: all 0.15s ease;
+}
+
+.role-card:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.12);
+}
+
+.role-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.role-card-title-group {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.role-card-name {
     font-size: 12px;
     font-weight: 600;
+    color: #f4f4f5;
+    flex-shrink: 0;
 }
-.role-desc {
-    font-size: 10px;
-    opacity: 0.55;
+
+.role-card-desc {
+    font-size: 10.5px;
+    color: #71717a;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.role-tier-select {
+
+.role-current-tag {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.07);
+    color: #a1a1aa;
+    border: 1px solid rgba(255, 255, 255, 0.1);
     flex-shrink: 0;
-    min-width: 128px;
-    padding: 4px 8px;
-    border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(0, 0, 0, 0.35);
-    color: inherit;
-    font-size: 12px;
 }
+.role-current-tag.pro {
+    background: rgba(99, 102, 241, 0.15);
+    color: #a5b4fc;
+    border-color: rgba(99, 102, 241, 0.3);
+}
+.role-current-tag.flash {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fde68a;
+    border-color: rgba(245, 158, 11, 0.3);
+}
+.role-current-tag.vision {
+    background: rgba(16, 185, 129, 0.15);
+    color: #6ee7b7;
+    border-color: rgba(16, 185, 129, 0.3);
+}
+
+.role-pills-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    padding: 2px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.role-pill-btn {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 4px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    height: 24px !important;
+    padding: 0 2px !important;
+    border-radius: 4px !important;
+    border: 1px solid transparent !important;
+    background: transparent !important;
+    color: #a1a1aa !important;
+    font-size: 11px !important;
+    font-weight: 550 !important;
+    cursor: pointer;
+    transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    white-space: nowrap !important;
+    box-sizing: border-box !important;
+}
+
+.role-pill-btn .pill-icon {
+    font-size: 10.5px;
+    line-height: 1;
+}
+
+.role-pill-btn:hover:not(:disabled) {
+    color: #ffffff !important;
+    background: rgba(255, 255, 255, 0.06) !important;
+}
+
+/* 自动 */
+.role-pill-btn.tier-auto.active {
+    background: rgba(255, 255, 255, 0.12) !important;
+    border-color: rgba(255, 255, 255, 0.22) !important;
+    color: #ffffff !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+/* Pro 强模型 */
+.role-pill-btn.tier-pro.active {
+    background: rgba(99, 102, 241, 0.28) !important;
+    border-color: rgba(99, 102, 241, 0.5) !important;
+    color: #c7d2fe !important;
+    box-shadow: 0 1px 4px rgba(99, 102, 241, 0.25);
+}
+
+/* Flash 快模型 */
+.role-pill-btn.tier-flash.active {
+    background: rgba(245, 158, 11, 0.22) !important;
+    border-color: rgba(245, 158, 11, 0.5) !important;
+    color: #fde68a !important;
+    box-shadow: 0 1px 4px rgba(245, 158, 11, 0.2);
+}
+
+/* Vision 视觉模型 */
+.role-pill-btn.tier-vision.active {
+    background: rgba(16, 185, 129, 0.22) !important;
+    border-color: rgba(16, 185, 129, 0.5) !important;
+    color: #6ee7b7 !important;
+    box-shadow: 0 1px 4px rgba(16, 185, 129, 0.2);
+}
+
 .route-badge.mode {
     background: linear-gradient(135deg, #5b8def 0%, #7f5bef 100%);
 }

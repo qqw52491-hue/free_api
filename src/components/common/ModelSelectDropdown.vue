@@ -394,48 +394,50 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  background: var(--bg-2, #1f1f23);
-  border: 1px solid var(--border-2, rgba(255, 255, 255, 0.14));
-  border-radius: var(--radius-sm, 8px);
+  background: linear-gradient(180deg, #1e1e28 0%, #14141d 100%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9px;
   color: var(--text-1, #f4f4f5);
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.05);
   width: 100%;
 }
 
 .model-select-wrapper.sm .model-select-trigger {
-  padding: 4px 10px;
-  min-height: 30px;
+  padding: 5px 11px;
+  min-height: 32px;
   font-size: 12px;
 }
 
 .model-select-wrapper.md .model-select-trigger {
-  padding: 6px 12px;
-  min-height: 36px;
+  padding: 8px 13px;
+  min-height: 38px;
   font-size: 13px;
 }
 
 .model-select-wrapper.lg .model-select-trigger {
-  padding: 8px 14px;
-  min-height: 42px;
+  padding: 10px 16px;
+  min-height: 44px;
   font-size: 14px;
 }
 
 .model-select-trigger:hover:not(:disabled) {
-  background: var(--bg-3, #27272a);
-  border-color: rgba(255, 255, 255, 0.25);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  background: linear-gradient(180deg, #242434 0%, #191924 100%);
+  border-color: rgba(129, 140, 248, 0.45);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(129, 140, 248, 0.2);
 }
 
 .model-select-wrapper.is-open .model-select-trigger {
-  border-color: var(--accent, #6c63ff);
-  box-shadow: 0 0 0 2px rgba(108, 99, 255, 0.2);
+  background: #1c1c28;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25), 0 4px 16px rgba(0, 0, 0, 0.5);
 }
 
 .model-select-wrapper.is-disabled .model-select-trigger {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
+  filter: grayscale(0.5);
 }
 
 .trigger-left {
@@ -460,23 +462,25 @@ onBeforeUnmount(() => {
 }
 
 .selected-display-name {
-  font-weight: 550;
-  color: var(--text-1, #f4f4f5);
+  font-weight: 600;
+  color: #f4f4f5;
   overflow: hidden;
   text-overflow: ellipsis;
+  letter-spacing: -0.01em;
 }
 
 .placeholder-text {
-  color: var(--text-3, #71717a);
+  color: #71717a;
 }
 
 .selected-platform-tag {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-3, #71717a);
-  font-weight: 500;
+  font-size: 10.5px;
+  padding: 1.5px 7px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  color: #a5b4fc;
+  font-weight: 600;
   flex-shrink: 0;
 }
 

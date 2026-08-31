@@ -1,13 +1,14 @@
 <template>
-  <div class="wechat-view">
-    <header class="view-header">
-      <h2>📱 微信绑定</h2>
+  <div class="wechat-view-container">
+    <div class="wechat-view">
+      <header class="view-header">
+      <h2>📱 微信绑定与移动控制台</h2>
       <p class="header-sub">
-        个人微信扫码连接 ClawBot 通道，之后在微信里即可给本机 Agent 派任务、收进度。
+        通过微信或手机浏览器随时向本机 Agent 派发任务、实时接收执行进度与回复交互。
       </p>
     </header>
 
-    <!-- 1. 连接状态 -->
+    <!-- 1. 连接状态监控栏 -->
     <section class="card">
       <div class="card-title-row">
         <h3>连接状态</h3>
@@ -55,88 +56,344 @@
       </div>
 
       <div v-if="loginError" class="error-line">⚠️ {{ loginError }}</div>
+    </section>
 
-      <!-- 二维码区域 -->
-      <div v-if="qrVisible" class="qr-area">
-        <img v-if="qrDataUrl" :src="qrDataUrl" alt="微信扫码二维码" class="qr-img" />
-        <div v-else class="qr-waiting">
-          <span v-if="qrHint">{{ qrHint }}</span>
-          <span v-else>正在获取二维码…</span>
+    <!-- 2. 双二维码工作区：左侧微信绑定，右侧网页控制台 -->
+    <section class="card qr-hub-card">
+      <div class="card-title-row">
+        <div class="card-title-group">
+          <h3>📲 双通道扫码连接中心</h3>
+          <span class="hub-pill">两个二维码独立分栏 · 左右并排</span>
         </div>
-        <p class="qr-tip">请使用微信扫描（二维码过期会自动刷新，扫码后在微信中确认连接）</p>
       </div>
 
-      <!-- 网页控制台二维码：手机扫码直达（token 已内嵌，免输） -->
-      <div class="qr-area console-qr">
-        <h4 class="console-qr-title">📱 网页控制台（手机扫码直达）</h4>
-        <div v-if="consoleQrSvg" class="console-qr-svg" v-html="consoleQrSvg"></div>
-        <div v-else class="qr-waiting"><span>正在生成二维码…</span></div>
-        <p class="console-qr-url" :title="consoleQrPrimary">{{ consoleQrPrimary }}</p>
-        <p class="qr-tip">
-          {{ consoleQrSource === "custom"
-            ? "二维码指向你配置的穿透域名（手机任意网络可开）"
-            : "当前指向局域网地址：手机需与电脑同一 Wi-Fi" }}
-        </p>
-        <div class="console-qr-custom">
-          <input
-            v-model="consoleUrlDraft"
-            class="console-qr-input"
-            placeholder="内网穿透地址（选填，如 https://abc.example.com）"
-            @keydown.enter="saveConsoleUrl"
-          />
-          <button class="btn" :disabled="busy" @click="saveConsoleUrl">保存并刷新二维码</button>
+      <div class="dual-qr-grid">
+        <!-- 左侧：微信扫码绑定 -->
+        <div class="qr-col wechat-col">
+          <div class="col-header">
+            <div class="col-title-group">
+              <span class="badge wechat-badge">🟢 微信通道</span>
+              <h4 class="col-title">个人微信扫码绑定</h4>
+            </div>
+            <span class="col-desc">微信 App 扫码授权，直接在聊天窗口派发任务</span>
+          </div>
+
+          <div class="qr-box-wrapper">
+            <!-- 已登录状态展示 -->
+            <div v-if="loggedIn" class="logged-card">
+              <div class="logged-badge-icon">✓</div>
+              <div class="logged-info">
+                <h5>微信账号已绑定</h5>
+                <p>{{ bridge?.account_id ? `已连接: ${bridge.account_id}` : "个人微信账号在线连接中" }}</p>
+                <span class="logged-sub">可直接在微信聊天框给此账号发指令</span>
+              </div>
+              <button class="btn warn sm" :disabled="busy" @click="reloginQr">
+                {{ reconfirmArmed ? "确认切换？" : "🔄 重新扫码切换" }}
+              </button>
+            </div>
+
+            <!-- 未登录：展示微信登录二维码 -->
+            <div v-else class="qr-display-content">
+              <div class="qr-white-card">
+                <img v-if="qrDataUrl" :src="qrDataUrl" alt="微信登录二维码" />
+                <div v-else class="qr-loading-inner">
+                  <div class="pulse-spinner green"></div>
+                  <span>{{ qrHint || (bridgeRunning ? "正在获取微信码…" : "请先启动桥") }}</span>
+                </div>
+              </div>
+              <div class="qr-card-footer">
+                <p class="qr-hint-text">打开手机微信 <strong>「扫一扫」</strong> 并在手机端确认</p>
+                <div class="qr-btn-group">
+                  <button v-if="!bridgeRunning" class="btn primary sm" :disabled="busy" @click="startBridgeAndLogin">
+                    启动桥并获取二维码
+                  </button>
+                  <button v-else-if="!qrVisible" class="btn primary sm" :disabled="busy" @click="startLogin">
+                    获取微信登录码
+                  </button>
+                  <button v-else class="btn ghost sm" :disabled="busy" @click="startLogin">
+                    🔄 刷新二维码
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 右侧：手机网页控制台二维码 -->
+        <div class="qr-col console-col">
+          <div class="col-header">
+            <div class="col-title-group">
+              <span class="badge console-badge">🌐 网页控制台</span>
+              <span class="console-source-pill" :class="consoleQrSource">
+                {{ consoleQrSource === "custom" ? "穿透域名" : "局域网 Wi-Fi" }}
+              </span>
+            </div>
+            <span class="col-desc">手机扫码直接打开 Web 界面（已内嵌免密 Token）</span>
+          </div>
+
+          <div class="qr-box-wrapper">
+            <div class="qr-display-content">
+              <div class="qr-white-card">
+                <div v-if="consoleQrSvg" class="console-svg-render" v-html="consoleQrSvg"></div>
+                <div v-else class="qr-loading-inner">
+                  <div class="pulse-spinner blue"></div>
+                  <span>生成中…</span>
+                </div>
+              </div>
+              <div class="qr-card-footer">
+                <p class="qr-hint-text">
+                  {{ consoleQrSource === "custom"
+                    ? "🚀 穿透模式：手机任意 4G/5G/Wi-Fi 均可直接打开"
+                    : "📶 局域网模式：手机需与电脑连接在同一 Wi-Fi" }}
+                </p>
+              </div>
+            </div>
+
+            <!-- 控制台链接与设置 -->
+            <div class="console-controls">
+              <div class="url-copy-row">
+                <input class="url-input" type="text" readonly :value="consoleQrPrimary" :title="consoleQrPrimary" />
+                <button class="btn copy-btn" :class="{ copied: copySuccess }" @click="copyConsoleUrl">
+                  {{ copySuccess ? "已复制 ✓" : "复制链接" }}
+                </button>
+              </div>
+
+              <div class="tunnel-row">
+                <input
+                  v-model="consoleUrlDraft"
+                  class="tunnel-input"
+                  placeholder="穿透域名（选填，如 https://my-agent.com）"
+                  @keydown.enter="saveConsoleUrl"
+                />
+                <button class="btn primary sm" :disabled="busy || savingUrl" @click="saveConsoleUrl">
+                  {{ savingUrl ? "保存中" : "保存域名" }}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- 2. 通道配置 -->
-    <section class="card">
+    <!-- 3. 通道配置 -->
+    <section class="card config-card">
       <div class="card-title-row">
-        <h3>通道配置</h3>
-        <span class="config-path" :title="configPath">{{ configPath }}</span>
+        <div class="card-title-group">
+          <h3>⚙️ 通道与模型路由配置</h3>
+          <span class="config-path" :title="configPath">{{ configPath }}</span>
+        </div>
       </div>
 
-      <div class="form-grid">
-        <div class="field">
-          <span>默认模型（会话创建）</span>
-          <ModelSelectDropdown
-            :model-value="form.model_id"
-            :models="allModels || []"
-            placeholder="搜索并选择默认模型..."
-            size="sm"
-            @update:model-value="form.model_id = $event"
-          />
+      <!-- 🤖 Agent 模型角色档位分工 (Tab 切换卡片) -->
+      <div class="role-tiers-card">
+        <div class="role-tiers-header">
+          <div class="header-left">
+            <span class="role-section-badge">🤖 模型分工路由 (Role Tiers)</span>
+            <span class="role-section-desc">为 Agent 的规划、执行与视觉分别指定最适配的模型</span>
+          </div>
+          <button
+            type="button"
+            class="btn-sync-all"
+            title="将 Pro、Flash、Vision 全部一键设为跟随默认模型"
+            @click="syncAllRoutesToDefault"
+          >
+            ⚡ 一键跟随默认
+          </button>
         </div>
-        <div class="field">
-          <span>Pro 路由（推理）</span>
-          <ModelSelectDropdown
-            :model-value="form.pro"
-            :models="allModels || []"
-            placeholder="跟随默认模型 (或选择 Pro)..."
-            size="sm"
-            @update:model-value="form.pro = $event"
-          />
+
+        <!-- 4 档位 Tab 切换栏 -->
+        <div class="role-tab-nav">
+          <button
+            type="button"
+            class="role-tab-btn"
+            :class="{ active: activeRoleTab === 'default' }"
+            @click="activeRoleTab = 'default'"
+          >
+            <span class="tab-icon">🌟</span>
+            <div class="tab-meta">
+              <span class="tab-label">默认基座</span>
+              <span class="tab-val-preview">{{ getModelDisplayName(form.model_id) || "未选择" }}</span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            class="role-tab-btn pro"
+            :class="{ active: activeRoleTab === 'pro' }"
+            @click="activeRoleTab = 'pro'"
+          >
+            <span class="tab-icon">🧠</span>
+            <div class="tab-meta">
+              <span class="tab-label">Pro 推理</span>
+              <span class="tab-val-preview" :class="{ 'is-follow': !form.pro }">
+                {{ form.pro ? getModelDisplayName(form.pro) : "跟随默认" }}
+              </span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            class="role-tab-btn flash"
+            :class="{ active: activeRoleTab === 'flash' }"
+            @click="activeRoleTab = 'flash'"
+          >
+            <span class="tab-icon">⚡</span>
+            <div class="tab-meta">
+              <span class="tab-label">Flash 执行</span>
+              <span class="tab-val-preview" :class="{ 'is-follow': !form.flash }">
+                {{ form.flash ? getModelDisplayName(form.flash) : "跟随默认" }}
+              </span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            class="role-tab-btn vision"
+            :class="{ active: activeRoleTab === 'vision' }"
+            @click="activeRoleTab = 'vision'"
+          >
+            <span class="tab-icon">👁️</span>
+            <div class="tab-meta">
+              <span class="tab-label">Vision 视觉</span>
+              <span class="tab-val-preview" :class="{ 'is-follow': !form.vision }">
+                {{ form.vision ? getModelDisplayName(form.vision) : "跟随默认" }}
+              </span>
+            </div>
+          </button>
         </div>
-        <div class="field">
-          <span>Flash 路由（执行）</span>
-          <ModelSelectDropdown
-            :model-value="form.flash"
-            :models="allModels || []"
-            placeholder="跟随默认模型 (或选择 Flash)..."
-            size="sm"
-            @update:model-value="form.flash = $event"
-          />
+
+        <!-- 对应 Tab 的配置面板 -->
+        <div class="role-tab-content">
+          <!-- 1. 默认创建 -->
+          <div v-if="activeRoleTab === 'default'" class="tier-pane default-pane">
+            <div class="tier-info-banner">
+              <div class="tier-badge-row">
+                <span class="tier-tag default">🌟 默认基座模型 (Default Base)</span>
+                <span class="tier-hint">任务创建与初始对话的基础会话模型</span>
+              </div>
+              <p class="tier-desc">
+                当微信收到新任务发起会话时使用的首选模型。若后续推理、执行或视觉未特别指定，将自动继承此配置。
+              </p>
+            </div>
+
+            <div class="tier-select-box">
+              <label class="tier-select-label">选择基座模型：</label>
+              <ModelSelectDropdown
+                :model-value="form.model_id"
+                :models="allModels || []"
+                placeholder="搜索并选择默认模型..."
+                size="md"
+                @update:model-value="form.model_id = $event"
+              />
+            </div>
+          </div>
+
+          <!-- 2. Pro 推理 -->
+          <div v-else-if="activeRoleTab === 'pro'" class="tier-pane pro-pane">
+            <div class="tier-info-banner">
+              <div class="tier-badge-row">
+                <span class="tier-tag pro">🧠 Pro 推理规划专家 (Reasoning & Planning)</span>
+                <span class="tier-hint">负责长程规划、深层反思与工具决策</span>
+              </div>
+              <p class="tier-desc">
+                负责复杂长流程拆解、反思纠错、自愈重试与架构设计。推荐搭配强推理模型（如 DeepSeek-R1、Claude 3.7 Sonnet、Gemini 2.5 Pro）。
+              </p>
+            </div>
+
+            <div class="tier-select-box">
+              <div class="tier-select-header">
+                <label class="tier-select-label">选择 Pro 推理模型：</label>
+                <button
+                  v-if="form.pro"
+                  type="button"
+                  class="btn-reset-route"
+                  @click="form.pro = ''"
+                >
+                  ↩️ 重置为跟随默认
+                </button>
+              </div>
+              <ModelSelectDropdown
+                :model-value="form.pro"
+                :models="allModels || []"
+                placeholder="跟随默认模型 (或选择特定 Pro 模型)..."
+                size="md"
+                @update:model-value="form.pro = $event"
+              />
+            </div>
+          </div>
+
+          <!-- 3. Flash 执行 -->
+          <div v-else-if="activeRoleTab === 'flash'" class="tier-pane flash-pane">
+            <div class="tier-info-banner">
+              <div class="tier-badge-row">
+                <span class="tier-tag flash">⚡ Flash 极速执行专家 (Fast Execution)</span>
+                <span class="tier-hint">负责高频工具调用与快速代码执行</span>
+              </div>
+              <p class="tier-desc">
+                负责常规命令调用、文件读写、快速代码润色等高频单步执行。推荐搭配低延迟、高吞吐的高性价比模型（如 Gemini 2.5 Flash、DeepSeek-V3、Claude 3.5 Haiku）。
+              </p>
+            </div>
+
+            <div class="tier-select-box">
+              <div class="tier-select-header">
+                <label class="tier-select-label">选择 Flash 执行模型：</label>
+                <button
+                  v-if="form.flash"
+                  type="button"
+                  class="btn-reset-route"
+                  @click="form.flash = ''"
+                >
+                  ↩️ 重置为跟随默认
+                </button>
+              </div>
+              <ModelSelectDropdown
+                :model-value="form.flash"
+                :models="allModels || []"
+                placeholder="跟随默认模型 (或选择特定 Flash 模型)..."
+                size="md"
+                @update:model-value="form.flash = $event"
+              />
+            </div>
+          </div>
+
+          <!-- 4. Vision 视觉 -->
+          <div v-else-if="activeRoleTab === 'vision'" class="tier-pane vision-pane">
+            <div class="tier-info-banner">
+              <div class="tier-badge-row">
+                <span class="tier-tag vision">👁️ Vision 多模态视觉专家 (Multimodal Vision)</span>
+                <span class="tier-hint">负责屏幕截图解析、图表识别与视觉审查</span>
+              </div>
+              <p class="tier-desc">
+                负责解析图片附件、网页 UI 截图、图表数据与图像理解。推荐选用具备强大多模态视觉理解能力的模型。
+              </p>
+            </div>
+
+            <div class="tier-select-box">
+              <div class="tier-select-header">
+                <label class="tier-select-label">选择 Vision 视觉模型：</label>
+                <button
+                  v-if="form.vision"
+                  type="button"
+                  class="btn-reset-route"
+                  @click="form.vision = ''"
+                >
+                  ↩️ 重置为跟随默认
+                </button>
+              </div>
+              <ModelSelectDropdown
+                :model-value="form.vision"
+                :models="allModels || []"
+                placeholder="跟随默认模型 (或选择特定 Vision 模型)..."
+                size="md"
+                @update:model-value="form.vision = $event"
+              />
+            </div>
+          </div>
         </div>
-        <div class="field">
-          <span>Vision 路由（视觉）</span>
-          <ModelSelectDropdown
-            :model-value="form.vision"
-            :models="allModels || []"
-            placeholder="跟随默认模型 (或选择 Vision)..."
-            size="sm"
-            @update:model-value="form.vision = $event"
-          />
-        </div>
+      </div>
+
+      <!-- 其他基础通道参数 -->
+      <div class="form-grid other-params-grid">
         <label class="field">
           <span>临时工作区（未绑定任务）</span>
           <input v-model="form.scratch_dir" type="text" placeholder="留空使用默认目录" />
@@ -166,12 +423,12 @@
 
       <label class="field wide">
         <span>首次联系帮助文案</span>
-        <textarea v-model="form.help_text" rows="4"></textarea>
+        <textarea v-model="form.help_text" rows="3"></textarea>
       </label>
 
       <div class="action-row">
         <button class="btn primary" :disabled="saving" @click="saveConfig">
-          {{ saving ? "保存中…" : "保存配置" }}
+          {{ saving ? "保存中…" : "保存通道配置" }}
         </button>
         <span v-if="saveHint" class="save-hint">{{ saveHint }}</span>
       </div>
@@ -198,6 +455,7 @@
         </li>
       </ul>
     </section>
+    </div>
   </div>
 </template>
 
@@ -276,6 +534,24 @@ const form = reactive({
   auto_start_bridge: true,
   llm_retries: "" as number | "",
 });
+
+const activeRoleTab = ref<"default" | "pro" | "flash" | "vision">("default");
+
+function getModelDisplayName(modelId: string): string {
+  if (!modelId) return "";
+  const found = allModels.value.find((m) => m.id === modelId || m.name === modelId);
+  if (found) {
+    return found.display_name || found.name;
+  }
+  return modelId;
+}
+
+function syncAllRoutesToDefault() {
+  form.pro = "";
+  form.flash = "";
+  form.vision = "";
+  saveHint.value = "已将 Pro / Flash / Vision 路由全部重置为跟随默认模型（记得点击保存）";
+}
 
 let statusTimer: number | null = null;
 let qrTimer: number | null = null;
@@ -358,6 +634,8 @@ const consoleQrSvg = ref("");
 const consoleQrPrimary = ref("");
 const consoleQrSource = ref<"lan" | "custom">("lan");
 const consoleUrlDraft = ref("");
+const copySuccess = ref(false);
+const savingUrl = ref(false);
 
 async function refreshConsoleQr() {
   try {
@@ -372,7 +650,21 @@ async function refreshConsoleQr() {
   }
 }
 
+async function copyConsoleUrl() {
+  if (!consoleQrPrimary.value) return;
+  try {
+    await navigator.clipboard.writeText(consoleQrPrimary.value);
+    copySuccess.value = true;
+    setTimeout(() => {
+      copySuccess.value = false;
+    }, 2000);
+  } catch (err) {
+    console.error("复制控制台链接失败:", err);
+  }
+}
+
 async function saveConsoleUrl() {
+  savingUrl.value = true;
   try {
     await invoke("wechat_channel_config_set", {
       config: { console_base_url: consoleUrlDraft.value.trim() },
@@ -380,6 +672,8 @@ async function saveConsoleUrl() {
     await refreshConfig();
   } catch {
     /* 保存失败静默，二维码保持原样 */
+  } finally {
+    savingUrl.value = false;
   }
 }
 
@@ -454,6 +748,13 @@ async function startLogin() {
   }
   await refreshStatus();
   busy.value = false;
+}
+
+async function startBridgeAndLogin() {
+  await startBridge();
+  if (bridgeRunning.value && !loggedIn.value) {
+    await startLogin();
+  }
 }
 
 async function stopBridge() {
@@ -531,6 +832,9 @@ async function refreshAll() {
 
 onMounted(async () => {
   await refreshAll();
+  if (bridgeRunning.value && !loggedIn.value && !showQr.value) {
+    await startLogin();
+  }
   statusTimer = window.setInterval(refreshStatus, 5000);
   runsTimer = window.setInterval(refreshRuns, 10000);
 });
@@ -544,15 +848,41 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.wechat-view-container {
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+
+.wechat-view-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.wechat-view-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.wechat-view-container::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+}
+
+.wechat-view-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
 .wechat-view {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  max-width: 900px;
+  max-width: 960px;
   margin: 0 auto;
-  padding: 16px 20px 40px;
+  padding: 18px 24px 60px;
   color: #f4f4f5;
   user-select: none;
+  box-sizing: border-box;
 }
 
 .view-header {
@@ -787,42 +1117,7 @@ onUnmounted(() => {
   padding: 6px 10px;
 }
 
-.qr-area {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 16px;
-  border: 1px dashed rgba(56, 189, 248, 0.35);
-  border-radius: 12px;
-  background: rgba(56, 189, 248, 0.03);
-}
 
-.qr-img {
-  width: 220px;
-  height: 220px;
-  border-radius: 10px;
-  background: #fff;
-  padding: 10px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-}
-
-.qr-waiting {
-  width: 220px;
-  height: 180px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #71717a;
-  font-size: 12px;
-  text-align: center;
-}
-
-.qr-tip {
-  margin: 0;
-  font-size: 11px;
-  color: #a1a1aa;
-}
 
 .form-grid {
   display: grid;
@@ -1020,54 +1315,604 @@ onUnmounted(() => {
   font-size: 11px;
 }
 
-/* 网页控制台二维码 */
-.console-qr {
-  margin-top: 14px;
-  border-top: 1px dashed rgba(255, 255, 255, 0.12);
-  padding-top: 14px;
+/* 双二维码工作区与分栏卡片 */
+.qr-hub-card {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #14141a;
 }
-.console-qr-title {
-  margin: 0 0 10px;
-  font-size: 13px;
+
+.card-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hub-pill {
+  font-size: 11px;
   font-weight: 600;
-  opacity: 0.9;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #a1a1aa;
 }
-.console-qr-svg {
-  width: 200px;
-  height: 200px;
-  background: #fff;
-  border-radius: 10px;
+
+.dual-qr-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: stretch;
+}
+
+.qr-col {
+  background: #181824;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  transition: all 0.2s ease;
+}
+
+.qr-col.wechat-col {
+  border-color: rgba(16, 185, 129, 0.25);
+  background: linear-gradient(180deg, rgba(16, 185, 129, 0.04) 0%, #161622 100%);
+}
+
+.qr-col.console-col {
+  border-color: rgba(56, 189, 248, 0.25);
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.04) 0%, #161622 100%);
+}
+
+.col-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.col-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.col-title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #f4f4f5;
+}
+
+.col-desc {
+  font-size: 11px;
+  color: #a1a1aa;
+}
+
+.badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.badge.wechat-badge {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #34d399;
+}
+
+.badge.console-badge {
+  background: rgba(56, 189, 248, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #38bdf8;
+}
+
+.console-source-pill {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+  margin-left: auto;
+}
+
+.console-source-pill.custom {
+  background: rgba(168, 85, 247, 0.15);
+  border-color: rgba(168, 85, 247, 0.35);
+  color: #c084fc;
+}
+
+.qr-box-wrapper {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.qr-display-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.qr-white-card {
+  width: 180px;
+  height: 180px;
+  background: #ffffff;
+  border-radius: 12px;
   padding: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  overflow: hidden;
+  margin: 0 auto;
 }
-.console-qr-svg svg {
+
+.qr-white-card img {
   width: 100%;
   height: 100%;
+  object-fit: contain;
   display: block;
 }
-.console-qr-url {
-  margin: 8px 0 4px;
-  font-size: 11.5px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  opacity: 0.75;
-  word-break: break-all;
+
+.console-svg-render {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
-.console-qr-custom {
+
+.console-svg-render :deep(svg) {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  display: block !important;
+}
+
+.qr-loading-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #71717a;
+  font-size: 11px;
+  text-align: center;
+  padding: 8px;
+}
+
+.pulse-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2.5px solid rgba(0, 0, 0, 0.1);
+  border-top-color: #07c160;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.pulse-spinner.green {
+  border-top-color: #10b981;
+}
+
+.pulse-spinner.blue {
+  border-top-color: #0284c7;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.qr-card-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.qr-hint-text {
+  margin: 0;
+  font-size: 11.5px;
+  color: #a1a1aa;
+  line-height: 1.4;
+}
+
+.qr-hint-text strong {
+  color: #f4f4f5;
+}
+
+.qr-btn-group {
   display: flex;
   gap: 8px;
-  margin-top: 8px;
 }
-.console-qr-input {
+
+.btn.sm {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+}
+
+.logged-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 16px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px dashed rgba(16, 185, 129, 0.3);
+  border-radius: 10px;
+  text-align: center;
+  flex: 1;
+}
+
+.logged-badge-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: rgba(16, 185, 129, 0.2);
+  border: 2px solid #10b981;
+  color: #10b981;
+  font-size: 20px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.logged-info h5 {
+  margin: 0;
+  font-size: 14px;
+  color: #f4f4f5;
+  font-weight: 700;
+}
+
+.logged-info p {
+  margin: 4px 0 2px;
+  font-size: 12px;
+  color: #34d399;
+  font-weight: 600;
+}
+
+.logged-sub {
+  font-size: 11px;
+  color: #a1a1aa;
+}
+
+.console-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.url-copy-row,
+.tunnel-row {
+  display: flex;
+  gap: 6px;
+}
+
+.url-input {
   flex: 1;
   min-width: 0;
-  padding: 7px 10px;
-  font-size: 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.06);
-  color: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: #12121a;
+  color: #38bdf8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 5px 8px;
+  outline: none;
+  text-overflow: ellipsis;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.tunnel-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: #12121a;
+  color: #f4f4f5;
+  font-size: 11px;
+  padding: 5px 8px;
   outline: none;
 }
-.console-qr-input:focus {
-  border-color: rgba(91, 140, 255, 0.55);
+
+.tunnel-input:focus {
+  border-color: #38bdf8;
+}
+
+.copy-btn {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.copy-btn.copied {
+  background: rgba(52, 211, 153, 0.18);
+  border-color: rgba(52, 211, 153, 0.4);
+  color: #34d399;
+}
+
+/* ---- 🤖 角色档位卡片与 Tab 切换器 ---- */
+.role-tiers-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 14px 16px 16px;
+  margin-bottom: 6px;
+}
+
+.role-tiers-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.role-section-badge {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f4f4f5;
+  margin-right: 8px;
+}
+
+.role-section-desc {
+  font-size: 12px;
+  color: #71717a;
+}
+
+.btn-sync-all {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: #a1a1aa;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-sync-all:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.35);
+  color: #c7d2fe;
+}
+
+/* 4 档位 Tab 切换器 */
+.role-tab-nav {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.role-tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #181820;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+
+.role-tab-btn:hover {
+  background: #20202c;
+  border-color: rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
+}
+
+.role-tab-btn .tab-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.role-tab-btn .tab-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.role-tab-btn .tab-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #d4d4d8;
+}
+
+.role-tab-btn .tab-val-preview {
+  font-size: 11px;
+  color: #a1a1aa;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.role-tab-btn .tab-val-preview.is-follow {
+  color: #71717a;
+  font-style: italic;
+}
+
+/* Tab 激活状态与专属高亮色 */
+.role-tab-btn.active {
+  background: #222233;
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.3), 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.role-tab-btn.active .tab-label {
+  color: #ffffff;
+}
+
+.role-tab-btn.pro.active {
+  border-color: rgba(129, 140, 248, 0.6);
+  box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.4), 0 4px 12px rgba(99, 102, 241, 0.15);
+}
+
+.role-tab-btn.flash.active {
+  border-color: rgba(245, 158, 11, 0.6);
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.4), 0 4px 12px rgba(245, 158, 11, 0.12);
+}
+
+.role-tab-btn.vision.active {
+  border-color: rgba(16, 185, 129, 0.6);
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.4), 0 4px 12px rgba(16, 185, 129, 0.12);
+}
+
+/* Tab 面板内容容器 */
+.role-tab-content {
+  background: #16161e;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.tier-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: tab-fade-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes tab-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.tier-info-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tier-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tier-tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+
+.tier-tag.default {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f4f4f5;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.tier-tag.pro {
+  background: rgba(129, 140, 248, 0.15);
+  color: #a5b4fc;
+  border: 1px solid rgba(129, 140, 248, 0.35);
+}
+
+.tier-tag.flash {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fcd34d;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.tier-tag.vision {
+  background: rgba(16, 185, 129, 0.15);
+  color: #6ee7b7;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.tier-hint {
+  font-size: 11px;
+  color: #71717a;
+}
+
+.tier-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #a1a1aa;
+}
+
+.tier-select-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.tier-select-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tier-select-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e4e4e7;
+}
+
+.btn-reset-route {
+  background: none;
+  border: none;
+  color: #38bdf8;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  transition: opacity 0.15s;
+}
+
+.btn-reset-route:hover {
+  text-decoration: underline;
+  opacity: 0.85;
+}
+
+.other-params-grid {
+  margin-top: 4px;
+}
+
+@media (max-width: 768px) {
+  .dual-qr-grid {
+    grid-template-columns: 1fr;
+  }
+  .role-tab-nav {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 </style>
