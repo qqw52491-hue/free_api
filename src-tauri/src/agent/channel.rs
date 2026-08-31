@@ -783,6 +783,7 @@ pub(crate) fn register_and_spawn_run(
             llm_retries,
             None,
             workspace_override,
+            Some(spawn_run.clone()),
         )
         .await;
         let _ = app.unlisten(event_id);

@@ -1453,6 +1453,20 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         await register(`agent-log-${sid}`, handleLog);
         await register(`agent-context-${sid}`, handleContext);
         await register(`agent-tool-event-${sid}`, (payload) => handleToolEvent(asRecord(payload)));
+        await register("channel-run-started", async (payload: any) => {
+            if (payload?.session_id === sid) {
+                await loadRunTraces();
+                await loadConversation();
+            }
+        });
+        await register("channel-run-done", async (payload: any) => {
+            if (payload?.session_id === sid) {
+                await loadRunTraces();
+                await loadConversation();
+                isRunning.value = false;
+                isThinking.value = false;
+            }
+        });
     }
 
     async function runAgent(nextGoal?: string, attachments?: ParsedAttachment[]) {

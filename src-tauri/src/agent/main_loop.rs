@@ -478,6 +478,7 @@ pub async fn run_agent_main_loop(
         transient_llm_request_retries,
         attachments,
         None,
+        None,
     )
     .await
 }
@@ -495,6 +496,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     transient_llm_request_retries: Option<u32>,
     attachments: Option<Vec<crate::commands::chat::ParsedAttachmentResult>>,
     workspace_override: Option<std::path::PathBuf>,
+    run_id_override: Option<String>,
 ) -> Result<(), String> {
     let transient_llm_request_retries = transient_llm_request_retries
         .unwrap_or(DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
@@ -520,7 +522,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
 
     // 每次用户发送任务（包括在同一会话中继续对话）都是一个独立的可复盘运行。
     // 该轨迹只服务历史 UI，不参与 checkpoint 恢复或模型上下文。
-    let run_id = uuid::Uuid::new_v4().to_string();
+    let run_id = run_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut run_trace_steps: Vec<serde_json::Value> = Vec::new();
     let mut run_machine = AgentRunMachine::new();
     advance_run_state(
