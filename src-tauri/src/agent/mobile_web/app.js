@@ -680,13 +680,19 @@ async function loadFlow(sessionId) {
   }
   _loadFlowInFlight = true;
   try {
-    const [sessRes, runsRes, tracesRes, artsRes] = await Promise.all([
-      api("/channel/sessions"),
+    const promises = [
       api("/channel/runs"),
       api(`/channel/session/${encodeURIComponent(sessionId)}/traces`),
       api(`/channel/session/${encodeURIComponent(sessionId)}/artifacts`),
-    ]);
-    S.sessions = sessRes.sessions || [];
+    ];
+    const needSessions = !S.sessions.length || !S.sessions.some(s => s.id === sessionId);
+    if (needSessions) {
+      promises.push(api("/channel/sessions"));
+    }
+    const [runsRes, tracesRes, artsRes, sessRes] = await Promise.all(promises);
+    if (sessRes && sessRes.sessions) {
+      S.sessions = sessRes.sessions;
+    }
     const session = S.sessions.find(s => s.id === sessionId) || null;
     const run = (runsRes.runs || []).filter(r => r.session_id === sessionId)
       .sort((a, b) => (b.started_at || "").localeCompare(a.started_at || ""))[0] || null;
@@ -884,8 +890,10 @@ function renderFlow() {
   // 仅在 html 内容真正变动时才重写 DOM，彻底杜绝轮询导致的整体重绘闪烁
   const timelineEl = $("timeline");
   if (timelineEl.dataset.renderedHtml !== html) {
+    const currentScroll = window.scrollY || document.documentElement.scrollTop;
     timelineEl.innerHTML = html;
     timelineEl.dataset.renderedHtml = html;
+    window.scrollTo(0, currentScroll);
   }
 
   // 实时状态行（带 DOM 差异防闪烁）
@@ -1358,19 +1366,24 @@ function connectSSE(force) {
       // SSE 实时推送驱动：桌面端 / 微信 / Agent 产生步骤、新任务或完成时立即刷新
       try {
         const payload = JSON.parse(ev.data || "{}");
+        const eventType = (payload.event && payload.event.type) || "";
+        const sid = payload.session_id;
         if (S.view.name === "flow" && S.currentSessionId) {
-          if (!payload.session_id || payload.session_id === S.currentSessionId) {
+          if (!sid || sid === S.currentSessionId) {
             loadFlow(S.currentSessionId).catch(() => {});
           }
-          loadHome().catch(() => {});
+          if (["start", "done", "failed", "cancelled", "deleted"].includes(eventType)) {
+            loadHome().catch(() => {});
+          }
         } else {
           loadHome().catch(() => {});
         }
       } catch (e) {
         if (S.view.name === "flow" && S.currentSessionId) {
           loadFlow(S.currentSessionId).catch(() => {});
+        } else {
+          loadHome().catch(() => {});
         }
-        loadHome().catch(() => {});
       }
     };
     es.onerror = () => {
@@ -1390,9 +1403,9 @@ async function boot() {
   connectSSE();
 
   // 自适应智能轮询：
-  // - Agent 运行中（running / waiting_human）→ 每 2s 轮询（需要实时看到步骤进展）
-  // - SSE 在线 + Agent 空闲 → 每 10s 心跳（SSE 负责推送，轮询只作保底）
-  // - SSE 断线 + Agent 空闲 → 每 6s 轮询（保证在隧道重连期间不漏掉更新）
+  // - SSE 在线 → 全部交由 SSE 实时推送，仅每 10s 兜底心跳一次
+  // - SSE 断线 + Agent 运行中 → 每 2s 短轮询
+  // - SSE 断线 + Agent 空闲 → 每 6s 慢轮询
   setInterval(() => {
     if (document.hidden) return;
     // ⚠️ 弹层/弹窗打开时跳过轮询重渲，防止 DOM 重建破坏弹层交互或卡顿
@@ -1400,20 +1413,27 @@ async function boot() {
     if ($('modalNew') && !$('modalNew').classList.contains('hidden')) return;
     const active = isAgentActive();
     const alive = sseAlive();
-    // SSE 在线且 Agent 空闲时，轮询节流（每 10s 一次通过 lastPoll 管控）
-    if (!active && alive) {
-      const now = Date.now();
-      if (!S._lastSlowPoll || now - S._lastSlowPoll >= 10000) {
-        S._lastSlowPoll = now;
+    const now = Date.now();
+
+    if (alive) {
+      // SSE 存活时，绝大部分状态靠实时推送更新，轮询只做 10s 兜底
+      if (!S._lastPoll || now - S._lastPoll >= 10000) {
+        S._lastPoll = now;
         if (S.view.name === "home") loadHome().catch(() => {});
+        else if (S.view.name === "flow" && S.currentSessionId) loadFlow(S.currentSessionId).catch(() => {});
       }
       return;
     }
-    // Agent 运行中：每次 tick 都刷新
-    if (S.view.name === "flow" && S.currentSessionId) {
-      loadFlow(S.currentSessionId).catch(() => {});
-    } else if (S.view.name === "home") {
-      loadHome().catch(() => {});
+
+    // SSE 断线时，才启用短轮询
+    const interval = active ? 2000 : 6000;
+    if (!S._lastPoll || now - S._lastPoll >= interval) {
+      S._lastPoll = now;
+      if (S.view.name === "home") {
+        loadHome().catch(() => {});
+      } else if (S.view.name === "flow" && S.currentSessionId) {
+        loadFlow(S.currentSessionId).catch(() => {});
+      }
     }
   }, 2000);
 }
