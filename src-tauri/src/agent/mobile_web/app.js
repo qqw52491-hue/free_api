@@ -635,7 +635,13 @@ function renderFlow() {
   // 提问卡片（等待人类输入）
   const paused = f.run && f.run.status === "waiting_human" ? (f.run.paused_reason || "Agent 请求人工协助。") : null;
   $("askCard").innerHTML = paused
-    ? `<div class="ask-card"><div class="rlabel">❓ Agent 提问</div><div class="q">${formatMarkdown(paused)}</div><div class="hint">在底部输入框直接回复即可</div></div>`
+    ? `<div class="ask-card">
+        <div class="rlabel">❓ Agent 提问 (等待您的回答)</div>
+        <div class="q">${formatMarkdown(paused)}</div>
+        <div class="ask-actions">
+          <button class="btn-ask-reply" onclick="const el=$('followInput'); if(el){el.focus(); el.scrollIntoView({behavior:'smooth'});}">💬 点击快速回复</button>
+        </div>
+      </div>`
     : "";
 
   // 产物清单
@@ -652,8 +658,11 @@ function renderFlow() {
 
   // Composer 状态与占位符
   const input = $("followInput");
+  const composer = $("composer");
+  const isWaitingHuman = f.run && f.run.status === "waiting_human";
+  composer.classList.toggle("waiting-human", !!isWaitingHuman);
   $("btnStop").classList.toggle("hidden", !(f.run && f.run.status === "running"));
-  if (f.run && f.run.status === "waiting_human") {
+  if (isWaitingHuman) {
     input.placeholder = "回复 Agent 的提问…";
   } else if (f.run && f.run.status === "running") {
     input.placeholder = "继续输入以排队后续修改 / 接管方向…";
