@@ -257,53 +257,13 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
         const list: AgentWorkerItem[] = [...teamWorkers.value];
 
-        // 仅定位当前正在运行或最新的步骤中的并发派发，避免历史多轮任务堆叠
+        // 仅定位当前正在运行或最新的步骤中的真实子 Agent，排除普通并发工具调用
         const runningSteps = steps.value.filter((s) => s.status === "running" || s.status === "pending");
         const targetSteps = runningSteps.length > 0 ? runningSteps : (isRunning.value ? steps.value.slice(-1) : []);
 
         for (const step of targetSteps) {
-            let parallelList: any[] = [];
-            const params = step.rawParams || step.params;
-            if (params && typeof params === "object") {
-                if (Array.isArray((params as any).parallel)) parallelList = (params as any).parallel;
-                else if (Array.isArray((params as any).commands)) parallelList = (params as any).commands;
-                else if (Array.isArray((params as any).tasks)) parallelList = (params as any).tasks;
-            }
-            if (parallelList.length === 0 && typeof params === "string" && params.includes("parallel")) {
-                try {
-                    const parsed = JSON.parse(params);
-                    if (parsed && Array.isArray(parsed.parallel)) parallelList = parsed.parallel;
-                } catch {}
-            }
-
-            if (parallelList.length > 0) {
-                for (let i = 0; i < parallelList.length; i++) {
-                    const p = parallelList[i];
-                    const pDesc = toText(p.description) || toText(p.command?.command) || `并行任务 ${i + 1}`;
-                    let pName = pDesc.split(/[:：]/)[0].trim();
-                    if (!pName || pName.length > 18) pName = `Agent ${String.fromCharCode(65 + i)}`;
-                    const pTool = toText(p.tool) || "shell_exec";
-                    const workerId = `parallel-${step.id || step.stepId}-${i}`;
-
-                    if (!list.some((w) => w.name === pName && w.currentStep === pDesc)) {
-                        list.push({
-                            id: workerId,
-                            name: pName,
-                            role: pName.toLowerCase().includes("review") ? "reviewer" : (pName.toLowerCase().includes("code") ? "coder" : "worker"),
-                            roleLabel: pTool.includes("/") ? pTool.split("/")[1] : pTool,
-                            status: step.status,
-                            currentStep: pDesc,
-                            currentTool: pTool,
-                            progress: step.status === "succeeded" ? 100 : (step.status === "running" ? 65 : 15),
-                            startedAt: step.timestamp,
-                            durationMs: step.metrics?.toolDurationMs,
-                            thought: p.thought || pDesc,
-                            output: p.output || (typeof step.result === "string" ? step.result : undefined),
-                        });
-                    }
-                }
-            } else if (step.tool === "child_reviewer" || step.action === "child_reviewer") {
-                if (!list.some((w) => w.role === "reviewer")) {
+            if (step.tool === "child_reviewer" || step.action === "child_reviewer") {
+                if (!list.some((w) => w.role === "reviewer" || w.id.includes("reviewer"))) {
                     list.push({
                         id: `reviewer-${step.id || step.stepId}`,
                         name: "代码质量审查员",
@@ -312,6 +272,40 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                         status: step.status,
                         currentStep: step.description || "代码质量与安全性深度审查",
                         currentTool: "child_reviewer",
+                        progress: step.status === "succeeded" ? 100 : 65,
+                        startedAt: step.timestamp,
+                        durationMs: step.metrics?.toolDurationMs,
+                        thought: step.thought,
+                        output: typeof step.result === "string" ? step.result : undefined,
+                    });
+                }
+            } else if (step.tool === "child_writer" || step.action === "child_writer") {
+                if (!list.some((w) => w.id.includes("writer"))) {
+                    list.push({
+                        id: `writer-${step.id || step.stepId}`,
+                        name: "沙箱代码写入员",
+                        role: "coder",
+                        roleLabel: "写入员",
+                        status: step.status,
+                        currentStep: step.description || "在隔离沙箱中编写代码与测试",
+                        currentTool: "child_writer",
+                        progress: step.status === "succeeded" ? 100 : 65,
+                        startedAt: step.timestamp,
+                        durationMs: step.metrics?.toolDurationMs,
+                        thought: step.thought,
+                        output: typeof step.result === "string" ? step.result : undefined,
+                    });
+                }
+            } else if (step.tool === "child_worker" || step.action === "child_worker") {
+                if (!list.some((w) => w.id.includes("child_worker"))) {
+                    list.push({
+                        id: `worker-${step.id || step.stepId}`,
+                        name: "自治子工作者",
+                        role: "worker",
+                        roleLabel: "Worker",
+                        status: step.status,
+                        currentStep: step.description || "执行独立子任务目标",
+                        currentTool: "child_worker",
                         progress: step.status === "succeeded" ? 100 : 65,
                         startedAt: step.timestamp,
                         durationMs: step.metrics?.toolDurationMs,
@@ -1208,53 +1202,11 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         }
 
         function syncWorkersFromStep(stepItem: AgentStepItem) {
-            let parallelList: any[] = [];
-            const params = stepItem.rawParams || stepItem.params;
-            if (params && typeof params === "object") {
-                if (Array.isArray((params as any).parallel)) parallelList = (params as any).parallel;
-                else if (Array.isArray((params as any).commands)) parallelList = (params as any).commands;
-                else if (Array.isArray((params as any).tasks)) parallelList = (params as any).tasks;
-            }
-            if (parallelList.length === 0 && typeof params === "string" && params.includes("parallel")) {
-                try {
-                    const parsed = JSON.parse(params);
-                    if (parsed && Array.isArray(parsed.parallel)) parallelList = parsed.parallel;
-                } catch {}
-            }
-            if (parallelList.length > 0) {
-                for (let i = 0; i < parallelList.length; i++) {
-                    const p = parallelList[i];
-                    const pDesc = toText(p.description) || toText(p.command?.command) || `并行子任务 ${i + 1}`;
-                    let pName = pDesc.split(/[:：]/)[0].trim();
-                    if (!pName || pName.length > 15) pName = `Agent ${String.fromCharCode(65 + i)}`;
-                    const pTool = toText(p.tool) || "shell_exec";
-                    const workerId = `parallel-${i}`;
-
-                    let worker = teamWorkers.value.find((w) => w.id === workerId || w.name === pName);
-                    if (!worker) {
-                        teamWorkers.value.push({
-                            id: workerId,
-                            name: pName,
-                            role: pName.toLowerCase().includes("review") ? "reviewer" : (pName.toLowerCase().includes("code") ? "coder" : "worker"),
-                            roleLabel: pTool.includes("/") ? pTool.split("/")[1] : pTool,
-                            status: stepItem.status === "succeeded" ? "succeeded" : "running",
-                            currentStep: pDesc,
-                            currentTool: pTool,
-                            progress: stepItem.status === "succeeded" ? 100 : 60,
-                            startedAt: Date.now(),
-                        });
-                    } else {
-                        if (stepItem.status === "succeeded") {
-                            worker.status = "succeeded";
-                            worker.progress = 100;
-                        }
-                    }
-                }
-            } else if (stepItem.tool === "child_reviewer" || stepItem.action === "child_reviewer") {
-                let worker = teamWorkers.value.find((w) => w.role === "reviewer");
+            if (stepItem.tool === "child_reviewer" || stepItem.action === "child_reviewer") {
+                let worker = teamWorkers.value.find((w) => w.role === "reviewer" || w.id.includes("reviewer"));
                 if (!worker) {
                     teamWorkers.value.push({
-                        id: "reviewer-1",
+                        id: `reviewer-${stepItem.id || stepItem.stepId}`,
                         name: "代码质量审查员",
                         role: "reviewer",
                         roleLabel: "审查员",
@@ -1264,6 +1216,45 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                         progress: stepItem.status === "succeeded" ? 100 : 60,
                         startedAt: Date.now(),
                     });
+                } else if (stepItem.status === "succeeded") {
+                    worker.status = "succeeded";
+                    worker.progress = 100;
+                }
+            } else if (stepItem.tool === "child_writer" || stepItem.action === "child_writer") {
+                let worker = teamWorkers.value.find((w) => w.id.includes("writer"));
+                if (!worker) {
+                    teamWorkers.value.push({
+                        id: `writer-${stepItem.id || stepItem.stepId}`,
+                        name: "沙箱代码写入员",
+                        role: "coder",
+                        roleLabel: "写入员",
+                        status: stepItem.status === "succeeded" ? "succeeded" : "running",
+                        currentStep: stepItem.description || "在隔离沙箱中编写代码与测试",
+                        currentTool: "child_writer",
+                        progress: stepItem.status === "succeeded" ? 100 : 60,
+                        startedAt: Date.now(),
+                    });
+                } else if (stepItem.status === "succeeded") {
+                    worker.status = "succeeded";
+                    worker.progress = 100;
+                }
+            } else if (stepItem.tool === "child_worker" || stepItem.action === "child_worker") {
+                let worker = teamWorkers.value.find((w) => w.id.includes("child_worker"));
+                if (!worker) {
+                    teamWorkers.value.push({
+                        id: `worker-${stepItem.id || stepItem.stepId}`,
+                        name: "自治子工作者",
+                        role: "worker",
+                        roleLabel: "Worker",
+                        status: stepItem.status === "succeeded" ? "succeeded" : "running",
+                        currentStep: stepItem.description || "执行独立子任务目标",
+                        currentTool: "child_worker",
+                        progress: stepItem.status === "succeeded" ? 100 : 60,
+                        startedAt: Date.now(),
+                    });
+                } else if (stepItem.status === "succeeded") {
+                    worker.status = "succeeded";
+                    worker.progress = 100;
                 }
             }
         }

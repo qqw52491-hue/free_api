@@ -220,7 +220,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import AgentPanel from "../components/AgentPanel.vue";
@@ -541,13 +541,6 @@ async function updateTabTitle(id: string, newTitle: string) {
     }
     projectTreeRef.value?.refreshProjects();
 }
-
-watch(panelRefs, () => {
-    for (const tab of tabs.value) {
-        const panel = panelRefs[tab.id];
-        if (panel) tab.running = panel.isRunning;
-    }
-}, { deep: true });
 
 let unlistenRunStarted: UnlistenFn | null = null;
 let unlistenRunDone: UnlistenFn | null = null;

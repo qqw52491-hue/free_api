@@ -220,8 +220,9 @@ const activeTab = ref<string>("");
 
 // 当有新的子 Agent 派发出来时，自动聚焦到最新的子 Agent Tab
 watch(
-    () => workersList.value,
-    (workers) => {
+    () => workersList.value.map((w) => w.id).join(","),
+    () => {
+        const workers = workersList.value;
         if (workers.length > 0) {
             if (!workers.some((w) => w.id === activeTab.value)) {
                 activeTab.value = workers[0].id;
@@ -230,7 +231,7 @@ watch(
             activeTab.value = "";
         }
     },
-    { immediate: true, deep: true }
+    { immediate: true }
 );
 
 const selectedWorker = computed(() => {

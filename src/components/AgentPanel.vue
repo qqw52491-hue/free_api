@@ -62,8 +62,9 @@
         >
             <main class="chat-column">
                 <div class="chat-workspace-split">
-                    <!-- 🤖 中间左列：动态 Agent 协作流面板 (自适应竖排小框框，可折叠) -->
+                    <!-- 🤖 中间左列：动态 Agent 协作流面板 (仅在真正产生子 Agent 时动态展开) -->
                     <aside
+                        v-if="session.teamState.value.workers && session.teamState.value.workers.length > 0"
                         class="team-side-rail"
                         :class="{ 'is-collapsed': teamRailCollapsed }"
                     >
@@ -414,9 +415,9 @@ const activePreviewContent = ref("");
 const teamRailCollapsed = ref(false);
 
 watch(
-    () => session.isRunning.value,
-    (running) => {
-        if (running) {
+    () => session.teamState.value.workers.length,
+    (count) => {
+        if (count > 0) {
             teamRailCollapsed.value = false;
         }
     }
