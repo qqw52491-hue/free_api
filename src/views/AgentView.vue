@@ -220,8 +220,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import AgentPanel from "../components/AgentPanel.vue";
 import ProjectSidebarTree, { type AgentProject, type TreeSessionItem } from "../components/ProjectSidebarTree.vue";
 import ProjectWorkspace from "../components/ProjectWorkspace.vue";
@@ -469,14 +470,33 @@ async function backfillSessionTitles(sessions: ChatSessionRow[]) {
 }
 
 async function loadSessions() {
-    const sessions = await invoke<ChatSessionRow[]>("get_sessions");
-    tabs.value = sessions.map((s) => asTab(s));
-    if (!tabs.value.length) {
-        createNewTask();
-        return;
-    }
-    if (!tabs.value.some((tab) => tab.id === activeTabId.value)) activeTabId.value = tabs.value[0].id;
-    void backfillSessionTitles(sessions);
+    try {
+        const sessions = await invoke<ChatSessionRow[]>("get_sessions");
+        const currentDrafts = tabs.value.filter((t) => t.isDraft);
+        
+        // 增量合并现有 tabs，避免冲掉正在编辑的草稿与正在运行的 UI 状态
+        const newTabs: TabInfo[] = [...currentDrafts];
+        for (const s of sessions) {
+            const existing = tabs.value.find((t) => t.id === s.id);
+            if (existing) {
+                if (s.title && s.title !== existing.label && !existing.label.includes("…")) {
+                    existing.label = s.title;
+                }
+                newTabs.push(existing);
+            } else {
+                newTabs.push(asTab(s));
+            }
+        }
+        tabs.value = newTabs;
+        if (!tabs.value.length) {
+            createNewTask();
+            return;
+        }
+        if (!activeTabId.value || !tabs.value.some((tab) => tab.id === activeTabId.value)) {
+            activeTabId.value = tabs.value[0].id;
+        }
+        void backfillSessionTitles(sessions);
+    } catch {}
 }
 
 async function closeTab(id: string) {
@@ -529,6 +549,10 @@ watch(panelRefs, () => {
     }
 }, { deep: true });
 
+let unlistenRunStarted: UnlistenFn | null = null;
+let unlistenRunDone: UnlistenFn | null = null;
+let sidebarPollTimer: number | null = null;
+
 onMounted(async () => {
     await loadAllModels();
     try {
@@ -537,6 +561,39 @@ onMounted(async () => {
         tabs.value = [];
         createNewTask();
     }
+
+    // 监听手机 / 微信 / 远程发起的任务启动和结束，实时刷新桌面端侧边栏任务与项目列表
+    try {
+        unlistenRunStarted = await listen<{ session_id: string; run_id: string }>("channel-run-started", async (event) => {
+            await loadSessions();
+            projectTreeRef.value?.refreshProjects();
+            if (event.payload?.session_id) {
+                const tab = tabs.value.find((t) => t.id === event.payload.session_id);
+                if (tab) tab.running = true;
+            }
+        });
+        unlistenRunDone = await listen<{ session_id: string }>("channel-run-done", async (event) => {
+            await loadSessions();
+            projectTreeRef.value?.refreshProjects();
+            if (event.payload?.session_id) {
+                const tab = tabs.value.find((t) => t.id === event.payload.session_id);
+                if (tab) tab.running = false;
+            }
+        });
+    } catch {}
+
+    // 3 秒轻量轮询，确保在任意远程操作后桌面侧栏列表秒级自动同步
+    sidebarPollTimer = window.setInterval(async () => {
+        if (document.hidden) return;
+        await loadSessions();
+        projectTreeRef.value?.refreshProjects();
+    }, 3000);
+});
+
+onUnmounted(() => {
+    if (sidebarPollTimer !== null) clearInterval(sidebarPollTimer);
+    unlistenRunStarted?.();
+    unlistenRunDone?.();
 });
 </script>
 
