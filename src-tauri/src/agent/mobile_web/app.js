@@ -49,8 +49,9 @@ function renderMarkdownInline(text) {
 
 function setConn(ok, msg) {
   const dot = $("connDot");
-  dot.className = "dot " + (ok ? "ok" : "bad");
-  $("connText").textContent = msg || (ok ? "已连接到当前桌面窗口" : "未连接");
+  if (dot) dot.className = "dot " + (ok ? "ok" : "bad");
+  const txt = $("connText");
+  if (txt) txt.textContent = msg || (ok ? "已连接到当前桌面窗口" : "未连接");
 }
 
 function closeSidebarMobile() {
@@ -77,6 +78,18 @@ async function api(path, opts = {}) {
   if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
   setConn(true);
   return data;
+}
+
+async function uploadFile(sessionId, file) {
+  const buf = await file.arrayBuffer();
+  return api(`/channel/session/${encodeURIComponent(sessionId)}/attachment-upload`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "X-File-Name": encodeURIComponent(file.name),
+    },
+    body: buf,
+  });
 }
 
 function relTime(iso) {
@@ -343,7 +356,7 @@ function renderFlow() {
   const status = active ? f.run.status : (f.trace ? f.trace.status : (s.status || null));
 
   $("topTitle").textContent = "任务会话";
-  $("topSub").textContent = short(s.goal || f.trace?.goal || s.title || "任务执行中", 20);
+  $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span id="connText">${esc(short(s.goal || f.trace?.goal || s.title || "任务执行中", 20))}</span>`;
   $("btnBackTop").classList.remove("hidden");
   $("btnMenu").classList.add("hidden");
 
@@ -697,9 +710,13 @@ async function tryConnect(token) {
 
 async function loadModels() {
   try {
-    const data = await api("/channel/models");
-    S.models = (data.models || []).filter(m => m.enabled !== 0 && m.enabled !== false);
+    const [mData, rData] = await Promise.all([
+      api("/channel/models"),
+      api("/channel/role-cards").catch(() => ({ cards: [] })),
+    ]);
+    S.models = (mData.models || []).filter(m => m.enabled !== 0 && m.enabled !== false);
     S.modelById = Object.fromEntries(S.models.map(m => [m.id, m]));
+    S.roleCards = rData.cards || [];
     if (!S.selectedNewModelId && S.models.length) {
       S.selectedNewModelId = S.models[0].id;
     }

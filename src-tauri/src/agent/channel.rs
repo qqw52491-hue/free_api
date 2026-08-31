@@ -1719,6 +1719,7 @@ fn channel_router(state: Arc<ChannelState>) -> Router {
     Router::new()
         .route("/", get(handler_web_home))
         .route("/web", get(handler_web_home))
+        .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }))
         .route("/channel/projects", get(handler_projects))
         .route("/channel/sessions", get(handler_sessions))
         .route("/channel/session", post(handler_session))
