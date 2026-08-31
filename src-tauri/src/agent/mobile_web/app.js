@@ -785,10 +785,7 @@ function openModal(prefillProjectId) {
   $("typeProject").style.background = newTaskType === "project" ? "var(--accent)" : "transparent";
   $("projField").style.display = newTaskType === "project" ? "" : "none";
   
-  if (!S.selectedNewModelId && S.models.length) {
-    S.selectedNewModelId = S.models[0].id;
-  }
-  $("lblNewModel").textContent = S.selectedNewModelId ? modelName(S.selectedNewModelId) : "选择模型…";
+  $("lblNewModel").textContent = S.selectedNewModelId ? modelName(S.selectedNewModelId) : "请选择模型…";
   
   $("newGoal").value = "";
   $("modalNew").classList.remove("hidden");
@@ -796,7 +793,11 @@ function openModal(prefillProjectId) {
 
 async function submitNew() {
   const projectId = newTaskType === "project" ? $("newProj").value : null;
-  const modelId = S.selectedNewModelId || (S.models[0] ? S.models[0].id : "");
+  const modelId = S.selectedNewModelId || "";
+  if (!modelId) {
+    toast("请先选择执行模型");
+    return;
+  }
   const goal = $("newGoal").value.trim();
   if (!goal) { toast("请填写任务内容"); return; }
   const btn = $("newSubmit"); btn.disabled = true;
@@ -808,7 +809,11 @@ async function submitNew() {
     $("modalNew").classList.add("hidden");
     await loadHome();
     await openSession(sess.session_id);
-    await api("/channel/task", { method: "POST", body: JSON.stringify({ session_id: sess.session_id, goal }) });
+    const routing = { pro: modelId, flash: modelId, vision: modelId };
+    await api("/channel/task", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sess.session_id, goal, model_routing: routing }),
+    });
     toast("任务已启动");
     await loadFlow(sess.session_id);
   } catch (e) {
@@ -871,7 +876,7 @@ function bind() {
       S.selectedNewModelId,
       (v) => {
         S.selectedNewModelId = v;
-        $("lblNewModel").textContent = modelName(v);
+        $("lblNewModel").textContent = v ? modelName(v) : "请选择模型…";
       }
     );
   };
@@ -879,6 +884,7 @@ function bind() {
   $("typeScratch").onclick = () => { newTaskType = "scratch"; $("projField").style.display = "none"; $("typeScratch").style.background = "var(--accent)"; $("typeProject").style.background = "transparent"; };
   $("typeProject").onclick = () => { newTaskType = "project"; $("projField").style.display = ""; $("typeProject").style.background = "var(--accent)"; $("typeScratch").style.background = "transparent"; };
   $("newCancel").onclick = () => $("modalNew").classList.add("hidden");
+  $("modalNew").onclick = (e) => { if (e.target === $("modalNew")) $("modalNew").classList.add("hidden"); };
   $("newSubmit").onclick = submitNew;
 
   // 快捷回到底部
@@ -943,9 +949,6 @@ async function loadModels() {
     S.models = (mData.models || []).filter(m => m.enabled !== 0 && m.enabled !== false);
     S.modelById = Object.fromEntries(S.models.map(m => [m.id, m]));
     S.roleCards = rData.cards || [];
-    if (!S.selectedNewModelId && S.models.length) {
-      S.selectedNewModelId = S.models[0].id;
-    }
   } catch (e) {}
 }
 

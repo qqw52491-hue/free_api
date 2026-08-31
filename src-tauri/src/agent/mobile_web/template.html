@@ -90,34 +90,11 @@
     </div>
   </div>
   <input id="clipInput" type="file" multiple class="hidden">
-
-  <!-- 通用选择弹层（带实时搜索功能） -->
-  <div id="sheetPick" class="modal hidden">
-    <div class="modal-card">
-      <h3 id="sheetTitle"></h3>
-      <div class="search-input-box" id="sheetSearchWrap">
-        <input id="sheetSearchInput" placeholder="🔍 搜索选项..." autocomplete="off">
-      </div>
-      <div id="sheetList" class="sheet-items-scroll"></div>
-      <div class="modal-foot"><button class="btn" id="sheetClose">取消</button></div>
-    </div>
-  </div>
-
-  <!-- 产物预览弹层 -->
-  <div id="artPreview" class="modal hidden">
-    <div class="modal-card">
-      <h3 id="apTitle"></h3>
-      <div id="apBody" style="max-height:50vh; overflow-y:auto; margin-bottom:10px;"></div>
-      <div class="modal-foot">
-        <button class="btn" id="apClose">关闭</button>
-        <a id="apOpenRaw" class="btn" target="_blank" rel="noopener">原始窗口打开</a>
-        <a id="apDownload" class="btn primary" download>⬇ 下载</a>
-      </div>
-    </div>
-  </div>
 </div>
 
-<!-- 新建任务弹窗 -->
+<!-- ================= 顶层弹窗与抽屉（同级平铺，避免被内部容器层级遮挡） ================= -->
+
+<!-- 新建任务弹窗 (Level 1: z-index 50) -->
 <div id="modalNew" class="modal hidden">
   <div class="modal-card">
     <h3>🚀 发起新任务</h3>
@@ -136,7 +113,7 @@
     <div class="field">
       <label>执行模型</label>
       <button id="btnPickNewModel" type="button" class="btn" style="width:100%; justify-content:space-between; padding:8px 10px; font-size:12.5px;">
-        <span id="lblNewModel">选择模型…</span>
+        <span id="lblNewModel">请选择模型…</span>
         <span style="color:var(--dim); font-size:11px;">🔍 搜索切换 ▾</span>
       </button>
     </div>
@@ -145,8 +122,33 @@
       <textarea id="newGoal" placeholder="描述要让 Agent 完成的目标…"></textarea>
     </div>
     <div class="modal-foot">
-      <button class="btn" id="newCancel">取消</button>
-      <button class="btn primary" id="newSubmit">启动</button>
+      <button class="btn" id="newCancel" type="button">取消</button>
+      <button class="btn primary" id="newSubmit" type="button">启动</button>
     </div>
+  </div>
+</div>
+
+<!-- 产物预览弹层 (Level 1: z-index 50) -->
+<div id="artPreview" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="apTitle"></h3>
+    <div id="apBody" style="max-height:50vh; overflow-y:auto; margin-bottom:10px;"></div>
+    <div class="modal-foot">
+      <button class="btn" id="apClose" type="button">关闭</button>
+      <a id="apOpenRaw" class="btn" target="_blank" rel="noopener">原始窗口打开</a>
+      <a id="apDownload" class="btn primary" download>⬇ 下载</a>
+    </div>
+  </div>
+</div>
+
+<!-- 通用选择弹层（Level 2: z-index 70，永远浮于新建弹窗之上） -->
+<div id="sheetPick" class="modal sheet-pick-modal hidden">
+  <div class="modal-card">
+    <h3 id="sheetTitle"></h3>
+    <div class="search-input-box" id="sheetSearchWrap">
+      <input id="sheetSearchInput" placeholder="🔍 搜索选项..." autocomplete="off">
+    </div>
+    <div id="sheetList" class="sheet-items-scroll"></div>
+    <div class="modal-foot"><button class="btn" id="sheetClose" type="button">取消</button></div>
   </div>
 </div>

@@ -791,6 +791,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   display: flex; align-items: flex-end; justify-content: center;
 }
 @media (min-width: 640px) { .modal { align-items: center; } }
+.sheet-pick-modal {
+  z-index: 80 !important;
+}
 .modal-card {
   width: 100%; max-width: 440px;
   background: var(--bg2);
@@ -816,7 +819,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   top: calc(55px + env(safe-area-inset-top, 0px));
   left: 50%;
   transform: translateX(-50%);
-  z-index: 60;
+  z-index: 99;
   background: rgba(24, 26, 36, 0.95);
   border: 1px solid var(--line2);
   color: var(--text);
