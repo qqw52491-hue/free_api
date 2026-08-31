@@ -2156,8 +2156,10 @@ textarea::placeholder {
     position: absolute;
     bottom: calc(100% + 8px);
     left: 0;
-    width: 280px;
-    padding: 10px 12px;
+    width: max-content;
+    min-width: 340px;
+    max-width: 460px;
+    padding: 10px 14px;
     background: #18181b;
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 8px;
@@ -2178,10 +2180,11 @@ textarea::placeholder {
 .shortcut-row {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    justify-content: flex-start;
+    gap: 12px;
     margin-bottom: 6px;
     font-size: 11px;
+    white-space: nowrap;
 }
 .shortcut-row:last-child {
     margin-bottom: 0;
@@ -2191,6 +2194,7 @@ textarea::placeholder {
     align-items: center;
     gap: 3px;
     flex-shrink: 0;
+    min-width: 86px;
 }
 .shortcut-keys kbd {
     background: rgba(255, 255, 255, 0.1);
@@ -2204,8 +2208,9 @@ textarea::placeholder {
 }
 .shortcut-desc {
     color: #a1a1aa;
-    font-size: 10.5px;
+    font-size: 11px;
     line-height: 1.3;
+    white-space: nowrap;
 }
 .shortcut-desc .text-red {
     color: #f87171;
