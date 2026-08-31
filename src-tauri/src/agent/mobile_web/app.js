@@ -16,8 +16,6 @@ const S = {
   taskOpts: { model_id: "", context_budget_mode: "", role_card: "" },
   selectedNewModelId: "",
   composerFiles: [],
-  lastTraceStamp: "",
-  goalOpen: false,
 };
 
 const BUDGETS = [
@@ -379,7 +377,24 @@ function renderStep(st) {
   `;
 }
 
-// ---------------------------------------------------------------- 数据加载与渲染
+// ---------------------------------------------------------------- 数据加载与多轮会话流渲染
+const traceDetailCache = new Map();
+
+async function fetchTraceDetail(t) {
+  const stamp = `${t.id}:${t.step_count || 0}:${t.updated_at || ""}`;
+  if (traceDetailCache.has(t.id) && traceDetailCache.get(t.id).stamp === stamp) {
+    return traceDetailCache.get(t.id).trace;
+  }
+  try {
+    const detail = await api(`/channel/trace/${encodeURIComponent(t.id)}`);
+    if (detail && detail.trace) {
+      traceDetailCache.set(t.id, { stamp, trace: detail.trace });
+      return detail.trace;
+    }
+  } catch (e) {}
+  return t;
+}
+
 async function loadHome() {
   const [projRes, sessRes] = await Promise.all([
     api("/channel/projects"),
@@ -406,16 +421,18 @@ async function loadFlow(sessionId) {
   const session = S.sessions.find(s => s.id === sessionId) || null;
   const run = (runsRes.runs || []).filter(r => r.session_id === sessionId)
     .sort((a, b) => (b.started_at || "").localeCompare(a.started_at || ""))[0] || null;
-  const traces = tracesRes.traces || [];
-  const latest = traces.length ? traces[traces.length - 1] : null;
-  const stamp = latest ? `${latest.id}:${latest.step_count}:${latest.updated_at}` : "";
-  let trace = S.flow && S.flow.sessionId === sessionId ? S.flow.trace : null;
-  if (latest && (stamp !== S.lastTraceStamp || !trace)) {
-    const detail = await api(`/channel/trace/${encodeURIComponent(latest.id)}`);
-    trace = detail.trace;
-  }
-  S.lastTraceStamp = stamp;
-  S.flow = { sessionId, session, run, trace, traces, artifacts: artsRes.artifacts || [] };
+  const traceList = tracesRes.traces || [];
+  
+  // 并行获取该会话所有历史轮次完整步骤
+  const fullTraces = await Promise.all(traceList.map(t => fetchTraceDetail(t)));
+
+  S.flow = {
+    sessionId,
+    session,
+    run,
+    traces: fullTraces,
+    artifacts: artsRes.artifacts || [],
+  };
   renderFlow();
 }
 
@@ -431,7 +448,8 @@ function groupsOf() {
 }
 
 function taskCard(s) {
-  const title = esc(s.goal || s.title);
+  // 保持会话标题稳定，优先展示 title，副标题展示最新进展
+  const title = esc(s.title || s.goal || "未命名会话");
   const time = esc(relTime(s.trace_updated_at || s.updated_at));
   return `
     <div class="task-row-card" data-session="${esc(s.id)}">
@@ -485,7 +503,7 @@ function renderSidebar() {
     const open = S.openGroups.has(g.key);
     const items = g.sessions.slice(0, 12).map(s => `
       <button class="side-task ${S.currentSessionId === s.id ? "active" : ""}" data-session="${esc(s.id)}">
-        <div class="t">${esc(short(s.goal || s.title, 22))}</div>
+        <div class="t">${esc(short(s.title || s.goal, 22))}</div>
         <div class="time">${esc(relTime(s.trace_updated_at || s.updated_at))}</div>
       </button>
     `).join("");
@@ -512,22 +530,43 @@ function renderFlow() {
   if (!f) return;
   const s = f.session || {};
   const active = f.run && ["running", "waiting_human"].includes(f.run.status);
-  const status = active ? f.run.status : (f.trace ? f.trace.status : (s.status || null));
+  const latestTrace = f.traces.length ? f.traces[f.traces.length - 1] : null;
 
   $("topTitle").textContent = "任务会话";
-  $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span id="connText">${esc(short(s.goal || f.trace?.goal || s.title || "任务执行中", 20))}</span>`;
+  $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span id="connText">${esc(short(s.title || s.goal || "任务会话", 20))}</span>`;
   $("btnBackTop").classList.remove("hidden");
   $("btnMenu").classList.add("hidden");
 
-  // 用户目标气泡
-  const goalText = s.goal || f.trace?.goal || s.title || "";
-  const goalMore = goalText.length > 70 ? `<span class="gmore">${S.goalOpen ? "收起 ▲" : "展开全文 ▼"}</span>` : "";
-  $("flowGoal").innerHTML = `<span class="arrow">→</span><div class="gtxt">${formatMarkdown(goalText)}${goalMore}</div>`;
-  $("flowGoal").onclick = (e) => {
-    if (e.target.closest("a") || e.target.closest("button")) return;
-    S.goalOpen = !S.goalOpen;
-    renderFlow();
-  };
+  // 完整渲染会话中的每一轮历史对话（按时间顺序自上而下完整排列）
+  let html = "";
+  if (!f.traces.length) {
+    if (s.goal) {
+      html += `<div class="goal-bubble"><span class="arrow">→</span><div class="gtxt">${formatMarkdown(s.goal)}</div></div>`;
+    }
+    html += `<div class="empty-tip">等待执行记录…</div>`;
+  } else {
+    html = f.traces.map((tr, idx) => {
+      const isLatest = idx === f.traces.length - 1;
+      const trGoal = tr.goal ? `<div class="goal-bubble"><span class="arrow">→</span><div class="gtxt">${formatMarkdown(tr.goal)}</div></div>` : "";
+      const trSteps = (tr.steps || []).map(st => renderStep(st)).join("");
+      
+      const trFailed = tr.status === "failed";
+      const trResult = (tr.completion && tr.completion.summary) ? tr.completion.summary : null;
+      const resultHtml = (!active || !isLatest) && trResult
+        ? `<div class="result-card ${trFailed ? "fail" : ""}"><div class="rlabel">${trFailed ? "✕ 失败原因" : "✓ 执行结果"}</div>${formatMarkdown(trResult)}</div>`
+        : "";
+
+      return `
+        <div class="turn-section" style="margin-bottom: 12px;">
+          ${trGoal}
+          ${trSteps}
+          ${resultHtml}
+        </div>
+      `;
+    }).join("");
+  }
+
+  $("timeline").innerHTML = html;
 
   // 实时状态行
   const live = $("liveLine");
@@ -539,27 +578,19 @@ function renderFlow() {
     live.innerHTML = `<span class="livedot"></span><span style="color:var(--amber); font-weight:600">等待你的回答</span>`;
   } else {
     live.className = "live-line";
-    live.innerHTML = `<span style="color:var(--dim)">${esc(s.project_name || "临时任务")} · ${esc(modelName(s.model_id))}${f.trace ? ` · ${f.trace.step_count ?? (f.trace.steps || []).length} 步` : ""}</span>`;
+    live.innerHTML = `<span style="color:var(--dim)">${esc(s.project_name || "临时任务")} · ${esc(modelName(s.model_id))}${f.traces.length > 1 ? ` · 共 ${f.traces.length} 轮对话` : ""}</span>`;
   }
 
-  // 提问卡片与结果卡片
+  // 提问卡片与当前运行错误
   const paused = f.run && f.run.status === "waiting_human" ? (f.run.paused_reason || "Agent 请求人工协助。") : null;
   $("askCard").innerHTML = paused
     ? `<div class="ask-card"><div class="rlabel">❓ Agent 提问</div><div class="q">${formatMarkdown(paused)}</div><div class="hint">在底部输入框直接回复即可</div></div>`
     : "";
 
-  const failed = status === "failed";
-  const resultText = (f.run && f.run.error) ? f.run.error
-    : (f.run && f.run.result) ? f.run.result
-    : (f.trace && f.trace.completion && f.trace.completion.summary) ? f.trace.completion.summary : null;
-  $("resultCard").innerHTML = (!active && resultText)
-    ? `<div class="result-card ${failed ? "fail" : ""}"><div class="rlabel">${failed ? "✕ 失败原因" : "✓ 执行结果"}</div>${formatMarkdown(resultText)}</div>`
+  const runError = (f.run && f.run.error) ? f.run.error : null;
+  $("resultCard").innerHTML = runError
+    ? `<div class="result-card fail"><div class="rlabel">✕ 运行中断</div>${formatMarkdown(runError)}</div>`
     : "";
-
-  // 步骤列表渲染
-  const steps = (f.trace && f.trace.steps) || [];
-  const stepHtmls = steps.map(st => renderStep(st)).join("");
-  $("timeline").innerHTML = stepHtmls || `<div class="empty-tip">等待执行记录…</div>`;
 
   // 产物清单
   const arts = f.artifacts || [];
@@ -573,7 +604,7 @@ function renderFlow() {
       </div>
     `).join("") + `</div>` : "";
 
-  // Composer 状态
+  // Composer 状态与占位符
   const input = $("followInput");
   $("btnStop").classList.toggle("hidden", !(f.run && f.run.status === "running"));
   if (f.run && f.run.status === "waiting_human") {
@@ -581,7 +612,7 @@ function renderFlow() {
   } else if (f.run && f.run.status === "running") {
     input.placeholder = "继续输入以排队后续修改 / 接管方向…";
   } else {
-    input.placeholder = "在当前会话发起下一个任务…";
+    input.placeholder = "在当前会话继续对话…";
   }
 }
 
@@ -591,7 +622,6 @@ async function openSession(sessionId) {
   S.view = { name: "flow" };
   $("viewHome").classList.add("hidden");
   $("viewFlow").classList.remove("hidden");
-  S.lastTraceStamp = "";
   $("timeline").innerHTML = `<div class="empty-tip">加载中…</div>`;
   try { await loadFlow(sessionId); } catch (e) { toast("加载失败：" + e.message); }
 }
@@ -630,8 +660,7 @@ async function sendComposer() {
       const body = { session_id: f.sessionId, goal: text };
       if (Object.keys(routing).length) body.model_routing = routing;
       await api("/channel/task", { method: "POST", body: JSON.stringify(body) });
-      toast("任务已启动");
-      S.lastTraceStamp = "";
+      toast("已发送");
     }
     input.value = "";
     await loadFlow(f.sessionId);
@@ -895,7 +924,7 @@ function connectSSE(force) {
     S.es = es;
     es.onopen = () => { setConn(true); };
     es.onmessage = (e) => {
-      // 收到任何事件（无论来自桌面、微信桥还是手机）立即全量刷新视图
+      // 收到任何事件（来自桌面、微信桥或手机）立即全量刷新视图
       if (S.view.name === "flow" && S.currentSessionId) {
         loadFlow(S.currentSessionId).catch(() => {});
         loadHome().catch(() => {});

@@ -49,11 +49,9 @@
         <div id="wsList"></div>
       </section>
 
-      <!-- 任务执行流 (View Flow - 匹配截图 1) -->
+      <!-- 任务执行流 (View Flow - 多轮连续对话完整流) -->
       <section id="viewFlow" class="hidden">
-        <div class="goal-bubble" id="flowGoal"></div>
         <div class="live-line" id="liveLine"></div>
-        
         <div id="timeline"></div>
         <div id="artBox"></div>
         <div id="askCard"></div>
@@ -65,14 +63,14 @@
   <!-- 悬浮快速滚动到底部按钮 -->
   <button id="btnScrollBottom" class="scroll-bottom-btn hidden" title="回到底部">↓</button>
 
-  <!-- 底部 Composer 输入底座 (匹配截图 1) -->
+  <!-- 底部 Composer 输入底座 -->
   <div class="composer-wrap" id="composer">
     <div class="composer-inner">
       <div id="composerFiles" style="margin-bottom: 4px;"></div>
       
       <div class="composer-dock">
         <div class="composer-input-row">
-          <textarea id="followInput" rows="1" placeholder="继续输入以排队后续修改…" autocomplete="off"></textarea>
+          <textarea id="followInput" rows="1" placeholder="在当前会话继续对话…" autocomplete="off"></textarea>
         </div>
         
         <div class="composer-toolbar">
