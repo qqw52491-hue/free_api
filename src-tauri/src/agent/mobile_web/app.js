@@ -489,6 +489,7 @@ function taskCard(s) {
         <div class="sub-line">${isRunning ? '<span style="color:#38bdf8; font-weight:600;">● 工作中…</span> · ' : ''}${time} · ${esc(modelName(s.model_id))}</div>
       </div>
       ${chip(s.status)}
+      <button class="task-del-btn" data-del-session="${esc(s.id)}" title="删除此会话">🗑</button>
     </div>
   `;
 }
@@ -497,6 +498,7 @@ function renderHome() {
   $("topTitle").textContent = "free_api 远程控制";
   $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span id="connText">已连接到当前桌面窗口</span>`;
   $("btnBackTop").classList.add("hidden");
+  $("btnDelSession").classList.add("hidden");
   $("btnMenu").classList.remove("hidden");
   $("homeMeta").textContent = `${S.projects.length + 1} 个工作区 · ${S.sessions.length} 个任务`;
   
@@ -532,11 +534,14 @@ function renderSidebar() {
       <button class="btn primary block" data-new="__scratch__">🚀 在临时工作区发任务</button>
     </div>` + groups.map(g => {
     const open = S.openGroups.has(g.key);
-    const items = g.sessions.slice(0, 12).map(s => `
-      <button class="side-task ${S.currentSessionId === s.id ? "active" : ""}" data-session="${esc(s.id)}">
-        <div class="t">${esc(short(s.title || s.goal, 22))}</div>
-        <div class="time">${esc(relTime(s.trace_updated_at || s.updated_at))}</div>
-      </button>
+    const items = g.sessions.slice(0, 15).map(s => `
+      <div class="side-task ${S.currentSessionId === s.id ? "active" : ""}" data-session="${esc(s.id)}">
+        <div class="side-task-info">
+          <div class="t">${esc(short(s.title || s.goal, 20))}</div>
+          <div class="time">${esc(relTime(s.trace_updated_at || s.updated_at))}</div>
+        </div>
+        <button class="side-del-btn" data-del-session="${esc(s.id)}" title="删除此会话">✕</button>
+      </div>
     `).join("");
     return `
       <div class="side-group ${open ? "open" : ""}" data-sgroup="${esc(g.key)}">
@@ -569,6 +574,7 @@ function renderFlow() {
   $("topTitle").textContent = s.title || "任务会话";
   $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span style="color:var(--dim); font-size:11px; max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:middle;">[${esc(dirLabel)}] ${esc(fullDirPath)}</span>`;
   $("btnBackTop").classList.remove("hidden");
+  $("btnDelSession").classList.remove("hidden");
   $("btnMenu").classList.add("hidden");
 
   // 完整渲染会话中的每一轮历史对话（按时间顺序自上而下完整排列）
@@ -599,19 +605,31 @@ function renderFlow() {
     }).join("");
   }
 
-  $("timeline").innerHTML = html;
+  // 仅在 html 内容真正变动时才重写 DOM，彻底杜绝轮询导致的整体重绘闪烁
+  const timelineEl = $("timeline");
+  if (timelineEl.dataset.renderedHtml !== html) {
+    timelineEl.innerHTML = html;
+    timelineEl.dataset.renderedHtml = html;
+  }
 
-  // 实时状态行
+  // 实时状态行（带 DOM 差异防闪烁）
   const live = $("liveLine");
+  let liveHtml = "";
+  let liveClass = "live-line";
   if (f.run && f.run.status === "running") {
-    live.className = "live-line";
-    live.innerHTML = `<span class="livedot"></span><strong>工作中</strong> <span style="color:var(--dim)">· ${esc(dirLabel)} · ${esc(f.run.state_detail || f.run.phase || "执行中")}${f.run.event_count ? ` · ${f.run.event_count} 事件` : ""}</span>`;
+    liveClass = "live-line";
+    liveHtml = `<span class="livedot"></span><strong>工作中</strong> <span style="color:var(--dim)">· ${esc(dirLabel)} · ${esc(f.run.state_detail || f.run.phase || "执行中")}${f.run.event_count ? ` · ${f.run.event_count} 事件` : ""}</span>`;
   } else if (f.run && f.run.status === "waiting_human") {
-    live.className = "live-line wait";
-    live.innerHTML = `<span class="livedot"></span><span style="color:var(--amber); font-weight:600">等待你的回答 · ${esc(dirLabel)}</span>`;
+    liveClass = "live-line wait";
+    liveHtml = `<span class="livedot"></span><span style="color:var(--amber); font-weight:600">等待你的回答 · ${esc(dirLabel)}</span>`;
   } else {
-    live.className = "live-line";
-    live.innerHTML = `<span style="color:var(--dim)">${esc(dirLabel)} · ${esc(modelName(s.model_id))}${f.traces.length > 0 ? ` · 共 ${f.traces.length} 轮对话` : ""}</span>`;
+    liveClass = "live-line";
+    liveHtml = `<span style="color:var(--dim)">${esc(dirLabel)} · ${esc(modelName(s.model_id))}${f.traces.length > 0 ? ` · 共 ${f.traces.length} 轮对话` : ""}</span>`;
+  }
+  if (live.dataset.renderedHtml !== liveHtml || live.className !== liveClass) {
+    live.className = liveClass;
+    live.innerHTML = liveHtml;
+    live.dataset.renderedHtml = liveHtml;
   }
 
   // 提问卡片（等待人类输入）
@@ -647,9 +665,11 @@ function renderFlow() {
 async function openSession(sessionId) {
   closeSidebarMobile();
   S.currentSessionId = sessionId;
+  renderSidebar();
   S.view = { name: "flow" };
   $("viewHome").classList.add("hidden");
   $("viewFlow").classList.remove("hidden");
+  $("btnDelSession").classList.remove("hidden");
   $("timeline").innerHTML = `<div class="empty-tip">加载中…</div>`;
   try { await loadFlow(sessionId); } catch (e) { toast("加载失败：" + e.message); }
 }
@@ -660,8 +680,24 @@ function goHome() {
   S.view = { name: "home" };
   $("viewFlow").classList.add("hidden");
   $("viewHome").classList.remove("hidden");
+  $("btnDelSession").classList.add("hidden");
   renderHome(); renderSidebar();
   loadHome().catch(() => {});
+}
+
+async function deleteSession(sessionId) {
+  if (!confirm("确定要删除此对话吗？删除后将无法恢复。")) return;
+  try {
+    await api(`/channel/session/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    toast("已删除对话");
+    if (S.currentSessionId === sessionId) {
+      goHome();
+    } else {
+      await loadHome();
+    }
+  } catch (e) {
+    toast("删除失败: " + e.message);
+  }
 }
 
 async function sendComposer() {
@@ -918,6 +954,9 @@ function bind() {
   };
   $("btnTheme").onclick = cycleTheme;
   $("btnNew").onclick = () => quickCreateSession("__scratch__");
+  $("btnDelSession").onclick = () => {
+    if (S.currentSessionId) deleteSession(S.currentSessionId);
+  };
   $("btnSend").onclick = sendComposer;
   $("btnStop").onclick = stopRun;
   $("btnClip").onclick = () => $("clipInput").click();
@@ -952,6 +991,13 @@ function bind() {
 
   // 全局事件代理
   document.addEventListener("click", (e) => {
+    const del = e.target.closest("[data-del-session]");
+    if (del) {
+      e.stopPropagation();
+      e.preventDefault();
+      deleteSession(del.dataset.delSession);
+      return;
+    }
     const th = e.target.closest("[data-thought-toggle]");
     if (th) {
       const id = th.dataset.thoughtToggle;

@@ -15,7 +15,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Html;
 use axum::response::sse::{Event as SseEvent, Sse};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -455,6 +455,34 @@ async fn handler_session(
         "title": session.title,
         "model_id": session.model_id,
     })))
+}
+
+async fn handler_delete_session(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let db = state.app.state::<DbState>();
+    let id = session_id.trim();
+    if let Ok(conn) = db.0.lock() {
+        let _ = conn.execute("DELETE FROM agent_task_records WHERE session_id=?1", rusqlite::params![id]);
+        let _ = conn.execute("DELETE FROM agent_task_resources WHERE session_id=?1", rusqlite::params![id]);
+        let _ = conn.execute("DELETE FROM agent_checkpoints WHERE run_id=?1", rusqlite::params![id]);
+        let _ = conn.execute("DELETE FROM agent_run_traces WHERE session_id=?1", rusqlite::params![id]);
+        let _ = conn.execute("DELETE FROM agent_step_logs WHERE session_id=?1", rusqlite::params![id]);
+        let _ = conn.execute("DELETE FROM agent_memory_nodes WHERE session_id=?1", rusqlite::params![id]);
+        let _ = conn.execute("DELETE FROM agent_lesson_recalls WHERE session_id=?1", rusqlite::params![id]);
+        let _ = conn.execute("DELETE FROM chat_messages WHERE session_id=?1", rusqlite::params![id]);
+        let _ = conn.execute("DELETE FROM project_sessions WHERE session_id=?1", rusqlite::params![id]);
+        let _ = conn.execute("DELETE FROM chat_sessions WHERE id=?1", rusqlite::params![id]);
+    }
+    notify_session_event(id, "deleted");
+    let _ = state.app.emit("channel-run-done", json!({ "session_id": id, "status": "deleted", "at": now_ts() }));
+    Ok(Json(json!({ "ok": true, "session_id": id })))
 }
 
 /// 确保 scratch 项目存在并返回其 id（未绑定任务的兜底工作区）
@@ -1766,6 +1794,7 @@ fn channel_router(state: Arc<ChannelState>) -> Router {
         .route("/channel/projects", get(handler_projects))
         .route("/channel/sessions", get(handler_sessions))
         .route("/channel/session", post(handler_session))
+        .route("/channel/session/{session_id}", delete(handler_delete_session))
         .route("/channel/task", post(handler_task))
         .route(
             "/channel/session/{session_id}/traces",
