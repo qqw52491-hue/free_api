@@ -582,7 +582,9 @@ function renderFlow() {
       const trSteps = (tr.steps || []).map(st => renderStep(st)).join("");
       
       const trFailed = tr.status === "failed";
-      const trResult = (tr.completion && tr.completion.summary) ? tr.completion.summary : null;
+      const trResult = (tr.completion && tr.completion.summary)
+        ? tr.completion.summary
+        : (isLatest && trFailed && f.run && f.run.error ? f.run.error : null);
       const resultHtml = (!active || !isLatest) && trResult
         ? `<div class="result-card ${trFailed ? "fail" : ""}"><div class="rlabel">${trFailed ? "✕ 失败原因" : "✓ 执行结果"}</div>${formatMarkdown(trResult)}</div>`
         : "";
@@ -612,15 +614,10 @@ function renderFlow() {
     live.innerHTML = `<span style="color:var(--dim)">${esc(dirLabel)} · ${esc(modelName(s.model_id))}${f.traces.length > 0 ? ` · 共 ${f.traces.length} 轮对话` : ""}</span>`;
   }
 
-  // 提问卡片与当前运行错误
+  // 提问卡片（等待人类输入）
   const paused = f.run && f.run.status === "waiting_human" ? (f.run.paused_reason || "Agent 请求人工协助。") : null;
   $("askCard").innerHTML = paused
     ? `<div class="ask-card"><div class="rlabel">❓ Agent 提问</div><div class="q">${formatMarkdown(paused)}</div><div class="hint">在底部输入框直接回复即可</div></div>`
-    : "";
-
-  const runError = (f.run && f.run.error) ? f.run.error : null;
-  $("resultCard").innerHTML = runError
-    ? `<div class="result-card fail"><div class="rlabel">✕ 运行中断</div>${formatMarkdown(runError)}</div>`
     : "";
 
   // 产物清单
