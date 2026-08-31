@@ -12,15 +12,10 @@ const S = {
   currentSessionId: null,
   flow: null,
   expandedSteps: new Set(),
-  collapsedPlans: new Set(),
   expandedThoughts: new Set(),
   taskOpts: { model_id: "", context_budget_mode: "", role_card: "" },
+  selectedNewModelId: "",
   composerFiles: [],
-  pendingFiles: [],
-  pollTimer: null,
-  tick: 0,
-  es: null,
-  sseFails: 0,
   lastTraceStamp: "",
   goalOpen: false,
 };
@@ -37,7 +32,7 @@ function esc(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/* 格式化 Markdown 行内高亮 */
+/* 格式化 Markdown 与行内高亮 (匹配参考截图 1) */
 function renderMarkdownInline(text) {
   if (!text) return "";
   let out = esc(text);
@@ -45,8 +40,10 @@ function renderMarkdownInline(text) {
   out = out.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
   // **bold**
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // filepath.ext highlight
+  // 文件名胶囊高亮
   out = out.replace(/\b([a-zA-Z0-9_\-\.\/]+\.(?:md|ts|js|rs|json|vue|html|css|py|yaml|yml))\b/g, '<code class="inline-code">$1</code>');
+  // ① ② ③ 序号加粗美化
+  out = out.replace(/([①②③④⑤⑥⑦⑧⑨⑩])/g, '<strong style="color:var(--accent2); margin-right:2px;">$1</strong>');
   return out;
 }
 
@@ -54,6 +51,13 @@ function setConn(ok, msg) {
   const dot = $("connDot");
   dot.className = "dot " + (ok ? "ok" : "bad");
   $("connText").textContent = msg || (ok ? "已连接到当前桌面窗口" : "未连接");
+}
+
+function closeSidebarMobile() {
+  const sb = $("sidebar");
+  const sm = $("sideMask");
+  if (sb) sb.classList.remove("show");
+  if (sm) sm.classList.remove("show");
 }
 
 async function api(path, opts = {}) {
@@ -102,7 +106,7 @@ function toolIcon(tool) {
   if (/command|cmd|shell|exec|run/.test(t)) return "💻";
   if (/search|grep|find|query/.test(t)) return "🔍";
   if (/artifact|save|upload/.test(t)) return "📦";
-  return "⚙️";
+  return "🔍";
 }
 
 const STATUS = {
@@ -120,12 +124,12 @@ function chip(status, extra) {
 }
 
 function stepChip(status) {
-  const map = { succeeded: ["done", "✓"], failed: ["failed", "✗"], finish_challenged: ["waiting", "待确认"], running: ["running", "●"] };
+  const map = { succeeded: ["done", "✓"], failed: ["failed", "✕"], finish_challenged: ["waiting", "待确认"], running: ["running", "●"] };
   const [cls, label] = map[status] || ["", status || ""];
   return `<span class="chip ${cls}">${esc(label)}</span>`;
 }
 
-function toast(msg, ms = 2400) {
+function toast(msg, ms = 2000) {
   const el = document.createElement("div");
   el.className = "toast"; el.textContent = msg;
   document.body.appendChild(el);
@@ -134,7 +138,7 @@ function toast(msg, ms = 2400) {
 
 function modelName(id) {
   const m = S.modelById[id];
-  return m ? (m.display_name || m.name) : short(id, 14);
+  return m ? (m.display_name || m.name) : short(id, 12);
 }
 
 function fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.ceil(n / 1024) + " KB"; }
@@ -148,7 +152,7 @@ function artIcon(a) {
   return "📦";
 }
 
-/* 渲染单一步骤 (Step Row / Thinking Block - 匹配截图 1) */
+/* 渲染单一步骤 (匹配截图 1 的轻量紧致风格) */
 function renderStep(st) {
   const open = S.expandedSteps.has(String(st.id));
   const act = (st.action && st.action !== st.tool) ? st.action : (st.description || st.action || "");
@@ -163,7 +167,7 @@ function renderStep(st) {
     thoughtHtml = `
       <div class="thought-block">
         <div class="thought-header" data-thought-toggle="${esc(st.id)}">
-          <span class="thought-icon">🧠</span>
+          <span>🧠</span>
           <span>思考 · ${thOpen ? "点击收起 ▲" : "持续了几秒 ▼"}</span>
         </div>
         ${thOpen ? `<div class="thought-content">${esc(st.thought)}</div>` : ""}
@@ -171,12 +175,12 @@ function renderStep(st) {
     `;
   }
 
-  // 参数与输出
+  // 详细参数与输出（点击胶囊后展开）
   const params = st.command || st.params;
   const paramsHtml = params ? `<div class="label">⌨️ 参数</div><pre>${esc(typeof params === "string" ? params : JSON.stringify(params, null, 2))}</pre>` : "";
   const output = st.output ? `<div class="label">📄 输出</div><pre>${esc(st.output)}</pre>` : "";
 
-  // 单行工具调用胶囊 (🔍 读取 📄 HANDOFF...)
+  // 极简单行工具胶囊 (🔍 读取 📄 ...)
   const isSub = /spawn|child|worker/.test(String(st.tool || "").toLowerCase());
   const toolPill = `
     <button class="tool-call-pill" data-step="${esc(st.id)}">
@@ -187,7 +191,7 @@ function renderStep(st) {
         <span class="t-args">${esc(act)}</span>
       </div>
       <div class="t-right">
-        ${st.timestamp ? `<span style="color:var(--dim)">${esc(relTime(new Date(st.timestamp).toISOString()))}</span>` : ""}
+        ${st.timestamp ? `<span>${esc(relTime(new Date(st.timestamp).toISOString()))}</span>` : ""}
         ${stepChip(st.status)}
       </div>
     </button>
@@ -269,13 +273,18 @@ function taskCard(s) {
 }
 
 function renderHome() {
+  $("topTitle").textContent = "free_api 远程控制";
+  $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span id="connText">已连接到当前桌面窗口</span>`;
+  $("btnBackTop").classList.add("hidden");
+  $("btnMenu").classList.remove("hidden");
   $("homeMeta").textContent = `${S.projects.length + 1} 个工作区 · ${S.sessions.length} 个任务`;
+  
   const groups = groupsOf();
   $("wsList").innerHTML = groups.map(g => {
     const open = S.openGroups.has(g.key);
     const tasks = g.sessions.length
       ? g.sessions.slice(0, 15).map(s => taskCard(s)).join("")
-      : `<div class="empty-tip">还没有任务，点击右上 ＋ 发起</div>`;
+      : `<div class="empty-tip">暂无任务，点击右上 ＋ 发起</div>`;
     return `
       <div class="ws-card ${open ? "open" : ""}" data-group="${esc(g.key)}">
         <div class="ws-head" role="button" data-toggle="${esc(g.key)}">
@@ -298,13 +307,13 @@ function renderHome() {
 
 function renderSidebar() {
   const groups = groupsOf();
-  $("sidebar").innerHTML = `<div style="padding:4px 4px 12px">
+  $("sidebar").innerHTML = `<div style="padding:4px 2px 10px">
       <button class="btn primary block" data-new="__scratch__">🚀 在临时工作区发任务</button>
     </div>` + groups.map(g => {
     const open = S.openGroups.has(g.key);
     const items = g.sessions.slice(0, 12).map(s => `
       <button class="side-task ${S.currentSessionId === s.id ? "active" : ""}" data-session="${esc(s.id)}">
-        <div class="t">${esc(short(s.goal || s.title, 24))}</div>
+        <div class="t">${esc(short(s.goal || s.title, 22))}</div>
         <div class="time">${esc(relTime(s.trace_updated_at || s.updated_at))}</div>
       </button>
     `).join("");
@@ -332,12 +341,15 @@ function renderFlow() {
   const s = f.session || {};
   const active = f.run && ["running", "waiting_human"].includes(f.run.status);
   const status = active ? f.run.status : (f.trace ? f.trace.status : (s.status || null));
-  $("flowTitle").textContent = short(s.goal || f.trace?.goal || s.title || "任务会话", 28);
-  $("flowChip").outerHTML = chip(status).replace('class="chip', `id="flowChip" class="chip`);
+
+  $("topTitle").textContent = "任务会话";
+  $("topSub").textContent = short(s.goal || f.trace?.goal || s.title || "任务执行中", 20);
+  $("btnBackTop").classList.remove("hidden");
+  $("btnMenu").classList.add("hidden");
 
   // 用户目标气泡 (User Bubble)
   const goalText = s.goal || f.trace?.goal || s.title || "";
-  const goalMore = goalText.length > 80 ? `<span class="gmore">${S.goalOpen ? "收起 ▲" : "展开全文 ▼"}</span>` : "";
+  const goalMore = goalText.length > 70 ? `<span class="gmore">${S.goalOpen ? "收起 ▲" : "展开全文 ▼"}</span>` : "";
   $("flowGoal").innerHTML = `<span class="arrow">→</span><span class="gtxt">${esc(goalText)}${goalMore}</span>`;
   $("flowGoal").onclick = () => { S.goalOpen = !S.goalOpen; renderFlow(); };
 
@@ -345,7 +357,7 @@ function renderFlow() {
   const live = $("liveLine");
   if (f.run && f.run.status === "running") {
     live.className = "live-line";
-    live.innerHTML = `<span class="livedot"></span><strong>工作中</strong> <span style="color:var(--dim)">· ${esc(f.run.state_detail || f.run.phase || "执行中")}${f.run.event_count ? ` · ${f.run.event_count} 个事件` : ""}</span>`;
+    live.innerHTML = `<span class="livedot"></span><strong>工作中</strong> <span style="color:var(--dim)">· ${esc(f.run.state_detail || f.run.phase || "执行中")}${f.run.event_count ? ` · ${f.run.event_count} 事件` : ""}</span>`;
   } else if (f.run && f.run.status === "waiting_human") {
     live.className = "live-line wait";
     live.innerHTML = `<span class="livedot"></span><span style="color:var(--amber); font-weight:600">等待你的回答</span>`;
@@ -365,7 +377,7 @@ function renderFlow() {
     : (f.run && f.run.result) ? f.run.result
     : (f.trace && f.trace.completion && f.trace.completion.summary) ? f.trace.completion.summary : null;
   $("resultCard").innerHTML = (!active && resultText)
-    ? `<div class="result-card ${failed ? "fail" : ""}"><div class="rlabel">${failed ? "✗ 失败原因" : "✓ 执行结果"}</div>${esc(resultText)}</div>`
+    ? `<div class="result-card ${failed ? "fail" : ""}"><div class="rlabel">${failed ? "✕ 失败原因" : "✓ 执行结果"}</div>${esc(resultText)}</div>`
     : "";
 
   // 步骤列表渲染
@@ -375,14 +387,13 @@ function renderFlow() {
 
   // 产物清单
   const arts = f.artifacts || [];
-  $("artBox").innerHTML = arts.length ? `<div style="margin-top:14px;"><div style="font-size:13px; font-weight:700; margin-bottom:8px;">📦 任务产物 (${arts.length})</div>` +
+  $("artBox").innerHTML = arts.length ? `<div style="margin-top:12px;"><div style="font-size:12px; font-weight:700; margin-bottom:6px;">📦 任务产物 (${arts.length})</div>` +
     arts.map(a => `
-      <div style="display:flex; align-items:center; gap:8px; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 12px; margin-bottom:6px;">
+      <div style="display:flex; align-items:center; gap:6px; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:6px 10px; margin-bottom:4px;">
         <span>${artIcon(a)}</span>
-        <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; font-size:13px;">${esc(a.display_name)}</span>
-        <span style="color:var(--dim); font-size:11.5px;">${fmtSize(a.size_bytes || 0)}</span>
-        <button class="btn" style="padding:3px 8px; font-size:11.5px;" data-apreview="${esc(a.id)}">预览</button>
-        <a class="btn primary" style="padding:3px 8px; font-size:11.5px;" href="/channel/artifact/${encodeURIComponent(a.id)}/raw?token=${encodeURIComponent(S.token)}&dl=1" download>下载</a>
+        <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; font-size:12px;">${esc(a.display_name)}</span>
+        <span style="color:var(--dim); font-size:10.5px;">${fmtSize(a.size_bytes || 0)}</span>
+        <a class="btn primary" style="padding:2px 7px; font-size:10.5px;" href="/channel/artifact/${encodeURIComponent(a.id)}/raw?token=${encodeURIComponent(S.token)}&dl=1" download>下载</a>
       </div>
     `).join("") + `</div>` : "";
 
@@ -399,17 +410,18 @@ function renderFlow() {
 }
 
 async function openSession(sessionId) {
+  closeSidebarMobile();
   S.currentSessionId = sessionId;
   S.view = { name: "flow" };
   $("viewHome").classList.add("hidden");
   $("viewFlow").classList.remove("hidden");
-  closeSidebarMobile();
   S.lastTraceStamp = "";
   $("timeline").innerHTML = `<div class="empty-tip">加载中…</div>`;
   try { await loadFlow(sessionId); } catch (e) { toast("加载失败：" + e.message); }
 }
 
 function goHome() {
+  closeSidebarMobile();
   S.currentSessionId = null;
   S.view = { name: "home" };
   $("viewFlow").classList.add("hidden");
@@ -460,30 +472,52 @@ async function stopRun() {
   } catch (e) { toast("停止失败：" + e.message); }
 }
 
-function openSheet(title, items, currentValue, onPick) {
+// ---------------------------------------------------------------- 带实时搜索的选择弹层
+function openSearchableSheet(title, allItems, currentValue, onPick) {
   $("sheetTitle").textContent = title;
-  $("sheetList").innerHTML = items.map(it => `
-    <button class="btn" style="width:100%; text-align:left; justify-content:space-between; padding:10px 12px; ${it.value === currentValue ? "border-color:var(--accent); color:var(--accent2)" : ""}" data-v="${esc(it.value)}">
-      <div>
-        <div style="font-weight:600">${esc(it.label)}</div>
-        ${it.sub ? `<div style="font-size:11px; color:var(--dim); margin-top:2px;">${esc(it.sub)}</div>` : ""}
-      </div>
-      ${it.value === currentValue ? "<span>✓</span>" : ""}
-    </button>
-  `).join("");
-  $("sheetList").querySelectorAll("button").forEach(btn => {
-    btn.onclick = () => { onPick(btn.dataset.v); $("sheetPick").classList.add("hidden"); };
-  });
+  const searchWrap = $("sheetSearchWrap");
+  const searchInput = $("sheetSearchInput");
+  searchWrap.style.display = allItems.length > 5 ? "" : "none";
+  searchInput.value = "";
+
+  function renderList(query) {
+    const q = (query || "").toLowerCase().trim();
+    const filtered = allItems.filter(it => {
+      if (!q) return true;
+      return it.label.toLowerCase().includes(q) || (it.sub && it.sub.toLowerCase().includes(q)) || (it.value && it.value.toLowerCase().includes(q));
+    });
+
+    $("sheetList").innerHTML = filtered.length ? filtered.map(it => `
+      <button class="sheet-model-row ${it.value === currentValue ? "selected" : ""}" data-v="${esc(it.value)}">
+        <div style="flex:1; min-width:0;">
+          <div class="m-title">${esc(it.label)}</div>
+          ${it.sub ? `<div class="m-sub">${esc(it.sub)}</div>` : ""}
+        </div>
+        ${it.value === currentValue ? '<span style="font-weight:bold;">✓</span>' : ""}
+      </button>
+    `).join("") : `<div class="empty-tip">未找到匹配项</div>`;
+
+    $("sheetList").querySelectorAll("button").forEach(btn => {
+      btn.onclick = () => {
+        onPick(btn.dataset.v);
+        $("sheetPick").classList.add("hidden");
+      };
+    });
+  }
+
+  searchInput.oninput = (e) => renderList(e.target.value);
+  renderList("");
   $("sheetPick").classList.remove("hidden");
+  if (allItems.length > 5) setTimeout(() => searchInput.focus(), 150);
 }
 
 function bindOptChips() {
-  $("optModel").onclick = () => openSheet("选择任务模型",
+  $("optModel").onclick = () => openSearchableSheet("选择任务模型",
     [{ value: "", label: "跟随会话模型", sub: "使用默认设置" }].concat(S.models.map(m => ({ value: m.id, label: m.display_name || m.name, sub: m.platform_name || "" }))),
     S.taskOpts.model_id,
     (v) => { S.taskOpts.model_id = v; $("lblModel").textContent = v ? short(modelName(v), 4) : "跟随"; $("optModel").classList.toggle("active", !!v); });
   
-  $("optBudget").onclick = () => openSheet("上下文压缩模式", BUDGETS, S.taskOpts.context_budget_mode,
+  $("optBudget").onclick = () => openSearchableSheet("上下文压缩模式", BUDGETS, S.taskOpts.context_budget_mode,
     (v) => {
       S.taskOpts.context_budget_mode = v;
       const bmap = { deep_coding: "长程", cost_saving: "省流", ultra_fast: "极速" };
@@ -491,7 +525,7 @@ function bindOptChips() {
       $("optBudget").classList.toggle("active", !!v && v !== "deep_coding");
     });
 
-  $("optRoles").onclick = () => openSheet("角色卡钉死",
+  $("optRoles").onclick = () => openSearchableSheet("角色卡钉死",
     [{ value: "", label: "跟随默认路由", sub: "不钉死任何角色" }].concat(S.roleCards.map(c => ({ value: c.name, label: c.label || c.name, sub: `作用域 ${c.scope_hints || "-"}` }))),
     S.taskOpts.role_card,
     (v) => { S.taskOpts.role_card = v; $("lblRoles").textContent = v ? short(v, 4) : "默认"; $("optRoles").classList.toggle("active", !!v); });
@@ -502,6 +536,7 @@ function bindOptChips() {
 
 let newTaskType = "scratch";
 function openModal(prefillProjectId) {
+  closeSidebarMobile();
   newTaskType = prefillProjectId && prefillProjectId !== "__scratch__" ? "project" : "scratch";
   const projects = groupsOf().filter(g => g.key !== "__scratch__");
   $("newProj").innerHTML = projects.map(g =>
@@ -511,16 +546,18 @@ function openModal(prefillProjectId) {
   $("typeProject").style.background = newTaskType === "project" ? "var(--accent)" : "transparent";
   $("projField").style.display = newTaskType === "project" ? "" : "none";
   
-  $("newModel").innerHTML = S.models.map(m =>
-    `<option value="${esc(m.id)}">${esc(m.display_name || m.name)} · ${esc(m.platform_name || "")}</option>`).join("")
-    || `<option value="">（未配置模型）</option>`;
+  if (!S.selectedNewModelId && S.models.length) {
+    S.selectedNewModelId = S.models[0].id;
+  }
+  $("lblNewModel").textContent = S.selectedNewModelId ? modelName(S.selectedNewModelId) : "选择模型…";
+  
   $("newGoal").value = "";
   $("modalNew").classList.remove("hidden");
 }
 
 async function submitNew() {
   const projectId = newTaskType === "project" ? $("newProj").value : null;
-  const modelId = $("newModel").value;
+  const modelId = S.selectedNewModelId || (S.models[0] ? S.models[0].id : "");
   const goal = $("newGoal").value.trim();
   if (!goal) { toast("请填写任务内容"); return; }
   const btn = $("newSubmit"); btn.disabled = true;
@@ -553,7 +590,7 @@ function cycleTheme() {
   const themes = ["default", "oled", "midnight"];
   const next = themes[(themes.indexOf(S.theme) + 1) % themes.length];
   applyTheme(next);
-  toast(`已切换主题: ${next === "default" ? "深灰 (默认)" : next === "oled" ? "OLED 纯黑" : "深蓝夜景"}`);
+  toast(`主题: ${next === "default" ? "深灰" : next === "oled" ? "纯黑" : "深蓝"}`);
 }
 
 function bind() {
@@ -567,13 +604,12 @@ function bind() {
   $("gateToken").addEventListener("keydown", (e) => { if (e.key === "Enter") $("gateSave").click(); });
 
   $("btnMenu").onclick = () => { $("sidebar").classList.toggle("show"); $("sideMask").classList.toggle("show"); };
-  $("sideMask").onclick = () => { $("sidebar").classList.remove("show"); $("sideMask").classList.remove("show"); };
-  $("btnBack").onclick = goHome;
+  $("sideMask").onclick = closeSidebarMobile;
+  $("btnBackTop").onclick = goHome;
   $("btnRefresh").onclick = () => {
     if (S.view.name === "flow" && S.currentSessionId) loadFlow(S.currentSessionId).catch(e => toast(e.message));
     else loadHome().catch(() => {});
   };
-  $("btnRefreshHome").onclick = () => loadHome().catch(() => {});
   $("btnToggleAll").onclick = () => {
     const allKeys = groupsOf().map(g => g.key);
     if (S.openGroups.size > 0) S.openGroups.clear();
@@ -589,6 +625,18 @@ function bind() {
 
   bindOptChips();
 
+  // 新建任务弹窗中的模型搜索选择器
+  $("btnPickNewModel").onclick = () => {
+    openSearchableSheet("选择执行模型",
+      S.models.map(m => ({ value: m.id, label: m.display_name || m.name, sub: m.platform_name || "" })),
+      S.selectedNewModelId,
+      (v) => {
+        S.selectedNewModelId = v;
+        $("lblNewModel").textContent = modelName(v);
+      }
+    );
+  };
+
   $("typeScratch").onclick = () => { newTaskType = "scratch"; $("projField").style.display = "none"; $("typeScratch").style.background = "var(--accent)"; $("typeProject").style.background = "transparent"; };
   $("typeProject").onclick = () => { newTaskType = "project"; $("projField").style.display = ""; $("typeProject").style.background = "var(--accent)"; $("typeScratch").style.background = "transparent"; };
   $("newCancel").onclick = () => $("modalNew").classList.add("hidden");
@@ -596,7 +644,7 @@ function bind() {
 
   // 快捷回到底部
   window.addEventListener("scroll", () => {
-    const show = window.scrollY < (document.documentElement.scrollHeight - window.innerHeight - 300);
+    const show = window.scrollY < (document.documentElement.scrollHeight - window.innerHeight - 250);
     $("btnScrollBottom").classList.toggle("hidden", !show || S.view.name !== "flow");
   });
   $("btnScrollBottom").onclick = () => { window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" }); };
@@ -652,6 +700,9 @@ async function loadModels() {
     const data = await api("/channel/models");
     S.models = (data.models || []).filter(m => m.enabled !== 0 && m.enabled !== false);
     S.modelById = Object.fromEntries(S.models.map(m => [m.id, m]));
+    if (!S.selectedNewModelId && S.models.length) {
+      S.selectedNewModelId = S.models[0].id;
+    }
   } catch (e) {}
 }
 
