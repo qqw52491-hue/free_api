@@ -16,6 +16,7 @@ const S = {
   taskOpts: { model_id: "", context_budget_mode: "", role_card: "" },
   selectedNewModelId: "",
   composerFiles: [],
+  sheetOpen: false,  // 弹层打开时禁止轮询重渲
 };
 
 const BUDGETS = [
@@ -679,38 +680,71 @@ async function stopRun() {
 
 // ---------------------------------------------------------------- 带实时搜索的选择弹层
 function openSearchableSheet(title, allItems, currentValue, onPick) {
+  S.sheetOpen = true;
   $("sheetTitle").textContent = title;
   const searchWrap = $("sheetSearchWrap");
   const searchInput = $("sheetSearchInput");
   searchWrap.style.display = allItems.length > 5 ? "" : "none";
   searchInput.value = "";
 
-  function renderList(query) {
-    const q = (query || "").toLowerCase().trim();
-    const filtered = allItems.filter(it => {
-      if (!q) return true;
-      return it.label.toLowerCase().includes(q) || (it.sub && it.sub.toLowerCase().includes(q)) || (it.value && it.value.toLowerCase().includes(q));
-    });
-
-    $("sheetList").innerHTML = filtered.length ? filtered.map(it => `
+  function makeRow(it) {
+    return `
       <button class="sheet-model-row ${it.value === currentValue ? "selected" : ""}" data-v="${esc(it.value)}">
         <div style="flex:1; min-width:0;">
           <div class="m-title">${esc(it.label)}</div>
           ${it.sub ? `<div class="m-sub">${esc(it.sub)}</div>` : ""}
         </div>
-        ${it.value === currentValue ? '<span style="font-weight:bold;">✓</span>' : ""}
+        ${it.value === currentValue ? '<span style="color:var(--accent2); font-weight:bold;">✓</span>' : ""}
       </button>
-    `).join("") : `<div class="empty-tip">未找到匹配项</div>`;
+    `;
+  }
 
-    $("sheetList").querySelectorAll("button").forEach(btn => {
+  function renderList(query) {
+    const q = (query || "").toLowerCase().trim();
+    let filtered = allItems.filter(it => {
+      if (!q) return true;
+      return it.label.toLowerCase().includes(q)
+        || (it.sub && it.sub.toLowerCase().includes(q))
+        || (it.value && it.value.toLowerCase().includes(q));
+    });
+
+    // 移动端首次未搜索时只显示前 30 条，防止 100+ 行同时渲染卡顿
+    const cap = !q && filtered.length > 30;
+    const visible = cap ? filtered.slice(0, 30) : filtered;
+
+    const list = $("sheetList");
+    list.innerHTML = visible.length
+      ? visible.map(makeRow).join("")
+        + (cap ? `<div class="empty-tip" style="cursor:pointer;color:var(--accent2);" id="sheetLoadMore">显示全部 ${filtered.length} 项（点击或搜索）</div>` : "")
+      : `<div class="empty-tip">未找到匹配项</div>`;
+
+    list.querySelectorAll("button[data-v]").forEach(btn => {
       btn.onclick = () => {
+        S.sheetOpen = false;
         onPick(btn.dataset.v);
         $("sheetPick").classList.add("hidden");
       };
     });
+
+    const more = $("sheetLoadMore");
+    if (more) more.onclick = () => {
+      list.innerHTML = filtered.map(makeRow).join("");
+      list.querySelectorAll("button[data-v]").forEach(btn => {
+        btn.onclick = () => {
+          S.sheetOpen = false;
+          onPick(btn.dataset.v);
+          $("sheetPick").classList.add("hidden");
+        };
+      });
+    };
   }
 
-  searchInput.oninput = (e) => renderList(e.target.value);
+  // 输入时 debounce 300ms 避免每键一次重渲
+  let _debTimer;
+  searchInput.oninput = (e) => {
+    clearTimeout(_debTimer);
+    _debTimer = setTimeout(() => renderList(e.target.value), 300);
+  };
   renderList("");
   $("sheetPick").classList.remove("hidden");
   if (allItems.length > 5) setTimeout(() => searchInput.focus(), 150);
@@ -735,8 +769,8 @@ function bindOptChips() {
     S.taskOpts.role_card,
     (v) => { S.taskOpts.role_card = v; $("lblRoles").textContent = v ? short(v, 4) : "默认"; $("optRoles").classList.toggle("active", !!v); });
 
-  $("sheetClose").onclick = () => $("sheetPick").classList.add("hidden");
-  $("sheetPick").addEventListener("click", (e) => { if (e.target === $("sheetPick")) $("sheetPick").classList.add("hidden"); });
+  $("sheetClose").onclick = () => { S.sheetOpen = false; $("sheetPick").classList.add("hidden"); };
+  $("sheetPick").addEventListener("click", (e) => { if (e.target === $("sheetPick")) { S.sheetOpen = false; $("sheetPick").classList.add("hidden"); } });
 }
 
 let newTaskType = "scratch";
@@ -963,6 +997,9 @@ async function boot() {
   // - SSE 断线 + Agent 空闲 → 每 6s 轮询（保证在隧道重连期间不漏掉更新）
   setInterval(() => {
     if (document.hidden) return;
+    // ⚠️ 弹层/弹窗打开时跳过轮询重渲，防止 DOM 重建破坏弹层交互或卡顿
+    if (S.sheetOpen) return;
+    if ($('modalNew') && !$('modalNew').classList.contains('hidden')) return;
     const active = isAgentActive();
     const alive = sseAlive();
     // SSE 在线且 Agent 空闲时，轮询节流（每 10s 一次通过 lastPoll 管控）
