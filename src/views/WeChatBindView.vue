@@ -462,6 +462,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import ModelSelectDropdown from "../components/common/ModelSelectDropdown.vue";
 
 interface ModelOption {
@@ -557,6 +558,8 @@ let statusTimer: number | null = null;
 let qrTimer: number | null = null;
 let runsTimer: number | null = null;
 let reconfirmTimer: number | null = null;
+let unlistenRunStarted: UnlistenFn | null = null;
+let unlistenRunDone: UnlistenFn | null = null;
 
 const bridgeRunning = computed(() => Boolean(bridge.value?.running));
 const loggedIn = computed(() => Boolean(bridge.value?.logged_in));
@@ -837,6 +840,16 @@ onMounted(async () => {
   }
   statusTimer = window.setInterval(refreshStatus, 5000);
   runsTimer = window.setInterval(refreshRuns, 10000);
+
+  // 监听来自 Rust 的 任务启动 / 完成 事件，手机和微信发起任务后桌面列表秒刷新无需等 10s
+  unlistenRunStarted = await listen("channel-run-started", () => {
+    refreshRuns();
+    refreshStatus();
+  });
+  unlistenRunDone = await listen("channel-run-done", () => {
+    refreshRuns();
+    refreshStatus();
+  });
 });
 
 onUnmounted(() => {
@@ -844,6 +857,8 @@ onUnmounted(() => {
   if (qrTimer !== null) clearInterval(qrTimer);
   if (runsTimer !== null) clearInterval(runsTimer);
   if (reconfirmTimer !== null) clearTimeout(reconfirmTimer);
+  unlistenRunStarted?.();
+  unlistenRunDone?.();
 });
 </script>
 

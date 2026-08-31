@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{AppHandle, Listener, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 
 const DEFAULT_API_PORT: u16 = 8790;
@@ -650,6 +650,11 @@ pub(crate) fn register_and_spawn_run(
         phase: None,
         state_detail: None,
     });
+    // 通知桌面端（Vue 监听此事件立即刷新任务列表，无需等待 10s 轮询）
+    let _ = app.emit(
+        "channel-run-started",
+        json!({ "run_id": run_id, "session_id": session_id, "at": now_ts() }),
+    );
 
     // 进度订阅：主循环的 agent-progress-{session} 事件原样转写进运行账本，
     // agent_paused（ask_human 阻塞）单独标记，供桥推送「卡住提问」。
@@ -780,6 +785,10 @@ pub(crate) fn register_and_spawn_run(
                     record.result = result;
                 });
                 notify_session_event(&spawn_session, if was_cancelled { "cancelled" } else { "done" });
+                let _ = spawn_app.emit(
+                    "channel-run-done",
+                    json!({ "run_id": spawn_run, "session_id": spawn_session, "status": "done", "at": now_ts() }),
+                );
             }
             Err(error) => {
                 patch_run(&spawn_run, |record| {
@@ -790,6 +799,10 @@ pub(crate) fn register_and_spawn_run(
                     record.paused_reason = None;
                 });
                 notify_session_event(&spawn_session, "failed");
+                let _ = spawn_app.emit(
+                    "channel-run-done",
+                    json!({ "run_id": spawn_run, "session_id": spawn_session, "status": "failed", "at": now_ts() }),
+                );
             }
         }
     });
