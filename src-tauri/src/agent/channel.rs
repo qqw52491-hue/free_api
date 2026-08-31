@@ -810,13 +810,16 @@ impl SessionRunGuard {
                     record.paused_form = None;
                 });
                 let db = self.app.state::<DbState>();
+                let existing_steps =
+                    crate::agent::run_trace::load_run_steps(db.inner(), &self.run_id)
+                        .unwrap_or_default();
                 let _ = crate::agent::run_trace::upsert_snapshot(
                     db.inner(),
                     &self.run_id,
                     &self.session_id,
                     &self.goal,
                     "failed",
-                    &[],
+                    &existing_steps,
                     Some(&json!({ "summary": error })),
                 );
                 notify_session_event(&self.session_id, "failed");

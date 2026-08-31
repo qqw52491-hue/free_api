@@ -24,7 +24,7 @@ pub fn upsert_snapshot(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, CASE WHEN ?4 IN ('succeeded', 'failed', 'cancelled') THEN ?7 ELSE NULL END)
          ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
-            steps_json=excluded.steps_json,
+            steps_json=CASE WHEN excluded.steps_json = '[]' AND agent_run_traces.steps_json != '[]' AND agent_run_traces.steps_json IS NOT NULL THEN agent_run_traces.steps_json ELSE excluded.steps_json END,
             completion_json=COALESCE(excluded.completion_json, agent_run_traces.completion_json),
             updated_at=excluded.updated_at,
             completed_at=CASE WHEN excluded.status IN ('succeeded', 'failed', 'cancelled') THEN excluded.updated_at ELSE agent_run_traces.completed_at END",
@@ -32,6 +32,25 @@ pub fn upsert_snapshot(
     )
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+pub fn load_run_steps(db: &DbState, run_id: &str) -> Result<Vec<Value>, String> {
+    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let row: Option<String> = conn
+        .query_row(
+            "SELECT steps_json FROM agent_run_traces WHERE id = ?1",
+            params![run_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if let Some(json_str) = row {
+        let val: Value = serde_json::from_str(&json_str).unwrap_or_else(|_| json!([]));
+        if let Some(arr) = val.as_array() {
+            return Ok(arr.clone());
+        }
+    }
+    Ok(Vec::new())
 }
 
 pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>, String> {

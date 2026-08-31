@@ -563,7 +563,8 @@ async fn run_agent_main_loop_in_workspace_inner(
         .await
         .insert(final_session_id.clone(), interrupt_tx);
 
-    let mut run_trace_steps: Vec<serde_json::Value> = Vec::new();
+    let mut run_trace_steps: Vec<serde_json::Value> =
+        crate::agent::run_trace::load_run_steps(state.inner(), &run_id).unwrap_or_default();
     let mut run_machine = AgentRunMachine::new();
     advance_run_state(
         &app,
