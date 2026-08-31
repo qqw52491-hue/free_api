@@ -270,7 +270,6 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
 .empty-tip { color: var(--dim); font-size: 11px; padding: 10px; text-align: center; }
 
 /* ---------- 任务执行流 (Flow View) ---------- */
-/* 顶部任务目标气泡 (User Bubble) */
 .goal-bubble {
   display: flex;
   align-items: flex-start;
@@ -291,7 +290,6 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
 .goal-bubble.open .gtxt { -webkit-line-clamp: unset; }
 .goal-bubble .gmore { display: block; color: var(--accent2); font-size: 10.5px; margin-top: 2px; font-weight: 600; }
 
-/* 状态流速行 */
 .live-line {
   display: flex;
   align-items: center;
@@ -346,7 +344,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   overflow-y: auto;
 }
 
-/* ---------- 完整富文本 / Markdown 排版系统 ---------- */
+/* ---------- 完整超全富文本 / Markdown 样式系统 ---------- */
 .assistant-narrative {
   font-size: 12.5px;
   line-height: 1.6;
@@ -358,6 +356,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
 .assistant-narrative p:first-child { margin-top: 0; }
 .assistant-narrative p:last-child { margin-bottom: 0; }
 
+/* 标题 */
+.md-h1 { font-size: 15px; font-weight: 700; color: #fff; margin: 8px 0 4px; border-bottom: 1px solid var(--line); padding-bottom: 3px; }
+.md-h2 { font-size: 14px; font-weight: 700; color: #fff; margin: 7px 0 3px; }
+.md-h3 { font-size: 13px; font-weight: 650; color: #f1f3f9; margin: 6px 0 2px; }
+.md-h4 { font-size: 12.5px; font-weight: 600; color: #e2e8f0; margin: 5px 0 2px; }
+
+/* 链接与删除线 */
+.md-link { color: var(--accent2); text-decoration: underline; text-underline-offset: 2px; }
+.md-del { text-decoration: line-through; opacity: 0.7; }
+
+/* 行内代码 */
 .inline-code {
   font-family: var(--mono);
   font-size: 11px;
@@ -369,12 +378,37 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   word-break: break-all;
 }
 
-.md-code-block {
-  margin: 5px 0;
+/* 代码块容器（带语言标头与一键复制按钮） */
+.md-code-box {
+  margin: 6px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+.md-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.md-copy-btn {
+  font-size: 10px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 1px 6px;
+  border-radius: 4px;
+  transition: all .15s;
+}
+.md-copy-btn:hover { color: #fff; background: var(--accent); }
+.md-code-box pre {
+  margin: 0;
   padding: 7px 9px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 7px;
   font-family: var(--mono);
   font-size: 11px;
   line-height: 1.45;
@@ -383,6 +417,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   white-space: pre;
 }
 
+/* 列表与任务复选框清单 */
 .md-list-item {
   display: flex;
   align-items: flex-start;
@@ -396,7 +431,20 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   flex: none;
   font-size: 11px;
 }
+.md-task-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0;
+  font-size: 12px;
+}
+.md-checkbox {
+  font-size: 12px;
+  flex: none;
+}
+.md-checkbox.checked { color: var(--green); }
 
+/* 引用块 & GitHub 风格 Alert 卡片 */
 .md-blockquote {
   border-left: 2px solid var(--accent);
   padding-left: 8px;
@@ -404,8 +452,55 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   color: var(--muted);
   font-size: 12px;
 }
+.md-callout {
+  padding: 7px 10px;
+  border-radius: 7px;
+  margin: 6px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  border-left: 3px solid;
+}
+.md-callout.note { background: rgba(59, 130, 246, 0.08); border-color: var(--accent); color: #dbeafe; }
+.md-callout.tip { background: rgba(16, 185, 129, 0.08); border-color: var(--green); color: #d1fae5; }
+.md-callout.warning { background: rgba(245, 158, 11, 0.08); border-color: var(--amber); color: #fef3c7; }
+.md-callout.important { background: rgba(239, 68, 68, 0.08); border-color: var(--red); color: #fee2e2; }
+.md-callout-title { font-weight: 700; font-size: 11px; margin-bottom: 2px; display: flex; align-items: center; gap: 4px; }
 
-/* ---------- 极简工具调用胶囊 (两行换行，工具名在后，参数清晰) ---------- */
+/* 移动端表格支持（自适应水平滚动） */
+.md-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 6px 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  text-align: left;
+}
+.md-table th, .md-table td {
+  padding: 6px 9px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-right: 1px solid rgba(255, 255, 255, 0.04);
+}
+.md-table th {
+  background: rgba(255, 255, 255, 0.03);
+  font-weight: 600;
+  color: #fff;
+}
+.md-table tr:nth-child(even) { background: rgba(255, 255, 255, 0.015); }
+
+/* 分割线 */
+.md-hr {
+  border: none;
+  height: 1px;
+  background: var(--line);
+  margin: 8px 0;
+}
+
+/* ---------- 极简工具调用胶囊 ---------- */
 .tool-call-pill {
   display: flex;
   align-items: flex-start;
@@ -647,7 +742,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   color: #f87171;
 }
 
-/* ---------- 搜索框与选择弹窗 (Searchable Model Picker) ---------- */
+/* ---------- 搜索框与选择弹窗 ---------- */
 .search-input-box {
   position: sticky;
   top: 0;
@@ -688,7 +783,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
 .sheet-model-row .m-title { font-size: 12px; font-weight: 600; }
 .sheet-model-row .m-sub { font-size: 10px; color: var(--dim); margin-top: 1px; }
 
-/* ---------- 弹窗与抽屉 (Modal Sheets) ---------- */
+/* ---------- 弹窗与抽屉 ---------- */
 .modal {
   position: fixed; inset: 0; z-index: 50;
   background: rgba(0, 0, 0, 0.65);

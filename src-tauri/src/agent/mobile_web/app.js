@@ -32,19 +32,32 @@ function esc(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/* 完整的移动端 Markdown / 富文本解析引擎 */
+/* ---------- 完整超全 Markdown 与富文本解析引擎 ---------- */
 function formatInline(text) {
+  if (!text) return "";
   let out = esc(text);
-  // 行内代码 `code`
+  
+  // 1. 行内代码 `code`
   out = out.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-  // 加粗 **bold**
+  
+  // 2. 加粗 **bold**
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // 斜体 *italic*
+  
+  // 3. 斜体 *italic*
   out = out.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
-  // 自动识别文件名并渲染为胶囊高亮
+  
+  // 4. 删除线 ~~del~~
+  out = out.replace(/~~([^~]+)~~/g, '<del class="md-del">$1</del>');
+  
+  // 5. 超链接 [title](url)
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)/g, '<a class="md-link" href="$2" target="_blank" rel="noopener">$1 ↗</a>');
+  
+  // 6. 文件路径与代码文件自动高亮胶囊
   out = out.replace(/\b([a-zA-Z0-9_\-\.\/]+\.(?:md|ts|js|rs|json|vue|html|css|py|yaml|yml|toml|sql|sh))\b/g, '<code class="inline-code">$1</code>');
-  // 序号加粗美化
+  
+  // 7. 序号加粗美化
   out = out.replace(/([①②③④⑤⑥⑦⑧⑨⑩])/g, '<strong style="color:var(--accent2); margin-right:2px;">$1</strong>');
+  
   return out;
 }
 
@@ -52,42 +65,138 @@ function formatMarkdown(raw) {
   if (!raw) return "";
   let text = String(raw).trim();
   
-  // 1. 代码块 ```lang\ncode\n```
+  // 1. 代码块提取并占位（附带语言标头与复制按钮）
+  const codeBlocks = [];
   text = text.replace(/```([a-zA-Z0-9_\-\.]*)\n([\s\S]*?)```/g, (m, lang, code) => {
-    return `\n\n__CODE_BLOCK__${encodeURIComponent(code.trim())}__\n\n`;
+    const idx = codeBlocks.length;
+    codeBlocks.push({ lang: lang || "code", code: code.trim() });
+    return `\n\n__CODE_BLOCK_${idx}__\n\n`;
   });
 
-  // 2. 按行处理段落、引用、列表
+  // 2. 按行逐段处理
   const lines = text.split("\n");
   const processed = [];
+  let tableRows = [];
   
-  for (let line of lines) {
-    let l = line.trim();
+  function flushTable() {
+    if (!tableRows.length) return;
+    let html = '<div class="md-table-wrap"><table class="md-table">';
+    let isHeader = true;
+    for (let r of tableRows) {
+      const cells = r.split("|").map(c => c.trim()).filter((c, i, a) => !(i === 0 && c === "") && !(i === a.length - 1 && c === ""));
+      if (cells.length && cells.every(c => /^[-:\s]+$/.test(c))) {
+        isHeader = false;
+        continue;
+      }
+      html += '<tr>';
+      for (let c of cells) {
+        html += isHeader ? `<th>${formatInline(c)}</th>` : `<td>${formatInline(c)}</td>`;
+      }
+      html += '</tr>';
+      isHeader = false;
+    }
+    html += '</table></div>';
+    processed.push(html);
+    tableRows = [];
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    let l = lines[i].trim();
+    
+    // 表格识别
+    if (l.startsWith("|") && l.endsWith("|")) {
+      tableRows.push(l);
+      continue;
+    } else {
+      flushTable();
+    }
+    
     if (!l) continue;
     
-    if (l.startsWith("__CODE_BLOCK__")) {
-      const code = decodeURIComponent(l.replace("__CODE_BLOCK__", "").replace("__", ""));
-      processed.push(`<pre class="md-code-block"><code>${esc(code)}</code></pre>`);
+    // 代码块还原
+    const cbMatch = l.match(/^__CODE_BLOCK_(\d+)__$/);
+    if (cbMatch) {
+      const item = codeBlocks[parseInt(cbMatch[1])];
+      if (item) {
+        processed.push(`
+          <div class="md-code-box">
+            <div class="md-code-head">
+              <span>${esc(item.lang)}</span>
+              <button class="md-copy-btn" onclick="copyCode(this)">📋 复制</button>
+            </div>
+            <pre><code>${esc(item.code)}</code></pre>
+          </div>
+        `);
+      }
       continue;
     }
+
+    // 分割线
+    if (/^(---|___|\*\*\*)$/.test(l)) {
+      processed.push('<hr class="md-hr">');
+      continue;
+    }
+
+    // 标题
+    if (l.startsWith("#### ")) { processed.push(`<div class="md-h4">${formatInline(l.slice(5))}</div>`); continue; }
+    if (l.startsWith("### ")) { processed.push(`<div class="md-h3">${formatInline(l.slice(4))}</div>`); continue; }
+    if (l.startsWith("## ")) { processed.push(`<div class="md-h2">${formatInline(l.slice(3))}</div>`); continue; }
+    if (l.startsWith("# ")) { processed.push(`<div class="md-h1">${formatInline(l.slice(2))}</div>`); continue; }
+
+    // GitHub 风格 Alert Callout
+    if (l.startsWith("> [!NOTE]")) { processed.push(`<div class="md-callout note"><div class="md-callout-title">ℹ️ 说明</div>${formatInline(l.slice(9).trim())}</div>`); continue; }
+    if (l.startsWith("> [!TIP]")) { processed.push(`<div class="md-callout tip"><div class="md-callout-title">💡 提示</div>${formatInline(l.slice(8).trim())}</div>`); continue; }
+    if (l.startsWith("> [!WARNING]")) { processed.push(`<div class="md-callout warning"><div class="md-callout-title">⚠️ 警告</div>${formatInline(l.slice(12).trim())}</div>`); continue; }
+    if (l.startsWith("> [!IMPORTANT]")) { processed.push(`<div class="md-callout important"><div class="md-callout-title">❗ 重要</div>${formatInline(l.slice(14).trim())}</div>`); continue; }
+
+    // 引用块
     if (l.startsWith(">")) {
       processed.push(`<blockquote class="md-blockquote">${formatInline(l.slice(1).trim())}</blockquote>`);
       continue;
     }
+
+    // 任务复选框清单
+    if (/^-\s*\[x\]/i.test(l)) {
+      processed.push(`<div class="md-task-item"><span class="md-checkbox checked">☑</span><span>${formatInline(l.replace(/^-\s*\[x\]/i, "").trim())}</span></div>`);
+      continue;
+    }
+    if (/^-\s*\[\s*\]/i.test(l)) {
+      processed.push(`<div class="md-task-item"><span class="md-checkbox">☐</span><span>${formatInline(l.replace(/^-\s*\[\s*\]/i, "").trim())}</span></div>`);
+      continue;
+    }
+
+    // 无序列表
     if (/^[-*]\s+/.test(l)) {
       processed.push(`<div class="md-list-item"><span class="md-list-bullet">•</span><span>${formatInline(l.replace(/^[-*]\s+/, ""))}</span></div>`);
       continue;
     }
+
+    // 有序列表 / 序号
     const numMatch = l.match(/^(\d+\.|[①②③④⑤⑥⑦⑧⑨⑩])\s*(.*)$/);
     if (numMatch) {
       processed.push(`<div class="md-list-item"><span class="md-list-bullet">${numMatch[1]}</span><span>${formatInline(numMatch[2])}</span></div>`);
       continue;
     }
+
+    // 普通段落
     processed.push(`<p>${formatInline(l)}</p>`);
   }
+  flushTable();
   
   return processed.join("");
 }
+
+window.copyCode = function(btn) {
+  const box = btn.closest(".md-code-box");
+  if (!box) return;
+  const code = box.querySelector("pre code")?.textContent || "";
+  navigator.clipboard.writeText(code).then(() => {
+    btn.textContent = "✓ 已复制";
+    setTimeout(() => { btn.textContent = "📋 复制"; }, 1500);
+  }).catch(() => {
+    toast("复制失败");
+  });
+};
 
 function setConn(ok, msg) {
   const dot = $("connDot");
@@ -207,13 +316,13 @@ function artIcon(a) {
   return "📦";
 }
 
-/* 渲染单一步骤：富文本说明 + 思考块 + 两行紧凑换行工具胶囊（工具名在后） */
+/* 渲染单一步骤 */
 function renderStep(st) {
   const open = S.expandedSteps.has(String(st.id));
   const tool = String(st.tool || "工具").trim();
   const act = (st.action && st.action !== st.tool) ? st.action : (st.description || st.action || "");
   
-  // 1. 富文本说明文字（若有）
+  // 1. 富文本说明文字
   const desc = st.description && st.description !== act
     ? `<div class="assistant-narrative">${formatMarkdown(st.description)}</div>`
     : "";
@@ -243,7 +352,6 @@ function renderStep(st) {
   if (shortTool.length > 13) shortTool = shortTool.slice(0, 11) + "…";
   
   let formattedMain = esc(act || tool);
-  // 高亮参数中的文件名
   formattedMain = formattedMain.replace(/\b([a-zA-Z0-9_\-\.\/]+\.(?:md|ts|js|rs|json|vue|html|css|py|yaml|yml|toml))\b/g, '<span class="t-target">$1</span>');
 
   const isSub = /spawn|child|worker/.test(tool.toLowerCase());
@@ -411,11 +519,15 @@ function renderFlow() {
   $("btnBackTop").classList.remove("hidden");
   $("btnMenu").classList.add("hidden");
 
-  // 用户目标气泡 (User Bubble)
+  // 用户目标气泡
   const goalText = s.goal || f.trace?.goal || s.title || "";
   const goalMore = goalText.length > 70 ? `<span class="gmore">${S.goalOpen ? "收起 ▲" : "展开全文 ▼"}</span>` : "";
-  $("flowGoal").innerHTML = `<span class="arrow">→</span><span class="gtxt">${formatMarkdown(goalText)}${goalMore}</span>`;
-  $("flowGoal").onclick = () => { S.goalOpen = !S.goalOpen; renderFlow(); };
+  $("flowGoal").innerHTML = `<span class="arrow">→</span><div class="gtxt">${formatMarkdown(goalText)}${goalMore}</div>`;
+  $("flowGoal").onclick = (e) => {
+    if (e.target.closest("a") || e.target.closest("button")) return;
+    S.goalOpen = !S.goalOpen;
+    renderFlow();
+  };
 
   // 实时状态行
   const live = $("liveLine");
@@ -802,7 +914,7 @@ async function boot() {
   await loadHome().catch(() => {});
   connectSSE();
   
-  // 活跃状态下定时保活与无感知轮询同步（电脑端/微信发消息或创建任务时，手机端无需手动刷新即可秒级同步）
+  // 活跃状态下定时保活与无感知轮询同步
   setInterval(() => {
     if (document.hidden) return;
     if (S.view.name === "flow" && S.currentSessionId) {
