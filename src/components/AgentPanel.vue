@@ -411,15 +411,16 @@ const inspectorWidth = ref(380);
 const inspectorCollapsed = ref(true);
 const isResizing = ref(false);
 const activePreviewContent = ref("");
-const teamRailCollapsed = ref(false);
+const teamRailCollapsed = ref(true);
 
 watch(
-    () => session.isRunning.value,
-    (running) => {
-        if (running) {
+    () => session.teamState.value.workers.length,
+    (count) => {
+        if (count > 0) {
             teamRailCollapsed.value = false;
         }
-    }
+    },
+    { immediate: true }
 );
 
 function startResize(e: MouseEvent) {
