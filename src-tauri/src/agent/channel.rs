@@ -201,6 +201,7 @@ pub struct RunRecord {
     /// running | waiting_human | done | failed | cancelled
     pub status: String,
     pub paused_reason: Option<String>,
+    pub paused_form: Option<serde_json::Value>,
     pub last_progress: Option<String>,
     pub event_count: u64,
     pub started_at: String,
@@ -220,7 +221,7 @@ pub struct RunRecord {
     pub state_detail: Option<String>,
 }
 
-fn runs_store() -> &'static Mutex<HashMap<String, RunRecord>> {
+pub(crate) fn runs_store() -> &'static Mutex<HashMap<String, RunRecord>> {
     static RUNS: OnceLock<Mutex<HashMap<String, RunRecord>>> = OnceLock::new();
     RUNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -655,6 +656,7 @@ impl SessionRunGuard {
             goal_preview: truncate_chars(goal, MAX_GOAL_PREVIEW_CHARS),
             status: "running".to_string(),
             paused_reason: None,
+            paused_form: None,
             last_progress: None,
             event_count: 0,
             started_at: started_at.clone(),
@@ -702,6 +704,11 @@ impl SessionRunGuard {
                 } else {
                     None
                 };
+                let paused_form = if paused {
+                    payload.get("form").filter(|v| !v.is_null()).cloned()
+                } else {
+                    None
+                };
                 patch_run(&listen_run, |record| {
                     if is_real_step {
                         record.event_count += 1;
@@ -712,9 +719,11 @@ impl SessionRunGuard {
                     if let Some(reason) = paused_reason {
                         record.status = "waiting_human".to_string();
                         record.paused_reason = Some(reason);
+                        record.paused_form = paused_form;
                     } else if record.status == "waiting_human" {
                         record.status = "running".to_string();
                         record.paused_reason = None;
+                        record.paused_form = None;
                     }
                 });
                 notify_session_event(&listen_session, if paused { "waiting_human" } else { "progress" });
@@ -782,6 +791,7 @@ impl SessionRunGuard {
                         record.status = "done".to_string();
                     }
                     record.paused_reason = None;
+                    record.paused_form = None;
                     record.result = result;
                 });
                 notify_session_event(&self.session_id, if was_cancelled { "cancelled" } else { "done" });
@@ -797,6 +807,7 @@ impl SessionRunGuard {
                         record.error = Some(truncate_chars(error, 2_000));
                     }
                     record.paused_reason = None;
+                    record.paused_form = None;
                 });
                 let db = self.app.state::<DbState>();
                 let _ = crate::agent::run_trace::upsert_snapshot(
@@ -1145,6 +1156,7 @@ async fn handler_run_answer(
     patch_run(&run_id, |record| {
         record.status = "running".to_string();
         record.paused_reason = None;
+        record.paused_form = None;
     });
     Ok(Json(json!({"ok": true, "session_id": session_id})))
 }
@@ -1175,6 +1187,7 @@ async fn handler_run_goal(
     patch_run(&run_id, |record| {
         record.status = "running".to_string();
         record.paused_reason = None;
+        record.paused_form = None;
     });
     Ok(Json(json!({"ok": true, "session_id": session_id})))
 }
@@ -1203,6 +1216,7 @@ async fn handler_run_cancel(
             record.status = "cancelled".to_string();
         }
         record.paused_reason = None;
+        record.paused_form = None;
     });
     Ok(Json(json!({"ok": true, "session_id": session_id})))
 }
@@ -1462,6 +1476,7 @@ fn apply_run_overlay(mut sessions: Vec<Value>) -> Vec<Value> {
             session["status"] = json!(run.status);
             if run.status == "waiting_human" {
                 session["paused_reason"] = json!(run.paused_reason);
+                session["paused_form"] = json!(run.paused_form);
             }
         }
     }
@@ -2367,6 +2382,7 @@ mod tests {
             goal_preview: "goal".to_string(),
             status: "running".to_string(),
             paused_reason: None,
+            paused_form: None,
             last_progress: None,
             event_count: 0,
             started_at: "2026-01-01T00:00:00+00:00".to_string(),
@@ -2398,6 +2414,7 @@ mod tests {
                 goal_preview: "old".to_string(),
                 status: "done".to_string(),
                 paused_reason: None,
+                paused_form: None,
                 last_progress: None,
                 event_count: 0,
                 started_at: "2025-01-01T00:00:00+00:00".to_string(),
@@ -2541,6 +2558,7 @@ mod tests {
             goal_preview: "goal".to_string(),
             status: "waiting_human".to_string(),
             paused_reason: Some("需要确认删除哪些文件？".to_string()),
+            paused_form: None,
             last_progress: None,
             event_count: 0,
             started_at: "2026-08-30T02:00:00+00:00".to_string(),

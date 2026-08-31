@@ -1139,8 +1139,14 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         // ask_human 暂停：只接收受控 form JSON，未知结构退回为普通文本回答。
         if (eventType === "agent_paused") {
             const message = toText(payload.message) || "Agent 正在等待你的输入。";
+            runTerminal.value = false;
+            isRunning.value = true;
+            isThinking.value = false;
             pauseReason.value = message;
             humanForm.value = normalizeHumanForm(payload.form, message);
+            setRunState("waiting_for_human", message);
+            appendLog(`⏸️ [人类协助] ${message}`);
+            autoScrollToBottom();
             return;
         }
 
@@ -1454,6 +1460,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         await register(`agent-tool-event-${sid}`, (payload) => handleToolEvent(asRecord(payload)));
         await register("channel-run-started", async (payload: any) => {
             if (payload?.session_id === sid) {
+                runTerminal.value = false;
+                isRunning.value = true;
+                isThinking.value = true;
+                setRunState("executing", "Agent 正在执行任务...");
                 await loadRunTraces();
                 await loadConversation();
             }
@@ -1592,11 +1602,15 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 user_goal: string;
                 last_error: string | null;
                 is_waiting_human: boolean;
+                form?: unknown;
             } | null>("get_agent_checkpoint", { sessionId: activeSessionId.value });
             if (cp && cp.is_waiting_human) {
                 runTerminal.value = false;
+                isRunning.value = true;
+                isThinking.value = false;
                 setRunState("waiting_for_human", "Agent 正在等待你的输入。");
                 pauseReason.value = cp.last_error || "Agent 正在等待你的输入。";
+                humanForm.value = normalizeHumanForm(cp.form, pauseReason.value);
                 currentGoal.value = cp.user_goal;
                 appendLog(`⏸️ [状态恢复] 会话正处于人工交互挂起状态 (步骤 #${cp.step_id + 1}): ${pauseReason.value}`);
             }

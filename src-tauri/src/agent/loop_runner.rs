@@ -1112,6 +1112,7 @@ pub async fn run_tool_phase(
 
         // 真正的阻塞点：死等人类回复！
         // rx 被我们在外层定义过了，这里可以直接 `.recv().await`
+        checkpoint.prepared_instruction = Some(inst.clone());
         checkpoint.wait_for_human(ask_msg.clone(), &context);
         save_checkpoint(state.inner(), &mut checkpoint)?;
         crate::agent::advance_run_state(

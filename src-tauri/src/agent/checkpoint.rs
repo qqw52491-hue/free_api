@@ -697,6 +697,7 @@ pub struct AgentCheckpointSummary {
     pub user_goal: String,
     pub last_error: Option<String>,
     pub is_waiting_human: bool,
+    pub form: Option<serde_json::Value>,
 }
 
 #[tauri::command]
@@ -705,13 +706,36 @@ pub async fn get_agent_checkpoint(
     session_id: String,
 ) -> Result<Option<AgentCheckpointSummary>, String> {
     let checkpoint = load_checkpoint(state.inner(), &session_id)?;
-    Ok(checkpoint.map(|cp| AgentCheckpointSummary {
-        run_id: cp.run_id,
-        phase: cp.phase.as_str().to_string(),
-        step_id: cp.step_id,
-        user_goal: cp.data.user_goal,
-        last_error: cp.last_error,
-        is_waiting_human: cp.phase == AgentPhase::WaitUser,
+    Ok(checkpoint.map(|cp| {
+        let form = cp
+            .prepared_instruction
+            .as_ref()
+            .and_then(|inst| inst.get_params().get("form").cloned())
+            .or_else(|| {
+                cp.pending.as_ref().and_then(|p| {
+                    p.instruction.get_params().get("form").cloned()
+                })
+            })
+            .or_else(|| {
+                crate::agent::channel::runs_store()
+                    .lock()
+                    .ok()
+                    .and_then(|store| {
+                        store
+                            .values()
+                            .find(|r| r.session_id == session_id && r.status == "waiting_human")
+                            .and_then(|r| r.paused_form.clone())
+                    })
+            });
+        AgentCheckpointSummary {
+            run_id: cp.run_id,
+            phase: cp.phase.as_str().to_string(),
+            step_id: cp.step_id,
+            user_goal: cp.data.user_goal,
+            last_error: cp.last_error,
+            is_waiting_human: cp.phase == AgentPhase::WaitUser,
+            form,
+        }
     }))
 }
 

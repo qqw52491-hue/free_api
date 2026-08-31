@@ -17,6 +17,14 @@ const S = {
   selectedNewModelId: "",
   composerFiles: [],
   sheetOpen: false,  // 弹层打开时禁止轮询重渲
+  humanForm: {
+    runId: "",
+    confirmValue: true,
+    singleSelectedId: "",
+    multiSelectedIds: [],
+    writeInText: "",
+    isSubmitting: false,
+  },
 };
 
 const BUDGETS = [
@@ -378,6 +386,256 @@ function renderStep(st) {
   `;
 }
 
+/* ---------- 结构化人类协助与提问交互 (Human Intervention) ---------- */
+function normalizeHumanForm(raw, fallbackTitle) {
+  const data = (raw && typeof raw === "object") ? raw : {};
+  const rawKind = String(data.kind || "").toLowerCase().trim();
+  const aliases = {
+    single: "single_select", select: "single_select", single_select: "single_select", radio: "single_select",
+    multi: "multi_select", multiple: "multi_select", multi_select: "multi_select", checkbox: "multi_select",
+    confirm: "confirm", confirmation: "confirm", text: "text", input: "text",
+    file: "file_picker", file_picker: "file_picker", upload: "file_picker", files: "file_picker",
+    custom_html: "custom_html", html: "custom_html", custom: "custom_html",
+  };
+  const kind = aliases[rawKind] || (data.options && data.options.length ? "single_select" : "text");
+  const options = (Array.isArray(data.options) ? data.options : []).slice(0, 12).map((item, index) => {
+    const opt = (item && typeof item === "object") ? item : { label: String(item) };
+    const id = String(opt.id || opt.value || index + 1).slice(0, 80);
+    const label = String(opt.label || opt.title || opt.name || id).slice(0, 160);
+    const description = opt.description || opt.detail ? String(opt.description || opt.detail).slice(0, 300) : "";
+    return description ? { id, label, description } : { id, label };
+  }).filter(item => item.id && item.label);
+
+  return {
+    kind,
+    title: String(data.title || data.label || fallbackTitle || "请提供反馈或确认下一步"),
+    description: String(data.description || data.help || ""),
+    placeholder: String(data.placeholder || ""),
+    options,
+    defaultValue: data.default ?? data.default_value ?? data.value,
+  };
+}
+
+function renderAskCard(run) {
+  if (!run || run.status !== "waiting_human") {
+    return "";
+  }
+  const rawForm = run.paused_form;
+  const reason = run.paused_reason || "Agent 请求人工协助。";
+  const form = normalizeHumanForm(rawForm, reason);
+
+  // 初始化该轮任务的交互表单状态
+  if (S.humanForm.runId !== run.run_id) {
+    S.humanForm.runId = run.run_id;
+    S.humanForm.confirmValue = typeof form.defaultValue === "boolean" ? form.defaultValue : true;
+    S.humanForm.singleSelectedId = typeof form.defaultValue === "string"
+      ? form.defaultValue
+      : (form.options && form.options[0]?.id ? form.options[0].id : "");
+    S.humanForm.multiSelectedIds = Array.isArray(form.defaultValue) ? [...form.defaultValue] : [];
+    S.humanForm.writeInText = (form.kind === "text" && typeof form.defaultValue === "string") ? form.defaultValue : "";
+    S.humanForm.isSubmitting = false;
+  }
+
+  const kindLabels = {
+    confirm: "操作确认",
+    single_select: "单项选择",
+    multi_select: "多项选择",
+    file_picker: "文件上传",
+    custom_html: "自定义交互",
+    text: "问答输入",
+  };
+  const formTypeLabel = kindLabels[form.kind] || "问答输入";
+
+  let bodyHtml = "";
+  if (form.kind === "confirm") {
+    bodyHtml = `
+      <div class="human-confirm-box">
+        <button type="button" class="human-choice-btn confirm-btn ${S.humanForm.confirmValue === true ? "active" : ""}" onclick="selectHumanConfirm(true)">
+          <span>✓</span><span>确认执行</span>
+        </button>
+        <button type="button" class="human-choice-btn cancel-btn ${S.humanForm.confirmValue === false ? "active" : ""}" onclick="selectHumanConfirm(false)">
+          <span>✕</span><span>取消并终止</span>
+        </button>
+      </div>
+    `;
+  } else if (form.kind === "single_select") {
+    bodyHtml = `
+      <div class="human-options-container">
+        ${form.options.map(opt => `
+          <div class="human-option-item ${S.humanForm.singleSelectedId === opt.id ? "selected" : ""}" onclick="selectHumanSingle('${esc(opt.id)}')">
+            <div class="human-radio-circle">
+              ${S.humanForm.singleSelectedId === opt.id ? '<div class="human-radio-inner"></div>' : ''}
+            </div>
+            <div class="human-option-text">
+              <span class="human-option-label">${esc(opt.label)}</span>
+              ${opt.description ? `<small class="human-option-sub">${esc(opt.description)}</small>` : ''}
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  } else if (form.kind === "multi_select") {
+    bodyHtml = `
+      <div class="human-multi-toolbar">
+        <span>已选 ${S.humanForm.multiSelectedIds.length}/${form.options.length} 项</span>
+        <div class="human-toolbar-actions">
+          <button type="button" class="mini-btn" onclick="selectHumanMultiAll(true)">全选</button>
+          <button type="button" class="mini-btn" onclick="selectHumanMultiAll(false)">清空</button>
+        </div>
+      </div>
+      <div class="human-options-container">
+        ${form.options.map(opt => {
+          const checked = S.humanForm.multiSelectedIds.includes(opt.id);
+          return `
+            <div class="human-option-item ${checked ? "selected" : ""}" onclick="toggleHumanMulti('${esc(opt.id)}')">
+              <div class="human-checkbox-box ${checked ? "checked" : ""}">
+                ${checked ? '<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
+              </div>
+              <div class="human-option-text">
+                <span class="human-option-label">${esc(opt.label)}</span>
+                ${opt.description ? `<small class="human-option-sub">${esc(opt.description)}</small>` : ''}
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+  } else if (form.kind === "text") {
+    bodyHtml = `
+      <div class="human-text-wrap">
+        <textarea class="human-textarea" id="humanTextInput" placeholder="${esc(form.placeholder || '请输入你的回复或指示…')}" rows="3" oninput="S.humanForm.writeInText=this.value">${esc(S.humanForm.writeInText)}</textarea>
+      </div>
+    `;
+  }
+
+  // 非纯文本问答时展示可选补充输入框
+  let writeInHtml = "";
+  if (form.kind !== "text" && form.kind !== "custom_html") {
+    writeInHtml = `
+      <div class="human-write-in-wrap">
+        <label class="human-write-in-label" for="humanWriteInInput">补充说明 / 自定义要求（可选）:</label>
+        <input id="humanWriteInInput" class="human-write-in-input" type="text" placeholder="如果以上选项不符合，可在此输入补充意见后提交…" value="${esc(S.humanForm.writeInText)}" oninput="S.humanForm.writeInText=this.value" onkeydown="if(event.key==='Enter')submitHumanIntervention()">
+      </div>
+    `;
+  }
+
+  const isSubmitting = S.humanForm.isSubmitting;
+  return `
+    <section class="human-intervention-card" aria-label="需要用户协助与确认">
+      <div class="human-top-row">
+        <div class="human-badge">
+          <span class="pulse-dot"></span>
+          <span>需要人类协助</span>
+        </div>
+        <span class="human-type-label">${esc(formTypeLabel)}</span>
+      </div>
+      <h3 class="human-title">${formatMarkdown(form.title)}</h3>
+      ${form.description ? `<div class="human-desc">${formatMarkdown(form.description)}</div>` : ""}
+      ${bodyHtml}
+      ${writeInHtml}
+      <div class="human-actions-bar">
+        <button type="button" class="human-submit-btn" id="btnSubmitHuman" onclick="submitHumanIntervention()" ${isSubmitting ? "disabled" : ""}>
+          <span>${isSubmitting ? "提交中…" : "提交反馈"}</span>
+          <svg viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+window.selectHumanConfirm = function(val) {
+  S.humanForm.confirmValue = val;
+  updateAskCardDom();
+};
+
+window.selectHumanSingle = function(id) {
+  S.humanForm.singleSelectedId = id;
+  updateAskCardDom();
+};
+
+window.toggleHumanMulti = function(id) {
+  const idx = S.humanForm.multiSelectedIds.indexOf(id);
+  if (idx >= 0) S.humanForm.multiSelectedIds.splice(idx, 1);
+  else S.humanForm.multiSelectedIds.push(id);
+  updateAskCardDom();
+};
+
+window.selectHumanMultiAll = function(selectAll) {
+  if (!S.flow || !S.flow.run) return;
+  const form = normalizeHumanForm(S.flow.run.paused_form, "");
+  S.humanForm.multiSelectedIds = selectAll ? form.options.map(o => o.id) : [];
+  updateAskCardDom();
+};
+
+window.submitHumanIntervention = async function() {
+  if (!S.flow || !S.flow.run || S.humanForm.isSubmitting) return;
+  const f = S.flow;
+  const form = normalizeHumanForm(f.run.paused_form, f.run.paused_reason || "");
+  const parts = [];
+
+  if (form.kind === "text") {
+    const textInput = $("humanTextInput");
+    if (textInput) S.humanForm.writeInText = textInput.value;
+    const txt = S.humanForm.writeInText.trim();
+    if (!txt) {
+      toast("请输入回复内容");
+      return;
+    }
+    parts.push(txt);
+  } else {
+    if (form.kind === "confirm") {
+      parts.push(`【确认状态】: ${S.humanForm.confirmValue ? "确认执行" : "取消操作"}`);
+    } else if (form.kind === "single_select") {
+      const matched = form.options.find(o => o.id === S.humanForm.singleSelectedId);
+      parts.push(`【选择项】: ${matched ? matched.label : S.humanForm.singleSelectedId}`);
+    } else if (form.kind === "multi_select") {
+      const labels = S.humanForm.multiSelectedIds.map(id => {
+        const opt = form.options.find(o => o.id === id);
+        return opt ? opt.label : id;
+      });
+      if (!labels.length && !S.humanForm.writeInText.trim()) {
+        toast("请至少选择一项或输入补充说明");
+        return;
+      }
+      if (labels.length) parts.push(`【已选项】: ${labels.join(", ")}`);
+    }
+    const writeInput = $("humanWriteInInput");
+    if (writeInput) S.humanForm.writeInText = writeInput.value;
+    if (S.humanForm.writeInText.trim()) {
+      parts.push(`【补充说明】: ${S.humanForm.writeInText.trim()}`);
+    }
+  }
+
+  const answerText = parts.join("\n");
+  if (!answerText.trim()) return;
+
+  S.humanForm.isSubmitting = true;
+  updateAskCardDom();
+  try {
+    await api(`/channel/run/${f.run.run_id}/answer`, {
+      method: "POST",
+      body: JSON.stringify({ text: answerText }),
+    });
+    toast("已提交反馈，Agent 继续执行");
+    S.humanForm.runId = "";
+    S.humanForm.writeInText = "";
+    await loadFlow(f.sessionId);
+  } catch (e) {
+    toast("提交失败: " + e.message);
+  } finally {
+    S.humanForm.isSubmitting = false;
+    updateAskCardDom();
+  }
+};
+
+function updateAskCardDom() {
+  const askCard = $("askCard");
+  if (!askCard || !S.flow) return;
+  const html = renderAskCard(S.flow.run);
+  askCard.innerHTML = html;
+  askCard.dataset.renderedHtml = html;
+}
+
 // ---------------------------------------------------------------- 数据加载与多轮会话流渲染
 const traceDetailCache = new Map();
 let _loadFlowInFlight = false;
@@ -409,7 +667,9 @@ async function loadHome() {
     if (S.projects.length) S.openGroups.add(S.projects[0].id);
     S.openGroups.add("__scratch__");
   }
-  renderHome();
+  if (S.view.name === "home") {
+    renderHome();
+  }
   renderSidebar();
 }
 
@@ -510,6 +770,7 @@ function taskCard(s) {
 }
 
 function renderHome() {
+  if (S.view.name !== "home") return;
   $("topTitle").textContent = "free_api 远程控制";
   $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span id="connText">已连接到当前桌面窗口</span>`;
   $("btnBackTop").classList.add("hidden");
@@ -647,17 +908,15 @@ function renderFlow() {
     live.dataset.renderedHtml = liveHtml;
   }
 
-  // 提问卡片（等待人类输入）
-  const paused = f.run && f.run.status === "waiting_human" ? (f.run.paused_reason || "Agent 请求人工协助。") : null;
-  $("askCard").innerHTML = paused
-    ? `<div class="ask-card">
-        <div class="rlabel">❓ Agent 提问 (等待您的回答)</div>
-        <div class="q">${formatMarkdown(paused)}</div>
-        <div class="ask-actions">
-          <button class="btn-ask-reply" onclick="const el=$('followInput'); if(el){el.focus(); el.scrollIntoView({behavior:'smooth'});}">💬 点击快速回复</button>
-        </div>
-      </div>`
-    : "";
+  // 提问卡片（等待人类输入 / 人工协助表单）
+  const askCard = $("askCard");
+  const askHtml = renderAskCard(f.run);
+  const activeEl = document.activeElement;
+  const isTypingInAsk = activeEl && (activeEl.id === "humanWriteInInput" || activeEl.id === "humanTextInput");
+  if (!isTypingInAsk && askCard.dataset.renderedHtml !== askHtml) {
+    askCard.innerHTML = askHtml;
+    askCard.dataset.renderedHtml = askHtml;
+  }
 
   // 产物清单
   const arts = f.artifacts || [];
