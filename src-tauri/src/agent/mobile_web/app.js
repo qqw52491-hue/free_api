@@ -380,6 +380,8 @@ function renderStep(st) {
 
 // ---------------------------------------------------------------- 数据加载与多轮会话流渲染
 const traceDetailCache = new Map();
+let _loadFlowInFlight = false;
+let _loadFlowPendingNext = false;
 
 async function fetchTraceDetail(t) {
   const stamp = `${t.id}:${t.step_count || 0}:${t.updated_at || ""}`;
@@ -412,58 +414,71 @@ async function loadHome() {
 }
 
 async function loadFlow(sessionId) {
-  const [sessRes, runsRes, tracesRes, artsRes] = await Promise.all([
-    api("/channel/sessions"),
-    api("/channel/runs"),
-    api(`/channel/session/${encodeURIComponent(sessionId)}/traces`),
-    api(`/channel/session/${encodeURIComponent(sessionId)}/artifacts`),
-  ]);
-  S.sessions = sessRes.sessions || [];
-  const session = S.sessions.find(s => s.id === sessionId) || null;
-  const run = (runsRes.runs || []).filter(r => r.session_id === sessionId)
-    .sort((a, b) => (b.started_at || "").localeCompare(a.started_at || ""))[0] || null;
-  const traceList = tracesRes.traces || [];
-  
-  // 并行获取该会话所有历史轮次完整步骤
-  const fullTraces = await Promise.all(traceList.map(t => fetchTraceDetail(t)));
+  if (_loadFlowInFlight) {
+    _loadFlowPendingNext = true;
+    return;
+  }
+  _loadFlowInFlight = true;
+  try {
+    const [sessRes, runsRes, tracesRes, artsRes] = await Promise.all([
+      api("/channel/sessions"),
+      api("/channel/runs"),
+      api(`/channel/session/${encodeURIComponent(sessionId)}/traces`),
+      api(`/channel/session/${encodeURIComponent(sessionId)}/artifacts`),
+    ]);
+    S.sessions = sessRes.sessions || [];
+    const session = S.sessions.find(s => s.id === sessionId) || null;
+    const run = (runsRes.runs || []).filter(r => r.session_id === sessionId)
+      .sort((a, b) => (b.started_at || "").localeCompare(a.started_at || ""))[0] || null;
+    const traceList = tracesRes.traces || [];
+    
+    // 并行获取该会话所有历史轮次完整步骤（已完成历史轮次直接命中内存缓存，0 网络请求）
+    const fullTraces = await Promise.all(traceList.map(t => fetchTraceDetail(t)));
 
-  // 严格按 ID 与 Goal 去重，彻底杜绝单条消息渲染两次的问题
-  const seenIds = new Set();
-  const seenGoals = new Set();
-  const uniqueTraces = [];
-  for (const tr of fullTraces) {
-    if (tr && tr.id && !seenIds.has(tr.id)) {
-      seenIds.add(tr.id);
-      if (tr.goal) seenGoals.add(tr.goal.trim());
-      uniqueTraces.push(tr);
+    // 严格按 ID 与 Goal 去重，彻底杜绝单条消息渲染两次的问题
+    const seenIds = new Set();
+    const seenGoals = new Set();
+    const uniqueTraces = [];
+    for (const tr of fullTraces) {
+      if (tr && tr.id && !seenIds.has(tr.id)) {
+        seenIds.add(tr.id);
+        if (tr.goal) seenGoals.add(tr.goal.trim());
+        uniqueTraces.push(tr);
+      }
+    }
+
+    // 仅当没有任何一条已入库 trace 与当前 run 匹配时，才补充临时执行中占位
+    if (run && ["running", "waiting_human"].includes(run.status)) {
+      const alreadyPresent = uniqueTraces.some(t =>
+        t.id === run.run_id ||
+        (t.goal && run.goal_preview && (t.goal.trim() === run.goal_preview.trim() || seenGoals.has(run.goal_preview.trim())))
+      );
+      if (!alreadyPresent && run.goal_preview) {
+        uniqueTraces.push({
+          id: run.run_id,
+          goal: run.goal_preview,
+          status: run.status,
+          steps: [],
+          started_at: run.started_at,
+        });
+      }
+    }
+
+    S.flow = {
+      sessionId,
+      session,
+      run,
+      traces: uniqueTraces,
+      artifacts: artsRes.artifacts || [],
+    };
+    renderFlow();
+  } finally {
+    _loadFlowInFlight = false;
+    if (_loadFlowPendingNext) {
+      _loadFlowPendingNext = false;
+      loadFlow(sessionId).catch(() => {});
     }
   }
-
-  // 仅当没有任何一条已入库 trace 与当前 run 匹配时，才补充临时执行中占位
-  if (run && ["running", "waiting_human"].includes(run.status)) {
-    const alreadyPresent = uniqueTraces.some(t =>
-      t.id === run.run_id ||
-      (t.goal && run.goal_preview && (t.goal.trim() === run.goal_preview.trim() || seenGoals.has(run.goal_preview.trim())))
-    );
-    if (!alreadyPresent && run.goal_preview) {
-      uniqueTraces.push({
-        id: run.run_id,
-        goal: run.goal_preview,
-        status: run.status,
-        steps: [],
-        started_at: run.started_at,
-      });
-    }
-  }
-
-  S.flow = {
-    sessionId,
-    session,
-    run,
-    traces: uniqueTraces,
-    artifacts: artsRes.artifacts || [],
-  };
-  renderFlow();
 }
 
 function groupsOf() {
