@@ -21,6 +21,19 @@
                 />
             </div>
 
+            <!-- ⏳ 排队队列提示栏 (Queued Goals Tray) -->
+            <div v-if="queuedGoals && queuedGoals.length > 0" class="composer-queue-tray">
+                <span class="queue-icon">⏳</span>
+                <span class="queue-label">待执行队列 ({{ queuedGoals.length }})：</span>
+                <div class="queue-items-scroll">
+                    <div v-for="(q, idx) in queuedGoals" :key="q.id" class="queue-pill">
+                        <span class="q-idx">#{{ idx + 1 }}</span>
+                        <span class="q-text" :title="q.text">{{ q.text }}</span>
+                        <button type="button" class="q-del-btn" @click.stop="$emit('cancel-queue', idx)" title="取消此排队任务">✕</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- 拖拽高亮提示 -->
             <div v-if="isDraggingOver" class="drag-drop-overlay">
                 <div class="drag-drop-content">
@@ -355,7 +368,31 @@
                 </div>
                 <div class="composer-actions">
                     <button v-if="isRunning" class="stop-control" type="button" :disabled="stopRequested" @click="$emit('stop')">{{ stopRequested ? '停止中' : '停止' }}</button>
-                    <button class="submit-control" type="button" :disabled="!canSubmit || isSending" :title="isRunning ? (isWaitingForHuman ? '回答当前请求' : '替换为新任务') : '开始任务'" @click="submit">
+                    
+                    <!-- 运行中模式切换：立即打断 vs 排队执行 -->
+                    <button
+                        v-if="isRunning && !isWaitingForHuman"
+                        type="button"
+                        class="mode-switch-pill"
+                        :class="{ 'is-queue': submitMode === 'queue' }"
+                        :title="submitMode === 'interrupt' ? '当前模式: ⚡ 立即打断当前任务 (点击切换为排队执行)' : '当前模式: ⏳ 排队等待当前任务完成后执行 (点击切换为立即打断)'"
+                        @click="submitMode = submitMode === 'interrupt' ? 'queue' : 'interrupt'"
+                    >
+                        <span class="mode-icon">{{ submitMode === 'interrupt' ? '⚡' : '⏳' }}</span>
+                        <span>{{ submitMode === 'interrupt' ? '立即打断' : '排队执行' }}</span>
+                    </button>
+
+                    <button
+                        class="submit-control"
+                        :class="{
+                            'is-queue-submit': isRunning && !isWaitingForHuman && submitMode === 'queue',
+                            'is-interrupt-submit': isRunning && !isWaitingForHuman && submitMode === 'interrupt'
+                        }"
+                        type="button"
+                        :disabled="!canSubmit || isSending"
+                        :title="isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : '开始任务'"
+                        @click="submit"
+                    >
                         <svg viewBox="0 0 24 24"><path d="m7 12 5-5 5 5M12 7v10"/></svg>
                     </button>
                 </div>
@@ -454,16 +491,20 @@ const props = defineProps<{
     allModels: AgentModelOption[];
     modelRouting: ModelRouting;
     telemetry?: AgentSessionTelemetry | null;
+    queuedGoals?: Array<{ id: string; text: string; createdAt: number }>;
 }>();
 const emit = defineEmits<{
     "update:draft": [value: string];
     "update:model-routing": [routing: ModelRouting];
     "update:budget-mode": [mode: ContextBudgetMode];
-    submit: [payload?: { text: string; attachments: ParsedAttachment[] }];
+    submit: [payload?: { text: string; attachments: ParsedAttachment[]; mode?: "interrupt" | "queue" }];
+    "cancel-queue": [index: number];
     stop: [];
     "open-settings": [];
     "attach-files": [paths: string[]];
 }>();
+
+const submitMode = ref<"interrupt" | "queue">("interrupt");
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
@@ -896,7 +937,9 @@ const currentModelName = computed(() => {
 const placeholderText = computed(() => props.isRunning
     ? props.isWaitingForHuman
         ? "补充自定义说明后按回车提交…"
-        : "输入新任务；旧模型/工具会在安全边界停止…"
+        : (submitMode.value === "queue"
+            ? "输入后续任务，将在当前任务执行完毕后自动开始…"
+            : "输入新任务，立即中断当前任务并以此为新目标执行…")
     : "想让 Agent 帮你做什么？",
 );
 const canSubmit = computed(() => {
@@ -918,10 +961,10 @@ function submit() {
         const visiblePrompt = userText ? `${briefBadges}\n\n${userText}` : briefBadges;
         emit("update:draft", "");
         attachments.value = [];
-        emit("submit", { text: visiblePrompt, attachments: currentAtts });
+        emit("submit", { text: visiblePrompt, attachments: currentAtts, mode: submitMode.value });
     } else {
         emit("update:draft", "");
-        emit("submit", { text: userText, attachments: [] });
+        emit("submit", { text: userText, attachments: [], mode: submitMode.value });
     }
 }
 
@@ -1937,6 +1980,120 @@ textarea::placeholder {
     stroke: currentColor;
     stroke-width: 2.4;
     fill: none;
+}
+
+/* ⏳ 排队队列横幅 */
+.composer-queue-tray {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    border-radius: 6px;
+    margin-bottom: 6px;
+    font-size: 11.5px;
+    color: #fef3c7;
+    overflow-x: auto;
+}
+.composer-queue-tray .queue-icon {
+    font-size: 13px;
+    flex-shrink: 0;
+}
+.composer-queue-tray .queue-label {
+    font-weight: 600;
+    color: #fbbf24;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.composer-queue-tray .queue-items-scroll {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow-x: auto;
+    flex: 1;
+}
+.composer-queue-tray .queue-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    max-width: 220px;
+    white-space: nowrap;
+}
+.composer-queue-tray .q-idx {
+    font-size: 10px;
+    color: #fbbf24;
+    font-weight: 700;
+}
+.composer-queue-tray .q-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #f3f4f6;
+}
+.composer-queue-tray .q-del-btn {
+    width: 14px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    font-size: 10px;
+    border-radius: 3px;
+    transition: all 0.15s;
+    padding: 0;
+    margin-left: 2px;
+}
+.composer-queue-tray .q-del-btn:hover {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.2);
+}
+
+/* 运行中模式切换按钮 (立即打断 vs 排队执行) */
+.mode-switch-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px;
+    height: 28px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    color: #fca5a5;
+    transition: all 0.15s ease;
+}
+.mode-switch-pill:hover {
+    background: rgba(239, 68, 68, 0.22);
+    border-color: rgba(239, 68, 68, 0.55);
+}
+.mode-switch-pill.is-queue {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.35);
+    color: #fde68a;
+}
+.mode-switch-pill.is-queue:hover {
+    background: rgba(245, 158, 11, 0.22);
+    border-color: rgba(245, 158, 11, 0.55);
+}
+.submit-control.is-interrupt-submit {
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.35);
+}
+.submit-control.is-queue-submit {
+    background: linear-gradient(135deg, #f59e0b, #d97706);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(245, 158, 11, 0.35);
 }
 
 /* ---- 底部实时指标连续状态行 ---- */

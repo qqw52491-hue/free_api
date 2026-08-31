@@ -202,6 +202,13 @@ export function extractSmartTitle(text: string): string {
     return `${clean.slice(0, 19)}…`;
 }
 
+export interface QueuedAgentGoal {
+    id: string;
+    text: string;
+    attachments?: ParsedAttachment[];
+    createdAt: number;
+}
+
 export function useAgentSession(sessionId: string, options?: UseAgentSessionOptions) {
     const activeSessionId = ref(sessionId);
     const modelRouting = ref<ModelRouting>(loadModelRouting());
@@ -220,6 +227,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const humanForm = ref<AgentHumanForm | null>(null);
     const humanInput = ref("");
     const pendingReplacementGoal = ref("");
+    const queuedGoals = ref<QueuedAgentGoal[]>([]);
     const isSendingHuman = ref(false);
     const stopRequested = ref(false);
     const elapsedSeconds = ref(0);
@@ -1545,6 +1553,13 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 pendingReplacementGoal.value = "";
                 await nextTick();
                 void runAgent(queuedGoal);
+            } else if (queuedGoals.value.length > 0) {
+                const next = queuedGoals.value.shift();
+                if (next) {
+                    await nextTick();
+                    appendLog(`[启动排队任务] ${next.text}`);
+                    void runAgent(next.text, next.attachments);
+                }
             }
         }
     }
@@ -1627,8 +1642,23 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         }
     }
 
-    async function sendHumanInput() {
-        const message = humanInput.value.trim();
+    function removeQueuedGoal(index: number) {
+        if (index >= 0 && index < queuedGoals.value.length) {
+            const removed = queuedGoals.value.splice(index, 1)[0];
+            if (removed) appendLog(`[已取消排队任务] ${removed.text}`);
+        }
+    }
+
+    function clearQueuedGoals() {
+        queuedGoals.value = [];
+    }
+
+    async function sendHumanInput(
+        overrideText?: string,
+        mode: "interrupt" | "queue" = "interrupt",
+        attachments?: ParsedAttachment[]
+    ) {
+        const message = (overrideText ?? humanInput.value).trim();
         if (!message || isSendingHuman.value) return;
         isSendingHuman.value = true;
         try {
@@ -1646,14 +1676,23 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     humanInput.value = "";
                     pauseReason.value = "";
                     humanForm.value = null;
-                    await runAgent(message);
+                    await runAgent(message, attachments);
                 }
+            } else if (mode === "queue") {
+                // ⏳ 排队模式：加入排队队列，等当前任务正常执行完毕后再执行
+                queuedGoals.value.push({
+                    id: String(Date.now()),
+                    text: message,
+                    attachments,
+                    createdAt: Date.now(),
+                });
+                appendLog(`[排队任务] 已排队后续执行：${message}`);
             } else {
-                // 运行中输入代表新任务；旧回合在后端安全边界取消，随后启动独立新树。
+                // ⚡ 立即打断模式：立即中断前序任务，切换为新目标
                 pendingReplacementGoal.value = message;
                 await invoke("replace_agent_goal", { sessionId: activeSessionId.value, goal: message });
                 humanInput.value = "";
-                appendLog(`[目标替换] 已请求新任务：${message}`);
+                appendLog(`[目标打断替换] 已请求中断当前任务并切换：${message}`);
             }
             autoScrollToBottom();
         } catch (error) {
@@ -1764,6 +1803,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         recordPage,
         setScrollElement,
         ensureModelRouting,
+        queuedGoals,
+        removeQueuedGoal,
+        clearQueuedGoals,
         runAgent,
         runReadOnlyRegression,
         requestStop,

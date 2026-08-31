@@ -148,12 +148,14 @@
                     :all-models="allModels"
                     :model-routing="session.modelRouting.value"
                     :telemetry="session.sessionTelemetry.value"
+                    :queued-goals="session.queuedGoals.value"
                     @update:draft="composerDraft = $event"
                     @update:model-routing="session.modelRouting.value = $event"
                     @update:budget-mode="session.updateBudgetMode($event)"
                     @open-settings="settingsOpen = true"
                     @attach-files="handleAttachFiles"
                     @submit="submitComposer"
+                    @cancel-queue="session.removeQueuedGoal"
                     @stop="session.requestStop"
                 />
             </main>
@@ -389,9 +391,15 @@ function handleOpenTeamDeck() {
     inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("team");
 }
-function submitComposer(payload?: { text: string; attachments?: any[] }) {
-    if (session.isRunning.value) void session.sendHumanInput();
-    else void session.runAgent(payload?.text || session.goalInput.value, payload?.attachments);
+function submitComposer(payload?: { text: string; attachments?: any[]; mode?: "interrupt" | "queue" }) {
+    const text = (payload?.text ?? composerDraft.value).trim();
+    if (!text && (!payload?.attachments || payload.attachments.length === 0)) return;
+    if (session.isRunning.value) {
+        void session.sendHumanInput(text, payload?.mode || "interrupt", payload?.attachments);
+    } else {
+        void session.runAgent(text || session.goalInput.value, payload?.attachments);
+    }
+    composerDraft.value = "";
 }
 function openPluginManager() {
     settingsOpen.value = false;
