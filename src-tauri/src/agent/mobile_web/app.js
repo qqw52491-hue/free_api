@@ -427,11 +427,26 @@ async function loadFlow(sessionId) {
   // 并行获取该会话所有历史轮次完整步骤
   const fullTraces = await Promise.all(traceList.map(t => fetchTraceDetail(t)));
 
-  // 如果当前有正在执行的 run，无论后端是否来得及生成第一个 step，前端流立即置顶该轮问题与执行中状态
+  // 严格按 ID 与 Goal 去重，彻底杜绝单条消息渲染两次的问题
+  const seenIds = new Set();
+  const seenGoals = new Set();
+  const uniqueTraces = [];
+  for (const tr of fullTraces) {
+    if (tr && tr.id && !seenIds.has(tr.id)) {
+      seenIds.add(tr.id);
+      if (tr.goal) seenGoals.add(tr.goal.trim());
+      uniqueTraces.push(tr);
+    }
+  }
+
+  // 仅当没有任何一条已入库 trace 与当前 run 匹配时，才补充临时执行中占位
   if (run && ["running", "waiting_human"].includes(run.status)) {
-    const exists = fullTraces.some(t => t.id === run.run_id);
-    if (!exists && run.goal_preview) {
-      fullTraces.push({
+    const alreadyPresent = uniqueTraces.some(t =>
+      t.id === run.run_id ||
+      (t.goal && run.goal_preview && (t.goal.trim() === run.goal_preview.trim() || seenGoals.has(run.goal_preview.trim())))
+    );
+    if (!alreadyPresent && run.goal_preview) {
+      uniqueTraces.push({
         id: run.run_id,
         goal: run.goal_preview,
         status: run.status,
@@ -445,7 +460,7 @@ async function loadFlow(sessionId) {
     sessionId,
     session,
     run,
-    traces: fullTraces,
+    traces: uniqueTraces,
     artifacts: artsRes.artifacts || [],
   };
   renderFlow();
@@ -525,10 +540,11 @@ function renderSidebar() {
     `).join("");
     return `
       <div class="side-group ${open ? "open" : ""}" data-sgroup="${esc(g.key)}">
-        <button class="side-head" data-toggle="${esc(g.key)}">
+        <div class="side-head" data-toggle="${esc(g.key)}" role="button">
           <span>${g.icon}</span><span class="name">${esc(g.name)}</span>
+          <button class="side-plus-btn" data-new="${esc(g.key)}" title="在此项目下新建对话">＋</button>
           <span class="count">${g.sessions.length}</span><span class="chev">⌄</span>
-        </button>
+        </div>
         <div class="side-sessions">${items || `<div class="empty-tip">无任务</div>`}</div>
       </div>
     `;
@@ -546,20 +562,19 @@ function renderFlow() {
   if (!f) return;
   const s = f.session || {};
   const active = f.run && ["running", "waiting_human"].includes(f.run.status);
-  const latestTrace = f.traces.length ? f.traces[f.traces.length - 1] : null;
+  const proj = s.project_id ? S.projects.find(p => p.id === s.project_id) : null;
+  const dirLabel = proj ? `📁 ${proj.name}` : `💬 临时工作区`;
+  const fullDirPath = proj ? (proj.root_path || "") : "scratch (临时目录)";
 
-  $("topTitle").textContent = "任务会话";
-  $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span id="connText">${esc(short(s.title || s.goal || "任务会话", 20))}</span>`;
+  $("topTitle").textContent = s.title || "任务会话";
+  $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span style="color:var(--dim); font-size:11px; max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:middle;">[${esc(dirLabel)}] ${esc(fullDirPath)}</span>`;
   $("btnBackTop").classList.remove("hidden");
   $("btnMenu").classList.add("hidden");
 
   // 完整渲染会话中的每一轮历史对话（按时间顺序自上而下完整排列）
   let html = "";
   if (!f.traces.length) {
-    if (s.goal) {
-      html += `<div class="goal-bubble"><span class="arrow">→</span><div class="gtxt">${formatMarkdown(s.goal)}</div></div>`;
-    }
-    html += `<div class="empty-tip">等待执行记录…</div>`;
+    html += `<div class="empty-tip">当前对话所在目录：<b>${esc(dirLabel)}</b><br><span style="font-size:11px; color:var(--dim);">${esc(fullDirPath)}</span><br><br>直接在下方输入内容即可开始</div>`;
   } else {
     html = f.traces.map((tr, idx) => {
       const isLatest = idx === f.traces.length - 1;
@@ -588,13 +603,13 @@ function renderFlow() {
   const live = $("liveLine");
   if (f.run && f.run.status === "running") {
     live.className = "live-line";
-    live.innerHTML = `<span class="livedot"></span><strong>工作中</strong> <span style="color:var(--dim)">· ${esc(f.run.state_detail || f.run.phase || "执行中")}${f.run.event_count ? ` · ${f.run.event_count} 事件` : ""}</span>`;
+    live.innerHTML = `<span class="livedot"></span><strong>工作中</strong> <span style="color:var(--dim)">· ${esc(dirLabel)} · ${esc(f.run.state_detail || f.run.phase || "执行中")}${f.run.event_count ? ` · ${f.run.event_count} 事件` : ""}</span>`;
   } else if (f.run && f.run.status === "waiting_human") {
     live.className = "live-line wait";
-    live.innerHTML = `<span class="livedot"></span><span style="color:var(--amber); font-weight:600">等待你的回答</span>`;
+    live.innerHTML = `<span class="livedot"></span><span style="color:var(--amber); font-weight:600">等待你的回答 · ${esc(dirLabel)}</span>`;
   } else {
     live.className = "live-line";
-    live.innerHTML = `<span style="color:var(--dim)">${esc(s.project_name || "临时任务")} · ${esc(modelName(s.model_id))}${f.traces.length > 1 ? ` · 共 ${f.traces.length} 轮对话` : ""}</span>`;
+    live.innerHTML = `<span style="color:var(--dim)">${esc(dirLabel)} · ${esc(modelName(s.model_id))}${f.traces.length > 0 ? ` · 共 ${f.traces.length} 轮对话` : ""}</span>`;
   }
 
   // 提问卡片与当前运行错误
@@ -852,6 +867,35 @@ function cycleTheme() {
   toast(`主题: ${next === "default" ? "深灰" : next === "oled" ? "纯黑" : "深蓝"}`);
 }
 
+// 直接在指定项目/目录创建新对话并立即跳转进入聊天页面
+async function quickCreateSession(projectId) {
+  closeSidebarMobile();
+  const pid = (projectId && projectId !== "__scratch__") ? projectId : null;
+  const proj = pid ? S.projects.find(p => p.id === pid) : null;
+  const defaultTitle = proj ? `${proj.name} 对话` : "新任务对话";
+  try {
+    const res = await api("/channel/session", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: pid,
+        title: defaultTitle,
+      }),
+    });
+    await loadHome();
+    await openSession(res.session_id);
+    toast(`已进入 ${proj ? proj.name : '临时工作区'}，直接在下方输入即可`);
+    setTimeout(() => {
+      const input = $("followInput");
+      if (input) {
+        input.focus();
+        input.scrollIntoView({ behavior: "smooth" });
+      }
+    }, 200);
+  } catch (e) {
+    toast("创建失败: " + e.message);
+  }
+}
+
 function bind() {
   $("gateSave").onclick = async () => {
     const token = $("gateToken").value.trim();
@@ -876,7 +920,7 @@ function bind() {
     renderHome(); renderSidebar();
   };
   $("btnTheme").onclick = cycleTheme;
-  $("btnNew").onclick = () => openModal("__scratch__");
+  $("btnNew").onclick = () => quickCreateSession("__scratch__");
   $("btnSend").onclick = sendComposer;
   $("btnStop").onclick = stopRun;
   $("btnClip").onclick = () => $("clipInput").click();
@@ -926,7 +970,7 @@ function bind() {
       return;
     }
     const plus = e.target.closest("[data-new]");
-    if (plus) { e.stopPropagation(); openModal(plus.dataset.new); return; }
+    if (plus) { e.stopPropagation(); quickCreateSession(plus.dataset.new); return; }
     const toggle = e.target.closest("[data-toggle]");
     if (toggle) { toggleGroup(toggle.dataset.toggle); return; }
     const sess = e.target.closest("[data-session]");
