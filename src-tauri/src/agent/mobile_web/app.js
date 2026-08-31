@@ -32,19 +32,61 @@ function esc(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/* 格式化 Markdown 与行内高亮 (匹配参考截图 1) */
-function renderMarkdownInline(text) {
-  if (!text) return "";
+/* 完整的移动端 Markdown / 富文本解析引擎 */
+function formatInline(text) {
   let out = esc(text);
-  // `code` / paths
+  // 行内代码 `code`
   out = out.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-  // **bold**
+  // 加粗 **bold**
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // 文件名胶囊高亮
-  out = out.replace(/\b([a-zA-Z0-9_\-\.\/]+\.(?:md|ts|js|rs|json|vue|html|css|py|yaml|yml))\b/g, '<code class="inline-code">$1</code>');
-  // ① ② ③ 序号加粗美化
+  // 斜体 *italic*
+  out = out.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
+  // 自动识别文件名并渲染为胶囊高亮
+  out = out.replace(/\b([a-zA-Z0-9_\-\.\/]+\.(?:md|ts|js|rs|json|vue|html|css|py|yaml|yml|toml|sql|sh))\b/g, '<code class="inline-code">$1</code>');
+  // 序号加粗美化
   out = out.replace(/([①②③④⑤⑥⑦⑧⑨⑩])/g, '<strong style="color:var(--accent2); margin-right:2px;">$1</strong>');
   return out;
+}
+
+function formatMarkdown(raw) {
+  if (!raw) return "";
+  let text = String(raw).trim();
+  
+  // 1. 代码块 ```lang\ncode\n```
+  text = text.replace(/```([a-zA-Z0-9_\-\.]*)\n([\s\S]*?)```/g, (m, lang, code) => {
+    return `\n\n__CODE_BLOCK__${encodeURIComponent(code.trim())}__\n\n`;
+  });
+
+  // 2. 按行处理段落、引用、列表
+  const lines = text.split("\n");
+  const processed = [];
+  
+  for (let line of lines) {
+    let l = line.trim();
+    if (!l) continue;
+    
+    if (l.startsWith("__CODE_BLOCK__")) {
+      const code = decodeURIComponent(l.replace("__CODE_BLOCK__", "").replace("__", ""));
+      processed.push(`<pre class="md-code-block"><code>${esc(code)}</code></pre>`);
+      continue;
+    }
+    if (l.startsWith(">")) {
+      processed.push(`<blockquote class="md-blockquote">${formatInline(l.slice(1).trim())}</blockquote>`);
+      continue;
+    }
+    if (/^[-*]\s+/.test(l)) {
+      processed.push(`<div class="md-list-item"><span class="md-list-bullet">•</span><span>${formatInline(l.replace(/^[-*]\s+/, ""))}</span></div>`);
+      continue;
+    }
+    const numMatch = l.match(/^(\d+\.|[①②③④⑤⑥⑦⑧⑨⑩])\s*(.*)$/);
+    if (numMatch) {
+      processed.push(`<div class="md-list-item"><span class="md-list-bullet">${numMatch[1]}</span><span>${formatInline(numMatch[2])}</span></div>`);
+      continue;
+    }
+    processed.push(`<p>${formatInline(l)}</p>`);
+  }
+  
+  return processed.join("");
 }
 
 function setConn(ok, msg) {
@@ -165,15 +207,18 @@ function artIcon(a) {
   return "📦";
 }
 
-/* 渲染单一步骤 (匹配截图 1 的轻量紧致风格) */
+/* 渲染单一步骤：富文本说明 + 思考块 + 两行紧凑换行工具胶囊（工具名在后） */
 function renderStep(st) {
   const open = S.expandedSteps.has(String(st.id));
+  const tool = String(st.tool || "工具").trim();
   const act = (st.action && st.action !== st.tool) ? st.action : (st.description || st.action || "");
+  
+  // 1. 富文本说明文字（若有）
   const desc = st.description && st.description !== act
-    ? `<div class="assistant-narrative">${renderMarkdownInline(st.description)}</div>`
+    ? `<div class="assistant-narrative">${formatMarkdown(st.description)}</div>`
     : "";
 
-  // 思考块 (🧠 思考 · 持续了几秒)
+  // 2. 思考块 (🧠 思考 · 持续了几秒)
   let thoughtHtml = "";
   if (st.thought) {
     const thOpen = S.expandedThoughts.has(String(st.id));
@@ -183,28 +228,34 @@ function renderStep(st) {
           <span>🧠</span>
           <span>思考 · ${thOpen ? "点击收起 ▲" : "持续了几秒 ▼"}</span>
         </div>
-        ${thOpen ? `<div class="thought-content">${esc(st.thought)}</div>` : ""}
+        ${thOpen ? `<div class="thought-content">${formatMarkdown(st.thought)}</div>` : ""}
       </div>
     `;
   }
 
-  // 详细参数与输出（点击胶囊后展开）
+  // 3. 详细参数与输出（点击展开）
   const params = st.command || st.params;
   const paramsHtml = params ? `<div class="label">⌨️ 参数</div><pre>${esc(typeof params === "string" ? params : JSON.stringify(params, null, 2))}</pre>` : "";
   const output = st.output ? `<div class="label">📄 输出</div><pre>${esc(st.output)}</pre>` : "";
 
-  // 极简单行工具胶囊 (🔍 读取 📄 ...)
-  const isSub = /spawn|child|worker/.test(String(st.tool || "").toLowerCase());
+  // 4. 两行自然换行工具胶囊：参数/目标在主体，简短工具名在后标签
+  let shortTool = tool.replace(/^(remote-hub\/|builtin\/)/, "");
+  if (shortTool.length > 13) shortTool = shortTool.slice(0, 11) + "…";
+  
+  let formattedMain = esc(act || tool);
+  // 高亮参数中的文件名
+  formattedMain = formattedMain.replace(/\b([a-zA-Z0-9_\-\.\/]+\.(?:md|ts|js|rs|json|vue|html|css|py|yaml|yml|toml))\b/g, '<span class="t-target">$1</span>');
+
+  const isSub = /spawn|child|worker/.test(tool.toLowerCase());
   const toolPill = `
     <button class="tool-call-pill" data-step="${esc(st.id)}">
-      <span class="t-ic">${toolIcon(st.tool)}</span>
+      <span class="t-ic">${toolIcon(tool)}</span>
       <div class="t-body">
-        <span class="t-name">${esc(st.tool || "工具")}</span>
-        ${isSub ? `<span class="tag-badge">🤖 子智能体</span>` : ""}
-        <span class="t-args">${esc(act)}</span>
+        ${isSub ? `<span class="tag-badge">🤖 子智能体</span> ` : ""}
+        ${formattedMain}
       </div>
       <div class="t-right">
-        ${st.timestamp ? `<span>${esc(relTime(new Date(st.timestamp).toISOString()))}</span>` : ""}
+        <span class="tool-tag">${esc(shortTool)}</span>
         ${stepChip(st.status)}
       </div>
     </button>
@@ -363,7 +414,7 @@ function renderFlow() {
   // 用户目标气泡 (User Bubble)
   const goalText = s.goal || f.trace?.goal || s.title || "";
   const goalMore = goalText.length > 70 ? `<span class="gmore">${S.goalOpen ? "收起 ▲" : "展开全文 ▼"}</span>` : "";
-  $("flowGoal").innerHTML = `<span class="arrow">→</span><span class="gtxt">${esc(goalText)}${goalMore}</span>`;
+  $("flowGoal").innerHTML = `<span class="arrow">→</span><span class="gtxt">${formatMarkdown(goalText)}${goalMore}</span>`;
   $("flowGoal").onclick = () => { S.goalOpen = !S.goalOpen; renderFlow(); };
 
   // 实时状态行
@@ -382,7 +433,7 @@ function renderFlow() {
   // 提问卡片与结果卡片
   const paused = f.run && f.run.status === "waiting_human" ? (f.run.paused_reason || "Agent 请求人工协助。") : null;
   $("askCard").innerHTML = paused
-    ? `<div class="ask-card"><div class="rlabel">❓ Agent 提问</div><div class="q">${esc(paused)}</div><div class="hint">在底部输入框直接回复即可</div></div>`
+    ? `<div class="ask-card"><div class="rlabel">❓ Agent 提问</div><div class="q">${formatMarkdown(paused)}</div><div class="hint">在底部输入框直接回复即可</div></div>`
     : "";
 
   const failed = status === "failed";
@@ -390,7 +441,7 @@ function renderFlow() {
     : (f.run && f.run.result) ? f.run.result
     : (f.trace && f.trace.completion && f.trace.completion.summary) ? f.trace.completion.summary : null;
   $("resultCard").innerHTML = (!active && resultText)
-    ? `<div class="result-card ${failed ? "fail" : ""}"><div class="rlabel">${failed ? "✕ 失败原因" : "✓ 执行结果"}</div>${esc(resultText)}</div>`
+    ? `<div class="result-card ${failed ? "fail" : ""}"><div class="rlabel">${failed ? "✕ 失败原因" : "✓ 执行结果"}</div>${formatMarkdown(resultText)}</div>`
     : "";
 
   // 步骤列表渲染
@@ -732,10 +783,15 @@ function connectSSE(force) {
     S.es = es;
     es.onopen = () => { setConn(true); };
     es.onmessage = (e) => {
-      if (S.view.name === "flow" && S.currentSessionId) loadFlow(S.currentSessionId).catch(() => {});
-      else if (S.view.name === "home") loadHome().catch(() => {});
+      // 收到任何事件（无论来自桌面、微信桥还是手机）立即全量刷新视图
+      if (S.view.name === "flow" && S.currentSessionId) {
+        loadFlow(S.currentSessionId).catch(() => {});
+        loadHome().catch(() => {});
+      } else {
+        loadHome().catch(() => {});
+      }
     };
-    es.onerror = () => { if (es.readyState === 2) setTimeout(() => connectSSE(true), 3000); };
+    es.onerror = () => { if (es.readyState === 2) setTimeout(() => connectSSE(true), 2500); };
   } catch (e) {}
 }
 
@@ -745,11 +801,16 @@ async function boot() {
   await loadModels().catch(() => {});
   await loadHome().catch(() => {});
   connectSSE();
+  
+  // 活跃状态下定时保活与无感知轮询同步（电脑端/微信发消息或创建任务时，手机端无需手动刷新即可秒级同步）
   setInterval(() => {
     if (document.hidden) return;
-    if (S.view.name === "flow" && S.currentSessionId) loadFlow(S.currentSessionId).catch(() => {});
-    else if (S.view.name === "home") loadHome().catch(() => {});
-  }, 3000);
+    if (S.view.name === "flow" && S.currentSessionId) {
+      loadFlow(S.currentSessionId).catch(() => {});
+    } else if (S.view.name === "home") {
+      loadHome().catch(() => {});
+    }
+  }, 2000);
 }
 
 (function init() {
