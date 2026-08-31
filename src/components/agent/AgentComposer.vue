@@ -368,6 +368,35 @@
                             </div>
                         </Teleport>
                     </div>
+
+                    <!-- ⌨️ 快捷键提示小问号 -->
+                    <div class="composer-shortcut-hint-wrap">
+                        <button
+                            type="button"
+                            class="composer-tool-btn shortcut-hint-btn"
+                            title="键盘快捷键与发送模式说明"
+                            @mouseenter="showShortcutTooltip = true"
+                            @mouseleave="showShortcutTooltip = false"
+                            @click="showShortcutTooltip = !showShortcutTooltip"
+                        >
+                            <svg viewBox="0 0 24 24" class="hint-q-icon"><circle cx="12" cy="12" r="9"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
+                        </button>
+                        <div v-if="showShortcutTooltip" class="shortcut-popover-card">
+                            <div class="shortcut-popover-title">⌨️ 发送与控制快捷键</div>
+                            <div class="shortcut-row">
+                                <div class="shortcut-keys"><kbd>Ctrl</kbd> + <kbd>↵</kbd></div>
+                                <div class="shortcut-desc"><strong class="text-red">⚡ 立即打断</strong>：中断前序，立即切换新任务</div>
+                            </div>
+                            <div class="shortcut-row">
+                                <div class="shortcut-keys"><kbd>Alt</kbd> + <kbd>↵</kbd></div>
+                                <div class="shortcut-desc"><strong class="text-amber">⏳ 排队执行</strong>：当前完成后自动无缝执行</div>
+                            </div>
+                            <div class="shortcut-row">
+                                <div class="shortcut-keys"><kbd>Shift</kbd> + <kbd>↵</kbd></div>
+                                <div class="shortcut-desc">在输入框中换行</div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 <div class="composer-actions">
                     <button v-if="isRunning" class="stop-control" type="button" :disabled="stopRequested" @click="$emit('stop')">{{ stopRequested ? '停止中' : '停止' }}</button>
@@ -508,6 +537,7 @@ const emit = defineEmits<{
 }>();
 
 const submitMode = ref<"interrupt" | "queue">("interrupt");
+const showShortcutTooltip = ref(false);
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
@@ -2099,6 +2129,89 @@ textarea::placeholder {
     background: linear-gradient(135deg, #f59e0b, #d97706);
     color: #fff;
     box-shadow: 0 2px 8px rgba(245, 158, 11, 0.35);
+}
+
+/* ⌨️ 快捷键问号提示与弹出卡片 */
+.composer-shortcut-hint-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+.shortcut-hint-btn {
+    opacity: 0.6;
+    transition: opacity 0.15s, color 0.15s;
+}
+.shortcut-hint-btn:hover {
+    opacity: 1;
+    color: #38bdf8;
+}
+.hint-q-icon {
+    width: 14px;
+    height: 14px;
+    stroke: currentColor;
+    stroke-width: 2;
+    fill: none;
+}
+.shortcut-popover-card {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    width: 280px;
+    padding: 10px 12px;
+    background: #18181b;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+    z-index: 9999;
+    pointer-events: none;
+    backdrop-filter: blur(12px);
+    animation: fadeInScale 0.15s ease-out;
+}
+.shortcut-popover-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #e4e4e7;
+    margin-bottom: 8px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.shortcut-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 11px;
+}
+.shortcut-row:last-child {
+    margin-bottom: 0;
+}
+.shortcut-keys {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+}
+.shortcut-keys kbd {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-size: 10px;
+    font-family: inherit;
+    color: #f4f4f5;
+    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.2);
+}
+.shortcut-desc {
+    color: #a1a1aa;
+    font-size: 10.5px;
+    line-height: 1.3;
+}
+.shortcut-desc .text-red {
+    color: #f87171;
+}
+.shortcut-desc .text-amber {
+    color: #fbbf24;
 }
 
 /* ---- 底部实时指标连续状态行 ---- */
