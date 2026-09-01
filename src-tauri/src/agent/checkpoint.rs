@@ -415,6 +415,12 @@ pub struct AgentCheckpoint {
     /// 对显式未完成 Todo 的终态质询已经发出一次，避免一次质询变成无限循环。
     #[serde(default)]
     pub finish_reviewed: bool,
+    /// 终态代码审查重试次数（达到上限后熔断升级，防止死循环）
+    #[serde(default)]
+    pub reviewer_retry_count: u32,
+    /// 上次审查的 Diff Hash（防重复重试相同 Diff）
+    #[serde(default)]
+    pub last_reviewed_diff_hash: Option<String>,
     pub last_error: Option<String>,
     pub version: i64,
     pub created_at: String,
@@ -434,6 +440,8 @@ impl AgentCheckpoint {
             step_id: 0,
             retry_count: 0,
             finish_reviewed: false,
+            reviewer_retry_count: 0,
+            last_reviewed_diff_hash: None,
             last_error: None,
             version: 0,
             created_at: now.clone(),

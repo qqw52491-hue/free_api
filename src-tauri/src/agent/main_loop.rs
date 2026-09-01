@@ -605,6 +605,8 @@ async fn run_agent_main_loop_in_workspace_inner(
     }
     // 运行起始时间：成功完成时自动登记运行期间新生成的工作区产物（微信回推文件链路）
     let run_started_at = chrono::Utc::now();
+    // 捕获任务起点 Git 基准快照（用于 finish 时进行精准增量 Diff 审查）
+    let git_baseline = crate::agent::reviewer_gatekeeper::GitBaseline::capture(&workspace_dir);
     // 项目会话进入前先拿工作区软锁（独占该目录直到本次 run 结束）
     let _workspace_run_lock = if is_project_session {
         Some(acquire_workspace_lock(&workspace_dir, &goal)?)
@@ -1399,6 +1401,10 @@ async fn run_agent_main_loop_in_workspace_inner(
             &open_todos,
             complex_delivery_unresolved,
         );
+
+        let mut reviewer_challenged = false;
+        let mut reviewer_warnings_delivered: Option<crate::agent::reviewer_gatekeeper::ReviewResult> = None;
+
         if finish_challenged {
             checkpoint.finish_reviewed = true;
             let blocker_summary = open_todos
@@ -1428,22 +1434,119 @@ async fn run_agent_main_loop_in_workspace_inner(
             // 打分模式累加连续失败权重）。实测依据：Flash 档反复守不住交付披露纪律。
             context.record_step_outcome(false);
         } else if is_finish && result.success {
-            crate::agent::dispatcher::emit_tool_event(
+            // ①~⑤ 确定性门禁 100% 通过后，才进行 Reviewer Git Diff 终审！
+            let review_res = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
                 &app,
-                &final_session_id,
+                state.inner(),
+                &context,
+                &model_routing,
                 step_id,
-                &instruction,
-                "succeeded",
-                Some("finish".to_string()),
-                Some(true),
-                &output_text,
-                None,
-            );
+                &workspace_dir,
+                &git_baseline,
+                &final_session_id,
+                &mut interrupt_rx,
+            )
+            .await;
+
+            if !review_res.is_passed() {
+                // 存在阻塞性缺陷！
+                if checkpoint.reviewer_retry_count < 3 {
+                    checkpoint.reviewer_retry_count += 1;
+                    checkpoint.last_reviewed_diff_hash = Some(review_res.diff_hash.clone());
+                    reviewer_challenged = true;
+
+                    let issues_text = review_res
+                        .blocking_issues
+                        .iter()
+                        .enumerate()
+                        .map(|(i, b)| {
+                            format!(
+                                "{}. 【{}】{}\n   👉 修复要求: {}",
+                                i + 1,
+                                b.file,
+                                b.issue,
+                                b.requirement
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    let nits_text = if !review_res.nit_issues.is_empty() {
+                        let nits = review_res
+                            .nit_issues
+                            .iter()
+                            .map(|n| format!("- [{}] {}", n.file, n.suggestion))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!("\n\n💡 次要建议（供参考，不阻碍交付）：\n{}", nits)
+                    } else {
+                        String::new()
+                    };
+
+                    context.add_error_feedback(&format!(
+                        "【🚨 终态代码审查未通过（第 {}/3 次评审）】\n审查模型（{}）评分: {}/100\n审查评价: {}\n\n检测到以下阻塞性缺陷（Blocking Issues）：\n{}{}\n\n本次 finish 已被系统拦截，任务不会在此终止。请直接针对上述缺陷进行修改并运行测试验证，修复完成后再次调用 finish 交付。",
+                        checkpoint.reviewer_retry_count,
+                        review_res.model_id,
+                        review_res.score,
+                        review_res.summary,
+                        issues_text,
+                        nits_text
+                    ));
+
+                    crate::agent::dispatcher::emit_tool_event(
+                        &app,
+                        &final_session_id,
+                        step_id,
+                        &instruction,
+                        "finish_challenged",
+                        Some("finish".to_string()),
+                        Some(false),
+                        &format!(
+                            "终态审查未通过（{}分）：发现 {} 项阻塞性缺陷，已打回自愈",
+                            review_res.score,
+                            review_res.blocking_issues.len()
+                        ),
+                        None,
+                    );
+                    context.record_step_outcome(false);
+                } else {
+                    // 达到 3 次熔断上限！进入带警告交付模式（Fail-Open with Warnings / 升级人工）
+                    reviewer_warnings_delivered = Some(review_res.clone());
+                    crate::agent::dispatcher::emit_tool_event(
+                        &app,
+                        &final_session_id,
+                        step_id,
+                        &instruction,
+                        "succeeded",
+                        Some("finish".to_string()),
+                        Some(true),
+                        &format!(
+                            "终态审查熔断放行（已重试 3 次）：仍有 {} 项未收敛缺陷已附带警告交付",
+                            review_res.blocking_issues.len()
+                        ),
+                        None,
+                    );
+                }
+            } else {
+                // 审查 100% 通过（或无代码修改 / 仅次要建议放行）
+                crate::agent::dispatcher::emit_tool_event(
+                    &app,
+                    &final_session_id,
+                    step_id,
+                    &instruction,
+                    "succeeded",
+                    Some("finish".to_string()),
+                    Some(true),
+                    &output_text,
+                    None,
+                );
+            }
         } else if !is_finish {
             // 新的常规步骤提供了新增证据，之后若仍有 open Todo 可重新进行一次质询。
             checkpoint.finish_reviewed = false;
         }
-        let outcome_str = if finish_challenged {
+        let is_effectively_challenged = finish_challenged || reviewer_challenged;
+        let outcome_str = if is_effectively_challenged {
             "finish_challenged"
         } else if result.success {
             "succeeded"
@@ -1613,7 +1716,8 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         // 工具结果已经进入可恢复上下文。先提交 durable phase/cursor，再通知前端；
         // 这样崩溃恢复不会把已经完成的普通步骤当作待执行，也不会把 finish 误续跑。
-        if is_finish && result.success && !finish_challenged {
+        let is_actually_completed = is_finish && result.success && !is_effectively_challenged;
+        if is_actually_completed {
             checkpoint.mark_done(&context);
         } else {
             // 被质询或失败的 finish 也要推进 durable cursor，恢复后继续下一轮而不是误判终态。
@@ -1625,7 +1729,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         app.emit(&format!("agent-context-{}", final_session_id), &context)
             .map_err(|e| e.to_string())?;
 
-        if is_finish && result.success && !finish_challenged {
+        if is_actually_completed {
             advance_run_state(
                 &app,
                 &final_session_id,
@@ -1655,11 +1759,25 @@ async fn run_agent_main_loop_in_workspace_inner(
                 &conversation_model_id,
                 &persisted_summary,
             )?;
-            // 完成区域展示模型自己的最终回复；不再额外生成固定模板的“任务总结”Markdown 文件。
-            let emitted_finish = match finish_payload {
+            // 完成区域展示模型自己的最终回复；若存在 3 次审查熔断遗留警告，注入到 emitted_finish
+            let mut emitted_finish = match finish_payload {
                 serde_json::Value::Object(object) => serde_json::Value::Object(object),
                 _ => json!({ "summary": persisted_summary }),
             };
+            if let Some(ref warnings) = reviewer_warnings_delivered {
+                if let serde_json::Value::Object(ref mut map) = emitted_finish {
+                    map.insert(
+                        "reviewer_warnings".to_string(),
+                        json!({
+                            "score": warnings.score,
+                            "summary": warnings.summary,
+                            "blocking_issues": warnings.blocking_issues,
+                            "nit_issues": warnings.nit_issues,
+                        }),
+                    );
+                }
+            }
+
             if let Err(error) = crate::agent::run_trace::upsert_snapshot(
                 state.inner(),
                 &run_id,
@@ -1671,11 +1789,18 @@ async fn run_agent_main_loop_in_workspace_inner(
             ) {
                 eprintln!("[run-trace] 无法保存完成快照: {error}");
             }
+
+            let complete_msg = if reviewer_warnings_delivered.is_some() {
+                "任务已交付（审查达到重试上限，附带未收敛警告）"
+            } else {
+                "任务已由 AI 标记完成"
+            };
+
             app.emit(
                 &format!("agent-progress-{}", final_session_id),
                 json!({
                     "type": "complete",
-                    "message": "任务已由 AI 标记完成",
+                    "message": complete_msg,
                     "success": true,
                     "output": output_text,      // 原始 JSON 字符串（兼容旧逻辑）
                     "finish": emitted_finish,   // 结构化成果对象，含 details/summary/artifacts

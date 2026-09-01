@@ -57,17 +57,15 @@
           <input v-model="form.label" type="text" placeholder="例如: 🎨 前端视觉与交互审查官" />
         </label>
 
-        <label class="field">
+        <div class="field">
           <span class="field-label">绑定大模型 (可选，留空跟随全局路由)</span>
-          <select v-model="form.model_id">
-            <option value="">跟随全局自动路由</option>
-            <optgroup v-for="(pModels, pName) in groupedModels" :key="pName" :label="pName">
-              <option v-for="m in pModels" :key="m.id" :value="m.id">
-                {{ m.name }} ({{ m.id.slice(0, 8) }})
-              </option>
-            </optgroup>
-          </select>
-        </label>
+          <ModelSelectDropdown
+            v-model="form.model_id"
+            :models="models"
+            placeholder="跟随全局自动路由"
+            size="md"
+          />
+        </div>
 
         <label class="field">
           <span class="field-label">验证测试命令 (可选，如 npm test / cargo check)</span>
@@ -185,8 +183,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue';
+import { ref, reactive, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import ModelSelectDropdown from '../components/common/ModelSelectDropdown.vue';
 
 interface RoleCard {
   id: string;
@@ -260,15 +259,7 @@ const presetTemplates = [
   },
 ];
 
-const groupedModels = computed(() => {
-  const groups: Record<string, ModelItem[]> = {};
-  for (const m of models.value) {
-    const p = m.platform_name || m.platform_id || '其他平台';
-    if (!groups[p]) groups[p] = [];
-    groups[p].push(m);
-  }
-  return groups;
-});
+
 
 function extractEmoji(label: string) {
   const match = label.match(/(\p{Emoji_Presentation}|\p{Extended_Pictographic})/u);
