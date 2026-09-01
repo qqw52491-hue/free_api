@@ -105,6 +105,13 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         actions: &["wait_jobs(job_ids?: string[], timeout_secs?: number)"],
     },
     BuiltinToolSpec {
+        name: "resume_child",
+        summary: "追问已完成的子任务：继承其脱水对话历史与保活工作区副本，以半量步数预算继续攻坚；需提供 child_run_id 与追问 message",
+        actions: &[
+            "dispatch(child_run_id: string, message: string, test_command?: string [writer 类可重设])",
+        ],
+    },
+    BuiltinToolSpec {
         name: "role_manager",
         summary: "专精角色池维护：角色卡=人设提示词+钉死模型+作用域+默认测试命令；派发子任务时传 role 参数即挂载",
         actions: &[

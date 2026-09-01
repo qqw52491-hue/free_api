@@ -242,6 +242,32 @@ pub(crate) fn begin_child_run(
     kind: &str,
     custom_cap: Option<i64>,
 ) -> Result<String, String> {
+    begin_child_run_extended(
+        db,
+        parent_run_id,
+        parent_session_id,
+        workspace_root,
+        model_id,
+        evidence_ref_count,
+        kind,
+        custom_cap,
+        None,
+        None,
+    )
+}
+
+pub(crate) fn begin_child_run_extended(
+    db: &DbState,
+    parent_run_id: &str,
+    parent_session_id: &str,
+    workspace_root: &Path,
+    model_id: &str,
+    evidence_ref_count: usize,
+    kind: &str,
+    custom_cap: Option<i64>,
+    workspace_copy: Option<&str>,
+    resumed_from: Option<&str>,
+) -> Result<String, String> {
     let child_run_id = Uuid::new_v4().to_string();
     let root = workspace_root
         .canonicalize()
@@ -283,7 +309,7 @@ pub(crate) fn begin_child_run(
         ));
     }
     conn.execute(
-        "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, evidence_ref_count, kind) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8)",
+        "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, evidence_ref_count, kind, workspace_copy, resumed_from) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10)",
         params![
             child_run_id,
             parent_run_id,
@@ -293,6 +319,8 @@ pub(crate) fn begin_child_run(
             chrono::Utc::now().to_rfc3339(),
             evidence_ref_count as i64,
             kind,
+            workspace_copy,
+            resumed_from,
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -308,11 +336,33 @@ pub(crate) fn finish_child_run(
     error_kind: Option<&str>,
     result_json: Option<&str>,
 ) {
+    finish_child_run_with_history(
+        db,
+        child_run_id,
+        status,
+        duration_ms,
+        completion_tokens,
+        error_kind,
+        result_json,
+        None,
+    );
+}
+
+pub(crate) fn finish_child_run_with_history(
+    db: &DbState,
+    child_run_id: &str,
+    status: &str,
+    duration_ms: u64,
+    completion_tokens: i64,
+    error_kind: Option<&str>,
+    result_json: Option<&str>,
+    message_history_json: Option<&str>,
+) {
     let Ok(conn) = db.0.lock() else {
         return;
     };
     let _ = conn.execute(
-        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, error_kind=?6, result_json=?7 WHERE id=?1",
+        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1",
         params![
             child_run_id,
             status,
@@ -321,6 +371,7 @@ pub(crate) fn finish_child_run(
             completion_tokens,
             error_kind,
             result_json,
+            message_history_json,
         ],
     );
     // ⚡ 唤醒挂起等待中的协程（watch 版本号广播，不存在丢失通知的竞态窗口）

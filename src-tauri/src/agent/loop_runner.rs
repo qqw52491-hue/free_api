@@ -10,8 +10,9 @@ use crate::agent::run_state::{AgentRunEvent, AgentRunMachine};
 use crate::agent::types::{AgentInstruction, DispatchResult, RUN_INTERRUPTED_ROUTE};
 use crate::agent::utils::call_llm;
 use crate::db::DbState;
-use serde_json::json;
-use std::path::Path;
+use crate::llm::ModelConfig;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch};
@@ -1373,6 +1374,236 @@ pub async fn run_tool_phase(
                 success: false,
                 route: "wait_jobs:interrupted_or_failed".to_string(),
             },
+        }
+    // --- B2.6 特殊工具：resume_child 追问已完成的子任务 ---
+    } else if inst.get_tool().eq_ignore_ascii_case("resume_child")
+        || inst.get_action().eq_ignore_ascii_case("resume_child")
+    {
+        let params = inst.get_params();
+        let target_child_id = params
+            .get("child_run_id")
+            .or_else(|| params.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let followup_msg = params
+            .get("message")
+            .or_else(|| params.get("task"))
+            .or_else(|| params.get("query"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let test_command_override = params
+            .get("test_command")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+
+        if target_child_id.is_empty() {
+            DispatchResult {
+                stdout: String::new(),
+                stderr: "❌ resume_child 缺少必要参数 child_run_id。".to_string(),
+                success: false,
+                route: "host_rejection:missing_child_run_id".to_string(),
+            }
+        } else if followup_msg.is_empty() {
+            DispatchResult {
+                stdout: String::new(),
+                stderr: "❌ resume_child 缺少必要参数 message（对该子任务的追问或补充要求）。".to_string(),
+                success: false,
+                route: "host_rejection:missing_followup_message".to_string(),
+            }
+        } else {
+            let child_data: Result<(String, String, Option<String>, Option<String>, String, String), String> = {
+                let conn = state.0.lock().map_err(|e| e.to_string())?;
+                conn.query_row(
+                    "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root FROM agent_child_runs WHERE id = ?1",
+                    rusqlite::params![target_child_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                        ))
+                    },
+                ).map_err(|e| format!("未找到子任务「{}」记录: {}", target_child_id, e))
+            };
+
+            match child_data {
+                Err(err) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: err,
+                    success: false,
+                    route: "host_rejection:child_not_found".to_string(),
+                },
+                Ok((status, kind, ws_copy, hist_json, child_model, root_str)) => {
+                    if status != "succeeded" {
+                        DispatchResult {
+                            stdout: String::new(),
+                            stderr: format!("❌ 仅能追问已成功的子任务（该任务当前状态为「{}」）；如需继续请直接派发新任务。", status),
+                            success: false,
+                            route: "host_rejection:status_not_succeeded".to_string(),
+                        }
+                    } else {
+                        // 校验工作区物理存在性
+                        let ws_path = match ws_copy {
+                            Some(ref p) if PathBuf::from(p).exists() => PathBuf::from(p),
+                            _ => PathBuf::new(),
+                        };
+                        if ws_path.as_os_str().is_empty() {
+                            DispatchResult {
+                                stdout: String::new(),
+                                stderr: "❌ 该子任务的工作副本已随父运行结束回收，无法继续追问，请重新派发新任务。".to_string(),
+                                success: false,
+                                route: "host_rejection:workspace_recycled".to_string(),
+                            }
+                        } else {
+                            let mut messages: Vec<Value> = match hist_json.as_deref() {
+                                Some(raw) => serde_json::from_str(raw).unwrap_or_default(),
+                                None => Vec::new(),
+                            };
+                            if messages.is_empty() {
+                                DispatchResult {
+                                    stdout: String::new(),
+                                    stderr: "❌ 该子任务未留存历史对话记录，无法恢复。".to_string(),
+                                    success: false,
+                                    route: "host_rejection:missing_history".to_string(),
+                                }
+                            } else {
+                                // 注入追问消息
+                                messages.push(json!({
+                                    "role": "user",
+                                    "content": format!("【追问与补充任务】\n{}", followup_msg)
+                                }));
+
+                                let routing = crate::agent::router::AgentRouter::route_for_role(
+                                    context,
+                                    model_routing,
+                                    step_id,
+                                    if kind == "writer" {
+                                        crate::agent::router::roles::WRITER
+                                    } else {
+                                        crate::agent::router::roles::SCOUT
+                                    },
+                                );
+                                let model_to_use = if !child_model.is_empty() {
+                                    child_model
+                                } else {
+                                    routing.model_id.clone()
+                                };
+                                let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
+
+                                let new_child_run_id = match crate::agent::child_reviewer::begin_child_run_extended(
+                                    state.inner(),
+                                    parent_run_id,
+                                    final_session_id,
+                                    workspace_dir,
+                                    &model_to_use,
+                                    0,
+                                    &kind,
+                                    None,
+                                    Some(ws_path.to_string_lossy().as_ref()),
+                                    Some(target_child_id),
+                                ) {
+                                    Ok(id) => id,
+                                    Err(err) => {
+                                        return Ok(DispatchResult {
+                                            stdout: String::new(),
+                                            stderr: format!("❌ 创建追问子任务失败: {}", err),
+                                            success: false,
+                                            route: "host_rejection:begin_run_failed".to_string(),
+                                        });
+                                    }
+                                };
+
+                                let config = match ModelConfig::from_db_state(state.inner(), &model_to_use) {
+                                    Ok(cfg) => cfg,
+                                    Err(err) => {
+                                        return Ok(DispatchResult {
+                                            stdout: String::new(),
+                                            stderr: format!("❌ 加载模型配置失败: {}", err),
+                                            success: false,
+                                            route: "host_rejection:model_config_failed".to_string(),
+                                        });
+                                    }
+                                };
+
+                                if kind == "writer" {
+                                    let test_cmd = test_command_override.unwrap_or_else(|| "npm test".to_string());
+                                    let writer_req = crate::agent::child_writer::WriterRequest {
+                                        task: followup_msg.to_string(),
+                                        test_command: test_cmd,
+                                        focus_paths: Vec::new(),
+                                        context_excerpts: None,
+                                        hard_scope: String::new(),
+                                    };
+                                    let max_steps = crate::agent::child_writer::MAX_WRITER_STEPS / 2;
+                                    let parent_root = PathBuf::from(&root_str);
+                                    tokio::spawn(crate::agent::child_writer::run_writer_loop(
+                                        DbState(state.0.clone()),
+                                        Some(app.clone()),
+                                        final_session_id.to_string(),
+                                        new_child_run_id.clone(),
+                                        parent_root,
+                                        ws_path,
+                                        config,
+                                        reasoning_effort,
+                                        writer_req,
+                                        String::new(),
+                                        interrupt_rx.clone(),
+                                        Some(messages),
+                                        Some(max_steps),
+                                    ));
+
+                                    DispatchResult {
+                                        stdout: format!(
+                                            "✅ 写入 worker 追问已成功启动：新 child_run_id={}（继承上轮历史与工作区副本，步数上限减半为 {} 步）。你可以继续执行其他工作，或使用 wait_jobs 等待结果。",
+                                            new_child_run_id, max_steps
+                                        ),
+                                        stderr: String::new(),
+                                        success: true,
+                                        route: "resume_child:writer_spawned".to_string(),
+                                    }
+                                } else {
+                                    let worker_req = crate::agent::child_worker::WorkerRequest {
+                                        task: followup_msg.to_string(),
+                                        focus_paths: Vec::new(),
+                                        context_excerpts: None,
+                                        hard_scope: String::new(),
+                                    };
+                                    let max_steps = crate::agent::child_worker::MAX_WORKER_STEPS / 2;
+                                    tokio::spawn(crate::agent::child_worker::run_worker_loop(
+                                        DbState(state.0.clone()),
+                                        Some(app.clone()),
+                                        final_session_id.to_string(),
+                                        new_child_run_id.clone(),
+                                        ws_path,
+                                        config,
+                                        reasoning_effort,
+                                        worker_req,
+                                        String::new(),
+                                        interrupt_rx.clone(),
+                                        Some(messages),
+                                        Some(max_steps),
+                                    ));
+
+                                    DispatchResult {
+                                        stdout: format!(
+                                            "✅ 侦察 worker 追问已成功启动：新 child_run_id={}（继承上轮历史，步数上限减半为 {} 步）。你可以继续执行其他工作，或使用 wait_jobs 等待结果。",
+                                            new_child_run_id, max_steps
+                                        ),
+                                        stderr: String::new(),
+                                        success: true,
+                                        route: "resume_child:worker_spawned".to_string(),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     // --- B3. 特殊拦截：AI 主动挂起呼叫人类 ---
     } else if inst.get_tool().eq_ignore_ascii_case("ask_human") || inst.get_action().eq_ignore_ascii_case("ask") {

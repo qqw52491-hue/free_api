@@ -204,7 +204,11 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             completion_tokens INTEGER NOT NULL DEFAULT 0,
             evidence_ref_count INTEGER NOT NULL DEFAULT 0,
             error_kind TEXT,
-            result_json TEXT
+            result_json TEXT,
+            kind TEXT NOT NULL DEFAULT 'review',
+            workspace_copy TEXT,
+            resumed_from TEXT,
+            message_history_json TEXT
         );
         CREATE TABLE IF NOT EXISTS agent_role_cards (
             id TEXT PRIMARY KEY,
@@ -556,6 +560,19 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     );
     let _ = conn.execute(
         "ALTER TABLE agent_role_cards ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 0;",
+        [],
+    );
+    // P5 副本生命周期与脱水追问字段：workspace_copy / resumed_from / message_history_json
+    let _ = conn.execute(
+        "ALTER TABLE agent_child_runs ADD COLUMN workspace_copy TEXT;",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_child_runs ADD COLUMN resumed_from TEXT;",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_child_runs ADD COLUMN message_history_json TEXT;",
         [],
     );
     if let Err(error) = migrate_uvx_bridge_plugins_to_native(&conn) {

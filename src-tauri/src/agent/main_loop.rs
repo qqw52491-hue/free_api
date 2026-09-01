@@ -66,6 +66,18 @@ fn acquire_workspace_lock(workspace_dir: &std::path::Path, goal: &str) -> Result
     Ok(WorkspaceRunGuard { key })
 }
 
+/// P5: 父 run 终态时自动统一回收该 run 下所有子 writer 副本
+struct ChildWorkspaceGuard<'a> {
+    db: &'a DbState,
+    run_id: &'a str,
+}
+
+impl<'a> Drop for ChildWorkspaceGuard<'a> {
+    fn drop(&mut self) {
+        crate::agent::child_writer::cleanup_child_workspaces(self.db, self.run_id);
+    }
+}
+
 /// Agent 每个任务最多执行步数（可按项目需求调整）
 const MAX_STEPS: usize = 300;
 /// 正常会话只做短暂态请求重试；后台回归可显式提高到上限以避免 Provider 波动中断取证。
@@ -612,6 +624,11 @@ async fn run_agent_main_loop_in_workspace_inner(
         Some(acquire_workspace_lock(&workspace_dir, &goal)?)
     } else {
         None
+    };
+    // P5 副本生命周期：父 run 终态时自动统一回收所有子 writer 的隔离副本
+    let _child_workspaces_guard = ChildWorkspaceGuard {
+        db: state.inner(),
+        run_id: &run_id,
     };
     // 1. 智能 MCP 插件同步：首次任务全量初始化，后续任务仅增量保活（见 mcp/session_bootstrap.rs）
     crate::agent::mcp::session_bootstrap::sync_mcp_plugins_for_session(

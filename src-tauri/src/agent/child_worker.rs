@@ -357,6 +357,8 @@ pub async fn run_worker_loop(
     request: WorkerRequest,
     persona: String,
     mut interrupt_rx: watch::Receiver<u64>,
+    initial_messages: Option<Vec<Value>>,
+    max_steps_override: Option<usize>,
 ) {
     let started_at = std::time::Instant::now();
     let mut completion_tokens: i64 = 0;
@@ -368,20 +370,25 @@ pub async fn run_worker_loop(
     let mut confidence = "unverified".to_string();
     let mut interrupted: Option<String> = None;
 
-    let focus = if request.focus_paths.is_empty() {
-        "（无）".to_string()
+    let max_steps = max_steps_override.unwrap_or(MAX_WORKER_STEPS);
+    let mut messages = if let Some(msgs) = initial_messages {
+        msgs
     } else {
-        request.focus_paths.join(", ")
+        let focus = if request.focus_paths.is_empty() {
+            "（无）".to_string()
+        } else {
+            request.focus_paths.join(", ")
+        };
+        let initial_user_prompt = render_worker_initial_prompt(&workspace_root, &focus, &request);
+        vec![
+            json!({"role": "system", "content": format!("{}{}", worker_system_prompt("scout"), persona)}),
+            json!({"role": "user", "content": initial_user_prompt}),
+        ]
     };
-    let initial_user_prompt = render_worker_initial_prompt(&workspace_root, &focus, &request);
-    let mut messages = vec![
-        json!({"role": "system", "content": format!("{}{}", worker_system_prompt("scout"), persona)}),
-        json!({"role": "user", "content": initial_user_prompt}),
-    ];
 
     let terminal: &str = loop {
         if started_at.elapsed() >= Duration::from_secs(WORKER_TIMEOUT_SECS)
-            || steps_used >= MAX_WORKER_STEPS
+            || steps_used >= max_steps
         {
             break "budget_exhausted";
         }
@@ -542,7 +549,9 @@ pub async fn run_worker_loop(
     };
 
     let result_json = worker_result_json(&result);
-    crate::agent::child_reviewer::finish_child_run(
+    let dehydrated = crate::agent::child_writer::dehydrate_child_messages(&messages);
+    let hist_json = serde_json::to_string(&dehydrated).ok();
+    crate::agent::child_reviewer::finish_child_run_with_history(
         &db,
         &child_run_id,
         &result.status,
@@ -550,6 +559,7 @@ pub async fn run_worker_loop(
         result.completion_tokens,
         result.error_kind.as_deref(),
         Some(&result_json),
+        hist_json.as_deref(),
     );
 
     if let Some(handle) = app {
@@ -622,7 +632,7 @@ pub async fn spawn_child_worker(
         .canonicalize()
         .map_err(|error| format!("child_worker 工作区不可用: {}", error))?;
     let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
-    let child_run_id = crate::agent::child_reviewer::begin_child_run(
+    let child_run_id = crate::agent::child_reviewer::begin_child_run_extended(
         db,
         parent_run_id,
         parent_session_id,
@@ -631,6 +641,8 @@ pub async fn spawn_child_worker(
         0,
         "worker",
         custom_cap,
+        Some(workspace.to_string_lossy().as_ref()),
+        None,
     )?;
     let mut config = ModelConfig::from_db_state(db, model_id)?;
     config.max_tokens = if config.max_tokens <= 0 {
@@ -655,6 +667,8 @@ pub async fn spawn_child_worker(
         request,
         persona,
         interrupt_rx,
+        None,
+        None,
     ));
     Ok(child_run_id)
 }

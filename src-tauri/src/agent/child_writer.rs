@@ -1,5 +1,6 @@
 use crate::db::DbState;
 use crate::llm::{self, ModelConfig};
+use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -43,6 +44,38 @@ pub struct WriterRequest {
     pub hard_scope: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictStatus {
+    CleanReplay,     // root_now == spawn_hash
+    AlreadyApplied,  // root_now == result_hash
+    Conflict,        // 三者互不相等
+}
+
+impl ConflictStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::CleanReplay => "✅ 可直接重放",
+            Self::AlreadyApplied => "✅ 内容已一致，无需操作",
+            Self::Conflict => "⚠️ 发生冲突，禁止盲目覆盖",
+        }
+    }
+}
+
+/// 三态冲突检测纯函数：比较 spawn 时刻快照、writer 修改结果、当前主工作区三者指纹
+pub fn evaluate_file_conflict(
+    spawn_hash: &str,
+    result_hash: &str,
+    root_now_hash: &str,
+) -> ConflictStatus {
+    if root_now_hash == spawn_hash {
+        ConflictStatus::CleanReplay
+    } else if root_now_hash == result_hash {
+        ConflictStatus::AlreadyApplied
+    } else {
+        ConflictStatus::Conflict
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangedFile {
     pub path: String,
@@ -50,6 +83,14 @@ pub struct ChangedFile {
     pub bytes_after: usize,
     #[serde(default)]
     pub diff: String,
+    #[serde(default)]
+    pub conflict_status: Option<ConflictStatus>,
+    #[serde(default)]
+    pub spawn_hash: Option<String>,
+    #[serde(default)]
+    pub result_hash: Option<String>,
+    #[serde(default)]
+    pub root_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +118,8 @@ pub struct WriterResult {
     pub test_output_tail: String,
     #[serde(default)]
     pub workspace_copy: String,
+    #[serde(default)]
+    pub patch_ref: Option<String>,
 }
 
 pub fn parse_writer_request(params: &Value) -> Result<WriterRequest, String> {
@@ -489,31 +532,298 @@ pub async fn execute_writer_action(
     }
 }
 
-/// 依据修改留底生成受限总 diff
-fn build_changed_files(changes: &BTreeMap<String, String>, copy_root: &Path) -> Vec<ChangedFile> {
-    let mut total = 0usize;
-    changes
-        .iter()
-        .filter_map(|(relative, before)| {
-            let after = std::fs::read_to_string(copy_root.join(relative)).unwrap_or_default();
-            let diff = line_diff(before, &after);
-            total += diff.chars().count();
-            if total > MAX_DIFF_TOTAL_CHARS {
-                return Some(ChangedFile {
-                    path: relative.clone(),
-                    bytes_before: before.len(),
-                    bytes_after: after.len(),
-                    diff: "（总 diff 预算耗尽，未内联）".to_string(),
-                });
+/// 初始化副本内的 Git 基线快照（解决副本无 .git 仓库无法 diff 的问题）
+pub async fn init_git_baseline(copy_root: &Path) -> bool {
+    let init = tokio::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(copy_root)
+        .output()
+        .await;
+    if init.is_err() || !init.as_ref().unwrap().status.success() {
+        return false;
+    }
+    let add = tokio::process::Command::new("git")
+        .arg("add")
+        .arg("-A")
+        .current_dir(copy_root)
+        .output()
+        .await;
+    if add.is_err() || !add.as_ref().unwrap().status.success() {
+        return false;
+    }
+    let commit = tokio::process::Command::new("git")
+        .args(&[
+            "-c", "user.email=agent@local",
+            "-c", "user.name=writer",
+            "commit", "-qm", "spawn baseline", "--allow-empty"
+        ])
+        .current_dir(copy_root)
+        .output()
+        .await;
+    commit.is_ok() && commit.unwrap().status.success()
+}
+
+/// 计算指定路径文件的指纹（优先使用 git hash-object，git 不可用时回退到 sha256）
+pub async fn compute_file_hash(path: &Path, git_available: bool) -> String {
+    if !path.exists() {
+        return "empty/deleted".to_string();
+    }
+    if git_available {
+        if let Ok(out) = tokio::process::Command::new("git")
+            .args(&["hash-object", path.to_string_lossy().as_ref()])
+            .output()
+            .await
+        {
+            if out.status.success() {
+                let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !h.is_empty() {
+                    return h;
+                }
             }
-            Some(ChangedFile {
-                path: relative.clone(),
-                bytes_before: before.len(),
-                bytes_after: after.len(),
-                diff,
-            })
+        }
+    }
+    use sha2::{Digest, Sha256};
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            format!("{:x}", hasher.finalize())
+        }
+        Err(_) => "read_error".to_string(),
+    }
+}
+
+/// 计算文本内容的指纹（优先使用 git hash-object --stdin，git 不可用时回退到 sha256）
+pub async fn compute_str_hash(content: &str, git_available: bool, cwd: &Path) -> String {
+    if content.is_empty() {
+        return "empty/deleted".to_string();
+    }
+    if git_available {
+        use tokio::io::AsyncWriteExt;
+        if let Ok(mut child) = tokio::process::Command::new("git")
+            .args(&["hash-object", "--stdin"])
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(content.as_bytes()).await;
+                drop(stdin);
+            }
+            if let Ok(out) = child.wait_with_output().await {
+                if out.status.success() {
+                    let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !h.is_empty() {
+                        return h;
+                    }
+                }
+            }
+        }
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// 从 Git 全量 diff 中截取指定相对路径文件的独立 diff 块
+pub fn extract_file_diff(full_diff: &str, relative_path: &str) -> Option<String> {
+    let clean_path = relative_path.replace('\\', "/");
+    let marker = format!("diff --git a/{} b/{}", clean_path, clean_path);
+    if let Some(pos) = full_diff.find(&marker) {
+        let after_marker = &full_diff[pos..];
+        let end = after_marker[marker.len()..]
+            .find("diff --git ")
+            .map(|offset| marker.len() + offset)
+            .unwrap_or(after_marker.len());
+        return Some(after_marker[..end].trim_end().to_string());
+    }
+    None
+}
+
+/// 脱水子任务历史消息：单条 observation 上限 4000 字符，大输出截断保留头尾
+pub fn dehydrate_child_messages(messages: &[Value]) -> Vec<Value> {
+    const MAX_DEHYDRATE_OBSERVATION_CHARS: usize = 4_000;
+    messages
+        .iter()
+        .map(|msg| {
+            let mut m = msg.clone();
+            if let Some(content) = m.get("content").and_then(|v| v.as_str()) {
+                if content.chars().count() > MAX_DEHYDRATE_OBSERVATION_CHARS {
+                    let char_count = content.chars().count();
+                    let head: String = content.chars().take(2_500).collect();
+                    let tail: String = content
+                        .chars()
+                        .skip(char_count.saturating_sub(1_500))
+                        .collect();
+                    let dehydrated = format!(
+                        "{}\n\n... [数据较长已脱水，省略 {} 字符] ...\n\n{}",
+                        head,
+                        char_count.saturating_sub(4_000),
+                        tail
+                    );
+                    m["content"] = json!(dehydrated);
+                }
+            }
+            m
         })
         .collect()
+}
+
+/// 父 run 终态时统一回收所有该父 run 下的子 writer 隔离副本
+pub fn cleanup_child_workspaces(db: &DbState, parent_run_id: &str) {
+    let Ok(conn) = db.0.lock() else { return; };
+    let mut stmt = match conn.prepare(
+        "SELECT workspace_copy FROM agent_child_runs WHERE parent_run_id = ?1 AND workspace_copy IS NOT NULL"
+    ) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let copies: Vec<String> = stmt
+        .query_map([parent_run_id], |row| row.get(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+
+    for path_str in copies {
+        let p = PathBuf::from(path_str);
+        if p.exists() {
+            let is_safe_writer_dir = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(".writer-"));
+            if is_safe_writer_dir {
+                let _ = std::fs::remove_dir_all(&p);
+            }
+        }
+    }
+}
+
+/// 依据修改留底与 Git 快照基线生成 Unified Hunk，并执行 48KB 分级降级与三态冲突检测
+async fn build_changed_files(
+    changes: &BTreeMap<String, String>,
+    copy_root: &Path,
+    parent_root: &Path,
+    git_available: bool,
+    db: &DbState,
+    parent_session_id: &str,
+    child_run_id: &str,
+) -> (Vec<ChangedFile>, Option<String>) {
+    let mut patch_ref = None;
+    let mut git_full_diff = String::new();
+
+    if git_available {
+        let _ = tokio::process::Command::new("git")
+            .arg("add")
+            .arg("-A")
+            .current_dir(copy_root)
+            .output()
+            .await;
+
+        if let Ok(out) = tokio::process::Command::new("git")
+            .args(&["diff", "--cached", "--unified=3"])
+            .current_dir(copy_root)
+            .output()
+            .await
+        {
+            if out.status.success() {
+                git_full_diff = String::from_utf8_lossy(&out.stdout).to_string();
+            }
+        }
+    }
+
+    let total_chars = git_full_diff.chars().count();
+    let mut file_diffs: BTreeMap<String, String> = BTreeMap::new();
+
+    if git_available && !git_full_diff.is_empty() {
+        if total_chars <= MAX_DIFF_TOTAL_CHARS {
+            // Tier 1: 全量 hunk 在 48KB 预算内，逐文件提取
+            for rel in changes.keys() {
+                if let Some(fd) = extract_file_diff(&git_full_diff, rel) {
+                    file_diffs.insert(rel.clone(), fd);
+                }
+            }
+        } else {
+            // Tier 2: 超出预算，尝试 --unified=0 降级重算（砍掉上下文行）
+            let u0_res = tokio::process::Command::new("git")
+                .args(&["diff", "--cached", "--unified=0"])
+                .current_dir(copy_root)
+                .output()
+                .await;
+            let u0_diff = u0_res
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default();
+            if !u0_diff.is_empty() && u0_diff.chars().count() <= MAX_DIFF_TOTAL_CHARS {
+                for rel in changes.keys() {
+                    if let Some(fd) = extract_file_diff(&u0_diff, rel) {
+                        file_diffs.insert(rel.clone(), format!("⚠️ 上下文已精简 (--unified=0):\n{}", fd));
+                    }
+                }
+            } else {
+                // Tier 3 & 4: 完整补丁登记为 Artifact 工件，内联文件首头 + patch_ref
+                let patch_title = format!("patch-{}.diff", &child_run_id[..8.min(child_run_id.len())]);
+                if let Ok(art) = crate::agent::artifact_manager::save_managed_artifact(
+                    db,
+                    parent_session_id,
+                    None,
+                    &patch_title,
+                    &git_full_diff,
+                    Some("diff"),
+                    Some("patch"),
+                    Some("writer_patch"),
+                ) {
+                    patch_ref = Some(art.id);
+                }
+
+                for rel in changes.keys() {
+                    let fd = extract_file_diff(&git_full_diff, rel).unwrap_or_default();
+                    let head_preview: String = fd.lines().take(10).collect::<Vec<_>>().join("\n");
+                    file_diffs.insert(
+                        rel.clone(),
+                        format!(
+                            "{}\n...（Diff 超出 48KB 预算，完整补丁已存入工件，可用 get_step_output 查看）",
+                            head_preview
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    let mut result_files = Vec::new();
+    for (relative, before) in changes {
+        let canonical_copy = copy_root.join(relative);
+        let canonical_parent = parent_root.join(relative);
+
+        let after = std::fs::read_to_string(&canonical_copy).unwrap_or_default();
+        let diff = if let Some(d) = file_diffs.get(relative) {
+            d.clone()
+        } else if git_available {
+            line_diff(before, &after)
+        } else {
+            format!("⚠️ git 不可用，回执为无行号简化 diff:\n{}", line_diff(before, &after))
+        };
+
+        let spawn_h = compute_str_hash(before, git_available, copy_root).await;
+        let result_h = compute_file_hash(&canonical_copy, git_available).await;
+        let root_now_h = compute_file_hash(&canonical_parent, git_available).await;
+        let conflict_status = evaluate_file_conflict(&spawn_h, &result_h, &root_now_h);
+
+        result_files.push(ChangedFile {
+            path: relative.clone(),
+            bytes_before: before.len(),
+            bytes_after: after.len(),
+            diff,
+            conflict_status: Some(conflict_status),
+            spawn_hash: Some(spawn_h),
+            result_hash: Some(result_h),
+            root_hash: Some(root_now_h),
+        });
+    }
+
+    (result_files, patch_ref)
 }
 
 /// L3 隔离写入 worker 主循环（异步，tokio::spawn 调用）
@@ -523,14 +833,18 @@ pub async fn run_writer_loop(
     app: Option<AppHandle>,
     parent_session_id: String,
     child_run_id: String,
+    parent_root: PathBuf,
     copy_root: PathBuf,
     config: ModelConfig,
     reasoning_effort: String,
     request: WriterRequest,
     persona: String,
     mut interrupt_rx: watch::Receiver<u64>,
+    initial_messages: Option<Vec<Value>>,
+    max_steps_override: Option<usize>,
 ) {
     let started_at = std::time::Instant::now();
+    let git_available = init_git_baseline(&copy_root).await;
     let mut completion_tokens: i64 = 0;
     let mut steps_used: usize = 0;
     let mut writes_used: usize = 0;
@@ -543,20 +857,25 @@ pub async fn run_writer_loop(
     let mut missing_evidence: Vec<String> = Vec::new();
     let mut interrupted: Option<String> = None;
 
-    let focus = if request.focus_paths.is_empty() {
-        "（无）".to_string()
+    let max_steps = max_steps_override.unwrap_or(MAX_WRITER_STEPS);
+    let mut messages = if let Some(msgs) = initial_messages {
+        msgs
     } else {
-        request.focus_paths.join(", ")
+        let focus = if request.focus_paths.is_empty() {
+            "（无）".to_string()
+        } else {
+            request.focus_paths.join(", ")
+        };
+        let initial_user_prompt = render_writer_initial_prompt(&copy_root, &focus, &request);
+        vec![
+            json!({"role": "system", "content": format!("{}{}", writer_system_prompt(), persona)}),
+            json!({"role": "user", "content": initial_user_prompt}),
+        ]
     };
-    let initial_user_prompt = render_writer_initial_prompt(&copy_root, &focus, &request);
-    let mut messages = vec![
-        json!({"role": "system", "content": format!("{}{}", writer_system_prompt(), persona)}),
-        json!({"role": "user", "content": initial_user_prompt}),
-    ];
 
     let terminal: &str = loop {
         if started_at.elapsed() >= Duration::from_secs(WRITER_TIMEOUT_SECS)
-            || steps_used >= MAX_WRITER_STEPS
+            || steps_used >= max_steps
         {
             break "budget_exhausted";
         }
@@ -618,7 +937,7 @@ pub async fn run_writer_loop(
                 completion_tokens += result
                     .usage
                     .map(|usage| usage.completion_tokens)
-                    .unwrap_or_default();
+                    .unwrap_or(0);
                 result.full_response
             }
         };
@@ -637,10 +956,9 @@ pub async fn run_writer_loop(
         if parsed.action == "finish" {
             if test_evidence.is_none() && !test_nudged {
                 test_nudged = true;
-                steps_used -= 1;
                 messages.push(json!({"role": "assistant", "content": raw}));
                 messages.push(json!({"role": "user", "content": format!(
-                    "【宿主拦截】你还没有运行测试命令 \"{}\"。修改未经测试验证不得交付：请先执行它，再 finish。",
+                    "【宿主强制门禁】尚未执行测试命令「{}」；交卷前必须运行测试并以通过为证据。请立即调用 run_command 执行测试。",
                     request.test_command
                 )}));
                 continue;
@@ -703,7 +1021,7 @@ pub async fn run_writer_loop(
         "budget_exhausted" => {
             missing_evidence.push(format!(
                 "以 budget_exhausted 终止（步数上限 {} / 时长上限 {}s）",
-                MAX_WRITER_STEPS, WRITER_TIMEOUT_SECS
+                max_steps, WRITER_TIMEOUT_SECS
             ));
             ("succeeded", None)
         }
@@ -715,7 +1033,16 @@ pub async fn run_writer_loop(
         missing_evidence.push("交付缺少测试证据：test_command 未被执行".to_string());
         confidence = "unverified".to_string();
     }
-    let changed_files = build_changed_files(&changes, &copy_root);
+    let (changed_files, patch_ref) = build_changed_files(
+        &changes,
+        &copy_root,
+        &parent_root,
+        git_available,
+        &db,
+        &parent_session_id,
+        &child_run_id,
+    )
+    .await;
     let (test_status, test_tail) = match &test_evidence {
         Some((_, passed, output)) => (
             if *passed { "passed" } else { "failed" }.to_string(),
@@ -739,9 +1066,13 @@ pub async fn run_writer_loop(
         test_status,
         test_output_tail: test_tail,
         workspace_copy: copy_root.display().to_string(),
+        patch_ref,
     };
 
-    crate::agent::child_reviewer::finish_child_run(
+    let dehydrated = dehydrate_child_messages(&messages);
+    let hist_json = serde_json::to_string(&dehydrated).ok();
+
+    crate::agent::child_reviewer::finish_child_run_with_history(
         &db,
         &child_run_id,
         &result.status,
@@ -749,6 +1080,7 @@ pub async fn run_writer_loop(
         result.completion_tokens,
         result.error_kind.as_deref(),
         Some(&serde_json::to_string(&result).unwrap_or_default()),
+        hist_json.as_deref(),
     );
     if let Some(handle) = app {
         let _ = handle.emit(
@@ -762,10 +1094,7 @@ pub async fn run_writer_loop(
             ),
         );
     }
-    // 自动回收 L3 隔离副本，防止磁盘空间泄漏与工作区目录污染
-    if copy_root.exists() {
-        let _ = std::fs::remove_dir_all(&copy_root);
-    }
+    // P5: copy_root 保留保活，供后续 resume_child 追问复用；待父 run 终态由 cleanup_child_workspaces 统一回收
 }
 
 /// 渲染 writer 的初始首条 user 提示词（P2：有 context_excerpts 则分区渲染，无则保持经典紧凑格式）
@@ -847,7 +1176,12 @@ pub async fn spawn_child_writer(
         }
     }
 
-    let child_run_id = crate::agent::child_reviewer::begin_child_run(
+    let child_nonce = Uuid::new_v4().to_string();
+    let child8 = child_nonce.get(..8).unwrap_or(&child_nonce).to_string();
+    let copy_root = parent.join(format!(".writer-{}", child8));
+    let (files, bytes) = create_isolated_copy(&parent, &copy_root)?;
+
+    let child_run_id = crate::agent::child_reviewer::begin_child_run_extended(
         db,
         parent_run_id,
         parent_session_id,
@@ -856,10 +1190,9 @@ pub async fn spawn_child_writer(
         0,
         "writer",
         custom_cap,
+        Some(copy_root.to_string_lossy().as_ref()),
+        None,
     )?;
-    let child8 = child_run_id.get(..8).unwrap_or(&child_run_id).to_string();
-    let copy_root = parent.join(format!(".writer-{}", child8));
-    let (files, bytes) = create_isolated_copy(&parent, &copy_root)?;
 
     let mut config = ModelConfig::from_db_state(db, model_id)?;
     config.max_tokens = if config.max_tokens <= 0 {
@@ -878,12 +1211,15 @@ pub async fn spawn_child_writer(
         app,
         session_clone,
         child_clone,
+        parent.clone(),
         copy_root.clone(),
         config,
         reasoning,
         request,
         persona,
         interrupt_rx,
+        None,
+        None,
     ));
     Ok(child_run_id)
 }
@@ -1039,5 +1375,120 @@ mod tests {
         assert!(diff.contains("+ B"));
         assert!(diff.contains("+ d"));
         assert!(!diff.contains("- a"));
+    }
+
+    #[test]
+    fn test_evaluate_file_conflict_matrix() {
+        // 1. 主工作区干净无第三方改动：可直接重放
+        assert_eq!(
+            evaluate_file_conflict("hash_v1", "hash_v2", "hash_v1"),
+            ConflictStatus::CleanReplay
+        );
+
+        // 2. 主工作区已被修改且内容与 writer 产物完全一致：无需操作
+        assert_eq!(
+            evaluate_file_conflict("hash_v1", "hash_v2", "hash_v2"),
+            ConflictStatus::AlreadyApplied
+        );
+
+        // 3. 主工作区被修改为第三方内容（三者互不相等）：真冲突，禁止盲目覆盖
+        assert_eq!(
+            evaluate_file_conflict("hash_v1", "hash_v2", "hash_v3"),
+            ConflictStatus::Conflict
+        );
+    }
+
+    #[test]
+    fn test_dehydrate_child_messages_bounds() {
+        let short_msg = json!({"role": "user", "content": "短文本"});
+        let huge_text = "A".repeat(10_000);
+        let long_msg = json!({"role": "user", "content": huge_text});
+
+        let msgs = vec![short_msg, long_msg];
+        let dehydrated = dehydrate_child_messages(&msgs);
+
+        assert_eq!(dehydrated[0]["content"], "短文本");
+        let long_content = dehydrated[1]["content"].as_str().unwrap();
+        assert!(long_content.len() < 5000);
+        assert!(long_content.contains("数据较长已脱水，省略 6000 字符"));
+    }
+
+    #[tokio::test]
+    async fn test_init_git_baseline_and_diff_extraction() {
+        let (base, root) = workspace();
+        let copy = base.join(".writer-git-test");
+        create_isolated_copy(&root, &copy).unwrap();
+
+        let ok = init_git_baseline(&copy).await;
+        if ok {
+            // 修改文件
+            std::fs::write(copy.join("src/sum.mjs"), "export function sum(a, b) { return a + b + 0; }\n").unwrap();
+            let _ = tokio::process::Command::new("git").arg("add").arg("-A").current_dir(&copy).output().await;
+            let out = tokio::process::Command::new("git")
+                .args(&["diff", "--cached", "--unified=3"])
+                .current_dir(&copy)
+                .output()
+                .await
+                .unwrap();
+            let diff_str = String::from_utf8_lossy(&out.stdout);
+            let extracted = extract_file_diff(&diff_str, "src/sum.mjs");
+            assert!(extracted.is_some());
+            let fd = extracted.unwrap();
+            assert!(fd.contains("diff --git a/src/sum.mjs b/src/sum.mjs"));
+            assert!(fd.contains("+export function sum"));
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_cleanup_child_workspaces_removes_matching_dirs_only() {
+        let (base, root) = workspace();
+        let copy1 = base.join(".writer-test-cleanup-1");
+        let copy2 = base.join(".writer-test-cleanup-2");
+        let safe_keep = base.join("safe_keep_dir");
+        std::fs::create_dir_all(&copy1).unwrap();
+        std::fs::create_dir_all(&copy2).unwrap();
+        std::fs::create_dir_all(&safe_keep).unwrap();
+
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+        let conn = state.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, kind, workspace_copy) VALUES (?1, ?2, ?3, ?4, ?5, 'succeeded', ?6, 'writer', ?7)",
+            rusqlite::params![
+                "child-run-clean-1",
+                "parent-run-clean",
+                "session-clean",
+                root.to_string_lossy(),
+                "test-model",
+                chrono::Utc::now().to_rfc3339(),
+                copy1.to_string_lossy(),
+            ],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, kind, workspace_copy) VALUES (?1, ?2, ?3, ?4, ?5, 'succeeded', ?6, 'writer', ?7)",
+            rusqlite::params![
+                "child-run-clean-2",
+                "parent-run-clean",
+                "session-clean",
+                root.to_string_lossy(),
+                "test-model",
+                chrono::Utc::now().to_rfc3339(),
+                copy2.to_string_lossy(),
+            ],
+        ).unwrap();
+        drop(conn);
+
+        assert!(copy1.exists());
+        assert!(copy2.exists());
+        assert!(safe_keep.exists());
+
+        cleanup_child_workspaces(&state, "parent-run-clean");
+
+        assert!(!copy1.exists(), "已登记的 copy1 副本必须被回收");
+        assert!(!copy2.exists(), "已登记的 copy2 副本必须被回收");
+        assert!(safe_keep.exists(), "非 writer 目录绝不能被误删");
+
+        let _ = std::fs::remove_dir_all(base);
     }
 }

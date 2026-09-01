@@ -1043,12 +1043,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 if (!worker) {
                     teamWorkers.value.push({
                         id: jid,
-                        name: jid.includes("reviewer") ? "代码质量审查员" : "后台协作 Worker",
-                        role: jid.includes("reviewer") ? "reviewer" : "worker",
-                        roleLabel: jid.includes("reviewer") ? "审查员" : "Worker",
+                        name: jid.includes("reviewer") ? "代码质量审查员" : jid.includes("writer") ? "沙箱代码写入员" : "后台侦察 Worker",
+                        role: jid.includes("reviewer") ? "reviewer" : jid.includes("writer") ? "coder" : "worker",
+                        roleLabel: jid.includes("reviewer") ? "审查员" : jid.includes("writer") ? "写入员" : "Worker",
                         status: "running",
                         currentStep: "正在后台独立处理任务...",
-                        currentTool: "wait_jobs",
+                        currentTool: jid.includes("reviewer") ? "child_reviewer" : jid.includes("writer") ? "child_writer" : "child_worker",
                         progress: 50,
                         startedAt: Date.now(),
                     });
