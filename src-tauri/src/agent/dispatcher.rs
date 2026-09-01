@@ -609,12 +609,14 @@ pub(crate) fn execute_command_inner(
         )
     };
 
+    let builtin_list = crate::agent::prompt_assembly::build_builtin_tools_compact_list();
     DispatchResult {
         stdout: String::new(),
         stderr: format!(
-            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n可用原生内置工具：finish, ask_human, model_manager, mcp_manager, skill_manager, role_manager, schedule_manager, project_manager, system_info, wechat_manager, web_search, web_fetch, search, get_step_output, task_store；{}\n外部 MCP 工具调用格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
+            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n可用原生内置工具：{}；{}\n外部 MCP 工具调用格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
             tool,
             action,
+            builtin_list,
             mcp_guide
         ),
         success: false,

@@ -686,8 +686,10 @@ async fn run_agent_main_loop_in_workspace_inner(
         } else {
             mcp_lines.join("\n")
         };
+        let builtin_list = crate::agent::prompt_assembly::build_builtin_tools_compact_list();
         let compact = format!(
-            "- 原生内置: finish, ask_human, search, task_store, get_step_output, project_resources, web_search, web_fetch, model_manager, mcp_manager, skill_manager, schedule_manager, project_manager, system_info, wechat_manager\n- MCP 插件:\n{}",
+            "- 原生内置: {}\n- MCP 插件:\n{}",
+            builtin_list,
             mcp_part
         );
         (registry.format_tools_menu(), compact)

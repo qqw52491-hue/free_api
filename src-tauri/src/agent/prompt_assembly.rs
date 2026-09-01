@@ -6,6 +6,19 @@
 use tauri::AppHandle;
 use tauri::Manager;
 
+/// 动态构建内置工具紧凑列表字符串（用于决策提示词尾部索引，避免硬编码不同步）
+pub fn build_builtin_tools_compact_list() -> String {
+    let mut names = BUILTIN_TOOL_SPECS
+        .iter()
+        .map(|s| s.name)
+        .collect::<Vec<_>>();
+    // 补齐项目受管资源工具别名（当存在项目时）
+    if !names.contains(&"project_resources") {
+        names.push("project_resources");
+    }
+    names.join(", ")
+}
+
 /// 加载核心系统提示词：优先资源目录，逐级回退到源码目录，最后用编译期嵌入副本。
 pub fn load_base_prompt(app: &AppHandle) -> String {
     let core_logic_embedded = include_str!("../../prompts/core_logic.md");
