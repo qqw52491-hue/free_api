@@ -735,69 +735,153 @@ pub async fn run_tool_phase(
         );
         let model_tier = routing.tier.to_string();
         let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
-        let child_params = inst.get_params();
-        // 角色卡：派发参数可携带 "role" 命中角色池 → 钉死专属模型 + 注入人设
-        let mut reviewer_persona = String::new();
-        let mut reviewer_model = routing.model_id.clone();
-        if let Some(role_name) = child_params.get("role").and_then(|v| v.as_str()) {
-            match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
-                Ok(Some(card)) => {
-                    if !card.allows_kind("reviewer") {
-                        return Ok(DispatchResult {
-                            stdout: String::new(),
-                            stderr: format!("角色卡「{}」未授权挂载为 reviewer（允许类型: {}）。", role_name, card.allowed_kinds),
-                            success: false,
-                            route: "host_rejection:role_kind_disallowed".to_string(),
-                        });
+        let items = inst.get_dispatch_items();
+        let total = items.len();
+        let is_batch = total > 1;
+
+        let mut item_reports = Vec::new();
+        let mut spawned_ids = Vec::new();
+        let mut success_count = 0;
+        let mut fail_count = 0;
+
+        for (idx, child_params) in items.iter().enumerate() {
+            let item_num = idx + 1;
+            let mut reviewer_persona = String::new();
+            let mut reviewer_model = routing.model_id.clone();
+            let mut effective_params = child_params.clone();
+
+            if let Some(role_name) = child_params.get("role").and_then(|v| v.as_str()) {
+                match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
+                    Ok(Some(card)) => {
+                        if !card.allows_kind("reviewer") {
+                            item_reports.push(format!(
+                                "[{}/{}] ❌ 角色卡「{}」未授权挂载为 reviewer（允许类型: {}）。",
+                                item_num, total, role_name, card.allowed_kinds
+                            ));
+                            fail_count += 1;
+                            continue;
+                        }
+                        reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
+                        if !card.model_id.is_empty() {
+                            reviewer_model = card.model_id.clone();
+                        }
+                        if card.max_concurrency > 0 {
+                            effective_params["max_concurrency"] = json!(card.max_concurrency);
+                        }
                     }
-                    reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
-                    if !card.model_id.is_empty() {
-                        reviewer_model = card.model_id.clone();
+                    Ok(None) => {
+                        item_reports.push(format!(
+                            "[{}/{}] ❌ 角色卡不存在或已禁用：{}；可用角色见角色池菜单，或先用 role_manager.upsert 创建。",
+                            item_num, total, role_name
+                        ));
+                        fail_count += 1;
+                        continue;
+                    }
+                    Err(error) => {
+                        item_reports.push(format!(
+                            "[{}/{}] ❌ 角色卡查询失败：{}。",
+                            item_num, total, error
+                        ));
+                        fail_count += 1;
+                        continue;
                     }
                 }
-                Ok(None) => {
-                    return Ok(DispatchResult {
-                        stdout: String::new(),
-                        stderr: format!("角色卡不存在或已禁用：{}；可用角色见角色池菜单，或先用 role_manager.upsert 创建。", role_name),
-                        success: false,
-                        route: "host_rejection:role_card_missing".to_string(),
-                    });
+            }
+
+            match spawn_child_reviewer(
+                Some(app.clone()),
+                state.inner(),
+                parent_run_id,
+                final_session_id,
+                workspace_dir,
+                &reviewer_model,
+                &model_tier,
+                &reasoning_effort,
+                &effective_params,
+                &reviewer_persona,
+                interrupt_rx.clone(),
+            )
+            .await
+            {
+                Ok(child_run_id) => {
+                    let question_str = effective_params.get("question").and_then(|v| v.as_str()).unwrap_or("");
+                    let question_brief = if question_str.chars().count() > 40 {
+                        format!("{}...", question_str.chars().take(40).collect::<String>())
+                    } else {
+                        question_str.to_string()
+                    };
+                    item_reports.push(format!(
+                        "[{}/{}] ✅ 已派发 child_run_id={} 审查任务: {}",
+                        item_num, total, child_run_id, question_brief
+                    ));
+                    spawned_ids.push(child_run_id);
+                    success_count += 1;
                 }
                 Err(error) => {
-                    return Ok(DispatchResult { stdout: String::new(), stderr: error, success: false, route: "host_rejection:role_card_lookup".to_string() });
+                    item_reports.push(format!(
+                        "[{}/{}] ❌ 派发失败：{}",
+                        item_num, total, error
+                    ));
+                    fail_count += 1;
                 }
             }
         }
-        match spawn_child_reviewer(
-            Some(app.clone()),
-            state.inner(),
-            parent_run_id,
-            final_session_id,
-            workspace_dir,
-            &reviewer_model,
-            &model_tier,
-            &reasoning_effort,
-            &child_params,
-            &reviewer_persona,
-            interrupt_rx.clone(),
-        )
-        .await
-        {
-            Ok(child_run_id) => DispatchResult {
-                stdout: format!(
+
+        if !is_batch {
+            if success_count == 1 {
+                let child_run_id = &spawned_ids[0];
+                let mut stdout = format!(
                     "子审查任务已异步派发，child_run_id: {}。需要结论时调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待，返回值中将直接给出完整审查结论；若先执行其他独立操作，结果也会在后续步骤自动注入。",
                     child_run_id, child_run_id
-                ),
-                stderr: String::new(),
-                success: true,
-                route: "child_reviewer:spawned".to_string(),
-            },
-            Err(error) => DispatchResult {
-                stdout: String::new(),
-                stderr: error,
-                success: false,
-                route: "child_reviewer:rejected_or_failed".to_string(),
-            },
+                );
+                if inst.is_mixed_dispatch_format() {
+                    stdout = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches。\n\n{}", stdout);
+                }
+                DispatchResult {
+                    stdout,
+                    stderr: String::new(),
+                    success: true,
+                    route: "child_reviewer:spawned".to_string(),
+                }
+            } else {
+                let err_msg = item_reports.into_iter().next().unwrap_or_else(|| "派发失败".to_string());
+                DispatchResult {
+                    stdout: String::new(),
+                    stderr: err_msg,
+                    success: false,
+                    route: "child_reviewer:rejected_or_failed".to_string(),
+                }
+            }
+        } else {
+            let mut summary = format!(
+                "已批量处理 {} 个审查任务派发请求（{} 成功，{} 失败）：\n{}",
+                total, success_count, fail_count, item_reports.join("\n")
+            );
+            if !spawned_ids.is_empty() {
+                let ids_formatted: Vec<String> = spawned_ids.iter().map(|id| format!("\"{}\"", id)).collect();
+                summary.push_str(&format!(
+                    "\n\n已成功派发的审查任务均在后台异步执行；需要结论时调用 wait_jobs(job_ids:[{}]) 挂起等待，或先推进其他独立操作。",
+                    ids_formatted.join(", ")
+                ));
+            }
+            if inst.is_mixed_dispatch_format() {
+                summary = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches 批量派发。\n\n{}", summary);
+            }
+            if success_count > 0 {
+                DispatchResult {
+                    stdout: summary,
+                    stderr: String::new(),
+                    success: true,
+                    route: format!("child_reviewer:batch:{}ok{}fail", success_count, fail_count),
+                }
+            } else {
+                DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("批量审查派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n")),
+                    success: false,
+                    route: "child_reviewer:rejected_or_failed".to_string(),
+                }
+            }
         }
     // --- B2.6 持续监听：注册周期巡检，外部变化以 watch_event 经 durable inbox 自动注入 ---
     } else if inst.get_tool().eq_ignore_ascii_case("watch_start")
@@ -892,66 +976,116 @@ pub async fn run_tool_phase(
             crate::agent::router::roles::WRITER,
         );
         let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
-        let writer_params = inst.get_params();
-        let mut writer_persona = String::new();
-        let mut writer_model = routing.model_id.clone();
-        let mut effective_params = writer_params.clone();
-        if let Some(role_name) = writer_params.get("role").and_then(|v| v.as_str()) {
-            match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
-                Ok(Some(card)) => {
-                    if !card.allows_kind("writer") {
-                        return Ok(DispatchResult {
-                            stdout: String::new(),
-                            stderr: format!("角色卡「{}」未授权挂载为 writer（允许类型: {}）。", role_name, card.allowed_kinds),
-                            success: false,
-                            route: "host_rejection:role_kind_disallowed".to_string(),
-                        });
+        let items = inst.get_dispatch_items();
+        let total = items.len();
+        let is_batch = total > 1;
+
+        let mut item_reports = Vec::new();
+        let mut spawned_ids = Vec::new();
+        let mut success_count = 0;
+        let mut fail_count = 0;
+
+        for (idx, writer_params) in items.iter().enumerate() {
+            let item_num = idx + 1;
+            let mut writer_persona = String::new();
+            let mut writer_model = routing.model_id.clone();
+            let mut effective_params = writer_params.clone();
+
+            if let Some(role_name) = writer_params.get("role").and_then(|v| v.as_str()) {
+                match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
+                    Ok(Some(card)) => {
+                        if !card.allows_kind("writer") {
+                            item_reports.push(format!(
+                                "[{}/{}] ❌ 角色卡「{}」未授权挂载为 writer（允许类型: {}）。",
+                                item_num, total, role_name, card.allowed_kinds
+                            ));
+                            fail_count += 1;
+                            continue;
+                        }
+                        writer_persona = crate::agent::tools::role_manager::persona_block(&card);
+                        if !card.model_id.is_empty() {
+                            writer_model = card.model_id.clone();
+                        }
+                        effective_params = crate::agent::tools::role_manager::merge_writer_defaults(&card, writer_params);
+                        if !card.hard_scope.is_empty() {
+                            effective_params["hard_scope"] = json!(card.hard_scope);
+                        }
+                        if card.max_concurrency > 0 {
+                            effective_params["max_concurrency"] = json!(card.max_concurrency);
+                        }
                     }
-                    writer_persona = crate::agent::tools::role_manager::persona_block(&card);
-                    if !card.model_id.is_empty() {
-                        writer_model = card.model_id.clone();
+                    Ok(None) => {
+                        item_reports.push(format!(
+                            "[{}/{}] ❌ 角色卡不存在或已禁用：{}。",
+                            item_num, total, role_name
+                        ));
+                        fail_count += 1;
+                        continue;
                     }
-                    effective_params = crate::agent::tools::role_manager::merge_writer_defaults(&card, &writer_params);
-                    if !card.hard_scope.is_empty() {
-                        effective_params["hard_scope"] = json!(card.hard_scope);
+                    Err(error) => {
+                        item_reports.push(format!(
+                            "[{}/{}] ❌ 角色卡查询失败：{}。",
+                            item_num, total, error
+                        ));
+                        fail_count += 1;
+                        continue;
                     }
                 }
-                Ok(None) => {
-                    return Ok(DispatchResult {
-                        stdout: String::new(),
-                        stderr: format!("角色卡不存在或已禁用：{}。", role_name),
-                        success: false,
-                        route: "host_rejection:role_card_missing".to_string(),
-                    });
+            }
+
+            match crate::agent::child_writer::spawn_child_writer(
+                Some(app.clone()),
+                state.inner(),
+                parent_run_id,
+                final_session_id,
+                workspace_dir,
+                &writer_model,
+                &reasoning_effort,
+                &effective_params,
+                writer_persona,
+                interrupt_rx.clone(),
+            )
+            .await
+            {
+                Ok(child_run_id) => {
+                    let task_str = effective_params.get("task").and_then(|v| v.as_str()).unwrap_or("");
+                    let task_brief = if task_str.chars().count() > 40 {
+                        format!("{}...", task_str.chars().take(40).collect::<String>())
+                    } else {
+                        task_str.to_string()
+                    };
+                    item_reports.push(format!(
+                        "[{}/{}] ✅ 已派发 child_run_id={} 写入任务: {}",
+                        item_num, total, child_run_id, task_brief
+                    ));
+                    spawned_ids.push(child_run_id);
+                    success_count += 1;
                 }
                 Err(error) => {
-                    return Ok(DispatchResult { stdout: String::new(), stderr: error, success: false, route: "host_rejection:role_card_lookup".to_string() });
+                    item_reports.push(format!(
+                        "[{}/{}] ❌ 派发失败：{}",
+                        item_num, total, error
+                    ));
+                    fail_count += 1;
                 }
             }
         }
-        match crate::agent::child_writer::spawn_child_writer(
-            Some(app.clone()),
-            state.inner(),
-            parent_run_id,
-            final_session_id,
-            workspace_dir,
-            &writer_model,
-            &reasoning_effort,
-            &effective_params,
-            writer_persona,
-            interrupt_rx.clone(),
-        )
-        .await
-        {
-            Ok(child_run_id) => {
+
+        if !is_batch {
+            if success_count == 1 {
+                let child_run_id = &spawned_ids[0];
+                let writer_params = &items[0];
                 let mut stdout = format!(
                     "写入 worker 已在隔离副本上开工，child_run_id: {}。它完成修改并自行运行你指定的测试命令后，会以结构化回执（changed_files 含逐文件 diff、test_status、findings）回到你的上下文；用 wait_jobs(job_ids:[\"{}\"]) 回收。注意：你（root）才是真实工作区的唯一写入者——审阅其 diff 后由你用常规写工具落实修改并最终验证。",
                     child_run_id, child_run_id
                 );
-                let task_str = effective_params.get("task").and_then(|v| v.as_str()).unwrap_or("");
-                let has_excerpts = effective_params.get("context_excerpts").is_some();
+                let task_str = writer_params.get("task").and_then(|v| v.as_str()).unwrap_or("");
+                let has_excerpts = writer_params.get("context_excerpts").is_some();
                 if crate::agent::types::is_task_thin(task_str) && !has_excerpts {
                     stdout = format!("⚠️ 本次派发任务描述较简略，子 Agent 可能缺乏必要背景，建议在后续派发时携带 context_excerpts（包含 background、file_hints 或 todo_slice）。\n\n{}", stdout);
+                }
+                if inst.is_mixed_dispatch_format() {
+                    stdout = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches。\n\n{}", stdout);
                 }
                 DispatchResult {
                     stdout,
@@ -959,13 +1093,45 @@ pub async fn run_tool_phase(
                     success: true,
                     route: "child_writer:spawned".to_string(),
                 }
-            },
-            Err(error) => DispatchResult {
-                stdout: String::new(),
-                stderr: error,
-                success: false,
-                route: "child_writer:rejected_or_failed".to_string(),
-            },
+            } else {
+                let err_msg = item_reports.into_iter().next().unwrap_or_else(|| "派发失败".to_string());
+                DispatchResult {
+                    stdout: String::new(),
+                    stderr: err_msg,
+                    success: false,
+                    route: "child_writer:rejected_or_failed".to_string(),
+                }
+            }
+        } else {
+            let mut summary = format!(
+                "已批量处理 {} 个写入 worker 派发请求（{} 成功，{} 失败）：\n{}",
+                total, success_count, fail_count, item_reports.join("\n")
+            );
+            if !spawned_ids.is_empty() {
+                let ids_formatted: Vec<String> = spawned_ids.iter().map(|id| format!("\"{}\"", id)).collect();
+                summary.push_str(&format!(
+                    "\n\n所有已派发的写入 worker 均在各自的私有副本上独立执行；完成后请调用 wait_jobs(job_ids:[{}]) 回收 diff 审查。",
+                    ids_formatted.join(", ")
+                ));
+            }
+            if inst.is_mixed_dispatch_format() {
+                summary = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches 批量派发。\n\n{}", summary);
+            }
+            if success_count > 0 {
+                DispatchResult {
+                    stdout: summary,
+                    stderr: String::new(),
+                    success: true,
+                    route: format!("child_writer:batch:{}ok{}fail", success_count, fail_count),
+                }
+            } else {
+                DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("批量写入 worker 派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n")),
+                    success: false,
+                    route: "child_writer:rejected_or_failed".to_string(),
+                }
+            }
         }
     // --- B2.1 L2 只读侦察 worker：异步派发独立动作-观测循环，结果经 durable inbox 回收 ---
     } else if inst.get_tool().eq_ignore_ascii_case("child_worker")
@@ -978,57 +1144,104 @@ pub async fn run_tool_phase(
             crate::agent::router::roles::SCOUT,
         );
         let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
-        let worker_params = inst.get_params();
-        let mut scout_persona = String::new();
-        let mut scout_model = routing.model_id.clone();
-        let mut effective_worker_params = worker_params.clone();
-        if let Some(role_name) = worker_params.get("role").and_then(|v| v.as_str()) {
-            match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
-                Ok(Some(card)) => {
-                    if !card.allows_kind("worker") {
-                        return Ok(DispatchResult {
-                            stdout: String::new(),
-                            stderr: format!("角色卡「{}」未授权挂载为 worker（允许类型: {}）。", role_name, card.allowed_kinds),
-                            success: false,
-                            route: "host_rejection:role_kind_disallowed".to_string(),
-                        });
+        let items = inst.get_dispatch_items();
+        let total = items.len();
+        let is_batch = total > 1;
+
+        let mut item_reports = Vec::new();
+        let mut spawned_ids = Vec::new();
+        let mut success_count = 0;
+        let mut fail_count = 0;
+
+        for (idx, worker_params) in items.iter().enumerate() {
+            let item_num = idx + 1;
+            let mut scout_persona = String::new();
+            let mut scout_model = routing.model_id.clone();
+            let mut effective_worker_params = worker_params.clone();
+
+            if let Some(role_name) = worker_params.get("role").and_then(|v| v.as_str()) {
+                match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
+                    Ok(Some(card)) => {
+                        if !card.allows_kind("worker") {
+                            item_reports.push(format!(
+                                "[{}/{}] ❌ 角色卡「{}」未授权挂载为 worker（允许类型: {}）。",
+                                item_num, total, role_name, card.allowed_kinds
+                            ));
+                            fail_count += 1;
+                            continue;
+                        }
+                        scout_persona = crate::agent::tools::role_manager::persona_block(&card);
+                        if !card.model_id.is_empty() {
+                            scout_model = card.model_id.clone();
+                        }
+                        if !card.hard_scope.is_empty() {
+                            effective_worker_params["hard_scope"] = json!(card.hard_scope);
+                        }
+                        if card.max_concurrency > 0 {
+                            effective_worker_params["max_concurrency"] = json!(card.max_concurrency);
+                        }
                     }
-                    scout_persona = crate::agent::tools::role_manager::persona_block(&card);
-                    if !card.model_id.is_empty() {
-                        scout_model = card.model_id.clone();
+                    Ok(None) => {
+                        item_reports.push(format!(
+                            "[{}/{}] ❌ 角色卡不存在或已禁用：{}。",
+                            item_num, total, role_name
+                        ));
+                        fail_count += 1;
+                        continue;
                     }
-                    if !card.hard_scope.is_empty() {
-                        effective_worker_params["hard_scope"] = json!(card.hard_scope);
+                    Err(error) => {
+                        item_reports.push(format!(
+                            "[{}/{}] ❌ 角色卡查询失败：{}。",
+                            item_num, total, error
+                        ));
+                        fail_count += 1;
+                        continue;
                     }
                 }
-                Ok(None) => {
-                    return Ok(DispatchResult {
-                        stdout: String::new(),
-                        stderr: format!("角色卡不存在或已禁用：{}。", role_name),
-                        success: false,
-                        route: "host_rejection:role_card_missing".to_string(),
-                    });
+            }
+
+            match crate::agent::child_worker::spawn_child_worker(
+                Some(app.clone()),
+                state.inner(),
+                parent_run_id,
+                final_session_id,
+                workspace_dir,
+                &scout_model,
+                &reasoning_effort,
+                &effective_worker_params,
+                scout_persona,
+                interrupt_rx.clone(),
+            )
+            .await
+            {
+                Ok(child_run_id) => {
+                    let task_str = effective_worker_params.get("task").and_then(|v| v.as_str()).unwrap_or("");
+                    let task_brief = if task_str.chars().count() > 40 {
+                        format!("{}...", task_str.chars().take(40).collect::<String>())
+                    } else {
+                        task_str.to_string()
+                    };
+                    item_reports.push(format!(
+                        "[{}/{}] ✅ 已派发 child_run_id={} 任务: {}",
+                        item_num, total, child_run_id, task_brief
+                    ));
+                    spawned_ids.push(child_run_id);
+                    success_count += 1;
                 }
                 Err(error) => {
-                    return Ok(DispatchResult { stdout: String::new(), stderr: error, success: false, route: "host_rejection:role_card_lookup".to_string() });
+                    item_reports.push(format!(
+                        "[{}/{}] ❌ 派发失败：{}",
+                        item_num, total, error
+                    ));
+                    fail_count += 1;
                 }
             }
         }
-        match crate::agent::child_worker::spawn_child_worker(
-            Some(app.clone()),
-            state.inner(),
-            parent_run_id,
-            final_session_id,
-            workspace_dir,
-            &scout_model,
-            &reasoning_effort,
-            &effective_worker_params,
-            scout_persona,
-            interrupt_rx.clone(),
-        )
-        .await
-        {
-            Ok(child_run_id) => {
+
+        if !is_batch {
+            if success_count == 1 {
+                let child_run_id = &spawned_ids[0];
+                let worker_params = &items[0];
                 let mut stdout = format!(
                     "侦察 worker 已异步派发，child_run_id: {}。worker 拥有独立上下文并自行执行只读侦察（读文件/列目录/只读命令），完成后以结构化结论（findings/confidence/evidence_refs/missing_evidence）回到你的上下文；需要结论时调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待，或先推进其他独立操作。finish 前须确认其已结束。",
                     child_run_id, child_run_id
@@ -1038,19 +1251,54 @@ pub async fn run_tool_phase(
                 if crate::agent::types::is_task_thin(task_str) && !has_excerpts {
                     stdout = format!("⚠️ 本次派发任务描述较简略，子 Agent 可能缺乏必要背景，建议在后续派发时携带 context_excerpts（包含 background、file_hints 或 todo_slice）。\n\n{}", stdout);
                 }
+                if inst.is_mixed_dispatch_format() {
+                    stdout = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches。\n\n{}", stdout);
+                }
                 DispatchResult {
                     stdout,
                     stderr: String::new(),
                     success: true,
                     route: "child_worker:spawned".to_string(),
                 }
-            },
-            Err(error) => DispatchResult {
-                stdout: String::new(),
-                stderr: error,
-                success: false,
-                route: "child_worker:rejected_or_failed".to_string(),
-            },
+            } else {
+                let err_msg = item_reports.into_iter().next().unwrap_or_else(|| "派发失败".to_string());
+                DispatchResult {
+                    stdout: String::new(),
+                    stderr: err_msg,
+                    success: false,
+                    route: "child_worker:rejected_or_failed".to_string(),
+                }
+            }
+        } else {
+            let mut summary = format!(
+                "已批量处理 {} 个 worker 派发请求（{} 成功，{} 失败）：\n{}",
+                total, success_count, fail_count, item_reports.join("\n")
+            );
+            if !spawned_ids.is_empty() {
+                let ids_formatted: Vec<String> = spawned_ids.iter().map(|id| format!("\"{}\"", id)).collect();
+                summary.push_str(&format!(
+                    "\n\n已成功派发的 worker 均在后台异步执行；需要其结论时调用 wait_jobs(job_ids:[{}]) 挂起等待，或先推进其他独立操作。",
+                    ids_formatted.join(", ")
+                ));
+            }
+            if inst.is_mixed_dispatch_format() {
+                summary = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches 批量派发。\n\n{}", summary);
+            }
+            if success_count > 0 {
+                DispatchResult {
+                    stdout: summary,
+                    stderr: String::new(),
+                    success: true,
+                    route: format!("child_worker:batch:{}ok{}fail", success_count, fail_count),
+                }
+            } else {
+                DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("批量派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n")),
+                    success: false,
+                    route: "child_worker:rejected_or_failed".to_string(),
+                }
+            }
         }
     // --- B2.5 特殊工具：wait_jobs 反应式零 Token 挂起等待 ---
     } else if inst.get_tool().eq_ignore_ascii_case("wait_jobs")

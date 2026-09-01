@@ -825,19 +825,24 @@ pub async fn spawn_child_writer(
     let parent = workspace_root
         .canonicalize()
         .map_err(|error| format!("child_writer 工作区不可用: {}", error))?;
+    let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
+    let effective_writer_cap = match custom_cap {
+        Some(cap) if cap > 0 => cap,
+        _ => MAX_WRITERS_PER_RUN as i64,
+    };
     {
         let conn = db.0.lock().map_err(|error| error.to_string())?;
         let existing: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND kind='writer'",
+                "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id = ?1 AND kind = 'writer'",
                 rusqlite::params![parent_run_id],
                 |row| row.get(0),
             )
             .map_err(|error| error.to_string())?;
-        if existing >= MAX_WRITERS_PER_RUN as i64 {
+        if existing >= effective_writer_cap {
             return Err(format!(
                 "每个父运行最多 {} 个写入 worker；请先回收现有 worker 的 diff 再由你自己落实修改。",
-                MAX_WRITERS_PER_RUN
+                effective_writer_cap
             ));
         }
     }
@@ -850,6 +855,7 @@ pub async fn spawn_child_writer(
         model_id,
         0,
         "writer",
+        custom_cap,
     )?;
     let child8 = child_run_id.get(..8).unwrap_or(&child_run_id).to_string();
     let copy_root = parent.join(format!(".writer-{}", child8));

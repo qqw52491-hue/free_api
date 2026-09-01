@@ -267,6 +267,9 @@ pub struct AgentInstruction {
     /// 【嵌套计划树】支持串行/并行任意嵌套的高阶计划树
     #[serde(default)]
     pub plan_tree: Option<serde_json::Value>,
+    /// 【批量派发】针对子 Agent（如 child_worker / child_writer）的一步多任务派发
+    #[serde(default)]
+    pub dispatches: Option<Vec<serde_json::Value>>,
     /// 【预加载优化】AI 预告下一轮想用的工具，系统会提前加载该工具的详细说明书
     #[serde(default)]
     pub next_tool_hint: Option<String>,
@@ -291,7 +294,7 @@ impl AgentInstruction {
     /// 工具注册表/宿主安全层校验。这里只拒绝会退化为隐式 `core` 的
     /// 无动作对象，并保留 parallel、plan_tree 与 pipeline 三类高阶动作。
     pub fn validate_executable_shape(&self) -> Result<(), String> {
-        if self.parallel.is_some() || self.plan_tree.is_some() || !self.commands.is_empty() {
+        if self.parallel.is_some() || self.plan_tree.is_some() || !self.commands.is_empty() || self.has_dispatches() {
             return Ok(());
         }
 
@@ -328,6 +331,30 @@ impl AgentInstruction {
             "AgentInstruction 缺少可执行入口（tool/action）。计划、反思、Todo、审查契约或进度摘要可以保留，但必须同时输出非空 tool、兼容 action，或 parallel、plan_tree、commands；宿主不会把无动作对象默认为 core。"
                 .to_string(),
         )
+    }
+
+    pub fn has_dispatches(&self) -> bool {
+        self.dispatches.as_ref().is_some_and(|list| !list.is_empty())
+    }
+
+    /// 获取批量派发列表；如果没有提供非空 dispatches 则回退到单个 `vec![self.get_params()]`
+    pub fn get_dispatch_items(&self) -> Vec<serde_json::Value> {
+        if let Some(ref items) = self.dispatches {
+            if !items.is_empty() {
+                return items.clone();
+            }
+        }
+        vec![self.get_params()]
+    }
+
+    /// 检查是否为混合格式（既有 dispatches 又有 params/command 单发字段）
+    pub fn is_mixed_dispatch_format(&self) -> bool {
+        if let Some(ref items) = self.dispatches {
+            if !items.is_empty() {
+                return self.params.is_some() || self.command.is_some();
+            }
+        }
+        false
     }
 
     pub fn get_action(&self) -> String {
@@ -693,4 +720,45 @@ mod tests {
         // 包含换行多段落的指令，不属于薄任务
         assert!(!is_task_thin("任务说明：\n1. 检查配置\n2. 补充日志"));
     }
+
+    #[test]
+    fn test_agent_instruction_dispatches_helpers() {
+        // 1. 单发（未提供 dispatches）：has_dispatches 为 false，get_dispatch_items 返回 params
+        let single = json!({
+            "tool": "child_worker",
+            "params": { "task": "单人任务" }
+        });
+        let inst: AgentInstruction = serde_json::from_value(single).unwrap();
+        assert!(!inst.has_dispatches());
+        assert!(!inst.is_mixed_dispatch_format());
+        let items = inst.get_dispatch_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["task"], "单人任务");
+
+        // 2. 纯批发（dispatches 数组）：has_dispatches 为 true
+        let batch = json!({
+            "tool": "child_worker",
+            "dispatches": [
+                { "task": "任务A" },
+                { "task": "任务B" }
+            ]
+        });
+        let inst_b: AgentInstruction = serde_json::from_value(batch).unwrap();
+        assert!(inst_b.has_dispatches());
+        assert!(!inst_b.is_mixed_dispatch_format());
+        assert_eq!(inst_b.get_dispatch_items().len(), 2);
+
+        // 3. 混合格式：既有 dispatches 又有 params
+        let mixed = json!({
+            "tool": "child_worker",
+            "params": { "task": "混淆任务" },
+            "dispatches": [
+                { "task": "任务1" }
+            ]
+        });
+        let inst_m: AgentInstruction = serde_json::from_value(mixed).unwrap();
+        assert!(inst_m.has_dispatches());
+        assert!(inst_m.is_mixed_dispatch_format());
+    }
 }
+

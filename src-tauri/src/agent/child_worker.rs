@@ -621,6 +621,7 @@ pub async fn spawn_child_worker(
     let workspace = workspace_root
         .canonicalize()
         .map_err(|error| format!("child_worker 工作区不可用: {}", error))?;
+    let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
     let child_run_id = crate::agent::child_reviewer::begin_child_run(
         db,
         parent_run_id,
@@ -629,6 +630,7 @@ pub async fn spawn_child_worker(
         model_id,
         0,
         "worker",
+        custom_cap,
     )?;
     let mut config = ModelConfig::from_db_state(db, model_id)?;
     config.max_tokens = if config.max_tokens <= 0 {

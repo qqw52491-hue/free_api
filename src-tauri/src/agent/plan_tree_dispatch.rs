@@ -133,6 +133,29 @@ where
     }
 }
 
+const ASYNC_CHILD_TOOLS: &[&str] = &["child_worker", "child_writer", "child_reviewer"];
+
+pub(crate) fn check_no_async_child_tools<I>(tools: I) -> Result<(), String>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    for tool in tools {
+        let t = tool.as_ref().to_ascii_lowercase();
+        if ASYNC_CHILD_TOOLS
+            .iter()
+            .any(|&c| t == c || t.ends_with(&format!(":{}", c)) || t.ends_with(&format!("/{}", c)))
+        {
+            return Err(format!(
+                "❌ 「{}」是异步后台子 Agent，不能放在 parallel 同步执行树中（契约冲突：parallel 同步等待完整结果，而子任务为异步后台运行并返回 job_id）。如需批量派发子任务，请直接使用对应工具的 dispatches 数组，例如：{{\"tool\": \"{}\", \"dispatches\": [ {{...}}, {{...}} ]}}。",
+                tool.as_ref(),
+                tool.as_ref()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 并行仅接受少量、已经由模型明确给出的独立分支。
 /// 该校验不推断、补充或改写任何 MCP 子步骤参数。
 pub(crate) fn validate_controlled_parallel_batch(
@@ -141,6 +164,12 @@ pub(crate) fn validate_controlled_parallel_batch(
     if parallel_steps.is_empty() {
         return Err("parallel 必须至少包含一个已确定的独立分支；未知范围请使用单步取证。".to_string());
     }
+    check_no_async_child_tools(parallel_steps.iter().map(|step| {
+        step.get("tool")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| step.get("action").and_then(serde_json::Value::as_str))
+            .unwrap_or("")
+    }))?;
     let cap = controlled_parallel_cap_for_tools(parallel_steps.iter().map(|step| {
         step.get("tool")
             .and_then(serde_json::Value::as_str)
@@ -176,6 +205,10 @@ pub(crate) fn validate_plan_tree_parallel_fanout(node: &PlanNode) -> Result<(), 
         }
         PlanNode::Obj(obj) => {
             if let Some(ref parallel_children) = obj.parallel {
+                check_no_async_child_tools(parallel_children.iter().map(|child| match child {
+                    PlanNode::Obj(child_obj) => child_obj.get_tool(),
+                    PlanNode::Seq(_) => "seq_nested".to_string(),
+                }))?;
                 let cap = controlled_parallel_cap_for_tools(parallel_children.iter().map(
                     |child| match child {
                         PlanNode::Obj(child_obj) => child_obj.get_tool(),
@@ -369,4 +402,30 @@ mod tests {
             .unwrap_err()
             .contains("至少包含一个"));
     }
+
+    #[test]
+    fn parallel_rejects_async_child_subagents_with_helpful_hint() {
+        let parse = |v: serde_json::Value| -> PlanNode { serde_json::from_value(v).unwrap() };
+
+        // 1. validate_controlled_parallel_batch 直接拒绝 child_worker
+        let steps = vec![
+            json!({ "tool": "child_worker", "task": "调研" }),
+            json!({ "tool": "child_worker", "task": "分析" }),
+        ];
+        let err = validate_controlled_parallel_batch(&steps).unwrap_err();
+        assert!(err.contains("异步后台子 Agent"));
+        assert!(err.contains("dispatches 数组"));
+
+        // 2. plan_tree 拒绝嵌套的 child_writer
+        let tree = parse(json!({
+            "parallel": [
+                { "tool": "child_writer", "task": "改码" },
+                { "tool": "file_viewer", "path": "Cargo.toml" }
+            ]
+        }));
+        let err2 = validate_plan_tree_parallel_fanout(&tree).unwrap_err();
+        assert!(err2.contains("异步后台子 Agent"));
+        assert!(err2.contains("child_writer"));
+    }
 }
+

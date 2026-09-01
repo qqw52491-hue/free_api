@@ -429,6 +429,20 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
             }
         }
 
+        // 5.1 批量派发 dispatches 规范化：提升嵌套在 command/params 内的 dispatches；单对象转为单元素数组
+        if !map.contains_key("dispatches") {
+            if let Some(cmd) = map.get("command").or_else(|| map.get("params")) {
+                if let Some(d) = cmd.get("dispatches") {
+                    map.insert("dispatches".to_string(), d.clone());
+                }
+            }
+        }
+        if let Some(d) = map.get("dispatches") {
+            if d.is_object() {
+                map.insert("dispatches".to_string(), serde_json::json!([d.clone()]));
+            }
+        }
+
         // 6. serde 的 default 仅处理缺失字段；对默认字符串字段，null 与省略同义。
         for field in ["reflection", "thought", "description"] {
             if map.get(field).is_some_and(serde_json::Value::is_null) {
@@ -526,3 +540,35 @@ pub fn extract_streaming_json_field(json_text: &str, field_names: &[&str]) -> Op
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_raw_instruction_value_dispatches() {
+        // 1. command 内的 dispatches 提升到顶层
+        let mut v1 = serde_json::json!({
+            "tool": "child_worker",
+            "command": {
+                "dispatches": [
+                    { "task": "A" },
+                    { "task": "B" }
+                ]
+            }
+        });
+        normalize_raw_instruction_value(&mut v1);
+        assert!(v1.get("dispatches").is_some());
+        assert_eq!(v1["dispatches"].as_array().unwrap().len(), 2);
+
+        // 2. 单对象 dispatches 转为单元素数组
+        let mut v2 = serde_json::json!({
+            "tool": "child_worker",
+            "dispatches": { "task": "单对象" }
+        });
+        normalize_raw_instruction_value(&mut v2);
+        assert!(v2["dispatches"].is_array());
+        assert_eq!(v2["dispatches"].as_array().unwrap().len(), 1);
+    }
+}
+

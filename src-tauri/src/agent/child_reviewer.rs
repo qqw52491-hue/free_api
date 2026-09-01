@@ -12,7 +12,10 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 use uuid::Uuid;
 
-pub const MAX_CHILD_REVIEWS_PER_PARENT_RUN: u8 = 2;
+pub const MAX_CHILDREN_PER_KIND_PER_RUN: u8 = 2;
+pub const MAX_TOTAL_CHILDREN_PER_RUN: u8 = 6;
+// 向后兼容原有常量别名
+pub const MAX_CHILD_REVIEWS_PER_PARENT_RUN: u8 = MAX_CHILDREN_PER_KIND_PER_RUN;
 const CHILD_TIMEOUT_SECS: u64 = 45;
 const CHILD_MAX_OUTPUT_TOKENS: i64 = 900;
 const MAX_QUESTION_CHARS: usize = 2_000;
@@ -237,23 +240,46 @@ pub(crate) fn begin_child_run(
     model_id: &str,
     evidence_ref_count: usize,
     kind: &str,
+    custom_cap: Option<i64>,
 ) -> Result<String, String> {
     let child_run_id = Uuid::new_v4().to_string();
     let root = workspace_root
         .canonicalize()
         .map_err(|error| format!("child_reviewer 工作区不可用: {}", error))?;
     let conn = db.0.lock().map_err(|error| error.to_string())?;
-    let existing_children: i64 = conn
+
+    // 第一道看门：全局总预算校验（所有 kind 累计上限 MAX_TOTAL_CHILDREN_PER_RUN = 6）
+    let total_children: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1",
+            params![parent_run_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if total_children >= i64::from(MAX_TOTAL_CHILDREN_PER_RUN) {
+        return Err(format!(
+            "每个父运行最多同时累计使用 {} 个子任务（全局看门上限已满，当前已有 {} 个）。",
+            MAX_TOTAL_CHILDREN_PER_RUN, total_children
+        ));
+    }
+
+    // 第二道看门：单 kind / 角色卡弹性配额（角色卡 max_concurrency 优先覆盖，0 则跟随默认）
+    let effective_kind_cap = match custom_cap {
+        Some(cap) if cap > 0 => cap,
+        _ => i64::from(MAX_CHILDREN_PER_KIND_PER_RUN),
+    };
+
+    let existing_kind_children: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND kind=?2",
             params![parent_run_id, kind],
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
-    if existing_children >= i64::from(MAX_CHILD_REVIEWS_PER_PARENT_RUN) {
+    if existing_kind_children >= effective_kind_cap {
         return Err(format!(
-            "每个父运行最多同时使用 {} 个 {} 子任务。",
-            MAX_CHILD_REVIEWS_PER_PARENT_RUN, kind
+            "每个父运行最多同时使用 {} 个 {} 子任务（当前配额 {} 已满）。",
+            effective_kind_cap, kind, effective_kind_cap
         ));
     }
     conn.execute(
@@ -342,6 +368,7 @@ pub async fn spawn_child_reviewer(
     let request = parse_child_review_request(params)?;
     let (evidence_excerpt, allowed_refs) =
         build_managed_resource_evidence(db, parent_session_id, &request)?;
+    let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
     let child_run_id = begin_child_run(
         db,
         parent_run_id,
@@ -350,6 +377,7 @@ pub async fn spawn_child_reviewer(
         model_id,
         allowed_refs.len(),
         "review",
+        custom_cap,
     )?;
 
     let mut config = ModelConfig::from_db_state(db, model_id)?;
@@ -863,10 +891,10 @@ mod tests {
         let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )));
-        let first = begin_child_run(&state, "parent-run", "parent-session", &workspace, "model-a", 2, "review").unwrap();
-        let second = begin_child_run(&state, "parent-run", "parent-session", &workspace, "model-a", 0, "review").unwrap();
+        let first = begin_child_run(&state, "parent-run", "parent-session", &workspace, "model-a", 2, "review", None).unwrap();
+        let second = begin_child_run(&state, "parent-run", "parent-session", &workspace, "model-a", 0, "review", None).unwrap();
         assert_ne!(first, second);
-        assert!(begin_child_run(&state, "parent-run", "parent-session", &workspace, "model-a", 0, "review").is_err());
+        assert!(begin_child_run(&state, "parent-run", "parent-session", &workspace, "model-a", 0, "review", None).is_err());
 
         finish_child_run(&state, &first, "succeeded", 12, 34, None, None);
         let conn = state.0.lock().unwrap();
@@ -893,7 +921,7 @@ mod tests {
         let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )));
-        let run_id = begin_child_run(&state, "parent-run-poll", "session-poll", &workspace, "model-a", 1, "review").unwrap();
+        let run_id = begin_child_run(&state, "parent-run-poll", "session-poll", &workspace, "model-a", 1, "review", None).unwrap();
         let sample_result = ChildReviewResult {
             child_run_id: run_id.clone(),
             status: "succeeded".to_string(),
@@ -934,7 +962,7 @@ mod tests {
         assert!(!has_running_child_runs(&state, "parent-run-1"));
 
         // 启动一个 child run -> 处于 running 状态
-        let child_1 = begin_child_run(&state, "parent-run-1", "session-1", &workspace, "model-a", 1, "review").unwrap();
+        let child_1 = begin_child_run(&state, "parent-run-1", "session-1", &workspace, "model-a", 1, "review", None).unwrap();
         assert!(has_running_child_runs(&state, "parent-run-1"));
         // 其他 parent_run 不受影响
         assert!(!has_running_child_runs(&state, "parent-run-2"));
@@ -955,8 +983,8 @@ mod tests {
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )));
 
-        let child_1 = begin_child_run(&state, "parent-run-c", "session-c", &workspace, "model-a", 0, "review").unwrap();
-        let child_2 = begin_child_run(&state, "parent-run-c", "session-c", &workspace, "model-a", 0, "review").unwrap();
+        let child_1 = begin_child_run(&state, "parent-run-c", "session-c", &workspace, "model-a", 0, "review", None).unwrap();
+        let child_2 = begin_child_run(&state, "parent-run-c", "session-c", &workspace, "model-a", 0, "review", None).unwrap();
 
         // child_1 正常成功完成
         finish_child_run(&state, &child_1, "succeeded", 50, 10, None, None);
@@ -997,8 +1025,8 @@ mod tests {
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )));
 
-        let child_1 = begin_child_run(&state, "parent-run-multi", "session-m", &workspace, "model-a", 1, "review").unwrap();
-        let child_2 = begin_child_run(&state, "parent-run-multi", "session-m", &workspace, "model-a", 1, "review").unwrap();
+        let child_1 = begin_child_run(&state, "parent-run-multi", "session-m", &workspace, "model-a", 1, "review", None).unwrap();
+        let child_2 = begin_child_run(&state, "parent-run-multi", "session-m", &workspace, "model-a", 1, "review", None).unwrap();
 
         // 初始无完成
         let polled_0 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
@@ -1073,7 +1101,7 @@ mod tests {
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )));
 
-        let child_id = begin_child_run(&state, "parent-run-wait", "session-wait", &workspace, "model-a", 1, "review").unwrap();
+        let child_id = begin_child_run(&state, "parent-run-wait", "session-wait", &workspace, "model-a", 1, "review", None).unwrap();
         finish_child_run(
             &state,
             &child_id,
@@ -1124,7 +1152,7 @@ mod tests {
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )));
 
-        let child_id = begin_child_run(&state, "parent-run-wake", "session-wake", &workspace, "model-a", 0, "review").unwrap();
+        let child_id = begin_child_run(&state, "parent-run-wake", "session-wake", &workspace, "model-a", 0, "review", None).unwrap();
 
         // 挂起等待期间子审查在后台完成，watch 版本号变更应瞬间唤醒等待者
         let db_clone = DbState(state.0.clone());
@@ -1172,8 +1200,8 @@ mod tests {
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )));
 
-        let finished = begin_child_run(&state, "parent-run-t", "session-t", &workspace, "model-a", 0, "review").unwrap();
-        let running = begin_child_run(&state, "parent-run-t", "session-t", &workspace, "model-a", 0, "review").unwrap();
+        let finished = begin_child_run(&state, "parent-run-t", "session-t", &workspace, "model-a", 0, "review", None).unwrap();
+        let running = begin_child_run(&state, "parent-run-t", "session-t", &workspace, "model-a", 0, "review", None).unwrap();
         finish_child_run(
             &state,
             &finished,
@@ -1221,7 +1249,7 @@ mod tests {
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )));
 
-        let child_id = begin_child_run(&state, "parent-run-fail", "session-fail", &workspace, "model-a", 0, "review").unwrap();
+        let child_id = begin_child_run(&state, "parent-run-fail", "session-fail", &workspace, "model-a", 0, "review", None).unwrap();
         finish_child_run(
             &state,
             &child_id,
@@ -1251,7 +1279,7 @@ mod tests {
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )));
 
-        let child_id = begin_child_run(&state, "parent-run-corrupt", "session-corrupt", &workspace, "model-a", 0, "review").unwrap();
+        let child_id = begin_child_run(&state, "parent-run-corrupt", "session-corrupt", &workspace, "model-a", 0, "review", None).unwrap();
         finish_child_run(&state, &child_id, "succeeded", 100, 10, None, Some("{not-valid-json"));
         {
             let conn = state.0.lock().unwrap();
@@ -1283,12 +1311,12 @@ mod tests {
         )));
 
         let session_id = "session-orphan";
-        let child_id = begin_child_run(&state, "parent-run-orphan", session_id, &workspace, "model-a", 0, "review").unwrap();
+        let child_id = begin_child_run(&state, "parent-run-orphan", session_id, &workspace, "model-a", 0, "review", None).unwrap();
         assert!(has_running_child_runs(&state, "parent-run-orphan"));
 
         // 同会话的其它子任务不受影响
         let other_session_child =
-            begin_child_run(&state, "parent-run-other", "session-other", &workspace, "model-a", 0, "review").unwrap();
+            begin_child_run(&state, "parent-run-other", "session-other", &workspace, "model-a", 0, "review", None).unwrap();
 
         let recovered =
             recover_orphaned_child_runs_on_session_start(&state, session_id).unwrap();
@@ -1322,7 +1350,7 @@ mod tests {
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )));
 
-        let child_id = begin_child_run(&state, "parent-run-wake", "session-wake", &workspace, "model-a", 0, "review").unwrap();
+        let child_id = begin_child_run(&state, "parent-run-wake", "session-wake", &workspace, "model-a", 0, "review", None).unwrap();
 
         let started = std::time::Instant::now();
         let state_clone = DbState(state.0.clone());
@@ -1349,6 +1377,39 @@ mod tests {
             .unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(results.is_empty());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn begin_child_run_respects_custom_cap_and_global_guard() {
+        let base = std::env::temp_dir().join(format!("free-api-child-cap-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        // 1. 角色卡 custom_cap = Some(1)：第 1 个成功，第 2 个超限被拒
+        let _c1 = begin_child_run(&state, "p-run-1", "s-1", &workspace, "m", 0, "worker", Some(1)).unwrap();
+        assert!(begin_child_run(&state, "p-run-1", "s-1", &workspace, "m", 0, "worker", Some(1)).is_err(), "超单卡额度1被拒");
+
+        // 2. 角色卡 custom_cap = Some(3)：放宽至 3
+        let _c2 = begin_child_run(&state, "p-run-2", "s-2", &workspace, "m", 0, "worker", Some(3)).unwrap();
+        let _c3 = begin_child_run(&state, "p-run-2", "s-2", &workspace, "m", 0, "worker", Some(3)).unwrap();
+        let _c4 = begin_child_run(&state, "p-run-2", "s-2", &workspace, "m", 0, "worker", Some(3)).unwrap();
+        assert!(begin_child_run(&state, "p-run-2", "s-2", &workspace, "m", 0, "worker", Some(3)).is_err(), "超单卡额度3被拒");
+
+        // 3. 全局总看门 MAX_TOTAL_CHILDREN_PER_RUN = 6
+        begin_child_run(&state, "p-run-3", "s-3", &workspace, "m", 0, "review", None).unwrap();
+        begin_child_run(&state, "p-run-3", "s-3", &workspace, "m", 0, "review", None).unwrap();
+        begin_child_run(&state, "p-run-3", "s-3", &workspace, "m", 0, "worker", None).unwrap();
+        begin_child_run(&state, "p-run-3", "s-3", &workspace, "m", 0, "worker", None).unwrap();
+        begin_child_run(&state, "p-run-3", "s-3", &workspace, "m", 0, "writer", Some(3)).unwrap();
+        begin_child_run(&state, "p-run-3", "s-3", &workspace, "m", 0, "writer", Some(3)).unwrap();
+        // 第 7 个被全局总看门拦截（6个已满）
+        let err = begin_child_run(&state, "p-run-3", "s-3", &workspace, "m", 0, "writer", Some(3)).unwrap_err();
+        assert!(err.contains("全局看门上限已满"));
 
         let _ = std::fs::remove_dir_all(base);
     }
