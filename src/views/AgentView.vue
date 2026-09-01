@@ -68,6 +68,16 @@
                 <button
                     type="button"
                     class="nav-row"
+                    :class="{ active: currentNavView === 'roles', 'icon-only': sidebarCollapsed }"
+                    title="Agent 角色工坊与专家团队"
+                    @click="currentNavView = 'roles'"
+                >
+                    <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                    <span v-if="!sidebarCollapsed">Roles 角色</span>
+                </button>
+                <button
+                    type="button"
+                    class="nav-row"
                     :class="{ active: currentNavView === 'plugins', 'icon-only': sidebarCollapsed }"
                     title="能力与 MCP 插件"
                     @click="currentNavView = 'plugins'"
@@ -201,17 +211,22 @@
                 <ApiManager @models-updated="loadAllModels" @back="currentNavView = 'agent'" />
             </div>
 
-            <!-- 4. 🔌 插件 / 提示词与 Skill 库 -->
+            <!-- 4. 🎭 专家工坊与角色卡配置 -->
+            <div v-if="currentNavView === 'roles'" class="full-view-panel">
+                <RoleManagerView />
+            </div>
+
+            <!-- 5. 🔌 插件 / 提示词与 Skill 库 -->
             <div v-if="currentNavView === 'plugins' || currentNavView === 'library'" class="full-view-panel">
                 <PluginView @back="currentNavView = 'agent'" />
             </div>
 
-            <!-- 5. ⏱️ Scheduled 定时任务 -->
+            <!-- 6. ⏱️ Scheduled 定时任务 -->
             <div v-if="currentNavView === 'scheduled'" class="full-view-panel">
                 <ScheduledView />
             </div>
 
-            <!-- 6. 📱 微信绑定与通道配置 -->
+            <!-- 7. 📱 微信绑定与通道配置 -->
             <div v-if="currentNavView === 'wechat'" class="full-view-panel">
                 <WeChatBindView />
             </div>
@@ -230,12 +245,13 @@ import ApiManager from "./ApiManager.vue";
 import PluginView from "./PluginView.vue";
 import WeChatBindView from "./WeChatBindView.vue";
 import ScheduledView from "./ScheduledView.vue";
+import RoleManagerView from "./RoleManagerView.vue";
 
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
 interface TabInfo { uid: string; id: string; label: string; running: boolean; projectId?: string; isDraft?: boolean; }
 
-const currentNavView = ref<"agent" | "project" | "llm" | "plugins" | "scheduled" | "library" | "wechat">("agent");
+const currentNavView = ref<"agent" | "project" | "llm" | "roles" | "plugins" | "scheduled" | "library" | "wechat">("agent");
 const selectedProjectId = ref<string>("");
 const allModels = ref<ModelOption[]>([]);
 const sidebarCollapsed = ref(false);
