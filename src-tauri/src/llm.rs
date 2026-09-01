@@ -939,7 +939,15 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                             mask_api_key(&available_keys[current_key_idx]),
                             config.model_name
                         );
-                        // 切换 Key 后无须过长退避，直接进入下一次尝试
+                        // 如果是 503 等服务端高并发超载错误，切换 Key 时短暂缓冲 600ms，避免毫秒级瞬发连击被 Google 机房全数拒绝
+                        if e.contains("503")
+                            || e.contains("high demand")
+                            || e.contains("spikes in demand")
+                            || e.contains("UNAVAILABLE")
+                            || e.contains("Service Unavailable")
+                        {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+                        }
                         continue;
                     }
 
