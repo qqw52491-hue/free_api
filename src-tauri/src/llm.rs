@@ -8,8 +8,12 @@ use futures_util::StreamExt;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::State;
 use tokio::sync::watch;
+
+/// 全局多 Key 负载均衡轮询计数器（每次新请求顺序轮换起始 Key，把高并发打散到各个 Key，避免单一 Key 触发 RPM/并发限流）
+static GLOBAL_KEY_REQUEST_ROTATOR: AtomicUsize = AtomicUsize::new(0);
 
 // ========================================================================
 // ModelConfig — 从数据库解析的模型配置，含平台适配参数
@@ -435,23 +439,43 @@ pub fn mask_api_key(key: &str) -> String {
     }
 }
 
-/// 判断是否为可触发 Key 轮换/故障转移的错误（如 401 鉴权失效、402 余额不足、429 频率限制、配额耗尽等）
+/// 判断是否为可触发 Key 轮换/故障转移的错误（如 401 鉴权失效、402 余额不足、403 权限受限、429 频率限制、503 服务超载/高并发、502/504 等）
 pub fn is_key_rotatable_error(status_code: Option<u16>, body_or_msg: &str) -> bool {
     if let Some(code) = status_code {
-        if code == 401 || code == 402 || code == 429 {
+        if code == 401
+            || code == 402
+            || code == 403
+            || code == 429
+            || code == 500
+            || code == 502
+            || code == 503
+            || code == 504
+        {
             return true;
         }
     }
     let lower = body_or_msg.to_lowercase();
-    lower.contains("insufficient_quota")
-        || lower.contains("insufficient balance")
+    lower.contains("503")
+        || lower.contains("service unavailable")
+        || lower.contains("unavailable")
+        || lower.contains("high demand")
+        || lower.contains("spikes in demand")
+        || lower.contains("overloaded")
+        || lower.contains("busy")
+        || lower.contains("resource_exhausted")
+        || lower.contains("resource exhausted")
+        || lower.contains("insufficient_quota")
+        || lower.contains("insufficient quota")
         || lower.contains("quota_exceeded")
+        || lower.contains("quota exceeded")
         || lower.contains("rate_limit")
         || lower.contains("rate limit")
+        || lower.contains("ratelimit")
         || lower.contains("balance")
         || lower.contains("余额不足")
         || lower.contains("额度不足")
         || lower.contains("欠费")
+        || lower.contains("quota")
         || lower.contains("exceeded your current quota")
         || lower.contains("invalid_api_key")
         || lower.contains("invalid api key")
@@ -459,6 +483,13 @@ pub fn is_key_rotatable_error(status_code: Option<u16>, body_or_msg: &str) -> bo
         || lower.contains("401 unauthorized")
         || lower.contains("402 payment required")
         || lower.contains("429 too many requests")
+        || lower.contains("403 forbidden")
+        || lower.contains("502 bad gateway")
+        || lower.contains("504 gateway timeout")
+        || lower.contains("api 错误 5")
+        || lower.contains("api 错误 4")
+        || lower.contains("capacity")
+        || lower.contains("temporarily unavailable")
 }
 
 // ========================================================================
@@ -854,7 +885,12 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
 
     let outcome: Result<StreamResult, String> = async {
         let mut last_error = String::new();
-        let mut current_key_idx = 0usize;
+        let start_key_idx = if total_keys > 1 {
+            GLOBAL_KEY_REQUEST_ROTATOR.fetch_add(1, Ordering::Relaxed) % total_keys
+        } else {
+            0
+        };
+        let mut current_key_idx = start_key_idx;
         let mut key_switch_count = 0usize;
 
         // 总尝试次数计算：保证最少尝试 max_retries 次，且每个 Key 至少有尝试机会
