@@ -421,6 +421,9 @@ pub struct AgentCheckpoint {
     /// 上次审查的 Diff Hash（防重复重试相同 Diff）
     #[serde(default)]
     pub last_reviewed_diff_hash: Option<String>,
+    /// 上次审查结果（当 diff_hash 未变时复用上次拦截，避免浪费 Token）
+    #[serde(default)]
+    pub last_review_result: Option<crate::agent::reviewer_gatekeeper::ReviewResult>,
     pub last_error: Option<String>,
     pub version: i64,
     pub created_at: String,
@@ -442,6 +445,7 @@ impl AgentCheckpoint {
             finish_reviewed: false,
             reviewer_retry_count: 0,
             last_reviewed_diff_hash: None,
+            last_review_result: None,
             last_error: None,
             version: 0,
             created_at: now.clone(),

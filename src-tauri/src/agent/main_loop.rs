@@ -1448,6 +1448,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                 run_started_at,
                 &final_session_id,
                 &mut interrupt_rx,
+                checkpoint.last_reviewed_diff_hash.as_deref(),
+                checkpoint.last_review_result.as_ref(),
             )
             .await;
 
@@ -1456,6 +1458,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 if checkpoint.reviewer_retry_count < 3 {
                     checkpoint.reviewer_retry_count += 1;
                     checkpoint.last_reviewed_diff_hash = Some(review_res.diff_hash.clone());
+                    checkpoint.last_review_result = Some(review_res.clone());
                     reviewer_challenged = true;
 
                     let issues_text = review_res
@@ -1532,6 +1535,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                 }
             } else {
                 // 审查 100% 通过（或无代码修改 / 仅次要建议放行）
+                checkpoint.last_reviewed_diff_hash = None;
+                checkpoint.last_review_result = None;
                 crate::agent::dispatcher::emit_tool_event(
                     &app,
                     &final_session_id,

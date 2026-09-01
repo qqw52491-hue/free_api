@@ -151,7 +151,7 @@ fn command_allowed(argv: &[&str]) -> Result<(), String> {
 }
 
 /// worker 动作执行（无 LLM、可单测）：read_file / list_dir / run_command
-pub fn execute_worker_action(
+pub async fn execute_worker_action(
     workspace_root: &Path,
     action: &str,
     params: &Value,
@@ -208,11 +208,15 @@ pub fn execute_worker_action(
             reject_shell_metachars(raw)?;
             let argv: Vec<&str> = raw.split_whitespace().collect();
             command_allowed(&argv)?;
-            let mut command = std::process::Command::new(argv[0]);
+            let mut command = tokio::process::Command::new(argv[0]);
             command.args(&argv[1..]).current_dir(workspace_root);
-            let output = command
-                .output()
-                .map_err(|error| format!("命令启动失败: {}", error))?;
+            let timeout_dur = Duration::from_secs(COMMAND_TIMEOUT_SECS);
+            let output = match tokio::time::timeout(timeout_dur, command.output()).await {
+                Ok(res) => res.map_err(|error| format!("命令启动失败: {}", error))?,
+                Err(_) => {
+                    return Ok(format!("⚠️ 命令执行超时（超过 {} 秒），已被强制终止。", COMMAND_TIMEOUT_SECS));
+                }
+            };
             let mut stdout = output.stdout;
             stdout.truncate(MAX_COMMAND_OUTPUT_BYTES);
             let status = if output.status.success() { "✅" } else { "⚠️ 非零退出" };
@@ -436,7 +440,7 @@ pub async fn run_worker_loop(
             break "succeeded";
         }
 
-        let observation = match execute_worker_action(&workspace_root, &parsed.action, &parsed.params) {
+        let observation = match execute_worker_action(&workspace_root, &parsed.action, &parsed.params).await {
             Ok(output) => output,
             Err(error) => format!("【动作被拒绝】{}", error),
         };
@@ -612,28 +616,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
-    #[test]
-    fn run_command_enforces_allowlist_and_metachars() {
+    #[tokio::test]
+    async fn run_command_enforces_allowlist_and_metachars() {
         let (_base, root) = workspace();
-        assert!(execute_worker_action(&root, "run_command", &json!({"command": "rm -rf ."})).is_err());
-        assert!(execute_worker_action(&root, "run_command", &json!({"command": "cat notes.log > out.txt"})).is_err());
-        assert!(execute_worker_action(&root, "run_command", &json!({"command": "grep error notes.log; ls"})).is_err());
-        assert!(execute_worker_action(&root, "run_command", &json!({"command": "git push origin main"})).is_err());
-        let ok = execute_worker_action(&root, "run_command", &json!({"command": "grep error notes.log"})).unwrap();
+        assert!(execute_worker_action(&root, "run_command", &json!({"command": "rm -rf ."})).await.is_err());
+        assert!(execute_worker_action(&root, "run_command", &json!({"command": "cat notes.log > out.txt"})).await.is_err());
+        assert!(execute_worker_action(&root, "run_command", &json!({"command": "grep error notes.log; ls"})).await.is_err());
+        assert!(execute_worker_action(&root, "run_command", &json!({"command": "git push origin main"})).await.is_err());
+        let ok = execute_worker_action(&root, "run_command", &json!({"command": "grep error notes.log"})).await.unwrap();
         assert!(ok.contains("error happened"));
-        let git_ok = execute_worker_action(&root, "run_command", &json!({"command": "git status"}));
+        let git_ok = execute_worker_action(&root, "run_command", &json!({"command": "git status"})).await;
         // 非仓库目录返回非零退出但允许执行
         assert!(git_ok.is_ok() || git_ok.is_err());
     }
 
-    #[test]
-    fn read_file_and_list_dir_are_bounded_and_contained() {
+    #[tokio::test]
+    async fn read_file_and_list_dir_are_bounded_and_contained() {
         let (base, root) = workspace();
-        let content = execute_worker_action(&root, "read_file", &json!({"path": "src/main.rs"})).unwrap();
+        let content = execute_worker_action(&root, "read_file", &json!({"path": "src/main.rs"})).await.unwrap();
         assert!(content.contains("println"));
-        let listing = execute_worker_action(&root, "list_dir", &json!({"path": "."})).unwrap();
+        let listing = execute_worker_action(&root, "list_dir", &json!({"path": "."})).await.unwrap();
         assert!(listing.contains("notes.log") && listing.contains("src"));
-        assert!(execute_worker_action(&root, "write_file", &json!({})).is_err());
+        assert!(execute_worker_action(&root, "write_file", &json!({})).await.is_err());
         let _ = std::fs::remove_dir_all(base);
     }
 

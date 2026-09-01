@@ -325,7 +325,7 @@ pub fn is_binary_file(path: &str) -> bool {
         || p.ends_with(".mp3")
 }
 
-/// 判定路径是否为噪音文件（lockfile、构建产物、依赖库、媒体资源等）
+/// 判定路径是否为噪音文件（lockfile、构建产物、依赖库等）
 pub fn is_noise_path(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
     p.contains("package-lock.json")
@@ -337,7 +337,6 @@ pub fn is_noise_path(path: &str) -> bool {
         || p.contains("dist/")
         || p.contains(".git/")
         || p.contains(".turbo/")
-        || is_binary_file(path)
 }
 
 /// 过滤 Git Diff 中的噪音文件段落
@@ -397,6 +396,8 @@ pub async fn evaluate_finish_diff(
     run_started_at: chrono::DateTime<chrono::Utc>,
     session_id: &str,
     interrupt_rx: &mut watch::Receiver<u64>,
+    last_reviewed_hash: Option<&str>,
+    last_review_result: Option<&ReviewResult>,
 ) -> ReviewResult {
     let started_at = std::time::Instant::now();
 
@@ -405,7 +406,17 @@ pub async fn evaluate_finish_diff(
         return ReviewResult::skipped_empty();
     };
 
-    // 2. 解析评审模型与角色人设
+    // 2. 防敷衍拦截：若代码未变 (diff_hash 相同) 且上次审查未通过，直接复用上次拦截结果，避免浪费 Token 重跑
+    if let (Some(last_hash), Some(last_res)) = (last_reviewed_hash, last_review_result) {
+        if !last_hash.is_empty() && last_hash == diff_hash && !last_res.is_passed() {
+            let mut reused = last_res.clone();
+            reused.summary = format!("【复用上次拦截 (Diff 未变)】检测到代码未做任何修复: {}", last_res.summary);
+            reused.duration_ms = 0;
+            return reused;
+        }
+    }
+
+    // 3. 解析评审模型与角色人设
     let (model_id, persona_extra) = if let Ok(Some(card)) = resolve_enabled_card(db, "reviewer") {
         let mid = if !card.model_id.trim().is_empty() {
             card.model_id.trim().to_string()
@@ -601,9 +612,21 @@ mod tests {
         assert!(is_noise_path("package-lock.json"));
         assert!(is_noise_path("src/dist/bundle.js"));
         assert!(is_noise_path("target/debug/app"));
-        assert!(is_noise_path("assets/logo.png"));
+        assert!(is_noise_path("node_modules/vue/index.js"));
+        assert!(!is_noise_path("assets/report.xlsx"));
+        assert!(!is_noise_path("exports/data.pdf"));
         assert!(!is_noise_path("src/agent/main_loop.rs"));
         assert!(!is_noise_path("src/components/ModelSelect.vue"));
+    }
+
+    #[test]
+    fn test_binary_artifact_detection() {
+        assert!(is_binary_file("assets/report.xlsx"));
+        assert!(is_binary_file("exports/data.pdf"));
+        assert!(is_binary_file("assets/logo.png"));
+        assert!(is_binary_file("backup.zip"));
+        assert!(!is_binary_file("src/main.rs"));
+        assert!(!is_binary_file("README.md"));
     }
 
     #[test]

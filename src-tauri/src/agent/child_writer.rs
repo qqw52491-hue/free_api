@@ -334,8 +334,8 @@ fn writer_system_prompt() -> &'static str {
 纪律：修改完成后必须用宿主指定的 test_command 验证且通过后才能 finish；write_file 必须写完整文件内容；禁止碰副本外的任何路径。"
 }
 
-/// 执行 writer 动作（同步、可单测）。返回 (观测输出, 是否测试命令)
-pub fn execute_writer_action(
+/// 执行 writer 动作（异步、可单测）。返回 (观测输出, 是否测试命令)
+pub async fn execute_writer_action(
     copy_root: &Path,
     action: &str,
     params: &Value,
@@ -419,11 +419,15 @@ pub fn execute_writer_action(
             reject_shell_metachars(raw)?;
             let argv: Vec<&str> = raw.split_whitespace().collect();
             command_allowed(&argv)?;
-            let output = std::process::Command::new(argv[0])
-                .args(&argv[1..])
-                .current_dir(copy_root)
-                .output()
-                .map_err(|error| format!("命令启动失败: {}", error))?;
+            let mut cmd = tokio::process::Command::new(argv[0]);
+            cmd.args(&argv[1..]).current_dir(copy_root);
+            let timeout_dur = Duration::from_secs(COMMAND_TIMEOUT_SECS);
+            let output = match tokio::time::timeout(timeout_dur, cmd.output()).await {
+                Ok(res) => res.map_err(|error| format!("命令启动失败: {}", error))?,
+                Err(_) => {
+                    return Ok(format!("⚠️ 命令执行超时（超过 {} 秒），已被强制终止。", COMMAND_TIMEOUT_SECS));
+                }
+            };
             let mut stdout = output.stdout;
             stdout.truncate(MAX_COMMAND_OUTPUT_BYTES);
             let status = if output.status.success() { "✅ exit 0" } else { "⚠️ 非零退出" };
@@ -632,7 +636,8 @@ pub async fn run_writer_loop(
             &mut writes_used,
             &request.test_command,
             &mut test_evidence,
-        );
+        )
+        .await;
         let observation = match observation {
             Ok(output) => output,
             Err(error) => format!("【动作被拒绝】{}", error),
@@ -715,6 +720,10 @@ pub async fn run_writer_loop(
                 result.test_status
             ),
         );
+    }
+    // 自动回收 L3 隔离副本，防止磁盘空间泄漏与工作区目录污染
+    if copy_root.exists() {
+        let _ = std::fs::remove_dir_all(&copy_root);
     }
 }
 
@@ -834,8 +843,8 @@ mod tests {
         assert!(copy.join("package.json").exists());
     }
 
-    #[test]
-    fn write_file_records_before_snapshot_and_refuses_escape() {
+    #[tokio::test]
+    async fn write_file_records_before_snapshot_and_refuses_escape() {
         let (base, root) = workspace();
         let copy = base.join(".writer-copy2");
         create_isolated_copy(&root, &copy).unwrap();
@@ -846,12 +855,12 @@ mod tests {
         // 越界写入被拒绝
         assert!(execute_writer_action(&copy, "write_file", &json!({
             "path": "../evil.txt", "content": "boom"
-        }), &mut changes, &mut writes, "npm test", &mut test_evidence).is_err());
+        }), &mut changes, &mut writes, "npm test", &mut test_evidence).await.is_err());
 
         // 正常写入：留底 + 落盘
         let out = execute_writer_action(&copy, "write_file", &json!({
             "path": "src/sum.mjs", "content": "export function sum(a, b) { return a + b; }\n"
-        }), &mut changes, &mut writes, "npm test", &mut test_evidence).unwrap();
+        }), &mut changes, &mut writes, "npm test", &mut test_evidence).await.unwrap();
         assert!(out.contains("已写入 src/sum.mjs"));
         assert_eq!(writes, 1);
         let before = changes.get("src/sum.mjs").unwrap();
@@ -859,13 +868,13 @@ mod tests {
         // 新建文件：留底为空
         execute_writer_action(&copy, "write_file", &json!({
             "path": "src/new-helper.mjs", "content": "export const ok = true;\n"
-        }), &mut changes, &mut writes, "npm test", &mut test_evidence).unwrap();
+        }), &mut changes, &mut writes, "npm test", &mut test_evidence).await.unwrap();
         assert!(changes.contains_key("src/new-helper.mjs"));
         let _ = std::fs::remove_dir_all(base);
     }
 
-    #[test]
-    fn run_command_tracks_test_evidence_and_blocks_non_allowlisted() {
+    #[tokio::test]
+    async fn run_command_tracks_test_evidence_and_blocks_non_allowlisted() {
         let (base, root) = workspace();
         let copy = base.join(".writer-copy3");
         create_isolated_copy(&root, &copy).unwrap();
@@ -873,10 +882,10 @@ mod tests {
         let mut writes = 0usize;
         let mut test_evidence: Option<(String, bool, String)> = None;
 
-        assert!(execute_writer_action(&copy, "run_command", &json!({"command": "rm -rf ."}), &mut changes, &mut writes, "npm test", &mut test_evidence).is_err());
-        assert!(execute_writer_action(&copy, "run_command", &json!({"command": "npm test > out.log"}), &mut changes, &mut writes, "npm test", &mut test_evidence).is_err());
+        assert!(execute_writer_action(&copy, "run_command", &json!({"command": "rm -rf ."}), &mut changes, &mut writes, "npm test", &mut test_evidence).await.is_err());
+        assert!(execute_writer_action(&copy, "run_command", &json!({"command": "npm test > out.log"}), &mut changes, &mut writes, "npm test", &mut test_evidence).await.is_err());
 
-        execute_writer_action(&copy, "run_command", &json!({"command": "node --test"}), &mut changes, &mut writes, "node --test", &mut test_evidence).unwrap();
+        execute_writer_action(&copy, "run_command", &json!({"command": "node --test"}), &mut changes, &mut writes, "node --test", &mut test_evidence).await.unwrap();
         let (command, passed, _) = test_evidence.expect("测试命令必须被记录为证据");
         assert_eq!(command, "node --test");
         // 测试会失败（sum 还没修），passed 应为 false
