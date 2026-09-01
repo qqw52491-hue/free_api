@@ -37,6 +37,7 @@ pub struct WorkerRequest {
     pub task: String,
     pub focus_paths: Vec<String>,
     pub context_excerpts: Option<crate::agent::types::DispatchContext>,
+    pub hard_scope: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,10 +87,16 @@ pub fn parse_worker_request(params: &Value) -> Result<WorkerRequest, String> {
         }
     }
     let context_excerpts = crate::agent::types::parse_dispatch_context(params.get("context_excerpts"))?;
+    let hard_scope = params
+        .get("hard_scope")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
     Ok(WorkerRequest {
         task,
         focus_paths,
         context_excerpts,
+        hard_scope,
     })
 }
 
@@ -112,6 +119,39 @@ fn ensure_contained(workspace_root: &Path, raw: &str) -> Result<PathBuf, String>
         return Err(format!("worker 只能访问工作区内的路径：{}", raw));
     }
     Ok(canonical)
+}
+
+/// 检查目标相对路径是否落在 hard_scope 物理围栏内
+pub fn check_hard_scope(workspace_root: &Path, canonical: &Path, hard_scope: &str) -> Result<(), String> {
+    if hard_scope.trim().is_empty() {
+        return Ok(());
+    }
+    let root = workspace_root
+        .canonicalize()
+        .map_err(|error| format!("工作区不可访问: {}", error))?;
+    let rel = canonical.strip_prefix(&root).unwrap_or(canonical);
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    let rel_clean = rel_str.trim_start_matches("./");
+
+    let allowed = hard_scope
+        .split(|c| c == ',' || c == '；' || c == '\n')
+        .map(|p| p.trim().replace('\\', "/"))
+        .filter(|p| !p.is_empty())
+        .any(|prefix| {
+            let prefix_clean = prefix.trim_start_matches("./").trim_end_matches('/');
+            if prefix_clean.is_empty() {
+                return true;
+            }
+            rel_clean == prefix_clean || rel_clean.starts_with(&format!("{}/", prefix_clean))
+        });
+
+    if !allowed {
+        return Err(format!(
+            "【权限围栏拦截】目标路径 \"{}\" 超出当前角色的 hard_scope 允许范围（{}）。",
+            rel_clean, hard_scope
+        ));
+    }
+    Ok(())
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -161,6 +201,7 @@ pub async fn execute_worker_action(
     workspace_root: &Path,
     action: &str,
     params: &Value,
+    hard_scope: &str,
 ) -> Result<String, String> {
     match action {
         "read_file" => {
@@ -169,6 +210,7 @@ pub async fn execute_worker_action(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "read_file 缺少 path。".to_string())?;
             let canonical = ensure_contained(workspace_root, raw)?;
+            check_hard_scope(workspace_root, &canonical, hard_scope)?;
             let metadata = std::fs::metadata(&canonical)
                 .map_err(|error| format!("无法读取文件元数据: {}", error))?;
             if metadata.len() > MAX_READ_FILE_BYTES {
@@ -442,7 +484,7 @@ pub async fn run_worker_loop(
             break "succeeded";
         }
 
-        let observation = match execute_worker_action(&workspace_root, &parsed.action, &parsed.params).await {
+        let observation = match execute_worker_action(&workspace_root, &parsed.action, &parsed.params, &request.hard_scope).await {
             Ok(output) => output,
             Err(error) => format!("【动作被拒绝】{}", error),
         };
@@ -663,6 +705,7 @@ mod tests {
             task: "排查日志".into(),
             focus_paths: vec!["notes.log".into()],
             context_excerpts: None,
+            hard_scope: String::new(),
         };
         let p1 = render_worker_initial_prompt(Path::new("/tmp/ws"), "notes.log", &req_simple);
         assert!(p1.starts_with("工作区根目录：/tmp/ws\n关注路径（如提供）：notes.log"));
@@ -676,6 +719,7 @@ mod tests {
                 file_hints: vec!["notes.log".into()],
                 prior_findings: vec!["已排除网络问题".into()],
             }),
+            hard_scope: String::new(),
         };
         let p2 = render_worker_initial_prompt(Path::new("/tmp/ws"), "notes.log", &req_rich);
         assert!(p2.contains("### 背景信息\n生产环境出现 500"));
@@ -698,13 +742,13 @@ mod tests {
     #[tokio::test]
     async fn run_command_enforces_allowlist_and_metachars() {
         let (_base, root) = workspace();
-        assert!(execute_worker_action(&root, "run_command", &json!({"command": "rm -rf ."})).await.is_err());
-        assert!(execute_worker_action(&root, "run_command", &json!({"command": "cat notes.log > out.txt"})).await.is_err());
-        assert!(execute_worker_action(&root, "run_command", &json!({"command": "grep error notes.log; ls"})).await.is_err());
-        assert!(execute_worker_action(&root, "run_command", &json!({"command": "git push origin main"})).await.is_err());
-        let ok = execute_worker_action(&root, "run_command", &json!({"command": "grep error notes.log"})).await.unwrap();
+        assert!(execute_worker_action(&root, "run_command", &json!({"command": "rm -rf ."}), "").await.is_err());
+        assert!(execute_worker_action(&root, "run_command", &json!({"command": "cat notes.log > out.txt"}), "").await.is_err());
+        assert!(execute_worker_action(&root, "run_command", &json!({"command": "grep error notes.log; ls"}), "").await.is_err());
+        assert!(execute_worker_action(&root, "run_command", &json!({"command": "git push origin main"}), "").await.is_err());
+        let ok = execute_worker_action(&root, "run_command", &json!({"command": "grep error notes.log"}), "").await.unwrap();
         assert!(ok.contains("error happened"));
-        let git_ok = execute_worker_action(&root, "run_command", &json!({"command": "git status"})).await;
+        let git_ok = execute_worker_action(&root, "run_command", &json!({"command": "git status"}), "").await;
         // 非仓库目录返回非零退出但允许执行
         assert!(git_ok.is_ok() || git_ok.is_err());
     }
@@ -712,11 +756,16 @@ mod tests {
     #[tokio::test]
     async fn read_file_and_list_dir_are_bounded_and_contained() {
         let (base, root) = workspace();
-        let content = execute_worker_action(&root, "read_file", &json!({"path": "src/main.rs"})).await.unwrap();
+        let content = execute_worker_action(&root, "read_file", &json!({"path": "src/main.rs"}), "").await.unwrap();
         assert!(content.contains("println"));
-        let listing = execute_worker_action(&root, "list_dir", &json!({"path": "."})).await.unwrap();
+        let listing = execute_worker_action(&root, "list_dir", &json!({"path": "."}), "").await.unwrap();
         assert!(listing.contains("notes.log") && listing.contains("src"));
-        assert!(execute_worker_action(&root, "write_file", &json!({})).await.is_err());
+        assert!(execute_worker_action(&root, "write_file", &json!({}), "").await.is_err());
+
+        // hard_scope 围栏测试：只允许读取 src/，试图读取 notes.log 被拦截
+        assert!(execute_worker_action(&root, "read_file", &json!({"path": "notes.log"}), "src/").await.is_err());
+        assert!(execute_worker_action(&root, "read_file", &json!({"path": "src/main.rs"}), "src/").await.is_ok());
+
         let _ = std::fs::remove_dir_all(base);
     }
 

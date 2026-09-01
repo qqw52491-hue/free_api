@@ -75,7 +75,43 @@
             placeholder="例如: cargo check 或 npm test"
           />
         </label>
+
+        <label class="field">
+          <span class="field-label">角色并发上限 (Max Concurrency)</span>
+          <input
+            v-model.number="form.max_concurrency"
+            type="number"
+            min="0"
+            max="20"
+            placeholder="0 = 跟随全局默认"
+          />
+        </label>
       </div>
+
+      <div class="field wide">
+        <span class="field-label">允许挂载的 Child 类型 (Allowed Kinds) <span class="field-hint">（留空则不限，均可挂载）</span></span>
+        <div class="kind-chips">
+          <button
+            v-for="opt in kindOptions"
+            :key="opt.value"
+            type="button"
+            class="kind-chip"
+            :class="{ selected: form.allowed_kinds.includes(opt.value) }"
+            @click="toggleKind(opt.value)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
+      </div>
+
+      <label class="field wide">
+        <span class="field-label">强制物理围栏 (Hard Scope) <span class="field-hint">（超出此范围的写入/读取将被 Rust 宿主层硬拦截，例如: src/, package.json；留空不限）</span></span>
+        <input
+          v-model="form.hard_scope"
+          type="text"
+          placeholder="例如: src/, package.json"
+        />
+      </label>
 
       <label class="field wide">
         <span class="field-label">适用范围提示 (Scope Hints)</span>
@@ -155,10 +191,22 @@
               <span class="tag-icon">🧪</span>
               <span class="tag-text">{{ card.default_test_command }}</span>
             </div>
+            <div v-if="card.allowed_kinds" class="meta-tag kind-tag" :title="`允许挂载类型: ${card.allowed_kinds}`">
+              <span class="tag-icon">🏷️</span>
+              <span class="tag-text">{{ card.allowed_kinds }}</span>
+            </div>
+            <div v-if="card.max_concurrency > 0" class="meta-tag concurrency-tag" :title="`并发上限: ${card.max_concurrency}`">
+              <span class="tag-icon">⚡</span>
+              <span class="tag-text">并发 {{ card.max_concurrency }}</span>
+            </div>
           </div>
 
           <p v-if="card.scope_hints" class="role-scope-hint" :title="card.scope_hints">
             🎯 {{ card.scope_hints }}
+          </p>
+
+          <p v-if="card.hard_scope" class="role-hard-scope" :title="`强制物理围栏: ${card.hard_scope}`">
+            🚧 围栏: {{ card.hard_scope }}
           </p>
 
           <div class="role-prompt-preview">
@@ -195,6 +243,9 @@ interface RoleCard {
   persona_prompt: string;
   scope_hints: string;
   default_test_command: string;
+  allowed_kinds: string;
+  hard_scope: string;
+  max_concurrency: number;
   enabled: boolean;
 }
 
@@ -204,6 +255,12 @@ interface ModelItem {
   platform_id: string;
   platform_name?: string;
 }
+
+const kindOptions = [
+  { value: 'writer', label: '✍️ 代码修改专家 (Writer)' },
+  { value: 'worker', label: '🔍 只读侦察探针 (Worker)' },
+  { value: 'reviewer', label: '🛡️ 终态审查专家 (Reviewer)' },
+];
 
 const cards = ref<RoleCard[]>([]);
 const models = ref<ModelItem[]>([]);
@@ -221,6 +278,9 @@ const form = reactive({
   persona_prompt: '',
   scope_hints: '',
   default_test_command: '',
+  allowed_kinds: [] as string[],
+  hard_scope: '',
+  max_concurrency: 0,
   enabled: true,
 });
 
@@ -232,6 +292,9 @@ const presetTemplates = [
     scope_hints: '涉及前端 UI、Vue 组件重构、CSS 样式排版及响应式交互优化',
     persona_prompt: '你是一位资深前端 UI/UX 架构师。请从视觉美观度、配色和谐度、响应式适配度、组件内聚性及微交互流畅度等维度进行严谨审查。评估并输出 0~100 的质量得分以及具体可执行的修改建议。',
     default_test_command: 'npm run build',
+    allowed_kinds: 'reviewer',
+    hard_scope: '',
+    max_concurrency: 0,
   },
   {
     icon: '🛡️',
@@ -240,6 +303,9 @@ const presetTemplates = [
     scope_hints: '涉及后端核心状态流转、并发安全、数据库事务与边界异常处理',
     persona_prompt: '你是一位资深系统架构与安全评审专家。重点审查核心逻辑的边界条件、状态一致性、死锁与竞态条件风险、错误处理完整度以及 SQL 注入等安全漏洞。给出严密的诊断打分与加固清单。',
     default_test_command: 'cargo test',
+    allowed_kinds: 'reviewer',
+    hard_scope: '',
+    max_concurrency: 0,
   },
   {
     icon: '🔍',
@@ -248,6 +314,9 @@ const presetTemplates = [
     scope_hints: '用于大范围跨文件代码搜索、调用链路追踪与依赖定位',
     persona_prompt: '你是一个高效率代码调研探针。在只读约束下，使用搜索与检索工具迅速定位关键接口、定义处及所有调用方，提炼关键上下文，为后续开发提供精准线索。',
     default_test_command: '',
+    allowed_kinds: 'worker',
+    hard_scope: '',
+    max_concurrency: 0,
   },
   {
     icon: '📝',
@@ -256,6 +325,9 @@ const presetTemplates = [
     scope_hints: '涉及 API 文档、架构说明、设计规范及交付报告的编写与美化',
     persona_prompt: '你是一位专业的技术写作专家。善于使用清晰易懂的 Markdown 结构、表格、时序图与警示块（Alerts），将复杂的代码逻辑与交付成果梳理为极其优雅专业的技术文档。',
     default_test_command: '',
+    allowed_kinds: 'writer',
+    hard_scope: 'docs/',
+    max_concurrency: 0,
   },
 ];
 
@@ -272,6 +344,15 @@ function getModelName(modelId: string) {
   return found ? found.name : modelId.slice(0, 10);
 }
 
+function toggleKind(kind: string) {
+  const idx = form.allowed_kinds.indexOf(kind);
+  if (idx >= 0) {
+    form.allowed_kinds.splice(idx, 1);
+  } else {
+    form.allowed_kinds.push(kind);
+  }
+}
+
 function startCreate() {
   isEditing.value = false;
   isCreating.value = true;
@@ -282,6 +363,9 @@ function startCreate() {
     persona_prompt: '',
     scope_hints: '',
     default_test_command: '',
+    allowed_kinds: [],
+    hard_scope: '',
+    max_concurrency: 0,
     enabled: true,
   });
   feedbackMsg.value = '';
@@ -301,6 +385,9 @@ function applyPreset(tpl: typeof presetTemplates[0]) {
   form.scope_hints = tpl.scope_hints;
   form.persona_prompt = tpl.persona_prompt;
   form.default_test_command = tpl.default_test_command;
+  form.allowed_kinds = tpl.allowed_kinds ? tpl.allowed_kinds.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  form.hard_scope = tpl.hard_scope || '';
+  form.max_concurrency = tpl.max_concurrency || 0;
   form.enabled = true;
   feedbackMsg.value = `已载入「${tpl.label}」预设，可根据需要调整后点击保存。`;
   feedbackIsError.value = false;
@@ -316,6 +403,9 @@ function editCard(card: RoleCard) {
     persona_prompt: card.persona_prompt,
     scope_hints: card.scope_hints || '',
     default_test_command: card.default_test_command || '',
+    allowed_kinds: card.allowed_kinds ? card.allowed_kinds.split(',').map((s) => s.trim()).filter(Boolean) : [],
+    hard_scope: card.hard_scope || '',
+    max_concurrency: card.max_concurrency || 0,
     enabled: card.enabled,
   });
   feedbackMsg.value = '';
@@ -365,6 +455,9 @@ async function saveRoleCard() {
         persona_prompt: form.persona_prompt.trim(),
         scope_hints: form.scope_hints.trim(),
         default_test_command: form.default_test_command.trim(),
+        allowed_kinds: form.allowed_kinds.join(','),
+        hard_scope: form.hard_scope.trim(),
+        max_concurrency: Number(form.max_concurrency) || 0,
         enabled: form.enabled,
       },
     });
@@ -796,5 +889,63 @@ textarea {
 .empty-icon {
   font-size: 36px;
   margin-bottom: 10px;
+}
+
+.field-hint {
+  font-size: 11px;
+  color: var(--text-3, #71717a);
+  font-weight: normal;
+  margin-left: 4px;
+}
+
+.kind-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.kind-chip {
+  background: var(--bg-2, #27272a);
+  border: 1px solid var(--border-1, #3f3f46);
+  border-radius: 6px;
+  color: var(--text-2, #d4d4d8);
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.kind-chip:hover {
+  border-color: #6366f1;
+  color: #fff;
+}
+
+.kind-chip.selected {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: #6366f1;
+  color: #818cf8;
+  font-weight: 500;
+}
+
+.meta-tag.kind-tag {
+  background: rgba(99, 102, 241, 0.12);
+  color: #818cf8;
+}
+
+.meta-tag.concurrency-tag {
+  background: rgba(234, 179, 8, 0.12);
+  color: #eab308;
+}
+
+.role-hard-scope {
+  font-size: 11px;
+  color: #f59e0b;
+  margin: 6px 0 0 0;
+  line-height: 1.4;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px dashed rgba(245, 158, 11, 0.25);
+  padding: 4px 8px;
+  border-radius: 6px;
 }
 </style>

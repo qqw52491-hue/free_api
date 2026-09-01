@@ -40,6 +40,7 @@ pub struct WriterRequest {
     pub test_command: String,
     pub focus_paths: Vec<String>,
     pub context_excerpts: Option<crate::agent::types::DispatchContext>,
+    pub hard_scope: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,11 +115,17 @@ pub fn parse_writer_request(params: &Value) -> Result<WriterRequest, String> {
         }
     }
     let context_excerpts = crate::agent::types::parse_dispatch_context(params.get("context_excerpts"))?;
+    let hard_scope = params
+        .get("hard_scope")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
     Ok(WriterRequest {
         task,
         test_command,
         focus_paths,
         context_excerpts,
+        hard_scope,
     })
 }
 
@@ -187,6 +194,39 @@ fn ensure_contained(copy_root: &Path, raw: &str) -> Result<PathBuf, String> {
         return Err(format!("writer 只能访问副本内的路径：{}", raw));
     }
     Ok(canonical)
+}
+
+/// 检查目标相对路径是否落在 hard_scope 物理围栏内
+pub fn check_hard_scope(copy_root: &Path, canonical: &Path, hard_scope: &str) -> Result<(), String> {
+    if hard_scope.trim().is_empty() {
+        return Ok(());
+    }
+    let root = copy_root
+        .canonicalize()
+        .map_err(|error| format!("工作区不可访问: {}", error))?;
+    let rel = canonical.strip_prefix(&root).unwrap_or(canonical);
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    let rel_clean = rel_str.trim_start_matches("./");
+
+    let allowed = hard_scope
+        .split(|c| c == ',' || c == '；' || c == '\n')
+        .map(|p| p.trim().replace('\\', "/"))
+        .filter(|p| !p.is_empty())
+        .any(|prefix| {
+            let prefix_clean = prefix.trim_start_matches("./").trim_end_matches('/');
+            if prefix_clean.is_empty() {
+                return true;
+            }
+            rel_clean == prefix_clean || rel_clean.starts_with(&format!("{}/", prefix_clean))
+        });
+
+    if !allowed {
+        return Err(format!(
+            "【权限围栏拦截】目标路径 \"{}\" 超出当前角色的 hard_scope 允许范围（{}）。",
+            rel_clean, hard_scope
+        ));
+    }
+    Ok(())
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -346,6 +386,7 @@ pub async fn execute_writer_action(
     writes_used: &mut usize,
     test_command: &str,
     test_evidence: &mut Option<(String, bool, String)>,
+    hard_scope: &str,
 ) -> Result<String, String> {
     match action {
         "list_dir" | "read_file" => {
@@ -395,6 +436,7 @@ pub async fn execute_writer_action(
                 return Err(format!("write_file 内容过大（{} 字节 > {}）。", content.len(), MAX_WRITE_FILE_BYTES));
             }
             let canonical = ensure_contained(copy_root, raw)?;
+            check_hard_scope(copy_root, &canonical, hard_scope)?;
             let relative = canonical
                 .strip_prefix(copy_root.canonicalize().unwrap_or_else(|_| copy_root.to_path_buf()))
                 .unwrap_or(&canonical)
@@ -634,6 +676,7 @@ pub async fn run_writer_loop(
             &mut writes_used,
             &request.test_command,
             &mut test_evidence,
+            &request.hard_scope,
         )
         .await;
         let observation = match observation {
@@ -892,6 +935,7 @@ mod tests {
             test_command: "npm test".into(),
             focus_paths: vec!["src/main.rs".into()],
             context_excerpts: None,
+            hard_scope: String::new(),
         };
         let p1 = render_writer_initial_prompt(Path::new("/tmp/copy"), "src/main.rs", &req_simple);
         assert!(p1.starts_with("副本工作区根目录：/tmp/copy\n关注路径：src/main.rs"));
@@ -906,6 +950,7 @@ mod tests {
                 file_hints: vec!["src/main.rs".into()],
                 prior_findings: vec!["之前已发现 panic".into()],
             }),
+            hard_scope: String::new(),
         };
         let p2 = render_writer_initial_prompt(Path::new("/tmp/copy"), "src/main.rs", &req_rich);
         assert!(p2.contains("### 背景信息\n这是详细背景"));
@@ -938,12 +983,17 @@ mod tests {
         // 越界写入被拒绝
         assert!(execute_writer_action(&copy, "write_file", &json!({
             "path": "../evil.txt", "content": "boom"
-        }), &mut changes, &mut writes, "npm test", &mut test_evidence).await.is_err());
+        }), &mut changes, &mut writes, "npm test", &mut test_evidence, "").await.is_err());
+
+        // hard_scope 物理围栏测试：只允许修改 src/，试图写 package.json 被拦截
+        assert!(execute_writer_action(&copy, "write_file", &json!({
+            "path": "package.json", "content": "{}"
+        }), &mut changes, &mut writes, "npm test", &mut test_evidence, "src/").await.is_err());
 
         // 正常写入：留底 + 落盘
         let out = execute_writer_action(&copy, "write_file", &json!({
             "path": "src/sum.mjs", "content": "export function sum(a, b) { return a + b; }\n"
-        }), &mut changes, &mut writes, "npm test", &mut test_evidence).await.unwrap();
+        }), &mut changes, &mut writes, "npm test", &mut test_evidence, "src/").await.unwrap();
         assert!(out.contains("已写入 src/sum.mjs"));
         assert_eq!(writes, 1);
         let before = changes.get("src/sum.mjs").unwrap();
@@ -951,7 +1001,7 @@ mod tests {
         // 新建文件：留底为空
         execute_writer_action(&copy, "write_file", &json!({
             "path": "src/new-helper.mjs", "content": "export const ok = true;\n"
-        }), &mut changes, &mut writes, "npm test", &mut test_evidence).await.unwrap();
+        }), &mut changes, &mut writes, "npm test", &mut test_evidence, "src/").await.unwrap();
         assert!(changes.contains_key("src/new-helper.mjs"));
         let _ = std::fs::remove_dir_all(base);
     }
@@ -965,10 +1015,10 @@ mod tests {
         let mut writes = 0usize;
         let mut test_evidence: Option<(String, bool, String)> = None;
 
-        assert!(execute_writer_action(&copy, "run_command", &json!({"command": "rm -rf ."}), &mut changes, &mut writes, "npm test", &mut test_evidence).await.is_err());
-        assert!(execute_writer_action(&copy, "run_command", &json!({"command": "npm test > out.log"}), &mut changes, &mut writes, "npm test", &mut test_evidence).await.is_err());
+        assert!(execute_writer_action(&copy, "run_command", &json!({"command": "rm -rf ."}), &mut changes, &mut writes, "npm test", &mut test_evidence, "").await.is_err());
+        assert!(execute_writer_action(&copy, "run_command", &json!({"command": "npm test > out.log"}), &mut changes, &mut writes, "npm test", &mut test_evidence, "").await.is_err());
 
-        execute_writer_action(&copy, "run_command", &json!({"command": "node --test"}), &mut changes, &mut writes, "node --test", &mut test_evidence).await.unwrap();
+        execute_writer_action(&copy, "run_command", &json!({"command": "node --test"}), &mut changes, &mut writes, "node --test", &mut test_evidence, "").await.unwrap();
         let (command, passed, _) = test_evidence.expect("测试命令必须被记录为证据");
         assert_eq!(command, "node --test");
         // 测试会失败（sum 还没修），passed 应为 false

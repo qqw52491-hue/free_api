@@ -214,6 +214,9 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             persona_prompt TEXT NOT NULL DEFAULT '',
             scope_hints TEXT NOT NULL DEFAULT '',
             default_test_command TEXT NOT NULL DEFAULT '',
+            allowed_kinds TEXT NOT NULL DEFAULT '',
+            hard_scope TEXT NOT NULL DEFAULT '',
+            max_concurrency INTEGER NOT NULL DEFAULT 0,
             enabled INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -540,6 +543,19 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     // result_json 晚于首版建表加入：老库缺失时子任务终态结果将无法落盘/消费，必须补齐
     let _ = conn.execute(
         "ALTER TABLE agent_child_runs ADD COLUMN result_json TEXT;",
+        [],
+    );
+    // 角色卡 v2 字段（P3）：allowed_kinds / hard_scope / max_concurrency
+    let _ = conn.execute(
+        "ALTER TABLE agent_role_cards ADD COLUMN allowed_kinds TEXT NOT NULL DEFAULT '';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_role_cards ADD COLUMN hard_scope TEXT NOT NULL DEFAULT '';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_role_cards ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 0;",
         [],
     );
     if let Err(error) = migrate_uvx_bridge_plugins_to_native(&conn) {

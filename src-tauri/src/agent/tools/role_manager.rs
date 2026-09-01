@@ -2,6 +2,7 @@ use crate::db::DbState;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::Path;
 use uuid::Uuid;
 
 /// 角色池上限：每张卡的清单都会注入主 Agent 上下文，超池会稀释注意力与预算。
@@ -12,7 +13,7 @@ const MAX_PERSONA_CHARS: usize = 3_000;
 const MAX_SCOPE_CHARS: usize = 500;
 const MAX_TEST_COMMAND_CHARS: usize = 200;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RoleCard {
     pub id: String,
     pub name: String,
@@ -21,7 +22,49 @@ pub struct RoleCard {
     pub persona_prompt: String,
     pub scope_hints: String,
     pub default_test_command: String,
+    #[serde(default)]
+    pub allowed_kinds: String,      // 逗号分隔: writer,worker,reviewer；空=不限
+    #[serde(default)]
+    pub hard_scope: String,         // 逗号分隔路径前缀；空=不限制
+    #[serde(default)]
+    pub max_concurrency: i64,       // 0=跟随全局默认
     pub enabled: bool,
+}
+
+impl RoleCard {
+    /// 检查该角色卡是否允许挂载到指定 child kind (writer, worker, reviewer)
+    pub fn allows_kind(&self, kind: &str) -> bool {
+        let allowed = self.allowed_kinds.trim();
+        if allowed.is_empty() {
+            return true;
+        }
+        allowed
+            .split(|c| c == ',' || c == '；' || c == ' ' || c == '\n')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .any(|k| k == kind.to_ascii_lowercase())
+    }
+
+    /// 检查相对路径是否命中 hard_scope 物理围栏（空=全放行；非空=必须命中至少一个前缀）
+    pub fn allows_path(&self, relative_path: &Path) -> bool {
+        let hard = self.hard_scope.trim();
+        if hard.is_empty() {
+            return true;
+        }
+        let rel_str = relative_path.to_string_lossy().replace('\\', "/");
+        let rel_clean = rel_str.trim_start_matches("./");
+
+        hard.split(|c| c == ',' || c == '；' || c == '\n')
+            .map(|p| p.trim().replace('\\', "/"))
+            .filter(|p| !p.is_empty())
+            .any(|prefix| {
+                let prefix_clean = prefix.trim_start_matches("./").trim_end_matches('/');
+                if prefix_clean.is_empty() {
+                    return true;
+                }
+                rel_clean == prefix_clean || rel_clean.starts_with(&format!("{}/", prefix_clean))
+            })
+    }
 }
 
 fn map_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoleCard> {
@@ -33,12 +76,15 @@ fn map_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoleCard> {
         persona_prompt: row.get(4)?,
         scope_hints: row.get(5)?,
         default_test_command: row.get(6)?,
-        enabled: row.get::<_, i64>(7)? != 0,
+        allowed_kinds: row.get(7)?,
+        hard_scope: row.get(8)?,
+        max_concurrency: row.get(9)?,
+        enabled: row.get::<_, i64>(10)? != 0,
     })
 }
 
 const CARD_COLUMNS: &str =
-    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, enabled";
+    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled";
 
 pub fn list_cards(db: &DbState, include_disabled: bool) -> Result<Vec<RoleCard>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -76,7 +122,9 @@ pub fn resolve_enabled_card(db: &DbState, name: &str) -> Result<Option<RoleCard>
 
 use rusqlite::OptionalExtension;
 
-fn validate_card_input(params: &Value) -> Result<(String, String, String, String, String, String), String> {
+fn validate_card_input(
+    params: &Value,
+) -> Result<(String, String, String, String, String, String, String, String, i64), String> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -102,6 +150,15 @@ fn validate_card_input(params: &Value) -> Result<(String, String, String, String
     let persona_prompt = take("persona_prompt", MAX_PERSONA_CHARS, "");
     let scope_hints = take("scope_hints", MAX_SCOPE_CHARS, "");
     let default_test_command = take("default_test_command", MAX_TEST_COMMAND_CHARS, "");
+    let allowed_kinds = take("allowed_kinds", 100, "");
+    let hard_scope = take("hard_scope", 500, "");
+    let max_concurrency = params
+        .get("max_concurrency")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        .max(0)
+        .min(20);
+
     if let Some(bad) = [model_id.as_str(), default_test_command.as_str()]
         .iter()
         .find(|f| f.chars().any(|c| [';', '|', '&', '>', '<', '`', '$', '(', ')', '\n'].contains(&c)))
@@ -109,12 +166,31 @@ fn validate_card_input(params: &Value) -> Result<(String, String, String, String
         let _ = bad;
         return Err("model_id / default_test_command 不允许 shell 控制字符。".to_string());
     }
-    Ok((name, label, model_id, persona_prompt, scope_hints, default_test_command))
+    Ok((
+        name,
+        label,
+        model_id,
+        persona_prompt,
+        scope_hints,
+        default_test_command,
+        allowed_kinds,
+        hard_scope,
+        max_concurrency,
+    ))
 }
 
 pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
-    let (name, label, model_id, persona_prompt, scope_hints, default_test_command) =
-        validate_card_input(params)?;
+    let (
+        name,
+        label,
+        model_id,
+        persona_prompt,
+        scope_hints,
+        default_test_command,
+        allowed_kinds,
+        hard_scope,
+        max_concurrency,
+    ) = validate_card_input(params)?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM agent_role_cards", [], |row| row.get(0))
@@ -133,13 +209,14 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
     }
     let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
     conn.execute(
-        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, enabled, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8)
+        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?11)
          ON CONFLICT(name) DO UPDATE SET
             label=excluded.label, model_id=excluded.model_id, persona_prompt=excluded.persona_prompt,
             scope_hints=excluded.scope_hints, default_test_command=excluded.default_test_command,
+            allowed_kinds=excluded.allowed_kinds, hard_scope=excluded.hard_scope, max_concurrency=excluded.max_concurrency,
             enabled=1, updated_at=excluded.updated_at",
-        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, now],
+        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, now],
     )
     .map_err(|e| e.to_string())?;
     drop(conn);
@@ -351,7 +428,11 @@ mod tests {
             id: "x".into(), name: "frontend_designer".into(), label: "前端".into(),
             model_id: "gemini".into(), persona_prompt: "审美优先".into(),
             scope_hints: "src/components, src/assets".into(),
-            default_test_command: "npm run build".into(), enabled: true,
+            default_test_command: "npm run build".into(),
+            allowed_kinds: "writer".into(),
+            hard_scope: "src/components, src/assets".into(),
+            max_concurrency: 1,
+            enabled: true,
         };
         // 模型未提供默认值时补齐
         let merged = merge_writer_defaults(&card, &json!({"task": "打磨 UI"}));
@@ -376,5 +457,30 @@ mod tests {
         let menu = build_role_cards_menu(&db).unwrap();
         assert!(menu.contains("a_role") && menu.contains("角色A"));
         assert!(!menu.contains("b_role"), "禁用的卡不得出现在菜单");
+    }
+
+    #[test]
+    fn role_card_v2_allows_kind_and_hard_scope() {
+        let card = RoleCard {
+            allowed_kinds: "writer, worker".into(),
+            hard_scope: "src/components, src/assets, package.json".into(),
+            ..Default::default()
+        };
+        // kind 检查
+        assert!(card.allows_kind("writer"));
+        assert!(card.allows_kind("worker"));
+        assert!(!card.allows_kind("reviewer"));
+
+        // hard_scope 检查
+        assert!(card.allows_path(Path::new("src/components/Button.vue")));
+        assert!(card.allows_path(Path::new("src/assets/logo.png")));
+        assert!(card.allows_path(Path::new("package.json")));
+        assert!(!card.allows_path(Path::new("src-tauri/src/main.rs")));
+        assert!(!card.allows_path(Path::new("Cargo.toml")));
+
+        // 默认空卡全放行
+        let empty_card = RoleCard::default();
+        assert!(empty_card.allows_kind("reviewer"));
+        assert!(empty_card.allows_path(Path::new("any/path/you/want.rs")));
     }
 }

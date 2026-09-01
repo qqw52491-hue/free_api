@@ -742,6 +742,14 @@ pub async fn run_tool_phase(
         if let Some(role_name) = child_params.get("role").and_then(|v| v.as_str()) {
             match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
                 Ok(Some(card)) => {
+                    if !card.allows_kind("reviewer") {
+                        return Ok(DispatchResult {
+                            stdout: String::new(),
+                            stderr: format!("角色卡「{}」未授权挂载为 reviewer（允许类型: {}）。", role_name, card.allowed_kinds),
+                            success: false,
+                            route: "host_rejection:role_kind_disallowed".to_string(),
+                        });
+                    }
                     reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
                     if !card.model_id.is_empty() {
                         reviewer_model = card.model_id.clone();
@@ -891,11 +899,22 @@ pub async fn run_tool_phase(
         if let Some(role_name) = writer_params.get("role").and_then(|v| v.as_str()) {
             match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
                 Ok(Some(card)) => {
+                    if !card.allows_kind("writer") {
+                        return Ok(DispatchResult {
+                            stdout: String::new(),
+                            stderr: format!("角色卡「{}」未授权挂载为 writer（允许类型: {}）。", role_name, card.allowed_kinds),
+                            success: false,
+                            route: "host_rejection:role_kind_disallowed".to_string(),
+                        });
+                    }
                     writer_persona = crate::agent::tools::role_manager::persona_block(&card);
                     if !card.model_id.is_empty() {
                         writer_model = card.model_id.clone();
                     }
                     effective_params = crate::agent::tools::role_manager::merge_writer_defaults(&card, &writer_params);
+                    if !card.hard_scope.is_empty() {
+                        effective_params["hard_scope"] = json!(card.hard_scope);
+                    }
                 }
                 Ok(None) => {
                     return Ok(DispatchResult {
@@ -962,12 +981,24 @@ pub async fn run_tool_phase(
         let worker_params = inst.get_params();
         let mut scout_persona = String::new();
         let mut scout_model = routing.model_id.clone();
+        let mut effective_worker_params = worker_params.clone();
         if let Some(role_name) = worker_params.get("role").and_then(|v| v.as_str()) {
             match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
                 Ok(Some(card)) => {
+                    if !card.allows_kind("worker") {
+                        return Ok(DispatchResult {
+                            stdout: String::new(),
+                            stderr: format!("角色卡「{}」未授权挂载为 worker（允许类型: {}）。", role_name, card.allowed_kinds),
+                            success: false,
+                            route: "host_rejection:role_kind_disallowed".to_string(),
+                        });
+                    }
                     scout_persona = crate::agent::tools::role_manager::persona_block(&card);
                     if !card.model_id.is_empty() {
                         scout_model = card.model_id.clone();
+                    }
+                    if !card.hard_scope.is_empty() {
+                        effective_worker_params["hard_scope"] = json!(card.hard_scope);
                     }
                 }
                 Ok(None) => {
@@ -991,7 +1022,7 @@ pub async fn run_tool_phase(
             workspace_dir,
             &scout_model,
             &reasoning_effort,
-            &worker_params,
+            &effective_worker_params,
             scout_persona,
             interrupt_rx.clone(),
         )
