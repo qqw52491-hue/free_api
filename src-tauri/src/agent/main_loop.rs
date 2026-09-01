@@ -1118,29 +1118,72 @@ async fn run_agent_main_loop_in_workspace_inner(
     while checkpoint.step_id < MAX_STEPS {
         let step_id = checkpoint.step_id;
 
-        // 🔄 异步子审查结果轮询：检查是否有已完成的 child_reviewer 任务，自动注入结果
+        // 🔄 异步子任务结果轮询（审查/工兵/侦察）：自动注入父 Agent 上下文
         if let Ok(completed) = crate::agent::child_reviewer::poll_completed_child_runs(state.inner(), &run_id) {
             if !completed.is_empty() {
                 let mut injection = String::new();
+                let git_available = crate::agent::child_writer::is_git_available(&workspace_dir).await;
                 for result in completed {
-                    injection.push_str(&format!(
-                        "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
-                        result.child_run_id,
-                        result.confidence,
-                        result.findings.join("\n- ")
-                    ));
+                    match result.kind.as_deref() {
+                        Some("writer") => {
+                            let mut writer_res = result.raw_result_json.as_deref()
+                                .and_then(|raw| serde_json::from_str::<crate::agent::child_writer::WriterResult>(raw).ok());
+                            if let Some(ref mut wr) = writer_res {
+                                // 🌟 核心：在父 Agent 消费回执的瞬间现算指纹，闭合 TOCTOU 竞争窗口！
+                                crate::agent::child_writer::refresh_file_conflicts(&mut wr.changed_files, &workspace_dir, git_available).await;
+                                injection.push_str(&format!(
+                                    "\n【🛠️ 写入工兵已完成 (child_run_id: {})】\n状态: {}, 测试: {}\n",
+                                    wr.child_run_id, wr.status, wr.test_status
+                                ));
+                                if !wr.test_output_tail.is_empty() {
+                                    injection.push_str(&format!("测试输出摘要:\n{}\n", wr.test_output_tail));
+                                }
+                                injection.push_str("修改文件与冲突状态（主工作区实时现算）:\n");
+                                for cf in &wr.changed_files {
+                                    let status_label = cf.conflict_status.map(|s| s.label()).unwrap_or("未知");
+                                    injection.push_str(&format!("- {} [{}]\n", cf.path, status_label));
+                                    if !cf.diff.is_empty() {
+                                        injection.push_str(&format!("```diff\n{}\n```\n", cf.diff));
+                                    }
+                                }
+                                if let Some(ref pr) = wr.patch_ref {
+                                    injection.push_str(&format!("完整补丁工件: 可用 artifact_manager(action: \"get\", id: \"{}\") 查看\n", pr));
+                                }
+                                if !wr.findings.is_empty() {
+                                    injection.push_str(&format!("修改说明:\n- {}\n", wr.findings.join("\n- ")));
+                                }
+                            } else {
+                                injection.push_str(&format!(
+                                    "\n【🛠️ 写入工兵已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
+                                    result.child_run_id, result.confidence, result.findings.join("\n- ")
+                                ));
+                            }
+                        }
+                        Some("worker") => {
+                            injection.push_str(&format!(
+                                "\n【🕵️ 只读侦察任务已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
+                                result.child_run_id, result.confidence, result.findings.join("\n- ")
+                            ));
+                        }
+                        _ => {
+                            injection.push_str(&format!(
+                                "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
+                                result.child_run_id, result.confidence, result.findings.join("\n- ")
+                            ));
+                        }
+                    }
                     if !result.missing_evidence.is_empty() {
-                        injection.push_str(&format!("缺失证据: {}\n", result.missing_evidence.join(", ")));
+                        injection.push_str(&format!("缺失证据/未完成项: {}\n", result.missing_evidence.join(", ")));
                     }
                     if let Some(ref err) = result.error_kind {
-                        injection.push_str(&format!("异常类别: {}（子审查未产出有效结论，请勿当作证据使用）\n", err));
+                        injection.push_str(&format!("异常类别: {}（子任务未正常完成，请谨慎对待输出）\n", err));
                     }
                 }
                 if !injection.is_empty() {
                     context.add_error_feedback(&injection);
                     let _ = app.emit(
                         &format!("agent-log-{}", final_session_id),
-                        "🔄 子审查结果已注入父 Agent 上下文".to_string()
+                        "🔄 子任务成果（含实时冲突检测）已注入父 Agent 上下文".to_string()
                     );
                 }
             }

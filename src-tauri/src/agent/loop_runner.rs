@@ -728,20 +728,13 @@ pub async fn run_tool_phase(
     }
 
     // --- B1.5 P4 连续批发派发解析失败降级熔断检查 ---
-    if let Some(ref d) = inst.dispatches {
-        if !d.is_empty() && context.batch_dispatch_circuit_breaker_remaining > 0 {
-            let remaining = context.batch_dispatch_circuit_breaker_remaining;
-            context.batch_dispatch_circuit_breaker_remaining = remaining.saturating_sub(1);
-            return Ok(DispatchResult {
-                stdout: String::new(),
-                stderr: format!(
-                    "⚠️ 批发格式近期连续解析失败，已触发熔断保护（还剩 {} 步恢复）。本轮请直接使用单工具派发（params: {{...}}），不要使用 dispatches 批发。",
-                    remaining
-                ),
-                success: false,
-                route: "host_rejection:batch_circuit_breaker".to_string(),
-            });
-        }
+    if let Err(breaker_msg) = context.check_batch_dispatch_allowed(inst.has_dispatches()) {
+        return Ok(DispatchResult {
+            stdout: String::new(),
+            stderr: breaker_msg,
+            success: false,
+            route: "host_rejection:batch_circuit_breaker".to_string(),
+        });
     }
 
     // --- B2. 受限 child reviewer：异步派发，不阻塞主循环。结果在后续 step 中由 main_loop 的 poll_completed_child_runs 注入。 ---
@@ -889,8 +882,8 @@ pub async fn run_tool_phase(
             if inst.is_mixed_dispatch_format() {
                 summary = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches 批量派发。\n\n{}", summary);
             }
+            let breaker_alert = context.record_batch_dispatch_outcome(success_count > 0);
             if success_count > 0 {
-                context.consecutive_batch_dispatch_errors = 0;
                 DispatchResult {
                     stdout: summary,
                     stderr: String::new(),
@@ -898,14 +891,13 @@ pub async fn run_tool_phase(
                     route: format!("child_reviewer:batch:{}ok{}fail", success_count, fail_count),
                 }
             } else {
-                context.consecutive_batch_dispatch_errors += 1;
-                if context.consecutive_batch_dispatch_errors >= 2 {
-                    context.batch_dispatch_circuit_breaker_remaining = 3;
-                    context.consecutive_batch_dispatch_errors = 0;
+                let mut err = format!("批量审查派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n"));
+                if let Some(alert) = breaker_alert {
+                    err = format!("{}\n\n{}", err, alert);
                 }
                 DispatchResult {
                     stdout: String::new(),
-                    stderr: format!("批量审查派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n")),
+                    stderr: err,
                     success: false,
                     route: "child_reviewer:rejected_or_failed".to_string(),
                 }
@@ -1151,8 +1143,8 @@ pub async fn run_tool_phase(
             if inst.is_mixed_dispatch_format() {
                 summary = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches 批量派发。\n\n{}", summary);
             }
+            let breaker_alert = context.record_batch_dispatch_outcome(success_count > 0);
             if success_count > 0 {
-                context.consecutive_batch_dispatch_errors = 0;
                 DispatchResult {
                     stdout: summary,
                     stderr: String::new(),
@@ -1160,14 +1152,13 @@ pub async fn run_tool_phase(
                     route: format!("child_writer:batch:{}ok{}fail", success_count, fail_count),
                 }
             } else {
-                context.consecutive_batch_dispatch_errors += 1;
-                if context.consecutive_batch_dispatch_errors >= 2 {
-                    context.batch_dispatch_circuit_breaker_remaining = 3;
-                    context.consecutive_batch_dispatch_errors = 0;
+                let mut err = format!("批量写入 worker 派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n"));
+                if let Some(alert) = breaker_alert {
+                    err = format!("{}\n\n{}", err, alert);
                 }
                 DispatchResult {
                     stdout: String::new(),
-                    stderr: format!("批量写入 worker 派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n")),
+                    stderr: err,
                     success: false,
                     route: "child_writer:rejected_or_failed".to_string(),
                 }
@@ -1327,8 +1318,8 @@ pub async fn run_tool_phase(
             if inst.is_mixed_dispatch_format() {
                 summary = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches 批量派发。\n\n{}", summary);
             }
+            let breaker_alert = context.record_batch_dispatch_outcome(success_count > 0);
             if success_count > 0 {
-                context.consecutive_batch_dispatch_errors = 0;
                 DispatchResult {
                     stdout: summary,
                     stderr: String::new(),
@@ -1336,14 +1327,13 @@ pub async fn run_tool_phase(
                     route: format!("child_worker:batch:{}ok{}fail", success_count, fail_count),
                 }
             } else {
-                context.consecutive_batch_dispatch_errors += 1;
-                if context.consecutive_batch_dispatch_errors >= 2 {
-                    context.batch_dispatch_circuit_breaker_remaining = 3;
-                    context.consecutive_batch_dispatch_errors = 0;
+                let mut err = format!("批量派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n"));
+                if let Some(alert) = breaker_alert {
+                    err = format!("{}\n\n{}", err, alert);
                 }
                 DispatchResult {
                     stdout: String::new(),
-                    stderr: format!("批量派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n")),
+                    stderr: err,
                     success: false,
                     route: "child_worker:rejected_or_failed".to_string(),
                 }

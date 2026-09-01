@@ -1163,6 +1163,40 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn test_poll_completed_child_runs_preserves_writer_raw_result_and_kind() {
+        let base = std::env::temp_dir().join(format!("free-api-child-poll-writer-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        let run_id = begin_child_run(&state, "parent-poll-w", "session-pw", &workspace, "model-w", 1, "writer", None).unwrap();
+        let writer_json = serde_json::json!({
+            "child_run_id": run_id,
+            "status": "succeeded",
+            "test_status": "passed",
+            "findings": ["修改成功"],
+            "confidence": "confirmed",
+            "evidence_refs": [],
+            "missing_evidence": [],
+            "duration_ms": 100,
+            "completion_tokens": 50,
+            "changed_files": []
+        }).to_string();
+
+        finish_child_run(&state, &run_id, "succeeded", 100, 50, None, Some(&writer_json));
+
+        let polled = poll_completed_child_runs(&state, "parent-poll-w").unwrap();
+        assert_eq!(polled.len(), 1);
+        assert_eq!(polled[0].kind.as_deref(), Some("writer"));
+        assert!(polled[0].raw_result_json.is_some());
+        assert_eq!(polled[0].raw_result_json.as_deref(), Some(writer_json.as_str()));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[tokio::test]
     async fn wait_for_jobs_returns_completed_child_reviewer_results() {
         let base = std::env::temp_dir().join(format!("free-api-child-wait-{}", Uuid::new_v4()));
