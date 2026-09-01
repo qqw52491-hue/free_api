@@ -335,21 +335,34 @@ impl ModelConfig {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
-    /// 构建认证 HeaderMap
+    /// 解析平台中配置的所有可用 API Key 列表（支持换行、逗号、分号、JSON 数组等分隔）
+    pub fn api_keys(&self) -> Vec<String> {
+        parse_api_keys(&self.api_key)
+    }
+
+    /// 构建认证 HeaderMap（使用首个可用 Key）
     pub fn auth_headers(&self) -> reqwest::header::HeaderMap {
+        let first_key = self.api_keys().into_iter().next().unwrap_or_else(|| self.api_key.clone());
+        self.auth_headers_for_key(&first_key)
+    }
+
+    /// 为指定的 API Key 构建认证 HeaderMap
+    pub fn auth_headers_for_key(&self, key: &str) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
-        let clean_key = self.api_key.trim();
-        let auth_val = if clean_key.starts_with("Bearer ") {
-            clean_key.to_string()
-        } else {
-            format!("Bearer {}", clean_key)
-        };
-        headers.insert(
-            "Authorization",
-            auth_val
-                .parse()
-                .unwrap_or_else(|_| "Bearer invalid".parse().unwrap()),
-        );
+        let clean_key = key.trim();
+        if !clean_key.is_empty() {
+            let auth_val = if clean_key.starts_with("Bearer ") {
+                clean_key.to_string()
+            } else {
+                format!("Bearer {}", clean_key)
+            };
+            headers.insert(
+                "Authorization",
+                auth_val
+                    .parse()
+                    .unwrap_or_else(|_| "Bearer invalid".parse().unwrap()),
+            );
+        }
         headers.insert("HTTP-Referer", "https://free-api-chat.app".parse().unwrap());
         headers.insert("X-OpenRouter-Title", "Free API Chat".parse().unwrap());
         headers
@@ -357,6 +370,14 @@ impl ModelConfig {
 
     /// 打印平台检测日志
     pub fn log_platform_info(&self) {
+        let keys = self.api_keys();
+        if keys.len() > 1 {
+            println!(
+                "🔑 平台 [{}] 配置了 {} 个 API Key (已启用故障转移/自动轮换机制)",
+                self.platform_name,
+                keys.len()
+            );
+        }
         if self.is_ollama {
             println!(
                 "🔓 检测到 Ollama 本地模型，已自动注入 num_ctx: {}",
@@ -370,6 +391,74 @@ impl ModelConfig {
             );
         }
     }
+}
+
+/// 解析文本中的多个 API Key（按换行、逗号、分号或 JSON 数组拆分）
+pub fn parse_api_keys(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return vec![];
+    }
+    // 如果是 JSON 数组格式 ["key1", "key2"]
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed) {
+            let list: Vec<String> = arr
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !list.is_empty() {
+                return list;
+            }
+        }
+    }
+    // 按照换行、逗号（中英文）、分号（中英文）分割
+    trimmed
+        .split(|c: char| c == '\n' || c == '\r' || c == ',' || c == ';' || c == '，' || c == '；')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// 对 API Key 进行日志与显示脱敏
+pub fn mask_api_key(key: &str) -> String {
+    let clean = key.trim();
+    let chars: Vec<char> = clean.chars().collect();
+    if chars.len() > 10 {
+        let prefix: String = chars[..6].iter().collect();
+        let suffix: String = chars[chars.len() - 4..].iter().collect();
+        format!("{}...{}", prefix, suffix)
+    } else if !chars.is_empty() {
+        "***".to_string()
+    } else {
+        "(无Key)".to_string()
+    }
+}
+
+/// 判断是否为可触发 Key 轮换/故障转移的错误（如 401 鉴权失效、402 余额不足、429 频率限制、配额耗尽等）
+pub fn is_key_rotatable_error(status_code: Option<u16>, body_or_msg: &str) -> bool {
+    if let Some(code) = status_code {
+        if code == 401 || code == 402 || code == 429 {
+            return true;
+        }
+    }
+    let lower = body_or_msg.to_lowercase();
+    lower.contains("insufficient_quota")
+        || lower.contains("insufficient balance")
+        || lower.contains("quota_exceeded")
+        || lower.contains("rate_limit")
+        || lower.contains("rate limit")
+        || lower.contains("balance")
+        || lower.contains("余额不足")
+        || lower.contains("额度不足")
+        || lower.contains("欠费")
+        || lower.contains("exceeded your current quota")
+        || lower.contains("invalid_api_key")
+        || lower.contains("invalid api key")
+        || lower.contains("usage limit reached")
+        || lower.contains("401 unauthorized")
+        || lower.contains("402 payment required")
+        || lower.contains("429 too many requests")
 }
 
 // ========================================================================
@@ -551,12 +640,13 @@ fn process_sse_line<F: FnMut(StreamEvent) -> bool>(
 
 pub const STREAM_INTERRUPTED_ERROR: &str = "agent_stream_interrupted";
 
-/// 发送一次流式请求，解析 SSE 事件并通过回调实时通知调用方。
+/// 发送一次流式请求（使用指定的 API Key），解析 SSE 事件并通过回调实时通知调用方。
 ///
 /// `on_event` 在每个 thinking/content chunk 到达时被调用，
 /// 调用方可以借此实现实时 UI 推送。
-pub async fn stream_once<F: FnMut(StreamEvent) -> bool>(
+pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
     config: &ModelConfig,
+    key: &str,
     messages: &[serde_json::Value],
     reasoning_effort: &str,
     interrupt_rx: &mut watch::Receiver<u64>,
@@ -568,7 +658,7 @@ pub async fn stream_once<F: FnMut(StreamEvent) -> bool>(
     }
     let body = config.build_body(messages, reasoning_effort);
     let url = config.endpoint_url();
-    let headers = config.auth_headers();
+    let headers = config.auth_headers_for_key(key);
 
     let start_instant = std::time::Instant::now();
     let mut first_token_instant: Option<std::time::Instant> = None;
@@ -694,6 +784,18 @@ pub async fn stream_once<F: FnMut(StreamEvent) -> bool>(
     })
 }
 
+/// 发送一次流式请求（使用首个可用 Key）
+pub async fn stream_once<F: FnMut(StreamEvent) -> bool>(
+    config: &ModelConfig,
+    messages: &[serde_json::Value],
+    reasoning_effort: &str,
+    interrupt_rx: &mut watch::Receiver<u64>,
+    on_event: &mut F,
+) -> Result<StreamResult, String> {
+    let first_key = config.api_keys().into_iter().next().unwrap_or_else(|| config.api_key.clone());
+    stream_once_with_key(config, &first_key, messages, reasoning_effort, interrupt_rx, on_event).await
+}
+
 /// 单次暂态请求重试的最大等待时间。上限允许长流程在 429/网络波动时持续恢复，
 /// 同时避免 20 次尝试沿用无界指数退避而等待数小时。
 const MAX_TRANSIENT_RETRY_BACKOFF_MS: u64 = 15_000;
@@ -720,7 +822,8 @@ fn transient_retry_backoff_ms(attempt_index: u32) -> u64 {
     (1_000u64 * (1u64 << exponent)).min(MAX_TRANSIENT_RETRY_BACKOFF_MS)
 }
 
-/// 带自动重试的流式请求（按配置次数重试所有错误）。
+/// 带自动重试与多 Key 故障转移的流式请求。
+/// 当遇到 401/402/429、余额不足或限流时，自动切换至该平台下的下一个可用 Key 重试；
 /// 全部尝试与退避共享单次调用总预算：预算耗尽立即放弃，避免端点挂起拖垮整个运行。
 /// 前后挂槽位健康熔断：连续失败快速失败（llm_breaker），用户中断不计入失败。
 pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
@@ -738,28 +841,42 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     let started = std::time::Instant::now();
     let budget_exhausted = || {
         format!(
-            "单次调用总预算 {}s 耗尽（含重试），已放弃本次调用",
+            "单次调用总预算 {}s 耗尽（含重试与Key轮换），已放弃本次调用",
             budget_ms / 1000
         )
     };
+
+    let mut available_keys = config.api_keys();
+    if available_keys.is_empty() {
+        available_keys.push(config.api_key.clone());
+    }
+    let total_keys = available_keys.len();
+
     let outcome: Result<StreamResult, String> = async {
         let mut last_error = String::new();
-        for i in 0..max_retries {
+        let mut current_key_idx = 0usize;
+        let mut key_switch_count = 0usize;
+
+        // 总尝试次数计算：保证最少尝试 max_retries 次，且每个 Key 至少有尝试机会
+        let total_attempts_allowed = (max_retries as usize).max(total_keys * 2);
+
+        for attempt_i in 0..total_attempts_allowed {
             let remaining_ms =
                 budget_ms.saturating_sub(started.elapsed().as_millis() as u64);
             if remaining_ms == 0 {
                 break;
             }
-            // 用剩余预算封顶本次尝试：服务端接受连接但流式无输出的挂起也在死线内被切断。
+
+            let current_key = &available_keys[current_key_idx];
             let attempt = tokio::time::timeout(
                 tokio::time::Duration::from_millis(remaining_ms),
-                stream_once(config, messages, reasoning_effort, interrupt_rx, on_event),
+                stream_once_with_key(config, current_key, messages, reasoning_effort, interrupt_rx, on_event),
             )
             .await;
+
             match attempt {
                 Ok(Ok(mut result)) => {
-                    // 成功路径回填实际尝试次数（首次即成功 = 1，transient 重试后成功 = i+1）
-                    result.attempt_count = i + 1;
+                    result.attempt_count = (attempt_i + 1) as u32;
                     return Ok(result);
                 }
                 Ok(Err(e)) => {
@@ -767,23 +884,52 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                         return Err(e);
                     }
 
-                    last_error = e;
+                    last_error = e.clone();
+
+                    // 检查是否为限流/欠费/鉴权失效等可换 Key 错误
+                    let rotatable = is_key_rotatable_error(None, &e);
+
+                    if rotatable && total_keys > 1 && key_switch_count < total_keys - 1 {
+                        let failed_key = current_key.clone();
+                        current_key_idx = (current_key_idx + 1) % total_keys;
+                        key_switch_count += 1;
+                        println!(
+                            "🔄 [多Key切换] 平台 [{}] 的 API Key [{}] 返回错误 ({})，自动切换至第 {}/{} 个备用 Key [{}] 重试模型 [{}]...",
+                            config.platform_name,
+                            mask_api_key(&failed_key),
+                            e,
+                            current_key_idx + 1,
+                            total_keys,
+                            mask_api_key(&available_keys[current_key_idx]),
+                            config.model_name
+                        );
+                        // 切换 Key 后无须过长退避，直接进入下一次尝试
+                        continue;
+                    }
+
                     println!(
-                        "⚠️ LLM 请求失败 (第 {} 次 / 共 {} 次): {}",
-                        i + 1,
-                        max_retries,
+                        "⚠️ LLM 请求失败 (第 {} 次 / 共 {} 次, 当前Key: {}): {}",
+                        attempt_i + 1,
+                        total_attempts_allowed,
+                        mask_api_key(current_key),
                         last_error
                     );
-                    if i < max_retries - 1 {
-                        // 有界指数退避（1s、2s、4s、8s、15s...）给服务端恢复窗口。
-                        let backoff_ms = transient_retry_backoff_ms(i);
-                        // 退避同样受总预算约束：睡不完就不再重试。
+
+                    if attempt_i < total_attempts_allowed - 1 {
+                        let backoff_ms = transient_retry_backoff_ms(attempt_i as u32);
                         if started.elapsed().as_millis() as u64 + backoff_ms >= budget_ms {
                             last_error = budget_exhausted();
                             break;
                         }
                         tokio::select! {
-                            _ = tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)) => {},
+                            _ = tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)) => {
+                                // 退避休眠结束后，如果所有 Key 都尝试过一轮了，
+                                // 重置切换计数，让下一轮重试可以继续轮询所有备用 Key
+                                if key_switch_count >= total_keys.saturating_sub(1) {
+                                    key_switch_count = 0;
+                                    current_key_idx = (current_key_idx + 1) % total_keys;
+                                }
+                            },
                             changed = interrupt_rx.changed() => {
                                 let _ = changed;
                                 return Err(STREAM_INTERRUPTED_ERROR.to_string());
@@ -792,7 +938,6 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                     }
                 }
                 Err(_elapsed) => {
-                    // 预算耗尽。此刻可能恰有取消请求在途：优先上报中断而非超时。
                     if interrupt_rx.has_changed().unwrap_or(false) {
                         return Err(STREAM_INTERRUPTED_ERROR.to_string());
                     }
@@ -801,13 +946,22 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                 }
             }
         }
+
         if last_error.is_empty() {
             last_error = budget_exhausted();
         }
-        Err(format!(
-            "LLM 请求最终失败 ({}次尝试内): {}",
-            max_retries, last_error
-        ))
+
+        if total_keys > 1 && key_switch_count > 0 {
+            Err(format!(
+                "LLM 请求最终失败（平台 [{}] 尝试了全部 {} 个 API Key 均未成功）: {}",
+                config.platform_name, total_keys, last_error
+            ))
+        } else {
+            Err(format!(
+                "LLM 请求最终失败 ({}次尝试内): {}",
+                max_retries, last_error
+            ))
+        }
     }
     .await;
 

@@ -339,24 +339,13 @@ pub async fn test_model(
     };
 
     let clean_base = platform.0.trim().trim_end_matches('/');
-    let clean_key = platform.1.trim();
-    let auth_header = if clean_key.starts_with("Bearer ") {
-        clean_key.to_string()
+    let keys = crate::llm::parse_api_keys(&platform.1);
+    let available_keys = if keys.is_empty() {
+        vec![platform.1.trim().to_string()]
     } else {
-        format!("Bearer {}", clean_key)
+        keys
     };
 
-    let key_chars: Vec<char> = clean_key.chars().collect();
-    let masked_key = if key_chars.len() > 10 {
-        let prefix: String = key_chars[..6].iter().collect();
-        let suffix: String = key_chars[key_chars.len() - 4..].iter().collect();
-        format!("{}...{}", prefix, suffix)
-    } else {
-        "***".to_string()
-    };
-    let masked_auth = format!("Bearer {}", masked_key);
-
-    let start = std::time::Instant::now();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -371,37 +360,93 @@ pub async fn test_model(
         "max_tokens": 16
     });
 
-    let resp = client
-        .post(&url)
-        .header("Authorization", &auth_header)
-        .header("HTTP-Referer", "https://free-api-chat.app")
-        .header("X-OpenRouter-Title", "Free API Chat")
-        .json(&body)
-        .send()
-        .await;
+    let mut status = "offline";
+    let mut msg = String::new();
+    let mut http_code: Option<u16> = None;
+    let mut resp_body = String::new();
+    let mut raw_err: Option<String> = None;
+    let mut latency: i64 = 0;
+    let mut active_key_used = available_keys[0].clone();
 
-    let latency = start.elapsed().as_millis() as i64;
-    let (status, msg, http_code, resp_body, raw_err) = match resp {
-        Ok(r) if r.status().is_success() => {
-            let s = r.status().as_u16();
-            let b = r.text().await.unwrap_or_default();
-            ("online", "连接正常".to_string(), Some(s), b, None)
+    for (k_idx, key) in available_keys.iter().enumerate() {
+        active_key_used = key.clone();
+        let clean_key = key.trim();
+        let auth_header = if clean_key.is_empty() {
+            "".to_string()
+        } else if clean_key.starts_with("Bearer ") {
+            clean_key.to_string()
+        } else {
+            format!("Bearer {}", clean_key)
+        };
+
+        let start = std::time::Instant::now();
+        let mut req = client
+            .post(&url)
+            .header("HTTP-Referer", "https://free-api-chat.app")
+            .header("X-OpenRouter-Title", "Free API Chat")
+            .json(&body);
+
+        if !auth_header.is_empty() {
+            req = req.header("Authorization", &auth_header);
         }
-        Ok(r) => {
-            let s = r.status().as_u16();
-            let b = r.text().await.unwrap_or_default();
-            ("offline", format!("HTTP {} - {}", s, b), Some(s), b, None)
+
+        let resp = req.send().await;
+        latency = start.elapsed().as_millis() as i64;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let s = r.status().as_u16();
+                let b = r.text().await.unwrap_or_default();
+                http_code = Some(s);
+                resp_body = b;
+                raw_err = None;
+                status = "online";
+                if available_keys.len() > 1 && k_idx > 0 {
+                    msg = format!("连接正常 (已自动故障转移至第 {} 个 Key: {})", k_idx + 1, crate::llm::mask_api_key(key));
+                } else {
+                    msg = "连接正常".to_string();
+                }
+                break;
+            }
+            Ok(r) => {
+                let s = r.status().as_u16();
+                let b = r.text().await.unwrap_or_default();
+                http_code = Some(s);
+                resp_body = b.clone();
+                raw_err = None;
+                status = "offline";
+                msg = format!("HTTP {} - {}", s, b);
+
+                let is_rotatable = crate::llm::is_key_rotatable_error(Some(s), &b);
+                if is_rotatable && k_idx + 1 < available_keys.len() {
+                    println!(
+                        "🔄 [检测故障转移] 模型 [{}] 的 API Key [{}] 失败 ({}), 尝试下一个 Key...",
+                        model_name,
+                        crate::llm::mask_api_key(key),
+                        s
+                    );
+                    continue;
+                }
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                http_code = None;
+                resp_body = String::new();
+                raw_err = Some(err_str.clone());
+                status = "offline";
+                msg = err_str.clone();
+
+                if k_idx + 1 < available_keys.len() {
+                    continue;
+                }
+            }
         }
-        Err(e) => {
-            let err_str = e.to_string();
-            (
-                "offline",
-                err_str.clone(),
-                None,
-                String::new(),
-                Some(err_str),
-            )
-        }
+    }
+
+    let masked_auth = if active_key_used.is_empty() {
+        "None".to_string()
+    } else {
+        format!("Bearer {}", crate::llm::mask_api_key(&active_key_used))
     };
 
     let diagnostics = json!({
@@ -418,7 +463,8 @@ pub async fn test_model(
         "http_status": http_code,
         "response_body": resp_body,
         "raw_error": raw_err,
-        "latency_ms": latency
+        "latency_ms": latency,
+        "total_keys_configured": available_keys.len(),
     });
 
     // 更新数据库
@@ -644,13 +690,11 @@ pub async fn fetch_remote_models(
     };
 
     let clean_base = eff_base_url.trim().trim_end_matches('/');
-    let clean_key = eff_api_key.trim();
-    let auth_header = if clean_key.is_empty() {
-        "".to_string()
-    } else if clean_key.starts_with("Bearer ") {
-        clean_key.to_string()
+    let keys = crate::llm::parse_api_keys(&eff_api_key);
+    let available_keys = if keys.is_empty() {
+        vec![eff_api_key.trim().to_string()]
     } else {
-        format!("Bearer {}", clean_key)
+        keys
     };
 
     let client = reqwest::Client::builder()
@@ -670,34 +714,62 @@ pub async fn fetch_remote_models(
 
     let target_url = format!("{}/models", base_trimmed);
 
-    let mut req = client
-        .get(&target_url)
-        .header("HTTP-Referer", "https://free-api-chat.app")
-        .header("X-OpenRouter-Title", "Free API Chat");
-    if !auth_header.is_empty() {
-        req = req.header("Authorization", &auth_header);
+    let mut last_fetch_err = String::new();
+    let mut json_val: Option<Value> = None;
+
+    for key in &available_keys {
+        let clean_key = key.trim();
+        let auth_header = if clean_key.is_empty() {
+            "".to_string()
+        } else if clean_key.starts_with("Bearer ") {
+            clean_key.to_string()
+        } else {
+            format!("Bearer {}", clean_key)
+        };
+
+        let mut req = client
+            .get(&target_url)
+            .header("HTTP-Referer", "https://free-api-chat.app")
+            .header("X-OpenRouter-Title", "Free API Chat");
+        if !auth_header.is_empty() {
+            req = req.header("Authorization", &auth_header);
+        }
+
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<Value>().await {
+                    Ok(jv) => {
+                        json_val = Some(jv);
+                        break;
+                    }
+                    Err(e) => {
+                        last_fetch_err = format!("端点 {} 响应解析 JSON 失败: {}", target_url, e);
+                    }
+                }
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let err_text = resp.text().await.unwrap_or_default();
+                last_fetch_err = format!(
+                    "无法从接口拉取模型列表。端点: {}，HTTP {} 错误: {}",
+                    target_url,
+                    status.as_u16(),
+                    err_text
+                );
+                if !crate::llm::is_key_rotatable_error(Some(status.as_u16()), &err_text) {
+                    break;
+                }
+            }
+            Err(e) => {
+                last_fetch_err = format!("请求 {} 失败: {}", target_url, e);
+            }
+        }
     }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("请求 {} 失败: {}", target_url, e))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let err_text = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "无法从接口拉取模型列表。端点: {}，HTTP {} 错误: {}",
-            target_url,
-            status.as_u16(),
-            err_text
-        ));
-    }
-
-    let json_val = resp
-        .json::<Value>()
-        .await
-        .map_err(|e| format!("端点 {} 响应解析 JSON 失败: {}", target_url, e))?;
+    let json_val = match json_val {
+        Some(v) => v,
+        None => return Err(last_fetch_err),
+    };
 
     let used_url = target_url;
 

@@ -131,7 +131,8 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
             "upsert_spec(name: string, context_window?|max_tokens?|supports_thinking?|default_temperature?|description?)",
             "delete_spec(name|id: string, confirm: true)",
             "list_platforms()",
-            "add_platform(name: string, base_url: string, api_key?: string) [新增提供商；成功后才能 add_model]",
+            "add_platform(name: string, base_url: string, api_key?: string, api_keys?: array) [新增提供商；成功后才能 add_model；支持多Key]",
+            "update_platform(platform_id|platform_name: string, name?|base_url?|api_key?|api_keys?) [更新提供商配置或多Key列表]",
             "add_model(platform_id|platform_name: string, model_name: string, ...) [仅已有平台；不得传 base_url/api_key]",
             "delete_model(model_id|model_name: string, confirm: true)",
         ],
@@ -242,7 +243,8 @@ mod tests {
         assert!(menu.contains("upsert_records(resource_id: string, records: array)"));
         assert!(menu.contains("get_step_output(output_id: string"));
         assert!(menu.contains("read_resource(resource_id: string)"));
-        assert!(menu.contains("add_platform(name: string, base_url: string, api_key?: string)"));
+        assert!(menu.contains("add_platform(name: string, base_url: string"));
+        assert!(menu.contains("update_platform(platform_id|platform_name: string"));
         assert!(menu.contains(
             "add_model(platform_id|platform_name: string, model_name: string, ...) [仅已有平台"
         ));

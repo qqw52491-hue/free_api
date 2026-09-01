@@ -62,24 +62,31 @@
               :class="{ active: selectedPlatformId === p.id }"
               @click="selectPlatform(p.id)"
             >
-              <div class="p-left">
-                <div class="p-icon">{{ getPlatformEmoji(p.name) }}</div>
-                <div class="p-info">
-                  <div class="p-name">{{ p.name }}</div>
-                  <div class="p-url">{{ p.base_url }}</div>
+              <div class="p-header-row">
+                <div class="p-left">
+                  <div class="p-icon">{{ getPlatformEmoji(p.name) }}</div>
+                  <div class="p-name-line">
+                    <span class="p-name" :title="p.name">{{ p.name }}</span>
+                    <span v-if="getKeyCount(p.api_key) > 0" class="p-key-badge" :title="`已配置 ${getKeyCount(p.api_key)} 个 API Key (自动故障转移/轮换)`">
+                      🔑 {{ getKeyCount(p.api_key) }} {{ getKeyCount(p.api_key) === 1 ? 'Key' : 'Keys' }}
+                    </span>
+                  </div>
+                </div>
+                <div class="p-actions">
+                  <button class="btn-icon btn-xs" @click.stop="openFetchRemoteModelsModal(p.id)" title="从接口拉取模型">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+                  </button>
+                  <button class="btn-icon btn-xs" @click.stop="editPlatform(p)" title="编辑">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                  </button>
+                  <button class="btn-icon btn-xs btn-del" @click.stop="confirmDeletePlatform(p)" title="删除">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                  </button>
                 </div>
               </div>
-              <div class="p-actions">
+              <div class="p-meta-row">
                 <span class="p-model-count">{{ getModelCount(p.id) }} 个模型</span>
-                <button class="btn-icon btn-xs" @click.stop="openFetchRemoteModelsModal(p.id)" title="从接口拉取模型">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
-                </button>
-                <button class="btn-icon btn-xs" @click.stop="editPlatform(p)" title="编辑">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                </button>
-                <button class="btn-icon btn-xs btn-del" @click.stop="confirmDeletePlatform(p)" title="删除">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-                </button>
+                <span class="p-url" :title="p.base_url">{{ p.base_url }}</span>
               </div>
             </div>
           </div>
@@ -323,19 +330,27 @@
                 <input class="form-input" v-model="pForm.base_url" placeholder="https://openrouter.ai/api/v1" />
               </div>
               <div class="form-group">
-                <label class="form-label">API Key *</label>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                  <label class="form-label" style="margin-bottom:0">API Key *</label>
+                  <span v-if="parsedKeyCount > 0" class="key-count-badge">
+                    ⚡ 已配置 {{ parsedKeyCount }} 个 Key (自动故障转移/轮换)
+                  </span>
+                </div>
                 <div class="key-wrap">
-                  <input
-                    :type="showKey ? 'text' : 'password'"
-                    class="form-input"
+                  <textarea
+                    class="form-textarea key-textarea"
                     v-model="pForm.api_key"
-                    placeholder="sk-..."
-                    style="padding-right:44px"
-                  />
-                  <button class="key-toggle" @click="showKey = !showKey" type="button">
+                    :style="{ filter: showKey ? 'none' : 'blur(4.5px)', transition: 'filter 0.2s ease' }"
+                    placeholder="支持配置多个 API Key (每行一个或逗号/分号隔开)&#10;sk-key1...&#10;sk-key2..."
+                    rows="3"
+                  ></textarea>
+                  <button class="key-toggle" @click="showKey = !showKey" type="button" :title="showKey ? '隐藏 API Key' : '显示 API Key'">
                     <svg v-if="!showKey" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                     <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8"/><path d="M1 1l22 22"/></svg>
                   </button>
+                </div>
+                <div class="form-tip">
+                  💡 支持多 Key 备份：调用模型时若遇 402(欠费/余额不足) 或 429(限流)，系统将自动无缝切换到下一个 Key，模型保持不变。
                 </div>
               </div>
               <div v-if="formError" class="form-error">⚠️ {{ formError }}</div>
@@ -883,6 +898,32 @@ const filteredModelSpecs = computed(() => {
   )
 })
 
+const parsedKeyCount = computed(() => {
+  const raw = pForm.value.api_key || ''
+  return parseKeys(raw).length
+})
+
+function parseKeys(raw: string): string[] {
+  if (!raw) return []
+  const trimmed = raw.trim()
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    try {
+      const arr = JSON.parse(trimmed)
+      if (Array.isArray(arr)) {
+        return arr.map((s: string) => String(s).trim()).filter(Boolean)
+      }
+    } catch {}
+  }
+  return trimmed
+    .split(/[\n\r,;，；]+/)
+    .map(s => s.trim())
+    .filter(Boolean)
+}
+
+function getKeyCount(rawKey: string): number {
+  return parseKeys(rawKey).length
+}
+
 function formatTok(tokens: number) {
   if (!tokens || tokens <= 0) return '0'
   if (tokens >= 1000000) return (tokens / 1000000).toFixed(tokens % 1000000 === 0 ? 0 : 1) + 'M'
@@ -901,13 +942,29 @@ function getPlatformEmoji(name: string) {
   return '🌐'
 }
 
+const platformModelCounts = ref<Record<string, number>>({})
+
+async function refreshModelCounts() {
+  try {
+    const all = await invoke<ModelData[]>('get_models')
+    const counts: Record<string, number> = {}
+    for (const m of all) {
+      counts[m.platform_id] = (counts[m.platform_id] || 0) + 1
+    }
+    platformModelCounts.value = counts
+  } catch (e) {
+    console.error('Failed to refresh model counts', e)
+  }
+}
+
 function getModelCount(platformId: string) {
-  return models.value.filter(m => m.platform_id === platformId).length
+  return platformModelCounts.value[platformId] ?? 0
 }
 
 // ==================== 数据加载 ====================
 async function loadPlatforms() {
   platforms.value = await invoke<PlatformData[]>('get_platforms')
+  await refreshModelCounts()
 }
 
 async function loadModelSpecs() {
@@ -917,6 +974,7 @@ async function loadModelSpecs() {
 async function selectPlatform(id: string) {
   selectedPlatformId.value = id
   models.value = await invoke<ModelData[]>('get_models', { platformId: id })
+  platformModelCounts.value[id] = models.value.length
 }
 
 // ==================== 平台增删改 ====================
@@ -1001,6 +1059,7 @@ async function addModel() {
   newModelName.value = ''
   quickSelectedSpecId.value = ''
   await selectPlatform(selectedPlatformId.value)
+  await refreshModelCounts()
   emit('models-updated')
 }
 
@@ -1221,6 +1280,7 @@ async function executeConfirmedDelete() {
     if (selectedPlatformId.value) {
       await selectPlatform(selectedPlatformId.value)
     }
+    await refreshModelCounts()
     emit('models-updated')
   } else if (deletingSpec.value) {
     await invoke('delete_model_spec', { idOrName: deletingSpec.value.id })
@@ -1396,6 +1456,7 @@ async function executeImportRemoteModels() {
     if (selectedPlatformId.value === pId) {
       await selectPlatform(pId)
     }
+    await refreshModelCounts()
     emit('models-updated')
 
     setTimeout(() => {
@@ -1410,6 +1471,9 @@ async function executeImportRemoteModels() {
 
 onMounted(async () => {
   await Promise.all([loadPlatforms(), loadModelSpecs()])
+  if (platforms.value.length > 0 && !selectedPlatformId.value) {
+    await selectPlatform(platforms.value[0].id)
+  }
 })
 </script>
 
@@ -1524,8 +1588,8 @@ onMounted(async () => {
 
 /* ---- 左侧平台面板 ---- */
 .platform-panel {
-  width: 320px;
-  min-width: 320px;
+  width: 330px;
+  min-width: 330px;
   border-right: 1px solid var(--border-1);
   background: var(--bg-1);
   display: flex;
@@ -1570,43 +1634,61 @@ onMounted(async () => {
 }
 
 .platform-item {
-  padding: 12px 14px;
+  padding: 10px 12px;
   border-radius: var(--radius-md);
   cursor: pointer;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 6px;
   transition: all 0.18s;
-  border: 1px solid transparent;
+  border: 1px solid var(--border-1);
+  background: var(--surface-1);
 }
 
 .platform-item:hover {
   background: var(--surface-2);
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 .platform-item.active {
   background: #27272a;
-  border-color: rgba(255, 255, 255, 0.12);
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.25);
+}
+
+.p-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
 }
 
 .p-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   flex: 1;
 }
 
 .p-icon {
-  font-size: 22px;
+  font-size: 20px;
+  line-height: 1;
   flex-shrink: 0;
 }
 
-.p-info { min-width: 0; }
+.p-name-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
 
 .p-name {
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--text-1);
   white-space: nowrap;
@@ -1614,36 +1696,46 @@ onMounted(async () => {
   text-overflow: ellipsis;
 }
 
+.p-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 28px;
+  min-width: 0;
+}
+
 .p-url {
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--text-4);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 2px;
   font-family: monospace;
+  flex: 1;
+  min-width: 0;
+}
+
+.p-model-count {
+  font-size: 10px;
+  color: var(--text-3);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 1px 6px;
+  border-radius: 99px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .p-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   flex-shrink: 0;
 }
 
-.p-model-count {
-  font-size: 10px;
-  color: var(--text-4);
-  background: var(--surface-1);
-  border: 1px solid var(--border-1);
-  padding: 2px 6px;
-  border-radius: 99px;
-  margin-right: 4px;
-}
-
 .p-actions .btn-icon {
-  opacity: 0;
-  transition: opacity 0.15s;
+  opacity: 0.65;
+  transition: opacity 0.15s, background 0.15s;
 }
 
 .platform-item:hover .p-actions .btn-icon {
@@ -1651,7 +1743,7 @@ onMounted(async () => {
 }
 
 .btn-xs { padding: 4px; border-radius: 4px; }
-.btn-del:hover { color: var(--red-light) !important; background: rgba(255,71,87,0.1) !important; }
+.btn-del:hover { color: var(--red-light) !important; background: rgba(255,71,87,0.15) !important; }
 
 /* ---- 右侧模型面板 ---- */
 .model-panel {
@@ -2124,23 +2216,63 @@ onMounted(async () => {
 }
 .form-textarea:focus { border-color: rgba(255, 255, 255, 0.25); }
 
-/* ---- Key toggle ---- */
+/* ---- Key toggle & Multi-key styles ---- */
 .key-wrap { position: relative; }
+
+.key-textarea {
+  font-family: 'JetBrains Mono', Consolas, Monaco, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding-right: 40px;
+  min-height: 72px;
+}
 
 .key-toggle {
   position: absolute;
   right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  background: none;
-  border: none;
+  top: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
   cursor: pointer;
   color: var(--text-3);
-  padding: 4px;
+  padding: 4px 6px;
   display: flex;
   align-items: center;
+  transition: all 0.15s;
 }
-.key-toggle:hover { color: var(--text-1); }
+.key-toggle:hover { color: var(--text-1); background: rgba(255, 255, 255, 0.1); }
+
+.p-key-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.key-count-badge {
+  font-size: 11px;
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.1);
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  font-weight: 500;
+}
+
+.form-tip {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  line-height: 1.45;
+}
 
 .form-error {
   font-size: 13px;

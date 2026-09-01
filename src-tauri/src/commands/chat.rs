@@ -314,11 +314,12 @@ pub async fn send_chat(
         .await
         .insert(session_id.clone(), interrupt_tx);
 
-    let stream_result = llm::stream_once(
+    let stream_result = llm::stream_with_retry(
         &config,
         &api_messages,
         "high",
         &mut interrupt_rx,
+        3,
         &mut on_event,
     )
     .await;

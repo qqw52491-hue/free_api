@@ -220,7 +220,24 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     }
                 }
             };
-            let api_key = params.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let api_key = if let Some(keys_arr) = params.get("api_keys").and_then(|v| v.as_array()) {
+                let list: Vec<String> = keys_arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                list.join("\n")
+            } else {
+                params.get("api_key").and_then(|v| v.as_str()).unwrap_or("").trim().to_string()
+            };
+
+            let parsed_keys = crate::llm::parse_api_keys(&api_key);
+            let key_info = if parsed_keys.len() > 1 {
+                format!("，已配置 {} 个 API Key (支持限流/欠费自动切换轮换)", parsed_keys.len())
+            } else {
+                String::new()
+            };
 
             let platform_id = uuid::Uuid::new_v4().to_string();
             let now = chrono::Utc::now().to_rfc3339();
@@ -231,8 +248,8 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             ) {
                 Ok(_) => DispatchResult {
                     stdout: format!(
-                        "✅ 成功添加平台 [{}] (base_url: {}, ID: {})",
-                        name, base_url, platform_id
+                        "✅ 成功添加平台 [{}] (base_url: {}, ID: {}){}",
+                        name, base_url, platform_id, key_info
                     ),
                     stderr: String::new(),
                     success: true,
@@ -243,6 +260,86 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     stderr: format!("添加平台失败: {}", e),
                     success: false,
                     route: "model_manager:add_platform".to_string(),
+                },
+            }
+        }
+        "update_platform" => {
+            let platform_target = match params
+                .get("platform_id")
+                .or_else(|| params.get("platform_name"))
+                .or_else(|| params.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                Some(p) if !p.trim().is_empty() => p.trim(),
+                _ => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: "❌ 缺少必填参数 platform_id 或 platform_name (要更新的平台标识)".to_string(),
+                        success: false,
+                        route: "model_manager:update_platform".to_string(),
+                    }
+                }
+            };
+
+            let platform_row: Result<(String, String, String, String), rusqlite::Error> = conn.query_row(
+                "SELECT id, name, base_url, api_key FROM platforms WHERE id = ?1 OR name = ?1 LIMIT 1",
+                rusqlite::params![platform_target],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            );
+
+            let (id, cur_name, cur_base_url, cur_api_key) = match platform_row {
+                Ok(vals) => vals,
+                Err(_) => {
+                    return DispatchResult {
+                        stdout: String::new(),
+                        stderr: format!("未找到平台 [{}]。请先调用 `list_platforms` 确认已有平台。", platform_target),
+                        success: false,
+                        route: "model_manager:update_platform".to_string(),
+                    }
+                }
+            };
+
+            let new_name = params.get("name").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or(cur_name);
+            let new_base_url = params.get("base_url").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or(cur_base_url);
+            let new_api_key = if let Some(keys_arr) = params.get("api_keys").and_then(|v| v.as_array()) {
+                let list: Vec<String> = keys_arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                list.join("\n")
+            } else if let Some(k) = params.get("api_key").and_then(|v| v.as_str()) {
+                k.trim().to_string()
+            } else {
+                cur_api_key
+            };
+
+            let parsed_keys = crate::llm::parse_api_keys(&new_api_key);
+            let key_info = if parsed_keys.len() > 1 {
+                format!(" (共配置 {} 个 API Key，支持欠费/限流自动切换)", parsed_keys.len())
+            } else {
+                String::new()
+            };
+
+            match conn.execute(
+                "UPDATE platforms SET name = ?1, base_url = ?2, api_key = ?3 WHERE id = ?4",
+                rusqlite::params![new_name, new_base_url, new_api_key, id],
+            ) {
+                Ok(_) => DispatchResult {
+                    stdout: format!(
+                        "✅ 成功更新平台 [{}] (base_url: {}, ID: {}){}",
+                        new_name, new_base_url, id, key_info
+                    ),
+                    stderr: String::new(),
+                    success: true,
+                    route: "model_manager:update_platform".to_string(),
+                },
+                Err(e) => DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!("更新平台失败: {}", e),
+                    success: false,
+                    route: "model_manager:update_platform".to_string(),
                 },
             }
         }
@@ -415,7 +512,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
         }
         _ => DispatchResult {
             stdout: String::new(),
-            stderr: format!("❌ 未知的 model_manager 动作 action='{}'。支持的动作: list_specs, upsert_spec, delete_spec, list_platforms, add_platform, add_model, delete_model", act),
+            stderr: format!("❌ 未知的 model_manager 动作 action='{}'。支持的动作: list_specs, upsert_spec, delete_spec, list_platforms, add_platform, update_platform, add_model, delete_model", act),
             success: false,
             route: "model_manager:unknown".to_string(),
         },
@@ -468,10 +565,22 @@ mod tests {
             &json!({
                 "name": "test-provider",
                 "base_url": "https://example.invalid/v1",
-                "api_key": "test-only-key",
+                "api_keys": ["test-key-1", "test-key-2"],
             }),
         );
         assert!(platform.success, "{}", platform.stderr);
+        assert!(platform.stdout.contains("2 个 API Key"));
+
+        let update_res = dispatch(
+            &state,
+            "update_platform",
+            &json!({
+                "platform_name": "test-provider",
+                "api_keys": ["test-key-new1", "test-key-new2", "test-key-new3"],
+            }),
+        );
+        assert!(update_res.success, "{}", update_res.stderr);
+        assert!(update_res.stdout.contains("3 个 API Key"));
 
         let model = dispatch(
             &state,
