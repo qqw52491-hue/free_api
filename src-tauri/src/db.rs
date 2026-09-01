@@ -208,7 +208,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             kind TEXT NOT NULL DEFAULT 'review',
             workspace_copy TEXT,
             resumed_from TEXT,
-            message_history_json TEXT
+            message_history_json TEXT,
+            consumed_at TEXT
         );
         CREATE TABLE IF NOT EXISTS agent_role_cards (
             id TEXT PRIMARY KEY,
@@ -573,6 +574,10 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     );
     let _ = conn.execute(
         "ALTER TABLE agent_child_runs ADD COLUMN message_history_json TEXT;",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_child_runs ADD COLUMN consumed_at TEXT;",
         [],
     );
     if let Err(error) = migrate_uvx_bridge_plugins_to_native(&conn) {

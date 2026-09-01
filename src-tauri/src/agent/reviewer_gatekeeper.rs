@@ -416,14 +416,19 @@ pub async fn evaluate_finish_diff(
         }
     }
 
-    // 3. 解析评审模型与角色人设
+    // 3. 解析评审模型与角色人设（要求角色卡明确授权 allows_kind("reviewer")）
     let (model_id, persona_extra) = if let Ok(Some(card)) = resolve_enabled_card(db, "reviewer") {
-        let mid = if !card.model_id.trim().is_empty() {
-            card.model_id.trim().to_string()
+        if card.allows_kind("reviewer") {
+            let mid = if !card.model_id.trim().is_empty() {
+                card.model_id.trim().to_string()
+            } else {
+                AgentRouter::route_for_role(context, model_routing, step_id, roles::REVIEWER).model_id
+            };
+            (mid, card.persona_prompt)
         } else {
-            AgentRouter::route_for_role(context, model_routing, step_id, roles::REVIEWER).model_id
-        };
-        (mid, card.persona_prompt)
+            let decision = AgentRouter::route_for_role(context, model_routing, step_id, roles::REVIEWER);
+            (decision.model_id, String::new())
+        }
     } else {
         let decision = AgentRouter::route_for_role(context, model_routing, step_id, roles::REVIEWER);
         (decision.model_id, String::new())

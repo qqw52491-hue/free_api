@@ -48,6 +48,10 @@ pub struct ChildReviewResult {
     pub completion_tokens: i64,
     #[serde(default)]
     pub error_kind: Option<String>,
+    #[serde(default)]
+    pub raw_result_json: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,37 +278,37 @@ pub(crate) fn begin_child_run_extended(
         .map_err(|error| format!("child_reviewer 工作区不可用: {}", error))?;
     let conn = db.0.lock().map_err(|error| error.to_string())?;
 
-    // 第一道看门：全局总预算校验（所有 kind 累计上限 MAX_TOTAL_CHILDREN_PER_RUN = 6）
-    let total_children: i64 = conn
+    // 第一道看门：全局瞬时并发看门（所有正在 running 的子任务数，上限 MAX_TOTAL_CHILDREN_PER_RUN = 6）
+    let running_children: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1",
+            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND status='running'",
             params![parent_run_id],
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
-    if total_children >= i64::from(MAX_TOTAL_CHILDREN_PER_RUN) {
+    if running_children >= i64::from(MAX_TOTAL_CHILDREN_PER_RUN) {
         return Err(format!(
-            "每个父运行最多同时累计使用 {} 个子任务（全局看门上限已满，当前已有 {} 个）。",
-            MAX_TOTAL_CHILDREN_PER_RUN, total_children
+            "每个父运行最多同时并发执行 {} 个子任务（全局看门上限已满，当前正在运行 {} 个）。请等待现有任务完成或使用 wait_jobs 等待。",
+            MAX_TOTAL_CHILDREN_PER_RUN, running_children
         ));
     }
 
-    // 第二道看门：单 kind / 角色卡弹性配额（角色卡 max_concurrency 优先覆盖，0 则跟随默认）
+    // 第二道看门：单 kind / 角色卡弹性瞬时并发配额（角色卡 max_concurrency 优先覆盖，0 则跟随默认）
     let effective_kind_cap = match custom_cap {
         Some(cap) if cap > 0 => cap,
         _ => i64::from(MAX_CHILDREN_PER_KIND_PER_RUN),
     };
 
-    let existing_kind_children: i64 = conn
+    let running_kind_children: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND kind=?2",
+            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND kind=?2 AND status='running'",
             params![parent_run_id, kind],
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
-    if existing_kind_children >= effective_kind_cap {
+    if running_kind_children >= effective_kind_cap {
         return Err(format!(
-            "每个父运行最多同时使用 {} 个 {} 子任务（当前配额 {} 已满）。",
+            "每个父运行最多同时并发执行 {} 个 {} 子任务（当前配额 {} 已满）。请等待现有任务完成或使用 wait_jobs 等待。",
             effective_kind_cap, kind, effective_kind_cap
         ));
     }
@@ -397,6 +401,8 @@ fn child_error_result_json(
         duration_ms,
         completion_tokens,
         error_kind: Some(error_kind.to_string()),
+        raw_result_json: None,
+        kind: None,
     })
     .unwrap_or_default()
 }
@@ -595,6 +601,8 @@ pub async fn spawn_child_reviewer(
             duration_ms,
             completion_tokens,
             error_kind: None,
+            raw_result_json: None,
+            kind: None,
         };
         let result_json = serde_json::to_string(&result).ok();
         finish_child_run(
@@ -624,21 +632,23 @@ pub fn poll_completed_child_runs_filtered(
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, result_json FROM agent_child_runs
+            "SELECT id, result_json, kind FROM agent_child_runs
              WHERE parent_run_id = ?1
                AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'invalid_output')
-               AND result_json IS NOT NULL",
+               AND result_json IS NOT NULL
+               AND (consumed_at IS NULL OR consumed_at = '')",
         )
         .map_err(|error| error.to_string())?;
-    let rows: Vec<(String, String)> = stmt
+    let rows: Vec<(String, String, String)> = stmt
         .query_map(params![parent_run_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
         })
         .map_err(|error| error.to_string())?
         .filter_map(|r| r.ok())
         .collect();
     let mut results = Vec::new();
-    for (id, json_str) in rows {
+    let now = chrono::Utc::now().to_rfc3339();
+    for (id, json_str, kind) in rows {
         // 定向模式：非目标 ID 的结果不消费，保留给后续 wait_jobs 或信箱轮询
         if let Some(targets) = targets {
             if !targets.iter().any(|t| t == &id) {
@@ -646,19 +656,21 @@ pub fn poll_completed_child_runs_filtered(
             }
         }
         match serde_json::from_str::<ChildReviewResult>(&json_str) {
-            Ok(result) => {
+            Ok(mut result) => {
+                result.raw_result_json = Some(json_str);
+                result.kind = Some(kind);
                 results.push(result);
                 let _ = conn.execute(
-                    "UPDATE agent_child_runs SET result_json = NULL WHERE id = ?1",
-                    params![id],
+                    "UPDATE agent_child_runs SET consumed_at = ?1 WHERE id = ?2",
+                    params![now, id],
                 );
             }
             Err(error) => {
-                // 损坏的结果行无法被消费，若不清除将随每次轮询永久重试；置 NULL 让该行退出信箱。
-                eprintln!("[child-reviewer] 结果 JSON 解析失败，清除损坏行 {}: {}", id, error);
+                // 损坏的结果行无法被消费，标记 consumed_at 让该行退出信箱，同时保留 result_json 供排查。
+                eprintln!("[child-reviewer] 结果 JSON 解析失败，跳过损坏行 {}: {}", id, error);
                 let _ = conn.execute(
-                    "UPDATE agent_child_runs SET result_json = NULL WHERE id = ?1",
-                    params![id],
+                    "UPDATE agent_child_runs SET consumed_at = ?1 WHERE id = ?2",
+                    params![now, id],
                 );
             }
         }
@@ -983,6 +995,8 @@ mod tests {
             duration_ms: 150,
             completion_tokens: 45,
             error_kind: None,
+            raw_result_json: None,
+            kind: None,
         };
         let sample_json = serde_json::to_string(&sample_result).unwrap();
         finish_child_run(&state, &run_id, "succeeded", 150, 45, None, Some(&sample_json));
@@ -993,7 +1007,7 @@ mod tests {
         assert_eq!(polled[0].child_run_id, run_id);
         assert_eq!(polled[0].confidence, "confirmed");
 
-        // 第二次轮询：因为 result_json 已置 NULL，不再重复消费
+        // 第二次轮询：因为 result_json 已标记 consumed_at，不再重复消费
         let polled_again = poll_completed_child_runs(&state, "parent-run-poll").unwrap();
         assert_eq!(polled_again.len(), 0);
 
@@ -1094,6 +1108,8 @@ mod tests {
             duration_ms: 200,
             completion_tokens: 30,
             error_kind: None,
+            raw_result_json: None,
+            kind: None,
         };
         finish_child_run(&state, &child_1, "succeeded", 200, 30, None, Some(&serde_json::to_string(&res_1).unwrap()));
 
@@ -1113,6 +1129,8 @@ mod tests {
             duration_ms: 350,
             completion_tokens: 40,
             error_kind: None,
+            raw_result_json: None,
+            kind: None,
         };
         finish_child_run(&state, &child_2, "succeeded", 350, 40, None, Some(&serde_json::to_string(&res_2).unwrap()));
 
@@ -1139,6 +1157,8 @@ mod tests {
             duration_ms: 120,
             completion_tokens: 25,
             error_kind: None,
+            raw_result_json: None,
+            kind: None,
         })
         .unwrap()
     }
@@ -1461,6 +1481,13 @@ mod tests {
         // 第 7 个被全局总看门拦截（6个已满）
         let err = begin_child_run(&state, "p-run-3", "s-3", &workspace, "m", 0, "writer", Some(3)).unwrap_err();
         assert!(err.contains("全局看门上限已满"));
+
+        // 4. 验证真并发机制：释放 1 个 running 任务后，新的任务即可成功进入（证明非累计死锁）
+        state.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET status = 'succeeded' WHERE parent_run_id = 'p-run-3' AND rowid IN (SELECT rowid FROM agent_child_runs WHERE parent_run_id = 'p-run-3' LIMIT 1)",
+            [],
+        ).unwrap();
+        assert!(begin_child_run(&state, "p-run-3", "s-3", &workspace, "m", 0, "writer", Some(3)).is_ok(), "释放一个并发名额后应成功进入");
 
         let _ = std::fs::remove_dir_all(base);
     }

@@ -726,6 +726,24 @@ pub async fn run_tool_phase(
         // 不在此处盲目广播 "succeeded"，交由 main_loop 的 finish guard 判定是否为 finish_challenged 统一发射事件
         return Ok(result);
     }
+
+    // --- B1.5 P4 连续批发派发解析失败降级熔断检查 ---
+    if let Some(ref d) = inst.dispatches {
+        if !d.is_empty() && context.batch_dispatch_circuit_breaker_remaining > 0 {
+            let remaining = context.batch_dispatch_circuit_breaker_remaining;
+            context.batch_dispatch_circuit_breaker_remaining = remaining.saturating_sub(1);
+            return Ok(DispatchResult {
+                stdout: String::new(),
+                stderr: format!(
+                    "⚠️ 批发格式近期连续解析失败，已触发熔断保护（还剩 {} 步恢复）。本轮请直接使用单工具派发（params: {{...}}），不要使用 dispatches 批发。",
+                    remaining
+                ),
+                success: false,
+                route: "host_rejection:batch_circuit_breaker".to_string(),
+            });
+        }
+    }
+
     // --- B2. 受限 child reviewer：异步派发，不阻塞主循环。结果在后续 step 中由 main_loop 的 poll_completed_child_runs 注入。 ---
     let dispatch_result = if inst.get_tool().eq_ignore_ascii_case("child_reviewer") {
         let routing = crate::agent::router::AgentRouter::route_for_role(
@@ -750,6 +768,9 @@ pub async fn run_tool_phase(
             let mut reviewer_persona = String::new();
             let mut reviewer_model = routing.model_id.clone();
             let mut effective_params = child_params.clone();
+            if let Some(obj) = effective_params.as_object_mut() {
+                obj.remove("max_concurrency");
+            }
 
             if let Some(role_name) = child_params.get("role").and_then(|v| v.as_str()) {
                 match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
@@ -767,7 +788,7 @@ pub async fn run_tool_phase(
                             reviewer_model = card.model_id.clone();
                         }
                         if card.max_concurrency > 0 {
-                            effective_params["max_concurrency"] = json!(card.max_concurrency);
+                            effective_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
                         }
                     }
                     Ok(None) => {
@@ -869,6 +890,7 @@ pub async fn run_tool_phase(
                 summary = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches 批量派发。\n\n{}", summary);
             }
             if success_count > 0 {
+                context.consecutive_batch_dispatch_errors = 0;
                 DispatchResult {
                     stdout: summary,
                     stderr: String::new(),
@@ -876,6 +898,11 @@ pub async fn run_tool_phase(
                     route: format!("child_reviewer:batch:{}ok{}fail", success_count, fail_count),
                 }
             } else {
+                context.consecutive_batch_dispatch_errors += 1;
+                if context.consecutive_batch_dispatch_errors >= 2 {
+                    context.batch_dispatch_circuit_breaker_remaining = 3;
+                    context.consecutive_batch_dispatch_errors = 0;
+                }
                 DispatchResult {
                     stdout: String::new(),
                     stderr: format!("批量审查派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n")),
@@ -991,6 +1018,9 @@ pub async fn run_tool_phase(
             let mut writer_persona = String::new();
             let mut writer_model = routing.model_id.clone();
             let mut effective_params = writer_params.clone();
+            if let Some(obj) = effective_params.as_object_mut() {
+                obj.remove("max_concurrency");
+            }
 
             if let Some(role_name) = writer_params.get("role").and_then(|v| v.as_str()) {
                 match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
@@ -1008,11 +1038,14 @@ pub async fn run_tool_phase(
                             writer_model = card.model_id.clone();
                         }
                         effective_params = crate::agent::tools::role_manager::merge_writer_defaults(&card, writer_params);
+                        if let Some(obj) = effective_params.as_object_mut() {
+                            obj.remove("max_concurrency");
+                        }
                         if !card.hard_scope.is_empty() {
                             effective_params["hard_scope"] = json!(card.hard_scope);
                         }
                         if card.max_concurrency > 0 {
-                            effective_params["max_concurrency"] = json!(card.max_concurrency);
+                            effective_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
                         }
                     }
                     Ok(None) => {
@@ -1119,6 +1152,7 @@ pub async fn run_tool_phase(
                 summary = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches 批量派发。\n\n{}", summary);
             }
             if success_count > 0 {
+                context.consecutive_batch_dispatch_errors = 0;
                 DispatchResult {
                     stdout: summary,
                     stderr: String::new(),
@@ -1126,6 +1160,11 @@ pub async fn run_tool_phase(
                     route: format!("child_writer:batch:{}ok{}fail", success_count, fail_count),
                 }
             } else {
+                context.consecutive_batch_dispatch_errors += 1;
+                if context.consecutive_batch_dispatch_errors >= 2 {
+                    context.batch_dispatch_circuit_breaker_remaining = 3;
+                    context.consecutive_batch_dispatch_errors = 0;
+                }
                 DispatchResult {
                     stdout: String::new(),
                     stderr: format!("批量写入 worker 派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n")),
@@ -1159,6 +1198,9 @@ pub async fn run_tool_phase(
             let mut scout_persona = String::new();
             let mut scout_model = routing.model_id.clone();
             let mut effective_worker_params = worker_params.clone();
+            if let Some(obj) = effective_worker_params.as_object_mut() {
+                obj.remove("max_concurrency");
+            }
 
             if let Some(role_name) = worker_params.get("role").and_then(|v| v.as_str()) {
                 match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
@@ -1179,7 +1221,7 @@ pub async fn run_tool_phase(
                             effective_worker_params["hard_scope"] = json!(card.hard_scope);
                         }
                         if card.max_concurrency > 0 {
-                            effective_worker_params["max_concurrency"] = json!(card.max_concurrency);
+                            effective_worker_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
                         }
                     }
                     Ok(None) => {
@@ -1286,6 +1328,7 @@ pub async fn run_tool_phase(
                 summary = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches 批量派发。\n\n{}", summary);
             }
             if success_count > 0 {
+                context.consecutive_batch_dispatch_errors = 0;
                 DispatchResult {
                     stdout: summary,
                     stderr: String::new(),
@@ -1293,6 +1336,11 @@ pub async fn run_tool_phase(
                     route: format!("child_worker:batch:{}ok{}fail", success_count, fail_count),
                 }
             } else {
+                context.consecutive_batch_dispatch_errors += 1;
+                if context.consecutive_batch_dispatch_errors >= 2 {
+                    context.batch_dispatch_circuit_breaker_remaining = 3;
+                    context.consecutive_batch_dispatch_errors = 0;
+                }
                 DispatchResult {
                     stdout: String::new(),
                     stderr: format!("批量派发全部失败（共 {} 项）：\n{}", total, item_reports.join("\n")),
@@ -1413,10 +1461,10 @@ pub async fn run_tool_phase(
                 route: "host_rejection:missing_followup_message".to_string(),
             }
         } else {
-            let child_data: Result<(String, String, Option<String>, Option<String>, String, String), String> = {
+            let child_data: Result<(String, String, Option<String>, Option<String>, String, String, Option<String>), String> = {
                 let conn = state.0.lock().map_err(|e| e.to_string())?;
                 conn.query_row(
-                    "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root FROM agent_child_runs WHERE id = ?1",
+                    "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json FROM agent_child_runs WHERE id = ?1",
                     rusqlite::params![target_child_id],
                     |row| {
                         Ok((
@@ -1426,6 +1474,7 @@ pub async fn run_tool_phase(
                             row.get::<_, Option<String>>(3)?,
                             row.get::<_, String>(4)?,
                             row.get::<_, String>(5)?,
+                            row.get::<_, Option<String>>(6)?,
                         ))
                     },
                 ).map_err(|e| format!("未找到子任务「{}」记录: {}", target_child_id, e))
@@ -1438,7 +1487,7 @@ pub async fn run_tool_phase(
                     success: false,
                     route: "host_rejection:child_not_found".to_string(),
                 },
-                Ok((status, kind, ws_copy, hist_json, child_model, root_str)) => {
+                Ok((status, kind, ws_copy, hist_json, child_model, root_str, prev_result_json)) => {
                     if status != "succeeded" {
                         DispatchResult {
                             stdout: String::new(),
@@ -1531,7 +1580,14 @@ pub async fn run_tool_phase(
                                 };
 
                                 if kind == "writer" {
-                                    let test_cmd = test_command_override.unwrap_or_else(|| "npm test".to_string());
+                                    let inherited_test_cmd = prev_result_json
+                                        .as_deref()
+                                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                                        .and_then(|v| v.get("test_command").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                                        .filter(|s| !s.trim().is_empty());
+                                    let test_cmd = test_command_override
+                                        .or(inherited_test_cmd)
+                                        .unwrap_or_else(|| "cargo test".to_string());
                                     let writer_req = crate::agent::child_writer::WriterRequest {
                                         task: followup_msg.to_string(),
                                         test_command: test_cmd,

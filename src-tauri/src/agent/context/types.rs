@@ -208,6 +208,12 @@ pub struct SandwichContext {
     /// 上下文压缩发生时清零（压缩后模型遗忘旧内容，重读重新合法）。
     #[serde(default)]
     pub read_ledger: std::collections::BTreeMap<String, ReadLedgerEntry>,
+    /// P4 连续批发派发解析失败计数（达 2 次触发 3 步熔断降级）
+    #[serde(default)]
+    pub consecutive_batch_dispatch_errors: usize,
+    /// P4 批发派发熔断保护期剩余步数（>0 时阻止 dispatches 并注入降级单发指引）
+    #[serde(default)]
+    pub batch_dispatch_circuit_breaker_remaining: usize,
     /// 当前最新一次工具执行的环境观测结果 (Observation)
     pub current_observation: String,
 
@@ -261,6 +267,8 @@ impl SandwichContext {
             last_step_failed: false,
             consecutive_failures: 0,
             read_ledger: std::collections::BTreeMap::new(),
+            consecutive_batch_dispatch_errors: 0,
+            batch_dispatch_circuit_breaker_remaining: 0,
             active_tool: None,
             compact_tools_index: None,
             active_tool_detail: String::new(),
@@ -279,6 +287,38 @@ impl SandwichContext {
             self.consecutive_failures = 0;
         } else {
             self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        }
+    }
+
+    /// P4 连续批发解析失败降级熔断逻辑：
+    /// 连续 2 次批发解析失败 → 触发 3 步熔断期（期间阻止 dispatches 并注入降级单发指引）
+    pub fn record_batch_dispatch_outcome(&mut self, success: bool) -> Option<String> {
+        if success {
+            self.consecutive_batch_dispatch_errors = 0;
+            None
+        } else {
+            self.consecutive_batch_dispatch_errors += 1;
+            if self.consecutive_batch_dispatch_errors >= 2 {
+                self.batch_dispatch_circuit_breaker_remaining = 3;
+                self.consecutive_batch_dispatch_errors = 0;
+                Some("⚠️ 批发格式近期已连续 2 次解析失败，触发熔断降级！后续 3 步内请使用单工具派发（params: {...}），之后再恢复批发。".to_string())
+            } else {
+                None
+            }
+        }
+    }
+
+    /// 检查当前步骤是否允许调用批发派发（dispatches）
+    pub fn check_batch_dispatch_allowed(&mut self, has_dispatches: bool) -> Result<(), String> {
+        if has_dispatches && self.batch_dispatch_circuit_breaker_remaining > 0 {
+            let remaining = self.batch_dispatch_circuit_breaker_remaining;
+            self.batch_dispatch_circuit_breaker_remaining = remaining.saturating_sub(1);
+            Err(format!(
+                "⚠️ 批发格式近期连续解析失败触发熔断保护期（还剩 {} 步恢复）。本轮请直接使用单工具派发（params: {{...}}），不可使用 dispatches 批发。",
+                remaining
+            ))
+        } else {
+            Ok(())
         }
     }
 
@@ -845,5 +885,29 @@ mod repeat_read_tests {
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "A").is_some());
         context.reset_read_ledger();
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "A").is_none(), "清零后重读合法");
+    }
+
+    #[test]
+    fn test_batch_dispatch_circuit_breaker_trips_and_recovers() {
+        let mut context = ctx();
+        // 1. 首次失败：不触发熔断
+        assert!(context.record_batch_dispatch_outcome(false).is_none());
+        assert!(context.check_batch_dispatch_allowed(true).is_ok());
+
+        // 2. 连续第 2 次失败：触发 3 步熔断
+        let alert = context.record_batch_dispatch_outcome(false);
+        assert!(alert.is_some());
+        assert!(alert.unwrap().contains("触发熔断降级"));
+
+        // 3. 熔断期间：阻止批发派发，连续 3 步倒数
+        let err1 = context.check_batch_dispatch_allowed(true).unwrap_err();
+        assert!(err1.contains("还剩 3 步"));
+        let err2 = context.check_batch_dispatch_allowed(true).unwrap_err();
+        assert!(err2.contains("还剩 2 步"));
+        let err3 = context.check_batch_dispatch_allowed(true).unwrap_err();
+        assert!(err3.contains("还剩 1 步"));
+
+        // 4. 熔断保护期结束：恢复允许批发
+        assert!(context.check_batch_dispatch_allowed(true).is_ok());
     }
 }

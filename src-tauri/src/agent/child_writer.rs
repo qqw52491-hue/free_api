@@ -564,39 +564,20 @@ pub async fn init_git_baseline(copy_root: &Path) -> bool {
     commit.is_ok() && commit.unwrap().status.success()
 }
 
-/// 计算指定路径文件的指纹（优先使用 git hash-object，git 不可用时回退到 sha256）
-pub async fn compute_file_hash(path: &Path, git_available: bool) -> String {
-    if !path.exists() {
-        return "empty/deleted".to_string();
-    }
-    if git_available {
-        if let Ok(out) = tokio::process::Command::new("git")
-            .args(&["hash-object", path.to_string_lossy().as_ref()])
-            .output()
-            .await
-        {
-            if out.status.success() {
-                let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !h.is_empty() {
-                    return h;
-                }
-            }
-        }
-    }
-    use sha2::{Digest, Sha256};
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            format!("{:x}", hasher.finalize())
-        }
-        Err(_) => "read_error".to_string(),
-    }
+/// 检查指定路径下 git 命令是否可用且可执行
+pub async fn is_git_available(cwd: &Path) -> bool {
+    tokio::process::Command::new("git")
+        .arg("--version")
+        .current_dir(cwd)
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
-/// 计算文本内容的指纹（优先使用 git hash-object --stdin，git 不可用时回退到 sha256）
-pub async fn compute_str_hash(content: &str, git_available: bool, cwd: &Path) -> String {
-    if content.is_empty() {
+/// 计算字节数据的指纹（优先使用 git hash-object --stdin，git 不可用时回退到 sha256）
+pub async fn compute_bytes_hash(bytes: &[u8], git_available: bool, cwd: &Path) -> String {
+    if bytes.is_empty() {
         return "empty/deleted".to_string();
     }
     if git_available {
@@ -609,7 +590,7 @@ pub async fn compute_str_hash(content: &str, git_available: bool, cwd: &Path) ->
             .spawn()
         {
             if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(content.as_bytes()).await;
+                let _ = stdin.write_all(bytes).await;
                 drop(stdin);
             }
             if let Ok(out) = child.wait_with_output().await {
@@ -624,8 +605,43 @@ pub async fn compute_str_hash(content: &str, git_available: bool, cwd: &Path) ->
     }
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
+    hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+/// 计算指定路径文件的指纹（以原始字节为基准，避免编码与换行符偏差）
+pub async fn compute_file_hash(path: &Path, git_available: bool) -> String {
+    if !path.exists() {
+        return "empty/deleted".to_string();
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let cwd = path.parent().unwrap_or(path);
+            compute_bytes_hash(&bytes, git_available, cwd).await
+        }
+        Err(_) => "read_error".to_string(),
+    }
+}
+
+/// 计算文本内容的指纹（与原始字节统一委托给 compute_bytes_hash）
+pub async fn compute_str_hash(content: &str, git_available: bool, cwd: &Path) -> String {
+    compute_bytes_hash(content.as_bytes(), git_available, cwd).await
+}
+
+/// 在根任务消费回执或准备合入真实工作区前，重新以当前主工作区的真实状态刷新冲突指纹
+pub async fn refresh_file_conflicts(
+    changed_files: &mut [ChangedFile],
+    parent_root: &Path,
+    git_available: bool,
+) {
+    for f in changed_files.iter_mut() {
+        let parent_file = parent_root.join(&f.path);
+        let root_now_h = compute_file_hash(&parent_file, git_available).await;
+        f.root_hash = Some(root_now_h.clone());
+        if let (Some(spawn_h), Some(result_h)) = (&f.spawn_hash, &f.result_hash) {
+            f.conflict_status = Some(evaluate_file_conflict(spawn_h, result_h, &root_now_h));
+        }
+    }
 }
 
 /// 从 Git 全量 diff 中截取指定相对路径文件的独立 diff 块
@@ -698,6 +714,65 @@ pub fn cleanup_child_workspaces(db: &DbState, parent_run_id: &str) {
             }
         }
     }
+}
+
+/// 应用启动或异常恢复时，统一回收所有已终态或崩溃残留的僵尸 writer 隔离副本（防止 200MB 磁盘泄漏）
+pub fn cleanup_orphaned_writer_workspaces(db: &DbState) -> usize {
+    let Ok(conn) = db.0.lock() else { return 0; };
+    // 1. 将上次异常退出的 running 子任务标记为 interrupted
+    let _ = conn.execute(
+        "UPDATE agent_child_runs SET status = 'interrupted' WHERE status = 'running'",
+        [],
+    );
+
+    // 2. 查出所有父任务已非活跃状态或已终态的历史 workspace_copy
+    let mut stmt = match conn.prepare(
+        "SELECT DISTINCT workspace_copy FROM agent_child_runs WHERE workspace_copy IS NOT NULL",
+    ) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let copies: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+
+    let mut cleaned_count = 0;
+    for path_str in copies {
+        let p = PathBuf::from(&path_str);
+        if p.exists() {
+            let is_safe_writer_dir = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(".writer-"));
+            if is_safe_writer_dir && std::fs::remove_dir_all(&p).is_ok() {
+                cleaned_count += 1;
+            }
+        }
+    }
+
+    // 3. 兜底：扫描各项目根目录下未被 DB 记录但以 .writer- 开头的物理孤儿目录
+    if let Ok(mut proj_stmt) = conn.prepare("SELECT root_path FROM agent_projects") {
+        if let Ok(proj_rows) = proj_stmt.query_map([], |row| row.get::<_, String>(0)) {
+            for root_res in proj_rows.flatten() {
+                let proj_path = PathBuf::from(root_res);
+                if let Ok(entries) = std::fs::read_dir(&proj_path) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                if name.starts_with(".writer-") && std::fs::remove_dir_all(&path).is_ok() {
+                                    cleaned_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    cleaned_count
 }
 
 /// 依据修改留底与 Git 快照基线生成 Unified Hunk，并执行 48KB 分级降级与三态冲突检测
@@ -774,17 +849,21 @@ async fn build_changed_files(
                     Some("patch"),
                     Some("writer_patch"),
                 ) {
-                    patch_ref = Some(art.id);
+                    patch_ref = Some(art.id.clone());
                 }
 
                 for rel in changes.keys() {
                     let fd = extract_file_diff(&git_full_diff, rel).unwrap_or_default();
                     let head_preview: String = fd.lines().take(10).collect::<Vec<_>>().join("\n");
+                    let ref_hint = patch_ref
+                        .as_deref()
+                        .map(|id| format!("可用 artifact_manager(action: \"get\", id: \"{}\") 查看完整补丁", id))
+                        .unwrap_or_else(|| "完整补丁已登记到受管工件".to_string());
                     file_diffs.insert(
                         rel.clone(),
                         format!(
-                            "{}\n...（Diff 超出 48KB 预算，完整补丁已存入工件，可用 get_step_output 查看）",
-                            head_preview
+                            "{}\n...（Diff 超出 48KB 预算，完整补丁已存入工件，{}）",
+                            head_preview, ref_hint
                         ),
                     );
                 }
@@ -1488,6 +1567,92 @@ mod tests {
         assert!(!copy1.exists(), "已登记的 copy1 副本必须被回收");
         assert!(!copy2.exists(), "已登记的 copy2 副本必须被回收");
         assert!(safe_keep.exists(), "非 writer 目录绝不能被误删");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_cleanup_orphaned_writer_workspaces_on_startup() {
+        let (base, root) = workspace();
+        let copy_db = base.join(".writer-test-orphan-db");
+        let copy_disk_only = root.join(".writer-test-orphan-disk");
+        let safe_keep = root.join("src");
+        std::fs::create_dir_all(&copy_db).unwrap();
+        std::fs::create_dir_all(&copy_disk_only).unwrap();
+        std::fs::create_dir_all(&safe_keep).unwrap();
+
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+        let conn = state.0.lock().unwrap();
+        // 注册 agent_projects
+        conn.execute(
+            "INSERT INTO agent_projects (id, name, root_path, created_at, updated_at) VALUES ('p1', 'proj', ?1, ?2, ?2)",
+            rusqlite::params![root.to_string_lossy(), chrono::Utc::now().to_rfc3339()],
+        ).unwrap();
+        // 模拟上次崩溃遗留的 running 任务
+        conn.execute(
+            "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, kind, workspace_copy) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, 'writer', ?7)",
+            rusqlite::params![
+                "child-orphan-1",
+                "parent-orphan",
+                "session-orphan",
+                root.to_string_lossy(),
+                "test-model",
+                chrono::Utc::now().to_rfc3339(),
+                copy_db.to_string_lossy(),
+            ],
+        ).unwrap();
+        drop(conn);
+
+        assert!(copy_db.exists());
+        assert!(copy_disk_only.exists());
+        assert!(safe_keep.exists());
+
+        let cleaned = cleanup_orphaned_writer_workspaces(&state);
+        assert!(cleaned >= 2, "至少清理 2 处孤儿子目录，实际清理: {}", cleaned);
+        assert!(!copy_db.exists(), "DB 中的僵尸目录必须被清理");
+        assert!(!copy_disk_only.exists(), "磁盘扫描发现的孤儿目录必须被清理");
+        assert!(safe_keep.exists(), "安全业务目录绝不可被误删");
+
+        // 验证 status 被置为 interrupted
+        let conn = state.0.lock().unwrap();
+        let status: String = conn.query_row(
+            "SELECT status FROM agent_child_runs WHERE id = 'child-orphan-1'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(status, "interrupted", "running 状态必须被标记为 interrupted");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_file_conflicts_catches_runtime_changes() {
+        let (base, root) = workspace();
+        let file_a = root.join("a.txt");
+        std::fs::write(&file_a, "original content\n").unwrap();
+
+        let spawn_hash = compute_file_hash(&file_a, false).await;
+        let changed_file = ChangedFile {
+            path: "a.txt".to_string(),
+            bytes_before: 10,
+            bytes_after: 20,
+            diff: String::new(),
+            spawn_hash: Some(spawn_hash.clone()),
+            result_hash: Some("result_hash_abc".to_string()),
+            root_hash: Some(spawn_hash.clone()),
+            conflict_status: Some(ConflictStatus::CleanReplay),
+        };
+
+        let mut files = vec![changed_file];
+        // 1. 父工程内容未变时，现算为 CleanReplay
+        refresh_file_conflicts(&mut files, &root, false).await;
+        assert_eq!(files[0].conflict_status, Some(ConflictStatus::CleanReplay));
+
+        // 2. 期间父工程被其他步骤修改
+        std::fs::write(&file_a, "modified by root or user\n").unwrap();
+        refresh_file_conflicts(&mut files, &root, false).await;
+        assert_eq!(files[0].conflict_status, Some(ConflictStatus::Conflict), "现算必须检测到中间发生的冲突");
 
         let _ = std::fs::remove_dir_all(base);
     }

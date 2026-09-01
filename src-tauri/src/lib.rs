@@ -45,6 +45,11 @@ pub fn run() {
                     },
                     Err(e) => eprintln!("[cleanup] 数据库锁获取失败: {e}"),
                 }
+                // 清理崩溃或异常残留的 .writer-* 隔离工作区副本（避免磁盘泄漏）
+                let cleaned_dirs = crate::agent::child_writer::cleanup_orphaned_writer_workspaces(&state);
+                if cleaned_dirs > 0 {
+                    println!("[cleanup] 已清理 {cleaned_dirs} 个崩溃残留的 writer 隔离副本目录");
+                }
             }
             // 微信通道：本机 axum API（供 Node 桥调用），失败只打日志不阻断启动
             crate::agent::channel::spawn_channel_server(app.handle().clone());

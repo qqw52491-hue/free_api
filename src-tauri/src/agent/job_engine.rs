@@ -236,17 +236,56 @@ fn collect_completed_child_results(
     match crate::agent::child_reviewer::poll_completed_child_runs_filtered(db, parent_run_id, target_job_ids) {
         Ok(children) => children
             .into_iter()
-            .map(|child| BackgroundJobResult {
-                result_json: serde_json::to_string(&child).unwrap_or_default(),
-                job_id: child.child_run_id.clone(),
-                job_type: "child_reviewer".to_string(),
-                title: "受限子审查任务".to_string(),
-                status: child.status,
-                duration_ms: child.duration_ms,
-                error_kind: child.error_kind,
+            .map(|child| {
+                let kind_str = child.kind.as_deref().unwrap_or("review");
+                let (job_type, title) = match kind_str {
+                    "writer" => ("child_writer".to_string(), "受限写入工兵任务".to_string()),
+                    "worker" => ("child_worker".to_string(), "受限侦察任务".to_string()),
+                    _ => ("child_reviewer".to_string(), "受限子审查任务".to_string()),
+                };
+                let result_json = child
+                    .raw_result_json
+                    .clone()
+                    .unwrap_or_else(|| serde_json::to_string(&child).unwrap_or_default());
+                BackgroundJobResult {
+                    result_json,
+                    job_id: child.child_run_id.clone(),
+                    job_type,
+                    title,
+                    status: child.status,
+                    duration_ms: child.duration_ms,
+                    error_kind: child.error_kind,
+                }
             })
             .collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+/// 在向调用方交付后台任务结果瞬间，重新以主工作区真实状态现算并刷新冲突指纹（闭合 TOC/TOU 竞争窗口）
+async fn enrich_and_refresh_collected_results(db: &DbState, collected: &mut [BackgroundJobResult]) {
+    for job in collected.iter_mut() {
+        if job.job_type == "child_writer" {
+            let parent_ws_opt = {
+                let Ok(conn) = db.0.lock() else { continue; };
+                conn.query_row(
+                    "SELECT workspace_root FROM agent_child_runs WHERE id = ?1",
+                    rusqlite::params![job.job_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+            };
+            if let Some(ws_path) = parent_ws_opt {
+                let parent_path = std::path::PathBuf::from(ws_path);
+                if let Ok(mut writer_res) = serde_json::from_str::<crate::agent::child_writer::WriterResult>(&job.result_json) {
+                    let git_available = crate::agent::child_writer::is_git_available(&parent_path).await;
+                    crate::agent::child_writer::refresh_file_conflicts(&mut writer_res.changed_files, &parent_path, git_available).await;
+                    if let Ok(new_json) = serde_json::to_string(&writer_res) {
+                        job.result_json = new_json;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -296,6 +335,7 @@ pub async fn wait_for_jobs(
     collected.extend(collect_completed_child_results(db, parent_run_id, target_job_ids));
 
     if found_target(&collected) || !has_any_running_jobs(db, parent_run_id) {
+        enrich_and_refresh_collected_results(db, &mut collected).await;
         return Ok(collected);
     }
 
@@ -326,6 +366,7 @@ pub async fn wait_for_jobs(
                 }
                 collected.extend(collect_completed_child_results(db, parent_run_id, target_job_ids));
                 if found_target(&collected) || !has_any_running_jobs(db, parent_run_id) {
+                    enrich_and_refresh_collected_results(db, &mut collected).await;
                     return Ok(collected);
                 }
             }
@@ -362,6 +403,7 @@ pub async fn wait_for_jobs(
         }
     }
 
+    enrich_and_refresh_collected_results(db, &mut collected).await;
     Ok(collected)
 }
 
