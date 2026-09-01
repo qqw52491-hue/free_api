@@ -36,6 +36,7 @@ const GIT_READONLY_SUBCOMMANDS: &[&str] = &["log", "diff", "status", "show", "br
 pub struct WorkerRequest {
     pub task: String,
     pub focus_paths: Vec<String>,
+    pub context_excerpts: Option<crate::agent::types::DispatchContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +85,12 @@ pub fn parse_worker_request(params: &Value) -> Result<WorkerRequest, String> {
             focus_paths.push(path);
         }
     }
-    Ok(WorkerRequest { task, focus_paths })
+    let context_excerpts = crate::agent::types::parse_dispatch_context(params.get("context_excerpts"))?;
+    Ok(WorkerRequest {
+        task,
+        focus_paths,
+        context_excerpts,
+    })
 }
 
 /// 工作区包含性校验：worker 的所有文件访问都必须落在规范化后的工作区内。
@@ -325,14 +331,10 @@ pub async fn run_worker_loop(
     } else {
         request.focus_paths.join(", ")
     };
+    let initial_user_prompt = render_worker_initial_prompt(&workspace_root, &focus, &request);
     let mut messages = vec![
         json!({"role": "system", "content": format!("{}{}", worker_system_prompt("scout"), persona)}),
-        json!({"role": "user", "content": format!(
-            "工作区根目录：{}\n关注路径（如提供）：{}\n\n侦察任务：{}",
-            workspace_root.display(),
-            focus,
-            request.task
-        )}),
+        json!({"role": "user", "content": initial_user_prompt}),
     ];
 
     let terminal: &str = loop {
@@ -497,6 +499,7 @@ pub async fn run_worker_loop(
         action_log,
     };
 
+    let result_json = worker_result_json(&result);
     crate::agent::child_reviewer::finish_child_run(
         &db,
         &child_run_id,
@@ -504,8 +507,9 @@ pub async fn run_worker_loop(
         result.duration_ms,
         result.completion_tokens,
         result.error_kind.as_deref(),
-        Some(&worker_result_json(&result)),
+        Some(&result_json),
     );
+
     if let Some(handle) = app {
         let _ = handle.emit(
             &format!("agent-log-{}", parent_session_id),
@@ -517,6 +521,43 @@ pub async fn run_worker_loop(
                 result.findings.len()
             ),
         );
+    }
+}
+
+/// 渲染 worker 的初始首条 user 提示词（P2：有 context_excerpts 则分区渲染，无则保持经典紧凑格式）
+pub fn render_worker_initial_prompt(
+    workspace_root: &Path,
+    focus: &str,
+    request: &WorkerRequest,
+) -> String {
+    if let Some(ref ctx) = request.context_excerpts {
+        let mut sections = Vec::new();
+        if let Some(ref bg) = ctx.background {
+            sections.push(format!("### 背景信息\n{}", bg));
+        }
+        if !ctx.todo_slice.is_empty() {
+            let todos = ctx.todo_slice.iter().map(|t| format!("- {}", t)).collect::<Vec<_>>().join("\n");
+            sections.push(format!("### 相关计划与待办\n{}", todos));
+        }
+        if !ctx.prior_findings.is_empty() {
+            let findings = ctx.prior_findings.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n");
+            sections.push(format!("### 既有结论与线索\n{}", findings));
+        }
+        if !ctx.file_hints.is_empty() {
+            let hints = ctx.file_hints.iter().map(|h| format!("- {}", h)).collect::<Vec<_>>().join("\n");
+            sections.push(format!("### 相关文件提示\n{}", hints));
+        }
+        sections.push(format!("### 侦察任务\n{}", request.task));
+        sections.push(format!("### 工作区根目录\n{}", workspace_root.display()));
+        sections.push(format!("### 关注路径（如提供）\n{}", focus));
+        sections.join("\n\n")
+    } else {
+        format!(
+            "工作区根目录：{}\n关注路径（如提供）：{}\n\n侦察任务：{}",
+            workspace_root.display(),
+            focus,
+            request.task
+        )
     }
 }
 
@@ -599,10 +640,48 @@ mod tests {
     fn parse_worker_request_validates_bounds() {
         let request = parse_worker_request(&json!({"task": "排查日志中的 error 来源", "focus_paths": ["notes.log", "src/", "extra"]})).unwrap();
         assert_eq!(request.focus_paths.len(), 3);
+        assert!(request.context_excerpts.is_none());
         assert!(parse_worker_request(&json!({})).is_err());
         assert!(parse_worker_request(&json!({"task": ""})).is_err());
         let long = "x".repeat(MAX_TASK_CHARS + 1);
         assert!(parse_worker_request(&json!({"task": long})).is_err());
+
+        // 带有 context_excerpts
+        let with_ctx = parse_worker_request(&json!({
+            "task": "排查启动错误",
+            "context_excerpts": {
+                "background": "用户点击启动无响应",
+                "file_hints": ["src/main.rs"]
+            }
+        })).unwrap();
+        assert!(with_ctx.context_excerpts.is_some());
+    }
+
+    #[test]
+    fn render_worker_initial_prompt_partitions_or_fallbacks() {
+        let req_simple = WorkerRequest {
+            task: "排查日志".into(),
+            focus_paths: vec!["notes.log".into()],
+            context_excerpts: None,
+        };
+        let p1 = render_worker_initial_prompt(Path::new("/tmp/ws"), "notes.log", &req_simple);
+        assert!(p1.starts_with("工作区根目录：/tmp/ws\n关注路径（如提供）：notes.log"));
+
+        let req_rich = WorkerRequest {
+            task: "排查日志".into(),
+            focus_paths: vec!["notes.log".into()],
+            context_excerpts: Some(crate::agent::types::DispatchContext {
+                background: Some("生产环境出现 500".into()),
+                todo_slice: vec![],
+                file_hints: vec!["notes.log".into()],
+                prior_findings: vec!["已排除网络问题".into()],
+            }),
+        };
+        let p2 = render_worker_initial_prompt(Path::new("/tmp/ws"), "notes.log", &req_rich);
+        assert!(p2.contains("### 背景信息\n生产环境出现 500"));
+        assert!(p2.contains("### 既有结论与线索\n- 已排除网络问题"));
+        assert!(p2.contains("### 相关文件提示\n- notes.log"));
+        assert!(p2.contains("### 侦察任务\n排查日志"));
     }
 
     #[test]

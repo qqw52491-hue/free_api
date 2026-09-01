@@ -39,6 +39,7 @@ pub struct WriterRequest {
     pub task: String,
     pub test_command: String,
     pub focus_paths: Vec<String>,
+    pub context_excerpts: Option<crate::agent::types::DispatchContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,10 +113,12 @@ pub fn parse_writer_request(params: &Value) -> Result<WriterRequest, String> {
             focus_paths.push(path);
         }
     }
+    let context_excerpts = crate::agent::types::parse_dispatch_context(params.get("context_excerpts"))?;
     Ok(WriterRequest {
         task,
         test_command,
         focus_paths,
+        context_excerpts,
     })
 }
 
@@ -503,15 +506,10 @@ pub async fn run_writer_loop(
     } else {
         request.focus_paths.join(", ")
     };
+    let initial_user_prompt = render_writer_initial_prompt(&copy_root, &focus, &request);
     let mut messages = vec![
         json!({"role": "system", "content": format!("{}{}", writer_system_prompt(), persona)}),
-        json!({"role": "user", "content": format!(
-            "副本工作区根目录：{}\n关注路径：{}\n必须执行的测试命令：{}\n\n修改任务：{}",
-            copy_root.display(),
-            focus,
-            request.test_command,
-            request.task
-        )}),
+        json!({"role": "user", "content": initial_user_prompt}),
     ];
 
     let terminal: &str = loop {
@@ -727,6 +725,45 @@ pub async fn run_writer_loop(
     }
 }
 
+/// 渲染 writer 的初始首条 user 提示词（P2：有 context_excerpts 则分区渲染，无则保持经典紧凑格式）
+pub fn render_writer_initial_prompt(
+    copy_root: &Path,
+    focus: &str,
+    request: &WriterRequest,
+) -> String {
+    if let Some(ref ctx) = request.context_excerpts {
+        let mut sections = Vec::new();
+        if let Some(ref bg) = ctx.background {
+            sections.push(format!("### 背景信息\n{}", bg));
+        }
+        if !ctx.todo_slice.is_empty() {
+            let todos = ctx.todo_slice.iter().map(|t| format!("- {}", t)).collect::<Vec<_>>().join("\n");
+            sections.push(format!("### 相关计划与待办\n{}", todos));
+        }
+        if !ctx.prior_findings.is_empty() {
+            let findings = ctx.prior_findings.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n");
+            sections.push(format!("### 既有结论与线索\n{}", findings));
+        }
+        if !ctx.file_hints.is_empty() {
+            let hints = ctx.file_hints.iter().map(|h| format!("- {}", h)).collect::<Vec<_>>().join("\n");
+            sections.push(format!("### 相关文件提示\n{}", hints));
+        }
+        sections.push(format!("### 修改任务\n{}", request.task));
+        sections.push(format!("### 副本工作区根目录\n{}", copy_root.display()));
+        sections.push(format!("### 关注路径\n{}", focus));
+        sections.push(format!("### 必须执行的测试命令\n{}", request.test_command));
+        sections.join("\n\n")
+    } else {
+        format!(
+            "副本工作区根目录：{}\n关注路径：{}\n必须执行的测试命令：{}\n\n修改任务：{}",
+            copy_root.display(),
+            focus,
+            request.test_command,
+            request.task
+        )
+    }
+}
+
 /// 异步派发 L3 写入 worker：复制工作区为私有副本 → 动作-观测循环 → diff 回执。
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_child_writer(
@@ -827,9 +864,55 @@ mod tests {
     fn parse_writer_request_requires_test_command() {
         let ok = parse_writer_request(&json!({"task": "修复 sum", "test_command": "npm test"})).unwrap();
         assert_eq!(ok.test_command, "npm test");
+        assert!(ok.context_excerpts.is_none());
         assert!(parse_writer_request(&json!({"task": "修复 sum"})).is_err());
         assert!(parse_writer_request(&json!({"task": "x", "test_command": "a; b"})).is_err());
         assert!(parse_writer_request(&json!({"task": "x", "test_command": "npm test", "focus_paths": ["1","2","3","4","5","6"]})).is_err());
+
+        // 带有 context_excerpts
+        let with_ctx = parse_writer_request(&json!({
+            "task": "修复 sum 函数边界",
+            "test_command": "npm test",
+            "context_excerpts": {
+                "background": "sum.mjs 未对负数做容错",
+                "todo_slice": ["修复负数逻辑", "通过单元测试"],
+                "file_hints": ["src/sum.mjs"]
+            }
+        })).unwrap();
+        assert!(with_ctx.context_excerpts.is_some());
+        let ctx = with_ctx.context_excerpts.unwrap();
+        assert_eq!(ctx.background.as_deref(), Some("sum.mjs 未对负数做容错"));
+        assert_eq!(ctx.todo_slice.len(), 2);
+    }
+
+    #[test]
+    fn render_writer_initial_prompt_partitions_or_fallbacks() {
+        let req_simple = WriterRequest {
+            task: "修复 bug".into(),
+            test_command: "npm test".into(),
+            focus_paths: vec!["src/main.rs".into()],
+            context_excerpts: None,
+        };
+        let p1 = render_writer_initial_prompt(Path::new("/tmp/copy"), "src/main.rs", &req_simple);
+        assert!(p1.starts_with("副本工作区根目录：/tmp/copy\n关注路径：src/main.rs"));
+
+        let req_rich = WriterRequest {
+            task: "修复 bug".into(),
+            test_command: "npm test".into(),
+            focus_paths: vec!["src/main.rs".into()],
+            context_excerpts: Some(crate::agent::types::DispatchContext {
+                background: Some("这是详细背景".into()),
+                todo_slice: vec!["步骤1".into()],
+                file_hints: vec!["src/main.rs".into()],
+                prior_findings: vec!["之前已发现 panic".into()],
+            }),
+        };
+        let p2 = render_writer_initial_prompt(Path::new("/tmp/copy"), "src/main.rs", &req_rich);
+        assert!(p2.contains("### 背景信息\n这是详细背景"));
+        assert!(p2.contains("### 相关计划与待办\n- 步骤1"));
+        assert!(p2.contains("### 既有结论与线索\n- 之前已发现 panic"));
+        assert!(p2.contains("### 相关文件提示\n- src/main.rs"));
+        assert!(p2.contains("### 修改任务\n修复 bug"));
     }
 
     #[test]

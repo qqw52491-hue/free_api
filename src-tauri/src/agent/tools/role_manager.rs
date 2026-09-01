@@ -197,6 +197,11 @@ pub fn build_role_cards_menu(db: &DbState) -> Result<String, String> {
             card.name, card.label, card.persona_prompt.chars().take(80).collect::<String>(), model_note, scope_note
         ));
     }
+    out.push_str("\n> 💡 **【派发纪律】** 派发给子 Agent 的 task 必须自包含：\n");
+    out.push_str("> 1. 背景：为什么做这件事；\n");
+    out.push_str("> 2. 目标：要产出什么（清晰可验收的标准）；\n");
+    out.push_str("> 3. 相关材料：涉及的文件路径/既有结论/约束。\n");
+    out.push_str("> 建议在派发参数中携带可选的 context_excerpts（包含 background、todo_slice、file_hints、prior_findings），避免模糊派发。\n");
     Ok(out)
 }
 

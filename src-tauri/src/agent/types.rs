@@ -453,6 +453,116 @@ pub struct DispatchResult {
     pub route: String,
 }
 
+/// 子 Agent 派发时的结构化交接上下文（P2 交接契约升级）
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct DispatchContext {
+    /// root 从自己的上下文里摘的相关材料，逐条注入 user prompt
+    #[serde(default)]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub todo_slice: Vec<String>,
+    #[serde(default)]
+    pub file_hints: Vec<String>,
+    #[serde(default)]
+    pub prior_findings: Vec<String>,
+}
+
+impl DispatchContext {
+    pub fn is_empty(&self) -> bool {
+        self.background.as_deref().unwrap_or("").trim().is_empty()
+            && self.todo_slice.is_empty()
+            && self.file_hints.is_empty()
+            && self.prior_findings.is_empty()
+    }
+}
+
+/// 解析可选的结构化交接上下文（容错解析 + 边界约束）
+pub fn parse_dispatch_context(val: Option<&serde_json::Value>) -> Result<Option<DispatchContext>, String> {
+    let Some(val) = val else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    let obj = val
+        .as_object()
+        .ok_or_else(|| "context_excerpts 必须是一个 JSON 对象。".to_string())?;
+
+    let background = obj
+        .get("background")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(ref bg) = background {
+        if bg.chars().count() > 4000 {
+            return Err("context_excerpts.background 最多 4000 字符。".to_string());
+        }
+    }
+
+    let parse_str_list = |field: &str, max_items: usize, max_chars: usize| -> Result<Vec<String>, String> {
+        let mut list = Vec::new();
+        if let Some(arr) = obj.get(field).and_then(|v| v.as_array()) {
+            for (idx, item) in arr.iter().enumerate() {
+                if idx >= max_items {
+                    return Err(format!("context_excerpts.{} 最多包含 {} 项。", field, max_items));
+                }
+                let s = item
+                    .as_str()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| format!("context_excerpts.{} 的元素必须是非空字符串。", field))?;
+                if s.chars().count() > max_chars {
+                    return Err(format!("context_excerpts.{} 单项最多 {} 字符。", field, max_chars));
+                }
+                list.push(s);
+            }
+        }
+        Ok(list)
+    };
+
+    let todo_slice = parse_str_list("todo_slice", 20, 500)?;
+    let file_hints = parse_str_list("file_hints", 30, 500)?;
+    let prior_findings = parse_str_list("prior_findings", 20, 1000)?;
+
+    let ctx = DispatchContext {
+        background,
+        todo_slice,
+        file_hints,
+        prior_findings,
+    };
+
+    if ctx.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(ctx))
+    }
+}
+
+/// 任务描述质量检查（软警示判断）：无换行、无路径/文件扩展名特征、无命令/代码特征、且长度较短时返回 true。
+pub fn is_task_thin(task: &str) -> bool {
+    let t = task.trim();
+    if t.is_empty() {
+        return true;
+    }
+    let has_newline = t.contains('\n');
+    let has_path_or_file = t.contains('/')
+        || t.contains('\\')
+        || [
+            ".rs", ".ts", ".js", ".jsx", ".tsx", ".json", ".vue", ".html", ".css", ".md", ".toml",
+            ".py", ".sh", ".sql", ".yaml", ".yml",
+        ]
+        .iter()
+        .any(|ext| t.contains(ext));
+    let has_command_or_symbol = [
+        "npm", "cargo", "pnpm", "yarn", "git", "test", "build", "run", "fn ", "function", "class",
+        "def ", "struct", "let ", "const ",
+    ]
+    .iter()
+    .any(|kw| t.to_lowercase().contains(kw));
+
+    !has_newline && !has_path_or_file && !has_command_or_symbol && t.chars().count() < 30
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,5 +645,52 @@ mod tests {
         }))
         .expect("plan tree instruction should deserialize");
         assert!(plan_tree.validate_executable_shape().is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_context_parsing_and_validation() {
+        // 空值或 null
+        assert!(parse_dispatch_context(None).unwrap().is_none());
+        assert!(parse_dispatch_context(Some(&serde_json::Value::Null)).unwrap().is_none());
+        assert!(parse_dispatch_context(Some(&json!({}))).unwrap().is_none());
+
+        // 非对象被拒绝
+        assert!(parse_dispatch_context(Some(&json!("string"))).is_err());
+
+        // 正常结构化解析
+        let val = json!({
+            "background": "项目使用 Tauri + Vue3",
+            "todo_slice": ["修复单测", "格式化代码"],
+            "file_hints": ["src-tauri/src/agent/child_writer.rs"],
+            "prior_findings": ["命令超时已修复"]
+        });
+        let parsed = parse_dispatch_context(Some(&val)).unwrap().expect("should parse successfully");
+        assert_eq!(parsed.background.as_deref(), Some("项目使用 Tauri + Vue3"));
+        assert_eq!(parsed.todo_slice.len(), 2);
+        assert_eq!(parsed.file_hints.len(), 1);
+        assert_eq!(parsed.prior_findings.len(), 1);
+    }
+
+    #[test]
+    fn test_is_task_thin_heuristics() {
+        // 明显的过薄任务（无换行、无路径、无命令，短文本）
+        assert!(is_task_thin("修复那个 bug"));
+        assert!(is_task_thin("优化一下代码"));
+        assert!(is_task_thin(""));
+
+        // 包含文件特征，不属于薄任务
+        assert!(!is_task_thin("修复 index.ts 的拼写错误"));
+        assert!(!is_task_thin("检查 src/lib.rs"));
+        assert!(!is_task_thin("修改 package.json 的版本号"));
+
+        // 包含命令特征，不属于薄任务
+        assert!(!is_task_thin("执行 npm test 解决报错"));
+        assert!(!is_task_thin("运行 cargo test"));
+
+        // 较长且自包含的指令，不属于薄任务
+        assert!(!is_task_thin("请重构用户认证模块的持久化逻辑，增加登录重试机制与失败状态回滚"));
+
+        // 包含换行多段落的指令，不属于薄任务
+        assert!(!is_task_thin("任务说明：\n1. 检查配置\n2. 补充日志"));
     }
 }

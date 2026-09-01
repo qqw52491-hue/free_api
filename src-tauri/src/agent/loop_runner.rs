@@ -924,14 +924,22 @@ pub async fn run_tool_phase(
         )
         .await
         {
-            Ok(child_run_id) => DispatchResult {
-                stdout: format!(
+            Ok(child_run_id) => {
+                let mut stdout = format!(
                     "写入 worker 已在隔离副本上开工，child_run_id: {}。它完成修改并自行运行你指定的测试命令后，会以结构化回执（changed_files 含逐文件 diff、test_status、findings）回到你的上下文；用 wait_jobs(job_ids:[\"{}\"]) 回收。注意：你（root）才是真实工作区的唯一写入者——审阅其 diff 后由你用常规写工具落实修改并最终验证。",
                     child_run_id, child_run_id
-                ),
-                stderr: String::new(),
-                success: true,
-                route: "child_writer:spawned".to_string(),
+                );
+                let task_str = effective_params.get("task").and_then(|v| v.as_str()).unwrap_or("");
+                let has_excerpts = effective_params.get("context_excerpts").is_some();
+                if crate::agent::types::is_task_thin(task_str) && !has_excerpts {
+                    stdout = format!("⚠️ 本次派发任务描述较简略，子 Agent 可能缺乏必要背景，建议在后续派发时携带 context_excerpts（包含 background、file_hints 或 todo_slice）。\n\n{}", stdout);
+                }
+                DispatchResult {
+                    stdout,
+                    stderr: String::new(),
+                    success: true,
+                    route: "child_writer:spawned".to_string(),
+                }
             },
             Err(error) => DispatchResult {
                 stdout: String::new(),
@@ -989,14 +997,22 @@ pub async fn run_tool_phase(
         )
         .await
         {
-            Ok(child_run_id) => DispatchResult {
-                stdout: format!(
+            Ok(child_run_id) => {
+                let mut stdout = format!(
                     "侦察 worker 已异步派发，child_run_id: {}。worker 拥有独立上下文并自行执行只读侦察（读文件/列目录/只读命令），完成后以结构化结论（findings/confidence/evidence_refs/missing_evidence）回到你的上下文；需要结论时调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待，或先推进其他独立操作。finish 前须确认其已结束。",
                     child_run_id, child_run_id
-                ),
-                stderr: String::new(),
-                success: true,
-                route: "child_worker:spawned".to_string(),
+                );
+                let task_str = worker_params.get("task").and_then(|v| v.as_str()).unwrap_or("");
+                let has_excerpts = worker_params.get("context_excerpts").is_some();
+                if crate::agent::types::is_task_thin(task_str) && !has_excerpts {
+                    stdout = format!("⚠️ 本次派发任务描述较简略，子 Agent 可能缺乏必要背景，建议在后续派发时携带 context_excerpts（包含 background、file_hints 或 todo_slice）。\n\n{}", stdout);
+                }
+                DispatchResult {
+                    stdout,
+                    stderr: String::new(),
+                    success: true,
+                    route: "child_worker:spawned".to_string(),
+                }
             },
             Err(error) => DispatchResult {
                 stdout: String::new(),

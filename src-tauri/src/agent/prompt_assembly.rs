@@ -89,14 +89,14 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "child_writer",
         summary: "L3 隔离写入 worker：宿主把工作区复制成私有副本，worker 在副本内修改代码并自行运行你指定的测试命令，回交逐文件 diff 与测试证据；你审阅后亲自落实真实修改；每运行最多 1 个",
         actions: &[
-            "dispatch(task: string, test_command: string [单条，如 npm test], focus_paths?: string[] <=5)",
+            "dispatch(task: string, test_command: string [单条，如 npm test], focus_paths?: string[] <=5, role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]})",
         ],
     },
     BuiltinToolSpec {
         name: "child_worker",
         summary: "L2 只读侦察 worker：独立上下文中自行读文件/列目录/执行只读命令完成侦察，回交结构化结论；每运行最多 2 个；结果经 wait_jobs 或信箱自动回收",
         actions: &[
-            "dispatch(task: string [自包含侦察任务], focus_paths?: string[] <=3 [工作区内路径])",
+            "dispatch(task: string [自包含侦察任务], focus_paths?: string[] <=3 [工作区内路径], role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]})",
         ],
     },
     BuiltinToolSpec {
