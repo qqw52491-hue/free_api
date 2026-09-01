@@ -38,12 +38,31 @@ impl GitBaseline {
         }
     }
 
-    /// 提取相对起点的过滤后代码变更 Diff
-    pub fn collect_diff(&self, workspace: &Path) -> Option<(String, String)> {
-        if !self.is_git {
-            return None;
+    /// 提取相对起点的审查材料：
+    /// 1. 有 Git 仓库：提取 Git Diff（并结合未跟踪新文件）
+    /// 2. 无 Git 仓库 / 临时目录：扫描任务启动后新增/修改的文本文件与二进制产物元数据（若无改动则 0ms 免检）
+    pub fn collect_review_material(
+        &self,
+        workspace: &Path,
+        context: &SandwichContext,
+        run_started_at: chrono::DateTime<chrono::Utc>,
+    ) -> Option<(String, String)> {
+        if self.is_git {
+            if let Some(res) = self.collect_git_diff(workspace) {
+                return Some(res);
+            }
+            // Git 模式下若无任何 Diff，且无外部副作用台账，判定为无文件变更任务（0ms 跳过）
+            if context.side_effects.is_empty() {
+                return None;
+            }
         }
 
+        // --- Non-Git 目录或无 Git 跟踪变更的 Fallback 收集 ---
+        Self::collect_fallback_workspace_changes(workspace, context, run_started_at)
+    }
+
+    /// Git 模式下的代码变更 Diff 提取
+    pub fn collect_git_diff(&self, workspace: &Path) -> Option<(String, String)> {
         // 1. 获取 Git Diff 文本
         let diff_args = if let Some(ref base) = self.base_head {
             vec!["diff", base.as_str()]
@@ -73,9 +92,12 @@ impl GitBaseline {
                 }
                 let full_path = workspace.join(file_rel);
                 if full_path.is_file() {
-                    if let Ok(content) = std::fs::read_to_string(&full_path) {
-                        let sample = if content.chars().count() > 1000 {
-                            format!("{}...\n[文件过长截断]", content.chars().take(1000).collect::<String>())
+                    if is_binary_file(file_rel) {
+                        let size_str = full_path.metadata().map(|m| format!("{} KB", m.len() / 1024)).unwrap_or_else(|_| "未知".to_string());
+                        untracked_chunks.push(format!("【新增二进制产物】文件: {} (大小: {})", file_rel, size_str));
+                    } else if let Ok(content) = std::fs::read_to_string(&full_path) {
+                        let sample = if content.chars().count() > 2000 {
+                            format!("{}...\n[文件过长截断]", content.chars().take(2000).collect::<String>())
                         } else {
                             content
                         };
@@ -114,6 +136,103 @@ impl GitBaseline {
         };
 
         Some((final_diff, hash_hex))
+    }
+
+    /// 非 Git 环境下的工作区变更与产物提取（泛化支持各类脚本、Excel、文档等）
+    fn collect_fallback_workspace_changes(
+        workspace: &Path,
+        context: &SandwichContext,
+        run_started_at: chrono::DateTime<chrono::Utc>,
+    ) -> Option<(String, String)> {
+        let since_sys = std::time::UNIX_EPOCH + std::time::Duration::from_millis(run_started_at.timestamp_millis().max(0) as u64);
+        let mut sections = Vec::new();
+
+        // 1. 扫描工作区自任务启动后修改或新增的文件
+        let mut modified_files = Vec::new();
+        Self::scan_modified_files(workspace, 0, since_sys, &mut modified_files);
+
+        for path in &modified_files {
+            let Ok(rel_path) = path.strip_prefix(workspace) else { continue };
+            let rel_str = rel_path.to_string_lossy().to_string();
+            if is_noise_path(&rel_str) {
+                continue;
+            }
+
+            if is_binary_file(&rel_str) {
+                let size_str = path.metadata().map(|m| format!("{} KB", m.len() / 1024)).unwrap_or_else(|_| "未知".to_string());
+                sections.push(format!("【生成二进制产物】文件: {} (大小: {})", rel_str, size_str));
+            } else if let Ok(content) = std::fs::read_to_string(path) {
+                let sample = if content.chars().count() > 3000 {
+                    format!("{}...\n[文件过长截断]", content.chars().take(3000).collect::<String>())
+                } else {
+                    content
+                };
+                sections.push(format!("--- 文件内容: {} ---\n{}", rel_str, sample));
+            }
+        }
+
+        // 2. 结合 Side-Effects 台账
+        if !context.side_effects.is_empty() {
+            let side_effects_desc = context.side_effects.iter()
+                .map(|r| format!("- [Step {}] {} · {}", r.step_id, r.tool, r.description))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(format!("【执行的外部不可逆操作清单 (Side-Effects)】:\n{}", side_effects_desc));
+        }
+
+        let combined = sections.join("\n\n").trim().to_string();
+        if combined.is_empty() {
+            return None;
+        }
+
+        // 3. 计算 SHA256 哈希
+        let mut hasher = Sha256::new();
+        hasher.update(combined.as_bytes());
+        let hash_hex = format!("{:x}", hasher.finalize());
+
+        // 4. 控制上限
+        let final_text = if combined.chars().count() > MAX_DIFF_CHARS {
+            format!(
+                "{}\n\n... [审查材料过长，已安全截断前 {} 字符进行审查]",
+                combined.chars().take(MAX_DIFF_CHARS).collect::<String>(),
+                MAX_DIFF_CHARS
+            )
+        } else {
+            combined
+        };
+
+        Some((final_text, hash_hex))
+    }
+
+    fn scan_modified_files(
+        dir: &Path,
+        depth: usize,
+        since: std::time::SystemTime,
+        out: &mut Vec<std::path::PathBuf>,
+    ) {
+        if depth > 4 || out.len() >= 20 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || is_noise_path(&name) {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    Self::scan_modified_files(&path, depth + 1, since, out);
+                } else if meta.is_file() {
+                    let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                    if mtime >= since {
+                        out.push(path);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -185,6 +304,27 @@ impl ReviewResult {
     }
 }
 
+/// 判定是否为二进制文件（Excel/Word/PDF/图片/压缩包等）
+pub fn is_binary_file(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.ends_with(".xlsx")
+        || p.ends_with(".xls")
+        || p.ends_with(".docx")
+        || p.ends_with(".doc")
+        || p.ends_with(".pptx")
+        || p.ends_with(".pdf")
+        || p.ends_with(".zip")
+        || p.ends_with(".tar")
+        || p.ends_with(".gz")
+        || p.ends_with(".png")
+        || p.ends_with(".jpg")
+        || p.ends_with(".jpeg")
+        || p.ends_with(".ico")
+        || p.ends_with(".webp")
+        || p.ends_with(".mp4")
+        || p.ends_with(".mp3")
+}
+
 /// 判定路径是否为噪音文件（lockfile、构建产物、依赖库、媒体资源等）
 pub fn is_noise_path(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
@@ -197,16 +337,7 @@ pub fn is_noise_path(path: &str) -> bool {
         || p.contains("dist/")
         || p.contains(".git/")
         || p.contains(".turbo/")
-        || p.ends_with(".png")
-        || p.ends_with(".jpg")
-        || p.ends_with(".jpeg")
-        || p.ends_with(".svg")
-        || p.ends_with(".ico")
-        || p.ends_with(".woff")
-        || p.ends_with(".woff2")
-        || p.ends_with(".ttf")
-        || p.ends_with(".pdf")
-        || p.ends_with(".zip")
+        || is_binary_file(path)
 }
 
 /// 过滤 Git Diff 中的噪音文件段落
@@ -263,13 +394,14 @@ pub async fn evaluate_finish_diff(
     step_id: usize,
     workspace: &Path,
     baseline: &GitBaseline,
+    run_started_at: chrono::DateTime<chrono::Utc>,
     session_id: &str,
     interrupt_rx: &mut watch::Receiver<u64>,
 ) -> ReviewResult {
     let started_at = std::time::Instant::now();
 
-    // 1. 提取 Diff
-    let Some((diff_content, diff_hash)) = baseline.collect_diff(workspace) else {
+    // 1. 提取审查材料（Git Diff 或 非 Git 修改文件/产物清单）
+    let Some((review_material, diff_hash)) = baseline.collect_review_material(workspace, context, run_started_at) else {
         return ReviewResult::skipped_empty();
     };
 
@@ -296,7 +428,7 @@ pub async fn evaluate_finish_diff(
         json!({
             "type": "action_phase",
             "phase": "reviewing",
-            "description": "🧐 专家评审员正在对代码变更进行终审...",
+            "description": "🧐 专家评审员正在对任务变更与成果进行终审...",
             "diff_hash": diff_hash
         }),
     );
@@ -305,7 +437,7 @@ pub async fn evaluate_finish_diff(
     let system_prompt = format!(
         r#"你是资深架构与代码质量审查专家（Reviewer）。
 {}
-请对本次任务提交的代码变更（Git Diff）及任务目标进行严谨客观的终态质量审查。
+请对本次任务提交的代码变更、文件修改及交付成果进行严谨客观的终态质量审查。
 
 【核心审查判定原则】
 1. 需求与逻辑：任务的核心目标是否已正确实现？是否存在明显的逻辑断层、未处理的边界异常或空指针风险？
@@ -335,7 +467,7 @@ pub async fn evaluate_finish_diff(
   "summary": "一句话审查评价与结论"
 }}
 
-注：若代码已满足需求且无严重阻塞性缺陷，blocking_issues 必须为空数组 [] 并将 verdict 设为 "passed"。"#,
+注：若成果已满足需求且无严重阻塞性缺陷，blocking_issues 必须为空数组 [] 并将 verdict 设为 "passed"。"#,
         if persona_extra.trim().is_empty() {
             ""
         } else {
@@ -344,9 +476,9 @@ pub async fn evaluate_finish_diff(
     );
 
     let user_prompt = format!(
-        "【任务目标】\n{}\n\n【本次交付的代码变更 Diff】\n```diff\n{}\n```\n\n请依据审查判定原则进行审查并输出严格的 JSON 结果。",
+        "【任务目标】\n{}\n\n【本次交付的变更材料 / 成果物】\n```\n{}\n```\n\n请依据审查判定原则进行审查并输出严格的 JSON 结果。",
         context.user_goal,
-        diff_content
+        review_material
     );
 
     let messages = vec![

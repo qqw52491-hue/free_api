@@ -1434,7 +1434,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             // 打分模式累加连续失败权重）。实测依据：Flash 档反复守不住交付披露纪律。
             context.record_step_outcome(false);
         } else if is_finish && result.success {
-            // ①~⑤ 确定性门禁 100% 通过后，才进行 Reviewer Git Diff 终审！
+            // ①~⑤ 确定性门禁 100% 通过后，才进行 Reviewer 终审（Git Diff 或 非 Git 产物/文件变更）！
             let review_res = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
                 &app,
                 state.inner(),
@@ -1443,6 +1443,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 step_id,
                 &workspace_dir,
                 &git_baseline,
+                run_started_at,
                 &final_session_id,
                 &mut interrupt_rx,
             )
