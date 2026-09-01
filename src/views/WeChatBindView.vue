@@ -733,9 +733,10 @@ async function startBridge() {
     await invoke("wechat_bridge_start");
   } catch (error) {
     loginError.value = String(error);
+  } finally {
+    await refreshStatus();
+    busy.value = false;
   }
-  await refreshStatus();
-  busy.value = false;
 }
 
 async function startLogin() {
@@ -748,9 +749,10 @@ async function startLogin() {
     startQrPolling();
   } catch (error) {
     loginError.value = String(error);
+  } finally {
+    await refreshStatus();
+    busy.value = false;
   }
-  await refreshStatus();
-  busy.value = false;
 }
 
 async function startBridgeAndLogin() {
@@ -766,11 +768,14 @@ async function stopBridge() {
     await invoke("wechat_bridge_stop");
     showQr.value = false;
     stopQrPolling();
+    qrDataUrl.value = null;
+    qrHint.value = null;
   } catch (error) {
     loginError.value = String(error);
+  } finally {
+    await refreshStatus();
+    busy.value = false;
   }
-  await refreshStatus();
-  busy.value = false;
 }
 
 async function reloginQr() {
@@ -798,9 +803,10 @@ async function reloginQr() {
     startQrPolling();
   } catch (error) {
     loginError.value = String(error);
+  } finally {
+    await refreshStatus();
+    busy.value = false;
   }
-  await refreshStatus();
-  busy.value = false;
 }
 
 async function saveConfig() {

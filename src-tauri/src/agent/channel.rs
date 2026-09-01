@@ -219,6 +219,13 @@ pub struct RunRecord {
     pub phase: Option<String>,
     /// 最新状态描述（每次状态机迁移都更新，「状态」查询可见）
     pub state_detail: Option<String>,
+    /// 任务来源: "channel" (微信/通道派发) | "desktop" (桌面端会话)
+    #[serde(default = "default_run_source")]
+    pub source: String,
+}
+
+fn default_run_source() -> String {
+    "channel".to_string()
 }
 
 pub(crate) fn runs_store() -> &'static Mutex<HashMap<String, RunRecord>> {
@@ -539,7 +546,17 @@ async fn handler_task(
         .optional()
         .map_err(internal_error)?;
     if session_exists.is_none() {
-        return Err(bad_request("会话不存在，请先创建会话"));
+        // 自愈：若会话在桌面端被清理或重启导致丢失，自动为通道重新创建该 session_id 对应的临时会话，避免死锁报错
+        let default_model = if !config.model_id.trim().is_empty() {
+            config.model_id.clone()
+        } else {
+            conn.query_row("SELECT id FROM models ORDER BY id LIMIT 1", [], |r| r.get::<_, String>(0)).unwrap_or_default()
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO chat_sessions (id, title, model_id, created_at, updated_at, message_count) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            rusqlite::params![session_id, "微信 · 自动自愈会话", default_model, now, now],
+        );
     }
     let has_project = crate::commands::projects::project_for_session(&conn, &session_id)
         .map_err(internal_error)?
@@ -576,7 +593,11 @@ async fn handler_task(
         }
     }
     if routing.pro.is_empty() {
-        routing.pro = model_id_of_session(&conn, &session_id)?;
+        routing.pro = if !config.model_id.trim().is_empty() {
+            config.model_id.clone()
+        } else {
+            model_id_of_session(&conn, &session_id)?
+        };
     }
     if routing.flash.is_empty() {
         routing.flash = routing.pro.clone();
@@ -650,6 +671,23 @@ impl SessionRunGuard {
         llm_retries: u32,
     ) -> Self {
         let started_at = now_ts();
+        let existing = {
+            let runs = runs_store().lock().expect("runs store poisoned");
+            runs.get(run_id).cloned()
+        };
+        let source = existing
+            .as_ref()
+            .map(|r| r.source.clone())
+            .unwrap_or_else(|| "desktop".to_string());
+        let report_every_actions = existing
+            .as_ref()
+            .map(|r| r.report_every_actions)
+            .unwrap_or(0);
+        let phase_push = existing
+            .as_ref()
+            .map(|r| r.phase_push)
+            .unwrap_or(false);
+
         upsert_run(RunRecord {
             run_id: run_id.to_string(),
             session_id: session_id.to_string(),
@@ -664,14 +702,15 @@ impl SessionRunGuard {
             result: None,
             error: None,
             llm_retries: llm_retries.clamp(1, 100),
-            report_every_actions: 0,
-            phase_push: false,
+            report_every_actions,
+            phase_push,
             phase: None,
             state_detail: None,
+            source,
         });
         let _ = app.emit(
             "channel-run-started",
-            json!({ "run_id": run_id, "session_id": session_id, "at": now_ts() }),
+            json!({ "run_id": run_id, "session_id": session_id, "goal": goal, "at": now_ts() }),
         );
         notify_session_event(session_id, "start");
 
@@ -863,7 +902,30 @@ pub(crate) fn register_and_spawn_run(
             .clamp(1, 100)
     );
 
-    // 立即持久化该轮任务初始状态（无论大模型是否已开始回复），保证列表与执行流立即有据可查
+    upsert_run(RunRecord {
+        run_id: run_id.clone(),
+        session_id: session_id.clone(),
+        goal_preview: truncate_chars(&goal, MAX_GOAL_PREVIEW_CHARS),
+        status: "running".to_string(),
+        paused_reason: None,
+        paused_form: None,
+        last_progress: None,
+        event_count: 0,
+        started_at: started_at.clone(),
+        updated_at: started_at.clone(),
+        result: None,
+        error: None,
+        llm_retries: llm_retries
+            .unwrap_or(crate::agent::main_loop::DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
+            .clamp(1, 100),
+        report_every_actions: _action_milestone_steps,
+        phase_push: _phase_push,
+        phase: None,
+        state_detail: None,
+        source: "channel".to_string(),
+    });
+
+    // 立即持久化该轮任务初始状态（用户消息气泡由 SessionRunGuard::new 在 channel-run-started 前写入）
     let db_state = app.state::<DbState>();
     let _ = crate::agent::run_trace::upsert_snapshot(
         db_state.inner(),
@@ -874,12 +936,6 @@ pub(crate) fn register_and_spawn_run(
         &[],
         None,
     );
-    if let Ok(conn) = db_state.0.lock() {
-        let _ = conn.execute(
-            "UPDATE chat_sessions SET updated_at=?1 WHERE id=?2",
-            rusqlite::params![started_at, session_id],
-        );
-    }
 
     let spawn_app = app.clone();
     let spawn_run = run_id.clone();
@@ -2198,16 +2254,18 @@ pub async fn wechat_bridge_relogin() -> Result<Value, String> {
 pub async fn wechat_bridge_stop() -> Result<Value, String> {
     let config = load_channel_config()?;
     BRIDGE_WATCHDOG_SUPPRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
-    let result = bridge_call(&config, "POST", "/bridge/stop", None).await;
-    let mut child = bridge_child_slot()
+    // 1. 优先立即强杀托管的 Node 子进程，避免 Node 阻塞在微信长轮询时前端无响应
+    let child = bridge_child_slot()
         .lock()
         .expect("child slot poisoned")
         .take();
-    if let Some(process) = child.as_mut() {
+    if let Some(mut process) = child {
         let _ = process.kill().await;
     }
-    drop(child);
-    result
+    // 2. 尝试向可能孤立的端口发送优雅停止请求（忽略失败）
+    let _ = bridge_call(&config, "POST", "/bridge/stop", None).await;
+    cache_bridge_status(&json!({ "running": false, "logged_in": false }));
+    Ok(json!({ "ok": true, "message": "微信桥已停止" }))
 }
 
 #[tauri::command]
@@ -2346,6 +2404,7 @@ pub async fn wechat_channel_runs() -> Result<Value, String> {
         .lock()
         .expect("runs store poisoned")
         .values()
+        .filter(|r| r.source == "channel")
         .cloned()
         .collect();
     runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
@@ -2397,6 +2456,7 @@ mod tests {
             phase_push: true,
             phase: None,
             state_detail: None,
+            source: "channel".to_string(),
         };
         upsert_run(record);
         patch_run(&key, |r| {
@@ -2429,6 +2489,7 @@ mod tests {
                 phase_push: true,
                 phase: None,
                 state_detail: None,
+                source: "channel".to_string(),
             });
         }
         let runs = runs_store().lock().unwrap();
@@ -2573,7 +2634,8 @@ mod tests {
             phase_push: true,
             phase: None,
             state_detail: None,
-        });
+                source: "channel".to_string(),
+            });
         let overlaid = apply_run_overlay(sessions);
         assert_eq!(overlaid[0]["status"], "waiting_human");
         assert_eq!(overlaid[0]["paused_reason"], "需要确认删除哪些文件？");

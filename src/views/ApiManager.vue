@@ -67,8 +67,8 @@
                   <div class="p-icon">{{ getPlatformEmoji(p.name) }}</div>
                   <div class="p-name-line">
                     <span class="p-name" :title="p.name">{{ p.name }}</span>
-                    <span v-if="getKeyCount(p.api_key) > 0" class="p-key-badge" :title="`已配置 ${getKeyCount(p.api_key)} 个 API Key (自动故障转移/轮换)`">
-                      🔑 {{ getKeyCount(p.api_key) }} {{ getKeyCount(p.api_key) === 1 ? 'Key' : 'Keys' }}
+                    <span v-if="getKeyBadge(p.api_key).total > 0" class="p-key-badge" :class="{ 'has-disabled': getKeyBadge(p.api_key).disabled > 0 }" :title="getKeyBadge(p.api_key).title">
+                      🔑 {{ getKeyBadge(p.api_key).label }}
                     </span>
                   </div>
                 </div>
@@ -330,13 +330,84 @@
                 <input class="form-input" v-model="pForm.base_url" placeholder="https://openrouter.ai/api/v1" />
               </div>
               <div class="form-group">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-                  <label class="form-label" style="margin-bottom:0">API Key *</label>
-                  <span v-if="parsedKeyCount > 0" class="key-count-badge">
-                    ⚡ 已配置 {{ parsedKeyCount }} 个 Key (自动故障转移/轮换)
-                  </span>
+                <div class="key-header-row">
+                  <label class="form-label" style="margin-bottom:0">API Key 管理 *</label>
+                  <div class="key-header-actions">
+                    <span v-if="currentKeyItems.length > 0" class="key-count-badge" :class="{ 'has-disabled': disabledKeyCount > 0 }">
+                      ⚡ {{ enabledKeyCount }}/{{ currentKeyItems.length }} 启用 {{ disabledKeyCount > 0 ? `(${disabledKeyCount} 个已禁用/跳过)` : '(自动轮换)' }}
+                    </span>
+                    <button
+                      type="button"
+                      class="btn-text-action"
+                      @click="rawKeyInputMode = !rawKeyInputMode"
+                      :title="rawKeyInputMode ? '切换到卡片式开关列表' : '切换到纯文本批量输入'"
+                    >
+                      {{ rawKeyInputMode ? '📱 开关列表' : '📝 批量编辑' }}
+                    </button>
+                  </div>
                 </div>
-                <div class="key-wrap">
+
+                <!-- 模式 A：卡片式列表与开关 (默认当有Key且非批量模式时展示) -->
+                <div v-if="!rawKeyInputMode && currentKeyItems.length > 0" class="key-management-box">
+                  <div class="key-items-list">
+                    <div
+                      v-for="(item, idx) in currentKeyItems"
+                      :key="idx"
+                      class="key-item-card"
+                      :class="{ 'is-disabled': !item.enabled }"
+                    >
+                      <div class="key-item-left">
+                        <span class="key-idx">#{{ idx + 1 }}</span>
+                        <span class="key-text" :title="item.key">
+                          {{ showKey ? item.key : maskKey(item.key) }}
+                        </span>
+                      </div>
+                      <div class="key-item-right">
+                        <span class="key-state-tag" :class="{ active: item.enabled }">
+                          {{ item.enabled ? '🟢 轮询中' : '⚪ 已跳过' }}
+                        </span>
+                        <button
+                          type="button"
+                          class="key-switch-btn"
+                          :class="{ active: item.enabled }"
+                          :title="item.enabled ? '点击临时禁用该 Key (轮询调度时将跳过)' : '点击重新启用该 Key'"
+                          @click="toggleKeyItem(idx)"
+                        >
+                          <span class="key-switch-thumb"></span>
+                        </button>
+                        <button
+                          type="button"
+                          class="btn-icon-xs btn-del-key"
+                          title="删除此 Key"
+                          @click="removeKeyItem(idx)"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 快捷添加单条 Key -->
+                  <div class="add-key-inline">
+                    <input
+                      v-model="newKeyInput"
+                      class="form-input form-input-sm"
+                      placeholder="输入新的 API Key (如 sk-... 或 AIzaSy...)"
+                      @keydown.enter.prevent="addSingleKey"
+                    />
+                    <button
+                      type="button"
+                      class="btn btn-secondary btn-sm"
+                      :disabled="!newKeyInput.trim()"
+                      @click="addSingleKey"
+                    >
+                      + 添加 Key
+                    </button>
+                  </div>
+                </div>
+
+                <!-- 模式 B：纯文本多行编辑器 -->
+                <div v-else class="key-wrap">
                   <textarea
                     class="form-textarea key-textarea"
                     v-model="pForm.api_key"
@@ -349,8 +420,9 @@
                     <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8"/><path d="M1 1l22 22"/></svg>
                   </button>
                 </div>
+
                 <div class="form-tip">
-                  💡 支持多 Key 备份：调用模型时若遇 402(欠费/余额不足) 或 429(限流)，系统将自动无缝切换到下一个 Key，模型保持不变。
+                  💡 <strong>每个 Key 均带独立开关</strong>：默认全部开启。临时关闭某个 Key 后，在模型调用与轮询时会自动跳过它，无须删除 Key。
                 </div>
               </div>
               <div v-if="formError" class="form-error">⚠️ {{ formError }}</div>
@@ -898,19 +970,41 @@ const filteredModelSpecs = computed(() => {
   )
 })
 
-const parsedKeyCount = computed(() => {
-  const raw = pForm.value.api_key || ''
-  return parseKeys(raw).length
-})
+interface ApiKeyItem {
+  key: string;
+  enabled: boolean;
+}
 
-function parseKeys(raw: string): string[] {
+const rawKeyInputMode = ref(false)
+const newKeyInput = ref('')
+
+function maskKey(key: string): string {
+  const clean = (key || '').trim()
+  if (clean.length > 12) {
+    return clean.slice(0, 6) + '...' + clean.slice(-4)
+  }
+  return clean ? '******' : ''
+}
+
+function parseKeyItems(raw: string): ApiKeyItem[] {
   if (!raw) return []
   const trimmed = raw.trim()
   if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
     try {
       const arr = JSON.parse(trimmed)
       if (Array.isArray(arr)) {
-        return arr.map((s: string) => String(s).trim()).filter(Boolean)
+        const list: ApiKeyItem[] = []
+        for (const item of arr) {
+          if (typeof item === 'string') {
+            const clean = item.trim()
+            if (clean) list.push({ key: clean, enabled: true })
+          } else if (item && typeof item === 'object') {
+            const k = String(item.key || item.api_key || item.token || '').trim()
+            const enabled = item.enabled !== false && item.disabled !== true
+            if (k) list.push({ key: k, enabled })
+          }
+        }
+        if (list.length > 0) return list
       }
     } catch {}
   }
@@ -918,10 +1012,74 @@ function parseKeys(raw: string): string[] {
     .split(/[\n\r,;，；]+/)
     .map(s => s.trim())
     .filter(Boolean)
+    .map(s => ({ key: s, enabled: true }))
 }
 
-function getKeyCount(rawKey: string): number {
-  return parseKeys(rawKey).length
+function serializeKeyItems(items: ApiKeyItem[]): string {
+  if (items.length === 0) return ''
+  const hasDisabled = items.some(i => !i.enabled)
+  if (hasDisabled) {
+    return JSON.stringify(items.map(i => ({ key: i.key.trim(), enabled: i.enabled })))
+  }
+  if (items.length === 1) {
+    return items[0].key.trim()
+  }
+  return items.map(i => i.key.trim()).join('\n')
+}
+
+const currentKeyItems = computed(() => parseKeyItems(pForm.value.api_key || ''))
+const enabledKeyCount = computed(() => currentKeyItems.value.filter(i => i.enabled).length)
+const disabledKeyCount = computed(() => currentKeyItems.value.length - enabledKeyCount.value)
+
+
+function getKeyBadge(rawKey: string) {
+  const items = parseKeyItems(rawKey)
+  const total = items.length
+  const enabled = items.filter(i => i.enabled).length
+  const disabled = total - enabled
+  let label = ''
+  let title = ''
+  if (total === 0) {
+    label = '0 Key'
+    title = '未配置 API Key'
+  } else if (disabled === 0) {
+    label = `${total} ${total === 1 ? 'Key' : 'Keys'}`
+    title = `已配置 ${total} 个 API Key (全部启用，自动故障转移/轮换)`
+  } else {
+    label = `${enabled}/${total} Keys`
+    title = `已配置 ${total} 个 API Key (${enabled} 个启用，${disabled} 个已禁用/跳过)`
+  }
+  return { total, enabled, disabled, label, title }
+}
+
+function toggleKeyItem(index: number) {
+  const list = parseKeyItems(pForm.value.api_key || '')
+  if (index >= 0 && index < list.length) {
+    list[index].enabled = !list[index].enabled
+    pForm.value.api_key = serializeKeyItems(list)
+  }
+}
+
+function removeKeyItem(index: number) {
+  const list = parseKeyItems(pForm.value.api_key || '')
+  if (index >= 0 && index < list.length) {
+    list.splice(index, 1)
+    pForm.value.api_key = serializeKeyItems(list)
+  }
+}
+
+function addSingleKey() {
+  const raw = newKeyInput.value.trim()
+  if (!raw) return
+  const newItems = parseKeyItems(raw)
+  const list = parseKeyItems(pForm.value.api_key || '')
+  for (const item of newItems) {
+    if (!list.some(existing => existing.key === item.key)) {
+      list.push(item)
+    }
+  }
+  pForm.value.api_key = serializeKeyItems(list)
+  newKeyInput.value = ''
 }
 
 function formatTok(tokens: number) {
@@ -2217,6 +2375,201 @@ onMounted(async () => {
 .form-textarea:focus { border-color: rgba(255, 255, 255, 0.25); }
 
 /* ---- Key toggle & Multi-key styles ---- */
+/* ---- Key Switch & Management Box Styles ---- */
+.key-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.key-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-text-action {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-text-action:hover {
+  color: var(--text-1);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--border-2);
+}
+
+.key-management-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-1);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.key-items-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.key-item-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.key-item-card.is-disabled {
+  opacity: 0.65;
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+.key-item-card:hover {
+  border-color: var(--border-2);
+}
+
+.key-item-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.key-idx {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: monospace;
+}
+
+.key-text {
+  font-family: 'JetBrains Mono', Consolas, Monaco, monospace;
+  font-size: 11.5px;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.key-item-card.is-disabled .key-text {
+  color: var(--text-3);
+  text-decoration: line-through;
+}
+
+.key-item-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.key-state-tag {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.key-state-tag.active {
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.key-switch-btn {
+  width: 32px;
+  height: 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  position: relative;
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  outline: none;
+}
+
+.key-switch-btn.active {
+  background: #10b981;
+  border-color: #10b981;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.35);
+}
+
+.key-switch-thumb {
+  position: absolute;
+  top: 1px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.key-switch-btn.active .key-switch-thumb {
+  transform: translateX(14px);
+}
+
+.btn-icon-xs {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  transition: all 0.15s;
+}
+
+.btn-icon-xs:hover {
+  color: var(--text-1);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.btn-del-key:hover {
+  color: var(--red-light);
+  background: rgba(255, 71, 87, 0.12);
+}
+
+.add-key-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.p-key-badge.has-disabled,
+.key-count-badge.has-disabled {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
 .key-wrap { position: relative; }
 
 .key-textarea {

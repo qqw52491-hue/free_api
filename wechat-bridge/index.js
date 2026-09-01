@@ -153,9 +153,13 @@ async function api(method, apiPath, body) {
 }
 
 async function botSend(text) {
-  if (!bot) return;
+  if (!bot) {
+    console.log("[bridge] botSend 跳过：bot 实例未就绪");
+    return;
+  }
   try {
     await bot.sendMessage(text);
+    console.log(`[bridge] 主动推送已下发: "${text.slice(0, 40).replace(/\n/g, ' ')}..."`);
   } catch (error) {
     console.error(`[bridge] 主动推送失败（context_token 可能已过期）: ${error}`);
   }
@@ -163,9 +167,13 @@ async function botSend(text) {
 
 /** 带文件回推的推送；失败降级为纯文本 */
 async function botSendWithMedia(text, media) {
-  if (!bot) return;
+  if (!bot) {
+    console.log("[bridge] botSendWithMedia 跳过：bot 实例未就绪");
+    return;
+  }
   try {
     await bot.sendMessage({ text, media });
+    console.log(`[bridge] 主动文件推送已下发: ${media.fileName || media.url}`);
   } catch (error) {
     console.error(`[bridge] 文件推送失败，降级为文本: ${error}`);
     await botSend(text);
@@ -286,12 +294,36 @@ async function submitTask(conversationId, goalText) {
   const sender = senderOf(conversationId);
   let sessionId = sender.session_id;
   if (!sessionId) {
-    const session = await api("POST", "/channel/session", { title: "微信 · 临时" });
+    const session = await api("POST", "/channel/session", {
+      project_id: sender.project_id || undefined,
+      title: sender.project_name ? `微信 · ${sender.project_name}` : "微信 · 临时",
+    });
     sender.session_id = session.session_id;
     saveState();
     sessionId = session.session_id;
   }
-  const task = await api("POST", "/channel/task", { session_id: sessionId, goal: goalText });
+  let task;
+  try {
+    task = await api("POST", "/channel/task", { session_id: sessionId, goal: goalText });
+  } catch (error) {
+    if (
+      String(error.message).includes("会话") ||
+      String(error.message).includes("session") ||
+      String(error.message).includes("模型")
+    ) {
+      console.log(`[bridge] 会话 ${sessionId} 失效/异常，尝试自动重建并重试派发任务...`);
+      const session = await api("POST", "/channel/session", {
+        project_id: sender.project_id || undefined,
+        title: sender.project_name ? `微信 · ${sender.project_name}` : "微信 · 临时",
+      });
+      sender.session_id = session.session_id;
+      saveState();
+      sessionId = session.session_id;
+      task = await api("POST", "/channel/task", { session_id: sessionId, goal: goalText });
+    } else {
+      throw error;
+    }
+  }
   state.task_counter = (state.task_counter || 0) + 1;
   saveState();
   const num = state.task_counter;
@@ -425,6 +457,7 @@ function watchRun(conversationId, runId, num) {
     clearInterval(timer);
     activeRuns.delete(conversationId);
     pendingQuestions.delete(conversationId);
+    console.log(`[bridge] watchRun 检测到任务 #${num} 终态: ${run.status} (hasResult: ${Boolean(run.result)})`);
     if (run.status === "done") {
       lastResults.set(conversationId, { num, text: run.result || "" });
       const artifact = await latestArtifact(run.session_id);

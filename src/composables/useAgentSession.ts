@@ -1460,6 +1460,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         await register(`agent-tool-event-${sid}`, (payload) => handleToolEvent(asRecord(payload)));
         await register("channel-run-started", async (payload: any) => {
             if (payload?.session_id === sid) {
+                if (payload?.goal) {
+                    currentGoal.value = payload.goal;
+                }
                 runTerminal.value = false;
                 isRunning.value = true;
                 isThinking.value = true;
@@ -1470,6 +1473,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         });
         await register("channel-run-done", async (payload: any) => {
             if (payload?.session_id === sid) {
+                currentGoal.value = "";
                 await loadRunTraces();
                 await loadConversation();
                 isRunning.value = false;

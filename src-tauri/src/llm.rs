@@ -397,30 +397,81 @@ impl ModelConfig {
     }
 }
 
-/// 解析文本中的多个 API Key（按换行、逗号、分号或 JSON 数组拆分）
-pub fn parse_api_keys(raw: &str) -> Vec<String> {
+/// 解析文本中的所有 API Key 项（支持对象数组结构 [{"key": "...", "enabled": true}]）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ParsedApiKeyItem {
+    pub key: String,
+    #[serde(default = "default_key_enabled")]
+    pub enabled: bool,
+}
+
+fn default_key_enabled() -> bool {
+    true
+}
+
+/// 解析文本中的所有 API Key 项（包含启用与临时禁用状态）
+pub fn parse_all_api_key_items(raw: &str) -> Vec<ParsedApiKeyItem> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return vec![];
     }
-    // 如果是 JSON 数组格式 ["key1", "key2"]
+    // 如果是 JSON 数组格式
     if trimmed.starts_with('[') && trimmed.ends_with(']') {
-        if let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed) {
-            let list: Vec<String> = arr
-                .into_iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !list.is_empty() {
-                return list;
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(arr) = val.as_array() {
+                let mut list = Vec::new();
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        let clean = s.trim();
+                        if !clean.is_empty() {
+                            list.push(ParsedApiKeyItem {
+                                key: clean.to_string(),
+                                enabled: true,
+                            });
+                        }
+                    } else if let Some(obj) = item.as_object() {
+                        let enabled = obj.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let disabled = obj.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let is_enabled = enabled && !disabled;
+                        let key_str = obj
+                            .get("key")
+                            .or_else(|| obj.get("api_key"))
+                            .or_else(|| obj.get("token"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        if !key_str.is_empty() {
+                            list.push(ParsedApiKeyItem {
+                                key: key_str.to_string(),
+                                enabled: is_enabled,
+                            });
+                        }
+                    }
+                }
+                if !list.is_empty() {
+                    return list;
+                }
             }
         }
     }
     // 按照换行、逗号（中英文）、分号（中英文）分割
     trimmed
         .split(|c: char| c == '\n' || c == '\r' || c == ',' || c == ';' || c == '，' || c == '；')
-        .map(|s| s.trim().to_string())
+        .map(|s| s.trim())
         .filter(|s| !s.is_empty())
+        .map(|s| ParsedApiKeyItem {
+            key: s.to_string(),
+            enabled: true,
+        })
+        .collect()
+}
+
+/// 解析平台中配置的所有处于启用状态的可用 API Key 列表（过滤掉 enabled: false 的项）
+pub fn parse_api_keys(raw: &str) -> Vec<String> {
+    parse_all_api_key_items(raw)
+        .into_iter()
+        .filter(|item| item.enabled && !item.key.trim().is_empty())
+        .map(|item| item.key)
         .collect()
 }
 
@@ -879,7 +930,16 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
 
     let mut available_keys = config.api_keys();
     if available_keys.is_empty() {
-        available_keys.push(config.api_key.clone());
+        let raw = config.api_key.trim();
+        if !raw.is_empty() && !raw.starts_with('[') {
+            available_keys.push(raw.to_string());
+        }
+    }
+    if available_keys.is_empty() {
+        return Err(format!(
+            "平台 [{}] 当前没有可用或处于启用状态的 API Key（所有 Key 均被临时禁用，请在【LLM 管理】中开启至少一个 Key）",
+            config.platform_name
+        ));
     }
     let total_keys = available_keys.len();
 
