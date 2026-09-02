@@ -153,9 +153,10 @@ pub struct DurableAgentContext {
     /// 避坑教训；嵌入字段以兼容旧 checkpoint JSON。
     #[serde(default)]
     pub failed_attempts: Vec<FailedAttempt>,
-    /// 不可逆改动台账；嵌入字段以兼容旧 checkpoint JSON。
     #[serde(default)]
     pub side_effects: Vec<SideEffectRecord>,
+    #[serde(default)]
+    pub inherited_side_effects_count: usize,
     pub progress_summary: String,
     pub observation_summary: String,
     pub active_tool: Option<String>,
@@ -185,6 +186,7 @@ impl DurableAgentContext {
             turns_history: context.turns_history.clone(),
             failed_attempts: context.failed_attempts.clone(),
             side_effects: context.side_effects.clone(),
+            inherited_side_effects_count: context.inherited_side_effects_count,
             progress_summary: context.progress_summary.clone(),
             observation_summary: truncate_chars(
                 &context.current_observation,
@@ -214,6 +216,7 @@ impl DurableAgentContext {
         context.turns_history = self.turns_history.clone();
         context.failed_attempts = self.failed_attempts.clone();
         context.side_effects = self.side_effects.clone();
+        context.inherited_side_effects_count = self.inherited_side_effects_count;
         context.progress_summary = self.progress_summary.clone();
         context.current_observation = self.observation_summary.clone();
         context.active_tool = self.active_tool.clone();
