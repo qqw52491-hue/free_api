@@ -547,7 +547,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     let mut tool_detail = {
                         let registry = registry_state.inner().lock().await;
                         let exact = registry.format_tool_detail(&attempted_tool);
-                        if exact.contains("未找到工具") {
+                        if exact.contains("未找到工具") || exact.contains("离线") || exact.contains("连接失败") {
                             String::new()
                         } else {
                             exact

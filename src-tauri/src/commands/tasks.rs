@@ -187,10 +187,10 @@ pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("路径无效: {}", e))?;
     let path_str = canonical.to_string_lossy().to_string();
-    let file_uri = format!("file://{}", path_str);
 
     #[cfg(target_os = "linux")]
     {
+        let file_uri = format!("file://{}", path_str);
         let gnome_data = format!("copy\n{}", file_uri);
 
         // 1. 尝试 wl-copy (Wayland 环境)

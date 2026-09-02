@@ -121,15 +121,27 @@ pub async fn load_tool_manual_for_next_step(
             tool_key
         );
     } else if !tool_detail.trim().is_empty() {
-        context.turns_history.push(ChatMessage {
-            role: "user".to_string(),
-            content: json!(format!(
-                "【工具/Skill 操作手册: {}】\n{}\n(已写入历史流，后续调用可直接参考此规格)",
-                tool_key,
-                tool_detail.trim()
-            )),
-        });
-        context.fetched_tools.insert(tool_key.clone());
-        println!("📖 [Tool Manifest Cache] 首次引入工具手册 [{}] 并作为事件追加至历史流 (已标记 fetched)", tool_key);
+        if tool_detail.contains("未找到工具") || tool_detail.contains("离线") || tool_detail.contains("连接失败") {
+            context.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!(
+                    "【插件不可用提示】插件/工具 [{}] 当前处于离线或连接失败状态，暂无可用工具，请勿尝试调用该插件下的动作。",
+                    tool_key
+                )),
+            });
+            context.fetched_tools.insert(tool_key.clone());
+            println!("⚠️ [Tool Manifest] 插件 [{}] 处于离线/连接失败状态，已注入不可用简短提示", tool_key);
+        } else {
+            context.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!(
+                    "【工具/Skill 操作手册: {}】\n{}\n(已写入历史流，后续调用可直接参考此规格)",
+                    tool_key,
+                    tool_detail.trim()
+                )),
+            });
+            context.fetched_tools.insert(tool_key.clone());
+            println!("📖 [Tool Manifest Cache] 首次引入工具手册 [{}] 并作为事件追加至历史流 (已标记 fetched)", tool_key);
+        }
     }
 }

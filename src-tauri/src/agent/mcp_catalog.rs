@@ -331,16 +331,23 @@ fn concise_schema_fields(schema: &serde_json::Value) -> String {
 pub fn concise_menu(
     items: impl IntoIterator<Item = (String, Vec<McpToolDef>, Option<String>)>,
 ) -> String {
-    let mut lines = vec![
-        "\n## MCP 工具目录（字段来自服务声明的 JSON Schema；* 为必填，? 为可选；需要约束细节请使用 next_tool_hint）"
-            .to_string(),
-    ];
     let mut sorted_items: Vec<(String, Vec<McpToolDef>, Option<String>)> =
         items.into_iter().collect();
     // 严格按插件名称字母序排序，消除 HashMap 遍历导致的随机性与前缀缓存击穿
     sorted_items.sort_by(|a, b| a.0.cmp(&b.0));
 
+    let mut lines = vec![
+        "\n## MCP 工具目录（字段来自服务声明的 JSON Schema；* 为必填，? 为可选；需要约束细节请使用 next_tool_hint）"
+            .to_string(),
+    ];
+    let mut valid_count = 0;
+
     for (name, mut tools, _card_opt) in sorted_items {
+        // 🚨 核心过滤：若该插件工具列表为空（连接失败、离线或无可用动作），绝不注入工具目录，杜绝诱导模型调用幽灵工具
+        if tools.is_empty() {
+            continue;
+        }
+        valid_count += 1;
         // 工具列表也严格按名称字母序排序。能力卡由模型生成，不能充当参数契约，
         // 因此不投影到执行提示词；模型只能看到服务声明的字段。
         tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -349,6 +356,9 @@ pub fn concise_menu(
             .map(|tool| format!("{}({})", tool.name, concise_schema_fields(&tool.schema)))
             .collect::<Vec<_>>();
         lines.push(format!("- {}: [{}]", name, tool_summaries.join("; ")));
+    }
+    if valid_count == 0 {
+        return String::new();
     }
     lines.push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}；仅使用上列服务声明字段。".to_string());
     lines.join("\n")
@@ -424,5 +434,29 @@ mod tests {
         assert!(menu.contains("ripgrep_search(cwd?, glob?, pattern*)"));
         assert!(!menu.contains("path?"));
         assert!(!menu.contains("include?"));
+    }
+
+    #[test]
+    fn concise_menu_skips_empty_or_failed_plugins() {
+        // 插件列表为空或插件内部工具为空时，绝不渲染 - plugin: []
+        let empty_menu = concise_menu(vec![
+            ("offline_plugin".to_string(), vec![], None),
+        ]);
+        assert_eq!(empty_menu, "");
+
+        let mixed_menu = concise_menu(vec![
+            ("offline_plugin".to_string(), vec![], None),
+            (
+                "active_plugin".to_string(),
+                vec![McpToolDef {
+                    name: "do_something".to_string(),
+                    description: "active tool".to_string(),
+                    schema: json!({ "properties": {} }),
+                }],
+                None,
+            ),
+        ]);
+        assert!(!mixed_menu.contains("offline_plugin"));
+        assert!(mixed_menu.contains("active_plugin: [do_something(无参数)]"));
     }
 }

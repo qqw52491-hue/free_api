@@ -207,14 +207,15 @@ impl PluginRegistry {
             let plugin_cfg = client.config.clone();
             let m_cfg = model_config.cloned();
             let plugin_name_log = client.config.name.clone();
+            let client_for_timeout = client.clone();
             let outcome = tokio::time::timeout(Duration::from_secs(8), async move {
-                client.ensure_session_initialized(Some(&session_id)).await?;
-                let tools = match client.list_tools().await {
+                client_for_timeout.ensure_session_initialized(Some(&session_id)).await?;
+                let tools = match client_for_timeout.list_tools().await {
                     Ok(tools) => tools,
                     Err(first_error) => {
                         // 吸收握手竞态与瞬时抖动：短退避后重试一次，仍失败才向上报错。
                         tokio::time::sleep(Duration::from_millis(400)).await;
-                        client.list_tools().await.map_err(|retry_error| {
+                        client_for_timeout.list_tools().await.map_err(|retry_error| {
                             format!("tools/list 首次失败: {first_error}; 重试失败: {retry_error}")
                         })?
                     }
@@ -232,14 +233,22 @@ impl PluginRegistry {
             .await;
             match outcome {
                 Ok(Ok(())) => {}
-                Ok(Err(error)) => eprintln!(
-                    "❌ MCP 工具目录预热失败 [{}]：{}（该插件在模型目录中将显示为空）",
-                    plugin_name_log, error
-                ),
-                Err(_) => eprintln!(
-                    "⏰ MCP 工具目录预热超时 [{}]（该插件在模型目录中将显示为空）",
-                    plugin_name_log
-                ),
+                Ok(Err(error)) => {
+                    eprintln!(
+                        "❌ MCP 工具目录预热失败 [{}]：{}（已从可用工具目录中屏蔽，避免注入无效工具）",
+                        plugin_name_log, error
+                    );
+                    crate::agent::mcp_catalog::remember_tools(&client.config, &[]);
+                    *client.cached_tools.write().unwrap_or_else(|p| p.into_inner()) = Vec::new();
+                }
+                Err(_) => {
+                    eprintln!(
+                        "⏰ MCP 工具目录预热超时 [{}]（已从可用工具目录中屏蔽，避免注入无效工具）",
+                        plugin_name_log
+                    );
+                    crate::agent::mcp_catalog::remember_tools(&client.config, &[]);
+                    *client.cached_tools.write().unwrap_or_else(|p| p.into_inner()) = Vec::new();
+                }
             }
         }
     }
@@ -291,24 +300,35 @@ impl PluginRegistry {
     }
 
     pub fn format_tools_menu(&self) -> String {
-        let mut lines: Vec<String> = Vec::new();
-        lines
-            .push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\")".to_string());
-
         let mut catalogs = Vec::new();
         for (name, client) in &self.clients {
             let tools = crate::agent::mcp_catalog::cached_tools(&client.config)
                 .unwrap_or_else(|| client.last_known_tools());
+            // 🚨 核心过滤：若该插件无任何可用工具（连接失败、离线），不纳入目录
+            if tools.is_empty() {
+                continue;
+            }
             let card = crate::agent::mcp_catalog::cached_capability_card(&client.config);
             catalogs.push((name.clone(), tools, card));
         }
+        if catalogs.is_empty() {
+            return String::new();
+        }
+
+        let menu = crate::agent::mcp_catalog::concise_menu(catalogs);
+        if menu.trim().is_empty() {
+            return String::new();
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        lines
+            .push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\")".to_string());
         lines.extend(
-            crate::agent::mcp_catalog::concise_menu(catalogs)
-                .trim_start_matches(
-                    "\n## MCP 工具目录（动态能力卡缓存；如需完整参数规范请使用 next_tool_hint）",
-                )
-                .lines()
-                .map(str::to_string),
+            menu.trim_start_matches(
+                "\n## MCP 工具目录（动态能力卡缓存；如需完整参数规范请使用 next_tool_hint）",
+            )
+            .lines()
+            .map(str::to_string),
         );
 
         lines.join("\n")
@@ -338,7 +358,10 @@ impl PluginRegistry {
             .collect();
 
         if matched.is_empty() {
-            return format!("\n❌ 未找到工具/插件 [{}] 的说明书。", requested_name);
+            return format!(
+                "\n❌ 未找到工具/插件 [{}] 的说明书或该服务当前处于离线/连接失败状态。",
+                requested_name
+            );
         }
 
         let mut detail = format!(
