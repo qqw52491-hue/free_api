@@ -47,12 +47,17 @@ impl GitBaseline {
         context: &SandwichContext,
         run_started_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<(String, String)> {
+        // 若本轮为纯对话/只读任务（未产生任何新增写入副作用），直接 0ms 跳过代码评审
+        if context.side_effects.len() == context.inherited_side_effects_count {
+            return None;
+        }
+
         if self.is_git {
             if let Some(res) = self.collect_git_diff(workspace) {
                 return Some(res);
             }
-            // Git 模式下若无任何 Diff，且无外部副作用台账，判定为无文件变更任务（0ms 跳过）
-            if context.side_effects.is_empty() {
+            // Git 模式下若无任何 Diff，且无新增外部副作用台账，判定为无文件变更任务（0ms 跳过）
+            if context.side_effects.len() == context.inherited_side_effects_count {
                 return None;
             }
         }
@@ -171,9 +176,14 @@ impl GitBaseline {
             }
         }
 
-        // 2. 结合 Side-Effects 台账
-        if !context.side_effects.is_empty() {
-            let side_effects_desc = context.side_effects.iter()
+        // 2. 结合 Side-Effects 台账（仅收集本轮新增的副作用）
+        let new_side_effects = if context.side_effects.len() > context.inherited_side_effects_count {
+            &context.side_effects[context.inherited_side_effects_count..]
+        } else {
+            &[]
+        };
+        if !new_side_effects.is_empty() {
+            let side_effects_desc = new_side_effects.iter()
                 .map(|r| format!("- [Step {}] {} · {}", r.step_id, r.tool, r.description))
                 .collect::<Vec<_>>()
                 .join("\n");
