@@ -624,6 +624,8 @@ async fn run_agent_main_loop_in_workspace_inner(
         (None, Vec::new())
     };
     let is_project_session = project_workspace.is_some();
+    let has_workspace_override = workspace_override.is_some();
+    let is_explicit_workspace = is_project_session || has_workspace_override;
     // Skill、插件与 shell 工具共享本轮运行时工作目录；恢复时会重新读取并按哈希复用未变更的 Skill。
     let workspace_dir = workspace_override
         .or(project_workspace)
@@ -673,9 +675,12 @@ async fn run_agent_main_loop_in_workspace_inner(
     let role_cards_menu = crate::agent::tools::role_manager::build_role_cards_menu(state.inner())
         .unwrap_or_default();
 
-    // 3. 从当前工作区向上读取 AGENTS.md / HUB.md；内容未变时走进程内哈希缓存。
-    let workspace_skill_context =
-        crate::agent::skill_context::workspace_skill_context(&workspace_dir);
+    // 3. 从当前工作区向上读取 AGENTS.md / HUB.md；未显式选定项目/工作区时保持为空。
+    let workspace_skill_context = if is_explicit_workspace {
+        crate::agent::skill_context::workspace_skill_context(&workspace_dir)
+    } else {
+        String::new()
+    };
     // 4. 用户在能力管理页维护的条目只作为补充上下文；读取失败不能阻断正常 Agent 运行。
     let custom_instruction_context = crate::commands::load_enabled_custom_instruction_context(
         state.inner(),
@@ -832,7 +837,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         crate::agent::conversation::recent_history(state.inner(), &final_session_id)?;
     // 审查任务在首次模型调用前注入轻量项目地图。它只包含目录、入口和 Git 元数据，
     // 不读取源码正文；恢复中的运行沿用 checkpoint，避免反复追加同一张地图。
-    if !is_resuming_existing {
+    if !is_resuming_existing && is_explicit_workspace {
         if let Some(review_map) = crate::agent::project_map::review_bootstrap(&goal, &workspace_dir)
         {
             context.turns_history.push(context::types::ChatMessage {
@@ -867,7 +872,11 @@ async fn run_agent_main_loop_in_workspace_inner(
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
     // 初始工作区是会话选择的已声明资源；恢复时保留 checkpoint 中已有的显式契约。
-    if context.resource_scope.primary_filesystem().is_none() {
+    // 仅在显式项目会话、存在 workspace_override 或 auto_pilot 模式下才声明主工作区。
+    // 在未选项目的通用自由会话中，主工作区保持为 None（自由模式），避免将宿主机启动目录误作为资源约束强塞给 Agent 及外部 MCP。
+    if (is_explicit_workspace || auto_pilot)
+        && context.resource_scope.primary_filesystem().is_none()
+    {
         let validation = if workspace_dir.is_dir() {
             context::resource_scope::ResourceScopeValidation::Valid
         } else {
@@ -1909,13 +1918,17 @@ async fn run_agent_main_loop_in_workspace_inner(
             .map_err(|e| e.to_string())?;
             // 自动登记运行期间新生成的工作区文件为产物：微信"完成后回推文件"
             // 不再依赖模型记得调用 register_file（漏登记 = 用户只收到文字收不到文件）
-            let registered = crate::agent::artifact_manager::auto_register_run_artifacts(
-                state.inner(),
-                &final_session_id,
-                Some(&run_id),
-                &workspace_dir,
-                run_started_at,
-            );
+            let registered = if is_explicit_workspace {
+                crate::agent::artifact_manager::auto_register_run_artifacts(
+                    state.inner(),
+                    &final_session_id,
+                    Some(&run_id),
+                    &workspace_dir,
+                    run_started_at,
+                )
+            } else {
+                Vec::new()
+            };
             if !registered.is_empty() {
                 println!(
                     "[run-trace] 自动登记 {} 个运行期产物: {}",
