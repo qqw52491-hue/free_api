@@ -216,9 +216,23 @@ impl ModelConfig {
         if !self.is_ollama && !self.is_lmstudio {
             body["stream_options"] = json!({ "include_usage": true });
         }
-        // 火山方舟 Chat API 原生支持 response_format；以请求级协议确保最终正文为合法 JSON。
-        // 这不改变任务提示、工具参数或模型路由，仅约束机器可解析的外层输出。
-        self.apply_provider_capabilities(&mut body, reasoning_effort);
+
+        // 1. 如果模型自身已配置了结构化的 provider_capabilities，优先应用自定义配置
+        let has_custom_profile = self.apply_provider_capabilities(&mut body, reasoning_effort);
+
+        // 2. 多厂商参数过滤与规范化层（Model Parameter Normalizer）：
+        // 基于家族指纹识别（Kimi、OpenAI o系列、DeepSeek R1、Claude等）对请求体执行参数白名单清洗。
+        // 若未配自定义画像，或属于严格敏感采样模型（如 Kimi-K3），确保敏感采样参数被剥离，防止 400 Bad Request
+        let family = crate::agent::model_filter::detect_model_family(&self.model_name, &self.base_url);
+        if !has_custom_profile || family == crate::agent::model_filter::ModelFamily::KimiReasoning {
+            crate::agent::model_filter::sanitize_and_normalize_body(
+                &mut body,
+                family,
+                reasoning_effort,
+                effective_max_tokens,
+            );
+        }
+
         // Ollama 需要通过 options 注入 num_ctx 与 num_predict
         if self.is_ollama {
             body["options"] = json!({
@@ -233,27 +247,17 @@ impl ModelConfig {
     }
 
     /// 将模型级 capability profile 映射到 OpenAI 兼容请求字段。
-    /// profile 缺失、不是对象或字段无效时安全降级为通用请求，不按模型名猜测供应商能力。
-    pub fn apply_provider_capabilities(&self, body: &mut Value, preference: &str) {
+    /// profile 缺失、不是对象或字段无效时安全降级为通用请求，返回 false；成功应用返回 true。
+    pub fn apply_provider_capabilities(&self, body: &mut Value, preference: &str) -> bool {
         let profile: Value = match serde_json::from_str::<Value>(&self.provider_capabilities) {
             Ok(value) if value.is_object() => value,
-            Ok(_) => {
-                eprintln!(
-                    "⚠️ 模型 {} 的 provider_capabilities 不是对象，已忽略",
-                    self.model_id
-                );
-                return;
-            }
-            Err(error) => {
-                eprintln!(
-                    "⚠️ 模型 {} 的 provider_capabilities 无法解析，已忽略: {}",
-                    self.model_id, error
-                );
-                return;
-            }
+            Ok(_) => return false,
+            Err(_) => return false,
         };
+        if profile.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+            return false;
+        }
         // 平台级 API 格式：如火山方舟需要 response_format: json_object 强制 JSON 输出模式。
-        // 之前按 URL contains("volces.com") 硬编码，现在由 profile 声明。
         if let Some(response_format) = profile.get("response_format") {
             if let Some(object) = body.as_object_mut() {
                 object.insert("response_format".to_string(), response_format.clone());
@@ -261,7 +265,7 @@ impl ModelConfig {
         }
 
         let Some(thinking) = profile.get("thinking").and_then(Value::as_object) else {
-            return;
+            return true;
         };
         let field = thinking
             .get("field")
@@ -284,7 +288,7 @@ impl ModelConfig {
             }
         }
         if !enabled {
-            return;
+            return true;
         }
         if thinking
             .get("remove_sampling_when_enabled")
@@ -297,7 +301,7 @@ impl ModelConfig {
             }
         }
         let Some(effort) = thinking.get("effort").and_then(Value::as_object) else {
-            return;
+            return true;
         };
         let effort_field = effort
             .get("field")
@@ -315,6 +319,7 @@ impl ModelConfig {
                 object.insert(effort_field.to_string(), value);
             }
         }
+        true
     }
 
     /// 火山方舟 OpenAI 兼容 Chat 端点。
@@ -492,7 +497,11 @@ pub fn mask_api_key(key: &str) -> String {
 
 /// 判断是否为可触发 Key 轮换/故障转移的错误（如 401 鉴权失效、402 余额不足、403 权限受限、429 频率限制、503 服务超载/高并发、502/504 等）
 pub fn is_key_rotatable_error(status_code: Option<u16>, body_or_msg: &str) -> bool {
+    // 🛑 400 Bad Request 是客户端参数/请求体格式错误，切换 Key 无意义，严禁轮换
     if let Some(code) = status_code {
+        if code == 400 {
+            return false;
+        }
         if code == 401
             || code == 402
             || code == 403
@@ -506,6 +515,9 @@ pub fn is_key_rotatable_error(status_code: Option<u16>, body_or_msg: &str) -> bo
         }
     }
     let lower = body_or_msg.to_lowercase();
+    if lower.contains("api 错误 400") || lower.contains("bad request") {
+        return false;
+    }
     lower.contains("503")
         || lower.contains("service unavailable")
         || lower.contains("unavailable")
@@ -538,7 +550,10 @@ pub fn is_key_rotatable_error(status_code: Option<u16>, body_or_msg: &str) -> bo
         || lower.contains("502 bad gateway")
         || lower.contains("504 gateway timeout")
         || lower.contains("api 错误 5")
-        || lower.contains("api 错误 4")
+        || lower.contains("api 错误 401")
+        || lower.contains("api 错误 402")
+        || lower.contains("api 错误 403")
+        || lower.contains("api 错误 429")
         || lower.contains("capacity")
         || lower.contains("temporarily unavailable")
 }
@@ -738,7 +753,7 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
     if interrupt_rx.has_changed().unwrap_or(false) {
         return Err(STREAM_INTERRUPTED_ERROR.to_string());
     }
-    let body = config.build_body(messages, reasoning_effort);
+    let mut body = config.build_body(messages, reasoning_effort);
     let url = config.endpoint_url();
     let headers = config.auth_headers_for_key(key);
 
@@ -747,12 +762,12 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
 
     let request = client
         .post(&url)
-        .headers(headers)
+        .headers(headers.clone())
         .json(&body)
         .timeout(std::time::Duration::from_secs(config.timeout_secs))
         .send();
     tokio::pin!(request);
-    let resp = tokio::select! {
+    let mut resp = tokio::select! {
         result = &mut request => result.map_err(|e| format!("请求失败: {}", e))?,
         changed = interrupt_rx.changed() => {
             let _ = changed;
@@ -762,8 +777,41 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("API 错误 {}: {}", status, body));
+        let err_body = resp.text().await.unwrap_or_default();
+
+        // 🩹 自愈检测：若为 400 Bad Request 且检测到敏感参数被拒，就地修正 payload 重发 1 次
+        if status == reqwest::StatusCode::BAD_REQUEST
+            && crate::agent::model_filter::self_heal_bad_request_payload(&mut body, &err_body)
+        {
+            println!(
+                "🔄 [参数自愈重试] 已自动剔除/修正非法字段，正在向 [{}] 原地重试...",
+                config.model_name
+            );
+            let retry_req = client
+                .post(&url)
+                .headers(headers)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(config.timeout_secs))
+                .send();
+            tokio::pin!(retry_req);
+            let retry_resp = tokio::select! {
+                result = &mut retry_req => result.map_err(|e| format!("自愈重试请求失败: {}", e))?,
+                changed = interrupt_rx.changed() => {
+                    let _ = changed;
+                    return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                }
+            };
+            if retry_resp.status().is_success() {
+                println!("✅ [参数自愈成功] [{}] 自愈重试成功接入！", config.model_name);
+                resp = retry_resp;
+            } else {
+                let s2 = retry_resp.status();
+                let b2 = retry_resp.text().await.unwrap_or_default();
+                return Err(format!("API 错误 {}: {}", s2, b2));
+            }
+        } else {
+            return Err(format!("API 错误 {}: {}", status, err_body));
+        }
     }
 
     let mut stream = resp.bytes_stream();
@@ -981,6 +1029,15 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                     }
 
                     last_error = e.clone();
+
+                    // 🛑 快速失败: 400 Bad Request 明确属于客户端参数/格式硬错误，自愈重试未解决说明无法恢复，终止盲目重试
+                    if e.contains("API 错误 400") || e.contains("400 Bad Request") {
+                        eprintln!(
+                            "🛑 [客户端请求错误] API 拒绝了请求格式 (400 Bad Request)，停止无效重试: {}",
+                            e
+                        );
+                        return Err(e);
+                    }
 
                     // 检查是否为限流/欠费/鉴权失效等可换 Key 错误
                     let rotatable = is_key_rotatable_error(None, &e);

@@ -495,11 +495,14 @@
                   <span style="font-size:11px;color:var(--text-3)">标准协议流派模板：</span>
                 </div>
                 <div class="quick-pills" style="margin-bottom:8px">
-                  <span class="quick-pill" @click="applyStandardCapability('standard')" title="无额外字段，最纯粹的 OpenAI 兼容模式">⚡ 纯净标准 ({})</span>
-                  <span class="quick-pill" @click="applyStandardCapability('reasoning_effort')" title="OpenAI o1/o3 及商汤等支持 reasoning_effort 档位的模型">🧠 思考档位 (o1/o3/商汤)</span>
-                  <span class="quick-pill" @click="applyStandardCapability('budget_tokens')" title="Claude 3.7 Sonnet 等按 Token 预算控制思考深度的模型">🎯 思考预算 (Claude 3.7)</span>
-                  <span class="quick-pill" @click="applyStandardCapability('thinking_bool')" title="支持 thinking: true/false 简单开关的模型">🔘 思考布尔 (thinking: true)</span>
-                  <span class="quick-pill" @click="applyStandardCapability('json_mode')" title="火山方舟及要求强制结构化 JSON 输出的平台">📦 JSON输出 (Volcengine)</span>
+                  <span class="quick-pill" @click="applyStandardCapability('kimi_k3')" title="Kimi / 商汤托管推理协议：支持 low/medium/high/max 多档深度调节，自动剔除冲突采样参数">🌙 Kimi / Moonshot 协议</span>
+                  <span class="quick-pill" @click="applyStandardCapability('reasoning_effort')" title="OpenAI GPT-5 / o系列新推理协议：支持 reasoning_effort 深度调节，自动映射 max_completion_tokens">🏛️ OpenAI / GPT-5 协议</span>
+                  <span class="quick-pill" @click="applyStandardCapability('deepseek_r1')" title="DeepSeek (R系列) / QwQ 开源推理协议：原生 reasoning_content 思考流，纯净免采样">🚀 DeepSeek / 开源推理协议</span>
+                  <span class="quick-pill" @click="applyStandardCapability('budget_tokens')" title="Anthropic Claude (4 / 5 系列) Extended Thinking：支持动态 Token 预算控制与消息严格交替">🎭 Anthropic 思考预算协议</span>
+                  <span class="quick-pill" @click="applyStandardCapability('google_gemini')" title="Google Gemini (3.x 系列) 协议：高度标准化的通用规约与结构化输出">✨ Google Gemini 协议</span>
+                  <span class="quick-pill" @click="applyStandardCapability('json_mode')" title="火山方舟 / 字节协议：强制 JSON 结构化输出规范">📦 字节/火山方舟协议</span>
+                  <span class="quick-pill" @click="applyStandardCapability('thinking_bool')" title="支持 thinking: true/false 简单开关协议">🔘 思考布尔开关</span>
+                  <span class="quick-pill" @click="applyStandardCapability('standard')" title="无额外字段，最纯粹的通用兼容模式">⚡ 经典标准兼容 ({})</span>
                 </div>
                 <textarea class="form-input" v-model="mForm.provider_capabilities" rows="10" spellcheck="false"
                   placeholder='{}'></textarea>
@@ -1241,9 +1244,37 @@ function onApplySpecToEditModel(e: Event) {
   }
 }
 
-function applyStandardCapability(type: 'standard' | 'reasoning_effort' | 'budget_tokens' | 'thinking_bool' | 'json_mode') {
-  if (type === 'standard') {
+function applyStandardCapability(type: 'standard' | 'google_gemini' | 'reasoning_effort' | 'budget_tokens' | 'thinking_bool' | 'json_mode' | 'kimi_k3' | 'deepseek_r1') {
+  if (type === 'standard' || type === 'google_gemini') {
     mForm.value.provider_capabilities = '{}'
+  } else if (type === 'kimi_k3') {
+    mForm.value.provider_capabilities = JSON.stringify({
+      thinking: {
+        force_enabled: true,
+        remove_sampling_when_enabled: true,
+        effort: {
+          field: "reasoning_effort",
+          map: {
+            off: "low",
+            low: "low",
+            medium: "high",
+            high: "max",
+            max: "max",
+            auto: "max"
+          },
+          default: "max"
+        }
+      },
+      response_format: { type: "json_object" }
+    }, null, 2)
+  } else if (type === 'deepseek_r1') {
+    mForm.value.provider_capabilities = JSON.stringify({
+      thinking: {
+        force_enabled: true,
+        remove_sampling_when_enabled: true
+      },
+      response_format: { type: "json_object" }
+    }, null, 2)
   } else if (type === 'reasoning_effort') {
     mForm.value.provider_capabilities = JSON.stringify({
       thinking: {

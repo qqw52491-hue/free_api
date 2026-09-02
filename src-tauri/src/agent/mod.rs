@@ -19,6 +19,7 @@ pub mod loop_runner;
 pub mod main_loop;
 pub mod mcp;
 pub mod mcp_catalog;
+pub mod model_filter;
 pub mod plan_tree;
 pub mod plan_tree_dispatch;
 pub mod project_map;
