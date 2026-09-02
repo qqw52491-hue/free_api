@@ -439,7 +439,13 @@ fn writer_system_prompt() -> &'static str {
 {\"action\":\"write_file\",\"params\":{\"path\":\"路径\",\"content\":\"完整新文件内容\"}}\n\
 {\"action\":\"run_command\",\"params\":{\"command\":\"单条命令\"}}\n\
 {\"action\":\"finish\",\"findings\":[\"1-8 条结论\"],\"confidence\":\"confirmed|supported|unverified\",\"evidence_refs\":[\"文件/测试引用\"],\"missing_evidence\":[\"...\"]}\n\
-纪律：修改完成后必须用宿主指定的 test_command 验证且通过后才能 finish；write_file 必须写完整文件内容；禁止碰副本外的任何路径。"
+纪律：\n\
+1. 先读后写：修改任何文件前必须先 read_file 读取最新内容，严禁盲目覆盖；\n\
+2. 最小修改原则：只修改与任务明确相关的代码/功能，严禁顺带重构、代码美化或修改无关功能；\n\
+3. 尊重既有设计：不得假设既有代码是错的，看似特殊的写法默认是开发者故意为之，禁止擅自改动现有逻辑；\n\
+4. 严禁虚假作弊：禁止为了让测试通过而用静态硬编码/假数据蒙混过关，禁止过度设计；\n\
+5. 保护注释与代码风格完整性，禁止随意精简或删除原有注释；\n\
+6. 修改完成后必须用宿主指定的 test_command 验证且通过后才能 finish；write_file 必须写完整文件内容；禁止碰副本外的任何路径。"
 }
 
 /// 执行 writer 动作（异步、可单测）。返回 (观测输出, 是否测试命令)

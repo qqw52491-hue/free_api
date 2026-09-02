@@ -374,8 +374,8 @@ pub(crate) fn execute_command_inner(
     params: &serde_json::Value,
     registry: &PluginRegistry,
 ) -> DispatchResult {
-    // 0. 宿主层硬拦截 (Host Security Rejection Layer)：
-    // 严禁模型自作主张越界切换工作区（例如试图调用 switch_workspace、set_workspace 等已被禁用的特权命令）
+    // 0. 宿主层安全防护：
+    // 项目专属会话禁止切换工作区（锁定在项目根目录，防止越界串扰）
     let lower_tool = tool.to_ascii_lowercase();
     let lower_action = action.to_ascii_lowercase();
     if lower_tool.contains("switch_workspace")
@@ -386,12 +386,15 @@ pub(crate) fn execute_command_inner(
         || lower_action.contains("switchworkspace")
         || lower_action.contains("set_workspace")
     {
-        return DispatchResult {
-            stdout: String::new(),
-            stderr: "❌ [宿主层安全拦截 (Host Security Rejection)] switch_workspace / 切换工作区已被宿主安全策略禁止。当前任务严格限定在初始工作区上下文中执行。请使用 search 或 read_file 等只读工具在当前工作区内完成代码定位，严禁越界切换。".to_string(),
-            success: false,
-            route: "host_rejection:forbidden_workspace_switch".to_string(),
-        };
+        if is_project_session(db, session_id) {
+            return DispatchResult {
+                stdout: String::new(),
+                stderr: "❌ [宿主安全保护] 当前为专属项目会话，工作区已锁定在项目根目录，禁止越界切换。如需操作外部项目，请在通用临时会话中操作。".to_string(),
+                success: false,
+                route: "host_rejection:project_session_workspace_locked".to_string(),
+            };
+        }
+        // 通用临时会话：放行给 MCP 插件进行工作区切换！
     }
     // 1. 核心原生工具 A: get_step_output (精准取回截断历史原文)
     if tool.eq_ignore_ascii_case("get_step_output") {
@@ -425,14 +428,6 @@ pub(crate) fn execute_command_inner(
 
     // 3. 核心原生工具 C: search (跨执行日志 FTS5 与实时代码 ripgrep 联邦检索)
     if tool.eq_ignore_ascii_case("search") {
-        if is_project_session(db, session_id) {
-            return DispatchResult {
-                stdout: String::new(),
-                stderr: "项目会话不允许用通用 search 扫描项目目录。请调用 project_resources.list_resources，再以 resource_id 调用 read_resource；仅明确登记的文件可读取。".to_string(),
-                success: false,
-                route: "host_rejection:project_session_unmanaged_search".to_string(),
-            };
-        }
         return retrieval::dispatch_search(db, session_id, params);
     }
 
@@ -484,16 +479,6 @@ pub(crate) fn execute_command_inner(
     if tool.eq_ignore_ascii_case("artifact_manager") || tool.eq_ignore_ascii_case("artifact_store")
     {
         return crate::agent::artifact_manager::dispatch(db, session_id, action, params);
-    }
-
-    // 项目会话不调用外部 MCP 文件/命令插件，避免任意项目根访问绕过受管资源账本。
-    if is_project_session(db, session_id) {
-        return DispatchResult {
-            stdout: String::new(),
-            stderr: "项目会话仅授权 project_resources 中已登记的文件；外部 MCP 工具被拒绝。可继续使用 web_search、web_fetch、task_store、artifact_manager 或 finish。".to_string(),
-            success: false,
-            route: "host_rejection:project_session_external_tool".to_string(),
-        };
     }
 
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
@@ -1066,21 +1051,25 @@ mod tests {
         let registry = PluginRegistry::new();
         let p = serde_json::json!({ "path": "/some/other/workspace" });
 
-        let res = execute_command_inner(&db, "test-session", "switch_workspace", "", &p, &registry);
-        assert!(!res.success);
-        assert!(res.stderr.contains("宿主层安全拦截"));
-        assert_eq!(res.route, "host_rejection:forbidden_workspace_switch");
+        // 1. 通用会话未关联项目，不触发项目锁定硬拦截（放行给外部 MCP 路由）
+        let res_general = execute_command_inner(&db, "general-session", "switch_workspace", "", &p, &registry);
+        assert_ne!(res_general.route, "host_rejection:project_session_workspace_locked");
 
-        let res2 = execute_command_inner(
-            &db,
-            "test-session",
-            "vscode_switchworkspace",
-            "",
-            &p,
-            &registry,
-        );
-        assert!(!res2.success);
-        assert!(res2.stderr.contains("宿主层安全拦截"));
+        // 2. 模拟项目会话绑定
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS agent_projects (id TEXT PRIMARY KEY, name TEXT, root_path TEXT, created_at TEXT, updated_at TEXT);
+                 CREATE TABLE IF NOT EXISTS agent_project_sessions (project_id TEXT, session_id TEXT, created_at TEXT);
+                 INSERT INTO agent_projects VALUES ('p1', 'proj', '/tmp', 'now', 'now');
+                 INSERT INTO agent_project_sessions VALUES ('p1', 'proj-session', 'now');"
+            ).unwrap();
+        }
+
+        let res = execute_command_inner(&db, "proj-session", "switch_workspace", "", &p, &registry);
+        assert!(!res.success);
+        assert!(res.stderr.contains("宿主安全保护"));
+        assert_eq!(res.route, "host_rejection:project_session_workspace_locked");
     }
 
     #[test]

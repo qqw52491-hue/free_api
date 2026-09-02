@@ -8,8 +8,9 @@
       <span class="card-prompt-type">{{ formTypeLabel }}</span>
     </div>
 
-    <h3 class="intervention-title">{{ formTitle }}</h3>
-    <p v-if="formDescription" class="intervention-desc">{{ formDescription }}</p>
+    <div v-if="renderedTitle" class="intervention-title-md md-content" v-html="renderedTitle"></div>
+    <h3 v-else class="intervention-title">{{ formTitle }}</h3>
+    <div v-if="renderedDescription" class="intervention-desc md-content" v-html="renderedDescription"></div>
 
     <!-- 1. 二次确认 (Confirm) -->
     <div v-if="formKind === 'confirm'" class="options-container confirm-box">
@@ -157,6 +158,7 @@
 import { computed, nextTick, onMounted, ref } from "vue";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { AgentHumanForm, AgentHumanFormKind } from "./types";
+import { renderMarkdown } from "./format";
 import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 
 const props = defineProps<{
@@ -181,6 +183,19 @@ const formTitle = computed(() => props.humanForm?.title || props.pauseReason || 
 const formDescription = computed(() => props.humanForm?.description || "");
 const formOptions = computed(() => props.humanForm?.options || []);
 const customHtmlCode = computed(() => props.humanForm?.html || (props.humanForm?.kind === "custom_html" ? props.humanForm.description || "" : ""));
+
+const renderedTitle = computed(() => {
+  const t = formTitle.value;
+  if (t && (t.includes("\n") || t.startsWith("#") || t.includes("**") || t.includes("- ") || t.includes("`") || t.length > 80)) {
+    return renderMarkdown(t);
+  }
+  return "";
+});
+
+const renderedDescription = computed(() => {
+  if (!formDescription.value) return "";
+  return renderMarkdown(formDescription.value);
+});
 
 const formTypeLabel = computed(() => {
   switch (formKind.value) {
@@ -374,11 +389,42 @@ function handleCustomHtmlCancel(reason: string) {
 }
 
 .intervention-title {
-  margin: 0 0 4px 0;
+  margin: 0 0 6px 0;
   color: #f4f4f5;
   font-size: 14.5px;
   font-weight: 650;
   line-height: 1.4;
+}
+
+.intervention-title-md {
+  margin: 0 0 10px 0;
+  color: #f4f4f5;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.intervention-title-md :deep(h1),
+.intervention-title-md :deep(h2),
+.intervention-title-md :deep(h3),
+.intervention-title-md :deep(h4) {
+  margin: 8px 0 4px 0;
+  color: #f4f4f5;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.intervention-title-md :deep(p) {
+  margin: 4px 0;
+}
+
+.intervention-title-md :deep(ul),
+.intervention-title-md :deep(ol) {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.intervention-title-md :deep(li) {
+  margin: 2px 0;
 }
 
 .intervention-desc {
@@ -386,6 +432,20 @@ function handleCustomHtmlCancel(reason: string) {
   color: #a1a1aa;
   font-size: 12.5px;
   line-height: 1.5;
+}
+
+.intervention-desc :deep(p) {
+  margin: 4px 0;
+}
+
+.intervention-desc :deep(ul),
+.intervention-desc :deep(ol) {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.intervention-desc :deep(li) {
+  margin: 2px 0;
 }
 
 .options-container {

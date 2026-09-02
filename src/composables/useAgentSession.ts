@@ -152,8 +152,8 @@ function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHumanForm
             : toText(defaultRaw) || undefined;
     return {
         kind,
-        title: toText(data.title || data.label || fallbackTitle).slice(0, 220) || fallbackTitle,
-        description: kind === "custom_html" ? undefined : (toText(data.description || data.help).slice(0, 600) || undefined),
+        title: toText(data.title || data.label || fallbackTitle) || fallbackTitle,
+        description: kind === "custom_html" ? undefined : (toText(data.description || data.help) || undefined),
         placeholder: toText(data.placeholder).slice(0, 160) || undefined,
         options,
         defaultValue,
