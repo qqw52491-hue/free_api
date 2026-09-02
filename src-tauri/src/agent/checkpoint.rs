@@ -315,6 +315,7 @@ impl DurableAgentContext {
                 let skip = effects.len() - MAX_INHERITED_SIDE_EFFECTS;
                 effects.drain(..skip);
             }
+            context.inherited_side_effects_count = effects.len();
             context.side_effects = effects;
         }
 

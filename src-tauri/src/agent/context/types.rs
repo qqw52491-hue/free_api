@@ -151,6 +151,9 @@ pub struct SandwichContext {
     pub failed_attempts: Vec<FailedAttempt>,
     /// 不可逆外部操作安全台账 (记录 shell_exec/文件修改等写操作)
     pub side_effects: Vec<SideEffectRecord>,
+    /// 本次运行从之前任务继承的副作用数量（用于区分本轮是否有新增副作用）
+    #[serde(default)]
+    pub inherited_side_effects_count: usize,
     /// 当前任务待办清单 (Todo items)
     pub todo_list: Vec<TodoItem>,
     /// 复杂审查、诊断或研究任务的可审计完成契约；普通任务保持 None。
@@ -247,6 +250,7 @@ impl SandwichContext {
             memories: BTreeMap::new(),
             failed_attempts: Vec::new(),
             side_effects: Vec::new(),
+            inherited_side_effects_count: 0,
             todo_list: Vec::new(),
             review_contract: None,
             change_verification: None,

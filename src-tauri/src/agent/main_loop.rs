@@ -174,6 +174,10 @@ fn complex_delivery_blocker(
     if !is_finish || !succeeded {
         return None;
     }
+    // 对于纯对话、解释答疑、或没有任何新增代码文件修改的任务，免除严苛的主根因四件套拦截
+    if context.side_effects.len() == context.inherited_side_effects_count {
+        return None;
+    }
     // ReviewContract 是模型首轮规划后持久化的显式复杂任务声明。
     // 不再依赖少数自然语言关键词：复杂 Bug、架构变更、公式证明等跨领域任务
     // 只要建立契约，就共享同一套依据—验证—交付闭环；普通任务保持轻量。
@@ -315,6 +319,12 @@ mod finish_guard_tests {
     fn root_cause_claim_without_contract_still_requires_inplace_calibration() {
         let mut context =
             context::SandwichContext::new("system".to_string(), "请诊断缓存问题".to_string());
+        context.side_effects.push(crate::agent::context::SideEffectRecord {
+            step_id: 1,
+            tool: "write".to_string(),
+            description: "fake".to_string(),
+            timestamp: "now".to_string(),
+        });
         // 无契约 + 交付宣称主根因但未就地校准 → 拦截
         let claiming = AgentInstruction {
             command: Some(serde_json::json!({ "summary": "### 主根因\n缓存模块未设置过期时间导致泄漏。" })),
@@ -344,6 +354,12 @@ mod finish_guard_tests {
         };
         let mut context =
             context::SandwichContext::new("system".to_string(), "请诊断缓存问题".to_string());
+        context.side_effects.push(crate::agent::context::SideEffectRecord {
+            step_id: 1,
+            tool: "write".to_string(),
+            description: "fake".to_string(),
+            timestamp: "now".to_string(),
+        });
         assert!(complex_delivery_blocker(&context, &instruction, true, true).is_none());
 
         context.review_contract = Some(ReviewContract {
@@ -727,7 +743,7 @@ async fn run_agent_main_loop_in_workspace_inner(
     };
 
     let project_resource_boundary = if is_project_session {
-        "\n\n## 项目受管资源边界\n当前会话已绑定项目根目录，宿主授权读取已登记的受管文件。可调用 `project_resources.list_resources()` 获取全部资源；以 resource_id 调用 `project_resources.read_resource(resource_id)` 读取内容；当生成或发现新的关键项目文件（如架构设计、数据库规范、核心接口）时，可调用 `project_resources.register_resource(path, label)` 将其登记为跨会话共享受管资源。不得用 `search`、外部 MCP 工具或 shell 越界探查未授权项目文件。"
+        "\n\n## 项目工作区与受管资源\n当前会话已绑定专属项目工作区。你可以在该项目工作区内正常使用 search、外部 MCP 工具以及各类子工兵进行工程分析与开发。同时可调用 `project_resources.list_resources()` 获取重点受管文件，或在生成重要项目产物时调用 `project_resources.register_resource(path, label)` 登记为跨会话共享受管资源。"
     } else {
         ""
     };
@@ -1460,7 +1476,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             &context.todo_list,
             context.review_contract.as_ref(),
             review_contract_started_this_turn,
-            context.side_effects.len(),
+            context.side_effects.len() - context.inherited_side_effects_count,
             context.change_verification.as_ref(),
         );
         let complex_delivery_blocker =
