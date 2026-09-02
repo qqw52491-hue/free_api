@@ -1153,22 +1153,38 @@ async fn run_agent_main_loop_in_workspace_inner(
                                     injection.push_str(&format!("修改说明:\n- {}\n", wr.findings.join("\n- ")));
                                 }
                             } else {
+                                let formatted_findings = if result.findings.is_empty() {
+                                    "（无具体发现）".to_string()
+                                } else {
+                                    result.findings.iter().map(|f| f.display_line()).collect::<Vec<_>>().join("\n- ")
+                                };
                                 injection.push_str(&format!(
                                     "\n【🛠️ 写入工兵已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
-                                    result.child_run_id, result.confidence, result.findings.join("\n- ")
+                                    result.child_run_id, result.confidence, formatted_findings
                                 ));
                             }
                         }
                         Some("worker") => {
+                            let formatted_findings = if result.findings.is_empty() {
+                                "（无具体发现）".to_string()
+                            } else {
+                                result.findings.iter().map(|f| f.display_line()).collect::<Vec<_>>().join("\n- ")
+                            };
                             injection.push_str(&format!(
                                 "\n【🕵️ 只读侦察任务已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
-                                result.child_run_id, result.confidence, result.findings.join("\n- ")
+                                result.child_run_id, result.confidence, formatted_findings
                             ));
                         }
                         _ => {
+                            let formatted_findings = if result.findings.is_empty() {
+                                "（无具体发现）".to_string()
+                            } else {
+                                result.findings.iter().map(|f| f.display_line()).collect::<Vec<_>>().join("\n- ")
+                            };
+                            let routing_str = result.routing.as_deref().unwrap_or("certain");
                             injection.push_str(&format!(
-                                "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
-                                result.child_run_id, result.confidence, result.findings.join("\n- ")
+                                "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]\n发现:\n- {}\n",
+                                result.child_run_id, result.confidence, routing_str, formatted_findings
                             ));
                         }
                     }

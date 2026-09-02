@@ -1485,8 +1485,185 @@ pub async fn run_tool_phase(
                             success: false,
                             route: "host_rejection:status_not_succeeded".to_string(),
                         }
+                    } else if kind == "review" || kind == "reviewer" {
+                        // 🌟 Reviewer 纯上下文对质分支：只读审查者无工作区副本，纯继承脱水历史进行反驳研判
+                        let mut messages: Vec<Value> = match hist_json.as_deref() {
+                            Some(raw) => serde_json::from_str(raw).unwrap_or_default(),
+                            None => Vec::new(),
+                        };
+                        if messages.is_empty() {
+                            DispatchResult {
+                                stdout: String::new(),
+                                stderr: "❌ 该审查任务未留存历史对话记录，无法恢复对质。".to_string(),
+                                success: false,
+                                route: "host_rejection:missing_history".to_string(),
+                            }
+                        } else {
+                            messages.push(json!({
+                                "role": "user",
+                                "content": format!(
+                                    "【父 Agent 反驳与对质】\n{}\n\n【对质研判规则】：\n请针对上述反驳与证据进行重新研判，输出更新后的审查 JSON：\n1. 若父 Agent 反驳与测试证据成立，请将该项缺陷撤回（从 findings 中剔除，并在 missing_evidence 说明已撤回原 finding ID）；\n2. 若仍坚持该缺陷，必须在 why 中给出全新证据与理由；\n3. 重新推导 routing（certain/needs_alignment/blocked）。",
+                                    followup_msg
+                                )
+                            }));
+
+                            let routing = crate::agent::router::AgentRouter::route_for_role(
+                                context,
+                                model_routing,
+                                step_id,
+                                crate::agent::router::roles::REVIEWER,
+                            );
+                            let model_to_use = if !child_model.is_empty() {
+                                child_model
+                            } else {
+                                routing.model_id.clone()
+                            };
+                            let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
+
+                            let new_child_run_id = match crate::agent::child_reviewer::begin_child_run_extended(
+                                state.inner(),
+                                parent_run_id,
+                                final_session_id,
+                                workspace_dir,
+                                &model_to_use,
+                                0,
+                                "review",
+                                None,
+                                None,
+                                Some(target_child_id),
+                            ) {
+                                Ok(id) => id,
+                                Err(err) => {
+                                    return Ok(DispatchResult {
+                                        stdout: String::new(),
+                                        stderr: format!("❌ 创建审查对质任务失败: {}", err),
+                                        success: false,
+                                        route: "host_rejection:begin_run_failed".to_string(),
+                                    });
+                                }
+                            };
+
+                            let mut config = match ModelConfig::from_db_state(state.inner(), &model_to_use) {
+                                Ok(cfg) => cfg,
+                                Err(err) => {
+                                    return Ok(DispatchResult {
+                                        stdout: String::new(),
+                                        stderr: format!("❌ 加载模型配置失败: {}", err),
+                                        success: false,
+                                        route: "host_rejection:model_config_failed".to_string(),
+                                    });
+                                }
+                            };
+                            config.max_tokens = 900;
+
+                            let db_clone = DbState(state.0.clone());
+                            let new_child_run_id_clone = new_child_run_id.clone();
+                            let _parent_session_id_clone = final_session_id.to_string();
+                            let mut interrupt_rx_clone = interrupt_rx.clone();
+                            let _app_clone = app.clone();
+
+                            tokio::spawn(async move {
+                                let started_at = std::time::Instant::now();
+                                let mut on_stream_event = |_: crate::llm::StreamEvent<'_>| -> bool { true };
+                                let call = crate::llm::stream_with_retry(
+                                    &config,
+                                    &messages,
+                                    &reasoning_effort,
+                                    &mut interrupt_rx_clone,
+                                    1,
+                                    &mut on_stream_event,
+                                );
+                                let stream_result = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(45),
+                                    call,
+                                ).await {
+                                    Ok(Ok(res)) => res,
+                                    Ok(Err(_e)) => {
+                                        crate::agent::child_reviewer::finish_child_run(
+                                            &db_clone,
+                                            &new_child_run_id_clone,
+                                            "failed",
+                                            started_at.elapsed().as_millis() as u64,
+                                            0,
+                                            Some("request_or_stream"),
+                                            None,
+                                        );
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        crate::agent::child_reviewer::finish_child_run(
+                                            &db_clone,
+                                            &new_child_run_id_clone,
+                                            "timed_out",
+                                            started_at.elapsed().as_millis() as u64,
+                                            0,
+                                            Some("timeout"),
+                                            None,
+                                        );
+                                        return;
+                                    }
+                                };
+
+                                let duration_ms = started_at.elapsed().as_millis() as u64;
+                                let completion_tokens = stream_result.usage.map(|u| u.completion_tokens).unwrap_or(0);
+                                let (findings, confidence, evidence_refs, missing_evidence, routing) = 
+                                    match crate::agent::child_reviewer::parse_child_review_rebuttal_output(&stream_result.full_response) {
+                                        Ok(res) => res,
+                                        Err(_) => {
+                                            crate::agent::child_reviewer::finish_child_run(
+                                                &db_clone,
+                                                &new_child_run_id_clone,
+                                                "invalid_output",
+                                                duration_ms,
+                                                completion_tokens,
+                                                Some("invalid_output"),
+                                                None,
+                                            );
+                                            return;
+                                        }
+                                    };
+
+                                let review_res = crate::agent::child_reviewer::ChildReviewResult {
+                                    child_run_id: new_child_run_id_clone.clone(),
+                                    status: "succeeded".to_string(),
+                                    findings,
+                                    confidence,
+                                    evidence_refs,
+                                    missing_evidence,
+                                    duration_ms,
+                                    completion_tokens,
+                                    error_kind: None,
+                                    raw_result_json: None,
+                                    kind: Some("review".to_string()),
+                                    routing: Some(routing),
+                                    withdrawn_findings: vec![],
+                                };
+
+                                let res_json = serde_json::to_string(&review_res).ok();
+                                crate::agent::child_reviewer::finish_child_run_with_history(
+                                    &db_clone,
+                                    &new_child_run_id_clone,
+                                    "succeeded",
+                                    duration_ms,
+                                    completion_tokens,
+                                    None,
+                                    res_json.as_deref(),
+                                    serde_json::to_string(&messages).ok().as_deref(),
+                                );
+                            });
+
+                            DispatchResult {
+                                stdout: format!(
+                                    "✅ 审查专家对质已成功启动：新 child_run_id={}（纯上下文继承唤醒，正在重新研判反驳）。你可以继续执行其他工作，或使用 wait_jobs 等待结果。",
+                                    new_child_run_id
+                                ),
+                                stderr: String::new(),
+                                success: true,
+                                route: "resume_child:reviewer_rebuttal_spawned".to_string(),
+                            }
+                        }
                     } else {
-                        // 校验工作区物理存在性
+                        // 校验工作区物理存在性（写入/侦察类 worker 必须依赖工作区副本）
                         let ws_path = match ws_copy {
                             Some(ref p) if PathBuf::from(p).exists() => PathBuf::from(p),
                             _ => PathBuf::new(),

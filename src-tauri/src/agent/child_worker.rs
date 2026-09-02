@@ -802,7 +802,8 @@ mod tests {
         };
         let parsed = serde_json::from_str::<crate::agent::child_reviewer::ChildReviewResult>(&worker_result_json(&result)).unwrap();
         assert_eq!(parsed.child_run_id, "job-x");
-        assert_eq!(parsed.findings, vec!["发现 A".to_string()]);
+        assert_eq!(parsed.findings.len(), 1);
+        assert_eq!(parsed.findings[0].why, "发现 A");
         assert_eq!(parsed.confidence, "supported");
     }
 

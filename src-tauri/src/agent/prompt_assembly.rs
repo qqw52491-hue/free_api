@@ -80,7 +80,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "child_reviewer",
-        summary: "受限只读子调查：审查父证据，或读取当前项目会话明确登记的资源；最多两次；不会调用工具或写入文件",
+        summary: "受限只读子调查：审查父证据包，回交带 ID/严重级别/物理行号的结构化 findings 与 routing（certain/needs_alignment/blocked）；收到结果后必须先分诊再行动：逐条判定接受/反驳(须附证据)/需澄清，不要直接照改，也不要直接忽略；不会调用工具或写入文件",
         actions: &[
             "investigate(question: string, evidence_refs?: string[] <=6, evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径])",
         ],
@@ -106,7 +106,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "resume_child",
-        summary: "追问已完成的子任务：继承其脱水对话历史与保活工作区副本，以半量步数预算继续攻坚；需提供 child_run_id 与追问 message",
+        summary: "追问/对质已完成的子任务：继承其脱水对话历史（writer 额外继承工作区副本），以半量步数预算继续攻坚；对 reviewer 的追问用于反驳指定 finding ID 并要求其 withdraw(撤回)/uphold(坚持)/revise(修正)；需提供 child_run_id 与追问 message",
         actions: &[
             "dispatch(child_run_id: string, message: string, test_command?: string [writer 类可重设])",
         ],

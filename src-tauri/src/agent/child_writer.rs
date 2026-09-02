@@ -172,6 +172,28 @@ pub fn parse_writer_request(params: &Value) -> Result<WriterRequest, String> {
     })
 }
 
+/// 把父工作区准备为 writer 的私有沙箱（优先尝试 git worktree 秒级创建；非 git 项目平滑降级为物理拷贝）。
+pub fn create_isolated_workspace(parent_root: &Path, copy_root: &Path) -> Result<(usize, u64), String> {
+    // 1. 优先尝试 Git Worktree（毫秒级、0 拷贝、天然分支隔离）
+    let is_git_repo = parent_root.join(".git").exists();
+    if is_git_repo {
+        let worktree_res = std::process::Command::new("git")
+            .args(&["worktree", "add", "--detach"])
+            .arg(copy_root)
+            .arg("HEAD")
+            .current_dir(parent_root)
+            .output();
+        if let Ok(out) = worktree_res {
+            if out.status.success() && copy_root.exists() {
+                return Ok((1, 0));
+            }
+        }
+    }
+
+    // 2. 降级走物理拷贝
+    create_isolated_copy(parent_root, copy_root)
+}
+
 /// 把父工作区复制为 writer 的私有副本（跳过 .git 与既有 writer 副本；预算硬顶防失控）。
 pub fn create_isolated_copy(parent_root: &Path, copy_root: &Path) -> Result<(usize, u64), String> {
     let mut files = 0usize;
@@ -1258,7 +1280,7 @@ pub async fn spawn_child_writer(
     let child_nonce = Uuid::new_v4().to_string();
     let child8 = child_nonce.get(..8).unwrap_or(&child_nonce).to_string();
     let copy_root = parent.join(format!(".writer-{}", child8));
-    let (files, bytes) = create_isolated_copy(&parent, &copy_root)?;
+    let (files, bytes) = create_isolated_workspace(&parent, &copy_root)?;
 
     let child_run_id = crate::agent::child_reviewer::begin_child_run_extended(
         db,
