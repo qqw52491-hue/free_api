@@ -501,10 +501,49 @@ pub async fn evaluate_finish_diff(
         }
     );
 
+    // 动态拼接目标块的 Checklist、Scope 边界与执行者自述
+    let mut block_sections = Vec::new();
+    if let Some(block) = context.active_target_block() {
+        if !block.checklist.is_empty() {
+            let items = block
+                .checklist
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("{}. {}", i + 1, c))
+                .collect::<Vec<_>>()
+                .join("\n");
+            block_sections.push(format!(
+                "【必须逐条核对的验收标准清单 (Checklist)】\n{}\n👉 审查强制要求：你必须对上述清单中的每一项在 Diff 中寻找实际代码证据。若某项未实现或无代码/输出证据支持，必须将其直接判定为 blocking_issue 并打回！绝不允许宽容放行。",
+                items
+            ));
+        }
+
+        if !block.scope.is_empty() {
+            block_sections.push(format!(
+                "【预定允许改动范围 (Scope)】\n{}\n👉 审查强制要求：仔细核对交付物中是否修改了超出上述范围的文件。顺手修改无关文件（Scope Creep）属于严重纪律缺陷，应提出修复要求。",
+                block.scope.join("\n")
+            ));
+        }
+
+        if let Some(report) = &block.self_report {
+            block_sections.push(format!(
+                "【执行模型提交的自述 (Self-Report)】\n- 核心改动: {}\n- 选型理由: {}\n- 存疑与隐患点: {}\n👉 审查强制要求：特别针对执行者自述中指出的“存疑与隐患点”，进行高强度的交叉严审！",
+                report.what_changed, report.rationale, report.uncertainties
+            ));
+        }
+    }
+
+    let extra_guidance = if block_sections.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", block_sections.join("\n\n"))
+    };
+
     let user_prompt = format!(
-        "【任务目标】\n{}\n\n【本次交付的变更材料 / 成果物】\n```\n{}\n```\n\n请依据审查判定原则进行审查并输出严格的 JSON 结果。",
+        "【任务目标】\n{}\n\n【本次交付的变更材料 / 成果物】\n```\n{}\n```{}\n\n请严格对照判定原则与验收标准输出合法的 JSON 审查结果。",
         context.user_goal,
-        review_material
+        review_material,
+        extra_guidance
     );
 
     let messages = vec![
@@ -616,6 +655,34 @@ fn extract_json_str(text: &str) -> String {
         }
     }
     trimmed.to_string()
+}
+
+/// 机械门禁零 Token 预检（在调用大模型审查前执行）：
+/// 检查实际修改的文件是否超出了当前活跃目标块的预定边界 (Scope)。
+pub fn mechanical_precheck_violations(
+    workspace: &Path,
+    active_block: Option<&crate::agent::target_block::TargetBlock>,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    if let Some(block) = active_block {
+        if !block.scope.is_empty() {
+            if let Some(files_str) = git_cmd(workspace, &["diff", "--name-only", "HEAD"]) {
+                let modified: Vec<String> = files_str
+                    .lines()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty() && !is_noise_path(s))
+                    .collect();
+                let bad = block.find_scope_violations(&modified);
+                for file in bad {
+                    violations.push(format!(
+                        "文件 [{}] 发生改动，但超出了当前目标块 [{}] 的预定允许范围 (Scope: {:?})",
+                        file, block.id, block.scope
+                    ));
+                }
+            }
+        }
+    }
+    violations
 }
 
 #[cfg(test)]

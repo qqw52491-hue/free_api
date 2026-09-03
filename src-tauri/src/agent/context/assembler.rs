@@ -68,6 +68,31 @@ impl SandwichContext {
             ));
         }
 
+        // (1.1) 目标块（TargetBlock）状态机投影
+        if let Some(block) = self.active_target_block() {
+            let checklist_desc = if block.checklist.is_empty() {
+                "无明确 Checklist".to_string()
+            } else {
+                block
+                    .checklist
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("{}. {}", i + 1, c))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+            bottom_state_card.push_str(&format!(
+                "【当前活跃目标块】id={} | title={}\n• 预设档位: {}\n• 边界范围(Scope): {}\n• 验收清单(Checklist): {}\n• 步数已用: {}/{} (硬顶上限)\n\n",
+                block.id,
+                block.title,
+                block.tier,
+                if block.scope.is_empty() { "不限".to_string() } else { block.scope.join(", ") },
+                checklist_desc,
+                block.steps_count,
+                block.hard_step_limit
+            ));
+        }
+
         // (2) 全局进度摘要：完整版已事件化入历史（set_progress_summary），
         // 尾部只携带首行+版本指针；事件缺失（旧会话/异常路径）回退全文。
         if !self.progress_summary.is_empty() {

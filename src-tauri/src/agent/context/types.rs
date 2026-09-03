@@ -159,6 +159,9 @@ pub struct SandwichContext {
     /// 复杂审查、诊断或研究任务的可审计完成契约；普通任务保持 None。
     #[serde(default)]
     pub review_contract: Option<ReviewContract>,
+    /// 目标块状态机与管理器（粗粒度任务单元）
+    #[serde(default)]
+    pub block_manager: crate::agent::target_block::BlockManager,
     /// 最近一批真实写入的验证状态；每次新的成功写入都会自动清空。
     #[serde(default)]
     pub change_verification: Option<ChangeVerification>,
@@ -253,6 +256,7 @@ impl SandwichContext {
             inherited_side_effects_count: 0,
             todo_list: Vec::new(),
             review_contract: None,
+            block_manager: crate::agent::target_block::BlockManager::new(),
             change_verification: None,
             turns_history: Vec::new(),
             current_observation: String::new(),
@@ -310,6 +314,16 @@ impl SandwichContext {
                 None
             }
         }
+    }
+
+    /// 获取当前活跃的目标块
+    pub fn active_target_block(&self) -> Option<&crate::agent::target_block::TargetBlock> {
+        self.block_manager.active_block()
+    }
+
+    /// 获取当前活跃的目标块可变引用
+    pub fn active_target_block_mut(&mut self) -> Option<&mut crate::agent::target_block::TargetBlock> {
+        self.block_manager.active_block_mut()
     }
 
     /// 检查当前步骤是否允许调用批发派发（dispatches）

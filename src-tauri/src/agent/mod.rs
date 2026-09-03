@@ -32,6 +32,7 @@ pub mod run_state;
 pub mod run_trace;
 pub mod scheduler;
 pub mod skill_context;
+pub mod target_block;
 pub mod task_store;
 pub mod task_summary;
 pub mod telemetry;

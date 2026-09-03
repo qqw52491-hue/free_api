@@ -831,23 +831,55 @@ impl SessionRunGuard {
                     }
                     record.paused_reason = None;
                     record.paused_form = None;
-                    record.result = result;
+                    record.result = result.clone();
                 });
                 notify_session_event(&self.session_id, if was_cancelled { "cancelled" } else { "done" });
                 let _ = self.app.emit(
                     "channel-run-done",
                     json!({ "run_id": self.run_id, "session_id": self.session_id, "status": "done", "at": now_ts() }),
                 );
+
+                // 若开启了微信通道，主动向主人微信推送任务完成结果
+                if !was_cancelled {
+                    if let Ok(config) = load_channel_config() {
+                        if config.auto_start_bridge {
+                            let push_text = if let Some(ref text) = result {
+                                let preview = if text.chars().count() > 300 {
+                                    format!("{}...", text.chars().take(300).collect::<String>())
+                                } else {
+                                    text.clone()
+                                };
+                                format!("🏁 任务已完成：\n\n{}", preview)
+                            } else {
+                                "🏁 任务已完成。".to_string()
+                            };
+                            tauri::async_runtime::spawn(async move {
+                                notify_wechat(&config, &push_text).await;
+                            });
+                        }
+                    }
+                }
             }
             Err(error) => {
+                let err_msg = truncate_chars(error, 2_000);
                 patch_run(&self.run_id, |record| {
                     if record.status != "cancelled" {
                         record.status = "failed".to_string();
-                        record.error = Some(truncate_chars(error, 2_000));
+                        record.error = Some(err_msg.clone());
                     }
                     record.paused_reason = None;
                     record.paused_form = None;
                 });
+
+                // 若开启了微信通道，主动向主人微信推送任务失败告警
+                if let Ok(config) = load_channel_config() {
+                    if config.auto_start_bridge {
+                        let push_text = format!("❌ 任务执行失败：\n{}", truncate_chars(&err_msg, 200));
+                        tauri::async_runtime::spawn(async move {
+                            notify_wechat(&config, &push_text).await;
+                        });
+                    }
+                }
                 let db = self.app.state::<DbState>();
                 let existing_steps =
                     crate::agent::run_trace::load_run_steps(db.inner(), &self.run_id)

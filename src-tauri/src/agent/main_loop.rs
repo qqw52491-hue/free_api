@@ -248,6 +248,88 @@ fn apply_instruction_state_updates(
         }
     }
 
+    if let Some(ref blocks) = instruction.target_blocks_update {
+        if !blocks.is_empty() {
+            context.block_manager.set_blocks(blocks.clone());
+        }
+    } else if context.block_manager.blocks.is_empty() && !instruction.todo_update.is_empty() {
+        // 自动桥接：从 todo_update 自动生成默认 TargetBlocks，平滑接入状态机
+        let auto_blocks: Vec<crate::agent::target_block::TargetBlock> = instruction
+            .todo_update
+            .iter()
+            .map(|t| {
+                let mut b = crate::agent::target_block::TargetBlock::new(
+                    format!("block-{}", t.id),
+                    &t.description,
+                );
+                // 自动识别高难度词根赋权
+                let desc_lower = t.description.to_lowercase();
+                if desc_lower.contains("重构")
+                    || desc_lower.contains("架构")
+                    || desc_lower.contains("迁移")
+                    || desc_lower.contains("并发")
+                {
+                    b.tier = "pro".to_string();
+                }
+                b
+            })
+            .collect();
+        context.block_manager.set_blocks(auto_blocks);
+    }
+
+    // 接收执行模型提交的自述
+    if let Some(ref report) = instruction.self_report {
+        if let Some(block) = context.active_target_block_mut() {
+            block.self_report = Some(report.clone());
+        }
+    }
+
+    // 处理执行模型主动呼叫 Pro 援助（逃生通道）
+    if instruction.request_escalation == Some(true) {
+        let escalation_result = if let Some(block) = context.active_target_block_mut() {
+            let id = block.id.clone();
+            Some((id, block.request_pro_escalation()))
+        } else {
+            None
+        };
+
+        if let Some((id, res)) = escalation_result {
+            match res {
+                Ok(_) => {
+                    context.add_error_feedback(&format!(
+                        "【🚀 逃生通道已激活】目标块 [{}] 已成功申请临时 Pro 强模型支援，下一步骤将使用 Pro 执行复杂推理。",
+                        id
+                    ));
+                }
+                Err(err) => {
+                    context.add_error_feedback(&format!("【⚠️ 逃生通道申请驳回】{}", err));
+                }
+            }
+        }
+    }
+
+    // 处理执行模型申请动态扩展修改边界 (Scope)
+    if let Some(ref ext) = instruction.scope_extension {
+        if !ext.paths.is_empty() {
+            if ext.reason.trim().is_empty() {
+                context.add_error_feedback("【⚠️ Scope 扩展驳回】申请扩展修改边界时必须在 reason 字段中提供正当的技术联动理由，不得空置。");
+            } else {
+                let expanded_info = if let Some(block) = context.active_target_block_mut() {
+                    block.expand_scope(&ext.paths);
+                    Some((block.id.clone(), ext.paths.clone(), ext.reason.clone()))
+                } else {
+                    None
+                };
+                if let Some((id, paths, reason)) = expanded_info {
+                    context.add_error_feedback(&format!(
+                        "【✅ Scope 边界扩展已放行】目标块 [{}] 允许修改范围已扩充包含：{:?}（理由：{}）",
+                        id, paths, reason
+                    ));
+                }
+            }
+        }
+    }
+
     !review_contract_was_present && context.review_contract.is_some()
 }
 
@@ -1268,6 +1350,26 @@ async fn run_agent_main_loop_in_workspace_inner(
             &mut run_machine,
             AgentRunEvent::BeginPlanning { step_id },
         )?;
+
+        // 宿主状态机：追踪当前目标块步数并触发硬顶防翻车警报
+        let hard_limit_warning = if let Some(block) = context.active_target_block_mut() {
+            block.on_step_start();
+            if block.is_hard_limit_exceeded() {
+                Some((block.id.clone(), block.steps_count, block.hard_step_limit))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some((id, count, limit)) = hard_limit_warning {
+            context.add_error_feedback(&format!(
+                "【⚠️ 目标块步数超限警报】当前活跃目标块 [{}] 已经执行了 {} 步（达到硬顶上限 {} 步）。\n请停止零散动作，检查当前方案是否受阻。若受阻请在 progress_summary 中指出并申请验收或进入收敛。",
+                id, count, limit
+            ));
+        }
+
         app.emit(
             &format!("agent-log-{}", final_session_id),
             format!("正在规划第 {} 步...", step_id + 1),
@@ -1537,30 +1639,66 @@ async fn run_agent_main_loop_in_workspace_inner(
             // 打分模式累加连续失败权重）。实测依据：Flash 档反复守不住交付披露纪律。
             context.record_step_outcome(false);
         } else if is_finish && result.success {
-            // ①~⑤ 确定性门禁 100% 通过后，才进行 Reviewer 终审（Git Diff 或 非 Git 产物/文件变更）！
-            let review_res = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
-                &app,
-                state.inner(),
-                &context,
-                &model_routing,
-                step_id,
+            // Level 0 机械门禁：零 Token 快速拦截（Scope 边界越界等）
+            let scope_violations = crate::agent::reviewer_gatekeeper::mechanical_precheck_violations(
                 &workspace_dir,
-                &git_baseline,
-                run_started_at,
-                &final_session_id,
-                &mut interrupt_rx,
-                checkpoint.last_reviewed_diff_hash.as_deref(),
-                checkpoint.last_review_result.as_ref(),
-            )
-            .await;
+                context.active_target_block(),
+            );
+            if !scope_violations.is_empty() {
+                checkpoint.finish_reviewed = true;
+                context.add_error_feedback(&format!(
+                    "【🚨 机械门禁拦截：代码改动超出目标块预定边界】\n{}\n本次 finish 已被系统自动打回（0 Token 消耗，免除强模型审查）。请还原无关文件的意外改动，或在方案中扩展该块的 scope 后重试。",
+                    scope_violations.join("\n")
+                ));
+                crate::agent::dispatcher::emit_tool_event(
+                    &app,
+                    &final_session_id,
+                    step_id,
+                    &instruction,
+                    "scope_challenged",
+                    Some("finish".to_string()),
+                    Some(false),
+                    &format!("机械拦截：改动超出目标块预定范围（{} 项越界）", scope_violations.len()),
+                    None,
+                );
+                context.record_step_outcome(false);
+            } else {
+                // Level 1: 确定性门禁与机械门禁 100% 通过后，才调用 Reviewer 终审（带 Checklist 证据链严审）！
+                let review_res = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
+                    &app,
+                    state.inner(),
+                    &context,
+                    &model_routing,
+                    step_id,
+                    &workspace_dir,
+                    &git_baseline,
+                    run_started_at,
+                    &final_session_id,
+                    &mut interrupt_rx,
+                    checkpoint.last_reviewed_diff_hash.as_deref(),
+                    checkpoint.last_review_result.as_ref(),
+                )
+                .await;
 
-            if !review_res.is_passed() {
+                if !review_res.is_passed() {
                 // 存在阻塞性缺陷！
                 if checkpoint.reviewer_retry_count < 3 {
                     checkpoint.reviewer_retry_count += 1;
                     checkpoint.last_reviewed_diff_hash = Some(review_res.diff_hash.clone());
                     checkpoint.last_review_result = Some(review_res.clone());
                     reviewer_challenged = true;
+
+                    // 目标块审查熔断联动：超限自动升维 Pro
+                    let breaker_alert = if let Some(block) = context.active_target_block_mut() {
+                        let tripped = block.record_review_failure();
+                        if tripped {
+                            Some(format!("\n\n【🚨 审查熔断告警】当前目标块 [{}] 连续 3 次未能通过审查，已触发死循环熔断！系统已强制将该块升维至主力强模型（Pro）接管执行，请利用强推理能力重构并彻底解决上述缺陷。", block.id))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
 
                     let issues_text = review_res
                         .blocking_issues
@@ -1591,13 +1729,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                     };
 
                     context.add_error_feedback(&format!(
-                        "【🚨 终态代码审查未通过（第 {}/3 次评审）】\n审查模型（{}）评分: {}/100\n审查评价: {}\n\n检测到以下阻塞性缺陷（Blocking Issues）：\n{}{}\n\n本次 finish 已被系统拦截，任务不会在此终止。请直接针对上述缺陷进行修改并运行测试验证，修复完成后再次调用 finish 交付。",
+                        "【🚨 终态代码审查未通过（第 {}/3 次评审）】\n审查模型（{}）评分: {}/100\n审查评价: {}\n\n检测到以下阻塞性缺陷（Blocking Issues）：\n{}{}{}\n\n本次 finish 已被系统拦截，任务不会在此终止。请直接针对上述缺陷进行修改并运行测试验证，修复完成后再次调用 finish 交付。",
                         checkpoint.reviewer_retry_count,
                         review_res.model_id,
                         review_res.score,
                         review_res.summary,
                         issues_text,
-                        nits_text
+                        nits_text,
+                        breaker_alert.as_deref().unwrap_or("")
                     ));
 
                     crate::agent::dispatcher::emit_tool_event(
@@ -1638,6 +1777,11 @@ async fn run_agent_main_loop_in_workspace_inner(
                 // 审查 100% 通过（或无代码修改 / 仅次要建议放行）
                 checkpoint.last_reviewed_diff_hash = None;
                 checkpoint.last_review_result = None;
+                // 宿主状态机：复位重试计数并推进当前目标块至 Completed，激活下一块
+                if let Some(block) = context.active_target_block_mut() {
+                    block.reset_review_retries();
+                }
+                context.block_manager.advance_to_next();
                 crate::agent::dispatcher::emit_tool_event(
                     &app,
                     &final_session_id,
@@ -1649,6 +1793,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     &output_text,
                     None,
                 );
+            }
             }
         } else if !is_finish {
             // 新的常规步骤提供了新增证据，之后若仍有 open Todo 可重新进行一次质询。
@@ -1696,6 +1841,10 @@ async fn run_agent_main_loop_in_workspace_inner(
                 short_error,
                 Some(output_id.clone()),
             );
+        }
+
+        if let Some(block) = context.active_target_block_mut() {
+            block.on_step_finish();
         }
 
         context.add_step(&instruction, &output_text, &output_id);

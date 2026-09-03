@@ -90,6 +90,17 @@ impl<'de> Deserialize<'de> for TodoItem {
     }
 }
 
+/// 动态申请扩展当前活跃块的修改范围边界 (Scope) 请求
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ScopeExtensionRequest {
+    /// 申请纳入 scope 的文件或目录相对路径列表
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// 正当的技术联动理由（必填，解释为什么需要改动外部文件）
+    #[serde(default)]
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortMemory {
     pub step_id: usize,
@@ -247,6 +258,18 @@ pub struct AgentInstruction {
 
     #[serde(default)]
     pub todo_update: Vec<TodoItem>,
+    /// 目标块显式规划或批量更新（粗粒度任务单元）
+    #[serde(default)]
+    pub target_blocks_update: Option<Vec<crate::agent::target_block::TargetBlock>>,
+    /// 执行模型主动申请临时 Pro 强模型援助（逃生通道，每块限频）
+    #[serde(default)]
+    pub request_escalation: Option<bool>,
+    /// 交付或阶段收官时提交的 3 行自述（改动说明、选型理由、存疑与隐患点）
+    #[serde(default)]
+    pub self_report: Option<crate::agent::target_block::BlockSelfReport>,
+    /// 动态申请扩展当前活跃块的修改范围边界 (Scope)，避免跨文件联动修改被机械门禁误杀
+    #[serde(default)]
+    pub scope_extension: Option<ScopeExtensionRequest>,
     /// 仅复杂审查、诊断或研究任务使用的完整审查契约更新。
     #[serde(default)]
     pub review_contract_update: Option<ReviewContract>,

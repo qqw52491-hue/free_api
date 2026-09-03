@@ -203,11 +203,33 @@ impl AgentRouter {
         }
 
         // ================================================================
-        // 第二优先级：基于客观规则的难度分流
+        // 第二优先级：目标块逃生通道（主动呼叫 Pro 支援）
+        // ================================================================
+        if let Some(block) = context.active_target_block() {
+            if block.active_escalation {
+                return RoutingDecision {
+                    model_id: config.pro.clone(),
+                    tier: RoutingTier::Pro,
+                    reason: format!("目标块 [{}] 申请临时 Pro 支援（逃生通道生效）", block.id),
+                };
+            }
+        }
+
+        // ================================================================
+        // 第三优先级：基于客观规则的难度与救场分流
         // ================================================================
 
-        // 规则 1：第一步（空历史），需要全局规划，必须用强模型
+        // 规则 1：第一步（空历史），若目标块未明确指定 flash，默认全局规划需强模型
         if context.turns_history.is_empty() {
+            if let Some(block) = context.active_target_block() {
+                if block.tier.eq_ignore_ascii_case("flash") && !config.force_pro_on_first_step {
+                    return RoutingDecision {
+                        model_id: config.flash.clone(),
+                        tier: RoutingTier::Flash,
+                        reason: format!("目标块 [{}] 显式指定 Flash 摸底，快速启动", block.id),
+                    };
+                }
+            }
             return RoutingDecision {
                 model_id: config.pro.clone(),
                 tier: RoutingTier::Pro,
@@ -248,6 +270,17 @@ impl AgentRouter {
             };
         }
 
+        // 规则 4：目标块预设档位继承（动作继承所属块的难度）
+        if let Some(block) = context.active_target_block() {
+            if block.tier.eq_ignore_ascii_case("pro") {
+                return RoutingDecision {
+                    model_id: config.pro.clone(),
+                    tier: RoutingTier::Pro,
+                    reason: format!("继承目标块 [{}] 预设 Pro 强推理档位", block.id),
+                };
+            }
+        }
+
         // ================================================================
         // 兜底：一切平安，交给便宜又快的 Flash 模型干活
         // ================================================================
@@ -268,12 +301,44 @@ impl AgentRouter {
                 reason: "当前上下文包含截图/图片，必须使用视觉模型处理".to_string(),
             };
         }
+
+        // 目标块逃生通道优先（主动申请 Pro 援助）
+        if let Some(block) = context.active_target_block() {
+            if block.active_escalation {
+                return RoutingDecision {
+                    model_id: config.pro.clone(),
+                    tier: RoutingTier::Pro,
+                    reason: format!("目标块 [{}] 申请临时 Pro 支援（逃生通道生效）", block.id),
+                };
+            }
+        }
+
         if context.turns_history.is_empty() {
+            if let Some(block) = context.active_target_block() {
+                if block.tier.eq_ignore_ascii_case("flash") && !config.force_pro_on_first_step {
+                    return RoutingDecision {
+                        model_id: config.flash.clone(),
+                        tier: RoutingTier::Flash,
+                        reason: format!("目标块 [{}] 显式指定 Flash 摸底，快速启动", block.id),
+                    };
+                }
+            }
             return RoutingDecision {
                 model_id: config.pro.clone(),
                 tier: RoutingTier::Pro,
                 reason: "首步全局规划，需要强推理能力".to_string(),
             };
+        }
+
+        // 目标块预设 Pro 档位直接升维
+        if let Some(block) = context.active_target_block() {
+            if block.tier.eq_ignore_ascii_case("pro") {
+                return RoutingDecision {
+                    model_id: config.pro.clone(),
+                    tier: RoutingTier::Pro,
+                    reason: format!("继承目标块 [{}] 预设 Pro 强推理档位", block.id),
+                };
+            }
         }
 
         let mut score = 0i32;
@@ -515,5 +580,40 @@ mod tests {
         config.role_models.insert(roles::PLANNER.to_string(), "planner-uuid".into());
         let fresh = SandwichContext::new("system".to_string(), "目标".to_string());
         assert_eq!(AgentRouter::route_for_step(&fresh, &config, 0).model_id, "planner-uuid");
+    }
+
+    #[test]
+    fn test_target_block_tier_inheritance_and_escalation() {
+        let config = mixed_config();
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut context, "准备开始执行");
+        context.record_step_outcome(true);
+
+        // 默认无活跃块：成功步回落 Flash
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Flash);
+
+        // 设置活跃块为 Pro 档位
+        let mut pro_block = crate::agent::target_block::TargetBlock::new("block-heavy", "重构核心");
+        pro_block.tier = "pro".to_string();
+        context.block_manager.set_blocks(vec![pro_block]);
+
+        // 继承目标块的 Pro 档位
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Pro);
+
+        // 切换为 Flash 档位块
+        let mut flash_block = crate::agent::target_block::TargetBlock::new("block-light", "修改配置");
+        flash_block.tier = "flash".to_string();
+        context.block_manager.set_blocks(vec![flash_block]);
+
+        // 继承 Flash 档位
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Flash);
+
+        // 触发逃生通道（主动申请 Pro 援助）
+        context.active_target_block_mut().unwrap().request_pro_escalation().unwrap();
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Pro);
+
+        // 单步结束，逃生通道复位，回落 Flash
+        context.active_target_block_mut().unwrap().on_step_finish();
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Flash);
     }
 }
