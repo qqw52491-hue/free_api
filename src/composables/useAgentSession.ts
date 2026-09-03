@@ -249,6 +249,49 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const llmParseErrors = ref<LlmParseErrorItem[]>([]);
     const teamWorkers = ref<AgentWorkerItem[]>([]);
 
+function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: string; role: "reviewer" | "coder" | "worker"; roleLabel: string } {
+    const isReviewer = step.tool === "child_reviewer" || step.action === "child_reviewer";
+    const isWriter = step.tool === "child_writer" || step.action === "child_writer";
+    const role: "reviewer" | "coder" | "worker" = isReviewer ? "reviewer" : isWriter ? "coder" : "worker";
+    const defaultLabel = isReviewer ? "代码审查员" : isWriter ? "沙箱写入员" : "侦察工作者";
+    const roleLabel = isReviewer ? "审查" : isWriter ? "写入" : "侦察";
+
+    let taskDesc = "";
+    const params = step.params || (step as any).params_summary;
+    if (params) {
+        if (typeof params === "object") {
+            taskDesc = String((params as any).task || (params as any).goal || (params as any).instruction || (params as any).command || "").trim();
+        } else if (typeof params === "string") {
+            try {
+                const parsed = JSON.parse(params);
+                taskDesc = String(parsed.task || parsed.goal || parsed.instruction || parsed.command || "").trim();
+            } catch {
+                taskDesc = params.trim();
+            }
+        }
+    }
+    if (!taskDesc && step.description && step.description !== "执行操作") {
+        taskDesc = step.description.trim();
+    }
+    if (!taskDesc && step.action && step.action !== "执行操作") {
+        taskDesc = step.action.trim();
+    }
+
+    let name = defaultLabel;
+    if (taskDesc) {
+        const cleanDesc = taskDesc.replace(/^[🔍⚡🛡️🔧\s]+/, "");
+        const shortDesc = cleanDesc.length > 18 ? cleanDesc.slice(0, 17) + "…" : cleanDesc;
+        name = `${roleLabel}: ${shortDesc}`;
+    }
+
+    return {
+        name,
+        taskDesc: taskDesc || (isReviewer ? "深入审查代码变更与安全隐患" : isWriter ? "在隔离沙箱中编写代码与测试" : "在工作区执行独立侦察与分析"),
+        role,
+        roleLabel,
+    };
+}
+
     const derivedWorkers = computed<AgentWorkerItem[]>(() => {
         // 如果当前没有在运行且没有显式注册 worker，则保持清空（避免历史子 agent 堆积）
         if (!isRunning.value && teamWorkers.value.length === 0) {
@@ -272,26 +315,27 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const isWorker = step.tool === "child_worker" || step.action === "child_worker";
             if (!isReviewer && !isWriter && !isWorker) continue;
 
-            const role = isReviewer ? "reviewer" : isWriter ? "coder" : "worker";
+            const details = extractWorkerDetails(step);
             // 查找是否已存在同角色或相同 stepId 的 Worker
-            const existing = Array.from(map.values()).find((w) => w.role === role || (step.id && w.id.includes(step.id)));
+            const existing = Array.from(map.values()).find((w) => w.role === details.role || (step.id && w.id.includes(step.id)));
             if (existing) {
                 // 原地合并，绝不创建新条目导致出现两个一模一样的 Worker
                 existing.status = step.status;
-                if (step.description) existing.currentStep = step.description;
+                if (details.taskDesc) existing.currentStep = details.taskDesc;
+                if (details.name && existing.name.length <= 8) existing.name = details.name;
                 if (step.thought) existing.thought = step.thought;
                 if (typeof step.result === "string") existing.output = step.result;
                 if (step.status === "succeeded") existing.progress = 100;
             } else {
-                const id = `${role}-${step.id || step.stepId}`;
+                const id = `${details.role}-${step.id || step.stepId}`;
                 map.set(id, {
                     id,
-                    name: isReviewer ? "代码质量审查员" : isWriter ? "沙箱代码写入员" : "自治子工作者",
-                    role,
-                    roleLabel: isReviewer ? "审查员" : isWriter ? "写入员" : "Worker",
+                    name: details.name,
+                    role: details.role,
+                    roleLabel: details.roleLabel,
                     status: step.status,
-                    currentStep: step.description || "正在后台独立处理任务...",
-                    currentTool: step.tool || role,
+                    currentStep: details.taskDesc,
+                    currentTool: step.tool || details.role,
                     progress: step.status === "succeeded" ? 100 : 65,
                     startedAt: step.timestamp,
                     durationMs: step.metrics?.toolDurationMs,
@@ -981,23 +1025,24 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             return;
         }
 
-        // 🔄 异步子审查代理流式事件（实时推导中指示灯）
-        if (eventType === "child_reviewer_stream") {
+        // 🔄 异步子 Agent（审查与侦察）流式事件（实时推导中指示灯）
+        if (eventType === "child_reviewer_stream" || eventType === "child_worker_stream") {
+            const isWorkerStream = eventType === "child_worker_stream";
             const streamType = toText(payload.stream_type);
             const chunk = toText(payload.chunk);
-            const childRunId = toText(payload.child_run_id) || "reviewer-1";
+            const childRunId = toText(payload.child_run_id) || (isWorkerStream ? "worker-1" : "reviewer-1");
             const shortId = childRunId ? childRunId.slice(0, 8) : "";
             
-            let worker = teamWorkers.value.find((w) => w.id === childRunId);
+            let worker = teamWorkers.value.find((w) => w.id === childRunId || (isWorkerStream ? w.role === "worker" : w.role === "reviewer"));
             if (!worker) {
                 worker = {
                     id: childRunId,
-                    name: "代码质量审查员",
-                    role: "reviewer",
-                    roleLabel: "审查员",
+                    name: isWorkerStream ? "后台侦察工作者" : "代码质量审查员",
+                    role: isWorkerStream ? "worker" : "reviewer",
+                    roleLabel: isWorkerStream ? "侦察" : "审查员",
                     status: "running",
-                    currentStep: "正在后台分析变更并审查潜在风险...",
-                    currentTool: "child_reviewer",
+                    currentStep: isWorkerStream ? "正在后台独立检索源码并收集事实证据..." : "正在后台分析变更并审查潜在风险...",
+                    currentTool: isWorkerStream ? "child_worker" : "child_reviewer",
                     progress: 35,
                     startedAt: Date.now(),
                     thought: "",
@@ -1007,12 +1052,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
             if (streamType === "thinking") {
                 actionPhaseText.value = chunk 
-                    ? `🔍 子审查独立推导中: ${chunk.slice(0, 35)}...` 
-                    : `🔍 子审查代理正在独立推导 (${shortId})...`;
+                    ? `🔍 ${isWorkerStream ? '子侦察' : '子审查'}独立推导中: ${chunk.slice(0, 35)}...` 
+                    : `🔍 ${isWorkerStream ? '子侦察' : '子审查'}代理正在独立推导 (${shortId})...`;
                 worker.thought = (worker.thought || "") + chunk;
                 worker.progress = Math.min(85, worker.progress + 1);
             } else {
-                actionPhaseText.value = `🔍 子审查代理生成结论中 (${shortId})...`;
+                actionPhaseText.value = `🔍 ${isWorkerStream ? '子侦察' : '子审查'}代理生成结论中 (${shortId})...`;
                 worker.output = (worker.output || "") + chunk;
                 worker.progress = Math.min(95, worker.progress + 1);
             }
@@ -1209,23 +1254,24 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const isWorker = tool === "child_worker";
             if (!isReviewer && !isWriter && !isWorker) return;
 
-            const role = isReviewer ? "reviewer" : isWriter ? "coder" : "worker";
-            let worker = teamWorkers.value.find((w) => w.role === role || (stepItem.id && w.id.includes(stepItem.id)));
+            const details = extractWorkerDetails(stepItem);
+            let worker = teamWorkers.value.find((w) => w.role === details.role || (stepItem.id && w.id.includes(stepItem.id)));
             if (!worker) {
                 teamWorkers.value.push({
-                    id: `${role}-${stepItem.id || stepItem.stepId}`,
-                    name: isReviewer ? "代码质量审查员" : isWriter ? "沙箱代码写入员" : "自治子工作者",
-                    role,
-                    roleLabel: isReviewer ? "审查员" : isWriter ? "写入员" : "Worker",
+                    id: `${details.role}-${stepItem.id || stepItem.stepId}`,
+                    name: details.name,
+                    role: details.role,
+                    roleLabel: details.roleLabel,
                     status: stepItem.status === "succeeded" ? "succeeded" : "running",
-                    currentStep: stepItem.description || "正在后台独立处理任务…",
-                    currentTool: stepItem.tool || role,
+                    currentStep: details.taskDesc,
+                    currentTool: stepItem.tool || details.role,
                     progress: stepItem.status === "succeeded" ? 100 : 60,
                     startedAt: Date.now(),
                 });
             } else {
                 worker.status = stepItem.status === "succeeded" ? "succeeded" : "running";
-                if (stepItem.description) worker.currentStep = stepItem.description;
+                if (details.taskDesc) worker.currentStep = details.taskDesc;
+                if (details.name && worker.name.length <= 8) worker.name = details.name;
                 if (stepItem.status === "succeeded") worker.progress = 100;
             }
         }

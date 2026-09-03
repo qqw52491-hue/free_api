@@ -86,6 +86,7 @@
                                 :steps="session.steps.value"
                                 :current-goal="session.currentGoal.value"
                                 :master-step-description="session.statusDescription.value"
+                                :only-active="true"
                             />
                         </div>
                     </aside>
@@ -387,9 +388,13 @@ function handleActiveThoughtSelect() {
     inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("detail");
 }
-function handleOpenTeamDeck() {
+function handleOpenTeamDeck(stepId?: string) {
     inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("team");
+    teamRailCollapsed.value = false;
+    if (stepId) {
+        session.selectedStepId.value = stepId;
+    }
 }
 function submitComposer(payload?: { text: string; attachments?: any[]; mode?: "interrupt" | "queue" }) {
     const text = (payload?.text ?? composerDraft.value).trim();

@@ -143,13 +143,16 @@
                                             <em v-else>{{ step.source }}</em>
                                         </button>
                                     </div>
-                                    <div v-if="isSubAgentTool(step.tool) || isWaitJobsTool(step.tool)" class="subagent-inline-capsule" role="button" tabindex="0" title="点击展开右侧团队协作看板" @click="$emit('open-team-deck')" @keydown.enter="$emit('open-team-deck')">
+                                    <div v-if="isSubAgentTool(step.tool) || isWaitJobsTool(step.tool)" class="subagent-inline-capsule" role="button" tabindex="0" :title="'点击查看当前步骤派发的子任务详情：' + extractSubagentTask(step)" @click="$emit('open-team-deck', step.id)" @keydown.enter="$emit('open-team-deck', step.id)">
                                         <div class="capsule-left">
                                             <span class="capsule-pulse-dot" :class="{ 'is-running': step.status === 'running' }"></span>
-                                            <span class="capsule-text">{{ step.status === 'running' ? '⚡ 正在进行后台多 Agent 协同执行' : '✅ 团队协同任务已完成并交付' }}</span>
+                                            <span class="capsule-text">
+                                                {{ step.status === 'running' ? '⚡ 正在独立执行：' : '✅ 协同任务已完成：' }}
+                                                <strong>{{ extractSubagentTask(step) }}</strong>
+                                            </span>
                                         </div>
                                         <div class="capsule-action">
-                                            <span>协作看板</span>
+                                            <span>实时看板</span>
                                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
                                         </div>
                                     </div>
@@ -348,8 +351,31 @@ const emit = defineEmits<{
     "select-active-thought": [];
     "submit-human": [answer: string];
     "open-preview": [code: string];
-    "open-team-deck": [];
+    "open-team-deck": [stepId?: string];
 }>();
+
+function extractSubagentTask(step: any): string {
+    if (!step) return "后台子任务";
+    const params = step.params || step.params_summary;
+    if (params) {
+        if (typeof params === "object") {
+            const p = params as any;
+            if (p.task && typeof p.task === "string") return p.task;
+            if (p.goal && typeof p.goal === "string") return p.goal;
+            if (p.command && typeof p.command === "string") return p.command;
+            if (p.instruction && typeof p.instruction === "string") return p.instruction;
+        } else if (typeof params === "string") {
+            try {
+                const parsed = JSON.parse(params);
+                if (parsed.task) return parsed.task;
+                if (parsed.goal) return parsed.goal;
+            } catch {}
+        }
+    }
+    if (step.description && step.description !== "执行操作") return step.description;
+    if (step.action && step.action !== "执行操作") return step.action;
+    return isSubAgentTool(step.tool) ? "独立子任务执行与审查" : "后台协同任务";
+}
 
 async function handlePreviewArtifact(artifact: ArtifactDescriptor) {
     if (!artifact.content) {
