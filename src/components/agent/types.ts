@@ -295,6 +295,8 @@ export interface AgentWorkerStep {
     title: string;
     tool?: string;
     status: AgentToolStatus;
+    description?: string;
+    summary?: string;
     durationMs?: number;
     output?: string;
 }
@@ -313,6 +315,9 @@ export interface AgentWorkerItem {
     thought?: string;
     output?: string;
     summary?: string;
+    findings?: string[];
+    evidenceRefs?: string[];
+    confidence?: string;
     steps?: AgentWorkerStep[];
 }
 

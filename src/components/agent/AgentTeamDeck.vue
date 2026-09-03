@@ -136,7 +136,25 @@
                         </div>
                     </div>
 
-                    <!-- 子 Agent 动态步骤链 (与主 Agent 步骤模型同构复用) -->
+                    <!-- 🎯 核心结论与发现 (当子任务产出 findings 时结构化高亮展示) -->
+                    <div v-if="selectedWorker.findings && selectedWorker.findings.length > 0" class="worker-findings-deck">
+                        <div class="findings-header">
+                            <span class="findings-icon">🎯</span>
+                            <strong class="findings-title">任务产出与结论总结</strong>
+                            <span class="findings-count">{{ selectedWorker.findings.length }} 条发现</span>
+                            <span v-if="selectedWorker.confidence" class="confidence-tag" :class="`conf-${selectedWorker.confidence}`">
+                                {{ selectedWorker.confidence === 'confirmed' ? '高信度 (confirmed)' : (selectedWorker.confidence === 'supported' ? '中信度 (supported)' : '待核验') }}
+                            </span>
+                        </div>
+                        <ul class="findings-list">
+                            <li v-for="(finding, fIdx) in selectedWorker.findings" :key="fIdx" class="finding-item">
+                                <span class="finding-num">{{ fIdx + 1 }}</span>
+                                <span class="finding-text">{{ finding }}</span>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <!-- 子 Agent 动态步骤链 (分层结构，文字为主，小巧标号) -->
                     <div class="worker-steps-chain">
                         <div
                             v-for="st in activeWorkerSteps"
@@ -144,21 +162,33 @@
                             class="worker-step-node"
                             :class="[`status-${st.status}`, { 'is-active': st.status === 'running' }]"
                         >
-                            <div class="step-badge">
-                                <i v-if="st.status === 'running'" class="spinner-dot"></i>
-                                <span v-else-if="st.status === 'succeeded'">✔</span>
-                                <span v-else-if="st.status === 'failed'">✕</span>
-                                <span v-else>{{ st.stepNumber }}</span>
+                            <!-- 小巧的时间轴序号环 -->
+                            <div class="step-rail-col">
+                                <span class="step-dot-badge">
+                                    <i v-if="st.status === 'running'" class="spinner-dot"></i>
+                                    <span v-else-if="st.status === 'succeeded'">✔</span>
+                                    <span v-else-if="st.status === 'failed'">✕</span>
+                                    <span v-else>{{ st.stepNumber }}</span>
+                                </span>
                             </div>
-                            <div class="step-content">
-                                <div class="step-header">
-                                    <span class="step-seq">步骤 {{ st.stepNumber }}</span>
-                                    <span v-if="st.tool" class="step-tool-tag">{{ getShortToolName(st.tool) }}</span>
-                                    <span class="step-status-text">
+
+                            <!-- 层级内容主体 -->
+                            <div class="step-content-body">
+                                <div class="step-meta-row">
+                                    <span class="step-seq-pill">第 {{ st.stepNumber }} 步</span>
+                                    <span v-if="st.tool" class="step-tool-badge">{{ getShortToolName(st.tool) }}</span>
+                                    <span class="step-status-tag" :class="`status-${st.status}`">
                                         {{ st.status === 'running' ? '执行中…' : (st.status === 'succeeded' ? '完成' : (st.status === 'failed' ? '异常' : '待命')) }}
                                     </span>
                                 </div>
-                                <p class="step-title-text" :title="st.title">{{ st.title }}</p>
+                                <h4 class="step-main-title">{{ st.title }}</h4>
+                                <div v-if="st.description && st.description !== st.title" class="step-desc-box">
+                                    <span class="desc-text">{{ st.description }}</span>
+                                </div>
+                                <div v-if="st.summary" class="step-summary-box">
+                                    <span class="summary-icon">💡</span>
+                                    <div class="summary-text">{{ st.summary }}</div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -265,27 +295,34 @@ const activeWorkerSteps = computed<AgentWorkerStep[]>(() => {
     if (selectedWorker.value.steps && selectedWorker.value.steps.length > 0) {
         return selectedWorker.value.steps;
     }
-    // 自适应生成动态微型步骤链，与主 Agent 链路同构复用
+    // 自适应生成动态分层步骤链
     const w = selectedWorker.value;
     const isDone = w.status === "succeeded";
     const isFailed = w.status === "failed";
+    const firstFinding = w.findings && w.findings[0] ? w.findings[0] : undefined;
+
     return [
         {
             stepNumber: 1,
-            title: "解析任务目标与安全隔离作用域",
+            title: "任务拆解与环境安全隔离",
             tool: "task_init",
+            description: "解析父级任务约束，初始化只读隔离上下文",
             status: "succeeded",
         },
         {
             stepNumber: 2,
-            title: w.currentStep || "执行核心操作与事实收集",
+            title: w.currentStep || "执行核心操作与事实证据探查",
             tool: w.currentTool || w.role,
+            description: `调用工具 [${getShortToolName(w.currentTool || w.role)}] 深入分析代码与运行日志`,
+            summary: w.thought ? (w.thought.slice(0, 110) + (w.thought.length > 110 ? "…" : "")) : undefined,
             status: isDone ? "succeeded" : isFailed ? "failed" : "running",
         },
         {
             stepNumber: 3,
-            title: isDone ? "结论提炼完毕，已成功汇聚回主调度" : (isFailed ? "任务执行异常，已上报主调度处理" : "等待执行完毕并交付结论"),
+            title: isDone ? "提炼核心发现并交付主调度" : (isFailed ? "任务异常中断并上报主调度" : "等待分析收敛与结果汇总"),
             tool: "finish",
+            description: isDone ? "事实证据已充分，成功将全部成果回传至主调度会话" : "等待子任务循环结束",
+            summary: firstFinding,
             status: isDone ? "succeeded" : isFailed ? "failed" : "pending",
         },
     ];
@@ -886,110 +923,258 @@ async function copyOutput(text?: string) {
     100% { opacity: 0.8; }
 }
 
-/* 子 Agent 动态步骤链 (与主 Agent 链路同构) */
+/* 🎯 核心结论与发现卡片 */
+.worker-findings-deck {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.08), rgba(24, 24, 32, 0.95));
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    border-radius: 8px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.findings-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+}
+
+.findings-icon {
+    font-size: 13px;
+}
+
+.findings-title {
+    color: #38bdf8;
+    font-weight: 700;
+}
+
+.findings-count {
+    font-size: 8.5px;
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+}
+
+.confidence-tag {
+    margin-left: auto;
+    font-size: 8px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(52, 211, 153, 0.15);
+    color: #34d399;
+}
+
+.findings-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.finding-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 10px;
+    line-height: 1.45;
+    color: #e4e4e7;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 4px 6px;
+    border-radius: 4px;
+    border-left: 2px solid #38bdf8;
+}
+
+.finding-num {
+    font-size: 8.5px;
+    font-weight: 700;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.15);
+    border-radius: 50%;
+    width: 14px;
+    height: 14px;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.finding-text {
+    flex: 1;
+    word-break: break-word;
+}
+
+/* 子 Agent 动态步骤链 (时间轴层次设计，大字标题，小巧序号) */
 .worker-steps-chain {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 8px;
+    padding-left: 2px;
 }
 
 .worker-step-node {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
-    padding: 6px 8px;
-    background: #181822;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 6px;
+    gap: 10px;
+    padding: 8px 10px;
+    background: #191924;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 8px;
     transition: all 0.2s ease;
 }
 
 .worker-step-node.is-active {
-    border-color: rgba(56, 189, 248, 0.4);
-    background: linear-gradient(90deg, rgba(56, 189, 248, 0.09), #181822);
-    box-shadow: 0 0 10px rgba(56, 189, 248, 0.1);
+    border-color: rgba(56, 189, 248, 0.5);
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.1), #191924 70%);
+    box-shadow: 0 0 12px rgba(56, 189, 248, 0.12);
 }
 
 .worker-step-node.status-succeeded {
-    border-color: rgba(52, 211, 153, 0.15);
+    border-color: rgba(52, 211, 153, 0.18);
 }
 
 .worker-step-node.status-failed {
-    border-color: rgba(248, 113, 113, 0.3);
-    background: rgba(248, 113, 113, 0.05);
+    border-color: rgba(248, 113, 113, 0.35);
+    background: rgba(248, 113, 113, 0.06);
 }
 
-.step-badge {
-    width: 16px;
-    height: 16px;
+.step-rail-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.step-dot-badge {
+    width: 18px;
+    height: 18px;
     border-radius: 50%;
     display: grid;
     place-items: center;
-    font-size: 8.5px;
+    font-size: 9px;
+    font-weight: 700;
     background: rgba(255, 255, 255, 0.08);
     color: #a1a1aa;
-    flex-shrink: 0;
-    margin-top: 1px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-.worker-step-node.status-succeeded .step-badge {
-    background: #34d399;
-    color: #064e3b;
-    font-weight: 700;
+.worker-step-node.status-succeeded .step-dot-badge {
+    background: #10b981;
+    color: #ffffff;
+    border-color: #34d399;
 }
 
-.worker-step-node.is-active .step-badge {
-    background: #38bdf8;
-    color: #082f49;
+.worker-step-node.is-active .step-dot-badge {
+    background: #0284c7;
+    color: #ffffff;
+    border-color: #38bdf8;
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.6);
 }
 
-.worker-step-node.status-failed .step-badge {
-    background: #f87171;
-    color: #450a0a;
-    font-weight: 700;
+.worker-step-node.status-failed .step-dot-badge {
+    background: #ef4444;
+    color: #ffffff;
+    border-color: #f87171;
 }
 
-.step-content {
+.step-content-body {
     flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
 }
 
-.step-header {
+.step-meta-row {
     display: flex;
     align-items: center;
     gap: 6px;
 }
 
-.step-seq {
-    font-size: 9px;
+.step-seq-pill {
+    font-size: 8.5px;
     font-weight: 700;
-    color: #f4f4f5;
+    color: #71717a;
+    text-transform: uppercase;
 }
 
-.step-tool-tag {
-    font-size: 8px;
+.step-tool-badge {
+    font-size: 8.5px;
     font-family: ui-monospace, SFMono-Regular, monospace;
-    padding: 0 4px;
-    border-radius: 3px;
-    background: rgba(255, 255, 255, 0.07);
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(56, 189, 248, 0.15);
     color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.25);
 }
 
-.step-status-text {
-    font-size: 8px;
+.step-status-tag {
+    font-size: 8.5px;
     color: #71717a;
     margin-left: auto;
 }
 
-.step-title-text {
+.step-status-tag.status-running {
+    color: #38bdf8;
+    font-weight: 600;
+}
+
+.step-status-tag.status-succeeded {
+    color: #34d399;
+}
+
+/* 主标题：大字号主导 */
+.step-main-title {
     margin: 0;
-    font-size: 8.5px;
-    color: #a1a1aa;
-    line-height: 1.35;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #f4f4f5;
+    line-height: 1.4;
     word-break: break-word;
+}
+
+/* 描述层级：具体执行内容 */
+.step-desc-box {
+    font-size: 9.5px;
+    color: #a1a1aa;
+    line-height: 1.45;
+    background: rgba(255, 255, 255, 0.03);
+    padding: 4px 6px;
+    border-radius: 4px;
+    border-left: 2px solid rgba(255, 255, 255, 0.12);
+    word-break: break-word;
+}
+
+/* 总结层级：执行发现/产出 */
+.step-summary-box {
+    display: flex;
+    align-items: flex-start;
+    gap: 5px;
+    font-size: 9.5px;
+    color: #fef08a;
+    background: rgba(234, 179, 8, 0.08);
+    border: 1px solid rgba(234, 179, 8, 0.2);
+    padding: 4px 6px;
+    border-radius: 4px;
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+.summary-icon {
+    font-size: 11px;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.summary-text {
+    flex: 1;
 }
 
 /* 终端输出预览 */

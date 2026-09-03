@@ -31,6 +31,7 @@ import {
     type AgentToolStatus,
     type AgentTeamState,
     type AgentWorkerItem,
+    type AgentWorkerStep,
     type ContextBudgetMode,
     type LlmParseErrorItem,
     type ParsedAttachment,
@@ -292,6 +293,58 @@ function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: st
     };
 }
 
+function parseWorkerArtifacts(raw: unknown): {
+    findings?: string[];
+    actionLog?: string[];
+    evidenceRefs?: string[];
+    confidence?: string;
+    steps?: AgentWorkerStep[];
+} {
+    if (!raw) return {};
+    let obj: any = raw;
+    if (typeof raw === "string") {
+        try {
+            obj = JSON.parse(raw);
+        } catch {
+            return {};
+        }
+    }
+    if (!obj || typeof obj !== "object") return {};
+
+    const findings: string[] = Array.isArray(obj.findings) ? obj.findings.map(String).filter(Boolean) : [];
+    const actionLog: string[] = Array.isArray(obj.action_log) ? obj.action_log.map(String).filter(Boolean) : [];
+    const evidenceRefs: string[] = Array.isArray(obj.evidence_refs) ? obj.evidence_refs.map(String).filter(Boolean) : [];
+    const confidence = typeof obj.confidence === "string" ? obj.confidence : undefined;
+
+    const steps: AgentWorkerStep[] = [];
+    if (actionLog.length > 0) {
+        actionLog.forEach((item, idx) => {
+            let tool = "action";
+            let description = item;
+            if (item.includes(":")) {
+                const parts = item.split(":");
+                tool = parts[0].trim();
+                description = parts.slice(1).join(":").trim();
+            }
+            steps.push({
+                stepNumber: idx + 1,
+                title: `执行 ${tool}`,
+                tool,
+                description,
+                status: "succeeded",
+            });
+        });
+    }
+
+    return {
+        findings: findings.length > 0 ? findings : undefined,
+        actionLog: actionLog.length > 0 ? actionLog : undefined,
+        evidenceRefs: evidenceRefs.length > 0 ? evidenceRefs : undefined,
+        confidence,
+        steps: steps.length > 0 ? steps : undefined,
+    };
+}
+
     const derivedWorkers = computed<AgentWorkerItem[]>(() => {
         // 如果当前没有在运行且没有显式注册 worker，则保持清空（避免历史子 agent 堆积）
         if (!isRunning.value && teamWorkers.value.length === 0) {
@@ -316,6 +369,7 @@ function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: st
             if (!isReviewer && !isWriter && !isWorker) continue;
 
             const details = extractWorkerDetails(step);
+            const arts = parseWorkerArtifacts(step.result);
             // 查找是否已存在同角色或相同 stepId 的 Worker
             const existing = Array.from(map.values()).find((w) => w.role === details.role || (step.id && w.id.includes(step.id)));
             if (existing) {
@@ -325,6 +379,10 @@ function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: st
                 if (details.name && existing.name.length <= 8) existing.name = details.name;
                 if (step.thought) existing.thought = step.thought;
                 if (typeof step.result === "string") existing.output = step.result;
+                if (arts.findings) existing.findings = arts.findings;
+                if (arts.evidenceRefs) existing.evidenceRefs = arts.evidenceRefs;
+                if (arts.confidence) existing.confidence = arts.confidence;
+                if (arts.steps && arts.steps.length > 0) existing.steps = arts.steps;
                 if (step.status === "succeeded") existing.progress = 100;
             } else {
                 const id = `${details.role}-${step.id || step.stepId}`;
@@ -341,6 +399,10 @@ function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: st
                     durationMs: step.metrics?.toolDurationMs,
                     thought: step.thought,
                     output: typeof step.result === "string" ? step.result : undefined,
+                    findings: arts.findings,
+                    evidenceRefs: arts.evidenceRefs,
+                    confidence: arts.confidence,
+                    steps: arts.steps,
                 });
             }
         }
