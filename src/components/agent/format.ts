@@ -212,8 +212,18 @@ export function normalizeStreamingMarkdown(raw: string): string {
     return processed;
 }
 
+const markdownCache = new Map<string, string>();
+const MAX_MARKDOWN_CACHE_SIZE = 800;
+const MAX_CACHEABLE_LENGTH = 60000;
+
 export function renderMarkdown(content: string): string {
     if (!content) return "";
+    const cached = markdownCache.get(content);
+    if (cached !== undefined) {
+        markdownCache.delete(content);
+        markdownCache.set(content, cached);
+        return cached;
+    }
     try {
         const sanitizedContent = normalizeStreamingMarkdown(content);
         const renderer = new marked.Renderer();
@@ -360,13 +370,25 @@ export function renderMarkdown(content: string): string {
             return `<a href="${href}"${titleAttr} class="markdown-rich-link" target="_blank" rel="noopener noreferrer">${text}${iconSvg}</a>`;
         };
 
-        return marked.parse(sanitizedContent, {
+        const html = marked.parse(sanitizedContent, {
             breaks: true,
             gfm: true,
             renderer,
         }) as string;
+        if (content.length <= MAX_CACHEABLE_LENGTH) {
+            if (markdownCache.size >= MAX_MARKDOWN_CACHE_SIZE) {
+                const oldestKeys = Array.from(markdownCache.keys()).slice(0, 100);
+                for (const k of oldestKeys) markdownCache.delete(k);
+            }
+            markdownCache.set(content, html);
+        }
+        return html;
     } catch {
-        return content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+        const fallback = content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+        if (content.length <= MAX_CACHEABLE_LENGTH) {
+            markdownCache.set(content, fallback);
+        }
+        return fallback;
     }
 }
 

@@ -357,7 +357,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const completionMessage = ref("");
     const streamingSummary = ref("");
     const { conversationMessages, isConversationLoading, loadConversation } = usePersistedAgentConversation(
-        activeSessionId.value,
+        () => activeSessionId.value,
         (message) => appendLog(`[会话历史加载失败] ${message}`),
     );
     const historyTurns = computed<AgentHistoryTurn[]>(() => historyRuns.value.map((run) => ({
@@ -391,11 +391,15 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         loadNextRecordPage,
         clearResources,
         disposeResources,
-    } = useAgentTaskResources(sessionId);
+    } = useAgentTaskResources(() => activeSessionId.value);
 
     let elapsedTimer: ReturnType<typeof setInterval> | null = null;
     let unlisteners: UnlistenFn[] = [];
     let logSequence = 0;
+    let runGeneration = 0;
+    // 启动窗口标记：新一代 runAgent 的 invoke 在途且 channel-run-started 未到期间为 true，
+    // 用于识别"迟到的旧代 run-done"——该事件自身不携带代数，无法靠代数比对识别自己已过期。
+    let awaitingRunStart = false;
 
     const stateMeta = computed(() => AGENT_RUN_STATE_CATALOG[runState.value]);
     const isWaitingForHuman = computed(() => runState.value === "waiting_for_human");
@@ -508,11 +512,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const managedSessionArtifacts = ref<ArtifactDescriptor[]>([]);
 
     async function reloadManagedArtifacts() {
-        if (!sessionId || !sessionId.trim()) {
+        const sid = activeSessionId.value;
+        if (!sid || !sid.trim() || sid.startsWith("draft-")) {
             managedSessionArtifacts.value = [];
             return;
         }
-        managedSessionArtifacts.value = await listSessionArtifacts(sessionId);
+        managedSessionArtifacts.value = await listSessionArtifacts(sid);
     }
 
     onMounted(() => {
@@ -1491,6 +1496,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         await register(`agent-tool-event-${sid}`, (payload) => handleToolEvent(asRecord(payload)));
         await register("channel-run-started", async (payload: any) => {
             if (payload?.session_id === sid) {
+                // 新一代任务已亮明身份，启动窗口结束；此后属于本代的 done 事件正常重置运行态
+                awaitingRunStart = false;
                 if (payload?.goal) {
                     currentGoal.value = payload.goal;
                 }
@@ -1504,11 +1511,33 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         });
         await register("channel-run-done", async (payload: any) => {
             if (payload?.session_id === sid) {
-                currentGoal.value = "";
-                await loadRunTraces();
-                await loadConversation();
+                // 启动窗口内收到的 done 事件必属于已被新一代接管的旧任务：
+                // 只做数据同步，严禁重置运行态/停计时器，避免踩掉新任务。
+                if (awaitingRunStart) {
+                    try {
+                        await loadRunTraces();
+                        await loadConversation();
+                    } catch (error) {
+                        appendLog(`[后台同步失败] ${toText(error)}`);
+                    }
+                    return;
+                }
+                const currentGenAtDone = runGeneration;
+                // 立即重置前端运行状态，确保用户发送下一条消息时不会因 isRunning 滞后而误发到打断通道
                 isRunning.value = false;
                 isThinking.value = false;
+                stopElapsedTimer();
+                try {
+                    await loadRunTraces();
+                    await loadConversation();
+                } catch (error) {
+                    appendLog(`[后台同步失败] ${toText(error)}`);
+                } finally {
+                    if (currentGenAtDone === runGeneration) {
+                        isRunning.value = false;
+                        isThinking.value = false;
+                    }
+                }
             }
         });
     }
@@ -1545,7 +1574,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             }
         }
 
-        await loadRunTraces();
+        const currentGeneration = ++runGeneration;
+        // 关键修复：点击发送后，第一步立即重置并更新运行态，使气泡与规划指示 0ms 即刻上屏响应！
         clearSession();
         runTerminal.value = false;
         currentGoal.value = requestedGoal;
@@ -1557,6 +1587,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         setRunState("planning", "正在连接模型并深度思考规划执行步骤。");
         startElapsedTimer();
         autoScrollToBottom();
+
+        // 静默预加载历史运行轨迹，绝不阻塞用户首帧交互
+        void loadRunTraces();
+
+        // 进入启动窗口：invoke 在途且 channel-run-started 未到达期间，迟到的旧代 run-done 不得重置运行态
+        awaitingRunStart = true;
         try {
             await invoke("run_agent_main_loop", {
                 modelRouting: modelRouting.value,
@@ -1574,28 +1610,46 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             setRunState("failed", message);
             appendLog(`[启动异常] ${message}`);
         } finally {
-            isRunning.value = false;
-            isThinking.value = false;
-            stopElapsedTimer();
-            const queuedGoal = pendingReplacementGoal.value;
-            await loadConversation();
-            await loadRunTraces();
-            const newest = historyRuns.value[historyRuns.value.length - 1];
-            if (newest && newest.goal === currentGoal.value && ["succeeded", "failed", "cancelled"].includes(newest.status)) {
-                clearSession();
-                autoScrollToBottom(false);
-            }
-            if (queuedGoal) {
-                pendingReplacementGoal.value = "";
-                await nextTick();
-                void runAgent(queuedGoal);
-            } else if (queuedGoals.value.length > 0) {
-                const next = queuedGoals.value.shift();
-                if (next) {
-                    await nextTick();
-                    appendLog(`[启动排队任务] ${next.text}`);
-                    void runAgent(next.text, next.attachments);
+            if (currentGeneration === runGeneration) {
+                // 本代任务终结，退出启动窗口；若已被新一代接管（else 分支），绝不触碰新代设置的标记
+                awaitingRunStart = false;
+                isRunning.value = false;
+                isThinking.value = false;
+                stopElapsedTimer();
+                const queuedGoal = pendingReplacementGoal.value;
+                try {
+                    await loadConversation();
+                    await loadRunTraces();
+                    // 关键保护：await 出让事件循环期间，若用户已触发新一代任务启动，严禁旧收尾踩踏清空新状态
+                    if (currentGeneration !== runGeneration) {
+                        appendLog(`[生命周期同步] 异步加载期间已由新代数任务(#${runGeneration})接管，跳过旧任务(#${currentGeneration})的清理。`);
+                        return;
+                    }
+                    const newest = historyRuns.value[historyRuns.value.length - 1];
+                    if (newest && newest.goal === currentGoal.value && ["succeeded", "failed", "cancelled"].includes(newest.status)) {
+                        clearSession();
+                        autoScrollToBottom(false);
+                    }
+                } catch (syncErr) {
+                    appendLog(`[收尾数据同步异常] ${toText(syncErr)}`);
                 }
+                if (currentGeneration !== runGeneration) {
+                    return;
+                }
+                if (queuedGoal) {
+                    pendingReplacementGoal.value = "";
+                    await nextTick();
+                    void runAgent(queuedGoal);
+                } else if (queuedGoals.value.length > 0) {
+                    const next = queuedGoals.value.shift();
+                    if (next) {
+                        await nextTick();
+                        appendLog(`[启动排队任务] ${next.text}`);
+                        void runAgent(next.text, next.attachments);
+                    }
+                }
+            } else {
+                appendLog(`[生命周期同步] 检测到已由新代数任务(#${runGeneration})接管，跳过旧任务(#${currentGeneration})终态清理。`);
             }
         }
     }
@@ -1730,9 +1784,24 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             } else {
                 // ⚡ 立即打断模式：立即中断前序任务，切换为新目标
                 pendingReplacementGoal.value = message;
-                await invoke("replace_agent_goal", { sessionId: activeSessionId.value, goal: message });
-                humanInput.value = "";
-                appendLog(`[目标打断替换] 已请求中断当前任务并切换：${message}`);
+                try {
+                    await invoke("replace_agent_goal", { sessionId: activeSessionId.value, goal: message });
+                    humanInput.value = "";
+                    appendLog(`[目标打断替换] 已请求中断当前任务并切换：${message}`);
+                } catch (interruptErr) {
+                    const errStr = toText(interruptErr);
+                    if (errStr.includes("任务已结束") || errStr.includes("通道不存在") || errStr.includes("not found")) {
+                        // 任务在后端其实已经结束，通道已被释放。此时前端 isRunning 尚未刷新导致误判。
+                        // 修正前端运行态，并无缝转为启动新任务，确保用户输入绝不被吞！
+                        appendLog(`[运行态同步] 检测到前序任务已终结，无缝转为新任务启动: ${message}`);
+                        pendingReplacementGoal.value = "";
+                        humanInput.value = "";
+                        isRunning.value = false;
+                        await runAgent(message, attachments);
+                        return;
+                    }
+                    throw interruptErr;
+                }
             }
             autoScrollToBottom();
         } catch (error) {

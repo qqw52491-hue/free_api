@@ -4,7 +4,7 @@
       <div
         v-if="block.type === 'markdown'"
         class="markdown-segment markdown-content"
-        v-html="renderSegmentMarkdown(block.content)"
+        v-html="block.html || renderSegmentMarkdown(block.content)"
       ></div>
       <EChartsBlock
         v-else-if="block.type === 'echarts'"
@@ -41,10 +41,38 @@
   </div>
 </template>
 
-<script setup lang="ts">
-import { computed } from "vue";
+<script lang="ts">
 import DOMPurify from "dompurify";
 import { renderMarkdown } from "../agent/format";
+
+const sanitizeCache = new Map<string, string>();
+const MAX_SANITIZE_CACHE = 800;
+const MAX_SANITIZE_LENGTH = 60000;
+
+function renderSegmentMarkdown(segment: string): string {
+  const cached = sanitizeCache.get(segment);
+  if (cached !== undefined) {
+    sanitizeCache.delete(segment);
+    sanitizeCache.set(segment, cached);
+    return cached;
+  }
+  const sanitized = DOMPurify.sanitize(renderMarkdown(segment), {
+    FORBID_TAGS: ["form", "iframe", "object", "embed", "script", "style"],
+    USE_PROFILES: { html: true, svg: true, mathMl: true },
+  });
+  if (segment.length <= MAX_SANITIZE_LENGTH) {
+    if (sanitizeCache.size >= MAX_SANITIZE_CACHE) {
+      const oldestKeys = Array.from(sanitizeCache.keys()).slice(0, 100);
+      for (const k of oldestKeys) sanitizeCache.delete(k);
+    }
+    sanitizeCache.set(segment, sanitized);
+  }
+  return sanitized;
+}
+</script>
+
+<script setup lang="ts">
+import { computed } from "vue";
 import EChartsBlock from "./EChartsBlock.vue";
 import MermaidBlock from "./MermaidBlock.vue";
 import HtmlPreviewBlock from "./HtmlPreviewBlock.vue";
@@ -52,6 +80,7 @@ import HtmlPreviewBlock from "./HtmlPreviewBlock.vue";
 interface ContentBlock {
   type: "markdown" | "echarts" | "mermaid" | "html";
   content: string;
+  html?: string;
 }
 
 const props = withDefaults(
@@ -86,7 +115,7 @@ const parsedBlocks = computed<ContentBlock[]>(() => {
     if (matchStart > lastIndex) {
       const mdText = text.slice(lastIndex, matchStart).trim();
       if (mdText) {
-        blocks.push({ type: "markdown", content: mdText });
+        blocks.push({ type: "markdown", content: mdText, html: renderSegmentMarkdown(mdText) });
       }
     }
 
@@ -99,7 +128,8 @@ const parsedBlocks = computed<ContentBlock[]>(() => {
       if (/<(?:!doctype|html|body|div|button|canvas|svg|form|input|style|script|section|main|h[1-6])/i.test(code)) {
         blocks.push({ type: "html", content: code });
       } else {
-        blocks.push({ type: "markdown", content: `\`\`\`html\n${code}\n\`\`\`` });
+        const mdHtml = `\`\`\`html\n${code}\n\`\`\``;
+        blocks.push({ type: "markdown", content: mdHtml, html: renderSegmentMarkdown(mdHtml) });
       }
     } else {
       blocks.push({ type: "echarts", content: code });
@@ -117,7 +147,7 @@ const parsedBlocks = computed<ContentBlock[]>(() => {
       if (unclosedMatch) {
         const mdBefore = trailingText.slice(0, unclosedMatch.index).trim();
         if (mdBefore) {
-          blocks.push({ type: "markdown", content: mdBefore });
+          blocks.push({ type: "markdown", content: mdBefore, html: renderSegmentMarkdown(mdBefore) });
         }
         const lang = unclosedMatch[1].toLowerCase();
         const code = unclosedMatch[2].trim();
@@ -132,24 +162,17 @@ const parsedBlocks = computed<ContentBlock[]>(() => {
         // 容错 B：模型直接输出了原生 HTML 标签结构而未包裹 ```
         blocks.push({ type: "html", content: trailingText });
       } else {
-        blocks.push({ type: "markdown", content: trailingText });
+        blocks.push({ type: "markdown", content: trailingText, html: renderSegmentMarkdown(trailingText) });
       }
     }
   }
 
-  return blocks.length ? blocks : [{ type: "markdown", content: text }];
+  return blocks.length ? blocks : [{ type: "markdown", content: text, html: renderSegmentMarkdown(text) }];
 });
 
 function getHtmlTitle(htmlCode: string): string {
   const match = htmlCode.match(/<title>([^<]+)<\/title>/i);
   return match ? match[1].trim() : "HTML 交互式页面与应用";
-}
-
-function renderSegmentMarkdown(segment: string): string {
-  return DOMPurify.sanitize(renderMarkdown(segment), {
-    FORBID_TAGS: ["form", "iframe", "object", "embed", "script", "style"],
-    USE_PROFILES: { html: true, svg: true, mathMl: true },
-  });
 }
 </script>
 

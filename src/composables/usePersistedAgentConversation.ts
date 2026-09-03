@@ -11,18 +11,23 @@ export interface PersistedConversationMessage {
     model_id?: string | null;
 }
 
-export function usePersistedAgentConversation(sessionId: string, onError?: (message: string) => void) {
+export function usePersistedAgentConversation(
+    sessionId: string | (() => string),
+    onError?: (message: string) => void
+) {
+    const getSessionId = typeof sessionId === "function" ? sessionId : () => sessionId;
     const conversationMessages = ref<PersistedConversationMessage[]>([]);
     const isConversationLoading = ref(false);
 
     async function loadConversation() {
-        if (sessionId.startsWith("draft-")) {
+        const sid = getSessionId();
+        if (!sid || sid.startsWith("draft-")) {
             conversationMessages.value = [];
             return;
         }
         isConversationLoading.value = true;
         try {
-            const messages = await invoke<PersistedConversationMessage[]>("get_messages", { sessionId });
+            const messages = await invoke<PersistedConversationMessage[]>("get_messages", { sessionId: sid });
             conversationMessages.value = Array.isArray(messages) ? messages : [];
         } catch (error) {
             onError?.(error instanceof Error ? error.message : String(error));

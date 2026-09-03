@@ -40,7 +40,8 @@ function normalizeRecordPage(payload: unknown, fallbackResourceId: string): Agen
     };
 }
 
-export function useAgentTaskResources(sessionId: string) {
+export function useAgentTaskResources(sessionId: string | (() => string)) {
+    const getSessionId = typeof sessionId === "function" ? sessionId : () => sessionId;
     const resources = ref<AgentTaskResource[]>([]);
     const isResourcesLoading = ref(false);
     const resourceLoadError = ref("");
@@ -65,11 +66,12 @@ export function useAgentTaskResources(sessionId: string) {
     }
 
     async function refreshResources() {
-        if (sessionId.startsWith("draft-") || isResourcesLoading.value) return;
+        const sid = getSessionId();
+        if (!sid || sid.startsWith("draft-") || isResourcesLoading.value) return;
         isResourcesLoading.value = true;
         resourceLoadError.value = "";
         try {
-            const payload = await invoke<unknown[]>("get_agent_task_resources", { sessionId });
+            const payload = await invoke<unknown[]>("get_agent_task_resources", { sessionId: sid });
             mergeContextResources(Array.isArray(payload) ? payload : []);
         } catch (error) {
             resourceLoadError.value = toText(error) || "无法读取当前 session 的任务资源。";
@@ -88,12 +90,13 @@ export function useAgentTaskResources(sessionId: string) {
 
     async function loadResourceRecords(offset = 0) {
         const resource = selectedResource.value;
-        if (!resource || isRecordsLoading.value) return;
+        const sid = getSessionId();
+        if (!resource || !sid || isRecordsLoading.value) return;
         isRecordsLoading.value = true;
         recordLoadError.value = "";
         try {
             const payload = await invoke<unknown>("get_agent_task_records", {
-                sessionId,
+                sessionId: sid,
                 resourceId: resource.resourceId,
                 offset,
                 limit: RESOURCE_PAGE_SIZE,

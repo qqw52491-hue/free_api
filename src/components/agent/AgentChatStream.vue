@@ -105,7 +105,7 @@
                         <time>{{ formatClock(entry.timestamp) }}</time>
                     </div>
                     <div class="plan-children-wrapper" :class="{ expanded: isPlanExpanded(entry) }">
-                        <div class="plan-children-inner">
+                        <div v-if="isPlanExpanded(entry)" class="plan-children-inner">
                             <div class="plan-children">
                                 <article v-for="step in entry.steps" :key="step.id" class="goal-node" :class="[`status-${step.status}`, { 'is-subagent': isSubAgentTool(step.tool), 'is-waitjobs': isWaitJobsTool(step.tool) }]">
                                     <button class="goal-row" :class="{ selected: step.id === selectedStepId, 'subagent-row': isSubAgentTool(step.tool), 'waitjobs-row': isWaitJobsTool(step.tool) }" type="button" @click="$emit('select-step', step.id)">
@@ -405,20 +405,20 @@ function isPlanExpanded(plan: PlanEntry): boolean {
     if (planExpandedState[plan.id] !== undefined) {
         return planExpandedState[plan.id];
     }
-    // 1. 如果当前任务正在执行中（isRunning），计划链条始终保持展开，杜绝步骤切换时的反复收缩与弹跳
-    if (props.isRunning) {
+    // 1. 如果是当前实时回合的计划（live-）且任务正在执行中，始终保持展开
+    if (props.isRunning && plan.id.startsWith("live-")) {
         return true;
     }
-    // 2. 当前回合的最新计划（live-）或正在运行/思考中的计划，默认保持展开供用户查看执行细节
-    if (plan.id.startsWith("live-") || plan.status === "running" || plan.isThinking) {
+    // 2. 当前正在运行中或思考中的计划默认保持展开
+    if (plan.status === "running" || plan.isThinking) {
         return true;
     }
-    // 3. 只有历史轮次的已完成归档计划（history-），默认收起
+    // 3. 历史轮次的计划（history-）默认保持折叠，防止几十轮计划全部展开撑爆 DOM
     return false;
 }
 
 function togglePlan(planId: string, currentStatus: AgentToolStatus, isThinking: boolean) {
-    const defaultState = props.isRunning || planId.startsWith("live-") || currentStatus === "running" || isThinking;
+    const defaultState = (props.isRunning && planId.startsWith("live-")) || currentStatus === "running" || isThinking;
     const currentState = planExpandedState[planId] !== undefined
         ? planExpandedState[planId]
         : defaultState;
@@ -535,14 +535,11 @@ function completionArtifacts(value: unknown): AgentArtifactInput[] {
         return true;
     });
 }
-function historyTimeline(): TimelineEntry[] {
+const historyTimelineEntries = computed<TimelineEntry[]>(() => {
     const timeline: TimelineEntry[] = [];
-    // 过滤掉当前正在实时运行中的回合，防止 live 与 history 重复渲染双份用户消息
+    // 过滤掉当前正在实时运行中的回合，由 live 视图独立渲染，防止双份重复
     const turnsToRender = props.historyTurns.filter((turn) => {
-        if (props.isRunning) {
-            if (turn.status === "running") return false;
-            if (props.currentGoal && turn.goal.trim() === props.currentGoal.trim()) return false;
-        }
+        if (props.isRunning && turn.status === "running") return false;
         return true;
     });
 
@@ -580,17 +577,21 @@ function historyTimeline(): TimelineEntry[] {
         }
     }
     return timeline;
-}
+});
+
 function currentTimeline(): TimelineEntry[] {
     const timeline: TimelineEntry[] = [];
-    // 只有当当前 goal 已经在 historyTurns 中被持久化（且状态已终结）且当前未在运行时才隐藏 live，防止重复渲染双份 completion
-    const alreadyPersisted = !props.isRunning && props.historyTurns.length > 0 && props.historyTurns.some((turn) => {
-        if (!props.currentGoal) return true;
-        const cleanGoal = props.currentGoal.trim();
-        const turnGoal = turn.goal.trim();
-        return (cleanGoal === turnGoal || cleanGoal.includes(turnGoal) || turnGoal.includes(cleanGoal)) && ["succeeded", "failed", "cancelled"].includes(turn.status);
-    });
+    const latestTurn = props.historyTurns[props.historyTurns.length - 1];
+    // 仅在任务未运行、且最新一轮已完成的 turn 与当前目标完全一致时才隐藏 live，防止重复渲染双份 completion
+    // 严禁使用 cleanGoal.includes(turnGoal) 遍历所有 80 轮历史，避免短文本匹配误判导致新发送的消息不显示
+    const alreadyPersisted = !props.isRunning && Boolean(
+        latestTurn &&
+        props.currentGoal &&
+        latestTurn.goal.trim() === props.currentGoal.trim() &&
+        ["succeeded", "failed", "cancelled"].includes(latestTurn.status)
+    );
     if (alreadyPersisted) return timeline;
+
     const plans = planEntries(props.steps, "live", props.isThinking);
     const firstTimestamp = plans[0]?.timestamp || Date.now();
     if (props.currentGoal) timeline.push({ id: "live-user-goal", type: "user", timestamp: firstTimestamp - 1, content: props.currentGoal });
@@ -607,7 +608,8 @@ function currentTimeline(): TimelineEntry[] {
     }
     return timeline;
 }
-const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimeline(), ...currentTimeline()]);
+
+const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimelineEntries.value, ...currentTimeline()]);
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败", challenged: "验证未闭合" }[status] || "未知"; }
 function isSubAgentTool(tool?: string): boolean {
     const t = (tool || "").toLowerCase();

@@ -976,8 +976,7 @@ const placeholderText = computed(() => props.isRunning
     : "想让 Agent 帮你做什么？",
 );
 const canSubmit = computed(() => {
-    const hasContent = Boolean(props.draft.trim()) || attachments.value.length > 0;
-    return props.isRunning ? hasContent : (props.canStart && hasContent);
+    return Boolean(props.draft.trim()) || attachments.value.length > 0;
 });
 
 function submit(explicitMode?: "interrupt" | "queue" | Event) {
