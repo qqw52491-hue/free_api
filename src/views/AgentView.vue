@@ -124,52 +124,55 @@
                 </button>
             </nav>
 
-            <!-- 1. 📁 项目树形区域 (Projects 树形手风琴展开) -->
-            <div v-if="!sidebarCollapsed" class="sidebar-section projects-tree-section">
-                <ProjectSidebarTree
-                    ref="projectTreeRef"
-                    :all-models="allModels"
-                    :active-session-id="activeTabId"
-                    :active-project-id="currentNavView === 'project' ? selectedProjectId : undefined"
-                    :drafts="tabs"
-                    @select-project="handleSelectProject"
-                    @open-session="openTreeSession"
-                    @new-project-session="handleNewProjectSession"
-                    @session-deleted="handleSessionDeleted"
-                />
-            </div>
+            <!-- 📁 & 💬 下方工作内容统一平滑滚动容器 (Projects + Tasks) -->
+            <div v-if="!sidebarCollapsed" class="sidebar-scrollable-body">
+                <!-- 1. 📁 项目树形区域 (Projects 树形折叠展开) -->
+                <div class="sidebar-section projects-tree-section">
+                    <ProjectSidebarTree
+                        ref="projectTreeRef"
+                        :all-models="allModels"
+                        :active-session-id="activeTabId"
+                        :active-project-id="currentNavView === 'project' ? selectedProjectId : undefined"
+                        :drafts="tabs"
+                        @select-project="handleSelectProject"
+                        @open-session="openTreeSession"
+                        @new-project-session="handleNewProjectSession"
+                        @session-deleted="handleSessionDeleted"
+                    />
+                </div>
 
-            <!-- 2. 💬 独立任务与对话列表 (Tasks 扁平列表，仅展示独立会话) -->
-            <div v-if="!sidebarCollapsed" class="sidebar-section tasks-section">
-                <div class="section-title">
-                    <span>Tasks ({{ independentTabs.length }})</span>
-                    <button v-if="taskSearchQuery" type="button" class="clear-search-btn" title="清空搜索" @click="taskSearchQuery = ''">✕</button>
-                    <span v-else class="list-control">☷</span>
-                </div>
-                <div v-if="tabs.length > 2 || taskSearchQuery" class="task-search-bar">
-                    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                    <input v-model="taskSearchQuery" type="text" placeholder="搜索历史任务..." class="task-search-input" />
-                </div>
-                <div class="task-list">
-                    <div
-                        v-for="tab in independentTabs"
-                        :key="tab.id"
-                        class="task-row"
-                        :class="{ active: currentNavView === 'agent' && activeTabId === tab.id, 'is-draft': tab.isDraft }"
-                        @click="selectTask(tab.id)"
-                        @dblclick="startRename(tab)"
-                    >
-                        <span class="task-state" :class="{ running: tab.running }"></span>
-                        <input
-                            v-if="renamingId === tab.id"
-                            v-model="renameText"
-                            class="task-rename-box"
-                            @blur="doRename(tab.id)"
-                            @keydown.enter.prevent="doRename(tab.id)"
-                            @click.stop
-                        />
-                        <span v-else class="task-label" :title="tab.label">{{ tab.label }}</span>
-                        <button type="button" class="task-close" title="关闭任务" @click.stop="closeTab(tab.id)">×</button>
+                <!-- 2. 💬 独立任务与对话列表 (Tasks 扁平列表) -->
+                <div class="sidebar-section tasks-section">
+                    <div class="section-title">
+                        <span>Tasks ({{ independentTabs.length }})</span>
+                        <button v-if="taskSearchQuery" type="button" class="clear-search-btn" title="清空搜索" @click="taskSearchQuery = ''">✕</button>
+                        <span v-else class="list-control">☷</span>
+                    </div>
+                    <div v-if="tabs.length > 2 || taskSearchQuery" class="task-search-bar">
+                        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                        <input v-model="taskSearchQuery" type="text" placeholder="搜索历史任务..." class="task-search-input" />
+                    </div>
+                    <div class="task-list">
+                        <div
+                            v-for="tab in independentTabs"
+                            :key="tab.id"
+                            class="task-row"
+                            :class="{ active: currentNavView === 'agent' && activeTabId === tab.id, 'is-draft': tab.isDraft }"
+                            @click="selectTask(tab.id)"
+                            @dblclick="startRename(tab)"
+                        >
+                            <span class="task-state" :class="{ running: tab.running }"></span>
+                            <input
+                                v-if="renamingId === tab.id"
+                                v-model="renameText"
+                                class="task-rename-box"
+                                @blur="doRename(tab.id)"
+                                @keydown.enter.prevent="doRename(tab.id)"
+                                @click.stop
+                            />
+                            <span v-else class="task-label" :title="tab.label">{{ tab.label }}</span>
+                            <button type="button" class="task-close" title="关闭任务" @click.stop="closeTab(tab.id)">×</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -766,43 +769,42 @@ onUnmounted(() => {
     display: flex;
 }
 
-/* 导航项 */
-/* 顶部功能导航：紧凑精致，腾出黄金垂直空间给 Projects 与 Tasks */
+/* 导航项：舒适舒展吸顶，恢复 31px 优雅高度与自然呼吸感 */
 .primary-nav {
     display: flex;
     flex-direction: column;
-    gap: 1.5px;
-    padding: 6px 8px 6px;
+    gap: 2.5px;
+    padding: 8px 8px 8px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     flex-shrink: 0;
 }
 
 .app-sidebar.collapsed .primary-nav {
-    padding: 8px 0;
+    padding: 10px 0;
     align-items: center;
-    gap: 3px;
+    gap: 4px;
 }
 
 .nav-row {
     display: flex;
-    height: 27px; /* 紧凑高度，腾出约 70~100px 空间 */
+    height: 31px; /* 优雅舒适高度，再也不局促拥挤 */
     align-items: center;
-    gap: 9px;
-    padding: 0 10px;
+    gap: 10px;
+    padding: 0 11px;
     border: 1px solid transparent;
     border-radius: 6px;
     color: #a1a1aa;
     cursor: pointer;
     background: transparent;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
     text-align: left;
     transition: all 0.12s;
 }
 
 .nav-row svg {
-    width: 14.5px;
-    height: 14.5px;
+    width: 15.5px;
+    height: 15.5px;
     flex-shrink: 0;
     fill: none;
     stroke: currentColor;
@@ -822,8 +824,8 @@ onUnmounted(() => {
 }
 
 .nav-row.new-task {
-    height: 29px;
-    margin-bottom: 2px;
+    height: 33px;
+    margin-bottom: 3px;
     color: #f4f4f5;
     border: 1px solid rgba(255, 255, 255, 0.12);
     background: rgba(255, 255, 255, 0.05);
@@ -834,17 +836,45 @@ onUnmounted(() => {
 }
 
 .nav-row.icon-only {
-    width: 36px;
-    height: 36px;
+    width: 40px;
+    height: 40px;
     padding: 0;
     justify-content: center;
-    border-radius: 8px;
+    border-radius: 9px;
     margin: 0 auto;
 }
 
 .nav-row.icon-only svg {
-    width: 18px;
-    height: 18px;
+    width: 19px;
+    height: 19px;
+}
+
+/* 📁 & 💬 下方工作内容统一平滑滚动容器 (Projects + Tasks) */
+.sidebar-scrollable-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* 统一细窄平滑半透明暗黑滚动条 */
+.sidebar-scrollable-body::-webkit-scrollbar {
+    width: 4px;
+}
+
+.sidebar-scrollable-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.sidebar-scrollable-body::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+}
+
+.sidebar-scrollable-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.28);
 }
 
 /* 侧边栏项目和任务 */
@@ -853,13 +883,8 @@ onUnmounted(() => {
 }
 
 .projects-tree-section {
-    padding-top: 6px;
+    padding-top: 8px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    display: flex;
-    flex-direction: column;
-    /* 项目区域最大高度限制为 200px，展开时自身滚动，绝不挤压 Task */
-    max-height: 200px;
-    min-height: 0;
     flex-shrink: 0;
 }
 
@@ -879,44 +904,16 @@ onUnmounted(() => {
 .list-control { color: #71717a; }
 
 .tasks-section {
-    /* 核心保全：Task 绝不可被挤压，固定占领全部剩余空间，保底 220px */
-    flex: 1;
-    min-height: 220px;
     padding-top: 8px;
+    flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    overflow: hidden; /* 外部不滚动，保证 Task 区域固定在视口中，不随任何东西滚动 */
 }
 
 .task-list {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto; /* Task 专属内部独立滚动条 */
-}
-
-/* 统一 Tasks 与 Task-list 细窄平滑暗黑滚动条 */
-.task-list::-webkit-scrollbar,
-.tasks-section::-webkit-scrollbar {
-    width: 4px;
-}
-
-.task-list::-webkit-scrollbar-track,
-.tasks-section::-webkit-scrollbar-track {
-    background: transparent;
-}
-
-.task-list::-webkit-scrollbar-thumb,
-.tasks-section::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.12);
-    border-radius: 4px;
-}
-
-.task-list::-webkit-scrollbar-thumb:hover,
-.tasks-section::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.28);
 }
 
 .task-search-bar {
