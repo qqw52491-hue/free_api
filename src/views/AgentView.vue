@@ -1,7 +1,14 @@
 <template>
     <div class="app-layout">
+        <!-- 移动端抽屉遮罩 -->
+        <div
+            v-if="mobileSidebarOpen"
+            class="mobile-sidebar-backdrop"
+            @click="mobileSidebarOpen = false"
+        ></div>
+
         <!-- 侧边栏：集成对话、项目树、LLM 平台管理、插件、定时任务与技能库 -->
-        <aside class="app-sidebar" :class="{ collapsed: sidebarCollapsed }">
+        <aside class="app-sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': mobileSidebarOpen }">
             <header class="sidebar-brand-row">
                 <div v-if="!sidebarCollapsed" class="brand-lockup">
                     <span class="brand-symbol">⚡</span>
@@ -175,6 +182,25 @@
 
         <!-- 右侧主工作区 (动态切换 Agent 对话、Project 工作区、LLM 管理、插件或技能库) -->
         <main class="app-main-content">
+            <!-- 📱 移动端极简顶部栏 (汉堡菜单呼出与当前标签指示) -->
+            <header class="mobile-top-bar mobile-only">
+                <button type="button" class="mobile-menu-trigger" @click="mobileSidebarOpen = true" title="打开菜单">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="3" y1="12" x2="21" y2="12"></line>
+                        <line x1="3" y1="6" x2="21" y2="6"></line>
+                        <line x1="3" y1="18" x2="21" y2="18"></line>
+                    </svg>
+                </button>
+                <div class="mobile-brand-title">
+                    <span class="brand-dot">⚡</span>
+                    <strong>free api</strong>
+                </div>
+                <button type="button" class="mobile-new-chat-btn" @click="createNewTask" title="新建对话">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 5v14M5 12h14" />
+                    </svg>
+                </button>
+            </header>
             <!-- 1. 🤖 Agent 对话主面板 -->
             <div v-show="currentNavView === 'agent'" class="full-view-panel">
                 <template v-for="tab in tabs" :key="tab.uid">
@@ -255,6 +281,7 @@ const currentNavView = ref<"agent" | "project" | "llm" | "roles" | "plugins" | "
 const selectedProjectId = ref<string>("");
 const allModels = ref<ModelOption[]>([]);
 const sidebarCollapsed = ref(false);
+const mobileSidebarOpen = ref(false);
 const renamingId = ref<string | null>(null);
 const renameText = ref("");
 const tabs = ref<TabInfo[]>([]);
@@ -1067,15 +1094,75 @@ onUnmounted(() => {
 .scheduled-card h3 { color: #f4f4f5; font-size: 16px; margin: 0; }
 .scheduled-card p { color: #8e8e93; font-size: 13px; line-height: 1.6; margin: 0; }
 
-@media (max-width: 760px) {
-    .app-sidebar { width: 64px; flex-basis: 64px; }
-    .app-sidebar .brand-lockup,
-    .app-sidebar .brand-toggle-btn,
-    .app-sidebar .nav-row span,
-    .app-sidebar .sidebar-section,
-    .app-sidebar .profile-name { display: none; }
-    .app-sidebar .sidebar-brand-row { justify-content: center; padding: 0; }
-    .app-sidebar .primary-nav { padding: 10px 0; align-items: center; }
-    .app-sidebar .sidebar-footer { justify-content: center; padding: 12px 0; }
+@media (max-width: 768px) {
+    .app-layout {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        padding-top: var(--safe-area-top);
+        padding-bottom: var(--safe-area-bottom);
+    }
+    /* 手机端彻底隐藏桌面常驻侧边栏，释放 100% 屏幕宽度给工作区 */
+    .app-sidebar {
+        position: fixed;
+        top: 0;
+        left: -280px;
+        bottom: 0;
+        width: 280px !important;
+        flex-basis: 280px !important;
+        z-index: 100;
+        background: #141416 !important;
+        box-shadow: 16px 0 36px rgba(0, 0, 0, 0.7);
+        transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .app-sidebar.mobile-open {
+        transform: translateX(280px);
+    }
+    .app-main-content {
+        width: 100% !important;
+        flex: 1 !important;
+        min-width: 0 !important;
+        padding-top: 0 !important;
+    }
+    .mobile-sidebar-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.65);
+        backdrop-filter: blur(4px);
+        z-index: 95;
+    }
+    .mobile-top-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 14px;
+        background: rgba(20, 20, 22, 0.95);
+        backdrop-filter: blur(16px);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        z-index: 20;
+        flex-shrink: 0;
+    }
+    .mobile-menu-trigger, .mobile-new-chat-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: #f4f4f5;
+        cursor: pointer;
+    }
+    .mobile-brand-title {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: #f4f4f5;
+    }
 }
 </style>

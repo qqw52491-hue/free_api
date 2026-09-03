@@ -2609,4 +2609,44 @@ textarea::placeholder {
 .route-badge.roles {
     background: linear-gradient(135deg, #2f9e6e 0%, #5bc48f 100%);
 }
+
+/* ==========================================================================
+   📱 移动端输入控制台专属优化 (AgentComposer <= 768px)
+   ========================================================================== */
+@media (max-width: 768px) {
+    .manus-composer-wrap {
+        padding: 6px 8px max(10px, var(--safe-area-bottom)) !important;
+        background: rgba(20, 20, 22, 0.92) !important;
+        backdrop-filter: blur(20px) saturate(180%) !important;
+        border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
+    }
+    .manus-composer {
+        padding: 8px 10px !important;
+        border-radius: 14px !important;
+    }
+    .manus-composer textarea {
+        font-size: 14px !important;
+        max-height: 120px !important;
+        min-height: 38px !important;
+        line-height: 1.45 !important;
+    }
+    .composer-bottom-row {
+        gap: 6px !important;
+    }
+    .composer-tool-btn {
+        width: 32px !important;
+        height: 32px !important;
+    }
+    .model-chip {
+        max-width: 140px !important;
+        padding: 3px 8px !important;
+        font-size: 11px !important;
+    }
+    .model-routing-popover.is-teleported {
+        left: 10px !important;
+        right: 10px !important;
+        width: calc(100vw - 20px) !important;
+        max-width: 100vw !important;
+    }
+}
 </style>

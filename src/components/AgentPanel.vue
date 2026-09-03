@@ -859,4 +859,67 @@ defineExpose({
         background: #121824 !important;
     }
 }
+
+/* ==========================================================================
+   📱 移动端专属工作台 Bottom Sheet 抽屉化 (AgentPanel <= 768px)
+   ========================================================================== */
+@media (max-width: 768px) {
+    .manus-chat-header {
+        padding: 6px 10px !important;
+        gap: 6px !important;
+    }
+    .model-selector {
+        max-width: 140px !important;
+        padding: 4px 8px !important;
+        font-size: 11px !important;
+    }
+    .model-selector small {
+        display: none !important;
+    }
+    .icon-control {
+        width: 30px !important;
+        height: 30px !important;
+    }
+    /* 手机端团队侧栏收起隐藏，避免挤占单列 */
+    .team-rail-column {
+        display: none !important;
+    }
+    /* 协同检查器在手机端以原生触控质感的底部抽屉 (Bottom Sheet) 呈现 */
+    .manus-agent-grid:not(.is-collapsed) :deep(.agent-inspector) {
+        position: fixed !important;
+        top: auto !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: 100vw !important;
+        max-height: 85vh !important;
+        height: 85vh !important;
+        z-index: 95 !important;
+        border-radius: 20px 20px 0 0 !important;
+        box-shadow: 0 -12px 48px rgba(0, 0, 0, 0.85) !important;
+        border-top: 1px solid rgba(255, 255, 255, 0.18) !important;
+        border-left: 0 !important;
+        background: #141923 !important;
+        backdrop-filter: blur(24px) saturate(180%) !important;
+        animation: sheet-slide-up 0.28s cubic-bezier(0.16, 1, 0.3, 1) !important;
+    }
+    /* 顶部触控把手 (Drag Handle) */
+    .manus-agent-grid:not(.is-collapsed) :deep(.agent-inspector)::before {
+        content: "";
+        position: absolute;
+        top: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 36px;
+        height: 4px;
+        border-radius: 99px;
+        background: rgba(255, 255, 255, 0.25);
+        z-index: 100;
+    }
+}
+
+@keyframes sheet-slide-up {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+}
 </style>

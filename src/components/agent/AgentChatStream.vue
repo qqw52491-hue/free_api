@@ -1823,5 +1823,44 @@ button.root-row {
     color: #38bdf8;
     font-weight: 600;
 }
+
+/* ==========================================================================
+   📱 移动端专属微调 (Chat Stream & Step Cards <= 768px)
+   ========================================================================== */
+@media (max-width: 768px) {
+    .chat-stream-scroll {
+        padding: 8px 10px 16px !important;
+    }
+    .stream-centered-content {
+        max-width: 100% !important;
+        gap: 8px !important;
+    }
+    .user-bubble {
+        max-width: 92% !important;
+        padding: 10px 14px !important;
+        font-size: 13.5px !important;
+        border-radius: 14px !important;
+    }
+    .assistant-bubble-wrap {
+        padding: 6px 4px !important;
+    }
+    .step-card, .step-item {
+        padding: 8px 10px !important;
+        border-radius: 10px !important;
+    }
+    .thought-card {
+        padding: 8px 10px !important;
+        font-size: 12px !important;
+    }
+    .artifact-card-wrap {
+        width: 100% !important;
+        margin: 6px 0 !important;
+    }
+    .follow-latest {
+        top: 4px !important;
+        font-size: 10px !important;
+        padding: 3px 8px !important;
+    }
+}
 </style>
 
