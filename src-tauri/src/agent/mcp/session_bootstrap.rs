@@ -27,6 +27,7 @@ pub async fn sync_mcp_plugins_for_session(
             "description": "🔍 正在同步 MCP 插件与存活状态..."
         }),
     );
+    let mut newly_spawned = Vec::new();
     {
         let cwd = workspace_dir.to_path_buf();
         let mut registry = registry_state.lock().await;
@@ -102,18 +103,7 @@ pub async fn sync_mcp_plugins_for_session(
                                 crate::agent::mcp::registry::PluginSource::ManagedDb,
                             ) {
                                 Ok(()) => {
-                                    let c = client_arc;
-                                    let n = name.clone();
-                                    tokio::spawn(async move {
-                                        let _ = c.ensure_session_initialized(None).await;
-                                        if let Ok(tools) = c.list_tools().await {
-                                            println!(
-                                                "🔌 DB 插件就绪: {} ({} 个工具)",
-                                                n,
-                                                tools.len()
-                                            );
-                                        }
-                                    });
+                                    newly_spawned.push((name.clone(), client_arc));
                                     println!("🔌 挂载新 DB 插件: {}", name);
                                 }
                                 Err(error) => {
@@ -149,5 +139,43 @@ pub async fn sync_mcp_plugins_for_session(
             is_first_init
         );
     }
+
+    if !newly_spawned.is_empty() {
+        println!(
+            "⏳ [MCP同步] 正在等待 {} 个新挂载 DB 插件完成握手与工具发现...",
+            newly_spawned.len()
+        );
+        let mut handles = Vec::new();
+        for (name, client) in newly_spawned {
+            handles.push(tokio::spawn(async move {
+                let init_res = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    async {
+                        let _ = client.ensure_session_initialized(None).await;
+                        client.list_tools().await
+                    },
+                )
+                .await;
+                match init_res {
+                    Ok(Ok(tools)) => {
+                        println!("🔌 DB 插件就绪: {} ({} 个工具)", name, tools.len());
+                    }
+                    Ok(Err(err)) => {
+                        eprintln!("⚠️ DB 插件 [{}] 初始化或获取工具失败: {}", name, err);
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "⚠️ DB 插件 [{}] 初始握手超时 (5s)，已降级放行由后台继续尝试",
+                            name
+                        );
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
     Ok(())
 }
