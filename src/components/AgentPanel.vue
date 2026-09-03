@@ -181,6 +181,7 @@
                     :completed-tool-count="session.completedToolCount.value"
                     :failed-tool-count="session.failedToolCount.value"
                     :selected-step="session.selectedStep.value"
+                    :steps="session.steps.value"
                     :selected-subpart="selectedSubpart"
                     :selected-human="selectedHuman"
                     :selected-active-thought="selectedActiveThought"
@@ -199,6 +200,7 @@
                     @refresh-resources="session.refreshResources"
                     @preview-resource="session.openResourcePreview"
                     @agent-submit="handleInspectorAgentSubmit"
+                    @select-step="session.selectedStepId.value = $event || null"
                     @close="inspectorCollapsed = true"
                 />
             </div>

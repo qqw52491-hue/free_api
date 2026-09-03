@@ -215,6 +215,33 @@
                         {{ selectedStep.reflection || selectedStep.explanation }}
                     </p>
 
+                    <!-- 🤖 本步骤派发的子 Agent 概览与跳转 -->
+                    <section v-if="currentStepSubagents.length > 0" class="subagents-step-deck">
+                        <div class="subagents-deck-header">
+                            <div class="deck-title-box">
+                                <span class="deck-icon">🤖</span>
+                                <h4>本步骤关联的子 Agent ({{ currentStepSubagents.length }})</h4>
+                            </div>
+                            <button type="button" class="btn-jump-team-deck" @click="activeTab = 'team'">
+                                查看完整协作拓扑与执行流 →
+                            </button>
+                        </div>
+                        <div class="subagents-card-grid">
+                            <article v-for="sub in currentStepSubagents" :key="sub.id" class="subagent-mini-card">
+                                <div class="mini-card-head">
+                                    <span class="sub-role-pill">{{ sub.roleLabel }}</span>
+                                    <strong class="sub-name-text">{{ sub.name }}</strong>
+                                    <span class="sub-status-pill" :class="`status-${sub.status}`">{{ sub.status }}</span>
+                                </div>
+                                <p class="sub-task-text">{{ sub.currentStep }}</p>
+                                <div v-if="sub.findings && sub.findings.length" class="sub-finding-highlight">
+                                    <span class="highlight-icon">🎯</span>
+                                    <span class="highlight-text">{{ sub.findings[0] }}</span>
+                                </div>
+                            </article>
+                        </div>
+                    </section>
+
                     <!-- 调用输入 -->
                     <section class="data-section">
                         <div class="section-title-row">
@@ -429,9 +456,15 @@
                 </div>
             </section>
 
-            <!-- 3. 团队协作 Tab (右侧实时监控区：仅展示活跃运行中的子 Agent) -->
+            <!-- 3. 团队协作 Tab (有选中步骤时展示该步骤派发的全部子任务，未选步骤时展示实时活跃任务) -->
             <section v-else-if="activeTab === 'team'" class="inspector-scroll team-pane">
-                <AgentTeamDeck :team-state="teamState" :only-active="true" />
+                <AgentTeamDeck
+                    :team-state="teamState"
+                    :steps="steps"
+                    :selected-step="selectedStep"
+                    :only-active="!selectedStep"
+                    @clear-selected-step="$emit('select-step', '')"
+                />
             </section>
 
             <!-- 4. 资源 Tab -->
@@ -461,6 +494,7 @@ import { formatClock, formatMilliseconds, formatNumber, formatPayload } from "./
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 import AgentTeamDeck from "./AgentTeamDeck.vue";
+import { extractSubagentsFromStep } from "./workerUtils";
 
 const props = withDefaults(
     defineProps<{
@@ -471,6 +505,7 @@ const props = withDefaults(
         tokenUsage: AgentTokenUsage | null;
         completedToolCount: number;
         failedToolCount: number;
+        steps?: AgentStepItem[];
         selectedStep: AgentStepItem | null;
         selectedSubpart: "thought" | "tool" | null;
         selectedHuman: { message: string; timestamp: number } | null;
@@ -489,6 +524,7 @@ const props = withDefaults(
         teamState?: AgentTeamState;
     }>(),
     {
+        steps: () => [],
         finalSummary: "",
         finalArtifacts: () => [],
         activePreviewContent: "",
@@ -504,8 +540,13 @@ defineEmits<{
     "preview-resource": [resource: AgentTaskResource];
     "agent-submit": [data: any];
     "agent-cancel": [reason: string];
+    "select-step": [id: string];
     "close": [];
 }>();
+
+const currentStepSubagents = computed(() => {
+    return extractSubagentsFromStep(props.selectedStep);
+});
 
 const activeTab = ref<"preview" | "detail" | "team" | "context" | "resources">("detail");
 
@@ -1136,7 +1177,146 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 .selected-step-heading { padding-bottom: 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
 .selected-step-heading > span { color: #71717a; font-size: 10px; font-weight: 700; }
 .selected-step-heading h3 { margin: 6px 0 3px; color: #f4f4f5; font-size: 14px; font-weight: 650; word-break: break-word; }
-.selected-step-heading p { margin: 0; color: #a1a1aa; font-size: 11px; line-height: 1.5; }
+.selected-step-heading p { margin: 0; color: #a1a1aa; font-size: 11px; line-height: 1.45; }
+
+/* 🤖 本步骤派发的子 Agent 概览卡片 */
+.subagents-step-deck {
+    margin-bottom: 12px;
+    background: #181822;
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.subagents-deck-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.deck-title-box {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.deck-icon {
+    font-size: 14px;
+}
+
+.deck-title-box h4 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 700;
+    color: #38bdf8;
+}
+
+.btn-jump-team-deck {
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    color: #38bdf8;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.btn-jump-team-deck:hover {
+    background: rgba(56, 189, 248, 0.25);
+    border-color: #38bdf8;
+}
+
+.subagents-card-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.subagent-mini-card {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.mini-card-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.sub-role-pill {
+    font-size: 8px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+}
+
+.sub-name-text {
+    font-size: 10px;
+    color: #f4f4f5;
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sub-status-pill {
+    font-size: 8px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    text-transform: capitalize;
+}
+
+.sub-status-pill.status-succeeded {
+    background: rgba(52, 211, 153, 0.15);
+    color: #34d399;
+}
+
+.sub-status-pill.status-running {
+    background: rgba(56, 189, 248, 0.15);
+    color: #38bdf8;
+}
+
+.sub-task-text {
+    margin: 0;
+    font-size: 9px;
+    color: #a1a1aa;
+    line-height: 1.35;
+}
+
+.sub-finding-highlight {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+    font-size: 8.5px;
+    color: #fef08a;
+    background: rgba(234, 179, 8, 0.08);
+    border: 1px solid rgba(234, 179, 8, 0.15);
+    padding: 3px 6px;
+    border-radius: 4px;
+}
+
+.highlight-icon {
+    font-size: 10px;
+}
+
+.highlight-text {
+    flex: 1;
+    word-break: break-word;
+}
+
 .step-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; color: #71717a; font-size: 10px; }
 .step-meta b { padding: 2px 5px; border-radius: 3px; font-weight: 650; }
 .step-meta .status-running { color: #f4f4f5; background: #27272a; }

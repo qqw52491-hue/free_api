@@ -1,14 +1,27 @@
 <template>
     <div class="agent-workspace-deck">
+        <!-- 📍 历史步骤子任务回看通知条 -->
+        <div v-if="isViewingHistoryStep && selectedStep" class="history-step-notice-bar">
+            <div class="notice-info">
+                <span class="notice-icon">📍</span>
+                <span class="notice-text">
+                    正在回看 <strong>步骤 #{{ selectedStep.stepId + 1 }}</strong> 派发的子任务 (共 {{ displayedWorkers.length }} 个)
+                </span>
+            </div>
+            <button type="button" class="btn-clear-history-step" title="退出历史回看，返回实时监控" @click="$emit('clear-selected-step')">
+                退出回看 ✕
+            </button>
+        </div>
+
         <!-- ================= 1. 上半部分：竖向 Agent 拓扑树 (Top Half: Vertical Topology Tree) ================= -->
         <section class="topology-overview-section">
             <div class="deck-header-bar">
                 <div class="title-with-dot">
                     <span class="live-pulse-dot" :class="`state-${teamState.masterStatus}`"></span>
-                    <span class="header-title-text">{{ isMultiAgent ? 'Agent 协同拓扑' : 'Agent 调度拓扑' }}</span>
+                    <span class="header-title-text">{{ isMultiAgent ? (isViewingHistoryStep ? '历史协同拓扑' : 'Agent 协同拓扑') : 'Agent 调度拓扑' }}</span>
                 </div>
                 <div class="header-status-pill" :class="`pill-${teamState.masterStatus}`">
-                    {{ statusText(teamState.masterStatus) }}
+                    {{ isViewingHistoryStep ? '历史回溯' : statusText(teamState.masterStatus) }}
                 </div>
             </div>
 
@@ -224,6 +237,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { AgentTeamState, AgentWorkerItem, AgentToolStatus, AgentStepItem, AgentWorkerStep } from "./types";
+import { extractSubagentsFromStep } from "./workerUtils";
 
 const props = withDefaults(
     defineProps<{
@@ -232,6 +246,7 @@ const props = withDefaults(
         currentGoal?: string;
         masterStepDescription?: string;
         onlyActive?: boolean;
+        selectedStep?: AgentStepItem | null;
     }>(),
     {
         teamState: () => ({
@@ -244,16 +259,37 @@ const props = withDefaults(
         currentGoal: "",
         masterStepDescription: "",
         onlyActive: false,
+        selectedStep: null,
     }
 );
 
+defineEmits<{
+    "clear-selected-step": [];
+}>();
+
+// 从当前选中的历史步骤中解析出绑定的子 Agent (用于历史回看)
+const stepWorkers = computed(() => {
+    return extractSubagentsFromStep(props.selectedStep);
+});
+
+const isViewingHistoryStep = computed(() => {
+    return stepWorkers.value.length > 0;
+});
+
 const workersList = computed(() => {
+    if (isViewingHistoryStep.value) {
+        return stepWorkers.value;
+    }
     return props.teamState?.workers || [];
 });
 
 const showAllCompleted = ref(false);
 
 const displayedWorkers = computed(() => {
+    // 若正在回看历史步骤派发的子任务，哪怕已完成也全量呈现，绝不过滤！
+    if (isViewingHistoryStep.value) {
+        return stepWorkers.value;
+    }
     const all = workersList.value;
     if (!props.onlyActive || showAllCompleted.value) {
         return all;
@@ -407,6 +443,60 @@ async function copyOutput(text?: string) {
     display: flex;
     flex-direction: column;
     gap: 8px;
+}
+
+/* 📍 历史步骤回看通知条 */
+.history-step-notice-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    margin-bottom: 8px;
+    background: linear-gradient(90deg, rgba(234, 179, 8, 0.15), rgba(234, 179, 8, 0.05));
+    border: 1px solid rgba(234, 179, 8, 0.35);
+    border-radius: 6px;
+    font-size: 10px;
+    color: #fef08a;
+}
+
+.notice-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.notice-icon {
+    font-size: 12px;
+}
+
+.notice-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.notice-text strong {
+    color: #ffffff;
+}
+
+.btn-clear-history-step {
+    padding: 2px 7px;
+    font-size: 9px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #f4f4f5;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s;
+}
+
+.btn-clear-history-step:hover {
+    background: rgba(234, 179, 8, 0.25);
+    border-color: #fef08a;
+    color: #fef08a;
 }
 
 .deck-header-bar {

@@ -31,13 +31,13 @@ import {
     type AgentToolStatus,
     type AgentTeamState,
     type AgentWorkerItem,
-    type AgentWorkerStep,
     type ContextBudgetMode,
     type LlmParseErrorItem,
     type ParsedAttachment,
     type ModelRouting,
 } from "../components/agent/types";
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
+import { extractWorkerDetails, parseWorkerArtifacts } from "../components/agent/workerUtils";
 
 const MAX_LOGS = 600;
 type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
@@ -249,101 +249,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const humanInterventions = ref<Array<{ message: string; timestamp: number }>>([]);
     const llmParseErrors = ref<LlmParseErrorItem[]>([]);
     const teamWorkers = ref<AgentWorkerItem[]>([]);
-
-function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: string; role: "reviewer" | "coder" | "worker"; roleLabel: string } {
-    const isReviewer = step.tool === "child_reviewer" || step.action === "child_reviewer";
-    const isWriter = step.tool === "child_writer" || step.action === "child_writer";
-    const role: "reviewer" | "coder" | "worker" = isReviewer ? "reviewer" : isWriter ? "coder" : "worker";
-    const defaultLabel = isReviewer ? "代码审查员" : isWriter ? "沙箱写入员" : "侦察工作者";
-    const roleLabel = isReviewer ? "审查" : isWriter ? "写入" : "侦察";
-
-    let taskDesc = "";
-    const params = step.params || (step as any).params_summary;
-    if (params) {
-        if (typeof params === "object") {
-            taskDesc = String((params as any).task || (params as any).goal || (params as any).instruction || (params as any).command || "").trim();
-        } else if (typeof params === "string") {
-            try {
-                const parsed = JSON.parse(params);
-                taskDesc = String(parsed.task || parsed.goal || parsed.instruction || parsed.command || "").trim();
-            } catch {
-                taskDesc = params.trim();
-            }
-        }
-    }
-    if (!taskDesc && step.description && step.description !== "执行操作") {
-        taskDesc = step.description.trim();
-    }
-    if (!taskDesc && step.action && step.action !== "执行操作") {
-        taskDesc = step.action.trim();
-    }
-
-    let name = defaultLabel;
-    if (taskDesc) {
-        const cleanDesc = taskDesc.replace(/^[🔍⚡🛡️🔧\s]+/, "");
-        const shortDesc = cleanDesc.length > 18 ? cleanDesc.slice(0, 17) + "…" : cleanDesc;
-        name = `${roleLabel}: ${shortDesc}`;
-    }
-
-    return {
-        name,
-        taskDesc: taskDesc || (isReviewer ? "深入审查代码变更与安全隐患" : isWriter ? "在隔离沙箱中编写代码与测试" : "在工作区执行独立侦察与分析"),
-        role,
-        roleLabel,
-    };
-}
-
-function parseWorkerArtifacts(raw: unknown): {
-    findings?: string[];
-    actionLog?: string[];
-    evidenceRefs?: string[];
-    confidence?: string;
-    steps?: AgentWorkerStep[];
-} {
-    if (!raw) return {};
-    let obj: any = raw;
-    if (typeof raw === "string") {
-        try {
-            obj = JSON.parse(raw);
-        } catch {
-            return {};
-        }
-    }
-    if (!obj || typeof obj !== "object") return {};
-
-    const findings: string[] = Array.isArray(obj.findings) ? obj.findings.map(String).filter(Boolean) : [];
-    const actionLog: string[] = Array.isArray(obj.action_log) ? obj.action_log.map(String).filter(Boolean) : [];
-    const evidenceRefs: string[] = Array.isArray(obj.evidence_refs) ? obj.evidence_refs.map(String).filter(Boolean) : [];
-    const confidence = typeof obj.confidence === "string" ? obj.confidence : undefined;
-
-    const steps: AgentWorkerStep[] = [];
-    if (actionLog.length > 0) {
-        actionLog.forEach((item, idx) => {
-            let tool = "action";
-            let description = item;
-            if (item.includes(":")) {
-                const parts = item.split(":");
-                tool = parts[0].trim();
-                description = parts.slice(1).join(":").trim();
-            }
-            steps.push({
-                stepNumber: idx + 1,
-                title: `执行 ${tool}`,
-                tool,
-                description,
-                status: "succeeded",
-            });
-        });
-    }
-
-    return {
-        findings: findings.length > 0 ? findings : undefined,
-        actionLog: actionLog.length > 0 ? actionLog : undefined,
-        evidenceRefs: evidenceRefs.length > 0 ? evidenceRefs : undefined,
-        confidence,
-        steps: steps.length > 0 ? steps : undefined,
-    };
-}
 
     const derivedWorkers = computed<AgentWorkerItem[]>(() => {
         // 如果当前没有在运行且没有显式注册 worker，则保持清空（避免历史子 agent 堆积）
