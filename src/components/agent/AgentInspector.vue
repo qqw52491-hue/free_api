@@ -545,7 +545,7 @@ defineEmits<{
 }>();
 
 const currentStepSubagents = computed(() => {
-    return extractSubagentsFromStep(props.selectedStep);
+    return extractSubagentsFromStep(props.selectedStep, props.steps);
 });
 
 const activeTab = ref<"preview" | "detail" | "team" | "context" | "resources">("detail");

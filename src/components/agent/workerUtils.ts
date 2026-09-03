@@ -192,12 +192,54 @@ export function extractWorkerDetails(step: AgentStepItem): { name: string; taskD
     };
 }
 
-export function extractSubagentsFromStep(step: AgentStepItem | null | undefined): AgentWorkerItem[] {
+export function extractSubagentsFromStep(
+    step: AgentStepItem | null | undefined,
+    allSteps?: AgentStepItem[]
+): AgentWorkerItem[] {
     if (!step) return [];
     const tool = (step.tool || step.action || "").toLowerCase();
     const isSub = tool === "child_worker" || tool === "child_reviewer" || tool === "child_writer";
     const isWait = tool.includes("wait_job");
     if (!isSub && !isWait) return [];
+
+    // 模式 0：如果当前选中的是 wait_jobs 挂起等待步骤，向前追溯对应派发步骤的全部并发子任务！
+    if (isWait && allSteps && allSteps.length > 0) {
+        const currentIdx = allSteps.findIndex((s) => s.id === step.id || s.stepId === step.stepId);
+        const searchRange = currentIdx > 0 ? allSteps.slice(0, currentIdx) : allSteps;
+
+        // 向前查找最近的并发派发步骤 (child_worker/child_reviewer)
+        for (let i = searchRange.length - 1; i >= 0; i--) {
+            const prevStep = searchRange[i];
+            const pTool = (prevStep.tool || prevStep.action || "").toLowerCase();
+            if (pTool === "child_worker" || pTool === "child_reviewer" || pTool === "child_writer") {
+                const prevWorkers = extractSubagentsFromStep(prevStep);
+                if (prevWorkers.length > 0) {
+                    const resultStr = typeof step.result === "string" ? step.result : JSON.stringify(step.result || "");
+                    return prevWorkers.map((pw) => {
+                        let findings = pw.findings;
+                        let steps = pw.steps;
+                        let durationMs = pw.durationMs || step.metrics?.toolDurationMs;
+
+                        // 若 wait_jobs 的 resultStr 包含输出块，尝试补充
+                        if (resultStr.includes(pw.id) || resultStr.includes("【任务 ID:")) {
+                            const arts = parseWorkerArtifacts(resultStr);
+                            if (arts.findings && !findings) findings = arts.findings;
+                            if (arts.steps && (!steps || steps.length <= 3)) steps = arts.steps;
+                        }
+
+                        return {
+                            ...pw,
+                            status: "succeeded",
+                            progress: 100,
+                            findings,
+                            steps,
+                            durationMs,
+                        };
+                    });
+                }
+            }
+        }
+    }
 
     const workers: AgentWorkerItem[] = [];
 

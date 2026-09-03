@@ -315,9 +315,9 @@ defineEmits<{
     "clear-selected-step": [];
 }>();
 
-// 从当前选中的历史步骤中解析出绑定的子 Agent (用于历史回看)
+// 从当前选中的历史步骤中解析出绑定的子 Agent (用于历史回看，支持 wait_jobs 溯源关联)
 const stepWorkers = computed(() => {
-    return extractSubagentsFromStep(props.selectedStep);
+    return extractSubagentsFromStep(props.selectedStep, props.steps);
 });
 
 const isViewingHistoryStep = computed(() => {
