@@ -767,40 +767,42 @@ onUnmounted(() => {
 }
 
 /* 导航项 */
+/* 顶部功能导航：紧凑精致，腾出黄金垂直空间给 Projects 与 Tasks */
 .primary-nav {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    padding: 10px 8px 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    gap: 1.5px;
+    padding: 6px 8px 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    flex-shrink: 0;
 }
 
 .app-sidebar.collapsed .primary-nav {
-    padding: 10px 0;
+    padding: 8px 0;
     align-items: center;
-    gap: 4px;
+    gap: 3px;
 }
 
 .nav-row {
     display: flex;
-    height: 34px;
+    height: 27px; /* 紧凑高度，腾出约 70~100px 空间 */
     align-items: center;
-    gap: 11px;
-    padding: 0 12px;
+    gap: 9px;
+    padding: 0 10px;
     border: 1px solid transparent;
-    border-radius: 7px;
+    border-radius: 6px;
     color: #a1a1aa;
     cursor: pointer;
     background: transparent;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 500;
     text-align: left;
     transition: all 0.12s;
 }
 
 .nav-row svg {
-    width: 17px;
-    height: 17px;
+    width: 14.5px;
+    height: 14.5px;
     flex-shrink: 0;
     fill: none;
     stroke: currentColor;
@@ -820,7 +822,8 @@ onUnmounted(() => {
 }
 
 .nav-row.new-task {
-    margin-bottom: 4px;
+    height: 29px;
+    margin-bottom: 2px;
     color: #f4f4f5;
     border: 1px solid rgba(255, 255, 255, 0.12);
     background: rgba(255, 255, 255, 0.05);
@@ -831,17 +834,17 @@ onUnmounted(() => {
 }
 
 .nav-row.icon-only {
-    width: 44px;
-    height: 44px;
+    width: 36px;
+    height: 36px;
     padding: 0;
     justify-content: center;
-    border-radius: 10px;
+    border-radius: 8px;
     margin: 0 auto;
 }
 
 .nav-row.icon-only svg {
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
 }
 
 /* 侧边栏项目和任务 */
@@ -850,12 +853,12 @@ onUnmounted(() => {
 }
 
 .projects-tree-section {
-    padding-top: 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     display: flex;
     flex-direction: column;
-    /* 核心布局保障：最大高度设为 38vh，保证展开项目时自身滚动，绝不挤压下方的 Tasks */
-    max-height: 38vh;
+    /* 项目区域最大高度限制为 200px，展开时自身滚动，绝不挤压 Task */
+    max-height: 200px;
     min-height: 0;
     flex-shrink: 0;
 }
@@ -876,28 +879,42 @@ onUnmounted(() => {
 .list-control { color: #71717a; }
 
 .tasks-section {
-    min-height: 140px; /* 保证 Tasks 列表永远有保底高度，绝不被压没 */
+    /* 核心保全：Task 绝不可被挤压，固定占领全部剩余空间，保底 220px */
     flex: 1;
-    padding-top: 10px;
-    overflow-y: auto;
+    min-height: 220px;
+    padding-top: 8px;
     display: flex;
     flex-direction: column;
+    overflow: hidden; /* 外部不滚动，保证 Task 区域固定在视口中，不随任何东西滚动 */
 }
 
-/* 统一 Tasks 细窄平滑暗黑滚动条 */
+.task-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto; /* Task 专属内部独立滚动条 */
+}
+
+/* 统一 Tasks 与 Task-list 细窄平滑暗黑滚动条 */
+.task-list::-webkit-scrollbar,
 .tasks-section::-webkit-scrollbar {
     width: 4px;
 }
 
+.task-list::-webkit-scrollbar-track,
 .tasks-section::-webkit-scrollbar-track {
     background: transparent;
 }
 
+.task-list::-webkit-scrollbar-thumb,
 .tasks-section::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.12);
     border-radius: 4px;
 }
 
+.task-list::-webkit-scrollbar-thumb:hover,
 .tasks-section::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.28);
 }

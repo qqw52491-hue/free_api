@@ -323,7 +323,6 @@ const expandedProjectIds = ref<Set<string>>(new Set());
 const busy = ref(false);
 
 function handleProjectRowClick(project: AgentProject) {
-  expandedProjectIds.value.add(project.id);
   loadProjectData(project.id);
   emit("select-project", project);
 }
@@ -408,12 +407,7 @@ async function refreshProjects() {
   try {
     projects.value = await invoke<AgentProject[]>("list_agent_projects");
     await Promise.all(projects.value.map((p) => loadProjectData(p.id)));
-    // 默认将所有项目全部展开
-    if (projects.value.length > 0) {
-      for (const p of projects.value) {
-        expandedProjectIds.value.add(p.id);
-      }
-    }
+    // 保持用户当前的折叠/展开状态，默认全部关闭，绝不强制展开
   } catch (e) {
     console.error("加载项目列表失败:", e);
   }
