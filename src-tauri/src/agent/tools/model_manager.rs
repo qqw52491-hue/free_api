@@ -512,7 +512,10 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
         }
         _ => DispatchResult {
             stdout: String::new(),
-            stderr: format!("❌ 未知的 model_manager 动作 action='{}'。支持的动作: list_specs, upsert_spec, delete_spec, list_platforms, add_platform, update_platform, add_model, delete_model", act),
+            stderr: format!(
+                "❌ 未知的 model_manager 动作 action='{}'。\n💡 支持的常用动作及范例:\n  - 查平台与模型: {{\"tool\": \"model_manager\", \"action\": \"list_platforms\"}}\n  - 添加平台: {{\"tool\": \"model_manager\", \"action\": \"add_platform\", \"params\": {{\"name\": \"OpenAI\", \"base_url\": \"https://api.openai.com/v1\", \"api_key\": \"sk-...\"}}}}\n  - 添加模型: {{\"tool\": \"model_manager\", \"action\": \"add_model\", \"params\": {{\"platform\": \"OpenAI\", \"model_id\": \"gpt-4o\"}}}}\n  (其余支持动作: list_specs, upsert_spec, delete_spec, update_platform, delete_model)",
+                act
+            ),
             success: false,
             route: "model_manager:unknown".to_string(),
         },

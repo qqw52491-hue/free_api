@@ -906,19 +906,17 @@ function formatDurationMs(ms?: number): string | null {
 .stage-sub-steps-tree {
     display: flex;
     flex-direction: column;
-    padding: 2px 8px 8px 34px;
+    padding: 2px 8px 8px 0;
+    margin-left: 14.5px;
+    padding-left: 18px;
+    border-left: 1.5px dashed rgba(255, 255, 255, 0.18);
     position: relative;
+    gap: 2px;
 }
 
 /* 贯穿子树的垂直主干引导线 (Sub-tree Spine) */
 .sub-tree-spine {
-    position: absolute;
-    top: 0;
-    bottom: 14px;
-    left: 17px;
-    width: 1px;
-    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.05));
-    pointer-events: none;
+    display: none;
 }
 
 .sub-step-row {
@@ -954,14 +952,14 @@ function formatDurationMs(ms?: number): string | null {
     flex-shrink: 0;
 }
 
-/* 从中轴线弯折伸向子节点的水平导引虚线 */
+/* 从左侧主垂直线正向「向右」伸入子节点圆点的水平导引虚线 */
 .branch-curve-line {
     position: absolute;
     top: 50%;
-    left: -17px;
-    width: 14px;
+    left: -26px; /* 18px padding + 8px row-padding */
+    width: 26px; /* 正向向右伸入圆点中心，无缝闭环 */
     height: 1px;
-    border-top: 1px dashed rgba(255, 255, 255, 0.22);
+    border-top: 1.5px dashed rgba(255, 255, 255, 0.22);
     pointer-events: none;
 }
 

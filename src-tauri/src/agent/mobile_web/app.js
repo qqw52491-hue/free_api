@@ -6,6 +6,8 @@ const S = {
   models: [], modelById: {},
   roleCards: [],
   projects: [],
+  expandedPlans: new Set(),
+  collapsedPlans: new Set(),
   sessions: [],
   view: { name: "home" },
   openGroups: new Set(JSON.parse(localStorage.getItem("free_api_open_groups") || "[]")),
@@ -323,18 +325,36 @@ function artIcon(a) {
   return "📦";
 }
 
-/* 渲染单一步骤 */
-function renderStep(st) {
+const TOOL_NAME_MAP = {
+  search: '搜索检索', ripgrep_search: '代码检索', read_text_file: '读取代码',
+  edit_file: '精确修改', write_file: '写入文件', shell_exec: '终端执行',
+  task_store: '归档状态', finish: '成果交付', ask_human: '用户协同',
+  web_search: '全网调研', web_fetch: '抓取网页'
+};
+
+/* 格式化工具名称标签 */
+function formatToolBadge(tool) {
+  if (!tool) return '思考分析';
+  const name = tool.includes('/') ? tool.split('/').pop() : tool;
+  return TOOL_NAME_MAP[name] || name;
+}
+
+/* 渲染二级树形子步骤 */
+function renderTreeSubStep(st, sIdx, isLast) {
   const open = S.expandedSteps.has(String(st.id));
   const tool = String(st.tool || "工具").trim();
   const act = (st.action && st.action !== st.tool) ? st.action : (st.description || st.action || "");
   
-  // 1. 富文本说明文字
-  const desc = st.description && st.description !== act
-    ? `<div class="assistant-narrative">${formatMarkdown(st.description)}</div>`
-    : "";
+  let shortTool = formatToolBadge(tool);
+  let formattedMain = esc(act || tool || `步骤 #${sIdx + 1}`);
+  formattedMain = formattedMain.replace(/\b([a-zA-Z0-9_\-\.\/]+\.(?:md|ts|js|rs|json|vue|html|css|py|yaml|yml|toml))\b/g, '<span class="t-target">$1</span>');
 
-  // 2. 思考块 (🧠 思考 · 持续了几秒)
+  // 详细参数与输出
+  const params = st.command || st.params;
+  const paramsHtml = params ? `<div class="label">⌨️ 参数</div><pre>${esc(typeof params === "string" ? params : JSON.stringify(params, null, 2))}</pre>` : "";
+  const output = st.output ? `<div class="label">📄 输出</div><pre>${esc(st.output)}</pre>` : "";
+
+  // 思考块
   let thoughtHtml = "";
   if (st.thought) {
     const thOpen = S.expandedThoughts.has(String(st.id));
@@ -342,48 +362,105 @@ function renderStep(st) {
       <div class="thought-block">
         <div class="thought-header" data-thought-toggle="${esc(st.id)}">
           <span>🧠</span>
-          <span>思考 · ${thOpen ? "点击收起 ▲" : "持续了几秒 ▼"}</span>
+          <span>思考过程 · ${thOpen ? "收起 ▲" : "展开 ▼"}</span>
         </div>
         ${thOpen ? `<div class="thought-content">${formatMarkdown(st.thought)}</div>` : ""}
       </div>
     `;
   }
 
-  // 3. 详细参数与输出（点击展开）
-  const params = st.command || st.params;
-  const paramsHtml = params ? `<div class="label">⌨️ 参数</div><pre>${esc(typeof params === "string" ? params : JSON.stringify(params, null, 2))}</pre>` : "";
-  const output = st.output ? `<div class="label">📄 输出</div><pre>${esc(st.output)}</pre>` : "";
-
-  // 4. 两行自然换行工具胶囊：参数/目标在主体，简短工具名在后标签
-  let shortTool = tool.replace(/^(remote-hub\/|builtin\/)/, "");
-  if (shortTool.length > 13) shortTool = shortTool.slice(0, 11) + "…";
-  
-  let formattedMain = esc(act || tool);
-  formattedMain = formattedMain.replace(/\b([a-zA-Z0-9_\-\.\/]+\.(?:md|ts|js|rs|json|vue|html|css|py|yaml|yml|toml))\b/g, '<span class="t-target">$1</span>');
-
-  const isSub = /spawn|child|worker/.test(tool.toLowerCase());
-  const toolPill = `
-    <button class="tool-call-pill" data-step="${esc(st.id)}">
-      <span class="t-ic">${toolIcon(tool)}</span>
-      <div class="t-body">
-        ${isSub ? `<span class="tag-badge">🤖 子智能体</span> ` : ""}
-        ${formattedMain}
-      </div>
-      <div class="t-right">
-        <span class="tool-tag">${esc(shortTool)}</span>
-        ${stepChip(st.status)}
-      </div>
-    </button>
-  `;
+  const isLastClass = isLast ? "is-last" : "";
 
   return `
-    <div class="step-container">
-      ${desc}
-      ${thoughtHtml}
-      ${toolPill}
-      ${open ? `<div class="step-detail-box">${paramsHtml}${output}</div>` : ""}
+    <div class="mobile-sub-step-row ${isLastClass} ${esc(st.status || 'pending')}">
+      <div class="mobile-tree-node-col">
+        <span class="mobile-branch-line"></span>
+        <span class="mobile-node-dot ${esc(st.status || 'pending')}"></span>
+      </div>
+      <div class="mobile-node-main">
+        <div class="mobile-node-header" data-step="${esc(st.id)}">
+          <span class="mobile-tool-badge">${esc(shortTool)}</span>
+          <span class="mobile-step-desc" title="${esc(act)}">${formattedMain}</span>
+          <span class="mobile-status-tag">${stepChip(st.status)}</span>
+        </div>
+        ${thoughtHtml}
+        ${open ? `<div class="step-detail-box">${paramsHtml}${output}</div>` : ""}
+      </div>
     </div>
   `;
+}
+
+/* 🌟 将物理步骤按阶段上下级聚合成树形折叠清单 */
+function renderStepsTree(steps) {
+  if (!steps || !steps.length) return "";
+  
+  // 按 planId 或 planTitle 聚合成阶段组
+  const groups = [];
+  const groupMap = new Map();
+  
+  for (const st of steps) {
+    const planKey = st.planId || st.planTitle || (steps.length > 3 ? "group-main" : `step-${st.id}`);
+    let g = groupMap.get(planKey);
+    if (!g) {
+      g = {
+        id: `plan-${planKey}`,
+        title: st.planTitle || (st.description && st.description.length <= 40 ? st.description : "阶段推进与执行"),
+        status: "succeeded",
+        steps: [],
+        hasRunning: false,
+        hasFailed: false
+      };
+      groupMap.set(planKey, g);
+      groups.push(g);
+    }
+    g.steps.push(st);
+    if (st.status === "running" || st.status === "executing") g.hasRunning = true;
+    if (st.status === "failed" || st.status === "error") g.hasFailed = true;
+  }
+
+  // 阶段状态汇总与默认展开判定
+  for (const g of groups) {
+    if (g.hasRunning) g.status = "running";
+    else if (g.hasFailed) g.status = "failed";
+    else g.status = "succeeded";
+  }
+
+  return groups.map((g, gIdx) => {
+    // 默认展开正在运行的阶段或最后一个阶段，或者用户显式展开
+    const defaultOpen = g.hasRunning || gIdx === groups.length - 1;
+    const isOpen = S.expandedPlans.has(g.id) || (defaultOpen && !S.collapsedPlans.has(g.id));
+    const statusIcon = g.status === "running" 
+      ? '<span class="mobile-plan-spinner"></span>' 
+      : (g.status === "failed" ? '<span class="mobile-plan-ic fail">✕</span>' : '<span class="mobile-plan-ic ok">✓</span>');
+
+    const subStepsHtml = g.steps.map((st, sIdx) => renderTreeSubStep(st, sIdx, sIdx === g.steps.length - 1)).join("");
+
+    return `
+      <div class="mobile-plan-tree-group ${g.status} ${isOpen ? 'is-expanded' : ''}" id="${esc(g.id)}">
+        <div class="mobile-plan-card-header" data-plan-toggle="${esc(g.id)}">
+          <div class="mobile-plan-title-row">
+            <div class="mobile-plan-icon-wrap">${statusIcon}</div>
+            <span class="mobile-plan-title-text">${esc(g.title)}</span>
+            <span class="mobile-plan-count-badge">${g.steps.length} 步</span>
+          </div>
+          <div class="mobile-plan-meta-row">
+            <span class="mobile-plan-toggle-arrow ${isOpen ? 'is-up' : ''}">▾</span>
+          </div>
+        </div>
+        <div class="mobile-plan-tree-body ${isOpen ? '' : 'hidden'}">
+          <div class="mobile-tree-spine-track"></div>
+          <div class="mobile-tree-nodes-list">
+            ${subStepsHtml}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+/* 兼容单步渲染 */
+function renderStep(st) {
+  return renderTreeSubStep(st, 0, true);
 }
 
 /* ---------- 结构化人类协助与提问交互 (Human Intervention) ---------- */
@@ -867,7 +944,7 @@ function renderFlow() {
     html = f.traces.map((tr, idx) => {
       const isLatest = idx === f.traces.length - 1;
       const trGoal = tr.goal ? `<div class="goal-bubble"><span class="arrow">→</span><div class="gtxt">${formatMarkdown(tr.goal)}</div></div>` : "";
-      const trSteps = (tr.steps || []).map(st => renderStep(st)).join("");
+      const trSteps = renderStepsTree(tr.steps || []);
       
       const trFailed = tr.status === "failed";
       const trResult = (tr.completion && tr.completion.summary)
@@ -1287,6 +1364,21 @@ function bind() {
       e.stopPropagation();
       e.preventDefault();
       deleteSession(del.dataset.delSession);
+      return;
+    }
+    const planToggle = e.target.closest("[data-plan-toggle]");
+    if (planToggle) {
+      const id = planToggle.dataset.planToggle;
+      const groupEl = planToggle.closest(".mobile-plan-tree-group");
+      const isCurrentlyOpen = groupEl ? groupEl.classList.contains("is-expanded") : false;
+      if (isCurrentlyOpen) {
+        S.collapsedPlans.add(id);
+        S.expandedPlans.delete(id);
+      } else {
+        S.expandedPlans.add(id);
+        S.collapsedPlans.delete(id);
+      }
+      renderFlow();
       return;
     }
     const th = e.target.closest("[data-thought-toggle]");

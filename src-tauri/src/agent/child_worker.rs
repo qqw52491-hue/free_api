@@ -17,7 +17,7 @@ pub const WORKER_TIMEOUT_SECS: u64 = 180;
 pub const WORKER_PER_CALL_TIMEOUT_SECS: u64 = 60;
 const WORKER_MAX_OUTPUT_TOKENS: i64 = 900;
 const MAX_TASK_CHARS: usize = 2_000;
-const MAX_FOCUS_PATHS: usize = 3;
+const MAX_FOCUS_PATHS: usize = 5;
 const MAX_OBSERVATION_CHARS: usize = 40_000;
 const MAX_ACTION_OUTPUT_CHARS: usize = 8_000;
 const MAX_READ_FILE_BYTES: u64 = 2_000_000;
@@ -77,11 +77,15 @@ pub fn parse_worker_request(params: &Value) -> Result<WorkerRequest, String> {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| "child_worker.focus_paths 必须是字符串数组。".to_string())?;
-            if focus_paths.len() >= MAX_FOCUS_PATHS {
-                return Err(format!("child_worker.focus_paths 最多 {} 个。", MAX_FOCUS_PATHS));
-            }
             if path.chars().count() > 500 || path.chars().any(char::is_control) {
                 return Err("child_worker.focus_paths 含非法路径。".to_string());
+            }
+            if focus_paths.len() >= MAX_FOCUS_PATHS {
+                return Err(format!(
+                    "child_worker.focus_paths 最多 {} 个。\n💡 建议：侦察工兵需精准聚焦，请只传入 1~{} 个关键文件或核心目录路径（如 [\"src/foo/\", \"src/bar.js\"]）。",
+                    MAX_FOCUS_PATHS,
+                    MAX_FOCUS_PATHS
+                ));
             }
             focus_paths.push(path);
         }

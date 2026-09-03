@@ -15,7 +15,24 @@ use std::path::Path;
 
 /// 统一联邦检索调度入口
 pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> DispatchResult {
-    let params: SearchParams = match serde_json::from_value(params_value.clone()) {
+    // 语法层归一化：无歧义自动适配大模型常见的标量字符串输入（如 "kinds": "code" 自动转为 ["code"]）
+    let normalized_value = match params_value {
+        Value::Object(map) => {
+            let mut new_map = map.clone();
+            if let Some(Value::String(k_str)) = new_map.get("kinds") {
+                let parts: Vec<Value> = k_str
+                    .split(',')
+                    .map(|s| Value::String(s.trim().to_string()))
+                    .filter(|v| v.as_str().map(|s| !s.is_empty()).unwrap_or(false))
+                    .collect();
+                new_map.insert("kinds".to_string(), Value::Array(parts));
+            }
+            Value::Object(new_map)
+        }
+        other => other.clone(),
+    };
+
+    let params: SearchParams = match serde_json::from_value(normalized_value) {
         Ok(p) => p,
         Err(e) => {
             if let Some(q) = params_value.as_str() {
@@ -30,7 +47,10 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
             } else {
                 return DispatchResult {
                     stdout: String::new(),
-                    stderr: format!("搜索参数解析失败: {}", e),
+                    stderr: format!(
+                        "❌ [search] 参数格式解析失败: {}\n💡 正确调用示例:\n  - 检索代码: {{\"query\": \"关键词\", \"kinds\": [\"code\"], \"path\": \".\"}}\n  - 检索历史: {{\"query\": \"关键词\", \"kinds\": [\"history\"]}}",
+                        e
+                    ),
                     success: false,
                     route: "retrieval".to_string(),
                 };
@@ -107,7 +127,7 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
             .filter(|p| !p.is_empty())
         {
             None => {
-                errors.push("code 检索需要显式 path 参数（要检索的目录或文件路径）".to_string());
+                errors.push("❌ [search] code 检索需要显式 path 参数（要检索的目录或文件路径，如 path: \".\" 或 path: \"src\"）。\n💡 正确示例: {\"query\": \"关键词\", \"kinds\": [\"code\"], \"path\": \".\"}".to_string());
             }
             Some(raw_path) => {
                 let root = Path::new(raw_path);

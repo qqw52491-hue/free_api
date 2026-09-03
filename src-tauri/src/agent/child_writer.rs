@@ -152,7 +152,11 @@ pub fn parse_writer_request(params: &Value) -> Result<WriterRequest, String> {
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| "child_writer.focus_paths 必须是字符串数组。".to_string())?;
             if focus_paths.len() >= MAX_FOCUS_PATHS {
-                return Err(format!("child_writer.focus_paths 最多 {} 个。", MAX_FOCUS_PATHS));
+                return Err(format!(
+                    "child_writer.focus_paths 最多 {} 个。\n💡 建议：写入工兵需聚焦核心目标，请只传入 1~{} 个关键文件路径（如 [\"src/a.js\", \"src/b.js\"]）。",
+                    MAX_FOCUS_PATHS,
+                    MAX_FOCUS_PATHS
+                ));
             }
             focus_paths.push(path);
         }

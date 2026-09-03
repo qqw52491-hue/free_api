@@ -443,6 +443,23 @@ pub(crate) fn execute_command_inner(
 
     // 3.7 核心原生工具 F: mcp_manager (MCP 外部插件接入、批量导入与能力卡维护)
     if tool.eq_ignore_ascii_case("mcp_manager") {
+        let act = action.to_ascii_lowercase();
+        // 变更类危险动作（add_http, delete, toggle, quick_connect）必须经过用户明确确认
+        if act.contains("add") || act.contains("delete") || act.contains("toggle") || act.contains("connect") {
+            let user_approved = params
+                .get("user_confirmed")
+                .and_then(|v| v.as_bool())
+                .or_else(|| params.get("confirm").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+            if !user_approved {
+                return DispatchResult {
+                    stdout: String::new(),
+                    stderr: "❌ [权限安全拦截] 严禁在执行代码或排错任务中擅自调用 mcp_manager 添加、修改或重连 MCP 插件！\n💡 关键提醒：当前已连接的 MCP 工具（如 remote-hub 下的 read_text_file, edit_file, ripgrep_search 等）已经全部就绪且立即可用！请直接以 {\"tool\": \"remote-hub/具体工具名\", \"command\": {...}} 格式调用，绝不需要也不允许调用 mcp_manager 或派发空步骤去‘加载’或‘重连’！".to_string(),
+                    success: false,
+                    route: "mcp_manager:permission_denied".to_string(),
+                };
+            }
+        }
         return crate::agent::tools::mcp_manager::dispatch(db, action, params);
     }
 
@@ -494,8 +511,8 @@ pub(crate) fn execute_command_inner(
             return DispatchResult {
                 stdout: String::new(),
                 stderr: format!(
-                    "❌ [工具契约] MCP 服务‘{}’不是具体工具。请显式调用‘{}/具体工具’，或保留 tool=‘{}’并将 action 设为具体工具名；不要把子工具名只放在参数里。宿主不会自动补全或改写 tool、cwd、path、project 参数。",
-                    plugin_name, plugin_name, plugin_name
+                    "❌ [工具契约] MCP 服务‘{}’是服务名称而非具体工具。\n💡 正确调用示范: {{\"tool\": \"{}/具体工具名\", \"command\": {{...}}}}（例如: \"{}/read_text_file\" 或 \"{}/ripgrep_search\"）。请勿遗漏斜杠与子工具名。",
+                    plugin_name, plugin_name, plugin_name, plugin_name
                 ),
                 success: false,
                 route: "host_rejection:mcp_service_requires_subtool".to_string(),

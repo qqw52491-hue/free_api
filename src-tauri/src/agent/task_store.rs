@@ -67,7 +67,9 @@ pub fn dispatch(
 ) -> DispatchResult {
     let result = (|| -> Result<Value, String> {
         if action == "get_step_output" || action == "get_output" {
-            let output_id = required_string(params_value, "output_id")?;
+            let output_id = optional_string(params_value, "output_id")
+                .or_else(|| optional_string(params_value, "id"))
+                .ok_or_else(|| "task_store 参数缺少 'output_id'。\n💡 正确示例: {\"action\": \"get_step_output\", \"params\": {\"output_id\": \"out-xxx\"}}".to_string())?;
             let text = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
             let offset = params_value
                 .get("offset")
@@ -102,7 +104,9 @@ pub fn dispatch(
             || action == "grep_step_output"
             || action == "search_output"
         {
-            let output_id = required_string(params_value, "output_id")?;
+            let output_id = optional_string(params_value, "output_id")
+                .or_else(|| optional_string(params_value, "id"))
+                .ok_or_else(|| "task_store 参数缺少 'output_id'。\n💡 正确示例: {\"action\": \"search_step_output\", \"params\": {\"output_id\": \"out-xxx\", \"pattern\": \"关键词\"}}".to_string())?;
             let pattern = required_string(params_value, "pattern")?;
             let requested_context_lines = params_value
                 .get("context_lines")
