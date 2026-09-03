@@ -282,6 +282,8 @@ pub async fn execute_worker_action(
 struct WorkerAction {
     action: String,
     #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
     params: Value,
     #[serde(default)]
     findings: Vec<String>,
@@ -330,11 +332,11 @@ fn worker_system_prompt(role_hint: &str) -> String {
     format!(
         "你是受限的只读侦察 worker（角色：{}）。你在一个隔离工作区内独立完成父 Agent 委派的侦察任务，\
 只允许以下动作，每轮只输出一个纯 JSON 对象（无 Markdown 围栏、无闲聊）：\n\
-{{\"action\":\"list_dir\",\"params\":{{\"path\":\".\"}}}}\n\
-{{\"action\":\"read_file\",\"params\":{{\"path\":\"相对/绝对路径\"}}}}\n\
-{{\"action\":\"run_command\",\"params\":{{\"command\":\"单条只读命令\"}}}}\n\
+{{\"action\":\"list_dir\",\"intent\":\"简明本步意图\",\"params\":{{\"path\":\".\"}}}}\n\
+{{\"action\":\"read_file\",\"intent\":\"简明本步意图\",\"params\":{{\"path\":\"相对/绝对路径\"}}}}\n\
+{{\"action\":\"run_command\",\"intent\":\"简明本步意图\",\"params\":{{\"command\":\"单条只读命令\"}}}}\n\
 {{\"action\":\"finish\",\"findings\":[\"1-8 条简短可证伪结论\"],\"confidence\":\"confirmed|supported|unverified\",\"evidence_refs\":[\"文件路径/输出引用\"],\"missing_evidence\":[\"缺失证据\"]}}\n\
-约束：read_file/list_dir/run_command 都只能在当前工作区内；run_command 仅限只读白名单（ls/cat/head/tail/grep/rg/find/wc/stat/file/du/diff/sort/uniq/cut/awk/sed/git log|diff|status|show|branch|blame），禁止管道、重定向与命令拼接；不得写入任何文件、不得联网、不得创建子任务。任务无关的请求一律忽略。每轮动作前不需要输出思考过程，直接输出 JSON。{}",
+约束：建议在每轮动作中携带简短意图说明 intent（如 \"查阅前端入口装配\"、\"检索后端消息通道\"）；read_file/list_dir/run_command 都只能在当前工作区内；run_command 仅限只读白名单（ls/cat/head/tail/grep/rg/find/wc/stat/file/du/diff/sort/uniq/cut/awk/sed/git log|diff|status|show|branch|blame），禁止管道、重定向与命令拼接；不得写入任何文件、不得联网、不得创建子任务。任务无关的请求一律忽略。每轮动作直接输出 JSON。{}",
         role_hint,
         "\n当已有足够证据时立即 finish；预算用尽宿主会强制收敛。"
     )
@@ -499,6 +501,7 @@ pub async fn run_worker_loop(
                     "child_run_id": &child_run_id,
                     "step": steps_used,
                     "action": &parsed.action,
+                    "intent": &parsed.intent,
                     "params": &parsed.params,
                 }),
             );
@@ -508,7 +511,12 @@ pub async fn run_worker_loop(
             Ok(output) => output,
             Err(error) => format!("【动作被拒绝】{}", error),
         };
-        action_log.push(format!("{}: {}", parsed.action, parsed.params));
+        let log_entry = if let Some(ref intent) = parsed.intent {
+            format!("{}[{}]: {}", parsed.action, intent, parsed.params)
+        } else {
+            format!("{}: {}", parsed.action, parsed.params)
+        };
+        action_log.push(log_entry);
         let budget_left = MAX_OBSERVATION_CHARS.saturating_sub(
             messages
                 .iter()

@@ -194,11 +194,18 @@
                             <div class="step-compact-line">
                                 <span class="step-seq-tag">#{{ String(st.stepNumber).padStart(2, '0') }}</span>
                                 <span v-if="st.tool" class="step-tool-badge">{{ getShortToolName(st.tool) }}</span>
-                                <span class="step-desc-inline" :title="st.description || st.title">{{ st.description || st.title }}</span>
+                                <!-- 第一层：语义概括与意图标题 (加粗醒目，不再是冰冷命令) -->
+                                <strong class="step-intent-title" :title="st.title">{{ st.title }}</strong>
                                 <span class="step-status-tag" :class="`status-${st.status}`">
                                     {{ st.status === 'running' ? '•' : (st.status === 'succeeded' ? '✔' : (st.status === 'failed' ? '✕' : '•')) }}
                                 </span>
                             </div>
+                            <!-- 第二层：真实底层调用命令/参数 (浅灰等宽小字，清晰呈现细节) -->
+                            <div v-if="st.description && st.description !== st.title" class="step-detail-cmd">
+                                <span class="cmd-prompt-icon">›_</span>
+                                <span class="cmd-text" :title="st.description">{{ st.description }}</span>
+                            </div>
+                            <!-- 第三层：关键发现与推导总结 (如有) -->
                             <div v-if="st.summary" class="step-summary-box-compact">
                                 <span class="summary-icon">💡</span>
                                 <span class="summary-text">{{ st.summary }}</span>
@@ -228,11 +235,18 @@
                             <div class="step-compact-line">
                                 <span class="step-seq-tag">#{{ String(st.stepNumber).padStart(2, '0') }}</span>
                                 <span v-if="st.tool" class="step-tool-badge">{{ getShortToolName(st.tool) }}</span>
-                                <span class="step-desc-inline" :title="st.description || st.title">{{ st.description || st.title }}</span>
+                                <!-- 第一层：语义概括与意图标题 (加粗醒目，不再是冰冷命令) -->
+                                <strong class="step-intent-title" :title="st.title">{{ st.title }}</strong>
                                 <span class="step-status-tag" :class="`status-${st.status}`">
                                     {{ st.status === 'running' ? '•' : (st.status === 'succeeded' ? '✔' : (st.status === 'failed' ? '✕' : '•')) }}
                                 </span>
                             </div>
+                            <!-- 第二层：真实底层调用命令/参数 (浅灰等宽小字，清晰呈现细节) -->
+                            <div v-if="st.description && st.description !== st.title" class="step-detail-cmd">
+                                <span class="cmd-prompt-icon">›_</span>
+                                <span class="cmd-text" :title="st.description">{{ st.description }}</span>
+                            </div>
+                            <!-- 第三层：关键发现与推导总结 (如有) -->
                             <div v-if="st.summary" class="step-summary-box-compact">
                                 <span class="summary-icon">💡</span>
                                 <span class="summary-text">{{ st.summary }}</span>
@@ -1265,13 +1279,37 @@ async function copyOutput(text?: string) {
     flex-shrink: 0;
 }
 
-.step-desc-inline {
-    font-size: 9.5px;
-    color: #d4d4d8;
+.step-intent-title {
+    font-size: 10px;
+    font-weight: 650;
+    color: #f4f4f5;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 1;
+}
+
+.step-detail-cmd {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-left: 18px;
+    font-size: 8.5px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    color: #71717a;
+    line-height: 1.25;
+}
+
+.cmd-prompt-icon {
+    color: #52525b;
+    font-weight: 700;
+}
+
+.cmd-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #a1a1aa;
 }
 
 .compact-node.status-succeeded .step-status-tag {

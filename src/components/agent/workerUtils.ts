@@ -1,5 +1,91 @@
 import type { AgentStepItem, AgentWorkerItem, AgentWorkerStep } from "./types";
 
+export function inferStepIntent(tool: string, rawTarget: string, explicitIntent?: string): { title: string; cleanTarget: string } {
+    let clean = rawTarget.trim();
+    // 移除包裹的 {"path":"..."} 或 {"command":"..."}
+    if (clean.startsWith("{") && clean.endsWith("}")) {
+        try {
+            const parsed = JSON.parse(clean);
+            if (parsed.path) clean = String(parsed.path);
+            else if (parsed.command) clean = String(parsed.command);
+        } catch {}
+    }
+    // 移除命令回显常见的前缀
+    clean = clean.replace(/^(read_file|list_dir|run_command)[:：\s]*/i, "").trim();
+    clean = clean.replace(/^运行命令[:：\s]*/i, "").trim();
+
+    if (explicitIntent && explicitIntent.trim()) {
+        return { title: explicitIntent.trim(), cleanTarget: clean };
+    }
+
+    const t = tool.toLowerCase();
+
+    // 1. 文件读取意图推导 (read_file)
+    if (t === "read_file") {
+        if (clean.endsWith("package.json")) return { title: "查阅工程依赖清单与构建脚本", cleanTarget: clean };
+        if (clean.endsWith("Cargo.toml")) return { title: "审查 Rust 后端依赖与 crate 特性配置", cleanTarget: clean };
+        if (clean.endsWith("tsconfig.json")) return { title: "审查 TypeScript 编译与路径别名配置", cleanTarget: clean };
+        if (clean.endsWith("tauri.conf.json")) return { title: "检查 Tauri 应用桌面窗口与安全权限配置", cleanTarget: clean };
+        if (clean.endsWith("main.ts") || clean.endsWith("index.ts")) return { title: "勘察前端主入口与全局挂载装配", cleanTarget: clean };
+        if (clean.endsWith("main.rs")) return { title: "审查 Rust 应用程序后端主入口点", cleanTarget: clean };
+        if (clean.endsWith("lib.rs")) return { title: "审查 Tauri 插件注册与命令暴露接口", cleanTarget: clean };
+        if (clean.endsWith("App.vue")) return { title: "勘察应用根组件与顶级布局骨架", cleanTarget: clean };
+        if (clean.includes("router")) return { title: "分析前端页面路由与导航映射表", cleanTarget: clean };
+        if (clean.includes("wechat") || clean.includes("channel")) return { title: "深入分析微信通讯通道与桥接实现", cleanTarget: clean };
+        if (clean.includes("child_worker") || clean.includes("loop_runner") || clean.includes("main_loop")) {
+            return { title: "审查 Agent 调度引擎与循环状态机", cleanTarget: clean };
+        }
+        if (clean.endsWith(".vue")) {
+            const name = clean.split("/").pop() || clean;
+            return { title: `审查 [${name}] 视图组件结构与交互`, cleanTarget: clean };
+        }
+        if (clean.endsWith(".rs")) {
+            const name = clean.split("/").pop() || clean;
+            return { title: `分析后端模块 [${name}] 业务逻辑`, cleanTarget: clean };
+        }
+        return { title: `读取源码文件 [${clean.split("/").pop() || clean}]`, cleanTarget: clean };
+    }
+
+    // 2. 目录结构勘察意图推导 (list_dir)
+    if (t === "list_dir") {
+        if (clean === "." || clean === "") return { title: "查阅工程根目录与项目架构全貌", cleanTarget: clean || "." };
+        if (clean.includes("views")) return { title: "梳理前端页面模块与视图体系", cleanTarget: clean };
+        if (clean.includes("components")) return { title: "探索前端通用组件库与子组件布局", cleanTarget: clean };
+        if (clean.includes("agent")) return { title: "勘察 Agent 核心引擎与调度模块目录", cleanTarget: clean };
+        if (clean.includes("src-tauri/src")) return { title: "探索 Tauri 后端核心源码结构", cleanTarget: clean };
+        if (clean.includes("src-tauri")) return { title: "勘察桌面端 Rust 工程架构", cleanTarget: clean };
+        if (clean.includes("src")) return { title: "勘察前端应用源码根目录", cleanTarget: clean };
+        if (clean.includes("wechat")) return { title: "勘察微信服务桥接子项目结构", cleanTarget: clean };
+        return { title: `探测目录 [${clean}] 拓扑结构`, cleanTarget: clean };
+    }
+
+    // 3. 命令行执行意图推导 (run_command)
+    if (t === "run_command") {
+        if (clean.startsWith("find ")) return { title: "遍历定位目标源码与资源文件树", cleanTarget: clean };
+        if (clean.includes("rg ") || clean.includes("grep ")) {
+            if (clean.includes("pub struct") || clean.includes("struct ")) return { title: "检索核心结构体与数据模型声明", cleanTarget: clean };
+            if (clean.includes("pub async fn") || clean.includes("async fn") || clean.includes("fn ")) return { title: "定位关键函数签名与异步方法实现", cleanTarget: clean };
+            if (clean.includes("<script") || clean.includes("script")) return { title: "定位 Vue 单文件组件脚本代码块", cleanTarget: clean };
+            if (clean.includes("wechat") || clean.includes("channel")) return { title: "全文检索微信消息相关收发链路", cleanTarget: clean };
+            return { title: "代码特征全文检索与模式匹配", cleanTarget: clean };
+        }
+        if (clean.startsWith("sed ") || clean.startsWith("head ") || clean.startsWith("tail ")) {
+            const target = clean.split(/\s+/).pop() || "";
+            return { title: `截取 [${target.split("/").pop() || target}] 核心片段深入分析`, cleanTarget: clean };
+        }
+        if (clean.startsWith("git ")) {
+            if (clean.includes("diff")) return { title: "核验工作区未提交的代码差异", cleanTarget: clean };
+            if (clean.includes("log")) return { title: "查阅近期提交历史与代码演进", cleanTarget: clean };
+            if (clean.includes("status")) return { title: "检查本地仓库工作树修改状态", cleanTarget: clean };
+            return { title: "执行 Git 只读版本库状态检查", cleanTarget: clean };
+        }
+        return { title: `执行命令分析: ${clean.split(/\s+/)[0]}`, cleanTarget: clean };
+    }
+
+    // 默认回退
+    return { title: `执行 ${tool}`, cleanTarget: clean };
+}
+
 export function parseWorkerArtifacts(raw: unknown): {
     findings?: string[];
     actionLog?: string[];
@@ -27,17 +113,28 @@ export function parseWorkerArtifacts(raw: unknown): {
     if (actionLog.length > 0) {
         actionLog.forEach((item, idx) => {
             let tool = "action";
-            let description = item;
-            if (item.includes(":")) {
+            let explicitIntent: string | undefined = undefined;
+            let rawTarget = item;
+
+            // 支持 action[intent]: params 格式
+            const intentMatch = item.match(/^([a-zA-Z0-9_-]+)\[([^\]]+)\]:\s*([\s\S]+)$/);
+            if (intentMatch) {
+                tool = intentMatch[1].trim();
+                explicitIntent = intentMatch[2].trim();
+                rawTarget = intentMatch[3].trim();
+            } else if (item.includes(":")) {
                 const parts = item.split(":");
                 tool = parts[0].trim();
-                description = parts.slice(1).join(":").trim();
+                rawTarget = parts.slice(1).join(":").trim();
             }
+
+            const inferred = inferStepIntent(tool, rawTarget, explicitIntent);
+
             steps.push({
                 stepNumber: idx + 1,
-                title: `执行 ${tool}`,
+                title: inferred.title,
                 tool,
-                description,
+                description: inferred.cleanTarget,
                 status: "succeeded",
             });
         });
