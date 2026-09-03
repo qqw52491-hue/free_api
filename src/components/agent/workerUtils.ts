@@ -104,36 +104,126 @@ export function extractSubagentsFromStep(step: AgentStepItem | null | undefined)
 
     const workers: AgentWorkerItem[] = [];
 
-    // 1. 检查 params 是否包含批量派发 (如一次开俩 agent)
     let rawParams: any = step.params;
     if (typeof rawParams === "string") {
         try { rawParams = JSON.parse(rawParams); } catch {}
     }
 
-    if (rawParams && Array.isArray(rawParams.dispatches) && rawParams.dispatches.length > 0) {
-        rawParams.dispatches.forEach((sub: any, idx: number) => {
-            const subTool = sub.tool || tool;
-            const isRev = subTool === "child_reviewer";
+    const resultStr = typeof step.result === "string" ? step.result : JSON.stringify(step.result || "");
+
+    // 模式 A：如果是 wait_jobs 挂起等待步骤，从结果中拆解多个完成的任务块
+    // 格式形如：- 【任务 ID: child-run-xxx | 类型: child_worker】状态: succeeded, 耗时: 12000ms \n 描述: ... \n 输出: ...
+    if (isWait && resultStr.includes("【任务 ID:")) {
+        const jobSections = resultStr.split(/(?=- 【任务 ID:)/g);
+        for (const sec of jobSections) {
+            const idMatch = sec.match(/【任务 ID:\s*([^\s|]+)/);
+            if (!idMatch) continue;
+            const jobId = idMatch[1];
+            const typeMatch = sec.match(/类型:\s*([^\s】]+)/);
+            const statusMatch = sec.match(/状态:\s*([^\s,]+)/);
+            const durationMatch = sec.match(/耗时:\s*(\d+)ms/);
+            const descMatch = sec.match(/描述:\s*([^\n]+)/);
+            const outputMatch = sec.match(/输出:\s*([\s\S]+)$/);
+
+            const jobType = typeMatch ? typeMatch[1] : "child_worker";
+            const jobStatus = statusMatch ? (statusMatch[1] === "succeeded" ? "succeeded" : "failed") : step.status;
+            const duration = durationMatch ? Number(durationMatch[1]) : undefined;
+            const desc = descMatch ? descMatch[1].trim() : `子任务 ${jobId.slice(0, 8)}`;
+            const outputRaw = outputMatch ? outputMatch[1].trim() : "";
+
+            const isRev = jobType === "child_reviewer";
             const role = isRev ? "reviewer" : "worker";
-            const taskText = String(sub.task || sub.goal || `子任务 #${idx + 1}`);
-            const cleanDesc = taskText.replace(/^[🔍⚡🛡️🔧\s]+/, "");
+            const arts = parseWorkerArtifacts(outputRaw);
+
+            const cleanDesc = desc.replace(/^[🔍⚡🛡️🔧\s]+/, "");
             const shortDesc = cleanDesc.length > 16 ? cleanDesc.slice(0, 15) + "…" : cleanDesc;
+
             workers.push({
-                id: `step-${step.stepId}-sub-${idx}`,
+                id: jobId,
                 name: `${isRev ? '审查' : '侦察'}: ${shortDesc}`,
                 role,
                 roleLabel: isRev ? "审查" : "侦察",
-                status: step.status,
-                currentStep: taskText,
-                currentTool: subTool,
-                progress: step.status === "succeeded" ? 100 : 70,
+                status: jobStatus as any,
+                currentStep: desc,
+                currentTool: jobType,
+                progress: jobStatus === "succeeded" ? 100 : 70,
                 startedAt: step.timestamp,
-                durationMs: step.metrics?.toolDurationMs,
+                durationMs: duration || step.metrics?.toolDurationMs,
+                thought: undefined,
+                output: outputRaw && outputRaw !== "（无附加输出）" ? outputRaw : undefined,
+                findings: arts.findings,
+                evidenceRefs: arts.evidenceRefs,
+                confidence: arts.confidence,
+                steps: arts.steps,
             });
-        });
+        }
     }
 
-    // 2. 如果不是批量 dispatches，则是常规单发子任务或 wait 步骤
+    // 模式 B：检查 params 中是否有批量派发数组 (dispatches, workers, tasks, parallel, 或 params 本身是数组)
+    if (workers.length === 0) {
+        let dispatchList: any[] = [];
+        if (Array.isArray(rawParams)) {
+            dispatchList = rawParams;
+        } else if (rawParams && typeof rawParams === "object") {
+            if (Array.isArray(rawParams.dispatches)) dispatchList = rawParams.dispatches;
+            else if (Array.isArray(rawParams.workers)) dispatchList = rawParams.workers;
+            else if (Array.isArray(rawParams.tasks)) dispatchList = rawParams.tasks;
+            else if (Array.isArray(rawParams.parallel)) dispatchList = rawParams.parallel;
+        }
+
+        if (dispatchList.length > 0) {
+            dispatchList.forEach((sub: any, idx: number) => {
+                const subTool = sub.tool || sub.action || tool;
+                const isRev = subTool === "child_reviewer";
+                const role = isRev ? "reviewer" : "worker";
+                const taskText = String(sub.task || sub.goal || sub.instruction || `子任务 #${idx + 1}`);
+                const cleanDesc = taskText.replace(/^[🔍⚡🛡️🔧\s]+/, "");
+                const shortDesc = cleanDesc.length > 16 ? cleanDesc.slice(0, 15) + "…" : cleanDesc;
+                workers.push({
+                    id: `step-${step.stepId}-sub-${idx}`,
+                    name: `${isRev ? '审查' : '侦察'}: ${shortDesc}`,
+                    role,
+                    roleLabel: isRev ? "审查" : "侦察",
+                    status: step.status,
+                    currentStep: taskText,
+                    currentTool: subTool,
+                    progress: step.status === "succeeded" ? 100 : 70,
+                    startedAt: step.timestamp,
+                    durationMs: step.metrics?.toolDurationMs,
+                });
+            });
+        }
+    }
+
+    // 模式 C：检查派发输出 summary (如: [1/2] ✅ 已派发 child_run_id=xxx 任务: 后端调度... [2/2] ...)
+    if (workers.length === 0 && resultStr.includes("已派发 child_run_id=")) {
+        const lines = resultStr.split("\n");
+        for (const line of lines) {
+            const match = line.match(/child_run_id=([^\s]+)\s+任务:\s*([^\n]+)/);
+            if (match) {
+                const childId = match[1];
+                const taskText = match[2].trim();
+                const isRev = taskText.includes("审查");
+                const role = isRev ? "reviewer" : "worker";
+                const cleanDesc = taskText.replace(/^[🔍⚡🛡️🔧\s]+/, "");
+                const shortDesc = cleanDesc.length > 16 ? cleanDesc.slice(0, 15) + "…" : cleanDesc;
+                workers.push({
+                    id: childId,
+                    name: `${isRev ? '审查' : '侦察'}: ${shortDesc}`,
+                    role,
+                    roleLabel: isRev ? "审查" : "侦察",
+                    status: step.status,
+                    currentStep: taskText,
+                    currentTool: isRev ? "child_reviewer" : "child_worker",
+                    progress: step.status === "succeeded" ? 100 : 70,
+                    startedAt: step.timestamp,
+                    durationMs: step.metrics?.toolDurationMs,
+                });
+            }
+        }
+    }
+
+    // 模式 D：常规单发子任务回退
     if (workers.length === 0) {
         const details = extractWorkerDetails(step);
         const arts = parseWorkerArtifacts(step.result);

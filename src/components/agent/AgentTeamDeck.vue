@@ -167,41 +167,75 @@
                         </ul>
                     </div>
 
-                    <!-- 子 Agent 动态步骤链 (分层结构，文字为主，小巧标号) -->
-                    <div class="worker-steps-chain">
+                    <!-- 子 Agent 执行轨迹条 (支持多步收纳与一键展开/折叠) -->
+                    <div class="steps-deck-bar">
+                        <div class="steps-deck-title">
+                            <span class="steps-deck-icon">⚡</span>
+                            <span>执行轨迹 (共 {{ activeWorkerSteps.length }} 步)</span>
+                        </div>
+                        <button
+                            v-if="activeWorkerSteps.length > 8"
+                            type="button"
+                            class="btn-toggle-steps-fold"
+                            @click="expandAllSteps = !expandAllSteps"
+                        >
+                            {{ expandAllSteps ? '折叠常规步骤' : `展开全部 (${activeWorkerSteps.length})` }}
+                        </button>
+                    </div>
+
+                    <div class="worker-steps-chain compact">
+                        <!-- 前置步骤 (折叠时展示前3步，展开时展示全部) -->
                         <div
-                            v-for="st in activeWorkerSteps"
+                            v-for="st in headSteps"
                             :key="st.stepNumber"
-                            class="worker-step-node"
+                            class="worker-step-node compact-node"
                             :class="[`status-${st.status}`, { 'is-active': st.status === 'running' }]"
                         >
-                            <!-- 小巧的时间轴序号环 -->
-                            <div class="step-rail-col">
-                                <span class="step-dot-badge">
-                                    <i v-if="st.status === 'running'" class="spinner-dot"></i>
-                                    <span v-else-if="st.status === 'succeeded'">✔</span>
-                                    <span v-else-if="st.status === 'failed'">✕</span>
-                                    <span v-else>{{ st.stepNumber }}</span>
+                            <div class="step-compact-line">
+                                <span class="step-seq-tag">#{{ String(st.stepNumber).padStart(2, '0') }}</span>
+                                <span v-if="st.tool" class="step-tool-badge">{{ getShortToolName(st.tool) }}</span>
+                                <span class="step-desc-inline" :title="st.description || st.title">{{ st.description || st.title }}</span>
+                                <span class="step-status-tag" :class="`status-${st.status}`">
+                                    {{ st.status === 'running' ? '•' : (st.status === 'succeeded' ? '✔' : (st.status === 'failed' ? '✕' : '•')) }}
                                 </span>
                             </div>
+                            <div v-if="st.summary" class="step-summary-box-compact">
+                                <span class="summary-icon">💡</span>
+                                <span class="summary-text">{{ st.summary }}</span>
+                            </div>
+                        </div>
 
-                            <!-- 层级内容主体 -->
-                            <div class="step-content-body">
-                                <div class="step-meta-row">
-                                    <span class="step-seq-pill">第 {{ st.stepNumber }} 步</span>
-                                    <span v-if="st.tool" class="step-tool-badge">{{ getShortToolName(st.tool) }}</span>
-                                    <span class="step-status-tag" :class="`status-${st.status}`">
-                                        {{ st.status === 'running' ? '执行中…' : (st.status === 'succeeded' ? '完成' : (st.status === 'failed' ? '异常' : '待命')) }}
-                                    </span>
-                                </div>
-                                <h4 class="step-main-title">{{ st.title }}</h4>
-                                <div v-if="st.description && st.description !== st.title" class="step-desc-box">
-                                    <span class="desc-text">{{ st.description }}</span>
-                                </div>
-                                <div v-if="st.summary" class="step-summary-box">
-                                    <span class="summary-icon">💡</span>
-                                    <div class="summary-text">{{ st.summary }}</div>
-                                </div>
+                        <!-- 智能折叠提示条 (点击展开) -->
+                        <button
+                            v-if="shouldFoldSteps"
+                            type="button"
+                            class="folded-steps-indicator-bar"
+                            title="点击展开中间被收起的常规只读步骤"
+                            @click="expandAllSteps = true"
+                        >
+                            <span class="fold-line"></span>
+                            <span class="fold-badge">↕ 期间执行了 {{ foldedCount }} 次只读探查操作 (点击展开)</span>
+                            <span class="fold-line"></span>
+                        </button>
+
+                        <!-- 后置步骤 (折叠时展示后3步) -->
+                        <div
+                            v-for="st in tailSteps"
+                            :key="st.stepNumber"
+                            class="worker-step-node compact-node"
+                            :class="[`status-${st.status}`, { 'is-active': st.status === 'running' }]"
+                        >
+                            <div class="step-compact-line">
+                                <span class="step-seq-tag">#{{ String(st.stepNumber).padStart(2, '0') }}</span>
+                                <span v-if="st.tool" class="step-tool-badge">{{ getShortToolName(st.tool) }}</span>
+                                <span class="step-desc-inline" :title="st.description || st.title">{{ st.description || st.title }}</span>
+                                <span class="step-status-tag" :class="`status-${st.status}`">
+                                    {{ st.status === 'running' ? '•' : (st.status === 'succeeded' ? '✔' : (st.status === 'failed' ? '✕' : '•')) }}
+                                </span>
+                            </div>
+                            <div v-if="st.summary" class="step-summary-box-compact">
+                                <span class="summary-icon">💡</span>
+                                <span class="summary-text">{{ st.summary }}</span>
                             </div>
                         </div>
                     </div>
@@ -362,6 +396,27 @@ const activeWorkerSteps = computed<AgentWorkerStep[]>(() => {
             status: isDone ? "succeeded" : isFailed ? "failed" : "pending",
         },
     ];
+});
+
+const expandAllSteps = ref(false);
+
+const shouldFoldSteps = computed(() => {
+    return activeWorkerSteps.value.length > 8 && !expandAllSteps.value;
+});
+
+const headSteps = computed(() => {
+    if (!shouldFoldSteps.value) return activeWorkerSteps.value;
+    return activeWorkerSteps.value.slice(0, 3);
+});
+
+const tailSteps = computed(() => {
+    if (!shouldFoldSteps.value) return [];
+    return activeWorkerSteps.value.slice(-3);
+});
+
+const foldedCount = computed(() => {
+    if (!shouldFoldSteps.value) return 0;
+    return activeWorkerSteps.value.length - headSteps.value.length - tailSteps.value.length;
 });
 
 function formatWorkerName(name: string): string {
@@ -559,8 +614,8 @@ async function copyOutput(text?: string) {
 .topo-diagram-card {
     background: #191922;
     border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 9px;
-    padding: 8px;
+    border-radius: 7px;
+    padding: 5px 6px;
     display: flex;
     flex-direction: column;
     align-items: stretch;
@@ -569,11 +624,11 @@ async function copyOutput(text?: string) {
 .topo-master-node {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 7px;
     background: #20202c;
     border: 1px solid rgba(255, 255, 255, 0.09);
-    border-radius: 8px;
-    padding: 6px 8px;
+    border-radius: 6px;
+    padding: 4px 6px;
     transition: all 0.15s ease;
 }
 
@@ -583,13 +638,13 @@ async function copyOutput(text?: string) {
 }
 
 .master-avatar {
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
     background: linear-gradient(135deg, #1e293b, #0f172a);
     display: grid;
     place-items: center;
-    font-size: 13px;
+    font-size: 11px;
     flex-shrink: 0;
 }
 
@@ -601,12 +656,12 @@ async function copyOutput(text?: string) {
 }
 
 .master-name {
-    font-size: 11px;
+    font-size: 10.5px;
     color: #f4f4f5;
 }
 
 .master-status-desc {
-    font-size: 9px;
+    font-size: 8.5px;
     color: #a1a1aa;
     white-space: nowrap;
     overflow: hidden;
@@ -614,9 +669,9 @@ async function copyOutput(text?: string) {
 }
 
 .master-status-badge {
-    font-size: 8.5px;
-    padding: 1px 5px;
-    border-radius: 4px;
+    font-size: 8px;
+    padding: 1px 4px;
+    border-radius: 3px;
     background: rgba(255, 255, 255, 0.06);
     color: #a1a1aa;
     display: inline-flex;
@@ -634,13 +689,13 @@ async function copyOutput(text?: string) {
     color: #34d399;
 }
 
-/* 竖向分支列表 (自上而下延伸) */
+/* 竖向分支列表 (自上而下延伸，收紧高度) */
 .topo-vertical-branches {
     display: flex;
     flex-direction: column;
-    margin-top: 4px;
-    padding-left: 6px;
-    max-height: 180px;
+    margin-top: 3px;
+    padding-left: 4px;
+    max-height: 120px;
     overflow-y: auto;
 }
 
@@ -652,7 +707,7 @@ async function copyOutput(text?: string) {
 }
 
 .tree-spine-col {
-    width: 18px;
+    width: 14px;
     position: relative;
     flex-shrink: 0;
 }
@@ -660,7 +715,7 @@ async function copyOutput(text?: string) {
 .spine-line.top-line {
     position: absolute;
     top: 0;
-    left: 4px;
+    left: 3px;
     height: 50%;
     width: 1.5px;
     background: rgba(255, 255, 255, 0.15);
@@ -669,8 +724,8 @@ async function copyOutput(text?: string) {
 .spine-curve {
     position: absolute;
     top: 50%;
-    left: 4px;
-    width: 10px;
+    left: 3px;
+    width: 8px;
     height: 1.5px;
     background: rgba(255, 255, 255, 0.15);
 }
@@ -678,7 +733,7 @@ async function copyOutput(text?: string) {
 .spine-line.bottom-line {
     position: absolute;
     top: 50%;
-    left: 4px;
+    left: 3px;
     bottom: 0;
     width: 1.5px;
     background: rgba(255, 255, 255, 0.15);
@@ -700,12 +755,12 @@ async function copyOutput(text?: string) {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 6px;
-    padding: 5px 8px;
-    margin: 2px 0 2px 2px;
+    gap: 5px;
+    padding: 3px 6px;
+    margin: 1px 0;
     background: #20202a;
     border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 6px;
+    border-radius: 5px;
     transition: all 0.15s ease;
 }
 
@@ -1100,135 +1155,188 @@ async function copyOutput(text?: string) {
     word-break: break-word;
 }
 
-/* 子 Agent 动态步骤链 (时间轴层次设计，大字标题，小巧序号) */
-.worker-steps-chain {
+/* 顶部操作条：显示步数与折叠切换 */
+.steps-deck-bar {
     display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding-left: 2px;
-}
-
-.worker-step-node {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 8px 10px;
-    background: #191924;
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 8px;
-    transition: all 0.2s ease;
-}
-
-.worker-step-node.is-active {
-    border-color: rgba(56, 189, 248, 0.5);
-    background: linear-gradient(90deg, rgba(56, 189, 248, 0.1), #191924 70%);
-    box-shadow: 0 0 12px rgba(56, 189, 248, 0.12);
-}
-
-.worker-step-node.status-succeeded {
-    border-color: rgba(52, 211, 153, 0.18);
-}
-
-.worker-step-node.status-failed {
-    border-color: rgba(248, 113, 113, 0.35);
-    background: rgba(248, 113, 113, 0.06);
-}
-
-.step-rail-col {
-    display: flex;
-    flex-direction: column;
     align-items: center;
-    flex-shrink: 0;
-    margin-top: 2px;
+    justify-content: space-between;
+    padding: 3px 2px 5px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    margin-bottom: 4px;
 }
 
-.step-dot-badge {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    display: grid;
-    place-items: center;
-    font-size: 9px;
-    font-weight: 700;
-    background: rgba(255, 255, 255, 0.08);
-    color: #a1a1aa;
+.steps-deck-title {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10.5px;
+    font-weight: 650;
+    color: #e4e4e7;
+}
+
+.steps-deck-icon {
+    font-size: 12px;
+    color: #38bdf8;
+}
+
+.btn-toggle-steps-fold {
+    background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #a1a1aa;
+    font-size: 8.5px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
 }
 
-.worker-step-node.status-succeeded .step-dot-badge {
-    background: #10b981;
+.btn-toggle-steps-fold:hover {
     color: #ffffff;
-    border-color: #34d399;
+    background: rgba(56, 189, 248, 0.15);
+    border-color: rgba(56, 189, 248, 0.3);
 }
 
-.worker-step-node.is-active .step-dot-badge {
-    background: #0284c7;
-    color: #ffffff;
-    border-color: #38bdf8;
-    box-shadow: 0 0 8px rgba(56, 189, 248, 0.6);
-}
-
-.worker-step-node.status-failed .step-dot-badge {
-    background: #ef4444;
-    color: #ffffff;
-    border-color: #f87171;
-}
-
-.step-content-body {
-    flex: 1;
-    min-width: 0;
+/* 紧凑版时间轴步骤链 (压缩行距，单行主旨，31步也不臃肿) */
+.worker-steps-chain.compact {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 3px;
+    padding-left: 0;
 }
 
-.step-meta-row {
+.compact-node {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 3.5px 7px;
+    background: #171720;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 5px;
+    transition: all 0.15s ease;
+}
+
+.compact-node:hover {
+    background: #1b1b26;
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+.compact-node.is-active {
+    border-color: rgba(56, 189, 248, 0.45);
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.08), #171720);
+}
+
+.step-compact-line {
     display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+    line-height: 1.3;
 }
 
-.step-seq-pill {
-    font-size: 8.5px;
+.step-seq-tag {
+    font-size: 8px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
     font-weight: 700;
     color: #71717a;
-    text-transform: uppercase;
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 4px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+.compact-node.status-succeeded .step-seq-tag {
+    color: #34d399;
+    background: rgba(52, 211, 153, 0.12);
+}
+
+.compact-node.is-active .step-seq-tag {
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.18);
 }
 
 .step-tool-badge {
-    font-size: 8.5px;
+    font-size: 8px;
     font-family: ui-monospace, SFMono-Regular, monospace;
     padding: 1px 5px;
-    border-radius: 4px;
-    background: rgba(56, 189, 248, 0.15);
+    border-radius: 3px;
+    background: rgba(56, 189, 248, 0.12);
     color: #38bdf8;
-    border: 1px solid rgba(56, 189, 248, 0.25);
+    border: 1px solid rgba(56, 189, 248, 0.2);
+    flex-shrink: 0;
 }
 
-.step-status-tag {
-    font-size: 8.5px;
-    color: #71717a;
-    margin-left: auto;
+.step-desc-inline {
+    font-size: 9.5px;
+    color: #d4d4d8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
 }
 
-.step-status-tag.status-running {
-    color: #38bdf8;
-    font-weight: 600;
-}
-
-.step-status-tag.status-succeeded {
+.compact-node.status-succeeded .step-status-tag {
     color: #34d399;
+    font-size: 9px;
+    font-weight: 700;
+    flex-shrink: 0;
 }
 
-/* 主标题：大字号主导 */
-.step-main-title {
-    margin: 0;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: #f4f4f5;
-    line-height: 1.4;
-    word-break: break-word;
+.compact-node.is-active .step-status-tag {
+    color: #38bdf8;
+    font-weight: 700;
+    flex-shrink: 0;
 }
+
+.step-summary-box-compact {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+    font-size: 9px;
+    color: #fef08a;
+    background: rgba(234, 179, 8, 0.08);
+    border: 1px solid rgba(234, 179, 8, 0.2);
+    padding: 3px 6px;
+    border-radius: 4px;
+    line-height: 1.35;
+    margin-top: 1px;
+}
+
+/* 折叠提示条 */
+.folded-steps-indicator-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    margin: 2px 0;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    width: 100%;
+    color: #71717a;
+    transition: all 0.15s ease;
+}
+
+.folded-steps-indicator-bar:hover .fold-badge {
+    color: #38bdf8;
+    border-color: rgba(56, 189, 248, 0.3);
+    background: rgba(56, 189, 248, 0.1);
+}
+
+.fold-line {
+    flex: 1;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.fold-badge {
+    font-size: 8.5px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #181822;
+    border: 1px dashed rgba(255, 255, 255, 0.15);
+    white-space: nowrap;
+}
+
 
 /* 描述层级：具体执行内容 */
 .step-desc-box {
