@@ -62,62 +62,115 @@
                     </div>
                 </div>
 
-                <!-- 展开的 TodoList 纯一级大任务清单 (高信噪比、极简阶段列表) -->
+                <!-- 展开的任务阶段与上下级子步骤树形清单 -->
                 <transition name="deck-expand">
                     <div v-if="isExpanded && level1Todos.length > 0" class="deck-body">
                         <div class="todolist-container">
                             <div
                                 v-for="(todo, pIdx) in level1Todos"
                                 :key="todo.id || pIdx"
-                                class="todolist-row level-1-row"
-                                :class="[todo.status, { 'is-current': todo.isCurrent }]"
-                                @click="handleTodoClick(todo)"
+                                class="stage-group-wrap"
+                                :class="[todo.status, { 'is-current': todo.isCurrent, 'is-open': isTodoExpanded(todo.id) }]"
                             >
-                                <!-- 状态指示器：进行中转圈、完成打勾、等待圆圈 -->
-                                <div class="step-icon-col">
-                                    <span v-if="todo.status === 'succeeded'" class="step-icon check">✓</span>
-                                    <span v-else-if="todo.status === 'failed'" class="step-icon fail">✕</span>
-                                    <span v-else-if="todo.isCurrent && isRunning" class="step-icon spinner">
-                                        <span class="manus-spinner small"></span>
-                                    </span>
-                                    <span v-else class="step-icon circle">○</span>
-                                </div>
-
-                                <!-- 一级任务阶段标题 -->
-                                <div class="step-content-col">
-                                    <div class="step-name-row">
-                                        <span class="step-name level-1-name">{{ todo.title }}</span>
+                                <!-- 一级阶段卡片栏 (点击切换展开/折叠子步骤详情) -->
+                                <div class="todolist-row level-1-row" @click="toggleTodoExpand(todo.id)">
+                                    <!-- 状态指示器：进行中转圈、完成打勾、等待圆圈 -->
+                                    <div class="step-icon-col">
+                                        <span v-if="todo.status === 'succeeded'" class="step-icon check">✓</span>
+                                        <span v-else-if="todo.status === 'failed'" class="step-icon fail">✕</span>
+                                        <span v-else-if="todo.isCurrent && isRunning" class="step-icon spinner">
+                                            <span class="manus-spinner small"></span>
+                                        </span>
+                                        <span v-else class="step-icon circle">○</span>
                                     </div>
 
-                                    <!-- 进行中时的动态提示（思考文字或当前工具） -->
-                                    <div v-if="todo.isCurrent && isRunning" class="step-sub-action-preview">
-                                        <span v-if="isThinking && latestThoughtSnippet" class="thought-live">
-                                            🧠 {{ latestThoughtSnippet }}
-                                        </span>
-                                        <span v-else-if="todo.currentSubStepTitle" class="action-live">
-                                            ⚡ 正在执行: {{ todo.currentSubStepTitle }}
-                                        </span>
-                                    </div>
-                                </div>
+                                    <!-- 一级任务阶段标题与子步骤数量徽标 -->
+                                    <div class="step-content-col">
+                                        <div class="step-name-row">
+                                            <span class="step-name level-1-name">{{ todo.title }}</span>
+                                            <span v-if="todo.steps.length > 0" class="sub-step-count-badge">
+                                                {{ todo.steps.length }} 步
+                                            </span>
+                                        </div>
 
-                                <!-- 一级任务右侧汇总数据 (该阶段合并 Token 与耗时) -->
-                                <div class="step-meta-col">
-                                    <span v-if="todo.isCurrent && isRunning" class="meta-live-timer">
-                                        {{ currentStepDurationText }}
-                                    </span>
-                                    <template v-else>
-                                        <span
-                                            v-if="todo.completionTokens > 0"
-                                            class="meta-tokens"
-                                            :title="`该阶段生成: ${todo.completionTokens.toLocaleString()} tok · 上下文: ${todo.allTokens.toLocaleString()} tok`"
+                                        <!-- 进行中时的动态提示（思考文字或当前工具） -->
+                                        <div v-if="todo.isCurrent && isRunning" class="step-sub-action-preview">
+                                            <span v-if="isThinking && latestThoughtSnippet" class="thought-live">
+                                                🧠 {{ latestThoughtSnippet }}
+                                            </span>
+                                            <span v-else-if="todo.currentSubStepTitle" class="action-live">
+                                                ⚡ 正在执行: {{ todo.currentSubStepTitle }}
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    <!-- 一级任务右侧汇总数据与展开箭头 -->
+                                    <div class="step-meta-col">
+                                        <span v-if="todo.isCurrent && isRunning" class="meta-live-timer">
+                                            {{ currentStepDurationText }}
+                                        </span>
+                                        <template v-else>
+                                            <span
+                                                v-if="todo.completionTokens > 0"
+                                                class="meta-tokens"
+                                                :title="`该阶段生成: ${todo.completionTokens.toLocaleString()} tok · 上下文: ${todo.allTokens.toLocaleString()} tok`"
+                                            >
+                                                {{ formatTokenCount(todo.completionTokens) }} tok
+                                            </span>
+                                            <span v-if="todo.durationMs > 0" class="meta-duration">
+                                                {{ formatDurationMs(todo.durationMs) }}
+                                            </span>
+                                        </template>
+                                        <!-- 子步骤展开/折叠微指示箭头 -->
+                                        <button
+                                            v-if="todo.steps.length > 0"
+                                            type="button"
+                                            class="sub-accordion-trigger"
+                                            :title="isTodoExpanded(todo.id) ? '收起详情' : '展开详情'"
+                                            @click.stop="toggleTodoExpand(todo.id)"
                                         >
-                                            {{ formatTokenCount(todo.completionTokens) }} tok
-                                        </span>
-                                        <span v-if="todo.durationMs > 0" class="meta-duration">
-                                            {{ formatDurationMs(todo.durationMs) }}
-                                        </span>
-                                    </template>
+                                            <svg viewBox="0 0 24 24" class="sub-chevron-icon" :class="{ 'is-flipped': isTodoExpanded(todo.id) }">
+                                                <path d="m6 9 6 6 6-6" />
+                                            </svg>
+                                        </button>
+                                    </div>
                                 </div>
+
+                                <!-- 二级子步骤树形详情 (Nested Sub-steps Detail) -->
+                                <transition name="sub-expand">
+                                    <div
+                                        v-if="isTodoExpanded(todo.id) && todo.steps.length > 0"
+                                        class="stage-sub-steps-tree"
+                                    >
+                                        <!-- 局部子步骤垂直主干虚线 -->
+                                        <div class="sub-tree-spine"></div>
+                                        <div
+                                            v-for="(step, sIdx) in todo.steps"
+                                            :key="step.id || sIdx"
+                                            class="sub-step-row"
+                                            :class="[step.status, { 'is-active-step': step.stepId === activeStepNumber }]"
+                                            @click.stop="handleSubStepClick(step)"
+                                        >
+                                            <!-- 树枝导引线与节点圆点 -->
+                                            <div class="sub-step-dot-col">
+                                                <span class="branch-curve-line"></span>
+                                                <span class="sub-status-dot" :class="step.status"></span>
+                                            </div>
+                                            <div class="sub-step-info-col">
+                                                <span class="sub-tool-badge">{{ getStepToolLabel(step) }}</span>
+                                                <span class="sub-step-desc" :title="step.description || step.tool || ''">
+                                                    {{ step.description || step.tool || `子步骤 #${sIdx + 1}` }}
+                                                </span>
+                                            </div>
+                                            <div class="sub-step-meta-col">
+                                                <span v-if="step.durationMs" class="sub-step-duration">
+                                                    {{ formatDurationMs(step.durationMs) }}
+                                                </span>
+                                                <span v-else-if="step.status === 'running'" class="sub-step-live-dot"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </transition>
                             </div>
                         </div>
                     </div>
@@ -217,11 +270,45 @@ function dismiss() {
     isDismissed.value = true;
 }
 
-function handleTodoClick(todo: Level1TodoItem) {
-    const lastStep = todo.steps[todo.steps.length - 1];
-    if (lastStep) {
-        emit('select-step', lastStep);
+// 上下级二级详情展开状态集合
+const expandedTodoIds = ref<Set<string>>(new Set());
+
+function isTodoExpanded(id: string): boolean {
+    // 当前正在运行的阶段默认展开，或者被用户显式展开
+    if (expandedTodoIds.value.has(id)) return true;
+    const current = level1Todos.value.find(t => t.id === id);
+    return !!(current?.isCurrent && props.isRunning);
+}
+
+function toggleTodoExpand(id: string) {
+    if (expandedTodoIds.value.has(id)) {
+        expandedTodoIds.value.delete(id);
+    } else {
+        expandedTodoIds.value.add(id);
     }
+}
+
+function handleSubStepClick(step: AgentStepItem) {
+    emit('select-step', step);
+}
+
+function getStepToolLabel(step: AgentStepItem): string {
+    if (!step.tool) return '思考分析';
+    const name = step.tool.includes('/') ? step.tool.split('/').pop()! : step.tool;
+    const map: Record<string, string> = {
+        'search': '搜索检索',
+        'ripgrep_search': '代码检索',
+        'read_text_file': '读取代码',
+        'edit_file': '精确修改',
+        'write_file': '写入文件',
+        'shell_exec': '执行终端',
+        'task_store': '归档状态',
+        'finish': '成果交付',
+        'ask_human': '用户协同',
+        'web_search': '全网调研',
+        'web_fetch': '抓取网页'
+    };
+    return map[name] || name;
 }
 
 // 🌟 将物理步骤按一级阶段/计划（Plan / Milestone）聚合成纯一级 TodoList
@@ -744,5 +831,272 @@ function formatDurationMs(ms?: number): string | null {
 .deck-expand-leave-to {
     opacity: 0;
     max-height: 0;
+}
+
+/* ==========================================================================
+   🌳 上下级树形子步骤折叠详情 (Hierarchical Nested Tree Styles)
+   ========================================================================== */
+.todolist-container {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 6px 8px;
+    position: relative;
+}
+
+.stage-group-wrap {
+    display: flex;
+    flex-direction: column;
+    border-radius: 8px;
+    transition: background 0.15s ease;
+    position: relative;
+}
+
+.stage-group-wrap.is-open {
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.sub-step-count-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 99px;
+    font-size: 10px;
+    font-weight: 550;
+    background: rgba(255, 255, 255, 0.06);
+    color: #a1a1aa !important;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    margin-left: 4px;
+}
+
+.sub-accordion-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: #71717a;
+    cursor: pointer;
+    margin-left: 2px;
+    transition: color 0.15s ease, background 0.15s ease;
+}
+
+.sub-accordion-trigger:hover {
+    color: #e4e4e7;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.sub-chevron-icon {
+    width: 12px;
+    height: 12px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.2;
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sub-chevron-icon.is-flipped {
+    transform: rotate(180deg);
+}
+
+/* 二级子步骤树形容器：形成清晰的缩进与贯穿垂直主干线 */
+.stage-sub-steps-tree {
+    display: flex;
+    flex-direction: column;
+    padding: 2px 8px 8px 34px;
+    position: relative;
+}
+
+/* 贯穿子树的垂直主干引导线 (Sub-tree Spine) */
+.sub-tree-spine {
+    position: absolute;
+    top: 0;
+    bottom: 14px;
+    left: 17px;
+    width: 1px;
+    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.05));
+    pointer-events: none;
+}
+
+.sub-step-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-size: 11.5px;
+    color: #d4d4d8 !important;
+    position: relative;
+}
+
+.sub-step-row:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.sub-step-row.is-active-step {
+    background: rgba(99, 102, 241, 0.14);
+    box-shadow: inset 2px 0 0 #6366f1;
+}
+
+/* 树形引导线与节点圆点 */
+.sub-step-dot-col {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    position: relative;
+    flex-shrink: 0;
+}
+
+/* 从中轴线弯折伸向子节点的水平导引虚线 */
+.branch-curve-line {
+    position: absolute;
+    top: 50%;
+    left: -17px;
+    width: 14px;
+    height: 1px;
+    border-top: 1px dashed rgba(255, 255, 255, 0.22);
+    pointer-events: none;
+}
+
+.sub-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #52525b;
+    position: relative;
+    z-index: 2;
+}
+
+.sub-status-dot.succeeded {
+    background: #4ade80;
+    box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
+}
+
+.sub-status-dot.running {
+    background: #6366f1;
+    box-shadow: 0 0 8px #6366f1;
+    animation: sub-dot-pulse 1s infinite alternate;
+}
+
+.sub-status-dot.failed {
+    background: #f87171;
+}
+
+@keyframes sub-dot-pulse {
+    from { transform: scale(0.85); opacity: 0.6; }
+    to { transform: scale(1.25); opacity: 1; }
+}
+
+.sub-step-info-col {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+}
+
+.sub-tool-badge {
+    font-size: 9.5px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(99, 102, 241, 0.16);
+    color: #a5b4fc !important;
+    font-weight: 550;
+    white-space: nowrap;
+    flex-shrink: 0;
+    border: 1px solid rgba(99, 102, 241, 0.25);
+}
+
+.sub-step-desc {
+    color: #e4e4e7 !important;
+    font-size: 11.5px !important;
+    line-height: 1.4 !important;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+.sub-step-meta-col {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: #a1a1aa !important;
+}
+
+.sub-step-duration {
+    color: #71717a !important;
+    font-variant-numeric: tabular-nums;
+}
+
+.sub-step-live-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #6366f1;
+    animation: sub-dot-pulse 1s infinite alternate;
+}
+
+/* 子步骤展开平滑动画 */
+.sub-expand-enter-active,
+.sub-expand-leave-active {
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    overflow: hidden;
+}
+
+.sub-expand-enter-from,
+.sub-expand-leave-to {
+    opacity: 0;
+    transform: translateY(-4px);
+    max-height: 0;
+}
+
+/* ==========================================================================
+   📱 移动端进度条专属极致紧凑优化 (AgentProgressDeck <= 768px)
+   ========================================================================== */
+@media (max-width: 768px) {
+    .agent-progress-deck-wrap {
+        padding: 0 8px 6px !important;
+    }
+    .agent-progress-deck {
+        border-radius: 10px !important;
+    }
+    .deck-header {
+        padding: 6px 10px !important;
+    }
+    .header-metrics {
+        display: none !important;
+    }
+    .status-title {
+        font-size: 12px !important;
+    }
+    .status-sub {
+        font-size: 11px !important;
+        max-width: 140px !important;
+    }
+    .todolist-row {
+        padding: 6px 8px !important;
+    }
+    .level-1-name {
+        font-size: 12px !important;
+    }
+    .stage-sub-steps-tree {
+        padding-left: 20px !important;
+    }
+    .sub-step-row {
+        padding: 4px 6px !important;
+        font-size: 11px !important;
+    }
+    .meta-tokens {
+        display: none !important;
+    }
 }
 </style>

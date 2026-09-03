@@ -249,8 +249,7 @@ onMounted(load);
   font-size: 12px;
 }
 
-<style scoped>
-.scheduled-view {
+.scheduled-view-inner {
   display: flex;
   flex-direction: column;
   gap: 16px;
