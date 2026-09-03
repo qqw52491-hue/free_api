@@ -429,9 +429,9 @@
                 </div>
             </section>
 
-            <!-- 3. 团队协作 Tab -->
+            <!-- 3. 团队协作 Tab (右侧实时监控区：仅展示活跃运行中的子 Agent) -->
             <section v-else-if="activeTab === 'team'" class="inspector-scroll team-pane">
-                <AgentTeamDeck :team-state="teamState" />
+                <AgentTeamDeck :team-state="teamState" :only-active="true" />
             </section>
 
             <!-- 4. 资源 Tab -->

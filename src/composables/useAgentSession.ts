@@ -255,68 +255,53 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             return [];
         }
 
-        const list: AgentWorkerItem[] = [...teamWorkers.value];
+        const map = new Map<string, AgentWorkerItem>();
 
-        // 仅定位当前正在运行或最新的步骤中的真实子 Agent，排除普通并发工具调用
+        // 1. 先放入显式注册的 teamWorkers
+        for (const w of teamWorkers.value) {
+            map.set(w.id, { ...w });
+        }
+
+        // 2. 从当前运行的 steps 中同步，严格按 role 或 stepId 进行合并去重，绝不重复生成双重 worker
         const runningSteps = steps.value.filter((s) => s.status === "running" || s.status === "pending");
         const targetSteps = runningSteps.length > 0 ? runningSteps : (isRunning.value ? steps.value.slice(-1) : []);
 
         for (const step of targetSteps) {
-            if (step.tool === "child_reviewer" || step.action === "child_reviewer") {
-                if (!list.some((w) => w.role === "reviewer" || w.id.includes("reviewer"))) {
-                    list.push({
-                        id: `reviewer-${step.id || step.stepId}`,
-                        name: "代码质量审查员",
-                        role: "reviewer",
-                        roleLabel: "审查员",
-                        status: step.status,
-                        currentStep: step.description || "代码质量与安全性深度审查",
-                        currentTool: "child_reviewer",
-                        progress: step.status === "succeeded" ? 100 : 65,
-                        startedAt: step.timestamp,
-                        durationMs: step.metrics?.toolDurationMs,
-                        thought: step.thought,
-                        output: typeof step.result === "string" ? step.result : undefined,
-                    });
-                }
-            } else if (step.tool === "child_writer" || step.action === "child_writer") {
-                if (!list.some((w) => w.id.includes("writer"))) {
-                    list.push({
-                        id: `writer-${step.id || step.stepId}`,
-                        name: "沙箱代码写入员",
-                        role: "coder",
-                        roleLabel: "写入员",
-                        status: step.status,
-                        currentStep: step.description || "在隔离沙箱中编写代码与测试",
-                        currentTool: "child_writer",
-                        progress: step.status === "succeeded" ? 100 : 65,
-                        startedAt: step.timestamp,
-                        durationMs: step.metrics?.toolDurationMs,
-                        thought: step.thought,
-                        output: typeof step.result === "string" ? step.result : undefined,
-                    });
-                }
-            } else if (step.tool === "child_worker" || step.action === "child_worker") {
-                if (!list.some((w) => w.id.includes("child_worker"))) {
-                    list.push({
-                        id: `worker-${step.id || step.stepId}`,
-                        name: "自治子工作者",
-                        role: "worker",
-                        roleLabel: "Worker",
-                        status: step.status,
-                        currentStep: step.description || "执行独立子任务目标",
-                        currentTool: "child_worker",
-                        progress: step.status === "succeeded" ? 100 : 65,
-                        startedAt: step.timestamp,
-                        durationMs: step.metrics?.toolDurationMs,
-                        thought: step.thought,
-                        output: typeof step.result === "string" ? step.result : undefined,
-                    });
-                }
+            const isReviewer = step.tool === "child_reviewer" || step.action === "child_reviewer";
+            const isWriter = step.tool === "child_writer" || step.action === "child_writer";
+            const isWorker = step.tool === "child_worker" || step.action === "child_worker";
+            if (!isReviewer && !isWriter && !isWorker) continue;
+
+            const role = isReviewer ? "reviewer" : isWriter ? "coder" : "worker";
+            // 查找是否已存在同角色或相同 stepId 的 Worker
+            const existing = Array.from(map.values()).find((w) => w.role === role || (step.id && w.id.includes(step.id)));
+            if (existing) {
+                // 原地合并，绝不创建新条目导致出现两个一模一样的 Worker
+                existing.status = step.status;
+                if (step.description) existing.currentStep = step.description;
+                if (step.thought) existing.thought = step.thought;
+                if (typeof step.result === "string") existing.output = step.result;
+                if (step.status === "succeeded") existing.progress = 100;
+            } else {
+                const id = `${role}-${step.id || step.stepId}`;
+                map.set(id, {
+                    id,
+                    name: isReviewer ? "代码质量审查员" : isWriter ? "沙箱代码写入员" : "自治子工作者",
+                    role,
+                    roleLabel: isReviewer ? "审查员" : isWriter ? "写入员" : "Worker",
+                    status: step.status,
+                    currentStep: step.description || "正在后台独立处理任务...",
+                    currentTool: step.tool || role,
+                    progress: step.status === "succeeded" ? 100 : 65,
+                    startedAt: step.timestamp,
+                    durationMs: step.metrics?.toolDurationMs,
+                    thought: step.thought,
+                    output: typeof step.result === "string" ? step.result : undefined,
+                });
             }
         }
 
-        return list;
+        return Array.from(map.values());
     });
 
     const teamState = computed<AgentTeamState>(() => {
@@ -1208,60 +1193,40 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         }
 
         function syncWorkersFromStep(stepItem: AgentStepItem) {
-            if (stepItem.tool === "child_reviewer" || stepItem.action === "child_reviewer") {
-                let worker = teamWorkers.value.find((w) => w.role === "reviewer" || w.id.includes("reviewer"));
-                if (!worker) {
-                    teamWorkers.value.push({
-                        id: `reviewer-${stepItem.id || stepItem.stepId}`,
-                        name: "代码质量审查员",
-                        role: "reviewer",
-                        roleLabel: "审查员",
-                        status: stepItem.status === "succeeded" ? "succeeded" : "running",
-                        currentStep: stepItem.description || "正在后台分析审查代码…",
-                        currentTool: "child_reviewer",
-                        progress: stepItem.status === "succeeded" ? 100 : 60,
-                        startedAt: Date.now(),
-                    });
-                } else if (stepItem.status === "succeeded") {
-                    worker.status = "succeeded";
-                    worker.progress = 100;
-                }
-            } else if (stepItem.tool === "child_writer" || stepItem.action === "child_writer") {
-                let worker = teamWorkers.value.find((w) => w.id.includes("writer"));
-                if (!worker) {
-                    teamWorkers.value.push({
-                        id: `writer-${stepItem.id || stepItem.stepId}`,
-                        name: "沙箱代码写入员",
-                        role: "coder",
-                        roleLabel: "写入员",
-                        status: stepItem.status === "succeeded" ? "succeeded" : "running",
-                        currentStep: stepItem.description || "在隔离沙箱中编写代码与测试",
-                        currentTool: "child_writer",
-                        progress: stepItem.status === "succeeded" ? 100 : 60,
-                        startedAt: Date.now(),
-                    });
-                } else if (stepItem.status === "succeeded") {
-                    worker.status = "succeeded";
-                    worker.progress = 100;
-                }
-            } else if (stepItem.tool === "child_worker" || stepItem.action === "child_worker") {
-                let worker = teamWorkers.value.find((w) => w.id.includes("child_worker"));
-                if (!worker) {
-                    teamWorkers.value.push({
-                        id: `worker-${stepItem.id || stepItem.stepId}`,
-                        name: "自治子工作者",
-                        role: "worker",
-                        roleLabel: "Worker",
-                        status: stepItem.status === "succeeded" ? "succeeded" : "running",
-                        currentStep: stepItem.description || "执行独立子任务目标",
-                        currentTool: "child_worker",
-                        progress: stepItem.status === "succeeded" ? 100 : 60,
-                        startedAt: Date.now(),
-                    });
-                } else if (stepItem.status === "succeeded") {
-                    worker.status = "succeeded";
-                    worker.progress = 100;
-                }
+            // 当 wait_for_jobs 完成时，将之前所有 running 的后台 worker 标记为完成
+            const tool = (stepItem.tool || stepItem.action || "").toLowerCase();
+            if (tool.includes("wait_job") && stepItem.status === "succeeded") {
+                teamWorkers.value.forEach((w) => {
+                    w.status = "succeeded";
+                    w.progress = 100;
+                    w.currentStep = "任务已完成并成功回收结论";
+                });
+                return;
+            }
+
+            const isReviewer = tool === "child_reviewer";
+            const isWriter = tool === "child_writer";
+            const isWorker = tool === "child_worker";
+            if (!isReviewer && !isWriter && !isWorker) return;
+
+            const role = isReviewer ? "reviewer" : isWriter ? "coder" : "worker";
+            let worker = teamWorkers.value.find((w) => w.role === role || (stepItem.id && w.id.includes(stepItem.id)));
+            if (!worker) {
+                teamWorkers.value.push({
+                    id: `${role}-${stepItem.id || stepItem.stepId}`,
+                    name: isReviewer ? "代码质量审查员" : isWriter ? "沙箱代码写入员" : "自治子工作者",
+                    role,
+                    roleLabel: isReviewer ? "审查员" : isWriter ? "写入员" : "Worker",
+                    status: stepItem.status === "succeeded" ? "succeeded" : "running",
+                    currentStep: stepItem.description || "正在后台独立处理任务…",
+                    currentTool: stepItem.tool || role,
+                    progress: stepItem.status === "succeeded" ? 100 : 60,
+                    startedAt: Date.now(),
+                });
+            } else {
+                worker.status = stepItem.status === "succeeded" ? "succeeded" : "running";
+                if (stepItem.description) worker.currentStep = stepItem.description;
+                if (stepItem.status === "succeeded") worker.progress = 100;
             }
         }
 

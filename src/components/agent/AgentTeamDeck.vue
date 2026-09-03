@@ -20,7 +20,7 @@
                     <div class="master-info-box">
                         <strong class="master-name">主调度 Master</strong>
                         <span class="master-status-desc" :title="currentGoal || '自主执行全流程'">
-                            {{ isMultiAgent ? `派发 ${workersList.length} 个子任务` : (currentGoal ? currentGoal.slice(0, 18) + '...' : '自主执行全流程') }}
+                            {{ isMultiAgent ? `正在调度 ${displayedWorkers.length} 个活跃子任务` : (currentGoal ? currentGoal.slice(0, 18) + '...' : '自主执行全流程') }}
                         </span>
                     </div>
                     <span class="master-status-badge" :class="`status-${teamState.masterStatus}`">
@@ -32,17 +32,17 @@
                 <!-- 竖向分支列表 (自上而下垂直展开，舒适间距，点击联动下方 Tab) -->
                 <div v-if="isMultiAgent" class="topo-vertical-branches">
                     <div
-                        v-for="(worker, wIdx) in workersList"
+                        v-for="(worker, wIdx) in displayedWorkers"
                         :key="worker.id"
                         class="topo-vertical-node"
-                        :class="[`status-${worker.status}`, { active: activeTab === worker.id, 'is-last': wIdx === workersList.length - 1 }]"
+                        :class="[`status-${worker.status}`, { active: activeTab === worker.id, 'is-last': wIdx === displayedWorkers.length - 1 }]"
                         @click="activeTab = worker.id"
                     >
                         <!-- 树干分支连线 -->
                         <div class="tree-spine-col">
                             <div class="spine-line top-line"></div>
                             <div class="spine-curve"></div>
-                            <div v-if="wIdx < workersList.length - 1" class="spine-line bottom-line"></div>
+                            <div v-if="wIdx < displayedWorkers.length - 1" class="spine-line bottom-line"></div>
                         </div>
 
                         <!-- 子 Agent 竖向卡片 -->
@@ -64,6 +64,16 @@
                     </div>
                 </div>
 
+                <!-- 实时模式：所有子任务均已完成时的轻量提示 -->
+                <div v-else-if="props.onlyActive && workersList.length > 0" class="topo-all-done-hint">
+                    <span class="done-icon">🎉</span>
+                    <span class="done-title">所有子任务已完成</span>
+                    <span class="done-desc">已成功回传主调度并退出实时队列</span>
+                    <button type="button" class="btn-toggle-done" @click="showAllCompleted = !showAllCompleted">
+                        {{ showAllCompleted ? '仅看活跃' : `查看全部已完成 (${workersList.length})` }}
+                    </button>
+                </div>
+
                 <!-- 单 Agent 待命或独立运行状态提示 -->
                 <div v-else class="topo-single-hint">
                     <span class="hint-dot">●</span>
@@ -77,7 +87,7 @@
             <!-- 横向排列短标题 Tab 栏 -->
             <div v-if="isMultiAgent" class="chains-tab-nav">
                 <button
-                    v-for="worker in workersList"
+                    v-for="worker in displayedWorkers"
                     :key="worker.id"
                     type="button"
                     class="chain-tab-btn"
@@ -173,6 +183,13 @@
                     </div>
                 </div>
 
+                <!-- 实时模式全部完成时的占位 -->
+                <div v-else-if="props.onlyActive && workersList.length > 0" class="no-workers-standby-box">
+                    <span class="standby-icon">🎉</span>
+                    <strong class="standby-title">子 Agent 均已完成</strong>
+                    <p class="standby-desc">当前阶段所有子任务已执行完毕。完整产物与执行过程已汇聚，可在左侧栏查看。</p>
+                </div>
+
                 <!-- 无子 Agent 时的极简占位 -->
                 <div v-else class="no-workers-standby-box">
                     <span class="standby-icon">🤖</span>
@@ -194,6 +211,7 @@ const props = withDefaults(
         steps?: AgentStepItem[];
         currentGoal?: string;
         masterStepDescription?: string;
+        onlyActive?: boolean;
     }>(),
     {
         teamState: () => ({
@@ -205,6 +223,7 @@ const props = withDefaults(
         steps: () => [],
         currentGoal: "",
         masterStepDescription: "",
+        onlyActive: false,
     }
 );
 
@@ -212,21 +231,34 @@ const workersList = computed(() => {
     return props.teamState?.workers || [];
 });
 
+const showAllCompleted = ref(false);
+
+const displayedWorkers = computed(() => {
+    const all = workersList.value;
+    if (!props.onlyActive || showAllCompleted.value) {
+        return all;
+    }
+    // 实时模式：只展示正在运行或排队中的活跃子 Agent，跑完立即收起，不霸占实时界面
+    return all.filter((w) => w.status === "running" || w.status === "pending");
+});
+
 const isMultiAgent = computed(() => {
-    return workersList.value.length > 0;
+    return displayedWorkers.value.length > 0;
 });
 
 const activeTab = ref<string>("");
 
-// 当有新的子 Agent 派发出来时，自动聚焦到最新的子 Agent Tab
+// 当有新的子 Agent 派发出来时，优先聚焦到正在 running 的活跃子 Agent Tab
 watch(
-    () => workersList.value.map((w) => w.id).join(","),
+    () => displayedWorkers.value.map((w) => `${w.id}-${w.status}`).join(","),
     () => {
-        const workers = workersList.value;
+        const workers = displayedWorkers.value;
         if (workers.length > 0) {
-            if (!workers.some((w) => w.id === activeTab.value)) {
-                activeTab.value = workers[0].id;
+            if (workers.some((w) => w.id === activeTab.value)) {
+                return;
             }
+            const running = workers.find((w) => w.status === "running");
+            activeTab.value = running ? running.id : workers[0].id;
         } else {
             activeTab.value = "";
         }
@@ -235,7 +267,7 @@ watch(
 );
 
 const selectedWorker = computed(() => {
-    return workersList.value.find((w) => w.id === activeTab.value) || workersList.value[0];
+    return displayedWorkers.value.find((w) => w.id === activeTab.value) || displayedWorkers.value[0];
 });
 
 function formatWorkerName(name: string): string {
@@ -604,6 +636,51 @@ async function copyOutput(text?: string) {
 .hint-dot {
     font-size: 6px;
     color: #38bdf8;
+}
+
+.topo-all-done-hint {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 3px;
+    margin-top: 8px;
+    padding: 8px 6px;
+    background: rgba(52, 211, 153, 0.08);
+    border: 1px dashed rgba(52, 211, 153, 0.25);
+    border-radius: 6px;
+}
+
+.done-icon {
+    font-size: 14px;
+}
+
+.done-title {
+    font-size: 10px;
+    font-weight: 600;
+    color: #34d399;
+}
+
+.done-desc {
+    font-size: 8.5px;
+    color: #a1a1aa;
+}
+
+.btn-toggle-done {
+    margin-top: 4px;
+    padding: 2px 8px;
+    font-size: 8.5px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #38bdf8;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-toggle-done:hover {
+    background: rgba(56, 189, 248, 0.15);
+    border-color: #38bdf8;
 }
 
 /* ================= 2. 下半部分：横向短标题多 Tab 链路与独立进度 ================= */
