@@ -1064,6 +1064,51 @@ function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: st
             return;
         }
 
+        // 👣 异步子 Agent 单步动作通知 (动态步骤链)
+        if (eventType === "child_worker_action") {
+            const childRunId = toText(payload.child_run_id);
+            const stepNum = Number(payload.step) || 1;
+            const action = toText(payload.action);
+            const params = payload.params;
+
+            let worker = teamWorkers.value.find((w) => w.id === childRunId || w.role === "worker");
+            if (worker) {
+                if (!worker.steps) {
+                    worker.steps = [
+                        {
+                            stepNumber: 1,
+                            title: "解析任务目标与安全作用域隔离",
+                            tool: "task_init",
+                            status: "succeeded",
+                        },
+                    ];
+                }
+                // 把之前的步骤置为 succeeded
+                worker.steps.forEach((s) => {
+                    if (s.status === "running") s.status = "succeeded";
+                });
+
+                let title = `执行 ${action}`;
+                if (params && typeof params === "object") {
+                    const p = params as any;
+                    if (p.path) title = `${action}: ${p.path}`;
+                    else if (p.command) title = `运行命令: ${p.command}`;
+                    else if (p.query) title = `检索: ${p.query}`;
+                }
+
+                worker.steps.push({
+                    stepNumber: Math.max(stepNum + 1, worker.steps.length + 1),
+                    title,
+                    tool: action,
+                    status: "running",
+                });
+                worker.currentStep = title;
+                worker.currentTool = action;
+                worker.progress = Math.min(90, 20 + worker.steps.length * 15);
+            }
+            return;
+        }
+
         // ⏳ 挂起等待后台 Worker 任务
         if (eventType === "agent_waiting_jobs") {
             const jobIds = Array.isArray(payload.job_ids) ? payload.job_ids.map(toText).filter(Boolean) : [];
@@ -1245,6 +1290,9 @@ function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: st
                     w.status = "succeeded";
                     w.progress = 100;
                     w.currentStep = "任务已完成并成功回收结论";
+                    if (w.steps) {
+                        w.steps.forEach((s) => (s.status = "succeeded"));
+                    }
                 });
                 return;
             }
@@ -1272,7 +1320,12 @@ function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: st
                 worker.status = stepItem.status === "succeeded" ? "succeeded" : "running";
                 if (details.taskDesc) worker.currentStep = details.taskDesc;
                 if (details.name && worker.name.length <= 8) worker.name = details.name;
-                if (stepItem.status === "succeeded") worker.progress = 100;
+                if (stepItem.status === "succeeded") {
+                    worker.progress = 100;
+                    if (worker.steps) {
+                        worker.steps.forEach((s) => (s.status = "succeeded"));
+                    }
+                }
             }
         }
 

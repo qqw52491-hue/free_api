@@ -136,39 +136,29 @@
                         </div>
                     </div>
 
-                    <!-- 子 Agent 三阶段链路 (Pipeline) -->
-                    <div class="worker-pipeline-stages">
-                        <!-- 阶段 1: 任务拆解与派发 -->
-                        <div class="pipeline-stage-item is-done">
-                            <div class="stage-status-icon">✔</div>
-                            <div class="stage-info">
-                                <span class="stage-name">阶段 1: 队长派发与参数解析</span>
-                                <small class="stage-desc">主调度 Master 完成任务隔离与参数注入</small>
+                    <!-- 子 Agent 动态步骤链 (与主 Agent 步骤模型同构复用) -->
+                    <div class="worker-steps-chain">
+                        <div
+                            v-for="st in activeWorkerSteps"
+                            :key="st.stepNumber"
+                            class="worker-step-node"
+                            :class="[`status-${st.status}`, { 'is-active': st.status === 'running' }]"
+                        >
+                            <div class="step-badge">
+                                <i v-if="st.status === 'running'" class="spinner-dot"></i>
+                                <span v-else-if="st.status === 'succeeded'">✔</span>
+                                <span v-else-if="st.status === 'failed'">✕</span>
+                                <span v-else>{{ st.stepNumber }}</span>
                             </div>
-                        </div>
-
-                        <!-- 阶段 2: 独立工具执行 -->
-                        <div class="pipeline-stage-item" :class="selectedWorker.status === 'succeeded' ? 'is-done' : (selectedWorker.status === 'running' ? 'is-running' : 'is-pending')">
-                            <div class="stage-status-icon">
-                                <i v-if="selectedWorker.status === 'running'" class="spinner-dot"></i>
-                                <span v-else-if="selectedWorker.status === 'succeeded'">✔</span>
-                                <span v-else>2</span>
-                            </div>
-                            <div class="stage-info">
-                                <span class="stage-name">阶段 2: 工具调用 [{{ getShortToolName(selectedWorker.currentTool) }}]</span>
-                                <small class="stage-desc" :title="selectedWorker.currentStep">{{ selectedWorker.currentStep || '正在执行指定指令…' }}</small>
-                            </div>
-                        </div>
-
-                        <!-- 阶段 3: 输出收集与结果汇聚 -->
-                        <div class="pipeline-stage-item" :class="selectedWorker.status === 'succeeded' ? 'is-done' : 'is-pending'">
-                            <div class="stage-status-icon">
-                                <span v-if="selectedWorker.status === 'succeeded'">✔</span>
-                                <span v-else>3</span>
-                            </div>
-                            <div class="stage-info">
-                                <span class="stage-name">阶段 3: 结果交付与汇总</span>
-                                <small class="stage-desc">{{ selectedWorker.status === 'succeeded' ? '结论已成功回传主调度' : '等待子任务执行完毕并回传' }}</small>
+                            <div class="step-content">
+                                <div class="step-header">
+                                    <span class="step-seq">步骤 {{ st.stepNumber }}</span>
+                                    <span v-if="st.tool" class="step-tool-tag">{{ getShortToolName(st.tool) }}</span>
+                                    <span class="step-status-text">
+                                        {{ st.status === 'running' ? '执行中…' : (st.status === 'succeeded' ? '完成' : (st.status === 'failed' ? '异常' : '待命')) }}
+                                    </span>
+                                </div>
+                                <p class="step-title-text" :title="st.title">{{ st.title }}</p>
                             </div>
                         </div>
                     </div>
@@ -203,7 +193,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { AgentTeamState, AgentWorkerItem, AgentToolStatus, AgentStepItem } from "./types";
+import type { AgentTeamState, AgentWorkerItem, AgentToolStatus, AgentStepItem, AgentWorkerStep } from "./types";
 
 const props = withDefaults(
     defineProps<{
@@ -268,6 +258,37 @@ watch(
 
 const selectedWorker = computed(() => {
     return displayedWorkers.value.find((w) => w.id === activeTab.value) || displayedWorkers.value[0];
+});
+
+const activeWorkerSteps = computed<AgentWorkerStep[]>(() => {
+    if (!selectedWorker.value) return [];
+    if (selectedWorker.value.steps && selectedWorker.value.steps.length > 0) {
+        return selectedWorker.value.steps;
+    }
+    // 自适应生成动态微型步骤链，与主 Agent 链路同构复用
+    const w = selectedWorker.value;
+    const isDone = w.status === "succeeded";
+    const isFailed = w.status === "failed";
+    return [
+        {
+            stepNumber: 1,
+            title: "解析任务目标与安全隔离作用域",
+            tool: "task_init",
+            status: "succeeded",
+        },
+        {
+            stepNumber: 2,
+            title: w.currentStep || "执行核心操作与事实收集",
+            tool: w.currentTool || w.role,
+            status: isDone ? "succeeded" : isFailed ? "failed" : "running",
+        },
+        {
+            stepNumber: 3,
+            title: isDone ? "结论提炼完毕，已成功汇聚回主调度" : (isFailed ? "任务执行异常，已上报主调度处理" : "等待执行完毕并交付结论"),
+            tool: "finish",
+            status: isDone ? "succeeded" : isFailed ? "failed" : "pending",
+        },
+    ];
 });
 
 function formatWorkerName(name: string): string {
@@ -865,74 +886,110 @@ async function copyOutput(text?: string) {
     100% { opacity: 0.8; }
 }
 
-/* 子 Agent 三阶段 Pipeline */
-.worker-pipeline-stages {
+/* 子 Agent 动态步骤链 (与主 Agent 链路同构) */
+.worker-steps-chain {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 5px;
 }
 
-.pipeline-stage-item {
+.worker-step-node {
     display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 6px;
-    background: #1f1f2a;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px;
+    background: #181822;
+    border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 6px;
+    transition: all 0.2s ease;
 }
 
-.pipeline-stage-item.is-running {
+.worker-step-node.is-active {
     border-color: rgba(56, 189, 248, 0.4);
-    background: linear-gradient(90deg, rgba(56, 189, 248, 0.08), #1f1f2a);
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.09), #181822);
+    box-shadow: 0 0 10px rgba(56, 189, 248, 0.1);
 }
 
-.pipeline-stage-item.is-done {
-    border-color: rgba(52, 211, 153, 0.2);
+.worker-step-node.status-succeeded {
+    border-color: rgba(52, 211, 153, 0.15);
 }
 
-.stage-status-icon {
+.worker-step-node.status-failed {
+    border-color: rgba(248, 113, 113, 0.3);
+    background: rgba(248, 113, 113, 0.05);
+}
+
+.step-badge {
     width: 16px;
     height: 16px;
     border-radius: 50%;
     display: grid;
     place-items: center;
-    font-size: 9px;
+    font-size: 8.5px;
     background: rgba(255, 255, 255, 0.08);
     color: #a1a1aa;
     flex-shrink: 0;
+    margin-top: 1px;
 }
 
-.pipeline-stage-item.is-done .stage-status-icon {
+.worker-step-node.status-succeeded .step-badge {
     background: #34d399;
     color: #064e3b;
     font-weight: 700;
 }
 
-.pipeline-stage-item.is-running .stage-status-icon {
+.worker-step-node.is-active .step-badge {
     background: #38bdf8;
     color: #082f49;
 }
 
-.stage-info {
+.worker-step-node.status-failed .step-badge {
+    background: #f87171;
+    color: #450a0a;
+    font-weight: 700;
+}
+
+.step-content {
     flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
+    gap: 2px;
 }
 
-.stage-name {
-    font-size: 9.5px;
+.step-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.step-seq {
+    font-size: 9px;
     font-weight: 700;
     color: #f4f4f5;
 }
 
-.stage-desc {
+.step-tool-tag {
+    font-size: 8px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.07);
+    color: #38bdf8;
+}
+
+.step-status-text {
+    font-size: 8px;
+    color: #71717a;
+    margin-left: auto;
+}
+
+.step-title-text {
+    margin: 0;
     font-size: 8.5px;
     color: #a1a1aa;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    line-height: 1.35;
+    word-break: break-word;
 }
 
 /* 终端输出预览 */

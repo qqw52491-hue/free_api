@@ -491,6 +491,19 @@ pub async fn run_worker_loop(
             break "succeeded";
         }
 
+        if let Some(ref handle) = app {
+            let _ = handle.emit(
+                &format!("agent-progress-{}", parent_session_id),
+                json!({
+                    "type": "child_worker_action",
+                    "child_run_id": &child_run_id,
+                    "step": steps_used,
+                    "action": &parsed.action,
+                    "params": &parsed.params,
+                }),
+            );
+        }
+
         let observation = match execute_worker_action(&workspace_root, &parsed.action, &parsed.params, &request.hard_scope).await {
             Ok(output) => output,
             Err(error) => format!("【动作被拒绝】{}", error),

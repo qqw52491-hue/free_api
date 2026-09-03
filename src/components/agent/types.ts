@@ -290,6 +290,15 @@ export interface ModelRouting {
     role_models: Record<string, string>;
 }
 
+export interface AgentWorkerStep {
+    stepNumber: number;
+    title: string;
+    tool?: string;
+    status: AgentToolStatus;
+    durationMs?: number;
+    output?: string;
+}
+
 export interface AgentWorkerItem {
     id: string;
     name: string;
@@ -304,6 +313,7 @@ export interface AgentWorkerItem {
     thought?: string;
     output?: string;
     summary?: string;
+    steps?: AgentWorkerStep[];
 }
 
 export interface AgentTeamState {
