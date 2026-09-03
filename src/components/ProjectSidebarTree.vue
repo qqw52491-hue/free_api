@@ -408,8 +408,11 @@ async function refreshProjects() {
   try {
     projects.value = await invoke<AgentProject[]>("list_agent_projects");
     await Promise.all(projects.value.map((p) => loadProjectData(p.id)));
-    if (projects.value.length > 0 && expandedProjectIds.value.size === 0) {
-      expandedProjectIds.value.add(projects.value[0].id);
+    // 默认将所有项目全部展开
+    if (projects.value.length > 0) {
+      for (const p of projects.value) {
+        expandedProjectIds.value.add(p.id);
+      }
     }
   } catch (e) {
     console.error("加载项目列表失败:", e);
@@ -586,6 +589,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   padding: 0 0 6px 0;
+  height: 100%;
+  min-height: 0;
 }
 
 .section-title {
@@ -598,6 +603,7 @@ onMounted(() => {
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+  flex-shrink: 0;
 }
 
 .title-actions {
@@ -637,6 +643,29 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+  padding-right: 2px;
+}
+
+/* 细窄平滑半透明滚动条 */
+.project-tree-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.project-tree-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.project-tree-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+.project-tree-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
 }
 
 .project-tree-item {

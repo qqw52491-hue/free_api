@@ -851,7 +851,13 @@ onUnmounted(() => {
 
 .projects-tree-section {
     padding-top: 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    flex-direction: column;
+    /* 核心布局保障：最大高度设为 38vh，保证展开项目时自身滚动，绝不挤压下方的 Tasks */
+    max-height: 38vh;
+    min-height: 0;
+    flex-shrink: 0;
 }
 
 .section-title {
@@ -864,15 +870,36 @@ onUnmounted(() => {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+    flex-shrink: 0;
 }
 
 .list-control { color: #71717a; }
 
 .tasks-section {
-    min-height: 0;
+    min-height: 140px; /* 保证 Tasks 列表永远有保底高度，绝不被压没 */
     flex: 1;
     padding-top: 10px;
     overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+}
+
+/* 统一 Tasks 细窄平滑暗黑滚动条 */
+.tasks-section::-webkit-scrollbar {
+    width: 4px;
+}
+
+.tasks-section::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.tasks-section::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+}
+
+.tasks-section::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.28);
 }
 
 .task-search-bar {
