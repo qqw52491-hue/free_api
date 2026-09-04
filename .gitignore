@@ -40,3 +40,4 @@ src-tauri/plugins/*.local.yml
 test-artifacts/
 src-tauri/.rpa_profile/
 .attachments/
+.workbuddy/

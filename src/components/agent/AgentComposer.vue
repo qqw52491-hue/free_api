@@ -369,21 +369,58 @@
                         </Teleport>
                     </div>
 
-                    <!-- 🚀 全自动 vs 🔍 交叉审查 vs 🛡️ 方案审批 门禁模式切换胶囊 -->
-                    <button
-                        type="button"
-                        class="composer-tool-btn plan-mode-toggle-btn"
-                        :class="{
-                            'is-plan-first': currentPlanMode === 'plan_approval',
-                            'is-cross-review': currentPlanMode === 'cross_review',
-                        }"
-                        :title="planModeTooltip"
-                        :disabled="isRunning"
-                        @click="cyclePlanMode"
-                    >
-                        <span class="plan-mode-icon">{{ planModeIcon }}</span>
-                        <span class="plan-mode-label">{{ planModeLabel }}</span>
-                    </button>
+                    <!-- 🚀 全自动 vs 🔍 交叉审查 vs 🛡️ 方案审批 门禁模式下拉选择 -->
+                    <div class="plan-mode-picker" ref="planPickerRef">
+                        <button
+                            type="button"
+                            class="composer-tool-btn plan-mode-toggle-btn"
+                            :class="{
+                                'is-plan-first': currentPlanMode === 'plan_approval',
+                                'is-cross-review': currentPlanMode === 'cross_review',
+                                active: planMenuOpen,
+                            }"
+                            :title="planModeTooltip"
+                            :disabled="isRunning"
+                            @click="togglePlanMenu"
+                        >
+                            <span class="plan-mode-icon">{{ planModeIcon }}</span>
+                            <span class="plan-mode-label">{{ planModeLabel }}</span>
+                            <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
+                        </button>
+
+                        <Teleport to="body">
+                            <div
+                                v-if="planMenuOpen"
+                                class="plan-dropdown-menu is-teleported"
+                                :class="`placement-${planPlacement}`"
+                                :style="planFixedStyle"
+                                @click.stop
+                            >
+                                <div class="plan-menu-header">执行与方案审批门禁</div>
+                                <button
+                                    v-for="opt in planModes"
+                                    :key="opt.id"
+                                    type="button"
+                                    class="plan-menu-item"
+                                    :class="[
+                                        `mode-${opt.id}`,
+                                        { selected: opt.id === currentPlanMode },
+                                    ]"
+                                    @click="selectPlanMode(opt.id)"
+                                >
+                                    <span class="opt-icon">{{ opt.icon }}</span>
+                                    <div class="opt-text">
+                                        <div class="opt-title">
+                                            <strong>{{ opt.label }}</strong>
+                                            <span class="opt-tag" :class="`tag-${opt.id}`">{{ opt.tag }}</span>
+                                        </div>
+                                        <small class="opt-sub">{{ opt.description }}</small>
+                                    </div>
+                                    <svg v-if="opt.id === currentPlanMode" class="check-icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+                                </button>
+                            </div>
+                        </Teleport>
+                    </div>
 
                     <!-- ⌨️ 快捷键提示小问号 -->
                     <div class="composer-shortcut-hint-wrap">
@@ -589,25 +626,52 @@ const planModeLabel = computed(() => {
 const planModeTooltip = computed(() => {
     switch (currentPlanMode.value) {
         case "auto":
-            return "当前模式: 🚀 全自动 (Auto) - 探索排查后直接实施。点击切换为双 Agent 交叉审查";
+            return "当前模式: 🚀 全自动 (Auto) - 探索排查后直接实施。点击选择门禁模式";
         case "cross_review":
-            return "当前模式: 🔍 交叉审查 (Cross-review) - 动笔前强制由子 Agent 独立推演挑刺。点击切换为人工方案审批";
+            return "当前模式: 🔍 交叉审查 (Cross-review) - 动笔前强制由子 Agent 独立推演挑刺。点击选择门禁模式";
         case "plan_approval":
-            return "当前模式: 🛡️ 方案审批 (Plan First) - 方案就绪后须经您确认方可写入代码。点击切换为全自动模式";
+            return "当前模式: 🛡️ 方案审批 (Plan First) - 方案就绪后须经您确认方可写入代码。点击选择门禁模式";
         default:
             return "";
     }
 });
 
-function cyclePlanMode() {
-    const nextMode: PlanExecutionMode =
-        currentPlanMode.value === "auto"
-            ? "cross_review"
-            : currentPlanMode.value === "cross_review"
-                ? "plan_approval"
-                : "auto";
-    emit("update:planMode", nextMode);
-    emit("update:autoPilot", nextMode !== "plan_approval");
+interface PlanModeOption {
+    id: PlanExecutionMode;
+    icon: string;
+    label: string;
+    tag: string;
+    description: string;
+}
+
+const planModes: PlanModeOption[] = [
+    {
+        id: "auto",
+        icon: "🚀",
+        label: "全自动",
+        tag: "极速流畅",
+        description: "完成只读排查后直接动笔修改代码，端到端自动推进不打扰",
+    },
+    {
+        id: "cross_review",
+        icon: "🔍",
+        label: "交叉审查",
+        tag: "双 Agent",
+        description: "动笔前强制派发子 Agent 对抗推演，消费审查结论后方可动笔",
+    },
+    {
+        id: "plan_approval",
+        icon: "🛡️",
+        label: "方案审批",
+        tag: "人工确认",
+        description: "动笔前必须呈报完整技术方案，经您在界面确认批准后才放行",
+    },
+];
+
+function selectPlanMode(mode: PlanExecutionMode) {
+    emit("update:planMode", mode);
+    emit("update:autoPilot", mode !== "plan_approval");
+    planMenuOpen.value = false;
 }
 
 const submitMode = ref<"interrupt" | "queue">("interrupt");
@@ -731,6 +795,15 @@ const modelMenuOpen = ref(false);
 const activeRoutingTab = ref<"models" | "roles">("models");
 const budgetPickerRef = ref<HTMLElement | null>(null);
 const budgetMenuOpen = ref(false);
+const planPickerRef = ref<HTMLElement | null>(null);
+const planMenuOpen = ref(false);
+const planPlacement = ref<"top" | "bottom">("top");
+const planCoords = ref<{ top: number; left: number; width: number; maxHeight: number }>({
+    top: 0,
+    left: 0,
+    width: 290,
+    maxHeight: 320,
+});
 
 const budgetModes = CONTEXT_BUDGET_MODES;
 const currentBudgetModeObj = computed(() => {
@@ -862,11 +935,64 @@ const budgetFixedStyle = computed(() => {
     };
 });
 
+function calculatePlanPosition(triggerEl: HTMLElement | null) {
+    if (!triggerEl) return;
+    const rect = triggerEl.getBoundingClientRect();
+    const spaceAbove = rect.top;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const targetWidth = 290;
+
+    let left = rect.left;
+    if (left + targetWidth > window.innerWidth - 12) {
+        left = Math.max(12, window.innerWidth - targetWidth - 12);
+    }
+    left = Math.max(12, left);
+
+    let placement: "top" | "bottom" = "top";
+    let top = 0;
+    let maxHeight = 320;
+
+    if (spaceAbove < 260 && spaceBelow > spaceAbove) {
+        placement = "bottom";
+        top = rect.bottom + 8;
+        maxHeight = Math.max(180, Math.min(360, spaceBelow - 20));
+    } else {
+        placement = "top";
+        top = rect.top - 8;
+        maxHeight = Math.max(180, Math.min(360, spaceAbove - 20));
+    }
+
+    planPlacement.value = placement;
+    planCoords.value = { top, left, width: targetWidth, maxHeight };
+}
+
+const planFixedStyle = computed(() => {
+    if (planPlacement.value === "top") {
+        return {
+            position: "fixed" as const,
+            bottom: `${Math.max(10, window.innerHeight - planCoords.value.top)}px`,
+            left: `${planCoords.value.left}px`,
+            width: `${planCoords.value.width}px`,
+            maxHeight: `${planCoords.value.maxHeight}px`,
+            zIndex: 99999,
+        };
+    }
+    return {
+        position: "fixed" as const,
+        top: `${planCoords.value.top}px`,
+        left: `${planCoords.value.left}px`,
+        width: `${planCoords.value.width}px`,
+        maxHeight: `${planCoords.value.maxHeight}px`,
+        zIndex: 99999,
+    };
+});
+
 function toggleModelMenu() {
     if (props.isRunning) return;
     if (!modelMenuOpen.value) {
         calculatePopoverPosition(modelPickerRef.value);
         budgetMenuOpen.value = false;
+        planMenuOpen.value = false;
         modelMenuOpen.value = true;
     } else {
         modelMenuOpen.value = false;
@@ -875,7 +1001,7 @@ function toggleModelMenu() {
 
 function handleComposerClick(e: MouseEvent) {
     const target = e.target as HTMLElement | null;
-    if (target && !target.closest("button") && !target.closest(".model-routing-popover") && !target.closest(".budget-dropdown-menu")) {
+    if (target && !target.closest("button") && !target.closest(".model-routing-popover") && !target.closest(".budget-dropdown-menu") && !target.closest(".plan-dropdown-menu")) {
         textareaRef.value?.focus();
     }
 }
@@ -885,9 +1011,22 @@ function toggleBudgetMenu() {
     if (!budgetMenuOpen.value) {
         calculateBudgetPosition(budgetPickerRef.value);
         modelMenuOpen.value = false;
+        planMenuOpen.value = false;
         budgetMenuOpen.value = true;
     } else {
         budgetMenuOpen.value = false;
+    }
+}
+
+function togglePlanMenu() {
+    if (props.isRunning) return;
+    if (!planMenuOpen.value) {
+        calculatePlanPosition(planPickerRef.value);
+        modelMenuOpen.value = false;
+        budgetMenuOpen.value = false;
+        planMenuOpen.value = true;
+    } else {
+        planMenuOpen.value = false;
     }
 }
 
@@ -991,18 +1130,23 @@ function handleClickOutside(e: MouseEvent) {
     if (modelPickerRef.value && !modelPickerRef.value.contains(target)) {
         modelMenuOpen.value = false;
     }
+    if (planPickerRef.value && !planPickerRef.value.contains(target)) {
+        planMenuOpen.value = false;
+    }
 }
 
 function handleKeyDown(e: KeyboardEvent) {
     if (e.key === "Escape") {
         if (modelMenuOpen.value) modelMenuOpen.value = false;
         if (budgetMenuOpen.value) budgetMenuOpen.value = false;
+        if (planMenuOpen.value) planMenuOpen.value = false;
     }
 }
 
 function handleScrollOrResize() {
     if (modelMenuOpen.value) calculatePopoverPosition(modelPickerRef.value);
     if (budgetMenuOpen.value) calculateBudgetPosition(budgetPickerRef.value);
+    if (planMenuOpen.value) calculatePlanPosition(planPickerRef.value);
 }
 
 onMounted(() => {
@@ -1584,51 +1728,65 @@ textarea::placeholder {
     pointer-events: none;
 }
 
-.composer-tools > button.plan-mode-toggle-btn {
-    width: auto;
-    height: 28px;
-    padding: 0 8px;
+.plan-mode-picker {
+    position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
-    color: #a1a1aa;
-    font-size: 11.5px;
+}
+
+.plan-mode-toggle-btn {
+    width: auto !important;
+    height: 28px !important;
+    padding: 0 8px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 5px !important;
+    border-radius: 6px !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    background: rgba(255, 255, 255, 0.03) !important;
+    color: #a1a1aa !important;
+    font-size: 11.5px !important;
     cursor: pointer;
     transition: all 0.15s ease;
     user-select: none;
 }
 
-.composer-tools > button.plan-mode-toggle-btn:hover:not(:disabled) {
-    color: #ffffff;
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.18);
+.plan-mode-toggle-btn:hover:not(:disabled) {
+    color: #ffffff !important;
+    background: rgba(255, 255, 255, 0.08) !important;
+    border-color: rgba(255, 255, 255, 0.18) !important;
 }
 
-.composer-tools > button.plan-mode-toggle-btn.is-cross-review {
-    background: rgba(16, 185, 129, 0.12);
-    border-color: rgba(16, 185, 129, 0.35);
-    color: #6ee7b7;
+.plan-mode-toggle-btn.active {
+    background: rgba(255, 255, 255, 0.1) !important;
+    border-color: rgba(255, 255, 255, 0.25) !important;
+    color: #ffffff !important;
 }
 
-.composer-tools > button.plan-mode-toggle-btn.is-cross-review:hover:not(:disabled) {
-    background: rgba(16, 185, 129, 0.2);
-    border-color: rgba(16, 185, 129, 0.5);
-    color: #a7f3d0;
+.plan-mode-toggle-btn.is-cross-review {
+    background: rgba(16, 185, 129, 0.12) !important;
+    border-color: rgba(16, 185, 129, 0.35) !important;
+    color: #6ee7b7 !important;
 }
 
-.composer-tools > button.plan-mode-toggle-btn.is-plan-first {
-    background: rgba(99, 102, 241, 0.12);
-    border-color: rgba(99, 102, 241, 0.35);
-    color: #a5b4fc;
+.plan-mode-toggle-btn.is-cross-review:hover:not(:disabled),
+.plan-mode-toggle-btn.is-cross-review.active {
+    background: rgba(16, 185, 129, 0.2) !important;
+    border-color: rgba(16, 185, 129, 0.5) !important;
+    color: #a7f3d0 !important;
 }
 
-.composer-tools > button.plan-mode-toggle-btn.is-plan-first:hover:not(:disabled) {
-    background: rgba(99, 102, 241, 0.2);
-    border-color: rgba(99, 102, 241, 0.5);
-    color: #c7d2fe;
+.plan-mode-toggle-btn.is-plan-first {
+    background: rgba(99, 102, 241, 0.12) !important;
+    border-color: rgba(99, 102, 241, 0.35) !important;
+    color: #a5b4fc !important;
+}
+
+.plan-mode-toggle-btn.is-plan-first:hover:not(:disabled),
+.plan-mode-toggle-btn.is-plan-first.active {
+    background: rgba(99, 102, 241, 0.2) !important;
+    border-color: rgba(99, 102, 241, 0.5) !important;
+    color: #c7d2fe !important;
 }
 
 .plan-mode-icon {
@@ -1640,6 +1798,20 @@ textarea::placeholder {
     font-size: 11.5px;
     font-weight: 550;
     line-height: 1;
+}
+
+.plan-mode-toggle-btn .chevron-icon {
+    width: 12px;
+    height: 12px;
+    stroke: currentColor;
+    stroke-width: 2;
+    fill: none;
+    opacity: 0.6;
+    transition: transform 0.15s ease;
+}
+
+.plan-mode-toggle-btn.active .chevron-icon {
+    transform: rotate(180deg);
 }
 .composer-tools > button svg {
     width: 14px;
@@ -2096,6 +2268,97 @@ textarea::placeholder {
     stroke-width: 2.5;
     fill: none;
     flex-shrink: 0;
+}
+
+.plan-dropdown-menu {
+    box-sizing: border-box;
+    background: #1e1e24;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 10px;
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08);
+    padding: 6px;
+    z-index: 99999 !important;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    backdrop-filter: blur(16px);
+    animation: popIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.plan-dropdown-menu.placement-top {
+    transform-origin: bottom left;
+}
+
+.plan-dropdown-menu.placement-bottom {
+    transform-origin: top left;
+}
+
+.plan-menu-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: #71717a;
+    padding: 4px 8px 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    margin-bottom: 2px;
+}
+
+.plan-menu-item {
+    display: flex !important;
+    align-items: center !important;
+    width: 100% !important;
+    height: auto !important;
+    padding: 8px 10px !important;
+    gap: 10px !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 6px !important;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.15s ease;
+}
+
+.plan-menu-item:hover {
+    background: rgba(255, 255, 255, 0.06) !important;
+}
+
+.plan-menu-item.selected {
+    background: rgba(59, 130, 246, 0.12) !important;
+    border-color: rgba(59, 130, 246, 0.25) !important;
+}
+
+.plan-menu-item.selected.mode-cross_review {
+    background: rgba(16, 185, 129, 0.12) !important;
+    border-color: rgba(16, 185, 129, 0.25) !important;
+}
+
+.plan-menu-item.selected.mode-cross_review .check-icon {
+    stroke: #34d399;
+}
+
+.plan-menu-item.selected.mode-plan_approval {
+    background: rgba(99, 102, 241, 0.12) !important;
+    border-color: rgba(99, 102, 241, 0.25) !important;
+}
+
+.plan-menu-item.selected.mode-plan_approval .check-icon {
+    stroke: #818cf8;
+}
+
+.plan-menu-item .opt-tag.tag-cross_review {
+    color: #6ee7b7;
+    background: rgba(16, 185, 129, 0.15);
+}
+
+.plan-menu-item .opt-tag.tag-plan_approval {
+    color: #a5b4fc;
+    background: rgba(99, 102, 241, 0.15);
+}
+
+.plan-menu-item .opt-tag.tag-auto {
+    color: #93c5fd;
+    background: rgba(59, 130, 246, 0.15);
 }
 
 .composer-actions {
