@@ -351,48 +351,15 @@ pub(crate) fn parse_action(raw_response: &str) -> Option<ParsedAction> {
 /// 评测报告只保存布尔值和缺失段落，不保存模型的 summary 正文，
 /// 避免将用户内容或敏感工具输出重新写入评测产物。
 pub(crate) fn assess_complex_delivery(logs: &[Value]) -> ComplexDeliveryAssessment {
-    let mut assessment = ComplexDeliveryAssessment::default();
     let Some(summary) = logs.iter().rev().find_map(|log| {
         log.get("raw_response")
             .and_then(Value::as_str)
             .and_then(finish_summary)
     }) else {
-        return assessment;
+        return ComplexDeliveryAssessment::default();
     };
 
-    assessment.finish_found = true;
-    assessment.verified_scope_present =
-        contains_any(&summary, &["已核验范围", "已验证范围", "核验范围", "验证范围"]);
-    assessment.assumptions_or_unverified_present =
-        contains_any(&summary, &["未核验范围", "未验证范围", "关键假设", "未核验", "假设与未核验"]);
-    assessment.conclusion_strength_present =
-        (summary.contains("结论强度") || summary.contains("置信度") || summary.contains("结论"))
-            && contains_any(&summary, &["已证实", "部分支持", "未验证", "confirmed", "likely", "hypothesis"]);
-    let root_cause_window = root_cause_claim_window(&summary);
-    assessment.root_cause_calibrated = root_cause_window.is_none_or(|window| {
-        (contains_any(
-            &window,
-            &[
-                "直接证据",
-                "根因证据",
-                "事实证据",
-                "源码证据",
-                "代码证据",
-                "排查证据",
-                "直接事实证据",
-                "直接源码证据",
-                "证据",
-                "依据",
-            ],
-        ) || window.contains("证据")
-            || window.contains("依据"))
-            && contains_any(&window, &["已证实", "部分支持", "未验证", "confirmed", "likely", "hypothesis"])
-    });
-    assessment.compliant = assessment.verified_scope_present
-        && assessment.assumptions_or_unverified_present
-        && assessment.conclusion_strength_present
-        && assessment.root_cause_calibrated;
-    assessment
+    assess_complex_delivery_summary(&summary)
 }
 
 /// 运行期 finish 拦截复用的摘要检查；调用方只消费布尔结果，不保存或回显 summary 正文。
@@ -410,22 +377,7 @@ pub(crate) fn assess_complex_delivery_summary(summary: &str) -> ComplexDeliveryA
             && contains_any(summary, &["已证实", "部分支持", "未验证", "confirmed", "likely", "hypothesis"]);
     let root_cause_window = root_cause_claim_window(summary);
     assessment.root_cause_calibrated = root_cause_window.is_none_or(|window| {
-        (contains_any(
-            &window,
-            &[
-                "直接证据",
-                "根因证据",
-                "事实证据",
-                "源码证据",
-                "代码证据",
-                "排查证据",
-                "直接事实证据",
-                "直接源码证据",
-                "证据",
-                "依据",
-            ],
-        ) || window.contains("证据")
-            || window.contains("依据"))
+        (window.contains("证据") || window.contains("依据"))
             && contains_any(&window, &["已证实", "部分支持", "未验证", "confirmed", "likely", "hypothesis"])
     });
     assessment.compliant = assessment.verified_scope_present

@@ -10,7 +10,7 @@ use crate::agent::control::{
     finish_interrupted_run, intervention_channels, stream_interrupt_channels,
     take_pending_interrupt, HumanControl,
 };
-use crate::agent::dispatcher::is_finish_instruction;
+use crate::agent::dispatcher::{is_finish_instruction, is_write_or_side_effect_tool};
 use crate::agent::evaluation_analysis::{assess_complex_delivery_summary, summary_makes_root_cause_claim};
 use crate::agent::loop_runner::run_call_llm_and_run_tool_phases;
 use crate::agent::mcp::{McpClient, PluginRegistry};
@@ -558,6 +558,43 @@ mod finish_guard_tests {
         assert!(context.review_contract.is_none());
         assert_eq!(context.change_verification, Some(expected));
     }
+
+    #[test]
+    fn mode_switch_from_auto_to_plan_approval_resets_approved_state() {
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.auto_pilot = true;
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+
+        let previous_auto_pilot = checkpoint.auto_pilot;
+        let new_auto_pilot = false;
+        checkpoint.auto_pilot = new_auto_pilot;
+        if previous_auto_pilot && !new_auto_pilot && checkpoint.plan_phase.is_approved() {
+            checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+        }
+
+        assert_eq!(checkpoint.plan_phase, crate::agent::checkpoint::PlanPhase::Reviewing);
+    }
+
+    #[test]
+    fn non_write_step_distinguishes_read_vs_write_tool() {
+        let read_inst = AgentInstruction {
+            tool: Some("read_file".to_string()),
+            ..Default::default()
+        };
+        let write_inst = AgentInstruction {
+            tool: Some("write_file".to_string()),
+            ..Default::default()
+        };
+        let child_writer_inst = AgentInstruction {
+            tool: Some("child_writer".to_string()),
+            ..Default::default()
+        };
+
+        assert!(!is_write_or_side_effect_tool(&read_inst));
+        assert!(is_write_or_side_effect_tool(&write_inst));
+        assert!(is_write_or_side_effect_tool(&child_writer_inst));
+    }
 }
 
 /// 推进后端运行状态，并向前端发送独立于旧进度事件的权威状态快照。
@@ -964,7 +1001,12 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
+    let previous_auto_pilot = checkpoint.auto_pilot;
     checkpoint.auto_pilot = auto_pilot;
+    // 如果用户从中途的 auto_pilot 切换为方案审批模式（!auto_pilot），重置已放行状态为审查中，确保重新经过人工确认
+    if previous_auto_pilot && !auto_pilot && checkpoint.plan_phase.is_approved() {
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+    }
     // 初始工作区是会话选择的已声明资源；恢复时保留 checkpoint 中已有的显式契约。
     // 仅在显式项目会话、存在 workspace_override 或 auto_pilot 模式下才声明主工作区。
     // 在未选项目的通用自由会话中，主工作区保持为 None（自由模式），避免将宿主机启动目录误作为资源约束强塞给 Agent 及外部 MCP。
@@ -1812,7 +1854,11 @@ async fn run_agent_main_loop_in_workspace_inner(
         } else if !is_finish {
             // 新的常规步骤提供了新增证据，之后若仍有 open Todo 可重新进行一次质询。
             checkpoint.finish_reviewed = false;
-            checkpoint.finish_challenge_count = 0;
+            // 只有当常规步骤产生了新的真实副作用写入时，才视为进入了新的交付周期，重置质询标记；
+            // 纯只读或查询步骤不重置 finish_challenge_count，防止模型通过插步（如反复 read_file）逃避熔断导致死循环。
+            if result.success && is_write_or_side_effect_tool(&instruction) {
+                checkpoint.finish_challenge_count = 0;
+            }
         }
         let is_effectively_challenged = finish_challenged || reviewer_challenged;
         let outcome_str = if is_effectively_challenged {
