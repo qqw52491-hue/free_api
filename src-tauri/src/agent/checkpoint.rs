@@ -587,6 +587,15 @@ impl AgentCheckpoint {
         }
     }
 
+    /// 回滚一次「未产生任何后台任务」的审查派发：归还审查轮次并恢复派发前的消费状态。
+    ///
+    /// 派发失败（角色卡未授权/不存在、参数非法等）不应消耗审查预算，否则额度耗尽后
+    /// 既无法重新派发、又永远等不到结论，交叉审查模式会永久阻塞写入。
+    pub fn rollback_plan_review_dispatch(&mut self, pre_dispatch_consumed: bool) {
+        self.plan_reviewer_retry_count = self.plan_reviewer_retry_count.saturating_sub(1);
+        self.plan_reviewer_consumed = pre_dispatch_consumed;
+    }
+
     pub fn restore_context(&self, context: &mut SandwichContext) {
         self.data.restore_into(context);
     }

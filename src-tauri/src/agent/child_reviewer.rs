@@ -906,6 +906,27 @@ pub fn has_running_child_runs(db: &DbState, parent_run_id: &str) -> bool {
     count > 0
 }
 
+/// 检查当前 parent_run 是否存在「已到终态但尚未被回收」的审查结论（wait_jobs 可直接收取）。
+///
+/// 与 `has_running_child_runs` 互补：前者代表结论还在路上，后者代表结论已产出但还没进入主 Agent 上下文。
+/// 门禁据此区分「应当挂起等待」与「应当重新派发」，避免模型对着空信箱反复 wait_jobs。
+pub fn has_pending_review_results(db: &DbState, parent_run_id: &str) -> bool {
+    let Ok(conn) = db.0.lock() else { return false; };
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_child_runs
+             WHERE parent_run_id = ?1
+               AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'invalid_output')
+               AND result_json IS NOT NULL
+               AND (consumed_at IS NULL OR consumed_at = '')
+               AND (kind IS NULL OR kind = '' OR kind = 'review')",
+            params![parent_run_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    count > 0
+}
+
 /// 将指定 parent_run 下所有仍处于 running 状态的子审查任务标记为 cancelled
 pub fn cancel_running_child_runs(db: &DbState, parent_run_id: &str) -> Result<usize, String> {
     let conn = db.0.lock().map_err(|error| error.to_string())?;

@@ -343,6 +343,61 @@ fn apply_instruction_state_updates(
 mod finish_guard_tests {
     use super::*;
 
+    /// 测试夹具：直接向 agent_child_runs 写入/更新/清理子任务行，用于还原门禁的真实判定场景。
+    fn insert_child_run(
+        db: &DbState,
+        id: &str,
+        parent_run_id: &str,
+        status: &str,
+        result_json: Option<&str>,
+        consumed_at: Option<&str>,
+    ) {
+        let conn = db.0.lock().unwrap();
+        let result = result_json
+            .map(|r| format!("'{}'", r))
+            .unwrap_or_else(|| "NULL".to_string());
+        let consumed = consumed_at
+            .map(|c| format!("'{}'", c))
+            .unwrap_or_else(|| "NULL".to_string());
+        conn.execute(
+            &format!(
+                "INSERT OR REPLACE INTO agent_child_runs
+                 (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, kind, result_json, consumed_at)
+                 VALUES ('{id}', '{parent}', 'sess', '{ws}', 'model', '{status}', '2026-01-01T00:00:00Z', 'review', {result}, {consumed})",
+                id = id,
+                parent = parent_run_id,
+                ws = std::env::temp_dir().display(),
+                status = status,
+                result = result,
+                consumed = consumed,
+            ),
+            [],
+        )
+        .unwrap();
+    }
+
+    fn mark_child_run(db: &DbState, id: &str, status: &str) {
+        let conn = db.0.lock().unwrap();
+        conn.execute(
+            &format!(
+                "UPDATE agent_child_runs SET status = '{status}' WHERE id = '{id}'",
+                status = status,
+                id = id,
+            ),
+            [],
+        )
+        .unwrap();
+    }
+
+    fn delete_child_runs(db: &DbState, parent_run_id: &str) {
+        let conn = db.0.lock().unwrap();
+        conn.execute(
+            &format!("DELETE FROM agent_child_runs WHERE parent_run_id = '{parent}'", parent = parent_run_id),
+            [],
+        )
+        .unwrap();
+    }
+
     fn todo(id: usize, status: &str, description: &str) -> TodoItem {
         TodoItem {
             id,
@@ -670,9 +725,10 @@ mod finish_guard_tests {
         assert_eq!(rej1.unwrap().route, "plan_gatekeeper:need_reviewer_dispatch");
         assert!(!checkpoint.plan_phase.is_approved());
 
-        // 阶段 2: 派发了 reviewer，但尚未等待/消费结论 -> 拦截 need_wait_reviewer_jobs
+        // 阶段 2: 派发了 reviewer 且子任务正在后台推演 -> 拦截 need_wait_reviewer_jobs
         checkpoint.plan_reviewer_retry_count = 1;
         checkpoint.plan_reviewer_consumed = false;
+        insert_child_run(&db, "child-running", "test_run", "running", Some("{}"), None);
         let rej2 = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint,
             &context,
@@ -683,6 +739,34 @@ mod finish_guard_tests {
         );
         assert!(rej2.is_some());
         assert_eq!(rej2.unwrap().route, "plan_gatekeeper:need_wait_reviewer_jobs");
+        assert!(!checkpoint.plan_phase.is_approved());
+
+        // 阶段 2b: 子任务已终态但结论尚未回收 -> 同样拦截 need_wait_reviewer_jobs（wait_jobs 可收取）
+        mark_child_run(&db, "child-running", "succeeded");
+        let rej2b = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint,
+            &context,
+            &db,
+            "test_run",
+            2,
+            false,
+        );
+        assert!(rej2b.is_some());
+        assert_eq!(rej2b.unwrap().route, "plan_gatekeeper:need_wait_reviewer_jobs");
+
+        // 阶段 2c: 派发失败场景——后台既无运行中任务、也无待回收结论 ->
+        // 必须引导模型重新派发（reviewer_result_missing），否则只会空等 wait_jobs 而永久写不了
+        delete_child_runs(&db, "test_run");
+        let rej2c = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint,
+            &context,
+            &db,
+            "test_run",
+            2,
+            false,
+        );
+        assert!(rej2c.is_some());
+        assert_eq!(rej2c.unwrap().route, "plan_gatekeeper:reviewer_result_missing");
         assert!(!checkpoint.plan_phase.is_approved());
 
         // 阶段 3: 审查结论已消费并注入上下文 -> 门禁放行并将 plan_phase 推进为 Approved
@@ -699,6 +783,38 @@ mod finish_guard_tests {
         assert!(checkpoint.plan_phase.is_approved());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn failed_reviewer_dispatch_rolls_back_review_budget() {
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::CrossReview;
+        checkpoint.plan_reviewer_retry_count = 0;
+        checkpoint.plan_reviewer_consumed = true;
+
+        // 模拟一次「派发前消费过结论」的派发：预扣 1 轮
+        let pre_consumed = checkpoint.plan_reviewer_consumed;
+        checkpoint.plan_reviewer_retry_count += 1;
+        checkpoint.plan_reviewer_consumed = false;
+
+        // 派发全部失败 -> 回滚预算，模型可以重新派发，不会耗尽 2 轮额度
+        checkpoint.rollback_plan_review_dispatch(pre_consumed);
+
+        assert_eq!(checkpoint.plan_reviewer_retry_count, 0);
+        assert!(checkpoint.plan_reviewer_consumed);
+    }
+
+    #[test]
+    fn rollback_never_underflows_review_budget() {
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.plan_reviewer_retry_count = 0;
+
+        checkpoint.rollback_plan_review_dispatch(false);
+
+        assert_eq!(checkpoint.plan_reviewer_retry_count, 0);
+        assert!(!checkpoint.plan_reviewer_consumed);
     }
 
     #[test]

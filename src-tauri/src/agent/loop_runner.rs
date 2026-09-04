@@ -722,6 +722,10 @@ pub(crate) fn check_pre_write_gatekeeper(
             })
         }
         crate::agent::checkpoint::PlanExecutionMode::CrossReview => {
+            // 先探测后台是否仍有审查任务在跑：用于区分「结论还在路上」与「派发压根没产生任务」。
+            // 若不区分，后者会让模型只会反复调用 wait_jobs 收空信箱，而 consumed 永远置不上位，写入被无限拦截。
+            let reviewer_running =
+                crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id);
             if checkpoint.plan_reviewer_retry_count == 0 {
                 Some(DispatchResult {
                     success: false,
@@ -729,14 +733,25 @@ pub(crate) fn check_pre_write_gatekeeper(
                     stderr: "【🚨 交叉审查门禁拦截：尚未派发子 Agent 对抗审查】\n当前处于【🔍 双 Agent 交叉审查模式】。在首次动笔修改代码前，必须先派发 child_reviewer 开展反驳推演与架构盲区排查：\n1. 调用 child_reviewer 工具，传入拟定的方案摘录、证据文件路径（如关键核心逻辑与跨模块关联点）及反证推演要求；\n2. 随后调用 wait_jobs 等待审查结论；\n3. 充分研判审查反驳意见后方可写入。本次操作已被安全拦截，目标未受影响。".to_string(),
                     route: "plan_gatekeeper:need_reviewer_dispatch".to_string(),
                 })
-            } else if !checkpoint.plan_reviewer_consumed
-                || crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id)
+            } else if reviewer_running
+                || (!checkpoint.plan_reviewer_consumed
+                    && crate::agent::child_reviewer::has_pending_review_results(db, parent_run_id))
             {
                 Some(DispatchResult {
                     success: false,
                     stdout: String::new(),
                     stderr: "【🚨 交叉审查门禁拦截：审查子 Agent 仍在异步推演中】\n检测到你已派发审查任务，但尚未等待并接收其审查结论（“问过 ≠ 听过”）。\n请立即调用 wait_jobs 工具（例如 wait_jobs() 或指定 job_ids）挂起等待审查专家完成对抗推演；\n审查结论注入上下文后，门禁将根据交叉审查结果放行写入。本次操作已被安全拦截，目标未受影响。".to_string(),
                     route: "plan_gatekeeper:need_wait_reviewer_jobs".to_string(),
+                })
+            } else if !checkpoint.plan_reviewer_consumed {
+                // 已消耗过审查轮次，但后台既没有在跑的任务、也没有待回收的结论 ——
+                // 说明上一次派发并未真正启动（角色卡未授权/不存在、参数非法等）。
+                // 此时必须引导模型重新派发，否则它会一直 wait_jobs 收空信箱而永久无法写入。
+                Some(DispatchResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "【🚨 交叉审查门禁拦截：未收到任何有效的审查结论】\n检测到此前已派发过审查任务，但后台当前没有正在运行的审查子任务，也没有可回收的审查结论（通常是派发立即失败：角色卡未授权挂载为 reviewer、role 名称不存在或参数非法）。\n请重新调用 child_reviewer 派发审查（先确认 role 名称可用且与任务匹配），或调用 wait_jobs 收取可能已完成的结论；\n收到审查结论后方可写入。本次操作已被安全拦截，目标未受影响。".to_string(),
+                    route: "plan_gatekeeper:reviewer_result_missing".to_string(),
                 })
             } else {
                 checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
@@ -891,6 +906,8 @@ pub async fn run_tool_phase(
 
     // --- B2. 受限 child reviewer：异步派发，不阻塞主循环。结果在后续 step 中由 main_loop 的 poll_completed_child_runs 注入。 ---
     let dispatch_result = if inst.get_tool().eq_ignore_ascii_case("child_reviewer") {
+        // 记录派发前的消费状态：若本次派发一个任务都没起来，需原样回滚，避免白耗一轮审查预算。
+        let pre_dispatch_consumed = checkpoint.plan_reviewer_consumed;
         // 方案审查轮数上限只约束批准前的方案审查讨论；
         // 已批准后的 child_reviewer 属于交付验证等其他用途，不消耗该预算、也不改变方案阶段。
         if !checkpoint.plan_phase.is_approved() {
@@ -1025,6 +1042,13 @@ pub async fn run_tool_phase(
                     fail_count += 1;
                 }
             }
+        }
+
+        // 一个审查任务都没起来（角色卡未授权/不存在、参数非法等）时回滚本轮审查预算：
+        // 否则失败也会消耗仅有的 2 轮额度，额度耗尽后派发被限流、结论又永远收不到，
+        // 交叉审查模式将陷入「既派不出、也写不了」的永久阻塞。
+        if success_count == 0 && !checkpoint.plan_phase.is_approved() {
+            checkpoint.rollback_plan_review_dispatch(pre_dispatch_consumed);
         }
 
         if !is_batch {
