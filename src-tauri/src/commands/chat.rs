@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 #[tauri::command]
 pub async fn get_sessions(state: State<'_, DbState>) -> Result<Vec<ChatSession>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.reader()?;
     let mut stmt = conn.prepare(
         "SELECT id, title, model_id, created_at, updated_at, message_count FROM chat_sessions ORDER BY updated_at DESC LIMIT 100"
     ).map_err(|e| e.to_string())?;
@@ -126,7 +126,7 @@ pub async fn get_messages(
     state: State<'_, DbState>,
     session_id: String,
 ) -> Result<Vec<ChatMessage>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.reader()?;
     let mut stmt = conn.prepare(
         "SELECT id, session_id, role, content, attachments, created_at, model_id FROM chat_messages WHERE session_id=?1 ORDER BY created_at ASC"
     ).map_err(|e| e.to_string())?;

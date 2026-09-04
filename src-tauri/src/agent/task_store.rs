@@ -35,7 +35,7 @@ struct TaskRecord {
 }
 
 pub fn list_resource_refs(db: &DbState, session_id: &str) -> Result<Vec<TaskResourceRef>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.reader()?;
     list_resource_refs_conn(&conn, session_id)
 }
 
@@ -47,7 +47,7 @@ pub fn list_records_page(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<Value, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.reader()?;
     let mut params_value = json!({
         "resource_id": resource_id,
         "offset": offset.unwrap_or(0),

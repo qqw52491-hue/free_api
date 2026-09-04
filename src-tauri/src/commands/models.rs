@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 #[tauri::command]
 pub async fn get_platforms(state: State<'_, DbState>) -> Result<Vec<Platform>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.reader()?;
     let mut stmt = conn.prepare(
         "SELECT id, name, base_url, api_key, created_at FROM platforms ORDER BY created_at DESC"
     ).map_err(|e| e.to_string())?;
@@ -101,7 +101,7 @@ pub async fn get_models(
     state: State<'_, DbState>,
     platform_id: Option<String>,
 ) -> Result<Vec<Model>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.reader()?;
     let (query, p): (String, Vec<String>) = if let Some(pid) = platform_id {
         ("SELECT id, platform_id, name, display_name, max_tokens, temperature, enabled, status, latency_ms, context_window, provider_capabilities FROM models WHERE platform_id = ?1 ORDER BY created_at DESC".into(), vec![pid])
     } else {

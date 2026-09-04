@@ -35,7 +35,7 @@ pub fn upsert_snapshot(
 }
 
 pub fn load_run_steps(db: &DbState, run_id: &str) -> Result<Vec<Value>, String> {
-    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let conn = db.reader()?;
     let row: Option<String> = conn
         .query_row(
             "SELECT steps_json FROM agent_run_traces WHERE id = ?1",
@@ -54,7 +54,7 @@ pub fn load_run_steps(db: &DbState, run_id: &str) -> Result<Vec<Value>, String> 
 }
 
 pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>, String> {
-    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let conn = db.reader()?;
     let mut statement = conn
         .prepare(
             "SELECT id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at

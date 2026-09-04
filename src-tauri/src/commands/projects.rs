@@ -588,8 +588,7 @@ pub(crate) fn read_project_resource_excerpts_for_session(
 
 #[tauri::command]
 pub async fn list_agent_projects(state: State<'_, DbState>) -> Result<Vec<AgentProject>, String> {
-
-    let conn = state.0.lock().map_err(|error| error.to_string())?;
+    let conn = state.reader()?;
     let mut statement = conn
         .prepare("SELECT id, name, root_path, created_at, updated_at FROM agent_projects ORDER BY updated_at DESC")
         .map_err(|error| error.to_string())?;
@@ -645,7 +644,7 @@ pub async fn list_agent_project_sessions(
     state: State<'_, DbState>,
     project_id: String,
 ) -> Result<Vec<ChatSession>, String> {
-    let conn = state.0.lock().map_err(|error| error.to_string())?;
+    let conn = state.reader()?;
     get_project(&conn, &project_id)?;
     let mut statement = conn
         .prepare(

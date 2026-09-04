@@ -17,6 +17,9 @@ use db::{get_db_path, init_db, DbState};
 pub fn run() {
     let db_path = get_db_path();
     let conn = init_db(&db_path).expect("Failed to initialize database");
+    if let Err(e) = db::init_read_pool(&db_path) {
+        eprintln!("[db] 只读连接池初始化失败 (将平滑降级为互斥锁): {e}");
+    }
 
     let registry = std::sync::Arc::new(tokio::sync::Mutex::new(agent::mcp::PluginRegistry::new()));
 

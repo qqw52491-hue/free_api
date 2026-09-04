@@ -1,11 +1,60 @@
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+pub type ReadPool = Pool<SqliteConnectionManager>;
+
+static READ_POOL: OnceLock<ReadPool> = OnceLock::new();
+
+/// 读连接持有包装器（自动解引用为 Connection，借用结束自动归还池中）
+pub enum DbReaderConnection<'a> {
+    Pooled(r2d2::PooledConnection<SqliteConnectionManager>),
+    Locked(std::sync::MutexGuard<'a, Connection>),
+}
+
+impl<'a> std::ops::Deref for DbReaderConnection<'a> {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            DbReaderConnection::Pooled(conn) => conn.deref(),
+            DbReaderConnection::Locked(guard) => guard.deref(),
+        }
+    }
+}
 
 /// 全局数据库状态 (Tauri managed state)
+/// 架构设计：Single-Writer Multi-Reader (SWMR) 模式
+/// - `.0`: 独占写连接互斥锁（所有写入、事务排队，杜绝 SQLITE_BUSY 并发锁冲突）
+/// - `reader()`: 并发只读连接池（独立只读连接，在 WAL 模式下多读完全并行，与写操作互不阻塞）
 #[derive(Clone)]
 pub struct DbState(pub Arc<Mutex<Connection>>);
+
+impl DbState {
+    /// 取得专职写连接（独占锁，排队写入，杜绝 SQLITE_BUSY 冲突）
+    #[inline]
+    pub fn writer(&self) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
+        self.0.lock().map_err(|e| format!("获取数据库写锁失败: {e}"))
+    }
+
+    /// 取得并发只读连接（优先从 r2d2 读连接池借出，多读完全并发，0 锁争用；
+    /// 若连接池未配置/测试环境下未初始化，自动平滑降级为互斥锁）
+    #[inline]
+    pub fn reader(&self) -> Result<DbReaderConnection<'_>, String> {
+        if let Some(pool) = READ_POOL.get() {
+            pool.get()
+                .map(DbReaderConnection::Pooled)
+                .map_err(|e| format!("从只读连接池获取连接失败: {e}"))
+        } else {
+            self.0
+                .lock()
+                .map(DbReaderConnection::Locked)
+                .map_err(|e| format!("获取数据库连接失败: {e}"))
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Platform {
@@ -101,6 +150,25 @@ pub fn mark_orphan_running_traces_interrupted(conn: &Connection) -> Result<usize
     Ok(n)
 }
 
+pub fn init_read_pool(path: &PathBuf) -> Result<ReadPool, String> {
+    let manager = SqliteConnectionManager::file(path).with_init(|c| {
+        c.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA foreign_keys=ON;
+             PRAGMA query_only=ON;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;",
+        )
+    });
+    let pool = Pool::builder()
+        .max_size(8)
+        .min_idle(Some(2))
+        .build(manager)
+        .map_err(|e| format!("初始化只读连接池失败: {e}"))?;
+    let _ = READ_POOL.set(pool.clone());
+    Ok(pool)
+}
+
 pub fn init_db(path: &PathBuf) -> Result<Connection> {
     std::fs::create_dir_all(path.parent().unwrap()).ok();
     let conn = Connection::open(path)?;
@@ -109,6 +177,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         "
         PRAGMA journal_mode=WAL;
         PRAGMA foreign_keys=ON;
+        PRAGMA synchronous=NORMAL;
+        PRAGMA busy_timeout=10000;
 
         CREATE TABLE IF NOT EXISTS platforms (
             id TEXT PRIMARY KEY,
