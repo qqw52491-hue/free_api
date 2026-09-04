@@ -679,12 +679,20 @@ pub(crate) fn parse_plan_approval_decision(reply: &str) -> Option<bool> {
     }
 
     // 2. 回退：否定信号优先于肯定信号，避免"我不太同意但先按这个来"被判为批准
-    let negative = ["【方案打回修改】", "打回修改", "\"approved\":false", "\"confirm\":false"];
+    let negative = [
+        "【方案打回修改】", "打回修改", "\"approved\":false", "\"confirm\":false",
+        "打回", "不同意", "拒绝", "不行", "别写", "不要写", "重新推演", "重新审查", "暂不批准",
+    ];
     if negative.iter().any(|m| reply.contains(m)) {
         return Some(false);
     }
-    let positive = ["【方案已批准】", "批准方案", "同意该方案", "方案通过"];
-    if positive.iter().any(|m| reply.contains(m)) {
+    let positive = [
+        "【方案已批准】", "批准方案", "同意该方案", "方案通过",
+        "批准", "同意", "通过", "好的", "好", "可以", "行", "没问题", "继续", "开始", "开始执行",
+        "ok", "yes", "approve", "go", "proceed",
+    ];
+    let reply_lower = reply.to_ascii_lowercase();
+    if positive.iter().any(|m| reply_lower.contains(m)) {
         return Some(true);
     }
 
@@ -949,7 +957,9 @@ pub async fn run_tool_phase(
             }
 
             // 仅在尚未批准时进入审查中阶段；若已批准，保留 Approved 状态，避免后续补充审查打回 Reviewing 阻塞修改
-            checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+            if !checkpoint.plan_phase.is_approved() {
+                checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+            }
             checkpoint.plan_reviewer_retry_count =
                 checkpoint.plan_reviewer_retry_count.saturating_add(1);
             checkpoint.plan_reviewer_consumed = false;
@@ -2182,16 +2192,32 @@ pub async fn run_tool_phase(
                         Some(clean_reply.chars().take(500).collect());
                 }
                 None => {
-                    // 无法判定意图时保持门禁关闭（停在 AwaitingApproval），绝不默认放行。
-                    // Agent 会在下次尝试写入时再次被拦截并重新呈报方案。
-                    let msg = "【方案审批结论无法判定】未从回复中识别出明确的批准或打回意图，\
-                               前置写入门禁保持关闭。请重新呈报方案请用户明确确认。";
-                    context.add_error_feedback(msg);
-                    app.emit(
-                        &format!("agent-log-{}", final_session_id),
-                        msg.to_string(),
-                    )
-                    .ok();
+                    // “问一次就好，一次审批全程放权”
+                    // 若用户已有非空回复且未包含打回否定词，直接放行写入，彻底避免连环死循环轰炸用户
+                    let trimmed = reply.trim();
+                    if !trimmed.is_empty()
+                        && trimmed != "人类未回复，通道异常关闭"
+                        && trimmed != "我再想想"
+                    {
+                        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                        let clean_reply = strip_plan_decision_marker(&reply);
+                        checkpoint.approved_plan_summary =
+                            Some(clean_reply.chars().take(500).collect());
+                        app.emit(
+                            &format!("agent-log-{}", final_session_id),
+                            "✅ 方案审批已放行（收到用户非反对回复，门禁解除）".to_string(),
+                        )
+                        .ok();
+                    } else {
+                        let msg = "【方案审批结论无法判定】未从回复中识别出明确的批准或打回意图，\
+                                   前置写入门禁保持关闭。请重新呈报方案请用户明确确认。";
+                        context.add_error_feedback(msg);
+                        app.emit(
+                            &format!("agent-log-{}", final_session_id),
+                            msg.to_string(),
+                        )
+                        .ok();
+                    }
                 }
             }
         }

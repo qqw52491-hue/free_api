@@ -363,6 +363,8 @@ struct TaskReq {
     session_id: String,
     goal: String,
     model_routing: Option<PartialRouting>,
+    #[serde(default)]
+    plan_mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -627,6 +629,7 @@ async fn handler_task(
         config.llm_retries,
         config.action_milestone_steps,
         config.phase_pushes,
+        req.plan_mode,
     )
     .map_err(|error| match error {
         SubmitError::InFlight => (
@@ -915,6 +918,7 @@ pub(crate) fn register_and_spawn_run(
     llm_retries: Option<u32>,
     _action_milestone_steps: u32,
     _phase_push: bool,
+    plan_mode: Option<String>,
 ) -> Result<String, SubmitError> {
     {
         let runs = runs_store().lock().expect("runs store poisoned");
@@ -973,6 +977,9 @@ pub(crate) fn register_and_spawn_run(
     let spawn_run = run_id.clone();
     let spawn_session = session_id.clone();
     let spawn_goal = goal;
+    let spawn_plan_mode = plan_mode
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "cross_review".to_string()); // 手机/通道端默认启用 cross_review 交叉审查模式
     tauri::async_runtime::spawn(async move {
         let db = spawn_app.state::<DbState>();
         let registry =
@@ -983,14 +990,14 @@ pub(crate) fn register_and_spawn_run(
             registry,
             routing,
             spawn_goal.clone(),
-            false,
+            true, // 手机端任务默认 auto_pilot: true，放手让 Agent 自主闭环
             Some(spawn_session.clone()),
             None,
             llm_retries,
             None,
             workspace_override,
             Some(spawn_run.clone()),
-            None,
+            Some(spawn_plan_mode),
         )
         .await;
     });

@@ -310,7 +310,17 @@ fn run_now(db: &DbState, params: &serde_json::Value) -> DispatchResult {
     } else {
         Some(crate::agent::channel::effective_scratch_dir_pub(&config))
     };
-    match crate::agent::channel::register_and_spawn_run(app, session_id, item.goal.clone(), routing, workspace_override, config.llm_retries, config.action_milestone_steps, config.phase_pushes)
+    match crate::agent::channel::register_and_spawn_run(
+        app,
+        session_id,
+        item.goal.clone(),
+        routing,
+        workspace_override,
+        config.llm_retries,
+        config.action_milestone_steps,
+        config.phase_pushes,
+        None,
+    )
     {
         Ok(run_id) => DispatchResult {
             stdout: format!(

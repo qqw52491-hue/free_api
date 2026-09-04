@@ -473,6 +473,7 @@ function normalizeHumanForm(raw, fallbackTitle) {
     confirm: "confirm", confirmation: "confirm", text: "text", input: "text",
     file: "file_picker", file_picker: "file_picker", upload: "file_picker", files: "file_picker",
     custom_html: "custom_html", html: "custom_html", custom: "custom_html",
+    plan_approval: "plan_approval", plan: "plan_approval", approval: "plan_approval",
   };
   const kind = aliases[rawKind] || (data.options && data.options.length ? "single_select" : "text");
   const options = (Array.isArray(data.options) ? data.options : []).slice(0, 12).map((item, index) => {
@@ -514,6 +515,7 @@ function renderAskCard(run) {
   }
 
   const kindLabels = {
+    plan_approval: "📋 方案审查与审批",
     confirm: "操作确认",
     single_select: "单项选择",
     multi_select: "多项选择",
@@ -524,7 +526,33 @@ function renderAskCard(run) {
   const formTypeLabel = kindLabels[form.kind] || "问答输入";
 
   let bodyHtml = "";
-  if (form.kind === "confirm") {
+  if (form.kind === "plan_approval") {
+    bodyHtml = `
+      <div class="human-plan-approval-box">
+        <div class="human-plan-banner">
+          <span class="banner-icon">🛡️</span>
+          <span>前置技术方案已就绪，请审阅后确认是否批准放行写入。</span>
+        </div>
+        ${form.description ? `<div class="human-plan-desc md-content">${formatMarkdown(form.description)}</div>` : ''}
+        <div class="human-confirm-box" style="margin-top: 12px;">
+          <button type="button" class="human-choice-btn confirm-btn active" onclick="submitMobilePlanApproval(true)">
+            <span>✅</span><span>批准方案并开始执行</span>
+          </button>
+          <button type="button" class="human-choice-btn cancel-btn" onclick="togglePlanRevisionInput()">
+            <span>🔄</span><span>提出修改 / 打回重推</span>
+          </button>
+        </div>
+        <div id="planRevisionWrap" class="plan-revision-wrap" style="display: none; margin-top: 10px;">
+          <textarea id="planRevisionInput" class="human-textarea" placeholder="请输入修改意见，提交后将打回 AI 重新推演方案…" rows="3"></textarea>
+          <div style="margin-top: 8px; text-align: right;">
+            <button type="button" class="human-submit-btn" style="width: auto; padding: 6px 14px; font-size: 12.5px;" onclick="submitMobilePlanApproval(false)">
+              <span>确认打回重推</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  } else if (form.kind === "confirm") {
     bodyHtml = `
       <div class="human-confirm-box">
         <button type="button" class="human-choice-btn confirm-btn ${S.humanForm.confirmValue === true ? "active" : ""}" onclick="selectHumanConfirm(true)">
@@ -585,9 +613,9 @@ function renderAskCard(run) {
     `;
   }
 
-  // 非纯文本问答时展示可选补充输入框
+  // 非纯文本问答或方案审批时展示可选补充输入框
   let writeInHtml = "";
-  if (form.kind !== "text" && form.kind !== "custom_html") {
+  if (form.kind !== "text" && form.kind !== "custom_html" && form.kind !== "plan_approval") {
     writeInHtml = `
       <div class="human-write-in-wrap">
         <label class="human-write-in-label" for="humanWriteInInput">补充说明 / 自定义要求（可选）:</label>
@@ -597,28 +625,68 @@ function renderAskCard(run) {
   }
 
   const isSubmitting = S.humanForm.isSubmitting;
-  return `
-    <section class="human-intervention-card" aria-label="需要用户协助与确认">
-      <div class="human-top-row">
-        <div class="human-badge">
-          <span class="pulse-dot"></span>
-          <span>需要人类协助</span>
-        </div>
-        <span class="human-type-label">${esc(formTypeLabel)}</span>
-      </div>
-      <h3 class="human-title">${formatMarkdown(form.title)}</h3>
-      ${form.description ? `<div class="human-desc">${formatMarkdown(form.description)}</div>` : ""}
-      ${bodyHtml}
-      ${writeInHtml}
+  const actionsBarHtml = form.kind === "plan_approval" ? "" : `
       <div class="human-actions-bar">
         <button type="button" class="human-submit-btn" id="btnSubmitHuman" onclick="submitHumanIntervention()" ${isSubmitting ? "disabled" : ""}>
           <span>${isSubmitting ? "提交中…" : "提交反馈"}</span>
           <svg viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
         </button>
       </div>
+  `;
+
+  return `
+    <section class="human-intervention-card" aria-label="需要用户协助与确认">
+      <div class="human-top-row">
+        <div class="human-badge">
+          <span class="pulse-dot"></span>
+          <span>${form.kind === "plan_approval" ? "📋 方案待审批" : "需要人类协助"}</span>
+        </div>
+        <span class="human-type-label">${esc(formTypeLabel)}</span>
+      </div>
+      <h3 class="human-title">${formatMarkdown(form.title)}</h3>
+      ${form.kind !== "plan_approval" && form.description ? `<div class="human-desc">${formatMarkdown(form.description)}</div>` : ""}
+      ${bodyHtml}
+      ${writeInHtml}
+      ${actionsBarHtml}
     </section>
   `;
 }
+
+window.togglePlanRevisionInput = function() {
+  const el = $("planRevisionWrap");
+  if (!el) return;
+  el.style.display = el.style.display === "none" ? "block" : "none";
+};
+
+window.submitMobilePlanApproval = async function(approved) {
+  if (!S.flow || !S.flow.run || S.humanForm.isSubmitting) return;
+  const f = S.flow;
+  let text = "";
+  if (approved) {
+    text = "【方案已批准】批准方案，请开始执行后续写入与测试步骤。\n<!--plan-decision:{\"approved\":true}-->";
+  } else {
+    const revEl = $("planRevisionInput");
+    const note = revEl ? revEl.value.trim() : "";
+    text = `【方案打回修改】请重新审视并按以下意见修改方案后再提交审查：\n${note || "用户打回要求重新推演方案"}\n<!--plan-decision:{\"approved\":false}-->`;
+  }
+
+  S.humanForm.isSubmitting = true;
+  updateAskCardDom();
+  try {
+    await api(`/channel/run/${f.run.run_id}/answer`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    toast(approved ? "方案已批准，Agent 开始执行" : "方案已打回，Agent 重新推演");
+    S.humanForm.runId = "";
+    S.humanForm.writeInText = "";
+    await loadFlow(f.sessionId);
+  } catch (e) {
+    toast(`提交失败: ${e.message}`);
+    S.humanForm.isSubmitting = false;
+    updateAskCardDom();
+  }
+};
 
 window.selectHumanConfirm = function(val) {
   S.humanForm.confirmValue = val;
