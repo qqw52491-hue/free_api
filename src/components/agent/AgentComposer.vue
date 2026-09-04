@@ -369,6 +369,21 @@
                         </Teleport>
                     </div>
 
+                    <!-- 🛡️ 方案审批 vs 🚀 全自动 门禁模式切换胶囊 -->
+                    <button
+                        type="button"
+                        class="composer-tool-btn plan-mode-toggle-btn"
+                        :class="{ 'is-plan-first': props.autoPilot === false }"
+                        :title="props.autoPilot === false
+                            ? '当前模式: 🛡️ 方案审批 (Plan First) - 方案就绪后须经您确认方可写入代码。点击切换为全自动模式'
+                            : '当前模式: 🚀 全自动 (Auto) - 方案内部审查后自动执行。点击切换为方案审批模式'"
+                        :disabled="isRunning"
+                        @click="$emit('update:autoPilot', props.autoPilot === false)"
+                    >
+                        <span class="plan-mode-icon">{{ props.autoPilot === false ? '🛡️' : '🚀' }}</span>
+                        <span class="plan-mode-label">{{ props.autoPilot === false ? '方案审批' : '全自动' }}</span>
+                    </button>
+
                     <!-- ⌨️ 快捷键提示小问号 -->
                     <div class="composer-shortcut-hint-wrap">
                         <button
@@ -524,11 +539,13 @@ const props = defineProps<{
     modelRouting: ModelRouting;
     telemetry?: AgentSessionTelemetry | null;
     queuedGoals?: Array<{ id: string; text: string; createdAt: number }>;
+    autoPilot?: boolean;
 }>();
 const emit = defineEmits<{
     "update:draft": [value: string];
     "update:model-routing": [routing: ModelRouting];
     "update:budget-mode": [mode: ContextBudgetMode];
+    "update:autoPilot": [value: boolean];
     submit: [payload?: { text: string; attachments: ParsedAttachment[]; mode?: "interrupt" | "queue" }];
     "cancel-queue": [index: number];
     stop: [];
@@ -1508,6 +1525,52 @@ textarea::placeholder {
     opacity: 0.35;
     cursor: not-allowed;
     pointer-events: none;
+}
+
+.composer-tools > button.plan-mode-toggle-btn {
+    width: auto;
+    height: 28px;
+    padding: 0 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    color: #a1a1aa;
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    user-select: none;
+}
+
+.composer-tools > button.plan-mode-toggle-btn:hover:not(:disabled) {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
+.composer-tools > button.plan-mode-toggle-btn.is-plan-first {
+    background: rgba(99, 102, 241, 0.12);
+    border-color: rgba(99, 102, 241, 0.35);
+    color: #a5b4fc;
+}
+
+.composer-tools > button.plan-mode-toggle-btn.is-plan-first:hover:not(:disabled) {
+    background: rgba(99, 102, 241, 0.2);
+    border-color: rgba(99, 102, 241, 0.5);
+    color: #c7d2fe;
+}
+
+.plan-mode-icon {
+    font-size: 12px;
+    line-height: 1;
+}
+
+.plan-mode-label {
+    font-size: 11.5px;
+    font-weight: 550;
+    line-height: 1;
 }
 .composer-tools > button svg {
     width: 14px;

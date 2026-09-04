@@ -69,7 +69,7 @@ export interface AgentSessionTelemetry {
     contextWindow: number;
     contextUsagePercent: number;
 }
-export type AgentHumanFormKind = "single_select" | "multi_select" | "confirm" | "file_picker" | "text" | "custom_html";
+export type AgentHumanFormKind = "single_select" | "multi_select" | "confirm" | "file_picker" | "text" | "custom_html" | "plan_approval";
 export interface AgentHumanFormOption {
     id: string;
     label: string;

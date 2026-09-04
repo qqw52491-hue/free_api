@@ -134,6 +134,7 @@ function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHumanForm
         confirm: "confirm", confirmation: "confirm", text: "text", input: "text",
         file: "file_picker", file_picker: "file_picker", upload: "file_picker", files: "file_picker",
         custom_html: "custom_html", html: "custom_html", custom: "custom_html",
+        plan_approval: "plan_approval", plan: "plan_approval", approval: "plan_approval",
     };
     const htmlCode = toText(data.html || data.custom_html || (rawKind === "custom_html" || rawKind === "html" ? data.description : ""));
     const kind = aliases[rawKind] || (htmlCode ? "custom_html" : undefined);
@@ -350,6 +351,20 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             // Ignore storage errors
         }
     });
+
+    const savedAutoPilot = localStorage.getItem("free_api_auto_pilot");
+    const autoPilot = ref<boolean>(savedAutoPilot !== "false");
+    watch(autoPilot, (val) => {
+        try {
+            localStorage.setItem("free_api_auto_pilot", String(val));
+        } catch {
+            // Ignore storage errors
+        }
+    });
+
+    function setAutoPilot(val: boolean) {
+        autoPilot.value = val;
+    }
 
     const activeStepNumber = ref<number>(1);
     const actionPhaseText = ref<string>("");
@@ -1597,7 +1612,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             await invoke("run_agent_main_loop", {
                 modelRouting: modelRouting.value,
                 goal: currentGoal.value,
-                autoPilot: true,
+                autoPilot: autoPilot.value,
                 sessionId: currentSessionId,
                 logContext: logContext.value,
                 transientLlmRequestRetries: retryAttempts.value === 0 ? 1 : Math.min(100, Math.max(1, retryAttempts.value + 1)),
@@ -1888,6 +1903,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         llmParseErrors,
         tokenUsage,
         retryAttempts,
+        autoPilot,
+        setAutoPilot,
         sessionTelemetry,
         completionMessage,
         streamingSummary,

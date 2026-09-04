@@ -739,6 +739,10 @@ pub async fn run_tool_phase(
 
     // --- B2. 受限 child reviewer：异步派发，不阻塞主循环。结果在后续 step 中由 main_loop 的 poll_completed_child_runs 注入。 ---
     let dispatch_result = if inst.get_tool().eq_ignore_ascii_case("child_reviewer") {
+        // 标记当前进入方案审查阶段，递增审查重试次数（防死循环）
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+        checkpoint.plan_reviewer_retry_count = checkpoint.plan_reviewer_retry_count.saturating_add(1);
+
         let routing = crate::agent::router::AgentRouter::route_for_role(
             context,
             model_routing,
@@ -1893,6 +1897,18 @@ pub async fn run_tool_phase(
             None => "人类未回复，通道异常关闭".to_string(),
         };
         context.add_error_feedback(&format!("【人类回复】{}", reply));
+        let is_plan_revision = reply.contains("【方案打回修改】")
+            || reply.contains("\"approved\":false")
+            || reply.contains("\"confirm\":false")
+            || reply.contains("打回修改");
+
+        if is_plan_revision {
+            checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+        } else {
+            // 人类参与交互回复或批准后，方案正式放行
+            checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+            checkpoint.approved_plan_summary = Some(reply.chars().take(500).collect());
+        }
         checkpoint.begin_planning(step_id, &context);
         save_checkpoint(state.inner(), &mut checkpoint)?;
         crate::agent::advance_run_state(
@@ -1920,6 +1936,54 @@ pub async fn run_tool_phase(
     } else {
         let is_write_tool = is_write_or_side_effect_tool(inst);
         if is_write_tool {
+            // 🛑 前置方案门禁拦截：未获得方案审批前，禁止直接调用破坏性修改工具
+            if !checkpoint.plan_phase.is_approved() {
+                if !checkpoint.auto_pilot {
+                    // 方案审批模式 (Plan Approval First Mode)：必须通过 ask_human (kind: 'plan_approval') 得到人类明确确认放行
+                    let result = DispatchResult {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "【🚨 前置方案审批门禁拦截：当前处于方案审批模式】\n检测到当前尚未获得用户的人工方案审批放行，禁止直接调用写文件或执行变更工具。\n请先调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的完整技术方案呈现给用户；\n待用户在交互界面上审阅并点击【批准方案】后，门禁将自动放行修改。本次写入已被安全拦截，目标文件未受影响。".to_string(),
+                        route: "plan_gatekeeper:need_human_approval".to_string(),
+                    };
+                    emit_tool_event(
+                        app,
+                        final_session_id,
+                        step_id,
+                        inst,
+                        "failed",
+                        Some(result.route.clone()),
+                        Some(false),
+                        &result.stderr,
+                        Some(tool_started_at.elapsed().as_millis()),
+                    );
+                    return Ok(result);
+                } else if step_id == 0 && context.turns_history.is_empty() {
+                    // 全自动模式 (Auto-pilot Mode)：首轮未取证即尝试直接修改代码
+                    let result = DispatchResult {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "【🚨 前置方案门禁拦截：尚未确立经论证的技术方案】\n检测到在首轮未完成只读排查与方案阐述前尝试直接调用了写代码工具。\n为保证工程契约安全，请先遵循【假设驱动与主动证伪法则】：\n1. 优先通过只读工具（如 read_file/grep_search）排查代码并排除错误假设，锁定唯一根因；\n2. 输出清晰的技术方案与反证推演说明；\n方案确认后再执行修改。本次写入已被安全拦截，目标文件未受影响。".to_string(),
+                        route: "plan_gatekeeper:need_plan".to_string(),
+                    };
+                    emit_tool_event(
+                        app,
+                        final_session_id,
+                        step_id,
+                        inst,
+                        "failed",
+                        Some(result.route.clone()),
+                        Some(false),
+                        &result.stderr,
+                        Some(tool_started_at.elapsed().as_millis()),
+                    );
+                    return Ok(result);
+                } else {
+                    // 全自动模式下，经历了前期只读取证与规划阐述后，前置门禁放行
+                    checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                }
+            }
+
             if let Some(scope_guard) = context
                 .resource_scope
                 .guard_known_outside_write(&inst.get_tool(), &inst.get_params())

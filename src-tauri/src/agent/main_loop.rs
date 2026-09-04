@@ -953,6 +953,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
+    checkpoint.auto_pilot = auto_pilot;
     // 初始工作区是会话选择的已声明资源；恢复时保留 checkpoint 中已有的显式契约。
     // 仅在显式项目会话、存在 workspace_override 或 auto_pilot 模式下才声明主工作区。
     // 在未选项目的通用自由会话中，主工作区保持为 None（自由模式），避免将宿主机启动目录误作为资源约束强塞给 Agent 及外部 MCP。

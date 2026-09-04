@@ -43,6 +43,36 @@ impl AgentPhase {
     }
 }
 
+/// 方案制定与前置审查门禁的生命周期阶段
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanPhase {
+    /// 1. 探索取证中：只读探索事实，尚未形成经过审查的最终方案
+    #[default]
+    Exploring,
+    /// 2. 方案审查中：主子 Agent 正在进行反证与挑刺审查
+    Reviewing,
+    /// 3. 等待人类审批：方案已完备，等待人类在 UI 点击确认或提出修改意见
+    AwaitingApproval,
+    /// 4. 方案已批准：前置门禁放行，允许执行代码写操作
+    Approved,
+}
+
+impl PlanPhase {
+    pub fn is_approved(self) -> bool {
+        matches!(self, Self::Approved)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exploring => "exploring",
+            Self::Reviewing => "reviewing",
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Approved => "approved",
+        }
+    }
+}
+
 /// 崩溃后处理 pending 调用的策略。默认保守，未知工具不自动重跑。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -428,10 +458,26 @@ pub struct AgentCheckpoint {
     /// 上次审查结果（当 diff_hash 未变时复用上次拦截，避免浪费 Token）
     #[serde(default)]
     pub last_review_result: Option<crate::agent::reviewer_gatekeeper::ReviewResult>,
+    /// 方案制定与前置门禁阶段
+    #[serde(default)]
+    pub plan_phase: PlanPhase,
+    /// 方案审查重试计数（防子 Agent 内部讨论死循环，上限 2 轮）
+    #[serde(default)]
+    pub plan_reviewer_retry_count: u32,
+    /// 最终批准的方案摘要（用于防方案漂移与核对）
+    #[serde(default)]
+    pub approved_plan_summary: Option<String>,
+    /// 运行模式：true 为全自动模式 (Auto-pilot)，false 为方案审批模式 (Plan Approval First)
+    #[serde(default = "default_auto_pilot")]
+    pub auto_pilot: bool,
     pub last_error: Option<String>,
     pub version: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_auto_pilot() -> bool {
+    true
 }
 
 impl AgentCheckpoint {
@@ -450,6 +496,10 @@ impl AgentCheckpoint {
             reviewer_retry_count: 0,
             last_reviewed_diff_hash: None,
             last_review_result: None,
+            plan_phase: PlanPhase::Exploring,
+            plan_reviewer_retry_count: 0,
+            approved_plan_summary: None,
+            auto_pilot: true,
             last_error: None,
             version: 0,
             created_at: now.clone(),
@@ -684,6 +734,10 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
                 Some(mut latest) => {
                     latest.data = checkpoint.data.clone();
                     latest.phase = checkpoint.phase;
+                    latest.plan_phase = checkpoint.plan_phase;
+                    latest.plan_reviewer_retry_count = checkpoint.plan_reviewer_retry_count;
+                    latest.approved_plan_summary = checkpoint.approved_plan_summary.clone();
+                    latest.auto_pilot = checkpoint.auto_pilot;
                     latest.pending = checkpoint.pending.clone();
                     latest.prepared_instruction = checkpoint.prepared_instruction.clone();
                     latest.step_id = checkpoint.step_id;
@@ -691,6 +745,10 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
                     checkpoint.version = latest.version;
                     checkpoint.data = latest.data;
                     checkpoint.phase = latest.phase;
+                    checkpoint.plan_phase = latest.plan_phase;
+                    checkpoint.plan_reviewer_retry_count = latest.plan_reviewer_retry_count;
+                    checkpoint.approved_plan_summary = latest.approved_plan_summary;
+                    checkpoint.auto_pilot = latest.auto_pilot;
                     checkpoint.pending = latest.pending;
                     checkpoint.prepared_instruction = latest.prepared_instruction;
                     checkpoint.step_id = latest.step_id;
@@ -709,6 +767,10 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
 pub struct AgentCheckpointSummary {
     pub run_id: String,
     pub phase: String,
+    #[serde(default)]
+    pub plan_phase: Option<String>,
+    #[serde(default = "default_auto_pilot")]
+    pub auto_pilot: bool,
     pub step_id: usize,
     pub user_goal: String,
     pub last_error: Option<String>,
@@ -746,6 +808,8 @@ pub async fn get_agent_checkpoint(
         AgentCheckpointSummary {
             run_id: cp.run_id,
             phase: cp.phase.as_str().to_string(),
+            plan_phase: Some(cp.plan_phase.as_str().to_string()),
+            auto_pilot: cp.auto_pilot,
             step_id: cp.step_id,
             user_goal: cp.data.user_goal,
             last_error: cp.last_error,

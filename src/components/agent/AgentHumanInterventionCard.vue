@@ -1,9 +1,9 @@
 <template>
-  <section class="human-intervention-card" aria-label="需要用户协助与确认">
+  <section class="human-intervention-card" :class="{ 'is-plan-approval': formKind === 'plan_approval' }" aria-label="需要用户协助与确认">
     <div class="card-top-row">
-      <div class="card-badge">
+      <div class="card-badge" :class="{ 'plan-badge': formKind === 'plan_approval' }">
         <span class="pulse-dot"></span>
-        <span>需要人类协助</span>
+        <span>{{ formKind === 'plan_approval' ? '📋 架构方案审查与审批' : '需要人类协助' }}</span>
       </div>
       <span class="card-prompt-type">{{ formTypeLabel }}</span>
     </div>
@@ -11,6 +11,85 @@
     <div v-if="renderedTitle" class="intervention-title-md md-content" v-html="renderedTitle"></div>
     <h3 v-else class="intervention-title">{{ formTitle }}</h3>
     <div v-if="renderedDescription" class="intervention-desc md-content" v-html="renderedDescription"></div>
+
+    <!-- 0. 架构方案审查与审批 (Plan Approval) -->
+    <div v-if="formKind === 'plan_approval'" class="options-container plan-approval-box">
+      <div class="plan-approval-banner">
+        <span class="banner-icon">🛡️</span>
+        <div class="banner-text">
+          <strong>前置技术方案与审查报告已就绪</strong>
+          <span>请审阅上述排查证据与推演方案。批准后 Agent 将放行门禁并开始写入代码；如有疑虑可提出修改建议打回重新推演。</span>
+        </div>
+      </div>
+
+      <!-- 如果有子选项（例如可选架构路径），支持选择 -->
+      <div v-if="formOptions.length > 0" class="list-box plan-options-list">
+        <div
+          v-for="opt in formOptions"
+          :key="opt.id"
+          class="option-item"
+          :class="{ selected: singleSelectedId === opt.id }"
+          @click="singleSelectedId = opt.id"
+        >
+          <div class="radio-circle">
+            <div class="radio-inner" v-if="singleSelectedId === opt.id"></div>
+          </div>
+          <div class="option-text-wrap">
+            <span class="option-label">{{ opt.label }}</span>
+            <small v-if="opt.description" class="option-sub">{{ opt.description }}</small>
+          </div>
+        </div>
+      </div>
+
+      <!-- 快速决策操作栏 -->
+      <div class="plan-decision-actions">
+        <button
+          type="button"
+          class="choice-btn approve-btn"
+          :disabled="isSending"
+          @click="handlePlanApprove"
+        >
+          <span class="choice-icon">✅</span>
+          <span>{{ isSending ? '提交中…' : '批准方案并开始执行' }}</span>
+        </button>
+
+        <button
+          type="button"
+          class="choice-btn revise-btn"
+          :class="{ active: showRevisionInput }"
+          :disabled="isSending"
+          @click="toggleRevisionInput"
+        >
+          <span class="choice-icon">🔄</span>
+          <span>{{ showRevisionInput ? '收起修改建议' : '提出修改建议 / 打回推演' }}</span>
+        </button>
+      </div>
+
+      <!-- 打回修改建议输入区 (展开/显式) -->
+      <div v-if="showRevisionInput" class="plan-revision-wrap">
+        <label class="revision-label" for="plan-revision-field">
+          <span>修改建议与打回意见（提交后将打回 AI 重新推演方案）:</span>
+        </label>
+        <textarea
+          id="plan-revision-field"
+          ref="planRevisionRef"
+          v-model="customWriteInText"
+          class="intervention-textarea revision-textarea"
+          placeholder="例如：请考虑边界情况下的并发性能，并补充单元测试方案后再重新审查..."
+          rows="3"
+        />
+        <div class="revision-actions">
+          <button
+            type="button"
+            class="submit-revision-btn"
+            :disabled="!customWriteInText.trim() || isSending"
+            @click="handlePlanRejectAndRevise"
+          >
+            <span>{{ isSending ? '提交中…' : '打回并要求重新推演方案' }}</span>
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- 1. 二次确认 (Confirm) -->
     <div v-if="formKind === 'confirm'" class="options-container confirm-box">
@@ -121,7 +200,7 @@
 
     <!-- 7. 兜底/附加补充输入框 (在选择题/确认题下方提供可选补充说明) -->
     <div
-      v-if="formKind !== 'custom_html' && formKind !== 'text' && !customHtmlCode"
+      v-if="formKind !== 'custom_html' && formKind !== 'text' && formKind !== 'plan_approval' && !customHtmlCode"
       class="write-in-wrap"
       @click="focusWriteInInput"
     >
@@ -140,7 +219,7 @@
     </div>
 
     <!-- 提交动作栏 (非自定义 HTML 时展示标准提交按钮) -->
-    <div v-if="formKind !== 'custom_html' && !customHtmlCode" class="intervention-actions">
+    <div v-if="formKind !== 'custom_html' && formKind !== 'plan_approval' && !customHtmlCode" class="intervention-actions">
       <button
         type="button"
         class="submit-intervention-btn"
@@ -204,6 +283,7 @@ const formTypeLabel = computed(() => {
     case "multi_select": return "多项选择";
     case "file_picker": return "文件上传";
     case "custom_html": return "自定义交互应用";
+    case "plan_approval": return "方案审查与审批";
     case "text": return "问答输入";
     default: return "问答输入";
   }
@@ -212,6 +292,37 @@ const formTypeLabel = computed(() => {
 // 状态与引用
 const textInputRef = ref<HTMLTextAreaElement | null>(null);
 const writeInInputRef = ref<HTMLInputElement | null>(null);
+const planRevisionRef = ref<HTMLTextAreaElement | null>(null);
+const showRevisionInput = ref(false);
+
+function toggleRevisionInput() {
+  showRevisionInput.value = !showRevisionInput.value;
+  if (showRevisionInput.value) {
+    nextTick(() => {
+      planRevisionRef.value?.focus();
+    });
+  }
+}
+
+function handlePlanApprove() {
+  if (props.isSending) return;
+  const parts: string[] = ["【方案已批准】批准方案，请开始执行后续写入与测试步骤。"];
+  if (formOptions.value.length > 0 && singleSelectedId.value) {
+    const matched = formOptions.value.find((o) => o.id === singleSelectedId.value);
+    parts.push(`【所选方案选项】: ${matched?.label || singleSelectedId.value}`);
+  }
+  if (customWriteInText.value.trim()) {
+    parts.push(`【补充执行要求】: ${customWriteInText.value.trim()}`);
+  }
+  emit("submit", parts.join("\n"));
+}
+
+function handlePlanRejectAndRevise() {
+  if (!customWriteInText.value.trim() || props.isSending) return;
+  const note = customWriteInText.value.trim();
+  const feedback = `【方案打回修改】请重新审视并按以下意见修改方案后再提交审查：\n${note}`;
+  emit("submit", feedback);
+}
 
 const confirmValue = ref<boolean | null>(
   typeof props.humanForm?.defaultValue === "boolean" ? props.humanForm.defaultValue : true
@@ -751,5 +862,167 @@ function handleCustomHtmlCancel(reason: string) {
 .submit-intervention-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* 📋 架构方案审查与审批卡片专用美化 */
+.human-intervention-card.is-plan-approval {
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  background: linear-gradient(180deg, #181822 0%, #121217 100%);
+  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.55), 0 0 20px rgba(99, 102, 241, 0.1);
+}
+
+.card-badge.plan-badge {
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  color: #a5b4fc;
+}
+
+.card-badge.plan-badge .pulse-dot {
+  background: #818cf8;
+  box-shadow: 0 0 8px #818cf8;
+}
+
+.plan-approval-banner {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  margin-bottom: 14px;
+}
+
+.banner-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  line-height: 1.2;
+}
+
+.banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.banner-text strong {
+  font-size: 13px;
+  color: #e0e7ff;
+}
+
+.banner-text span {
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+
+.plan-options-list {
+  margin-bottom: 14px;
+}
+
+.plan-decision-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.approve-btn {
+  flex: 1;
+  min-width: 200px;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important;
+  color: #ffffff !important;
+  border: none !important;
+  font-weight: 650;
+  padding: 10px 18px;
+  box-shadow: 0 2px 12px rgba(16, 185, 129, 0.35);
+  transition: all 0.2s ease;
+}
+
+.approve-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #059669 0%, #047857 100%) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.45);
+}
+
+.revise-btn {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  color: #cbd5e1 !important;
+  padding: 10px 16px;
+  transition: all 0.2s ease;
+}
+
+.revise-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: rgba(245, 158, 11, 0.4) !important;
+  color: #fbbf24 !important;
+}
+
+.revise-btn.active {
+  border-color: #f59e0b !important;
+  background: rgba(245, 158, 11, 0.12) !important;
+  color: #f59e0b !important;
+}
+
+.plan-revision-wrap {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.revision-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #fbbf24;
+}
+
+.revision-textarea {
+  width: 100%;
+  resize: vertical;
+  background: #111113;
+  border: 1px solid #27272a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: #f4f4f5;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.revision-textarea:focus {
+  border-color: #f59e0b;
+  outline: none;
+}
+
+.revision-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.submit-revision-btn {
+  background: #f59e0b;
+  color: #18181b;
+  border: none;
+  border-radius: 6px;
+  padding: 7px 16px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.submit-revision-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.submit-revision-btn:hover:not(:disabled) {
+  background: #fbbf24;
+  transform: translateY(-1px);
 }
 </style>
