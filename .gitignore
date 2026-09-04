@@ -41,3 +41,4 @@ test-artifacts/
 src-tauri/.rpa_profile/
 .attachments/
 .workbuddy/
+.writer-*/

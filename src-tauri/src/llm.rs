@@ -770,8 +770,12 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
     let mut resp = tokio::select! {
         result = &mut request => result.map_err(|e| format!("请求失败: {}", e))?,
         changed = interrupt_rx.changed() => {
-            let _ = changed;
-            return Err(STREAM_INTERRUPTED_ERROR.to_string());
+            if changed.is_ok() {
+                return Err(STREAM_INTERRUPTED_ERROR.to_string());
+            } else {
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
         }
     };
 
@@ -797,8 +801,12 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
             let retry_resp = tokio::select! {
                 result = &mut retry_req => result.map_err(|e| format!("自愈重试请求失败: {}", e))?,
                 changed = interrupt_rx.changed() => {
-                    let _ = changed;
-                    return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                    if changed.is_ok() {
+                        return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                    } else {
+                        std::future::pending::<()>().await;
+                        unreachable!()
+                    }
                 }
             };
             if retry_resp.status().is_success() {
@@ -824,8 +832,12 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
         let item = tokio::select! {
             next = stream.next() => next,
             changed = interrupt_rx.changed() => {
-                let _ = changed;
-                return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                if changed.is_ok() {
+                    return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                } else {
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
             }
         };
         let Some(item) = item else {
@@ -1092,8 +1104,11 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                                 }
                             },
                             changed = interrupt_rx.changed() => {
-                                let _ = changed;
-                                return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                                if changed.is_ok() {
+                                    return Err(STREAM_INTERRUPTED_ERROR.to_string());
+                                } else {
+                                    std::future::pending::<()>().await;
+                                }
                             }
                         }
                     }
@@ -1195,8 +1210,12 @@ pub async fn stream_with_resilient_retry<F: FnMut(StreamEvent) -> bool>(
         let cancelled = tokio::select! {
             _ = tokio::time::sleep(wait) => false,
             changed = interrupt_rx.changed() => {
-                let _ = changed;
-                true
+                if changed.is_ok() {
+                    true
+                } else {
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
             }
         };
         if cancelled {

@@ -2262,11 +2262,11 @@ pub async fn run_tool_phase(
             res = &mut tool_task => {
                 res.map_err(|e| e.to_string())?
             }
-            control = rx.recv() => {
+            Some(control) = rx.recv() => {
                 let interrupt_reason = match control {
-                    Some(HumanControl::Cancel) => "用户请求停止当前任务。".to_string(),
-                    Some(HumanControl::ReplaceGoal(goal)) => format!("用户提交了新的任务目标：{}（已中断前序工具）", goal),
-                    Some(HumanControl::Answer(_)) | None => "用户请求中断当前任务。".to_string(),
+                    HumanControl::Cancel => "用户请求停止当前任务。".to_string(),
+                    HumanControl::ReplaceGoal(goal) => format!("用户提交了新的任务目标：{}（已中断前序工具）", goal),
+                    HumanControl::Answer(_) => "用户请求中断当前任务。".to_string(),
                 };
 
                 if is_write_tool {
