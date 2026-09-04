@@ -35,6 +35,7 @@ import {
     type LlmParseErrorItem,
     type ParsedAttachment,
     type ModelRouting,
+    type PlanExecutionMode,
 } from "../components/agent/types";
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
 import { extractWorkerDetails, parseWorkerArtifacts } from "../components/agent/workerUtils";
@@ -353,15 +354,44 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         }
     });
 
+    const savedPlanMode = localStorage.getItem("free_api_plan_mode");
     const savedAutoPilot = localStorage.getItem("free_api_auto_pilot");
-    const autoPilot = ref<boolean>(savedAutoPilot !== "false");
+    const initialPlanMode: PlanExecutionMode =
+        savedPlanMode === "cross_review" || savedPlanMode === "plan_approval" || savedPlanMode === "auto"
+            ? savedPlanMode
+            : savedAutoPilot === "false"
+                ? "plan_approval"
+                : "auto";
+
+    const planMode = ref<PlanExecutionMode>(initialPlanMode);
+    const autoPilot = ref<boolean>(initialPlanMode !== "plan_approval");
+
+    watch(planMode, (val) => {
+        try {
+            localStorage.setItem("free_api_plan_mode", val);
+            localStorage.setItem("free_api_auto_pilot", String(val !== "plan_approval"));
+        } catch {
+            // Ignore storage errors
+        }
+        autoPilot.value = val !== "plan_approval";
+    });
+
     watch(autoPilot, (val) => {
         try {
             localStorage.setItem("free_api_auto_pilot", String(val));
         } catch {
             // Ignore storage errors
         }
+        if (!val && planMode.value !== "plan_approval") {
+            planMode.value = "plan_approval";
+        } else if (val && planMode.value === "plan_approval") {
+            planMode.value = "auto";
+        }
     });
+
+    function setPlanMode(mode: PlanExecutionMode) {
+        planMode.value = mode;
+    }
 
     function setAutoPilot(val: boolean) {
         autoPilot.value = val;
@@ -1614,6 +1644,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 modelRouting: modelRouting.value,
                 goal: currentGoal.value,
                 autoPilot: autoPilot.value,
+                planMode: planMode.value,
                 sessionId: currentSessionId,
                 logContext: logContext.value,
                 transientLlmRequestRetries: retryAttempts.value === 0 ? 1 : Math.min(100, Math.max(1, retryAttempts.value + 1)),
@@ -1906,6 +1937,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         llmParseErrors,
         tokenUsage,
         retryAttempts,
+        planMode,
+        setPlanMode,
         autoPilot,
         setAutoPilot,
         sessionTelemetry,

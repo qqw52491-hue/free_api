@@ -73,6 +73,46 @@ impl PlanPhase {
     }
 }
 
+/// 方案与执行前置门禁模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanExecutionMode {
+    /// 🚀 全自动模式 (Auto)：只读排查与初步规划后直接放行修改
+    #[default]
+    Auto,
+    /// 🔍 双 Agent 交叉审查模式 (Cross-review)：动笔前必须派发 child_reviewer 并消费其反驳推演结论
+    CrossReview,
+    /// 🛡️ 方案审批模式 (Plan Approval First)：动笔前必须由人类在 UI 明确点击【批准方案】
+    PlanApproval,
+}
+
+impl PlanExecutionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::CrossReview => "cross_review",
+            Self::PlanApproval => "plan_approval",
+        }
+    }
+
+    pub fn from_str_or_auto_pilot(mode: Option<&str>, auto_pilot: bool) -> Self {
+        match mode.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("cross_review") | Some("cross-review") | Some("crossreview") => Self::CrossReview,
+            Some("plan_approval") | Some("plan-approval") | Some("plan") | Some("approval") => {
+                Self::PlanApproval
+            }
+            Some("auto") | Some("auto_pilot") | Some("autopilot") => Self::Auto,
+            _ => {
+                if auto_pilot {
+                    Self::Auto
+                } else {
+                    Self::PlanApproval
+                }
+            }
+        }
+    }
+}
+
 /// 崩溃后处理 pending 调用的策略。默认保守，未知工具不自动重跑。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -470,7 +510,13 @@ pub struct AgentCheckpoint {
     /// 最终批准的方案摘要（用于防方案漂移与核对）
     #[serde(default)]
     pub approved_plan_summary: Option<String>,
-    /// 运行模式：true 为全自动模式 (Auto-pilot)，false 为方案审批模式 (Plan Approval First)
+    /// 运行执行模式：Auto（全自动）、CrossReview（交叉审查）、PlanApproval（方案审批）
+    #[serde(default)]
+    pub plan_mode: PlanExecutionMode,
+    /// 方案审查结果是否已被主循环或 wait_jobs 消费并注入上下文（“问过”且“听过”）
+    #[serde(default)]
+    pub plan_reviewer_consumed: bool,
+    /// 运行模式兼容字段：true 为全自动/自主模式，false 为方案审批模式
     #[serde(default = "default_auto_pilot")]
     pub auto_pilot: bool,
     pub last_error: Option<String>,
@@ -503,6 +549,8 @@ impl AgentCheckpoint {
             plan_phase: PlanPhase::Exploring,
             plan_reviewer_retry_count: 0,
             approved_plan_summary: None,
+            plan_mode: PlanExecutionMode::Auto,
+            plan_reviewer_consumed: false,
             auto_pilot: true,
             last_error: None,
             version: 0,
@@ -515,17 +563,27 @@ impl AgentCheckpoint {
         self.data = DurableAgentContext::capture(context);
     }
 
-    /// 模式切换守卫：从全自动模式切换为方案审批模式时，自动授予（无人工留痕）的
-    /// Approved 不再可信，重置为 Reviewing 要求重新经过人工审批；
-    /// 人工批准过的方案（approved_plan_summary 有留痕）保持放行，避免误伤已确认状态。
-    /// 必须在更新 auto_pilot 字段之前调用（依赖切换前的旧值）。
-    pub fn reconcile_plan_phase_for_mode_switch(&mut self, new_auto_pilot: bool) {
-        if self.auto_pilot
-            && !new_auto_pilot
-            && self.plan_phase.is_approved()
-            && self.approved_plan_summary.is_none()
-        {
-            self.plan_phase = PlanPhase::Reviewing;
+    /// 模式切换守卫：
+    /// 1. 从全自动或交叉审查切为方案审批模式时，自动授予（无人工留痕）的 Approved 不再可信，重置为 Reviewing；
+    ///    人工批准过的方案（approved_plan_summary 有留痕）保持放行，避免误伤已确认状态。
+    /// 2. 切换为交叉审查模式时，若当前的 Approved 是全自动盲放行（既无人工审批也未消费过审查结论），
+    ///    同样重置为 Reviewing 要求完成审查推演；
+    pub fn reconcile_plan_phase_for_mode_switch(&mut self, new_mode: PlanExecutionMode) {
+        match new_mode {
+            PlanExecutionMode::PlanApproval => {
+                if self.plan_phase.is_approved() && self.approved_plan_summary.is_none() {
+                    self.plan_phase = PlanPhase::Reviewing;
+                }
+            }
+            PlanExecutionMode::CrossReview => {
+                if self.plan_phase.is_approved()
+                    && self.approved_plan_summary.is_none()
+                    && !self.plan_reviewer_consumed
+                {
+                    self.plan_phase = PlanPhase::Reviewing;
+                }
+            }
+            PlanExecutionMode::Auto => {}
         }
     }
 
@@ -755,6 +813,8 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
                     latest.plan_phase = checkpoint.plan_phase;
                     latest.plan_reviewer_retry_count = checkpoint.plan_reviewer_retry_count;
                     latest.approved_plan_summary = checkpoint.approved_plan_summary.clone();
+                    latest.plan_mode = checkpoint.plan_mode;
+                    latest.plan_reviewer_consumed = checkpoint.plan_reviewer_consumed;
                     latest.auto_pilot = checkpoint.auto_pilot;
                     latest.finish_reviewed = checkpoint.finish_reviewed;
                     latest.finish_challenge_count = checkpoint.finish_challenge_count;
@@ -768,6 +828,8 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
                     checkpoint.plan_phase = latest.plan_phase;
                     checkpoint.plan_reviewer_retry_count = latest.plan_reviewer_retry_count;
                     checkpoint.approved_plan_summary = latest.approved_plan_summary;
+                    checkpoint.plan_mode = latest.plan_mode;
+                    checkpoint.plan_reviewer_consumed = latest.plan_reviewer_consumed;
                     checkpoint.auto_pilot = latest.auto_pilot;
                     checkpoint.finish_reviewed = latest.finish_reviewed;
                     checkpoint.finish_challenge_count = latest.finish_challenge_count;
@@ -791,6 +853,8 @@ pub struct AgentCheckpointSummary {
     pub phase: String,
     #[serde(default)]
     pub plan_phase: Option<String>,
+    #[serde(default)]
+    pub plan_mode: Option<String>,
     #[serde(default = "default_auto_pilot")]
     pub auto_pilot: bool,
     pub step_id: usize,
@@ -831,6 +895,7 @@ pub async fn get_agent_checkpoint(
             run_id: cp.run_id,
             phase: cp.phase.as_str().to_string(),
             plan_phase: Some(cp.plan_phase.as_str().to_string()),
+            plan_mode: Some(cp.plan_mode.as_str().to_string()),
             auto_pilot: cp.auto_pilot,
             step_id: cp.step_id,
             user_goal: cp.data.user_goal,

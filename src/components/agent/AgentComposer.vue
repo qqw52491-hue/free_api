@@ -369,19 +369,20 @@
                         </Teleport>
                     </div>
 
-                    <!-- 🛡️ 方案审批 vs 🚀 全自动 门禁模式切换胶囊 -->
+                    <!-- 🚀 全自动 vs 🔍 交叉审查 vs 🛡️ 方案审批 门禁模式切换胶囊 -->
                     <button
                         type="button"
                         class="composer-tool-btn plan-mode-toggle-btn"
-                        :class="{ 'is-plan-first': props.autoPilot === false }"
-                        :title="props.autoPilot === false
-                            ? '当前模式: 🛡️ 方案审批 (Plan First) - 方案就绪后须经您确认方可写入代码。点击切换为全自动模式'
-                            : '当前模式: 🚀 全自动 (Auto) - 方案内部审查后自动执行。点击切换为方案审批模式'"
+                        :class="{
+                            'is-plan-first': currentPlanMode === 'plan_approval',
+                            'is-cross-review': currentPlanMode === 'cross_review',
+                        }"
+                        :title="planModeTooltip"
                         :disabled="isRunning"
-                        @click="$emit('update:autoPilot', props.autoPilot === false)"
+                        @click="cyclePlanMode"
                     >
-                        <span class="plan-mode-icon">{{ props.autoPilot === false ? '🛡️' : '🚀' }}</span>
-                        <span class="plan-mode-label">{{ props.autoPilot === false ? '方案审批' : '全自动' }}</span>
+                        <span class="plan-mode-icon">{{ planModeIcon }}</span>
+                        <span class="plan-mode-label">{{ planModeLabel }}</span>
                     </button>
 
                     <!-- ⌨️ 快捷键提示小问号 -->
@@ -523,6 +524,7 @@ import {
     type AgentSessionTelemetry,
     type ContextBudgetMode,
     type ModelRouting,
+    type PlanExecutionMode,
     type ReasoningEffort,
 } from "./types";
 
@@ -540,18 +542,73 @@ const props = defineProps<{
     telemetry?: AgentSessionTelemetry | null;
     queuedGoals?: Array<{ id: string; text: string; createdAt: number }>;
     autoPilot?: boolean;
+    planMode?: PlanExecutionMode;
 }>();
 const emit = defineEmits<{
     "update:draft": [value: string];
     "update:model-routing": [routing: ModelRouting];
     "update:budget-mode": [mode: ContextBudgetMode];
     "update:autoPilot": [value: boolean];
+    "update:planMode": [mode: PlanExecutionMode];
     submit: [payload?: { text: string; attachments: ParsedAttachment[]; mode?: "interrupt" | "queue" }];
     "cancel-queue": [index: number];
     stop: [];
     "open-settings": [];
     "attach-files": [paths: string[]];
 }>();
+
+const currentPlanMode = computed<PlanExecutionMode>(() => {
+    if (props.planMode) return props.planMode;
+    return props.autoPilot === false ? "plan_approval" : "auto";
+});
+
+const planModeIcon = computed(() => {
+    switch (currentPlanMode.value) {
+        case "cross_review":
+            return "🔍";
+        case "plan_approval":
+            return "🛡️";
+        case "auto":
+        default:
+            return "🚀";
+    }
+});
+
+const planModeLabel = computed(() => {
+    switch (currentPlanMode.value) {
+        case "cross_review":
+            return "交叉审查";
+        case "plan_approval":
+            return "方案审批";
+        case "auto":
+        default:
+            return "全自动";
+    }
+});
+
+const planModeTooltip = computed(() => {
+    switch (currentPlanMode.value) {
+        case "auto":
+            return "当前模式: 🚀 全自动 (Auto) - 探索排查后直接实施。点击切换为双 Agent 交叉审查";
+        case "cross_review":
+            return "当前模式: 🔍 交叉审查 (Cross-review) - 动笔前强制由子 Agent 独立推演挑刺。点击切换为人工方案审批";
+        case "plan_approval":
+            return "当前模式: 🛡️ 方案审批 (Plan First) - 方案就绪后须经您确认方可写入代码。点击切换为全自动模式";
+        default:
+            return "";
+    }
+});
+
+function cyclePlanMode() {
+    const nextMode: PlanExecutionMode =
+        currentPlanMode.value === "auto"
+            ? "cross_review"
+            : currentPlanMode.value === "cross_review"
+                ? "plan_approval"
+                : "auto";
+    emit("update:planMode", nextMode);
+    emit("update:autoPilot", nextMode !== "plan_approval");
+}
 
 const submitMode = ref<"interrupt" | "queue">("interrupt");
 const showShortcutTooltip = ref(false);
@@ -1548,6 +1605,18 @@ textarea::placeholder {
     color: #ffffff;
     background: rgba(255, 255, 255, 0.08);
     border-color: rgba(255, 255, 255, 0.18);
+}
+
+.composer-tools > button.plan-mode-toggle-btn.is-cross-review {
+    background: rgba(16, 185, 129, 0.12);
+    border-color: rgba(16, 185, 129, 0.35);
+    color: #6ee7b7;
+}
+
+.composer-tools > button.plan-mode-toggle-btn.is-cross-review:hover:not(:disabled) {
+    background: rgba(16, 185, 129, 0.2);
+    border-color: rgba(16, 185, 129, 0.5);
+    color: #a7f3d0;
 }
 
 .composer-tools > button.plan-mode-toggle-btn.is-plan-first {

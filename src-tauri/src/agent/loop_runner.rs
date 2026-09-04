@@ -692,6 +692,73 @@ pub(crate) fn parse_plan_approval_decision(reply: &str) -> Option<bool> {
     None
 }
 
+/// 统合前置写入门禁判定（支持全自动、双 Agent 交叉审查、人工方案审批三种模式）
+/// - 若放行返回 None，并适时将 plan_phase 置为 Approved；
+/// - 若拦截返回 Some(DispatchResult)。
+pub(crate) fn check_pre_write_gatekeeper(
+    checkpoint: &mut AgentCheckpoint,
+    context: &crate::agent::context::SandwichContext,
+    db: &DbState,
+    parent_run_id: &str,
+    step_id: usize,
+    is_resume_child: bool,
+) -> Option<DispatchResult> {
+    if checkpoint.plan_phase.is_approved() {
+        return None;
+    }
+
+    match checkpoint.plan_mode {
+        crate::agent::checkpoint::PlanExecutionMode::PlanApproval => {
+            let stderr = if is_resume_child {
+                "【🚨 前置方案审批门禁拦截：当前处于方案审批模式】\n检测到尝试通过 resume_child 恢复写入型子 Agent 继续修改代码，该路径同样需要人工方案审批放行。\n请先调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的完整技术方案呈现给用户；\n待用户在交互界面上审阅并点击【批准方案】后，门禁将自动放行修改。本次恢复已被安全拦截，目标文件未受影响。".to_string()
+            } else {
+                "【🚨 前置方案审批门禁拦截：当前处于方案审批模式】\n检测到当前尚未获得用户的人工方案审批放行，禁止直接调用写文件、派发写入子 Agent 或执行变更工具。\n请先调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的完整技术方案呈现给用户；\n待用户在交互界面上审阅并点击【批准方案】后，门禁将自动放行修改。本次操作已被安全拦截，目标未受影响。".to_string()
+            };
+            Some(DispatchResult {
+                success: false,
+                stdout: String::new(),
+                stderr,
+                route: "plan_gatekeeper:need_human_approval".to_string(),
+            })
+        }
+        crate::agent::checkpoint::PlanExecutionMode::CrossReview => {
+            if checkpoint.plan_reviewer_retry_count == 0 {
+                Some(DispatchResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "【🚨 交叉审查门禁拦截：尚未派发子 Agent 对抗审查】\n当前处于【🔍 双 Agent 交叉审查模式】。在首次动笔修改代码前，必须先派发 child_reviewer 开展反驳推演与架构盲区排查：\n1. 调用 child_reviewer 工具，传入拟定的方案摘录、证据文件路径（如关键核心逻辑与跨模块关联点）及反证推演要求；\n2. 随后调用 wait_jobs 等待审查结论；\n3. 充分研判审查反驳意见后方可写入。本次操作已被安全拦截，目标未受影响。".to_string(),
+                    route: "plan_gatekeeper:need_reviewer_dispatch".to_string(),
+                })
+            } else if !checkpoint.plan_reviewer_consumed
+                || crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id)
+            {
+                Some(DispatchResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "【🚨 交叉审查门禁拦截：审查子 Agent 仍在异步推演中】\n检测到你已派发审查任务，但尚未等待并接收其审查结论（“问过 ≠ 听过”）。\n请立即调用 wait_jobs 工具（例如 wait_jobs() 或指定 job_ids）挂起等待审查专家完成对抗推演；\n审查结论注入上下文后，门禁将根据交叉审查结果放行写入。本次操作已被安全拦截，目标未受影响。".to_string(),
+                    route: "plan_gatekeeper:need_wait_reviewer_jobs".to_string(),
+                })
+            } else {
+                checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                None
+            }
+        }
+        crate::agent::checkpoint::PlanExecutionMode::Auto => {
+            if !is_resume_child && step_id == 0 && context.turns_history.is_empty() {
+                Some(DispatchResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "【🚨 前置方案门禁拦截：尚未确立经论证的技术方案】\n检测到在首轮未完成只读排查与方案阐述前尝试直接调用了写代码工具。\n为保证工程契约安全，请先遵循【假设驱动与主动证伪法则】：\n1. 优先通过只读工具（如 read_file/grep_search）排查代码并排除错误假设，锁定唯一根因；\n2. 输出清晰的技术方案与反证推演说明；\n方案确认后再执行修改。本次写入已被安全拦截，目标文件未受影响。".to_string(),
+                    route: "plan_gatekeeper:need_plan".to_string(),
+                })
+            } else {
+                checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                None
+            }
+        }
+    }
+}
+
 /// 执行持久化状态机的 RunTool 阶段。
 ///
 /// 调用前为未知或可能有副作用的操作创建 pending checkpoint；人工等待也以
@@ -798,50 +865,27 @@ pub async fn run_tool_phase(
         || inst.get_tool().eq_ignore_ascii_case("child_writer")
         || inst.get_action().eq_ignore_ascii_case("child_writer");
 
-    if is_write_tool && !checkpoint.plan_phase.is_approved() {
-        if !checkpoint.auto_pilot {
-            // 方案审批模式 (Plan Approval First Mode)：必须通过 ask_human (kind: 'plan_approval') 得到人类明确确认放行
-            let result = DispatchResult {
-                success: false,
-                stdout: String::new(),
-                stderr: "【🚨 前置方案审批门禁拦截：当前处于方案审批模式】\n检测到当前尚未获得用户的人工方案审批放行，禁止直接调用写文件、派发写入子 Agent 或执行变更工具。\n请先调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的完整技术方案呈现给用户；\n待用户在交互界面上审阅并点击【批准方案】后，门禁将自动放行修改。本次操作已被安全拦截，目标未受影响。".to_string(),
-                route: "plan_gatekeeper:need_human_approval".to_string(),
-            };
+    if is_write_tool {
+        if let Some(rejection) = check_pre_write_gatekeeper(
+            checkpoint,
+            context,
+            state.inner(),
+            parent_run_id,
+            step_id,
+            false,
+        ) {
             emit_tool_event(
                 app,
                 final_session_id,
                 step_id,
                 inst,
                 "failed",
-                Some(result.route.clone()),
+                Some(rejection.route.clone()),
                 Some(false),
-                &result.stderr,
+                &rejection.stderr,
                 Some(tool_started_at.elapsed().as_millis()),
             );
-            return Ok(result);
-        } else if step_id == 0 && context.turns_history.is_empty() {
-            // 全自动模式 (Auto-pilot Mode)：首轮未取证即尝试直接修改代码
-            let result = DispatchResult {
-                success: false,
-                stdout: String::new(),
-                stderr: "【🚨 前置方案门禁拦截：尚未确立经论证的技术方案】\n检测到在首轮未完成只读排查与方案阐述前尝试直接调用了写代码工具。\n为保证工程契约安全，请先遵循【假设驱动与主动证伪法则】：\n1. 优先通过只读工具（如 read_file/grep_search）排查代码并排除错误假设，锁定唯一根因；\n2. 输出清晰的技术方案与反证推演说明；\n方案确认后再执行修改。本次写入已被安全拦截，目标文件未受影响。".to_string(),
-                route: "plan_gatekeeper:need_plan".to_string(),
-            };
-            emit_tool_event(
-                app,
-                final_session_id,
-                step_id,
-                inst,
-                "failed",
-                Some(result.route.clone()),
-                Some(false),
-                &result.stderr,
-                Some(tool_started_at.elapsed().as_millis()),
-            );
-            return Ok(result);
-        } else {
-            // 全自动模式下，经历了前期只读取证与规划阐述后，前置门禁放行
-            checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+            return Ok(rejection);
         }
     }
 
@@ -877,6 +921,7 @@ pub async fn run_tool_phase(
             checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
             checkpoint.plan_reviewer_retry_count =
                 checkpoint.plan_reviewer_retry_count.saturating_add(1);
+            checkpoint.plan_reviewer_consumed = false;
         }
 
         let routing = crate::agent::router::AgentRouter::route_for_role(
@@ -1522,6 +1567,12 @@ pub async fn run_tool_phase(
         .await
         {
             Ok(completed_jobs) => {
+                if completed_jobs
+                    .iter()
+                    .any(|j| j.job_type == "child_reviewer" || j.job_type.contains("reviewer"))
+                {
+                    checkpoint.plan_reviewer_consumed = true;
+                }
                 let mut out = String::new();
                 if completed_jobs.is_empty() {
                     out.push_str("等待结束：当前无新完成的后台任务，或所有后台任务已结束。");
@@ -1695,6 +1746,10 @@ pub async fn run_tool_phase(
                                 }
                             };
                             config.max_tokens = 900;
+                            if !checkpoint.plan_phase.is_approved() {
+                                checkpoint.plan_reviewer_retry_count += 1;
+                                checkpoint.plan_reviewer_consumed = false;
+                            }
 
                             let db_clone = DbState(state.0.clone());
                             let new_child_run_id_clone = new_child_run_id.clone();
@@ -1889,31 +1944,26 @@ pub async fn run_tool_phase(
                                 if kind == "writer" {
                                     // 🛑 前置方案门禁：恢复(resume_child)写入型子任务等同于开启新的写入路径，
                                     // 未获批准前必须拦截，防止绕过派发门禁（B1.8）通过旧 writer 子任务改代码。
-                                    if !checkpoint.plan_phase.is_approved() {
-                                        if !checkpoint.auto_pilot {
-                                            let result = DispatchResult {
-                                                stdout: String::new(),
-                                                stderr: "【🚨 前置方案审批门禁拦截：当前处于方案审批模式】\n检测到尝试通过 resume_child 恢复写入型子 Agent 继续修改代码，该路径同样需要人工方案审批放行。\n请先调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的完整技术方案呈现给用户；\n待用户在交互界面上审阅并点击【批准方案】后，门禁将自动放行修改。本次恢复已被安全拦截，目标文件未受影响。".to_string(),
-                                                success: false,
-                                                route: "plan_gatekeeper:need_human_approval".to_string(),
-                                            };
-                                            emit_tool_event(
-                                                app,
-                                                final_session_id,
-                                                step_id,
-                                                inst,
-                                                "failed",
-                                                Some(result.route.clone()),
-                                                Some(false),
-                                                &result.stderr,
-                                                Some(tool_started_at.elapsed().as_millis()),
-                                            );
-                                            return Ok(result);
-                                        } else {
-                                            // 全自动模式下恢复写入子任务视同常规写入放行
-                                            checkpoint.plan_phase =
-                                                crate::agent::checkpoint::PlanPhase::Approved;
-                                        }
+                                    if let Some(rejection) = check_pre_write_gatekeeper(
+                                        checkpoint,
+                                        context,
+                                        state.inner(),
+                                        parent_run_id,
+                                        step_id,
+                                        true,
+                                    ) {
+                                        emit_tool_event(
+                                            app,
+                                            final_session_id,
+                                            step_id,
+                                            inst,
+                                            "failed",
+                                            Some(rejection.route.clone()),
+                                            Some(false),
+                                            &rejection.stderr,
+                                            Some(tool_started_at.elapsed().as_millis()),
+                                        );
+                                        return Ok(rejection);
                                     }
 
                                     let inherited_test_cmd = prev_result_json

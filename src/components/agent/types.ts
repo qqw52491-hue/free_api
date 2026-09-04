@@ -28,6 +28,8 @@ export type AgentRunState =
     | "failed"
     | "cancelled";
 
+export type PlanExecutionMode = "auto" | "cross_review" | "plan_approval";
+
 export type AgentTimelineKind = "system" | "planning" | "tool" | "success" | "error" | "human" | "recovery";
 export type AgentToolStatus = "running" | "succeeded" | "failed" | "pending" | "challenged";
 export type AgentDetailSection = "params" | "result";

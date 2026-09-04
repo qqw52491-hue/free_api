@@ -990,6 +990,7 @@ pub(crate) fn register_and_spawn_run(
             None,
             workspace_override,
             Some(spawn_run.clone()),
+            None,
         )
         .await;
     });

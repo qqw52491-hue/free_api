@@ -563,11 +563,13 @@ mod finish_guard_tests {
     fn mode_switch_from_auto_to_plan_approval_resets_approved_state() {
         let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::Auto;
         checkpoint.auto_pilot = true;
         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
         checkpoint.approved_plan_summary = None;
 
-        checkpoint.reconcile_plan_phase_for_mode_switch(false);
+        checkpoint.reconcile_plan_phase_for_mode_switch(crate::agent::checkpoint::PlanExecutionMode::PlanApproval);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::PlanApproval;
         checkpoint.auto_pilot = false;
 
         assert_eq!(checkpoint.plan_phase, crate::agent::checkpoint::PlanPhase::Reviewing);
@@ -577,12 +579,14 @@ mod finish_guard_tests {
     fn mode_switch_preserves_human_approved_plan() {
         let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::Auto;
         checkpoint.auto_pilot = true;
         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
         // 人工批准会留下方案摘要痕迹
         checkpoint.approved_plan_summary = Some("用户已批准：调整拖拽遮罩逻辑".to_string());
 
-        checkpoint.reconcile_plan_phase_for_mode_switch(false);
+        checkpoint.reconcile_plan_phase_for_mode_switch(crate::agent::checkpoint::PlanExecutionMode::PlanApproval);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::PlanApproval;
         checkpoint.auto_pilot = false;
 
         // 人工确认过的方案不应因模式切换被撤销，避免用户被迫二次审批
@@ -593,14 +597,151 @@ mod finish_guard_tests {
     fn mode_switch_to_auto_pilot_keeps_phase_untouched() {
         let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::PlanApproval;
         checkpoint.auto_pilot = false;
         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
 
         // 反向切换（审批 -> 全自动）不应改动阶段，交由全自动链路自行放行
-        checkpoint.reconcile_plan_phase_for_mode_switch(true);
+        checkpoint.reconcile_plan_phase_for_mode_switch(crate::agent::checkpoint::PlanExecutionMode::Auto);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::Auto;
         checkpoint.auto_pilot = true;
 
         assert_eq!(checkpoint.plan_phase, crate::agent::checkpoint::PlanPhase::Reviewing);
+    }
+
+    #[test]
+    fn mode_switch_from_auto_to_cross_review_resets_unconsumed_approved_state() {
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::Auto;
+        checkpoint.auto_pilot = true;
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+        checkpoint.approved_plan_summary = None;
+        checkpoint.plan_reviewer_consumed = false;
+
+        // 从全自动切到交叉审查，如果此前并未消费过审查结论，重置为 Reviewing
+        checkpoint.reconcile_plan_phase_for_mode_switch(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::CrossReview;
+
+        assert_eq!(checkpoint.plan_phase, crate::agent::checkpoint::PlanPhase::Reviewing);
+    }
+
+    #[test]
+    fn mode_switch_preserves_cross_reviewed_state_when_consumed() {
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::CrossReview;
+        checkpoint.auto_pilot = true;
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+        checkpoint.approved_plan_summary = None;
+        checkpoint.plan_reviewer_consumed = true;
+
+        // 已消费过审查结论的 Approved 状态在交叉审查模式下继续保持
+        checkpoint.reconcile_plan_phase_for_mode_switch(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
+
+        assert!(checkpoint.plan_phase.is_approved());
+    }
+
+    #[test]
+    fn cross_review_gatekeeper_enforces_dispatch_then_consume_then_approve() {
+        let temp_dir = std::env::temp_dir().join(format!("gatekeeper-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        let context = context::SandwichContext::new("system".to_string(), "修复拖拽穿透".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::CrossReview;
+        checkpoint.auto_pilot = true;
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Exploring;
+        checkpoint.plan_reviewer_retry_count = 0;
+        checkpoint.plan_reviewer_consumed = false;
+
+        // 阶段 1: 尚未派发 reviewer，尝试写代码 -> 拦截 need_reviewer_dispatch
+        let rej1 = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint,
+            &context,
+            &db,
+            "test_run",
+            1,
+            false,
+        );
+        assert!(rej1.is_some());
+        assert_eq!(rej1.unwrap().route, "plan_gatekeeper:need_reviewer_dispatch");
+        assert!(!checkpoint.plan_phase.is_approved());
+
+        // 阶段 2: 派发了 reviewer，但尚未等待/消费结论 -> 拦截 need_wait_reviewer_jobs
+        checkpoint.plan_reviewer_retry_count = 1;
+        checkpoint.plan_reviewer_consumed = false;
+        let rej2 = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint,
+            &context,
+            &db,
+            "test_run",
+            2,
+            false,
+        );
+        assert!(rej2.is_some());
+        assert_eq!(rej2.unwrap().route, "plan_gatekeeper:need_wait_reviewer_jobs");
+        assert!(!checkpoint.plan_phase.is_approved());
+
+        // 阶段 3: 审查结论已消费并注入上下文 -> 门禁放行并将 plan_phase 推进为 Approved
+        checkpoint.plan_reviewer_consumed = true;
+        let rej3 = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint,
+            &context,
+            &db,
+            "test_run",
+            3,
+            false,
+        );
+        assert!(rej3.is_none());
+        assert!(checkpoint.plan_phase.is_approved());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn plan_approval_mode_gatekeeper_blocks_until_approved() {
+        let temp_dir = std::env::temp_dir().join(format!("gatekeeper-plan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        let context = context::SandwichContext::new("system".to_string(), "修改重要逻辑".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::PlanApproval;
+        checkpoint.auto_pilot = false;
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+        checkpoint.plan_reviewer_retry_count = 2;
+        checkpoint.plan_reviewer_consumed = true;
+
+        let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint,
+            &context,
+            &db,
+            "test_run",
+            3,
+            false,
+        );
+        assert!(rej.is_some());
+        assert_eq!(rej.unwrap().route, "plan_gatekeeper:need_human_approval");
+        assert!(!checkpoint.plan_phase.is_approved());
+
+        // 人类批准后
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+        checkpoint.approved_plan_summary = Some("用户批准了方案".to_string());
+        let rej_approved = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint,
+            &context,
+            &db,
+            "test_run",
+            4,
+            false,
+        );
+        assert!(rej_approved.is_none());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -760,6 +901,7 @@ pub async fn run_agent_main_loop(
     log_context: Option<bool>,
     transient_llm_request_retries: Option<u32>,
     attachments: Option<Vec<crate::commands::chat::ParsedAttachmentResult>>,
+    plan_mode: Option<String>,
 ) -> Result<(), String> {
     run_agent_main_loop_in_workspace(
         app,
@@ -774,6 +916,7 @@ pub async fn run_agent_main_loop(
         attachments,
         None,
         None,
+        plan_mode,
     )
     .await
 }
@@ -792,6 +935,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     attachments: Option<Vec<crate::commands::chat::ParsedAttachmentResult>>,
     workspace_override: Option<std::path::PathBuf>,
     run_id_override: Option<String>,
+    plan_mode: Option<String>,
 ) -> Result<(), String> {
     let final_session_id = session_id.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -825,6 +969,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         attachments,
         workspace_override,
         run_id,
+        plan_mode,
     )
     .await;
 
@@ -845,6 +990,7 @@ async fn run_agent_main_loop_in_workspace_inner(
     attachments: Option<Vec<crate::commands::chat::ParsedAttachmentResult>>,
     workspace_override: Option<std::path::PathBuf>,
     run_id: String,
+    plan_mode: Option<String>,
 ) -> Result<(), String> {
     // 立即注册人类干预与流式中断接收器，确保任务启动第一毫秒即可被前端即时打断
     let (tx, mut rx) = mpsc::channel::<HumanControl>(5);
@@ -1138,10 +1284,18 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
-    // 模式切换守卫：从全自动切到方案审批模式时，自动授予的 Approved 不可信需重置；人工批准的保留。
-    // 必须在写入新的 auto_pilot 之前调用（方法内部依赖切换前的旧值）。
-    checkpoint.reconcile_plan_phase_for_mode_switch(auto_pilot);
-    checkpoint.auto_pilot = auto_pilot;
+    // 模式切换守卫：按目标执行模式（全自动/交叉审查/方案审批）规范化方案阶段；人工确认过的方案永久保留。
+    let target_plan_mode = crate::agent::checkpoint::PlanExecutionMode::from_str_or_auto_pilot(
+        plan_mode.as_deref(),
+        auto_pilot,
+    );
+    checkpoint.reconcile_plan_phase_for_mode_switch(target_plan_mode);
+    checkpoint.plan_mode = target_plan_mode;
+    checkpoint.auto_pilot = matches!(
+        target_plan_mode,
+        crate::agent::checkpoint::PlanExecutionMode::Auto
+            | crate::agent::checkpoint::PlanExecutionMode::CrossReview
+    );
     // 初始工作区是会话选择的已声明资源；恢复时保留 checkpoint 中已有的显式契约。
     // 仅在显式项目会话、存在 workspace_override 或 auto_pilot 模式下才声明主工作区。
     // 在未选项目的通用自由会话中，主工作区保持为 None（自由模式），避免将宿主机启动目录误作为资源约束强塞给 Agent 及外部 MCP。
@@ -1482,6 +1636,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]\n发现:\n- {}\n",
                                 result.child_run_id, result.confidence, routing_str, formatted_findings
                             ));
+                            checkpoint.plan_reviewer_consumed = true;
                         }
                     }
                     if !result.missing_evidence.is_empty() {
@@ -1506,6 +1661,9 @@ async fn run_agent_main_loop_in_workspace_inner(
             if !jobs.is_empty() {
                 let mut job_injection = String::new();
                 for job in jobs {
+                    if job.job_type == "child_reviewer" || job.job_type.contains("reviewer") {
+                        checkpoint.plan_reviewer_consumed = true;
+                    }
                     job_injection.push_str(&format!(
                         "\n【⚡ 后台异步任务已完成 (ID: {}, 类型: {})】\n任务描述: {}\n执行状态: {}\n耗时: {}ms\n输出/结论:\n{}\n",
                         job.job_id,

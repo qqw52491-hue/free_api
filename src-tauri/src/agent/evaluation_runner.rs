@@ -463,6 +463,7 @@ pub async fn start_background_agent_evaluation(
             None,
             worker_workspace,
             None,
+            None,
         ));
 
         let monitor_app = event_app.clone();
