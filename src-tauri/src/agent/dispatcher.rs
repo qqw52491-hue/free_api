@@ -30,7 +30,60 @@ fn mcp_service_requires_concrete_tool(tool: &str, action: &str) -> bool {
         && (action.trim().is_empty() || tool.trim().eq_ignore_ascii_case(action.trim()))
 }
 
+fn has_read_only_flag(inst: &AgentInstruction) -> bool {
+    let check_val = |v: &serde_json::Value| -> bool {
+        if let Some(obj) = v.as_object() {
+            if obj.get("read_only").and_then(|b| b.as_bool()) == Some(true)
+                || obj.get("readonly").and_then(|b| b.as_bool()) == Some(true)
+            {
+                return true;
+            }
+            if let Some(meta) = obj.get("metadata").or_else(|| obj.get("meta")) {
+                if meta.get("read_only").and_then(|b| b.as_bool()) == Some(true)
+                    || meta.get("readonly").and_then(|b| b.as_bool()) == Some(true)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+
+    if let Some(cmd) = &inst.command {
+        if check_val(cmd) {
+            return true;
+        }
+    }
+    if let Some(params) = &inst.params {
+        if check_val(params) {
+            return true;
+        }
+    }
+    if let Some(val) = inst.extra_fields.get("read_only") {
+        if val.as_bool() == Some(true) {
+            return true;
+        }
+    }
+    if let Some(val) = inst.extra_fields.get("readonly") {
+        if val.as_bool() == Some(true) {
+            return true;
+        }
+    }
+    if let Some(meta) = inst.extra_fields.get("metadata").or_else(|| inst.extra_fields.get("meta")) {
+        if check_val(meta) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
+    // 显式声明只读时优先放行：即使工具名命中写动词（如 preview_saved_logs / run_query with read_only: true），
+    // 只要参数或元数据中明确声明 read_only: true，一律按只读工具放行。
+    if has_read_only_flag(inst) {
+        return false;
+    }
+
     // MCP 工具常以 "服务名/具体工具" 形式出现（如 remote-hub/shell_exec）。
     // 分类前统一剥离命名空间，否则前缀判定会被命名空间遮蔽（remote-hub/read_file 匹配不到 read_ 前缀）。
     let raw_tool = inst.get_tool().to_ascii_lowercase();
@@ -1132,5 +1185,40 @@ mod tests {
             notice_over.is_some(),
             "over-budget range must include truncation guard notice"
         );
+    }
+
+    #[test]
+    fn test_is_write_or_side_effect_tool_read_only_override() {
+        use crate::agent::types::AgentInstruction;
+        use serde_json::json;
+
+        // 1. preview_saved_logs 含有 "save" 动词，默认会被判为写操作
+        let mut inst_default = AgentInstruction::default();
+        inst_default.tool = Some("preview_saved_logs".to_string());
+        assert!(is_write_or_side_effect_tool(&inst_default));
+
+        // 2. 参数 command 中显式声明 read_only: true -> 优先判定为只读 (false)
+        let mut inst_read_only = AgentInstruction::default();
+        inst_read_only.tool = Some("preview_saved_logs".to_string());
+        inst_read_only.command = Some(json!({ "read_only": true, "log_id": 123 }));
+        assert!(!is_write_or_side_effect_tool(&inst_read_only));
+
+        // 3. 元数据 metadata 中声明 read_only: true
+        let mut inst_meta = AgentInstruction::default();
+        inst_meta.tool = Some("preview_saved_logs".to_string());
+        inst_meta.command = Some(json!({ "metadata": { "read_only": true } }));
+        assert!(!is_write_or_side_effect_tool(&inst_meta));
+
+        // 4. params 字段中声明 readonly: true
+        let mut inst_params = AgentInstruction::default();
+        inst_params.tool = Some("run_read_query".to_string());
+        inst_params.params = Some(json!({ "readonly": true }));
+        assert!(!is_write_or_side_effect_tool(&inst_params));
+
+        // 5. 真正的写操作即使带 read_only: false 依然是写操作
+        let mut inst_write = AgentInstruction::default();
+        inst_write.tool = Some("write_file".to_string());
+        inst_write.command = Some(json!({ "read_only": false }));
+        assert!(is_write_or_side_effect_tool(&inst_write));
     }
 }

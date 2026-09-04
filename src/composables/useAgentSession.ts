@@ -1656,6 +1656,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             hasError.value = true;
             setRunState("failed", message);
             appendLog(`[启动异常] ${message}`);
+            try {
+                await loadConversation();
+                await loadRunTraces();
+            } catch {
+                // 忽略恢复时的辅助同步异常
+            }
         } finally {
             if (currentGeneration === runGeneration) {
                 // 本代任务终结，退出启动窗口；若已被新一代接管（else 分支），绝不触碰新代设置的标记

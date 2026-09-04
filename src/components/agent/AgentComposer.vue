@@ -34,6 +34,20 @@
                 </div>
             </div>
 
+            <!-- 💡 模式切换放行机制温和引导提示 -->
+            <transition name="mode-guide-fade">
+                <div v-if="activeModeGuide" class="composer-mode-guide-banner" :class="`is-${activeModeGuide.mode}`">
+                    <div class="mode-guide-left">
+                        <span class="mode-guide-icon">{{ activeModeGuide.mode === 'cross_review' ? '🔍' : '🛡️' }}</span>
+                        <div class="mode-guide-text">
+                            <span class="mode-guide-title">{{ activeModeGuide.title }}</span>
+                            <span class="mode-guide-desc">{{ activeModeGuide.mechanism }}</span>
+                        </div>
+                    </div>
+                    <button type="button" class="mode-guide-close-btn" @click.stop="dismissModeGuide" title="关闭提示">✕</button>
+                </div>
+            </transition>
+
             <!-- 拖拽高亮提示 -->
             <div v-if="isDraggingOver" class="drag-drop-overlay">
                 <div class="drag-drop-content">
@@ -672,9 +686,37 @@ function selectPlanMode(mode: PlanExecutionMode) {
     emit("update:planMode", mode);
     emit("update:autoPilot", mode !== "plan_approval");
     planMenuOpen.value = false;
+
+    if (mode === "cross_review") {
+        activeModeGuide.value = {
+            mode: "cross_review",
+            title: "交叉审查模式已就绪",
+            mechanism: "放行机制：AI 动笔写代码前，必须派发独立 Reviewer 子 Agent 对抗推演，并通过审查结论后方可放行写入。",
+        };
+    } else if (mode === "plan_approval") {
+        activeModeGuide.value = {
+            mode: "plan_approval",
+            title: "方案审批模式已就绪",
+            mechanism: "放行机制：AI 制定完技术方案后会暂停并呈报审批卡片，经您在界面确认批准后才放行代码修改。",
+        };
+    } else {
+        activeModeGuide.value = null;
+    }
 }
 
-const submitMode = ref<"interrupt" | "queue">("interrupt");
+interface ModeGuideTip {
+    mode: "cross_review" | "plan_approval";
+    title: string;
+    mechanism: string;
+}
+
+const activeModeGuide = ref<ModeGuideTip | null>(null);
+
+function dismissModeGuide() {
+    activeModeGuide.value = null;
+}
+
+const submitMode = ref<"interrupt" | "queue">("queue");
 const showShortcutTooltip = ref(false);
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
@@ -2425,6 +2467,105 @@ textarea::placeholder {
     color: #fef3c7;
     overflow-x: auto;
 }
+
+/* 💡 模式切换放行机制温和引导条 */
+.composer-mode-guide-banner {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+    font-size: 11.5px;
+    line-height: 1.4;
+    transition: all 0.2s ease;
+}
+
+.composer-mode-guide-banner.is-cross_review {
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    color: #e0e7ff;
+}
+
+.composer-mode-guide-banner.is-plan_approval {
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    color: #fef3c7;
+}
+
+.composer-mode-guide-banner .mode-guide-left {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    flex: 1;
+}
+
+.composer-mode-guide-banner .mode-guide-icon {
+    font-size: 13px;
+    line-height: 1.2;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.composer-mode-guide-banner .mode-guide-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.composer-mode-guide-banner .mode-guide-title {
+    font-weight: 600;
+    font-size: 11.5px;
+}
+
+.composer-mode-guide-banner.is-cross_review .mode-guide-title {
+    color: #a5b4fc;
+}
+
+.composer-mode-guide-banner.is-plan_approval .mode-guide-title {
+    color: #fbbf24;
+}
+
+.composer-mode-guide-banner .mode-guide-desc {
+    font-size: 11px;
+    opacity: 0.9;
+    color: #d1d5db;
+}
+
+.composer-mode-guide-banner .mode-guide-close-btn {
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    font-size: 11px;
+    border-radius: 3px;
+    transition: all 0.15s;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.composer-mode-guide-banner .mode-guide-close-btn:hover {
+    color: #f3f4f6;
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.mode-guide-fade-enter-active,
+.mode-guide-fade-leave-active {
+    transition: all 0.2s ease;
+}
+
+.mode-guide-fade-enter-from,
+.mode-guide-fade-leave-to {
+    opacity: 0;
+    transform: translateY(-4px);
+}
+
 .composer-queue-tray .queue-icon {
     font-size: 13px;
     flex-shrink: 0;

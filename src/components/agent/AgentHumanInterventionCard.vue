@@ -10,7 +10,20 @@
 
     <div v-if="renderedTitle" class="intervention-title-md md-content" v-html="renderedTitle"></div>
     <h3 v-else class="intervention-title">{{ formTitle }}</h3>
-    <div v-if="renderedDescription" class="intervention-desc md-content" v-html="renderedDescription"></div>
+    <div v-if="renderedDescription" class="intervention-desc-wrapper" :class="{ 'is-plan': formKind === 'plan_approval' }">
+      <button
+        v-if="formKind === 'plan_approval'"
+        type="button"
+        class="copy-plan-btn"
+        :class="{ copied: isPlanCopied }"
+        :title="isPlanCopied ? '已复制到剪贴板' : '复制技术方案 Markdown 原文'"
+        @click="handleCopyPlan"
+      >
+        <span class="copy-icon">{{ isPlanCopied ? '✓' : '📋' }}</span>
+        <span>{{ isPlanCopied ? '已复制' : '复制方案' }}</span>
+      </button>
+      <div class="intervention-desc md-content" v-html="renderedDescription"></div>
+    </div>
 
     <!-- 0. 架构方案审查与审批 (Plan Approval) -->
     <div v-if="formKind === 'plan_approval'" class="options-container plan-approval-box">
@@ -234,7 +247,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { AgentHumanForm, AgentHumanFormKind } from "./types";
 import { renderMarkdown } from "./format";
@@ -275,6 +288,57 @@ const renderedTitle = computed(() => {
 const renderedDescription = computed(() => {
   if (!formDescription.value) return "";
   return renderMarkdown(formDescription.value);
+});
+
+const isPlanCopied = ref(false);
+let copyPlanTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function handleCopyPlan() {
+  const content = formDescription.value || "";
+  if (!content) return;
+
+  let success = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(content);
+      success = true;
+    } catch {
+      success = false;
+    }
+  }
+
+  if (!success) {
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = content;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      success = document.execCommand("copy");
+      document.body.removeChild(textarea);
+    } catch {
+      success = false;
+    }
+  }
+
+  if (success) {
+    isPlanCopied.value = true;
+    if (copyPlanTimer) clearTimeout(copyPlanTimer);
+    copyPlanTimer = setTimeout(() => {
+      isPlanCopied.value = false;
+      copyPlanTimer = null;
+    }, 2000);
+  }
+}
+
+onUnmounted(() => {
+  if (copyPlanTimer) {
+    clearTimeout(copyPlanTimer);
+    copyPlanTimer = null;
+  }
 });
 
 const formTypeLabel = computed(() => {
@@ -537,6 +601,53 @@ function handleCustomHtmlCancel(reason: string) {
 
 .intervention-title-md :deep(li) {
   margin: 2px 0;
+}
+
+.intervention-desc-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.copy-plan-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #a1a1aa;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+  backdrop-filter: blur(4px);
+}
+
+.copy-plan-btn:hover {
+  color: #e4e4e7;
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.copy-plan-btn.copied {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.12);
+  border-color: rgba(52, 211, 153, 0.3);
+}
+
+.copy-plan-btn .copy-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.is-plan-approval .intervention-desc-wrapper.is-plan .intervention-desc {
+  padding-right: 88px;
 }
 
 .intervention-desc {
