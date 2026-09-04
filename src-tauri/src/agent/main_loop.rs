@@ -1760,10 +1760,22 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 result.findings.iter().map(|f| f.display_line()).collect::<Vec<_>>().join("\n- ")
                             };
                             let routing_str = result.routing.as_deref().unwrap_or("certain");
+                            let scorecard_desc = if let Some(ref sc) = result.scorecard {
+                                format!(
+                                    "\n审查评分卡: 综合平均 {} 分 (正确性: {}/100, 破坏性风险: {}/100, 代码规范: {}/100, 测试覆盖: {}/100) -> 门禁状态: [{}]\n",
+                                    sc.average_score(), sc.correctness, sc.risk, sc.style, sc.test_coverage,
+                                    if sc.passes_gate() { "✅合格放行" } else { "🚨未达标拦截(均分需>=75且risk需>=60)" }
+                                )
+                            } else {
+                                String::new()
+                            };
                             injection.push_str(&format!(
-                                "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]\n发现:\n- {}\n",
-                                result.child_run_id, result.confidence, routing_str, formatted_findings
+                                "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]{}发现:\n- {}\n",
+                                result.child_run_id, result.confidence, routing_str, scorecard_desc, formatted_findings
                             ));
+                            if let Some(ref sc) = result.scorecard {
+                                checkpoint.last_review_scorecard = Some(sc.clone());
+                            }
                             checkpoint.plan_reviewer_consumed = true;
                         }
                     }

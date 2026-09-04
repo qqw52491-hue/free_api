@@ -149,6 +149,56 @@
                         </div>
                     </div>
 
+                    <!-- 📊 ReviewScorecard 审查评分卡 (正确性、破坏性风险、代码规范、测试覆盖) -->
+                    <div v-if="selectedWorker.scorecard" class="worker-scorecard-deck">
+                        <div class="scorecard-header">
+                            <span class="scorecard-icon">📊</span>
+                            <strong class="scorecard-title">审查评分卡 (ReviewScorecard)</strong>
+                            <span class="scorecard-badge" :class="(selectedWorker.scorecard.correctness + selectedWorker.scorecard.risk + selectedWorker.scorecard.style + selectedWorker.scorecard.test_coverage) / 4 >= 75 && selectedWorker.scorecard.risk >= 60 ? 'pass' : 'fail'">
+                                均分: {{ Math.round((selectedWorker.scorecard.correctness + selectedWorker.scorecard.risk + selectedWorker.scorecard.style + selectedWorker.scorecard.test_coverage) / 4) }} 分 · 
+                                {{ (selectedWorker.scorecard.correctness + selectedWorker.scorecard.risk + selectedWorker.scorecard.style + selectedWorker.scorecard.test_coverage) / 4 >= 75 && selectedWorker.scorecard.risk >= 60 ? '✅ 门禁合格放行' : '🚨 未达门禁标准' }}
+                            </span>
+                        </div>
+                        <div class="scorecard-grid">
+                            <div class="scorecard-item">
+                                <div class="item-label-row">
+                                    <span class="dim-name">正确性 (Correctness)</span>
+                                    <span class="dim-val">{{ selectedWorker.scorecard.correctness }}/100</span>
+                                </div>
+                                <div class="progress-track">
+                                    <div class="progress-bar correctness" :style="{ width: `${selectedWorker.scorecard.correctness}%` }"></div>
+                                </div>
+                            </div>
+                            <div class="scorecard-item">
+                                <div class="item-label-row">
+                                    <span class="dim-name">破坏性风险/安全 (Risk)</span>
+                                    <span class="dim-val" :class="selectedWorker.scorecard.risk < 60 ? 'text-danger' : ''">{{ selectedWorker.scorecard.risk }}/100</span>
+                                </div>
+                                <div class="progress-track">
+                                    <div class="progress-bar risk" :class="selectedWorker.scorecard.risk < 60 ? 'bar-danger' : ''" :style="{ width: `${selectedWorker.scorecard.risk}%` }"></div>
+                                </div>
+                            </div>
+                            <div class="scorecard-item">
+                                <div class="item-label-row">
+                                    <span class="dim-name">代码规范 (Style)</span>
+                                    <span class="dim-val">{{ selectedWorker.scorecard.style }}/100</span>
+                                </div>
+                                <div class="progress-track">
+                                    <div class="progress-bar style" :style="{ width: `${selectedWorker.scorecard.style}%` }"></div>
+                                </div>
+                            </div>
+                            <div class="scorecard-item">
+                                <div class="item-label-row">
+                                    <span class="dim-name">测试覆盖 (Test Coverage)</span>
+                                    <span class="dim-val">{{ selectedWorker.scorecard.test_coverage }}/100</span>
+                                </div>
+                                <div class="progress-track">
+                                    <div class="progress-bar test" :style="{ width: `${selectedWorker.scorecard.test_coverage}%` }"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- 🎯 核心结论与发现 (当子任务产出 findings 时结构化高亮展示) -->
                     <div v-if="selectedWorker.findings && selectedWorker.findings.length > 0" class="worker-findings-deck">
                         <div class="findings-header">
@@ -1083,6 +1133,74 @@ async function copyOutput(text?: string) {
 }
 
 /* 🎯 核心结论与发现卡片 */
+.worker-scorecard-deck {
+    margin-top: 14px;
+    padding: 12px 14px;
+    background: rgba(18, 22, 34, 0.75);
+    border: 1px solid rgba(80, 100, 160, 0.25);
+    border-radius: 8px;
+}
+.scorecard-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.scorecard-icon { font-size: 16px; }
+.scorecard-title { font-size: 13px; font-weight: 600; color: #e2e8f0; }
+.scorecard-badge {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 500;
+}
+.scorecard-badge.pass {
+    background: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.scorecard-badge.fail {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.scorecard-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px 16px;
+}
+.scorecard-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.item-label-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+}
+.dim-name { color: #94a3b8; }
+.dim-val { color: #f1f5f9; font-weight: 600; font-family: monospace; }
+.dim-val.text-danger { color: #f87171; }
+.progress-track {
+    width: 100%;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    overflow: hidden;
+}
+.progress-bar {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.3s ease;
+}
+.progress-bar.correctness { background: linear-gradient(90deg, #38bdf8, #0ea5e9); }
+.progress-bar.risk { background: linear-gradient(90deg, #10b981, #059669); }
+.progress-bar.risk.bar-danger { background: linear-gradient(90deg, #f87171, #dc2626); }
+.progress-bar.style { background: linear-gradient(90deg, #a855f7, #9333ea); }
+.progress-bar.test { background: linear-gradient(90deg, #f59e0b, #d97706); }
+
 .worker-findings-deck {
     background: linear-gradient(135deg, rgba(56, 189, 248, 0.08), rgba(24, 24, 32, 0.95));
     border: 1px solid rgba(56, 189, 248, 0.25);

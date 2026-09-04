@@ -1,4 +1,4 @@
-import type { AgentStepItem, AgentWorkerItem, AgentWorkerStep } from "./types";
+import type { AgentStepItem, AgentWorkerItem, AgentWorkerStep, ReviewScorecard } from "./types";
 
 export function inferStepIntent(tool: string, rawTarget: string, explicitIntent?: string): { title: string; cleanTarget: string } {
     let clean = rawTarget.trim();
@@ -88,6 +88,7 @@ export function inferStepIntent(tool: string, rawTarget: string, explicitIntent?
 
 export function parseWorkerArtifacts(raw: unknown): {
     findings?: string[];
+    scorecard?: ReviewScorecard;
     actionLog?: string[];
     evidenceRefs?: string[];
     confidence?: string;
@@ -142,6 +143,12 @@ export function parseWorkerArtifacts(raw: unknown): {
 
     return {
         findings: findings.length > 0 ? findings : undefined,
+        scorecard: (obj.scorecard && typeof obj.scorecard === 'object') ? {
+            correctness: Number(obj.scorecard.correctness) || 0,
+            risk: Number(obj.scorecard.risk) || 0,
+            style: Number(obj.scorecard.style) || 0,
+            test_coverage: Number(obj.scorecard.test_coverage) || 0,
+        } : undefined,
         actionLog: actionLog.length > 0 ? actionLog : undefined,
         evidenceRefs: evidenceRefs.length > 0 ? evidenceRefs : undefined,
         confidence,

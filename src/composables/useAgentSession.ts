@@ -288,6 +288,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 if (step.thought) existing.thought = step.thought;
                 if (typeof step.result === "string") existing.output = step.result;
                 if (arts.findings) existing.findings = arts.findings;
+                if (arts.scorecard) existing.scorecard = arts.scorecard;
                 if (arts.evidenceRefs) existing.evidenceRefs = arts.evidenceRefs;
                 if (arts.confidence) existing.confidence = arts.confidence;
                 if (arts.steps && arts.steps.length > 0) existing.steps = arts.steps;
@@ -308,6 +309,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     thought: step.thought,
                     output: typeof step.result === "string" ? step.result : undefined,
                     findings: arts.findings,
+                    scorecard: arts.scorecard,
                     evidenceRefs: arts.evidenceRefs,
                     confidence: arts.confidence,
                     steps: arts.steps,

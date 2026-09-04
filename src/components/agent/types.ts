@@ -1,3 +1,10 @@
+export interface ReviewScorecard {
+    correctness: number; // 0~100
+    risk: number;        // 0~100（破坏性风险/安全性，>=60方可放行）
+    style: number;       // 0~100
+    test_coverage: number; // 0~100
+}
+
 export interface ParsedAttachment {
     file_name: string;
     file_path: string;
@@ -318,6 +325,7 @@ export interface AgentWorkerItem {
     output?: string;
     summary?: string;
     findings?: string[];
+    scorecard?: ReviewScorecard;
     evidenceRefs?: string[];
     confidence?: string;
     steps?: AgentWorkerStep[];

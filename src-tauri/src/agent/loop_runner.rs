@@ -753,6 +753,19 @@ pub(crate) fn check_pre_write_gatekeeper(
                     stderr: "【🚨 交叉审查门禁拦截：未收到任何有效的审查结论】\n检测到此前已派发过审查任务，但后台当前没有正在运行的审查子任务，也没有可回收的审查结论（通常是派发立即失败：角色卡未授权挂载为 reviewer、role 名称不存在或参数非法）。\n请重新调用 child_reviewer 派发审查（先确认 role 名称可用且与任务匹配），或调用 wait_jobs 收取可能已完成的结论；\n收到审查结论后方可写入。本次操作已被安全拦截，目标未受影响。".to_string(),
                     route: "plan_gatekeeper:reviewer_result_missing".to_string(),
                 })
+            } else if let Some(ref scorecard) = checkpoint.last_review_scorecard {
+                if !scorecard.passes_gate() {
+                    let reason = scorecard.gate_rejection_reason().unwrap_or_else(|| "审查评分未达放行门槛".to_string());
+                    Some(DispatchResult {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: format!("【🚨 交叉审查硬门禁拦截：审查评分未达标】\n审查子 Agent 给出的 ReviewScorecard 评分未达放行标准：\n{}\n硬门禁规则：综合平均分必须 >= 75 分，且破坏性风险/安全性评分 (risk) 必须 >= 60 分。\n系统已自动拒绝放行代码写入。请结合审查发现的问题打回重新规划与修复后再尝试写入。", reason),
+                        route: "plan_gatekeeper:scorecard_failed".to_string(),
+                    })
+                } else {
+                    checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                    None
+                }
             } else {
                 checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
                 None
@@ -1857,6 +1870,7 @@ pub async fn run_tool_phase(
                                     kind: Some("review".to_string()),
                                     routing: Some(routing),
                                     withdrawn_findings: vec![],
+                                    scorecard: None,
                                 };
 
                                 let res_json = serde_json::to_string(&review_res).ok();

@@ -519,6 +519,9 @@ pub struct AgentCheckpoint {
     /// 方案审查结果是否已被主循环或 wait_jobs 消费并注入上下文（“问过”且“听过”）
     #[serde(default)]
     pub plan_reviewer_consumed: bool,
+    /// 方案审查最新评分卡（正确性、破坏性风险、代码规范、测试覆盖）
+    #[serde(default)]
+    pub last_review_scorecard: Option<crate::agent::child_reviewer::ReviewScorecard>,
     /// 运行模式兼容字段：true 为全自动/自主模式，false 为方案审批模式
     #[serde(default = "default_auto_pilot")]
     pub auto_pilot: bool,
@@ -554,6 +557,7 @@ impl AgentCheckpoint {
             approved_plan_summary: None,
             plan_mode: PlanExecutionMode::Auto,
             plan_reviewer_consumed: false,
+            last_review_scorecard: None,
             auto_pilot: true,
             last_error: None,
             version: 0,

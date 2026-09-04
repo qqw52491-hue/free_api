@@ -36,6 +36,61 @@ pub struct ChildReviewRequest {
     resource_ids: Vec<String>,
 }
 
+/// 对抗推演审查多维度评分卡
+/// 包含正确性、破坏性风险（安全性）、代码规范、测试覆盖四个维度，各 0~100 分
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewScorecard {
+    pub correctness: u32,
+    pub risk: u32,
+    pub style: u32,
+    pub test_coverage: u32,
+}
+
+impl ReviewScorecard {
+    pub fn new(correctness: u32, risk: u32, style: u32, test_coverage: u32) -> Self {
+        Self {
+            correctness: correctness.min(100),
+            risk: risk.min(100),
+            style: style.min(100),
+            test_coverage: test_coverage.min(100),
+        }
+    }
+
+    /// 计算四维度的综合平均分（向下取整）
+    pub fn average_score(&self) -> u32 {
+        (self.correctness + self.risk + self.style + self.test_coverage) / 4
+    }
+
+    /// 检查是否满足硬门禁放行条件：综合均分 >= 75 且 risk >= 60
+    pub fn passes_gate(&self) -> bool {
+        self.average_score() >= 75 && self.risk >= 60
+    }
+
+    /// 未通过硬门禁时的详细诊断原因说明
+    pub fn gate_rejection_reason(&self) -> Option<String> {
+        if self.passes_gate() {
+            None
+        } else {
+            let mut failures = Vec::new();
+            let avg = self.average_score();
+            if avg < 75 {
+                failures.push(format!("综合平均分未达 75 分放行线（当前 {} 分）", avg));
+            }
+            if self.risk < 60 {
+                failures.push(format!("破坏性风险/安全性得分未达 60 分安全阈值（当前 {} 分）", self.risk));
+            }
+            Some(format!(
+                "{}。评分卡详情：正确性 {}/100, 破坏性风险 {}/100, 代码规范 {}/100, 测试覆盖 {}/100",
+                failures.join("，且 "),
+                self.correctness,
+                self.risk,
+                self.style,
+                self.test_coverage
+            ))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewFinding {
     pub id: String,                 // F1..F5 —— 供反驳时定位
@@ -134,6 +189,9 @@ pub struct ChildReviewResult {
     pub routing: Option<String>,
     #[serde(default)]
     pub withdrawn_findings: Vec<String>,
+    /// 结构化审查评分卡（4个维度，各 0~100 分）
+    #[serde(default)]
+    pub scorecard: Option<ReviewScorecard>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +241,20 @@ struct RawChildReviewOutput {
     missing_evidence: Vec<String>,
     #[serde(default)]
     routing: Option<String>,
+    #[serde(default)]
+    scorecard: Option<RawReviewScorecard>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawReviewScorecard {
+    #[serde(default)]
+    correctness: Option<u32>,
+    #[serde(default)]
+    risk: Option<u32>,
+    #[serde(default)]
+    style: Option<u32>,
+    #[serde(default)]
+    test_coverage: Option<u32>,
 }
 
 pub fn parse_child_review_request(params: &Value) -> Result<ChildReviewRequest, String> {
@@ -303,13 +375,14 @@ fn normalize_nonempty(value: &str, max_chars: usize, field: &str) -> Result<Stri
 pub fn parse_child_review_rebuttal_output(
     raw: &str,
 ) -> Result<(Vec<ReviewFinding>, String, Vec<String>, Vec<String>, String), String> {
-    parse_controlled_output(raw, &[])
+    let (findings, confidence, refs, missing, routing, _) = parse_controlled_output(raw, &[])?;
+    Ok((findings, confidence, refs, missing, routing))
 }
 
 fn parse_controlled_output(
     raw: &str,
     allowed_refs: &[String],
-) -> Result<(Vec<ReviewFinding>, String, Vec<String>, Vec<String>, String), String> {
+) -> Result<(Vec<ReviewFinding>, String, Vec<String>, Vec<String>, String, Option<ReviewScorecard>), String> {
     let output: RawChildReviewOutput = serde_json::from_str(raw)
         .map_err(|_| "child_reviewer 未返回规定的 JSON 审查摘要。".to_string())?;
     if output.findings.len() > 5 {
@@ -405,12 +478,22 @@ fn parse_controlled_output(
         "certain".to_string()
     };
 
+    let scorecard = output.scorecard.map(|sc| {
+        ReviewScorecard::new(
+            sc.correctness.unwrap_or(80),
+            sc.risk.unwrap_or(80),
+            sc.style.unwrap_or(85),
+            sc.test_coverage.unwrap_or(75),
+        )
+    });
+
     Ok((
         structured_findings,
         output.confidence,
         output_refs.into_iter().collect(),
         output.missing_evidence.into_iter().map(|s| s.trim().to_string()).collect(),
         routing,
+        scorecard,
     ))
 }
 
@@ -583,6 +666,7 @@ fn child_error_result_json(
         kind: None,
         routing: Some("blocked".to_string()),
         withdrawn_findings: vec![],
+        scorecard: None,
     })
     .unwrap_or_default()
 }
@@ -641,9 +725,16 @@ pub async fn spawn_child_reviewer(
           ],\n\
           \"confidence\": \"confirmed|supported|unverified\",\n\
           \"evidence_refs\": [\"仅可使用父Agent给定的引用\"],\n\
-          \"missing_evidence\": [\"缺少的证据描述\"]\n\
+          \"missing_evidence\": [\"缺少的证据描述\"],\n\
+          \"scorecard\": {{\n\
+            \"correctness\": 0-100（代码逻辑正确性与功能完备性，100为完全正确零缺陷）,\n\
+            \"risk\": 0-100（破坏性风险/安全性评分，100为零破坏性完全安全，>=60方可放行）,\n\
+            \"style\": 0-100（代码规范与既有工程风格契合度）,\n\
+            \"test_coverage\": 0-100（测试用例充分度与反证覆盖度）\n\
+          }}\n\
         }}\n\
         【硬规则】：\n\
+        0. 必须在 scorecard 中如实评出4个维度评分（0~100整数），综合均分>=75且破坏性风险>=60方可放行代码写入；\n\
         1. findings 为 1–5 条结构化审查条目；若无确切位置 location，severity 必须标为 question（禁止标 blocking）；\n\
         2. 证据不足时 confidence 标 unverified 并在 missing_evidence 说明；\n\
         3. 不要输出任何推理过程、Markdown 标记或额外字段。{}",
@@ -773,7 +864,7 @@ pub async fn spawn_child_reviewer(
             .usage
             .map(|usage| usage.completion_tokens)
             .unwrap_or_default();
-        let (findings, confidence, evidence_refs, missing_evidence, routing) = match parse_controlled_output(&stream_result.full_response, &allowed_refs) {
+        let (findings, confidence, evidence_refs, missing_evidence, routing, scorecard) = match parse_controlled_output(&stream_result.full_response, &allowed_refs) {
             Ok(output) => output,
             Err(_error) => {
                 finish_child_run(
@@ -809,6 +900,7 @@ pub async fn spawn_child_reviewer(
             kind: None,
             routing: Some(routing),
             withdrawn_findings: vec![],
+            scorecard,
         };
         let result_json = serde_json::to_string(&result).ok();
         finish_child_run_with_history(
@@ -1015,6 +1107,39 @@ pub fn child_result_token_usage(result: &ChildReviewResult) -> TokenUsage {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_review_scorecard_passes_gate_and_clamping() {
+        // 1. 正常合格：均分 80，risk 80
+        let sc = ReviewScorecard::new(80, 80, 80, 80);
+        assert_eq!(sc.average_score(), 80);
+        assert!(sc.passes_gate());
+        assert!(sc.gate_rejection_reason().is_none());
+
+        // 2. 压线放行：均分恰好 75，risk 恰好 60
+        let sc_edge = ReviewScorecard::new(80, 60, 80, 80);
+        assert_eq!(sc_edge.average_score(), 75);
+        assert!(sc_edge.passes_gate());
+
+        // 3. 破坏性风险 risk < 60 单项硬拦截（即便综合平均分高达 82 分）
+        let sc_risk_fail = ReviewScorecard::new(95, 59, 90, 85);
+        assert_eq!(sc_risk_fail.average_score(), 82);
+        assert!(!sc_risk_fail.passes_gate(), "risk 低于 60 分必须自动拦截拒绝放行");
+        let reason = sc_risk_fail.gate_rejection_reason().unwrap();
+        assert!(reason.contains("破坏性风险/安全性得分未达 60 分安全阈值"));
+
+        // 4. 综合平均分 < 75 硬拦截（即便 risk 单项高达 90 分）
+        let sc_avg_fail = ReviewScorecard::new(60, 90, 70, 70);
+        assert_eq!(sc_avg_fail.average_score(), 72);
+        assert!(!sc_avg_fail.passes_gate(), "综合均分低于 75 分必须自动拦截拒绝放行");
+        let reason2 = sc_avg_fail.gate_rejection_reason().unwrap();
+        assert!(reason2.contains("综合平均分未达 75 分放行线"));
+
+        // 5. 0~100 数值钳制 (clamping)
+        let sc_clamped = ReviewScorecard::new(150, 200, 80, 70);
+        assert_eq!(sc_clamped.correctness, 100);
+        assert_eq!(sc_clamped.risk, 100);
+    }
     use super::*;
     use rusqlite::params;
 
@@ -1167,7 +1292,7 @@ mod tests {
 
     #[test]
     fn controlled_output_is_short_and_structured() {
-        let (findings, confidence, evidence_refs, missing, routing) = parse_controlled_output(
+        let (findings, confidence, evidence_refs, missing, routing, _) = parse_controlled_output(
             r#"{"findings":[{"id":"F1","severity":"blocking","location":"src/foo.rs:10","current":"旧逻辑","why":"缺少空检查","suggestion":"添加Option安全解包","evidence_strength":"confirmed"}],"confidence":"supported","evidence_refs":["out-1"],"missing_evidence":["需要复现后状态快照"]}"#,
             &["out-1".to_string()],
         )
@@ -1184,7 +1309,7 @@ mod tests {
 
     #[test]
     fn unlocated_blocking_finding_is_automatically_downgraded_to_question() {
-        let (findings, _, _, _, routing) = parse_controlled_output(
+        let (findings, _, _, _, routing, _) = parse_controlled_output(
             r#"{"findings":[{"id":"F1","severity":"blocking","location":"","current":"","why":"感觉架构还要优化","suggestion":"","evidence_strength":"unverified"}],"confidence":"confirmed","evidence_refs":["out-1"],"missing_evidence":[]}"#,
             &["out-1".to_string()],
         )
@@ -1195,7 +1320,7 @@ mod tests {
 
     #[test]
     fn text_only_findings_are_backward_compatible_and_parsed_as_questions() {
-        let (findings, _, _, _, routing) = parse_controlled_output(
+        let (findings, _, _, _, routing, _) = parse_controlled_output(
             r#"{"findings":["发现A: 异步流式正常"],"confidence":"confirmed","evidence_refs":["out-1"],"missing_evidence":[]}"#,
             &["out-1".to_string()],
         )
@@ -1268,6 +1393,7 @@ mod tests {
             kind: None,
             routing: Some("certain".to_string()),
             withdrawn_findings: vec![],
+            scorecard: None,
         };
         let sample_json = serde_json::to_string(&sample_result).unwrap();
         finish_child_run(&state, &run_id, "succeeded", 150, 45, None, Some(&sample_json));
@@ -1391,6 +1517,7 @@ mod tests {
             kind: None,
             routing: Some("certain".to_string()),
             withdrawn_findings: vec![],
+            scorecard: None,
         };
         finish_child_run(&state, &child_1, "succeeded", 200, 30, None, Some(&serde_json::to_string(&res_1).unwrap()));
 
@@ -1422,6 +1549,7 @@ mod tests {
             kind: None,
             routing: Some("certain".to_string()),
             withdrawn_findings: vec![],
+            scorecard: None,
         };
         finish_child_run(&state, &child_2, "succeeded", 350, 40, None, Some(&serde_json::to_string(&res_2).unwrap()));
 
@@ -1460,6 +1588,7 @@ mod tests {
             kind: None,
             routing: Some("certain".to_string()),
             withdrawn_findings: vec![],
+            scorecard: None,
         })
         .unwrap()
     }
