@@ -159,6 +159,10 @@ impl SandwichContext {
             self.side_effects.len(),
             self.change_verification.as_ref(),
         ));
+        // (11) 方案门禁状态投影：决策前可见当前模式与放行条件，避免靠写入被拒学习规则。
+        bottom_state_card.push_str(&ContextRenderer::render_plan_gate(
+            self.plan_gate.as_ref(),
+        ));
         let trimmed_bottom = bottom_state_card.trim_end();
         if !trimmed_bottom.is_empty() {
             messages.push(ChatMessage {

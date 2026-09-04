@@ -1,5 +1,5 @@
 use crate::agent::change_verification::{change_verification_blocker, ChangeVerification};
-use crate::agent::context::types::FailedAttempt;
+use crate::agent::context::types::{FailedAttempt, PlanGateProjection};
 use crate::agent::review_contract::ReviewContract;
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::TodoItem;
@@ -121,6 +121,71 @@ impl ContextRenderer {
                 .unwrap_or_default()
         )
     }
+    /// 方案门禁状态卡：让模型在「决策前」看到当前模式与放行条件，
+    /// 避免靠写入被拒（一整轮 LLM 往返的代价）来反推门禁规则。
+    /// 指引文案必须与 loop_runner 的 check_pre_write_gatekeeper 拦截语义一一对应。
+    pub fn render_plan_gate(gate: Option<&PlanGateProjection>) -> String {
+        let Some(gate) = gate else {
+            return String::new();
+        };
+        let phase_label = match gate.phase.as_str() {
+            "exploring" => "探索取证中",
+            "reviewing" => "方案审查中",
+            "awaiting_approval" => "等待人工审批",
+            "approved" => "已批准放行",
+            other => other,
+        };
+        let (mode_label, guidance) = match gate.mode.as_str() {
+            "cross_review" => {
+                let review_state = if !gate.reviewer_dispatched {
+                    "尚未派发"
+                } else if gate.reviewer_consumed {
+                    "结论已消费"
+                } else {
+                    "已派发·结论未消费"
+                };
+                let next = if gate.phase == "approved" {
+                    "门禁已放行，可执行写入；新一批写入前的状态变更会反映在本卡。"
+                } else if !gate.reviewer_dispatched {
+                    "首次写入前必须先派发 child_reviewer 对抗审查（直接写工具将被门禁拦截）。"
+                } else if !gate.reviewer_consumed {
+                    "审查结论未回收：先 wait_jobs 收取并研判后再写入（问过 ≠ 听过，直接写入将被拦截）。"
+                } else {
+                    "研判审查结论后即可写入，门禁将自动放行。"
+                };
+                (
+                    format!(
+                        "🔍 交叉审查 (cross_review) | 审查: {}（预算 {}/{}）",
+                        review_state, gate.reviewer_budget_used, gate.reviewer_budget_max
+                    ),
+                    next,
+                )
+            }
+            "plan_approval" => {
+                let next = if gate.phase == "approved" {
+                    "方案已获人类批准，门禁放行，可执行写入。"
+                } else if gate.phase == "awaiting_approval" {
+                    "方案已呈报，等待人类在界面批准；期间不要调用写工具。"
+                } else {
+                    "写入前必须 ask_human(kind: plan_approval) 呈报完整方案并获人类批准（直接写工具将被拦截）。"
+                };
+                ("🛡️ 方案审批 (plan_approval)".to_string(), next)
+            }
+            _ => {
+                let next = if gate.phase == "approved" {
+                    "门禁放行中。"
+                } else {
+                    "完成只读排查与方案阐述后写入将自动放行；未经排查直接写入会被首轮门禁拦截。"
+                };
+                ("🚀 全自动 (auto)".to_string(), next)
+            }
+        };
+        format!(
+            "【方案门禁状态】模式: {} | 方案阶段: {}\n指引: {}\n\n",
+            mode_label, phase_label, guidance
+        )
+    }
+
     pub fn render_decision_instruction(compact_tools: Option<&str>) -> String {
         if let Some(tools) = compact_tools.filter(|s| !s.trim().is_empty()) {
             format!(
@@ -130,5 +195,83 @@ impl ContextRenderer {
         } else {
             "请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自上方工具菜单。在 description 字段给出面向用户的一句话进度；仅当上一步失败或被拦截时，才在 reflection 中补一句原因与改法。".to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gate(mode: &str, phase: &str, dispatched: bool, consumed: bool) -> PlanGateProjection {
+        PlanGateProjection {
+            mode: mode.to_string(),
+            phase: phase.to_string(),
+            reviewer_dispatched: dispatched,
+            reviewer_consumed: consumed,
+            reviewer_budget_used: if dispatched { 1 } else { 0 },
+            reviewer_budget_max: 2,
+        }
+    }
+
+    #[test]
+    fn plan_gate_renders_nothing_when_absent() {
+        assert!(ContextRenderer::render_plan_gate(None).is_empty());
+    }
+
+    #[test]
+    fn cross_review_undispatched_guides_dispatch_before_write() {
+        let out = ContextRenderer::render_plan_gate(Some(&gate(
+            "cross_review",
+            "exploring",
+            false,
+            false,
+        )));
+        assert!(out.contains("交叉审查"));
+        assert!(out.contains("尚未派发"));
+        assert!(out.contains("child_reviewer"), "应指引先派发审查: {out}");
+    }
+
+    #[test]
+    fn cross_review_dispatched_unconsumed_guides_wait_jobs() {
+        let out = ContextRenderer::render_plan_gate(Some(&gate(
+            "cross_review",
+            "reviewing",
+            true,
+            false,
+        )));
+        assert!(out.contains("结论未消费"));
+        assert!(out.contains("wait_jobs"), "应指引挂起等待结论: {out}");
+    }
+
+    #[test]
+    fn cross_review_approved_shows_gate_open() {
+        let out = ContextRenderer::render_plan_gate(Some(&gate(
+            "cross_review",
+            "approved",
+            true,
+            true,
+        )));
+        assert!(out.contains("已批准放行"));
+        assert!(!out.contains("将被拦截"), "放行后不应再出现拦截警告: {out}");
+    }
+
+    #[test]
+    fn plan_approval_mode_guides_ask_human() {
+        let out = ContextRenderer::render_plan_gate(Some(&gate(
+            "plan_approval",
+            "exploring",
+            false,
+            false,
+        )));
+        assert!(out.contains("方案审批"));
+        assert!(out.contains("plan_approval"));
+        assert!(out.contains("ask_human"), "应指引呈报审批卡片: {out}");
+    }
+
+    #[test]
+    fn auto_mode_renders_compact_single_guidance() {
+        let out = ContextRenderer::render_plan_gate(Some(&gate("auto", "exploring", false, false)));
+        assert!(out.contains("全自动"));
+        assert!(out.contains("自动放行"));
     }
 }

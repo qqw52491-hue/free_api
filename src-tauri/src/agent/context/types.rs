@@ -25,6 +25,24 @@ pub struct ReadLedgerEntry {
     pub line_count: usize,
 }
 
+/// 方案门禁状态投影：由 checkpoint 每轮规划前生成，注入底部状态卡，
+/// 让模型在「决策前可见」当前执行模式与放行条件，避免靠写入被拒学习门禁规则。
+/// 纯瞬态投影：不入持久化捕获，每轮从 checkpoint 事实状态重算。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct PlanGateProjection {
+    /// 执行模式："auto" | "cross_review" | "plan_approval"
+    pub mode: String,
+    /// 方案阶段："exploring" | "reviewing" | "awaiting_approval" | "approved"
+    pub phase: String,
+    /// 是否已派发过方案审查子 Agent
+    pub reviewer_dispatched: bool,
+    /// 审查结论是否已消费（注入过主 Agent 上下文）
+    pub reviewer_consumed: bool,
+    /// 批准前审查预算：已用 / 上限
+    pub reviewer_budget_used: u32,
+    pub reviewer_budget_max: u32,
+}
+
 /// 失败教训记录（用于防止大模型在长任务中重复尝试已知失败的方法）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FailedAttempt {
@@ -243,6 +261,9 @@ pub struct SandwichContext {
     /// 压缩引擎专用 LLM 配置（运行时注入，不参与 checkpoint 序列化）
     #[serde(skip)]
     pub compaction_model_config: Option<ModelConfig>,
+    /// 方案门禁状态投影（每轮由 checkpoint 重算注入，瞬态，不序列化）
+    #[serde(skip)]
+    pub plan_gate: Option<PlanGateProjection>,
 }
 
 impl SandwichContext {
@@ -285,6 +306,7 @@ impl SandwichContext {
             fetched_tools: BTreeSet::new(),
             budget_config: crate::agent::context::budget::ContextBudgetConfig::default(),
             compaction_model_config: None,
+            plan_gate: None,
         }
     }
 

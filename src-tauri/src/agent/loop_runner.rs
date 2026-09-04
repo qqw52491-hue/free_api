@@ -911,8 +911,9 @@ pub async fn run_tool_phase(
         // 方案审查轮数上限只约束批准前的方案审查讨论；
         // 已批准后的 child_reviewer 属于交付验证等其他用途，不消耗该预算、也不改变方案阶段。
         if !checkpoint.plan_phase.is_approved() {
-            const MAX_PLAN_REVIEWER_RETRIES: u32 = 2;
-            if checkpoint.plan_reviewer_retry_count >= MAX_PLAN_REVIEWER_RETRIES {
+            if checkpoint.plan_reviewer_retry_count
+                >= crate::agent::checkpoint::MAX_PLAN_REVIEWER_RETRIES
+            {
                 let limit_msg = "【审查轮数已达上限（2 轮）】方案审查讨论已达最大重试上限，请停止继续派发审查子 Agent。\n请综合已有审查建议，整理最终技术方案并调用 ask_human（kind: 'plan_approval'）呈报给用户进行人工审批。".to_string();
                 let result = DispatchResult {
                     stdout: String::new(),

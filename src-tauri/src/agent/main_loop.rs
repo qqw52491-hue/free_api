@@ -1803,6 +1803,9 @@ async fn run_agent_main_loop_in_workspace_inner(
             }
         }
         let resume_instruction = recovered_instruction.take();
+        // 每轮规划前把方案门禁状态投影进上下文底部状态卡：模型在决策时即可见
+        // 当前模式与放行条件，不再靠写入被拒（一整轮 LLM 往返）反推门禁规则。
+        context.plan_gate = Some(checkpoint.plan_gate_projection());
         if resume_instruction.is_none() {
             checkpoint.begin_planning(step_id, &context);
             save_checkpoint(state.inner(), &mut checkpoint)?;

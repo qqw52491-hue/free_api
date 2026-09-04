@@ -43,6 +43,9 @@ impl AgentPhase {
     }
 }
 
+/// 批准前方案审查的轮数硬上限（门禁与投影共用同一事实源）
+pub const MAX_PLAN_REVIEWER_RETRIES: u32 = 2;
+
 /// 方案制定与前置审查门禁的生命周期阶段
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -563,6 +566,20 @@ impl AgentCheckpoint {
         self.data = DurableAgentContext::capture(context);
     }
 
+    /// 生成方案门禁状态的瞬态投影，供上下文装配层注入底部状态卡（事前可见）。
+    pub fn plan_gate_projection(
+        &self,
+    ) -> crate::agent::context::types::PlanGateProjection {
+        crate::agent::context::types::PlanGateProjection {
+            mode: self.plan_mode.as_str().to_string(),
+            phase: self.plan_phase.as_str().to_string(),
+            reviewer_dispatched: self.plan_reviewer_retry_count > 0,
+            reviewer_consumed: self.plan_reviewer_consumed,
+            reviewer_budget_used: self.plan_reviewer_retry_count,
+            reviewer_budget_max: MAX_PLAN_REVIEWER_RETRIES,
+        }
+    }
+
     /// 模式切换守卫：
     /// 1. 从全自动或交叉审查切为方案审批模式时，自动授予（无人工留痕）的 Approved 不再可信，重置为 Reviewing；
     ///    人工批准过的方案（approved_plan_summary 有留痕）保持放行，避免误伤已确认状态。
@@ -928,6 +945,37 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_gate_projection_mirrors_checkpoint_facts() {
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("run-test".to_string(), &context);
+        checkpoint.plan_mode = PlanExecutionMode::CrossReview;
+        checkpoint.plan_phase = PlanPhase::Reviewing;
+        checkpoint.plan_reviewer_retry_count = 1;
+        checkpoint.plan_reviewer_consumed = false;
+
+        let proj = checkpoint.plan_gate_projection();
+        assert_eq!(proj.mode, "cross_review");
+        assert_eq!(proj.phase, "reviewing");
+        assert!(proj.reviewer_dispatched);
+        assert!(!proj.reviewer_consumed);
+        assert_eq!(proj.reviewer_budget_used, 1);
+        assert_eq!(proj.reviewer_budget_max, MAX_PLAN_REVIEWER_RETRIES);
+    }
+
+    #[test]
+    fn plan_gate_projection_defaults_to_auto_exploring_undispatched() {
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let checkpoint = AgentCheckpoint::new("run-test".to_string(), &context);
+
+        let proj = checkpoint.plan_gate_projection();
+        assert_eq!(proj.mode, "auto");
+        assert_eq!(proj.phase, "exploring");
+        assert!(!proj.reviewer_dispatched);
+        assert!(!proj.reviewer_consumed);
+        assert_eq!(proj.reviewer_budget_used, 0);
+    }
 
     fn instruction(action: &str) -> AgentInstruction {
         AgentInstruction {
