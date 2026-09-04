@@ -791,34 +791,37 @@ pub async fn run_tool_phase(
 
     // --- B2. 受限 child reviewer：异步派发，不阻塞主循环。结果在后续 step 中由 main_loop 的 poll_completed_child_runs 注入。 ---
     let dispatch_result = if inst.get_tool().eq_ignore_ascii_case("child_reviewer") {
-        const MAX_PLAN_REVIEWER_RETRIES: u32 = 2;
-        if checkpoint.plan_reviewer_retry_count >= MAX_PLAN_REVIEWER_RETRIES {
-            let limit_msg = "【审查轮数已达上限（2 轮）】方案审查讨论已达最大重试上限，请停止继续派发审查子 Agent。\n请综合已有审查建议，整理最终技术方案并调用 ask_human（kind: 'plan_approval'）呈报给用户进行人工审批。".to_string();
-            let result = DispatchResult {
-                stdout: String::new(),
-                stderr: limit_msg,
-                success: false,
-                route: "plan_gatekeeper:reviewer_retry_limit".to_string(),
-            };
-            emit_tool_event(
-                app,
-                final_session_id,
-                step_id,
-                inst,
-                "failed",
-                Some(result.route.clone()),
-                Some(false),
-                &result.stderr,
-                Some(tool_started_at.elapsed().as_millis()),
-            );
-            return Ok(result);
-        }
-
-        // 仅在尚未批准时进入审查中阶段；若已批准，保留 Approved 状态，避免后续补充审查打回 Reviewing 阻塞修改
+        // 方案审查轮数上限只约束批准前的方案审查讨论；
+        // 已批准后的 child_reviewer 属于交付验证等其他用途，不消耗该预算、也不改变方案阶段。
         if !checkpoint.plan_phase.is_approved() {
+            const MAX_PLAN_REVIEWER_RETRIES: u32 = 2;
+            if checkpoint.plan_reviewer_retry_count >= MAX_PLAN_REVIEWER_RETRIES {
+                let limit_msg = "【审查轮数已达上限（2 轮）】方案审查讨论已达最大重试上限，请停止继续派发审查子 Agent。\n请综合已有审查建议，整理最终技术方案并调用 ask_human（kind: 'plan_approval'）呈报给用户进行人工审批。".to_string();
+                let result = DispatchResult {
+                    stdout: String::new(),
+                    stderr: limit_msg,
+                    success: false,
+                    route: "plan_gatekeeper:reviewer_retry_limit".to_string(),
+                };
+                emit_tool_event(
+                    app,
+                    final_session_id,
+                    step_id,
+                    inst,
+                    "failed",
+                    Some(result.route.clone()),
+                    Some(false),
+                    &result.stderr,
+                    Some(tool_started_at.elapsed().as_millis()),
+                );
+                return Ok(result);
+            }
+
+            // 仅在尚未批准时进入审查中阶段；若已批准，保留 Approved 状态，避免后续补充审查打回 Reviewing 阻塞修改
             checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+            checkpoint.plan_reviewer_retry_count =
+                checkpoint.plan_reviewer_retry_count.saturating_add(1);
         }
-        checkpoint.plan_reviewer_retry_count = checkpoint.plan_reviewer_retry_count.saturating_add(1);
 
         let routing = crate::agent::router::AgentRouter::route_for_role(
             context,
@@ -1828,6 +1831,35 @@ pub async fn run_tool_phase(
                                 };
 
                                 if kind == "writer" {
+                                    // 🛑 前置方案门禁：恢复(resume_child)写入型子任务等同于开启新的写入路径，
+                                    // 未获批准前必须拦截，防止绕过派发门禁（B1.8）通过旧 writer 子任务改代码。
+                                    if !checkpoint.plan_phase.is_approved() {
+                                        if !checkpoint.auto_pilot {
+                                            let result = DispatchResult {
+                                                stdout: String::new(),
+                                                stderr: "【🚨 前置方案审批门禁拦截：当前处于方案审批模式】\n检测到尝试通过 resume_child 恢复写入型子 Agent 继续修改代码，该路径同样需要人工方案审批放行。\n请先调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的完整技术方案呈现给用户；\n待用户在交互界面上审阅并点击【批准方案】后，门禁将自动放行修改。本次恢复已被安全拦截，目标文件未受影响。".to_string(),
+                                                success: false,
+                                                route: "plan_gatekeeper:need_human_approval".to_string(),
+                                            };
+                                            emit_tool_event(
+                                                app,
+                                                final_session_id,
+                                                step_id,
+                                                inst,
+                                                "failed",
+                                                Some(result.route.clone()),
+                                                Some(false),
+                                                &result.stderr,
+                                                Some(tool_started_at.elapsed().as_millis()),
+                                            );
+                                            return Ok(result);
+                                        } else {
+                                            // 全自动模式下恢复写入子任务视同常规写入放行
+                                            checkpoint.plan_phase =
+                                                crate::agent::checkpoint::PlanPhase::Approved;
+                                        }
+                                    }
+
                                     let inherited_test_cmd = prev_result_json
                                         .as_deref()
                                         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
@@ -1913,10 +1945,15 @@ pub async fn run_tool_phase(
     } else if inst.get_tool().eq_ignore_ascii_case("ask_human") || inst.get_action().eq_ignore_ascii_case("ask") {
         let params = inst.get_params();
         let form_val = params.get("form");
+        // 与前端 normalizeHumanForm 的别名表保持一致（plan_approval / plan / approval），
+        // 防止前端渲染出审批卡片而后端不认，导致用户批准后门禁仍然关闭。
         let is_plan_approval_kind = form_val
             .and_then(|f| f.get("kind"))
             .and_then(|k| k.as_str())
-            .map(|k| k.eq_ignore_ascii_case("plan_approval"))
+            .map(|k| {
+                let normalized = k.trim().to_ascii_lowercase();
+                normalized == "plan_approval" || normalized == "plan" || normalized == "approval"
+            })
             .unwrap_or(false);
 
         let ask_msg = params

@@ -515,6 +515,20 @@ impl AgentCheckpoint {
         self.data = DurableAgentContext::capture(context);
     }
 
+    /// 模式切换守卫：从全自动模式切换为方案审批模式时，自动授予（无人工留痕）的
+    /// Approved 不再可信，重置为 Reviewing 要求重新经过人工审批；
+    /// 人工批准过的方案（approved_plan_summary 有留痕）保持放行，避免误伤已确认状态。
+    /// 必须在更新 auto_pilot 字段之前调用（依赖切换前的旧值）。
+    pub fn reconcile_plan_phase_for_mode_switch(&mut self, new_auto_pilot: bool) {
+        if self.auto_pilot
+            && !new_auto_pilot
+            && self.plan_phase.is_approved()
+            && self.approved_plan_summary.is_none()
+        {
+            self.plan_phase = PlanPhase::Reviewing;
+        }
+    }
+
     pub fn restore_context(&self, context: &mut SandwichContext) {
         self.data.restore_into(context);
     }

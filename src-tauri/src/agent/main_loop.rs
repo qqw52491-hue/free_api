@@ -565,15 +565,65 @@ mod finish_guard_tests {
         let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
         checkpoint.auto_pilot = true;
         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+        checkpoint.approved_plan_summary = None;
 
-        let previous_auto_pilot = checkpoint.auto_pilot;
-        let new_auto_pilot = false;
-        checkpoint.auto_pilot = new_auto_pilot;
-        if previous_auto_pilot && !new_auto_pilot && checkpoint.plan_phase.is_approved() {
-            checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
-        }
+        checkpoint.reconcile_plan_phase_for_mode_switch(false);
+        checkpoint.auto_pilot = false;
 
         assert_eq!(checkpoint.plan_phase, crate::agent::checkpoint::PlanPhase::Reviewing);
+    }
+
+    #[test]
+    fn mode_switch_preserves_human_approved_plan() {
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.auto_pilot = true;
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+        // 人工批准会留下方案摘要痕迹
+        checkpoint.approved_plan_summary = Some("用户已批准：调整拖拽遮罩逻辑".to_string());
+
+        checkpoint.reconcile_plan_phase_for_mode_switch(false);
+        checkpoint.auto_pilot = false;
+
+        // 人工确认过的方案不应因模式切换被撤销，避免用户被迫二次审批
+        assert!(checkpoint.plan_phase.is_approved());
+    }
+
+    #[test]
+    fn mode_switch_to_auto_pilot_keeps_phase_untouched() {
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.auto_pilot = false;
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+
+        // 反向切换（审批 -> 全自动）不应改动阶段，交由全自动链路自行放行
+        checkpoint.reconcile_plan_phase_for_mode_switch(true);
+        checkpoint.auto_pilot = true;
+
+        assert_eq!(checkpoint.plan_phase, crate::agent::checkpoint::PlanPhase::Reviewing);
+    }
+
+    #[test]
+    fn plan_approval_kind_accepts_frontend_aliases() {
+        // 前端 normalizeHumanForm 支持 plan_approval / plan / approval 三种别名，
+        // 后端必须同步识别，否则前端渲染审批卡片、用户批准后门禁仍关闭。
+        for kind in ["plan_approval", "plan", "approval", "PLAN_APPROVAL", " Plan "] {
+            let normalized = kind.trim().to_ascii_lowercase();
+            assert!(
+                normalized == "plan_approval" || normalized == "plan" || normalized == "approval",
+                "别名 {} 未被识别",
+                kind
+            );
+        }
+        // 普通提问的 kind 绝不能被误判为方案审批
+        for kind in ["choice", "confirm", "text", "planning_note"] {
+            let normalized = kind.trim().to_ascii_lowercase();
+            assert!(
+                !(normalized == "plan_approval" || normalized == "plan" || normalized == "approval"),
+                "普通提问 {} 被误判为方案审批",
+                kind
+            );
+        }
     }
 
     #[test]
@@ -1001,12 +1051,10 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
-    let previous_auto_pilot = checkpoint.auto_pilot;
+    // 模式切换守卫：从全自动切到方案审批模式时，自动授予的 Approved 不可信需重置；人工批准的保留。
+    // 必须在写入新的 auto_pilot 之前调用（方法内部依赖切换前的旧值）。
+    checkpoint.reconcile_plan_phase_for_mode_switch(auto_pilot);
     checkpoint.auto_pilot = auto_pilot;
-    // 如果用户从中途的 auto_pilot 切换为方案审批模式（!auto_pilot），重置已放行状态为审查中，确保重新经过人工确认
-    if previous_auto_pilot && !auto_pilot && checkpoint.plan_phase.is_approved() {
-        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
-    }
     // 初始工作区是会话选择的已声明资源；恢复时保留 checkpoint 中已有的显式契约。
     // 仅在显式项目会话、存在 workspace_override 或 auto_pilot 模式下才声明主工作区。
     // 在未选项目的通用自由会话中，主工作区保持为 None（自由模式），避免将宿主机启动目录误作为资源约束强塞给 Agent 及外部 MCP。
