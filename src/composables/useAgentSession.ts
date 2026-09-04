@@ -38,6 +38,7 @@ import {
 } from "../components/agent/types";
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
 import { extractWorkerDetails, parseWorkerArtifacts } from "../components/agent/workerUtils";
+import { stripPlanDecisionMarker } from "../components/agent/planDecision";
 
 const MAX_LOGS = 600;
 type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
@@ -1726,6 +1727,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     async function answerHuman(answer: string) {
         const message = answer.trim();
         if (!message || isSendingHuman.value) return;
+        // 日志展示用清洗后的文本（剥离后端解析用的结构化标记），但传给 Agent 的 message 保持原样
+        const displayMessage = stripPlanDecisionMarker(message);
         isSendingHuman.value = true;
         try {
             try {
@@ -1734,11 +1737,11 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 pauseReason.value = "";
                 humanForm.value = null;
                 setRunState("executing", "已收到人工回答，等待 Agent 继续执行。");
-                appendLog(`[人工回答] ${message}`);
+                appendLog(`[人工回答] ${displayMessage}`);
                 autoScrollToBottom();
             } catch {
                 // 内存通道不存在（应用曾重启过），无缝唤醒主循环续跑
-                appendLog(`[人工回答] 正在携带回答唤醒并继续任务: ${message}`);
+                appendLog(`[人工回答] 正在携带回答唤醒并继续任务: ${displayMessage}`);
                 humanInput.value = "";
                 pauseReason.value = "";
                 humanForm.value = null;

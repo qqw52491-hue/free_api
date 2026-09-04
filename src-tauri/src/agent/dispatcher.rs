@@ -31,45 +31,47 @@ fn mcp_service_requires_concrete_tool(tool: &str, action: &str) -> bool {
 }
 
 pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
-    let tool = inst.get_tool().to_ascii_lowercase();
+    // MCP 工具常以 "服务名/具体工具" 形式出现（如 remote-hub/shell_exec）。
+    // 分类前统一剥离命名空间，否则前缀判定会被命名空间遮蔽（remote-hub/read_file 匹配不到 read_ 前缀）。
+    let raw_tool = inst.get_tool().to_ascii_lowercase();
+    let tool = raw_tool.rsplit('/').next().unwrap_or(&raw_tool);
     let action = inst.get_action().to_ascii_lowercase();
 
-    // 显式排除网络抓取/搜索/文件读取等纯只读操作
-    if tool == "web_fetch"
-        || tool == "web_search"
-        || tool == "read_file"
-        || tool == "search_files"
-        || tool == "ripgrep_search"
-        || tool.starts_with("read_")
-        || tool.starts_with("get_")
-        || tool.starts_with("list_")
-        || tool.starts_with("search_")
-        || action.starts_with("read_")
-        || action.starts_with("get_")
-        || action.starts_with("list_")
-        || action.starts_with("search_")
-    {
-        return false;
-    }
-
-    // 显式匹配写盘/Excel/代码修改/数据库写入/系统脚本执行等写操作
-    tool.contains("excel")
+    // 写动词优先于只读前缀白名单：
+    // 形如 get_shell_output / list_running_jobs 的"取结果"类工具，虽然以只读前缀开头，
+    // 但本质是脚本执行类动作，必须按写操作处理，否则会被只读前缀误判放行。
+    let has_write_verb = tool.contains("excel")
         || tool.contains("write")
         || tool.contains("edit")
         || tool.contains("shell")
         || tool.contains("bash")
         || tool.contains("exec")
-        || (tool == "task_store"
-            && (action.contains("create")
-                || action.contains("upsert")
-                || action.contains("update")))
+        || tool.contains("create")
+        || tool.contains("delete")
+        || tool.contains("save")
+        || tool.contains("run")
         || action.starts_with("write")
         || action.starts_with("edit")
         || action.starts_with("create")
         || action.starts_with("delete")
         || action.starts_with("save")
         || action.starts_with("exec")
-        || action.starts_with("run")
+        || action.starts_with("run");
+
+    if has_write_verb {
+        return true;
+    }
+
+    // task_store 的变更型动作（不带 create/update 前缀时由 action.contains 兜底识别）
+    if tool == "task_store"
+        && (action.contains("create") || action.contains("upsert") || action.contains("update"))
+    {
+        return true;
+    }
+
+    // 其余一律视为只读：包括 web_fetch / web_search / ripgrep_search、
+    // read_* / get_* / list_* / search_* 系列，以及未登记的未知工具（保守按非写处理）。
+    false
 }
 
 /// 面向 AgentPanel 的轻量工具生命周期事件。只发送参数和输出摘要；完整大对象

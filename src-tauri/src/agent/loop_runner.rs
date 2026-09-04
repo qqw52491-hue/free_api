@@ -636,6 +636,62 @@ pub async fn run_call_llm_and_run_tool_phases(
     })
 }
 
+/// 前端下发方案审批结论时使用的结构化标记，形如 `<!--plan-decision:{"approved":true}-->`。
+/// 采用 HTML 注释形态，既不会干扰 Markdown 方案正文的渲染，也不会被模型当作指令文本。
+const PLAN_DECISION_MARKER_PREFIX: &str = "<!--plan-decision:";
+const PLAN_DECISION_MARKER_SUFFIX: &str = "-->";
+
+/// 剥离回复末尾的结构化审批标记，用于日志展示与持久化摘要。
+pub(crate) fn strip_plan_decision_marker(reply: &str) -> String {
+    match reply.find(PLAN_DECISION_MARKER_PREFIX) {
+        Some(start) => {
+            let head = &reply[..start];
+            let rest = &reply[start + PLAN_DECISION_MARKER_PREFIX.len()..];
+            match rest.find(PLAN_DECISION_MARKER_SUFFIX) {
+                // 标记之后若还有正文（理论上不应出现），保留尾部内容
+                Some(end) => format!("{}{}", head.trim_end(), rest[end + PLAN_DECISION_MARKER_SUFFIX.len()..].trim_end()),
+                None => reply.to_string(),
+            }
+        }
+        None => reply.to_string(),
+    }
+}
+
+/// 从人类回复中解析方案审批结论。
+///
+/// 返回 `Some(true)` = 批准放行；`Some(false)` = 打回重新推演；`None` = 无法判定。
+///
+/// 判定顺序：
+/// 1. 优先解析前端下发的结构化标记，这是权威来源，**不受用户自然语言内容干扰**；
+/// 2. 无标记时（CLI / 直接调用等非 UI 通道）回退到关键词嗅探；
+/// 3. 仍无法判定时返回 `None`，由调用方保持门禁关闭，绝不默认放行。
+pub(crate) fn parse_plan_approval_decision(reply: &str) -> Option<bool> {
+    // 1. 结构化标记：权威来源。即便用户补充意见里写了"打回修改"等字样也不会误判。
+    if let Some(start) = reply.find(PLAN_DECISION_MARKER_PREFIX) {
+        let rest = &reply[start + PLAN_DECISION_MARKER_PREFIX.len()..];
+        if let Some(end) = rest.find(PLAN_DECISION_MARKER_SUFFIX) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(rest[..end].trim()) {
+                if let Some(approved) = value.get("approved").and_then(|v| v.as_bool()) {
+                    return Some(approved);
+                }
+            }
+        }
+    }
+
+    // 2. 回退：否定信号优先于肯定信号，避免"我不太同意但先按这个来"被判为批准
+    let negative = ["【方案打回修改】", "打回修改", "\"approved\":false", "\"confirm\":false"];
+    if negative.iter().any(|m| reply.contains(m)) {
+        return Some(false);
+    }
+    let positive = ["【方案已批准】", "批准方案", "同意该方案", "方案通过"];
+    if positive.iter().any(|m| reply.contains(m)) {
+        return Some(true);
+    }
+
+    // 3. 无法判定：交由调用方保持门禁关闭
+    None
+}
+
 /// 执行持久化状态机的 RunTool 阶段。
 ///
 /// 调用前为未知或可能有副作用的操作创建 pending checkpoint；人工等待也以
@@ -2023,17 +2079,31 @@ pub async fn run_tool_phase(
         };
         context.add_error_feedback(&format!("【人类回复】{}", reply));
         if is_plan_approval_kind {
-            let is_plan_revision = reply.contains("【方案打回修改】")
-                || reply.contains("\"approved\":false")
-                || reply.contains("\"confirm\":false")
-                || reply.contains("打回修改");
-
-            if is_plan_revision {
-                checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
-            } else {
-                // 人类在方案审批卡片中批准放行
-                checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
-                checkpoint.approved_plan_summary = Some(reply.chars().take(500).collect());
+            match parse_plan_approval_decision(&reply) {
+                Some(false) => {
+                    // 人类提出修改意见，打回重新推演审查
+                    checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+                }
+                Some(true) => {
+                    // 人类在方案审批卡片中批准放行
+                    checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                    // 摘要中剥离结构化标记，避免协议噪声污染持久化内容
+                    let clean_reply = strip_plan_decision_marker(&reply);
+                    checkpoint.approved_plan_summary =
+                        Some(clean_reply.chars().take(500).collect());
+                }
+                None => {
+                    // 无法判定意图时保持门禁关闭（停在 AwaitingApproval），绝不默认放行。
+                    // Agent 会在下次尝试写入时再次被拦截并重新呈报方案。
+                    let msg = "【方案审批结论无法判定】未从回复中识别出明确的批准或打回意图，\
+                               前置写入门禁保持关闭。请重新呈报方案请用户明确确认。";
+                    context.add_error_feedback(msg);
+                    app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        msg.to_string(),
+                    )
+                    .ok();
+                }
             }
         }
         checkpoint.begin_planning(step_id, &context);

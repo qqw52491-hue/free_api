@@ -645,6 +645,93 @@ mod finish_guard_tests {
         assert!(is_write_or_side_effect_tool(&write_inst));
         assert!(is_write_or_side_effect_tool(&child_writer_inst));
     }
+
+    fn inst_with_tool(tool: &str) -> AgentInstruction {
+        AgentInstruction {
+            tool: Some(tool.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn namespaced_mcp_tools_are_classified_by_concrete_tool_name() {
+        // MCP 工具常带 "服务名/具体工具" 前缀，分类必须基于剥离命名空间后的具体工具名
+        assert!(is_write_or_side_effect_tool(&inst_with_tool("remote-hub/shell_exec")));
+        assert!(is_write_or_side_effect_tool(&inst_with_tool("remote-hub/write_file")));
+        assert!(!is_write_or_side_effect_tool(&inst_with_tool("remote-hub/read_file")));
+        assert!(!is_write_or_side_effect_tool(&inst_with_tool("remote-hub/list_dir")));
+    }
+
+    #[test]
+    fn write_verb_beats_readonly_prefix() {
+        // 形如 get_shell_output 的"取结果"类工具本质是脚本执行，
+        // 不能被 get_/list_ 只读前缀误判放行，否则门禁可被绕过。
+        assert!(is_write_or_side_effect_tool(&inst_with_tool("get_shell_output")));
+        assert!(is_write_or_side_effect_tool(&inst_with_tool("list_running_jobs")));
+        // 常规只读工具仍必须判为只读
+        assert!(!is_write_or_side_effect_tool(&inst_with_tool("get_file_content")));
+        assert!(!is_write_or_side_effect_tool(&inst_with_tool("list_workspaces")));
+        assert!(!is_write_or_side_effect_tool(&inst_with_tool("read_multiple_files")));
+        assert!(!is_write_or_side_effect_tool(&inst_with_tool("search_files")));
+        assert!(!is_write_or_side_effect_tool(&inst_with_tool("web_fetch")));
+    }
+
+    #[test]
+    fn plan_decision_marker_is_authoritative_over_free_text() {
+        use crate::agent::loop_runner::parse_plan_approval_decision;
+
+        // 原始缺陷：用户在「补充执行要求」里写了"打回修改"却点的是批准，
+        // 旧逻辑靠文本嗅探会误判为打回。结构化标记必须覆盖文本。
+        let tricky = "【方案已批准】批准方案，请开始执行后续写入与测试步骤。\n\
+                      【补充执行要求】: 注意别把之前打回修改的那段逻辑又改回来\n\
+                      <!--plan-decision:{\"approved\":true}-->";
+        assert_eq!(parse_plan_approval_decision(tricky), Some(true));
+
+        let tricky_reject = "【方案打回修改】请重新审视：\n这里写了个「批准方案」的注释\n\
+                             <!--plan-decision:{\"approved\":false}-->";
+        assert_eq!(parse_plan_approval_decision(tricky_reject), Some(false));
+    }
+
+    #[test]
+    fn plan_decision_falls_back_to_text_markers_without_structured_marker() {
+        use crate::agent::loop_runner::parse_plan_approval_decision;
+
+        // 非 UI 通道（CLI / 直接调用）没有结构化标记，仍需兼容旧的文本约定
+        assert_eq!(
+            parse_plan_approval_decision("【方案已批准】可以开始改了"),
+            Some(true)
+        );
+        assert_eq!(
+            parse_plan_approval_decision("【方案打回修改】换个库再推演一次"),
+            Some(false)
+        );
+        assert_eq!(
+            parse_plan_approval_decision("{\"approved\":false}"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn plan_decision_returns_none_for_ambiguous_reply() {
+        use crate::agent::loop_runner::parse_plan_approval_decision;
+
+        // 无法判定时返回 None，调用方应保持门禁关闭，绝不默认放行
+        assert_eq!(parse_plan_approval_decision("我再想想"), None);
+        assert_eq!(parse_plan_approval_decision(""), None);
+    }
+
+    #[test]
+    fn strip_plan_decision_marker_cleans_persisted_summary() {
+        use crate::agent::loop_runner::{strip_plan_decision_marker, parse_plan_approval_decision};
+
+        let raw = "【方案已批准】开始执行\n<!--plan-decision:{\"approved\":true}-->";
+        let cleaned = strip_plan_decision_marker(raw);
+        assert_eq!(cleaned, "【方案已批准】开始执行");
+        // 清洗不能破坏解析（解析在清洗之前进行）
+        assert_eq!(parse_plan_approval_decision(raw), Some(true));
+        // 无标记时原样返回
+        assert_eq!(strip_plan_decision_marker("普通回复"), "普通回复");
+    }
 }
 
 /// 推进后端运行状态，并向前端发送独立于旧进度事件的权威状态快照。

@@ -238,6 +238,7 @@ import { computed, nextTick, onMounted, ref } from "vue";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { AgentHumanForm, AgentHumanFormKind } from "./types";
 import { renderMarkdown } from "./format";
+import { withPlanDecision } from "./planDecision";
 import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 
 const props = defineProps<{
@@ -314,14 +315,14 @@ function handlePlanApprove() {
   if (customWriteInText.value.trim()) {
     parts.push(`【补充执行要求】: ${customWriteInText.value.trim()}`);
   }
-  emit("submit", parts.join("\n"));
+  emit("submit", withPlanDecision(parts.join("\n"), true));
 }
 
 function handlePlanRejectAndRevise() {
   if (!customWriteInText.value.trim() || props.isSending) return;
   const note = customWriteInText.value.trim();
   const feedback = `【方案打回修改】请重新审视并按以下意见修改方案后再提交审查：\n${note}`;
-  emit("submit", feedback);
+  emit("submit", withPlanDecision(feedback, false));
 }
 
 const confirmValue = ref<boolean | null>(
