@@ -449,6 +449,9 @@ pub struct AgentCheckpoint {
     /// 对显式未完成 Todo 的终态质询已经发出一次，避免一次质询变成无限循环。
     #[serde(default)]
     pub finish_reviewed: bool,
+    /// 终态质询累计次数（达到上限后强制熔断放行，绝不允许死循环）
+    #[serde(default)]
+    pub finish_challenge_count: u32,
     /// 终态代码审查重试次数（达到上限后熔断升级，防止死循环）
     #[serde(default)]
     pub reviewer_retry_count: u32,
@@ -493,6 +496,7 @@ impl AgentCheckpoint {
             step_id: 0,
             retry_count: 0,
             finish_reviewed: false,
+            finish_challenge_count: 0,
             reviewer_retry_count: 0,
             last_reviewed_diff_hash: None,
             last_review_result: None,
@@ -738,6 +742,8 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
                     latest.plan_reviewer_retry_count = checkpoint.plan_reviewer_retry_count;
                     latest.approved_plan_summary = checkpoint.approved_plan_summary.clone();
                     latest.auto_pilot = checkpoint.auto_pilot;
+                    latest.finish_reviewed = checkpoint.finish_reviewed;
+                    latest.finish_challenge_count = checkpoint.finish_challenge_count;
                     latest.pending = checkpoint.pending.clone();
                     latest.prepared_instruction = checkpoint.prepared_instruction.clone();
                     latest.step_id = checkpoint.step_id;
@@ -749,6 +755,8 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
                     checkpoint.plan_reviewer_retry_count = latest.plan_reviewer_retry_count;
                     checkpoint.approved_plan_summary = latest.approved_plan_summary;
                     checkpoint.auto_pilot = latest.auto_pilot;
+                    checkpoint.finish_reviewed = latest.finish_reviewed;
+                    checkpoint.finish_challenge_count = latest.finish_challenge_count;
                     checkpoint.pending = latest.pending;
                     checkpoint.prepared_instruction = latest.prepared_instruction;
                     checkpoint.step_id = latest.step_id;

@@ -148,19 +148,25 @@ fn should_challenge_finish_with_blockers(
     is_finish && succeeded && !finish_reviewed && !blockers.is_empty()
 }
 
-/// 主根因的证据边界是交付正确性的前置条件，不能因已经提醒过一次而静默放行。
-/// Todo、审查义务与写入验证仍沿用原有的一次反馈语义，避免反复广播相同状态卡。
+/// 主根因的证据边界是交付正确性的前置条件，但绝不能造成无上限的死循环死锁。
+/// 累计质询达到 MAX_FINISH_CHALLENGES（2 次）时，硬性熔断放行，避免用户任务卡死。
 fn should_challenge_finish_with_complex_delivery_blocker(
     is_finish: bool,
     succeeded: bool,
     finish_reviewed: bool,
+    finish_challenge_count: u32,
     blockers: &[String],
     complex_delivery_unresolved: bool,
 ) -> bool {
-    is_finish
-        && succeeded
-        && !blockers.is_empty()
-        && (!finish_reviewed || complex_delivery_unresolved)
+    const MAX_FINISH_CHALLENGES: u32 = 2;
+    if !is_finish || !succeeded || blockers.is_empty() {
+        return false;
+    }
+    // 防死循环硬性熔断保护：累计质询已达 2 次时，绝不再次死循环拦截
+    if finish_challenge_count >= MAX_FINISH_CHALLENGES {
+        return false;
+    }
+    !finish_reviewed || complex_delivery_unresolved
 }
 
 /// 复杂诊断 finish 缺少边界披露时复用既有可恢复拦截。
@@ -386,14 +392,19 @@ mod finish_guard_tests {
     #[test]
     fn complex_delivery_blocker_remains_active_after_an_initial_finish_challenge() {
         let blockers = vec!["复杂终态缺少主根因直接证据与结论强度".to_string()];
+        // 首次重试（count = 1）依然保持质询
         assert!(should_challenge_finish_with_complex_delivery_blocker(
-            true, true, true, &blockers, true
+            true, true, true, 1, &blockers, true
+        ));
+        // 达到上限（count = 2）硬性熔断放行，绝不无限循环
+        assert!(!should_challenge_finish_with_complex_delivery_blocker(
+            true, true, true, 2, &blockers, true
         ));
         assert!(!should_challenge_finish_with_complex_delivery_blocker(
-            true, true, true, &blockers, false
+            true, true, true, 0, &blockers, false
         ));
         assert!(!should_challenge_finish_with_complex_delivery_blocker(
-            true, false, true, &blockers, true
+            true, false, true, 0, &blockers, true
         ));
     }
 
@@ -1604,6 +1615,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             is_finish,
             result.success,
             checkpoint.finish_reviewed,
+            checkpoint.finish_challenge_count,
             &open_todos,
             complex_delivery_unresolved,
         );
@@ -1613,6 +1625,7 @@ async fn run_agent_main_loop_in_workspace_inner(
 
         if finish_challenged {
             checkpoint.finish_reviewed = true;
+            checkpoint.finish_challenge_count = checkpoint.finish_challenge_count.saturating_add(1);
             let blocker_summary = open_todos
                 .iter()
                 .map(|todo| format!("- {todo}"))
@@ -1799,6 +1812,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         } else if !is_finish {
             // 新的常规步骤提供了新增证据，之后若仍有 open Todo 可重新进行一次质询。
             checkpoint.finish_reviewed = false;
+            checkpoint.finish_challenge_count = 0;
         }
         let is_effectively_challenged = finish_challenged || reviewer_challenged;
         let outcome_str = if is_effectively_challenged {

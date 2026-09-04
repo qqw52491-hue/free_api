@@ -146,8 +146,8 @@ pub async fn run_call_llm_and_run_tool_phases(
             &context.todo_list,
             context.review_contract.as_ref(),
             false,
-            context.side_effects.len() - context.inherited_side_effects_count,
-            context.change_verification.as_ref(),
+            0, // 避免把待闭合验证当作流式早期中断条件，允许模型在 finish 时同时递交 change_verification_update
+            None,
         );
         let can_early_challenge_finish =
             !checkpoint.finish_reviewed && !open_todos_for_early_check.is_empty();

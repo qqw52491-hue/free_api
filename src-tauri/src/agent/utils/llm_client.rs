@@ -253,11 +253,15 @@ pub async fn call_llm(
                     ..
                 } = &event
                 {
-                    if accumulated_content.contains("\"tool\": \"finish\"")
+                    let has_finish_intent = accumulated_content.contains("\"tool\": \"finish\"")
                         || accumulated_content.contains("\"tool\":\"finish\"")
                         || accumulated_content.contains("\"action\": \"finish\"")
-                        || accumulated_content.contains("\"action\":\"finish\"")
-                    {
+                        || accumulated_content.contains("\"action\":\"finish\"");
+                    let has_verification_closing = accumulated_content.contains("change_verification_update")
+                        || accumulated_content.contains("\"status\": \"verified\"")
+                        || accumulated_content.contains("\"status\":\"verified\"");
+
+                    if has_finish_intent && !has_verification_closing && accumulated_content.len() > 60 {
                         println!("⚡ [流式早期熔断] 存在未闭合事项时检测到 finish 调用意图，提前终止流式接收！");
                         early_finish_aborted = true;
                         return false;

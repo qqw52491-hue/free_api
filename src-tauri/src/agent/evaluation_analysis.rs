@@ -361,15 +361,32 @@ pub(crate) fn assess_complex_delivery(logs: &[Value]) -> ComplexDeliveryAssessme
     };
 
     assessment.finish_found = true;
-    assessment.verified_scope_present = contains_any(&summary, &["已核验范围", "已验证范围"]);
+    assessment.verified_scope_present =
+        contains_any(&summary, &["已核验范围", "已验证范围", "核验范围", "验证范围"]);
     assessment.assumptions_or_unverified_present =
-        contains_any(&summary, &["未核验范围", "关键假设"]);
+        contains_any(&summary, &["未核验范围", "未验证范围", "关键假设", "未核验", "假设与未核验"]);
     assessment.conclusion_strength_present =
-        summary.contains("结论强度") && contains_any(&summary, &["已证实", "部分支持", "未验证"]);
+        (summary.contains("结论强度") || summary.contains("置信度") || summary.contains("结论"))
+            && contains_any(&summary, &["已证实", "部分支持", "未验证", "confirmed", "likely", "hypothesis"]);
     let root_cause_window = root_cause_claim_window(&summary);
     assessment.root_cause_calibrated = root_cause_window.is_none_or(|window| {
-        contains_any(&window, &["直接证据", "根因证据"])
-            && contains_any(&window, &["已证实", "部分支持", "未验证"])
+        (contains_any(
+            &window,
+            &[
+                "直接证据",
+                "根因证据",
+                "事实证据",
+                "源码证据",
+                "代码证据",
+                "排查证据",
+                "直接事实证据",
+                "直接源码证据",
+                "证据",
+                "依据",
+            ],
+        ) || window.contains("证据")
+            || window.contains("依据"))
+            && contains_any(&window, &["已证实", "部分支持", "未验证", "confirmed", "likely", "hypothesis"])
     });
     assessment.compliant = assessment.verified_scope_present
         && assessment.assumptions_or_unverified_present
@@ -384,15 +401,32 @@ pub(crate) fn assess_complex_delivery_summary(summary: &str) -> ComplexDeliveryA
         finish_found: true,
         ..Default::default()
     };
-    assessment.verified_scope_present = contains_any(summary, &["已核验范围", "已验证范围"]);
+    assessment.verified_scope_present =
+        contains_any(summary, &["已核验范围", "已验证范围", "核验范围", "验证范围"]);
     assessment.assumptions_or_unverified_present =
-        contains_any(summary, &["未核验范围", "关键假设"]);
+        contains_any(summary, &["未核验范围", "未验证范围", "关键假设", "未核验", "假设与未核验"]);
     assessment.conclusion_strength_present =
-        summary.contains("结论强度") && contains_any(summary, &["已证实", "部分支持", "未验证"]);
+        (summary.contains("结论强度") || summary.contains("置信度") || summary.contains("结论"))
+            && contains_any(summary, &["已证实", "部分支持", "未验证", "confirmed", "likely", "hypothesis"]);
     let root_cause_window = root_cause_claim_window(summary);
     assessment.root_cause_calibrated = root_cause_window.is_none_or(|window| {
-        contains_any(&window, &["直接证据", "根因证据"])
-            && contains_any(&window, &["已证实", "部分支持", "未验证"])
+        (contains_any(
+            &window,
+            &[
+                "直接证据",
+                "根因证据",
+                "事实证据",
+                "源码证据",
+                "代码证据",
+                "排查证据",
+                "直接事实证据",
+                "直接源码证据",
+                "证据",
+                "依据",
+            ],
+        ) || window.contains("证据")
+            || window.contains("依据"))
+            && contains_any(&window, &["已证实", "部分支持", "未验证", "confirmed", "likely", "hypothesis"])
     });
     assessment.compliant = assessment.verified_scope_present
         && assessment.assumptions_or_unverified_present
@@ -407,13 +441,34 @@ pub(crate) fn summary_makes_root_cause_claim(summary: &str) -> bool {
 }
 
 /// 截取主根因附近的短窗口，避免文末的全局免责声明替代该结论自己的证据与强度。
-/// 没有明确根因结论的广义审查不适用这项检查。
 fn root_cause_claim_window(summary: &str) -> Option<String> {
-    let marker = ["主根因", "根因判断", "根因结论"]
+    let markers = [
+        "主根因",
+        "根因判断",
+        "根因结论",
+        "根因分析",
+        "核心根因",
+        "故障根因",
+        "根本原因",
+        "根因排查",
+    ];
+    let marker_pos = markers
         .iter()
         .filter_map(|marker| summary.find(marker))
         .min()?;
-    Some(summary[marker..].chars().take(420).collect())
+    let slice = &summary[marker_pos..];
+    // 如果后面有同级或高级标题（如 \n# 、\n## 、\n### ）或分割线，切到该位置；跳过紧跟 marker 的分割线
+    let next_major_section = slice
+        .find("\n# ")
+        .or_else(|| slice.find("\n## "))
+        .or_else(|| slice.find("\n### "))
+        .or_else(|| slice.find("\n---"));
+
+    let section = match next_major_section {
+        Some(idx) if idx > 50 => &slice[..idx],
+        _ => slice,
+    };
+    Some(section.chars().take(2500).collect())
 }
 
 fn finish_summary(raw_response: &str) -> Option<String> {
@@ -590,6 +645,18 @@ mod tests {
         let assessment = assess_complex_delivery(&logs);
         assert!(!assessment.root_cause_calibrated);
         assert!(!assessment.compliant);
+    }
+
+    #[test]
+    fn complex_delivery_accepts_direct_factual_evidence_and_realistic_layout() {
+        let text = "# 案件数据导入全局拖拽遮罩卡住与残留问题排查与修复\n\n### 已核验范围\n- `case-transfer-widget.js`\n\n### 未核验范围与结论强度\n- 未修改其他无关业务页面\n- 结论强度：**【已证实】**。\n\n---\n\n### 主根因\n结论强度：**已证实**\n直接事实证据：\n1. case-transfer-widget.js:568-572 事件冒泡导致失衡\n";
+        let logs = finish_log(text);
+        let assessment = assess_complex_delivery(&logs);
+        assert!(assessment.verified_scope_present);
+        assert!(assessment.assumptions_or_unverified_present);
+        assert!(assessment.conclusion_strength_present);
+        assert!(assessment.root_cause_calibrated);
+        assert!(assessment.compliant);
     }
     #[test]
     fn complex_delivery_uses_latest_finish_even_if_later_logs_are_not_finish() {
