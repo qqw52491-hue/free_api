@@ -1,7 +1,7 @@
 // 判分 oracle 驱动的 progression 测试：纯客户端管道，题目/输入/期望输出全部由宿主下发。
 // 本文件不含任何答案；每次 npm test：GET /current 取题 → 执行 transform → POST /verify 送验 → 解锁。
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -33,6 +33,8 @@ const post = async (p, body) => {
 const cur = await get(`/current?nonce=${nonce}&v=${Date.now()}`);
 const stageFile = path.join(root, "src", `stage-${cur.id}.mjs`);
 if (!existsSync(stageFile)) {
+  // src/ 可能尚不存在（懒生成）：必须先建目录，否则 writeFileSync 直接 ENOENT
+  mkdirSync(path.dirname(stageFile), { recursive: true });
   writeFileSync(stageFile, "export function transform(value) {\n  return value;\n}\n");
 }
 writeFileSync(
@@ -54,6 +56,7 @@ if (verdict.done) {
 } else {
   const nextFile = path.join(root, "src", `stage-${verdict.next.id}.mjs`);
   if (!existsSync(nextFile)) {
+    mkdirSync(path.dirname(nextFile), { recursive: true });
     writeFileSync(nextFile, "export function transform(value) {\n  return value;\n}\n");
   }
   writeFileSync(
