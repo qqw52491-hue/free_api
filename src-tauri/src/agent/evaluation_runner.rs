@@ -443,6 +443,15 @@ pub async fn start_background_agent_evaluation(
     } else {
         None
     };
+    // 修复实测 catch-22：npm test（取题通道）会被写前门禁拦截，模型不看题无法过审。
+    // 首阶段题面在启动时注入目标；后续阶段仍由 CURRENT_STAGE.md 在解锁后披露。
+    let goal = match (&oracle, evaluation_run.goal.clone()) {
+        (Some(_), goal) => format!(
+            "{goal}\n\n【当前阶段任务（宿主判分，逐阶段推进）】\n{}\n（完成并 npm test 通过后，CURRENT_STAGE.md 会披露下一阶段题面；答案在宿主侧，禁止尝试伪造判分或修改受保护文件。）",
+            crate::agent::eval_oracle::initial_stage_brief()
+        ),
+        (None, goal) => goal,
+    };
     let evaluation_id = evaluation_run.evaluation_id.clone();
     let scenario_id = evaluation_run.scenario_id.clone();
     let goal = evaluation_run.goal.clone();

@@ -25,6 +25,21 @@ fn stages() -> Vec<Value> {
     serde_json::from_str(STAGES).expect("eval_oracle_stages.json 必须是合法 JSON")
 }
 
+/// 首阶段题面（id + requirement）：评测启动时注入目标文本。
+/// 修复实测 catch-22——npm test 是取题通道却被写前门禁拦截，模型不看题无法过审、
+/// 不过审不能跑测试。答案仍在服务端，此处只下发第一题的题面。
+pub fn initial_stage_brief() -> String {
+    let stages = stages();
+    let first = &stages[0];
+    format!(
+        "阶段 {}/{}：仅修改 src/stage-{}.mjs 的 transform。{}",
+        first["id"].as_str().unwrap_or("01"),
+        stages.len(),
+        first["id"].as_str().unwrap_or("01"),
+        first["requirement"].as_str().unwrap_or("")
+    )
+}
+
 /// 归一化序列化：哨兵 → token、数值 → f64、对象键排序。
 /// 两侧（期望/实际）各自 canon 后字符串相等即语义相等（对齐 JS deepEqual 宽松语义，-0==0）。
 fn canon(v: &Value) -> String {
