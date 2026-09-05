@@ -976,11 +976,29 @@ function planEntries(steps: AgentStepItem[], prefix: string, active = false): Pl
         if (step.planTitle) existing.title = step.planTitle;
         groups.set(key, existing);
     }
-    const plans = [...groups.values()].map((plan) => {
+    const rawPlans = [...groups.values()];
+    const plans = rawPlans.map((plan, idx) => {
+        const isLatest = idx === rawPlans.length - 1;
         const calculatedStatus = planStatus(plan.steps);
+
+        let status: AgentToolStatus;
+        if (isTaskActive) {
+            if (isLatest) {
+                // 🌟 用户核心诉求：只要任务还在执行中，最新的大阶段就稳定保持为 running！
+                // 绝不因单个微步骤完成与下一步调度之间的间隙而反复在"运行中"与"缩略合并"之间横跳！
+                status = "running";
+            } else {
+                // 🌟 确定开启了下一大阶段（isLatest 为 false），前面的大阶段才确认完成并恢复缩略合并状态！
+                status = calculatedStatus === "running" ? "succeeded" : calculatedStatus;
+            }
+        } else {
+            // 任务整体已结束（产出最终回复或停止运行）：所有阶段稳定落定
+            status = calculatedStatus === "running" ? "succeeded" : calculatedStatus;
+        }
+
         return {
             ...plan,
-            status: (!isTaskActive && calculatedStatus === "running") ? "succeeded" : calculatedStatus,
+            status,
         };
     });
     if (active && isTaskActive && (props.isThinking || Boolean(props.thought))) {

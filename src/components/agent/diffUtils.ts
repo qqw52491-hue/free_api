@@ -1222,12 +1222,21 @@ export function getRunningStagePreview(
     }
 
     // 3. 正在执行的当前动作 (带流光动画)
+    const hasLiveStep = steps.some((s) => s.status === "running" || s.status === "pending");
     const runningStep = steps.find((s) => s.status === "running" || s.status === "pending") || steps[steps.length - 1];
     let line3Icon = "⚡";
     let line3Text = "正在执行操作 …";
     let line3Kind: StageRunningPreview["line3"]["actionKind"] = "other";
 
-    if (runningStep) {
+    if (!hasLiveStep && steps.length > 0 && (isThinking || currentThought)) {
+        line3Icon = "💭";
+        line3Text = "正在深入分析并规划下一步动作 …";
+        line3Kind = "think";
+    } else if (!hasLiveStep && steps.length > 0) {
+        line3Icon = "⚡";
+        line3Text = "正在协同推进阶段任务 …";
+        line3Kind = "other";
+    } else if (runningStep) {
         const tool = (runningStep.tool || runningStep.action || "").toLowerCase();
         let targetFile = "";
         const p = (runningStep.params || runningStep.rawParams) as any;
