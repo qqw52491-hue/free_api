@@ -79,7 +79,7 @@ function mainAgentScript(last, all, messages) {
     // 审查结论已回收且评分通过 → 写 stage-01
     state.phase = "approved";
     return JSON.stringify({
-      tool: "write_file",
+      tool: "remote-http-mcp/write_file",
       description: "实现 stage-01：去空白并转大写",
       command: { path: `${FIXTURE_DIR}/src/stage-01.mjs`, content: STAGE1_IMPL },
       todo_update: [{ id: 0, status: "done", description: "完成阶段 01 实现并通过宿主判分" }],
@@ -88,9 +88,9 @@ function mainAgentScript(last, all, messages) {
   if (state.phase === "approved") {
     state.phase = "testing";
     return JSON.stringify({
-      tool: "shell_exec",
+      tool: "remote-http-mcp/shell_exec",
       description: "运行 npm test 验证当前阶段",
-      command: { command: "npm test", cwd: FIXTURE_DIR, shell_mode: true, timeout_ms: 30000 },
+      command: { command: "npm", args: ["test"], cwd: FIXTURE_DIR, timeout_ms: 30000 },
     });
   }
   if (state.phase === "testing") {
@@ -110,7 +110,7 @@ function mainAgentScript(last, all, messages) {
     // 测试失败：回到重写（正常情况下 stage-01 实现是正确的，不应走到这）
     state.phase = "approved";
     return JSON.stringify({
-      tool: "write_file",
+      tool: "remote-http-mcp/write_file",
       description: "修正 stage-01 实现",
       command: { path: `${FIXTURE_DIR}/src/stage-01.mjs`, content: STAGE1_IMPL },
     });
@@ -156,6 +156,16 @@ export function startMockModel() {
         messages = [];
       }
       const content = nextAssistantCall(messages);
+      // 诊断：最后一次工具输出尾部（npm test 为何不解锁，一眼可见）
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "user") {
+          const c = String(messages[i].content ?? "");
+          if (c.includes("执行输出")) {
+            console.log(`[mock][npm输出尾部] ${c.slice(-350).replace(/\n/g, " ⏎ ")}`);
+          }
+          break;
+        }
+      }
       const role0 = String(messages[0]?.content ?? "").slice(0, 40);
       console.log(`[mock] messages=${messages.length} msg0=${JSON.stringify(role0)} → ${content.slice(0, 80)}`);
 
