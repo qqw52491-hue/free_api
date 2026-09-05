@@ -105,6 +105,32 @@ impl ChildReviewResult {
             .count() as u32
     }
 
+    /// 阶段审查的拦截判据：未撤回且 finality != final_only 的 blocking 数。
+    /// final_only（仅最终交付前必须解决）不拦截中间态写入，只记账带入收尾审查。
+    pub fn stage_blocking_open(&self) -> u32 {
+        self.findings
+            .iter()
+            .filter(|f| {
+                f.severity.eq_ignore_ascii_case("blocking")
+                    && f.finality != "final_only"
+                    && !self.withdrawn_findings.contains(&f.id)
+            })
+            .count() as u32
+    }
+
+    /// final_only 级 blocking 的展示行（带入收尾审查的 carry-over 义务）
+    pub fn stage_final_only_lines(&self) -> Vec<String> {
+        self.findings
+            .iter()
+            .filter(|f| {
+                f.severity.eq_ignore_ascii_case("blocking")
+                    && f.finality == "final_only"
+                    && !self.withdrawn_findings.contains(&f.id)
+            })
+            .map(|f| f.display_line())
+            .collect()
+    }
+
     /// 本轮异议动态三元组：(新增, 撤回, 维持)。
     /// - 撤回：被审查者裁决 withdraw 的 blocking 异议数；
     /// - 维持：裁决 maintain 的 blocking 异议数；
@@ -148,6 +174,11 @@ impl ChildReviewResult {
 pub struct ReviewFinding {
     pub id: String,                 // F1..F5 —— 供反驳时定位
     pub severity: String,           // blocking | suggestion | question
+    /// blocking 细分：regardless（无论后续阶段如何都是错的，阶段审查据此拦截写入）
+    /// | final_only（最终交付前必须解决，中间态可接受，只记账带入收尾审查）。
+    /// 缺省按 regardless 处理（fail-closed）。
+    #[serde(default)]
+    pub finality: String,
     #[serde(default)]
     pub location: String,           // "src/foo.rs:142"，定位不到则空串
     #[serde(default)]
@@ -210,6 +241,7 @@ where
             FindingHelper::Text(s) => results.push(ReviewFinding {
                 id: format!("F{}", idx + 1),
                 severity: "suggestion".to_string(),
+                finality: "regardless".to_string(),
                 location: String::new(),
                 current: String::new(),
                 why: s,
@@ -304,6 +336,8 @@ enum FlexibleRawFinding {
 
 #[derive(Debug, Deserialize)]
 struct RawReviewFinding {
+    #[serde(default)]
+    finality: Option<String>,
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -533,6 +567,16 @@ fn parse_controlled_output(
                 if !matches!(severity.as_str(), "blocking" | "suggestion" | "question") {
                     severity = "suggestion".to_string();
                 }
+                // blocking 终态相关性：regardless（中间态即错）| final_only（仅最终交付前必须解决）
+                let finality = s
+                    .finality
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase();
+                let finality = match finality.as_str() {
+                    "final_only" | "blocking_if_final" => "final_only".to_string(),
+                    _ => "regardless".to_string(),
+                };
                 // 🌟 硬规则：定位不到具体物理行号的，强制降级为 question，禁止当 blocking 阻塞缺陷！
                 if location.is_empty() && severity == "blocking" {
                     severity = "question".to_string();
@@ -547,6 +591,7 @@ fn parse_controlled_output(
                 ReviewFinding {
                     id,
                     severity,
+                    finality,
                     location,
                     current: current.clone(),
                     why: if why.is_empty() { current } else { why },
@@ -559,6 +604,7 @@ fn parse_controlled_output(
                 ReviewFinding {
                     id: default_id,
                     severity: "question".to_string(),
+                    finality: "regardless".to_string(),
                     location: String::new(),
                     current: String::new(),
                     why: text,
@@ -860,7 +906,8 @@ pub async fn spawn_child_reviewer(
               \"current\": \"当前代码或现象\",\n\
               \"why\": \"为什么是问题\",\n\
               \"suggestion\": \"具体改进建议\",\n\
-              \"evidence_strength\": \"confirmed|supported|unverified\"\n\
+              \"evidence_strength\": \"confirmed|supported|unverified\",\n\
+              \"finality\": \"blocking_regardless|blocking_if_final\"（severity 为 blocking 时必填：无论后续阶段如何都是错的取 blocking_regardless；仅最终交付前必须解决、当前中间态可接受取 blocking_if_final）\n\
             }}\n\
           ],\n\
           \"confidence\": \"confirmed|supported|unverified\",\n\
@@ -880,7 +927,8 @@ pub async fn spawn_child_reviewer(
         1. findings 为 1–5 条结构化审查条目；若无确切位置 location，severity 必须标为 question（禁止标 blocking）；\n\
         2. 证据不足时 confidence 标 unverified 并在 missing_evidence 说明；\n\
         3. 若证据包中提供了此前审查的 blocking 异议及父Agent的处理说明，必须输出 objection_verdicts 逐条裁决：问题确已解决或经证伪不成立时 verdict 取 withdraw，理由必须引用证据包中父Agent处理说明或修订内容的具体点（空泛模板理由会被系统按 maintain 处理）；仍成立或有新证据支持时取 maintain。无历史异议时省略该字段；\n\
-        4. 不要输出任何推理过程、Markdown 标记或额外字段。{}",
+        4. 【领域检查单】产出 findings 前逐项自查是否覆盖：边界条件与空值、并发与资源生命周期、错误传播与回滚、数据兼容与迁移、安全（注入/越权/密钥泄漏）、测试盲区；确认无法覆盖的维度写入 missing_evidence；\n\
+        5. 不要输出任何推理过程、Markdown 标记或额外字段。{}",
         persona
     );
     let messages = vec![
@@ -1321,6 +1369,7 @@ mod tests {
         ReviewFinding {
             id: id.to_string(),
             severity: "blocking".to_string(),
+            finality: "regardless".to_string(),
             location: "src/a.rs:1".to_string(),
             current: "c".to_string(),
             why: "w".to_string(),
@@ -1363,6 +1412,7 @@ mod tests {
         let mk = |id: &str, sev: &str| ReviewFinding {
             id: id.to_string(),
             severity: sev.to_string(),
+            finality: "regardless".to_string(),
             location: String::new(),
             current: String::new(),
             why: String::new(),
@@ -1408,6 +1458,44 @@ mod tests {
         };
         let (added, withdrawn, maintained) = inflated.objection_stats();
         assert_eq!((added, withdrawn, maintained), (2, 2, 1), "撤回≈新增：膨胀信号可见");
+    }
+
+    #[test]
+    fn finality_defaults_to_regardless_and_normalizes_aliases() {
+        // 未携带 finality → regardless（fail-closed）
+        let raw = r#"{"findings":[{"id":"F1","severity":"blocking","location":"src/a.rs:1","why":"x"}],"confidence":"supported"}"#;
+        let (findings, _, _, _, _, _, _, _) = parse_controlled_output(raw, &[]).unwrap();
+        assert_eq!(findings[0].finality, "regardless");
+
+        // 别名归一化
+        let raw2 = r#"{"findings":[{"id":"F1","severity":"blocking","location":"src/a.rs:1","why":"x","finality":"blocking_if_final"}],"confidence":"supported"}"#;
+        let (findings2, _, _, _, _, _, _, _) = parse_controlled_output(raw2, &[]).unwrap();
+        assert_eq!(findings2[0].finality, "final_only");
+
+        // stage_blocking_open：final_only 不计入拦截判据
+        let result = ChildReviewResult {
+            child_run_id: "c".into(),
+            status: "succeeded".into(),
+            findings: vec![
+                blocking_finding("F1"),
+                ReviewFinding { finality: "final_only".to_string(), ..blocking_finding("F2") },
+            ],
+            confidence: "confirmed".into(),
+            evidence_refs: vec![],
+            missing_evidence: vec![],
+            duration_ms: 0,
+            completion_tokens: 0,
+            prompt_tokens: 0,
+            error_kind: None,
+            raw_result_json: None,
+            kind: None,
+            routing: None,
+            withdrawn_findings: vec![],
+            objection_verdicts: vec![],
+            scorecard: None,
+        };
+        assert_eq!(result.stage_blocking_open(), 1);
+        assert_eq!(result.stage_final_only_lines().len(), 1);
     }
 
     #[test]
@@ -1751,6 +1839,7 @@ mod tests {
             findings: vec![ReviewFinding {
                 id: "F1".to_string(),
                 severity: "suggestion".to_string(),
+                finality: "regardless".to_string(),
                 location: "src/main.rs:1".to_string(),
                 current: "".to_string(),
                 why: "异步流式正常".to_string(),
@@ -1877,6 +1966,7 @@ mod tests {
             findings: vec![ReviewFinding {
                 id: "F1".to_string(),
                 severity: "suggestion".to_string(),
+                finality: "regardless".to_string(),
                 location: "src/main.rs:1".to_string(),
                 current: "".to_string(),
                 why: "审查1通过".to_string(),
@@ -1911,6 +2001,7 @@ mod tests {
             findings: vec![ReviewFinding {
                 id: "F2".to_string(),
                 severity: "suggestion".to_string(),
+                finality: "regardless".to_string(),
                 location: "src/main.rs:2".to_string(),
                 current: "".to_string(),
                 why: "审查2通过".to_string(),
@@ -1952,6 +2043,7 @@ mod tests {
             findings: vec![ReviewFinding {
                 id: "F1".to_string(),
                 severity: "suggestion".to_string(),
+                finality: "regardless".to_string(),
                 location: "".to_string(),
                 current: "".to_string(),
                 why: finding.to_string(),

@@ -740,6 +740,22 @@ async fn run_agent_main_loop_in_workspace_inner(
                 let mut injection = String::new();
                 let git_available = crate::agent::child_writer::is_git_available(&workspace_dir).await;
                 for result in completed {
+                    // 阶段审查结果走独立语义（不占用方案审查状态，基础设施失败不烧预算且视为未审）
+                    if Some(result.child_run_id.as_str()) == checkpoint.stage_review_run_id.as_deref()
+                        || Some(result.child_run_id.as_str())
+                            == checkpoint.stage_review_rebuttal_run_id.as_deref()
+                    {
+                        let note = crate::agent::stage_review::apply_stage_result(
+                            &mut checkpoint,
+                            &result,
+                            &context,
+                        );
+                        injection.push_str(&format!(
+                            "\n【📋 阶段审查 (child_run_id: {})】\n{}\n",
+                            result.child_run_id, note
+                        ));
+                        continue;
+                    }
                     match result.kind.as_deref() {
                         Some("writer") => {
                             let mut writer_res = result.raw_result_json.as_deref()
@@ -1080,6 +1096,42 @@ async fn run_agent_main_loop_in_workspace_inner(
         // 两类责任账本独立更新，避免审查契约的拒绝路径吞掉写入验证更新。
         let review_contract_started_this_turn =
             apply_instruction_state_updates(&mut context, &instruction);
+
+        // --- 阶段级写入审查（双触发：todo 阶段推进 / 累计写入文件数兜底）---
+        // 首次评估先建立覆盖基线（存量副作用不计入"未覆盖写入"）
+        if checkpoint.stage_review_baseline_side_effects == 0 && checkpoint.stage_review_budget_used == 0 {
+            checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
+        }
+        if let Some(reason) = crate::agent::stage_review::should_fire(&checkpoint, &context, &instruction) {
+            match crate::agent::stage_review::dispatch(
+                &app,
+                state.inner(),
+                &run_id,
+                &final_session_id,
+                &workspace_dir,
+                &mut checkpoint,
+                &context,
+                &model_routing,
+                step_id,
+                interrupt_rx.clone(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    let _ = save_checkpoint(state.inner(), &mut checkpoint);
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        format!("📋 阶段审查已派发（{}）", reason),
+                    );
+                }
+                Err(err) => {
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        format!("⚠️ 阶段审查派发失败: {}", err),
+                    );
+                }
+            }
+        }
         if !instruction.memories_update.is_empty() {
             let rejections = context.update_memories(instruction.memories_update.clone());
             if !rejections.is_empty() {

@@ -46,6 +46,9 @@ impl AgentPhase {
 /// 批准前方案审查的轮数硬上限（门禁与投影共用同一事实源）
 pub const MAX_PLAN_REVIEWER_RETRIES: u32 = 2;
 
+/// 阶段级写入审查的次数硬上限（独立于方案审查预算，语义不同不可混用）
+pub const MAX_STAGE_REVIEWS: u32 = 5;
+
 /// 方案制定与前置审查门禁的生命周期阶段
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
@@ -537,6 +540,24 @@ pub struct AgentCheckpoint {
     /// 基础设施失败（超时/取消/中断）已退还的审查轮次数；封顶防无限重试
     #[serde(default)]
     pub reviewer_budget_refunds: u32,
+    /// ---- 阶段级写入审查（双触发：todo 阶段推进 / 累计写入文件数兜底）----
+    /// 已派发的阶段审查次数
+    #[serde(default)]
+    pub stage_review_budget_used: u32,
+    /// 在途阶段审查任务的 child_run_id（含其 rebuttal 对质任务）
+    #[serde(default)]
+    pub stage_review_run_id: Option<String>,
+    #[serde(default)]
+    pub stage_review_rebuttal_run_id: Option<String>,
+    /// 覆盖基线：上次成功阶段审查时的副作用台账长度（之后的新增 = 未覆盖写入）
+    #[serde(default)]
+    pub stage_review_baseline_side_effects: u32,
+    /// 阶段审查未解决的 blocking_regardless 数（>0 时拦截写入，直到对质撤回）
+    #[serde(default)]
+    pub stage_review_blockers_open: u32,
+    /// final_only 级 blocking 的 carry-over（不拦截，带入收尾审查）
+    #[serde(default)]
+    pub stage_review_final_only: Vec<String>,
     /// 运行模式兼容字段：true 为全自动/自主模式，false 为方案审批模式
     #[serde(default = "default_auto_pilot")]
     pub auto_pilot: bool,
@@ -578,6 +599,12 @@ impl AgentCheckpoint {
             review_objection_withdrawn: 0,
             review_objection_maintained: 0,
             reviewer_budget_refunds: 0,
+            stage_review_budget_used: 0,
+            stage_review_run_id: None,
+            stage_review_rebuttal_run_id: None,
+            stage_review_baseline_side_effects: 0,
+            stage_review_blockers_open: 0,
+            stage_review_final_only: Vec::new(),
             auto_pilot: true,
             last_error: None,
             version: 0,

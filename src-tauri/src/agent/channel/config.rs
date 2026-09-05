@@ -61,6 +61,13 @@ pub struct ChannelConfig {
     /// None = 默认 600s，上限 3600s。
     #[serde(default)]
     pub reviewer_reap_grace_secs: Option<u64>,
+    /// 阶段级写入审查开关（仅交叉审查/审批模式生效；None = 开启）
+    #[serde(default)]
+    pub stage_review_enabled: Option<bool>,
+    /// 行为兜底触发阈值：距上次阶段审查累计写入 N 个文件即触发（防 todo 记账博弈）。
+    /// None = 默认 6。
+    #[serde(default)]
+    pub stage_review_max_files: Option<u32>,
     /// 网页控制台对外访问基础地址（内网穿透域名，如 https://xxx.example.com）；
     /// 空 = 自动探测局域网 IPv4。用于生成扫码直达的二维码
     #[serde(default)]
@@ -104,6 +111,8 @@ impl Default for ChannelConfig {
             help_text: default_help_text(),
             auto_start_bridge: true,
             reviewer_reap_grace_secs: None,
+            stage_review_enabled: None,
+            stage_review_max_files: None,
             allowlist: Vec::new(),
             llm_retries: None,
             action_milestone_steps: default_action_milestone(),

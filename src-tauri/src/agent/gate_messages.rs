@@ -59,3 +59,16 @@ pub fn cross_review_blocking_findings_open(count: u32) -> String {
 pub fn reviewer_retry_limit() -> String {
     "【审查轮数已达上限（2 轮）】方案审查讨论已达最大重试上限，请停止继续派发审查子 Agent。\n请综合已有审查建议，整理最终技术方案并调用 ask_human（kind: 'plan_approval'）呈报给用户进行人工审批。".to_string()
 }
+
+/// 阶段级审查：上一阶段的 blocking_regardless 异议未解决，拦截继续写入。
+/// 解套路径 = resume_child 对质（审查者撤回后自动放行）；修复本身不需要先写入。
+pub fn stage_review_blocking_open(count: u32, stage_run_id: &str, final_only_summary: &str) -> String {
+    let mut text = format!(
+        "【🚨 阶段审查拦截：上一阶段存在 {} 条未解决的 blocking_regardless 异议】\n阶段审查发现无论后续阶段如何都成立的结构性缺陷，继续堆叠新写入只会放大返工成本，本次写入已被拦截。\n【解套路径（唯一）】调用 resume_child（child_run_id: \"{}\"），逐条提交处理说明与证据：问题确已解决或经证伪不成立时审查者会撤回（withdraw），全部撤回后自动放行；仍成立的请先按审查建议修正方案。\n修复后的代码由下一轮阶段审查复检。\n",
+        count, stage_run_id
+    );
+    if !final_only_summary.is_empty() {
+        text.push_str(&format!("\n【final_only 记账（不拦截，但最终交付前必须解决）】\n{}\n", final_only_summary));
+    }
+    text
+}

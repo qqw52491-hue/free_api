@@ -575,7 +575,7 @@ pub async fn run_worker_loop(
         missing_evidence,
         duration_ms: started_at.elapsed().as_millis() as u64,
         completion_tokens,
-        prompt_tokens: 0,
+        prompt_tokens,
         error_kind,
         steps_used,
         action_log,

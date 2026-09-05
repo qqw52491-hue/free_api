@@ -96,6 +96,28 @@ pub(crate) fn check_pre_write_gatekeeper(
     step_id: usize,
     is_resume_child: bool,
 ) -> Option<DispatchResult> {
+    // ---- 阶段级审查拦截（独立于方案门禁：Approved 后的写入也要过阶段审查这一关）----
+    // blocking_regardless 未解决 → 拦截写入；解套唯一路径是 resume_child 对质撤回。
+    // final_only 不在此拦截，由收尾审查兜底。
+    if checkpoint.stage_review_blockers_open > 0 {
+        let stage_run_id = checkpoint
+            .stage_review_run_id
+            .clone()
+            .or_else(|| checkpoint.stage_review_rebuttal_run_id.clone())
+            .unwrap_or_default();
+        let final_only_summary = checkpoint.stage_review_final_only.join("\n");
+        return Some(DispatchResult {
+            success: false,
+            stdout: String::new(),
+            stderr: crate::agent::gate_messages::stage_review_blocking_open(
+                checkpoint.stage_review_blockers_open,
+                &stage_run_id,
+                &final_only_summary,
+            ),
+            route: "stage_review:blocking_open".to_string(),
+        });
+    }
+
     if checkpoint.plan_phase.is_approved() {
         return None;
     }

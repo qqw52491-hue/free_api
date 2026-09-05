@@ -816,6 +816,40 @@ mod finish_guard_tests {
     }
 
     #[test]
+    fn stage_review_blockers_intercept_writes_even_when_plan_approved() {
+        let temp_dir = std::env::temp_dir().join(format!("gatekeeper-stage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+        checkpoint.stage_review_blockers_open = 2;
+        checkpoint.stage_review_final_only = vec!["F9: 收尾前必须修复".to_string()];
+
+        // 方案已批准，但阶段审查的 regardless 拦截仍然生效
+        let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint, &context, &db, "test_run", 5, false,
+        );
+        assert!(rej.is_some());
+        let rej = rej.unwrap();
+        assert_eq!(rej.route, "stage_review:blocking_open");
+        assert!(rej.stderr.contains("resume_child"), "必须给出对质解套路径");
+        assert!(rej.stderr.contains("final_only"), "final_only 记账要随拦截文案带出");
+
+        // 清零后放行
+        checkpoint.stage_review_blockers_open = 0;
+        let pass = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint, &context, &db, "test_run", 6, false,
+        );
+        assert!(pass.is_none());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn infra_failed_review_rounds_get_refund_with_cap() {
         let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);

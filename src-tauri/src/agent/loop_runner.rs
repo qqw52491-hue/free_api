@@ -872,7 +872,60 @@ pub async fn run_tool_phase(
         .await
         {
             Ok(completed_jobs) => {
+                let mut stage_notes = String::new();
                 for job in completed_jobs.iter() {
+                    // 阶段审查任务走独立语义：不置 plan consumed、基础设施失败退还阶段次数
+                    if Some(job.job_id.as_str()) == checkpoint.stage_review_run_id.as_deref()
+                        || Some(job.job_id.as_str())
+                            == checkpoint.stage_review_rebuttal_run_id.as_deref()
+                    {
+                        let value = serde_json::from_str::<serde_json::Value>(&job.result_json)
+                            .unwrap_or(serde_json::json!({}));
+                        let error_kind = value.get("error_kind").and_then(|e| e.as_str()).map(|s| s.to_string());
+                        if matches!(
+                            error_kind.as_deref(),
+                            Some("timed_out") | Some("interrupted") | Some("cancelled")
+                        ) {
+                            checkpoint.stage_review_run_id = None;
+                            checkpoint.stage_review_rebuttal_run_id = None;
+                            if checkpoint.reviewer_budget_refunds < 3 && checkpoint.stage_review_budget_used > 0 {
+                                checkpoint.stage_review_budget_used -= 1;
+                                checkpoint.reviewer_budget_refunds += 1;
+                            }
+                            stage_notes.push_str("\n⚠️ 阶段审查未正常完成（次数已退还），该阶段视为未审。");
+                            continue;
+                        }
+                        let withdrawn: Vec<String> = value
+                            .get("withdrawn_findings")
+                            .and_then(|w| w.as_array())
+                            .map(|arr| arr.iter().filter_map(|i| i.as_str().map(|s| s.to_string())).collect())
+                            .unwrap_or_default();
+                        let is_blocked = |f: &serde_json::Value| {
+                            f.get("severity").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("blocking")).unwrap_or(false)
+                                && f.get("finality").and_then(|s| s.as_str()).map(|s| s != "final_only").unwrap_or(true)
+                                && !f.get("id").and_then(|i| i.as_str()).map(|id| withdrawn.iter().any(|w| w == id)).unwrap_or(false)
+                        };
+                        let findings_arr = value.get("findings").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+                        checkpoint.stage_review_run_id = None;
+                        checkpoint.stage_review_rebuttal_run_id = None;
+                        checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
+                        checkpoint.stage_review_blockers_open = findings_arr.iter().filter(|f| is_blocked(f)).count() as u32;
+                        checkpoint.stage_review_final_only = findings_arr.iter()
+                            .filter(|f| {
+                                f.get("severity").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("blocking")).unwrap_or(false)
+                                    && f.get("finality").and_then(|s| s.as_str()).map(|s| s == "final_only").unwrap_or(false)
+                                    && !f.get("id").and_then(|i| i.as_str()).map(|id| withdrawn.iter().any(|w| w == id)).unwrap_or(false)
+                            })
+                            .map(|f| format!("{}: {}", f.get("id").and_then(|i| i.as_str()).unwrap_or("?"), f.get("why").and_then(|w| w.as_str()).unwrap_or("")))
+                            .collect();
+                        stage_notes.push_str(&format!(
+                            "\n📋 阶段审查结论已回收：blocking_regardless 未解决 {} 条 / final_only 记账 {} 条。{}",
+                            checkpoint.stage_review_blockers_open,
+                            checkpoint.stage_review_final_only.len(),
+                            if checkpoint.stage_review_blockers_open > 0 { "后续写入已被拦截，请用 resume_child 对质解套。" } else { "" }
+                        ));
+                        continue;
+                    }
                     if !(job.job_type == "child_reviewer" || job.job_type.contains("reviewer")) {
                         continue;
                     }
@@ -950,6 +1003,7 @@ pub async fn run_tool_phase(
                 if completed_jobs.is_empty() {
                     out.push_str("等待结束：当前无新完成的后台任务，或所有后台任务已结束。");
                 } else {
+                    out.push_str(&stage_notes);
                     out.push_str(&format!("✅ 已成功等待并接收到 {} 个后台任务结果：\n", completed_jobs.len()));
                     for job in completed_jobs {
                         out.push_str(&format!(
@@ -1100,7 +1154,13 @@ pub async fn run_tool_phase(
                                 None,
                                 Some(target_child_id),
                             ) {
-                                Ok(id) => id,
+                                Ok(id) => {
+                                    // 对质目标是阶段审查任务时，登记复检 run id 以便结果回流阶段语义
+                                    if Some(target_child_id) == checkpoint.stage_review_run_id.as_deref() {
+                                        checkpoint.stage_review_rebuttal_run_id = Some(id.clone());
+                                    }
+                                    id
+                                }
                                 Err(err) => {
                                     return Ok(DispatchResult {
                                         stdout: String::new(),
