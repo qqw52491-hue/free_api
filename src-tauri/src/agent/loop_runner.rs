@@ -40,6 +40,28 @@ pub(crate) use crate::agent::plan_gate::{
     strip_plan_decision_marker,
 };
 
+/// ask_human 冷却判定（先监听后求助）：刚被门禁拦截（本步或上一步）且门禁未指示求助时，
+/// 返回冷却拒绝文案；否则 None 放行。一次性豁免：拒绝后清除拦截记录，
+/// 模型再行动一步后仍被困住可正常求助，避免死锁。
+pub(crate) fn evaluate_ask_human_cooldown(
+    checkpoint: &mut AgentCheckpoint,
+    step_id: usize,
+) -> Option<String> {
+    if checkpoint.gate_human_escape_directed {
+        checkpoint.gate_human_escape_directed = false;
+        return None;
+    }
+    let blocked_step = checkpoint.recent_gate_block_step?;
+    if step_id.saturating_sub(blocked_step as usize) > 1 {
+        checkpoint.recent_gate_block_step = None;
+        return None;
+    }
+    checkpoint.recent_gate_block_step = None;
+    Some(
+        "【先监听，后求助】你刚刚被系统门禁拦截，尚未做出任何被拦截意见要求的行动就呼叫人类，本次求助已被宿主冷却拒绝。\n请先执行拦截意见中要求的动作：重新取证（read/grep）、按审查建议修改实现、重新派发 child_reviewer 复审，或调用 wait_jobs 挂起等待后台结论；\n完成至少一步有效动作后，若问题仍未解决，再向人类求助并附上你已尝试的动作与结果。".to_string(),
+    )
+}
+
 /// 执行持久化状态机的 RunTool 阶段。
 ///
 /// 调用前为未知或可能有副作用的操作创建 pending checkpoint；人工等待也以
@@ -1498,6 +1520,27 @@ pub async fn run_tool_phase(
         }
     // --- B3. 特殊拦截：AI 主动挂起呼叫人类 ---
     } else if inst.get_tool().eq_ignore_ascii_case("ask_human") || inst.get_action().eq_ignore_ascii_case("ask") {
+        // 【先监听，后求助】刚被门禁拦截就立刻 ask_human = 把问题甩给人类。
+        // 宿主冷却一次：要求先按拦截意见行动（重新取证/修复/重派审查/wait_jobs）。
+        if let Some(cooldown_msg) = evaluate_ask_human_cooldown(checkpoint, step_id) {
+            crate::agent::dispatcher::emit_tool_event(
+                app,
+                final_session_id,
+                step_id,
+                inst,
+                "failed",
+                Some("ask_human_cooldown".to_string()),
+                Some(false),
+                &cooldown_msg,
+                Some(tool_started_at.elapsed().as_millis()),
+            );
+            return Ok(DispatchResult {
+                stdout: String::new(),
+                stderr: cooldown_msg,
+                success: false,
+                route: "host_rejection:ask_human_cooldown".to_string(),
+            });
+        }
         let params = inst.get_params();
         let form_val = params.get("form");
         // 与前端 normalizeHumanForm 的别名表保持一致（plan_approval / plan / approval），

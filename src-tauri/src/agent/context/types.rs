@@ -412,14 +412,16 @@ impl SandwichContext {
             };
             return None;
         }
-        entry.count += 1;
+        entry.count = entry.count.saturating_add(1);
         if entry.count >= 3 {
             let sample = entry.sample.clone();
             let lines = entry.line_count;
-            entry.count = u32::MAX / 2; // 持续拦截直到内容变化
+            let times = entry.count;
+            // 正常累加计数（不再使用哨兵值：报出"已读取 2147483647 次"既荒谬又无信息量）。
+            // 内容变化时上方已重置指纹，因此 >=3 后持续拦截，直至文件真正被修改。
             return Some(format!(
-                "【重复读取拦截】该文件你已读取 {} 次且内容未变化（哈希一致，共 {} 行）。上次读取的内容开头：\n{}\n内容仍在你此前的上下文里；要定位片段请用 grep/搜索工具按关键词提取，或先修改文件后再读取。严禁原样重读。",
-                entry.count, lines, sample
+                "【重复读取拦截】该文件你已连续读取 {} 次且内容未变化（哈希一致，共 {} 行）。上次读取的内容开头：\n{}\n内容仍在你此前的上下文里；要定位片段请用 grep/搜索工具按关键词提取，或先修改文件后再读取。严禁原样重读。",
+                times, lines, sample
             ));
         }
         None
@@ -925,7 +927,7 @@ mod repeat_read_tests {
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", content).is_none(), "第 2 次放行");
         let blocked = context.check_repeat_read("read_text_file", "/ws/a.rs", content);
         assert!(blocked.is_some(), "第 3 次同内容必须拦截");
-        assert!(blocked.unwrap().contains("已读取"), "拦截消息要给抓手");
+        assert!(blocked.unwrap().contains("已连续读取"), "拦截消息要给抓手");
 
         // 内容变化（改后重读）→ 放行并重置
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_none());

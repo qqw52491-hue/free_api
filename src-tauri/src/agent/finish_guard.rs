@@ -816,6 +816,60 @@ mod finish_guard_tests {
     }
 
     #[test]
+    fn ask_human_cooldown_requires_action_before_asking() {
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+
+        // 无拦截记录：放行
+        assert!(crate::agent::loop_runner::evaluate_ask_human_cooldown(&mut checkpoint, 5).is_none());
+
+        // 本步刚被拦截：冷却拒绝（一次性），且记录被清除
+        checkpoint.recent_gate_block_step = Some(5);
+        let msg = crate::agent::loop_runner::evaluate_ask_human_cooldown(&mut checkpoint, 5);
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("先监听"));
+        assert!(checkpoint.recent_gate_block_step.is_none());
+
+        // 冷却后再问：放行（模型有机会行动；死锁豁免）
+        assert!(crate::agent::loop_runner::evaluate_ask_human_cooldown(&mut checkpoint, 6).is_none());
+
+        // 预算耗尽等门禁显式指示求助：豁免一次
+        checkpoint.gate_human_escape_directed = true;
+        assert!(crate::agent::loop_runner::evaluate_ask_human_cooldown(&mut checkpoint, 7).is_none());
+        assert!(!checkpoint.gate_human_escape_directed, "豁免标记一次性消费");
+    }
+
+    #[test]
+    fn repeat_read_interception_reports_real_count() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("read-ledger-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("stage.md");
+        let mut f = std::fs::File::create(&file).unwrap();
+        f.write_all("# 当前阶段 01/24\n仅修改 src/stage-01.mjs。\n".as_bytes()).unwrap();
+        drop(f);
+
+        let mut context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mk = |path: &str| crate::agent::types::AgentInstruction {
+            tool: Some("read_text_file".to_string()),
+            params: Some(serde_json::json!({ "path": path })),
+            ..Default::default()
+        };
+
+        // 前两次合法读取放行
+        assert!(context.check_repeat_read_dispatch(&mk("stage.md"), &dir).is_none());
+        assert!(context.check_repeat_read_dispatch(&mk("stage.md"), &dir).is_none());
+        // 第三次拦截：文案必须是真实次数，不允许再出现哨兵值 2147483647
+        let block = context.check_repeat_read_dispatch(&mk("stage.md"), &dir).unwrap();
+        assert!(block.contains("已连续读取 3 次"), "文案应报真实次数: {}", block);
+        assert!(!block.contains("2147483647"), "哨兵值泄漏: {}", block);
+        // 持续拦截直到内容变化
+        assert!(context.check_repeat_read_dispatch(&mk("stage.md"), &dir).is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn stage_review_blockers_intercept_writes_even_when_plan_approved() {
         let temp_dir = std::env::temp_dir().join(format!("gatekeeper-stage-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();

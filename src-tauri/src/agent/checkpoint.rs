@@ -561,6 +561,13 @@ pub struct AgentCheckpoint {
     /// 阶段审查未解决的 blocking_regardless 数（>0 时拦截写入，直到对质撤回）
     #[serde(default)]
     pub stage_review_blockers_open: u32,
+    /// 最近一次门禁拦截发生的 step_id（ask_human 冷却判定用）；
+    /// 成功提交一个步骤即清零（模型已按拦截意见行动）
+    #[serde(default)]
+    pub recent_gate_block_step: Option<u64>,
+    /// 门禁文案显式指示模型去 ask_human（如预算耗尽转人工）时置位：此时求助是合法的，冷却豁免
+    #[serde(default)]
+    pub gate_human_escape_directed: bool,
     /// final_only 级 blocking 的 carry-over（不拦截，带入收尾审查）
     #[serde(default)]
     pub stage_review_final_only: Vec<String>,
@@ -612,6 +619,8 @@ impl AgentCheckpoint {
             stage_review_rebuttal_run_id: None,
             stage_review_baseline_side_effects: 0,
             stage_review_blockers_open: 0,
+            recent_gate_block_step: None,
+            gate_human_escape_directed: false,
             stage_review_final_only: Vec::new(),
             auto_pilot: true,
             last_error: None,
@@ -769,6 +778,8 @@ impl AgentCheckpoint {
         self.pending = None;
         self.prepared_instruction = None;
         self.last_error = None;
+        // 成功提交一步 = 模型已行动（按拦截意见做了事），ask_human 冷却解除
+        self.recent_gate_block_step = None;
         self.refresh_context(context);
     }
 
