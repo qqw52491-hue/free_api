@@ -27,6 +27,15 @@ fn stage_review_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// 阶段审查预算上限：默认常量 5；长任务可通过 FREE_API_STAGE_REVIEW_MAX_ROUNDS 放宽（上限 40）
+fn stage_review_budget_max() -> u32 {
+    std::env::var("FREE_API_STAGE_REVIEW_MAX_ROUNDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map(|v| v.clamp(1, 40))
+        .unwrap_or(MAX_STAGE_REVIEWS)
+}
+
 fn stage_review_max_files() -> u32 {
     crate::agent::channel::channel_config_shared()
         .read()
@@ -59,7 +68,7 @@ pub fn should_fire(
     if checkpoint.stage_review_blockers_open > 0 {
         return None;
     }
-    if checkpoint.stage_review_budget_used >= MAX_STAGE_REVIEWS {
+    if checkpoint.stage_review_budget_used >= stage_review_budget_max() {
         return None;
     }
 

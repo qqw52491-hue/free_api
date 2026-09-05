@@ -37,29 +37,29 @@ const describeLong = modelId && enabled ? describe : describe.skip;
 
 const stages = [
   ["01", "把字符串去除首尾空白并转为大写。", "  alpha  ", "ALPHA"],
-  ["02", "把字符串去除首尾空白并转为小写。", "  BETA  ", "beta"],
+  ["02", "把字符串去除首尾空白并转为小写；若转换结果与输入完全相同则返回 null（表示无变化）。", "  BETA  ", "beta"],
   ["03", "仅接受去空白后非空的字符串；其他值返回 null。", "   ", null],
   ["04", "仅接受有限数值，截断为整数并限制在 0 到 10；其他值返回 null。", 17.8, 10],
-  ["05", "仅接受有限数值，四舍五入到两位小数；其他值返回 null。", 3.14159, 3.14],
+  ["05", "仅接受有限数值，四舍五入到两位小数；注意 -0 必须归一化为 0；其他值返回 null。", -0.001, 0],
   ["06", "接受字符串数组：去空白、删除空值、保留首次出现并按字母升序返回。", [" beta ", "alpha", "beta", ""], ["alpha", "beta"]],
   ["07", "接受逗号分隔字符串：拆分、去空白、删除空项、去重并按字母升序返回数组。", "z, alpha, z, beta, ", ["alpha", "beta", "z"]],
   ["08", "接受对象数组：只保留具有字符串 name 和有限 score 的项，按 score 降序、name 升序返回新数组。", [{ name: "b", score: 2 }, { name: "a", score: 2 }, { name: "x", score: Infinity }], [{ name: "a", score: 2 }, { name: "b", score: 2 }]],
-  ["09", "接受对象，返回新对象并补齐 enabled:false、retries:0；原对象字段优先，输入非对象时当作空对象。", { retries: 2, label: "x" }, { enabled: false, retries: 2, label: "x" }],
+  ["09", "接受对象，返回深拷贝并补齐 enabled:false、retries:0；原对象字段优先；嵌套对象与数组也必须深拷贝（修改返回值不得影响输入）；输入非对象或为 null 时当作空对象。原型链上的属性不得拷贝。", { retries: 2, label: "x", meta: { tags: ["a"] } }, { enabled: false, retries: 2, label: "x", meta: { tags: ["a"] } }],
   ["10", "接受对象：键名去空白转小写，值保持不变；冲突时后出现的键覆盖；返回新对象。", { " Alpha ": 1, BETA: 2, alpha: 3 }, { alpha: 3, beta: 2 }],
   ["11", "接受数组，只求和有限数值；返回 0 表示无有效值。", [1, Infinity, "2", -3], -2],
   ["12", "接受数组，只平均有限且大于 0 的数值；无有效值返回 0。", [1, -2, 3, Infinity], 2],
-  ["13", "接受字符串，生成 slug：去空白、小写、连续非字母数字替换为单个连字符、移除首尾连字符。", "  Hello, World! 2026  ", "hello-world-2026"],
-  ["14", "接受对象数组，按非空字符串 id 去重并保留最后出现项；按 id 升序返回新数组。", [{ id: "b", v: 1 }, { id: "a", v: 2 }, { id: "b", v: 3 }], [{ id: "a", v: 2 }, { id: "b", v: 3 }]],
+  ["13", "接受字符串，生成 slug：小写、连续非字母数字（含下划线）替换为单个连字符、移除首尾连字符；Unicode 字母（如中文名）按原样保留参与分词边界判定。", "  Héllo, 世界__Wörld!!  ", "héllo-世界-wörld"],
+  ["14", "接受对象数组，按非空字符串 id 去重并保留最后出现项；按 id 升序返回新数组；排序必须稳定（同 id 项保持其最后出现项的唯一性），数组含 1000 项时不得栈溢出或死循环。", [{ id: "b", v: 1 }, { id: "a", v: 2 }, { id: "b", v: 3 }], [{ id: "a", v: 2 }, { id: "b", v: 3 }]],
   ["15", "接受两个有限数值组成的数组，返回 {min,max}；任何无效输入返回 null。", [8, -2], { min: -2, max: 8 }],
   ["16", "接受布尔值或字符串 true/false（忽略大小写和空白）；无法解析时返回 null。", " TRUE ", true],
   ["17", "接受字符串，按空白分词，每个词首字母大写其余小写，并以单空格连接。", "hELLo   wORLD", "Hello World"],
-  ["18", "接受数组，删除 null 和 undefined，保持其余元素顺序并返回新数组。", [0, null, "", undefined, false, 3], [0, "", false, 3]],
+  ["18", "接受数组，删除 null 和 undefined，保持其余元素顺序并返回新数组；稀疏数组（存在空洞）的空洞同样视为 undefined 删除；类数组对象（含 length）不处理，原样返回 null。", [0, null, "", undefined, false, 3], [0, "", false, 3]],
   ["19", "接受数值数组，只保留有限数值并按升序返回新数组。", [3, Infinity, -1, 2], [-1, 2, 3]],
-  ["20", "接受字符串，规范化 email：去空白并转小写；不含单个 @ 或任一侧为空时返回 null。", " User@Example.COM ", "user@example.com"],
+  ["20", "接受字符串，规范化 email：去空白并转小写；不含恰好一个 @、任一侧为空、或本地段含点号时返回 null。", " User.Name@Example.COM ", null],
   ["21", "接受多行字符串：逐行去空白、删除空行、去重并保持首次出现顺序。", " a\n\n b \na\n", ["a", "b"]],
   ["22", "接受字符串数组：按每个去空白后首字符的小写分组，忽略空字符串，返回键按字母升序的对象，组内保留原去空白值。", ["Apple", " ant ", "Beta", ""], { a: ["Apple", "ant"], b: ["Beta"] }],
   ["23", "接受对象数组，只保留有限 value 和字符串 id，按 value 降序、id 升序取前三项，返回新数组。", [{ id: "b", value: 3 }, { id: "a", value: 3 }, { id: "c", value: 1 }, { id: "x", value: Infinity }], [{ id: "a", value: 3 }, { id: "b", value: 3 }, { id: "c", value: 1 }]],
-  ["24", "接受对象数组，只保留非空字符串 id 与有限数值 value；按 id 取最高 value，返回 {count, average}，平均值为保留项均值，无项时为 {count:0,average:0}。", [{ id: "a", value: 2 }, { id: "a", value: 4 }, { id: "b", value: 6 }, { id: "x", value: Infinity }], { count: 2, average: 5 }],
+  ["24", "接受对象数组，只保留非空字符串 id 与有限数值 value；按 id 取最高 value，返回 {count, average}，平均值为保留项均值（两位小数），无项时为 {count:0,average:0}；__proto__ 键的项必须忽略（原型污染防护）。", [{ id: "a", value: 2 }, { id: "a", value: 4.005 }, { id: "b", value: 6 }, { id: "__proto__", value: 9 }, { id: "x", value: Infinity }], { count: 2, average: 5 }],
 ];
 
 function stageFile([id]) { return `src/stage-${id}.mjs`; }
@@ -73,9 +73,10 @@ function createFixture() {
     ["README.md", `# Staged convergence fixture\n\n这是 24 阶段真实修复任务。当前唯一可执行义务在 CURRENT_STAGE.md。每次 npm test 成功验证当前阶段后会解锁下一阶段；在全部阶段完成前，npm test 会以非零退出并明确给出下一阶段。只修改 src/ 中当前阶段文件。\n`],
     ["CURRENT_STAGE.md", renderStage(0)],
     ["test/.progress.json", JSON.stringify({ index: 0 })],
-    ["test/progression.test.mjs", `import assert from 'node:assert/strict';\nimport { readFileSync, writeFileSync } from 'node:fs';\nimport path from 'node:path';\nimport { fileURLToPath, pathToFileURL } from 'node:url';\nconst root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');\nconst stages = ${JSON.stringify(stages)};\nconst statePath = path.join(root, 'test/.progress.json');\nconst state = JSON.parse(readFileSync(statePath, 'utf8'));\nconst [id, requirement, input, expected] = stages[state.index];\nconst source = path.join(root, 'src', 'stage-' + id + '.mjs');\nconst mod = await import(pathToFileURL(source).href + '?v=' + Date.now());\nconst before = structuredClone(input);\nassert.deepEqual(mod.transform(input), expected, '当前阶段 ' + id + ' 尚未满足：' + requirement);\nassert.deepEqual(input, before, 'transform 不得修改输入');\nif (state.index < stages.length - 1) {\n  const next = state.index + 1;\n  const [nextId, nextRequirement] = stages[next];\n  writeFileSync(statePath, JSON.stringify({ index: next }));\n  writeFileSync(path.join(root, 'CURRENT_STAGE.md'), '# 当前阶段 ' + nextId + '/' + stages.length + '\\n\\n仅修改 src/stage-' + nextId + '.mjs 的 transform。' + nextRequirement + '\\n\\n运行 npm test；不要修改 README、package.json、CURRENT_STAGE.md、test/ 或 .progress.json。\\n');\n  assert.fail('阶段 ' + id + ' 已验证，已解锁阶段 ' + nextId + '；继续读取 CURRENT_STAGE.md 并完成新的义务。');\n}\n`],
+    ["test/progression.test.mjs", `import assert from 'node:assert/strict';\nimport { readFileSync, writeFileSync, existsSync } from 'node:fs';\nimport path from 'node:path';\nimport { fileURLToPath, pathToFileURL } from 'node:url';\nconst root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');\nconst stages = ${JSON.stringify(stages)};\nconst statePath = path.join(root, 'test/.progress.json');\nconst state = JSON.parse(readFileSync(statePath, 'utf8'));\n\n// 全量回归：已完成阶段的实现必须持续满足契约（防止后期改动砸掉前期）\nfor (let i = 0; i < state.index; i++) {\n  const [pid, preq, pin, pexp] = stages[i];\n  const psrc = path.join(root, 'src', 'stage-' + pid + '.mjs');\n  const pmod = await import(pathToFileURL(psrc).href + '?v=' + Date.now() + '-' + i);\n  const pbefore = structuredClone(pin);\n  assert.deepEqual(pmod.transform(pin), pexp, '回归失败：阶段 ' + pid + ' 被后续改动破坏（' + preq + '）');\n  assert.deepEqual(pin, pbefore, '回归检查：阶段 ' + pid + ' 的 transform 不得修改输入');\n}\n\nconst [id, requirement, input, expected] = stages[state.index];\nconst source = path.join(root, 'src', 'stage-' + id + '.mjs');\nassert.ok(existsSync(source), '当前阶段源文件缺失：' + source);\nconst mod = await import(pathToFileURL(source).href + '?v=' + Date.now());\nconst before = structuredClone(input);\nassert.deepEqual(mod.transform(input), expected, '当前阶段 ' + id + ' 尚未满足：' + requirement);\nassert.deepEqual(input, before, 'transform 不得修改输入');\nif (state.index < stages.length - 1) {\n  const next = state.index + 1;\n  const [nextId, nextRequirement] = stages[next];\n  // 懒生成：下一阶段源文件在解锁时才创建（物理上杜绝批量预写）\n  writeFileSync(path.join(root, 'src', 'stage-' + nextId + '.mjs'), "export function transform(value) {\\n  return value;\\n}\\n");\n  writeFileSync(statePath, JSON.stringify({ index: next }));\n  writeFileSync(path.join(root, 'CURRENT_STAGE.md'), '# 当前阶段 ' + nextId + '/' + stages.length + '\\n\\n仅修改 src/stage-' + nextId + '.mjs 的 transform。' + nextRequirement + '\\n\\n运行 npm test；不要修改 README、package.json、CURRENT_STAGE.md、test/ 或 .progress.json。\\n');\n  assert.fail('阶段 ' + id + ' 已验证，已解锁阶段 ' + nextId + '；继续读取 CURRENT_STAGE.md 并完成新的义务。');\n}\n`],
   ]);
-  for (const stage of stages) files.set(stageFile(stage), "export function transform(value) {\n  return value;\n}\n");
+  // 懒生成：只预置 stage-01，其余阶段文件在解锁时创建（物理上杜绝批量预写）
+  files.set(stageFile(stages[0]), "export function transform(value) {\n  return value;\n}\n");
   for (const [relative, content] of files) {
     const file = path.join(fixtureDir, relative);
     mkdirSync(path.dirname(file), { recursive: true });
