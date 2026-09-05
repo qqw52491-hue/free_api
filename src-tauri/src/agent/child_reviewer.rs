@@ -38,7 +38,8 @@ pub struct ChildReviewRequest {
 
 /// 对抗推演审查多维度评分卡
 /// 包含正确性、破坏性风险（安全性）、代码规范、测试覆盖四个维度，各 0~100 分
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "../src/types/generated/")]
 pub struct ReviewScorecard {
     pub correctness: u32,
     pub risk: u32,

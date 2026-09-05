@@ -635,9 +635,7 @@ mod finish_guard_tests {
         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
         checkpoint.approved_plan_summary = None;
 
-        checkpoint.reconcile_plan_phase_for_mode_switch(crate::agent::checkpoint::PlanExecutionMode::PlanApproval);
-        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::PlanApproval;
-        checkpoint.auto_pilot = false;
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::PlanApproval);
 
         assert_eq!(checkpoint.plan_phase, crate::agent::checkpoint::PlanPhase::Reviewing);
     }
@@ -652,9 +650,7 @@ mod finish_guard_tests {
         // 人工批准会留下方案摘要痕迹
         checkpoint.approved_plan_summary = Some("用户已批准：调整拖拽遮罩逻辑".to_string());
 
-        checkpoint.reconcile_plan_phase_for_mode_switch(crate::agent::checkpoint::PlanExecutionMode::PlanApproval);
-        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::PlanApproval;
-        checkpoint.auto_pilot = false;
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::PlanApproval);
 
         // 人工确认过的方案不应因模式切换被撤销，避免用户被迫二次审批
         assert!(checkpoint.plan_phase.is_approved());
@@ -669,9 +665,7 @@ mod finish_guard_tests {
         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
 
         // 反向切换（审批 -> 全自动）不应改动阶段，交由全自动链路自行放行
-        checkpoint.reconcile_plan_phase_for_mode_switch(crate::agent::checkpoint::PlanExecutionMode::Auto);
-        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::Auto;
-        checkpoint.auto_pilot = true;
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::Auto);
 
         assert_eq!(checkpoint.plan_phase, crate::agent::checkpoint::PlanPhase::Reviewing);
     }
@@ -687,8 +681,7 @@ mod finish_guard_tests {
         checkpoint.plan_reviewer_consumed = false;
 
         // 从全自动切到交叉审查，如果此前并未消费过审查结论，重置为 Reviewing
-        checkpoint.reconcile_plan_phase_for_mode_switch(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
-        checkpoint.plan_mode = crate::agent::checkpoint::PlanExecutionMode::CrossReview;
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
 
         assert_eq!(checkpoint.plan_phase, crate::agent::checkpoint::PlanPhase::Reviewing);
     }
@@ -704,7 +697,7 @@ mod finish_guard_tests {
         checkpoint.plan_reviewer_consumed = true;
 
         // 已消费过审查结论的 Approved 状态在交叉审查模式下继续保持
-        checkpoint.reconcile_plan_phase_for_mode_switch(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
 
         assert!(checkpoint.plan_phase.is_approved());
     }
@@ -1000,6 +993,119 @@ mod finish_guard_tests {
         assert_eq!(parse_plan_approval_decision(raw), Some(true));
         // 无标记时原样返回
         assert_eq!(strip_plan_decision_marker("普通回复"), "普通回复");
+    }
+
+    #[test]
+    fn plan_decision_marker_is_typed_parsed_with_note_and_tolerates_variants() {
+        use crate::agent::loop_runner::{extract_plan_decision, parse_plan_approval_decision};
+
+        // 打回 + 附带修改意见：note 必须经类型化结构完整带回
+        let reject = "【方案打回修改】请重新推演\n<!--plan-decision:{\"approved\":false,\"note\":\"数据库换成 tokio-rs\"}-->";
+        assert_eq!(parse_plan_approval_decision(reject), Some(false));
+        let decision = extract_plan_decision(reject).unwrap();
+        assert!(!decision.approved);
+        assert_eq!(decision.note.as_deref(), Some("数据库换成 tokio-rs"));
+
+        // 未知字段不破坏解析（向前兼容前端新增字段）
+        assert_eq!(
+            parse_plan_approval_decision("<!--plan-decision:{\"approved\":true,\"via\":\"mobile\"}-->"),
+            Some(true)
+        );
+        // 畸形 JSON 静默降级到关键词链路，绝不能 panic 或误放行
+        assert_eq!(
+            parse_plan_approval_decision("<!--plan-decision:{bad json}--> 我同意"),
+            Some(true)
+        );
+        // approved 缺失时同样降级
+        assert_eq!(
+            parse_plan_approval_decision("<!--plan-decision:{\"note\":\"hi\"}-->"),
+            None
+        );
+    }
+
+    #[test]
+    fn cross_review_scorecard_gate_blocks_low_risk_scores_then_passes_on_gate_clear() {
+        let temp_dir = std::env::temp_dir().join(format!("gatekeeper-score-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        let context = context::SandwichContext::new("system".to_string(), "修复内存泄漏".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
+        checkpoint.plan_reviewer_retry_count = 1;
+        checkpoint.plan_reviewer_consumed = true;
+
+        // 均分达标但 risk < 60：即使平均分 90+ 也必须硬拦截
+        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(95, 40, 95, 95));
+        let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint, &context, &db, "test_run", 2, false,
+        );
+        assert!(rej.is_some());
+        assert_eq!(rej.unwrap().route, "plan_gatekeeper:scorecard_failed");
+        assert!(!checkpoint.plan_phase.is_approved());
+
+        // 达标评分卡：放行并推进为 Approved
+        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(90, 80, 85, 70));
+        let pass = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint, &context, &db, "test_run", 3, false,
+        );
+        assert!(pass.is_none());
+        assert!(checkpoint.plan_phase.is_approved());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn auto_mode_first_step_write_is_blocked_until_plan_stated() {
+        let temp_dir = std::env::temp_dir().join(format!("gatekeeper-auto-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        let mut context = context::SandwichContext::new("system".to_string(), "重构调度器".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::Auto);
+
+        // 首轮、上下文为空就动笔 -> 拦截 need_plan
+        let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint, &context, &db, "test_run", 0, false,
+        );
+        assert!(rej.is_some());
+        assert_eq!(rej.unwrap().route, "plan_gatekeeper:need_plan");
+        assert!(!checkpoint.plan_phase.is_approved());
+
+        // 已有只读排查痕迹（上下文非空）-> 放行
+        context.turns_history.push(context::types::ChatMessage {
+            role: "assistant".to_string(),
+            content: json!("已完成只读排查：根因锁定在 dispatcher.rs:120"),
+        });
+        let pass = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint, &context, &db, "test_run", 1, false,
+        );
+        assert!(pass.is_none());
+        assert!(checkpoint.plan_phase.is_approved());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn set_execution_mode_is_the_single_entry_point_and_syncs_auto_pilot() {
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+
+        // PlanApproval：auto_pilot 必须同步为 false
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::PlanApproval);
+        assert_eq!(checkpoint.plan_mode, crate::agent::checkpoint::PlanExecutionMode::PlanApproval);
+        assert!(!checkpoint.auto_pilot);
+
+        // Auto：auto_pilot 必须同步为 true
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::Auto);
+        assert!(checkpoint.auto_pilot);
+
+        // CrossReview：同样视为自主模式（auto_pilot = true）
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
+        assert!(checkpoint.auto_pilot);
     }
 }
 
@@ -1417,13 +1523,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         plan_mode.as_deref(),
         auto_pilot,
     );
-    checkpoint.reconcile_plan_phase_for_mode_switch(target_plan_mode);
-    checkpoint.plan_mode = target_plan_mode;
-    checkpoint.auto_pilot = matches!(
-        target_plan_mode,
-        crate::agent::checkpoint::PlanExecutionMode::Auto
-            | crate::agent::checkpoint::PlanExecutionMode::CrossReview
-    );
+    checkpoint.set_execution_mode(target_plan_mode);
     // 初始工作区是会话选择的已声明资源；恢复时保留 checkpoint 中已有的显式契约。
     // 仅在显式项目会话、存在 workspace_override 或 auto_pilot 模式下才声明主工作区。
     // 在未选项目的通用自由会话中，主工作区保持为 None（自由模式），避免将宿主机启动目录误作为资源约束强塞给 Agent 及外部 MCP。

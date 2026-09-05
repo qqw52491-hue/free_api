@@ -1,9 +1,7 @@
-export interface ReviewScorecard {
-    correctness: number; // 0~100
-    risk: number;        // 0~100（破坏性风险/安全性，>=60方可放行）
-    style: number;       // 0~100
-    test_coverage: number; // 0~100
-}
+// ReviewScorecard 由 Rust 端 ts-rs 生成，唯一事实源：src-tauri/src/agent/child_reviewer.rs
+// 同步方式：npm run sync:types（cargo test -- export_bindings 后拷贝到 src/types/generated/）
+export type { ReviewScorecard } from "../../types/generated/ReviewScorecard";
+import type { ReviewScorecard } from "../../types/generated/ReviewScorecard";
 
 export interface ParsedAttachment {
     file_name: string;

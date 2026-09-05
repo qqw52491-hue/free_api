@@ -641,6 +641,27 @@ pub async fn run_call_llm_and_run_tool_phases(
 const PLAN_DECISION_MARKER_PREFIX: &str = "<!--plan-decision:";
 const PLAN_DECISION_MARKER_SUFFIX: &str = "-->";
 
+/// 方案审批的结构化结论（标记载荷的类型化契约）。
+///
+/// 与前端 `AgentHumanInterventionCard` / 移动端 app.js 的下发格式保持一致；
+/// 结构变化必须双向同步，后端解析用本结构而非裸 JSON Value，避免字段拼写漂移静默失效。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct PlanDecision {
+    /// true = 批准放行；false = 打回重新推演
+    pub approved: bool,
+    /// 打回时用户附带的修改意见（可选）
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// 从结构化标记中提取类型化的审批结论。
+pub(crate) fn extract_plan_decision(reply: &str) -> Option<PlanDecision> {
+    let start = reply.find(PLAN_DECISION_MARKER_PREFIX)?;
+    let rest = &reply[start + PLAN_DECISION_MARKER_PREFIX.len()..];
+    let end = rest.find(PLAN_DECISION_MARKER_SUFFIX)?;
+    serde_json::from_str::<PlanDecision>(rest[..end].trim()).ok()
+}
+
 /// 剥离回复末尾的结构化审批标记，用于日志展示与持久化摘要。
 pub(crate) fn strip_plan_decision_marker(reply: &str) -> String {
     match reply.find(PLAN_DECISION_MARKER_PREFIX) {
@@ -667,15 +688,8 @@ pub(crate) fn strip_plan_decision_marker(reply: &str) -> String {
 /// 3. 仍无法判定时返回 `None`，由调用方保持门禁关闭，绝不默认放行。
 pub(crate) fn parse_plan_approval_decision(reply: &str) -> Option<bool> {
     // 1. 结构化标记：权威来源。即便用户补充意见里写了"打回修改"等字样也不会误判。
-    if let Some(start) = reply.find(PLAN_DECISION_MARKER_PREFIX) {
-        let rest = &reply[start + PLAN_DECISION_MARKER_PREFIX.len()..];
-        if let Some(end) = rest.find(PLAN_DECISION_MARKER_SUFFIX) {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(rest[..end].trim()) {
-                if let Some(approved) = value.get("approved").and_then(|v| v.as_bool()) {
-                    return Some(approved);
-                }
-            }
-        }
+    if let Some(decision) = extract_plan_decision(reply) {
+        return Some(decision.approved);
     }
 
     // 2. 回退：否定信号优先于肯定信号，避免"我不太同意但先按这个来"被判为批准
@@ -718,9 +732,9 @@ pub(crate) fn check_pre_write_gatekeeper(
     match checkpoint.plan_mode {
         crate::agent::checkpoint::PlanExecutionMode::PlanApproval => {
             let stderr = if is_resume_child {
-                "【🚨 前置方案审批门禁拦截：当前处于方案审批模式】\n检测到尝试通过 resume_child 恢复写入型子 Agent 继续修改代码，该路径同样需要人工方案审批放行。\n请先调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的完整技术方案呈现给用户；\n待用户在交互界面上审阅并点击【批准方案】后，门禁将自动放行修改。本次恢复已被安全拦截，目标文件未受影响。".to_string()
+                crate::agent::gate_messages::plan_approval_resume_child_blocked()
             } else {
-                "【🚨 前置方案审批门禁拦截：当前处于方案审批模式】\n检测到当前尚未获得用户的人工方案审批放行，禁止直接调用写文件、派发写入子 Agent 或执行变更工具。\n请先调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的完整技术方案呈现给用户；\n待用户在交互界面上审阅并点击【批准方案】后，门禁将自动放行修改。本次操作已被安全拦截，目标未受影响。".to_string()
+                crate::agent::gate_messages::plan_approval_need_human_approval()
             };
             Some(DispatchResult {
                 success: false,
@@ -738,7 +752,7 @@ pub(crate) fn check_pre_write_gatekeeper(
                 Some(DispatchResult {
                     success: false,
                     stdout: String::new(),
-                    stderr: "【🚨 交叉审查门禁拦截：尚未派发子 Agent 对抗审查】\n当前处于【🔍 双 Agent 交叉审查模式】。在首次动笔修改代码前，必须先派发 child_reviewer 开展反驳推演与架构盲区排查：\n1. 调用 child_reviewer 工具，传入拟定的方案摘录、证据文件路径（如关键核心逻辑与跨模块关联点）及反证推演要求；\n2. 随后调用 wait_jobs 等待审查结论；\n3. 充分研判审查反驳意见后方可写入。本次操作已被安全拦截，目标未受影响。".to_string(),
+                    stderr: crate::agent::gate_messages::cross_review_need_reviewer_dispatch(),
                     route: "plan_gatekeeper:need_reviewer_dispatch".to_string(),
                 })
             } else if reviewer_running
@@ -748,7 +762,7 @@ pub(crate) fn check_pre_write_gatekeeper(
                 Some(DispatchResult {
                     success: false,
                     stdout: String::new(),
-                    stderr: "【🚨 交叉审查门禁拦截：审查子 Agent 仍在异步推演中】\n检测到你已派发审查任务，但尚未等待并接收其审查结论（“问过 ≠ 听过”）。\n请立即调用 wait_jobs 工具（例如 wait_jobs() 或指定 job_ids）挂起等待审查专家完成对抗推演；\n审查结论注入上下文后，门禁将根据交叉审查结果放行写入。本次操作已被安全拦截，目标未受影响。".to_string(),
+                    stderr: crate::agent::gate_messages::cross_review_need_wait_reviewer_jobs(),
                     route: "plan_gatekeeper:need_wait_reviewer_jobs".to_string(),
                 })
             } else if !checkpoint.plan_reviewer_consumed {
@@ -758,7 +772,7 @@ pub(crate) fn check_pre_write_gatekeeper(
                 Some(DispatchResult {
                     success: false,
                     stdout: String::new(),
-                    stderr: "【🚨 交叉审查门禁拦截：未收到任何有效的审查结论】\n检测到此前已派发过审查任务，但后台当前没有正在运行的审查子任务，也没有可回收的审查结论（通常是派发立即失败：角色卡未授权挂载为 reviewer、role 名称不存在或参数非法）。\n请重新调用 child_reviewer 派发审查（先确认 role 名称可用且与任务匹配），或调用 wait_jobs 收取可能已完成的结论；\n收到审查结论后方可写入。本次操作已被安全拦截，目标未受影响。".to_string(),
+                    stderr: crate::agent::gate_messages::cross_review_reviewer_result_missing(),
                     route: "plan_gatekeeper:reviewer_result_missing".to_string(),
                 })
             } else if let Some(ref scorecard) = checkpoint.last_review_scorecard {
@@ -767,7 +781,7 @@ pub(crate) fn check_pre_write_gatekeeper(
                     Some(DispatchResult {
                         success: false,
                         stdout: String::new(),
-                        stderr: format!("【🚨 交叉审查硬门禁拦截：审查评分未达标】\n审查子 Agent 给出的 ReviewScorecard 评分未达放行标准：\n{}\n硬门禁规则：综合平均分必须 >= 75 分，且破坏性风险/安全性评分 (risk) 必须 >= 60 分。\n系统已自动拒绝放行代码写入。请结合审查发现的问题打回重新规划与修复后再尝试写入。", reason),
+                        stderr: crate::agent::gate_messages::cross_review_scorecard_failed(&reason),
                         route: "plan_gatekeeper:scorecard_failed".to_string(),
                     })
                 } else {
@@ -784,7 +798,7 @@ pub(crate) fn check_pre_write_gatekeeper(
                 Some(DispatchResult {
                     success: false,
                     stdout: String::new(),
-                    stderr: "【🚨 前置方案门禁拦截：尚未确立经论证的技术方案】\n检测到在首轮未完成只读排查与方案阐述前尝试直接调用了写代码工具。\n为保证工程契约安全，请先遵循【假设驱动与主动证伪法则】：\n1. 优先通过只读工具（如 read_file/grep_search）排查代码并排除错误假设，锁定唯一根因；\n2. 输出清晰的技术方案与反证推演说明；\n方案确认后再执行修改。本次写入已被安全拦截，目标文件未受影响。".to_string(),
+                    stderr: crate::agent::gate_messages::auto_mode_need_plan(),
                     route: "plan_gatekeeper:need_plan".to_string(),
                 })
             } else {

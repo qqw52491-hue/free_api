@@ -47,8 +47,9 @@ impl AgentPhase {
 pub const MAX_PLAN_REVIEWER_RETRIES: u32 = 2;
 
 /// 方案制定与前置审查门禁的生命周期阶段
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../src/types/generated/")]
 pub enum PlanPhase {
     /// 1. 探索取证中：只读探索事实，尚未形成经过审查的最终方案
     #[default]
@@ -77,8 +78,9 @@ impl PlanPhase {
 }
 
 /// 方案与执行前置门禁模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../src/types/generated/")]
 pub enum PlanExecutionMode {
     /// 🚀 全自动模式 (Auto)：只读排查与初步规划后直接放行修改
     #[default]
@@ -582,6 +584,18 @@ impl AgentCheckpoint {
             reviewer_budget_used: self.plan_reviewer_retry_count,
             reviewer_budget_max: MAX_PLAN_REVIEWER_RETRIES,
         }
+    }
+
+    /// 统一的执行模式切换入口：规范化方案阶段（人工确认过的方案永久保留）
+    /// 并同步 auto_pilot 兼容字段。所有模式切换都必须走这里，
+    /// 避免 reconcile / plan_mode / auto_pilot 三处赋值散落导致漏改。
+    pub fn set_execution_mode(&mut self, new_mode: PlanExecutionMode) {
+        self.reconcile_plan_phase_for_mode_switch(new_mode);
+        self.plan_mode = new_mode;
+        self.auto_pilot = matches!(
+            new_mode,
+            PlanExecutionMode::Auto | PlanExecutionMode::CrossReview
+        );
     }
 
     /// 模式切换守卫：
