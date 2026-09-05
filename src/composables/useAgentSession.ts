@@ -645,7 +645,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const stepId = numberOrUndefined(step.id ?? step.step_id) ?? index;
             const tool = toText(step.tool || step.action) || "action";
             const sourcePlanId = toText(step.plan_id || step.planId) || "plan-default";
-            const planTitle = sanitizePlanTitle(step.plan_title || step.planTitle, goal);
+            const planTitle = sanitizePlanTitle(toText(step.plan_title || step.planTitle), toText(goal));
             const params = step.command ?? step.params;
             const result = step.output ?? step.result;
             return {
@@ -935,7 +935,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 stepId,
                 description: toText(payload.description) || `${name}: ${action}`,
                 planId: toText(payload.plan_id) || "plan-default",
-                planTitle: sanitizePlanTitle(payload.plan_title, currentGoal.value),
+                planTitle: sanitizePlanTitle(toText(payload.plan_title), toText(currentGoal.value)),
                 modelTier: toText(payload.model_tier) || undefined,
                 tool: name,
                 action,
@@ -1274,7 +1274,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 stepId,
                 description,
                 planId: toText(rawStep.plan_id) || "plan-default",
-                planTitle: sanitizePlanTitle(rawStep.plan_title, currentGoal.value),
+                planTitle: sanitizePlanTitle(toText(rawStep.plan_title), toText(currentGoal.value)),
                 modelTier: toText(rawStep.model_tier) || undefined,
                 reflection,
                 thought: thoughtText,
