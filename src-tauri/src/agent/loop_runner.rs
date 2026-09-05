@@ -1764,6 +1764,19 @@ pub async fn run_tool_phase(
         }
 
         // 具体和本地工具交互 (非 ask_human 走普通逻辑)
+        // 【防旁路探针】shell 类工具一条命令可改 N 个文件，全部绕过 write_file 门禁与
+        // 逐文件副作用台账。执行前后各测一次 git 脏文件数，差值计入未覆盖 shell 变更，
+        // 供阶段审查的文件数阈值兜底（is_write_or_side_effect_tool 已含 shell/exec/run 动词）。
+        let is_shell_class = {
+            let t = inst.get_tool().to_ascii_lowercase();
+            let t = t.rsplit('/').next().unwrap_or(&t).to_string();
+            ["shell", "bash", "exec", "run"].iter().any(|verb| t.contains(verb))
+        };
+        let shell_pre_dirty = if is_shell_class {
+            crate::agent::review_tools::git_dirty_file_count(workspace_dir)
+        } else {
+            None
+        };
         let inst_c = inst.clone();
         let registry_arc = registry_state.inner().clone();
         let db = state.inner().clone();
@@ -1828,6 +1841,22 @@ pub async fn run_tool_phase(
                 }
             }
         };
+
+        // 【防旁路结算】shell 执行后复测脏文件数，差值（封顶 50）计入未覆盖 shell 变更
+        if is_shell_class {
+            let post = crate::agent::review_tools::git_dirty_file_count(workspace_dir);
+            if let (Some(pre), Some(post)) = (shell_pre_dirty, post) {
+                let delta = post.saturating_sub(pre).min(50);
+                if delta > 0 {
+                    checkpoint.uncovered_shell_mutations =
+                        checkpoint.uncovered_shell_mutations.saturating_add(delta);
+                }
+            } else if shell_pre_dirty.is_none() {
+                // 非 git 环境：无探针能力，按每次调用保守计 1
+                checkpoint.uncovered_shell_mutations =
+                    checkpoint.uncovered_shell_mutations.saturating_add(1);
+            }
+        }
 
         if dispatch_result.route == RUN_INTERRUPTED_ROUTE {
             return Ok(dispatch_result);

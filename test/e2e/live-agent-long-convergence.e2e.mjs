@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -83,6 +84,16 @@ function createFixture() {
       protectedFiles.set(file, content);
     }
   }
+  // git 化 fixture：shell 批量修改探针依赖 git status 差值，真实项目均有 git
+  try {
+    const run = (args) => execSync(`git ${args}`, { cwd: fixtureDir, stdio: "ignore" });
+    run("init -q");
+    run("-c user.email=eval@local -c user.name=eval add -A");
+    run('-c user.email=eval@local -c user.name=eval commit -qm init');
+  } catch {
+    // git 不可用时探针自动退化为按调用计数（阶段审查仍有 todo/文件数兜底）
+  }
+
 }
 async function assertHiddenAssertions() {
   for (const [file, original] of protectedFiles) assert.equal(readFileSync(file, 'utf8'), original, `受保护文件被改写：${path.relative(fixtureDir, file)}`);

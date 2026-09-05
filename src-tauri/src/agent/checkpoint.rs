@@ -568,6 +568,15 @@ pub struct AgentCheckpoint {
     /// 门禁文案显式指示模型去 ask_human（如预算耗尽转人工）时置位：此时求助是合法的，冷却豁免
     #[serde(default)]
     pub gate_human_escape_directed: bool,
+    /// shell 类工具造成的文件变更累计数（git 探针实测；非 git 环境按每次调用计 1）。
+    /// 防旁路：shell_exec 一条命令可改 N 个文件且全部绕过 write_file 门禁，
+    /// 该计数让阶段审查的文件数阈值对 shell 副作用同样生效。
+    #[serde(default)]
+    pub uncovered_shell_mutations: u32,
+    /// 阶段审查派发时的 shell 变更基线（派发前已存在的变更视为本轮已覆盖；
+    /// 消费时不得覆盖此基线——与 baseline_side_effects 的竞态修复同语义）
+    #[serde(default)]
+    pub stage_review_shell_baseline: u32,
     /// final_only 级 blocking 的 carry-over（不拦截，带入收尾审查）
     #[serde(default)]
     pub stage_review_final_only: Vec<String>,
@@ -621,6 +630,8 @@ impl AgentCheckpoint {
             stage_review_blockers_open: 0,
             recent_gate_block_step: None,
             gate_human_escape_directed: false,
+            uncovered_shell_mutations: 0,
+            stage_review_shell_baseline: 0,
             stage_review_final_only: Vec::new(),
             auto_pilot: true,
             last_error: None,

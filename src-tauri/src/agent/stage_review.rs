@@ -63,6 +63,20 @@ pub fn should_fire(
         return None;
     }
 
+    // 触发 3（先于 writes_since 早退判定）：shell 批量修改兜底——shell_exec 一条命令可改
+    // N 个文件并绕过 write_file 门禁，以 git 探针实测的未覆盖变更数独立兜底
+    //（非 git 环境按每次调用计 1，阈值语义不变）。
+    let shell_uncovered = checkpoint
+        .uncovered_shell_mutations
+        .saturating_sub(checkpoint.stage_review_shell_baseline);
+    if shell_uncovered >= stage_review_max_files() {
+        return Some(format!(
+            "自上次阶段审查以来 shell 类工具修改了约 {} 个文件（阈值 {}）",
+            shell_uncovered,
+            stage_review_max_files()
+        ));
+    }
+
     let writes_since = context
         .side_effects
         .len()
@@ -167,6 +181,8 @@ pub async fn dispatch(
 
     checkpoint.stage_review_run_id = Some(child_run_id.clone());
     checkpoint.stage_review_budget_used += 1;
+    // shell 变更基线同样在派发时记录（覆盖语义与 baseline_side_effects 一致）
+    checkpoint.stage_review_shell_baseline = checkpoint.uncovered_shell_mutations;
     // 覆盖基线在【派发时】记录：reviewer 证据包取的是此刻的 diff，此后发生的写入
     // 不在本轮审查范围内，必须留在基线之外让下一次触发兜住（防覆盖记账竞态）。
     checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
@@ -320,6 +336,34 @@ mod tests {
         // 第 6 个触发（记账博弈兜底：模型不更新 todo 也逃不掉）
         context.record_side_effect(6, "write_file".to_string(), "f6.rs".to_string());
         assert!(should_fire(&cp, &context, &instruction).is_some(), "达到阈值必须触发");
+    }
+
+    #[test]
+    fn shell_batch_mutations_trigger_stage_review_independently() {
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let instruction = AgentInstruction::default();
+        let cp = approved_checkpoint();
+
+        // shell 未覆盖变更 5 个：不触发（同 todo/文件数阈值）
+        let mut cp5 = approved_checkpoint();
+        cp5.uncovered_shell_mutations = 5;
+        assert!(should_fire(&cp5, &context, &instruction).is_none(), "5 个 shell 变更不应触发");
+
+        // 达到阈值 6：无 todo 推进也必须触发（防旁路的核心断言）
+        let mut cp6 = approved_checkpoint();
+        cp6.uncovered_shell_mutations = 6;
+        let reason = should_fire(&cp6, &context, &instruction).unwrap();
+        assert!(reason.contains("shell"), "触发原因应标明 shell 旁路: {}", reason);
+
+        // 基线语义：派发时快照后，新增变更才计入未覆盖
+        let mut cp_baselined = approved_checkpoint();
+        cp_baselined.uncovered_shell_mutations = 10;
+        cp_baselined.stage_review_shell_baseline = 8;
+        assert!(should_fire(&cp_baselined, &context, &instruction).is_none(), "基线之上的增量 2 < 6 不触发");
+        cp_baselined.uncovered_shell_mutations = 14;
+        assert!(should_fire(&cp_baselined, &context, &instruction).is_some(), "基线上增量 6 触发");
+
+        let _ = cp; let _ = cp5;
     }
 
     #[test]

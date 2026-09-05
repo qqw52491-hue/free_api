@@ -40,6 +40,25 @@ fn cap(s: String) -> String {
     }
 }
 
+/// git 脏文件探针：统计工作区当前变更/未跟踪文件数（shell 前后各测一次，差值即本次
+/// shell 真实改动的文件数）。非 git 目录返回 None（调用方退化为按调用次数计 1）。
+pub fn git_dirty_file_count(workspace: &Path) -> Option<u32> {
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(workspace)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count() as u32,
+    )
+}
+
 fn git_args(workspace: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git").args(args).current_dir(workspace).output().ok()?;
     if !out.status.success() {
@@ -199,6 +218,25 @@ mod tests {
         assert!(execute(&dir, "write_file", &json!({})).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_dirty_probe_counts_new_files() {
+        let dir = std::env::temp_dir().join(format!("rtools-git-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = Command::new("git").args(["init", "-q"]).current_dir(&dir).status();
+        let _ = Command::new("git").args(["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]).current_dir(&dir).status();
+        let _ = Command::new("git").args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]).current_dir(&dir).status();
+        assert_eq!(git_dirty_file_count(&dir), Some(0), "干净仓库应为 0");
+        std::fs::write(dir.join("new.rs"), "fn x() {}
+").unwrap();
+        assert_eq!(git_dirty_file_count(&dir), Some(1), "新增文件应计 1");
+        // 非 git 目录返回 None
+        let plain = std::env::temp_dir().join(format!("rtools-plain-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(git_dirty_file_count(&plain), None);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&plain);
     }
 
     #[test]
