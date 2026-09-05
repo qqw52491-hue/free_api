@@ -171,12 +171,14 @@ pub(crate) fn check_pre_write_gatekeeper(
                     route: "plan_gatekeeper:reviewer_result_missing".to_string(),
                 })
             } else if let Some(ref scorecard) = checkpoint.last_review_scorecard {
+                let budget_exhausted = checkpoint.plan_reviewer_retry_count
+                    >= crate::agent::checkpoint::MAX_PLAN_REVIEWER_RETRIES;
                 if !scorecard.passes_gate() {
                     let reason = scorecard.gate_rejection_reason().unwrap_or_else(|| "审查评分未达放行门槛".to_string());
                     Some(DispatchResult {
                         success: false,
                         stdout: String::new(),
-                        stderr: crate::agent::gate_messages::cross_review_scorecard_failed(&reason),
+                        stderr: crate::agent::gate_messages::cross_review_scorecard_failed(&reason, budget_exhausted),
                         route: "plan_gatekeeper:scorecard_failed".to_string(),
                     })
                 } else if checkpoint.last_review_blocking_count > 0 {
@@ -184,7 +186,10 @@ pub(crate) fn check_pre_write_gatekeeper(
                     Some(DispatchResult {
                         success: false,
                         stdout: String::new(),
-                        stderr: crate::agent::gate_messages::cross_review_blocking_findings_open(checkpoint.last_review_blocking_count),
+                        stderr: crate::agent::gate_messages::cross_review_blocking_findings_open(
+                            checkpoint.last_review_blocking_count,
+                            budget_exhausted,
+                        ),
                         route: "plan_gatekeeper:blocking_findings_open".to_string(),
                     })
                 } else {

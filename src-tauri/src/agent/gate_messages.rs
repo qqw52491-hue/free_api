@@ -31,8 +31,16 @@ pub fn cross_review_reviewer_result_missing() -> String {
 }
 
 /// 交叉审查模式：ReviewScorecard 评分未达硬门禁
-pub fn cross_review_scorecard_failed(reason: &str) -> String {
-    format!("【🚨 交叉审查硬门禁拦截：审查评分未达标】\n审查子 Agent 给出的 ReviewScorecard 评分未达放行标准：\n{}\n硬门禁规则：综合平均分必须 >= 75 分，且破坏性风险/安全性评分 (risk) 必须 >= 60 分。\n系统已自动拒绝放行代码写入。请结合审查发现的问题打回重新规划与修复后再尝试写入。", reason)
+pub fn cross_review_scorecard_failed(reason: &str, budget_exhausted: bool) -> String {
+    let escape_guide = if budget_exhausted {
+        "【审查预算已耗尽】方案审查已达最大重试轮次，无法再次派发审查子 Agent。\n【解套路径（人工仲裁放行）】严禁因审查受阻而直接放弃写入或草率 finish！请立即调用 ask_human 工具（设置 kind: 'plan_approval'），在 message 中向用户说明技术方案与审查员的低分质疑，阐述为何该方案安全或确属任务必需，申请人工审批。用户在界面确认放行后，前置门禁将立即解除并允许写入！"
+    } else {
+        "【解套路径 1（方案修正）】若审查员指出的破坏性风险与漏洞属实，请修正方案后重新派发 child_reviewer 审查。\n【解套路径 2（人工仲裁放行）】若经核实审查员意见存在过度防御、偏执假设或与当前功能目标冲突（如实现特定脚本/功能必需的代码），且方案整体可控，请调用 ask_human 工具（设置 kind: 'plan_approval'），将方案分歧呈报用户申请人工裁决。用户批准后门禁立即放行写入，严禁放弃写入直接在对话中贴代码！"
+    };
+    format!(
+        "【🚨 交叉审查硬门禁拦截：审查评分未达标】\n审查子 Agent 给出的 ReviewScorecard 评分未达放行标准：\n{}\n硬门禁规则：综合平均分必须 >= 75 分，且破坏性风险/安全性评分 (risk) 必须 >= 60 分。\n系统已自动拒绝放行代码写入。\n{}",
+        reason, escape_guide
+    )
 }
 
 /// 全自动模式：首轮未完成只读排查与方案阐述即尝试写入
@@ -51,24 +59,40 @@ pub fn cross_review_scorecard_missing(budget_exhausted: bool) -> String {
 }
 
 /// 交叉审查模式：评分达标但仍有未解决的 blocking 级异议
-pub fn cross_review_blocking_findings_open(count: u32) -> String {
-    format!("【🚨 交叉审查硬门禁拦截：存在未解决的 blocking 级异议】\n审查评分虽已达标，但最新一轮审查仍有 {} 条 blocking 级异议未解决。\n硬门禁规则：blocking 异议必须逐条回应并修复，或经再次审查确认已解决后，方可放行写入。\n请针对每条 blocking 异议给出处理说明（修复 / 证伪 / 设计取舍理由），然后重新派发审查确认。\n【重要】重新派发 child_reviewer 时，必须在证据包中逐条附上：原始异议（含编号，如 F1）、你的处理说明与对应证据。审查者将据此对每条异议裁决 maintain 或 withdraw，全部撤回或解决后方可放行。", count)
+pub fn cross_review_blocking_findings_open(count: u32, budget_exhausted: bool) -> String {
+    let escape_guide = if budget_exhausted {
+        "【审查预算已耗尽】方案审查已达最大重试上限。\n【解套路径（人工仲裁放行）】请调用 ask_human 工具（设置 kind: 'plan_approval'），将尚未闭合的 blocking 异议及你的解释呈报用户，由用户进行人工裁决。用户批准后门禁将立即解除并放行写入。"
+    } else {
+        "【解套路径 1（重审确认）】针对每条 blocking 异议给出处理说明（修复 / 证伪 / 设计取舍理由），重新派发 child_reviewer 确认。\n【解套路径 2（人工仲裁放行）】若审查员坚持维持异议（maintain）但确属过度防御或业务特有设计，请调用 ask_human 工具（设置 kind: 'plan_approval'）将分歧与方案呈报用户，由人工裁决强制放行。"
+    };
+    format!(
+        "【🚨 交叉审查硬门禁拦截：存在未解决的 blocking 级异议】\n审查评分虽已达标，但最新一轮审查仍有 {} 条 blocking 级异议未解决。\n硬门禁规则：blocking 异议必须逐条回应并修复，或经再次审查确认已解决后，方可放行写入。\n{}",
+        count, escape_guide
+    )
 }
 
 /// 方案审查轮次预算耗尽的统一提示（常规派发与反驳对质共用）
 pub fn reviewer_retry_limit() -> String {
-    "【审查轮数已达上限（2 轮）】方案审查讨论已达最大重试上限，请停止继续派发审查子 Agent。\n请综合已有审查建议，整理最终技术方案并调用 ask_human（kind: 'plan_approval'）呈报给用户进行人工审批。".to_string()
+    "【审查轮数已达上限（2 轮）】方案审查讨论已达最大重试上限，请停止继续派发审查子 Agent。\n请综合已有审查建议，整理最终技术方案并调用 ask_human（kind: 'plan_approval'）呈报给用户进行人工审批。\n用户在界面批准后，前置门禁将立即解除并放行代码写入。".to_string()
 }
 
 /// 阶段级审查：上一阶段的 blocking_regardless 异议未解决，拦截继续写入。
-/// 解套路径 = resume_child 对质（审查者撤回后自动放行）；修复本身不需要先写入。
+/// 解套路径 = resume_child 对质（审查者撤回后自动放行），或 ask_human 人工仲裁放行。
 pub fn stage_review_blocking_open(count: u32, stage_run_id: &str, final_only_summary: &str) -> String {
     let mut text = format!(
-        "【🚨 阶段审查拦截：上一阶段存在 {} 条未解决的 blocking_regardless 异议】\n阶段审查发现无论后续阶段如何都成立的结构性缺陷，继续堆叠新写入只会放大返工成本，本次写入已被拦截。\n【解套路径（唯一）】调用 resume_child（child_run_id: \"{}\"），逐条提交处理说明与证据：问题确已解决或经证伪不成立时审查者会撤回（withdraw），全部撤回后自动放行；仍成立的请先按审查建议修正方案。\n修复后的代码由下一轮阶段审查复检。\n",
+        "【🚨 阶段审查拦截：上一阶段存在 {} 条未解决的 blocking_regardless 异议】\n阶段审查发现无论后续阶段如何都成立的结构性缺陷，继续堆叠新写入只会放大返工成本，本次写入已被拦截。\n【解套路径 1（对质撤回）】调用 resume_child（child_run_id: \"{}\"），逐条提交处理说明与证据：问题确已解决或经证伪不成立时审查者会撤回（withdraw），全部撤回后自动放行；\n【解套路径 2（人工仲裁放行）】若与审查者存在无法弥合的分歧，或审查意见阻碍了必要功能的实现，请调用 ask_human 工具向用户呈报阶段审查争议详情，由用户人工裁决强制放行。\n",
         count, stage_run_id
     );
     if !final_only_summary.is_empty() {
         text.push_str(&format!("\n【final_only 记账（不拦截，但最终交付前必须解决）】\n{}\n", final_only_summary));
     }
     text
+}
+
+/// 方案审查未通过且未发生任何写入时尝试 finish 逃避代码写入的拦截提示
+pub fn finish_blocked_by_unapproved_plan(reason: &str) -> String {
+    format!(
+        "【🚨 终态拦截：代码写入尚未完成且方案审查未闭合】\n检测到当前任务方案审查尚未通过（{}），且工作区内尚未完成任何代码写入。\n严禁在未获放行的情况下擅自将代码仅以文本形式贴出并直接结束任务！\n【必须采取的行动】\n1. 若审查意见属实，请修正方案并重新审查；\n2. 若审查员存在过度防御阻碍了开发，请立即调用 ask_human 工具（设置 kind: 'plan_approval'）呈报用户申请人工裁决放行；\n获得用户批准放行后，请真实调用写入工具写入文件并验证通过，方可提交 finish！",
+        reason
+    )
 }

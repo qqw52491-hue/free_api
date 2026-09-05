@@ -1211,6 +1211,22 @@ async fn run_agent_main_loop_in_workspace_inner(
         if is_finish && (crate::agent::child_reviewer::has_running_child_runs(state.inner(), &run_id) || crate::agent::job_engine::has_running_jobs(state.inner(), &run_id)) {
             open_todos.push("仍有后台异步任务或持续监听正在执行中：后台任务请调用 wait_jobs 挂起等待并接收结论；持续监听（watch）请调用 watch_stop 显式释放后再提交 finish，或执行其他独立操作后重试".to_string());
         }
+        if is_finish && checkpoint.stage_review_blockers_open > 0 {
+            open_todos.push(format!(
+                "阶段审查仍有 {} 条未解决的 blocking 缺陷：请先调用 resume_child 对质撤回，或调用 ask_human 申请人工仲裁放行",
+                checkpoint.stage_review_blockers_open
+            ));
+        }
+        if is_finish
+            && !checkpoint.plan_phase.is_approved()
+            && (checkpoint.last_review_scorecard.as_ref().map_or(false, |s| !s.passes_gate())
+                || checkpoint.last_review_blocking_count > 0)
+            && (context.side_effects.len() == context.inherited_side_effects_count)
+        {
+            open_todos.push(
+                "方案审查未达标且尚未写入任何代码：禁止直接提交 finish！请根据审查意见修正方案并重新审查，或调用 ask_human 呈报用户申请人工仲裁放行后写入代码".to_string(),
+            );
+        }
         let finish_challenged = should_challenge_finish_with_complex_delivery_blocker(
             is_finish,
             result.success,

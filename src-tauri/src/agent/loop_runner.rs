@@ -1511,6 +1511,18 @@ pub async fn run_tool_phase(
             })
             .unwrap_or(false);
 
+        // 人工仲裁与放行上下文识别：
+        // 1. 显式带有 plan_approval/plan/approval kind 表单；
+        // 2. 当前方案前置门禁尚未获批（如 Exploring / Reviewing / AwaitingApproval）；
+        // 3. 存在未通过的审查评分卡或未闭合的 blocking 异议；
+        // 4. 阶段审查存在未解决的 stage_review_blockers_open。
+        // 在上述任一情况下，本次 ask_human 均承担向人类请示写入权限或请求人工仲裁放行的语义。
+        let is_approval_context = is_plan_approval_kind
+            || !checkpoint.plan_phase.is_approved()
+            || checkpoint.stage_review_blockers_open > 0
+            || checkpoint.last_review_scorecard.as_ref().map_or(false, |s| !s.passes_gate())
+            || checkpoint.last_review_blocking_count > 0;
+
         let ask_msg = params
             .get("message")
             .or_else(|| form_val.and_then(|f| f.get("title")))
@@ -1525,21 +1537,35 @@ pub async fn run_tool_phase(
         )
         .ok();
 
+        // 若处于仲裁/审批上下文但模型未提供 form，自动补齐 plan_approval 结构化表单，
+        // 使得前端直接渲染【批准方案】【打回修改】等可点击卡片，提升人机协作效率。
+        let final_form_val: Option<serde_json::Value> = if form_val.is_some() {
+            form_val.cloned()
+        } else if is_approval_context {
+            Some(json!({
+                "kind": "plan_approval",
+                "title": "方案与安全审查人工仲裁",
+                "description": ask_msg
+            }))
+        } else {
+            None
+        };
+
         // 通知前端进入暂停状态
         app.emit(
             &format!("agent-progress-{}", final_session_id),
             json!({
                 "type": "agent_paused",
                 "message": ask_msg,
-                "form": form_val.cloned().unwrap_or(serde_json::Value::Null)
+                "form": final_form_val.unwrap_or(serde_json::Value::Null)
             }),
         )
         .ok();
 
         println!("⏸️ [阻塞点] 模型触发 ask_human 挂起，正在死等前端人类唤醒...");
 
-        // 方案审批挂起时，将阶段设为 AwaitingApproval，供前端及 Checkpoint 呈现等待审批状态
-        if is_plan_approval_kind {
+        // 方案审批与仲裁挂起时，将阶段设为 AwaitingApproval，供前端及 Checkpoint 呈现等待审批状态
+        if is_approval_context {
             checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::AwaitingApproval;
         }
 
@@ -1577,7 +1603,7 @@ pub async fn run_tool_phase(
             None => "人类未回复，通道异常关闭".to_string(),
         };
         context.add_error_feedback(&format!("【人类回复】{}", reply));
-        if is_plan_approval_kind {
+        if is_approval_context {
             match parse_plan_approval_decision(&reply) {
                 Some(false) => {
                     // 人类提出修改意见，打回重新推演审查
@@ -1586,10 +1612,18 @@ pub async fn run_tool_phase(
                 Some(true) => {
                     // 人类在方案审批卡片中批准放行
                     checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                    if checkpoint.stage_review_blockers_open > 0 {
+                        checkpoint.stage_review_blockers_open = 0;
+                    }
                     // 摘要中剥离结构化标记，避免协议噪声污染持久化内容
                     let clean_reply = strip_plan_decision_marker(&reply);
                     checkpoint.approved_plan_summary =
                         Some(clean_reply.chars().take(500).collect());
+                    app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        "✅ 方案审批与人工仲裁已放行（收到用户批准，写入门禁解除）".to_string(),
+                    )
+                    .ok();
                 }
                 None => {
                     // “问一次就好，一次审批全程放权”
@@ -1600,12 +1634,15 @@ pub async fn run_tool_phase(
                         && trimmed != "我再想想"
                     {
                         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                        if checkpoint.stage_review_blockers_open > 0 {
+                            checkpoint.stage_review_blockers_open = 0;
+                        }
                         let clean_reply = strip_plan_decision_marker(&reply);
                         checkpoint.approved_plan_summary =
                             Some(clean_reply.chars().take(500).collect());
                         app.emit(
                             &format!("agent-log-{}", final_session_id),
-                            "✅ 方案审批已放行（收到用户非反对回复，门禁解除）".to_string(),
+                            "✅ 方案审批与人工仲裁已放行（收到用户非反对回复，门禁解除）".to_string(),
                         )
                         .ok();
                     } else {

@@ -1217,4 +1217,71 @@ mod finish_guard_tests {
         checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
         assert!(checkpoint.auto_pilot);
     }
+
+    #[test]
+    fn cross_review_human_arbitration_bypasses_failed_scorecard_and_blockers() {
+        let temp_dir = std::env::temp_dir().join(format!("gatekeeper-esc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        let context = context::SandwichContext::new("system".to_string(), "实现系统运维脚本".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
+        checkpoint.plan_reviewer_retry_count = 2; // 预算已耗尽
+        checkpoint.plan_reviewer_consumed = true;
+
+        // 模拟审查员过度防御打了低分 (risk: 48 < 60)
+        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(80, 48, 85, 75));
+        let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint, &context, &db, "test_run", 3, false,
+        );
+        assert!(rej.is_some());
+        let rej_res = rej.unwrap();
+        assert_eq!(rej_res.route, "plan_gatekeeper:scorecard_failed");
+        assert!(rej_res.stderr.contains("ask_human"), "预算耗尽拦截文案必须指引 ask_human 人工仲裁");
+        assert!(rej_res.stderr.contains("人工仲裁"), "拦截文案必须包含人工仲裁说明");
+
+        // 人工仲裁放行：用户确认批准后，plan_phase 变为 Approved
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+        let pass = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint, &context, &db, "test_run", 4, false,
+        );
+        assert!(pass.is_none(), "人类批准后门禁必须立即放行写入，绝不因审查低分继续拦截");
+        assert!(checkpoint.plan_phase.is_approved());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn stage_review_blocker_cleared_by_human_arbitration() {
+        let temp_dir = std::env::temp_dir().join(format!("gatekeeper-stage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        let context = context::SandwichContext::new("system".to_string(), "重构核心模块".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+        checkpoint.stage_review_blockers_open = 1;
+
+        // 存在未解决的 stage review blocker -> 拦截写入
+        let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint, &context, &db, "test_run", 5, false,
+        );
+        assert!(rej.is_some());
+        let rej_res = rej.unwrap();
+        assert_eq!(rej_res.route, "stage_review:blocking_open");
+        assert!(rej_res.stderr.contains("ask_human"), "阶段拦截必须提供 ask_human 人工仲裁路径");
+
+        // 人工仲裁放行：解除 stage_review_blockers_open
+        checkpoint.stage_review_blockers_open = 0;
+        let pass = crate::agent::loop_runner::check_pre_write_gatekeeper(
+            &mut checkpoint, &context, &db, "test_run", 6, false,
+        );
+        assert!(pass.is_none(), "阶段 blocker 解除后门禁放行");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
