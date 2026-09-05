@@ -16,7 +16,16 @@ pub const MAX_CHILDREN_PER_KIND_PER_RUN: u8 = 2;
 pub const MAX_TOTAL_CHILDREN_PER_RUN: u8 = 6;
 // 向后兼容原有常量别名
 pub const MAX_CHILD_REVIEWS_PER_PARENT_RUN: u8 = MAX_CHILDREN_PER_KIND_PER_RUN;
-const CHILD_TIMEOUT_SECS: u64 = 45;
+/// reviewer 单次调用超时（秒）：可通过 FREE_API_REVIEWER_TIMEOUT_SECS 调整。
+    /// 实测教训：45s 对慢平台/大证据包太紧——审查超时→退款→重派→再超时，死循环到模型弃疗。
+    fn child_timeout_secs() -> u64 {
+        std::env::var("FREE_API_REVIEWER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|v| v.clamp(30, 600))
+            .unwrap_or(45)
+    }
+
 const CHILD_MAX_OUTPUT_TOKENS: i64 = 900;
 const MAX_QUESTION_CHARS: usize = 2_000;
 const MAX_EVIDENCE_CHARS: usize = 6_000;
@@ -1014,7 +1023,7 @@ pub async fn spawn_child_reviewer(
                 &mut on_stream_event,
             );
             let stream_result = match tokio::time::timeout(
-                Duration::from_secs(CHILD_TIMEOUT_SECS),
+                Duration::from_secs(child_timeout_secs()),
                 call,
             )
             .await
