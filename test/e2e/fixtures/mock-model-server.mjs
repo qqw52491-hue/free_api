@@ -10,6 +10,7 @@ const STAGE1_IMPL = `export function transform(value) {
 `;
 
 // 单会话状态机（冒烟串行运行，一次只有一个会话）
+const FIXTURE_DIR = process.env.FREE_API_LIVE_FIXTURE_DIR ?? "";
 const state = { phase: "start", finishAttempts: 0 };
 
 function lastUserText(messages) {
@@ -23,11 +24,14 @@ function lastUserText(messages) {
   return "";
 }
 
-function isReviewerRequest(messages) {
+function isMainAgentRequest(messages) {
+  // 主 Agent 系统提示独有锚点（角色卡菜单里嵌着 reviewer 人设，正向判定会被误判，
+  // 两次实测教训：4 次解析错误）——改用反向判定
   const sys = String(messages[0]?.content ?? "");
-  // 精确判定：reviewer 的系统提示以此开场（主 Agent 契约里也含 "child reviewer" 字样，
-  // 首版误判导致把审查 JSON 发给了主 Agent——4 次解析错误的教训）
-  return sys.includes("你是独立的对抗审查者") || sys.includes("受限的只读 child reviewer");
+  return sys.includes("PROMPT_BUILD:");
+}
+function isReviewerRequest(messages) {
+  return !isMainAgentRequest(messages) && /child reviewer|对抗审查/.test(String(messages[0]?.content ?? ""));
 }
 
 // 状态机推进：每次请求 = 上一步工具结果已回灌，决定下一步动作
@@ -35,17 +39,38 @@ function nextAssistantCall(messages) {
   const last = lastUserText(messages);
   const all = JSON.stringify(messages);
 
+  if (isMainAgentRequest(messages)) {
+    return mainAgentScript(last, all, messages);
+  }
   if (isReviewerRequest(messages)) {
-    // 固定合法评分卡：均分 87.5 ≥ 75，risk 85 ≥ 60 —— 应通过硬门禁
-    return JSON.stringify({
+    // 故障注入变体（验证 failover 链端到端）：
+    // - parse:   第 1 次 reviewer 输出非法 JSON → 应触发同参重试
+    // - timeout: 第 1 次 reviewer 延迟应答 → 应触发宿主超时 → 跨平台备用审查员
+    const scenario = process.env.FREE_API_SMOKE_SCENARIO ?? "happy";
+    state.reviewerCalls = (state.reviewerCalls ?? 0) + 1;
+    const validReview = JSON.stringify({
       findings: [],
       confidence: "confirmed",
       evidence_refs: [],
       missing_evidence: [],
       scorecard: { correctness: 90, risk: 85, style: 90, test_coverage: 85 },
     });
+    if (scenario === "parse" && state.reviewerCalls === 1) {
+      return "这不是合法的审查 JSON（故障注入：parse 变体第 1 次调用）";
+    }
+    if (scenario === "timeout" && state.reviewerCalls === 1) {
+      const delay = Number(process.env.FREE_API_SMOKE_REVIEWER_DELAY_MS ?? 40_000);
+      const busyUntil = Date.now() + delay;
+      while (Date.now() < busyUntil) { /* 故障注入：故意压线超时 */ }
+      return validReview;
+    }
+    return validReview;
   }
 
+  return mainAgentScript(last, all, messages);
+}
+
+function mainAgentScript(last, all, messages) {
   if (last.includes("已派发 child_run_id")) {
     state.phase = "waiting";
     return JSON.stringify({ tool: "wait_jobs", description: "挂起等待审查结论" });
@@ -56,7 +81,7 @@ function nextAssistantCall(messages) {
     return JSON.stringify({
       tool: "write_file",
       description: "实现 stage-01：去空白并转大写",
-      command: { path: "src/stage-01.mjs", content: STAGE1_IMPL },
+      command: { path: `${FIXTURE_DIR}/src/stage-01.mjs`, content: STAGE1_IMPL },
       todo_update: [{ id: 0, status: "done", description: "完成阶段 01 实现并通过宿主判分" }],
     });
   }
@@ -65,7 +90,7 @@ function nextAssistantCall(messages) {
     return JSON.stringify({
       tool: "shell_exec",
       description: "运行 npm test 验证当前阶段",
-      command: { command: "npm test", shell_mode: true, timeout_ms: 30000 },
+      command: { command: "npm test", cwd: FIXTURE_DIR, shell_mode: true, timeout_ms: 30000 },
     });
   }
   if (state.phase === "testing") {
@@ -87,7 +112,7 @@ function nextAssistantCall(messages) {
     return JSON.stringify({
       tool: "write_file",
       description: "修正 stage-01 实现",
-      command: { path: "src/stage-01.mjs", content: STAGE1_IMPL },
+      command: { path: `${FIXTURE_DIR}/src/stage-01.mjs`, content: STAGE1_IMPL },
     });
   }
   if (state.phase === "finishing") {
@@ -131,6 +156,8 @@ export function startMockModel() {
         messages = [];
       }
       const content = nextAssistantCall(messages);
+      const role0 = String(messages[0]?.content ?? "").slice(0, 40);
+      console.log(`[mock] messages=${messages.length} msg0=${JSON.stringify(role0)} → ${content.slice(0, 80)}`);
 
       res.writeHead(200, {
         "content-type": "text/event-stream",
