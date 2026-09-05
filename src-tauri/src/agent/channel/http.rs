@@ -1,342 +1,7 @@
-// 微信通道层 (WeChat Channel)：
-// - 本机 axum HTTP API（默认 127.0.0.1:8790），供 Node 微信桥调用：建会话、派任务、
-//   轮询进度、应答 ask_human、抢方向盘(ReplaceGoal)与停止(Cancel)。
-// - 一组 Tauri 命令（wechat_bridge_* / wechat_channel_*）供「微信绑定」页面代理访问
-//   Node 桥（扫码登录二维码、桥状态、配置读写）。
-// - 任务执行完全复用 run_agent_main_loop_in_workspace：项目会话走项目工作区，
-//   未绑定会话兜底到 scratch_dir，主循环零改动。
-// 鉴权：所有请求必须携带 X-Channel-Token，与桥共用同一份 channel-config.json。
+//! axum HTTP 层：会话/任务/事件流/追踪/工件等 handler 与路由表。
+//! 从 channel.rs 原样抽出，行为不变。
 
-use crate::agent::main_loop::run_agent_main_loop_in_workspace;
-use crate::agent::router::ModelRoutingConfig;
-use crate::db::DbState;
-use axum::extract::{Path as AxumPath, Query as AxumQuery, State as AxumState};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::Html;
-use axum::response::sse::{Event as SseEvent, Sse};
-use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
-use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{AppHandle, Emitter, Listener, Manager};
-use tokio::sync::Mutex as AsyncMutex;
-
-const DEFAULT_API_PORT: u16 = 8790;
-const DEFAULT_BRIDGE_PORT: u16 = 8791;
-const SCRATCH_PROJECT_NAME: &str = "wechat-scratch";
-const DEFAULT_HEARTBEAT_MINUTES: u64 = 30;
-const MAX_RUN_RECORDS: usize = 200;
-const MAX_GOAL_PREVIEW_CHARS: usize = 120;
-const MAX_RESULT_CHARS: usize = 24_000;
-
-// ---------------------------------------------------------------- 配置
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelConfig {
-    /// 桥 ↔ 本机 API 的共享令牌
-    pub token: String,
-    /// 本机 axum API 端口
-    #[serde(default = "default_api_port")]
-    pub port: u16,
-    /// Node 桥 HTTP 端口
-    #[serde(default = "default_bridge_port")]
-    pub bridge_port: u16,
-    /// 未绑定任务的工作区落点
-    #[serde(default)]
-    pub scratch_dir: String,
-    /// 创建会话时登记的模型（也是默认路由基线）
-    #[serde(default)]
-    pub model_id: String,
-    /// 路由三槽：pro / flash / vision（模型 UUID，空则沿用会话模型）
-    #[serde(default)]
-    pub pro: String,
-    #[serde(default)]
-    pub flash: String,
-    #[serde(default)]
-    pub vision: String,
-    /// 心跳汇报间隔（分钟）
-    #[serde(default = "default_heartbeat_minutes")]
-    pub heartbeat_minutes: u64,
-    /// 首次联系推送的帮助文案
-    #[serde(default = "default_help_text")]
-    pub help_text: String,
-    /// 应用启动时自动拉起微信桥
-    #[serde(default = "default_true")]
-    pub auto_start_bridge: bool,
-    /// 微信发送者白名单（wxid 列表）；空表 = 自动锁定第一条消息的发送者为主人
-    #[serde(default)]
-    pub allowlist: Vec<String>,
-    /// 微信任务的瞬时 LLM 请求重试次数；None = 跟随系统默认（3，上限 100）。
-    /// API 不稳定时调高：评测路径基线为 20。
-    #[serde(default)]
-    pub llm_retries: Option<u32>,
-    /// 动作里程碑汇报步长：每 N 个动作推一条"正在干啥"；0 = 关闭
-    #[serde(default = "default_action_milestone")]
-    pub action_milestone_steps: u32,
-    /// 阶段里程碑（环境就绪/失败恢复/救援/交付）是否推送
-    #[serde(default = "default_true")]
-    pub phase_pushes: bool,
-    /// 网页控制台对外访问基础地址（内网穿透域名，如 https://xxx.example.com）；
-    /// 空 = 自动探测局域网 IPv4。用于生成扫码直达的二维码
-    #[serde(default)]
-    pub console_base_url: Option<String>,
-}
-
-fn default_action_milestone() -> u32 {
-    15
-}
-
-fn default_api_port() -> u16 {
-    DEFAULT_API_PORT
-}
-fn default_bridge_port() -> u16 {
-    DEFAULT_BRIDGE_PORT
-}
-fn default_heartbeat_minutes() -> u64 {
-    DEFAULT_HEARTBEAT_MINUTES
-}
-fn default_help_text() -> String {
-    // 完整指令面板由桥内置（COMMAND_PANEL，随桥能力同步），此处只是可自定义的开场白
-    "🤖 SandwichAgent 微信通道已就绪。".to_string()
-}
-
-fn default_true() -> bool {
-    true
-}
-
-impl Default for ChannelConfig {
-    fn default() -> Self {
-        Self {
-            token: uuid::Uuid::new_v4().to_string(),
-            port: default_api_port(),
-            bridge_port: default_bridge_port(),
-            scratch_dir: String::new(),
-            model_id: String::new(),
-            pro: String::new(),
-            flash: String::new(),
-            vision: String::new(),
-            heartbeat_minutes: default_heartbeat_minutes(),
-            help_text: default_help_text(),
-            auto_start_bridge: true,
-            allowlist: Vec::new(),
-            llm_retries: None,
-            action_milestone_steps: default_action_milestone(),
-            phase_pushes: true,
-            console_base_url: None,
-        }
-    }
-}
-
-pub fn channel_config_path() -> PathBuf {
-    // 与 Node 桥一致：CHANNEL_CONFIG_PATH 可指向独立配置文件（多实例隔离/测试）
-    if let Ok(path) = std::env::var("CHANNEL_CONFIG_PATH") {
-        if !path.trim().is_empty() {
-            return PathBuf::from(path);
-        }
-    }
-    let home = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join("free-api-chat").join("channel-config.json")
-}
-
-pub fn load_channel_config() -> Result<ChannelConfig, String> {
-    let path = channel_config_path();
-    if !path.exists() {
-        let config = ChannelConfig::default();
-        save_channel_config(&config)?;
-        return Ok(config);
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut config: ChannelConfig =
-        serde_json::from_str(&raw).map_err(|e| format!("channel-config.json 解析失败: {e}"))?;
-    if config.token.trim().is_empty() {
-        config.token = uuid::Uuid::new_v4().to_string();
-        save_channel_config(&config)?;
-    }
-    Ok(config)
-}
-
-pub fn save_channel_config(config: &ChannelConfig) -> Result<(), String> {
-    let path = channel_config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let raw = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    std::fs::write(&path, raw).map_err(|e| e.to_string())
-}
-
-fn default_scratch_dir() -> PathBuf {
-    let home = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join("free-api-chat").join("wechat-scratch")
-}
-
-fn effective_scratch_dir(config: &ChannelConfig) -> PathBuf {
-    let raw = config.scratch_dir.trim();
-    if raw.is_empty() {
-        return default_scratch_dir();
-    }
-    let expanded = if let Some(stripped) = raw.strip_prefix("~/") {
-        dirs_next::home_dir().unwrap_or_default().join(stripped)
-    } else {
-        PathBuf::from(raw)
-    };
-    expanded
-        .canonicalize()
-        .unwrap_or_else(|_| {
-            let _ = std::fs::create_dir_all(&expanded);
-            expanded
-        })
-}
-
-// ---------------------------------------------------------------- 运行账本
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RunRecord {
-    pub run_id: String,
-    pub session_id: String,
-    pub goal_preview: String,
-    /// running | waiting_human | done | failed | cancelled
-    pub status: String,
-    pub paused_reason: Option<String>,
-    pub paused_form: Option<serde_json::Value>,
-    pub last_progress: Option<String>,
-    pub event_count: u64,
-    pub started_at: String,
-    pub updated_at: String,
-    pub result: Option<String>,
-    pub error: Option<String>,
-    /// 本次 run 实际生效的 LLM 瞬时重试次数（提交时快照）
-    pub llm_retries: u32,
-    /// 动作里程碑步长（提交时快照；0 = 该任务不按动作汇报）
-    pub report_every_actions: u32,
-    /// 本任务是否推送阶段里程碑（提交时快照）
-    pub phase_push: bool,
-    /// 最近一次里程碑状态描述（仅环境就绪/失败恢复/外部救援/开始交付时更新，
-    /// 桥据此推送阶段汇报）
-    pub phase: Option<String>,
-    /// 最新状态描述（每次状态机迁移都更新，「状态」查询可见）
-    pub state_detail: Option<String>,
-    /// 任务来源: "channel" (微信/通道派发) | "desktop" (桌面端会话)
-    #[serde(default = "default_run_source")]
-    pub source: String,
-}
-
-fn default_run_source() -> String {
-    "channel".to_string()
-}
-
-pub(crate) fn runs_store() -> &'static Mutex<HashMap<String, RunRecord>> {
-    static RUNS: OnceLock<Mutex<HashMap<String, RunRecord>>> = OnceLock::new();
-    RUNS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-// ---------------------------------------------------------------- 实时事件总线
-// 网页端 SSE 推送的数据源：run 的进度/状态/终态事件在此广播，
-// handler_events 订阅后按 session 过滤下发（网页端 EventSource 无法带 header，
-// token 走 query 参数；这比 WebSocket 更贴合本机 HTTP + 内网穿透隧道场景）。
-
-type SessionEvent = (String, Value);
-
-fn event_bus() -> &'static tokio::sync::broadcast::Sender<SessionEvent> {
-    static BUS: OnceLock<tokio::sync::broadcast::Sender<SessionEvent>> = OnceLock::new();
-    BUS.get_or_init(|| tokio::sync::broadcast::channel(512).0)
-}
-
-pub(crate) fn notify_session_event(session_id: &str, kind: &str) {
-    // progress 类事件走主循环热路径（实测可达 10+/s），SSE 端合并到 ≤3/s；
-    // state/提问/终态类低频且关键，即时放行。
-    static LAST_PROGRESS: OnceLock<Mutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
-    if kind == "progress" {
-        let map = LAST_PROGRESS.get_or_init(|| Mutex::new(HashMap::new()));
-        let now = std::time::Instant::now();
-        let mut guard = map.lock().expect("notify lock poisoned");
-        if let Some(last) = guard.get(session_id) {
-            if now.duration_since(*last) < std::time::Duration::from_millis(300) {
-                return;
-            }
-        }
-        guard.insert(session_id.to_string(), now);
-    }
-    let _ = event_bus().send((
-        session_id.to_string(),
-        json!({ "type": kind, "at": now_ts() }),
-    ));
-}
-
-fn now_ts() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
-
-fn truncate_chars(raw: &str, max: usize) -> String {
-    raw.chars().take(max).collect()
-}
-
-/// 运行账本快照（供调度器轮询终态）
-pub(crate) fn runs_store_snapshot() -> Vec<RunRecord> {
-    runs_store()
-        .lock()
-        .expect("runs store poisoned")
-        .values()
-        .cloned()
-        .collect()
-}
-
-/// scratch 目录解析的 crate 级入口（调度器复用）
-pub(crate) fn effective_scratch_dir_pub(config: &ChannelConfig) -> std::path::PathBuf {
-    effective_scratch_dir(config)
-}
-
-fn upsert_run(record: RunRecord) {
-    let mut runs = runs_store().lock().expect("runs store poisoned");
-    if runs.len() >= MAX_RUN_RECORDS && !runs.contains_key(&record.run_id) {
-        // 淘汰最旧的已完成记录
-        if let Some(oldest) = runs
-            .values()
-            .filter(|r| !matches!(r.status.as_str(), "running" | "waiting_human"))
-            .min_by_key(|r| r.started_at.clone())
-            .map(|r| r.run_id.clone())
-        {
-            runs.remove(&oldest);
-        }
-    }
-    let run_key = record.run_id.clone();
-    runs.insert(run_key, record);
-}
-
-fn patch_run(run_id: &str, patch: impl FnOnce(&mut RunRecord)) {
-    let mut runs = runs_store().lock().expect("runs store poisoned");
-    if let Some(record) = runs.get_mut(run_id) {
-        record.updated_at = now_ts();
-        patch(record);
-    }
-}
-
-// ---------------------------------------------------------------- Axum 状态与鉴权
-
-pub struct ChannelState {
-    pub app: AppHandle,
-    pub config: Arc<std::sync::RwLock<ChannelConfig>>,
-}
-
-fn authorized(headers: &HeaderMap, config: &ChannelConfig) -> bool {
-    headers
-        .get("x-channel-token")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == config.token)
-        .unwrap_or(false)
-}
-
-fn unauthorized() -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({"error": "缺少或无效的 X-Channel-Token"})),
-    )
-}
-
-// ---------------------------------------------------------------- 请求/响应结构
+use super::*;
 
 #[derive(Deserialize)]
 struct SessionReq {
@@ -349,7 +14,7 @@ struct SessionReq {
 struct PartialRouting {
     pro: Option<String>,
     flash: Option<String>,
-    vision: Option<String>,
+    pub vision: Option<String>,
     /// 上下文压缩策略：deep_coding（长程）| cost_saving（省流）| ultra_fast（极速）
     context_budget_mode: Option<String>,
     /// 路由模式：rules | scored
@@ -379,21 +44,21 @@ struct GoalReq {
 
 #[derive(Deserialize)]
 pub struct ConfigPutReq {
-    port: Option<u16>,
-    bridge_port: Option<u16>,
-    scratch_dir: Option<String>,
-    model_id: Option<String>,
-    pro: Option<String>,
-    flash: Option<String>,
-    vision: Option<String>,
-    heartbeat_minutes: Option<u64>,
-    help_text: Option<String>,
-    auto_start_bridge: Option<bool>,
-    allowlist: Option<Vec<String>>,
-    llm_retries: Option<u32>,
-    action_milestone_steps: Option<u32>,
-    phase_pushes: Option<bool>,
-    console_base_url: Option<String>,
+    pub port: Option<u16>,
+    pub bridge_port: Option<u16>,
+    pub scratch_dir: Option<String>,
+    pub model_id: Option<String>,
+    pub pro: Option<String>,
+    pub flash: Option<String>,
+    pub vision: Option<String>,
+    pub heartbeat_minutes: Option<u64>,
+    pub help_text: Option<String>,
+    pub auto_start_bridge: Option<bool>,
+    pub allowlist: Option<Vec<String>>,
+    pub llm_retries: Option<u32>,
+    pub action_milestone_steps: Option<u32>,
+    pub phase_pushes: Option<bool>,
+    pub console_base_url: Option<String>,
 }
 
 // ---------------------------------------------------------------- 处理器
@@ -648,7 +313,7 @@ async fn handler_task(
 }
 
 /// 提交失败的类型：会话在途（调用方映射 409）或其他原因
-pub(crate) enum SubmitError {
+pub enum SubmitError {
     InFlight,
     Other(String),
 }
@@ -656,7 +321,7 @@ pub(crate) enum SubmitError {
 /// 统一的任务提交入口（HTTP 处理器与定时调度器共用）：
 /// 登记 RunRecord → 订阅进度事件 → 后台 spawn 主循环。
 /// 同一会话同时只允许一个在途任务（含 waiting_human）。
-pub(crate) struct SessionRunGuard {
+pub struct SessionRunGuard {
     app: AppHandle,
     session_id: String,
     run_id: String,
@@ -1387,7 +1052,7 @@ async fn handler_config_put(
     Ok(Json(config_value(&config)))
 }
 
-fn config_value(config: &ChannelConfig) -> Value {
+pub(crate) fn config_value(config: &ChannelConfig) -> Value {
     json!({
         "port": config.port,
         "bridge_port": config.bridge_port,
@@ -1436,7 +1101,7 @@ fn internal_error(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
 // ---------------------------------------------------------------- 网页控制台
 // ZCode 风格的浏览器控制台：工作区/临时任务选择 → 会话列表 → 执行流实时视图。
 // 模块化管理（HTML 骨架 / CSS 样式 / JS 逻辑独立分拆在 mobile_web/ 目录下，编译期零开销嵌入二进制）
-const CHANNEL_WEB_PAGE: &str = concat!(
+pub(crate) const CHANNEL_WEB_PAGE: &str = concat!(
     r#"<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1479,11 +1144,11 @@ struct SessionsQuery {
 }
 
 /// trace 文本字段在网页详情端点的截断上限（步骤可能带全量工具输出）
-const TRACE_FIELD_TRUNCATE: usize = 6_000;
+pub(crate) const TRACE_FIELD_TRUNCATE: usize = 6_000;
 
 /// 会话列表（含项目绑定与最近一次 trace 概要），网页端左栏/工作区卡片数据源。
 /// 纯 SQL 便于单测；在途实时状态由 apply_run_overlay 在处理器里合并。
-fn list_channel_sessions(
+pub(crate) fn list_channel_sessions(
     conn: &rusqlite::Connection,
     project_id: Option<&str>,
     scratch_only: bool,
@@ -1556,7 +1221,7 @@ fn list_channel_sessions(
 
 /// 把在途 RunRecord 的实时状态合并进会话列表：
 /// running/waiting_human 覆盖 trace 终态，并附带 run_id 供网页端应答/接管/取消。
-fn apply_run_overlay(mut sessions: Vec<Value>) -> Vec<Value> {
+pub(crate) fn apply_run_overlay(mut sessions: Vec<Value>) -> Vec<Value> {
     let runs = runs_store().lock().expect("runs store poisoned");
     for session in sessions.iter_mut() {
         let Some(session_id) = session.get("id").and_then(Value::as_str) else {
@@ -1633,7 +1298,7 @@ async fn handler_session_traces(
 }
 
 /// 详情端点对步骤长文本字段统一截断，避免长程任务的 trace 响应过大
-fn sanitize_trace_steps(steps: &mut Value) {
+pub(crate) fn sanitize_trace_steps(steps: &mut Value) {
     let Some(entries) = steps.as_array_mut() else {
         return;
     };
@@ -1724,7 +1389,7 @@ async fn handler_trace_detail(
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 
 /// 极简 percent-decode（文件名经 X-File-Name 头传输，JS 侧 encodeURIComponent）
-fn percent_decode(input: &str) -> String {
+pub(crate) fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -1811,7 +1476,7 @@ async fn handler_session_attachment_upload(
 }
 
 /// 极简 percent-encode（Content-Disposition 的 UTF-8 文件名用；保留 RFC 3986 非保留字符）
-fn percent_encode_component(s: &str) -> String {
+pub(crate) fn percent_encode_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
@@ -1927,7 +1592,7 @@ async fn handler_artifact_preview(
     }
 }
 
-fn channel_router(state: Arc<ChannelState>) -> Router {
+pub(crate) fn channel_router(state: Arc<ChannelState>) -> Router {
     Router::new()
         .route("/", get(handler_web_home))
         .route("/web", get(handler_web_home))
@@ -1982,741 +1647,10 @@ fn channel_router(state: Arc<ChannelState>) -> Router {
 // 两边必须共享同一份 Arc<RwLock<ChannelConfig>>，否则保存后运行中的服务仍在用
 // 应用启动时加载的旧值（表现为「未配置默认模型」）。
 
-static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+pub(crate) static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
 /// 桥 watchdog 抑制标志：页面「停止桥」置位（用户主动关闭，不自动复活），
 /// 手动「启动桥」复位。自动启动/看门狗均尊重该标志。
-static BRIDGE_WATCHDOG_SUPPRESSED: std::sync::atomic::AtomicBool =
+pub(crate) static BRIDGE_WATCHDOG_SUPPRESSED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// setup 时暂存 AppHandle，供无 State/AppHandle 上下文的原生工具（schedule_manager.run_now 等）取用
-pub(crate) fn stash_app_handle(app: tauri::AppHandle) {
-    let _ = APP_HANDLE.set(app);
-}
-
-pub(crate) fn app_handle() -> Option<tauri::AppHandle> {
-    APP_HANDLE.get().cloned()
-}
-
-static BRIDGE_STATUS_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<Option<(std::time::Instant, Value)>>,
-> = std::sync::OnceLock::new();
-
-/// bridge_call 成功时缓存状态快照，供 wechat_manager.status 离线查询
-fn cache_bridge_status(value: &Value) {
-    let cache = BRIDGE_STATUS_CACHE.get_or_init(|| std::sync::Mutex::new(None));
-    if let Ok(mut slot) = cache.lock() {
-        *slot = Some((std::time::Instant::now(), value.clone()));
-    }
-}
-
-/// 最近 5 分钟内的桥状态快照（过期返回 None，避免误报在线）
-pub(crate) fn cached_bridge_status() -> Option<Value> {
-    let cache = BRIDGE_STATUS_CACHE.get_or_init(|| std::sync::Mutex::new(None));
-    let slot = cache.lock().ok()?;
-    let (at, value) = slot.as_ref()?;
-    if at.elapsed() < std::time::Duration::from_secs(300) {
-        Some(value.clone())
-    } else {
-        None
-    }
-}
-
-pub(crate) fn channel_config_shared() -> &'static Arc<std::sync::RwLock<ChannelConfig>> {
-    static CONFIG: OnceLock<Arc<std::sync::RwLock<ChannelConfig>>> = OnceLock::new();
-    CONFIG.get_or_init(|| {
-        let config = match load_channel_config() {
-            Ok(config) => config,
-            Err(error) => {
-                eprintln!("[channel] 配置加载失败，使用默认配置: {error}");
-                ChannelConfig::default()
-            }
-        };
-        Arc::new(std::sync::RwLock::new(config))
-    })
-}
-
-pub(crate) fn sync_shared_config(config: &ChannelConfig) {
-    *channel_config_shared()
-        .write()
-        .expect("config poisoned") = config.clone();
-}
-
-/// 在 Tauri setup 时启动本机通道 API；失败只打日志，不阻断应用启动。
-pub fn spawn_channel_server(app: AppHandle) {
-    stash_app_handle(app.clone());
-    let config = channel_config_shared().read().expect("config poisoned").clone();
-    let port = config.port;
-    let state = Arc::new(ChannelState {
-        app,
-        config: channel_config_shared().clone(),
-    });
-    tauri::async_runtime::spawn(async move {
-        let addr = format!("127.0.0.1:{port}");
-        match tokio::net::TcpListener::bind(&addr).await {
-            Ok(listener) => {
-                println!("[channel] 微信通道 API 已监听 http://{addr}");
-                if let Err(error) = axum::serve(listener, channel_router(state)).await {
-                    eprintln!("[channel] API 服务退出: {error}");
-                }
-            }
-            Err(error) => eprintln!(
-                "[channel] 端口 127.0.0.1:{port} 绑定失败（可能已有应用实例在运行）: {error}"
-            ),
-        }
-    });
-
-    // 自动拉起微信桥（auto_start_bridge=false 可关闭；失败不影响应用）
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let auto_start = channel_config_shared()
-            .read()
-            .expect("config poisoned")
-            .auto_start_bridge;
-        if !auto_start {
-            println!("[channel] 微信桥自动启动已关闭，可在微信绑定页手动启动");
-            return;
-        }
-        match ensure_bridge_running().await {
-            Ok(value) => println!("[channel] 微信桥已自动启动: {value}"),
-            Err(error) => eprintln!("[channel] 微信桥自动启动失败（可在微信绑定页手动启动）: {error}"),
-        }
-    });
-
-    // 看门狗：低频探活，桥意外退出时自动复活（用户手动停止则保持安静）
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-            if BRIDGE_WATCHDOG_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst) {
-                continue;
-            }
-            let auto_start = channel_config_shared()
-                .read()
-                .map(|config| config.auto_start_bridge)
-                .unwrap_or(false);
-            if !auto_start {
-                continue;
-            }
-            if let Err(error) = ensure_bridge_running().await {
-                eprintln!("[channel] 看门狗拉起微信桥失败: {error}");
-            }
-        }
-    });
-}
-
-// ---------------------------------------------------------------- 页面用 Tauri 命令（桥代理 + 配置）
-
-static BRIDGE_CHILD: OnceLock<Mutex<Option<tokio::process::Child>>> = OnceLock::new();
-
-fn bridge_child_slot() -> &'static Mutex<Option<tokio::process::Child>> {
-    BRIDGE_CHILD.get_or_init(|| Mutex::new(None))
-}
-
-fn bridge_base(config: &ChannelConfig) -> String {
-    format!("http://127.0.0.1:{}", config.bridge_port)
-}
-
-fn bridge_http() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(6))
-        .build()
-        .expect("reqwest client")
-}
-
-fn resolve_bridge_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("FREE_API_WECHAT_BRIDGE_DIR") {
-        let dir = PathBuf::from(dir);
-        if dir.join("index.js").exists() {
-            return Some(dir);
-        }
-    }
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("wechat-bridge"));
-        if let Some(parent) = cwd.parent() {
-            candidates.push(parent.join("wechat-bridge"));
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let mut ancestor = exe.parent().map(|p| p.to_path_buf());
-        for _ in 0..4 {
-            if let Some(dir) = ancestor {
-                candidates.push(dir.join("wechat-bridge"));
-                ancestor = dir.parent().map(|p| p.to_path_buf());
-            }
-        }
-    }
-    candidates
-        .into_iter()
-        .find(|dir| dir.join("index.js").exists())
-}
-
-async fn bridge_call(
-    config: &ChannelConfig,
-    method: &str,
-    path: &str,
-    body: Option<Value>,
-) -> Result<Value, String> {
-    let url = format!("{}{}", bridge_base(config), path);
-    let client = bridge_http();
-    let mut request = match method {
-        "POST" => client.post(&url),
-        _ => client.get(&url),
-    };
-    if let Some(value) = &body {
-        request = request.json(value);
-    }
-    let response = request
-        .header("x-channel-token", &config.token)
-        .send()
-        .await
-        .map_err(|_| format!("微信桥未响应（{url}）。请先在页面启动桥。"))?;
-    let value: Value = response.json().await.map_err(|e| e.to_string())?;
-    if path.starts_with("/bridge/status") {
-        cache_bridge_status(&value);
-    }
-    Ok(value)
-}
-
-/// 主动推送文本到主人微信（经桥转发；桥未运行时只记日志不报错）
-pub(crate) async fn notify_wechat(config: &ChannelConfig, text: &str) {
-    let payload = json!({ "text": text });
-    if let Err(error) = bridge_call(config, "POST", "/bridge/notify", Some(payload)).await {
-        eprintln!("[channel] 微信推送失败: {error}");
-    }
-}
-
-/// 确保微信桥在运行：已就绪直接返回；否则拉起 node 子进程并等待就绪。
-/// 供页面「启动桥」按钮与应用启动时的自动拉起共用；重复调用不会起第二个进程。
-async fn ensure_bridge_running() -> Result<Value, String> {
-    let config = load_channel_config()?;
-    if let Ok(status) = bridge_call(&config, "GET", "/bridge/status", None).await {
-        return Ok(json!({ "already_running": true, "status": status }));
-    }
-    // 已持有存活的子进程（仍在启动中）时不再重复 spawn，避免双实例抢端口。
-    // guard 的检查与清理全部收在同步块内，跨 await 前必然释放（否则 future 非 Send）。
-    let child_still_starting = {
-        let mut slot = bridge_child_slot().lock().expect("child slot poisoned");
-        match slot.as_mut().map(|process| process.try_wait()) {
-            Some(Ok(None)) => true,  // 子进程存活，仍在启动中
-            Some(Ok(Some(_))) => {
-                slot.take(); // 子进程已退出，清理句柄后重新拉起
-                false
-            }
-            _ => false,
-        }
-    };
-    if child_still_starting {
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if let Ok(status) = bridge_call(&config, "GET", "/bridge/status", None).await {
-                return Ok(json!({ "already_running": false, "status": status }));
-            }
-        }
-        return Err("桥进程启动中但未在 10 秒内就绪，请查看桥日志".to_string());
-    }
-    let dir = resolve_bridge_dir().ok_or(
-        "未找到 wechat-bridge 目录（可设 FREE_API_WECHAT_BRIDGE_DIR 指向该目录）",
-    )?;
-    let index_js = dir.join("index.js");
-    // 桥日志落盘：之前 piped 后被丢弃，排障困难；现在追加写入数据目录
-    let log_path = channel_config_path()
-        .parent()
-        .map(|p| p.join("wechat-bridge.log"))
-        .ok_or_else(|| "无法定位桥日志目录".to_string())?;
-    let stdout_log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| format!("打开桥日志失败: {e}"))?;
-    let stderr_log = stdout_log
-        .try_clone()
-        .map_err(|e| format!("复用桥日志句柄失败: {e}"))?;
-    let child = tokio::process::Command::new("node")
-        .arg(&index_js)
-        .env("CHANNEL_CONFIG_PATH", channel_config_path())
-        .stdout(std::process::Stdio::from(stdout_log))
-        .stderr(std::process::Stdio::from(stderr_log))
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("启动 node 桥失败: {e}"))?;
-    *bridge_child_slot().lock().expect("child slot poisoned") = Some(child);
-
-    // 等待桥就绪（最多 10s）
-    for _ in 0..20 {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if let Ok(status) = bridge_call(&config, "GET", "/bridge/status", None).await {
-            return Ok(json!({ "already_running": false, "status": status }));
-        }
-    }
-    Err("桥进程已启动但未在 10 秒内就绪，请查看桥日志".to_string())
-}
-
-#[tauri::command]
-pub async fn wechat_bridge_start() -> Result<Value, String> {
-    // 手动启动解除看门狗抑制（用户重新启用）
-    BRIDGE_WATCHDOG_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
-    ensure_bridge_running().await
-}
-
-#[tauri::command]
-pub async fn wechat_bridge_status() -> Result<Value, String> {
-    let config = load_channel_config()?;
-    let bridge = bridge_call(&config, "GET", "/bridge/status", None)
-        .await
-        .unwrap_or_else(|e| json!({ "running": false, "error": e }));
-    Ok(json!({
-        "bridge": bridge,
-        "config": config_value(&config),
-    }))
-}
-
-#[tauri::command]
-pub async fn wechat_bridge_login_start() -> Result<Value, String> {
-    let config = load_channel_config()?;
-    bridge_call(&config, "POST", "/bridge/login/start", None).await
-}
-
-#[tauri::command]
-pub async fn wechat_bridge_qr() -> Result<Value, String> {
-    let config = load_channel_config()?;
-    bridge_call(&config, "GET", "/bridge/qr", None).await
-}
-
-#[tauri::command]
-pub async fn wechat_bridge_relogin() -> Result<Value, String> {
-    // 一键重新扫码：桥内部停监听→清凭据→发起新登录，进程不退出
-    let config = load_channel_config()?;
-    bridge_call(&config, "POST", "/bridge/relogin", None).await
-}
-
-#[tauri::command]
-pub async fn wechat_bridge_stop() -> Result<Value, String> {
-    let config = load_channel_config()?;
-    BRIDGE_WATCHDOG_SUPPRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
-    // 1. 优先立即强杀托管的 Node 子进程，避免 Node 阻塞在微信长轮询时前端无响应
-    let child = bridge_child_slot()
-        .lock()
-        .expect("child slot poisoned")
-        .take();
-    if let Some(mut process) = child {
-        let _ = process.kill().await;
-    }
-    // 2. 尝试向可能孤立的端口发送优雅停止请求（忽略失败）
-    let _ = bridge_call(&config, "POST", "/bridge/stop", None).await;
-    cache_bridge_status(&json!({ "running": false, "logged_in": false }));
-    Ok(json!({ "ok": true, "message": "微信桥已停止" }))
-}
-
-#[tauri::command]
-pub async fn wechat_channel_config_get() -> Result<Value, String> {
-    // 以磁盘为准读取（兼容手改文件），并同步进运行中服务的共享配置
-    let config = load_channel_config()?;
-    sync_shared_config(&config);
-    Ok(config_value(&config))
-}
-
-#[tauri::command]
-pub async fn wechat_channel_config_set(config: ConfigPutReq) -> Result<Value, String> {
-    let mut current = load_channel_config()?;
-    if let Some(v) = config.port {
-        current.port = v;
-    }
-    if let Some(v) = config.bridge_port {
-        current.bridge_port = v;
-    }
-    if let Some(v) = config.scratch_dir {
-        current.scratch_dir = v.trim().to_string();
-    }
-    if let Some(v) = config.model_id {
-        current.model_id = v.trim().to_string();
-    }
-    if let Some(v) = config.pro {
-        current.pro = v.trim().to_string();
-    }
-    if let Some(v) = config.flash {
-        current.flash = v.trim().to_string();
-    }
-    if let Some(v) = config.vision {
-        current.vision = v.trim().to_string();
-    }
-    if let Some(v) = config.heartbeat_minutes {
-        current.heartbeat_minutes = v.clamp(1, 24 * 60);
-    }
-    if let Some(v) = config.help_text {
-        current.help_text = v;
-    }
-    if let Some(v) = config.auto_start_bridge {
-        current.auto_start_bridge = v;
-    }
-    if let Some(v) = config.allowlist {
-        current.allowlist = v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-    }
-    if let Some(v) = config.llm_retries {
-        current.llm_retries = Some(v.clamp(1, 100));
-    }
-    if let Some(v) = config.action_milestone_steps {
-        current.action_milestone_steps = v.clamp(0, 1000);
-    }
-    if let Some(v) = config.console_base_url.clone() {
-        let trimmed = v.trim().to_string();
-        current.console_base_url = if trimmed.is_empty() { None } else { Some(trimmed) };
-    }
-    if let Some(v) = config.phase_pushes {
-        current.phase_pushes = v;
-    }
-    save_channel_config(&current)?;
-    sync_shared_config(&current);
-    Ok(config_value(&current))
-}
-
-/// 探测本机局域网 IPv4（UDP connect 不发包，仅取路由选定的本地地址）
-fn lan_ipv4_addresses() -> Vec<String> {
-    let mut out = Vec::new();
-    let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
-        return out;
-    };
-    // 对多个公网锚点做路由探测，多网卡/多网段都能覆盖
-    for anchor in ["8.8.8.8:80", "1.1.1.1:80", "114.114.114.114:80"] {
-        if socket.connect(anchor).is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                let ip = addr.ip().to_string();
-                if !ip.starts_with("127.") && !out.contains(&ip) {
-                    out.push(ip);
-                }
-            }
-            // connect 会改 socket 的对端，重置后继续
-            let _ = socket.connect("0.0.0.0:0");
-        }
-    }
-    out
-}
-
-/// 网页控制台二维码：默认二维码指向局域网地址（扫码免输 token）；
-/// 配置了 console_base_url（内网穿透域名）则优先用它。
-#[tauri::command]
-pub async fn wechat_channel_console_qr() -> Result<Value, String> {
-    let config = channel_config_shared().read().expect("config poisoned").clone();
-    let port = config.port;
-    let token = config.token.clone();
-
-    let mut urls: Vec<String> = Vec::new();
-    let custom = config
-        .console_base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(|v| v.trim_end_matches('/').to_string());
-    if let Some(base) = &custom {
-        urls.push(format!("{base}/?token={token}"));
-    }
-    for ip in lan_ipv4_addresses() {
-        let url = format!("http://{ip}:{port}/?token={token}");
-        if !urls.contains(&url) {
-            urls.push(url);
-        }
-    }
-    if urls.is_empty() {
-        urls.push(format!("http://127.0.0.1:{port}/?token={token}"));
-    }
-
-    // 主二维码 = 第一个候选（自定义穿透地址优先，否则局域网）
-    use qrcode::render::svg::Color;
-    let code = qrcode::QrCode::with_error_correction_level(urls[0].as_bytes(), qrcode::EcLevel::M)
-        .map_err(|e| format!("二维码生成失败: {e}"))?;
-    let svg = code
-        .render::<Color>()
-        .min_dimensions(220, 220)
-        .quiet_zone(true)
-        .build();
-
-    Ok(json!({
-        "svg": svg,
-        "primary": urls[0],
-        "urls": urls,
-        "source": if custom.is_some() { "custom" } else { "lan" },
-    }))
-}
-
-#[tauri::command]
-pub async fn wechat_channel_runs() -> Result<Value, String> {
-    let mut runs: Vec<RunRecord> = runs_store()
-        .lock()
-        .expect("runs store poisoned")
-        .values()
-        .filter(|r| r.source == "channel")
-        .cloned()
-        .collect();
-    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-    runs.truncate(20);
-    serde_json::to_value(runs).map_err(|e| e.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::http::HeaderValue;
-
-    fn test_config() -> ChannelConfig {
-        ChannelConfig {
-            token: "test-token".to_string(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn authorized_accepts_only_matching_token() {
-        let config = test_config();
-        let mut headers = HeaderMap::new();
-        assert!(!authorized(&headers, &config));
-        headers.insert("x-channel-token", HeaderValue::from_static("wrong"));
-        assert!(!authorized(&headers, &config));
-        headers.insert("x-channel-token", HeaderValue::from_static("test-token"));
-        assert!(authorized(&headers, &config));
-    }
-
-    #[test]
-    fn run_store_upsert_patch_and_eviction() {
-        let key = format!("test-run-{}", uuid::Uuid::new_v4());
-        let record = RunRecord {
-            run_id: key.clone(),
-            session_id: "session-x".to_string(),
-            goal_preview: "goal".to_string(),
-            status: "running".to_string(),
-            paused_reason: None,
-            paused_form: None,
-            last_progress: None,
-            event_count: 0,
-            started_at: "2026-01-01T00:00:00+00:00".to_string(),
-            updated_at: "2026-01-01T00:00:00+00:00".to_string(),
-            result: None,
-            error: None,
-            llm_retries: 3,
-            report_every_actions: 15,
-            phase_push: true,
-            phase: None,
-            state_detail: None,
-            source: "channel".to_string(),
-        };
-        upsert_run(record);
-        patch_run(&key, |r| {
-            r.event_count = 5;
-            r.last_progress = Some("进行中".to_string());
-        });
-        {
-            let runs = runs_store().lock().unwrap();
-            let stored = runs.get(&key).expect("record should exist");
-            assert_eq!(stored.event_count, 5);
-            assert_eq!(stored.last_progress.as_deref(), Some("进行中"));
-        }
-        // 淘汰路径：填满后最旧已完成记录应被挤出
-        for i in 0..(MAX_RUN_RECORDS + 10) {
-            upsert_run(RunRecord {
-                run_id: format!("evict-{i}-{}", std::process::id()),
-                session_id: "session-evict".to_string(),
-                goal_preview: "old".to_string(),
-                status: "done".to_string(),
-                paused_reason: None,
-                paused_form: None,
-                last_progress: None,
-                event_count: 0,
-                started_at: "2025-01-01T00:00:00+00:00".to_string(),
-                updated_at: "2025-01-01T00:00:00+00:00".to_string(),
-                result: None,
-                error: None,
-                llm_retries: 3,
-                report_every_actions: 15,
-                phase_push: true,
-                phase: None,
-                state_detail: None,
-                source: "channel".to_string(),
-            });
-        }
-        let runs = runs_store().lock().unwrap();
-        assert!(runs.len() <= MAX_RUN_RECORDS);
-        drop(runs);
-        runs_store().lock().unwrap().remove(&key);
-    }
-
-    #[test]
-    fn scratch_dir_defaults_under_data_dir() {
-        let default_dir = effective_scratch_dir_pub(&ChannelConfig::default());
-        assert!(default_dir.ends_with("wechat-scratch"));
-    }
-
-    #[test]
-    fn config_serde_roundtrip_keeps_optional_fields() {
-        let raw = serde_json::to_string(&ChannelConfig::default()).unwrap();
-        let parsed: ChannelConfig = serde_json::from_str(&raw).unwrap();
-        assert!(parsed.llm_retries.is_none());
-        assert!(parsed.allowlist.is_empty());
-        assert!(parsed.auto_start_bridge);
-        assert_eq!(parsed.action_milestone_steps, 15);
-        assert!(parsed.phase_pushes);
-        // 缺失字段/未知字段都应容忍
-        let parsed2: ChannelConfig =
-            serde_json::from_str(r#"{"token":"t","unknown_field":1}"#).unwrap();
-        assert_eq!(parsed2.token, "t");
-        assert_eq!(parsed2.port, DEFAULT_API_PORT);
-    }
-
-    // ------------------------------------------------ 网页控制台：会话列表与 trace
-
-    fn web_test_conn() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE chat_sessions (
-                id TEXT PRIMARY KEY, title TEXT NOT NULL, model_id TEXT NOT NULL,
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                message_count INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE agent_projects (
-                id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL);
-            CREATE TABLE agent_project_sessions (
-                project_id TEXT NOT NULL, session_id TEXT NOT NULL, created_at TEXT NOT NULL);
-            CREATE TABLE agent_run_traces (
-                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, goal TEXT, status TEXT NOT NULL,
-                steps_json TEXT NOT NULL, completion_json TEXT,
-                started_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT);",
-        )
-        .unwrap();
-        conn
-    }
-
-    fn insert_session(conn: &rusqlite::Connection, id: &str, updated_at: &str) {
-        conn.execute(
-            "INSERT INTO chat_sessions (id, title, model_id, created_at, updated_at, message_count)
-             VALUES (?1, ?1, 'model-a', '2026-08-30T00:00:00+00:00', ?2, 0)",
-            rusqlite::params![id, updated_at],
-        )
-        .unwrap();
-    }
-
-    fn insert_trace(conn: &rusqlite::Connection, id: &str, session_id: &str, status: &str, updated_at: &str) {
-        conn.execute(
-            "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at)
-             VALUES (?1, ?2, '目标', ?3, '[]', ?4, ?4)",
-            rusqlite::params![id, session_id, status, updated_at],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn session_listing_filters_and_orders() {
-        let conn = web_test_conn();
-        conn.execute(
-            "INSERT INTO agent_projects (id, name, root_path) VALUES ('p1', 'free_api', '/tmp/free_api')",
-            [],
-        )
-        .unwrap();
-        insert_session(&conn, "s-project", "2026-08-30T01:00:00+00:00");
-        conn.execute(
-            "INSERT INTO agent_project_sessions (project_id, session_id, created_at)
-             VALUES ('p1', 's-project', '2026-08-30T01:00:00+00:00')",
-            [],
-        )
-        .unwrap();
-        insert_trace(&conn, "t-project", "s-project", "succeeded", "2026-08-30T01:05:00+00:00");
-        insert_session(&conn, "s-plain-new", "2026-08-30T02:00:00+00:00");
-        insert_trace(&conn, "t-plain", "s-plain-new", "failed", "2026-08-30T02:10:00+00:00");
-        insert_session(&conn, "s-bare", "2026-08-30T00:30:00+00:00");
-
-        // 全量：按最近活动排序（s-plain-new > s-project > s-bare）
-        let all = list_channel_sessions(&conn, None, false).unwrap();
-        let ids: Vec<&str> = all
-            .iter()
-            .map(|s| s["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, vec!["s-plain-new", "s-project", "s-bare"]);
-        let plain = all.iter().find(|s| s["id"] == "s-plain-new").unwrap();
-        assert_eq!(plain["status"], "failed");
-        assert_eq!(plain["trace_id"], "t-plain");
-        assert!(plain["project_id"].is_null());
-        // 无 trace 的会话也要返回（status 为 null）
-        let bare = all.iter().find(|s| s["id"] == "s-bare").unwrap();
-        assert!(bare["status"].is_null());
-
-        // 项目过滤
-        let project = list_channel_sessions(&conn, Some("p1"), false).unwrap();
-        assert_eq!(project.len(), 1);
-        assert_eq!(project[0]["id"], "s-project");
-        assert_eq!(project[0]["project_name"], "free_api");
-
-        // 临时任务过滤：只含未绑定项目的会话
-        let scratch = list_channel_sessions(&conn, None, true).unwrap();
-        let scratch_ids: Vec<&str> = scratch.iter().map(|s| s["id"].as_str().unwrap()).collect();
-        assert_eq!(scratch_ids, vec!["s-plain-new", "s-bare"]);
-    }
-
-    #[test]
-    fn run_overlay_marks_active_sessions() {
-        let conn = web_test_conn();
-        insert_session(&conn, "ov-session", "2026-08-30T01:00:00+00:00");
-        insert_trace(&conn, "ov-trace", "ov-session", "succeeded", "2026-08-30T01:05:00+00:00");
-        let sessions = list_channel_sessions(&conn, None, false).unwrap();
-        assert_eq!(sessions[0]["status"], "succeeded");
-
-        let run_id = format!("ov-run-{}", uuid::Uuid::new_v4());
-        upsert_run(RunRecord {
-            run_id: run_id.clone(),
-            session_id: "ov-session".to_string(),
-            goal_preview: "goal".to_string(),
-            status: "waiting_human".to_string(),
-            paused_reason: Some("需要确认删除哪些文件？".to_string()),
-            paused_form: None,
-            last_progress: None,
-            event_count: 0,
-            started_at: "2026-08-30T02:00:00+00:00".to_string(),
-            updated_at: "2026-08-30T02:00:00+00:00".to_string(),
-            result: None,
-            error: None,
-            llm_retries: 3,
-            report_every_actions: 15,
-            phase_push: true,
-            phase: None,
-            state_detail: None,
-                source: "channel".to_string(),
-            });
-        let overlaid = apply_run_overlay(sessions);
-        assert_eq!(overlaid[0]["status"], "waiting_human");
-        assert_eq!(overlaid[0]["paused_reason"], "需要确认删除哪些文件？");
-        assert_eq!(overlaid[0]["run_id"], run_id);
-        let _ = runs_store().lock().unwrap().remove(&run_id);
-    }
-
-    #[test]
-    fn percent_decode_handles_ascii_utf8_and_invalid() {
-        assert_eq!(percent_decode("plain.txt"), "plain.txt");
-        assert_eq!(percent_decode("%E6%8A%A5%E5%91%8A.txt"), "报告.txt");
-        assert_eq!(percent_decode("a%2Fb%20c"), "a/b c");
-        // 非法序列原样保留
-        assert_eq!(percent_decode("abc%zz"), "abc%zz");
-        assert_eq!(percent_decode("trail%"), "trail%");
-    }
-
-    #[test]
-    fn trace_steps_sanitizer_truncates_long_fields() {
-        let long_output = "x".repeat(TRACE_FIELD_TRUNCATE + 500);
-        let mut steps = json!([
-            { "tool": "read_file", "output": long_output, "thought": "短思考" },
-            { "tool": "run_command", "output": "ok" }
-        ]);
-        sanitize_trace_steps(&mut steps);
-        let entries = steps.as_array().unwrap();
-        let sanitized = entries[0]["output"].as_str().unwrap();
-        assert!(sanitized.chars().count() <= TRACE_FIELD_TRUNCATE + 20);
-        assert!(sanitized.ends_with("……（已截断，完整内容见桌面端）"));
-        assert_eq!(entries[0]["thought"], "短思考");
-        assert_eq!(entries[1]["output"], "ok");
-    }
-}
-
-// handler_web_home 是 async 但无 IO，直接验证页面已内嵌且非空
-#[cfg(test)]
-mod web_page_tests {
-    use super::*;
-    #[test]
-    fn embedded_page_present() {
-        assert!(CHANNEL_WEB_PAGE.contains("远程控制"));
-        assert!(CHANNEL_WEB_PAGE.len() > 5_000);
-    }
-}
