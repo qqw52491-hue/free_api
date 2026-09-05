@@ -6,6 +6,9 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// 【判分通道完整性】在任何模型代码被加载之前捕获原生 fetch 引用。
+// 模型实现里覆写 global.fetch（实测发生过的 reward hacking 样本）将无法劫持判分请求。
+const nativeFetch = global.fetch;
 const { port, nonce } = JSON.parse(readFileSync(path.join(root, '.verify.json'), 'utf8'));
 const base = `http://127.0.0.1:${port}`;
 
@@ -20,9 +23,9 @@ const revive = (k, x) =>
   : x === "__-Infinity__" ? -Infinity
   : x === "__NaN__" ? NaN
   : x;
-const get = async (p) => JSON.parse(await (await fetch(base + p)).text(), revive);
+const get = async (p) => JSON.parse(await (await nativeFetch(base + p)).text(), revive);
 const post = async (p, body) => {
-  const r = await fetch(base + p, {
+  const r = await nativeFetch(base + p, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body, encodeReplacer),
