@@ -544,10 +544,23 @@
             </span>
             <span class="t-sep">·</span>
 
-            <!-- 7. 对话轮次 / 步骤 -->
-            <span class="telemetry-node" title="当前执行轮次与步骤">
+            <!-- 7. 总体回合与轮次统计 (一共多少轮/一共多少回合总体数据统计) -->
+            <span
+                class="telemetry-node turns-stat-node"
+                :title="`会话总体轮次：当前第 ${currentTurn || 1} 回合 (总计开启 ${totalTurns || 1} 轮任务)`"
+            >
+                <span class="t-label">💬 回合</span>
+                <span class="t-val text-indigo">{{ isRunning ? `第 ${currentTurn || 1}/${totalTurns || 1} 轮` : `共 ${totalTurns || 1} 回合` }}</span>
+            </span>
+            <span class="t-sep">·</span>
+
+            <!-- 8. 累计步骤与大阶段统计 -->
+            <span
+                class="telemetry-node steps-stat-node"
+                :title="`会话总体进度：累计执行 ${totalSteps || telemetry?.stepCount || 0} 个步骤，跨越 ${totalStages || 1} 个大阶段`"
+            >
                 <span class="t-label">🔄 步骤</span>
-                <span class="t-val">{{ (telemetry?.stepCount && telemetry.stepCount > 0) ? `第 ${telemetry.stepCount} 步` : '1 轮' }}</span>
+                <span class="t-val">{{ isRunning ? `本轮第 ${telemetry?.stepCount || 1} 步 · 累${totalSteps || telemetry?.stepCount || 0}` : `累计 ${totalSteps || telemetry?.stepCount || 0} 步` }}</span>
             </span>
         </div>
 
@@ -591,6 +604,10 @@ const props = defineProps<{
     allModels: AgentModelOption[];
     modelRouting: ModelRouting;
     telemetry?: AgentSessionTelemetry | null;
+    totalTurns?: number;
+    currentTurn?: number;
+    totalStages?: number;
+    totalSteps?: number;
     queuedGoals?: Array<{ id: string; text: string; createdAt: number }>;
     autoPilot?: boolean;
     planMode?: PlanExecutionMode;
@@ -2812,6 +2829,25 @@ textarea::placeholder {
 
 .text-green {
     color: #4ade80 !important;
+}
+
+.text-indigo {
+    color: #a5b4fc !important;
+}
+
+.turns-stat-node,
+.steps-stat-node {
+    cursor: default;
+    transition: all 0.15s ease;
+}
+
+.turns-stat-node:hover .t-val {
+    color: #c7d2fe !important;
+    text-shadow: 0 0 8px rgba(99, 102, 241, 0.5);
+}
+
+.steps-stat-node:hover .t-val {
+    color: #ffffff;
 }
 
 .badge-safe {

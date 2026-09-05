@@ -814,10 +814,13 @@ function getPlanDigest(steps: AgentStepItem[]): PlanDigest {
 
 const planOrderMap = computed(() => {
     const map = new Map<string, number>();
-    let count = 1;
+    let currentTurnPlanCount = 1;
     for (const entry of timelineEntries.value) {
-        if (entry.type === 'plan') {
-            map.set(entry.id, count++);
+        if (entry.type === 'user') {
+            // 🌟 核心需求：每次开始新一轮对话/回合，大阶段序号重新从 1 开始独立排序
+            currentTurnPlanCount = 1;
+        } else if (entry.type === 'plan') {
+            map.set(entry.id, currentTurnPlanCount++);
         }
     }
     return map;

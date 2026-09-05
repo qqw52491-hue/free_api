@@ -151,6 +151,10 @@
                     :all-models="allModels"
                     :model-routing="session.modelRouting.value"
                     :telemetry="session.sessionTelemetry.value"
+                    :total-turns="totalTurnsCount"
+                    :current-turn="currentTurnIndex"
+                    :total-stages="totalAllStagesCount"
+                    :total-steps="totalAllStepsCount"
                     :queued-goals="session.queuedGoals.value"
                     :auto-pilot="session.autoPilot.value"
                     :plan-mode="session.planMode.value"
@@ -312,6 +316,46 @@ const deckSummary = computed(() => {
         return turns[turns.length - 1].summary || turns[turns.length - 1].goal || "";
     }
     return "";
+});
+
+// 🌟 会话总体统计数据：一共多少轮 / 一共多少回合 / 累计阶段与步骤
+const totalTurnsCount = computed(() => {
+    const historyCount = session.historyTurns.value?.length || 0;
+    const hasCurrentActive = session.isRunning.value || session.steps.value.length > 0 || Boolean(session.currentGoal.value);
+    return Math.max(1, historyCount + (hasCurrentActive ? 1 : 0));
+});
+
+const currentTurnIndex = computed(() => {
+    const historyCount = session.historyTurns.value?.length || 0;
+    const hasCurrentActive = session.isRunning.value || session.steps.value.length > 0 || Boolean(session.currentGoal.value);
+    if (hasCurrentActive) {
+        return historyCount + 1;
+    }
+    return Math.max(1, historyCount);
+});
+
+const totalAllStepsCount = computed(() => {
+    const historySteps = (session.historyTurns.value || []).reduce((acc, t) => acc + (t.steps?.length || 0), 0);
+    return historySteps + (session.steps.value?.length || 0);
+});
+
+const totalAllStagesCount = computed(() => {
+    let stageCount = 0;
+    for (const turn of session.historyTurns.value || []) {
+        const seenPlans = new Set<string>();
+        for (const s of turn.steps || []) {
+            const key = s.planId || s.planTitle || "default-plan";
+            seenPlans.add(key);
+        }
+        stageCount += seenPlans.size;
+    }
+    const currentSeenPlans = new Set<string>();
+    for (const s of session.steps.value || []) {
+        const key = s.planId || s.planTitle || "default-plan";
+        currentSeenPlans.add(key);
+    }
+    stageCount += currentSeenPlans.size;
+    return Math.max(1, stageCount);
 });
 
 async function handleAttachFiles(filePaths: string[]) {
