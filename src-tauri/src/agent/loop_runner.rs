@@ -994,6 +994,8 @@ pub async fn run_tool_phase(
                             .unwrap_or(0);
                         checkpoint.review_objection_withdrawn = withdrawn.len() as u32;
                         checkpoint.review_objection_maintained = maintained;
+                        checkpoint.review_total_withdrawn += withdrawn.len() as u32;
+                        checkpoint.review_total_maintained += maintained;
                         checkpoint.review_objection_added = checkpoint
                             .last_review_blocking_count
                             .saturating_sub(checkpoint.review_objection_withdrawn);

@@ -841,6 +841,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 checkpoint.review_objection_added = added;
                                 checkpoint.review_objection_withdrawn = withdrawn;
                                 checkpoint.review_objection_maintained = maintained;
+                                checkpoint.review_total_withdrawn += withdrawn;
+                                checkpoint.review_total_maintained += maintained;
                                 injection.push_str(&format!(
                                     "\n📊 本轮异议动态: 新增 {} / 撤回 {} / 维持 {}（连续多轮撤回≈新增且总数不降 = 审查空转，请评估转人工）\n",
                                     added, withdrawn, maintained
@@ -1276,6 +1278,20 @@ async fn run_agent_main_loop_in_workspace_inner(
                 context.record_step_outcome(false);
             } else {
                 // Level 1: 确定性门禁与机械门禁 100% 通过后，才调用 Reviewer 终审（带 Checklist 证据链严审）！
+                // 宿主执行验证：有真实写入且配置了验证命令时，宿主亲自跑一把，
+                // 真实退出码进 reviewer 证据包（堵"模型把失败当证据"的幻觉空子）
+                let host_verification = if context.side_effects.len() > context.inherited_side_effects_count {
+                    let hv = crate::agent::host_verify::run(&workspace_dir).await;
+                    if let Some(ref text) = hv {
+                        let _ = app.emit(
+                            &format!("agent-log-{}", final_session_id),
+                            format!("🧪 宿主执行验证完成:\n{}", text),
+                        );
+                    }
+                    hv
+                } else {
+                    None
+                };
                 let review_res = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
                     &app,
                     state.inner(),
@@ -1289,8 +1305,25 @@ async fn run_agent_main_loop_in_workspace_inner(
                     &mut interrupt_rx,
                     checkpoint.last_reviewed_diff_hash.as_deref(),
                     checkpoint.last_review_result.as_ref(),
+                    &checkpoint.stage_review_final_only,
+                    host_verification.as_deref(),
                 )
                 .await;
+
+                // 审查效能报告：撤回率是误报率的上界（含合理补救型撤回）
+                {
+                    let (tw, tm) = (checkpoint.review_total_withdrawn, checkpoint.review_total_maintained);
+                    if tw + tm > 0 {
+                        let rate = (tw as f64 / (tw + tm) as f64 * 100.0).round() as u32;
+                        let _ = app.emit(
+                            &format!("agent-log-{}", final_session_id),
+                            format!(
+                                "📊 审查效能: 异议撤回 {}/{}（约 {}%）——撤回率是误报率上界；>50% 提示该 reviewer 判定过松，建议调整角色卡或更换模型。",
+                                tw, tw + tm, rate
+                            ),
+                        );
+                    }
+                }
 
                 if !review_res.is_passed() {
                 // 存在阻塞性缺陷！

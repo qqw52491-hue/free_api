@@ -206,6 +206,8 @@ pub fn apply_stage_result(
     checkpoint.stage_review_final_only = result.stage_final_only_lines();
 
     let (added, withdrawn, maintained) = result.objection_stats();
+    checkpoint.review_total_withdrawn += withdrawn;
+    checkpoint.review_total_maintained += maintained;
     let mut text = format!(
         "📊 阶段审查完成: blocking_regardless 未解决 {} 条 / final_only 记账 {} 条；异议动态: 新增 {} / 撤回 {} / 维持 {}；成本: 输入 {} / 输出 {} tokens, 耗时 {}ms。",
         checkpoint.stage_review_blockers_open,

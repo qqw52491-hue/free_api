@@ -540,6 +540,12 @@ pub struct AgentCheckpoint {
     /// 基础设施失败（超时/取消/中断）已退还的审查轮次数；封顶防无限重试
     #[serde(default)]
     pub reviewer_budget_refunds: u32,
+    /// 全任务累计：异议撤回数 / 维持数。撤回率 = 撤回/(撤回+维持)，是误报率的上界
+    /// （含"主Agent补充证据后合理撤回"的成分）；>50% 提示该 reviewer 判定过松。
+    #[serde(default)]
+    pub review_total_withdrawn: u32,
+    #[serde(default)]
+    pub review_total_maintained: u32,
     /// ---- 阶段级写入审查（双触发：todo 阶段推进 / 累计写入文件数兜底）----
     /// 已派发的阶段审查次数
     #[serde(default)]
@@ -599,6 +605,8 @@ impl AgentCheckpoint {
             review_objection_withdrawn: 0,
             review_objection_maintained: 0,
             reviewer_budget_refunds: 0,
+            review_total_withdrawn: 0,
+            review_total_maintained: 0,
             stage_review_budget_used: 0,
             stage_review_run_id: None,
             stage_review_rebuttal_run_id: None,

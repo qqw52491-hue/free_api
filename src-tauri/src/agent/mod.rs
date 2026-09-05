@@ -33,6 +33,8 @@ pub mod gate_messages;
 pub mod finish_guard;
 pub mod workspace_lock;
 pub mod stage_review;
+pub mod review_tools;
+pub mod host_verify;
 pub mod router;
 pub mod run_state;
 pub mod run_trace;

@@ -408,13 +408,26 @@ pub async fn evaluate_finish_diff(
     interrupt_rx: &mut watch::Receiver<u64>,
     last_reviewed_hash: Option<&str>,
     last_review_result: Option<&ReviewResult>,
+    stage_carry_over: &[String],
+    host_verification: Option<&str>,
 ) -> ReviewResult {
     let started_at = std::time::Instant::now();
 
     // 1. 提取审查材料（Git Diff 或 非 Git 修改文件/产物清单）
-    let Some((review_material, diff_hash)) = baseline.collect_review_material(workspace, context, run_started_at) else {
+    let Some((mut review_material, diff_hash)) = baseline.collect_review_material(workspace, context, run_started_at) else {
         return ReviewResult::skipped_empty();
     };
+    // 阶段审查 final_only 记账（carry-over）：最终交付前必须逐条解决的义务
+    if !stage_carry_over.is_empty() {
+        review_material.push_str("\n\n【上一阶段 final_only 记账（最终交付前必须逐条解决，本阶段审查未覆盖）】\n");
+        for line in stage_carry_over {
+            review_material.push_str(&format!("- {}\n", line));
+        }
+    }
+    // 宿主实测验证：真实退出码，替代模型自报的"测试通过"
+    if let Some(hv) = host_verification {
+        review_material.push_str(&format!("\n\n【宿主实测验证（宿主亲自执行，非模型自报）】\n{}\n", hv));
+    }
 
     // 2. 防敷衍拦截：若代码未变 (diff_hash 相同) 且上次审查未通过，直接复用上次拦截结果，避免浪费 Token 重跑
     if let (Some(last_hash), Some(last_res)) = (last_reviewed_hash, last_review_result) {

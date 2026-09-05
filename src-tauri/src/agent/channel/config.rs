@@ -68,6 +68,17 @@ pub struct ChannelConfig {
     /// None = 默认 6。
     #[serde(default)]
     pub stage_review_max_files: Option<u32>,
+    /// reviewer 只读取证步数预算（read_file/grep_search/git_diff/git_log/list_dir）。
+    /// 0 = 关闭（回到"瞎子"模式，只评估证据包）；None = 默认 5。
+    #[serde(default)]
+    pub reviewer_tool_steps: Option<u32>,
+    /// 宿主执行验证命令（如 "cargo test"）：收尾审查前宿主亲自执行，
+    /// 真实退出码与输出尾部注入 reviewer 证据包。空 = 关闭。
+    #[serde(default)]
+    pub verify_test_command: Option<String>,
+    /// 宿主执行验证超时（秒）。None = 默认 120，上限 600。
+    #[serde(default)]
+    pub verify_timeout_secs: Option<u64>,
     /// 网页控制台对外访问基础地址（内网穿透域名，如 https://xxx.example.com）；
     /// 空 = 自动探测局域网 IPv4。用于生成扫码直达的二维码
     #[serde(default)]
@@ -113,6 +124,9 @@ impl Default for ChannelConfig {
             reviewer_reap_grace_secs: None,
             stage_review_enabled: None,
             stage_review_max_files: None,
+            reviewer_tool_steps: None,
+            verify_test_command: None,
+            verify_timeout_secs: None,
             allowlist: Vec::new(),
             llm_retries: None,
             action_milestone_steps: default_action_milestone(),
