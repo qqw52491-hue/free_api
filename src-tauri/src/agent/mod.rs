@@ -28,6 +28,8 @@ pub mod retrieval;
 pub mod review_contract;
 pub mod reviewer_gatekeeper;
 pub mod gate_messages;
+pub mod finish_guard;
+pub mod workspace_lock;
 pub mod router;
 pub mod run_state;
 pub mod run_trace;

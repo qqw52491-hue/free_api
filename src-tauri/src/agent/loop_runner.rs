@@ -142,7 +142,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 "model_id": routing.model_id
             }),
         );
-        let open_todos_for_early_check = crate::agent::main_loop::finish_blockers(
+        let open_todos_for_early_check = crate::agent::finish_guard::finish_blockers(
             &context.todo_list,
             context.review_contract.as_ref(),
             false,
