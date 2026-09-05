@@ -167,6 +167,9 @@ pub async fn dispatch(
 
     checkpoint.stage_review_run_id = Some(child_run_id.clone());
     checkpoint.stage_review_budget_used += 1;
+    // 覆盖基线在【派发时】记录：reviewer 证据包取的是此刻的 diff，此后发生的写入
+    // 不在本轮审查范围内，必须留在基线之外让下一次触发兜住（防覆盖记账竞态）。
+    checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
     if let Some(note) = cross_family_note {
         let _ = app.emit(
             &format!("agent-log-{}", session_id),
@@ -200,8 +203,9 @@ pub fn apply_stage_result(
         return "⚠️ 阶段审查任务未正常完成（阶段审查次数已退还）。该阶段视为未审，累计写入达到阈值后将自动重审。".to_string();
     }
 
-    // 覆盖基线推进：本批写入已被本次审查覆盖
-    checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
+    // 基线已在派发时记录（见 dispatch）；此处不得用当前台账长度覆盖，
+    // 否则派发后、消费前的写入会被错误标记为已覆盖。派发后的新写入计入
+    // writes_since，由下一次触发（todo 推进/文件数阈值）安排复检。
     checkpoint.stage_review_blockers_open = result.stage_blocking_open();
     checkpoint.stage_review_final_only = result.stage_final_only_lines();
 
@@ -347,7 +351,8 @@ mod tests {
         context.record_side_effect(2, "write_file".to_string(), "b.rs".to_string());
         let mut cp = approved_checkpoint();
         cp.stage_review_run_id = Some("child-9".to_string());
-        cp.stage_review_baseline_side_effects = 0;
+        // 派发时基线已记录为 2（dispatch 时刻的台账长度）
+        cp.stage_review_baseline_side_effects = 2;
 
         let result = ChildReviewResult {
             child_run_id: "child-9".to_string(),
@@ -374,7 +379,7 @@ mod tests {
         let note = apply_stage_result(&mut cp, &result, &context);
         assert_eq!(cp.stage_review_blockers_open, 1, "仅 regardless 计入拦截");
         assert_eq!(cp.stage_review_final_only.len(), 1, "final_only 仅记账");
-        assert_eq!(cp.stage_review_baseline_side_effects, 2, "覆盖基线推进到当前台账");
+        assert_eq!(cp.stage_review_baseline_side_effects, 2, "消费不得覆盖派发时基线（防覆盖记账竞态）");
         assert!(cp.stage_review_run_id.is_none());
         assert!(note.contains("拦截"), "有 regardless 拦截时必须给出解套提示");
 

@@ -930,7 +930,7 @@ pub async fn run_tool_phase(
                         let findings_arr = value.get("findings").and_then(|f| f.as_array()).cloned().unwrap_or_default();
                         checkpoint.stage_review_run_id = None;
                         checkpoint.stage_review_rebuttal_run_id = None;
-                        checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
+                        // 基线已在派发时记录；此处不得覆盖（防覆盖记账竞态，同 stage_review::apply_stage_result）
                         checkpoint.stage_review_blockers_open = findings_arr.iter().filter(|f| is_blocked(f)).count() as u32;
                         checkpoint.stage_review_final_only = findings_arr.iter()
                             .filter(|f| {
