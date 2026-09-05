@@ -28,7 +28,9 @@ const routingConfig = {
   ...(roleModels ? { role_models: roleModels } : {}),
 };
 const enabled = process.env.FREE_API_LIVE_LONG_CONVERGENCE === "1";
-const fixtureDir = path.join(artifactDir, `agent-long-convergence-${Date.now()}-${process.pid}`);
+const planMode = process.env.FREE_API_EVALUATION_PLAN_MODE?.trim() || null;
+// 外部隔离工作区（FREE_API_LIVE_FIXTURE_DIR）：避免写入项目目录触发热重载
+const fixtureDir = process.env.FREE_API_LIVE_FIXTURE_DIR?.trim() || path.join(artifactDir, `agent-long-convergence-${Date.now()}-${process.pid}`);
 const protectedFiles = new Map();
 const describeLong = modelId && enabled ? describe : describe.skip;
 
@@ -102,7 +104,7 @@ describeLong('可选真实模型多阶段长程收敛回归', function () {
     await browser.url('tauri://localhost/agent');
   });
   it('在 24 个阶段性义务中维持状态、修复、测试并通过外部断言', async () => {
-    const started = await browser.executeAsync(async (selectedModelId, routingConfig, maxDurationMinutes, selectedWorkspace, done) => {
+    const started = await browser.executeAsync(async (selectedModelId, routingConfig, maxDurationMinutes, selectedWorkspace, evalPlanMode, done) => {
       try {
         const { invoke } = window.__TAURI__.core;
         const result = await invoke('start_background_agent_evaluation', {
@@ -111,10 +113,11 @@ describeLong('可选真实模型多阶段长程收敛回归', function () {
           scenario: 'isolated_write_fixture',
           routingPreset: null,
           workspaceOverride: selectedWorkspace,
+          ...(evalPlanMode ? { planMode: evalPlanMode } : {}),
         });
         done({ ok: true, result });
       } catch (error) { done({ ok: false, error: String(error) }); }
-    }, proModelId, routingConfig, maxDurationMinutes, fixtureDir);
+    }, proModelId, routingConfig, maxDurationMinutes, fixtureDir, planMode);
     assert.equal(started?.ok, true, started?.error ?? '后台评测启动失败');
     evaluationId = started.result?.evaluation_id;
     assert.ok(evaluationId, '缺少评测 ID');

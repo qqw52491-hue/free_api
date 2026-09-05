@@ -364,10 +364,21 @@ fn resolve_isolated_evaluation_workspace(
         .map_err(|error| format!("无法确定项目工作区：{error}"))?
         .canonicalize()
         .map_err(|error| format!("项目工作区不可用：{error}"))?;
-    let allowed_root = project_root
-        .join(EVALUATION_ARTIFACTS_DIR)
-        .canonicalize()
-        .map_err(|error| format!("评测工件目录不可用：{error}"))?;
+    // 默认锁定在 test-artifacts 下；本地实弹评测可通过
+    // FREE_API_EVALUATION_WS_ROOT 显式放行项目外的隔离根（避免写入项目目录触发热重载/污染仓库）。
+    let allowed_root = match std::env::var("FREE_API_EVALUATION_WS_ROOT")
+        .ok()
+        .map(|value| PathBuf::from(value.trim().to_string()))
+        .filter(|value| !value.as_os_str().is_empty())
+    {
+        Some(root) => root
+            .canonicalize()
+            .map_err(|error| format!("评测工作区根（env）不可用：{error}"))?,
+        None => project_root
+            .join(EVALUATION_ARTIFACTS_DIR)
+            .canonicalize()
+            .map_err(|error| format!("评测工件目录不可用：{error}"))?,
+    };
     if !workspace.starts_with(&allowed_root) {
         return Err(format!(
             "评测隔离工作区必须位于 {} 下",
@@ -393,6 +404,7 @@ pub async fn start_background_agent_evaluation(
     scenario: Option<String>,
     routing_preset: Option<String>,
     workspace_override: Option<String>,
+    plan_mode: Option<String>,
 ) -> Result<BackgroundEvaluationStart, String> {
     let (evaluation_model_routing, routing_metadata) = {
         let state = app.state::<DbState>();
@@ -463,7 +475,7 @@ pub async fn start_background_agent_evaluation(
             None,
             worker_workspace,
             None,
-            None,
+            plan_mode,
         ));
 
         let monitor_app = event_app.clone();

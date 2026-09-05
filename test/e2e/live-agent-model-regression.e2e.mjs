@@ -15,6 +15,7 @@ const roleModelsRaw = process.env.FREE_API_ROLE_MODELS?.trim() || "";
 const roleModels = roleModelsRaw ? JSON.parse(roleModelsRaw) : null;
 const evaluationTimeoutMs = Number(process.env.FREE_API_LIVE_EVALUATION_TIMEOUT_MS ?? 1_200_000);
 const writeFixtureEnabled = process.env.FREE_API_LIVE_WRITE_FIXTURE === "1";
+const planMode = process.env.FREE_API_EVALUATION_PLAN_MODE?.trim() || null;
 const fixtureDir = path.join(artifactDir, `agent-write-fixture-${Date.now()}-${process.pid}`);
 const protectedFixtureFiles = new Map();
 const describeLive = modelId ? describe : describe.skip;
@@ -65,6 +66,7 @@ describeLive("可选真实模型长流程回归", function () {
           scenario: selectedScenario,
           routingPreset: null,
           workspaceOverride: selectedWorkspace,
+          ...(planMode ? { planMode } : {}),
         });
         done({ ok: true, result });
       } catch (error) {
