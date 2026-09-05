@@ -51,6 +51,8 @@ pub struct WorkerResult {
     pub duration_ms: u64,
     pub completion_tokens: i64,
     #[serde(default)]
+    pub prompt_tokens: i64,
+    #[serde(default)]
     pub error_kind: Option<String>,
     /// worker 扩展字段：宿主与 UI 可读；ChildReviewResult 反序列化会忽略未知字段，信箱复用不受影响
     #[serde(default)]
@@ -368,6 +370,7 @@ pub async fn run_worker_loop(
 ) {
     let started_at = std::time::Instant::now();
     let mut completion_tokens: i64 = 0;
+    let mut prompt_tokens: i64 = 0;
     let mut steps_used: usize = 0;
     let mut action_log: Vec<String> = Vec::new();
     let mut findings: Vec<String> = Vec::new();
@@ -456,6 +459,10 @@ pub async fn run_worker_loop(
                 completion_tokens += result
                     .usage
                     .map(|usage| usage.completion_tokens)
+                    .unwrap_or_default();
+                prompt_tokens += result
+                    .usage
+                    .map(|usage| usage.prompt_tokens)
                     .unwrap_or_default();
                 result.full_response
             }
@@ -568,6 +575,7 @@ pub async fn run_worker_loop(
         missing_evidence,
         duration_ms: started_at.elapsed().as_millis() as u64,
         completion_tokens,
+        prompt_tokens: 0,
         error_kind,
         steps_used,
         action_log,
@@ -821,6 +829,7 @@ mod tests {
             missing_evidence: vec![],
             duration_ms: 1200,
             completion_tokens: 300,
+            prompt_tokens: 0,
             error_kind: None,
             steps_used: 4,
             action_log: vec!["read_file: src/main.rs".into()],

@@ -808,8 +808,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 String::new()
                             };
                             injection.push_str(&format!(
-                                "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]{}发现:\n- {}\n",
-                                result.child_run_id, result.confidence, routing_str, scorecard_desc, formatted_findings
+                                "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]{}成本: 输入 {} / 输出 {} tokens, 耗时 {}ms\n发现:\n- {}\n",
+                                result.child_run_id, result.confidence, routing_str, scorecard_desc, result.prompt_tokens, result.completion_tokens, result.duration_ms, formatted_findings
                             ));
                             // 异议闭环：以"未撤回的 blocking 异议"为收敛判据
                             let blocking_count = result.unwithdrawn_blocking_count();

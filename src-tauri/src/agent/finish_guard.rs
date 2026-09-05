@@ -746,6 +746,76 @@ mod finish_guard_tests {
     }
 
     #[test]
+    fn reap_stale_child_runs_converges_zombie_rows() {
+        let temp_dir = std::env::temp_dir().join(format!("gatekeeper-reap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        // 夹具 started_at 为 2026-01-01（远早于宽限上限），构成僵尸 running 行
+        insert_child_run(&db, "zombie", "test_run", "running", None, None);
+        assert!(crate::agent::child_reviewer::has_running_child_runs(&db, "test_run"));
+
+        let reaped = crate::agent::child_reviewer::reap_stale_child_runs(&db, "test_run");
+        assert_eq!(reaped, 1);
+        // 收敛后：不再 running，且携带可消费的 result_json（信箱可收取，门禁不被锁死）
+        assert!(!crate::agent::child_reviewer::has_running_child_runs(&db, "test_run"));
+        let conn = db.0.lock().unwrap();
+        let (status, result_json): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, result_json FROM agent_child_runs WHERE id = 'zombie'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(status, "timed_out");
+        assert!(result_json.unwrap().contains("timed_out"));
+
+        // 二次巡检幂等：无新僵尸时返回 0
+        assert_eq!(crate::agent::child_reviewer::reap_stale_child_runs(&db, "test_run"), 0);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn finish_child_run_guard_rejects_late_overwrite() {
+        let temp_dir = std::env::temp_dir().join(format!("gatekeeper-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        // 正常迁移：running -> succeeded
+        insert_child_run(&db, "c1", "test_run", "running", None, None);
+        crate::agent::child_reviewer::finish_child_run(
+            &db, "c1", "succeeded", 100, 0, None, Some("{}"),
+        );
+        {
+            let conn = db.0.lock().unwrap();
+            let status: String = conn
+                .query_row("SELECT status FROM agent_child_runs WHERE id='c1'", [], |r| r.get(0))
+                .unwrap();
+            drop(conn);
+            assert_eq!(status, "succeeded");
+        }
+
+        // 取消后，迟到的 succeeded 提交不得覆盖已收敛状态（watch 竞态兜底）
+        insert_child_run(&db, "c2", "test_run", "running", None, None);
+        crate::agent::child_reviewer::cancel_running_child_runs(&db, "test_run").unwrap();
+        crate::agent::child_reviewer::finish_child_run(
+            &db, "c2", "succeeded", 100, 0, None, Some("{}"),
+        );
+        let conn = db.0.lock().unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM agent_child_runs WHERE id='c2'", [], |r| r.get(0))
+            .unwrap();
+        drop(conn);
+        assert_eq!(status, "cancelled", "迟到提交不得把 cancelled 覆盖回 succeeded");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn reserve_plan_review_round_caps_rebuttal_budget() {
         let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);

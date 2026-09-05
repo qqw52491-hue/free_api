@@ -224,6 +224,9 @@ pub struct ChildReviewResult {
     pub missing_evidence: Vec<String>,
     pub duration_ms: u64,
     pub completion_tokens: i64,
+    /// 输入 token 用量（成本可观测：多 Agent 的隐性大头在 prompt 侧）
+    #[serde(default)]
+    pub prompt_tokens: i64,
     #[serde(default)]
     pub error_kind: Option<String>,
     #[serde(default)]
@@ -714,7 +717,9 @@ pub(crate) fn finish_child_run_with_history(
         return;
     };
     let _ = conn.execute(
-        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1",
+        // 仅允许 running -> 终态的单向迁移：迟到任务不得把已收敛的行（cancelled/
+        // interrupted/timed_out）覆盖回 succeeded，否则取消语义与门禁判定会被竞态击穿
+        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1 AND status='running'",
         params![
             child_run_id,
             status,
@@ -748,6 +753,7 @@ fn child_error_result_json(
         missing_evidence: vec![format!("子审查任务未能产出结论（{}）", error_kind)],
         duration_ms,
         completion_tokens,
+        prompt_tokens: 0,
         error_kind: Some(error_kind.to_string()),
         raw_result_json: None,
         kind: None,
@@ -955,6 +961,10 @@ pub async fn spawn_child_reviewer(
             .usage
             .map(|usage| usage.completion_tokens)
             .unwrap_or_default();
+        let prompt_tokens = stream_result
+            .usage
+            .map(|usage| usage.prompt_tokens)
+            .unwrap_or_default();
         let (findings, confidence, evidence_refs, missing_evidence, routing, scorecard, objection_verdicts, withdrawn_findings) = match parse_controlled_output(&stream_result.full_response, &allowed_refs) {
             Ok(output) => output,
             Err(_error) => {
@@ -986,6 +996,7 @@ pub async fn spawn_child_reviewer(
             missing_evidence,
             duration_ms,
             completion_tokens,
+            prompt_tokens,
             error_kind: None,
             raw_result_json: None,
             kind: None,
@@ -1020,6 +1031,8 @@ pub fn poll_completed_child_runs_filtered(
     parent_run_id: &str,
     targets: Option<&[String]>,
 ) -> Result<Vec<ChildReviewResult>, String> {
+    // 每次收割前先巡检僵尸 running 行（panic/悬挂兜底，见 reap_stale_child_runs）
+    reap_stale_child_runs(db, parent_run_id);
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare(
@@ -1078,6 +1091,55 @@ pub fn poll_completed_child_runs(
 }
 
 /// 检查当前 parent_run 是否仍有正在执行中的子审查任务
+/// 运行期僵尸巡检：running 行超过对应 kind 预算的宽限上限后收敛为 timed_out，
+/// 并写入可消费的 result_json。兜底「子任务 panic / spawn 任务悬挂导致行永远
+/// 停在 running → 交叉审查门禁被一具僵尸锁死到重启」的死锁路径。
+/// 宽限上限 = 各 kind 自身预算的数倍，正常慢任务不会误伤。
+pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
+    let Ok(conn) = db.0.lock() else { return 0; };
+    let rows: Vec<(String, Option<String>, String)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT id, kind, started_at FROM agent_child_runs WHERE parent_run_id = ?1 AND status = 'running'",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return 0,
+        };
+        stmt.query_map(params![parent_run_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))
+        })
+        .map(|mapped| mapped.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    };
+    let now = chrono::Utc::now();
+    let mut reaped = 0usize;
+    for (child_run_id, kind, started_at) in rows {
+        let budget_secs: i64 = match kind.as_deref() {
+            Some("writer") => 1200,
+            Some("worker") => 900,
+            _ => 600,
+        };
+        let age_secs = chrono::DateTime::parse_from_rfc3339(&started_at)
+            .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds())
+            .unwrap_or(0);
+        if age_secs <= budget_secs {
+            continue;
+        }
+        let _ = conn.execute(
+            "UPDATE agent_child_runs SET status='timed_out', finished_at=?2, error_kind='timed_out', result_json=?3 WHERE id=?1 AND status='running'",
+            params![
+                child_run_id,
+                now.to_rfc3339(),
+                child_error_result_json(&child_run_id, "timed_out", "timed_out", age_secs.max(0) as u64 * 1000, 0)
+            ],
+        );
+        reaped += 1;
+    }
+    if reaped > 0 {
+        crate::agent::job_engine::notify_job_state_changed();
+    }
+    reaped
+}
+
 pub fn has_running_child_runs(db: &DbState, parent_run_id: &str) -> bool {
     let Ok(conn) = db.0.lock() else { return false; };
     let count: i64 = conn
@@ -1183,6 +1245,7 @@ pub fn result_as_dispatch_output(result: ChildReviewResult) -> String {
         "missing_evidence": result.missing_evidence,
         "duration_ms": result.duration_ms,
         "completion_tokens": result.completion_tokens,
+        "prompt_tokens": result.prompt_tokens,
         "routing": result.routing,
         "withdrawn_findings": result.withdrawn_findings,
     })
@@ -1252,6 +1315,7 @@ mod tests {
             missing_evidence: vec![],
             duration_ms: 0,
             completion_tokens: 0,
+            prompt_tokens: 0,
             error_kind: None,
             raw_result_json: None,
             kind: None,
@@ -1546,6 +1610,7 @@ mod tests {
             missing_evidence: vec![],
             duration_ms: 150,
             completion_tokens: 45,
+            prompt_tokens: 0,
             error_kind: None,
             raw_result_json: None,
             kind: None,
@@ -1671,6 +1736,7 @@ mod tests {
             missing_evidence: vec![],
             duration_ms: 200,
             completion_tokens: 30,
+            prompt_tokens: 0,
             error_kind: None,
             raw_result_json: None,
             kind: None,
@@ -1704,6 +1770,7 @@ mod tests {
             missing_evidence: vec![],
             duration_ms: 350,
             completion_tokens: 40,
+            prompt_tokens: 0,
             error_kind: None,
             raw_result_json: None,
             kind: None,
@@ -1744,6 +1811,7 @@ mod tests {
             missing_evidence: vec![],
             duration_ms: 120,
             completion_tokens: 25,
+            prompt_tokens: 0,
             error_kind: None,
             raw_result_json: None,
             kind: None,

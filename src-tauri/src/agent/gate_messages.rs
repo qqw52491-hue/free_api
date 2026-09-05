@@ -17,7 +17,7 @@ pub fn plan_approval_resume_child_blocked() -> String {
 
 /// 交叉审查模式：尚未派发 child_reviewer
 pub fn cross_review_need_reviewer_dispatch() -> String {
-    "【🚨 交叉审查门禁拦截：尚未派发子 Agent 对抗审查】\n当前处于【🔍 双 Agent 交叉审查模式】。在首次动笔修改代码前，必须先派发 child_reviewer 开展反驳推演与架构盲区排查：\n1. 调用 child_reviewer 工具，传入拟定的方案摘录、证据文件路径（如关键核心逻辑与跨模块关联点）及反证推演要求；\n2. 随后调用 wait_jobs 等待审查结论；\n3. 充分研判审查反驳意见后方可写入。本次操作已被安全拦截，目标未受影响。".to_string()
+    "【🚨 交叉审查门禁拦截：尚未派发子 Agent 对抗审查】\n当前处于【🔍 双 Agent 交叉审查模式】。在首次动笔修改代码前，必须先派发 child_reviewer 开展反驳推演与架构盲区排查：\n1. 调用 child_reviewer 工具，传入拟定的方案摘录、证据文件路径（如关键核心逻辑与跨模块关联点）及反证推演要求；\n2. 随后调用 wait_jobs 等待审查结论；\n3. 充分研判审查反驳意见后方可写入。\n【建议】对高风险或大范围变更，可并行派发两个使用不同角色卡（不同模型家族）的 child_reviewer，先独立审查再交叉比对两份结论——异构视角的盲区互补收益最大。本次操作已被安全拦截，目标未受影响。".to_string()
 }
 
 /// 交叉审查模式：已派发但结论尚未回收（“问过 ≠ 听过”）

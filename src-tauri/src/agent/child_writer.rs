@@ -104,6 +104,8 @@ pub struct WriterResult {
     pub duration_ms: u64,
     pub completion_tokens: i64,
     #[serde(default)]
+    pub prompt_tokens: i64,
+    #[serde(default)]
     pub error_kind: Option<String>,
     #[serde(default)]
     pub steps_used: usize,
@@ -957,6 +959,7 @@ pub async fn run_writer_loop(
     let started_at = std::time::Instant::now();
     let git_available = init_git_baseline(&copy_root).await;
     let mut completion_tokens: i64 = 0;
+    let mut prompt_tokens: i64 = 0;
     let mut steps_used: usize = 0;
     let mut writes_used: usize = 0;
     let mut changes: BTreeMap<String, String> = BTreeMap::new();
@@ -1048,6 +1051,10 @@ pub async fn run_writer_loop(
                 completion_tokens += result
                     .usage
                     .map(|usage| usage.completion_tokens)
+                    .unwrap_or(0);
+                prompt_tokens += result
+                    .usage
+                    .map(|usage| usage.prompt_tokens)
                     .unwrap_or(0);
                 result.full_response
             }
@@ -1170,6 +1177,7 @@ pub async fn run_writer_loop(
         missing_evidence,
         duration_ms: started_at.elapsed().as_millis() as u64,
         completion_tokens,
+        prompt_tokens,
         error_kind,
         steps_used,
         changed_files,

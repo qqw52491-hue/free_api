@@ -115,6 +115,8 @@ pub(crate) fn check_pre_write_gatekeeper(
             })
         }
         crate::agent::checkpoint::PlanExecutionMode::CrossReview => {
+            // 门禁判定前先巡检僵尸 running 行，防止 panic/悬挂的子任务把门禁永久锁死
+            crate::agent::child_reviewer::reap_stale_child_runs(db, parent_run_id);
             // 先探测后台是否仍有审查任务在跑：用于区分「结论还在路上」与「派发压根没产生任务」。
             // 若不区分，后者会让模型只会反复调用 wait_jobs 收空信箱，而 consumed 永远置不上位，写入被无限拦截。
             let reviewer_running =

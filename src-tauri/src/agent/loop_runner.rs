@@ -1161,6 +1161,7 @@ pub async fn run_tool_phase(
                                     missing_evidence,
                                     duration_ms,
                                     completion_tokens,
+        prompt_tokens: 0,
                                     error_kind: None,
                                     raw_result_json: None,
                                     kind: Some("review".to_string()),
