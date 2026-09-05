@@ -91,10 +91,25 @@ fixture 无答案，杜绝批量解题）。
 - 故障注入变体：`FREE_API_SMOKE_SCENARIO=parse|timeout`（验证 failover 链）
 
 **当前卡点（唯一）**：mock 剧本在"写 src/stage-01.mjs → npm test"之间循环（293 次调用），
-stage-01 始终未解锁。已修：工具名加命名空间 `remote-http-mcp/` 前缀、绝对路径、
-shell 带 cwd。**已埋诊断**：mock 每次请求会打印
-`[mock][npm输出尾部] …`（wdio 日志可见）——下一轮跑完直接看这个日志就能定位
-npm test 为什么不解锁。
+stage-01 始终未解锁。已修：工具名加命名空间 `remote-http-mcp/`、绝对路径、shell 带 cwd、
+reviewer 判定改用主 Agent 独有锚点反向判定（PROMPT_BUILD）。**已埋诊断**：mock 每次请求
+打印 `[mock][npm输出尾部] …`（wdio 日志可见）。
+
+**重构方案（已定，按外部评审意见）——mock 从"手写剧本"改为 trace 回放（cassette）**：
+
+手写剧本写的是"想象中的模型行为"，而想象已连续骗了三次（关键词匹配 3 个 bug）。
+8 次实弹的完整 `agent_logs/` 就是现成剧本库（每条含完整 request/response）。
+
+实现要点（踩坑预警）：
+1. **主键 = oracle /status 的阶段 index**，调用序号只做同阶段内副键——任何重试/failover/
+   探活都会让纯序号漂移，后面的牌全乱。
+2. **路径参数化**：历史 trace 里的绝对路径是那一轮的 fixture 目录，回放时必须
+   模板替换为当前 run 的 fixture 目录，否则写错地方。
+3. **剧本外情况返回明确的"剧本外错误牌"并记录**，不硬等不猜。
+4. **对抗样本即测试用例**：3.1-pro 的 fetch 劫持 trace 回放时，断言体系必须拦截
+   （reviewer 抓到 + final_only 记账）——案例库直接变成对抗测试集。
+5. 素材位置：`agent_logs/agent-evaluation-*.json`（每条含 raw_response + usage +
+   messages 全文）；注意部分被强杀会话的日志尾部可能截断。
 
 **冒烟断言**（spec 内）：child_reviewer 派发 ✓、write_file ✓、shell_exec ✓、
 无 ask_human、oracle /status index ≥ 1、failover 变体下
@@ -102,17 +117,21 @@ checkpoint 的 plan_reviewer_failover_count ≥ 1。
 
 ## 五、下一步（按优先级，接续点就在这）
 
-1. **修完冒烟**：跑一次 `FREE_API_SMOKE=1 …`（命令见下），看 `[mock][npm输出尾部]`，
-   修 mock 剧本的最后 bug。**强烈建议把 mock 从"关键词状态机"改为"按调用序号的确定性剧本"**
-   （第 N 次调用返回第 N 张牌）——关键词匹配已连续出 3 个 bug。
-   冒烟评测上限 8 分钟不够的话提到 15（spec 内 maxDurationMinutes + deadline 同步改）。
+0. **通道健康检查单（deepseek 复跑的前置门禁，全勾才烧那 59 分钟）**：
+   npm test 取题通道 ✓（catch-22 已修）｜证据包 ≤6000 ✓（超限静默失败已修）｜
+   mkdir 回归 ✓（已修）｜fetch 判分通道加固 ✓（已修）｜
+   **主审通道可靠性 >95%（未达——Antigravity 代理 reviewer 实测约 50% 失败，
+   主审必须先迁 Shantung 或由 failover 链兜底并显式标注）**。
+   抖动的尺子做不了"首次有效测量"。
+1. **mock 改 trace 回放**（方案见第四节，含序号漂移防护与路径参数化）。
 2. **冒烟两个 failover 变体跑绿**（parse / timeout）——failover 链目前只有单测，
    没走过全链路。
-3. **deepseek-v4-pro 复跑** = 第一次有效能力测量（通道修完后）。收敛 → 体系故事闭环；
+3. **deepseek-v4-pro 复跑** = 第一次有效能力测量。收敛 → 体系故事闭环；
    不收敛 → 第一个干净的能力信号。同时把 reviewer 行为指标
-   （异议新增/撤回/维持、裁决理由长度）与收敛结果一起出——flash 审 pro 有橡皮图章风险，
-   只有真实交锋能证伪。
-4. **之后**：双 reviewer 真实现（撤回的第二双眼睛）；mock 冒烟挂进常规流程；
+   （异议新增/撤回/维持、裁决理由长度）作为正式产出——flash 审 pro 有橡皮图章风险，
+   只有真实交锋能证伪；若"收敛但 reviewer 全程零 blocking"，结论是
+   "flash 审不了 pro"，P0 转向 failover 实战与 reviewer 选型矩阵，而不是宣布胜利。
+4. **之后**：双 reviewer 真实现（撤回的第二双眼睛）；冒烟挂进常规流程；
    `run_tool_phase` 函数级拆分（纯工程债，最后做）。
 
 ## 六、环境与命令速查
@@ -178,6 +197,18 @@ model_id 当前钉 3.8-flash）。**评测后要恢复/检查这张卡**。
 4. **用户工作区红线**：评测写入必须在 `/Users/wx/Documents/free_api-eval-ws/` 下，
    绝不写 free_api 项目目录（热部署风险）。
 5. **真模型实弹很贵**：改门禁/通道/判分逻辑后，先跑冒烟（假模型）再上真模型。
+
+## 七·五、平台方向决策（待用户拍板）
+
+本项目已从"Agent 平台"演进为"**Agent 行为评测平台**"的雏形：三层门禁、服务端判分、
+reward hacking 案例库、确定性冒烟、异构 reviewer、trace 素材库。两个终局方向投入不同：
+
+- **对内**（给本平台当质量护城河）：重点投冒烟回归、门禁校准、信任阶梯。
+- **对外**（可复用的 Agent 评测基准/harness）：重点投 **trace 回放库（必修——
+  没有回放库，别人无法复现任何结论）**、案例库、可复现报告格式。
+
+现有证据（docs/evals/ 建档、服务端判分、案例档案）已偏向对外方向，
+**待用户确认后再投入对应建设**。
 
 ## 八、已知未修（如实记录）
 
