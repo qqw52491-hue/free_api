@@ -122,6 +122,7 @@
                             @submit-human="session.answerHuman($event)"
                             @open-preview="handleOpenPreview"
                             @open-team-deck="handleOpenTeamDeck"
+                            @open-diff="handleOpenDiff"
                         />
                     </div>
                 </div>
@@ -136,6 +137,7 @@
                     :session-title="deckSessionTitle"
                     :summary="deckSummary"
                     @select-step="handleStepSelect($event.id)"
+                    @open-diff="handleOpenDiff"
                 />
                 <AgentComposer
                     :draft="composerDraft"
@@ -242,7 +244,7 @@ import AgentInspector from "./agent/AgentInspector.vue";
 import AgentRecordPreview from "./agent/AgentRecordPreview.vue";
 import AgentSettingsDrawer from "./agent/AgentSettingsDrawer.vue";
 import AgentTeamDeck from "./agent/AgentTeamDeck.vue";
-import type { AgentModelOption } from "./agent/types";
+import type { AgentModelOption, FileDiffPayload } from "./agent/types";
 import { useAgentSession } from "../composables/useAgentSession";
 
 const props = defineProps<{
@@ -401,6 +403,15 @@ function handleOpenTeamDeck(stepId?: string) {
     if (stepId) {
         session.selectedStepId.value = stepId;
     }
+}
+function handleOpenDiff(payload: FileDiffPayload) {
+    if (payload.stepId) {
+        clearNarrativeSelection();
+        selectedSubpart.value = "tool";
+        session.selectStep(payload.stepId);
+    }
+    inspectorCollapsed.value = false;
+    inspectorRef.value?.openDiff(payload);
 }
 function submitComposer(payload?: { text: string; attachments?: any[]; mode?: "interrupt" | "queue" }) {
     const text = (payload?.text ?? composerDraft.value).trim();

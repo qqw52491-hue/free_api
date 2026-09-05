@@ -15,7 +15,9 @@
                     class="img-thumbnail"
                     @error="handleImgError"
                 />
-                <div v-else class="thumb-placeholder">🖼️</div>
+                <div v-else class="thumb-placeholder">
+                    <FileIcon kind="image" :size="20" />
+                </div>
                 <div class="thumb-overlay">
                     <svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
                 </div>
@@ -29,7 +31,7 @@
         <!-- 2. 文档/表格/代码/压缩包卡片 -->
         <template v-else>
             <div class="file-icon-badge" :class="badgeClass">
-                <span>{{ badgeIcon }}</span>
+                <FileIcon :name="attachment.file_name" :size="20" />
             </div>
             <div class="attachment-meta">
                 <span class="file-name" :title="attachment.file_name">{{ attachment.file_name }}</span>
@@ -54,6 +56,7 @@
 import { computed, ref } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type { ParsedAttachment } from "./types";
+import FileIcon from "./FileIcon.vue";
 
 const props = withDefaults(
     defineProps<{
@@ -117,16 +120,6 @@ async function handleImgError() {
         }
     }
 }
-
-const badgeIcon = computed(() => {
-    const ext = props.attachment.file_name.split(".").pop()?.toLowerCase() || "";
-    if (["xlsx", "xls", "csv", "ods"].includes(ext)) return "📊";
-    if (["pdf"].includes(ext)) return "📄";
-    if (["docx", "doc"].includes(ext)) return "📝";
-    if (["zip", "tar", "gz", "rar", "7z"].includes(ext)) return "📦";
-    if (["rs", "ts", "js", "py", "go", "java", "c", "cpp", "html", "css", "json", "sql", "sh"].includes(ext)) return "💻";
-    return "📎";
-});
 
 const badgeClass = computed(() => {
     const ext = props.attachment.file_name.split(".").pop()?.toLowerCase() || "";

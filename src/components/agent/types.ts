@@ -338,3 +338,88 @@ export interface AgentTeamState {
     workers: AgentWorkerItem[];
 }
 
+export type StageState = "pending" | "running" | "collapsed" | "manual_expanded";
+export type StageFailureState = "none" | "recovered" | "retrying" | "unrecovered";
+
+export interface ReviewerVerdict {
+    verdict: "pass" | "fail";
+    score?: number;
+}
+
+export interface FileChangeChip {
+    path: string;
+    fileName: string;
+    displayLabel: string;
+    actionKind: "modify" | "create" | "delete";
+    additions: number;
+    deletions: number;
+    oldContent?: string;
+    newContent?: string;
+    rawDiff?: string;
+    startLine?: number;
+    stepId?: string;
+    isIntercepted?: boolean;
+}
+
+export interface FileDiffPayload {
+    filePath: string;
+    fileName?: string;
+    oldContent?: string;
+    newContent?: string;
+    rawDiff?: string;
+    startLine?: number;
+    additions?: number;
+    deletions?: number;
+    stepId?: string;
+    isIntercepted?: boolean;
+}
+export interface RunningPreviewLine1 {
+    icon: string;
+    text: string;
+    duration?: string;
+}
+
+export interface RunningPreviewLine2 {
+    icon: string;
+    text: string;
+}
+
+export interface RunningPreviewLine3 {
+    icon: string;
+    text: string;
+    actionKind: "write" | "read" | "search" | "command" | "review" | "think" | "other";
+}
+
+export interface StageRunningPreview {
+    line1?: RunningPreviewLine1;
+    line2?: RunningPreviewLine2;
+    line3: RunningPreviewLine3;
+}
+
+export type StageActionCapsuleKind =
+    | "code"
+    | "excel"
+    | "doc"
+    | "reviewer"
+    | "wait"
+    | "command"
+    | "search"
+    | "read"
+    | "other";
+
+export interface StageActionCapsule {
+    id: string;
+    kind: StageActionCapsuleKind;
+    icon: string;
+    label: string;
+    detail?: string;
+    additions?: number;
+    deletions?: number;
+    isIntercepted?: boolean;
+    stepId?: string;
+    chip?: FileChangeChip;
+    score?: number;
+    verdict?: "pass" | "fail";
+    tooltip?: string;
+}
+

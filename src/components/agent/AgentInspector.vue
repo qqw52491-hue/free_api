@@ -116,6 +116,18 @@
 
             <nav class="detail-tabs">
                 <button type="button" :class="{ active: activeTab === 'detail' }" @click="activeTab = 'detail'">调用详情</button>
+                <button
+                    v-if="effectiveDiffPayload"
+                    type="button"
+                    :class="{ active: activeTab === 'diff' }"
+                    @click="activeTab = 'diff'"
+                >
+                    代码 Diff
+                    <span v-if="diffStatsBadge" class="tab-badge-diff">
+                        <span v-if="diffStatsBadge.additions > 0" class="stat-add">+{{ diffStatsBadge.additions }}</span>
+                        <span v-if="diffStatsBadge.deletions > 0" class="stat-del">−{{ diffStatsBadge.deletions }}</span>
+                    </span>
+                </button>
                 <button type="button" :class="{ active: activeTab === 'team' }" @click="activeTab = 'team'">
                     团队协作
                     <i v-if="teamState?.workers?.length">({{ teamState.workers.length }})</i>
@@ -197,6 +209,20 @@
                             <b :class="`status-${selectedStep.status}`">{{ statusLabel(selectedStep.status) }}</b>
                             <em v-if="selectedStep.durationMs">{{ formatMilliseconds(selectedStep.durationMs) }}</em>
                             <em>{{ formatClock(selectedStep.timestamp) }}</em>
+                        </div>
+
+                        <!-- 代码改动快速横幅（点击直达代码 Diff 视口） -->
+                        <div v-if="stepDiffPayload" class="step-diff-banner" @click="activeTab = 'diff'">
+                            <div class="banner-left">
+                                <span class="banner-icon">✏️</span>
+                                <span class="banner-file">{{ stepDiffPayload.fileName }}</span>
+                                <span v-if="(stepDiffPayload.additions || 0) > 0" class="banner-add">+{{ stepDiffPayload.additions }}</span>
+                                <span v-if="(stepDiffPayload.deletions || 0) > 0" class="banner-del">−{{ stepDiffPayload.deletions }}</span>
+                            </div>
+                            <div class="banner-action">
+                                <span>查看代码 Diff</span>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                            </div>
                         </div>
                     </div>
 
@@ -482,18 +508,41 @@
                     <footer><small v-if="resource.rowCount !== undefined">{{ formatNumber(Number(resource.rowCount)) }} 条记录</small><button type="button" @click="$emit('preview-resource', resource)">查看记录</button></footer>
                 </article>
             </section>
+
+            <!-- 5. 代码 Diff Tab -->
+            <section v-else-if="activeTab === 'diff'" class="diff-tab-pane">
+                <FileDiffViewer
+                    v-if="effectiveDiffPayload"
+                    :file-path="effectiveDiffPayload.filePath"
+                    :old-content="effectiveDiffPayload.oldContent"
+                    :new-content="effectiveDiffPayload.newContent"
+                    :raw-diff="effectiveDiffPayload.rawDiff"
+                    :start-line="effectiveDiffPayload.startLine"
+                    :additions="effectiveDiffPayload.additions"
+                    :deletions="effectiveDiffPayload.deletions"
+                    :intercepted="effectiveDiffPayload.isIntercepted"
+                    @close="activeTab = 'detail'"
+                />
+                <div v-else class="detail-placeholder">
+                    <div class="placeholder-glyph">📄</div>
+                    <h3>暂无代码变动</h3>
+                    <p>选择一个代码修改或创建文件的步骤，即可在此查看代码改动细节。</p>
+                </div>
+            </section>
         </template>
     </aside>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTeamState, AgentTokenUsage, AgentToolStatus, LlmParseErrorItem } from "./types";
+import type { AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTeamState, AgentTokenUsage, AgentToolStatus, FileDiffPayload, LlmParseErrorItem } from "./types";
 import type { AgentArtifactInput } from "../../types/artifact";
 import { formatClock, formatMilliseconds, formatNumber, formatPayload } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 import AgentTeamDeck from "./AgentTeamDeck.vue";
+import FileDiffViewer from "./FileDiffViewer.vue";
+import { extractDiffFromStep } from "./diffUtils";
 import { extractSubagentsFromStep } from "./workerUtils";
 
 const props = withDefaults(
@@ -548,15 +597,50 @@ const currentStepSubagents = computed(() => {
     return extractSubagentsFromStep(props.selectedStep, props.steps);
 });
 
-const activeTab = ref<"preview" | "detail" | "team" | "context" | "resources">("detail");
+const activeTab = ref<"preview" | "detail" | "diff" | "team" | "context" | "resources">("detail");
+const customDiffPayload = ref<FileDiffPayload | null>(null);
 
-function switchTab(tab: "preview" | "detail" | "team" | "context" | "resources") {
+const stepDiffPayload = computed<FileDiffPayload | null>(() => {
+    return extractDiffFromStep(props.selectedStep);
+});
+
+const effectiveDiffPayload = computed<FileDiffPayload | null>(() => {
+    return customDiffPayload.value || stepDiffPayload.value;
+});
+
+const diffStatsBadge = computed(() => {
+    const diff = effectiveDiffPayload.value;
+    if (!diff) return null;
+    return {
+        additions: diff.additions || 0,
+        deletions: diff.deletions || 0,
+    };
+});
+
+watch(
+    () => props.selectedStep?.id,
+    (newId, oldId) => {
+        if (newId !== oldId) {
+            if (customDiffPayload.value && customDiffPayload.value.stepId !== newId) {
+                customDiffPayload.value = null;
+            }
+        }
+    }
+);
+
+function switchTab(tab: "preview" | "detail" | "diff" | "team" | "context" | "resources") {
     activeTab.value = tab;
+}
+
+function openDiff(payload: FileDiffPayload) {
+    customDiffPayload.value = payload;
+    activeTab.value = "diff";
 }
 
 defineExpose({
     setTab: switchTab,
     switchTab,
+    openDiff,
     activeTab,
 });
 const copiedKey = ref<string | null>(null);
@@ -1140,9 +1224,113 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 .inspector-metrics strong { color: #f4f4f5; font-size: 11.5px; font-weight: 600; }
 .inspector-metrics .danger { color: #ff4757; }
 
-.detail-tabs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 3px; padding: 6px 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); background: #141416; }
-.detail-tabs button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 6px 4px; border: 0; border-radius: 5px; color: #a1a1aa; cursor: pointer; background: transparent; font: inherit; font-size: 11px; font-weight: 550; transition: all 0.15s; }
-.detail-tabs button:hover { color: #ffffff; }
+.detail-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: #141416;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.detail-tabs::-webkit-scrollbar {
+    display: none;
+}
+.detail-tabs button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: 5px;
+    color: #a1a1aa;
+    cursor: pointer;
+    background: transparent;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 550;
+    white-space: nowrap;
+    transition: all 0.15s;
+    flex-shrink: 0;
+}
+.detail-tabs button:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.04);
+}
+.detail-tabs button.active {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.09);
+}
+
+.tab-badge-diff {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-weight: 600;
+    margin-left: 2px;
+}
+.tab-badge-diff .stat-add {
+    color: #4ade80;
+}
+.tab-badge-diff .stat-del {
+    color: #f87171;
+}
+
+.diff-tab-pane {
+    flex: 1 1 0%;
+    height: 0;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.step-diff-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 10px;
+    padding: 7px 12px;
+    border-radius: 6px;
+    background: rgba(56, 189, 248, 0.08);
+    border: 1px solid rgba(56, 189, 248, 0.22);
+    cursor: pointer;
+    transition: all 0.18s ease;
+}
+.step-diff-banner:hover {
+    background: rgba(56, 189, 248, 0.14);
+    border-color: rgba(56, 189, 248, 0.38);
+}
+.step-diff-banner .banner-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.step-diff-banner .banner-file {
+    color: #e0f2fe;
+    font-weight: 600;
+}
+.step-diff-banner .banner-add {
+    color: #4ade80;
+    font-weight: 600;
+}
+.step-diff-banner .banner-del {
+    color: #f87171;
+    font-weight: 600;
+}
+.step-diff-banner .banner-action {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    color: #38bdf8;
+    font-size: 11px;
+    font-weight: 550;
+}
 .inspector-scroll {
     min-height: 0;
     flex: 1 1 0%;

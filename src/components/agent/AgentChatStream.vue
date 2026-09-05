@@ -89,32 +89,229 @@
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                     </template>
                 </article>
-                <article v-else-if="entry.type === 'plan'" class="plan-node" :class="[`status-${entry.status}`, { 'is-active-plan': entry.status === 'running' || entry.isThinking, 'is-collapsed': !isPlanExpanded(entry) }]">
-                    <div class="plan-row" role="button" tabindex="0" title="点击展开/折叠执行过程" @click="togglePlan(entry.id, entry.status, entry.isThinking)" @keydown.enter="togglePlan(entry.id, entry.status, entry.isThinking)">
+                <article
+                    v-else-if="entry.type === 'plan'"
+                    class="plan-node"
+                    :class="[
+                        `status-${entry.status}`,
+                        {
+                            'is-active-plan': isPlanRunning(entry),
+                            'is-collapsed': !isPlanExpanded(entry),
+                            'is-pure-read': getPlanDigest(entry.steps).capsules.length === 0
+                        }
+                    ]"
+                >
+                    <!-- 🌟 正在执行卡片顶栏 (Image 2: ○ 阶段 N · 标题  进行中 · 第 4/6 步) -->
+                    <div
+                        v-if="isPlanRunning(entry)"
+                        class="plan-row is-running-row"
+                        role="button"
+                        tabindex="0"
+                        title="点击展开/折叠步骤详情"
+                        @click="togglePlan(entry)"
+                        @keydown.enter="togglePlan(entry)"
+                    >
+                        <span class="stage-spinner-ring manus-spinner mini"></span>
+                        <span class="plan-title-bold">{{ getStageDisplayTitle(entry) }}</span>
+                        <span class="plan-running-badge">{{ getRunningProgressText(entry) }}</span>
+                        <div class="plan-row-spacer"></div>
+                        <time class="plan-running-time">{{ formatClock(entry.timestamp) }}</time>
+                    </div>
+
+                    <!-- 🌟 已结束阶段卡片顶栏 (Image 1: ▶ ✓ 阶段 N · 标题  1 失败已重试  4 步 · 读 3 · 728 tok · 14s) -->
+                    <div
+                        v-else
+                        class="plan-row"
+                        role="button"
+                        tabindex="0"
+                        title="点击展开/折叠执行过程"
+                        @click="togglePlan(entry)"
+                        @keydown.enter="togglePlan(entry)"
+                    >
                         <span class="plan-expand-arrow" :class="{ open: isPlanExpanded(entry) }">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                                <polyline points="9 18 15 12 9 6"></polyline>
+                            <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor">
+                                <polygon points="6 4 20 12 6 20"></polygon>
                             </svg>
                         </span>
-                        <span class="plan-mark"><i></i></span>
-                        <span class="plan-title">
-                            <small>计划</small>{{ entry.title }}
-                            <span v-if="!isPlanExpanded(entry)" class="plan-collapsed-hint">（{{ entry.steps.length }} 个步骤 · 点击展开）</span>
+                        <span v-if="entry.status === 'succeeded'" class="stage-status-check">✓</span>
+                        <span v-else-if="entry.status === 'failed'" class="stage-status-fail">✕</span>
+
+                        <span class="plan-title-bold">{{ getStageDisplayTitle(entry) }}</span>
+
+                        <span v-if="getPlanDigest(entry.steps).failureState === 'recovered'" class="plan-fail-tag tag-recovered" title="阶段内曾有步骤失败，已自动重试恢复成功">
+                            {{ getPlanDigest(entry.steps).failedCount }} 失败已重试
                         </span>
-                        <span class="row-status">{{ statusLabel(entry.status) }}</span>
-                        <time>{{ formatClock(entry.timestamp) }}</time>
+                        <span v-else-if="getPlanDigest(entry.steps).failureState === 'retrying'" class="plan-fail-tag tag-retrying" title="此阶段有步骤失败，正在重试中">
+                            失败重试中
+                        </span>
+                        <span v-else-if="getPlanDigest(entry.steps).failureState === 'unrecovered'" class="plan-fail-tag tag-unrecovered" title="此阶段包含未恢复的失败">
+                            失败未恢复
+                        </span>
+
+                        <div class="plan-row-spacer"></div>
+
+                        <span class="plan-meta-right">
+                            {{ getPlanMetaSummary(entry, getPlanDigest(entry.steps)) }}
+                        </span>
                     </div>
+
+                    <!-- 🌟 正在执行卡片主体：收拢态直接呈现最后 3 条数据，当前动作带字体的流光动画 (Image 2) -->
+                    <div
+                        v-if="!isPlanExpanded(entry) && isPlanRunning(entry)"
+                        class="plan-running-preview"
+                        @click="togglePlan(entry)"
+                    >
+                        <!-- 第 1 条数据：最近读取/搜索操作与耗时 -->
+                        <div v-if="getPlanRunningPreview(entry).line1" class="running-preview-line line-recent-action">
+                            <span class="preview-icon">{{ getPlanRunningPreview(entry).line1?.icon }}</span>
+                            <span class="preview-text">{{ getPlanRunningPreview(entry).line1?.text }}</span>
+                            <span v-if="getPlanRunningPreview(entry).line1?.duration" class="preview-duration">
+                                {{ getPlanRunningPreview(entry).line1?.duration }}
+                            </span>
+                        </div>
+
+                        <!-- 第 2 条数据：规划或思考摘要 -->
+                        <div v-if="getPlanRunningPreview(entry).line2" class="running-preview-line line-thought">
+                            <span class="preview-icon">{{ getPlanRunningPreview(entry).line2?.icon }}</span>
+                            <span class="preview-text">{{ getPlanRunningPreview(entry).line2?.text }}</span>
+                        </div>
+
+                        <!-- 第 3 条数据：当前正在执行的动作 (带字体的流光动画 text-shimmer-flow) -->
+                        <div class="running-preview-line line-active-action">
+                            <span class="preview-spinner manus-spinner mini"></span>
+                            <span class="preview-tool-icon">{{ getPlanRunningPreview(entry).line3.icon }}</span>
+                            <span class="preview-text text-shimmer-flow">{{ getPlanRunningPreview(entry).line3.text }}</span>
+                        </div>
+                    </div>
+
+                    <!-- 🌟 已结束阶段卡片第二行：收拢态动作胶囊 (按时间顺序排列) -->
+                    <div
+                        v-else-if="!isPlanExpanded(entry)"
+                        class="plan-chips-row"
+                        @click="togglePlan(entry)"
+                    >
+                        <!-- 纯读取阶段胶囊 (没有任何产物、改动、审查等动作) -->
+                        <span v-if="getPlanDigest(entry.steps).capsules.length === 0" class="pill-pure-read">
+                            <span class="pill-icon"><FileIcon kind="read" :size="12" /></span> 本阶段无文件改动 (纯读取)
+                        </span>
+
+                        <!-- 🌟 按时间顺序排列的所有动作胶囊 -->
+                        <template v-else>
+                            <template v-for="cap in getPlanDigest(entry.steps).capsules.slice(0, 4)" :key="cap.id">
+                                <!-- 1. 代码文件修改/创建 (可点击查看 Diff) -->
+                                <span
+                                    v-if="cap.kind === 'code'"
+                                    class="plan-file-chip clickable"
+                                    :title="cap.isIntercepted
+                                        ? `${cap.label} · 写入已被门禁拦截（点击查看尝试内容）`
+                                        : `${cap.label} · 点击查看代码改动`"
+                                    @click.stop="cap.chip && handleChipClick(entry, cap.chip)"
+                                >
+                                    <span class="chip-icon"><FileIcon :name="cap.chip?.fileName || cap.label" kind="code" :size="13" /></span>
+                                    <span class="chip-name">{{ cap.label }}</span>
+                                    <span v-if="cap.additions && cap.additions > 0" class="chip-add">+{{ cap.additions }}</span>
+                                    <span v-if="cap.deletions && cap.deletions > 0" class="chip-del">−{{ cap.deletions }}</span>
+                                    <span v-if="cap.isIntercepted" class="chip-blocked">已拦截</span>
+                                </span>
+
+                                <!-- 2. Excel 数据表格产物胶囊 -->
+                                <span
+                                    v-else-if="cap.kind === 'excel'"
+                                    class="plan-capsule-excel"
+                                    :class="{ clickable: !!cap.chip }"
+                                    :title="`Excel 数据表格: ${cap.label}`"
+                                    @click.stop="cap.chip && handleChipClick(entry, cap.chip)"
+                                >
+                                    <span class="chip-icon"><FileIcon :name="cap.label" kind="excel" :size="13" /></span>
+                                    <span class="chip-name">{{ cap.label }}</span>
+                                    <span v-if="cap.additions && cap.additions > 0" class="chip-add">+{{ cap.additions }}</span>
+                                </span>
+
+                                <!-- 3. 文档 / 研报胶囊 -->
+                                <span
+                                    v-else-if="cap.kind === 'doc'"
+                                    class="plan-capsule-doc"
+                                    :class="{ clickable: !!cap.chip }"
+                                    :title="`文档/研报: ${cap.label}`"
+                                    @click.stop="cap.chip && handleChipClick(entry, cap.chip)"
+                                >
+                                    <span class="chip-icon"><FileIcon :name="cap.label" kind="doc" :size="13" /></span>
+                                    <span class="chip-name">{{ cap.label }}</span>
+                                    <span v-if="cap.additions && cap.additions > 0" class="chip-add">+{{ cap.additions }}</span>
+                                </span>
+
+                                <!-- 4. Reviewer 审查结论胶囊 -->
+                                <span
+                                    v-else-if="cap.kind === 'reviewer'"
+                                    class="plan-chip-reviewer"
+                                    :class="{ 'is-fail': cap.verdict === 'fail' }"
+                                >
+                                    <FileIcon kind="reviewer" :size="12" style="margin-right: 4px; vertical-align: -2px;" />
+                                    {{ cap.label }}
+                                </span>
+
+                                <!-- 5. 方案审查挂起 / 异步等待胶囊 -->
+                                <span
+                                    v-else-if="cap.kind === 'wait'"
+                                    class="plan-capsule-wait"
+                                >
+                                    <span class="chip-icon"><FileIcon kind="wait" :size="12" /></span>
+                                    <span class="chip-name">{{ cap.label }}</span>
+                                </span>
+
+                                <!-- 6. 读取文件上下文胶囊 (带专属文件图标与微读标) -->
+                                <span
+                                    v-else-if="cap.kind === 'read'"
+                                    class="plan-capsule-read"
+                                    :title="cap.tooltip || `读取上下文: ${cap.label}`"
+                                >
+                                    <span class="chip-icon"><FileIcon :name="cap.label" :size="12" /></span>
+                                    <span class="chip-read-tag">读</span>
+                                    <span class="chip-name">{{ cap.label }}</span>
+                                </span>
+
+                                <!-- 7. 终端命令 / 其他工具动作胶囊 -->
+                                <span
+                                    v-else
+                                    class="plan-capsule-general"
+                                >
+                                    <span class="chip-icon"><FileIcon :name="cap.label" :kind="cap.kind" :size="13" /></span>
+                                    <span class="chip-name">{{ cap.label }}</span>
+                                </span>
+                            </template>
+
+                            <!-- 超出 4 个动作的折叠计数徽标 -->
+                            <span
+                                v-if="getPlanDigest(entry.steps).capsules.length > 4"
+                                class="plan-chip-overflow"
+                                :title="`共 ${getPlanDigest(entry.steps).capsules.length} 个动作`"
+                            >
+                                +{{ getPlanDigest(entry.steps).capsules.length - 4 }} 个动作
+                            </span>
+                        </template>
+                    </div>
+
                     <div class="plan-children-wrapper" :class="{ expanded: isPlanExpanded(entry) }">
                         <div v-if="isPlanExpanded(entry)" class="plan-children-inner">
                             <div class="plan-children">
-                                <article v-for="step in entry.steps" :key="step.id" class="goal-node" :class="[`status-${step.status}`, { 'is-subagent': isSubAgentTool(step.tool), 'is-waitjobs': isWaitJobsTool(step.tool) }]">
+                                <!-- 正在执行阶段折叠早期步骤，聚焦最新 2-3 步 -->
+                                <div v-if="hasCollapsedEarlySteps(entry)" class="early-steps-fold-bar" @click.stop="showAllRunningSteps[entry.id] = true">
+                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                                    <span>已完成前 {{ getEarlyStepsCount(entry) }} 步 (点击展开全部)</span>
+                                </div>
+                                <div v-else-if="isPlanRunning(entry) && entry.steps.length > 3 && showAllRunningSteps[entry.id]" class="early-steps-fold-bar is-expanded" @click.stop="showAllRunningSteps[entry.id] = false">
+                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"></polyline></svg>
+                                    <span>收起早期步骤 (仅保持最近 3 步)</span>
+                                </div>
+
+                                <article v-for="step in getVisiblePlanSteps(entry)" :key="step.id" class="goal-node" :class="[`status-${step.status}`, { 'is-subagent': isSubAgentTool(step.tool), 'is-waitjobs': isWaitJobsTool(step.tool) }]">
+                                    <!-- 主步骤第1行：干脆利落，只展示步骤意图与执行耗时状态，点击查看整体过程 -->
                                     <button class="goal-row" :class="{ selected: step.id === selectedStepId, 'subagent-row': isSubAgentTool(step.tool), 'waitjobs-row': isWaitJobsTool(step.tool) }" type="button" @click="$emit('select-step', step.id)">
                                         <span class="tree-mark"><i></i></span>
-                                        <span class="step-tool-emoji">{{ getToolIcon(step.tool, step.action).emoji }}</span>
                                         <span class="goal-label">
                                             <span v-if="isSubAgentTool(step.tool)" class="subagent-tag-badge">子智能体 · 审查</span>
                                             <span v-else-if="isWaitJobsTool(step.tool)" class="waitjobs-tag-badge">异步挂起</span>
-                                            {{ step.description || '执行步骤' }}
+                                            {{ step.description && step.description !== '执行操作' ? step.description : formatStepOperation(step).actionText }}
                                             <small v-if="step.modelTier" class="model-tier">{{ step.modelTier }}</small>
                                         </span>
                                         <span v-if="getStepMetricsPill(step)" class="step-metrics-badge" :title="getStepMetricsTooltip(step)">
@@ -124,6 +321,7 @@
                                         <time>{{ formatClock(step.timestamp) }}</time>
                                     </button>
                                     <div class="node-children">
+                                        <!-- 1. 思考行 (如果有思考过程) -->
                                         <button v-if="step.thought" class="child-row thought-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'thought' }" type="button" @click="$emit('select-step-thought', step.id)">
                                             <span class="child-mark"></span>
                                             <span class="tool-tag thought-tag">🧠 思考</span>
@@ -131,13 +329,42 @@
                                             <em v-if="step.metrics?.thinkingDurationMs">{{ (step.metrics.thinkingDurationMs / 1000).toFixed(1) }}s</em>
                                             <em v-else>已分析</em>
                                         </button>
-                                        <button class="child-row tool-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'tool', 'tool-child-subagent': isSubAgentTool(step.tool), 'tool-child-wait': isWaitJobsTool(step.tool) }" type="button" @click="$emit('select-step', step.id)">
+
+                                        <!-- 2. 第2行：简约大气的文件操作卡片 (修改/读取 📄 文件名 #L1-80 +20 -1；有内容看 Diff，无内容看步骤详情) -->
+                                        <div
+                                            v-if="hasFileOperation(step)"
+                                            class="child-action-card is-diff-clickable"
+                                            :title="actionCardTitle(step)"
+                                            @click.stop="handleActionCardClick(step)"
+                                        >
+                                            <span class="child-mark"></span>
+                                            <span class="card-action-label">{{ formatStepOperation(step).badgeLabel }}</span>
+                                            <span class="card-file-icon">
+                                                <FileIcon :name="formatStepOperation(step).fileName || getStepMiniChip(step)?.fileName" :size="13" />
+                                            </span>
+                                            <span class="card-file-name">{{ formatStepOperation(step).fileName || getStepMiniChip(step)?.fileName }}</span>
+                                            <span v-if="formatStepOperation(step).lineRange" class="card-line-range">{{ formatStepOperation(step).lineRange }}</span>
+                                            <span v-if="(getStepMiniChip(step)?.additions || 0) > 0" class="card-diff-add">+{{ getStepMiniChip(step)?.additions }}</span>
+                                            <span v-if="(getStepMiniChip(step)?.deletions || 0) > 0" class="card-diff-del">−{{ getStepMiniChip(step)?.deletions }}</span>
+                                            <span v-if="getStepMiniChip(step)?.isIntercepted" class="card-blocked">已拦截</span>
+                                            <span v-if="chipHasDiffContent(getStepMiniChip(step))" class="card-view-diff-hint">查看 Diff →</span>
+                                            <em v-if="step.metrics?.toolDurationMs" class="card-duration">{{ (step.metrics.toolDurationMs / 1000).toFixed(1) }}s</em>
+                                        </div>
+
+                                        <!-- 3. 普通非文件工具调用 (如单纯的后台挂起、协同调度等) -->
+                                        <button
+                                            v-else
+                                            class="child-row tool-child"
+                                            :class="{ selected: step.id === selectedStepId && selectedSubpart === 'tool', 'tool-child-subagent': isSubAgentTool(step.tool), 'tool-child-wait': isWaitJobsTool(step.tool) }"
+                                            type="button"
+                                            @click="$emit('select-step', step.id)"
+                                        >
                                             <span class="child-mark"></span>
                                             <span class="tool-tag" :style="{ color: getToolIcon(step.tool, step.action).color, background: `${getToolIcon(step.tool, step.action).color}18` }">
-                                                {{ getToolIcon(step.tool, step.action).emoji }} {{ isSubAgentTool(step.tool) ? '子审查代理' : (isWaitJobsTool(step.tool) ? '零 Token 挂起' : (step.tool || '工具')) }}
+                                                {{ formatStepOperation(step).badgeLabel }}
                                             </span>
                                             <span :class="{ 'subagent-action-text': isSubAgentTool(step.tool), 'waitjobs-action-text': isWaitJobsTool(step.tool) }">
-                                                {{ isSubAgentTool(step.tool) ? (step.status === 'running' ? '⚡ 正在后台独立执行调查审查，点击右侧抽屉可查看证据包与发现…' : (step.action || step.explanation || '已生成审查结论 · 点击查看详情')) : (isWaitJobsTool(step.tool) ? (step.status === 'running' ? '⏳ 当前协程已反应式挂起等待后台通知，0 Token 0 CPU 消耗…' : '✅ 后台任务已完成，已唤醒并回收全部结论') : shortText(step.action || step.explanation || '执行操作', 110)) }}
+                                                {{ isSubAgentTool(step.tool) ? (step.status === 'running' ? '⚡ 正在后台独立执行调查审查，点击右侧抽屉可查看证据包与发现…' : (step.action || step.explanation || '已生成审查结论 · 点击查看详情')) : (isWaitJobsTool(step.tool) ? (step.status === 'running' ? '⏳ 当前协程已反应式挂起等待后台通知，0 Token 0 CPU 消耗…' : '✅ 后台任务已完成，已唤醒并回收全部结论') : shortText(formatStepOperation(step).actionText || step.action || step.explanation || '执行操作', 110)) }}
                                             </span>
                                             <em v-if="step.metrics?.toolDurationMs">{{ (step.metrics.toolDurationMs / 1000).toFixed(1) }}s · {{ step.source }}</em>
                                             <em v-else>{{ step.source }}</em>
@@ -157,6 +384,14 @@
                                         </div>
                                     </div>
                                 </article>
+
+                                <!-- 🌟 正在执行流光呼吸指示器 (Running Shimmer Streamer) -->
+                                <div v-if="entry.status === 'running' || entry.isThinking" class="plan-running-shimmer">
+                                    <span class="shimmer-icon">⚡</span>
+                                    <span class="shimmer-text">{{ getRunningStateText(entry) }}</span>
+                                    <div class="shimmer-beam"></div>
+                                </div>
+
                                 <article v-if="entry.isThinking && (thought || isRunning)" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
                                     <header><span class="thought-pulse-dot" :class="{ 'is-running': isRunning }"><i></i></span><b>思考</b><em>{{ isRunning ? '思考中…' : '思考过程' }}</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
                                     <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
@@ -217,12 +452,14 @@ import { computed, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AttachmentCard from "./AttachmentCard.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
-import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, ParsedAttachment } from "./types";
+import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule } from "./types";
+import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules } from "./diffUtils";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
 import { formatClock, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
 import ArtifactList from "../artifacts/ArtifactList.vue";
+import FileIcon from "./FileIcon.vue";
 
 function parseUserMessageAttachments(content: string): { cleanText: string; attachments: ParsedAttachment[] } {
     if (!content) return { cleanText: "", attachments: [] };
@@ -352,6 +589,7 @@ const emit = defineEmits<{
     "submit-human": [answer: string];
     "open-preview": [code: string];
     "open-team-deck": [stepId?: string];
+    "open-diff": [payload: FileDiffPayload];
 }>();
 
 function extractSubagentTask(step: any): string {
@@ -401,28 +639,239 @@ const activeThoughtStartedAt = ref<number | null>(null);
 const followLiveTail = ref(true);
 const planExpandedState = reactive<Record<string, boolean>>({});
 
+// ── 🛠️ 步骤文件变更与计划摘要解析 ──
+/**
+ * Chip 点击：有真实 Diff 内容 → 打开 Diff；否则回落到对应步骤详情
+ * （如仅声明目标文件的写入派发步骤），避免打开空 Diff。
+ */
+function handleChipClick(entry: PlanEntry, chip: FileChangeChip | undefined) {
+    if (!chip) return;
+    if (chipHasDiffContent(chip)) {
+        emit('open-diff', diffPayloadFromChip(chip));
+        return;
+    }
+    const step = entry.steps.find(s => s.id === chip.stepId);
+    if (step) emit('select-step', step.id);
+}
+
+/** 子步骤操作卡片点击：有内容看 Diff，无内容看步骤详情 */
+function handleActionCardClick(step: AgentStepItem) {
+    const chip = getStepMiniChip(step);
+    if (chipHasDiffContent(chip)) {
+        emit('open-diff', diffPayloadFromChip(chip!));
+        return;
+    }
+    emit('select-step', step.id);
+}
+
+/** 操作卡片悬浮提示 */
+function actionCardTitle(step: AgentStepItem): string {
+    const chip = getStepMiniChip(step);
+    if (chip?.isIntercepted) return `${chip.path} · 写入已被门禁拦截（点击查看尝试内容）`;
+    if (chipHasDiffContent(chip)) return '点击在右侧查看代码改动 Diff';
+    return formatStepOperation(step).filePath || '点击查看步骤详情';
+}
+
+function getStepMiniChip(step: AgentStepItem): FileChangeChip | undefined {
+    const parsed = parseStepFileChanges(step);
+    return parsed.chips?.[0] || parsed.chip;
+}
+
+function hasFileOperation(step: AgentStepItem): boolean {
+    const parsed = parseStepFileChanges(step);
+    const op = formatStepOperation(step);
+    return !!(parsed.chips.length > 0 || parsed.chip || parsed.readFiles.length > 0 || op.fileName || (op.hasDiff && op.filePath));
+}
+
+const showAllRunningSteps = ref<Record<string, boolean>>({});
+
+function getVisiblePlanSteps(entry: PlanEntry): AgentStepItem[] {
+    if (entry.status !== 'running' && !entry.isThinking) {
+        return entry.steps;
+    }
+    if (showAllRunningSteps.value[entry.id] || entry.steps.length <= 3) {
+        return entry.steps;
+    }
+    return entry.steps.slice(-3);
+}
+
+function hasCollapsedEarlySteps(entry: PlanEntry): boolean {
+    return (entry.status === 'running' || !!entry.isThinking) && entry.steps.length > 3 && !showAllRunningSteps.value[entry.id];
+}
+
+function getEarlyStepsCount(entry: PlanEntry): number {
+    return Math.max(0, entry.steps.length - 3);
+}
+
+function getRunningStateText(entry: PlanEntry): string {
+    if (entry.isThinking) {
+        return props.thought ? `🧠 ${props.thought.slice(0, 80)}...` : '🧠 正在深入思考与规划下一步行动…';
+    }
+    const runningStep = entry.steps.find(s => s.status === 'running') || entry.steps[entry.steps.length - 1];
+    if (runningStep) {
+        const op = formatStepOperation(runningStep);
+        const desc = (runningStep.description && runningStep.description !== '执行操作')
+            ? runningStep.description
+            : op.actionText;
+        return `⚡ 正在执行: ${desc}`;
+    }
+    return '⚡ 正在协同执行任务中…';
+}
+
+interface PlanDigest {
+    readCount: number;
+    searchCount: number;
+    editCount: number;
+    failedCount: number;
+    failureState: StageFailureState;
+    fileChips: FileChangeChip[];
+    capsules: StageActionCapsule[];
+    readFiles: string[];
+    hasMoreChipsCount: number;
+    reviewerVerdict?: ReviewerVerdict;
+    completionTokens: number;
+    durationMs: number;
+}
+
+function getPlanDigest(steps: AgentStepItem[]): PlanDigest {
+    let readCount = 0;
+    let searchCount = 0;
+    let failedCount = 0;
+    let completionTokens = 0;
+    let durationMs = 0;
+    const rawChips: FileChangeChip[] = [];
+    const readFiles: string[] = [];
+    let reviewerVerdict: ReviewerVerdict | undefined;
+
+    for (const s of steps) {
+        if (s.status === 'failed') failedCount++;
+        const parsed = parseStepFileChanges(s);
+        readCount += parsed.readCount;
+        searchCount += parsed.searchCount;
+        if (parsed.chips && parsed.chips.length > 0) {
+            rawChips.push(...parsed.chips);
+        } else if (parsed.chip) {
+            rawChips.push(parsed.chip);
+        }
+        if (parsed.readFiles && parsed.readFiles.length > 0) {
+            for (const rf of parsed.readFiles) {
+                if (!readFiles.includes(rf)) readFiles.push(rf);
+            }
+        }
+        if (parsed.reviewerVerdict && !reviewerVerdict) {
+            reviewerVerdict = parsed.reviewerVerdict;
+        }
+        if (s.metrics?.completionTokens) completionTokens += s.metrics.completionTokens;
+        if (s.durationMs) durationMs += s.durationMs;
+    }
+
+    // 失败状态分级：失败后有成功步骤才算"已重试"；运行中未重试为 retrying；终态未恢复才告警
+    let failureState: StageFailureState = 'none';
+    if (failedCount > 0) {
+        let lastFailedIdx = -1;
+        let lastOkIdx = -1;
+        steps.forEach((s, i) => {
+            if (s.status === 'failed') lastFailedIdx = i;
+            if (s.status === 'succeeded') lastOkIdx = i;
+        });
+        if (lastOkIdx > lastFailedIdx) {
+            failureState = 'recovered';
+        } else if (!props.isRunning) {
+            failureState = 'unrecovered';
+        } else {
+            failureState = 'retrying';
+        }
+    }
+
+    const aggregated = aggregateFileChips(rawChips);
+    const hasMoreChipsCount = Math.max(0, aggregated.length - 4);
+    const editCount = aggregated.length;
+    const capsules = extractStageChronologicalCapsules(steps);
+
+    if (durationMs === 0 && steps.length > 1) {
+        const first = steps[0]?.timestamp;
+        const last = steps[steps.length - 1]?.timestamp;
+        if (first && last && last > first) {
+            durationMs = last - first;
+        }
+    }
+
+    return {
+        readCount,
+        searchCount,
+        editCount,
+        failedCount,
+        failureState,
+        fileChips: aggregated,
+        capsules,
+        readFiles,
+        hasMoreChipsCount,
+        reviewerVerdict,
+        completionTokens,
+        durationMs,
+    };
+}
+
+const planOrderMap = computed(() => {
+    const map = new Map<string, number>();
+    let count = 1;
+    for (const entry of timelineEntries.value) {
+        if (entry.type === 'plan') {
+            map.set(entry.id, count++);
+        }
+    }
+    return map;
+});
+
+function getStageDisplayTitle(entry: PlanEntry): string {
+    const idx = planOrderMap.value.get(entry.id) || 1;
+    return formatStageTitle(entry.title, idx);
+}
+
+function getRunningProgressText(entry: PlanEntry): string {
+    const total = entry.steps.length;
+    const completed = entry.steps.filter((s) => s.status === 'succeeded').length;
+    const current = Math.min(total, completed + 1);
+    if (total > 0) {
+        return `进行中 · 第 ${current}/${Math.max(total, current)} 步`;
+    }
+    return '进行中 · 准备中';
+}
+
+function getPlanRunningPreview(entry: PlanEntry): StageRunningPreview {
+    return getRunningStagePreview(entry.steps, entry.isThinking || props.isThinking, props.thought);
+}
+
+function getPlanMetaSummary(entry: PlanEntry, digest: PlanDigest): string {
+    const parts: string[] = [];
+    parts.push(`${entry.steps.length} 步`);
+    if (digest.searchCount > 0) parts.push(`搜 ${digest.searchCount}`);
+    if (digest.readCount > 0) parts.push(`读 ${digest.readCount}`);
+    if (digest.editCount > 0) parts.push(`${digest.editCount} 编辑`);
+    if (digest.completionTokens > 0) parts.push(`${formatTokenCount(digest.completionTokens)} tok`);
+    if (digest.durationMs > 0) parts.push(formatStageDuration(digest.durationMs));
+    return parts.join(' · ');
+}
+
 function isPlanExpanded(plan: PlanEntry): boolean {
     if (planExpandedState[plan.id] !== undefined) {
         return planExpandedState[plan.id];
     }
-    // 1. 如果是当前实时回合的计划（live-）且任务正在执行中，始终保持展开
-    if (props.isRunning && plan.id.startsWith("live-")) {
+    // 1. 如果包含未恢复的失败，保持展开以便排查
+    const digest = getPlanDigest(plan.steps);
+    if (digest.failureState === 'unrecovered') {
         return true;
     }
-    // 2. 当前正在运行中或思考中的计划默认保持展开
-    if (plan.status === "running" || plan.isThinking) {
-        return true;
-    }
-    // 3. 历史轮次的计划（history-）默认保持折叠，防止几十轮计划全部展开撑爆 DOM
+    // 2. 默认保持收拢态：
+    //    - 运行中默认呈现 3 行流光紧凑摘要卡片 (图片 2)
+    //    - 已完成默认呈现 2 行富摘要胶囊卡片 (图片 1)
+    //    - 仅在用户手动点击后才展开完整步骤树
     return false;
 }
 
-function togglePlan(planId: string, currentStatus: AgentToolStatus, isThinking: boolean) {
-    const defaultState = (props.isRunning && planId.startsWith("live-")) || currentStatus === "running" || isThinking;
-    const currentState = planExpandedState[planId] !== undefined
-        ? planExpandedState[planId]
-        : defaultState;
-    planExpandedState[planId] = !currentState;
+function togglePlan(plan: PlanEntry) {
+    const isCurrentlyExpanded = isPlanExpanded(plan);
+    planExpandedState[plan.id] = !isCurrentlyExpanded;
 }
 
 const BOTTOM_THRESHOLD_PX = 56;
@@ -495,6 +944,15 @@ watch(
     }
 );
 
+function isPlanRunning(entry: PlanEntry): boolean {
+    if (!props.isRunning) return false;
+    // 如果已经开始输出最终总结报告，则所有阶段工具调用均已收敛完成，立即停止流光与 spinner
+    if (props.finalSummary && props.finalSummary.trim().length > 0) return false;
+    if (props.completionMessage && props.completionMessage.trim().length > 0) return false;
+    if (!entry) return false;
+    return entry.status === "running" || Boolean(entry.isThinking);
+}
+
 function planStatus(steps: AgentStepItem[]): AgentToolStatus {
     // 聚合每个逻辑 stepId 的最新尝试状态（若重试已成功，阶段整体应为成功）
     const latestStatusByStep = new Map<number, AgentToolStatus>();
@@ -502,11 +960,13 @@ function planStatus(steps: AgentStepItem[]): AgentToolStatus {
         latestStatusByStep.set(step.stepId, step.status);
     }
     const statuses = Array.from(latestStatusByStep.values());
-    if (statuses.some((s) => s === "running" || s === "pending" || s === "challenged")) return "running";
+    const isTaskActive = props.isRunning && !props.finalSummary?.trim() && !props.completionMessage?.trim();
+    if (isTaskActive && statuses.some((s) => s === "running" || s === "pending" || s === "challenged")) return "running";
     if (statuses.some((s) => s === "failed")) return "failed";
     return "succeeded";
 }
 function planEntries(steps: AgentStepItem[], prefix: string, active = false): PlanEntry[] {
+    const isTaskActive = props.isRunning && !props.finalSummary?.trim() && !props.completionMessage?.trim();
     const groups = new Map<string, PlanEntry>();
     for (const step of steps.filter((item) => Boolean(item.description || item.tool || item.action))) {
         const key = step.planId || "plan-default";
@@ -516,8 +976,14 @@ function planEntries(steps: AgentStepItem[], prefix: string, active = false): Pl
         if (step.planTitle) existing.title = step.planTitle;
         groups.set(key, existing);
     }
-    const plans = [...groups.values()].map((plan) => ({ ...plan, status: planStatus(plan.steps) }));
-    if (active && (props.isThinking || Boolean(props.thought))) {
+    const plans = [...groups.values()].map((plan) => {
+        const calculatedStatus = planStatus(plan.steps);
+        return {
+            ...plan,
+            status: (!isTaskActive && calculatedStatus === "running") ? "succeeded" : calculatedStatus,
+        };
+    });
+    if (active && isTaskActive && (props.isThinking || Boolean(props.thought))) {
         const last = plans[plans.length - 1];
         if (last && (props.isThinking || !last.steps.some(s => s.thought))) {
             last.isThinking = true;
@@ -645,7 +1111,7 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 8px;
 }
 
 /* 浮动跟随最新 */
@@ -1121,31 +1587,108 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     text-decoration: underline;
 }
 
-/* ── ⚡ 紧凑分层执行树 ── */
+/* ── 🌟 阶段卡片容器 (对齐设计图：独立圆角卡片，精致紧凑间距) ── */
 .plan-node {
     width: 100%;
-    margin: 3px 0;
-    background: transparent !important;
-    border: none !important;
+    margin: 2px 0;
+    padding: 7px 11px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.02);
+    box-sizing: border-box;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* 计划大标题行 (极紧凑，高 26px，支持点击展开/折叠) */
+.plan-node + .plan-node {
+    margin-top: -4px; /* 紧贴相邻阶段，实际纵向间隙紧凑精致 (约 5~6px) */
+}
+
+.plan-node:hover {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.plan-node.is-active-plan {
+    border-color: rgba(59, 130, 246, 0.28);
+    background: rgba(59, 130, 246, 0.035);
+    box-shadow: 0 2px 12px rgba(59, 130, 246, 0.06);
+}
+
+/* 计划阶段标题行 */
 .plan-row {
     display: flex;
     align-items: center;
-    gap: 6px;
-    min-height: 26px;
-    padding: 3px 6px;
-    border-radius: 6px;
-    color: #f4f4f5;
-    font-size: 12px;
+    gap: 7px;
+    min-height: 24px;
+    color: #f1f5f9;
+    font-size: 12.5px;
     cursor: pointer;
     user-select: none;
-    transition: background 0.15s ease, transform 0.1s ease;
+    transition: background 0.15s ease;
 }
 
-.plan-row:hover {
-    background: rgba(255, 255, 255, 0.05);
+.plan-row.is-running-row {
+    gap: 8px;
+}
+
+.plan-row-spacer {
+    flex: 1;
+    min-width: 8px;
+}
+
+.plan-title-bold {
+    font-weight: 600;
+    font-size: 13px;
+    color: #f1f5f9;
+    letter-spacing: -0.01em;
+}
+
+.stage-status-check {
+    color: #10b981;
+    font-weight: 700;
+    font-size: 13px;
+    line-height: 1;
+}
+
+.stage-status-fail {
+    color: #ef4444;
+    font-weight: 700;
+    font-size: 13px;
+    line-height: 1;
+}
+
+.stage-spinner-ring {
+    width: 13px;
+    height: 13px;
+    border: 2px solid rgba(59, 130, 246, 0.3);
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+.plan-running-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: rgba(59, 130, 246, 0.12);
+    color: #38bdf8;
+    border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
+.plan-running-time {
+    font-size: 11.5px;
+    color: #64748b;
+}
+
+.plan-meta-right {
+    font-size: 12px;
+    color: #94a3b8;
+    font-variant-numeric: tabular-nums;
+    font-weight: 400;
 }
 
 .plan-expand-arrow {
@@ -1214,7 +1757,10 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
 }
 
 .plan-title {
-    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 550;
     color: #e4e4e7;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1223,12 +1769,58 @@ watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunni
     min-width: 0;
 }
 
-.plan-title small {
-    margin-right: 6px;
-    color: var(--accent-light);
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
+.plan-title-text {
+    font-size: 12px;
+    font-weight: 550;
+    color: #f4f4f5;
+    letter-spacing: -0.01em;
+}
+
+.plan-meta-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #71717a;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-weight: 450;
+}
+
+.plan-meta-inline .meta-sep {
+    color: #52525b;
+    font-size: 10px;
+}
+
+.plan-fail-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 5px;
+    border-radius: 4px;
+    font-size: 10px;
+    margin-left: 2px;
+    line-height: 1.5;
+    white-space: nowrap;
+}
+
+.plan-fail-tag.tag-recovered {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    font-weight: 550;
+}
+
+.plan-fail-tag.tag-retrying {
+    background: rgba(245, 158, 11, 0.12);
+    color: #fcd34d;
+    border: 1px solid rgba(245, 158, 11, 0.22);
+    font-weight: 550;
+}
+
+.plan-fail-tag.tag-unrecovered {
+    background: rgba(239, 68, 68, 0.18);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    font-weight: 600;
 }
 
 .model-tier {
@@ -1863,6 +2455,577 @@ button.root-row {
         font-size: 10px !important;
         padding: 3px 8px !important;
     }
+}
+
+/* ── 📚 计划节点收拢态：正在执行三行流光预览与文件变更胶囊 (Image 1 & 2) ── */
+.plan-running-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+    padding: 8px 4px 4px 18px;
+    cursor: pointer;
+    border-top: 1px solid rgba(59, 130, 246, 0.12);
+}
+
+.running-preview-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.4;
+    min-height: 20px;
+}
+
+.running-preview-line.line-recent-action {
+    color: #94a3b8;
+}
+
+.running-preview-line.line-recent-action .preview-duration {
+    margin-left: auto;
+    color: #64748b;
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+}
+
+.running-preview-line.line-thought {
+    color: #cbd5e1;
+    font-size: 12px;
+}
+
+.running-preview-line.line-active-action {
+    color: #38bdf8;
+    font-size: 12.5px;
+}
+
+.running-preview-line .preview-icon,
+.running-preview-line .preview-tool-icon {
+    font-size: 13px;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.running-preview-line .preview-spinner {
+    width: 11px;
+    height: 11px;
+    border: 1.5px solid rgba(59, 130, 246, 0.3);
+    border-top-color: #38bdf8;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+/* 🌟 字体的流光动画 (Text Shimmer Flow) */
+@keyframes textShimmerFlow {
+    0% {
+        background-position: -200% 0;
+    }
+    100% {
+        background-position: 200% 0;
+    }
+}
+
+.text-shimmer-flow {
+    background: linear-gradient(
+        90deg,
+        #2563eb 0%,
+        #38bdf8 20%,
+        #ffffff 45%,
+        #818cf8 70%,
+        #2563eb 100%
+    );
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: textShimmerFlow 2.2s linear infinite;
+    font-weight: 550;
+    display: inline-block;
+}
+
+:root[data-theme='dark'] .text-shimmer-flow,
+.dark .text-shimmer-flow {
+    background: linear-gradient(
+        90deg,
+        #60a5fa 0%,
+        #38bdf8 20%,
+        #ffffff 50%,
+        #a78bfa 75%,
+        #60a5fa 100%
+    );
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+/* 纯读取阶段胶囊 (Image 1 Stage 1) */
+.pill-pure-read {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11.5px;
+    background: rgba(148, 163, 184, 0.08);
+    border: 1px solid rgba(148, 163, 184, 0.15);
+    color: #94a3b8;
+    user-select: none;
+    line-height: 1.35;
+}
+
+.pill-pure-read .pill-icon {
+    font-size: 12px;
+}
+
+/* 一级阶段第二行文件 Chips 容器 */
+.plan-chips-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 4px 2px 18px;
+    cursor: pointer;
+}
+
+.plan-file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 11.5px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    line-height: 1.35;
+    transition: all 0.15s ease;
+    user-select: none;
+}
+
+.plan-file-chip.clickable {
+    cursor: pointer;
+}
+
+.plan-file-chip.clickable:hover {
+    background: rgba(56, 189, 248, 0.09);
+    border-color: rgba(56, 189, 248, 0.32);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.plan-file-chip .chip-icon {
+    font-size: 11px;
+    opacity: 0.85;
+}
+
+.plan-file-chip .chip-name {
+    color: #e2e8f0;
+    font-weight: 500;
+}
+
+.plan-file-chip .chip-add {
+    color: #4ade80;
+    font-weight: 600;
+}
+
+.plan-file-chip .chip-del {
+    color: #f87171;
+    font-weight: 600;
+}
+
+.plan-chip-overflow {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    background: rgba(255, 255, 255, 0.04);
+    color: #a1a1aa;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.plan-chip-reviewer {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 11px;
+    background: rgba(99, 102, 241, 0.12);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    color: #c7d2fe;
+    font-weight: 500;
+}
+
+.plan-chip-reviewer.is-fail {
+    background: rgba(239, 68, 68, 0.14);
+    border-color: rgba(239, 68, 68, 0.32);
+    color: #fca5a5;
+}
+
+/* 🌟 Excel 表格产物胶囊 */
+.plan-capsule-excel {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 11.5px;
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.28);
+    color: #6ee7b7;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    line-height: 1.35;
+    transition: all 0.15s ease;
+    user-select: none;
+}
+.plan-capsule-excel.clickable {
+    cursor: pointer;
+}
+.plan-capsule-excel.clickable:hover {
+    background: rgba(16, 185, 129, 0.18);
+    border-color: rgba(16, 185, 129, 0.45);
+}
+
+/* 🌟 文档 / 研报胶囊 */
+.plan-capsule-doc {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 11.5px;
+    background: rgba(168, 85, 247, 0.1);
+    border: 1px solid rgba(168, 85, 247, 0.28);
+    color: #d8b4fe;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    line-height: 1.35;
+    transition: all 0.15s ease;
+    user-select: none;
+}
+.plan-capsule-doc.clickable {
+    cursor: pointer;
+}
+.plan-capsule-doc.clickable:hover {
+    background: rgba(168, 85, 247, 0.18);
+    border-color: rgba(168, 85, 247, 0.45);
+}
+
+/* 🌟 方案审查挂起 / 异步等待胶囊 */
+.plan-capsule-wait {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 11px;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    color: #fde68a;
+    font-weight: 500;
+}
+
+/* 🌟 终端命令 / 其他通用工具动作胶囊 */
+.plan-capsule-general {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 11px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #cbd5e1;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* 🌟 读取文件上下文胶囊 */
+.plan-capsule-read {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    background: rgba(99, 102, 241, 0.08);
+    border: 1px solid rgba(99, 102, 241, 0.22);
+    color: #c7d2fe;
+}
+
+.chip-read-tag {
+    font-size: 9.5px;
+    line-height: 1.1;
+    padding: 1px 3px;
+    border-radius: 3px;
+    background: rgba(99, 102, 241, 0.2);
+    color: #a5b4fc;
+    font-weight: 550;
+}
+
+/* 被门禁拦截的写入标记 */
+.chip-blocked {
+    font-size: 9px;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: rgba(239, 68, 68, 0.18);
+    color: #fca5a5;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    font-weight: 600;
+    margin-left: 2px;
+}
+
+.card-blocked {
+    font-size: 9.5px;
+    padding: 0 5px;
+    border-radius: 3px;
+    background: rgba(239, 68, 68, 0.16);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    font-weight: 600;
+    margin-left: 4px;
+}
+
+/* 正在执行阶段早期步骤折叠栏 */
+.early-steps-fold-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    margin: 2px 0 4px 6px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px dashed rgba(255, 255, 255, 0.08);
+    color: #94a3b8;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    width: fit-content;
+    user-select: none;
+}
+
+.early-steps-fold-bar:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.16);
+    color: #f1f5f9;
+}
+
+.early-steps-fold-bar svg {
+    color: #64748b;
+    transition: transform 0.15s ease;
+}
+
+.early-steps-fold-bar:hover svg {
+    color: #38bdf8;
+}
+
+/* 🌟 正在执行流光呼吸指示器 (Running Shimmer Streamer) */
+.plan-running-shimmer {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0 2px 6px;
+    padding: 5px 12px;
+    border-radius: 5px;
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.08) 0%, rgba(56, 189, 248, 0.12) 50%, rgba(99, 102, 241, 0.08) 100%);
+    border: 1px solid rgba(56, 189, 248, 0.28);
+    overflow: hidden;
+    color: #e0f2fe;
+    font-size: 11px;
+    font-weight: 500;
+    user-select: none;
+    box-shadow: 0 2px 8px rgba(56, 189, 248, 0.08);
+}
+
+.plan-running-shimmer .shimmer-icon {
+    font-size: 11px;
+    line-height: 1;
+    filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.6));
+    animation: shimmer-pulse-icon 1.2s ease-in-out infinite alternate;
+}
+
+.plan-running-shimmer .shimmer-text {
+    color: #e0f2fe;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+    z-index: 1;
+}
+
+.plan-running-shimmer .shimmer-beam {
+    position: absolute;
+    top: 0;
+    left: -150%;
+    width: 150%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.04) 30%, rgba(56, 189, 248, 0.3) 50%, rgba(255, 255, 255, 0.12) 65%, transparent 100%);
+    animation: shimmer-beam-sweep 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    pointer-events: none;
+}
+
+@keyframes shimmer-beam-sweep {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(200%); }
+}
+
+@keyframes shimmer-pulse-icon {
+    0% { transform: scale(0.92); opacity: 0.8; }
+    100% { transform: scale(1.08); opacity: 1; }
+}
+
+.plan-file-chip.chip-readonly {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.06);
+    cursor: default;
+}
+
+.chip-read-tag {
+    font-size: 9px;
+    padding: 0 3px;
+    border-radius: 3px;
+    background: rgba(148, 163, 184, 0.12);
+    color: #94a3b8;
+    margin-left: 2px;
+}
+
+.step-file-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 10px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    margin-left: 6px;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+
+.step-file-pill.clickable {
+    cursor: pointer;
+}
+.step-file-pill.clickable:hover {
+    background: rgba(56, 189, 248, 0.12);
+    border-color: rgba(56, 189, 248, 0.35);
+}
+
+.step-file-pill .pill-name {
+    color: #d4d4d8;
+}
+
+.step-file-pill .pill-add {
+    color: #4ade80;
+    font-weight: 600;
+}
+
+.step-file-pill .pill-del {
+    color: #f87171;
+    font-weight: 600;
+}
+
+.step-file-pill .pill-linerange,
+.step-op-linerange {
+    color: #38bdf8;
+    font-size: 10px;
+    font-weight: 500;
+    margin-left: 3px;
+    opacity: 0.9;
+}
+
+/* ==========================================================================
+   ✨ 现代 IDE 极简第 2 行文件操作卡片 (Action / Diff Card)
+   ========================================================================== */
+.child-action-card {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 12px;
+    margin: 3px 0 3px 18px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 11.5px;
+    color: #cbd5e1;
+    position: relative;
+    transition: all 0.15s ease;
+    user-select: none;
+}
+
+.child-action-card.is-diff-clickable {
+    cursor: pointer;
+}
+
+.child-action-card.is-diff-clickable:hover {
+    background: rgba(56, 189, 248, 0.07);
+    border-color: rgba(56, 189, 248, 0.32);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.child-action-card .card-action-label {
+    color: #94a3b8;
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.2px;
+}
+
+.child-action-card .card-file-icon {
+    font-size: 12px;
+    line-height: 1;
+    opacity: 0.85;
+}
+
+.child-action-card .card-file-name {
+    color: #e2e8f0;
+    font-weight: 500;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11.5px;
+}
+
+.child-action-card .card-line-range {
+    color: #38bdf8;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.child-action-card .card-diff-add {
+    color: #4ade80;
+    font-weight: 600;
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.child-action-card .card-diff-del {
+    color: #f87171;
+    font-weight: 600;
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.child-action-card .card-view-diff-hint {
+    margin-left: auto;
+    font-size: 11px;
+    color: #38bdf8;
+    opacity: 0.75;
+    font-weight: 500;
+    transition: all 0.15s ease;
+}
+
+.child-action-card:hover .card-view-diff-hint {
+    opacity: 1;
+    transform: translateX(2px);
+    text-decoration: underline;
+}
+
+.child-action-card .card-duration {
+    color: #64748b;
+    font-size: 9.5px;
+    font-style: normal;
+    margin-left: 6px;
 }
 </style>
 
