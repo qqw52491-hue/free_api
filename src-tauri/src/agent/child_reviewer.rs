@@ -92,7 +92,21 @@ impl ReviewScorecard {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl ChildReviewResult {
+    /// 未被审查者撤回的 blocking 异议数——异议闭环的收敛判据：
+    /// 评分达标且该值为 0 才允许放行写入。
+    pub fn unwithdrawn_blocking_count(&self) -> u32 {
+        self.findings
+            .iter()
+            .filter(|f| {
+                f.severity.eq_ignore_ascii_case("blocking")
+                    && !self.withdrawn_findings.contains(&f.id)
+            })
+            .count() as u32
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewFinding {
     pub id: String,                 // F1..F5 —— 供反驳时定位
     pub severity: String,           // blocking | suggestion | question
@@ -169,6 +183,36 @@ where
     Ok(results)
 }
 
+/// 第二轮审查对既有 blocking 异议的裁决（异议闭环的核心载体）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ObjectionVerdict {
+    /// 对应 findings 中某条异议的 id（如 F1）
+    pub finding_id: String,
+    /// "maintain"（维持异议，仍需解决）| "withdraw"（撤回异议，视为已解决）
+    pub verdict: String,
+    /// 裁决理由：withdraw 必须说明为何不再成立
+    pub reason: String,
+}
+
+/// 依据审查者第二轮裁决计算被撤回的 blocking 异议 id。
+/// 裁决只对「确实存在且为 blocking」的异议生效；对未知 id 或非 blocking 异议的
+/// withdraw 一律无效（fail-closed：无效裁决不放宽门禁）。
+pub fn resolve_withdrawn_ids(
+    findings: &[ReviewFinding],
+    verdicts: &[ObjectionVerdict],
+) -> Vec<String> {
+    verdicts
+        .iter()
+        .filter(|v| v.verdict.eq_ignore_ascii_case("withdraw"))
+        .filter(|v| {
+            findings
+                .iter()
+                .any(|f| f.id == v.finding_id && f.severity.eq_ignore_ascii_case("blocking"))
+        })
+        .map(|v| v.finding_id.clone())
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildReviewResult {
     pub child_run_id: String,
@@ -190,6 +234,9 @@ pub struct ChildReviewResult {
     pub routing: Option<String>,
     #[serde(default)]
     pub withdrawn_findings: Vec<String>,
+    /// 第二轮审查对上轮 blocking 异议的逐条裁决
+    #[serde(default)]
+    pub objection_verdicts: Vec<ObjectionVerdict>,
     /// 结构化审查评分卡（4个维度，各 0~100 分）
     #[serde(default)]
     pub scorecard: Option<ReviewScorecard>,
@@ -244,6 +291,19 @@ struct RawChildReviewOutput {
     routing: Option<String>,
     #[serde(default)]
     scorecard: Option<RawReviewScorecard>,
+    #[serde(default)]
+    objection_verdicts: Vec<RawObjectionVerdict>,
+}
+
+/// 宽容解析 objection_verdicts：字段缺失/非法时降级为 maintain（保守方向，不放宽门禁）
+#[derive(Debug, Deserialize)]
+struct RawObjectionVerdict {
+    #[serde(default)]
+    finding_id: Option<String>,
+    #[serde(default)]
+    verdict: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -376,14 +436,23 @@ fn normalize_nonempty(value: &str, max_chars: usize, field: &str) -> Result<Stri
 pub fn parse_child_review_rebuttal_output(
     raw: &str,
 ) -> Result<(Vec<ReviewFinding>, String, Vec<String>, Vec<String>, String), String> {
-    let (findings, confidence, refs, missing, routing, _) = parse_controlled_output(raw, &[])?;
+    let (findings, confidence, refs, missing, routing, _, _, _) = parse_controlled_output(raw, &[])?;
     Ok((findings, confidence, refs, missing, routing))
 }
 
 fn parse_controlled_output(
     raw: &str,
     allowed_refs: &[String],
-) -> Result<(Vec<ReviewFinding>, String, Vec<String>, Vec<String>, String, Option<ReviewScorecard>), String> {
+) -> Result<(
+    Vec<ReviewFinding>,
+    String,
+    Vec<String>,
+    Vec<String>,
+    String,
+    Option<ReviewScorecard>,
+    Vec<ObjectionVerdict>,
+    Vec<String>,
+), String> {
     let output: RawChildReviewOutput = serde_json::from_str(raw)
         .map_err(|_| "child_reviewer 未返回规定的 JSON 审查摘要。".to_string())?;
     if output.findings.len() > 5 {
@@ -488,6 +557,21 @@ fn parse_controlled_output(
         )
     });
 
+    let objection_verdicts: Vec<ObjectionVerdict> = output
+        .objection_verdicts
+        .into_iter()
+        .map(|raw| ObjectionVerdict {
+            finding_id: raw.finding_id.unwrap_or_default().trim().to_string(),
+            // 缺失/非法 verdict 一律按 maintain 处理：裁决不明确时绝不当撤回
+            verdict: match raw.verdict.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+                Some(v) if v == "withdraw" || v == "maintain" => v,
+                _ => "maintain".to_string(),
+            },
+            reason: raw.reason.unwrap_or_default().trim().to_string(),
+        })
+        .collect();
+    let withdrawn_findings = resolve_withdrawn_ids(&structured_findings, &objection_verdicts);
+
     Ok((
         structured_findings,
         output.confidence,
@@ -495,6 +579,8 @@ fn parse_controlled_output(
         output.missing_evidence.into_iter().map(|s| s.trim().to_string()).collect(),
         routing,
         scorecard,
+        objection_verdicts,
+        withdrawn_findings,
     ))
 }
 
@@ -667,6 +753,7 @@ fn child_error_result_json(
         kind: None,
         routing: Some("blocked".to_string()),
         withdrawn_findings: vec![],
+        objection_verdicts: vec![],
         scorecard: None,
     })
     .unwrap_or_default()
@@ -732,13 +819,16 @@ pub async fn spawn_child_reviewer(
             \"risk\": 0-100（破坏性风险/安全性评分，100为零破坏性完全安全，>=60方可放行）,\n\
             \"style\": 0-100（代码规范与既有工程风格契合度）,\n\
             \"test_coverage\": 0-100（测试用例充分度与反证覆盖度）\n\
-          }}\n\
+          }},\n\
+          \"objection_verdicts\": [{{\"finding_id\":\"F1\",\"verdict\":\"maintain|withdraw\",\"reason\":\"裁决理由\"}}]\n\
         }}\n\
+        【审查方法（去锚定）】：先不细读父Agent提交的方案，独立列出「该任务必须满足的硬条件」与「预判的最大风险」；再带着这份清单对照方案审查。findings 的 why 字段须以 [预判内] 或 [预判外] 前缀标注来源。\n\
         【硬规则】：\n\
         0. 必须在 scorecard 中如实评出4个维度评分（0~100整数），综合均分>=75且破坏性风险>=60方可放行代码写入；\n\
         1. findings 为 1–5 条结构化审查条目；若无确切位置 location，severity 必须标为 question（禁止标 blocking）；\n\
         2. 证据不足时 confidence 标 unverified 并在 missing_evidence 说明；\n\
-        3. 不要输出任何推理过程、Markdown 标记或额外字段。{}",
+        3. 若证据包中提供了此前审查的 blocking 异议及父Agent的处理说明，必须输出 objection_verdicts 逐条裁决：问题确已解决或经证伪不成立时 verdict 取 withdraw 并给出理由；仍成立或有新证据支持时取 maintain。无历史异议时省略该字段；\n\
+        4. 不要输出任何推理过程、Markdown 标记或额外字段。{}",
         persona
     );
     let messages = vec![
@@ -865,7 +955,7 @@ pub async fn spawn_child_reviewer(
             .usage
             .map(|usage| usage.completion_tokens)
             .unwrap_or_default();
-        let (findings, confidence, evidence_refs, missing_evidence, routing, scorecard) = match parse_controlled_output(&stream_result.full_response, &allowed_refs) {
+        let (findings, confidence, evidence_refs, missing_evidence, routing, scorecard, objection_verdicts, withdrawn_findings) = match parse_controlled_output(&stream_result.full_response, &allowed_refs) {
             Ok(output) => output,
             Err(_error) => {
                 finish_child_run(
@@ -900,7 +990,8 @@ pub async fn spawn_child_reviewer(
             raw_result_json: None,
             kind: None,
             routing: Some(routing),
-            withdrawn_findings: vec![],
+            withdrawn_findings,
+            objection_verdicts,
             scorecard,
         };
         let result_json = serde_json::to_string(&result).ok();
@@ -1109,8 +1200,74 @@ pub fn child_result_token_usage(result: &ChildReviewResult) -> TokenUsage {
 #[cfg(test)]
 mod tests {
 
+    fn blocking_finding(id: &str) -> ReviewFinding {
+        ReviewFinding {
+            id: id.to_string(),
+            severity: "blocking".to_string(),
+            location: "src/a.rs:1".to_string(),
+            current: "c".to_string(),
+            why: "w".to_string(),
+            suggestion: "s".to_string(),
+            evidence_strength: "confirmed".to_string(),
+        }
+    }
+
+    fn verdict(id: &str, v: &str) -> ObjectionVerdict {
+        ObjectionVerdict {
+            finding_id: id.to_string(),
+            verdict: v.to_string(),
+            reason: "r".to_string(),
+        }
+    }
+
     #[test]
-    fn test_review_scorecard_passes_gate_and_clamping() {
+    fn resolve_withdrawn_ids_is_fail_closed() {
+        let findings = vec![blocking_finding("F1"), blocking_finding("F2")];
+
+        // 正常撤回
+        let withdrawn = resolve_withdrawn_ids(&findings, &[verdict("F1", "withdraw")]);
+        assert_eq!(withdrawn, vec!["F1".to_string()]);
+
+        // maintain 不撤回
+        assert!(resolve_withdrawn_ids(&findings, &[verdict("F1", "maintain")]).is_empty());
+
+        // 对不存在的 id 撤回：无效，不放宽门禁
+        assert!(resolve_withdrawn_ids(&findings, &[verdict("F9", "withdraw")]).is_empty());
+
+        // 大小写宽容
+        assert_eq!(
+            resolve_withdrawn_ids(&findings, &[verdict("F2", "WITHDRAW")]),
+            vec!["F2".to_string()]
+        );
+    }
+
+    #[test]
+    fn unwithdrawn_blocking_count_excludes_withdrawn() {
+        let mut result = ChildReviewResult {
+            child_run_id: "c1".to_string(),
+            status: "succeeded".to_string(),
+            findings: vec![blocking_finding("F1"), blocking_finding("F2")],
+            confidence: "confirmed".to_string(),
+            evidence_refs: vec![],
+            missing_evidence: vec![],
+            duration_ms: 0,
+            completion_tokens: 0,
+            error_kind: None,
+            raw_result_json: None,
+            kind: None,
+            routing: None,
+            withdrawn_findings: vec!["F1".to_string()],
+            objection_verdicts: vec![verdict("F1", "withdraw")],
+            scorecard: Some(ReviewScorecard::new(90, 80, 85, 70)),
+        };
+        // F1 已撤回、F2 仍 blocking：收敛判据为 1
+        assert_eq!(result.unwithdrawn_blocking_count(), 1);
+        result.withdrawn_findings.push("F2".to_string());
+        assert_eq!(result.unwithdrawn_blocking_count(), 0);
+    }
+
+    #[test]
+    fn review_scorecard_passes_gate_and_clamping() {
         // 1. 正常合格：均分 80，risk 80
         let sc = ReviewScorecard::new(80, 80, 80, 80);
         assert_eq!(sc.average_score(), 80);
@@ -1293,7 +1450,7 @@ mod tests {
 
     #[test]
     fn controlled_output_is_short_and_structured() {
-        let (findings, confidence, evidence_refs, missing, routing, _) = parse_controlled_output(
+        let (findings, confidence, evidence_refs, missing, routing, _, _, _) = parse_controlled_output(
             r#"{"findings":[{"id":"F1","severity":"blocking","location":"src/foo.rs:10","current":"旧逻辑","why":"缺少空检查","suggestion":"添加Option安全解包","evidence_strength":"confirmed"}],"confidence":"supported","evidence_refs":["out-1"],"missing_evidence":["需要复现后状态快照"]}"#,
             &["out-1".to_string()],
         )
@@ -1310,7 +1467,7 @@ mod tests {
 
     #[test]
     fn unlocated_blocking_finding_is_automatically_downgraded_to_question() {
-        let (findings, _, _, _, routing, _) = parse_controlled_output(
+        let (findings, _, _, _, routing, _, _, _) = parse_controlled_output(
             r#"{"findings":[{"id":"F1","severity":"blocking","location":"","current":"","why":"感觉架构还要优化","suggestion":"","evidence_strength":"unverified"}],"confidence":"confirmed","evidence_refs":["out-1"],"missing_evidence":[]}"#,
             &["out-1".to_string()],
         )
@@ -1321,7 +1478,7 @@ mod tests {
 
     #[test]
     fn text_only_findings_are_backward_compatible_and_parsed_as_questions() {
-        let (findings, _, _, _, routing, _) = parse_controlled_output(
+        let (findings, _, _, _, routing, _, _, _) = parse_controlled_output(
             r#"{"findings":["发现A: 异步流式正常"],"confidence":"confirmed","evidence_refs":["out-1"],"missing_evidence":[]}"#,
             &["out-1".to_string()],
         )
@@ -1394,6 +1551,7 @@ mod tests {
             kind: None,
             routing: Some("certain".to_string()),
             withdrawn_findings: vec![],
+        objection_verdicts: vec![],
             scorecard: None,
         };
         let sample_json = serde_json::to_string(&sample_result).unwrap();
@@ -1518,6 +1676,7 @@ mod tests {
             kind: None,
             routing: Some("certain".to_string()),
             withdrawn_findings: vec![],
+        objection_verdicts: vec![],
             scorecard: None,
         };
         finish_child_run(&state, &child_1, "succeeded", 200, 30, None, Some(&serde_json::to_string(&res_1).unwrap()));
@@ -1550,6 +1709,7 @@ mod tests {
             kind: None,
             routing: Some("certain".to_string()),
             withdrawn_findings: vec![],
+        objection_verdicts: vec![],
             scorecard: None,
         };
         finish_child_run(&state, &child_2, "succeeded", 350, 40, None, Some(&serde_json::to_string(&res_2).unwrap()));
@@ -1589,6 +1749,7 @@ mod tests {
             kind: None,
             routing: Some("certain".to_string()),
             withdrawn_findings: vec![],
+        objection_verdicts: vec![],
             scorecard: None,
         })
         .unwrap()

@@ -811,14 +811,17 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]{}发现:\n- {}\n",
                                 result.child_run_id, result.confidence, routing_str, scorecard_desc, formatted_findings
                             ));
-                            let blocking_count = result
-                                .findings
-                                .iter()
-                                .filter(|f| f.severity.eq_ignore_ascii_case("blocking"))
-                                .count() as u32;
+                            // 异议闭环：以"未撤回的 blocking 异议"为收敛判据
+                            let blocking_count = result.unwithdrawn_blocking_count();
                             checkpoint.last_review_blocking_count = blocking_count;
                             if let Some(ref sc) = result.scorecard {
                                 checkpoint.last_review_scorecard = Some(sc.clone());
+                            }
+                            if !result.withdrawn_findings.is_empty() {
+                                injection.push_str(&format!(
+                                    "\n♻️ 审查者已撤回异议: {}（以最新裁决为准，撤回理由见审查结论）\n",
+                                    result.withdrawn_findings.join(", ")
+                                ));
                             }
                             checkpoint.plan_reviewer_consumed = true;
                         }

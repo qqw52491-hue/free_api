@@ -52,7 +52,7 @@ pub fn cross_review_scorecard_missing(budget_exhausted: bool) -> String {
 
 /// 交叉审查模式：评分达标但仍有未解决的 blocking 级异议
 pub fn cross_review_blocking_findings_open(count: u32) -> String {
-    format!("【🚨 交叉审查硬门禁拦截：存在未解决的 blocking 级异议】\n审查评分虽已达标，但最新一轮审查仍有 {} 条 blocking 级异议未解决。\n硬门禁规则：blocking 异议必须逐条回应并修复，或经再次审查确认已解决后，方可放行写入。\n请针对每条 blocking 异议给出处理说明（修复 / 证伪 / 设计取舍理由），然后重新派发审查确认。", count)
+    format!("【🚨 交叉审查硬门禁拦截：存在未解决的 blocking 级异议】\n审查评分虽已达标，但最新一轮审查仍有 {} 条 blocking 级异议未解决。\n硬门禁规则：blocking 异议必须逐条回应并修复，或经再次审查确认已解决后，方可放行写入。\n请针对每条 blocking 异议给出处理说明（修复 / 证伪 / 设计取舍理由），然后重新派发审查确认。\n【重要】重新派发 child_reviewer 时，必须在证据包中逐条附上：原始异议（含编号，如 F1）、你的处理说明与对应证据。审查者将据此对每条异议裁决 maintain 或 withdraw，全部撤回或解决后方可放行。", count)
 }
 
 /// 方案审查轮次预算耗尽的统一提示（常规派发与反驳对质共用）

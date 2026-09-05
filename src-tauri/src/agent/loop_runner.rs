@@ -871,16 +871,29 @@ pub async fn run_tool_phase(
                         if let Some(sc) = value.get("scorecard").and_then(|v| serde_json::from_value::<crate::agent::child_reviewer::ReviewScorecard>(v.clone()).ok()) {
                             checkpoint.last_review_scorecard = Some(sc);
                         }
+                        // 异议闭环：撤回的 blocking 异议不计入拦截判据
+                        let withdrawn: Vec<String> = value
+                            .get("withdrawn_findings")
+                            .and_then(|w| w.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|i| i.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         checkpoint.last_review_blocking_count = value
                             .get("findings")
                             .and_then(|f| f.as_array())
                             .map(|arr| {
                                 arr.iter()
                                     .filter(|f| {
-                                        f.get("severity")
+                                        let is_blocking = f
+                                            .get("severity")
                                             .and_then(|s| s.as_str())
                                             .map(|s| s.eq_ignore_ascii_case("blocking"))
-                                            .unwrap_or(false)
+                                            .unwrap_or(false);
+                                        let id = f.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                                        is_blocking && !withdrawn.iter().any(|w| w == id)
                                     })
                                     .count() as u32
                             })
@@ -1153,6 +1166,7 @@ pub async fn run_tool_phase(
                                     kind: Some("review".to_string()),
                                     routing: Some(routing),
                                     withdrawn_findings: vec![],
+                                    objection_verdicts: vec![],
                                     scorecard: None,
                                 };
 
