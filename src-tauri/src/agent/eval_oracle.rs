@@ -98,51 +98,56 @@ pub fn spawn() -> std::io::Result<EvalOracleHandle> {
         let stages = stages();
         let total = stages.len();
         for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let progress = progress_for_thread.clone();
-            let nonce_for_req = nonce_for_thread.clone();
-            // 每连接单次请求-响应（Keep-Alive 关闭：客户端每次新建连接）
-            let mut reader = BufReader::new(match stream.try_clone() {
-                Ok(s) => s,
-                Err(_) => continue,
-            });
-            let mut request_line = String::new();
-            if reader.read_line(&mut request_line).is_err() {
-                continue;
-            }
-            let mut content_length = 0usize;
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_err() {
+            let Ok(stream) = stream else { continue };
+            // 每连接独立线程 + 10s 读写超时：任何半开/慢连接都不得阻塞判分服务——
+            // 否则后续所有 npm test 的验题请求集体失败，模型永久卡在当前阶段（实测根因）。
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
+            let nonce_for_conn = nonce_for_thread.clone();
+            let stages_for_conn = stages.clone();
+            let progress_for_conn = progress_for_thread.clone();
+            std::thread::spawn(move || {
+                let Ok(reader_stream) = stream.try_clone() else { return };
+                let mut reader = BufReader::new(reader_stream);
+                let mut stream = stream;
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() || request_line.trim().is_empty() {
                     return;
                 }
-                let line = line.trim();
-                if line.is_empty() {
-                    break;
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
+                    }
+                    let trimmed = line.trim().to_string();
+                    if trimmed.is_empty() {
+                        break;
+                    }
+                    if let Some(v) = trimmed
+                        .to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().to_string())
+                    {
+                        content_length = v.parse().unwrap_or(0);
+                    }
                 }
-                if let Some(v) = line
-                    .to_ascii_lowercase()
-                    .strip_prefix("content-length:")
-                    .map(|v| v.trim().to_string())
-                {
-                    content_length = v.parse().unwrap_or(0);
+                let mut body = vec![0u8; content_length.min(1_048_576)];
+                if content_length > 0 && reader.read_exact(&mut body).is_err() {
+                    return;
                 }
-            }
-            let mut body = vec![0u8; content_length];
-            if content_length > 0 && reader.read_exact(&mut body).is_err() {
-                return;
-            }
-            let body_str = String::from_utf8_lossy(&body).to_string();
-
-            let response = route(
-                &request_line,
-                &body_str,
-                &nonce_for_req,
-                &stages,
-                total,
-                &progress,
-            );
-            let _ = write_response(&mut stream, &response);
+                let body_str = String::from_utf8_lossy(&body).to_string();
+                let response = route(
+                    &request_line,
+                    &body_str,
+                    &nonce_for_conn,
+                    &stages_for_conn,
+                    total,
+                    &progress_for_conn,
+                );
+                let _ = write_response(&mut stream, &response);
+            });
         }
     });
 
