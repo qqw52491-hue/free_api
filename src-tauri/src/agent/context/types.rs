@@ -188,6 +188,10 @@ pub struct SandwichContext {
     pub failed_attempts: Vec<FailedAttempt>,
     /// 不可逆外部操作安全台账 (记录 shell_exec/文件修改等写操作)
     pub side_effects: Vec<SideEffectRecord>,
+    /// shell 批改探针：CallLlm+RunTool 阶段开始前的 git 脏文件数快照（None=非 git 或未测）。
+    /// 主循环在步骤结束后取差值入账，使 shell_exec 批量改文件无法绕过阶段审查的文件数阈值。
+    #[serde(default)]
+    pub shell_probe_pre_dirty: Option<u32>,
     /// 本次运行从之前任务继承的副作用数量（用于区分本轮是否有新增副作用）
     #[serde(default)]
     pub inherited_side_effects_count: usize,
@@ -293,6 +297,7 @@ impl SandwichContext {
             memories: BTreeMap::new(),
             failed_attempts: Vec::new(),
             side_effects: Vec::new(),
+            shell_probe_pre_dirty: None,
             inherited_side_effects_count: 0,
             todo_list: Vec::new(),
             review_contract: None,

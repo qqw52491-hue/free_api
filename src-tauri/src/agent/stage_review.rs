@@ -200,7 +200,7 @@ pub async fn dispatch(
 pub fn apply_stage_result(
     checkpoint: &mut AgentCheckpoint,
     result: &crate::agent::child_reviewer::ChildReviewResult,
-    context: &SandwichContext,
+    _context: &SandwichContext,
 ) -> String {
     let was_rebuttal = checkpoint.stage_review_rebuttal_run_id.as_deref()
         == Some(result.child_run_id.as_str());

@@ -1104,6 +1104,26 @@ async fn run_agent_main_loop_in_workspace_inner(
         if checkpoint.stage_review_baseline_side_effects == 0 && checkpoint.stage_review_budget_used == 0 {
             checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
         }
+        // 【shell 批改探针·后】步骤结束时取差值入账（覆盖单发/批量/重试所有执行路径）
+        {
+            let post = crate::agent::review_tools::git_dirty_file_count(&workspace_dir);
+            match (context.shell_probe_pre_dirty, post) {
+                (Some(pre), Some(post)) => {
+                    let delta = post.saturating_sub(pre).min(50);
+                    if delta > 0 {
+                        checkpoint.uncovered_shell_mutations =
+                            checkpoint.uncovered_shell_mutations.saturating_add(delta);
+                    }
+                }
+                // 非 git 环境：按本步骤是否为写类指令保守计 1
+                (None, _) if crate::agent::dispatcher::is_write_or_side_effect_tool(&instruction) => {
+                    checkpoint.uncovered_shell_mutations =
+                        checkpoint.uncovered_shell_mutations.saturating_add(1);
+                }
+                _ => {}
+            }
+            context.shell_probe_pre_dirty = None;
+        }
         if let Some(reason) = crate::agent::stage_review::should_fire(&checkpoint, &context, &instruction) {
             match crate::agent::stage_review::dispatch(
                 &app,

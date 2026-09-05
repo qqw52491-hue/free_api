@@ -23,6 +23,7 @@ use crate::agent::loop_runner::{run_tool_phase, StepExecutionOutcome, REPEATED_F
 use crate::agent::plan_gate::check_pre_write_gatekeeper;
 
 pub async fn run_call_llm_and_run_tool_phases(
+
     app: &AppHandle,
     state: &State<'_, DbState>,
     registry_state: &State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
@@ -42,6 +43,9 @@ pub async fn run_call_llm_and_run_tool_phases(
     resume_instruction: Option<AgentInstruction>,
     run_trace_steps: &mut Vec<serde_json::Value>,
 ) -> Result<StepExecutionOutcome, String> {
+    // 【shell 批改探针·前】步骤开始前快照 git 脏文件数；主循环在步骤结束后取差值。
+    // 覆盖单发/批量派发/重试所有路径，防止 shell_exec 批量改文件绕过阶段审查。
+    context.shell_probe_pre_dirty = crate::agent::review_tools::git_dirty_file_count(workspace_dir);
     let mut retry_count = 0;
     let max_retries = 3;
     let mut planning_retry_count = 0;
