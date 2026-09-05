@@ -16,6 +16,8 @@ pub mod file_parser;
 pub mod job_engine;
 pub mod lesson;
 pub mod loop_runner;
+pub mod plan_gate;
+pub mod call_llm_phase;
 pub mod main_loop;
 pub mod mcp;
 pub mod mcp_catalog;
