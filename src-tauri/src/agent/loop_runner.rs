@@ -324,6 +324,16 @@ pub async fn run_tool_phase(
             .await
             {
                 Ok(child_run_id) => {
+                    // 派发快照：供消费端在 reviewer 故障（invalid_output/超时）时自动故障转移重派
+                    if !checkpoint.plan_phase.is_approved() {
+                        checkpoint.plan_reviewer_last_dispatch = Some(json!({
+                            "model": reviewer_model,
+                            "tier": model_tier,
+                            "effort": reasoning_effort,
+                            "persona": reviewer_persona,
+                            "params": effective_params,
+                        }).to_string());
+                    }
                     let question_str = effective_params.get("question").and_then(|v| v.as_str()).unwrap_or("");
                     let question_brief = if question_str.chars().count() > 40 {
                         format!("{}...", question_str.chars().take(40).collect::<String>())

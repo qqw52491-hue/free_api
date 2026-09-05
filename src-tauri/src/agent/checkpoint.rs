@@ -561,6 +561,14 @@ pub struct AgentCheckpoint {
     /// 阶段审查未解决的 blocking_regardless 数（>0 时拦截写入，直到对质撤回）
     #[serde(default)]
     pub stage_review_blockers_open: u32,
+    /// ---- 方案审查者故障转移链（failover）----
+    /// 已执行的自动故障转移次数（invalid_output 重试 1 次 + 超时切换备用审查员，封顶 2）
+    #[serde(default)]
+    pub plan_reviewer_failover_count: u32,
+    /// 最近一次方案审查派发的完整参数快照（模型/tier/effort/persona/params），
+    /// 供消费端在 reviewer 故障时自动重派，无需模型重新组织派发
+    #[serde(default)]
+    pub plan_reviewer_last_dispatch: Option<String>,
     /// 最近一次门禁拦截发生的 step_id（ask_human 冷却判定用）；
     /// 成功提交一个步骤即清零（模型已按拦截意见行动）
     #[serde(default)]
@@ -628,6 +636,8 @@ impl AgentCheckpoint {
             stage_review_rebuttal_run_id: None,
             stage_review_baseline_side_effects: 0,
             stage_review_blockers_open: 0,
+            plan_reviewer_failover_count: 0,
+            plan_reviewer_last_dispatch: None,
             recent_gate_block_step: None,
             gate_human_escape_directed: false,
             uncovered_shell_mutations: 0,

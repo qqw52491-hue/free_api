@@ -140,6 +140,59 @@ pub fn prefer_cross_family_reviewer(
     }
 }
 
+/// 审查者故障转移选型：主审查员模型不可靠（超时/非法输出）时，
+/// 从启用模型中挑一个**不同平台**的异构家族备选；无跨平台可选时退化为
+/// 同平台异构家族；再无则 None（调用方退款并升级人工）。
+/// 注意：failover 是可靠性兜底，会牺牲跨家族盲区互补性，运行报告需显式标注。
+pub fn reviewer_failover_model(
+    conn: &rusqlite::Connection,
+    primary_model_id: &str,
+) -> Option<String> {
+    // 家族判定必须用模型【名称】——id 是 UUID，对 UUID 判家族恒为 "other"，
+    // 会导致候选永远为空（单测捕获的生产 bug）。
+    let (primary_platform, primary_name): (Option<String>, String) = conn
+        .query_row(
+            "SELECT platform_id, name FROM models WHERE id = ?1",
+            [primary_model_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+    let primary_family = model_family(&primary_name);
+    let models: Vec<(String, String, String)> = {
+        let Ok(mut stmt) =
+            conn.prepare("SELECT id, name, platform_id FROM models WHERE enabled = 1 AND id != ?1")
+        else {
+            return None;
+        };
+        stmt.query_map([primary_model_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    };
+    let mut candidates: Vec<(String, String)> = models
+        .into_iter()
+        .filter(|(id, name, _)| {
+            let f = model_family(name);
+            f != primary_family && f != "other" && id != primary_model_id
+        })
+        .map(|(id, _, platform)| (id, platform))
+        .collect();
+    // 第一优先：不同平台 + 异构家族；第二优先：同平台异构家族
+    let cross_platform: Vec<&(String, String)> = candidates
+        .iter()
+        .filter(|(_, platform)| Some(platform) != primary_platform.as_ref())
+        .collect();
+    let pick = if let Some(first) = cross_platform.first() {
+        Some((*first).clone())
+    } else if let Some(first) = candidates.first() {
+        Some((*first).clone())
+    } else {
+        None
+    };
+    pick.map(|(id, _)| id)
+}
+
 impl ModelRoutingConfig {
     pub fn reasoning_effort_for(&self, tier: &RoutingTier) -> &str {
         let configured = match tier {
@@ -488,6 +541,40 @@ impl AgentRouter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reviewer_failover_prefers_cross_platform_heterogeneous() {
+        use crate::db::init_db;
+        let dir = std::env::temp_dir().join(format!("fover-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = init_db(&dir.join("t.db")).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO platforms (id, name, base_url, api_key, created_at) VALUES
+             ('pa','pa','https://a','k','2026-01-01'), ('pb','pb','https://b','k','2026-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO models (id, platform_id, name, display_name, enabled, created_at) VALUES
+             ('m-exec','pa','gpt-exec','e',1,'2026-01-01'),
+             ('m-same-family','pa','gpt-2','e',1,'2026-01-01'),
+             ('m-cross-same-platform','pa','claude-x','e',1,'2026-01-01'),
+             ('m-cross-cross-platform','pb','glm-x','e',1,'2026-01-01')",
+            [],
+        )
+        .unwrap();
+        // 主审查员 = exec（openai 系，pa 平台）→ 备选必须跨平台 + 异构家族优先
+        let pick = super::reviewer_failover_model(&conn, "m-exec");
+        assert_eq!(pick.as_deref(), Some("m-cross-cross-platform"), "应优先跨平台异构");
+        // 移除跨平台候选 → 退化为同平台异构家族
+        conn.execute("DELETE FROM models WHERE id='m-cross-cross-platform'", []).unwrap();
+        let pick = super::reviewer_failover_model(&conn, "m-exec");
+        assert_eq!(pick.as_deref(), Some("m-cross-same-platform"));
+        // 全部同家族 → None（退款 + 升级人工）
+        conn.execute("DELETE FROM models WHERE id='m-cross-same-platform'", []).unwrap();
+        assert_eq!(super::reviewer_failover_model(&conn, "m-exec"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn model_family_heuristic_classification() {
         assert_eq!(super::model_family("claude-sonnet-4"), "anthropic");

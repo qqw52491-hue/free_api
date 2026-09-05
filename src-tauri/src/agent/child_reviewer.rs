@@ -1288,12 +1288,17 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
     let now = chrono::Utc::now();
     // reviewer 宽限可通过 channel-config.json 的 reviewer_reap_grace_secs 调整
     // （异构大家族模型在长上下文上推理超 10 分钟并不罕见，默认 600s 偏紧时可调高）
-    let reviewer_budget_secs: i64 = crate::agent::channel::channel_config_shared()
-        .read()
-        .ok()
-        .and_then(|cfg| cfg.reviewer_reap_grace_secs)
-        .map(|v| v.min(3600) as i64)
-        .unwrap_or(600);
+    // 配置不变式：reap 宽限必须严格大于 reviewer 单次超时，否则会出现
+    // "超时被 reap 成 timed_out 但子进程还在跑、迟到结果被状态守卫丢弃"的边角。
+    let reviewer_budget_secs: i64 = {
+        let configured = crate::agent::channel::channel_config_shared()
+            .read()
+            .ok()
+            .and_then(|cfg| cfg.reviewer_reap_grace_secs)
+            .map(|v| v.min(3600) as i64)
+            .unwrap_or(600);
+        configured.max(child_timeout_secs() as i64 + 30)
+    };
     let mut reaped = 0usize;
     for (child_run_id, kind, started_at) in rows {
         let budget_secs: i64 = match kind.as_deref() {

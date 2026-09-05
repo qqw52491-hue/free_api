@@ -827,6 +827,66 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]{}成本: 输入 {} / 输出 {} tokens, 耗时 {}ms\n发现:\n- {}\n",
                                 result.child_run_id, result.confidence, routing_str, scorecard_desc, result.prompt_tokens, result.completion_tokens, result.duration_ms, formatted_findings
                             ));
+                            // 【审查者故障转移链】invalid_output → 同参数重试；超时 → 切换跨平台备用审查员。
+                            // 封顶 2 次；两次都失败 → 退款 + 升级人工（ask_human 路径不变）。
+                            let failover_eligible = matches!(
+                                result.error_kind.as_deref(),
+                                Some("invalid_output") | Some("timed_out")
+                            ) && checkpoint.plan_reviewer_failover_count < 2
+                                && checkpoint.plan_reviewer_last_dispatch.is_some()
+                                && !checkpoint.plan_phase.is_approved();
+                            if failover_eligible {
+                                if let Ok(dispatch) = serde_json::from_str::<serde_json::Value>(
+                                    checkpoint.plan_reviewer_last_dispatch.as_deref().unwrap_or("{}"),
+                                ) {
+                                    let primary_model = dispatch.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let failover_model = {
+                                        let conn = state.inner().0.lock().map_err(|err| err.to_string())?;
+                                        crate::agent::router::reviewer_failover_model(&conn, &primary_model)
+                                    };
+                                    let model_to_use = failover_model.unwrap_or_else(|| primary_model.clone());
+                                    let params = dispatch.get("params").cloned().unwrap_or(serde_json::json!({}));
+                                    let persona = dispatch.get("persona").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let tier = dispatch.get("tier").and_then(|v| v.as_str()).unwrap_or("flash").to_string();
+                                    let effort = dispatch.get("effort").and_then(|v| v.as_str()).unwrap_or("high").to_string();
+                                    match crate::agent::child_reviewer::spawn_child_reviewer(
+                                        Some(app.clone()),
+                                        state.inner(),
+                                        &run_id,
+                                        &final_session_id,
+                                        &workspace_dir,
+                                        &model_to_use,
+                                        &tier,
+                                        &effort,
+                                        &params,
+                                        &persona,
+                                        interrupt_rx.clone(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(new_run_id) => {
+                                            checkpoint.plan_reviewer_failover_count += 1;
+                                            checkpoint.plan_reviewer_last_dispatch = Some(json!({
+                                                "model": model_to_use,
+                                                "tier": tier,
+                                                "effort": effort,
+                                                "persona": persona,
+                                                "params": params,
+                                            }).to_string());
+                                            injection.push_str(&format!(
+                                                "\n🔁 审查者故障转移：上次结论异常（{}），已自动改用备用审查员重派 (child_run_id: {})\n",
+                                                result.error_kind.as_deref().unwrap_or("?"), new_run_id
+                                            ));
+                                            continue;
+                                        }
+                                        Err(spawn_err) => {
+                                            injection.push_str(&format!(
+                                                "\n⚠️ 审查者故障转移重派失败: {}（转人工裁决路径不受影响）\n", spawn_err
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                             // 基础设施失败：退款、不算消费过（超时不是审查，不应烧预算）
                             if matches!(
                                 result.error_kind.as_deref(),
