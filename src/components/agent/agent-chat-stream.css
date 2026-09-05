@@ -550,6 +550,10 @@
     font-size: 13px;
     color: #f1f5f9;
     letter-spacing: -0.01em;
+    max-width: 560px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .stage-status-check {

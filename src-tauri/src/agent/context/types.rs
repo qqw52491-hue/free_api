@@ -73,6 +73,22 @@ pub struct PlanState {
     pub next_index: usize,
 }
 
+pub fn clip_plan_title(raw: &str) -> String {
+    let first_line = raw.lines().next().unwrap_or("").trim();
+    let normalized = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let candidate = if normalized.is_empty() {
+        "执行任务"
+    } else {
+        normalized.as_str()
+    };
+    let clipped: String = candidate.chars().take(40).collect();
+    if candidate.chars().count() > 40 {
+        format!("{}…", clipped)
+    } else {
+        clipped
+    }
+}
+
 impl PlanState {
     pub fn new() -> Self {
         Self::default()
@@ -86,11 +102,14 @@ impl PlanState {
         is_new_plan: bool,
         default_title: &str,
     ) -> (String, String) {
+        let default_clean = clip_plan_title(default_title);
+        let requested_title = requested_title.map(|t| clip_plan_title(&t));
+
         // 1. 如果模型明确指定了 ID
         if let Some(id) = requested_id {
             let title = requested_title
                 .or_else(|| self.active_title.clone())
-                .unwrap_or_else(|| default_title.to_string());
+                .unwrap_or(default_clean);
             self.active_id = Some(id.clone());
             self.active_title = Some(title.clone());
             return (id, title);
@@ -102,7 +121,7 @@ impl PlanState {
             let id = format!("plan-{}", self.next_index);
             let title = requested_title
                 .or_else(|| self.active_title.clone())
-                .unwrap_or_else(|| default_title.to_string());
+                .unwrap_or(default_clean);
             self.active_id = Some(id.clone());
             self.active_title = Some(title.clone());
             return (id, title);
@@ -112,7 +131,7 @@ impl PlanState {
         if let Some(existing_id) = self.active_id.clone() {
             let title = requested_title
                 .or_else(|| self.active_title.clone())
-                .unwrap_or_else(|| default_title.to_string());
+                .unwrap_or(default_clean);
             self.active_title = Some(title.clone());
             return (existing_id, title);
         }
@@ -120,7 +139,7 @@ impl PlanState {
         // 4. 初次启动自动分配 plan-1
         self.next_index = self.next_index.saturating_add(1);
         let id = format!("plan-{}", self.next_index);
-        let title = requested_title.unwrap_or_else(|| default_title.to_string());
+        let title = requested_title.unwrap_or(default_clean);
         self.active_id = Some(id.clone());
         self.active_title = Some(title.clone());
         (id, title)

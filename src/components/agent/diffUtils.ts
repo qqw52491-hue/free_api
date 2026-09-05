@@ -1095,7 +1095,10 @@ export function formatStageTitle(rawTitle: string, stageIndex: number): string {
         .replace(/^阶段\s*([0-9一二三四五六七八九十]+|[a-zA-Z]+)\s*[·:：\-\s]\s*/, "")
         .replace(/^步骤\s*([0-9一二三四五六七八九十]+|[a-zA-Z]+)\s*[·:：\-\s]\s*/, "")
         .trim();
-    const finalTitle = cleaned || rawTitle.trim();
+    // 防御长文本/多行文本污染：只取首行，折叠多余空白，限制最大长度 40
+    const firstLine = (cleaned || rawTitle.trim()).split("\n")[0].trim().replace(/\s+/g, " ");
+    const truncated = firstLine.length > 40 ? firstLine.slice(0, 38) + "…" : firstLine;
+    const finalTitle = truncated || "执行任务";
     return `阶段 ${stageIndex} · ${finalTitle}`;
 }
 

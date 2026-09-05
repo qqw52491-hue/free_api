@@ -1603,7 +1603,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             "command": instruction.get_params(),
             "params": instruction.get_params(),
             "plan_id": context.active_plan_id().unwrap_or_default(),
-            "plan_title": context.active_plan_title().unwrap_or(&context.user_goal),
+            "plan_title": context.active_plan_title().map(str::to_string).unwrap_or_else(|| crate::agent::context::types::clip_plan_title(&context.user_goal)),
             "status": if finish_challenged { "finish_challenged" } else if result.success { "succeeded" } else { "failed" },
             "output": output_text.clone(),
             "resource_scope_revision": context.resource_scope.revision,

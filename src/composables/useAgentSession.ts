@@ -626,6 +626,11 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
         return normalizeArtifactList(flatList);
     }
+    function sanitizePlanTitle(title?: string, fallbackGoal?: string): string {
+        const candidate = toText(title).trim() || toText(fallbackGoal).trim() || "执行任务";
+        const firstLine = candidate.split("\n")[0].trim().replace(/\s+/g, " ");
+        return firstLine.length > 40 ? firstLine.slice(0, 38) + "…" : firstLine;
+    }
     function normalizeRunTrace(value: unknown): HistoryRunSnapshot {
         const trace = asRecord(value);
         const runId = toText(trace.id) || "unknown-run";
@@ -640,7 +645,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const stepId = numberOrUndefined(step.id ?? step.step_id) ?? index;
             const tool = toText(step.tool || step.action) || "action";
             const sourcePlanId = toText(step.plan_id || step.planId) || "plan-default";
-            const planTitle = toText(step.plan_title || step.planTitle) || goal;
+            const planTitle = sanitizePlanTitle(step.plan_title || step.planTitle, goal);
             const params = step.command ?? step.params;
             const result = step.output ?? step.result;
             return {
@@ -930,7 +935,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 stepId,
                 description: toText(payload.description) || `${name}: ${action}`,
                 planId: toText(payload.plan_id) || "plan-default",
-                planTitle: toText(payload.plan_title) || currentGoal.value || "执行任务",
+                planTitle: sanitizePlanTitle(payload.plan_title, currentGoal.value),
                 modelTier: toText(payload.model_tier) || undefined,
                 tool: name,
                 action,
@@ -1269,7 +1274,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 stepId,
                 description,
                 planId: toText(rawStep.plan_id) || "plan-default",
-                planTitle: toText(rawStep.plan_title) || currentGoal.value || "执行任务",
+                planTitle: sanitizePlanTitle(rawStep.plan_title, currentGoal.value),
                 modelTier: toText(rawStep.model_tier) || undefined,
                 reflection,
                 thought: thoughtText,
