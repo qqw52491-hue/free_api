@@ -34,6 +34,7 @@ pub mod finish_guard;
 pub mod workspace_lock;
 pub mod stage_review;
 pub mod review_tools;
+pub mod eval_oracle;
 pub mod host_verify;
 pub mod router;
 pub mod run_state;

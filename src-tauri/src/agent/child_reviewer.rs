@@ -423,7 +423,9 @@ pub fn parse_child_review_request(params: &Value) -> Result<ChildReviewRequest, 
         ));
     }
     if raw.evidence_excerpt.trim().is_empty() && refs.is_empty() && resource_ids.is_empty() {
-        return Err("child_reviewer 必须携带父 Agent 提供的 evidence_refs、evidence_excerpt 或 resource_ids。".to_string());
+        return Err(
+            "child_reviewer 必须携带证据：三选一传入 evidence_refs（你已读取过的文件路径，如 README.md、package.json）、evidence_excerpt（关键代码/文档摘录）或 resource_ids（受管资源 ID）。\n若尚未读取任何文件，请先用 read_text_file/grep 取证，再派发审查——空手派发审查没有意义。".to_string(),
+        );
     }
 
     Ok(ChildReviewRequest {

@@ -118,7 +118,10 @@ pub struct BackgroundEvaluationStart {
     /// SQLite 模型 UUID：固定为火山订阅的 DeepSeek V4 Pro。
     pub reasoning_model_id: String,
     /// SQLite 模型 UUID：固定为火山订阅的 MiniMax M3。
-    pub execution_model_id: String,
+    pub execution_model_id: String,    /// 写入型评测的判分 oracle（127.0.0.1 随机端口 + nonce；None = 本场景无 oracle）
+    pub verify_port: Option<u16>,
+    pub verify_nonce: Option<String>,
+
 }
 
 /// 在不依赖 UI、模型或 MCP 的情况下监督一个后台工作单元。
@@ -434,6 +437,12 @@ pub async fn start_background_agent_evaluation(
         &session_id,
         requested_scenario.as_deref(),
     )?;
+    // 写入型评测启动服务端判分 oracle：题目/输入/期望输出不再落盘，杜绝客户端批量解题
+    let oracle = if evaluation_run.scenario_id == evaluation::ISOLATED_WRITE_FIXTURE_SCENARIO {
+        Some(crate::agent::eval_oracle::spawn().map_err(|e| format!("判分 oracle 启动失败: {e}"))?)
+    } else {
+        None
+    };
     let evaluation_id = evaluation_run.evaluation_id.clone();
     let scenario_id = evaluation_run.scenario_id.clone();
     let goal = evaluation_run.goal.clone();
@@ -626,7 +635,9 @@ pub async fn start_background_agent_evaluation(
         max_duration_minutes: duration_minutes,
         reasoning_model_id,
         execution_model_id,
-    })
+            verify_port: oracle.as_ref().map(|o| o.port),
+        verify_nonce: oracle.as_ref().map(|o| o.nonce.clone()),
+})
 }
 
 #[cfg(test)]

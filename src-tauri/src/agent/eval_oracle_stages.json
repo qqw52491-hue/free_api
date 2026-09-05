@@ -1,0 +1,333 @@
+[
+ {
+  "id": "01",
+  "requirement": "把字符串去除首尾空白并转为大写。",
+  "input": "  alpha  ",
+  "expected": "ALPHA"
+ },
+ {
+  "id": "02",
+  "requirement": "把字符串去除首尾空白并转为小写；若转换结果与输入完全相同则返回 null（表示无变化）。",
+  "input": "  BETA  ",
+  "expected": "beta"
+ },
+ {
+  "id": "03",
+  "requirement": "仅接受去空白后非空的字符串；其他值返回 null。",
+  "input": "   ",
+  "expected": null
+ },
+ {
+  "id": "04",
+  "requirement": "仅接受有限数值，截断为整数并限制在 0 到 10；其他值返回 null。",
+  "input": 17.8,
+  "expected": 10
+ },
+ {
+  "id": "05",
+  "requirement": "仅接受有限数值，四舍五入到两位小数；注意 -0 必须归一化为 0；其他值返回 null。",
+  "input": -0.001,
+  "expected": 0
+ },
+ {
+  "id": "06",
+  "requirement": "接受字符串数组：去空白、删除空值、保留首次出现并按字母升序返回。",
+  "input": [
+   " beta ",
+   "alpha",
+   "beta",
+   ""
+  ],
+  "expected": [
+   "alpha",
+   "beta"
+  ]
+ },
+ {
+  "id": "07",
+  "requirement": "接受逗号分隔字符串：拆分、去空白、删除空项、去重并按字母升序返回数组。",
+  "input": "z, alpha, z, beta, ",
+  "expected": [
+   "alpha",
+   "beta",
+   "z"
+  ]
+ },
+ {
+  "id": "08",
+  "requirement": "接受对象数组：只保留具有字符串 name 和有限 score 的项，按 score 降序、name 升序返回新数组。",
+  "input": [
+   {
+    "name": "b",
+    "score": 2
+   },
+   {
+    "name": "a",
+    "score": 2
+   },
+   {
+    "name": "x",
+    "score": "__Infinity__"
+   }
+  ],
+  "expected": [
+   {
+    "name": "a",
+    "score": 2
+   },
+   {
+    "name": "b",
+    "score": 2
+   }
+  ]
+ },
+ {
+  "id": "09",
+  "requirement": "接受对象，返回深拷贝并补齐 enabled:false、retries:0；原对象字段优先；嵌套对象与数组也必须深拷贝（修改返回值不得影响输入）；输入非对象或为 null 时当作空对象。原型链上的属性不得拷贝。",
+  "input": {
+   "retries": 2,
+   "label": "x",
+   "meta": {
+    "tags": [
+     "a"
+    ]
+   }
+  },
+  "expected": {
+   "enabled": false,
+   "retries": 2,
+   "label": "x",
+   "meta": {
+    "tags": [
+     "a"
+    ]
+   }
+  }
+ },
+ {
+  "id": "10",
+  "requirement": "接受对象：键名去空白转小写，值保持不变；冲突时后出现的键覆盖；返回新对象。",
+  "input": {
+   " Alpha ": 1,
+   "BETA": 2,
+   "alpha": 3
+  },
+  "expected": {
+   "alpha": 3,
+   "beta": 2
+  }
+ },
+ {
+  "id": "11",
+  "requirement": "接受数组，只求和有限数值；返回 0 表示无有效值。",
+  "input": [
+   1,
+   "__Infinity__",
+   "2",
+   -3
+  ],
+  "expected": -2
+ },
+ {
+  "id": "12",
+  "requirement": "接受数组，只平均有限且大于 0 的数值；无有效值返回 0。",
+  "input": [
+   1,
+   -2,
+   3,
+   "__Infinity__"
+  ],
+  "expected": 2
+ },
+ {
+  "id": "13",
+  "requirement": "接受字符串，生成 slug：小写、连续非字母数字（含下划线）替换为单个连字符、移除首尾连字符；Unicode 字母（如中文名）按原样保留参与分词边界判定。",
+  "input": "  Héllo, 世界__Wörld!!  ",
+  "expected": "héllo-世界-wörld"
+ },
+ {
+  "id": "14",
+  "requirement": "接受对象数组，按非空字符串 id 去重并保留最后出现项；按 id 升序返回新数组；排序必须稳定（同 id 项保持其最后出现项的唯一性），数组含 1000 项时不得栈溢出或死循环。",
+  "input": [
+   {
+    "id": "b",
+    "v": 1
+   },
+   {
+    "id": "a",
+    "v": 2
+   },
+   {
+    "id": "b",
+    "v": 3
+   }
+  ],
+  "expected": [
+   {
+    "id": "a",
+    "v": 2
+   },
+   {
+    "id": "b",
+    "v": 3
+   }
+  ]
+ },
+ {
+  "id": "15",
+  "requirement": "接受两个有限数值组成的数组，返回 {min,max}；任何无效输入返回 null。",
+  "input": [
+   8,
+   -2
+  ],
+  "expected": {
+   "min": -2,
+   "max": 8
+  }
+ },
+ {
+  "id": "16",
+  "requirement": "接受布尔值或字符串 true/false（忽略大小写和空白）；无法解析时返回 null。",
+  "input": " TRUE ",
+  "expected": true
+ },
+ {
+  "id": "17",
+  "requirement": "接受字符串，按空白分词，每个词首字母大写其余小写，并以单空格连接。",
+  "input": "hELLo   wORLD",
+  "expected": "Hello World"
+ },
+ {
+  "id": "18",
+  "requirement": "接受数组，删除 null 和 undefined，保持其余元素顺序并返回新数组；稀疏数组（存在空洞）的空洞同样视为 undefined 删除；类数组对象（含 length）不处理，原样返回 null。",
+  "input": [
+   0,
+   null,
+   "",
+   null,
+   false,
+   3
+  ],
+  "expected": [
+   0,
+   "",
+   false,
+   3
+  ]
+ },
+ {
+  "id": "19",
+  "requirement": "接受数值数组，只保留有限数值并按升序返回新数组。",
+  "input": [
+   3,
+   "__Infinity__",
+   -1,
+   2
+  ],
+  "expected": [
+   -1,
+   2,
+   3
+  ]
+ },
+ {
+  "id": "20",
+  "requirement": "接受字符串，规范化 email：去空白并转小写；不含恰好一个 @、任一侧为空、或本地段含点号时返回 null。",
+  "input": " User.Name@Example.COM ",
+  "expected": null
+ },
+ {
+  "id": "21",
+  "requirement": "接受多行字符串：逐行去空白、删除空行、去重并保持首次出现顺序。",
+  "input": " a\n\n b \na\n",
+  "expected": [
+   "a",
+   "b"
+  ]
+ },
+ {
+  "id": "22",
+  "requirement": "接受字符串数组：按每个去空白后首字符的小写分组，忽略空字符串，返回键按字母升序的对象，组内保留原去空白值。",
+  "input": [
+   "Apple",
+   " ant ",
+   "Beta",
+   ""
+  ],
+  "expected": {
+   "a": [
+    "Apple",
+    "ant"
+   ],
+   "b": [
+    "Beta"
+   ]
+  }
+ },
+ {
+  "id": "23",
+  "requirement": "接受对象数组，只保留有限 value 和字符串 id，按 value 降序、id 升序取前三项，返回新数组。",
+  "input": [
+   {
+    "id": "b",
+    "value": 3
+   },
+   {
+    "id": "a",
+    "value": 3
+   },
+   {
+    "id": "c",
+    "value": 1
+   },
+   {
+    "id": "x",
+    "value": "__Infinity__"
+   }
+  ],
+  "expected": [
+   {
+    "id": "a",
+    "value": 3
+   },
+   {
+    "id": "b",
+    "value": 3
+   },
+   {
+    "id": "c",
+    "value": 1
+   }
+  ]
+ },
+ {
+  "id": "24",
+  "requirement": "接受对象数组，只保留非空字符串 id 与有限数值 value；按 id 取最高 value，返回 {count, average}，平均值为保留项均值（两位小数），无项时为 {count:0,average:0}；__proto__ 键的项必须忽略（原型污染防护）。",
+  "input": [
+   {
+    "id": "a",
+    "value": 2
+   },
+   {
+    "id": "a",
+    "value": 4.005
+   },
+   {
+    "id": "b",
+    "value": 6
+   },
+   {
+    "id": "__proto__",
+    "value": 9
+   },
+   {
+    "id": "x",
+    "value": "__Infinity__"
+   }
+  ],
+  "expected": {
+   "count": 2,
+   "average": 5
+  }
+ }
+]
