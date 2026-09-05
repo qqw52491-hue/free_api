@@ -1124,6 +1124,16 @@ async fn run_agent_main_loop_in_workspace_inner(
             }
             context.shell_probe_pre_dirty = None;
         }
+        println!(
+            "【阶段审查诊断】step {} | phase={:?} | mode={:?} | uncovered={} | shell_baseline={} | budget={} | side_effects={}",
+            step_id,
+            checkpoint.plan_phase,
+            checkpoint.plan_mode,
+            checkpoint.uncovered_shell_mutations,
+            checkpoint.stage_review_shell_baseline,
+            checkpoint.stage_review_budget_used,
+            context.side_effects.len()
+        );
         if let Some(reason) = crate::agent::stage_review::should_fire(&checkpoint, &context, &instruction) {
             match crate::agent::stage_review::dispatch(
                 &app,

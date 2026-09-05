@@ -135,30 +135,7 @@ pub async fn dispatch(
         router::prefer_cross_family_reviewer(&conn, &routing.model_id)
     };
 
-    let mut evidence = String::new();
-    evidence.push_str(&format!("【任务目标】{}\n", context.user_goal));
-    let todos = context
-        .todo_list
-        .iter()
-        .map(|t| format!("- [{}] {} ({})", t.status, t.description, t.id))
-        .collect::<Vec<_>>()
-        .join("\n");
-    evidence.push_str(&format!(
-        "【阶段计划（注意：这是中间态，非最终形态，final_only 级问题请如实标注）】\n{}\n",
-        todos
-    ));
-    match crate::agent::reviewer_gatekeeper::GitBaseline::capture(workspace)
-        .collect_git_diff(workspace)
-    {
-        Some((diff, _)) => {
-            let capped: String = diff.chars().take(12_000).collect();
-            evidence.push_str(&format!(
-                "【当前累计变更 diff（含自上次阶段审查以来的全部写入）】\n{}",
-                capped
-            ));
-        }
-        None => evidence.push_str("【当前累计变更 diff】（无法获取 git diff，请基于方案与目标做结构性审查）\n"),
-    }
+    let evidence = build_stage_evidence(context, workspace);
 
     let params = json!({
         "question": "阶段级写入审查：审查当前阶段变更是否满足阶段目标且无 blocking 缺陷",
@@ -193,6 +170,55 @@ pub async fn dispatch(
         );
     }
     Ok(())
+}
+
+/// 组装阶段审查证据包：任务目标 + 阶段计划 + diff 尾部。
+/// 硬约束：总长不得超过 child_reviewer 的 evidence_excerpt 预算（6000 字符），
+/// 超限会导致派发在解析层被静默拒绝（实测教训）。diff 取尾部——最近的变更与当前阶段最相关。
+fn build_stage_evidence(context: &SandwichContext, workspace: &Path) -> String {
+    const MAX_EVIDENCE_CHARS: usize = 6_000;
+
+    let mut evidence = String::new();
+    evidence.push_str(&format!("【任务目标】{}\n", context.user_goal));
+    let todos = context
+        .todo_list
+        .iter()
+        .map(|t| format!("- [{}] {} ({})", t.status, t.description, t.id))
+        .collect::<Vec<_>>()
+        .join("\n");
+    evidence.push_str(&format!(
+        "【阶段计划（注意：这是中间态，非最终形态，final_only 级问题请如实标注）】\n{}\n",
+        todos
+    ));
+
+    let diff_block = match crate::agent::reviewer_gatekeeper::GitBaseline::capture(workspace)
+        .collect_git_diff(workspace)
+    {
+        Some((diff, _)) => format!(
+            "【当前累计变更 diff（含自上次阶段审查以来的全部写入，尾部为最新变更）】\n{}",
+            diff
+        ),
+        None => "【当前累计变更 diff】（无法获取 git diff，请基于方案与目标做结构性审查）\n".to_string(),
+    };
+
+    // 先按预算截断 diff 尾部，再拼入总包；总包兜底再截一次
+    let used = evidence.chars().count();
+    let diff_allowance = MAX_EVIDENCE_CHARS.saturating_sub(used + 64).max(200);
+    let diff_tail: String = {
+        let chars: Vec<char> = diff_block.chars().collect();
+        let allowance = diff_allowance.max(200);
+        if chars.len() > allowance {
+            let tail: String = chars[chars.len() - allowance..].iter().collect();
+            format!("…（前段截断，保留尾部）\n{}", tail)
+        } else {
+            diff_block
+        }
+    };
+    evidence.push_str(&diff_tail);
+    if evidence.chars().count() > MAX_EVIDENCE_CHARS {
+        evidence = evidence.chars().take(MAX_EVIDENCE_CHARS).collect();
+    }
+    evidence
 }
 
 /// 消费阶段审查结果（成功或基础设施失败均走这里）。
@@ -336,6 +362,51 @@ mod tests {
         // 第 6 个触发（记账博弈兜底：模型不更新 todo 也逃不掉）
         context.record_side_effect(6, "write_file".to_string(), "f6.rs".to_string());
         assert!(should_fire(&cp, &context, &instruction).is_some(), "达到阈值必须触发");
+    }
+
+    #[test]
+    fn stage_evidence_never_exceeds_child_reviewer_budget() {
+        let dir = std::env::temp_dir().join(format!("stage-ev-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(&dir).status().unwrap()
+        };
+        std::fs::write(dir.join("big.rs"), "fn base() {}
+").unwrap();
+        assert!(git(&["init", "-q"]).success());
+        assert!(git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]).success());
+        assert!(git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]).success());
+        // 已跟踪文件的修改才会进 git diff HEAD
+        std::fs::write(dir.join("big.rs"), "x".repeat(40_000)).unwrap();
+
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        context.user_goal = "很长的目标".repeat(50);
+        for i in 0..24 {
+            context.todo_list.push(crate::agent::types::TodoItem {
+                id: i,
+                status: "done".to_string(),
+                description: "很长的阶段任务描述".repeat(5),
+                evidence_output_id: None,
+            });
+        }
+
+        let evidence = build_stage_evidence(&context, &dir);
+        assert!(
+            evidence.chars().count() <= 6_000,
+            "证据包超限会被 child_reviewer 解析层拒绝（实测教训）: {}",
+            evidence.chars().count()
+        );
+        assert!(evidence.contains("【任务目标】"), "目标必须保留");
+        assert!(evidence.contains("前段截断"), "大 diff 应截断保留尾部");
+
+        // 小 diff 不截断
+        std::fs::write(dir.join("big.rs"), "fn small() {}
+").unwrap();
+        let evidence2 = build_stage_evidence(&context, &dir);
+        assert!(!evidence2.contains("前段截断"));
+        assert!(evidence2.chars().count() <= 6_000);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
