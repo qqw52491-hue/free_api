@@ -180,7 +180,7 @@ pub async fn run_tool_phase(
             if checkpoint.plan_reviewer_retry_count
                 >= crate::agent::checkpoint::MAX_PLAN_REVIEWER_RETRIES
             {
-                let limit_msg = "【审查轮数已达上限（2 轮）】方案审查讨论已达最大重试上限，请停止继续派发审查子 Agent。\n请综合已有审查建议，整理最终技术方案并调用 ask_human（kind: 'plan_approval'）呈报给用户进行人工审批。".to_string();
+                let limit_msg = crate::agent::gate_messages::reviewer_retry_limit();
                 let result = DispatchResult {
                     stdout: String::new(),
                     stderr: limit_msg,
@@ -860,11 +860,32 @@ pub async fn run_tool_phase(
         .await
         {
             Ok(completed_jobs) => {
-                if completed_jobs
-                    .iter()
-                    .any(|j| j.job_type == "child_reviewer" || j.job_type.contains("reviewer"))
-                {
+                for job in completed_jobs.iter() {
+                    if !(job.job_type == "child_reviewer" || job.job_type.contains("reviewer")) {
+                        continue;
+                    }
                     checkpoint.plan_reviewer_consumed = true;
+                    // wait_jobs 交付路径同样要回填评分卡与 blocking 计数，
+                    // 否则门禁在“走 wait_jobs 收取”的正常链路上会因缺评分卡而误拦（fail-closed 的对称补齐）。
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&job.result_json) {
+                        if let Some(sc) = value.get("scorecard").and_then(|v| serde_json::from_value::<crate::agent::child_reviewer::ReviewScorecard>(v.clone()).ok()) {
+                            checkpoint.last_review_scorecard = Some(sc);
+                        }
+                        checkpoint.last_review_blocking_count = value
+                            .get("findings")
+                            .and_then(|f| f.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter(|f| {
+                                        f.get("severity")
+                                            .and_then(|s| s.as_str())
+                                            .map(|s| s.eq_ignore_ascii_case("blocking"))
+                                            .unwrap_or(false)
+                                    })
+                                    .count() as u32
+                            })
+                            .unwrap_or(0);
+                    }
                 }
                 let mut out = String::new();
                 if completed_jobs.is_empty() {
@@ -1040,8 +1061,15 @@ pub async fn run_tool_phase(
                             };
                             config.max_tokens = 900;
                             if !checkpoint.plan_phase.is_approved() {
-                                checkpoint.plan_reviewer_retry_count += 1;
-                                checkpoint.plan_reviewer_consumed = false;
+                                // 反驳对质同样消耗审查预算：必须走统一预扣，堵住无上限自增旁路
+                                if let Err(reason) = checkpoint.reserve_plan_review_round() {
+                                    return Ok(DispatchResult {
+                                        stdout: String::new(),
+                                        stderr: format!("【审查轮数已达上限】{}\n{}", reason, crate::agent::gate_messages::reviewer_retry_limit()),
+                                        success: false,
+                                        route: "plan_gatekeeper:reviewer_retry_limit".to_string(),
+                                    });
+                                }
                             }
 
                             let db_clone = DbState(state.0.clone());

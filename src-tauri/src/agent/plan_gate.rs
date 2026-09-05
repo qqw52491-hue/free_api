@@ -155,13 +155,28 @@ pub(crate) fn check_pre_write_gatekeeper(
                         stderr: crate::agent::gate_messages::cross_review_scorecard_failed(&reason),
                         route: "plan_gatekeeper:scorecard_failed".to_string(),
                     })
+                } else if checkpoint.last_review_blocking_count > 0 {
+                    // 评分达标但存在未解决的 blocking 异议：分数不是唯一门槛，异议必须闭环
+                    Some(DispatchResult {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: crate::agent::gate_messages::cross_review_blocking_findings_open(checkpoint.last_review_blocking_count),
+                        route: "plan_gatekeeper:blocking_findings_open".to_string(),
+                    })
                 } else {
                     checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
                     None
                 }
             } else {
-                checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
-                None
+                // fail-closed：审查结论缺失评分卡时绝不默认放行（旧的 fail-open 暗道）
+                let budget_exhausted = checkpoint.plan_reviewer_retry_count
+                    >= crate::agent::checkpoint::MAX_PLAN_REVIEWER_RETRIES;
+                Some(DispatchResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: crate::agent::gate_messages::cross_review_scorecard_missing(budget_exhausted),
+                    route: "plan_gatekeeper:scorecard_missing".to_string(),
+                })
             }
         }
         crate::agent::checkpoint::PlanExecutionMode::Auto => {

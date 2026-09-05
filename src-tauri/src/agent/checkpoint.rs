@@ -524,6 +524,9 @@ pub struct AgentCheckpoint {
     /// 方案审查最新评分卡（正确性、破坏性风险、代码规范、测试覆盖）
     #[serde(default)]
     pub last_review_scorecard: Option<crate::agent::child_reviewer::ReviewScorecard>,
+    /// 最新一轮审查中未解决的 blocking 级异议数量（评分达标但存在 blocking 时同样拦截）
+    #[serde(default)]
+    pub last_review_blocking_count: u32,
     /// 运行模式兼容字段：true 为全自动/自主模式，false 为方案审批模式
     #[serde(default = "default_auto_pilot")]
     pub auto_pilot: bool,
@@ -560,6 +563,7 @@ impl AgentCheckpoint {
             plan_mode: PlanExecutionMode::Auto,
             plan_reviewer_consumed: false,
             last_review_scorecard: None,
+            last_review_blocking_count: 0,
             auto_pilot: true,
             last_error: None,
             version: 0,
@@ -620,6 +624,22 @@ impl AgentCheckpoint {
             }
             PlanExecutionMode::Auto => {}
         }
+    }
+
+    /// 预扣一轮方案审查预算。已到上限返回 Err（调用方应拒绝派发并引导人工放行）。
+    ///
+    /// 所有消耗审查轮次的路径（常规派发、resume_child 反驳对质）都必须走这里，
+    /// 防止旁路无上限自增绕过熔断。
+    pub fn reserve_plan_review_round(&mut self) -> Result<(), String> {
+        if self.plan_reviewer_retry_count >= MAX_PLAN_REVIEWER_RETRIES {
+            return Err(format!(
+                "方案审查轮次预算已耗尽（上限 {} 轮）",
+                MAX_PLAN_REVIEWER_RETRIES
+            ));
+        }
+        self.plan_reviewer_retry_count += 1;
+        self.plan_reviewer_consumed = false;
+        Ok(())
     }
 
     /// 回滚一次「未产生任何后台任务」的审查派发：归还审查轮次并恢复派发前的消费状态。

@@ -39,3 +39,23 @@ pub fn cross_review_scorecard_failed(reason: &str) -> String {
 pub fn auto_mode_need_plan() -> String {
     "【🚨 前置方案门禁拦截：尚未确立经论证的技术方案】\n检测到在首轮未完成只读排查与方案阐述前尝试直接调用了写代码工具。\n为保证工程契约安全，请先遵循【假设驱动与主动证伪法则】：\n1. 优先通过只读工具（如 read_file/grep_search）排查代码并排除错误假设，锁定唯一根因；\n2. 输出清晰的技术方案与反证推演说明；\n方案确认后再执行修改。本次写入已被安全拦截，目标文件未受影响。".to_string()
 }
+
+/// 交叉审查模式：审查结论缺少评分卡（fail-closed，绝不默认放行）
+pub fn cross_review_scorecard_missing(budget_exhausted: bool) -> String {
+    let escape = if budget_exhausted {
+        "审查轮次预算已耗尽，无法再次派发：请调用 ask_human 工具（kind: 'plan_approval'）将当前方案与已有审查结论呈报用户，由人工审批放行。"
+    } else {
+        "请重新调用 child_reviewer 派发审查，并确保输出包含 scorecard 四维评分；或直接调用 ask_human（kind: 'plan_approval'）走人工审批。"
+    };
+    format!("【🚨 交叉审查硬门禁拦截：审查结论缺少评分卡】\n检测到审查子任务的结论中没有 ReviewScorecard 评分卡，硬门禁无法核定放行条件，本次写入已被安全拦截（缺失评分时绝不默认放行）。\n{}目标未受影响。", escape)
+}
+
+/// 交叉审查模式：评分达标但仍有未解决的 blocking 级异议
+pub fn cross_review_blocking_findings_open(count: u32) -> String {
+    format!("【🚨 交叉审查硬门禁拦截：存在未解决的 blocking 级异议】\n审查评分虽已达标，但最新一轮审查仍有 {} 条 blocking 级异议未解决。\n硬门禁规则：blocking 异议必须逐条回应并修复，或经再次审查确认已解决后，方可放行写入。\n请针对每条 blocking 异议给出处理说明（修复 / 证伪 / 设计取舍理由），然后重新派发审查确认。", count)
+}
+
+/// 方案审查轮次预算耗尽的统一提示（常规派发与反驳对质共用）
+pub fn reviewer_retry_limit() -> String {
+    "【审查轮数已达上限（2 轮）】方案审查讨论已达最大重试上限，请停止继续派发审查子 Agent。\n请综合已有审查建议，整理最终技术方案并调用 ask_human（kind: 'plan_approval'）呈报给用户进行人工审批。".to_string()
+}
