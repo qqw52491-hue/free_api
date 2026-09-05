@@ -67,6 +67,79 @@ fn default_reasoning_effort() -> String {
 fn default_context_budget_mode() -> String {
     "deep_coding".to_string()
 }
+/// 从 model_id 启发式判断模型家族。跨家族异构审查的前提是能识别家族；
+/// 私有部署名无法识别时返回 "other"（按同家族保守处理，不做切换）。
+pub fn model_family(model_id: &str) -> &'static str {
+    let id = model_id.to_ascii_lowercase();
+    if id.contains("claude") || id.contains("anthropic") {
+        "anthropic"
+    } else if id.contains("gpt") || id.contains("o1") || id.contains("o3") || id.contains("o4")
+        || id.contains("openai")
+    {
+        "openai"
+    } else if id.contains("gemini") || id.contains("gemma") {
+        "google"
+    } else if id.contains("deepseek") {
+        "deepseek"
+    } else if id.contains("qwen") || id.contains("qwq") {
+        "qwen"
+    } else if id.contains("glm") || id.contains("zhipu") || id.contains("chatglm") {
+        "glm"
+    } else if id.contains("mistral") || id.contains("mixtral") {
+        "mistral"
+    } else if id.contains("llama") {
+        "llama"
+    } else if id.contains("kimi") || id.contains("moonshot") {
+        "moonshot"
+    } else if id.contains("doubao") {
+        "doubao"
+    } else {
+        "other"
+    }
+}
+
+/// reviewer 跨家族优选（配置级异构的默认行为，显式 role_models/角色卡钉死不受影响）：
+/// 当前 reviewer 模型与规划者同家族时，从启用模型中挑一个异构家族的替代；
+/// 无异构可选（单家族部署）时保持原模型并返回告警，由调用方显式记录。
+/// 返回 (最终模型, 说明)。
+pub fn prefer_cross_family_reviewer(
+    conn: &rusqlite::Connection,
+    current_model: &str,
+) -> (String, Option<String>) {
+    let current_family = model_family(current_model);
+    if current_family == "other" {
+        return (current_model.to_string(), None);
+    }
+    let models: Vec<String> = {
+        let Ok(mut stmt) = conn.prepare("SELECT id FROM models WHERE enabled = 1") else {
+            return (current_model.to_string(), None);
+        };
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    };
+    let alternative = models.iter().find(|m| {
+        let family = model_family(m);
+        family != current_family && family != "other"
+    });
+    match alternative {
+        Some(m) => (
+            m.clone(),
+            Some(format!(
+                " reviewer 异构优选：{}（{} 系）→ {}（{} 系），与规划者模型家族错开以互补盲区。",
+                current_model, current_family, m, model_family(m)
+            )),
+        ),
+        None => (
+            current_model.to_string(),
+            Some(format!(
+                " ⚠️ reviewer 与规划者同为 {} 系模型且无异构家族可选（单家族部署），跨家族审查收益将打折；建议接入其他家族模型或在角色卡钉死异构模型。",
+                current_family
+            )),
+        ),
+    }
+}
+
 impl ModelRoutingConfig {
     pub fn reasoning_effort_for(&self, tier: &RoutingTier) -> &str {
         let configured = match tier {
@@ -415,6 +488,59 @@ impl AgentRouter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn model_family_heuristic_classification() {
+        assert_eq!(super::model_family("claude-sonnet-4"), "anthropic");
+        assert_eq!(super::model_family("gpt-4o-mini"), "openai");
+        assert_eq!(super::model_family("o3-preview"), "openai");
+        assert_eq!(super::model_family("gemini-2.5-pro"), "google");
+        assert_eq!(super::model_family("deepseek-chat"), "deepseek");
+        assert_eq!(super::model_family("qwen-max"), "qwen");
+        assert_eq!(super::model_family("glm-4.6"), "glm");
+        assert_eq!(super::model_family("kimi-k2"), "moonshot");
+        // 未知命名按 other 保守处理，不做切换
+        assert_eq!(super::model_family("my-private-llm-v2"), "other");
+    }
+
+    #[test]
+    fn prefer_cross_family_reviewer_switches_and_falls_back() {
+        use crate::db::init_db;
+        let dir = std::env::temp_dir().join(format!("xfamily-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = init_db(&dir.join("t.db")).unwrap();
+
+        // 多家族可用：openai 规划者 → 切到非 openai 家族
+        conn.execute(
+            "INSERT OR REPLACE INTO platforms (id, name, base_url, api_key, created_at) VALUES ('p','test','https://example.com','sk-test','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO models (id, platform_id, name, display_name, enabled, created_at) VALUES
+             ('gpt-x','p','n','d',1,'2026-01-01T00:00:00Z'),
+             ('claude-y','p','n','d',1,'2026-01-01T00:00:00Z'),
+             ('glm-z','p','n','d',1,'2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let (model, note) = super::prefer_cross_family_reviewer(&conn, "gpt-x");
+        assert_ne!(super::model_family(&model), "openai", "应切到异构家族");
+        assert!(note.unwrap().contains("异构优选"));
+
+        // 单家族：无异构可选 → 保持原模型 + 显式告警
+        conn.execute("DELETE FROM models WHERE id IN ('claude-y','glm-z')", []).unwrap();
+        let (model, note) = super::prefer_cross_family_reviewer(&conn, "gpt-x");
+        assert_eq!(model, "gpt-x");
+        assert!(note.unwrap().contains("无异构家族可选"));
+
+        // 未知家族（other）：保守不切换、不打扰
+        let (model, note) = super::prefer_cross_family_reviewer(&conn, "my-private-llm");
+        assert_eq!(model, "my-private-llm");
+        assert!(note.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use crate::agent::context::SandwichContext;
     use crate::agent::review_contract::ReviewContract;

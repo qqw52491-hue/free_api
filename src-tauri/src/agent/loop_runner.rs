@@ -205,9 +205,10 @@ pub async fn run_tool_phase(
             if !checkpoint.plan_phase.is_approved() {
                 checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
             }
-            checkpoint.plan_reviewer_retry_count =
-                checkpoint.plan_reviewer_retry_count.saturating_add(1);
-            checkpoint.plan_reviewer_consumed = false;
+            // 统一走 reserve：与反驳对质共用同一预扣入口，预算语义单一事实源
+            if checkpoint.reserve_plan_review_round().is_err() {
+                // 上方已做过上限检查，正常不会到这里；兜底不递增
+            }
         }
 
         let routing = crate::agent::router::AgentRouter::route_for_role(
@@ -270,6 +271,17 @@ pub async fn run_tool_phase(
                         ));
                         fail_count += 1;
                         continue;
+                    }
+                }
+                if reviewer_model == routing.model_id {
+                    // 未被角色卡钉死时应用配置级异构优选；说明写进派发报告，人工可见
+                    let (preferred, note) = crate::agent::router::prefer_cross_family_reviewer(
+                        &*state.inner().0.lock().unwrap(),
+                        &reviewer_model,
+                    );
+                    reviewer_model = preferred;
+                    if let Some(note) = note {
+                        item_reports.push(format!("[{}/{}]{}", item_num, total, note));
                     }
                 }
             }
@@ -864,6 +876,18 @@ pub async fn run_tool_phase(
                     if !(job.job_type == "child_reviewer" || job.job_type.contains("reviewer")) {
                         continue;
                     }
+                    // 基础设施失败（超时/取消/中断）不是实质性审查：退款且不算消费过
+                    let infra_kind = serde_json::from_str::<serde_json::Value>(&job.result_json)
+                        .ok()
+                        .and_then(|v| v.get("error_kind").and_then(|e| e.as_str()).map(|s| s.to_string()));
+                    let is_infra = matches!(
+                        infra_kind.as_deref(),
+                        Some("timed_out") | Some("interrupted") | Some("cancelled")
+                    );
+                    if is_infra {
+                        checkpoint.refund_infra_failed_review_round(infra_kind.as_deref());
+                        continue;
+                    }
                     checkpoint.plan_reviewer_consumed = true;
                     // wait_jobs 交付路径同样要回填评分卡与 blocking 计数，
                     // 否则门禁在“走 wait_jobs 收取”的正常链路上会因缺评分卡而误拦（fail-closed 的对称补齐）。
@@ -898,6 +922,28 @@ pub async fn run_tool_phase(
                                     .count() as u32
                             })
                             .unwrap_or(0);
+                        // 异议动态三计数（膨胀观测）
+                        let findings_arr = value.get("findings").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+                        let maintained = value
+                            .get("objection_verdicts")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter(|v| {
+                                        v.get("verdict").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("maintain")).unwrap_or(false)
+                                            && findings_arr.iter().any(|f| {
+                                                f.get("id").and_then(|i| i.as_str()) == v.get("finding_id").and_then(|i| i.as_str())
+                                                    && f.get("severity").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("blocking")).unwrap_or(false)
+                                            })
+                                    })
+                                    .count() as u32
+                            })
+                            .unwrap_or(0);
+                        checkpoint.review_objection_withdrawn = withdrawn.len() as u32;
+                        checkpoint.review_objection_maintained = maintained;
+                        checkpoint.review_objection_added = checkpoint
+                            .last_review_blocking_count
+                            .saturating_sub(checkpoint.review_objection_withdrawn);
                     }
                 }
                 let mut out = String::new();
@@ -1034,7 +1080,11 @@ pub async fn run_tool_phase(
                             let model_to_use = if !child_model.is_empty() {
                                 child_model
                             } else {
-                                routing.model_id.clone()
+                                let (preferred, _note) = crate::agent::router::prefer_cross_family_reviewer(
+                                    &*state.inner().0.lock().unwrap(),
+                                    &routing.model_id,
+                                );
+                                preferred
                             };
                             let reasoning_effort = model_routing.reasoning_effort_for(&routing.tier).to_string();
 

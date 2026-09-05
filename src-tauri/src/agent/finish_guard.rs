@@ -816,6 +816,36 @@ mod finish_guard_tests {
     }
 
     #[test]
+    fn infra_failed_review_rounds_get_refund_with_cap() {
+        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
+
+        // 预扣 2 轮后两次超时：各退 1 轮
+        checkpoint.plan_reviewer_retry_count = 0;
+        let _ = checkpoint.reserve_plan_review_round();
+        let _ = checkpoint.reserve_plan_review_round();
+        assert!(checkpoint.refund_infra_failed_review_round(Some("timed_out")));
+        assert_eq!(checkpoint.plan_reviewer_retry_count, 1);
+        assert!(checkpoint.refund_infra_failed_review_round(Some("interrupted")));
+        assert_eq!(checkpoint.plan_reviewer_retry_count, 0);
+        assert_eq!(checkpoint.reviewer_budget_refunds, 2);
+
+        // 预算为 0 时不再退款
+        assert!(!checkpoint.refund_infra_failed_review_round(Some("timed_out")));
+
+        // 实质性终态（invalid_output）不退款
+        checkpoint.plan_reviewer_retry_count = 2;
+        assert!(!checkpoint.refund_infra_failed_review_round(Some("invalid_output")));
+        assert_eq!(checkpoint.plan_reviewer_retry_count, 2);
+
+        // 退款封顶 3 次：防持续故障下预算永不耗尽
+        checkpoint.plan_reviewer_retry_count = 5;
+        checkpoint.reviewer_budget_refunds = 3;
+        assert!(!checkpoint.refund_infra_failed_review_round(Some("timed_out")));
+        assert_eq!(checkpoint.plan_reviewer_retry_count, 5);
+    }
+
+    #[test]
     fn reserve_plan_review_round_caps_rebuttal_budget() {
         let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);

@@ -57,6 +57,10 @@ pub struct ChannelConfig {
     /// 阶段里程碑（环境就绪/失败恢复/救援/交付）是否推送
     #[serde(default = "default_true")]
     pub phase_pushes: bool,
+    /// reviewer 僵尸行巡检宽限（秒）。异构大家族模型长上下文推理较慢时可调高；
+    /// None = 默认 600s，上限 3600s。
+    #[serde(default)]
+    pub reviewer_reap_grace_secs: Option<u64>,
     /// 网页控制台对外访问基础地址（内网穿透域名，如 https://xxx.example.com）；
     /// 空 = 自动探测局域网 IPv4。用于生成扫码直达的二维码
     #[serde(default)]
@@ -99,6 +103,7 @@ impl Default for ChannelConfig {
             heartbeat_minutes: default_heartbeat_minutes(),
             help_text: default_help_text(),
             auto_start_bridge: true,
+            reviewer_reap_grace_secs: None,
             allowlist: Vec::new(),
             llm_retries: None,
             action_milestone_steps: default_action_milestone(),

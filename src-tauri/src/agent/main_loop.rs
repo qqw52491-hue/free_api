@@ -811,9 +811,25 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]{}成本: 输入 {} / 输出 {} tokens, 耗时 {}ms\n发现:\n- {}\n",
                                 result.child_run_id, result.confidence, routing_str, scorecard_desc, result.prompt_tokens, result.completion_tokens, result.duration_ms, formatted_findings
                             ));
-                            // 异议闭环：以"未撤回的 blocking 异议"为收敛判据
-                            let blocking_count = result.unwithdrawn_blocking_count();
-                            checkpoint.last_review_blocking_count = blocking_count;
+                            // 基础设施失败：退款、不算消费过（超时不是审查，不应烧预算）
+                            if matches!(
+                                result.error_kind.as_deref(),
+                                Some("timed_out") | Some("interrupted") | Some("cancelled")
+                            ) {
+                                checkpoint.refund_infra_failed_review_round(result.error_kind.as_deref());
+                            } else {
+                                // 异议闭环：以"未撤回的 blocking 异议"为收敛判据
+                                let blocking_count = result.unwithdrawn_blocking_count();
+                                checkpoint.last_review_blocking_count = blocking_count;
+                                let (added, withdrawn, maintained) = result.objection_stats();
+                                checkpoint.review_objection_added = added;
+                                checkpoint.review_objection_withdrawn = withdrawn;
+                                checkpoint.review_objection_maintained = maintained;
+                                injection.push_str(&format!(
+                                    "\n📊 本轮异议动态: 新增 {} / 撤回 {} / 维持 {}（连续多轮撤回≈新增且总数不降 = 审查空转，请评估转人工）\n",
+                                    added, withdrawn, maintained
+                                ));
+                            }
                             if let Some(ref sc) = result.scorecard {
                                 checkpoint.last_review_scorecard = Some(sc.clone());
                             }
@@ -823,7 +839,12 @@ async fn run_agent_main_loop_in_workspace_inner(
                                     result.withdrawn_findings.join(", ")
                                 ));
                             }
-                            checkpoint.plan_reviewer_consumed = true;
+                            if !matches!(
+                                result.error_kind.as_deref(),
+                                Some("timed_out") | Some("interrupted") | Some("cancelled")
+                            ) {
+                                checkpoint.plan_reviewer_consumed = true;
+                            }
                         }
                     }
                     if !result.missing_evidence.is_empty() {

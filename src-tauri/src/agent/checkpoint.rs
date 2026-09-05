@@ -527,6 +527,16 @@ pub struct AgentCheckpoint {
     /// 最新一轮审查中未解决的 blocking 级异议数量（评分达标但存在 blocking 时同样拦截）
     #[serde(default)]
     pub last_review_blocking_count: u32,
+    /// 本轮异议动态：(新增, 撤回, 维持) —— 膨胀观测：撤回≈新增且总数不降 = 审查空转
+    #[serde(default)]
+    pub review_objection_added: u32,
+    #[serde(default)]
+    pub review_objection_withdrawn: u32,
+    #[serde(default)]
+    pub review_objection_maintained: u32,
+    /// 基础设施失败（超时/取消/中断）已退还的审查轮次数；封顶防无限重试
+    #[serde(default)]
+    pub reviewer_budget_refunds: u32,
     /// 运行模式兼容字段：true 为全自动/自主模式，false 为方案审批模式
     #[serde(default = "default_auto_pilot")]
     pub auto_pilot: bool,
@@ -564,6 +574,10 @@ impl AgentCheckpoint {
             plan_reviewer_consumed: false,
             last_review_scorecard: None,
             last_review_blocking_count: 0,
+            review_objection_added: 0,
+            review_objection_withdrawn: 0,
+            review_objection_maintained: 0,
+            reviewer_budget_refunds: 0,
             auto_pilot: true,
             last_error: None,
             version: 0,
@@ -640,6 +654,22 @@ impl AgentCheckpoint {
         self.plan_reviewer_retry_count += 1;
         self.plan_reviewer_consumed = false;
         Ok(())
+    }
+
+    /// 基础设施失败的审查轮次退款：超时/取消/中断不是实质性审查，不应烧掉预算
+    /// （否则一次超时 = 双倍代价：本轮作废 + 重派再扣）。退款封顶 3 次，
+    /// 防止持续故障下预算永不耗尽、模型无限空转。
+    pub fn refund_infra_failed_review_round(&mut self, error_kind: Option<&str>) -> bool {
+        let infra = matches!(
+            error_kind,
+            Some("timed_out") | Some("interrupted") | Some("cancelled")
+        );
+        if !infra || self.reviewer_budget_refunds >= 3 || self.plan_reviewer_retry_count == 0 {
+            return false;
+        }
+        self.plan_reviewer_retry_count -= 1;
+        self.reviewer_budget_refunds += 1;
+        true
     }
 
     /// 回滚一次「未产生任何后台任务」的审查派发：归还审查轮次并恢复派发前的消费状态。

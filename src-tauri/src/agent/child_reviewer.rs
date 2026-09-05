@@ -104,6 +104,44 @@ impl ChildReviewResult {
             })
             .count() as u32
     }
+
+    /// 本轮异议动态三元组：(新增, 撤回, 维持)。
+    /// - 撤回：被审查者裁决 withdraw 的 blocking 异议数；
+    /// - 维持：裁决 maintain 的 blocking 异议数；
+    /// - 新增：本轮 findings 中未被任何裁决覆盖的 blocking 异议数（首轮全部算新增）。
+    ///
+    /// 膨胀观测用：连续多轮「撤回数≈新增数且未解决总数不降」说明审查在空转，
+    /// 行为上等价于 reviewer 刁难——只有留下计数才能事后与"方案真的烂"区分开。
+    pub fn objection_stats(&self) -> (u32, u32, u32) {
+        let is_blocking = |f: &ReviewFinding| f.severity.eq_ignore_ascii_case("blocking");
+        let withdrawn = self
+            .withdrawn_findings
+            .iter()
+            .filter(|id| self.findings.iter().any(|f| &f.id == *id && is_blocking(f)))
+            .count() as u32;
+        let maintained = self
+            .objection_verdicts
+            .iter()
+            .filter(|v| {
+                v.verdict.eq_ignore_ascii_case("maintain")
+                    && self
+                        .findings
+                        .iter()
+                        .any(|f| f.id == v.finding_id && is_blocking(f))
+            })
+            .count() as u32;
+        let covered: Vec<&String> = self
+            .objection_verdicts
+            .iter()
+            .map(|v| &v.finding_id)
+            .collect();
+        let added = self
+            .findings
+            .iter()
+            .filter(|f| is_blocking(f) && !covered.iter().any(|id| **id == f.id))
+            .count() as u32;
+        (added, withdrawn, maintained)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -563,14 +601,22 @@ fn parse_controlled_output(
     let objection_verdicts: Vec<ObjectionVerdict> = output
         .objection_verdicts
         .into_iter()
-        .map(|raw| ObjectionVerdict {
-            finding_id: raw.finding_id.unwrap_or_default().trim().to_string(),
-            // 缺失/非法 verdict 一律按 maintain 处理：裁决不明确时绝不当撤回
-            verdict: match raw.verdict.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
-                Some(v) if v == "withdraw" || v == "maintain" => v,
-                _ => "maintain".to_string(),
-            },
-            reason: raw.reason.unwrap_or_default().trim().to_string(),
+        .map(|raw| {
+            let reason = raw.reason.unwrap_or_default().trim().to_string();
+            // 撤回必须有据：理由非空且达到最低信息量，否则按 maintain 处理。
+            // 这是结构性底线（挡模板化橡皮擦）；"理由是否真的引用了父Agent的
+            // 修订内容"是语义判断，由审查方法约束 + 事后 objection_stats 观测兜底。
+            let reason_is_substantive = reason.chars().count() >= 12;
+            ObjectionVerdict {
+                finding_id: raw.finding_id.unwrap_or_default().trim().to_string(),
+                // 缺失/非法 verdict 或理由空洞 一律按 maintain 处理：裁决不明确时绝不当撤回
+                verdict: match raw.verdict.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+                    Some(v) if v == "withdraw" && reason_is_substantive => v,
+                    Some(v) if v == "maintain" => v,
+                    _ => "maintain".to_string(),
+                },
+                reason,
+            }
         })
         .collect();
     let withdrawn_findings = resolve_withdrawn_ids(&structured_findings, &objection_verdicts);
@@ -833,7 +879,7 @@ pub async fn spawn_child_reviewer(
         0. 必须在 scorecard 中如实评出4个维度评分（0~100整数），综合均分>=75且破坏性风险>=60方可放行代码写入；\n\
         1. findings 为 1–5 条结构化审查条目；若无确切位置 location，severity 必须标为 question（禁止标 blocking）；\n\
         2. 证据不足时 confidence 标 unverified 并在 missing_evidence 说明；\n\
-        3. 若证据包中提供了此前审查的 blocking 异议及父Agent的处理说明，必须输出 objection_verdicts 逐条裁决：问题确已解决或经证伪不成立时 verdict 取 withdraw 并给出理由；仍成立或有新证据支持时取 maintain。无历史异议时省略该字段；\n\
+        3. 若证据包中提供了此前审查的 blocking 异议及父Agent的处理说明，必须输出 objection_verdicts 逐条裁决：问题确已解决或经证伪不成立时 verdict 取 withdraw，理由必须引用证据包中父Agent处理说明或修订内容的具体点（空泛模板理由会被系统按 maintain 处理）；仍成立或有新证据支持时取 maintain。无历史异议时省略该字段；\n\
         4. 不要输出任何推理过程、Markdown 标记或额外字段。{}",
         persona
     );
@@ -1111,12 +1157,20 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
         .unwrap_or_default()
     };
     let now = chrono::Utc::now();
+    // reviewer 宽限可通过 channel-config.json 的 reviewer_reap_grace_secs 调整
+    // （异构大家族模型在长上下文上推理超 10 分钟并不罕见，默认 600s 偏紧时可调高）
+    let reviewer_budget_secs: i64 = crate::agent::channel::channel_config_shared()
+        .read()
+        .ok()
+        .and_then(|cfg| cfg.reviewer_reap_grace_secs)
+        .map(|v| v.min(3600) as i64)
+        .unwrap_or(600);
     let mut reaped = 0usize;
     for (child_run_id, kind, started_at) in rows {
         let budget_secs: i64 = match kind.as_deref() {
             Some("writer") => 1200,
             Some("worker") => 900,
-            _ => 600,
+            _ => reviewer_budget_secs,
         };
         let age_secs = chrono::DateTime::parse_from_rfc3339(&started_at)
             .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds())
@@ -1302,6 +1356,104 @@ mod tests {
             resolve_withdrawn_ids(&findings, &[verdict("F2", "WITHDRAW")]),
             vec!["F2".to_string()]
         );
+    }
+
+    #[test]
+    fn objection_stats_distinguishes_added_withdrawn_maintained() {
+        let mk = |id: &str, sev: &str| ReviewFinding {
+            id: id.to_string(),
+            severity: sev.to_string(),
+            location: String::new(),
+            current: String::new(),
+            why: String::new(),
+            suggestion: String::new(),
+            evidence_strength: "confirmed".to_string(),
+        };
+        // 第二轮：F1 维持、F2 撤回（撤回项仍列在 findings 中，由 verdict 裁定）、F3 新增
+        let result = ChildReviewResult {
+            child_run_id: "c".into(),
+            status: "succeeded".into(),
+            findings: vec![mk("F1", "blocking"), mk("F2", "blocking"), mk("F3", "blocking")],
+            confidence: "confirmed".into(),
+            evidence_refs: vec![],
+            missing_evidence: vec![],
+            duration_ms: 0,
+            completion_tokens: 0,
+            prompt_tokens: 0,
+            error_kind: None,
+            raw_result_json: None,
+            kind: None,
+            routing: None,
+            withdrawn_findings: vec!["F2".to_string()],
+            objection_verdicts: vec![verdict("F1", "maintain"), verdict("F2", "withdraw")],
+            scorecard: None,
+        };
+        let (added, withdrawn, maintained) = result.objection_stats();
+        assert_eq!(added, 1, "F3 无裁决覆盖，计为新增");
+        assert_eq!(withdrawn, 1, "F2 被裁决撤回");
+        assert_eq!(maintained, 1, "F1 维持");
+
+        // 膨胀场景：撤回2条旧异议 + 新增2条新异议（F4/F5 无裁决覆盖）
+        let inflated = ChildReviewResult {
+            findings: vec![
+                mk("F1", "blocking"),
+                mk("F2", "blocking"),
+                mk("F3", "blocking"),
+                mk("F4", "blocking"),
+                mk("F5", "blocking"),
+            ],
+            objection_verdicts: vec![verdict("F1", "maintain"), verdict("F2", "withdraw"), verdict("F3", "withdraw")],
+            withdrawn_findings: vec!["F2".to_string(), "F3".to_string()],
+            ..result
+        };
+        let (added, withdrawn, maintained) = inflated.objection_stats();
+        assert_eq!((added, withdrawn, maintained), (2, 2, 1), "撤回≈新增：膨胀信号可见");
+    }
+
+    #[test]
+    fn parse_rejects_eraser_withdrawals_with_empty_or_thin_reason() {
+        let base = |verdict_reason: &str| format!(
+            r#"{{"findings":[{{"id":"F1","severity":"blocking","location":"src/a.rs:1","why":"存在空指针解引用"}}],
+                "confidence":"supported",
+                "objection_verdicts":[{{"finding_id":"F1","verdict":"withdraw","reason":"{}"}}]}}"#,
+            verdict_reason
+        );
+        // 空理由 → 按 maintain，不撤回
+        let (findings, _, _, _, _, _, verdicts, withdrawn) =
+            parse_controlled_output(&base(""), &[]).unwrap();
+        assert_eq!(verdicts[0].verdict, "maintain");
+        assert!(withdrawn.is_empty());
+        assert_eq!(
+            ChildReviewResult::unwithdrawn_blocking_count(&ChildReviewResult {
+                child_run_id: "c".into(),
+                status: "succeeded".into(),
+                findings,
+                confidence: "supported".into(),
+                evidence_refs: vec![],
+                missing_evidence: vec![],
+                duration_ms: 0,
+                completion_tokens: 0,
+                prompt_tokens: 0,
+                error_kind: None,
+                raw_result_json: None,
+                kind: None,
+                routing: None,
+                withdrawn_findings: withdrawn,
+                objection_verdicts: verdicts,
+                scorecard: None,
+            }),
+            1
+        );
+        // 模板化短理由（<12字）→ 同样按 maintain
+        let (_, _, _, _, _, _, verdicts, withdrawn) =
+            parse_controlled_output(&base("已修复"), &[]).unwrap();
+        assert_eq!(verdicts[0].verdict, "maintain");
+        assert!(withdrawn.is_empty());
+        // 有实质内容的理由 → 认可 withdraw
+        let (_, _, _, _, _, _, verdicts, withdrawn) =
+            parse_controlled_output(&base("父Agent已在 a.rs:1 增加判空并补了回归测试，见处理说明第1条"), &[]).unwrap();
+        assert_eq!(verdicts[0].verdict, "withdraw");
+        assert_eq!(withdrawn, vec!["F1".to_string()]);
     }
 
     #[test]
