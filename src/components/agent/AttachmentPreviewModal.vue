@@ -54,6 +54,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatFileSize } from "./formatUtils";
 import { computed, ref } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
@@ -93,13 +94,6 @@ function getFileBadgeIcon(fileName: string): string {
     if (["zip", "tar", "gz", "rar", "7z"].includes(ext)) return "📦";
     if (["rs", "ts", "js", "py", "go", "java", "c", "cpp", "html", "css", "json", "sql", "sh"].includes(ext)) return "💻";
     return "📎";
-}
-
-function formatFileSize(bytes?: number): string {
-    if (!bytes || bytes <= 0) return "";
-    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${bytes} B`;
 }
 
 async function handleCopy() {
