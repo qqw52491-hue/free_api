@@ -837,10 +837,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                         || Some(result.child_run_id.as_str())
                             == checkpoint.stage_review_rebuttal_run_id.as_deref()
                     {
+                        let oracle_index = crate::agent::eval_oracle::query_active_progress()
+                            .await
+                            .map(|(idx, _, _)| idx as u32);
                         let note = crate::agent::stage_review::apply_stage_result(
                             &mut checkpoint,
                             &result,
                             &context,
+                            oracle_index,
                         );
                         injection.push_str(&format!(
                             "\n【📋 阶段审查 (child_run_id: {})】\n{}\n",

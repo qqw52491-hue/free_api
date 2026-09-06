@@ -260,6 +260,17 @@ cargo test 437 全绿 ✓。
 有任务在跑→只做简短巡检并在此追加一行，空闲→按 〇·十二 队列推进下一项。
 **追加格式**：`- MM-DD HH:MM 做了什么/状态/下一步`（新行加在最上面）。
 
+- 09-07 05:16 **【僵尸 blocker 治理落地】宿主判分越过出生阶段即自动清账**。
+  机制：checkpoint 新增 `stage_review_blocker_stage`（blocker 出现时的 oracle
+  「下一未解阶段」索引，两处写入点记录：wait 交付 + apply_stage_result[签名加
+  oracle_index 参数]）；两个写入门禁调用点（B1.8 主写入 + resume_child writer）
+  在拦截前查 oracle 进度，越过出生索引 → `clear_stale_stage_blockers` 清零并
+  以 final_only 记账带入收尾。oracle 缺失/未越过/旧快照无字段 → 不动
+  （fail-closed，对质与仲裁仍是出口）。三处清零点同步复位出生索引。
+  441 测试全过（含新单测：未越过不清/越过清账/无索引不清），happy 冒烟 23.1s ✓
+  （新二进制）。**遗留**：治果需 pro 实弹再验（上轮终局正是被它卡死）——下轮
+  pro 实弹观察是否再出现「旧 blocker 拦写」升级。
+- 09-07 05:06 **【pro 复测②终局 + 新设计问题入档】44 分钟 cancelled（提前于预算）**。
 - 09-07 05:06 **【pro 复测②终局 + 新设计问题入档】44 分钟 cancelled（提前于预算）**。
   103 调用 / **主 Agent 解析 100%** / 7-8/24 阶段。子任务：16 成功 / 16 invalid /
   4 超时 / 1 失败——invalid 率约 0.36/分钟（上轮 0.55），宽松解析未见显著降燥，

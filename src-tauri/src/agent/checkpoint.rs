@@ -579,6 +579,12 @@ pub struct AgentCheckpoint {
     /// （审查员不撤 + 写入全禁 + 模型无处可去 = 实测死锁形态）。
     #[serde(default)]
     pub stage_review_confrontation_failures: u32,
+    /// 僵尸 blocker 治理：blockers_open 变为 >0 时的宿主判分阶段索引（oracle 的
+    /// 「下一未解阶段」index，0 基）。宿主判分越过该索引 = 该阶段的实现已被客观
+    /// 判定通过，遗留的阶段审查拦截属僵尸 blocker，写入门禁自动清账（final_only
+    /// 记账）。实测（09-07 pro 终局）：阶段 07 已过判分，旧 blocker 仍全局拦写。
+    #[serde(default)]
+    pub stage_review_blocker_stage: Option<u32>,
     /// ---- 方案审查者故障转移链（failover）----
     /// 已执行的自动故障转移次数（invalid_output 重试 1 次 + 超时切换备用审查员，封顶 2）
     #[serde(default)]
@@ -655,6 +661,7 @@ impl AgentCheckpoint {
             stage_review_baseline_side_effects: 0,
             stage_review_blockers_open: 0,
             stage_review_confrontation_failures: 0,
+            stage_review_blocker_stage: None,
             plan_reviewer_failover_count: 0,
             plan_reviewer_last_dispatch: None,
             recent_gate_block_step: None,
@@ -785,8 +792,32 @@ impl AgentCheckpoint {
             }
         }
         self.stage_review_blockers_open = 0;
+        self.stage_review_blocker_stage = None;
         self.stage_review_confrontation_failures = 0;
         true
+    }
+
+    /// 僵尸 blocker 清账：blocker 出生阶段已被宿主判分越过 → 该阶段实现已被客观
+    /// 判定通过，遗留的阶段审查拦截自动清零并以 final_only 记账带入收尾。
+    /// 返回 Some(说明文案) 表示发生了清理。oracle 进度缺失/未越过时不动
+    /// （fail-closed：对质与人工仲裁仍是唯一出口）。旧快照无出生阶段字段时同样不动。
+    pub fn clear_stale_stage_blockers(&mut self, oracle_index: u32) -> Option<String> {
+        if self.stage_review_blockers_open == 0 {
+            return None;
+        }
+        let born = self.stage_review_blocker_stage?;
+        if oracle_index <= born {
+            return None;
+        }
+        self.stage_review_final_only.push(format!(
+            "🧟 僵尸 blocker 清账：出生于阶段索引 {born} 的 {} 条 blocking_regardless，在宿主判分推进到索引 {oracle_index} 后仍未清零，自动降级 final_only 带入收尾",
+            self.stage_review_blockers_open
+        ));
+        self.stage_review_blockers_open = 0;
+        self.stage_review_blocker_stage = None;
+        Some(format!(
+            "⏰ 宿主判分已越过历史阶段（blocker 出生索引 {born} < 当前进度 {oracle_index}），遗留的阶段审查 blocker 属僵尸拦截，已自动清账放行；遗留项以 final_only 带入收尾审查。"
+        ))
     }
 
     /// 回滚一次「未产生任何后台任务」的审查派发：归还审查轮次并恢复派发前的消费状态。
@@ -1151,6 +1182,31 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_stage_blocker_clears_when_oracle_passes_birth_stage() {
+        // 09-07 pro 终局实测：阶段 07 已过宿主判分，旧 blocker 仍全局拦写（僵尸拦截）。
+        // 规则：宿主判分越过 blocker 出生索引 → 自动清账（final_only 记账）；未越过或
+        // 无出生索引（旧快照）→ 不动，对质与仲裁仍是唯一出口。
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("run-zombie".to_string(), &context);
+        cp.stage_review_blocker_stage = Some(2);
+        cp.stage_review_blockers_open = 1;
+
+        assert!(cp.clear_stale_stage_blockers(2).is_none(), "未越过不清");
+        assert_eq!(cp.stage_review_blockers_open, 1);
+
+        let note = cp.clear_stale_stage_blockers(3).expect("越过应清账");
+        assert_eq!(cp.stage_review_blockers_open, 0);
+        assert!(cp.stage_review_blocker_stage.is_none());
+        assert!(cp.stage_review_final_only.iter().any(|l| l.contains("僵尸 blocker")));
+        assert!(note.contains("僵尸拦截"));
+
+        cp.stage_review_blockers_open = 1;
+        cp.stage_review_blocker_stage = None;
+        assert!(cp.clear_stale_stage_blockers(9).is_none(), "无出生索引不清");
+        assert_eq!(cp.stage_review_blockers_open, 1);
+    }
 
     #[test]
     fn save_checkpoint_conflict_retry_does_not_relock_self() {

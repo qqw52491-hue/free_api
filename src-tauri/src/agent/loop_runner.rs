@@ -169,6 +169,18 @@ pub async fn run_tool_phase(
         || inst.get_action().eq_ignore_ascii_case("child_writer");
 
     if is_write_tool {
+        // 僵尸 blocker 清账：blocker 出生阶段已被宿主判分越过 → 自动清零放行
+        // （final_only 记账带入收尾）。oracle 缺失/未越过时不动，对质与仲裁仍是出口。
+        if checkpoint.stage_review_blockers_open > 0 {
+            if let Some((idx, _, _)) = crate::agent::eval_oracle::query_active_progress().await {
+                if let Some(note) = checkpoint.clear_stale_stage_blockers(idx as u32) {
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        note,
+                    );
+                }
+            }
+        }
         if let Some(rejection) = check_pre_write_gatekeeper(
             checkpoint,
             context,
@@ -944,6 +956,15 @@ pub async fn run_tool_phase(
                         checkpoint.stage_review_rebuttal_run_id = None;
                         // 基线已在派发时记录；此处不得覆盖（防覆盖记账竞态，同 stage_review::apply_stage_result）
                         checkpoint.stage_review_blockers_open = findings_arr.iter().filter(|f| is_blocked(f)).count() as u32;
+                        // 僵尸 blocker 治理：记录出生时的宿主判分阶段索引；宿主越过它即自动清账
+                        if checkpoint.stage_review_blockers_open > 0 {
+                            checkpoint.stage_review_blocker_stage =
+                                crate::agent::eval_oracle::query_active_progress()
+                                    .await
+                                    .map(|(idx, _, _)| idx as u32);
+                        } else {
+                            checkpoint.stage_review_blocker_stage = None;
+                        }
                         checkpoint.stage_review_final_only = findings_arr.iter()
                             .filter(|f| {
                                 f.get("severity").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("blocking")).unwrap_or(false)
@@ -1511,6 +1532,19 @@ pub async fn run_tool_phase(
                                 if kind == "writer" {
                                     // 🛑 前置方案门禁：恢复(resume_child)写入型子任务等同于开启新的写入路径，
                                     // 未获批准前必须拦截，防止绕过派发门禁（B1.8）通过旧 writer 子任务改代码。
+                                    // 僵尸 blocker 清账同主写入门禁（见 B1.8 注释）。
+                                    if checkpoint.stage_review_blockers_open > 0 {
+                                        if let Some((idx, _, _)) =
+                                            crate::agent::eval_oracle::query_active_progress().await
+                                        {
+                                            if let Some(note) = checkpoint.clear_stale_stage_blockers(idx as u32) {
+                                                let _ = app.emit(
+                                                    &format!("agent-log-{}", final_session_id),
+                                                    note,
+                                                );
+                                            }
+                                        }
+                                    }
                                     if let Some(rejection) = check_pre_write_gatekeeper(
                                         checkpoint,
                                         context,
@@ -1753,6 +1787,7 @@ pub async fn run_tool_phase(
                     checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
                     if checkpoint.stage_review_blockers_open > 0 {
                         checkpoint.stage_review_blockers_open = 0;
+                        checkpoint.stage_review_blocker_stage = None;
                     }
                     // 摘要中剥离结构化标记，避免协议噪声污染持久化内容
                     let clean_reply = strip_plan_decision_marker(&reply);
@@ -1775,6 +1810,7 @@ pub async fn run_tool_phase(
                         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
                         if checkpoint.stage_review_blockers_open > 0 {
                             checkpoint.stage_review_blockers_open = 0;
+                            checkpoint.stage_review_blocker_stage = None;
                         }
                         let clean_reply = strip_plan_decision_marker(&reply);
                         checkpoint.approved_plan_summary =

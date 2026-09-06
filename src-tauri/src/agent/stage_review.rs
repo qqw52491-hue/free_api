@@ -244,11 +244,14 @@ fn build_stage_evidence(context: &SandwichContext, workspace: &Path) -> String {
 }
 
 /// 消费阶段审查结果（成功或基础设施失败均走这里）。
+/// oracle_index：宿主判分「下一未解阶段」索引（None = 无 oracle 场景）。
+/// blockers>0 时记录出生索引，供僵尸 blocker 清账判定。
 /// 返回注入父 Agent 上下文的摘要文案。
 pub fn apply_stage_result(
     checkpoint: &mut AgentCheckpoint,
     result: &crate::agent::child_reviewer::ChildReviewResult,
     _context: &SandwichContext,
+    oracle_index: Option<u32>,
 ) -> String {
     let was_rebuttal = checkpoint.stage_review_rebuttal_run_id.as_deref()
         == Some(result.child_run_id.as_str());
@@ -271,6 +274,12 @@ pub fn apply_stage_result(
     // 否则派发后、消费前的写入会被错误标记为已覆盖。派发后的新写入计入
     // writes_since，由下一次触发（todo 推进/文件数阈值）安排复检。
     checkpoint.stage_review_blockers_open = result.stage_blocking_open();
+    // 僵尸 blocker 治理：记录出生阶段索引（无 blocker 时清空，避免陈旧索引干扰）
+    if checkpoint.stage_review_blockers_open > 0 {
+        checkpoint.stage_review_blocker_stage = oracle_index;
+    } else {
+        checkpoint.stage_review_blocker_stage = None;
+    }
     checkpoint.stage_review_final_only = result.stage_final_only_lines();
 
     let (added, withdrawn, maintained) = result.objection_stats();
@@ -513,7 +522,7 @@ mod tests {
             objection_verdicts: vec![],
             scorecard: None,
         };
-        let note = apply_stage_result(&mut cp, &result, &context);
+        let note = apply_stage_result(&mut cp, &result, &context, None);
         assert_eq!(cp.stage_review_blockers_open, 1, "仅 regardless 计入拦截");
         assert_eq!(cp.stage_review_final_only.len(), 1, "final_only 仅记账");
         assert_eq!(cp.stage_review_baseline_side_effects, 2, "消费不得覆盖派发时基线（防覆盖记账竞态）");
@@ -550,7 +559,7 @@ mod tests {
             objection_verdicts: vec![],
             scorecard: None,
         };
-        let _ = apply_stage_result(&mut cp, &result, &context);
+        let _ = apply_stage_result(&mut cp, &result, &context, None);
         // 预算退还 + 基线不动（视为未审，会重新触发）+ 不产生拦截
         assert_eq!(cp.stage_review_budget_used, 0);
         assert_eq!(cp.stage_review_baseline_side_effects, 0);
