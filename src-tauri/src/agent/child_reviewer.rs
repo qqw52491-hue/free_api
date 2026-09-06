@@ -860,6 +860,22 @@ pub(crate) fn finish_child_run_with_history(
 
 /// 为失败/超时/取消的子审查构造可被信箱消费的结果 JSON。
 /// 统一让所有终态都携带 result_json，消费机制（置 NULL）才能对所有终态生效。
+/// invalid_output 专用：在标准错误结果上注入审查员原始输出（截断 4000 字符），
+/// 补"invalid 无从诊断"的盲区——宽松解析时代仍失败的案例，raw 是唯一证据。
+fn child_invalid_result_json(child_run_id: &str, duration_ms: u64, completion_tokens: i64, raw: &str) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(&child_error_result_json(
+        child_run_id,
+        "invalid_output",
+        "invalid_output",
+        duration_ms,
+        completion_tokens,
+    ))
+    .unwrap_or(serde_json::json!({}));
+    let truncated: String = raw.chars().take(4000).collect();
+    value["raw_result_json"] = serde_json::Value::String(truncated);
+    value.to_string()
+}
+
 fn child_error_result_json(
     child_run_id: &str,
     status: &str,
@@ -1125,12 +1141,11 @@ pub async fn spawn_child_reviewer(
                     duration_ms,
                     completion_tokens,
                     Some("invalid_output"),
-                    Some(&child_error_result_json(
+                    Some(&child_invalid_result_json(
                         &child_run_id_clone,
-                        "invalid_output",
-                        "invalid_output",
                         duration_ms,
                         completion_tokens,
+                        &raw,
                     )),
                 );
                 return;
