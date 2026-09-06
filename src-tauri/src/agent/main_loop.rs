@@ -426,6 +426,8 @@ async fn run_agent_main_loop_in_workspace_inner(
 
     let project_resource_boundary = if is_project_session {
         "\n\n## 项目工作区与受管资源\n当前会话已绑定专属项目工作区。你可以在该项目工作区内正常使用 search、外部 MCP 工具以及各类子工兵进行工程分析与开发。同时可调用 `project_resources.list_resources()` 获取重点受管文件，或在生成重要项目产物时调用 `project_resources.register_resource(path, label)` 登记为跨会话共享受管资源。"
+    } else if has_workspace_override {
+        "\n\n## 独立临时工作区 (Scratch Workspace)\n当前会话处于独立临时工作区。该目录与用户的任何主工程项目源码完全物理隔离，仅用于一次性任务演示、临时探索与临时交付物存放，请在该独立目录下执行操作，严禁向用户的其他工程源码目录随意写入。"
     } else {
         ""
     };
@@ -487,6 +489,17 @@ async fn run_agent_main_loop_in_workspace_inner(
             }
             manifest_text.push_str("- 提示：调用 `project_resources.read_resource(resource_id)` 可直接读取上述文件内容；在工作区发现或生成新核心交付物时可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。");
         }
+        context.project_resource_manifest = Some(manifest_text);
+    } else if has_workspace_override {
+        context.resource_scope =
+            context::resource_scope::ResourceScopeContract::bind_primary_filesystem(
+                &workspace_dir.to_string_lossy(),
+                context::resource_scope::ResourceScopeSource::SessionSelected,
+            );
+        let manifest_text = format!(
+            "【独立临时工作区清单 (Scratch Workspace)】\n- 临时物理工作目录: `{}`\n- 本会话为未绑定项目的独立任务，所有临时操作与产物均严格限定在该临时目录下，严禁向用户的其他工程项目源码目录写入。\n",
+            workspace_dir.display()
+        );
         context.project_resource_manifest = Some(manifest_text);
     }
     context.compact_tools_index = Some(compact_tools_index);

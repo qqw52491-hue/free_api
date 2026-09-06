@@ -1194,6 +1194,7 @@ async function openSession(sessionId) {
   $("viewHome").classList.add("hidden");
   $("viewFlow").classList.remove("hidden");
   $("btnDelSession").classList.remove("hidden");
+  $("composer").classList.remove("hidden");
   $("timeline").innerHTML = `<div class="empty-tip">加载中…</div>`;
   try { await loadFlow(sessionId); } catch (e) { toast("加载失败：" + e.message); }
 }
@@ -1201,10 +1202,12 @@ async function openSession(sessionId) {
 function goHome() {
   closeSidebarMobile();
   S.currentSessionId = null;
+  S.flow = null;
   S.view = { name: "home" };
   $("viewFlow").classList.add("hidden");
   $("viewHome").classList.remove("hidden");
   $("btnDelSession").classList.add("hidden");
+  $("composer").classList.add("hidden");
   renderHome(); renderSidebar();
   loadHome().catch(() => {});
 }
@@ -1375,6 +1378,9 @@ function openModal(prefillProjectId) {
   $("typeProject").style.background = newTaskType === "project" ? "var(--accent)" : "transparent";
   $("projField").style.display = newTaskType === "project" ? "" : "none";
   
+  if (!S.selectedNewModelId && S.models.length) {
+    S.selectedNewModelId = S.models[0].id;
+  }
   $("lblNewModel").textContent = S.selectedNewModelId ? modelName(S.selectedNewModelId) : "请选择模型…";
   
   $("newGoal").value = "";
@@ -1480,7 +1486,7 @@ function bind() {
     renderHome(); renderSidebar();
   };
   $("btnTheme").onclick = cycleTheme;
-  $("btnNew").onclick = () => quickCreateSession("__scratch__");
+  $("btnNew").onclick = () => openModal();
   $("btnDelSession").onclick = () => {
     if (S.currentSessionId) deleteSession(S.currentSessionId);
   };
@@ -1555,7 +1561,7 @@ function bind() {
       return;
     }
     const plus = e.target.closest("[data-new]");
-    if (plus) { e.stopPropagation(); quickCreateSession(plus.dataset.new); return; }
+    if (plus) { e.stopPropagation(); openModal(plus.dataset.new); return; }
     const toggle = e.target.closest("[data-toggle]");
     if (toggle) { toggleGroup(toggle.dataset.toggle); return; }
     const sess = e.target.closest("[data-session]");
@@ -1649,6 +1655,7 @@ function connectSSE(force) {
 async function boot() {
   applyTheme(S.theme);
   bind();
+  if ($("composer")) $("composer").classList.add("hidden");
   await loadModels().catch(() => {});
   await loadHome().catch(() => {});
   connectSSE();
@@ -1662,6 +1669,7 @@ async function boot() {
     // ⚠️ 弹层/弹窗打开时跳过轮询重渲，防止 DOM 重建破坏弹层交互或卡顿
     if (S.sheetOpen) return;
     if ($('modalNew') && !$('modalNew').classList.contains('hidden')) return;
+    if ($('artPreview') && !$('artPreview').classList.contains('hidden')) return;
     const active = isAgentActive();
     const alive = sseAlive();
     const now = Date.now();
