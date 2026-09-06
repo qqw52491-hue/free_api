@@ -278,6 +278,17 @@ cargo test 437 全绿 ✓。
   仲裁答案绕过 rx（或 wait_user 换 dedicated runtime）。所有取证物：
   /tmp/app_sample.txt、/tmp/app_sample2.txt、/tmp/http_probe.log、checkpoint v46、
   monitor 快照 4b5d2543。
+- 09-07 04:13 **【审查员 invalid_output 治理第一刀】宽松 JSON 提取落地**。
+  诊断：invalid 子任务 result_json=NULL（审查原始输出不落库的已知盲区，
+  无法看到真实失败形状）→ 从解析代码定位到根因画像：`parse_controlled_output`
+  用严格 `serde_json::from_str`，审查员输出只要带 ```json 围栏/前后说明文字/
+  与思考文本混合即判 invalid → 整链重派烧真 token（pro 大输出下 33 次）。
+  **修复**：`extract_json_object` 助手（剥围栏 + 截取首个'{'到最后'}'），
+  应用于审查摘要解析与取证请求解析两处；原样解析仍优先，截取后仍失败才算真
+  invalid（fail-closed 保留）。单测：围栏/前后杂文/纯文本三例。440 测试全过，
+  happy 冒烟 23.9s ✓（新二进制）。**遗留**：① 审查员原始输出仍不落库（应把
+  invalid 时 raw 存进 result_json，下轮做）② 宽松化的实际降燥效果需下一轮
+  pro 实弹复测 invalid 率（33→?）。
 - 09-07 04:07 **【pro 复跑·死锁修复活体验证通过】12/24 预算取消，零冻结**。
   pro×flash 60 分钟：**165 调用 / 97.6% 解析**，推进到 12/24（上次同场景 01:02
   即冻结于 0 写入）。**wait_user 多次发生且全程无冻结**——HTTP prober 全程 360 次

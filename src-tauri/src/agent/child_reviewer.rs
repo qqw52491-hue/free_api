@@ -526,6 +526,20 @@ pub fn parse_child_review_rebuttal_output(
     Ok((findings, confidence, refs, missing, routing))
 }
 
+/// 宽松 JSON 提取：审查模型在大上下文下常把 JSON 包进 ```json 围栏、前后加一句
+/// 说明文字，或与思考文本混合。实测（09-07 pro 实弹）：审查员 33 次 invalid_output
+/// 大多源于此，每次触发整链重派烧真 token。策略：优先原样解析；失败则剥围栏、
+/// 截取首个 '{' 到最后一个 '}' 的片段再解析。截取后仍解析失败才算真 invalid。
+fn extract_json_object(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    Some(&trimmed[start..=end])
+}
+
 fn parse_controlled_output(
     raw: &str,
     allowed_refs: &[String],
@@ -540,7 +554,13 @@ fn parse_controlled_output(
     Vec<String>,
 ), String> {
     let output: RawChildReviewOutput = serde_json::from_str(raw)
-        .map_err(|_| "child_reviewer 未返回规定的 JSON 审查摘要。".to_string())?;
+        .or_else(|_| {
+            extract_json_object(raw).ok_or_else(|| "child_reviewer 未返回规定的 JSON 审查摘要。".to_string())
+            .and_then(|fragment| {
+                serde_json::from_str(fragment)
+                    .map_err(|_| "child_reviewer 未返回规定的 JSON 审查摘要。".to_string())
+            })
+        })?;
     if output.findings.len() > 5 {
         return Err("child_reviewer.findings 最多包含 5 项。".to_string());
     }
@@ -1116,9 +1136,12 @@ pub async fn spawn_child_reviewer(
                 return;
             }
 
-            // 3. 取证请求（含 "tool" 键）且预算未尽 → 执行并回灌
+            // 3. 取证请求（含 "tool" 键）且预算未尽 → 执行并回灌（同样宽松提取）
             let tool_request = serde_json::from_str::<serde_json::Value>(&raw)
                 .ok()
+                .or_else(|| {
+                    extract_json_object(&raw).and_then(|fragment| serde_json::from_str(fragment).ok())
+                })
                 .filter(|v| v.get("tool").is_some());
             if let Some(req) = tool_request {
                 if tool_steps_used < reviewer_tool_steps {
@@ -1545,6 +1568,24 @@ mod tests {
         };
         let (added, withdrawn, maintained) = inflated.objection_stats();
         assert_eq!((added, withdrawn, maintained), (2, 2, 1), "撤回≈新增：膨胀信号可见");
+    }
+
+    #[test]
+    fn parse_tolerates_fenced_and_prose_wrapped_json() {
+        // 09-07 pro 实弹：审查员 33 次 invalid_output 多因大上下文下把 JSON 包进围栏
+        // 或前后加说明文字。宽松提取后应正常解析；完全无 JSON 仍判 invalid。
+        let json = r#"{"findings":[],"confidence":"confirmed","evidence_refs":[],"missing_evidence":[],"scorecard":{"correctness":90,"risk":85,"style":90,"test_coverage":85}}"#;
+        let fenced = format!("```json\n{json}\n```");
+        let (f, _, _, _, _, sc, _, _) = parse_controlled_output(&fenced, &[]).unwrap();
+        assert!(f.is_empty());
+        assert_eq!(sc.unwrap().correctness, 90);
+
+        let prose = format!("好的，以下是我的审查结论：\n{json}\n请查收。");
+        let (f2, _, _, _, _, _, _, _) = parse_controlled_output(&prose, &[]).unwrap();
+        assert!(f2.is_empty());
+
+        // 完全没有 JSON → 仍报错（真 invalid）
+        assert!(parse_controlled_output("我觉得这段代码写得不错。", &[]).is_err());
     }
 
     #[test]
