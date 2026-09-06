@@ -260,6 +260,21 @@ cargo test 437 全绿 ✓。
 有任务在跑→只做简短巡检并在此追加一行，空闲→按 〇·十二 队列推进下一项。
 **追加格式**：`- MM-DD HH:MM 做了什么/状态/下一步`（新行加在最上面）。
 
+- 09-07 01:53 **【P1 卷宗②】pro 实弹全局停摆案（与①通道停摆大概率同根）**。
+  session 62a7dc67（pro×flash，exec_27c53db5）：15 次 LLM 调用后 **01:02:52 起全
+  进程零活动**（42+ 分钟，DB agent_llm_calls/monitor 快照/trace 全部冻结于该刻）。
+  死点序列：plan 关 catch-22（审查员要求跑 npm test 才能看到 CURRENT_STAGE.md，
+  而门禁拦截 plan 阶段 shell）→ ask_human 两次被「先监听后求助」冷却拒绝 →
+  **转正式 wait_user（checkpoint v46, 17:02:52.43）→ 同一秒起 monitor 10s 心跳、
+  仲裁观察器、HTTP 服务全部停止被轮询**（工作线程 park 空闲、CPU 0.2%、无 panic）。
+  已排除：载荷解析不匹配（agent_paused_reason 正确）、业务 handler 死锁、CPU 饥饿、
+  锁中毒（.ok() 容忍）。**主嫌疑**：tauri 全局异步运行时在 wait_user 转换时刻停止
+  轮询——疑似某任务持 std 锁跨 await（checkpoint 落库持 DbState 锁 + 监控任务同步
+  抢同一把锁）或事件派发线程与运行时交互死锁。**旁证**：纯 std 线程的 oracle 判分
+  服务同进程内正常。**判定实验（下轮实弹必做）**：后台 prober 每 10s curl
+  /favicon.ico 记时间戳 + 对照 DB 步骤时刻，锁定停摆精确时刻与触发转换；
+  FREE_API_EVAL_ASK_HUMAN_MODE=cancel 可回退规避仲裁路径对照。60 分钟预算自动
+  取消兜底已验证（02:00 前后应见 spec 失败/取消报告）。
 - 09-07 01:26 **【P1 候选·真发现】评测运行期间通道 HTTP 服务整体停摆**。
   实测（pro 实弹运行中，app PID 76645）：TCP 握手成功（内核 backlog）但
   `GET /channel/runs`、`GET /favicon.ico` 15s 零字节超时；app CPU 0.2%（非负载）；
