@@ -260,6 +260,24 @@ cargo test 437 全绿 ✓。
 有任务在跑→只做简短巡检并在此追加一行，空闲→按 〇·十二 队列推进下一项。
 **追加格式**：`- MM-DD HH:MM 做了什么/状态/下一步`（新行加在最上面）。
 
+- 09-07 02:16 **【P1 判定实验完成——耦合实锤】wait_user 入口 = 全局运行时冻结**。
+  判定实验（run3，exec_356c36b0）：flash×flash 再收敛一轮（**24/24 succeeded，
+  89 调用/94.4% 解析/1.1% 工具失败/88.2% 缓存，verdict=review_recommended**，
+  比首跑多 4 调用/5 次解析错——同题两跑已具重复性），prober 每 10s 探
+  /favicon.ico **全程 72 次 204 存活直至正常关停**。三跑对照：
+  flash run1（无 wait_user）✓ 全程健康；pro run2（01:02:52 进 wait_user）✝
+  同秒全停；flash run3（无 wait_user）✓ 全程健康。
+  **结论**：主循环进入 wait_user（rx.recv().await 前后）时整个 tauri 异步运行时
+  停止被轮询；凡 ask_human 升级 = 无人值守评测必死 + 手机端必瘫。
+  已排除：web_search 同步 join（pro 全程未用）、载荷解析、锁中毒、CPU 饥饿。
+  **下会话修复切入点**：① 对 wait_user 转换段（main_loop.rs ~755 advance_run_state
+  WaitForHuman → emit → rx.recv）逐语句加时间戳日志做最小复现；② 审 advance_run_state
+  与 run_guard/emit 链里有无 std 锁跨 await、线程 join、同步 channel recv；
+  ③ tauri::async_runtime 全局运行时的懒初始化位置（sample 显示 worker 经 blocking
+  pool 启动的异常签名）；④ 临时缓解（修因前）：评测跑 wait_user 时宿主侧直接注入
+  仲裁答案绕过 rx（或 wait_user 换 dedicated runtime）。所有取证物：
+  /tmp/app_sample.txt、/tmp/app_sample2.txt、/tmp/http_probe.log、checkpoint v46、
+  monitor 快照 4b5d2543。
 - 09-07 01:53 **【P1 卷宗②】pro 实弹全局停摆案（与①通道停摆大概率同根）**。
   session 62a7dc67（pro×flash，exec_27c53db5）：15 次 LLM 调用后 **01:02:52 起全
   进程零活动**（42+ 分钟，DB agent_llm_calls/monitor 快照/trace 全部冻结于该刻）。
