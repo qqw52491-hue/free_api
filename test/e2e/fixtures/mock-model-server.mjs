@@ -1,12 +1,16 @@
 // 假 AI 冒烟测试用的 mock 模型服务：OpenAI 兼容 /v1/chat/completions（SSE 流式）。
 //
-// 【回放模式】不再手写剧本（手写剧本 = 想象中的模型行为，已连续骗出 3 个 bug），
-// 而是回放 agent_logs 真实 trace 提取的卡带（见 cassette/extract-cassette.mjs）：
-//   - 主键 = oracle 阶段 index（仅用于观测/回卷判定），卡带按线性指针推进，
-//     任何重试/failover/探活都不会让整卷卡带错位；
-//   - wait 牌粘滞：派发 ack 上下文里反复服务同一张 wait 牌，直到审查结论出现；
-//   - 写后测试无进展 → 回卷到 implement_write 牌重试（封顶 2 次）；
-//   - 剧本外 → 明确的错误牌 + 大声记日志，不硬等不猜。
+// 【回放模式 + 宿主事实驱动状态机】不手写剧本（手写剧本 = 想象中的模型行为，
+// 已连续骗出 3 个 bug），回放 agent_logs 真实 trace 提取的卡带
+// （见 cassette/extract-cassette.mjs）。出牌不再靠整卷线性指针（它无法建模
+// 「质询→修复→重试」循环，parse 变体 301 调用循环的根因），而是每次调用从
+// 上下文重新推导宿主事实、按事实选相位：
+//   plan_approved? —— 「门禁状态: [已批准放行]」（main_loop 方案审查结论注入）
+//   oracle_index?  —— deriveStage()（CURRENT_STAGE.md/判分进度标记的最高阶段）
+//   判分反馈       —— 阶段失败「实现行为与契约不符」/ 终局拦截「宿主判分进度 X/Y 未完成」
+// 相位内保持线性子指针（read→write→verify 次序来自真实 trace）；跨相位推进只由
+// 事实翻转驱动——重试/failover/探活消耗的调用不再让卡带错位；wait 牌粘滞与
+// 修复回卷（封顶 2 次）保留；剧本外 → 明确的错误牌 + 大声记日志，不硬等不猜。
 // 路径参数化：卡带里的 __FIXTURE_ROOT__ 替换为当前 run 的 fixture 目录；
 // wait 牌的 job_ids（上一轮 run 的 UUID）直接剥除——宿主语义缺省 = 等全部任务。
 //
@@ -112,11 +116,27 @@ const FINAL_REVIEW_CLEAN = JSON.stringify({
   summary: "冒烟终审：实现符合阶段契约，无阻塞性缺陷。",
 });
 
-function makeReplayer(cassette, fixtureDir) {
-  const flat = Object.entries(cassette.meta.stages)
-    .flatMap(([stage, cards]) => cards.map((card) => ({ ...card, stage })));
-  const rewindTarget = flat.findIndex((c) => c.role === "implement_write");
-  const state = { index: 0, rewinds: 0, served: 0 };
+// 宿主事实驱动状态机（替代线性指针回放器，架构见文件头注释）
+function makeStateMachine(cassette, fixtureDir) {
+  const byStage = cassette.meta.stages;
+  const planCards = byStage["0"] ?? [];
+  const stageCards = new Map();
+  for (const [k, cards] of Object.entries(byStage)) {
+    if (k !== "0" && k !== "default") stageCards.set(Number(k), cards);
+  }
+  const finishCards = byStage.default ?? [];
+  const maxStage = Math.max(0, ...stageCards.keys());
+
+  // 进度子指针只记"相位内走到哪"；相位切换由事实翻转驱动（每次调用重推导）
+  const state = {
+    planIdx: 0,
+    postReviewServed: false,
+    stageIdx: {},
+    stageRepairs: {},
+    finishServed: false,
+    finishRepairs: 0,
+    lastStage: null,
+  };
 
   function expand(card, { stripJobIds = false } = {}) {
     let raw = String(card.raw_response).split("__FIXTURE_ROOT__").join(fixtureDir);
@@ -130,78 +150,125 @@ function makeReplayer(cassette, fixtureDir) {
     return raw;
   }
 
-  // 宿主反馈分类（供 wait 粘滞判定）。
-  // 只认强信号：有效结论的注入文本（子审查代理已完成/审查评分卡）或方案阶段已批准。
-  // ⚠️ 不可用「结论已消费」当放行信号：失败的旧结论被 wait 消费（超时/非法输出→failover
-  // 重派窗口）时状态卡同样显示「结论已消费」，放行会抢在备用审查员结论之前（实测两次）。
+  // wait 粘滞判定（强信号）：真评分卡或已批准放行。
+  // ⚠️ 不可用「结论已消费」「子审查代理已完成」当信号：invalid 交付（failover
+  // 重派窗口）同样带这些字样，放行会抢在备用审查员结论之前（历史实测两次）。
   const isReviewResult = (messages) => {
     const users = messages.filter((m) => m.role === "user").slice(-6);
     const blob = users.map((m) => String(m.content ?? "")).join("\n");
-    // ⚠️ 不可用"子审查代理已完成"当信号：invalid 交付（failover 场景）的注入
-    // 同样带这句话——只有真评分卡或已批准放行才代表结论有效
     return /审查评分卡|已批准放行/.test(blob);
   };
 
   return function nextMainCard(messages) {
     const last = lastUserText(messages);
     const stage = deriveStage(messages);
+    const blob = messages
+      .filter((m) => m.role === "user")
+      .map((m) => String(m.content ?? ""))
+      .join("\n");
+    // 事实 1：方案关口放行（main_loop 方案审查结论注入的「门禁状态: [已批准放行]」）
+    const planApproved = /门禁状态: \[已批准放行\]/.test(blob);
+    // 事实 3a/3b 只看最后一轮反馈（避免历史失败残留误触发）：
+    const stageFailedNow = last.includes("实现行为与契约不符"); // eval_oracle 阶段判分失败 hint
+    const oracleBlockedNow = last.includes("宿主判分进度"); // finish 门禁判分进度拦截
 
-    if (state.index >= flat.length) {
-      // finish 牌之后宿主仍回来（终审打回/重试）→ 原地重发 finish（义务与验证闭合是幂等的）；
-      // 只有从未发过 finish 的耗尽才按「无进展」回卷，最后才出剧本外错误牌
-      const finishIdx = flat.findIndex((c) => c.role === "finish");
-      if (finishIdx >= 0 && state.served > 0 && state.lastServedRole === "finish") {
-        // oracle 阶段进度拦截（宿主判分未完成）→ 像真模型一样回卷到实现阶段修复重试，
-        // 而不是原地对空交卷；其他未闭合事项（义务/契约）→ 原地重发 finish
-        if (/宿主判分进度/.test(last) && rewindTarget >= 0 && state.rewinds < 2) {
-          state.rewinds += 1;
-          state.index = rewindTarget;
-          console.log(`[mock][回卷] 阶段=${stage} 宿主判分未完成，回卷到 implement_write 修复（第 ${state.rewinds}/2 次）`);
-          return expand(flat[rewindTarget], {});
-        }
-        console.log(`[mock][finish 重发] 阶段=${stage} 终态门禁未收卡，原地重发 finish`);
-        return expand(flat[finishIdx], {});
-      }
-      if (!state.finishServed && rewindTarget >= 0 && state.rewinds < 2) {
-        state.rewinds += 1;
-        state.index = rewindTarget;
-        console.log(`[mock][回卷] 阶段=${stage} 无进展，回卷到 implement_write（第 ${state.rewinds}/2 次）`);
-      } else {
-        console.log(`[mock][剧本外!!!] 阶段=${stage} 卡带耗尽且回卷超限。上下文尾部：${last.slice(-300).replace(/\n/g, " ⏎ ")}`);
+    // ── 相位一：方案关口（open…gate → wait 粘滞 → post_review）──
+    if (!planApproved) {
+      const card = planCards[state.planIdx];
+      if (!card) {
+        console.log(`[mock][剧本外!!!] 方案关口卡带耗尽仍未放行。尾部：${last.slice(-300).replace(/\n/g, " ⏎ ")}`);
         return OUT_OF_SCRIPT_CARD;
       }
-    }
-
-    let idx = state.index;
-    let card = flat[idx];
-
-    // wait 牌粘滞：派发 ack / 门禁反馈等非结论上下文里原地反复服务；
-    // 审查结论真正到达后才跳过 wait 牌、推进到下一张
-    if (card.role === "wait") {
-      if (!isReviewResult(messages)) {
-        console.log(`[mock][wait 粘滞] stage=${stage} #${idx}/${flat.length} 等审查结论。上下文尾部：${last.slice(-160).replace(/\n/g, " ⏎ ")}`);
+      if (card.role === "wait" && !isReviewResult(messages)) {
+        console.log(`[mock][wait 粘滞] plan #${state.planIdx}/${planCards.length} 等方案审查结论。尾部：${last.slice(-160).replace(/\n/g, " ⏎ ")}`);
         return expand(card, { stripJobIds: true });
       }
-      // 诊断：记录跳过 wait 时的命中上下文（防误跳过回归）
-      try {
-        const blob = messages.filter((m) => m.role === "user").slice(-4).map((m) => String(m.content ?? "")).join("\n---\n");
-        writeFileSync("/tmp/mock-skipwait.txt", `stage=${stage} idx=${idx}\n${blob.slice(-3000)}`);
-      } catch { /* 诊断失败不阻塞 */ }
-      console.log(`[mock][wait 放行] stage=${stage} #${idx} 检测到审查结论，推进`);
-      idx += 1;
-      card = flat[idx];
-      if (!card) {
-        console.log(`[mock][剧本外!!!] wait 牌之后无牌。上下文尾部：${last.slice(-300).replace(/\n/g, " ⏎ ")}`);
-        return OUT_OF_SCRIPT_CARD;
+      state.planIdx += 1;
+      if (card.role === "post_review") state.postReviewServed = true;
+      console.log(`[mock][出牌·plan] #${state.planIdx - 1}/${planCards.length} role=${card.role}`);
+      return expand(card, {});
+    }
+
+    // 方案已放行：post_review 尚未出就补出（方案结论到达后的第一张主牌）
+    if (!state.postReviewServed) {
+      const i = planCards.findIndex((c) => c.role === "post_review");
+      state.postReviewServed = true;
+      if (i >= 0) {
+        state.planIdx = Math.max(state.planIdx, i + 1);
+        console.log(`[mock][出牌·plan] 放行后补出 post_review`);
+        return expand(planCards[i], {});
       }
     }
 
-    state.index = idx + 1;
-    state.served += 1;
-    state.lastServedRole = card.role;
-    if (card.role === "finish") state.finishServed = true;
-    console.log(`[mock][出牌] stage=${stage} #${idx}/${flat.length} role=${card.role} origin=${card.origin}`);
-    return expand(card, {});
+    // ── 相位二：阶段实现（read→write→verify；判分失败原地修复重试）──
+    const target = stage < 1 ? 1 : stage;
+    if (stageCards.has(target) && !oracleBlockedNow) {
+      const cards = stageCards.get(target);
+      state.lastStage = target;
+      const iw = cards.findIndex((c) => c.role === "implement_write");
+      const idx = state.stageIdx[target] ?? 0;
+
+      // 事实 3a：当前阶段判分失败 → 重出 implement_write（封顶 2 次），修复后下一张 verify
+      if (stageFailedNow && idx > 0) {
+        const repairs = (state.stageRepairs[target] ?? 0) + 1;
+        if (iw >= 0 && repairs <= 2) {
+          state.stageRepairs[target] = repairs;
+          state.stageIdx[target] = iw + 1;
+          console.log(`[mock][修复重试] stage=${target} 判分失败，重出 implement_write（第 ${repairs}/2 次）。尾部：${last.slice(-160).replace(/\n/g, " ⏎ ")}`);
+          return expand(cards[iw], {});
+        }
+        console.log(`[mock][剧本外!!!] stage=${target} 判分失败且修复超限。尾部：${last.slice(-300).replace(/\n/g, " ⏎ ")}`);
+        return OUT_OF_SCRIPT_CARD;
+      }
+
+      const card = cards[idx];
+      if (card && card.role === "wait" && !isReviewResult(messages)) {
+        console.log(`[mock][wait 粘滞] stage=${target} #${idx}/${cards.length} 等审查结论。尾部：${last.slice(-160).replace(/\n/g, " ⏎ ")}`);
+        return expand(card, { stripJobIds: true });
+      }
+      if (!card) {
+        // 本阶段牌已出完但解锁事实未进上下文 → 幂等重发 verify 等判分
+        const v = cards.findIndex((c) => c.role === "verify");
+        if (v >= 0) {
+          console.log(`[mock][verify 幂等] stage=${target} 牌尽未解锁，重发 verify 等判分`);
+          return expand(cards[v], {});
+        }
+        console.log(`[mock][剧本外!!!] stage=${target} 牌尽且无 verify 可重发。尾部：${last.slice(-300).replace(/\n/g, " ⏎ ")}`);
+        return OUT_OF_SCRIPT_CARD;
+      }
+      state.stageIdx[target] = idx + 1;
+      console.log(`[mock][出牌·stage=${target}] #${idx}/${cards.length} role=${card.role}`);
+      return expand(card, {});
+    }
+
+    // ── 相位三：finish（判分进度拦截 → 回卷修复；否则幂等重发）──
+    const finishCard = finishCards[0];
+    if (!finishCard) {
+      console.log(`[mock][剧本外!!!] 无 finish 牌。尾部：${last.slice(-300).replace(/\n/g, " ⏎ ")}`);
+      return OUT_OF_SCRIPT_CARD;
+    }
+    if (state.finishServed && oracleBlockedNow) {
+      // 事实 3b：宿主判分进度未完成 → 回卷最后工作阶段的 implement_write 修复重试；
+      // 回卷超限仍被拦截 = 卡带内容覆盖不了该进度 → 大声出剧本外牌（不静默循环）
+      const rs = state.lastStage ?? maxStage;
+      const cards = stageCards.get(rs) ?? [];
+      const iw = cards.findIndex((c) => c.role === "implement_write");
+      if (state.finishRepairs < 2 && iw >= 0) {
+        state.finishRepairs += 1;
+        state.stageIdx[rs] = iw + 1;
+        console.log(`[mock][回卷] finish 被判分进度拦截，回卷 stage=${rs} 修复（第 ${state.finishRepairs}/2 次）。尾部：${last.slice(-160).replace(/\n/g, " ⏎ ")}`);
+        return expand(cards[iw], {});
+      }
+      console.log(`[mock][剧本外!!!] finish 被判分进度拦截且回卷超限（stage=${rs}）。尾部：${last.slice(-300).replace(/\n/g, " ⏎ ")}`);
+      return OUT_OF_SCRIPT_CARD;
+    }
+    if (state.finishServed) {
+      console.log(`[mock][finish 重发] 终态门禁未收卡，幂等重发 finish`);
+      return expand(finishCard, {});
+    }
+    state.finishServed = true;
+    console.log(`[mock][出牌·finish] 阶段事实=${stage}/${maxStage}`);
+    return expand(finishCard, {});
   };
 }
 
@@ -244,7 +311,7 @@ function makeReviewerResponder(cassette) {
 // cassette: extract-cassette.mjs 产出的卡带 JSON；fixtureDir: 当前 run 的绝对路径
 export function startMockModel({ cassette, fixtureDir }) {
   if (!cassette?.meta?.stages) throw new Error("startMockModel 需要卡带 JSON（cassette/extract-cassette.mjs 产出）");
-  const nextMainCard = makeReplayer(cassette, fixtureDir);
+  const nextMainCard = makeStateMachine(cassette, fixtureDir);
   const nextReviewerCard = makeReviewerResponder(cassette);
 
   const server = http.createServer((req, res) => {
