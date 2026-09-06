@@ -1,5 +1,5 @@
 use crate::agent::checkpoint::{load_checkpoint, AgentPhase};
-use crate::agent::control::cancel_agent_run;
+use crate::agent::control::{cancel_agent_run, HumanControl};
 use crate::agent::evaluation;
 use crate::agent::main_loop::run_agent_main_loop_in_workspace;
 use crate::agent::mcp::PluginRegistry;
@@ -28,6 +28,9 @@ pub const DEFAULT_EVALUATION_DURATION_MINUTES: u64 = 20;
 /// 交接单协议按 60 分钟预算编排，20 上限曾把 19.4 分钟的运行在 20:00 整点砍成 cancelled。
 const MAX_EVALUATION_DURATION_MINUTES: u64 = 60;
 const STOP_GRACE_PERIOD: Duration = Duration::from_secs(120);
+/// 无人值守评测的自动仲裁上限：ask_human 超过此次数仍无法推进则安全停止
+/// （防止坏配对下无限"补充预算→再失败"循环烧钱）。
+const MAX_AUTO_ARBITRATIONS: usize = 3;
 const HUMAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const STRUCTURED_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
 const EVALUATION_ARTIFACTS_DIR: &str = "test-artifacts";
@@ -572,6 +575,16 @@ pub async fn start_background_agent_evaluation(
         let human_wait_session_id = worker_session_id.clone();
         let human_wait_evaluation_id = worker_evaluation_id.clone();
         let human_wait_reason_for_observer = human_wait_reason.clone();
+        // 【无人值守自动仲裁】ask_human 不再必然终止评测：注入合成裁决（方案审查类
+        // 暂停自动补 2 轮预算），封顶 3 次后才安全停止。实测教训：pro×glm 坏配对下
+        // 模型按门禁指引 ask_human，评测器却因"无人应答"直接取消——问人反而成了死法。
+        // FREE_API_EVAL_ASK_HUMAN_MODE=cancel 可回退旧行为。
+        let ask_human_auto = std::env::var("FREE_API_EVAL_ASK_HUMAN_MODE")
+            .ok()
+            .as_deref()
+            != Some("cancel");
+        let auto_arbitrations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let auto_arbitrations_for_observer = auto_arbitrations.clone();
         let human_wait_observer = tauri::async_runtime::spawn(async move {
             loop {
                 if human_wait_detected.load(Ordering::SeqCst) {
@@ -591,6 +604,55 @@ pub async fn start_background_agent_evaluation(
                             &format!("agent-evaluation-monitor-{}", human_wait_session_id),
                             &snapshot,
                         );
+                    }
+                    let arbitration_index =
+                        auto_arbitrations_for_observer.fetch_add(1, Ordering::SeqCst);
+                    let budget_related = reason.contains("审查轮数")
+                        || reason.contains("预算已耗尽")
+                        || reason.contains("预算上限");
+                    if ask_human_auto && arbitration_index < MAX_AUTO_ARBITRATIONS {
+                        // 方案审查类暂停：从 checkpoint 退还 2 轮预算后再注入裁决
+                        if budget_related {
+                            let arb_state = human_wait_app.state::<DbState>();
+                            if let Ok(Some(mut cp)) =
+                                crate::agent::checkpoint::load_checkpoint(arb_state.inner(), &human_wait_session_id)
+                            {
+                                cp.plan_reviewer_retry_count =
+                                    cp.plan_reviewer_retry_count.saturating_sub(2);
+                                cp.plan_reviewer_consumed = false;
+                                let _ = crate::agent::checkpoint::save_checkpoint(arb_state.inner(), &mut cp);
+                            }
+                        }
+                        let reply = format!(
+                            "【无人值守自动仲裁 {}/{}】人工不在场，按以下裁决继续：{}                             1) 若为审查轮次耗尽——已补充 2 轮方案审查预算，请继续按门禁流程与审查员迭代；\n                             2) 若审查员持续技术故障（invalid_output/超时/连接失败），请在 reflection 中记录后改用其他解套路径，不要反复派发同一审查；\n                             3) 在没有新的实质性阻塞前，禁止再次 ask_human。",
+                            arbitration_index + 1,
+                            MAX_AUTO_ARBITRATIONS,
+                            if budget_related { "本暂停属审查预算耗尽，预算已补充。" } else { "" }
+                        );
+                        let channels = crate::agent::control::intervention_channels().lock().await;
+                        let answered: Result<(), String> = channels
+                            .get(&human_wait_session_id)
+                            .map(|sender| {
+                                sender
+                                    .try_send(HumanControl::Answer(reply))
+                                    .map_err(|e| e.to_string())
+                            })
+                            .unwrap_or(Err("通道不存在".to_string()));
+                        drop(channels);
+                        if answered.is_ok() {
+                            let _ = human_wait_app.emit(
+                                &format!("agent-log-{}", human_wait_session_id),
+                                format!(
+                                    "[回归评测] 检测到 ask_human：{}；已注入自动仲裁 {}/{}，评测继续。",
+                                    reason,
+                                    arbitration_index + 1,
+                                    MAX_AUTO_ARBITRATIONS
+                                ),
+                            );
+                            human_wait_detected.store(false, Ordering::SeqCst);
+                            sleep(HUMAN_WAIT_POLL_INTERVAL).await;
+                            continue;
+                        }
                     }
                     let _ = human_wait_app.emit(
                         &format!("agent-log-{}", human_wait_session_id),
