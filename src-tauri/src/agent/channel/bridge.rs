@@ -280,7 +280,14 @@ fn lan_ipv4_addresses() -> Vec<String> {
         if socket.connect(anchor).is_ok() {
             if let Ok(addr) = socket.local_addr() {
                 let ip = addr.ip().to_string();
-                if !ip.starts_with("127.") && !out.contains(&ip) {
+                // 过滤回环 + 198.18.x.x/15（IANA 保留的基准测试段，
+                // macOS Tailscale / iCloud Private Relay 虚拟接口会用这个段，
+                // 不是真实局域网地址，手机无法访问）
+                if !ip.starts_with("127.")
+                    && !ip.starts_with("198.18.")
+                    && !ip.starts_with("198.19.")
+                    && !out.contains(&ip)
+                {
                     out.push(ip);
                 }
             }
