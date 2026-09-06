@@ -82,7 +82,7 @@ describeLong("可选真实模型多阶段长程收敛回归（服务端判分）
         const result = await invoke("start_background_agent_evaluation", {
           modelRouting: { pro: selectedModelId, flash: selectedModelId, vision: selectedModelId, reasoning_effort: evalReasoningEffort, ...(routingConfig.routing_mode ? { routing_mode: routingConfig.routing_mode } : {}), ...(routingConfig.role_models ? { role_models: routingConfig.role_models } : {}) },
           maxDurationMinutes: maxDurationMinutes,
-          scenario: "isolated_write_fixture",
+          scenario: process.env.FREE_API_EVALUATION_SCENARIO?.trim() || "isolated_write_fixture",
           routingPreset: null,
           workspaceOverride: selectedWorkspace,
           ...(evalPlanMode ? { planMode: evalPlanMode } : {}),
