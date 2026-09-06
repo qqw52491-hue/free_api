@@ -921,10 +921,14 @@ mod finish_guard_tests {
         // 预算为 0 时不再退款
         assert!(!checkpoint.refund_infra_failed_review_round(Some("timed_out")));
 
-        // 实质性终态（invalid_output）不退款
+        // 审查者技术失败（invalid_output）应退款：技术失败与业务驳回是两笔账
+        // （实测教训：error_kind 落库值是 "timeout" 不是 "timed_out"，也要认）
         checkpoint.plan_reviewer_retry_count = 2;
-        assert!(!checkpoint.refund_infra_failed_review_round(Some("invalid_output")));
-        assert_eq!(checkpoint.plan_reviewer_retry_count, 2);
+        checkpoint.reviewer_budget_refunds = 0;
+        assert!(checkpoint.refund_infra_failed_review_round(Some("invalid_output")));
+        assert_eq!(checkpoint.plan_reviewer_retry_count, 1);
+        assert!(checkpoint.refund_infra_failed_review_round(Some("timeout")));
+        assert_eq!(checkpoint.plan_reviewer_retry_count, 0);
 
         // 退款封顶 3 次：防持续故障下预算永不耗尽
         checkpoint.plan_reviewer_retry_count = 5;

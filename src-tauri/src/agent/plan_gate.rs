@@ -199,7 +199,7 @@ fn gate_interception(
                 })
             } else if let Some(ref scorecard) = checkpoint.last_review_scorecard {
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
-                    >= crate::agent::checkpoint::MAX_PLAN_REVIEWER_RETRIES;
+                    >= crate::agent::checkpoint::max_plan_reviewer_rounds();
                 if !scorecard.passes_gate() {
                     let reason = scorecard.gate_rejection_reason().unwrap_or_else(|| "审查评分未达放行门槛".to_string());
                     Some(DispatchResult {
@@ -226,7 +226,7 @@ fn gate_interception(
             } else {
                 // fail-closed：审查结论缺失评分卡时绝不默认放行（旧的 fail-open 暗道）
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
-                    >= crate::agent::checkpoint::MAX_PLAN_REVIEWER_RETRIES;
+                    >= crate::agent::checkpoint::max_plan_reviewer_rounds();
                 Some(DispatchResult {
                     success: false,
                     stdout: String::new(),

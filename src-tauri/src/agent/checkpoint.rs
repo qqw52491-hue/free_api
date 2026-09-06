@@ -43,8 +43,19 @@ impl AgentPhase {
     }
 }
 
-/// 批准前方案审查的轮数硬上限（门禁与投影共用同一事实源）
+/// 批准前方案审查的轮数默认上限（门禁与投影共用同一事实源）。
+/// 可用 FREE_API_PLAN_REVIEW_MAX_ROUNDS 调整（钳位 1..=6）——reviewer 的
+/// invalid_output 连发会消耗请求方预算（虽已可退款），默认 2 轮在高抖动
+/// 通道下偏紧（实测：glm 62 分→改进→预算耗尽→ask_human 弃赛）。
 pub const MAX_PLAN_REVIEWER_RETRIES: u32 = 2;
+
+pub fn max_plan_reviewer_rounds() -> u32 {
+    std::env::var("FREE_API_PLAN_REVIEW_MAX_ROUNDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map(|v| v.clamp(1, 6))
+        .unwrap_or(MAX_PLAN_REVIEWER_RETRIES)
+}
 
 /// 阶段级写入审查的次数硬上限（独立于方案审查预算，语义不同不可混用）
 pub const MAX_STAGE_REVIEWS: u32 = 5;
@@ -710,10 +721,11 @@ impl AgentCheckpoint {
     /// 所有消耗审查轮次的路径（常规派发、resume_child 反驳对质）都必须走这里，
     /// 防止旁路无上限自增绕过熔断。
     pub fn reserve_plan_review_round(&mut self) -> Result<(), String> {
-        if self.plan_reviewer_retry_count >= MAX_PLAN_REVIEWER_RETRIES {
+        let max_rounds = max_plan_reviewer_rounds();
+        if self.plan_reviewer_retry_count >= max_rounds {
             return Err(format!(
                 "方案审查轮次预算已耗尽（上限 {} 轮）",
-                MAX_PLAN_REVIEWER_RETRIES
+                max_rounds
             ));
         }
         self.plan_reviewer_retry_count += 1;
@@ -721,13 +733,15 @@ impl AgentCheckpoint {
         Ok(())
     }
 
-    /// 基础设施失败的审查轮次退款：超时/取消/中断不是实质性审查，不应烧掉预算
-    /// （否则一次超时 = 双倍代价：本轮作废 + 重派再扣）。退款封顶 3 次，
-    /// 防止持续故障下预算永不耗尽、模型无限空转。
+    /// 审查者技术失败的审查轮次退款：超时/取消/中断/非法输出不是实质性审查，不应烧掉
+    /// 请求方的预算——技术失败和业务驳回是两笔账（实测教训：error_kind 落库值是
+    /// "timeout" 而非 "timed_out"，且 invalid_output 未纳入退款，glm 实弹中模型为
+    /// 审查员的故障买了单）。退款封顶 3 次，防止持续故障下预算永不耗尽、模型无限空转。
     pub fn refund_infra_failed_review_round(&mut self, error_kind: Option<&str>) -> bool {
         let infra = matches!(
             error_kind,
-            Some("timed_out") | Some("interrupted") | Some("cancelled")
+            Some("timed_out") | Some("timeout") | Some("interrupted") | Some("cancelled")
+                | Some("invalid_output")
         );
         if !infra || self.reviewer_budget_refunds >= 3 || self.plan_reviewer_retry_count == 0 {
             return false;
