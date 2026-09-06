@@ -572,6 +572,11 @@ pub struct AgentCheckpoint {
     /// 阶段审查未解决的 blocking_regardless 数（>0 时拦截写入，直到对质撤回）
     #[serde(default)]
     pub stage_review_blockers_open: u32,
+    /// 同一 blocking 异议连续被审查员维持（对质拒撤回）的次数——达到阈值自动
+    /// 降级为 final_only 记账（吵不赢就降级放行，账要还），防止三方锁死
+    /// （审查员不撤 + 写入全禁 + 模型无处可去 = 实测死锁形态）。
+    #[serde(default)]
+    pub stage_review_confrontation_failures: u32,
     /// ---- 方案审查者故障转移链（failover）----
     /// 已执行的自动故障转移次数（invalid_output 重试 1 次 + 超时切换备用审查员，封顶 2）
     #[serde(default)]
@@ -647,6 +652,7 @@ impl AgentCheckpoint {
             stage_review_rebuttal_run_id: None,
             stage_review_baseline_side_effects: 0,
             stage_review_blockers_open: 0,
+            stage_review_confrontation_failures: 0,
             plan_reviewer_failover_count: 0,
             plan_reviewer_last_dispatch: None,
             recent_gate_block_step: None,
@@ -748,6 +754,34 @@ impl AgentCheckpoint {
         }
         self.plan_reviewer_retry_count -= 1;
         self.reviewer_budget_refunds += 1;
+        true
+    }
+
+    /// 对质失败自动降级：blocking 异议经对质仍被审查员维持（confirmed 证据拒不撤回）
+    /// 时累计失败次数；达到 threshold 后把未解决 blockers 降级为 final_only 记账
+    /// 带入收尾审查，blockers_open 清零放行写入。返回 true = 本次触发降级。
+    /// 空行（异议已全部撤回/解决）时重置计数。
+    pub fn note_stage_review_confrontation_maintained(
+        &mut self,
+        blocker_lines: Vec<String>,
+        threshold: u32,
+    ) -> bool {
+        if blocker_lines.is_empty() {
+            self.stage_review_confrontation_failures = 0;
+            return false;
+        }
+        self.stage_review_confrontation_failures += 1;
+        if self.stage_review_confrontation_failures < threshold {
+            return false;
+        }
+        for line in blocker_lines {
+            let tagged = format!("【对质未撤回自动降级】{line}");
+            if !self.stage_review_final_only.iter().any(|existing| existing == &tagged) {
+                self.stage_review_final_only.push(tagged);
+            }
+        }
+        self.stage_review_blockers_open = 0;
+        self.stage_review_confrontation_failures = 0;
         true
     }
 

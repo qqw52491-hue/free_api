@@ -908,9 +908,10 @@ pub async fn run_tool_phase(
                 let mut failover_notes = String::new();
                 for job in completed_jobs.iter() {
                     // 阶段审查任务走独立语义：不置 plan consumed、基础设施失败退还阶段次数
+                    let is_rebuttal_result = Some(job.job_id.as_str())
+                        == checkpoint.stage_review_rebuttal_run_id.as_deref();
                     if Some(job.job_id.as_str()) == checkpoint.stage_review_run_id.as_deref()
-                        || Some(job.job_id.as_str())
-                            == checkpoint.stage_review_rebuttal_run_id.as_deref()
+                        || is_rebuttal_result
                     {
                         let value = serde_json::from_str::<serde_json::Value>(&job.result_json)
                             .unwrap_or(serde_json::json!({}));
@@ -951,6 +952,29 @@ pub async fn run_tool_phase(
                             })
                             .map(|f| format!("{}: {}", f.get("id").and_then(|i| i.as_str()).unwrap_or("?"), f.get("why").and_then(|w| w.as_str()).unwrap_or("")))
                             .collect();
+                        // 【对质失败自动降级】对质结果若仍维持 blocking（审查员以 confirmed
+                        // 证据拒不撤回）累计失败次数；2 轮后自动降级 final_only 记账放行——
+                        // 否则"审查员不撤 + 写入全禁 + 模型无处去"三方锁死（pro×glm 实测死锁）。
+                        if is_rebuttal_result {
+                            let blocker_lines: Vec<String> = findings_arr
+                                .iter()
+                                .filter(|f| is_blocked(f))
+                                .map(|f| {
+                                    format!(
+                                        "{}: {}",
+                                        f.get("id").and_then(|i| i.as_str()).unwrap_or("?"),
+                                        f.get("why").and_then(|w| w.as_str()).unwrap_or("")
+                                    )
+                                })
+                                .collect();
+                            if checkpoint.note_stage_review_confrontation_maintained(blocker_lines, 2) {
+                                stage_notes.push_str(
+                                    "\n⚖️ 【对质失败自动降级】blocking 异议经 2 轮对质仍被审查员维持，已降级为 final_only 记账带入收尾审查（收尾前必须逐条解决），写入已放行。",
+                                );
+                            }
+                        } else {
+                            checkpoint.stage_review_confrontation_failures = 0;
+                        }
                         stage_notes.push_str(&format!(
                             "\n📋 阶段审查结论已回收：blocking_regardless 未解决 {} 条 / final_only 记账 {} 条。{}",
                             checkpoint.stage_review_blockers_open,
