@@ -195,6 +195,13 @@ fn build_stage_evidence(context: &SandwichContext, workspace: &Path) -> String {
         .map(|t| format!("- [{}] {} ({})", t.status, t.description, t.id))
         .collect::<Vec<_>>()
         .join("\n");
+    // 【实测死锁教训】oracle 会为未来阶段预生成占位存根（src/stage-XX.mjs 内容为
+    // "return value;"）。它们出现在累计 diff 里是设计内的未来工作，审查员曾把
+    // "存根未实现未来阶段义务"判成 blocking_regardless，拦截一切写入形成死锁
+    // （模型被迫 ask_human，整轮评测终止）。必须在证据包里显式豁免。
+    evidence.push_str(
+        "【占位存根豁免（重要）】宿主 oracle 会为尚未到达的未来阶段预生成占位文件          src/stage-XX.mjs（内容为 return value; 存根）。这些文件出现在 diff 中属于设计内          的未来工作，不属于任何当前阶段的缺陷：不得因此判出 blocking（无论 regardless          还是 final_only），最多作为一条 suggestion 提及。你的审查对象是已实现代码的          结构性质量与当前阶段义务的落实情况。\n\n",
+    );
     evidence.push_str(&format!(
         "【阶段计划（注意：这是中间态，非最终形态，final_only 级问题请如实标注）】\n{}\n",
         todos
