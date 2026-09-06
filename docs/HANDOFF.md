@@ -46,13 +46,23 @@ hijack（3.1-pro fetch 劫持真实牌回放：阶段审查抓到 F2 final_only 
 3. **wait 路径 invalid_output failover 缺口**：glm run5 中 reviewer 两次 invalid_output
    经 wait_jobs 交付，该路径只对超时做 failover——模型对错误 JSON 重复派发后弃赛。
    已补齐（866cfa9），三路径（poll/信箱/wait）对齐。
-4. **glm run6（6162e049）= 全链路首次完整验证**：MCP 工具✓、审查评分卡真实产出✓
-   （flash 给 glm 方案打 62 分并给出实质意见"加 String 归一化防非字符串"，glm 据此
-   改进了方案）、门禁拦截<75 分✓、failover 自动重派✓、ask_human 冷却✓。
+4. **glm run6（6162e049）= 方案关口及以前的全链路验证**（适用边界：阶段审查、
+   oracle 判分、收尾审查三大件至今没被真模型走过——不得表述为"全链路验证完毕"）：
+   MCP 工具✓、审查评分卡真实产出✓（flash 给 glm 方案打 62 分并给出实质意见
+   "加 String 归一化防非字符串"，glm 据此改进了方案）、门禁拦截<75 分✓、
+   failover 自动重派✓、ask_human 冷却✓。
    终局：glm 改进方案后 plan 审查预算 2/2 耗尽 → ask_human → 评测按设计自动停止。
 
-**行为对照（初步，环境注记：均含基建故障期）**：deepseek@high=慢思考型（39min 7 调用
-未动笔）；glm-5.2=快节奏搜索型（45s/调用，77% 调用是 search，曾 30 调用不跑 npm test）。
+**行为对照（按轮次拆分后的修正版）**：
+- glm-5.2 "77% search 探索成瘾"画像**已撤销**——那是隧道死掉轮的伪影（没有
+  文件/shell 工具时 search 是唯一选择）。工具可用轮（run6）search 占比 **0%**，
+  读文件/shell/派审/写文件行为全部正常。
+- deepseek@high=慢思考型（39min 7 调用未动笔，跨两轮一致，此条保留）；
+  其 92% search 占比同样是隔离 bug 时代（search 解析到宿主项目）的混淆数据，待重测。
+- 教训重申：工具可用性先于行为定性，标签必须带环境注记。
+- **工程债记录**：429 的 60s 退避是反应式的，主 Agent + reviewer + worker 三方并发
+  同吃一个 key 的 rpm 配额，同时醒来会撞同一窗口——预防式做法是客户端侧
+  token bucket 限流器（集中管理 rpm 消耗权），不急但记入工程债。
 
 **审查预算设计问题（待议）**：invalid_output 是 reviewer 的缺陷，却消耗请求方的
 plan 审查预算（infra 类超时可退款，invalid 不退）——建议把 invalid_output 纳入退款。
@@ -279,5 +289,8 @@ reward hacking 案例库、确定性冒烟、异构 reviewer、trace 素材库�
 - final_only 记账已入 checkpoint 且已拼入收尾审查材料（reviewer_gatekeeper），
   但冒烟 hijack 场景尚未断言"收尾审查证据包含 final_only 条目"（现只断言 checkpoint）
 - `run_tool_phase` 函数级拆分（纯工程债）
+- 客户端侧 token bucket rpm 限流器（三方并发共享 Shantung key 配额的预防式治理）
+- 下一轮测量目标先定义：**方案关口通过率 + 首个 oracle 阶段解锁（index≥1）**，
+  24 阶段收敛是加分项不是及格线（真模型从未走过阶段审查/判分/收尾三大件）
 - 前端零单测（vitest 未配）；`agent_evaluations/` 与 `test-artifacts/` 是 gitignore 的运行输出
 - 模型库 ~295 个 enabled=0 的模型无法区分"本就禁用/误禁"，待用户 UI 核对（见〇）
