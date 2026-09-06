@@ -1403,6 +1403,24 @@ async fn run_agent_main_loop_in_workspace_inner(
         if let Some(blocker) = complex_delivery_blocker {
             open_todos.push(blocker);
         }
+        // 【廉价完成防线】评测 oracle 的判分进度是任务完成度的客观事实源：
+        // 模型自declared的审查契约/TODO 只覆盖它自己申报的范围（实测：1/24 交付被判
+        // succeeded）。oracle 未完成时把缺口作为持久 blocker——与 complex 未决同级，
+        // 不因 finish_reviewed 置位而失效；熔断上限（MAX_FINISH_CHALLENGES）仍是安全阀。
+        let mut oracle_progress_unresolved = false;
+        if is_finish && result.success {
+            if let Some((index, total, completed)) =
+                crate::agent::eval_oracle::query_active_progress().await
+            {
+                if !completed && index < total {
+                    oracle_progress_unresolved = true;
+                    open_todos.push(format!(
+                        "宿主判分进度 {}/{} 未完成：本任务以宿主逐阶段判分为唯一完成标准，禁止以部分阶段通过为由交卷；请读取 CURRENT_STAGE.md 继续实现下一阶段并用 npm test 送验",
+                        index, total
+                    ));
+                }
+            }
+        }
         if is_finish && (crate::agent::child_reviewer::has_running_child_runs(state.inner(), &run_id) || crate::agent::job_engine::has_running_jobs(state.inner(), &run_id)) {
             open_todos.push("仍有后台异步任务或持续监听正在执行中：后台任务请调用 wait_jobs 挂起等待并接收结论；持续监听（watch）请调用 watch_stop 显式释放后再提交 finish，或执行其他独立操作后重试".to_string());
         }
@@ -1428,7 +1446,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             checkpoint.finish_reviewed,
             checkpoint.finish_challenge_count,
             &open_todos,
-            complex_delivery_unresolved,
+            complex_delivery_unresolved || oracle_progress_unresolved,
         );
 
         let mut reviewer_challenged = false;

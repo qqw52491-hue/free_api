@@ -154,6 +154,42 @@ pub fn spawn() -> std::io::Result<EvalOracleHandle> {
     Ok(EvalOracleHandle { port, nonce })
 }
 
+// 当前评测进程的活动 oracle（单评测串行假设下全局唯一）。
+// finish 门禁据此把宿主判分进度作为交付的客观事实源——模型自declared的
+// 审查契约/TODO 不能替代它（实测：廉价完成击穿三层门禁，1/24 交付被判 succeeded）。
+static ACTIVE_ORACLE: std::sync::OnceLock<(u16, String)> = std::sync::OnceLock::new();
+
+pub fn register_active_oracle(port: u16, nonce: &str) {
+    let _ = ACTIVE_ORACLE.set((port, nonce.to_string()));
+}
+
+pub fn active_oracle() -> Option<&'static (u16, String)> {
+    ACTIVE_ORACLE.get()
+}
+
+/// 查询活动 oracle 的判分进度。无 oracle 或查询失败返回 None（fail-open，
+/// oracle 基础设施故障不应把 finish 永久堵死）。
+pub async fn query_active_progress() -> Option<(usize, usize, bool)> {
+    let (port, nonce) = active_oracle()?;
+    let url = format!("http://127.0.0.1:{port}/status?nonce={nonce}");
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        reqwest::get(&url),
+    )
+    .await
+    .ok()?
+    .ok()?
+    .text()
+    .await
+    .ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    Some((
+        v.get("index")?.as_u64()? as usize,
+        v.get("total")?.as_u64()? as usize,
+        v.get("completed")?.as_bool()?,
+    ))
+}
+
 fn route(
     request_line: &str,
     body: &str,

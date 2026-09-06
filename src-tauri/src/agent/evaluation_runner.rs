@@ -439,7 +439,11 @@ pub async fn start_background_agent_evaluation(
     )?;
     // 写入型评测启动服务端判分 oracle：题目/输入/期望输出不再落盘，杜绝客户端批量解题
     let oracle = if evaluation_run.scenario_id == evaluation::ISOLATED_WRITE_FIXTURE_SCENARIO {
-        Some(crate::agent::eval_oracle::spawn().map_err(|e| format!("判分 oracle 启动失败: {e}"))?)
+        let handle = crate::agent::eval_oracle::spawn().map_err(|e| format!("判分 oracle 启动失败: {e}"))?;
+        // 注册为活动 oracle：finish 门禁据此把宿主判分进度作为交付的客观事实源
+        // （实测教训：无此注册时模型自declared契约只覆盖 stage-01，1/24 交付被判 succeeded）
+        crate::agent::eval_oracle::register_active_oracle(handle.port, &handle.nonce);
+        Some(handle)
     } else {
         None
     };
