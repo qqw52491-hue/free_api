@@ -1807,6 +1807,7 @@ pub async fn run_tool_phase(
         let registry_arc = registry_state.inner().clone();
         let db = state.inner().clone();
         let sid = final_session_id.clone();
+        let ws_root = workspace_dir.to_path_buf();
         let registry = {
             let guard = registry_arc.lock().await;
             (*guard).clone()
@@ -1814,7 +1815,7 @@ pub async fn run_tool_phase(
 
         let mut tool_task = tokio::task::spawn_blocking(move || {
             println!("执行动作: {:?}", inst_c);
-            run_agent_step(&db, &sid, &inst_c, &registry)
+            run_agent_step(&db, &sid, &inst_c, &registry, Some(&ws_root))
         });
 
         let mut dispatch_result = tokio::select! {

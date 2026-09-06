@@ -54,7 +54,7 @@ pub fn run_plan_tree_sync(
             // 对 MCP 插件使用 handle.block_on，在 runtime 内嵌套 block_on 会直接 panic。
             // 用 spawn_blocking 把同步分发放到 blocking 线程执行，消除 runtime 嵌套。
             let res = tokio::task::spawn_blocking(move || {
-                execute_command_inner(&db_c, &sid_c, &tool, &action, &args, &reg_c)
+                execute_command_inner(&db_c, &sid_c, &tool, &action, &args, &reg_c, None)
             })
             .await
             .map_err(|e| format!("工具执行任务崩溃: {}", e))?;

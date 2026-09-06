@@ -428,6 +428,7 @@ pub(crate) fn execute_command_inner(
     action: &str,
     params: &serde_json::Value,
     registry: &PluginRegistry,
+    workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
     // 0. 宿主层安全防护：
     // 项目专属会话禁止切换工作区（锁定在项目根目录，防止越界串扰）
@@ -483,7 +484,7 @@ pub(crate) fn execute_command_inner(
 
     // 3. 核心原生工具 C: search (跨执行日志 FTS5 与实时代码 ripgrep 联邦检索)
     if tool.eq_ignore_ascii_case("search") {
-        return retrieval::dispatch_search(db, session_id, params);
+        return retrieval::dispatch_search(db, session_id, params, workspace_root);
     }
 
     // 3.5 核心原生工具 D: web_search / web_fetch (互联网全网检索与网页正文 Markdown 提取)
@@ -686,6 +687,7 @@ pub fn run_agent_step(
     session_id: &str,
     instruction: &AgentInstruction,
     registry: &PluginRegistry,
+    workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
     let tool_name = instruction.get_tool().to_lowercase();
     if is_finish_instruction(instruction) {
@@ -789,7 +791,7 @@ pub fn run_agent_step(
             // 是本层路由字段，原样转发会被下游 MCP 的参数契约拒绝（「tool」不是声明字段）。
             let step_params = cmd_val.get("command").cloned().unwrap_or_else(|| cmd_val.clone());
             let res =
-                execute_command_inner(db, session_id, step_tool, &step_action, &step_params, registry);
+                execute_command_inner(db, session_id, step_tool, &step_action, &step_params, registry, workspace_root);
 
             // 拼接输出结果
             if !res.stdout.is_empty() {
@@ -834,7 +836,7 @@ pub fn run_agent_step(
     }
 
     let params = instruction.get_params();
-    execute_command_inner(db, session_id, &tool_name, &action, &params, registry)
+    execute_command_inner(db, session_id, &tool_name, &action, &params, registry, workspace_root)
 }
 
 #[tauri::command]
@@ -881,7 +883,7 @@ pub async fn dispatch_agent_step(
     };
 
     let result =
-        tokio::task::spawn_blocking(move || run_agent_step(&db, &sid, &instruction, &registry))
+        tokio::task::spawn_blocking(move || run_agent_step(&db, &sid, &instruction, &registry, None))
             .await
             .map_err(|e| e.to_string())?;
 
@@ -1124,7 +1126,7 @@ mod tests {
         let p = serde_json::json!({ "path": "/some/other/workspace" });
 
         // 1. 通用会话未关联项目，不触发项目锁定硬拦截（放行给外部 MCP 路由）
-        let res_general = execute_command_inner(&db, "general-session", "switch_workspace", "", &p, &registry);
+        let res_general = execute_command_inner(&db, "general-session", "switch_workspace", "", &p, &registry, None);
         assert_ne!(res_general.route, "host_rejection:project_session_workspace_locked");
 
         // 2. 模拟项目会话绑定
@@ -1138,7 +1140,7 @@ mod tests {
             ).unwrap();
         }
 
-        let res = execute_command_inner(&db, "proj-session", "switch_workspace", "", &p, &registry);
+        let res = execute_command_inner(&db, "proj-session", "switch_workspace", "", &p, &registry, None);
         assert!(!res.success);
         assert!(res.stderr.contains("宿主安全保护"));
         assert_eq!(res.route, "host_rejection:project_session_workspace_locked");

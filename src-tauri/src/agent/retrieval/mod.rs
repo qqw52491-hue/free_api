@@ -14,7 +14,12 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 /// 统一联邦检索调度入口
-pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> DispatchResult {
+pub fn dispatch_search(
+    db: &DbState,
+    session_id: &str,
+    params_value: &Value,
+    workspace_root: Option<&std::path::Path>,
+) -> DispatchResult {
     // 语法层归一化：无歧义自动适配大模型常见的标量字符串输入（如 "kinds": "code" 自动转为 ["code"]）
     let normalized_value = match params_value {
         Value::Object(map) => {
@@ -130,18 +135,30 @@ pub fn dispatch_search(db: &DbState, session_id: &str, params_value: &Value) -> 
                 errors.push("❌ [search] code 检索需要显式 path 参数（要检索的目录或文件路径，如 path: \".\" 或 path: \"src\"）。\n💡 正确示例: {\"query\": \"关键词\", \"kinds\": [\"code\"], \"path\": \".\"}".to_string());
             }
             Some(raw_path) => {
-                let root = Path::new(raw_path);
+                // 【工作区隔离】相对路径以当前会话工作区为根解析，而不是进程 CWD——
+                // 评测隔离工作区下按 CWD 解析会让模型检索到宿主项目目录（实测教训：
+                // deepseek 实弹曾据此把宿主 docs/前端样式翻了个遍，预算烧在错误工作区）。
+                let raw = Path::new(raw_path);
+                let root = match (raw.is_absolute(), workspace_root) {
+                    (false, Some(ws)) => std::path::PathBuf::from(ws).join(raw),
+                    _ => std::path::PathBuf::from(raw),
+                };
                 if !root.is_dir() && !root.is_file() {
-                    errors.push(format!("path 不是有效目录或文件: {}", raw_path));
+                    errors.push(format!(
+                        "path 不是有效目录或文件: {}（已按当前工作区解析为 {}，不存在；注意 src/ 目录可能尚未生成，先运行 npm test 让宿主创建题目文件）",
+                        raw_path,
+                        root.display()
+                    ));
                 } else {
                     // 把真实解析出的检索根（绝对路径）投影进结果：资源作用域契约
                     // 依据它判定 inside/outside，相对路径不再永远落入 unknown。
-                    resolved_root = root
-                        .canonicalize()
-                        .ok()
-                        .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(root)))
-                        .map(|absolute| absolute.to_string_lossy().to_string());
-                    match search_code(root, &params.query, limit) {
+                    resolved_root = Some(
+                        root.canonicalize()
+                            .unwrap_or_else(|_| root.clone())
+                            .to_string_lossy()
+                            .to_string(),
+                    );
+                    match search_code(&root, &params.query, limit) {
                         Ok((hits, literal_fallback)) => {
                             if literal_fallback {
                                 notes.push(
@@ -419,12 +436,12 @@ mod tests {
         .unwrap();
         let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
 
-        let result = dispatch_search(&db, "session-dispatch", &json!({"query": "数据库服务器"}));
+        let result = dispatch_search(&db, "session-dispatch", &json!({"query": "数据库服务器"}), None);
         assert!(result.success);
         let payload: Value = serde_json::from_str(&result.stdout).unwrap();
         assert_eq!(payload["total_hits"], 1);
 
-        let short = dispatch_search(&db, "session-dispatch", &json!({"query": "数据"}));
+        let short = dispatch_search(&db, "session-dispatch", &json!({"query": "数据"}), None);
         assert!(short.success);
         let short_payload: Value = serde_json::from_str(&short.stdout).unwrap();
         assert_eq!(
@@ -436,11 +453,12 @@ mod tests {
             &db,
             "session-dispatch",
             &json!({"query": "fn main", "kinds": ["code"]}),
+            None,
         );
         assert!(!code_missing.success);
         assert!(code_missing.stderr.contains("path"));
 
-        let str_query = dispatch_search(&db, "session-dispatch", &json!("数据库服务器"));
+        let str_query = dispatch_search(&db, "session-dispatch", &json!("数据库服务器"), None);
         assert!(str_query.success);
         let str_payload: Value = serde_json::from_str(&str_query.stdout).unwrap();
         assert_eq!(str_payload["total_hits"], 1);
@@ -519,6 +537,7 @@ mod tests {
                 "kinds": ["code"],
                 "path": file.to_str().unwrap(),
             }),
+            None,
         );
 
         assert!(
@@ -562,6 +581,7 @@ mod tests {
                 "kinds": ["code"],
                 "path": temp.0.to_str().unwrap(),
             }),
+            None,
         );
 
         assert!(result.success, "正则解析失败应降级重试: {}", result.stderr);
@@ -596,6 +616,7 @@ mod tests {
                 "kinds": ["code"],
                 "path": ".",
             }),
+            None,
         );
         std::env::set_current_dir(original_cwd).unwrap();
 

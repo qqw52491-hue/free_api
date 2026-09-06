@@ -95,7 +95,7 @@ mod finish_instruction_tests {
         )));
         let registry = PluginRegistry::new();
 
-        let result = run_agent_step(&db, "finish-regression", &instruction, &registry);
+        let result = run_agent_step(&db, "finish-regression", &instruction, &registry, None);
         assert!(result.success);
         assert_eq!(result.route, "finish");
         assert_eq!(result.stdout, "Excel 已创建");
