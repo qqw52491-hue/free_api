@@ -9,6 +9,8 @@ const S = {
   expandedPlans: new Set(),
   collapsedPlans: new Set(),
   sessions: [],
+  runs: [],
+  evals: [],
   view: { name: "home" },
   openGroups: new Set(JSON.parse(localStorage.getItem("free_api_open_groups") || "[]")),
   currentSessionId: null,
@@ -802,12 +804,17 @@ async function fetchTraceDetail(t) {
 }
 
 async function loadHome() {
-  const [projRes, sessRes] = await Promise.all([
+  const [projRes, sessRes, runsRes, evalsRes] = await Promise.all([
     api("/channel/projects"),
     api("/channel/sessions"),
+    // 旧二进制无这两个路由时降级为空列表，不阻塞首页
+    api("/channel/runs").catch(() => ({})),
+    api("/channel/evals").catch(() => ({})),
   ]);
   S.projects = projRes.projects || [];
   S.sessions = sessRes.sessions || [];
+  S.runs = runsRes.runs || [];
+  S.evals = evalsRes.evals || [];
   if (S.openGroups.size === 0) {
     if (S.projects.length) S.openGroups.add(S.projects[0].id);
     S.openGroups.add("__scratch__");
@@ -928,6 +935,8 @@ function renderHome() {
   $("btnDelSession").classList.add("hidden");
   $("btnMenu").classList.remove("hidden");
   $("homeMeta").textContent = `${S.projects.length + 1} 个工作区 · ${S.sessions.length} 个任务`;
+  renderRecent();
+  renderEvals();
   
   const groups = groupsOf();
   $("wsList").innerHTML = groups.map(g => {
@@ -953,6 +962,85 @@ function renderHome() {
       </div>
     `;
   }).join("");
+}
+
+// ===== 最近动态（runs 全局聚合）与评测报告（在线浏览，路由在 http.rs handler_eval_*） =====
+function renderRecent() {
+  const feed = $("recentFeed");
+  if (!feed) return;
+  $("recentMeta").textContent = S.runs.length ? `${S.runs.length} 条任务记录` : "";
+  const runs = S.runs.slice(0, 8);
+  if (!runs.length) {
+    feed.innerHTML = `<div class="empty-tip">暂无任务动态</div>`;
+    return;
+  }
+  feed.innerHTML = runs.map(r => {
+    const isRunning = r.status === "running" || r.status === "waiting_human";
+    const dot = isRunning ? '<span style="color:#38bdf8; font-weight:600;">● 进行中</span> · ' : "";
+    return `
+      <div class="task-row-card ${isRunning ? "running-card" : ""}" data-recent-run="${esc(r.run_id || "")}">
+        <div class="tt">
+          <div class="title">${esc(r.goal_preview || "未命名任务")}</div>
+          <div class="sub-line">${dot}${esc(relTime(r.started_at))}${r.session_id ? " · 点击查看执行流" : ""}</div>
+        </div>
+        ${chip(r.status)}
+      </div>
+    `;
+  }).join("");
+  feed.querySelectorAll("[data-recent-run]").forEach(el => {
+    el.onclick = () => {
+      const run = S.runs.find(x => (x.run_id || "") === el.dataset.recentRun);
+      if (run?.session_id) openSession(run.session_id);
+    };
+  });
+}
+
+function renderEvals() {
+  const list = $("evalList");
+  if (!list) return;
+  $("evalMeta").textContent = S.evals.length ? `${S.evals.length} 份报告` : "";
+  const evals = S.evals.slice(0, 10);
+  if (!evals.length) {
+    list.innerHTML = `<div class="empty-tip">暂无评测报告（agent_evaluations）</div>`;
+    return;
+  }
+  list.innerHTML = evals.map(ev => `
+    <div class="task-row-card" data-eval-id="${esc(ev.id)}">
+      <div class="tt">
+        <div class="title">${esc(short(ev.id.replace(/^agent-[a-z-]+-/, ""), 46))}</div>
+        <div class="sub-line">${esc(relTime(new Date((ev.modified_secs || 0) * 1000).toISOString()))}${ev.has_markdown ? " · 📄 报告" : ""}</div>
+      </div>
+      <span class="tag-badge">浏览</span>
+    </div>
+  `).join("");
+  list.querySelectorAll("[data-eval-id]").forEach(el => {
+    el.onclick = () => openEval(el.dataset.evalId).catch(e => toast(e.message));
+  });
+}
+
+async function openEval(evalId) {
+  const res = await api(`/channel/eval/${encodeURIComponent(evalId)}`);
+  let html;
+  if (res.kind === "markdown") {
+    html = formatMarkdown(res.content || "");
+  } else {
+    let summary = "";
+    try {
+      const data = JSON.parse(res.content || "{}");
+      const m = data.metrics || {};
+      summary = `<div class="eval-summary">
+        <b>状态</b> ${esc(data.trace_status || "?")} · <b>结论</b> ${esc(data.verdict || "?")}<br>
+        <b>调用</b> ${esc(String(m.llm_call_count ?? "?"))} 次 · <b>解析成功率</b> ${esc(String(m.parse_success_rate_percent ?? "?"))}% ·
+        <b>工具失败率</b> ${esc(String(m.tool_failure_rate_percent ?? "?"))}% · <b>缓存命中</b> ${esc(String(m.cache_hit_rate_percent ?? "?"))}%
+      </div>`;
+    } catch { /* 非结构化 JSON 原样展示 */ }
+    html = `${summary}<pre class="mono" style="white-space:pre-wrap; font-size:11px;">${esc(res.content || "")}</pre>`;
+  }
+  $("apTitle").textContent = `评测报告 · ${short(evalId, 40)}`;
+  $("apBody").innerHTML = html;
+  $("apOpenRaw").classList.add("hidden");
+  $("apDownload").classList.add("hidden");
+  $("artPreview").classList.remove("hidden");
 }
 
 function renderSidebar() {
@@ -1270,6 +1358,9 @@ function bindOptChips() {
 
   $("sheetClose").onclick = () => { S.sheetOpen = false; $("sheetPick").classList.add("hidden"); };
   $("sheetPick").addEventListener("click", (e) => { if (e.target === $("sheetPick")) { S.sheetOpen = false; $("sheetPick").classList.add("hidden"); } });
+  // 评测报告预览弹层（openEval 打开）
+  $("apClose").onclick = () => $("artPreview").classList.add("hidden");
+  $("artPreview").addEventListener("click", (e) => { if (e.target === $("artPreview")) $("artPreview").classList.add("hidden"); });
 }
 
 let newTaskType = "scratch";

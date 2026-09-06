@@ -985,6 +985,88 @@ async fn handler_run_cancel(
     Ok(Json(json!({"ok": true, "session_id": session_id})))
 }
 
+// ===== 评测报告在线浏览（与评测落盘共用 CWD/agent_evaluations 约定，见 evaluation.rs） =====
+
+async fn handler_eval_list(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let dir = std::env::current_dir()
+        .map_err(|e| internal_error(format!("无法获取工作目录: {e}")))?
+        .join("agent_evaluations");
+    let mut items: Vec<(std::time::SystemTime, Value)> = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(&dir) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(stem) = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .and_then(|name| name.strip_suffix(".json").map(str::to_string))
+            else {
+                continue;
+            };
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            let md_path = dir.join(format!("{stem}.md"));
+            items.push((
+                modified,
+                json!({
+                    "id": stem,
+                    "has_markdown": md_path.is_file(),
+                    "modified_secs": modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                }),
+            ));
+        }
+    }
+    items.sort_by(|a, b| b.0.cmp(&a.0));
+    let evals: Vec<Value> = items.into_iter().map(|(_, v)| v).take(50).collect();
+    Ok(Json(json!({ "evals": evals })))
+}
+
+async fn handler_eval_detail(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(eval_id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    // fail-closed：只允许安全文件名字符，防路径穿越
+    if eval_id.is_empty()
+        || !eval_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        || eval_id.contains("..")
+    {
+        return Err(bad_request("非法的评测报告 ID"));
+    }
+    let dir = std::env::current_dir()
+        .map_err(|e| internal_error(format!("无法获取工作目录: {e}")))?
+        .join("agent_evaluations");
+    let md_path = dir.join(format!("{eval_id}.md"));
+    let (path, kind) = if md_path.is_file() {
+        (md_path, "markdown")
+    } else {
+        (dir.join(format!("{eval_id}.json")), "json")
+    };
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| not_found("评测报告不存在或已清理"))?;
+    Ok(Json(json!({ "id": eval_id, "kind": kind, "content": content })))
+}
+
 async fn handler_config_get(
     AxumState(state): AxumState<Arc<ChannelState>>,
     headers: HeaderMap,
@@ -1609,6 +1691,8 @@ pub(crate) fn channel_router(state: Arc<ChannelState>) -> Router {
         .route("/channel/trace/{trace_id}", get(handler_trace_detail))
         .route("/channel/runs", get(handler_run_list))
         .route("/channel/run/{run_id}", get(handler_run_status))
+        .route("/channel/evals", get(handler_eval_list))
+        .route("/channel/eval/{eval_id}", get(handler_eval_detail))
         .route("/channel/run/{run_id}/answer", post(handler_run_answer))
         .route("/channel/run/{run_id}/goal", post(handler_run_goal))
         .route("/channel/run/{run_id}/cancel", post(handler_run_cancel))

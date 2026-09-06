@@ -1470,3 +1470,16 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   .side-mask.show { display: block; }
   .main { padding: 8px 8px 120px; }
 }
+
+/* ===== 最近动态 / 评测报告（首页新增区块） ===== */
+.eval-summary {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+  background: var(--card-inner);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.eval-summary b { color: var(--text); font-weight: 600; }
