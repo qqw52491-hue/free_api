@@ -1507,19 +1507,77 @@ async fn run_agent_main_loop_in_workspace_inner(
                 context.record_step_outcome(false);
             } else {
                 // Level 1: 确定性门禁与机械门禁 100% 通过后，才调用 Reviewer 终审（带 Checklist 证据链严审）！
+                // 【B 路径执行器】契约义务绑定的冻结验证命令：宿主逐条执行，退出码即判定。
+                // 失败 = 0 token 机械拦截打回（验证器故障也判失败，绝不放行）。
+                let obligation_results = if context.side_effects.len() > context.inherited_side_effects_count {
+                    let obligations: Vec<crate::agent::review_contract::ReviewObligation> = context
+                        .review_contract
+                        .as_ref()
+                        .map(|c| c.obligations.clone())
+                        .unwrap_or_default();
+                    crate::agent::host_verify::run_obligation_verifications(&workspace_dir, &obligations)
+                        .await
+                } else {
+                    Vec::new()
+                };
+                let obligation_failures: Vec<String> = obligation_results
+                    .iter()
+                    .filter(|r| !r.passed)
+                    .map(|r| {
+                        format!(
+                            "- 义务 [{}] 验证命令 `{}` 退出码 {}: {}",
+                            r.obligation_id, r.command, r.exit_code, r.output_tail
+                        )
+                    })
+                    .collect();
+                if !obligation_failures.is_empty() {
+                    checkpoint.finish_reviewed = true;
+                    context.add_error_feedback(&format!(
+                        "【🚨 义务宿主验证拦截】契约绑定的验证命令未全部通过（退出码即判定，冻结脚本不可修改）：\n{}\n本次 finish 已被系统自动打回。请真实修复对应义务后重试；验证脚本已冻结，修改工作区脚本无效。",
+                        obligation_failures.join("\n")
+                    ));
+                    crate::agent::dispatcher::emit_tool_event(
+                        &app,
+                        &final_session_id,
+                        step_id,
+                        &instruction,
+                        "obligation_verify_challenged",
+                        Some("finish".to_string()),
+                        Some(false),
+                        &format!("义务宿主验证失败 {} 项", obligation_failures.len()),
+                        None,
+                    );
+                    context.record_step_outcome(false);
+                    // 跳过终审：机械事实已足够打回，省一次审查
+                    let _ = save_checkpoint(state.inner(), &mut checkpoint);
+                    continue;
+                }
                 // 宿主执行验证：有真实写入且配置了验证命令时，宿主亲自跑一把，
                 // 真实退出码进 reviewer 证据包（堵"模型把失败当证据"的幻觉空子）
-                let host_verification = if context.side_effects.len() > context.inherited_side_effects_count {
-                    let hv = crate::agent::host_verify::run(&workspace_dir).await;
-                    if let Some(ref text) = hv {
-                        let _ = app.emit(
-                            &format!("agent-log-{}", final_session_id),
-                            format!("🧪 宿主执行验证完成:\n{}", text),
-                        );
+                let host_verification = {
+                    let mut parts: Vec<String> = Vec::new();
+                    if context.side_effects.len() > context.inherited_side_effects_count {
+                        if let Some(hv) = crate::agent::host_verify::run(&workspace_dir).await {
+                            let _ = app.emit(
+                                &format!("agent-log-{}", final_session_id),
+                                format!("🧪 宿主执行验证完成:\n{}", hv),
+                            );
+                            parts.push(hv);
+                        }
                     }
-                    hv
-                } else {
-                    None
+                    if !obligation_results.is_empty() {
+                        let lines: Vec<String> = obligation_results
+                            .iter()
+                            .map(|r| {
+                                format!(
+                                    "- [{}] `{}` → 退出码 {}: {}",
+                                    r.obligation_id, r.command, r.exit_code, r.output_tail
+                                )
+                            })
+                            .collect();
+                        parts.push(format!("契约义务验证（冻结脚本）：\n{}", lines.join("\n")));
+                    }
+                    (!parts.is_empty()).then(|| parts.join("\n\n"))
                 };
                 let review_res = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
                     &app,

@@ -26,6 +26,17 @@ pub struct ReviewObligation {
     pub evidence_refs: Vec<String>,
     #[serde(default)]
     pub waived_reason: Option<String>,
+    /// 义务绑定的可执行验证命令（契约播种：模型起草、方案审查批准后冻结）。
+    /// 退出码 0 = 该义务客观成立；非 0 = 收尾门禁 blocker。None = 纯主观义务。
+    #[serde(default)]
+    pub verify_command: Option<String>,
+    /// 批准时刻的验证脚本内容快照（冻结副本）。执行时宿主写临时文件运行此副本，
+    /// 工作区内同名脚本被模型改动不影响判定——防"模型改自己的考卷"。
+    #[serde(default)]
+    pub verify_script: Option<String>,
+    /// 冻结脚本内容的 SHA-256（执行前核验副本完整性）。
+    #[serde(default)]
+    pub verify_sha256: Option<String>,
 }
 
 impl ReviewContract {
@@ -53,6 +64,18 @@ impl ReviewContract {
             if candidate.question.trim() != existing.question.trim() {
                 return Err(format!(
                     "审查契约义务 {} 的问题文本不能被静默改写；请新增新义务，或保留原问题并以 waived 说明范围变化。",
+                    existing.id
+                ));
+            }
+            // 【冻结要害】验证命令/脚本/哈希一经存在于契约，任务中途不得改写——
+            // 否则模型改自己的考卷，客观锚失效（这是整个 B 路径的安全前提）。
+            if existing.verify_command.is_some()
+                && (candidate.verify_command != existing.verify_command
+                    || candidate.verify_script != existing.verify_script
+                    || candidate.verify_sha256 != existing.verify_sha256)
+            {
+                return Err(format!(
+                    "审查契约义务 {} 的验证命令/脚本已冻结，中途不得改写；如需更换验证方式，请新增新义务并在方案审查中说明。",
                     existing.id
                 ));
             }
@@ -234,6 +257,9 @@ mod tests {
 
     fn obligation(id: &str, question: &str, status: &str) -> ReviewObligation {
         ReviewObligation {
+            verify_command: None,
+            verify_script: None,
+            verify_sha256: None,
             id: id.to_string(),
             question: question.to_string(),
             status: status.to_string(),
