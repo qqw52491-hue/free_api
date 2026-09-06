@@ -196,6 +196,18 @@ live-agent-real-task.e2e.mjs）。首发任务：**用 excel MCP 在隔离工作
   38c6f7e 一轮）；Excel 专属冻结验证脚本的首轮实弹待下批（把 check_matrix.py
   声明进契约即可，机制今日已备）。
 
+## 〇·十、冒烟大量测试战报（2026-09-06 晚，零模型 token）
+
+四变体回归 + B 路径端到端：happy ✓（23s）、hijack ✓（25s）、parse ✗（mock 失步）、
+timeout 未跑（parse 占用）。新发现与处置：
+1. mock 放行信号被 invalid 交付骗过 → 收紧为真评分卡/已批准放行；
+2. oracle 拦截 finish 时 mock 原地对空交卷 → 改为回卷实现阶段修复重试；
+3. **parse 变体仍失败（301 调用循环）——根因=mock 线性卡带无法建模
+   "质询→修复→重试"循环，需重构为以宿主事实为键的小状态机
+   （plan_approved? oracle_index? obligations_pass? 三个事实驱动出牌）**，
+   排队下一会话。宿主行为全程正确，spec 断言全部兜住——失败均在 mock 侧。
+注意：冒烟用本地 mock，不消耗模型 token 额度，可任意跑。
+
 ## 一、项目是什么
 
 **SandwichAgent**（仓库 `/Users/wx/Documents/free_api`）：本地自主 Agent 桌面平台，
