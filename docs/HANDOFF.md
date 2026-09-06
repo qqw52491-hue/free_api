@@ -147,8 +147,13 @@ FREE_API_SMOKE_SCENARIO=hijack …
    npm test 取题通道 ✓｜证据包 ≤6000 ✓｜mkdir 回归 ✓｜fetch 判分通道加固 ✓｜
    oracle 送验 nonce 契约 ✓（本轮修复）｜MCP 白名单自动注册 ✓（本轮修复）｜
    failover 链全链路 ✓（本轮修复+冒烟两变体验证）｜首阶段题面注入 ✓（本轮修复）｜
-   **主审通道可靠性 >95%（未达——Antigravity 代理 reviewer 实测约 50% 失败，
-   主审必须先迁 Shantung 或由 failover 链兜底并显式标注）**。
+   **主审通道可靠性（已复核，原"约 50% 失败"结论有误）**：agent_child_runs 全量
+   统计 Antigravity 子任务成功 60/67≈90%，agent_llm_calls 调用层 94.2%（634 次，
+   Shantung 反而 77.3%）；2026-09-06 实测 5/5 全过（单次 ~2.2s）。5 次 invalid_output
+   全部集中在 09-05 14:22–14:56 一个 35 分钟窗口（3.1-pro 劫持混乱实弹），
+   是"模型 × 当时环境"的孤例，不构成通道属性。**前置门禁视为已过**——
+   主审维持 Antigravity gemini-3.8-flash（对 deepseek 执行者恰好跨平台+跨家族，
+   异构性最优），failover 链（已冒烟验证）作纵深兜底。
 1. **deepseek-v4-pro 复跑** = 第一次有效能力测量（前置门禁仅剩主审通道一项）。
    收敛 → 体系故事闭环；不收敛 → 第一个干净的能力信号。同时产出 reviewer 行为指标
    （异议新增/撤回/维持、裁决理由长度）——若"收敛但 reviewer 全程零 blocking"，
@@ -238,7 +243,8 @@ reward hacking 案例库、确定性冒烟、异构 reviewer、trace 素材库�
 - ~~冒烟 mock 剧本的解锁循环~~ → **已解决**：trace 回放卡带版四场景全绿（见四）
 - 3.1-pro 的 mkdir 回归修复后**尚未复跑验证**（冒烟 fixture 里 src 懒生成路径已覆盖，
   但未用 3.1-pro 真模型复跑）
-- reviewer 通道 Antigravity 平台可靠性约 50%（failover 链已建且冒烟验证，主审仍建议迁 Shantung）
+- ~~reviewer 通道 Antigravity 平台可靠性约 50%~~ → **已复核证伪**（全量数据 90%/94.2%，
+  "50%"来自 3.1-pro 混乱实弹的 35 分钟孤例窗口；详见第五节健康检查单）。
 - 终态 reviewer / 子 Agent 的 LLM 调用不进 agent_logs、agent_llm_calls（卡带里
   reviewer 牌只能按宿主契约合成/重构，回放保真度受限的根源，待修）
 - final_only 记账已入 checkpoint 且已拼入收尾审查材料（reviewer_gatekeeper），
