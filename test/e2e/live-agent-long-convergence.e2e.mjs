@@ -20,6 +20,7 @@ const flashModelId = process.env.FREE_API_LIVE_MODEL_ID_FLASH?.trim() || modelId
 const routingMode = process.env.FREE_API_ROUTING_MODE?.trim() || "";
 const roleModelsRaw = process.env.FREE_API_ROLE_MODELS?.trim() || "";
 const roleModels = roleModelsRaw ? JSON.parse(roleModelsRaw) : null;
+const evalScenario = process.env.FREE_API_EVALUATION_SCENARIO?.trim() || "isolated_write_fixture";
 const routingConfig = {
   pro: proModelId,
   flash: flashModelId,
@@ -76,20 +77,20 @@ describeLong("可选真实模型多阶段长程收敛回归（服务端判分）
   });
 
   it("在 24 个阶段性义务中维持状态、修复、测试并通过宿主判分", async () => {
-    const started = await browser.executeAsync(async (selectedModelId, routingConfig, maxDurationMinutes, selectedWorkspace, evalPlanMode, evalReasoningEffort, done) => {
+    const started = await browser.executeAsync(async (selectedModelId, routingConfig, maxDurationMinutes, selectedWorkspace, evalPlanMode, evalReasoningEffort, evalScenario, done) => {
       try {
         const { invoke } = window.__TAURI__.core;
         const result = await invoke("start_background_agent_evaluation", {
           modelRouting: { pro: selectedModelId, flash: selectedModelId, vision: selectedModelId, reasoning_effort: evalReasoningEffort, ...(routingConfig.routing_mode ? { routing_mode: routingConfig.routing_mode } : {}), ...(routingConfig.role_models ? { role_models: routingConfig.role_models } : {}) },
           maxDurationMinutes: maxDurationMinutes,
-          scenario: process.env.FREE_API_EVALUATION_SCENARIO?.trim() || "isolated_write_fixture",
+          scenario: evalScenario,
           routingPreset: null,
           workspaceOverride: selectedWorkspace,
           ...(evalPlanMode ? { planMode: evalPlanMode } : {}),
         });
         done({ ok: true, result });
       } catch (error) { done({ ok: false, error: String(error) }); }
-    }, proModelId, routingConfig, maxDurationMinutes, fixtureDir, planMode, reasoningEffort);
+    }, proModelId, routingConfig, maxDurationMinutes, fixtureDir, planMode, reasoningEffort, evalScenario);
     assert.equal(started?.ok, true, started?.error ?? "后台评测启动失败");
     evaluationId = started.result?.evaluation_id;
     verifyPort = started.result?.verify_port;
