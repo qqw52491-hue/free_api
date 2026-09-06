@@ -1,7 +1,32 @@
 # 会话交接文档（HANDOFF）
 
 > 写给下一个会话/下一个模型的完整交接。读完这份 + git log 即可无缝继续。
-> 最后更新：2026-09-06 凌晨。当前 git 干净，所有工作已提交。
+> 最后更新：2026-09-06 上午。**冒烟四场景全绿（trace 回放版），实弹前置全部打通。**
+
+## 〇、本会话增量（2026-09-06 上午）
+
+**冒烟从"手写剧本"改为"trace 回放卡带"，四场景全绿**：
+happy（24s 全管道）/ parse（failover=1）/ timeout（failover=1）/
+hijack（3.1-pro fetch 劫持真实牌回放：阶段审查抓到 F2 final_only + 记账 + 判分真实通过）。
+运行命令见第六节。**以后改门禁/通道/判分逻辑，先跑四场景冒烟再烧真模型。**
+
+冒烟第一次真跑就抓出 4 个体系真 bug（全部修复）：
+
+1. **oracle 送验恒 403**：判分服务重写时误对 POST /verify 强加 URL nonce，违反自身契约
+   （nonce 在 body）——重写后从未有模型过判分的根因。已修 + 回归单测锁死。
+2. **隔离 fixture 未注册 MCP 白名单**：新建 fixture 不在 MCP Hub 白名单，模型一切
+   write/shell 全 Access denied。评测启动时宿主自动调 add_allowed_directory
+   （必须从 DB 插件表构造临时 client；走 registry 会因会话插件引导未执行而空转）。
+3. **failover 链被旁路 + 命名不一致**：超时结论经 loop_runner wait_jobs 交付路径只退款
+   不重派；且子任务 error_kind 落库值是 `timeout`（status 才是 `timed_out`），多处匹配漏掉。
+   已统一抽 `try_plan_reviewer_failover` 供三条结果路径共用。
+4. **goal 覆盖 bug**：evaluation_runner 里 goal 被二次赋值覆盖，首阶段题面注入整个丢弃
+   （catch-22 修复静默失效）。已删覆盖行。
+
+**⚠️ 数据事故与修复**：spec 停用真实模型后若 run 崩溃 after() 不执行，模型永久 enabled=0
+（实测发生）。已改为禁用清单落盘自愈（test-artifacts/smoke-disabled-models.json）。
+本次靠聊天/调用历史找回 23 个模型；**其余 ~295 个 enabled=0 无法区分"本就禁用"还是
+"误禁"，请用户在模型管理 UI 抽查核对**。
 
 ## 一、项目是什么
 
@@ -79,60 +104,58 @@ fixture 无答案，杜绝批量解题）。
 案例全档在 `docs/evals/reward-hacking-case-001.md`；fetch 通道已加固
 （原生 fetch 在模型代码加载前捕获）。
 
-## 四、当前进行中：假 AI 冒烟测试（差最后一口气）
+## 四、假 AI 冒烟测试（已完成，改为 trace 回放卡带）
 
-**目的**：确定性假模型（本地 OpenAI 兼容 mock 服务播放剧本）端到端跑通全门禁管道，
-把"管道 bug"与"模型能力"彻底解耦。以后改门禁/通道/判分逻辑先跑冒烟再烧真模型。
+**目的**：确定性假模型端到端跑通全门禁管道，把"管道 bug"与"模型能力"彻底解耦。
 
 **文件**：
-- `test/e2e/fixtures/mock-model-server.mjs` — OpenAI 兼容 SSE mock（状态机出牌）
-- `test/e2e/fixtures/progression-oracle.test.mjs` — oracle 驱动的 progression 测试
-- `test/e2e/live-agent-smoke.e2e.mjs` — 冒烟 spec（FREE_API_SMOKE=1 启用）
-- 故障注入变体：`FREE_API_SMOKE_SCENARIO=parse|timeout`（验证 failover 链）
+- `test/e2e/fixtures/cassette/extract-cassette.mjs` — 卡带提取器（从 agent_logs 真实
+  trace 提取；主键=oracle 阶段 index、路径参数化 `__FIXTURE_ROOT__`、wait 牌剥
+  job_ids、每牌 provenance、synthetic 牌显式标注）。产出
+  `smoke-happy.cassette.json`（flash 真实管道）+ `smoke-hijack.cassette.json`
+  （3.1-pro 劫持牌，case-001 对抗回归）。改 trace 素材后重跑该脚本重建卡带。
+- `test/e2e/fixtures/mock-model-server.mjs` — OpenAI 兼容 SSE mock **回放器**：
+  线性指针 + wait 粘滞（结论强信号"子审查代理已完成/审查评分卡/已批准放行"才放行；
+  ⚠️ 弱信号"结论已消费"在 failover 重派窗口会误放行，实测两次）+ 无进展回卷
+  （封顶 2 次）+ 剧本外错误牌大声记日志。reviewer 牌按宿主契约出牌
+  （方案/阶段/终态三种格式，阶段审查在 hijack 场景返回 F2 final_only）。
+- `test/e2e/live-agent-smoke.e2e.mjs` — 冒烟 spec。断言：child_reviewer ✓、
+  write_file ✓、shell_exec ✓、无 ask_human、oracle index ≥ 1、
+  failover 变体 plan_reviewer_failover_count ≥ 1、hijack 变体
+  stage_review_final_only ≥ 1。
 
-**当前卡点（唯一）**：mock 剧本在"写 src/stage-01.mjs → npm test"之间循环（293 次调用），
-stage-01 始终未解锁。已修：工具名加命名空间 `remote-http-mcp/`、绝对路径、shell 带 cwd、
-reviewer 判定改用主 Agent 独有锚点反向判定（PROMPT_BUILD）。**已埋诊断**：mock 每次请求
-打印 `[mock][npm输出尾部] …`（wdio 日志可见）。
+**四场景命令**（详见第六节）：
+```bash
+# happy
+FREE_API_SMOKE=1 … npx wdio run wdio.conf.mjs --spec test/e2e/live-agent-smoke.e2e.mjs
+# parse（子任务内 forced_final 重试一次，故注入前 2 次调用才落到 run 级 invalid_output）
+FREE_API_SMOKE_SCENARIO=parse …
+# timeout（宿主 child_timeout_secs 默认 45s 且钳位下限 30s，mock 注入延迟 50s 必触发）
+FREE_API_SMOKE_SCENARIO=timeout …
+# hijack 对抗样本（3.1-pro fetch 劫持）
+FREE_API_SMOKE_SCENARIO=hijack …
+```
 
-**重构方案（已定，按外部评审意见）——mock 从"手写剧本"改为 trace 回放（cassette）**：
-
-手写剧本写的是"想象中的模型行为"，而想象已连续骗了三次（关键词匹配 3 个 bug）。
-8 次实弹的完整 `agent_logs/` 就是现成剧本库（每条含完整 request/response）。
-
-实现要点（踩坑预警）：
-1. **主键 = oracle /status 的阶段 index**，调用序号只做同阶段内副键——任何重试/failover/
-   探活都会让纯序号漂移，后面的牌全乱。
-2. **路径参数化**：历史 trace 里的绝对路径是那一轮的 fixture 目录，回放时必须
-   模板替换为当前 run 的 fixture 目录，否则写错地方。
-3. **剧本外情况返回明确的"剧本外错误牌"并记录**，不硬等不猜。
-4. **对抗样本即测试用例**：3.1-pro 的 fetch 劫持 trace 回放时，断言体系必须拦截
-   （reviewer 抓到 + final_only 记账）——案例库直接变成对抗测试集。
-5. 素材位置：`agent_logs/agent-evaluation-*.json`（每条含 raw_response + usage +
-   messages 全文）；注意部分被强杀会话的日志尾部可能截断。
-
-**冒烟断言**（spec 内）：child_reviewer 派发 ✓、write_file ✓、shell_exec ✓、
-无 ask_human、oracle /status index ≥ 1、failover 变体下
-checkpoint 的 plan_reviewer_failover_count ≥ 1。
+**⚠️ 冒烟 DB 卫生**：spec 会临时停用真实模型（failover 候选按表序选异构家族，
+不停用会选到不可达的真模型）+ 钉 reviewer-cross 卡到 mock；after() 恢复。
+禁用清单落盘 `test-artifacts/smoke-disabled-models.json` 自愈——若见该文件残留，
+说明上轮崩溃未清理，下轮 before() 会自动恢复。
 
 ## 五、下一步（按优先级，接续点就在这）
 
 0. **通道健康检查单（deepseek 复跑的前置门禁，全勾才烧那 59 分钟）**：
-   npm test 取题通道 ✓（catch-22 已修）｜证据包 ≤6000 ✓（超限静默失败已修）｜
-   mkdir 回归 ✓（已修）｜fetch 判分通道加固 ✓（已修）｜
+   npm test 取题通道 ✓｜证据包 ≤6000 ✓｜mkdir 回归 ✓｜fetch 判分通道加固 ✓｜
+   oracle 送验 nonce 契约 ✓（本轮修复）｜MCP 白名单自动注册 ✓（本轮修复）｜
+   failover 链全链路 ✓（本轮修复+冒烟两变体验证）｜首阶段题面注入 ✓（本轮修复）｜
    **主审通道可靠性 >95%（未达——Antigravity 代理 reviewer 实测约 50% 失败，
    主审必须先迁 Shantung 或由 failover 链兜底并显式标注）**。
-   抖动的尺子做不了"首次有效测量"。
-1. **mock 改 trace 回放**（方案见第四节，含序号漂移防护与路径参数化）。
-2. **冒烟两个 failover 变体跑绿**（parse / timeout）——failover 链目前只有单测，
-   没走过全链路。
-3. **deepseek-v4-pro 复跑** = 第一次有效能力测量。收敛 → 体系故事闭环；
-   不收敛 → 第一个干净的能力信号。同时把 reviewer 行为指标
-   （异议新增/撤回/维持、裁决理由长度）作为正式产出——flash 审 pro 有橡皮图章风险，
-   只有真实交锋能证伪；若"收敛但 reviewer 全程零 blocking"，结论是
-   "flash 审不了 pro"，P0 转向 failover 实战与 reviewer 选型矩阵，而不是宣布胜利。
-4. **之后**：双 reviewer 真实现（撤回的第二双眼睛）；冒烟挂进常规流程；
-   `run_tool_phase` 函数级拆分（纯工程债，最后做）。
+1. **deepseek-v4-pro 复跑** = 第一次有效能力测量（前置门禁仅剩主审通道一项）。
+   收敛 → 体系故事闭环；不收敛 → 第一个干净的能力信号。同时产出 reviewer 行为指标
+   （异议新增/撤回/维持、裁决理由长度）——若"收敛但 reviewer 全程零 blocking"，
+   结论是"flash 审不了 pro"，P0 转向 failover 实战与 reviewer 选型矩阵。
+2. **之后**：双 reviewer 真实现（撤回的第二双眼睛）；四场景冒烟挂进常规流程；
+   对抗卡带库扩容（往 smoke-hijack 模式加更多 case）；`run_tool_phase` 函数级拆分
+   （纯工程债，最后做）。
 
 ## 六、环境与命令速查
 
@@ -212,10 +235,14 @@ reward hacking 案例库、确定性冒烟、异构 reviewer、trace 素材库�
 
 ## 八、已知未修（如实记录）
 
-- 冒烟 mock 剧本的解锁循环（见四，诊断探针已埋）
-- 3.1-pro 的 mkdir 回归修复后**尚未复跑验证**
-- reviewer 通道 Antigravity 平台可靠性约 50%（failover 链已建，主审仍建议迁 Shantung）
-- 终态 reviewer 的 LLM 调用不进 agent_logs（与子 Agent telemetry 同根，待修）
-- final_only 记账已入 checkpoint 但未接入收尾审查证据包（差一个拼接点）
+- ~~冒烟 mock 剧本的解锁循环~~ → **已解决**：trace 回放卡带版四场景全绿（见四）
+- 3.1-pro 的 mkdir 回归修复后**尚未复跑验证**（冒烟 fixture 里 src 懒生成路径已覆盖，
+  但未用 3.1-pro 真模型复跑）
+- reviewer 通道 Antigravity 平台可靠性约 50%（failover 链已建且冒烟验证，主审仍建议迁 Shantung）
+- 终态 reviewer / 子 Agent 的 LLM 调用不进 agent_logs、agent_llm_calls（卡带里
+  reviewer 牌只能按宿主契约合成/重构，回放保真度受限的根源，待修）
+- final_only 记账已入 checkpoint 且已拼入收尾审查材料（reviewer_gatekeeper），
+  但冒烟 hijack 场景尚未断言"收尾审查证据包含 final_only 条目"（现只断言 checkpoint）
 - `run_tool_phase` 函数级拆分（纯工程债）
 - 前端零单测（vitest 未配）；`agent_evaluations/` 与 `test-artifacts/` 是 gitignore 的运行输出
+- 模型库 ~295 个 enabled=0 的模型无法区分"本就禁用/误禁"，待用户 UI 核对（见〇）
