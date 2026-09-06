@@ -941,6 +941,20 @@ pub async fn run_tool_phase(
                             stage_notes.push_str("\n⚠️ 阶段审查未正常完成（次数已退还），该阶段视为未审。");
                             continue;
                         }
+                        // 对质子任务技术性失败（审查员输出非法，未产生有效裁决）：
+                        // 原 blocking 异议保留（不能因空 findings 误清账——那会把"审查
+                        // 员失联"当成"异议撤回"），也不计对质拒撤回次数；允许重新
+                        // resume_child 对质或等宿主判分越过该阶段自动清账。
+                        // 实测（09-07 pro ③）：对质 invalid_output 一次即把模型推上
+                        // 升级人工，技术故障不该有这个杀伤力。
+                        if is_rebuttal_result && error_kind.as_deref() == Some("invalid_output") {
+                            checkpoint.stage_review_run_id = None;
+                            checkpoint.stage_review_rebuttal_run_id = None;
+                            stage_notes.push_str(
+                                "\n⚖️ 对质子任务技术性失败（审查员输出非法，未产生有效裁决）：原 blocking 异议保留，可重新 resume_child 对质，或等宿主判分越过该阶段自动清账。",
+                            );
+                            continue;
+                        }
                         let withdrawn: Vec<String> = value
                             .get("withdrawn_findings")
                             .and_then(|w| w.as_array())
