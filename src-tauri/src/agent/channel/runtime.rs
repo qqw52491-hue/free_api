@@ -65,10 +65,10 @@ pub fn spawn_channel_server(app: AppHandle) {
         config: channel_config_shared().clone(),
     });
     tauri::async_runtime::spawn(async move {
-        let addr = format!("127.0.0.1:{port}");
+        let addr = format!("0.0.0.0:{port}");
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => {
-                println!("[channel] 微信通道 API 已监听 http://{addr}");
+                println!("[channel] 微信通道 API 已监听 http://{addr}（局域网设备用 Mac 的 192.168.x.x:{port} 访问）");
                 if let Err(error) = axum::serve(listener, channel_router(state)).await {
                     eprintln!("[channel] API 服务退出: {error}");
                 }
