@@ -278,6 +278,17 @@ cargo test 437 全绿 ✓。
   仲裁答案绕过 rx（或 wait_user 换 dedicated runtime）。所有取证物：
   /tmp/app_sample.txt、/tmp/app_sample2.txt、/tmp/http_probe.log、checkpoint v46、
   monitor 快照 4b5d2543。
+- 09-07 04:07 **【pro 复跑·死锁修复活体验证通过】12/24 预算取消，零冻结**。
+  pro×flash 60 分钟：**165 调用 / 97.6% 解析**，推进到 12/24（上次同场景 01:02
+  即冻结于 0 写入）。**wait_user 多次发生且全程无冻结**——HTTP prober 全程 360 次
+  204（死探针仅启动窗口 2 个 + 关停后 8 个），手机端在评测期间保持可用（P1 修复
+  的直接用户价值落地）。仲裁机制工作（模型多次升级、继续推进）。
+  **新量化问题（下轮优化目标）**：审查员（flash）对 pro 大输出打分卡产出
+  **33 次 invalid_output**（9 成功/33 失败/1 failed）——审查可靠性在大上下文上
+  崩塌，烧掉大量重试时间；候选方向：审查证据包瘦身/分片审查/评分卡格式容错。
+  终局：模型在 stage-09 blocking 异议（深拷贝改进被全局门禁拦截）上请求人工仲裁
+  + 预算到期 → cancelled（合法路径，needs_attention）。结论带环境注记：本结论仅
+  适用于"pro 执行 × flash 审查 × 本 oracle 难度"组合。
 - 09-07 03:04 **【parse 复绿·mock 重构全闭环】四场景真跑全绿**：happy 22.9s /
   timeout 1m08s / hijack 23s / **parse 23.9s**（FREE_API_SMOKE=1 带对，零剧本外牌，
   DB 卫生 ✓）。parse 红的最终根因**是 mock 不是宿主**：wait_jobs 交付文本内嵌
