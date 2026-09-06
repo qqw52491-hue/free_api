@@ -241,6 +241,20 @@ use super::runtime::*;
     }
 
     #[test]
+    fn eval_id_sanitizer_blocks_traversal_and_odd_chars() {
+        assert!(is_safe_eval_id(
+            "agent-write-fixture-05a1fa98-1903-4a62-a661-f6d88782bc01"
+        ));
+        assert!(is_safe_eval_id("agent-real-task_1.2"));
+        assert!(!is_safe_eval_id("")); // 空
+        assert!(!is_safe_eval_id("..")); // 纯点点
+        assert!(!is_safe_eval_id("../secret")); // 相对路径穿越
+        assert!(!is_safe_eval_id("a/b")); // 路径分隔符
+        assert!(!is_safe_eval_id("报告")); // 非 ASCII
+        assert!(!is_safe_eval_id("a b")); // 空格
+    }
+
+    #[test]
     fn percent_decode_handles_ascii_utf8_and_invalid() {
         assert_eq!(percent_decode("plain.txt"), "plain.txt");
         assert_eq!(percent_decode("%E6%8A%A5%E5%91%8A.txt"), "报告.txt");

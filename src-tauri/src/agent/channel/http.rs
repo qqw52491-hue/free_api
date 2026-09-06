@@ -1035,6 +1035,15 @@ async fn handler_eval_list(
     Ok(Json(json!({ "evals": evals })))
 }
 
+// 评测报告 ID 白名单：仅 ASCII 字母数字与 - _ .，且禁止 ".."（防路径穿越，fail-closed）
+pub(crate) fn is_safe_eval_id(eval_id: &str) -> bool {
+    !eval_id.is_empty()
+        && !eval_id.contains("..")
+        && eval_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 async fn handler_eval_detail(
     AxumState(state): AxumState<Arc<ChannelState>>,
     headers: HeaderMap,
@@ -1044,13 +1053,7 @@ async fn handler_eval_detail(
     if !authorized(&headers, &config) {
         return Err(unauthorized());
     }
-    // fail-closed：只允许安全文件名字符，防路径穿越
-    if eval_id.is_empty()
-        || !eval_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        || eval_id.contains("..")
-    {
+    if !is_safe_eval_id(&eval_id) {
         return Err(bad_request("非法的评测报告 ID"));
     }
     let dir = std::env::current_dir()
