@@ -67,6 +67,25 @@ hijack（3.1-pro fetch 劫持真实牌回放：阶段审查抓到 F2 final_only 
 **审查预算设计问题（待议）**：invalid_output 是 reviewer 的缺陷，却消耗请求方的
 plan 审查预算（infra 类超时可退款，invalid 不退）——建议把 invalid_output 纳入退款。
 
+## 〇·三、里程碑：首次完整收敛（2026-09-06 15:26，必读）
+
+**gemini-3.8-flash-high（执行者）× glm-5.2（审查员，reviewer-cross 卡钉定）× cross_review
+模式：24/24 阶段全部通过宿主判分，trace_status=succeeded，spec 全绿。**
+这是本体系第一次"真模型 × 真服务端判分 × 全门禁 × 完整收敛"的测量。
+
+- session `3bb9a7af-3a01-469c-bc62-997ca19ef564`，报告
+  `agent_evaluations/agent-write-fixture-e3680adf-….json`
+- 耗时 10 分 58 秒，90 次 LLM 调用（**解析成功率 100%**），92 工具步骤
+  （28 read + 28 write + 28 shell），工具失败率 6.5%（模型全部自行恢复）
+- 门禁全程参与：方案审查 1 轮通过（glm 首牌即有效）、阶段审查 15 次（15 预算），
+  16 个子审查任务 15 个有效；finish 质询 1 次（交卷一度被拦后模型继续推进）；
+  上一轮的廉价完成被本轮防线实时拦截——**同一模型同一意图，修复前后行为对比成立**
+- 上一轮死点（12→13 存根死锁）本轮直接越过
+
+**适用边界（纪律）**：本结论测的是"3.8-flash × glm 审查 × 本 oracle 难度"的组合，
+不外推为其他模型能力；执行者是快模型，60 分钟格式对它远未饱和（10 分钟跑完，
+预算余 80%）——下一轮测量建议换执行者（glm-5.2 或 deepseek@medium）填满预算维度。
+
 ## 一、项目是什么
 
 **SandwichAgent**（仓库 `/Users/wx/Documents/free_api`）：本地自主 Agent 桌面平台，
