@@ -170,7 +170,7 @@ pub fn reviewer_failover_model(
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
     };
-    let mut candidates: Vec<(String, String)> = models
+    let candidates: Vec<(String, String)> = models
         .into_iter()
         .filter(|(id, name, _)| {
             let f = model_family(name);

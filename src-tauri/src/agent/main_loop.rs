@@ -162,7 +162,9 @@ pub(crate) async fn try_plan_reviewer_failover(
     workspace_dir: &std::path::Path,
     checkpoint: &mut AgentCheckpoint,
     interrupt_rx: watch::Receiver<u64>,
-    error_kind: &str,
+    // 当前仅 invalid_output/timed_out 共用同一重派动作；保留参数供 〇·二 待议的
+    // "invalid_output 纳入退款"设计分化行为（届时启用）
+    _error_kind: &str,
 ) -> Result<Option<String>, String> {
     if checkpoint.plan_reviewer_failover_count >= 2
         || checkpoint.plan_reviewer_last_dispatch.is_none()
