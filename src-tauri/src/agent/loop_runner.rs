@@ -1001,6 +1001,32 @@ pub async fn run_tool_phase(
                         checkpoint.refund_infra_failed_review_round(infra_kind.as_deref());
                         continue;
                     }
+                    // 【冒烟实测抓到的坑】invalid_output 的结论若从 wait_jobs 交付，
+                    // 必须同样走故障转移重派（此前只覆盖超时类）——否则模型只能对着
+                    // 一段错误 JSON 重复派发或直接 ask_human 弃赛。
+                    if infra_kind.as_deref() == Some("invalid_output") {
+                        match crate::agent::main_loop::try_plan_reviewer_failover(
+                            app,
+                            state.inner(),
+                            parent_run_id,
+                            final_session_id,
+                            workspace_dir,
+                            checkpoint,
+                            interrupt_rx.clone(),
+                            "invalid_output",
+                        )
+                        .await
+                        {
+                            Ok(Some(new_run_id)) => {
+                                failover_notes.push_str(&format!(
+                                    "\n🔁 审查者故障转移：上次结论异常（invalid_output），已自动改用备用审查员重派 (child_run_id: {})\n",
+                                    new_run_id
+                                ));
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
                     checkpoint.plan_reviewer_consumed = true;
                     // wait_jobs 交付路径同样要回填评分卡与 blocking 计数，
                     // 否则门禁在“走 wait_jobs 收取”的正常链路上会因缺评分卡而误拦（fail-closed 的对称补齐）。

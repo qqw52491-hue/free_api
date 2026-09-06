@@ -964,6 +964,17 @@ fn transient_retry_backoff_ms(attempt_index: u32) -> u64 {
     (1_000u64 * (1u64 << exponent)).min(MAX_TRANSIENT_RETRY_BACKOFF_MS)
 }
 
+/// 限流类失败（429/rpm/quota）的专用退避：配额窗口按分钟计，快速重试只会
+/// 连续撞墙并把重试预算烧光（实测教训：deepseek 实弹 429 后 1-16s 退避连续
+/// 重试 20 次全部 429，240s 预算耗尽整个评测被带崩）。固定退避 60s 让重试
+/// 落在下一个配额窗口。
+const RATE_LIMIT_RETRY_BACKOFF_MS: u64 = 60_000;
+
+fn is_rate_limit_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("429") || lower.contains("too many requests") || lower.contains("rpm exhausted") || lower.contains("quota")
+}
+
 /// 带自动重试与多 Key 故障转移的流式请求。
 /// 当遇到 401/402/429、余额不足或限流时，自动切换至该平台下的下一个可用 Key 重试；
 /// 全部尝试与退避共享单次调用总预算：预算耗尽立即放弃，避免端点挂起拖垮整个运行。
@@ -1089,7 +1100,11 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                     );
 
                     if attempt_i < total_attempts_allowed - 1 {
-                        let backoff_ms = transient_retry_backoff_ms(attempt_i as u32);
+                        let backoff_ms = if is_rate_limit_error(&last_error) {
+                            RATE_LIMIT_RETRY_BACKOFF_MS
+                        } else {
+                            transient_retry_backoff_ms(attempt_i as u32)
+                        };
                         if started.elapsed().as_millis() as u64 + backoff_ms >= budget_ms {
                             last_error = budget_exhausted();
                             break;
