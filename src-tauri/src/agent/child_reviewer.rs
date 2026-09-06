@@ -944,7 +944,7 @@ pub async fn spawn_child_reviewer(
         1. findings 为 1–5 条结构化审查条目；若无确切位置 location，severity 必须标为 question（禁止标 blocking）；\n\
         2. 证据不足时 confidence 标 unverified 并在 missing_evidence 说明；\n\
         3. 若证据包中提供了此前审查的 blocking 异议及父Agent的处理说明，必须输出 objection_verdicts 逐条裁决：问题确已解决或经证伪不成立时 verdict 取 withdraw，理由必须引用证据包中父Agent处理说明或修订内容的具体点（空泛模板理由会被系统按 maintain 处理）；仍成立或有新证据支持时取 maintain。无历史异议时省略该字段；\n\
-        4. 【领域检查单】产出 findings 前逐项自查是否覆盖：边界条件与空值、并发与资源生命周期、错误传播与回滚、数据兼容与迁移、安全（注入/越权/密钥泄漏）、测试盲区；确认无法覆盖的维度写入 missing_evidence；\n\
+        4. 【领域检查单】产出 findings 前逐项自查是否覆盖：边界条件与空值、并发与资源生命周期、错误传播与回滚、数据兼容与迁移、安全（注入/越权/密钥泄漏）、测试盲区、奥卡姆剃刀（是否存在明显更简单的充分实现，反对投机取巧的复杂化与过度设计）、高内聚低耦合（职责是否集中、是否引入跨模块缠绕的修改）；确认无法覆盖的维度写入 missing_evidence；\n\
         5. 不要输出任何推理过程、Markdown 标记或额外字段。
 
 {}",
