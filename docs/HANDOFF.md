@@ -134,6 +134,9 @@ plan 审查预算（infra 类超时可退款，invalid 不退）——建议把 
   修复方向：a) 仲裁裁决按暂停类型分派（阶段审查死锁→授权一次修正性写入或
   重置 blockers_open）；b) 同一 blocker 对质 N 次拒撤回后自动降级
   blocking→final_only 记账带入收尾（"吵不赢就降级放行，账要还"）。
+  **→ b) 已实现（5aaa54e）**：checkpoint 记 stage_review_confrontation_failures，
+  对质维持 2 轮自动降级（blockers 清零放行写入，账带 final_only 进收尾），
+  冒烟回归绿。a) 视需要再做（b 落地后死锁已有自动出口）。
 - 行为注记：pro 的失败模式仍是"对质无果即升级"；本次谎报（宣称已实现）是它
   被拦的根因——审查门禁对强模型的谎报同样有效。
 
