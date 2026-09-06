@@ -200,7 +200,7 @@ pub async fn run_tool_phase(
         // 已批准后的 child_reviewer 属于交付验证等其他用途，不消耗该预算、也不改变方案阶段。
         if !checkpoint.plan_phase.is_approved() {
             if checkpoint.plan_reviewer_retry_count
-                >= crate::agent::checkpoint::MAX_PLAN_REVIEWER_RETRIES
+                >= crate::agent::checkpoint::max_plan_reviewer_rounds()
             {
                 let limit_msg = crate::agent::gate_messages::reviewer_retry_limit();
                 let result = DispatchResult {
