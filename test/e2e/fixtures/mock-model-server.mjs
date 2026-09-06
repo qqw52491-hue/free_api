@@ -137,7 +137,9 @@ function makeReplayer(cassette, fixtureDir) {
   const isReviewResult = (messages) => {
     const users = messages.filter((m) => m.role === "user").slice(-6);
     const blob = users.map((m) => String(m.content ?? "")).join("\n");
-    return /子审查代理已完成|审查评分卡|已批准放行/.test(blob);
+    // ⚠️ 不可用"子审查代理已完成"当信号：invalid 交付（failover 场景）的注入
+    // 同样带这句话——只有真评分卡或已批准放行才代表结论有效
+    return /审查评分卡|已批准放行/.test(blob);
   };
 
   return function nextMainCard(messages) {
@@ -149,6 +151,14 @@ function makeReplayer(cassette, fixtureDir) {
       // 只有从未发过 finish 的耗尽才按「无进展」回卷，最后才出剧本外错误牌
       const finishIdx = flat.findIndex((c) => c.role === "finish");
       if (finishIdx >= 0 && state.served > 0 && state.lastServedRole === "finish") {
+        // oracle 阶段进度拦截（宿主判分未完成）→ 像真模型一样回卷到实现阶段修复重试，
+        // 而不是原地对空交卷；其他未闭合事项（义务/契约）→ 原地重发 finish
+        if (/宿主判分进度/.test(last) && rewindTarget >= 0 && state.rewinds < 2) {
+          state.rewinds += 1;
+          state.index = rewindTarget;
+          console.log(`[mock][回卷] 阶段=${stage} 宿主判分未完成，回卷到 implement_write 修复（第 ${state.rewinds}/2 次）`);
+          return expand(flat[rewindTarget], {});
+        }
         console.log(`[mock][finish 重发] 阶段=${stage} 终态门禁未收卡，原地重发 finish`);
         return expand(flat[finishIdx], {});
       }
