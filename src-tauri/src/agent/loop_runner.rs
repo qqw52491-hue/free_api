@@ -1361,7 +1361,9 @@ pub async fn run_tool_phase(
                                 let (findings, confidence, evidence_refs, missing_evidence, routing) = 
                                     match crate::agent::child_reviewer::parse_child_review_rebuttal_output(&stream_result.full_response) {
                                         Ok(res) => res,
-                                        Err(_) => {
+                                        Err(parse_err) => {
+                                            // 对质解析失败也要落 raw：这是 09-07 pro 实弹 12 条
+                                            // NULL invalid 的来源，丢 raw = 丢唯一诊断证据
                                             crate::agent::child_reviewer::finish_child_run(
                                                 &db_clone,
                                                 &new_child_run_id_clone,
@@ -1369,7 +1371,12 @@ pub async fn run_tool_phase(
                                                 duration_ms,
                                                 completion_tokens,
                                                 Some("invalid_output"),
-                                                None,
+                                                Some(&crate::agent::child_reviewer::child_invalid_result_json(
+                                                    &new_child_run_id_clone,
+                                                    duration_ms,
+                                                    completion_tokens,
+                                                    &format!("解析错误: {parse_err}\n原始输出: {}", stream_result.full_response),
+                                                )),
                                             );
                                             return;
                                         }

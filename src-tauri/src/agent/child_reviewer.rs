@@ -862,8 +862,12 @@ pub(crate) fn finish_child_run_with_history(
 /// 统一让所有终态都携带 result_json，消费机制（置 NULL）才能对所有终态生效。
 /// invalid_output 专用：在标准错误结果上注入审查员原始输出（截断 4000 字符），
 /// 补"invalid 无从诊断"的盲区——宽松解析时代仍失败的案例，raw 是唯一证据。
-fn child_invalid_result_json(child_run_id: &str, duration_ms: u64, completion_tokens: i64, raw: &str) -> String {
-    let mut value: serde_json::Value = serde_json::from_str(&child_error_result_json(
+pub(crate) fn child_invalid_result_json(
+    child_run_id: &str,
+    duration_ms: u64,
+    completion_tokens: i64,
+    raw: &str,
+) -> String {    let mut value: serde_json::Value = serde_json::from_str(&child_error_result_json(
         child_run_id,
         "invalid_output",
         "invalid_output",
