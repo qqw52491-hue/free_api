@@ -576,6 +576,9 @@ mod tests {
         ctx.review_contract = Some(crate::agent::review_contract::ReviewContract {
             scope_statement: "核验 finish 到 checkpoint 的调用链".to_string(),
             obligations: vec![crate::agent::review_contract::ReviewObligation {
+                verify_command: None,
+                verify_script: None,
+                verify_sha256: None,
                 id: "terminal".to_string(),
                 question: "finish 是否由宿主语义门控？".to_string(),
                 status: "open".to_string(),

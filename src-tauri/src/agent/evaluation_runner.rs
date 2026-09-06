@@ -436,6 +436,11 @@ pub async fn start_background_agent_evaluation(
     {
         return Err("写入型评测必须提供位于 test-artifacts 下的隔离工作区".to_string());
     }
+    if requested_scenario.as_deref() == Some(evaluation::CUSTOM_GOAL_SCENARIO)
+        && evaluation_workspace.is_none()
+    {
+        return Err("custom_goal 真实任务必须提供位于评测白名单根内的隔离工作区".to_string());
+    }
     let evaluation_run = evaluation::begin_agent_evaluation_for_scenario(
         &session_id,
         requested_scenario.as_deref(),

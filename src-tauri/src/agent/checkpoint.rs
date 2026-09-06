@@ -1465,6 +1465,9 @@ mod tests {
         source.review_contract = Some(ReviewContract {
             scope_statement: "核验终态恢复".to_string(),
             obligations: vec![crate::agent::review_contract::ReviewObligation {
+                verify_command: None,
+                verify_script: None,
+                verify_sha256: None,
                 id: "restore".to_string(),
                 question: "checkpoint 是否恢复审查契约？".to_string(),
                 status: "evidenced".to_string(),

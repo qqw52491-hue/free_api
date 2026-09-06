@@ -13,6 +13,10 @@ pub const READ_ONLY_REGRESSION_GOAL: &str = r#"你是一名证据驱动的只读
 
 /// 复杂取消一致性审查的独立评测场景标识。
 pub const COMPLEX_CANCELLATION_DIAGNOSTIC_SCENARIO: &str = "complex_cancellation_diagnostic";
+/// 自定义真实任务场景：goal 从环境变量 FREE_API_EVAL_CUSTOM_GOAL 读取，
+/// 工作区必须提供且位于评测白名单根内（复用 isolated_workspace 校验）。
+/// 用于把门禁体系放到真实任务上试产（token 记账 + 审查行为数据）。
+pub const CUSTOM_GOAL_SCENARIO: &str = "custom_goal";
 pub const ISOLATED_WRITE_FIXTURE_SCENARIO: &str = "isolated_write_fixture";
 
 /// 诊断型场景共享的输出契约：唯一允许写入的是 fixture 根目录的 DIAGNOSIS.json。
@@ -214,6 +218,13 @@ fn scenario_requires_complex_delivery(scenario_id: &str) -> bool {
 }
 
 fn resolve_scenario(scenario_id: &str) -> Result<(&'static str, String), String> {
+    if scenario_id == CUSTOM_GOAL_SCENARIO {
+        let goal = std::env::var("FREE_API_EVAL_CUSTOM_GOAL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| "custom_goal 场景需要 FREE_API_EVAL_CUSTOM_GOAL 提供任务目标".to_string())?;
+        return Ok(("agent-custom", goal));
+    }
     match scenario_id {
         "read_only_regression" => Ok(("agent-readonly", READ_ONLY_REGRESSION_GOAL.to_string())),
         COMPLEX_CANCELLATION_DIAGNOSTIC_SCENARIO => Ok((

@@ -442,6 +442,9 @@ mod finish_guard_tests {
         context.review_contract = Some(ReviewContract {
             scope_statement: "核验缓存调用链".to_string(),
             obligations: vec![crate::agent::review_contract::ReviewObligation {
+                verify_command: None,
+                verify_script: None,
+                verify_sha256: None,
                 id: "cache".to_string(),
                 question: "缓存失效是否真实触发？".to_string(),
                 status: "evidenced".to_string(),
@@ -457,6 +460,9 @@ mod finish_guard_tests {
         let open_contract = ReviewContract {
             scope_statement: "审查上下文设计".to_string(),
             obligations: vec![crate::agent::review_contract::ReviewObligation {
+                verify_command: None,
+                verify_script: None,
+                verify_sha256: None,
                 id: "implementation".to_string(),
                 question: "实现调用链是否真实接通？".to_string(),
                 status: "open".to_string(),
@@ -476,6 +482,9 @@ mod finish_guard_tests {
         let closed_contract = ReviewContract {
             scope_statement: "仅解释完整 diff".to_string(),
             obligations: vec![crate::agent::review_contract::ReviewObligation {
+                verify_command: None,
+                verify_script: None,
+                verify_sha256: None,
                 id: "diff".to_string(),
                 question: "变更意图是否明确？".to_string(),
                 status: "evidenced".to_string(),
