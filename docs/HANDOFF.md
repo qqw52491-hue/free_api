@@ -1,7 +1,8 @@
 # 会话交接文档（HANDOFF）
 
 > 写给下一个会话/下一个模型的完整交接。读完这份 + git log 即可无缝继续。
-> 最后更新：2026-09-06 上午。**冒烟四场景全绿（trace 回放版），实弹前置全部打通。**
+> 最后更新：2026-09-06 下午。**冒烟四场景全绿（trace 回放版）；下午实弹三连后
+> 基建全链路验证完毕（见〇·二），待干净重跑一轮。**
 
 ## 〇、本会话增量（2026-09-06 上午）
 
@@ -27,6 +28,34 @@ hijack（3.1-pro fetch 劫持真实牌回放：阶段审查抓到 F2 final_only 
 （实测发生）。已改为禁用清单落盘自愈（test-artifacts/smoke-disabled-models.json）。
 本次靠聊天/调用历史找回 23 个模型；**其余 ~295 个 enabled=0 无法区分"本就禁用"还是
 "误禁"，请用户在模型管理 UI 抽查核对**。
+
+## 〇·二、下午实弹战报（2026-09-06 13:00-14:00，三轮+一次全链路验证）
+
+**下午三轮 deepseek/glm 实弹全部数据无效，但把环境翻了个底朝天：**
+
+1. **deepseek@high（c8ac8143 前身 182e63c1 + c8ac8143）**：2-7 分钟/调用的思考速度，
+   39 分钟仅 7 次调用且未动笔——deepseek@high 在 60 分钟格式下节奏上限不足；
+   另被 429 rpm exhausted 打死侦察 worker（Shantung key 有每分钟配额）。
+   已修：限流类错误专用 60s 退避（原 1-16s 快重试连撞 20 次全 429，240s 预算耗尽带崩
+   整个评测——run2 死因）。建议后续：FREE_API_LLM_CALL_BUDGET_SECONDS=600 起步。
+2. **重大环境事故：cloudflared 隧道中午死亡**（自动升级 2026.8.3 后退出，公网 530）。
+   glm run4（ecbfc19d）从第一通调用就没有 remote-http-mcp 工具（无 shell/文件读写），
+   纯靠内置 search 空转 30 调用后 ask_human 报"无 shell 工具"——该轮数据无效，
+   但 **glm 在被环境卡死时如实升级人工而非幻觉工具，是正向行为信号**。
+   已重启隧道（tunnel run local-mcp）。
+3. **wait 路径 invalid_output failover 缺口**：glm run5 中 reviewer 两次 invalid_output
+   经 wait_jobs 交付，该路径只对超时做 failover——模型对错误 JSON 重复派发后弃赛。
+   已补齐（866cfa9），三路径（poll/信箱/wait）对齐。
+4. **glm run6（6162e049）= 全链路首次完整验证**：MCP 工具✓、审查评分卡真实产出✓
+   （flash 给 glm 方案打 62 分并给出实质意见"加 String 归一化防非字符串"，glm 据此
+   改进了方案）、门禁拦截<75 分✓、failover 自动重派✓、ask_human 冷却✓。
+   终局：glm 改进方案后 plan 审查预算 2/2 耗尽 → ask_human → 评测按设计自动停止。
+
+**行为对照（初步，环境注记：均含基建故障期）**：deepseek@high=慢思考型（39min 7 调用
+未动笔）；glm-5.2=快节奏搜索型（45s/调用，77% 调用是 search，曾 30 调用不跑 npm test）。
+
+**审查预算设计问题（待议）**：invalid_output 是 reviewer 的缺陷，却消耗请求方的
+plan 审查预算（infra 类超时可退款，invalid 不退）——建议把 invalid_output 纳入退款。
 
 ## 一、项目是什么
 
