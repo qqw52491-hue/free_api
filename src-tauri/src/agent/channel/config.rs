@@ -61,6 +61,11 @@ pub struct ChannelConfig {
     /// None = 默认 600s，上限 3600s。
     #[serde(default)]
     pub reviewer_reap_grace_secs: Option<u64>,
+    /// 门禁档位预设：L1 轻量（仅收尾审查+机械门禁）/ L2 标准（方案+阶段+收尾，生产默认）/
+    /// L3 全量（L2 + 每次写入必审）。环境变量 FREE_API_GATE_PROFILE 优先于本字段；
+    /// None = L2。L3 的双审查员会签/红队预演为未建增强项，当前 L3 = L2 + 最高强度参数。
+    #[serde(default)]
+    pub gate_profile: Option<String>,
     /// 阶段级写入审查开关（仅交叉审查/审批模式生效；None = 开启）
     #[serde(default)]
     pub stage_review_enabled: Option<bool>,
@@ -122,6 +127,7 @@ impl Default for ChannelConfig {
             help_text: default_help_text(),
             auto_start_bridge: true,
             reviewer_reap_grace_secs: None,
+            gate_profile: None,
             stage_review_enabled: None,
             stage_review_max_files: None,
             reviewer_tool_steps: None,

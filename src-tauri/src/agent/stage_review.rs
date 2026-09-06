@@ -20,11 +20,14 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 
 fn stage_review_enabled() -> bool {
-    crate::agent::channel::channel_config_shared()
+    let config_enabled = crate::agent::channel::channel_config_shared()
         .read()
         .ok()
-        .and_then(|c| c.stage_review_enabled)
-        .unwrap_or(true)
+        .and_then(|c| c.stage_review_enabled);
+    crate::agent::channel::profile_stage_review_enabled(
+        crate::agent::channel::active_gate_profile(),
+        config_enabled,
+    )
 }
 
 /// 阶段审查预算上限：默认常量 5；长任务可通过 FREE_API_STAGE_REVIEW_MAX_ROUNDS 放宽（上限 40）
@@ -37,11 +40,14 @@ fn stage_review_budget_max() -> u32 {
 }
 
 fn stage_review_max_files() -> u32 {
-    crate::agent::channel::channel_config_shared()
+    let config_max = crate::agent::channel::channel_config_shared()
         .read()
         .ok()
-        .and_then(|c| c.stage_review_max_files)
-        .unwrap_or(6)
+        .and_then(|c| c.stage_review_max_files);
+    crate::agent::channel::profile_stage_review_max_files(
+        crate::agent::channel::active_gate_profile(),
+        config_max,
+    )
 }
 
 /// 双触发判定。返回 Some(原因) 表示应派发阶段审查。

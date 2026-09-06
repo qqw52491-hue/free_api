@@ -281,3 +281,27 @@ use super::runtime::*;
     }
 }
 
+
+#[test]
+fn gate_profile_parsing_and_tier_mapping() {
+    use super::{parse_gate_profile, profile_stage_review_enabled, profile_stage_review_max_files, GateProfile};
+    assert_eq!(parse_gate_profile(None), GateProfile::L2);
+    assert_eq!(parse_gate_profile(Some("l1")), GateProfile::L1);
+    assert_eq!(parse_gate_profile(Some("L3")), GateProfile::L3);
+    assert_eq!(parse_gate_profile(Some("junk")), GateProfile::L2);
+
+    // L1：阶段审查强制关，阈值无意义
+    assert!(!profile_stage_review_enabled(GateProfile::L1, None));
+    assert!(!profile_stage_review_enabled(GateProfile::L1, Some(true)));
+    // L2：配置缺省 = 开
+    assert!(profile_stage_review_enabled(GateProfile::L2, None));
+    // 配置显式关可覆盖（L2/L3 下仍尊重配置）
+    assert!(!profile_stage_review_enabled(GateProfile::L2, Some(false)));
+
+    // L3：每次写入必审
+    assert_eq!(profile_stage_review_max_files(GateProfile::L3, None), 1);
+    assert_eq!(profile_stage_review_max_files(GateProfile::L3, Some(6)), 1);
+    // L1/L2：按配置或缺省 6
+    assert_eq!(profile_stage_review_max_files(GateProfile::L2, None), 6);
+    assert_eq!(profile_stage_review_max_files(GateProfile::L1, Some(3)), 3);
+}

@@ -35,6 +35,54 @@ pub(crate) use config::*;
 pub use config::{
     channel_config_path, load_channel_config, save_channel_config, ChannelConfig,
 };
+
+/// 门禁档位：按风险分级的审查强度预设（保险按保额定价，而非一刀全开或全关）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateProfile {
+    /// 轻量：仅收尾审查 + 机械门禁（人在环的小改）
+    L1,
+    /// 标准：方案 + 阶段 + 收尾全开（生产默认，今日 24/24 收敛验证档）
+    L2,
+    /// 全量：L2 + 每次写入必审（高危变更；双审查员会签为未建增强项）
+    L3,
+}
+
+pub fn parse_gate_profile(raw: Option<&str>) -> GateProfile {
+    match raw.map(|s| s.trim().to_ascii_uppercase()).as_deref() {
+        Some("L1") => GateProfile::L1,
+        Some("L3") => GateProfile::L3,
+        _ => GateProfile::L2,
+    }
+}
+
+/// 活动档位：环境变量 FREE_API_GATE_PROFILE 优先，其次 channel-config 的
+/// gate_profile 字段，默认 L2。
+pub fn active_gate_profile() -> GateProfile {
+    if let Ok(v) = std::env::var("FREE_API_GATE_PROFILE") {
+        return parse_gate_profile(Some(&v));
+    }
+    let configured = channel_config_shared()
+        .read()
+        .ok()
+        .and_then(|c| c.gate_profile.clone());
+    parse_gate_profile(configured.as_deref())
+}
+
+/// 档位 → 阶段审查有效开关：L1 关闭，L2/L3 按配置（默认开）。
+pub fn profile_stage_review_enabled(
+    profile: GateProfile,
+    config_enabled: Option<bool>,
+) -> bool {
+    profile != GateProfile::L1 && config_enabled.unwrap_or(true)
+}
+
+/// 档位 → 阶段审查触发阈值：L3 每次写入必审（1），其余按配置（默认 6）。
+pub fn profile_stage_review_max_files(profile: GateProfile, config_max: Option<u32>) -> u32 {
+    match profile {
+        GateProfile::L3 => 1,
+        _ => config_max.unwrap_or(6),
+    }
+}
 pub use bridge::{
     wechat_bridge_login_start, wechat_bridge_qr, wechat_bridge_relogin, wechat_bridge_start,
     wechat_bridge_status, wechat_bridge_stop, wechat_channel_config_get,
