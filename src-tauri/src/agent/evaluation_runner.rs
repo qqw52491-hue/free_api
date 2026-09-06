@@ -454,7 +454,8 @@ pub async fn start_background_agent_evaluation(
     };
     let evaluation_id = evaluation_run.evaluation_id.clone();
     let scenario_id = evaluation_run.scenario_id.clone();
-    let goal = evaluation_run.goal.clone();
+    // 注意：此处不得再用 evaluation_run.goal 覆盖 goal——那会把上面的
+    // 首阶段题面注入整个丢弃（实测教训：该覆盖曾让 catch-22 修复静默失效）。
 
     let event_app = app.clone();
     let worker_app = app.clone();
@@ -480,6 +481,39 @@ pub async fn start_background_agent_evaluation(
         let state_owner = worker_app.clone();
         let state = state_owner.state::<DbState>();
         let registry = state_owner.state::<Arc<Mutex<PluginRegistry>>>();
+        // 【冒烟实测抓到的坑】isolated_write_fixture 每次新建 fixture 目录，但 MCP Hub
+        // 白名单只含历史手工注册的目录——模型的一切 write_file/shell_exec 都会
+        // "Access denied / cwd must be inside allowed workspaces"，npm test 根本跑不起来。
+        // 评测启动时宿主自动注册隔离工作区，环境自举不消耗模型步数与预算。
+        // 注意：此处不能走全局 registry（评测会话的插件引导尚未执行，registry 仍为空，
+        // 实测注册请求从未上线）——直接从 DB 插件表构造临时客户端调用。
+        if let Some(ws) = worker_workspace.as_ref() {
+            let ws_display = ws.display().to_string();
+            let register = || async {
+                let managed = crate::commands::load_managed_mcp_plugins(state.inner())?;
+                let config = managed
+                    .into_iter()
+                    .find(|p| p.enabled && p.config.name == "remote-http-mcp")
+                    .map(|p| p.config)
+                    .ok_or_else(|| "remote-http-mcp 插件未配置".to_string())?;
+                let client = crate::agent::mcp::client::McpClient::spawn(config)?;
+                client
+                    .call_tool(
+                        "add_allowed_directory",
+                        serde_json::json!({
+                            "path": ws_display,
+                            "reason": "评测启动：隔离工作区自动注册",
+                        }),
+                    )
+                    .await
+                    .map(|_| ())
+            };
+            match timeout(Duration::from_secs(15), register()).await {
+                Ok(Ok(())) => println!("✅ [evaluation] 隔离工作区已注册到 MCP 白名单: {}", ws.display()),
+                Ok(Err(e)) => println!("⚠️ [evaluation] 隔离工作区白名单注册失败（模型可自行调用 add_allowed_directory 兜底）: {e}"),
+                Err(_) => println!("⚠️ [evaluation] 隔离工作区白名单注册超时（15s），继续启动评测"),
+            }
+        }
         let mut worker = Box::pin(run_agent_main_loop_in_workspace(
             worker_app.clone(),
             state,

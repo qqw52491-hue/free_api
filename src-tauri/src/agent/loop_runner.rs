@@ -905,6 +905,7 @@ pub async fn run_tool_phase(
         {
             Ok(completed_jobs) => {
                 let mut stage_notes = String::new();
+                let mut failover_notes = String::new();
                 for job in completed_jobs.iter() {
                     // 阶段审查任务走独立语义：不置 plan consumed、基础设施失败退还阶段次数
                     if Some(job.job_id.as_str()) == checkpoint.stage_review_run_id.as_deref()
@@ -962,14 +963,41 @@ pub async fn run_tool_phase(
                         continue;
                     }
                     // 基础设施失败（超时/取消/中断）不是实质性审查：退款且不算消费过
+                    // 注意子任务 error_kind 落库值是 "timeout"（status 才是 "timed_out"），两者都要认
                     let infra_kind = serde_json::from_str::<serde_json::Value>(&job.result_json)
                         .ok()
                         .and_then(|v| v.get("error_kind").and_then(|e| e.as_str()).map(|s| s.to_string()));
                     let is_infra = matches!(
                         infra_kind.as_deref(),
-                        Some("timed_out") | Some("interrupted") | Some("cancelled")
+                        Some("timed_out") | Some("timeout") | Some("interrupted") | Some("cancelled")
                     );
                     if is_infra {
+                        let kind = infra_kind.as_deref().unwrap_or("timed_out");
+                        // 【冒烟实测抓到的坑】超时类失败必须先走 failover 重派备用审查员；
+                        // 只退款的话主 Agent 会对着已失败的审查任务永远 wait（信箱无结论可收）
+                        if matches!(kind, "timeout" | "timed_out") {
+                            match crate::agent::main_loop::try_plan_reviewer_failover(
+                                app,
+                                state.inner(),
+                                parent_run_id,
+                                final_session_id,
+                                workspace_dir,
+                                checkpoint,
+                                interrupt_rx.clone(),
+                                kind,
+                            )
+                            .await
+                            {
+                                Ok(Some(new_run_id)) => {
+                                    failover_notes.push_str(&format!(
+                                        "\n🔁 审查者故障转移：上次结论异常（{}），已自动改用备用审查员重派 (child_run_id: {})\n",
+                                        kind, new_run_id
+                                    ));
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
                         checkpoint.refund_infra_failed_review_round(infra_kind.as_deref());
                         continue;
                     }
@@ -1037,6 +1065,7 @@ pub async fn run_tool_phase(
                 if completed_jobs.is_empty() {
                     out.push_str("等待结束：当前无新完成的后台任务，或所有后台任务已结束。");
                 } else {
+                    out.push_str(&failover_notes);
                     out.push_str(&stage_notes);
                     out.push_str(&format!("✅ 已成功等待并接收到 {} 个后台任务结果：\n", completed_jobs.len()));
                     for job in completed_jobs {

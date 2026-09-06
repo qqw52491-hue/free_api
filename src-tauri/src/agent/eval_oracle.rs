@@ -165,7 +165,13 @@ fn route(
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("");
-    let authorized = path.contains(&format!("nonce={nonce}"));
+    // 鉴权契约（见文件头部端点约定）：GET 用 URL query nonce；POST /verify 的 nonce
+    // 在 body 里（fixture 测试文件如此发送）。判分服务重写时曾误对 POST 也强加
+    // URL nonce，导致送验恒 403、hint 为空——冒烟测试抓到的回归。
+    let authorized = match method {
+        "POST" => body.contains(&format!("\"nonce\":\"{nonce}\"")),
+        _ => path.contains(&format!("nonce={nonce}")),
+    };
     if !authorized {
         return json_response(403, &serde_json::json!({ "error": "nonce 无效" }));
     }
@@ -289,5 +295,26 @@ mod tests {
             assert!(s.get("input").is_some());
             assert!(s.get("expected").is_some());
         }
+    }
+
+    #[test]
+    fn verify_post_auths_via_body_nonce_not_url() {
+        // 回归锁：判分服务重写曾对 POST 强加 URL nonce，送验恒 403（hint 为空）。
+        // 契约：POST /verify 的 nonce 在 body（fixture 测试文件如此发送）。
+        let progress = Arc::new(AtomicUsize::new(0));
+        let req = "POST /verify HTTP/1.1";
+        let body = serde_json::json!({ "nonce": "n-123", "output": "ALPHA" }).to_string();
+        let res = route(req, &body, "n-123", &stages(), 24, &progress);
+        assert!(res.contains("\"pass\":true"), "body nonce 应放行并判分通过: {res}");
+        assert_eq!(progress.load(Ordering::SeqCst), 1, "判分通过应推进进度");
+
+        // URL nonce 的 POST（无 body nonce）不再放行
+        let progress2 = Arc::new(AtomicUsize::new(0));
+        let res2 = route("POST /verify?nonce=n-123 HTTP/1.1", "{}", "n-123", &stages(), 24, &progress2);
+        assert!(res2.contains("403"), "缺 body nonce 的 POST 必须 403: {res2}");
+
+        // GET 仍走 URL nonce
+        let res3 = route("GET /current?nonce=n-123&v=1 HTTP/1.1", "", "bad", &stages(), 24, &progress);
+        assert!(res3.contains("403"), "GET 携带错误 nonce 必须 403: {res3}");
     }
 }
