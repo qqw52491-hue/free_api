@@ -278,6 +278,32 @@ cargo test 437 全绿 ✓。
   仲裁答案绕过 rx（或 wait_user 换 dedicated runtime）。所有取证物：
   /tmp/app_sample.txt、/tmp/app_sample2.txt、/tmp/http_probe.log、checkpoint v46、
   monitor 快照 4b5d2543。
+- 09-07 02:58 **【P1 破案+修复】wait_user 全局冻结根因 = save_checkpoint 自死锁**。
+  冻结期 sample 逐线程分析（31 线程）：主循环任务卡在 `run_tool_phase →
+  save_checkpoint → (乐观锁冲突重试路径) → load_checkpoint → std Mutex::lock`——
+  save_checkpoint 在**持有 db.0 锁的 scope 内**调 load_checkpoint（其内再次
+  db.0.lock()），std Mutex 不可重入 → 同线程永久自死锁；另 9 个工作线程全部堵在
+  同一把锁上（8 条 list_agent_project_resources IPC + 监控快照），工作线程耗尽后
+  连不碰 DB 的 HTTP 路由都无人接——"运行时冻结"完整闭环，与①②卷宗全部观测吻合。
+  触发窗口=wait_user：仲裁观察器退款 save 与主循环 save 并发 → 乐观锁冲突 → 走进
+  死路。**修复（已提交见下）**：save_checkpoint 重构为"锁内只写一次、冲突先 Drop
+  锁再 load+merge 重试"+回归测试（修复前该测试悬挂）。smoke 回归发现并另修
+  mock 放行判据过窄 bug（见下条）。
+- 09-07 02:58 **【勘误+新线索】parse 变体真红：宿主重试结论投递缺口（新 bug，未修）**。
+  ① 勘误：00:58"四场景全绿"中 parse/timeout/hijack 实为 describe.skip 空过
+  （冒烟 spec 需 FREE_API_SMOKE=1，当时漏带）——只有 happy 真跑；带参重跑后
+  真实结果：timeout ✓(1m09s)、hijack ✓(23s)、**parse ✗(7m25s)**。
+  ② happy 首次 8m 失败 = mock 放行判据过窄（重构时收窄成「门禁状态: [已批准放行]」
+  打分卡专属格式，漏掉门禁状态卡的「方案阶段: 已批准放行」路径）→ 已放宽为
+  /已批准放行/ 宽匹配（旧线性 mock 同款，从未误触发）→ happy 23.9s 复绿 ✓。
+  ③ **parse 新根因（宿主侧，非 mock）**：mock 日志证明审查调用链 1=invalid(注入)、
+  2=invalid(注入)、3=**合法评分卡已送达**，但门禁状态卡停在「结论已消费（预算 1/2）|
+  方案审查中」——同参重试的合法结论落地前，wait 路径已把 invalid 结论消费
+  （866cfa9 补的是 failover 缺口，重试结论的重新投递仍缺）；主 Agent 永远等不到
+  评分卡，wait 粘滞 7 分钟至 spec 超时。**下一步（下轮首任务）**：审计
+  child_reviewer 同参重试链与 wait_jobs 消费路径，让"重试产出的合法结论"重新进入
+  投递/注入（或 wait 消费时校验结论有效性、无效则继续等重试结果）。修复后 parse
+  变体复绿 = mock 重构全闭环。
 - 09-07 01:53 **【P1 卷宗②】pro 实弹全局停摆案（与①通道停摆大概率同根）**。
   session 62a7dc67（pro×flash，exec_27c53db5）：15 次 LLM 调用后 **01:02:52 起全
   进程零活动**（42+ 分钟，DB agent_llm_calls/monitor 快照/trace 全部冻结于该刻）。

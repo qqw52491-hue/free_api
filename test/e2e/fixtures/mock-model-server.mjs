@@ -166,8 +166,10 @@ function makeStateMachine(cassette, fixtureDir) {
       .filter((m) => m.role === "user")
       .map((m) => String(m.content ?? ""))
       .join("\n");
-    // 事实 1：方案关口放行（main_loop 方案审查结论注入的「门禁状态: [已批准放行]」）
-    const planApproved = /门禁状态: \[已批准放行\]/.test(blob);
+    // 事实 1：方案关口放行。宽匹配——放行可能经由多种注入路径落地（评分卡行
+    // 「门禁状态: [已批准放行]」或门禁状态卡的「方案阶段: 已批准放行」等），
+    // 旧线性 mock 即用宽匹配且从未误触发（工具菜单等常驻文本不含该词）。
+    const planApproved = /已批准放行/.test(blob);
     // 事实 3a/3b 只看最后一轮反馈（避免历史失败残留误触发）：
     const stageFailedNow = last.includes("实现行为与契约不符"); // eval_oracle 阶段判分失败 hint
     const oracleBlockedNow = last.includes("宿主判分进度"); // finish 门禁判分进度拦截
