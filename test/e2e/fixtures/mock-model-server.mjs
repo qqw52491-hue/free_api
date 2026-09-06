@@ -151,12 +151,15 @@ function makeStateMachine(cassette, fixtureDir) {
   }
 
   // wait 粘滞判定（强信号）：真评分卡或已批准放行。
+  // 评分卡有两种落地文本：信箱注入路径的中文「审查评分卡:」（main_loop:909）与
+  // wait_jobs 交付文本里的英文键 "scorecard"（result_json 原样内嵌，loop_runner:1117）。
   // ⚠️ 不可用「结论已消费」「子审查代理已完成」当信号：invalid 交付（failover
   // 重派窗口）同样带这些字样，放行会抢在备用审查员结论之前（历史实测两次）。
+  // invalid/timeout 的 result_json 无 scorecard 键，不会误放行。
   const isReviewResult = (messages) => {
     const users = messages.filter((m) => m.role === "user").slice(-6);
     const blob = users.map((m) => String(m.content ?? "")).join("\n");
-    return /审查评分卡|已批准放行/.test(blob);
+    return /审查评分卡|已批准放行|"scorecard"/.test(blob);
   };
 
   return function nextMainCard(messages) {

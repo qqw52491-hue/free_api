@@ -278,6 +278,16 @@ cargo test 437 全绿 ✓。
   仲裁答案绕过 rx（或 wait_user 换 dedicated runtime）。所有取证物：
   /tmp/app_sample.txt、/tmp/app_sample2.txt、/tmp/http_probe.log、checkpoint v46、
   monitor 快照 4b5d2543。
+- 09-07 03:04 **【parse 复绿·mock 重构全闭环】四场景真跑全绿**：happy 22.9s /
+  timeout 1m08s / hijack 23s / **parse 23.9s**（FREE_API_SMOKE=1 带对，零剧本外牌，
+  DB 卫生 ✓）。parse 红的最终根因**是 mock 不是宿主**：wait_jobs 交付文本内嵌
+  result_json 原文，评分卡键名是英文 `"scorecard"`，而 mock 强信号正则只认中文
+  「审查评分卡」（信箱注入路径才有）→ parse 走 wait 交付路径时 mock 永远等不到
+  认识的信号 → 无限粘滞。修复：isReviewResult 增补 `"scorecard"` 键匹配——
+  invalid/timeout 的 result_json 无此键，不会重蹈弱信号误放行。DB 取证链：
+  重试子任务 f4d952ec result_json 尾部含完整 scorecard（宿主投递无缺口）。
+  至此 〇·十 排队的 mock 状态机重构项**真正完成**；上轮"宿主重试结论投递缺口"
+  假设证伪撤案。
 - 09-07 02:58 **【P1 破案+修复】wait_user 全局冻结根因 = save_checkpoint 自死锁**。
   冻结期 sample 逐线程分析（31 线程）：主循环任务卡在 `run_tool_phase →
   save_checkpoint → (乐观锁冲突重试路径) → load_checkpoint → std Mutex::lock`——
