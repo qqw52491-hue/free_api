@@ -269,32 +269,55 @@ pub async fn wechat_channel_config_set(config: ConfigPutReq) -> Result<Value, St
     Ok(config_value(&current))
 }
 
-/// 探测本机局域网 IPv4（UDP connect 不发包，仅取路由选定的本地地址）
+/// 判断 IP 是否为可用的局域网 IPv4（排除回环 + IANA 保留基准测试段）
+fn is_usable_lan_ip(ip: &str) -> bool {
+    !ip.starts_with("127.")
+        && !ip.starts_with("198.18.")
+        && !ip.starts_with("198.19.")
+}
+
+/// 探测本机局域网 IPv4（两段式：UDP 路由探测优先，VPN 劫持时 fallback 到 ifconfig 枚举）
 fn lan_ipv4_addresses() -> Vec<String> {
     let mut out = Vec::new();
-    let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
-        return out;
-    };
-    // 对多个公网锚点做路由探测，多网卡/多网段都能覆盖
-    for anchor in ["8.8.8.8:80", "1.1.1.1:80", "114.114.114.114:80"] {
-        if socket.connect(anchor).is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                let ip = addr.ip().to_string();
-                // 过滤回环 + 198.18.x.x/15（IANA 保留的基准测试段，
-                // macOS Tailscale / iCloud Private Relay 虚拟接口会用这个段，
-                // 不是真实局域网地址，手机无法访问）
-                if !ip.starts_with("127.")
-                    && !ip.starts_with("198.18.")
-                    && !ip.starts_with("198.19.")
-                    && !out.contains(&ip)
-                {
-                    out.push(ip);
+
+    // 方案一：UDP connect 不发包，仅利用路由表选定出口 IP（快速，但 VPN 全局接管时会给虚拟接口）
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        for anchor in ["8.8.8.8:80", "1.1.1.1:80", "114.114.114.114:80"] {
+            if socket.connect(anchor).is_ok() {
+                if let Ok(addr) = socket.local_addr() {
+                    let ip = addr.ip().to_string();
+                    if is_usable_lan_ip(&ip) && !out.contains(&ip) {
+                        out.push(ip);
+                    }
                 }
+                // connect 会改 socket 的对端，重置后继续
+                let _ = socket.connect("0.0.0.0:0");
             }
-            // connect 会改 socket 的对端，重置后继续
-            let _ = socket.connect("0.0.0.0:0");
         }
     }
+
+    // 方案二：UDP 探测没拿到有效 IP（典型场景：Tailscale / iCloud Private Relay 全局接管路由）
+    // fallback 到解析 ifconfig 输出，直接枚举网卡上绑定的私有 IPv4
+    if out.is_empty() {
+        if let Ok(output) = std::process::Command::new("ifconfig").output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let line = line.trim();
+                // macOS/Linux: "inet 192.168.1.4 netmask ..."
+                if let Some(rest) = line.strip_prefix("inet ") {
+                    let ip = rest.split_whitespace().next().unwrap_or("").to_string();
+                    // 只保留标准私有地址段（192.168 / 10. / 172.16-31）
+                    let is_private = ip.starts_with("192.168.")
+                        || ip.starts_with("10.")
+                        || ip.starts_with("172.");
+                    if is_private && !out.contains(&ip) {
+                        out.push(ip);
+                    }
+                }
+            }
+        }
+    }
+
     out
 }
 
