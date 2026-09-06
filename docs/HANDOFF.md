@@ -1,8 +1,10 @@
 # 会话交接文档（HANDOFF）
 
 > 写给下一个会话/下一个模型的完整交接。读完这份 + git log 即可无缝继续。
-> 最后更新：2026-09-06 下午。**冒烟四场景全绿（trace 回放版）；下午实弹三连后
-> 基建全链路验证完毕（见〇·二），待干净重跑一轮。**
+> 最后更新：2026-09-07 凌晨（收尾核验）。**冒烟 happy/hijack 绿、parse 红（mock
+> 状态机重构排队）、timeout 未跑；多次完整收敛已达成（〇·三~〇·七）。
+> 队列首位=〇·十二（用户 09-07 凌晨新指令：大量测试换 Antigravity 双模型+自我迭代
+> +手机端同步增强），其后 〇·十一 种子缺陷排查基准。**
 
 ## 〇、本会话增量（2026-09-06 上午）
 
@@ -228,7 +230,23 @@ timeout 未跑（parse 占用）。新发现与处置：
 双审查员会签开发 → deepseek@medium 预算维度。
 
 **环境状态快照**：reviewer-cross 卡=34217be8（默认）✓；cloudflared 隧道已修复✓；
-无残留进程✓；工作树干净✓；全部工作已提交（最新 8528406）。
+无残留进程✓；工作树干净✓；全部工作已提交（最新 fe3f9f4；本节定稿=58b25c6）。
+09-07 复核：reviewer-cross 卡 DB 实查 enabled=1 ✓、隧道运行中 ✓、无残留进程 ✓、
+cargo test 437 全绿 ✓。
+
+## 〇·十二、用户新指令（2026-09-07 凌晨，用户休息前布置——优先级高于 〇·十一）
+
+1. **大量测试换模型**：一律用 Antigravity 反代的 gemini-3.8-flash-high（34217be8）
+   与 gemini-3.1-pro（bcb44ed7）——响应最快、历史表现最好；不再用 Shantung 的
+   glm-5.2 等（慢/不稳）。注意：执行者与审查员同平台同家族时跨家族审查偏好会回退，
+   跑之前先确认 reviewer-cross 卡与 failover 候选符合预期。
+2. **大量测试 + 自我迭代闭环**：跑（先冒烟零 token 兜底，再上真模型实弹）→
+   分析 → 修 → 回归，循环推进；结论带环境注记、每阶段提交（纪律见第七节）。
+3. **手机端增强（重点新方向）**：手机端是独立 HTML（非 Vue）——
+   `src-tauri/src/agent/channel/mobile_web/{template.html,style.css,app.js}`
+   （骨架 154 行/CSS 1472/JS 1612，编译期嵌入 `channel/http.rs`）。
+   任务：与桌面端 Vue 前端的数据渲染对齐同步，加最近动态/在线浏览等可查看样式，
+   把手机端做到"可用"状态（目前投入少）。
 
 ## 一、项目是什么
 
@@ -276,7 +294,7 @@ fixture 无答案，杜绝批量解题）。
    僵尸行运行期巡检（reap，宽限≥超时+30s 不等式已钉死）、finish 单向状态守卫、
    reviewer 超时 env 可配（`FREE_API_REVIEWER_TIMEOUT_SECS`，默认 45 上限 600）、
    子任务 prompt_tokens 可观测、oracle 判分服务并发化。
-9. **测试**：434 个 Rust 测试全过、零警告。测试文件集中在
+9. **测试**：Rust 测试全过、零警告（09-07 实测 437）。测试文件集中在
    `finish_guard.rs`（门禁/预算/failover）、`stage_review.rs`、`router.rs`、`child_reviewer.rs`。
 
 ## 三、实弹评测：已测模型与结论（重要——注意结论的适用边界）
@@ -368,7 +386,7 @@ FREE_API_SMOKE_SCENARIO=hijack …
 
 ```bash
 # Rust 测试
-cd src-tauri && cargo test          # 434 个测试
+cd src-tauri && cargo test          # 437 个测试（09-07 实测）
 
 # 评测二进制构建（增量，~40s）
 npm run test:e2e:build
