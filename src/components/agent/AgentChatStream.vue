@@ -414,7 +414,7 @@
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                     </div>
                     <div class="summary-rich">
-                        <RichContentRenderer :content="(entry.summary || entry.title) + (entry.id === 'live-completion' && isStreamingSummary ? ' ▌' : '')" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
+                        <RichContentRenderer :content="entry.summary || entry.title" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
                     </div>
                     <div v-if="entry.artifacts && entry.artifacts.length" class="final-artifacts">
                         <ArtifactList
@@ -935,7 +935,7 @@ function getStepMetricsTooltip(step: AgentStepItem): string {
 }
 
 // --- 🌟 真正的实时流式 Markdown 增量渲染与光标 ---
-const isStreamingSummary = computed(() => props.isRunning && Boolean(props.finalSummary));
+// isStreamingSummary 已移除：解耦光标与富文本内容，避免末尾方块符号与二次全量重绘卡顿
 
 watch(
     () => [props.steps.length, props.isRunning, props.finalSummary, props.thought],
