@@ -208,99 +208,15 @@ pub fn split_shell_segments(cmd: &str) -> Vec<&str> {
     segments
 }
 
-/// 核验单条子命令是否命中纯只读白名单
-fn is_single_segment_safe(seg: &str) -> bool {
-    let words: Vec<&str> = seg.split_whitespace().collect();
-    if words.is_empty() {
-        return true;
-    }
-    let first = words[0].to_ascii_lowercase();
-    let base_cmd = first.rsplit('/').next().unwrap_or(&first);
-
-    match base_cmd {
-        "curl" | "wget" => {
-            // 严禁写文件、上传数据或非 GET/HEAD 动作
-            let mut idx = 1;
-            while idx < words.len() {
-                let word = words[idx];
-                let lower = word.to_ascii_lowercase();
-
-                // 1. 写文件类参数: -o, -O, --output, --output=..., --remote-name
-                if lower == "-o" || lower == "-o" || lower.starts_with("-o=") || lower == "--output" || lower.starts_with("--output=") || lower == "--remote-name" {
-                    // 特例: -o - 表示输出到 stdout (纯只读打印)
-                    if lower == "-o" && idx + 1 < words.len() && words[idx + 1] == "-" {
-                        idx += 2;
-                        continue;
-                    }
-                    return false;
-                }
-                // 2. 非 GET 请求方法: -X POST, -X PUT, -X DELETE, -X PATCH, --request ...
-                if lower == "-x" || lower == "--request" {
-                    if idx + 1 < words.len() {
-                        let method = words[idx + 1].to_ascii_uppercase();
-                        if method != "GET" && method != "HEAD" {
-                            return false;
-                        }
-                        idx += 2;
-                        continue;
-                    }
-                }
-                if lower.starts_with("-xpost") || lower.starts_with("-xput") || lower.starts_with("-xdelete") || lower.starts_with("-xpatch") {
-                    return false;
-                }
-                // 3. 上传数据: -d, --data, --json, -F, --form, -T, --upload-file
-                if lower == "-d" || lower.starts_with("-d=") || lower.starts_with("-d@") || lower == "--data" || lower.starts_with("--data") || lower == "--json" {
-                    return false;
-                }
-                if word == "-F" || lower.starts_with("-f=") || lower == "--form" || lower.starts_with("--form=") {
-                    return false;
-                }
-                if word == "-T" || lower == "--upload-file" {
-                    return false;
-                }
-
-                idx += 1;
-            }
-            true
-        }
-        "git" => {
-            if words.len() < 2 {
-                return true; // 单纯 git 或 git --help
-            }
-            let sub = words[1].to_ascii_lowercase();
-            matches!(
-                sub.as_str(),
-                "status" | "diff" | "log" | "show" | "branch" | "tag" | "rev-parse" | "ls-files" | "remote" | "describe" | "check-ignore" | "grep" | "--version" | "-v" | "help"
-            )
-        }
-        "ls" | "cat" | "head" | "tail" | "grep" | "rg" | "wc" | "pwd" | "which" | "whereis" | "whoami" | "date" | "echo" | "diff" | "cmp" | "sort" | "uniq" | "file" | "stat" | "uname" | "uptime" | "id" | "tree" | "ping" | "nslookup" | "dig" => {
-            true
-        }
-        "node" | "python" | "python3" | "cargo" | "rustc" | "npm" => {
-            // 仅允许版本查询类只读探针
-            if words.len() >= 2 {
-                let second = words[1].to_ascii_lowercase();
-                second == "-v" || second == "--version" || second == "version"
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
-/// 严格分析 Shell 命令行是否为纯只读安全探针。
-/// 必须满足：
-/// 1. 不包含任何文件写入重定向（> 或 >>，排除 2>&1 正常错误输出合并）；
-/// 2. 不包含任何危险管道注入（| bash）、提权、删除修改操作；
-/// 3. 切分后的每一个子命令必须 100% 命中只读白名单。
-pub fn is_safe_read_only_shell_command(raw_cmd: &str) -> bool {
+/// 检测 Shell 命令是否试图进行写盘重定向、文本就地替换、文件删除或破坏性修改。
+/// 仅拦截这几类明确的破坏性写盘操作；其他所有常规命令与探针全部放行。
+pub fn is_destructive_shell_command(raw_cmd: &str) -> bool {
     let trimmed = raw_cmd.trim();
     if trimmed.is_empty() {
         return false;
     }
 
-    // 1. 危险模式一票否决：检查写盘重定向（允许 2>&1 和 1>&2）
+    // 1. 检查文件写盘/追加重定向（> 或 >>，允许 2>&1 和 1>&2 这种文件描述符重定向）
     let chars: Vec<char> = trimmed.chars().collect();
     let len = chars.len();
     for i in 0..len {
@@ -309,102 +225,114 @@ pub fn is_safe_read_only_shell_command(raw_cmd: &str) -> bool {
             let next = if i + 1 < len { chars[i + 1] } else { ' ' };
             let is_fd_dup = (prev == '1' || prev == '2') && next == '&';
             if !is_fd_dup {
-                return false; // 文件输出重定向，视为写盘
+                return true; // 包含写入重定向（如 > 或 >>），判定为破坏性写操作
             }
         }
     }
 
-    // 检查危险管道/注入/提权关键词
+    // 2. 检查文本就地替换、文件删除、强制覆盖等高危操作
     let lower = trimmed.to_ascii_lowercase();
-    let dangerous_tokens = [
-        "| bash", "| sh", "| zsh", "| python", "| node", "| perl", "| ruby", "| tee",
-        "sudo ", "chmod ", "chown ", "rm ", "rmdir ", "touch ", "mkdir ", "mv ",
-        "sed -i", "eval ", "exec ", "dd ", "mkfs", "kill ", "pkill ", "reboot", "shutdown",
-        "git commit", "git push", "git reset", "git checkout", "git clean", "git rebase", "git merge",
-        "npm install", "npm i ", "npm run build", "cargo build", "cargo install", "yarn add", "pnpm add",
-        "pip install", "pip uninstall",
-    ];
-    for token in &dangerous_tokens {
-        if lower.contains(token) {
-            return false;
-        }
+
+    // 2. 文本就地替换与流编辑写盘 (sed -i, perl -i, awk -i inplace 等)
+    if lower.contains("sed -i")
+        || lower.contains("perl -pi")
+        || lower.contains("perl -i")
+        || lower.contains("awk -i inplace")
+    {
+        return true;
     }
 
-    // 2. 切分各级命令链（支持 ; && || |）
-    let segments = split_shell_segments(trimmed);
-    if segments.is_empty() {
-        return false;
+    // 3. 文件或目录删除、文本清空与强制截断 (rm, rmdir, unlink, truncate, shred)
+    if lower.contains("rm ")
+        || lower.contains("rm\t")
+        || lower.contains("rmdir ")
+        || lower.contains("rmdir\t")
+        || lower.contains("unlink ")
+        || lower.ends_with(" rm")
+        || lower.contains("truncate ")
+        || lower.contains("shred ")
+        || lower.contains("dd of=")
+    {
+        return true;
     }
 
-    for seg in segments {
-        let seg_trimmed = seg.trim();
-        if seg_trimmed.is_empty() {
-            continue;
-        }
-        if !is_single_segment_safe(seg_trimmed) {
-            return false;
-        }
+    // 4. 危险管道注入与提权 (curl ... | bash, sudo 等)
+    if lower.contains("| bash")
+        || lower.contains("| sh")
+        || lower.contains("| zsh")
+        || lower.contains("| python")
+        || lower.contains("| node")
+        || lower.contains("sudo ")
+    {
+        return true;
     }
 
-    true
+    false
+}
+
+/// 兼容性辅助包装：非破坏性即为安全只读
+pub fn is_safe_read_only_shell_command(raw_cmd: &str) -> bool {
+    !is_destructive_shell_command(raw_cmd)
 }
 
 pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
-    // 显式声明只读时优先放行：即使工具名命中写动词（如 preview_saved_logs / run_query with read_only: true），
-    // 只要参数或元数据中明确声明 read_only: true，一律按只读工具放行。
+    // 显式声明只读时优先放行：即使工具名命中写动词，只要明确声明 read_only: true，一律按只读工具放行。
     if has_read_only_flag(inst) {
         return false;
     }
 
-    // MCP 工具常以 "服务名/具体工具" 形式出现（如 remote-hub/shell_exec）。
-    // 分类前统一剥离命名空间，否则前缀判定会被命名空间遮蔽（remote-hub/read_file 匹配不到 read_ 前缀）。
+    // 分类前统一剥离命名空间（remote-hub/read_file -> read_file）
     let raw_tool = inst.get_tool().to_ascii_lowercase();
     let tool = raw_tool.rsplit('/').next().unwrap_or(&raw_tool);
     let action = inst.get_action().to_ascii_lowercase();
 
-    // 🌟 全链条只读 Shell 嗅探：如果指令提取出了具体命令行且经白名单核验确认 100% 只读（如 curl 查网络、git status/diff、ls/cat 等无副作用探针），直接按只读放行，绝不误触修改代码的审查门禁！
-    if let Some(cmd_str) = extract_shell_command_string(inst) {
-        if is_safe_read_only_shell_command(&cmd_str) {
-            return false;
-        }
-    }
-
-    // 写动词优先于只读前缀白名单：
-    // 形如 get_shell_output / list_running_jobs 的"取结果"类工具，虽然以只读前缀开头，
-    // 但本质是脚本执行类动作，必须按写操作处理，否则会被只读前缀误判放行。
-    let has_write_verb = tool.contains("excel")
-        || tool.contains("write")
+    // 1. 核心代码与文件写盘工具（edit_file / write_file / child_writer 等）：无论何时必须由门禁严格把关！
+    let is_code_write_tool = tool.contains("write")
         || tool.contains("edit")
-        || tool.contains("shell")
-        || tool.contains("bash")
-        || tool.contains("exec")
-        || tool.contains("create")
         || tool.contains("delete")
         || tool.contains("save")
-        || tool.contains("run")
+        || tool.contains("excel")
+        || tool.eq_ignore_ascii_case("child_writer")
         || action.starts_with("write")
         || action.starts_with("edit")
-        || action.starts_with("create")
         || action.starts_with("delete")
-        || action.starts_with("save")
-        || action.starts_with("exec")
-        || action.starts_with("run");
+        || action.starts_with("save");
 
-    if has_write_verb {
+    if is_code_write_tool {
         return true;
     }
 
-    // task_store 的变更型动作（不带 create/update 前缀时由 action.contains 兜底识别）
+    // 2. Shell / 终端执行类工具（shell_exec, run_command, bash, exec, cmd 等）：
+    // 🌟 不再做脆弱繁琐的命令白名单猜测；仅拦截明确的重定向写盘(>)、文本就地替换(sed -i)、文件删除(rm)等破坏性动作。
+    // 其他所有探针（如 curl 查网络/天气、date、ls、cat、grep、测试与构建命令等）全部放行！
+    let is_shell_tool = tool.contains("shell")
+        || tool.contains("bash")
+        || tool.contains("exec")
+        || tool.contains("terminal")
+        || tool.contains("command")
+        || tool.contains("run")
+        || action.starts_with("exec")
+        || action.starts_with("run");
+
+    if is_shell_tool {
+        if let Some(cmd_str) = extract_shell_command_string(inst) {
+            return is_destructive_shell_command(&cmd_str);
+        }
+        // 如果未指定具体命令行（纯工具名嗅探），保守按写操作处理，保持向后兼容
+        return true;
+    }
+
+    // 3. task_store 的变更型动作（不带 create/update 前缀时由 action.contains 兜底识别）
     if tool == "task_store"
         && (action.contains("create") || action.contains("upsert") || action.contains("update"))
     {
         return true;
     }
 
-    // 其余一律视为只读：包括 web_fetch / web_search / ripgrep_search、
-    // read_* / get_* / list_* / search_* 系列，以及未登记的未知工具（保守按非写处理）。
+    // 其余一律视为非写操作
     false
 }
+
 
 /// 面向 AgentPanel 的轻量工具生命周期事件。只发送参数和输出摘要；完整大对象
 /// 仍由 task_store / 文件系统持久化，不能被事件流或模型上下文重复承载。
@@ -1536,18 +1464,23 @@ mod tests {
         assert!(!is_safe_read_only_shell_command("rm -rf src/"));
         assert!(!is_safe_read_only_shell_command("sed -i 's/a/b/g' file.txt"));
 
-        // 6. 危险 git 动作 -> 拦截
-        assert!(!is_safe_read_only_shell_command("git reset --hard"));
-        assert!(!is_safe_read_only_shell_command("git checkout ."));
-        assert!(!is_safe_read_only_shell_command("git commit -m 'test'"));
+        // 6. 文本替换与删除拦截 (用户明确指定只拦截这类修改行为)
+        assert!(!is_safe_read_only_shell_command("sed -i 's/foo/bar/g' src/main.rs"));
+        assert!(!is_safe_read_only_shell_command("perl -pi -e 's/foo/bar/g' file.txt"));
+        assert!(!is_safe_read_only_shell_command("rm -rf target"));
+        assert!(!is_safe_read_only_shell_command("rmdir tmp"));
+        assert!(!is_safe_read_only_shell_command("truncate -s 0 test.txt"));
 
-        // 7. 包管理构建/修改动作 -> 拦截
-        assert!(!is_safe_read_only_shell_command("npm install"));
-        assert!(!is_safe_read_only_shell_command("cargo build"));
+        // 7. 常规开发与测试构建命令 -> 放行（不作为代码修改工具拦截）
+        assert!(is_safe_read_only_shell_command("cargo build"));
+        assert!(is_safe_read_only_shell_command("npm run build"));
+        assert!(is_safe_read_only_shell_command("npm test"));
+        assert!(is_safe_read_only_shell_command("git status"));
+        assert!(is_safe_read_only_shell_command("git diff"));
 
-        // 8. 复合命令中有一条未知/写操作 -> 全链条一票否决
+        // 8. 复合命令中若含有删除/替换/重定向写盘 -> 全链条一票否决
         assert!(!is_safe_read_only_shell_command("git status && rm -rf tmp"));
-        assert!(!is_safe_read_only_shell_command("ls -l; npm run build"));
+        assert!(!is_safe_read_only_shell_command("ls -l; sed -i 's/a/b/g' config.json"));
 
         // 9. 集成到 is_write_or_side_effect_tool 验证
         let mut inst_curl = AgentInstruction::default();
@@ -1555,10 +1488,15 @@ mod tests {
         inst_curl.command = Some(json!({ "command": "curl https://wttr.in/Shanghai" }));
         assert!(!is_write_or_side_effect_tool(&inst_curl), "只读 curl 应该放行为只读操作");
 
-        let mut inst_write_shell = AgentInstruction::default();
-        inst_write_shell.tool = Some("remote-hub/shell_exec".to_string());
-        inst_write_shell.command = Some(json!({ "command": "npm test" }));
-        assert!(is_write_or_side_effect_tool(&inst_write_shell), "npm test 属于潜在测试/写入脚本必须受门禁保护");
+        let mut inst_test_shell = AgentInstruction::default();
+        inst_test_shell.tool = Some("remote-hub/shell_exec".to_string());
+        inst_test_shell.command = Some(json!({ "command": "cargo test" }));
+        assert!(!is_write_or_side_effect_tool(&inst_test_shell), "测试与构建命令不属于修改代码写盘，应放行");
+
+        let mut inst_sed_shell = AgentInstruction::default();
+        inst_sed_shell.tool = Some("remote-hub/shell_exec".to_string());
+        inst_sed_shell.command = Some(json!({ "command": "sed -i 's/old/new/g' src/lib.rs" }));
+        assert!(is_write_or_side_effect_tool(&inst_sed_shell), "sed -i 就地修改文件属于破坏性写盘，必须受门禁保护");
 
         // 10. 用户实测场景: bash -c 复合天气/网络探针多命令
         let mut inst_bash_c = AgentInstruction::default();
