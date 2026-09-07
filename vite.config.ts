@@ -29,4 +29,29 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**", "**/.writer-*/**"],
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("echarts") || id.includes("zrender")) {
+              return "vendor-echarts";
+            }
+            if (id.includes("mermaid")) {
+              return "vendor-mermaid";
+            }
+            if (id.includes("katex")) {
+              return "vendor-katex";
+            }
+            if (id.includes("marked") || id.includes("dompurify") || id.includes("highlight.js")) {
+              return "vendor-markdown";
+            }
+            if (id.includes("vue") || id.includes("pinia") || id.includes("@vueuse")) {
+              return "vendor-core";
+            }
+          }
+        },
+      },
+    },
+  },
 }));

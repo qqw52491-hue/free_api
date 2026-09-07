@@ -72,10 +72,11 @@ function renderSegmentMarkdown(segment: string): string {
 </script>
 
 <script setup lang="ts">
-import { computed } from "vue";
-import EChartsBlock from "./EChartsBlock.vue";
-import MermaidBlock from "./MermaidBlock.vue";
+import { computed, defineAsyncComponent } from "vue";
 import HtmlPreviewBlock from "./HtmlPreviewBlock.vue";
+
+const EChartsBlock = defineAsyncComponent(() => import("./EChartsBlock.vue"));
+const MermaidBlock = defineAsyncComponent(() => import("./MermaidBlock.vue"));
 
 interface ContentBlock {
   type: "markdown" | "echarts" | "mermaid" | "html";

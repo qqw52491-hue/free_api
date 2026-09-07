@@ -6,9 +6,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Free API Chat — 免费API智能对话</title>
     <meta name="description" content="高性能本地AI对话工具，支持多个免费API管理与切换" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
     <style>
       html, body {
         background-color: #141416 !important;
@@ -23,10 +20,100 @@
         width: 100%;
         height: 100%;
       }
+      .app-skeleton {
+        display: flex;
+        width: 100%;
+        height: 100%;
+        background-color: #141416;
+        user-select: none;
+      }
+      .skeleton-sidebar {
+        width: 260px;
+        height: 100%;
+        background: #19191d;
+        border-right: 1px solid rgba(255, 255, 255, 0.06);
+        padding: 18px 14px;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .skeleton-brand {
+        height: 28px;
+        width: 110px;
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        margin-bottom: 8px;
+      }
+      .skeleton-btn {
+        height: 38px;
+        background: rgba(108, 99, 255, 0.15);
+        border-radius: 8px;
+        margin-bottom: 6px;
+      }
+      .skeleton-item {
+        height: 32px;
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 6px;
+      }
+      .skeleton-main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        background: #141416;
+      }
+      .skeleton-header {
+        height: 52px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      }
+      .skeleton-body {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+      }
+      .skeleton-circle {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .skeleton-line {
+        width: 160px;
+        height: 16px;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 4px;
+      }
+      .skeleton-sub {
+        width: 240px;
+        height: 12px;
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 4px;
+      }
     </style>
   </head>
   <body style="background-color: #141416;">
-    <div id="app"></div>
+    <div id="app">
+      <div class="app-skeleton">
+        <aside class="skeleton-sidebar">
+          <div class="skeleton-brand"></div>
+          <div class="skeleton-btn"></div>
+          <div class="skeleton-item"></div>
+          <div class="skeleton-item"></div>
+          <div class="skeleton-item"></div>
+        </aside>
+        <main class="skeleton-main">
+          <div class="skeleton-header"></div>
+          <div class="skeleton-body">
+            <div class="skeleton-circle"></div>
+            <div class="skeleton-line"></div>
+            <div class="skeleton-sub"></div>
+          </div>
+        </main>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

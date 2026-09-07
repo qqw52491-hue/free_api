@@ -35,11 +35,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, defineAsyncComponent } from "vue";
 import RichContentRenderer from "./RichContentRenderer.vue";
-import EChartsBlock from "./EChartsBlock.vue";
-import MermaidBlock from "./MermaidBlock.vue";
 import HtmlPreviewBlock from "./HtmlPreviewBlock.vue";
+
+const EChartsBlock = defineAsyncComponent(() => import("./EChartsBlock.vue"));
+const MermaidBlock = defineAsyncComponent(() => import("./MermaidBlock.vue"));
 
 export interface TabItem {
   id: string;

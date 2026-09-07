@@ -264,17 +264,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import AgentPanel from "../components/AgentPanel.vue";
 import ProjectSidebarTree, { type AgentProject, type TreeSessionItem } from "../components/ProjectSidebarTree.vue";
 import ProjectWorkspace from "../components/ProjectWorkspace.vue";
-import ApiManager from "./ApiManager.vue";
-import PluginView from "./PluginView.vue";
-import WeChatBindView from "./WeChatBindView.vue";
-import ScheduledView from "./ScheduledView.vue";
-import RoleManagerView from "./RoleManagerView.vue";
+
+const ApiManager = defineAsyncComponent(() => import("./ApiManager.vue"));
+const PluginView = defineAsyncComponent(() => import("./PluginView.vue"));
+const WeChatBindView = defineAsyncComponent(() => import("./WeChatBindView.vue"));
+const ScheduledView = defineAsyncComponent(() => import("./ScheduledView.vue"));
+const RoleManagerView = defineAsyncComponent(() => import("./RoleManagerView.vue"));
 
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
