@@ -28,7 +28,57 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import * as echarts from "echarts";
+import * as echarts from "echarts/core";
+import {
+  BarChart,
+  LineChart,
+  PieChart,
+  ScatterChart,
+  RadarChart,
+  TreeChart,
+  TreemapChart,
+  GraphChart,
+  SankeyChart,
+} from "echarts/charts";
+import {
+  TitleComponent,
+  TooltipComponent,
+  GridComponent,
+  LegendComponent,
+  ToolboxComponent,
+  DataZoomComponent,
+  VisualMapComponent,
+  MarkLineComponent,
+  MarkPointComponent,
+  DatasetComponent,
+  TransformComponent,
+} from "echarts/components";
+import { CanvasRenderer } from "echarts/renderers";
+
+// 显式按需注册必需的图表组件与 Canvas 渲染器
+echarts.use([
+  TitleComponent,
+  TooltipComponent,
+  GridComponent,
+  LegendComponent,
+  ToolboxComponent,
+  DataZoomComponent,
+  VisualMapComponent,
+  MarkLineComponent,
+  MarkPointComponent,
+  DatasetComponent,
+  TransformComponent,
+  BarChart,
+  LineChart,
+  PieChart,
+  ScatterChart,
+  RadarChart,
+  TreeChart,
+  TreemapChart,
+  GraphChart,
+  SankeyChart,
+  CanvasRenderer,
+]);
 
 const props = withDefaults(
   defineProps<{
@@ -46,7 +96,7 @@ const copied = ref(false);
 const chartTitle = ref<string>("");
 const chartType = ref<string>("bar");
 
-let chartInstance: echarts.ECharts | null = null;
+let chartInstance: any = null;
 let resizeObserver: ResizeObserver | null = null;
 
 const chartIcon = computed(() => {
@@ -124,7 +174,7 @@ function initChart() {
       "#f43f5e",
     ];
 
-    const finalOption: echarts.EChartsOption = {
+    const finalOption: Record<string, any> = {
       backgroundColor: "transparent",
       color: rawOption.color || obsidianPalette,
       textStyle: {
