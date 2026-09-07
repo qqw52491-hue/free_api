@@ -1664,51 +1664,45 @@ pub async fn run_tool_phase(
         }
     // --- B3. 特殊拦截：AI 主动挂起呼叫人类 ---
     } else if inst.get_tool().eq_ignore_ascii_case("ask_human") || inst.get_action().eq_ignore_ascii_case("ask") {
-        // 【先监听，后求助】刚被门禁拦截就立刻 ask_human = 把问题甩给人类。
-        // 宿主冷却一次：要求先按拦截意见行动（重新取证/修复/重派审查/wait_jobs）。
-        if let Some(cooldown_msg) = evaluate_ask_human_cooldown(checkpoint, step_id) {
-            crate::agent::dispatcher::emit_tool_event(
-                app,
-                final_session_id,
-                step_id,
-                inst,
-                "failed",
-                Some("ask_human_cooldown".to_string()),
-                Some(false),
-                &cooldown_msg,
-                Some(tool_started_at.elapsed().as_millis()),
-            );
-            return Ok(DispatchResult {
-                stdout: String::new(),
-                stderr: cooldown_msg,
-                success: false,
-                route: "host_rejection:ask_human_cooldown".to_string(),
-            });
-        }
         let params = inst.get_params();
         let form_val = params.get("form");
-        // 与前端 normalizeHumanForm 的别名表保持一致（plan_approval / plan / approval），
-        // 防止前端渲染出审批卡片而后端不认，导致用户批准后门禁仍然关闭。
-        let is_plan_approval_kind = form_val
+        let ask_kind = form_val
             .and_then(|f| f.get("kind"))
             .and_then(|k| k.as_str())
-            .map(|k| {
-                let normalized = k.trim().to_ascii_lowercase();
-                normalized == "plan_approval" || normalized == "plan" || normalized == "approval"
-            })
-            .unwrap_or(false);
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
 
-        // 人工仲裁与放行上下文识别：
-        // 1. 显式带有 plan_approval/plan/approval kind 表单；
-        // 2. 当前方案前置门禁尚未获批（如 Exploring / Reviewing / AwaitingApproval）；
-        // 3. 存在未通过的审查评分卡或未闭合的 blocking 异议；
-        // 4. 阶段审查存在未解决的 stage_review_blockers_open。
-        // 在上述任一情况下，本次 ask_human 均承担向人类请示写入权限或请求人工仲裁放行的语义。
-        let is_approval_context = is_plan_approval_kind
-            || !checkpoint.plan_phase.is_approved()
-            || checkpoint.stage_review_blockers_open > 0
-            || checkpoint.last_review_scorecard.as_ref().map_or(false, |s| !s.passes_gate())
-            || checkpoint.last_review_blocking_count > 0;
+        // 与前端 normalizeHumanForm 的别名表保持一致（plan_approval / plan / approval），
+        // 显式声明为审批/门禁放行类型的表单
+        let is_plan_approval_kind =
+            ask_kind == "plan_approval" || ask_kind == "plan" || ask_kind == "approval";
+
+        // 【方向 3：冷却作用域收窄至 approval 类】
+        // 门禁冷却（evaluate_ask_human_cooldown）核心目的在于防止模型刚被前置写入门禁拦截就立刻甩锅让人类审批放行。
+        // - plan_approval / 门禁放行类：冷却生效（必须先按拦截意见行动，严禁立即甩锅绕门禁）。
+        // - 缺参数、缺凭据、偏好或普通信息提问（非 approval 类，含过渡期 missing_parameter）：永远放行，不受冷却限制！
+        if is_plan_approval_kind {
+            if let Some(cooldown_msg) = evaluate_ask_human_cooldown(checkpoint, step_id) {
+                crate::agent::dispatcher::emit_tool_event(
+                    app,
+                    final_session_id,
+                    step_id,
+                    inst,
+                    "failed",
+                    Some("ask_human_cooldown".to_string()),
+                    Some(false),
+                    &cooldown_msg,
+                    Some(tool_started_at.elapsed().as_millis()),
+                );
+                return Ok(DispatchResult {
+                    stdout: String::new(),
+                    stderr: cooldown_msg,
+                    success: false,
+                    route: "host_rejection:ask_human_cooldown".to_string(),
+                });
+            }
+        }
 
         let ask_msg = params
             .get("message")
@@ -1717,6 +1711,64 @@ pub async fn run_tool_phase(
             .and_then(|v| v.as_str())
             .unwrap_or("AI 请求人类协助与指示")
             .to_string();
+
+        // 【防问个没完：信息类提问全局配额兜底 (默认 5 次，可由配置调节；私密凭据类提问豁免)】
+        // 提问信息类在同一任务里只允许问有限次数，超出直接拦截并强制采用默认值推进；且同一问题只允许问一次。
+        if !is_plan_approval_kind {
+            let is_credential = crate::agent::checkpoint::is_credential_inquiry_kind(&ask_kind);
+            if !is_credential {
+                let budget = crate::agent::channel::config::max_human_inquiry_budget();
+                if let Some(quota_err) = checkpoint.check_inquiry_quota_exceeded(budget) {
+                    crate::agent::dispatcher::emit_tool_event(
+                        app,
+                        final_session_id,
+                        step_id,
+                        inst,
+                        "failed",
+                        Some("ask_human_quota_exhausted".to_string()),
+                        Some(false),
+                        &quota_err,
+                        Some(tool_started_at.elapsed().as_millis()),
+                    );
+                    return Ok(DispatchResult {
+                        stdout: String::new(),
+                        stderr: quota_err,
+                        success: false,
+                        route: "host_rejection:ask_human_quota_exhausted".to_string(),
+                    });
+                }
+            }
+
+            if let Some(dup_err) = checkpoint.check_duplicate_question(&ask_msg) {
+                crate::agent::dispatcher::emit_tool_event(
+                    app,
+                    final_session_id,
+                    step_id,
+                    inst,
+                    "failed",
+                    Some("ask_human_duplicate".to_string()),
+                    Some(false),
+                    &dup_err,
+                    Some(tool_started_at.elapsed().as_millis()),
+                );
+                return Ok(DispatchResult {
+                    stdout: String::new(),
+                    stderr: dup_err,
+                    success: false,
+                    route: "host_rejection:ask_human_duplicate".to_string(),
+                });
+            }
+            checkpoint.record_asked_question(&ask_msg);
+        }
+
+        // 人工仲裁与放行上下文识别：
+        // 仅在明确带有 plan_approval/plan/approval kind 表单，或门禁阻断/审查耗尽显式指示仲裁且模型未给 form 时生效。
+        // 绝不将普通的缺参提问或用户偏好咨询判定为方案审批卡片（防止用户回答一个参数导致代码写入门禁意外放开）！
+        let is_approval_context = is_plan_approval_kind
+            || (form_val.is_none()
+                && (checkpoint.gate_human_escape_directed
+                    || checkpoint.stage_review_blockers_open > 0
+                    || checkpoint.last_review_blocking_count > 0));
 
         app.emit(
             &format!("agent-log-{}", final_session_id),

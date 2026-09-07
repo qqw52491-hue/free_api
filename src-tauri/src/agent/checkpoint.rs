@@ -612,6 +612,9 @@ pub struct AgentCheckpoint {
     /// final_only 级 blocking 的 carry-over（不拦截，带入收尾审查）
     #[serde(default)]
     pub stage_review_final_only: Vec<String>,
+    /// 任务内已向人类发起过提问的问题列表（用于相同/高度相似问题去重）
+    #[serde(default)]
+    pub asked_human_questions: Vec<String>,
     /// 运行模式兼容字段：true 为全自动/自主模式，false 为方案审批模式
     #[serde(default = "default_auto_pilot")]
     pub auto_pilot: bool,
@@ -623,6 +626,49 @@ pub struct AgentCheckpoint {
 
 fn default_auto_pilot() -> bool {
     true
+}
+
+/// 计算两个规范化字符串的字符 Bigram Jaccard 相似度（0.0 ~ 1.0）
+pub fn question_bigram_similarity(s1: &str, s2: &str) -> f64 {
+    let chars1: Vec<char> = s1.chars().collect();
+    let chars2: Vec<char> = s2.chars().collect();
+    if chars1.len() < 2 || chars2.len() < 2 {
+        return if s1 == s2 { 1.0 } else { 0.0 };
+    }
+
+    use std::collections::HashSet;
+    let mut bg1 = HashSet::new();
+    for window in chars1.windows(2) {
+        bg1.insert((window[0], window[1]));
+    }
+
+    let mut bg2 = HashSet::new();
+    for window in chars2.windows(2) {
+        bg2.insert((window[0], window[1]));
+    }
+
+    let intersection = bg1.intersection(&bg2).count();
+    let union = bg1.union(&bg2).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+/// 单个任务允许向用户发起信息类提问的默认最大配额（防琐碎问题没完没了；审批与私密凭据类求助不受此限）
+pub const DEFAULT_MAX_HUMAN_INQUIRY_BUDGET: usize = 5;
+
+/// 识别是否属于私密凭据/鉴权类提问（密码、Token、API Key 等，无合理默认值，豁免配额熔断）
+pub fn is_credential_inquiry_kind(kind: &str) -> bool {
+    let k = kind.trim().to_ascii_lowercase();
+    k == "missing_credential"
+        || k == "credential"
+        || k == "secret"
+        || k == "password"
+        || k == "token"
+        || k == "api_key"
+        || k == "auth"
 }
 
 impl AgentCheckpoint {
@@ -669,6 +715,7 @@ impl AgentCheckpoint {
             uncovered_shell_mutations: 0,
             stage_review_shell_baseline: 0,
             stage_review_final_only: Vec::new(),
+            asked_human_questions: Vec::new(),
             auto_pilot: true,
             last_error: None,
             version: 0,
@@ -827,6 +874,134 @@ impl AgentCheckpoint {
     pub fn rollback_plan_review_dispatch(&mut self, pre_dispatch_consumed: bool) {
         self.plan_reviewer_retry_count = self.plan_reviewer_retry_count.saturating_sub(1);
         self.plan_reviewer_consumed = pre_dispatch_consumed;
+    }
+
+    /// 规范化提问文本以便去重比对：去除空白、常见中英文标点符号并转为小写
+    pub fn normalize_question(text: &str) -> String {
+        text.chars()
+            .filter(|c| {
+                !c.is_whitespace()
+                    && !c.is_ascii_punctuation()
+                    && !matches!(
+                        *c,
+                        '？' | '?'
+                            | '。'
+                            | '.'
+                            | '！'
+                            | '!'
+                            | '，'
+                            | ','
+                            | '：'
+                            | ':'
+                            | '；'
+                            | ';'
+                            | '“'
+                            | '”'
+                            | '"'
+                            | '\''
+                            | '`'
+                            | '【'
+                            | '】'
+                            | '['
+                            | ']'
+                            | '（'
+                            | '）'
+                            | '('
+                            | ')'
+                            | '、'
+                            | '《'
+                            | '》'
+                    )
+            })
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    }
+
+    /// 检查信息类提问是否已达到配额上限（私密凭据类提问在调用处豁免）
+    pub fn check_inquiry_quota_exceeded(&self, budget: usize) -> Option<String> {
+        if self.asked_human_questions.len() >= budget {
+            Some(format!(
+                "【信息提问配额已耗尽】本任务向用户提问已达上限（{}/{} 次）。为避免过度打扰用户，系统已关闭主动信息提问通道。\n\
+请直接结合用户此前的全部输入、上下文已有信息及行业通用规范，采用最合理通用的默认参数与假设坚决推进执行；在最终输出中明确注明所采用的默认设定即可，严禁继续停顿提问。\n\
+（注：若确需索取用户私密凭据/API Key，请在表单中设置 kind: \"missing_credential\" 申请凭据豁免通道）。",
+                self.asked_human_questions.len(),
+                budget
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// 检查是否为重复提问。如果重复，返回拦截拒绝提示；否则返回 None。
+    pub fn check_duplicate_question(&self, question: &str) -> Option<String> {
+        let norm_incoming = Self::normalize_question(question);
+        if norm_incoming.is_empty() {
+            return None;
+        }
+
+        for past in &self.asked_human_questions {
+            let norm_past = Self::normalize_question(past);
+            if norm_past.is_empty() {
+                continue;
+            }
+
+            // 1. 规范化后完全相同（剔除标点与空格后一致）
+            if norm_incoming == norm_past {
+                return Some(format!(
+                    "【重复提问拦截】检测到你在本任务中此前已向用户询问过相同问题：\"{}\"。\n\
+用户此前的回复已存在于上下文（【人类回复】）中。\n\
+- 若此前提问已涵盖该信息，请直接结合已有回复或行业默认值继续执行，切勿就同一事项反复打扰用户；\n\
+- 若确需针对不同的新参数/新槽位（如不同字段、新实体或不同操作）提问，请换用更具体详细的独立表述重新提问。",
+                    past
+                ));
+            }
+
+            // 2. 包含关系且差异字符纯为语气助词/口癖（如仅多了“呢”、“呀”、“吧”、“啊”、“吗”等，字符差 <= 2）
+            let len_diff = norm_incoming.chars().count().abs_diff(norm_past.chars().count());
+            if len_diff <= 2
+                && (norm_incoming.contains(&norm_past) || norm_past.contains(&norm_incoming))
+            {
+                let diff_chars: String = if norm_incoming.len() > norm_past.len() {
+                    norm_incoming.replace(&norm_past, "")
+                } else {
+                    norm_past.replace(&norm_incoming, "")
+                };
+                let is_filler = diff_chars.chars().all(|c| matches!(c, '呢' | '呀' | '吧' | '啊' | '吗' | '哈' | '请' | '问'));
+                if is_filler {
+                    return Some(format!(
+                        "【重复提问拦截】检测到你在本任务中此前已向用户询问过高度相似的问题：\"{}\"。\n\
+用户此前的回复已存在于上下文（【人类回复】）中。\n\
+- 若此前提问已涵盖该信息，请直接结合已有回复或行业默认值继续执行，切勿就同一事项反复打扰用户；\n\
+- 若确需针对不同的新参数/新槽位（如不同字段、新实体或不同操作）提问，请换用更具体详细的独立表述重新提问。",
+                        past
+                    ));
+                }
+            }
+
+            // 3. 高度相似比对（Bigram Jaccard 相似度 >= 0.88，且两串长度均至少 8 个字符）
+            // 采用 0.88 阈值保护“同模板不同槽位”的合法提问（例如“查询哪个城市” vs “查询哪个日期”）不被误伤
+            if norm_incoming.chars().count() >= 8 && norm_past.chars().count() >= 8 {
+                if question_bigram_similarity(&norm_incoming, &norm_past) >= 0.88 {
+                    return Some(format!(
+                        "【重复提问拦截】检测到你在本任务中此前已向用户询问过高度相似的问题：\"{}\"。\n\
+用户此前的回复已存在于上下文（【人类回复】）中。\n\
+- 若此前提问已涵盖该信息，请直接结合已有回复或行业默认值继续执行，切勿就同一事项反复打扰用户；\n\
+- 若确需针对不同的新参数/新槽位（如不同字段、新实体或不同操作）提问，请换用更具体详细的独立表述重新提问。",
+                        past
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// 记录已发给人类的提问
+    pub fn record_asked_question(&mut self, question: &str) {
+        let trimmed = question.trim();
+        if !trimmed.is_empty() && !self.asked_human_questions.iter().any(|q| q == trimmed) {
+            self.asked_human_questions.push(trimmed.to_string());
+        }
     }
 
     pub fn restore_context(&self, context: &mut SandwichContext) {
@@ -1635,5 +1810,60 @@ mod tests {
         let mut next_task = SandwichContext::new("system".to_string(), "新任务".to_string());
         checkpoint.data.inherit_filling_into(&mut next_task);
         assert!(next_task.change_verification.is_none());
+    }
+
+    #[test]
+    fn test_question_deduplication() {
+        let context = SandwichContext::new("system".to_string(), "查天气".to_string());
+        let mut cp = AgentCheckpoint::new("run-dedup".to_string(), &context);
+
+        // 初始无问题：不重复
+        assert!(cp.check_duplicate_question("请问你想查询哪个城市的天气？").is_none());
+
+        // 记录第一个提问
+        cp.record_asked_question("请问你想查询哪个城市的天气？");
+        assert_eq!(cp.asked_human_questions.len(), 1);
+
+        // 1. 完全相同的问题：拦截
+        let dup1 = cp.check_duplicate_question("请问你想查询哪个城市的天气？");
+        assert!(dup1.is_some());
+        assert!(dup1.unwrap().contains("重复提问拦截"));
+
+        // 2. 标点符号与空格变种：拦截
+        let dup2 = cp.check_duplicate_question("  请问你想查询哪个城市的天气!  ");
+        assert!(dup2.is_some());
+
+        // 3. 口癖轻微变种（包含关系且差值纯为语气助词）：拦截
+        let dup3 = cp.check_duplicate_question("请问你想查询哪个城市的天气呢？");
+        assert!(dup3.is_some());
+
+        // 4. 同模板不同槽位提问（城市 vs 日期）：绝不误伤，必须放行！
+        assert!(cp.check_duplicate_question("您想查询哪个日期的天气？").is_none());
+        assert!(cp.check_duplicate_question("请问你想查询哪个日期的天气？").is_none());
+
+        // 5. 相似指标/参数槽位提问（指标A vs 指标B）：放行
+        assert!(cp.check_duplicate_question("请提供要分析的指标A").is_none());
+        cp.record_asked_question("请提供要分析的指标A");
+        assert!(cp.check_duplicate_question("请提供要分析的指标B").is_none());
+
+        // 6. 提问配额约束（全局封顶，可配默认 5 次）
+        assert!(cp.check_inquiry_quota_exceeded(DEFAULT_MAX_HUMAN_INQUIRY_BUDGET).is_none());
+        cp.record_asked_question("问题3");
+        cp.record_asked_question("问题4");
+        cp.record_asked_question("问题5");
+        assert_eq!(cp.asked_human_questions.len(), 5);
+        let quota_err = cp.check_inquiry_quota_exceeded(DEFAULT_MAX_HUMAN_INQUIRY_BUDGET);
+        assert!(quota_err.is_some());
+        assert!(quota_err.unwrap().contains("信息提问配额已耗尽"));
+
+        // 7. 凭据类提问识别（豁免配额熔断）
+        assert!(is_credential_inquiry_kind("missing_credential"));
+        assert!(is_credential_inquiry_kind("credential"));
+        assert!(is_credential_inquiry_kind("SECRET"));
+        assert!(is_credential_inquiry_kind("api_key"));
+        assert!(is_credential_inquiry_kind("password"));
+        assert!(!is_credential_inquiry_kind("missing_parameter"));
+        assert!(!is_credential_inquiry_kind("text"));
+        assert!(!is_credential_inquiry_kind("plan_approval"));
     }
 }

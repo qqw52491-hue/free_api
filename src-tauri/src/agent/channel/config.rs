@@ -88,6 +88,9 @@ pub struct ChannelConfig {
     /// 空 = 自动探测局域网 IPv4。用于生成扫码直达的二维码
     #[serde(default)]
     pub console_base_url: Option<String>,
+    /// 单个任务允许向用户发起信息类提问的最大配额（防琐碎问题没完没了；None = 默认 5）
+    #[serde(default)]
+    pub max_human_inquiry_budget: Option<u32>,
 }
 
 fn default_action_milestone() -> u32 {
@@ -138,6 +141,7 @@ impl Default for ChannelConfig {
             action_milestone_steps: default_action_milestone(),
             phase_pushes: true,
             console_base_url: None,
+            max_human_inquiry_budget: None,
         }
     }
 }
@@ -201,4 +205,15 @@ pub(crate) fn effective_scratch_dir(config: &ChannelConfig) -> PathBuf {
             expanded
         })
 }
+
+/// 获取全局配置中的信息类提问配额（默认 5 次）
+pub fn max_human_inquiry_budget() -> usize {
+    crate::agent::channel::channel_config_shared()
+        .read()
+        .ok()
+        .and_then(|c| c.max_human_inquiry_budget)
+        .map(|v| v as usize)
+        .unwrap_or(crate::agent::checkpoint::DEFAULT_MAX_HUMAN_INQUIRY_BUDGET)
+}
+
 
