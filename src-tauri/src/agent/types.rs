@@ -217,6 +217,81 @@ impl TokenUsage {
     }
 }
 
+fn deserialize_optional_string_or_vec<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringOrVecVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for StringOrVecVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string, a sequence of strings, or null")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut items = Vec::new();
+            while let Some(item) = seq.next_element::<serde_json::Value>()? {
+                if let Some(s) = item.as_str() {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        items.push(trimmed.to_string());
+                    }
+                }
+            }
+            if items.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(items.join(", ")))
+            }
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVecVisitor)
+}
+
 // 这是ai 回答的具体格式
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentInstruction {
@@ -293,8 +368,8 @@ pub struct AgentInstruction {
     /// 【批量派发】针对子 Agent（如 child_worker / child_writer）的一步多任务派发
     #[serde(default)]
     pub dispatches: Option<Vec<serde_json::Value>>,
-    /// 【预加载优化】AI 预告下一轮想用的工具，系统会提前加载该工具的详细说明书
-    #[serde(default)]
+    /// 【预加载优化】AI 预告下一轮想用的工具/Skill（支持逗号分隔或数组多选，系统提前加载对应详细说明书）
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_vec")]
     pub next_tool_hint: Option<String>,
     #[serde(default)]
     pub require_memory: Option<bool>,
@@ -408,6 +483,28 @@ impl AgentInstruction {
             }
         }
         self.tool.clone().unwrap_or_default()
+    }
+
+    /// 提取下一轮需要预加载的工具或 Skill 列表（支持逗号分隔、分号分隔或数组多选；未设置时回退至当前 action）
+    pub fn get_next_tool_hints(&self) -> Vec<String> {
+        let raw_hint = self.next_tool_hint.as_deref().unwrap_or("").trim();
+        if !raw_hint.is_empty() {
+            let list: Vec<String> = raw_hint
+                .split(|c| c == ',' || c == ';' || c == '，' || c == '；' || c == '、')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty() && *s != "finish" && *s != "core")
+                .map(|s| s.to_string())
+                .collect();
+            if !list.is_empty() {
+                return list;
+            }
+        }
+        let action = self.get_action();
+        if action.is_empty() || action == "finish" || action == "core" {
+            Vec::new()
+        } else {
+            vec![action]
+        }
     }
 
     pub fn get_tool(&self) -> String {
@@ -782,6 +879,56 @@ mod tests {
         let inst_m: AgentInstruction = serde_json::from_value(mixed).unwrap();
         assert!(inst_m.has_dispatches());
         assert!(inst_m.is_mixed_dispatch_format());
+    }
+
+    #[test]
+    fn test_next_tool_hint_multiple_formats() {
+        // 1. 逗号分隔字符串
+        let json_comma = json!({
+            "tool": "search",
+            "next_tool_hint": "code_diagnosis, code_development, code_verify"
+        });
+        let inst: AgentInstruction = serde_json::from_value(json_comma).unwrap();
+        assert_eq!(
+            inst.get_next_tool_hints(),
+            vec!["code_diagnosis", "code_development", "code_verify"]
+        );
+
+        // 2. JSON 数组多选
+        let json_array = json!({
+            "tool": "search",
+            "next_tool_hint": ["chart_visualization", "frontend_design"]
+        });
+        let inst_arr: AgentInstruction = serde_json::from_value(json_array).unwrap();
+        assert_eq!(
+            inst_arr.get_next_tool_hints(),
+            vec!["chart_visualization", "frontend_design"]
+        );
+
+        // 3. 中文标点、空格、分号混合容错
+        let json_mixed = json!({
+            "tool": "search",
+            "next_tool_hint": "code_development；code_verify，deep_research、chart_visualization"
+        });
+        let inst_mixed: AgentInstruction = serde_json::from_value(json_mixed).unwrap();
+        assert_eq!(
+            inst_mixed.get_next_tool_hints(),
+            vec!["code_development", "code_verify", "deep_research", "chart_visualization"]
+        );
+
+        // 4. 未提供 hint 时回退至 action
+        let json_no_hint = json!({
+            "tool": "remote-hub/read_text_file"
+        });
+        let inst_fallback: AgentInstruction = serde_json::from_value(json_no_hint).unwrap();
+        assert_eq!(inst_fallback.get_next_tool_hints(), vec!["remote-hub/read_text_file"]);
+
+        // 5. finish 或 core 动作自动过滤不加载
+        let json_finish = json!({
+            "tool": "finish"
+        });
+        let inst_finish: AgentInstruction = serde_json::from_value(json_finish).unwrap();
+        assert!(inst_finish.get_next_tool_hints().is_empty());
     }
 }
 

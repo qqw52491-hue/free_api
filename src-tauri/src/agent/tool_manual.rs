@@ -18,24 +18,47 @@ pub async fn load_tool_manual_for_next_step(
     context: &mut SandwichContext,
     instruction: &AgentInstruction,
 ) {
-    let next_tool = instruction
-        .next_tool_hint
-        .clone()
-        .unwrap_or_else(|| instruction.get_action());
-    let tool_key = next_tool
-        .split('/')
-        .next()
-        .unwrap_or(&next_tool)
-        .to_string();
-    if tool_key.is_empty() || tool_key == "finish" || tool_key == "core" {
-        return;
-    }
-    if context.has_tool_manual(&tool_key) {
+    let targets = instruction.get_next_tool_hints();
+    if targets.is_empty() {
         return;
     }
 
-    let tool_filename = format!("{}.md", tool_key);
     let resource_dir = app.path().resource_dir().unwrap_or_default();
+    let is_explicit = instruction.next_tool_hint.is_some();
+
+    for raw_target in targets {
+        let tool_key = raw_target
+            .split('/')
+            .next()
+            .unwrap_or(&raw_target)
+            .trim()
+            .to_string();
+        if tool_key.is_empty() || tool_key == "finish" || tool_key == "core" {
+            continue;
+        }
+        if context.has_tool_manual(&tool_key) {
+            continue;
+        }
+
+        load_single_tool_manual(
+            &tool_key,
+            is_explicit,
+            &resource_dir,
+            registry_state,
+            context,
+        )
+        .await;
+    }
+}
+
+async fn load_single_tool_manual(
+    tool_key: &str,
+    is_explicit_hint: bool,
+    resource_dir: &std::path::Path,
+    registry_state: &Arc<Mutex<PluginRegistry>>,
+    context: &mut SandwichContext,
+) {
+    let tool_filename = format!("{}.md", tool_key);
     let candidate_paths = [
         std::path::PathBuf::from("src-tauri/prompts/tools").join(&tool_filename),
         std::path::PathBuf::from("prompts/tools").join(&tool_filename),
@@ -58,14 +81,14 @@ pub async fn load_tool_manual_for_next_step(
     if tool_detail.is_empty() {
         let is_registered_plugin = {
             let registry = registry_state.lock().await;
-            registry.plugin_names().contains(&tool_key.as_str())
+            registry.plugin_names().contains(&tool_key)
         };
         if is_registered_plugin {
             // 命中插件但目录缓存为空/过期：现场刷新一次再生成说明书，
             // 让懒加载在长会话中依旧有效，而不是静默返回空。
             let client = {
                 let registry = registry_state.lock().await;
-                registry.get(&tool_key)
+                registry.get(tool_key)
             };
             if let Some(client) = client {
                 if crate::agent::mcp_catalog::cached_tools(&client.config)
@@ -84,8 +107,8 @@ pub async fn load_tool_manual_for_next_step(
                 }
             }
             let registry = registry_state.lock().await;
-            tool_detail = registry.format_tool_detail(&tool_key);
-        } else if instruction.next_tool_hint.is_some() {
+            tool_detail = registry.format_tool_detail(tool_key);
+        } else if is_explicit_hint {
             // 显式 hint 未命中任何手册/Skill/插件时必须给模型可行动的纠错事实，
             // 否则它会重复猜测不存在的名字，永远拿不到工具契约。
             let plugin_names = {
@@ -129,7 +152,7 @@ pub async fn load_tool_manual_for_next_step(
                     tool_key
                 )),
             });
-            context.fetched_tools.insert(tool_key.clone());
+            context.fetched_tools.insert(tool_key.to_string());
             println!("⚠️ [Tool Manifest] 插件 [{}] 处于离线/连接失败状态，已注入不可用简短提示", tool_key);
         } else {
             context.turns_history.push(ChatMessage {
@@ -140,7 +163,7 @@ pub async fn load_tool_manual_for_next_step(
                     tool_detail.trim()
                 )),
             });
-            context.fetched_tools.insert(tool_key.clone());
+            context.fetched_tools.insert(tool_key.to_string());
             println!("📖 [Tool Manifest Cache] 首次引入工具手册 [{}] 并作为事件追加至历史流 (已标记 fetched)", tool_key);
         }
     }
