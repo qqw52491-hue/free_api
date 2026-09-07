@@ -136,15 +136,8 @@ pub async fn run_call_llm_and_run_tool_phases(
                 "model_id": routing.model_id
             }),
         );
-        let open_todos_for_early_check = crate::agent::finish_guard::finish_blockers(
-            &context.todo_list,
-            context.review_contract.as_ref(),
-            false,
-            0, // 避免把待闭合验证当作流式早期中断条件，允许模型在 finish 时同时递交 change_verification_update
-            None,
-        );
-        let can_early_challenge_finish =
-            !checkpoint.finish_reviewed && !open_todos_for_early_check.is_empty();
+        // 统一由后置终态门禁 (finish_guard) 权威仲裁与自愈，严禁在流式前序 60 字符早退掐断大模型输出
+        let can_early_challenge_finish = false;
 
         let planning_start = Instant::now();
         let (mut inst, token_usage, thinking_text, history_estimate_at_request) = match call_llm(

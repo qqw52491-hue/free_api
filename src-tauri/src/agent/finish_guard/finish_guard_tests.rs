@@ -1703,3 +1703,24 @@ index 123..456 100644
         );
         assert!(blockers.is_empty());
     }
+
+    #[test]
+    fn test_readonly_step_preserves_finish_reviewed_and_challenge_count() {
+        use crate::agent::dispatcher::is_write_or_side_effect_tool;
+        use crate::agent::types::AgentInstruction;
+
+        let read_inst = AgentInstruction {
+            tool: Some("read_text_file".to_string()),
+            description: "读取代码进行分析".to_string(),
+            ..Default::default()
+        };
+        assert!(!is_write_or_side_effect_tool(&read_inst));
+
+        let write_inst = AgentInstruction {
+            tool: Some("write_to_file".to_string()),
+            description: "写入修复代码".to_string(),
+            ..Default::default()
+        };
+        assert!(is_write_or_side_effect_tool(&write_inst));
+    }
+

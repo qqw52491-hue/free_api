@@ -1517,7 +1517,20 @@ async fn run_agent_main_loop_in_workspace_inner(
                 checkpoint.stage_review_blockers_open
             ));
         }
+        let has_code_modification_intent = context.active_target_block().is_some()
+            || context.todo_list.iter().any(|t| {
+                let d = t.description.to_lowercase();
+                d.contains("修改")
+                    || d.contains("修复")
+                    || d.contains("编写")
+                    || d.contains("重构")
+                    || d.contains("实现")
+                    || d.contains("write")
+                    || d.contains("fix")
+                    || d.contains("refactor")
+            });
         if is_finish
+            && has_code_modification_intent
             && !checkpoint.plan_phase.is_approved()
             && (checkpoint.last_review_scorecard.as_ref().map_or(false, |s| !s.passes_gate())
                 || checkpoint.last_review_blocking_count > 0)
@@ -1815,11 +1828,10 @@ async fn run_agent_main_loop_in_workspace_inner(
             }
             }
         } else if !is_finish {
-            // 新的常规步骤提供了新增证据，之后若仍有 open Todo 可重新进行一次质询。
-            checkpoint.finish_reviewed = false;
-            // 只有当常规步骤产生了新的真实副作用写入时，才视为进入了新的交付周期，重置质询标记；
-            // 纯只读或查询步骤不重置 finish_challenge_count，防止模型通过插步（如反复 read_file）逃避熔断导致死循环。
+            // 只有当常规步骤产生了新的真实副作用写入时，才视为进入了新的交付周期，重置质询标记与计数；
+            // 纯只读或查询步骤不重置 finish_reviewed / finish_challenge_count，防止模型因查阅参考信息导致门禁无限循环打回。
             if result.success && is_write_or_side_effect_tool(&instruction) {
+                checkpoint.finish_reviewed = false;
                 checkpoint.finish_challenge_count = 0;
             }
         }
@@ -1986,7 +1998,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             "params": instruction.get_params(),
             "plan_id": context.active_plan_id().unwrap_or_default(),
             "plan_title": context.active_plan_title().map(str::to_string).unwrap_or_else(|| crate::agent::context::types::clip_plan_title(&context.user_goal)),
-            "status": if finish_challenged { "finish_challenged" } else if result.success { "succeeded" } else { "failed" },
+            "status": outcome_str,
             "output": output_text.clone(),
             "resource_scope_revision": context.resource_scope.revision,
             "metrics": metrics_json,
