@@ -208,6 +208,100 @@ pub fn split_shell_segments(cmd: &str) -> Vec<&str> {
     segments
 }
 
+/// 检测命令行中是否存在真正写盘的文件重定向（如 `> file.txt`、`>> out.log`）。
+/// 自动放行：
+/// 1. 引号内部的 `>`（如 `curl 'http://...?a>1'` 或 `awk '$1 > 2'`）
+/// 2. 丢弃到空设备（如 `>/dev/null`、`2>/dev/null`、`&>/dev/null`、`>>/dev/null`、`2> /dev/null`、`>nul` 等）
+/// 3. 文件描述符重定向（如 `2>&1`、`1>&2`、`>&2`）
+pub fn has_file_write_redirection(cmd: &str) -> bool {
+    let bytes = cmd.as_bytes();
+    let len = bytes.len();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut i = 0;
+
+    while i < len {
+        let b = bytes[i];
+        if b == b'\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            i += 1;
+            continue;
+        }
+        if b == b'"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            i += 1;
+            continue;
+        }
+
+        if !in_single_quote && !in_double_quote && b == b'>' {
+            let mut next_idx = i + 1;
+            // 支持 >> 或 >|
+            if next_idx < len && (bytes[next_idx] == b'>' || bytes[next_idx] == b'|') {
+                next_idx += 1;
+            }
+            // 跳过空格和 tab
+            while next_idx < len && (bytes[next_idx] == b' ' || bytes[next_idx] == b'\t') {
+                next_idx += 1;
+            }
+            let rest = &cmd[next_idx..];
+            // 1. 丢弃到 /dev/null（包括 2>/dev/null, >/dev/null, &>/dev/null 等）
+            let is_dev_null = rest.starts_with("/dev/null");
+            let is_win_nul = if rest.starts_with("nul") || rest.starts_with("NUL") {
+                let after = &rest[3..];
+                after.is_empty()
+                    || after.starts_with(' ')
+                    || after.starts_with('\t')
+                    || after.starts_with(';')
+                    || after.starts_with('&')
+                    || after.starts_with('|')
+            } else {
+                false
+            };
+            if is_dev_null || is_win_nul {
+                let skip_len = if is_dev_null { "/dev/null".len() } else { 3 };
+                i = next_idx + skip_len;
+                continue;
+            }
+            // 2. 文件描述符重定向（如 2>&1, 1>&2, >&2, >&1）
+            if rest.starts_with("&1") || rest.starts_with("&2") {
+                i = next_idx + 2;
+                continue;
+            }
+            // 3. 其余均为真实文件重定向写盘
+            return true;
+        }
+
+        i += 1;
+    }
+
+    false
+}
+
+fn is_pipe_to_interpreter(lower: &str) -> bool {
+    let interpreters = ["bash", "sh", "zsh", "python", "node", "perl", "ruby"];
+    for interp in &interpreters {
+        for prefix in &[format!("| {}", interp), format!("|{}", interp)] {
+            let mut search_from = 0;
+            while let Some(pos) = lower[search_from..].find(prefix) {
+                let abs_pos = search_from + pos;
+                let after = &lower[abs_pos + prefix.len()..];
+                if after.is_empty()
+                    || after.starts_with(' ')
+                    || after.starts_with('\t')
+                    || after.starts_with('-')
+                    || after.starts_with('|')
+                    || after.starts_with(';')
+                    || after.starts_with('&')
+                {
+                    return true;
+                }
+                search_from = abs_pos + prefix.len();
+            }
+        }
+    }
+    false
+}
+
 /// 检测 Shell 命令是否试图进行写盘重定向、文本就地替换、文件删除或破坏性修改。
 /// 仅拦截这几类明确的破坏性写盘操作；其他所有常规命令与探针全部放行。
 pub fn is_destructive_shell_command(raw_cmd: &str) -> bool {
@@ -216,24 +310,15 @@ pub fn is_destructive_shell_command(raw_cmd: &str) -> bool {
         return false;
     }
 
-    // 1. 检查文件写盘/追加重定向（> 或 >>，允许 2>&1 和 1>&2 这种文件描述符重定向）
-    let chars: Vec<char> = trimmed.chars().collect();
-    let len = chars.len();
-    for i in 0..len {
-        if chars[i] == '>' {
-            let prev = if i > 0 { chars[i - 1] } else { ' ' };
-            let next = if i + 1 < len { chars[i + 1] } else { ' ' };
-            let is_fd_dup = (prev == '1' || prev == '2') && next == '&';
-            if !is_fd_dup {
-                return true; // 包含写入重定向（如 > 或 >>），判定为破坏性写操作
-            }
-        }
+    // 1. 检查是否存在真实文件写盘/追加重定向（自动排除 /dev/null、2>&1、引号内 >）
+    if has_file_write_redirection(trimmed) {
+        return true;
     }
 
-    // 2. 检查文本就地替换、文件删除、强制覆盖等高危操作
+    // 2. 检查文本就地替换、文件删除等破坏性操作
     let lower = trimmed.to_ascii_lowercase();
 
-    // 2. 文本就地替换与流编辑写盘 (sed -i, perl -i, awk -i inplace 等)
+    // 2.1 文本就地替换与流编辑写盘 (sed -i, perl -i, awk -i inplace 等)
     if lower.contains("sed -i")
         || lower.contains("perl -pi")
         || lower.contains("perl -i")
@@ -242,7 +327,7 @@ pub fn is_destructive_shell_command(raw_cmd: &str) -> bool {
         return true;
     }
 
-    // 3. 文件或目录删除、文本清空与强制截断 (rm, rmdir, unlink, truncate, shred)
+    // 2.2 文件或目录删除、文本清空与强制截断 (rm, rmdir, unlink, truncate, shred)
     if lower.contains("rm ")
         || lower.contains("rm\t")
         || lower.contains("rmdir ")
@@ -256,13 +341,13 @@ pub fn is_destructive_shell_command(raw_cmd: &str) -> bool {
         return true;
     }
 
-    // 4. 危险管道注入与提权 (curl ... | bash, sudo 等)
-    if lower.contains("| bash")
-        || lower.contains("| sh")
-        || lower.contains("| zsh")
-        || lower.contains("| python")
-        || lower.contains("| node")
-        || lower.contains("sudo ")
+    // 2.3 危险管道注入与提权 (curl ... | bash, sudo 等)
+    if is_pipe_to_interpreter(&lower)
+        || lower.starts_with("sudo ")
+        || lower.contains("; sudo ")
+        || lower.contains("&& sudo ")
+        || lower.contains("|| sudo ")
+        || lower.contains("| sudo ")
     {
         return true;
     }
@@ -1531,5 +1616,19 @@ mod tests {
             "args": ["-s", "-m", "5", "http://ip-api.com/json"]
         }));
         assert!(!is_write_or_side_effect_tool(&inst_split_args), "curl + args 拆分传递只读必须放行");
+
+        // 13. 用户实测场景: 2>/dev/null 丢弃输出、管道与引号内部字符，必须安全放行
+        let mut inst_sh_c = AgentInstruction::default();
+        inst_sh_c.tool = Some("remote-hub/shell_exec".to_string());
+        inst_sh_c.command = Some(json!({
+            "command": "sh",
+            "args": [
+                "-c",
+                "curl -s --noproxy '*' -m 4 http://whois.pconline.com.cn/ipJson.jsp | iconv -f gbk -t utf-8 2>/dev/null || curl -s -m 4 https://cip.cc"
+            ],
+            "cwd": "/home/w/文档/free_api/src-tauri",
+            "shell_mode": true
+        }));
+        assert!(!is_write_or_side_effect_tool(&inst_sh_c), "带 2>/dev/null 的网络探针与编码转换必须作为只读放行");
     }
 }
