@@ -4,7 +4,7 @@ use chrono::Utc;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 // ==================== SESSION COMMANDS ====================
@@ -56,52 +56,20 @@ pub async fn create_session(
 }
 
 #[tauri::command]
-pub async fn delete_session(state: State<'_, DbState>, id: String) -> Result<(), String> {
+pub async fn delete_session(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    id: String,
+) -> Result<(), String> {
+    let app_dir = app.path().app_data_dir().ok();
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    // 彻底级联清理该会话在所有 SQLite 业务表、大文本日志表与 FTS5 索引表中的历史数据
-    let _ = conn.execute(
-        "DELETE FROM agent_task_records WHERE session_id=?1",
-        params![&id],
-    );
-    let _ = conn.execute(
-        "DELETE FROM agent_task_resources WHERE session_id=?1",
-        params![&id],
-    );
-    let _ = conn.execute(
-        "DELETE FROM agent_checkpoints WHERE run_id=?1",
-        params![&id],
-    );
-    let _ = conn.execute(
-        "DELETE FROM agent_run_traces WHERE session_id=?1",
-        params![&id],
-    );
-    let _ = conn.execute(
-        "DELETE FROM agent_step_logs WHERE session_id=?1",
-        params![&id],
-    );
-    let _ = conn.execute(
-        "DELETE FROM agent_memory_nodes WHERE session_id=?1",
-        params![&id],
-    );
-    let _ = conn.execute(
-        "DELETE FROM agent_lesson_recalls WHERE session_id=?1",
-        params![&id],
-    );
-    let _ = conn.execute(
-        "DELETE FROM chat_messages WHERE session_id=?1",
-        params![&id],
-    );
-    let _ = conn.execute(
-        "DELETE FROM agent_step_logs_fts WHERE session_id=?1",
-        params![&id],
-    );
-    let _ = conn.execute(
-        "DELETE FROM agent_memory_nodes_fts WHERE session_id=?1",
-        params![&id],
-    );
-    conn.execute("DELETE FROM chat_sessions WHERE id=?1", params![&id])
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    crate::db::delete_session_completely(&conn, &id, app_dir.as_deref())
+}
+
+#[tauri::command]
+pub async fn vacuum_database(state: State<'_, DbState>) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    crate::db::vacuum_database(&conn)
 }
 
 #[tauri::command]

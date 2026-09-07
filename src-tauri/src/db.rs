@@ -150,6 +150,125 @@ pub fn mark_orphan_running_traces_interrupted(conn: &Connection) -> Result<usize
     Ok(n)
 }
 
+/// 彻底级联清理指定会话关联的所有 SQLite 业务表、运行日志、大文本落盘文件、上传附件与 FTS 全文索引
+pub fn delete_session_completely(
+    conn: &Connection,
+    session_id: &str,
+    app_data_dir: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let id = session_id.trim();
+    if id.is_empty() {
+        return Ok(());
+    }
+
+    // 1. 清理该会话溢出落盘到本地 outputs/ 的 .log 大文本文件
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT raw_output FROM agent_step_logs WHERE session_id=?1 AND raw_output LIKE '[[spilled_to_disk:%'"
+    ) {
+        if let Ok(rows) = stmt.query_map(rusqlite::params![id], |row| row.get::<_, String>(0)) {
+            for raw in rows.flatten() {
+                if let Some(path_str) = raw.strip_prefix("[[spilled_to_disk:").and_then(|s| s.strip_suffix("]]")) {
+                    let path = std::path::Path::new(path_str);
+                    if path.exists() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. 清理上传到 attachments/{session_id} 的本地磁盘附件目录
+    let mut attach_dirs = Vec::new();
+    if let Some(dir) = app_data_dir {
+        attach_dirs.push(dir.join("attachments").join(id));
+    }
+    if let Some(data_dir) = dirs_next::data_dir() {
+        attach_dirs.push(data_dir.join("free-api-chat").join("attachments").join(id));
+    }
+    for dir in attach_dirs {
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    // 3. 严格级联清理所有关联表（覆盖全部 16 张表，包含子审查员历史、Telemetry 指标、产物账本等）
+    let _ = conn.execute(
+        "DELETE FROM agent_task_records WHERE resource_id IN (SELECT resource_id FROM agent_task_resources WHERE session_id=?1)",
+        rusqlite::params![id],
+    );
+    let _ = conn.execute("DELETE FROM agent_task_resources WHERE session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_checkpoints WHERE run_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_run_traces WHERE session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_child_runs WHERE parent_session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_background_jobs WHERE parent_session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_llm_calls WHERE session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_artifacts WHERE session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_step_logs_fts WHERE session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_step_logs WHERE session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_memory_nodes_fts WHERE session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_memory_nodes WHERE session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_lesson_recalls WHERE session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM chat_messages WHERE session_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_project_sessions WHERE session_id=?1", rusqlite::params![id]);
+    conn.execute("DELETE FROM chat_sessions WHERE id=?1", rusqlite::params![id])
+        .map_err(|e| format!("删除会话主记录失败: {e}"))?;
+
+    Ok(())
+}
+
+/// 自动清扫由于历史版本缺失级联逻辑而残留在数据库中的孤儿会话历史数据
+pub fn cleanup_orphaned_session_data(conn: &Connection) -> Result<usize> {
+    let mut total_cleaned = 0;
+
+    // 清理无主溢出落盘的 .log 文件
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT raw_output FROM agent_step_logs WHERE session_id NOT IN (SELECT id FROM chat_sessions) AND raw_output LIKE '[[spilled_to_disk:%'"
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+            for raw in rows.flatten() {
+                if let Some(path_str) = raw.strip_prefix("[[spilled_to_disk:").and_then(|s| s.strip_suffix("]]")) {
+                    let path = std::path::Path::new(path_str);
+                    if path.exists() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
+    }
+
+    let cleanup_sqls = [
+        "DELETE FROM agent_task_records WHERE resource_id NOT IN (SELECT resource_id FROM agent_task_resources)",
+        "DELETE FROM agent_task_resources WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_checkpoints WHERE run_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_run_traces WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_child_runs WHERE parent_session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_background_jobs WHERE parent_session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_llm_calls WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_artifacts WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_step_logs_fts WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_step_logs WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_memory_nodes_fts WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_memory_nodes WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_lesson_recalls WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM chat_messages WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_project_sessions WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+    ];
+
+    for sql in &cleanup_sqls {
+        if let Ok(affected) = conn.execute(sql, []) {
+            total_cleaned += affected;
+        }
+    }
+
+    Ok(total_cleaned)
+}
+
+/// 执行 SQLite VACUUM 操作，清理数据库碎片并回收物理磁盘空间
+pub fn vacuum_database(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("VACUUM;")
+        .map_err(|e| format!("执行数据库 VACUUM 瘦身失败: {e}"))
+}
+
 pub fn init_read_pool(path: &PathBuf) -> Result<ReadPool, String> {
     let manager = SqliteConnectionManager::file(path).with_init(|c| {
         c.execute_batch(
@@ -955,5 +1074,79 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(excel_command, "uvx");
+    }
+
+    #[test]
+    fn test_delete_session_completely_and_orphan_cleanup() {
+        let temp_dir = std::env::temp_dir().join(format!("test-cleanup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("test_cleanup.db");
+        let conn = init_db(&db_path).unwrap();
+
+        // 1. 插入一个完整会话及其关联数据
+        let s_id = "session-100";
+        conn.execute(
+            "INSERT INTO chat_sessions (id, title, model_id, created_at, updated_at) VALUES (?1, 'Title', 'm1', '2026-01-01', '2026-01-01')",
+            rusqlite::params![s_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, created_at) VALUES ('msg-1', ?1, 'user', 'hi', '2026-01-01')",
+            rusqlite::params![s_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at) VALUES ('child-1', 'r1', ?1, '/tmp', 'm1', 'done', '2026-01-01')",
+            rusqlite::params![s_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO agent_llm_calls (session_id, step_id, created_at) VALUES (?1, 1, '2026-01-01')",
+            rusqlite::params![s_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO agent_artifacts (id, session_id, display_name, format, kind, canonical_path, created_at, updated_at) VALUES ('art-1', ?1, 'f', 'txt', 'code', '/tmp/f.txt', '2026-01-01', '2026-01-01')",
+            rusqlite::params![s_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO agent_task_resources (resource_id, session_id, kind, label, created_at, updated_at) VALUES ('res-1', ?1, 'file', 'uri', '2026-01-01', '2026-01-01')",
+            rusqlite::params![s_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO agent_task_records (resource_id, record_key, data_json, created_at, updated_at) VALUES ('res-1', 'k1', '{}', '2026-01-01', '2026-01-01')",
+            [],
+        ).unwrap();
+
+        // 2. 执行彻底删除
+        delete_session_completely(&conn, s_id, Some(&temp_dir)).unwrap();
+
+        // 3. 验证所有关联表为 0
+        let msg_count: i64 = conn.query_row("SELECT count(*) FROM chat_messages WHERE session_id=?1", [s_id], |r| r.get(0)).unwrap();
+        assert_eq!(msg_count, 0);
+        let child_count: i64 = conn.query_row("SELECT count(*) FROM agent_child_runs WHERE parent_session_id=?1", [s_id], |r| r.get(0)).unwrap();
+        assert_eq!(child_count, 0);
+        let llm_count: i64 = conn.query_row("SELECT count(*) FROM agent_llm_calls WHERE session_id=?1", [s_id], |r| r.get(0)).unwrap();
+        assert_eq!(llm_count, 0);
+        let art_count: i64 = conn.query_row("SELECT count(*) FROM agent_artifacts WHERE session_id=?1", [s_id], |r| r.get(0)).unwrap();
+        assert_eq!(art_count, 0);
+        let task_res_count: i64 = conn.query_row("SELECT count(*) FROM agent_task_resources WHERE session_id=?1", [s_id], |r| r.get(0)).unwrap();
+        assert_eq!(task_res_count, 0);
+        let task_rec_count: i64 = conn.query_row("SELECT count(*) FROM agent_task_records WHERE resource_id='res-1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(task_rec_count, 0);
+        let session_count: i64 = conn.query_row("SELECT count(*) FROM chat_sessions WHERE id=?1", [s_id], |r| r.get(0)).unwrap();
+        assert_eq!(session_count, 0);
+
+        // 4. 验证孤儿清理：插入没有会话主记录的孤儿数据
+        conn.execute(
+            "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at) VALUES ('orphan-1', 'r1', 'ghost-session', '/tmp', 'm1', 'done', '2026-01-01')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO agent_llm_calls (session_id, step_id, created_at) VALUES ('ghost-session', 1, '2026-01-01')",
+            [],
+        ).unwrap();
+        let cleaned = cleanup_orphaned_session_data(&conn).unwrap();
+        assert!(cleaned >= 2);
+        let orphan_child: i64 = conn.query_row("SELECT count(*) FROM agent_child_runs WHERE id='orphan-1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(orphan_child, 0);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

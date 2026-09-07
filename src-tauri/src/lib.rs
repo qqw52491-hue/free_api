@@ -41,11 +41,18 @@ pub fn run() {
                 let state = tauri::Manager::state::<DbState>(app);
                 let lock = state.0.lock();
                 match lock {
-                    Ok(conn) => match crate::db::mark_orphan_running_traces_interrupted(&conn) {
-                        Ok(n) if n > 0 => println!("[cleanup] 已将 {n} 条遗留 running trace 标记为已中断"),
-                        Ok(_) => {}
-                        Err(e) => eprintln!("[cleanup] 清理僵尸 running trace 失败: {e}"),
-                    },
+                    Ok(conn) => {
+                        match crate::db::mark_orphan_running_traces_interrupted(&conn) {
+                            Ok(n) if n > 0 => println!("[cleanup] 已将 {n} 条遗留 running trace 标记为已中断"),
+                            Ok(_) => {}
+                            Err(e) => eprintln!("[cleanup] 清理僵尸 running trace 失败: {e}"),
+                        }
+                        match crate::db::cleanup_orphaned_session_data(&conn) {
+                            Ok(n) if n > 0 => println!("[cleanup] 已自动清扫 {n} 条已删除会话的孤儿历史记录"),
+                            Ok(_) => {}
+                            Err(e) => eprintln!("[cleanup] 清扫孤儿历史记录失败: {e}"),
+                        }
+                    }
                     Err(e) => eprintln!("[cleanup] 数据库锁获取失败: {e}"),
                 }
                 // 清理崩溃或异常残留的 .writer-* 隔离工作区副本（避免磁盘泄漏）
@@ -94,6 +101,7 @@ pub fn run() {
             commands::create_session,
             commands::delete_session,
             commands::rename_session,
+            commands::vacuum_database,
             // 项目、项目会话与用户明确授权的项目内资源
             commands::list_agent_projects,
             commands::create_agent_project,

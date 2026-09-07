@@ -144,16 +144,8 @@ async fn handler_delete_session(
     let db = state.app.state::<DbState>();
     let id = session_id.trim();
     if let Ok(conn) = db.0.lock() {
-        let _ = conn.execute("DELETE FROM agent_task_records WHERE session_id=?1", rusqlite::params![id]);
-        let _ = conn.execute("DELETE FROM agent_task_resources WHERE session_id=?1", rusqlite::params![id]);
-        let _ = conn.execute("DELETE FROM agent_checkpoints WHERE run_id=?1", rusqlite::params![id]);
-        let _ = conn.execute("DELETE FROM agent_run_traces WHERE session_id=?1", rusqlite::params![id]);
-        let _ = conn.execute("DELETE FROM agent_step_logs WHERE session_id=?1", rusqlite::params![id]);
-        let _ = conn.execute("DELETE FROM agent_memory_nodes WHERE session_id=?1", rusqlite::params![id]);
-        let _ = conn.execute("DELETE FROM agent_lesson_recalls WHERE session_id=?1", rusqlite::params![id]);
-        let _ = conn.execute("DELETE FROM chat_messages WHERE session_id=?1", rusqlite::params![id]);
-        let _ = conn.execute("DELETE FROM project_sessions WHERE session_id=?1", rusqlite::params![id]);
-        let _ = conn.execute("DELETE FROM chat_sessions WHERE id=?1", rusqlite::params![id]);
+        let app_dir = state.app.path().app_data_dir().ok();
+        let _ = crate::db::delete_session_completely(&conn, id, app_dir.as_deref());
     }
     notify_session_event(id, "deleted");
     let _ = state.app.emit("channel-run-done", json!({ "session_id": id, "status": "deleted", "at": now_ts() }));
