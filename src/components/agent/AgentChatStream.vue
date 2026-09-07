@@ -956,20 +956,20 @@ function isPlanRunning(entry: PlanEntry): boolean {
     return entry.status === "running" || Boolean(entry.isThinking);
 }
 
-function planStatus(steps: AgentStepItem[]): AgentToolStatus {
+function planStatus(steps: AgentStepItem[], isLiveTaskActive = false): AgentToolStatus {
     // 聚合每个逻辑 stepId 的最新尝试状态（若重试已成功，阶段整体应为成功）
     const latestStatusByStep = new Map<number, AgentToolStatus>();
     for (const step of steps) {
         latestStatusByStep.set(step.stepId, step.status);
     }
     const statuses = Array.from(latestStatusByStep.values());
-    const isTaskActive = props.isRunning && !props.finalSummary?.trim() && !props.completionMessage?.trim();
-    if (isTaskActive && statuses.some((s) => s === "running" || s === "pending" || s === "challenged")) return "running";
+    if (isLiveTaskActive && statuses.some((s) => s === "running" || s === "pending" || s === "challenged")) return "running";
     if (statuses.some((s) => s === "failed")) return "failed";
     return "succeeded";
 }
 function planEntries(steps: AgentStepItem[], prefix: string, active = false): PlanEntry[] {
-    const isTaskActive = props.isRunning && !props.finalSummary?.trim() && !props.completionMessage?.trim();
+    const isLive = prefix === "live";
+    const isTaskActive = isLive && props.isRunning && !props.finalSummary?.trim() && !props.completionMessage?.trim();
     const groups = new Map<string, PlanEntry>();
     for (const step of steps.filter((item) => Boolean(item.description || item.tool || item.action))) {
         const key = step.planId || "plan-default";
@@ -982,7 +982,7 @@ function planEntries(steps: AgentStepItem[], prefix: string, active = false): Pl
     const rawPlans = [...groups.values()];
     const plans = rawPlans.map((plan, idx) => {
         const isLatest = idx === rawPlans.length - 1;
-        const calculatedStatus = planStatus(plan.steps);
+        const calculatedStatus = planStatus(plan.steps, isTaskActive);
 
         let status: AgentToolStatus;
         if (isTaskActive) {
