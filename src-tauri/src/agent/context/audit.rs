@@ -212,6 +212,7 @@ mod tests {
             tool: "code_editor".to_string(),
             description: "created src/main.rs".to_string(),
             timestamp: "2026-08-17T00:00:00Z".to_string(),
+            affected_paths: Vec::new(),
         }];
         let rendered = AuditLedger::render_ledger(&records);
         assert!(rendered.contains("created src/main.rs"));
@@ -227,6 +228,7 @@ mod tests {
                 tool: "code_editor".to_string(),
                 description: format!("modified file_{}.rs", i),
                 timestamp: "2026-08-17T00:00:00Z".to_string(),
+                affected_paths: Vec::new(),
             });
         }
         let rendered = AuditLedger::render_ledger(&records);

@@ -401,6 +401,7 @@ mod finish_guard_tests {
             tool: "write".to_string(),
             description: "fake".to_string(),
             timestamp: "now".to_string(),
+            affected_paths: Vec::new(),
         });
         // 无契约 + 交付宣称主根因但未就地校准 → 拦截
         let claiming = AgentInstruction {
@@ -436,6 +437,7 @@ mod finish_guard_tests {
             tool: "write".to_string(),
             description: "fake".to_string(),
             timestamp: "now".to_string(),
+            affected_paths: Vec::new(),
         });
         assert!(complex_delivery_blocker(&context, &instruction, true, true).is_none());
 

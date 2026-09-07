@@ -1498,6 +1498,7 @@ mod tests {
             tool: "edit_file".to_string(),
             description: "model_manager.rs 新增 add_platform".to_string(),
             timestamp: "2026-08-24T00:00:00Z".to_string(),
+            affected_paths: Vec::new(),
         });
         previous
             .memories

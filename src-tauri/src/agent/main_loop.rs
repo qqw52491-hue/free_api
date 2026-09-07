@@ -1410,6 +1410,29 @@ async fn run_agent_main_loop_in_workspace_inner(
         };
 
         let is_finish = is_finish_instruction(&instruction);
+
+        // 🌟 纯 UI/样式/文档改动自动豁免：
+        // 若当前未闭合，但本轮所有代码改动全部为纯前端/样式/文档文件，且无绑定强制验证命令，系统在 finish 时自动置为 waived
+        if is_finish && result.success && context.change_verification.is_none() {
+            let has_explicit_verify = context
+                .review_contract
+                .as_ref()
+                .map_or(false, |rc| rc.has_executable_verification());
+            if !has_explicit_verify && context.is_only_ui_or_doc_side_effects() {
+                context.change_verification = Some(crate::agent::change_verification::ChangeVerification {
+                    status: "waived".to_string(),
+                    evidence_refs: Vec::new(),
+                    waived_reason: Some(
+                        "改动全部为纯 UI/样式/文档静态资源，系统自动豁免单元测试验证".to_string(),
+                    ),
+                });
+                let _ = app.emit(
+                    &format!("agent-log-{}", final_session_id),
+                    "🎨 系统自动感知：检测到本次改动全部为纯 UI/样式/文档文件，已自动豁免写入测试验证 (waived)".to_string(),
+                );
+            }
+        }
+
         let mut open_todos = finish_blockers(
             &context.todo_list,
             context.review_contract.as_ref(),
@@ -1875,11 +1898,19 @@ async fn run_agent_main_loop_in_workspace_inner(
             let safe_params = crate::agent::context::AuditLedger::format_side_effect_params(
                 &instruction.get_params(),
             );
-            context.record_side_effect(
+            let affected_paths = crate::agent::change_verification::extract_file_paths_from_params(
+                &instruction.get_params(),
+            );
+            context.record_side_effect_with_paths(
                 step_id,
                 instruction.get_tool(),
                 format!("{}: {}", instruction.description, safe_params),
+                affected_paths,
             );
+        } else if result.success {
+            // 🌟 写入验证智能自愈与自动感知 (Auto-verification):
+            // 当存在未闭合的本地写入，且当前执行的命令是测试/验证命令且执行成功时，系统自动闭合为 verified！
+            try_auto_verify_change(&mut context, step_id, &instruction, &app, &final_session_id);
         }
 
         context.current_observation = output_text.clone();
@@ -2111,3 +2142,56 @@ async fn run_agent_main_loop_in_workspace_inner(
 
     Ok(())
 }
+
+fn try_auto_verify_change(
+    context: &mut context::SandwichContext,
+    step_id: usize,
+    instruction: &AgentInstruction,
+    app: &AppHandle,
+    session_id: &str,
+) {
+    if context.side_effects.len() <= context.inherited_side_effects_count
+        || context
+            .change_verification
+            .as_ref()
+            .map_or(false, crate::agent::change_verification::ChangeVerification::is_resolved)
+    {
+        return;
+    }
+
+    let Some(cmd) =
+        crate::agent::change_verification::extract_command_from_params(&instruction.get_params())
+    else {
+        return;
+    };
+
+    let is_test_cmd = crate::agent::change_verification::is_test_or_verification_command(&cmd);
+    let matches_contract_verify = context.review_contract.as_ref().map_or(false, |rc| {
+        rc.obligations.iter().any(|o| {
+            o.verify_command
+                .as_deref()
+                .map_or(false, |vc| vc.trim() == cmd.trim())
+        })
+    });
+
+    if is_test_cmd || matches_contract_verify {
+        let snippet = if cmd.chars().count() > 60 {
+            format!("{}...", cmd.chars().take(60).collect::<String>())
+        } else {
+            cmd
+        };
+        context.change_verification = Some(crate::agent::change_verification::ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec![format!("step_{} ({})", step_id, snippet)],
+            waived_reason: None,
+        });
+        let _ = app.emit(
+            &format!("agent-log-{}", session_id),
+            format!(
+                "🧪 系统自动感知：检测到验证命令 `{}` 成功执行，已自动标记写入验证通过 (verified)",
+                snippet
+            ),
+        );
+    }
+}
+

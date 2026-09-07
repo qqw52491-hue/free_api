@@ -110,12 +110,19 @@ impl ContextRenderer {
         }
         if let Some(blocker) = change_verification_blocker(side_effect_count, verification) {
             return format!(
-                "【写入后验证】\n- {}\n下一步：运行适用的测试/检查，并在 change_verification_update 中记录 verified + evidence_refs；若明确不验证，则记录 waived + waived_reason。\n\n",
+                "【写入后验证】\n\
+                - {}\n\
+                - 智能感知规则（免手动声明）：\n\
+                  * 若运行了验证命令（如 cargo test / npm test / tsc / pytest 等）且成功通过，系统将自动标记为 verified，无须手动声明；\n\
+                  * 若改动全为纯 UI/样式/静态文档文件，系统在提交 finish 时将自动豁免 (waived)；\n\
+                - 若需在调用 finish 交付时手动声明闭合（在顶层 JSON 中二选一填空，严禁拼入 summary 正文中）：\n\
+                  1. 已验证：\"change_verification_update\": {{\"status\": \"verified\", \"evidence_refs\": [\"测试步骤或命令输出摘要\"]}}\n\
+                  2. 免测豁免：\"change_verification_update\": {{\"status\": \"waived\", \"waived_reason\": \"说明免测理由，如UI微调/无自动化单测环境\"}}\n\n",
                 blocker
             );
         }
         format!(
-            "【写入后验证】\n- 最近写入：{}\n终态前：新的真实写入会自动使此闭合失效。\n\n",
+            "【写入后验证】\n- 最近写入：{}\n终态前：后续若无新增代码写入，调用 finish 将直接放行；若发生新的真实写入，将重新激活闭合要求。\n\n",
             verification
                 .map(ChangeVerification::summary)
                 .unwrap_or_default()

@@ -63,6 +63,8 @@ pub struct SideEffectRecord {
     pub tool: String,
     pub description: String,
     pub timestamp: String,
+    #[serde(default)]
+    pub affected_paths: Vec<String>,
 }
 
 /// 阶段计划状态机：自包含管理计划 ID、标题与自增编号
@@ -668,6 +670,16 @@ impl SandwichContext {
     }
 
     pub fn record_side_effect(&mut self, step_id: usize, tool: String, description: String) {
+        self.record_side_effect_with_paths(step_id, tool, description, Vec::new());
+    }
+
+    pub fn record_side_effect_with_paths(
+        &mut self,
+        step_id: usize,
+        tool: String,
+        description: String,
+        affected_paths: Vec<String>,
+    ) {
         // 旧验证只能覆盖其前已知的写入；新的真实写入必须重新验证或豁免。
         self.change_verification = None;
         self.side_effects.push(SideEffectRecord {
@@ -675,7 +687,28 @@ impl SandwichContext {
             tool,
             description,
             timestamp: chrono::Utc::now().to_rfc3339(),
+            affected_paths,
         });
+    }
+
+    /// 检查本轮（自 inherited_side_effects_count 之后）发生的真实写入，是否全部为纯 UI 界面或静态文档改动
+    pub fn is_only_ui_or_doc_side_effects(&self) -> bool {
+        let new_effects = if self.side_effects.len() > self.inherited_side_effects_count {
+            &self.side_effects[self.inherited_side_effects_count..]
+        } else {
+            return false;
+        };
+        if new_effects.is_empty() {
+            return false;
+        }
+        let mut all_paths = Vec::new();
+        for effect in new_effects {
+            if effect.affected_paths.is_empty() {
+                return false;
+            }
+            all_paths.extend(effect.affected_paths.clone());
+        }
+        crate::agent::change_verification::are_all_paths_ui_or_doc(&all_paths)
     }
 
     pub fn update_observation(&mut self, obs: String) {
@@ -913,6 +946,36 @@ mod tests {
         ctx.record_side_effect(2, "edit_file".to_string(), "后续写入".to_string());
         assert!(ctx.change_verification.is_none());
         assert_eq!(ctx.side_effects.len(), 2);
+    }
+
+    #[test]
+    fn test_is_only_ui_or_doc_side_effects() {
+        let mut ctx = SandwichContext::new("sys".to_string(), "修改界面".to_string());
+        assert!(!ctx.is_only_ui_or_doc_side_effects());
+
+        // 仅包含 UI 和文档修改
+        ctx.record_side_effect_with_paths(
+            1,
+            "edit_file".to_string(),
+            "修改卡片样式".to_string(),
+            vec!["src/components/AgentDeck.vue".to_string()],
+        );
+        ctx.record_side_effect_with_paths(
+            2,
+            "write_file".to_string(),
+            "更新说明文档".to_string(),
+            vec!["README.md".to_string()],
+        );
+        assert!(ctx.is_only_ui_or_doc_side_effects());
+
+        // 混入了后端逻辑文件
+        ctx.record_side_effect_with_paths(
+            3,
+            "edit_file".to_string(),
+            "修改认证逻辑".to_string(),
+            vec!["src-tauri/src/agent/auth.rs".to_string()],
+        );
+        assert!(!ctx.is_only_ui_or_doc_side_effects());
     }
 }
 
