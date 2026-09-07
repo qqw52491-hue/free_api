@@ -1789,6 +1789,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 humanInput.value = "";
                 pauseReason.value = "";
                 humanForm.value = null;
+                isRunning.value = false;
+                runTerminal.value = false;
                 await runAgent(message);
             }
         } catch (error) {
@@ -1832,6 +1834,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     humanInput.value = "";
                     pauseReason.value = "";
                     humanForm.value = null;
+                    isRunning.value = false;
+                    runTerminal.value = false;
                     await runAgent(message, attachments);
                 }
             } else if (mode === "queue") {

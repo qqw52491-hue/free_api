@@ -121,7 +121,7 @@
                   <span class="thinking-toggle">{{ thinkingCollapsed ? '▼ 展开' : '▲ 收起' }}</span>
                 </div>
                 <div v-show="!thinkingCollapsed || isThinking" class="thinking-body">
-                  <div v-if="thinkingContent" class="thinking-content" v-html="renderMarkdown(thinkingContent)"></div>
+                  <div v-if="thinkingContent" class="thinking-content" v-html="renderedThinkingHtml"></div>
                   <div v-else class="thinking-placeholder">
                     <div class="loading-dots"><span></span><span></span><span></span></div>
                     <span>模型已接收输入，正在推理思考中…</span>
@@ -129,7 +129,7 @@
                 </div>
               </div>
 
-              <div class="message-content md-content" v-if="streamContent" v-html="renderMarkdown(streamContent)"></div>
+              <div class="message-content md-content" v-if="streamContent" v-html="renderedStreamHtml"></div>
               <div class="message-content" v-else-if="!thinkingContent && !isThinking">
                 <div class="loading-dots"><span></span><span></span><span></span></div>
               </div>
@@ -259,12 +259,50 @@ const thinkingContent = ref('')
 const isThinking = ref(false)
 const thinkingCollapsed = ref(false)
 
+// 流式输出 Markdown 节流渲染缓存 (避免每个 SSE Token 触发同步 full parse)
+const renderedStreamHtml = ref('')
+let streamRenderRaf: number | null = null
+
+function scheduleStreamRender() {
+  if (streamRenderRaf !== null) return
+  streamRenderRaf = requestAnimationFrame(() => {
+    renderedStreamHtml.value = renderMarkdown(streamContent.value)
+    streamRenderRaf = null
+  })
+}
+
+function flushStreamRender() {
+  if (streamRenderRaf !== null) {
+    cancelAnimationFrame(streamRenderRaf)
+    streamRenderRaf = null
+  }
+  renderedStreamHtml.value = renderMarkdown(streamContent.value)
+}
+
+// 思考过程 Markdown 节流渲染缓存
+const renderedThinkingHtml = ref('')
+let thinkingRenderRaf: number | null = null
+
+function scheduleThinkingRender() {
+  if (thinkingRenderRaf !== null) return
+  thinkingRenderRaf = requestAnimationFrame(() => {
+    renderedThinkingHtml.value = renderMarkdown(thinkingContent.value)
+    thinkingRenderRaf = null
+  })
+}
+
+function flushThinkingRender() {
+  if (thinkingRenderRaf !== null) {
+    cancelAnimationFrame(thinkingRenderRaf)
+    thinkingRenderRaf = null
+  }
+  renderedThinkingHtml.value = renderMarkdown(thinkingContent.value)
+}
+
 const messagesContainer = ref<HTMLElement>()
 const inputRef = ref<HTMLTextAreaElement>()
 
 const currentSession = computed(() => sessions.value.find(s => s.id === currentSessionId.value))
-
-
 
 onMounted(async () => {
   allModels.value = await invoke<ModelOption[]>('get_all_models_with_platform')
@@ -272,9 +310,11 @@ onMounted(async () => {
   if (allModels.value.length > 0) selectedModelId.value = allModels.value[0].id
 
   listen<{ session_id: string; content: string; done: boolean }>('chat-stream', (event) => {
-    if (event.payload.done) { /* done handled by invoke promise */ }
-    else {
+    if (event.payload.done) {
+      flushStreamRender()
+    } else {
       streamContent.value += event.payload.content
+      scheduleStreamRender()
       scrollToBottom()
     }
   })
@@ -286,12 +326,15 @@ onMounted(async () => {
       isThinking.value = true
       thinkingCollapsed.value = false
       thinkingContent.value = ''
+      renderedThinkingHtml.value = ''
     } else if (status === 'streaming' && content) {
       thinkingContent.value += content
+      scheduleThinkingRender()
       scrollToBottom()
     } else if (status === 'done') {
       isThinking.value = false
       thinkingCollapsed.value = true  // 思考完成后自动收起
+      flushThinkingRender()
     }
   })
 
@@ -310,6 +353,10 @@ onMounted(async () => {
 async function selectSession(id: string) {
   currentSessionId.value = id
   visibleMessageLimit.value = 30
+  streamContent.value = ''
+  renderedStreamHtml.value = ''
+  thinkingContent.value = ''
+  renderedThinkingHtml.value = ''
   messages.value = await invoke<ChatMessage[]>('get_messages', { sessionId: id })
   const s = sessions.value.find(s => s.id === id)
   if (s?.model_id) selectedModelId.value = s.model_id
@@ -325,6 +372,10 @@ async function newSession() {
   currentSessionId.value = session.id
   visibleMessageLimit.value = 30
   messages.value = []
+  streamContent.value = ''
+  renderedStreamHtml.value = ''
+  thinkingContent.value = ''
+  renderedThinkingHtml.value = ''
   chatError.value = ''
   await nextTick()
   inputRef.value?.focus()
@@ -374,8 +425,10 @@ async function sendMessage() {
   pendingFiles.value = []
   streaming.value = true
   streamContent.value = ''
+  renderedStreamHtml.value = ''
   tokenUsage.value = null
   thinkingContent.value = ''
+  renderedThinkingHtml.value = ''
   isThinking.value = true
   thinkingCollapsed.value = false
 
@@ -403,9 +456,18 @@ async function sendMessage() {
       chatError.value = errText
     }
   } finally {
+    if (streamRenderRaf !== null) {
+      cancelAnimationFrame(streamRenderRaf)
+      streamRenderRaf = null
+    }
+    if (thinkingRenderRaf !== null) {
+      cancelAnimationFrame(thinkingRenderRaf)
+      thinkingRenderRaf = null
+    }
     streaming.value = false
     isThinking.value = false
     streamContent.value = ''
+    renderedStreamHtml.value = ''
     scrollToBottom()
   }
 }
@@ -414,6 +476,8 @@ async function stopChat() {
   if (!streaming.value || !currentSessionId.value) return
   try {
     await invoke('cancel_chat', { sessionId: currentSessionId.value })
+    flushStreamRender()
+    flushThinkingRender()
   } catch (e: any) {
     console.warn('cancel_chat error:', e)
   }
@@ -439,7 +503,16 @@ async function pickFile() {
 }
 
 function onKeydown(e: KeyboardEvent) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }
-function scrollToBottom() { nextTick(() => { const el = messagesContainer.value; if (el) el.scrollTop = el.scrollHeight }) }
+let scrollPending = false
+function scrollToBottom() {
+  if (scrollPending) return
+  scrollPending = true
+  requestAnimationFrame(() => {
+    const el = messagesContainer.value
+    if (el) el.scrollTop = el.scrollHeight
+    scrollPending = false
+  })
+}
 function formatTime(iso: string) { try { return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) } catch { return '' } }
 
 function parseAttachments(json: string | null): { name: string }[] { if (!json) return []; try { return JSON.parse(json) } catch { return [] } }
@@ -677,5 +750,28 @@ watch(userInput, () => { nextTick(() => { const el = inputRef.value; if (el) { e
   font-size: 12px;
   color: var(--text-3);
   font-style: normal;
+}
+.load-more-history-row {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 16px;
+}
+.load-more-history-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--accent-light, #a5b4fc);
+  background: var(--bg-surface-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.load-more-history-btn:hover {
+  color: #fff;
+  background: var(--accent, #6c63ff);
+  border-color: var(--accent, #6c63ff);
 }
 </style>
