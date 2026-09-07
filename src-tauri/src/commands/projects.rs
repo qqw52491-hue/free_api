@@ -549,9 +549,6 @@ pub(crate) fn read_project_resource_excerpts_for_session(
     let mut remaining = max_total_chars;
     let mut excerpts = Vec::with_capacity(resource_ids.len());
     for raw_resource_id in resource_ids {
-        if remaining == 0 {
-            return Err("child investigator 受管资源总摘录超过预算".to_string());
-        }
         let resource_id = raw_resource_id.trim();
         if resource_id.is_empty() || resource_id.chars().count() > 160 || !seen.insert(resource_id) {
             return Err("child investigator 的资源 ID 无效或重复".to_string());
@@ -573,7 +570,11 @@ pub(crate) fn read_project_resource_excerpts_for_session(
         let content = std::fs::read_to_string(canonical_path)
             .map_err(|_| "child investigator 只支持 UTF-8 文本资源".to_string())?;
         let total_chars = content.chars().count();
-        let excerpt: String = content.chars().take(remaining).collect();
+        let excerpt: String = if remaining > 0 {
+            content.chars().take(remaining).collect()
+        } else {
+            String::new()
+        };
         let excerpt_chars = excerpt.chars().count();
         remaining = remaining.saturating_sub(excerpt_chars);
         excerpts.push(ProjectResourceExcerpt {
@@ -946,14 +947,18 @@ mod tests {
         .unwrap();
         assert_eq!(single[0].content, "abcd");
         assert!(single[0].truncated);
-        assert!(read_project_resource_excerpts_for_session(
+        let multi = read_project_resource_excerpts_for_session(
             &conn,
             &session.id,
             &[first.resource_id.clone(), second.resource_id.clone()],
             4,
         )
-        .unwrap_err()
-        .contains("总摘录超过预算"));
+        .unwrap();
+        assert_eq!(multi.len(), 2);
+        assert_eq!(multi[0].content, "abcd");
+        assert!(multi[0].truncated);
+        assert_eq!(multi[1].content, "");
+        assert!(multi[1].truncated);
 
         #[cfg(unix)]
         {

@@ -53,27 +53,63 @@ pub struct ReviewScorecard {
     pub correctness: u32,
     pub risk: u32,
     pub style: u32,
-    pub test_coverage: u32,
+    #[serde(default)]
+    pub test_coverage: Option<u32>,
+    #[serde(default)]
+    pub null_reason: Option<String>,
 }
 
 impl ReviewScorecard {
-    pub fn new(correctness: u32, risk: u32, style: u32, test_coverage: u32) -> Self {
+    pub fn new(correctness: u32, risk: u32, style: u32, test_coverage: Option<u32>) -> Self {
         Self {
             correctness: correctness.min(100),
             risk: risk.min(100),
             style: style.min(100),
-            test_coverage: test_coverage.min(100),
+            test_coverage: test_coverage.map(|t| t.min(100)),
+            null_reason: None,
         }
     }
 
-    /// 计算四维度的综合平均分（向下取整）
+    pub fn with_reason(
+        correctness: u32,
+        risk: u32,
+        style: u32,
+        test_coverage: Option<u32>,
+        null_reason: Option<String>,
+    ) -> Self {
+        Self {
+            correctness: correctness.min(100),
+            risk: risk.min(100),
+            style: style.min(100),
+            test_coverage: test_coverage.map(|t| t.min(100)),
+            null_reason,
+        }
+    }
+
+    /// 计算有效维度的综合平均分（向下取整，处理 test_coverage 为 None 的动态分母）
     pub fn average_score(&self) -> u32 {
-        (self.correctness + self.risk + self.style + self.test_coverage) / 4
+        let mut sum = self.correctness + self.risk + self.style;
+        let mut count = 3u32;
+        if let Some(tc) = self.test_coverage {
+            sum += tc;
+            count += 1;
+        }
+        if count == 0 {
+            0
+        } else {
+            sum / count
+        }
     }
 
     /// 检查是否满足硬门禁放行条件：综合均分 >= 75 且 risk >= 60
     pub fn passes_gate(&self) -> bool {
         self.average_score() >= 75 && self.risk >= 60
+    }
+
+    /// 弱作用兜底：判定评分是否异常偏低（正确性或安全性 < 60 分，或均分 < 60 分）
+    /// 用于在没有 blocking finding 时识别“审查员放水/偷懒”反常状态并转人工确认
+    pub fn is_abnormally_low(&self) -> bool {
+        self.correctness < 60 || self.risk < 60 || self.average_score() < 60
     }
 
     /// 未通过硬门禁时的详细诊断原因说明
@@ -89,13 +125,16 @@ impl ReviewScorecard {
             if self.risk < 60 {
                 failures.push(format!("破坏性风险/安全性得分未达 60 分安全阈值（当前 {} 分）", self.risk));
             }
+            let tc_desc = self.test_coverage.map_or_else(|| "N/A".to_string(), |tc| format!("{}/100", tc));
+            let reason_suffix = self.null_reason.as_deref().map_or(String::new(), |r| format!(" (N/A理由: {})", r));
             Some(format!(
-                "{}。评分卡详情：正确性 {}/100, 破坏性风险 {}/100, 代码规范 {}/100, 测试覆盖 {}/100",
+                "{}。评分卡详情：正确性 {}/100, 破坏性风险 {}/100, 代码规范 {}/100, 测试覆盖 {}{}",
                 failures.join("，且 "),
                 self.correctness,
                 self.risk,
                 self.style,
-                self.test_coverage
+                tc_desc,
+                reason_suffix
             ))
         }
     }
@@ -400,6 +439,8 @@ struct RawReviewScorecard {
     style: Option<u32>,
     #[serde(default)]
     test_coverage: Option<u32>,
+    #[serde(default)]
+    null_reason: Option<String>,
 }
 
 pub fn parse_child_review_request(params: &Value) -> Result<ChildReviewRequest, String> {
@@ -667,11 +708,12 @@ fn parse_controlled_output(
     };
 
     let scorecard = output.scorecard.map(|sc| {
-        ReviewScorecard::new(
+        ReviewScorecard::with_reason(
             sc.correctness.unwrap_or(80),
             sc.risk.unwrap_or(80),
             sc.style.unwrap_or(85),
-            sc.test_coverage.unwrap_or(75),
+            sc.test_coverage,
+            sc.null_reason,
         )
     });
 
@@ -945,6 +987,27 @@ pub async fn spawn_child_reviewer(
         config.max_tokens.min(CHILD_MAX_OUTPUT_TOKENS)
     };
 
+    let has_verify_obligation = if let Ok(conn) = db.reader() {
+        conn.query_row(
+            "SELECT snapshot_json FROM agent_checkpoints WHERE session_id = ?1 OR run_id = ?2 ORDER BY updated_at DESC LIMIT 1",
+            rusqlite::params![parent_session_id, parent_run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|json_str| serde_json::from_str::<crate::agent::checkpoint::AgentCheckpoint>(&json_str).ok())
+        .map_or(false, |cp| {
+            cp.data.review_contract.as_ref().map_or(false, |rc| rc.has_executable_verification())
+        })
+    } else {
+        false
+    };
+
+    let contract_verify_hint = if has_verify_obligation {
+        "【契约验证属性】：当前任务契约明确绑定了可执行验证义务 (verify_command)。test_coverage 维度必须如实评分（0~100整数），严禁填 null。"
+    } else {
+        "【契约验证属性】：当前任务契约未绑定自动化验证命令 (verify_command)。test_coverage 维度已机械置为 N/A，请在 scorecard 中将 test_coverage 设为 null，并在 null_reason 填写“任务无绑定验证命令”。"
+    };
+
     // reviewer 只读取证步数预算（0 = 瞎子模式）：解除信息同源瓶颈
     let reviewer_tool_steps = crate::agent::channel::channel_config_shared()
         .read()
@@ -974,7 +1037,8 @@ pub async fn spawn_child_reviewer(
             \"correctness\": 0-100（代码逻辑正确性与功能完备性，100为完全正确零缺陷）,\n\
             \"risk\": 0-100（破坏性风险/安全性评分，100为零破坏性完全安全，>=60方可放行）,\n\
             \"style\": 0-100（代码规范与既有工程风格契合度）,\n\
-            \"test_coverage\": 0-100（测试用例充分度与反证覆盖度）\n\
+            \"test_coverage\": 0-100 或 null（测试用例充分度与反证覆盖度；若改动为纯界面展示、样式、文案调整或当前任务未绑定自动化测试验证义务，填 null 表示不适用 N/A，并在 null_reason 说明原因；严禁在无须单测时乱填 0 导致误拦截）,\n\
+            \"null_reason\": \"若 test_coverage 为 null 时必填简短原因说明，否则可省略\"\n\
           }},\n\
           \"objection_verdicts\": [{{\"finding_id\":\"F1\",\"verdict\":\"maintain|withdraw\",\"reason\":\"裁决理由\"}}]\n\
         }}\n\
@@ -1004,8 +1068,9 @@ pub async fn spawn_child_reviewer(
         json!({
             "role": "user",
             "content": format!(
-                "审查问题：{}\n\n父 Agent 明确提供的证据引用：{}\n\n证据摘录（可能为空；不得假定摘录外事实）：{}",
+                "审查问题：{}\n\n{}\n\n父 Agent 明确提供的证据引用：{}\n\n证据摘录（可能为空；不得假定摘录外事实）：{}",
                 request.question,
+                contract_verify_hint,
                 if allowed_refs.is_empty() { "（无）".to_string() } else { allowed_refs.join(", ") },
                 if evidence_excerpt.is_empty() { "（无）".to_string() } else { evidence_excerpt },
             )
@@ -1204,6 +1269,17 @@ pub async fn spawn_child_reviewer(
         };
 
         let (findings, confidence, evidence_refs, missing_evidence, routing, scorecard, objection_verdicts, withdrawn_findings) = final_parsed;
+
+        // 契约驱动机械判定：若任务契约未绑定自动化验证义务，机械置 test_coverage 为 None (N/A)
+        let scorecard = scorecard.map(|mut sc| {
+            if !has_verify_obligation {
+                sc.test_coverage = None;
+                if sc.null_reason.is_none() {
+                    sc.null_reason = Some("任务契约未绑定可执行验证义务".to_string());
+                }
+            }
+            sc
+        });
 
         let result = ChildReviewResult {
             child_run_id: child_run_id_clone.clone(),
@@ -1709,7 +1785,7 @@ mod tests {
             routing: None,
             withdrawn_findings: vec!["F1".to_string()],
             objection_verdicts: vec![verdict("F1", "withdraw")],
-            scorecard: Some(ReviewScorecard::new(90, 80, 85, 70)),
+            scorecard: Some(ReviewScorecard::new(90, 80, 85, Some(70))),
         };
         // F1 已撤回、F2 仍 blocking：收敛判据为 1
         assert_eq!(result.unwithdrawn_blocking_count(), 1);
@@ -1720,34 +1796,44 @@ mod tests {
     #[test]
     fn review_scorecard_passes_gate_and_clamping() {
         // 1. 正常合格：均分 80，risk 80
-        let sc = ReviewScorecard::new(80, 80, 80, 80);
+        let sc = ReviewScorecard::new(80, 80, 80, Some(80));
         assert_eq!(sc.average_score(), 80);
         assert!(sc.passes_gate());
         assert!(sc.gate_rejection_reason().is_none());
 
         // 2. 压线放行：均分恰好 75，risk 恰好 60
-        let sc_edge = ReviewScorecard::new(80, 60, 80, 80);
+        let sc_edge = ReviewScorecard::new(80, 60, 80, Some(80));
         assert_eq!(sc_edge.average_score(), 75);
         assert!(sc_edge.passes_gate());
 
         // 3. 破坏性风险 risk < 60 单项硬拦截（即便综合平均分高达 82 分）
-        let sc_risk_fail = ReviewScorecard::new(95, 59, 90, 85);
+        let sc_risk_fail = ReviewScorecard::new(95, 59, 90, Some(85));
         assert_eq!(sc_risk_fail.average_score(), 82);
         assert!(!sc_risk_fail.passes_gate(), "risk 低于 60 分必须自动拦截拒绝放行");
         let reason = sc_risk_fail.gate_rejection_reason().unwrap();
         assert!(reason.contains("破坏性风险/安全性得分未达 60 分安全阈值"));
 
         // 4. 综合平均分 < 75 硬拦截（即便 risk 单项高达 90 分）
-        let sc_avg_fail = ReviewScorecard::new(60, 90, 70, 70);
+        let sc_avg_fail = ReviewScorecard::new(60, 90, 70, Some(70));
         assert_eq!(sc_avg_fail.average_score(), 72);
         assert!(!sc_avg_fail.passes_gate(), "综合均分低于 75 分必须自动拦截拒绝放行");
         let reason2 = sc_avg_fail.gate_rejection_reason().unwrap();
         assert!(reason2.contains("综合平均分未达 75 分放行线"));
 
         // 5. 0~100 数值钳制 (clamping)
-        let sc_clamped = ReviewScorecard::new(150, 200, 80, 70);
+        let sc_clamped = ReviewScorecard::new(150, 200, 80, Some(70));
         assert_eq!(sc_clamped.correctness, 100);
         assert_eq!(sc_clamped.risk, 100);
+
+        // 6. 动态分母与 N/A 测试覆盖（UI 微调场景）
+        let sc_na = ReviewScorecard::new(90, 95, 95, None);
+        assert_eq!(sc_na.average_score(), 93);
+        assert!(sc_na.passes_gate());
+        assert!(!sc_na.is_abnormally_low());
+
+        // 7. 异常低分识别（放水防御）
+        let sc_low = ReviewScorecard::new(50, 90, 80, None);
+        assert!(sc_low.is_abnormally_low());
     }
     use super::*;
     use rusqlite::params;

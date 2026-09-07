@@ -924,9 +924,10 @@ async fn run_agent_main_loop_in_workspace_inner(
                             };
                             let routing_str = result.routing.as_deref().unwrap_or("certain");
                             let scorecard_desc = if let Some(ref sc) = result.scorecard {
+                                let tc_str = sc.test_coverage.map_or_else(|| "N/A".to_string(), |tc| format!("{}/100", tc));
                                 format!(
-                                    "\n审查评分卡: 综合平均 {} 分 (正确性: {}/100, 破坏性风险: {}/100, 代码规范: {}/100, 测试覆盖: {}/100) -> 门禁状态: [{}]\n",
-                                    sc.average_score(), sc.correctness, sc.risk, sc.style, sc.test_coverage,
+                                    "\n审查评分卡: 综合平均 {} 分 (正确性: {}/100, 破坏性风险: {}/100, 代码规范: {}/100, 测试覆盖: {}) -> 门禁状态: [{}]\n",
+                                    sc.average_score(), sc.correctness, sc.risk, sc.style, tc_str,
                                     if sc.passes_gate() { "✅合格放行" } else { "🚨未达标拦截(均分需>=75且risk需>=60)" }
                                 )
                             } else {

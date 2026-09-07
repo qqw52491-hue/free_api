@@ -154,9 +154,9 @@
                         <div class="scorecard-header">
                             <span class="scorecard-icon">📊</span>
                             <strong class="scorecard-title">审查评分卡 (ReviewScorecard)</strong>
-                            <span class="scorecard-badge" :class="(selectedWorker.scorecard.correctness + selectedWorker.scorecard.risk + selectedWorker.scorecard.style + selectedWorker.scorecard.test_coverage) / 4 >= 75 && selectedWorker.scorecard.risk >= 60 ? 'pass' : 'fail'">
-                                均分: {{ Math.round((selectedWorker.scorecard.correctness + selectedWorker.scorecard.risk + selectedWorker.scorecard.style + selectedWorker.scorecard.test_coverage) / 4) }} 分 · 
-                                {{ (selectedWorker.scorecard.correctness + selectedWorker.scorecard.risk + selectedWorker.scorecard.style + selectedWorker.scorecard.test_coverage) / 4 >= 75 && selectedWorker.scorecard.risk >= 60 ? '✅ 门禁合格放行' : '🚨 未达门禁标准' }}
+                            <span class="scorecard-badge" :class="computeScorecardPass(selectedWorker.scorecard) ? 'pass' : 'fail'">
+                                均分: {{ computeScorecardAverage(selectedWorker.scorecard) }} 分 · 
+                                {{ computeScorecardPass(selectedWorker.scorecard) ? '✅ 门禁合格放行' : '🚨 未达门禁标准' }}
                             </span>
                         </div>
                         <div class="scorecard-grid">
@@ -190,10 +190,10 @@
                             <div class="scorecard-item">
                                 <div class="item-label-row">
                                     <span class="dim-name">测试覆盖 (Test Coverage)</span>
-                                    <span class="dim-val">{{ selectedWorker.scorecard.test_coverage }}/100</span>
+                                    <span class="dim-val">{{ selectedWorker.scorecard.test_coverage != null ? `${selectedWorker.scorecard.test_coverage}/100` : 'N/A (免检)' }}</span>
                                 </div>
                                 <div class="progress-track">
-                                    <div class="progress-bar test" :style="{ width: `${selectedWorker.scorecard.test_coverage}%` }"></div>
+                                    <div class="progress-bar test" :style="{ width: `${selectedWorker.scorecard.test_coverage ?? 100}%` }"></div>
                                 </div>
                             </div>
                         </div>
@@ -334,8 +334,24 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { AgentTeamState, AgentWorkerItem, AgentToolStatus, AgentStepItem, AgentWorkerStep } from "./types";
+import type { AgentTeamState, AgentWorkerItem, AgentToolStatus, AgentStepItem, AgentWorkerStep, ReviewScorecard } from "./types";
 import { extractSubagentsFromStep } from "./workerUtils";
+
+function computeScorecardAverage(sc?: ReviewScorecard): number {
+    if (!sc) return 0;
+    let sum = sc.correctness + sc.risk + sc.style;
+    let count = 3;
+    if (sc.test_coverage != null) {
+        sum += sc.test_coverage;
+        count += 1;
+    }
+    return Math.round(sum / count);
+}
+
+function computeScorecardPass(sc?: ReviewScorecard): boolean {
+    if (!sc) return false;
+    return computeScorecardAverage(sc) >= 75 && sc.risk >= 60;
+}
 
 const props = withDefaults(
     defineProps<{

@@ -710,7 +710,7 @@ mod finish_guard_tests {
         assert!(!checkpoint.plan_phase.is_approved());
 
         // 阶段 3b: 评分达标但有未解决 blocking 异议 -> 仍拦截
-        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(90, 80, 85, 70));
+        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(90, 80, 85, Some(70)));
         checkpoint.last_review_blocking_count = 2;
         let rej_blocking = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint, &context, &db, "test_run", 3, false,
@@ -1240,7 +1240,7 @@ mod finish_guard_tests {
         checkpoint.plan_reviewer_consumed = true;
 
         // 均分达标但 risk < 60：即使平均分 90+ 也必须硬拦截
-        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(95, 40, 95, 95));
+        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(95, 40, 95, Some(95)));
         let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint, &context, &db, "test_run", 2, false,
         );
@@ -1249,7 +1249,7 @@ mod finish_guard_tests {
         assert!(!checkpoint.plan_phase.is_approved());
 
         // 达标评分卡：放行并推进为 Approved
-        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(90, 80, 85, 70));
+        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(90, 80, 85, Some(70)));
         let pass = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint, &context, &db, "test_run", 3, false,
         );
@@ -1325,7 +1325,7 @@ mod finish_guard_tests {
         checkpoint.plan_reviewer_consumed = true;
 
         // 模拟审查员过度防御打了低分 (risk: 48 < 60)
-        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(80, 48, 85, 75));
+        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(80, 48, 85, Some(75)));
         let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint, &context, &db, "test_run", 3, false,
         );

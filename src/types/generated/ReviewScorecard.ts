@@ -4,4 +4,4 @@
  * 对抗推演审查多维度评分卡
  * 包含正确性、破坏性风险（安全性）、代码规范、测试覆盖四个维度，各 0~100 分
  */
-export type ReviewScorecard = { correctness: number, risk: number, style: number, test_coverage: number, };
+export type ReviewScorecard = { correctness: number, risk: number, style: number, test_coverage: number | null, null_reason?: string | null, };

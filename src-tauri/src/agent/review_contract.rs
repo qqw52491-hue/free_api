@@ -40,6 +40,11 @@ pub struct ReviewObligation {
 }
 
 impl ReviewContract {
+    /// 检查契约中是否声明了任何可执行的验证命令或冻结验证脚本
+    pub fn has_executable_verification(&self) -> bool {
+        self.obligations.iter().any(|o| o.verify_command.is_some() || o.verify_script.is_some())
+    }
+
     /// 将模型提供的完整契约更新应用到已持久化状态。
     /// 更新不得移除旧义务，也不得把已闭合义务退回 open。
     pub fn apply_update(&mut self, update: ReviewContract) -> Result<(), String> {

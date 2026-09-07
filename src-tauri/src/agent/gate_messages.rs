@@ -33,9 +33,9 @@ pub fn cross_review_reviewer_result_missing() -> String {
 /// 交叉审查模式：ReviewScorecard 评分未达硬门禁
 pub fn cross_review_scorecard_failed(reason: &str, budget_exhausted: bool) -> String {
     let escape_guide = if budget_exhausted {
-        "【审查预算已耗尽】方案审查已达最大重试轮次，无法再次派发审查子 Agent。\n【解套路径（人工仲裁放行）】严禁因审查受阻而直接放弃写入或草率 finish！请立即调用 ask_human 工具（设置 kind: 'plan_approval'），在 message 中向用户说明技术方案与审查员的低分质疑，阐述为何该方案安全或确属任务必需，申请人工审批。用户在界面确认放行后，前置门禁将立即解除并允许写入！"
+        "【审查预算已耗尽】方案审查已达最大重试轮次，无法再次派发审查子 Agent。\n【解套路径（人工仲裁放行）】严禁因审查受阻而直接放弃写入或草率 finish！请立即调用 ask_human 工具（设置 kind: 'plan_approval'），在 message 中向用户说明技术方案与审查员的低分质疑，阐述为何该方案安全或确属任务必需，申请人工审批：\n```json\n{\n  \"tool\": \"ask_human\",\n  \"command\": {\n    \"kind\": \"plan_approval\",\n    \"message\": \"技术方案说明与审批申请：...（说明方案及安全性，申请人工审批放行）\"\n  }\n}\n```\n用户在界面确认放行后，前置门禁将立即解除并允许写入！"
     } else {
-        "【解套路径 1（方案修正）】若审查员指出的破坏性风险与漏洞属实，请修正方案后重新派发 child_reviewer 审查。\n【解套路径 2（人工仲裁放行）】若经核实审查员意见存在过度防御、偏执假设或与当前功能目标冲突（如实现特定脚本/功能必需的代码），且方案整体可控，请调用 ask_human 工具（设置 kind: 'plan_approval'），将方案分歧呈报用户申请人工裁决。用户批准后门禁立即放行写入，严禁放弃写入直接在对话中贴代码！"
+        "【解套路径 1（方案修正）】若审查员指出的破坏性风险与漏洞属实，请修正方案后重新派发 child_reviewer 审查。\n【解套路径 2（人工仲裁放行）】若经核实审查员意见存在过度防御、偏执假设或与当前功能目标冲突（如实现特定脚本/功能必需的代码），且方案整体可控，请调用 ask_human 工具（设置 kind: 'plan_approval'），将方案分歧呈报用户申请人工裁决：\n```json\n{\n  \"tool\": \"ask_human\",\n  \"command\": {\n    \"kind\": \"plan_approval\",\n    \"message\": \"技术方案与审查分歧呈报：...（说明方案及安全性，申请人工审批放行）\"\n  }\n}\n```\n用户批准后门禁立即放行写入，严禁放弃写入直接在对话中贴代码！"
     };
     format!(
         "【🚨 交叉审查硬门禁拦截：审查评分未达标】\n审查子 Agent 给出的 ReviewScorecard 评分未达放行标准：\n{}\n硬门禁规则：综合平均分必须 >= 75 分，且破坏性风险/安全性评分 (risk) 必须 >= 60 分。\n系统已自动拒绝放行代码写入。\n{}",
@@ -61,9 +61,9 @@ pub fn cross_review_scorecard_missing(budget_exhausted: bool) -> String {
 /// 交叉审查模式：评分达标但仍有未解决的 blocking 级异议
 pub fn cross_review_blocking_findings_open(count: u32, budget_exhausted: bool) -> String {
     let escape_guide = if budget_exhausted {
-        "【审查预算已耗尽】方案审查已达最大重试上限。\n【解套路径（人工仲裁放行）】请调用 ask_human 工具（设置 kind: 'plan_approval'），将尚未闭合的 blocking 异议及你的解释呈报用户，由用户进行人工裁决。用户批准后门禁将立即解除并放行写入。"
+        "【审查预算已耗尽】方案审查已达最大重试上限。\n【解套路径（人工仲裁放行）】请调用 ask_human 工具（设置 kind: 'plan_approval'），将尚未闭合的 blocking 异议及你的解释呈报用户，由用户进行人工裁决：\n```json\n{\n  \"tool\": \"ask_human\",\n  \"command\": {\n    \"kind\": \"plan_approval\",\n    \"message\": \"异议仲裁申请：...（向用户说明未闭合的 blocking 异议及为何方案安全或必要）\"\n  }\n}\n```\n用户批准后门禁将立即解除并放行写入。"
     } else {
-        "【解套路径 1（重审确认）】针对每条 blocking 异议给出处理说明（修复 / 证伪 / 设计取舍理由），重新派发 child_reviewer 确认。\n【解套路径 2（人工仲裁放行）】若审查员坚持维持异议（maintain）但确属过度防御或业务特有设计，请调用 ask_human 工具（设置 kind: 'plan_approval'）将分歧与方案呈报用户，由人工裁决强制放行。"
+        "【解套路径 1（重审确认）】针对每条 blocking 异议给出处理说明（修复 / 证伪 / 设计取舍理由），重新派发 child_reviewer 确认。\n【解套路径 2（人工仲裁放行）】若审查员坚持维持异议（maintain）但确属过度防御或业务特有设计，请调用 ask_human 工具（设置 kind: 'plan_approval'）将分歧与方案呈报用户，由人工裁决强制放行：\n```json\n{\n  \"tool\": \"ask_human\",\n  \"command\": {\n    \"kind\": \"plan_approval\",\n    \"message\": \"方案与异议分歧呈报：...（申请人工裁决放行）\"\n  }\n}\n```"
     };
     format!(
         "【🚨 交叉审查硬门禁拦截：存在未解决的 blocking 级异议】\n审查评分虽已达标，但最新一轮审查仍有 {} 条 blocking 级异议未解决。\n硬门禁规则：blocking 异议必须逐条回应并修复，或经再次审查确认已解决后，方可放行写入。\n{}",

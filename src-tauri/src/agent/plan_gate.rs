@@ -200,16 +200,8 @@ fn gate_interception(
             } else if let Some(ref scorecard) = checkpoint.last_review_scorecard {
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
                     >= crate::agent::checkpoint::max_plan_reviewer_rounds();
-                if !scorecard.passes_gate() {
-                    let reason = scorecard.gate_rejection_reason().unwrap_or_else(|| "审查评分未达放行门槛".to_string());
-                    Some(DispatchResult {
-                        success: false,
-                        stdout: String::new(),
-                        stderr: crate::agent::gate_messages::cross_review_scorecard_failed(&reason, budget_exhausted),
-                        route: "plan_gatekeeper:scorecard_failed".to_string(),
-                    })
-                } else if checkpoint.last_review_blocking_count > 0 {
-                    // 评分达标但存在未解决的 blocking 异议：分数不是唯一门槛，异议必须闭环
+                if checkpoint.last_review_blocking_count > 0 {
+                    // 🌟 层次 3 核心：门禁以 blocking 阻塞缺陷为首要依据，存在未闭合 blocking 则必须解决
                     Some(DispatchResult {
                         success: false,
                         stdout: String::new(),
@@ -218,6 +210,15 @@ fn gate_interception(
                             budget_exhausted,
                         ),
                         route: "plan_gatekeeper:blocking_findings_open".to_string(),
+                    })
+                } else if scorecard.is_abnormally_low() {
+                    // 弱作用兜底：无 blocking 缺陷但评分异常偏低（正确性或安全性得分 < 60 分），防审查员放水，转人工核验
+                    let reason = scorecard.gate_rejection_reason().unwrap_or_else(|| "审查评分异常偏低（正确性或安全性得分 < 60 分），存在放水嫌疑，需人工核验".to_string());
+                    Some(DispatchResult {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: crate::agent::gate_messages::cross_review_scorecard_failed(&reason, budget_exhausted),
+                        route: "plan_gatekeeper:scorecard_failed".to_string(),
                     })
                 } else {
                     checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
