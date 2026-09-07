@@ -113,7 +113,8 @@ impl ContextRenderer {
             let mut prompt = format!(
                 "【写入后验证】\n\
                 - {}\n\
-                - 智能感知规则（免手动声明）：\n",
+                - 智能感知与主动闭环规则：\n\
+                  * 🚀 主动验证授权：代码写入完成后，无需向用户申请许可，请主动调用终端工具运行自测或编译命令；若测试报错，直接依据错误输出就地修复；\n",
                 blocker
             );
             if let Some(cmd) = suggested_cmd {
@@ -127,7 +128,7 @@ impl ContextRenderer {
                 );
             }
             prompt.push_str(
-                "  * 若改动全为纯静态资源（样式/图片/文档等），系统在提交 finish 时将自动豁免 (waived)；\n\
+                "  * 若工程中无可用测试套件，或改动全为纯静态资源（样式/图片/文档等），系统在提交 finish 时将自动豁免 (waived)；\n\
                 - 若需在调用 finish 交付时手动声明闭合（在顶层 JSON 中二选一填空，严禁拼入 summary 正文中）：\n\
                   1. 已验证：\"change_verification_update\": {\"status\": \"verified\", \"evidence_refs\": [\"测试步骤或命令输出摘要\"]}\n\
                   2. 免测豁免：\"change_verification_update\": {\"status\": \"waived\", \"waived_reason\": \"说明免测理由，如UI微调/无自动化单测环境\"}\n\n",
@@ -293,5 +294,36 @@ mod tests {
         let out = ContextRenderer::render_plan_gate(Some(&gate("auto", "exploring", false, false)));
         assert!(out.contains("全自动"));
         assert!(out.contains("自动放行"));
+    }
+
+    #[test]
+    fn render_change_verification_empty_when_no_writes() {
+        assert!(ContextRenderer::render_change_verification(0, None, None).is_empty());
+    }
+
+    #[test]
+    fn render_change_verification_prompts_proactive_authorization_and_inferred_cmd() {
+        let out = ContextRenderer::render_change_verification(
+            1,
+            None,
+            Some("npx vue-tsc --noEmit"),
+        );
+        assert!(out.contains("写入后验证"));
+        assert!(out.contains("主动验证授权"));
+        assert!(out.contains("无需向用户申请许可"));
+        assert!(out.contains("npx vue-tsc --noEmit"));
+        assert!(out.contains("自动标记为 verified"));
+    }
+
+    #[test]
+    fn render_change_verification_shows_resolved_summary() {
+        let verified = ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["cargo test all pass".to_string()],
+            waived_reason: None,
+        };
+        let out = ContextRenderer::render_change_verification(1, Some(&verified), None);
+        assert!(out.contains("已验证：cargo test all pass"));
+        assert!(out.contains("直接放行"));
     }
 }
