@@ -292,18 +292,13 @@
                     </div>
 
                     <div class="plan-children-wrapper" :class="{ expanded: isPlanExpanded(entry) }">
-                        <div v-if="isPlanExpanded(entry)" class="plan-children-inner">
+                        <div
+                            v-if="isPlanExpanded(entry)"
+                            class="plan-children-inner"
+                            :ref="(el) => setPlanInnerRef(entry.id, el)"
+                            @scroll.passive="onPlanScroll($event, entry)"
+                        >
                             <div class="plan-children">
-                                <!-- 正在执行阶段折叠早期步骤，聚焦最新 2-3 步 -->
-                                <div v-if="hasCollapsedEarlySteps(entry)" class="early-steps-fold-bar" @click.stop="showAllRunningSteps[entry.id] = true">
-                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                                    <span>已完成前 {{ getEarlyStepsCount(entry) }} 步 (点击展开全部)</span>
-                                </div>
-                                <div v-else-if="isPlanRunning(entry) && entry.steps.length > 3 && showAllRunningSteps[entry.id]" class="early-steps-fold-bar is-expanded" @click.stop="showAllRunningSteps[entry.id] = false">
-                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"></polyline></svg>
-                                    <span>收起早期步骤 (仅保持最近 3 步)</span>
-                                </div>
-
                                 <article v-for="step in getVisiblePlanSteps(entry)" :key="step.id" class="goal-node" :class="[`status-${step.status}`, { 'is-subagent': isSubAgentTool(step.tool), 'is-waitjobs': isWaitJobsTool(step.tool) }]">
                                     <!-- 主步骤第1行：干脆利落，只展示步骤意图与执行耗时状态，点击查看整体过程 -->
                                     <button class="goal-row" :class="{ selected: step.id === selectedStepId, 'subagent-row': isSubAgentTool(step.tool), 'waitjobs-row': isWaitJobsTool(step.tool) }" type="button" @click="$emit('select-step', step.id)">
@@ -397,6 +392,17 @@
                                     <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
                                 </article>
                             </div>
+
+                            <!-- 🌟 当用户在运行中向上滑动查阅时，显示浮动恢复吸底按钮 -->
+                            <button
+                                v-if="(entry.status === 'running' || isPlanRunning(entry)) && planFollowTailState[entry.id] === false"
+                                type="button"
+                                class="resume-plan-follow-btn"
+                                @click.stop="resumePlanFollow(entry)"
+                            >
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                                <span>回到底部 · 跟随最新步骤</span>
+                            </button>
                         </div>
                     </div>
                 </article>
@@ -683,25 +689,64 @@ function hasFileOperation(step: AgentStepItem): boolean {
     return !!(parsed.chips.length > 0 || parsed.chip || parsed.readFiles.length > 0 || op.fileName || (op.hasDiff && op.filePath));
 }
 
-const showAllRunningSteps = ref<Record<string, boolean>>({});
+// ── 🌟 运行态计划步骤视窗滚动与智能吸底 ──
+const planFollowTailState = reactive<Record<string, boolean>>({});
+const planInnerRefs = shallowReactive<Record<string, HTMLElement | null>>({});
+
+function setPlanInnerRef(planId: string, el: any) {
+    if (el) {
+        planInnerRefs[planId] = el as HTMLElement;
+    } else {
+        delete planInnerRefs[planId];
+    }
+}
+
+function onPlanScroll(event: Event, entry: PlanEntry) {
+    const target = event.currentTarget as HTMLElement;
+    if (!target) return;
+    const isNearBottom = target.scrollHeight - target.scrollTop - target.clientHeight <= 16;
+    planFollowTailState[entry.id] = isNearBottom;
+}
+
+function scrollPlanToBottom(planId: string, smooth = false) {
+    nextTick(() => {
+        requestAnimationFrame(() => {
+            const el = planInnerRefs[planId];
+            if (el) {
+                if (smooth) {
+                    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+                } else {
+                    el.scrollTop = el.scrollHeight;
+                }
+            }
+        });
+    });
+}
+
+function resumePlanFollow(entry: PlanEntry) {
+    planFollowTailState[entry.id] = true;
+    scrollPlanToBottom(entry.id, true);
+}
 
 function getVisiblePlanSteps(entry: PlanEntry): AgentStepItem[] {
-    if (entry.status !== 'running' && !entry.isThinking) {
-        return entry.steps;
-    }
-    if (showAllRunningSteps.value[entry.id] || entry.steps.length <= 3) {
-        return entry.steps;
-    }
-    return entry.steps.slice(-3);
+    return entry.steps;
 }
 
-function hasCollapsedEarlySteps(entry: PlanEntry): boolean {
-    return (entry.status === 'running' || !!entry.isThinking) && entry.steps.length > 3 && !showAllRunningSteps.value[entry.id];
-}
-
-function getEarlyStepsCount(entry: PlanEntry): number {
-    return Math.max(0, entry.steps.length - 3);
-}
+// 🌟 运行中步骤追加或流式更新时，自动保持吸底跟随
+watch(
+    () => props.steps.map(s => `${s.id}-${s.status}-${s.description || ''}`).join('|'),
+    () => {
+        if (!props.isRunning) return;
+        for (const entry of timelineEntries.value) {
+            if (entry.type === 'plan' && isPlanRunning(entry) && isPlanExpanded(entry)) {
+                if (planFollowTailState[entry.id] !== false) {
+                    scrollPlanToBottom(entry.id, false);
+                }
+            }
+        }
+    },
+    { flush: 'post' }
+);
 
 function getRunningStateText(entry: PlanEntry): string {
     if (entry.isThinking) {
@@ -874,7 +919,12 @@ function isPlanExpanded(plan: PlanEntry): boolean {
 
 function togglePlan(plan: PlanEntry) {
     const isCurrentlyExpanded = isPlanExpanded(plan);
-    planExpandedState[plan.id] = !isCurrentlyExpanded;
+    const willExpand = !isCurrentlyExpanded;
+    planExpandedState[plan.id] = willExpand;
+    if (willExpand && (plan.status === 'running' || isPlanRunning(plan))) {
+        planFollowTailState[plan.id] = true;
+        scrollPlanToBottom(plan.id, false);
+    }
 }
 
 const BOTTOM_THRESHOLD_PX = 56;

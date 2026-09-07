@@ -765,6 +765,63 @@
     min-height: 0;
 }
 
+/* 🌟 运行中阶段展开：限制视窗高度约3-4行，开启平滑滚动并隔离滚轮穿透 */
+.plan-node.is-active-plan .plan-children-inner {
+    max-height: 240px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+    position: relative;
+    padding-right: 2px;
+    scroll-behavior: smooth;
+}
+
+.plan-node.is-active-plan .plan-children-inner::-webkit-scrollbar {
+    width: 4px;
+}
+
+.plan-node.is-active-plan .plan-children-inner::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+}
+
+.plan-node.is-active-plan .plan-children-inner::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.35);
+}
+
+/* 浮动恢复吸底徽标按钮 */
+.resume-plan-follow-btn {
+    position: sticky;
+    bottom: 4px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #e4e4e7;
+    background: rgba(24, 24, 27, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(8px);
+    cursor: pointer;
+    z-index: 10;
+    transition: all 0.2s ease;
+    margin: 4px auto 2px auto;
+}
+
+.resume-plan-follow-btn:hover {
+    background: rgba(39, 39, 42, 0.95);
+    border-color: rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+    transform: translateX(-50%) translateY(-1px);
+}
+
 .plan-children {
     margin-left: 7px;
     padding-left: 12px;
