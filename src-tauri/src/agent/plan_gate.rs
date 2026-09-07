@@ -128,8 +128,13 @@ pub(crate) fn check_pre_write_gatekeeper(
         Some(result) => {
             // 记录拦截步（ask_human 冷却依据）；预算耗尽这类"指示去求助"的拦截豁免冷却
             checkpoint.recent_gate_block_step = Some(step_id as u64);
-            if result.route == "plan_gatekeeper:reviewer_retry_limit" {
-                // 只有"预算耗尽、门禁文案明确指示去 ask_human"的情形才豁免冷却
+            if result.route == "plan_gatekeeper:reviewer_retry_limit"
+                || result.route == "plan_gatekeeper:scorecard_failed"
+                || result.route == "plan_gatekeeper:blocking_findings_open"
+                || result.route == "plan_gatekeeper:scorecard_missing"
+                || result.route == "plan_gatekeeper:need_human_approval"
+            {
+                // 只要门禁文案明确指示去 ask_human 申请人工审批，就豁免冷却并标记由门禁引导仲裁
                 checkpoint.gate_human_escape_directed = true;
             }
         }

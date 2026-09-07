@@ -138,6 +138,7 @@ pub fn run() {
             commands::toggle_agent_custom_instruction,
             commands::delete_agent_custom_instruction,
             // Agent 任务数据区与历史复盘（前端只读）
+            crate::agent::workspace_lock::force_release_workspace_lock,
             commands::get_agent_task_resources,
             commands::get_agent_task_records,
             commands::get_session_run_traces,

@@ -1668,6 +1668,8 @@ pub async fn run_tool_phase(
         let form_val = params.get("form");
         let ask_kind = form_val
             .and_then(|f| f.get("kind"))
+            .or_else(|| params.get("kind"))
+            .or_else(|| params.get("command").and_then(|c| c.get("kind")))
             .and_then(|k| k.as_str())
             .unwrap_or("")
             .trim()
@@ -1762,13 +1764,14 @@ pub async fn run_tool_phase(
         }
 
         // 人工仲裁与放行上下文识别：
-        // 仅在明确带有 plan_approval/plan/approval kind 表单，或门禁阻断/审查耗尽显式指示仲裁且模型未给 form 时生效。
-        // 绝不将普通的缺参提问或用户偏好咨询判定为方案审批卡片（防止用户回答一个参数导致代码写入门禁意外放开）！
+        // 明确带有 plan_approval/plan/approval kind，或门禁阻断/审查耗尽显式指示仲裁。
         let is_approval_context = is_plan_approval_kind
+            || checkpoint.gate_human_escape_directed
+            || checkpoint.stage_review_blockers_open > 0
+            || checkpoint.last_review_blocking_count > 0
             || (form_val.is_none()
-                && (checkpoint.gate_human_escape_directed
-                    || checkpoint.stage_review_blockers_open > 0
-                    || checkpoint.last_review_blocking_count > 0));
+                && checkpoint.plan_reviewer_retry_count
+                    >= crate::agent::checkpoint::max_plan_reviewer_rounds());
 
         app.emit(
             &format!("agent-log-{}", final_session_id),
@@ -1851,9 +1854,14 @@ pub async fn run_tool_phase(
                 Some(true) => {
                     // 人类在方案审批卡片中批准放行
                     checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                    checkpoint.gate_human_escape_directed = false;
+                    checkpoint.recent_gate_block_step = None;
                     if checkpoint.stage_review_blockers_open > 0 {
                         checkpoint.stage_review_blockers_open = 0;
                         checkpoint.stage_review_blocker_stage = None;
+                    }
+                    if checkpoint.last_review_blocking_count > 0 {
+                        checkpoint.last_review_blocking_count = 0;
                     }
                     // 摘要中剥离结构化标记，避免协议噪声污染持久化内容
                     let clean_reply = strip_plan_decision_marker(&reply);
@@ -1874,9 +1882,14 @@ pub async fn run_tool_phase(
                         && trimmed != "我再想想"
                     {
                         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                        checkpoint.gate_human_escape_directed = false;
+                        checkpoint.recent_gate_block_step = None;
                         if checkpoint.stage_review_blockers_open > 0 {
                             checkpoint.stage_review_blockers_open = 0;
                             checkpoint.stage_review_blocker_stage = None;
+                        }
+                        if checkpoint.last_review_blocking_count > 0 {
+                            checkpoint.last_review_blocking_count = 0;
                         }
                         let clean_reply = strip_plan_decision_marker(&reply);
                         checkpoint.approved_plan_summary =

@@ -317,7 +317,7 @@ async fn run_agent_main_loop_in_workspace_inner(
     let git_baseline = crate::agent::reviewer_gatekeeper::GitBaseline::capture(&workspace_dir);
     // 项目会话进入前先拿工作区软锁（独占该目录直到本次 run 结束）
     let _workspace_run_lock = if is_project_session {
-        Some(acquire_workspace_lock(&workspace_dir, &goal).await?)
+        Some(acquire_workspace_lock(&workspace_dir, &final_session_id, &run_id, &goal).await?)
     } else {
         None
     };

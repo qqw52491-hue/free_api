@@ -1,5 +1,6 @@
 import { marked } from "marked";
 import katex from "katex";
+import "katex/dist/katex.min.css";
 import hljs from "highlight.js/lib/common";
 
 // 注册 KaTeX 数学公式解析扩展 ($行内公式$ 与 $$独立块级公式$$)

@@ -2,7 +2,6 @@ import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import App from './App.vue'
 import AgentView from './views/AgentView.vue'
-import 'katex/dist/katex.min.css'
 import './style.css'
 
 const PluginView = () => import('./views/PluginView.vue')
