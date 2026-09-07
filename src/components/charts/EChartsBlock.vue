@@ -3,16 +3,23 @@
     <div class="echarts-header">
       <div class="echarts-title">
         <span class="chart-type-icon">{{ chartIcon }}</span>
-        <span>{{ chartTitle || '数据可视化' }}</span>
+        <span>{{ chartTitle || "交互式可视化图表" }}</span>
       </div>
       <div class="echarts-tools">
-        <button type="button" class="tool-btn" title="导出为图片" @click="downloadImage">
-          <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        <button class="tool-btn" title="导出高清 PNG 图片" @click="downloadImage">
+          <svg viewBox="0 0 24 24">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
           <span>导出</span>
         </button>
-        <button type="button" class="tool-btn" title="复制代码" @click="copyCode">
-          <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          <span>{{ copied ? '已复制' : '复制' }}</span>
+        <button class="tool-btn" title="复制代码" @click="copyCode">
+          <svg viewBox="0 0 24 24">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+          <span>{{ copied ? "已复制" : "代码" }}</span>
         </button>
       </div>
     </div>
@@ -28,57 +35,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import * as echarts from "echarts/core";
-import {
-  BarChart,
-  LineChart,
-  PieChart,
-  ScatterChart,
-  RadarChart,
-  TreeChart,
-  TreemapChart,
-  GraphChart,
-  SankeyChart,
-} from "echarts/charts";
-import {
-  TitleComponent,
-  TooltipComponent,
-  GridComponent,
-  LegendComponent,
-  ToolboxComponent,
-  DataZoomComponent,
-  VisualMapComponent,
-  MarkLineComponent,
-  MarkPointComponent,
-  DatasetComponent,
-  TransformComponent,
-} from "echarts/components";
-import { CanvasRenderer } from "echarts/renderers";
-
-// 显式按需注册必需的图表组件与 Canvas 渲染器
-echarts.use([
-  TitleComponent,
-  TooltipComponent,
-  GridComponent,
-  LegendComponent,
-  ToolboxComponent,
-  DataZoomComponent,
-  VisualMapComponent,
-  MarkLineComponent,
-  MarkPointComponent,
-  DatasetComponent,
-  TransformComponent,
-  BarChart,
-  LineChart,
-  PieChart,
-  ScatterChart,
-  RadarChart,
-  TreeChart,
-  TreemapChart,
-  GraphChart,
-  SankeyChart,
-  CanvasRenderer,
-]);
+import * as echarts from "echarts";
 
 const props = withDefaults(
   defineProps<{
@@ -96,7 +53,7 @@ const copied = ref(false);
 const chartTitle = ref<string>("");
 const chartType = ref<string>("bar");
 
-let chartInstance: any = null;
+let chartInstance: echarts.ECharts | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
 const chartIcon = computed(() => {
@@ -109,6 +66,11 @@ const chartIcon = computed(() => {
     case "tree":
     case "treemap": return "🌲 树图";
     case "sankey": return "🌊 桑基图";
+    case "heatmap": return "🔥 热力图";
+    case "candlestick": return "🕯️ K线图";
+    case "funnel": return "⏳ 漏斗图";
+    case "gauge": return "⏱️ 仪表盘";
+    case "sunburst": return "☀️ 旭日图";
     default: return "📊 统计图表";
   }
 });
@@ -174,7 +136,7 @@ function initChart() {
       "#f43f5e",
     ];
 
-    const finalOption: Record<string, any> = {
+    const finalOption: echarts.EChartsOption = {
       backgroundColor: "transparent",
       color: rawOption.color || obsidianPalette,
       textStyle: {

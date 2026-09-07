@@ -1,9 +1,9 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import App from './App.vue'
-import AgentView from './views/AgentView.vue'
 import './style.css'
 
+const AgentView = () => import('./views/AgentView.vue')
 const PluginView = () => import('./views/PluginView.vue')
 
 const router = createRouter({
