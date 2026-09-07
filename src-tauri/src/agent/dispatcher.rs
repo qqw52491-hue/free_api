@@ -77,6 +77,172 @@ fn has_read_only_flag(inst: &AgentInstruction) -> bool {
     false
 }
 
+pub fn extract_shell_command_string(inst: &AgentInstruction) -> Option<&str> {
+    if let Some(cmd) = &inst.command {
+        if let Some(s) = cmd.get("command").and_then(|v| v.as_str()) {
+            return Some(s);
+        }
+        if let Some(s) = cmd.get("cmd").and_then(|v| v.as_str()) {
+            return Some(s);
+        }
+        if let Some(s) = cmd.as_str() {
+            return Some(s);
+        }
+    }
+    if let Some(params) = &inst.params {
+        if let Some(s) = params.get("command").and_then(|v| v.as_str()) {
+            return Some(s);
+        }
+        if let Some(s) = params.get("cmd").and_then(|v| v.as_str()) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// 拆分复合 shell 命令为各个独立子段（尊重单双引号内的分号与管道）
+pub fn split_shell_segments(cmd: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut current_start = 0;
+    let bytes = cmd.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while i < len {
+        let b = bytes[i];
+        if b == b'\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+        } else if b == b'"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+        } else if !in_single_quote && !in_double_quote {
+            if b == b';' || b == b'|' {
+                if i > current_start {
+                    segments.push(&cmd[current_start..i]);
+                }
+                current_start = i + 1;
+            } else if b == b'&' && i + 1 < len && bytes[i + 1] == b'&' {
+                if i > current_start {
+                    segments.push(&cmd[current_start..i]);
+                }
+                i += 1;
+                current_start = i + 1;
+            }
+        }
+        i += 1;
+    }
+    if current_start < len {
+        segments.push(&cmd[current_start..]);
+    }
+    segments
+}
+
+/// 核验单条子命令是否命中纯只读白名单
+fn is_single_segment_safe(seg: &str) -> bool {
+    let words: Vec<&str> = seg.split_whitespace().collect();
+    if words.is_empty() {
+        return true;
+    }
+    let first = words[0].to_ascii_lowercase();
+    let base_cmd = first.rsplit('/').next().unwrap_or(&first);
+
+    match base_cmd {
+        "curl" | "wget" => {
+            // 确保没有写盘或非 GET 操作
+            let lower_seg = seg.to_ascii_lowercase();
+            let unsafe_curl_flags = [
+                "-o ", "-o=", "-o", "--output", "-x post", "-x put", "-x delete", "-x patch",
+                "-d ", "--data", "--form", "-f "
+            ];
+            !unsafe_curl_flags.iter().any(|f| lower_seg.contains(f))
+        }
+        "git" => {
+            if words.len() < 2 {
+                return true; // 单纯 git 或 git --help
+            }
+            let sub = words[1].to_ascii_lowercase();
+            matches!(
+                sub.as_str(),
+                "status" | "diff" | "log" | "show" | "branch" | "tag" | "rev-parse" | "ls-files" | "remote" | "describe" | "check-ignore" | "grep" | "--version" | "-v" | "help"
+            )
+        }
+        "ls" | "cat" | "head" | "tail" | "grep" | "rg" | "wc" | "pwd" | "which" | "whereis" | "whoami" | "date" | "echo" | "diff" | "cmp" | "sort" | "uniq" | "file" | "stat" | "uname" | "uptime" | "id" | "tree" | "ping" | "nslookup" | "dig" => {
+            true
+        }
+        "node" | "python" | "python3" | "cargo" | "rustc" | "npm" => {
+            // 仅允许版本查询类只读探针
+            if words.len() >= 2 {
+                let second = words[1].to_ascii_lowercase();
+                second == "-v" || second == "--version" || second == "version"
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// 严格分析 Shell 命令行是否为纯只读安全探针。
+/// 必须满足：
+/// 1. 不包含任何文件写入重定向（> 或 >>，排除 2>&1 正常错误输出合并）；
+/// 2. 不包含任何危险管道注入（| bash）、提权、删除修改操作；
+/// 3. 切分后的每一个子命令必须 100% 命中只读白名单。
+pub fn is_safe_read_only_shell_command(raw_cmd: &str) -> bool {
+    let trimmed = raw_cmd.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // 1. 危险模式一票否决：检查写盘重定向（允许 2>&1 和 1>&2）
+    let chars: Vec<char> = trimmed.chars().collect();
+    let len = chars.len();
+    for i in 0..len {
+        if chars[i] == '>' {
+            let prev = if i > 0 { chars[i - 1] } else { ' ' };
+            let next = if i + 1 < len { chars[i + 1] } else { ' ' };
+            let is_fd_dup = (prev == '1' || prev == '2') && next == '&';
+            if !is_fd_dup {
+                return false; // 文件输出重定向，视为写盘
+            }
+        }
+    }
+
+    // 检查危险管道/注入/提权关键词
+    let lower = trimmed.to_ascii_lowercase();
+    let dangerous_tokens = [
+        "| bash", "| sh", "| zsh", "| python", "| node", "| perl", "| ruby", "| tee",
+        "sudo ", "chmod ", "chown ", "rm ", "rmdir ", "touch ", "mkdir ", "mv ",
+        "sed -i", "eval ", "exec ", "dd ", "mkfs", "kill ", "pkill ", "reboot", "shutdown",
+        "git commit", "git push", "git reset", "git checkout", "git clean", "git rebase", "git merge",
+        "npm install", "npm i ", "npm run build", "cargo build", "cargo install", "yarn add", "pnpm add",
+        "pip install", "pip uninstall",
+    ];
+    for token in &dangerous_tokens {
+        if lower.contains(token) {
+            return false;
+        }
+    }
+
+    // 2. 切分各级命令链（支持 ; && || |）
+    let segments = split_shell_segments(trimmed);
+    if segments.is_empty() {
+        return false;
+    }
+
+    for seg in segments {
+        let seg_trimmed = seg.trim();
+        if seg_trimmed.is_empty() {
+            continue;
+        }
+        if !is_single_segment_safe(seg_trimmed) {
+            return false;
+        }
+    }
+
+    true
+}
+
 pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
     // 显式声明只读时优先放行：即使工具名命中写动词（如 preview_saved_logs / run_query with read_only: true），
     // 只要参数或元数据中明确声明 read_only: true，一律按只读工具放行。
@@ -89,6 +255,16 @@ pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
     let raw_tool = inst.get_tool().to_ascii_lowercase();
     let tool = raw_tool.rsplit('/').next().unwrap_or(&raw_tool);
     let action = inst.get_action().to_ascii_lowercase();
+
+    // 🌟 全链条只读 Shell 嗅探：如果调用的是 shell/bash/exec 工具，且命令经全量白名单核验确认 100% 只读（如 curl 查网络、git status/diff、ls/cat 等无副作用探针），直接按只读放行，绝不误触修改代码的审查门禁！
+    let is_shell_exec = tool.contains("shell") || tool.contains("bash") || tool == "exec";
+    if is_shell_exec {
+        if let Some(cmd_str) = extract_shell_command_string(inst) {
+            if is_safe_read_only_shell_command(cmd_str) {
+                return false;
+            }
+        }
+    }
 
     // 写动词优先于只读前缀白名单：
     // 形如 get_shell_output / list_running_jobs 的"取结果"类工具，虽然以只读前缀开头，
@@ -1222,5 +1398,63 @@ mod tests {
         inst_write.tool = Some("write_file".to_string());
         inst_write.command = Some(json!({ "read_only": false }));
         assert!(is_write_or_side_effect_tool(&inst_write));
+    }
+
+    #[test]
+    fn test_is_safe_read_only_shell_command() {
+        use crate::agent::types::AgentInstruction;
+        use serde_json::json;
+
+        // 1. 纯只读 curl 查网络/天气 -> 识别为安全只读放行
+        assert!(is_safe_read_only_shell_command("curl https://wttr.in/Shanghai"));
+        assert!(is_safe_read_only_shell_command("curl -s https://api.weather.com/data"));
+        assert!(is_safe_read_only_shell_command("wget -qO- https://example.com"));
+
+        // 2. 纯只读 git status / diff / log / branch -> 放行
+        assert!(is_safe_read_only_shell_command("git status"));
+        assert!(is_safe_read_only_shell_command("git diff --stat"));
+        assert!(is_safe_read_only_shell_command("git log -n 5"));
+        assert!(is_safe_read_only_shell_command("git branch -a"));
+
+        // 3. 常见探针与复合命令 (&&, ;, |) -> 放行
+        assert!(is_safe_read_only_shell_command("ls -la && pwd"));
+        assert!(is_safe_read_only_shell_command("cat src/main.rs | grep fn"));
+        assert!(is_safe_read_only_shell_command("echo hello; date"));
+        assert!(is_safe_read_only_shell_command("node -v"));
+        assert!(is_safe_read_only_shell_command("cargo --version"));
+
+        // 4. 危险操作一票否决：文件输出重定向 -> 拦截 (判为写操作)
+        assert!(!is_safe_read_only_shell_command("curl https://foo.com > output.txt"));
+        assert!(!is_safe_read_only_shell_command("echo hello >> README.md"));
+
+        // 5. 危险管道与提权注入 -> 拦截
+        assert!(!is_safe_read_only_shell_command("curl https://foo.com | bash"));
+        assert!(!is_safe_read_only_shell_command("sudo ls"));
+        assert!(!is_safe_read_only_shell_command("rm -rf src/"));
+        assert!(!is_safe_read_only_shell_command("sed -i 's/a/b/g' file.txt"));
+
+        // 6. 危险 git 动作 -> 拦截
+        assert!(!is_safe_read_only_shell_command("git reset --hard"));
+        assert!(!is_safe_read_only_shell_command("git checkout ."));
+        assert!(!is_safe_read_only_shell_command("git commit -m 'test'"));
+
+        // 7. 包管理构建/修改动作 -> 拦截
+        assert!(!is_safe_read_only_shell_command("npm install"));
+        assert!(!is_safe_read_only_shell_command("cargo build"));
+
+        // 8. 复合命令中有一条未知/写操作 -> 全链条一票否决
+        assert!(!is_safe_read_only_shell_command("git status && rm -rf tmp"));
+        assert!(!is_safe_read_only_shell_command("ls -l; npm run build"));
+
+        // 9. 集成到 is_write_or_side_effect_tool 验证
+        let mut inst_curl = AgentInstruction::default();
+        inst_curl.tool = Some("remote-hub/shell_exec".to_string());
+        inst_curl.command = Some(json!({ "command": "curl https://wttr.in/Shanghai" }));
+        assert!(!is_write_or_side_effect_tool(&inst_curl), "只读 curl 应该放行为只读操作");
+
+        let mut inst_write_shell = AgentInstruction::default();
+        inst_write_shell.tool = Some("remote-hub/shell_exec".to_string());
+        inst_write_shell.command = Some(json!({ "command": "npm test" }));
+        assert!(is_write_or_side_effect_tool(&inst_write_shell), "npm test 属于潜在测试/写入脚本必须受门禁保护");
     }
 }
