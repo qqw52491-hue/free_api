@@ -1411,25 +1411,40 @@ async fn run_agent_main_loop_in_workspace_inner(
 
         let is_finish = is_finish_instruction(&instruction);
 
-        // 🌟 纯 UI/样式/文档改动自动豁免：
-        // 若当前未闭合，但本轮所有代码改动全部为纯前端/样式/文档文件，且无绑定强制验证命令，系统在 finish 时自动置为 waived
+        // 🌟 纯静态资源自动豁免与无测试工具自适应跳过：
         if is_finish && result.success && context.change_verification.is_none() {
             let has_explicit_verify = context
                 .review_contract
                 .as_ref()
                 .map_or(false, |rc| rc.has_executable_verification());
-            if !has_explicit_verify && context.is_only_ui_or_doc_side_effects() {
-                context.change_verification = Some(crate::agent::change_verification::ChangeVerification {
-                    status: "waived".to_string(),
-                    evidence_refs: Vec::new(),
-                    waived_reason: Some(
-                        "改动全部为纯 UI/样式/文档静态资源，系统自动豁免单元测试验证".to_string(),
-                    ),
-                });
-                let _ = app.emit(
-                    &format!("agent-log-{}", final_session_id),
-                    "🎨 系统自动感知：检测到本次改动全部为纯 UI/样式/文档文件，已自动豁免写入测试验证 (waived)".to_string(),
-                );
+            if !has_explicit_verify {
+                if context.is_only_ui_or_doc_side_effects() {
+                    context.change_verification = Some(crate::agent::change_verification::ChangeVerification {
+                        status: "waived".to_string(),
+                        evidence_refs: Vec::new(),
+                        waived_reason: Some(
+                            "改动全部为纯静态资源（样式/图片/文档），系统自动豁免写入验证".to_string(),
+                        ),
+                    });
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        "🎨 系统自动感知：检测到本次改动全部为纯静态资源（样式/图片/文档），已自动豁免写入测试验证 (waived)".to_string(),
+                    );
+                } else if !context.has_inferrable_verification_command() {
+                    // 🌟 泛化降级策略：如果改动了代码文件，但当前工程未检测到任何自动化测试套件或类型检查工具，
+                    // 按照“如果一般都可以，这个如果没有就跳过”的原则，系统自适应跳过强制校验
+                    context.change_verification = Some(crate::agent::change_verification::ChangeVerification {
+                        status: "waived".to_string(),
+                        evidence_refs: Vec::new(),
+                        waived_reason: Some(
+                            "当前工程未检测到类型检查器或自动化测试配置，系统自适应跳过验证".to_string(),
+                        ),
+                    });
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        "☕ 系统自动感知：当前工程未检测到测试或类型检查工具，已自适应跳过验证 (waived)".to_string(),
+                    );
+                }
             }
         }
 
@@ -2166,6 +2181,14 @@ fn try_auto_verify_change(
     };
 
     let is_test_cmd = crate::agent::change_verification::is_test_or_verification_command(&cmd);
+    let is_inferred_cmd = context
+        .inferred_verification_command()
+        .as_deref()
+        .map_or(false, |ic| {
+            let lower_cmd = cmd.trim().to_lowercase();
+            let lower_ic = ic.trim().to_lowercase();
+            lower_cmd.contains(&lower_ic) || lower_ic.contains(&lower_cmd)
+        });
     let matches_contract_verify = context.review_contract.as_ref().map_or(false, |rc| {
         rc.obligations.iter().any(|o| {
             o.verify_command
@@ -2174,7 +2197,7 @@ fn try_auto_verify_change(
         })
     });
 
-    if is_test_cmd || matches_contract_verify {
+    if is_test_cmd || matches_contract_verify || is_inferred_cmd {
         let snippet = if cmd.chars().count() > 60 {
             format!("{}...", cmd.chars().take(60).collect::<String>())
         } else {

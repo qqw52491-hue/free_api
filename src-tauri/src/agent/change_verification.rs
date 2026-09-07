@@ -126,23 +126,33 @@ pub fn is_test_or_verification_command(cmd: &str) -> bool {
         "deno test",
         "npx tsc",
         "npx vue-tsc",
+        "tsc --noemit",
+        "vue-tsc --noemit",
+        "typecheck",
+        "type-check",
         "npm run check",
         "npm run build",
         "cargo build",
         "pytest",
         "python -m unittest",
         "go test",
+        "go vet",
         "mvn test",
         "gradle test",
         "ctest",
         "npm run lint",
         "eslint",
         "golangci-lint",
+        "mypy",
+        "flake8",
+        "ruff check",
+        "biome check",
     ];
     test_patterns.iter().any(|pattern| lower.contains(pattern))
 }
 
 /// 判断文件路径是否为纯 UI 界面、样式、媒体或静态文档文件
+/// 🚨 注意：.vue / .tsx / .jsx / .ts 包含可执行脚本与类型声明，绝不能作为纯静态资源无脑豁免！
 pub fn is_pure_ui_or_doc_path(path_str: &str) -> bool {
     let lower = path_str.trim().to_lowercase();
     if lower.is_empty() {
@@ -159,7 +169,6 @@ pub fn is_pure_ui_or_doc_path(path_str: &str) -> bool {
         return false;
     }
     let pure_exts = [
-        ".vue",
         ".css",
         ".scss",
         ".sass",
@@ -180,6 +189,153 @@ pub fn is_pure_ui_or_doc_path(path_str: &str) -> bool {
         ".yml",
     ];
     pure_exts.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// 根据受影响的文件列表与工程特征上下文，自适应推导最匹配的验证/类型检查命令：
+/// 1. 契约优先：检查 package.json 是否声明了标准的 typecheck / check / test 脚本；
+/// 2. 依赖嗅探：
+///    - 存在 tsconfig.json 且依赖包含 vue -> npx vue-tsc --noEmit
+///    - 存在 tsconfig.json 且依赖包含 react 或 typescript -> npx tsc --noEmit
+/// 3. 生态嗅探：
+///    - 若为 Rust 项目（Cargo.toml）且包含 .rs 改动 -> cargo check
+///    - 若为 Python 项目（pyproject.toml/requirements.txt）且包含 .py 改动 -> pytest
+///    - 若为 Go 项目（go.mod）且包含 .go 改动 -> go test ./...
+/// 4. 若无法推导任何可执行的类型检查或测试套件 -> 返回 None（由上层自适应跳过豁免）
+pub fn infer_adaptive_verification_command(affected_paths: &[String]) -> Option<String> {
+    if affected_paths.is_empty() {
+        return None;
+    }
+
+    let has_web_files = affected_paths.iter().any(|p| {
+        p.ends_with(".vue")
+            || p.ends_with(".ts")
+            || p.ends_with(".tsx")
+            || p.ends_with(".jsx")
+            || p.ends_with(".js")
+    });
+    let has_rs_files = affected_paths.iter().any(|p| p.ends_with(".rs"));
+    let has_py_files = affected_paths.iter().any(|p| p.ends_with(".py"));
+    let has_go_files = affected_paths.iter().any(|p| p.ends_with(".go"));
+
+    let mut candidate_roots = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidate_roots.push(cwd.clone());
+        if let Some(parent) = cwd.parent() {
+            candidate_roots.push(parent.to_path_buf());
+        }
+    }
+
+    for path_str in affected_paths {
+        let p = std::path::Path::new(path_str);
+        let mut starts = Vec::new();
+        if p.is_absolute() {
+            if let Some(parent) = p.parent() {
+                starts.push(parent.to_path_buf());
+            }
+        } else {
+            for base in &candidate_roots.clone() {
+                starts.push(base.join(p));
+            }
+        }
+
+        for start in starts {
+            let mut curr = start.as_path();
+            while let Some(parent) = curr.parent() {
+                if parent.join("package.json").exists()
+                    || parent.join("Cargo.toml").exists()
+                    || parent.join("pyproject.toml").exists()
+                    || parent.join("go.mod").exists()
+                {
+                    if !candidate_roots.contains(&parent.to_path_buf()) {
+                        candidate_roots.push(parent.to_path_buf());
+                    }
+                }
+                curr = parent;
+            }
+        }
+    }
+
+    // 1. 如果包含 Web/TS/JS 文件，优先在所有候选根目录中寻找匹配 package.json
+    if has_web_files {
+        for root in &candidate_roots {
+            let pkg_json_path = root.join("package.json");
+            if pkg_json_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&pkg_json_path) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let scripts = json.get("scripts").and_then(|s| s.as_object());
+                        if let Some(s) = scripts {
+                            if s.contains_key("typecheck") {
+                                return Some("npm run typecheck".to_string());
+                            }
+                            if s.contains_key("type-check") {
+                                return Some("npm run type-check".to_string());
+                            }
+                            if s.contains_key("check") {
+                                return Some("npm run check".to_string());
+                            }
+                        }
+
+                        let has_tsconfig = root.join("tsconfig.json").exists();
+                        if has_tsconfig {
+                            let deps = json.get("dependencies").and_then(|d| d.as_object());
+                            let dev_deps = json.get("devDependencies").and_then(|d| d.as_object());
+                            let has_dep = |name: &str| -> bool {
+                                deps.map_or(false, |d| d.contains_key(name))
+                                    || dev_deps.map_or(false, |d| d.contains_key(name))
+                            };
+
+                            if has_dep("vue") || has_dep("@vue/runtime-core") {
+                                return Some("npx vue-tsc --noEmit".to_string());
+                            }
+                            if has_dep("react") || has_dep("@types/react") || has_dep("typescript") {
+                                return Some("npx tsc --noEmit".to_string());
+                            }
+                        }
+
+                        if let Some(s) = scripts {
+                            if let Some(test_cmd) = s.get("test").and_then(|t| t.as_str()) {
+                                let test_lower = test_cmd.to_lowercase();
+                                if !test_lower.contains("no test specified")
+                                    && !test_lower.contains("exit 1")
+                                {
+                                    return Some("npm test".to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. 如果包含 Rust 文件，寻找 Cargo.toml
+    if has_rs_files {
+        for root in &candidate_roots {
+            if root.join("Cargo.toml").exists() {
+                return Some("cargo check".to_string());
+            }
+        }
+    }
+
+    // 3. 如果包含 Python 文件，寻找 pyproject.toml / requirements.txt
+    if has_py_files {
+        for root in &candidate_roots {
+            if root.join("pyproject.toml").exists() || root.join("requirements.txt").exists() {
+                return Some("pytest".to_string());
+            }
+        }
+    }
+
+    // 4. 如果包含 Go 文件，寻找 go.mod
+    if has_go_files {
+        for root in &candidate_roots {
+            if root.join("go.mod").exists() {
+                return Some("go test ./...".to_string());
+            }
+        }
+    }
+
+    None
 }
 
 /// 从工具参数 JSON 中提取可能被修改的文件路径
@@ -299,7 +455,8 @@ mod tests {
 
     #[test]
     fn test_ui_and_doc_path_detection() {
-        assert!(is_pure_ui_or_doc_path("src/components/AgentDeck.vue"));
+        assert!(!is_pure_ui_or_doc_path("src/components/AgentDeck.vue"));
+        assert!(!is_pure_ui_or_doc_path("src/components/AgentDeck.tsx"));
         assert!(is_pure_ui_or_doc_path("src/style.css"));
         assert!(is_pure_ui_or_doc_path("README.md"));
         assert!(is_pure_ui_or_doc_path("docs/ARCHITECTURE.md"));
@@ -309,12 +466,34 @@ mod tests {
         assert!(!is_pure_ui_or_doc_path("Cargo.toml"));
 
         assert!(are_all_paths_ui_or_doc(&[
-            "src/components/Card.vue".to_string(),
+            "src/components/Card.html".to_string(),
             "src/index.css".to_string(),
         ]));
         assert!(!are_all_paths_ui_or_doc(&[
             "src/components/Card.vue".to_string(),
+            "src/index.css".to_string(),
+        ]));
+        assert!(!are_all_paths_ui_or_doc(&[
+            "src/components/Card.html".to_string(),
             "src-tauri/src/main.rs".to_string(),
         ]));
+    }
+
+    #[test]
+    fn test_infer_adaptive_verification_command() {
+        let rust_paths = vec!["src-tauri/src/main.rs".to_string()];
+        assert_eq!(
+            infer_adaptive_verification_command(&rust_paths),
+            Some("cargo check".to_string())
+        );
+
+        let vue_paths = vec!["src/components/agent/AgentChatStream.vue".to_string()];
+        assert_eq!(
+            infer_adaptive_verification_command(&vue_paths),
+            Some("npx vue-tsc --noEmit".to_string())
+        );
+
+        let empty_paths: Vec<String> = Vec::new();
+        assert_eq!(infer_adaptive_verification_command(&empty_paths), None);
     }
 }

@@ -158,6 +158,7 @@ impl SandwichContext {
         bottom_state_card.push_str(&ContextRenderer::render_change_verification(
             self.side_effects.len(),
             self.change_verification.as_ref(),
+            self.inferred_verification_command().as_deref(),
         ));
         // (11) 方案门禁状态投影：决策前可见当前模式与放行条件，避免靠写入被拒学习规则。
         bottom_state_card.push_str(&ContextRenderer::render_plan_gate(

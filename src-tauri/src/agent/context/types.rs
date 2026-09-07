@@ -711,6 +711,29 @@ impl SandwichContext {
         crate::agent::change_verification::are_all_paths_ui_or_doc(&all_paths)
     }
 
+    pub fn new_affected_paths(&self) -> Vec<String> {
+        if self.side_effects.len() <= self.inherited_side_effects_count {
+            return Vec::new();
+        }
+        let mut paths = Vec::new();
+        for effect in &self.side_effects[self.inherited_side_effects_count..] {
+            paths.extend(effect.affected_paths.clone());
+        }
+        paths
+    }
+
+    pub fn inferred_verification_command(&self) -> Option<String> {
+        let paths = self.new_affected_paths();
+        if paths.is_empty() {
+            return None;
+        }
+        crate::agent::change_verification::infer_adaptive_verification_command(&paths)
+    }
+
+    pub fn has_inferrable_verification_command(&self) -> bool {
+        self.inferred_verification_command().is_some()
+    }
+
     pub fn update_observation(&mut self, obs: String) {
         self.current_observation = obs;
     }
@@ -953,12 +976,12 @@ mod tests {
         let mut ctx = SandwichContext::new("sys".to_string(), "修改界面".to_string());
         assert!(!ctx.is_only_ui_or_doc_side_effects());
 
-        // 仅包含 UI 和文档修改
+        // 仅包含静态 UI 和文档修改
         ctx.record_side_effect_with_paths(
             1,
             "edit_file".to_string(),
             "修改卡片样式".to_string(),
-            vec!["src/components/AgentDeck.vue".to_string()],
+            vec!["src/components/AgentDeck.css".to_string()],
         );
         ctx.record_side_effect_with_paths(
             2,
@@ -968,12 +991,12 @@ mod tests {
         );
         assert!(ctx.is_only_ui_or_doc_side_effects());
 
-        // 混入了后端逻辑文件
+        // 混入了含有脚本逻辑的组件文件（.vue 不能被纯静态豁免）
         ctx.record_side_effect_with_paths(
             3,
             "edit_file".to_string(),
-            "修改认证逻辑".to_string(),
-            vec!["src-tauri/src/agent/auth.rs".to_string()],
+            "修改组件代码".to_string(),
+            vec!["src/components/AgentDeck.vue".to_string()],
         );
         assert!(!ctx.is_only_ui_or_doc_side_effects());
     }

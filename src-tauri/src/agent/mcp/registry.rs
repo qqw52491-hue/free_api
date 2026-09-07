@@ -171,7 +171,7 @@ impl PluginRegistry {
     pub async fn prime_tool_catalog_for_session(
         &self,
         chat_session_id: &str,
-        model_config: Option<&crate::llm::ModelConfig>,
+        _model_config: Option<&crate::llm::ModelConfig>,
     ) {
         for client in self.clients.values() {
             let client = client.clone();
@@ -179,33 +179,10 @@ impl PluginRegistry {
             let needs_catalog = crate::agent::mcp_catalog::cached_tools(&client.config)
                 .map_or(true, |tools| tools.is_empty());
             if !needs_catalog {
-                if let Some(cfg) = model_config {
-                    if let Some(tools) = crate::agent::mcp_catalog::cached_tools(&client.config) {
-                        let plugin_cfg = client.config.clone();
-                        let plugin_name = client.config.name.clone();
-                        let cfg_clone = cfg.clone();
-                        tokio::spawn(async move {
-                            if let Ok(card) = crate::agent::mcp_catalog::generate_llm_mcp_card(
-                                &plugin_name,
-                                &tools,
-                                &cfg_clone,
-                            )
-                            .await
-                            {
-                                crate::agent::mcp_catalog::set_cached_capability_card(
-                                    &plugin_cfg,
-                                    card,
-                                );
-                            }
-                        });
-                    }
-                }
                 continue;
             }
 
-            let plugin_name = client.config.name.clone();
             let plugin_cfg = client.config.clone();
-            let m_cfg = model_config.cloned();
             let plugin_name_log = client.config.name.clone();
             let client_for_timeout = client.clone();
             let outcome = tokio::time::timeout(Duration::from_secs(8), async move {
@@ -220,14 +197,14 @@ impl PluginRegistry {
                         })?
                     }
                 };
-                if let Some(cfg) = &m_cfg {
-                    if let Ok(card) =
-                        crate::agent::mcp_catalog::generate_llm_mcp_card(&plugin_name, &tools, cfg)
-                            .await
-                    {
-                        crate::agent::mcp_catalog::set_cached_capability_card(&plugin_cfg, card);
-                    }
+
+                // 🌟 能力卡获取原则：优先使用数据库/配置中已有的 capability_card；
+                // 若用户尚未生成过，直接使用 0 延迟、0 消耗的本地规则能力卡兜底，绝不在会话预热期间调用 LLM！
+                if crate::agent::mcp_catalog::cached_capability_card(&plugin_cfg).is_none() {
+                    let fallback_card = crate::agent::mcp_catalog::generate_rule_based_mcp_card(&tools);
+                    crate::agent::mcp_catalog::set_cached_capability_card(&plugin_cfg, fallback_card);
                 }
+
                 Ok::<(), String>(())
             })
             .await;
