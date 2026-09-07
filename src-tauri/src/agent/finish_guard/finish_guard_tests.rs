@@ -1,276 +1,6 @@
-//! finish 终态质询门禁与指令状态更新。
-//! 从 main_loop.rs 原样抽出，行为不变；测试随实现同文件迁移。
-
-use crate::agent::change_verification::{
-    apply_change_verification_update, change_verification_blocker, ChangeVerification,
-};
-use crate::agent::checkpoint::AgentCheckpoint;
-use crate::agent::context;
-use crate::agent::evaluation_analysis::{assess_complex_delivery_summary, summary_makes_root_cause_claim};
-use crate::agent::review_contract::{apply_review_contract_update, ReviewContract};
-use crate::agent::types::{AgentInstruction, TodoItem};
-use serde_json::json;
-use crate::db::DbState;
-#[allow(unused_imports)]
-use crate::agent::dispatcher::{is_finish_instruction, is_write_or_side_effect_tool};
-
-pub(crate) fn open_todo_descriptions(todos: &[TodoItem]) -> Vec<String> {
-    todos
-        .iter()
-        .filter(|item| {
-            matches!(
-                item.status.trim().to_ascii_lowercase().as_str(),
-                "pending" | "in_progress"
-            )
-        })
-        .map(|item| {
-            let description = item.description.trim();
-            if description.is_empty() {
-                format!("Todo #{}", item.id)
-            } else {
-                description.to_string()
-            }
-        })
-        .collect()
-}
-
-pub(crate) fn should_challenge_finish(
-    is_finish: bool,
-    succeeded: bool,
-    finish_reviewed: bool,
-    todos: &[TodoItem],
-) -> bool {
-    is_finish && succeeded && !finish_reviewed && !open_todo_descriptions(todos).is_empty()
-}
-
-/// 汇总 finish 时仍未闭合的责任。
-///
-/// 真实写入只产生一项"最近写入批次待验证"义务，不按文件或编辑次数逐条要求测试；
-/// 无成功写入的只读任务不会因此产生 blocker。
-pub(crate) fn finish_blockers(
-    todos: &[TodoItem],
-    review_contract: Option<&ReviewContract>,
-    review_contract_started_this_turn: bool,
-    side_effect_count: usize,
-    change_verification: Option<&ChangeVerification>,
-) -> Vec<String> {
-    let mut blockers = open_todo_descriptions(todos);
-    if review_contract_started_this_turn {
-        blockers.push("审查契约刚在本轮建立，尚未执行任何契约义务".to_string());
-    }
-    if let Some(contract) = review_contract {
-        blockers.extend(contract.open_descriptions());
-    }
-    if let Some(blocker) = change_verification_blocker(side_effect_count, change_verification) {
-        blockers.push(blocker);
-    }
-    blockers
-}
-
-pub(crate) fn should_challenge_finish_with_blockers(
-    is_finish: bool,
-    succeeded: bool,
-    finish_reviewed: bool,
-    blockers: &[String],
-) -> bool {
-    is_finish && succeeded && !finish_reviewed && !blockers.is_empty()
-}
-
-/// 主根因的证据边界是交付正确性的前置条件，但绝不能造成无上限的死循环死锁。
-/// 累计质询达到 MAX_FINISH_CHALLENGES（2 次）时，硬性熔断放行，避免用户任务卡死。
-pub(crate) fn should_challenge_finish_with_complex_delivery_blocker(
-    is_finish: bool,
-    succeeded: bool,
-    finish_reviewed: bool,
-    finish_challenge_count: u32,
-    blockers: &[String],
-    complex_delivery_unresolved: bool,
-) -> bool {
-    const MAX_FINISH_CHALLENGES: u32 = 2;
-    if !is_finish || !succeeded || blockers.is_empty() {
-        return false;
-    }
-    // 防死循环硬性熔断保护：累计质询已达 2 次时，绝不再次死循环拦截
-    if finish_challenge_count >= MAX_FINISH_CHALLENGES {
-        return false;
-    }
-    !finish_reviewed || complex_delivery_unresolved
-}
-
-/// 复杂诊断 finish 缺少边界披露时复用既有可恢复拦截。
-/// 该检查只消费当前内存中的 summary 生成布尔结论，既不持久化也不回显用户交付正文。
-pub(crate) fn complex_delivery_blocker(
-    context: &context::SandwichContext,
-    instruction: &AgentInstruction,
-    is_finish: bool,
-    succeeded: bool,
-) -> Option<String> {
-    if !is_finish || !succeeded {
-        return None;
-    }
-    // 对于纯对话、解释答疑、或没有任何新增代码文件修改的任务，免除严苛的主根因四件套拦截
-    if context.side_effects.len() == context.inherited_side_effects_count {
-        return None;
-    }
-    // ReviewContract 是模型首轮规划后持久化的显式复杂任务声明。
-    // 不再依赖少数自然语言关键词：复杂 Bug、架构变更、公式证明等跨领域任务
-    // 只要建立契约，就共享同一套依据—验证—交付闭环；普通任务保持轻量。
-    if context.review_contract.is_none() {
-        // 未建契约的交付：不要求完整四件套，但只要交付自身宣称了主根因，
-        // 就必须就地校准（直接证据 + 结论强度）——"谁宣称根因，谁就校准"，
-        // 防止把复杂诊断的边界披露漏成无契约即免检。
-        let Some(summary) = instruction
-            .command
-            .as_ref()
-            .and_then(|command| command.get("summary"))
-            .and_then(|summary| summary.as_str())
-        else {
-            return None;
-        };
-        return if summary_makes_root_cause_claim(summary)
-            && !assess_complex_delivery_summary(summary).root_cause_calibrated
-        {
-            Some("交付提出了主根因结论，但缺少就地证据与结论强度（需在主根因小节内给出直接证据并标注 已证实/部分支持/未验证）".to_string())
-        } else {
-            None
-        };
-    }
-    let Some(summary) = instruction
-        .command
-        .as_ref()
-        .and_then(|command| command.get("summary"))
-        .and_then(|summary| summary.as_str())
-    else {
-        return Some("复杂终态缺少 summary，无法核验主根因的证据边界".to_string());
-    };
-    let assessment = assess_complex_delivery_summary(summary);
-    (!assessment.compliant).then_some(
-        "复杂终态缺少已核验范围、未核验范围或关键假设、结论强度，或主根因就地的直接证据与结论强度"
-            .to_string(),
-    )
-}
-
-/// 应用模型本轮提出的状态更新。
-/// ReviewContract 与 ChangeVerification 是两套正交账本，必须独立处理：
-/// 前者是否存在或是否被拒绝，都不能阻止后者闭合最近写入的验证责任。
-pub(crate) fn apply_instruction_state_updates(
-    context: &mut context::SandwichContext,
-    instruction: &AgentInstruction,
-) -> bool {
-    if !instruction.todo_update.is_empty() {
-        context.todo_list = instruction.todo_update.clone();
-    }
-
-    let review_contract_was_present = context.review_contract.is_some();
-    if let Some(update) = instruction.review_contract_update.clone() {
-        if let Err(error) = apply_review_contract_update(&mut context.review_contract, update) {
-            context.add_error_feedback(&format!(
-                "【审查契约更新未采纳】{}\n请保留既有义务；每项必须为 open，或以 evidenced + evidence_refs、waived + waived_reason 闭合。",
-                error
-            ));
-        }
-    }
-
-    if let Some(update) = instruction.change_verification_update.clone() {
-        if let Err(error) =
-            apply_change_verification_update(&mut context.change_verification, update)
-        {
-            context.add_error_feedback(&format!(
-                "【写入验证更新未采纳】{}\n真实写入后，必须以 verified + evidence_refs 或 waived + waived_reason 闭合；新写入会自动使旧验证失效。",
-                error
-            ));
-        }
-    }
-
-    if let Some(ref blocks) = instruction.target_blocks_update {
-        if !blocks.is_empty() {
-            context.block_manager.set_blocks(blocks.clone());
-        }
-    } else if context.block_manager.blocks.is_empty() && !instruction.todo_update.is_empty() {
-        // 自动桥接：从 todo_update 自动生成默认 TargetBlocks，平滑接入状态机
-        let auto_blocks: Vec<crate::agent::target_block::TargetBlock> = instruction
-            .todo_update
-            .iter()
-            .map(|t| {
-                let mut b = crate::agent::target_block::TargetBlock::new(
-                    format!("block-{}", t.id),
-                    &t.description,
-                );
-                // 自动识别高难度词根赋权
-                let desc_lower = t.description.to_lowercase();
-                if desc_lower.contains("重构")
-                    || desc_lower.contains("架构")
-                    || desc_lower.contains("迁移")
-                    || desc_lower.contains("并发")
-                {
-                    b.tier = "pro".to_string();
-                }
-                b
-            })
-            .collect();
-        context.block_manager.set_blocks(auto_blocks);
-    }
-
-    // 接收执行模型提交的自述
-    if let Some(ref report) = instruction.self_report {
-        if let Some(block) = context.active_target_block_mut() {
-            block.self_report = Some(report.clone());
-        }
-    }
-
-    // 处理执行模型主动呼叫 Pro 援助（逃生通道）
-    if instruction.request_escalation == Some(true) {
-        let escalation_result = if let Some(block) = context.active_target_block_mut() {
-            let id = block.id.clone();
-            Some((id, block.request_pro_escalation()))
-        } else {
-            None
-        };
-
-        if let Some((id, res)) = escalation_result {
-            match res {
-                Ok(_) => {
-                    context.add_error_feedback(&format!(
-                        "【🚀 逃生通道已激活】目标块 [{}] 已成功申请临时 Pro 强模型支援，下一步骤将使用 Pro 执行复杂推理。",
-                        id
-                    ));
-                }
-                Err(err) => {
-                    context.add_error_feedback(&format!("【⚠️ 逃生通道申请驳回】{}", err));
-                }
-            }
-        }
-    }
-
-    // 处理执行模型申请动态扩展修改边界 (Scope)
-    if let Some(ref ext) = instruction.scope_extension {
-        if !ext.paths.is_empty() {
-            if ext.reason.trim().is_empty() {
-                context.add_error_feedback("【⚠️ Scope 扩展驳回】申请扩展修改边界时必须在 reason 字段中提供正当的技术联动理由，不得空置。");
-            } else {
-                let expanded_info = if let Some(block) = context.active_target_block_mut() {
-                    block.expand_scope(&ext.paths);
-                    Some((block.id.clone(), ext.paths.clone(), ext.reason.clone()))
-                } else {
-                    None
-                };
-                if let Some((id, paths, reason)) = expanded_info {
-                    context.add_error_feedback(&format!(
-                        "【✅ Scope 边界扩展已放行】目标块 [{}] 允许修改范围已扩充包含：{:?}（理由：{}）",
-                        id, paths, reason
-                    ));
-                }
-            }
-        }
-    }
-
-    !review_contract_was_present && context.review_contract.is_some()
-}
-
-
-#[cfg(test)]
-mod finish_guard_tests {
     use super::*;
+    use crate::agent::dispatcher::is_write_or_side_effect_tool;
+    use crate::agent::review_contract::ReviewObligation;
 
     /// 测试夹具：直接向 agent_child_runs 写入/更新/清理子任务行，用于还原门禁的真实判定场景。
     fn insert_child_run(
@@ -1602,4 +1332,374 @@ mod finish_guard_tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
-}
+
+    #[test]
+    fn test_parse_file_line_ref_formats() {
+        assert_eq!(
+            parse_file_line_ref("src/views/ChatView.vue:442"),
+            Some(("src/views/ChatView.vue".to_string(), 442, 442))
+        );
+        assert_eq!(
+            parse_file_line_ref("src/views/ChatView.vue:87-103"),
+            Some(("src/views/ChatView.vue".to_string(), 87, 103))
+        );
+        assert_eq!(
+            parse_file_line_ref("ChatView.vue:L442"),
+            Some(("ChatView.vue".to_string(), 442, 442))
+        );
+        assert_eq!(
+            parse_file_line_ref("ChatView.vue#L87-L103"),
+            Some(("ChatView.vue".to_string(), 87, 103))
+        );
+        assert_eq!(
+            parse_file_line_ref("[ChatView.vue:442](file:///workspace/ChatView.vue#L442)"),
+            Some(("ChatView.vue".to_string(), 442, 442))
+        );
+        assert_eq!(
+            parse_file_line_ref("ChatView.vue:442 (scrollToBottom 优化)"),
+            Some(("ChatView.vue".to_string(), 442, 442))
+        );
+        assert_eq!(
+            parse_file_line_ref("`src/components/ModelSelect.vue:55..60`"),
+            Some(("src/components/ModelSelect.vue".to_string(), 55, 60))
+        );
+        // 非代码行号证据返回 None
+        assert_eq!(parse_file_line_ref("output_id: test-42"), None);
+        assert_eq!(parse_file_line_ref("git diff --stat"), None);
+        assert_eq!(parse_file_line_ref("npm test passed"), None);
+        assert_eq!(parse_file_line_ref("已核验无异常"), None);
+    }
+
+    #[test]
+    fn test_single_edit_touching_multiple_obligations_is_not_blocked() {
+        // 场景：单次编辑 (side_effect_count = 1) 同时修改了同一个文件中的 3 个函数
+        // Diff 包含了 3 个修改 Hunk，分别覆盖 lines 87-103, 126, 445
+        let raw_diff = r#"diff --git a/src/views/ChatView.vue b/src/views/ChatView.vue
+index 123..456 100644
+--- a/src/views/ChatView.vue
++++ b/src/views/ChatView.vue
+@@ -87,17 +87,20 @@
+-old virtual scroll
++new virtual scroll
+@@ -124,5 +126,8 @@
+-old markdown render
++new markdown render
+@@ -440,6 +445,10 @@
+-old scrollToBottom
++new scrollToBottom with rAF
+"#;
+        let diff_ctx = DiffContext::from_diff_and_paths(
+            Some(raw_diff),
+            &["src/views/ChatView.vue".to_string()],
+        );
+
+        let contract = ReviewContract {
+            scope_statement: "优化 ChatView.vue 长列表与渲染性能".to_string(),
+            obligations: vec![
+                ReviewObligation {
+                    id: "scroll".to_string(),
+                    question: "是否优化 scrollToBottom 节流？".to_string(),
+                    status: "evidenced".to_string(),
+                    evidence_refs: vec!["ChatView.vue:445".to_string()],
+                    waived_reason: None,
+                    verify_command: None,
+                    verify_script: None,
+                    verify_sha256: None,
+                },
+                ReviewObligation {
+                    id: "render".to_string(),
+                    question: "是否优化 Markdown 渲染防抖？".to_string(),
+                    status: "evidenced".to_string(),
+                    evidence_refs: vec!["src/views/ChatView.vue:126".to_string()],
+                    waived_reason: None,
+                    verify_command: None,
+                    verify_script: None,
+                    verify_sha256: None,
+                },
+                ReviewObligation {
+                    id: "virtual".to_string(),
+                    question: "是否启用虚拟滚动列表？".to_string(),
+                    status: "evidenced".to_string(),
+                    evidence_refs: vec!["ChatView.vue:87-103".to_string()],
+                    waived_reason: None,
+                    verify_command: None,
+                    verify_script: None,
+                    verify_sha256: None,
+                },
+            ],
+        };
+
+        let verified = ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["output_id: test-1".to_string()],
+            waived_reason: None,
+        };
+
+        // 关键断言：side_effect_count = 1，但 3 条义务均在 diff 中找到真实修改行号，绝不误伤拦截！
+        let blockers = finish_blockers_with_diff(
+            &[],
+            Some(&contract),
+            false,
+            1,
+            Some(&verified),
+            Some(&diff_ctx),
+        );
+        assert!(
+            blockers.is_empty(),
+            "单次编辑同时覆盖多项义务时必须放行，不按写入次数误伤：{:?}",
+            blockers
+        );
+    }
+
+    #[test]
+    fn test_false_completion_extract_py_only_is_blocked() {
+        // 场景（复现用户真实 Bug）：
+        // Agent 只写了 extract.py，却声称完成了 ChatView.vue 的性能优化并在契约中标为 evidenced
+        let raw_diff = r#"【新增未跟踪文件】:
+--- 新增文件: extract.py ---
+def main():
+    pass
+"#;
+        let diff_ctx = DiffContext::from_diff_and_paths(
+            Some(raw_diff),
+            &["extract.py".to_string()],
+        );
+
+        let contract = ReviewContract {
+            scope_statement: "性能优化".to_string(),
+            obligations: vec![
+                ReviewObligation {
+                    id: "scroll".to_string(),
+                    question: "优化 scrollToBottom".to_string(),
+                    status: "evidenced".to_string(),
+                    evidence_refs: vec!["ChatView.vue:442".to_string()],
+                    waived_reason: None,
+                    verify_command: None,
+                    verify_script: None,
+                    verify_sha256: None,
+                },
+            ],
+        };
+
+        let verified = ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["output_id: test-1".to_string()],
+            waived_reason: None,
+        };
+
+        let blockers = finish_blockers_with_diff(
+            &[],
+            Some(&contract),
+            false,
+            1,
+            Some(&verified),
+            Some(&diff_ctx),
+        );
+
+        assert_eq!(blockers.len(), 1);
+        assert!(
+            blockers[0].contains("scroll"),
+            "必须点名未真实履约的义务 id: {}",
+            blockers[0]
+        );
+        assert!(
+            blockers[0].contains("ChatView.vue:442"),
+            "必须指出无效的证据引用: {}",
+            blockers[0]
+        );
+        assert!(
+            blockers[0].contains("未在本次真实代码改动 (diff) 中找到对应修改行"),
+            "拦截文案必须明确原因: {}",
+            blockers[0]
+        );
+    }
+
+    #[test]
+    fn test_partial_fix_blocks_only_unmodified_obligations() {
+        // 场景：Agent 真实修改了 scrollToBottom (line 445)，但没有修改 Markdown 渲染 (line 126)
+        let raw_diff = r#"diff --git a/src/views/ChatView.vue b/src/views/ChatView.vue
+index 123..456 100644
+--- a/src/views/ChatView.vue
++++ b/src/views/ChatView.vue
+@@ -440,6 +445,10 @@
+-old scrollToBottom
++new scrollToBottom
+"#;
+        let diff_ctx = DiffContext::from_diff_and_paths(
+            Some(raw_diff),
+            &["src/views/ChatView.vue".to_string()],
+        );
+
+        let contract = ReviewContract {
+            scope_statement: "优化性能".to_string(),
+            obligations: vec![
+                ReviewObligation {
+                    id: "scroll".to_string(),
+                    question: "优化 scrollToBottom".to_string(),
+                    status: "evidenced".to_string(),
+                    evidence_refs: vec!["ChatView.vue:445".to_string()],
+                    waived_reason: None,
+                    verify_command: None,
+                    verify_script: None,
+                    verify_sha256: None,
+                },
+                ReviewObligation {
+                    id: "render".to_string(),
+                    question: "优化 Markdown 渲染".to_string(),
+                    status: "evidenced".to_string(),
+                    evidence_refs: vec!["ChatView.vue:126".to_string()],
+                    waived_reason: None,
+                    verify_command: None,
+                    verify_script: None,
+                    verify_sha256: None,
+                },
+            ],
+        };
+
+        let verified = ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["output_id: test-1".to_string()],
+            waived_reason: None,
+        };
+
+        let blockers = finish_blockers_with_diff(
+            &[],
+            Some(&contract),
+            false,
+            1,
+            Some(&verified),
+            Some(&diff_ctx),
+        );
+
+        // scroll 命中 line 445 放行；render 引用 line 126 未被修改，被精准拦截！
+        assert_eq!(blockers.len(), 1);
+        assert!(blockers[0].contains("render"));
+        assert!(!blockers[0].contains("scroll"));
+    }
+
+    #[test]
+    fn test_missing_line_evidence_in_write_task_is_blocked() {
+        // 场景：在写操作任务中，义务声称 evidenced 但没有给出形如 file:line 的证据
+        let raw_diff = r#"diff --git a/src/views/ChatView.vue b/src/views/ChatView.vue
+@@ -440,6 +445,10 @@
++new
+"#;
+        let diff_ctx = DiffContext::from_diff_and_paths(
+            Some(raw_diff),
+            &["src/views/ChatView.vue".to_string()],
+        );
+
+        let contract = ReviewContract {
+            scope_statement: "优化性能".to_string(),
+            obligations: vec![
+                ReviewObligation {
+                    id: "scroll".to_string(),
+                    question: "优化 scrollToBottom".to_string(),
+                    status: "evidenced".to_string(),
+                    evidence_refs: vec!["已完成优化".to_string()],
+                    waived_reason: None,
+                    verify_command: None,
+                    verify_script: None,
+                    verify_sha256: None,
+                },
+            ],
+        };
+
+        let verified = ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["output_id: test-1".to_string()],
+            waived_reason: None,
+        };
+
+        let blockers = finish_blockers_with_diff(
+            &[],
+            Some(&contract),
+            false,
+            1,
+            Some(&verified),
+            Some(&diff_ctx),
+        );
+
+        assert_eq!(blockers.len(), 1);
+        assert!(blockers[0].contains("缺少具体代码行号"));
+    }
+
+    #[test]
+    fn test_read_only_task_and_waived_obligations_are_not_blocked() {
+        // 场景 1：只读任务 (side_effect_count = 0) 不做 diff 校验
+        let contract = ReviewContract {
+            scope_statement: "代码走查".to_string(),
+            obligations: vec![
+                ReviewObligation {
+                    id: "audit".to_string(),
+                    question: "是否存在内存泄漏？".to_string(),
+                    status: "evidenced".to_string(),
+                    evidence_refs: vec!["git diff --stat".to_string()],
+                    waived_reason: None,
+                    verify_command: None,
+                    verify_script: None,
+                    verify_sha256: None,
+                },
+            ],
+        };
+        let blockers = finish_blockers_with_diff(&[], Some(&contract), false, 0, None, None);
+        assert!(blockers.is_empty());
+
+        // 场景 2：豁免义务 (waived) 不做 diff 校验
+        let contract_waived = ReviewContract {
+            scope_statement: "性能优化".to_string(),
+            obligations: vec![
+                ReviewObligation {
+                    id: "virtual".to_string(),
+                    question: "虚拟滚动".to_string(),
+                    status: "waived".to_string(),
+                    evidence_refs: Vec::new(),
+                    waived_reason: Some("经评估长列表数据量较小，暂无需引入虚拟滚动".to_string()),
+                    verify_command: None,
+                    verify_script: None,
+                    verify_sha256: None,
+                },
+            ],
+        };
+        let empty_diff = DiffContext::default();
+        let verified = ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: vec!["output_id: test-1".to_string()],
+            waived_reason: None,
+        };
+        let blockers = finish_blockers_with_diff(
+            &[],
+            Some(&contract_waived),
+            false,
+            1,
+            Some(&verified),
+            Some(&empty_diff),
+        );
+        assert!(blockers.is_empty());
+
+        // 场景 3：带有可执行 verify_command 的义务由 host_verify 处理，免除 diff 行号检查
+        let contract_command = ReviewContract {
+            scope_statement: "单元测试".to_string(),
+            obligations: vec![
+                ReviewObligation {
+                    id: "unit_test".to_string(),
+                    question: "单元测试是否通过？".to_string(),
+                    status: "evidenced".to_string(),
+                    evidence_refs: vec!["output_id: run-10".to_string()],
+                    waived_reason: None,
+                    verify_command: Some("npm test".to_string()),
+                    verify_script: None,
+                    verify_sha256: None,
+                },
+            ],
+        };
+        let blockers = finish_blockers_with_diff(
+            &[],
+            Some(&contract_command),
+            false,
+            1,
+            Some(&verified),
+            Some(&empty_diff),
+        );
+        assert!(blockers.is_empty());
+    }

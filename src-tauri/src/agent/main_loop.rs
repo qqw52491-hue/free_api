@@ -33,6 +33,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::agent::finish_guard::{
     apply_instruction_state_updates, complex_delivery_blocker, finish_blockers,
+    finish_blockers_with_diff, review_contract_evidence_blockers, DiffContext,
     should_challenge_finish, should_challenge_finish_with_blockers,
     should_challenge_finish_with_complex_delivery_blocker,
 };
@@ -1448,13 +1449,41 @@ async fn run_agent_main_loop_in_workspace_inner(
             }
         }
 
-        let mut open_todos = finish_blockers(
+        let side_effect_count = context
+            .side_effects
+            .len()
+            .saturating_sub(context.inherited_side_effects_count);
+        let diff_context = if side_effect_count > 0 {
+            let affected_paths = context.new_affected_paths();
+            let raw_diff = git_baseline.collect_git_diff(&workspace_dir).map(|(d, _)| d);
+            Some(DiffContext::from_diff_and_paths(
+                raw_diff.as_deref(),
+                &affected_paths,
+            ))
+        } else {
+            None
+        };
+
+        let mut open_todos = finish_blockers_with_diff(
             &context.todo_list,
             context.review_contract.as_ref(),
             review_contract_started_this_turn,
-            context.side_effects.len() - context.inherited_side_effects_count,
+            side_effect_count,
             context.change_verification.as_ref(),
+            diff_context.as_ref(),
         );
+        let contract_evidence_unresolved = context
+            .review_contract
+            .as_ref()
+            .map(|c| {
+                !review_contract_evidence_blockers(
+                    c,
+                    side_effect_count,
+                    diff_context.as_ref(),
+                )
+                .is_empty()
+            })
+            .unwrap_or(false);
         let complex_delivery_blocker =
             complex_delivery_blocker(&context, &instruction, is_finish, result.success);
         let complex_delivery_unresolved = complex_delivery_blocker.is_some();
@@ -1504,7 +1533,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             checkpoint.finish_reviewed,
             checkpoint.finish_challenge_count,
             &open_todos,
-            complex_delivery_unresolved || oracle_progress_unresolved,
+            complex_delivery_unresolved || oracle_progress_unresolved || contract_evidence_unresolved,
         );
 
         let mut reviewer_challenged = false;
