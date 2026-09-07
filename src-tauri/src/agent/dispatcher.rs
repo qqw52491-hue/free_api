@@ -77,24 +77,94 @@ fn has_read_only_flag(inst: &AgentInstruction) -> bool {
     false
 }
 
-pub fn extract_shell_command_string(inst: &AgentInstruction) -> Option<&str> {
-    if let Some(cmd) = &inst.command {
-        if let Some(s) = cmd.get("command").and_then(|v| v.as_str()) {
-            return Some(s);
+pub fn extract_shell_command_string(inst: &AgentInstruction) -> Option<String> {
+    let parse_from_value = |val: &serde_json::Value| -> Option<String> {
+        // 1. 纯字符串形态: "curl -s ..."
+        if let Some(s) = val.as_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
         }
-        if let Some(s) = cmd.get("cmd").and_then(|v| v.as_str()) {
-            return Some(s);
+
+        // 2. JSON Object 形态: 常见字段与 args 列表
+        if let Some(obj) = val.as_object() {
+            // 2.1 完整命令行字段优先
+            for key in &["script", "command_line", "CommandLine"] {
+                if let Some(s) = obj.get(*key).and_then(|v| v.as_str()) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+
+            // 2.2 提取 command / cmd / input 字段
+            let cmd_val = obj.get("command").or_else(|| obj.get("cmd")).or_else(|| obj.get("input"));
+            let cmd_str = cmd_val.and_then(|v| v.as_str());
+
+            // 提取 args 字段（字符串数组）
+            let args_vec: Option<Vec<&str>> = obj.get("args").and_then(|v| {
+                v.as_array().map(|arr| {
+                    arr.iter().filter_map(|item| item.as_str()).collect()
+                })
+            });
+
+            if let Some(cmd) = cmd_str {
+                let cmd_trimmed = cmd.trim();
+                let base = cmd_trimmed.rsplit('/').next().unwrap_or(cmd_trimmed);
+
+                // 特殊处理解释器包装: bash / sh / zsh（形如 {"command": "bash", "args": ["-c", "date; curl ..."]}）
+                if base == "bash" || base == "sh" || base == "zsh" {
+                    if let Some(ref args) = args_vec {
+                        // 寻找 -c 及其后面的实际脚本参数
+                        for (i, arg) in args.iter().enumerate() {
+                            if *arg == "-c" {
+                                if i + 1 < args.len() {
+                                    return Some(args[i + 1].trim().to_string());
+                                }
+                            } else if arg.starts_with("-c ") {
+                                return Some(arg[3..].trim().to_string());
+                            } else if arg.starts_with("-c=") {
+                                return Some(arg[3..].trim().to_string());
+                            }
+                        }
+                    }
+                }
+
+                // 如果包含 args，将其与 cmd 拼接为完整命令行以供全链条白名单核验
+                if let Some(ref args) = args_vec {
+                    if !args.is_empty() {
+                        let mut full = cmd_trimmed.to_string();
+                        for arg in args {
+                            full.push(' ');
+                            full.push_str(arg);
+                        }
+                        return Some(full);
+                    }
+                }
+
+                return Some(cmd_trimmed.to_string());
+            }
+
+            // 如果没有 command 字段，但 args 提供了完整命令列表
+            if let Some(ref args) = args_vec {
+                if !args.is_empty() {
+                    return Some(args.join(" "));
+                }
+            }
         }
-        if let Some(s) = cmd.as_str() {
-            return Some(s);
+        None
+    };
+
+    if let Some(ref cmd) = inst.command {
+        if let Some(res) = parse_from_value(cmd) {
+            return Some(res);
         }
     }
-    if let Some(params) = &inst.params {
-        if let Some(s) = params.get("command").and_then(|v| v.as_str()) {
-            return Some(s);
-        }
-        if let Some(s) = params.get("cmd").and_then(|v| v.as_str()) {
-            return Some(s);
+    if let Some(ref params) = inst.params {
+        if let Some(res) = parse_from_value(params) {
+            return Some(res);
         }
     }
     None
@@ -149,13 +219,49 @@ fn is_single_segment_safe(seg: &str) -> bool {
 
     match base_cmd {
         "curl" | "wget" => {
-            // 确保没有写盘或非 GET 操作
-            let lower_seg = seg.to_ascii_lowercase();
-            let unsafe_curl_flags = [
-                "-o ", "-o=", "-o", "--output", "-x post", "-x put", "-x delete", "-x patch",
-                "-d ", "--data", "--form", "-f "
-            ];
-            !unsafe_curl_flags.iter().any(|f| lower_seg.contains(f))
+            // 严禁写文件、上传数据或非 GET/HEAD 动作
+            let mut idx = 1;
+            while idx < words.len() {
+                let word = words[idx];
+                let lower = word.to_ascii_lowercase();
+
+                // 1. 写文件类参数: -o, -O, --output, --output=..., --remote-name
+                if lower == "-o" || lower == "-o" || lower.starts_with("-o=") || lower == "--output" || lower.starts_with("--output=") || lower == "--remote-name" {
+                    // 特例: -o - 表示输出到 stdout (纯只读打印)
+                    if lower == "-o" && idx + 1 < words.len() && words[idx + 1] == "-" {
+                        idx += 2;
+                        continue;
+                    }
+                    return false;
+                }
+                // 2. 非 GET 请求方法: -X POST, -X PUT, -X DELETE, -X PATCH, --request ...
+                if lower == "-x" || lower == "--request" {
+                    if idx + 1 < words.len() {
+                        let method = words[idx + 1].to_ascii_uppercase();
+                        if method != "GET" && method != "HEAD" {
+                            return false;
+                        }
+                        idx += 2;
+                        continue;
+                    }
+                }
+                if lower.starts_with("-xpost") || lower.starts_with("-xput") || lower.starts_with("-xdelete") || lower.starts_with("-xpatch") {
+                    return false;
+                }
+                // 3. 上传数据: -d, --data, --json, -F, --form, -T, --upload-file
+                if lower == "-d" || lower.starts_with("-d=") || lower.starts_with("-d@") || lower == "--data" || lower.starts_with("--data") || lower == "--json" {
+                    return false;
+                }
+                if word == "-F" || lower.starts_with("-f=") || lower == "--form" || lower.starts_with("--form=") {
+                    return false;
+                }
+                if word == "-T" || lower == "--upload-file" {
+                    return false;
+                }
+
+                idx += 1;
+            }
+            true
         }
         "git" => {
             if words.len() < 2 {
@@ -256,13 +362,10 @@ pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
     let tool = raw_tool.rsplit('/').next().unwrap_or(&raw_tool);
     let action = inst.get_action().to_ascii_lowercase();
 
-    // 🌟 全链条只读 Shell 嗅探：如果调用的是 shell/bash/exec 工具，且命令经全量白名单核验确认 100% 只读（如 curl 查网络、git status/diff、ls/cat 等无副作用探针），直接按只读放行，绝不误触修改代码的审查门禁！
-    let is_shell_exec = tool.contains("shell") || tool.contains("bash") || tool == "exec";
-    if is_shell_exec {
-        if let Some(cmd_str) = extract_shell_command_string(inst) {
-            if is_safe_read_only_shell_command(cmd_str) {
-                return false;
-            }
+    // 🌟 全链条只读 Shell 嗅探：如果指令提取出了具体命令行且经白名单核验确认 100% 只读（如 curl 查网络、git status/diff、ls/cat 等无副作用探针），直接按只读放行，绝不误触修改代码的审查门禁！
+    if let Some(cmd_str) = extract_shell_command_string(inst) {
+        if is_safe_read_only_shell_command(&cmd_str) {
+            return false;
         }
     }
 
@@ -1456,5 +1559,39 @@ mod tests {
         inst_write_shell.tool = Some("remote-hub/shell_exec".to_string());
         inst_write_shell.command = Some(json!({ "command": "npm test" }));
         assert!(is_write_or_side_effect_tool(&inst_write_shell), "npm test 属于潜在测试/写入脚本必须受门禁保护");
+
+        // 10. 用户实测场景: bash -c 复合天气/网络探针多命令
+        let mut inst_bash_c = AgentInstruction::default();
+        inst_bash_c.tool = Some("remote-hub/shell_exec".to_string());
+        inst_bash_c.command = Some(json!({
+            "command": "bash",
+            "args": [
+                "-c",
+                "date; curl -s -m 5 'http://ip-api.com/json'; echo ''; curl -s -m 5 'wttr.in/?format=3'"
+            ],
+            "cwd": "/home/w/文档/free_api"
+        }));
+        assert!(!is_write_or_side_effect_tool(&inst_bash_c), "bash -c 复合只读命令必须放行为只读操作");
+
+        // 11. bash -c 若内部含有写操作 -> 必须拦截
+        let mut inst_bash_c_write = AgentInstruction::default();
+        inst_bash_c_write.tool = Some("remote-hub/shell_exec".to_string());
+        inst_bash_c_write.command = Some(json!({
+            "command": "bash",
+            "args": [
+                "-c",
+                "date; rm -rf target"
+            ]
+        }));
+        assert!(is_write_or_side_effect_tool(&inst_bash_c_write), "bash -c 包含 rm 必须判定为写操作受门禁保护");
+
+        // 12. 带有 command 与 args 拆分传递的形式 (如 curl -s http://...)
+        let mut inst_split_args = AgentInstruction::default();
+        inst_split_args.tool = Some("run_command".to_string());
+        inst_split_args.command = Some(json!({
+            "command": "curl",
+            "args": ["-s", "-m", "5", "http://ip-api.com/json"]
+        }));
+        assert!(!is_write_or_side_effect_tool(&inst_split_args), "curl + args 拆分传递只读必须放行");
     }
 }
