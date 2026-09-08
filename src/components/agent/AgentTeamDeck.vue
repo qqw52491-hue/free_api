@@ -217,6 +217,13 @@
                         </ul>
                     </div>
 
+                    <!-- 🏷️ 角色特化交付契约扩展卡 (Custom Schema 扩展字段) -->
+                    <ExtraContractDeck
+                        v-if="selectedWorker.extra || selectedWorker.customSchema"
+                        :extra="selectedWorker.extra"
+                        :schema="selectedWorker.customSchema"
+                    />
+
                     <!-- 子 Agent 执行轨迹条 (支持多步收纳与一键展开/折叠) -->
                     <div class="steps-deck-bar">
                         <div class="steps-deck-title">
@@ -336,6 +343,7 @@
 import { computed, ref, watch } from "vue";
 import type { AgentTeamState, AgentWorkerItem, AgentToolStatus, AgentStepItem, AgentWorkerStep, ReviewScorecard } from "./types";
 import { extractSubagentsFromStep } from "./workerUtils";
+import ExtraContractDeck from "./ExtraContractDeck.vue";
 
 function computeScorecardAverage(sc?: ReviewScorecard): number {
     if (!sc) return 0;

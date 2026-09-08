@@ -292,6 +292,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 if (arts.evidenceRefs) existing.evidenceRefs = arts.evidenceRefs;
                 if (arts.confidence) existing.confidence = arts.confidence;
                 if (arts.steps && arts.steps.length > 0) existing.steps = arts.steps;
+                if (arts.extra) existing.extra = arts.extra;
+                if (arts.customSchema) existing.customSchema = arts.customSchema;
                 if (step.status === "succeeded") existing.progress = 100;
             } else {
                 const id = `${details.role}-${step.id || step.stepId}`;
@@ -313,6 +315,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     evidenceRefs: arts.evidenceRefs,
                     confidence: arts.confidence,
                     steps: arts.steps,
+                    extra: arts.extra,
+                    customSchema: arts.customSchema,
                 });
             }
         }

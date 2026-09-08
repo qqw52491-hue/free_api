@@ -1,4 +1,4 @@
-import type { AgentStepItem, AgentWorkerItem, AgentWorkerStep, ReviewScorecard } from "./types";
+import type { AgentStepItem, AgentWorkerItem, AgentWorkerStep, ReviewScorecard, ContractSchema } from "./types";
 
 export function inferStepIntent(tool: string, rawTarget: string, explicitIntent?: string): { title: string; cleanTarget: string } {
     let clean = rawTarget.trim();
@@ -93,6 +93,8 @@ export function parseWorkerArtifacts(raw: unknown): {
     evidenceRefs?: string[];
     confidence?: string;
     steps?: AgentWorkerStep[];
+    extra?: Record<string, any>;
+    customSchema?: ContractSchema;
 } {
     if (!raw) return {};
     let obj: any = raw;
@@ -109,6 +111,28 @@ export function parseWorkerArtifacts(raw: unknown): {
     const actionLog: string[] = Array.isArray(obj.action_log) ? obj.action_log.map(String).filter(Boolean) : [];
     const evidenceRefs: string[] = Array.isArray(obj.evidence_refs) ? obj.evidence_refs.map(String).filter(Boolean) : [];
     const confidence = typeof obj.confidence === "string" ? obj.confidence : undefined;
+
+    // 提取扩展字段（支持嵌套在 obj.extra 中，或扁平在 obj 顶层中的非基线字段）
+    const extra: Record<string, any> = {};
+    if (obj.extra && typeof obj.extra === "object" && !Array.isArray(obj.extra)) {
+        Object.assign(extra, obj.extra);
+    }
+    const baselineKeys = new Set([
+        "findings", "scorecard", "action_log", "evidence_refs", "missing_evidence",
+        "confidence", "status", "child_run_id", "duration_ms", "completion_tokens",
+        "prompt_tokens", "error_kind", "raw_result_json", "kind", "steps",
+        "routing", "withdrawn_findings", "objection_verdicts", "steps_used",
+        "task_id", "attempt_id", "extra", "custom_schema", "changed_files",
+        "test_command", "test_status", "test_output_tail", "workspace_copy", "patch_ref"
+    ]);
+    for (const [k, v] of Object.entries(obj)) {
+        if (!baselineKeys.has(k) && v !== undefined && v !== null) {
+            extra[k] = v;
+        }
+    }
+
+    const customSchema: ContractSchema | undefined =
+        (obj.custom_schema && typeof obj.custom_schema === "object") ? obj.custom_schema : undefined;
 
     const steps: AgentWorkerStep[] = [];
     if (actionLog.length > 0) {
@@ -153,6 +177,8 @@ export function parseWorkerArtifacts(raw: unknown): {
         evidenceRefs: evidenceRefs.length > 0 ? evidenceRefs : undefined,
         confidence,
         steps: steps.length > 0 ? steps : undefined,
+        extra: Object.keys(extra).length > 0 ? extra : undefined,
+        customSchema,
     };
 }
 
@@ -226,12 +252,16 @@ export function extractSubagentsFromStep(
                         let findings = pw.findings;
                         let steps = pw.steps;
                         let durationMs = pw.durationMs || step.metrics?.toolDurationMs;
+                        let extra = pw.extra;
+                        let customSchema = pw.customSchema;
 
                         // 若 wait_jobs 的 resultStr 包含输出块，尝试补充
                         if (resultStr.includes(pw.id) || resultStr.includes("【任务 ID:")) {
                             const arts = parseWorkerArtifacts(resultStr);
                             if (arts.findings && !findings) findings = arts.findings;
                             if (arts.steps && (!steps || steps.length <= 3)) steps = arts.steps;
+                            if (arts.extra) extra = arts.extra;
+                            if (arts.customSchema) customSchema = arts.customSchema;
                         }
 
                         return {
@@ -241,6 +271,8 @@ export function extractSubagentsFromStep(
                             findings,
                             steps,
                             durationMs,
+                            extra,
+                            customSchema,
                         };
                     });
                 }
@@ -301,6 +333,8 @@ export function extractSubagentsFromStep(
                 evidenceRefs: arts.evidenceRefs,
                 confidence: arts.confidence,
                 steps: arts.steps,
+                extra: arts.extra,
+                customSchema: arts.customSchema,
             });
         }
     }
@@ -390,6 +424,8 @@ export function extractSubagentsFromStep(
             evidenceRefs: arts.evidenceRefs,
             confidence: arts.confidence,
             steps: arts.steps,
+            extra: arts.extra,
+            customSchema: arts.customSchema,
         });
     }
 

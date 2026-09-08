@@ -308,6 +308,19 @@ export interface AgentWorkerStep {
     output?: string;
 }
 
+export interface ContractFieldDef {
+    name: string;
+    field_type: "string" | "string[]" | "number" | "boolean";
+    description: string;
+    required?: boolean;
+    allowed_values?: string[];
+}
+
+export interface ContractSchema {
+    fields: ContractFieldDef[];
+    strict_closed_set?: boolean;
+}
+
 export interface AgentWorkerItem {
     id: string;
     name: string;
@@ -327,6 +340,8 @@ export interface AgentWorkerItem {
     evidenceRefs?: string[];
     confidence?: string;
     steps?: AgentWorkerStep[];
+    extra?: Record<string, any>;
+    customSchema?: ContractSchema;
 }
 
 export interface AgentTeamState {
