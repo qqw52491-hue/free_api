@@ -243,23 +243,23 @@ fn build_stage_evidence(context: &SandwichContext, workspace: &Path) -> String {
     evidence
 }
 
-/// 消费阶段审查结果（成功或基础设施失败均走这里）。
+/// 消费阶段审查交付回执（成功或基础设施失败均走这里）。
 /// oracle_index：宿主判分「下一未解阶段」索引（None = 无 oracle 场景）。
 /// blockers>0 时记录出生索引，供僵尸 blocker 清账判定。
 /// 返回注入父 Agent 上下文的摘要文案。
-pub fn apply_stage_result(
+pub fn apply_stage_receipt(
     checkpoint: &mut AgentCheckpoint,
-    result: &crate::agent::child_reviewer::ChildReviewResult,
+    receipt: &crate::agent::protocol::DeliveryReceipt,
     _context: &SandwichContext,
     oracle_index: Option<u32>,
 ) -> String {
     let was_rebuttal = checkpoint.stage_review_rebuttal_run_id.as_deref()
-        == Some(result.child_run_id.as_str());
+        == Some(receipt.child_run_id.as_str());
     checkpoint.stage_review_run_id = None;
     checkpoint.stage_review_rebuttal_run_id = None;
 
     // 基础设施失败：退还阶段审查次数、基线不清零（该阶段视为「未审」，会重新触发）
-    if result.is_infra_failure() {
+    if receipt.is_infra_failure() {
         if checkpoint.reviewer_budget_refunds < 3 && checkpoint.stage_review_budget_used > 0 {
             checkpoint.stage_review_budget_used -= 1;
             checkpoint.reviewer_budget_refunds += 1;
@@ -270,16 +270,16 @@ pub fn apply_stage_result(
     // 基线已在派发时记录（见 dispatch）；此处不得用当前台账长度覆盖，
     // 否则派发后、消费前的写入会被错误标记为已覆盖。派发后的新写入计入
     // writes_since，由下一次触发（todo 推进/文件数阈值）安排复检。
-    checkpoint.stage_review_blockers_open = result.stage_blocking_open();
+    checkpoint.stage_review_blockers_open = receipt.stage_blocking_open();
     // 僵尸 blocker 治理：记录出生阶段索引（无 blocker 时清空，避免陈旧索引干扰）
     if checkpoint.stage_review_blockers_open > 0 {
         checkpoint.stage_review_blocker_stage = oracle_index;
     } else {
         checkpoint.stage_review_blocker_stage = None;
     }
-    checkpoint.stage_review_final_only = result.stage_final_only_lines();
+    checkpoint.stage_review_final_only = receipt.stage_final_only_lines();
 
-    let (added, withdrawn, maintained) = result.objection_stats();
+    let (added, withdrawn, maintained) = receipt.objection_stats();
     checkpoint.review_total_withdrawn += withdrawn;
     checkpoint.review_total_maintained += maintained;
     let mut text = format!(
@@ -289,9 +289,9 @@ pub fn apply_stage_result(
         added,
         withdrawn,
         maintained,
-        result.prompt_tokens,
-        result.completion_tokens,
-        result.duration_ms
+        receipt.prompt_tokens,
+        receipt.completion_tokens,
+        receipt.duration_ms
     );
     if was_rebuttal {
         text.push_str("（对质复检结论）");
@@ -308,6 +308,17 @@ pub fn apply_stage_result(
         }
     }
     text
+}
+
+/// 兼容老接口：将 ChildReviewResult 转换为 DeliveryReceipt 交付回执后处理
+pub fn apply_stage_result(
+    checkpoint: &mut AgentCheckpoint,
+    result: &crate::agent::child_reviewer::ChildReviewResult,
+    context: &SandwichContext,
+    oracle_index: Option<u32>,
+) -> String {
+    let receipt: crate::agent::protocol::DeliveryReceipt = result.clone().into();
+    apply_stage_receipt(checkpoint, &receipt, context, oracle_index)
 }
 
 #[cfg(test)]
@@ -562,5 +573,32 @@ mod tests {
         assert_eq!(cp.stage_review_baseline_side_effects, 0);
         assert_eq!(cp.stage_review_blockers_open, 0);
         assert!(cp.stage_review_run_id.is_none());
+    }
+
+    #[test]
+    fn apply_stage_receipt_directly_handles_blockers_and_infra_failure() {
+        use crate::agent::protocol::DeliveryReceipt;
+        let mut context = SandwichContext::new("system".to_string(), "goal".to_string());
+        context.record_side_effect(1, "write_file".to_string(), "a.rs".to_string());
+        let mut cp = approved_checkpoint();
+        cp.stage_review_run_id = Some("receipt-1".to_string());
+        cp.stage_review_budget_used = 1;
+
+        let receipt = DeliveryReceipt {
+            child_run_id: "receipt-1".to_string(),
+            task_id: "receipt-1".to_string(),
+            attempt_id: 1,
+            kind: "review".to_string(),
+            status: "timed_out".to_string(),
+            duration_ms: 60000,
+            completion_tokens: 0,
+            prompt_tokens: 0,
+            error_kind: Some("timed_out".to_string()),
+            payload: None,
+            raw_text: None,
+        };
+        let note = apply_stage_receipt(&mut cp, &receipt, &context, None);
+        assert_eq!(cp.stage_review_budget_used, 0);
+        assert!(note.contains("阶段审查任务未正常完成"));
     }
 }

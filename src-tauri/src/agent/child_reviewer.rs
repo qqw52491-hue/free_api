@@ -2502,6 +2502,81 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    #[test]
+    fn test_poll_completed_delivery_receipts_unified_pipeline() {
+        let base = std::env::temp_dir().join(format!("free-api-receipt-poll-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        // 1. 模拟子审查任务
+        let rev_run_id = begin_child_run(&state, "parent-receipt-p1", "session-rc1", &workspace, "model-r", 1, "review", None).unwrap();
+        let rev_json = serde_json::json!({
+            "child_run_id": rev_run_id,
+            "status": "succeeded",
+            "findings": [{
+                "id": "F1",
+                "severity": "blocking",
+                "finality": "regardless",
+                "location": "src/main.rs:1",
+                "current": "",
+                "why": "漏洞",
+                "suggestion": "修复",
+                "evidence_strength": "confirmed"
+            }],
+            "confidence": "high",
+            "evidence_refs": ["ref1"],
+            "missing_evidence": [],
+            "duration_ms": 120,
+            "completion_tokens": 40,
+            "routing": "certain",
+            "withdrawn_findings": []
+        }).to_string();
+        finish_child_run(&state, &rev_run_id, "succeeded", 120, 40, None, Some(&rev_json));
+
+        // 2. 模拟写入工兵任务
+        let wrt_run_id = begin_child_run(&state, "parent-receipt-p1", "session-rc1", &workspace, "model-w", 2, "writer", None).unwrap();
+        let wrt_json = serde_json::json!({
+            "child_run_id": wrt_run_id,
+            "status": "succeeded",
+            "test_status": "passed",
+            "findings": ["已创建新模块"],
+            "confidence": "confirmed",
+            "evidence_refs": [],
+            "missing_evidence": [],
+            "duration_ms": 200,
+            "completion_tokens": 80,
+            "changed_files": []
+        }).to_string();
+        finish_child_run(&state, &wrt_run_id, "succeeded", 200, 80, None, Some(&wrt_json));
+
+        // 统一轮询回执流
+        let receipts = poll_completed_delivery_receipts(&state, "parent-receipt-p1", None).unwrap();
+        assert_eq!(receipts.len(), 2);
+
+        let rev_receipt = receipts.iter().find(|r| r.child_run_id == rev_run_id).expect("审查回执存在");
+        assert_eq!(rev_receipt.kind, "review");
+        assert_eq!(rev_receipt.confidence(), "high");
+        assert_eq!(rev_receipt.stage_blocking_open(), 1);
+        let delivery_data = rev_receipt.as_reviewer_delivery().expect("应能提取 ReviewerDeliveryData");
+        assert_eq!(delivery_data.findings.len(), 1);
+        assert_eq!(delivery_data.findings[0].id, "F1");
+
+        let wrt_receipt = receipts.iter().find(|r| r.child_run_id == wrt_run_id).expect("工兵回执存在");
+        assert_eq!(wrt_receipt.kind, "writer");
+        let writer_data = wrt_receipt.as_writer_result().expect("应能提取 WriterResult");
+        assert_eq!(writer_data.findings, vec!["已创建新模块".to_string()]);
+        assert_eq!(writer_data.test_status, "passed");
+
+        // 消费幂等性校验：再次轮询必须为空
+        let empty_receipts = poll_completed_delivery_receipts(&state, "parent-receipt-p1", None).unwrap();
+        assert!(empty_receipts.is_empty());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[tokio::test]
     async fn wait_for_jobs_returns_completed_child_reviewer_results() {
         let base = std::env::temp_dir().join(format!("free-api-child-wait-{}", Uuid::new_v4()));

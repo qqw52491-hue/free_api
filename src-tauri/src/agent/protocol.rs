@@ -161,16 +161,79 @@ impl DeliveryReceipt {
                     .and_then(|t| serde_json::from_str(t).ok())
             })
     }
+
+    /// 未被审查者撤回的 blocking 异议数
+    pub fn unwithdrawn_blocking_count(&self) -> u32 {
+        self.as_reviewer_delivery()
+            .map(|d| d.unwithdrawn_blocking_count())
+            .unwrap_or(0)
+    }
+
+    /// 阶段审查的拦截判据（未撤回且非 final_only 的 blocking 异议数）
+    pub fn stage_blocking_open(&self) -> u32 {
+        self.as_reviewer_delivery()
+            .map(|d| d.stage_blocking_open())
+            .unwrap_or(0)
+    }
+
+    /// final_only 级 blocking 的展示行（带入收尾审查的 carry-over 义务）
+    pub fn stage_final_only_lines(&self) -> Vec<String> {
+        self.as_reviewer_delivery()
+            .map(|d| d.stage_final_only_lines())
+            .unwrap_or_default()
+    }
+
+    /// 本轮异议动态三元组：(新增, 撤回, 维持)
+    pub fn objection_stats(&self) -> (u32, u32, u32) {
+        self.as_reviewer_delivery()
+            .map(|d| d.objection_stats())
+            .unwrap_or((0, 0, 0))
+    }
+
+    /// 提取审查发现项
+    pub fn findings(&self) -> Vec<crate::agent::child_reviewer::ReviewFinding> {
+        self.as_reviewer_delivery()
+            .map(|d| d.findings)
+            .unwrap_or_default()
+    }
+
+    /// 提取审查结论置信度/状态
+    pub fn confidence(&self) -> String {
+        self.as_reviewer_delivery()
+            .map(|d| d.confidence)
+            .unwrap_or_else(|| self.status.clone())
+    }
+
+    /// 提取审查建议路由
+    pub fn routing(&self) -> Option<String> {
+        self.as_reviewer_delivery().and_then(|d| d.routing)
+    }
+
+    /// 提取审查评分卡
+    pub fn scorecard(&self) -> Option<crate::agent::child_reviewer::ReviewScorecard> {
+        self.as_reviewer_delivery().and_then(|d| d.scorecard)
+    }
+
+    /// 提取缺失证据项
+    pub fn missing_evidence(&self) -> Vec<String> {
+        self.as_reviewer_delivery()
+            .map(|d| d.missing_evidence)
+            .unwrap_or_default()
+    }
 }
 
 impl From<crate::agent::child_reviewer::ChildReviewResult> for DeliveryReceipt {
     fn from(res: crate::agent::child_reviewer::ChildReviewResult) -> Self {
         let kind = res.kind.clone().unwrap_or_else(|| "review".to_string());
         let raw_text = res.raw_result_json.clone();
-        let payload = raw_text
-            .as_deref()
-            .and_then(|t| serde_json::from_str::<Value>(t).ok())
-            .or_else(|| serde_json::to_value(&res).ok());
+        let payload = if kind == "writer" || kind == "worker" {
+            raw_text
+                .as_deref()
+                .and_then(|t| serde_json::from_str::<Value>(t).ok())
+                .or_else(|| serde_json::to_value(&res).ok())
+        } else {
+            serde_json::to_value(res.to_reviewer_delivery()).ok()
+        };
 
         Self {
             child_run_id: res.child_run_id.clone(),
@@ -257,5 +320,80 @@ mod tests {
         assert!(receipt.is_infra_failure());
         assert_eq!(receipt.raw_text.as_deref(), Some(r#"{"verdict": "pass", broken..."#));
         assert!(receipt.as_reviewer_delivery().is_none());
+    }
+
+    #[test]
+    fn test_delivery_receipt_delegators_and_from_conversion() {
+        use crate::agent::child_reviewer::{ChildReviewResult, ObjectionVerdict, ReviewFinding, ReviewScorecard};
+
+        let res = ChildReviewResult {
+            child_run_id: "c-1".to_string(),
+            status: "succeeded".to_string(),
+            findings: vec![
+                ReviewFinding {
+                    id: "F1".to_string(),
+                    severity: "blocking".to_string(),
+                    finality: "regardless".to_string(),
+                    location: "src/lib.rs:10".to_string(),
+                    current: "old".to_string(),
+                    why: "risk".to_string(),
+                    suggestion: "fix".to_string(),
+                    evidence_strength: "confirmed".to_string(),
+                },
+                ReviewFinding {
+                    id: "F2".to_string(),
+                    severity: "blocking".to_string(),
+                    finality: "final_only".to_string(),
+                    location: "src/main.rs:20".to_string(),
+                    current: "todo".to_string(),
+                    why: "clean up".to_string(),
+                    suggestion: "clean".to_string(),
+                    evidence_strength: "confirmed".to_string(),
+                },
+            ],
+            confidence: "high".to_string(),
+            evidence_refs: vec!["ref1".to_string()],
+            missing_evidence: vec!["missing1".to_string()],
+            duration_ms: 1200,
+            completion_tokens: 300,
+            prompt_tokens: 500,
+            error_kind: None,
+            raw_result_json: None,
+            kind: Some("review".to_string()),
+            routing: Some("certain".to_string()),
+            withdrawn_findings: vec!["F1".to_string()],
+            objection_verdicts: vec![
+                ObjectionVerdict {
+                    finding_id: "F1".to_string(),
+                    verdict: "withdraw".to_string(),
+                    reason: "resolved".to_string(),
+                }
+            ],
+            scorecard: Some(ReviewScorecard::new(80, 70, 85, Some(90))),
+        };
+
+        let receipt: DeliveryReceipt = res.into();
+        assert_eq!(receipt.child_run_id, "c-1");
+        assert_eq!(receipt.kind, "review");
+        assert_eq!(receipt.status, "succeeded");
+        assert_eq!(receipt.duration_ms, 1200);
+        assert_eq!(receipt.prompt_tokens, 500);
+        assert_eq!(receipt.completion_tokens, 300);
+        assert!(receipt.is_success());
+        assert!(!receipt.is_infra_failure());
+
+        // Domain delegators
+        assert_eq!(receipt.confidence(), "high");
+        assert_eq!(receipt.routing().as_deref(), Some("certain"));
+        assert_eq!(receipt.missing_evidence(), vec!["missing1"]);
+        assert_eq!(receipt.findings().len(), 2);
+        assert_eq!(receipt.unwithdrawn_blocking_count(), 1); // F2 is unwithdrawn
+        assert_eq!(receipt.stage_blocking_open(), 0); // F1 withdrawn, F2 is final_only
+        assert_eq!(receipt.stage_final_only_lines().len(), 1);
+        let (added, withdrawn, maintained) = receipt.objection_stats();
+        assert_eq!(withdrawn, 1);
+        assert_eq!(maintained, 0);
+        assert_eq!(added, 1); // F2 is new blocking
+        assert!(receipt.scorecard().unwrap().passes_gate());
     }
 }

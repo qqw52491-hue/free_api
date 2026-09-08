@@ -227,34 +227,34 @@ pub fn has_any_running_jobs(db: &DbState, parent_run_id: &str) -> bool {
     has_running_jobs(db, parent_run_id) || crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id)
 }
 
-/// 将子审查终态结果映射为统一的信箱结果条目
+/// 将子审查/工兵/侦察终态回执映射为统一的信箱结果条目
 fn collect_completed_child_results(
     db: &DbState,
     parent_run_id: &str,
     target_job_ids: Option<&[String]>,
 ) -> Vec<BackgroundJobResult> {
-    match crate::agent::child_reviewer::poll_completed_child_runs_filtered(db, parent_run_id, target_job_ids) {
-        Ok(children) => children
+    match crate::agent::child_reviewer::poll_completed_delivery_receipts(db, parent_run_id, target_job_ids) {
+        Ok(receipts) => receipts
             .into_iter()
-            .map(|child| {
-                let kind_str = child.kind.as_deref().unwrap_or("review");
-                let (job_type, title) = match kind_str {
+            .map(|receipt| {
+                let (job_type, title) = match receipt.kind.as_str() {
                     "writer" => ("child_writer".to_string(), "受限写入工兵任务".to_string()),
                     "worker" => ("child_worker".to_string(), "受限侦察任务".to_string()),
                     _ => ("child_reviewer".to_string(), "受限子审查任务".to_string()),
                 };
-                let result_json = child
-                    .raw_result_json
+                let result_json = receipt
+                    .raw_text
                     .clone()
-                    .unwrap_or_else(|| serde_json::to_string(&child).unwrap_or_default());
+                    .or_else(|| receipt.payload.as_ref().map(|p| serde_json::to_string(p).unwrap_or_default()))
+                    .unwrap_or_else(|| serde_json::to_string(&receipt).unwrap_or_default());
                 BackgroundJobResult {
                     result_json,
-                    job_id: child.child_run_id.clone(),
+                    job_id: receipt.child_run_id.clone(),
                     job_type,
                     title,
-                    status: child.status,
-                    duration_ms: child.duration_ms,
-                    error_kind: child.error_kind,
+                    status: receipt.status,
+                    duration_ms: receipt.duration_ms,
+                    error_kind: receipt.error_kind,
                 }
             })
             .collect(),
