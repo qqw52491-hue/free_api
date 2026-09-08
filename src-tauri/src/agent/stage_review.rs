@@ -156,20 +156,19 @@ pub async fn dispatch(
         "question": "阶段级写入审查：审查当前阶段变更是否满足阶段目标且无 blocking 缺陷",
         "evidence_excerpt": evidence,
     });
-    let child_run_id = crate::agent::child_reviewer::spawn_child_reviewer(
-        Some(app.clone()),
-        db,
+    let envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
         parent_run_id,
         session_id,
-        workspace,
         &model_to_use,
-        &routing.tier.to_string(),
-        model_routing.reasoning_effort_for(&routing.tier),
-        &params,
-        "",
-        interrupt_rx,
+        params,
     )
-    .await?;
+    .with_task_id(format!("stage_review_{}", checkpoint.step_id))
+    .with_tier(&routing.tier.to_string())
+    .with_effort(model_routing.reasoning_effort_for(&routing.tier));
+
+    let child_run_id = envelope
+        .dispatch(Some(app.clone()), db, workspace, interrupt_rx)
+        .await?;
 
     checkpoint.stage_review_run_id = Some(child_run_id.clone());
     checkpoint.stage_review_budget_used += 1;

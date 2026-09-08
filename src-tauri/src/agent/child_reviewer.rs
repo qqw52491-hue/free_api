@@ -102,20 +102,17 @@ impl PlanReviewerDispatchSnapshot {
         workspace_root: &Path,
         interrupt_rx: watch::Receiver<u64>,
     ) -> Result<String, String> {
-        spawn_child_reviewer(
-            app,
-            db,
+        let envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
             parent_run_id,
             parent_session_id,
-            workspace_root,
             &self.model,
-            &self.tier,
-            &self.effort,
-            &self.params,
-            &self.persona,
-            interrupt_rx,
+            self.params.clone(),
         )
-        .await
+        .with_tier(&self.tier)
+        .with_effort(&self.effort)
+        .with_persona(&self.persona);
+
+        envelope.dispatch(app, db, workspace_root, interrupt_rx).await
     }
 }
 

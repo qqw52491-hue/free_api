@@ -72,8 +72,174 @@ pub struct DispatchEnvelope {
 }
 
 impl DispatchEnvelope {
+    pub fn new(
+        task_id: impl Into<String>,
+        role_id: impl Into<String>,
+        contract_id: impl Into<String>,
+        parent_run_id: impl Into<String>,
+        parent_session_id: impl Into<String>,
+        model_id: impl Into<String>,
+        input_payload: Value,
+    ) -> Self {
+        Self {
+            task_id: task_id.into(),
+            attempt_id: default_attempt_id(),
+            role_id: role_id.into(),
+            contract_id: contract_id.into(),
+            parent_run_id: parent_run_id.into(),
+            parent_session_id: parent_session_id.into(),
+            model_id: model_id.into(),
+            model_tier: default_tier(),
+            reasoning_effort: default_effort(),
+            persona: String::new(),
+            timeout_secs: default_timeout_secs(),
+            input_payload,
+        }
+    }
+
+    pub fn reviewer(
+        parent_run_id: impl Into<String>,
+        parent_session_id: impl Into<String>,
+        model_id: impl Into<String>,
+        input_payload: Value,
+    ) -> Self {
+        Self::new(
+            "review",
+            "child_reviewer",
+            "reviewer.v1",
+            parent_run_id,
+            parent_session_id,
+            model_id,
+            input_payload,
+        )
+    }
+
+    pub fn writer(
+        parent_run_id: impl Into<String>,
+        parent_session_id: impl Into<String>,
+        model_id: impl Into<String>,
+        input_payload: Value,
+    ) -> Self {
+        let mut env = Self::new(
+            "writer",
+            "child_writer",
+            "writer.v1",
+            parent_run_id,
+            parent_session_id,
+            model_id,
+            input_payload,
+        );
+        env.timeout_secs = 180;
+        env
+    }
+
+    pub fn worker(
+        parent_run_id: impl Into<String>,
+        parent_session_id: impl Into<String>,
+        model_id: impl Into<String>,
+        input_payload: Value,
+    ) -> Self {
+        Self::new(
+            "worker",
+            "child_worker",
+            "worker.v1",
+            parent_run_id,
+            parent_session_id,
+            model_id,
+            input_payload,
+        )
+    }
+
+    pub fn with_task_id(mut self, task_id: impl Into<String>) -> Self {
+        self.task_id = task_id.into();
+        self
+    }
+
+    pub fn with_attempt_id(mut self, attempt_id: u32) -> Self {
+        self.attempt_id = attempt_id;
+        self
+    }
+
+    pub fn with_tier(mut self, tier: impl Into<String>) -> Self {
+        self.model_tier = tier.into();
+        self
+    }
+
+    pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = effort.into();
+        self
+    }
+
+    pub fn with_persona(mut self, persona: impl Into<String>) -> Self {
+        self.persona = persona.into();
+        self
+    }
+
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout_secs = secs;
+        self
+    }
+
     pub fn attempt_key(&self) -> TaskAttemptKey {
         TaskAttemptKey::new(&self.task_id, self.attempt_id)
+    }
+
+    /// 统一异步派发执行：根据 role_id 自动委派给对应沙箱执行体
+    pub async fn dispatch(
+        &self,
+        app: Option<tauri::AppHandle>,
+        db: &crate::db::DbState,
+        workspace_root: &std::path::Path,
+        interrupt_rx: tokio::sync::watch::Receiver<u64>,
+    ) -> Result<String, String> {
+        match self.role_id.as_str() {
+            "child_writer" | "writer" => {
+                crate::agent::child_writer::spawn_child_writer(
+                    app,
+                    db,
+                    &self.parent_run_id,
+                    &self.parent_session_id,
+                    workspace_root,
+                    &self.model_id,
+                    &self.reasoning_effort,
+                    &self.input_payload,
+                    self.persona.clone(),
+                    interrupt_rx,
+                )
+                .await
+            }
+            "child_worker" | "worker" => {
+                crate::agent::child_worker::spawn_child_worker(
+                    app,
+                    db,
+                    &self.parent_run_id,
+                    &self.parent_session_id,
+                    workspace_root,
+                    &self.model_id,
+                    &self.reasoning_effort,
+                    &self.input_payload,
+                    self.persona.clone(),
+                    interrupt_rx,
+                )
+                .await
+            }
+            _ => {
+                crate::agent::child_reviewer::spawn_child_reviewer(
+                    app,
+                    db,
+                    &self.parent_run_id,
+                    &self.parent_session_id,
+                    workspace_root,
+                    &self.model_id,
+                    &self.model_tier,
+                    &self.reasoning_effort,
+                    &self.input_payload,
+                    &self.persona,
+                    interrupt_rx,
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -395,5 +561,42 @@ mod tests {
         assert_eq!(maintained, 0);
         assert_eq!(added, 1); // F2 is new blocking
         assert!(receipt.scorecard().unwrap().passes_gate());
+    }
+
+    #[test]
+    fn test_dispatch_envelope_builders() {
+        let rev = DispatchEnvelope::reviewer("parent-1", "session-1", "model-r", serde_json::json!({"q": 1}))
+            .with_task_id("rev_1")
+            .with_tier("pro")
+            .with_effort("high")
+            .with_persona("auditor")
+            .with_attempt_id(2)
+            .with_timeout_secs(90);
+
+        assert_eq!(rev.task_id, "rev_1");
+        assert_eq!(rev.role_id, "child_reviewer");
+        assert_eq!(rev.contract_id, "reviewer.v1");
+        assert_eq!(rev.parent_run_id, "parent-1");
+        assert_eq!(rev.parent_session_id, "session-1");
+        assert_eq!(rev.model_id, "model-r");
+        assert_eq!(rev.model_tier, "pro");
+        assert_eq!(rev.reasoning_effort, "high");
+        assert_eq!(rev.persona, "auditor");
+        assert_eq!(rev.attempt_id, 2);
+        assert_eq!(rev.timeout_secs, 90);
+        assert_eq!(rev.attempt_key().task_id, "rev_1");
+        assert_eq!(rev.attempt_key().attempt_id, 2);
+
+        let wrt = DispatchEnvelope::writer("parent-2", "session-2", "model-w", serde_json::json!({"task": "fix"}))
+            .with_task_id("wrt_1");
+        assert_eq!(wrt.role_id, "child_writer");
+        assert_eq!(wrt.contract_id, "writer.v1");
+        assert_eq!(wrt.timeout_secs, 180);
+
+        let wrk = DispatchEnvelope::worker("parent-3", "session-3", "model-s", serde_json::json!({"task": "scout"}))
+            .with_task_id("wrk_1");
+        assert_eq!(wrk.role_id, "child_worker");
+        assert_eq!(wrk.contract_id, "worker.v1");
+        assert_eq!(wrk.timeout_secs, 60);
     }
 }

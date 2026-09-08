@@ -2,7 +2,7 @@
 //! 从 loop_runner.rs 原样抽出，行为不变。
 
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
-use crate::agent::child_reviewer::{result_as_dispatch_output, spawn_child_reviewer};
+use crate::agent::child_reviewer::result_as_dispatch_output;
 use crate::agent::context::resource_scope::ResourceOperation;
 use crate::agent::control::{take_pending_interrupt, HumanControl};
 use crate::agent::dispatcher::{

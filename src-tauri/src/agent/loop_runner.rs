@@ -2,7 +2,7 @@
 //! 既有外部引用路径 crate::agent::loop_runner::* 通过下方 re-export 全部维持不变。
 
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
-use crate::agent::child_reviewer::{result_as_dispatch_output, spawn_child_reviewer};
+use crate::agent::child_reviewer::result_as_dispatch_output;
 use crate::agent::context::resource_scope::ResourceOperation;
 use crate::agent::control::{take_pending_interrupt, HumanControl};
 use crate::agent::dispatcher::{
@@ -591,19 +591,25 @@ pub async fn run_tool_phase(
                 }
             }
 
-            match crate::agent::child_writer::spawn_child_writer(
-                Some(app.clone()),
-                state.inner(),
+            let envelope = crate::agent::protocol::DispatchEnvelope::writer(
                 parent_run_id,
                 final_session_id,
-                workspace_dir,
                 &writer_model,
-                &reasoning_effort,
-                &effective_params,
-                writer_persona,
-                interrupt_rx.clone(),
+                effective_params.clone(),
             )
-            .await
+            .with_task_id(format!("writer_{}", item_num))
+            .with_tier(routing.tier.to_string())
+            .with_effort(&reasoning_effort)
+            .with_persona(writer_persona);
+
+            match envelope
+                .dispatch(
+                    Some(app.clone()),
+                    state.inner(),
+                    workspace_dir,
+                    interrupt_rx.clone(),
+                )
+                .await
             {
                 Ok(child_run_id) => {
                     let task_str = effective_params.get("task").and_then(|v| v.as_str()).unwrap_or("");
@@ -766,19 +772,25 @@ pub async fn run_tool_phase(
                 }
             }
 
-            match crate::agent::child_worker::spawn_child_worker(
-                Some(app.clone()),
-                state.inner(),
+            let envelope = crate::agent::protocol::DispatchEnvelope::worker(
                 parent_run_id,
                 final_session_id,
-                workspace_dir,
                 &scout_model,
-                &reasoning_effort,
-                &effective_worker_params,
-                scout_persona,
-                interrupt_rx.clone(),
+                effective_worker_params.clone(),
             )
-            .await
+            .with_task_id(format!("worker_{}", item_num))
+            .with_tier(routing.tier.to_string())
+            .with_effort(&reasoning_effort)
+            .with_persona(scout_persona);
+
+            match envelope
+                .dispatch(
+                    Some(app.clone()),
+                    state.inner(),
+                    workspace_dir,
+                    interrupt_rx.clone(),
+                )
+                .await
             {
                 Ok(child_run_id) => {
                     let task_str = effective_worker_params.get("task").and_then(|v| v.as_str()).unwrap_or("");
