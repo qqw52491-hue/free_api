@@ -499,6 +499,20 @@ impl ChildReviewResult {
     pub fn objection_stats(&self) -> (u32, u32, u32) {
         self.to_reviewer_delivery().objection_stats()
     }
+
+    /// 尝试将交付内容反序列化为写入工兵结果 (WriterResult)
+    pub fn as_writer_result(&self) -> Option<crate::agent::child_writer::WriterResult> {
+        self.raw_result_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+    }
+
+    /// 尝试将交付内容反序列化为只读侦察任务结果 (WorkerResult)
+    pub fn as_worker_result(&self) -> Option<crate::agent::child_worker::WorkerResult> {
+        self.raw_result_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2468,6 +2482,11 @@ mod tests {
         assert_eq!(polled[0].kind.as_deref(), Some("writer"));
         assert!(polled[0].raw_result_json.is_some());
         assert_eq!(polled[0].raw_result_json.as_deref(), Some(writer_json.as_str()));
+
+        // 验证强类型抽取方法正常工作
+        let writer_res = polled[0].as_writer_result().expect("as_writer_result 应成功解析");
+        assert_eq!(writer_res.findings, vec!["修改成功".to_string()]);
+        assert_eq!(writer_res.test_status, "passed");
 
         let _ = std::fs::remove_dir_all(base);
     }

@@ -830,8 +830,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     }
                     match result.kind.as_deref() {
                         Some("writer") => {
-                            let mut writer_res = result.raw_result_json.as_deref()
-                                .and_then(|raw| serde_json::from_str::<crate::agent::child_writer::WriterResult>(raw).ok());
+                            let mut writer_res = result.as_writer_result();
                             if let Some(ref mut wr) = writer_res {
                                 // 🌟 核心：在父 Agent 消费回执的瞬间现算指纹，闭合 TOCTOU 竞争窗口！
                                 crate::agent::child_writer::refresh_file_conflicts(&mut wr.changed_files, &workspace_dir, git_available).await;
@@ -869,15 +868,28 @@ async fn run_agent_main_loop_in_workspace_inner(
                             }
                         }
                         Some("worker") => {
-                            let formatted_findings = if result.findings.is_empty() {
-                                "（无具体发现）".to_string()
+                            let (confidence, formatted_findings, action_logs) = if let Some(ref wrk) = result.as_worker_result() {
+                                let findings_str = if wrk.findings.is_empty() {
+                                    "（无具体发现）".to_string()
+                                } else {
+                                    wrk.findings.join("\n- ")
+                                };
+                                (wrk.confidence.clone(), findings_str, wrk.action_log.clone())
                             } else {
-                                result.findings.iter().map(|f| f.display_line()).collect::<Vec<_>>().join("\n- ")
+                                let findings_str = if result.findings.is_empty() {
+                                    "（无具体发现）".to_string()
+                                } else {
+                                    result.findings.iter().map(|f| f.display_line()).collect::<Vec<_>>().join("\n- ")
+                                };
+                                (result.confidence.clone(), findings_str, Vec::new())
                             };
                             injection.push_str(&format!(
                                 "\n【🕵️ 只读侦察任务已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
-                                result.child_run_id, result.confidence, formatted_findings
+                                result.child_run_id, confidence, formatted_findings
                             ));
+                            if !action_logs.is_empty() {
+                                injection.push_str(&format!("执行动作记录:\n- {}\n", action_logs.join("\n- ")));
+                            }
                         }
                         _ => {
                             let formatted_findings = if result.findings.is_empty() {
