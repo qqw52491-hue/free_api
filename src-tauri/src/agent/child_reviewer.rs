@@ -65,6 +65,8 @@ pub struct PlanReviewerDispatchSnapshot {
     pub persona: String,
     #[serde(default)]
     pub params: Value,
+    #[serde(default)]
+    pub custom_schema: crate::agent::protocol::ContractSchema,
 }
 
 impl PlanReviewerDispatchSnapshot {
@@ -81,7 +83,13 @@ impl PlanReviewerDispatchSnapshot {
             effort: effort.into(),
             persona: persona.into(),
             params,
+            custom_schema: Default::default(),
         }
+    }
+
+    pub fn with_custom_schema(mut self, schema: crate::agent::protocol::ContractSchema) -> Self {
+        self.custom_schema = schema;
+        self
     }
 
     pub fn to_json_string(&self) -> String {
@@ -102,7 +110,7 @@ impl PlanReviewerDispatchSnapshot {
         workspace_root: &Path,
         interrupt_rx: watch::Receiver<u64>,
     ) -> Result<String, String> {
-        let envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
+        let mut envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
             parent_run_id,
             parent_session_id,
             &self.model,
@@ -112,9 +120,14 @@ impl PlanReviewerDispatchSnapshot {
         .with_effort(&self.effort)
         .with_persona(&self.persona);
 
+        if !self.custom_schema.is_empty() {
+            envelope = envelope.with_custom_schema(self.custom_schema.clone());
+        }
+
         envelope.dispatch(app, db, workspace_root, interrupt_rx).await
     }
 }
+
 
 
 /// 对抗推演审查多维度评分卡
@@ -1128,6 +1141,7 @@ pub async fn spawn_child_reviewer(
     reasoning_effort: &str,
     params: &Value,
     persona: &str,
+    custom_schema: Option<crate::agent::protocol::ContractSchema>,
     mut interrupt_rx: watch::Receiver<u64>,
 ) -> Result<String, String> {
     let request = parse_child_review_request(params)?;
@@ -1480,6 +1494,26 @@ pub async fn spawn_child_reviewer(
                 }
             }
         }
+        // 若挂载了特化契约，做严格闭集与必填校验；若违规，则标记为 invalid_output (contract_violation)
+        if let Some(ref schema) = custom_schema {
+            if !schema.is_empty() {
+                if let Err(err) = schema.validate_shape(&result_val) {
+                    let result_json = serde_json::to_string(&result_val).ok();
+                    finish_child_run_with_history(
+                        &db_clone,
+                        &child_run_id_clone,
+                        "invalid_output",
+                        duration_ms,
+                        completion_tokens,
+                        Some(&format!("contract_violation: {}", err)),
+                        result_json.as_deref(),
+                        serde_json::to_string(&messages).ok().as_deref(),
+                    );
+                    return;
+                }
+            }
+        }
+
         let result_json = serde_json::to_string(&result_val).ok();
         finish_child_run_with_history(
             &db_clone,
@@ -1492,6 +1526,7 @@ pub async fn spawn_child_reviewer(
             serde_json::to_string(&messages).ok().as_deref(),
         );
     });
+
 
     Ok(child_run_id)
 }

@@ -131,6 +131,93 @@
         ></textarea>
       </label>
 
+      <!-- 📋 交付契约约束 (Contract Schema) -->
+      <div class="field wide contract-section">
+        <div class="contract-header">
+          <div class="contract-title-group">
+            <span class="field-label">📋 结构化交付契约约束 (Contract Schema)</span>
+            <span class="field-hint">声明该专家在输出 JSON 交付物时除常规 findings/confidence 外必须包含的特化字段。调度时自动注入 Prompt，交卷时由 Rust 门禁严格校验。</span>
+          </div>
+          <button type="button" class="btn secondary btn-sm add-field-btn" @click="addSchemaField">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            添加契约字段
+          </button>
+        </div>
+
+        <div v-if="!form.schema_fields.length" class="contract-empty">
+          <span class="empty-hint">暂无特化契约字段（仅输出基线 findings / confidence）。点击右上角「+ 添加契约字段」可定义此专家的专属输出（如 risk_level、cve_refs 等）。</span>
+        </div>
+
+        <div v-else class="contract-fields-list">
+          <div
+            v-for="(field, fIdx) in form.schema_fields"
+            :key="fIdx"
+            class="contract-field-row"
+          >
+            <div class="field-col col-name">
+              <span class="sub-label">字段键名 (snake_case) <b class="req">*</b></span>
+              <input
+                v-model="field.name"
+                type="text"
+                placeholder="例如: risk_level"
+                @blur="sanitizeFieldName(field)"
+              />
+            </div>
+
+            <div class="field-col col-type">
+              <span class="sub-label">数据类型</span>
+              <select v-model="field.field_type">
+                <option value="string">文本 (string)</option>
+                <option value="string[]">文本列表 (string[])</option>
+                <option value="number">数字 (number)</option>
+                <option value="boolean">布尔 (boolean)</option>
+              </select>
+            </div>
+
+            <div class="field-col col-req">
+              <span class="sub-label">是否必填</span>
+              <button
+                type="button"
+                class="req-toggle-pill"
+                :class="{ active: field.required }"
+                @click="field.required = !field.required"
+              >
+                {{ field.required ? '必填' : '选填' }}
+              </button>
+            </div>
+
+            <div class="field-col col-desc">
+              <span class="sub-label">字段用途说明 (注入 Prompt 指引)</span>
+              <input
+                v-model="field.description"
+                type="text"
+                placeholder="例如: 安全风险等级评估"
+              />
+            </div>
+
+            <div class="field-col col-enum">
+              <span class="sub-label">可选枚举值 (逗号分隔，选填)</span>
+              <input
+                v-model="field.allowed_values_str"
+                type="text"
+                placeholder="例如: high, medium, low"
+              />
+            </div>
+
+            <div class="field-col col-action">
+              <button
+                type="button"
+                class="btn-icon danger"
+                title="删除此字段"
+                @click="removeSchemaField(fIdx)"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="action-row">
         <button class="btn primary" :disabled="saving" @click="saveRoleCard">
           {{ saving ? "保存中…" : isEditing ? "保存修改" : "确认创建角色" }}
@@ -199,7 +286,12 @@
               <span class="tag-icon">⚡</span>
               <span class="tag-text">并发 {{ card.max_concurrency }}</span>
             </div>
+            <div v-if="getSchemaFieldCount(card) > 0" class="meta-tag contract-tag" :title="`特化契约字段: ${getSchemaFieldNames(card)}`">
+              <span class="tag-icon">📋</span>
+              <span class="tag-text">契约 {{ getSchemaFieldCount(card) }} 字段</span>
+            </div>
           </div>
+
 
           <p v-if="card.scope_hints" class="role-scope-hint" :title="card.scope_hints">
             🎯 {{ card.scope_hints }}
@@ -247,6 +339,15 @@ interface RoleCard {
   hard_scope: string;
   max_concurrency: number;
   enabled: boolean;
+  custom_schema?: string;
+}
+
+interface SchemaFieldFormItem {
+  name: string;
+  field_type: 'string' | 'string[]' | 'number' | 'boolean';
+  required: boolean;
+  description: string;
+  allowed_values_str: string;
 }
 
 interface ModelItem {
@@ -282,6 +383,7 @@ const form = reactive({
   hard_scope: '',
   max_concurrency: 0,
   enabled: true,
+  schema_fields: [] as SchemaFieldFormItem[],
 });
 
 const presetTemplates = [
@@ -290,11 +392,27 @@ const presetTemplates = [
     name: 'frontend_ui_reviewer',
     label: '🎨 前端美化与交互审查专家',
     scope_hints: '涉及前端 UI、Vue 组件重构、CSS 样式排版及响应式交互优化',
-    persona_prompt: '你是一位资深前端 UI/UX 架构师。请从视觉美观度、配色和谐度、响应式适配度、组件内聚性及微交互流畅度等维度进行严谨审查。评估并输出 0~100 的质量得分以及具体可执行的修改建议。',
+    persona_prompt: '你是一位资深前端 UI/UX 架构师。请从视觉美观度、配色和谐度、响应式适配度、组件内聚性及微交互流畅度等维度进行严谨审查。评估并输出质量得分与具体可执行的修改建议。',
     default_test_command: 'npm run build',
     allowed_kinds: 'reviewer',
     hard_scope: '',
     max_concurrency: 0,
+    schema_fields: [
+      {
+        name: 'visual_score',
+        field_type: 'number' as const,
+        required: true,
+        description: '视觉与微交互体验得分 (0~100)',
+        allowed_values_str: '',
+      },
+      {
+        name: 'a11y_issues',
+        field_type: 'string[]' as const,
+        required: false,
+        description: '无障碍与对比度缺陷清单',
+        allowed_values_str: '',
+      },
+    ],
   },
   {
     icon: '🛡️',
@@ -306,6 +424,22 @@ const presetTemplates = [
     allowed_kinds: 'reviewer',
     hard_scope: '',
     max_concurrency: 0,
+    schema_fields: [
+      {
+        name: 'risk_level',
+        field_type: 'string' as const,
+        required: true,
+        description: '综合安全风险等级',
+        allowed_values_str: 'low, medium, high, critical',
+      },
+      {
+        name: 'cve_refs',
+        field_type: 'string[]' as const,
+        required: false,
+        description: '关联的 CVE 漏洞编号清单',
+        allowed_values_str: '',
+      },
+    ],
   },
   {
     icon: '🔍',
@@ -317,6 +451,7 @@ const presetTemplates = [
     allowed_kinds: 'worker',
     hard_scope: '',
     max_concurrency: 0,
+    schema_fields: [] as SchemaFieldFormItem[],
   },
   {
     icon: '📝',
@@ -328,10 +463,52 @@ const presetTemplates = [
     allowed_kinds: 'writer',
     hard_scope: 'docs/',
     max_concurrency: 0,
+    schema_fields: [] as SchemaFieldFormItem[],
   },
 ];
 
+function addSchemaField() {
+  form.schema_fields.push({
+    name: '',
+    field_type: 'string',
+    required: true,
+    description: '',
+    allowed_values_str: '',
+  });
+}
 
+function removeSchemaField(idx: number) {
+  form.schema_fields.splice(idx, 1);
+}
+
+function sanitizeFieldName(field: SchemaFieldFormItem) {
+  field.name = field.name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function getSchemaFieldCount(card: RoleCard): number {
+  if (!card.custom_schema) return 0;
+  try {
+    const parsed = JSON.parse(card.custom_schema);
+    return Array.isArray(parsed?.fields) ? parsed.fields.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function getSchemaFieldNames(card: RoleCard): string {
+  if (!card.custom_schema) return '';
+  try {
+    const parsed = JSON.parse(card.custom_schema);
+    if (Array.isArray(parsed?.fields)) {
+      return parsed.fields.map((f: any) => f.name).join(', ');
+    }
+  } catch {}
+  return '';
+}
 
 function extractEmoji(label: string) {
   const match = label.match(/(\p{Emoji_Presentation}|\p{Extended_Pictographic})/u);
@@ -367,6 +544,7 @@ function startCreate() {
     hard_scope: '',
     max_concurrency: 0,
     enabled: true,
+    schema_fields: [],
   });
   feedbackMsg.value = '';
 }
@@ -389,6 +567,11 @@ function applyPreset(tpl: typeof presetTemplates[0]) {
   form.hard_scope = tpl.hard_scope || '';
   form.max_concurrency = tpl.max_concurrency || 0;
   form.enabled = true;
+  if (tpl.schema_fields && tpl.schema_fields.length) {
+    form.schema_fields = tpl.schema_fields.map((f) => ({ ...f }));
+  } else {
+    form.schema_fields = [];
+  }
   feedbackMsg.value = `已载入「${tpl.label}」预设，可根据需要调整后点击保存。`;
   feedbackIsError.value = false;
 }
@@ -396,6 +579,24 @@ function applyPreset(tpl: typeof presetTemplates[0]) {
 function editCard(card: RoleCard) {
   isCreating.value = false;
   isEditing.value = true;
+  let parsedFields: SchemaFieldFormItem[] = [];
+  if (card.custom_schema) {
+    try {
+      const parsed = JSON.parse(card.custom_schema);
+      if (Array.isArray(parsed?.fields)) {
+        parsedFields = parsed.fields.map((f: any) => ({
+          name: f.name || '',
+          field_type: f.field_type || 'string',
+          required: f.required !== false,
+          description: f.description || '',
+          allowed_values_str: Array.isArray(f.allowed_values) ? f.allowed_values.join(', ') : '',
+        }));
+      }
+    } catch {
+      parsedFields = [];
+    }
+  }
+
   Object.assign(form, {
     name: card.name,
     label: card.label,
@@ -407,6 +608,7 @@ function editCard(card: RoleCard) {
     hard_scope: card.hard_scope || '',
     max_concurrency: card.max_concurrency || 0,
     enabled: card.enabled,
+    schema_fields: parsedFields,
   });
   feedbackMsg.value = '';
 }
@@ -444,6 +646,40 @@ async function saveRoleCard() {
     return;
   }
 
+  // 格式化与校验特化契约字段
+  let custom_schema = '';
+  const validFields = form.schema_fields.filter((f) => f.name.trim());
+  if (validFields.length > 0) {
+    const reserved = [
+      'findings', 'confidence', 'evidence_refs', 'missing_evidence',
+      'changed_files', 'test_status', 'action_log', 'status', 'summary',
+    ];
+    for (const f of validFields) {
+      const fieldName = f.name.trim().toLowerCase();
+      if (reserved.includes(fieldName)) {
+        feedbackMsg.value = `字段名「${fieldName}」为系统基线保留字，禁止重复声明！`;
+        feedbackIsError.value = true;
+        return;
+      }
+    }
+    const fields = validFields.map((f) => {
+      const allowed = f.allowed_values_str.trim()
+        ? f.allowed_values_str.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+        : undefined;
+      return {
+        name: f.name.trim().toLowerCase(),
+        field_type: f.field_type,
+        required: !!f.required,
+        description: f.description.trim(),
+        allowed_values: allowed && allowed.length ? allowed : undefined,
+      };
+    });
+    custom_schema = JSON.stringify({
+      fields,
+      strict_closed_set: true,
+    });
+  }
+
   saving.value = true;
   feedbackMsg.value = '';
   try {
@@ -459,6 +695,7 @@ async function saveRoleCard() {
         hard_scope: form.hard_scope.trim(),
         max_concurrency: Number(form.max_concurrency) || 0,
         enabled: form.enabled,
+        custom_schema,
       },
     });
     feedbackMsg.value = '角色卡已成功保存！';
@@ -467,6 +704,7 @@ async function saveRoleCard() {
     setTimeout(() => {
       cancelEdit();
     }, 1200);
+
   } catch (err: any) {
     feedbackMsg.value = `保存失败: ${err?.message || err}`;
     feedbackIsError.value = true;
@@ -948,4 +1186,182 @@ textarea {
   padding: 4px 8px;
   border-radius: 6px;
 }
+
+/* 📋 交付契约约束 (Contract Schema) */
+.contract-section {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-1, #27272a);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 18px;
+}
+
+.contract-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.contract-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.contract-title-group .field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f4f4f5;
+}
+
+.contract-title-group .field-hint {
+  font-size: 11px;
+  color: var(--text-4, #71717a);
+  line-height: 1.4;
+}
+
+.add-field-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.contract-empty {
+  padding: 18px;
+  border: 1px dashed var(--border-1, #3f3f46);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.15);
+  text-align: center;
+}
+
+.empty-hint {
+  font-size: 12px;
+  color: var(--text-3, #a1a1aa);
+}
+
+.contract-fields-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.contract-field-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  background: var(--bg-1, #18181b);
+  border: 1px solid var(--border-1, #27272a);
+  border-radius: 8px;
+  padding: 10px 12px;
+  transition: border-color 0.15s;
+}
+
+.contract-field-row:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+}
+
+.field-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sub-label {
+  font-size: 11px;
+  color: var(--text-3, #a1a1aa);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.col-name {
+  flex: 1.2;
+  min-width: 140px;
+}
+
+.col-name input {
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.col-type {
+  width: 130px;
+  flex-shrink: 0;
+}
+
+.col-type select {
+  font-size: 12px;
+  padding: 8px 8px;
+}
+
+.col-req {
+  width: 60px;
+  flex-shrink: 0;
+}
+
+.req-toggle-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--border-1, #3f3f46);
+  background: var(--bg-2, #27272a);
+  color: var(--text-3, #71717a);
+  transition: all 0.15s ease;
+  text-align: center;
+}
+
+.req-toggle-pill.active {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: #ef4444;
+  color: #f87171;
+}
+
+.col-desc {
+  flex: 2;
+  min-width: 160px;
+}
+
+.col-enum {
+  flex: 1.5;
+  min-width: 140px;
+}
+
+.col-action {
+  width: 32px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon.danger {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-4, #71717a);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon.danger:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.meta-tag.contract-tag {
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.25);
+}
 </style>
+

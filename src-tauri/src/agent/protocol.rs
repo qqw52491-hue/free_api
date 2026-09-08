@@ -542,6 +542,10 @@ impl DispatchEnvelope {
         self
     }
 
+    pub fn with_custom_schema(self, schema: ContractSchema) -> Self {
+        self.with_schema(schema)
+    }
+
     pub fn with_custom_field(mut self, field: ContractFieldDef) -> Result<Self, String> {
         self.custom_schema.add_field(field)?;
         Ok(self)
@@ -621,6 +625,11 @@ impl DispatchEnvelope {
                 .await
             }
             _ => {
+                let schema_opt = if self.custom_schema.is_empty() {
+                    None
+                } else {
+                    Some(self.custom_schema.clone())
+                };
                 crate::agent::child_reviewer::spawn_child_reviewer(
                     app,
                     db,
@@ -632,6 +641,7 @@ impl DispatchEnvelope {
                     &self.reasoning_effort,
                     &self.input_payload,
                     &final_persona,
+                    schema_opt,
                     interrupt_rx,
                 )
                 .await

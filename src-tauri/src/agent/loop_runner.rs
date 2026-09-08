@@ -271,6 +271,7 @@ pub async fn run_tool_phase(
                 obj.remove("max_concurrency");
             }
 
+            let mut reviewer_custom_schema = None;
             if let Some(role_name) = child_params.get("role").and_then(|v| v.as_str()) {
                 match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
                     Ok(Some(card)) => {
@@ -283,6 +284,9 @@ pub async fn run_tool_phase(
                             continue;
                         }
                         reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
+                        if let Some(schema) = card.parse_custom_schema() {
+                            reviewer_custom_schema = Some(schema);
+                        }
                         if !card.model_id.is_empty() {
                             reviewer_model = card.model_id.clone();
                         }
@@ -320,13 +324,16 @@ pub async fn run_tool_phase(
                 }
             }
 
-            let snapshot = crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::new(
+            let mut snapshot = crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::new(
                 &reviewer_model,
                 &model_tier,
                 &reasoning_effort,
                 &reviewer_persona,
                 effective_params.clone(),
             );
+            if let Some(schema) = reviewer_custom_schema {
+                snapshot = snapshot.with_custom_schema(schema);
+            }
 
             match snapshot
                 .spawn(
@@ -546,6 +553,7 @@ pub async fn run_tool_phase(
                 obj.remove("max_concurrency");
             }
 
+            let mut writer_custom_schema = None;
             if let Some(role_name) = writer_params.get("role").and_then(|v| v.as_str()) {
                 match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
                     Ok(Some(card)) => {
@@ -558,6 +566,9 @@ pub async fn run_tool_phase(
                             continue;
                         }
                         writer_persona = crate::agent::tools::role_manager::persona_block(&card);
+                        if let Some(schema) = card.parse_custom_schema() {
+                            writer_custom_schema = Some(schema);
+                        }
                         if !card.model_id.is_empty() {
                             writer_model = card.model_id.clone();
                         }
@@ -591,7 +602,7 @@ pub async fn run_tool_phase(
                 }
             }
 
-            let envelope = crate::agent::protocol::DispatchEnvelope::writer(
+            let mut envelope = crate::agent::protocol::DispatchEnvelope::writer(
                 parent_run_id,
                 final_session_id,
                 &writer_model,
@@ -601,6 +612,10 @@ pub async fn run_tool_phase(
             .with_tier(routing.tier.to_string())
             .with_effort(&reasoning_effort)
             .with_persona(writer_persona);
+
+            if let Some(schema) = writer_custom_schema {
+                envelope = envelope.with_custom_schema(schema);
+            }
 
             match envelope
                 .dispatch(
@@ -731,6 +746,7 @@ pub async fn run_tool_phase(
                 obj.remove("max_concurrency");
             }
 
+            let mut scout_custom_schema = None;
             if let Some(role_name) = worker_params.get("role").and_then(|v| v.as_str()) {
                 match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
                     Ok(Some(card)) => {
@@ -743,6 +759,9 @@ pub async fn run_tool_phase(
                             continue;
                         }
                         scout_persona = crate::agent::tools::role_manager::persona_block(&card);
+                        if let Some(schema) = card.parse_custom_schema() {
+                            scout_custom_schema = Some(schema);
+                        }
                         if !card.model_id.is_empty() {
                             scout_model = card.model_id.clone();
                         }
@@ -772,7 +791,7 @@ pub async fn run_tool_phase(
                 }
             }
 
-            let envelope = crate::agent::protocol::DispatchEnvelope::worker(
+            let mut envelope = crate::agent::protocol::DispatchEnvelope::worker(
                 parent_run_id,
                 final_session_id,
                 &scout_model,
@@ -782,6 +801,10 @@ pub async fn run_tool_phase(
             .with_tier(routing.tier.to_string())
             .with_effort(&reasoning_effort)
             .with_persona(scout_persona);
+
+            if let Some(schema) = scout_custom_schema {
+                envelope = envelope.with_custom_schema(schema);
+            }
 
             match envelope
                 .dispatch(

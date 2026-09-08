@@ -29,9 +29,20 @@ pub struct RoleCard {
     #[serde(default)]
     pub max_concurrency: i64,       // 0=跟随全局默认
     pub enabled: bool,
+    #[serde(default)]
+    pub custom_schema: String,      // 结构化交付契约 (JSON 序列化的 ContractSchema)
 }
 
 impl RoleCard {
+    /// 解析角色卡绑定的结构化交付契约模式（ContractSchema）
+    pub fn parse_custom_schema(&self) -> Option<crate::agent::protocol::ContractSchema> {
+        let trimmed = self.custom_schema.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        serde_json::from_str(trimmed).ok()
+    }
+
     /// 检查该角色卡是否允许挂载到指定 child kind (writer, worker, reviewer)
     pub fn allows_kind(&self, kind: &str) -> bool {
         let allowed = self.allowed_kinds.trim();
@@ -80,11 +91,13 @@ fn map_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoleCard> {
         hard_scope: row.get(8)?,
         max_concurrency: row.get(9)?,
         enabled: row.get::<_, i64>(10)? != 0,
+        custom_schema: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
     })
 }
 
 const CARD_COLUMNS: &str =
-    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled";
+    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema";
+
 
 pub fn list_cards(db: &DbState, include_disabled: bool) -> Result<Vec<RoleCard>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -124,7 +137,7 @@ use rusqlite::OptionalExtension;
 
 fn validate_card_input(
     params: &Value,
-) -> Result<(String, String, String, String, String, String, String, String, i64), String> {
+) -> Result<(String, String, String, String, String, String, String, String, i64, String), String> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -158,6 +171,15 @@ fn validate_card_input(
         .unwrap_or(0)
         .max(0)
         .min(20);
+    let custom_schema = take("custom_schema", 10_000, "");
+    if !custom_schema.is_empty() {
+        let schema: crate::agent::protocol::ContractSchema = serde_json::from_str(&custom_schema)
+            .map_err(|e| format!("custom_schema 不是有效的 JSON Schema: {}", e))?;
+        for f in &schema.fields {
+            crate::agent::protocol::validate_custom_field_name(&f.name)
+                .map_err(|e| format!("custom_schema 包含非法字段名: {}", e))?;
+        }
+    }
 
     if let Some(bad) = [model_id.as_str(), default_test_command.as_str()]
         .iter()
@@ -176,6 +198,7 @@ fn validate_card_input(
         allowed_kinds,
         hard_scope,
         max_concurrency,
+        custom_schema,
     ))
 }
 
@@ -190,6 +213,7 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
         allowed_kinds,
         hard_scope,
         max_concurrency,
+        custom_schema,
     ) = validate_card_input(params)?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let count: i64 = conn
@@ -209,14 +233,15 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
     }
     let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
     conn.execute(
-        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?11)
+        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?12)
          ON CONFLICT(name) DO UPDATE SET
             label=excluded.label, model_id=excluded.model_id, persona_prompt=excluded.persona_prompt,
             scope_hints=excluded.scope_hints, default_test_command=excluded.default_test_command,
             allowed_kinds=excluded.allowed_kinds, hard_scope=excluded.hard_scope, max_concurrency=excluded.max_concurrency,
+            custom_schema=excluded.custom_schema,
             enabled=1, updated_at=excluded.updated_at",
-        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, now],
+        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, custom_schema, now],
     )
     .map_err(|e| e.to_string())?;
     drop(conn);
@@ -269,12 +294,23 @@ pub fn build_role_cards_menu(db: &DbState) -> Result<String, String> {
         } else {
             format!("；作用域: {}", card.scope_hints)
         };
+        let schema_note = if let Some(schema) = card.parse_custom_schema() {
+            if !schema.is_empty() {
+                let names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
+                format!("；特化契约字段: [{}]", names.join(", "))
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "- [{}] {}：{}（{}{}）\n",
-            card.name, card.label, card.persona_prompt.chars().take(80).collect::<String>(), model_note, scope_note
+            "- [{}] {}：{}（{}{}{}）\n",
+            card.name, card.label, card.persona_prompt.chars().take(80).collect::<String>(), model_note, scope_note, schema_note
         ));
     }
     out.push_str("\n> 💡 **【派发纪律】** 派发给子 Agent 的 task 必须自包含：\n");
+
     out.push_str("> 1. 背景：为什么做这件事；\n");
     out.push_str("> 2. 目标：要产出什么（清晰可验收的标准）；\n");
     out.push_str("> 3. 相关材料：涉及的文件路径/既有结论/约束。\n");
@@ -433,6 +469,7 @@ mod tests {
             hard_scope: "src/components, src/assets".into(),
             max_concurrency: 1,
             enabled: true,
+            custom_schema: String::new(),
         };
         // 模型未提供默认值时补齐
         let merged = merge_writer_defaults(&card, &json!({"task": "打磨 UI"}));
@@ -483,4 +520,73 @@ mod tests {
         assert!(empty_card.allows_kind("reviewer"));
         assert!(empty_card.allows_path(Path::new("any/path/you/want.rs")));
     }
+
+    #[test]
+    fn role_card_custom_schema_round_trip_and_validation() {
+        let db = setup_db();
+        let valid_schema = json!({
+            "fields": [
+                {
+                    "name": "risk_level",
+                    "field_type": "string",
+                    "required": true,
+                    "description": "安全风险评级",
+                    "allowed_values": ["low", "medium", "high"]
+                },
+                {
+                    "name": "cve_refs",
+                    "field_type": "string[]",
+                    "required": false,
+                    "description": "CVE编号清单"
+                }
+            ],
+            "strict_closed_set": true
+        });
+
+        let created = upsert_card(&db, &json!({
+            "name": "sec_reviewer",
+            "label": "安全审计官",
+            "persona_prompt": "专注代码安全审计",
+            "custom_schema": valid_schema.to_string(),
+        })).unwrap();
+
+        assert!(!created.custom_schema.is_empty());
+        let parsed = created.parse_custom_schema().expect("应该成功解析为 ContractSchema");
+        assert_eq!(parsed.fields.len(), 2);
+        assert_eq!(parsed.fields[0].name, "risk_level");
+        assert!(parsed.strict_closed_set);
+
+        // 菜单展示特化字段
+        let menu = build_role_cards_menu(&db).unwrap();
+        assert!(menu.contains("特化契约字段: [risk_level, cve_refs]"));
+
+        // 撞车基线保留字（如 findings）应当被拒绝
+        let conflict_schema = json!({
+            "fields": [
+                {
+                    "name": "findings",
+                    "field_type": "string[]",
+                    "required": true,
+                    "description": "试图篡改基线 findings"
+                }
+            ]
+        });
+        let conflict_res = upsert_card(&db, &json!({
+            "name": "bad_role",
+            "label": "坏角色",
+            "persona_prompt": "xxx",
+            "custom_schema": conflict_schema.to_string(),
+        }));
+        assert!(conflict_res.is_err(), "包含基线保留字 findings 的 schema 必须被拒绝");
+
+        // 非法 JSON 格式应当被拒绝
+        let invalid_json_res = upsert_card(&db, &json!({
+            "name": "bad_json_role",
+            "label": "坏角色2",
+            "persona_prompt": "xxx",
+            "custom_schema": "{not valid json}",
+        }));
+        assert!(invalid_json_res.is_err(), "非法 JSON 格式必须被拒绝");
+    }
 }
+

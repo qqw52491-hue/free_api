@@ -412,9 +412,11 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             hard_scope TEXT NOT NULL DEFAULT '',
             max_concurrency INTEGER NOT NULL DEFAULT 0,
             enabled INTEGER NOT NULL DEFAULT 1,
+            custom_schema TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
 
         CREATE INDEX IF NOT EXISTS idx_agent_child_runs_parent ON agent_child_runs(parent_run_id, started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_agent_child_runs_session ON agent_child_runs(parent_session_id, started_at DESC);
@@ -750,6 +752,10 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     );
     let _ = conn.execute(
         "ALTER TABLE agent_role_cards ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 0;",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_role_cards ADD COLUMN custom_schema TEXT NOT NULL DEFAULT '';",
         [],
     );
     // P5 副本生命周期与脱水追问字段：workspace_copy / resumed_from / message_history_json
