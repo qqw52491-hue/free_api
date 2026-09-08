@@ -363,7 +363,9 @@ pub struct ReviewerDeliveryData {
     #[serde(default, deserialize_with = "deserialize_findings")]
     pub findings: Vec<ReviewFinding>,
     pub confidence: String,
+    #[serde(default)]
     pub evidence_refs: Vec<String>,
+    #[serde(default)]
     pub missing_evidence: Vec<String>,
     #[serde(default)]
     pub routing: Option<String>,
@@ -373,9 +375,22 @@ pub struct ReviewerDeliveryData {
     pub objection_verdicts: Vec<ObjectionVerdict>,
     #[serde(default)]
     pub scorecard: Option<ReviewScorecard>,
+    /// 动态扩展字段：承载 custom_schema 声明的角色特化产物（如 cve_refs, risk_level 等）
+    #[serde(default, flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl ReviewerDeliveryData {
+    /// 获取扩展字段原始 JSON 值
+    pub fn get_extra(&self, key: &str) -> Option<&serde_json::Value> {
+        self.extra.get(key)
+    }
+
+    /// 获取扩展字段字符串值
+    pub fn get_extra_str(&self, key: &str) -> Option<&str> {
+        self.extra.get(key).and_then(|v| v.as_str())
+    }
+
     /// 未被审查者撤回的 blocking 异议数——异议闭环的收敛判据：
     /// 评分达标且该值为 0 才允许放行写入。
     pub fn unwithdrawn_blocking_count(&self) -> u32 {
@@ -474,6 +489,7 @@ impl ChildReviewResult {
             withdrawn_findings: self.withdrawn_findings.clone(),
             objection_verdicts: self.objection_verdicts.clone(),
             scorecard: self.scorecard.clone(),
+            extra: Default::default(),
         }
     }
 
@@ -1268,7 +1284,7 @@ pub async fn spawn_child_reviewer(
         // ===== 取证循环：模型可先请求只读工具核实疑点，预算用尽必须收敛为最终审查 JSON =====
         let mut tool_steps_used: u32 = 0;
         let mut forced_final = false;
-        let (duration_ms, completion_tokens, prompt_tokens, final_parsed) = loop {
+        let (duration_ms, completion_tokens, prompt_tokens, final_parsed, final_raw) = loop {
             let call = llm::stream_with_retry(
                 &config,
                 &messages,
@@ -1347,7 +1363,7 @@ pub async fn spawn_child_reviewer(
 
             // 1. 最终审查 JSON（含 findings 键）→ 收敛
             if let Ok(parsed) = parse_controlled_output(&raw, &allowed_refs) {
-                break (duration_ms, completion_tokens, prompt_tokens, parsed);
+                break (duration_ms, completion_tokens, prompt_tokens, parsed, raw);
             }
 
             // 2. 已强制收敛仍不合规 → invalid_output
@@ -1448,7 +1464,23 @@ pub async fn spawn_child_reviewer(
             objection_verdicts,
             scorecard,
         };
-        let result_json = serde_json::to_string(&result).ok();
+        // 动态合并 LLM 产物中的扩展字段（如 cve_refs, risk_level 等），确保强类型外产物不丢失
+        let mut result_val = serde_json::to_value(&result).unwrap_or_default();
+        if let Some(parsed_val) = serde_json::from_str::<serde_json::Value>(&final_raw)
+            .ok()
+            .or_else(|| extract_json_object(&final_raw).and_then(|f| serde_json::from_str(f).ok()))
+        {
+            if let Some(map) = parsed_val.as_object() {
+                if let Some(res_map) = result_val.as_object_mut() {
+                    for (k, v) in map {
+                        if !res_map.contains_key(k) {
+                            res_map.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let result_json = serde_json::to_string(&result_val).ok();
         finish_child_run_with_history(
             &db_clone,
             &child_run_id_clone,

@@ -964,6 +964,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                                         withdrawn_findings: Vec::new(),
                                         objection_verdicts: Vec::new(),
                                         scorecard: receipt.scorecard(),
+                                        extra: Default::default(),
                                     }
                                 });
                                 checkpoint.record_reviewer_delivery(&delivery);

@@ -1,5 +1,358 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
+
+/// 协议与多 Agent 基线保留字黑名单：禁止扩展字段与基线强类型字段碰撞。
+/// 该集合由单元测试 `test_baseline_reserved_fields_completeness` 守卫，
+/// 若基线 struct 增删字段，测试将立即报错，防止黑名单隐式腐烂。
+pub const BASELINE_RESERVED_FIELDS: &[&str] = &[
+    // 通用协议 & 执行元数据
+    "child_run_id",
+    "task_id",
+    "attempt_id",
+    "role_id",
+    "contract_id",
+    "parent_run_id",
+    "parent_session_id",
+    "model_id",
+    "model_tier",
+    "reasoning_effort",
+    "persona",
+    "timeout_secs",
+    "input_payload",
+    "custom_schema",
+    "status",
+    "duration_ms",
+    "completion_tokens",
+    "prompt_tokens",
+    "error_kind",
+    "raw_result_json",
+    "raw_text",
+    "payload",
+    "kind",
+    "steps_used",
+    "extra",
+    // 审查员基线
+    "findings",
+    "confidence",
+    "evidence_refs",
+    "missing_evidence",
+    "routing",
+    "withdrawn_findings",
+    "objection_verdicts",
+    "scorecard",
+    // 工兵基线
+    "changed_files",
+    "test_command",
+    "test_status",
+    "test_output_tail",
+    "workspace_copy",
+    "patch_ref",
+    // 侦察基线
+    "action_log",
+];
+
+/// 判定给定字段名是否属于基线保留字
+pub fn is_reserved_field_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    BASELINE_RESERVED_FIELDS.contains(&lower.as_str())
+}
+
+/// 校验自定义扩展字段名称的合法性（防碰撞 + 命名语法约束）
+pub fn validate_custom_field_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("自定义扩展字段名不能为空".to_string());
+    }
+    if is_reserved_field_name(trimmed) {
+        return Err(format!(
+            "字段名 '{}' 命中基线协议保留字黑名单，禁止用作扩展字段！",
+            trimmed
+        ));
+    }
+    let is_valid_ident = trimmed.starts_with(|c: char| c.is_ascii_lowercase())
+        && trimmed.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && trimmed.len() >= 2
+        && trimmed.len() <= 64;
+
+    if !is_valid_ident {
+        return Err(format!(
+            "字段名 '{}' 不符合命名规范：必须是全小写 snake_case（以小写字母开头，仅含字母/数字/下划线，长度 2-64）",
+            trimmed
+        ));
+    }
+    Ok(())
+}
+
+/// 扩展字段支持的基础数据类型（v1 收紧为标量与字符串数组，杜绝嵌套对象引发的前端排版与解析灾难）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ContractFieldType {
+    #[serde(rename = "string")]
+    String,
+    #[serde(rename = "string[]")]
+    StringArray,
+    #[serde(rename = "number")]
+    Number,
+    #[serde(rename = "boolean")]
+    Boolean,
+}
+
+impl ContractFieldType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::StringArray => "string[]",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+        }
+    }
+
+    pub fn from_type_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_lowercase().as_str() {
+            "string" | "str" | "text" => Ok(Self::String),
+            "string[]" | "string_array" | "array<string>" | "list[str]" => Ok(Self::StringArray),
+            "number" | "int" | "float" | "integer" => Ok(Self::Number),
+            "boolean" | "bool" => Ok(Self::Boolean),
+            other => Err(format!(
+                "不支持的字段类型: '{}'。v1 扩展字段仅支持标量与字符串数组: 'string' | 'string[]' | 'number' | 'boolean'",
+                other
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ContractFieldType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// 单个扩展字段契约定义（声明式驱动模型 Prompt 与运行时校验）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContractFieldDef {
+    pub name: String,
+    pub field_type: ContractFieldType,
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_values: Option<Vec<String>>,
+}
+
+impl ContractFieldDef {
+    pub fn new(
+        name: impl Into<String>,
+        field_type: ContractFieldType,
+        description: impl Into<String>,
+        required: bool,
+    ) -> Result<Self, String> {
+        let name_str = name.into();
+        validate_custom_field_name(&name_str)?;
+        Ok(Self {
+            name: name_str,
+            field_type,
+            description: description.into(),
+            required,
+            allowed_values: None,
+        })
+    }
+
+    /// 静态常量式安全构造器（若名字非法直接 panic，仅供内部已知安全常量调用）
+    pub fn must_new(
+        name: impl Into<String>,
+        field_type: ContractFieldType,
+        description: impl Into<String>,
+        required: bool,
+    ) -> Self {
+        Self::new(name, field_type, description, required).expect("静态字段名必须合法")
+    }
+
+    pub fn with_allowed_values(mut self, allowed: Vec<String>) -> Self {
+        self.allowed_values = Some(allowed);
+        self
+    }
+
+    pub fn validate_value(&self, val: Option<&Value>) -> Result<(), String> {
+        let val = match val {
+            Some(v) if !v.is_null() => v,
+            _ => {
+                if self.required {
+                    return Err(format!("缺少必填字段: '{}' ({})", self.name, self.description));
+                } else {
+                    return Ok(());
+                }
+            }
+        };
+
+        match self.field_type {
+            ContractFieldType::String => {
+                let s = val.as_str().ok_or_else(|| {
+                    format!("字段 '{}' 类型不匹配: 期望 string，实际为 {}", self.name, val)
+                })?;
+                if let Some(ref allowed) = self.allowed_values {
+                    if !allowed.iter().any(|item| item == s) {
+                        return Err(format!(
+                            "字段 '{}' 取值非法: '{}' 不在可选值域 {:?} 内",
+                            self.name, s, allowed
+                        ));
+                    }
+                }
+            }
+            ContractFieldType::StringArray => {
+                let arr = val.as_array().ok_or_else(|| {
+                    format!("字段 '{}' 类型不匹配: 期望 string[]，实际为 {}", self.name, val)
+                })?;
+                for (idx, elem) in arr.iter().enumerate() {
+                    if !elem.is_string() {
+                        return Err(format!(
+                            "字段 '{}' 的第 {} 项类型不匹配: 期望 string，实际为 {}",
+                            self.name, idx, elem
+                        ));
+                    }
+                }
+            }
+            ContractFieldType::Number => {
+                if !val.is_number() {
+                    return Err(format!(
+                        "字段 '{}' 类型不匹配: 期望 number，实际为 {}",
+                        self.name, val
+                    ));
+                }
+            }
+            ContractFieldType::Boolean => {
+                if !val.is_boolean() {
+                    return Err(format!(
+                        "字段 '{}' 类型不匹配: 期望 boolean，实际为 {}",
+                        self.name, val
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 扩展契约模式（Contract Schema）：定义一组特化扩展字段及闭集校验规则
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContractSchema {
+    #[serde(default)]
+    pub fields: Vec<ContractFieldDef>,
+    /// 是否开启闭集白名单校验：若开启，产物中若包含未在此声明的未知字段，直接拒收并报警
+    #[serde(default = "default_true")]
+    pub strict_closed_set: bool,
+}
+
+impl ContractSchema {
+    pub fn new(fields: Vec<ContractFieldDef>) -> Self {
+        Self {
+            fields,
+            strict_closed_set: true,
+        }
+    }
+
+    pub fn with_strict_closed_set(mut self, strict: bool) -> Self {
+        self.strict_closed_set = strict;
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    pub fn add_field(&mut self, field: ContractFieldDef) -> Result<(), String> {
+        if self.fields.iter().any(|f| f.name == field.name) {
+            return Err(format!("重复添加字段 '{}'", field.name));
+        }
+        self.fields.push(field);
+        Ok(())
+    }
+
+    pub fn field_names(&self) -> BTreeSet<&str> {
+        self.fields.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    /// 渲染格式化 Prompt 指引，直接注入到大模型角色提示词中
+    pub fn render_prompt_instructions(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+
+        let mut lines = Vec::new();
+        lines.push("【输出扩展契约规范】".to_string());
+        lines.push("你在输出最终 JSON 时，除标准基线字段外，还必须严格遵守以下扩展字段约定（严禁臆造或拼错字段名，多余未知字段将被系统拒收）：".to_string());
+        for f in &self.fields {
+            let req_str = if f.required { "必填" } else { "选填" };
+            let enum_str = if let Some(ref allowed) = f.allowed_values {
+                format!("，可选值: [{}]", allowed.join(", "))
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "- `{}` ({}, {}{}): {}",
+                f.name,
+                f.field_type.as_str(),
+                req_str,
+                enum_str,
+                f.description
+            ));
+        }
+        lines.push("请确保 JSON 顶级键中包含上述必填字段，且键名与数据类型完全吻合。".to_string());
+        lines.join("\n")
+    }
+
+    /// 校验产物负载的形态（类型、必填性、闭集白名单）
+    pub fn validate_shape(&self, payload: &Value) -> Result<(), String> {
+        if self.is_empty() {
+            return Ok(());
+        }
+
+        let map = payload.as_object().ok_or_else(|| {
+            format!("交付产物不是合法的 JSON 对象，无法进行契约校验: {}", payload)
+        })?;
+
+        // 1. 闭集白名单校验：除基线保留字段外，所有的额外键都必须在 self.fields 声明列表中
+        if self.strict_closed_set {
+            let declared_names = self.field_names();
+            for (key, _) in map {
+                if is_reserved_field_name(key) {
+                    continue;
+                }
+                if !declared_names.contains(key.as_str()) {
+                    return Err(format!(
+                        "闭集校验失败：检测到未在契约中声明的未知扩展字段 '{}'（可用扩展字段: {:?}）。请纠正拼写或移除该字段。",
+                        key, declared_names
+                    ));
+                }
+            }
+        }
+
+        // 2. 逐字段校验定义
+        for field in &self.fields {
+            let val = map.get(&field.name);
+            field.validate_value(val)?;
+        }
+
+        Ok(())
+    }
+
+    /// 清洗 payload：仅保留 custom_schema 中声明过的有效扩展字段，剔除未声明的任意模型幻觉键
+    pub fn sanitize_extra(&self, payload: &Value) -> std::collections::HashMap<String, Value> {
+        let mut clean = std::collections::HashMap::new();
+        if let Some(map) = payload.as_object() {
+            let declared_names = self.field_names();
+            for (key, val) in map {
+                if declared_names.contains(key.as_str()) {
+                    clean.insert(key.clone(), val.clone());
+                }
+            }
+        }
+        clean
+    }
+}
 
 /// 默认子任务派发超时（秒）
 pub const DEFAULT_DISPATCH_TIMEOUT_SECS: u64 = 60;
@@ -69,6 +422,9 @@ pub struct DispatchEnvelope {
     /// 领域特定入参载荷（由具体角色解析，宿主通用层不干涉内部字段）
     #[serde(default)]
     pub input_payload: Value,
+    /// 扩展字段契约模式（声明此任务必须/可选返回的自定义字段）
+    #[serde(default)]
+    pub custom_schema: ContractSchema,
 }
 
 impl DispatchEnvelope {
@@ -94,6 +450,7 @@ impl DispatchEnvelope {
             persona: String::new(),
             timeout_secs: default_timeout_secs(),
             input_payload,
+            custom_schema: ContractSchema::default(),
         }
     }
 
@@ -180,11 +537,40 @@ impl DispatchEnvelope {
         self
     }
 
+    pub fn with_schema(mut self, schema: ContractSchema) -> Self {
+        self.custom_schema = schema;
+        self
+    }
+
+    pub fn with_custom_field(mut self, field: ContractFieldDef) -> Result<Self, String> {
+        self.custom_schema.add_field(field)?;
+        Ok(self)
+    }
+
     pub fn attempt_key(&self) -> TaskAttemptKey {
         TaskAttemptKey::new(&self.task_id, self.attempt_id)
     }
 
-    /// 统一异步派发执行：根据 role_id 自动委派给对应沙箱执行体
+    /// 使用信封绑定的扩展契约对交付回执进行校验与守卫。
+    /// 若回执执行成功但违反了扩展字段约束（如缺少必填字段、类型不符、包含未声明未知字段），
+    /// 将就地将回执标记为 invalid_output，并记录 contract_violation 错误信息。
+    pub fn validate_delivery_receipt(&self, receipt: &mut DeliveryReceipt) -> Result<(), String> {
+        if self.custom_schema.is_empty() {
+            return Ok(());
+        }
+        if !receipt.is_success() {
+            return Ok(());
+        }
+        if let Err(err) = receipt.validate_against_schema(&self.custom_schema) {
+            receipt.status = "invalid_output".to_string();
+            receipt.error_kind = Some(format!("contract_violation: {}", err));
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// 统一异步派发执行：根据 role_id 自动委派给对应沙箱执行体。
+    /// 若绑定了扩展契约模式，将自动生成契约约束格式规范追加至角色提示词中。
     pub async fn dispatch(
         &self,
         app: Option<tauri::AppHandle>,
@@ -192,6 +578,17 @@ impl DispatchEnvelope {
         workspace_root: &std::path::Path,
         interrupt_rx: tokio::sync::watch::Receiver<u64>,
     ) -> Result<String, String> {
+        let final_persona = if !self.custom_schema.is_empty() {
+            let instructions = self.custom_schema.render_prompt_instructions();
+            if self.persona.is_empty() {
+                instructions
+            } else {
+                format!("{}\n\n{}", self.persona, instructions)
+            }
+        } else {
+            self.persona.clone()
+        };
+
         match self.role_id.as_str() {
             "child_writer" | "writer" => {
                 crate::agent::child_writer::spawn_child_writer(
@@ -203,7 +600,7 @@ impl DispatchEnvelope {
                     &self.model_id,
                     &self.reasoning_effort,
                     &self.input_payload,
-                    self.persona.clone(),
+                    final_persona,
                     interrupt_rx,
                 )
                 .await
@@ -218,7 +615,7 @@ impl DispatchEnvelope {
                     &self.model_id,
                     &self.reasoning_effort,
                     &self.input_payload,
-                    self.persona.clone(),
+                    final_persona,
                     interrupt_rx,
                 )
                 .await
@@ -234,7 +631,7 @@ impl DispatchEnvelope {
                     &self.model_tier,
                     &self.reasoning_effort,
                     &self.input_payload,
-                    &self.persona,
+                    &final_persona,
                     interrupt_rx,
                 )
                 .await
@@ -386,20 +783,40 @@ impl DeliveryReceipt {
             .map(|d| d.missing_evidence)
             .unwrap_or_default()
     }
+
+    /// 校验交付产物是否满足给定的扩展契约模式
+    pub fn validate_against_schema(&self, schema: &ContractSchema) -> Result<(), String> {
+        if schema.is_empty() {
+            return Ok(());
+        }
+        if let Some(ref payload) = self.payload {
+            schema.validate_shape(payload)
+        } else if let Some(ref raw_text) = self.raw_text {
+            if let Ok(val) = serde_json::from_str::<Value>(raw_text) {
+                schema.validate_shape(&val)
+            } else {
+                Err("无法校验契约: 交付产物既无有效 payload 且 raw_text 无法解析为 JSON".to_string())
+            }
+        } else {
+            Err("无法校验契约: 交付产物未包含任何有效 payload 或 raw_text".to_string())
+        }
+    }
 }
 
 impl From<crate::agent::child_reviewer::ChildReviewResult> for DeliveryReceipt {
     fn from(res: crate::agent::child_reviewer::ChildReviewResult) -> Self {
         let kind = res.kind.clone().unwrap_or_else(|| "review".to_string());
         let raw_text = res.raw_result_json.clone();
-        let payload = if kind == "writer" || kind == "worker" {
-            raw_text
-                .as_deref()
-                .and_then(|t| serde_json::from_str::<Value>(t).ok())
-                .or_else(|| serde_json::to_value(&res).ok())
-        } else {
-            serde_json::to_value(res.to_reviewer_delivery()).ok()
-        };
+        let payload = raw_text
+            .as_deref()
+            .and_then(|t| serde_json::from_str::<Value>(t).ok())
+            .or_else(|| {
+                if kind == "writer" || kind == "worker" {
+                    serde_json::to_value(&res).ok()
+                } else {
+                    serde_json::to_value(res.to_reviewer_delivery()).ok()
+                }
+            });
 
         Self {
             child_run_id: res.child_run_id.clone(),
@@ -436,6 +853,7 @@ mod tests {
             persona: "strict_auditor".to_string(),
             timeout_secs: 120,
             input_payload: serde_json::json!({"question": "security audit"}),
+            custom_schema: ContractSchema::default(),
         };
 
         let key = envelope.attempt_key();
@@ -599,4 +1017,316 @@ mod tests {
         assert_eq!(wrk.contract_id, "worker.v1");
         assert_eq!(wrk.timeout_secs, 60);
     }
+
+    #[test]
+    fn test_baseline_reserved_fields_completeness() {
+        use crate::agent::child_reviewer::{ChildReviewResult, ReviewerDeliveryData};
+        use crate::agent::child_writer::WriterResult;
+        use crate::agent::child_worker::WorkerResult;
+
+        // 1. 检查 ReviewerDeliveryData 字段全部被黑名单覆盖
+        let rev_delivery = ReviewerDeliveryData {
+            findings: vec![],
+            confidence: "confirmed".to_string(),
+            evidence_refs: vec![],
+            missing_evidence: vec![],
+            routing: None,
+            withdrawn_findings: vec![],
+            objection_verdicts: vec![],
+            scorecard: None,
+            extra: Default::default(),
+        };
+        let val = serde_json::to_value(&rev_delivery).unwrap();
+        for key in val.as_object().unwrap().keys() {
+            assert!(
+                is_reserved_field_name(key),
+                "ReviewerDeliveryData 字段 '{}' 未在 BASELINE_RESERVED_FIELDS 中登记，请同步更新保留字黑名单！",
+                key
+            );
+        }
+
+        // 2. 检查 ChildReviewResult 字段
+        let child_res = ChildReviewResult {
+            child_run_id: "c".to_string(),
+            status: "s".to_string(),
+            findings: vec![],
+            confidence: "c".to_string(),
+            evidence_refs: vec![],
+            missing_evidence: vec![],
+            duration_ms: 0,
+            completion_tokens: 0,
+            prompt_tokens: 0,
+            error_kind: None,
+            raw_result_json: None,
+            kind: None,
+            routing: None,
+            withdrawn_findings: vec![],
+            objection_verdicts: vec![],
+            scorecard: None,
+        };
+        let val = serde_json::to_value(&child_res).unwrap();
+        for key in val.as_object().unwrap().keys() {
+            assert!(
+                is_reserved_field_name(key),
+                "ChildReviewResult 字段 '{}' 未在 BASELINE_RESERVED_FIELDS 中登记，请同步更新保留字黑名单！",
+                key
+            );
+        }
+
+        // 3. 检查 WriterResult 字段
+        let writer_res = WriterResult {
+            child_run_id: "w".to_string(),
+            status: "s".to_string(),
+            findings: vec![],
+            confidence: "c".to_string(),
+            evidence_refs: vec![],
+            missing_evidence: vec![],
+            duration_ms: 0,
+            completion_tokens: 0,
+            prompt_tokens: 0,
+            error_kind: None,
+            steps_used: 0,
+            changed_files: vec![],
+            test_command: "".to_string(),
+            test_status: "".to_string(),
+            test_output_tail: "".to_string(),
+            workspace_copy: "".to_string(),
+            patch_ref: None,
+        };
+        let val = serde_json::to_value(&writer_res).unwrap();
+        for key in val.as_object().unwrap().keys() {
+            assert!(
+                is_reserved_field_name(key),
+                "WriterResult 字段 '{}' 未在 BASELINE_RESERVED_FIELDS 中登记，请同步更新保留字黑名单！",
+                key
+            );
+        }
+
+        // 4. 检查 WorkerResult 字段
+        let worker_res = WorkerResult {
+            child_run_id: "w".to_string(),
+            status: "s".to_string(),
+            findings: vec![],
+            confidence: "c".to_string(),
+            evidence_refs: vec![],
+            missing_evidence: vec![],
+            duration_ms: 0,
+            completion_tokens: 0,
+            prompt_tokens: 0,
+            error_kind: None,
+            steps_used: 0,
+            action_log: vec![],
+        };
+        let val = serde_json::to_value(&worker_res).unwrap();
+        for key in val.as_object().unwrap().keys() {
+            assert!(
+                is_reserved_field_name(key),
+                "WorkerResult 字段 '{}' 未在 BASELINE_RESERVED_FIELDS 中登记，请同步更新保留字黑名单！",
+                key
+            );
+        }
+
+        // 5. 检查 DeliveryReceipt 字段
+        let receipt = DeliveryReceipt {
+            child_run_id: "".to_string(),
+            task_id: "".to_string(),
+            attempt_id: 1,
+            kind: "".to_string(),
+            status: "".to_string(),
+            duration_ms: 0,
+            completion_tokens: 0,
+            prompt_tokens: 0,
+            error_kind: None,
+            payload: None,
+            raw_text: None,
+        };
+        let val = serde_json::to_value(&receipt).unwrap();
+        for key in val.as_object().unwrap().keys() {
+            assert!(
+                is_reserved_field_name(key),
+                "DeliveryReceipt 字段 '{}' 未在 BASELINE_RESERVED_FIELDS 中登记，请同步更新保留字黑名单！",
+                key
+            );
+        }
+
+        // 6. 检查 DispatchEnvelope 字段
+        let env = DispatchEnvelope::reviewer("p", "s", "m", Value::Null);
+        let val = serde_json::to_value(&env).unwrap();
+        for key in val.as_object().unwrap().keys() {
+            assert!(
+                is_reserved_field_name(key),
+                "DispatchEnvelope 字段 '{}' 未在 BASELINE_RESERVED_FIELDS 中登记，请同步更新保留字黑名单！",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_custom_field_name_validation() {
+        // 命中保留字必须拒绝
+        assert!(validate_custom_field_name("findings").is_err());
+        assert!(validate_custom_field_name("confidence").is_err());
+        assert!(validate_custom_field_name("status").is_err());
+        assert!(validate_custom_field_name("changed_files").is_err());
+
+        // 语法不合规必须拒绝
+        assert!(validate_custom_field_name("").is_err());
+        assert!(validate_custom_field_name("a").is_err()); // 长度 < 2
+        assert!(validate_custom_field_name("1cve").is_err()); // 非小写字母开头
+        assert!(validate_custom_field_name("cve-refs").is_err()); // 含连字符
+        assert!(validate_custom_field_name("CveRefs").is_err()); // 驼峰大写
+
+        // 合法 snake_case 自定义字段必须通过
+        assert!(validate_custom_field_name("cve_refs").is_ok());
+        assert!(validate_custom_field_name("risk_level").is_ok());
+        assert!(validate_custom_field_name("cvss_score").is_ok());
+    }
+
+    #[test]
+    fn test_contract_field_def_type_validation() {
+        // 1. string 标量及枚举值域校验
+        let str_field = ContractFieldDef::must_new("risk_level", ContractFieldType::String, "风险等级", true)
+            .with_allowed_values(vec!["critical".into(), "high".into(), "low".into()]);
+
+        assert!(str_field.validate_value(Some(&Value::String("high".into()))).is_ok());
+        assert!(str_field.validate_value(Some(&Value::String("unknown".into()))).is_err());
+        assert!(str_field.validate_value(Some(&Value::Number(100.into()))).is_err());
+        assert!(str_field.validate_value(None).is_err()); // 必填缺失
+
+        // 2. string[] 字符串数组校验
+        let arr_field = ContractFieldDef::must_new("cve_refs", ContractFieldType::StringArray, "CVE列表", true);
+        assert!(arr_field.validate_value(Some(&serde_json::json!(["CVE-2023-1", "CVE-2023-2"]))).is_ok());
+        assert!(arr_field.validate_value(Some(&serde_json::json!([]))).is_ok());
+        assert!(arr_field.validate_value(Some(&serde_json::json!(["CVE-1", 123]))).is_err()); // 元素类型错
+        assert!(arr_field.validate_value(Some(&serde_json::json!("not_array"))).is_err());
+
+        // 3. 选填字段校验（None 或 Null 允许通过）
+        let opt_field = ContractFieldDef::must_new("extra_notes", ContractFieldType::String, "补充说明", false);
+        assert!(opt_field.validate_value(None).is_ok());
+        assert!(opt_field.validate_value(Some(&Value::Null)).is_ok());
+        assert!(opt_field.validate_value(Some(&Value::String("ok".into()))).is_ok());
+    }
+
+    #[test]
+    fn test_contract_schema_closed_set_and_shape_validation() {
+        let schema = ContractSchema::new(vec![
+            ContractFieldDef::must_new("cve_refs", ContractFieldType::StringArray, "CVE列表", true),
+            ContractFieldDef::must_new("risk_level", ContractFieldType::String, "风险级别", true)
+                .with_allowed_values(vec!["critical".into(), "high".into(), "low".into()]),
+        ]);
+
+        // 1. 合规输出必须通过
+        let valid_payload = serde_json::json!({
+            "findings": [],
+            "confidence": "confirmed",
+            "cve_refs": ["CVE-2024-0001"],
+            "risk_level": "high"
+        });
+        assert!(schema.validate_shape(&valid_payload).is_ok());
+
+        // 2. 模型拼错字段名 (如 cve_ids) 或额外注入垃圾键 → 闭集校验拦截
+        let typo_payload = serde_json::json!({
+            "findings": [],
+            "confidence": "confirmed",
+            "cve_ids": ["CVE-2024-0001"], // 拼错字段名！
+            "risk_level": "high"
+        });
+        let err = schema.validate_shape(&typo_payload).unwrap_err();
+        assert!(err.contains("闭集校验失败"));
+        assert!(err.contains("cve_ids"));
+
+        // 3. 缺少必填项校验
+        let missing_payload = serde_json::json!({
+            "findings": [],
+            "confidence": "confirmed",
+            "cve_refs": ["CVE-2024-0001"]
+            // 缺少 risk_level
+        });
+        assert!(schema.validate_shape(&missing_payload).unwrap_err().contains("缺少必填字段: 'risk_level'"));
+
+        // 4. sanitize_extra 清洗测试：仅收纳白名单字段，剔除未声明字段
+        let mixed_payload = serde_json::json!({
+            "cve_refs": ["CVE-2024-0001"],
+            "risk_level": "high",
+            "hallucinated_garbage": "some junk",
+            "unregistered_flag": true
+        });
+        let clean = schema.sanitize_extra(&mixed_payload);
+        assert_eq!(clean.len(), 2);
+        assert!(clean.contains_key("cve_refs"));
+        assert!(clean.contains_key("risk_level"));
+        assert!(!clean.contains_key("hallucinated_garbage"));
+    }
+
+    #[test]
+    fn test_contract_schema_prompt_instruction_rendering() {
+        let schema = ContractSchema::new(vec![
+            ContractFieldDef::must_new("cve_refs", ContractFieldType::StringArray, "关联CVE编号列表", true),
+            ContractFieldDef::must_new("risk_level", ContractFieldType::String, "安全风险等级", true)
+                .with_allowed_values(vec!["critical".into(), "high".into(), "low".into()]),
+            ContractFieldDef::must_new("compliance_notes", ContractFieldType::String, "合规备注", false),
+        ]);
+
+        let prompt = schema.render_prompt_instructions();
+        assert!(prompt.contains("【输出扩展契约规范】"));
+        assert!(prompt.contains("`cve_refs` (string[], 必填): 关联CVE编号列表"));
+        assert!(prompt.contains("`risk_level` (string, 必填，可选值: [critical, high, low]): 安全风险等级"));
+        assert!(prompt.contains("`compliance_notes` (string, 选填): 合规备注"));
+    }
+
+    #[test]
+    fn test_dispatch_envelope_validate_delivery_receipt_guard() {
+        let envelope = DispatchEnvelope::reviewer("p1", "s1", "m1", Value::Null)
+            .with_custom_field(ContractFieldDef::must_new("risk_level", ContractFieldType::String, "风险等级", true))
+            .unwrap();
+
+        // 1. 成功交付且字段齐全 → 校验通过
+        let mut good_receipt = DeliveryReceipt {
+            child_run_id: "r1".to_string(),
+            task_id: "t1".to_string(),
+            attempt_id: 1,
+            kind: "review".to_string(),
+            status: "succeeded".to_string(),
+            duration_ms: 100,
+            completion_tokens: 50,
+            prompt_tokens: 50,
+            error_kind: None,
+            payload: Some(serde_json::json!({
+                "findings": [],
+                "confidence": "confirmed",
+                "risk_level": "critical"
+            })),
+            raw_text: None,
+        };
+        assert!(envelope.validate_delivery_receipt(&mut good_receipt).is_ok());
+        assert_eq!(good_receipt.status, "succeeded");
+
+        // 2. 交付物缺少自定义必填字段 → 被信封卫士拦截并打标为 invalid_output
+        let mut bad_receipt = DeliveryReceipt {
+            child_run_id: "r2".to_string(),
+            task_id: "t2".to_string(),
+            attempt_id: 1,
+            kind: "review".to_string(),
+            status: "succeeded".to_string(),
+            duration_ms: 100,
+            completion_tokens: 50,
+            prompt_tokens: 50,
+            error_kind: None,
+            payload: Some(serde_json::json!({
+                "findings": [],
+                "confidence": "confirmed"
+                // 缺失 risk_level
+            })),
+            raw_text: None,
+        };
+        let val_err = envelope.validate_delivery_receipt(&mut bad_receipt).unwrap_err();
+        assert!(val_err.contains("缺少必填字段: 'risk_level'"));
+        assert_eq!(bad_receipt.status, "invalid_output");
+        assert!(bad_receipt.error_kind.unwrap().contains("contract_violation"));
+
+        // 3. 提取审查交付产物时，扩展字段安全注入 extra 桶中
+        let delivery_data = good_receipt.as_reviewer_delivery().expect("应成功提取");
+        assert_eq!(delivery_data.get_extra_str("risk_level"), Some("critical"));
+    }
 }
+
