@@ -1536,6 +1536,17 @@ pub fn poll_completed_child_runs(
     poll_completed_child_runs_filtered(db, parent_run_id, None)
 }
 
+/// 轮询已完成的子任务，返回通用交付回执列表 (DeliveryReceipt)。
+pub fn poll_completed_delivery_receipts(
+    db: &DbState,
+    parent_run_id: &str,
+    targets: Option<&[String]>,
+) -> Result<Vec<crate::agent::protocol::DeliveryReceipt>, String> {
+    let raw = poll_completed_child_runs_filtered(db, parent_run_id, targets)?;
+    Ok(raw.into_iter().map(Into::into).collect())
+}
+
+
 /// 检查当前 parent_run 是否仍有正在执行中的子审查任务
 /// 运行期僵尸巡检：running 行超过对应 kind 预算的宽限上限后收敛为 timed_out，
 /// 并写入可消费的 result_json。兜底「子任务 panic / spawn 任务悬挂导致行永远
