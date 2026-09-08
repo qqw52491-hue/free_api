@@ -571,6 +571,29 @@ textarea::placeholder {
 .plan-mode-toggle-btn.active .chevron-icon {
     transform: rotate(180deg);
 }
+
+/* 🏷️ 模型胶囊上的门禁角标 (免审直通 / 自定义专家卡) */
+.chip-gate-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 10.5px;
+    font-weight: 600;
+    line-height: 1;
+    padding: 2px 5px;
+    border-radius: 4px;
+    margin-left: 4px;
+    letter-spacing: 0.2px;
+}
+.chip-gate-badge.disabled {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fde68a;
+    border: 1px solid rgba(245, 158, 11, 0.45);
+}
+.chip-gate-badge.custom {
+    background: rgba(168, 85, 247, 0.2);
+    color: #e9d5ff;
+    border: 1px solid rgba(168, 85, 247, 0.45);
+}
 .composer-tools > button svg {
     width: 14px;
     height: 14px;
@@ -1119,6 +1142,148 @@ textarea::placeholder {
     background: rgba(59, 130, 246, 0.15);
 }
 
+/* ==========================================================================
+   🎭 5 工位与角色装配增强样式 (Reviewer 特别控制、标签与提示)
+   ========================================================================== */
+.role-card.is-reviewer-slot {
+    background: rgba(99, 102, 241, 0.04);
+    border-color: rgba(99, 102, 241, 0.16);
+}
+.role-card.is-reviewer-slot:hover {
+    background: rgba(99, 102, 241, 0.07);
+    border-color: rgba(99, 102, 241, 0.28);
+}
+
+.role-current-tag.tag-disabled {
+    background: rgba(245, 158, 11, 0.18);
+    color: #fde68a;
+    border-color: rgba(245, 158, 11, 0.4);
+}
+.role-current-tag.tag-role {
+    background: rgba(168, 85, 247, 0.18);
+    color: #e9d5ff;
+    border-color: rgba(168, 85, 247, 0.4);
+}
+
+.reviewer-slot-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+.reviewer-gate-pills {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.reviewer-gate-btn {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+    height: 24px !important;
+    padding: 0 8px !important;
+    border-radius: 5px !important;
+    font-size: 11px !important;
+    font-weight: 550 !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    background: rgba(255, 255, 255, 0.04) !important;
+    color: #a1a1aa !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap !important;
+}
+
+.reviewer-gate-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08) !important;
+    color: #ffffff !important;
+}
+
+.reviewer-gate-btn.active {
+    background: rgba(99, 102, 241, 0.22) !important;
+    border-color: rgba(99, 102, 241, 0.45) !important;
+    color: #c7d2fe !important;
+    box-shadow: 0 1px 3px rgba(99, 102, 241, 0.2);
+}
+
+.reviewer-gate-btn.btn-disabled.active {
+    background: rgba(245, 158, 11, 0.2) !important;
+    border-color: rgba(245, 158, 11, 0.45) !important;
+    color: #fde68a !important;
+    box-shadow: 0 1px 3px rgba(245, 158, 11, 0.2);
+}
+
+.reviewer-card-dropdown-wrap {
+    flex: 1;
+    min-width: 140px;
+}
+
+.reviewer-card-select {
+    width: 100%;
+    height: 24px;
+    padding: 0 6px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 500;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(20, 20, 24, 0.9);
+    color: #a1a1aa;
+    outline: none;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.reviewer-card-select:hover:not(:disabled) {
+    border-color: rgba(255, 255, 255, 0.22);
+    color: #ffffff;
+}
+
+.reviewer-card-select.active {
+    border-color: rgba(168, 85, 247, 0.5);
+    background: rgba(168, 85, 247, 0.16);
+    color: #e9d5ff;
+}
+
+.reviewer-gate-hint {
+    font-size: 11px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    line-height: 1.4;
+}
+
+.reviewer-gate-hint.disabled {
+    background: rgba(245, 158, 11, 0.08);
+    color: #fde68a;
+    border: 1px solid rgba(245, 158, 11, 0.22);
+}
+
+.reviewer-gate-hint.custom {
+    background: rgba(168, 85, 247, 0.08);
+    color: #e9d5ff;
+    border: 1px solid rgba(168, 85, 247, 0.22);
+}
+
+.roles-footer-tip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    margin-top: 6px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px dashed rgba(255, 255, 255, 0.09);
+    border-radius: 6px;
+    font-size: 11px;
+    color: #71717a;
+    line-height: 1.4;
+}
+
+.roles-footer-tip .tip-icon {
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
 .composer-actions {
     display: flex;
     align-items: center;
@@ -1631,6 +1796,24 @@ textarea::placeholder {
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
 
+.tab-count-badge {
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(99, 102, 241, 0.22);
+    color: #c7d2fe;
+    border: 1px solid rgba(99, 102, 241, 0.4);
+    margin-left: 2px;
+}
+
+.tab-count-badge.is-custom {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fde68a;
+    border-color: rgba(245, 158, 11, 0.45);
+}
+
 .top-mode-switch {
     display: inline-flex;
     align-items: center;
@@ -1702,6 +1885,161 @@ textarea::placeholder {
     gap: 8px;
 }
 
+/* 🎯 核心工种独立算力指派 */
+.role-slots-section {
+    background: rgba(255, 255, 255, 0.02) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 2px;
+}
+
+.route-badge.slots {
+    background: rgba(14, 165, 233, 0.12);
+    color: #38bdf8;
+    border: 1px solid rgba(14, 165, 233, 0.28);
+}
+
+.reset-slots-btn {
+    font-size: 10px;
+    font-weight: 550;
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    padding: 1px 7px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.reset-slots-btn:hover:not(:disabled) {
+    color: #f4f4f5;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.role-slots-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.role-slot-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 8px;
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    transition: all 0.15s ease;
+}
+
+.role-slot-row:hover {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(0, 0, 0, 0.35);
+}
+
+.slot-info {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+}
+
+.slot-icon {
+    font-size: 13px;
+    flex-shrink: 0;
+}
+
+.slot-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0px;
+    min-width: 0;
+}
+
+.slot-name {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #f4f4f5;
+    white-space: nowrap;
+}
+
+.slot-desc {
+    font-size: 9.5px;
+    color: #71717a;
+    white-space: nowrap;
+}
+
+.slot-picker-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.slot-choice-pill {
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 550;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: #a1a1aa;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.slot-choice-pill:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+    color: #f4f4f5;
+}
+
+.slot-choice-pill.active {
+    background: rgba(99, 102, 241, 0.22);
+    border-color: rgba(99, 102, 241, 0.5);
+    color: #c7d2fe;
+    font-weight: 600;
+    box-shadow: 0 1px 3px rgba(99, 102, 241, 0.2);
+}
+
+.slot-choice-pill.heter.active {
+    background: rgba(59, 130, 246, 0.2);
+    border-color: rgba(59, 130, 246, 0.5);
+    color: #93c5fd;
+}
+
+.slot-model-select {
+    height: 21px;
+    padding: 0 5px;
+    font-size: 10px;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    color: #8e8e9f;
+    cursor: pointer;
+    outline: none;
+    max-width: 95px;
+    transition: all 0.15s ease;
+}
+
+.slot-model-select:hover:not(:disabled) {
+    border-color: rgba(255, 255, 255, 0.2);
+    color: #f4f4f5;
+}
+
+.slot-model-select.active {
+    border-color: rgba(168, 85, 247, 0.5);
+    background: rgba(168, 85, 247, 0.14);
+    color: #e9d5ff;
+    font-weight: 600;
+}
+
 @keyframes tabFadeIn {
     from {
         opacity: 0;
@@ -1713,164 +2051,663 @@ textarea::placeholder {
     }
 }
 
-/* 🎭 角色档位高级卡片与胶囊开关 */
-.roles-pane {
+/* 🎭 专家小队与门禁面板 (Squad & Gate) */
+.squad-pane {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 12px;
 }
 
-.role-cards-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+.squad-section {
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 12px 14px;
+    transition: border-color 0.2s;
 }
 
-.role-card {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    transition: all 0.15s ease;
-}
-
-.role-card:hover {
-    background: rgba(255, 255, 255, 0.05);
+.squad-section:hover {
     border-color: rgba(255, 255, 255, 0.12);
 }
 
-.role-card-header {
+.squad-section .section-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+    margin-bottom: 10px;
 }
 
-.role-card-title-group {
+.squad-section .section-title-wrap {
     display: flex;
-    align-items: baseline;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.squad-section .section-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.squad-section .section-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #f4f4f5;
+    letter-spacing: -0.2px;
+}
+
+.squad-section .section-badge-count {
+    font-size: 10px;
+    font-weight: 600;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.1);
+    border: 1px solid rgba(56, 189, 248, 0.22);
+    padding: 1px 7px;
+    border-radius: 999px;
+    line-height: 1.3;
+}
+
+.squad-section .section-desc {
+    font-size: 11px;
+    color: #71717a;
+}
+
+/* 门禁状态胶囊 */
+.gate-current-status-tag {
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.gate-current-status-tag.status-default {
+    background: rgba(59, 130, 246, 0.12);
+    color: #93c5fd;
+    border: 1px solid rgba(59, 130, 246, 0.25);
+}
+.gate-current-status-tag.status-disabled {
+    background: rgba(245, 158, 11, 0.12);
+    color: #fde68a;
+    border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+/* 门禁控制组 */
+.gate-controls-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.gate-mode-pills {
+    display: flex;
+    align-items: center;
     gap: 6px;
+    flex-wrap: wrap;
+}
+
+.gate-mode-pill-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 550;
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    cursor: pointer;
+    transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    white-space: nowrap;
+}
+
+.gate-mode-pill-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+    color: #f4f4f5;
+}
+
+.gate-mode-pill-btn.active {
+    background: rgba(59, 130, 246, 0.2);
+    color: #60a5fa;
+    border-color: rgba(59, 130, 246, 0.45);
+    box-shadow: 0 1px 4px rgba(59, 130, 246, 0.2);
+}
+
+.gate-mode-pill-btn.btn-disabled.active {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fde68a;
+    border-color: rgba(245, 158, 11, 0.45);
+    box-shadow: 0 1px 4px rgba(245, 158, 11, 0.2);
+}
+
+/* 门禁策略动态提示条 */
+.gate-policy-banner {
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.gate-policy-banner.default {
+    background: rgba(59, 130, 246, 0.06);
+    border: 1px solid rgba(59, 130, 246, 0.18);
+    color: #bfdbfe;
+}
+
+.gate-policy-banner.disabled {
+    background: rgba(245, 158, 11, 0.06);
+    border: 1px solid rgba(245, 158, 11, 0.18);
+    color: #fef08a;
+}
+
+.gate-policy-banner.custom {
+    background: rgba(168, 85, 247, 0.06);
+    border: 1px solid rgba(168, 85, 247, 0.18);
+    color: #e9d5ff;
+}
+
+.gate-policy-banner.adaptive {
+    background: rgba(16, 185, 129, 0.08);
+    border: 1px solid rgba(16, 185, 129, 0.22);
+    color: #a7f3d0;
+}
+
+/* 🏷️ 工种插槽快速过滤标签栏 */
+.squad-kind-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 10px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+}
+
+.kind-filter-btn {
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 500;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: #a1a1aa;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.kind-filter-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #f4f4f5;
+}
+
+.kind-filter-btn.active {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+    font-weight: 600;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.kind-filter-btn .count-total {
+    font-size: 9.5px;
+    opacity: 0.65;
+    margin-left: 1px;
+}
+
+.kind-filter-btn.is-depleted {
+    color: #71717a;
+    border-style: dashed;
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+.kind-filter-btn.is-depleted.active {
+    color: #d4d4d8;
+    border-color: rgba(255, 255, 255, 0.22);
+}
+
+.section-badge-count.is-custom {
+    color: #f59e0b !important;
+    background: rgba(245, 158, 11, 0.12) !important;
+    border-color: rgba(245, 158, 11, 0.3) !important;
+}
+
+/* 顶部操作动作组 */
+.squad-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.squad-action-pill-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.squad-action-pill-btn.reset {
+    background: rgba(16, 185, 129, 0.12);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    color: #6ee7b7;
+}
+
+.squad-action-pill-btn.reset:hover:not(:disabled) {
+    background: rgba(16, 185, 129, 0.22);
+    border-color: rgba(16, 185, 129, 0.5);
+    color: #a7f3d0;
+    transform: translateY(-0.5px);
+}
+
+.squad-action-pill-btn.exclude-all {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #a1a1aa;
+}
+
+.squad-action-pill-btn.exclude-all:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.12);
+    border-color: rgba(239, 68, 68, 0.3);
+    color: #fca5a5;
+    transform: translateY(-0.5px);
+}
+
+/* 专家工坊管理直达按钮 */
+.manage-roles-link-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.1);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.manage-roles-link-btn:hover {
+    background: rgba(56, 189, 248, 0.2);
+    color: #7dd3fc;
+    border-color: rgba(56, 189, 248, 0.4);
+    transform: translateY(-0.5px);
+}
+
+.manage-roles-link-btn .link-icon {
+    width: 12px;
+    height: 12px;
+    stroke: currentColor;
+    stroke-width: 2.5;
+    fill: none;
+}
+
+/* 专家卡片网格 - 支持多专家优雅滚动 */
+.squad-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 8px;
+    max-height: 275px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.squad-cards-grid::-webkit-scrollbar,
+.model-routing-popover::-webkit-scrollbar {
+    width: 5px;
+}
+
+.squad-cards-grid::-webkit-scrollbar-track,
+.model-routing-popover::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 4px;
+}
+
+.squad-cards-grid::-webkit-scrollbar-thumb,
+.model-routing-popover::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 4px;
+}
+
+.squad-cards-grid::-webkit-scrollbar-thumb:hover,
+.model-routing-popover::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.32);
+}
+
+.squad-member-card {
+    background: rgba(0, 0, 0, 0.32);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 8px;
+    padding: 9px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: all 0.15s ease;
+    cursor: pointer;
+    user-select: none;
+}
+
+.squad-member-card:hover {
+    border-color: rgba(99, 102, 241, 0.35);
+    background: rgba(255, 255, 255, 0.045);
+    transform: translateY(-1px);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+}
+
+.squad-member-card.is-active {
+    border-color: rgba(99, 102, 241, 0.28);
+    background: rgba(99, 102, 241, 0.035);
+}
+
+.squad-member-card.is-hibernated {
+    opacity: 0.52;
+    filter: grayscale(45%);
+    border-style: dashed;
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.squad-member-card.is-hibernated:hover {
+    opacity: 0.85;
+    filter: grayscale(0%);
+    border-color: rgba(255, 255, 255, 0.25);
+}
+
+.member-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+/* 本会话选用 / 休眠切换按钮 */
+.session-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4.5px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+}
+.session-toggle-btn .status-indicator {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.session-toggle-btn.active {
+    background: rgba(16, 185, 129, 0.14);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    color: #6ee7b7;
+}
+.session-toggle-btn.active .status-indicator {
+    background: #10b981;
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+}
+.session-toggle-btn.active:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: rgba(239, 68, 68, 0.35);
+    color: #fca5a5;
+}
+.session-toggle-btn.active:hover:not(:disabled) .status-indicator {
+    background: #ef4444;
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+}
+.session-toggle-btn.hibernated {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px dashed rgba(255, 255, 255, 0.16);
+    color: #71717a;
+}
+.session-toggle-btn.hibernated .status-indicator {
+    background: #71717a;
+}
+.session-toggle-btn.hibernated:hover:not(:disabled) {
+    background: rgba(16, 185, 129, 0.1);
+    border-color: rgba(16, 185, 129, 0.3);
+    color: #a7f3d0;
+}
+.session-toggle-btn.hibernated:hover:not(:disabled) .status-indicator {
+    background: #10b981;
+}
+
+.member-identity {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     min-width: 0;
     overflow: hidden;
 }
 
-.role-card-name {
+.member-checkbox {
+    width: 15px;
+    height: 15px;
+    border-radius: 4px;
+    border: 1.5px solid rgba(255, 255, 255, 0.25);
+    background: rgba(0, 0, 0, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+}
+
+.member-checkbox.checked {
+    background: #10b981;
+    border-color: #10b981;
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.45);
+}
+
+.member-checkbox .check-icon {
+    width: 10px;
+    height: 10px;
+    stroke: #ffffff;
+    stroke-width: 3;
+    fill: none;
+}
+
+.member-name-block {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.member-label {
     font-size: 12px;
     font-weight: 600;
     color: #f4f4f5;
-    flex-shrink: 0;
-}
-
-.role-card-desc {
-    font-size: 10.5px;
-    color: #71717a;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
-.role-current-tag {
+.member-slug {
+    font-size: 9.5px;
+    color: #71717a;
+    font-family: 'JetBrains Mono', monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.member-model-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     font-size: 10px;
-    font-weight: 600;
     padding: 1px 6px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.07);
-    color: #a1a1aa;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #cbd5e1;
+    max-width: 110px;
     flex-shrink: 0;
 }
-.role-current-tag.pro {
-    background: rgba(99, 102, 241, 0.15);
-    color: #a5b4fc;
-    border-color: rgba(99, 102, 241, 0.3);
-}
-.role-current-tag.flash {
-    background: rgba(245, 158, 11, 0.15);
-    color: #fde68a;
-    border-color: rgba(245, 158, 11, 0.3);
-}
-.role-current-tag.vision {
-    background: rgba(16, 185, 129, 0.15);
-    color: #6ee7b7;
-    border-color: rgba(16, 185, 129, 0.3);
+
+.member-model-tag .model-icon {
+    font-size: 9px;
 }
 
-.role-pills-row {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
+.member-model-tag .model-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.member-badges-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
     gap: 4px;
-    background: rgba(0, 0, 0, 0.35);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.kind-badge {
+    font-size: 9.5px;
+    font-weight: 550;
+    padding: 1px 5px;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+
+.kind-badge.kind-writer {
+    background: rgba(16, 185, 129, 0.14);
+    color: #6ee7b7;
+    border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.kind-badge.kind-worker {
+    background: rgba(59, 130, 246, 0.14);
+    color: #93c5fd;
+    border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
+.kind-badge.kind-reviewer {
+    background: rgba(245, 158, 11, 0.14);
+    color: #fde68a;
+    border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.kind-badge.kind-scout {
+    background: rgba(139, 92, 246, 0.14);
+    color: #c4b5fd;
+    border: 1px solid rgba(139, 92, 246, 0.25);
+}
+
+.kind-badge.kind-all {
+    background: rgba(236, 72, 153, 0.14);
+    color: #f472b6;
+    border: 1px solid rgba(236, 72, 153, 0.25);
+}
+
+.scope-fence-badge {
+    font-size: 9px;
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+    padding: 1px 4px;
+    border-radius: 3px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.member-persona-excerpt {
+    font-size: 10px;
+    color: #94a3b8;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 空状态 */
+.squad-empty-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px 14px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px dashed rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    gap: 8px;
+}
+
+.squad-empty-box .empty-icon {
+    font-size: 26px;
+}
+
+.squad-empty-box .empty-text strong {
+    font-size: 12px;
+    color: #e4e4e7;
+    display: block;
+    margin-bottom: 2px;
+}
+
+.squad-empty-box .empty-text p {
+    font-size: 11px;
+    color: #71717a;
+    margin: 0;
+    line-height: 1.4;
+}
+
+.squad-empty-box .load-preset-btn {
+    font-size: 11px;
+    font-weight: 600;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.28);
+    padding: 5px 12px;
     border-radius: 6px;
-    padding: 2px;
-    width: 100%;
-    box-sizing: border-box;
-}
-
-.role-pill-btn {
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    gap: 4px !important;
-    width: 100% !important;
-    min-width: 0 !important;
-    height: 24px !important;
-    padding: 0 2px !important;
-    border-radius: 4px !important;
-    border: 1px solid transparent !important;
-    background: transparent !important;
-    color: #a1a1aa !important;
-    font-size: 11px !important;
-    font-weight: 550 !important;
     cursor: pointer;
-    transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
-    white-space: nowrap !important;
-    box-sizing: border-box !important;
+    transition: all 0.15s ease;
+    margin-top: 4px;
 }
 
-.role-pill-btn .pill-icon {
+.squad-empty-box .load-preset-btn:hover {
+    background: rgba(56, 189, 248, 0.22);
+    color: #7dd3fc;
+}
+
+/* 机制说明框 */
+.squad-footer-mechanism {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
     font-size: 10.5px;
-    line-height: 1;
+    color: #71717a;
+    line-height: 1.4;
+    margin-top: 10px;
 }
 
-.role-pill-btn:hover:not(:disabled) {
-    color: #ffffff !important;
-    background: rgba(255, 255, 255, 0.06) !important;
+.squad-footer-mechanism .mechanism-icon {
+    font-size: 13px;
+    flex-shrink: 0;
+    margin-top: 1px;
 }
 
-/* 自动 */
-.role-pill-btn.tier-auto.active {
-    background: rgba(255, 255, 255, 0.12) !important;
-    border-color: rgba(255, 255, 255, 0.22) !important;
-    color: #ffffff !important;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-}
-
-/* Pro 强模型 */
-.role-pill-btn.tier-pro.active {
-    background: rgba(99, 102, 241, 0.28) !important;
-    border-color: rgba(99, 102, 241, 0.5) !important;
-    color: #c7d2fe !important;
-    box-shadow: 0 1px 4px rgba(99, 102, 241, 0.25);
-}
-
-/* Flash 快模型 */
-.role-pill-btn.tier-flash.active {
-    background: rgba(245, 158, 11, 0.22) !important;
-    border-color: rgba(245, 158, 11, 0.5) !important;
-    color: #fde68a !important;
-    box-shadow: 0 1px 4px rgba(245, 158, 11, 0.2);
-}
-
-/* Vision 视觉模型 */
-.role-pill-btn.tier-vision.active {
-    background: rgba(16, 185, 129, 0.22) !important;
-    border-color: rgba(16, 185, 129, 0.5) !important;
-    color: #6ee7b7 !important;
-    box-shadow: 0 1px 4px rgba(16, 185, 129, 0.2);
+.squad-footer-mechanism .mechanism-text strong {
+    color: #a1a1aa;
 }
 
 .route-badge.mode {

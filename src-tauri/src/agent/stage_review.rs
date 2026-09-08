@@ -55,7 +55,15 @@ pub fn should_fire(
     checkpoint: &AgentCheckpoint,
     context: &SandwichContext,
     instruction: &AgentInstruction,
+    model_routing: &ModelRoutingConfig,
 ) -> Option<String> {
+    // 0. 会话级阶段审查门禁覆盖检查（若为 disabled/none 则直通免审）
+    if let Some(ref ovr) = model_routing.stage_reviewer_override {
+        let clean = ovr.trim();
+        if clean.eq_ignore_ascii_case("disabled") || clean.eq_ignore_ascii_case("none") {
+            return None;
+        }
+    }
     // 仅在方案已批准后介入（批准前由方案审查负责），全自动模式保持原有行为
     if !checkpoint.plan_phase.is_approved() {
         return None;
@@ -125,8 +133,92 @@ pub fn should_fire(
     None
 }
 
+/// 自动自适应优选审查专家：
+/// 1. 若当前启用的审查专家只有 1 位，自动挂载该专家；
+/// 2. 若有多位，根据当前阶段改动的文件类型（前端 vs 后端）匹配对应专家；
+/// 3. 若无审查专家，返回 None 走系统默认的跨家族异构对抗模型兜底。
+fn resolve_adaptive_reviewer_card(
+    db: &DbState,
+    context: &SandwichContext,
+    disabled_cards: &[String],
+) -> Option<crate::agent::tools::role_manager::RoleCard> {
+    let cards = crate::agent::tools::role_manager::list_cards(db, false).ok()?;
+    let active_reviewers: Vec<crate::agent::tools::role_manager::RoleCard> = cards
+        .into_iter()
+        .filter(|c| {
+            c.enabled
+                && c.allows_kind("reviewer")
+                && !disabled_cards.iter().any(|d| d.eq_ignore_ascii_case(&c.name))
+        })
+        .collect();
+
+    if active_reviewers.is_empty() {
+        return None;
+    }
+    if active_reviewers.len() == 1 {
+        return Some(active_reviewers.into_iter().next().unwrap());
+    }
+
+    // 存在多位审查专家时：根据最近改动的文件类型做领域自适应匹配
+    let all_paths: Vec<String> = context
+        .side_effects
+        .iter()
+        .flat_map(|s| {
+            let mut paths = s.affected_paths.clone();
+            paths.push(s.description.clone());
+            paths
+        })
+        .collect();
+
+    let has_frontend = all_paths.iter().any(|p| {
+        let l = p.to_ascii_lowercase();
+        l.ends_with(".vue")
+            || l.ends_with(".tsx")
+            || l.ends_with(".jsx")
+            || l.ends_with(".css")
+            || l.ends_with(".scss")
+            || l.ends_with(".html")
+    });
+    let has_backend = all_paths.iter().any(|p| {
+        let l = p.to_ascii_lowercase();
+        l.ends_with(".rs")
+            || l.ends_with(".go")
+            || l.ends_with(".py")
+            || l.ends_with(".sql")
+            || l.ends_with(".toml")
+            || l.ends_with(".java")
+    });
+
+    if has_frontend && !has_backend {
+        if let Some(c) = active_reviewers.iter().find(|c| {
+            let s = format!("{} {} {}", c.name, c.label, c.scope_hints).to_ascii_lowercase();
+            s.contains("前端")
+                || s.contains("frontend")
+                || s.contains("ui")
+                || s.contains("vue")
+                || s.contains("react")
+        }) {
+            return Some(c.clone());
+        }
+    } else if has_backend && !has_frontend {
+        if let Some(c) = active_reviewers.iter().find(|c| {
+            let s = format!("{} {} {}", c.name, c.label, c.scope_hints).to_ascii_lowercase();
+            s.contains("后端")
+                || s.contains("backend")
+                || s.contains("安全")
+                || s.contains("security")
+                || s.contains("api")
+        }) {
+            return Some(c.clone());
+        }
+    }
+
+    // 默认回退第一位启用的审查专家卡
+    active_reviewers.into_iter().next()
+}
+
 /// 派发一次阶段审查。证据包由宿主组装（任务目标 + 阶段计划 + 当前累计 diff），
-/// reviewer 走跨家族优选（角色卡钉死除外）。
+/// reviewer 走自适应专家挂载或跨家族异构模型优选。
 pub async fn dispatch(
     app: &AppHandle,
     db: &DbState,
@@ -139,6 +231,28 @@ pub async fn dispatch(
     step_id: usize,
     interrupt_rx: watch::Receiver<u64>,
 ) -> Result<(), String> {
+    // 1. 检查会话级是否有指定的审查官角色卡，未硬性指定时自适应从启用专家中匹配
+    let role_card = if let Some(ref ovr) = model_routing.stage_reviewer_override {
+        let clean = ovr.trim();
+        if clean.eq_ignore_ascii_case("disabled") || clean.eq_ignore_ascii_case("none") {
+            None
+        } else if !clean.is_empty()
+            && !clean.eq_ignore_ascii_case("default")
+            && !clean.eq_ignore_ascii_case("follow_global")
+            && !clean.eq_ignore_ascii_case("auto")
+        {
+            match crate::agent::tools::role_manager::resolve_enabled_card(db, clean) {
+                Ok(Some(card)) if card.allows_kind("reviewer") => Some(card),
+                _ => resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards),
+            }
+        } else {
+            resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards)
+        }
+    } else {
+        resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards)
+    };
+
+    // 2. 确定所用模型与跨家族优选
     let routing = AgentRouter::route_for_role(
         context,
         model_routing,
@@ -147,16 +261,63 @@ pub async fn dispatch(
     );
     let (model_to_use, cross_family_note) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        router::prefer_cross_family_reviewer(&conn, &routing.model_id)
+        let has_explicit_reviewer_slot = model_routing
+            .role_models
+            .get(router::roles::REVIEWER)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+
+        if let Some(ref card) = role_card {
+            if !card.model_id.is_empty() {
+                (card.model_id.clone(), None)
+            } else if has_explicit_reviewer_slot {
+                (routing.model_id.clone(), None)
+            } else {
+                router::prefer_cross_family_reviewer(&conn, &routing.model_id)
+            }
+        } else if has_explicit_reviewer_slot {
+            (routing.model_id.clone(), None)
+        } else {
+            router::prefer_cross_family_reviewer(&conn, &routing.model_id)
+        }
     };
 
-    let evidence = build_stage_evidence(context, workspace);
+    // 3. 收集关注材料与组装证据包（严格在 6000 字符预算内）
+    let focus_context = if let Some(ref card) = role_card {
+        let domains = card.parse_focus_domains();
+        if !domains.is_empty() {
+            crate::agent::context_collector::assemble_focus_context(
+                &domains,
+                workspace,
+                None,
+                None,
+            )
+            .await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let evidence = build_stage_evidence(context, workspace, focus_context.as_deref());
+
+    // 4. 组装派发参数与信封
+    let question = if let Some(ref card) = role_card {
+        format!(
+            "阶段级写入审查（专家角色：{}）：审查当前阶段变更是否满足阶段目标、无 blocking 缺陷并符合角色规范",
+            card.label
+        )
+    } else {
+        "阶段级写入审查：审查当前阶段变更是否满足阶段目标且无 blocking 缺陷".to_string()
+    };
 
     let params = json!({
-        "question": "阶段级写入审查：审查当前阶段变更是否满足阶段目标且无 blocking 缺陷",
+        "question": question,
         "evidence_excerpt": evidence,
     });
-    let envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
+
+    let mut envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
         parent_run_id,
         session_id,
         &model_to_use,
@@ -165,6 +326,16 @@ pub async fn dispatch(
     .with_task_id(format!("stage_review_{}", checkpoint.step_id))
     .with_tier(&routing.tier.to_string())
     .with_effort(model_routing.reasoning_effort_for(&routing.tier));
+
+    if let Some(ref card) = role_card {
+        let persona = crate::agent::tools::role_manager::persona_block(card);
+        if !persona.is_empty() {
+            envelope = envelope.with_persona(persona);
+        }
+        if let Some(schema) = card.parse_custom_schema() {
+            envelope = envelope.with_custom_schema(schema);
+        }
+    }
 
     let child_run_id = envelope
         .dispatch(Some(app.clone()), db, workspace, interrupt_rx)
@@ -177,19 +348,28 @@ pub async fn dispatch(
     // 覆盖基线在【派发时】记录：reviewer 证据包取的是此刻的 diff，此后发生的写入
     // 不在本轮审查范围内，必须留在基线之外让下一次触发兜住（防覆盖记账竞态）。
     checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
-    if let Some(note) = cross_family_note {
-        let _ = app.emit(
-            &format!("agent-log-{}", session_id),
-            format!("📋 阶段审查已派发 ({}):{}", child_run_id, note),
-        );
-    }
+
+    let role_note = if let Some(ref card) = role_card {
+        format!(" (挂载专家: {})", card.label)
+    } else {
+        String::new()
+    };
+    let note_text = cross_family_note.map(|n| format!(":{}", n)).unwrap_or_default();
+    let _ = app.emit(
+        &format!("agent-log-{}", session_id),
+        format!("📋 阶段审查已派发 ({}){}{}", child_run_id, note_text, role_note),
+    );
     Ok(())
 }
 
-/// 组装阶段审查证据包：任务目标 + 阶段计划 + diff 尾部。
+/// 组装阶段审查证据包：任务目标 + 阶段计划 + 专项材料(如有) + diff 尾部。
 /// 硬约束：总长不得超过 child_reviewer 的 evidence_excerpt 预算（6000 字符），
 /// 超限会导致派发在解析层被静默拒绝（实测教训）。diff 取尾部——最近的变更与当前阶段最相关。
-fn build_stage_evidence(context: &SandwichContext, workspace: &Path) -> String {
+fn build_stage_evidence(
+    context: &SandwichContext,
+    workspace: &Path,
+    focus_context: Option<&str>,
+) -> String {
     const MAX_EVIDENCE_CHARS: usize = 6_000;
 
     let mut evidence = String::new();
@@ -208,9 +388,18 @@ fn build_stage_evidence(context: &SandwichContext, workspace: &Path) -> String {
         "【占位存根豁免（重要）】宿主 oracle 会为尚未到达的未来阶段预生成占位文件          src/stage-XX.mjs（内容为 return value; 存根）。这些文件出现在 diff 中属于设计内          的未来工作，不属于任何当前阶段的缺陷：不得因此判出 blocking（无论 regardless          还是 final_only），最多作为一条 suggestion 提及。你的审查对象是已实现代码的          结构性质量与当前阶段义务的落实情况。\n\n",
     );
     evidence.push_str(&format!(
-        "【阶段计划（注意：这是中间态，非最终形态，final_only 级问题请如实标注）】\n{}\n",
+        "【阶段计划（注意：这是中间态，非最终形态，final_only 级问题请如实标注）】\n{}\n\n",
         todos
     ));
+
+    // 如果角色卡提取了 focus_domains 材料，按预算（最多 1500 字符）安全注入
+    if let Some(focus) = focus_context {
+        let focus_clean = focus.trim();
+        if !focus_clean.is_empty() {
+            let focus_snippet: String = focus_clean.chars().take(1500).collect();
+            evidence.push_str(&format!("【审查专家专项关注材料】\n{}\n\n", focus_snippet));
+        }
+    }
 
     let diff_block = match crate::agent::reviewer_gatekeeper::GitBaseline::capture(workspace)
         .collect_git_diff(workspace)
@@ -360,35 +549,43 @@ mod tests {
         }
     }
 
+    use crate::agent::router::ModelRoutingConfig;
+
+    fn default_routing() -> ModelRoutingConfig {
+        ModelRoutingConfig::default()
+    }
+
     #[test]
     fn should_fire_requires_approved_non_auto_mode_and_real_writes() {
         let context = SandwichContext::new("system".to_string(), "goal".to_string());
         let instruction = instruction_with_todo_done();
+        let routing = default_routing();
 
         // 未批准：不触发（方案审查负责批准前）
         let mut cp = approved_checkpoint();
         cp.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
-        assert!(should_fire(&cp, &context, &instruction).is_none());
+        assert!(should_fire(&cp, &context, &instruction, &routing).is_none());
 
         // 全自动模式：不触发（保持原有行为）
         let mut cp = approved_checkpoint();
         cp.set_execution_mode(PlanExecutionMode::Auto);
-        assert!(should_fire(&cp, &context, &instruction).is_none());
+        assert!(should_fire(&cp, &context, &instruction, &routing).is_none());
 
         // 批准 + 交叉审查，但无写入：不触发
         let cp = approved_checkpoint();
-        assert!(should_fire(&cp, &context, &instruction).is_none());
+        assert!(should_fire(&cp, &context, &instruction, &routing).is_none());
 
         // 有写入 + todo 阶段完成：触发
         let mut context2 = SandwichContext::new("system".to_string(), "goal".to_string());
         context2.record_side_effect(1, "write_file".to_string(), "a.rs".to_string());
         let cp = approved_checkpoint();
-        assert!(should_fire(&cp, &context2, &instruction).is_some());
+        assert!(should_fire(&cp, &context2, &instruction, &routing).is_some());
     }
 
     #[test]
     fn write_count_threshold_is_the_behavioral_backstop() {
         let mut context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let routing = default_routing();
         // 无 todo 更新的普通指令
         let instruction = AgentInstruction::default();
         // 阈值默认 6：写 5 个不触发
@@ -396,10 +593,10 @@ mod tests {
             context.record_side_effect(i, "write_file".to_string(), format!("f{}.rs", i));
         }
         let cp = approved_checkpoint();
-        assert!(should_fire(&cp, &context, &instruction).is_none(), "5 个文件不应触发");
+        assert!(should_fire(&cp, &context, &instruction, &routing).is_none(), "5 个文件不应触发");
         // 第 6 个触发（记账博弈兜底：模型不更新 todo 也逃不掉）
         context.record_side_effect(6, "write_file".to_string(), "f6.rs".to_string());
-        assert!(should_fire(&cp, &context, &instruction).is_some(), "达到阈值必须触发");
+        assert!(should_fire(&cp, &context, &instruction, &routing).is_some(), "达到阈值必须触发");
     }
 
     #[test]
@@ -409,8 +606,7 @@ mod tests {
         let git = |args: &[&str]| {
             std::process::Command::new("git").args(args).current_dir(&dir).status().unwrap()
         };
-        std::fs::write(dir.join("big.rs"), "fn base() {}
-").unwrap();
+        std::fs::write(dir.join("big.rs"), "fn base() {}\n").unwrap();
         assert!(git(&["init", "-q"]).success());
         assert!(git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]).success());
         assert!(git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]).success());
@@ -428,7 +624,7 @@ mod tests {
             });
         }
 
-        let evidence = build_stage_evidence(&context, &dir);
+        let evidence = build_stage_evidence(&context, &dir, None);
         assert!(
             evidence.chars().count() <= 6_000,
             "证据包超限会被 child_reviewer 解析层拒绝（实测教训）: {}",
@@ -438,11 +634,16 @@ mod tests {
         assert!(evidence.contains("前段截断"), "大 diff 应截断保留尾部");
 
         // 小 diff 不截断
-        std::fs::write(dir.join("big.rs"), "fn small() {}
-").unwrap();
-        let evidence2 = build_stage_evidence(&context, &dir);
+        std::fs::write(dir.join("big.rs"), "fn small() {}\n").unwrap();
+        let evidence2 = build_stage_evidence(&context, &dir, None);
         assert!(!evidence2.contains("前段截断"));
         assert!(evidence2.chars().count() <= 6_000);
+
+        // 验证 focus_context 注入且总长度仍受 6000 字符限制
+        let focus_mat = "【关注领域重点】: 前端组件及可访问性规范".repeat(20);
+        let evidence3 = build_stage_evidence(&context, &dir, Some(&focus_mat));
+        assert!(evidence3.contains("【审查专家专项关注材料】"));
+        assert!(evidence3.chars().count() <= 6_000);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -451,26 +652,27 @@ mod tests {
     fn shell_batch_mutations_trigger_stage_review_independently() {
         let context = SandwichContext::new("system".to_string(), "goal".to_string());
         let instruction = AgentInstruction::default();
+        let routing = default_routing();
         let cp = approved_checkpoint();
 
         // shell 未覆盖变更 5 个：不触发（同 todo/文件数阈值）
         let mut cp5 = approved_checkpoint();
         cp5.uncovered_shell_mutations = 5;
-        assert!(should_fire(&cp5, &context, &instruction).is_none(), "5 个 shell 变更不应触发");
+        assert!(should_fire(&cp5, &context, &instruction, &routing).is_none(), "5 个 shell 变更不应触发");
 
         // 达到阈值 6：无 todo 推进也必须触发（防旁路的核心断言）
         let mut cp6 = approved_checkpoint();
         cp6.uncovered_shell_mutations = 6;
-        let reason = should_fire(&cp6, &context, &instruction).unwrap();
+        let reason = should_fire(&cp6, &context, &instruction, &routing).unwrap();
         assert!(reason.contains("shell"), "触发原因应标明 shell 旁路: {}", reason);
 
         // 基线语义：派发时快照后，新增变更才计入未覆盖
         let mut cp_baselined = approved_checkpoint();
         cp_baselined.uncovered_shell_mutations = 10;
         cp_baselined.stage_review_shell_baseline = 8;
-        assert!(should_fire(&cp_baselined, &context, &instruction).is_none(), "基线之上的增量 2 < 6 不触发");
+        assert!(should_fire(&cp_baselined, &context, &instruction, &routing).is_none(), "基线之上的增量 2 < 6 不触发");
         cp_baselined.uncovered_shell_mutations = 14;
-        assert!(should_fire(&cp_baselined, &context, &instruction).is_some(), "基线上增量 6 触发");
+        assert!(should_fire(&cp_baselined, &context, &instruction, &routing).is_some(), "基线上增量 6 触发");
 
         let _ = cp; let _ = cp5;
     }
@@ -480,21 +682,48 @@ mod tests {
         let mut context = SandwichContext::new("system".to_string(), "goal".to_string());
         context.record_side_effect(1, "write_file".to_string(), "a.rs".to_string());
         let instruction = instruction_with_todo_done();
+        let routing = default_routing();
 
         // 预算耗尽
         let mut cp = approved_checkpoint();
         cp.stage_review_budget_used = crate::agent::checkpoint::MAX_STAGE_REVIEWS;
-        assert!(should_fire(&cp, &context, &instruction).is_none());
+        assert!(should_fire(&cp, &context, &instruction, &routing).is_none());
 
         // 在途审查
         let mut cp = approved_checkpoint();
         cp.stage_review_run_id = Some("child-1".to_string());
-        assert!(should_fire(&cp, &context, &instruction).is_none());
+        assert!(should_fire(&cp, &context, &instruction, &routing).is_none());
 
         // 有未解决拦截时不重复派发（等对质收敛）
         let mut cp = approved_checkpoint();
         cp.stage_review_blockers_open = 1;
-        assert!(should_fire(&cp, &context, &instruction).is_none());
+        assert!(should_fire(&cp, &context, &instruction, &routing).is_none());
+    }
+
+    #[test]
+    fn should_fire_respects_stage_reviewer_override_disabled_and_roles() {
+        let mut context = SandwichContext::new("system".to_string(), "goal".to_string());
+        context.record_side_effect(1, "write_file".to_string(), "a.rs".to_string());
+        let instruction = instruction_with_todo_done();
+        let cp = approved_checkpoint();
+
+        // 默认配置下：达到条件触发
+        let default_cfg = default_routing();
+        assert!(should_fire(&cp, &context, &instruction, &default_cfg).is_some());
+
+        // 显式免审（"disabled" 或 "none"）：直通免审，完全不触发
+        let mut disabled_cfg = default_routing();
+        disabled_cfg.stage_reviewer_override = Some("disabled".to_string());
+        assert!(should_fire(&cp, &context, &instruction, &disabled_cfg).is_none(), "disabled 必须直通免审");
+
+        let mut none_cfg = default_routing();
+        none_cfg.stage_reviewer_override = Some("None".to_string());
+        assert!(should_fire(&cp, &context, &instruction, &none_cfg).is_none(), "None 必须直通免审");
+
+        // 指定角色卡：依然正常触发阶段审查
+        let mut custom_role_cfg = default_routing();
+        custom_role_cfg.stage_reviewer_override = Some("frontend_gatekeeper".to_string());
+        assert!(should_fire(&cp, &context, &instruction, &custom_role_cfg).is_some(), "指定角色卡仍应正常触发");
     }
 
     #[test]
@@ -537,7 +766,7 @@ mod tests {
         assert!(note.contains("拦截"), "有 regardless 拦截时必须给出解套提示");
 
         // 基线推进后：同样写入不再触发
-        assert!(should_fire(&cp, &context, &instruction_with_todo_done()).is_none());
+        assert!(should_fire(&cp, &context, &instruction_with_todo_done(), &default_routing()).is_none());
     }
 
     #[test]

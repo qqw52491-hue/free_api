@@ -67,6 +67,10 @@ pub struct PlanReviewerDispatchSnapshot {
     pub params: Value,
     #[serde(default)]
     pub custom_schema: crate::agent::protocol::ContractSchema,
+    #[serde(default)]
+    pub focus_domains: Vec<crate::agent::protocol::FocusDomain>,
+    #[serde(default)]
+    pub specialized_context: Option<String>,
 }
 
 impl PlanReviewerDispatchSnapshot {
@@ -84,11 +88,23 @@ impl PlanReviewerDispatchSnapshot {
             persona: persona.into(),
             params,
             custom_schema: Default::default(),
+            focus_domains: Vec::new(),
+            specialized_context: None,
         }
     }
 
     pub fn with_custom_schema(mut self, schema: crate::agent::protocol::ContractSchema) -> Self {
         self.custom_schema = schema;
+        self
+    }
+
+    pub fn with_focus_domains(mut self, domains: Vec<crate::agent::protocol::FocusDomain>) -> Self {
+        self.focus_domains = domains;
+        self
+    }
+
+    pub fn with_specialized_context(mut self, ctx: impl Into<String>) -> Self {
+        self.specialized_context = Some(ctx.into());
         self
     }
 
@@ -1239,6 +1255,16 @@ pub async fn spawn_child_reviewer(
             "不得调用任何工具：只评估证据包内的事实，证据不足时在 missing_evidence 说明。".to_string()
         }
     );
+    let specialized_context = params
+        .get("specialized_context")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+    let focus_section = if let Some(spec) = specialized_context {
+        format!("\n\n{}", spec)
+    } else {
+        String::new()
+    };
+
     let mut messages = vec![
         json!({
             "role": "system",
@@ -1247,9 +1273,10 @@ pub async fn spawn_child_reviewer(
         json!({
             "role": "user",
             "content": format!(
-                "审查问题：{}\n\n{}\n\n父 Agent 明确提供的证据引用：{}\n\n证据摘录（可能为空；不得假定摘录外事实）：{}",
+                "审查问题：{}\n\n{}{}\n\n父 Agent 明确提供的证据引用：{}\n\n证据摘录（可能为空；不得假定摘录外事实）：{}",
                 request.question,
                 contract_verify_hint,
+                focus_section,
                 if allowed_refs.is_empty() { "（无）".to_string() } else { allowed_refs.join(", ") },
                 if evidence_excerpt.is_empty() { "（无）".to_string() } else { evidence_excerpt },
             )

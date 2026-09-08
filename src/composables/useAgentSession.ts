@@ -70,6 +70,7 @@ function loadModelRouting(): ModelRouting {
         context_budget_mode: "deep_coding",
         routing_mode: "rules",
         role_models: {},
+        stage_reviewer_override: undefined,
     };
     try {
         const stored = JSON.parse(localStorage.getItem(MODEL_ROUTING_STORAGE_KEY) || "{}") as Partial<ModelRouting> & { reasoning_effort?: unknown; reasoning_effort_version?: unknown };
@@ -92,6 +93,7 @@ function loadModelRouting(): ModelRouting {
             role_models: stored.role_models && typeof stored.role_models === "object" && !Array.isArray(stored.role_models)
                 ? stored.role_models as Record<string, string>
                 : {},
+            stage_reviewer_override: typeof stored.stage_reviewer_override === "string" ? stored.stage_reviewer_override : undefined,
         };
     } catch {
         return fallback;

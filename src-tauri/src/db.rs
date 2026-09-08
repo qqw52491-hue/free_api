@@ -413,6 +413,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             max_concurrency INTEGER NOT NULL DEFAULT 0,
             enabled INTEGER NOT NULL DEFAULT 1,
             custom_schema TEXT NOT NULL DEFAULT '',
+            focus_domains TEXT NOT NULL DEFAULT '[]',
+            input_schema TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -756,6 +758,14 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     );
     let _ = conn.execute(
         "ALTER TABLE agent_role_cards ADD COLUMN custom_schema TEXT NOT NULL DEFAULT '';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_role_cards ADD COLUMN focus_domains TEXT NOT NULL DEFAULT '[]';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_role_cards ADD COLUMN input_schema TEXT NOT NULL DEFAULT '';",
         [],
     );
     // P5 副本生命周期与脱水追问字段：workspace_copy / resumed_from / message_history_json

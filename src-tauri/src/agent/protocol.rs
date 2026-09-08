@@ -21,6 +21,8 @@ pub const BASELINE_RESERVED_FIELDS: &[&str] = &[
     "timeout_secs",
     "input_payload",
     "custom_schema",
+    "focus_domains",
+    "specialized_context",
     "status",
     "duration_ms",
     "completion_tokens",
@@ -56,6 +58,56 @@ pub const BASELINE_RESERVED_FIELDS: &[&str] = &[
 pub fn is_reserved_field_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
     BASELINE_RESERVED_FIELDS.contains(&lower.as_str())
+}
+
+/// 角色关注领域（Focus Domain）：声明角色在调度时期望系统底层自动装配的专项材料
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusDomain {
+    ChangedFiles,
+    GitDiff,
+    LastVerifyLog,
+}
+
+impl FocusDomain {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ChangedFiles => "changed_files",
+            Self::GitDiff => "git_diff",
+            Self::LastVerifyLog => "last_verify_log",
+        }
+    }
+
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            Self::ChangedFiles => "变更文件列表 (changed_files)",
+            Self::GitDiff => "关键代码差异 (git_diff)",
+            Self::LastVerifyLog => "最近验证/构建日志 (last_verify_log)",
+        }
+    }
+
+    pub fn from_domain_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "changed_files" | "files" => Some(Self::ChangedFiles),
+            "git_diff" | "diff" => Some(Self::GitDiff),
+            "last_verify_log" | "verify_log" | "test_log" => Some(Self::LastVerifyLog),
+            _ => None,
+        }
+    }
+
+    pub fn all() -> &'static [FocusDomain] {
+        &[
+            Self::ChangedFiles,
+            Self::GitDiff,
+            Self::LastVerifyLog,
+        ]
+    }
+}
+
+impl std::fmt::Display for FocusDomain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 /// 校验自定义扩展字段名称的合法性（防碰撞 + 命名语法约束）
@@ -304,6 +356,34 @@ impl ContractSchema {
         lines.join("\n")
     }
 
+    /// 渲染自定义入参的 Prompt 指引，指导主 Agent 在派发该角色时应该/可以传入哪些参数
+    pub fn render_input_prompt_instructions(&self, role_name: &str) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+
+        let mut lines = Vec::new();
+        lines.push(format!("【角色「{}」自定义入参规范 (custom_inputs)】", role_name));
+        lines.push("派发该角色时，请在调用参数的 `custom_inputs` 对象中传入以下键值对（若无特殊需要，必填项必须提供）：".to_string());
+        for f in &self.fields {
+            let req_str = if f.required { "必填" } else { "选填" };
+            let enum_str = if let Some(ref allowed) = f.allowed_values {
+                format!("，可选值: [{}]", allowed.join(", "))
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "- `{}` ({}, {}{}): {}",
+                f.name,
+                f.field_type.as_str(),
+                req_str,
+                enum_str,
+                f.description
+            ));
+        }
+        lines.join("\n")
+    }
+
     /// 校验产物负载的形态（类型、必填性、闭集白名单）
     pub fn validate_shape(&self, payload: &Value) -> Result<(), String> {
         if self.is_empty() {
@@ -425,6 +505,12 @@ pub struct DispatchEnvelope {
     /// 扩展字段契约模式（声明此任务必须/可选返回的自定义字段）
     #[serde(default)]
     pub custom_schema: ContractSchema,
+    /// 角色声明的关注域清单
+    #[serde(default)]
+    pub focus_domains: Vec<FocusDomain>,
+    /// 系统已自动采集装配的专属材料
+    #[serde(default)]
+    pub specialized_context: Option<String>,
 }
 
 impl DispatchEnvelope {
@@ -451,6 +537,8 @@ impl DispatchEnvelope {
             timeout_secs: default_timeout_secs(),
             input_payload,
             custom_schema: ContractSchema::default(),
+            focus_domains: Vec::new(),
+            specialized_context: None,
         }
     }
 
@@ -549,6 +637,16 @@ impl DispatchEnvelope {
     pub fn with_custom_field(mut self, field: ContractFieldDef) -> Result<Self, String> {
         self.custom_schema.add_field(field)?;
         Ok(self)
+    }
+
+    pub fn with_focus_domains(mut self, domains: Vec<FocusDomain>) -> Self {
+        self.focus_domains = domains;
+        self
+    }
+
+    pub fn with_specialized_context(mut self, ctx: impl Into<String>) -> Self {
+        self.specialized_context = Some(ctx.into());
+        self
     }
 
     pub fn attempt_key(&self) -> TaskAttemptKey {
@@ -864,6 +962,8 @@ mod tests {
             timeout_secs: 120,
             input_payload: serde_json::json!({"question": "security audit"}),
             custom_schema: ContractSchema::default(),
+            focus_domains: vec![FocusDomain::GitDiff],
+            specialized_context: None,
         };
 
         let key = envelope.attempt_key();

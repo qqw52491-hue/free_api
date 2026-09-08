@@ -131,6 +131,122 @@
         ></textarea>
       </label>
 
+      <!-- 🎯 上下文关注域 (Focus Domains / 系统预装材料) -->
+      <div class="field wide focus-domain-section">
+        <div class="focus-header">
+          <span class="field-label">🎯 上下文关注域 (Focus Domains / 自动装配材料)</span>
+          <span class="field-hint">勾选该角色需要的专项材料。派发时系统底层自动并发采集并安全截断注入，主 Agent 无需在提示词中手动粘贴大段代码与日志。</span>
+        </div>
+        <div class="focus-pills-wrap">
+          <button
+            v-for="opt in focusDomainOptions"
+            :key="opt.value"
+            type="button"
+            class="focus-pill"
+            :class="{ active: form.focus_domains.includes(opt.value) }"
+            :title="opt.desc"
+            @click="toggleFocusDomain(opt.value)"
+          >
+            <span class="pill-check">{{ form.focus_domains.includes(opt.value) ? '✓' : '+' }}</span>
+            <span>{{ opt.label }}</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 📥 自定义入参需求约束 (Input Contract Schema / 动态业务上下文) -->
+      <div class="field wide input-contract-section">
+        <div class="contract-header">
+          <div class="contract-title-group">
+            <span class="field-label">📥 自定义入参需求约束 (Input Contract Schema)</span>
+            <span class="field-hint">声明主 Agent 在向该专家派工时，除了系统自动采集的关注材料外，必须或建议在输入参数中额外显式补充的业务字段（如 business_goal、affected_modules 等）。</span>
+          </div>
+          <button type="button" class="btn btn-sm btn-input-add" @click="addInputField">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            添加入参字段
+          </button>
+        </div>
+
+        <div v-if="!form.input_fields.length" class="contract-empty">
+          <span class="empty-hint">暂无特定入参字段约束（主 Agent 按常规说明自由派发）。点击右上角「+ 添加入参字段」可约束派工必须携带的特定业务要素。</span>
+        </div>
+
+        <div v-else class="schema-table-wrap input-table-wrap">
+          <div class="schema-table-header">
+            <div class="th-col col-idx">#</div>
+            <div class="th-col col-name">入参键名 (Key) <b class="th-req">*</b></div>
+            <div class="th-col col-type">数据类型 (Type)</div>
+            <div class="th-col col-req">约束 (Req)</div>
+            <div class="th-col col-desc">入参用途说明 (Description)</div>
+            <div class="th-col col-enum">可选枚举范围 (Enum)</div>
+            <div class="th-col col-action">操作</div>
+          </div>
+          <div class="schema-table-body">
+            <div
+              v-for="(field, fIdx) in form.input_fields"
+              :key="fIdx"
+              class="schema-table-row input-row"
+            >
+              <div class="td-col col-idx">
+                <span class="row-index">{{ fIdx + 1 }}</span>
+              </div>
+              <div class="td-col col-name">
+                <input
+                  v-model="field.name"
+                  type="text"
+                  class="cell-input mono-input"
+                  placeholder="例如: business_goal"
+                  @blur="sanitizeFieldName(field)"
+                />
+              </div>
+              <div class="td-col col-type">
+                <select v-model="field.field_type" class="cell-select">
+                  <option value="string">string (文本)</option>
+                  <option value="string[]">string[] (列表)</option>
+                  <option value="number">number (数字)</option>
+                  <option value="boolean">boolean (布尔)</option>
+                </select>
+              </div>
+              <div class="td-col col-req">
+                <button
+                  type="button"
+                  class="req-toggle-pill"
+                  :class="{ active: field.required }"
+                  @click="field.required = !field.required"
+                >
+                  {{ field.required ? '必填' : '选填' }}
+                </button>
+              </div>
+              <div class="td-col col-desc">
+                <input
+                  v-model="field.description"
+                  type="text"
+                  class="cell-input"
+                  placeholder="说明此入参的具体业务诉求与预期目标"
+                />
+              </div>
+              <div class="td-col col-enum">
+                <input
+                  v-model="field.allowed_values_str"
+                  type="text"
+                  class="cell-input"
+                  placeholder="feature, bugfix... (选填)"
+                />
+              </div>
+              <div class="td-col col-action">
+                <button
+                  type="button"
+                  class="btn-row-del"
+                  title="删除此字段"
+                  @click="removeInputField(fIdx)"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 📋 交付契约约束 (Contract Schema) -->
       <div class="field wide contract-section">
         <div class="contract-header">
@@ -138,7 +254,7 @@
             <span class="field-label">📋 结构化交付契约约束 (Contract Schema)</span>
             <span class="field-hint">声明该专家在输出 JSON 交付物时除常规 findings/confidence 外必须包含的特化字段。调度时自动注入 Prompt，交卷时由 Rust 门禁严格校验。</span>
           </div>
-          <button type="button" class="btn secondary btn-sm add-field-btn" @click="addSchemaField">
+          <button type="button" class="btn btn-sm btn-output-add" @click="addSchemaField">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
             添加契约字段
           </button>
@@ -148,71 +264,78 @@
           <span class="empty-hint">暂无特化契约字段（仅输出基线 findings / confidence）。点击右上角「+ 添加契约字段」可定义此专家的专属输出（如 risk_level、cve_refs 等）。</span>
         </div>
 
-        <div v-else class="contract-fields-list">
-          <div
-            v-for="(field, fIdx) in form.schema_fields"
-            :key="fIdx"
-            class="contract-field-row"
-          >
-            <div class="field-col col-name">
-              <span class="sub-label">字段键名 (snake_case) <b class="req">*</b></span>
-              <input
-                v-model="field.name"
-                type="text"
-                placeholder="例如: risk_level"
-                @blur="sanitizeFieldName(field)"
-              />
-            </div>
-
-            <div class="field-col col-type">
-              <span class="sub-label">数据类型</span>
-              <select v-model="field.field_type">
-                <option value="string">文本 (string)</option>
-                <option value="string[]">文本列表 (string[])</option>
-                <option value="number">数字 (number)</option>
-                <option value="boolean">布尔 (boolean)</option>
-              </select>
-            </div>
-
-            <div class="field-col col-req">
-              <span class="sub-label">是否必填</span>
-              <button
-                type="button"
-                class="req-toggle-pill"
-                :class="{ active: field.required }"
-                @click="field.required = !field.required"
-              >
-                {{ field.required ? '必填' : '选填' }}
-              </button>
-            </div>
-
-            <div class="field-col col-desc">
-              <span class="sub-label">字段用途说明 (注入 Prompt 指引)</span>
-              <input
-                v-model="field.description"
-                type="text"
-                placeholder="例如: 安全风险等级评估"
-              />
-            </div>
-
-            <div class="field-col col-enum">
-              <span class="sub-label">可选枚举值 (逗号分隔，选填)</span>
-              <input
-                v-model="field.allowed_values_str"
-                type="text"
-                placeholder="例如: high, medium, low"
-              />
-            </div>
-
-            <div class="field-col col-action">
-              <button
-                type="button"
-                class="btn-icon danger"
-                title="删除此字段"
-                @click="removeSchemaField(fIdx)"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-              </button>
+        <div v-else class="schema-table-wrap output-table-wrap">
+          <div class="schema-table-header">
+            <div class="th-col col-idx">#</div>
+            <div class="th-col col-name">交付字段键名 (Key) <b class="th-req">*</b></div>
+            <div class="th-col col-type">数据类型 (Type)</div>
+            <div class="th-col col-req">约束 (Req)</div>
+            <div class="th-col col-desc">交付物说明 (Description)</div>
+            <div class="th-col col-enum">可选枚举范围 (Enum)</div>
+            <div class="th-col col-action">操作</div>
+          </div>
+          <div class="schema-table-body">
+            <div
+              v-for="(field, fIdx) in form.schema_fields"
+              :key="fIdx"
+              class="schema-table-row output-row"
+            >
+              <div class="td-col col-idx">
+                <span class="row-index">{{ fIdx + 1 }}</span>
+              </div>
+              <div class="td-col col-name">
+                <input
+                  v-model="field.name"
+                  type="text"
+                  class="cell-input mono-input"
+                  placeholder="例如: risk_level"
+                  @blur="sanitizeFieldName(field)"
+                />
+              </div>
+              <div class="td-col col-type">
+                <select v-model="field.field_type" class="cell-select">
+                  <option value="string">string (文本)</option>
+                  <option value="string[]">string[] (列表)</option>
+                  <option value="number">number (数字)</option>
+                  <option value="boolean">boolean (布尔)</option>
+                </select>
+              </div>
+              <div class="td-col col-req">
+                <button
+                  type="button"
+                  class="req-toggle-pill"
+                  :class="{ active: field.required }"
+                  @click="field.required = !field.required"
+                >
+                  {{ field.required ? '必填' : '选填' }}
+                </button>
+              </div>
+              <div class="td-col col-desc">
+                <input
+                  v-model="field.description"
+                  type="text"
+                  class="cell-input"
+                  placeholder="说明此交付字段的评判准则与格式"
+                />
+              </div>
+              <div class="td-col col-enum">
+                <input
+                  v-model="field.allowed_values_str"
+                  type="text"
+                  class="cell-input"
+                  placeholder="high, medium, low... (选填)"
+                />
+              </div>
+              <div class="td-col col-action">
+                <button
+                  type="button"
+                  class="btn-row-del"
+                  title="删除此字段"
+                  @click="removeSchemaField(fIdx)"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -290,6 +413,14 @@
               <span class="tag-icon">📋</span>
               <span class="tag-text">契约 {{ getSchemaFieldCount(card) }} 字段</span>
             </div>
+            <div v-if="getFocusDomains(card).length > 0" class="meta-tag focus-tag" :title="`系统自动装配: ${getFocusDomainLabels(card)}`">
+              <span class="tag-icon">🎯</span>
+              <span class="tag-text">{{ getFocusDomains(card).length }} 关注材料</span>
+            </div>
+            <div v-if="getInputFieldCount(card) > 0" class="meta-tag input-tag" :title="`必填/自定义入参: ${getInputFieldNames(card)}`">
+              <span class="tag-icon">📥</span>
+              <span class="tag-text">入参 {{ getInputFieldCount(card) }} 字段</span>
+            </div>
           </div>
 
 
@@ -340,6 +471,8 @@ interface RoleCard {
   max_concurrency: number;
   enabled: boolean;
   custom_schema?: string;
+  focus_domains?: string;
+  input_schema?: string;
 }
 
 interface SchemaFieldFormItem {
@@ -363,6 +496,12 @@ const kindOptions = [
   { value: 'reviewer', label: '🛡️ 终态审查专家 (Reviewer)' },
 ];
 
+const focusDomainOptions = [
+  { value: 'git_diff', label: '⚡ 关键代码差异 (git_diff)', desc: '自动提取当前代码变更差异切片（带预算截断）' },
+  { value: 'changed_files', label: '📁 变更文件列表 (changed_files)', desc: '自动提取工作区未暂存与已修改的文件树' },
+  { value: 'last_verify_log', label: '🧪 最近验证/测试日志 (last_verify_log)', desc: '自动注入最近一次构建或单测的终端执行输出' },
+];
+
 const cards = ref<RoleCard[]>([]);
 const models = ref<ModelItem[]>([]);
 const loading = ref(false);
@@ -383,6 +522,8 @@ const form = reactive({
   hard_scope: '',
   max_concurrency: 0,
   enabled: true,
+  focus_domains: [] as string[],
+  input_fields: [] as SchemaFieldFormItem[],
   schema_fields: [] as SchemaFieldFormItem[],
 });
 
@@ -397,6 +538,16 @@ const presetTemplates = [
     allowed_kinds: 'reviewer',
     hard_scope: '',
     max_concurrency: 0,
+    focus_domains: ['git_diff', 'changed_files'],
+    input_fields: [
+      {
+        name: 'target_viewport',
+        field_type: 'string' as const,
+        required: false,
+        description: '重点审查的目标视口/设备分辨率',
+        allowed_values_str: 'desktop, mobile, tablet',
+      },
+    ],
     schema_fields: [
       {
         name: 'visual_score',
@@ -424,6 +575,16 @@ const presetTemplates = [
     allowed_kinds: 'reviewer',
     hard_scope: '',
     max_concurrency: 0,
+    focus_domains: ['git_diff', 'changed_files', 'last_verify_log'],
+    input_fields: [
+      {
+        name: 'security_level',
+        field_type: 'string' as const,
+        required: false,
+        description: '本次审查的安全敏感级别要求',
+        allowed_values_str: 'high, medium, critical',
+      },
+    ],
     schema_fields: [
       {
         name: 'risk_level',
@@ -451,6 +612,16 @@ const presetTemplates = [
     allowed_kinds: 'worker',
     hard_scope: '',
     max_concurrency: 0,
+    focus_domains: ['changed_files'],
+    input_fields: [
+      {
+        name: 'search_query',
+        field_type: 'string' as const,
+        required: true,
+        description: '需要探测的目标符号、方法名或技术关键词',
+        allowed_values_str: '',
+      },
+    ],
     schema_fields: [] as SchemaFieldFormItem[],
   },
   {
@@ -463,6 +634,8 @@ const presetTemplates = [
     allowed_kinds: 'writer',
     hard_scope: 'docs/',
     max_concurrency: 0,
+    focus_domains: ['changed_files', 'git_diff'],
+    input_fields: [] as SchemaFieldFormItem[],
     schema_fields: [] as SchemaFieldFormItem[],
   },
 ];
@@ -479,6 +652,20 @@ function addSchemaField() {
 
 function removeSchemaField(idx: number) {
   form.schema_fields.splice(idx, 1);
+}
+
+function addInputField() {
+  form.input_fields.push({
+    name: '',
+    field_type: 'string',
+    required: true,
+    description: '',
+    allowed_values_str: '',
+  });
+}
+
+function removeInputField(idx: number) {
+  form.input_fields.splice(idx, 1);
 }
 
 function sanitizeFieldName(field: SchemaFieldFormItem) {
@@ -510,6 +697,27 @@ function getSchemaFieldNames(card: RoleCard): string {
   return '';
 }
 
+function getInputFieldCount(card: RoleCard): number {
+  if (!card.input_schema) return 0;
+  try {
+    const parsed = JSON.parse(card.input_schema);
+    return Array.isArray(parsed?.fields) ? parsed.fields.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function getInputFieldNames(card: RoleCard): string {
+  if (!card.input_schema) return '';
+  try {
+    const parsed = JSON.parse(card.input_schema);
+    if (Array.isArray(parsed?.fields)) {
+      return parsed.fields.map((f: any) => f.name).join(', ');
+    }
+  } catch {}
+  return '';
+}
+
 function extractEmoji(label: string) {
   const match = label.match(/(\p{Emoji_Presentation}|\p{Extended_Pictographic})/u);
   return match ? match[0] : '';
@@ -530,6 +738,35 @@ function toggleKind(kind: string) {
   }
 }
 
+function toggleFocusDomain(domain: string) {
+  const idx = form.focus_domains.indexOf(domain);
+  if (idx >= 0) {
+    form.focus_domains.splice(idx, 1);
+  } else {
+    form.focus_domains.push(domain);
+  }
+}
+
+function getFocusDomains(card: RoleCard): string[] {
+  if (!card.focus_domains) return [];
+  try {
+    const parsed = JSON.parse(card.focus_domains);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return card.focus_domains.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+  }
+}
+
+function getFocusDomainLabels(card: RoleCard): string {
+  const list = getFocusDomains(card);
+  const labelMap: Record<string, string> = {
+    git_diff: '代码差异 (git_diff)',
+    changed_files: '变更文件 (changed_files)',
+    last_verify_log: '测试日志 (last_verify_log)',
+  };
+  return list.map((item) => labelMap[item] || item).join(', ');
+}
+
 function startCreate() {
   isEditing.value = false;
   isCreating.value = true;
@@ -544,6 +781,8 @@ function startCreate() {
     hard_scope: '',
     max_concurrency: 0,
     enabled: true,
+    focus_domains: [],
+    input_fields: [],
     schema_fields: [],
   });
   feedbackMsg.value = '';
@@ -567,8 +806,14 @@ function applyPreset(tpl: typeof presetTemplates[0]) {
   form.hard_scope = tpl.hard_scope || '';
   form.max_concurrency = tpl.max_concurrency || 0;
   form.enabled = true;
+  form.focus_domains = tpl.focus_domains ? [...tpl.focus_domains] : [];
+  if (tpl.input_fields && tpl.input_fields.length) {
+    form.input_fields = tpl.input_fields.map((f: any) => ({ ...f }));
+  } else {
+    form.input_fields = [];
+  }
   if (tpl.schema_fields && tpl.schema_fields.length) {
-    form.schema_fields = tpl.schema_fields.map((f) => ({ ...f }));
+    form.schema_fields = tpl.schema_fields.map((f: any) => ({ ...f }));
   } else {
     form.schema_fields = [];
   }
@@ -597,6 +842,36 @@ function editCard(card: RoleCard) {
     }
   }
 
+  let parsedInputFields: SchemaFieldFormItem[] = [];
+  if (card.input_schema) {
+    try {
+      const parsed = JSON.parse(card.input_schema);
+      if (Array.isArray(parsed?.fields)) {
+        parsedInputFields = parsed.fields.map((f: any) => ({
+          name: f.name || '',
+          field_type: f.field_type || 'string',
+          required: f.required !== false,
+          description: f.description || '',
+          allowed_values_str: Array.isArray(f.allowed_values) ? f.allowed_values.join(', ') : '',
+        }));
+      }
+    } catch {
+      parsedInputFields = [];
+    }
+  }
+
+  let parsedDomains: string[] = [];
+  if (card.focus_domains) {
+    try {
+      const parsed = JSON.parse(card.focus_domains);
+      if (Array.isArray(parsed)) {
+        parsedDomains = parsed;
+      }
+    } catch {
+      parsedDomains = card.focus_domains.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+    }
+  }
+
   Object.assign(form, {
     name: card.name,
     label: card.label,
@@ -608,6 +883,8 @@ function editCard(card: RoleCard) {
     hard_scope: card.hard_scope || '',
     max_concurrency: card.max_concurrency || 0,
     enabled: card.enabled,
+    focus_domains: parsedDomains,
+    input_fields: parsedInputFields,
     schema_fields: parsedFields,
   });
   feedbackMsg.value = '';
@@ -657,7 +934,7 @@ async function saveRoleCard() {
     for (const f of validFields) {
       const fieldName = f.name.trim().toLowerCase();
       if (reserved.includes(fieldName)) {
-        feedbackMsg.value = `字段名「${fieldName}」为系统基线保留字，禁止重复声明！`;
+        feedbackMsg.value = `契约字段名「${fieldName}」为系统基线保留字，禁止重复声明！`;
         feedbackIsError.value = true;
         return;
       }
@@ -680,6 +957,39 @@ async function saveRoleCard() {
     });
   }
 
+  // 格式化与校验特化入参需求字段
+  let input_schema = '';
+  const validInFields = form.input_fields.filter((f) => f.name.trim());
+  if (validInFields.length > 0) {
+    const reservedIn = [
+      'task', 'focus_domains', 'specialized_context', 'prompt',
+    ];
+    for (const f of validInFields) {
+      const fieldName = f.name.trim().toLowerCase();
+      if (reservedIn.includes(fieldName)) {
+        feedbackMsg.value = `入参字段名「${fieldName}」为系统调度保留字，禁止重复声明！`;
+        feedbackIsError.value = true;
+        return;
+      }
+    }
+    const inFields = validInFields.map((f) => {
+      const allowed = f.allowed_values_str.trim()
+        ? f.allowed_values_str.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+        : undefined;
+      return {
+        name: f.name.trim().toLowerCase(),
+        field_type: f.field_type,
+        required: !!f.required,
+        description: f.description.trim(),
+        allowed_values: allowed && allowed.length ? allowed : undefined,
+      };
+    });
+    input_schema = JSON.stringify({
+      fields: inFields,
+      strict_closed_set: false,
+    });
+  }
+
   saving.value = true;
   feedbackMsg.value = '';
   try {
@@ -696,6 +1006,8 @@ async function saveRoleCard() {
         max_concurrency: Number(form.max_concurrency) || 0,
         enabled: form.enabled,
         custom_schema,
+        focus_domains: JSON.stringify(form.focus_domains),
+        input_schema,
       },
     });
     feedbackMsg.value = '角色卡已成功保存！';
@@ -1187,13 +1499,23 @@ textarea {
   border-radius: 6px;
 }
 
-/* 📋 交付契约约束 (Contract Schema) */
+/* 📋 交付契约与入参约束 (Contract & Input Schema) */
 .contract-section {
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--border-1, #27272a);
+  background: rgba(16, 185, 129, 0.02);
+  border: 1px solid rgba(16, 185, 129, 0.18);
   border-radius: 10px;
   padding: 16px;
   margin-bottom: 18px;
+  transition: border-color 0.2s ease;
+}
+
+.input-contract-section {
+  background: rgba(6, 182, 212, 0.02);
+  border: 1px solid rgba(6, 182, 212, 0.18);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 18px;
+  transition: border-color 0.2s ease;
 }
 
 .contract-header {
@@ -1211,31 +1533,74 @@ textarea {
 }
 
 .contract-title-group .field-label {
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 600;
   color: #f4f4f5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .contract-title-group .field-hint {
-  font-size: 11px;
-  color: var(--text-4, #71717a);
-  line-height: 1.4;
+  font-size: 11.5px;
+  color: var(--text-3, #a1a1aa);
+  line-height: 1.45;
 }
 
-.add-field-btn {
+.btn-input-add {
+  background: rgba(6, 182, 212, 0.12);
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  color: #67e8f9;
+  font-weight: 500;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   white-space: nowrap;
   flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.btn-input-add:hover {
+  background: rgba(6, 182, 212, 0.22);
+  border-color: rgba(6, 182, 212, 0.6);
+  color: #fff;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.25);
+}
+
+.btn-output-add {
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #6ee7b7;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.btn-output-add:hover {
+  background: rgba(16, 185, 129, 0.22);
+  border-color: rgba(16, 185, 129, 0.6);
+  color: #fff;
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.25);
 }
 
 .contract-empty {
-  padding: 18px;
+  padding: 22px 18px;
   border: 1px dashed var(--border-1, #3f3f46);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.15);
+  background: rgba(0, 0, 0, 0.2);
   text-align: center;
+}
+
+.input-contract-section .contract-empty {
+  border-color: rgba(6, 182, 212, 0.25);
+}
+
+.contract-section .contract-empty {
+  border-color: rgba(16, 185, 129, 0.25);
 }
 
 .empty-hint {
@@ -1243,48 +1608,98 @@ textarea {
   color: var(--text-3, #a1a1aa);
 }
 
-.contract-fields-list {
+/* 现代精炼表格体系 (Sleek Schema Table) */
+.schema-table-wrap {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  overflow: hidden;
+  background: rgba(18, 18, 22, 0.5);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.input-table-wrap {
+  border-color: rgba(6, 182, 212, 0.22);
+}
+
+.output-table-wrap {
+  border-color: rgba(16, 185, 129, 0.22);
+}
+
+.schema-table-header {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 10px;
-}
-
-.contract-field-row {
-  display: flex;
-  align-items: flex-end;
-  gap: 10px;
-  background: var(--bg-1, #18181b);
-  border: 1px solid var(--border-1, #27272a);
-  border-radius: 8px;
-  padding: 10px 12px;
-  transition: border-color 0.15s;
-}
-
-.contract-field-row:hover {
-  border-color: rgba(99, 102, 241, 0.35);
-}
-
-.field-col {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.sub-label {
+  padding: 9px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 11px;
-  color: var(--text-3, #a1a1aa);
-  font-weight: 500;
-  white-space: nowrap;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  user-select: none;
+}
+
+.input-table-wrap .schema-table-header {
+  background: rgba(6, 182, 212, 0.08);
+  border-bottom-color: rgba(6, 182, 212, 0.2);
+  color: #67e8f9;
+}
+
+.output-table-wrap .schema-table-header {
+  background: rgba(16, 185, 129, 0.08);
+  border-bottom-color: rgba(16, 185, 129, 0.2);
+  color: #6ee7b7;
+}
+
+.th-req {
+  color: #ef4444;
+  font-weight: bold;
+}
+
+.schema-table-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.schema-table-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  background: rgba(24, 24, 27, 0.5);
+  transition: background 0.15s ease;
+}
+
+.schema-table-row:last-child {
+  border-bottom: none;
+}
+
+.schema-table-row:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+/* 单元格列宽与对齐 */
+.th-col,
+.td-col {
+  display: flex;
+  align-items: center;
+}
+
+.col-idx {
+  width: 22px;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.row-index {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: #71717a;
+  font-weight: 600;
 }
 
 .col-name {
-  flex: 1.2;
+  flex: 1.4;
   min-width: 140px;
-}
-
-.col-name input {
-  font-family: monospace;
-  font-size: 12px;
 }
 
 .col-type {
@@ -1292,76 +1707,203 @@ textarea {
   flex-shrink: 0;
 }
 
-.col-type select {
-  font-size: 12px;
-  padding: 8px 8px;
-}
-
 .col-req {
-  width: 60px;
+  width: 58px;
   flex-shrink: 0;
-}
-
-.req-toggle-pill {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 8px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  border: 1px solid var(--border-1, #3f3f46);
-  background: var(--bg-2, #27272a);
-  color: var(--text-3, #71717a);
-  transition: all 0.15s ease;
-  text-align: center;
-}
-
-.req-toggle-pill.active {
-  background: rgba(239, 68, 68, 0.15);
-  border-color: #ef4444;
-  color: #f87171;
+  justify-content: center;
 }
 
 .col-desc {
   flex: 2;
-  min-width: 160px;
+  min-width: 170px;
 }
 
 .col-enum {
-  flex: 1.5;
-  min-width: 140px;
+  flex: 1.4;
+  min-width: 130px;
 }
 
 .col-action {
-  width: 32px;
+  width: 28px;
   flex-shrink: 0;
-  display: flex;
-  align-items: center;
   justify-content: center;
 }
 
-.btn-icon.danger {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-4, #71717a);
-  cursor: pointer;
-  padding: 6px;
+/* 单元格控件精修 */
+.cell-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
   border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f4f4f5;
   transition: all 0.15s ease;
-  display: flex;
+}
+
+.cell-input:focus {
+  background: rgba(0, 0, 0, 0.65);
+  outline: none;
+}
+
+.input-table-wrap .cell-input:focus,
+.input-table-wrap .cell-select:focus {
+  border-color: #06b6d4;
+  box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.2);
+}
+
+.output-table-wrap .cell-input:focus,
+.output-table-wrap .cell-select:focus {
+  border-color: #10b981;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
+}
+
+.mono-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  letter-spacing: 0.2px;
+}
+
+.input-table-wrap .mono-input {
+  color: #a5f3fc;
+}
+
+.output-table-wrap .mono-input {
+  color: #a7f3d0;
+}
+
+.cell-select {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  font-size: 11.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e4e4e7;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.15s ease;
+}
+
+.req-toggle-pill {
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 13px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #71717a;
+  transition: all 0.15s ease;
+  text-align: center;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 
-.btn-icon.danger:hover {
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  border-color: rgba(239, 68, 68, 0.3);
+.req-toggle-pill.active {
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #f87171;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.2);
 }
 
+.btn-row-del {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #71717a;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.btn-row-del:hover {
+  background: rgba(239, 68, 68, 0.18);
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+/* 角色列表徽章样式 */
 .meta-tag.contract-tag {
   background: rgba(16, 185, 129, 0.12);
   color: #10b981;
   border-color: rgba(16, 185, 129, 0.25);
+}
+
+.meta-tag.focus-tag {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.25);
+}
+
+.meta-tag.input-tag {
+  background: rgba(6, 182, 212, 0.12);
+  color: #06b6d4;
+  border-color: rgba(6, 182, 212, 0.25);
+}
+
+.focus-domain-section {
+  background: rgba(245, 158, 11, 0.03);
+  border: 1px solid rgba(245, 158, 11, 0.15);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.focus-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.focus-pills-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.focus-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-1, #3f3f46);
+  background: var(--bg-1, #18181b);
+  color: var(--text-2, #a1a1aa);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.focus-pill:hover {
+  border-color: #f59e0b;
+  color: #f4f4f5;
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.focus-pill.active {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: #f59e0b;
+  color: #fbbf24;
+  font-weight: 600;
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.15);
+}
+
+.pill-check {
+  font-weight: bold;
+  font-size: 13px;
 }
 </style>
 

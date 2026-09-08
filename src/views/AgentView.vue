@@ -215,6 +215,7 @@
                             :all-models="allModels"
                             @new-session="createNewTask"
                             @open-plugins="currentNavView = 'plugins'"
+                            @open-roles="currentNavView = 'roles'"
                             @update:running="(val) => { tab.running = val; }"
                             @update:title="(title) => { updateTabTitle(tab.id, title); }"
                             @promoted="handleSessionPromoted"

@@ -293,6 +293,20 @@ pub async fn run_tool_phase(
                         if card.max_concurrency > 0 {
                             effective_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
                         }
+                        let focus_domains = card.parse_focus_domains();
+                        let custom_inputs = child_params.get("custom_inputs");
+                        let last_verify_log = child_params
+                            .get("last_verify_log")
+                            .or_else(|| child_params.get("verify_log"))
+                            .and_then(|v| v.as_str());
+                        if let Some(spec_ctx) = crate::agent::context_collector::assemble_focus_context(
+                            &focus_domains,
+                            workspace_dir,
+                            last_verify_log,
+                            custom_inputs,
+                        ).await {
+                            effective_params["specialized_context"] = json!(spec_ctx);
+                        }
                     }
                     Ok(None) => {
                         item_reports.push(format!(
@@ -333,6 +347,9 @@ pub async fn run_tool_phase(
             );
             if let Some(schema) = reviewer_custom_schema {
                 snapshot = snapshot.with_custom_schema(schema);
+            }
+            if let Some(spec) = effective_params.get("specialized_context").and_then(|v| v.as_str()) {
+                snapshot = snapshot.with_specialized_context(spec);
             }
 
             match snapshot
@@ -582,6 +599,20 @@ pub async fn run_tool_phase(
                         if card.max_concurrency > 0 {
                             effective_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
                         }
+                        let focus_domains = card.parse_focus_domains();
+                        let custom_inputs = writer_params.get("custom_inputs");
+                        let last_verify_log = writer_params
+                            .get("last_verify_log")
+                            .or_else(|| writer_params.get("verify_log"))
+                            .and_then(|v| v.as_str());
+                        if let Some(spec_ctx) = crate::agent::context_collector::assemble_focus_context(
+                            &focus_domains,
+                            workspace_dir,
+                            last_verify_log,
+                            custom_inputs,
+                        ).await {
+                            effective_params["specialized_context"] = json!(spec_ctx);
+                        }
                     }
                     Ok(None) => {
                         item_reports.push(format!(
@@ -615,6 +646,9 @@ pub async fn run_tool_phase(
 
             if let Some(schema) = writer_custom_schema {
                 envelope = envelope.with_custom_schema(schema);
+            }
+            if let Some(spec) = effective_params.get("specialized_context").and_then(|v| v.as_str()) {
+                envelope = envelope.with_specialized_context(spec);
             }
 
             match envelope
@@ -771,6 +805,20 @@ pub async fn run_tool_phase(
                         if card.max_concurrency > 0 {
                             effective_worker_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
                         }
+                        let focus_domains = card.parse_focus_domains();
+                        let custom_inputs = worker_params.get("custom_inputs");
+                        let last_verify_log = worker_params
+                            .get("last_verify_log")
+                            .or_else(|| worker_params.get("verify_log"))
+                            .and_then(|v| v.as_str());
+                        if let Some(spec_ctx) = crate::agent::context_collector::assemble_focus_context(
+                            &focus_domains,
+                            workspace_dir,
+                            last_verify_log,
+                            custom_inputs,
+                        ).await {
+                            effective_worker_params["specialized_context"] = json!(spec_ctx);
+                        }
                     }
                     Ok(None) => {
                         item_reports.push(format!(
@@ -804,6 +852,9 @@ pub async fn run_tool_phase(
 
             if let Some(schema) = scout_custom_schema {
                 envelope = envelope.with_custom_schema(schema);
+            }
+            if let Some(spec) = effective_worker_params.get("specialized_context").and_then(|v| v.as_str()) {
+                envelope = envelope.with_specialized_context(spec);
             }
 
             match envelope

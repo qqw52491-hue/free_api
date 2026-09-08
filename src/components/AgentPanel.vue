@@ -164,6 +164,7 @@
                     @update:auto-pilot="session.setAutoPilot($event)"
                     @update:plan-mode="session.setPlanMode($event)"
                     @open-settings="settingsOpen = true"
+                    @open-roles="emit('open-roles')"
                     @attach-files="handleAttachFiles"
                     @submit="submitComposer"
                     @cancel-queue="session.removeQueuedGoal"
@@ -259,6 +260,7 @@ const props = defineProps<{
 const emit = defineEmits<{
     "new-session": [];
     "open-plugins": [];
+    "open-roles": [];
     "update:running": [running: boolean];
     "update:title": [title: string];
     "promoted": [oldId: string, newId: string, title: string, projectId?: string];

@@ -31,12 +31,40 @@ pub struct RoleCard {
     pub enabled: bool,
     #[serde(default)]
     pub custom_schema: String,      // 结构化交付契约 (JSON 序列化的 ContractSchema)
+    #[serde(default)]
+    pub focus_domains: String,      // 角色关注领域白名单列表 (JSON 序列化的 Vec<FocusDomain>)
+    #[serde(default)]
+    pub input_schema: String,       // 角色自定义入参契约 (JSON 序列化的 ContractSchema)
 }
 
 impl RoleCard {
     /// 解析角色卡绑定的结构化交付契约模式（ContractSchema）
     pub fn parse_custom_schema(&self) -> Option<crate::agent::protocol::ContractSchema> {
         let trimmed = self.custom_schema.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        serde_json::from_str(trimmed).ok()
+    }
+
+    /// 解析角色声明的关注领域清单
+    pub fn parse_focus_domains(&self) -> Vec<crate::agent::protocol::FocusDomain> {
+        let trimmed = self.focus_domains.trim();
+        if trimmed.is_empty() || trimmed == "[]" {
+            return Vec::new();
+        }
+        if let Ok(domains) = serde_json::from_str::<Vec<crate::agent::protocol::FocusDomain>>(trimmed) {
+            return domains;
+        }
+        trimmed
+            .split(|c| c == ',' || c == '；' || c == ' ' || c == '\n')
+            .filter_map(|s| crate::agent::protocol::FocusDomain::from_domain_str(s))
+            .collect()
+    }
+
+    /// 解析角色自定义入参契约模式（ContractSchema）
+    pub fn parse_input_schema(&self) -> Option<crate::agent::protocol::ContractSchema> {
+        let trimmed = self.input_schema.trim();
         if trimmed.is_empty() {
             return None;
         }
@@ -92,11 +120,13 @@ fn map_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoleCard> {
         max_concurrency: row.get(9)?,
         enabled: row.get::<_, i64>(10)? != 0,
         custom_schema: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+        focus_domains: row.get::<_, Option<String>>(12)?.unwrap_or_else(|| "[]".to_string()),
+        input_schema: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
     })
 }
 
 const CARD_COLUMNS: &str =
-    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema";
+    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema";
 
 
 pub fn list_cards(db: &DbState, include_disabled: bool) -> Result<Vec<RoleCard>, String> {
@@ -137,7 +167,7 @@ use rusqlite::OptionalExtension;
 
 fn validate_card_input(
     params: &Value,
-) -> Result<(String, String, String, String, String, String, String, String, i64, String), String> {
+) -> Result<(String, String, String, String, String, String, String, String, i64, String, String, String), String> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -181,6 +211,55 @@ fn validate_card_input(
         }
     }
 
+    let focus_domains = if let Some(arr) = params.get("focus_domains").and_then(|v| v.as_array()) {
+        let mut list = Vec::new();
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                if let Some(domain) = crate::agent::protocol::FocusDomain::from_domain_str(s) {
+                    if !list.contains(&domain) {
+                        list.push(domain);
+                    }
+                } else {
+                    return Err(format!("不支持的关注域: '{}'。可选关注域: changed_files, git_diff, last_verify_log", s));
+                }
+            }
+        }
+        serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+    } else if let Some(s) = params.get("focus_domains").and_then(|v| v.as_str()) {
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed == "[]" {
+            "[]".to_string()
+        } else if let Ok(list) = serde_json::from_str::<Vec<crate::agent::protocol::FocusDomain>>(trimmed) {
+            serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+        } else {
+            let mut list = Vec::new();
+            for part in trimmed.split(|c| c == ',' || c == '；' || c == ' ') {
+                let part_clean = part.trim();
+                if part_clean.is_empty() { continue; }
+                if let Some(domain) = crate::agent::protocol::FocusDomain::from_domain_str(part_clean) {
+                    if !list.contains(&domain) {
+                        list.push(domain);
+                    }
+                } else {
+                    return Err(format!("不支持的关注域: '{}'。可选关注域: changed_files, git_diff, last_verify_log", part_clean));
+                }
+            }
+            serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+        }
+    } else {
+        "[]".to_string()
+    };
+
+    let input_schema = take("input_schema", 10_000, "");
+    if !input_schema.is_empty() {
+        let schema: crate::agent::protocol::ContractSchema = serde_json::from_str(&input_schema)
+            .map_err(|e| format!("input_schema 不是有效的 JSON Schema: {}", e))?;
+        for f in &schema.fields {
+            crate::agent::protocol::validate_custom_field_name(&f.name)
+                .map_err(|e| format!("input_schema 包含非法字段名: {}", e))?;
+        }
+    }
+
     if let Some(bad) = [model_id.as_str(), default_test_command.as_str()]
         .iter()
         .find(|f| f.chars().any(|c| [';', '|', '&', '>', '<', '`', '$', '(', ')', '\n'].contains(&c)))
@@ -199,6 +278,8 @@ fn validate_card_input(
         hard_scope,
         max_concurrency,
         custom_schema,
+        focus_domains,
+        input_schema,
     ))
 }
 
@@ -214,6 +295,8 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
         hard_scope,
         max_concurrency,
         custom_schema,
+        focus_domains,
+        input_schema,
     ) = validate_card_input(params)?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let count: i64 = conn
@@ -233,15 +316,17 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
     }
     let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
     conn.execute(
-        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?12)
+        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14, ?14)
          ON CONFLICT(name) DO UPDATE SET
             label=excluded.label, model_id=excluded.model_id, persona_prompt=excluded.persona_prompt,
             scope_hints=excluded.scope_hints, default_test_command=excluded.default_test_command,
             allowed_kinds=excluded.allowed_kinds, hard_scope=excluded.hard_scope, max_concurrency=excluded.max_concurrency,
             custom_schema=excluded.custom_schema,
+            focus_domains=excluded.focus_domains,
+            input_schema=excluded.input_schema,
             enabled=1, updated_at=excluded.updated_at",
-        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, custom_schema, now],
+        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, custom_schema, focus_domains, input_schema, now],
     )
     .map_err(|e| e.to_string())?;
     drop(conn);
@@ -277,13 +362,17 @@ pub fn delete_card(db: &DbState, params: &Value) -> Result<String, String> {
 }
 
 /// 主 Agent 的角色池菜单（注入工具目录旁）：一行一卡，说明派发方式。
-pub fn build_role_cards_menu(db: &DbState) -> Result<String, String> {
+pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -> Result<String, String> {
     let cards = list_cards(db, false)?;
-    if cards.is_empty() {
+    let active_cards: Vec<RoleCard> = cards
+        .into_iter()
+        .filter(|c| !disabled_names.iter().any(|d| d.eq_ignore_ascii_case(&c.name)))
+        .collect();
+    if active_cards.is_empty() {
         return Ok(String::new());
     }
     let mut out = String::from("\n### 专精角色池（派发 child_reviewer/child_worker/child_writer 时传 \"role\": \"角色标识\" 即可挂载人设与专属模型）\n【提示】reviewer 角色建议在角色选择器中钉一个与规划者不同家族的模型：异构模型盲区互补，交叉审查收益最大。\n");
-    for card in cards {
+    for card in active_cards {
         let model_note = if card.model_id.is_empty() {
             "跟随档位路由".to_string()
         } else {
@@ -304,9 +393,28 @@ pub fn build_role_cards_menu(db: &DbState) -> Result<String, String> {
         } else {
             String::new()
         };
+        let focus_note = {
+            let domains = card.parse_focus_domains();
+            if !domains.is_empty() {
+                let d_str: Vec<&str> = domains.iter().map(|d| d.as_str()).collect();
+                format!("；【系统预装材料: {}，派发时无需重复贴大段代码】", d_str.join(", "))
+            } else {
+                String::new()
+            }
+        };
+        let input_note = if let Some(in_schema) = card.parse_input_schema() {
+            if !in_schema.is_empty() {
+                let names: Vec<&str> = in_schema.fields.iter().map(|f| f.name.as_str()).collect();
+                format!("；需在 custom_inputs 提供参数: [{}]", names.join(", "))
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "- [{}] {}：{}（{}{}{}）\n",
-            card.name, card.label, card.persona_prompt.chars().take(80).collect::<String>(), model_note, scope_note, schema_note
+            "- [{}] {}：{}（{}{}{}{}{}）\n",
+            card.name, card.label, card.persona_prompt.chars().take(80).collect::<String>(), model_note, scope_note, schema_note, focus_note, input_note
         ));
     }
     out.push_str("\n> 💡 **【派发纪律】** 派发给子 Agent 的 task 必须自包含：\n");
@@ -316,6 +424,10 @@ pub fn build_role_cards_menu(db: &DbState) -> Result<String, String> {
     out.push_str("> 3. 相关材料：涉及的文件路径/既有结论/约束。\n");
     out.push_str("> 建议在派发参数中携带可选的 context_excerpts（包含 background、todo_slice、file_hints、prior_findings），避免模糊派发。\n");
     Ok(out)
+}
+
+pub fn build_role_cards_menu(db: &DbState) -> Result<String, String> {
+    build_role_cards_menu_filtered(db, &[])
 }
 
 /// 把角色卡默认值合并进 child_writer 派发参数（纯函数，可单测）：
@@ -470,6 +582,8 @@ mod tests {
             max_concurrency: 1,
             enabled: true,
             custom_schema: String::new(),
+            focus_domains: String::new(),
+            input_schema: String::new(),
         };
         // 模型未提供默认值时补齐
         let merged = merge_writer_defaults(&card, &json!({"task": "打磨 UI"}));
@@ -587,6 +701,49 @@ mod tests {
             "custom_schema": "{not valid json}",
         }));
         assert!(invalid_json_res.is_err(), "非法 JSON 格式必须被拒绝");
+    }
+
+    #[test]
+    fn role_card_focus_domains_and_input_schema_round_trip() {
+        let db = setup_db();
+        let valid_in_schema = json!({
+            "fields": [
+                {
+                    "name": "business_goal",
+                    "field_type": "string",
+                    "required": true,
+                    "description": "业务改造目标"
+                }
+            ]
+        });
+
+        let card = upsert_card(&db, &json!({
+            "name": "arch_reviewer",
+            "label": "架构审查员",
+            "persona_prompt": "专注模块解耦",
+            "focus_domains": ["git_diff", "changed_files"],
+            "input_schema": valid_in_schema.to_string(),
+        })).unwrap();
+
+        let parsed_domains = card.parse_focus_domains();
+        assert_eq!(parsed_domains.len(), 2);
+        assert!(parsed_domains.contains(&crate::agent::protocol::FocusDomain::GitDiff));
+        assert!(parsed_domains.contains(&crate::agent::protocol::FocusDomain::ChangedFiles));
+
+        let parsed_input = card.parse_input_schema().expect("应成功解析 input_schema");
+        assert_eq!(parsed_input.fields[0].name, "business_goal");
+
+        let menu = build_role_cards_menu(&db).unwrap();
+        assert!(menu.contains("系统预装材料"));
+        assert!(menu.contains("需在 custom_inputs 提供参数: [business_goal]"));
+
+        // 不支持的 focus domain 应当被拒绝
+        let bad_domain_res = upsert_card(&db, &json!({
+            "name": "bad_domain_role",
+            "label": "坏角色3",
+            "focus_domains": ["invalid_domain_name"],
+        }));
+        assert!(bad_domain_res.is_err(), "不支持的 focus domain 必须被拒绝");
     }
 }
 

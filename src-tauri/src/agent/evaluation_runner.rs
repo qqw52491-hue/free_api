@@ -828,6 +828,8 @@ mod tests {
             context_budget_mode: "deep_coding".to_string(),
             routing_mode: String::new(),
             role_models: Default::default(),
+            stage_reviewer_override: None,
+            disabled_role_cards: Default::default(),
         };
 
         let (resolved, metadata) = fixed_evaluation_model_routing(&db, requested, None).unwrap();

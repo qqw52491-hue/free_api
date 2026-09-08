@@ -6,6 +6,7 @@ pub mod child_worker;
 pub mod child_writer;
 pub mod checkpoint;
 pub mod context;
+pub mod context_collector;
 pub mod control;
 pub mod conversation;
 pub mod dispatcher;

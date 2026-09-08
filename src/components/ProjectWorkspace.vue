@@ -878,6 +878,7 @@ function loadModelRouting(): ModelRouting {
     context_budget_mode: "deep_coding",
     routing_mode: "rules",
     role_models: {},
+    stage_reviewer_override: undefined,
   };
 }
 

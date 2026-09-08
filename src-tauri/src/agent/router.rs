@@ -33,6 +33,12 @@ pub struct ModelRoutingConfig {
     /// 角色挂档位由系统默认表处理，钉死某角色才需要填这里。
     #[serde(default)]
     pub role_models: BTreeMap<String, String>,
+    /// 会话级阶段审查门禁覆盖："disabled"（直通免审）| 角色名（如 "frontend_ui_reviewer"）| 空串/缺省（跟随全局默认）
+    #[serde(default)]
+    pub stage_reviewer_override: Option<String>,
+    /// 本会话排除/休眠的角色卡标识列表（无需修改全局工坊，即可在当前会话动态启闭某专家）
+    #[serde(default)]
+    pub disabled_role_cards: Vec<String>,
 }
 
 impl Default for ModelRoutingConfig {
@@ -49,6 +55,8 @@ impl Default for ModelRoutingConfig {
             context_budget_mode: "deep_coding".to_string(),
             routing_mode: String::new(),
             role_models: BTreeMap::new(),
+            stage_reviewer_override: None,
+            disabled_role_cards: Vec::new(),
         }
     }
 }

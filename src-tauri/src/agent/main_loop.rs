@@ -311,9 +311,12 @@ async fn run_agent_main_loop_in_workspace_inner(
 
     // 2. 稳定的内置工具契约首轮常驻；长范例与外部 MCP schema 仍按需加载。
     let local_tools_menu = crate::agent::prompt_assembly::build_local_tools_menu();
-    // 角色池清单：主 Agent 由此知道池子里有哪些专精角色可派发（读取失败不阻断运行）
-    let role_cards_menu = crate::agent::tools::role_manager::build_role_cards_menu(state.inner())
-        .unwrap_or_default();
+    // 角色池清单：主 Agent 由此知道池子里有哪些专精角色可派发（自动过滤当前会话休眠的角色卡）
+    let role_cards_menu = crate::agent::tools::role_manager::build_role_cards_menu_filtered(
+        state.inner(),
+        &model_routing.disabled_role_cards,
+    )
+    .unwrap_or_default();
 
     // 3. 从当前工作区向上读取 AGENTS.md / HUB.md；未显式选定项目/工作区时保持为空。
     let workspace_skill_context = if is_explicit_workspace {
@@ -1294,7 +1297,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             checkpoint.stage_review_budget_used,
             context.side_effects.len()
         );
-        if let Some(reason) = crate::agent::stage_review::should_fire(&checkpoint, &context, &instruction) {
+        if let Some(reason) = crate::agent::stage_review::should_fire(&checkpoint, &context, &instruction, &model_routing) {
             match crate::agent::stage_review::dispatch(
                 &app,
                 state.inner(),
