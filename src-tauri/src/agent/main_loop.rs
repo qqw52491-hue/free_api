@@ -173,69 +173,31 @@ pub(crate) async fn try_plan_reviewer_failover(
     {
         return Ok(None);
     }
-    let dispatch = serde_json::from_str::<serde_json::Value>(
-        checkpoint
-            .plan_reviewer_last_dispatch
-            .as_deref()
-            .unwrap_or("{}"),
-    )
-    .unwrap_or_else(|_| serde_json::json!({}));
-    let primary_model = dispatch
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let mut dispatch = match checkpoint.plan_reviewer_dispatch_snapshot() {
+        Some(d) => d,
+        None => return Ok(None),
+    };
     let failover_model = {
         let conn = state.0.lock().map_err(|err| err.to_string())?;
-        crate::agent::router::reviewer_failover_model(&conn, &primary_model)
+        crate::agent::router::reviewer_failover_model(&conn, &dispatch.model)
     };
-    let model_to_use = failover_model.unwrap_or_else(|| primary_model.clone());
-    let params = dispatch
-        .get("params")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
-    let persona = dispatch
-        .get("persona")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let tier = dispatch
-        .get("tier")
-        .and_then(|v| v.as_str())
-        .unwrap_or("flash")
-        .to_string();
-    let effort = dispatch
-        .get("effort")
-        .and_then(|v| v.as_str())
-        .unwrap_or("high")
-        .to_string();
-    match crate::agent::child_reviewer::spawn_child_reviewer(
-        Some(app.clone()),
-        state,
-        run_id,
-        session_id,
-        workspace_dir,
-        &model_to_use,
-        &tier,
-        &effort,
-        &params,
-        &persona,
-        interrupt_rx,
-    )
-    .await
+    if let Some(model) = failover_model {
+        dispatch.model = model;
+    }
+    match dispatch
+        .spawn(
+            Some(app.clone()),
+            state,
+            run_id,
+            session_id,
+            workspace_dir,
+            interrupt_rx,
+        )
+        .await
     {
         Ok(new_run_id) => {
             checkpoint.plan_reviewer_failover_count += 1;
-            checkpoint.plan_reviewer_last_dispatch = Some(
-                serde_json::json!({
-                    "model": model_to_use,
-                    "tier": tier,
-                    "effort": effort,
-                    "persona": persona,
-                    "params": params,
-                })
-                .to_string(),
-            );
+            checkpoint.set_plan_reviewer_dispatch_snapshot(&dispatch);
             Ok(Some(new_run_id))
         }
         Err(spawn_err) => Err(spawn_err),
@@ -973,40 +935,23 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 }
                             }
                             // 基础设施失败：退款、不算消费过（超时不是审查，不应烧预算）
-                            if matches!(
-                                result.error_kind.as_deref(),
-                                Some("timed_out") | Some("interrupted") | Some("cancelled")
-                            ) {
+                            if result.is_infra_failure() {
                                 checkpoint.refund_infra_failed_review_round(result.error_kind.as_deref());
                             } else {
-                                // 异议闭环：以"未撤回的 blocking 异议"为收敛判据
-                                let blocking_count = result.unwithdrawn_blocking_count();
-                                checkpoint.last_review_blocking_count = blocking_count;
-                                let (added, withdrawn, maintained) = result.objection_stats();
-                                checkpoint.review_objection_added = added;
-                                checkpoint.review_objection_withdrawn = withdrawn;
-                                checkpoint.review_objection_maintained = maintained;
-                                checkpoint.review_total_withdrawn += withdrawn;
-                                checkpoint.review_total_maintained += maintained;
+                                let delivery = result.to_reviewer_delivery();
+                                checkpoint.record_reviewer_delivery(&delivery);
                                 injection.push_str(&format!(
                                     "\n📊 本轮异议动态: 新增 {} / 撤回 {} / 维持 {}（连续多轮撤回≈新增且总数不降 = 审查空转，请评估转人工）\n",
-                                    added, withdrawn, maintained
+                                    checkpoint.review_objection_added,
+                                    checkpoint.review_objection_withdrawn,
+                                    checkpoint.review_objection_maintained
                                 ));
-                            }
-                            if let Some(ref sc) = result.scorecard {
-                                checkpoint.last_review_scorecard = Some(sc.clone());
-                            }
-                            if !result.withdrawn_findings.is_empty() {
-                                injection.push_str(&format!(
-                                    "\n♻️ 审查者已撤回异议: {}（以最新裁决为准，撤回理由见审查结论）\n",
-                                    result.withdrawn_findings.join(", ")
-                                ));
-                            }
-                            if !matches!(
-                                result.error_kind.as_deref(),
-                                Some("timed_out") | Some("interrupted") | Some("cancelled")
-                            ) {
-                                checkpoint.plan_reviewer_consumed = true;
+                                if !delivery.withdrawn_findings.is_empty() {
+                                    injection.push_str(&format!(
+                                        "\n♻️ 审查者已撤回异议: {}（以最新裁决为准，撤回理由见审查结论）\n",
+                                        delivery.withdrawn_findings.join(", ")
+                                    ));
+                                }
                             }
                         }
                     }

@@ -45,6 +45,81 @@ pub struct ChildReviewRequest {
     resource_ids: Vec<String>,
 }
 
+fn default_dispatch_tier() -> String {
+    "flash".to_string()
+}
+
+fn default_dispatch_effort() -> String {
+    "high".to_string()
+}
+
+/// 方案审查派发参数快照（强类型 DTO，用于审查员故障转移与重派）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanReviewerDispatchSnapshot {
+    pub model: String,
+    #[serde(default = "default_dispatch_tier")]
+    pub tier: String,
+    #[serde(default = "default_dispatch_effort")]
+    pub effort: String,
+    #[serde(default)]
+    pub persona: String,
+    #[serde(default)]
+    pub params: Value,
+}
+
+impl PlanReviewerDispatchSnapshot {
+    pub fn new(
+        model: impl Into<String>,
+        tier: impl Into<String>,
+        effort: impl Into<String>,
+        persona: impl Into<String>,
+        params: Value,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            tier: tier.into(),
+            effort: effort.into(),
+            persona: persona.into(),
+            params,
+        }
+    }
+
+    pub fn to_json_string(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    pub fn from_json_str(s: &str) -> Option<Self> {
+        serde_json::from_str(s).ok()
+    }
+
+    /// 依据当前快照派发子审查任务
+    pub async fn spawn(
+        &self,
+        app: Option<AppHandle>,
+        db: &DbState,
+        parent_run_id: &str,
+        parent_session_id: &str,
+        workspace_root: &Path,
+        interrupt_rx: watch::Receiver<u64>,
+    ) -> Result<String, String> {
+        spawn_child_reviewer(
+            app,
+            db,
+            parent_run_id,
+            parent_session_id,
+            workspace_root,
+            &self.model,
+            &self.tier,
+            &self.effort,
+            &self.params,
+            &self.persona,
+            interrupt_rx,
+        )
+        .await
+    }
+}
+
+
 /// 对抗推演审查多维度评分卡
 /// 包含正确性、破坏性风险（安全性）、代码规范、测试覆盖四个维度，各 0~100 分
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
@@ -137,84 +212,6 @@ impl ReviewScorecard {
                 reason_suffix
             ))
         }
-    }
-}
-
-impl ChildReviewResult {
-    /// 未被审查者撤回的 blocking 异议数——异议闭环的收敛判据：
-    /// 评分达标且该值为 0 才允许放行写入。
-    pub fn unwithdrawn_blocking_count(&self) -> u32 {
-        self.findings
-            .iter()
-            .filter(|f| {
-                f.severity.eq_ignore_ascii_case("blocking")
-                    && !self.withdrawn_findings.contains(&f.id)
-            })
-            .count() as u32
-    }
-
-    /// 阶段审查的拦截判据：未撤回且 finality != final_only 的 blocking 数。
-    /// final_only（仅最终交付前必须解决）不拦截中间态写入，只记账带入收尾审查。
-    pub fn stage_blocking_open(&self) -> u32 {
-        self.findings
-            .iter()
-            .filter(|f| {
-                f.severity.eq_ignore_ascii_case("blocking")
-                    && f.finality != "final_only"
-                    && !self.withdrawn_findings.contains(&f.id)
-            })
-            .count() as u32
-    }
-
-    /// final_only 级 blocking 的展示行（带入收尾审查的 carry-over 义务）
-    pub fn stage_final_only_lines(&self) -> Vec<String> {
-        self.findings
-            .iter()
-            .filter(|f| {
-                f.severity.eq_ignore_ascii_case("blocking")
-                    && f.finality == "final_only"
-                    && !self.withdrawn_findings.contains(&f.id)
-            })
-            .map(|f| f.display_line())
-            .collect()
-    }
-
-    /// 本轮异议动态三元组：(新增, 撤回, 维持)。
-    /// - 撤回：被审查者裁决 withdraw 的 blocking 异议数；
-    /// - 维持：裁决 maintain 的 blocking 异议数；
-    /// - 新增：本轮 findings 中未被任何裁决覆盖的 blocking 异议数（首轮全部算新增）。
-    ///
-    /// 膨胀观测用：连续多轮「撤回数≈新增数且未解决总数不降」说明审查在空转，
-    /// 行为上等价于 reviewer 刁难——只有留下计数才能事后与"方案真的烂"区分开。
-    pub fn objection_stats(&self) -> (u32, u32, u32) {
-        let is_blocking = |f: &ReviewFinding| f.severity.eq_ignore_ascii_case("blocking");
-        let withdrawn = self
-            .withdrawn_findings
-            .iter()
-            .filter(|id| self.findings.iter().any(|f| &f.id == *id && is_blocking(f)))
-            .count() as u32;
-        let maintained = self
-            .objection_verdicts
-            .iter()
-            .filter(|v| {
-                v.verdict.eq_ignore_ascii_case("maintain")
-                    && self
-                        .findings
-                        .iter()
-                        .any(|f| f.id == v.finding_id && is_blocking(f))
-            })
-            .count() as u32;
-        let covered: Vec<&String> = self
-            .objection_verdicts
-            .iter()
-            .map(|v| &v.finding_id)
-            .collect();
-        let added = self
-            .findings
-            .iter()
-            .filter(|f| is_blocking(f) && !covered.iter().any(|id| **id == f.id))
-            .count() as u32;
-        (added, withdrawn, maintained)
     }
 }
 
@@ -361,6 +358,147 @@ pub struct ChildReviewResult {
     /// 结构化审查评分卡（4个维度，各 0~100 分）
     #[serde(default)]
     pub scorecard: Option<ReviewScorecard>,
+}
+
+/// 方案/代码审查员的业务领域交付产物（与宿主执行耗时、网络超时等物理事实解耦）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewerDeliveryData {
+    #[serde(default, deserialize_with = "deserialize_findings")]
+    pub findings: Vec<ReviewFinding>,
+    pub confidence: String,
+    pub evidence_refs: Vec<String>,
+    pub missing_evidence: Vec<String>,
+    #[serde(default)]
+    pub routing: Option<String>,
+    #[serde(default)]
+    pub withdrawn_findings: Vec<String>,
+    #[serde(default)]
+    pub objection_verdicts: Vec<ObjectionVerdict>,
+    #[serde(default)]
+    pub scorecard: Option<ReviewScorecard>,
+}
+
+impl ReviewerDeliveryData {
+    /// 未被审查者撤回的 blocking 异议数——异议闭环的收敛判据：
+    /// 评分达标且该值为 0 才允许放行写入。
+    pub fn unwithdrawn_blocking_count(&self) -> u32 {
+        self.findings
+            .iter()
+            .filter(|f| {
+                f.severity.eq_ignore_ascii_case("blocking")
+                    && !self.withdrawn_findings.contains(&f.id)
+            })
+            .count() as u32
+    }
+
+    /// 阶段审查的拦截判据：未撤回且 finality != final_only 的 blocking 数。
+    /// final_only（仅最终交付前必须解决）不拦截中间态写入，只记账带入收尾审查。
+    pub fn stage_blocking_open(&self) -> u32 {
+        self.findings
+            .iter()
+            .filter(|f| {
+                f.severity.eq_ignore_ascii_case("blocking")
+                    && f.finality != "final_only"
+                    && !self.withdrawn_findings.contains(&f.id)
+            })
+            .count() as u32
+    }
+
+    /// final_only 级 blocking 的展示行（带入收尾审查的 carry-over 义务）
+    pub fn stage_final_only_lines(&self) -> Vec<String> {
+        self.findings
+            .iter()
+            .filter(|f| {
+                f.severity.eq_ignore_ascii_case("blocking")
+                    && f.finality == "final_only"
+                    && !self.withdrawn_findings.contains(&f.id)
+            })
+            .map(|f| f.display_line())
+            .collect()
+    }
+
+    /// 本轮异议动态三元组：(新增, 撤回, 维持)。
+    /// - 撤回：被审查者裁决 withdraw 的 blocking 异议数；
+    /// - 维持：裁决 maintain 的 blocking 异议数；
+    /// - 新增：本轮 findings 中未被任何裁决覆盖的 blocking 异议数（首轮全部算新增）。
+    pub fn objection_stats(&self) -> (u32, u32, u32) {
+        let is_blocking = |f: &ReviewFinding| f.severity.eq_ignore_ascii_case("blocking");
+        let withdrawn = self
+            .withdrawn_findings
+            .iter()
+            .filter(|id| self.findings.iter().any(|f| &f.id == *id && is_blocking(f)))
+            .count() as u32;
+        let maintained = self
+            .objection_verdicts
+            .iter()
+            .filter(|v| {
+                v.verdict.eq_ignore_ascii_case("maintain")
+                    && self
+                        .findings
+                        .iter()
+                        .any(|f| f.id == v.finding_id && is_blocking(f))
+            })
+            .count() as u32;
+        let covered: Vec<&String> = self
+            .objection_verdicts
+            .iter()
+            .map(|v| &v.finding_id)
+            .collect();
+        let added = self
+            .findings
+            .iter()
+            .filter(|f| is_blocking(f) && !covered.iter().any(|id| **id == f.id))
+            .count() as u32;
+        (added, withdrawn, maintained)
+    }
+}
+
+impl ChildReviewResult {
+    /// 判定本次结果是否属于基础设施或执行异常（如超时/取消/崩溃/格式损坏，非有效业务审查结论）
+    pub fn is_infra_failure(&self) -> bool {
+        matches!(
+            self.error_kind.as_deref(),
+            Some("timed_out")
+                | Some("timeout")
+                | Some("interrupted")
+                | Some("cancelled")
+                | Some("invalid_output")
+        )
+    }
+
+    /// 提取审查员的纯业务领域交付数据
+    pub fn to_reviewer_delivery(&self) -> ReviewerDeliveryData {
+        ReviewerDeliveryData {
+            findings: self.findings.clone(),
+            confidence: self.confidence.clone(),
+            evidence_refs: self.evidence_refs.clone(),
+            missing_evidence: self.missing_evidence.clone(),
+            routing: self.routing.clone(),
+            withdrawn_findings: self.withdrawn_findings.clone(),
+            objection_verdicts: self.objection_verdicts.clone(),
+            scorecard: self.scorecard.clone(),
+        }
+    }
+
+    /// 未被审查者撤回的 blocking 异议数（委托至领域交付数据）
+    pub fn unwithdrawn_blocking_count(&self) -> u32 {
+        self.to_reviewer_delivery().unwithdrawn_blocking_count()
+    }
+
+    /// 阶段审查的拦截判据（委托至领域交付数据）
+    pub fn stage_blocking_open(&self) -> u32 {
+        self.to_reviewer_delivery().stage_blocking_open()
+    }
+
+    /// final_only 级 blocking 的展示行（委托至领域交付数据）
+    pub fn stage_final_only_lines(&self) -> Vec<String> {
+        self.to_reviewer_delivery().stage_final_only_lines()
+    }
+
+    /// 本轮异议动态三元组（委托至领域交付数据）
+    pub fn objection_stats(&self) -> (u32, u32, u32) {
+        self.to_reviewer_delivery().objection_stats()
+    }
 }
 
 #[derive(Debug, Deserialize)]

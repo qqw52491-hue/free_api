@@ -728,6 +728,36 @@ impl AgentCheckpoint {
         self.data = DurableAgentContext::capture(context);
     }
 
+    /// 读取方案审查最近派发的强类型参数快照（若存在且格式合法）
+    pub fn plan_reviewer_dispatch_snapshot(&self) -> Option<crate::agent::child_reviewer::PlanReviewerDispatchSnapshot> {
+        self.plan_reviewer_last_dispatch
+            .as_deref()
+            .and_then(crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::from_json_str)
+    }
+
+    /// 写入方案审查最近派发的强类型参数快照（底层序列化为兼容的 JSON 字符串）
+    pub fn set_plan_reviewer_dispatch_snapshot(
+        &mut self,
+        snapshot: &crate::agent::child_reviewer::PlanReviewerDispatchSnapshot,
+    ) {
+        self.plan_reviewer_last_dispatch = Some(snapshot.to_json_string());
+    }
+
+    /// 消费并记录一轮合法的方案审查结论，原子更新异议与评分卡记账状态
+    pub fn record_reviewer_delivery(&mut self, delivery: &crate::agent::child_reviewer::ReviewerDeliveryData) {
+        let (added, withdrawn, maintained) = delivery.objection_stats();
+        self.last_review_blocking_count = delivery.unwithdrawn_blocking_count();
+        self.review_objection_added = added;
+        self.review_objection_withdrawn = withdrawn;
+        self.review_objection_maintained = maintained;
+        self.review_total_withdrawn += withdrawn;
+        self.review_total_maintained += maintained;
+        if let Some(ref sc) = delivery.scorecard {
+            self.last_review_scorecard = Some(sc.clone());
+        }
+        self.plan_reviewer_consumed = true;
+    }
+
     /// 生成方案门禁状态的瞬态投影，供上下文装配层注入底部状态卡（事前可见）。
     pub fn plan_gate_projection(&self) -> crate::agent::context::types::PlanGateProjection {
         crate::agent::context::types::PlanGateProjection {
@@ -1866,4 +1896,45 @@ mod tests {
         assert!(!is_credential_inquiry_kind("text"));
         assert!(!is_credential_inquiry_kind("plan_approval"));
     }
+
+    #[test]
+    fn plan_reviewer_dispatch_snapshot_roundtrip_and_defaults() {
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-run-snap".to_string(), &ctx);
+        assert!(cp.plan_reviewer_dispatch_snapshot().is_none());
+
+        // 1. 写入强类型快照
+        let snap = crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::new(
+            "gemini-2.5-pro",
+            "pro",
+            "high",
+            "code_reviewer",
+            serde_json::json!({"question": "check bounds"}),
+        );
+        cp.set_plan_reviewer_dispatch_snapshot(&snap);
+
+        // 2. 验证底层存储为合法 JSON 字符串
+        let raw_str = cp.plan_reviewer_last_dispatch.as_ref().unwrap();
+        assert!(raw_str.contains("gemini-2.5-pro"));
+
+        // 3. 读取强类型快照无损恢复
+        let recovered = cp.plan_reviewer_dispatch_snapshot().unwrap();
+        assert_eq!(recovered.model, "gemini-2.5-pro");
+        assert_eq!(recovered.tier, "pro");
+        assert_eq!(recovered.effort, "high");
+        assert_eq!(recovered.persona, "code_reviewer");
+        assert_eq!(recovered.params["question"], "check bounds");
+
+        // 4. 兼容老版本/缺省字段：tier 和 effort 缺省时自动补齐默认值
+        cp.plan_reviewer_last_dispatch = Some(r#"{"model":"gemini-flash"}"#.to_string());
+        let legacy = cp.plan_reviewer_dispatch_snapshot().unwrap();
+        assert_eq!(legacy.model, "gemini-flash");
+        assert_eq!(legacy.tier, "flash");
+        assert_eq!(legacy.effort, "high");
+
+        // 5. 损坏 JSON 安全降级返回 None，绝不 panic
+        cp.plan_reviewer_last_dispatch = Some(r#"{"corrupted json"#.to_string());
+        assert!(cp.plan_reviewer_dispatch_snapshot().is_none());
+    }
 }
+

@@ -259,10 +259,7 @@ pub fn apply_stage_result(
     checkpoint.stage_review_rebuttal_run_id = None;
 
     // 基础设施失败：退还阶段审查次数、基线不清零（该阶段视为「未审」，会重新触发）
-    if matches!(
-        result.error_kind.as_deref(),
-        Some("timed_out") | Some("interrupted") | Some("cancelled")
-    ) {
+    if result.is_infra_failure() {
         if checkpoint.reviewer_budget_refunds < 3 && checkpoint.stage_review_budget_used > 0 {
             checkpoint.stage_review_budget_used -= 1;
             checkpoint.reviewer_budget_refunds += 1;

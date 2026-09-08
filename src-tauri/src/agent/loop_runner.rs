@@ -320,31 +320,29 @@ pub async fn run_tool_phase(
                 }
             }
 
-            match spawn_child_reviewer(
-                Some(app.clone()),
-                state.inner(),
-                parent_run_id,
-                final_session_id,
-                workspace_dir,
+            let snapshot = crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::new(
                 &reviewer_model,
                 &model_tier,
                 &reasoning_effort,
-                &effective_params,
                 &reviewer_persona,
-                interrupt_rx.clone(),
-            )
-            .await
+                effective_params.clone(),
+            );
+
+            match snapshot
+                .spawn(
+                    Some(app.clone()),
+                    state.inner(),
+                    parent_run_id,
+                    final_session_id,
+                    workspace_dir,
+                    interrupt_rx.clone(),
+                )
+                .await
             {
                 Ok(child_run_id) => {
                     // 派发快照：供消费端在 reviewer 故障（invalid_output/超时）时自动故障转移重派
                     if !checkpoint.plan_phase.is_approved() {
-                        checkpoint.plan_reviewer_last_dispatch = Some(json!({
-                            "model": reviewer_model,
-                            "tier": model_tier,
-                            "effort": reasoning_effort,
-                            "persona": reviewer_persona,
-                            "params": effective_params,
-                        }).to_string());
+                        checkpoint.set_plan_reviewer_dispatch_snapshot(&snapshot);
                     }
                     let question_str = effective_params.get("question").and_then(|v| v.as_str()).unwrap_or("");
                     let question_brief = if question_str.chars().count() > 40 {
