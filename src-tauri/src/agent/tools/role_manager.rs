@@ -335,10 +335,14 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
 }
 
 pub fn toggle_card(db: &DbState, params: &Value) -> Result<String, String> {
-    let name = params
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "role_manager.toggle 缺少 name。".to_string())?;
+    let name = if let Some(s) = params.as_str() {
+        s
+    } else {
+        params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "role_manager.toggle 缺少 name。".to_string())?
+    };
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let rows = conn
         .execute(
@@ -350,10 +354,14 @@ pub fn toggle_card(db: &DbState, params: &Value) -> Result<String, String> {
 }
 
 pub fn delete_card(db: &DbState, params: &Value) -> Result<String, String> {
-    let name = params
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "role_manager.delete 缺少 name。".to_string())?;
+    let name = if let Some(s) = params.as_str() {
+        s
+    } else {
+        params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "role_manager.delete 缺少 name。".to_string())?
+    };
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let rows = conn
         .execute("DELETE FROM agent_role_cards WHERE name = ?1", params![name])

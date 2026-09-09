@@ -19,13 +19,13 @@ pub async fn upsert_role_card(state: State<'_, DbState>, card: Value) -> Result<
 /// 启用/禁用切换
 #[tauri::command]
 pub async fn toggle_role_card(state: State<'_, DbState>, name: String) -> Result<String, String> {
-    role_manager::toggle_card(state.inner(), &Value::String(name))
+    role_manager::toggle_card(state.inner(), &json!({ "name": name }))
 }
 
 /// 删除角色卡
 #[tauri::command]
 pub async fn delete_role_card(state: State<'_, DbState>, name: String) -> Result<String, String> {
-    role_manager::delete_card(state.inner(), &Value::String(name))
+    role_manager::delete_card(state.inner(), &json!({ "name": name }))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
