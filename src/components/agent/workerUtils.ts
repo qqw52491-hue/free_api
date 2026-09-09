@@ -382,20 +382,22 @@ export function extractWorkerDetails(step: AgentStepItem): { name: string; taskD
     const isWriter = step.tool === "child_writer" || step.action === "child_writer";
     const role: "reviewer" | "coder" | "worker" = isReviewer ? "reviewer" : isWriter ? "coder" : "worker";
     const defaultLabel = isReviewer ? "代码审查员" : isWriter ? "沙箱写入员" : "侦察工作者";
-    const roleLabel = isReviewer ? "审查" : isWriter ? "写入" : "侦察";
+    const defaultRoleLabel = isReviewer ? "审查" : isWriter ? "写入" : "侦察";
 
     let taskDesc = "";
+    let explicitRoleLabel = "";
+    let explicitRole = "";
+
     const params = step.params || (step as any).params_summary;
     if (params) {
-        if (typeof params === "object") {
-            taskDesc = String((params as any).task || (params as any).goal || (params as any).instruction || (params as any).command || "").trim();
-        } else if (typeof params === "string") {
-            try {
-                const parsed = JSON.parse(params);
-                taskDesc = String(parsed.task || parsed.goal || parsed.instruction || parsed.command || "").trim();
-            } catch {
-                taskDesc = params.trim();
-            }
+        let p: any = params;
+        if (typeof params === "string") {
+            try { p = JSON.parse(params); } catch { taskDesc = params.trim(); }
+        }
+        if (p && typeof p === "object") {
+            taskDesc = String(p.task || p.question || p.goal || p.instruction || p.command || "").trim();
+            explicitRoleLabel = String(p.role_label || p.roleLabel || p.card_label || "").trim();
+            explicitRole = String(p.role || p.role_name || p.roleName || "").trim();
         }
     }
     if (!taskDesc && step.description && step.description !== "执行操作") {
@@ -405,11 +407,23 @@ export function extractWorkerDetails(step: AgentStepItem): { name: string; taskD
         taskDesc = step.action.trim();
     }
 
-    let name = defaultLabel;
-    if (taskDesc) {
+    // 智能推导：若未显式传 role_label，从任务描述或步骤描述中正则提取角色名称（如“阶段级写入审查（专家角色：🎨 前端视觉审查官）”）
+    if (!explicitRoleLabel) {
+        const fullSearchText = `${taskDesc} ${step.description || ""} ${step.action || ""}`;
+        const match = fullSearchText.match(/(?:专家角色|挂载专家|角色)[：:]\s*([^\s，,）)\n]+)/);
+        if (match && match[1]) {
+            explicitRoleLabel = match[1].trim();
+        }
+    }
+
+    // 优先使用明确的角色身份（例如“🎨 前端视觉与交互审查官”或“🛡️ 安全架构专家”）
+    let name = explicitRoleLabel || (explicitRole ? `${defaultRoleLabel} · ${explicitRole}` : defaultLabel);
+    let roleLabel = explicitRoleLabel || defaultRoleLabel;
+
+    if (!explicitRoleLabel && !explicitRole && taskDesc) {
         const cleanDesc = taskDesc.replace(/^[🔍⚡🛡️🔧\s]+/, "");
         const shortDesc = cleanDesc.length > 18 ? cleanDesc.slice(0, 17) + "…" : cleanDesc;
-        name = `${roleLabel}: ${shortDesc}`;
+        name = `${defaultRoleLabel}: ${shortDesc}`;
     }
 
     return {
@@ -562,14 +576,16 @@ export function extractSubagentsFromStep(
                 const subTool = sub.tool || sub.action || tool;
                 const isRev = subTool === "child_reviewer";
                 const role = isRev ? "reviewer" : "worker";
-                const taskText = String(sub.task || sub.goal || sub.instruction || `子任务 #${idx + 1}`);
+                const explicitRole = sub.role_label || sub.roleLabel || sub.role || sub.card_label;
+                const taskText = String(sub.task || sub.question || sub.goal || sub.instruction || `子任务 #${idx + 1}`);
                 const cleanDesc = taskText.replace(/^[🔍⚡🛡️🔧\s]+/, "");
                 const shortDesc = cleanDesc.length > 16 ? cleanDesc.slice(0, 15) + "…" : cleanDesc;
+                const displayName = explicitRole ? String(explicitRole) : `${isRev ? '审查' : '侦察'}: ${shortDesc}`;
                 workers.push({
                     id: `step-${step.stepId}-sub-${idx}`,
-                    name: `${isRev ? '审查' : '侦察'}: ${shortDesc}`,
+                    name: displayName,
                     role,
-                    roleLabel: isRev ? "审查" : "侦察",
+                    roleLabel: explicitRole ? String(explicitRole) : (isRev ? "审查" : "侦察"),
                     status: step.status,
                     currentStep: taskText,
                     currentTool: subTool,

@@ -359,6 +359,8 @@ pub async fn dispatch(
         let evidence = build_stage_evidence(context, workspace, None);
         let question = "阶段级写入审查：审查当前阶段变更是否满足阶段目标且无 blocking 缺陷".to_string();
         let params = json!({
+            "role": "stage_reviewer",
+            "role_label": "🛡️ 阶段综合审查官",
             "question": question,
             "evidence_excerpt": evidence,
         });
@@ -432,6 +434,8 @@ pub async fn dispatch(
             card.label
         );
         let params = json!({
+            "role": card.name,
+            "role_label": card.label,
             "question": question,
             "evidence_excerpt": evidence,
         });

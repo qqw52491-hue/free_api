@@ -527,6 +527,16 @@ const foldedCount = computed(() => {
 
 function formatWorkerName(name: string): string {
     if (!name) return "子 Agent";
+    // 优先识别专精角色卡（带有 Emoji 或明确职称如审查官/架构师/专家等）
+    if (/[🎨🛡️🔧⚡🔍🧠🎭🤖💻]/.test(name) || /审查官|审查员|专家|架构师|写入员|工作者|设计官/.test(name)) {
+        if (name.includes("：") || name.includes(":")) {
+            const parts = name.split(/[:：]/);
+            if (/角色|专家|挂载/.test(parts[0]) && parts[1]?.trim()) {
+                return parts[1].trim().slice(0, 14);
+            }
+        }
+        return name.length > 14 ? name.slice(0, 13) + "…" : name;
+    }
     // 提取精简短标题 (例如 "Agent A：计算1+1" -> "Agent A", "子Agent-B 计算1+1" -> "Agent B")
     if (name.includes("：") || name.includes(":")) {
         const prefix = name.split(/[:：]/)[0].trim();
@@ -537,8 +547,8 @@ function formatWorkerName(name: string): string {
     if (match && match[1]) {
         return match[1].replace(/[-_]/g, " ");
     }
-    if (name.length > 8) {
-        return name.slice(0, 7) + "…";
+    if (name.length > 12) {
+        return name.slice(0, 11) + "…";
     }
     return name;
 }

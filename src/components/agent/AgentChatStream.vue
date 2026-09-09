@@ -304,7 +304,7 @@
                                     <button class="goal-row" :class="{ selected: step.id === selectedStepId, 'subagent-row': isSubAgentTool(step.tool), 'waitjobs-row': isWaitJobsTool(step.tool) }" type="button" @click="$emit('select-step', step.id)">
                                         <span class="tree-mark"><i></i></span>
                                         <span class="goal-label">
-                                            <span v-if="isSubAgentTool(step.tool)" class="subagent-tag-badge">子智能体 · 审查</span>
+                                            <span v-if="isSubAgentTool(step.tool)" class="subagent-tag-badge">{{ getSubAgentBadgeText(step) }}</span>
                                             <span v-else-if="isWaitJobsTool(step.tool)" class="waitjobs-tag-badge">异步挂起</span>
                                             {{ step.description && step.description !== '执行操作' ? step.description : formatStepOperation(step).actionText }}
                                             <small v-if="step.modelTier" class="model-tier">{{ step.modelTier }}</small>
@@ -312,7 +312,7 @@
                                         <span v-if="getStepMetricsPill(step)" class="step-metrics-badge" :title="getStepMetricsTooltip(step)">
                                             {{ getStepMetricsPill(step) }}
                                         </span>
-                                        <span class="row-status" :class="`status-tag-${step.status}`">{{ isSubAgentTool(step.tool) && step.status === 'running' ? '后台审查中' : (isWaitJobsTool(step.tool) && step.status === 'running' ? '挂起等待' : statusLabel(step.status)) }}</span>
+                                        <span class="row-status" :class="`status-tag-${step.status}`">{{ isSubAgentTool(step.tool) && step.status === 'running' ? '后台协同中' : (isWaitJobsTool(step.tool) && step.status === 'running' ? '挂起等待' : statusLabel(step.status)) }}</span>
                                         <time>{{ formatClock(step.timestamp) }}</time>
                                     </button>
                                     <div class="node-children">
@@ -601,23 +601,31 @@ const emit = defineEmits<{
 function extractSubagentTask(step: any): string {
     if (!step) return "后台子任务";
     const params = step.params || step.params_summary;
+    let rolePrefix = "";
     if (params) {
         if (typeof params === "object") {
             const p = params as any;
-            if (p.task && typeof p.task === "string") return p.task;
-            if (p.goal && typeof p.goal === "string") return p.goal;
-            if (p.command && typeof p.command === "string") return p.command;
-            if (p.instruction && typeof p.instruction === "string") return p.instruction;
+            if (p.role_label) rolePrefix = `[${p.role_label}] `;
+            else if (p.role) rolePrefix = `[${p.role}] `;
+
+            if (p.task && typeof p.task === "string") return `${rolePrefix}${p.task}`;
+            if (p.question && typeof p.question === "string") return `${rolePrefix}${p.question}`;
+            if (p.goal && typeof p.goal === "string") return `${rolePrefix}${p.goal}`;
+            if (p.command && typeof p.command === "string") return `${rolePrefix}${p.command}`;
+            if (p.instruction && typeof p.instruction === "string") return `${rolePrefix}${p.instruction}`;
         } else if (typeof params === "string") {
             try {
                 const parsed = JSON.parse(params);
-                if (parsed.task) return parsed.task;
-                if (parsed.goal) return parsed.goal;
+                if (parsed.role_label) rolePrefix = `[${parsed.role_label}] `;
+                else if (parsed.role) rolePrefix = `[${parsed.role}] `;
+                if (parsed.task) return `${rolePrefix}${parsed.task}`;
+                if (parsed.question) return `${rolePrefix}${parsed.question}`;
+                if (parsed.goal) return `${rolePrefix}${parsed.goal}`;
             } catch {}
         }
     }
-    if (step.description && step.description !== "执行操作") return step.description;
-    if (step.action && step.action !== "执行操作") return step.action;
+    if (step.description && step.description !== "执行操作") return `${rolePrefix}${step.description}`;
+    if (step.action && step.action !== "执行操作") return `${rolePrefix}${step.action}`;
     return isSubAgentTool(step.tool) ? "独立子任务执行与审查" : "后台协同任务";
 }
 
@@ -1150,7 +1158,43 @@ const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimelineEntri
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败", challenged: "验证未闭合" }[status] || "未知"; }
 function isSubAgentTool(tool?: string): boolean {
     const t = (tool || "").toLowerCase();
-    return t.includes("child_reviewer") || t.includes("sub_agent");
+    return t.includes("child_reviewer") || t.includes("child_writer") || t.includes("child_worker") || t.includes("sub_agent");
+}
+function getSubAgentBadgeText(step: any): string {
+    const tool = (step?.tool || step?.action || "").toLowerCase();
+    const isReviewer = tool.includes("child_reviewer");
+    const isWriter = tool.includes("child_writer");
+    const isWorker = tool.includes("child_worker");
+    const defaultKindLabel = isReviewer ? "审查" : isWriter ? "写入" : isWorker ? "侦察" : "子任务";
+
+    const params = step?.params || step?.params_summary;
+    let roleLabel = "";
+    if (params) {
+        let p: any = params;
+        if (typeof params === "string") {
+            try { p = JSON.parse(params); } catch {}
+        }
+        if (p && typeof p === "object") {
+            roleLabel = String(p.role_label || p.roleLabel || p.card_label || p.role || "").trim();
+        }
+    }
+
+    if (!roleLabel && (step?.description || step?.action)) {
+        const full = `${step.description || ""} ${step.action || ""}`;
+        const match = full.match(/(?:专家角色|挂载专家|角色)[：:]\s*([^\s，,）)\n]+)/);
+        if (match && match[1]) {
+            roleLabel = match[1].trim();
+        }
+    }
+
+    if (roleLabel) {
+        if (roleLabel.length <= 14) {
+            return `${roleLabel} · ${defaultKindLabel}`;
+        }
+        return roleLabel;
+    }
+
+    return `子智能体 · ${defaultKindLabel}`;
 }
 function isWaitJobsTool(tool?: string): boolean {
     const t = (tool || "").toLowerCase();

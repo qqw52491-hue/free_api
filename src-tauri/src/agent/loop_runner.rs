@@ -292,6 +292,8 @@ pub async fn run_tool_phase(
                             continue;
                         }
                         reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
+                        effective_params["role"] = json!(card.name);
+                        effective_params["role_label"] = json!(card.label);
                         if let Some(schema) = card.parse_custom_schema() {
                             reviewer_custom_schema = Some(schema);
                         }
@@ -606,6 +608,8 @@ pub async fn run_tool_phase(
                             writer_model = card.model_id.clone();
                         }
                         effective_params = crate::agent::tools::role_manager::merge_writer_defaults(&card, writer_params);
+                        effective_params["role"] = json!(card.name);
+                        effective_params["role_label"] = json!(card.label);
                         if let Some(obj) = effective_params.as_object_mut() {
                             obj.remove("max_concurrency");
                         }
@@ -817,6 +821,8 @@ pub async fn run_tool_phase(
                             continue;
                         }
                         scout_persona = crate::agent::tools::role_manager::persona_block(&card);
+                        effective_worker_params["role"] = json!(card.name);
+                        effective_worker_params["role_label"] = json!(card.label);
                         if let Some(schema) = card.parse_custom_schema() {
                             scout_custom_schema = Some(schema);
                         }
