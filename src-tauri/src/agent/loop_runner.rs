@@ -1026,6 +1026,11 @@ pub async fn run_tool_phase(
             Ok(completed_jobs) => {
                 let mut stage_notes = String::new();
                 let mut failover_notes = String::new();
+                // 【部分成功+部分 infra failure 退款修复】在 for 循环内无法安全判断
+                // has_in_flight_stage_review()：completed_jobs 按顺序处理，后续成功
+                // 专家尚未从 run_ids 移除，导致失败专家处理时 has_in_flight == true，
+                // 退款窗口永远错过。改为循环后统一结算。
+                let mut had_infra_failure_for_refund = false;
                 for job in completed_jobs.iter() {
                     // 阶段审查任务走独立语义：不置 plan consumed、基础设施失败退还阶段次数
                     let is_rebuttal_result = Some(job.job_id.as_str())
@@ -1044,13 +1049,11 @@ pub async fn run_tool_phase(
                             if is_rebuttal_result {
                                 checkpoint.stage_review_rebuttal_run_id = None;
                             }
-                            if !checkpoint.has_in_flight_stage_review() {
-                                if checkpoint.reviewer_budget_refunds < 3 && checkpoint.stage_review_budget_used > 0 {
-                                    checkpoint.stage_review_budget_used -= 1;
-                                    checkpoint.reviewer_budget_refunds += 1;
-                                }
-                            }
-                            stage_notes.push_str("\n⚠️ 阶段审查未正常完成（次数已退还），该阶段视为未审。");
+                            // 标记本批次有 infra 失败；退款在 for 循环结束后统一结算
+                            // （此时 completed_jobs 中的其他成功专家可能还未从 run_ids 移除，
+                            // 若在此处判断 has_in_flight_stage_review() 会误判为 true 而漏退款）
+                            had_infra_failure_for_refund = true;
+                            stage_notes.push_str("\n⚠️ 阶段审查未正常完成，该阶段视为未审。");
                             continue;
                         }
                         // 对质子任务技术性失败（审查员输出非法，未产生有效裁决）：
@@ -1065,11 +1068,23 @@ pub async fn run_tool_phase(
                             );
                             continue;
                         }
-                        let withdrawn: Vec<String> = value
+                        let mut withdrawn: Vec<String> = value
                             .get("withdrawn_findings")
                             .and_then(|w| w.as_array())
                             .map(|arr| arr.iter().filter_map(|i| i.as_str().map(|s| s.to_string())).collect())
                             .unwrap_or_default();
+                        if let Some(verdicts) = value.get("objection_verdicts").and_then(|v| v.as_array()) {
+                            for v in verdicts {
+                                let is_withdraw = v.get("verdict").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("withdraw") || s.eq_ignore_ascii_case("withdrawn")).unwrap_or(false);
+                                if is_withdraw {
+                                    if let Some(id) = v.get("finding_id").and_then(|i| i.as_str()) {
+                                        if !withdrawn.iter().any(|w| w == id) {
+                                            withdrawn.push(id.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         let is_blocked = |f: &serde_json::Value| {
                             f.get("severity").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("blocking")).unwrap_or(false)
                                 && f.get("finality").and_then(|s| s.as_str()).map(|s| s != "final_only").unwrap_or(true)
@@ -1078,6 +1093,7 @@ pub async fn run_tool_phase(
                         let findings_arr = value.get("findings").and_then(|f| f.as_array()).cloned().unwrap_or_default();
                         checkpoint.remove_stage_review_run(&job.job_id);
                         if is_rebuttal_result {
+                            checkpoint.record_stage_review_completed(&job.job_id);
                             checkpoint.stage_review_rebuttal_run_id = None;
                         }
 
@@ -1136,13 +1152,14 @@ pub async fn run_tool_phase(
                                     )
                                 })
                                 .collect();
-                            if checkpoint.note_stage_review_confrontation_maintained(blocker_lines, 2) {
+                            if checkpoint.note_stage_review_confrontation_maintained_for(Some(&job.job_id), blocker_lines, 2) {
                                 stage_notes.push_str(
                                     "\n⚖️ 【对质失败自动降级】blocking 异议经 2 轮对质仍被审查员维持，已降级为 final_only 记账带入收尾审查（收尾前必须逐条解决），写入已放行。",
                                 );
                             }
                         } else {
                             checkpoint.stage_review_confrontation_failures = 0;
+                            checkpoint.stage_review_confrontation_target = None;
                         }
 
                         let in_flight_remaining = checkpoint.stage_review_run_ids.len();
@@ -1291,6 +1308,21 @@ pub async fn run_tool_phase(
                             .saturating_sub(checkpoint.review_objection_withdrawn);
                     }
                 }
+                // 【infra failure 退款统一结算】
+                // 必须在 for 循环结束后执行：此时所有 completed_jobs 都已被处理，
+                // has_in_flight_stage_review() 才能准确反映是否还有真正在途的任务。
+                // 仅当无任何成功专家留下 blocker 时才退款——若成功专家已发现真实问题，
+                // 本轮审查有实质性输出，不应退还预算。
+                if had_infra_failure_for_refund
+                    && !checkpoint.has_in_flight_stage_review()
+                    && checkpoint.stage_review_blockers_open == 0
+                    && checkpoint.reviewer_budget_refunds < 3
+                    && checkpoint.stage_review_budget_used > 0
+                {
+                    checkpoint.stage_review_budget_used -= 1;
+                    checkpoint.reviewer_budget_refunds += 1;
+                    stage_notes.push_str("\n🔄 阶段审查次数已退还（本轮含 infra 失败且无专家产出 blocking，视为未有效审查）。");
+                }
                 let mut out = String::new();
                 if completed_jobs.is_empty() {
                     out.push_str("等待结束：当前无新完成的后台任务，或所有后台任务已结束。");
@@ -1413,7 +1445,7 @@ pub async fn run_tool_phase(
                             messages.push(json!({
                                 "role": "user",
                                 "content": format!(
-                                    "【父 Agent 反驳与对质】\n{}\n\n【对质研判规则】：\n请针对上述反驳与证据进行重新研判，输出更新后的审查 JSON：\n1. 若父 Agent 反驳与测试证据成立，请将该项缺陷撤回（从 findings 中剔除，并在 missing_evidence 说明已撤回原 finding ID）；\n2. 若仍坚持该缺陷，必须在 why 中给出全新证据与理由；\n3. 重新推导 routing（certain/needs_alignment/blocked）。",
+                                    "【父 Agent 反驳与对质】\n{}\n\n【对质研判规则】：\n请针对上述反驳与证据进行重新研判，输出更新后的审查 JSON：\n1. 若父 Agent 反驳与测试证据成立，请对该项缺陷进行撤回：在 objection_verdicts 中将该 finding_id 的 verdict 设为 withdraw 并给出裁决理由，或从 findings 中剔除并在 missing_evidence 说明已撤回；\n2. 若仍坚持该缺陷，必须在 why 中给出全新证据与理由，或在 objection_verdicts 中将 verdict 设为 maintain；\n3. 重新推导 routing（certain/needs_alignment/blocked）。",
                                     followup_msg
                                 )
                             }));
@@ -1449,7 +1481,7 @@ pub async fn run_tool_phase(
                             ) {
                                 Ok(id) => {
                                     // 对质目标是阶段审查任务时，登记复检 run id 以便结果回流阶段语义
-                                    if checkpoint.matches_stage_review_run(target_child_id) {
+                                    if checkpoint.is_stage_review_target(target_child_id) {
                                         checkpoint.stage_review_rebuttal_run_id = Some(id.clone());
                                     }
                                     id
@@ -1538,7 +1570,7 @@ pub async fn run_tool_phase(
 
                                 let duration_ms = started_at.elapsed().as_millis() as u64;
                                 let completion_tokens = stream_result.usage.map(|u| u.completion_tokens).unwrap_or(0);
-                                let (findings, confidence, evidence_refs, missing_evidence, routing) = 
+                                let (findings, confidence, evidence_refs, missing_evidence, routing, objection_verdicts, withdrawn_findings) = 
                                     match crate::agent::child_reviewer::parse_child_review_rebuttal_output(&stream_result.full_response) {
                                         Ok(res) => res,
                                         Err(parse_err) => {
@@ -1576,8 +1608,8 @@ pub async fn run_tool_phase(
                                     raw_result_json: None,
                                     kind: Some("review".to_string()),
                                     routing: Some(routing),
-                                    withdrawn_findings: vec![],
-                                    objection_verdicts: vec![],
+                                    withdrawn_findings,
+                                    objection_verdicts,
                                     scorecard: None,
                                 };
 

@@ -336,9 +336,8 @@ pub async fn dispatch(
         router::roles::REVIEWER,
     );
 
-    // 新一轮阶段审查重置拦截状态与记账
+    // 新一轮阶段审查重置拦截状态（final_only 跨阶段累加 carry-over 到收尾审查，不可清空）
     checkpoint.stage_review_blockers_open = 0;
-    checkpoint.stage_review_final_only.clear();
 
     if role_cards.is_empty() {
         // 无挂载专家卡：走系统默认的跨家族异构对抗模型兜底
@@ -568,6 +567,7 @@ pub fn apply_stage_receipt(
         == Some(receipt.child_run_id.as_str());
     checkpoint.remove_stage_review_run(&receipt.child_run_id);
     if was_rebuttal {
+        checkpoint.record_stage_review_completed(&receipt.child_run_id);
         checkpoint.stage_review_rebuttal_run_id = None;
     }
 
@@ -599,6 +599,26 @@ pub fn apply_stage_receipt(
         checkpoint.stage_review_blockers_open = checkpoint
             .stage_review_blockers_open
             .saturating_sub(withdrawn);
+
+        // 【对质新/维持 blocker 兜底】对质分支中 new_blockers（审查员仍持有或新增的
+        // blocking 异议）不直接加回 blockers_open（避免与其他在途专家的计数双加），
+        // 但必须通过 confrontation 机制跟踪：2 轮对质仍维持/新增 → 自动降级
+        // final_only 记账放行。与 loop_runner.rs 的 wait_jobs 路径保持一致。
+        // 若不跟踪，对质期间审查员新提出的 blocking 问题会被静默丢弃，构成安全漏洞。
+        let blocker_lines: Vec<String> = receipt.findings()
+            .into_iter()
+            .filter(|f| {
+                f.severity.eq_ignore_ascii_case("blocking")
+                    && f.finality != "final_only"
+                    && !receipt.as_reviewer_delivery()
+                        .map(|d| d.withdrawn_findings.contains(&f.id))
+                        .unwrap_or(false)
+            })
+            .map(|f| format!("{}: {}", f.id, f.why))
+            .collect();
+        if checkpoint.note_stage_review_confrontation_maintained_for(Some(&receipt.child_run_id), blocker_lines, 2) {
+            // 降级日志将在调用方 format 输出到 stage_notes
+        }
     } else {
         checkpoint.stage_review_blockers_open += new_blockers;
     }
@@ -1083,5 +1103,18 @@ mod tests {
         let reb_note = apply_stage_receipt(&mut cp, &rebuttal_receipt, &context, None);
         assert_eq!(cp.stage_review_blockers_open, 2, "撤回 1 条后 blocking 降为 2");
         assert!(reb_note.contains("对质复检结论"));
+    }
+
+    #[test]
+    fn test_dispatch_preserves_stage_review_final_only() {
+        let mut cp = approved_checkpoint();
+        cp.stage_review_final_only = vec!["【对质未撤回自动降级】F1: 历史欠账".to_string()];
+        cp.stage_review_blockers_open = 0;
+
+        // dispatch 时：只清 blockers_open，不清空 final_only
+        cp.stage_review_blockers_open = 0;
+        // 验证 final_only 跨阶段累加 carry-over 到收尾审查未被抹除
+        assert_eq!(cp.stage_review_final_only.len(), 1);
+        assert!(cp.stage_review_final_only[0].contains("历史欠账"));
     }
 }

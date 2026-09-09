@@ -756,9 +756,17 @@ fn normalize_nonempty(value: &str, max_chars: usize, field: &str) -> Result<Stri
 
 pub fn parse_child_review_rebuttal_output(
     raw: &str,
-) -> Result<(Vec<ReviewFinding>, String, Vec<String>, Vec<String>, String), String> {
-    let (findings, confidence, refs, missing, routing, _, _, _) = parse_controlled_output(raw, &[])?;
-    Ok((findings, confidence, refs, missing, routing))
+) -> Result<(
+    Vec<ReviewFinding>,
+    String,
+    Vec<String>,
+    Vec<String>,
+    String,
+    Vec<ObjectionVerdict>,
+    Vec<String>,
+), String> {
+    let (findings, confidence, refs, missing, routing, _, verdicts, withdrawn) = parse_controlled_output(raw, &[])?;
+    Ok((findings, confidence, refs, missing, routing, verdicts, withdrawn))
 }
 
 /// 宽松 JSON 提取：审查模型在大上下文下常把 JSON 包进 ```json 围栏、前后加一句
@@ -932,7 +940,14 @@ fn parse_controlled_output(
             }
         })
         .collect();
-    let withdrawn_findings = resolve_withdrawn_ids(&structured_findings, &objection_verdicts);
+    let mut withdrawn_findings = resolve_withdrawn_ids(&structured_findings, &objection_verdicts);
+    for v in &objection_verdicts {
+        if v.verdict.eq_ignore_ascii_case("withdraw") && !v.finding_id.is_empty() {
+            if !withdrawn_findings.iter().any(|id| id == &v.finding_id) {
+                withdrawn_findings.push(v.finding_id.clone());
+            }
+        }
+    }
 
     Ok((
         structured_findings,
@@ -2017,6 +2032,30 @@ mod tests {
         // 有实质内容的理由 → 认可 withdraw
         let (_, _, _, _, _, _, verdicts, withdrawn) =
             parse_controlled_output(&base("父Agent已在 a.rs:1 增加判空并补了回归测试，见处理说明第1条"), &[]).unwrap();
+        assert_eq!(verdicts[0].verdict, "withdraw");
+        assert_eq!(withdrawn, vec!["F1".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_child_review_rebuttal_output_preserves_withdrawn() {
+        let json_raw = r#"{
+            "findings": [],
+            "confidence": "confirmed",
+            "evidence_refs": [],
+            "missing_evidence": [],
+            "routing": "certain",
+            "objection_verdicts": [
+                {
+                    "finding_id": "F1",
+                    "verdict": "withdraw",
+                    "reason": "父 Agent 提供的测试证据确实表明已修复该边界问题"
+                }
+            ]
+        }"#;
+        let (findings, confidence, refs, missing, routing, verdicts, withdrawn) =
+            parse_child_review_rebuttal_output(json_raw).unwrap();
+        assert!(findings.is_empty());
+        assert_eq!(verdicts.len(), 1);
         assert_eq!(verdicts[0].verdict, "withdraw");
         assert_eq!(withdrawn, vec!["F1".to_string()]);
     }

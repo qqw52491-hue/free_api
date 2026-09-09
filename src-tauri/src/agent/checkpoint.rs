@@ -571,6 +571,12 @@ pub struct AgentCheckpoint {
     pub stage_review_run_ids: Vec<String>,
     #[serde(default)]
     pub stage_review_rebuttal_run_id: Option<String>,
+    /// 最近已完成或已对质的历史阶段审查任务 ID 列表（用于 resume_child 对质时识别阶段审查目标，最多保留 20 条）
+    #[serde(default)]
+    pub stage_review_completed_run_ids: Vec<String>,
+    /// 当前正在对质的目标审查任务 ID（用于对质失败计数隔离，防多专家交叉借分）
+    #[serde(default)]
+    pub stage_review_confrontation_target: Option<String>,
     /// 覆盖基线：上次成功阶段审查时的副作用台账长度（之后的新增 = 未覆盖写入）
     #[serde(default)]
     pub stage_review_baseline_side_effects: u32,
@@ -708,6 +714,8 @@ impl AgentCheckpoint {
             stage_review_run_id: None,
             stage_review_run_ids: Vec::new(),
             stage_review_rebuttal_run_id: None,
+            stage_review_completed_run_ids: Vec::new(),
+            stage_review_confrontation_target: None,
             stage_review_baseline_side_effects: 0,
             stage_review_blockers_open: 0,
             stage_review_confrontation_failures: 0,
@@ -837,12 +845,30 @@ impl AgentCheckpoint {
             || self.stage_review_run_ids.iter().any(|r| r == run_id)
     }
 
+    /// 判定指定任务 ID 是否属于在途或已完成的阶段审查任务（用于对质目标识别）
+    pub fn is_stage_review_target(&self, run_id: &str) -> bool {
+        self.matches_stage_review_run(run_id)
+            || self.stage_review_rebuttal_run_id.as_deref() == Some(run_id)
+            || self.stage_review_completed_run_ids.iter().any(|r| r == run_id)
+    }
+
+    /// 记录已完成的阶段审查或对质任务 ID（最多保留 20 条）
+    pub fn record_stage_review_completed(&mut self, run_id: &str) {
+        if !self.stage_review_completed_run_ids.iter().any(|r| r == run_id) {
+            self.stage_review_completed_run_ids.push(run_id.to_string());
+            if self.stage_review_completed_run_ids.len() > 20 {
+                self.stage_review_completed_run_ids.remove(0);
+            }
+        }
+    }
+
     /// 移除已完成的阶段审查任务 ID；若列表中仍有其他任务则继续维持，否则清空
     pub fn remove_stage_review_run(&mut self, run_id: &str) {
         self.stage_review_run_ids.retain(|r| r != run_id);
         if self.stage_review_run_id.as_deref() == Some(run_id) {
             self.stage_review_run_id = self.stage_review_run_ids.first().cloned();
         }
+        self.record_stage_review_completed(run_id);
     }
 
     /// 清空全部阶段审查在途任务 ID
@@ -875,21 +901,40 @@ impl AgentCheckpoint {
 
     /// 对质失败自动降级：blocking 异议经对质仍被审查员维持（confirmed 证据拒不撤回）
     /// 时累计失败次数；达到 threshold 后把未解决 blockers 降级为 final_only 记账
-    /// 带入收尾审查，blockers_open 清零放行写入。返回 true = 本次触发降级。
+    /// 带入收尾审查，安全扣减 blockers_open 放行写入。返回 true = 本次触发降级。
     /// 空行（异议已全部撤回/解决）时重置计数。
     pub fn note_stage_review_confrontation_maintained(
         &mut self,
         blocker_lines: Vec<String>,
         threshold: u32,
     ) -> bool {
+        self.note_stage_review_confrontation_maintained_for(None, blocker_lines, threshold)
+    }
+
+    /// 附带目标专家隔离的对质失败自动降级：不同专家独立计数，防止联合会审交叉借分。
+    pub fn note_stage_review_confrontation_maintained_for(
+        &mut self,
+        target_child_id: Option<&str>,
+        blocker_lines: Vec<String>,
+        threshold: u32,
+    ) -> bool {
         if blocker_lines.is_empty() {
             self.stage_review_confrontation_failures = 0;
+            self.stage_review_confrontation_target = None;
             return false;
+        }
+        // 目标切换时，独立重置计数器，防止联合会审中不同专家的失败互相借分
+        if let Some(target) = target_child_id {
+            if self.stage_review_confrontation_target.as_deref() != Some(target) {
+                self.stage_review_confrontation_failures = 0;
+                self.stage_review_confrontation_target = Some(target.to_string());
+            }
         }
         self.stage_review_confrontation_failures += 1;
         if self.stage_review_confrontation_failures < threshold {
             return false;
         }
+        let count = blocker_lines.len() as u32;
         for line in blocker_lines {
             let tagged = format!("【对质未撤回自动降级】{line}");
             if !self
@@ -900,9 +945,13 @@ impl AgentCheckpoint {
                 self.stage_review_final_only.push(tagged);
             }
         }
-        self.stage_review_blockers_open = 0;
-        self.stage_review_blocker_stage = None;
+        // 安全扣减：仅扣减当前对质降级的条数，不可无条件全局置 0，防止未对质专家的 blocker 被静默清空
+        self.stage_review_blockers_open = self.stage_review_blockers_open.saturating_sub(count);
+        if self.stage_review_blockers_open == 0 {
+            self.stage_review_blocker_stage = None;
+        }
         self.stage_review_confrontation_failures = 0;
+        self.stage_review_confrontation_target = None;
         true
     }
 
@@ -1967,6 +2016,52 @@ mod tests {
         // 5. 损坏 JSON 安全降级返回 None，绝不 panic
         cp.plan_reviewer_last_dispatch = Some(r#"{"corrupted json"#.to_string());
         assert!(cp.plan_reviewer_dispatch_snapshot().is_none());
+    }
+
+    #[test]
+    fn test_is_stage_review_target_matches_completed_runs() {
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-run-target".to_string(), &ctx);
+        cp.stage_review_run_ids = vec!["expert-1".to_string(), "expert-2".to_string()];
+        assert!(cp.is_stage_review_target("expert-1"));
+        assert!(cp.is_stage_review_target("expert-2"));
+        assert!(!cp.is_stage_review_target("other-run"));
+
+        // 当 expert-1 产生结果被 remove 后，matches_stage_review_run 为 false，但 is_stage_review_target 仍为 true
+        cp.remove_stage_review_run("expert-1");
+        assert!(!cp.matches_stage_review_run("expert-1"));
+        assert!(cp.is_stage_review_target("expert-1"));
+
+        // 对质任务完成后记录历史，追问对质任务也识别为阶段审查目标
+        cp.record_stage_review_completed("rebuttal-1");
+        assert!(cp.is_stage_review_target("rebuttal-1"));
+    }
+
+    #[test]
+    fn test_confrontation_maintained_isolated_per_expert_and_safe_deduction() {
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-run-isolate".to_string(), &ctx);
+        cp.stage_review_blockers_open = 2;
+
+        let blocker_a = vec!["F1: 专家 A 的问题".to_string()];
+        let blocker_b = vec!["F2: 专家 B 的问题".to_string()];
+
+        // 专家 A 对质失败第 1 次
+        assert!(!cp.note_stage_review_confrontation_maintained_for(Some("expert-a"), blocker_a.clone(), 2));
+        assert_eq!(cp.stage_review_confrontation_failures, 1);
+        assert_eq!(cp.stage_review_confrontation_target.as_deref(), Some("expert-a"));
+
+        // 专家 B 对质失败第 1 次：隔离重置，不借用专家 A 的失败计数！
+        assert!(!cp.note_stage_review_confrontation_maintained_for(Some("expert-b"), blocker_b.clone(), 2));
+        assert_eq!(cp.stage_review_confrontation_failures, 1);
+        assert_eq!(cp.stage_review_confrontation_target.as_deref(), Some("expert-b"));
+
+        // 专家 B 对质失败第 2 次：达到阈值 2，触发专家 B 降级！
+        assert!(cp.note_stage_review_confrontation_maintained_for(Some("expert-b"), blocker_b.clone(), 2));
+        // 安全扣减：只扣减专家 B 降级的 1 条，总数 2 - 1 = 1，专家 A 的 blocker 绝不被清除！
+        assert_eq!(cp.stage_review_blockers_open, 1);
+        assert_eq!(cp.stage_review_final_only.len(), 1);
+        assert!(cp.stage_review_final_only[0].contains("专家 B"));
     }
 }
 
