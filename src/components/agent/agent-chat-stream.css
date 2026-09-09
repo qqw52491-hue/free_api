@@ -1481,6 +1481,11 @@ button.root-row {
     flex: 1 1 auto;
 }
 
+.running-preview-line.line-active-action .preview-text {
+    mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 100%);
+    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 100%);
+}
+
 .running-preview-line .preview-icon,
 .running-preview-line .preview-tool-icon {
     font-size: 13px;

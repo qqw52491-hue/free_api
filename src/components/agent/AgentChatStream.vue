@@ -191,9 +191,8 @@
                         <!-- 第 3 条数据：当前正在执行的动作 / 飞速流动的动态思考流 (带字体的流光动画 text-shimmer-flow) -->
                         <div class="running-preview-line line-active-action">
                             <span class="preview-spinner manus-spinner mini"></span>
-                            <span :key="getPlanRunningPreview(entry).line3.icon" class="preview-tool-icon icon-anim-switch">{{ getPlanRunningPreview(entry).line3.icon }}</span>
-                            <span :key="getPlanRunningPreview(entry).line3.text" class="preview-text text-shimmer-flow ticker-text-anim">{{ getPlanRunningPreview(entry).line3.text }}</span>
-                            <span v-if="getPlanRunningPreview(entry).line3.actionKind === 'think'" class="typing-cursor">_</span>
+                            <span :key="getPlanRunningPreview(entry).line3.actionKind" class="preview-tool-icon icon-anim-switch">{{ getPlanRunningPreview(entry).line3.icon }}</span>
+                            <span class="preview-text text-shimmer-flow">{{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? (smoothedThoughtText || getPlanRunningPreview(entry).line3.text) : getPlanRunningPreview(entry).line3.text }}</span>
                         </div>
                     </div>
 
@@ -455,13 +454,9 @@
                         <div class="running-preview-line line-active-action">
                             <span class="preview-spinner manus-spinner mini"></span>
                             <span class="preview-tool-icon icon-anim-switch">💭</span>
-                            <span
-                                :key="thought ? extractActiveThoughtSentence(thought) : 'initial'"
-                                class="preview-text text-shimmer-flow ticker-text-anim"
-                            >
-                                {{ thought ? (thought.trim().startsWith('思考') || thought.trim().startsWith('规划') ? extractActiveThoughtSentence(thought) : '思考: ' + extractActiveThoughtSentence(thought)) : '正在连接模型并深度思考规划执行步骤 …' }}
+                            <span class="preview-text text-shimmer-flow">
+                                {{ smoothedThoughtText }}
                             </span>
-                            <span v-if="isRunning" class="typing-cursor">_</span>
                         </div>
                     </div>
                 </article>
@@ -506,7 +501,7 @@
     </div>
 </template>
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, shallowReactive, watch } from "vue";
+import { computed, nextTick, onUnmounted, reactive, ref, shallowReactive, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AttachmentCard from "./AttachmentCard.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
@@ -704,6 +699,73 @@ const streamElement = ref<HTMLElement | null>(null);
 const activeThoughtStartedAt = ref<number | null>(null);
 const followLiveTail = ref(true);
 const planExpandedState = reactive<Record<string, boolean>>({});
+
+// 🌟 60FPS 游标流光推演放映器 (Continuous 60FPS Thought Stream Playback Engine)
+// 彻底根除高频流（700tok/s）下瞬间替换、闪现卡顿与毫无流动感的问题：
+// 1. 采用 streamCursor 连续物理游标，不依赖脆弱的前缀匹配
+// 2. 超高速涌入时自适应跨帧步长（每帧按比例追平），在固定 60FPS 下形成极速向前流淌的飞驰跑马灯感
+// 3. 彻底移除思考:与…等人造头尾，呈现纯粹思维流
+const smoothedThoughtText = ref("");
+let streamCursor = 0;
+let thoughtRafId: number | null = null;
+
+function renderSliceAtCursor(raw: string, cursor: number): string {
+    if (!raw) return "正在深入分析并规划下一步动作 …";
+    const slice = raw.slice(0, cursor);
+    return extractActiveThoughtSentence(slice, 120);
+}
+
+watch(
+    () => props.thought,
+    (newThought, oldThought) => {
+        if (!newThought) {
+            streamCursor = 0;
+            smoothedThoughtText.value = "正在深入分析并规划下一步动作 …";
+            if (thoughtRafId !== null) {
+                cancelAnimationFrame(thoughtRafId);
+                thoughtRafId = null;
+            }
+            return;
+        }
+
+        // 如果全新思考流启动，重置游标从头开始放映
+        if (!oldThought || (newThought.length < (oldThought?.length || 0))) {
+            streamCursor = Math.min(15, newThought.length);
+        }
+
+        if (thoughtRafId !== null) return;
+
+        function tick() {
+            const raw = props.thought;
+            const targetLen = raw.length;
+
+            if (streamCursor >= targetLen) {
+                smoothedThoughtText.value = renderSliceAtCursor(raw, targetLen);
+                thoughtRafId = null;
+                return;
+            }
+
+            const remaining = targetLen - streamCursor;
+            // 🌟 核心算法：自适应帧步进（不管多快，计算比例步长保证每帧都在向前流动）
+            // 慢速时每帧步进 1~2 字符；700tok/s 极速爆发时每帧步进 4~18 字符（极速掠过），保证在数帧内平滑追齐
+            const step = Math.min(remaining, Math.max(1, Math.ceil(remaining / 5)));
+            streamCursor += step;
+
+            smoothedThoughtText.value = renderSliceAtCursor(raw, streamCursor);
+            thoughtRafId = requestAnimationFrame(tick);
+        }
+
+        thoughtRafId = requestAnimationFrame(tick);
+    },
+    { immediate: true }
+);
+
+onUnmounted(() => {
+    if (thoughtRafId !== null) {
+        cancelAnimationFrame(thoughtRafId);
+        thoughtRafId = null;
+    }
+});
 
 // ── 🛠️ 步骤文件变更与计划摘要解析 ──
 /**

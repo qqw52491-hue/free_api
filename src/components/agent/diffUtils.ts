@@ -1127,55 +1127,44 @@ export function formatTokenCount(n?: number): string {
 /**
  * 从长思考内容中智能提取当前活跃的思考片段（末尾正在推演的核心句子），用于极速流光展示
  */
-export function extractActiveThoughtSentence(raw: string): string {
+export function extractActiveThoughtSentence(raw: string, maxLen = 110): string {
     if (!raw) return "正在深入分析并规划下一步动作 …";
-    // 1. 去除代码块、XML/HTML 标签、markdown 强调字符等
-    const stripped = raw
-        .replace(/```[\s\S]*?```/g, "")
-        .replace(/<[^>]+>/g, "")
-        .replace(/[#*`_>]/g, "")
+    // 1. 去除代码块、XML/HTML 标签、markdown 强调字符等，将换行与空白压缩为单空格
+    let stripped = raw
+        .replace(/```[\s\S]*?```/g, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/[#*`_>~]/g, "")
+        .replace(/\r?\n+/g, " ")
         .replace(/\s+/g, " ")
         .trim();
     if (!stripped) return "正在深入分析并规划下一步动作 …";
 
-    // 2. 句级拆分：同时支持中英文标点与换行
-    // 中文：。！？!?；; \n
-    // 英文：句号+空格 (. )、分号+空格 (; )
-    const sentences = stripped
-        .split(/(?<=[。！？!?；;\n]|\.\s+|;\s+)/)
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-    // 优先获取最新的活跃思考末梢（最后一句）
-    let candidate = "";
-    if (sentences.length >= 1) {
-        candidate = sentences[sentences.length - 1];
-        // 如果末尾句子太短（比如小于 4 个字符），往前拼合上一句
-        if (candidate.length < 4 && sentences.length >= 2) {
-            candidate = sentences[sentences.length - 2] + " " + candidate;
-        }
-    }
-    if (!candidate || candidate.length < 4) {
-        candidate = stripped;
-    }
-
-    // 3. 过滤纯英文开场样板套话（如 "Reframing Technical Documentation...", "Evaluating available tools..."）
-    // 若全文存在中文但末尾切出来是纯英文套话，优先截取末尾的中文有效段落
-    if (/^([A-Za-z\s,.:'-]+)$/.test(candidate) && /[\u4e00-\u9fa5]/.test(stripped)) {
-        const chineseChunks = stripped.match(/[\u4e00-\u9fa5][^\n。！？!?]{4,80}/g);
+    // 2. 若全文存在中文但末尾切出来是纯英文套话，优先截取末尾的中文有效思考段落
+    if (/[\u4e00-\u9fa5]/.test(stripped)) {
+        const chineseChunks = stripped.match(/[\u4e00-\u9fa5][^\n。！？!?]{6,120}/g);
         if (chineseChunks && chineseChunks.length > 0) {
-            candidate = chineseChunks[chineseChunks.length - 1].trim();
+            const lastChunk = chineseChunks[chineseChunks.length - 1].trim();
+            if (lastChunk.length >= 8) {
+                stripped = lastChunk;
+            }
         }
     }
 
-    // 4. 关键：单行字数限制与向左流动（动态 Ticker Tail Window）
-    // 🌟 绝不能 slice(0, maxLen)！那样会把文字死死钉在开头，导致流式 token 涌入时界面毫无变化！
-    // 必须保留末尾的活跃切片（超过 maxLen 则以 … 开头截取尾部），让最新涌入的思考单词/字符始终在右侧滚动流出！
-    const maxLen = 42;
-    if (candidate.length > maxLen) {
-        candidate = "…" + candidate.slice(-maxLen);
+    // 3. 动态 Ticker Tail Window：占满整行（默认 ~110 字符，铺满整行视觉宽度）
+    // 🌟 绝不能从头部截断！必须保留末尾的活跃推演切片，让最新涌入的思考字符始终在右侧流动涌出！
+    if (stripped.length <= maxLen) {
+        return stripped;
     }
-    return candidate;
+
+    // 取最后 maxLen 长度的活跃尾部
+    let tail = stripped.slice(-maxLen);
+    // 智能单词边界对齐：避免把英文单词硬生生切半（例如 "...ew, which could be" -> 往前找第一个空格）
+    const firstSpace = tail.indexOf(" ");
+    if (firstSpace > 0 && firstSpace <= 14) {
+        tail = tail.slice(firstSpace + 1);
+    }
+
+    return tail.trim();
 }
 
 /**
@@ -1407,8 +1396,7 @@ export function getRunningStagePreview(
 
     if (isThinking || (activeThought && (!hasLiveStep || (runningStep?.status === "running" && !runningStep.tool)))) {
         line3Icon = "💭";
-        const sentence = extractActiveThoughtSentence(activeThought);
-        line3Text = sentence.startsWith("思考") || sentence.startsWith("规划") ? sentence : `思考: ${sentence}`;
+        line3Text = extractActiveThoughtSentence(activeThought);
         line3Kind = "think";
     } else if (runningStep && (runningStep.status === "running" || runningStep.status === "pending")) {
         const tool = (runningStep.tool || runningStep.action || "").toLowerCase();
@@ -1456,7 +1444,7 @@ export function getRunningStagePreview(
             line3Kind = "other";
         } else if (runningStep.thought) {
             line3Icon = "💭";
-            line3Text = `思考: ${extractActiveThoughtSentence(runningStep.thought)}`;
+            line3Text = extractActiveThoughtSentence(runningStep.thought);
             line3Kind = "think";
         }
     } else if (isThinking) {
