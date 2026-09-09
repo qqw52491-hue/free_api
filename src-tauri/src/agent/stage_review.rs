@@ -459,16 +459,17 @@ pub async fn dispatch(
             .dispatch(Some(app.clone()), db, workspace, interrupt_rx.clone())
             .await?;
 
+        // ★ 立即注册：dispatch 成功后即刻写入 checkpoint，
+        //   防止后续循环 dispatch 失败时已派出的任务成为孤儿。
         dispatched_run_ids.push(child_run_id.clone());
+        checkpoint.stage_review_run_ids = dispatched_run_ids.clone();
+        checkpoint.stage_review_run_id = dispatched_run_ids.first().cloned();
 
         let _ = app.emit(
             &format!("agent-log-{}", session_id),
             format!("📋 阶段审查已派发 ({}) (挂载专家: {})", child_run_id, card.label),
         );
     }
-
-    checkpoint.stage_review_run_id = dispatched_run_ids.first().cloned();
-    checkpoint.stage_review_run_ids = dispatched_run_ids.clone();
     // 预算语义：整轮联合会审无论派发 1 位还是多位，仅计 1 轮
     checkpoint.stage_review_budget_used += 1;
     checkpoint.stage_review_shell_baseline = checkpoint.uncovered_shell_mutations;
