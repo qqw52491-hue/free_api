@@ -101,8 +101,10 @@ pub(crate) fn check_pre_write_gatekeeper(
     // final_only 不在此拦截，由收尾审查兜底。
     if checkpoint.stage_review_blockers_open > 0 {
         let stage_run_id = checkpoint
-            .stage_review_run_id
-            .clone()
+            .stage_review_run_ids
+            .first()
+            .cloned()
+            .or_else(|| checkpoint.stage_review_run_id.clone())
             .or_else(|| checkpoint.stage_review_rebuttal_run_id.clone())
             .unwrap_or_default();
         let final_only_summary = checkpoint.stage_review_final_only.join("\n");

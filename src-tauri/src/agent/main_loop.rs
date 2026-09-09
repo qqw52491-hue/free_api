@@ -812,7 +812,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 let git_available = crate::agent::child_writer::is_git_available(&workspace_dir).await;
                 for receipt in completed {
                     // 阶段审查结果走独立语义（不占用方案审查状态，基础设施失败不烧预算且视为未审）
-                    if Some(receipt.child_run_id.as_str()) == checkpoint.stage_review_run_id.as_deref()
+                    if checkpoint.matches_stage_review_run(&receipt.child_run_id)
                         || Some(receipt.child_run_id.as_str())
                             == checkpoint.stage_review_rebuttal_run_id.as_deref()
                     {

@@ -36,6 +36,9 @@ pub struct ModelRoutingConfig {
     /// 会话级阶段审查门禁覆盖："disabled"（直通免审）| 角色名（如 "frontend_ui_reviewer"）| 空串/缺省（跟随全局默认）
     #[serde(default)]
     pub stage_reviewer_override: Option<String>,
+    /// 阶段审查联合会审模式：true = 并发唤起匹配专家（至多 3 位）；false = 智能自适应单审（默认）
+    #[serde(default)]
+    pub stage_review_committee: bool,
     /// 本会话排除/休眠的角色卡标识列表（无需修改全局工坊，即可在当前会话动态启闭某专家）
     #[serde(default)]
     pub disabled_role_cards: Vec<String>,
@@ -56,6 +59,7 @@ impl Default for ModelRoutingConfig {
             routing_mode: String::new(),
             role_models: BTreeMap::new(),
             stage_reviewer_override: None,
+            stage_review_committee: false,
             disabled_role_cards: Vec::new(),
         }
     }

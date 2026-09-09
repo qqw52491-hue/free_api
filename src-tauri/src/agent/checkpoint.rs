@@ -566,6 +566,9 @@ pub struct AgentCheckpoint {
     /// 在途阶段审查任务的 child_run_id（含其 rebuttal 对质任务）
     #[serde(default)]
     pub stage_review_run_id: Option<String>,
+    /// 联合会审模式下在途阶段审查任务的 child_run_id 列表
+    #[serde(default)]
+    pub stage_review_run_ids: Vec<String>,
     #[serde(default)]
     pub stage_review_rebuttal_run_id: Option<String>,
     /// 覆盖基线：上次成功阶段审查时的副作用台账长度（之后的新增 = 未覆盖写入）
@@ -703,6 +706,7 @@ impl AgentCheckpoint {
             review_total_maintained: 0,
             stage_review_budget_used: 0,
             stage_review_run_id: None,
+            stage_review_run_ids: Vec::new(),
             stage_review_rebuttal_run_id: None,
             stage_review_baseline_side_effects: 0,
             stage_review_blockers_open: 0,
@@ -818,6 +822,34 @@ impl AgentCheckpoint {
         self.plan_reviewer_retry_count += 1;
         self.plan_reviewer_consumed = false;
         Ok(())
+    }
+
+    /// 判定是否存在在途的阶段审查任务（支持单审与联合会审）
+    pub fn has_in_flight_stage_review(&self) -> bool {
+        self.stage_review_run_id.is_some()
+            || !self.stage_review_run_ids.is_empty()
+            || self.stage_review_rebuttal_run_id.is_some()
+    }
+
+    /// 判定指定任务 ID 是否属于当前在途的阶段审查任务
+    pub fn matches_stage_review_run(&self, run_id: &str) -> bool {
+        self.stage_review_run_id.as_deref() == Some(run_id)
+            || self.stage_review_run_ids.iter().any(|r| r == run_id)
+    }
+
+    /// 移除已完成的阶段审查任务 ID；若列表中仍有其他任务则继续维持，否则清空
+    pub fn remove_stage_review_run(&mut self, run_id: &str) {
+        self.stage_review_run_ids.retain(|r| r != run_id);
+        if self.stage_review_run_id.as_deref() == Some(run_id) {
+            self.stage_review_run_id = self.stage_review_run_ids.first().cloned();
+        }
+    }
+
+    /// 清空全部阶段审查在途任务 ID
+    pub fn clear_stage_review_runs(&mut self) {
+        self.stage_review_run_id = None;
+        self.stage_review_run_ids.clear();
+        self.stage_review_rebuttal_run_id = None;
     }
 
     /// 审查者技术失败的审查轮次退款：超时/取消/中断/非法输出不是实质性审查，不应烧掉

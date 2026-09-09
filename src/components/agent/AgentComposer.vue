@@ -508,13 +508,15 @@
                                                     class="gate-current-status-tag"
                                                     :class="{
                                                         'status-disabled': isStageReviewerDisabled,
-                                                        'status-default': !isStageReviewerDisabled,
+                                                        'status-committee': !isStageReviewerDisabled && isCommitteeMode,
+                                                        'status-default': !isStageReviewerDisabled && !isCommitteeMode,
                                                     }"
                                                 >
                                                     <span v-if="isStageReviewerDisabled">⚡ 免审直通</span>
+                                                    <span v-else-if="isCommitteeMode">👥 联合会审 ({{ activeReviewerCards.length }})</span>
                                                     <span v-else-if="activeReviewerCards.length === 0">🌐 异构对抗兜底</span>
                                                     <span v-else-if="activeReviewerCards.length === 1">🎭 专属审查专家</span>
-                                                    <span v-else>🎯 领域自适应质检 ({{ activeReviewerCards.length }})</span>
+                                                    <span v-else>🎯 智能自适应 ({{ activeReviewerCards.length }})</span>
                                                 </div>
                                             </div>
 
@@ -523,13 +525,24 @@
                                                     <button
                                                         type="button"
                                                         class="gate-mode-pill-btn"
-                                                        :class="{ active: !isStageReviewerDisabled }"
-                                                        title="智能阶段门禁：有质检专家时自动挂载，无专家时自动由系统异构模型交叉把关"
+                                                        :class="{ active: !isStageReviewerDisabled && !isCommitteeMode }"
+                                                        title="智能自适应（单审）：根据变更文件类型（前端/后端）自动挑选 1 位最匹配的专家审查"
                                                         :disabled="isRunning"
-                                                        @click="selectStageReviewer('')"
+                                                        @click="setGateMode('adaptive')"
                                                     >
-                                                        <span class="btn-icon">🛡️</span>
-                                                        <span>智能门禁</span>
+                                                        <span class="btn-icon">🎯</span>
+                                                        <span>智能自适应</span>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        class="gate-mode-pill-btn btn-committee"
+                                                        :class="{ active: !isStageReviewerDisabled && isCommitteeMode }"
+                                                        title="联合会审（多审并发）：全栈变更时并发唤起匹配专家（至多 3 位）各司其职，联合会审"
+                                                        :disabled="isRunning"
+                                                        @click="setGateMode('committee')"
+                                                    >
+                                                        <span class="btn-icon">👥</span>
+                                                        <span>联合会审</span>
                                                     </button>
                                                     <button
                                                         type="button"
@@ -537,16 +550,19 @@
                                                         :class="{ active: isStageReviewerDisabled }"
                                                         title="免审直通：跳过阶段审查，代码写入后直接推进，0 耗时 0 阻拦（适合轻量原型或文档）"
                                                         :disabled="isRunning"
-                                                        @click="selectStageReviewer('disabled')"
+                                                        @click="setGateMode('disabled')"
                                                     >
                                                         <span class="btn-icon">⚡</span>
                                                         <span>免审直通</span>
                                                     </button>
                                                 </div>
 
-                                                <!-- 动态策略说明条（精确契合 3+1 种状态） -->
+                                                <!-- 动态策略说明条 -->
                                                 <div v-if="isStageReviewerDisabled" class="gate-policy-banner disabled">
                                                     ⚡ <strong>免审直通已生效</strong>：代码写入后跳过阶段审查直接推进（适合轻量原型或文档）。
+                                                </div>
+                                                <div v-else-if="isCommitteeMode" class="gate-policy-banner committee">
+                                                    👥 <strong>联合会审模式已开启</strong>：阶段推进时并发唤起匹配专家（至多 3 位）独立质检、一票否决汇总，仅计 1 轮审查预算。
                                                 </div>
                                                 <div v-else-if="activeReviewerCards.length === 0" class="gate-policy-banner default">
                                                     🌐 <strong>异构对抗兜底生效中（跨模型家族严审）</strong>：未启用质检专家时，由系统跨模型家族严格交叉把关。
@@ -555,7 +571,7 @@
                                                     🎭 <strong>审查专家已挂载</strong>：「{{ activeReviewerCards[0].label || activeReviewerCards[0].name }}」{{ activeReviewerCards[0].model_id ? `（锁定 ${getCardModelName(activeReviewerCards[0].model_id)}）` : '（跟随工位算力）' }}：阶段推进时负责把关。
                                                 </div>
                                                 <div v-else class="gate-policy-banner adaptive">
-                                                    🎯 <strong>领域自适应质检就绪</strong>：已启用 {{ activeReviewerCards.length }} 位审查专家，阶段推进时按改动代码类型自适应派发。
+                                                    🎯 <strong>智能自适应质检就绪</strong>：已启用 {{ activeReviewerCards.length }} 位审查专家，阶段推进时按改动代码类型自动挑选 1 位把关。
                                                 </div>
                                             </div>
                                         </div>
@@ -1648,12 +1664,21 @@ const isStageReviewerDisabled = computed(() => {
     return clean === "disabled" || clean === "none";
 });
 
+const isCommitteeMode = computed(() => {
+    return props.modelRouting?.stage_review_committee === true;
+});
+
 const activeReviewerCards = computed(() => {
     return reviewerRoleCards.value.filter((c) => !isCardHibernatedForSlot(c.name, "reviewer"));
 });
 
 const stageReviewerBadgeText = computed(() => {
     if (isStageReviewerDisabled.value) return "⚡免审";
+    if (isCommitteeMode.value) {
+        return activeReviewerCards.value.length > 0
+            ? `👥会审(${activeReviewerCards.value.length})`
+            : "👥会审";
+    }
     if (activeReviewerCards.value.length === 0) return "🌐异构";
     if (activeReviewerCards.value.length === 1) {
         const c = activeReviewerCards.value[0];
@@ -1667,6 +1692,8 @@ const modelChipTooltip = computed(() => {
     let title = `配置模型路由与专家小队 (当前规划: ${currentModelName.value})`;
     if (isStageReviewerDisabled.value) {
         title += " | ⚡ 阶段门禁: 免审直通";
+    } else if (isCommitteeMode.value) {
+        title += ` | 👥 阶段门禁: 联合会审(${activeReviewerCards.value.length}位专家并发)`;
     } else if (activeReviewerCards.value.length === 0) {
         title += " | 🌐 阶段门禁: 系统异构对抗兜底";
     } else if (activeReviewerCards.value.length === 1) {
@@ -1677,11 +1704,26 @@ const modelChipTooltip = computed(() => {
     return title;
 });
 
-function selectStageReviewer(name: string) {
-    emit("update:model-routing", {
-        ...props.modelRouting,
-        stage_reviewer_override: name ? name : undefined,
-    });
+function setGateMode(mode: "adaptive" | "committee" | "disabled") {
+    if (mode === "disabled") {
+        emit("update:model-routing", {
+            ...props.modelRouting,
+            stage_reviewer_override: "disabled",
+            stage_review_committee: false,
+        });
+    } else if (mode === "committee") {
+        emit("update:model-routing", {
+            ...props.modelRouting,
+            stage_reviewer_override: undefined,
+            stage_review_committee: true,
+        });
+    } else {
+        emit("update:model-routing", {
+            ...props.modelRouting,
+            stage_reviewer_override: undefined,
+            stage_review_committee: false,
+        });
+    }
 }
 
 const budgetModes = CONTEXT_BUDGET_MODES;

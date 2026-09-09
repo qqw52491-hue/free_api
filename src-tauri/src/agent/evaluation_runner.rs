@@ -829,6 +829,7 @@ mod tests {
             routing_mode: String::new(),
             role_models: Default::default(),
             stage_reviewer_override: None,
+            stage_review_committee: false,
             disabled_role_cards: Default::default(),
         };
 

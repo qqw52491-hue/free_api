@@ -75,8 +75,7 @@ pub fn should_fire(
         return None;
     }
     // 已有在途审查或尚有未解决的拦截时，不重复派发（等消费或对质收敛）
-    if checkpoint.stage_review_run_id.is_some() || checkpoint.stage_review_rebuttal_run_id.is_some()
-    {
+    if checkpoint.has_in_flight_stage_review() {
         return None;
     }
     if checkpoint.stage_review_blockers_open > 0 {
@@ -134,15 +133,21 @@ pub fn should_fire(
 }
 
 /// 自动自适应优选审查专家：
-/// 1. 若当前启用的审查专家只有 1 位，自动挂载该专家；
-/// 2. 若有多位，根据当前阶段改动的文件类型（前端 vs 后端）匹配对应专家；
-/// 3. 若无审查专家，返回 None 走系统默认的跨家族异构对抗模型兜底。
-fn resolve_adaptive_reviewer_card(
+/// 1. 若为单审模式（is_committee = false）：
+///    - 若启用的审查专家只有 1 位，自动挂载该专家；
+///    - 若有多位，根据改动文件类型（前端 vs 后端）匹配对应 1 位专家；
+///    - 若无审查专家，返回空 Vec 走系统默认异构对抗模型兜底。
+/// 2. 若为联合会审模式（is_committee = true）：
+///    - 根据改动文件类型挑选匹配专家并发派发，硬性上限 3 位（防 Token 爆炸）。
+fn resolve_adaptive_reviewer_cards(
     db: &DbState,
     context: &SandwichContext,
     disabled_cards: &[String],
-) -> Option<crate::agent::tools::role_manager::RoleCard> {
-    let cards = crate::agent::tools::role_manager::list_cards(db, false).ok()?;
+    is_committee: bool,
+) -> Vec<crate::agent::tools::role_manager::RoleCard> {
+    let Ok(cards) = crate::agent::tools::role_manager::list_cards(db, false) else {
+        return Vec::new();
+    };
     let active_reviewers: Vec<crate::agent::tools::role_manager::RoleCard> = cards
         .into_iter()
         .filter(|c| {
@@ -153,13 +158,9 @@ fn resolve_adaptive_reviewer_card(
         .collect();
 
     if active_reviewers.is_empty() {
-        return None;
-    }
-    if active_reviewers.len() == 1 {
-        return Some(active_reviewers.into_iter().next().unwrap());
+        return Vec::new();
     }
 
-    // 存在多位审查专家时：根据最近改动的文件类型做领域自适应匹配
     let all_paths: Vec<String> = context
         .side_effects
         .iter()
@@ -189,36 +190,96 @@ fn resolve_adaptive_reviewer_card(
             || l.ends_with(".java")
     });
 
-    if has_frontend && !has_backend {
-        if let Some(c) = active_reviewers.iter().find(|c| {
-            let s = format!("{} {} {}", c.name, c.label, c.scope_hints).to_ascii_lowercase();
-            s.contains("前端")
-                || s.contains("frontend")
-                || s.contains("ui")
-                || s.contains("vue")
-                || s.contains("react")
-        }) {
-            return Some(c.clone());
+    let is_fe_card = |c: &crate::agent::tools::role_manager::RoleCard| {
+        let s = format!("{} {} {}", c.name, c.label, c.scope_hints).to_ascii_lowercase();
+        s.contains("前端")
+            || s.contains("frontend")
+            || s.contains("ui")
+            || s.contains("vue")
+            || s.contains("react")
+    };
+    let is_be_card = |c: &crate::agent::tools::role_manager::RoleCard| {
+        let s = format!("{} {} {}", c.name, c.label, c.scope_hints).to_ascii_lowercase();
+        s.contains("后端")
+            || s.contains("backend")
+            || s.contains("安全")
+            || s.contains("security")
+            || s.contains("api")
+    };
+
+    if !is_committee {
+        if active_reviewers.len() == 1 {
+            return vec![active_reviewers.into_iter().next().unwrap()];
         }
-    } else if has_backend && !has_frontend {
-        if let Some(c) = active_reviewers.iter().find(|c| {
-            let s = format!("{} {} {}", c.name, c.label, c.scope_hints).to_ascii_lowercase();
-            s.contains("后端")
-                || s.contains("backend")
-                || s.contains("安全")
-                || s.contains("security")
-                || s.contains("api")
-        }) {
-            return Some(c.clone());
+        if has_frontend && !has_backend {
+            if let Some(c) = active_reviewers.iter().find(|c| is_fe_card(c)) {
+                return vec![c.clone()];
+            }
+        } else if has_backend && !has_frontend {
+            if let Some(c) = active_reviewers.iter().find(|c| is_be_card(c)) {
+                return vec![c.clone()];
+            }
+        }
+        return vec![active_reviewers.into_iter().next().unwrap()];
+    }
+
+    // 联合会审（committee）多审模式：上限 3 位
+    if active_reviewers.len() <= 3 {
+        let mut sorted = active_reviewers;
+        sorted.sort_by_key(|c| {
+            let fe = is_fe_card(c);
+            let be = is_be_card(c);
+            if has_frontend && fe {
+                0
+            } else if has_backend && be {
+                0
+            } else if fe || be {
+                1
+            } else {
+                2
+            }
+        });
+        return sorted;
+    }
+
+    // 活跃专家 > 3 位时：优先挑选契合领域的专家（至多 3 位）
+    let mut selected: Vec<crate::agent::tools::role_manager::RoleCard> = Vec::new();
+
+    if has_frontend {
+        for c in active_reviewers.iter().filter(|c| is_fe_card(c)) {
+            if !selected.iter().any(|s| s.name == c.name) {
+                selected.push(c.clone());
+                if selected.len() >= 2 {
+                    break;
+                }
+            }
+        }
+    }
+    if has_backend {
+        for c in active_reviewers.iter().filter(|c| is_be_card(c)) {
+            if !selected.iter().any(|s| s.name == c.name) {
+                selected.push(c.clone());
+                if selected.len() >= 3 {
+                    break;
+                }
+            }
         }
     }
 
-    // 默认回退第一位启用的审查专家卡
-    active_reviewers.into_iter().next()
+    for c in active_reviewers.into_iter() {
+        if selected.len() >= 3 {
+            break;
+        }
+        if !selected.iter().any(|s| s.name == c.name) {
+            selected.push(c);
+        }
+    }
+
+    selected
 }
 
 /// 派发一次阶段审查。证据包由宿主组装（任务目标 + 阶段计划 + 当前累计 diff），
-/// reviewer 走自适应专家挂载或跨家族异构模型优选。
+/// reviewer 走自适应专家挂载或跨家族异构模型优选。在联合会审模式下，并发唤起多位专家。
 pub async fn dispatch(
     app: &AppHandle,
     db: &DbState,
@@ -232,106 +293,160 @@ pub async fn dispatch(
     interrupt_rx: watch::Receiver<u64>,
 ) -> Result<(), String> {
     // 1. 检查会话级是否有指定的审查官角色卡，未硬性指定时自适应从启用专家中匹配
-    let role_card = if let Some(ref ovr) = model_routing.stage_reviewer_override {
+    let (is_explicit_override, explicit_card) = if let Some(ref ovr) = model_routing.stage_reviewer_override {
         let clean = ovr.trim();
         if clean.eq_ignore_ascii_case("disabled") || clean.eq_ignore_ascii_case("none") {
-            None
+            return Ok(());
         } else if !clean.is_empty()
             && !clean.eq_ignore_ascii_case("default")
             && !clean.eq_ignore_ascii_case("follow_global")
             && !clean.eq_ignore_ascii_case("auto")
         {
             if crate::agent::tools::role_manager::is_card_disabled_for(&model_routing.disabled_role_cards, clean, "reviewer") {
-                resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards)
+                (false, None)
             } else {
                 match crate::agent::tools::role_manager::resolve_enabled_card(db, clean) {
-                    Ok(Some(card)) if card.allows_kind("reviewer") => Some(card),
-                    _ => resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards),
+                    Ok(Some(card)) if card.allows_kind("reviewer") => (true, Some(card)),
+                    _ => (false, None),
                 }
             }
         } else {
-            resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards)
+            (false, None)
         }
     } else {
-        resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards)
+        (false, None)
     };
 
-    // 2. 确定所用模型与跨家族优选
+    // 会话级硬性指定单张卡片时：指定单人优先，committee 自动失效
+    let role_cards = if is_explicit_override {
+        explicit_card.into_iter().collect()
+    } else {
+        resolve_adaptive_reviewer_cards(
+            db,
+            context,
+            &model_routing.disabled_role_cards,
+            model_routing.stage_review_committee,
+        )
+    };
+
     let routing = AgentRouter::route_for_role(
         context,
         model_routing,
         step_id,
         router::roles::REVIEWER,
     );
-    let (model_to_use, cross_family_note) = {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let has_explicit_reviewer_slot = model_routing
-            .role_models
-            .get(router::roles::REVIEWER)
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false);
 
-        if let Some(ref card) = role_card {
-            if !card.model_id.is_empty() {
-                (card.model_id.clone(), None)
-            } else if has_explicit_reviewer_slot {
+    // 新一轮阶段审查重置拦截状态与记账
+    checkpoint.stage_review_blockers_open = 0;
+    checkpoint.stage_review_final_only.clear();
+
+    if role_cards.is_empty() {
+        // 无挂载专家卡：走系统默认的跨家族异构对抗模型兜底
+        let (model_to_use, cross_family_note) = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let has_explicit_reviewer_slot = model_routing
+                .role_models
+                .get(router::roles::REVIEWER)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+
+            if has_explicit_reviewer_slot {
                 (routing.model_id.clone(), None)
             } else {
                 router::prefer_cross_family_reviewer(&conn, &routing.model_id)
             }
-        } else if has_explicit_reviewer_slot {
-            (routing.model_id.clone(), None)
-        } else {
-            router::prefer_cross_family_reviewer(&conn, &routing.model_id)
-        }
-    };
+        };
 
-    // 3. 收集关注材料与组装证据包（严格在 6000 字符预算内）
-    let focus_context = if let Some(ref card) = role_card {
-        let domains = card.parse_focus_domains();
-        if !domains.is_empty() {
-            crate::agent::context_collector::assemble_focus_context(
-                &domains,
-                workspace,
-                None,
-                None,
-            )
-            .await
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+        let evidence = build_stage_evidence(context, workspace, None);
+        let question = "阶段级写入审查：审查当前阶段变更是否满足阶段目标且无 blocking 缺陷".to_string();
+        let params = json!({
+            "question": question,
+            "evidence_excerpt": evidence,
+        });
 
-    let evidence = build_stage_evidence(context, workspace, focus_context.as_deref());
+        let envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
+            parent_run_id,
+            session_id,
+            &model_to_use,
+            params,
+        )
+        .with_task_id(format!("stage_review_{}", checkpoint.step_id))
+        .with_tier(&routing.tier.to_string())
+        .with_effort(model_routing.reasoning_effort_for(&routing.tier));
 
-    // 4. 组装派发参数与信封
-    let question = if let Some(ref card) = role_card {
-        format!(
+        let child_run_id = envelope
+            .dispatch(Some(app.clone()), db, workspace, interrupt_rx)
+            .await?;
+
+        checkpoint.stage_review_run_id = Some(child_run_id.clone());
+        checkpoint.stage_review_run_ids = vec![child_run_id.clone()];
+        checkpoint.stage_review_budget_used += 1;
+        checkpoint.stage_review_shell_baseline = checkpoint.uncovered_shell_mutations;
+        checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
+
+        let note_text = cross_family_note.map(|n| format!(":{}", n)).unwrap_or_default();
+        let _ = app.emit(
+            &format!("agent-log-{}", session_id),
+            format!("📋 阶段审查已派发 ({}){}", child_run_id, note_text),
+        );
+        return Ok(());
+    }
+
+    // 挂载专家审查（单审或多专家联合会审并发派发）
+    let mut dispatched_run_ids = Vec::new();
+    for card in &role_cards {
+        let model_to_use = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let has_explicit_reviewer_slot = model_routing
+                .role_models
+                .get(router::roles::REVIEWER)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+
+            if !card.model_id.is_empty() {
+                card.model_id.clone()
+            } else if has_explicit_reviewer_slot {
+                routing.model_id.clone()
+            } else {
+                router::prefer_cross_family_reviewer(&conn, &routing.model_id).0
+            }
+        };
+
+        let focus_context = {
+            let domains = card.parse_focus_domains();
+            if !domains.is_empty() {
+                crate::agent::context_collector::assemble_focus_context(
+                    &domains,
+                    workspace,
+                    None,
+                    None,
+                )
+                .await
+            } else {
+                None
+            }
+        };
+
+        let evidence = build_stage_evidence(context, workspace, focus_context.as_deref());
+        let question = format!(
             "阶段级写入审查（专家角色：{}）：审查当前阶段变更是否满足阶段目标、无 blocking 缺陷并符合角色规范",
             card.label
+        );
+        let params = json!({
+            "question": question,
+            "evidence_excerpt": evidence,
+        });
+
+        let mut envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
+            parent_run_id,
+            session_id,
+            &model_to_use,
+            params,
         )
-    } else {
-        "阶段级写入审查：审查当前阶段变更是否满足阶段目标且无 blocking 缺陷".to_string()
-    };
+        .with_task_id(format!("stage_review_{}_{}", checkpoint.step_id, card.name))
+        .with_tier(&routing.tier.to_string())
+        .with_effort(model_routing.reasoning_effort_for(&routing.tier));
 
-    let params = json!({
-        "question": question,
-        "evidence_excerpt": evidence,
-    });
-
-    let mut envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
-        parent_run_id,
-        session_id,
-        &model_to_use,
-        params,
-    )
-    .with_task_id(format!("stage_review_{}", checkpoint.step_id))
-    .with_tier(&routing.tier.to_string())
-    .with_effort(model_routing.reasoning_effort_for(&routing.tier));
-
-    if let Some(ref card) = role_card {
         let persona = crate::agent::tools::role_manager::persona_block(card);
         if !persona.is_empty() {
             envelope = envelope.with_persona(persona);
@@ -339,30 +454,33 @@ pub async fn dispatch(
         if let Some(schema) = card.parse_custom_schema() {
             envelope = envelope.with_custom_schema(schema);
         }
+
+        let child_run_id = envelope
+            .dispatch(Some(app.clone()), db, workspace, interrupt_rx.clone())
+            .await?;
+
+        dispatched_run_ids.push(child_run_id.clone());
+
+        let _ = app.emit(
+            &format!("agent-log-{}", session_id),
+            format!("📋 阶段审查已派发 ({}) (挂载专家: {})", child_run_id, card.label),
+        );
     }
 
-    let child_run_id = envelope
-        .dispatch(Some(app.clone()), db, workspace, interrupt_rx)
-        .await?;
-
-    checkpoint.stage_review_run_id = Some(child_run_id.clone());
+    checkpoint.stage_review_run_id = dispatched_run_ids.first().cloned();
+    checkpoint.stage_review_run_ids = dispatched_run_ids.clone();
+    // 预算语义：整轮联合会审无论派发 1 位还是多位，仅计 1 轮
     checkpoint.stage_review_budget_used += 1;
-    // shell 变更基线同样在派发时记录（覆盖语义与 baseline_side_effects 一致）
     checkpoint.stage_review_shell_baseline = checkpoint.uncovered_shell_mutations;
-    // 覆盖基线在【派发时】记录：reviewer 证据包取的是此刻的 diff，此后发生的写入
-    // 不在本轮审查范围内，必须留在基线之外让下一次触发兜住（防覆盖记账竞态）。
     checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
 
-    let role_note = if let Some(ref card) = role_card {
-        format!(" (挂载专家: {})", card.label)
-    } else {
-        String::new()
-    };
-    let note_text = cross_family_note.map(|n| format!(":{}", n)).unwrap_or_default();
-    let _ = app.emit(
-        &format!("agent-log-{}", session_id),
-        format!("📋 阶段审查已派发 ({}){}{}", child_run_id, note_text, role_note),
-    );
+    if dispatched_run_ids.len() > 1 {
+        let _ = app.emit(
+            &format!("agent-log-{}", session_id),
+            format!("👥 联合会审已启动：共唤起 {} 位审查专家并发把关", dispatched_run_ids.len()),
+        );
+    }
+
     Ok(())
 }
 
@@ -447,14 +565,18 @@ pub fn apply_stage_receipt(
 ) -> String {
     let was_rebuttal = checkpoint.stage_review_rebuttal_run_id.as_deref()
         == Some(receipt.child_run_id.as_str());
-    checkpoint.stage_review_run_id = None;
-    checkpoint.stage_review_rebuttal_run_id = None;
+    checkpoint.remove_stage_review_run(&receipt.child_run_id);
+    if was_rebuttal {
+        checkpoint.stage_review_rebuttal_run_id = None;
+    }
 
     // 基础设施失败：退还阶段审查次数、基线不清零（该阶段视为「未审」，会重新触发）
     if receipt.is_infra_failure() {
-        if checkpoint.reviewer_budget_refunds < 3 && checkpoint.stage_review_budget_used > 0 {
-            checkpoint.stage_review_budget_used -= 1;
-            checkpoint.reviewer_budget_refunds += 1;
+        if !checkpoint.has_in_flight_stage_review() {
+            if checkpoint.reviewer_budget_refunds < 3 && checkpoint.stage_review_budget_used > 0 {
+                checkpoint.stage_review_budget_used -= 1;
+                checkpoint.reviewer_budget_refunds += 1;
+            }
         }
         return "⚠️ 阶段审查任务未正常完成（阶段审查次数已退还）。该阶段视为未审，累计写入达到阈值后将自动重审。".to_string();
     }
@@ -462,20 +584,50 @@ pub fn apply_stage_receipt(
     // 基线已在派发时记录（见 dispatch）；此处不得用当前台账长度覆盖，
     // 否则派发后、消费前的写入会被错误标记为已覆盖。派发后的新写入计入
     // writes_since，由下一次触发（todo 推进/文件数阈值）安排复检。
-    checkpoint.stage_review_blockers_open = receipt.stage_blocking_open();
+    let new_blockers = receipt.stage_blocking_open();
+    if was_rebuttal {
+        let (_, stats_withdrawn, _) = receipt.objection_stats();
+        let payload_withdrawn = receipt.as_reviewer_delivery().map(|d| {
+            let direct_withdrawn = d.withdrawn_findings.len() as u32;
+            let verdict_withdrawn = d.objection_verdicts.iter().filter(|v| {
+                v.verdict.eq_ignore_ascii_case("withdraw") || v.verdict.eq_ignore_ascii_case("withdrawn")
+            }).count() as u32;
+            direct_withdrawn.max(verdict_withdrawn)
+        }).unwrap_or(0);
+        let withdrawn = stats_withdrawn.max(payload_withdrawn);
+        checkpoint.stage_review_blockers_open = checkpoint
+            .stage_review_blockers_open
+            .saturating_sub(withdrawn);
+    } else {
+        checkpoint.stage_review_blockers_open += new_blockers;
+    }
+
     // 僵尸 blocker 治理：记录出生阶段索引（无 blocker 时清空，避免陈旧索引干扰）
     if checkpoint.stage_review_blockers_open > 0 {
         checkpoint.stage_review_blocker_stage = oracle_index;
-    } else {
+    } else if !checkpoint.has_in_flight_stage_review() {
         checkpoint.stage_review_blocker_stage = None;
     }
-    checkpoint.stage_review_final_only = receipt.stage_final_only_lines();
+
+    let receipt_final_only = receipt.stage_final_only_lines();
+    checkpoint.stage_review_final_only.extend(receipt_final_only);
+    checkpoint.stage_review_final_only.sort();
+    checkpoint.stage_review_final_only.dedup();
 
     let (added, withdrawn, maintained) = receipt.objection_stats();
     checkpoint.review_total_withdrawn += withdrawn;
     checkpoint.review_total_maintained += maintained;
+
+    let in_flight_remaining = checkpoint.stage_review_run_ids.len();
+    let committee_suffix = if in_flight_remaining > 0 {
+        format!("（联合会审仍在途，剩余 {} 位专家）", in_flight_remaining)
+    } else {
+        String::new()
+    };
+
     let mut text = format!(
-        "📊 阶段审查完成: blocking_regardless 未解决 {} 条 / final_only 记账 {} 条；异议动态: 新增 {} / 撤回 {} / 维持 {}；成本: 输入 {} / 输出 {} tokens, 耗时 {}ms。",
+        "📊 阶段审查完成: 本次 blocking {} 条 / 累计 blocking_regardless 未解决 {} 条 / final_only 记账 {} 条；异议动态: 新增 {} / 撤回 {} / 维持 {}；成本: 输入 {} / 输出 {} tokens, 耗时 {}ms。{}",
+        new_blockers,
         checkpoint.stage_review_blockers_open,
         checkpoint.stage_review_final_only.len(),
         added,
@@ -483,7 +635,8 @@ pub fn apply_stage_receipt(
         maintained,
         receipt.prompt_tokens,
         receipt.completion_tokens,
-        receipt.duration_ms
+        receipt.duration_ms,
+        committee_suffix
     );
     if was_rebuttal {
         text.push_str("（对质复检结论）");
@@ -832,5 +985,102 @@ mod tests {
         let note = apply_stage_receipt(&mut cp, &receipt, &context, None);
         assert_eq!(cp.stage_review_budget_used, 0);
         assert!(note.contains("阶段审查任务未正常完成"));
+    }
+
+    #[test]
+    fn apply_stage_receipt_committee_accumulates_blockers_and_merges_final_only() {
+        use crate::agent::protocol::DeliveryReceipt;
+        let mut context = SandwichContext::new("system".to_string(), "goal".to_string());
+        context.record_side_effect(1, "write_file".to_string(), "app.vue".to_string());
+        context.record_side_effect(2, "write_file".to_string(), "lib.rs".to_string());
+        let mut cp = approved_checkpoint();
+        cp.stage_review_run_ids = vec!["rev-fe".to_string(), "rev-be".to_string()];
+        cp.stage_review_run_id = Some("rev-fe".to_string());
+        cp.stage_review_budget_used = 1;
+
+        // 专家 1（前端）：发现 1 个 blocking，1 个 final_only
+        let receipt1 = DeliveryReceipt {
+            child_run_id: "rev-fe".to_string(),
+            task_id: "stage_review_1_fe".to_string(),
+            attempt_id: 1,
+            kind: "review".to_string(),
+            status: "succeeded".to_string(),
+            duration_ms: 1200,
+            completion_tokens: 150,
+            prompt_tokens: 450,
+            error_kind: None,
+            payload: Some(serde_json::json!({
+                "confidence": "confirmed",
+                "findings": [
+                    { "id": "FE-1", "severity": "blocking", "finality": "regardless", "why": "前端状态泄露" },
+                    { "id": "FE-2", "severity": "blocking", "finality": "final_only", "why": "缺少可访问性 aria-label" }
+                ],
+                "withdrawn_findings": []
+            })),
+            raw_text: None,
+        };
+        let note1 = apply_stage_receipt(&mut cp, &receipt1, &context, None);
+        assert_eq!(cp.stage_review_blockers_open, 1, "前端专家产出 1 个 blocking");
+        assert_eq!(cp.stage_review_final_only.len(), 1);
+        assert_eq!(cp.stage_review_run_ids, vec!["rev-be".to_string()]);
+        assert_eq!(cp.stage_review_run_id, Some("rev-be".to_string()));
+        assert!(note1.contains("联合会审仍在途，剩余 1 位专家"));
+
+        // 专家 2（后端）：发现 2 个 blocking，1 个 final_only
+        let receipt2 = DeliveryReceipt {
+            child_run_id: "rev-be".to_string(),
+            task_id: "stage_review_1_be".to_string(),
+            attempt_id: 1,
+            kind: "review".to_string(),
+            status: "succeeded".to_string(),
+            duration_ms: 1500,
+            completion_tokens: 200,
+            prompt_tokens: 500,
+            error_kind: None,
+            payload: Some(serde_json::json!({
+                "confidence": "confirmed",
+                "findings": [
+                    { "id": "BE-1", "severity": "blocking", "finality": "regardless", "why": "SQL 注入隐患" },
+                    { "id": "BE-2", "severity": "blocking", "finality": "regardless", "why": "并发死锁隐患" },
+                    { "id": "BE-3", "severity": "blocking", "finality": "final_only", "why": "缺少索引日志" }
+                ],
+                "withdrawn_findings": []
+            })),
+            raw_text: None,
+        };
+        let note2 = apply_stage_receipt(&mut cp, &receipt2, &context, None);
+        assert_eq!(cp.stage_review_blockers_open, 3, "联合会审累计 1 + 2 = 3 个 blocking");
+        assert_eq!(cp.stage_review_final_only.len(), 2, "final_only 汇总 2 条");
+        assert!(cp.stage_review_run_ids.is_empty(), "所有专家均已交付");
+        assert!(cp.stage_review_run_id.is_none());
+        assert!(!note2.contains("仍在途"));
+
+        // 对质撤回测试：针对 BE-1 进行对质并撤回，blocking 减 1
+        cp.stage_review_rebuttal_run_id = Some("reb-be".to_string());
+        let rebuttal_receipt = DeliveryReceipt {
+            child_run_id: "reb-be".to_string(),
+            task_id: "stage_rebuttal_1".to_string(),
+            attempt_id: 1,
+            kind: "review".to_string(),
+            status: "succeeded".to_string(),
+            duration_ms: 800,
+            completion_tokens: 80,
+            prompt_tokens: 300,
+            error_kind: None,
+            payload: Some(serde_json::json!({
+                "confidence": "confirmed",
+                "findings": [
+                    { "id": "BE-2", "severity": "blocking", "finality": "regardless", "why": "并发死锁隐患" }
+                ],
+                "withdrawn_findings": ["BE-1"],
+                "objection_verdicts": [
+                    { "finding_id": "BE-1", "verdict": "withdraw", "reason": "父 Agent 提供的参数化查询证据充分" }
+                ]
+            })),
+            raw_text: None,
+        };
+        let reb_note = apply_stage_receipt(&mut cp, &rebuttal_receipt, &context, None);
+        assert_eq!(cp.stage_review_blockers_open, 2, "撤回 1 条后 blocking 降为 2");
+        assert!(reb_note.contains("对质复检结论"));
     }
 }

@@ -1030,7 +1030,7 @@ pub async fn run_tool_phase(
                     // 阶段审查任务走独立语义：不置 plan consumed、基础设施失败退还阶段次数
                     let is_rebuttal_result = Some(job.job_id.as_str())
                         == checkpoint.stage_review_rebuttal_run_id.as_deref();
-                    if Some(job.job_id.as_str()) == checkpoint.stage_review_run_id.as_deref()
+                    if checkpoint.matches_stage_review_run(&job.job_id)
                         || is_rebuttal_result
                     {
                         let value = serde_json::from_str::<serde_json::Value>(&job.result_json)
@@ -1040,11 +1040,15 @@ pub async fn run_tool_phase(
                             error_kind.as_deref(),
                             Some("timed_out") | Some("interrupted") | Some("cancelled")
                         ) {
-                            checkpoint.stage_review_run_id = None;
-                            checkpoint.stage_review_rebuttal_run_id = None;
-                            if checkpoint.reviewer_budget_refunds < 3 && checkpoint.stage_review_budget_used > 0 {
-                                checkpoint.stage_review_budget_used -= 1;
-                                checkpoint.reviewer_budget_refunds += 1;
+                            checkpoint.remove_stage_review_run(&job.job_id);
+                            if is_rebuttal_result {
+                                checkpoint.stage_review_rebuttal_run_id = None;
+                            }
+                            if !checkpoint.has_in_flight_stage_review() {
+                                if checkpoint.reviewer_budget_refunds < 3 && checkpoint.stage_review_budget_used > 0 {
+                                    checkpoint.stage_review_budget_used -= 1;
+                                    checkpoint.reviewer_budget_refunds += 1;
+                                }
                             }
                             stage_notes.push_str("\n⚠️ 阶段审查未正常完成（次数已退还），该阶段视为未审。");
                             continue;
@@ -1053,10 +1057,8 @@ pub async fn run_tool_phase(
                         // 原 blocking 异议保留（不能因空 findings 误清账——那会把"审查
                         // 员失联"当成"异议撤回"），也不计对质拒撤回次数；允许重新
                         // resume_child 对质或等宿主判分越过该阶段自动清账。
-                        // 实测（09-07 pro ③）：对质 invalid_output 一次即把模型推上
-                        // 升级人工，技术故障不该有这个杀伤力。
                         if is_rebuttal_result && error_kind.as_deref() == Some("invalid_output") {
-                            checkpoint.stage_review_run_id = None;
+                            checkpoint.remove_stage_review_run(&job.job_id);
                             checkpoint.stage_review_rebuttal_run_id = None;
                             stage_notes.push_str(
                                 "\n⚖️ 对质子任务技术性失败（审查员输出非法，未产生有效裁决）：原 blocking 异议保留，可重新 resume_child 对质，或等宿主判分越过该阶段自动清账。",
@@ -1074,27 +1076,51 @@ pub async fn run_tool_phase(
                                 && !f.get("id").and_then(|i| i.as_str()).map(|id| withdrawn.iter().any(|w| w == id)).unwrap_or(false)
                         };
                         let findings_arr = value.get("findings").and_then(|f| f.as_array()).cloned().unwrap_or_default();
-                        checkpoint.stage_review_run_id = None;
-                        checkpoint.stage_review_rebuttal_run_id = None;
-                        // 基线已在派发时记录；此处不得覆盖（防覆盖记账竞态，同 stage_review::apply_stage_result）
-                        checkpoint.stage_review_blockers_open = findings_arr.iter().filter(|f| is_blocked(f)).count() as u32;
+                        checkpoint.remove_stage_review_run(&job.job_id);
+                        if is_rebuttal_result {
+                            checkpoint.stage_review_rebuttal_run_id = None;
+                        }
+
+                        let new_blockers = findings_arr.iter().filter(|f| is_blocked(f)).count() as u32;
+                        if is_rebuttal_result {
+                            let withdrawn_count = withdrawn.len() as u32;
+                            checkpoint.stage_review_blockers_open = checkpoint
+                                .stage_review_blockers_open
+                                .saturating_sub(withdrawn_count);
+                        } else {
+                            checkpoint.stage_review_blockers_open += new_blockers;
+                        }
+
                         // 僵尸 blocker 治理：记录出生时的宿主判分阶段索引；宿主越过它即自动清账
                         if checkpoint.stage_review_blockers_open > 0 {
                             checkpoint.stage_review_blocker_stage =
                                 crate::agent::eval_oracle::query_active_progress()
                                     .await
                                     .map(|(idx, _, _)| idx as u32);
-                        } else {
+                        } else if !checkpoint.has_in_flight_stage_review() {
                             checkpoint.stage_review_blocker_stage = None;
                         }
-                        checkpoint.stage_review_final_only = findings_arr.iter()
+
+                        let reviewer_label = job.title.strip_prefix("审查专家: ")
+                            .or_else(|| job.title.strip_prefix("子审查任务: "))
+                            .unwrap_or(&job.title);
+
+                        let new_final_only: Vec<String> = findings_arr.iter()
                             .filter(|f| {
                                 f.get("severity").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("blocking")).unwrap_or(false)
                                     && f.get("finality").and_then(|s| s.as_str()).map(|s| s == "final_only").unwrap_or(false)
                                     && !f.get("id").and_then(|i| i.as_str()).map(|id| withdrawn.iter().any(|w| w == id)).unwrap_or(false)
                             })
-                            .map(|f| format!("{}: {}", f.get("id").and_then(|i| i.as_str()).unwrap_or("?"), f.get("why").and_then(|w| w.as_str()).unwrap_or("")))
+                            .map(|f| {
+                                let id = f.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+                                let why = f.get("why").and_then(|w| w.as_str()).unwrap_or("");
+                                format!("[{}] {}: {}", reviewer_label, id, why)
+                            })
                             .collect();
+                        checkpoint.stage_review_final_only.extend(new_final_only);
+                        checkpoint.stage_review_final_only.sort();
+                        checkpoint.stage_review_final_only.dedup();
+
                         // 【对质失败自动降级】对质结果若仍维持 blocking（审查员以 confirmed
                         // 证据拒不撤回）累计失败次数；2 轮后自动降级 final_only 记账放行——
                         // 否则"审查员不撤 + 写入全禁 + 模型无处去"三方锁死（pro×glm 实测死锁）。
@@ -1118,11 +1144,22 @@ pub async fn run_tool_phase(
                         } else {
                             checkpoint.stage_review_confrontation_failures = 0;
                         }
+
+                        let in_flight_remaining = checkpoint.stage_review_run_ids.len();
+                        let committee_suffix = if in_flight_remaining > 0 {
+                            format!("（联合会审仍在途，剩余 {} 位专家）", in_flight_remaining)
+                        } else {
+                            String::new()
+                        };
+
                         stage_notes.push_str(&format!(
-                            "\n📋 阶段审查结论已回收：blocking_regardless 未解决 {} 条 / final_only 记账 {} 条。{}",
+                            "\n📋 阶段审查结论已回收 (专家: {}): 本次 blocking {} 条 / 累计 blocking_regardless 未解决 {} 条 / final_only 记账 {} 条。{}{}",
+                            reviewer_label,
+                            new_blockers,
                             checkpoint.stage_review_blockers_open,
                             checkpoint.stage_review_final_only.len(),
-                            if checkpoint.stage_review_blockers_open > 0 { "后续写入已被拦截，请用 resume_child 对质解套。" } else { "" }
+                            if checkpoint.stage_review_blockers_open > 0 { "后续写入已被拦截，请用 resume_child 对质解套。" } else { "" },
+                            committee_suffix
                         ));
                         continue;
                     }
@@ -1412,7 +1449,7 @@ pub async fn run_tool_phase(
                             ) {
                                 Ok(id) => {
                                     // 对质目标是阶段审查任务时，登记复检 run id 以便结果回流阶段语义
-                                    if Some(target_child_id) == checkpoint.stage_review_run_id.as_deref() {
+                                    if checkpoint.matches_stage_review_run(target_child_id) {
                                         checkpoint.stage_review_rebuttal_run_id = Some(id.clone());
                                     }
                                     id

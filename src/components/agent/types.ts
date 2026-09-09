@@ -297,6 +297,8 @@ export interface ModelRouting {
     role_models: Record<string, string>;
     /** 阶段审查门禁覆盖：undefined/null/"" = 跟随全局默认；"disabled"/"none" = 免审直通；其他 = 角色卡名称 */
     stage_reviewer_override?: string;
+    /** 阶段审查联合会审模式：true = 并发唤起匹配专家（至多 3 位）；false = 智能自适应单审（默认） */
+    stage_review_committee?: boolean;
     /** 本会话排除/休眠的角色卡名称列表（无需修改全局工坊，即可在当前会话动态启闭某专家） */
     disabled_role_cards?: string[];
 }

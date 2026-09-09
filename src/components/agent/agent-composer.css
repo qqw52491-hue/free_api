@@ -2190,6 +2190,11 @@ textarea::placeholder {
     color: #fde68a;
     border: 1px solid rgba(245, 158, 11, 0.25);
 }
+.gate-current-status-tag.status-committee {
+    background: rgba(168, 85, 247, 0.14);
+    color: #d8b4fe;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+}
 
 /* 门禁控制组 */
 .gate-controls-row {
@@ -2240,6 +2245,13 @@ textarea::placeholder {
     box-shadow: 0 1px 4px rgba(245, 158, 11, 0.2);
 }
 
+.gate-mode-pill-btn.btn-committee.active {
+    background: rgba(168, 85, 247, 0.2);
+    color: #d8b4fe;
+    border-color: rgba(168, 85, 247, 0.45);
+    box-shadow: 0 1px 4px rgba(168, 85, 247, 0.2);
+}
+
 /* 门禁策略动态提示条 */
 .gate-policy-banner {
     padding: 4px 8px;
@@ -2252,6 +2264,12 @@ textarea::placeholder {
     background: rgba(59, 130, 246, 0.06);
     border: 1px solid rgba(59, 130, 246, 0.18);
     color: #bfdbfe;
+}
+
+.gate-policy-banner.committee {
+    background: rgba(168, 85, 247, 0.08);
+    border: 1px solid rgba(168, 85, 247, 0.25);
+    color: #e9d5ff;
 }
 
 .gate-policy-banner.disabled {

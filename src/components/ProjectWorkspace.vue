@@ -879,6 +879,7 @@ function loadModelRouting(): ModelRouting {
     routing_mode: "rules",
     role_models: {},
     stage_reviewer_override: undefined,
+    stage_review_committee: false,
   };
 }
 
