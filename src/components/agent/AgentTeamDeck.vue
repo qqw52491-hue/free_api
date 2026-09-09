@@ -210,9 +210,17 @@
                             </span>
                         </div>
                         <ul class="findings-list">
-                            <li v-for="(finding, fIdx) in selectedWorker.findings" :key="fIdx" class="finding-item">
+                            <li
+                                v-for="(finding, fIdx) in selectedWorker.findings"
+                                :key="fIdx"
+                                class="finding-item"
+                                :class="{
+                                    'is-blocking': isBlockingFinding(finding),
+                                    'is-warning': isWarningFinding(finding),
+                                }"
+                            >
                                 <span class="finding-num">{{ fIdx + 1 }}</span>
-                                <span class="finding-text">{{ finding }}</span>
+                                <span class="finding-text">{{ formatFinding(finding) }}</span>
                             </li>
                         </ul>
                     </div>
@@ -342,7 +350,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { AgentTeamState, AgentWorkerItem, AgentToolStatus, AgentStepItem, AgentWorkerStep, ReviewScorecard } from "./types";
-import { extractSubagentsFromStep } from "./workerUtils";
+import { extractSubagentsFromStep, formatFinding } from "./workerUtils";
 import ExtraContractDeck from "./ExtraContractDeck.vue";
 
 function computeScorecardAverage(sc?: ReviewScorecard): number {
@@ -359,6 +367,16 @@ function computeScorecardAverage(sc?: ReviewScorecard): number {
 function computeScorecardPass(sc?: ReviewScorecard): boolean {
     if (!sc) return false;
     return computeScorecardAverage(sc) >= 75 && sc.risk >= 60;
+}
+
+function isBlockingFinding(finding: any): boolean {
+    const text = formatFinding(finding).toLowerCase();
+    return text.includes("阻断") || text.includes("blocking");
+}
+
+function isWarningFinding(finding: any): boolean {
+    const text = formatFinding(finding).toLowerCase();
+    return text.includes("警告") || text.includes("warning");
 }
 
 const props = withDefaults(
@@ -457,7 +475,7 @@ const activeWorkerSteps = computed<AgentWorkerStep[]>(() => {
     const w = selectedWorker.value;
     const isDone = w.status === "succeeded";
     const isFailed = w.status === "failed";
-    const firstFinding = w.findings && w.findings[0] ? w.findings[0] : undefined;
+    const firstFinding = w.findings && w.findings[0] ? formatFinding(w.findings[0]) : undefined;
 
     return [
         {
@@ -1290,6 +1308,27 @@ async function copyOutput(text?: string) {
     padding: 4px 6px;
     border-radius: 4px;
     border-left: 2px solid #38bdf8;
+    transition: all 0.15s ease;
+}
+
+.finding-item.is-blocking {
+    border-left-color: #ef4444;
+    background: rgba(239, 68, 68, 0.08);
+}
+
+.finding-item.is-blocking .finding-num {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.18);
+}
+
+.finding-item.is-warning {
+    border-left-color: #f59e0b;
+    background: rgba(245, 158, 11, 0.08);
+}
+
+.finding-item.is-warning .finding-num {
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.18);
 }
 
 .finding-num {

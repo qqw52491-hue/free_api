@@ -50,7 +50,7 @@
                 :key="idx"
                 class="field-chip-tag"
               >
-                {{ String(item) }}
+                {{ formatHistoricalVal(item) }}
               </span>
             </div>
             <span v-else-if="hasValue(field.name)" class="val-empty-arr">— 空数组 [] —</span>
@@ -95,7 +95,7 @@
         <div class="field-value-cell">
           <div v-if="Array.isArray(val)" class="field-chips-group">
             <span v-for="(item, idx) in val" :key="idx" class="field-chip-tag">
-              {{ String(item) }}
+              {{ formatHistoricalVal(item) }}
             </span>
             <span v-if="val.length === 0" class="val-empty-arr">— 空 [] —</span>
           </div>
@@ -106,7 +106,7 @@
             {{ val }}
           </span>
           <span v-else class="field-val-badge">
-            {{ String(val) }}
+            {{ formatHistoricalVal(val) }}
           </span>
         </div>
       </div>

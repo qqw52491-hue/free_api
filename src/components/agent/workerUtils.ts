@@ -82,8 +82,162 @@ export function inferStepIntent(tool: string, rawTarget: string, explicitIntent?
         return { title: `执行命令分析: ${clean.split(/\s+/)[0]}`, cleanTarget: clean };
     }
 
-    // 默认回退
+// 默认回退
     return { title: `执行 ${tool}`, cleanTarget: clean };
+}
+
+/**
+ * 安全格式化单个发现项 (Finding)，防止任何 [object Object] 泄露到 UI
+ * 深度适配 child_reviewer 的 ReviewFinding 结构以及通用的键值结构
+ */
+export function formatFinding(item: any): string {
+    if (item === null || item === undefined) return "";
+
+    // 1. 如果已经是字符串，检查是否是残留的 [object Object] 或未解包的 JSON 字符串
+    if (typeof item === "string") {
+        const trimmed = item.trim();
+        if (!trimmed || trimmed === "[object Object]") return "";
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+            try {
+                const parsed = JSON.parse(trimmed);
+                if (parsed && typeof parsed === "object") {
+                    return formatFinding(parsed);
+                }
+            } catch {
+                // 不是有效 JSON，直接按原字符串展示
+            }
+        }
+        return trimmed;
+    }
+
+    if (typeof item !== "object") {
+        return String(item);
+    }
+
+    // 2. 结构化对象提取（支持 child_reviewer 专属 ReviewFinding 与通用模型契约）
+    const id = typeof item.id === "string" && item.id.trim() !== "[object Object]" ? item.id.trim() : "";
+    const severity = typeof item.severity === "string" ? item.severity.toLowerCase().trim() : "";
+    const location = (typeof item.location === "string" && item.location.trim() !== "[object Object]" ? item.location.trim() : "")
+        || (typeof item.file === "string" && item.file.trim() !== "[object Object]" ? item.file.trim() : "")
+        || (typeof item.path === "string" && item.path.trim() !== "[object Object]" ? item.path.trim() : "");
+    const why = typeof item.why === "string" && item.why.trim() !== "[object Object]" ? item.why.trim() : "";
+    const current = typeof item.current === "string" && item.current.trim() !== "[object Object]" ? item.current.trim() : "";
+    const suggestion = (typeof item.suggestion === "string" && item.suggestion.trim() !== "[object Object]" ? item.suggestion.trim() : "")
+        || (typeof item.fix === "string" && item.fix.trim() !== "[object Object]" ? item.fix.trim() : "")
+        || (typeof item.recommendation === "string" && item.recommendation.trim() !== "[object Object]" ? item.recommendation.trim() : "");
+    const title = typeof item.title === "string" && item.title.trim() !== "[object Object]" ? item.title.trim() : "";
+    const detail = typeof item.detail === "string" && item.detail.trim() !== "[object Object]" ? item.detail.trim() : "";
+
+    // 候选主要说明文本（按优先级采纳）
+    const mainContent = [
+        why,
+        item.finding,
+        item.description,
+        item.text,
+        item.message,
+        item.claim,
+        item.summary,
+        item.reason,
+        item.issue,
+        item.content,
+        current,
+    ].find((v) => typeof v === "string" && v.trim().length > 0 && v.trim() !== "[object Object]")?.trim() || "";
+
+    const parts: string[] = [];
+
+    // 严重级别徽标 / 标识
+    if (severity) {
+        let sevTag = severity.toUpperCase();
+        if (severity === "blocking") sevTag = "🚫 阻断";
+        else if (severity === "warning") sevTag = "⚠️ 警告";
+        else if (severity === "question") sevTag = "❓ 存疑";
+        else if (severity === "info") sevTag = "ℹ️ 提示";
+        parts.push(id ? `[${id} | ${sevTag}]` : `[${sevTag}]`);
+    } else if (id) {
+        parts.push(`[${id}]`);
+    }
+
+    // 定位代码行或文件
+    if (location) {
+        parts.push(`${location}:`);
+    }
+
+    // 主干描述与标题
+    if (title) {
+        if (mainContent && mainContent !== title) {
+            parts.push(`${title} - ${mainContent}`);
+        } else {
+            parts.push(title);
+        }
+    } else if (mainContent) {
+        parts.push(mainContent);
+    } else if (detail) {
+        parts.push(detail);
+    }
+
+    // 修复/改进建议
+    if (suggestion) {
+        parts.push(`(💡 建议: ${suggestion})`);
+    }
+
+    const assembled = parts.join(" ").trim();
+    if (assembled.length > 0) {
+        return assembled;
+    }
+
+    // 3. 兜底转换：转换为精简 JSON 字符串，绝不输出 [object Object]
+    try {
+        const json = JSON.stringify(item);
+        if (json && json !== "{}" && json !== "[]") return json;
+    } catch {
+        // ignore
+    }
+
+    return "";
+}
+
+/**
+ * 安全格式化单个 Action Log 项
+ */
+export function formatActionLog(item: any): string {
+    if (item === null || item === undefined) return "";
+    if (typeof item === "string") {
+        const trimmed = item.trim();
+        return trimmed === "[object Object]" ? "" : trimmed;
+    }
+    if (typeof item !== "object") return String(item);
+
+    const candidate = [item.action, item.tool, item.log, item.message, item.step, item.title, item.description]
+        .find((v) => typeof v === "string" && v.trim().length > 0 && v.trim() !== "[object Object]");
+    if (candidate) return candidate.trim();
+
+    try {
+        const json = JSON.stringify(item);
+        if (json && json !== "{}") return json;
+    } catch {}
+    return "";
+}
+
+/**
+ * 安全格式化单个证据引用项
+ */
+export function formatEvidenceRef(item: any): string {
+    if (item === null || item === undefined) return "";
+    if (typeof item === "string") {
+        const trimmed = item.trim();
+        return trimmed === "[object Object]" ? "" : trimmed;
+    }
+    if (typeof item !== "object") return String(item);
+
+    const candidate = [item.ref, item.id, item.path, item.file, item.source, item.name, item.url]
+        .find((v) => typeof v === "string" && v.trim().length > 0 && v.trim() !== "[object Object]");
+    if (candidate) return candidate.trim();
+
+    try {
+        const json = JSON.stringify(item);
+        if (json && json !== "{}") return json;
+    } catch {}
+    return "";
 }
 
 export function parseWorkerArtifacts(raw: unknown): {
@@ -99,17 +253,58 @@ export function parseWorkerArtifacts(raw: unknown): {
     if (!raw) return {};
     let obj: any = raw;
     if (typeof raw === "string") {
+        const trimmed = raw.trim();
         try {
-            obj = JSON.parse(raw);
+            obj = JSON.parse(trimmed);
         } catch {
-            return {};
+            // 尝试提取 ```json ... ``` 块
+            const codeMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+            if (codeMatch) {
+                try {
+                    obj = JSON.parse(codeMatch[1].trim());
+                } catch {
+                    const braceMatch = trimmed.match(/\{[\s\S]*\}/);
+                    if (braceMatch) {
+                        try { obj = JSON.parse(braceMatch[0]); } catch {}
+                    }
+                }
+            } else {
+                const braceMatch = trimmed.match(/\{[\s\S]*\}/);
+                if (braceMatch) {
+                    try { obj = JSON.parse(braceMatch[0]); } catch {}
+                }
+            }
         }
     }
     if (!obj || typeof obj !== "object") return {};
 
-    const findings: string[] = Array.isArray(obj.findings) ? obj.findings.map(String).filter(Boolean) : [];
-    const actionLog: string[] = Array.isArray(obj.action_log) ? obj.action_log.map(String).filter(Boolean) : [];
-    const evidenceRefs: string[] = Array.isArray(obj.evidence_refs) ? obj.evidence_refs.map(String).filter(Boolean) : [];
+    // 格式化 findings，过滤无效项与 [object Object]
+    let rawFindings: any[] = [];
+    if (Array.isArray(obj.findings)) {
+        rawFindings = obj.findings;
+    } else if (obj.findings) {
+        rawFindings = [obj.findings];
+    }
+    const findings: string[] = rawFindings.map(formatFinding).filter(Boolean);
+
+    // 格式化 action_log
+    let rawActionLog: any[] = [];
+    if (Array.isArray(obj.action_log)) {
+        rawActionLog = obj.action_log;
+    } else if (obj.action_log) {
+        rawActionLog = [obj.action_log];
+    }
+    const actionLog: string[] = rawActionLog.map(formatActionLog).filter(Boolean);
+
+    // 格式化 evidence_refs
+    let rawEvidenceRefs: any[] = [];
+    if (Array.isArray(obj.evidence_refs)) {
+        rawEvidenceRefs = obj.evidence_refs;
+    } else if (obj.evidence_refs) {
+        rawEvidenceRefs = [obj.evidence_refs];
+    }
+    const evidenceRefs: string[] = rawEvidenceRefs.map(formatEvidenceRef).filter(Boolean);
+
     const confidence = typeof obj.confidence === "string" ? obj.confidence : undefined;
 
     // 提取扩展字段（支持嵌套在 obj.extra 中，或扁平在 obj 顶层中的非基线字段）
@@ -257,8 +452,19 @@ export function extractSubagentsFromStep(
 
                         // 若 wait_jobs 的 resultStr 包含输出块，尝试补充
                         if (resultStr.includes(pw.id) || resultStr.includes("【任务 ID:")) {
-                            const arts = parseWorkerArtifacts(resultStr);
-                            if (arts.findings && !findings) findings = arts.findings;
+                            let targetOutput = resultStr;
+                            if (resultStr.includes("【任务 ID:")) {
+                                const jobSections = resultStr.split(/(?=- 【任务 ID:)/g);
+                                for (const sec of jobSections) {
+                                    if (sec.includes(pw.id) || jobSections.length === 1) {
+                                        const outputMatch = sec.match(/输出:\s*([\s\S]+)$/);
+                                        if (outputMatch) targetOutput = outputMatch[1].trim();
+                                        break;
+                                    }
+                                }
+                            }
+                            const arts = parseWorkerArtifacts(targetOutput);
+                            if (arts.findings && arts.findings.length > 0) findings = arts.findings;
                             if (arts.steps && (!steps || steps.length <= 3)) steps = arts.steps;
                             if (arts.extra) extra = arts.extra;
                             if (arts.customSchema) customSchema = arts.customSchema;

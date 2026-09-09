@@ -260,9 +260,10 @@
                                     <span class="sub-status-pill" :class="`status-${sub.status}`">{{ sub.status }}</span>
                                 </div>
                                 <p class="sub-task-text">{{ sub.currentStep }}</p>
-                                <div v-if="sub.findings && sub.findings.length" class="sub-finding-highlight">
+                                <div v-if="sub.findings && sub.findings.length && formatFinding(sub.findings[0])" class="sub-finding-highlight">
                                     <span class="highlight-icon">🎯</span>
-                                    <span class="highlight-text">{{ sub.findings[0] }}</span>
+                                    <span class="highlight-text">{{ formatFinding(sub.findings[0]) }}</span>
+                                    <span v-if="sub.findings.length > 1" class="highlight-count-tag">+{{ sub.findings.length - 1 }}</span>
                                 </div>
                             </article>
                         </div>
@@ -543,7 +544,7 @@ import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 import AgentTeamDeck from "./AgentTeamDeck.vue";
 import FileDiffViewer from "./FileDiffViewer.vue";
 import { extractDiffFromStep } from "./diffUtils";
-import { extractSubagentsFromStep } from "./workerUtils";
+import { extractSubagentsFromStep, formatFinding } from "./workerUtils";
 
 const props = withDefaults(
     defineProps<{
@@ -1503,6 +1504,17 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 .highlight-text {
     flex: 1;
     word-break: break-word;
+}
+
+.highlight-count-tag {
+    font-size: 7.5px;
+    font-weight: 700;
+    color: #fef08a;
+    background: rgba(234, 179, 8, 0.2);
+    padding: 0 4px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    margin-left: 2px;
 }
 
 .step-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; color: #71717a; font-size: 10px; }
