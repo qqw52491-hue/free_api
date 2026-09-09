@@ -1486,6 +1486,27 @@ button.root-row {
     -webkit-mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 100%);
 }
 
+/* 🌟 真正的向前（向左）物理平滑跑马灯视口与流动轨道 */
+.running-preview-line .preview-ticker-viewport {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    position: relative;
+    display: flex;
+    align-items: center;
+    mask-image: linear-gradient(to right, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
+}
+
+.running-preview-line .preview-ticker-track {
+    display: inline-block;
+    white-space: nowrap;
+    will-change: transform;
+    padding-left: 6px;
+    padding-right: 48px;
+}
+
 .running-preview-line .preview-icon,
 .running-preview-line .preview-tool-icon {
     font-size: 13px;
