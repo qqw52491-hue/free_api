@@ -361,12 +361,53 @@ pub fn delete_card(db: &DbState, params: &Value) -> Result<String, String> {
     Ok(format!("已删除角色 {}（{} 行）", name, rows))
 }
 
+/// 检查角色卡在特定工位（如 "writer", "reviewer", "worker"）或全局是否处于禁用/休眠状态
+pub fn is_card_disabled_for(disabled_names: &[String], card_name: &str, kind: &str) -> bool {
+    let name_lower = card_name.to_ascii_lowercase();
+    let slot_prefix = format!("{}:", kind.to_ascii_lowercase());
+    disabled_names.iter().any(|d| {
+        let d_lower = d.to_ascii_lowercase();
+        // 1. 全局禁用: "card_a"
+        if d_lower == name_lower {
+            return true;
+        }
+        // 2. 工位专属禁用: "writer:card_a"
+        if d_lower.starts_with(&slot_prefix) {
+            let target = &d_lower[slot_prefix.len()..];
+            if target == name_lower {
+                return true;
+            }
+        }
+        // 3. 兼容 scout 与 worker
+        if (kind.eq_ignore_ascii_case("scout") && d_lower.starts_with("worker:"))
+            || (kind.eq_ignore_ascii_case("worker") && d_lower.starts_with("scout:"))
+        {
+            let target = d_lower.split_once(':').map(|(_, r)| r).unwrap_or("");
+            if target == name_lower {
+                return true;
+            }
+        }
+        false
+    })
+}
+
 /// 主 Agent 的角色池菜单（注入工具目录旁）：一行一卡，说明派发方式。
 pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -> Result<String, String> {
     let cards = list_cards(db, false)?;
     let active_cards: Vec<RoleCard> = cards
         .into_iter()
-        .filter(|c| !disabled_names.iter().any(|d| d.eq_ignore_ascii_case(&c.name)))
+        .filter(|c| {
+            // 若全局禁用该卡片名称，排除
+            if disabled_names.iter().any(|d| d.eq_ignore_ascii_case(&c.name)) {
+                return false;
+            }
+            // 若卡片在它所支持的全部工位上都被单独排除了，才排除
+            let kinds = ["writer", "worker", "reviewer"];
+            let has_any_active = kinds
+                .iter()
+                .any(|k| c.allows_kind(k) && !is_card_disabled_for(disabled_names, &c.name, k));
+            has_any_active
+        })
         .collect();
     if active_cards.is_empty() {
         return Ok(String::new());
@@ -744,6 +785,33 @@ mod tests {
             "focus_domains": ["invalid_domain_name"],
         }));
         assert!(bad_domain_res.is_err(), "不支持的 focus domain 必须被拒绝");
+    }
+
+    #[test]
+    fn test_is_card_disabled_for_slot_isolation() {
+        let disabled = vec![
+            "writer:card_a".to_string(),
+            "reviewer:card_b".to_string(),
+            "card_global".to_string(),
+        ];
+
+        // card_a 在 writer 下被禁用，但在 reviewer 下依然可用！
+        assert!(is_card_disabled_for(&disabled, "card_a", "writer"));
+        assert!(!is_card_disabled_for(&disabled, "card_a", "reviewer"));
+        assert!(!is_card_disabled_for(&disabled, "card_a", "worker"));
+
+        // card_b 在 reviewer 下被禁用，但在 writer 下依然可用！
+        assert!(!is_card_disabled_for(&disabled, "card_b", "writer"));
+        assert!(is_card_disabled_for(&disabled, "card_b", "reviewer"));
+
+        // card_global 全局禁用，所有工位都被禁用
+        assert!(is_card_disabled_for(&disabled, "card_global", "writer"));
+        assert!(is_card_disabled_for(&disabled, "card_global", "reviewer"));
+        assert!(is_card_disabled_for(&disabled, "card_global", "worker"));
+
+        // 未配置的 card_c 任何工位都不被禁用
+        assert!(!is_card_disabled_for(&disabled, "card_c", "writer"));
+        assert!(!is_card_disabled_for(&disabled, "card_c", "reviewer"));
     }
 }
 

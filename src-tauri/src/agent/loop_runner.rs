@@ -273,6 +273,14 @@ pub async fn run_tool_phase(
 
             let mut reviewer_custom_schema = None;
             if let Some(role_name) = child_params.get("role").and_then(|v| v.as_str()) {
+                if crate::agent::tools::role_manager::is_card_disabled_for(&model_routing.disabled_role_cards, role_name, "reviewer") {
+                    item_reports.push(format!(
+                        "[{}/{}] ⏸️ 角色卡「{}」在当前会话的 reviewer 工位已被用户排除/休眠；请改用其他角色或直接以默认身份派发。",
+                        item_num, total, role_name
+                    ));
+                    fail_count += 1;
+                    continue;
+                }
                 match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
                     Ok(Some(card)) => {
                         if !card.allows_kind("reviewer") {
@@ -572,6 +580,14 @@ pub async fn run_tool_phase(
 
             let mut writer_custom_schema = None;
             if let Some(role_name) = writer_params.get("role").and_then(|v| v.as_str()) {
+                if crate::agent::tools::role_manager::is_card_disabled_for(&model_routing.disabled_role_cards, role_name, "writer") {
+                    item_reports.push(format!(
+                        "[{}/{}] ⏸️ 角色卡「{}」在当前会话的 writer 工位已被用户排除/休眠；请改用其他角色或直接以默认身份派发。",
+                        item_num, total, role_name
+                    ));
+                    fail_count += 1;
+                    continue;
+                }
                 match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
                     Ok(Some(card)) => {
                         if !card.allows_kind("writer") {
@@ -782,6 +798,14 @@ pub async fn run_tool_phase(
 
             let mut scout_custom_schema = None;
             if let Some(role_name) = worker_params.get("role").and_then(|v| v.as_str()) {
+                if crate::agent::tools::role_manager::is_card_disabled_for(&model_routing.disabled_role_cards, role_name, "worker") {
+                    item_reports.push(format!(
+                        "[{}/{}] ⏸️ 角色卡「{}」在当前会话的 worker/scout 工位已被用户排除/休眠；请改用其他角色或直接以默认身份派发。",
+                        item_num, total, role_name
+                    ));
+                    fail_count += 1;
+                    continue;
+                }
                 match crate::agent::tools::role_manager::resolve_enabled_card(state.inner(), role_name) {
                     Ok(Some(card)) => {
                         if !card.allows_kind("worker") {

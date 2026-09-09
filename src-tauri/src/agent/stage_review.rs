@@ -148,7 +148,7 @@ fn resolve_adaptive_reviewer_card(
         .filter(|c| {
             c.enabled
                 && c.allows_kind("reviewer")
-                && !disabled_cards.iter().any(|d| d.eq_ignore_ascii_case(&c.name))
+                && !crate::agent::tools::role_manager::is_card_disabled_for(disabled_cards, &c.name, "reviewer")
         })
         .collect();
 
@@ -241,9 +241,13 @@ pub async fn dispatch(
             && !clean.eq_ignore_ascii_case("follow_global")
             && !clean.eq_ignore_ascii_case("auto")
         {
-            match crate::agent::tools::role_manager::resolve_enabled_card(db, clean) {
-                Ok(Some(card)) if card.allows_kind("reviewer") => Some(card),
-                _ => resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards),
+            if crate::agent::tools::role_manager::is_card_disabled_for(&model_routing.disabled_role_cards, clean, "reviewer") {
+                resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards)
+            } else {
+                match crate::agent::tools::role_manager::resolve_enabled_card(db, clean) {
+                    Ok(Some(card)) if card.allows_kind("reviewer") => Some(card),
+                    _ => resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards),
+                }
             }
         } else {
             resolve_adaptive_reviewer_card(db, context, &model_routing.disabled_role_cards)

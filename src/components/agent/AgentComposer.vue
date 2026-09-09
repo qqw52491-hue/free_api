@@ -134,33 +134,53 @@
                                     </div>
                                 </div>
 
-                                <!-- 🌟 顶部工具条：独立分段 Tab + 横排分流模式开关 -->
+                                <!-- 🌟 顶部工具条：独立 4 工位 Tab + 横排分流模式开关 -->
                                 <div class="routing-top-toolbar">
-                                    <div class="routing-tabs-nav">
+                                    <div class="routing-tabs-nav station-tabs-nav">
                                         <button
                                             type="button"
                                             class="routing-tab-btn"
-                                            :class="{ active: activeRoutingTab === 'models' }"
-                                            @click="activeRoutingTab = 'models'"
+                                            :class="{ active: activeRoutingTab === 'brain' }"
+                                            @click="activeRoutingTab = 'brain'"
                                         >
-                                            <span class="tab-btn-icon">🤖</span>
-                                            <span class="tab-btn-text">主脑算力</span>
+                                            <span class="tab-btn-icon">🧠</span>
+                                            <span class="tab-btn-text">主脑基线</span>
                                         </button>
                                         <button
                                             type="button"
                                             class="routing-tab-btn"
-                                            :class="{ active: activeRoutingTab === 'roles' }"
-                                            @click="activeRoutingTab = 'roles'"
+                                            :class="{ active: activeRoutingTab === 'writer' }"
+                                            @click="activeRoutingTab = 'writer'"
                                         >
-                                            <span class="tab-btn-icon">🎭</span>
-                                            <span class="tab-btn-text">专家小队与门禁</span>
-                                            <span
-                                                v-if="allEnabledRoleCards.length > 0"
-                                                class="tab-count-badge"
-                                                :class="{ 'is-custom': isCustomSquadActive }"
-                                                :title="isCustomSquadActive ? `当前出战: ${sessionActiveCardsCount} / 专家库总数: ${allEnabledRoleCards.length}` : `全员就绪: ${allEnabledRoleCards.length}`"
-                                            >
-                                                {{ sessionActiveCardsCount }}
+                                            <span class="tab-btn-icon">✍️</span>
+                                            <span class="tab-btn-text">改码写入</span>
+                                            <span v-if="writerRoleCards.length > 0" class="tab-count-badge" :class="{ 'is-custom': isWriterCustom }">
+                                                {{ writerActiveCardsCount }}/{{ writerRoleCards.length }}
+                                            </span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="routing-tab-btn"
+                                            :class="{ active: activeRoutingTab === 'reviewer' }"
+                                            @click="activeRoutingTab = 'reviewer'"
+                                        >
+                                            <span class="tab-btn-icon">🛡️</span>
+                                            <span class="tab-btn-text">阶段审查</span>
+                                            <span v-if="isStageReviewerDisabled" class="tab-count-badge disabled">免审</span>
+                                            <span v-else-if="reviewerRoleCards.length > 0" class="tab-count-badge" :class="{ 'is-custom': isReviewerCustom }">
+                                                {{ reviewerActiveCardsCount }}/{{ reviewerRoleCards.length }}
+                                            </span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="routing-tab-btn"
+                                            :class="{ active: activeRoutingTab === 'scout' }"
+                                            @click="activeRoutingTab = 'scout'"
+                                        >
+                                            <span class="tab-btn-icon">🔎</span>
+                                            <span class="tab-btn-text">调研探针</span>
+                                            <span v-if="scoutRoleCards.length > 0" class="tab-count-badge" :class="{ 'is-custom': isScoutCustom }">
+                                                {{ scoutActiveCardsCount }}/{{ scoutRoleCards.length }}
                                             </span>
                                         </button>
                                     </div>
@@ -194,9 +214,8 @@
                                 </div>
 
                                 <div class="popover-body">
-                                    <!-- Tab 1: 模型分工 (前三个推理、执行、视觉合并展示) -->
-                                    <div v-if="activeRoutingTab === 'models'" class="tab-pane-content models-unified-pane">
-                                        <!-- 1. 推理规划模型 (Pro) -->
+                                    <!-- Station 1: 🧠 主脑算力基线 (推理规划、极速执行、视觉模型) -->
+                                    <div v-if="activeRoutingTab === 'brain'" class="tab-pane-content models-unified-pane">
                                         <!-- 1. 推理规划模型 (Pro / 模型 1) -->
                                         <div class="route-item pro-tier">
                                             <div class="route-item-head">
@@ -204,7 +223,6 @@
                                                     <span class="route-badge pro">🧠 🥇 模型 1：推理规划 (Pro)</span>
                                                     <small>长程规划与深层自愈救场</small>
                                                 </div>
-                                                <!-- 🎯 Codex / Claude 风格档位切换器 -->
                                                 <div class="effort-segmented-wrap" title="思考档位切换">
                                                     <span class="effort-label">思考:</span>
                                                     <div class="effort-slider-group">
@@ -240,9 +258,8 @@
                                             <div class="route-item-head">
                                                 <div class="head-left">
                                                     <span class="route-badge flash">⚡ 🥈 模型 2：极速执行 (Flash)</span>
-                                                    <small>高频工具调用与快速改码</small>
+                                                    <small>高频工具调用与快速推进</small>
                                                 </div>
-                                                <!-- 🎯 Codex / Claude 风格档位切换器 -->
                                                 <div class="effort-segmented-wrap" title="思考档位切换">
                                                     <span class="effort-label">思考:</span>
                                                     <div class="effort-slider-group">
@@ -280,7 +297,6 @@
                                                     <span class="route-badge vision">👁️ 多模态视觉模型 (Vision)</span>
                                                     <small>截图分析与图表识别</small>
                                                 </div>
-                                                <!-- 🎯 Codex / Claude 风格档位切换器 -->
                                                 <div class="effort-segmented-wrap" title="思考档位切换">
                                                     <span class="effort-label">思考:</span>
                                                     <div class="effort-slider-group">
@@ -310,109 +326,187 @@
                                                 />
                                             </div>
                                         </div>
+                                    </div>
 
-                                        <!-- 4. 🎯 核心工种独立算力指派（审查、写入、探索独立选模型 1 或模型 2） -->
-                                        <div class="route-item role-slots-section">
-                                            <div class="route-item-head">
-                                                <div class="head-left">
-                                                    <span class="route-badge slots">🎯 核心工种独立算力指派</span>
-                                                    <small>各环节完全独立：审查、写入、探索可自由点选模型 1 或模型 2</small>
+                                    <!-- Station 2: ✍️ 改码写入工位 (Writer) -->
+                                    <div v-else-if="activeRoutingTab === 'writer'" class="tab-pane-content station-pane">
+                                        <div class="squad-section station-section">
+                                            <div class="section-head">
+                                                <div class="section-title-wrap">
+                                                    <div class="section-title-row">
+                                                        <span class="section-title">✍️ 改码写入工位 (Writer)</span>
+                                                        <span
+                                                            class="section-badge-count"
+                                                            :class="{ 'is-custom': isWriterCustom }"
+                                                        >
+                                                            {{ isWriterCustom ? `出战: ${writerActiveCardsCount} / ${writerRoleCards.length}` : `🌟 全员就绪 (${writerRoleCards.length})` }}
+                                                        </span>
+                                                    </div>
+                                                    <span class="section-desc">
+                                                        负责编写与修改代码。此处排除角色仅在改码生效，绝不影响审查与探针。
+                                                    </span>
                                                 </div>
-                                                <button
-                                                    v-if="hasAnyCustomRoleSlot"
-                                                    type="button"
-                                                    class="reset-slots-btn"
-                                                    title="清空独立指定，恢复默认分工"
-                                                    :disabled="isRunning"
-                                                    @click="resetAllRoleSlots"
-                                                >
-                                                    恢复默认
-                                                </button>
+                                                <div class="squad-head-actions">
+                                                    <button
+                                                        v-if="isWriterCustom"
+                                                        type="button"
+                                                        class="squad-action-pill-btn reset"
+                                                        title="恢复该工种全部专家出战"
+                                                        :disabled="isRunning"
+                                                        @click="resetSlotToAllActive('writer')"
+                                                    >
+                                                        <span>🌟 恢复全员</span>
+                                                    </button>
+                                                    <button
+                                                        v-else
+                                                        type="button"
+                                                        class="squad-action-pill-btn exclude-all"
+                                                        title="改码写入排除所有角色，本次任务改码直接使用工位模型"
+                                                        :disabled="isRunning"
+                                                        @click="hibernateAllCardsForSlot('writer')"
+                                                    >
+                                                        <span>🚫 全部排除</span>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        class="manage-roles-link-btn"
+                                                        title="打开 Agent 专家工坊"
+                                                        @click="openRoleManager"
+                                                    >
+                                                        <span>工坊管理</span>
+                                                        <svg viewBox="0 0 24 24" class="link-icon"><path d="m9 18 6-6-6-6"/></svg>
+                                                    </button>
+                                                </div>
                                             </div>
 
-                                            <div class="role-slots-list">
+                                            <!-- 💻 该工位绑定算力 -->
+                                            <div class="station-model-bar">
+                                                <div class="station-model-label">
+                                                    <span class="bar-icon">💻</span>
+                                                    <span>写入工位算力:</span>
+                                                </div>
+                                                <div class="station-model-picker">
+                                                    <button
+                                                        type="button"
+                                                        class="slot-choice-pill"
+                                                        :class="{ active: getSlotChoice('writer') === 'pro' }"
+                                                        :title="`指定使用模型 1: ${getModelDisplayName(modelRouting.pro)}`"
+                                                        :disabled="isRunning"
+                                                        @click="setSlotChoice('writer', 'pro')"
+                                                    >
+                                                        🥇 模型 1 (Pro)
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        class="slot-choice-pill"
+                                                        :class="{ active: getSlotChoice('writer') === 'flash' || !getSlotChoice('writer') }"
+                                                        :title="`指定使用模型 2: ${getModelDisplayName(modelRouting.flash)}`"
+                                                        :disabled="isRunning"
+                                                        @click="setSlotChoice('writer', 'flash')"
+                                                    >
+                                                        🥈 模型 2 (Flash)
+                                                    </button>
+                                                    <select
+                                                        class="slot-model-select"
+                                                        :class="{ active: isCustomSpecificModel('writer') }"
+                                                        :disabled="isRunning"
+                                                        :value="isCustomSpecificModel('writer') ? getSlotChoice('writer') : ''"
+                                                        @change="onSlotSelectChange('writer', ($event.target as HTMLSelectElement).value)"
+                                                    >
+                                                        <option value="">{{ isCustomSpecificModel('writer') ? `指定: ${getModelDisplayName(getSlotChoice('writer'))}` : '更多独立模型…' }}</option>
+                                                        <option
+                                                            v-for="m in allModels"
+                                                            :key="m.id"
+                                                            :value="m.id"
+                                                        >
+                                                            {{ m.display_name || m.name }}
+                                                        </option>
+                                                    </select>
+                                                </div>
+                                            </div>
+
+                                            <!-- 写入专家卡片网格 -->
+                                            <div v-if="writerRoleCards.length > 0" class="squad-cards-grid">
                                                 <div
-                                                    v-for="slot in coreTaskSlots"
-                                                    :key="slot.key"
-                                                    class="role-slot-row"
+                                                    v-for="card in writerRoleCards"
+                                                    :key="card.id"
+                                                    class="squad-member-card"
+                                                    :class="{
+                                                        'is-active': !isCardHibernatedForSlot(card.name, 'writer'),
+                                                        'is-hibernated': isCardHibernatedForSlot(card.name, 'writer'),
+                                                    }"
+                                                    :title="isCardHibernatedForSlot(card.name, 'writer') ? '点击将其加入改码出战' : '点击将此专家从改码中排除（不影响审查）'"
+                                                    @click="toggleSessionCardForSlot(card.name, 'writer')"
                                                 >
-                                                    <div class="slot-info">
-                                                        <span class="slot-icon">{{ slot.icon }}</span>
-                                                        <div class="slot-text">
-                                                            <strong class="slot-name">{{ slot.name }}</strong>
-                                                            <small class="slot-desc">{{ slot.desc }}</small>
+                                                    <div class="member-card-header">
+                                                        <div class="member-identity">
+                                                            <div
+                                                                class="member-checkbox"
+                                                                :class="{ checked: !isCardHibernatedForSlot(card.name, 'writer') }"
+                                                            >
+                                                                <svg v-if="!isCardHibernatedForSlot(card.name, 'writer')" viewBox="0 0 24 24" class="check-icon"><path d="M20 6 9 17l-5-5"/></svg>
+                                                            </div>
+                                                            <div class="member-name-block">
+                                                                <strong class="member-label">{{ card.label || card.name }}</strong>
+                                                                <span class="member-slug">{{ card.name }}</span>
+                                                            </div>
                                                         </div>
+                                                        <button
+                                                            type="button"
+                                                            class="session-toggle-btn"
+                                                            :class="{ active: !isCardHibernatedForSlot(card.name, 'writer'), hibernated: isCardHibernatedForSlot(card.name, 'writer') }"
+                                                            :title="isCardHibernatedForSlot(card.name, 'writer') ? '点击恢复改码出战' : '点击在写入中排除'"
+                                                            :disabled="isRunning"
+                                                            @click.stop="toggleSessionCardForSlot(card.name, 'writer')"
+                                                        >
+                                                            <span class="status-indicator"></span>
+                                                            <span>{{ isCardHibernatedForSlot(card.name, 'writer') ? '✕ 已排除' : '✓ 出战中' }}</span>
+                                                        </button>
                                                     </div>
 
-                                                    <div class="slot-picker-group">
-                                                        <!-- 快捷点选模型 1 -->
-                                                        <button
-                                                            type="button"
-                                                            class="slot-choice-pill"
-                                                            :class="{ active: getSlotChoice(slot.key) === 'pro' }"
-                                                            :title="`指定使用模型 1: ${getModelDisplayName(modelRouting.pro)}`"
-                                                            :disabled="isRunning"
-                                                            @click="setSlotChoice(slot.key, 'pro')"
-                                                        >
-                                                            🥇 模型 1
-                                                        </button>
+                                                    <div class="member-badges-row">
+                                                        <div class="member-model-tag" :title="card.model_id ? `专属锁定: ${getCardModelName(card.model_id)}` : '跟随写入工位算力'">
+                                                            <span class="model-icon">🎯</span>
+                                                            <span class="model-text">{{ card.model_id ? getCardModelName(card.model_id) : '跟随工位算力' }}</span>
+                                                        </div>
+                                                        <span v-if="card.hard_scope" class="scope-fence-badge" :title="`物理写入围栏: ${card.hard_scope}`">
+                                                            🚧 范围: {{ card.hard_scope }}
+                                                        </span>
+                                                        <span v-if="card.default_test_command" class="scope-fence-badge" :title="`默认测试命令: ${card.default_test_command}`">
+                                                            🧪 {{ card.default_test_command }}
+                                                        </span>
+                                                    </div>
 
-                                                        <!-- 快捷点选模型 2 -->
-                                                        <button
-                                                            type="button"
-                                                            class="slot-choice-pill"
-                                                            :class="{ active: getSlotChoice(slot.key) === 'flash' }"
-                                                            :title="`指定使用模型 2: ${getModelDisplayName(modelRouting.flash)}`"
-                                                            :disabled="isRunning"
-                                                            @click="setSlotChoice(slot.key, 'flash')"
-                                                        >
-                                                            🥈 模型 2
-                                                        </button>
-
-                                                        <!-- 审查独有的异构对抗严审 -->
-                                                        <button
-                                                            v-if="slot.key === 'reviewer'"
-                                                            type="button"
-                                                            class="slot-choice-pill heter"
-                                                            :class="{ active: getSlotChoice(slot.key) === '' }"
-                                                            title="系统异构对抗：自动选择跨模型家族严审"
-                                                            :disabled="isRunning"
-                                                            @click="setSlotChoice(slot.key, '')"
-                                                        >
-                                                            🌐 异构对抗
-                                                        </button>
-
-                                                        <!-- 指定任意具体独立模型 -->
-                                                        <select
-                                                            class="slot-model-select"
-                                                            :class="{ active: isCustomSpecificModel(slot.key) }"
-                                                            :disabled="isRunning"
-                                                            :value="isCustomSpecificModel(slot.key) ? getSlotChoice(slot.key) : ''"
-                                                            @change="onSlotSelectChange(slot.key, ($event.target as HTMLSelectElement).value)"
-                                                        >
-                                                            <option value="">{{ isCustomSpecificModel(slot.key) ? `指定: ${getModelDisplayName(getSlotChoice(slot.key))}` : '更多模型…' }}</option>
-                                                            <option
-                                                                v-for="m in allModels"
-                                                                :key="m.id"
-                                                                :value="m.id"
-                                                            >
-                                                                {{ m.display_name || m.name }}
-                                                            </option>
-                                                        </select>
+                                                    <div class="member-persona-excerpt" :title="card.persona_prompt || card.scope_hints">
+                                                        {{ card.scope_hints || card.persona_prompt?.slice(0, 72) || '通用改码写入角色卡' }}
                                                     </div>
                                                 </div>
+                                            </div>
+
+                                            <div v-else class="squad-empty-box">
+                                                <span class="empty-icon">✍️</span>
+                                                <div class="empty-text">
+                                                    <strong>暂无改码写入专属角色卡</strong>
+                                                    <p>当前改码写入使用基础工位模型。可前往专家工坊创建专精前端组件、后端 API 等专精改码角色。</p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    class="load-preset-btn"
+                                                    @click="openRoleManager"
+                                                >
+                                                    👉 前往「Agent 专家工坊」管理角色卡
+                                                </button>
                                             </div>
                                         </div>
                                     </div>
 
-                                    <!-- Tab 2: 专家协作小队与门禁 (Squad & Gate) -->
-                                    <div v-else-if="activeRoutingTab === 'roles'" class="tab-pane-content squad-pane">
-                                        <!-- 1. 🛡️ 阶段验收与门禁策略卡片 -->
+                                    <!-- Station 3: 🛡️ 阶段审查工位 (Reviewer) -->
+                                    <div v-else-if="activeRoutingTab === 'reviewer'" class="tab-pane-content station-pane">
                                         <div class="squad-section gate-section">
                                             <div class="section-head">
                                                 <div class="section-title-wrap">
-                                                    <span class="section-title">🛡️ 阶段验收与门禁策略</span>
-                                                    <span class="section-desc">代码写入与阶段推进时的质量把关规则 (按会话独立配置)</span>
+                                                    <span class="section-title">🛡️ 阶段门禁策略</span>
+                                                    <span class="section-desc">代码改动与阶段推进时的防翻车把关规则 (按会话独立配置)</span>
                                                 </div>
                                                 <div
                                                     class="gate-current-status-tag"
@@ -434,7 +528,7 @@
                                                         type="button"
                                                         class="gate-mode-pill-btn"
                                                         :class="{ active: !isStageReviewerDisabled }"
-                                                        title="智能阶段门禁：有质检专家时自动挂载，无专家时自动由系统异构模型交叉严把质量关"
+                                                        title="智能阶段门禁：有质检专家时自动挂载，无专家时自动由系统异构模型交叉把关"
                                                         :disabled="isRunning"
                                                         @click="selectStageReviewer('')"
                                                     >
@@ -445,7 +539,7 @@
                                                         type="button"
                                                         class="gate-mode-pill-btn btn-disabled"
                                                         :class="{ active: isStageReviewerDisabled }"
-                                                        title="免审直通：跳过阶段审查，代码写入后直接推进，0 耗时 0 阻拦（适合纯 UI、原型或文档）"
+                                                        title="免审直通：跳过阶段审查，代码写入后直接推进，0 耗时 0 阻拦（适合轻量原型或文档）"
                                                         :disabled="isRunning"
                                                         @click="selectStageReviewer('disabled')"
                                                     >
@@ -459,10 +553,10 @@
                                                     ⚡ <strong>免审直通已生效</strong>：代码写入后跳过阶段审查直接推进，0 耗时 0 拦截（适合轻量原型、文档、简单脚本）。
                                                 </div>
                                                 <div v-else-if="activeReviewerCards.length === 0" class="gate-policy-banner default">
-                                                    🌐 <strong>系统异构对抗兜底生效中（跨模型家族严审）</strong>：当前小队未启用质检专家，阶段推进时将由系统自动调度异构模型进行 4 维严格把关。
+                                                    🌐 <strong>系统异构对抗兜底生效中（跨模型家族严审）</strong>：当前未启用质检专家，阶段推进时将由系统自动调度异构模型进行 4 维严格把关。
                                                 </div>
                                                 <div v-else-if="activeReviewerCards.length === 1" class="gate-policy-banner custom">
-                                                    🎭 <strong>自动挂载审查专家「{{ activeReviewerCards[0].label || activeReviewerCards[0].name }}」</strong>{{ activeReviewerCards[0].model_id ? `（锁定 ${getCardModelName(activeReviewerCards[0].model_id)}）` : '（跟随快模型）' }}：当前小队已锁定专属审查官，阶段推进时自动负责审查。
+                                                    🎭 <strong>自动挂载审查专家「{{ activeReviewerCards[0].label || activeReviewerCards[0].name }}」</strong>{{ activeReviewerCards[0].model_id ? `（锁定 ${getCardModelName(activeReviewerCards[0].model_id)}）` : '（跟随审查工位算力）' }}：当前已锁定专属审查官，阶段推进时自动负责审查。
                                                 </div>
                                                 <div v-else class="gate-policy-banner adaptive">
                                                     🎯 <strong>领域自适应质检就绪</strong>：检测到 {{ activeReviewerCards.length }} 位启用的审查专家（前端/后端/安全），阶段推进时按改动代码类型自适应派发对应专家。
@@ -470,48 +564,47 @@
                                             </div>
                                         </div>
 
-                                        <!-- 2. 👥 本会话出战专家阵容 (Session Squad Roster) -->
-                                        <div class="squad-section roster-section">
+                                        <div class="squad-section station-section">
                                             <div class="section-head">
                                                 <div class="section-title-wrap">
                                                     <div class="section-title-row">
-                                                        <span class="section-title">👥 本会话出战专家阵容</span>
+                                                        <span class="section-title">👥 审查专家库与算力 (Reviewer)</span>
                                                         <span
                                                             class="section-badge-count"
-                                                            :class="{ 'is-custom': isCustomSquadActive }"
+                                                            :class="{ 'is-custom': isReviewerCustom }"
                                                         >
-                                                            {{ isCustomSquadActive ? `自选出战: ${sessionActiveCardsCount} / ${allEnabledRoleCards.length}` : `🌟 全员就绪 (${allEnabledRoleCards.length})` }}
+                                                            {{ isReviewerCustom ? `出战: ${reviewerActiveCardsCount} / ${reviewerRoleCards.length}` : `🌟 全员就绪 (${reviewerRoleCards.length})` }}
                                                         </span>
                                                     </div>
                                                     <span class="section-desc">
-                                                        {{ isCustomSquadActive ? '已进入主动配置模式：主脑仅会派发已出战的专家。点击卡片可快速切换。' : '默认全员待命模式：所有专家卡片均可被调度。点击专家卡片可自由排除或配置小队。' }}
+                                                        负责阶段交付物验收。独立启用/排除审查角色，绝不影响改码写入与调研探针。
                                                     </span>
                                                 </div>
                                                 <div class="squad-head-actions">
                                                     <button
-                                                        v-if="isCustomSquadActive"
+                                                        v-if="isReviewerCustom"
                                                         type="button"
                                                         class="squad-action-pill-btn reset"
-                                                        title="清空排除名单，恢复默认全员出战状态"
+                                                        title="恢复该工种全部专家出战"
                                                         :disabled="isRunning"
-                                                        @click="resetToAllActive"
+                                                        @click="resetSlotToAllActive('reviewer')"
                                                     >
-                                                        <span>🌟 恢复全员出战</span>
+                                                        <span>🌟 恢复全员</span>
                                                     </button>
                                                     <button
                                                         v-else
                                                         type="button"
                                                         class="squad-action-pill-btn exclude-all"
-                                                        title="全部排除，本次任务仅使用主脑默认通用基线（或点击后自选个别专家）"
+                                                        title="审查排除所有角色，阶段验收由系统异构模型兜底"
                                                         :disabled="isRunning"
-                                                        @click="hibernateAllCards"
+                                                        @click="hibernateAllCardsForSlot('reviewer')"
                                                     >
-                                                        <span>🚫 全部排除 (仅基线)</span>
+                                                        <span>🚫 全部排除</span>
                                                     </button>
                                                     <button
                                                         type="button"
                                                         class="manage-roles-link-btn"
-                                                        title="打开 Agent 专家工坊，新建或调整专家角色卡"
+                                                        title="打开 Agent 专家工坊"
                                                         @click="openRoleManager"
                                                     >
                                                         <span>工坊管理</span>
@@ -520,140 +613,302 @@
                                                 </div>
                                             </div>
 
-                                            <!-- 🏷️ 工种插槽快速过滤标签 -->
-                                            <div class="squad-kind-filter-bar">
-                                                <button
-                                                    type="button"
-                                                    class="kind-filter-btn"
-                                                    :class="{ active: squadKindFilter === 'all' }"
-                                                    @click="squadKindFilter = 'all'"
-                                                >
-                                                    🌟 全部 ({{ isCustomSquadActive ? `${sessionActiveCardsCount}/${allEnabledRoleCards.length}` : allEnabledRoleCards.length }})
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    class="kind-filter-btn"
-                                                    :class="{
-                                                        active: squadKindFilter === 'writer',
-                                                        'is-depleted': countActiveByKind('writer') === 0 && countByKind('writer') > 0,
-                                                    }"
-                                                    :title="countActiveByKind('writer') === 0 ? '该工种专家全部已排除，代码改写将使用默认主脑基线' : `改码写入专家：${countActiveByKind('writer')} 出战 / ${countByKind('writer')} 总计`"
-                                                    @click="squadKindFilter = 'writer'"
-                                                >
-                                                    ✍️ 改码写入 ({{ countActiveByKind('writer') }}<span v-if="countActiveByKind('writer') !== countByKind('writer')" class="count-total">/{{ countByKind('writer') }}</span>)
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    class="kind-filter-btn"
-                                                    :class="{
-                                                        active: squadKindFilter === 'reviewer',
-                                                        'is-depleted': countActiveByKind('reviewer') === 0 && countByKind('reviewer') > 0,
-                                                    }"
-                                                    :title="countActiveByKind('reviewer') === 0 ? '该工种专家全部已排除，质检验收将由系统异构对抗兜底' : `质检验收专家：${countActiveByKind('reviewer')} 出战 / ${countByKind('reviewer')} 总计`"
-                                                    @click="squadKindFilter = 'reviewer'"
-                                                >
-                                                    🛡️ 质检验收 ({{ countActiveByKind('reviewer') }}<span v-if="countActiveByKind('reviewer') !== countByKind('reviewer')" class="count-total">/{{ countByKind('reviewer') }}</span>)
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    class="kind-filter-btn"
-                                                    :class="{
-                                                        active: squadKindFilter === 'worker',
-                                                        'is-depleted': countActiveByKind('worker') === 0 && countByKind('worker') > 0,
-                                                    }"
-                                                    :title="countActiveByKind('worker') === 0 ? '该工种专家全部已排除，调研探针将使用默认主脑基线' : `调研探针专家：${countActiveByKind('worker')} 出战 / ${countByKind('worker')} 总计`"
-                                                    @click="squadKindFilter = 'worker'"
-                                                >
-                                                    🔎 调研探针 ({{ countActiveByKind('worker') }}<span v-if="countActiveByKind('worker') !== countByKind('worker')" class="count-total">/{{ countByKind('worker') }}</span>)
-                                                </button>
+                                            <!-- 💻 该工位绑定算力 -->
+                                            <div class="station-model-bar">
+                                                <div class="station-model-label">
+                                                    <span class="bar-icon">💻</span>
+                                                    <span>审查工位算力:</span>
+                                                </div>
+                                                <div class="station-model-picker">
+                                                    <button
+                                                        type="button"
+                                                        class="slot-choice-pill heter"
+                                                        :class="{ active: !getSlotChoice('reviewer') }"
+                                                        title="系统异构对抗：自动选择跨模型家族严审"
+                                                        :disabled="isRunning"
+                                                        @click="setSlotChoice('reviewer', '')"
+                                                    >
+                                                        🌐 异构对抗兜底
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        class="slot-choice-pill"
+                                                        :class="{ active: getSlotChoice('reviewer') === 'pro' }"
+                                                        :title="`指定使用模型 1: ${getModelDisplayName(modelRouting.pro)}`"
+                                                        :disabled="isRunning"
+                                                        @click="setSlotChoice('reviewer', 'pro')"
+                                                    >
+                                                        🥇 模型 1 (Pro)
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        class="slot-choice-pill"
+                                                        :class="{ active: getSlotChoice('reviewer') === 'flash' }"
+                                                        :title="`指定使用模型 2: ${getModelDisplayName(modelRouting.flash)}`"
+                                                        :disabled="isRunning"
+                                                        @click="setSlotChoice('reviewer', 'flash')"
+                                                    >
+                                                        🥈 模型 2 (Flash)
+                                                    </button>
+                                                    <select
+                                                        class="slot-model-select"
+                                                        :class="{ active: isCustomSpecificModel('reviewer') }"
+                                                        :disabled="isRunning"
+                                                        :value="isCustomSpecificModel('reviewer') ? getSlotChoice('reviewer') : ''"
+                                                        @change="onSlotSelectChange('reviewer', ($event.target as HTMLSelectElement).value)"
+                                                    >
+                                                        <option value="">{{ isCustomSpecificModel('reviewer') ? `指定: ${getModelDisplayName(getSlotChoice('reviewer'))}` : '更多独立模型…' }}</option>
+                                                        <option
+                                                            v-for="m in allModels"
+                                                            :key="m.id"
+                                                            :value="m.id"
+                                                        >
+                                                            {{ m.display_name || m.name }}
+                                                        </option>
+                                                    </select>
+                                                </div>
                                             </div>
 
-                                            <!-- 专家卡片网格 -->
-                                            <div v-if="filteredRoleCards.length > 0" class="squad-cards-grid">
+                                            <!-- 审查卡片网格 -->
+                                            <div v-if="reviewerRoleCards.length > 0" class="squad-cards-grid">
                                                 <div
-                                                    v-for="card in filteredRoleCards"
+                                                    v-for="card in reviewerRoleCards"
                                                     :key="card.id"
                                                     class="squad-member-card"
                                                     :class="{
-                                                        'is-active': !isCardHibernated(card.name),
-                                                        'is-hibernated': isCardHibernated(card.name),
+                                                        'is-active': !isCardHibernatedForSlot(card.name, 'reviewer'),
+                                                        'is-hibernated': isCardHibernatedForSlot(card.name, 'reviewer'),
                                                     }"
-                                                    :title="isCardHibernated(card.name) ? '点击将其加入本会话出战小队' : '点击将此专家从本会话排除'"
-                                                    @click="toggleSessionCard(card.name)"
+                                                    :title="isCardHibernatedForSlot(card.name, 'reviewer') ? '点击将其加入审查出战' : '点击将此专家从审查中排除（不影响写入）'"
+                                                    @click="toggleSessionCardForSlot(card.name, 'reviewer')"
                                                 >
                                                     <div class="member-card-header">
                                                         <div class="member-identity">
                                                             <div
                                                                 class="member-checkbox"
-                                                                :class="{ checked: !isCardHibernated(card.name) }"
+                                                                :class="{ checked: !isCardHibernatedForSlot(card.name, 'reviewer') }"
                                                             >
-                                                                <svg v-if="!isCardHibernated(card.name)" viewBox="0 0 24 24" class="check-icon"><path d="M20 6 9 17l-5-5"/></svg>
+                                                                <svg v-if="!isCardHibernatedForSlot(card.name, 'reviewer')" viewBox="0 0 24 24" class="check-icon"><path d="M20 6 9 17l-5-5"/></svg>
                                                             </div>
                                                             <div class="member-name-block">
                                                                 <strong class="member-label">{{ card.label || card.name }}</strong>
                                                                 <span class="member-slug">{{ card.name }}</span>
                                                             </div>
                                                         </div>
-                                                        <!-- 状态徽标与切换按钮 -->
                                                         <button
                                                             type="button"
                                                             class="session-toggle-btn"
-                                                            :class="{ active: !isCardHibernated(card.name), hibernated: isCardHibernated(card.name) }"
-                                                            :title="isCardHibernated(card.name) ? '点击将其加入本会话出战小队' : '点击将此专家从本会话排除'"
+                                                            :class="{ active: !isCardHibernatedForSlot(card.name, 'reviewer'), hibernated: isCardHibernatedForSlot(card.name, 'reviewer') }"
+                                                            :title="isCardHibernatedForSlot(card.name, 'reviewer') ? '点击恢复审查出战' : '点击在此工位排除'"
                                                             :disabled="isRunning"
-                                                            @click.stop="toggleSessionCard(card.name)"
+                                                            @click.stop="toggleSessionCardForSlot(card.name, 'reviewer')"
                                                         >
                                                             <span class="status-indicator"></span>
-                                                            <span>{{ isCardHibernated(card.name) ? '✕ 已排除' : '✓ 出战中' }}</span>
+                                                            <span>{{ isCardHibernatedForSlot(card.name, 'reviewer') ? '✕ 已排除' : '✓ 出战中' }}</span>
                                                         </button>
                                                     </div>
 
                                                     <div class="member-badges-row">
-                                                        <div class="member-model-tag" :title="`绑定的模型: ${getCardModelName(card.model_id)}`">
+                                                        <div class="member-model-tag" :title="card.model_id ? `专属锁定: ${getCardModelName(card.model_id)}` : '跟随审查工位算力'">
                                                             <span class="model-icon">🎯</span>
-                                                            <span class="model-text">{{ getCardModelName(card.model_id) }}</span>
+                                                            <span class="model-text">{{ card.model_id ? getCardModelName(card.model_id) : '跟随工位算力' }}</span>
                                                         </div>
-                                                        <span
-                                                            v-for="badge in getCardKindBadges(card)"
-                                                            :key="badge.key"
-                                                            class="kind-badge"
-                                                            :class="`kind-${badge.key}`"
-                                                        >
-                                                            {{ badge.label }}
+                                                        <span v-if="card.focus_domains && card.focus_domains !== '[]'" class="scope-fence-badge" :title="`预装材料: ${card.focus_domains}`">
+                                                            📦 预装材料
                                                         </span>
-                                                        <span v-if="card.hard_scope" class="scope-fence-badge" :title="`物理写入围栏: ${card.hard_scope}`">
-                                                            🚧 范围: {{ card.hard_scope }}
+                                                        <span v-if="card.custom_schema" class="scope-fence-badge" title="定义了自定义契约字段">
+                                                            📑 特化契约
                                                         </span>
                                                     </div>
 
                                                     <div class="member-persona-excerpt" :title="card.persona_prompt || card.scope_hints">
-                                                        {{ card.scope_hints || card.persona_prompt?.slice(0, 72) || '通用专业角色卡' }}
+                                                        {{ card.scope_hints || card.persona_prompt?.slice(0, 72) || '通用质检验收角色卡' }}
                                                     </div>
                                                 </div>
                                             </div>
 
-                                            <!-- 空状态提示 -->
                                             <div v-else class="squad-empty-box">
-                                                <span class="empty-icon">🎭</span>
+                                                <span class="empty-icon">🛡️</span>
                                                 <div class="empty-text">
-                                                    <strong>{{ squadKindFilter === 'all' ? '专家库暂无已启用的自定义角色卡' : '该工种插槽暂无已启用的专家卡' }}</strong>
-                                                    <p>{{ squadKindFilter === 'all' ? '当前所有子 Agent 均使用主脑默认通用基线。可前往专家工坊载入前端、后端或安全审计专家卡。' : '可前往专家工坊为该插槽创建或启用专精角色卡。' }}</p>
+                                                    <strong>暂无审查验收专属角色卡</strong>
+                                                    <p>当前阶段审查将使用跨模型家族异构对抗兜底。可前往专家工坊创建前端门禁官、后端架构审查等角色卡。</p>
                                                 </div>
                                                 <button
                                                     type="button"
                                                     class="load-preset-btn"
                                                     @click="openRoleManager"
                                                 >
-                                                    👉 前往「Agent 专家工坊」一键管理专家
+                                                    👉 前往「Agent 专家工坊」管理角色卡
                                                 </button>
                                             </div>
+                                        </div>
+                                    </div>
 
-                                            <div class="squad-footer-mechanism">
-                                                <span class="mechanism-icon">💡</span>
-                                                <div class="mechanism-text">
-                                                    <strong>插槽自适应与兜底调度机制：</strong>
-                                                    主 Agent 按任务工种（改码 writer / 调研 worker / 审查 reviewer）自动从「已入选」的专家中匹配派发。已休眠的专家本会话不会被调用；审查插槽无专家时自动由跨厂商异构对抗模型兜底。
+                                    <!-- Station 4: 🔎 调研探针工位 (Scout / Worker) -->
+                                    <div v-else-if="activeRoutingTab === 'scout'" class="tab-pane-content station-pane">
+                                        <div class="squad-section station-section">
+                                            <div class="section-head">
+                                                <div class="section-title-wrap">
+                                                    <div class="section-title-row">
+                                                        <span class="section-title">🔎 调研探针工位 (Scout / Worker)</span>
+                                                        <span
+                                                            class="section-badge-count"
+                                                            :class="{ 'is-custom': isScoutCustom }"
+                                                        >
+                                                            {{ isScoutCustom ? `出战: ${scoutActiveCardsCount} / ${scoutRoleCards.length}` : `🌟 全员就绪 (${scoutRoleCards.length})` }}
+                                                        </span>
+                                                    </div>
+                                                    <span class="section-desc">
+                                                        负责跨文件探索、长文本检索与只读探针。独立配置，不影响改码与审查。
+                                                    </span>
                                                 </div>
+                                                <div class="squad-head-actions">
+                                                    <button
+                                                        v-if="isScoutCustom"
+                                                        type="button"
+                                                        class="squad-action-pill-btn reset"
+                                                        title="恢复该工种全部专家出战"
+                                                        :disabled="isRunning"
+                                                        @click="resetSlotToAllActive('worker')"
+                                                    >
+                                                        <span>🌟 恢复全员</span>
+                                                    </button>
+                                                    <button
+                                                        v-else
+                                                        type="button"
+                                                        class="squad-action-pill-btn exclude-all"
+                                                        title="探针排除所有角色，本次任务探针直接使用工位模型"
+                                                        :disabled="isRunning"
+                                                        @click="hibernateAllCardsForSlot('worker')"
+                                                    >
+                                                        <span>🚫 全部排除</span>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        class="manage-roles-link-btn"
+                                                        title="打开 Agent 专家工坊"
+                                                        @click="openRoleManager"
+                                                    >
+                                                        <span>工坊管理</span>
+                                                        <svg viewBox="0 0 24 24" class="link-icon"><path d="m9 18 6-6-6-6"/></svg>
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            <!-- 💻 该工位绑定算力 -->
+                                            <div class="station-model-bar">
+                                                <div class="station-model-label">
+                                                    <span class="bar-icon">💻</span>
+                                                    <span>探针工位算力:</span>
+                                                </div>
+                                                <div class="station-model-picker">
+                                                    <button
+                                                        type="button"
+                                                        class="slot-choice-pill"
+                                                        :class="{ active: getSlotChoice('scout') === 'pro' }"
+                                                        :title="`指定使用模型 1: ${getModelDisplayName(modelRouting.pro)}`"
+                                                        :disabled="isRunning"
+                                                        @click="setSlotChoice('scout', 'pro')"
+                                                    >
+                                                        🥇 模型 1 (Pro)
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        class="slot-choice-pill"
+                                                        :class="{ active: getSlotChoice('scout') === 'flash' || !getSlotChoice('scout') }"
+                                                        :title="`指定使用模型 2: ${getModelDisplayName(modelRouting.flash)}`"
+                                                        :disabled="isRunning"
+                                                        @click="setSlotChoice('scout', 'flash')"
+                                                    >
+                                                        🥈 模型 2 (Flash)
+                                                    </button>
+                                                    <select
+                                                        class="slot-model-select"
+                                                        :class="{ active: isCustomSpecificModel('scout') }"
+                                                        :disabled="isRunning"
+                                                        :value="isCustomSpecificModel('scout') ? getSlotChoice('scout') : ''"
+                                                        @change="onSlotSelectChange('scout', ($event.target as HTMLSelectElement).value)"
+                                                    >
+                                                        <option value="">{{ isCustomSpecificModel('scout') ? `指定: ${getModelDisplayName(getSlotChoice('scout'))}` : '更多独立模型…' }}</option>
+                                                        <option
+                                                            v-for="m in allModels"
+                                                            :key="m.id"
+                                                            :value="m.id"
+                                                        >
+                                                            {{ m.display_name || m.name }}
+                                                        </option>
+                                                    </select>
+                                                </div>
+                                            </div>
+
+                                            <!-- 探针卡片网格 -->
+                                            <div v-if="scoutRoleCards.length > 0" class="squad-cards-grid">
+                                                <div
+                                                    v-for="card in scoutRoleCards"
+                                                    :key="card.id"
+                                                    class="squad-member-card"
+                                                    :class="{
+                                                        'is-active': !isCardHibernatedForSlot(card.name, 'worker'),
+                                                        'is-hibernated': isCardHibernatedForSlot(card.name, 'worker'),
+                                                    }"
+                                                    :title="isCardHibernatedForSlot(card.name, 'worker') ? '点击将其加入探针出战' : '点击将此专家从调研探针中排除'"
+                                                    @click="toggleSessionCardForSlot(card.name, 'worker')"
+                                                >
+                                                    <div class="member-card-header">
+                                                        <div class="member-identity">
+                                                            <div
+                                                                class="member-checkbox"
+                                                                :class="{ checked: !isCardHibernatedForSlot(card.name, 'worker') }"
+                                                            >
+                                                                <svg v-if="!isCardHibernatedForSlot(card.name, 'worker')" viewBox="0 0 24 24" class="check-icon"><path d="M20 6 9 17l-5-5"/></svg>
+                                                            </div>
+                                                            <div class="member-name-block">
+                                                                <strong class="member-label">{{ card.label || card.name }}</strong>
+                                                                <span class="member-slug">{{ card.name }}</span>
+                                                            </div>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            class="session-toggle-btn"
+                                                            :class="{ active: !isCardHibernatedForSlot(card.name, 'worker'), hibernated: isCardHibernatedForSlot(card.name, 'worker') }"
+                                                            :title="isCardHibernatedForSlot(card.name, 'worker') ? '点击恢复探针出战' : '点击在此工位排除'"
+                                                            :disabled="isRunning"
+                                                            @click.stop="toggleSessionCardForSlot(card.name, 'worker')"
+                                                        >
+                                                            <span class="status-indicator"></span>
+                                                            <span>{{ isCardHibernatedForSlot(card.name, 'worker') ? '✕ 已排除' : '✓ 出战中' }}</span>
+                                                        </button>
+                                                    </div>
+
+                                                    <div class="member-badges-row">
+                                                        <div class="member-model-tag" :title="card.model_id ? `专属锁定: ${getCardModelName(card.model_id)}` : '跟随探针工位算力'">
+                                                            <span class="model-icon">🎯</span>
+                                                            <span class="model-text">{{ card.model_id ? getCardModelName(card.model_id) : '跟随工位算力' }}</span>
+                                                        </div>
+                                                        <span v-if="card.hard_scope" class="scope-fence-badge" :title="`探索围栏: ${card.hard_scope}`">
+                                                            🚧 {{ card.hard_scope }}
+                                                        </span>
+                                                    </div>
+
+                                                    <div class="member-persona-excerpt" :title="card.persona_prompt || card.scope_hints">
+                                                        {{ card.scope_hints || card.persona_prompt?.slice(0, 72) || '通用调研探针角色卡' }}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div v-else class="squad-empty-box">
+                                                <span class="empty-icon">🔎</span>
+                                                <div class="empty-text">
+                                                    <strong>暂无调研探针专属角色卡</strong>
+                                                    <p>当前调研探针使用基础工位模型。可前往专家工坊创建文档查阅、网络抓取、安全侦察等探针角色。</p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    class="load-preset-btn"
+                                                    @click="openRoleManager"
+                                                >
+                                                    👉 前往「Agent 专家工坊」管理角色卡
+                                                </button>
                                             </div>
                                         </div>
                                     </div>
@@ -1173,7 +1428,7 @@ async function handleFileDrop(e: DragEvent) {
 }
 const modelPickerRef = ref<HTMLElement | null>(null);
 const modelMenuOpen = ref(false);
-const activeRoutingTab = ref<"models" | "roles">("models");
+const activeRoutingTab = ref<"brain" | "writer" | "reviewer" | "scout">("brain");
 const budgetPickerRef = ref<HTMLElement | null>(null);
 const budgetMenuOpen = ref(false);
 const planPickerRef = ref<HTMLElement | null>(null);
@@ -1215,39 +1470,6 @@ function getCardModelName(modelId?: string): string {
     return found ? (found.display_name || found.name) : modelId;
 }
 
-const coreTaskSlots = [
-    {
-        key: "reviewer",
-        icon: "🛡️",
-        name: "阶段审查 (Reviewer)",
-        desc: "质量验收与防翻车门禁",
-    },
-    {
-        key: "writer",
-        icon: "✍️",
-        name: "改码写入 (Writer)",
-        desc: "代码编写与 diff 修改",
-    },
-    {
-        key: "scout",
-        icon: "🔎",
-        name: "探索阅读 (Scout / 套索)",
-        desc: "文件查阅与只读探针",
-    },
-    {
-        key: "planner",
-        icon: "🧭",
-        name: "任务规划 (Planner)",
-        desc: "首步全局架构与任务拆解",
-    },
-    {
-        key: "executor",
-        icon: "⚙️",
-        name: "常规执行 (Executor)",
-        desc: "日常工具调度与执行推进",
-    },
-];
-
 function getModelDisplayName(modelId?: string): string {
     return getCardModelName(modelId);
 }
@@ -1288,116 +1510,143 @@ function onSlotSelectChange(slotKey: string, modelId: string) {
     setSlotChoice(slotKey, modelId);
 }
 
-const hasAnyCustomRoleSlot = computed(() => {
-    const roleModels = props.modelRouting?.role_models || {};
-    return Object.keys(roleModels).length > 0;
-});
-
-function resetAllRoleSlots() {
-    if (props.isRunning) return;
-    emit("update:model-routing", {
-        ...props.modelRouting,
-        role_models: {},
-    });
-}
-
-function getCardKindBadges(card: RoleCard): Array<{ key: string; label: string }> {
-    const raw = (card.allowed_kinds || "*").trim();
-    if (raw === "*" || !raw) {
-        return [{ key: "all", label: "🌟 全能调度 (*)" }];
-    }
-    const map: Record<string, string> = {
-        writer: "✍️ 代码编写",
-        worker: "🔎 调研探针",
-        scout: "🛰️ 侦察分析",
-        reviewer: "🛡️ 质量审查",
-    };
-    return raw.split(/[,;，；\s]+/).filter(Boolean).map((k) => {
-        const lower = k.toLowerCase();
-        return {
-            key: lower,
-            label: map[lower] || `🏷️ ${k}`,
-        };
-    });
-}
-
 function openRoleManager() {
     modelMenuOpen.value = false;
     emit("open-roles");
 }
 
-const squadKindFilter = ref<"all" | "writer" | "reviewer" | "worker">("all");
-
-const disabledRoleCards = computed(() => {
-    return props.modelRouting?.disabled_role_cards || [];
-});
-
-const isCustomSquadActive = computed(() => {
-    return disabledRoleCards.value.length > 0;
-});
-
-function isCardHibernated(name: string): boolean {
-    return disabledRoleCards.value.some((d) => d.toLowerCase() === name.toLowerCase());
+function isCardHibernatedForSlot(name: string, slot: string): boolean {
+    const list = props.modelRouting?.disabled_role_cards || [];
+    const nameLower = name.toLowerCase();
+    const slotPrefix = `${slot.toLowerCase()}:`;
+    return list.some((d) => {
+        const dLower = d.toLowerCase();
+        if (dLower === nameLower) return true;
+        if (dLower.startsWith(slotPrefix)) {
+            return dLower.slice(slotPrefix.length) === nameLower;
+        }
+        if ((slot.toLowerCase() === 'scout' && dLower.startsWith('worker:')) ||
+            (slot.toLowerCase() === 'worker' && dLower.startsWith('scout:'))) {
+            return dLower.split(':')[1] === nameLower;
+        }
+        return false;
+    });
 }
 
-function toggleSessionCard(name: string) {
+function toggleSessionCardForSlot(name: string, slot: string) {
     if (props.isRunning) return;
-    const list = [...(props.modelRouting?.disabled_role_cards || [])];
-    const idx = list.findIndex((n) => n.toLowerCase() === name.toLowerCase());
-    if (idx >= 0) {
-        list.splice(idx, 1);
-    } else {
-        list.push(name);
+    const currentList = [...(props.modelRouting?.disabled_role_cards || [])];
+    const nameLower = name.toLowerCase();
+    const slotKey = `${slot.toLowerCase()}:${nameLower}`;
+    const isCurrentlyHibernated = isCardHibernatedForSlot(name, slot);
+
+    const filteredList = currentList.filter((d) => {
+        const dLower = d.toLowerCase();
+        if (dLower === nameLower) return false;
+        if (dLower === slotKey) return false;
+        if (slot === 'worker' && dLower === `scout:${nameLower}`) return false;
+        if (slot === 'scout' && dLower === `worker:${nameLower}`) return false;
+        return true;
+    });
+
+    const wasLegacyGlobal = currentList.some((d) => d.toLowerCase() === nameLower);
+    if (wasLegacyGlobal) {
+        const allSlots = ["writer", "reviewer", "worker"];
+        for (const s of allSlots) {
+            if (s !== slot.toLowerCase()) {
+                filteredList.push(`${s}:${nameLower}`);
+            }
+        }
+    }
+
+    if (!isCurrentlyHibernated) {
+        filteredList.push(slotKey);
+    }
+
+    emit("update:model-routing", {
+        ...props.modelRouting,
+        disabled_role_cards: filteredList,
+    });
+}
+
+const writerRoleCards = computed(() => {
+    return allEnabledRoleCards.value.filter((c) => {
+        const raw = (c.allowed_kinds || "*").toLowerCase();
+        return raw === "*" || raw.includes("writer");
+    });
+});
+
+const reviewerRoleCards = computed(() => {
+    return allEnabledRoleCards.value.filter((c) => {
+        const raw = (c.allowed_kinds || "*").toLowerCase();
+        return raw === "*" || raw.includes("reviewer");
+    });
+});
+
+const scoutRoleCards = computed(() => {
+    return allEnabledRoleCards.value.filter((c) => {
+        const raw = (c.allowed_kinds || "*").toLowerCase();
+        return raw === "*" || raw.includes("worker") || raw.includes("scout");
+    });
+});
+
+const writerActiveCardsCount = computed(() => {
+    return writerRoleCards.value.filter((c) => !isCardHibernatedForSlot(c.name, 'writer')).length;
+});
+
+const reviewerActiveCardsCount = computed(() => {
+    return reviewerRoleCards.value.filter((c) => !isCardHibernatedForSlot(c.name, 'reviewer')).length;
+});
+
+const scoutActiveCardsCount = computed(() => {
+    return scoutRoleCards.value.filter((c) => !isCardHibernatedForSlot(c.name, 'worker')).length;
+});
+
+const isWriterCustom = computed(() => {
+    return writerRoleCards.value.some((c) => isCardHibernatedForSlot(c.name, "writer"));
+});
+
+const isReviewerCustom = computed(() => {
+    return reviewerRoleCards.value.some((c) => isCardHibernatedForSlot(c.name, "reviewer"));
+});
+
+const isScoutCustom = computed(() => {
+    return scoutRoleCards.value.some((c) => isCardHibernatedForSlot(c.name, "worker"));
+});
+
+function resetSlotToAllActive(slot: string) {
+    if (props.isRunning) return;
+    const currentList = [...(props.modelRouting?.disabled_role_cards || [])];
+    const slotPrefix = `${slot.toLowerCase()}:`;
+    const filtered = currentList.filter((d) => {
+        const dLower = d.toLowerCase();
+        if (dLower.startsWith(slotPrefix)) return false;
+        if (slot === 'scout' && dLower.startsWith('worker:')) return false;
+        if (slot === 'worker' && dLower.startsWith('scout:')) return false;
+        return true;
+    });
+    emit("update:model-routing", {
+        ...props.modelRouting,
+        disabled_role_cards: filtered,
+    });
+}
+
+function hibernateAllCardsForSlot(slot: string) {
+    if (props.isRunning) return;
+    const currentList = [...(props.modelRouting?.disabled_role_cards || [])];
+    const cards = slot === 'writer' ? writerRoleCards.value : slot === 'reviewer' ? reviewerRoleCards.value : scoutRoleCards.value;
+    const slotPrefix = `${slot.toLowerCase()}:`;
+    for (const card of cards) {
+        const key = `${slotPrefix}${card.name.toLowerCase()}`;
+        if (!currentList.some((d) => d.toLowerCase() === key)) {
+            currentList.push(key);
+        }
     }
     emit("update:model-routing", {
         ...props.modelRouting,
-        disabled_role_cards: list,
+        disabled_role_cards: currentList,
     });
 }
-
-function resetToAllActive() {
-    if (props.isRunning) return;
-    emit("update:model-routing", {
-        ...props.modelRouting,
-        disabled_role_cards: [],
-    });
-}
-
-function hibernateAllCards() {
-    if (props.isRunning) return;
-    const allNames = allEnabledRoleCards.value.map((c) => c.name);
-    emit("update:model-routing", {
-        ...props.modelRouting,
-        disabled_role_cards: allNames,
-    });
-}
-
-const sessionActiveCardsCount = computed(() => {
-    return allEnabledRoleCards.value.filter((c) => !isCardHibernated(c.name)).length;
-});
-
-function countByKind(kind: string): number {
-    return allEnabledRoleCards.value.filter((c) => {
-        const raw = (c.allowed_kinds || "*").toLowerCase();
-        return raw === "*" || raw.includes(kind);
-    }).length;
-}
-
-function countActiveByKind(kind: string): number {
-    return allEnabledRoleCards.value.filter((c) => {
-        if (isCardHibernated(c.name)) return false;
-        const raw = (c.allowed_kinds || "*").toLowerCase();
-        return raw === "*" || raw.includes(kind);
-    }).length;
-}
-
-const filteredRoleCards = computed(() => {
-    if (squadKindFilter.value === "all") return allEnabledRoleCards.value;
-    return allEnabledRoleCards.value.filter((c) => {
-        const raw = (c.allowed_kinds || "*").toLowerCase();
-        return raw === "*" || raw.includes(squadKindFilter.value);
-    });
-});
 
 const currentStageReviewerOverride = computed(() => {
     return (props.modelRouting?.stage_reviewer_override || "").trim();
@@ -1409,11 +1658,7 @@ const isStageReviewerDisabled = computed(() => {
 });
 
 const activeReviewerCards = computed(() => {
-    return allEnabledRoleCards.value.filter((c) => {
-        if (isCardHibernated(c.name)) return false;
-        const raw = (c.allowed_kinds || "*").toLowerCase();
-        return raw === "*" || raw.includes("reviewer");
-    });
+    return reviewerRoleCards.value.filter((c) => !isCardHibernatedForSlot(c.name, "reviewer"));
 });
 
 const stageReviewerBadgeText = computed(() => {
