@@ -653,6 +653,7 @@ textarea::placeholder {
 .model-routing-popover {
     box-sizing: border-box;
     overflow-y: auto;
+    overflow-x: hidden;
     background: #18181c;
     border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 12px;
@@ -1763,7 +1764,14 @@ textarea::placeholder {
     align-items: center;
     gap: 3px;
     flex: 1 1 auto;
-    overflow-x: auto;
+    overflow: hidden;
+    scrollbar-width: none;
+}
+
+.routing-tabs-nav::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
 }
 
 .routing-tab-btn {
@@ -1991,7 +1999,7 @@ textarea::placeholder {
 }
 
 .slot-choice-pill {
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: 4px;
     font-size: 10px;
     font-weight: 550;
@@ -2001,6 +2009,7 @@ textarea::placeholder {
     cursor: pointer;
     transition: all 0.15s ease;
     white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .slot-choice-pill:hover:not(:disabled) {
@@ -2024,7 +2033,7 @@ textarea::placeholder {
 
 .slot-model-select {
     height: 21px;
-    padding: 0 5px;
+    padding: 0 4px;
     font-size: 10px;
     background: rgba(0, 0, 0, 0.4);
     border: 1px solid rgba(255, 255, 255, 0.1);
@@ -2032,7 +2041,9 @@ textarea::placeholder {
     color: #8e8e9f;
     cursor: pointer;
     outline: none;
-    max-width: 95px;
+    max-width: 90px;
+    white-space: nowrap;
+    flex-shrink: 0;
     transition: all 0.15s ease;
 }
 
@@ -2099,19 +2110,21 @@ textarea::placeholder {
 .station-model-label {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: 11px;
     font-weight: 600;
     color: #a1a1aa;
     white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .station-model-picker {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    flex-wrap: wrap;
+    gap: 4px;
+    flex-wrap: nowrap;
     justify-content: flex-end;
+    flex-shrink: 0;
 }
 
 .squad-section .section-head {
@@ -2126,6 +2139,7 @@ textarea::placeholder {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    min-width: 0;
 }
 
 .squad-section .section-title-row {
@@ -2164,6 +2178,7 @@ textarea::placeholder {
     padding: 2px 8px;
     border-radius: 999px;
     white-space: nowrap;
+    flex-shrink: 0;
 }
 .gate-current-status-tag.status-default {
     background: rgba(59, 130, 246, 0.12);
@@ -2180,23 +2195,23 @@ textarea::placeholder {
 .gate-controls-row {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 5px;
 }
 
 .gate-mode-pills {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     flex-wrap: wrap;
 }
 
 .gate-mode-pill-btn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-size: 11.5px;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 5px;
+    font-size: 11px;
     font-weight: 550;
     color: #a1a1aa;
     background: rgba(255, 255, 255, 0.05);
@@ -2227,10 +2242,10 @@ textarea::placeholder {
 
 /* 门禁策略动态提示条 */
 .gate-policy-banner {
-    padding: 6px 10px;
-    border-radius: 6px;
-    font-size: 11px;
-    line-height: 1.45;
+    padding: 4px 8px;
+    border-radius: 5px;
+    font-size: 10.5px;
+    line-height: 1.4;
 }
 
 .gate-policy-banner.default {
@@ -2397,9 +2412,9 @@ textarea::placeholder {
 /* 专家卡片网格 - 支持多专家优雅滚动 */
 .squad-cards-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 8px;
-    max-height: 275px;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 6px;
+    max-height: 160px;
     overflow-y: auto;
     padding-right: 4px;
 }
@@ -2429,11 +2444,11 @@ textarea::placeholder {
 .squad-member-card {
     background: rgba(0, 0, 0, 0.32);
     border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 8px;
-    padding: 9px 11px;
+    border-radius: 7px;
+    padding: 6px 9px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 5px;
     transition: all 0.15s ease;
     cursor: pointer;
     user-select: none;
@@ -2467,7 +2482,7 @@ textarea::placeholder {
 
 .member-card-header {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 6px;
 }
@@ -2476,10 +2491,10 @@ textarea::placeholder {
 .session-toggle-btn {
     display: inline-flex;
     align-items: center;
-    gap: 4.5px;
-    padding: 2px 7px;
+    gap: 4px;
+    padding: 1.5px 6px;
     border-radius: 4px;
-    font-size: 10px;
+    font-size: 9.5px;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -2563,22 +2578,24 @@ textarea::placeholder {
 
 .member-name-block {
     display: flex;
-    flex-direction: column;
+    align-items: baseline;
+    gap: 4px;
     min-width: 0;
     overflow: hidden;
 }
 
 .member-label {
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 600;
     color: #f4f4f5;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    flex-shrink: 0;
 }
 
 .member-slug {
-    font-size: 9.5px;
+    font-size: 9px;
     color: #71717a;
     font-family: 'JetBrains Mono', monospace;
     white-space: nowrap;

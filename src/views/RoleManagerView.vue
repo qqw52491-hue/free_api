@@ -15,6 +15,173 @@
       </div>
     </header>
 
+    <!-- 🤖 AI 智能专家角色孵化器 -->
+    <section class="ai-incubator-card card">
+      <div class="ai-incubator-head">
+        <div class="ai-title-wrap">
+          <div class="ai-badge">
+            <span class="badge-icon">🤖</span>
+            <span>AI 角色孵化器</span>
+          </div>
+          <h3 class="ai-heading">自然语言智能孵化角色</h3>
+          <p class="ai-subheading">
+            描述你想要的专家职能或点击下方方向建议，大模型自动推演专业人设、物理围栏、验证命令与交付契约
+          </p>
+        </div>
+        <div class="ai-head-actions">
+          <div class="ai-model-select-wrap">
+            <span class="model-select-lbl">孵化模型:</span>
+            <ModelSelectDropdown
+              v-model="aiModelId"
+              :models="models"
+              placeholder="跟随全局路由"
+              size="sm"
+            />
+          </div>
+          <button
+            type="button"
+            class="toggle-suggestions-btn"
+            :class="{ active: showAiSuggestions }"
+            @click="showAiSuggestions = !showAiSuggestions"
+          >
+            <span>💡 灵感建议库</span>
+            <span class="toggle-arrow">{{ showAiSuggestions ? '▲' : '▼' }}</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 💡 结构化分类灵感建议 (点击快速填入) -->
+      <div v-show="showAiSuggestions" class="ai-suggestions-panel">
+        <div
+          v-for="group in aiSuggestionGroups"
+          :key="group.category"
+          class="sugg-group"
+        >
+          <div class="sugg-group-head">
+            <span class="group-title">{{ group.category }}</span>
+            <span class="group-desc">{{ group.desc }}</span>
+          </div>
+          <div class="sugg-chips-wrap">
+            <button
+              v-for="item in group.items"
+              :key="item.title"
+              type="button"
+              class="sugg-chip"
+              :title="item.prompt"
+              @click="applyAiSuggestion(item)"
+            >
+              <span class="sugg-icon">{{ item.icon }}</span>
+              <span class="sugg-name">{{ item.title }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 💬 多轮对话记录流 (有历史记录时展示) -->
+      <div v-if="aiChatHistory.length > 0" class="ai-chat-thread-box">
+        <div class="chat-thread-header">
+          <span class="thread-title">💬 协同设计对话流 (已进行 {{ Math.ceil(aiChatHistory.length / 2) }} 轮调优 · 下方表单实时同步)</span>
+          <button type="button" class="btn-reset-chat" @click="resetAiChat" title="清空对话历史，开启全新孵化">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+            清空重开
+          </button>
+        </div>
+        <div class="chat-bubbles-scroll" ref="chatScrollRef">
+          <div
+            v-for="(msg, idx) in aiChatHistory"
+            :key="idx"
+            class="chat-bubble-row"
+            :class="msg.role"
+          >
+            <div class="bubble-avatar">
+              {{ msg.role === 'user' ? '👤' : '🤖' }}
+            </div>
+            <div class="bubble-content">
+              <div class="bubble-text">{{ msg.content }}</div>
+              <div v-if="msg.role === 'assistant'" class="bubble-meta">
+                <span class="sync-tag">✓ 角色草案已同步更新</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="aiGenerating" class="chat-bubble-row assistant thinking">
+            <div class="bubble-avatar">🤖</div>
+            <div class="bubble-content">
+              <div class="bubble-thinking">
+                <span class="spinner-xs"></span>
+                <span>正在根据您的要求分析代码防线与契约字段…</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 快捷微调胶囊 (有草案时展示) -->
+      <div v-if="aiChatHistory.length > 0" class="quick-tweaks-bar">
+        <span class="tweaks-label">快速微调:</span>
+        <div class="tweaks-chips">
+          <button
+            v-for="tweak in quickTweakOptions"
+            :key="tweak.label"
+            type="button"
+            class="tweak-chip"
+            @click="applyQuickTweak(tweak.prompt)"
+          >
+            {{ tweak.label }}
+          </button>
+        </div>
+      </div>
+
+      <!-- 输入框与生成动作 -->
+      <div class="ai-prompt-input-row">
+        <textarea
+          v-model="aiPrompt"
+          rows="2"
+          class="ai-prompt-textarea"
+          :placeholder="aiChatHistory.length ? '继续对 AI 说明微调意见（如『把测试命令改成 npm test』或『硬围栏加上 package.json』，按 Enter 发送）...' : '例如: 帮我定制一个专精 Vue3 + Tailwind CSS 的样式审查员，重点把关组件规范与移动端响应式，构建命令用 npm run build...'"
+          :disabled="aiGenerating"
+          @keydown.enter.ctrl.prevent="generateWithAi"
+        ></textarea>
+      </div>
+
+      <div class="ai-prompt-bottom-bar">
+        <div class="kind-hint-selector">
+          <span class="kind-hint-label">倾向挂载 (多选):</span>
+          <div class="kind-pills">
+            <button
+              type="button"
+              class="kind-pill-btn auto-pill"
+              :class="{ active: aiKindHints.length === 0 }"
+              @click="clearAiKindHints"
+              title="不限制挂载类型，由大模型根据场景自动判断最适合的角色类型"
+            >
+              ⚡ 自动判断
+            </button>
+            <button
+              v-for="k in aiKindOptions"
+              :key="k.value"
+              type="button"
+              class="kind-pill-btn"
+              :class="{ active: aiKindHints.includes(k.value) }"
+              @click="toggleAiKindHint(k.value)"
+            >
+              <span class="pill-check">{{ aiKindHints.includes(k.value) ? '✓' : '+' }}</span>
+              {{ k.label }}
+            </button>
+          </div>
+        </div>
+        <button
+          type="button"
+          class="btn primary ai-submit-btn"
+          :disabled="aiGenerating || !aiPrompt.trim()"
+          @click="generateWithAi"
+        >
+          <span v-if="aiGenerating" class="spinner-sm"></span>
+          <span v-else>{{ aiChatHistory.length ? '💬' : '✨' }}</span>
+          <span>{{ aiGenerating ? '正在深度思考并更新…' : aiChatHistory.length ? '发送微调指令' : '一键智能孵化并载入' }}</span>
+        </button>
+      </div>
+    </section>
+
     <!-- 预设模板快速添加栏 -->
     <section class="preset-templates-bar card">
       <div class="preset-header">
@@ -122,14 +289,27 @@
         />
       </label>
 
-      <label class="field wide">
-        <span class="field-label">专属 Persona 提示词 (定义专家的职责、挑刺准则与打分标准) <b class="req">*</b></span>
+      <div class="field wide">
+        <div class="persona-label-row">
+          <span class="field-label">专属 Persona 提示词 (定义专家的职责、挑刺准则与打分标准) <b class="req">*</b></span>
+          <button
+            type="button"
+            class="btn-polish-prompt"
+            :disabled="polishingPrompt || !form.persona_prompt.trim()"
+            @click="polishPromptWithAi"
+            title="调用大模型对当前人设进行专业度提升与规范强化"
+          >
+            <span v-if="polishingPrompt" class="spinner-xs"></span>
+            <span v-else>✨</span>
+            {{ polishingPrompt ? '深度润色中…' : 'AI 深度润色人设' }}
+          </button>
+        </div>
         <textarea
           v-model="form.persona_prompt"
           rows="6"
           placeholder="例如: 你是一位资深前端架构师与 UI 评审专家。重点审查 UI 配色、交互过渡、响应式适配度与代码优雅性。请给出结构化打分与改进项..."
         ></textarea>
-      </label>
+      </div>
 
       <!-- 🎯 上下文关注域 (Focus Domains / 系统预装材料) -->
       <div class="field wide focus-domain-section">
@@ -510,6 +690,132 @@ const isEditing = ref(false);
 const isCreating = ref(false);
 const feedbackMsg = ref('');
 const feedbackIsError = ref(false);
+
+const aiPrompt = ref('');
+const aiKindHints = ref<string[]>([]);
+const aiModelId = ref('');
+const aiGenerating = ref(false);
+const showAiSuggestions = ref(true);
+const polishingPrompt = ref(false);
+
+interface RoleChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+const aiChatHistory = ref<RoleChatMessage[]>([]);
+
+const aiKindOptions = [
+  { value: 'writer', label: '✍️ 改码专精 (Writer)' },
+  { value: 'reviewer', label: '🛡️ 阶段审查 (Reviewer)' },
+  { value: 'worker', label: '🔍 调研探针 (Worker)' },
+];
+
+function toggleAiKindHint(val: string) {
+  const idx = aiKindHints.value.indexOf(val);
+  if (idx >= 0) {
+    aiKindHints.value.splice(idx, 1);
+  } else {
+    aiKindHints.value.push(val);
+  }
+}
+
+function clearAiKindHints() {
+  aiKindHints.value = [];
+}
+
+const quickTweakOptions = [
+  { label: '🧪 改为 npm test', prompt: '把默认验证测试命令修改为 npm test' },
+  { label: '🧪 改为 cargo test', prompt: '把默认验证测试命令修改为 cargo test' },
+  { label: '🚧 围栏加上 package.json', prompt: '在强制物理围栏 (hard_scope) 中加上 package.json' },
+  { label: '🛡️ 增加风险评级契约', prompt: '在交付契约中增加 risk_level 字段，可选值为 low, medium, high, critical' },
+  { label: '🔥 人设要求更严苛挑刺', prompt: '在 Persona 人设中提出更严苛的审查挑刺标准，绝不允许带病通过' },
+  { label: '📱 强化移动端响应式', prompt: '在 Persona 人设中重点强化移动端断点、触摸目标与弹性布局的审查维度' },
+];
+
+function applyQuickTweak(promptText: string) {
+  aiPrompt.value = promptText;
+  generateWithAi();
+}
+
+function resetAiChat() {
+  aiChatHistory.value = [];
+  feedbackMsg.value = '';
+}
+
+const aiSuggestionGroups = [
+  {
+    category: '✍️ 改码专精 (Writer)',
+    desc: '专精特定语言、框架或目录的代码实现与重构',
+    items: [
+      {
+        icon: '🎨',
+        title: 'Vue3 / Tailwind 响应式改造专家',
+        kind: 'writer',
+        prompt: '专精 Vue3 组合式 API 与 Tailwind CSS，重点优化组件结构、代码优雅性与多端响应式排版。硬围栏限制在 src/ 目录，构建验证 npm run build',
+      },
+      {
+        icon: '🦀',
+        title: 'Rust 异步高并发加固专家',
+        kind: 'writer',
+        prompt: '专精 Tokio 异步运行时、通道并发安全、无锁结构与错误传播规范，代码稳健且高效。硬围栏限制在 src-tauri/ 目录，验证命令 cargo check',
+      },
+      {
+        icon: '📝',
+        title: '技术文档与 API 契约编撰官',
+        kind: 'writer',
+        prompt: '专精撰写结构优雅的技术架构说明、API 接口文档与 Mermaid 架构时序图，格式清晰专业。硬围栏限制在 docs/ 目录',
+      },
+    ],
+  },
+  {
+    category: '🛡️ 质量与安全审查 (Reviewer)',
+    desc: '阶段门禁中把关代码逻辑、安全合规、视觉美学与测试覆盖',
+    items: [
+      {
+        icon: '🛡️',
+        title: 'SQL 注入与权限越权审计官',
+        kind: 'reviewer',
+        prompt: '审查后端核心接口鉴权、SQL 注入风险、越权漏洞与敏感信息泄漏。特化交付契约包含 risk_level(low/medium/high/critical) 和 cve_refs 清单',
+      },
+      {
+        icon: '✨',
+        title: 'UI 视觉质感与微交互评审官',
+        kind: 'reviewer',
+        prompt: '资深 UI/UX 评审专家，重点挑剔页面排版美观度、暗色模式适配、动效过渡丝滑度与层级间距。交付契约包含 visual_score(0~100) 和 ui_flaws 清单',
+      },
+      {
+        icon: '🧪',
+        title: '单测覆盖率与异常边界守护官',
+        kind: 'reviewer',
+        prompt: '审查变更代码的单元测试完备性、边界异常分支覆盖与 Mock 严密性。验证测试命令执行 cargo test 或 npm test',
+      },
+      {
+        icon: '⚡',
+        title: '前端性能瓶颈与重渲染体检官',
+        kind: 'reviewer',
+        prompt: '排查长列表卡顿、内存泄漏隐患、高频重渲染与无意义计算，交付契约包含 perf_score 和 bottleneck_list',
+      },
+    ],
+  },
+  {
+    category: '🔎 调研与诊断探针 (Worker)',
+    desc: '只读模式搜寻代码依赖、调用链路追踪与故障定位',
+    items: [
+      {
+        icon: '🔍',
+        title: '跨文件架构依赖与接口调研员',
+        kind: 'worker',
+        prompt: '只读代码探针，快速扫描全局跨文件依赖树、API 调用链路与版本兼容性，为开发提供高密度技术事实',
+      },
+      {
+        icon: '🩺',
+        title: '报错日志反查与崩溃诊断员',
+        kind: 'worker',
+        prompt: '针对终端执行报错日志、panic 堆栈信息进行快速逆向排查，定位引发崩溃的问题源码行并给出排查线索',
+      },
+    ],
+  },
+];
 
 const form = reactive({
   name: '',
@@ -911,8 +1217,157 @@ async function loadModels() {
       platform_id: item.platform_id,
       platform_name: item.platform_name || item.platform_id,
     }));
+    if (!aiModelId.value && models.value.length > 0) {
+      const fastOne = models.value.find(
+        (m) => /flash|fast/i.test(m.name) || /flash|fast/i.test(m.id)
+      );
+      if (fastOne) {
+        aiModelId.value = fastOne.id;
+      }
+    }
   } catch (err) {
     console.error('加载模型列表失败', err);
+  }
+}
+
+function applyAiSuggestion(item: { icon: string; title: string; kind: string; prompt: string }) {
+  aiPrompt.value = item.prompt;
+  aiKindHints.value = [item.kind];
+}
+
+async function generateWithAi() {
+  const textToSend = aiPrompt.value.trim();
+  if (!textToSend) return;
+
+  const currentCard = isCreating.value || isEditing.value || aiChatHistory.value.length > 0 ? {
+    name: form.name,
+    label: form.label,
+    allowed_kinds: form.allowed_kinds.join(','),
+    hard_scope: form.hard_scope,
+    scope_hints: form.scope_hints,
+    default_test_command: form.default_test_command,
+    persona_prompt: form.persona_prompt,
+    focus_domains: form.focus_domains,
+    input_fields: form.input_fields,
+    schema_fields: form.schema_fields,
+  } : null;
+
+  // 1. 立即乐观将用户消息显示在对话框中，并立刻清空输入框
+  aiChatHistory.value.push({ role: 'user', content: textToSend });
+  aiPrompt.value = '';
+  aiGenerating.value = true;
+  feedbackMsg.value = '';
+
+  // 立即滚动到最新位置，呈现用户消息和思考中状态
+  setTimeout(() => {
+    const scrollEl = document.querySelector('.chat-bubbles-scroll');
+    if (scrollEl) {
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
+  }, 20);
+
+  try {
+    // 2. 将此条之前的历史记录传入，避免最新指令被重复拼接
+    const historyPayload = aiChatHistory.value
+      .slice(0, -1)
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    const res = await invoke<any>('chat_iterate_role_card_ai', {
+      prompt: textToSend,
+      history: historyPayload,
+      currentCard,
+      roleKindHint: aiKindHints.value.length ? aiKindHints.value.join(',') : null,
+      modelId: aiModelId.value || null,
+    });
+
+    aiChatHistory.value.push({ role: 'assistant', content: res.reply });
+
+    const roleData = res.card;
+    isCreating.value = true;
+    isEditing.value = false;
+
+    form.name = roleData.name || form.name || '';
+    form.label = roleData.label || form.label || '';
+    form.model_id = aiModelId.value || form.model_id || '';
+    form.persona_prompt = roleData.persona_prompt || form.persona_prompt || '';
+    form.scope_hints = roleData.scope_hints || '';
+    form.default_test_command = roleData.default_test_command || '';
+    form.allowed_kinds = Array.isArray(roleData.allowed_kinds) ? [...roleData.allowed_kinds] : [];
+    form.hard_scope = roleData.hard_scope || '';
+    form.max_concurrency = 0;
+    form.enabled = true;
+    form.focus_domains = Array.isArray(roleData.focus_domains)
+      ? [...roleData.focus_domains]
+      : ['git_diff', 'changed_files'];
+
+    if (Array.isArray(roleData.input_fields)) {
+      form.input_fields = roleData.input_fields.map((f: any) => ({
+        name: f.name || '',
+        field_type: f.field_type || 'string',
+        required: f.required !== false,
+        description: f.description || '',
+        allowed_values_str: f.allowed_values_str || '',
+      }));
+    }
+
+    if (Array.isArray(roleData.schema_fields)) {
+      form.schema_fields = roleData.schema_fields.map((f: any) => ({
+        name: f.name || '',
+        field_type: f.field_type || 'string',
+        required: f.required !== false,
+        description: f.description || '',
+        allowed_values_str: f.allowed_values_str || '',
+      }));
+    }
+
+    feedbackMsg.value = `✓ ${res.reply}`;
+    feedbackIsError.value = false;
+
+    setTimeout(() => {
+      const scrollEl = document.querySelector('.chat-bubbles-scroll');
+      if (scrollEl) {
+        scrollEl.scrollTop = scrollEl.scrollHeight;
+      }
+    }, 50);
+
+  } catch (err: any) {
+    aiChatHistory.value.push({
+      role: 'assistant',
+      content: `❌ 微调失败: ${err?.message || err}`,
+    });
+    feedbackMsg.value = `AI 孵化/微调失败: ${err?.message || err}`;
+    feedbackIsError.value = true;
+  } finally {
+    aiGenerating.value = false;
+    setTimeout(() => {
+      const scrollEl = document.querySelector('.chat-bubbles-scroll');
+      if (scrollEl) {
+        scrollEl.scrollTop = scrollEl.scrollHeight;
+      }
+    }, 50);
+  }
+}
+
+async function polishPromptWithAi() {
+  if (!form.persona_prompt.trim()) return;
+  polishingPrompt.value = true;
+  try {
+    const polished = await invoke<string>('polish_persona_prompt_ai', {
+      currentPrompt: form.persona_prompt.trim(),
+      roleName: form.name || form.label || null,
+      roleKind: form.allowed_kinds[0] || null,
+      modelId: form.model_id || aiModelId.value || null,
+    });
+    if (polished && polished.trim()) {
+      form.persona_prompt = polished.trim();
+      feedbackMsg.value = '✨ Persona 人设提示词已成功深度润色！';
+      feedbackIsError.value = false;
+    }
+  } catch (err: any) {
+    feedbackMsg.value = `润色失败: ${err?.message || err}`;
+    feedbackIsError.value = true;
+  } finally {
+    polishingPrompt.value = false;
   }
 }
 
@@ -1087,6 +1542,514 @@ onMounted(() => {
   border-radius: 12px;
   padding: 18px 20px;
   margin-bottom: 20px;
+}
+
+/* AI 角色孵化器卡片 */
+.ai-incubator-card {
+  background: linear-gradient(135deg, rgba(30, 27, 75, 0.45) 0%, rgba(24, 24, 27, 0.75) 50%, rgba(15, 23, 42, 0.5) 100%);
+  border: 1px solid rgba(129, 140, 248, 0.3);
+  box-shadow: 0 4px 24px rgba(79, 70, 229, 0.08);
+  position: relative;
+  overflow: hidden;
+}
+
+.ai-incubator-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #6366f1, #a855f7, #06b6d4);
+}
+
+.ai-incubator-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.ai-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  background: rgba(99, 102, 241, 0.18);
+  border: 1px solid rgba(129, 140, 248, 0.35);
+  color: #c7d2fe;
+  font-size: 11px;
+  font-weight: 600;
+  width: fit-content;
+}
+
+.ai-heading {
+  font-size: 15px;
+  font-weight: 700;
+  color: #f4f4f5;
+  margin: 0;
+}
+
+.ai-subheading {
+  font-size: 12.5px;
+  color: var(--text-3, #a1a1aa);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.ai-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ai-model-select-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-3, #a1a1aa);
+}
+
+.ai-model-select-wrap :deep(.model-select-wrapper) {
+  min-width: 170px;
+  max-width: 240px;
+}
+
+.toggle-suggestions-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #d4d4d8;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.toggle-suggestions-btn:hover,
+.toggle-suggestions-btn.active {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(99, 102, 241, 0.4);
+  color: #c7d2fe;
+}
+
+.toggle-arrow {
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+/* 灵感库面板 */
+.ai-suggestions-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sugg-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sugg-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e0e7ff;
+}
+
+.group-desc {
+  font-size: 11.5px;
+  color: #71717a;
+}
+
+.sugg-chips-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sugg-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #d4d4d8;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.sugg-chip:hover {
+  background: rgba(99, 102, 241, 0.16);
+  border-color: rgba(129, 140, 248, 0.4);
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+/* 对话流面板 */
+.ai-chat-thread-box {
+  margin-bottom: 12px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(129, 140, 248, 0.25);
+  border-radius: 10px;
+  padding: 10px 14px;
+}
+
+.chat-thread-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.thread-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #c7d2fe;
+}
+
+.btn-reset-chat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #a1a1aa;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-reset-chat:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+}
+
+.chat-bubbles-scroll {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.chat-bubbles-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.chat-bubbles-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+.chat-bubble-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.chat-bubble-row.user {
+  flex-direction: row-reverse;
+}
+
+.bubble-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.chat-bubble-row.user .bubble-content {
+  background: linear-gradient(135deg, rgba(79, 70, 229, 0.35) 0%, rgba(124, 58, 237, 0.35) 100%);
+  border: 1px solid rgba(129, 140, 248, 0.3);
+  border-radius: 8px 2px 8px 8px;
+  color: #f4f4f5;
+}
+
+.chat-bubble-row.assistant .bubble-content {
+  background: rgba(39, 39, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 2px 8px 8px 8px;
+  color: #e4e4e7;
+}
+
+.bubble-content {
+  max-width: 85%;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.bubble-text {
+  word-break: break-word;
+}
+
+.bubble-meta {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sync-tag {
+  font-size: 11px;
+  color: #34d399;
+  font-weight: 500;
+}
+
+.bubble-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #a1a1aa;
+}
+
+/* 快速微调栏 */
+.quick-tweaks-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.tweaks-label {
+  font-size: 11.5px;
+  color: #71717a;
+  white-space: nowrap;
+}
+
+.tweaks-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tweak-chip {
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  color: #c7d2fe;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tweak-chip:hover {
+  background: rgba(99, 102, 241, 0.25);
+  border-color: rgba(99, 102, 241, 0.5);
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+/* 输入与控制区 */
+.ai-prompt-input-row {
+  margin-bottom: 10px;
+}
+
+.ai-prompt-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(24, 24, 27, 0.9);
+  border: 1px solid rgba(129, 140, 248, 0.3);
+  border-radius: 8px;
+  color: #f4f4f5;
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.ai-prompt-textarea:focus {
+  border-color: #818cf8;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+.ai-prompt-bottom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.kind-hint-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kind-hint-label {
+  font-size: 12px;
+  color: var(--text-3, #a1a1aa);
+  white-space: nowrap;
+}
+
+.kind-pills {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.kind-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #a1a1aa;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.kind-pill-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #e4e4e7;
+}
+
+.kind-pill-btn.active {
+  background: rgba(99, 102, 241, 0.25);
+  border-color: rgba(99, 102, 241, 0.5);
+  color: #a5b4fc;
+  font-weight: 500;
+}
+
+.kind-pill-btn.auto-pill.active {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: rgba(59, 130, 246, 0.45);
+  color: #93c5fd;
+}
+
+.pill-check {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.ai-submit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ai-submit-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.4);
+}
+
+.ai-submit-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* 人设润色按钮 */
+.persona-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.btn-polish-prompt {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: rgba(139, 92, 246, 0.15);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  color: #c4b5fd;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-polish-prompt:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.28);
+  border-color: rgba(139, 92, 246, 0.6);
+  color: #ede9fe;
+  transform: translateY(-1px);
+}
+
+.btn-polish-prompt:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 微型 Spinner */
+.spinner-xs {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: inline-block;
+}
+
+.spinner-sm {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: inline-block;
 }
 
 /* 预设栏 */
