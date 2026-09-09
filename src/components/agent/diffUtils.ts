@@ -1124,12 +1124,9 @@ export function formatTokenCount(n?: number): string {
     return String(n);
 }
 
-/**
- * 从长思考内容中智能提取当前活跃的思考片段（末尾正在推演的核心句子），用于极速流光展示
- */
 export function extractActiveThoughtSentence(raw: string, maxLen = 110): string {
     if (!raw) return "正在深入分析并规划下一步动作 …";
-    // 1. 去除代码块、XML/HTML 标签、markdown 强调字符等，将换行与空白压缩为单空格
+    // 1. 去除代码块、XML/HTML 标签、markdown 强调字符等，将换行与连续空白压缩为单空格
     let stripped = raw
         .replace(/```[\s\S]*?```/g, " ")
         .replace(/<[^>]+>/g, " ")
@@ -1139,32 +1136,13 @@ export function extractActiveThoughtSentence(raw: string, maxLen = 110): string 
         .trim();
     if (!stripped) return "正在深入分析并规划下一步动作 …";
 
-    // 2. 若全文存在中文但末尾切出来是纯英文套话，优先截取末尾的中文有效思考段落
-    if (/[\u4e00-\u9fa5]/.test(stripped)) {
-        const chineseChunks = stripped.match(/[\u4e00-\u9fa5][^\n。！？!?]{6,120}/g);
-        if (chineseChunks && chineseChunks.length > 0) {
-            const lastChunk = chineseChunks[chineseChunks.length - 1].trim();
-            if (lastChunk.length >= 8) {
-                stripped = lastChunk;
-            }
-        }
-    }
-
-    // 3. 动态 Ticker Tail Window：占满整行（默认 ~110 字符，铺满整行视觉宽度）
-    // 🌟 绝不能从头部截断！必须保留末尾的活跃推演切片，让最新涌入的思考字符始终在右侧流动涌出！
+    // 2. 动态 Tail Window：自然推挤与末尾视窗追踪
+    // 🌟 绝不在遇到句号/标点时重置清空！新字在末尾自然长出追加，超出 maxLen 则保留最新尾部推挤出旧字
     if (stripped.length <= maxLen) {
         return stripped;
     }
 
-    // 取最后 maxLen 长度的活跃尾部
-    let tail = stripped.slice(-maxLen);
-    // 智能单词边界对齐：避免把英文单词硬生生切半（例如 "...ew, which could be" -> 往前找第一个空格）
-    const firstSpace = tail.indexOf(" ");
-    if (firstSpace > 0 && firstSpace <= 14) {
-        tail = tail.slice(firstSpace + 1);
-    }
-
-    return tail.trim();
+    return stripped.slice(-maxLen);
 }
 
 /**

@@ -192,14 +192,13 @@
                         <div class="running-preview-line line-active-action">
                             <span class="preview-spinner manus-spinner mini"></span>
                             <span :key="getPlanRunningPreview(entry).line3.actionKind" class="preview-tool-icon icon-anim-switch">{{ getPlanRunningPreview(entry).line3.icon }}</span>
-                            <!-- 思考态：真正的向左连续平滑跑马灯 -->
-                            <div v-if="getPlanRunningPreview(entry).line3.actionKind === 'think'" class="preview-ticker-viewport">
-                                <span class="preview-ticker-track text-shimmer-flow" :style="tickerTransformStyle">
-                                    {{ liveThoughtText }}
-                                </span>
-                            </div>
-                            <!-- 普通工具操作态：常规文本展示 -->
-                            <span v-else class="preview-text text-shimmer-flow">{{ getPlanRunningPreview(entry).line3.text }}</span>
+                            <!-- 思考态/操作态：自然推挤与末尾视窗追踪，新字在右侧追加，超出时自然把左侧旧字顶出 -->
+                            <span
+                                v-scroll-tail
+                                class="preview-text text-shimmer-flow"
+                            >
+                                {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? (liveThoughtText || getPlanRunningPreview(entry).line3.text) : getPlanRunningPreview(entry).line3.text }}
+                            </span>
                         </div>
                     </div>
 
@@ -461,11 +460,12 @@
                         <div class="running-preview-line line-active-action">
                             <span class="preview-spinner manus-spinner mini"></span>
                             <span class="preview-tool-icon icon-anim-switch">💭</span>
-                            <div class="preview-ticker-viewport">
-                                <span class="preview-ticker-track text-shimmer-flow" :style="tickerTransformStyle">
-                                    {{ liveThoughtText }}
-                                </span>
-                            </div>
+                            <span
+                                v-scroll-tail
+                                class="preview-text text-shimmer-flow"
+                            >
+                                {{ liveThoughtText || '正在连接模型并深度思考规划执行步骤 …' }}
+                            </span>
                         </div>
                     </div>
                 </article>
@@ -510,7 +510,7 @@
     </div>
 </template>
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, reactive, ref, shallowReactive, watch } from "vue";
+import { computed, nextTick, reactive, ref, shallowReactive, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AttachmentCard from "./AttachmentCard.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
@@ -709,88 +709,33 @@ const activeThoughtStartedAt = ref<number | null>(null);
 const followLiveTail = ref(true);
 const planExpandedState = reactive<Record<string, boolean>>({});
 
-// 🌟 真正的 60FPS 物理向左连续流动跑马灯引擎 (Hardware-Accelerated Marquee Flowing Engine)
-// 彻底解决「文字一个个蹦出来像加载进度条」的问题：
-// 1. 文本完整呈现，不再 slice 逐字打字；
-// 2. 通过 translate3d(-Xpx, 0, 0) 硬件加速持续向左平滑推演流动；
-// 3. 基础巡航速度 (48px/s) 确保一出现就持续平滑流动，绝不卡滞停顿；
-// 4. 超高速 (700tok/s) 爆发时自适应提速至 160~280px/s，飞速流淌后自然阻尼减速。
-const tickerOffset = ref(0);
-let tickerVelocity = 48; // 当前速度 px/s
-let lastTickerTime = 0;
-let tickerRafId: number | null = null;
-let lastThoughtLen = 0;
-
+// 🌟 实时思考推演流：自然推挤与末尾视窗追踪 (Tail-follow Push)
+// 1. 新思考字符在末尾自然长出追加；
+// 2. 超出单行容器宽度时，保持末尾对齐右侧，自然将左侧旧内容顶出视口；
+// 3. 绝不重新从头打字加载，绝不移动整个容器元素，稳定丝滑呈现
 const liveThoughtText = computed(() => {
     const raw = props.thought;
     if (!raw) return "正在深入分析全局上下文与决策规划 …";
-    return extractActiveThoughtSentence(raw, 260);
+    return extractActiveThoughtSentence(raw, 110);
 });
 
-const tickerTransformStyle = computed(() => ({
-    transform: `translate3d(-${tickerOffset.value.toFixed(1)}px, 0, 0)`,
-}));
-
-function startContinuousTicker() {
-    if (tickerRafId !== null) return;
-    lastTickerTime = performance.now();
-
-    function frame(now: number) {
-        const dt = Math.min((now - lastTickerTime) / 1000, 0.1);
-        lastTickerTime = now;
-
-        // 速度自然阻尼衰减回基础巡航速度 48px/s
-        const baseSpeed = 48;
-        tickerVelocity += (baseSpeed - tickerVelocity) * Math.min(1, dt * 2.5);
-
-        tickerOffset.value += tickerVelocity * dt;
-
-        // 避免数值无限膨胀，当位移极大时平滑折返
-        if (tickerOffset.value > 2600) {
-            tickerOffset.value = 0;
+// 自定义指令：保证末尾文字始终对齐右侧视口，超出宽度时自然把左侧旧字顶出视口
+const vScrollTail = {
+    mounted(el: HTMLElement) {
+        if (el.scrollWidth > el.clientWidth) {
+            el.scrollLeft = el.scrollWidth;
+        } else {
+            el.scrollLeft = 0;
         }
-
-        tickerRafId = requestAnimationFrame(frame);
-    }
-
-    tickerRafId = requestAnimationFrame(frame);
-}
-
-function stopContinuousTicker() {
-    if (tickerRafId !== null) {
-        cancelAnimationFrame(tickerRafId);
-        tickerRafId = null;
-    }
-}
-
-watch(
-    () => props.thought,
-    (newThought) => {
-        if (!newThought) {
-            tickerOffset.value = 0;
-            lastThoughtLen = 0;
-            tickerVelocity = 48;
-            stopContinuousTicker();
-            return;
-        }
-
-        // 启动持续向左流动
-        startContinuousTicker();
-
-        // 收到新字符时自适应提速，呈现爆发式的向前飞驰流光
-        const currentLen = newThought.length;
-        const diff = currentLen - lastThoughtLen;
-        if (diff > 0) {
-            tickerVelocity = Math.min(280, tickerVelocity + Math.min(160, diff * 2.5));
-        }
-        lastThoughtLen = currentLen;
     },
-    { immediate: true }
-);
-
-onUnmounted(() => {
-    stopContinuousTicker();
-});
+    updated(el: HTMLElement) {
+        if (el.scrollWidth > el.clientWidth) {
+            el.scrollLeft = el.scrollWidth;
+        } else {
+            el.scrollLeft = 0;
+        }
+    },
+};
 
 // ── 🛠️ 步骤文件变更与计划摘要解析 ──
 /**
