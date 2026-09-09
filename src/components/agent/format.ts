@@ -184,11 +184,36 @@ export function normalizeStreamingMarkdown(raw: string): string {
         processed = processed.replace(/\\t/g, "\t");
     }
 
-    // 1. 预测并补全未闭合的代码块 (```)
-    const codeBlockMatches = processed.match(/```/g);
-    if (codeBlockMatches && codeBlockMatches.length % 2 !== 0) {
-        // 如果有奇数个 ```，说明末尾有一个正在流式输出的代码块，虚拟追加闭合符
-        processed += "\n```";
+    // 1. 预测并补全未闭合的多行代码块 (``` 或 ~~~)
+    // 严格遵循 CommonMark 规范逐行追踪围栏状态，杜绝行内反引号、正则字面量导致的奇偶倒错误判
+    const lines = processed.split(/\r?\n/);
+    let openFence: string | null = null;
+    for (const line of lines) {
+        // CommonMark 要求代码围栏前导空格必须少于 4 个
+        const indentMatch = line.match(/^ {0,3}/);
+        if (!indentMatch) continue;
+        const trimmed = line.slice(indentMatch[0].length);
+
+        if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+            const fenceChar = trimmed[0];
+            const match = trimmed.match(/^(`{3,}|~{3,})/);
+            if (match) {
+                const fence = match[1];
+                const rest = trimmed.slice(fence.length);
+                if (!openFence) {
+                    // CommonMark 规范：开启围栏的代码块 info string 中不能包含相同的围栏符号
+                    if (!rest.includes(fenceChar)) {
+                        openFence = fence;
+                    }
+                } else if (openFence[0] === fenceChar && fence.length >= openFence.length && rest.trim() === "") {
+                    // 闭合围栏必须使用相同字符且长度不小于开启围栏，且行内无多余内容
+                    openFence = null;
+                }
+            }
+        }
+    }
+    if (openFence) {
+        processed += `\n${openFence}`;
     }
 
     // 2. 预测并补全未闭合的独立块级数学公式 ($$)

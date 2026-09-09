@@ -408,6 +408,17 @@ const composerDraft = computed({
     },
 });
 
+// 💡 保护用户草稿：当任务运行结束 (isRunning 从 true 变为 false) 时，自动将 humanInput 中未发送的草稿平滑保留至 goalInput，绝不清空用户输入
+watch(() => session.isRunning.value, (running, prevRunning) => {
+    if (prevRunning && !running) {
+        const pendingDraft = session.humanInput.value.trim();
+        if (pendingDraft) {
+            session.goalInput.value = session.humanInput.value;
+            session.humanInput.value = "";
+        }
+    }
+});
+
 function clearNarrativeSelection() {
     selectedHumanEventId.value = null;
     selectedActiveThought.value = false;

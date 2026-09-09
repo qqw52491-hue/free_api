@@ -73,6 +73,7 @@ function renderSegmentMarkdown(segment: string): string {
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent } from "vue";
+import { marked } from "marked";
 import HtmlPreviewBlock from "./HtmlPreviewBlock.vue";
 
 const EChartsBlock = defineAsyncComponent(() => import("./EChartsBlock.vue"));
@@ -98,76 +99,97 @@ defineEmits<{
   "open-preview": [code: string];
 }>();
 
+// 常见 Mermaid 图表开头，用于识别未加反引号围栏的残缺段落
+const MERMAID_KEYWORDS = /^(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|mindmap|pie|gitGraph|journey|quadrantChart|xychart-beta|packet-beta|architecture-beta|kanban)/i;
+
 const parsedBlocks = computed<ContentBlock[]>(() => {
   const text = props.content || "";
   if (!text) return [];
 
-  // 1. 优先匹配完整闭合的 ```echarts ... ```, ```chart ... ```, ```mermaid ... ```, ```html ... ```
-  const blockRegex = /```(echarts|chart|mermaid|html)[\s\r\n]+([\s\S]*?)```/gi;
+  // 使用 marked.lexer 解析顶级 AST Token，完全遵循 Markdown 规范，杜绝代码块穿透
+  let tokens: any[] = [];
+  try {
+    tokens = marked.lexer(text);
+  } catch {
+    tokens = [];
+  }
+
+  if (!tokens || tokens.length === 0) {
+    return [{ type: "markdown", content: text, html: renderSegmentMarkdown(text) }];
+  }
+
   const blocks: ContentBlock[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null = null;
+  let accumulatedMarkdown = "";
 
-  while ((match = blockRegex.exec(text)) !== null) {
-    const matchStart = match.index;
-    const matchEnd = blockRegex.lastIndex;
-
-    // 前置 Markdown 文本
-    if (matchStart > lastIndex) {
-      const mdText = text.slice(lastIndex, matchStart).trim();
-      if (mdText) {
-        blocks.push({ type: "markdown", content: mdText, html: renderSegmentMarkdown(mdText) });
-      }
+  function flushMarkdown() {
+    const trimmed = accumulatedMarkdown.trim();
+    if (trimmed) {
+      blocks.push({
+        type: "markdown",
+        content: trimmed,
+        html: renderSegmentMarkdown(trimmed),
+      });
     }
-
-    const lang = match[1].toLowerCase();
-    const code = match[2].trim();
-
-    if (lang === "mermaid") {
-      blocks.push({ type: "mermaid", content: code });
-    } else if (lang === "html") {
-      if (/<(?:!doctype|html|body|div|button|canvas|svg|form|input|style|script|section|main|h[1-6])/i.test(code)) {
-        blocks.push({ type: "html", content: code });
-      } else {
-        const mdHtml = `\`\`\`html\n${code}\n\`\`\``;
-        blocks.push({ type: "markdown", content: mdHtml, html: renderSegmentMarkdown(mdHtml) });
-      }
-    } else {
-      blocks.push({ type: "echarts", content: code });
-    }
-
-    lastIndex = matchEnd;
+    accumulatedMarkdown = "";
   }
 
-  // 2. 尾部剩余文本（容错：截断未闭合的代码块或原生 HTML）
-  if (lastIndex < text.length) {
-    const trailingText = text.slice(lastIndex).trim();
-    if (trailingText) {
-      // 容错 A：末尾带有未闭合的 ```html、```echarts 或 ```mermaid
-      const unclosedMatch = /```(echarts|chart|mermaid|html)[\s\r\n]+([\s\S]*)$/i.exec(trailingText);
-      if (unclosedMatch) {
-        const mdBefore = trailingText.slice(0, unclosedMatch.index).trim();
-        if (mdBefore) {
-          blocks.push({ type: "markdown", content: mdBefore, html: renderSegmentMarkdown(mdBefore) });
-        }
-        const lang = unclosedMatch[1].toLowerCase();
-        const code = unclosedMatch[2].trim();
-        if (lang === "html") {
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+
+    // 1. 顶级代码块 token (```lang ... ```)
+    if (token.type === "code") {
+      const lang = (token.lang || "").trim().toLowerCase();
+      const code = (token.text || "").trim();
+
+      if (lang === "mermaid") {
+        flushMarkdown();
+        blocks.push({ type: "mermaid", content: code });
+        continue;
+      } else if (lang === "echarts" || lang === "chart") {
+        flushMarkdown();
+        blocks.push({ type: "echarts", content: code });
+        continue;
+      } else if (lang === "html") {
+        if (/<(?:!doctype|html|body|div|button|canvas|svg|form|input|style|script|section|main|h[1-6])/i.test(code)) {
+          flushMarkdown();
           blocks.push({ type: "html", content: code });
-        } else if (lang === "mermaid") {
-          blocks.push({ type: "mermaid", content: code });
-        } else {
-          blocks.push({ type: "echarts", content: code });
+          continue;
         }
-      } else if (/^<!DOCTYPE html|<html[\s\S]*<\/html>|<div class="container"/i.test(trailingText)) {
-        // 容错 B：模型直接输出了原生 HTML 标签结构而未包裹 ```
-        blocks.push({ type: "html", content: trailingText });
-      } else {
-        blocks.push({ type: "markdown", content: trailingText, html: renderSegmentMarkdown(trailingText) });
       }
     }
+
+    // 2. 顶级段落自愈容错：针对模型漏掉头部反引号或结尾转义为 ``n 的破损图表块
+    if (token.type === "paragraph" && token.raw) {
+      const rawParagraph = token.raw.trim();
+      // 检查是否以 mermaid 裸词开头，且紧跟合法图表语法
+      const bareMermaidMatch = rawParagraph.match(/^(?:`*\s*)mermaid[\r\n]+([\s\S]+)$/i);
+      if (bareMermaidMatch) {
+        let innerCode = bareMermaidMatch[1].trim();
+        // 剥离尾部破损的 ``n 或 ``` 标记
+        innerCode = innerCode.replace(/[\r\n]+`{2,3}n?$/i, "").trim();
+        if (MERMAID_KEYWORDS.test(innerCode)) {
+          flushMarkdown();
+          blocks.push({ type: "mermaid", content: innerCode });
+          continue;
+        }
+      }
+    }
+
+    // 3. 顶级原生 HTML 自愈（模型直接输出 HTML 结构而未包裹围栏）
+    if (token.type === "html" && token.raw) {
+      const trimmedRaw = token.raw.trim();
+      if (/^<!DOCTYPE html|<html[\s\S]*<\/html>|<div class="container"/i.test(trimmedRaw)) {
+        flushMarkdown();
+        blocks.push({ type: "html", content: trimmedRaw });
+        continue;
+      }
+    }
+
+    // 其余普通 token 保持原始文本拼装到 markdown 渲染段中
+    accumulatedMarkdown += token.raw || "";
   }
 
+  flushMarkdown();
   return blocks.length ? blocks : [{ type: "markdown", content: text, html: renderSegmentMarkdown(text) }];
 });
 
