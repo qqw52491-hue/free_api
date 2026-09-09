@@ -1489,6 +1489,16 @@ button.root-row {
     -webkit-mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 100%);
 }
 
+.running-preview-line .preview-think-tag {
+    font-size: 12px;
+    font-weight: 600;
+    color: #38bdf8;
+    flex-shrink: 0;
+    margin-right: -2px;
+    opacity: 0.92;
+    letter-spacing: 0.5px;
+}
+
 .running-preview-line .preview-icon,
 .running-preview-line .preview-tool-icon {
     font-size: 13px;

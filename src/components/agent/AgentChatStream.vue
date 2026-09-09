@@ -192,6 +192,7 @@
                         <div class="running-preview-line line-active-action">
                             <span class="preview-spinner manus-spinner mini"></span>
                             <span :key="getPlanRunningPreview(entry).line3.actionKind" class="preview-tool-icon icon-anim-switch">{{ getPlanRunningPreview(entry).line3.icon }}</span>
+                            <span v-if="getPlanRunningPreview(entry).line3.actionKind === 'think'" class="preview-think-tag">思考:</span>
                             <!-- 思考态/操作态：自然推挤与末尾视窗追踪，新字在右侧追加，超出时自然把左侧旧字顶出 -->
                             <span
                                 v-scroll-tail
@@ -460,6 +461,7 @@
                         <div class="running-preview-line line-active-action">
                             <span class="preview-spinner manus-spinner mini"></span>
                             <span class="preview-tool-icon icon-anim-switch">💭</span>
+                            <span class="preview-think-tag">思考:</span>
                             <span
                                 v-scroll-tail
                                 class="preview-text text-shimmer-flow"

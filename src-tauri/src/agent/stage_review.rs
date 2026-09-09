@@ -64,6 +64,10 @@ pub fn should_fire(
             return None;
         }
     }
+    // 任务正在调用 finish 交付结果时绝不触发异步阶段审查（防止与终态门禁冲突导致自己拦截自己）
+    if instruction.get_tool().eq_ignore_ascii_case("finish") {
+        return None;
+    }
     // 仅在方案已批准后介入（批准前由方案审查负责），全自动模式保持原有行为
     if !checkpoint.plan_phase.is_approved() {
         return None;
