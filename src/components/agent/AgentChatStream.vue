@@ -716,23 +716,40 @@ const planExpandedState = reactive<Record<string, boolean>>({});
 const liveThoughtText = computed(() => {
     const raw = props.thought;
     if (!raw) return "正在深入分析全局上下文与决策规划 …";
-    return extractActiveThoughtSentence(raw, 110);
+    return extractActiveThoughtSentence(raw, 350);
 });
+
+// 🌟 平滑尾随滚动指令 (Smooth Tail-follow Scroll)
+// 1. 统一由 rAF 帧调度：在高频 Token 涌入时合并单帧内的重复更新，杜绝强制同步重排；
+// 2. 即时末尾对齐：右边每长出一个新字，左边老字被自然顶出视口，右侧始终紧贴边缘占满整行；
+// 3. 配合左侧 CSS mask-image 渐变，顶出的老字自然淡出消失。
+const scrollTailPending = new Set<HTMLElement>();
+let scrollTailRafId: number | null = null;
+
+function flushScrollTail() {
+    scrollTailRafId = null;
+    for (const el of scrollTailPending) {
+        if (el.scrollWidth > el.clientWidth) {
+            el.scrollLeft = el.scrollWidth - el.clientWidth;
+        } else {
+            el.scrollLeft = 0;
+        }
+    }
+    scrollTailPending.clear();
+}
 
 // 自定义指令：保证末尾文字始终对齐右侧视口，超出宽度时自然把左侧旧字顶出视口
 const vScrollTail = {
     mounted(el: HTMLElement) {
-        if (el.scrollWidth > el.clientWidth) {
-            el.scrollLeft = el.scrollWidth;
-        } else {
-            el.scrollLeft = 0;
+        scrollTailPending.add(el);
+        if (scrollTailRafId === null) {
+            scrollTailRafId = requestAnimationFrame(flushScrollTail);
         }
     },
     updated(el: HTMLElement) {
-        if (el.scrollWidth > el.clientWidth) {
-            el.scrollLeft = el.scrollWidth;
-        } else {
-            el.scrollLeft = 0;
+        scrollTailPending.add(el);
+        if (scrollTailRafId === null) {
+            scrollTailRafId = requestAnimationFrame(flushScrollTail);
         }
     },
 };

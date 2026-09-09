@@ -1447,6 +1447,8 @@ button.root-row {
     line-height: 1.4;
     min-height: 20px;
     overflow: hidden;
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .running-preview-line.line-recent-action {
@@ -1474,6 +1476,7 @@ button.root-row {
 }
 
 .running-preview-line .preview-text {
+    display: block;
     overflow: hidden;
     text-overflow: clip;
     white-space: nowrap;

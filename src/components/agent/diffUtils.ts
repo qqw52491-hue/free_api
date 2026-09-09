@@ -1124,9 +1124,11 @@ export function formatTokenCount(n?: number): string {
     return String(n);
 }
 
-export function extractActiveThoughtSentence(raw: string, maxLen = 110): string {
-    if (!raw) return "正在深入分析并规划下一步动作 …";
-    // 1. 去除代码块、XML/HTML 标签、markdown 强调字符等，将换行与连续空白压缩为单空格
+export function extractActiveThoughtSentence(raw: string, maxLen = 350): string {
+    const fallback = "正在深入分析并规划下一步动作 …";
+    if (!raw) return fallback;
+
+    // 去除代码块、XML/HTML 标签、markdown 强调字符等，将换行与连续空白压缩为单空格
     let stripped = raw
         .replace(/```[\s\S]*?```/g, " ")
         .replace(/<[^>]+>/g, " ")
@@ -1134,10 +1136,10 @@ export function extractActiveThoughtSentence(raw: string, maxLen = 110): string 
         .replace(/\r?\n+/g, " ")
         .replace(/\s+/g, " ")
         .trim();
-    if (!stripped) return "正在深入分析并规划下一步动作 …";
 
-    // 2. 动态 Tail Window：自然推挤与末尾视窗追踪
-    // 🌟 绝不在遇到句号/标点时重置清空！新字在末尾自然长出追加，超出 maxLen 则保留最新尾部推挤出旧字
+    if (!stripped) return fallback;
+
+    // 动态 Tail Window：保留足够长（350 字符）的活跃思考流，确保在任何宽屏下都能撑满单行整行并贴紧右侧
     if (stripped.length <= maxLen) {
         return stripped;
     }
