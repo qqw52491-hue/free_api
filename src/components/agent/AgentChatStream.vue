@@ -113,7 +113,7 @@
                     >
                         <span class="stage-spinner-ring manus-spinner mini"></span>
                         <span class="plan-title-bold">{{ getStageDisplayTitle(entry) }}</span>
-                        <span class="plan-running-badge">{{ getRunningProgressText(entry) }}</span>
+                        <span :key="getRunningProgressText(entry)" class="plan-running-badge badge-step-switch">{{ getRunningProgressText(entry) }}</span>
                         <div class="plan-row-spacer"></div>
                         <time class="plan-running-time">{{ formatClock(entry.timestamp) }}</time>
                     </div>
@@ -155,14 +155,18 @@
                         </span>
                     </div>
 
-                    <!-- 🌟 正在执行卡片主体：收拢态直接呈现最后 3 条数据，当前动作带字体的流光动画 (Image 2) -->
+                    <!-- 🌟 正在执行卡片主体：收拢态直接呈现前两步记录与当前极速流光动作 -->
                     <div
                         v-if="!isPlanExpanded(entry) && isPlanRunning(entry)"
                         class="plan-running-preview"
                         @click="togglePlan(entry)"
                     >
-                        <!-- 第 1 条数据：最近读取/搜索操作与耗时 -->
-                        <div v-if="getPlanRunningPreview(entry).line1" class="running-preview-line line-recent-action">
+                        <!-- 第 1 条数据：前第 2 步操作记录与耗时 -->
+                        <div
+                            v-if="getPlanRunningPreview(entry).line1"
+                            :key="getPlanRunningPreview(entry).line1?.text"
+                            class="running-preview-line line-recent-action line-step-switch"
+                        >
                             <span class="preview-icon">{{ getPlanRunningPreview(entry).line1?.icon }}</span>
                             <span class="preview-text">{{ getPlanRunningPreview(entry).line1?.text }}</span>
                             <span v-if="getPlanRunningPreview(entry).line1?.duration" class="preview-duration">
@@ -170,17 +174,26 @@
                             </span>
                         </div>
 
-                        <!-- 第 2 条数据：规划或思考摘要 -->
-                        <div v-if="getPlanRunningPreview(entry).line2" class="running-preview-line line-thought">
+                        <!-- 第 2 条数据：前第 1 步（最近完成）操作记录与耗时 -->
+                        <div
+                            v-if="getPlanRunningPreview(entry).line2"
+                            :key="getPlanRunningPreview(entry).line2?.text"
+                            class="running-preview-line line-thought line-step-switch"
+                            :title="getPlanRunningPreview(entry).line2?.fullThought || getPlanRunningPreview(entry).line2?.text"
+                        >
                             <span class="preview-icon">{{ getPlanRunningPreview(entry).line2?.icon }}</span>
                             <span class="preview-text">{{ getPlanRunningPreview(entry).line2?.text }}</span>
+                            <span v-if="getPlanRunningPreview(entry).line2?.duration" class="preview-duration">
+                                {{ getPlanRunningPreview(entry).line2?.duration }}
+                            </span>
                         </div>
 
-                        <!-- 第 3 条数据：当前正在执行的动作 (带字体的流光动画 text-shimmer-flow) -->
+                        <!-- 第 3 条数据：当前正在执行的动作 / 飞速流动的动态思考流 (带字体的流光动画 text-shimmer-flow) -->
                         <div class="running-preview-line line-active-action">
                             <span class="preview-spinner manus-spinner mini"></span>
-                            <span class="preview-tool-icon">{{ getPlanRunningPreview(entry).line3.icon }}</span>
-                            <span class="preview-text text-shimmer-flow">{{ getPlanRunningPreview(entry).line3.text }}</span>
+                            <span :key="getPlanRunningPreview(entry).line3.icon" class="preview-tool-icon icon-anim-switch">{{ getPlanRunningPreview(entry).line3.icon }}</span>
+                            <span :key="getPlanRunningPreview(entry).line3.text" class="preview-text text-shimmer-flow ticker-text-anim">{{ getPlanRunningPreview(entry).line3.text }}</span>
+                            <span v-if="getPlanRunningPreview(entry).line3.actionKind === 'think'" class="typing-cursor">_</span>
                         </div>
                     </div>
 
@@ -406,14 +419,53 @@
                         </div>
                     </div>
                 </article>
-                <article v-else-if="entry.type === 'active-thought'" class="active-thought-stream root-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
-                    <header><span class="thought-pulse-dot" :class="{ 'is-running': isRunning }"><i></i></span><b>思考</b><em>{{ isRunning ? '思考中…' : '思考过程' }}</em><time>{{ formatClock(entry.timestamp) }}</time></header>
-                    <div v-if="isRunning && !thought" class="active-thought-initial">
-                        <span class="manus-spinner small"></span>
-                        <span>正在连接模型并深度思考规划执行步骤…</span>
+                <article
+                    v-else-if="entry.type === 'active-thought'"
+                    class="plan-node status-running is-active-plan is-collapsed"
+                    :class="{ selected: selectedNarrative === 'active-thought' }"
+                    role="button"
+                    tabindex="0"
+                    title="点击查看完整思考过程"
+                    @click="$emit('select-active-thought')"
+                    @keydown.enter="$emit('select-active-thought')"
+                >
+                    <div class="plan-row is-running-row">
+                        <span class="stage-spinner-ring manus-spinner mini"></span>
+                        <span class="plan-title-bold">阶段 1 · 规划执行策略</span>
+                        <span class="plan-running-badge badge-step-switch">进行中 · 准备中</span>
+                        <div class="plan-row-spacer"></div>
+                        <time class="plan-running-time">{{ formatClock(entry.timestamp) }}</time>
                     </div>
-                    <pre v-else class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
+
+                    <div class="plan-running-preview">
+                        <!-- 第 1 行：环境准备 -->
+                        <div class="running-preview-line line-recent-action line-step-switch">
+                            <span class="preview-icon">📋</span>
+                            <span class="preview-text">准备阶段上下文与工作区环境</span>
+                            <span class="preview-duration">0.2s</span>
+                        </div>
+
+                        <!-- 第 2 行：锚定任务目标 (绝不与第3行思考重复) -->
+                        <div class="running-preview-line line-thought line-step-switch" :title="props.currentGoal ? '目标：' + props.currentGoal : '规划：按阶段目标制定实施方案并有序推进'">
+                            <span class="preview-icon">🎯</span>
+                            <span class="preview-text">{{ props.currentGoal ? '目标：' + shortText(props.currentGoal, 60) : '规划：按阶段目标制定实施方案并有序推进' }}</span>
+                        </div>
+
+                        <!-- 第 3 行：当前高速滚动推演的思考流光 (Ticker 滚动窗口，带有流光动画) -->
+                        <div class="running-preview-line line-active-action">
+                            <span class="preview-spinner manus-spinner mini"></span>
+                            <span class="preview-tool-icon icon-anim-switch">💭</span>
+                            <span
+                                :key="thought ? extractActiveThoughtSentence(thought) : 'initial'"
+                                class="preview-text text-shimmer-flow ticker-text-anim"
+                            >
+                                {{ thought ? (thought.trim().startsWith('思考') || thought.trim().startsWith('规划') ? extractActiveThoughtSentence(thought) : '思考: ' + extractActiveThoughtSentence(thought)) : '正在连接模型并深度思考规划执行步骤 …' }}
+                            </span>
+                            <span v-if="isRunning" class="typing-cursor">_</span>
+                        </div>
+                    </div>
                 </article>
+
                 <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
                     <div class="agent-msg-header">
                         <span class="agent-logo-pill">⚡ Free API</span>
@@ -459,7 +511,7 @@ import { invoke } from "@tauri-apps/api/core";
 import AttachmentCard from "./AttachmentCard.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
 import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule } from "./types";
-import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules } from "./diffUtils";
+import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtSentence } from "./diffUtils";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
 import { formatClock, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
@@ -895,7 +947,7 @@ function getRunningProgressText(entry: PlanEntry): string {
 }
 
 function getPlanRunningPreview(entry: PlanEntry): StageRunningPreview {
-    return getRunningStagePreview(entry.steps, entry.isThinking || props.isThinking, props.thought);
+    return getRunningStagePreview(entry.steps, entry.isThinking || props.isThinking, props.thought, entry.title || props.currentGoal);
 }
 
 function getPlanMetaSummary(entry: PlanEntry, digest: PlanDigest): string {

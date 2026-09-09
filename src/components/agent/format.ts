@@ -216,21 +216,28 @@ export function normalizeStreamingMarkdown(raw: string): string {
         processed += `\n${openFence}`;
     }
 
-    // 2. 预测并补全未闭合的独立块级数学公式 ($$)
-    const blockMathMatches = processed.match(/\$\$/g);
+    // 2. 预测并补全未闭合的独立块级数学公式 ($$) 与行内公式 ($)
+    // 💡 关键防护：必须先排除所有代码块（多行围栏与行内代码），避免将代码/终端命令中的 $ (如 bash 提示符 $、变量 $HOME) 误判为数学公式
+    const contentOutsideCode = processed
+        .replace(/```[\s\S]*?```/g, "")
+        .replace(/~~~[\s\S]*?~~~/g, "")
+        .replace(/`[^`\n]+`/g, "");
+
+    const blockMathMatches = contentOutsideCode.match(/\$\$/g);
     if (blockMathMatches && blockMathMatches.length % 2 !== 0) {
         processed += "\n$$";
     }
 
     // 3. 预测并补全未闭合的单美元行内公式 ($ ... $)
-    const strippedBlock = processed.replace(/\$\$[\s\S]*?\$\$/g, "");
-    const singleDollarMatches = strippedBlock.match(/(?<!\\)\$/g);
-    if (singleDollarMatches && singleDollarMatches.length % 2 !== 0) {
+    // 必须仅检测真正的行内公式起始 (如 $E=mc^2，前导非单词非转义、紧随非空字符非数字)，排除货币 $100 与终端提示 $
+    const strippedBlock = contentOutsideCode.replace(/\$\$[\s\S]*?\$\$/g, "");
+    const unclosedInlineMath = /(?<![\w\$\\])\$(?!\s|\d)(?:[^\$\n]|\\\$)*$/.test(strippedBlock);
+    if (unclosedInlineMath) {
         processed += "$";
     }
 
     // 4. 预测并补全未闭合的加粗标记 (**)
-    const boldMatches = processed.match(/\*\*/g);
+    const boldMatches = contentOutsideCode.match(/\*\*/g);
     if (boldMatches && boldMatches.length % 2 !== 0) {
         processed += "**";
     }

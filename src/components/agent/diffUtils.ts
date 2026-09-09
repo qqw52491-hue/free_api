@@ -1,4 +1,4 @@
-import type { AgentStepItem, FileChangeChip, FileDiffPayload, ReviewerVerdict, StageActionCapsule, StageActionCapsuleKind, StageRunningPreview } from "./types";
+import type { AgentStepItem, FileChangeChip, FileDiffPayload, ReviewerVerdict, RunningPreviewLine1, RunningPreviewLine2, StageActionCapsule, StageActionCapsuleKind, StageRunningPreview } from "./types";
 import { parseWorkerArtifacts } from "./workerUtils";
 
 export function cleanFilePath(raw: string): string {
@@ -1125,121 +1125,292 @@ export function formatTokenCount(n?: number): string {
 }
 
 /**
- * 提取正在执行阶段的最后 3 条数据预览 (收拢态直接呈现)
- * Line 1: 最近操作（读取文件数与文件列表/搜索），附带耗时 (如 0.8s)
- * Line 2: 思考/规划摘要 (💭 规划：...)
- * Line 3: 正在执行的动作 (带字体的流光动画 text-shimmer-flow)
+ * 从长思考内容中智能提取当前活跃的思考片段（末尾正在推演的核心句子），用于极速流光展示
+ */
+export function extractActiveThoughtSentence(raw: string): string {
+    if (!raw) return "正在深入分析并规划下一步动作 …";
+    // 1. 去除代码块、XML/HTML 标签、markdown 强调字符等
+    const stripped = raw
+        .replace(/```[\s\S]*?```/g, "")
+        .replace(/<[^>]+>/g, "")
+        .replace(/[#*`_>]/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!stripped) return "正在深入分析并规划下一步动作 …";
+
+    // 2. 句级拆分：同时支持中英文标点与换行
+    // 中文：。！？!?；; \n
+    // 英文：句号+空格 (. )、分号+空格 (; )
+    const sentences = stripped
+        .split(/(?<=[。！？!?；;\n]|\.\s+|;\s+)/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    // 优先获取最新的活跃思考末梢（最后一句）
+    let candidate = "";
+    if (sentences.length >= 1) {
+        candidate = sentences[sentences.length - 1];
+        // 如果末尾句子太短（比如小于 4 个字符），往前拼合上一句
+        if (candidate.length < 4 && sentences.length >= 2) {
+            candidate = sentences[sentences.length - 2] + " " + candidate;
+        }
+    }
+    if (!candidate || candidate.length < 4) {
+        candidate = stripped;
+    }
+
+    // 3. 过滤纯英文开场样板套话（如 "Reframing Technical Documentation...", "Evaluating available tools..."）
+    // 若全文存在中文但末尾切出来是纯英文套话，优先截取末尾的中文有效段落
+    if (/^([A-Za-z\s,.:'-]+)$/.test(candidate) && /[\u4e00-\u9fa5]/.test(stripped)) {
+        const chineseChunks = stripped.match(/[\u4e00-\u9fa5][^\n。！？!?]{4,80}/g);
+        if (chineseChunks && chineseChunks.length > 0) {
+            candidate = chineseChunks[chineseChunks.length - 1].trim();
+        }
+    }
+
+    // 4. 关键：单行字数限制与向左流动（动态 Ticker Tail Window）
+    // 🌟 绝不能 slice(0, maxLen)！那样会把文字死死钉在开头，导致流式 token 涌入时界面毫无变化！
+    // 必须保留末尾的活跃切片（超过 maxLen 则以 … 开头截取尾部），让最新涌入的思考单词/字符始终在右侧滚动流出！
+    const maxLen = 42;
+    if (candidate.length > maxLen) {
+        candidate = "…" + candidate.slice(-maxLen);
+    }
+    return candidate;
+}
+
+/**
+ * 将已完成的单步操作格式化为紧凑单行摘要，附带专属图标与耗时（用于前两步记录）
+ */
+export function formatCompletedStepDigest(step: AgentStepItem): {
+    icon: string;
+    text: string;
+    duration?: string;
+    fullThought?: string;
+} {
+    const duration = step.durationMs ? formatStageDuration(step.durationMs) : undefined;
+    const tool = (step.tool || step.action || "").toLowerCase();
+
+    // 0. 门禁拦截
+    if (isInterceptedStep(step)) {
+        return {
+            icon: "🛡️",
+            text: "操作已被前置门禁拦截（需审查审批）",
+            duration,
+            fullThought: step.thought,
+        };
+    }
+
+    // 1. 文件写/编辑操作
+    const op = formatStepOperation(step);
+    if (op.fileName) {
+        if (tool.includes("write") || tool.includes("edit") || tool.includes("replace") || tool.includes("child_writer")) {
+            let diffStat = "";
+            const adds = op.diffStat?.additions || 0;
+            const dels = op.diffStat?.deletions || 0;
+            if (adds > 0 || dels > 0) {
+                diffStat = ` (+${adds} -${dels})`;
+            }
+            return {
+                icon: "✏️",
+                text: `写入了 ${op.fileName}${diffStat}`,
+                duration,
+                fullThought: step.thought,
+            };
+        }
+        if (tool.includes("read") || tool.includes("cat") || tool.includes("view")) {
+            return {
+                icon: "📖",
+                text: `读取了 ${op.fileName}${op.lineRange ? ` (${op.lineRange})` : ""}`,
+                duration,
+                fullThought: step.thought,
+            };
+        }
+    }
+
+    // 2. 搜索操作
+    if (tool.includes("search") || tool.includes("grep")) {
+        const p = (step.params || step.rawParams) as any;
+        let query = "";
+        if (p && typeof p === "object") {
+            query = String(p.Query || p.query || p.q || "");
+        }
+        return {
+            icon: "🔍",
+            text: query ? `检索了: ${query.slice(0, 35)}` : "检索了代码库上下文",
+            duration,
+            fullThought: step.thought,
+        };
+    }
+
+    // 3. 审查员 / 子智能体
+    if (tool.includes("reviewer") || tool.includes("review") || tool.includes("subagent")) {
+        let verdictLabel = "审查完成";
+        if (step.result) {
+            const rawRes = typeof step.result === "string" ? step.result : JSON.stringify(step.result);
+            if (rawRes.includes('"verdict":"passed"') || rawRes.includes("通过") || rawRes.includes("approved")) {
+                verdictLabel = "方案审查通过";
+            } else if (rawRes.includes("rejected") || rawRes.includes("打回") || rawRes.includes("拦截")) {
+                verdictLabel = "审查打回并修正";
+            }
+        }
+        const label = step.description && step.description !== "执行操作"
+            ? step.description
+            : verdictLabel;
+        return {
+            icon: "🤖",
+            text: label,
+            duration,
+            fullThought: step.thought,
+        };
+    }
+
+    // 4. 终端执行
+    if (tool.includes("shell") || tool.includes("exec") || tool.includes("command") || tool.includes("bash")) {
+        let cmd = "";
+        const p = (step.params || step.rawParams) as any;
+        if (p && typeof p === "object") {
+            cmd = String(p.command || p.cmd || p.CommandLine || "");
+            if (Array.isArray(p.args)) {
+                cmd += " " + p.args.join(" ");
+            }
+        }
+        let desc = step.description && step.description !== "执行操作" ? step.description : "";
+        if (!desc && cmd) {
+            desc = cmd.slice(0, 40);
+        }
+        return {
+            icon: "⚡",
+            text: desc ? `执行了: ${desc}` : "执行了终端命令",
+            duration,
+            fullThought: step.thought,
+        };
+    }
+
+    // 5. 产物管理
+    if (tool.includes("artifact")) {
+        return {
+            icon: "📦",
+            text: step.description && step.description !== "执行操作" ? step.description : "生成了交付物文档",
+            duration,
+            fullThought: step.thought,
+        };
+    }
+
+    // 6. 有明确 description
+    if (step.description && step.description !== "执行操作") {
+        return {
+            icon: "⚡",
+            text: step.description,
+            duration,
+            fullThought: step.thought,
+        };
+    }
+
+    // 7. 兜底若有思考
+    if (step.thought) {
+        return {
+            icon: "🧠",
+            text: extractActiveThoughtSentence(step.thought),
+            duration,
+            fullThought: step.thought,
+        };
+    }
+
+    return {
+        icon: "⚡",
+        text: "完成了前置操作",
+        duration,
+        fullThought: step.thought,
+    };
+}
+
+/**
+ * 提取正在执行阶段的三行流光预览 (收拢态直接呈现)
+ * Line 1: 前第 2 步已完成记录（清晰掌握前置操作路径）
+ * Line 2: 前第 1 步最近完成记录 / 思考结论（紧跟最新进展）
+ * Line 3: 正在执行的操作或活跃思考流（带 text-shimmer-flow 流光与快速跳动，极速响应）
  */
 export function getRunningStagePreview(
     steps: AgentStepItem[],
     isThinking?: boolean,
-    currentThought?: string
+    currentThought?: string,
+    stageTitle?: string
 ): StageRunningPreview {
-    // 1. 查找成功执行过的步骤与读取过的文件
     const succeededSteps = steps.filter((s) => s.status === "succeeded");
-    const readFiles: string[] = [];
-    let lastReadStep: AgentStepItem | undefined;
-    let lastSearchStep: AgentStepItem | undefined;
-    let lastSearchQuery = "";
 
-    for (const step of succeededSteps) {
-        const parsed = parseStepFileChanges(step);
-        if (parsed.readFiles && parsed.readFiles.length > 0) {
-            lastReadStep = step;
-            for (const rf of parsed.readFiles) {
-                if (!readFiles.includes(rf)) readFiles.push(rf);
-            }
-        }
-        const tool = (step.tool || step.action || "").toLowerCase();
-        if (tool.includes("search") || tool.includes("grep")) {
-            lastSearchStep = step;
-            const p = (step.params || step.rawParams) as any;
-            if (p && typeof p === "object" && (p.Query || p.query || p.q)) {
-                lastSearchQuery = String(p.Query || p.query || p.q);
-            }
-        }
+    let line1: RunningPreviewLine1;
+    let line2: RunningPreviewLine2;
+
+    if (succeededSteps.length >= 2) {
+        // 前第 2 步
+        const stepA = succeededSteps[succeededSteps.length - 2];
+        const digestA = formatCompletedStepDigest(stepA);
+        line1 = {
+            icon: digestA.icon,
+            text: digestA.text,
+            duration: digestA.duration,
+        };
+
+        // 前第 1 步 (最近完成)
+        const stepB = succeededSteps[succeededSteps.length - 1];
+        const digestB = formatCompletedStepDigest(stepB);
+        line2 = {
+            icon: digestB.icon,
+            text: digestB.text,
+            duration: digestB.duration,
+            fullThought: digestB.fullThought,
+        };
+    } else if (succeededSteps.length === 1) {
+        // 只有 1 步完成：Line 1 为环境准备，Line 2 为刚完成的第 1 步
+        line1 = {
+            icon: "📋",
+            text: "准备阶段上下文与工作区环境",
+            duration: "0.2s",
+        };
+        const stepB = succeededSteps[0];
+        const digestB = formatCompletedStepDigest(stepB);
+        line2 = {
+            icon: digestB.icon,
+            text: digestB.text,
+            duration: digestB.duration,
+            fullThought: digestB.fullThought,
+        };
+    } else {
+        // 尚未完成任何步骤：Line 1 为环境准备，Line 2 为任务阶段目标（锚点明确，绝不与 Line 3 的思考内容重复）
+        line1 = {
+            icon: "📋",
+            text: "准备阶段上下文与工作区环境",
+            duration: "0.2s",
+        };
+        const cleanStage = stageTitle
+            ? stageTitle.replace(/^阶段\s*\d+\s*[·:：-]\s*/, "").trim()
+            : "";
+        const targetDesc = cleanStage
+            ? (cleanStage.startsWith("目标") || cleanStage.startsWith("规划") ? cleanStage : `目标：${cleanStage}`)
+            : "规划：按阶段目标制定实施方案并有序推进";
+        line2 = {
+            icon: "🎯",
+            text: targetDesc,
+            fullThought: currentThought,
+        };
     }
 
-    let line1Text = "准备阶段上下文与工作区环境";
-    let line1Icon = "📋";
-    let line1Duration = "0.2s";
-
-    if (readFiles.length > 0) {
-        line1Icon = "📖";
-        const shortNames = readFiles.slice(0, 2).map((f) => f.split("/").pop() || f).join(" · ");
-        line1Text = `查看了 ${readFiles.length} 个文件 ${shortNames}${readFiles.length > 2 ? " 等" : ""}`;
-        if (lastReadStep?.durationMs) {
-            line1Duration = formatStageDuration(lastReadStep.durationMs);
-        } else {
-            line1Duration = "0.8s";
-        }
-    } else if (lastSearchStep) {
-        line1Icon = "🔍";
-        line1Text = lastSearchQuery ? `检索了: ${lastSearchQuery}` : "检索了代码库上下文";
-        if (lastSearchStep.durationMs) {
-            line1Duration = formatStageDuration(lastSearchStep.durationMs);
-        } else {
-            line1Duration = "0.5s";
-        }
-    } else if (succeededSteps.length > 0) {
-        const last = succeededSteps[succeededSteps.length - 1];
-        line1Icon = "⚡";
-        line1Text = last.description || "完成了前置操作";
-        if (last.durationMs) {
-            line1Duration = formatStageDuration(last.durationMs);
-        } else {
-            line1Duration = "0.4s";
-        }
-    }
-
-    // 2. 查找思考或规划摘要
-    let rawThought = currentThought || "";
-    if (!rawThought) {
-        for (let i = steps.length - 1; i >= 0; i--) {
-            if (steps[i].thought) {
-                rawThought = steps[i].thought || "";
-                break;
-            }
-        }
-    }
-
-    let cleanThought = "";
-    if (rawThought) {
-        // 清除 markdown 标记与换行，截取前 45 字符
-        const stripped = rawThought
-            .replace(/```[\s\S]*?```/g, "")
-            .replace(/[#*`_>]/g, "")
-            .replace(/\s+/g, " ")
-            .trim();
-        cleanThought = stripped.slice(0, 48);
-        if (stripped.length > 48) cleanThought += "…";
-    }
-
-    let line2Text = "规划：按计划有序推进各子任务";
-    if (cleanThought) {
-        if (/^(规划|思考|分析|目标)[:：]/.test(cleanThought)) {
-            line2Text = cleanThought;
-        } else {
-            line2Text = `规划：${cleanThought}`;
-        }
-    }
-
-    // 3. 正在执行的当前动作 (带流光动画)
+    // Line 3: 正在执行的当前动作 (刷刷刷的高速流光动画与动态思考)
     const hasLiveStep = steps.some((s) => s.status === "running" || s.status === "pending");
     const runningStep = steps.find((s) => s.status === "running" || s.status === "pending") || steps[steps.length - 1];
+
     let line3Icon = "⚡";
     let line3Text = "正在执行操作 …";
     let line3Kind: StageRunningPreview["line3"]["actionKind"] = "other";
 
-    if (!hasLiveStep && steps.length > 0 && (isThinking || currentThought)) {
+    const activeThought = currentThought || (runningStep?.thought && (isThinking || runningStep.status === "running") ? runningStep.thought : "");
+
+    if (isThinking || (activeThought && (!hasLiveStep || (runningStep?.status === "running" && !runningStep.tool)))) {
         line3Icon = "💭";
-        line3Text = "正在深入分析并规划下一步动作 …";
+        const sentence = extractActiveThoughtSentence(activeThought);
+        line3Text = sentence.startsWith("思考") || sentence.startsWith("规划") ? sentence : `思考: ${sentence}`;
         line3Kind = "think";
-    } else if (!hasLiveStep && steps.length > 0) {
-        line3Icon = "⚡";
-        line3Text = "正在协同推进阶段任务 …";
-        line3Kind = "other";
-    } else if (runningStep) {
+    } else if (runningStep && (runningStep.status === "running" || runningStep.status === "pending")) {
         const tool = (runningStep.tool || runningStep.action || "").toLowerCase();
         let targetFile = "";
         const p = (runningStep.params || runningStep.rawParams) as any;
@@ -1259,9 +1430,9 @@ export function getRunningStagePreview(
             tool.includes("child_writer")
         ) {
             line3Icon = "✏️";
-            line3Text = fileName ? `正在写入 ${fileName} … (完成后自动收回收胶囊)` : "正在写入代码与文档 … (完成后自动收回收胶囊)";
+            line3Text = fileName ? `正在写入 ${fileName} …` : "正在写入代码与文档 …";
             line3Kind = "write";
-        } else if (tool.includes("read") || tool.includes("cat")) {
+        } else if (tool.includes("read") || tool.includes("cat") || tool.includes("view")) {
             line3Icon = "📖";
             line3Text = fileName ? `正在读取 ${fileName} …` : "正在读取上下文文件 …";
             line3Kind = "read";
@@ -1271,37 +1442,36 @@ export function getRunningStagePreview(
             line3Kind = "search";
         } else if (tool.includes("child_reviewer") || tool.includes("review")) {
             line3Icon = "🤖";
-            line3Text = "子智能体正在审查代码变动与门禁 …";
+            line3Text = "子智能体正在审查方案与代码变动 …";
             line3Kind = "review";
-        } else if (tool.includes("command") || tool.includes("exec") || tool.includes("shell")) {
+        } else if (tool.includes("command") || tool.includes("exec") || tool.includes("shell") || tool.includes("bash")) {
             line3Icon = "⚡";
-            line3Text = runningStep.description ? `正在执行: ${runningStep.description} …` : "正在执行终端命令 …";
+            line3Text = runningStep.description && runningStep.description !== "执行操作"
+                ? `正在执行: ${runningStep.description} …`
+                : "正在执行终端命令 …";
             line3Kind = "command";
-        } else if (isThinking || runningStep.thought) {
-            line3Icon = "💭";
-            line3Text = "正在深入思考本阶段实现策略 …";
-            line3Kind = "think";
         } else if (runningStep.description && runningStep.description !== "执行操作") {
             line3Icon = "⚡";
             line3Text = `正在执行: ${runningStep.description} …`;
             line3Kind = "other";
+        } else if (runningStep.thought) {
+            line3Icon = "💭";
+            line3Text = `思考: ${extractActiveThoughtSentence(runningStep.thought)}`;
+            line3Kind = "think";
         }
     } else if (isThinking) {
         line3Icon = "💭";
         line3Text = "正在深入分析需求并规划步骤 …";
         line3Kind = "think";
+    } else {
+        line3Icon = "⚡";
+        line3Text = "正在协同推进阶段任务 …";
+        line3Kind = "other";
     }
 
     return {
-        line1: {
-            icon: line1Icon,
-            text: line1Text,
-            duration: line1Duration,
-        },
-        line2: {
-            icon: "💭",
-            text: line2Text,
-        },
+        line1,
+        line2,
         line3: {
             icon: line3Icon,
             text: line3Text,

@@ -335,16 +335,62 @@ pub async fn run_tool_phase(
                         continue;
                     }
                 }
-                if reviewer_model == routing.model_id {
-                    // 未被角色卡钉死时应用配置级异构优选；说明写进派发报告，人工可见
-                    let (preferred, note) = crate::agent::router::prefer_cross_family_reviewer(
-                        &*state.inner().0.lock().unwrap(),
-                        &reviewer_model,
-                    );
-                    reviewer_model = preferred;
-                    if let Some(note) = note {
-                        item_reports.push(format!("[{}/{}]{}", item_num, total, note));
+            } else {
+                // 模型未显式指定 role：根据任务问题与证据包智能匹配专精角色卡（如运维/技术文档自动匹配 doc_writer）
+                let auto_card = {
+                    let cards = crate::agent::tools::role_manager::list_cards(state.inner(), false).unwrap_or_default();
+                    let active: Vec<_> = cards.into_iter().filter(|c| {
+                        c.enabled && c.allows_kind("reviewer") && !crate::agent::tools::role_manager::is_card_disabled_for(&model_routing.disabled_role_cards, &c.name, "reviewer")
+                    }).collect();
+
+                    let q_text = child_params.get("question").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+                    let ev_text = child_params.get("evidence_excerpt").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+                    let corpus = format!("{} {}", q_text, ev_text);
+
+                    let is_doc = corpus.contains("文档") || corpus.contains("手册") || corpus.contains("规范") || corpus.contains("markdown") || corpus.contains(".md") || corpus.contains("doc");
+                    let is_fe = corpus.contains("前端") || corpus.contains("ui") || corpus.contains("vue") || corpus.contains("react") || corpus.contains("css") || corpus.contains("html");
+                    let is_be = corpus.contains("后端") || corpus.contains("架构") || corpus.contains("api") || corpus.contains("rust") || corpus.contains("sql") || corpus.contains("数据库");
+
+                    let matched = if is_doc {
+                        active.iter().find(|c| c.name.contains("doc") || c.label.contains("文档")).cloned()
+                    } else if is_fe {
+                        active.iter().find(|c| c.name.contains("frontend") || c.name.contains("ui") || c.label.contains("前端")).cloned()
+                    } else if is_be {
+                        active.iter().find(|c| c.name.contains("arch") || c.name.contains("backend") || c.label.contains("架构")).cloned()
+                    } else {
+                        None
+                    };
+                    matched.or_else(|| if active.len() == 1 { active.into_iter().next() } else { None })
+                };
+
+                if let Some(card) = auto_card {
+                    reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
+                    effective_params["role"] = json!(card.name);
+                    effective_params["role_label"] = json!(card.label);
+                    if let Some(schema) = card.parse_custom_schema() {
+                        reviewer_custom_schema = Some(schema);
                     }
+                    if !card.model_id.is_empty() {
+                        reviewer_model = card.model_id.clone();
+                    }
+                    if card.max_concurrency > 0 {
+                        effective_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
+                    }
+                } else {
+                    effective_params["role"] = json!("system_reviewer");
+                    effective_params["role_label"] = json!("🛡️ 跨模型综合审查官");
+                }
+            }
+
+            if reviewer_model == routing.model_id {
+                // 未被角色卡钉死时应用配置级异构优选；说明写进派发报告，人工可见
+                let (preferred, note) = crate::agent::router::prefer_cross_family_reviewer(
+                    &*state.inner().0.lock().unwrap(),
+                    &reviewer_model,
+                );
+                reviewer_model = preferred;
+                if let Some(note) = note {
+                    item_reports.push(format!("[{}/{}]{}", item_num, total, note));
                 }
             }
 
@@ -651,6 +697,9 @@ pub async fn run_tool_phase(
                         continue;
                     }
                 }
+            } else {
+                effective_params["role"] = json!("system_writer");
+                effective_params["role_label"] = json!("✍️ 隔离沙箱写入工兵");
             }
 
             let mut envelope = crate::agent::protocol::DispatchEnvelope::writer(
@@ -867,6 +916,9 @@ pub async fn run_tool_phase(
                         continue;
                     }
                 }
+            } else {
+                effective_worker_params["role"] = json!("system_worker");
+                effective_worker_params["role_label"] = json!("🔍 独立只读侦察专员");
             }
 
             let mut envelope = crate::agent::protocol::DispatchEnvelope::worker(

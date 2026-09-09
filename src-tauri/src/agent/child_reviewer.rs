@@ -1303,6 +1303,8 @@ pub async fn spawn_child_reviewer(
     let db_clone = DbState(db.0.clone());
     let child_run_id_clone = child_run_id.clone();
     let session_id_clone = parent_session_id.to_string();
+    let param_role = params.get("role").cloned();
+    let param_role_label = params.get("role_label").cloned();
 
     tokio::spawn(async move {
         let started_at = std::time::Instant::now();
@@ -1534,6 +1536,14 @@ pub async fn spawn_child_reviewer(
                         }
                     }
                 }
+            }
+        }
+        if let Some(res_map) = result_val.as_object_mut() {
+            if let Some(role) = param_role {
+                res_map.insert("role".to_string(), role);
+            }
+            if let Some(role_label) = param_role_label {
+                res_map.insert("role_label".to_string(), role_label);
             }
         }
         // 若挂载了特化契约，做严格闭集与必填校验；若违规，则标记为 invalid_output (contract_violation)

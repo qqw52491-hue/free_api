@@ -177,12 +177,24 @@ pub(crate) async fn try_plan_reviewer_failover(
         Some(d) => d,
         None => return Ok(None),
     };
-    let failover_model = {
+    let (failover_model, model_name) = {
         let conn = state.0.lock().map_err(|err| err.to_string())?;
-        crate::agent::router::reviewer_failover_model(&conn, &dispatch.model)
+        let m = crate::agent::router::reviewer_failover_model(&conn, &dispatch.model);
+        let name = m.as_deref().and_then(|id| {
+            conn.query_row("SELECT name FROM models WHERE id = ?1", rusqlite::params![id], |r| r.get::<_, String>(0)).ok()
+        });
+        (m, name)
     };
     if let Some(model) = failover_model {
         dispatch.model = model;
+    }
+    if let Some(obj) = dispatch.params.as_object_mut() {
+        let label = if let Some(ref mn) = model_name {
+            format!("🛡️ 故障转移备选审查官 ({})", mn)
+        } else {
+            "🛡️ 故障转移备选审查官".to_string()
+        };
+        obj.insert("role_label".to_string(), serde_json::json!(label));
     }
     match dispatch
         .spawn(

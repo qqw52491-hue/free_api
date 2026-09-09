@@ -418,6 +418,8 @@ export interface RunningPreviewLine1 {
 export interface RunningPreviewLine2 {
     icon: string;
     text: string;
+    duration?: string;
+    fullThought?: string;
 }
 
 export interface RunningPreviewLine3 {

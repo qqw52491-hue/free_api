@@ -237,11 +237,17 @@ fn collect_completed_child_results(
         Ok(receipts) => receipts
             .into_iter()
             .map(|receipt| {
-                let (job_type, title) = match receipt.kind.as_str() {
-                    "writer" => ("child_writer".to_string(), "受限写入工兵任务".to_string()),
-                    "worker" => ("child_worker".to_string(), "受限侦察任务".to_string()),
-                    _ => ("child_reviewer".to_string(), "受限子审查任务".to_string()),
+                let role_label = receipt
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("role_label").or_else(|| p.get("role")).and_then(|v| v.as_str()))
+                    .map(|s| s.to_string());
+                let (job_type, default_title) = match receipt.kind.as_str() {
+                    "writer" => ("child_writer".to_string(), "✍️ 隔离沙箱写入工兵".to_string()),
+                    "worker" => ("child_worker".to_string(), "🔍 独立只读侦察专员".to_string()),
+                    _ => ("child_reviewer".to_string(), "🛡️ 跨模型综合审查官".to_string()),
                 };
+                let title = role_label.unwrap_or(default_title);
                 let result_json = receipt
                     .raw_text
                     .clone()
