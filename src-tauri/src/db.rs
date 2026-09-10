@@ -213,6 +213,9 @@ pub fn delete_session_completely(
     conn.execute("DELETE FROM chat_sessions WHERE id=?1", rusqlite::params![id])
         .map_err(|e| format!("删除会话主记录失败: {e}"))?;
 
+    // 4. 清理内存中该会话的 local_file 乐观并发基线缓存（防止孤儿会话内存残留）
+    crate::agent::tools::local_file::cleanup_session_baselines(id);
+
     Ok(())
 }
 

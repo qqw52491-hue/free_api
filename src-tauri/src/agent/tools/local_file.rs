@@ -73,12 +73,38 @@ pub fn dispatch(
 // 4. 写入成功后立即刷新基线，保证后续连续修改顺畅通过；
 // 5. 支持 force: true 逃生通道强制覆盖。
 // =====================================================================
+// 乐观并发冲突与盲写拦截基线 (Optimistic Concurrency / versionGuard)
+//
+// 机制说明（汲取 mcp-remote-setup 与工业级编辑器实践）：
+// 1. read 读取文件时：自动计算 SHA256 哈希存入会话级内存基线表；
+// 2. write 写入前（若文件已在磁盘存在）：
+//    - 若本会话从未读取过该文件（缺少基线）：硬拦截，防止基于幻觉全量盲写覆盖用户现有文件；
+//    - 若基线哈希与磁盘实时哈希不一致：硬拦截，杜绝丢失外部修改（Lost Update）；
+//    - 若带 force: true：直接绕过强制写入；
+//    - 若是新建文件（磁盘不存在）或私有临时草稿（session_tmp）：直接写入；
+// 3. edit 局部替换前：比对磁盘当前文件哈希；若无基线则依赖 target_content 严格唯一匹配物理锚点；
+// 4. write / edit 成功后：立即刷新基线，由 Agent 自建的文件在此后具备完备基线保护；
+// 5. 纯内存维护、重启清零、在会话删除时通过 cleanup_session_baselines 彻底清理；
+// 6. 内置 50,000 条上限安全阀，超限自动轻量削顶，彻底杜绝内存泄漏风险。
+// =====================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictInfo {
     pub known_hex: String,
     pub live_hex: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaselineStatus {
+    /// 基线哈希与磁盘实时哈希完全一致（或新自建文件）
+    Clean,
+    /// 磁盘文件已被外部改动（基线哈希与实时哈希不匹配）
+    Conflict(ConflictInfo),
+    /// 当前会话尚未建立该文件的基线（从未读取过，也非本次会话新建）
+    NoBaseline { live_hex: String },
+}
+
+const MAX_GLOBAL_BASELINES: usize = 50_000;
 
 static FILE_BASELINES: LazyLock<Mutex<HashMap<(String, PathBuf), String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -93,7 +119,37 @@ pub fn calculate_sha256_hex(bytes: &[u8]) -> String {
 pub fn record_file_baseline(session_id: &str, path: &Path, content_bytes: &[u8]) {
     let hash = calculate_sha256_hex(content_bytes);
     if let Ok(mut map) = FILE_BASELINES.lock() {
+        // 全局安全阀：超出 50,000 条时轻量淘汰最早的 5,000 条，杜绝极端长期运行场景下的内存膨胀
+        if map.len() >= MAX_GLOBAL_BASELINES {
+            let to_remove: Vec<_> = map.keys().take(5_000).cloned().collect();
+            for k in to_remove {
+                map.remove(&k);
+            }
+        }
         map.insert((session_id.to_string(), path.to_path_buf()), hash);
+    }
+}
+
+pub fn check_file_baseline(
+    session_id: &str,
+    path: &Path,
+    live_bytes: &[u8],
+) -> BaselineStatus {
+    let live_hex = calculate_sha256_hex(live_bytes);
+    if let Ok(map) = FILE_BASELINES.lock() {
+        if let Some(known_hex) = map.get(&(session_id.to_string(), path.to_path_buf())) {
+            if *known_hex != live_hex {
+                return BaselineStatus::Conflict(ConflictInfo {
+                    known_hex: known_hex[..12.min(known_hex.len())].to_string(),
+                    live_hex: live_hex[..12.min(live_hex.len())].to_string(),
+                });
+            } else {
+                return BaselineStatus::Clean;
+            }
+        }
+    }
+    BaselineStatus::NoBaseline {
+        live_hex: live_hex[..12.min(live_hex.len())].to_string(),
     }
 }
 
@@ -102,18 +158,16 @@ pub fn check_file_conflict(
     path: &Path,
     live_bytes: &[u8],
 ) -> Option<ConflictInfo> {
-    let live_hex = calculate_sha256_hex(live_bytes);
-    if let Ok(map) = FILE_BASELINES.lock() {
-        if let Some(known_hex) = map.get(&(session_id.to_string(), path.to_path_buf())) {
-            if *known_hex != live_hex {
-                return Some(ConflictInfo {
-                    known_hex: known_hex[..12.min(known_hex.len())].to_string(),
-                    live_hex: live_hex[..12.min(live_hex.len())].to_string(),
-                });
-            }
-        }
+    match check_file_baseline(session_id, path, live_bytes) {
+        BaselineStatus::Conflict(info) => Some(info),
+        _ => None,
     }
-    None
+}
+
+pub fn cleanup_session_baselines(session_id: &str) {
+    if let Ok(mut map) = FILE_BASELINES.lock() {
+        map.retain(|(sess, _), _| sess != session_id);
+    }
 }
 
 /// 从 DispatchResult 中安全判定本次 local_file 操作是否作用于会话临时目录 (session_tmp)
@@ -308,29 +362,54 @@ fn execute_write(
         }
     }
 
-    // 🌟 乐观并发保护：如果文件已存在且未开启 force，比对哈希基线防丢失更新
+    // 🌟 乐观并发与盲写拦截保护：如果文件已在磁盘存在且未开启 force
     let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
     if !force && resolved.canonical_path.exists() {
-        if let Ok(live_bytes) = std::fs::read(&resolved.canonical_path) {
-            if let Some(conflict) = check_file_conflict(session_id, &resolved.canonical_path, &live_bytes) {
-                let payload = json!({
-                    "kind": "optimistic_concurrency_conflict",
-                    "path": resolved.display_path,
-                    "known_hash": conflict.known_hex,
-                    "live_hash": conflict.live_hex,
-                    "retryable": true,
-                    "safe_to_retry": false,
-                    "recommended_action": "read_latest_file_before_write",
-                });
-                return DispatchResult {
-                    stdout: String::new(),
-                    stderr: format!(
-                        "❌ [并发冲突拦截] 文件 \"{}\" 自上次读取后已被外部修改 (哈希不匹配: 读时={}, 当前={})。\n💡 建议：为防止意外覆盖外部修改（丢失更新），写入已中止。请先调用 local_file.read 读取最新内容，或在确实需要强行覆盖时传入 force: true。\n<!-- 结构化元数据: {} -->",
-                        resolved.display_path, conflict.known_hex, conflict.live_hex, payload
-                    ),
-                    success: false,
-                    route: "local_file:write:conflict".to_string(),
-                };
+        // 会话专属临时草稿目录 (session_tmp) 为当前会话单点独占的草稿工作区，不受盲写覆盖限制
+        if !resolved.is_session_tmp {
+            if let Ok(live_bytes) = std::fs::read(&resolved.canonical_path) {
+                match check_file_baseline(session_id, &resolved.canonical_path, &live_bytes) {
+                    BaselineStatus::Conflict(conflict) => {
+                        let payload = json!({
+                            "kind": "optimistic_concurrency_conflict",
+                            "path": resolved.display_path,
+                            "known_hash": conflict.known_hex,
+                            "live_hash": conflict.live_hex,
+                            "retryable": true,
+                            "safe_to_retry": false,
+                            "recommended_action": "read_latest_file_before_write",
+                        });
+                        return DispatchResult {
+                            stdout: String::new(),
+                            stderr: format!(
+                                "❌ [并发冲突拦截] 文件 \"{}\" 自上次读取后已被外部修改 (哈希不匹配: 读时={}, 当前={})。\n💡 建议：为防止意外覆盖外部修改（丢失更新），写入已中止。请先调用 local_file.read 读取最新内容，或在确实需要强行覆盖时传入 force: true。\n<!-- 结构化元数据: {} -->",
+                                resolved.display_path, conflict.known_hex, conflict.live_hex, payload
+                            ),
+                            success: false,
+                            route: "local_file:write:conflict".to_string(),
+                        };
+                    }
+                    BaselineStatus::NoBaseline { live_hex } => {
+                        let payload = json!({
+                            "kind": "unindexed_file_overwrite_prevention",
+                            "path": resolved.display_path,
+                            "live_hash": live_hex,
+                            "retryable": true,
+                            "safe_to_retry": false,
+                            "recommended_action": "read_existing_file_before_overwrite",
+                        });
+                        return DispatchResult {
+                            stdout: String::new(),
+                            stderr: format!(
+                                "❌ [全量覆盖保护拦截] 待写入的文件 \"{}\" 在磁盘上已存在，但本会话尚未通过 local_file.read 读取过该文件（缺少内容基线）。\n💡 建议：全量写入（write）会彻底覆写既有代码（高爆炸半径）。为防止误覆盖现有代码，请先调用 local_file.read 建立基线核对内容；若确信无需核对并要强行全量覆盖，请显式传入 force: true。\n<!-- 结构化元数据: {} -->",
+                                resolved.display_path, payload
+                            ),
+                            success: false,
+                            route: "local_file:write:missing_baseline".to_string(),
+                        };
+                    }
+                    BaselineStatus::Clean => {}
+                }
             }
         }
     }
@@ -795,6 +874,97 @@ mod tests {
 
         let content = std::fs::read_to_string(ws.join("file.txt")).unwrap();
         assert_eq!(content, "forced content");
+
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn test_unindexed_existing_file_write_intercepted_and_force_bypasses() {
+        let ws = temp_dir();
+        let db = mock_db();
+        let session = "test_unindexed_write";
+
+        // 用户预先在工作区创建了既有文件（会话此前从未 read 过该文件）
+        std::fs::write(ws.join("existing.txt"), "pre-existing critical code").unwrap();
+
+        // Agent 在无基线情况下试图全量写入覆写 -> 必须被硬拦截！
+        let p_blind_write = json!({"path": "existing.txt", "content": "blind hallucinated content"});
+        let res_blind = dispatch(&db, session, "write", &p_blind_write, Some(&ws));
+        assert!(!res_blind.success, "未读过的既有文件盲目全量覆写必须被拦截");
+        assert!(res_blind.stderr.contains("全量覆盖保护拦截"));
+        assert!(res_blind.stderr.contains("缺少内容基线"));
+
+        // 显式传入 force: true -> 成功覆盖
+        let p_force_write = json!({
+            "path": "existing.txt",
+            "content": "forced intentional content",
+            "force": true
+        });
+        let res_force = dispatch(&db, session, "write", &p_force_write, Some(&ws));
+        assert!(res_force.success, "带 force: true 必须允许强制覆盖");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("existing.txt")).unwrap(),
+            "forced intentional content"
+        );
+
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn test_unindexed_existing_file_edit_succeeds_and_records_baseline() {
+        let ws = temp_dir();
+        let db = mock_db();
+        let session = "test_unindexed_edit";
+
+        // 用户预先在工作区创建了既有文件
+        std::fs::write(ws.join("config.ini"), "port = 8080\nthreads = 4\n").unwrap();
+
+        // 局部替换：即使没有预先 read 基线，凭借 target_content 唯一锚点也允许精准替换
+        let p_edit = json!({
+            "path": "config.ini",
+            "target_content": "threads = 4",
+            "replacement_content": "threads = 8"
+        });
+        let res_edit = dispatch(&db, session, "edit", &p_edit, Some(&ws));
+        assert!(res_edit.success, "无基线但局部替换锚点唯一应放行: {}", res_edit.stderr);
+
+        // 替换成功后已自动建立基线，若外部篡改，下一次修改即刻受并发锁保护
+        std::fs::write(ws.join("config.ini"), "tampered by outside").unwrap();
+        let p_edit_again = json!({
+            "path": "config.ini",
+            "target_content": "threads = 8",
+            "replacement_content": "threads = 16"
+        });
+        let res_again = dispatch(&db, session, "edit", &p_edit_again, Some(&ws));
+        assert!(!res_again.success);
+        assert!(res_again.stderr.contains("并发冲突拦截"));
+
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn test_self_created_file_lifecycle_and_session_cleanup() {
+        let ws = temp_dir();
+        let db = mock_db();
+        let session = "test_self_created";
+
+        // Agent 在本会话首次写入一个新文件（磁盘原本不存在） -> 顺利通过并自动沉淀基线
+        let p_new = json!({"path": "new_tool.rs", "content": "fn run() {}"});
+        let res_new = dispatch(&db, session, "write", &p_new, Some(&ws));
+        assert!(res_new.success, "自建新文件应直接成功");
+
+        // 随后在同一会话中再次写入此自建文件 -> 判定为自有文件且基线匹配，顺利通过
+        let p_overwrite = json!({"path": "new_tool.rs", "content": "fn run() { println!(\"ok\"); }"});
+        let res_over = dispatch(&db, session, "write", &p_overwrite, Some(&ws));
+        assert!(res_over.success, "同会话自建文件再次覆写应正常放行: {}", res_over.stderr);
+
+        // 执行会话级清理 cleanup_session_baselines
+        cleanup_session_baselines(session);
+
+        // 清理后，基线表不再包含该会话记录；此时该文件已存在磁盘，再次尝试不带 force 写入 -> 触发覆盖保护拦截！
+        let res_after_cleanup = dispatch(&db, session, "write", &p_overwrite, Some(&ws));
+        assert!(!res_after_cleanup.success, "清理基线后既有文件写入应被拦截");
+        assert!(res_after_cleanup.stderr.contains("全量覆盖保护拦截"));
 
         let _ = std::fs::remove_dir_all(ws);
     }
