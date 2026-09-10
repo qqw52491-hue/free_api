@@ -220,10 +220,11 @@ pub fn dispatch(
                 .collect()
         });
 
-    execute_command_blocking(&final_cmd, &execution_cwd, timeout_secs, custom_env)
+    execute_command_blocking(session_id, &final_cmd, &execution_cwd, timeout_secs, custom_env)
 }
 
 fn execute_command_blocking(
+    session_id: &str,
     cmd_str: &str,
     cwd: &Path,
     timeout_secs: u64,
@@ -231,6 +232,9 @@ fn execute_command_blocking(
 ) -> DispatchResult {
     let start_time = Instant::now();
     let enriched_path = get_enriched_path_env();
+    let session_tmp_dir = crate::agent::path_guard::get_session_tmp_dir(session_id);
+    let _ = std::fs::create_dir_all(&session_tmp_dir);
+    let session_tmp_str = session_tmp_dir.to_string_lossy().to_string();
 
     // 使用 tokio 异步派发并挂载独立 Reactor 与超时控制
     let fut = async move {
@@ -240,6 +244,8 @@ fn execute_command_blocking(
             c.arg("/C").arg(cmd_str);
             c.current_dir(cwd);
             c.env("PATH", &enriched_path);
+            c.env("SESSION_TMP_DIR", &session_tmp_str);
+            c.env("TMPDIR", &session_tmp_str);
             if let Some(ref env_map) = custom_env {
                 for (k, v) in env_map {
                     c.env(k, v);
@@ -256,6 +262,8 @@ fn execute_command_blocking(
             c.arg("-c").arg(cmd_str);
             c.current_dir(cwd);
             c.env("PATH", &enriched_path);
+            c.env("SESSION_TMP_DIR", &session_tmp_str);
+            c.env("TMPDIR", &session_tmp_str);
             c.process_group(0); // 独立进程组：以子进程为主导组长，方便超时按组整棵树杀死
             if let Some(ref env_map) = custom_env {
                 for (k, v) in env_map {
@@ -565,6 +573,20 @@ mod tests {
         let res = dispatch("test_sess", "exec", &params, Some(ws));
         assert!(res.success);
         assert!(res.stdout.contains("magic_env_val_999"));
+    }
+
+    #[test]
+    fn test_local_shell_session_tmp_dir_injected() {
+        let temp = TempDirGuard::new();
+        let ws = temp.path();
+
+        let params = json!({
+            "command": "echo $SESSION_TMP_DIR"
+        });
+
+        let res = dispatch("test_sess_tmp_check", "exec", &params, Some(ws));
+        assert!(res.success);
+        assert!(res.stdout.contains("test_sess_tmp_check"));
     }
 
     #[test]

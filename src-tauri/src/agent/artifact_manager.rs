@@ -278,7 +278,14 @@ pub fn register_workspace_artifact(
 
     let mut path_buf = PathBuf::from(clean);
     if !path_buf.exists() {
-        if let Ok(current_dir) = std::env::current_dir() {
+        // 1. 优先尝试从当前会话专属临时受管目录 (session_tmp) 解析快捷路径（如 "tmp/xxx", "./tmp/xxx" 或直接文件名）
+        let session_tmp = crate::agent::path_guard::get_session_tmp_dir(session_id);
+        let stripped = clean.strip_prefix("./").unwrap_or(clean);
+        let sub = stripped.strip_prefix("tmp/").unwrap_or(stripped);
+        let candidate_tmp = session_tmp.join(sub);
+        if candidate_tmp.exists() {
+            path_buf = candidate_tmp;
+        } else if let Ok(current_dir) = std::env::current_dir() {
             let candidate = current_dir.join(clean);
             if candidate.exists() {
                 path_buf = candidate;
@@ -856,5 +863,25 @@ mod tests {
         assert!(!names.iter().any(|n| n.contains("hidden")));
         assert!(!names.iter().any(|n| n.contains("config")));
         std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn register_file_dispatch_resolves_tmp_path() {
+        let db = test_db();
+        let session = "sess-tmp-test";
+        let session_tmp = crate::agent::path_guard::get_session_tmp_dir(session);
+        std::fs::create_dir_all(&session_tmp).unwrap();
+        let test_file = session_tmp.join("taiyuan_weather_5days.xlsx");
+        std::fs::write(&test_file, b"fake excel bytes").unwrap();
+
+        // 模拟 Agent 传入 tmp/ 相对路径登记产物
+        let result = dispatch(&db, session, "register_file", &serde_json::json!({
+            "path": "tmp/taiyuan_weather_5days.xlsx"
+        }));
+        assert!(result.success, "应能成功解析 tmp/ 路径: {}", result.stderr);
+        assert!(result.stdout.contains("taiyuan_weather_5days.xlsx"));
+        assert!(result.stdout.contains("已登记入产物账本"));
+
+        let _ = std::fs::remove_dir_all(&session_tmp);
     }
 }
