@@ -6,3 +6,4 @@ pub mod schedule_manager;
 pub mod skill_manager;
 pub mod wechat_manager;
 pub mod system_info;
+pub mod local_file;

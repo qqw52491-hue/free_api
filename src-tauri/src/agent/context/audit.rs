@@ -41,10 +41,46 @@ impl AuditLedger {
         )
     }
 
-    /// 判断某个工具及参数是否属于可能产生外部物理副作用（写文件、数据库修改、外部系统写调用等）的操作
+    /// 兼容性入口：根据 tool 与 params 判断是否产生外部物理副作用
     pub fn is_mutating_side_effect(tool: &str, params: &serde_json::Value) -> bool {
+        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        Self::is_mutating_side_effect_with_action(tool, action, params)
+    }
+
+    /// 核心判断：结合工具名、动作名与参数细分判定是否属于可能产生外部物理副作用的操作
+    pub fn is_mutating_side_effect_with_action(
+        tool: &str,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> bool {
         let lower_tool = tool.to_lowercase();
         let action_name = lower_tool.split('/').last().unwrap_or(&lower_tool);
+        let act = if !action.is_empty() {
+            action.to_lowercase()
+        } else {
+            params
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase()
+        };
+
+        // 0. 原生 local_file 工具专用精准判定：
+        //    - read / list 为纯只读，绝不记录进 Side-Effects 台账；
+        //    - 写入到 session_tmp（如 path 为 tmp/ 或 ./tmp/，或显式 is_tmp）为草稿免审，不进台账；
+        //    - write / edit 写入项目工作区代码时，必须严格入账！
+        if action_name == "local_file" {
+            if act.starts_with("read") || act.starts_with("list") {
+                return false;
+            }
+            if act.starts_with("write") || act.starts_with("edit") {
+                if Self::is_temporary_draft_path(params) {
+                    return false;
+                }
+                return true;
+            }
+            return false;
+        }
 
         // 1. 显式只读工具白名单（绝不记录进 Side-Effects 台账）
         let is_readonly_tool = matches!(
@@ -112,6 +148,33 @@ impl AuditLedger {
             || action_name.contains("patch")
             || action_name.contains("apply")
             || action_name.contains("remove")
+            || act.starts_with("write")
+            || act.starts_with("edit")
+            || act.starts_with("delete")
+            || act.starts_with("save")
+    }
+
+    /// 判定参数中的目标文件路径是否属于会话临时草稿目录 (session_tmp / tmp)
+    pub fn is_temporary_draft_path(params: &serde_json::Value) -> bool {
+        if params.get("is_tmp").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return true;
+        }
+        let raw_path = params
+            .get("path")
+            .or_else(|| params.get("target_file"))
+            .or_else(|| params.get("filepath"))
+            .or_else(|| params.get("file_path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if raw_path.is_empty() {
+            return false;
+        }
+        let normalized = raw_path.replace('\\', "/");
+        normalized.starts_with("tmp/")
+            || normalized.starts_with("./tmp/")
+            || normalized.contains("/free-api-chat/tmp/")
+            || normalized.contains("/.free-api-chat/tmp/")
     }
 
     /// 检测 shell 命令是否为只读查询（如 git log/show/diff, ls, cat, grep 等）
@@ -274,6 +337,41 @@ mod tests {
         assert!(AuditLedger::is_mutating_side_effect(
             "remote-hub/shell_exec",
             &json!({"command": "rm", "args": ["-rf", "dist"]})
+        ));
+
+        // local_file 原生工具针对项目代码写入/编辑入台账
+        assert!(AuditLedger::is_mutating_side_effect(
+            "local_file",
+            &json!({"action": "write", "path": "src/main.rs", "content": "fn main() {}"})
+        ));
+        assert!(AuditLedger::is_mutating_side_effect_with_action(
+            "local_file",
+            "edit",
+            &json!({"path": "src/lib.rs", "target_content": "old", "replacement_content": "new"})
+        ));
+
+        // local_file 针对 session_tmp 草稿豁免入台账
+        assert!(!AuditLedger::is_mutating_side_effect(
+            "local_file",
+            &json!({"action": "write", "path": "tmp/draft.md", "content": "draft"})
+        ));
+        assert!(!AuditLedger::is_mutating_side_effect(
+            "local_file",
+            &json!({"action": "edit", "path": "./tmp/draft.md", "target_content": "a", "replacement_content": "b"})
+        ));
+        assert!(!AuditLedger::is_mutating_side_effect(
+            "local_file",
+            &json!({"action": "write", "path": "src/main.rs", "content": "tmp", "is_tmp": true})
+        ));
+
+        // local_file 只读动作不入台账
+        assert!(!AuditLedger::is_mutating_side_effect(
+            "local_file",
+            &json!({"action": "read", "path": "src/main.rs"})
+        ));
+        assert!(!AuditLedger::is_mutating_side_effect(
+            "local_file",
+            &json!({"action": "list", "path": "."})
         ));
     }
 

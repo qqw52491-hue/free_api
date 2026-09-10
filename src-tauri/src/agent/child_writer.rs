@@ -442,16 +442,17 @@ fn writer_system_prompt() -> &'static str {
     "你是 L3 隔离写入 worker。宿主已把工作区复制成你的私有副本：你的全部读/写/命令都只落在副本内，真实工作区对你是不可见的。每轮只输出一个纯 JSON 对象（无围栏、无闲聊）：\n\
 {\"action\":\"list_dir\",\"params\":{\"path\":\".\"}}\n\
 {\"action\":\"read_file\",\"params\":{\"path\":\"路径\"}}\n\
+{\"action\":\"edit_file\",\"params\":{\"path\":\"路径\",\"target_content\":\"待替换原文本\",\"replacement_content\":\"替换后的新内容\"}}\n\
 {\"action\":\"write_file\",\"params\":{\"path\":\"路径\",\"content\":\"完整新文件内容\"}}\n\
 {\"action\":\"run_command\",\"params\":{\"command\":\"单条命令\"}}\n\
 {\"action\":\"finish\",\"findings\":[\"1-8 条结论\"],\"confidence\":\"confirmed|supported|unverified\",\"evidence_refs\":[\"文件/测试引用\"],\"missing_evidence\":[\"...\"]}\n\
 纪律：\n\
 1. 先读后写：修改任何文件前必须先 read_file 读取最新内容，严禁盲目覆盖；\n\
-2. 最小修改原则：只修改与任务明确相关的代码/功能，严禁顺带重构、代码美化或修改无关功能；\n\
+2. 最小修改原则：修改已有代码时优先使用 edit_file 进行精准局部替换（确保 target_content 在文件中全局唯一），只修改与任务明确相关的代码，严禁顺带重构；\n\
 3. 尊重既有设计：不得假设既有代码是错的，看似特殊的写法默认是开发者故意为之，禁止擅自改动现有逻辑；\n\
 4. 严禁虚假作弊：禁止为了让测试通过而用静态硬编码/假数据蒙混过关，禁止过度设计；\n\
 5. 保护注释与代码风格完整性，禁止随意精简或删除原有注释；\n\
-6. 修改完成后必须用宿主指定的 test_command 验证且通过后才能 finish；write_file 必须写完整文件内容；禁止碰副本外的任何路径。"
+6. 修改完成后必须用宿主指定的 test_command 验证且通过后才能 finish；禁止碰副本外的任何路径。"
 }
 
 /// 执行 writer 动作（异步、可单测）。返回 (观测输出, 是否测试命令)
@@ -533,6 +534,79 @@ pub async fn execute_writer_action(
             *writes_used += 1;
             Ok(format!("✅ 已写入 {}（{} 字节）", relative, content.len()))
         }
+        "edit_file" => {
+            if *writes_used >= MAX_WRITES {
+                return Err(format!("写入次数已达上限 {}；请合并修改。", MAX_WRITES));
+            }
+            let raw = params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "edit_file 缺少 path。".to_string())?;
+            let target_content = params
+                .get("target_content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "edit_file 缺少 target_content（待替换的目标原文本）。".to_string())?;
+            let replacement_content = params
+                .get("replacement_content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "edit_file 缺少 replacement_content（替换后的新内容）。".to_string())?;
+
+            if target_content.is_empty() {
+                return Err("edit_file target_content 不能为空。".to_string());
+            }
+
+            let canonical = ensure_contained(copy_root, raw)?;
+            check_hard_scope(copy_root, &canonical, hard_scope)?;
+            let relative = canonical
+                .strip_prefix(copy_root.canonicalize().unwrap_or_else(|_| copy_root.to_path_buf()))
+                .unwrap_or(&canonical)
+                .to_string_lossy()
+                .to_string();
+
+            if !canonical.exists() {
+                return Err(format!("待编辑的文件不存在: {}", relative));
+            }
+
+            // 首次修改前留底，供 diff 生成
+            if !changes.contains_key(&relative) {
+                let before = std::fs::read(&canonical)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+                    .unwrap_or_default();
+                changes.insert(relative.clone(), before);
+            }
+
+            let current_content = std::fs::read_to_string(&canonical)
+                .map_err(|error| format!("读取待编辑文件失败: {}", error))?;
+
+            let matches: Vec<(usize, &str)> = current_content.match_indices(target_content).collect();
+            if matches.is_empty() {
+                return Err(format!(
+                    "❌ [编辑失败：目标文本未找到] 在文件 \"{}\" 中未找到指定的 target_content。请先使用 read_file 读取最新内容核对精确文本。",
+                    relative
+                ));
+            }
+            if matches.len() > 1 {
+                let line_numbers: Vec<usize> = matches
+                    .iter()
+                    .map(|(idx, _)| current_content[..*idx].lines().count() + 1)
+                    .collect();
+                return Err(format!(
+                    "❌ [编辑失败：目标文本不唯一] 在文件 \"{}\" 中找到了 {} 处匹配（位于行号: {:?}）。请在 target_content 中多包含前后上下文确保唯一。",
+                    relative, matches.len(), line_numbers
+                ));
+            }
+
+            let match_offset = matches[0].0;
+            let start_line = current_content[..match_offset].lines().count() + 1;
+            let replaced_lines_count = target_content.lines().count().max(1);
+            let end_line = start_line + replaced_lines_count - 1;
+
+            let new_content = current_content.replacen(target_content, replacement_content, 1);
+            std::fs::write(&canonical, new_content)
+                .map_err(|error| format!("写入编辑结果失败: {}", error))?;
+            *writes_used += 1;
+            Ok(format!("✅ 已局部更新 {}（替换第 {} 至 {} 行的内容）", relative, start_line, end_line))
+        }
         "run_command" => {
             let raw = params
                 .get("command")
@@ -560,7 +634,7 @@ pub async fn execute_writer_action(
             Ok(format!("{}\n[stdout {}]", status, body))
         }
         other => Err(format!(
-            "未知动作 {}；可用：list_dir、read_file、write_file、run_command、finish。",
+            "未知动作 {}；可用：list_dir、read_file、write_file、edit_file、run_command、finish。",
             other
         )),
     }
@@ -1693,6 +1767,63 @@ mod tests {
         std::fs::write(&file_a, "modified by root or user\n").unwrap();
         refresh_file_conflicts(&mut files, &root, false).await;
         assert_eq!(files[0].conflict_status, Some(ConflictStatus::Conflict), "现算必须检测到中间发生的冲突");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn test_execute_writer_action_edit_file() {
+        let (base, root) = workspace();
+        let file = root.join("src/sum.mjs");
+
+        let mut changes = BTreeMap::new();
+        let mut writes_used = 0;
+        let mut test_evidence = None;
+
+        // 唯一匹配替换成功
+        let p_ok = json!({
+            "path": "src/sum.mjs",
+            "target_content": "return a - b;",
+            "replacement_content": "return a + b;"
+        });
+        let res = execute_writer_action(
+            &root,
+            "edit_file",
+            &p_ok,
+            &mut changes,
+            &mut writes_used,
+            "npm test",
+            &mut test_evidence,
+            "",
+        )
+        .await;
+
+        assert!(res.is_ok(), "edit_file should succeed: {:?}", res);
+        assert_eq!(writes_used, 1);
+        assert!(changes.contains_key("src/sum.mjs"));
+
+        let updated = std::fs::read_to_string(&file).unwrap();
+        assert!(updated.contains("return a + b;"));
+
+        // 未找到报错
+        let p_not_found = json!({
+            "path": "src/sum.mjs",
+            "target_content": "non_existent_code();",
+            "replacement_content": "foo();"
+        });
+        let res_err = execute_writer_action(
+            &root,
+            "edit_file",
+            &p_not_found,
+            &mut changes,
+            &mut writes_used,
+            "npm test",
+            &mut test_evidence,
+            "",
+        )
+        .await;
+        assert!(res_err.is_err());
+        assert!(res_err.unwrap_err().contains("目标文本未找到"));
 
         let _ = std::fs::remove_dir_all(base);
     }

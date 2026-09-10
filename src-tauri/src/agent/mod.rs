@@ -53,6 +53,7 @@ pub mod types;
 pub mod utils;
 pub mod watch_engine;
 pub mod web_search;
+pub mod path_guard;
 
 pub use checkpoint::*;
 pub use control::*;

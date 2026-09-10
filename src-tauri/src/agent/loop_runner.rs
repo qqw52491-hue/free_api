@@ -58,7 +58,7 @@ pub(crate) fn evaluate_ask_human_cooldown(
     }
     checkpoint.recent_gate_block_step = None;
     Some(
-        "【❌ 求助失败：本次 ask_human 已被宿主冷却拒绝】\n【原因】刚刚被系统门禁拦截，尚未做出任何被拦截意见要求的行动即直接呼叫人类。\n【必须执行的操作】：\n请先执行拦截意见中要求的动作（重新取证 read/grep、按审查建议修改方案、重新派发 child_reviewer 复审，或调用 wait_jobs 挂起等待后台结论）；\n完成至少一步有效行动后若仍受阻，再向人类求助并附上你已尝试的动作与结果。".to_string(),
+        "【❌ 求助失败：本次 ask_human 已被宿主冷却拒绝（先监听，后求助）】\n【原因】刚刚被系统门禁拦截，尚未做出任何被拦截意见要求的行动即直接呼叫人类。\n【必须执行的操作】：\n请先执行拦截意见中要求的动作（重新取证 read/grep、按审查建议修改方案、重新派发 child_reviewer 复审，或调用 wait_jobs 挂起等待后台结论）；\n完成至少一步有效行动后若仍受阻，再向人类求助并附上你已尝试的动作与结果。".to_string(),
     )
 }
 

@@ -235,6 +235,16 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
             "read_artifact(artifact_id: string)",
         ],
     },
+    BuiltinToolSpec {
+        name: "local_file",
+        summary: "本地文件读写与精准局部替换（受工作区与临时目录双白名单保护）：修改已有文件优先使用 edit 进行局部替换，禁止动辄全量重写。注：tmp/ 相对路径会自动路由到会话专属临时草稿目录",
+        actions: &[
+            "read(path: string, start_line?: number, end_line?: number)",
+            "write(path: string, content: string)",
+            "edit(path: string, target_content: string, replacement_content: string) — 精准局部替换，target_content 必须全局唯一",
+            "list(path?: string, depth?: number)",
+        ],
+    },
 ];
 
 /// 从稳定的内置契约渲染首轮工具目录。

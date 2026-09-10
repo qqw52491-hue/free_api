@@ -1290,10 +1290,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                             checkpoint.uncovered_shell_mutations.saturating_add(delta);
                     }
                 }
-                // 非 git 环境：按本步骤是否为写类指令保守计 1
+                // 非 git 环境：按本步骤是否为写类指令保守计 1（但排除 session_tmp 草稿写入）
                 (None, _) if crate::agent::dispatcher::is_write_or_side_effect_tool(&instruction) => {
-                    checkpoint.uncovered_shell_mutations =
-                        checkpoint.uncovered_shell_mutations.saturating_add(1);
+                    let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
+                        && crate::agent::tools::local_file::is_dispatch_result_tmp(&result);
+                    if !is_tmp_write {
+                        checkpoint.uncovered_shell_mutations =
+                            checkpoint.uncovered_shell_mutations.saturating_add(1);
+                    }
                 }
                 _ => {}
             }
@@ -1818,10 +1822,14 @@ async fn run_agent_main_loop_in_workspace_inner(
             }
         } else if !is_finish {
             // 只有当常规步骤产生了新的真实副作用写入时，才视为进入了新的交付周期，重置质询标记与计数；
-            // 纯只读或查询步骤不重置 finish_reviewed / finish_challenge_count，防止模型因查阅参考信息导致门禁无限循环打回。
+            // 纯只读或临时草稿写入（session_tmp）不重置 finish_reviewed / finish_challenge_count，防止草稿修改打乱交付周期。
             if result.success && is_write_or_side_effect_tool(&instruction) {
-                checkpoint.finish_reviewed = false;
-                checkpoint.finish_challenge_count = 0;
+                let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
+                    && crate::agent::tools::local_file::is_dispatch_result_tmp(&result);
+                if !is_tmp_write {
+                    checkpoint.finish_reviewed = false;
+                    checkpoint.finish_challenge_count = 0;
+                }
             }
         }
         let is_effectively_challenged = finish_challenged || reviewer_challenged;
@@ -1933,10 +1941,14 @@ async fn run_agent_main_loop_in_workspace_inner(
 
         // --- 记录不可逆副作用安全台账 (Side-Effects Ledger) ---
         // 关键不可逆操作（如写入文件、修改数据库、执行写操作命令等）成功执行后记录台账，
-        // 纯只读命令（如 git log/show/diff, search 等）不入台账；参数保持完整合法 JSON，绝不使用 ... 截断元数据
+        // 纯只读命令（如 git log/show/diff, search 等）及临时草稿 (session_tmp) 不入台账；参数保持完整合法 JSON，绝不使用 ... 截断元数据
+        let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
+            && crate::agent::tools::local_file::is_dispatch_result_tmp(&result);
         if result.success
-            && crate::agent::context::AuditLedger::is_mutating_side_effect(
+            && !is_tmp_write
+            && crate::agent::context::AuditLedger::is_mutating_side_effect_with_action(
                 &instruction.get_tool(),
+                &instruction.get_action(),
                 &instruction.get_params(),
             )
         {

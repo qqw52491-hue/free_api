@@ -369,7 +369,22 @@ pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
     // 分类前统一剥离命名空间（remote-hub/read_file -> read_file）
     let raw_tool = inst.get_tool().to_ascii_lowercase();
     let tool = raw_tool.rsplit('/').next().unwrap_or(&raw_tool);
-    let action = inst.get_action().to_ascii_lowercase();
+    let mut action = inst.get_action().to_ascii_lowercase();
+    if action == tool || action.is_empty() {
+        if let Some(act) = inst.get_params().get("action").and_then(|v| v.as_str()) {
+            action = act.to_ascii_lowercase();
+        }
+    }
+
+    // 0. local_file 原生工具精准判定：read/list 绝不拦截；write/edit 必须严格由门禁把关！
+    if tool.eq_ignore_ascii_case("local_file") {
+        if action.starts_with("read") || action.starts_with("list") {
+            return false;
+        }
+        if action.starts_with("write") || action.starts_with("edit") {
+            return true;
+        }
+    }
 
     // 1. 核心代码与文件写盘工具（edit_file / write_file / child_writer 等）：无论何时必须由门禁严格把关！
     let is_code_write_tool = tool.contains("write")
@@ -844,6 +859,11 @@ pub(crate) fn execute_command_inner(
     if tool.eq_ignore_ascii_case("artifact_manager") || tool.eq_ignore_ascii_case("artifact_store")
     {
         return crate::agent::artifact_manager::dispatch(db, session_id, action, params);
+    }
+
+    // 3.13 核心原生工具 L: local_file (工作区与临时目录双白名单本地文件读写/精准局部替换)
+    if tool.eq_ignore_ascii_case("local_file") {
+        return crate::agent::tools::local_file::dispatch(db, session_id, action, params, workspace_root);
     }
 
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
