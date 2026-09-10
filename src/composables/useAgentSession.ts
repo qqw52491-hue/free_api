@@ -584,12 +584,21 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     const finalArtifacts = computed<ArtifactDescriptor[]>(() => {
         const output = finishOutput.value || {};
+        const hasExplicitCandidates = Boolean(
+            currentRunArtifacts.value.length ||
+            output.artifacts ||
+            output.files ||
+            output.created_files ||
+            output.paths
+        );
         const candidates = [
             ...currentRunArtifacts.value,
             output.artifacts,
             output.files,
             output.created_files,
             output.paths,
+            // 🌟 核心承接兜底：若当前单轮未产生新产物（如用户追问、移动文件后 finish），自动承接会话已登记的受管产物，确保交付物卡片不消失
+            ...(!hasExplicitCandidates ? managedSessionArtifacts.value : []),
         ];
         const flatList: AgentArtifactInput[] = candidates
             .flatMap((candidate) => Array.isArray(candidate) ? candidate : candidate ? [candidate] : [])

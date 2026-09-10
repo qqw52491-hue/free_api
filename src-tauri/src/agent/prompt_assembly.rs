@@ -47,8 +47,8 @@ struct BuiltinToolSpec {
 const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     BuiltinToolSpec {
         name: "finish",
-        summary: "终态交付；仅在所有完成门控已闭合时使用",
-        actions: &["finish(summary: string)"],
+        summary: "终态交付；仅在所有完成门控已闭合时使用。若生成或调整了文件交付物，建议在 artifacts 中附带相对路径列表，系统会自动在界面底部上屏生成下载与打开卡片",
+        actions: &["finish(summary: string, artifacts?: string[])"],
     },
     BuiltinToolSpec {
         name: "ask_human",

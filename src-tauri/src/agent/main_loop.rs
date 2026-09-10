@@ -2086,6 +2086,37 @@ async fn run_agent_main_loop_in_workspace_inner(
                 }
             }
 
+            // 🌟 产物上屏兜底：若模型在 finish 中未附带 artifacts 字段，自动从当前会话已登记的受管产物库中回填
+            let has_explicit_artifacts = emitted_finish
+                .get("artifacts")
+                .and_then(|v| v.as_array())
+                .map(|arr| !arr.is_empty())
+                .unwrap_or(false);
+
+            if !has_explicit_artifacts {
+                if let Ok(records) = crate::agent::artifact_manager::list_session_artifacts(state.inner(), &final_session_id) {
+                    if !records.is_empty() {
+                        let artifact_json_list: Vec<_> = records
+                            .into_iter()
+                            .map(|rec| {
+                                json!({
+                                    "artifact_id": rec.id,
+                                    "name": rec.display_name,
+                                    "format": rec.format,
+                                    "kind": rec.kind,
+                                    "size_bytes": rec.size_bytes,
+                                    "canonical_path": rec.canonical_path,
+                                    "local_path": rec.canonical_path,
+                                })
+                            })
+                            .collect();
+                        if let serde_json::Value::Object(ref mut map) = emitted_finish {
+                            map.insert("artifacts".to_string(), json!(artifact_json_list));
+                        }
+                    }
+                }
+            }
+
             if let Err(error) = crate::agent::run_trace::upsert_snapshot(
                 state.inner(),
                 &run_id,
