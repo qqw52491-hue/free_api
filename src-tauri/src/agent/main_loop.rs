@@ -438,20 +438,32 @@ async fn run_agent_main_loop_in_workspace_inner(
         )?;
     }
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
-    if is_project_session {
-        context.resource_scope =
-            context::resource_scope::ResourceScopeContract::bind_primary_filesystem(
-                &workspace_dir.to_string_lossy(),
-                context::resource_scope::ResourceScopeSource::SessionSelected,
-            );
+    let session_tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
 
-        // 动态受管文件清单挂载在底层面包（M_Tail），绝不污染 M0 顶层长前缀缓存
-        let mut manifest_text = format!(
-            "【项目受管文件清单 (Project Resource Manifest)】\n- 项目物理工作目录: `{}`\n",
-            workspace_dir.display()
+    // 绑定主文件系统作用域
+    context.resource_scope =
+        context::resource_scope::ResourceScopeContract::bind_primary_filesystem(
+            &workspace_dir.to_string_lossy(),
+            context::resource_scope::ResourceScopeSource::SessionSelected,
         );
+
+    // 动态可操作文件边界卡片挂载在底层面包（M_Tail），每轮伴随状态卡投射，绝不污染 M0 顶层长前缀缓存
+    let mut manifest_text = format!(
+        "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
+         • 项目物理工作区: `{}`\n\
+           - 相对路径默认基于此目录解析（如 \"src/main.rs\"、\"package.json\"）；修改已有文件优先调用 `local_file` 的 `edit` 局部替换，禁止动辄全量重写。\n\
+           - 门禁与台账规则: 对项目源码的写操作受阶段审查门禁保护，成功写入将记入不可逆副作用台账。\n\
+         • 会话专属临时目录: `{}`\n\
+           - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
+           - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
+         • 物理牢笼约束: 任何超出上述双白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
+        workspace_dir.display(),
+        session_tmp_dir.display()
+    );
+
+    if is_project_session {
         if project_resources.is_empty() {
-            manifest_text.push_str("- 当前项目暂无登记的受管文件。当在工作区生成重要产物或分析报告时，可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。");
+            manifest_text.push_str("- 当前项目暂无登记的受管数据文件。当在工作区生成重要产物或分析报告时，可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。\n");
         } else {
             manifest_text.push_str(&format!("- 本项目已登记受管数据文件（共 {} 个，已建立资源句柄可直接读取分析）：\n", project_resources.len()));
             for r in &project_resources {
@@ -465,21 +477,13 @@ async fn run_agent_main_loop_in_workspace_inner(
                     r.label
                 ));
             }
-            manifest_text.push_str("- 提示：调用 `project_resources.read_resource(resource_id)` 可直接读取上述文件内容；在工作区发现或生成新核心交付物时可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。");
+            manifest_text.push_str("- 提示：调用 `project_resources.read_resource(resource_id)` 可直接读取上述文件内容；在工作区发现或生成新核心交付物时可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。\n");
         }
-        context.project_resource_manifest = Some(manifest_text);
     } else if has_workspace_override {
-        context.resource_scope =
-            context::resource_scope::ResourceScopeContract::bind_primary_filesystem(
-                &workspace_dir.to_string_lossy(),
-                context::resource_scope::ResourceScopeSource::SessionSelected,
-            );
-        let manifest_text = format!(
-            "【独立临时工作区清单 (Scratch Workspace)】\n- 临时物理工作目录: `{}`\n- 本会话为未绑定项目的独立任务，所有临时操作与产物均严格限定在该临时目录下，严禁向用户的其他工程项目源码目录写入。\n",
-            workspace_dir.display()
-        );
-        context.project_resource_manifest = Some(manifest_text);
+        manifest_text.push_str("- 提示：本会话为独立任务工作区，所有代码与操作严格限定在该目录下，严禁向用户的其他工程项目源码目录写入。\n");
     }
+
+    context.project_resource_manifest = Some(manifest_text);
     context.compact_tools_index = Some(compact_tools_index);
     // 注入当前路由模型的上下文窗口大小与压缩配置，用于历史压缩水位动态计算与双层智能归档。
     // 双模型路由下同一段历史会分别发给推理与执行模型，预算必须按两者窗口的
