@@ -478,7 +478,8 @@ pub async fn fetch_url_markdown(url: String) -> Result<String, String> {
 }
 
 pub fn resolve_safe_artifact_path(raw: &str) -> Result<std::path::PathBuf, String> {
-    let clean = raw.trim().trim_matches('"').trim_matches('\'');
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
+    let clean = trimmed.strip_prefix("file://").unwrap_or(trimmed).trim();
     if clean.is_empty() || clean == "[object Object]" {
         return Err("未提供有效的文件路径".to_string());
     }
@@ -490,7 +491,51 @@ pub fn resolve_safe_artifact_path(raw: &str) -> Result<std::path::PathBuf, Strin
             .map_err(|e| format!("无法解析路径: {}", e));
     }
 
-    // 尝试基于当前工作目录以及父级工作区目录查找相对路径
+    // 1. 优先在应用数据目录的全局会话临时受管目录中查找 (解决 tmp/ 相对快捷路径或纯文件名)
+    let global_tmp = dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("free-api-chat")
+        .join("tmp");
+
+    if global_tmp.exists() {
+        let stripped = clean.strip_prefix("./").unwrap_or(clean);
+        let sub_path = stripped.strip_prefix("tmp/").unwrap_or(stripped);
+
+        // 1.1 直接检查全局临时根目录下的 sub_path
+        let direct_candidate = global_tmp.join(sub_path);
+        if direct_candidate.exists() {
+            return direct_candidate
+                .canonicalize()
+                .map_err(|e| format!("无法解析路径: {}", e));
+        }
+
+        // 1.2 遍历所有会话子目录，查找最新的匹配文件
+        if let Ok(entries) = std::fs::read_dir(&global_tmp) {
+            let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+            for entry in entries.flatten() {
+                let session_dir = entry.path();
+                if session_dir.is_dir() {
+                    let candidate = session_dir.join(sub_path);
+                    if candidate.exists() {
+                        let mtime = candidate
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        candidates.push((mtime, candidate));
+                    }
+                }
+            }
+            if !candidates.is_empty() {
+                candidates.sort_by(|a, b| b.0.cmp(&a.0));
+                return candidates[0]
+                    .1
+                    .canonicalize()
+                    .map_err(|e| format!("无法解析路径: {}", e));
+            }
+        }
+    }
+
+    // 2. 尝试基于当前工作目录以及父级工作区目录查找相对路径
     if let Ok(current_dir) = std::env::current_dir() {
         let candidate = current_dir.join(clean);
         if candidate.exists() {
@@ -505,6 +550,24 @@ pub fn resolve_safe_artifact_path(raw: &str) -> Result<std::path::PathBuf, Strin
                     .canonicalize()
                     .map_err(|e| format!("无法解析路径: {}", e));
             }
+        }
+    }
+
+    // 3. 尝试在操作系统系统临时目录下查找
+    let sys_tmp = std::env::temp_dir();
+    let sys_candidate = sys_tmp.join(clean);
+    if sys_candidate.exists() {
+        return sys_candidate
+            .canonicalize()
+            .map_err(|e| format!("无法解析路径: {}", e));
+    }
+    let stripped = clean.strip_prefix("./").unwrap_or(clean);
+    if let Some(sub) = stripped.strip_prefix("tmp/") {
+        let sys_sub_candidate = sys_tmp.join(sub);
+        if sys_sub_candidate.exists() {
+            return sys_sub_candidate
+                .canonicalize()
+                .map_err(|e| format!("无法解析路径: {}", e));
         }
     }
 
@@ -694,4 +757,34 @@ pub async fn save_and_parse_uploaded_attachment(
         );
     }
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_safe_artifact_path_for_session_tmp() {
+        // 测试解析真实存在的 tmp 相对路径
+        let res = resolve_safe_artifact_path("tmp/beijing_weather_5days.xlsx");
+        if res.is_ok() {
+            let path = res.unwrap();
+            assert!(path.is_absolute());
+            assert!(path.exists());
+            assert!(path.to_string_lossy().contains("beijing_weather_5days.xlsx"));
+        }
+
+        // 测试纯文件名
+        let res_file = resolve_safe_artifact_path("beijing_weather_5days.xlsx");
+        if res_file.is_ok() {
+            let path = res_file.unwrap();
+            assert!(path.is_absolute());
+            assert!(path.exists());
+        }
+
+        // 测试不存在的虚拟路径
+        let res_err = resolve_safe_artifact_path("tmp/absolutely_non_existent_file_12345.xyz");
+        assert!(res_err.is_err());
+        assert!(res_err.unwrap_err().contains("文件不存在"));
+    }
 }

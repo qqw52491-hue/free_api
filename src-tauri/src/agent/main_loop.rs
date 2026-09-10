@@ -2086,6 +2086,50 @@ async fn run_agent_main_loop_in_workspace_inner(
                 }
             }
 
+            // 🌟 规范化本轮 finish 交付的产物列表：若本轮模型显式附带了文件路径，自动解析绝对路径并登记受管交付物
+            if let serde_json::Value::Object(ref mut map) = emitted_finish {
+                if let Some(artifacts_val) = map.get_mut("artifacts") {
+                    if let Some(arr) = artifacts_val.as_array_mut() {
+                        let mut resolved_artifacts = Vec::new();
+                        for item in arr.iter() {
+                            let raw_candidate = match item {
+                                serde_json::Value::String(s) => Some(s.clone()),
+                                serde_json::Value::Object(obj) => {
+                                    obj.get("canonical_path")
+                                        .or_else(|| obj.get("local_path"))
+                                        .or_else(|| obj.get("path"))
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                }
+                                _ => None,
+                            };
+                            if let Some(path_str) = raw_candidate {
+                                if let Ok(rec) = crate::agent::artifact_manager::register_workspace_artifact(
+                                    state.inner(),
+                                    &final_session_id,
+                                    Some(&run_id),
+                                    &path_str,
+                                ) {
+                                    resolved_artifacts.push(json!({
+                                        "artifact_id": rec.id,
+                                        "name": rec.display_name,
+                                        "format": rec.format,
+                                        "kind": rec.kind,
+                                        "size_bytes": rec.size_bytes,
+                                        "canonical_path": rec.canonical_path,
+                                        "local_path": rec.canonical_path,
+                                    }));
+                                } else {
+                                    resolved_artifacts.push(item.clone());
+                                }
+                            } else {
+                                resolved_artifacts.push(item.clone());
+                            }
+                        }
+                        *artifacts_val = serde_json::Value::Array(resolved_artifacts);
+                    }
+                }
+            }
 
             if let Err(error) = crate::agent::run_trace::upsert_snapshot(
                 state.inner(),
