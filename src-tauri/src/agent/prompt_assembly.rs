@@ -247,9 +247,9 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "local_shell",
-        summary: "本地工作区终端命令执行工具：执行构建、测试、代码检查与环境探针（受工作区物理边界与超时保护）",
+        summary: "本地工作区终端命令执行工具：执行构建、测试、代码检查与环境探针（受工作区物理边界与超时保护，工具链PATH自动补齐）",
         actions: &[
-            "exec(command: string, cwd?: string, timeout_secs?: number) — 在项目工作区执行 shell 命令行",
+            "exec(command: string, args?: string[], cwd?: string, timeout_secs?: number, env?: object) — 在项目工作区执行 shell 命令行（支持参数数组与自定义环境变量）",
         ],
     },
 ];

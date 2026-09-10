@@ -1,21 +1,124 @@
 //! local_shell: 原生本地命令行执行工具（受工作区物理边界与超时熔断保护）。
 //!
-//! 设计目标：
+//! 设计目标与安全/自愈兜底机制（参考并汲取 mcp-remote-setup 生产实践）：
 //! 1. 彻底解耦外部 MCP 依赖，为主 Agent 提供原生的终端命令执行与测试运行能力；
-//! 2. 工作区物理边界牢笼：命令默认在当前项目工作区根目录执行，自定义 cwd 必须通过 path_guard 双白名单核验；
-//! 3. 超时与死锁熔断：基于 tokio::time::timeout 实现异步自动中断（默认 60s，上限 300s）；
-//! 4. 上下文保护：超长输出智能截断（保留关键头部与尾部摘要，最大 50KB / 1000 行）；
-//! 5. 结构化结果输出：stdout、stderr、exit_code、duration_ms。
+//! 2. 工具链 PATH 自动补齐：主动探测并补全 ~/.cargo/bin, ~/.local/bin, ~/.local/share/pnpm, /usr/local/bin 等路径，杜绝 GUI/非交互式会话中找不到编译器或包管理器的 ENOENT 错误；
+//! 3. 进程组级别隔离与双阶段优雅杀灭：开启 process_group(0)，超时先发 SIGTERM 软杀整个进程组（-pid），1.5秒未退硬发 SIGKILL，彻底防止孤儿进程/子进程树常驻泄漏；
+//! 4. 命令与参数智能归一化：无缝兼容单字符串命令 (command: "cargo test") 与结构化命令+参数数组 (command: "cargo", args: ["test", "--release"])，带标准单引号转义；
+//! 5. 自定义环境变量支持：支持传入 env: { "KEY": "VAL" } 灵活注入环境变量；
+//! 6. 工作区物理边界牢笼：命令默认在当前项目工作区根目录执行，自定义 cwd 必须通过 path_guard 双白名单核验；
+//! 7. 详细友好的 ENOENT 诊断：明确区分工作目录不存在与命令未在 PATH 中找到，并输出排查指引；
+//! 8. 结构化结果输出与诊断建议：输出 exit_code、duration_ms、kind、retryable、safe_to_retry、recommended_action，辅助大模型自愈纠错。
 
 use crate::agent::path_guard::ensure_allowed_path;
 use crate::agent::types::DispatchResult;
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const MAX_TIMEOUT_SECS: u64 = 300;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024; // 50KB 输出上限
+
+/// 常用开发工具链路径自动补齐（避免非交互式桌面进程丢失 pnpm/cargo/node/go 等二进制）
+pub fn get_enriched_path_env() -> String {
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let mut paths_to_prepend: Vec<PathBuf> = Vec::new();
+
+    if let Some(home) = dirs_next::home_dir() {
+        let candidates = [
+            home.join(".cargo").join("bin"),
+            home.join(".local").join("bin"),
+            home.join(".local").join("share").join("pnpm"),
+            home.join(".yarn").join("bin"),
+        ];
+        for c in &candidates {
+            if c.exists() {
+                paths_to_prepend.push(c.clone());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        for p in &["/usr/local/bin", "/opt/homebrew/bin", "/usr/local/go/bin"] {
+            let pb = PathBuf::from(p);
+            if pb.exists() {
+                paths_to_prepend.push(pb);
+            }
+        }
+    }
+
+    if paths_to_prepend.is_empty() {
+        return current_path;
+    }
+
+    #[cfg(windows)]
+    let separator = ";";
+    #[cfg(not(windows))]
+    let separator = ":";
+
+    let existing_set: std::collections::HashSet<String> = current_path
+        .split(separator)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    let mut new_parts = Vec::new();
+    for p in paths_to_prepend {
+        let s = p.to_string_lossy().to_string();
+        if !existing_set.contains(&s) {
+            new_parts.push(s);
+        }
+    }
+
+    if new_parts.is_empty() {
+        current_path
+    } else {
+        format!("{}{}{}", new_parts.join(separator), separator, current_path)
+    }
+}
+
+/// 标准单引号安全转义（shell 里转义单引号的标准写法 '\''）
+pub fn quote_shell_arg(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+/// 兼容 command + args 数组，拼装成可安全执行的完整命令行字符串
+pub fn build_full_command(command: &str, args: &[String]) -> String {
+    let trimmed = command.trim();
+    if args.is_empty() {
+        return trimmed.to_string();
+    }
+    let quoted_args: Vec<String> = args.iter().map(|a| quote_shell_arg(a)).collect();
+    format!("{} {}", trimmed, quoted_args.join(" "))
+}
+
+/// 杀灭子进程树 / 进程组（防止孤儿后台进程残留）
+fn kill_process_group(pid: u32, signal: &str) {
+    #[cfg(unix)]
+    {
+        // 负 PID (-pid) 表示向以 pid 为组长的整个子进程组发送信号，防止子进程树孤儿泄漏
+        let status = std::process::Command::new("kill")
+            .arg(format!("-{}", signal))
+            .arg(format!("-{}", pid))
+            .status();
+        // 若负 PID 失败，退化为针对单进程发送信号
+        if status.map(|s| !s.success()).unwrap_or(true) {
+            let _ = std::process::Command::new("kill")
+                .arg(format!("-{}", signal))
+                .arg(pid.to_string())
+                .status();
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(&["/F", "/T", "/PID", &pid.to_string()])
+            .status();
+    }
+}
 
 pub fn dispatch(
     session_id: &str,
@@ -26,9 +129,15 @@ pub fn dispatch(
     let ws_root = match workspace_root {
         Some(p) => p,
         None => {
+            let payload = json!({
+                "kind": "missing_workspace",
+                "retryable": false,
+                "safe_to_retry": true,
+                "recommended_action": "provide_workspace_root",
+            });
             return DispatchResult {
                 stdout: String::new(),
-                stderr: "❌ [系统错误] 未提供当前活跃的工作区路径，拒绝执行 shell 命令。".to_string(),
+                stderr: format!("❌ [系统错误] 未提供当前活跃的工作区路径，拒绝执行 shell 命令。\n<!-- 结构化元数据: {} -->", payload),
                 success: false,
                 route: "local_shell:missing_workspace".to_string(),
             };
@@ -43,24 +152,49 @@ pub fn dispatch(
     {
         Some(c) if !c.trim().is_empty() => c.trim(),
         _ => {
+            let payload = json!({
+                "kind": "missing_command",
+                "retryable": false,
+                "safe_to_retry": true,
+                "recommended_action": "provide_command_field",
+            });
             return DispatchResult {
                 stdout: String::new(),
-                stderr: "❌ local_shell 缺少必填参数 'command'（待执行的命令行）。".to_string(),
+                stderr: format!("❌ local_shell 缺少必填参数 'command'（待执行的命令行）。\n<!-- 结构化元数据: {} -->", payload),
                 success: false,
                 route: "local_shell:missing_command".to_string(),
             };
         }
     };
 
-    // 确定执行工作目录 (cwd)
+    // 支持可选的 args 参数列表
+    let args_list: Vec<String> = params
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let final_cmd = build_full_command(raw_cmd, &args_list);
+
+    // 确定执行工作目录 (cwd)，受 path_guard 严格约束
     let execution_cwd: PathBuf = match params.get("cwd").and_then(|v| v.as_str()) {
         Some(custom_cwd) if !custom_cwd.trim().is_empty() => {
             match ensure_allowed_path(custom_cwd.trim(), ws_root, Some(session_id), false) {
                 Ok(resolved) => resolved.canonical_path,
                 Err(e) => {
+                    let payload = json!({
+                        "kind": "cwd_denied",
+                        "retryable": false,
+                        "safe_to_retry": true,
+                        "recommended_action": "use_path_within_workspace",
+                    });
                     return DispatchResult {
                         stdout: String::new(),
-                        stderr: format!("❌ [执行目录拒绝] 指定的 cwd 不在合法白名单内: {}", e),
+                        stderr: format!("❌ [执行目录拒绝] 指定的 cwd 不在合法白名单内: {}\n<!-- 结构化元数据: {} -->", e, payload),
                         success: false,
                         route: "local_shell:cwd_denied".to_string(),
                     };
@@ -76,53 +210,64 @@ pub fn dispatch(
         .unwrap_or(DEFAULT_TIMEOUT_SECS)
         .min(MAX_TIMEOUT_SECS);
 
-    execute_command_blocking(raw_cmd, &execution_cwd, timeout_secs)
+    // 提取可选自定义环境变量
+    let custom_env: Option<HashMap<String, String>> = params
+        .get("env")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|val| (k.clone(), val.to_string())))
+                .collect()
+        });
+
+    execute_command_blocking(&final_cmd, &execution_cwd, timeout_secs, custom_env)
 }
 
-fn execute_command_blocking(cmd_str: &str, cwd: &Path, timeout_secs: u64) -> DispatchResult {
+fn execute_command_blocking(
+    cmd_str: &str,
+    cwd: &Path,
+    timeout_secs: u64,
+    custom_env: Option<HashMap<String, String>>,
+) -> DispatchResult {
     let start_time = Instant::now();
+    let enriched_path = get_enriched_path_env();
 
-    // 构建命令调用（跨平台适配）
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut c = std::process::Command::new("cmd.exe");
-        c.arg("/C").arg(cmd_str);
-        c
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let mut command = {
-        let mut c = std::process::Command::new("sh");
-        c.arg("-c").arg(cmd_str);
-        c
-    };
-
-    command.current_dir(cwd);
-    command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::piped());
-
-    // 使用 tokio 异步派发并挂载超时控制
+    // 使用 tokio 异步派发并挂载独立 Reactor 与超时控制
     let fut = async move {
         #[cfg(target_os = "windows")]
-        let mut child = tokio::process::Command::new("cmd.exe")
-            .arg("/C")
-            .arg(cmd_str)
-            .current_dir(cwd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("命令进程启动失败: {e}"))?;
+        let mut child = {
+            let mut c = tokio::process::Command::new("cmd.exe");
+            c.arg("/C").arg(cmd_str);
+            c.current_dir(cwd);
+            c.env("PATH", &enriched_path);
+            if let Some(ref env_map) = custom_env {
+                for (k, v) in env_map {
+                    c.env(k, v);
+                }
+            }
+            c.stdout(std::process::Stdio::piped());
+            c.stderr(std::process::Stdio::piped());
+            c.spawn().map_err(|e| format_spawn_error(e, cmd_str, cwd, &enriched_path))?
+        };
 
         #[cfg(not(target_os = "windows"))]
-        let mut child = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd_str)
-            .current_dir(cwd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("命令进程启动失败: {e}"))?;
+        let mut child = {
+            let mut c = tokio::process::Command::new("sh");
+            c.arg("-c").arg(cmd_str);
+            c.current_dir(cwd);
+            c.env("PATH", &enriched_path);
+            c.process_group(0); // 独立进程组：以子进程为主导组长，方便超时按组整棵树杀死
+            if let Some(ref env_map) = custom_env {
+                for (k, v) in env_map {
+                    c.env(k, v);
+                }
+            }
+            c.stdout(std::process::Stdio::piped());
+            c.stderr(std::process::Stdio::piped());
+            c.spawn().map_err(|e| format_spawn_error(e, cmd_str, cwd, &enriched_path))?
+        };
 
+        let child_pid = child.id();
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
 
@@ -149,22 +294,52 @@ fn execute_command_blocking(cmd_str: &str, cwd: &Path, timeout_secs: u64) -> Dis
 
         match tokio::time::timeout(timeout_dur, wait_fut).await {
             Ok(Ok(status)) => Ok((status, stdout_bytes, stderr_bytes)),
-            Ok(Err(e)) => Err(format!("命令等待执行结果失败: {e}")),
+            Ok(Err(e)) => Err((
+                "spawn_error".to_string(),
+                false,
+                true,
+                "check_command_path_and_permissions".to_string(),
+                format!("命令等待执行结果失败: {e}"),
+            )),
             Err(_) => {
-                let _ = child.kill().await;
-                Err(format!(
-                    "⚠️ [执行超时] 命令运行超过 {} 秒上限，已被系统强制终止杀死。",
-                    timeout_secs
+                // 1. 发送 SIGTERM 软杀整个进程组（向负 PID 发信号）
+                if let Some(pid) = child_pid {
+                    kill_process_group(pid, "TERM");
+                }
+                // 2. 给予最多 1.5 秒优雅清理缓冲期，若超时未退则硬杀 (SIGKILL)
+                let exited = tokio::time::timeout(Duration::from_millis(1500), child.wait()).await;
+                if exited.is_err() {
+                    if let Some(pid) = child_pid {
+                        kill_process_group(pid, "KILL");
+                    }
+                    let _ = child.kill().await;
+                }
+
+                Err((
+                    "process_timeout".to_string(),
+                    true,
+                    false,
+                    "check_state_before_retry_or_increase_timeout".to_string(),
+                    format!(
+                        "⚠️ [执行超时] 命令运行超过 {} 秒上限，已被系统强制终止杀死（已向进程树发送清理信号）。",
+                        timeout_secs
+                    ),
                 ))
             }
         }
     };
 
-    let run_in_rt = || -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
+    let run_in_rt = || -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), (String, bool, bool, String, String)> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| format!("创建 Tokio 运行时失败: {e}"))?;
+            .map_err(|e| (
+                "runtime_error".to_string(),
+                false,
+                true,
+                "retry".to_string(),
+                format!("创建 Tokio 运行时失败: {e}"),
+            ))?;
         rt.block_on(fut)
     };
 
@@ -174,7 +349,13 @@ fn execute_command_blocking(cmd_str: &str, cwd: &Path, timeout_secs: u64) -> Dis
         std::thread::scope(|s| {
             s.spawn(|| run_in_rt())
                 .join()
-                .unwrap_or_else(|_| Err("命令执行线程意外退出".to_string()))
+                .unwrap_or_else(|_| Err((
+                    "thread_crashed".to_string(),
+                    false,
+                    false,
+                    "check_host_system".to_string(),
+                    "命令执行线程意外退出".to_string(),
+                )))
         })
     } else {
         run_in_rt()
@@ -192,13 +373,24 @@ fn execute_command_blocking(cmd_str: &str, cwd: &Path, timeout_secs: u64) -> Dis
 
             let stdout_trimmed = truncate_output(&raw_stdout, MAX_OUTPUT_BYTES);
             let stderr_trimmed = truncate_output(&raw_stderr, MAX_OUTPUT_BYTES);
+            let is_truncated = raw_stdout.len() > MAX_OUTPUT_BYTES || raw_stderr.len() > MAX_OUTPUT_BYTES;
 
-            let status_badge = if success { "✅ [成功]" } else { "⚠️ [退出码非零]" };
+            let (kind, retryable, safe_to_retry, recommended_action) = if success {
+                ("success", false, true, "done")
+            } else {
+                ("non_zero_exit", true, false, "inspect_stderr_and_fix_arguments")
+            };
 
-            let mut formatted_stdout = format!(
-                "{} 命令执行完成 (耗时: {}ms, exit_code: {})\n$ {}\n",
-                status_badge, duration_ms, exit_code, cmd_str
-            );
+            let status_badge = if success {
+                format!("✅ [成功] (exit_code: 0, 耗时: {}ms)", duration_ms)
+            } else {
+                format!(
+                    "⚠️ [退出码非零] (exit_code: {}, 建议: {}, 耗时: {}ms)",
+                    exit_code, recommended_action, duration_ms
+                )
+            };
+
+            let mut formatted_stdout = format!("{}\n$ {}\n", status_badge, cmd_str);
 
             if !stdout_trimmed.is_empty() {
                 formatted_stdout.push_str(&format!("\n--- STDOUT ---\n{}", stdout_trimmed));
@@ -213,21 +405,74 @@ fn execute_command_blocking(cmd_str: &str, cwd: &Path, timeout_secs: u64) -> Dis
                 "exit_code": exit_code,
                 "duration_ms": duration_ms,
                 "success": success,
+                "kind": kind,
+                "retryable": retryable,
+                "safe_to_retry": safe_to_retry,
+                "recommended_action": recommended_action,
+                "truncated": is_truncated,
             });
 
             DispatchResult {
                 stdout: format!("{}\n\n<!-- 结构化元数据: {} -->", formatted_stdout.trim_end(), payload),
                 stderr: if success { String::new() } else { format!("命令退出码: {}", exit_code) },
                 success,
-                route: if success { "local_shell:success".to_string() } else { "local_shell:non_zero_exit".to_string() },
+                route: format!("local_shell:{}", kind),
             }
         }
-        Err(err_msg) => DispatchResult {
-            stdout: String::new(),
-            stderr: format!("❌ 命令执行失败: {}", err_msg),
-            success: false,
-            route: "local_shell:execution_error".to_string(),
-        },
+        Err((kind, retryable, safe_to_retry, recommended_action, err_msg)) => {
+            let payload = json!({
+                "command": cmd_str,
+                "cwd": cwd.display().to_string(),
+                "exit_code": -1,
+                "duration_ms": duration_ms,
+                "success": false,
+                "kind": kind,
+                "retryable": retryable,
+                "safe_to_retry": safe_to_retry,
+                "recommended_action": recommended_action,
+            });
+
+            DispatchResult {
+                stdout: String::new(),
+                stderr: format!("❌ {}\n<!-- 结构化元数据: {} -->", err_msg, payload),
+                success: false,
+                route: format!("local_shell:{}", kind),
+            }
+        }
+    }
+}
+
+/// 友好详细的进程启动异常诊断
+fn format_spawn_error(e: std::io::Error, cmd: &str, cwd: &Path, path_env: &str) -> (String, bool, bool, String, String) {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        if !cwd.exists() {
+            (
+                "cwd_not_found".to_string(),
+                false,
+                true,
+                "check_working_directory".to_string(),
+                format!("执行工作目录不存在: '{}' (请核对路径有效性)", cwd.display()),
+            )
+        } else {
+            (
+                "command_not_found".to_string(),
+                false,
+                true,
+                "check_command_path_and_permissions".to_string(),
+                format!(
+                    "未在系统 PATH 中找到待执行命令 (spawn ENOENT)。\n待执行: {}\n补充后的 PATH: {}\n建议：检查该工具是否已安装或提供完整可执行文件绝对路径。",
+                    cmd, path_env
+                ),
+            )
+        }
+    } else {
+        (
+            "spawn_error".to_string(),
+            false,
+            true,
+            "check_permissions_and_args".to_string(),
+            format!("命令进程启动失败: {e}"),
+        )
     }
 }
 
@@ -286,6 +531,40 @@ mod tests {
         assert!(res.success);
         assert!(res.stdout.contains("antigravity_test_ok"));
         assert!(res.stdout.contains("exit_code: 0"));
+        assert!(res.stdout.contains("\"kind\":\"success\""));
+    }
+
+    #[test]
+    fn test_local_shell_with_args_array() {
+        let temp = TempDirGuard::new();
+        let ws = temp.path();
+
+        let params = json!({
+            "command": "echo",
+            "args": ["antigravity_arg1", "antigravity_arg2 with space"]
+        });
+
+        let res = dispatch("test_sess", "exec", &params, Some(ws));
+        assert!(res.success);
+        assert!(res.stdout.contains("antigravity_arg1 antigravity_arg2 with space"));
+        assert!(res.stdout.contains("\"recommended_action\":\"done\""));
+    }
+
+    #[test]
+    fn test_local_shell_custom_env() {
+        let temp = TempDirGuard::new();
+        let ws = temp.path();
+
+        let params = json!({
+            "command": "echo $MY_CUSTOM_TEST_VAR",
+            "env": {
+                "MY_CUSTOM_TEST_VAR": "magic_env_val_999"
+            }
+        });
+
+        let res = dispatch("test_sess", "exec", &params, Some(ws));
+        assert!(res.success);
+        assert!(res.stdout.contains("magic_env_val_999"));
     }
 
     #[test]
@@ -300,6 +579,8 @@ mod tests {
         let res = dispatch("test_sess", "exec", &params, Some(ws));
         assert!(!res.success);
         assert!(res.stdout.contains("exit_code: 42"));
+        assert!(res.stdout.contains("\"kind\":\"non_zero_exit\""));
+        assert!(res.stdout.contains("\"retryable\":true"));
     }
 
     #[test]
@@ -316,6 +597,7 @@ mod tests {
         let res = dispatch("test_sess", "exec", &params, Some(ws));
         assert!(!res.success);
         assert!(res.stderr.contains("指定的 cwd 不在合法白名单内"));
+        assert!(res.stderr.contains("\"kind\":\"cwd_denied\""));
     }
 
     #[test]
@@ -327,5 +609,11 @@ mod tests {
         let res = dispatch("test_sess", "exec", &params, Some(ws));
         assert!(!res.success);
         assert!(res.stderr.contains("缺少必填参数 'command'"));
+    }
+
+    #[test]
+    fn test_enriched_path_has_entries() {
+        let enriched = get_enriched_path_env();
+        assert!(!enriched.is_empty());
     }
 }
