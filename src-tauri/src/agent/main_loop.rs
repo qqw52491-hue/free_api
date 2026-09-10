@@ -1402,7 +1402,7 @@ async fn run_agent_main_loop_in_workspace_inner(
 
         // --- 记录历史 + 更新观测 ---
         let final_stdout = result.stdout.clone();
-        let output_text = if result.success {
+        let mut output_text = if result.success {
             final_stdout.clone()
         } else {
             format!("❌ {}\n{}", result.stderr, final_stdout)
@@ -1838,6 +1838,14 @@ async fn run_agent_main_loop_in_workspace_inner(
             }
         }
         let is_effectively_challenged = finish_challenged || reviewer_challenged;
+        if is_effectively_challenged {
+            let detail = context
+                .turns_history
+                .last()
+                .and_then(|m| m.content.as_str())
+                .unwrap_or("【❌ 结项拦截打回】任务未满足验收条件，finish 未生效，请依据门禁提示完成修复后重试。");
+            output_text = detail.to_string();
+        }
         let outcome_str = if is_effectively_challenged {
             "finish_challenged"
         } else if result.success {

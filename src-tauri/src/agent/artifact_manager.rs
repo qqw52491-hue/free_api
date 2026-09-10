@@ -360,6 +360,7 @@ pub fn register_workspace_artifact(
             "UPDATE agent_artifacts SET run_id = ?1, size_bytes = ?2, updated_at = ?3 WHERE id = ?4",
             params![record.run_id, record.size_bytes, record.updated_at, eid],
         ).ok();
+        drop(conn);
         return get_artifact_record(db, &eid);
     }
 
