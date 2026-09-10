@@ -24,6 +24,22 @@ export function normalizeLocalFilePath(rawPath: string): string {
 }
 
 /**
+ * 查找元素所属的最近独立滚动容器（如 .canvas-scroll-content 或 overflow-y 为 auto/scroll 的容器）
+ */
+export function findScrollContainer(el: HTMLElement): HTMLElement | null {
+  let parent = el.parentElement;
+  while (parent && parent !== document.body && parent !== document.documentElement) {
+    const style = window.getComputedStyle(parent);
+    const overflowY = style.overflowY;
+    if (overflowY === "auto" || overflowY === "scroll") {
+      return parent;
+    }
+    parent = parent.parentElement;
+  }
+  return null;
+}
+
+/**
  * 全局链接点击事件处理器
  */
 export async function handleGlobalLinkClick(e: MouseEvent): Promise<void> {
@@ -47,17 +63,52 @@ export async function handleGlobalLinkClick(e: MouseEvent): Promise<void> {
 
     const decodedId = decodeURIComponent(rawId);
     const slugId = decodedId.toLowerCase().replace(/[^\w\u4e00-\u9fa5]+/g, "-");
+    const cleanSlugId = slugId.replace(/^-+|-+$/g, "");
 
-    // 优先匹配标准 ID、原始解码 ID 或标准化 Slug ID
-    const targetEl =
-      document.getElementById(rawId) ||
-      document.getElementById(decodedId) ||
-      document.getElementById(slugId) ||
-      document.querySelector(`[name="${rawId}"]`) ||
-      document.querySelector(`[name="${decodedId}"]`);
+    // 优先从触发点击的当前就近容器中寻找锚点（如右侧画布 .canvas-scroll-content 或独立段落），
+    // 避免因为左右分栏存在重复文档 ID 而错误定位到左侧对话流中
+    const localScope =
+      target.closest(".canvas-scroll-content") ||
+      target.closest(".manus-inspector") ||
+      target.closest(".rich-content-stream") ||
+      target.closest(".markdown-segment");
+
+    const findTargetIn = (scope: ParentNode): HTMLElement | null => {
+      // 1.1 精准属性与 slug 匹配
+      const candidates = [rawId, decodedId, slugId, cleanSlugId].filter(Boolean);
+      for (const cand of candidates) {
+        try {
+          const el = scope.querySelector<HTMLElement>(`[id="${CSS.escape(cand)}"], [name="${CSS.escape(cand)}"]`);
+          if (el) return el;
+        } catch {
+          // ignore selector escape errors
+        }
+      }
+
+      // 1.2 标题文字容错兜底（针对模型生成 TOC 时的细微标点/空格差异）
+      const headings = scope.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6");
+      for (const h of headings) {
+        const text = (h.getAttribute("data-heading-text") || h.textContent || "").trim();
+        if (!text) continue;
+        if (text === decodedId || text === rawId) return h;
+        const hSlug = text.toLowerCase().replace(/[^\w\u4e00-\u9fa5]+/g, "-").replace(/^-+|-+$/g, "");
+        if (hSlug && (hSlug === cleanSlugId || hSlug === slugId)) return h;
+      }
+      return null;
+    };
+
+    const targetEl = (localScope ? findTargetIn(localScope) : null) || findTargetIn(document);
 
     if (targetEl) {
-      targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
+      const scrollParent = findScrollContainer(targetEl);
+      if (scrollParent && scrollParent !== document.body && scrollParent !== document.documentElement) {
+        const parentRect = scrollParent.getBoundingClientRect();
+        const elRect = targetEl.getBoundingClientRect();
+        const top = scrollParent.scrollTop + (elRect.top - parentRect.top);
+        scrollParent.scrollTo({ top: Math.max(0, top - 12), behavior: "smooth" });
+      } else {
+        targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     }
     return;
   }

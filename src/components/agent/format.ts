@@ -371,8 +371,11 @@ export function renderMarkdown(content: string): string {
 
         renderer.heading = function ({ text, depth }: { text: string; depth: number }) {
             const cleanText = (text || "").replace(/<[^>]+>/g, "").trim();
-            const id = cleanText.toLowerCase().replace(/[^\w\u4e00-\u9fa5]+/g, "-");
-            return `<h${depth} id="${id}">${text}</h${depth}>`;
+            const id = cleanText
+                .toLowerCase()
+                .replace(/[^\w\u4e00-\u9fa5]+/g, "-")
+                .replace(/^-+|-+$/g, "");
+            return `<h${depth} id="${id}" data-heading-text="${cleanText}">${text}</h${depth}>`;
         };
 
         renderer.link = function ({ href, title, text }: { href: string; title?: string | null; text: string }) {
