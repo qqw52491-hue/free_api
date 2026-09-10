@@ -13,7 +13,8 @@ export function formatTokens(count: number): string {
 }
 
 export function formatMs(ms?: number): string {
-    if (!ms) return "0ms";
+    if (ms == null || Number.isNaN(ms) || ms < 0) return "--";
+    if (ms < 1) return "< 1ms";
     if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
     return `${ms}ms`;
 }

@@ -207,7 +207,7 @@
                         <p>{{ selectedStep.description || selectedStep.action }}</p>
                         <div class="step-meta">
                             <b :class="`status-${selectedStep.status}`">{{ statusLabel(selectedStep.status) }}</b>
-                            <em v-if="selectedStep.durationMs">{{ formatMilliseconds(selectedStep.durationMs) }}</em>
+                            <em v-if="selectedStep.durationMs != null">{{ formatMilliseconds(selectedStep.durationMs) }}</em>
                             <em>{{ formatClock(selectedStep.timestamp) }}</em>
                         </div>
 

@@ -117,8 +117,15 @@ export function formatDuration(seconds: number): string {
 }
 
 export function formatMilliseconds(milliseconds?: number): string {
-    if (!milliseconds || milliseconds <= 0) return "";
+    if (milliseconds == null || Number.isNaN(milliseconds) || milliseconds < 0) return "";
+    if (milliseconds === 0) return "< 1ms";
     if (milliseconds < 1000) return `${milliseconds}ms`;
+    return `${(milliseconds / 1000).toFixed(1)}s`;
+}
+
+export function formatDurationSeconds(milliseconds?: number): string {
+    if (milliseconds == null || Number.isNaN(milliseconds) || milliseconds < 0) return "";
+    if (milliseconds < 100) return "< 0.1s";
     return `${(milliseconds / 1000).toFixed(1)}s`;
 }
 

@@ -1125,7 +1125,7 @@
             <!-- 6. 工具调用时间 -->
             <span class="telemetry-node" title="工具执行耗时">
                 <span class="t-label">🔧 工具</span>
-                <span class="t-val">{{ (telemetry?.lastToolDurationMs && telemetry.lastToolDurationMs > 0) ? formatMs(telemetry.lastToolDurationMs) : '--' }}</span>
+                <span class="t-val">{{ (telemetry?.lastToolDurationMs !== undefined && telemetry.lastToolDurationMs >= 0) ? formatMs(telemetry.lastToolDurationMs) : '--' }}</span>
             </span>
             <span class="t-sep">·</span>
 

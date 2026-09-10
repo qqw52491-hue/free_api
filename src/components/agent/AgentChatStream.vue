@@ -340,7 +340,7 @@
                                             <span class="child-mark"></span>
                                             <span class="tool-tag thought-tag">🧠 思考</span>
                                             <span>{{ shortText(step.thought, 110) }}</span>
-                                            <em v-if="step.metrics?.thinkingDurationMs">{{ (step.metrics.thinkingDurationMs / 1000).toFixed(1) }}s</em>
+                                            <em v-if="step.metrics?.thinkingDurationMs != null">{{ formatDurationSeconds(step.metrics.thinkingDurationMs) }}</em>
                                             <em v-else>已分析</em>
                                         </button>
 
@@ -362,7 +362,7 @@
                                             <span v-if="(getStepMiniChip(step)?.deletions || 0) > 0" class="card-diff-del">−{{ getStepMiniChip(step)?.deletions }}</span>
                                             <span v-if="getStepMiniChip(step)?.isIntercepted" class="card-blocked">已拦截</span>
                                             <span v-if="chipHasDiffContent(getStepMiniChip(step))" class="card-view-diff-hint">查看 Diff →</span>
-                                            <em v-if="step.metrics?.toolDurationMs" class="card-duration">{{ (step.metrics.toolDurationMs / 1000).toFixed(1) }}s</em>
+                                            <em v-if="step.metrics?.toolDurationMs != null" class="card-duration">{{ formatDurationSeconds(step.metrics.toolDurationMs) }}</em>
                                         </div>
 
                                         <!-- 3. 普通非文件工具调用 (如单纯的后台挂起、协同调度等) -->
@@ -380,7 +380,7 @@
                                             <span :class="{ 'subagent-action-text': isSubAgentTool(step.tool), 'waitjobs-action-text': isWaitJobsTool(step.tool) }">
                                                 {{ isSubAgentTool(step.tool) ? (step.status === 'running' ? '⚡ 正在后台独立执行调查审查，点击右侧抽屉可查看证据包与发现…' : (step.action || step.explanation || '已生成审查结论 · 点击查看详情')) : (isWaitJobsTool(step.tool) ? (step.status === 'running' ? '⏳ 当前协程已反应式挂起等待后台通知，0 Token 0 CPU 消耗…' : '✅ 后台任务已完成，已唤醒并回收全部结论') : shortText(formatStepOperation(step).actionText || step.action || step.explanation || '执行操作', 110)) }}
                                             </span>
-                                            <em v-if="step.metrics?.toolDurationMs">{{ (step.metrics.toolDurationMs / 1000).toFixed(1) }}s · {{ step.source }}</em>
+                                            <em v-if="step.metrics?.toolDurationMs != null">{{ formatDurationSeconds(step.metrics.toolDurationMs) }} · {{ step.source }}</em>
                                             <em v-else>{{ step.source }}</em>
                                         </button>
                                     </div>
@@ -519,7 +519,7 @@ import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
 import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule } from "./types";
 import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtSentence } from "./diffUtils";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
-import { formatClock, getToolIcon, shortText } from "./format";
+import { formatClock, formatDurationSeconds, formatMilliseconds, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
 import ArtifactList from "../artifacts/ArtifactList.vue";
@@ -1081,15 +1081,15 @@ function formatMetricTokenCount(n: number): string {
 
 function getStepMetricsPill(step: AgentStepItem): string {
     const m = step.metrics;
-    if (!m && !step.durationMs) return '';
+    if (!m && step.durationMs == null) return '';
     const parts: string[] = [];
     if (m?.completionTokens) {
         parts.push(`${formatMetricTokenCount(m.completionTokens)} tok`);
     }
-    if (m?.totalDurationMs) {
-        parts.push(m.totalDurationMs < 1000 ? `${m.totalDurationMs}ms` : `${(m.totalDurationMs / 1000).toFixed(1)}s`);
-    } else if (step.durationMs) {
-        parts.push(step.durationMs < 1000 ? `${step.durationMs}ms` : `${(step.durationMs / 1000).toFixed(1)}s`);
+    if (m?.totalDurationMs != null) {
+        parts.push(formatMilliseconds(m.totalDurationMs));
+    } else if (step.durationMs != null) {
+        parts.push(formatMilliseconds(step.durationMs));
     }
     return parts.join(' · ');
 }
@@ -1100,8 +1100,8 @@ function getStepMetricsTooltip(step: AgentStepItem): string {
     const lines: string[] = [];
     if (m.promptTokens) lines.push(`📥 输入上下文: ${m.promptTokens.toLocaleString()} tok (缓存命中: ${m.cacheHitRate || 0}%)`);
     if (m.completionTokens) lines.push(`📤 输出生成: ${m.completionTokens.toLocaleString()} tok`);
-    if (m.thinkingDurationMs) lines.push(`🧠 思考耗时: ${(m.thinkingDurationMs / 1000).toFixed(1)}s`);
-    if (m.toolDurationMs) lines.push(`⚡ 工具耗时: ${(m.toolDurationMs / 1000).toFixed(1)}s`);
+    if (m.thinkingDurationMs != null) lines.push(`🧠 思考耗时: ${formatDurationSeconds(m.thinkingDurationMs)}`);
+    if (m.toolDurationMs != null) lines.push(`⚡ 工具耗时: ${formatDurationSeconds(m.toolDurationMs)}`);
     if (m.tokensPerSecond) lines.push(`💨 吐字速率: ${m.tokensPerSecond.toFixed(1)} tok/s`);
     return lines.join('\n');
 }

@@ -471,7 +471,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     const sessionTelemetry = computed<AgentSessionTelemetry>(() => {
         const currentSteps = steps.value;
-        const lastStepWithDuration = [...currentSteps].reverse().find(s => s.durationMs !== undefined && s.durationMs > 0);
+        const lastStepWithDuration = [...currentSteps].reverse().find(s => s.durationMs !== undefined && s.durationMs >= 0);
         const totalToolMs = currentSteps.reduce((acc, s) => acc + (s.durationMs ?? 0), 0);
         const usage = tokenUsage.value;
 
