@@ -14,6 +14,36 @@ pub fn get_session_tmp_dir(session_id: &str) -> PathBuf {
     base.join("free-api-chat").join("tmp").join(session_id)
 }
 
+/// 判定给定路径是否物理位于当前会话临时目录或全局会话临时根目录下，或是 tmp/ 相对快捷路径
+pub fn is_path_in_session_tmp(raw_path: &str, session_id: Option<&str>) -> bool {
+    let trimmed = raw_path.trim();
+    if trimmed.starts_with("tmp/") || trimmed.starts_with("./tmp/") {
+        return true;
+    }
+    let p = Path::new(trimmed);
+    if let Some(sid) = session_id {
+        let specific_tmp = get_session_tmp_dir(sid);
+        if p.starts_with(&specific_tmp) {
+            return true;
+        }
+    }
+    let global_tmp = dirs_next::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("free-api-chat")
+        .join("tmp");
+    if p.starts_with(&global_tmp) {
+        return true;
+    }
+    if let Ok(canon) = p.canonicalize() {
+        if let Ok(canon_global) = global_tmp.canonicalize() {
+            if canon.starts_with(&canon_global) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone)]
 pub struct AllowedPathResolution {
     /// 物理绝对路径（已 canonicalize 或基于合法 parent 构建）

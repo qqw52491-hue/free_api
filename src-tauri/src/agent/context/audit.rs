@@ -170,11 +170,7 @@ impl AuditLedger {
         if raw_path.is_empty() {
             return false;
         }
-        let normalized = raw_path.replace('\\', "/");
-        normalized.starts_with("tmp/")
-            || normalized.starts_with("./tmp/")
-            || normalized.contains("/free-api-chat/tmp/")
-            || normalized.contains("/.free-api-chat/tmp/")
+        crate::agent::path_guard::is_path_in_session_tmp(raw_path, None)
     }
 
     /// 检测 shell 命令是否为只读查询（如 git log/show/diff, ls, cat, grep 等）
