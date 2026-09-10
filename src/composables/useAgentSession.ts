@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentTaskResources } from "./useAgentTaskResources";
 import { usePersistedAgentConversation, type PersistedConversationMessage } from "./usePersistedAgentConversation";
 import type { ArtifactDescriptor, AgentArtifactInput } from "../types/artifact";
-import { listSessionArtifacts, normalizeArtifact, normalizeArtifactList } from "../utils/artifact";
+import { normalizeArtifact, normalizeArtifactList } from "../utils/artifact";
 
 export interface AgentHistoryTurn {
     id: string;
@@ -565,40 +565,16 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         }
         return cleanUserFacingSummary(combined);
     });
-    const managedSessionArtifacts = ref<ArtifactDescriptor[]>([]);
-
-    async function reloadManagedArtifacts() {
-        const sid = activeSessionId.value;
-        if (!sid || !sid.trim() || sid.startsWith("draft-")) {
-            managedSessionArtifacts.value = [];
-            return;
-        }
-        managedSessionArtifacts.value = await listSessionArtifacts(sid);
-    }
-
-    onMounted(() => {
-        reloadManagedArtifacts();
-    });
-
     const currentRunArtifacts = ref<ArtifactDescriptor[]>([]);
 
     const finalArtifacts = computed<ArtifactDescriptor[]>(() => {
         const output = finishOutput.value || {};
-        const hasExplicitCandidates = Boolean(
-            currentRunArtifacts.value.length ||
-            output.artifacts ||
-            output.files ||
-            output.created_files ||
-            output.paths
-        );
         const candidates = [
             ...currentRunArtifacts.value,
             output.artifacts,
             output.files,
             output.created_files,
             output.paths,
-            // 🌟 核心承接兜底：若当前单轮未产生新产物（如用户追问、移动文件后 finish），自动承接会话已登记的受管产物，确保交付物卡片不消失
-            ...(!hasExplicitCandidates ? managedSessionArtifacts.value : []),
         ];
         const flatList: AgentArtifactInput[] = candidates
             .flatMap((candidate) => Array.isArray(candidate) ? candidate : candidate ? [candidate] : [])
@@ -1025,7 +1001,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             }
         }
         scheduleResourceRefresh();
-        reloadManagedArtifacts();
         setRunState(succeeded ? "succeeded" : "failed", message);
         appendLog(`[任务结束] ${succeeded ? "✅ 成功" : "❌ 失败"}: ${message}`);
         autoScrollToBottom();
