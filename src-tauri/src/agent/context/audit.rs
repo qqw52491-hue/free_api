@@ -134,7 +134,7 @@ impl AuditLedger {
         }
 
         // 2. shell 命令：细分检测是否为只读命令
-        if action_name == "shell_exec" || action_name == "shell_exec_async" {
+        if action_name == "local_shell" || action_name == "shell_exec" || action_name == "shell_exec_async" {
             return !Self::is_readonly_shell_command(params);
         }
 
@@ -175,18 +175,36 @@ impl AuditLedger {
 
     /// 检测 shell 命令是否为只读查询（如 git log/show/diff, ls, cat, grep 等）
     pub fn is_readonly_shell_command(params: &serde_json::Value) -> bool {
-        let cmd = params.get("command").and_then(|c| c.as_str()).unwrap_or("");
-        let args: Vec<&str> = params
+        let raw_cmd = params
+            .get("command")
+            .or_else(|| params.get("cmd"))
+            .or_else(|| params.get("commandline"))
+            .or_else(|| params.get("command_line"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .trim();
+
+        let explicit_args: Vec<&str> = params
             .get("args")
             .and_then(|a| a.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
 
-        let base_cmd = cmd.split('/').last().unwrap_or(cmd).trim();
+        let mut tokens: Vec<&str> = raw_cmd.split_whitespace().collect();
+        if !explicit_args.is_empty() {
+            tokens.extend(explicit_args);
+        }
+
+        if tokens.is_empty() {
+            return false;
+        }
+
+        let first = tokens[0];
+        let base_cmd = first.split('/').last().unwrap_or(first).trim();
 
         if base_cmd == "git" {
             let mut skip_next = false;
-            for arg in &args {
+            for arg in &tokens[1..] {
                 if skip_next {
                     skip_next = false;
                     continue;
@@ -368,6 +386,24 @@ mod tests {
         assert!(!AuditLedger::is_mutating_side_effect(
             "local_file",
             &json!({"action": "list", "path": "."})
+        ));
+
+        // local_shell 原生工具：只读命令免入台账，副作用命令严格入台账
+        assert!(!AuditLedger::is_mutating_side_effect(
+            "local_shell",
+            &json!({"command": "git status"})
+        ));
+        assert!(!AuditLedger::is_mutating_side_effect(
+            "local_shell",
+            &json!({"command": "ls -la"})
+        ));
+        assert!(AuditLedger::is_mutating_side_effect(
+            "local_shell",
+            &json!({"command": "cargo test"})
+        ));
+        assert!(AuditLedger::is_mutating_side_effect(
+            "local_shell",
+            &json!({"command": "rm -rf target"})
         ));
     }
 

@@ -245,6 +245,13 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
             "list(path?: string, depth?: number)",
         ],
     },
+    BuiltinToolSpec {
+        name: "local_shell",
+        summary: "本地工作区终端命令执行工具：执行构建、测试、代码检查与环境探针（受工作区物理边界与超时保护）",
+        actions: &[
+            "exec(command: string, cwd?: string, timeout_secs?: number) — 在项目工作区执行 shell 命令行",
+        ],
+    },
 ];
 
 /// 从稳定的内置契约渲染首轮工具目录。

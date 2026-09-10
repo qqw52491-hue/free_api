@@ -866,6 +866,11 @@ pub(crate) fn execute_command_inner(
         return crate::agent::tools::local_file::dispatch(db, session_id, action, params, workspace_root);
     }
 
+    // 3.14 核心原生工具 M: local_shell (工作区物理边界与超时保护本地命令行执行)
+    if tool.eq_ignore_ascii_case("local_shell") {
+        return crate::agent::tools::local_shell::dispatch(session_id, action, params, workspace_root);
+    }
+
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
     let (plugin_name, tool_name) = if tool.contains('/') {
         let parts: Vec<&str> = tool.split('/').collect();
