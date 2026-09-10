@@ -184,19 +184,35 @@ export function isSafeArtifactUrl(value?: string): boolean {
  * 支持：内存内联 content、安全远程 previewUrl、以及本地常见文本/文档/代码文件 (可通过宿主 read_artifact_file 异步拉取)
  */
 export function isArtifactPreviewable(artifact: ArtifactDescriptor): boolean {
+  const fmt = (artifact.format || "").toLowerCase().replace(/^\./, "");
+  
+  // 1. 二进制/不可内联预览的文件扩展名黑名单（如 Excel, Word, PPT, 压缩包等）
+  const binaryUnpreviewableExts = [
+    "xlsx", "xls", "docx", "doc", "pptx", "ppt", "zip", "tar", "gz", "7z", "rar",
+    "pdf", "exe", "bin", "dll", "so", "dylib", "db", "sqlite"
+  ];
+  if (fmt && binaryUnpreviewableExts.includes(fmt)) {
+    return false;
+  }
+
+  // 2. 如果已经拥有非空内联正文
   if (artifact.content && artifact.content.trim().length > 0) return true;
+
+  // 3. 安全的 Web 预览 URL
   if (isSafeArtifactUrl(artifact.previewUrl)) return true;
-  if (artifact.artifactId) return true;
-  if (artifact.localPath) {
-    const fmt = (artifact.format || "").toLowerCase().replace(/^\./, "");
-    const previewableExts = [
-      "md", "markdown", "txt", "html", "htm", "json", "yaml", "yml", "toml",
-      "js", "ts", "jsx", "tsx", "vue", "rs", "py", "go", "java", "c", "cpp",
-      "sql", "css", "scss", "sh", "svg", "png", "jpg", "jpeg", "webp", "gif"
-    ];
+
+  // 4. 白名单可预览格式（文本、代码、轻量图像、SVG、CSV等）
+  const previewableExts = [
+    "md", "markdown", "txt", "html", "htm", "json", "yaml", "yml", "toml",
+    "js", "ts", "jsx", "tsx", "vue", "rs", "py", "go", "java", "c", "cpp",
+    "sql", "css", "scss", "sh", "svg", "png", "jpg", "jpeg", "webp", "gif", "csv"
+  ];
+  if (fmt) {
     return previewableExts.includes(fmt);
   }
-  return false;
+
+  // 5. 没有 format 时，仅当类型为明确的文本、网页、图表或图片时才允许预览
+  return ["text", "web", "chart", "image"].includes(artifact.kind);
 }
 
 /**

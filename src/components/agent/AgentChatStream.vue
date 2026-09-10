@@ -688,6 +688,16 @@ function extractSubagentTask(step: any): string {
 }
 
 async function handlePreviewArtifact(artifact: ArtifactDescriptor) {
+    const { isArtifactPreviewable, openArtifactById, openArtifactInSystem } = await import("../../utils/artifact");
+    if (!isArtifactPreviewable(artifact)) {
+        if (artifact.artifactId) {
+            await openArtifactById(artifact.artifactId);
+        } else if (artifact.localPath) {
+            await openArtifactInSystem(artifact.localPath);
+        }
+        return;
+    }
+
     if (!artifact.content) {
         if (artifact.artifactId) {
             const { readArtifactById } = await import("../../utils/artifact");
@@ -699,8 +709,9 @@ async function handlePreviewArtifact(artifact: ArtifactDescriptor) {
             if (text) artifact.content = text;
         }
     }
-    const content = artifact.content || artifact.localPath || "";
-    emit("open-preview", content);
+    if (artifact.content) {
+        emit("open-preview", artifact.content);
+    }
 }
 
 function handleDownloadArtifact(_artifact: ArtifactDescriptor) {
