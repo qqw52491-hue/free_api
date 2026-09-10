@@ -531,6 +531,9 @@ pub struct AgentCheckpoint {
     /// 最终批准的方案摘要（用于防方案漂移与核对）
     #[serde(default)]
     pub approved_plan_summary: Option<String>,
+    /// 人类主人明确批准的特赦/豁免指示（用于在代码审查门禁中豁免特定改动）
+    #[serde(default)]
+    pub human_waivers: Vec<String>,
     /// 运行执行模式：Auto（全自动）、CrossReview（交叉审查）、PlanApproval（方案审批）
     #[serde(default)]
     pub plan_mode: PlanExecutionMode,
@@ -700,6 +703,7 @@ impl AgentCheckpoint {
             plan_phase: PlanPhase::Exploring,
             plan_reviewer_retry_count: 0,
             approved_plan_summary: None,
+            human_waivers: Vec::new(),
             plan_mode: PlanExecutionMode::Auto,
             plan_reviewer_consumed: false,
             last_review_scorecard: None,
@@ -1112,6 +1116,42 @@ impl AgentCheckpoint {
         let trimmed = question.trim();
         if !trimmed.is_empty() && !self.asked_human_questions.iter().any(|q| q == trimmed) {
             self.asked_human_questions.push(trimmed.to_string());
+        }
+    }
+
+    /// 记录人类主人明确批准的特赦/豁免指示（最多保留最近 10 条）
+    pub fn record_human_waiver(&mut self, waiver: &str) {
+        let trimmed = waiver.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if !self.human_waivers.iter().any(|w| w == trimmed) {
+            self.human_waivers.push(trimmed.to_string());
+            if self.human_waivers.len() > 10 {
+                self.human_waivers.remove(0);
+            }
+        }
+    }
+
+    /// 汇总当前会话中人类所有生效的特赦与裁决文本
+    pub fn human_waiver_text(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(summary) = &self.approved_plan_summary {
+            let s = summary.trim();
+            if !s.is_empty() {
+                parts.push(format!("方案裁决: {}", s));
+            }
+        }
+        for w in &self.human_waivers {
+            let item = w.trim();
+            if !item.is_empty() && !parts.iter().any(|p| p.contains(item)) {
+                parts.push(format!("人工特赦: {}", item));
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
         }
     }
 
@@ -2062,6 +2102,28 @@ mod tests {
         assert_eq!(cp.stage_review_blockers_open, 1);
         assert_eq!(cp.stage_review_final_only.len(), 1);
         assert!(cp.stage_review_final_only[0].contains("专家 B"));
+    }
+
+    #[test]
+    fn test_human_waiver_recording_and_text_aggregation() {
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-waiver".to_string(), &ctx);
+        assert!(cp.human_waiver_text().is_none());
+
+        cp.record_human_waiver("保留本地 if(true) 调试放行，直接交付");
+        assert!(cp.human_waiver_text().is_some());
+        let text = cp.human_waiver_text().unwrap();
+        assert!(text.contains("if(true)"));
+
+        // 重复记录幂等去重
+        cp.record_human_waiver("保留本地 if(true) 调试放行，直接交付");
+        assert_eq!(cp.human_waivers.len(), 1);
+
+        // 与 approved_plan_summary 联动聚合
+        cp.approved_plan_summary = Some("用户批准了案件导出方案".to_string());
+        let full_text = cp.human_waiver_text().unwrap();
+        assert!(full_text.contains("方案裁决: 用户批准了案件导出方案"));
+        assert!(full_text.contains("人工特赦: 保留本地 if(true) 调试放行，直接交付"));
     }
 }
 

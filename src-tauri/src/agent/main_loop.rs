@@ -1677,6 +1677,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     }
                     (!parts.is_empty()).then(|| parts.join("\n\n"))
                 };
+                let human_waivers = checkpoint.human_waiver_text();
                 let review_res = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
                     &app,
                     state.inner(),
@@ -1692,6 +1693,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     checkpoint.last_review_result.as_ref(),
                     &checkpoint.stage_review_final_only,
                     host_verification.as_deref(),
+                    human_waivers.as_deref(),
                 )
                 .await;
 

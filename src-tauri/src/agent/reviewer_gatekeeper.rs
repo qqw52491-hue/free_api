@@ -410,6 +410,7 @@ pub async fn evaluate_finish_diff(
     last_review_result: Option<&ReviewResult>,
     stage_carry_over: &[String],
     host_verification: Option<&str>,
+    human_waivers: Option<&str>,
 ) -> ReviewResult {
     let started_at = std::time::Instant::now();
 
@@ -429,9 +430,11 @@ pub async fn evaluate_finish_diff(
         review_material.push_str(&format!("\n\n【宿主实测验证（宿主亲自执行，非模型自报）】\n{}\n", hv));
     }
 
-    // 2. 防敷衍拦截：若代码未变 (diff_hash 相同) 且上次审查未通过，直接复用上次拦截结果，避免浪费 Token 重跑
+    // 2. 防敷衍拦截：若代码未变 (diff_hash 相同) 且上次审查未通过，
+    // 且期间未发生人类人工仲裁特赦（无 human_waivers 介入），直接复用上次拦截结果，避免浪费 Token 重跑
     if let (Some(last_hash), Some(last_res)) = (last_reviewed_hash, last_review_result) {
-        if !last_hash.is_empty() && last_hash == diff_hash && !last_res.is_passed() {
+        let has_active_waiver = human_waivers.map_or(false, |w| !w.trim().is_empty());
+        if !last_hash.is_empty() && last_hash == diff_hash && !last_res.is_passed() && !has_active_waiver {
             let mut reused = last_res.clone();
             reused.summary = format!("【复用上次拦截 (Diff 未变)】检测到代码未做任何修复: {}", last_res.summary);
             reused.duration_ms = 0;
@@ -542,6 +545,16 @@ pub async fn evaluate_finish_diff(
             block_sections.push(format!(
                 "【执行模型提交的自述 (Self-Report)】\n- 核心改动: {}\n- 选型理由: {}\n- 存疑与隐患点: {}\n👉 审查强制要求：特别针对执行者自述中指出的“存疑与隐患点”，进行高强度的交叉严审！",
                 report.what_changed, report.rationale, report.uncertainties
+            ));
+        }
+    }
+
+    if let Some(waivers) = human_waivers {
+        let trimmed = waivers.trim();
+        if !trimmed.is_empty() {
+            block_sections.push(format!(
+                "【👑 最高裁决：人类主人已明确批准的特赦与豁免指示 (Human Approved Waivers)】\n{}\n👉 审查强制纪律：人类主人的裁决具有最高权威（高于常规代码审查规则）。若人类已明确知晓并批准保留某处改动（如调试代码、特殊放行或特定业务权衡），你必须严格尊重该裁决，绝对禁止将用户已特赦的改动再次判定为 blocking_issues！其余未被特赦的代码仍须按正常标准严格审查。",
+                trimmed
             ));
         }
     }
@@ -783,5 +796,37 @@ index 789..abc 100644
         let res2 = parse_reviewer_json(clean_json, "test-model", "hash123", 300);
         assert_eq!(res2.verdict, "passed");
         assert!(res2.is_passed());
+    }
+
+    #[test]
+    fn test_human_waivers_bypass_anti_perfunctory() {
+        let last_hash = "same_diff_hash";
+        let diff_hash = "same_diff_hash";
+        let last_res = ReviewResult {
+            verdict: "rejected".to_string(),
+            score: 50,
+            blocking_issues: vec![BlockingIssue {
+                file: "LicenseInterceptor.java".to_string(),
+                issue: "后门".to_string(),
+                requirement: "还原".to_string(),
+            }],
+            nit_issues: vec![],
+            summary: "存在未修复缺陷".to_string(),
+            duration_ms: 100,
+            model_id: "test-model".to_string(),
+            diff_hash: diff_hash.to_string(),
+        };
+
+        // 无豁免时：命中防敷衍拦截 (Diff 未变)
+        let human_waivers_none: Option<&str> = None;
+        let has_active_waiver = human_waivers_none.map_or(false, |w| !w.trim().is_empty());
+        assert!(!has_active_waiver);
+        assert!(!last_res.is_passed());
+        assert_eq!(last_hash, diff_hash);
+
+        // 有人类特赦豁免时：判定存在特赦，解除防敷衍拦截，允许调用审查员
+        let human_waivers_some = Some("【选择项】: 保留本地 if(true) 调试放行，直接交付");
+        let has_active_waiver_with_waiver = human_waivers_some.map_or(false, |w| !w.trim().is_empty());
+        assert!(has_active_waiver_with_waiver);
     }
 }

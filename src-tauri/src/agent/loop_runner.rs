@@ -2102,6 +2102,10 @@ pub async fn run_tool_phase(
                     let clean_reply = strip_plan_decision_marker(&reply);
                     checkpoint.approved_plan_summary =
                         Some(clean_reply.chars().take(500).collect());
+                    checkpoint.record_human_waiver(&clean_reply);
+                    checkpoint.last_reviewed_diff_hash = None;
+                    checkpoint.last_review_result = None;
+                    checkpoint.reviewer_retry_count = 0;
                     app.emit(
                         &format!("agent-log-{}", final_session_id),
                         "✅ 方案审批与人工仲裁已放行（收到用户批准，写入门禁解除）".to_string(),
@@ -2129,6 +2133,10 @@ pub async fn run_tool_phase(
                         let clean_reply = strip_plan_decision_marker(&reply);
                         checkpoint.approved_plan_summary =
                             Some(clean_reply.chars().take(500).collect());
+                        checkpoint.record_human_waiver(&clean_reply);
+                        checkpoint.last_reviewed_diff_hash = None;
+                        checkpoint.last_review_result = None;
+                        checkpoint.reviewer_retry_count = 0;
                         app.emit(
                             &format!("agent-log-{}", final_session_id),
                             "✅ 方案审批与人工仲裁已放行（收到用户非反对回复，门禁解除）".to_string(),
@@ -2144,6 +2152,27 @@ pub async fn run_tool_phase(
                         )
                         .ok();
                     }
+                }
+            }
+        } else {
+            let clean_reply = strip_plan_decision_marker(&reply);
+            let reply_lower = clean_reply.to_ascii_lowercase();
+            let has_explicit_waiver_intent = reply_lower.contains("force_pass")
+                || reply_lower.contains("放行")
+                || reply_lower.contains("特赦")
+                || reply_lower.contains("豁免")
+                || (reply_lower.contains("保留") && reply_lower.contains("调试"));
+            if has_explicit_waiver_intent {
+                checkpoint.record_human_waiver(&clean_reply);
+                checkpoint.last_reviewed_diff_hash = None;
+                checkpoint.last_review_result = None;
+                checkpoint.reviewer_retry_count = 0;
+                if checkpoint.stage_review_blockers_open > 0 {
+                    checkpoint.stage_review_blockers_open = 0;
+                    checkpoint.stage_review_blocker_stage = None;
+                }
+                if checkpoint.last_review_blocking_count > 0 {
+                    checkpoint.last_review_blocking_count = 0;
                 }
             }
         }
