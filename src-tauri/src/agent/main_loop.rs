@@ -407,7 +407,7 @@ async fn run_agent_main_loop_in_workspace_inner(
     } else if has_workspace_override {
         "\n\n## 独立临时工作区 (Scratch Workspace)\n当前会话处于独立临时工作区。该目录与用户的任何主工程项目源码完全物理隔离，仅用于一次性任务演示、临时探索与临时交付物存放，请在该独立目录下执行操作，严禁向用户的其他工程源码目录随意写入。"
     } else {
-        "\n\n## 通用会话模式 (无绑定工程)\n当前会话未选定任何项目工程，处于通用探索与问答模式。严禁随意向当前进程目录写入非代码杂项文件！凡是天气查询、临时抓取、数据报表、Excel 导出、测试脚本等非工程资产，必须全部写入 `tmp/` 目录并通过 `artifact_manager` 登记交付。"
+        "\n\n## 通用会话模式 (无绑定工程)\n当前会话未选定具体工程项目。凡未明确要求存放于工程中的临时文件、数据导出或中间脚本，一律写入 `tmp/` 目录并通过 `artifact_manager` 登记交付，严禁直接散落在当前运行根目录下。"
     };
     let system_prompt = format!(
         "{}{}{}{}{}\n{}\n{}{}",
@@ -455,7 +455,7 @@ async fn run_agent_main_loop_in_workspace_inner(
            - 门禁与台账规则: 对项目源码的写操作受阶段审查门禁保护，成功写入将记入不可逆副作用台账。\n\
          • 会话专属临时目录: `{}`\n\
            - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
-           - 临时数据与非工程产物隔离铁律: 天气查询、临时抓取数据、数据报表、Excel/CSV 导出、一次性分析测试脚本等，严禁直接写入项目物理工作区根目录污染源码！必须全部写入此目录（路径如 \"tmp/report.xlsx\"），并调用 `artifact_manager(action: \"register_file\", path: \"tmp/report.xlsx\")` 上屏供用户下载与系统程序打开。\n\
+           - 临时与未明确路径产物隔离: 凡未明确指定项目路径的临时文件、数据导出或中间草稿，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入项目物理工作区根目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
            - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
          • 物理牢笼约束: 任何超出上述双白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
         workspace_dir.display(),
