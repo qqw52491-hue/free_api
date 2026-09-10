@@ -237,11 +237,11 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "local_file",
-        summary: "本地文件读写与精准局部替换（受工作区与临时目录双白名单保护）：修改已有文件优先使用 edit 进行局部替换，禁止动辄全量重写。注：tmp/ 相对路径会自动路由到会话专属临时草稿目录",
+        summary: "本地文件读写与精准局部替换（受双白名单保护与SHA256乐观并发锁防覆盖保护）：修改已有文件优先使用 edit 局部替换。注：tmp/ 相对路径自动路由到会话专属临时草稿目录",
         actions: &[
-            "read(path: string, start_line?: number, end_line?: number)",
-            "write(path: string, content: string)",
-            "edit(path: string, target_content: string, replacement_content: string) — 精准局部替换，target_content 必须全局唯一",
+            "read(path: string, start_line?: number, end_line?: number) — 读取文件（自动建立并发哈希基线）",
+            "write(path: string, content: string, force?: boolean) — 全量写入文件（带外部篡改拦截，force 可强制覆盖）",
+            "edit(path: string, target_content: string, replacement_content: string, force?: boolean) — 精准局部替换，target_content 必须全局唯一",
             "list(path?: string, depth?: number)",
         ],
     },

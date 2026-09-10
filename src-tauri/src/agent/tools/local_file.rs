@@ -10,7 +10,10 @@ use crate::agent::path_guard::ensure_allowed_path;
 use crate::agent::types::DispatchResult;
 use crate::db::DbState;
 use serde_json::json;
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 const MAX_READ_BYTES: usize = 2 * 1024 * 1024; // 2MB 单次读取上限
 
@@ -57,6 +60,60 @@ pub fn dispatch(
             route: "local_file:invalid_action".to_string(),
         },
     }
+}
+
+// =====================================================================
+// 乐观并发冲突检测基线 (Optimistic Concurrency / versionGuard)
+//
+// 机制说明（汲取 mcp-remote-setup 生产实践）：
+// 1. read 读取文件时：自动计算 SHA256 哈希存入会话级内存基线表；
+// 2. write / edit 写入或局部替换前：比对磁盘当前文件的实时 SHA256；
+// 3. 若哈希不一致（说明在 Agent 读取与写入之间，文件已被用户在 IDE 或外部工具修改）：
+//    立即硬拦截拒绝，杜绝"丢失更新"（Lost Update）事故；
+// 4. 写入成功后立即刷新基线，保证后续连续修改顺畅通过；
+// 5. 支持 force: true 逃生通道强制覆盖。
+// =====================================================================
+
+#[derive(Debug, Clone)]
+pub struct ConflictInfo {
+    pub known_hex: String,
+    pub live_hex: String,
+}
+
+static FILE_BASELINES: LazyLock<Mutex<HashMap<(String, PathBuf), String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn calculate_sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let res = hasher.finalize();
+    format!("{:x}", res)
+}
+
+pub fn record_file_baseline(session_id: &str, path: &Path, content_bytes: &[u8]) {
+    let hash = calculate_sha256_hex(content_bytes);
+    if let Ok(mut map) = FILE_BASELINES.lock() {
+        map.insert((session_id.to_string(), path.to_path_buf()), hash);
+    }
+}
+
+pub fn check_file_conflict(
+    session_id: &str,
+    path: &Path,
+    live_bytes: &[u8],
+) -> Option<ConflictInfo> {
+    let live_hex = calculate_sha256_hex(live_bytes);
+    if let Ok(map) = FILE_BASELINES.lock() {
+        if let Some(known_hex) = map.get(&(session_id.to_string(), path.to_path_buf())) {
+            if *known_hex != live_hex {
+                return Some(ConflictInfo {
+                    known_hex: known_hex[..12.min(known_hex.len())].to_string(),
+                    live_hex: live_hex[..12.min(live_hex.len())].to_string(),
+                });
+            }
+        }
+    }
+    None
 }
 
 /// 从 DispatchResult 中安全判定本次 local_file 操作是否作用于会话临时目录 (session_tmp)
@@ -145,6 +202,9 @@ fn execute_read(
             };
         }
     };
+
+    // 🌟 记录乐观并发哈希基线 (versionGuard)
+    record_file_baseline(session_id, &resolved.canonical_path, &bytes);
 
     let content = String::from_utf8_lossy(&bytes);
     let all_lines: Vec<&str> = content.lines().collect();
@@ -248,6 +308,33 @@ fn execute_write(
         }
     }
 
+    // 🌟 乐观并发保护：如果文件已存在且未开启 force，比对哈希基线防丢失更新
+    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !force && resolved.canonical_path.exists() {
+        if let Ok(live_bytes) = std::fs::read(&resolved.canonical_path) {
+            if let Some(conflict) = check_file_conflict(session_id, &resolved.canonical_path, &live_bytes) {
+                let payload = json!({
+                    "kind": "optimistic_concurrency_conflict",
+                    "path": resolved.display_path,
+                    "known_hash": conflict.known_hex,
+                    "live_hash": conflict.live_hex,
+                    "retryable": true,
+                    "safe_to_retry": false,
+                    "recommended_action": "read_latest_file_before_write",
+                });
+                return DispatchResult {
+                    stdout: String::new(),
+                    stderr: format!(
+                        "❌ [并发冲突拦截] 文件 \"{}\" 自上次读取后已被外部修改 (哈希不匹配: 读时={}, 当前={})。\n💡 建议：为防止意外覆盖外部修改（丢失更新），写入已中止。请先调用 local_file.read 读取最新内容，或在确实需要强行覆盖时传入 force: true。\n<!-- 结构化元数据: {} -->",
+                        resolved.display_path, conflict.known_hex, conflict.live_hex, payload
+                    ),
+                    success: false,
+                    route: "local_file:write:conflict".to_string(),
+                };
+            }
+        }
+    }
+
     if let Err(e) = std::fs::write(&resolved.canonical_path, content) {
         return DispatchResult {
             stdout: String::new(),
@@ -256,6 +343,9 @@ fn execute_write(
             route: "local_file:write:io_error".to_string(),
         };
     }
+
+    // 写入成功后立即刷新内存基线，保障会话内后续写操作正常进行
+    record_file_baseline(session_id, &resolved.canonical_path, content.as_bytes());
 
     let payload = json!({
         "path": resolved.display_path,
@@ -346,6 +436,31 @@ fn execute_edit(
         }
     };
 
+    // 🌟 乐观并发保护：比对哈希基线防基于过时上下文产生错误局部替换
+    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !force {
+        if let Some(conflict) = check_file_conflict(session_id, &resolved.canonical_path, current_content.as_bytes()) {
+            let payload = json!({
+                "kind": "optimistic_concurrency_conflict",
+                "path": resolved.display_path,
+                "known_hash": conflict.known_hex,
+                "live_hash": conflict.live_hex,
+                "retryable": true,
+                "safe_to_retry": false,
+                "recommended_action": "read_latest_file_before_edit",
+            });
+            return DispatchResult {
+                stdout: String::new(),
+                stderr: format!(
+                    "❌ [并发冲突拦截] 文件 \"{}\" 自上次读取后已被外部修改 (哈希不匹配: 读时={}, 当前={})。\n💡 建议：为防止基于过时代码上下文产生错误局部替换，编辑已中止。请先调用 local_file.read 读取最新代码核对行号与上下文，或在确实需要强行修改时传入 force: true。\n<!-- 结构化元数据: {} -->",
+                    resolved.display_path, conflict.known_hex, conflict.live_hex, payload
+                ),
+                success: false,
+                route: "local_file:edit:conflict".to_string(),
+            };
+        }
+    }
+
     // 严格检查匹配次数与位置
     let matches: Vec<(usize, &str)> = current_content.match_indices(target_content).collect();
 
@@ -387,7 +502,7 @@ fn execute_edit(
 
     let new_content = current_content.replacen(target_content, replacement_content, 1);
 
-    if let Err(e) = std::fs::write(&resolved.canonical_path, new_content) {
+    if let Err(e) = std::fs::write(&resolved.canonical_path, &new_content) {
         return DispatchResult {
             stdout: String::new(),
             stderr: format!("写入编辑结果失败 ({}): {}", resolved.display_path, e),
@@ -395,6 +510,9 @@ fn execute_edit(
             route: "local_file:edit:io_error".to_string(),
         };
     }
+
+    // 编辑写入成功后立即刷新内存基线
+    record_file_baseline(session_id, &resolved.canonical_path, new_content.as_bytes());
 
     let payload = json!({
         "path": resolved.display_path,
@@ -586,6 +704,97 @@ mod tests {
         let res = dispatch(&db, "test_session", "patch", &p, Some(&ws));
         assert!(!res.success);
         assert!(res.stderr.contains("非法动作"));
+
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn test_optimistic_lock_normal_read_write_succeeds() {
+        let ws = temp_dir();
+        let db = mock_db();
+        let session = "test_opt_normal";
+
+        // 写入初始文件
+        let p_write = json!({"path": "file.txt", "content": "initial content"});
+        let res = dispatch(&db, session, "write", &p_write, Some(&ws));
+        assert!(res.success);
+
+        // Agent 读取该文件，自动沉淀 baseline
+        let p_read = json!({"path": "file.txt"});
+        let res_read = dispatch(&db, session, "read", &p_read, Some(&ws));
+        assert!(res_read.success);
+
+        // 未发生外部篡改，Agent 再次正常修改 -> 顺利通过
+        let p_edit = json!({
+            "path": "file.txt",
+            "target_content": "initial",
+            "replacement_content": "updated"
+        });
+        let res_edit = dispatch(&db, session, "edit", &p_edit, Some(&ws));
+        assert!(res_edit.success, "正常连续修改应通过: {}", res_edit.stderr);
+
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn test_optimistic_lock_external_modification_intercepted() {
+        let ws = temp_dir();
+        let db = mock_db();
+        let session = "test_opt_conflict";
+
+        // 写入初始文件并读取
+        let p_write = json!({"path": "file.txt", "content": "initial content"});
+        dispatch(&db, session, "write", &p_write, Some(&ws));
+
+        let p_read = json!({"path": "file.txt"});
+        dispatch(&db, session, "read", &p_read, Some(&ws));
+
+        // 模拟外部（用户在IDE或外部格式化工具）修改了该文件
+        std::fs::write(ws.join("file.txt"), "external user modified content").unwrap();
+
+        // Agent 试图执行全量写入，未带 force -> 应该被并发冲突拦截！
+        let p_write2 = json!({"path": "file.txt", "content": "agent overwrite"});
+        let res_conflict = dispatch(&db, session, "write", &p_write2, Some(&ws));
+        assert!(!res_conflict.success);
+        assert!(res_conflict.stderr.contains("并发冲突拦截"));
+        assert!(res_conflict.stderr.contains("哈希不匹配"));
+
+        // Agent 试图执行局部编辑，未带 force -> 同样应被拦截！
+        let p_edit = json!({
+            "path": "file.txt",
+            "target_content": "external",
+            "replacement_content": "agent edit"
+        });
+        let res_edit_conflict = dispatch(&db, session, "edit", &p_edit, Some(&ws));
+        assert!(!res_edit_conflict.success);
+        assert!(res_edit_conflict.stderr.contains("并发冲突拦截"));
+
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn test_optimistic_lock_force_overwrite_bypasses() {
+        let ws = temp_dir();
+        let db = mock_db();
+        let session = "test_opt_force";
+
+        // 写入初始文件并读取
+        let p_write = json!({"path": "file.txt", "content": "initial content"});
+        dispatch(&db, session, "write", &p_write, Some(&ws));
+
+        let p_read = json!({"path": "file.txt"});
+        dispatch(&db, session, "read", &p_read, Some(&ws));
+
+        // 模拟外部修改
+        std::fs::write(ws.join("file.txt"), "external user modified content").unwrap();
+
+        // 传入 force: true -> 成功绕过拦截强行覆盖
+        let p_force = json!({"path": "file.txt", "content": "forced content", "force": true});
+        let res_force = dispatch(&db, session, "write", &p_force, Some(&ws));
+        assert!(res_force.success, "带 force 应绕过冲突拦截: {}", res_force.stderr);
+
+        let content = std::fs::read_to_string(ws.join("file.txt")).unwrap();
+        assert_eq!(content, "forced content");
 
         let _ = std::fs::remove_dir_all(ws);
     }
