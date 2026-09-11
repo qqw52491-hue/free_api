@@ -498,27 +498,162 @@ fn extract_zip_archive(bytes: &[u8]) -> Result<ExtractedContent, String> {
     })
 }
 
-/// 将提取的内容渲染为大模型提示词（LLM Prompt）友好的 Markdown 注入格式
-pub fn format_for_prompt(content: &ExtractedContent, file_name: &str) -> String {
+/// 单文件内联上限：2 KB（约 500~600 Tokens，是工具往返成本与直接内联的盈亏平衡点）
+pub const INLINE_MAX_BYTES: usize = 2 * 1024;
+
+/// 全局内联预算上限：8 KB，防止多个"小文件"叠加冲垮上下文
+pub const INLINE_TOTAL_BUDGET: usize = 8 * 1024;
+
+/// 大纲最多提取条目数
+pub const OUTLINE_MAX_ITEMS: usize = 20;
+
+/// 非 Markdown 文件的速览行数
+pub const PREVIEW_HEAD_LINES: usize = 15;
+
+/// 格式化字节数大小
+pub fn human_size(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// 提取结构大纲：Markdown 优先提取 '#' 标题层级，其他文本/代码提取前 N 行
+pub fn extract_outline(text: &str, file_name: &str) -> Vec<String> {
+    if file_name.ends_with(".md") || file_name.ends_with(".markdown") {
+        text.lines()
+            .filter_map(|l| {
+                let t = l.trim_start();
+                if t.starts_with('#') {
+                    Some(t.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        text.lines()
+            .take(PREVIEW_HEAD_LINES)
+            .map(|l| {
+                let trimmed = l.trim();
+                if trimmed.chars().count() > 80 {
+                    format!("| {}…", trimmed.chars().take(80).collect::<String>())
+                } else {
+                    format!("| {}", trimmed)
+                }
+            })
+            .collect()
+    }
+}
+
+/// 为中大文件构建轻量 Manifest 档案卡（仅约 150 Tokens）
+pub fn build_manifest_card(
+    file_name: &str,
+    size_bytes: usize,
+    text: &str,
+    sandbox_path: Option<&str>,
+) -> String {
+    let line_count = text.lines().count();
+    let outline = extract_outline(text, file_name);
+    let display_path = sandbox_path.unwrap_or(file_name);
+
+    let mut card = format!(
+        "📎【用户已挂载本地参考文件】\n- 文件名: `{}`\n- 大小: {}（共 {} 行）\n- 沙箱访问路径: `{}`\n",
+        file_name,
+        human_size(size_bytes),
+        line_count,
+        display_path,
+    );
+
+    if !outline.is_empty() {
+        if file_name.ends_with(".md") || file_name.ends_with(".markdown") {
+            card.push_str("- 结构大纲速览 (章节):\n");
+        } else {
+            card.push_str("- 首部内容速览:\n");
+        }
+        for item in outline.iter().take(OUTLINE_MAX_ITEMS) {
+            card.push_str(&format!("    {}\n", item));
+        }
+        if outline.len() > OUTLINE_MAX_ITEMS {
+            card.push_str(&format!("    ...（其余 {} 条略）\n", outline.len() - OUTLINE_MAX_ITEMS));
+        }
+    }
+
+    card.push_str(&format!(
+        "💡 提示: 完整正文已在本地沙箱就绪。若需研判具体细节，请使用 `local_file` 按需分段读取，不要凭大纲臆测正文：\n   `local_file(action=\"read\", path=\"{}\", start_line=1, end_line=100)`\n",
+        display_path
+    ));
+    card
+}
+
+/// 支持沙箱路径与预算控制的分层 Prompt 格式化
+pub fn format_for_prompt_with_sandbox(
+    content: &ExtractedContent,
+    file_name: &str,
+    sandbox_path: Option<&str>,
+    can_inline: bool,
+) -> (String, usize) {
     match content {
         ExtractedContent::Text {
             text,
             total_chars,
-            truncated,
+            truncated: _,
         } => {
-            let trunc_hint = if *truncated {
-                format!(
-                    " (⚠️ 内容已截断至前 {} 字符，原文共 {} 字符)",
-                    text.chars().count(),
-                    total_chars
-                )
+            let size = text.len();
+            if size <= INLINE_MAX_BYTES && can_inline {
+                let formatted = format!(
+                    "📎【用户已上传文本附件: `{}`】(大小: {}, 已内联全文)\n```\n{}\n```\n",
+                    file_name,
+                    human_size(size),
+                    text
+                );
+                (formatted, size)
             } else {
-                String::new()
-            };
-            format!(
-                "【用户已上传文本附件: `{}`{}】\n```\n{}\n```\n",
-                file_name, trunc_hint, text
-            )
+                let card = build_manifest_card(file_name, *total_chars.max(&size), text, sandbox_path);
+                (card, 0)
+            }
+        }
+        ExtractedContent::Document {
+            text,
+            paragraphs_count: _,
+            tables_count: _,
+            truncated: _,
+        } => {
+            let size = text.len();
+            if size <= INLINE_MAX_BYTES && can_inline {
+                let formatted = format!(
+                    "📎【用户已上传 Word 文档附件: `{}`】(大小: {}, 已内联全文)\n```markdown\n{}\n```\n",
+                    file_name,
+                    human_size(size),
+                    text
+                );
+                (formatted, size)
+            } else {
+                let card = build_manifest_card(file_name, size, text, sandbox_path);
+                (card, 0)
+            }
+        }
+        ExtractedContent::Pdf {
+            text,
+            total_chars,
+            truncated: _,
+        } => {
+            let size = text.len();
+            if size <= INLINE_MAX_BYTES && can_inline {
+                let formatted = format!(
+                    "📎【用户已上传 PDF 文档附件: `{}`】(大小: {}, 已内联全文)\n```markdown\n{}\n```\n",
+                    file_name,
+                    human_size(size),
+                    text
+                );
+                (formatted, size)
+            } else {
+                let card = build_manifest_card(file_name, *total_chars.max(&size), text, sandbox_path);
+                (card, 0)
+            }
         }
         ExtractedContent::Spreadsheet { sheets, summary } => {
             let mut out = format!("【用户已上传电子表格附件: `{}`】\n- 摘要: {}\n\n", file_name, summary);
@@ -528,42 +663,20 @@ pub fn format_for_prompt(content: &ExtractedContent, file_name: &str) -> String 
                     s.name, s.row_count, s.col_count, s.preview_markdown
                 ));
             }
-            out
-        }
-        ExtractedContent::Document {
-            text,
-            paragraphs_count,
-            tables_count,
-            truncated,
-        } => {
-            let trunc_hint = if *truncated { " (内容过长已截断)" } else { "" };
-            format!(
-                "【用户已上传 Word 文档附件: `{}`{}】(共 {} 个段落, {} 张表格)\n```markdown\n{}\n```\n",
-                file_name, trunc_hint, paragraphs_count, tables_count, text
-            )
-        }
-        ExtractedContent::Pdf {
-            text,
-            total_chars,
-            truncated,
-        } => {
-            let trunc_hint = if *truncated { " (内容过长已截断)" } else { "" };
-            format!(
-                "【用户已上传 PDF 文档附件: `{}`{}】(全文共 {} 字符)\n```markdown\n{}\n```\n",
-                file_name, trunc_hint, total_chars, text
-            )
+            (out, 0)
         }
         ExtractedContent::Image {
             mime_type,
             size_bytes,
             ..
         } => {
-            format!(
+            let out = format!(
                 "【用户已上传图片附件: `{}`】(格式: {}, 大小: {:.1} KB)\n*(图片数据已作为视觉多模态消息携带)*\n",
                 file_name,
                 mime_type,
                 (*size_bytes as f64) / 1024.0
-            )
+            );
+            (out, 0)
         }
         ExtractedContent::Archive {
             files,
@@ -575,24 +688,31 @@ pub fn format_for_prompt(content: &ExtractedContent, file_name: &str) -> String 
             } else {
                 String::new()
             };
-            format!(
+            let out = format!(
                 "【用户已上传压缩包附件: `{}`】(包含 {} 个文件条目)\n目录结构:\n- {}{}\n",
                 file_name, total_entries, preview, more
-            )
+            );
+            (out, 0)
         }
         ExtractedContent::Binary {
             file_name,
             size_bytes,
             mime_guess,
         } => {
-            format!(
+            let out = format!(
                 "【用户已上传二进制文件: `{}`】(类型: {}, 大小: {:.1} KB)\n",
                 file_name,
                 mime_guess,
                 (*size_bytes as f64) / 1024.0
-            )
+            );
+            (out, 0)
         }
     }
+}
+
+/// 保持向后兼容的原有入口
+pub fn format_for_prompt(content: &ExtractedContent, file_name: &str) -> String {
+    format_for_prompt_with_sandbox(content, file_name, None, true).0
 }
 
 #[cfg(test)]
@@ -705,5 +825,41 @@ mod tests {
         assert!(prompt.contains("用户已上传电子表格附件: `sales.xlsx`"));
         assert!(prompt.contains("工作表: `销售统计`"));
         assert!(prompt.contains("2026-08-01"));
+    }
+
+    #[test]
+    fn test_tiered_inline_and_manifest_card() {
+        // 1. 小文件 (< 2KB): 直接内联
+        let small_text = "# Title\nHello world!".to_string();
+        let small_content = ExtractedContent::Text {
+            text: small_text.clone(),
+            total_chars: small_text.len(),
+            truncated: false,
+        };
+        let (prompt, inlined) = format_for_prompt_with_sandbox(&small_content, "small.md", Some("tmp/small.md"), true);
+        assert!(prompt.contains("已内联全文"));
+        assert!(prompt.contains("Hello world!"));
+        assert_eq!(inlined, small_text.len());
+
+        // 2. 大文件 (> 2KB): 生成 Manifest 卡，不塞全量正文
+        let large_text = format!(
+            "# 第一章 架构背景\n这是背景说明\n## 1.1 动机\n具体动机\n# 第二章 方案设计\n具体设计\n{}",
+            "x".repeat(3000)
+        );
+        let large_content = ExtractedContent::Text {
+            text: large_text.clone(),
+            total_chars: large_text.len(),
+            truncated: false,
+        };
+        let (card_prompt, inlined_zero) = format_for_prompt_with_sandbox(&large_content, "arch.md", Some("tmp/arch.md"), true);
+        assert_eq!(inlined_zero, 0);
+        assert!(card_prompt.contains("📎【用户已挂载本地参考文件】"));
+        assert!(card_prompt.contains("沙箱访问路径: `tmp/arch.md`"));
+        assert!(card_prompt.contains("# 第一章 架构背景"));
+        assert!(card_prompt.contains("## 1.1 动机"));
+        assert!(card_prompt.contains("# 第二章 方案设计"));
+        assert!(card_prompt.contains("local_file(action=\"read\", path=\"tmp/arch.md\""));
+        // 确保没有塞 3000 个 x
+        assert!(!card_prompt.contains(&"x".repeat(500)));
     }
 }

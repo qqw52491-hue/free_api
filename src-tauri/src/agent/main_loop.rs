@@ -574,8 +574,9 @@ async fn run_agent_main_loop_in_workspace_inner(
         );
     }
 
-    // 🌟 注入本轮用户传入的附件 (图片 Base64 多模态 / 解析文档文本)
+    // 🌟 注入本轮用户传入的附件 (图片 Base64 多模态 / 分层轻量挂载文档与代码)
     let mut injected_image_paths = std::collections::HashSet::new();
+    let mut inlined_attachment_bytes = 0usize;
 
     // 1. 处理显式传递的 attachments 附件列表
     if let Some(ref atts) = attachments {
@@ -624,11 +625,57 @@ async fn run_agent_main_loop_in_workspace_inner(
                     );
                     injected_image_paths.insert(att.file_path.clone());
                 }
-            } else if !att.prompt_text.is_empty() {
-                context.turns_history.push(crate::agent::context::ChatMessage {
-                    role: "user".to_string(),
-                    content: serde_json::json!(att.prompt_text),
-                });
+            } else {
+                // 📂 非图片附件：自动复制到物理沙箱（项目 .attachments/ 或会话 tmp/）并执行分层挂载
+                let src_path = std::path::Path::new(&att.file_path);
+                let (sandbox_path_str, actual_file_path) = if is_project_session {
+                    let attach_dir = workspace_dir.join(".attachments");
+                    let _ = std::fs::create_dir_all(&attach_dir);
+                    let target_file = attach_dir.join(&att.file_name);
+                    if src_path.exists() && src_path != target_file {
+                        let _ = std::fs::copy(src_path, &target_file);
+                    }
+                    (format!(".attachments/{}", att.file_name), target_file)
+                } else {
+                    let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
+                    let _ = std::fs::create_dir_all(&tmp_dir);
+                    let target_file = tmp_dir.join(&att.file_name);
+                    if src_path.exists() && src_path != target_file {
+                        let _ = std::fs::copy(src_path, &target_file);
+                    }
+                    (format!("tmp/{}", att.file_name), target_file)
+                };
+
+                let can_inline = inlined_attachment_bytes + (att.size_bytes as usize) <= crate::agent::file_parser::INLINE_TOTAL_BUDGET;
+                let parsed_content = if actual_file_path.exists() {
+                    crate::agent::file_parser::parse_file(&actual_file_path, None).ok()
+                } else if src_path.exists() {
+                    crate::agent::file_parser::parse_file(src_path, None).ok()
+                } else {
+                    None
+                };
+
+                let prompt_text = if let Some(ref content) = parsed_content {
+                    let (rendered, newly_inlined) = crate::agent::file_parser::format_for_prompt_with_sandbox(
+                        content,
+                        &att.file_name,
+                        Some(&sandbox_path_str),
+                        can_inline,
+                    );
+                    inlined_attachment_bytes += newly_inlined;
+                    rendered
+                } else if !att.prompt_text.is_empty() {
+                    att.prompt_text.clone()
+                } else {
+                    format!("📎【用户已挂载本地文件】`{}` (沙箱路径: `{}`)\n", att.file_name, sandbox_path_str)
+                };
+
+                if !prompt_text.is_empty() {
+                    context.turns_history.push(crate::agent::context::ChatMessage {
+                        role: "user".to_string(),
+                        content: serde_json::json!(prompt_text),
+                    });
+                }
             }
         }
     }
@@ -686,7 +733,32 @@ async fn run_agent_main_loop_in_workspace_inner(
                                     injected_image_paths.insert(file_path.to_string());
                                 }
                             } else if let Ok(extracted) = crate::agent::file_parser::parse_file(p, None) {
-                                let prompt_text = crate::agent::file_parser::format_for_prompt(&extracted, file_name);
+                                // 同样自动拷贝到沙箱目录并生成分层提示词！
+                                let (sandbox_path_str, _actual_file_path) = if is_project_session {
+                                    let attach_dir = workspace_dir.join(".attachments");
+                                    let _ = std::fs::create_dir_all(&attach_dir);
+                                    let target_file = attach_dir.join(file_name);
+                                    if p != target_file {
+                                        let _ = std::fs::copy(p, &target_file);
+                                    }
+                                    (format!(".attachments/{}", file_name), target_file)
+                                } else {
+                                    let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
+                                    let _ = std::fs::create_dir_all(&tmp_dir);
+                                    let target_file = tmp_dir.join(file_name);
+                                    if p != target_file {
+                                        let _ = std::fs::copy(p, &target_file);
+                                    }
+                                    (format!("tmp/{}", file_name), target_file)
+                                };
+                                let can_inline = inlined_attachment_bytes <= crate::agent::file_parser::INLINE_TOTAL_BUDGET;
+                                let (prompt_text, newly_inlined) = crate::agent::file_parser::format_for_prompt_with_sandbox(
+                                    &extracted,
+                                    file_name,
+                                    Some(&sandbox_path_str),
+                                    can_inline,
+                                );
+                                inlined_attachment_bytes += newly_inlined;
                                 context.turns_history.push(crate::agent::context::ChatMessage {
                                     role: "user".to_string(),
                                     content: serde_json::json!(prompt_text),

@@ -2104,9 +2104,9 @@ function submit(explicitMode?: "interrupt" | "queue" | Event) {
         || (props.isRunning && !props.isWaitingForHuman ? submitMode.value : undefined);
 
     if (currentAtts.length > 0) {
-        // 🌟 结构化排列附件清单：清晰标注文件名、大小与本地物理路径
+        // 🌟 结构化排列附件清单：显示文件名与大小徽标（宿主物理路径不再直接暴露在用户对话气泡中）
         const briefBadges = currentAtts
-            .map((a) => `📎 [附件: ${a.file_name} (${formatFileSize(a.size_bytes)}) | 路径: ${a.file_path}]`)
+            .map((a) => `📎 [附件: ${a.file_name} (${formatFileSize(a.size_bytes)})]`)
             .join("\n");
         const visiblePrompt = userText ? `${briefBadges}\n\n${userText}` : briefBadges;
         emit("update:draft", "");
