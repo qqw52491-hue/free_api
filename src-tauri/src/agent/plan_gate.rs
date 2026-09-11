@@ -216,6 +216,24 @@ fn gate_interception(
                     stderr: crate::agent::gate_messages::cross_review_reviewer_result_missing(),
                     route: "plan_gatekeeper:reviewer_result_missing".to_string(),
                 })
+            } else if checkpoint.plan_review_batch.deliveries.is_empty()
+                && !checkpoint.plan_review_batch.failed_run_ids.is_empty()
+            {
+                let budget_exhausted = checkpoint.plan_reviewer_retry_count
+                    >= crate::agent::checkpoint::max_plan_reviewer_rounds();
+                let reasons: Vec<String> = checkpoint
+                    .plan_review_batch
+                    .failed_run_ids
+                    .iter()
+                    .map(|(id, r)| format!("- 审查任务 `{}`: {}", id, r))
+                    .collect();
+                let summary = reasons.join("\n");
+                Some(DispatchResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: crate::agent::gate_messages::cross_review_batch_all_failed(&summary, budget_exhausted),
+                    route: "plan_gatekeeper:reviewer_all_failed".to_string(),
+                })
             } else if let Some(ref scorecard) = checkpoint.last_review_scorecard {
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
                     >= crate::agent::checkpoint::max_plan_reviewer_rounds();
@@ -443,6 +461,65 @@ mod tests {
         let res_clean = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-run", 1, false);
         assert!(res_clean.is_none(), "全部齐套且无 blocking 时应放行写入");
         assert_eq!(cp.plan_phase, PlanPhase::Approved);
+    }
+
+    #[test]
+    fn test_gate_handles_all_reviewers_failed_without_deadlock() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-run-fail".to_string(), &context);
+        cp.plan_mode = PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+
+        let batch = vec!["rev-1".to_string(), "rev-2".to_string()];
+        cp.register_plan_reviewer_batch(&batch);
+
+        // 两个任务均异常失败
+        cp.record_reviewer_failure_for_run("rev-1", "timed_out");
+        cp.record_reviewer_failure_for_run("rev-2", "corrupted_json_output");
+
+        // 批次已收口，绝不能卡在 need_wait_reviewer_jobs！
+        assert!(cp.plan_review_batch.is_complete());
+        assert_eq!(cp.plan_review_batch.pending_count(), 0);
+
+        let res = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-run-fail", 1, false);
+        assert!(res.is_some());
+        let dispatch = res.unwrap();
+        assert_eq!(dispatch.route, "plan_gatekeeper:reviewer_all_failed");
+        assert!(dispatch.stderr.contains("rev-1"));
+        assert!(dispatch.stderr.contains("timed_out"));
+        assert!(dispatch.stderr.contains("rev-2"));
+        assert!(dispatch.stderr.contains("corrupted_json_output"));
+    }
+
+    #[test]
+    fn test_failover_replaces_expected_reviewer_in_batch() {
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-failover".to_string(), &context);
+        cp.register_plan_reviewer_batch(&["rev-old".to_string()]);
+
+        assert!(cp.plan_review_batch.expected_run_ids.contains("rev-old"));
+
+        // 触发故障转移替换
+        cp.replace_expected_reviewer_run_id("rev-old", "rev-new");
+        assert!(!cp.plan_review_batch.expected_run_ids.contains("rev-old"));
+        assert!(cp.plan_review_batch.expected_run_ids.contains("rev-new"));
+        assert!(!cp.plan_review_batch.is_complete());
+
+        // 新任务交付后完成
+        let del = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "high".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: None,
+            extra: Default::default(),
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-new"), &del);
+        assert!(cp.plan_review_batch.is_complete());
     }
 }
 

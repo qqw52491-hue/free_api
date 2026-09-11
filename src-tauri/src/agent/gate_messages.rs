@@ -52,6 +52,30 @@ pub fn cross_review_reviewer_result_missing() -> String {
      收到审查结论后方可写入。严禁直接假装成功！".to_string()
 }
 
+/// 交叉审查模式：并发审查任务全部异常终止未能产出有效结论
+pub fn cross_review_batch_all_failed(failure_details: &str, budget_exhausted: bool) -> String {
+    let escape_guide = if budget_exhausted {
+        "【审查预算已耗尽】方案审查已达最大重试轮次，无法再次派发审查子 Agent。\n\
+         【解套路径（人工仲裁放行）】请调用 ask_human 工具（设置 kind: 'plan_approval'），向用户说明子审查任务异常详情及拟实施方案，申请人工审批放行：\n\
+         ```json\n\
+         {\n  \"tool\": \"ask_human\",\n  \"command\": {\n    \"kind\": \"plan_approval\",\n    \"message\": \"审查异常呈报与方案审批申请：...（向用户说明审查任务异常原因及方案安全性，申请人工审批）\"\n  }\n}\n\
+         ```\n\
+         用户批准后门禁将立即解除并允许写入！"
+    } else {
+        "【解套路径 1（重新派发）】请检查子任务失败原因（如模型响应超时、入参格式异常等），重新调用 child_reviewer 派发审查。\n\
+         【解套路径 2（人工仲裁）】若多次审查均因基础设施异常失败，可调用 ask_human（kind: 'plan_approval'）申请用户人工核准放行。"
+    };
+
+    format!(
+        "【⚠️ 门禁保护触发：已阻止未审查写入，目标文件未受任何修改！】\n\
+         【原因】本批次并发审查专家均未产出有效审查结论（子任务异常终止）：\n\
+         {}\n\
+         【必须采取的行动】：\n\
+         {}",
+        failure_details, escape_guide
+    )
+}
+
 /// 交叉审查模式：ReviewScorecard 评分未达硬门禁
 pub fn cross_review_scorecard_failed(reason: &str, budget_exhausted: bool) -> String {
     let escape_guide = if budget_exhausted {

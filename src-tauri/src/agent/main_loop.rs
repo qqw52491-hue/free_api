@@ -970,8 +970,12 @@ async fn run_agent_main_loop_in_workspace_inner(
                                     }
                                 }
                             }
-                            // 基础设施失败：退款、不算消费过（超时不是审查，不应烧预算）
+                            // 基础设施失败：退款、不算消费过（超时不是审查，不应烧预算），同时记录批次失败收口
                             if receipt.is_infra_failure() {
+                                checkpoint.record_reviewer_failure_for_run(
+                                    &receipt.child_run_id,
+                                    receipt.error_kind.as_deref().unwrap_or("infra_failure"),
+                                );
                                 checkpoint.refund_infra_failed_review_round(receipt.error_kind.as_deref());
                             } else {
                                 let delivery = receipt.as_reviewer_delivery().unwrap_or_else(|| {

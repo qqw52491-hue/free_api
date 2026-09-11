@@ -1272,6 +1272,7 @@ pub async fn run_tool_phase(
                             .await
                             {
                                 Ok(Some(new_run_id)) => {
+                                    checkpoint.replace_expected_reviewer_run_id(&job.job_id, &new_run_id);
                                     failover_notes.push_str(&format!(
                                         "\n🔁 审查者故障转移：上次结论异常（{}），已自动改用备用审查员重派 (child_run_id: {})\n",
                                         kind, new_run_id
@@ -1281,6 +1282,7 @@ pub async fn run_tool_phase(
                                 _ => {}
                             }
                         }
+                        checkpoint.record_reviewer_failure_for_run(&job.job_id, infra_kind.as_deref().unwrap_or("infra_failure"));
                         checkpoint.refund_infra_failed_review_round(infra_kind.as_deref());
                         continue;
                     }
@@ -1301,6 +1303,7 @@ pub async fn run_tool_phase(
                         .await
                         {
                             Ok(Some(new_run_id)) => {
+                                checkpoint.replace_expected_reviewer_run_id(&job.job_id, &new_run_id);
                                 failover_notes.push_str(&format!(
                                     "\n🔁 审查者故障转移：上次结论异常（invalid_output），已自动改用备用审查员重派 (child_run_id: {})\n",
                                     new_run_id
@@ -1309,6 +1312,7 @@ pub async fn run_tool_phase(
                             }
                             _ => {}
                         }
+                        checkpoint.record_reviewer_failure_for_run(&job.job_id, "invalid_output");
                     }
                     // wait_jobs 交付路径通过 record_reviewer_delivery_for_run 实现齐套屏障、幂等去重与现场真聚合
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&job.result_json) {
@@ -1346,6 +1350,8 @@ pub async fn run_tool_phase(
                             }
                         });
                         checkpoint.record_reviewer_delivery_for_run(Some(&job.job_id), &delivery);
+                    } else {
+                        checkpoint.record_reviewer_failure_for_run(&job.job_id, "corrupted_json_output");
                     }
                 }
                 // 【infra failure 退款统一结算】

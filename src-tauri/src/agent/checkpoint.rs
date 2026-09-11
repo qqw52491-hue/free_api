@@ -504,6 +504,9 @@ pub struct PlanReviewBatchState {
     /// 幂等保护：已收割的审查任务 child_run_id（去重防重复累加）
     #[serde(default)]
     pub delivered_run_ids: std::collections::BTreeSet<String>,
+    /// 异常收口：记录失败/异常终止的任务及原因 (run_id -> error_reason)
+    #[serde(default)]
+    pub failed_run_ids: std::collections::BTreeMap<String, String>,
     /// 存储各个审查员的原始交付数据（保留角色与详细 findings，供现场真聚合和精准归因）
     #[serde(default)]
     pub deliveries: Vec<crate::agent::child_reviewer::ReviewerDeliveryData>,
@@ -511,22 +514,46 @@ pub struct PlanReviewBatchState {
 
 impl PlanReviewBatchState {
     pub fn is_empty(&self) -> bool {
-        self.expected_run_ids.is_empty() && self.deliveries.is_empty()
+        self.expected_run_ids.is_empty() && self.deliveries.is_empty() && self.failed_run_ids.is_empty()
     }
 
-    /// 判定本批审查任务是否已全部齐套回传
+    /// 判定本批审查任务是否已全部收口（成功交付或已确认为异常失败）
     pub fn is_complete(&self) -> bool {
         if self.expected_run_ids.is_empty() {
             // 没有登记 expected（如单审兼容或历史状态）：以是否有交付为准
             !self.deliveries.is_empty()
         } else {
-            self.expected_run_ids.is_subset(&self.delivered_run_ids)
+            self.expected_run_ids.iter().all(|id| {
+                self.delivered_run_ids.contains(id) || self.failed_run_ids.contains_key(id)
+            })
         }
     }
 
-    /// 还有多少个在途审查任务尚未交付
+    /// 还有多少个在途审查任务尚未收口（既未成功交付，亦未确认为异常失败）
     pub fn pending_count(&self) -> usize {
-        self.expected_run_ids.difference(&self.delivered_run_ids).count()
+        self.expected_run_ids
+            .iter()
+            .filter(|id| !self.delivered_run_ids.contains(*id) && !self.failed_run_ids.contains_key(*id))
+            .count()
+    }
+
+    /// 登记任务失败/异常终止（超时、崩溃、解析失败等，收口防死锁）
+    pub fn record_failure(&mut self, run_id: &str, reason: &str) -> bool {
+        if self.delivered_run_ids.contains(run_id) {
+            return false;
+        }
+        self.failed_run_ids.insert(run_id.to_string(), reason.to_string()).is_none()
+    }
+
+    /// 故障转移重派时，无缝将旧 run_id 替换为新备用 run_id，齐套屏障无感转移
+    pub fn replace_expected_run_id(&mut self, old_id: &str, new_id: &str) -> bool {
+        if self.expected_run_ids.remove(old_id) {
+            self.expected_run_ids.insert(new_id.to_string());
+            self.failed_run_ids.remove(old_id);
+            true
+        } else {
+            false
+        }
     }
 
     /// 登记新交付（幂等：同一个 run_id 只记录一次）
@@ -539,6 +566,7 @@ impl PlanReviewBatchState {
             if !self.delivered_run_ids.insert(id.to_string()) {
                 return false; // 幂等保护：重复交付直接忽略
             }
+            self.failed_run_ids.remove(id); // 若此前暂记过失败，以最新成功交付为准
         }
         self.deliveries.push(delivery);
         true
@@ -874,11 +902,25 @@ impl AgentCheckpoint {
         self.plan_review_batch = PlanReviewBatchState {
             expected_run_ids: run_ids.iter().cloned().collect(),
             delivered_run_ids: std::collections::BTreeSet::new(),
+            failed_run_ids: std::collections::BTreeMap::new(),
             deliveries: Vec::new(),
         };
         self.plan_reviewer_consumed = false;
         self.last_review_blocking_count = 0;
         self.last_review_scorecard = None;
+    }
+
+    /// 登记审查任务失败/异常退出（超时、崩溃、格式错误等，收口防死锁）
+    pub fn record_reviewer_failure_for_run(&mut self, run_id: &str, reason: &str) {
+        self.plan_review_batch.record_failure(run_id, reason);
+        if self.plan_review_batch.is_complete() {
+            self.plan_reviewer_consumed = true;
+        }
+    }
+
+    /// 审查者故障转移重派时，将旧任务 ID 替换为新重派的任务 ID
+    pub fn replace_expected_reviewer_run_id(&mut self, old_id: &str, new_id: &str) {
+        self.plan_review_batch.replace_expected_run_id(old_id, new_id);
     }
 
     /// 消费并记录一个审查员的交付结论（支持幂等去重与齐套现场真聚合）
