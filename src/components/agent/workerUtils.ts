@@ -20,8 +20,26 @@ export function inferStepIntent(tool: string, rawTarget: string, explicitIntent?
 
     const t = tool.toLowerCase();
 
-    // 1. 文件读取意图推导 (read_file)
-    if (t === "read_file") {
+    // 0. 原生本地文件分流 (local_file)
+    if (t === "local_file" || t.endsWith("/local_file")) {
+        if (clean.includes('"action":"edit"') || clean.includes("'action':'edit'") || clean.includes("edit") || clean.includes("target_content")) {
+            const name = clean.split("/").pop() || clean;
+            return { title: `精准局部替换源码文件 [${name}]`, cleanTarget: clean };
+        }
+        if (clean.includes('"action":"write"') || clean.includes("'action':'write'") || clean.includes("write")) {
+            const name = clean.split("/").pop() || clean;
+            return { title: `全量写入源码文件 [${name}]`, cleanTarget: clean };
+        }
+        if (clean.includes('"action":"list"') || clean.includes("'action':'list'") || clean.includes("list")) {
+            return { title: `探测目录 [${clean}] 拓扑结构`, cleanTarget: clean };
+        }
+        // 默认按读取处理
+        const name = clean.split("/").pop() || clean;
+        return { title: `读取源码文件 [${name}]`, cleanTarget: clean };
+    }
+
+    // 1. 文件读取意图推导 (read_file / view_file / read_text_file)
+    if (t === "read_file" || t === "view_file" || t === "read_text_file" || t === "read_text") {
         if (clean.endsWith("package.json")) return { title: "查阅工程依赖清单与构建脚本", cleanTarget: clean };
         if (clean.endsWith("Cargo.toml")) return { title: "审查 Rust 后端依赖与 crate 特性配置", cleanTarget: clean };
         if (clean.endsWith("tsconfig.json")) return { title: "审查 TypeScript 编译与路径别名配置", cleanTarget: clean };
@@ -46,8 +64,8 @@ export function inferStepIntent(tool: string, rawTarget: string, explicitIntent?
         return { title: `读取源码文件 [${clean.split("/").pop() || clean}]`, cleanTarget: clean };
     }
 
-    // 2. 目录结构勘察意图推导 (list_dir)
-    if (t === "list_dir") {
+    // 2. 目录结构勘察意图推导 (list_dir / list_directory / tree)
+    if (t === "list_dir" || t === "list_directory" || t === "tree") {
         if (clean === "." || clean === "") return { title: "查阅工程根目录与项目架构全貌", cleanTarget: clean || "." };
         if (clean.includes("views")) return { title: "梳理前端页面模块与视图体系", cleanTarget: clean };
         if (clean.includes("components")) return { title: "探索前端通用组件库与子组件布局", cleanTarget: clean };
@@ -59,8 +77,8 @@ export function inferStepIntent(tool: string, rawTarget: string, explicitIntent?
         return { title: `探测目录 [${clean}] 拓扑结构`, cleanTarget: clean };
     }
 
-    // 3. 命令行执行意图推导 (run_command)
-    if (t === "run_command") {
+    // 3. 命令行执行意图推导 (run_command / shell_exec / bash / local_shell)
+    if (t === "local_shell" || t.endsWith("/local_shell") || t === "run_command" || t === "shell_exec" || t === "bash") {
         if (clean.startsWith("find ")) return { title: "遍历定位目标源码与资源文件树", cleanTarget: clean };
         if (clean.includes("rg ") || clean.includes("grep ")) {
             if (clean.includes("pub struct") || clean.includes("struct ")) return { title: "检索核心结构体与数据模型声明", cleanTarget: clean };
@@ -79,10 +97,61 @@ export function inferStepIntent(tool: string, rawTarget: string, explicitIntent?
             if (clean.includes("status")) return { title: "检查本地仓库工作树修改状态", cleanTarget: clean };
             return { title: "执行 Git 只读版本库状态检查", cleanTarget: clean };
         }
-        return { title: `执行命令分析: ${clean.split(/\s+/)[0]}`, cleanTarget: clean };
+        return { title: `执行终端命令: ${clean.split(/\s+/)[0]}`, cleanTarget: clean };
     }
 
-// 默认回退
+    // 4. 全网搜索与网页抓取 (web_search / web_fetch)
+    if (t === "web_search") {
+        return { title: clean ? `全网检索: "${clean.slice(0, 35)}"` : "执行全网实时搜索", cleanTarget: clean };
+    }
+    if (t === "web_fetch" || t === "fetch_url") {
+        return { title: clean ? `抓取网页正文: ${clean.slice(0, 35)}` : "提取目标网页 Markdown 正文", cleanTarget: clean };
+    }
+
+    // 5. 代码特征检索 (grep_search / ripgrep_search / search)
+    if (t === "grep_search" || t === "ripgrep_search" || t === "search" || t === "search_code") {
+        return { title: clean ? `全文检索特征: "${clean.slice(0, 35)}"` : "检索代码与文档特征", cleanTarget: clean };
+    }
+
+    // 6. 代码修改与写入 (edit_file / write_file / replace_file_content)
+    if (t.includes("write") || t.includes("edit") || t.includes("replace") || t.includes("patch")) {
+        const name = clean.split("/").pop() || clean;
+        return { title: `修改/写入源码文件 [${name}]`, cleanTarget: clean };
+    }
+
+    // 7. 挂起等待 (wait_jobs)
+    if (t.includes("wait_jobs") || t.includes("wait_job")) {
+        return { title: "反应式挂起等待后台协同结论", cleanTarget: clean };
+    }
+
+    // 8. 人工交互与终态交付
+    if (t.includes("ask_human") || t.includes("human")) {
+        return { title: clean ? `请求人工裁决: ${clean.slice(0, 35)}` : "向用户呈报方案审批与问询", cleanTarget: clean };
+    }
+    if (t === "finish" || t.includes("finish")) {
+        return { title: "达成任务终态交付与产物归档", cleanTarget: clean };
+    }
+
+    // 9. 追问子任务 (resume_child)
+    if (t.includes("resume_child")) {
+        return { title: clean ? `追问对质子任务: ${clean.slice(0, 35)}` : "追问对质已完成的子任务", cleanTarget: clean };
+    }
+
+    // 10. 产物、项目与微信管理
+    if (t.includes("artifact")) {
+        return { title: "生成并登记交付产物文档", cleanTarget: clean };
+    }
+    if (t.includes("project_manager")) {
+        return { title: "维护工程工作区白名单", cleanTarget: clean };
+    }
+    if (t.includes("project_resources")) {
+        return { title: "管理工程受管共享资源", cleanTarget: clean };
+    }
+    if (t.includes("wechat")) {
+        return { title: "微信服务桥接通道调用", cleanTarget: clean };
+    }
+
+    // 默认回退
     return { title: `执行 ${tool}`, cleanTarget: clean };
 }
 

@@ -13,6 +13,14 @@
                         </div>
                         <div class="status-text-wrap">
                             <span class="status-title">{{ headerTitle }}</span>
+                            <span
+                                v-if="gateBadge"
+                                class="gate-status-badge"
+                                :class="gateBadge.type"
+                                :title="gateBadge.title"
+                            >
+                                {{ gateBadge.label }}
+                            </span>
                             <span v-if="isRunning && currentExecutingSubStep" class="status-sub">
                                 · {{ currentExecutingSubStep }}
                             </span>
@@ -272,6 +280,7 @@ const props = defineProps<{
     activeStepNumber?: number;
     sessionTitle?: string;
     summary?: string;
+    planGate?: any;
 }>();
 
 const emit = defineEmits<{
@@ -500,6 +509,36 @@ const allSucceeded = computed(() => {
     return level1Todos.value.length > 0 && completedPlansCount.value === level1Todos.value.length;
 });
 
+const gateBadge = computed(() => {
+    const gate = props.planGate;
+    if (!gate || typeof gate !== 'object') return null;
+
+    if (gate.blockingCount && gate.blockingCount > 0) {
+        return {
+            type: 'danger',
+            label: `🔴 门禁保护 (${gate.blockingCount} 条 Blocking)`,
+            title: gate.blockingSummary || `当前存在 ${gate.blockingCount} 条 Blocking 致命缺陷未闭合，写入工具已物理封锁`,
+        };
+    }
+    if (gate.batchIncomplete) {
+        const delivered = gate.deliveredReviewers || 0;
+        const expected = gate.expectedReviewers || 0;
+        return {
+            type: 'warning',
+            label: `⏳ 齐套等待中 (${delivered}/${expected})`,
+            title: '并发审查专家推演中，齐套屏障保护写入',
+        };
+    }
+    if (gate.humanWaived) {
+        return {
+            type: 'success',
+            label: '🟢 人工特批放行',
+            title: '已获人工豁免放行，写入通道已开启',
+        };
+    }
+    return null;
+});
+
 const headerTitle = computed(() => {
     if (props.isRunning) {
         if (level1Todos.value.length > 0) {
@@ -686,6 +725,37 @@ function formatDurationMs(ms?: number): string | null {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.gate-status-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 9999px;
+    line-height: 1.4;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: all 0.2s ease;
+}
+
+.gate-status-badge.danger {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.gate-status-badge.warning {
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.gate-status-badge.success {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+    border: 1px solid rgba(16, 185, 129, 0.35);
 }
 
 .header-right {

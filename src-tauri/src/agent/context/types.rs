@@ -41,6 +41,27 @@ pub struct PlanGateProjection {
     /// 批准前审查预算：已用 / 上限
     pub reviewer_budget_used: u32,
     pub reviewer_budget_max: u32,
+    /// 未闭合的 Blocking 缺陷数量
+    #[serde(default)]
+    pub blocking_count: u32,
+    /// 未闭合 Blocking 缺陷的紧凑摘要清单 (例如 "[F1] case-transfer-widget.js:1062")
+    #[serde(default)]
+    pub blocking_summary: Option<String>,
+    /// 并发审查员批次是否仍在推演中未齐套（齐套屏障生效中）
+    #[serde(default)]
+    pub batch_incomplete: bool,
+    /// 并发审查员已回传数量
+    #[serde(default)]
+    pub delivered_reviewers: usize,
+    /// 并发审查员预期总数
+    #[serde(default)]
+    pub expected_reviewers: usize,
+    /// 审查预算是否已耗尽（达到最大重试上限）
+    #[serde(default)]
+    pub budget_exhausted: bool,
+    /// 是否已获人工审批/豁免特批放行
+    #[serde(default)]
+    pub human_waived: bool,
 }
 
 /// 失败教训记录（用于防止大模型在长任务中重复尝试已知失败的方法）

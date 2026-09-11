@@ -447,22 +447,39 @@ export function getToolIcon(tool?: string, action?: string): { emoji: string; co
         return { emoji: "🌍", color: "#60a5fa" };
     }
 
-    // 2. 终端命令与脚本
-    if (t.includes("bash") || t.includes("shell") || t.includes("exec") || t.includes("cmd") || t.includes("terminal") || a.includes("exec")) {
+    // 2. 终端命令与脚本 (包含 local_shell)
+    if (t.includes("local_shell") || t.includes("bash") || t.includes("shell") || t.includes("exec") || t.includes("cmd") || t.includes("terminal") || a.includes("exec")) {
         return { emoji: "⚡", color: "#facc15" };
     }
 
-    // 3. 文件读写与代码
-    if (t.includes("read_file") || t.includes("read_text") || t.includes("get_code") || a.includes("read")) {
+    // 3. 原生本地文件操作 (local_file 动作分支)
+    if (t.includes("local_file")) {
+        if (a.includes("edit") || a.includes("modify") || a.includes("replace")) {
+            return { emoji: "✏️", color: "#f472b6" };
+        }
+        if (a.includes("write") || a.includes("create")) {
+            return { emoji: "📝", color: "#f472b6" };
+        }
+        if (a.includes("list") || a.includes("dir") || a.includes("tree")) {
+            return { emoji: "📁", color: "#fb923c" };
+        }
         return { emoji: "📖", color: "#a78bfa" };
     }
-    if (t.includes("write_file") || t.includes("edit_file") || t.includes("create_file") || t.includes("modify") || a.includes("write")) {
+
+    // 3.1 通用文件读写与代码
+    if (t.includes("read_file") || t.includes("read_text") || t.includes("view_file") || t.includes("get_code") || a.includes("read")) {
+        return { emoji: "📖", color: "#a78bfa" };
+    }
+    if (t.includes("edit_file") || a.includes("edit")) {
+        return { emoji: "✏️", color: "#f472b6" };
+    }
+    if (t.includes("write_file") || t.includes("create_file") || t.includes("modify") || a.includes("write")) {
         return { emoji: "📝", color: "#f472b6" };
     }
     if (t.includes("search") || t.includes("ripgrep") || t.includes("grep") || t.includes("find") || a.includes("search")) {
         return { emoji: "🔍", color: "#fbbf24" };
     }
-    if (t.includes("directory") || t.includes("tree") || t.includes("list_files") || t.includes("filesystem") || a.includes("list")) {
+    if (t.includes("directory") || t.includes("tree") || t.includes("list_files") || t.includes("list_dir") || t.includes("filesystem") || a.includes("list")) {
         return { emoji: "📁", color: "#fb923c" };
     }
 
@@ -471,8 +488,13 @@ export function getToolIcon(tool?: string, action?: string): { emoji: string; co
         return { emoji: "📊", color: "#34d399" };
     }
 
-    // 5. 数据集与数据库
-    if (t.includes("task_store") || t.includes("sqlite") || t.includes("sql") || t.includes("db") || t.includes("database") || t.includes("get_step_output")) {
+    // 5. 截断输出取回
+    if (t.includes("get_step_output")) {
+        return { emoji: "📜", color: "#cbd5e1" };
+    }
+
+    // 5.1 数据集与数据库
+    if (t.includes("task_store") || t.includes("sqlite") || t.includes("sql") || t.includes("db") || t.includes("database")) {
         return { emoji: "💾", color: "#2dd4bf" };
     }
 
@@ -480,13 +502,19 @@ export function getToolIcon(tool?: string, action?: string): { emoji: string; co
     if (t.includes("ask_human") || t.includes("human") || t.includes("confirm")) {
         return { emoji: "👤", color: "#c084fc" };
     }
-    if (t.includes("finish") || t.includes("done") || t.includes("deliver")) {
+    if (t === "finish" || t.includes("finish") || t.includes("done") || t.includes("deliver")) {
         return { emoji: "🎉", color: "#4ade80" };
     }
 
     // 7. 子智能体与异步挂起
-    if (t.includes("child_reviewer") || t.includes("sub_agent") || t.includes("investigate")) {
+    if (t.includes("child_writer")) {
+        return { emoji: "✍️", color: "#f472b6" };
+    }
+    if (t.includes("child_reviewer") || t.includes("sub_agent") || t.includes("child_worker") || t.includes("investigate")) {
         return { emoji: "🤖", color: "#a855f7" };
+    }
+    if (t.includes("resume_child")) {
+        return { emoji: "🔄", color: "#8b5cf6" };
     }
     if (t.includes("wait_jobs") || t.includes("wait_job") || a.includes("wait_jobs")) {
         return { emoji: "⏳", color: "#f59e0b" };
@@ -497,7 +525,42 @@ export function getToolIcon(tool?: string, action?: string): { emoji: string; co
         return { emoji: "🧠", color: "#e879f9" };
     }
 
-    // 9. 默认 MCP 外部插件
+    // 9. 产物交付、系统配置与管理工具
+    if (t.includes("artifact")) {
+        return { emoji: "📦", color: "#fb923c" };
+    }
+    if (t.includes("model_manager")) {
+        return { emoji: "⚙️", color: "#94a3b8" };
+    }
+    if (t.includes("skill_manager")) {
+        return { emoji: "🧠", color: "#ec4899" };
+    }
+    if (t.includes("mcp_manager")) {
+        return { emoji: "🔌", color: "#6366f1" };
+    }
+    if (t.includes("role_manager")) {
+        return { emoji: "🎭", color: "#f43f5e" };
+    }
+    if (t.includes("schedule_manager")) {
+        return { emoji: "⏰", color: "#eab308" };
+    }
+    if (t.includes("project_manager")) {
+        return { emoji: "🏗️", color: "#0ea5e9" };
+    }
+    if (t.includes("project_resources") || t.includes("register_project_resource")) {
+        return { emoji: "📚", color: "#38bdf8" };
+    }
+    if (t.includes("watch_start") || t.includes("watch_stop") || t.includes("watch")) {
+        return { emoji: "👁️", color: "#06b6d4" };
+    }
+    if (t.includes("system_info")) {
+        return { emoji: "💻", color: "#64748b" };
+    }
+    if (t.includes("wechat")) {
+        return { emoji: "💬", color: "#22c55e" };
+    }
+
+    // 10. 默认 MCP 外部插件
     if (t.includes("/")) {
         return { emoji: "🧩", color: "#818cf8" };
     }

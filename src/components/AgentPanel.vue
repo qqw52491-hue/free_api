@@ -136,6 +136,7 @@
                     :active-step-number="session.activeStepNumber.value"
                     :session-title="deckSessionTitle"
                     :summary="deckSummary"
+                    :plan-gate="session.planGate.value"
                     @select-step="handleStepSelect($event.id)"
                     @open-diff="handleOpenDiff"
                 />

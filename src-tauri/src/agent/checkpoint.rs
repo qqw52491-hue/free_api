@@ -961,6 +961,38 @@ impl AgentCheckpoint {
 
     /// 生成方案门禁状态的瞬态投影，供上下文装配层注入底部状态卡（事前可见）。
     pub fn plan_gate_projection(&self) -> crate::agent::context::types::PlanGateProjection {
+        let unwithdrawn_blockings = self.plan_review_batch.aggregate_unwithdrawn_blockings();
+        let blocking_count = if unwithdrawn_blockings.is_empty() {
+            self.last_review_blocking_count
+        } else {
+            unwithdrawn_blockings.len() as u32
+        };
+
+        let blocking_summary = if blocking_count > 0 {
+            if !unwithdrawn_blockings.is_empty() {
+                let items: Vec<String> = unwithdrawn_blockings
+                    .iter()
+                    .take(3)
+                    .map(|b| {
+                        let loc = if b.location.is_empty() { "全局" } else { &b.location };
+                        format!("[{}] {}: {}", b.id, loc, b.why.chars().take(40).collect::<String>())
+                    })
+                    .collect();
+                Some(items.join("; "))
+            } else {
+                Some(format!("存在 {} 条 Blocking 阻塞缺陷", blocking_count))
+            }
+        } else {
+            None
+        };
+
+        let batch_incomplete = !self.plan_review_batch.expected_run_ids.is_empty()
+            && !self.plan_review_batch.is_complete();
+        let delivered_reviewers = self.plan_review_batch.delivered_run_ids.len();
+        let expected_reviewers = self.plan_review_batch.expected_run_ids.len();
+        let budget_exhausted = self.plan_reviewer_retry_count >= MAX_PLAN_REVIEWER_RETRIES;
+        let human_waived = self.human_waiver_text().is_some();
+
         crate::agent::context::types::PlanGateProjection {
             mode: self.plan_mode.as_str().to_string(),
             phase: self.plan_phase.as_str().to_string(),
@@ -968,6 +1000,13 @@ impl AgentCheckpoint {
             reviewer_consumed: self.plan_reviewer_consumed,
             reviewer_budget_used: self.plan_reviewer_retry_count,
             reviewer_budget_max: MAX_PLAN_REVIEWER_RETRIES,
+            blocking_count,
+            blocking_summary,
+            batch_incomplete,
+            delivered_reviewers,
+            expected_reviewers,
+            budget_exhausted,
+            human_waived,
         }
     }
 
@@ -1775,6 +1814,53 @@ mod tests {
         assert!(!proj.reviewer_consumed);
         assert_eq!(proj.reviewer_budget_used, 1);
         assert_eq!(proj.reviewer_budget_max, MAX_PLAN_REVIEWER_RETRIES);
+        assert_eq!(proj.blocking_count, 0);
+        assert!(!proj.batch_incomplete);
+        assert!(!proj.budget_exhausted);
+    }
+
+    #[test]
+    fn plan_gate_projection_reflects_blocking_and_batch_barrier() {
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut checkpoint = AgentCheckpoint::new("run-test".to_string(), &context);
+        checkpoint.plan_mode = PlanExecutionMode::CrossReview;
+        checkpoint.plan_phase = PlanPhase::Reviewing;
+        checkpoint.plan_reviewer_retry_count = 2;
+        checkpoint.plan_reviewer_consumed = true;
+
+        // 模拟批次已派发 2 个审查员，回传 1 个且带有 1 个 blocking
+        checkpoint.plan_review_batch.expected_run_ids.insert("rev-1".to_string());
+        checkpoint.plan_review_batch.expected_run_ids.insert("rev-2".to_string());
+        let delivery = crate::agent::child_reviewer::ReviewerDeliveryData {
+            findings: vec![crate::agent::child_reviewer::ReviewFinding {
+                id: "F1".to_string(),
+                severity: "blocking".to_string(),
+                finality: "regardless".to_string(),
+                location: "src/main.js:10".to_string(),
+                current: "window.addEventListener".to_string(),
+                why: "内存泄漏隐患".to_string(),
+                suggestion: "解除事件监听".to_string(),
+                evidence_strength: "confirmed".to_string(),
+            }],
+            confidence: "high".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: None,
+            extra: std::collections::HashMap::new(),
+        };
+        checkpoint.plan_review_batch.record_delivery(Some("rev-1"), delivery);
+
+        let proj = checkpoint.plan_gate_projection();
+        assert_eq!(proj.blocking_count, 1);
+        assert!(proj.blocking_summary.is_some());
+        assert!(proj.blocking_summary.unwrap().contains("[F1] src/main.js:10"));
+        assert!(proj.batch_incomplete, "尚有 rev-2 未齐套，batch_incomplete 应为 true");
+        assert_eq!(proj.delivered_reviewers, 1);
+        assert_eq!(proj.expected_reviewers, 2);
+        assert!(proj.budget_exhausted, "已用 2 轮重试，预算应标记耗尽");
     }
 
     #[test]

@@ -145,65 +145,94 @@ impl ContextRenderer {
     /// 方案门禁状态卡：让模型在「决策前」看到当前模式与放行条件，
     /// 避免靠写入被拒（一整轮 LLM 往返的代价）来反推门禁规则。
     /// 指引文案必须与 loop_runner 的 check_pre_write_gatekeeper 拦截语义一一对应。
+    /// 方案门禁状态卡：让模型在「决策前」看到当前模式与放行条件，
+    /// 避免靠写入被拒（一整轮 LLM 往返的代价）来反推门禁规则。
+    /// 【按需条件化渲染原则】：每轮仅命中唯一的激活状态分支，严格控体积（单状态 1~3 行），稳吃前缀缓存。
     pub fn render_plan_gate(gate: Option<&PlanGateProjection>) -> String {
         let Some(gate) = gate else {
             return String::new();
         };
-        let phase_label = match gate.phase.as_str() {
-            "exploring" => "探索取证中",
-            "reviewing" => "方案审查中",
-            "awaiting_approval" => "等待人工审批",
-            "approved" => "已批准放行",
-            other => other,
-        };
-        let (mode_label, guidance) = match gate.mode.as_str() {
-            "cross_review" => {
-                let review_state = if !gate.reviewer_dispatched {
-                    "尚未派发"
-                } else if gate.reviewer_consumed {
-                    "结论已消费"
-                } else {
-                    "已派发·结论未消费"
-                };
-                let next = if gate.phase == "approved" {
-                    "门禁已放行，可执行写入；新一批写入前的状态变更会反映在本卡。"
-                } else if !gate.reviewer_dispatched {
-                    "首次写入前必须先派发 child_reviewer 对抗审查（直接写工具将被门禁拦截）。"
-                } else if !gate.reviewer_consumed {
-                    "审查结论未回收：先 wait_jobs 收取并研判后再写入（问过 ≠ 听过，直接写入将被拦截）。"
-                } else {
-                    "研判审查结论后即可写入，门禁将自动放行。"
-                };
-                (
-                    format!(
-                        "🔍 交叉审查 (cross_review) | 审查: {}（预算 {}/{}）",
-                        review_state, gate.reviewer_budget_used, gate.reviewer_budget_max
-                    ),
-                    next,
-                )
-            }
-            "plan_approval" => {
-                let next = if gate.phase == "approved" {
-                    "方案已获人类批准，门禁放行，可执行写入。"
-                } else if gate.phase == "awaiting_approval" {
-                    "方案已呈报，等待人类在界面批准；期间不要调用写工具。"
-                } else {
-                    "写入前必须 ask_human(kind: plan_approval) 呈报完整方案并获人类批准（直接写工具将被拦截）。"
-                };
-                ("🛡️ 方案审批 (plan_approval)".to_string(), next)
-            }
-            _ => {
-                let next = if gate.phase == "approved" {
-                    "门禁放行中。"
-                } else {
-                    "完成只读排查与方案阐述后写入将自动放行；未经排查直接写入会被首轮门禁拦截。"
-                };
-                ("🚀 全自动 (auto)".to_string(), next)
-            }
-        };
+
+        // 1. 已批准放行分支 (Approved)
+        if gate.phase == "approved" {
+            let waiver_hint = if gate.human_waived {
+                "（已获人工特批放行）"
+            } else {
+                ""
+            };
+            return format!(
+                "【方案门禁状态】🟢 门禁已放行{}\n指引: 门禁放行中，写入工具已全面解锁，可按方案执行写入并验证；新一批写入前的状态变更会反映在本卡。\n\n",
+                waiver_hint
+            );
+        }
+
+        // 2. 方案审批模式分支 (plan_approval)
+        if gate.mode == "plan_approval" {
+            let guidance = if gate.phase == "awaiting_approval" {
+                "方案已呈报，等待人类在界面批准；期间不要调用写工具。"
+            } else {
+                "写入前必须 ask_human(kind: plan_approval) 呈报完整方案并获人类批准（直接写工具将被拦截）。"
+            };
+            return format!(
+                "【方案门禁状态】🛡️ 方案审批 (plan_approval)\n指引: {}\n\n",
+                guidance
+            );
+        }
+
+        // 3. 全自动模式分支 (auto)
+        if gate.mode != "cross_review" {
+            return "【方案门禁状态】🚀 全自动 (auto)\n指引: 完成只读排查与方案阐述后写入将自动放行；未经排查直接写入会被首轮门禁拦截。\n\n".to_string();
+        }
+
+        // 4. 交叉审查模式分支 (cross_review) —— 细分且互斥的单一活跃状态
+        // 4.1 尚未派发审查员
+        if !gate.reviewer_dispatched {
+            return format!(
+                "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）\n指引: 首次写入前必须先派发 child_reviewer 对抗审查（直接写工具将被门禁拦截）。\n\n",
+                gate.reviewer_budget_used, gate.reviewer_budget_max
+            );
+        }
+
+        // 4.2 并发审查推演中尚未齐套（齐套屏障生效中）
+        if gate.batch_incomplete || !gate.reviewer_consumed {
+            let delivered = gate.delivered_reviewers;
+            let expected = if gate.expected_reviewers > 0 { gate.expected_reviewers } else { 1 };
+            return format!(
+                "【方案门禁状态】⏳ 交叉审查 (cross_review) | 审查: 结论未消费（推演中 {}/{}）\n指引: 审查结论未回收：先 wait_jobs 收取并研判后再写入（问过 ≠ 听过，直接写入将被拦截）。\n\n",
+                delivered, expected
+            );
+        }
+
+        // 4.3 存在未闭合的 Blocking 阻塞缺陷（红色物理封锁态）
+        if gate.blocking_count > 0 {
+            let summary_line = if let Some(summary) = &gate.blocking_summary {
+                format!("\n待闭合缺陷: {}", summary)
+            } else {
+                String::new()
+            };
+            let escape = if gate.budget_exhausted {
+                "审查预算已耗尽，请立即调用 ask_human(kind: 'plan_approval') 说明情况并申请人工裁决放行。"
+            } else {
+                "针对异议完善方案并重新派发 child_reviewer 确认闭合；若审查员意见过度防御，可调用 ask_human(kind: 'plan_approval') 呈报人工仲裁放行。"
+            };
+            return format!(
+                "【方案门禁状态】🔴 门禁封锁中（存在 {} 条未闭合 Blocking 致命缺陷）{}\n指引: 写入工具已被物理封锁，任何写入调用将被门禁当场拦截并丢弃！当前必须：{}\n\n",
+                gate.blocking_count, summary_line, escape
+            );
+        }
+
+        // 4.4 审查预算耗尽（达最大重试上限）且未放行
+        if gate.budget_exhausted {
+            return format!(
+                "【方案门禁状态】⚠️ 审查预算已耗尽 ({}/{})\n指引: 审查轮数已达上限，禁止继续派发审查子 Agent。请调用 ask_human(kind: 'plan_approval') 呈报方案申请人工审批放行。\n\n",
+                gate.reviewer_budget_used, gate.reviewer_budget_max
+            );
+        }
+
+        // 4.5 审查结论已回收且无 Blocking 缺陷（等待门禁最终校验放行）
         format!(
-            "【方案门禁状态】模式: {} | 方案阶段: {}\n指引: {}\n\n",
-            mode_label, phase_label, guidance
+            "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 结论已消费（预算 {}/{}）\n指引: 审查结论已研判闭合（无 Blocking 缺陷）；请输出完善后的技术方案，门禁核验通过后放行写入。\n\n",
+            gate.reviewer_budget_used, gate.reviewer_budget_max
         )
     }
 
@@ -231,6 +260,13 @@ mod tests {
             reviewer_consumed: consumed,
             reviewer_budget_used: if dispatched { 1 } else { 0 },
             reviewer_budget_max: 2,
+            blocking_count: 0,
+            blocking_summary: None,
+            batch_incomplete: false,
+            delivered_reviewers: if consumed { 1 } else { 0 },
+            expected_reviewers: if dispatched { 1 } else { 0 },
+            budget_exhausted: false,
+            human_waived: false,
         }
     }
 
@@ -265,6 +301,43 @@ mod tests {
     }
 
     #[test]
+    fn cross_review_blocking_findings_locks_write_and_shows_summary() {
+        let mut g = gate("cross_review", "reviewing", true, true);
+        g.blocking_count = 1;
+        g.blocking_summary = Some("[F1] case-transfer-widget.js:1062: DOM 跳闪".to_string());
+
+        let out = ContextRenderer::render_plan_gate(Some(&g));
+        assert!(out.contains("门禁封锁中"), "应明确宣告门禁封锁: {out}");
+        assert!(out.contains("物理封锁"), "应告知写入工具已被物理封锁: {out}");
+        assert!(out.contains("[F1] case-transfer-widget.js:1062"), "应包含缺陷摘要: {out}");
+        assert!(!out.contains("即可写入，门禁将自动放行"), "绝不应误导说即可写入: {out}");
+    }
+
+    #[test]
+    fn cross_review_batch_incomplete_guides_wait_jobs() {
+        let mut g = gate("cross_review", "reviewing", true, true);
+        g.batch_incomplete = true;
+        g.delivered_reviewers = 1;
+        g.expected_reviewers = 2;
+
+        let out = ContextRenderer::render_plan_gate(Some(&g));
+        assert!(out.contains("wait_jobs"), "齐套屏障应指引 wait_jobs: {out}");
+        assert!(out.contains("1/2"), "应展示齐套进度: {out}");
+    }
+
+    #[test]
+    fn cross_review_budget_exhausted_guides_ask_human() {
+        let mut g = gate("cross_review", "reviewing", true, true);
+        g.budget_exhausted = true;
+        g.reviewer_budget_used = 2;
+        g.reviewer_budget_max = 2;
+
+        let out = ContextRenderer::render_plan_gate(Some(&g));
+        assert!(out.contains("预算已耗尽"), "应展示预算耗尽: {out}");
+        assert!(out.contains("ask_human"), "应指引转人工审批: {out}");
+    }
+
+    #[test]
     fn cross_review_approved_shows_gate_open() {
         let out = ContextRenderer::render_plan_gate(Some(&gate(
             "cross_review",
@@ -272,8 +345,18 @@ mod tests {
             true,
             true,
         )));
-        assert!(out.contains("已批准放行"));
+        assert!(out.contains("门禁已放行"));
         assert!(!out.contains("将被拦截"), "放行后不应再出现拦截警告: {out}");
+    }
+
+    #[test]
+    fn cross_review_approved_with_human_waiver_shows_waiver_hint() {
+        let mut g = gate("cross_review", "approved", true, true);
+        g.human_waived = true;
+
+        let out = ContextRenderer::render_plan_gate(Some(&g));
+        assert!(out.contains("门禁已放行"));
+        assert!(out.contains("已获人工特批放行"));
     }
 
     #[test]

@@ -430,6 +430,26 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const runTerminal = ref(true);
     const scrollContainerElement = ref<HTMLElement | null>(null);
 
+    const planGate = computed(() => {
+        const ctx = latestContext.value;
+        if (!ctx) return null;
+        const raw = (ctx.plan_gate || asRecord(ctx.context).plan_gate || asRecord(ctx.data).plan_gate) as Record<string, unknown> | undefined;
+        if (!raw || typeof raw !== "object") return null;
+        return {
+            mode: toText(raw.mode),
+            phase: toText(raw.phase),
+            reviewerDispatched: Boolean(raw.reviewer_dispatched),
+            reviewerConsumed: Boolean(raw.reviewer_consumed),
+            blockingCount: Number(raw.blocking_count) || 0,
+            blockingSummary: toText(raw.blocking_summary) || null,
+            batchIncomplete: Boolean(raw.batch_incomplete),
+            deliveredReviewers: Number(raw.delivered_reviewers) || 0,
+            expectedReviewers: Number(raw.expected_reviewers) || 0,
+            budgetExhausted: Boolean(raw.budget_exhausted),
+            humanWaived: Boolean(raw.human_waived),
+        };
+    });
+
     const {
         resources,
         isResourcesLoading,
@@ -1965,6 +1985,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         tokenUsage,
         retryAttempts,
         planMode,
+        planGate,
         setPlanMode,
         autoPilot,
         setAutoPilot,
