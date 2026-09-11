@@ -626,29 +626,18 @@ async fn run_agent_main_loop_in_workspace_inner(
                     injected_image_paths.insert(att.file_path.clone());
                 }
             } else {
-                // 📂 非图片附件：自动复制到物理沙箱（项目 .attachments/ 或会话 tmp/）并执行分层挂载
+                // 📂 非图片附件：统一存放至当前会话的 tmp/ 临时沙箱并执行分层挂载（绝不污染项目工作区代码仓库）
                 let src_path = std::path::Path::new(&att.file_path);
-                let (sandbox_path_str, actual_file_path) = if is_project_session {
-                    let attach_dir = workspace_dir.join(".attachments");
-                    let _ = std::fs::create_dir_all(&attach_dir);
-                    let target_file = attach_dir.join(&att.file_name);
-                    if src_path.exists() && src_path != target_file {
-                        let _ = std::fs::copy(src_path, &target_file);
-                    } else if !target_file.exists() && !att.prompt_text.is_empty() {
-                        let _ = std::fs::write(&target_file, att.prompt_text.as_bytes());
-                    }
-                    (format!(".attachments/{}", att.file_name), target_file)
-                } else {
-                    let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
-                    let _ = std::fs::create_dir_all(&tmp_dir);
-                    let target_file = tmp_dir.join(&att.file_name);
-                    if src_path.exists() && src_path != target_file {
-                        let _ = std::fs::copy(src_path, &target_file);
-                    } else if !target_file.exists() && !att.prompt_text.is_empty() {
-                        let _ = std::fs::write(&target_file, att.prompt_text.as_bytes());
-                    }
-                    (format!("tmp/{}", att.file_name), target_file)
-                };
+                let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
+                let _ = std::fs::create_dir_all(&tmp_dir);
+                let target_file = tmp_dir.join(&att.file_name);
+                if src_path.exists() && src_path != target_file {
+                    let _ = std::fs::copy(src_path, &target_file);
+                } else if !target_file.exists() && !att.prompt_text.is_empty() {
+                    let _ = std::fs::write(&target_file, att.prompt_text.as_bytes());
+                }
+                let sandbox_path_str = format!("tmp/{}", att.file_name);
+                let actual_file_path = target_file;
 
                 let can_inline = inlined_attachment_bytes + (att.size_bytes as usize) <= crate::agent::file_parser::INLINE_TOTAL_BUDGET;
                 let parsed_content = if actual_file_path.exists() {
@@ -737,24 +726,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                                     injected_image_paths.insert(file_path.to_string());
                                 }
                             } else if let Ok(extracted) = crate::agent::file_parser::parse_file(p, None) {
-                                // 同样自动拷贝到沙箱目录并生成分层提示词！
-                                let (sandbox_path_str, _actual_file_path) = if is_project_session {
-                                    let attach_dir = workspace_dir.join(".attachments");
-                                    let _ = std::fs::create_dir_all(&attach_dir);
-                                    let target_file = attach_dir.join(file_name);
-                                    if p != target_file {
-                                        let _ = std::fs::copy(p, &target_file);
-                                    }
-                                    (format!(".attachments/{}", file_name), target_file)
-                                } else {
-                                    let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
-                                    let _ = std::fs::create_dir_all(&tmp_dir);
-                                    let target_file = tmp_dir.join(file_name);
-                                    if p != target_file {
-                                        let _ = std::fs::copy(p, &target_file);
-                                    }
-                                    (format!("tmp/{}", file_name), target_file)
-                                };
+                                // 同样自动拷贝到会话 tmp/ 沙箱目录并生成分层提示词！
+                                let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
+                                let _ = std::fs::create_dir_all(&tmp_dir);
+                                let target_file = tmp_dir.join(file_name);
+                                if p != target_file {
+                                    let _ = std::fs::copy(p, &target_file);
+                                }
+                                let sandbox_path_str = format!("tmp/{}", file_name);
                                 let can_inline = inlined_attachment_bytes <= crate::agent::file_parser::INLINE_TOTAL_BUDGET;
                                 let (prompt_text, newly_inlined) = crate::agent::file_parser::format_for_prompt_with_sandbox(
                                     &extracted,
