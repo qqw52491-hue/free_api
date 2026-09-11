@@ -1320,6 +1320,8 @@ pub async fn spawn_child_reviewer(
                                 "stream_type": "thinking",
                                 "chunk": chunk,
                                 "child_run_id": &child_run_id_clone,
+                                "role": &param_role,
+                                "role_label": &param_role_label,
                             }),
                         );
                     }
@@ -1331,6 +1333,8 @@ pub async fn spawn_child_reviewer(
                                 "stream_type": "content",
                                 "chunk": chunk,
                                 "child_run_id": &child_run_id_clone,
+                                "role": &param_role,
+                                "role_label": &param_role_label,
                             }),
                         );
                     }

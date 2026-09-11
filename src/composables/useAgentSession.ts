@@ -1054,14 +1054,21 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const chunk = toText(payload.chunk);
             const childRunId = toText(payload.child_run_id) || (isWorkerStream ? "worker-1" : "reviewer-1");
             const shortId = childRunId ? childRunId.slice(0, 8) : "";
+            const explicitRoleLabel = toText(payload.role_label) || toText(payload.role);
             
-            let worker = teamWorkers.value.find((w) => w.id === childRunId || (isWorkerStream ? w.role === "worker" : w.role === "reviewer"));
+            let worker = childRunId ? teamWorkers.value.find((w) => w.id === childRunId) : undefined;
+            if (!worker && (!childRunId || childRunId === "reviewer-1" || childRunId === "worker-1")) {
+                worker = teamWorkers.value.find((w) => isWorkerStream ? w.role === "worker" : w.role === "reviewer");
+            }
             if (!worker) {
+                const displayName = explicitRoleLabel 
+                    ? (isWorkerStream ? `侦察 · ${explicitRoleLabel}` : `审查 · ${explicitRoleLabel}`)
+                    : (isWorkerStream ? "后台侦察工作者" : "代码质量审查员");
                 worker = {
                     id: childRunId,
-                    name: isWorkerStream ? "后台侦察工作者" : "代码质量审查员",
+                    name: displayName,
                     role: isWorkerStream ? "worker" : "reviewer",
-                    roleLabel: isWorkerStream ? "侦察" : "审查员",
+                    roleLabel: explicitRoleLabel || (isWorkerStream ? "侦察" : "审查员"),
                     status: "running",
                     currentStep: isWorkerStream ? "正在后台独立检索源码并收集事实证据..." : "正在后台分析变更并审查潜在风险...",
                     currentTool: isWorkerStream ? "child_worker" : "child_reviewer",
@@ -1093,7 +1100,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const action = toText(payload.action);
             const params = payload.params;
 
-            let worker = teamWorkers.value.find((w) => w.id === childRunId || w.role === "worker");
+            let worker = childRunId ? teamWorkers.value.find((w) => w.id === childRunId) : undefined;
+            if (!worker && (!childRunId || childRunId === "worker-1")) {
+                worker = teamWorkers.value.find((w) => w.role === "worker");
+            }
             if (worker) {
                 if (!worker.steps) {
                     worker.steps = [
@@ -1325,7 +1335,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             if (!isReviewer && !isWriter && !isWorker) return;
 
             const details = extractWorkerDetails(stepItem);
-            let worker = teamWorkers.value.find((w) => w.role === details.role || (stepItem.id && w.id.includes(stepItem.id)));
+            let worker = teamWorkers.value.find((w) => (stepItem.id && w.id.includes(stepItem.id)) || w.id === stepItem.id);
+            if (!worker && teamWorkers.value.length <= 1) {
+                worker = teamWorkers.value.find((w) => w.role === details.role);
+            }
             if (!worker) {
                 teamWorkers.value.push({
                     id: `${details.role}-${stepItem.id || stepItem.stepId}`,
