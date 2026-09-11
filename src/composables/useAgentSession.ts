@@ -898,6 +898,11 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                         ? "pending"
                         : "running";
 
+        if (eventType === "finish_challenged" || eventType === "challenged") {
+            streamingSummary.value = "";
+            finishOutput.value = null;
+        }
+
         // 查找最新的匹配步骤：若前一个步骤已失败/成功/被质询，而新事件重新下发，保留历史错误尝试并追加新条目
         let targetIdx = -1;
         for (let i = steps.value.length - 1; i >= 0; i--) {

@@ -1254,7 +1254,7 @@ pub async fn spawn_child_reviewer(
         }}\n\
         【审查方法（去锚定）】：先不细读父Agent提交的方案，独立列出「该任务必须满足的硬条件」与「预判的最大风险」；再带着这份清单对照方案审查。findings 的 why 字段须以 [预判内] 或 [预判外] 前缀标注来源。\n\
         【硬规则】：\n\
-        0. 必须在 scorecard 中如实评出4个维度评分（0~100整数），综合均分>=75且破坏性风险>=60方可放行代码写入；\n\
+        0. 【核心强制】必须在顶级 JSON 中完整输出 scorecard 四维评分卡（correctness, risk, style, test_coverage），缺失该字段会导致审查判定无效并重修；综合均分>=75且破坏性风险>=60方可放行代码写入；\n\
         1. findings 为 1–5 条结构化审查条目；若无确切位置 location，severity 必须标为 question（禁止标 blocking）；\n\
         2. 证据不足时 confidence 标 unverified 并在 missing_evidence 说明；\n\
         3. 若证据包中提供了此前审查的 blocking 异议及父Agent的处理说明，必须输出 objection_verdicts 逐条裁决：问题确已解决或经证伪不成立时 verdict 取 withdraw，理由必须引用证据包中父Agent处理说明或修订内容的具体点（空泛模板理由会被系统按 maintain 处理）；仍成立或有新证据支持时取 maintain。无历史异议时省略该字段；\n\

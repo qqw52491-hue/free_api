@@ -47,7 +47,7 @@ struct BuiltinToolSpec {
 const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     BuiltinToolSpec {
         name: "finish",
-        summary: "终态交付；仅在所有完成门控已闭合时使用。若生成或调整了文件交付物，建议在 artifacts 中附带相对路径列表，系统会自动在界面底部上屏生成下载与打开卡片",
+        summary: "终态交付；全流程彻底完成的收尾交卷指令。【前置硬约束】：严禁提前交付！若本任务涉及代码修改，必须先完成真实测试验证或确认审查意见已闭合，确保无遗留 blocking 缺陷或未闭合待办；未经验收直接草率 finish 会被系统机械门禁当场拦截打回！若生成或调整了文件交付物，建议在 artifacts 中附带相对路径列表，系统会自动在界面底部上屏生成下载与打开卡片",
         actions: &["finish(summary: string, artifacts?: string[])"],
     },
     BuiltinToolSpec {
@@ -240,8 +240,8 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         summary: "本地文件读写与精准局部替换（受双白名单保护与SHA256乐观并发锁防覆盖保护）：修改已有文件优先使用 edit 局部替换。注：tmp/ 相对路径自动路由到会话专属临时草稿目录",
         actions: &[
             "read(path: string, start_line?: number, end_line?: number) — 读取文件（自动建立并发哈希基线）",
-            "write(path: string, content: string, force?: boolean) — 全量写入文件（已有文件必须先 read 建立基线或显式 force: true，外部篡改硬拦截）",
-            "edit(path: string, target_content: string, replacement_content: string, force?: boolean) — 精准局部替换，target_content 必须全局唯一",
+            "write(path: string, content: string, force?: boolean) — 全量写入文件。⚠️【前置门禁】调用前必须已完成 child_reviewer 审查且获取 ReviewScorecard，否则系统底层无条件拦截丢弃！",
+            "edit(path: string, target_content: string, replacement_content: string, force?: boolean) — 精准局部替换。⚠️【前置门禁】调用前必须已完成 child_reviewer 审查且获取 ReviewScorecard，否则系统底层无条件拦截丢弃！",
             "list(path?: string, depth?: number)",
         ],
     },

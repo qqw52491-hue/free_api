@@ -7,7 +7,7 @@
 
 /// 方案审批模式：直接写代码 / 派发写入子 Agent / 执行变更工具被拦截
 pub fn plan_approval_need_human_approval() -> String {
-    "【❌ 执行失败：写入已被拦截，目标文件未做任何修改！】\n\
+    "【⚠️ 门禁保护触发：写入已被拦截，目标文件未做任何修改！】\n\
      【原因】当前处于【方案审批模式】，尚未获得人工方案审批放行，禁止直接写文件、派发写入子 Agent 或执行变更工具。\n\
      【必须执行的操作】：\n\
      请调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的技术方案呈现给用户；\n\
@@ -16,7 +16,7 @@ pub fn plan_approval_need_human_approval() -> String {
 
 /// 方案审批模式：通过 resume_child 恢复写入型子 Agent 被拦截
 pub fn plan_approval_resume_child_blocked() -> String {
-    "【❌ 执行失败：恢复子任务已被拦截，目标文件未做任何修改！】\n\
+    "【⚠️ 门禁保护触发：恢复子任务已被拦截，目标文件未做任何修改！】\n\
      【原因】当前处于【方案审批模式】，尝试通过 resume_child 恢复写入型子 Agent 修改代码同样需要人工方案审批放行。\n\
      【必须执行的操作】：\n\
      请调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的技术方案呈现给用户；\n\
@@ -25,7 +25,7 @@ pub fn plan_approval_resume_child_blocked() -> String {
 
 /// 交叉审查模式：尚未派发 child_reviewer
 pub fn cross_review_need_reviewer_dispatch() -> String {
-    "【❌ 执行失败：写入已被拦截，目标文件未受任何修改！】\n\
+    "【⚠️ 门禁保护触发：已阻止未审查写入，目标文件未受任何修改！】\n\
      【原因】当前处于【双 Agent 交叉审查模式】。在首次动笔修改代码前，必须先派发 child_reviewer 开展反驳推演与架构盲区排查。\n\
      【必须执行的操作】：\n\
      1. 调用 child_reviewer 工具，传入 role（如文档任务使用 doc_writer，前端使用 frontend_ui_designer 等）、拟定方案摘录、证据文件路径及反证推演要求；\n\
@@ -36,7 +36,7 @@ pub fn cross_review_need_reviewer_dispatch() -> String {
 
 /// 交叉审查模式：已派发但结论尚未回收（“问过 ≠ 听过”）
 pub fn cross_review_need_wait_reviewer_jobs() -> String {
-    "【❌ 执行失败：写入已被拦截，目标文件未受任何修改！】\n\
+    "【⚠️ 门禁保护触发：已阻止未审查写入，目标文件未受任何修改！】\n\
      【原因】审查子 Agent 仍在异步推演中，尚未等待并接收其审查结论（“问过 ≠ 听过”）。\n\
      【必须执行的操作】：\n\
      请立即调用 wait_jobs 工具挂起等待审查专家完成对抗推演；\n\
@@ -45,7 +45,7 @@ pub fn cross_review_need_wait_reviewer_jobs() -> String {
 
 /// 交叉审查模式：派发从未真正启动（无运行中任务、无可回收结论）
 pub fn cross_review_reviewer_result_missing() -> String {
-    "【❌ 执行失败：写入已被拦截，目标文件未受任何修改！】\n\
+    "【⚠️ 门禁保护触发：已阻止未审查写入，目标文件未受任何修改！】\n\
      【原因】未收到任何有效的审查结论（后台既无运行中审查任务，亦无可回收结论；通常因角色卡未授权、role 名称不存在或参数非法导致派发失败）。\n\
      【必须执行的操作】：\n\
      请重新调用 child_reviewer 派发有效审查（核对 role 名称），或调用 wait_jobs 收取可能已完成的结论；\n\
@@ -70,7 +70,7 @@ pub fn cross_review_scorecard_failed(reason: &str, budget_exhausted: bool) -> St
          用户批准后门禁立即放行写入，严禁放弃写入直接在对话中贴代码！"
     };
     format!(
-        "【❌ 执行失败：代码写入已被拦截并丢弃，目标文件未受任何修改！】\n\
+        "【⚠️ 门禁保护触发：代码写入已被拦截并丢弃，目标文件未受任何修改！】\n\
          【原因】审查评分未达标（要求：综合平均分 >= 75 分，且破坏性风险/安全性评分 risk >= 60 分）：\n\
          {}\n\
          【必须采取的行动（严禁假装成功或草率 finish）】：\n\
@@ -81,7 +81,7 @@ pub fn cross_review_scorecard_failed(reason: &str, budget_exhausted: bool) -> St
 
 /// 全自动模式：首轮未完成只读排查与方案阐述即尝试写入
 pub fn auto_mode_need_plan() -> String {
-    "【❌ 执行失败：写入已被拦截，目标文件未受任何修改！】\n\
+    "【⚠️ 门禁保护触发：写入已被拦截，目标文件未受任何修改！】\n\
      【原因】首轮未完成只读排查与方案阐述前尝试直接调用了写代码工具。\n\
      【必须执行的操作】：\n\
      1. 优先通过只读工具（如 read_file/grep_search）排查代码并排除错误假设，锁定唯一根因；\n\
@@ -97,7 +97,7 @@ pub fn cross_review_scorecard_missing(budget_exhausted: bool) -> String {
         "请重新调用 child_reviewer 派发审查，并确保输出包含 scorecard 四维评分；或直接调用 ask_human（kind: 'plan_approval'）走人工审批。"
     };
     format!(
-        "【❌ 执行失败：写入已被拦截并丢弃，目标文件未受任何修改！】\n\
+        "【⚠️ 门禁保护触发：已阻止无 Scorecard 写入，目标文件未受任何修改！】\n\
          【原因】审查结论中缺少 ReviewScorecard 评分卡，硬门禁无法核定放行条件（缺失评分时绝不默认放行）。\n\
          【必须执行的操作】：\n\
          {}\n\
@@ -160,7 +160,7 @@ pub fn stage_review_blocking_open(count: u32, stage_run_id: &str, final_only_sum
 /// 方案审查未通过且未发生任何写入时尝试 finish 逃避代码写入的拦截提示
 pub fn finish_blocked_by_unapproved_plan(reason: &str) -> String {
     format!(
-        "【❌ 结项失败：任务未完成，已被拦截打回！】\n\
+        "【⚠️ 交付门禁拦截：方案未通过，finish 未生效！】\n\
          【原因】当前任务方案审查尚未通过（{}），且工作区内尚未完成任何代码写入。\n\
          严禁在未获放行的情况下擅自将代码仅以文本形式贴出并直接结束任务！\n\
          【必须采取的行动】：\n\

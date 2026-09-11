@@ -1559,7 +1559,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 .collect::<Vec<_>>()
                 .join("\n");
             context.add_error_feedback(&format!(
-                "【❌ 结项失败：任务尚未完成，finish 已被系统拦截打回！】\n【未闭合项/证据缺失】：\n{}\n任务不会终止。严禁在未闭合上述事项时假装完成或草率结项！\n【必须采取的行动】：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新并完成验证后，方可再次提交 finish 交付。",
+                "【⚠️ 交付门禁拦截打回：任务尚未满足结项标准，finish 未生效！】\n【未闭合项/证据缺失】：\n{}\n任务仍在运行中。请勿在未闭合上述事项时草率结项！\n【必须采取的行动】：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新并完成验证后，方可再次提交 finish 交付。",
                 blocker_summary
             ));
             crate::agent::dispatcher::emit_tool_event(
@@ -1588,7 +1588,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             if !scope_violations.is_empty() {
                 checkpoint.finish_reviewed = true;
                 context.add_error_feedback(&format!(
-                    "【❌ 结项失败：代码改动超出目标块预定边界，finish 已被系统拦截打回！】\n{}\n（0 Token 消耗机械打回，范围不合规）。\n【必须采取的行动】：请还原无关文件的意外改动，或在方案中扩展该块的 scope 后重试。",
+                    "【⚠️ 交付门禁拦截打回：代码改动超出目标块预定边界，finish 未生效！】\n{}\n（0 Token 消耗机械打回，范围不合规）。\n【必须采取的行动】：请还原无关文件的意外改动，或在方案中扩展该块的 scope 后重试。",
                     scope_violations.join("\n")
                 ));
                 crate::agent::dispatcher::emit_tool_event(
@@ -1631,7 +1631,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 if !obligation_failures.is_empty() {
                     checkpoint.finish_reviewed = true;
                     context.add_error_feedback(&format!(
-                        "【❌ 结项失败：契约绑定的宿主验证命令未通过，finish 已被系统拦截打回！】\n{}\n（说明：命令退出码即为判定依据，冻结脚本不可修改）。\n【必须采取的行动】：请真实修复对应代码使验证通过后重试；严禁未验证直接提交交付。",
+                        "【⚠️ 交付门禁拦截打回：契约绑定的宿主验证命令未通过，finish 未生效！】\n{}\n（说明：命令退出码即为判定依据，冻结脚本不可修改）。\n【必须采取的行动】：请真实修复对应代码使验证通过后重试；严禁未验证直接提交交付。",
                         obligation_failures.join("\n")
                     ));
                     crate::agent::dispatcher::emit_tool_event(
@@ -1761,7 +1761,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     };
 
                     context.add_error_feedback(&format!(
-                        "【❌ 结项失败：终态代码审查未通过，finish 已被系统拦截打回！（第 {}/3 次评审）】\n审查模型（{}）评分: {}/100\n审查评价: {}\n\n检测到以下阻塞性缺陷（Blocking Issues）：\n{}{}{}\n\n任务不会终止。严禁无视缺陷假装完成！\n【必须采取的行动】：请直接针对上述缺陷修改代码并运行测试验证，修复完成后再次调用 finish 交付。",
+                        "【⚠️ 终态审查未通过打回：检测到阻塞性缺陷，finish 未生效！（第 {}/3 次评审）】\n审查模型（{}）评分: {}/100\n审查评价: {}\n\n检测到以下阻塞性缺陷（Blocking Issues）：\n{}{}{}\n\n任务仍在运行中。请直接针对上述缺陷修改代码并运行测试验证，修复完成后再次调用 finish 交付。",
                         checkpoint.reviewer_retry_count,
                         review_res.model_id,
                         review_res.score,
@@ -1845,7 +1845,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 .turns_history
                 .last()
                 .and_then(|m| m.content.as_str())
-                .unwrap_or("【❌ 结项拦截打回】任务未满足验收条件，finish 未生效，请依据门禁提示完成修复后重试。");
+                .unwrap_or("【⚠️ 交付门禁拦截打回】任务未满足验收条件，finish 未生效，请依据门禁提示完成修复后重试。");
             output_text = detail.to_string();
         }
         let outcome_str = if is_effectively_challenged {

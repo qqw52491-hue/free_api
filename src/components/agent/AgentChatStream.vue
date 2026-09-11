@@ -1262,7 +1262,8 @@ function currentTimeline(): TimelineEntry[] {
     if ((props.isThinking || Boolean(props.thought) || props.isRunning) && !plans.length) {
         timeline.push({ id: "active-thought", type: "active-thought", timestamp: activeThoughtStartedAt.value || Date.now() });
     }
-    if (props.completionMessage || props.finalSummary || props.finalArtifacts.length) {
+    const isCompletedOrSettled = !props.isRunning || Boolean(props.completionMessage);
+    if (isCompletedOrSettled && (props.completionMessage || props.finalSummary || props.finalArtifacts.length)) {
         timeline.push({ id: "live-completion", type: "completion", timestamp: Date.now(), title: props.completionMessage || (props.hasError ? "任务未能完成" : "任务已完成"), summary: props.finalSummary || props.completionMessage, artifacts: props.finalArtifacts, failed: props.hasError });
     }
     return timeline;
