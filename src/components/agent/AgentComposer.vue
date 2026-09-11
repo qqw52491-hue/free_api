@@ -2247,14 +2247,40 @@ function submit(explicitMode?: "interrupt" | "queue" | Event) {
         || (props.isRunning && !props.isWaitingForHuman ? submitMode.value : undefined);
 
     if (currentAtts.length > 0) {
-        // 🌟 结构化排列附件清单：显示文件名与大小徽标（宿主物理路径不再直接暴露在用户对话气泡中）
-        const briefBadges = currentAtts
-            .map((a) => `📎 [附件: ${a.file_name} (${formatFileSize(a.size_bytes)})]`)
-            .join("\n");
-        const visiblePrompt = userText ? `${briefBadges}\n\n${userText}` : briefBadges;
+        // 🌟 分流：粘贴的纯文本片段 (is_pasted_snippet) vs 物理附件 (拖拽或上传的文件/图片)
+        const pastedSnippets = currentAtts.filter((a) => a.is_pasted_snippet);
+        const realAttachments = currentAtts.filter((a) => !a.is_pasted_snippet);
+
+        const promptParts: string[] = [];
+
+        // 1. 真实物理文件：生成附件徽标，并传递给后端走沙箱与分层挂载
+        if (realAttachments.length > 0) {
+            const briefBadges = realAttachments
+                .map((a) => `📎 [附件: ${a.file_name} (${formatFileSize(a.size_bytes)})]`)
+                .join("\n");
+            promptParts.push(briefBadges);
+        }
+
+        // 2. 用户的提问文字
+        if (userText) {
+            promptParts.push(userText);
+        }
+
+        // 3. 粘贴的长文本/代码片段：直接作为纯文本/代码块输入给大模型，0延迟秒看秒答，绝不在本地写任何文件！
+        if (pastedSnippets.length > 0) {
+            const snippetBlocks = pastedSnippets
+                .map((s) => {
+                    const ext = s.file_name.split(".").pop() || "";
+                    return `\`\`\`${ext}\n${s.prompt_text}\n\`\`\``;
+                })
+                .join("\n\n");
+            promptParts.push(snippetBlocks);
+        }
+
+        const visiblePrompt = promptParts.join("\n\n");
         emit("update:draft", "");
         attachments.value = [];
-        emit("submit", { text: visiblePrompt, attachments: currentAtts, mode });
+        emit("submit", { text: visiblePrompt, attachments: realAttachments, mode });
     } else {
         emit("update:draft", "");
         emit("submit", { text: userText, attachments: [], mode });
