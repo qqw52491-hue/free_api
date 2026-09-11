@@ -1272,8 +1272,8 @@ const planModes: PlanModeOption[] = [
         id: "auto",
         icon: "🚀",
         label: "智能自适应",
-        tag: "策略准入",
-        description: "低危静态改动极速秒过，命中高危文件或危险命令时按策略自动升级专家审查",
+        tag: "推荐默认",
+        description: "默认推荐：低危小改动极速秒过，命中高危文件或危险命令时按策略自动升级专家审查",
     },
     {
         id: "cross_review",
