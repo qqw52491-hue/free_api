@@ -106,8 +106,24 @@ pub fn cross_review_scorecard_missing(budget_exhausted: bool) -> String {
     )
 }
 
-/// 交叉审查模式：评分达标但仍有未解决的 blocking 级异议
-pub fn cross_review_blocking_findings_open(count: u32, budget_exhausted: bool) -> String {
+/// 交叉审查模式：并发审查任务尚未齐套（齐套屏障拦截）
+pub fn cross_review_batch_incomplete(delivered: usize, expected: usize) -> String {
+    format!(
+        "【⚠️ 门禁保护触发：已阻止未齐套写入，目标文件未受任何修改！】\n\
+         【原因】当前处于【多审查员并发审查模式】。本批次派发了 {} 个审查任务，当前仅回传 {} 个，尚有审查专家在后台推演中（齐套屏障保护）。\n\
+         【必须执行的操作】：\n\
+         请调用 wait_jobs 工具挂起等待剩余 {} 个审查结论回传；\n\
+         所有并发审查员全部交付并完成现场合流判定后，方可评估放行。严禁在审查未齐套时抢跑写入！",
+        expected, delivered, expected.saturating_sub(delivered)
+    )
+}
+
+/// 交叉审查模式：评分达标但仍有未解决的 blocking 级异议（附带具体缺陷清单）
+pub fn cross_review_blocking_findings_with_details(
+    count: u32,
+    details: &str,
+    budget_exhausted: bool,
+) -> String {
     let escape_guide = if budget_exhausted {
         "【审查预算已耗尽】方案审查已达最大重试上限。\n\
          【解套路径（人工仲裁放行）】请调用 ask_human 工具（设置 kind: 'plan_approval'），将尚未闭合的 blocking 异议及你的解释呈报用户，由用户进行人工裁决：\n\
@@ -122,13 +138,26 @@ pub fn cross_review_blocking_findings_open(count: u32, budget_exhausted: bool) -
          {\n  \"tool\": \"ask_human\",\n  \"command\": {\n    \"kind\": \"plan_approval\",\n    \"message\": \"方案与异议分歧呈报：...（申请人工裁决放行）\"\n  }\n}\n\
          ```"
     };
+
+    let details_section = if details.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n【🚨 待修复 Blocking 致命缺陷清单】：\n{}\n", details.trim())
+    };
+
     format!(
         "【❌ 执行失败：代码写入已被拦截并丢弃，目标文件未做任何修改！】\n\
          【原因】审查评分虽已达标，但最新一轮审查仍有 {} 条 blocking 级异议未解决（硬门禁规则：blocking 异议必须逐条回应并修复，或经再次审查确认已解决后方可放行）。\n\
+         {}\
          【必须采取的行动（严禁假装已修改或草率 finish）】：\n\
          {}",
-        count, escape_guide
+        count, details_section, escape_guide
     )
+}
+
+/// 交叉审查模式：评分达标但仍有未解决的 blocking 级异议（简版兼容）
+pub fn cross_review_blocking_findings_open(count: u32, budget_exhausted: bool) -> String {
+    cross_review_blocking_findings_with_details(count, "", budget_exhausted)
 }
 
 /// 方案审查轮次预算耗尽的统一提示（常规派发与反驳对质共用）

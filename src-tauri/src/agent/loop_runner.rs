@@ -454,6 +454,10 @@ pub async fn run_tool_phase(
             checkpoint.rollback_plan_review_dispatch(pre_dispatch_consumed);
         }
 
+        if success_count > 0 {
+            checkpoint.register_plan_reviewer_batch(&spawned_ids);
+        }
+
         if !is_batch {
             if success_count == 1 {
                 let child_run_id = &spawned_ids[0];
@@ -1306,64 +1310,42 @@ pub async fn run_tool_phase(
                             _ => {}
                         }
                     }
-                    checkpoint.plan_reviewer_consumed = true;
-                    // wait_jobs 交付路径同样要回填评分卡与 blocking 计数，
-                    // 否则门禁在“走 wait_jobs 收取”的正常链路上会因缺评分卡而误拦（fail-closed 的对称补齐）。
+                    // wait_jobs 交付路径通过 record_reviewer_delivery_for_run 实现齐套屏障、幂等去重与现场真聚合
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&job.result_json) {
-                        if let Some(sc) = value.get("scorecard").and_then(|v| serde_json::from_value::<crate::agent::child_reviewer::ReviewScorecard>(v.clone()).ok()) {
-                            checkpoint.last_review_scorecard = Some(sc);
-                        }
-                        // 异议闭环：撤回的 blocking 异议不计入拦截判据
-                        let withdrawn: Vec<String> = value
-                            .get("withdrawn_findings")
-                            .and_then(|w| w.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|i| i.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        checkpoint.last_review_blocking_count = value
-                            .get("findings")
-                            .and_then(|f| f.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter(|f| {
-                                        let is_blocking = f
-                                            .get("severity")
-                                            .and_then(|s| s.as_str())
-                                            .map(|s| s.eq_ignore_ascii_case("blocking"))
-                                            .unwrap_or(false);
-                                        let id = f.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                                        is_blocking && !withdrawn.iter().any(|w| w == id)
-                                    })
-                                    .count() as u32
-                            })
-                            .unwrap_or(0);
-                        // 异议动态三计数（膨胀观测）
-                        let findings_arr = value.get("findings").and_then(|f| f.as_array()).cloned().unwrap_or_default();
-                        let maintained = value
-                            .get("objection_verdicts")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter(|v| {
-                                        v.get("verdict").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("maintain")).unwrap_or(false)
-                                            && findings_arr.iter().any(|f| {
-                                                f.get("id").and_then(|i| i.as_str()) == v.get("finding_id").and_then(|i| i.as_str())
-                                                    && f.get("severity").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("blocking")).unwrap_or(false)
-                                            })
-                                    })
-                                    .count() as u32
-                            })
-                            .unwrap_or(0);
-                        checkpoint.review_objection_withdrawn = withdrawn.len() as u32;
-                        checkpoint.review_objection_maintained = maintained;
-                        checkpoint.review_total_withdrawn += withdrawn.len() as u32;
-                        checkpoint.review_total_maintained += maintained;
-                        checkpoint.review_objection_added = checkpoint
-                            .last_review_blocking_count
-                            .saturating_sub(checkpoint.review_objection_withdrawn);
+                        let delivery: crate::agent::child_reviewer::ReviewerDeliveryData = serde_json::from_value(value.clone()).unwrap_or_else(|_| {
+                            let withdrawn: Vec<String> = value
+                                .get("withdrawn_findings")
+                                .and_then(|w| w.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|i| i.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let objection_verdicts: Vec<crate::agent::child_reviewer::ObjectionVerdict> = value
+                                .get("objection_verdicts")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                .unwrap_or_default();
+                            let scorecard: Option<crate::agent::child_reviewer::ReviewScorecard> = value
+                                .get("scorecard")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok());
+                            let findings: Vec<crate::agent::child_reviewer::ReviewFinding> = value
+                                .get("findings")
+                                .and_then(|f| serde_json::from_value(f.clone()).ok())
+                                .unwrap_or_default();
+                            crate::agent::child_reviewer::ReviewerDeliveryData {
+                                findings,
+                                confidence: value.get("confidence").and_then(|v| v.as_str()).unwrap_or("confirmed").to_string(),
+                                evidence_refs: Vec::new(),
+                                missing_evidence: Vec::new(),
+                                routing: value.get("routing").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                withdrawn_findings: withdrawn,
+                                objection_verdicts,
+                                scorecard,
+                                extra: Default::default(),
+                            }
+                        });
+                        checkpoint.record_reviewer_delivery_for_run(Some(&job.job_id), &delivery);
                     }
                 }
                 // 【infra failure 退款统一结算】

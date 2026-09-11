@@ -495,6 +495,112 @@ fn merge_chat_onto_filling(
     filling
 }
 
+/// 方案审查并发批次状态（支持多审查员并发审查：齐套屏障、幂等去重、原始交付归集与现场真聚合）
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PlanReviewBatchState {
+    /// 齐套屏障：本批派发的所有审查任务 child_run_id
+    #[serde(default)]
+    pub expected_run_ids: std::collections::BTreeSet<String>,
+    /// 幂等保护：已收割的审查任务 child_run_id（去重防重复累加）
+    #[serde(default)]
+    pub delivered_run_ids: std::collections::BTreeSet<String>,
+    /// 存储各个审查员的原始交付数据（保留角色与详细 findings，供现场真聚合和精准归因）
+    #[serde(default)]
+    pub deliveries: Vec<crate::agent::child_reviewer::ReviewerDeliveryData>,
+}
+
+impl PlanReviewBatchState {
+    pub fn is_empty(&self) -> bool {
+        self.expected_run_ids.is_empty() && self.deliveries.is_empty()
+    }
+
+    /// 判定本批审查任务是否已全部齐套回传
+    pub fn is_complete(&self) -> bool {
+        if self.expected_run_ids.is_empty() {
+            // 没有登记 expected（如单审兼容或历史状态）：以是否有交付为准
+            !self.deliveries.is_empty()
+        } else {
+            self.expected_run_ids.is_subset(&self.delivered_run_ids)
+        }
+    }
+
+    /// 还有多少个在途审查任务尚未交付
+    pub fn pending_count(&self) -> usize {
+        self.expected_run_ids.difference(&self.delivered_run_ids).count()
+    }
+
+    /// 登记新交付（幂等：同一个 run_id 只记录一次）
+    pub fn record_delivery(
+        &mut self,
+        run_id: Option<&str>,
+        delivery: crate::agent::child_reviewer::ReviewerDeliveryData,
+    ) -> bool {
+        if let Some(id) = run_id {
+            if !self.delivered_run_ids.insert(id.to_string()) {
+                return false; // 幂等保护：重复交付直接忽略
+            }
+        }
+        self.deliveries.push(delivery);
+        true
+    }
+
+    /// 现场真聚合：提取所有审查员提出的未撤回 blocking 级缺陷（并集）
+    pub fn aggregate_unwithdrawn_blockings(&self) -> Vec<crate::agent::child_reviewer::ReviewFinding> {
+        let mut blockings = Vec::new();
+        for del in &self.deliveries {
+            for f in &del.findings {
+                if f.severity.eq_ignore_ascii_case("blocking")
+                    && !del.withdrawn_findings.iter().any(|w| w == &f.id)
+                {
+                    blockings.push(f.clone());
+                }
+            }
+        }
+        blockings
+    }
+
+    /// 现场真聚合：计算所有审查员 Scorecard 的真实算术平均值（真平均）
+    pub fn aggregate_scorecard(&self) -> Option<crate::agent::child_reviewer::ReviewScorecard> {
+        let scorecards: Vec<&crate::agent::child_reviewer::ReviewScorecard> = self
+            .deliveries
+            .iter()
+            .filter_map(|d| d.scorecard.as_ref())
+            .collect();
+
+        if scorecards.is_empty() {
+            return None;
+        }
+
+        let n = scorecards.len() as u32;
+        let sum_correctness: u32 = scorecards.iter().map(|s| s.correctness).sum();
+        let sum_risk: u32 = scorecards.iter().map(|s| s.risk).sum();
+        let sum_style: u32 = scorecards.iter().map(|s| s.style).sum();
+
+        let mut tc_sum = 0u32;
+        let mut tc_count = 0u32;
+        for s in &scorecards {
+            if let Some(tc) = s.test_coverage {
+                tc_sum += tc;
+                tc_count += 1;
+            }
+        }
+
+        let test_coverage = if tc_count > 0 {
+            Some(tc_sum / tc_count)
+        } else {
+            None
+        };
+
+        Some(crate::agent::child_reviewer::ReviewScorecard {
+            correctness: sum_correctness / n,
+            risk: sum_risk / n,
+            style: sum_style / n,
+            test_coverage,
+            null_reason: scorecards.iter().find_map(|s| s.null_reason.clone()),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCheckpoint {
     pub schema_version: u32,
@@ -540,6 +646,9 @@ pub struct AgentCheckpoint {
     /// 方案审查结果是否已被主循环或 wait_jobs 消费并注入上下文（“问过”且“听过”）
     #[serde(default)]
     pub plan_reviewer_consumed: bool,
+    /// 方案审查并发批次状态（齐套屏障、幂等去重与现场真聚合）
+    #[serde(default)]
+    pub plan_review_batch: PlanReviewBatchState,
     /// 方案审查最新评分卡（正确性、破坏性风险、代码规范、测试覆盖）
     #[serde(default)]
     pub last_review_scorecard: Option<crate::agent::child_reviewer::ReviewScorecard>,
@@ -706,6 +815,7 @@ impl AgentCheckpoint {
             human_waivers: Vec::new(),
             plan_mode: PlanExecutionMode::Auto,
             plan_reviewer_consumed: false,
+            plan_review_batch: PlanReviewBatchState::default(),
             last_review_scorecard: None,
             last_review_blocking_count: 0,
             review_objection_added: 0,
@@ -759,19 +869,52 @@ impl AgentCheckpoint {
         self.plan_reviewer_last_dispatch = Some(snapshot.to_json_string());
     }
 
-    /// 消费并记录一轮合法的方案审查结论，原子更新异议与评分卡记账状态
-    pub fn record_reviewer_delivery(&mut self, delivery: &crate::agent::child_reviewer::ReviewerDeliveryData) {
+    /// 注册本轮并发审查任务批次（齐套屏障：记录预期全部交付的 run_ids）
+    pub fn register_plan_reviewer_batch(&mut self, run_ids: &[String]) {
+        self.plan_review_batch = PlanReviewBatchState {
+            expected_run_ids: run_ids.iter().cloned().collect(),
+            delivered_run_ids: std::collections::BTreeSet::new(),
+            deliveries: Vec::new(),
+        };
+        self.plan_reviewer_consumed = false;
+        self.last_review_blocking_count = 0;
+        self.last_review_scorecard = None;
+    }
+
+    /// 消费并记录一个审查员的交付结论（支持幂等去重与齐套现场真聚合）
+    pub fn record_reviewer_delivery_for_run(
+        &mut self,
+        run_id: Option<&str>,
+        delivery: &crate::agent::child_reviewer::ReviewerDeliveryData,
+    ) {
+        let is_new = self.plan_review_batch.record_delivery(run_id, delivery.clone());
+        if !is_new {
+            return; // 幂等：重复交付忽略，防重复计数
+        }
+
         let (added, withdrawn, maintained) = delivery.objection_stats();
-        self.last_review_blocking_count = delivery.unwithdrawn_blocking_count();
-        self.review_objection_added = added;
-        self.review_objection_withdrawn = withdrawn;
-        self.review_objection_maintained = maintained;
+        self.review_objection_added += added;
+        self.review_objection_withdrawn += withdrawn;
+        self.review_objection_maintained += maintained;
         self.review_total_withdrawn += withdrawn;
         self.review_total_maintained += maintained;
-        if let Some(ref sc) = delivery.scorecard {
-            self.last_review_scorecard = Some(sc.clone());
+
+        // 现场真聚合：blocking 缺陷取并集，四维评分取算术均值
+        self.last_review_blocking_count = self
+            .plan_review_batch
+            .aggregate_unwithdrawn_blockings()
+            .len() as u32;
+        self.last_review_scorecard = self.plan_review_batch.aggregate_scorecard();
+
+        // 齐套屏障：只有全部预期任务到齐才置 consumed 为 true
+        if self.plan_review_batch.is_complete() {
+            self.plan_reviewer_consumed = true;
         }
-        self.plan_reviewer_consumed = true;
+    }
+
+    /// 消费并记录一轮合法的方案审查结论（兼容旧接口与单发交付）
+    pub fn record_reviewer_delivery(&mut self, delivery: &crate::agent::child_reviewer::ReviewerDeliveryData) {
+        self.record_reviewer_delivery_for_run(None, delivery);
     }
 
     /// 生成方案门禁状态的瞬态投影，供上下文装配层注入底部状态卡（事前可见）。
@@ -833,6 +976,9 @@ impl AgentCheckpoint {
         }
         self.plan_reviewer_retry_count += 1;
         self.plan_reviewer_consumed = false;
+        self.last_review_blocking_count = 0;
+        self.last_review_scorecard = None;
+        self.plan_review_batch = PlanReviewBatchState::default();
         Ok(())
     }
 
@@ -2125,5 +2271,213 @@ mod tests {
         assert!(full_text.contains("方案裁决: 用户批准了案件导出方案"));
         assert!(full_text.contains("人工特赦: 保留本地 if(true) 调试放行，直接交付"));
     }
+
+    #[test]
+    fn test_plan_review_batch_barrier_incomplete_blocks_consumed() {
+        use crate::agent::child_reviewer::{ReviewScorecard, ReviewerDeliveryData};
+
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-barrier".to_string(), &ctx);
+        cp.plan_mode = PlanExecutionMode::CrossReview;
+        let batch_ids = vec!["rev-sec".to_string(), "rev-arch".to_string()];
+        cp.register_plan_reviewer_batch(&batch_ids);
+
+        assert!(!cp.plan_review_batch.is_complete());
+        assert_eq!(cp.plan_review_batch.pending_count(), 2);
+        assert!(!cp.plan_reviewer_consumed);
+
+        // 交付 1：安全审查交付
+        let del1 = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "high".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard {
+                correctness: 90,
+                risk: 95,
+                style: 85,
+                test_coverage: Some(80),
+                null_reason: None,
+            }),
+            extra: std::collections::HashMap::new(),
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-sec"), &del1);
+
+        // 齐套屏障拦截：未全部到齐，不得放行 consumed
+        assert!(!cp.plan_review_batch.is_complete());
+        assert_eq!(cp.plan_review_batch.pending_count(), 1);
+        assert!(!cp.plan_reviewer_consumed);
+
+        // 交付 2：架构审查交付
+        let del2 = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "high".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard {
+                correctness: 80,
+                risk: 85,
+                style: 95,
+                test_coverage: Some(90),
+                null_reason: None,
+            }),
+            extra: std::collections::HashMap::new(),
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-arch"), &del2);
+
+        // 全部齐套：屏障解除，consumed 置为 true
+        assert!(cp.plan_review_batch.is_complete());
+        assert_eq!(cp.plan_review_batch.pending_count(), 0);
+        assert!(cp.plan_reviewer_consumed);
+
+        // 验证现场真聚合打分：（90+80)/2=85, (95+85)/2=90, (85+95)/2=90, (80+90)/2=85
+        let sc = cp.last_review_scorecard.expect("scorecard should exist");
+        assert_eq!(sc.correctness, 85);
+        assert_eq!(sc.risk, 90);
+        assert_eq!(sc.style, 90);
+        assert_eq!(sc.test_coverage, Some(85));
+    }
+
+    #[test]
+    fn test_plan_review_batch_idempotency_ignores_replays() {
+        use crate::agent::child_reviewer::{ReviewFinding, ReviewScorecard, ReviewerDeliveryData};
+
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-idempotent".to_string(), &ctx);
+        let batch_ids = vec!["rev-1".to_string()];
+        cp.register_plan_reviewer_batch(&batch_ids);
+
+        let del = ReviewerDeliveryData {
+            findings: vec![ReviewFinding {
+                id: "F1".to_string(),
+                severity: "blocking".to_string(),
+                finality: "regardless".to_string(),
+                location: "src/main.rs:10".to_string(),
+                current: "foo".to_string(),
+                why: "fatal bug".to_string(),
+                suggestion: "fix bug".to_string(),
+                evidence_strength: "confirmed".to_string(),
+            }],
+            confidence: "high".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard {
+                correctness: 50,
+                risk: 40,
+                style: 60,
+                test_coverage: None,
+                null_reason: None,
+            }),
+            extra: std::collections::HashMap::new(),
+        };
+
+        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
+        assert_eq!(cp.plan_review_batch.deliveries.len(), 1);
+        assert_eq!(cp.last_review_blocking_count, 1);
+        assert_eq!(cp.review_objection_added, 1);
+
+        // 重复投递同一 run_id：幂等保护直接忽略，不重复累加
+        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
+        assert_eq!(cp.plan_review_batch.deliveries.len(), 1);
+        assert_eq!(cp.last_review_blocking_count, 1);
+        assert_eq!(cp.review_objection_added, 1);
+    }
+
+    #[test]
+    fn test_plan_review_batch_live_aggregation_unions_blockings_and_respects_withdrawn() {
+        use crate::agent::child_reviewer::{ReviewFinding, ReviewerDeliveryData};
+
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-union".to_string(), &ctx);
+        let batch_ids = vec!["rev-sec".to_string(), "rev-arch".to_string()];
+        cp.register_plan_reviewer_batch(&batch_ids);
+
+        // 专家 1 提出 SEC-1 (blocking)
+        let del1 = ReviewerDeliveryData {
+            findings: vec![ReviewFinding {
+                id: "SEC-1".to_string(),
+                severity: "blocking".to_string(),
+                finality: "regardless".to_string(),
+                location: "sec.rs".to_string(),
+                current: "a".to_string(),
+                why: "xss".to_string(),
+                suggestion: "escape".to_string(),
+                evidence_strength: "confirmed".to_string(),
+            }],
+            confidence: "high".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: None,
+            extra: std::collections::HashMap::new(),
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-sec"), &del1);
+
+        // 专家 2 提出 ARCH-1 (blocking), ARCH-2 (blocking 但已撤回), ARCH-3 (advisory 非 blocking)
+        let del2 = ReviewerDeliveryData {
+            findings: vec![
+                ReviewFinding {
+                    id: "ARCH-1".to_string(),
+                    severity: "blocking".to_string(),
+                    finality: "regardless".to_string(),
+                    location: "arch.rs".to_string(),
+                    current: "b".to_string(),
+                    why: "perf bottleneck".to_string(),
+                    suggestion: "index".to_string(),
+                    evidence_strength: "confirmed".to_string(),
+                },
+                ReviewFinding {
+                    id: "ARCH-2".to_string(),
+                    severity: "blocking".to_string(),
+                    finality: "regardless".to_string(),
+                    location: "arch.rs".to_string(),
+                    current: "c".to_string(),
+                    why: "lock contention".to_string(),
+                    suggestion: "rwlock".to_string(),
+                    evidence_strength: "confirmed".to_string(),
+                },
+                ReviewFinding {
+                    id: "ARCH-3".to_string(),
+                    severity: "advisory".to_string(),
+                    finality: "regardless".to_string(),
+                    location: "arch.rs".to_string(),
+                    current: "d".to_string(),
+                    why: "naming style".to_string(),
+                    suggestion: "rename".to_string(),
+                    evidence_strength: "confirmed".to_string(),
+                },
+            ],
+            confidence: "high".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: vec!["ARCH-2".to_string()], // ARCH-2 已被撤回
+            objection_verdicts: Vec::new(),
+            scorecard: None,
+            extra: std::collections::HashMap::new(),
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-arch"), &del2);
+
+        // 现场真聚合检查：
+        // blocking 并集应当包含 SEC-1 和 ARCH-1，不包含已撤回的 ARCH-2，也不包含 advisory 的 ARCH-3
+        let blockings = cp.plan_review_batch.aggregate_unwithdrawn_blockings();
+        assert_eq!(blockings.len(), 2);
+        let ids: Vec<&str> = blockings.iter().map(|b| b.id.as_str()).collect();
+        assert!(ids.contains(&"SEC-1"));
+        assert!(ids.contains(&"ARCH-1"));
+        assert_eq!(cp.last_review_blocking_count, 2);
+    }
 }
+
 

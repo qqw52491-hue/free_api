@@ -80,9 +80,9 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "child_reviewer",
-        summary: "受限只读子调查：审查父证据包，回交带 ID/严重级别/物理行号的结构化 findings 与 routing（certain/needs_alignment/blocked）；收到结果后必须先分诊再行动：逐条判定接受/反驳(须附证据)/需澄清，不要直接照改，也不要直接忽略；不会调用工具或写入文件",
+        summary: "受限只读子调查：审查父证据包，回交带 ID/严重级别/物理行号的结构化 findings 与 routing（certain/needs_alignment/blocked）；收到结果后必须先分诊再行动：逐条判定接受/反驳(须附证据)/需澄清，不要直接照改，也不要直接忽略；不会调用工具或写入文件；支持单发或 dispatches 批量并发派发多个专家会审",
         actions: &[
-            "investigate(question: string, role?: string [挂载专精角色卡标识], evidence_refs?: string[] <=6, evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径])",
+            "investigate(question: string, role?: string [挂载专精角色卡标识], evidence_refs?: string[] <=6, evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径], dispatches?: Array<{question, role?, ...}> [一步批量并发派发多个审查员会审])",
         ],
     },
     BuiltinToolSpec {

@@ -177,6 +177,9 @@ fn gate_interception(
             // 若不区分，后者会让模型只会反复调用 wait_jobs 收空信箱，而 consumed 永远置不上位，写入被无限拦截。
             let reviewer_running =
                 crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id);
+            let is_batch_incomplete = !checkpoint.plan_review_batch.is_complete()
+                && !checkpoint.plan_review_batch.expected_run_ids.is_empty();
+
             if checkpoint.plan_reviewer_retry_count == 0 {
                 Some(DispatchResult {
                     success: false,
@@ -185,13 +188,22 @@ fn gate_interception(
                     route: "plan_gatekeeper:need_reviewer_dispatch".to_string(),
                 })
             } else if reviewer_running
+                || is_batch_incomplete
                 || (!checkpoint.plan_reviewer_consumed
                     && crate::agent::child_reviewer::has_pending_review_results(db, parent_run_id))
             {
+                let stderr = if is_batch_incomplete {
+                    crate::agent::gate_messages::cross_review_batch_incomplete(
+                        checkpoint.plan_review_batch.delivered_run_ids.len(),
+                        checkpoint.plan_review_batch.expected_run_ids.len(),
+                    )
+                } else {
+                    crate::agent::gate_messages::cross_review_need_wait_reviewer_jobs()
+                };
                 Some(DispatchResult {
                     success: false,
                     stdout: String::new(),
-                    stderr: crate::agent::gate_messages::cross_review_need_wait_reviewer_jobs(),
+                    stderr,
                     route: "plan_gatekeeper:need_wait_reviewer_jobs".to_string(),
                 })
             } else if !checkpoint.plan_reviewer_consumed {
@@ -207,13 +219,32 @@ fn gate_interception(
             } else if let Some(ref scorecard) = checkpoint.last_review_scorecard {
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
                     >= crate::agent::checkpoint::max_plan_reviewer_rounds();
-                if checkpoint.last_review_blocking_count > 0 {
-                    // 🌟 层次 3 核心：门禁以 blocking 阻塞缺陷为首要依据，存在未闭合 blocking 则必须解决
+                let unwithdrawn_blockings = checkpoint.plan_review_batch.aggregate_unwithdrawn_blockings();
+                let blocking_count = if unwithdrawn_blockings.is_empty() {
+                    checkpoint.last_review_blocking_count
+                } else {
+                    unwithdrawn_blockings.len() as u32
+                };
+
+                if blocking_count > 0 {
+                    // 🌟 层次 3 核心：门禁以 blocking 阻塞缺陷为首要依据，存在未闭合 blocking 则必须解决（附带详细清单与归属）
+                    let mut details = String::new();
+                    for (i, b) in unwithdrawn_blockings.iter().enumerate() {
+                        details.push_str(&format!(
+                            "{}. [{}] {}: {}\n   💡 建议: {}\n",
+                            i + 1,
+                            b.id,
+                            if b.location.is_empty() { "全局" } else { &b.location },
+                            b.why,
+                            if b.suggestion.is_empty() { "请修复该致命设计隐患" } else { &b.suggestion }
+                        ));
+                    }
                     Some(DispatchResult {
                         success: false,
                         stdout: String::new(),
-                        stderr: crate::agent::gate_messages::cross_review_blocking_findings_open(
-                            checkpoint.last_review_blocking_count,
+                        stderr: crate::agent::gate_messages::cross_review_blocking_findings_with_details(
+                            blocking_count,
+                            &details,
                             budget_exhausted,
                         ),
                         route: "plan_gatekeeper:blocking_findings_open".to_string(),
@@ -258,4 +289,161 @@ fn gate_interception(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::child_reviewer::{ReviewFinding, ReviewScorecard, ReviewerDeliveryData};
+    use crate::agent::context::SandwichContext;
+    use std::sync::{Arc, Mutex};
+
+    fn setup_test_db() -> DbState {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_child_runs (
+                id TEXT PRIMARY KEY,
+                parent_run_id TEXT NOT NULL,
+                child_run_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                kind TEXT,
+                result_json TEXT,
+                consumed_at TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                finished_at TEXT,
+                error_kind TEXT
+            );",
+        )
+        .unwrap();
+        DbState(Arc::new(Mutex::new(conn)))
+    }
+
+    #[test]
+    fn test_gate_blocks_on_incomplete_batch_barrier() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-run".to_string(), &context);
+        cp.plan_mode = PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+
+        let batch = vec!["rev-1".to_string(), "rev-2".to_string()];
+        cp.register_plan_reviewer_batch(&batch);
+
+        // 仅交付 1 个，未齐套
+        let del = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "high".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard {
+                correctness: 90,
+                risk: 90,
+                style: 90,
+                test_coverage: None,
+                null_reason: None,
+            }),
+            extra: std::collections::HashMap::new(),
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
+
+        let res = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-run", 1, false);
+        assert!(res.is_some());
+        let dispatch = res.unwrap();
+        assert_eq!(dispatch.route, "plan_gatekeeper:need_wait_reviewer_jobs");
+        assert!(dispatch.stderr.contains("齐套屏障保护"));
+        assert!(dispatch.stderr.contains("本批次派发了 2 个审查任务，当前仅回传 1 个"));
+    }
+
+    #[test]
+    fn test_gate_blocks_on_union_blocking_and_passes_when_clean() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-run".to_string(), &context);
+        cp.plan_mode = PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+
+        let batch = vec!["rev-1".to_string(), "rev-2".to_string()];
+        cp.register_plan_reviewer_batch(&batch);
+
+        // 审查员 1 发现 blocking 缺陷
+        let del1 = ReviewerDeliveryData {
+            findings: vec![ReviewFinding {
+                id: "SEC-BLOCK-1".to_string(),
+                severity: "blocking".to_string(),
+                finality: "regardless".to_string(),
+                location: "src/auth.rs:42".to_string(),
+                current: "unauthenticated".to_string(),
+                why: "missing auth check".to_string(),
+                suggestion: "add auth guard".to_string(),
+                evidence_strength: "confirmed".to_string(),
+            }],
+            confidence: "high".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard {
+                correctness: 50,
+                risk: 30,
+                style: 80,
+                test_coverage: None,
+                null_reason: None,
+            }),
+            extra: std::collections::HashMap::new(),
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del1);
+
+        // 审查员 2 交付无 blocking
+        let del2 = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "high".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard {
+                correctness: 90,
+                risk: 90,
+                style: 90,
+                test_coverage: None,
+                null_reason: None,
+            }),
+            extra: std::collections::HashMap::new(),
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-2"), &del2);
+
+        // 齐套且存在 blocking 缺陷：必须拦截并提供精准归因
+        let res = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-run", 1, false);
+        assert!(res.is_some());
+        let dispatch = res.unwrap();
+        assert_eq!(dispatch.route, "plan_gatekeeper:blocking_findings_open");
+        assert!(dispatch.stderr.contains("SEC-BLOCK-1"));
+        assert!(dispatch.stderr.contains("src/auth.rs:42"));
+        assert!(dispatch.stderr.contains("add auth guard"));
+
+        // 模拟下一轮：缺陷被解决并撤回后，无 blocking 且评分达标
+        cp.register_plan_reviewer_batch(&batch);
+        let mut del1_fixed = del1.clone();
+        del1_fixed.withdrawn_findings = vec!["SEC-BLOCK-1".to_string()];
+        del1_fixed.scorecard = Some(ReviewScorecard {
+            correctness: 95,
+            risk: 90,
+            style: 85,
+            test_coverage: None,
+            null_reason: None,
+        });
+        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del1_fixed);
+        cp.record_reviewer_delivery_for_run(Some("rev-2"), &del2);
+
+        let res_clean = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-run", 1, false);
+        assert!(res_clean.is_none(), "全部齐套且无 blocking 时应放行写入");
+        assert_eq!(cp.plan_phase, PlanPhase::Approved);
+    }
+}
+
 

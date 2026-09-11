@@ -987,7 +987,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                                         extra: Default::default(),
                                     }
                                 });
-                                checkpoint.record_reviewer_delivery(&delivery);
+                                checkpoint.record_reviewer_delivery_for_run(Some(&receipt.child_run_id), &delivery);
                                 injection.push_str(&format!(
                                     "\n📊 本轮异议动态: 新增 {} / 撤回 {} / 维持 {}（连续多轮撤回≈新增且总数不降 = 审查空转，请评估转人工）\n",
                                     checkpoint.review_objection_added,
