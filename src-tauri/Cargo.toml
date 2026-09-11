@@ -48,3 +48,12 @@ ts-rs = { version = "12.0.1", default-features = false, features = ["serde-compa
 # 仅 `cargo build --features wdio` 的测试构建载入；正常开发与发布版均不包含 WebDriver。
 [features]
 wdio = ["dep:tauri-plugin-wdio-webdriver"]
+
+# 控制 dev 构建体积：完整调试信息会使 target/debug 膨胀到数 GB 并随依赖变更持续堆积。
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+# 第三方依赖不需要调试信息，只保留回溯所需的行号表（此处直接关掉，回溯仍有行号）。
+[profile.dev.package."*"]
+debug = false
