@@ -26,12 +26,15 @@ pub fn plan_approval_resume_child_blocked() -> String {
 /// 交叉审查模式：尚未派发 child_reviewer
 pub fn cross_review_need_reviewer_dispatch() -> String {
     "【⚠️ 门禁保护触发：已阻止未审查写入，目标文件未受任何修改！】\n\
-     【原因】当前处于【双 Agent 交叉审查模式】。在首次动笔修改代码前，必须先派发 child_reviewer 开展反驳推演与架构盲区排查。\n\
-     【必须执行的操作】：\n\
-     1. 调用 child_reviewer 工具，传入 role（如文档任务使用 doc_writer，前端使用 frontend_ui_designer 等）、拟定方案摘录、证据文件路径及反证推演要求；\n\
-     2. 随后调用 wait_jobs 等待审查结论；\n\
-     3. 充分研判审查反驳意见并闭合后方可写入。\n\
-     严禁跳过审查直接贴代码或结项！".to_string()
+     【原因】当前处于【方案审查模式】。在首次动笔修改代码前，必须先完成方案对齐推演。\n\
+     【必须执行的固定流程】：\n\
+     1. 首先调用 child_reviewer（指定 role: \"tech_lead\"），传入方案摘要 (plan_summary)、涉及文件列表 (target_files) 及当前讨论轮次 (discussion_round)，进行 1v1 方案对齐；\n\
+     2. 随后调用 wait_jobs 等待审查裁决；\n\
+     3. 严格按其返回的结构化结论（decision）行动：\n\
+        - 若 approved：方案已放行，可直接执行代码写入；\n\
+        - 若 rebuttal：根据意见调整方案并继续 1v1 讨论；\n\
+        - 若 escalate：按照其指定的 escalate_roles 专家列表，并发派发多专家联合会审（通过 dispatches 数组），会审通过后方可动笔！\n\
+     严禁跳过审查直接写代码或结项！".to_string()
 }
 
 /// 交叉审查模式：已派发但结论尚未回收（“问过 ≠ 听过”）

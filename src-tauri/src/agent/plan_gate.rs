@@ -135,6 +135,7 @@ pub(crate) fn check_pre_write_gatekeeper(
                 || result.route == "plan_gatekeeper:blocking_findings_open"
                 || result.route == "plan_gatekeeper:scorecard_missing"
                 || result.route == "plan_gatekeeper:need_human_approval"
+                || result.route == "plan_gatekeeper:escalation_required"
             {
                 // 只要门禁文案明确指示去 ask_human 申请人工审批，就豁免冷却并标记由门禁引导仲裁
                 checkpoint.gate_human_escape_directed = true;
@@ -233,6 +234,28 @@ fn gate_interception(
                     stdout: String::new(),
                     stderr: crate::agent::gate_messages::cross_review_batch_all_failed(&summary, budget_exhausted),
                     route: "plan_gatekeeper:reviewer_all_failed".to_string(),
+                })
+            } else if let Some(ref req_roles) = checkpoint.plan_escalation_required {
+                let role_list = if req_roles.is_empty() {
+                    "多位专家 (如 architect, security_specialist)".to_string()
+                } else {
+                    req_roles.join(", ")
+                };
+                let budget_exhausted = checkpoint.plan_reviewer_retry_count
+                    >= crate::agent::checkpoint::max_plan_reviewer_rounds();
+                Some(DispatchResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: format!(
+                        "【⚠️ 方案门禁拦截：Tech Lead 方案评审判定必须升级多专家联合会审】\n\
+                         【原因】1v1 方案评审认为当前改动跨模块关联度高或涉及高危架构设计，单人无法完全放行。\n\
+                         【必须执行的操作】：\n\
+                         请调用 child_reviewer 工具（通过 dispatches 数组），并发派发多位专家（建议角色：{}）开展联合会审！\n\
+                         随后调用 wait_jobs 等待齐套结论，会审通过后方可动笔写入！{}",
+                        role_list,
+                        if budget_exhausted { "\n【提示】若审查预算耗尽，可调用 ask_human 申请人工审批放行。" } else { "" }
+                    ),
+                    route: "plan_gatekeeper:escalation_required".to_string(),
                 })
             } else if let Some(ref scorecard) = checkpoint.last_review_scorecard {
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
@@ -374,7 +397,12 @@ fn gate_interception(
                     } => {
                         checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
                         let stderr = format!(
-                            "【智能自适应门禁：触发按需升级审查】\n原因: {}\n命中规则: `{}`\n建议审查专家: {}\n系统已根据策略将任务自动升级为交叉审查模式，请派发审查员（child_reviewer）推演核验后再行写入！",
+                            "【智能自适应门禁：触发按需升级审查】\n\
+                             原因: {}\n\
+                             命中规则: `{}`\n\
+                             系统已将任务切换为方案审查模式。在动笔修改代码前，请严格遵循两阶段固定审查流程：\n\
+                             1. 优先调用 `child_reviewer`（指定 role: \"tech_lead\"）进行 1v1 方案对齐讨论（传入 plan_summary、target_files 与 discussion_round）；\n\
+                             2. 根据 Tech Lead 的结构化裁决行动：若 approved 则直接放行；若 rebuttal 则微调方案；若 escalate 则按推荐专家（建议：{}）并发派发联合会审！",
                             reason, matched_pattern, suggested_roles.join(", ")
                         );
                         Some(DispatchResult {
@@ -610,6 +638,103 @@ mod tests {
         };
         cp.record_reviewer_delivery_for_run(Some("rev-new"), &del);
         assert!(cp.plan_review_batch.is_complete());
+    }
+
+    #[test]
+    fn test_tech_lead_approved_synthesizes_scorecard_and_passes_gate() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-tech-lead-ok".to_string(), &context);
+        cp.plan_mode = PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+
+        cp.register_plan_reviewer_batch(&["rev-tl".to_string()]);
+
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("decision".to_string(), serde_json::json!("approved"));
+        extra.insert("file_coupling".to_string(), serde_json::json!("isolated"));
+        extra.insert("analysis".to_string(), serde_json::json!("方案改动局部且清晰，通过"));
+
+        let del = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "confirmed".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: Some("certain".to_string()),
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: None, // 无显式 scorecard，由契约自动合成合格评分卡
+            extra,
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-tl"), &del);
+
+        assert!(cp.last_review_scorecard.is_some(), "approved 应自动合成基线合格评分卡");
+        let res = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-tech-lead-ok", 1, false);
+        assert!(res.is_none(), "Tech Lead 裁决 approved 且无 blocking 时应放行写入");
+        assert_eq!(cp.plan_phase, PlanPhase::Approved);
+    }
+
+    #[test]
+    fn test_tech_lead_escalate_blocks_gate_until_multi_expert_council_passes() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-tech-lead-esc".to_string(), &context);
+        cp.plan_mode = PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+
+        // 1. Tech Lead 1v1 评审判定 escalate
+        cp.register_plan_reviewer_batch(&["rev-tl".to_string()]);
+
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("decision".to_string(), serde_json::json!("escalate"));
+        extra.insert("file_coupling".to_string(), serde_json::json!("coupled"));
+        extra.insert("analysis".to_string(), serde_json::json!("涉及核心鉴权架构改造，需联合会审"));
+        extra.insert("escalate_roles".to_string(), serde_json::json!(["architect", "security_specialist"]));
+
+        let del = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "confirmed".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: Some("certain".to_string()),
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: None,
+            extra,
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-tl"), &del);
+
+        assert!(cp.plan_escalation_required.is_some());
+        let res = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-tech-lead-esc", 1, false);
+        assert!(res.is_some());
+        let dispatch = res.unwrap();
+        assert_eq!(dispatch.route, "plan_gatekeeper:escalation_required");
+        assert!(dispatch.stderr.contains("Tech Lead 方案评审判定必须升级多专家联合会审"));
+        assert!(dispatch.stderr.contains("architect, security_specialist"));
+
+        // 2. 主脑响应升级要求，并发派发多专家联合会审
+        let council_batch = vec!["council-arch".to_string(), "council-sec".to_string()];
+        cp.register_plan_reviewer_batch(&council_batch);
+        assert!(cp.plan_escalation_required.is_none(), "注册多任务联合会审后升级挂起状态已清除");
+
+        let council_del = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "confirmed".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: Some("certain".to_string()),
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard::new(90, 90, 85, None)),
+            extra: Default::default(),
+        };
+        cp.record_reviewer_delivery_for_run(Some("council-arch"), &council_del);
+        cp.record_reviewer_delivery_for_run(Some("council-sec"), &council_del);
+
+        // 联合会审齐套且无 blocking：放行写入！
+        let res_council = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-tech-lead-esc", 2, false);
+        assert!(res_council.is_none(), "联合会审齐套通过后放行写入");
+        assert_eq!(cp.plan_phase, PlanPhase::Approved);
     }
 }
 

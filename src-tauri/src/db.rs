@@ -875,6 +875,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         );
     }
 
+    let _ = crate::agent::tools::role_manager::ensure_default_role_cards(&conn);
+
     Ok(conn)
 }
 

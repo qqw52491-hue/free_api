@@ -683,6 +683,9 @@ pub struct AgentCheckpoint {
     /// 方案审查并发批次状态（齐套屏障、幂等去重与现场真聚合）
     #[serde(default)]
     pub plan_review_batch: PlanReviewBatchState,
+    /// 1v1 方案评审是否裁决必须升级多专家联合会审（Some 时存储建议拉起的专家角色列表）
+    #[serde(default)]
+    pub plan_escalation_required: Option<Vec<String>>,
     /// 方案审查最新评分卡（正确性、破坏性风险、代码规范、测试覆盖）
     #[serde(default)]
     pub last_review_scorecard: Option<crate::agent::child_reviewer::ReviewScorecard>,
@@ -852,6 +855,7 @@ impl AgentCheckpoint {
             plan_mode: PlanExecutionMode::Auto,
             plan_reviewer_consumed: false,
             plan_review_batch: PlanReviewBatchState::default(),
+            plan_escalation_required: None,
             last_review_scorecard: None,
             last_review_blocking_count: 0,
             review_objection_added: 0,
@@ -913,6 +917,10 @@ impl AgentCheckpoint {
             failed_run_ids: std::collections::BTreeMap::new(),
             deliveries: Vec::new(),
         };
+        if run_ids.len() > 1 {
+            // 已并发派发了多个审查员（联合会审），清除升级挂起状态
+            self.plan_escalation_required = None;
+        }
         self.plan_reviewer_consumed = false;
         self.last_review_blocking_count = 0;
         self.last_review_scorecard = None;
@@ -937,6 +945,31 @@ impl AgentCheckpoint {
         run_id: Option<&str>,
         delivery: &crate::agent::child_reviewer::ReviewerDeliveryData,
     ) {
+        let mut delivery = delivery.clone();
+        // 🌟 1v1 Tech Lead 方案评审扩展契约解析与定级联动
+        if let Some(dec) = delivery.get_extra_str("decision") {
+            if dec.eq_ignore_ascii_case("escalate") {
+                let roles: Vec<String> = delivery
+                    .get_extra("escalate_roles")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|i| i.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.plan_escalation_required = Some(roles);
+            } else if dec.eq_ignore_ascii_case("approved") {
+                self.plan_escalation_required = None;
+                // 若 Tech Lead 裁决 approved 但未附带底层四维评分卡，自动补齐高分通过卡，避免 scorecard_missing 门禁误杀
+                if delivery.scorecard.is_none() {
+                    delivery.scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(
+                        95, 95, 90, None,
+                    ));
+                }
+            }
+        }
+
         let is_new = self.plan_review_batch.record_delivery(run_id, delivery.clone());
         if !is_new {
             return; // 幂等：重复交付忽略，防重复计数

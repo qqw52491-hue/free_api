@@ -523,40 +523,71 @@
                                             </div>
 
                                             <div class="gate-controls-row">
-                                                <div class="gate-mode-pills">
-                                                    <button
-                                                        type="button"
-                                                        class="gate-mode-pill-btn"
-                                                        :class="{ active: !isStageReviewerDisabled && !isCommitteeMode }"
-                                                        title="智能自适应（单审）：根据变更文件类型（前端/后端）自动挑选 1 位最匹配的专家审查"
-                                                        :disabled="isRunning"
-                                                        @click="setGateMode('adaptive')"
-                                                    >
-                                                        <span class="btn-icon">🎯</span>
-                                                        <span>智能自适应</span>
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        class="gate-mode-pill-btn btn-committee"
-                                                        :class="{ active: !isStageReviewerDisabled && isCommitteeMode }"
-                                                        title="联合会审（多审并发）：全栈变更时并发唤起匹配专家（至多 3 位）各司其职，联合会审"
-                                                        :disabled="isRunning"
-                                                        @click="setGateMode('committee')"
-                                                    >
-                                                        <span class="btn-icon">👥</span>
-                                                        <span>联合会审</span>
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        class="gate-mode-pill-btn btn-disabled"
-                                                        :class="{ active: isStageReviewerDisabled }"
-                                                        title="免审直通：跳过阶段审查，代码写入后直接推进，0 耗时 0 阻拦（适合轻量原型或文档）"
-                                                        :disabled="isRunning"
-                                                        @click="setGateMode('disabled')"
-                                                    >
-                                                        <span class="btn-icon">⚡</span>
-                                                        <span>免审直通</span>
-                                                    </button>
+                                                <div class="gate-config-group">
+                                                    <span class="gate-group-label">触发策略 (Trigger):</span>
+                                                    <div class="gate-mode-pills">
+                                                        <button
+                                                            type="button"
+                                                            class="gate-mode-pill-btn"
+                                                            :class="{ active: currentPlanMode === 'auto' && !isStageReviewerDisabled }"
+                                                            title="智能风控：按策略自动决定是否审查（高危才审）"
+                                                            :disabled="isRunning"
+                                                            @click="setTriggerMode('auto')"
+                                                        >
+                                                            <span class="btn-icon">🎯</span>
+                                                            <span>智能风控</span>
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            class="gate-mode-pill-btn"
+                                                            :class="{ active: currentPlanMode === 'cross_review' && !isStageReviewerDisabled }"
+                                                            title="严格把关：强制必定触发专家审查（无视风控策略）"
+                                                            :disabled="isRunning"
+                                                            @click="setTriggerMode('cross_review')"
+                                                        >
+                                                            <span class="btn-icon">🛡️</span>
+                                                            <span>严格把关</span>
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            class="gate-mode-pill-btn btn-disabled"
+                                                            :class="{ active: isStageReviewerDisabled }"
+                                                            title="极速免审：永久跳过审查"
+                                                            :disabled="isRunning"
+                                                            @click="setTriggerMode('disabled')"
+                                                        >
+                                                            <span class="btn-icon">⚡</span>
+                                                            <span>极速免审</span>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                
+                                                <div class="gate-config-group" :class="{ 'is-dimmed': isStageReviewerDisabled }">
+                                                    <span class="gate-group-label">并发策略 (Concurrency):</span>
+                                                    <div class="gate-mode-pills">
+                                                        <button
+                                                            type="button"
+                                                            class="gate-mode-pill-btn"
+                                                            :class="{ active: !isCommitteeMode }"
+                                                            title="智能挑单：如果触发审查，则自动挑选 1 位最匹配的专家"
+                                                            :disabled="isRunning || isStageReviewerDisabled"
+                                                            @click="setConcurrencyMode('adaptive')"
+                                                        >
+                                                            <span class="btn-icon">👤</span>
+                                                            <span>智能挑单 (单审)</span>
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            class="gate-mode-pill-btn btn-committee"
+                                                            :class="{ active: isCommitteeMode }"
+                                                            title="联合会审：如果触发审查，则并发唤起至多 3 位专家会审"
+                                                            :disabled="isRunning || isStageReviewerDisabled"
+                                                            @click="setConcurrencyMode('committee')"
+                                                        >
+                                                            <span class="btn-icon">👥</span>
+                                                            <span>联合会审 (多审)</span>
+                                                        </button>
+                                                    </div>
                                                 </div>
 
                                                 <!-- 动态策略说明条 -->
@@ -1236,26 +1267,23 @@ const planModeIcon = computed(() => {
 
 const planModeLabel = computed(() => {
     switch (currentPlanMode.value) {
-        case "cross_review":
-            return "交叉审查";
         case "plan_approval":
             return "方案审批";
+        case "cross_review":
         case "auto":
         default:
-            return "智能自适应";
+            return "智能分发";
     }
 });
 
 const planModeTooltip = computed(() => {
     switch (currentPlanMode.value) {
-        case "auto":
-            return "当前模式: 🚀 智能自适应 (Adaptive Auto) - 低危静态改动极速秒过，高危按策略自动升级专家审查。点击切换";
-        case "cross_review":
-            return "当前模式: 🔍 交叉审查 (Cross-review) - 动笔前强制由子 Agent 独立推演挑刺。点击选择门禁模式";
         case "plan_approval":
-            return "当前模式: 🛡️ 方案审批 (Plan First) - 方案就绪后须经您确认方可写入代码。点击选择门禁模式";
+            return "当前模式: 🛡️ 方案审批 (Plan First) - 方案就绪后须经您确认方可写入代码。点击切换";
+        case "cross_review":
+        case "auto":
         default:
-            return "";
+            return "当前模式: 🚀 智能分发 (Auto Dispatch) - 执行流程全权交由 Agent 内部风控策略管理。点击切换";
     }
 });
 
@@ -1271,16 +1299,9 @@ const planModes: PlanModeOption[] = [
     {
         id: "auto",
         icon: "🚀",
-        label: "智能自适应",
+        label: "智能分发",
         tag: "推荐默认",
-        description: "默认推荐：低危小改动极速秒过，命中高危文件或危险命令时按策略自动升级专家审查",
-    },
-    {
-        id: "cross_review",
-        icon: "🔍",
-        label: "交叉审查",
-        tag: "双 Agent",
-        description: "动笔前强制派发子 Agent 对抗推演，消费审查结论后方可动笔",
+        description: "默认推荐：执行流程全权交由内部审查卡片的风控策略管控",
     },
     {
         id: "plan_approval",
@@ -1296,13 +1317,7 @@ function selectPlanMode(mode: PlanExecutionMode) {
     emit("update:autoPilot", mode !== "plan_approval");
     planMenuOpen.value = false;
 
-    if (mode === "cross_review") {
-        activeModeGuide.value = {
-            mode: "cross_review",
-            title: "交叉审查模式已就绪",
-            mechanism: "放行机制：AI 动笔写代码前，必须派发独立 Reviewer 子 Agent 对抗推演，并通过审查结论后方可放行写入。",
-        };
-    } else if (mode === "plan_approval") {
+    if (mode === "plan_approval") {
         activeModeGuide.value = {
             mode: "plan_approval",
             title: "方案审批模式已就绪",
@@ -1855,26 +1870,26 @@ const modelChipTooltip = computed(() => {
     return title;
 });
 
-function setGateMode(mode: "adaptive" | "committee" | "disabled") {
+function setTriggerMode(mode: "auto" | "cross_review" | "disabled") {
     if (mode === "disabled") {
         emit("update:model-routing", {
             ...props.modelRouting,
             stage_reviewer_override: "disabled",
-            stage_review_committee: false,
-        });
-    } else if (mode === "committee") {
-        emit("update:model-routing", {
-            ...props.modelRouting,
-            stage_reviewer_override: undefined,
-            stage_review_committee: true,
         });
     } else {
+        emit("update:planMode", mode);
         emit("update:model-routing", {
             ...props.modelRouting,
             stage_reviewer_override: undefined,
-            stage_review_committee: false,
         });
     }
+}
+
+function setConcurrencyMode(mode: "adaptive" | "committee") {
+    emit("update:model-routing", {
+        ...props.modelRouting,
+        stage_review_committee: mode === "committee",
+    });
 }
 
 const budgetModes = CONTEXT_BUDGET_MODES;

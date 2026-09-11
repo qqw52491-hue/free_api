@@ -6,7 +6,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// 角色池上限：每张卡的清单都会注入主 Agent 上下文，超池会稀释注意力与预算。
-pub const MAX_ROLE_CARDS: usize = 8;
+pub const MAX_ROLE_CARDS: usize = 16;
 const MAX_NAME_CHARS: usize = 64;
 const MAX_LABEL_CHARS: usize = 80;
 const MAX_PERSONA_CHARS: usize = 3_000;
@@ -369,6 +369,91 @@ pub fn delete_card(db: &DbState, params: &Value) -> Result<String, String> {
     Ok(format!("已删除角色 {}（{} 行）", name, rows))
 }
 
+/// 初始化与确保内置核心角色卡（如 1v1 方案评审与定级专用的 Tech Lead）
+pub fn ensure_default_role_cards(conn: &rusqlite::Connection) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let id = "default-role-tech-lead";
+    let input_schema = json!({
+        "fields": [
+            {
+                "name": "plan_summary",
+                "field_type": "string",
+                "required": true,
+                "description": "主脑制定的实施方案核心摘要与执行步骤"
+            },
+            {
+                "name": "target_files",
+                "field_type": "string[]",
+                "required": false,
+                "description": "拟修改或创建的文件路径列表"
+            },
+            {
+                "name": "discussion_round",
+                "field_type": "number",
+                "required": false,
+                "description": "当前方案讨论的回合轮次（默认为 1）"
+            },
+            {
+                "name": "user_goal",
+                "field_type": "string",
+                "required": false,
+                "description": "用户的原始任务目标"
+            }
+        ],
+        "strict_closed_set": false
+    }).to_string();
+
+    let custom_schema = json!({
+        "fields": [
+            {
+                "name": "decision",
+                "field_type": "string",
+                "required": true,
+                "description": "评审裁决：approved (通过开工), rebuttal (打回修改继续1v1), escalate (升级多专家联合会审)",
+                "allowed_values": ["approved", "rebuttal", "escalate"]
+            },
+            {
+                "name": "file_coupling",
+                "field_type": "string",
+                "required": true,
+                "description": "修改关联度分析：isolated (单一孤立改动), coupled (跨层/深度关联)",
+                "allowed_values": ["isolated", "coupled"]
+            },
+            {
+                "name": "analysis",
+                "field_type": "string",
+                "required": true,
+                "description": "综合技术含金量、文件关联度和战况的评审理由与分析"
+            },
+            {
+                "name": "escalate_roles",
+                "field_type": "string[]",
+                "required": false,
+                "description": "若 decision 为 escalate，指定需要参与联合会审的增援专家角色标识列表"
+            }
+        ],
+        "strict_closed_set": false
+    }).to_string();
+
+    let persona_prompt = "你是一名资深技术主管 (Tech Lead)。你的核心职责是在主脑编写代码前，对其提交的方案 (Plan)、拟修改文件 (target_files) 和实施步骤进行深入的技术把关与 1v1 方案评审对齐。\n\n你必须客观评估：\n1. 方案可行性与严密性：方案设计是否逻辑自洽？是否存在遗漏的边界情况或破坏性变更？\n2. 改动关联度 (file_coupling)：\n   - isolated（单一/孤立）：各个修改文件职责明确、改动局部独立（如纯文案、单一组件样式、局部叶子函数修补、配置文件修改），即使改动了多个文件也是单一维度的修改。\n   - coupled（深度关联/跨层）：修改涉及多个架构层次、模块间契约变更、状态共享改造、全局鉴权/拦截器改动或数据库表结构与前端 IPC 联调。\n3. 讨论战况与定级决断 (decision)：\n   - approved：方案扎实清晰，改动范围可控（无论是单一改动，还是 1~2 轮内已对齐的关联改动）。直接放行，主脑可开工编码。输出合规评分卡（各项 >= 80），无阻塞缺陷。\n   - rebuttal：方案存在可修正的逻辑缺陷、未考虑的边界或不严谨处，需要在 1v1 讨论中进一步推演修改。请在 findings 中给出具体修改意见与定位。\n   - escalate：方案改动范围巨大且跨模块强关联（如高危架构重构、底层数据流变更），或者主脑在 2~3 轮对质后方案仍存在不可调和的架构分歧。单人评审无法完全兜底，必须升级为多专家联合会审！请在 escalate_roles 中指定需要增援的专家（如 'architect', 'security_specialist', 'performance_expert' 等）。";
+
+    let _ = conn.execute(
+        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, created_at, updated_at)
+         VALUES (?1, 'tech_lead', '技术主管 (Tech Lead - 方案评审与定级)', '', ?2, '负责改动实施前的 1v1 方案评审，评估技术含金量与文件关联度，决定放行、打回或升级多专家会审', '', 'reviewer', '', 0, 1, ?3, '[]', ?4, ?5, ?5)
+         ON CONFLICT(name) DO UPDATE SET
+            label=excluded.label,
+            persona_prompt=excluded.persona_prompt,
+            scope_hints=excluded.scope_hints,
+            allowed_kinds=excluded.allowed_kinds,
+            custom_schema=excluded.custom_schema,
+            input_schema=excluded.input_schema,
+            updated_at=excluded.updated_at",
+        rusqlite::params![id, persona_prompt, custom_schema, input_schema, now],
+    );
+
+    Ok(())
+}
+
 /// 检查角色卡在特定工位（如 "writer", "reviewer", "worker"）或全局是否处于禁用/休眠状态
 pub fn is_card_disabled_for(disabled_names: &[String], card_name: &str, kind: &str) -> bool {
     let name_lower = card_name.to_ascii_lowercase();
@@ -601,11 +686,29 @@ mod tests {
         // 名字非法字符被拒绝
         assert!(upsert_card(&db, &json!({"name": "bad;name"})).is_err());
 
-        // 池子上限：已有 1 张（frontend_designer），再填到 8 张后拒绝第 9 张
-        for i in 1..MAX_ROLE_CARDS {
+        // 池子上限测试：先统计当前已有卡片数量，填满至 MAX_ROLE_CARDS 后拒绝溢出卡
+        let current_count = list_cards(&db, true).unwrap().len();
+        for i in current_count..MAX_ROLE_CARDS {
             upsert_card(&db, &json!({"name": format!("role_{}", i)})).unwrap();
         }
         assert!(upsert_card(&db, &json!({"name": "overflow_role"})).is_err());
+    }
+
+    #[test]
+    fn test_default_tech_lead_card_seeded() {
+        let db = setup_db();
+        let tl = resolve_enabled_card(&db, "tech_lead").unwrap().expect("系统初始化应自动预装 tech_lead");
+        assert_eq!(tl.name, "tech_lead");
+        assert!(tl.allows_kind("reviewer"));
+        let custom_schema = tl.parse_custom_schema().expect("tech_lead 应具备合法的 custom_schema");
+        assert!(custom_schema.field_names().contains("decision"));
+        assert!(custom_schema.field_names().contains("file_coupling"));
+        assert!(custom_schema.field_names().contains("analysis"));
+        assert!(custom_schema.field_names().contains("escalate_roles"));
+
+        let input_schema = tl.parse_input_schema().expect("tech_lead 应具备合法的 input_schema");
+        assert!(input_schema.field_names().contains("plan_summary"));
+        assert!(input_schema.field_names().contains("target_files"));
     }
 
     #[test]
@@ -650,6 +753,8 @@ mod tests {
     #[test]
     fn role_cards_menu_lists_enabled_only() {
         let db = setup_db();
+        // 清理初始化预装卡片，校验空池基线
+        let _ = delete_card(&db, &json!({"name": "tech_lead"}));
         assert!(build_role_cards_menu(&db).unwrap().is_empty());
         upsert_card(&db, &json!({"name": "a_role", "label": "角色A", "persona_prompt": "描述A"})).unwrap();
         upsert_card(&db, &json!({"name": "b_role", "label": "角色B"})).unwrap();
