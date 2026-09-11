@@ -434,6 +434,19 @@ async function promptCreateProject() {
   }
 }
 
+// 拖拽文件夹快速导入/新建项目
+function promptCreateProjectWithDir(dirPath: string) {
+  if (!dirPath) return;
+  createProjectModal.rootPath = dirPath;
+  createProjectModal.name = dirPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "未命名项目";
+  createProjectModal.visible = true;
+  nextTick(() => {
+    projectNameInputRef.value?.focus();
+    projectNameInputRef.value?.select();
+  });
+}
+
+
 async function submitCreateProject() {
   if (!createProjectModal.name.trim() || !createProjectModal.rootPath) return;
   busy.value = true;
@@ -571,6 +584,7 @@ defineExpose({
   loadProjectData,
   projects,
   projectSessionsMap,
+  promptCreateProjectWithDir,
 });
 
 onMounted(() => {

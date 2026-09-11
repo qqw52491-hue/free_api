@@ -1185,6 +1185,38 @@ onBeforeUnmount(() => {
   window.removeEventListener("scroll", handleScrollOrResize, true);
   window.removeEventListener("resize", handleScrollOrResize);
 });
+
+async function addResourcesByPaths(paths: string[]): Promise<number> {
+  if (!props.projectId || paths.length === 0) return 0;
+  busy.value = true;
+  let successCount = 0;
+  try {
+    for (const p of paths) {
+      try {
+        await invoke("add_agent_project_resource", {
+          projectId: props.projectId,
+          path: p,
+        });
+        successCount++;
+      } catch (err) {
+        console.warn("添加项目资源失败:", p, err);
+      }
+    }
+    if (successCount > 0) {
+      await loadProject();
+      emit("refresh-projects");
+    }
+  } finally {
+    busy.value = false;
+  }
+  return successCount;
+}
+
+defineExpose({
+  loadProject,
+  addResourcesByPaths,
+  project,
+});
 </script>
 
 <style scoped>

@@ -141,6 +141,7 @@
                     @open-diff="handleOpenDiff"
                 />
                 <AgentComposer
+                    ref="composerRef"
                     :draft="composerDraft"
                     :is-running="session.isRunning.value"
                     :is-waiting-for-human="session.isWaitingForHuman.value"
@@ -266,6 +267,7 @@ const emit = defineEmits<{
     "update:title": [title: string];
     "promoted": [oldId: string, newId: string, title: string, projectId?: string];
 }>();
+const composerRef = ref<InstanceType<typeof AgentComposer> | null>(null);
 const settingsOpen = ref(false);
 const selectedSubpart = ref<"thought" | "tool" | null>(null);
 const selectedHumanEventId = ref<string | null>(null);
@@ -599,6 +601,7 @@ defineExpose({
     isRunning: session.isRunning,
     session,
     runAgent: (goal: string) => session.runAgent(goal),
+    attachFiles: (paths: string[]) => composerRef.value?.attachFilePaths(paths),
 });
 </script>
 

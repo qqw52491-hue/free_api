@@ -1353,6 +1353,38 @@ function removeAttachment(index: number) {
     attachments.value.splice(index, 1);
 }
 
+async function attachFilePaths(paths: string[]): Promise<number> {
+    const validPaths = paths.filter((p): p is string => typeof p === "string" && !!p);
+    if (validPaths.length === 0) return 0;
+
+    emit("attach-files", validPaths);
+    let successCount = 0;
+
+    for (const p of validPaths) {
+        try {
+            const parsed = await invoke<ParsedAttachment>("parse_attachment_file", { path: p });
+            if (parsed) {
+                attachments.value.push(parsed);
+                successCount++;
+            }
+        } catch (err) {
+            console.warn("解析文件失败，使用路径降级:", err);
+            const fileName = p.split("/").pop() || p;
+            attachments.value.push({
+                file_name: fileName,
+                file_path: p,
+                size_bytes: 0,
+                content_type: "file",
+                prompt_text: `【附加文件】: ${p}`,
+                image_data_url: null,
+                raw_preview: null,
+            });
+            successCount++;
+        }
+    }
+    return successCount;
+}
+
 async function promptAttachFiles() {
     try {
         const selected = await openDialog({
@@ -1361,31 +1393,7 @@ async function promptAttachFiles() {
         });
         if (!selected) return;
         const paths = Array.isArray(selected) ? selected : [selected];
-        const validPaths = paths.filter((p): p is string => typeof p === "string" && !!p);
-        if (validPaths.length === 0) return;
-
-        emit("attach-files", validPaths);
-
-        for (const p of validPaths) {
-            try {
-                const parsed = await invoke<ParsedAttachment>("parse_attachment_file", { path: p });
-                if (parsed) {
-                    attachments.value.push(parsed);
-                }
-            } catch (err) {
-                console.warn("解析文件失败，使用路径降级:", err);
-                const fileName = p.split("/").pop() || p;
-                attachments.value.push({
-                    file_name: fileName,
-                    file_path: p,
-                    size_bytes: 0,
-                    content_type: "file",
-                    prompt_text: `【附加文件】: ${p}`,
-                    image_data_url: null,
-                    raw_preview: null,
-                });
-            }
-        }
+        await attachFilePaths(paths);
     } catch (e) {
         console.error("选择文件失败:", e);
     }
@@ -2115,6 +2123,11 @@ const contextLevelClass = computed(() => {
     if (p >= 80) return "badge-danger";
     if (p >= 60) return "badge-warn";
     return "badge-safe";
+});
+
+defineExpose({
+    attachFilePaths,
+    attachments,
 });
 </script>
 

@@ -784,6 +784,45 @@ pub async fn get_agent_session_project_resources(
     project_resources_for_session(&conn, &session_id)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DraggedPathItem {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size_bytes: u64,
+    pub exists: bool,
+}
+
+#[tauri::command]
+pub async fn inspect_dragged_paths(
+    paths: Vec<String>,
+) -> Result<Vec<DraggedPathItem>, String> {
+    let mut items = Vec::new();
+    for p in paths {
+        let path_buf = PathBuf::from(&p);
+        let exists = path_buf.exists();
+        let is_dir = path_buf.is_dir();
+        let size_bytes = if exists && !is_dir {
+            std::fs::metadata(&path_buf).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        let name = path_buf
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&p)
+            .to_string();
+        items.push(DraggedPathItem {
+            path: p,
+            name,
+            is_dir,
+            size_bytes,
+            exists,
+        });
+    }
+    Ok(items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1059,6 +1098,42 @@ mod tests {
         assert!(preview.content.contains("# Database V2 Spec"));
 
         drop(conn);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn inspecting_dragged_paths_distinguishes_dirs_and_files() {
+        let base = std::env::temp_dir().join(format!("free-api-inspect-{}", Uuid::new_v4()));
+        let dir = base.join("my-project");
+        let file = base.join("data.csv");
+        let nonexistent = base.join("ghost.txt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&file, "col1,col2\n1,2\n").unwrap();
+
+        let paths = vec![
+            dir.to_string_lossy().to_string(),
+            file.to_string_lossy().to_string(),
+            nonexistent.to_string_lossy().to_string(),
+        ];
+
+        let results = inspect_dragged_paths(paths).await.unwrap();
+        assert_eq!(results.len(), 3);
+
+        // 目录判定
+        assert!(results[0].is_dir);
+        assert!(results[0].exists);
+        assert_eq!(results[0].name, "my-project");
+
+        // 文件判定
+        assert!(!results[1].is_dir);
+        assert!(results[1].exists);
+        assert_eq!(results[1].name, "data.csv");
+        assert!(results[1].size_bytes > 0);
+
+        // 不存在的文件判定
+        assert!(!results[2].exists);
+        assert_eq!(results[2].name, "ghost.txt");
+
         let _ = std::fs::remove_dir_all(base);
     }
 }

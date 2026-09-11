@@ -117,6 +117,7 @@ pub fn run() {
             commands::read_agent_project_resource,
             commands::get_agent_session_project,
             commands::get_agent_session_project_resources,
+            commands::inspect_dragged_paths,
             // 消息
             commands::get_messages,
             commands::save_message,

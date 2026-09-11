@@ -227,6 +227,7 @@
             <!-- 2. 📁 Project 工作区面板 (类似 Manus Project Dashboard) -->
             <div v-if="currentNavView === 'project' && selectedProjectId" class="full-view-panel">
                 <ProjectWorkspace
+                    ref="projectWorkspaceRef"
                     :project-id="selectedProjectId"
                     :all-models="allModels"
                     @open-session="openTreeSession"
@@ -261,6 +262,43 @@
                 <WeChatBindView />
             </div>
         </main>
+
+        <!-- 🌟 全屏智能拖拽悬停毛玻璃蒙层 -->
+        <transition name="fade-drop">
+            <div v-if="isDraggingOver" class="global-drag-overlay" :class="`view-${currentNavView}`">
+                <div class="drag-glass-card">
+                    <div class="drag-icon-pulse">
+                        <span v-if="currentNavView === 'project'">📁</span>
+                        <span v-else>📥</span>
+                    </div>
+                    <div class="drag-text-group">
+                        <h3 v-if="currentNavView === 'project'">松开将数据文件添加至项目受管资源</h3>
+                        <h3 v-else>松开将文件附加至当前会话</h3>
+                        <p>
+                            <span class="hint-highlight">💡 无论何处，拖入文件夹将自动识别并创建/导入本地新项目</span>
+                        </p>
+                        <div class="drag-badge-tags">
+                            <span>🖼️ 图片视觉预览</span>
+                            <span>📊 Excel / Word / PDF</span>
+                            <span>💻 代码工程与日志</span>
+                            <span>📁 本地项目文件夹</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- 🌟 全局轻量浮动操作 Toast -->
+        <transition name="toast-slide">
+            <div v-if="floatingToast" class="global-floating-toast" :class="`is-${floatingToast.type}`">
+                <span class="toast-icon">
+                    <template v-if="floatingToast.type === 'success'">✓</template>
+                    <template v-else-if="floatingToast.type === 'warning'">⚠️</template>
+                    <template v-else>ℹ️</template>
+                </span>
+                <span class="toast-text">{{ floatingToast.text }}</span>
+            </div>
+        </transition>
     </div>
 </template>
 
@@ -271,6 +309,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import AgentPanel from "../components/AgentPanel.vue";
 import ProjectSidebarTree, { type AgentProject, type TreeSessionItem } from "../components/ProjectSidebarTree.vue";
 import ProjectWorkspace from "../components/ProjectWorkspace.vue";
+import { useGlobalFileDrop, type DraggedPathItem } from "../composables/useGlobalFileDrop";
 
 const ApiManager = defineAsyncComponent(() => import("./ApiManager.vue"));
 const PluginView = defineAsyncComponent(() => import("./PluginView.vue"));
@@ -281,6 +320,7 @@ const RoleManagerView = defineAsyncComponent(() => import("./RoleManagerView.vue
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
 interface TabInfo { uid: string; id: string; label: string; running: boolean; projectId?: string; isDraft?: boolean; }
+interface FloatingToast { id: number; text: string; type: "success" | "info" | "warning"; }
 
 const currentNavView = ref<"agent" | "project" | "llm" | "roles" | "plugins" | "scheduled" | "library" | "wechat">("agent");
 const selectedProjectId = ref<string>("");
@@ -294,6 +334,83 @@ const activeTabId = ref("");
 const taskSearchQuery = ref("");
 const panelRefs = reactive<Record<string, any>>({});
 const projectTreeRef = ref<InstanceType<typeof ProjectSidebarTree> | null>(null);
+const projectWorkspaceRef = ref<InstanceType<typeof ProjectWorkspace> | null>(null);
+
+const floatingToast = ref<FloatingToast | null>(null);
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showToast(text: string, type: "success" | "info" | "warning" = "success") {
+    if (toastTimer) clearTimeout(toastTimer);
+    floatingToast.value = { id: Date.now(), text, type };
+    toastTimer = setTimeout(() => {
+        floatingToast.value = null;
+    }, 3500);
+}
+
+async function handleGlobalDrop(paths: string[]) {
+    if (!paths || paths.length === 0) return;
+    try {
+        const items = await invoke<DraggedPathItem[]>("inspect_dragged_paths", { paths });
+        if (!items || items.length === 0) return;
+
+        // 1. 优先检查是否包含文件夹 (Directory)
+        const dirItem = items.find((i) => i.is_dir);
+        if (dirItem) {
+            // 无论当前在哪个页面，拖入文件夹一律触发创建/导入本地项目
+            sidebarCollapsed.value = false;
+            projectTreeRef.value?.promptCreateProjectWithDir(dirItem.path);
+            showToast(`已识别本地项目目录: ${dirItem.name}，请确认导入`, "info");
+            return;
+        }
+
+        // 2. 全为文件：提取有效路径
+        const validFilePaths = items.filter((i) => !i.is_dir && i.exists).map((i) => i.path);
+        if (validFilePaths.length === 0) {
+            showToast("拖入的文件不存在或已被移除", "warning");
+            return;
+        }
+
+        // 2a. 场景 A: 当前在项目详情工作区 (Project Workspace)
+        if (currentNavView.value === "project" && selectedProjectId.value) {
+            const count = await projectWorkspaceRef.value?.addResourcesByPaths(validFilePaths);
+            const prj = projectWorkspaceRef.value?.project;
+            const prjName = prj?.name || "当前项目";
+            showToast(`已成功为【${prjName}】导入 ${count || validFilePaths.length} 个数据文件`, "success");
+            return;
+        }
+
+        // 2b. 场景 B: 当前在 Agent 对话主面板
+        if (currentNavView.value === "agent" && activeTabId.value) {
+            const panel = panelRefs[activeTabId.value];
+            if (panel && typeof panel.attachFiles === "function") {
+                const count = await panel.attachFiles(validFilePaths);
+                showToast(`已为当前会话附加 ${count || validFilePaths.length} 个文件`, "success");
+                return;
+            }
+        }
+
+        // 2c. 场景 C: 其他视图或无活跃会话，自动切回对话并附加
+        currentNavView.value = "agent";
+        if (!activeTabId.value) {
+            createNewTask();
+        }
+        await nextTick();
+        setTimeout(async () => {
+            const panel = panelRefs[activeTabId.value];
+            if (panel && typeof panel.attachFiles === "function") {
+                const count = await panel.attachFiles(validFilePaths);
+                showToast(`已切换至会话并附加 ${count || validFilePaths.length} 个文件`, "success");
+            }
+        }, 150);
+    } catch (err) {
+        console.error("处理拖拽文件失败:", err);
+        showToast("处理拖拽文件失败: " + String(err), "warning");
+    }
+}
+
+const { isDraggingOver } = useGlobalFileDrop({
+    onDropPaths: handleGlobalDrop,
+});
 
 // 独立会话列表过滤：只保留未与任何项目绑定的独立任务
 const independentTabs = computed(() => {
@@ -1207,5 +1324,153 @@ onUnmounted(() => {
         letter-spacing: -0.02em;
         color: #f4f4f5;
     }
+}
+
+/* 全屏智能拖拽悬停毛玻璃蒙层 */
+.global-drag-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(10, 14, 23, 0.78);
+    backdrop-filter: blur(14px) saturate(180%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    padding: 32px;
+}
+
+.drag-glass-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 36px 48px;
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.85), rgba(15, 23, 42, 0.92));
+    border: 2px dashed rgba(99, 102, 241, 0.65);
+    border-radius: 20px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6), 0 0 30px rgba(99, 102, 241, 0.2);
+    animation: dragPulseBorder 2s ease-in-out infinite alternate;
+    max-width: 520px;
+}
+
+@keyframes dragPulseBorder {
+    0% {
+        border-color: rgba(99, 102, 241, 0.5);
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6), 0 0 20px rgba(99, 102, 241, 0.15);
+    }
+    100% {
+        border-color: rgba(129, 140, 248, 0.9);
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6), 0 0 40px rgba(129, 140, 248, 0.35);
+    }
+}
+
+.drag-icon-pulse {
+    font-size: 48px;
+    line-height: 1;
+    margin-bottom: 16px;
+    filter: drop-shadow(0 4px 12px rgba(99, 102, 241, 0.5));
+}
+
+.drag-text-group h3 {
+    margin: 0 0 8px 0;
+    font-size: 19px;
+    font-weight: 700;
+    color: #ffffff;
+    letter-spacing: -0.01em;
+}
+
+.drag-text-group p {
+    margin: 0 0 16px 0;
+    font-size: 13px;
+    color: #94a3b8;
+}
+
+.hint-highlight {
+    display: inline-block;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.1);
+    padding: 3px 10px;
+    border-radius: 12px;
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    font-weight: 500;
+}
+
+.drag-badge-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+}
+
+.drag-badge-tags span {
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.07);
+    color: #cbd5e1;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* 全局飘窗 Toast */
+.global-floating-toast {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 18px;
+    border-radius: 12px;
+    background: rgba(15, 23, 42, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(16px);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    color: #f8fafc;
+    font-size: 13.5px;
+    font-weight: 500;
+    pointer-events: none;
+}
+
+.global-floating-toast.is-success {
+    border-color: rgba(34, 197, 94, 0.35);
+    background: linear-gradient(135deg, rgba(20, 83, 45, 0.9), rgba(15, 23, 42, 0.95));
+}
+
+.global-floating-toast.is-warning {
+    border-color: rgba(245, 158, 11, 0.35);
+    background: linear-gradient(135deg, rgba(120, 53, 15, 0.9), rgba(15, 23, 42, 0.95));
+}
+
+.global-floating-toast.is-info {
+    border-color: rgba(56, 189, 248, 0.35);
+    background: linear-gradient(135deg, rgba(12, 74, 110, 0.9), rgba(15, 23, 42, 0.95));
+}
+
+.global-floating-toast .toast-icon {
+    font-weight: 700;
+}
+
+/* 动效 */
+.fade-drop-enter-active,
+.fade-drop-leave-active {
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.fade-drop-enter-from,
+.fade-drop-leave-to {
+    opacity: 0;
+    transform: scale(0.98);
+}
+
+.toast-slide-enter-active,
+.toast-slide-leave-active {
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.toast-slide-enter-from,
+.toast-slide-leave-to {
+    opacity: 0;
+    transform: translate(-50%, -16px);
 }
 </style>
