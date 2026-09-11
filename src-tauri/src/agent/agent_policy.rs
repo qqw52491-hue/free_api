@@ -39,15 +39,38 @@ fn default_fast_pass_patterns() -> Vec<String> {
 
 fn default_high_risk_patterns() -> Vec<String> {
     vec![
-        "src-tauri/**".to_string(),
+        // 1. 核心密钥与环境变量 (全语言通用)
+        ".env*".to_string(),
+        "**/.env*".to_string(),
+        "**/*secret*".to_string(),
+        "**/*credentials*".to_string(),
+        // 2. 数据库与数据迁移
         "**/migrations/**".to_string(),
-        "tauri.conf.json".to_string(),
+        "**/*.sql".to_string(),
+        "schema.prisma".to_string(),
+        // 3. 各主流语言的核心构建与依赖清单
         "Cargo.toml".to_string(),
         "Cargo.lock".to_string(),
         "package.json".to_string(),
-        "**/*.sql".to_string(),
+        "pnpm-lock.yaml".to_string(),
+        "requirements.txt".to_string(),
+        "pyproject.toml".to_string(),
+        "Pipfile".to_string(),
+        "go.mod".to_string(),
+        "go.sum".to_string(),
+        "pom.xml".to_string(),
+        "build.gradle*".to_string(),
+        // 4. 容器编排与 CI/CD 基础设施
+        "Dockerfile*".to_string(),
+        "docker-compose*.yml".to_string(),
+        "**/.github/workflows/**".to_string(),
+        // 5. 权限与安全模块
         "**/auth/**".to_string(),
         "**/permissions/**".to_string(),
+        "**/security/**".to_string(),
+        // 6. 本地原生核心目录（若存在）
+        "src-tauri/**".to_string(),
+        "tauri.conf.json".to_string(),
     ]
 }
 
