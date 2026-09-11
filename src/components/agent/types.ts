@@ -11,6 +11,7 @@ export interface ParsedAttachment {
     prompt_text: string;
     image_data_url?: string | null;
     raw_preview?: string | null;
+    is_pasted_snippet?: boolean;
 }
 
 export interface AgentModelOption {

@@ -17,6 +17,7 @@
                     :removable="true"
                     @preview-image="openImagePreview"
                     @preview-doc="openDocPreview"
+                    @unpack="unpackSnippet"
                     @remove="removeAttachment(idx)"
                 />
             </div>
@@ -64,6 +65,7 @@
                 :placeholder="placeholderText"
                 rows="1"
                 @input="handleInput"
+                @paste="handlePaste"
                 @keydown.ctrl.enter.exact.prevent="submit('interrupt')"
                 @keydown.meta.enter.exact.prevent="submit('interrupt')"
                 @keydown.alt.enter.prevent="submit('queue')"
@@ -1155,6 +1157,8 @@
             :doc-modal="previewDocModal"
             @close-image="previewImageModal = null"
             @close-doc="previewDocModal = null"
+            @unpack-doc="unpackSnippet"
+            @update-doc="updateSnippet"
         />
     </footer>
 </template>
@@ -1334,6 +1338,7 @@ interface ParsedAttachment {
     prompt_text: string;
     image_data_url?: string | null;
     raw_preview?: string | null;
+    is_pasted_snippet?: boolean;
 }
 
 const attachments = ref<ParsedAttachment[]>([]);
@@ -1438,6 +1443,144 @@ async function handleFileDrop(e: DragEvent) {
         reader.readAsDataURL(file);
     }
 }
+
+async function handlePaste(e: ClipboardEvent) {
+    if (props.isSending) return;
+    const clipboard = e.clipboardData;
+    if (!clipboard) return;
+
+    // 1. 优先检查剪贴板是否携带图片 (如截图直接粘贴)
+    const items = clipboard.items;
+    let hasImage = false;
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+            const file = item.getAsFile();
+            if (file) {
+                hasImage = true;
+                e.preventDefault();
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const base64Data = event.target?.result as string;
+                    if (base64Data) {
+                        const timestamp = new Date().toTimeString().split(" ")[0].replace(/:/g, "");
+                        const fileName = file.name && file.name !== "image.png" ? file.name : `screenshot_${timestamp}.png`;
+                        attachments.value.push({
+                            file_name: fileName,
+                            file_path: fileName,
+                            size_bytes: file.size,
+                            content_type: file.type || "image/png",
+                            prompt_text: `【用户已上传图片附件: \`${fileName}\`】(格式: ${file.type || "image/png"}, 大小: ${(file.size / 1024).toFixed(1)} KB)\n*(图片数据已作为视觉多模态消息携带)*\n`,
+                            image_data_url: base64Data,
+                            raw_preview: null,
+                        });
+                    }
+                };
+                reader.readAsDataURL(file);
+                return;
+            }
+        }
+    }
+    if (hasImage) return;
+
+    // 2. 检查纯文本内容：短文本正常进入输入框光标处；长文本/大段代码智能折叠为虚拟卡片
+    const text = clipboard.getData("text/plain");
+    if (!text) return;
+
+    const lines = text.split("\n").length;
+    const charLen = text.length;
+
+    // 智能判定分水岭：行数 >= 15 或 字符数 >= 500 时，折叠为虚拟文件保护输入框视野
+    if (lines >= 15 || charLen >= 500) {
+        e.preventDefault();
+
+        // 智能嗅探文件类型扩展名
+        let ext = "txt";
+        const trimmed = text.trim();
+        if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+            try {
+                JSON.parse(trimmed);
+                ext = "json";
+            } catch {
+                // ignore
+            }
+        } else if (trimmed.startsWith("<!DOCTYPE html") || trimmed.startsWith("<html")) {
+            ext = "html";
+        } else if (trimmed.startsWith("# ") || trimmed.includes("\n## ")) {
+            ext = "md";
+        } else if (trimmed.includes("fn main(") || trimmed.includes("pub fn ") || trimmed.includes("impl ")) {
+            ext = "rs";
+        } else if (trimmed.includes("import React") || trimmed.includes("export default") || trimmed.includes("const ") || trimmed.includes("function ")) {
+            ext = "ts";
+        } else if (trimmed.includes("def ") && trimmed.includes(":\n")) {
+            ext = "py";
+        }
+
+        const snippetIndex = attachments.value.filter((a) => a.is_pasted_snippet).length + 1;
+        const fileName = ext === "json"
+            ? `pasted_data_${snippetIndex}.json`
+            : ext === "md"
+                ? `pasted_notes_${snippetIndex}.md`
+                : `pasted_snippet_${snippetIndex}.${ext}`;
+
+        const sizeBytes = new Blob([text]).size;
+        attachments.value.push({
+            file_name: fileName,
+            file_path: `virtual://pasted/${fileName}`,
+            size_bytes: sizeBytes,
+            content_type: ext === "json" ? "application/json" : "text/plain",
+            prompt_text: text,
+            image_data_url: null,
+            raw_preview: text.slice(0, 500),
+            is_pasted_snippet: true,
+        });
+    }
+}
+
+function unpackSnippet(item: ParsedAttachment) {
+    const idx = attachments.value.findIndex((a) => a === item || (a.file_name === item.file_name && a.prompt_text === item.prompt_text));
+    if (idx !== -1) {
+        attachments.value.splice(idx, 1);
+    }
+    const textToInsert = item.prompt_text || item.raw_preview || "";
+    if (!textToInsert) return;
+
+    const el = textareaRef.value;
+    if (el && typeof el.selectionStart === "number") {
+        const start = el.selectionStart;
+        const end = el.selectionEnd;
+        const currentDraft = props.draft;
+        const before = currentDraft.slice(0, start);
+        const after = currentDraft.slice(end);
+        const separator = before.length > 0 && !before.endsWith("\n") ? "\n\n" : "";
+        const newDraft = before + separator + textToInsert + after;
+        emit("update:draft", newDraft);
+        nextTick(() => {
+            el.focus();
+            const newPos = start + separator.length + textToInsert.length;
+            el.setSelectionRange(newPos, newPos);
+            autoResizeTextarea();
+        });
+    } else {
+        const currentDraft = props.draft.trim();
+        const newDraft = currentDraft ? `${currentDraft}\n\n${textToInsert}` : textToInsert;
+        emit("update:draft", newDraft);
+        nextTick(() => {
+            el?.focus();
+            autoResizeTextarea();
+        });
+    }
+}
+
+function updateSnippet(item: ParsedAttachment, newText: string) {
+    const target = attachments.value.find((a) => a === item || (a.file_name === item.file_name && a.file_path === item.file_path));
+    if (target) {
+        target.prompt_text = newText;
+        target.size_bytes = new Blob([newText]).size;
+        target.raw_preview = newText.slice(0, 500);
+    }
+}
+
 const modelPickerRef = ref<HTMLElement | null>(null);
 const modelMenuOpen = ref(false);
 const activeRoutingTab = ref<"brain" | "writer" | "reviewer" | "scout">("brain");

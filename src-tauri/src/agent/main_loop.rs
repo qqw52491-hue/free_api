@@ -634,6 +634,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                     let target_file = attach_dir.join(&att.file_name);
                     if src_path.exists() && src_path != target_file {
                         let _ = std::fs::copy(src_path, &target_file);
+                    } else if !target_file.exists() && !att.prompt_text.is_empty() {
+                        let _ = std::fs::write(&target_file, att.prompt_text.as_bytes());
                     }
                     (format!(".attachments/{}", att.file_name), target_file)
                 } else {
@@ -642,6 +644,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                     let target_file = tmp_dir.join(&att.file_name);
                     if src_path.exists() && src_path != target_file {
                         let _ = std::fs::copy(src_path, &target_file);
+                    } else if !target_file.exists() && !att.prompt_text.is_empty() {
+                        let _ = std::fs::write(&target_file, att.prompt_text.as_bytes());
                     }
                     (format!("tmp/{}", att.file_name), target_file)
                 };

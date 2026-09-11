@@ -39,6 +39,17 @@
             </div>
         </template>
 
+        <!-- ⤢ 展开回输入框按钮 (专门给粘贴折叠的长文本附件使用，提供撤回/后悔药体验) -->
+        <button
+            v-if="removable && attachment.is_pasted_snippet"
+            type="button"
+            class="unpack-attachment-btn"
+            title="展开回输入框 (解包还原为文本)"
+            @click.stop="$emit('unpack', attachment)"
+        >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+        </button>
+
         <!-- 移除附件按钮 (用于输入框就绪托盘) -->
         <button
             v-if="removable"
@@ -71,6 +82,7 @@ const props = withDefaults(
 const emit = defineEmits<{
     "preview-image": [attachment: ParsedAttachment];
     "preview-doc": [attachment: ParsedAttachment];
+    unpack: [attachment: ParsedAttachment];
     remove: [];
 }>();
 
@@ -264,6 +276,34 @@ function handleClick() {
 .attachment-meta .file-size {
     font-size: 10px;
     color: #71717a;
+}
+
+.unpack-attachment-btn {
+    display: grid !important;
+    place-items: center !important;
+    width: 18px !important;
+    height: 18px !important;
+    border-radius: 50% !important;
+    border: 0 !important;
+    background: rgba(59, 130, 246, 0.15) !important;
+    color: #60a5fa !important;
+    cursor: pointer;
+    padding: 0 !important;
+    flex-shrink: 0;
+    transition: all 0.12s;
+}
+
+.unpack-attachment-btn:hover {
+    background: rgba(59, 130, 246, 0.35) !important;
+    color: #93c5fd !important;
+    transform: scale(1.08);
+}
+
+.unpack-attachment-btn svg {
+    width: 10px;
+    height: 10px;
+    stroke: currentColor;
+    stroke-width: 2.5;
 }
 
 .remove-attachment-btn {
