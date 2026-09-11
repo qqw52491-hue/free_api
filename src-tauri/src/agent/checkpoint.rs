@@ -668,6 +668,12 @@ pub struct AgentCheckpoint {
     /// 人类主人明确批准的特赦/豁免指示（用于在代码审查门禁中豁免特定改动）
     #[serde(default)]
     pub human_waivers: Vec<String>,
+    /// 策略引擎核准的目标改动文件列表（用于写后真实 Git Diff 范围防逃逸比对）
+    #[serde(default)]
+    pub approved_target_files: Option<Vec<String>>,
+    /// 策略引擎最新评估摘要（供审计与调试展示）
+    #[serde(default)]
+    pub policy_decision_summary: Option<String>,
     /// 运行执行模式：Auto（全自动）、CrossReview（交叉审查）、PlanApproval（方案审批）
     #[serde(default)]
     pub plan_mode: PlanExecutionMode,
@@ -841,6 +847,8 @@ impl AgentCheckpoint {
             plan_reviewer_retry_count: 0,
             approved_plan_summary: None,
             human_waivers: Vec::new(),
+            approved_target_files: None,
+            policy_decision_summary: None,
             plan_mode: PlanExecutionMode::Auto,
             plan_reviewer_consumed: false,
             plan_review_batch: PlanReviewBatchState::default(),

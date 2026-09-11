@@ -277,6 +277,22 @@ fn gate_interception(
                         route: "plan_gatekeeper:scorecard_failed".to_string(),
                     })
                 } else {
+                    if checkpoint.approved_target_files.is_none() {
+                        let mut target_files = Vec::new();
+                        if let Some(ref inst) = checkpoint.prepared_instruction {
+                            let params = inst.get_params();
+                            if let Some(p) = params.get("path")
+                                .or_else(|| params.get("file_path"))
+                                .or_else(|| params.get("target"))
+                                .and_then(|v| v.as_str())
+                            {
+                                target_files.push(p.to_string());
+                            }
+                        }
+                        if !target_files.is_empty() {
+                            checkpoint.approved_target_files = Some(target_files);
+                        }
+                    }
                     checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
                     None
                 }
@@ -301,8 +317,82 @@ fn gate_interception(
                     route: "plan_gatekeeper:need_plan".to_string(),
                 })
             } else {
-                checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
-                None
+                // 🌟 智能自适应策略准入评估：
+                let ws_path = context
+                    .resource_scope
+                    .primary_filesystem()
+                    .map(|b| std::path::Path::new(&b.locator));
+                let policy = crate::agent::agent_policy::PolicyConfig::load_from_workspace_or_default(ws_path);
+
+                let mut target_files = Vec::new();
+                let mut commands = Vec::new();
+
+                if let Some(ref inst) = checkpoint.prepared_instruction {
+                    if let Some(cmd) = crate::agent::dispatcher::extract_shell_command_string(inst) {
+                        commands.push(cmd);
+                    }
+                    let params = inst.get_params();
+                    if let Some(p) = params.get("path")
+                        .or_else(|| params.get("file_path"))
+                        .or_else(|| params.get("target"))
+                        .and_then(|v| v.as_str())
+                    {
+                        target_files.push(p.to_string());
+                    }
+                }
+
+                if let Some(ref approved) = checkpoint.approved_target_files {
+                    for f in approved {
+                        if !target_files.contains(f) {
+                            target_files.push(f.clone());
+                        }
+                    }
+                }
+
+                let plan_text = format!("{} {}", context.user_goal, context.progress_summary);
+                let decision = crate::agent::agent_policy::evaluate_plan_policy(
+                    &policy,
+                    &target_files,
+                    &commands,
+                    &plan_text,
+                );
+
+                checkpoint.policy_decision_summary = Some(decision.summary());
+
+                match decision {
+                    crate::agent::agent_policy::PolicyDecision::FastPass { .. } => {
+                        if !target_files.is_empty() && checkpoint.approved_target_files.is_none() {
+                            checkpoint.approved_target_files = Some(target_files);
+                        }
+                        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                        None
+                    }
+                    crate::agent::agent_policy::PolicyDecision::EscalateToReview {
+                        reason,
+                        matched_pattern,
+                        suggested_roles,
+                    } => {
+                        checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
+                        let stderr = format!(
+                            "【智能自适应门禁：触发按需升级审查】\n原因: {}\n命中规则: `{}`\n建议审查专家: {}\n系统已根据策略将任务自动升级为交叉审查模式，请派发审查员（child_reviewer）推演核验后再行写入！",
+                            reason, matched_pattern, suggested_roles.join(", ")
+                        );
+                        Some(DispatchResult {
+                            success: false,
+                            stdout: String::new(),
+                            stderr,
+                            route: "plan_gatekeeper:escalated_to_cross_review".to_string(),
+                        })
+                    }
+                    crate::agent::agent_policy::PolicyDecision::Block { reason } => {
+                        Some(DispatchResult {
+                            success: false,
+                            stdout: String::new(),
+                            stderr: format!("【安全策略强力阻断】\n{}", reason),
+                            route: "plan_gatekeeper:policy_blocked".to_string(),
+                        })
+                    }
+                }
             }
         }
     }

@@ -1242,14 +1242,14 @@ const planModeLabel = computed(() => {
             return "方案审批";
         case "auto":
         default:
-            return "全自动";
+            return "智能自适应";
     }
 });
 
 const planModeTooltip = computed(() => {
     switch (currentPlanMode.value) {
         case "auto":
-            return "当前模式: 🚀 全自动 (Auto) - 探索排查后直接实施。点击选择门禁模式";
+            return "当前模式: 🚀 智能自适应 (Adaptive Auto) - 低危静态改动极速秒过，高危按策略自动升级专家审查。点击切换";
         case "cross_review":
             return "当前模式: 🔍 交叉审查 (Cross-review) - 动笔前强制由子 Agent 独立推演挑刺。点击选择门禁模式";
         case "plan_approval":
@@ -1271,9 +1271,9 @@ const planModes: PlanModeOption[] = [
     {
         id: "auto",
         icon: "🚀",
-        label: "全自动",
-        tag: "极速流畅",
-        description: "完成只读排查后直接动笔修改代码，端到端自动推进不打扰",
+        label: "智能自适应",
+        tag: "策略准入",
+        description: "低危静态改动极速秒过，命中高危文件或危险命令时按策略自动升级专家审查",
     },
     {
         id: "cross_review",

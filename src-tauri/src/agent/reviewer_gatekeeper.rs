@@ -66,6 +66,52 @@ impl GitBaseline {
         Self::collect_fallback_workspace_changes(workspace, context, run_started_at)
     }
 
+    /// 提取任务期间新增或修改的文件相对路径列表（用于写后范围防逃逸校验）
+    pub fn collect_changed_file_paths(
+        &self,
+        workspace: &Path,
+        run_started_at: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<String> {
+        let mut paths = Vec::new();
+        if self.is_git {
+            let diff_args = if let Some(ref base) = self.base_head {
+                vec!["diff", "--name-only", base.as_str()]
+            } else {
+                vec!["diff", "--name-only", "HEAD"]
+            };
+            if let Some(text) = git_cmd(workspace, &diff_args) {
+                for line in text.lines() {
+                    let l = line.trim();
+                    if !l.is_empty() && !is_noise_path(l) {
+                        paths.push(l.to_string());
+                    }
+                }
+            }
+            if let Some(untracked) = git_cmd(workspace, &["ls-files", "--others", "--exclude-standard"]) {
+                for line in untracked.lines() {
+                    let l = line.trim();
+                    if !l.is_empty() && !is_noise_path(l) {
+                        paths.push(l.to_string());
+                    }
+                }
+            }
+        } else {
+            let since_sys = std::time::UNIX_EPOCH
+                + std::time::Duration::from_millis(run_started_at.timestamp_millis().max(0) as u64);
+            let mut modified_files = Vec::new();
+            Self::scan_modified_files(workspace, 0, since_sys, &mut modified_files);
+            for p in modified_files {
+                if let Ok(rel) = p.strip_prefix(workspace) {
+                    let s = rel.to_string_lossy().to_string();
+                    if !is_noise_path(&s) {
+                        paths.push(s);
+                    }
+                }
+            }
+        }
+        paths
+    }
+
     /// Git 模式下的代码变更 Diff 提取
     pub fn collect_git_diff(&self, workspace: &Path) -> Option<(String, String)> {
         // 1. 获取 Git Diff 文本
@@ -312,6 +358,23 @@ impl ReviewResult {
             diff_hash: diff_hash.to_string(),
         }
     }
+
+    pub fn rejected_with_scope_drift(reason: &str, diff_hash: &str) -> Self {
+        Self {
+            verdict: "rejected".to_string(),
+            score: 0,
+            blocking_issues: vec![BlockingIssue {
+                file: "global".to_string(),
+                issue: reason.to_string(),
+                requirement: "立即撤销未经审批的高危文件改动，或在 Plan 中向人类申请特赦/扩展审批".to_string(),
+            }],
+            nit_issues: Vec::new(),
+            summary: reason.to_string(),
+            duration_ms: 0,
+            model_id: "scope_drift_guard".to_string(),
+            diff_hash: diff_hash.to_string(),
+        }
+    }
 }
 
 /// 判定是否为二进制文件（Excel/Word/PDF/图片/压缩包等）
@@ -411,6 +474,7 @@ pub async fn evaluate_finish_diff(
     stage_carry_over: &[String],
     host_verification: Option<&str>,
     human_waivers: Option<&str>,
+    approved_target_files: Option<&[String]>,
 ) -> ReviewResult {
     let started_at = std::time::Instant::now();
 
@@ -418,6 +482,18 @@ pub async fn evaluate_finish_diff(
     let Some((mut review_material, diff_hash)) = baseline.collect_review_material(workspace, context, run_started_at) else {
         return ReviewResult::skipped_empty();
     };
+
+    // 🌟 1.5 真实 Git Diff 范围防逃逸校验 (Scope Drift Guard)
+    let changed_files = baseline.collect_changed_file_paths(workspace, run_started_at);
+    let policy = crate::agent::agent_policy::PolicyConfig::load_from_workspace_or_default(Some(workspace));
+    if let Err(scope_err) = crate::agent::agent_policy::verify_scope_drift(
+        approved_target_files,
+        &changed_files,
+        &policy,
+    ) {
+        return ReviewResult::rejected_with_scope_drift(&scope_err, &diff_hash);
+    }
+
     // 阶段审查 final_only 记账（carry-over）：最终交付前必须逐条解决的义务
     if !stage_carry_over.is_empty() {
         review_material.push_str("\n\n【上一阶段 final_only 记账（最终交付前必须逐条解决，本阶段审查未覆盖）】\n");
