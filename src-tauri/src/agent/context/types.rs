@@ -471,7 +471,14 @@ impl SandwichContext {
             "read_text_file", "read_file", "get_file_content", "get_code_snippet",
         ];
         let tool = instruction.get_tool().to_lowercase();
-        if !READ_TOOLS.iter().any(|t| tool.contains(t)) {
+        // 原生 local_file 的 read/list 纳入同一套重复读取识别——
+        // 修复口径分裂：MCP 路径能识别重复通读，原生工具路径此前完全不拦（评测实测 51 次 read 零拦截）。
+        // write/edit 不在此列（写操作由写前门禁管辖，且重复"读"判据不适用于写）。
+        let is_native_read = tool == "local_file" && {
+            let action = instruction.get_action().to_lowercase();
+            action.starts_with("read") || action.starts_with("list")
+        };
+        if !is_native_read && !READ_TOOLS.iter().any(|t| tool.contains(t)) {
             return None;
         }
         let params = instruction.get_params();
@@ -1047,6 +1054,39 @@ mod repeat_read_tests {
         // 重置后计数从 1 起：再连续两次放行，第 3 次同内容又拦（count ≥ 3）
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_none(), "重置后第 2 次放行");
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_some(), "第 3 次同内容再拦");
+    }
+
+    #[test]
+    fn local_file_native_reads_are_deduped_like_mcp_reads() {
+        let mut context = ctx();
+        let ws = std::env::temp_dir().join(format!("eval-repeat-read-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let file = ws.join("legacy.txt");
+        std::fs::write(&file, "stable content").unwrap();
+        let path_str = file.to_string_lossy().to_string();
+
+        let read_inst = |action: &str| crate::agent::types::AgentInstruction {
+            tool: Some("local_file".to_string()),
+            action: Some(action.to_string()),
+            command: Some(serde_json::json!({ "path": path_str.clone() })),
+            ..Default::default()
+        };
+
+        // 原生 local_file read：与 MCP 读取同一口径——第 1/2 次放行，第 3 次同内容拦截
+        assert!(context.check_repeat_read_dispatch(&read_inst("read"), &ws).is_none(), "第 1 次放行");
+        assert!(context.check_repeat_read_dispatch(&read_inst("read"), &ws).is_none(), "第 2 次放行");
+        let blocked = context.check_repeat_read_dispatch(&read_inst("read"), &ws);
+        assert!(blocked.is_some(), "第 3 次同内容必须拦截（原生工具此前完全不拦）");
+
+        // write/edit 不按重复读取判据处理（写操作归写前门禁管辖）
+        assert!(context.check_repeat_read_dispatch(&read_inst("write"), &ws).is_none());
+        assert!(context.check_repeat_read_dispatch(&read_inst("edit"), &ws).is_none());
+
+        // 内容变化后放行并重置
+        std::fs::write(&file, "changed content").unwrap();
+        assert!(context.check_repeat_read_dispatch(&read_inst("read"), &ws).is_none(), "内容变化后重读合法");
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
