@@ -613,6 +613,7 @@ async function runEvaluation() {
           throw new Error('实弹运行未产出会话 id（应用启动失败或评测启动被拒），详见上方 wdio 输出');
         }
         const sessionId = fs.readFileSync(sessionFile, 'utf8').trim();
+        options.agentSession = sessionId; // 记入报告与遥测关联
         const traceStatus = fs.existsSync(`${sessionFile}.status`)
           ? fs.readFileSync(`${sessionFile}.status`, 'utf8').trim()
           : 'unknown';
