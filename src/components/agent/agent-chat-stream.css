@@ -1484,9 +1484,69 @@ button.root-row {
     flex: 1 1 auto;
 }
 
-.running-preview-line.line-active-action .preview-text {
-    mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 100%);
-    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 100%);
+.running-preview-line .preview-flip-ticker-viewport {
+    position: relative;
+    overflow: hidden;
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 20px;
+    display: flex;
+    align-items: center;
+}
+
+.running-preview-line .preview-flip-ticker-viewport .preview-text {
+    width: 100%;
+    display: block;
+    line-height: 20px;
+    height: 20px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: clip;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* 仅在产生左侧溢出时才淡入遮罩，确保新行从头渲染时首字符 100% 清晰锐利 */
+.running-preview-line.line-active-action .preview-text.has-left-overflow {
+    mask-image: linear-gradient(to right, transparent 0, #000 18px, #000 100%);
+    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 18px, #000 100%);
+}
+
+/* 🌟 垂直翻牌 / 上下翻转 Ticker 动效 (Flip-up Ticker Transition) */
+.ticker-flip-enter-active,
+.ticker-flip-leave-active {
+    transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: transform, opacity;
+}
+
+.ticker-flip-leave-active {
+    position: absolute !important;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    pointer-events: none;
+    width: 100%;
+}
+
+.ticker-flip-enter-from {
+    opacity: 0;
+    transform: translateY(100%);
+}
+
+.ticker-flip-enter-to {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.ticker-flip-leave-from {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.ticker-flip-leave-to {
+    opacity: 0;
+    transform: translateY(-100%);
 }
 
 .running-preview-line .preview-think-tag {

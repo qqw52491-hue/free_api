@@ -43,6 +43,67 @@ export function formatTokenCount(n?: number): string {
     return String(n);
 }
 
+export interface ActiveThoughtLineInfo {
+    text: string;
+    lineKey: number;
+    totalLines: number;
+}
+
+/**
+ * 🌟 换行感知动态思考提取器：
+ * 1. 严格保留换行 \\n 的节奏感，不将整篇思考压平成单行长文本；
+ * 2. 提取当前正在活跃输出的最后有效行，并从开头展示渲染；
+ * 3. 返回 lineKey（当前有效行数计数），每次大模型输出 \\n 换行并开始新行时自增，
+ *    用于驱动前端 Vue Transition 触发上下翻牌推挤动效（旧行被顶出，新行从下方翻入）。
+ */
+export function extractActiveThoughtLineInfo(raw: string, maxLen = 300): ActiveThoughtLineInfo {
+    const fallback = "正在深入分析并规划下一步动作 …";
+    if (!raw || !raw.trim()) {
+        return { text: fallback, lineKey: 0, totalLines: 0 };
+    }
+
+    // 1. 去除完整代码块与流式未闭合代码块头
+    let cleaned = raw.replace(/```[\s\S]*?```/g, " ");
+    cleaned = cleaned.replace(/```[a-zA-Z0-9_\-]*\n?/g, " ");
+    // 2. 移除 <think>, </think>, <thought>, </thought> 等标签
+    cleaned = cleaned.replace(/<\/?[a-zA-Z0-9_\-]+(\s+[^>]*)?>/g, " ");
+
+    // 3. 按真实换行符拆分成行
+    const rawLines = cleaned.split(/\r?\n/);
+    const validLines: string[] = [];
+
+    for (const line of rawLines) {
+        const l = line
+            .replace(/^#{1,6}\s+/, "")            // 移除标题 #
+            .replace(/^>\s*/, "")                  // 移除引用 >
+            .replace(/^[-*+]\s+/, "")              // 移除无序列表 - * +
+            .replace(/^\d+[\.\)]\s+/, "")          // 移除有序列表 1. 2)
+            .replace(/^[•●▪▫]\s*/, "")             // 移除特殊 bullet 点
+            .replace(/[*_`~]/g, "")                // 移除加粗/强调/反引号
+            .replace(/\s+/g, " ")                 // 连续空白折叠
+            .trim();
+
+        if (l.length > 0) {
+            validLines.push(l);
+        }
+    }
+
+    if (validLines.length === 0) {
+        return { text: fallback, lineKey: 0, totalLines: 0 };
+    }
+
+    let current = validLines[validLines.length - 1];
+    if (current.length > maxLen) {
+        current = current.slice(0, maxLen);
+    }
+
+    return {
+        text: current,
+        lineKey: validLines.length,
+        totalLines: validLines.length,
+    };
+}
+
 export function extractActiveThoughtSentence(raw: string, maxLen = 350): string {
     const fallback = "正在深入分析并规划下一步动作 …";
     if (!raw) return fallback;
@@ -510,13 +571,16 @@ export function getRunningStagePreview(
     let line3Icon = "⚡";
     let line3Text = "正在执行操作 …";
     let line3Kind: StageRunningPreview["line3"]["actionKind"] = "other";
+    let line3LineKey: number | undefined;
 
     const activeThought = currentThought || (runningStep?.thought && (isThinking || runningStep.status === "running") ? runningStep.thought : "");
 
     if (isThinking || (activeThought && (!hasLiveStep || (runningStep?.status === "running" && !runningStep.tool)))) {
         line3Icon = "💭";
-        line3Text = extractActiveThoughtSentence(activeThought);
+        const lineInfo = extractActiveThoughtLineInfo(activeThought);
+        line3Text = lineInfo.text;
         line3Kind = "think";
+        line3LineKey = lineInfo.lineKey;
     } else if (runningStep && (runningStep.status === "running" || runningStep.status === "pending")) {
         const tool = (runningStep.tool || runningStep.action || "").toLowerCase();
         let targetFile = "";
@@ -649,13 +713,16 @@ export function getRunningStagePreview(
             line3Kind = "other";
         } else if (runningStep.thought) {
             line3Icon = "💭";
-            line3Text = extractActiveThoughtSentence(runningStep.thought);
+            const lineInfo = extractActiveThoughtLineInfo(runningStep.thought);
+            line3Text = lineInfo.text;
             line3Kind = "think";
+            line3LineKey = lineInfo.lineKey;
         }
     } else if (isThinking) {
         line3Icon = "💭";
         line3Text = "正在深入分析需求并规划步骤 …";
         line3Kind = "think";
+        line3LineKey = 0;
     } else {
         line3Icon = "⚡";
         line3Text = "正在协同推进阶段任务 …";
@@ -669,6 +736,7 @@ export function getRunningStagePreview(
             icon: line3Icon,
             text: line3Text,
             actionKind: line3Kind,
+            lineKey: line3LineKey,
         },
     };
 }

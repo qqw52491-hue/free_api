@@ -188,18 +188,24 @@
                             </span>
                         </div>
 
-                        <!-- 第 3 条数据：当前正在执行的动作 / 飞速流动的动态思考流 (带字体的流光动画 text-shimmer-flow) -->
+                        <!-- 第 3 条数据：当前正在执行的动作 / 飞速流动的动态思考流 (带字体的流光动画与换行垂直翻牌) -->
                         <div class="running-preview-line line-active-action">
                             <span class="preview-spinner manus-spinner mini"></span>
                             <span :key="getPlanRunningPreview(entry).line3.actionKind" class="preview-tool-icon icon-anim-switch">{{ getPlanRunningPreview(entry).line3.icon }}</span>
                             <span v-if="getPlanRunningPreview(entry).line3.actionKind === 'think'" class="preview-think-tag">思考:</span>
-                            <!-- 思考态/操作态：自然推挤与末尾视窗追踪，新字在右侧追加，超出时自然把左侧旧字顶出 -->
-                            <span
-                                v-scroll-tail
-                                class="preview-text text-shimmer-flow"
-                            >
-                                {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? (liveThoughtText || getPlanRunningPreview(entry).line3.text) : getPlanRunningPreview(entry).line3.text }}
-                            </span>
+                            <!-- 思考态换行垂直翻牌 / 操作态切换：新行从下方翻入且从头渲染，旧行被顶出 -->
+                            <div class="preview-flip-ticker-viewport">
+                                <Transition name="ticker-flip">
+                                    <span
+                                        :key="getLine3Key(entry)"
+                                        v-scroll-tail
+                                        class="preview-text text-shimmer-flow"
+                                        :title="getLine3FullText(entry)"
+                                    >
+                                        {{ getLine3DisplayText(entry) }}
+                                    </span>
+                                </Transition>
+                            </div>
                         </div>
                     </div>
 
@@ -457,17 +463,23 @@
                             <span class="preview-text">{{ props.currentGoal ? '目标：' + shortText(props.currentGoal, 60) : '规划：按阶段目标制定实施方案并有序推进' }}</span>
                         </div>
 
-                        <!-- 第 3 行：当前高速滚动推演的思考流光 (Ticker 滚动窗口，带有流光动画) -->
+                        <!-- 第 3 行：当前高速滚动推演的思考流光 (Ticker 滚动窗口，带有流光与垂直翻牌) -->
                         <div class="running-preview-line line-active-action">
                             <span class="preview-spinner manus-spinner mini"></span>
                             <span class="preview-tool-icon icon-anim-switch">💭</span>
                             <span class="preview-think-tag">思考:</span>
-                            <span
-                                v-scroll-tail
-                                class="preview-text text-shimmer-flow"
-                            >
-                                {{ liveThoughtText || '正在连接模型并深度思考规划执行步骤 …' }}
-                            </span>
+                            <div class="preview-flip-ticker-viewport">
+                                <Transition name="ticker-flip">
+                                    <span
+                                        :key="`init-think-${liveThoughtInfo.lineKey}`"
+                                        v-scroll-tail
+                                        class="preview-text text-shimmer-flow"
+                                        :title="liveThoughtInfo.text"
+                                    >
+                                        {{ liveThoughtInfo.text || '正在连接模型并深度思考规划执行步骤 …' }}
+                                    </span>
+                                </Transition>
+                            </div>
                         </div>
                     </div>
                 </article>
@@ -517,7 +529,7 @@ import { invoke } from "@tauri-apps/api/core";
 import AttachmentCard from "./AttachmentCard.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
 import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule } from "./types";
-import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtSentence } from "./diffUtils";
+import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtLineInfo } from "./diffUtils";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
 import { formatClock, formatDurationSeconds, formatMilliseconds, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
@@ -722,20 +734,44 @@ const activeThoughtStartedAt = ref<number | null>(null);
 const followLiveTail = ref(true);
 const planExpandedState = reactive<Record<string, boolean>>({});
 
-// 🌟 实时思考推演流：自然推挤与末尾视窗追踪 (Tail-follow Push)
-// 1. 新思考字符在末尾自然长出追加；
-// 2. 超出单行容器宽度时，保持末尾对齐右侧，自然将左侧旧内容顶出视口；
-// 3. 绝不重新从头打字加载，绝不移动整个容器元素，稳定丝滑呈现
-const liveThoughtText = computed(() => {
+// 🌟 换行感知实时思考流与上下垂直翻牌切换 (Flip-up Ticker)
+// 1. 严格保留大模型思考过程中的换行 \n 节奏，提取当前正在活跃输出的最后有效行并从头渲染；
+// 2. 换行触发 lineKey 自增，配合 Vue Transition 触发上下翻牌推挤（旧行被顶出，新行从下方翻入）；
+// 3. 在同一行内持续吐字时原地追加，若超出视口宽度则配合 v-scroll-tail 尾随平滑滚动。
+const liveThoughtInfo = computed(() => {
     const raw = props.thought;
-    if (!raw) return "正在深入分析全局上下文与决策规划 …";
-    return extractActiveThoughtSentence(raw, 350);
+    return extractActiveThoughtLineInfo(raw || "");
 });
+
+function getLine3DisplayText(entry: PlanEntry): string {
+    const preview = getPlanRunningPreview(entry);
+    if (preview.line3.actionKind === "think") {
+        return liveThoughtInfo.value.text || preview.line3.text || "正在深入分析全局上下文与决策规划 …";
+    }
+    return preview.line3.text || "正在执行操作 …";
+}
+
+function getLine3FullText(entry: PlanEntry): string {
+    const preview = getPlanRunningPreview(entry);
+    if (preview.line3.actionKind === "think") {
+        return props.thought || liveThoughtInfo.value.text || preview.line3.text;
+    }
+    return preview.line3.text;
+}
+
+function getLine3Key(entry: PlanEntry): string {
+    const preview = getPlanRunningPreview(entry);
+    if (preview.line3.actionKind === "think") {
+        const keyId = liveThoughtInfo.value.lineKey || preview.line3.lineKey || 0;
+        return `think-${entry.id}-${keyId}`;
+    }
+    return `action-${entry.id}-${preview.line3.actionKind}-${preview.line3.text}`;
+}
 
 // 🌟 平滑尾随滚动指令 (Smooth Tail-follow Scroll)
 // 1. 统一由 rAF 帧调度：在高频 Token 涌入时合并单帧内的重复更新，杜绝强制同步重排；
-// 2. 即时末尾对齐：右边每长出一个新字，左边老字被自然顶出视口，右侧始终紧贴边缘占满整行；
-// 3. 配合左侧 CSS mask-image 渐变，顶出的老字自然淡出消失。
+// 2. 即时末尾对齐：超长文本时右边每长出一个新字，左边老字被自然顶出视口；
+// 3. 动态 class：只有存在左侧溢出时才激活渐隐 mask，确保新行从头渲染时首字符 100% 清晰锐利。
 const scrollTailPending = new Set<HTMLElement>();
 let scrollTailRafId: number | null = null;
 
@@ -747,13 +783,20 @@ function flushScrollTail() {
         } else {
             el.scrollLeft = 0;
         }
+        if (el.scrollLeft > 6) {
+            el.classList.add("has-left-overflow");
+        } else {
+            el.classList.remove("has-left-overflow");
+        }
     }
     scrollTailPending.clear();
 }
 
-// 自定义指令：保证末尾文字始终对齐右侧视口，超出宽度时自然把左侧旧字顶出视口
+// 自定义指令：新行挂载时从 0 开始，溢出时自动平滑尾随
 const vScrollTail = {
     mounted(el: HTMLElement) {
+        el.scrollLeft = 0;
+        el.classList.remove("has-left-overflow");
         scrollTailPending.add(el);
         if (scrollTailRafId === null) {
             scrollTailRafId = requestAnimationFrame(flushScrollTail);

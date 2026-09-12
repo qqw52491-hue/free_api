@@ -427,6 +427,7 @@ export interface RunningPreviewLine3 {
     icon: string;
     text: string;
     actionKind: "write" | "read" | "search" | "command" | "review" | "think" | "other";
+    lineKey?: number;
 }
 
 export interface StageRunningPreview {
