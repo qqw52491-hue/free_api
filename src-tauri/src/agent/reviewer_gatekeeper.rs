@@ -488,7 +488,8 @@ pub async fn evaluate_finish_diff(
     // 🌟 1.5 范围漂移校验（全模式降级为审查重点提示，不再硬拦）：
     // 排查是发现驱动的，实现阶段扩围是常态——人类审批方案时同样无法预知全部涉改文件，
     // 文件清单硬拦在所有模式下都会误伤必要修复（评测实测）。
-    // 真正的不变量由"控制面自改升级"规则承担：改动监管机制自身必须升级人类，与文件清单无关。
+    // 控制面改动的监督由披露纪律（交付说明列出监管行为变化）+ 评测考卷 + diff 审查承担，
+    // 不再设独立硬拦（单机单人场景下该规则退化为全民打断）。
     let changed_files = baseline.collect_changed_file_paths(workspace, run_started_at);
     let policy = crate::agent::agent_policy::PolicyConfig::load_from_workspace_or_default(Some(workspace));
     if let Err(scope_err) = crate::agent::agent_policy::verify_scope_drift(
