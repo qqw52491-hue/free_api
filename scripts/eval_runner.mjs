@@ -564,7 +564,8 @@ async function runEvaluation() {
         if (!options.model) {
           throw new Error('实弹运行需要 --model <模型UUID>（或环境变量 FREE_API_LIVE_MODEL_ID）');
         }
-        const sessionFile = path.join(artifactsDir, `eval-session-${caseDef.id}.txt`);
+        const sessionFile = path.join(artifactsDir, `eval-session-${caseDef.id}-${Date.now()}.txt`);
+        // 会话文件带时间戳唯一化：支持同一考题并行跑多组对照（A/B 不同模型配置互不覆盖）
         // 清除上一轮会话残留，防止判分指向旧会话
         if (fs.existsSync(sessionFile)) fs.rmSync(sessionFile);
         if (fs.existsSync(`${sessionFile}.status`)) fs.rmSync(`${sessionFile}.status`);
