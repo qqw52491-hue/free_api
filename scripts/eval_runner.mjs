@@ -53,6 +53,9 @@ function parseCliArgs() {
     runAll: false,
     verbose: false,
     agentSession: null,
+    live: false,
+    model: process.env.FREE_API_LIVE_MODEL_ID?.trim() || null,
+    durationMinutes: Number(process.env.FREE_API_LIVE_MAX_DURATION_MINUTES ?? 25),
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -65,6 +68,12 @@ function parseCliArgs() {
       options.runAll = true;
     } else if (a === '--agent-session') {
       options.agentSession = args[++i];
+    } else if (a === '--live') {
+      options.live = true;
+    } else if (a === '--model') {
+      options.model = args[++i];
+    } else if (a === '--duration') {
+      options.durationMinutes = Number(args[++i]);
     } else if (a === '-v' || a === '--verbose') {
       options.verbose = true;
     }
@@ -547,6 +556,60 @@ async function runEvaluation() {
         };
         diffInfo = inspectGitDiff(sandboxPath);
         telemetry = { main_prompt: 0, main_completion: 0, review_prompt: 0, review_completion: 0, gate_fires: [], traces: [] };
+      } else if (options.live) {
+        // LIVE 编排：唤起 wdio 实弹 spec（应用内后台评测跑在沙盒工作区），结束后注入卷子机械判分
+        if (!options.model) {
+          throw new Error('实弹运行需要 --model <模型UUID>（或环境变量 FREE_API_LIVE_MODEL_ID）');
+        }
+        const sessionFile = path.join(artifactsDir, `eval-session-${caseDef.id}.txt`);
+        const planMode = caseDef.plan_mode || '';
+        const wdioEnv = {
+          ...process.env,
+          CARGO_TARGET_DIR: path.join(rootDir, 'src-tauri', 'target'),
+          FREE_API_LIVE_MODEL_ID: options.model,
+          FREE_API_LIVE_FIXTURE_DIR: sandboxPath,
+          FREE_API_EVALUATION_SCENARIO: 'custom_goal',
+          FREE_API_EVAL_CUSTOM_GOAL: caseDef.problem_statement,
+          FREE_API_LIVE_MAX_DURATION_MINUTES: String(options.durationMinutes),
+          FREE_API_EVALUATION_PLAN_MODE: planMode,
+          FREE_API_EVAL_SESSION_FILE: sessionFile,
+        };
+        console.log(`   🚀 [LIVE] 唤起实弹 Agent (model=${options.model.slice(0, 8)}, plan=${planMode || '默认'}, 上限 ${options.durationMinutes} 分钟)`);
+        console.log(`   📂 [LIVE] 沙盒工作区: ${sandboxPath}`);
+        const wdioStart = Date.now();
+        const wdioRes = spawnSync(
+          `npx wdio run wdio.conf.mjs --spec test/e2e/eval-case-agent.e2e.mjs`,
+          { cwd: rootDir, shell: true, encoding: 'utf8', env: wdioEnv, timeout: (options.durationMinutes + 15) * 60_000 }
+        );
+        console.log(`   ⏱️ [LIVE] 实弹阶段耗时 ${((Date.now() - wdioStart) / 1000 / 60).toFixed(1)} 分钟 (wdio exit=${wdioRes.status})`);
+
+        if (!fs.existsSync(sessionFile)) {
+          throw new Error('实弹运行未产出会话 id（应用启动失败或评测启动被拒），详见上方 wdio 输出');
+        }
+        const sessionId = fs.readFileSync(sessionFile, 'utf8').trim();
+        const traceStatus = fs.existsSync(`${sessionFile}.status`)
+          ? fs.readFileSync(`${sessionFile}.status`, 'utf8').trim()
+          : 'unknown';
+        console.log(`   🧾 [LIVE] 会话 ${sessionId} 终态: ${traceStatus}`);
+
+        mode = { isDryRun: false, label: `🔵 LIVE (model=${options.model.slice(0, 8)}, session=${sessionId}, 终态=${traceStatus})` };
+
+        // agent 作业环境不含卷子：判分前才注入测试补丁
+        const patchPath = testPatchAbsPath(caseDef);
+        if (patchPath && fs.existsSync(patchPath)) {
+          console.log(`   📥 [Judge] 注入判据测试补丁: ${path.basename(patchPath)}`);
+          execSync(`git apply "${patchPath}"`, { cwd: sandboxPath, stdio: 'pipe' });
+        }
+
+        const runResult = runCommand(sandboxPath, caseDef.verify_command, JUDGE_TIMEOUT_MS);
+        result = {
+          ...evaluateJudge(caseDef, runResult),
+          durationMs: 0,
+          stdoutSnippet: runResult.stdout.slice(-2000),
+          stderrSnippet: runResult.stderr.slice(-2000),
+        };
+        diffInfo = inspectGitDiff(sandboxPath);
+        telemetry = querySessionTelemetry(sessionId);
       } else {
         // LIVE：必须有 agent 会话；判分前注入测试补丁（agent 作业环境不含卷子，防改卷）
         if (!options.agentSession) {

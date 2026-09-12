@@ -9,6 +9,7 @@
   "test_patch": "test/eval_cases/patches/case_01_subagent_failover.test.patch",
   "scaffold_patch": "test/eval_cases/patches/case_01_subagent_failover.scaffold.patch",
   "expected_exit_code": 0,
+  "plan_mode": "cross_review",
   "max_steps": 15,
   "expected_diff_files": [
     "src-tauri/src/agent/checkpoint.rs",
