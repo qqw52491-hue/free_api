@@ -1250,29 +1250,59 @@ async fn run_agent_main_loop_in_workspace_inner(
         // 修复：绝不可以在这里清空 current_observation，因为这会导致 AI 看不到刚获取的页面数据
         // ================================================================
         // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
+        // （2026-09-13 夜实弹教训：单次 call_llm 硬失败——反代僵死挂 13min、claude 400/流错误
+        //   0s 即死——直接 mark_failed 整轮判死。此处把注释承诺的外层重试落地，共 3 次机会；
+        //   用户主动中断不重试。）
         // ================================================================
-        let outcome = match run_call_llm_and_run_tool_phases(
-            &app,
-            &state,
-            &registry_state,
-            &model_routing,
-            &run_id,
-            &workspace_dir,
-            &goal,
-            log_context,
-            transient_llm_request_retries,
-            &final_session_id,
-            step_id,
-            &mut context,
-            &mut checkpoint,
-            &mut run_machine,
-            &mut rx,
-            &mut interrupt_rx,
-            resume_instruction,
-            &mut run_trace_steps,
-        )
-        .await
-        {
+        let mut resume_instruction_opt = resume_instruction;
+        let mut phases_failure_count: u32 = 0;
+        let outcome = loop {
+            let phases_err = match run_call_llm_and_run_tool_phases(
+                &app,
+                &state,
+                &registry_state,
+                &model_routing,
+                &run_id,
+                &workspace_dir,
+                &goal,
+                log_context,
+                transient_llm_request_retries,
+                &final_session_id,
+                step_id,
+                &mut context,
+                &mut checkpoint,
+                &mut run_machine,
+                &mut rx,
+                &mut interrupt_rx,
+                resume_instruction_opt.take(),
+                &mut run_trace_steps,
+            )
+            .await
+            {
+                Ok(res) => break Ok(res),
+                Err(error) => error,
+            };
+            if phases_err.contains(crate::llm::STREAM_INTERRUPTED_ERROR) {
+                break Err(phases_err);
+            }
+            phases_failure_count += 1;
+            if phases_failure_count >= 3 {
+                break Err(phases_err);
+            }
+            let backoff_secs = 5u64 * phases_failure_count as u64;
+            let retry_warn = format!(
+                "【plan+exec 第 {} 次失败，{}s 后重试（本步最多 3 次机会）】{}",
+                phases_failure_count, backoff_secs, phases_err
+            );
+            println!("⚠️ {}", retry_warn);
+            let _ = app.emit(
+                &format!("agent-log-{}", final_session_id),
+                retry_warn.clone(),
+            );
+            context.add_error_feedback(&retry_warn);
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+        };
+        let outcome = match outcome {
             Ok(res) => res,
             Err(error) => {
                 let terminal_error = format!("任务执行失败: {}", error);
