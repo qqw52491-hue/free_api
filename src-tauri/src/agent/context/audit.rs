@@ -235,6 +235,10 @@ impl AuditLedger {
             return false;
         }
 
+        if base_cmd == "sed" {
+            return Self::is_sed_readonly(&tokens);
+        }
+
         matches!(
             base_cmd,
             "ls" | "cat"
@@ -250,6 +254,62 @@ impl AuditLedger {
                 | "which"
                 | "whereis"
         )
+    }
+
+    /// sed 只读判定：排查场景 `sed -n '1,5p' file` 属纯读取，但 sed 同时具备
+    /// 原地改写能力，必须逐项排除后才可算只读（宁可误记副作用，不可漏记真实写入）：
+    /// - 严禁 `-i` / `--in-place`（原地改写文件），含合并短旗标（如 `-in`、`-ni`）；
+    /// - 严禁 `-f` / `--file`（脚本来自文件，内容不可静态审计）；
+    /// - 严禁脚本文本含 `w` / `e` 文件写入或命令执行指令（如 `2w /tmp/x`）。
+    fn is_sed_readonly(tokens: &[&str]) -> bool {
+        for arg in &tokens[1..] {
+            let a = *arg;
+            if a == "-i" || a == "--in-place" || a == "-f" || a == "--file" {
+                return false;
+            }
+            if a.starts_with("--") && (a.starts_with("--in-place") || a.starts_with("--file")) {
+                return false;
+            }
+            // 合并短旗标（如 -in、-ni、-Ei）中的 'i' 同样代表 in-place
+            if a.starts_with('-') && !a.starts_with("--") && a[1..].contains('i') {
+                return false;
+            }
+            // 非旗标参数即脚本文本，检测 w/e 文件指令
+            if !a.starts_with('-') && Self::sed_script_has_write_directive(a) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// 检测 sed 脚本文本中的写入/执行指令。保守子串启发：
+    /// `w`（写入文件）或 `e`（执行外部命令）出现在行地址上下文（行首、数字/`$`/`;`/`}`/`,`/`/` 之后）
+    /// 即判非只读。误判方向是安全的——最多把一条纯读取 sed 记为副作用。
+    fn sed_script_has_write_directive(script: &str) -> bool {
+        let lower = script.to_lowercase();
+        let bytes = lower.as_bytes();
+        for (idx, &b) in bytes.iter().enumerate() {
+            if b != b'w' && b != b'e' {
+                continue;
+            }
+            let prev_ok = idx == 0
+                || matches!(
+                    bytes[idx - 1],
+                    b' ' | b'\t' | b';' | b'}' | b'$' | b',' | b'/' | b'\n' | b'0'..=b'9'
+                );
+            if !prev_ok {
+                continue;
+            }
+            // 指令后应跟空白 + 文件名/命令（w file / e cmd）；行尾裸 w/e 也保守视为命中
+            let rest = &lower[idx + 1..];
+            let next_ok = rest.is_empty()
+                || rest.starts_with(|c: char| c.is_ascii_whitespace())
+                || rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '/');
+            if next_ok {
+                return true;
+            }
+        }
+        false
     }
 
     /// 提取不可逆副作用的干净结构化参数元数据（保留合法完整的 JSON，绝不用 ... 截断破坏元数据）
@@ -281,6 +341,28 @@ impl SandwichContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sed_readonly_variants_are_classified_correctly() {
+        let ro = |cmd: &str| {
+            AuditLedger::is_readonly_shell_command(&serde_json::json!({ "command": cmd }))
+        };
+        // 纯读取：事故现场的排查形态，必须判只读
+        assert!(ro("sed -n '265,340p' src-tauri/src/agent/main_loop.rs"));
+        assert!(ro("sed 's/a/b/' file.txt"));
+        assert!(ro("sed -E -n '1,3p' file.txt"));
+        // 原地写入：一律非只读
+        assert!(!ro("sed -i 's/a/b/' file.txt"));
+        assert!(!ro("sed --in-place 's/a/b/' file.txt"));
+        assert!(!ro("sed -in 's/a/b/' file.txt"));
+        assert!(!ro("sed -ni 's/a/b/' file.txt"));
+        // 脚本来自文件：内容不可静态审计，非只读
+        assert!(!ro("sed -f script.sed file.txt"));
+        // 脚本内嵌 w 写文件 / e 执行命令指令：非只读
+        assert!(!ro("sed -n '2w /tmp/out.txt' file.txt"));
+        assert!(!ro("sed '$w /tmp/out' file.txt"));
+        assert!(!ro("sed -n '/x/e cat /etc/passwd' file.txt"));
+    }
 
     #[test]
     fn test_render_ledger_small() {

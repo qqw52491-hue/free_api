@@ -14,7 +14,9 @@ mod finish_guard_tests;
 pub use diff::{
     file_paths_match, parse_file_line_ref, parse_unified_diff, DiffContext,
 };
-pub(crate) use diff::review_contract_evidence_blockers;
+pub(crate) use diff::{
+    delivery_claims_code_modification, review_contract_evidence_blockers,
+};
 pub(crate) use state_updates::apply_instruction_state_updates;
 
 use crate::agent::change_verification::{change_verification_blocker, ChangeVerification};
@@ -66,6 +68,8 @@ pub(crate) fn finish_blockers_with_diff(
     side_effect_count: usize,
     change_verification: Option<&ChangeVerification>,
     diff_context: Option<&DiffContext>,
+    workspace_root: Option<&std::path::Path>,
+    delivery_text: Option<&str>,
 ) -> Vec<String> {
     let mut blockers = open_todo_descriptions(todos);
     if review_contract_started_this_turn {
@@ -78,6 +82,8 @@ pub(crate) fn finish_blockers_with_diff(
                 contract,
                 side_effect_count,
                 diff_context,
+                workspace_root,
+                delivery_text,
             ));
         }
     }
@@ -103,6 +109,8 @@ pub(crate) fn finish_blockers(
         review_contract_started_this_turn,
         side_effect_count,
         change_verification,
+        None,
+        None,
         None,
     )
 }

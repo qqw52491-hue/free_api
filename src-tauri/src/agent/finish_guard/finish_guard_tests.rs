@@ -1443,6 +1443,8 @@ index 123..456 100644
             1,
             Some(&verified),
             Some(&diff_ctx),
+            None,
+            None,
         );
         assert!(
             blockers.is_empty(),
@@ -1494,6 +1496,8 @@ def main():
             1,
             Some(&verified),
             Some(&diff_ctx),
+            None,
+            None,
         );
 
         assert_eq!(blockers.len(), 1);
@@ -1569,6 +1573,8 @@ index 123..456 100644
             1,
             Some(&verified),
             Some(&diff_ctx),
+            None,
+            None,
         );
 
         // scroll 命中 line 445 放行；render 引用 line 126 未被修改，被精准拦截！
@@ -1618,6 +1624,8 @@ index 123..456 100644
             1,
             Some(&verified),
             Some(&diff_ctx),
+            None,
+            None,
         );
 
         assert_eq!(blockers.len(), 1);
@@ -1642,7 +1650,16 @@ index 123..456 100644
                 },
             ],
         };
-        let blockers = finish_blockers_with_diff(&[], Some(&contract), false, 0, None, None);
+        let blockers = finish_blockers_with_diff(
+            &[],
+            Some(&contract),
+            false,
+            0,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(blockers.is_empty());
 
         // 场景 2：豁免义务 (waived) 不做 diff 校验
@@ -1674,6 +1691,8 @@ index 123..456 100644
             1,
             Some(&verified),
             Some(&empty_diff),
+            None,
+            None,
         );
         assert!(blockers.is_empty());
 
@@ -1700,6 +1719,8 @@ index 123..456 100644
             1,
             Some(&verified),
             Some(&empty_diff),
+            None,
+            None,
         );
         assert!(blockers.is_empty());
     }
@@ -1722,5 +1743,103 @@ index 123..456 100644
             ..Default::default()
         };
         assert!(is_write_or_side_effect_tool(&write_inst));
+    }
+
+    fn diagnostic_contract_with_refs(refs: &[&str]) -> ReviewContract {
+        ReviewContract {
+            scope_statement: "排查默认对话工作区绑定根因".to_string(),
+            obligations: vec![ReviewObligation {
+                id: "root-cause".to_string(),
+                question: "根因是否已定位并证实？".to_string(),
+                status: "evidenced".to_string(),
+                evidence_refs: refs.iter().map(|r| r.to_string()).collect(),
+                waived_reason: None,
+                verify_command: None,
+                verify_script: None,
+                verify_sha256: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn diagnostic_task_with_locatable_refs_passes_without_diff() {
+        // 事故现场形态：sed 排查命令产生副作用（side_effect_count = 1），但无任何代码改动
+        let ctx = DiffContext::from_diff_and_paths(None, &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let blockers = review_contract_evidence_blockers(
+            &diagnostic_contract_with_refs(&["src-tauri/src/agent/finish_guard/diff.rs:1"]),
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(blockers.is_empty(), "诊断引用静态可定位时应放行: {blockers:?}");
+
+        // 工作区相对路径（不带 src-tauri/ 前缀）同样可定位
+        let blockers = review_contract_evidence_blockers(
+            &diagnostic_contract_with_refs(&["src/agent/finish_guard/diff.rs:1"]),
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(blockers.is_empty(), "工作区相对诊断引用应放行: {blockers:?}");
+    }
+
+    #[test]
+    fn lying_writer_claiming_fix_with_empty_diff_is_blocked() {
+        let ctx = DiffContext::from_diff_and_paths(None, &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let delivery_text = "任务完成，已修复 main_loop.rs 的工作区绑定问题";
+        let blockers = review_contract_evidence_blockers(
+            &diagnostic_contract_with_refs(&["src/agent/finish_guard/diff.rs:1"]),
+            1,
+            Some(&ctx),
+            Some(root),
+            Some(delivery_text),
+        );
+        assert_eq!(blockers.len(), 1, "声称修改但无 diff 必须拦截");
+        assert!(blockers[0].contains("声称已修改/修复代码"));
+    }
+
+    #[test]
+    fn fabricated_line_numbers_fail_static_check() {
+        let ctx = DiffContext::from_diff_and_paths(None, &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let blockers = review_contract_evidence_blockers(
+            &diagnostic_contract_with_refs(&["src/agent/finish_guard/diff.rs:999999"]),
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(!blockers.is_empty(), "行号越界的引用必须拦截");
+        assert!(blockers[0].contains("未能在当前工作区源码中定位"));
+    }
+
+    #[test]
+    fn real_diff_still_requires_evidence_inside_diff() {
+        // 有真实改动时严格对账行为不变：证据命中 diff 放行，不在 diff 拦截
+        let raw_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,3 +10,4 @@\n fn a() {}\n";
+        let ctx = DiffContext::from_diff_and_paths(Some(raw_diff), &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let hit = review_contract_evidence_blockers(
+            &diagnostic_contract_with_refs(&["src/lib.rs:10"]),
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(hit.is_empty(), "证据落入真实 diff 应放行: {hit:?}");
+
+        let miss = review_contract_evidence_blockers(
+            &diagnostic_contract_with_refs(&["src/other_never_touched.rs:10"]),
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(!miss.is_empty(), "证据未落入真实 diff 必须拦截");
     }
 

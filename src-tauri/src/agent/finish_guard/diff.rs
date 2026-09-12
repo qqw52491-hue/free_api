@@ -254,17 +254,21 @@ pub fn parse_file_line_ref(raw: &str) -> Option<(String, u32, u32)> {
     }
 }
 
-/// 核对审查契约中声称 `evidenced` 的义务证据是否真实落在代码修改 (diff) 中。
+/// 核对审查契约中声称 `evidenced` 的义务证据是否真实成立。
 ///
-/// 遵循原则：
-/// 1. 按证据核对，不按写入次数对账：单次编辑同时修改多个函数/位置，只要证据行号均在 diff 中即可放行（防止误报）；
-/// 2. 严防虚假交付：只修一个文件却把另外几项也声称 evidenced 的行为，会被精确定位拦截；
-/// 3. 义务若带有宿主可执行验证命令 (verify_command)，则交由宿主执行器判定，此处不强制要求代码 diff；
-/// 4. 纯只读任务（side_effect_count == 0）免于 diff 行号门禁。
+/// 以**客观物理事实（工作区有无真实代码改动 diff）**分流，解耦"有副作用"与"必改代码"：
+/// 1. 有真实 diff → 严格对账：证据行号必须落入本次修改（防虚假交付，原逻辑不变）；
+/// 2. 无真实 diff（排查/测试/运维类任务的命令副作用）→ 证据降级为"静态可定位"校验：
+///    引用的 file:line 在当前工作区源码中客观存在即可，绝不要求落入不存在的 diff；
+/// 3. 无真实 diff 但交付**声称已修改代码** → 照常拦截（撒谎 writer 不因"无 diff"放行）；
+/// 4. 义务带宿主可执行验证命令 (verify_command) 的，交由宿主执行器判定，此处不核对；
+/// 5. 纯只读任务（side_effect_count == 0）不进入本门禁。
 pub(crate) fn review_contract_evidence_blockers(
     contract: &ReviewContract,
     side_effect_count: usize,
     diff_context: Option<&DiffContext>,
+    workspace_root: Option<&std::path::Path>,
+    delivery_text: Option<&str>,
 ) -> Vec<String> {
     if side_effect_count == 0 {
         return Vec::new();
@@ -272,6 +276,21 @@ pub(crate) fn review_contract_evidence_blockers(
     let Some(ctx) = diff_context else {
         return Vec::new();
     };
+
+    let has_actual_diff = !ctx.changed_files.is_empty();
+
+    if !has_actual_diff {
+        // 反撒谎硬拦截：声称修改了代码却拿不出任何真实改动
+        if delivery_text
+            .map(delivery_claims_code_modification)
+            .unwrap_or(false)
+        {
+            return vec![format!(
+                "交付声称已修改/修复代码，但工作区 Git diff 为空、亦无任何真实文件改动记录。请要么真实完成修改后重新交付，要么将\"已修复\"类措辞改为\"已定位根因\"，以诊断/分析报告形式交付。"
+            )];
+        }
+        return diagnostic_static_evidence_blockers(contract, ctx, workspace_root);
+    }
 
     let mut blockers = Vec::new();
 
@@ -327,5 +346,99 @@ pub(crate) fn review_contract_evidence_blockers(
     }
 
     blockers
+}
+
+/// 交付文本中声称"已修改代码"的关键词（启发式兜底，宁缺毋滥）：
+/// 漏判的最坏结果是放行撒谎 writer，误判的最坏结果是误拦诊断任务——
+/// 因此只收录强修改语义词，不收录"已更新/已调整"等常见于报告措辞的弱信号。
+pub(crate) const MODIFICATION_CLAIM_KEYWORDS: &[&str] = &[
+    "已修改", "已修复", "已更正", "已改写", "已重构", "已实现", "已写入", "已新增", "已添加",
+    "已删除", "已移除", "已编辑", "修改完成", "修复完成", "改动完成",
+];
+
+/// 判定交付文本是否声称"已经修改了代码"。用于无 diff 场景的反撒谎拦截。
+pub(crate) fn delivery_claims_code_modification(delivery_text: &str) -> bool {
+    let text = delivery_text.trim();
+    !text.is_empty() && MODIFICATION_CLAIM_KEYWORDS.iter().any(|kw| text.contains(kw))
+}
+
+/// 无真实 diff 时的诊断证据校验：引用能通过 affected_paths 回退，
+/// 或 file:line 在当前工作区源码中静态可定位（文件存在且行号在行数范围内）。
+fn diagnostic_static_evidence_blockers(
+    contract: &ReviewContract,
+    ctx: &DiffContext,
+    workspace_root: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+
+    for obligation in &contract.obligations {
+        let status = obligation.status.trim().to_ascii_lowercase();
+        if status != "evidenced" {
+            continue;
+        }
+        if obligation.verify_command.is_some() || obligation.verify_script.is_some() {
+            continue;
+        }
+
+        let mut has_valid_evidence = false;
+        let mut failed_refs = Vec::new();
+
+        for ref_str in &obligation.evidence_refs {
+            let valid = match parse_file_line_ref(ref_str) {
+                Some((ref_path, start_line, end_line)) => {
+                    ctx.matches_diff(&ref_path, start_line, end_line)
+                        || ref_statically_locatable(&ref_path, start_line, workspace_root)
+                }
+                None => false,
+            };
+            if valid {
+                has_valid_evidence = true;
+                break;
+            }
+            failed_refs.push(ref_str.trim().to_string());
+        }
+
+        if !has_valid_evidence {
+            blockers.push(format!(
+                "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的证据 `{}` 未能在当前工作区源码中定位。诊断/排查任务免于 diff 行号对账，但引用需客观存在（文件存在且行号在文件行数范围内）。请核对文件路径与行号，或将状态改为 waived 并说明理由。",
+                obligation.id,
+                obligation.question.trim(),
+                failed_refs.join(", ")
+            ));
+        }
+    }
+
+    blockers
+}
+
+/// 静态定位：文件存在于候选路径下且 start_line 未超出文件总行数。
+/// 候选顺序：引用原样（绝对/CWD 相对）→ 工作区相对 → 去 "src-tauri/" 前缀 → 工作区上级拼接（仓库根布局）。
+/// 纯文件名引用不做递归搜索（避免目录遍历开销与误匹配）。
+fn ref_statically_locatable(
+    ref_path: &str,
+    start_line: u32,
+    workspace_root: Option<&std::path::Path>,
+) -> bool {
+    let mut candidates: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(ref_path)];
+    if let Some(root) = workspace_root {
+        candidates.push(root.join(ref_path));
+        if let Some(stripped) = ref_path.strip_prefix("src-tauri/") {
+            candidates.push(root.join(stripped));
+        }
+        if let Some(parent) = root.parent() {
+            candidates.push(parent.join(ref_path));
+        }
+    }
+
+    for candidate in candidates {
+        let Ok(content) = std::fs::read(&candidate) else {
+            continue;
+        };
+        let total_lines = content.iter().filter(|&&b| b == b'\n').count() as u32
+            + u32::from(!content.is_empty() && *content.last().unwrap() != b'\n');
+        // 文件找到但行号越界 → 引用无效（防随手编造行号），不再尝试其余候选
+        return start_line <= total_lines.max(1);
+    }
+    false
 }
 

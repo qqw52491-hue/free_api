@@ -1537,6 +1537,14 @@ async fn run_agent_main_loop_in_workspace_inner(
             None
         };
 
+        // 交付摘要：义务证据校验反撒谎拦截与遥测路由判定共用
+        let instruction_summary = instruction
+            .get_params()
+            .get("command")
+            .and_then(|command| command.get("summary"))
+            .and_then(|s| s.as_str())
+            .map(str::to_string);
+
         let mut open_todos = finish_blockers_with_diff(
             &context.todo_list,
             context.review_contract.as_ref(),
@@ -1544,19 +1552,50 @@ async fn run_agent_main_loop_in_workspace_inner(
             side_effect_count,
             context.change_verification.as_ref(),
             diff_context.as_ref(),
+            Some(workspace_dir.as_path()),
+            instruction_summary.as_deref(),
         );
-        let contract_evidence_unresolved = context
+        let evidence_blockers = context
             .review_contract
             .as_ref()
             .map(|c| {
-                !review_contract_evidence_blockers(
+                review_contract_evidence_blockers(
                     c,
                     side_effect_count,
                     diff_context.as_ref(),
+                    Some(workspace_dir.as_path()),
+                    instruction_summary.as_deref(),
                 )
-                .is_empty()
             })
-            .unwrap_or(false);
+            .unwrap_or_default();
+        let contract_evidence_unresolved = !evidence_blockers.is_empty();
+        // 门禁触发遥测：义务证据三分法（diff 对账 / 修改声明拦截 / 诊断静态校验）的触发频率
+        if !evidence_blockers.is_empty() {
+            let route = if diff_context
+                .as_ref()
+                .map(|d| !d.changed_files.is_empty())
+                .unwrap_or(false)
+            {
+                "finish_obligation_evidence:diff_not_matched"
+            } else if instruction_summary
+                .as_deref()
+                .map(crate::agent::finish_guard::delivery_claims_code_modification)
+                .unwrap_or(false)
+            {
+                "finish_obligation_evidence:modification_claim_denied"
+            } else {
+                "finish_obligation_evidence:static_check_failed"
+            };
+            crate::agent::telemetry::record_gate_fire(
+                state.inner(),
+                &crate::agent::telemetry::GateFireRecord {
+                    run_id: &run_id,
+                    step_id: step_id as i64,
+                    gate: "finish_obligation_evidence",
+                    route,
+                },
+            );
+        }
         let complex_delivery_blocker =
             complex_delivery_blocker(&context, &instruction, is_finish, result.success);
         let complex_delivery_unresolved = complex_delivery_blocker.is_some();
