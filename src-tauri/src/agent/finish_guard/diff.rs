@@ -292,6 +292,32 @@ pub(crate) fn review_contract_evidence_blockers(
         return diagnostic_static_evidence_blockers(contract, ctx, workspace_root);
     }
 
+    // 当前 diff 覆盖地图：编辑会导致行号漂移，模型引用的证据行号极易变陈旧——
+    // 驳回时直接给出真实可用的 file:[起-止] 区间，让模型照图选行号，斩断"陈旧证据→驳回→原样重试"循环
+    let diff_map = format!(
+        "【当前 diff 实际覆盖区间（证据行号必须从此图中选取）】{}\n",
+        {
+            let mut parts: Vec<String> = ctx
+                .changed_files
+                .iter()
+                .map(|(f, hs)| {
+                    if hs.is_empty() {
+                        f.clone()
+                    } else {
+                        let ranges = hs
+                            .iter()
+                            .map(|(a, b)| format!("{}-{}", a, b))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("{} [{}]", f, ranges)
+                    }
+                })
+                .collect();
+            parts.sort();
+            parts.join("; ")
+        }
+    );
+
     let mut blockers = Vec::new();
 
     for obligation in &contract.obligations {
@@ -323,16 +349,18 @@ pub(crate) fn review_contract_evidence_blockers(
         if !has_valid_evidence {
             if obligation.evidence_refs.is_empty() {
                 blockers.push(format!(
-                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但未提供任何 evidence_refs 证据引用。请提供落入本次 diff 的代码行号证据，或将状态改为 waived 并说明理由。",
+                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但未提供任何 evidence_refs 证据引用。请提供落入本次 diff 的代码行号证据，或将状态改为 waived 并说明理由。\n{}",
                     obligation.id,
-                    obligation.question.trim()
+                    obligation.question.trim(),
+                    diff_map
                 ));
             } else if failed_refs.iter().any(|r| parse_file_line_ref(r).is_some()) {
                 blockers.push(format!(
-                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的代码证据 `{}` 未在本次真实代码改动 (diff) 中找到对应修改行。请补充落入本次真实 diff 的代码行号证据，或将状态改为 waived 并说明理由。",
+                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的代码证据 `{}` 未在本次真实代码改动 (diff) 中找到对应修改行——注意：你的编辑会使此前的行号发生漂移，陈旧行号不再有效。请对照下方真实覆盖区间重新引用，或将状态改为 waived 并说明理由。\n{}",
                     obligation.id,
                     obligation.question.trim(),
-                    failed_refs.join(", ")
+                    failed_refs.join(", "),
+                    diff_map
                 ));
             } else {
                 blockers.push(format!(
