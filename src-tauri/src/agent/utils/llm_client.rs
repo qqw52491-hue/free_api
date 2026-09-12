@@ -706,7 +706,22 @@ fn provider_requires_alternating_roles(config: &crate::llm::ModelConfig) -> bool
     match config.requires_alternating_roles {
         1 => true,
         0 => false,
-        _ => config.base_url.to_ascii_lowercase().contains("anthropic"),
+        // 自动探测：除 base_url 嗅探外，按模型家族识别 Claude 系——
+        // 中转站（如本地反代）base_url 不含 "anthropic"，但上游仍是严格交替协议；
+        // 连续同角色消息经其转换会给 assistant 轮注入无签名 thinking 块（实测 400:
+        // messages.N.content.0.thinking.signature: Field required）。
+        _ => {
+            if config.base_url.to_ascii_lowercase().contains("anthropic") {
+                return true;
+            }
+            matches!(
+                crate::agent::model_filter::detect_model_family(
+                    &config.model_name,
+                    &config.base_url
+                ),
+                crate::agent::model_filter::ModelFamily::ClaudeThinking
+            )
+        }
     }
 }
 
