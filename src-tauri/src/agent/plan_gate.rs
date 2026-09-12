@@ -136,6 +136,7 @@ pub(crate) fn check_pre_write_gatekeeper(
                 || result.route == "plan_gatekeeper:scorecard_missing"
                 || result.route == "plan_gatekeeper:need_human_approval"
                 || result.route == "plan_gatekeeper:escalation_required"
+                || result.route == "plan_gatekeeper:reviewer_all_failed"
             {
                 // 只要门禁文案明确指示去 ask_human 申请人工审批，就豁免冷却并标记由门禁引导仲裁
                 checkpoint.gate_human_escape_directed = true;
