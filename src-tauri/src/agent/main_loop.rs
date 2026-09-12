@@ -440,27 +440,43 @@ async fn run_agent_main_loop_in_workspace_inner(
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
     let session_tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
 
-    // 绑定主文件系统作用域
-    context.resource_scope =
-        context::resource_scope::ResourceScopeContract::bind_primary_filesystem(
-            &workspace_dir.to_string_lossy(),
-            context::resource_scope::ResourceScopeSource::SessionSelected,
-        );
+    // 绑定主文件系统作用域（仅显式项目会话或评测自动驾驶模式声明物理工作区，默认会话保持工作区为空）
+    if is_explicit_workspace || auto_pilot {
+        context.resource_scope =
+            context::resource_scope::ResourceScopeContract::bind_primary_filesystem(
+                &workspace_dir.to_string_lossy(),
+                context::resource_scope::ResourceScopeSource::SessionSelected,
+            );
+    }
 
     // 动态可操作文件边界卡片挂载在底层面包（M_Tail），每轮伴随状态卡投射，绝不污染 M0 顶层长前缀缓存
-    let mut manifest_text = format!(
-        "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
-         • 项目物理工作区: `{}`\n\
-           - 相对路径默认基于此目录解析（如 \"src/main.rs\"、\"package.json\"）；修改已有文件优先调用 `local_file` 的 `edit` 局部替换，禁止动辄全量重写。\n\
-           - 门禁与台账规则: 对项目源码的写操作受阶段审查门禁保护，成功写入将记入不可逆副作用台账。\n\
-         • 会话专属临时目录: `{}`\n\
-           - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
-           - 临时与未明确路径产物隔离: 凡未明确指定项目路径的临时文件、数据导出或中间草稿，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入项目物理工作区根目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
-           - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
-         • 物理牢笼约束: 任何超出上述双白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
-        workspace_dir.display(),
-        session_tmp_dir.display()
-    );
+    let mut manifest_text = if is_explicit_workspace || auto_pilot {
+        format!(
+            "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
+             • 项目物理工作区: `{}`\n\
+               - 相对路径默认基于此目录解析（如 \"src/main.rs\"、\"package.json\"）；修改已有文件优先调用 `local_file` 的 `edit` 局部替换，禁止动辄全量重写。\n\
+               - 门禁与台账规则: 对项目源码的写操作受阶段审查门禁保护，成功写入将记入不可逆副作用台账。\n\
+             • 会话专属临时目录: `{}`\n\
+               - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
+               - 临时与未明确路径产物隔离: 凡未明确指定项目路径的临时文件、数据导出或中间草稿，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入项目物理工作区根目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
+               - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
+             • 物理牢笼约束: 任何超出上述双白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
+            workspace_dir.display(),
+            session_tmp_dir.display()
+        )
+    } else {
+        format!(
+            "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
+             • 通用自由会话（未绑定项目工作区）\n\
+               - 当前对话为通用会话模式，未绑定具体项目工作区，工作区保持为空。请勿臆造或宣称已绑定任何本地项目工程目录。\n\
+             • 会话专属临时目录: `{}`\n\
+               - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
+               - 临时产物与草稿隔离: 凡未明确要求存放于项目工程中的临时文件、数据导出或中间脚本，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入宿主当前运行目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
+               - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
+             • 物理牢笼约束: 任何超出临时目录白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
+            session_tmp_dir.display()
+        )
+    };
 
     if is_project_session {
         if project_resources.is_empty() {
