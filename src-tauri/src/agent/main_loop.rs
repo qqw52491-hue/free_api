@@ -1007,6 +1007,28 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]{}成本: 输入 {} / 输出 {} tokens, 耗时 {}ms\n发现:\n- {}\n",
                                 receipt.child_run_id, receipt.confidence(), routing_str, scorecard_desc, receipt.prompt_tokens, receipt.completion_tokens, receipt.duration_ms, formatted_findings
                             ));
+                            // 审查发现自动闭环：登记为待办条目，finish 门禁要求逐条闭合——
+                            // 修复第八轮实测的"pro 审查员发现真缺口但被主脑静默丢弃"问题
+                            {
+                                let next_id = context
+                                    .todo_list
+                                    .iter()
+                                    .map(|t| t.id)
+                                    .max()
+                                    .map_or(0, |m| m + 1);
+                                for (offset, f) in findings.iter().enumerate() {
+                                    let desc = format!("[审查发现] {}", f.display_line());
+                                    if context.todo_list.iter().any(|t| t.description == desc) {
+                                        continue; // 去重：同一发现不重复登记
+                                    }
+                                    context.todo_list.push(crate::agent::types::TodoItem {
+                                        id: next_id + offset,
+                                        status: "pending".to_string(),
+                                        description: desc,
+                                        evidence_output_id: None,
+                                    });
+                                }
+                            }
                             // 【审查者故障转移链】invalid_output → 同参数重试；超时 → 切换跨平台备用审查员。
                             // 封顶 2 次；两次都失败 → 退款 + 升级人工（ask_human 路径不变）。
                             let failover_eligible = matches!(
