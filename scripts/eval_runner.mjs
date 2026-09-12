@@ -562,6 +562,9 @@ async function runEvaluation() {
           throw new Error('实弹运行需要 --model <模型UUID>（或环境变量 FREE_API_LIVE_MODEL_ID）');
         }
         const sessionFile = path.join(artifactsDir, `eval-session-${caseDef.id}.txt`);
+        // 清除上一轮会话残留，防止判分指向旧会话
+        if (fs.existsSync(sessionFile)) fs.rmSync(sessionFile);
+        if (fs.existsSync(`${sessionFile}.status`)) fs.rmSync(`${sessionFile}.status`);
         const planMode = caseDef.plan_mode || '';
         const wdioEnv = {
           ...process.env,
@@ -582,6 +585,11 @@ async function runEvaluation() {
           { cwd: rootDir, shell: true, encoding: 'utf8', env: wdioEnv, timeout: (options.durationMinutes + 15) * 60_000 }
         );
         console.log(`   ⏱️ [LIVE] 实弹阶段耗时 ${((Date.now() - wdioStart) / 1000 / 60).toFixed(1)} 分钟 (wdio exit=${wdioRes.status})`);
+        if (wdioRes.status !== 0) {
+            console.log(`   ❌ [LIVE] wdio 失败输出尾部（诊断用）:`);
+            console.log((wdioRes.stdout || '').split('\n').slice(-25).join('\n'));
+            console.log((wdioRes.stderr || '').split('\n').slice(-15).join('\n'));
+        }
 
         if (!fs.existsSync(sessionFile)) {
           throw new Error('实弹运行未产出会话 id（应用启动失败或评测启动被拒），详见上方 wdio 输出');
@@ -594,11 +602,17 @@ async function runEvaluation() {
 
         mode = { isDryRun: false, label: `🔵 LIVE (model=${options.model.slice(0, 8)}, session=${sessionId}, 终态=${traceStatus})` };
 
-        // agent 作业环境不含卷子：判分前才注入测试补丁
+        // agent 作业环境不含卷子：判分前才注入测试补丁（--3way 容忍 agent 编辑导致的上下文漂移，
+        // 失败降级 -C1 宽松匹配；agent 若恰好写了同名测试，参考卷已用规格专属名避免撞车）
         const patchPath = testPatchAbsPath(caseDef);
         if (patchPath && fs.existsSync(patchPath)) {
           console.log(`   📥 [Judge] 注入判据测试补丁: ${path.basename(patchPath)}`);
-          execSync(`git apply "${patchPath}"`, { cwd: sandboxPath, stdio: 'pipe' });
+          try {
+            execSync(`git apply --3way "${patchPath}"`, { cwd: sandboxPath, stdio: 'pipe' });
+          } catch {
+            console.log(`   ↩️ --3way 未命中，降级 -C1 宽松匹配重试`);
+            execSync(`git apply -C1 "${patchPath}"`, { cwd: sandboxPath, stdio: 'pipe' });
+          }
         }
 
         const runResult = runCommand(sandboxPath, caseDef.verify_command, JUDGE_TIMEOUT_MS);

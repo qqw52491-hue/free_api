@@ -20,7 +20,7 @@ index 500b1bf..fbe8b39 100644
      }
 +
 +    #[test]
-+    fn test_gate_handles_all_reviewers_failed_without_deadlock() {
++    fn test_spec_all_failed_batch_routes_to_reviewer_all_failed() {
 +        let db = setup_test_db();
 +        let context = SandwichContext::new("system".to_string(), "goal".to_string());
 +        let mut cp = AgentCheckpoint::new("test-run-fail".to_string(), &context);
