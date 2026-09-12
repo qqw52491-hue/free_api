@@ -149,6 +149,10 @@ fn test_2026_frontier_models_detection() {
     assert_eq!(detect_model_family("claude-fable-5", proxy_url), ModelFamily::ClaudeThinking);
     assert_eq!(detect_model_family("claude-opus-5", proxy_url), ModelFamily::ClaudeThinking);
 
+    // Claude Opus 4.x：上游默认开启 Extended Thinking，必须按思考家族清洗采样参数
+    assert_eq!(detect_model_family("claude-opus-4.6", proxy_url), ModelFamily::ClaudeThinking);
+    assert_eq!(detect_model_family("claude-opus-4-6-20260201", proxy_url), ModelFamily::ClaudeThinking);
+
     // DeepSeek R3
     assert_eq!(detect_model_family("deepseek-r3-preview", proxy_url), ModelFamily::DeepSeekReasoning);
 

@@ -44,6 +44,10 @@ pub fn detect_model_family(model_name: &str, base_url: &str) -> ModelFamily {
             || m.contains("reason")
             || m.contains("fable")
             || m.contains("opus-5")
+            // opus-4.x 上游部署普遍默认开启 Extended Thinking，采样参数必须按思考家族清洗
+            // （实测：claude-opus-4.6 带 top_p<0.95 请求直接 400 "`top_p` must be >= 0.95
+            //   or unset when thinking is enabled"）
+            || m.contains("opus-4")
             || m.contains("sonnet-4")
             || m.contains("sonnet-5")
             || m.contains("3-7")
