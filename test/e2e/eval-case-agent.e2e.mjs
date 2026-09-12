@@ -8,6 +8,7 @@ import { writeFileSync } from "node:fs";
 
 const appDb = "/Users/wx/Library/Application Support/free-api-chat/data_v2.db";
 const modelId = process.env.FREE_API_LIVE_MODEL_ID?.trim();
+const reviewerModelId = process.env.FREE_API_LIVE_REVIEWER_MODEL_ID?.trim() || null;
 const fixtureDir = process.env.FREE_API_LIVE_FIXTURE_DIR?.trim();
 const maxDurationMinutes = Number(process.env.FREE_API_LIVE_MAX_DURATION_MINUTES ?? 20);
 const sessionFile = process.env.FREE_API_EVAL_SESSION_FILE?.trim();
@@ -21,11 +22,17 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
     assert.ok(fixtureDir, "需要 FREE_API_LIVE_FIXTURE_DIR（沙盒工作区）");
     assert.ok(sessionFile, "需要 FREE_API_EVAL_SESSION_FILE");
 
-    const started = await browser.executeAsync(async (model, workspace, plan, minutes, done) => {
+    const started = await browser.executeAsync(async (model, reviewerModel, workspace, plan, minutes, done) => {
       try {
         const { invoke } = window.__TAURI__.core;
         const result = await invoke("start_background_agent_evaluation", {
-          modelRouting: { pro: model, flash: model, vision: model, reasoning_effort: "high" },
+          modelRouting: {
+            pro: model,
+            flash: model,
+            vision: model,
+            reasoning_effort: "high",
+            ...(reviewerModel ? { role_models: { reviewer: reviewerModel } } : {}),
+          },
           maxDurationMinutes: minutes,
           scenario: "custom_goal",
           routingPreset: null,
@@ -34,7 +41,7 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
         });
         done({ ok: true, result });
       } catch (error) { done({ ok: false, error: String(error) }); }
-    }, modelId, fixtureDir, planMode, maxDurationMinutes);
+    }, modelId, reviewerModelId, fixtureDir, planMode, maxDurationMinutes);
     assert.equal(started?.ok, true, started?.error ?? "后台评测启动失败");
     const sessionId = started.result?.session_id;
     assert.ok(sessionId, "缺少 session_id");

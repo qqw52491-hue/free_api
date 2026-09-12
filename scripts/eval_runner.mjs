@@ -55,6 +55,7 @@ function parseCliArgs() {
     agentSession: null,
     live: false,
     model: process.env.FREE_API_LIVE_MODEL_ID?.trim() || null,
+    reviewerModel: process.env.FREE_API_LIVE_REVIEWER_MODEL_ID?.trim() || null,
     durationMinutes: Number(process.env.FREE_API_LIVE_MAX_DURATION_MINUTES ?? 25),
   };
 
@@ -72,6 +73,8 @@ function parseCliArgs() {
       options.live = true;
     } else if (a === '--model') {
       options.model = args[++i];
+    } else if (a === '--reviewer-model') {
+      options.reviewerModel = args[++i];
     } else if (a === '--duration') {
       options.durationMinutes = Number(args[++i]);
     } else if (a === '-v' || a === '--verbose') {
@@ -570,6 +573,7 @@ async function runEvaluation() {
           ...process.env,
           CARGO_TARGET_DIR: path.join(rootDir, 'src-tauri', 'target'),
           FREE_API_LIVE_MODEL_ID: options.model,
+          ...(options.reviewerModel ? { FREE_API_LIVE_REVIEWER_MODEL_ID: options.reviewerModel } : {}),
           FREE_API_LIVE_FIXTURE_DIR: sandboxPath,
           FREE_API_EVALUATION_SCENARIO: 'custom_goal',
           FREE_API_EVAL_CUSTOM_GOAL: caseDef.problem_statement,
