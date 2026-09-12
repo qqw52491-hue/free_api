@@ -17,7 +17,7 @@ pub use diff::{
 pub(crate) use diff::{
     delivery_claims_code_modification, review_contract_evidence_blockers,
 };
-pub(crate) use state_updates::apply_instruction_state_updates;
+pub(crate) use state_updates::{apply_todo_update_guarded, apply_instruction_state_updates};
 
 use crate::agent::change_verification::{change_verification_blocker, ChangeVerification};
 use crate::agent::checkpoint::AgentCheckpoint;

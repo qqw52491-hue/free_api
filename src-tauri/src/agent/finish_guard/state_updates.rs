@@ -13,31 +13,7 @@ pub(crate) fn apply_instruction_state_updates(
     instruction: &AgentInstruction,
 ) -> bool {
     if !instruction.todo_update.is_empty() {
-        // 监管继承守卫：[审查发现] 前缀的待办是审查环节的监管产出，
-        // 不允许被 todo_update 静默剔除——更新中未保留的发现按原样恢复为 pending。
-        // 销账的唯一途径：在 todo_update 中保留该条目并显式置为 done/failed（附处理说明）。
-        let mut incoming = instruction.todo_update.clone();
-        // 先收集被剔除的审查发现（不可变借用），再统一恢复（可变借用）
-        let mut dropped_findings = Vec::new();
-        for existing in &context.todo_list {
-            if !existing.description.starts_with("[审查发现]") {
-                continue;
-            }
-            let kept = incoming
-                .iter()
-                .any(|t| t.id == existing.id || t.description == existing.description);
-            if !kept {
-                dropped_findings.push(existing.clone());
-            }
-        }
-        for restored in dropped_findings {
-            context.add_error_feedback(&format!(
-                "【审查发现待办被剔除，已自动恢复】\"{}\" 是审查环节的监管产出，禁止静默删除。要销账请在 todo_update 中保留该条目并置为 done（附处理说明）。",
-                restored.description
-            ));
-            incoming.push(restored);
-        }
-        context.todo_list = incoming;
+        apply_todo_update_guarded(context, &instruction.todo_update);
     }
 
     let review_contract_was_present = context.review_contract.is_some();
@@ -146,3 +122,40 @@ pub(crate) fn apply_instruction_state_updates(
     !review_contract_was_present && context.review_contract.is_some()
 }
 
+
+/// 应用 todo_update 并执行监管继承守卫。
+/// [审查发现] 前缀的待办是审查环节的监管产出，不允许被 todo_update 静默剔除——
+/// 更新中未保留的发现按原样恢复为 pending 并附恢复告警；
+/// 销账的唯一途径：在更新中保留该条目并显式置为 done/failed（附处理说明）。
+/// 所有 todo_list 的 todo_update 应用路径（loop_runner 状态更新 / main_loop 证据回填）
+/// 必须统一走本函数，杜绝旁路。
+pub(crate) fn apply_todo_update_guarded(
+    context: &mut context::SandwichContext,
+    todo_update: &[crate::agent::types::TodoItem],
+) {
+    if todo_update.is_empty() {
+        return; // 空更新 = 未尝试管理待办，保持原状
+    }
+    let mut incoming = todo_update.to_vec();
+    // 先收集被剔除的审查发现（不可变借用），再统一恢复（可变借用）
+    let mut dropped_findings = Vec::new();
+    for existing in &context.todo_list {
+        if !existing.description.starts_with("[审查发现]") {
+            continue;
+        }
+        let kept = incoming
+            .iter()
+            .any(|t| t.id == existing.id || t.description == existing.description);
+        if !kept {
+            dropped_findings.push(existing.clone());
+        }
+    }
+    for restored in dropped_findings {
+        context.add_error_feedback(&format!(
+            "【审查发现待办被剔除，已自动恢复】\"{}\" 是审查环节的监管产出，禁止静默删除。要销账请在 todo_update 中保留该条目并置为 done（附处理说明）。",
+            restored.description
+        ));
+        incoming.push(restored);
+    }
+    context.todo_list = incoming;
+}

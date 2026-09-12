@@ -2053,8 +2053,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                     item.evidence_output_id = Some(output_id.clone());
                 }
             }
-            // 证据关联后同步更新 todo_list
-            context.todo_list = instruction.todo_update.clone();
+            // 证据关联后同步更新 todo_list（走监管继承守卫：[审查发现] 禁止被静默剔除）
+            crate::agent::finish_guard::apply_todo_update_guarded(&mut context, &instruction.todo_update);
         }
 
         // ── Lesson 血缘召回记录：若当步工具是 search，将命中的 lesson 类型结果写入血缘表 ───────
