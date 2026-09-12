@@ -1774,6 +1774,15 @@ async fn run_agent_main_loop_in_workspace_inner(
 
                 if !review_res.is_passed() {
                 // 存在阻塞性缺陷！
+                crate::agent::telemetry::record_gate_fire(
+                    state.inner(),
+                    &crate::agent::telemetry::GateFireRecord {
+                        run_id: &run_id,
+                        step_id: step_id as i64,
+                        gate: "finish_review",
+                        route: "finish_review:blocking",
+                    },
+                );
                 if checkpoint.reviewer_retry_count < 3 {
                     checkpoint.reviewer_retry_count += 1;
                     checkpoint.last_reviewed_diff_hash = Some(review_res.diff_hash.clone());

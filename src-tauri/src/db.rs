@@ -668,6 +668,21 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     ",
     )?;
 
+    // 门禁触发遥测：每次拦截落一行，回答"哪些机制真实触发过、频率如何"，
+    // 为门禁机制的保留/退役提供数据。纯观测，不参与任何门禁逻辑。
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_gate_fires (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            step_id INTEGER NOT NULL,
+            gate TEXT NOT NULL,
+            route TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_gate_fires_route
+            ON agent_gate_fires(route);",
+    )?;
+
     // 滚动迁移：早期版本的 FTS 表用默认 unicode61 分词器（中文子串检索全部失效），
     // 检测到旧表时重建为 trigram，并从 agent_step_logs 主表回填索引（失败不阻断主流程）
     if let Err(e) = crate::agent::retrieval::ensure_trigram_fts(&conn) {
@@ -875,7 +890,10 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         );
     }
 
-    let _ = crate::agent::tools::role_manager::ensure_default_role_cards(&conn);
+    if let Err(e) = crate::agent::tools::role_manager::ensure_default_role_cards(&conn) {
+        // 预装失败不阻断启动，但必须留痕，避免内置卡缺失后 1v1 方案评审静默失效
+        eprintln!("[init_db] 预装内置角色卡失败: {e}");
+    }
 
     Ok(conn)
 }

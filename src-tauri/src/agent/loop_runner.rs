@@ -189,6 +189,15 @@ pub async fn run_tool_phase(
             step_id,
             false,
         ) {
+            crate::agent::telemetry::record_gate_fire(
+                state.inner(),
+                &crate::agent::telemetry::GateFireRecord {
+                    run_id: parent_run_id,
+                    step_id: step_id as i64,
+                    gate: "pre_write",
+                    route: &rejection.route,
+                },
+            );
             emit_tool_event(
                 app,
                 final_session_id,
@@ -221,6 +230,15 @@ pub async fn run_tool_phase(
                     success: false,
                     route: "plan_gatekeeper:reviewer_retry_limit".to_string(),
                 };
+                crate::agent::telemetry::record_gate_fire(
+                    state.inner(),
+                    &crate::agent::telemetry::GateFireRecord {
+                        run_id: parent_run_id,
+                        step_id: step_id as i64,
+                        gate: "pre_write",
+                        route: &result.route,
+                    },
+                );
                 emit_tool_event(
                     app,
                     final_session_id,
@@ -1790,6 +1808,15 @@ pub async fn run_tool_phase(
                                         step_id,
                                         true,
                                     ) {
+                                        crate::agent::telemetry::record_gate_fire(
+                                            state.inner(),
+                                            &crate::agent::telemetry::GateFireRecord {
+                                                run_id: parent_run_id,
+                                                step_id: step_id as i64,
+                                                gate: "pre_write",
+                                                route: &rejection.route,
+                                            },
+                                        );
                                         emit_tool_event(
                                             app,
                                             final_session_id,

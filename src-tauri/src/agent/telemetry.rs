@@ -112,6 +112,76 @@ pub fn list_llm_calls(db: &DbState, session_id: &str) -> Result<Vec<Value>, Stri
     Ok(calls)
 }
 
+/// 一次门禁拦截触发的纯观测记录（零行为参与）。
+/// 记录点在各门禁消费点（pre-write 两处、reviewer_retry_limit、finish_review），
+/// 用于回答：哪些拦截机制真实触发过、频率如何——为门禁机制的保留/退役提供数据。
+#[derive(Debug, Clone)]
+pub struct GateFireRecord<'a> {
+    pub run_id: &'a str,
+    pub step_id: i64,
+    /// 门禁家族：pre_write / finish_review / ...
+    pub gate: &'a str,
+    /// 拦截路由原文（如 plan_gatekeeper:escalation_required）
+    pub route: &'a str,
+}
+
+/// 写入一条门禁触发记录。失败只打日志不阻断主循环：
+/// 观测系统的故障不应影响被观测的循环（与 record_llm_call 同一容错纪律）。
+pub fn record_gate_fire(db: &DbState, record: &GateFireRecord) {
+    let conn = match db.0.lock() {
+        Ok(conn) => conn,
+        Err(_) => {
+            eprintln!("⚠️ [Telemetry] DB 锁不可用，跳过本条门禁触发记录");
+            return;
+        }
+    };
+    if let Err(e) = conn.execute(
+        "INSERT INTO agent_gate_fires (run_id, step_id, gate, route, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            record.run_id,
+            record.step_id,
+            record.gate,
+            record.route,
+            chrono::Utc::now().to_rfc3339()
+        ],
+    ) {
+        eprintln!("⚠️ [Telemetry] 门禁触发记录写入失败（不影响主流程）: {e}");
+    }
+}
+
+/// 汇总门禁触发次数（按 route 分组，触发次数降序）。
+/// 供评测报告/管理面板读取，回答"哪个机制在真实工作"。
+pub fn gate_fire_counts(db: &DbState) -> Vec<(String, i64)> {
+    let conn = match db.0.lock() {
+        Ok(conn) => conn,
+        Err(_) => {
+            eprintln!("⚠️ [Telemetry] DB 锁不可用，门禁触发统计返回空");
+            return Vec::new();
+        }
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT route, COUNT(*) AS fires FROM agent_gate_fires
+         GROUP BY route ORDER BY fires DESC, route ASC",
+    ) {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            eprintln!("⚠️ [Telemetry] 门禁触发统计查询失败: {e}");
+            return Vec::new();
+        }
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    });
+    match rows {
+        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Err(e) => {
+            eprintln!("⚠️ [Telemetry] 门禁触发统计读取失败: {e}");
+            Vec::new()
+        }
+    }
+}
+
 fn json_row(row: &rusqlite::Row<'_>) -> Value {
     let nullable = |idx: usize| -> Value {
         row.get::<_, Option<String>>(idx)
@@ -181,6 +251,14 @@ mod tests {
                 outcome TEXT NOT NULL DEFAULT 'instruction_ready',
                 request_try INTEGER NOT NULL DEFAULT 1,
                 transport_attempt_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE agent_gate_fires (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                step_id INTEGER NOT NULL,
+                gate TEXT NOT NULL,
+                route TEXT NOT NULL,
+                created_at TEXT NOT NULL
             );",
         )
         .unwrap();
@@ -234,6 +312,39 @@ mod tests {
                     None
                 },
             },
+        );
+    }
+
+    #[test]
+    fn gate_fires_roundtrip_and_aggregate_by_route() {
+        let db = test_db();
+        for (run_id, route) in [
+            ("run-1", "plan_gatekeeper:escalation_required"),
+            ("run-2", "plan_gatekeeper:escalation_required"),
+            ("run-2", "finish_review:blocking"),
+        ] {
+            record_gate_fire(
+                &db,
+                &GateFireRecord {
+                    run_id,
+                    step_id: 7,
+                    gate: if route.starts_with("finish_review") {
+                        "finish_review"
+                    } else {
+                        "pre_write"
+                    },
+                    route,
+                },
+            );
+        }
+
+        let counts = gate_fire_counts(&db);
+        assert_eq!(
+            counts,
+            vec![
+                ("plan_gatekeeper:escalation_required".to_string(), 2),
+                ("finish_review:blocking".to_string(), 1),
+            ]
         );
     }
 
