@@ -16,14 +16,33 @@ pub const MAX_CHILDREN_PER_KIND_PER_RUN: u8 = 2;
 pub const MAX_TOTAL_CHILDREN_PER_RUN: u8 = 6;
 // 向后兼容原有常量别名
 pub const MAX_CHILD_REVIEWS_PER_PARENT_RUN: u8 = MAX_CHILDREN_PER_KIND_PER_RUN;
-/// reviewer 单次调用超时（秒）：可通过 FREE_API_REVIEWER_TIMEOUT_SECS 调整。
+    /// reviewer 单次调用超时（秒）：可通过 FREE_API_REVIEWER_TIMEOUT_SECS 调整。
     /// 实测教训：45s 对慢平台/大证据包太紧——审查超时→退款→重派→再超时，死循环到模型弃疗。
-    fn child_timeout_secs() -> u64 {
+    /// 慢思考家族（Claude thinking 等）默认放宽到 120s：单审常超 45s，实测流错误+超时连发。
+    fn child_timeout_secs(model_name: &str) -> u64 {
         std::env::var("FREE_API_REVIEWER_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map(|v| v.clamp(30, 600))
-            .unwrap_or(45)
+            .unwrap_or_else(|| {
+                if matches!(
+                    crate::agent::model_filter::detect_model_family(model_name, ""),
+                    crate::agent::model_filter::ModelFamily::ClaudeThinking
+                ) {
+                    120
+                } else {
+                    45
+                }
+            })
+    }
+
+    /// 无模型上下文场景（如 reap 宽限计算）取家族默认上限，保证"宽限 > 超时"不变式。
+    fn max_child_timeout_secs() -> u64 {
+        std::env::var("FREE_API_REVIEWER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|v| v.clamp(30, 600))
+            .unwrap_or(120)
     }
 
 const CHILD_MAX_OUTPUT_TOKENS: i64 = 900;
@@ -1374,7 +1393,7 @@ pub async fn spawn_child_reviewer(
                 &mut on_stream_event,
             );
             let stream_result = match tokio::time::timeout(
-                Duration::from_secs(child_timeout_secs()),
+                Duration::from_secs(child_timeout_secs(&config.model_name)),
                 call,
             )
             .await
@@ -1717,7 +1736,7 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
             .and_then(|cfg| cfg.reviewer_reap_grace_secs)
             .map(|v| v.min(3600) as i64)
             .unwrap_or(600);
-        configured.max(child_timeout_secs() as i64 + 30)
+        configured.max(max_child_timeout_secs() as i64 + 30)
     };
     let mut reaped = 0usize;
     for (child_run_id, kind, started_at) in rows {
