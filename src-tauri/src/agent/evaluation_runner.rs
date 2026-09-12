@@ -8,6 +8,7 @@ use crate::agent::run_trace;
 use crate::db::DbState;
 use chrono::Utc;
 use rusqlite::params;
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
@@ -193,43 +194,79 @@ fn read_structured_monitor_snapshot(
     session_id: &str,
     event_pause_reason: Option<String>,
 ) -> Result<EvaluationMonitorSnapshot, String> {
-    let traces = run_trace::list_session_traces(db, session_id)?;
-    let latest_trace = traces.last();
-    let steps = latest_trace
-        .and_then(|trace| trace.get("steps"))
-        .and_then(Value::as_array);
-    let checkpoint = load_checkpoint(db, session_id)?;
-    let checkpoint_phase = checkpoint
-        .as_ref()
-        .map(|checkpoint| checkpoint.phase.as_str().to_string());
-    let checkpoint_reason = checkpoint
-        .as_ref()
-        .filter(|checkpoint| checkpoint.phase == AgentPhase::WaitUser)
-        .and_then(|checkpoint| checkpoint.last_error.clone());
+    // 轻量化采样：monitor 每 1s 跑一次，此前整载全部 trace 版本（steps_json 随步数
+    // 无界膨胀）+ 反序列化整个 checkpoint，长会话后期每 tick 数十 MB JSON 解析，
+    // 22 个并发 tick 打爆 DB 连接池，主循环饿死在连接互斥锁上整轮停摆（实测线程栈）。
+    // 快照只需要 ~200 字节的状态字段，全部走 SQL 内提取，绝不进 Rust 反序列化。
+    let conn = db.reader()?;
+    let trace_row = conn
+        .query_row(
+            "SELECT id, status, updated_at,
+                    json_array_length(steps_json),
+                    json_extract(steps_json, '$[#-1]'),
+                    (SELECT COUNT(*) FROM agent_run_traces WHERE session_id=t.session_id)
+             FROM agent_run_traces t WHERE t.session_id=?1
+             ORDER BY t.started_at DESC, t.id DESC LIMIT 1",
+            params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let (trace_id, trace_status, trace_updated_at, steps_count, latest_step_raw, trace_count) =
+        trace_row.unwrap_or((None, None, None, None, None, 0));
+    let latest_step: Option<Value> = latest_step_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok());
+
+    let checkpoint_row = conn
+        .query_row(
+            "SELECT phase, version, updated_at, json_extract(snapshot_json, '$.last_error')
+             FROM agent_checkpoints WHERE run_id=?1 ORDER BY rowid DESC LIMIT 1",
+            params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let (checkpoint_phase, checkpoint_version, checkpoint_updated_at, checkpoint_last_error) =
+        checkpoint_row
+            .map(|(phase, version, updated_at, last_error)| (Some(phase), Some(version), Some(updated_at), last_error))
+            .unwrap_or((None, None, None, None));
+    // 原语义：仅 WaitUser 阶段的 last_error 作为人工等待原因
+    let checkpoint_reason = match checkpoint_phase.as_deref() {
+        Some("wait_user") => checkpoint_last_error,
+        _ => None,
+    };
 
     Ok(EvaluationMonitorSnapshot {
         schema_version: 1,
         observed_at: Utc::now().to_rfc3339(),
         evaluation_id: evaluation_id.to_string(),
         session_id: session_id.to_string(),
-        trace_count: traces.len(),
-        latest_trace_id: latest_trace
-            .and_then(|trace| trace.get("id"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        latest_trace_status: latest_trace
-            .and_then(|trace| trace.get("status"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        latest_trace_updated_at: latest_trace
-            .and_then(|trace| trace.get("updated_at"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        latest_step_count: steps.map_or(0, Vec::len),
-        latest_step: steps.and_then(|steps| steps.last().cloned()),
+        trace_count: trace_count as usize,
+        latest_trace_id: trace_id,
+        latest_trace_status: trace_status,
+        latest_trace_updated_at: trace_updated_at,
+        latest_step_count: steps_count.unwrap_or(0) as usize,
+        latest_step: latest_step,
         checkpoint_phase,
-        checkpoint_version: checkpoint.as_ref().map(|checkpoint| checkpoint.version),
-        checkpoint_updated_at: checkpoint.map(|checkpoint| checkpoint.updated_at),
+        checkpoint_version,
+        checkpoint_updated_at,
         human_wait_reason: event_pause_reason.or(checkpoint_reason),
     })
 }
