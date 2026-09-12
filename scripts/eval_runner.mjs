@@ -579,6 +579,19 @@ async function runEvaluation() {
         };
         console.log(`   🚀 [LIVE] 唤起实弹 Agent (model=${options.model.slice(0, 8)}, plan=${planMode || '默认'}, 上限 ${options.durationMinutes} 分钟)`);
         console.log(`   📂 [LIVE] 沙盒工作区: ${sandboxPath}`);
+
+        // 确保应用二进制与当前代码一致——杜绝"改了代码忘重建，考卷跑在旧门禁上"的流程错误
+        console.log(`   🔨 [LIVE] 重建应用二进制 (增量，通常 <1 分钟)...`);
+        const buildRes = spawnSync('npm run test:e2e:build', {
+          cwd: rootDir, shell: true, encoding: 'utf8',
+          timeout: 20 * 60_000,
+        });
+        if (buildRes.status !== 0) {
+          console.log((buildRes.stdout || '').split('\n').slice(-8).join('\n'));
+          throw new Error(`应用构建失败 (exit=${buildRes.status})，取消本轮实弹`);
+        }
+        console.log(`   ✅ [LIVE] 应用已更新至当前代码`);
+
         const wdioStart = Date.now();
         const wdioRes = spawnSync(
           `npx wdio run wdio.conf.mjs --spec test/e2e/eval-case-agent.e2e.mjs`,
