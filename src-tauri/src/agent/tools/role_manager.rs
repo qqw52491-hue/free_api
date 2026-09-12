@@ -460,6 +460,51 @@ pub fn ensure_default_role_cards(conn: &rusqlite::Connection) -> Result<(), Stri
     )
     .map_err(|e| format!("升级 tech_lead 角色卡失败: {e}"))?;
 
+    // 联合会审专家预装：Tech Lead 的 escalate_roles 会点名这些专家，
+    // 卡不存在则多专家会审升级路径会因"查无此人"而断链。保护式预装（DO NOTHING）。
+    const COMMITTEE_SPECIALISTS: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "architect",
+            "架构评审专家",
+            "你是一名资深软件架构师，在多专家联合会审中负责架构维度的把关。评估要点：1) 改动是否与现有模块边界和分层契约一致；2) 状态共享与并发访问是否安全（锁、竞态、状态机收敛语义）；3) 是否引入不必要的耦合或破坏既有抽象；4) 向后兼容与迁移路径是否明确。在 findings 中给出具体定位（文件:行号）与理由。",
+            "架构/状态机/模块边界/并发安全",
+            "架构,并发,状态机,模块边界",
+        ),
+        (
+            "security_specialist",
+            "安全审查专家",
+            "你是一名应用安全专家，在多专家联合会审中负责安全维度的把关。评估要点：1) 输入校验与注入面（SQL/命令/路径拼接）；2) 鉴权与权限边界是否被改动弱化；3) 敏感信息（密钥/日志/临时文件）是否泄露；4) 失败路径是否泄露系统内部信息。在 findings 中给出具体定位与攻击场景。",
+            "安全/鉴权/注入面/敏感信息",
+            "安全,鉴权,注入,敏感信息",
+        ),
+        (
+            "performance_expert",
+            "性能评审专家",
+            "你是一名性能工程专家，在多专家联合会审中负责性能维度的把关。评估要点：1) 热点路径的复杂度与分配行为（重复计算/大对象拷贝/每步重编译）；2) 锁竞争与阻塞点；3) I/O 次数与批量机会；4) 缓存友好性与内存增长。在 findings 中给出具体定位与量化依据。",
+            "性能/热点/锁竞争/IO",
+            "性能,热点,锁,内存,IO",
+        ),
+    ];
+    for (idx, (name, label, persona, scope_hints, focus_domains)) in
+        COMMITTEE_SPECIALISTS.iter().enumerate()
+    {
+        conn.execute(
+            "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, created_at, updated_at)
+             VALUES (?1, ?2, ?3, '', ?4, ?5, '', 'reviewer', '', 0, 1, '[]', ?6, '[]', ?7, ?7)
+             ON CONFLICT(name) DO NOTHING",
+            rusqlite::params![
+                format!("default-role-committee-{}", idx + 1),
+                name,
+                label,
+                persona,
+                scope_hints,
+                focus_domains,
+                now
+            ],
+        )
+        .map_err(|e| format!("预装联合会审专家 {name} 失败: {e}"))?;
+    }
+
     Ok(())
 }
 
@@ -783,8 +828,10 @@ mod tests {
     #[test]
     fn role_cards_menu_lists_enabled_only() {
         let db = setup_db();
-        // 清理初始化预装卡片，校验空池基线
-        let _ = delete_card(&db, &json!({"name": "tech_lead"}));
+        // 清理初始化预装卡片（tech_lead + 联合会审专家），校验空池基线
+        for name in ["tech_lead", "architect", "security_specialist", "performance_expert"] {
+            let _ = delete_card(&db, &json!({ "name": name }));
+        }
         assert!(build_role_cards_menu(&db).unwrap().is_empty());
         upsert_card(&db, &json!({"name": "a_role", "label": "角色A", "persona_prompt": "描述A"})).unwrap();
         upsert_card(&db, &json!({"name": "b_role", "label": "角色B"})).unwrap();
