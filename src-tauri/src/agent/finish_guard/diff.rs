@@ -346,6 +346,30 @@ pub(crate) fn review_contract_evidence_blockers(
             }
         }
 
+        // 逐文件修正建议：对每个失败引用，直接给出该文件在 diff 中的实际区间，
+        // 把"驳回→模型自行换算行号→可能再次失败"的多轮循环压缩为"照抄建议"的一次性修正
+        let fix_suggestions = {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut suggestions = Vec::new();
+            for r in &failed_refs {
+                if let Some((ref_path, _, _)) = parse_file_line_ref(r) {
+                    for (df, hs) in &ctx.changed_files {
+                        if file_paths_match(&ref_path, df) && seen.insert(df.clone()) {
+                            let ranges = hs
+                                .iter()
+                                .map(|(a, b)| format!("{}-{}", a, b))
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            suggestions
+                                .push(format!("`{}` 的 diff 实际区间为 [{}] → 可引用 {}:<区间内行号>", ref_path, ranges, df));
+                            break;
+                        }
+                    }
+                }
+            }
+            suggestions.join("\n")
+        };
+
         if !has_valid_evidence {
             if obligation.evidence_refs.is_empty() {
                 blockers.push(format!(
@@ -356,11 +380,12 @@ pub(crate) fn review_contract_evidence_blockers(
                 ));
             } else if failed_refs.iter().any(|r| parse_file_line_ref(r).is_some()) {
                 blockers.push(format!(
-                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的代码证据 `{}` 未在本次真实代码改动 (diff) 中找到对应修改行——注意：你的编辑会使此前的行号发生漂移，陈旧行号不再有效。请对照下方真实覆盖区间重新引用，或将状态改为 waived 并说明理由。\n{}",
+                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的代码证据 `{}` 未在本次真实代码改动 (diff) 中找到对应修改行——注意：你的编辑会使此前的行号发生漂移，陈旧行号不再有效。请对照下方真实覆盖区间重新引用，或将状态改为 waived 并说明理由。\n{}\n💡 修正建议（照抄即可）：\n{}",
                     obligation.id,
                     obligation.question.trim(),
                     failed_refs.join(", "),
-                    diff_map
+                    diff_map,
+                    fix_suggestions
                 ));
             } else {
                 blockers.push(format!(
