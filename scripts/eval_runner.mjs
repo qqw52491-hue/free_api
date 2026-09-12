@@ -585,6 +585,32 @@ async function runEvaluation() {
         console.log(`   🚀 [LIVE] 唤起实弹 Agent (model=${options.model.slice(0, 8)}, plan=${planMode || '默认'}, 上限 ${options.durationMinutes} 分钟)`);
         console.log(`   📂 [LIVE] 沙盒工作区: ${sandboxPath}`);
 
+        // LLM 代理预检：代理宕机时本轮实弹必然全灭（调用挂死→超时判死，2026-09-12 夜实测），
+        // 快速失败并指明根因，避免整轮空转
+        {
+          const probePlatformId = spawnSync(
+            `sqlite3 "${appDbPath}" "SELECT platform_id FROM models WHERE id='${options.model}'"`,
+            { shell: true, encoding: 'utf8' }
+          ).stdout?.trim();
+          const probeBaseUrl = probePlatformId
+            ? spawnSync(
+                `sqlite3 "${appDbPath}" "SELECT base_url FROM platforms WHERE id='${probePlatformId}'"`,
+                { shell: true, encoding: 'utf8' }
+              ).stdout?.trim()
+            : '';
+          if (probeBaseUrl) {
+            const probe = spawnSync(
+              `curl -s -o /dev/null -w '%{http_code}' --max-time 5 '${probeBaseUrl.replace(/\/+$/, '')}/models'`,
+              { shell: true, encoding: 'utf8' }
+            );
+            const httpCode = (probe.stdout || '').trim();
+            if (!httpCode || httpCode === '000') {
+              throw new Error(`LLM 代理预检失败：${probeBaseUrl} 不可达（连接被拒或超时）。请先恢复本地反代（Docker/OrbStack 与 antigravity-manager 容器）再跑实弹。`);
+            }
+            console.log(`   🩺 [LIVE] LLM 代理预检通过 (${probeBaseUrl} → HTTP ${httpCode})`);
+          }
+        }
+
         // 确保应用二进制与当前代码一致——杜绝"改了代码忘重建，考卷跑在旧门禁上"的流程错误
         console.log(`   🔨 [LIVE] 重建应用二进制 (增量，通常 <1 分钟)...`);
         const buildRes = spawnSync('npm run test:e2e:build', {
