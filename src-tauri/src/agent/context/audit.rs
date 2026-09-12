@@ -202,6 +202,12 @@ impl AuditLedger {
         let first = tokens[0];
         let base_cmd = first.split('/').last().unwrap_or(first).trim();
 
+        // 重定向即写入：带 `>` 输出重定向的命令不再算只读（如 `echo x >> file`、`git diff > patch`）。
+        // 引号内的 `>` 字面量不触发——先抹掉引号内内容再做结构检测。
+        if Self::blank_quoted_segments(&tokens.join(" ")).contains('>') {
+            return false;
+        }
+
         if base_cmd == "git" {
             let mut skip_next = false;
             for arg in &tokens[1..] {
@@ -256,12 +262,38 @@ impl AuditLedger {
         )
     }
 
+    /// 抹掉引号内的内容（保留字符位置结构），用于重定向/管道等结构性检测——
+    /// 避免 `grep "a > b" file` 这类引号内字面量被误判为输出重定向。
+    pub(crate) fn blank_quoted_segments(cmd: &str) -> String {
+        let mut out = String::with_capacity(cmd.len());
+        let mut quote: Option<char> = None;
+        for c in cmd.chars() {
+            match quote {
+                Some(q) => {
+                    if c == q {
+                        quote = None;
+                    }
+                    out.push(' ');
+                }
+                None => {
+                    if c == '\'' || c == '"' {
+                        quote = Some(c);
+                        out.push(' ');
+                    } else {
+                        out.push(c);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// sed 只读判定：排查场景 `sed -n '1,5p' file` 属纯读取，但 sed 同时具备
     /// 原地改写能力，必须逐项排除后才可算只读（宁可误记副作用，不可漏记真实写入）：
     /// - 严禁 `-i` / `--in-place`（原地改写文件），含合并短旗标（如 `-in`、`-ni`）；
     /// - 严禁 `-f` / `--file`（脚本来自文件，内容不可静态审计）；
-    /// - 严禁脚本文本含 `w` / `e` 文件写入或命令执行指令（如 `2w /tmp/x`）。
-    fn is_sed_readonly(tokens: &[&str]) -> bool {
+    /// - 严禁脚本文本中出现 `w` / `e` 文件写入或命令执行指令（如 `2w /tmp/x`）。
+    pub(crate) fn is_sed_readonly(tokens: &[&str]) -> bool {
         for arg in &tokens[1..] {
             let a = *arg;
             if a == "-i" || a == "--in-place" || a == "-f" || a == "--file" {
@@ -341,6 +373,21 @@ impl SandwichContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_redirection_disqualifies_readonly() {
+        let ro = |cmd: &str| {
+            AuditLedger::is_readonly_shell_command(&serde_json::json!({ "command": cmd }))
+        };
+        // 引号内的 `>` 是字面量，不算重定向
+        assert!(ro("grep 'a > b' file.txt"));
+        assert!(ro("echo hello"));
+        // 任何输出重定向即写入，不再算只读
+        assert!(!ro("echo hacked >> ~/.zshrc"));
+        assert!(!ro("git diff > patch.diff"));
+        assert!(!ro("cat a > b"));
+        assert!(!ro("sed -n '1p' file > out.txt"));
+    }
 
     #[test]
     fn sed_readonly_variants_are_classified_correctly() {

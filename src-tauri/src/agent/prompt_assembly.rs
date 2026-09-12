@@ -247,9 +247,10 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "local_shell",
-        summary: "本地工作区终端命令执行工具：执行构建、测试、代码检查与环境探针（受工作区物理边界与超时保护，工具链PATH自动补齐）",
+        summary: "本地工作区终端命令执行工具：执行构建、测试、代码检查与环境探针（受工作区物理边界与超时保护，工具链PATH自动补齐）。⚠️【工具排他约束】严禁挪用为文件阅读器：读取文件必须用 local_file(action: \"read\")，代码检索必须用 search",
         actions: &[
             "exec(command: string, args?: string[], cwd?: string, timeout_secs?: number, env?: object) — 在项目工作区执行 shell 命令行（支持参数数组与自定义环境变量）",
+            "⚠️【严禁滥用】禁止用 cat/sed/head/tail 等命令查看或读取文件内容——shell 读文件无法建立乐观并发哈希基线（后续 edit/write 该文件会被硬拦截），且纯文件读取命令会被工具误用拦截器软驳回并引导纠正",
         ],
     },
 ];
