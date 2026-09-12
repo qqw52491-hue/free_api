@@ -670,6 +670,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
 
     // 门禁触发遥测：每次拦截落一行，回答"哪些机制真实触发过、频率如何"，
     // 为门禁机制的保留/退役提供数据。纯观测，不参与任何门禁逻辑。
+    // 注意顺序：先建表/补列，最后建索引——索引引用的新列在旧库上必须先经 ALTER 补齐。
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS agent_gate_fires (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -679,17 +680,20 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             gate TEXT NOT NULL,
             route TEXT NOT NULL,
             created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_agent_gate_fires_route
-            ON agent_gate_fires(route);
-        CREATE INDEX IF NOT EXISTS idx_agent_gate_fires_session
-            ON agent_gate_fires(session_id);",
+        );",
     )?;
     // 滚动迁移：早期版本只有 run_id（UUID），评测报告按 session_id 关联会恒空
+    // （列已存在时本语句报 duplicate column，属于正常情况，静默忽略）
     let _ = conn.execute(
         "ALTER TABLE agent_gate_fires ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
         [],
     );
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_agent_gate_fires_route
+            ON agent_gate_fires(route);
+        CREATE INDEX IF NOT EXISTS idx_agent_gate_fires_session
+            ON agent_gate_fires(session_id);",
+    )?;
 
     // 滚动迁移：早期版本的 FTS 表用默认 unicode61 分词器（中文子串检索全部失效），
     // 检测到旧表时重建为 trigram，并从 agent_step_logs 主表回填索引（失败不阻断主流程）
