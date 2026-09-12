@@ -193,6 +193,7 @@ pub async fn run_tool_phase(
                 state.inner(),
                 &crate::agent::telemetry::GateFireRecord {
                     run_id: parent_run_id,
+                    session_id: &final_session_id,
                     step_id: step_id as i64,
                     gate: "pre_write",
                     route: &rejection.route,
@@ -234,6 +235,7 @@ pub async fn run_tool_phase(
                     state.inner(),
                     &crate::agent::telemetry::GateFireRecord {
                         run_id: parent_run_id,
+                        session_id: &final_session_id,
                         step_id: step_id as i64,
                         gate: "pre_write",
                         route: &result.route,
@@ -1812,6 +1814,7 @@ pub async fn run_tool_phase(
                                             state.inner(),
                                             &crate::agent::telemetry::GateFireRecord {
                                                 run_id: parent_run_id,
+                                                session_id: &final_session_id,
                                                 step_id: step_id as i64,
                                                 gate: "pre_write",
                                                 route: &rejection.route,

@@ -347,7 +347,7 @@ function querySessionTelemetry(sessionId) {
     let gateFires = [];
     try {
       const rawGates = execSync(
-        `sqlite3 "${appDbPath}" "SELECT gate, route, count(*) FROM agent_gate_fires WHERE run_id='${sessionId}' GROUP BY gate, route"`,
+        `sqlite3 "${appDbPath}" "SELECT gate, route, count(*) FROM agent_gate_fires WHERE session_id='${sessionId}' GROUP BY gate, route"`,
         { encoding: 'utf8' }
       ).trim();
       if (rawGates) {

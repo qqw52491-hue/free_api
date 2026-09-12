@@ -1590,6 +1590,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 state.inner(),
                 &crate::agent::telemetry::GateFireRecord {
                     run_id: &run_id,
+                    session_id: &final_session_id,
                     step_id: step_id as i64,
                     gate: "finish_obligation_evidence",
                     route,
@@ -1833,6 +1834,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     state.inner(),
                     &crate::agent::telemetry::GateFireRecord {
                         run_id: &run_id,
+                        session_id: &final_session_id,
                         step_id: step_id as i64,
                         gate: "finish_review",
                         route: "finish_review:blocking",

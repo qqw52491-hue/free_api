@@ -362,7 +362,8 @@ pub fn verify_scope_drift(
 
     if !unapproved_high_risk.is_empty() {
         return Err(format!(
-            "【越权逃逸拦截】检测到实际代码改动了未经 Plan 审批的高危文件: {:?}！Plan 中仅申报了: {:?}。禁止暗度陈仓！",
+            "【越权逃逸拦截】检测到实际代码改动了未经 Plan 审批的高危文件: {:?}！Plan 中仅申报了: {:?}。\n\
+             💡 排查中发现必须修改未申报文件是正常的——补救通道：把这些文件与原因补入方案（更新计划申报），重新派发 child_reviewer 评审通过后，写入时名单会自动扩容；切勿不申报直接交付。",
             unapproved_high_risk, approved
         ));
     }

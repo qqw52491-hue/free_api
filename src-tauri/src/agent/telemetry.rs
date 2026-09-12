@@ -118,8 +118,10 @@ pub fn list_llm_calls(db: &DbState, session_id: &str) -> Result<Vec<Value>, Stri
 #[derive(Debug, Clone)]
 pub struct GateFireRecord<'a> {
     pub run_id: &'a str,
+    /// 会话 id：评测报告/面板按会话聚合时使用（run_id 是内部运行标识，二者不同）
+    pub session_id: &'a str,
     pub step_id: i64,
-    /// 门禁家族：pre_write / finish_review / ...
+    /// 门禁家族：pre_write / finish_review / finish_obligation_evidence / ...
     pub gate: &'a str,
     /// 拦截路由原文（如 plan_gatekeeper:escalation_required）
     pub route: &'a str,
@@ -136,10 +138,11 @@ pub fn record_gate_fire(db: &DbState, record: &GateFireRecord) {
         }
     };
     if let Err(e) = conn.execute(
-        "INSERT INTO agent_gate_fires (run_id, step_id, gate, route, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO agent_gate_fires (run_id, session_id, step_id, gate, route, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![
             record.run_id,
+            record.session_id,
             record.step_id,
             record.gate,
             record.route,
@@ -255,6 +258,7 @@ mod tests {
             CREATE TABLE agent_gate_fires (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL,
+                session_id TEXT NOT NULL DEFAULT '',
                 step_id INTEGER NOT NULL,
                 gate TEXT NOT NULL,
                 route TEXT NOT NULL,
@@ -327,6 +331,7 @@ mod tests {
                 &db,
                 &GateFireRecord {
                     run_id,
+                    session_id: "sess-eval",
                     step_id: 7,
                     gate: if route.starts_with("finish_review") {
                         "finish_review"

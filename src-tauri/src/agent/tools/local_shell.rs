@@ -192,6 +192,7 @@ pub fn dispatch(
             db,
             &crate::agent::telemetry::GateFireRecord {
                 run_id: session_id,
+                session_id: &session_id,
                 step_id: 0,
                 gate: "shell_tool_misuse",
                 route: "shell_tool_misuse:file_read_via_shell",
