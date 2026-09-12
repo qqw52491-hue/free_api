@@ -295,6 +295,14 @@ fn execute_read(
         resolved.display_path, total_lines, start_line, slice_end
     );
 
+    // 导航提示：窗口式读取时提示"可整读"，引导模型一次性建立文件全貌而非碎片化重读
+    if (start_line > 1 || slice_end < total_lines) && total_lines <= 1200 {
+        output.push_str(&format!(
+            "\n💡 该文件共 {} 行，未指定行号区间即可一次读取全文，避免碎片化重读。\n",
+            total_lines
+        ));
+    }
+
     for (idx, line) in all_lines[slice_start..slice_end].iter().enumerate() {
         let line_num = slice_start + idx + 1;
         output.push_str(&format!("{:4}: {}\n", line_num, line));
