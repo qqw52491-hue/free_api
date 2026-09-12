@@ -31,7 +31,8 @@ pub const MAX_CHILD_REVIEWS_PER_PARENT_RUN: u8 = MAX_CHILDREN_PER_KIND_PER_RUN;
                 ) {
                     120
                 } else {
-                    45
+                    // 60s：实测 pro 审查大证据包 45s 下 2/4 超时（quota 健康时也逼近上限）
+                    60
                 }
             })
     }
