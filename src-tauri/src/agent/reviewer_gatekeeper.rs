@@ -475,6 +475,7 @@ pub async fn evaluate_finish_diff(
     host_verification: Option<&str>,
     human_waivers: Option<&str>,
     approved_target_files: Option<&[String]>,
+    plan_mode: Option<crate::agent::checkpoint::PlanExecutionMode>,
 ) -> ReviewResult {
     let started_at = std::time::Instant::now();
 
@@ -483,7 +484,9 @@ pub async fn evaluate_finish_diff(
         return ReviewResult::skipped_empty();
     };
 
-    // 🌟 1.5 真实 Git Diff 范围防逃逸校验 (Scope Drift Guard)
+    // 🌟 1.5 范围漂移校验（降级为审查重点提示，不再硬拦）：
+    // 排查是发现驱动的——实现阶段扩围是常态，硬拦会把必要修复逼进死胡同（评测实测）。
+    // 仅 plan_approval 模式保留硬拦：文件清单是人类亲自批准的契约，越界即违约。
     let changed_files = baseline.collect_changed_file_paths(workspace, run_started_at);
     let policy = crate::agent::agent_policy::PolicyConfig::load_from_workspace_or_default(Some(workspace));
     if let Err(scope_err) = crate::agent::agent_policy::verify_scope_drift(
@@ -491,7 +494,13 @@ pub async fn evaluate_finish_diff(
         &changed_files,
         &policy,
     ) {
-        return ReviewResult::rejected_with_scope_drift(&scope_err, &diff_hash);
+        if plan_mode == Some(crate::agent::checkpoint::PlanExecutionMode::PlanApproval) {
+            return ReviewResult::rejected_with_scope_drift(&scope_err, &diff_hash);
+        }
+        review_material.push_str(&format!(
+            "\n\n【⚠️ 审查重点：本次修改涉及计划外高危文件，请重点核对其必要性与安全性】\n{}\n（排查中发现必须修改未申报文件属正常扩围，已自动纳入本轮审查范围）\n",
+            scope_err
+        ));
     }
 
     // 阶段审查 final_only 记账（carry-over）：最终交付前必须逐条解决的义务

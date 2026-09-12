@@ -1810,6 +1810,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     host_verification.as_deref(),
                     human_waivers.as_deref(),
                     checkpoint.approved_target_files.as_deref(),
+                    Some(checkpoint.plan_mode),
                 )
                 .await;
 
