@@ -3,7 +3,7 @@
   "title": "多智能体并发审查子代理超时/崩溃故障转移与死锁排查",
   "tier": "gold",
   "base_commit": "b426090~1",
-  "problem_statement": "【故障复现报障】在多 Agent 并发交叉审查模式（PlanReviewBatchState）下，当某一个专精审查员 (child_reviewer) 因网络波动超时、被操作系统意外杀灭或退出时，系统状态机出现严重死锁：父会话持续在 wait_jobs 处无限挂起，批状态机既未记录 failed_run_ids，也未触发替补审查员派发机制。请审查 checkpoint.rs 与 plan_gate.rs 状态流转，修复此子代理容灾故障，确保相关审查批次在遇到失败节点时能够完成收敛并闭环。\n\n【验收标准补充】修复后，当一批审查员全部失败（无任何成功交付）时，写前门禁必须给出明确的失败引导路由 plan_gatekeeper:reviewer_all_failed（提示主脑重试或升级），而不是落入 plan_gatekeeper:scorecard_missing 等无关分支——分支判定顺序属于验收范围。",
+  "problem_statement": "【故障复现报障】在多 Agent 并发交叉审查模式（PlanReviewBatchState）下，当某一个专精审查员 (child_reviewer) 因网络波动超时、被操作系统意外杀灭或退出时，系统状态机出现严重死锁：父会话持续在 wait_jobs 处无限挂起，批状态机既未记录 failed_run_ids，也未触发替补审查员派发机制。请审查 checkpoint.rs 与 plan_gate.rs 状态流转，修复此子代理容灾故障，确保相关审查批次在遇到失败节点时能够完成收敛并闭环。\n\n【验收标准补充】修复后，当一批审查员全部失败（无任何成功交付）时，写前门禁必须给出明确的失败引导路由 plan_gatekeeper:reviewer_all_failed（提示主脑重试或升级），而不是落入 plan_gatekeeper:scorecard_missing 等无关分支——分支判定顺序属于验收范围。此外，失败引导信息必须列出失败任务的具体清单（哪个审查员、什么原因），让主脑能据以决策重试或升级——只给泛化文案不算闭合。",
   "verify_command": "cargo test --manifest-path src-tauri/Cargo.toml --lib test_spec_all_failed_batch_routes_to_reviewer_all_failed",
   "judge_kind": "cargo_test",
   "test_patch": "test/eval_cases/patches/case_01_subagent_failover.test.patch",
