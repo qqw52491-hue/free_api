@@ -10,18 +10,13 @@ pub use workspace_search::*;
 
 use crate::agent::types::DispatchResult;
 use crate::db::DbState;
+use rusqlite::params;
 use serde_json::{json, Value};
 use std::path::Path;
 
-/// 统一联邦检索调度入口
-pub fn dispatch_search(
-    db: &DbState,
-    session_id: &str,
-    params_value: &Value,
-    workspace_root: Option<&std::path::Path>,
-) -> DispatchResult {
-    // 语法层归一化：无歧义自动适配大模型常见的标量字符串输入（如 "kinds": "code" 自动转为 ["code"]）
-    let normalized_value = match params_value {
+/// kinds 标量归一化（"code" → ["code"]），从 dispatch_search 提取以便指纹复用
+fn normalize_scalar_kinds(params_value: &Value) -> Value {
+    match params_value {
         Value::Object(map) => {
             let mut new_map = map.clone();
             if let Some(Value::String(k_str)) = new_map.get("kinds") {
@@ -35,7 +30,85 @@ pub fn dispatch_search(
             Value::Object(new_map)
         }
         other => other.clone(),
-    };
+    }
+}
+
+/// 归一化参数的稳定指纹（经 SearchParams 结构体往返，键序确定）。
+/// None = 参数无法解析为合法检索（不可比对）。
+fn canonical_search_fingerprint(params_value: &Value) -> Option<String> {
+    let normalized = normalize_scalar_kinds(params_value);
+    let parsed: SearchParams = serde_json::from_value(normalized).ok()?;
+    serde_json::to_string(&parsed).ok()
+}
+
+/// 会话内检索去重：同参会话中，与此前某次**成功** search 参数完全一致、且其后未发生
+/// 文件修改（edit/write）时，直接复用上一次的结果——物理短路，不依赖模型自觉。
+/// （缓存只读自 trace 快照，若该步尚未落盘则自然 miss，属尽力而为。）
+fn lookup_cached_search(db: &DbState, session_id: &str, fp: &str) -> Option<DispatchResult> {
+    const INVALIDATING_ACTIONS: &[&str] = &["edit", "write"];
+    let conn = db.reader().ok()?;
+    let steps_json: String = conn
+        .query_row(
+            "SELECT steps_json FROM agent_run_traces WHERE session_id=?1 ORDER BY id DESC LIMIT 1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let steps: Vec<Value> = serde_json::from_str(&steps_json).ok()?;
+    let mut cached: Option<(i64, String)> = None;
+    for s in &steps {
+        match s.get("action").and_then(Value::as_str) {
+            Some("search") => {
+                if s.get("status").and_then(Value::as_str) != Some("succeeded") {
+                    continue;
+                }
+                let same = s
+                    .get("params")
+                    .and_then(canonical_search_fingerprint)
+                    .map(|p| p == fp)
+                    .unwrap_or(false);
+                if same {
+                    let id = s.get("id").and_then(Value::as_i64).unwrap_or(0);
+                    let out = s
+                        .get("output")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if !out.is_empty() {
+                        cached = Some((id, out));
+                    }
+                }
+            }
+            other => {
+                if cached.is_some()
+                    && other.map(|a| INVALIDATING_ACTIONS.contains(&a)).unwrap_or(false)
+                {
+                    cached = None;
+                }
+            }
+        }
+    }
+    let (step_id, output) = cached?;
+    Some(DispatchResult {
+        stdout: format!(
+            "🎯【检索去重】本会话第 {} 步已执行完全同参的检索且期间无文件修改，直接复用其结果（物理缓存，未重新检索）：\n{}\n\n如需刷新请改换关键词或加 path 约束强制重检。",
+            step_id, output
+        ),
+        stderr: String::new(),
+        success: true,
+        route: "retrieval-cache".to_string(),
+    })
+}
+
+/// 统一联邦检索调度入口
+pub fn dispatch_search(
+    db: &DbState,
+    session_id: &str,
+    params_value: &Value,
+    workspace_root: Option<&std::path::Path>,
+) -> DispatchResult {
+    // 语法层归一化：无歧义自动适配大模型常见的标量字符串输入（如 "kinds": "code" 自动转为 ["code"]）
+    let normalized_value = normalize_scalar_kinds(params_value);
 
     let params: SearchParams = match serde_json::from_value(normalized_value) {
         Ok(p) => p,
@@ -83,6 +156,13 @@ pub fn dispatch_search(
 
     let wants_history = kinds.iter().any(|k| k == "history" || k == "all");
     let wants_code = kinds.iter().any(|k| k == "code" || k == "all");
+
+    // 会话内去重：同参成功检索直接复用（edit/write 会使其失效，见 lookup_cached_search）
+    if let Some(fp) = canonical_search_fingerprint(params_value) {
+        if let Some(cached) = lookup_cached_search(db, session_id, &fp) {
+            return cached;
+        }
+    }
 
     let mut history_ok = !wants_history;
     if wants_history {
