@@ -7,6 +7,7 @@ pub enum ReviewMode {
     DiffReview,
     ProjectReview,
     Incident,
+    Implementation,
 }
 
 impl ReviewMode {
@@ -15,6 +16,7 @@ impl ReviewMode {
             Self::DiffReview => "变更 / Diff 审查",
             Self::ProjectReview => "项目结构理解与审查",
             Self::Incident => "代码问题排查",
+            Self::Implementation => "实现 / 修复类开发任务",
         }
     }
 }
@@ -66,6 +68,20 @@ pub fn detect_review_mode(goal: &str) -> Option<ReviewMode> {
         "提交",
     ]) {
         Some(ReviewMode::DiffReview)
+    } else if has(&[
+        "修复",
+        "实现",
+        "新增",
+        "开发",
+        "重构",
+        "编写",
+        "添加",
+        "fix",
+        "implement",
+        "feature",
+    ]) {
+        // 实现/修复类开发任务：同样需要符号地图做精准定位（Aider repo-map 的轻量形态）
+        Some(ReviewMode::Implementation)
     } else if has(&[
         "报错",
         "错误",
@@ -137,6 +153,15 @@ fn render_project_map(mode: ReviewMode, workspace: &Path) -> String {
         ReviewMode::Incident => {
             lines.push("排查策略：先用错误码、文件路径、函数名或路由进行代码搜索；再读取命中的函数及其相邻调用链。注意区分表象与根因：报错描述的是最终症状，触发报错的上游逻辑偏离才是修复目标。当代码意图与实际行为矛盾时，至少追问两层因果再给出结论。交付方案前反证推演：按此方案修复后，调用方是否仍能正常工作。".to_string());
         }
+        ReviewMode::Implementation => {
+            lines.push("实现策略：先对照符号地图锁定目标文件与函数，再读取最小行范围；修改前确认调用方与向后兼容，修改后确认测试覆盖。".to_string());
+        }
+    }
+
+    // 符号地图（Aider repo-map 的轻量形态）：文件 → 关键定义 + 行号。
+    // 让模型首轮定位从"反复搜索兜底"升级为"按图索骥"，直接命中目标区间。
+    if let Some(symbols) = symbol_map_section(workspace) {
+        lines.push(symbols);
     }
 
     lines.extend([
@@ -202,6 +227,110 @@ fn git_output(workspace: &Path, args: &[&str]) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+const SYMBOL_MAP_BUDGET: usize = 2_200;
+const SYMBOL_SCAN_FILES: usize = 15;
+const SYMBOLS_PER_FILE: usize = 6;
+const SOURCE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx", "js", "py"];
+
+/// 符号地图（Aider repo-map 的轻量文本形态）：扫描源码文件的顶层定义，
+/// 输出 "文件:行号 → 签名" 的紧凑列表。无 tree-sitter 依赖；预算 2.2k 字符封顶。
+fn symbol_map_section(workspace: &Path) -> Option<String> {
+    let mut files = Vec::new();
+    collect_source_files(workspace, 0, &mut files);
+    if files.is_empty() {
+        return None;
+    }
+    files.sort();
+
+    let mut lines = Vec::new();
+    let mut budget = SYMBOL_MAP_BUDGET;
+    for path in files.iter().take(SYMBOL_SCAN_FILES) {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let mut file_syms: Vec<String> = Vec::new();
+        for (idx, raw) in content.lines().enumerate() {
+            let trimmed = raw.trim_start();
+            let hit = if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                trimmed.starts_with("fn ")
+                    || trimmed.starts_with("pub fn ")
+                    || trimmed.starts_with("struct ")
+                    || trimmed.starts_with("enum ")
+                    || trimmed.starts_with("trait ")
+                    || trimmed.starts_with("impl ")
+            } else {
+                trimmed.starts_with("function ")
+                    || trimmed.starts_with("class ")
+                    || trimmed.starts_with("def ")
+                    || trimmed.starts_with("export function ")
+            };
+            if hit {
+                file_syms.push(format!(
+                    "  L{} {}",
+                    idx + 1,
+                    trimmed.chars().take(64).collect::<String>()
+                ));
+            }
+        }
+        if file_syms.is_empty() {
+            continue;
+        }
+        let display = path
+            .strip_prefix(workspace)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        let take = file_syms.len().min(SYMBOLS_PER_FILE);
+        budget = budget.saturating_sub(display.chars().count() + 40);
+        if budget == 0 {
+            break;
+        }
+        lines.push(format!("{}:", display));
+        for sym in file_syms.into_iter().take(take) {
+            let cost = sym.chars().count() + 1;
+            if budget < cost {
+                break;
+            }
+            budget -= cost;
+            lines.push(sym);
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "符号地图（文件:行号 → 定义，用于首轮精准定位）：\n{}",
+        lines.join("\n")
+    ))
+}
+
+fn collect_source_files(dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    if depth > 3 || out.len() >= SYMBOL_SCAN_FILES * 3 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if EXCLUDED_DIRS.contains(&name.as_str()) || name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_source_files(&path, depth + 1, out);
+        } else if SOURCE_EXTENSIONS
+            .iter()
+            .any(|ext| name.rsplit('.').next() == Some(*ext))
+        {
+            out.push(path);
+        }
+        if out.len() >= 60 {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +367,30 @@ mod tests {
         assert!(map.contains("已排除"));
         assert!(map.contains("阅读协议"));
         assert!(!map.contains("node_modules/"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn implementation_mode_gets_symbol_map() {
+        let unique = format!("free-api-map-sym-{}", std::process::id());
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(root.join("src/agent")).unwrap();
+        std::fs::write(
+            root.join("src/agent/checkpoint.rs"),
+            "pub struct Batch {\n    ok: bool,\n}\n\npub fn is_complete(&self) -> bool {\n    true\n}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            detect_review_mode("修复子代理容灾死锁"),
+            Some(ReviewMode::Implementation),
+            "修复/实现类任务必须命中 Implementation 模式"
+        );
+        let map = review_bootstrap("修复子代理容灾死锁", &root).unwrap();
+        assert!(map.contains("符号地图"), "实现任务必须携带符号地图: {map}");
+        assert!(map.contains("checkpoint.rs"), "符号地图应列出源文件");
+        assert!(map.contains("is_complete"), "符号地图应含函数定义");
 
         std::fs::remove_dir_all(root).unwrap();
     }
