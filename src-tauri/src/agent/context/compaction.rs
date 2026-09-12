@@ -92,26 +92,32 @@ pub async fn generate_llm_summary(
         "stream": false
     });
 
-    let request_future = client.post(&url).headers(headers).json(&body).send();
-
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(20), request_future)
-        .await
-        .map_err(|_| "LLM 摘要请求超时 (超过 20s)".to_string())?
-        .map_err(|e| format!("LLM 摘要网络请求失败: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let err_text = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "LLM 摘要 API 返回错误状态码 {}: {}",
-            status, err_text
-        ));
-    }
-
-    let json_resp: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("解析 LLM 摘要返回 JSON 失败: {}", e))?;
+    // send + body 读取整体限时：仅包 send() 时，端点收下连接不吐 body 会让
+    // resp.json() 无限挂起（实测整轮评测卡死在压缩路径）
+    let json_resp: serde_json::Value = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        async {
+            let resp = client
+                .post(&url)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("LLM 摘要网络请求失败: {}", e))?;
+            let status = resp.status();
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| format!("LLM 摘要响应体读取失败: {}", e))?;
+            if !status.is_success() {
+                return Err(format!("LLM 摘要 API 返回错误状态码 {}: {}", status, text));
+            }
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|e| format!("解析 LLM 摘要返回 JSON 失败: {}", e))
+        },
+    )
+    .await
+    .map_err(|_| "LLM 摘要请求超时 (超过 90s，含响应体读取)".to_string())??;
 
     let extracted_content = json_resp["choices"][0]["message"]["content"]
         .as_str()
