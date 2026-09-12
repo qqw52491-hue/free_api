@@ -593,6 +593,10 @@ async function runEvaluation() {
         });
         if (buildRes.status !== 0) {
           console.log((buildRes.stdout || '').split('\n').slice(-8).join('\n'));
+          // exit=null 时 stdout 往往为空，必须把 spawn error 与信号打出来，否则根因不可见
+          if (buildRes.error) console.log(`   [诊断] spawn error: ${buildRes.error}`);
+          if (buildRes.signal) console.log(`   [诊断] 进程被信号终止: ${buildRes.signal}`);
+          if ((buildRes.stderr || '').trim()) console.log((buildRes.stderr).split('\n').slice(-8).join('\n'));
           throw new Error(`应用构建失败 (exit=${buildRes.status})，取消本轮实弹`);
         }
         console.log(`   ✅ [LIVE] 应用已更新至当前代码`);
