@@ -158,6 +158,9 @@ pub struct ReviewScorecard {
     pub test_coverage: Option<u32>,
     #[serde(default)]
     pub null_reason: Option<String>,
+    /// 是否为系统合成的高分基线卡（Tech Lead approved 快速通道），而非审查员真实评分
+    #[serde(default)]
+    pub synthesized: bool,
 }
 
 impl ReviewScorecard {
@@ -168,6 +171,7 @@ impl ReviewScorecard {
             style: style.min(100),
             test_coverage: test_coverage.map(|t| t.min(100)),
             null_reason: None,
+            synthesized: false,
         }
     }
 
@@ -184,6 +188,20 @@ impl ReviewScorecard {
             style: style.min(100),
             test_coverage: test_coverage.map(|t| t.min(100)),
             null_reason,
+            synthesized: false,
+        }
+    }
+
+    /// 合成的高分基线放行卡：Tech Lead 裁决 approved 但未输出四维评分卡时兜底，
+    /// 避免 scorecard_missing 门禁误拦。synthesized=true 便于日志与聚合区分真实评分。
+    pub fn synthesized_baseline() -> Self {
+        Self {
+            correctness: 95,
+            risk: 95,
+            style: 90,
+            test_coverage: None,
+            null_reason: None,
+            synthesized: true,
         }
     }
 

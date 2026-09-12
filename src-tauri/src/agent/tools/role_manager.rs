@@ -437,19 +437,14 @@ pub fn ensure_default_role_cards(conn: &rusqlite::Connection) -> Result<(), Stri
 
     let persona_prompt = "你是一名资深技术主管 (Tech Lead)。你的核心职责是在主脑编写代码前，对其提交的方案 (Plan)、拟修改文件 (target_files) 和实施步骤进行深入的技术把关与 1v1 方案评审对齐。\n\n你必须客观评估：\n1. 方案可行性与严密性：方案设计是否逻辑自洽？是否存在遗漏的边界情况或破坏性变更？\n2. 改动关联度 (file_coupling)：\n   - isolated（单一/孤立）：各个修改文件职责明确、改动局部独立（如纯文案、单一组件样式、局部叶子函数修补、配置文件修改），即使改动了多个文件也是单一维度的修改。\n   - coupled（深度关联/跨层）：修改涉及多个架构层次、模块间契约变更、状态共享改造、全局鉴权/拦截器改动或数据库表结构与前端 IPC 联调。\n3. 讨论战况与定级决断 (decision)：\n   - approved：方案扎实清晰，改动范围可控（无论是单一改动，还是 1~2 轮内已对齐的关联改动）。直接放行，主脑可开工编码。输出合规评分卡（各项 >= 80），无阻塞缺陷。\n   - rebuttal：方案存在可修正的逻辑缺陷、未考虑的边界或不严谨处，需要在 1v1 讨论中进一步推演修改。请在 findings 中给出具体修改意见与定位。\n   - escalate：方案改动范围巨大且跨模块强关联（如高危架构重构、底层数据流变更），或者主脑在 2~3 轮对质后方案仍存在不可调和的架构分歧。单人评审无法完全兜底，必须升级为多专家联合会审！请在 escalate_roles 中指定需要增援的专家（如 'architect', 'security_specialist', 'performance_expert' 等）。";
 
-    let _ = conn.execute(
+    // 仅在缺失时预装；用户对内置卡的编辑（换模型、改 Prompt、调 Schema）必须跨重启保留
+    conn.execute(
         "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, created_at, updated_at)
          VALUES (?1, 'tech_lead', '技术主管 (Tech Lead - 方案评审与定级)', '', ?2, '负责改动实施前的 1v1 方案评审，评估技术含金量与文件关联度，决定放行、打回或升级多专家会审', '', 'reviewer', '', 0, 1, ?3, '[]', ?4, ?5, ?5)
-         ON CONFLICT(name) DO UPDATE SET
-            label=excluded.label,
-            persona_prompt=excluded.persona_prompt,
-            scope_hints=excluded.scope_hints,
-            allowed_kinds=excluded.allowed_kinds,
-            custom_schema=excluded.custom_schema,
-            input_schema=excluded.input_schema,
-            updated_at=excluded.updated_at",
+         ON CONFLICT(name) DO NOTHING",
         rusqlite::params![id, persona_prompt, custom_schema, input_schema, now],
-    );
+    )
+    .map_err(|e| format!("预装 tech_lead 角色卡失败: {e}"))?;
 
     Ok(())
 }
@@ -709,6 +704,27 @@ mod tests {
         let input_schema = tl.parse_input_schema().expect("tech_lead 应具备合法的 input_schema");
         assert!(input_schema.field_names().contains("plan_summary"));
         assert!(input_schema.field_names().contains("target_files"));
+    }
+
+    #[test]
+    fn test_default_tech_lead_card_preserves_user_edits_on_reseed() {
+        let db = setup_db();
+        // 用户对内置 tech_lead 卡做了个性化编辑（换模型、改 Prompt）
+        upsert_card(&db, &json!({
+            "name": "tech_lead",
+            "model_id": "user-model-uuid",
+            "persona_prompt": "用户自定义的 Tech Lead 提示词"
+        })).unwrap();
+
+        // 模拟应用重启：init_db 再次执行预装
+        ensure_default_role_cards(&db.writer().unwrap()).unwrap();
+
+        let tl = resolve_enabled_card(&db, "tech_lead").unwrap().expect("重启后 tech_lead 仍存在");
+        assert_eq!(
+            tl.persona_prompt, "用户自定义的 Tech Lead 提示词",
+            "预装不得覆盖用户对内置角色卡的编辑"
+        );
+        assert_eq!(tl.model_id, "user-model-uuid", "用户绑定的模型不得被预装重置");
     }
 
     #[test]

@@ -625,6 +625,7 @@ impl PlanReviewBatchState {
             style: sum_style / n,
             test_coverage,
             null_reason: scorecards.iter().find_map(|s| s.null_reason.clone()),
+            synthesized: scorecards.iter().any(|s| s.synthesized),
         })
     }
 }
@@ -963,9 +964,11 @@ impl AgentCheckpoint {
                 self.plan_escalation_required = None;
                 // 若 Tech Lead 裁决 approved 但未附带底层四维评分卡，自动补齐高分通过卡，避免 scorecard_missing 门禁误杀
                 if delivery.scorecard.is_none() {
-                    delivery.scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(
-                        95, 95, 90, None,
-                    ));
+                    eprintln!(
+                        "[checkpoint] Tech Lead 裁决 approved 但未附带评分卡，已合成基线放行评分卡（synthesized，非真实审查评分）"
+                    );
+                    delivery.scorecard =
+                        Some(crate::agent::child_reviewer::ReviewScorecard::synthesized_baseline());
                 }
             }
         }
@@ -2470,6 +2473,7 @@ mod tests {
                 style: 85,
                 test_coverage: Some(80),
                 null_reason: None,
+                synthesized: false,
             }),
             extra: std::collections::HashMap::new(),
         };
@@ -2495,6 +2499,7 @@ mod tests {
                 style: 95,
                 test_coverage: Some(90),
                 null_reason: None,
+                synthesized: false,
             }),
             extra: std::collections::HashMap::new(),
         };
@@ -2545,6 +2550,7 @@ mod tests {
                 style: 60,
                 test_coverage: None,
                 null_reason: None,
+                synthesized: false,
             }),
             extra: std::collections::HashMap::new(),
         };

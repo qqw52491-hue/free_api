@@ -480,6 +480,7 @@ mod tests {
                 style: 90,
                 test_coverage: None,
                 null_reason: None,
+                synthesized: false,
             }),
             extra: std::collections::HashMap::new(),
         };
@@ -528,6 +529,7 @@ mod tests {
                 style: 80,
                 test_coverage: None,
                 null_reason: None,
+                synthesized: false,
             }),
             extra: std::collections::HashMap::new(),
         };
@@ -548,6 +550,7 @@ mod tests {
                 style: 90,
                 test_coverage: None,
                 null_reason: None,
+                synthesized: false,
             }),
             extra: std::collections::HashMap::new(),
         };
@@ -572,6 +575,7 @@ mod tests {
             style: 85,
             test_coverage: None,
             null_reason: None,
+            synthesized: false,
         });
         cp.record_reviewer_delivery_for_run(Some("rev-1"), &del1_fixed);
         cp.record_reviewer_delivery_for_run(Some("rev-2"), &del2);
@@ -669,6 +673,10 @@ mod tests {
         cp.record_reviewer_delivery_for_run(Some("rev-tl"), &del);
 
         assert!(cp.last_review_scorecard.is_some(), "approved 应自动合成基线合格评分卡");
+        assert!(
+            cp.last_review_scorecard.as_ref().unwrap().synthesized,
+            "合成的基线评分卡必须携带 synthesized 标记，与非审查员真实评分区分"
+        );
         let res = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-tech-lead-ok", 1, false);
         assert!(res.is_none(), "Tech Lead 裁决 approved 且无 blocking 时应放行写入");
         assert_eq!(cp.plan_phase, PlanPhase::Approved);
