@@ -1,0 +1,15 @@
+{
+  "id": "case_03_blind_write_interception",
+  "title": "local_file 既有文件盲写覆盖拦截缺失修复",
+  "tier": "silver",
+  "base_commit": "e956d49~1",
+  "problem_statement": "【故障复现报障】用户反馈：Agent 在从未读取过某个磁盘既有文件的情况下，可以直接用 local_file 的 write 全量覆盖该文件，导致用户的外部修改被静默丢失（Lost Update 风险）。请排查 src-tauri/src/agent/tools/local_file.rs 的写入链路，落地既有文件盲写拦截：本会话未建立内容基线（从未 read 过）的既有文件，全量写入必须被拒绝并给出拒绝原因（提示先读取建立基线）；同时不得破坏自建文件（本会话创建）的正常覆写与显式 force 逃生门。",
+  "verify_command": "cargo test --manifest-path src-tauri/Cargo.toml --lib test_blind_write_to_unread_existing_file_is_rejected",
+  "judge_kind": "cargo_test",
+  "test_patch": "test/eval_cases/patches/case_03_blind_write_interception.test.patch",
+  "expected_exit_code": 0,
+  "max_steps": 10,
+  "expected_diff_files": [
+    "src-tauri/src/agent/tools/local_file.rs"
+  ]
+}

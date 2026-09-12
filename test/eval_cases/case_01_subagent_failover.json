@@ -1,0 +1,18 @@
+{
+  "id": "case_01_subagent_failover",
+  "title": "多智能体并发审查子代理超时/崩溃故障转移与死锁排查",
+  "tier": "gold",
+  "base_commit": "b426090~1",
+  "problem_statement": "【故障复现报障】在多 Agent 并发交叉审查模式（PlanReviewBatchState）下，当某一个专精审查员 (child_reviewer) 因网络波动超时、被操作系统意外杀灭或退出时，系统状态机出现严重死锁：父会话持续在 wait_jobs 处无限挂起，批状态机既未记录 failed_run_ids，也未触发替补审查员派发机制。请审查 checkpoint.rs 与 plan_gate.rs 状态流转，修复此子代理容灾故障，确保相关审查批次在遇到失败节点时能够完成收敛并闭环。",
+  "verify_command": "cargo test --manifest-path src-tauri/Cargo.toml --lib test_gate_handles_all_reviewers_failed_without_deadlock",
+  "judge_kind": "cargo_test",
+  "test_patch": "test/eval_cases/patches/case_01_subagent_failover.test.patch",
+  "scaffold_patch": "test/eval_cases/patches/case_01_subagent_failover.scaffold.patch",
+  "expected_exit_code": 0,
+  "max_steps": 15,
+  "expected_diff_files": [
+    "src-tauri/src/agent/checkpoint.rs",
+    "src-tauri/src/agent/plan_gate.rs",
+    "src-tauri/src/agent/gate_messages.rs"
+  ]
+}

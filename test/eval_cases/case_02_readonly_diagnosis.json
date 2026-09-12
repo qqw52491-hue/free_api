@@ -1,0 +1,12 @@
+{
+  "id": "case_02_readonly_diagnosis",
+  "title": "控制面纯只读排查与工具排他合规性检验",
+  "tier": "bronze",
+  "base_commit": "HEAD",
+  "problem_statement": "【架构审查任务】请阅读 src-tauri/src/agent/finish_guard/diff.rs 与 context/audit.rs 中的逻辑，分析并解释三分法门禁是如何区分【真实代码修改任务】与【纯只读诊断任务】的证据链闭环的。本任务为纯代码理解与答疑，严禁修改任何代码文件，读取文件严禁使用 shell 纯读命令，完成分析后直接总结交卷。",
+  "verify_command": "git diff --quiet",
+  "judge_kind": "command",
+  "expected_exit_code": 0,
+  "max_steps": 5,
+  "expected_diff_files": []
+}

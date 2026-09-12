@@ -1,0 +1,34 @@
+diff --git a/src-tauri/src/agent/tools/local_file.rs b/src-tauri/src/agent/tools/local_file.rs
+index e3f0670..8bcf3e4 100644
+--- a/src-tauri/src/agent/tools/local_file.rs
++++ b/src-tauri/src/agent/tools/local_file.rs
+@@ -798,4 +798,29 @@ mod tests {
+ 
+         let _ = std::fs::remove_dir_all(ws);
+     }
++
++    #[test]
++    fn test_blind_write_to_unread_existing_file_is_rejected() {
++        // 评测判据（FAIL_TO_PASS）：模拟用户磁盘上已存在、但本会话从未读取过的文件。
++        // Agent 不经读取直接全量覆盖 = 盲写（丢失外部修改风险），必须被拦截。
++        let ws = temp_dir();
++        let db = mock_db();
++
++        let existing = ws.join("legacy_config.txt");
++        std::fs::write(&existing, "original user content").unwrap();
++
++        let blind_write = json!({
++            "path": "legacy_config.txt",
++            "content": "overwritten without ever reading"
++        });
++        let res = dispatch(&db, "eval_session", "write", &blind_write, Some(&ws));
++        assert!(
++            !res.success,
++            "未建立基线的既有文件盲写必须被拦截，当前却被放行: {}",
++            res.stderr
++        );
++        assert!(!res.stderr.trim().is_empty(), "拦截时必须给出拒绝原因");
++
++        let _ = std::fs::remove_dir_all(ws);
++    }
+ }
