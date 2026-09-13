@@ -1,0 +1,16 @@
+{
+  "id": "case_09_watch_stop_param",
+  "title": "watch_stop 裸调路径数据库参数错位修复（历史坑复现 9a27cc0）",
+  "tier": "silver",
+  "base_commit": "9a27cc0~1",
+  "problem_statement": "【故障复现报障】用户反馈：Agent 按交付门禁要求释放后台监听任务时，调用 watch_stop 工具且不带 watch_id（意图停止当前 run 的全部监听）必然报错 `Wrong number of parameters passed to query. Got 2, needed 3`，只能靠绕行手段收尾。请排查 src-tauri/src/agent/watch_engine.rs 中批量停止监听的 SQL 链路，修复参数绑定错位，确保裸调路径能成功将 running 状态的 watch 行更新为 cancelled 并写入 finished_at 时间戳。",
+  "verify_command": "cargo test --manifest-path src-tauri/Cargo.toml --lib test_spec_stop_all_watches_marks_finished",
+  "judge_kind": "cargo_test",
+  "test_patch": "test/eval_cases/patches/case_09_watch_stop_param.test.patch",
+  "expected_exit_code": 0,
+  "max_steps": 60,
+  "expected_diff_files": [
+    "src-tauri/src/agent/watch_engine.rs"
+  ],
+  "max_prompt_tokens": 8000000
+}

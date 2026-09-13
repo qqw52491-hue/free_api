@@ -1,0 +1,16 @@
+{
+  "id": "case_10_review_todo_guard",
+  "title": "审查发现待办的监管继承守卫缺失修复（历史坑复现 204d2fd）",
+  "tier": "silver",
+  "base_commit": "204d2fd~1",
+  "problem_statement": "【故障复现报障】安全审计发现：todo_update 是全量覆盖语义，模型可以在更新待办清单时直接不携带 `[审查发现]` 前缀的条目，静默删除审查环节留下的监管产出，从而绕过交付门禁的义务检查。请排查 src-tauri/src/agent/finish_guard/ 下 todo_update 的应用链路，落地监管继承守卫：更新中未保留的审查发现条目必须自动恢复（保留原 pending 状态并给出恢复告警）；销账的唯一合法途径是在 todo_update 中保留该条目并显式置为 done/failed（附处理说明）。注意：显式置 done 的条目必须能正常销账，不得误伤合法闭环。",
+  "verify_command": "cargo test --manifest-path src-tauri/Cargo.toml --lib review_finding",
+  "judge_kind": "cargo_test",
+  "expected_exit_code": 0,
+  "max_steps": 80,
+  "expected_diff_files": [
+    "src-tauri/src/agent/finish_guard/state_updates.rs"
+  ],
+  "max_prompt_tokens": 10000000,
+  "test_patch": "test/eval_cases/patches/case_10_review_todo_guard.test.patch"
+}

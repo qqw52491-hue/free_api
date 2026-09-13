@@ -1,0 +1,42 @@
+diff --git a/src-tauri/src/agent/watch_engine.rs b/src-tauri/src/agent/watch_engine.rs
+index ece80fe..216d13b 100644
+--- a/src-tauri/src/agent/watch_engine.rs
++++ b/src-tauri/src/agent/watch_engine.rs
+@@ -439,6 +439,37 @@ mod tests {
+         assert!(parse_watch_request(&json!({"kind": "file"})).is_err());
+     }
+ 
++    #[test]
++    fn test_spec_stop_all_watches_marks_finished() {
++        // 规格：watch_stop 裸调路径（未传 watch_id）必须成功取消该 run 的全部
++        // running watch 行并写入 finished_at——回归 stop_all_watches 参数错位
++        // （finished_at 曾绑定 ?3 但只传 2 参，execute 必然报 "Got 2, needed 3"）。
++        let (base, db) = setup_test_db();
++        {
++            let conn = db.0.lock().unwrap();
++            conn.execute(
++                "INSERT INTO agent_background_jobs
++                 (id, parent_session_id, parent_run_id, job_type, title, params_json, status, started_at)
++                 VALUES ('job-spec-w1', 'sess-spec', 'run-spec', 'watch', 'w', '{}', 'running', '2026-01-01T00:00:00Z')",
++                [],
++            ).unwrap();
++        }
++        let stopped = stop_all_watches(&db, "run-spec").expect("stop_all_watches must succeed");
++        assert_eq!(stopped, 1);
++        let conn = db.0.lock().unwrap();
++        let (status, finished_at): (String, Option<String>) = conn
++            .query_row(
++                "SELECT status, finished_at FROM agent_background_jobs WHERE id='job-spec-w1'",
++                [],
++                |r| Ok((r.get(0)?, r.get(1)?)),
++            )
++            .unwrap();
++        assert_eq!(status, "cancelled");
++        assert!(finished_at.is_some(), "finished_at must be written");
++        drop(conn);
++        let _ = std::fs::remove_dir_all(base);
++    }
++
+     #[tokio::test]
+     async fn file_watch_rejects_targets_outside_workspace() {
+         let base = std::env::temp_dir().join(format!("free-api-watch-scope-{}", Uuid::new_v4()));

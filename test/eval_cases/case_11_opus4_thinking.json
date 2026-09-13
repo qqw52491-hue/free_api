@@ -1,0 +1,16 @@
+{
+  "id": "case_11_opus4_thinking",
+  "title": "claude-opus-4.x 模型家族归类修复（历史坑复现 9dc3947）",
+  "tier": "silver",
+  "base_commit": "9dc3947~1",
+  "problem_statement": "【故障复现报障】线上实测：对 claude-opus-4.6 / claude-opus-4-6-20260201 这类 opus-4.x 模型发起带 top_p 参数的请求时，上游直接返回 400 错误：`top_p must be >= 0.95 or unset when thinking is enabled`。根因是 opus-4.x 上游部署普遍默认开启 Extended Thinking，采样参数必须按思考家族（ClaudeThinking）的规则清洗，但当前模型家族探测没有把它归入该家族。请排查 src-tauri/src/agent/model_filter/detector.rs 的 detect_model_family 归类逻辑，让 opus-4.x 系列正确归入 ClaudeThinking，同时不得改变其它既有模型的归类结果。",
+  "verify_command": "cargo test --manifest-path src-tauri/Cargo.toml --lib test_2026_frontier_models_detection",
+  "judge_kind": "cargo_test",
+  "expected_exit_code": 0,
+  "max_steps": 60,
+  "expected_diff_files": [
+    "src-tauri/src/agent/model_filter/detector.rs"
+  ],
+  "max_prompt_tokens": 8000000,
+  "test_patch": "test/eval_cases/patches/case_11_opus4_thinking.test.patch"
+}

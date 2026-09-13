@@ -1,0 +1,65 @@
+diff --git a/src-tauri/src/agent/finish_guard/finish_guard_tests.rs b/src-tauri/src/agent/finish_guard/finish_guard_tests.rs
+index 4889e2a..9f17c95 100644
+--- a/src-tauri/src/agent/finish_guard/finish_guard_tests.rs
++++ b/src-tauri/src/agent/finish_guard/finish_guard_tests.rs
+@@ -1843,3 +1843,60 @@ index 123..456 100644
+         assert!(!miss.is_empty(), "证据未落入真实 diff 必须拦截");
+     }
+ 
++
++#[test]
++fn review_finding_todos_cannot_be_silently_dropped() {
++    let mut context = context::SandwichContext::new("system".to_string(), "goal".to_string());
++    context.todo_list.push(crate::agent::types::TodoItem {
++        id: 5,
++        status: "pending".to_string(),
++        description: "[审查发现] [QUESTION] at plan_gate.rs:135 冷却豁免白名单漏加新路由".to_string(),
++        evidence_output_id: None,
++    });
++
++    // 模型提交的 todo_update 刻意剔除了审查发现条目 → 必须自动恢复
++    let drop_instruction = AgentInstruction {
++        tool: Some("todo_update".to_string()),
++        todo_update: vec![crate::agent::types::TodoItem {
++            id: 1,
++            status: "done".to_string(),
++            description: "无关待办".to_string(),
++            evidence_output_id: None,
++        }],
++        ..Default::default()
++    };
++    apply_instruction_state_updates(&mut context, &drop_instruction);
++
++    assert!(
++        context.todo_list.iter().any(|t| t.description.starts_with("[审查发现]")),
++        "被剔除的审查发现必须自动恢复，禁止静默销账"
++    );
++    assert!(context.todo_list.iter().any(|t| t.description == "无关待办"));
++}
++
++#[test]
++fn review_finding_kept_with_explicit_closure_is_accepted() {
++    let mut context = context::SandwichContext::new("system".to_string(), "goal".to_string());
++    context.todo_list.push(crate::agent::types::TodoItem {
++        id: 5,
++        status: "pending".to_string(),
++        description: "[审查发现] [QUESTION] at plan_gate.rs:135 冷却豁免白名单漏加新路由".to_string(),
++        evidence_output_id: None,
++    });
++
++    // 模型保留该条目并显式闭合（done）→ 合法销账，不恢复不告警
++    let close_instruction = AgentInstruction {
++        tool: Some("todo_update".to_string()),
++        todo_update: vec![crate::agent::types::TodoItem {
++            id: 5,
++            status: "done".to_string(),
++            description: "[审查发现] [QUESTION] at plan_gate.rs:135 冷却豁免白名单漏加新路由".to_string(),
++            evidence_output_id: None,
++        }],
++        ..Default::default()
++    };
++    apply_instruction_state_updates(&mut context, &close_instruction);
++
++    assert_eq!(context.todo_list.len(), 1);
++    assert_eq!(context.todo_list[0].status, "done");
++}
