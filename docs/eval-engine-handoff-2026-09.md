@@ -387,3 +387,21 @@ python3 scripts/eval_analyze.py <session_id> [<session_id2> ...]
 5. 控制面改动必须在交付说明中披露；
 6. 观测先于拦截：新门禁路径上线必须同步埋 `record_gate_fire`；
 7. 台账要能退役：零触发的门禁路径连续多轮未触发即标记评估退役。
+
+---
+
+## 十一、阶段四补丁（reap 归档链 / 预算管道 / 精确判分 / 方差基线）
+
+- **reap 归档链**（`571b341`）：收割标记 `reaped_stale` 与真实 `timeout` 可区分；
+  收割行允许迟到结果落库覆盖 stub（cancelled/interrupted 仍拒绝），归档元数据随会话寿命。
+- **预算管道**（`3d3e17c`）：`case.max_steps`/`max_prompt_tokens` 经 env→IPC→
+  `AgentRunBudget` 进 main_loop；token 计量含被门禁打回的步；触发原因写 completion。
+  考卷预算已按实弹观测校准（原装饰值远低于实际）。注意：token 上限只管主循环。
+- **精确判分**（`100fc19`）：判据 SQL 一律用 `FREE_API_EVAL_AGENT_SESSION` 显式注入，
+  禁止"最新会话"子查询；command 类补红基线校准（基线必须为红，负向题声明
+  `baseline_expectation:"green"` 例外）。
+- **case_01 ×3 方差基线**：121–182 步 / 9.4M–19.2M prompt / 3×PASS。
+  r1 撞 40min 时限 cancelled 但判分仍 PASS——cargo_test 判据不查终态，
+  若要"时限内完成"计分需补终态断言（command 判据③后已查 succeeded）。
+- 新不变量补一条：**判据禁止推断会话身份**——session_id 必须由 runner 显式注入，
+  `ORDER BY id DESC`/`started_at DESC` 猜最新在并行对照下必错。
