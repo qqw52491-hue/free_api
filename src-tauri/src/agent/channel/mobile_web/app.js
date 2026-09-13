@@ -941,8 +941,11 @@ function renderHome() {
   const groups = groupsOf();
   $("wsList").innerHTML = groups.map(g => {
     const open = S.openGroups.has(g.key);
-    const tasks = g.sessions.length
-      ? g.sessions.slice(0, 15).map(s => taskCard(s)).join("")
+    // 运行中任务置顶：移动端列表长、侧栏滚动不可靠，把活跃任务浮到最前直接可点
+    const sorted = g.sessions.slice().sort((a, b) =>
+      (b.status === "running" ? 1 : 0) - (a.status === "running" ? 1 : 0));
+    const tasks = sorted.length
+      ? sorted.slice(0, 15).map(s => taskCard(s)).join("")
       : `<div class="empty-tip">暂无任务，点击右上 ＋ 发起</div>`;
     return `
       <div class="ws-card ${open ? "open" : ""}" data-group="${esc(g.key)}">

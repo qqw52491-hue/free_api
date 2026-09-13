@@ -102,8 +102,19 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
 .dot.bad { background: var(--red); }
 
 .topbar-right { display: flex; align-items: center; gap: 6px; flex: none; }
-.icon-btn { width: 28px; height: 28px; border-radius: 7px; display: flex; align-items: center; justify-content: center; background: var(--card); border: 1px solid var(--line); font-size: 13px; color: var(--text-sub); transition: all .15s ease; flex: none; }
+.icon-btn { width: 28px; height: 28px; border-radius: 7px; display: flex; align-items: center; justify-content: center; background: var(--card); border: 1px solid var(--line); font-size: 13px; color: var(--text-sub); transition: all .15s ease; flex: none; position: relative; }
 .icon-btn:hover { background: var(--card-hover); border-color: var(--line2); color: #fff; }
+
+/* 触屏命中区扩展：视觉尺寸不变，::after 把可点区域扩到 ≥44px（WCAG 2.5.5） */
+.icon-btn::after, .side-del-btn::after, .side-plus-btn::after, .ws-plus-btn::after,
+.task-del-btn::after, .mini-ctrl-btn::after, .md-copy-btn::after, .dock-btn::after,
+.dock-chip-btn::after, .send-control-btn::after, .btn-new-pill::after {
+  content: ""; position: absolute; inset: -9px;
+}
+.side-del-btn, .side-plus-btn, .ws-plus-btn, .task-del-btn, .mini-ctrl-btn,
+.md-copy-btn, .dock-btn, .dock-chip-btn, .send-control-btn, .btn-new-pill {
+  position: relative;
+}
 
 .btn-new-pill {
   display: inline-flex; align-items: center; gap: 4px;
@@ -166,7 +177,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
 .side-task.active { background: var(--card-inner); border-color: var(--accent); }
 .side-task-info { flex: 1; min-width: 0; }
 .side-task .t { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
-.side-task .time { font-size: 9.5px; color: var(--dim); margin-top: 1px; }
+.side-task .time { font-size: 10.5px; color: var(--dim); margin-top: 1px; }
 .side-del-btn {
   width: 18px;
   height: 18px;
@@ -314,7 +325,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
 }
 .task-row-card .tt { flex: 1; min-width: 0; }
 .task-row-card .title { font-size: 12px; font-weight: 600; color: #f1f3f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.task-row-card .sub-line { font-size: 10px; color: var(--dim); margin-top: 1px; display: flex; align-items: center; gap: 4px; }
+.task-row-card .sub-line { font-size: 10.5px; color: var(--dim); margin-top: 1px; display: flex; align-items: center; gap: 4px; }
 .task-del-btn {
   width: 22px;
   height: 22px;
@@ -605,7 +616,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   color: #93c5fd;
   font-weight: 550;
   margin-right: 4px;
+  overflow-wrap: anywhere; /* 长路径/参数在 320-390px 下断行防溢出 */
+  word-break: break-word;
 }
+/* 消息流内行内代码兜底防溢出 */
+#timeline code, #viewFlow code:not(.md-code-box code) { overflow-wrap: anywhere; word-break: break-word; }
 .tool-call-pill .t-right {
   flex: none;
   display: flex;
@@ -1313,13 +1328,13 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   gap: 3px;
 }
 .dock-btn {
-  width: 22px;
-  height: 22px;
-  border-radius: 5px;
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
+  font-size: 15px;
   color: var(--muted);
   transition: all .15s;
 }
@@ -1328,9 +1343,10 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 10.5px;
+  padding: 5px 8px;
+  min-height: 30px;
+  border-radius: 6px;
+  font-size: 11.5px;
   color: var(--muted);
   background: var(--card-inner);
   border: 1px solid var(--line);
@@ -1345,9 +1361,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   gap: 4px;
 }
 .send-control-btn {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
   background: var(--accent);
   color: #fff;
   font-size: 12px;
