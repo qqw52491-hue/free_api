@@ -682,6 +682,16 @@ pub async fn evaluate_finish_diff(
     let stream_result = match tokio::time::timeout(Duration::from_secs(REVIEW_TIMEOUT_SECS), call).await {
         Ok(res) => res,
         Err(_) => {
+            crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                session_id,
+                "finish-review",
+                1,
+                &model_config,
+                &messages,
+                None,
+                "request_error",
+                Some("timeout"),
+            );
             return ReviewResult::failed_open("Reviewer 审查超时（>35s），已降级放行", &model_id, &diff_hash);
         }
     };
@@ -689,8 +699,30 @@ pub async fn evaluate_finish_diff(
     let duration_ms = started_at.elapsed().as_millis() as u64;
 
     let response_text = match stream_result {
-        Ok(output) => output.full_response,
+        Ok(output) => {
+            crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                session_id,
+                "finish-review",
+                1,
+                &model_config,
+                &messages,
+                Some(&output),
+                "success",
+                None,
+            );
+            output.full_response
+        }
         Err(e) => {
+            crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                session_id,
+                "finish-review",
+                1,
+                &model_config,
+                &messages,
+                None,
+                "request_error",
+                Some(&e),
+            );
             return ReviewResult::failed_open(&format!("Reviewer 调用失败: {}", e), &model_id, &diff_hash);
         }
     };

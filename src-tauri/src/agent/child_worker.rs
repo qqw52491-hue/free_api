@@ -433,6 +433,7 @@ pub async fn run_worker_loop(
             1,
             &mut ignore_stream_event,
         );
+        let child_log_suffix = format!("child-{}", child_run_id);
         let raw = match tokio::time::timeout(
             Duration::from_secs(WORKER_PER_CALL_TIMEOUT_SECS),
             call,
@@ -440,10 +441,30 @@ pub async fn run_worker_loop(
         .await
         {
             Err(_) => {
+                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                    &parent_session_id,
+                    &child_log_suffix,
+                    steps_used,
+                    &config,
+                    &messages,
+                    None,
+                    "request_error",
+                    Some("timeout"),
+                );
                 interrupted = Some("worker 单步调用超时".to_string());
                 break "timed_out";
             }
             Ok(Err(error)) => {
+                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                    &parent_session_id,
+                    &child_log_suffix,
+                    steps_used,
+                    &config,
+                    &messages,
+                    None,
+                    "request_error",
+                    Some(&error),
+                );
                 interrupted = Some(if error == llm::STREAM_INTERRUPTED_ERROR {
                     "worker 已随父任务取消".to_string()
                 } else {
@@ -456,6 +477,16 @@ pub async fn run_worker_loop(
                 };
             }
             Ok(Ok(result)) => {
+                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                    &parent_session_id,
+                    &child_log_suffix,
+                    steps_used,
+                    &config,
+                    &messages,
+                    Some(&result),
+                    "success",
+                    None,
+                );
                 completion_tokens += result
                     .usage
                     .map(|usage| usage.completion_tokens)

@@ -1588,12 +1588,13 @@ pub async fn run_tool_phase(
 
                             let db_clone = DbState(state.0.clone());
                             let new_child_run_id_clone = new_child_run_id.clone();
-                            let _parent_session_id_clone = final_session_id.to_string();
+                            let parent_session_id_clone = final_session_id.to_string();
                             let mut interrupt_rx_clone = interrupt_rx.clone();
                             let _app_clone = app.clone();
 
                             tokio::spawn(async move {
                                 let started_at = std::time::Instant::now();
+                                let child_log_suffix = format!("child-{}", new_child_run_id_clone);
                                 let mut on_stream_event = |_: crate::llm::StreamEvent<'_>| -> bool { true };
                                 let call = crate::llm::stream_with_retry(
                                     &config,
@@ -1604,11 +1605,23 @@ pub async fn run_tool_phase(
                                     &mut on_stream_event,
                                 );
                                 let stream_result = match tokio::time::timeout(
-                                    std::time::Duration::from_secs(45),
+                                    std::time::Duration::from_secs(
+                                        crate::agent::child_reviewer::child_timeout_secs(&config.model_name),
+                                    ),
                                     call,
                                 ).await {
                                     Ok(Ok(res)) => res,
-                                    Ok(Err(_e)) => {
+                                    Ok(Err(e)) => {
+                                        crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                                            &parent_session_id_clone,
+                                            &child_log_suffix,
+                                            1,
+                                            &config,
+                                            &messages,
+                                            None,
+                                            "request_error",
+                                            Some(&e),
+                                        );
                                         crate::agent::child_reviewer::finish_child_run(
                                             &db_clone,
                                             &new_child_run_id_clone,
@@ -1621,6 +1634,16 @@ pub async fn run_tool_phase(
                                         return;
                                     }
                                     Err(_) => {
+                                        crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                                            &parent_session_id_clone,
+                                            &child_log_suffix,
+                                            1,
+                                            &config,
+                                            &messages,
+                                            None,
+                                            "request_error",
+                                            Some("timeout"),
+                                        );
                                         crate::agent::child_reviewer::finish_child_run(
                                             &db_clone,
                                             &new_child_run_id_clone,
@@ -1633,6 +1656,17 @@ pub async fn run_tool_phase(
                                         return;
                                     }
                                 };
+
+                                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                                    &parent_session_id_clone,
+                                    &child_log_suffix,
+                                    1,
+                                    &config,
+                                    &messages,
+                                    Some(&stream_result),
+                                    "success",
+                                    None,
+                                );
 
                                 let duration_ms = started_at.elapsed().as_millis() as u64;
                                 let completion_tokens = stream_result.usage.map(|u| u.completion_tokens).unwrap_or(0);

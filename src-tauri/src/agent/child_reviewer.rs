@@ -19,7 +19,8 @@ pub const MAX_CHILD_REVIEWS_PER_PARENT_RUN: u8 = MAX_CHILDREN_PER_KIND_PER_RUN;
     /// reviewer 单次调用超时（秒）：可通过 FREE_API_REVIEWER_TIMEOUT_SECS 调整。
     /// 实测教训：45s 对慢平台/大证据包太紧——审查超时→退款→重派→再超时，死循环到模型弃疗。
     /// 慢思考家族（Claude thinking 等）默认放宽到 120s：单审常超 45s，实测流错误+超时连发。
-    fn child_timeout_secs(model_name: &str) -> u64 {
+    /// pub(crate)：resume_child 复审路径（loop_runner）同样复用本模型感知超时。
+    pub(crate) fn child_timeout_secs(model_name: &str) -> u64 {
         std::env::var("FREE_API_REVIEWER_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -1384,7 +1385,11 @@ pub async fn spawn_child_reviewer(
         // ===== 取证循环：模型可先请求只读工具核实疑点，预算用尽必须收敛为最终审查 JSON =====
         let mut tool_steps_used: u32 = 0;
         let mut forced_final = false;
+        // 归档计数：本子运行内的第几次 LLM 调用（取证循环每轮一次）
+        let mut llm_call_index = 0usize;
+        let child_log_suffix = format!("child-{}", child_run_id_clone);
         let (duration_ms, completion_tokens, prompt_tokens, final_parsed, final_raw) = loop {
+            llm_call_index += 1;
             let call = llm::stream_with_retry(
                 &config,
                 &messages,
@@ -1400,6 +1405,16 @@ pub async fn spawn_child_reviewer(
             .await
             {
                 Err(_) => {
+                    crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                        &session_id_clone,
+                        &child_log_suffix,
+                        llm_call_index,
+                        &config,
+                        &messages,
+                        None,
+                        "request_error",
+                        Some("timeout"),
+                    );
                     let duration_ms = started_at.elapsed().as_millis() as u64;
                     finish_child_run(
                         &db_clone,
@@ -1419,6 +1434,16 @@ pub async fn spawn_child_reviewer(
                     return;
                 }
                 Ok(Err(error)) => {
+                    crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                        &session_id_clone,
+                        &child_log_suffix,
+                        llm_call_index,
+                        &config,
+                        &messages,
+                        None,
+                        "request_error",
+                        Some(&error),
+                    );
                     let duration_ms = started_at.elapsed().as_millis() as u64;
                     let status = if error == llm::STREAM_INTERRUPTED_ERROR {
                         "cancelled"
@@ -1447,7 +1472,19 @@ pub async fn spawn_child_reviewer(
                     );
                     return;
                 }
-                Ok(Ok(result)) => result,
+                Ok(Ok(result)) => {
+                    crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                        &session_id_clone,
+                        &child_log_suffix,
+                        llm_call_index,
+                        &config,
+                        &messages,
+                        Some(&result),
+                        "success",
+                        None,
+                    );
+                    result
+                }
             };
 
             let duration_ms = started_at.elapsed().as_millis() as u64;

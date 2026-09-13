@@ -181,6 +181,65 @@ pub fn log_llm_exchange_to_file(
     }
 }
 
+/// 辅助 LLM 调用（子 Agent / 门禁审查）归档：写入 `<session>__<suffix>.json`
+/// 独立文件，与主会话归档同 schema，供卡带提取（真实审查员牌）与停摆排查使用。
+///
+/// 独立文件而非并入主会话文件的原因：归档是 read-modify-write 无锁写，
+/// 多个子任务与主循环并发写同一文件会互相覆盖丢条。
+///
+/// `call_index` 为该调用方内部的第几次 LLM 调用；`try_index` 记 transport
+/// 实际尝试数（失败路径不可知记 0）。
+pub fn log_auxiliary_llm_exchange(
+    parent_session_id: &str,
+    log_suffix: &str,
+    call_index: usize,
+    model_config: &ModelConfig,
+    api_messages: &[serde_json::Value],
+    result: Option<&llm::StreamResult>,
+    status: &str,
+    error: Option<&str>,
+) {
+    let usage = result.map(|res| match res.usage {
+        Some(raw) => TokenUsage::new(
+            raw.prompt_tokens,
+            raw.completion_tokens,
+            raw.cached_tokens,
+            model_config.context_window,
+            res.ttft_ms,
+            res.total_duration_ms,
+            res.tokens_per_second,
+        ),
+        None => {
+            let (est_p, est_c) = llm::estimate_usage(
+                api_messages,
+                res.full_response.len(),
+                model_config.context_window,
+            );
+            TokenUsage::new(
+                est_p,
+                est_c,
+                0,
+                model_config.context_window,
+                res.ttft_ms,
+                res.total_duration_ms,
+                res.tokens_per_second,
+            )
+        }
+    });
+    log_llm_exchange_to_file(
+        &format!("{}__{}", parent_session_id, log_suffix),
+        call_index,
+        result.map(|r| r.attempt_count as usize).unwrap_or(0),
+        model_config,
+        api_messages,
+        result.map(|r| r.thinking_text.as_str()).unwrap_or(""),
+        result.map(|r| r.full_response.as_str()).unwrap_or(""),
+        usage.as_ref(),
+        status,
+        error,
+    );
+}
+
 pub async fn call_llm(
     messages: &SandwichContext,
     state: &State<'_, DbState>,
