@@ -28,13 +28,72 @@ pub fn cross_review_need_reviewer_dispatch() -> String {
     "【⚠️ 门禁保护触发：已阻止未审查写入，目标文件未受任何修改！】\n\
      【原因】当前处于【方案审查模式】。在首次动笔修改代码前，必须先完成方案对齐推演。\n\
      【必须执行的固定流程】：\n\
-     1. 首先调用 child_reviewer（指定 role: \"tech_lead\"），传入方案摘要 (plan_summary)、涉及文件列表 (target_files) 及当前讨论轮次 (discussion_round)，进行 1v1 方案对齐；\n\
+     1. 推荐方式：单独输出 {\"submit_plan\": {\"plan_summary\": \"...\", \"target_files\": [...], \"evidence_refs\": [...], \"root_cause\": \"...\", \"assumptions\": [...], \"open_questions\": [...], \"intended_verification\": \"...\"}} 提交结构化方案——宿主将原子完成方案登记与 Tech Lead 派发；\n\
+        （兼容方式：调用 child_reviewer 并指定 role: \"tech_lead\"，自行传入 plan_summary、target_files 与 discussion_round 进行 1v1 方案对齐）；\n\
      2. 随后调用 wait_jobs 等待审查裁决；\n\
      3. 严格按其返回的结构化结论（decision）行动：\n\
         - 若 approved：方案已放行，可直接执行代码写入；\n\
         - 若 rebuttal：根据意见调整方案并继续 1v1 讨论；\n\
         - 若 escalate：按照其指定的 escalate_roles 专家列表，并发派发多专家联合会审（通过 dispatches 数组），会审通过后方可动笔！\n\
      严禁跳过审查直接写代码或结项！".to_string()
+}
+
+/// 交叉审查模式：探索预算（含已批延期）耗尽，仍未派发首次方案审查
+pub fn cross_review_exploration_budget_exhausted(
+    effective_limit: usize,
+    extensions_left: u32,
+) -> String {
+    let extension_hint = if extensions_left > 0 {
+        format!(
+            "2. 若证据确实不足以形成方案，可输出 request_exploration_extension 字段申请延期探索（剩余 {} 次），\
+             必须填写 unresolved_question（还缺哪条证据）与 next_queries（1~6 条具体取证项）；\n",
+            extensions_left
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "【⚠️ 方案探索预算已耗尽：本步操作已被拒绝！】\n\
+         【原因】当前处于交叉审查模式，已执行 {} 个探索步骤但仍未派发首次方案审查。继续扩散搜索会增加成本而不推进审查状态。\n\
+         【必须执行的操作】：\n\
+         1. 请立即基于已有证据提交方案：推荐输出 submit_plan 字段（plan_summary、target_files、evidence_refs 等），宿主将原子完成方案登记与 Tech Lead 派发；也可直接调用 child_reviewer（role: \"tech_lead\"）；随后调用 wait_jobs 接收裁决；\n\
+         {}\
+         {}. 若现有信息确实不足以形成方案，请调用 ask_human 明确说明缺失信息，禁止继续无边界搜索。",
+        effective_limit,
+        extension_hint,
+        if extensions_left > 0 { "3" } else { "2" }
+    )
+}
+
+/// 探索延期申请获批：追加步数已入账，有效上限抬升
+pub fn exploration_extension_granted(
+    granted_steps: u32,
+    new_effective_limit: usize,
+    extensions_left: u32,
+) -> String {
+    format!(
+        "【✅ 探索延期已批准】追加 {} 个探索步骤，有效探索上限调整为 {} 步（剩余延期次数 {}）。\n\
+         请按申请中声明的 next_queries 收敛取证，避免重新扩散；到达新上限后必须派发 child_reviewer 提交方案审查。",
+        granted_steps, new_effective_limit, extensions_left
+    )
+}
+
+/// 探索延期申请被拒：结构不合法或预算已用尽（不消耗延期次数）
+pub fn exploration_extension_denied(reason: &str, extensions_left: u32) -> String {
+    format!(
+        "【⚠️ 探索延期申请驳回】{}\n\
+         合法申请需填写 unresolved_question（尚未解决的关键问题）与 next_queries（1~6 条具体取证项），\
+         可选 extra_steps 指定追加步数。剩余延期次数：{}。\n\
+         若无法补足申请要素，请立即派发 child_reviewer 提交方案审查，或调用 ask_human 说明缺失信息。",
+        reason, extensions_left
+    )
+}
+
+/// 探索延期申请不适用于当前阶段（非交叉审查探索期或已派审）
+pub fn exploration_extension_not_applicable() -> String {
+    "【ℹ️ 探索延期申请不适用】当前不在交叉审查探索阶段（或首次审查已派发），探索延期申请已被忽略。\n\
+     若需调整方案，请直接修正后重新派发 child_reviewer；若需人工介入，请调用 ask_human。"
+        .to_string()
 }
 
 /// 交叉审查模式：已派发但结论尚未回收（“问过 ≠ 听过”）

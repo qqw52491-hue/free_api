@@ -62,6 +62,19 @@ pub struct PlanGateProjection {
     /// 是否已获人工审批/豁免特批放行
     #[serde(default)]
     pub human_waived: bool,
+    /// 探索预算投影（仅 cross_review + exploring + 尚未派审时有意义，其余为 0）
+    /// 当前已消耗的探索步数
+    #[serde(default)]
+    pub exploration_steps: usize,
+    /// 软提醒阈值：到达后状态卡转为收敛指引（不拦截）
+    #[serde(default)]
+    pub exploration_soft_limit: usize,
+    /// 当前有效硬上限（基础 + 已批延期，封顶绝对上限）
+    #[serde(default)]
+    pub exploration_hard_limit: usize,
+    /// 剩余可申请的探索延期次数
+    #[serde(default)]
+    pub exploration_extensions_left: u32,
 }
 
 /// 失败教训记录（用于防止大模型在长任务中重复尝试已知失败的方法）

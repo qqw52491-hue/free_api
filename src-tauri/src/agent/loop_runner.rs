@@ -62,6 +62,9 @@ pub(crate) fn evaluate_ask_human_cooldown(
     )
 }
 
+/// submit_plan 编排已拆至 crate::agent::plan_submit::handle_submit_plan（此处仅 re-export）。
+use crate::agent::plan_submit::handle_submit_plan;
+
 /// 执行持久化状态机的 RunTool 阶段。
 ///
 /// 调用前为未知或可能有副作用的操作创建 pending checkpoint；人工等待也以
@@ -82,30 +85,59 @@ pub async fn run_tool_phase(
     rx: &mut mpsc::Receiver<HumanControl>,
     interrupt_rx: &mut watch::Receiver<u64>,
 ) -> Result<DispatchResult, String> {
-    // --- B. 执行动作 ---
-    if let Some(reason) =
-        context.repeated_failure_blocker(&inst.get_tool(), &inst.get_action(), &inst.get_params())
-    {
-        return Ok(DispatchResult {
-            success: false,
-            stdout: String::new(),
-            stderr: reason,
-            route: REPEATED_FAILURE_BLOCKED_ROUTE.to_string(),
-        });
-    }
+    let instruction_tool = inst.get_tool();
+    let instruction_action = inst.get_action();
+    // submit_plan 优先裁决：它是探索期的合法收敛出口，独立于探索预算门禁与工具派发链。
+    // 与工具调用混发属协议误用（提交语义含糊），直接拒绝让模型单独重提。
+    let submit_plan_request = inst.submit_plan.clone();
+    // 探索延期裁决先于门禁评估：获批当步生效，附带在同一指令上的取证调用可立即通过门禁；
+    // 纯申请（无工具入口）不派发工具，裁决结果直接作为本步结果。
+    // 同一步已提交方案时延期申请无意义，跳过裁决避免白耗延期额度。
+    let extension_verdict = if inst.submit_plan.is_some() {
+        None
+    } else {
+        inst.request_exploration_extension
+            .as_ref()
+            .map(|req| crate::agent::plan_gate::adjudicate_exploration_extension(checkpoint, req))
+    };
+    let exploration_limit =
+        crate::agent::plan_gate::cross_review_exploration_effective_limit(checkpoint);
+    let exploration_rejection = crate::agent::plan_gate::check_cross_review_exploration_gate(
+        checkpoint,
+        step_id,
+        &instruction_tool,
+        &instruction_action,
+        exploration_limit,
+    );
 
-    // --- B0. 重复读取硬拦截：同工具+同路径第 3 次读取且内容未变 → 拒绝并给抓手 ---
-    if let Some(block_msg) = context.check_repeat_read_dispatch(inst, workspace_dir) {
-        let _ = app.emit(
-            &format!("agent-log-{}", final_session_id),
-            "🛑 重复读取已拦截：内容未变化，强制切换策略".to_string(),
-        );
-        return Ok(DispatchResult {
-            success: false,
-            stdout: String::new(),
-            stderr: block_msg,
-            route: "host_rejection:repeat_read".to_string(),
-        });
+    if exploration_rejection.is_none() {
+        // --- B. 执行动作 ---
+        if let Some(reason) = context.repeated_failure_blocker(
+            &inst.get_tool(),
+            &inst.get_action(),
+            &inst.get_params(),
+        ) {
+            return Ok(DispatchResult {
+                success: false,
+                stdout: String::new(),
+                stderr: reason,
+                route: REPEATED_FAILURE_BLOCKED_ROUTE.to_string(),
+            });
+        }
+
+        // --- B0. 重复读取硬拦截：同工具+同路径第 3 次读取且内容未变 → 拒绝并给抓手 ---
+        if let Some(block_msg) = context.check_repeat_read_dispatch(inst, workspace_dir) {
+            let _ = app.emit(
+                &format!("agent-log-{}", final_session_id),
+                "🛑 重复读取已拦截：内容未变化，强制切换策略".to_string(),
+            );
+            return Ok(DispatchResult {
+                success: false,
+                stdout: String::new(),
+                stderr: block_msg,
+                route: "host_rejection:repeat_read".to_string(),
+            });
+        }
     }
 
     app.emit(
@@ -134,6 +166,171 @@ pub async fn run_tool_phase(
         "",
         None,
     );
+
+    if let Some(submission) = submit_plan_request {
+        let result = if inst.has_executable_entry() {
+            DispatchResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "【⚠️ submit_plan 协议误用】方案提交是独立的状态转换动作，必须与工具调用分步提交。\n请单独输出 {\"submit_plan\": {...}}，不要附带 tool/action/params。".to_string(),
+                route: "plan_liveness:submit_plan_mixed".to_string(),
+            }
+        } else {
+            handle_submit_plan(
+                app,
+                state.inner(),
+                model_routing,
+                parent_run_id,
+                workspace_dir,
+                final_session_id,
+                step_id,
+                &submission,
+                context,
+                checkpoint,
+                interrupt_rx.clone(),
+            )
+            .await
+        };
+        crate::agent::telemetry::record_gate_fire(
+            state.inner(),
+            &crate::agent::telemetry::GateFireRecord {
+                run_id: parent_run_id,
+                session_id: final_session_id,
+                step_id: step_id as i64,
+                gate: "plan_liveness",
+                route: &result.route,
+            },
+        );
+        emit_tool_event(
+            app,
+            final_session_id,
+            step_id,
+            inst,
+            if result.success { "completed" } else { "failed" },
+            Some(result.route.clone()),
+            Some(result.success),
+            if result.success { &result.stdout } else { &result.stderr },
+            Some(tool_started_at.elapsed().as_millis()),
+        );
+        return Ok(result);
+    }
+
+    // prepare_finish 早路由：它只是标记——真正的门禁评估在 main_loop 终态段执行
+    // （那里才有 open_todos/义务验证/宿主验证/终审的完整上下文）。成功路径不在此处
+    // emit 完成事件，避免与 main_loop 的权威收据事件重复。
+    if inst.prepare_finish.is_some() {
+        let result = if inst.has_executable_entry() {
+            DispatchResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "【⚠️ prepare_finish 协议误用】终态预检是独立的评估动作，必须与工具调用分步提交。\n请单独输出 {\"prepare_finish\": {\"summary\": \"...\"}}，不要附带 tool/action/params。".to_string(),
+                route: "finalization:prepare_mixed".to_string(),
+            }
+        } else {
+            DispatchResult {
+                success: true,
+                stdout: inst
+                    .prepare_finish
+                    .as_ref()
+                    .and_then(|req| req.summary.clone().or_else(|| req.details.clone()))
+                    .unwrap_or_else(|| "终态预检".to_string()),
+                stderr: String::new(),
+                route: "prepare_finish".to_string(),
+            }
+        };
+        crate::agent::telemetry::record_gate_fire(
+            state.inner(),
+            &crate::agent::telemetry::GateFireRecord {
+                run_id: parent_run_id,
+                session_id: final_session_id,
+                step_id: step_id as i64,
+                gate: "finalization",
+                route: &result.route,
+            },
+        );
+        if !result.success {
+            emit_tool_event(
+                app,
+                final_session_id,
+                step_id,
+                inst,
+                "failed",
+                Some(result.route.clone()),
+                Some(false),
+                &result.stderr,
+                Some(tool_started_at.elapsed().as_millis()),
+            );
+        }
+        return Ok(result);
+    }
+
+    if let Some(verdict) = extension_verdict {
+        crate::agent::telemetry::record_gate_fire(
+            state.inner(),
+            &crate::agent::telemetry::GateFireRecord {
+                run_id: parent_run_id,
+                session_id: final_session_id,
+                step_id: step_id as i64,
+                gate: "plan_liveness",
+                route: verdict.route,
+            },
+        );
+        if inst.is_bare_exploration_extension_request() {
+            let result = DispatchResult {
+                success: verdict.granted,
+                stdout: if verdict.granted {
+                    verdict.message.clone()
+                } else {
+                    String::new()
+                },
+                stderr: if verdict.granted {
+                    String::new()
+                } else {
+                    verdict.message.clone()
+                },
+                route: verdict.route.to_string(),
+            };
+            emit_tool_event(
+                app,
+                final_session_id,
+                step_id,
+                inst,
+                if verdict.granted { "completed" } else { "failed" },
+                Some(result.route.clone()),
+                Some(verdict.granted),
+                &verdict.message,
+                Some(tool_started_at.elapsed().as_millis()),
+            );
+            return Ok(result);
+        }
+        // 附带在工具调用上的申请：裁决意见注入下一轮上下文，不阻断本次动作
+        context.add_error_feedback(&verdict.message);
+    }
+
+    if let Some(rejection) = exploration_rejection {
+        crate::agent::telemetry::record_gate_fire(
+            state.inner(),
+            &crate::agent::telemetry::GateFireRecord {
+                run_id: parent_run_id,
+                session_id: final_session_id,
+                step_id: step_id as i64,
+                gate: "plan_liveness",
+                route: &rejection.route,
+            },
+        );
+        emit_tool_event(
+            app,
+            final_session_id,
+            step_id,
+            inst,
+            "failed",
+            Some(rejection.route.clone()),
+            Some(false),
+            &rejection.stderr,
+            Some(tool_started_at.elapsed().as_millis()),
+        );
+        return Ok(rejection);
+    }
 
     // --- B1. 协议终态：finish 不创建 pending、不派发工具，由主循环在终态自检裁决后统一收敛状态与发送事件。 ---
     if is_finish_instruction(inst) {

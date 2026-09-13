@@ -12,6 +12,311 @@ use crate::db::DbState;
 const PLAN_DECISION_MARKER_PREFIX: &str = "<!--plan-decision:";
 const PLAN_DECISION_MARKER_SUFFIX: &str = "-->";
 
+const DEFAULT_CROSS_REVIEW_EXPLORATION_MAX_STEPS: usize = 24;
+const DEFAULT_CROSS_REVIEW_EXPLORATION_SOFT_STEPS: usize = 14;
+const DEFAULT_CROSS_REVIEW_EXPLORATION_EXTENSION_STEPS: u32 = 8;
+const DEFAULT_CROSS_REVIEW_EXPLORATION_MAX_EXTENSIONS: u32 = 2;
+const DEFAULT_CROSS_REVIEW_EXPLORATION_ABSOLUTE_STEPS: usize = 48;
+
+/// 探索预算配置：全部环境变量可调，默认值仅为起始点，后续按历史轨迹调优。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExplorationBudgetConfig {
+    /// 软提醒阈值：到达后状态卡转为收敛指引，不拦截
+    pub soft_steps: usize,
+    /// 初始硬上限：到达后普通操作被门禁拒绝
+    pub base_steps: usize,
+    /// 单次延期最多可追加的步数
+    pub per_extension_steps: u32,
+    /// 延期申请次数上限
+    pub max_extensions: u32,
+    /// 无论如何不可突破的绝对上限
+    pub absolute_steps: usize,
+}
+
+impl ExplorationBudgetConfig {
+    pub(crate) fn from_env() -> Self {
+        Self {
+            soft_steps: cross_review_exploration_soft_steps(),
+            base_steps: cross_review_exploration_max_steps(),
+            per_extension_steps: cross_review_exploration_extension_steps(),
+            max_extensions: cross_review_exploration_max_extensions(),
+            absolute_steps: cross_review_exploration_absolute_steps(),
+        }
+    }
+
+    /// 有效硬上限 = min(基础上限 + 已批延期步数, 绝对上限)
+    pub(crate) fn effective_limit(&self, granted_steps: u32) -> usize {
+        self.base_steps
+            .saturating_add(granted_steps as usize)
+            .min(self.absolute_steps)
+    }
+}
+
+pub(crate) fn cross_review_exploration_max_steps() -> usize {
+    std::env::var("FREE_API_CROSS_REVIEW_EXPLORATION_MAX_STEPS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.clamp(8, 100))
+        .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_MAX_STEPS)
+}
+
+pub(crate) fn cross_review_exploration_soft_steps() -> usize {
+    std::env::var("FREE_API_CROSS_REVIEW_EXPLORATION_SOFT_STEPS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.clamp(4, 80))
+        .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_SOFT_STEPS)
+}
+
+pub(crate) fn cross_review_exploration_extension_steps() -> u32 {
+    std::env::var("FREE_API_CROSS_REVIEW_EXPLORATION_EXTENSION_STEPS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .map(|value| value.clamp(1, 32))
+        .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_EXTENSION_STEPS)
+}
+
+pub(crate) fn cross_review_exploration_max_extensions() -> u32 {
+    std::env::var("FREE_API_CROSS_REVIEW_EXPLORATION_MAX_EXTENSIONS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .map(|value| value.clamp(0, 8))
+        .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_MAX_EXTENSIONS)
+}
+
+pub(crate) fn cross_review_exploration_absolute_steps() -> usize {
+    std::env::var("FREE_API_CROSS_REVIEW_EXPLORATION_ABSOLUTE_STEPS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.clamp(16, 200))
+        .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_ABSOLUTE_STEPS)
+}
+
+/// 当前有效探索硬上限（基础上限 + 已批延期，受绝对上限封顶）
+pub(crate) fn cross_review_exploration_effective_limit(checkpoint: &AgentCheckpoint) -> usize {
+    ExplorationBudgetConfig::from_env()
+        .effective_limit(checkpoint.plan_exploration_granted_steps)
+}
+
+/// 剩余可申请的延期次数
+pub(crate) fn cross_review_exploration_extensions_left(checkpoint: &AgentCheckpoint) -> u32 {
+    cross_review_exploration_max_extensions()
+        .saturating_sub(checkpoint.plan_exploration_extensions_used)
+}
+
+/// 探索延期裁决结果： granted 表示已入账并抬升有效上限；
+/// message 为面向模型的裁决说明（注入上下文或作为纯申请的本步结果）。
+#[derive(Debug)]
+pub(crate) struct ExtensionVerdict {
+    pub granted: bool,
+    pub granted_steps: u32,
+    pub message: String,
+    pub route: &'static str,
+}
+
+/// 裁决模型的探索延期申请（生产入口：预算配置取自环境变量）。
+pub(crate) fn adjudicate_exploration_extension(
+    checkpoint: &mut AgentCheckpoint,
+    request: &crate::agent::types::ExplorationExtensionRequest,
+) -> ExtensionVerdict {
+    adjudicate_exploration_extension_with(
+        checkpoint,
+        request,
+        ExplorationBudgetConfig::from_env(),
+    )
+}
+
+/// 探索延期裁决（显式配置版，供测试注入确定性预算）。
+///
+/// 判定顺序：
+/// 1. 适用性——仅交叉审查 + Exploring + 尚未派发过首次审查；
+/// 2. 结构——unresolved_question 非空、next_queries 为 1~6 条非空取证项；
+/// 3. 预算——延期次数与绝对上限余量；
+/// 全部通过后一次性入账：extensions_used +1、granted_steps += grant。
+/// 除入账两个字段外不触碰其他状态：模型仍须自己决定何时派发审查。
+pub(crate) fn adjudicate_exploration_extension_with(
+    checkpoint: &mut AgentCheckpoint,
+    request: &crate::agent::types::ExplorationExtensionRequest,
+    cfg: ExplorationBudgetConfig,
+) -> ExtensionVerdict {
+    let applicable = checkpoint.plan_mode == PlanExecutionMode::CrossReview
+        && checkpoint.plan_phase == PlanPhase::Exploring
+        && checkpoint.plan_reviewer_retry_count == 0;
+    if !applicable {
+        return ExtensionVerdict {
+            granted: false,
+            granted_steps: 0,
+            message: gate_messages::exploration_extension_not_applicable(),
+            route: "plan_liveness:extension_not_applicable",
+        };
+    }
+
+    let extensions_left = cfg
+        .max_extensions
+        .saturating_sub(checkpoint.plan_exploration_extensions_used);
+    let deny = |reason: &str| ExtensionVerdict {
+        granted: false,
+        granted_steps: 0,
+        message: gate_messages::exploration_extension_denied(reason, extensions_left),
+        route: "plan_liveness:extension_denied",
+    };
+
+    if request.unresolved_question.trim().is_empty() {
+        return deny("unresolved_question 不能为空：必须明确还缺哪条关键证据、它将如何改变方案。");
+    }
+    let concrete_queries = request
+        .next_queries
+        .iter()
+        .filter(|q| !q.trim().is_empty())
+        .count();
+    if concrete_queries == 0 || concrete_queries > 6 {
+        return deny("next_queries 必须包含 1~6 条非空的具体取证项，防止无边界续探。");
+    }
+
+    let effective = cfg.effective_limit(checkpoint.plan_exploration_granted_steps);
+    let room = cfg.absolute_steps.saturating_sub(effective) as u32;
+    if extensions_left == 0 {
+        return deny("延期申请次数已用尽。");
+    }
+    if room == 0 {
+        return deny("已到达探索绝对上限，无法追加任何步骤。");
+    }
+
+    let grant = request
+        .extra_steps
+        .unwrap_or(cfg.per_extension_steps)
+        .clamp(1, cfg.per_extension_steps)
+        .min(room);
+    checkpoint.plan_exploration_extensions_used += 1;
+    checkpoint.plan_exploration_granted_steps += grant;
+    let new_limit = cfg.effective_limit(checkpoint.plan_exploration_granted_steps);
+    ExtensionVerdict {
+        granted: true,
+        granted_steps: grant,
+        message: gate_messages::exploration_extension_granted(
+            grant,
+            new_limit,
+            extensions_left - 1,
+        ),
+        route: "plan_liveness:extension_granted",
+    }
+}
+
+/// submit_plan 适用性预检（纯 checkpoint 判定，不含 DB 在途行检查）。
+/// 返回 Some(reason) 表示当前状态不可用提交；None 放行。
+/// 覆盖：模式/阶段/升级挂起/未闭合审查轮次/预算上限。
+pub(crate) fn submit_plan_rejection(checkpoint: &AgentCheckpoint) -> Option<String> {
+    if checkpoint.plan_mode != PlanExecutionMode::CrossReview {
+        return Some(format!(
+            "【ℹ️ submit_plan 不适用】当前执行模式为 {:?}，方案提交通道仅在交叉审查模式（cross_review）下有效。\n\
+             全自动模式可直接在排查后写入；方案审批模式请调用 ask_human(kind: plan_approval) 呈报方案。",
+            checkpoint.plan_mode
+        ));
+    }
+    if checkpoint.plan_phase.is_approved() {
+        return Some(
+            "【ℹ️ submit_plan 不适用】方案已获放行，无需再次提交。请按已批准方案执行写入与验证。"
+                .to_string(),
+        );
+    }
+    if let Some(ref roles) = checkpoint.plan_escalation_required {
+        return Some(format!(
+            "【⚠️ submit_plan 已拒绝】Tech Lead 已裁决须升级多专家联合会审（建议角色：{}）。\n\
+             请改用 child_reviewer 通过 dispatches 数组并发派发上述专家；submit_plan 的 1v1 单审通道不再适用。",
+            if roles.is_empty() {
+                "architect / security_specialist 等".to_string()
+            } else {
+                roles.join(", ")
+            }
+        ));
+    }
+    // 已预扣预算但结论未消费 = 审查轮次仍开着，重复提交只会制造无人认领的审查任务
+    if checkpoint.plan_reviewer_retry_count > 0 && !checkpoint.plan_reviewer_consumed {
+        return Some(
+            "【⚠️ submit_plan 已拒绝】已有方案审查任务在途或结论尚未回收（问过 ≠ 听过）。\n\
+             请先调用 wait_jobs 收取并研判审查结论；确认需要新一轮评审时再重新提交 submit_plan。"
+                .to_string(),
+        );
+    }
+    if checkpoint.plan_reviewer_retry_count >= crate::agent::checkpoint::max_plan_reviewer_rounds()
+    {
+        return Some(gate_messages::reviewer_retry_limit());
+    }
+    None
+}
+
+/// submit_plan 结构校验：方案必须带来源证据，防止空想方案进入审查。
+/// 成功返回 (规范化 target_files, 去重 evidence_refs)。
+pub(crate) fn validate_plan_submission(
+    submission: &crate::agent::types::PlanSubmission,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    if submission.plan_summary.trim().chars().count() < 10 {
+        return Err(
+            "【⚠️ submit_plan 结构不合法】plan_summary 不能为空且至少 10 个字符：请概述根因、改动方式与实施步骤。"
+                .to_string(),
+        );
+    }
+    let target_files: Vec<String> = submission
+        .target_files
+        .iter()
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
+    if target_files.is_empty() || target_files.len() > 50 {
+        return Err(
+            "【⚠️ submit_plan 结构不合法】target_files 必须包含 1~50 条非空文件路径。".to_string(),
+        );
+    }
+    let mut evidence_refs: Vec<String> = submission
+        .evidence_refs
+        .iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect();
+    evidence_refs.dedup();
+    if evidence_refs.is_empty() || evidence_refs.len() > 6 {
+        return Err(
+            "【⚠️ submit_plan 结构不合法】evidence_refs 必须包含 1~6 条你已实际读取过的证据引用（文件路径或证据标识）；空手提交方案没有审查意义。"
+                .to_string(),
+        );
+    }
+    Ok((target_files, evidence_refs))
+}
+
+/// 探索活性门禁：交叉审查 + Exploring + 尚未派审 时，超过有效硬上限的探索被拒绝。
+/// effective_limit 由调用方按「基础 + 已批延期（封顶绝对上限）」计算后传入，
+/// 使本函数保持纯判定、可用任意预算做确定性测试。
+pub(crate) fn check_cross_review_exploration_gate(
+    checkpoint: &AgentCheckpoint,
+    step_id: usize,
+    tool: &str,
+    action: &str,
+    effective_limit: usize,
+) -> Option<DispatchResult> {
+    let reviewer_dispatch = tool.eq_ignore_ascii_case("child_reviewer")
+        || action.eq_ignore_ascii_case("child_reviewer");
+    let human_escalation =
+        tool.eq_ignore_ascii_case("ask_human") || action.eq_ignore_ascii_case("ask");
+    if checkpoint.plan_mode != PlanExecutionMode::CrossReview
+        || checkpoint.plan_phase != PlanPhase::Exploring
+        || checkpoint.plan_reviewer_retry_count > 0
+        || step_id < effective_limit
+        || reviewer_dispatch
+        || human_escalation
+    {
+        return None;
+    }
+    Some(DispatchResult {
+        success: false,
+        stdout: String::new(),
+        stderr: gate_messages::cross_review_exploration_budget_exhausted(
+            effective_limit,
+            cross_review_exploration_extensions_left(checkpoint),
+        ),
+        route: "plan_gatekeeper:exploration_budget_exhausted".to_string(),
+    })
+}
+
 /// 方案审批的结构化结论（标记载荷的类型化契约）。
 ///
 /// 与前端 `AgentHumanInterventionCard` / 移动端 app.js 的下发格式保持一致；
@@ -744,6 +1049,327 @@ mod tests {
         let res_council = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-tech-lead-esc", 2, false);
         assert!(res_council.is_none(), "联合会审齐套通过后放行写入");
         assert_eq!(cp.plan_phase, PlanPhase::Approved);
+    }
+
+    fn exploration_checkpoint(
+        mode: PlanExecutionMode,
+        phase: PlanPhase,
+        retry_count: u32,
+    ) -> AgentCheckpoint {
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-liveness".to_string(), &context);
+        cp.plan_mode = mode;
+        cp.plan_phase = phase;
+        cp.plan_reviewer_retry_count = retry_count;
+        cp
+    }
+
+    #[test]
+    fn test_exploration_gate_fires_only_after_budget() {
+        let cp = exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
+        assert!(check_cross_review_exploration_gate(&cp, 19, "read_file", "", 20).is_none());
+        let res = check_cross_review_exploration_gate(&cp, 20, "grep_search", "", 20);
+        assert!(res.is_some());
+        let dispatch = res.unwrap();
+        assert_eq!(
+            dispatch.route,
+            "plan_gatekeeper:exploration_budget_exhausted"
+        );
+        assert!(!dispatch.success);
+        assert!(dispatch.stderr.contains("20"));
+        assert!(dispatch.stderr.contains("child_reviewer"));
+    }
+
+    #[test]
+    fn test_exploration_gate_allows_reviewer_dispatch_and_human_escalation() {
+        let cp = exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
+        assert!(check_cross_review_exploration_gate(&cp, 20, "child_reviewer", "", 20).is_none());
+        assert!(check_cross_review_exploration_gate(&cp, 20, "", "child_reviewer", 20).is_none());
+        assert!(check_cross_review_exploration_gate(&cp, 20, "ask_human", "", 20).is_none());
+        assert!(check_cross_review_exploration_gate(&cp, 20, "", "ask", 20).is_none());
+    }
+
+    #[test]
+    fn test_exploration_gate_ignores_non_exploring_states() {
+        let auto = exploration_checkpoint(PlanExecutionMode::Auto, PlanPhase::Exploring, 0);
+        assert!(check_cross_review_exploration_gate(&auto, 100, "read_file", "", 20).is_none());
+
+        let retried =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 1);
+        assert!(check_cross_review_exploration_gate(&retried, 100, "read_file", "", 20).is_none());
+
+        let approved =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Approved, 0);
+        assert!(check_cross_review_exploration_gate(&approved, 100, "read_file", "", 20).is_none());
+    }
+
+    // ---------- 探索延期裁决（软提醒 + 结构化延长 + 绝对上限） ----------
+
+    fn extension_cfg() -> ExplorationBudgetConfig {
+        ExplorationBudgetConfig {
+            soft_steps: 10,
+            base_steps: 20,
+            per_extension_steps: 8,
+            max_extensions: 2,
+            absolute_steps: 40,
+        }
+    }
+
+    fn valid_extension_request() -> crate::agent::types::ExplorationExtensionRequest {
+        crate::agent::types::ExplorationExtensionRequest {
+            unresolved_question: "尚未确认 checkpoint 与 wait_jobs 的失败交付边界".to_string(),
+            next_queries: vec!["定位 record_reviewer_failure_for_run 的调用点".to_string()],
+            extra_steps: None,
+            reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_extension_grant_raises_effective_limit() {
+        let cfg = extension_cfg();
+        let mut cp =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
+        let verdict =
+            adjudicate_exploration_extension_with(&mut cp, &valid_extension_request(), cfg);
+        assert!(verdict.granted);
+        assert_eq!(verdict.granted_steps, 8);
+        assert_eq!(verdict.route, "plan_liveness:extension_granted");
+        assert_eq!(cp.plan_exploration_extensions_used, 1);
+        assert_eq!(cp.plan_exploration_granted_steps, 8);
+        // 有效上限从 20 抬升到 28：第 25 步的搜索在授予后被放行
+        assert!(check_cross_review_exploration_gate(&cp, 25, "search", "", 28).is_none());
+    }
+
+    #[test]
+    fn test_extension_denied_without_unresolved_question() {
+        let cfg = extension_cfg();
+        let mut cp =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
+        let mut req = valid_extension_request();
+        req.unresolved_question = "   ".to_string();
+        let verdict = adjudicate_exploration_extension_with(&mut cp, &req, cfg);
+        assert!(!verdict.granted);
+        assert_eq!(verdict.route, "plan_liveness:extension_denied");
+        // 结构不合法的拒绝不消耗延期次数
+        assert_eq!(cp.plan_exploration_extensions_used, 0);
+        assert_eq!(cp.plan_exploration_granted_steps, 0);
+    }
+
+    #[test]
+    fn test_extension_denied_without_concrete_queries() {
+        let cfg = extension_cfg();
+        let mut cp =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
+        let mut req = valid_extension_request();
+        req.next_queries = vec!["  ".to_string()];
+        let verdict = adjudicate_exploration_extension_with(&mut cp, &req, cfg);
+        assert!(!verdict.granted);
+        assert_eq!(cp.plan_exploration_extensions_used, 0);
+
+        req.next_queries = (0..7).map(|i| format!("query {}", i)).collect();
+        let verdict = adjudicate_exploration_extension_with(&mut cp, &req, cfg);
+        assert!(!verdict.granted, "超过 6 条取证项同样拒绝");
+        assert_eq!(cp.plan_exploration_extensions_used, 0);
+    }
+
+    #[test]
+    fn test_extension_count_capped_by_max_extensions() {
+        let cfg = extension_cfg();
+        let mut cp =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
+        let req = valid_extension_request();
+        assert!(adjudicate_exploration_extension_with(&mut cp, &req, cfg).granted);
+        assert!(adjudicate_exploration_extension_with(&mut cp, &req, cfg).granted);
+        let third = adjudicate_exploration_extension_with(&mut cp, &req, cfg);
+        assert!(!third.granted, "第三次申请必须被次数上限拒绝");
+        assert_eq!(cp.plan_exploration_extensions_used, 2);
+        assert_eq!(cp.plan_exploration_granted_steps, 16);
+    }
+
+    #[test]
+    fn test_extension_never_exceeds_absolute_cap() {
+        let cfg = extension_cfg(); // base 20 + abs 40 → 最多再授 20 步
+        let mut cp =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
+        let mut req = valid_extension_request();
+        req.extra_steps = Some(8);
+        adjudicate_exploration_extension_with(&mut cp, &req, cfg); // +8 → 28
+        adjudicate_exploration_extension_with(&mut cp, &req, cfg); // +8 → 36
+        // 次数已用完；把次数上限抬高后，余量只剩 40-36=4 步
+        let loose_cfg = ExplorationBudgetConfig { max_extensions: 9, ..cfg };
+        let verdict = adjudicate_exploration_extension_with(&mut cp, &req, loose_cfg);
+        assert!(verdict.granted);
+        assert_eq!(verdict.granted_steps, 4, "授予量必须被绝对上限截断");
+        assert_eq!(cfg.effective_limit(cp.plan_exploration_granted_steps), 40);
+    }
+
+    #[test]
+    fn test_extension_not_applicable_outside_exploring() {
+        let cfg = extension_cfg();
+        let req = valid_extension_request();
+        let mut auto = exploration_checkpoint(PlanExecutionMode::Auto, PlanPhase::Exploring, 0);
+        let v = adjudicate_exploration_extension_with(&mut auto, &req, cfg);
+        assert!(!v.granted);
+        assert_eq!(v.route, "plan_liveness:extension_not_applicable");
+
+        let mut dispatched =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Reviewing, 1);
+        let v = adjudicate_exploration_extension_with(&mut dispatched, &req, cfg);
+        assert!(!v.granted);
+
+        let mut approved =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Approved, 0);
+        let v = adjudicate_exploration_extension_with(&mut approved, &req, cfg);
+        assert!(!v.granted);
+        // 不适用裁决不得污染延期账本
+        assert_eq!(auto.plan_exploration_extensions_used, 0);
+        assert_eq!(dispatched.plan_exploration_granted_steps, 0);
+        assert_eq!(approved.plan_exploration_extensions_used, 0);
+    }
+
+    #[test]
+    fn test_extension_request_makes_bare_instruction_executable() {
+        let bare = crate::agent::types::AgentInstruction {
+            request_exploration_extension: Some(valid_extension_request()),
+            ..Default::default()
+        };
+        assert!(bare.validate_executable_shape().is_ok());
+        assert!(bare.is_bare_exploration_extension_request());
+
+        let mut attached = crate::agent::types::AgentInstruction::default();
+        attached.tool = Some("search".to_string());
+        attached.request_exploration_extension = Some(valid_extension_request());
+        assert!(attached.validate_executable_shape().is_ok());
+        assert!(!attached.is_bare_exploration_extension_request());
+    }
+
+    // ---------- submit_plan：适用性预检 / 结构校验 / 一致提交 ----------
+
+    fn valid_submission() -> crate::agent::types::PlanSubmission {
+        crate::agent::types::PlanSubmission {
+            plan_summary: "修复 checkpoint 保存时的竞态：把批次注册并入同一次 UPDATE".to_string(),
+            target_files: vec!["src/agent/checkpoint.rs".to_string()],
+            root_cause: "spawn 与批次注册分离导致半截状态".to_string(),
+            evidence_refs: vec!["src/agent/checkpoint.rs:922".to_string()],
+            assumptions: vec![],
+            open_questions: vec![],
+            intended_verification: "cargo test --lib plan_gate".to_string(),
+            risk_level: "medium".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_submit_plan_rejection_phase_matrix() {
+        // 交叉审查 + Exploring + 未派审 → 放行
+        let mut cp =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
+        assert!(submit_plan_rejection(&cp).is_none());
+
+        // Auto 模式 → 不适用
+        let auto = exploration_checkpoint(PlanExecutionMode::Auto, PlanPhase::Exploring, 0);
+        assert!(submit_plan_rejection(&auto).unwrap().contains("不适用"));
+
+        // PlanApproval 模式 → 不适用（应走 ask_human）
+        let approval =
+            exploration_checkpoint(PlanExecutionMode::PlanApproval, PlanPhase::Exploring, 0);
+        assert!(submit_plan_rejection(&approval).unwrap().contains("不适用"));
+
+        // 已放行 → 不适用
+        let approved =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Approved, 0);
+        assert!(submit_plan_rejection(&approved).unwrap().contains("已获放行"));
+
+        // 升级挂起 → 拒绝并指引联合会审
+        cp.plan_escalation_required = Some(vec!["architect".to_string()]);
+        let rej = submit_plan_rejection(&cp).unwrap();
+        assert!(rej.contains("联合会审"));
+        assert!(rej.contains("architect"));
+        cp.plan_escalation_required = None;
+
+        // 审查轮次未闭合（已预扣未消费）→ 拒绝重复提交
+        cp.plan_reviewer_retry_count = 1;
+        cp.plan_reviewer_consumed = false;
+        assert!(submit_plan_rejection(&cp).unwrap().contains("在途"));
+
+        // 上一轮已消费 → 允许新一轮提交
+        cp.plan_reviewer_consumed = true;
+        assert!(submit_plan_rejection(&cp).is_none());
+
+        // 预算耗尽 → 拒绝
+        cp.plan_reviewer_retry_count = crate::agent::checkpoint::max_plan_reviewer_rounds();
+        assert!(submit_plan_rejection(&cp).unwrap().contains("上限"));
+    }
+
+    #[test]
+    fn test_validate_plan_submission_structure() {
+        // 合法提交
+        let (files, refs) = validate_plan_submission(&valid_submission()).unwrap();
+        assert_eq!(files, vec!["src/agent/checkpoint.rs"]);
+        assert_eq!(refs, vec!["src/agent/checkpoint.rs:922"]);
+
+        // 摘要过短
+        let mut s = valid_submission();
+        s.plan_summary = "修 bug".to_string();
+        assert!(validate_plan_submission(&s).unwrap_err().contains("plan_summary"));
+
+        // 无目标文件 / 过多目标文件
+        let mut s = valid_submission();
+        s.target_files = vec![];
+        assert!(validate_plan_submission(&s).unwrap_err().contains("target_files"));
+        s.target_files = (0..51).map(|i| format!("f{i}.rs")).collect();
+        assert!(validate_plan_submission(&s).unwrap_err().contains("target_files"));
+
+        // 无证据 / 证据超上限
+        let mut s = valid_submission();
+        s.evidence_refs = vec!["  ".to_string()];
+        assert!(validate_plan_submission(&s).unwrap_err().contains("evidence_refs"));
+        s.evidence_refs = (0..7).map(|i| format!("src/f{i}.rs")).collect();
+        assert!(validate_plan_submission(&s).unwrap_err().contains("evidence_refs"));
+    }
+
+    #[test]
+    fn test_commit_plan_submission_is_consistent() {
+        let mut cp =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
+        let snapshot = crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::new(
+            "model-x",
+            "pro",
+            "high",
+            "persona",
+            serde_json::json!({"role": "tech_lead"}),
+        );
+        cp.commit_plan_submission(valid_submission(), "rev-42", &snapshot, 9);
+
+        // 不变式：方案落账、阶段推进、预算预扣、批次注册、派发快照——同生同灭
+        assert!(cp.submitted_plan.is_some());
+        assert_eq!(cp.submitted_plan_step, Some(9));
+        assert_eq!(cp.plan_phase, PlanPhase::Reviewing);
+        assert_eq!(cp.plan_reviewer_retry_count, 1);
+        assert!(!cp.plan_reviewer_consumed);
+        assert!(cp.plan_review_batch.expected_run_ids.contains("rev-42"));
+        assert_eq!(cp.plan_review_batch.expected_run_ids.len(), 1);
+        assert!(cp.plan_reviewer_last_dispatch.is_some());
+        // 提交后门禁应把后续提交视为「轮次未闭合」
+        assert!(submit_plan_rejection(&cp).unwrap().contains("在途"));
+    }
+
+    #[test]
+    fn test_submit_plan_instruction_shapes() {
+        // 纯提交可执行且识别为 bare
+        let bare = crate::agent::types::AgentInstruction {
+            submit_plan: Some(valid_submission()),
+            ..Default::default()
+        };
+        assert!(bare.validate_executable_shape().is_ok());
+        assert!(bare.is_bare_plan_submission());
+        assert!(!bare.is_bare_exploration_extension_request());
+
+        // 附带工具入口 → 非 bare（宿主会以协议误用拒绝混发）
+        let mut mixed = crate::agent::types::AgentInstruction::default();
+        mixed.tool = Some("search".to_string());
+        mixed.submit_plan = Some(valid_submission());
+        assert!(mixed.validate_executable_shape().is_ok());
+        assert!(!mixed.is_bare_plan_submission());
     }
 }
 

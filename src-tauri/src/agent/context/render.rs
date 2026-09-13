@@ -96,7 +96,7 @@ impl ContextRenderer {
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "【审查契约】\n范围：{}\n{}\n终态前：每项必须以 evidenced + evidence_refs 或 waived + waived_reason 闭合。\n\n",
+            "【审查契约】\n范围：{}\n{}\n终态前：每项必须以 evidenced + evidence_refs（`文件:行号`，须落入真实 diff）或 waived + waived_reason 闭合；若义务本质是\"命令/测试可通过\"，可给该项挂 `verify_command` 由宿主亲自执行判分（退出码为准），无需行号证据。\n\n",
             contract.scope_statement, obligations
         )
     }
@@ -185,10 +185,36 @@ impl ContextRenderer {
         }
 
         // 4. 交叉审查模式分支 (cross_review) —— 细分且互斥的单一活跃状态
-        // 4.1 尚未派发审查员
+        // 4.1 尚未派发审查员 —— 按探索预算分三态（正常 / 收敛区软提醒 / 硬上限预告）
         if !gate.reviewer_dispatched {
+            // 硬上限已触达：与门禁拦截文案保持一致，预先说明剩余逃生通道
+            if gate.exploration_hard_limit > 0 && gate.exploration_steps >= gate.exploration_hard_limit
+            {
+                let extension_hint = if gate.exploration_extensions_left > 0 {
+                    format!(
+                        "或在指令中附 request_exploration_extension 申请延期（剩余 {} 次，需 unresolved_question + next_queries）",
+                        gate.exploration_extensions_left
+                    )
+                } else {
+                    "探索延期额度已用完".to_string()
+                };
+                return format!(
+                    "【方案门禁状态】⛔ 交叉审查 (cross_review) | 探索预算已耗尽（步数 {}/{}）\n指引: 普通工具调用将被门禁拒绝；请立即输出 submit_plan 提交结构化方案（宿主自动派发 Tech Lead）或调用 child_reviewer，{}，或调用 ask_human 说明缺失信息。\n\n",
+                    gate.exploration_steps, gate.exploration_hard_limit, extension_hint
+                );
+            }
+            // 软提醒区：不拦截，只引导收敛（模型仍保有继续取证或立即派审的决定权）
+            if gate.exploration_soft_limit > 0 && gate.exploration_steps >= gate.exploration_soft_limit
+            {
+                return format!(
+                    "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）| 探索收敛区（步数 {}/硬上限 {}）\n指引: 请停止扩散搜索，汇总根因、目标文件与风险后输出 submit_plan 提交方案（宿主将自动派发 Tech Lead）；证据确实不足可在指令中附 request_exploration_extension 申请延期（剩余 {} 次，需 unresolved_question + next_queries）。\n\n",
+                    gate.reviewer_budget_used, gate.reviewer_budget_max,
+                    gate.exploration_steps, gate.exploration_hard_limit,
+                    gate.exploration_extensions_left
+                );
+            }
             return format!(
-                "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）\n指引: 首次写入前必须先派发 child_reviewer 对抗审查（直接写工具将被门禁拦截）。\n\n",
+                "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）\n指引: 首次写入前必须先完成方案审查：证据成熟后输出 submit_plan 提交结构化方案（宿主自动派发 Tech Lead），或调用 child_reviewer 手动派发；直接写工具将被门禁拦截。\n\n",
                 gate.reviewer_budget_used, gate.reviewer_budget_max
             );
         }
@@ -267,6 +293,7 @@ mod tests {
             expected_reviewers: if dispatched { 1 } else { 0 },
             budget_exhausted: false,
             human_waived: false,
+            ..Default::default()
         }
     }
 

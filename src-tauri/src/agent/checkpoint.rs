@@ -657,6 +657,10 @@ pub struct AgentCheckpoint {
     /// 上次审查结果（当 diff_hash 未变时复用上次拦截，避免浪费 Token）
     #[serde(default)]
     pub last_review_result: Option<crate::agent::reviewer_gatekeeper::ReviewResult>,
+    /// prepare_finish 沉淀的终态收据：diff/scope/契约未变时 finish 直接复用其结论，
+    /// 不重复执行义务验证与终审 LLM 调用。
+    #[serde(default)]
+    pub pending_finalization: Option<crate::agent::finalization::FinalizationReceipt>,
     /// 方案制定与前置门禁阶段
     #[serde(default)]
     pub plan_phase: PlanPhase,
@@ -687,6 +691,18 @@ pub struct AgentCheckpoint {
     /// 1v1 方案评审是否裁决必须升级多专家联合会审（Some 时存储建议拉起的专家角色列表）
     #[serde(default)]
     pub plan_escalation_required: Option<Vec<String>>,
+    /// 交叉审查探索期已消耗的延期申请次数（request_exploration_extension 批准计数）
+    #[serde(default)]
+    pub plan_exploration_extensions_used: u32,
+    /// 交叉审查探索期累计获批追加的探索步数（并入有效硬上限，受绝对上限封顶）
+    #[serde(default)]
+    pub plan_exploration_granted_steps: u32,
+    /// 最近一次 submit_plan 落账的结构化方案（审查注册与派发的母本；重提时覆盖）
+    #[serde(default)]
+    pub submitted_plan: Option<crate::agent::types::PlanSubmission>,
+    /// submitted_plan 落账时的 step_id（审计与血缘追踪）
+    #[serde(default)]
+    pub submitted_plan_step: Option<usize>,
     /// 方案审查最新评分卡（正确性、破坏性风险、代码规范、测试覆盖）
     #[serde(default)]
     pub last_review_scorecard: Option<crate::agent::child_reviewer::ReviewScorecard>,
@@ -847,6 +863,7 @@ impl AgentCheckpoint {
             reviewer_retry_count: 0,
             last_reviewed_diff_hash: None,
             last_review_result: None,
+            pending_finalization: None,
             plan_phase: PlanPhase::Exploring,
             plan_reviewer_retry_count: 0,
             approved_plan_summary: None,
@@ -857,6 +874,10 @@ impl AgentCheckpoint {
             plan_reviewer_consumed: false,
             plan_review_batch: PlanReviewBatchState::default(),
             plan_escalation_required: None,
+            plan_exploration_extensions_used: 0,
+            plan_exploration_granted_steps: 0,
+            submitted_plan: None,
+            submitted_plan_step: None,
             last_review_scorecard: None,
             last_review_blocking_count: 0,
             review_objection_added: 0,
@@ -925,6 +946,28 @@ impl AgentCheckpoint {
         self.plan_reviewer_consumed = false;
         self.last_review_blocking_count = 0;
         self.last_review_scorecard = None;
+    }
+
+    /// submit_plan 的一致状态提交：方案落账 + 阶段推进 + 预算预扣 + 批次注册 + 派发快照。
+    /// 仅在审查子任务已成功 spawn 之后调用——spawn 是唯一可失败的外部副作用，
+    /// 本方法只做内存态合并，由外层 save_checkpoint 的乐观锁 UPDATE 完成持久化原子提交。
+    /// 预算上限须由调用方在 spawn 前预检；此处 reserve 兜底失败时仍完成批次注册，
+    /// 避免「子任务在跑但父状态不认识它」的孤儿状态。
+    pub fn commit_plan_submission(
+        &mut self,
+        submission: crate::agent::types::PlanSubmission,
+        child_run_id: &str,
+        snapshot: &crate::agent::child_reviewer::PlanReviewerDispatchSnapshot,
+        step_id: usize,
+    ) {
+        self.submitted_plan = Some(submission);
+        self.submitted_plan_step = Some(step_id);
+        if !self.plan_phase.is_approved() {
+            self.plan_phase = PlanPhase::Reviewing;
+        }
+        let _ = self.reserve_plan_review_round();
+        self.register_plan_reviewer_batch(&[child_run_id.to_string()]);
+        self.set_plan_reviewer_dispatch_snapshot(snapshot);
     }
 
     /// 登记审查任务失败/异常退出（超时、崩溃、格式错误等，收口防死锁）
@@ -1036,6 +1079,20 @@ impl AgentCheckpoint {
         let expected_reviewers = self.plan_review_batch.expected_run_ids.len();
         let budget_exhausted = self.plan_reviewer_retry_count >= MAX_PLAN_REVIEWER_RETRIES;
         let human_waived = self.human_waiver_text().is_some();
+        // 探索预算三态投影：仅交叉审查 + Exploring + 尚未派审时有意义，
+        // 其余阶段清零（渲染层对应分支不会被命中）。
+        let exploration_active = self.plan_mode == PlanExecutionMode::CrossReview
+            && self.plan_phase == PlanPhase::Exploring
+            && self.plan_reviewer_retry_count == 0;
+        let (exploration_soft, exploration_hard, exploration_extensions_left) = if exploration_active {
+            (
+                crate::agent::plan_gate::cross_review_exploration_soft_steps(),
+                crate::agent::plan_gate::cross_review_exploration_effective_limit(self),
+                crate::agent::plan_gate::cross_review_exploration_extensions_left(self),
+            )
+        } else {
+            (0, 0, 0)
+        };
 
         crate::agent::context::types::PlanGateProjection {
             mode: self.plan_mode.as_str().to_string(),
@@ -1051,6 +1108,10 @@ impl AgentCheckpoint {
             expected_reviewers,
             budget_exhausted,
             human_waived,
+            exploration_steps: if exploration_active { self.step_id } else { 0 },
+            exploration_soft_limit: exploration_soft,
+            exploration_hard_limit: exploration_hard,
+            exploration_extensions_left,
         }
     }
 

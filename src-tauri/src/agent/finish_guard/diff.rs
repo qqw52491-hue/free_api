@@ -380,7 +380,7 @@ pub(crate) fn review_contract_evidence_blockers(
                 ));
             } else if failed_refs.iter().any(|r| parse_file_line_ref(r).is_some()) {
                 blockers.push(format!(
-                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的代码证据 `{}` 未在本次真实代码改动 (diff) 中找到对应修改行——注意：你的编辑会使此前的行号发生漂移，陈旧行号不再有效。请对照下方真实覆盖区间重新引用，或将状态改为 waived 并说明理由。\n{}\n💡 修正建议（照抄即可）：\n{}",
+                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的代码证据 `{}` 未在本次真实代码改动 (diff) 中找到对应修改行——注意：你的编辑会使此前的行号发生漂移，陈旧行号不再有效。请对照下方真实覆盖区间重新引用；若该义务靠命令/测试输出证明，改挂 `verify_command` 由宿主执行判分；或改 waived 并说明理由。\n{}\n💡 修正建议（照抄即可）：\n{}",
                     obligation.id,
                     obligation.question.trim(),
                     failed_refs.join(", "),
@@ -389,7 +389,7 @@ pub(crate) fn review_contract_evidence_blockers(
                 ));
             } else {
                 blockers.push(format!(
-                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但在包含代码写入的任务中，引用的证据 `{}` 缺少具体代码行号（需形如 `文件:行号`，且须落入真实 diff）。请补充行号证据，或将状态改为 waived 并说明理由。",
+                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但在包含代码写入的任务中，引用的证据 `{}` 缺少具体代码行号（需形如 `文件:行号`，且须落入真实 diff）。三条出路任选：①补充落入 diff 的行号证据；②若该义务靠命令/测试输出证明（output_id 句柄不作数），给该项挂 `verify_command` 由宿主执行判分；③改 waived 并说明理由。",
                     obligation.id,
                     obligation.question.trim(),
                     failed_refs.join(", ")

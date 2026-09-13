@@ -47,7 +47,7 @@ struct BuiltinToolSpec {
 const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     BuiltinToolSpec {
         name: "finish",
-        summary: "终态交付；全流程彻底完成的收尾交卷指令。【前置硬约束】：严禁提前交付！若本任务涉及代码修改，必须先完成真实测试验证或确认审查意见已闭合，确保无遗留 blocking 缺陷或未闭合待办；未经验收直接草率 finish 会被系统机械门禁当场拦截打回！若生成或调整了文件交付物，建议在 artifacts 中附带相对路径列表，系统会自动在界面底部上屏生成下载与打开卡片",
+        summary: "终态交付；全流程彻底完成的收尾交卷指令。【前置硬约束】：严禁提前交付！若本任务涉及代码修改，必须先完成真实测试验证或确认审查意见已闭合，确保无遗留 blocking 缺陷或未闭合待办；未经验收直接草率 finish 会被系统机械门禁当场拦截打回！若生成或调整了文件交付物，建议在 artifacts 中附带相对路径列表，系统会自动在界面底部上屏生成下载与打开卡片。【可选预检】：正式交付前可单独一步输出 {\"prepare_finish\": {\"summary\": \"...\"}} 跑同一套门禁做就绪评估——只沉淀收据、不提交终态；就绪收据在代码未变时被 finish 直接复用，免重复验证与终审",
         actions: &["finish(summary: string, artifacts?: string[])"],
     },
     BuiltinToolSpec {

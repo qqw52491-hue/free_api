@@ -1536,9 +1536,12 @@ async fn run_agent_main_loop_in_workspace_inner(
         };
 
         let is_finish = is_finish_instruction(&instruction);
+        // prepare_finish：与 finish 同一套门禁评估，但只沉淀收据、不提交终态。
+        let is_prepare_finish = instruction.prepare_finish.is_some();
+        let finish_gate_requested = is_finish || is_prepare_finish;
 
         // 🌟 纯静态资源自动豁免与无测试工具自适应跳过：
-        if is_finish && result.success && context.change_verification.is_none() {
+        if finish_gate_requested && result.success && context.change_verification.is_none() {
             let has_explicit_verify = context
                 .review_contract
                 .as_ref()
@@ -1590,12 +1593,19 @@ async fn run_agent_main_loop_in_workspace_inner(
         };
 
         // 交付摘要：义务证据校验反撒谎拦截与遥测路由判定共用
+        // （prepare_finish 的预填摘要与 finish.command.summary 同等参与判定，保证预检口径一致）
         let instruction_summary = instruction
             .get_params()
             .get("command")
             .and_then(|command| command.get("summary"))
             .and_then(|s| s.as_str())
-            .map(str::to_string);
+            .map(str::to_string)
+            .or_else(|| {
+                instruction
+                    .prepare_finish
+                    .as_ref()
+                    .and_then(|req| req.summary.clone())
+            });
 
         let mut open_todos = finish_blockers_with_diff(
             &context.todo_list,
@@ -1660,7 +1670,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         // succeeded）。oracle 未完成时把缺口作为持久 blocker——与 complex 未决同级，
         // 不因 finish_reviewed 置位而失效；熔断上限（MAX_FINISH_CHALLENGES）仍是安全阀。
         let mut oracle_progress_unresolved = false;
-        if is_finish && result.success {
+        if finish_gate_requested && result.success {
             if let Some((index, total, completed)) =
                 crate::agent::eval_oracle::query_active_progress().await
             {
@@ -1673,10 +1683,10 @@ async fn run_agent_main_loop_in_workspace_inner(
                 }
             }
         }
-        if is_finish && (crate::agent::child_reviewer::has_running_child_runs(state.inner(), &run_id) || crate::agent::job_engine::has_running_jobs(state.inner(), &run_id)) {
+        if finish_gate_requested && (crate::agent::child_reviewer::has_running_child_runs(state.inner(), &run_id) || crate::agent::job_engine::has_running_jobs(state.inner(), &run_id)) {
             open_todos.push("仍有后台异步任务或持续监听正在执行中：后台任务请调用 wait_jobs 挂起等待并接收结论；持续监听（watch）请调用 watch_stop 显式释放后再提交 finish，或执行其他独立操作后重试".to_string());
         }
-        if is_finish && checkpoint.stage_review_blockers_open > 0 {
+        if finish_gate_requested && checkpoint.stage_review_blockers_open > 0 {
             open_todos.push(format!(
                 "阶段审查仍有 {} 条未解决的 blocking 缺陷：请先调用 resume_child 对质撤回，或调用 ask_human 申请人工仲裁放行",
                 checkpoint.stage_review_blockers_open
@@ -1694,7 +1704,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     || d.contains("fix")
                     || d.contains("refactor")
             });
-        if is_finish
+        if finish_gate_requested
             && has_code_modification_intent
             && !checkpoint.plan_phase.is_approved()
             && (checkpoint.last_review_scorecard.as_ref().map_or(false, |s| !s.passes_gate())
@@ -1705,14 +1715,20 @@ async fn run_agent_main_loop_in_workspace_inner(
                 "方案审查未达标且尚未写入任何代码：禁止直接提交 finish！请根据审查意见修正方案并重新审查，或调用 ask_human 呈报用户申请人工仲裁放行后写入代码".to_string(),
             );
         }
-        let finish_challenged = should_challenge_finish_with_complex_delivery_blocker(
-            is_finish,
-            result.success,
-            checkpoint.finish_reviewed,
-            checkpoint.finish_challenge_count,
-            &open_todos,
-            complex_delivery_unresolved || oracle_progress_unresolved || contract_evidence_unresolved,
-        );
+        let finish_challenged = if is_prepare_finish {
+            // prepare_finish 只评估、不质询：blockers 沉淀进收据，
+            // finish_reviewed / challenge_count / 重试预算一律不动。
+            false
+        } else {
+            should_challenge_finish_with_complex_delivery_blocker(
+                is_finish,
+                result.success,
+                checkpoint.finish_reviewed,
+                checkpoint.finish_challenge_count,
+                &open_todos,
+                complex_delivery_unresolved || oracle_progress_unresolved || contract_evidence_unresolved,
+            )
+        };
 
         let mut reviewer_challenged = false;
         let mut reviewer_warnings_delivered: Option<crate::agent::reviewer_gatekeeper::ReviewResult> = None;
@@ -1726,7 +1742,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 .collect::<Vec<_>>()
                 .join("\n");
             context.add_error_feedback(&format!(
-                "【⚠️ 交付门禁拦截打回：任务尚未满足结项标准，finish 未生效！】\n【未闭合项/证据缺失】：\n{}\n任务仍在运行中。请勿在未闭合上述事项时草率结项！\n【必须采取的行动】：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新并完成验证后，方可再次提交 finish 交付。",
+                "【⚠️ 交付门禁拦截打回：任务尚未满足结项标准，finish 未生效！】\n【未闭合项/证据缺失】：\n{}\n任务仍在运行中。请勿在未闭合上述事项时草率结项！\n【必须采取的行动】：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新并完成验证后，方可再次提交 finish 交付；如需先评估就绪状态而不提交终态，可单独一步输出 prepare_finish 做预检。",
                 blocker_summary
             ));
             crate::agent::dispatcher::emit_tool_event(
@@ -1747,6 +1763,66 @@ async fn run_agent_main_loop_in_workspace_inner(
             // 打分模式累加连续失败权重）。实测依据：Flash 档反复守不住交付披露纪律。
             context.record_step_outcome(false);
         } else if is_finish && result.success {
+            // 🧾 FinalizationReceipt 复用：prepare_finish 已就绪且 diff/scope/契约指纹未变 →
+            // 跳过义务验证、宿主验证与终审 LLM 调用，直接进入终态提交。
+            // 动态 blocker（新后台任务、新 Todo 等）已在上方 finish_challenged 判过，此处只省昂贵项。
+            let current_diff_hash = git_baseline
+                .collect_review_material(&workspace_dir, &context, run_started_at)
+                .map(|(_, hash)| hash)
+                .unwrap_or_default();
+            let contract_fp = crate::agent::finalization::contract_fingerprint(
+                context.review_contract.as_ref(),
+            );
+            let receipt_reusable = checkpoint
+                .pending_finalization
+                .as_ref()
+                .map(|receipt| {
+                    receipt.is_ready()
+                        && receipt.is_fresh(
+                            &current_diff_hash,
+                            context.resource_scope.revision,
+                            &contract_fp,
+                        )
+                })
+                .unwrap_or(false);
+            if receipt_reusable {
+                let receipt = checkpoint.pending_finalization.as_ref().unwrap();
+                let _ = app.emit(
+                    &format!("agent-log-{}", final_session_id),
+                    format!(
+                        "🧾 终态收据复用（{}）：diff/scope/契约未变，跳过重复的义务验证、宿主验证与终审。",
+                        receipt.receipt_id
+                    ),
+                );
+                // 与审查通过分支同款的提交侧状态复位
+                checkpoint.last_reviewed_diff_hash = None;
+                checkpoint.last_review_result = None;
+                if let Some(block) = context.active_target_block_mut() {
+                    block.reset_review_retries();
+                }
+                context.block_manager.advance_to_next();
+                crate::agent::telemetry::record_gate_fire(
+                    state.inner(),
+                    &crate::agent::telemetry::GateFireRecord {
+                        run_id: &run_id,
+                        session_id: &final_session_id,
+                        step_id: step_id as i64,
+                        gate: "finalization",
+                        route: "finalization:receipt_reused",
+                    },
+                );
+                crate::agent::dispatcher::emit_tool_event(
+                    &app,
+                    &final_session_id,
+                    step_id,
+                    &instruction,
+                    "succeeded",
+                    Some("finish".to_string()),
+                    Some(true),
+                    "终态收据复用：验证与终审结论在 diff 未变下仍有效，直接提交",
+                    None,
+                );
+            } else {
             // Level 0 机械门禁：零 Token 快速拦截（Scope 边界越界等）
             let scope_violations = crate::agent::reviewer_gatekeeper::mechanical_precheck_violations(
                 &workspace_dir,
@@ -1967,22 +2043,60 @@ async fn run_agent_main_loop_in_workspace_inner(
                     );
                     context.record_step_outcome(false);
                 } else {
-                    // 达到 3 次熔断上限！进入带警告交付模式（Fail-Open with Warnings / 升级人工）
-                    reviewer_warnings_delivered = Some(review_res.clone());
-                    crate::agent::dispatcher::emit_tool_event(
-                        &app,
-                        &final_session_id,
-                        step_id,
-                        &instruction,
-                        "succeeded",
-                        Some("finish".to_string()),
-                        Some(true),
-                        &format!(
-                            "终态审查熔断放行（已重试 3 次）：仍有 {} 项未收敛缺陷已附带警告交付",
+                    // 达到 3 次熔断上限：低风险带警告交付；高风险（鉴权/密钥/迁移/并发/安全策略）
+                    // 不享受熔断放行额度——继续按未通过处理并引导 ask_human 人工仲裁。
+                    let risk_flags =
+                        crate::agent::finalization::detect_risk_flags(&context.new_affected_paths());
+                    if risk_flags.is_empty() {
+                        reviewer_warnings_delivered = Some(review_res.clone());
+                        crate::agent::dispatcher::emit_tool_event(
+                            &app,
+                            &final_session_id,
+                            step_id,
+                            &instruction,
+                            "succeeded",
+                            Some("finish".to_string()),
+                            Some(true),
+                            &format!(
+                                "终态审查熔断放行（已重试 3 次）：仍有 {} 项未收敛缺陷已附带警告交付",
+                                review_res.blocking_issues.len()
+                            ),
+                            None,
+                        );
+                    } else {
+                        reviewer_challenged = true;
+                        checkpoint.finish_reviewed = true;
+                        crate::agent::telemetry::record_gate_fire(
+                            state.inner(),
+                            &crate::agent::telemetry::GateFireRecord {
+                                run_id: &run_id,
+                                session_id: &final_session_id,
+                                step_id: step_id as i64,
+                                gate: "finish_review",
+                                route: "finish_review:high_risk_escalated",
+                            },
+                        );
+                        context.add_error_feedback(&format!(
+                            "【⚠️ 高风险交付审查未收敛（已重试 3 次），禁止自动带警告交付！】\n检测到高风险改动信号：{}\n仍有 {} 项阻塞性缺陷未解决。\n【必须采取的行动】：高风险改动不享受熔断放行额度——请继续修复缺陷后重试 finish；若认为审查意见有误，请调用 ask_human 申请人工仲裁。",
+                            risk_flags.join(", "),
                             review_res.blocking_issues.len()
-                        ),
-                        None,
-                    );
+                        ));
+                        crate::agent::dispatcher::emit_tool_event(
+                            &app,
+                            &final_session_id,
+                            step_id,
+                            &instruction,
+                            "finish_challenged",
+                            Some("finish".to_string()),
+                            Some(false),
+                            &format!(
+                                "高风险改动审查未收敛（{}），已熔断升级人工仲裁",
+                                risk_flags.join(", ")
+                            ),
+                            None,
+                        );
+                        context.record_step_outcome(false);
+                    }
                 }
             } else {
                 // 审查 100% 通过（或无代码修改 / 仅次要建议放行）
@@ -2006,6 +2120,70 @@ async fn run_agent_main_loop_in_workspace_inner(
                 );
             }
             }
+            }
+        } else if is_prepare_finish && result.success {
+            // ── 终态预检：与 finish 同一套门禁，只沉淀收据、不提交终态 ──
+            // 就绪收据在 diff/scope/契约未变时被 finish 直接复用，不重复烧验证与终审。
+            let receipt = crate::agent::finalization::evaluate_prepare_finish(
+                &app,
+                state.inner(),
+                &context,
+                &mut checkpoint,
+                &run_id,
+                &final_session_id,
+                step_id,
+                &workspace_dir,
+                &git_baseline,
+                run_started_at,
+                &model_routing,
+                &mut interrupt_rx,
+                &open_todos,
+                instruction.prepare_finish.as_ref(),
+            )
+            .await;
+            checkpoint.pending_finalization = Some(receipt.clone());
+            crate::agent::telemetry::record_gate_fire(
+                state.inner(),
+                &crate::agent::telemetry::GateFireRecord {
+                    run_id: &run_id,
+                    session_id: &final_session_id,
+                    step_id: step_id as i64,
+                    gate: "finalization",
+                    route: if receipt.is_ready() {
+                        "finalization:prepared_ready"
+                    } else {
+                        "finalization:prepared_blocked"
+                    },
+                },
+            );
+            output_text = if receipt.is_ready() {
+                format!(
+                    "✅ 终态预检就绪（receipt {}）：所有门禁已通过且证据已冻结。\n现在调用 finish 将直接复用本收据完成提交——diff/scope/契约未变时不再重复验证与终审。",
+                    receipt.receipt_id
+                )
+            } else {
+                format!(
+                    "⚠️ 终态预检未就绪（receipt {}）：\n{}\n请逐项闭合后重新 prepare_finish，或修复后直接调用 finish。",
+                    receipt.receipt_id,
+                    receipt
+                        .blockers
+                        .iter()
+                        .map(|b| format!("- {}", b))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            };
+            crate::agent::dispatcher::emit_tool_event(
+                &app,
+                &final_session_id,
+                step_id,
+                &instruction,
+                "succeeded",
+                Some("prepare_finish".to_string()),
+                Some(receipt.is_ready()),
+                &output_text,
+                None,
+            );
         } else if !is_finish {
             // 只有当常规步骤产生了新的真实副作用写入时，才视为进入了新的交付周期，重置质询标记与计数；
             // 纯只读或临时草稿写入（session_tmp）不重置 finish_reviewed / finish_challenge_count，防止草稿修改打乱交付周期。
@@ -2214,30 +2392,21 @@ async fn run_agent_main_loop_in_workspace_inner(
         // 工具结果已经进入可恢复上下文。先提交 durable phase/cursor，再通知前端；
         // 这样崩溃恢复不会把已经完成的普通步骤当作待执行，也不会把 finish 误续跑。
         let is_actually_completed = is_finish && result.success && !is_effectively_challenged;
+        let mut committed_emitted_finish: Option<serde_json::Value> = None;
         if is_actually_completed {
             checkpoint.mark_done(&context);
-        } else {
-            // 被质询或失败的 finish 也要推进 durable cursor，恢复后继续下一轮而不是误判终态。
-            checkpoint.complete_step(step_id, &context);
-        }
-        save_checkpoint(state.inner(), &mut checkpoint)?;
-
-        // --- 前端通知 + 任务完成判定（合并） ---
-        app.emit(&format!("agent-context-{}", final_session_id), &context)
-            .map_err(|e| e.to_string())?;
-
-        if is_actually_completed {
-            advance_run_state(
-                &app,
-                &final_session_id,
-                &mut run_machine,
-                AgentRunEvent::BeginFinalizing,
-            )?;
-            // finish 指令：直接发 complete，不走普通的 step_done
-            // 尝试从 command 里解析 finish 的结构化内容
+            // ── 交付载荷在提交前构建：指令 command 优先，收据预填载荷回填 ──
             let finish_payload = instruction
                 .command
                 .clone()
+                .filter(|value| value.is_object())
+                .or_else(|| {
+                    checkpoint
+                        .pending_finalization
+                        .as_ref()
+                        .map(|receipt| receipt.finish_payload.clone())
+                        .filter(|value| value.is_object())
+                })
                 .unwrap_or(serde_json::Value::Null);
 
             let persisted_summary = finish_payload
@@ -2250,12 +2419,6 @@ async fn run_agent_main_loop_in_workspace_inner(
                 })
                 .unwrap_or(&output_text)
                 .to_string();
-            crate::agent::conversation::complete_turn(
-                state.inner(),
-                &final_session_id,
-                &conversation_model_id,
-                &persisted_summary,
-            )?;
             // 完成区域展示模型自己的最终回复；若存在 3 次审查熔断遗留警告，注入到 emitted_finish
             let mut emitted_finish = match finish_payload {
                 serde_json::Value::Object(object) => serde_json::Value::Object(object),
@@ -2274,8 +2437,19 @@ async fn run_agent_main_loop_in_workspace_inner(
                     );
                 }
             }
+            if let Some(ref receipt) = checkpoint.pending_finalization {
+                if let serde_json::Value::Object(ref mut map) = emitted_finish {
+                    map.insert(
+                        "finalization_receipt".to_string(),
+                        json!(receipt.receipt_id),
+                    );
+                }
+            }
 
-            // 🌟 规范化本轮 finish 交付的产物列表：若本轮模型显式附带了文件路径，自动解析绝对路径并登记受管交付物
+            // 🌟 规范化本轮 finish 交付的产物列表：若本轮模型显式附带了文件路径，自动解析绝对路径并登记受管交付物。
+            // 产物登记是提交前的派生写入：路径幂等去重，失败降级为原始条目；
+            // 它不在终态事务内（register_workspace_artifact 自带锁，嵌套会死锁），
+            // 事务回滚时留下的是可去重的普通产物行，不会污染权威终态。
             if let serde_json::Value::Object(ref mut map) = emitted_finish {
                 if let Some(artifacts_val) = map.get_mut("artifacts") {
                     if let Some(arr) = artifacts_val.as_array_mut() {
@@ -2320,17 +2494,39 @@ async fn run_agent_main_loop_in_workspace_inner(
                 }
             }
 
-            if let Err(error) = crate::agent::run_trace::upsert_snapshot(
+            // ── 终态短事务：checkpoint Done + run trace succeeded + 会话消息原子提交 ──
+            crate::agent::finalization::commit_finalization(
                 state.inner(),
+                &mut checkpoint,
                 &run_id,
                 &final_session_id,
                 &goal,
-                "succeeded",
                 &run_trace_steps,
-                Some(&emitted_finish),
-            ) {
-                eprintln!("[run-trace] 无法保存完成快照: {error}");
-            }
+                &emitted_finish,
+                &persisted_summary,
+                &conversation_model_id,
+            )?;
+            committed_emitted_finish = Some(emitted_finish);
+        } else {
+            // 被质询或失败的 finish 也要推进 durable cursor，恢复后继续下一轮而不是误判终态。
+            checkpoint.complete_step(step_id, &context);
+            save_checkpoint(state.inner(), &mut checkpoint)?;
+        }
+
+        // --- 前端通知 + 任务完成判定（合并） ---
+        app.emit(&format!("agent-context-{}", final_session_id), &context)
+            .map_err(|e| e.to_string())?;
+
+        if is_actually_completed {
+            advance_run_state(
+                &app,
+                &final_session_id,
+                &mut run_machine,
+                AgentRunEvent::BeginFinalizing,
+            )?;
+            let emitted_finish = committed_emitted_finish
+                .take()
+                .unwrap_or_else(|| json!({ "summary": output_text }));
 
             let complete_msg = if reviewer_warnings_delivered.is_some() {
                 "任务已交付（审查达到重试上限，附带未收敛警告）"

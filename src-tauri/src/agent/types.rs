@@ -101,6 +101,71 @@ pub struct ScopeExtensionRequest {
     pub reason: String,
 }
 
+/// 结构化方案提交（submit_plan）：模型声明「方案已成熟」并请求进入审查。
+/// 宿主校验后把「登记方案 + 预扣审查预算 + 注册审查批次 + 派发 Tech Lead」
+/// 收敛为一次一致的状态转换——方案落账与审查注册同生同灭，杜绝半截状态。
+/// 派发产生的外部副作用（子任务 spawn）先行完成，内存态合并在其后一次提交。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct PlanSubmission {
+    /// 方案核心摘要与实施步骤（必填）
+    #[serde(default)]
+    pub plan_summary: String,
+    /// 拟修改或创建的文件路径列表（必填，1~50 条）
+    #[serde(default)]
+    pub target_files: Vec<String>,
+    /// 根因假设/问题定性（强烈建议填写）
+    #[serde(default)]
+    pub root_cause: String,
+    /// 支撑方案的证据引用（必填，1~6 条：已读取过的文件路径或证据标识）
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    /// 关键假设（可选）
+    #[serde(default)]
+    pub assumptions: Vec<String>,
+    /// 仍未闭合的问题（可选）
+    #[serde(default)]
+    pub open_questions: Vec<String>,
+    /// 打算如何验证改动（可选但强烈建议）
+    #[serde(default)]
+    pub intended_verification: String,
+    /// 自评风险等级：low | medium | high（可选）
+    #[serde(default)]
+    pub risk_level: String,
+}
+
+/// 终态预检（prepare_finish）：模型请求宿主按 finish 同一套门禁做交付就绪评估。
+/// 与 finish 的区别：只沉淀 FinalizationReceipt、绝不提交终态；
+/// 收据按 diff_hash + scope 版本 + 契约指纹保鲜，有效期内 finish 直接复用结论，
+/// 不重复执行义务验证与终审 LLM 调用。必须单独成步，不与工具调用混发。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct PrepareFinishRequest {
+    /// 预检自述摘要（可选；就绪时作为交付摘要预填）
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// 交付说明（可选）
+    #[serde(default)]
+    pub details: Option<String>,
+}
+
+/// 交叉审查探索阶段的结构化延期申请。
+/// 模型保留「还需要查什么」的决定权；宿主只裁决预算是否合法：
+/// 单次步数有上限、总次数有上限、且绝不突破探索绝对上限。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ExplorationExtensionRequest {
+    /// 尚未解决的关键问题（必填）：还缺哪条证据、它将如何改变方案
+    #[serde(default)]
+    pub unresolved_question: String,
+    /// 接下来打算执行的有限取证清单（必填，1~6 条，防止无边界续探）
+    #[serde(default)]
+    pub next_queries: Vec<String>,
+    /// 申请追加的探索步数（缺省按单次授予上限；超出部分被截断）
+    #[serde(default)]
+    pub extra_steps: Option<u32>,
+    /// 补充说明（可选）
+    #[serde(default)]
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortMemory {
     pub step_id: usize,
@@ -345,6 +410,18 @@ pub struct AgentInstruction {
     /// 动态申请扩展当前活跃块的修改范围边界 (Scope)，避免跨文件联动修改被机械门禁误杀
     #[serde(default)]
     pub scope_extension: Option<ScopeExtensionRequest>,
+    /// 探索阶段的结构化延期申请（仅交叉审查 Exploring 且未派审时有效）；
+    /// 可单独提交，也可随工具调用附带，由宿主在工具派发前裁决
+    #[serde(default)]
+    pub request_exploration_extension: Option<ExplorationExtensionRequest>,
+    /// 结构化方案提交：提交后宿主原子完成「登记方案 + 预扣预算 + 注册批次 + 派发 Tech Lead」。
+    /// 必须单独成步（不与工具调用混发）；仅在交叉审查模式且方案未放行前有效。
+    #[serde(default)]
+    pub submit_plan: Option<PlanSubmission>,
+    /// 终态预检：运行与 finish 相同的门禁评估但只沉淀 FinalizationReceipt、不提交终态。
+    /// 必须单独成步（不与工具调用混发）。
+    #[serde(default)]
+    pub prepare_finish: Option<PrepareFinishRequest>,
     /// 仅复杂审查、诊断或研究任务使用的完整审查契约更新。
     #[serde(default)]
     pub review_contract_update: Option<ReviewContract>,
@@ -391,9 +468,12 @@ impl AgentInstruction {
     /// 不在此处复制动态工具目录或各工具的参数 schema：这些仍由
     /// 工具注册表/宿主安全层校验。这里只拒绝会退化为隐式 `core` 的
     /// 无动作对象，并保留 parallel、plan_tree 与 pipeline 三类高阶动作。
-    pub fn validate_executable_shape(&self) -> Result<(), String> {
+    /// 是否存在真正的可执行入口（tool / action / commands / parallel / plan_tree / dispatches）。
+    /// 与 validate_executable_shape 共用同一份判定，避免「形状校验」与「纯状态请求识别」
+    /// 两处各写一套导致漂移。
+    pub fn has_executable_entry(&self) -> bool {
         if self.parallel.is_some() || self.plan_tree.is_some() || !self.commands.is_empty() || self.has_dispatches() {
-            return Ok(());
+            return true;
         }
 
         let has_tool = self
@@ -421,7 +501,33 @@ impl AgentInstruction {
                 }
             });
 
-        if has_tool || has_legacy_action {
+        has_tool || has_legacy_action
+    }
+
+    /// 是否为「纯探索延期申请」：携带 request_exploration_extension 但没有任何工具入口。
+    /// 纯申请不派发工具，由宿主裁决后直接以裁决结果作为本步结果。
+    pub fn is_bare_exploration_extension_request(&self) -> bool {
+        self.request_exploration_extension.is_some() && !self.has_executable_entry()
+    }
+
+    /// 是否为「纯方案提交」：携带 submit_plan 但没有任何工具入口。
+    /// 方案提交是独立的状态转换动作，不与工具调用混发。
+    pub fn is_bare_plan_submission(&self) -> bool {
+        self.submit_plan.is_some() && !self.has_executable_entry()
+    }
+
+    /// 是否为「纯终态预检」：携带 prepare_finish 但没有任何工具入口。
+    /// 预检是独立的评估动作，由宿主在主循环门禁段处理，不与工具调用混发。
+    pub fn is_bare_prepare_finish(&self) -> bool {
+        self.prepare_finish.is_some() && !self.has_executable_entry()
+    }
+
+    pub fn validate_executable_shape(&self) -> Result<(), String> {
+        if self.has_executable_entry()
+            || self.request_exploration_extension.is_some()
+            || self.submit_plan.is_some()
+            || self.prepare_finish.is_some()
+        {
             return Ok(());
         }
 
@@ -929,6 +1035,28 @@ mod tests {
         });
         let inst_finish: AgentInstruction = serde_json::from_value(json_finish).unwrap();
         assert!(inst_finish.get_next_tool_hints().is_empty());
+    }
+
+    #[test]
+    fn prepare_finish_is_bare_executable_control_op() {
+        // 纯预检：无工具入口也应通过可执行形状校验
+        let inst: AgentInstruction = serde_json::from_value(json!({
+            "prepare_finish": { "summary": "修复完成，待交付" }
+        }))
+        .unwrap();
+        assert!(inst.is_bare_prepare_finish());
+        assert!(!inst.has_executable_entry());
+        assert!(inst.validate_executable_shape().is_ok());
+
+        // 与工具混发 → 仍具可执行入口，run_tool_phase 会按协议误用拒绝
+        let mixed: AgentInstruction = serde_json::from_value(json!({
+            "tool": "search",
+            "params": {"query": "x"},
+            "prepare_finish": {}
+        }))
+        .unwrap();
+        assert!(mixed.has_executable_entry());
+        assert!(!mixed.is_bare_prepare_finish());
     }
 }
 
