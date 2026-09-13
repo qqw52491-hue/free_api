@@ -156,7 +156,7 @@ pub fn stop_all_watches(db: &DbState, parent_run_id: &str) -> Result<usize, Stri
     let rows = conn
         .execute(
             "UPDATE agent_background_jobs
-             SET status = 'cancelled', finished_at = ?3, error_kind = 'watch_stopped'
+             SET status = 'cancelled', finished_at = ?2, error_kind = 'watch_stopped'
              WHERE parent_run_id = ?1 AND job_type = 'watch' AND status = 'running'",
             rusqlite::params![parent_run_id, chrono::Utc::now().to_rfc3339()],
         )
