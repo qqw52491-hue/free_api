@@ -114,6 +114,49 @@ escalate 裁决降级 rebuttal、`original_decision` 留痕、panel_note 引导�
    可说的是"审查深度与 findings 正相关，且模型会按不确定度自发扩展审查面"，
    强制面板的收益需要会触发 escalate 的更难题来测（case_08 历史上有过一次）。
 
+### 【E】零 token 成本解剖 — ✅ 完成（`scripts/cost_anatomy.py`）
+
+数据源：61 个评测会话的 `agent_llm_calls`（按步归段）+ `agent_gate_fires` 普查。
+
+**五段占比（每题多轮均值，主循环 prompt）**：
+
+| 题 | n | 探索 | 方案 | 写码 | 审查 | 返工 |
+|---|---:|---:|---:|---:|---:|---:|
+| case_01 容灾 | 19 | **60.1%** | 0% | 9.4% | 6.1% | 22.8% |
+| case_02 只读 | 3 | 88.2% | 0% | 0% | 0% | 0% |
+| case_03 盲写 | 3 | 24.5% | 0% | 9.3% | 21.6% | 39.8% |
+| case_04 异步ckpt | 8 | 32.1% | 0.3% | 5.4% | 7.0% | **52.8%** |
+| case_05 密钥 | 2 | 71.4% | 0.4% | 4.8% | 7.1% | 13.4% |
+| case_06 事务 | 2 | 49.0% | 5.5% | 1.9% | 6.2% | 31.2% |
+| case_07 缓存 | 5 | 16.2% | 3.5% | 2.5% | 9.0% | **63.8%** |
+| case_08 重试 | 6 | 40.6% | 0% | 6.1% | 10.2% | 39.2% |
+
+**结论**：
+1. **返工段是埋雷题最大成本**（52–64%）——方案被打回/审查不通过后，重探索+重写码
+   吃掉过半 token。审查本身只花 6–10%，杠杆在"第一轮方案一次写对"。
+   → 最高价值优化：submit_plan 预检强化（把"会被打回的缺陷模式"前置成静态清单），
+   或给主脑注入"常见 rebuttal 模式"历史摘要，降低首轮返工率。
+2. **探索段是 case_01/05 最大成本**（60–88%）——重复搜索同一函数（失忆型重搜）
+   是主因；去重缓存已命中 3 次/轮但仍不够，建议加近似参数归一化命中。
+3. 审查 token 占比小但撬动返工大——reviewer 的 ROI 极高，值得继续投入
+   （多审一轮省下的返工远超其成本）。
+
+**门禁触发普查**（61 会话）：diff_not_matched×174、static_check_failed×56、
+submit_plan:dispatched×37、file_read_via_shell×29、submit_plan_mixed×22、
+finish_review:blocking×11、extension_granted×10、stage_review:blocking_open×9、
+scorecard_missing×7、escalated_to_cross_review×3、其余 ×1。
+
+**从未触发的门禁路由**（注册但 61 会话 0 次）：
+`plan_gatekeeper:escalation_required`（Tech Lead escalate 全史未发——与 C 结论互证）、
+`need_plan/need_human_approval/need_reviewer_dispatch/need_wait_reviewer_jobs`（引导族全静默）、
+`reviewer_all_failed/reviewer_result_missing/reviewer_retry_limit`（兜底族未达）、
+`policy_blocked`（安全策略未拦过）、`finish_review:high_risk_escalated/plan_target_mismatch`、
+`scope_guard:outside`、`plan_liveness:extension_denied/extension_not_applicable`。
+→ 这些是**评测覆盖盲区**而非铁定死代码：退役判定需二次代码审计；
+  同时说明考卷没压到这些路径（need_* 引导族静默说明模型已学会流程，或路径冗余）。
+
+### 【D】浸泡测试 — 进行中（8 题 × 3 轮，`scripts/soak_eval.sh`）
+
 ---
 
 ## 阶段四：四项按序执行中
