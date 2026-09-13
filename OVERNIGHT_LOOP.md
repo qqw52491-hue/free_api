@@ -88,12 +88,31 @@ TP=4 FN=0 TN=4 FP=0 → **召回率 4/4=100%，误杀率 0/4=0%，判分精度 4
 - case_06 雷题 PASS 路径是"拒绝交付"而非"实现+标记"——语义上仍算正确拦雷。
 - 05s 首轮判分挂在判据基建 bug（`1aca8f0`），非 agent 行为；轨迹证据事后核验通过。
 
-### 【C】受控 A/B：面板 vs 强制 1v1 — 基建落地 `8faad26`，实弹进行中
+### 【C】受控 A/B：面板 vs 强制 1v1 — ✅ 完成（`8faad26`）
 
 设计：A 组=case_04（cross_review+面板可用，复用夜间 r2/r3 两轮）；
 B 组=case_04ab（cross_review 强制 Tech Lead 1v1 + `FREE_API_EVAL_REVIEW_PANEL=off`，
 escalate 裁决降级 rebuttal、`original_decision` 留痕、panel_note 引导回 1v1）。
 判据只验物理交付（diff 终态同步语义+succeeded），审查差异从遥测提取，避免结构性偏置。
+
+| 组 | 轮 | 步数 | 主+子 token | 审查轮(ok) | findings | 角色 | 裁决 | 墙钟 |
+|---|---|---:|---:|---|---:|---|---|---|
+| A 面板可用 | `c28b7a0b` | 84 | 5.15M | 4(1) | 3 | tech_lead | rebuttal | ~19min |
+| A | `f0c80d8a` | 73 | 3.98M | 3(2) | 6 | tech_lead | rebuttal×2 | ~15min |
+| B 1v1钉死 | `83060600` | 79 | 4.75M | 4(2) | 5 | tech_lead | rebuttal×2 | 16.5min |
+| B | `e90a458c` | 107 | 7.07M | 9(5) | 10 | tech_lead+**architect** | rebuttal×5 | 25.5min |
+
+**定量结论（n=2/组，方向性）**：
+1. **A 组面板从未触发**——Tech Lead 两轮都选 rebuttal 而非 escalate，"强制面板 vs 1v1"
+   在 case_04 上无可测差异（面板是按需路径，不是常态路径）。
+2. **B-r2 模型自发派了 architect 副审**——1v1 开关只拆掉"强制升级"，不禁止自主求援。
+   该轮 findings=10（A 组最多 6）、步数 107、token 7.07M——**自主多审产生了更多发现**
+   但成本也更高（步数 +42%、token +78% vs B-r1）。
+3. 均值：A 步数 78.5/token 4.57M vs B 步数 93/token 5.91M——本样本 B 反而更贵，
+   主因是 r2 的自主多审开销，非面板本身。
+4. **回答"并发审查是否优于 1v1"**：本实验无法直接回答——A 组未触发并发；
+   可说的是"审查深度与 findings 正相关，且模型会按不确定度自发扩展审查面"，
+   强制面板的收益需要会触发 escalate 的更难题来测（case_08 历史上有过一次）。
 
 ---
 
