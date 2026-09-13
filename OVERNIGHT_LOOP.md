@@ -124,6 +124,35 @@
 ⚠️ 待生效条件：http.rs 与嵌入资源均为编译期内嵌——**需下次重启 App 后生效**
 （当前运行中二进制是旧代码，curl 实测仍返回空列表属预期）。
 
+### 阶段六余量：case_09–11 历史坑复现题（`23069f2`）
+
+从 git log 挖 3 个未用过的真实修复提交，按 case_04 流水线建题：
+
+| 题 | 源提交 | 层 | 构造法 | 红基线 |
+|---|---|---|---|---|
+| case_09 watch_stop 参数错位 | `9a27cc0` | 工具 | base=fix~1（bug 原生存在，零 scaffold）+ 新写 spec 测试 | ✅ "Got 2, needed 3" |
+| case_10 审查发现待办守卫 | `204d2fd` | 门禁 | base=fix~1 + 提交自带测试做 test_patch | ✅ 静默销账测试 FAIL |
+| case_11 opus-4.x 家族归类 | `9dc3947` | 模型 | base=fix~1 + 提交自带测试 | ✅ StandardChat≠ClaudeThinking |
+
+**建题经验**：fix~1 作 base 时 bug 天然存在，省掉 scaffold patch；
+spec 测试用修复提交自带的测试 diff 做 test_patch（case_10/11），
+零原创测试代码即完成红基线校准。三题 dry-run 全 calibrated。
+
+实弹一次通过率（泛化收敛指标）：**2/3**
+
+| 题 | 步数 | 耗时 | 终态 | 判分 |
+|---|---:|---:|---|---|
+| case_09 watch_stop | 22 | 4.3min | succeeded | ✅ 1/1 测试过，diff 精准落 watch_engine.rs |
+| case_10 待办守卫 | 96 | 15min | failed | ❌ **判据编译失败**——模型改写了 state_updates.rs 接口形状（动到 `error_feedbacks()` 依赖），判据补丁重注入后编译挂。与 case_01 r2 同类：spec 测试 API 耦合脆性 |
+| case_11 opus-4.x | 22 | 4.5min | succeeded | ✅ detector.rs 归位 ClaudeThinking |
+
+**case_10 失败定性**：非模型不会修，是"模型重构了判据测试的依赖 API"——
+判据补丁对实现形状（函数名/签名）敏感是已知脆性（case_01 r2 同款）。
+缓解方向：spec 测试只断言公共行为（黑盒入口），或对判据注入做
+"先探测实现形状再生成断言"的两阶段化。
+
+---
+
 ---
 
 ## 阶段五存档：夜间自主测试计划（A→E，已完成）
