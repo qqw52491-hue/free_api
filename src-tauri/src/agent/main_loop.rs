@@ -1847,6 +1847,65 @@ async fn run_agent_main_loop_in_workspace_inner(
                 );
                 context.record_step_outcome(false);
             } else {
+                // 零改动短路（实弹实测教训：模型在零 diff 时调 finish，终审烧一整轮
+                // Reviewer 才返回"未提交任何代码变更"）：方案已声明 target_files 而当前
+                // diff 与其零交集 → 0 Token 机械打回，不进终审。
+                let plan_targets = checkpoint
+                    .submitted_plan
+                    .as_ref()
+                    .map(|p| p.target_files.as_slice())
+                    .filter(|t| !t.is_empty())
+                    .or(checkpoint.approved_target_files.as_deref());
+                let declared_but_untouched = plan_targets
+                    .map(|targets| {
+                        let diff_files: Vec<&String> = diff_context
+                            .as_ref()
+                            .map(|d| d.changed_files.keys().collect())
+                            .unwrap_or_default();
+                        !targets.iter().any(|tf| {
+                            diff_files.iter().any(|df| {
+                                crate::agent::finish_guard::diff::file_paths_match(tf, df)
+                            })
+                        })
+                    })
+                    .unwrap_or(false);
+                if declared_but_untouched {
+                    let actual: Vec<String> = diff_context
+                        .as_ref()
+                        .map(|d| d.changed_files.keys().cloned().collect())
+                        .unwrap_or_default();
+                    checkpoint.finish_reviewed = true;
+                    context.add_error_feedback(&format!(
+                        "【⚠️ 交付门禁拦截打回：方案声明的目标文件与实际改动零交集，finish 未生效！】\n方案声明目标：{}\n实际改动文件：{}\n（0 Token 机械打回，终审无需介入）。\n【必须采取的行动】：①若尚未真正修改，请先完成对声明目标的实际改动并重跑验证；②若实现路径已变，请重新 submit_plan 更新 target_files 后再 finish；③若本任务本就无需改这些文件，请用 ask_human 说明理由。",
+                        plan_targets.unwrap_or(&[]).join(", "),
+                        if actual.is_empty() { "（无：当前工作区零改动）".to_string() } else { actual.join(", ") }
+                    ));
+                    crate::agent::telemetry::record_gate_fire(
+                        state.inner(),
+                        &crate::agent::telemetry::GateFireRecord {
+                            run_id: &run_id,
+                            session_id: &final_session_id,
+                            step_id: step_id as i64,
+                            gate: "finish_review",
+                            route: "finish_review:plan_target_mismatch",
+                        },
+                    );
+                    crate::agent::dispatcher::emit_tool_event(
+                        &app,
+                        &final_session_id,
+                        step_id,
+                        &instruction,
+                        "plan_target_challenged",
+                        Some("finish".to_string()),
+                        Some(false),
+                        "机械拦截：方案声明目标与实际改动零交集",
+                        None,
+                    );
+                    context.record_step_outcome(false);
+                    // 跳过终审：机械事实已足够打回，省一次审查
+                    let _ = save_checkpoint(state.inner(), &mut checkpoint);
+                    continue;
+                }
                 // Level 1: 确定性门禁与机械门禁 100% 通过后，才调用 Reviewer 终审（带 Checklist 证据链严审）！
                 // 【B 路径执行器】契约义务绑定的冻结验证命令：宿主逐条执行，退出码即判定。
                 // 失败 = 0 token 机械拦截打回（验证器故障也判失败，绝不放行）。

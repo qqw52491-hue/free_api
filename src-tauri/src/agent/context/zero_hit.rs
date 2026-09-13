@@ -131,7 +131,7 @@ fn scope_key(params: &Value) -> String {
     "default".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 struct ZeroHitState {
     consecutive_zero_hits: u32,
     notice_issued: bool,
@@ -151,6 +151,15 @@ struct ZeroHitState {
 pub struct ZeroHitTracker {
     #[serde(default)]
     states: HashMap<String, ZeroHitState>,
+    /// 跨作用域全局连续零命中：实弹实测发现模型在每个空搜索上换 path，
+    /// 各作用域组永远达不到阈值（换域即换组的隔离规则被无意绕过）。
+    /// 该计数只看"连续无结果"，与作用域无关；任何命中清零。
+    #[serde(default)]
+    global_streak: ZeroHitState,
+    /// 本轮连击内是否已发过作用域级提示：发过则抑制全局提示，
+    /// 避免同一连击里两条相近文案连发（提示密度每条连击至多一条）。
+    #[serde(default)]
+    group_notice_fired_in_streak: bool,
 }
 
 impl ZeroHitTracker {
@@ -172,6 +181,8 @@ impl ZeroHitTracker {
         if is_explicit_hit(output) {
             // 任何命中都说明调查在推进：清空全部组的零命中状态
             self.states.clear();
+            self.global_streak = ZeroHitState::default();
+            self.group_notice_fired_in_streak = false;
             return None;
         }
         if !is_explicit_zero_hit(output) {
@@ -187,12 +198,25 @@ impl ZeroHitTracker {
                 notice_issued: false,
             });
         state.consecutive_zero_hits = state.consecutive_zero_hits.saturating_add(1);
+        self.global_streak.consecutive_zero_hits =
+            self.global_streak.consecutive_zero_hits.saturating_add(1);
         if state.consecutive_zero_hits >= ZERO_HIT_NOTICE_THRESHOLD && !state.notice_issued {
             state.notice_issued = true;
+            self.group_notice_fired_in_streak = true;
             return Some(format!(
                 "【检索零命中提示】连续 {} 次在当前作用域内以{}未命中。请先检查关键词、目录范围、目标是否存在或是否属于另一个系统；若已有两个独立方向均未命中，可说明证据边界或向用户澄清前提。不要只替换近义词继续盲搜。",
                 ZERO_HIT_NOTICE_THRESHOLD,
                 family.as_str()
+            ));
+        }
+        if self.global_streak.consecutive_zero_hits >= ZERO_HIT_NOTICE_THRESHOLD
+            && !self.global_streak.notice_issued
+            && !self.group_notice_fired_in_streak
+        {
+            self.global_streak.notice_issued = true;
+            return Some(format!(
+                "【检索零命中提示】已连续 {} 次跨多个作用域检索零命中——更换目录或措辞不等于更换假设。若目标文件已知，改用 local_file.read 分页精读；若不确定目标是否存在，先用文件名检索或列目录确认存在性，再决定下一个查询。",
+                ZERO_HIT_NOTICE_THRESHOLD
             ));
         }
         None
@@ -283,22 +307,26 @@ mod tests {
         let mut tracker = ZeroHitTracker::default();
         let repo_a = json!({"query": "q", "path": "/repo_a"});
         let repo_b = json!({"query": "q", "path": "/repo_b"});
-        // 不同作用域各自计数：A 积累 3 次不触发
+        // 不同作用域各自计数：A 积累 3 次不触发组内提示
         for _ in 0..ZERO_HIT_NOTICE_THRESHOLD - 1 {
             assert!(tracker
                 .record("p/search", &repo_a, true, zero_output())
                 .is_none());
         }
-        // B 作用域从零开始：3 次也不触发
-        for _ in 0..ZERO_HIT_NOTICE_THRESHOLD - 1 {
+        // 换到 B：作用域组从零计数，但全局连击 A3+B1=4 → 触发全局提示（跨域盲搜的兜底）
+        let global = tracker.record("p/search", &repo_b, true, zero_output());
+        assert!(global.is_some(), "跨作用域累计零命中应触发全局提示");
+        assert!(global.unwrap().contains("跨多个作用域"));
+        // B 继续空命中：全局提示每连击只发一次
+        for _ in 0..2 {
             assert!(tracker
                 .record("p/search", &repo_b, true, zero_output())
                 .is_none());
         }
-        // A 再 1 次达到阈值触发（组内累计，未被 B 干扰）
-        assert!(tracker
-            .record("p/search", &repo_a, true, zero_output())
-            .is_some());
+        // A 再 1 次达到组内阈值：作用域级提示仍独立发放，不被全局提示挤占
+        let scoped = tracker.record("p/search", &repo_a, true, zero_output());
+        assert!(scoped.is_some(), "A 组内达阈值仍应发作用域提示");
+        assert!(scoped.unwrap().contains("作用域"));
 
         // 换工具族（内容→文件名）：新组从零计数，不继承旧族计数
         let mut tracker2 = ZeroHitTracker::default();
@@ -361,6 +389,34 @@ mod tests {
                 .is_none());
         }
         assert!(tracker.states.is_empty());
+    }
+
+    #[test]
+    fn cross_scope_zero_streak_triggers_global_notice() {
+        // case_05 实弹病理：同一问题换 path 连续空搜，作用域隔离规则被无意绕过
+        let mut tracker = ZeroHitTracker::default();
+        let paths = ["src", "scripts", "src-tauri", "test"];
+        let mut notice = None;
+        for p in paths {
+            let params = json!({"query": "x", "path": p});
+            notice = tracker.record("p/search", &params, true, zero_output());
+        }
+        assert!(
+            notice.as_deref().unwrap_or("").contains("跨多个作用域"),
+            "跨作用域连续零命中应触发全局提示"
+        );
+        // 每组作用域内计数未到阈值：不应额外再发
+        for p in ["a", "b", "c"] {
+            assert!(tracker
+                .record("p/search", &json!({"query":"x","path":p}), true, zero_output())
+                .is_none());
+        }
+        // 一次命中后全局清零，重新累计可再提示
+        tracker.record("p/search", &json!({"query":"x","path":"z"}), true, hit_output());
+        for p in ["m", "n", "o", "p"] {
+            notice = tracker.record("p/search", &json!({"query":"x","path":p}), true, zero_output());
+        }
+        assert!(notice.is_some(), "命中清零后新一轮跨域连击应再次提示");
     }
 
     #[test]
