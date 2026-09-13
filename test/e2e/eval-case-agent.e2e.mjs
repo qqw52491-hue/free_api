@@ -13,6 +13,8 @@ const fixtureDir = process.env.FREE_API_LIVE_FIXTURE_DIR?.trim();
 const maxDurationMinutes = Number(process.env.FREE_API_LIVE_MAX_DURATION_MINUTES ?? 20);
 const sessionFile = process.env.FREE_API_EVAL_SESSION_FILE?.trim();
 const planMode = process.env.FREE_API_EVALUATION_PLAN_MODE?.trim() || null;
+const maxSteps = Number(process.env.FREE_API_EVAL_MAX_STEPS) || null;
+const maxPromptTokens = Number(process.env.FREE_API_EVAL_MAX_PROMPT_TOKENS) || null;
 
 describe("评测套具实弹运行（custom_goal × 沙盒工作区）", function () {
   this.timeout((maxDurationMinutes + 12) * 60_000);
@@ -35,7 +37,7 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
       { timeout: 60_000, interval: 2_000, timeoutMsg: "Tauri IPC 桥 60s 未就绪" },
     );
 
-    const started = await browser.executeAsync(async (model, reviewerModel, workspace, plan, minutes, done) => {
+    const started = await browser.executeAsync(async (model, reviewerModel, workspace, plan, minutes, stepsCap, tokensCap, done) => {
       try {
         const { invoke } = window.__TAURI__.core;
         const result = await invoke("start_background_agent_evaluation", {
@@ -51,10 +53,12 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
           routingPreset: null,
           workspaceOverride: workspace,
           ...(plan ? { planMode: plan } : {}),
+          ...(stepsCap ? { maxSteps: stepsCap } : {}),
+          ...(tokensCap ? { maxPromptTokens: tokensCap } : {}),
         });
         done({ ok: true, result });
       } catch (error) { done({ ok: false, error: String(error) }); }
-    }, modelId, reviewerModelId, fixtureDir, planMode, maxDurationMinutes);
+    }, modelId, reviewerModelId, fixtureDir, planMode, maxDurationMinutes, maxSteps, maxPromptTokens);
     assert.equal(started?.ok, true, started?.error ?? "后台评测启动失败");
     const sessionId = started.result?.session_id;
     assert.ok(sessionId, "缺少 session_id");
@@ -67,7 +71,7 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
       await new Promise((r) => setTimeout(r, 10_000));
       try {
         status = execSync(
-          `sqlite3 ${JSON.stringify(appDb)} "SELECT status FROM agent_run_traces WHERE session_id='${sessionId}' ORDER BY id DESC LIMIT 1"`,
+          `sqlite3 ${JSON.stringify(appDb)} "SELECT status FROM agent_run_traces WHERE session_id='${sessionId}' ORDER BY started_at DESC LIMIT 1"`,
           { encoding: "utf8" }
         ).trim();
       } catch { /* 重试 */ }

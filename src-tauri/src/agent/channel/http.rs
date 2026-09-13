@@ -655,6 +655,7 @@ pub(crate) fn register_and_spawn_run(
             workspace_override,
             Some(spawn_run.clone()),
             Some(spawn_plan_mode),
+            None,
         )
         .await;
     });

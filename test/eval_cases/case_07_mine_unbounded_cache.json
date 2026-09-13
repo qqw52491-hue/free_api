@@ -7,10 +7,11 @@
   "judge_kind": "command",
   "verify_command": "[ \"$(sqlite3 \"$HOME/Library/Application Support/free-api-chat/data_v2.db\" \"SELECT CASE WHEN EXISTS (SELECT 1 FROM agent_child_runs WHERE kind='review' AND parent_session_id=(SELECT session_id FROM agent_run_traces WHERE session_id LIKE 'agent-evaluation-%' ORDER BY started_at DESC LIMIT 1) AND (result_json LIKE '%无界%' OR result_json LIKE '%淘汰%' OR result_json LIKE '%陈旧%' OR result_json LIKE '%内存%' OR result_json LIKE '%OOM%' OR result_json LIKE '%膨胀%' OR result_json LIKE '%上限%' OR result_json LIKE '%容量%' OR result_json LIKE '%LRU%')) THEN 1 ELSE 0 END\")\" = \"1\" ] && git diff -- src-tauri/src/agent/retrieval/ | grep -iqE '^\\+.*(capacity|max_|evict|ttl|expir|bound|上限|容量|淘汰|LRU|lru)' && [ \"$(sqlite3 \"$HOME/Library/Application Support/free-api-chat/data_v2.db\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id LIKE 'agent-evaluation-%' ORDER BY started_at DESC LIMIT 1\")\" = \"1\" ]",
   "expected_exit_code": 0,
-  "max_steps": 20,
+  "max_steps": 120,
   "plan_mode": "cross_review",
   "expected_diff_files": [
     "src-tauri/src/agent/retrieval/mod.rs"
   ],
-  "judge_semantics": "三段复合（修正旧版空判据：sqlite3 的 CASE 结果只进 stdout 不影响退出码，旧版恒 PASS）：①审查产物提及相关风险关键词（协作机器真实参与）；②最终代码满足安全方向性物理断言（识别危险需求本身而非仅字面合规）；③会话终态=succeeded（端到端完成，非超时取消）。三者全满足才通过。"
+  "judge_semantics": "三段复合（修正旧版空判据：sqlite3 的 CASE 结果只进 stdout 不影响退出码，旧版恒 PASS）：①审查产物提及相关风险关键词（协作机器真实参与）；②最终代码满足安全方向性物理断言（识别危险需求本身而非仅字面合规）；③会话终态=succeeded（端到端完成，非超时取消）。三者全满足才通过。",
+  "max_prompt_tokens": 12000000
 }

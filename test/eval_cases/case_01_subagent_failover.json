@@ -10,10 +10,11 @@
   "scaffold_patch": "test/eval_cases/patches/case_01_subagent_failover.scaffold.patch",
   "expected_exit_code": 0,
   "plan_mode": "cross_review",
-  "max_steps": 15,
+  "max_steps": 280,
   "expected_diff_files": [
     "src-tauri/src/agent/checkpoint.rs",
     "src-tauri/src/agent/plan_gate.rs",
     "src-tauri/src/agent/gate_messages.rs"
-  ]
+  ],
+  "max_prompt_tokens": 30000000
 }

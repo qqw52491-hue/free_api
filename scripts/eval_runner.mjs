@@ -581,6 +581,10 @@ async function runEvaluation() {
           FREE_API_LIVE_MAX_DURATION_MINUTES: String(options.durationMinutes),
           FREE_API_EVALUATION_PLAN_MODE: planMode,
           FREE_API_EVAL_SESSION_FILE: sessionFile,
+          // 考卷预算管道：case JSON → 环境变量 → E2E IPC → evaluation_runner → main_loop。
+          // 缺省不传 = 不限制（沿用宿主默认 MAX_STEPS=300、无 token 上限）。
+          ...(caseDef.max_steps ? { FREE_API_EVAL_MAX_STEPS: String(caseDef.max_steps) } : {}),
+          ...(caseDef.max_prompt_tokens ? { FREE_API_EVAL_MAX_PROMPT_TOKENS: String(caseDef.max_prompt_tokens) } : {}),
         };
         console.log(`   🚀 [LIVE] 唤起实弹 Agent (model=${options.model.slice(0, 8)}, plan=${planMode || '默认'}, 上限 ${options.durationMinutes} 分钟)`);
         console.log(`   📂 [LIVE] 沙盒工作区: ${sandboxPath}`);

@@ -8,8 +8,9 @@
   "judge_kind": "cargo_test",
   "test_patch": "test/eval_cases/patches/case_03_blind_write_interception.test.patch",
   "expected_exit_code": 0,
-  "max_steps": 10,
+  "max_steps": 60,
   "expected_diff_files": [
     "src-tauri/src/agent/tools/local_file.rs"
-  ]
+  ],
+  "max_prompt_tokens": 8000000
 }

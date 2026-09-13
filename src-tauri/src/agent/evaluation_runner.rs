@@ -448,6 +448,8 @@ pub async fn start_background_agent_evaluation(
     routing_preset: Option<String>,
     workspace_override: Option<String>,
     plan_mode: Option<String>,
+    max_steps: Option<u64>,
+    max_prompt_tokens: Option<u64>,
 ) -> Result<BackgroundEvaluationStart, String> {
     let (evaluation_model_routing, routing_metadata) = {
         let state = app.state::<DbState>();
@@ -577,6 +579,13 @@ pub async fn start_background_agent_evaluation(
             worker_workspace,
             None,
             plan_mode,
+            // 考卷预算：max_steps/max_prompt_tokens 任一触发即在步骤边界收敛出报告
+            (max_steps.is_some() || max_prompt_tokens.is_some()).then(|| {
+                crate::agent::main_loop::AgentRunBudget {
+                    max_steps: max_steps.map(|v| v as usize),
+                    max_prompt_tokens: max_prompt_tokens.map(|v| v as i64),
+                }
+            }),
         ));
 
         let monitor_app = event_app.clone();

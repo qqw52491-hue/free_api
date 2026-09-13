@@ -41,6 +41,30 @@ use crate::agent::workspace_lock::{acquire_workspace_lock, ChildWorkspaceGuard};
 
 /// Agent 每个任务最多执行步数（可按项目需求调整）
 const MAX_STEPS: usize = 300;
+
+/// 宿主级运行预算：评测考卷可覆盖步数与 prompt token 上限。
+/// 任一触发即在步骤边界立即收敛为 failed 终态并出报告，
+/// 触发原因写入 completion summary 供判分/复盘区分（步数 vs token）。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AgentRunBudget {
+    pub max_steps: Option<usize>,
+    pub max_prompt_tokens: Option<i64>,
+}
+
+pub(crate) fn effective_max_steps(budget: Option<&AgentRunBudget>) -> usize {
+    budget.and_then(|b| b.max_steps).unwrap_or(MAX_STEPS)
+}
+
+/// 返回 Some(reason) 表示 token 预算已耗尽，主循环应在步骤边界收敛。
+fn token_budget_stop_reason(
+    budget: Option<&AgentRunBudget>,
+    spent_prompt_tokens: i64,
+) -> Option<String> {
+    let cap = budget?.max_prompt_tokens?;
+    (spent_prompt_tokens >= cap).then(|| {
+        format!("任务在消耗 {} prompt tokens 后触发 token 上限 {}", spent_prompt_tokens, cap)
+    })
+}
 /// 正常会话只做短暂态请求重试；后台回归可显式提高到上限以避免 Provider 波动中断取证。
 pub(crate) const DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 3;
 const MAX_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 100;
@@ -90,6 +114,7 @@ pub async fn run_agent_main_loop(
         None,
         None,
         plan_mode,
+        None,
     )
     .await
 }
@@ -109,6 +134,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     workspace_override: Option<std::path::PathBuf>,
     run_id_override: Option<String>,
     plan_mode: Option<String>,
+    run_budget: Option<AgentRunBudget>,
 ) -> Result<(), String> {
     let final_session_id = session_id.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -143,6 +169,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         workspace_override,
         run_id,
         plan_mode,
+        run_budget,
     )
     .await;
 
@@ -230,6 +257,7 @@ async fn run_agent_main_loop_in_workspace_inner(
     workspace_override: Option<std::path::PathBuf>,
     run_id: String,
     plan_mode: Option<String>,
+    run_budget: Option<AgentRunBudget>,
 ) -> Result<(), String> {
     // 立即注册人类干预与流式中断接收器，确保任务启动第一毫秒即可被前端即时打断
     let (tx, mut rx) = mpsc::channel::<HumanControl>(5);
@@ -890,7 +918,15 @@ async fn run_agent_main_loop_in_workspace_inner(
 
     // durable cursor 是调度权威：每个普通步骤提交后推进 step_id；恢复时也从这里继续。
     // 不再使用启动瞬间捕获范围的 for-loop，避免 checkpoint 更新后调度器仍沿旧游标运行。
-    while checkpoint.step_id < MAX_STEPS {
+    let max_steps = effective_max_steps(run_budget.as_ref());
+    let mut spent_prompt_tokens: i64 = 0;
+    let mut budget_stop_reason: Option<String> = None;
+    while checkpoint.step_id < max_steps {
+        // token 预算在步骤边界检查：一旦跨线立即收敛出报告，不再派发新步骤
+        if let Some(reason) = token_budget_stop_reason(run_budget.as_ref(), spent_prompt_tokens) {
+            budget_stop_reason = Some(reason);
+            break;
+        }
         let step_id = checkpoint.step_id;
 
         // 🔄 异步子任务结果轮询（审查/工兵/侦察）：自动注入父 Agent 上下文
@@ -1303,7 +1339,14 @@ async fn run_agent_main_loop_in_workspace_inner(
             tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
         };
         let outcome = match outcome {
-            Ok(res) => res,
+            Ok(res) => {
+                // 预算计量放在 outcome 定案处：含被门禁打回的 finish 步，
+                // 被拒步骤消耗的 LLM 调用同样计入 token 上限。
+                if let Some(u) = res.token_usage.as_ref() {
+                    spent_prompt_tokens += u.prompt_tokens;
+                }
+                res
+            }
             Err(error) => {
                 let terminal_error = format!("任务执行失败: {}", error);
                 advance_run_state(
@@ -2658,7 +2701,8 @@ async fn run_agent_main_loop_in_workspace_inner(
             },
         )?;
     } else if !run_machine.state().is_terminal() {
-        let terminal_error = format!("任务在达到最大步数 {} 后未完成", MAX_STEPS);
+        let terminal_error = budget_stop_reason
+            .unwrap_or_else(|| format!("任务在达到最大步数 {} 后未完成", max_steps));
         advance_run_state(
             &app,
             &final_session_id,
@@ -2754,3 +2798,37 @@ fn try_auto_verify_change(
     }
 }
 
+
+#[cfg(test)]
+mod budget_tests {
+    use super::{effective_max_steps, token_budget_stop_reason, AgentRunBudget, MAX_STEPS};
+
+    #[test]
+    fn effective_max_steps_defaults_to_host_constant() {
+        assert_eq!(effective_max_steps(None), MAX_STEPS);
+        let budget = AgentRunBudget { max_steps: None, max_prompt_tokens: Some(1) };
+        assert_eq!(effective_max_steps(Some(&budget)), MAX_STEPS);
+    }
+
+    #[test]
+    fn effective_max_steps_case_override_wins() {
+        let budget = AgentRunBudget { max_steps: Some(15), max_prompt_tokens: None };
+        assert_eq!(effective_max_steps(Some(&budget)), 15);
+    }
+
+    #[test]
+    fn token_budget_fires_only_at_or_above_cap() {
+        let budget = AgentRunBudget { max_steps: None, max_prompt_tokens: Some(1000) };
+        assert!(token_budget_stop_reason(Some(&budget), 999).is_none());
+        let reason = token_budget_stop_reason(Some(&budget), 1000).unwrap();
+        assert!(reason.contains("token 上限"));
+        assert!(reason.contains("1000"));
+    }
+
+    #[test]
+    fn token_budget_absent_means_unbounded() {
+        let budget = AgentRunBudget { max_steps: Some(5), max_prompt_tokens: None };
+        assert!(token_budget_stop_reason(Some(&budget), i64::MAX).is_none());
+        assert!(token_budget_stop_reason(None, i64::MAX).is_none());
+    }
+}

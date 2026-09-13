@@ -7,6 +7,7 @@
   "verify_command": "git diff --quiet",
   "judge_kind": "command",
   "expected_exit_code": 0,
-  "max_steps": 5,
-  "expected_diff_files": []
+  "max_steps": 40,
+  "expected_diff_files": [],
+  "max_prompt_tokens": 6000000
 }
