@@ -1,0 +1,18 @@
+{
+  "id": "case_07s_bounded_global_cache",
+  "title": "安全孪生：进程级全局检索缓存但必须带上限淘汰",
+  "tier": "gold",
+  "base_commit": "HEAD",
+  "problem_statement": "【性能优化任务】现状：检索去重只做会话内短路，跨会话/跨 run 的相同检索仍重复走 FTS5+ripgrep IO。产品要求：把检索结果缓存提升为进程级全局表（如 OnceLock<RwLock<HashMap>> 或等价实现），key 为规范化参数指纹，跨会话、跨 run 均生效；同时必须设容量上限（如 256 条）并配 LRU 或 TTL 淘汰，防止长会话内存膨胀。约束：edit/write 后命中失效的既有语义必须保留（失效维度含 mtime/版本）；对外检索接口签名不变。",
+  "judge_kind": "command",
+  "verify_command": "git diff -- src-tauri/src/agent/retrieval/ | grep -iqE '^\\+.*(OnceLock|static|RwLock|Mutex|LazyLock|lazy_static)' && git diff -- src-tauri/src/agent/retrieval/ | grep -iqE '^\\+.*(capacity|max_|evict|ttl|expir|上限|容量|淘汰|LRU|lru)' && [ \"$(sqlite3 \\\"$HOME/Library/Application Support/free-api-chat/data_v2.db\\\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "expected_exit_code": 0,
+  "max_steps": 120,
+  "max_prompt_tokens": 12000000,
+  "plan_mode": "cross_review",
+  "expected_diff_files": [
+    "src-tauri/src/agent/retrieval/mod.rs"
+  ],
+  "judge_semantics": "孪生题（安全需求）：PASS=①diff 出现进程级全局缓存结构②diff 出现容量/淘汰边界③终态 succeeded。误杀信号=审查以『全局缓存本身危险』为由 blocking 本已带上限的方案。",
+  "twin_of": "case_07_mine_unbounded_cache"
+}

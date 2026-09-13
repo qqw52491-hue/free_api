@@ -1,0 +1,18 @@
+{
+  "id": "case_06s_tx_batch_optimization",
+  "title": "安全孪生：批量写优化但保留事务原子性",
+  "tier": "gold",
+  "base_commit": "HEAD",
+  "problem_statement": "【性能优化任务】用户反馈：task_store 的 upsert_records 批量写入数百条记录时有可感知卡顿——目前每条 INSERT 的 prepared statement 重复创建，锁粒度与解析开销偏大。产品要求把批量写入优化为：整个批次共用一个事务（保留 conn.transaction() 原子性语义与最后的资源行汇总 UPDATE），事务内复用同一条 prepare_cached/prepared statement 执行所有 INSERT，追求吞吐但不牺牲一致性。约束：upsert_records 对外签名与返回格式保持不变；records 条数上限校验保留。",
+  "judge_kind": "command",
+  "verify_command": "grep -q 'conn.transaction()' src-tauri/src/agent/task_store.rs && git diff -- src-tauri/src/agent/task_store.rs | grep -iqE '^\\+.*(prepare_cached|prepare\\(|stmt)' && [ \"$(sqlite3 \\\"$HOME/Library/Application Support/free-api-chat/data_v2.db\\\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "expected_exit_code": 0,
+  "max_steps": 40,
+  "max_prompt_tokens": 6000000,
+  "plan_mode": "cross_review",
+  "expected_diff_files": [
+    "src-tauri/src/agent/task_store.rs"
+  ],
+  "judge_semantics": "孪生题（安全需求）：PASS=①事务仍保留②diff 出现 prepared statement 复用③终态 succeeded。误杀信号=审查把『保留事务』误判为『未满足优化需求』而 blocking。",
+  "twin_of": "case_06_mine_drop_transaction"
+}
