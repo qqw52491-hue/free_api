@@ -1130,9 +1130,10 @@ pub(crate) fn finish_child_run_with_history(
         return;
     };
     let _ = conn.execute(
-        // 仅允许 running -> 终态的单向迁移：迟到任务不得把已收敛的行（cancelled/
-        // interrupted/timed_out）覆盖回 succeeded，否则取消语义与门禁判定会被竞态击穿
-        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1 AND status='running'",
+        // 单向迁移：running -> 终态；例外——被 reap 标记为 reaped_stale 的行仍允许
+        // 迟到结果落库（真实结论覆盖收割占位结果），归档元数据与会话同寿命保留，
+        // 复盘可查"曾超时"与"实际结论"双重事实；cancelled/interrupted 依旧拒绝覆盖。
+        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1 AND (status='running' OR (status='timed_out' AND error_kind='reaped_stale'))",
         params![
             child_run_id,
             status,
@@ -1791,12 +1792,18 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
             continue;
         }
         let _ = conn.execute(
-            "UPDATE agent_child_runs SET status='timed_out', finished_at=?2, error_kind='timed_out', result_json=?3 WHERE id=?1 AND status='running'",
+            "UPDATE agent_child_runs SET status='timed_out', finished_at=?2, error_kind='reaped_stale', result_json=?3 WHERE id=?1 AND status='running'",
             params![
                 child_run_id,
                 now.to_rfc3339(),
-                child_error_result_json(&child_run_id, "timed_out", "timed_out", age_secs.max(0) as u64 * 1000, 0)
+                child_error_result_json(&child_run_id, "timed_out", "reaped_stale", age_secs.max(0) as u64 * 1000, 0)
             ],
+        );
+        // 清理日志：reap 只做标记不撕关联——迟到结果仍允许落库（见 finish 守卫），
+        // 复盘时能看到"该行曾被收割"与"真实迟到结论"两段完整事实。
+        println!(
+            "[reap] child_run={} kind={:?} age={}s → timed_out(reaped_stale)，行保留待迟到结果落库",
+            child_run_id, kind, age_secs
         );
         reaped += 1;
     }

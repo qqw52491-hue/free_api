@@ -520,6 +520,58 @@
     }
 
     #[test]
+    fn reaped_row_accepts_late_result_and_preserves_metadata() {
+        // 回归：case_01 实测在 22 步内触发 reap（reviewer 进程被收割后行被打上
+        // 终态+占位结果，真实迟到结论被 status='running' 守卫永久丢弃——
+        // 复盘时只见"timed_out"不见真实产出）。修复后：收割行可接收迟到结果，
+        // 元数据（session/started_at）与双段事实（曾收割 + 真实结论）完整可查。
+        let temp_dir = std::env::temp_dir().join(format!("gatekeeper-reap-late-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        insert_child_run(&db, "reaped1", "test_run", "running", None, None);
+        assert_eq!(crate::agent::child_reviewer::reap_stale_child_runs(&db, "test_run"), 1);
+
+        {
+            let conn = db.0.lock().unwrap();
+            let (status, error_kind): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT status, error_kind FROM agent_child_runs WHERE id='reaped1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "timed_out");
+            assert_eq!(error_kind.as_deref(), Some("reaped_stale"), "收割标记须可区分于真实流超时");
+        }
+
+        // 迟到真实结果落库：守卫不再拦截 reaped_stale 行
+        let real = r#"{"status":"succeeded","findings":[{"id":"F1","severity":"suggestion"}]}"#;
+        crate::agent::child_reviewer::finish_child_run(
+            &db, "reaped1", "succeeded", 73_000, 512, None, Some(real),
+        );
+
+        let conn = db.0.lock().unwrap();
+        let (status, result_json, parent_session_id, started_at): (
+            String, Option<String>, String, String,
+        ) = conn
+            .query_row(
+                "SELECT status, result_json, parent_session_id, started_at FROM agent_child_runs WHERE id='reaped1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(status, "succeeded", "迟到真实结论应落库覆盖占位 stub");
+        assert!(result_json.unwrap().contains("F1"), "真实 findings 完整可查");
+        assert_eq!(parent_session_id, "sess");
+        assert_eq!(started_at, "2026-01-01T00:00:00Z", "归档元数据不被 reap 物理撕掉");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn finish_child_run_guard_rejects_late_overwrite() {
         let temp_dir = std::env::temp_dir().join(format!("gatekeeper-guard-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
