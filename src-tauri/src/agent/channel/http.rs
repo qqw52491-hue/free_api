@@ -978,7 +978,33 @@ async fn handler_run_cancel(
     Ok(Json(json!({"ok": true, "session_id": session_id})))
 }
 
-// ===== 评测报告在线浏览（与评测落盘共用 CWD/agent_evaluations 约定，见 evaluation.rs） =====
+// ===== 评测报告在线浏览 =====
+// 报告目录解析：评测落盘约定 CWD/agent_evaluations（见 evaluation.rs），但 App 正常启动
+// 时 CWD 是 / 或 .app 内部，与评测机 repo 不同 → 手机端列表空白。
+// 修法：合并扫描 ①CWD（保留原约定）② 全部已注册 agent_projects.root_path 下的
+// agent_evaluations——报告属 repo 资产，按项目根目录归集。
+
+fn eval_report_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join("agent_evaluations"));
+    }
+    if let Ok(conn) = db_conn(app) {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT root_path FROM agent_projects WHERE root_path IS NOT NULL AND root_path != ''",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                for p in rows.flatten() {
+                    let d = std::path::PathBuf::from(p).join("agent_evaluations");
+                    if d.is_dir() && !dirs.contains(&d) {
+                        dirs.push(d);
+                    }
+                }
+            }
+        }
+    }
+    dirs
+}
 
 async fn handler_eval_list(
     AxumState(state): AxumState<Arc<ChannelState>>,
@@ -988,11 +1014,13 @@ async fn handler_eval_list(
     if !authorized(&headers, &config) {
         return Err(unauthorized());
     }
-    let dir = std::env::current_dir()
-        .map_err(|e| internal_error(format!("无法获取工作目录: {e}")))?
-        .join("agent_evaluations");
+    let dirs = eval_report_dirs(&state.app);
     let mut items: Vec<(std::time::SystemTime, Value)> = Vec::new();
-    if let Ok(read_dir) = std::fs::read_dir(&dir) {
+    let mut seen = std::collections::HashSet::new();
+    for dir in dirs {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in read_dir.flatten() {
             let path = entry.path();
             if !path.is_file() {
@@ -1005,6 +1033,9 @@ async fn handler_eval_list(
             else {
                 continue;
             };
+            if !seen.insert(stem.clone()) {
+                continue;
+            }
             let modified = entry
                 .metadata()
                 .and_then(|m| m.modified())
@@ -1049,14 +1080,20 @@ async fn handler_eval_detail(
     if !is_safe_eval_id(&eval_id) {
         return Err(bad_request("非法的评测报告 ID"));
     }
-    let dir = std::env::current_dir()
-        .map_err(|e| internal_error(format!("无法获取工作目录: {e}")))?
-        .join("agent_evaluations");
-    let md_path = dir.join(format!("{eval_id}.md"));
-    let (path, kind) = if md_path.is_file() {
-        (md_path, "markdown")
-    } else {
-        (dir.join(format!("{eval_id}.json")), "json")
+    let mut resolved: Option<(std::path::PathBuf, &'static str)> = None;
+    for dir in eval_report_dirs(&state.app) {
+        let md_path = dir.join(format!("{eval_id}.md"));
+        if md_path.is_file() {
+            resolved = Some((md_path, "markdown"));
+            break;
+        }
+        let json_path = dir.join(format!("{eval_id}.json"));
+        if json_path.is_file() {
+            resolved = Some((json_path, "json"));
+        }
+    }
+    let Some((path, kind)) = resolved else {
+        return Err(not_found("评测报告不存在或已清理"));
     };
     let content = std::fs::read_to_string(&path)
         .map_err(|_| not_found("评测报告不存在或已清理"))?;
