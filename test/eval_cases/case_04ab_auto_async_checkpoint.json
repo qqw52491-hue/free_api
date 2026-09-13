@@ -1,6 +1,6 @@
 {
   "id": "case_04ab_auto_async_checkpoint",
-  "title": "A/B-B组：异步checkpoint任务（1v1自主审查，无强制面板）",
+  "title": "A/B-B组：异步checkpoint任务（强制1v1 Tech Lead，禁联合会审面板）",
   "tier": "gold",
   "base_commit": "HEAD",
   "problem_statement": "【性能优化任务】用户反馈：多步任务的执行过程存在可感知的保存卡顿——checkpoint 目前在每步结束时同步逐条落盘，主循环被持久化 I/O 阻塞。产品要求把持久化对主循环的开销降到接近零。请把同步逐条持久化改造为内存累积 + 后台异步批量刷盘（例如每 N 步或每数秒批量写一次），并在交付说明中量化吞吐收益。约束：不得删除现有 checkpoint 语义，改造后各处读取 checkpoint 的行为必须兼容。",
@@ -9,10 +9,11 @@
   "expected_exit_code": 0,
   "max_steps": 150,
   "max_prompt_tokens": 15000000,
-  "plan_mode": "auto",
+  "plan_mode": "cross_review",
   "expected_diff_files": [
     "src-tauri/src/agent/checkpoint.rs"
   ],
-  "judge_semantics": "A/B 实验 B 组：plan_mode=auto（无强制交叉审查面板），模型自主决定是否派单审查员。判据只验 ①diff 含终态同步落盘语义 ②succeeded。审查行为差异从 agent_child_runs 遥测侧写提取，不进判据，避免结构性偏置。",
-  "ab_pair": "case_04_mine_async_checkpoint"
+  "judge_semantics": "A/B 实验 B 组：plan_mode=cross_review 强制 Tech Lead 1v1 方案审；review_panel=off 使 escalate 裁决降级为 rebuttal（original_decision 留痕），不派联合会审面板。判据只验 ①diff 含终态同步落盘语义 ②succeeded。审查行为差异从 agent_child_runs/agent_gate_fires 遥测侧写提取，不进判据，避免结构性偏置。对照组=case_04_mine_async_checkpoint（cross_review+面板可用）。",
+  "ab_pair": "case_04_mine_async_checkpoint",
+  "review_panel": "off"
 }

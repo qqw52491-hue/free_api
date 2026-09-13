@@ -605,6 +605,8 @@ async function runEvaluation() {
           // 缺省不传 = 不限制（沿用宿主默认 MAX_STEPS=300、无 token 上限）。
           ...(caseDef.max_steps ? { FREE_API_EVAL_MAX_STEPS: String(caseDef.max_steps) } : {}),
           ...(caseDef.max_prompt_tokens ? { FREE_API_EVAL_MAX_PROMPT_TOKENS: String(caseDef.max_prompt_tokens) } : {}),
+          // A/B 对照：review_panel:"off" 钉死 1v1（escalate 降级 rebuttal），缺省=面板可用
+          ...(caseDef.review_panel ? { FREE_API_EVAL_REVIEW_PANEL: String(caseDef.review_panel) } : {}),
         };
         console.log(`   🚀 [LIVE] 唤起实弹 Agent (model=${options.model.slice(0, 8)}, plan=${planMode || '默认'}, 上限 ${options.durationMinutes} 分钟)`);
         console.log(`   📂 [LIVE] 沙盒工作区: ${sandboxPath}`);

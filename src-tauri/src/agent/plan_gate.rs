@@ -92,6 +92,20 @@ pub(crate) fn cross_review_exploration_absolute_steps() -> usize {
         .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_ABSOLUTE_STEPS)
 }
 
+/// 多专家联合会审面板开关（A/B 对照实验用）。
+/// `FREE_API_EVAL_REVIEW_PANEL=off|0|disabled|false` → 钉死 1v1：Tech Lead 的
+/// escalate 裁决被降级为 rebuttal，plan_escalation_required 不置位，
+/// submit_plan 的 1v1 通道保持可用。缺省=on（生产行为不变）。
+pub(crate) fn review_panel_enabled() -> bool {
+    !matches!(
+        std::env::var("FREE_API_EVAL_REVIEW_PANEL")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("off") | Some("0") | Some("disabled") | Some("false")
+    )
+}
+
 /// 当前有效探索硬上限（基础上限 + 已批延期，受绝对上限封顶）
 pub(crate) fn cross_review_exploration_effective_limit(checkpoint: &AgentCheckpoint) -> usize {
     ExplorationBudgetConfig::from_env()
@@ -988,8 +1002,12 @@ mod tests {
         assert_eq!(cp.plan_phase, PlanPhase::Approved);
     }
 
+    /// FREE_API_EVAL_REVIEW_PANEL 是进程级 env，凡读写它的测试共用一把锁防并发竞态
+    static PANEL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_tech_lead_escalate_blocks_gate_until_multi_expert_council_passes() {
+        let _env_guard = PANEL_ENV_LOCK.lock().unwrap();
         let db = setup_test_db();
         let context = SandwichContext::new("system".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("test-tech-lead-esc".to_string(), &context);
@@ -1049,6 +1067,54 @@ mod tests {
         let res_council = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-tech-lead-esc", 2, false);
         assert!(res_council.is_none(), "联合会审齐套通过后放行写入");
         assert_eq!(cp.plan_phase, PlanPhase::Approved);
+    }
+
+    #[test]
+    fn test_panel_off_downgrades_escalate_to_rebuttal() {
+        let _env_guard = PANEL_ENV_LOCK.lock().unwrap();
+        std::env::set_var("FREE_API_EVAL_REVIEW_PANEL", "off");
+        let db = setup_test_db();
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-panel-off".to_string(), &context);
+        cp.plan_mode = PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+        cp.register_plan_reviewer_batch(&["rev-tl".to_string()]);
+
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("decision".to_string(), serde_json::json!("escalate"));
+        extra.insert("file_coupling".to_string(), serde_json::json!("coupled"));
+        extra.insert("analysis".to_string(), serde_json::json!("跨模块强关联，建议会审"));
+        extra.insert(
+            "escalate_roles".to_string(),
+            serde_json::json!(["architect"]),
+        );
+        let del = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "confirmed".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: Some("certain".to_string()),
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard::new(70, 70, 70, None)),
+            extra,
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-tl"), &del);
+        std::env::remove_var("FREE_API_EVAL_REVIEW_PANEL");
+
+        // 面板禁用：不挂起升级要求，1v1 通道（submit_plan）不因 escalate 被封死
+        assert!(cp.plan_escalation_required.is_none());
+        // 降级后的 decision 以 rebuttal 入库，原始裁决留痕 original_decision
+        let last = cp
+            .plan_review_batch
+            .deliveries
+            .last()
+            .expect("应有交付记录");
+        assert_eq!(last.get_extra_str("decision"), Some("rebuttal"));
+        assert_eq!(last.get_extra_str("original_decision"), Some("escalate"));
+        assert!(last.get_extra_str("panel_note").is_some());
+        // 有评分卡且无 blocking 时门禁可放行（1v1 闭环不被升级要求卡死）
+        let _ = db; // db 仅为签名所需
     }
 
     fn exploration_checkpoint(

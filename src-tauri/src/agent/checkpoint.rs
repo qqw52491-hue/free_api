@@ -993,16 +993,37 @@ impl AgentCheckpoint {
         // 🌟 1v1 Tech Lead 方案评审扩展契约解析与定级联动
         if let Some(dec) = delivery.get_extra_str("decision") {
             if dec.eq_ignore_ascii_case("escalate") {
-                let roles: Vec<String> = delivery
-                    .get_extra("escalate_roles")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|i| i.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                self.plan_escalation_required = Some(roles);
+                if !crate::agent::plan_gate::review_panel_enabled() {
+                    // 钉死 1v1 对照组（A/B 实验）：escalate 降级为 rebuttal，
+                    // 保留原始裁决在 original_decision 供复盘，追加说明引导主脑回 1v1。
+                    delivery.extra.insert(
+                        "original_decision".to_string(),
+                        serde_json::json!("escalate"),
+                    );
+                    delivery
+                        .extra
+                        .insert("decision".to_string(), serde_json::json!("rebuttal"));
+                    delivery.extra.insert(
+                        "panel_note".to_string(),
+                        serde_json::json!(
+                            "多专家联合会审面板在本配置下已禁用；本次 escalate 按 rebuttal 处理，请继续在 1v1 通道中消化其关注点并修订方案后重新提交评审。"
+                        ),
+                    );
+                    eprintln!(
+                        "[checkpoint] review panel disabled: Tech Lead escalate downgraded to rebuttal"
+                    );
+                } else {
+                    let roles: Vec<String> = delivery
+                        .get_extra("escalate_roles")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|i| i.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    self.plan_escalation_required = Some(roles);
+                }
             } else if dec.eq_ignore_ascii_case("approved") {
                 self.plan_escalation_required = None;
                 // 若 Tech Lead 裁决 approved 但未附带底层四维评分卡，自动补齐高分通过卡，避免 scorecard_missing 门禁误杀
