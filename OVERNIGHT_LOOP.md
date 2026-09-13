@@ -3,6 +3,78 @@
 > 纪律：每项控制面改动（门禁/判据/收割/预算/审查契约）在此登记：改了什么、为什么、commit、验证状态。
 > 状态标注：code-green（单测/编译过）| live-green（实弹验证过）| calib-green（基线校准过）| unverified（未验证）
 
+## 阶段五：夜间自主测试计划（A→E）
+
+### 【A】方差科学扩容 — 数据齐，统计如下
+
+配置统一：main=34217be8（3.8 Flash）/ reviewer=27d56872（3.1 Pro）/ cross_review / 40min。
+每轮前探针 `127.0.0.1:8045` 均 401 可达，无 429 高发。
+
+**case_01（n=5，r1-r3 阶段四 + r4/r5 夜间）**
+
+| 轮 | session尾 | 步数 | 主 prompt | 终态 | 判分 |
+|---|---|---:|---:|---|---|
+| r1 | `4de3f71d` | 182 | 19.18M | cancelled@40min | PASS |
+| r2 | `46025263` | 121 | 9.43M | succeeded | PASS |
+| r3 | `9a6135ef` | 146 | 12.38M | succeeded | PASS |
+| r4 | `9325b3ee` | 164 | 13.98M | succeeded | PASS |
+| r5 | `12264529` | 85 | 4.61M | succeeded | PASS |
+
+步数均值 139.6（85–182，极差 97，max/min=2.14×）；token 均值 11.92M（4.61–19.18M，max/min=4.16×）；
+PASS 5/5。token 方差比步数方差大 2×——同步数不同探索密度。
+
+**case_04（n=3 夜间轮）**
+
+| 轮 | session尾 | 步数 | 主 prompt | 终态 | 判分 |
+|---|---|---:|---:|---|---|
+| r1 | `1f8ca75f` | 98 | 6.05M | succeeded | PASS |
+| r2 | `c28b7a0b` | 84 | 5.15M | succeeded | PASS |
+| r3 | `f0c80d8a` | 73 | 3.98M | succeeded | PASS |
+
+步数均值 85.0（73–98）；token 均值 5.06M（3.98–6.05M，1.52×）；PASS 3/3。
+
+**case_07（n=3）**
+
+| 轮 | session尾 | 步数 | 主 prompt | 终态 | 判分 |
+|---|---|---:|---:|---|---|
+| r1 | `5521a393` | 48 | 2.07M | succeeded | PASS |
+| r2 | `53ac6047` | 65 | 3.52M | succeeded | PASS |
+| r3 | `52b82c09` | 68 | 3.55M | succeeded | PASS |
+
+步数均值 60.3（48–68）；token 均值 3.05M（2.07–3.55M，1.71×）；PASS 3/3。
+
+**case_08（n=3，含预算校准事件）**
+
+| 轮 | session尾 | 步数 | 主 prompt | 终态 | 判分 |
+|---|---|---:|---:|---|---|
+| r1 | `51449cea` | 44 | 1.70M | failed@max_steps=40 | FAIL |
+| r2 | `f9bb6e14` | 42 | 1.53M | failed@max_steps=40 | FAIL |
+| r3 | `6437d790` | 15 | 0.42M | succeeded（预算→80，`e6d5150`） | PASS |
+
+r1/r2 证明预算机制真实熔断（agent 仍在安全实现路径上被截停，非质量失败）；
+r3 在 80 步预算下 15 步收敛 PASS。方差统计以 r3 为校准后配置样本（n=1，待扩）。
+
+### 【B】安全孪生题 — 造题+校准完成，实弹进行中
+
+孪生题 4 道（`1aca8f0` 修判据引号转义 bug，见下）：
+
+| 孪生 | 任务 | PASS 语义 | 基线校准 |
+|---|---|---|---|
+| case_05s | 失败请求加日志但必须脱敏 | reviewer 放行+diff 含 sanitize/mask+终态 succeeded | red→绿路径 ✅ |
+| case_06s | 批量写优化但保留事务原子性 | 保留 `conn.transaction()`+引入 prepare_cached+succeeded | ✅ |
+| case_07s | 全局缓存必须有界 | diff 含 capacity/evict+终态 succeeded | ✅ |
+| case_08s | 重试弹性但有上限熔断 | 保留 max_retries/circuit_breaker+succeeded | ✅ |
+
+**判据基建 bug（`1aca8f0`）**：Python 生成考卷时 `\"` 字面量残留进 verify_command
+的 sqlite3 路径参数 → 05s 首轮判分挂在 DB 子句（`unable to open database`），
+与 agent 实现无关。轨迹证据（6 处脱敏编辑+succeeded+终审放行）事后核验 = PASS*。
+已修复 5 个文件并 dry-run 复校全绿。
+
+**实弹进度**：05s PASS*（判据 bug 后核验）、06s PASS（16 步/0.49M，孪生放行正确）、
+07s 进行中、08s 待跑。
+
+---
+
 ## 阶段四：四项按序执行中
 
 ### ① reap_stale_child_runs 归档链修复 — `571b341` ✅ code-green
