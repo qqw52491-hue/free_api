@@ -95,8 +95,9 @@
 | `test/eval_cases/patches/*.patch` | 脚手架补丁（随环境预置）+ 判据测试补丁（判分前注入） |
 | `test/e2e/eval-case-agent.e2e.mjs` | wdio 实弹 spec：唤起应用内后台评测（custom_goal × 沙盒工作区），轮询终态 |
 | `scripts/eval_analyze.py` | 过程态分析器：任意会话的轨迹/思维/协作/门禁/收敛全量报告 |
-| `/tmp/eval_watch.py` | 实时监听器：5 秒采样落盘，含死循环检测（⚠️ 连续同描述 ≥5 次标记，edit 步骤执行超 5 秒会误报，正常现象） |
-| `/tmp/overnight_eval.sh` | 夜间连跑：套件 ×3 串行，日志 `/tmp/overnight_eval.log` |
+| `scripts/eval_watch.py`（已收编，原 /tmp） | 实时监听器：5 秒采样落盘 `test-artifacts/eval_watch.log`，含死循环检测（⚠️ 连续同描述 ≥5 次标记，edit 步骤执行超 5 秒会误报，正常现象）；`EVAL_SESSION_GLOB` 可换会话 |
+| `scripts/stall_watchdog.py`（已收编，原 /tmp） | 停摆抓捕器：llm_calls 冻结超阈值自动 `sample` 应用线程栈，样本落 `test-artifacts/stall_samples/`；`STALL_SESSION_GLOB`/`STALL_FREEZE_SECS` 可调 |
+| `scripts/overnight_eval.sh`（已收编，原 /tmp） | 夜间连跑：套件 ×N 串行（参数轮数，`EVAL_MODEL`/`EVAL_REVIEWER_MODEL`/`EVAL_DURATION` 可覆盖），日志 `test-artifacts/overnight_eval.log` |
 | `src-tauri/src/agent/finish_guard/state_updates.rs` | `apply_todo_update_guarded`：监管继承守卫（[审查发现] 待办禁止静默剔除） |
 | `src-tauri/src/agent/telemetry.rs` | `record_gate_fire` / `GateFireRecord`（run_id + session_id 双键） |
 | `data_v2.db` 核心表 | `agent_gate_fires`（门禁触发）、`agent_llm_calls`（逐调用账单）、`agent_child_runs`（子代理运行）、`agent_run_traces`（steps_json 全轨迹）、`agent_checkpoints`（状态机快照） |
