@@ -22,6 +22,19 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
     assert.ok(fixtureDir, "需要 FREE_API_LIVE_FIXTURE_DIR（沙盒工作区）");
     assert.ok(sessionFile, "需要 FREE_API_EVAL_SESSION_FILE");
 
+    // 等待 Tauri IPC 桥就绪：新窗口的 __TAURI__ 注入晚于页面 load，
+    // 过早 executeAsync 会拿到 undefined（case_02 回归实测 0.1min 即翻车）
+    await browser.waitUntil(
+      async () => {
+        try {
+          return await browser.execute(() => Boolean(window.__TAURI__ && window.__TAURI__.core));
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 60_000, interval: 2_000, timeoutMsg: "Tauri IPC 桥 60s 未就绪" },
+    );
+
     const started = await browser.executeAsync(async (model, reviewerModel, workspace, plan, minutes, done) => {
       try {
         const { invoke } = window.__TAURI__.core;
