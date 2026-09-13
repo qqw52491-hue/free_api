@@ -194,7 +194,7 @@ class WorktreeSandbox {
 }
 
 // ---- 物理命令执行 ----
-function runCommand(sandboxPath, command, timeoutMs) {
+function runCommand(sandboxPath, command, timeoutMs, extraEnv = {}) {
   const sharedTargetDir = path.join(rootDir, 'src-tauri', 'target');
   const res = spawnSync(command, {
     cwd: sandboxPath,
@@ -203,6 +203,9 @@ function runCommand(sandboxPath, command, timeoutMs) {
     env: {
       ...process.env,
       CARGO_TARGET_DIR: sharedTargetDir,
+      // FREE_API_EVAL_AGENT_SESSION 由此显式注入：判分 SQL 只允许用 runner 已知的
+      // 精确会话 id，禁止 ORDER BY id DESC / started_at DESC 猜"最新"（并行对照必串）
+      ...extraEnv,
     },
     timeout: timeoutMs,
   });
@@ -278,8 +281,25 @@ function runCalibration(sandboxPath, caseDef) {
   const patchPath = testPatchAbsPath(caseDef);
 
   if (kind !== 'cargo_test') {
-    console.log(`   🟡 [Calibration] 行为类判据 (${kind})，跳过红基线校准（其有效性由题面约束保证）`);
-    return { status: 'skipped', kind, reason: '行为类判据无红基线可校准' };
+    // command 判据的红基线校准：基线上无 agent 会话、无 diff，判据必须为红才允许开考。
+    // 恒真/空判据（如只看退出码不看输出的 sqlite CASE）在基线即为绿 → 考题无效。
+    // 例外：考卷可显式声明 baseline_expectation:'green'（如 case_02 "零改动即正确"负向题）。
+    const expectation = caseDef.baseline_expectation || 'red';
+    const runResult = runCommand(sandboxPath, caseDef.verify_command, CALIBRATION_TIMEOUT_MS, {
+      FREE_API_EVAL_AGENT_SESSION: '',
+    });
+    if (runResult.timedOut) {
+      return { status: 'invalid', kind, reason: '行为类判据在校准期超时——判据本身疑似挂起，考题无效', exitCode: null };
+    }
+    const green = runResult.exitCode === caseDef.expected_exit_code;
+    if (expectation === 'green') {
+      return green
+        ? { status: 'calibrated', kind, reason: `基线声明为绿且判据为绿（负向题语义），校准通过`, exitCode: runResult.exitCode }
+        : { status: 'invalid', kind, reason: `基线声明为绿但判据为红 (exit=${runResult.exitCode})——判据或考题自相矛盾`, exitCode: runResult.exitCode };
+    }
+    return green
+      ? { status: 'invalid', kind, reason: '行为类判据在基线上为绿（恒真/空判据嫌疑）——基线必须为红才允许开考', exitCode: runResult.exitCode }
+      : { status: 'calibrated', kind, reason: `基线判据为红 (exit=${runResult.exitCode})，校准通过`, exitCode: runResult.exitCode };
   }
 
   if (!patchPath || !fs.existsSync(patchPath)) {
@@ -367,7 +387,7 @@ function querySessionTelemetry(sessionId) {
     let traces = [];
     try {
       const rawSteps = execSync(
-        `sqlite3 "${appDbPath}" "SELECT steps_json FROM agent_run_traces WHERE session_id='${sessionId}' ORDER BY id DESC LIMIT 1"`,
+        `sqlite3 "${appDbPath}" "SELECT steps_json FROM agent_run_traces WHERE session_id='${sessionId}' ORDER BY started_at DESC LIMIT 1"`,
         { encoding: 'utf8' }
       ).trim();
       if (rawSteps) {
@@ -668,7 +688,9 @@ async function runEvaluation() {
           }
         }
 
-        const runResult = runCommand(sandboxPath, caseDef.verify_command, JUDGE_TIMEOUT_MS);
+        const runResult = runCommand(sandboxPath, caseDef.verify_command, JUDGE_TIMEOUT_MS, {
+          FREE_API_EVAL_AGENT_SESSION: sessionId,
+        });
         result = {
           ...evaluateJudge(caseDef, runResult),
           durationMs: 0,
@@ -692,7 +714,9 @@ async function runEvaluation() {
           execSync(`git apply "${patchPath}"`, { cwd: sandboxPath, stdio: 'pipe' });
         }
 
-        const runResult = runCommand(sandboxPath, caseDef.verify_command, JUDGE_TIMEOUT_MS);
+        const runResult = runCommand(sandboxPath, caseDef.verify_command, JUDGE_TIMEOUT_MS, {
+          FREE_API_EVAL_AGENT_SESSION: options.agentSession,
+        });
         result = {
           ...evaluateJudge(caseDef, runResult),
           durationMs: 0,
