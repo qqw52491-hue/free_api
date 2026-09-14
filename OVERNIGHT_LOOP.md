@@ -244,6 +244,7 @@ spec 测试用修复提交自带的测试 diff 做 test_patch（case_10/11），
   前端真 diff 高亮卡，不再正则反推 +N −N）；`local_file.write` → `kind:"write"`
   （path/size/is_tmp）；`local_shell` → `kind:"terminal"`（command/exit_code/
   duration/输出尾 8 行，spawn 失败带 spawn_error，非零退出红边）。
+- 抽屉详情态复用：6 个视图组件增加 `detail` prop；`AgentInspector.vue` 抽屉面板同一注册表分发展开态（read 全量高框可滚、terminal 全量黑底终端、diff 直接从 params 还原完整改动、search 展开全部 hits + 根目录/备注/错误），同款组件两处复用。
 - 验证：cargo check 干净、local_* 20 项测试全绿、vue-tsc 无错。
 
 ## 阶段五存档：夜间自主测试计划（A→E，已完成）

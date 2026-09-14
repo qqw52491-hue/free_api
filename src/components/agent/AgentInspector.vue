@@ -226,6 +226,17 @@
                         </div>
                     </div>
 
+                    <!-- 工具直供结构化视图详情态：同一注册表分发，detail 模式展开完整内容 -->
+                    <component
+                        v-if="selectedStep.view && toolViewComponents[selectedStep.view.kind]"
+                        :is="toolViewComponents[selectedStep.view.kind]"
+                        :view="selectedStep.view"
+                        :detail="true"
+                        :output="formattedOutput"
+                        :params="selectedStep.rawParams ?? selectedStep.params"
+                        class="inspector-tool-view"
+                    />
+
                     <!-- 错误诊断区 (如果步骤失败或存在错误) -->
                     <div v-if="selectedStep.status === 'failed' || stepErrorText" class="error-diagnostic-card">
                         <div class="card-header">
@@ -543,6 +554,7 @@ import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 import AgentTeamDeck from "./AgentTeamDeck.vue";
 import FileDiffViewer from "./FileDiffViewer.vue";
+import { toolViewComponents } from "./views";
 import { extractDiffFromStep } from "./diffUtils";
 import { extractSubagentsFromStep, formatFinding } from "./workerUtils";
 

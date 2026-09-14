@@ -13,7 +13,7 @@
 <script setup lang="ts">
 import type { WriteToolView } from "../types";
 
-defineProps<{ view: WriteToolView }>();
+defineProps<{ view: WriteToolView; detail?: boolean; output?: string; params?: unknown }>();
 defineEmits<{ select: [] }>();
 
 function formatSize(bytes: number): string {

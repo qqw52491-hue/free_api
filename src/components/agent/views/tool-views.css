@@ -370,3 +370,49 @@
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+/* ============ 详情态（Inspector 抽屉内展开） ============ */
+.tool-view-card.is-detail,
+.diff-card.is-detail,
+.term-card.is-detail {
+    margin: 8px 0 10px;
+    cursor: default;
+    animation: none;
+}
+
+.tool-view-card.is-detail .tool-view-preview.detail-body {
+    max-height: 420px;
+    overflow: auto;
+    white-space: pre;
+}
+
+.term-card.is-detail .term-body {
+    max-height: 420px;
+    overflow: auto;
+}
+
+.diff-card.is-detail .diff-lines {
+    max-height: none;
+}
+
+.tool-view-card.is-detail .tool-view-hits.detail-list {
+    max-height: 300px;
+    overflow: auto;
+}
+
+.view-note {
+    margin-top: 5px;
+    color: #64748b;
+    font-size: 10.5px;
+    line-height: 1.5;
+}
+
+.view-note.err {
+    color: #fca5a5;
+}
+
+.view-note code {
+    color: #7dd3fc;
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
+}
