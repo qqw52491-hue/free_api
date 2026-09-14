@@ -240,7 +240,11 @@ spec 测试用修复提交自带的测试 diff 做 test_patch（case_10/11），
   `agent-chat-stream.css` 原块删除留指针注释。
 - `local_file.read` 接入 `kind:"read"`：path/行区间/总行数 + 前 40 行行号预览
   （preview 是卡片缩略，完整输出仍在 stdout，不在 step json 重复持久化整段）。
-- 验证：cargo check 干净、local_file 10 项测试全绿、vue-tsc 无错。
+- 第二批：`local_file.edit` → `kind:"diff"`（removed/added 行直供各截 30 行，
+  前端真 diff 高亮卡，不再正则反推 +N −N）；`local_file.write` → `kind:"write"`
+  （path/size/is_tmp）；`local_shell` → `kind:"terminal"`（command/exit_code/
+  duration/输出尾 8 行，spawn 失败带 spawn_error，非零退出红边）。
+- 验证：cargo check 干净、local_* 20 项测试全绿、vue-tsc 无错。
 
 ## 阶段五存档：夜间自主测试计划（A→E，已完成）
 

@@ -451,7 +451,37 @@ fn execute_command_blocking(
                 "truncated": is_truncated,
             });
 
-            DispatchResult { view: None,
+            // UI 结构化视图：命令/退出码/耗时 + 输出尾巴（合并 stdout+stderr 末 8 行，
+            // 卡片缩略；完整输出仍在 stdout 与 step 日志）。
+            let mut combined = String::new();
+            if !stdout_trimmed.is_empty() {
+                combined.push_str(&stdout_trimmed);
+            }
+            if !stderr_trimmed.is_empty() {
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&stderr_trimmed);
+            }
+            let tail: Vec<&str> = combined.lines().collect();
+            let output_tail: String = tail
+                .iter()
+                .skip(tail.len().saturating_sub(8))
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let view = json!({
+                "kind": "terminal",
+                "command": cmd_str,
+                "cwd": cwd.display().to_string(),
+                "exit_code": exit_code,
+                "duration_ms": duration_ms,
+                "truncated": is_truncated,
+                "output_tail": output_tail,
+            });
+
+            DispatchResult {
+                view: Some(view),
                 stdout: format!("{}\n\n<!-- 结构化元数据: {} -->", formatted_stdout.trim_end(), payload),
                 stderr: if success { String::new() } else { format!("命令退出码: {}", exit_code) },
                 success,
@@ -471,7 +501,17 @@ fn execute_command_blocking(
                 "recommended_action": recommended_action,
             });
 
-            DispatchResult { view: None,
+            let view = json!({
+                "kind": "terminal",
+                "command": cmd_str,
+                "cwd": cwd.display().to_string(),
+                "exit_code": -1,
+                "duration_ms": duration_ms,
+                "spawn_error": err_msg,
+            });
+
+            DispatchResult {
+                view: Some(view),
                 stdout: String::new(),
                 stderr: format!("❌ {}\n<!-- 结构化元数据: {} -->", err_msg, payload),
                 success: false,

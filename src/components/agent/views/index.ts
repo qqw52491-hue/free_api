@@ -2,6 +2,9 @@ import type { Component } from "vue";
 import SearchView from "./SearchView.vue";
 import SearchCacheView from "./SearchCacheView.vue";
 import ReadView from "./ReadView.vue";
+import DiffView from "./DiffView.vue";
+import WriteView from "./WriteView.vue";
+import TerminalView from "./TerminalView.vue";
 
 /**
  * 工具直供结构化视图注册表：DispatchResult.view.kind → 卡片组件。
@@ -12,4 +15,7 @@ export const toolViewComponents: Record<string, Component> = {
     search: SearchView,
     "search-cache": SearchCacheView,
     read: ReadView,
+    diff: DiffView,
+    write: WriteView,
+    terminal: TerminalView,
 };

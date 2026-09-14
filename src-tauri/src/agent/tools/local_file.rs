@@ -467,7 +467,15 @@ fn execute_write(
         "message": format!("✅ 已成功写入 \"{}\"（共 {} 字节）", resolved.display_path, content.len())
     });
 
-    DispatchResult { view: None,
+    let view = json!({
+        "kind": "write",
+        "path": resolved.display_path,
+        "size_bytes": content.len(),
+        "is_tmp": resolved.is_session_tmp,
+    });
+
+    DispatchResult {
+        view: Some(view),
         stdout: serde_json::to_string_pretty(&payload).unwrap_or_default(),
         stderr: String::new(),
         success: true,
@@ -639,7 +647,25 @@ fn execute_edit(
         )
     });
 
-    DispatchResult { view: None,
+    // UI 结构化视图：removed/added 行直供（各截 30 行），前端渲染真 diff 高亮卡，
+    // 不再从 stdout 文本正则反推增删数。
+    const DIFF_VIEW_MAX_LINES: usize = 30;
+    let removed: Vec<&str> = target_content.lines().collect();
+    let added: Vec<&str> = replacement_content.lines().collect();
+    let view = json!({
+        "kind": "diff",
+        "path": resolved.display_path,
+        "start_line": start_line,
+        "end_line": end_line,
+        "removed_lines": removed.iter().take(DIFF_VIEW_MAX_LINES).collect::<Vec<_>>(),
+        "added_lines": added.iter().take(DIFF_VIEW_MAX_LINES).collect::<Vec<_>>(),
+        "removed_total": removed.len(),
+        "added_total": added.len(),
+        "truncated": removed.len() > DIFF_VIEW_MAX_LINES || added.len() > DIFF_VIEW_MAX_LINES,
+    });
+
+    DispatchResult {
+        view: Some(view),
         stdout: serde_json::to_string_pretty(&payload).unwrap_or_default(),
         stderr: String::new(),
         success: true,

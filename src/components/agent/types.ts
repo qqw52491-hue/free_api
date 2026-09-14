@@ -176,7 +176,37 @@ export interface ReadToolView {
     preview_truncated?: boolean;
 }
 
-export type ToolView = SearchToolView | SearchCacheToolView | ReadToolView | ({ kind: string } & Record<string, unknown>);
+export interface DiffToolView {
+    kind: "diff";
+    path: string;
+    start_line: number;
+    end_line: number;
+    removed_lines: string[];
+    added_lines: string[];
+    removed_total?: number;
+    added_total?: number;
+    truncated?: boolean;
+}
+
+export interface WriteToolView {
+    kind: "write";
+    path: string;
+    size_bytes: number;
+    is_tmp?: boolean;
+}
+
+export interface TerminalToolView {
+    kind: "terminal";
+    command: string;
+    cwd?: string;
+    exit_code: number;
+    duration_ms?: number;
+    truncated?: boolean;
+    output_tail?: string;
+    spawn_error?: string;
+}
+
+export type ToolView = SearchToolView | SearchCacheToolView | ReadToolView | DiffToolView | WriteToolView | TerminalToolView | ({ kind: string } & Record<string, unknown>);
 
 export interface AgentStepItem {
     id: string;
