@@ -63,6 +63,30 @@ live 验证待下轮运维类实弹（卸载/服务管理任务应一次通过�
   ensure_uv 后补 spawn（下载不持锁），进度事件提示"正在下载 uv 运行时"。
 - Tauri 命令 `ensure_uv_runtime`：给前端"一键安装 MCP"按钮预留就绪探针。
 
+### 阶段十二：门禁任务矩阵猎捕（8 轮）— 2026-09-15
+
+`gate_matrix_tests.rs` 12 场景端到端穿"审计门（副作用分类）× 验证门（自动认账）"，
+逐轮挖病灶修复。**全量 613 tests 绿**。
+
+| 步 | 行为 | 根因层 | 必要/浪费 | 修复 |
+|---|---|---|---|---|
+| R1 | `find -exec/-delete`、`git config/branch -d/tag/remote add`、`sort -o`/`tree -o`、`date -s`、`hostname x`、`mount -a` 走只读白名单 | 门禁（audit） | 漏记=静默绕过 | 专用分派 arm 按旗标双态判定，裸白名单移除 |
+| R1 | `[[ a > b ]]`/`test a \> b` 的 > 被当重定向；printf/cd/export/umask/版本探针误记 | 门禁 | 误记=幻影写入卡 finish | [[ ]] 比较豁免 + 转义 > 识别 + 内建/版本探针白名单 |
+| R2 | `cmd >/dev/null`、`>/dev/fd/1` 当写入 | 门禁 | 误记 | 哑目标集扩 /dev/null、/dev/stdout、/dev/fd/* |
+| R2 | `command`/`builtin`/`ionice`/`chrt`/`taskset` 不剥壳；`sudo -n`/`sudo -u root` 带旗标不剥 | 门禁 | 误记 | 剥壳器吃值旗标连值跳；command/builtin 保持保守剥（`command -v` 的 -v 是查询模式，剥掉会把对象当命令） |
+| R2 | macOS 族全裸奔：`defaults read`/`launchctl list`/`diskutil info`/`spctl`/`xattr`/`codesign -v` | 门禁 | 误记 | macOS 工具族分派 + `crontab -l` |
+| R5 | 绑定 token 假命中：`opt`⊆`options`、`.conf`⊆`config`、`.service`⊆`…service` | 门禁（verify 绑定） | 假绑定=无关探针关账 | NOISE 扩三类：目录骨架词（opt/usr/etc/share…）、扩展名段（conf/yml/service/plist…）、单元后缀 |
+| R5 | `curl -o /dev/null`（无 -f/-w 时 404 也 exit 0）、`zypper se`（搜不到也 0）当断言探针 | 门禁（verify） | 真空断言=自动认假账 | 移出探针/缺失探针表；`zypper info` 保留（exit 104 构成断言） |
+| R6 | 命名空间弱 exec 工具（`db/exec_sql` `browser/exec_js`）参数语言非 shell，破坏性检查隐形 → "DELETE FROM users" 被放行 | 门禁（dispatcher） | 漏记 | 壳标记分层：强壳（shell/bash/terminal/powershell/cmd/command）走命令分析；弱 exec/run/eval 命名空间工具回落只读动词 fail-closed |
+| R6 | args-only 形态 `{"args":["ls","-la"]}` 两侧提取不一致（dispatcher 识别、audit 记空） | 门禁（audit↔dispatcher 不对称） | 同参两侧不同判 | audit 空 command 时以 args.join 合成命令串 |
+| R7 | `read_only:true` 模型可自填绕过 dispatcher 前置拦截 | 设计残留 | 纵深：审计台账不认该 flag，挂账仍留痕 | 不修——记录为已知软点（拦截层可绕、台账层不可绕） |
+| R7 | `is_workspace_target("../x")` `..` 逃逸相对路径判"区内" → diff 对账门对区外目标强索覆盖 | 门禁（applicability） | 假拦截 | 组件级深度计数，depth<0 即区外 |
+| R8 | 复审缓存：`!is_passed()` 才复用（FAIL 重放、PASS 必重跑）、契约变更 diff 不变仍拦 | — | 语义已正确 | 无需修，验证通过 |
+
+**残留边界（明确不修/留痕）**：checkpoint 恢复时 `context.side_effects` 非空则放弃
+checkpoint 侧效果合并（去重无唯一 id，窗口窄）；`pipx list` 类恒 0 探针因无对象
+token 天然不绑定，属无害死项。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。

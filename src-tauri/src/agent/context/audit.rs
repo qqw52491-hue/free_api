@@ -138,20 +138,92 @@ impl AuditLedger {
             return !Self::is_readonly_shell_command(params);
         }
 
-        // 3. 常见写操作与变更类动作
+        // 3. MCP 命名空间工具（plugin/tool 形态）：写动词词表不可枚举——
+        //    format_range/set_formula/rename_sheet/merge_cells/insert_rows 这类
+        //    不含经典写动词的变更操作不能因词表漏收而对台账隐形。
+        //    只读动词前缀放行，其余一律记副作用（fail-closed）。
+        //    例外：叶子名带强壳标记（shell/bash/terminal/powershell/cmd/command）
+        //    时参数语言就是 shell——走命令级分析，与 dispatcher 判定保持一致
+        //    （x/run_command 跑 `ls` 不该一侧放行一侧入账）。
+        if lower_tool.contains('/') {
+            let orig_name = tool.split('/').last().unwrap_or(tool);
+            let leaf_lower = orig_name.to_lowercase();
+            let strong_shell_marker = leaf_lower.contains("shell")
+                || leaf_lower.contains("bash")
+                || leaf_lower.contains("terminal")
+                || leaf_lower.contains("powershell")
+                || leaf_lower.contains("cmd")
+                || leaf_lower.contains("command");
+            if strong_shell_marker {
+                return !Self::is_readonly_shell_command(params);
+            }
+            return !Self::mcp_tool_is_readonly_verb(orig_name);
+        }
+
+        // 4. 常见写操作与变更类动作
         action_name.contains("write")
             || action_name.contains("edit")
             || action_name.contains("move")
+            || action_name.contains("rename")
             || action_name.contains("delete")
             || action_name.contains("create")
             || action_name.contains("upsert")
             || action_name.contains("patch")
             || action_name.contains("apply")
             || action_name.contains("remove")
+            || action_name.contains("insert")
+            || action_name.contains("update")
+            || action_name.contains("format")
+            || action_name.contains("merge")
+            || action_name.contains("append")
+            || action_name.contains("install")
+            || action_name.contains("set_")
+            || action_name.contains("add_")
+            || action_name.contains("drop")
+            || action_name.contains("modify")
+            || action_name.contains("fill")
+            || action_name.contains("clear")
+            || action_name.contains("resize")
+            || action_name.contains("upload")
+            || action_name.contains("download")
+            || action_name.contains("import")
+            || action_name.contains("export")
+            || action_name.contains("exec")
+            || action_name.contains("deploy")
             || act.starts_with("write")
             || act.starts_with("edit")
             || act.starts_with("delete")
             || act.starts_with("save")
+            || act.starts_with("rename")
+            || act.starts_with("update")
+            || act.starts_with("insert")
+            || act.starts_with("move")
+    }
+
+    /// MCP 工具名的只读动词判定：snake_case 前缀、连字符前缀或 camelCase
+    /// 词首大写边界（readFile/getSheetData）都算；`getaway_x` 这类以读动词
+    /// 起头但非独立词的形态不误判（小写续写不算词边界）。
+    /// 入参传原始工具名（未小写化）——camelCase 边界依赖原始大小写。
+    pub(crate) fn mcp_tool_is_readonly_verb(action_name: &str) -> bool {
+        let lower = action_name.to_lowercase();
+        const READ_VERBS: &[&str] = &[
+            "read", "list", "ls", "get", "describe", "show", "inspect", "query",
+            "search", "find", "check", "status", "info", "count", "exists",
+            "validate", "ping", "health", "version", "help", "view", "peek",
+            "fetch", "probe", "analyze", "summarize", "preview", "dump", "cat",
+            "diff", "watch", "monitor", "trace", "resolve", "lookup", "detect",
+            "estimate", "explain", "report",
+        ];
+        READ_VERBS.iter().any(|v| {
+            lower == *v
+                || lower.starts_with(&format!("{v}_"))
+                || lower.starts_with(&format!("{v}-"))
+                || action_name
+                    .strip_prefix(v)
+                    .map_or(false, |rest| {
+                        rest.chars().next().map_or(false, |c| c.is_uppercase())
+                    })
+        })
     }
 
     /// 判定参数中的目标文件路径是否属于会话临时草稿目录 (session_tmp / tmp)
@@ -175,20 +247,32 @@ impl AuditLedger {
 
     /// 检测 shell 命令是否为只读查询（如 git log/show/diff, ls, cat, grep 等）
     pub fn is_readonly_shell_command(params: &serde_json::Value) -> bool {
-        let raw_cmd = params
-            .get("command")
-            .or_else(|| params.get("cmd"))
-            .or_else(|| params.get("commandline"))
-            .or_else(|| params.get("command_line"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .trim();
-
-        let explicit_args: Vec<&str> = params
+        let mut explicit_args: Vec<&str> = params
             .get("args")
             .and_then(|a| a.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
+
+        let owned_args_cmd;
+        let raw_cmd = {
+            let c = params
+                .get("command")
+                .or_else(|| params.get("cmd"))
+                .or_else(|| params.get("commandline"))
+                .or_else(|| params.get("command_line"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .trim();
+            if c.is_empty() && !explicit_args.is_empty() {
+                // args-only 形态（{"args":["ls","-la"]}）：args 本体即命令行——
+                // dispatcher 同款提取，两侧分类保持一致
+                owned_args_cmd = explicit_args.join(" ");
+                explicit_args.clear();
+                owned_args_cmd.as_str()
+            } else {
+                c
+            }
+        };
 
         // 命令替换/进程替换守卫：$(cmd)、`cmd`、<(cmd)、>(cmd) 内层不可静态审计，
         // 必须扫原文（双引号内的 $() 同样会执行，不能用抹除引号后的文本判断）。
@@ -306,8 +390,9 @@ impl AuditLedger {
         let mut tok_idx = 0usize;
         while tok_idx < tokens.len() {
             match tokens[tok_idx] {
-                // 仅剥 "sudo cmd" 直跟形态；sudo -u foo cmd 等带参旗标不剥
-                "sudo" | "doas" | "pkexec" => {
+                // command/builtin 只剥直跟形态：`command -v x` 的 -v 是查询
+                // 模式（x 是查询对象而非被执行命令），剥掉会把对象当命令误评
+                "command" | "builtin" => {
                     if tokens
                         .get(tok_idx + 1)
                         .map_or(false, |t| !t.starts_with('-'))
@@ -317,7 +402,29 @@ impl AuditLedger {
                         break;
                     }
                 }
-                "timeout" | "nice" | "nohup" | "stdbuf" | "time" => {
+                // sudo/doas/pkexec 剥壳：跳过旗标参数，吃值旗标（-u/-g/-C/-T 等）
+                // 连值一起跳过——`sudo -n cat f`、`sudo -u root ls /` 剥到真实命令
+                "sudo" | "doas" | "pkexec" => {
+                    tok_idx += 1;
+                    while let Some(&t) = tokens.get(tok_idx) {
+                        if !t.starts_with('-') {
+                            break;
+                        }
+                        tok_idx += 1;
+                        if matches!(
+                            t,
+                            "-u" | "-g" | "-h" | "-p" | "-C" | "-T" | "-r" | "-t"
+                                | "-D" | "-U" | "--user" | "--group" | "--host"
+                                | "--prompt" | "--chdir" | "--timeout" | "--role"
+                                | "--type" | "--command-timeout"
+                        ) {
+                            tok_idx += 1;
+                        }
+                    }
+                }
+                // ionice/chrt/taskset 的旗标值多为数字/数字区间，数值跳过循环可吞
+                "ionice" | "chrt" | "taskset" | "timeout" | "nice" | "nohup" | "stdbuf"
+                | "time" => {
                     tok_idx += 1;
                     // 跳过包装器自身旗标（-k/-s/-n/-o 等）
                     while tokens.get(tok_idx).map_or(false, |t| t.starts_with('-')) {
@@ -344,41 +451,35 @@ impl AuditLedger {
         // 重定向即写入：`>`/`>>`/`&>` 输出重定向不再算只读（`echo x >> file`）。
         // `2>&1`/`>&-` 是 fd 复制不写文件，不触发。引号内 `>` 字面量不计——
         // 先抹掉引号内内容再做结构检测。
-        if Self::has_write_redirect(&Self::blank_quoted_segments(&tokens.join(" "))) {
+        // 特例：`[[ a > b ]]` 内的 < > 是字符串比较而非重定向（`[`/`test` 无此
+        // 语义——shell 在调用内建前就已解析重定向，故仅对 `[[ ]]` 豁免），
+        // 检测范围收窄到 `]]` 之后，不丢 `[[ x ]] > f` 这类真写入。
+        let mut redirect_subject = Self::blank_quoted_segments(&tokens.join(" "));
+        if base_cmd == "[[" {
+            if let Some(pos) = redirect_subject.rfind("]]") {
+                redirect_subject = redirect_subject[pos..].to_string();
+            }
+        }
+        if Self::has_write_redirect(&redirect_subject) {
             return false;
         }
 
+        // 通用版本/帮助探针：`x --version`/`x -V`/`x help`/`x version` 纯输出
+        // 不改状态——置于重定向检测之后（`x --version > f` 仍是写入）与命令分派
+        // 之前（覆盖未单列的工具）。
+        if !tokens[1..].is_empty()
+            && tokens[1..].iter().all(|a| {
+                matches!(
+                    *a,
+                    "--version" | "-V" | "--help" | "-h" | "-?" | "version" | "help"
+                )
+            })
+        {
+            return true;
+        }
+
         if base_cmd == "git" {
-            let mut skip_next = false;
-            for arg in &tokens[1..] {
-                if skip_next {
-                    skip_next = false;
-                    continue;
-                }
-                if *arg == "-C" || *arg == "--git-dir" || *arg == "--work-tree" {
-                    skip_next = true;
-                    continue;
-                }
-                if arg.starts_with('-') {
-                    continue;
-                }
-                // 第一个非 flag 参数即为 git 子命令
-                return matches!(
-                    *arg,
-                    "log"
-                        | "show"
-                        | "status"
-                        | "diff"
-                        | "branch"
-                        | "tag"
-                        | "remote"
-                        | "config"
-                        | "rev-parse"
-                        | "describe"
-                        | "check-ignore"
-                );
-            }
-            return false;
+            return Self::git_is_readonly(&tokens[1..]);
         }
 
         if base_cmd == "sed" {
@@ -392,10 +493,327 @@ impl AuditLedger {
             "dpkg" | "dpkg-query" => return Self::dpkg_is_readonly(tokens),
             "rpm" => {
                 return tokens[1..].iter().any(|a| {
-                    a.strip_prefix("--").map_or(false, |r| r.starts_with("query"))
-                        || a.strip_prefix('-').map_or(false, |r| r.starts_with('q'))
+                    a.strip_prefix("--").map_or(false, |r| {
+                        r.starts_with("query") || r.starts_with("verify") || r.starts_with("checksig")
+                    }) || a.strip_prefix('-').map_or(false, |r| {
+                        r.starts_with('q') || r.starts_with('V') || r.starts_with('K')
+                    })
                 });
             }
+            // find 裸名绝不能算只读：-exec/-execdir/-ok/-okdir 执行任意命令，
+            // -delete 删除，-fprint/-fprintf/-fls/-cpio 写文件。
+            "find" => {
+                return !tokens[1..].iter().any(|a| {
+                    matches!(
+                        *a,
+                        "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint"
+                            | "-fprintf" | "-fls" | "-cpio"
+                    )
+                });
+            }
+            // fd/fdfind 同 find：--exec/--exec-batch/-x/-X 执行任意命令
+            "fd" | "fdfind" => {
+                return !tokens[1..].iter().any(|a| {
+                    matches!(*a, "--exec" | "--exec-batch" | "-x" | "-X")
+                });
+            }
+            // sort -o/--output 把结果落盘
+            "sort" => {
+                return !tokens[1..].iter().any(|a| {
+                    a.starts_with("--output")
+                        || (a.starts_with('-')
+                            && !a.starts_with("--")
+                            && a[1..].contains('o'))
+                });
+            }
+            // tree -o/--output 把树图写入文件
+            "tree" => {
+                return !tokens[1..]
+                    .iter()
+                    .any(|a| *a == "-o" || a.starts_with("--output"));
+            }
+            // date -s/--set 或纯数字操作数（MMDDhhmm 格式）设置系统时间
+            "date" => {
+                return !tokens[1..].iter().any(|a| {
+                    *a == "-s"
+                        || a.starts_with("--set")
+                        || (!a.starts_with('-')
+                            && !a.is_empty()
+                            && a.chars().all(|c| c.is_ascii_digit()))
+                });
+            }
+            // hostname/网络配置类：带非旗标操作数即变更（`hostname x`、`arp -d h`、
+            // `route add`、`ifconfig eth0 up`）
+            "hostname" | "ifconfig" | "iwconfig" | "arp" | "route" => {
+                return !tokens[1..].iter().any(|a| !a.starts_with('-'));
+            }
+            // mount：裸跑列出挂载（只读），-a/-A/--all 挂载 fstab 全部条目（变更），
+            // 任何非旗标操作数（设备/挂载点）也是挂载动作
+            "mount" => {
+                return !tokens[1..].iter().any(|a| {
+                    !a.starts_with('-') || matches!(*a, "-a" | "-A" | "--all")
+                });
+            }
+            // sysctl -w/--write 或 k=v 操作数写内核参数；-p/--load/--system 应用配置
+            "sysctl" => {
+                return !tokens[1..].iter().any(|a| {
+                    matches!(*a, "-w" | "--write" | "-p" | "--load" | "--system")
+                        || (!a.starts_with('-') && a.contains('='))
+                });
+            }
+            // dmesg：-c/-C/--clear/--read-clear 清缓冲、-n/--console-level、-D/-E
+            // 开关打印是变更；其余（-T/-w/-l 等）只读
+            "dmesg" => {
+                return !tokens[1..].iter().any(|a| {
+                    if let Some(rest) = a.strip_prefix("--") {
+                        return matches!(
+                            rest.split('=').next().unwrap_or(""),
+                            "clear" | "read-clear" | "console-level" | "console-on"
+                                | "console-off"
+                        );
+                    }
+                    a.strip_prefix('-').map_or(false, |rest| {
+                        !rest.is_empty()
+                            && rest.chars().any(|c| matches!(c, 'c' | 'C' | 'n' | 'D' | 'E'))
+                    })
+                });
+            }
+            // fuser -k/--kill 杀进程
+            "fuser" => {
+                return !tokens[1..]
+                    .iter()
+                    .any(|a| *a == "-k" || a.starts_with("--kill"));
+            }
+            // bridge 与 ip 同构：变更操作数在，即非只读
+            "bridge" => {
+                return !tokens[1..]
+                    .iter()
+                    .any(|a| !a.starts_with('-') && Self::is_netlink_mutating_operand(a));
+            }
+            // Python 包管理只读子集（install/uninstall/download 等落为变更）
+            "pip" | "pip3" | "pipx" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["list", "show", "check", "freeze", "inspect", "hash", "debug"],
+                );
+            }
+            "npm" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &[
+                        "ls", "list", "ll", "la", "view", "info", "search", "outdated",
+                        "audit", "ping", "root", "bin", "prefix", "explain", "why", "doctor",
+                    ],
+                );
+            }
+            "yarn" | "pnpm" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["list", "ls", "why", "outdated", "audit", "info", "view", "licenses"],
+                );
+            }
+            "gem" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &[
+                        "list", "info", "search", "dependency", "environment", "env",
+                        "outdated", "query", "contents", "specification", "which", "help",
+                    ],
+                );
+            }
+            // go env -w 写配置；version/doc 纯读；list/build 可能触缓存故不算
+            "go" => {
+                return match tokens[1..].iter().find(|a| !a.starts_with('-')) {
+                    Some(&"env") => !tokens[1..].iter().any(|a| *a == "-w"),
+                    Some(&"version") | Some(&"doc") => true,
+                    _ => false,
+                };
+            }
+            "rustup" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["show", "which", "check", "version", "docs"],
+                );
+            }
+            "yum" | "dnf" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &[
+                        "list", "info", "search", "check-update", "repolist", "history",
+                        "deplist", "provides", "whatprovides", "grouplist", "groupinfo",
+                        "check", "summary",
+                    ],
+                );
+            }
+            "repoquery" => return true,
+            "zypper" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &[
+                        "search", "se", "info", "if", "list-updates", "lu", "patch-check",
+                        "packages", "pa", "products", "patterns", "services", "repos", "lr",
+                        "ps", "verify", "what-provides", "wp", "licenses", "locks", "ll",
+                    ],
+                );
+            }
+            "apk" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &[
+                        "info", "list", "search", "policy", "version", "stats", "dot",
+                        "verify", "manifest",
+                    ],
+                );
+            }
+            // helm：repo/template 等双态子命令不在列——保守按变更
+            "helm" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["list", "ls", "status", "show", "get", "history", "search", "env"],
+                );
+            }
+            "minikube" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["status", "ip", "version", "logs"],
+                );
+            }
+            // virsh 查询子命令只读；start/destroy/define 等变更
+            "virsh" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &[
+                        "list", "dominfo", "domstate", "dumpxml", "nodeinfo", "version",
+                        "pool-list", "net-list", "vol-list", "snapshot-list", "capabilities",
+                        "hostname", "uri", "domid", "domuuid", "domname", "domdisplay",
+                        "sysinfo", "freecell", "freepages",
+                    ],
+                );
+            }
+            // nmcli：双态子命令靠操作数区分（con up/add/delete 变更）
+            "nmcli" => {
+                return Self::nmcli_is_readonly(tokens);
+            }
+            // busctl call/set-property/emit 会触发任意 D-Bus 副作用
+            "busctl" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["list", "status", "monitor", "tree", "introspect", "user-status",
+                        "get-property"],
+                );
+            }
+            // apt-config 只有读配置的能力
+            "apt-config" => return true,
+            "apt-file" => {
+                return Self::first_operand_in(tokens, &["search", "list", "show", "find"]);
+            }
+            // ldconfig 裸跑重建链接器缓存（变更）；-p/--print-cache 只读
+            "ldconfig" => {
+                return tokens[1..]
+                    .iter()
+                    .any(|a| matches!(*a, "-p" | "--print-cache"));
+            }
+            // crontab：-l 列举只读；-e/-r/-i 或文件操作数（安装新表）即变更；
+            // -u/--user 的取值是旗标值不是文件操作数
+            "crontab" => {
+                let mut i = 1usize;
+                let mut has_list = false;
+                let mut mutating = false;
+                while i < tokens.len() {
+                    let a = tokens[i];
+                    if matches!(a, "-u" | "--user") {
+                        i += 2;
+                        continue;
+                    }
+                    match a {
+                        "-l" | "--list" => has_list = true,
+                        "-e" | "-r" | "-i" | "--edit" | "--remove" => mutating = true,
+                        _ if !a.starts_with('-') => mutating = true,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                return has_list && !mutating;
+            }
+            // macOS 管理工具：查询子命令只读，变更子命令入账
+            "defaults" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["read", "read-type", "find", "domains", "help"],
+                );
+            }
+            "launchctl" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &[
+                        "list", "print", "print-cache", "print-disabled", "blame",
+                        "procinfo", "managername", "managerpid", "manageruid", "examine",
+                    ],
+                );
+            }
+            "mas" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["list", "search", "info", "outdated", "version", "account", "home"],
+                );
+            }
+            "log" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["show", "stream", "stats", "predicate", "test", "help"],
+                );
+            }
+            "diskutil" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["list", "info", "verifyvolume", "verifydisk", "activity"],
+                );
+            }
+            "hdiutil" => {
+                return Self::first_operand_in(
+                    tokens,
+                    &["info", "imageinfo", "pmap", "isencrypted", "verify", "help"],
+                );
+            }
+            // codesign：-s/-f/-r/-o 等签署/改写旗标即变更；-d/-v/--verify 只读
+            "codesign" => {
+                return tokens[1..].iter().all(|a| {
+                    if let Some(rest) = a.strip_prefix("--") {
+                        return matches!(
+                            rest.split('=').next().unwrap_or(""),
+                            "verify" | "display" | "check-verify" | "verbose" | "strict"
+                                | "deep" | "all-architectures" | "xml"
+                        );
+                    }
+                    if !a.starts_with('-') {
+                        return true; // 目标文件操作数
+                    }
+                    a[1..].chars().all(|c| matches!(c, 'd' | 'v' | 'D' | 'V'))
+                });
+            }
+            // spctl --master-disable/--add/--remove/--reset 等改评估策略
+            "spctl" => {
+                return !tokens[1..].iter().any(|a| {
+                    a.strip_prefix("--").map_or(false, |r| {
+                        r.starts_with("master")
+                            || r.starts_with("add")
+                            || r.starts_with("remove")
+                            || r.starts_with("enable")
+                            || r.starts_with("disable")
+                            || r.starts_with("reset")
+                    })
+                });
+            }
+            // xattr -w 写、-d 删、-c 清扩展属性；-l/-p/-v/-x 读
+            "xattr" => {
+                return !tokens[1..].iter().any(|a| {
+                    a.strip_prefix('-').map_or(false, |rest| {
+                        !rest.is_empty()
+                            && rest.chars().any(|c| matches!(c, 'w' | 'd' | 'c'))
+                    })
+                });
+            }
+            // `local_shell` 显式 args 值可能是旗标的取值（crontab -u user 等）
             "apt" | "apt-get" => return Self::apt_is_readonly(tokens),
             "apt-cache" => return true,
             "brew" => {
@@ -424,7 +842,11 @@ impl AuditLedger {
                     ],
                 );
             }
-            "service" => return tokens.get(2).map_or(false, |a| *a == "status"),
+            // service x status 只读；--status-all 全旗标列举也只读
+            "service" => {
+                return tokens.get(2).map_or(false, |a| *a == "status")
+                    || tokens[1..].iter().all(|a| a.starts_with('-'));
+            }
             "docker" | "podman" => {
                 return Self::first_operand_in(
                     &tokens,
@@ -444,13 +866,9 @@ impl AuditLedger {
                 );
             }
             "hostnamectl" | "timedatectl" | "localectl" | "loginctl" | "resolvectl"
-            | "networkctl" | "bootctl" | "coredumpctl" => {
-                return tokens[1..]
-                    .iter()
-                    .find(|a| !a.starts_with('-'))
-                    .map_or(true, |op| {
-                        matches!(*op, "status" | "show" | "list" | "query" | "statistics" | "dump")
-                    });
+            | "networkctl" | "bootctl" | "coredumpctl" | "machinectl" | "userdbctl"
+            | "homectl" | "oomctl" => {
+                return Self::ctl_is_readonly(tokens);
             }
             // journalctl 无子命令（参数全是旗标/过滤表达式），变更靠特定长旗标
             "journalctl" => {
@@ -464,15 +882,11 @@ impl AuditLedger {
                 });
             }
             "ip" => return Self::ip_is_readonly(tokens),
-            "ifconfig" | "iwconfig" => {
-                return !tokens[1..].iter().any(|a| !a.starts_with('-'));
-            }
             "nc" | "ncat" | "netcat" => {
                 return tokens[1..].iter().any(|a| *a == "-z" || *a == "--zero");
             }
             "curl" => return Self::curl_is_readonly(tokens),
             "wget" => return Self::wget_is_readonly(tokens),
-            "mount" => return !tokens[1..].iter().any(|a| !a.starts_with('-')),
             "command" => return matches!(tokens.get(1), Some(&"-v") | Some(&"-V")),
             "env" => {
                 return tokens[1..]
@@ -480,7 +894,13 @@ impl AuditLedger {
                     .all(|a| a.starts_with('-') || a.contains('='));
             }
             "tar" => return Self::tar_is_readonly(tokens),
-            "unzip" => return tokens[1..].iter().any(|a| matches!(*a, "-l" | "-t" | "-Z")),
+            // unzip：-l/-t/-Z 列举测试、-p/-c 提取到 stdout（只读）；
+            // -o/-f/-n 等落地解包旗标不在列 → 变更
+            "unzip" => {
+                return tokens[1..]
+                    .iter()
+                    .any(|a| matches!(*a, "-l" | "-t" | "-Z" | "-p" | "-c"));
+            }
             _ => {}
         }
 
@@ -490,11 +910,11 @@ impl AuditLedger {
                 | "grep"
                 | "rg"
                 | "ripgrep"
-                | "find"
                 | "head"
                 | "tail"
                 | "wc"
                 | "echo"
+                | "printf"
                 | "pwd"
                 | "which"
                 | "whereis"
@@ -533,11 +953,9 @@ impl AuditLedger {
                 | "df"
                 | "du"
                 | "free"
-                | "hostname"
                 | "uptime"
                 | "id"
                 | "whoami"
-                | "date"
                 | "uname"
                 | "printenv"
                 | "nproc"
@@ -550,9 +968,62 @@ impl AuditLedger {
                 | "dig"
                 | "host"
                 | "nslookup"
+                | "whois"
+                // 硬件/内核/会话只读观测（双态工具在上方分派中带守卫）
+                | "blkid"
+                | "findmnt"
+                | "lsmod"
+                | "lsns"
+                | "lsipc"
+                | "lslocks"
+                | "lslogins"
+                | "lsmem"
+                | "lsscsi"
+                | "lsattr"
+                | "getfacl"
+                | "getent"
+                | "lsb_release"
+                | "dmidecode"
+                | "lshw"
+                | "sensors"
+                | "acpi"
+                | "upower"
+                | "pstree"
+                | "vmstat"
+                | "iostat"
+                | "mpstat"
+                | "pidstat"
+                | "top"
+                | "who"
+                | "w"
+                | "users"
+                | "last"
+                | "lastlog"
+                | "groups"
+                | "locale"
+                | "man"
+                | "whatis"
+                | "apropos"
+                | "info"
+                | "cal"
+                // macOS 纯读观测（launchctl/diskutil 等双态工具在上方分派中带守卫）
+                | "ioreg"
+                | "kextstat"
+                | "system_profiler"
+                | "mdls"
+                | "mdfind"
+                // 终端态观测/重置：不写文件不改系统持久态
+                | "tty"
+                | "stty"
+                | "tput"
+                | "clear"
+                | "reset"
+                | "atq"
+                | "mountpoint"
+                | "fc-list"
+                | "fc-match"
                 // 文本过滤器与杂项只读（重定向 > 已在上方排除）
                 | "jq"
-                | "sort"
                 | "uniq"
                 | "tr"
                 | "cut"
@@ -561,7 +1032,41 @@ impl AuditLedger {
                 | "column"
                 | "fold"
                 | "fmt"
-                | "tree"
+                | "pr"
+                | "rev"
+                | "tac"
+                | "nl"
+                | "tsort"
+                | "iconv"
+                | "expand"
+                | "unexpand"
+                | "numfmt"
+                | "seq"
+                | "factor"
+                | "bc"
+                | "dc"
+                | "expr"
+                | "base64"
+                | "basenc"
+                | "od"
+                | "hexdump"
+                | "nm"
+                | "objdump"
+                | "readelf"
+                | "strings"
+                | "size"
+                | "addr2line"
+                | "c++filt"
+                | "bat"
+                | "batcat"
+                | "less"
+                | "more"
+                | "most"
+                | "exa"
+                | "eza"
+                | "lsd"
+                | "dust"
+                | "duf"
                 | "zipinfo"
                 | "zcat"
                 | "zless"
@@ -571,6 +1076,25 @@ impl AuditLedger {
                 | "sleep"
                 | "true"
                 | "false"
+                // shell 内建：只改当前进程状态（cwd/环境/选项），不产生文件系统副作用
+                | "cd"
+                | "pushd"
+                | "popd"
+                | "dirs"
+                | "export"
+                | "readonly"
+                | "declare"
+                | "typeset"
+                | "local"
+                | "umask"
+                | "ulimit"
+                | "set"
+                | "shopt"
+                | "jobs"
+                | "hash"
+                | "history"
+                | "alias"
+                | "unalias"
         )
     }
 
@@ -580,6 +1104,193 @@ impl AuditLedger {
             .iter()
             .find(|a| !a.starts_with('-'))
             .map_or(false, |op| readonly_ops.contains(op))
+    }
+
+    /// git 只读判定：按子命令细分——纯读子命令白名单 + 双态子命令按操作数区分
+    /// "列举"与"增删改"（`git branch -d` 删分支、`git config k v` 写配置、
+    /// `git stash` 裸跑即 push 都是真实变更，不能因子命令名含列举形态就放走）。
+    fn git_is_readonly(args: &[&str]) -> bool {
+        // --output=<f> 让 diff/log/show 等把内容落盘——直接判变更
+        if args.iter().any(|a| a.starts_with("--output")) {
+            return false;
+        }
+        // 定位子命令：跳过全局选项；吃值的旗标消耗其后一个 token
+        const VALUE_FLAGS: &[&str] = &[
+            "-C", "-c", "--git-dir", "--work-tree", "--exec-path", "--namespace",
+        ];
+        let mut i = 0usize;
+        while i < args.len() {
+            let a = args[i];
+            if VALUE_FLAGS.contains(&a) {
+                i += 2;
+                continue;
+            }
+            if a.starts_with('-') {
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        let Some(&sub) = args.get(i) else {
+            return true; // 裸 `git` 仅打印帮助
+        };
+        let rest = &args[(i + 1).min(args.len())..];
+        let operands: Vec<&&str> = rest.iter().filter(|a| !a.starts_with('-')).collect();
+        let has_flag = |names: &[&str]| rest.iter().any(|a| names.contains(a));
+        match sub {
+            // 纯读子命令
+            "log" | "show" | "status" | "diff" | "rev-parse" | "describe" | "check-ignore"
+            | "blame" | "annotate" | "ls-files" | "ls-tree" | "ls-remote" | "rev-list"
+            | "shortlog" | "reflog" | "name-rev" | "show-branch" | "whatchanged"
+            | "count-objects" | "var" | "verify-commit" | "verify-tag" | "cat-file"
+            | "show-ref" | "for-each-ref" | "merge-base" | "grep" | "range-diff"
+            | "cherry" | "fsck" | "help" | "version" | "stripspace" | "check-attr"
+            | "check-mailmap" | "check-ref-format" | "interpret-trailers" | "mktag"
+            | "patch-id" | "show-index" | "verify-pack" | "diff-files" | "diff-index"
+            | "diff-tree" => true,
+            // branch/tag：列举形态只读；创建/删除/改名/设上游（含写旗标）即变更
+            "branch" => {
+                if has_flag(&[
+                    "-d", "-D", "-m", "-M", "-c", "-C", "-u", "--set-upstream-to",
+                    "--unset-upstream", "-f", "--force", "--edit-description", "--track",
+                ]) {
+                    return false;
+                }
+                // 带 -l/--list/--contains 等列举旗标时，操作数是过滤模式
+                if has_flag(&[
+                    "-l", "--list", "--show-current", "--contains", "--no-contains",
+                    "--merged", "--no-merged", "--points-at",
+                ]) {
+                    return true;
+                }
+                operands.is_empty()
+            }
+            "tag" => {
+                if has_flag(&[
+                    "-a", "-s", "-u", "-m", "-f", "-d", "-F", "-e", "--delete",
+                    "--annotate", "--sign", "--local-user", "--file", "--edit",
+                ]) {
+                    return false;
+                }
+                if has_flag(&[
+                    "-l", "--list", "--verify", "-v", "--contains", "--no-contains",
+                    "--merged", "--no-merged", "--points-at", "--sort", "--format",
+                ]) || rest.iter().any(|a| {
+                    a.starts_with('-') && !a.starts_with("--") && a[1..].starts_with('n')
+                }) {
+                    return true;
+                }
+                operands.is_empty()
+            }
+            // remote：裸跑/-v/列举型子命令只读；add/remove/set-url/prune/update 变更
+            "remote" => {
+                if operands.is_empty() {
+                    return true;
+                }
+                matches!(*operands[0], "get-url" | "show" | "ls-remote")
+            }
+            // config：单操作数 `git config key` 是取值（只读）；≥2 操作数或
+            // --add/--unset/-e 等写旗标即变更。--file/--blob/--default/--type
+            // 消耗其后的值，不算普通操作数
+            "config" => {
+                if has_flag(&[
+                    "--add", "--set", "--unset", "--unset-all", "--replace-all",
+                    "--rename-section", "--remove-section", "-e", "--edit",
+                ]) {
+                    return false;
+                }
+                if has_flag(&[
+                    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list",
+                    "-l", "--null", "-z", "--name-only", "--show-origin", "--show-scope",
+                    "--includes",
+                ]) {
+                    return true;
+                }
+                let mut operands = 0usize;
+                let mut j = 0usize;
+                while j < rest.len() {
+                    let a = rest[j];
+                    if matches!(a, "--file" | "--blob" | "--default" | "--type" | "-f") {
+                        j += 2;
+                        continue;
+                    }
+                    if !a.starts_with('-') {
+                        operands += 1;
+                    }
+                    j += 1;
+                }
+                operands <= 1
+            }
+            // stash：list/show 只读；裸 stash 即 push = 变更；pop/apply/drop 变更
+            "stash" => operands.first().map_or(false, |op| matches!(**op, "list" | "show")),
+            // submodule：status/summary 或裸跑只读；init/update/sync/foreach 变更
+            "submodule" => {
+                operands.first().map_or(true, |op| {
+                    matches!(**op, "status" | "summary")
+                })
+            }
+            // worktree：list 只读；add/remove/move/lock/prune 变更
+            "worktree" => operands.first().map_or(false, |op| **op == "list"),
+            // notes：list/show/get-ref 只读
+            "notes" => operands.first().map_or(false, |op| {
+                matches!(**op, "list" | "show" | "get-ref")
+            }),
+            // symbolic-ref：单操作数读引用；-d/--delete 或 ≥2 操作数写引用
+            "symbolic-ref" => {
+                !has_flag(&["-d", "--delete"]) && operands.len() <= 1
+            }
+            // hash-object：-w/--write 写对象库
+            "hash-object" => !has_flag(&["-w", "--write"]),
+            _ => false,
+        }
+    }
+
+    /// *ctl 工具只读判定：裸命令（hostnamectl/timedatectl 无参即打印状态）与
+    /// status/show/list-* /show-*/*status 族只读；set-*/lock-*/enable/disable 等
+    /// 变更子命令不在列 → 非只读。
+    fn ctl_is_readonly(tokens: &[&str]) -> bool {
+        let Some(op) = tokens[1..].iter().find(|a| !a.starts_with('-')) else {
+            return true;
+        };
+        matches!(
+            *op,
+            "status" | "show" | "list" | "query" | "statistics" | "dump" | "help"
+                | "hostname" | "info" | "describe"
+        ) || op.starts_with("list-")
+            || op.starts_with("show-")
+            || op.ends_with("-status")
+    }
+
+    /// ip/bridge 变更操作数集合判定（route/addr 对象名不在内）
+    fn is_netlink_mutating_operand(op: &str) -> bool {
+        matches!(
+            op,
+            "set" | "add" | "del" | "delete" | "replace" | "flush" | "change" | "save"
+                | "restore" | "enable" | "disable" | "up" | "down"
+        )
+    }
+
+    /// nmcli 只读判定：出现变更操作数即非只读；否则首操作数须为只读对象域
+    fn nmcli_is_readonly(tokens: &[&str]) -> bool {
+        let operands: Vec<&&str> = tokens[1..].iter().filter(|a| !a.starts_with('-')).collect();
+        if operands.iter().any(|a| {
+            matches!(
+                **a,
+                "up" | "down" | "add" | "delete" | "del" | "modify" | "edit" | "set"
+                    | "connect" | "disconnect" | "load" | "clone" | "import" | "on" | "off"
+                    | "enable" | "disable" | "reapply" | "reload" | "create" | "apply"
+            )
+        }) {
+            return false;
+        }
+        operands.first().map_or(true, |op| {
+            matches!(
+                **op,
+                "g" | "general" | "device" | "dev" | "d" | "connection" | "con" | "c"
+                    | "radio" | "r" | "networking" | "n" | "monitor" | "m" | "agent"
+                    | "show" | "status" | "help"
+            )
+        })
     }
 
     /// pacman 只读判定：操作位（首个旗标首字符或 --xxx 长旗标）为 -Q/--query/-T/--deptest 才算查询态。
@@ -610,14 +1321,14 @@ impl AuditLedger {
                     name,
                     "list" | "status" | "listfiles" | "print-avail" | "print-architecture"
                         | "print-foreign-architectures" | "query" | "audit" | "compare-versions"
-                        | "verify" | "get-selections" | "yet-to-unpack"
+                        | "verify" | "get-selections" | "yet-to-unpack" | "show" | "search"
                 );
             }
             if let Some(rest) = arg.strip_prefix('-') {
                 if !rest.is_empty() {
                     return matches!(
                         rest.chars().next().unwrap(),
-                        'l' | 's' | 'L' | 'p' | 'V' | 'C'
+                        'l' | 's' | 'S' | 'L' | 'p' | 'V' | 'C' | 'W'
                     );
                 }
                 continue;
@@ -791,16 +1502,61 @@ impl AuditLedger {
     }
 
     /// 写入重定向检测：任一 `>` 且其后不是 `&<数字>`/`&-` 的 fd 复制形式。
-    /// `&>`/`&>>` 中的 `>` 同样命中（写盘）；`2>&1`、`>&-` 不命中（fd 操作）。
+    /// `&>`/`&>>` 中的 `>` 同样命中（写盘）；`2>&1`、`>&-` 不命中（fd 操作）；
+    /// `\>` 是转义字面量（`test a \> b` 的比较语法）不命中——奇数连续反斜杠
+    /// 才转义，偶数（`\\>`）末尾的 `>` 仍是重定向。
     fn has_write_redirect(blanked: &str) -> bool {
         let b = blanked.as_bytes();
         for i in 0..b.len() {
             if b[i] == b'>' {
+                let mut backslashes = 0usize;
+                let mut j = i;
+                while j > 0 && b[j - 1] == b'\\' {
+                    backslashes += 1;
+                    j -= 1;
+                }
+                if backslashes % 2 == 1 {
+                    continue; // 转义的 \> 是字面量
+                }
                 let fd_dup = b.get(i + 1) == Some(&b'&')
                     && b.get(i + 2)
                         .map_or(false, |c| c.is_ascii_digit() || *c == b'-');
                 if !fd_dup {
-                    return true;
+                    // 目标是哑设备则非真实写入：>/dev/null、2>/dev/null、
+                    // >/dev/stdout|stderr|tty|pts/*|fd/* 都不产生持久文件。
+                    // 注意 /dev/sda 这类真设备不在豁免列——仍是写入。
+                    let mut j = i + 1;
+                    while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+                        j += 1;
+                    }
+                    const NOOP_TARGETS: &[&str] = &[
+                        "/dev/null",
+                        "/dev/stdout",
+                        "/dev/stderr",
+                        "/dev/tty",
+                        "/dev/pts/",
+                        "/dev/fd/",
+                    ];
+                    let rest = &blanked[j..];
+                    let is_noop = NOOP_TARGETS.iter().any(|t| {
+                        if !rest.starts_with(t) {
+                            return false;
+                        }
+                        // 以 / 结尾的是目录前缀（/dev/fd/1、/dev/pts/0），
+                        // 后续字符就是名字本体，无需边界检查
+                        if t.ends_with('/') {
+                            return true;
+                        }
+                        rest[t.len()..]
+                            .chars()
+                            .next()
+                            .map_or(true, |c| {
+                                !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+                            })
+                    });
+                    if !is_noop {
+                        return true;
+                    }
                 }
             }
         }

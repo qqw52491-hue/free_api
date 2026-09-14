@@ -150,6 +150,11 @@ pub fn is_state_probe_command(cmd: &str) -> bool {
         "systemctl is-enabled",
         "systemctl is-failed",
         "systemctl show",
+        "systemctl cat",
+        "systemctl list-unit",
+        "systemctl is-system-running",
+        // journalctl 恒 exit 0（弱断言），但 -u <unit> 的对象 token 绑定仍保证
+        // "查的是本次改动对象的服务日志"——保留探针位，语义充分性交终审
         "journalctl",
         "pgrep",
         "pidof",
@@ -157,12 +162,12 @@ pub fn is_state_probe_command(cmd: &str) -> bool {
         // 网络/HTTP 断言（-f/-w/-o 断言形态；裸 curl 不收录——它只证明发出了请求）
         "curl -f",
         "curl --fail",
-        "curl -o /dev/null",
         "-w '%{http_code}",
         "-w \"%{http_code}",
         "curl -i ",
         "curl -I ",
         "curl --head",
+        // `curl -o /dev/null` 不收录：无 -f/-w 时 404 也 exit 0，不构成断言
         "wget --spider",
         "nc -z",
         "ping -c",
@@ -177,9 +182,77 @@ pub fn is_state_probe_command(cmd: &str) -> bool {
         "jq --exit-status",
         // 容器/编排/系统资源存在性断言
         "docker inspect",
+        "docker image inspect",
+        "podman inspect",
         "kubectl get",
+        "kubectl describe",
+        "helm status",
+        "virsh domstate",
         "hostnamectl",
         "timedatectl",
+        // 挂载/对象存在性断言（exit≠0 当对象缺失——ss/netstat/lsblk/lspci 这类
+        // "恒 0 输出型"不收录：它们的退出码不构成断言）
+        "findmnt",
+        "mountpoint",
+        "lsof -i",
+        "getent ",
+        // 其余发行版/语言包管理断言
+        "dpkg -w",
+        "dnf list",
+        "yum list",
+        // `zypper se` 不收录：搜不到也 exit 0（真空断言）；`zypper info` 缺失包
+        // 返回 ZYPPER_EXIT_INF_CAP_NOT_FOUND 构成断言
+        "zypper info",
+        "apk info",
+        "pip show",
+        "pipx list",
+        "npm ls",
+        "npm view",
+        "pkg-config --exists",
+        "pkg-config --modversion",
+        "pkg-config --atleast-version",
+        // macOS 断言
+        "launchctl list",
+        "launchctl print",
+        "defaults read",
+        "defaults find",
+        "codesign -v",
+        "codesign --verify",
+        "codesign -d",
+        "spctl -a",
+        "spctl --assess",
+        "nmcli dev",
+        "nmcli con show",
+        "ip link",
+        "ip addr",
+        "ip route",
+        // 语法/配置校验断言（退出码即"文件可解析"判据）
+        "nginx -t",
+        "apachectl -t",
+        "httpd -t",
+        "sshd -t",
+        "visudo -c",
+        "bash -n",
+        "sh -n",
+        "zsh -n",
+        "php -l",
+        "ruby -c",
+        "node --check",
+        "python -m py_compile",
+        "python3 -m py_compile",
+        "perl -c",
+        "xmllint",
+        "jq empty",
+        "python -m json.tool",
+        "python3 -m json.tool",
+        "systemd-analyze verify",
+        // 校验和/签名断言
+        "sha256sum -c",
+        "sha1sum -c",
+        "md5sum -c",
+        "sha512sum -c",
+        "b2sum -c",
+        "gpg --verify",
     ];
     if PROBE_PATTERNS.iter().any(|p| lower.contains(p)) {
         return true;
@@ -215,6 +288,23 @@ fn cmd_meaningful_tokens(cmd_lower: &str) -> Vec<String> {
         "is-active", "is-enabled", "is-failed",
         "http", "https", "localhost", "dev", "null", "json", "text", "html",
         "true", "false", "error", "warn", "debug", "output",
+        // 文件系统结构段：`test -e /opt/x` 的 "opt" 子串命中 "options" 属假绑定——
+        // 对象身份由文件名 token 承载，目录骨架词一律噪声化
+        "opt", "usr", "bin", "sbin", "etc", "var", "tmp", "home", "lib", "lib64",
+        "libexec", "share", "local", "root", "mnt", "media", "srv", "proc",
+        "sys", "run", "boot", "applications", "users", "volumes", "private",
+        "windows", "program", "files", "system32", "desktop", "documents",
+        "downloads",
+        // 扩展名段：`.conf`/`.service` 的类型词不携带对象身份（"conf" ⊆ "config"
+        // 会把 `/etc/random.conf` 绑到任意提及 config 的挂账写入）
+        "conf", "cfg", "ini", "log", "txt", "xml", "yaml", "yml", "toml",
+        "htm", "md", "rst", "csv", "tsv", "bash", "rb", "pl", "jsx", "tsx",
+        "java", "hpp", "cs", "exe", "dll", "dylib", "jar", "war", "bz2",
+        "xz", "7z", "rar", "deb", "rpm", "apk", "dmg", "iso", "img", "plist",
+        "service", "socket", "timer", "target", "mount", "automount", "slice",
+        "scope", "app", "bak",
+        // 代码/归档扩展名同样只标类型不标对象
+        "py", "js", "ts", "rs", "cc", "hh", "zip", "gz", "so",
     ];
     let mut out = Vec::new();
     for (idx, raw_tok) in cmd_lower.split_whitespace().enumerate() {
@@ -279,13 +369,115 @@ pub fn is_absence_probe_command(cmd: &str) -> bool {
         "pidof",
         "ps -p",
         "docker inspect",
+        "docker image inspect",
+        "podman inspect",
         "kubectl get",
         "nc -z",
         "ping -c",
         "curl -f",
         "curl --fail",
+        // 与探针清单同步扩展的包/资源断言（非零退出语义有效）
+        "dpkg -w",
+        "dnf list",
+        "yum list",
+        // `zypper se` 不收录：搜不到也 exit 0（真空断言）；`zypper info` 缺失包
+        // 返回 ZYPPER_EXIT_INF_CAP_NOT_FOUND 构成断言
+        "zypper info",
+        "apk info",
+        "pip show",
+        "pipx list",
+        "npm ls",
+        "npm list",
+        "launchctl print",
+        "launchctl list",
+        "defaults read",
+        "findmnt",
+        "mountpoint",
+        "getent ",
+        "nmcli dev",
+        "virsh domstate",
+        "helm status",
+        "pkg-config --exists",
+        "fc-match",
+        "ip link",
+        "ip addr",
+        "codesign -v",
+        "codesign --verify",
+        "gpg --verify",
+        "spctl -a",
+        "spctl --assess",
+        "nginx -t",
+        "apachectl -t",
+        "sshd -t",
+        "visudo -c",
+        "bash -n",
+        "sh -n",
+        "php -l",
+        "ruby -c",
+        "node --check",
+        "python -m py_compile",
+        "python3 -m py_compile",
+        "perl -c",
+        "sha256sum -c",
+        "sha1sum -c",
+        "md5sum -c",
+        "sha512sum -c",
+        "b2sum -c",
     ];
     ABSENCE_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+/// 自动验证决策（纯函数，可单测）：把"这条命令的执行结果是否构成验证"的判定
+/// 从 emit/feedback 副作用中抽出，宿主只负责执行决策对应的效果。
+#[derive(Debug, PartialEq, Eq)]
+pub enum AutoVerifyDecision {
+    /// 证据与待验证写入批次成立 → 自动闭合 verified
+    AutoVerify,
+    /// 绑定的存在性探针返回非零——方向取决于任务意图，发举证指引
+    AbsenceProbeGuidance,
+    /// 不构成验证（或探针与写入无物理绑定）→ 无动作
+    /// （命名 Skip 而非 None：避免与 Option::None 在 glob import 下冲突）
+    Skip,
+}
+
+pub fn decide_auto_verify(
+    cmd: &str,
+    command_succeeded: bool,
+    pending_refs: &[String],
+    contract_verify_commands: &[&str],
+    inferred_cmd: Option<&str>,
+) -> AutoVerifyDecision {
+    let is_test_cmd = is_test_or_verification_command(cmd);
+    let is_probe_cmd = is_state_probe_command(cmd);
+    let is_inferred_cmd = inferred_cmd.map_or(false, |ic| {
+        let lower_cmd = cmd.trim().to_lowercase();
+        let lower_ic = ic.trim().to_lowercase();
+        !lower_ic.is_empty() && (lower_cmd.contains(&lower_ic) || lower_ic.contains(&lower_cmd))
+    });
+    let matches_contract = contract_verify_commands
+        .iter()
+        .any(|vc| vc.trim() == cmd.trim());
+    let probe_bound = probe_binds_to_pending_writes(cmd, pending_refs);
+
+    if command_succeeded {
+        // 成功路径：生态测试命令、契约声明或宿主推断的验证命令无条件认账；
+        // 通用状态探针需与待验证写入物理绑定——"发生了一次断言"不等于
+        // "断言的是这次变更"。
+        if is_test_cmd
+            || (is_probe_cmd && probe_bound)
+            || matches_contract
+            || is_inferred_cmd
+        {
+            return AutoVerifyDecision::AutoVerify;
+        }
+        return AutoVerifyDecision::Skip;
+    }
+    // 失败路径不自动闭合：非零退出是否达标取决于任务意图（卸载 vs 安装方向
+    // 相反），宿主不猜。仅对绑定的存在性探针发举证指引。
+    if probe_bound && is_absence_probe_command(cmd) {
+        return AutoVerifyDecision::AbsenceProbeGuidance;
+    }
+    AutoVerifyDecision::Skip
 }
 
 /// 判断给定的 shell 命令是否包含明确的自动化测试、类型检查或构建验证特征
@@ -553,7 +745,21 @@ pub fn extract_command_from_params(params: &serde_json::Value) -> Option<String>
             {
                 if let Some(s) = v.as_str() {
                     if !s.trim().is_empty() {
-                        return Some(s.trim().to_string());
+                        // command 与 args 分离的形态（{"command":"git","args":[...]}）
+                        // 拼回完整命令行——契约 verify_command 精确匹配、探针识别
+                        // 都依赖完整形态
+                        let mut full = s.trim().to_string();
+                        if let Some(args) = map
+                            .get("args")
+                            .or_else(|| map.get("arguments"))
+                            .and_then(|a| a.as_array())
+                        {
+                            for arg in args.iter().filter_map(|v| v.as_str()) {
+                                full.push(' ');
+                                full.push_str(arg);
+                            }
+                        }
+                        return Some(full);
                     }
                 }
             }

@@ -2931,26 +2931,6 @@ fn try_auto_verify_change(
         return;
     };
 
-    let is_test_cmd = crate::agent::change_verification::is_test_or_verification_command(&cmd);
-    // 通用状态探针（which/test -e/pacman -Q/systemctl/curl -f/grep -q 等）：
-    // 非编码任务的天然验证手段——命令本身即一次客观状态断言
-    let is_probe_cmd = crate::agent::change_verification::is_state_probe_command(&cmd);
-    let is_inferred_cmd = context
-        .inferred_verification_command()
-        .as_deref()
-        .map_or(false, |ic| {
-            let lower_cmd = cmd.trim().to_lowercase();
-            let lower_ic = ic.trim().to_lowercase();
-            lower_cmd.contains(&lower_ic) || lower_ic.contains(&lower_cmd)
-        });
-    let matches_contract_verify = context.review_contract.as_ref().map_or(false, |rc| {
-        rc.obligations.iter().any(|o| {
-            o.verify_command
-                .as_deref()
-                .map_or(false, |vc| vc.trim() == cmd.trim())
-        })
-    });
-
     // 探针-写入物理绑定：探针命令必须引用待验证副作用记录中的具体对象
     // （路径/名称 token），否则 `which python` 这类无关探针不能替代码写入结账。
     let pending_refs: Vec<String> = context.side_effects[context.inherited_side_effects_count..]
@@ -2959,45 +2939,56 @@ fn try_auto_verify_change(
             std::iter::once(r.description.clone()).chain(r.affected_paths.iter().cloned())
         })
         .collect();
-    let probe_bound =
-        crate::agent::change_verification::probe_binds_to_pending_writes(&cmd, &pending_refs);
+    let contract_verify_commands: Vec<&str> = context
+        .review_contract
+        .as_ref()
+        .map(|rc| {
+            rc.obligations
+                .iter()
+                .filter_map(|o| o.verify_command.as_deref())
+                .collect()
+        })
+        .unwrap_or_default();
+    let decision = crate::agent::change_verification::decide_auto_verify(
+        &cmd,
+        command_succeeded,
+        &pending_refs,
+        &contract_verify_commands,
+        context.inferred_verification_command().as_deref(),
+    );
 
-    let qualifies = if command_succeeded {
-        // 成功路径：生态测试命令、契约声明或宿主推断的验证命令无条件认账；
-        // 通用状态探针需与待验证写入物理绑定——"发生了一次断言"不等于
-        // "断言的是这次变更"。
-        is_test_cmd || (is_probe_cmd && probe_bound) || matches_contract_verify || is_inferred_cmd
-    } else {
-        // 失败路径不自动闭合：非零退出是否达标取决于任务意图
-        // （卸载 vs 安装方向相反），宿主不猜。对绑定的存在性探针发举证指引，
-        // 让模型显式声明"该状态即目标"，终审可凭 step_N 核验。
-        if probe_bound
-            && crate::agent::change_verification::is_absence_probe_command(&cmd)
-        {
-            let snippet: String = if cmd.chars().count() > 60 {
-                format!("{}...", cmd.chars().take(60).collect::<String>())
-            } else {
-                cmd.clone()
-            };
-            context.add_error_feedback(&format!(
-                "存在性探针 `{}` 返回非零退出（step_{}）。若该状态正是目标\
-                （卸载/禁用/删除类任务），请调用 change_verification_update\
-                （status=verified, evidence_refs=[\"step_{}\"]）显式举证闭合验证；\
-                若目标相反（安装/启用/部署），请修复后重试。",
-                snippet, step_id, step_id
-            ));
-            let _ = app.emit(
-                &format!("agent-log-{}", session_id),
-                format!(
-                    "🧪 存在性断言 `{}` 返回非零退出（step_{}）——是否达标取决于任务意图，已提示显式举证",
-                    snippet, step_id
-                ),
-            );
-        }
-        false
-    };
+    // 失败路径不自动闭合：非零退出是否达标取决于任务意图
+    // （卸载 vs 安装方向相反），宿主不猜。对绑定的存在性探针发举证指引，
+    // 让模型显式声明"该状态即目标"，终审可凭 step_N 核验。
+    if matches!(
+        decision,
+        crate::agent::change_verification::AutoVerifyDecision::AbsenceProbeGuidance
+    ) {
+        let snippet: String = if cmd.chars().count() > 60 {
+            format!("{}...", cmd.chars().take(60).collect::<String>())
+        } else {
+            cmd.clone()
+        };
+        context.add_error_feedback(&format!(
+            "存在性探针 `{}` 返回非零退出（step_{}）。若该状态正是目标\
+            （卸载/禁用/删除类任务），请调用 change_verification_update\
+            （status=verified, evidence_refs=[\"step_{}\"]）显式举证闭合验证；\
+            若目标相反（安装/启用/部署），请修复后重试。",
+            snippet, step_id, step_id
+        ));
+        let _ = app.emit(
+            &format!("agent-log-{}", session_id),
+            format!(
+                "🧪 存在性断言 `{}` 返回非零退出（step_{}）——是否达标取决于任务意图，已提示显式举证",
+                snippet, step_id
+            ),
+        );
+    }
 
-    if qualifies {
+    if matches!(
+        decision,
+        crate::agent::change_verification::AutoVerifyDecision::AutoVerify
+    ) {
         let snippet = if cmd.chars().count() > 60 {
             format!("{}...", cmd.chars().take(60).collect::<String>())
         } else {

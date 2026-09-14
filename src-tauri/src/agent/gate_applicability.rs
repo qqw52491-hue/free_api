@@ -80,6 +80,21 @@ pub fn is_workspace_target(target: &str, workspace: &Path) -> bool {
     };
     let path = Path::new(&expanded);
     if path.is_relative() {
+        // `..` 逃逸检查：`../../etc/passwd` 是相对路径但解析到工作区外——
+        // 错判为"区内"会让 diff 对账门对区外目标强索 diff 覆盖（假拦截）
+        let mut depth = 0isize;
+        for comp in path.components() {
+            match comp {
+                std::path::Component::ParentDir => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return false;
+                    }
+                }
+                std::path::Component::CurDir => {}
+                _ => depth += 1,
+            }
+        }
         return true;
     }
     path.starts_with(workspace)
@@ -107,6 +122,13 @@ mod tests {
         assert!(!is_workspace_target("", ws));
         // HOME 与 workspace 无关时，~/ 一律外部
         assert!(!is_workspace_target("~/.config/app.conf", ws));
+        // `..` 逃逸：相对形态但解析到区外
+        assert!(!is_workspace_target("../../etc/passwd", ws));
+        assert!(!is_workspace_target("../outside/x.rs", ws));
+        assert!(!is_workspace_target("a/../../x", ws));
+        // 内部折返仍是区内（a/../b 解析回工作区）
+        assert!(is_workspace_target("a/../b.rs", ws));
+        assert!(is_workspace_target("./a/./b.rs", ws));
     }
 
     #[test]

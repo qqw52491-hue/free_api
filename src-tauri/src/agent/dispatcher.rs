@@ -367,7 +367,8 @@ pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
     }
 
     // 分类前统一剥离命名空间（remote-hub/read_file -> read_file）
-    let raw_tool = inst.get_tool().to_ascii_lowercase();
+    let orig_tool = inst.get_tool();
+    let raw_tool = orig_tool.to_ascii_lowercase();
     let tool = raw_tool.rsplit('/').next().unwrap_or(&raw_tool);
     let mut action = inst.get_action().to_ascii_lowercase();
     if action == tool || action.is_empty() {
@@ -410,17 +411,30 @@ pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
         return true;
     }
 
-    // 2. Shell / 终端执行类工具（shell_exec, run_command, bash, exec, cmd 等）：
-    // 🌟 不再做脆弱繁琐的命令白名单猜测；仅拦截明确的重定向写盘(>)、文本就地替换(sed -i)、文件删除(rm)等破坏性动作。
-    // 其他所有探针（如 curl 查网络/天气、date、ls、cat、grep、测试与构建命令等）全部放行！
-    let is_shell_tool = tool.contains("shell")
+    // 2. Shell / 终端执行类工具分两层：
+    //    强壳标记（shell/bash/terminal/powershell/cmd/command 出现在名字里）——
+    //        参数语言就是 shell，走命令级分析；
+    //    弱执行标记（exec/run/eval）——参数语言可能是 SQL/JS/任何 DSL
+    //        （exec_sql 里 "DELETE FROM" 过不了 shell 破坏性检查会被放行 = 漏记），
+    //        命名空间工具上不信任弱标记，落到 2.5 的只读动词 fail-closed 判定。
+    let strong_shell_marker = tool.contains("shell")
         || tool.contains("bash")
-        || tool.contains("exec")
         || tool.contains("terminal")
-        || tool.contains("command")
+        || tool.contains("powershell")
+        || tool.contains("cmd")
+        || tool.contains("command");
+    let weak_exec_marker = tool.contains("exec")
         || tool.contains("run")
+        || tool.contains("eval")
         || action.starts_with("exec")
         || action.starts_with("run");
+
+    let is_shell_tool = if raw_tool.contains('/') {
+        // 命名空间工具只信强壳标记
+        strong_shell_marker
+    } else {
+        strong_shell_marker || weak_exec_marker
+    };
 
     if is_shell_tool {
         if let Some(cmd_str) = extract_shell_command_string(inst) {
@@ -428,6 +442,15 @@ pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
         }
         // 如果未指定具体命令行（纯工具名嗅探），保守按写操作处理，保持向后兼容
         return true;
+    }
+
+    // 2.5 MCP 命名空间工具（plugin/tool）：写动词词表不可枚举——审计台账同款
+    // fail-closed：只读动词前缀外的形态一律按写/副作用处理，否则 format_range、
+    // rename_sheet、exec_sql(非 shell 语言) 这类 MCP 变更会绕过分阶段审查与验证绑定。
+    // （须在强壳检测之后：remote-hub/shell_exec 这类壳工具走命令级分析）
+    if raw_tool.contains('/') {
+        let orig_name = orig_tool.rsplit('/').next().unwrap_or(&orig_tool);
+        return !crate::agent::context::AuditLedger::mcp_tool_is_readonly_verb(orig_name);
     }
 
     // 3. task_store 的变更型动作（不带 create/update 前缀时由 action.contains 兜底识别）

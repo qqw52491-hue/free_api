@@ -67,6 +67,9 @@ pub use loop_runner::*;
 pub use main_loop::*;
 
 #[cfg(test)]
+mod gate_matrix_tests;
+
+#[cfg(test)]
 mod finish_instruction_tests {
     use super::*;
     use crate::agent::mcp::PluginRegistry;
