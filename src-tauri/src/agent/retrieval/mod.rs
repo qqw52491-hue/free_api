@@ -41,26 +41,33 @@ fn canonical_search_fingerprint(params_value: &Value) -> Option<String> {
     serde_json::to_string(&parsed).ok()
 }
 
-/// 会话内检索去重：同参会话中，与此前某次**成功** search 参数完全一致、且其后未发生
-/// 文件修改（edit/write）时，直接复用上一次的结果——物理短路，不依赖模型自觉。
-/// （缓存只读自 trace 快照，若该步尚未落盘则自然 miss，属尽力而为。）
-///
-/// 回执只投「锚点 + output_id 句柄」、绝不二次灌全量 hits：全量回放在历史上等于把
-/// 物理去重省下的 IO 原样烧回 Token；句柄指向 agent_step_logs 的持久化原文，
-/// compaction 脱水后仍可经 task_store.get_step_output / search_step_output 取回。
-fn lookup_cached_search(db: &DbState, session_id: &str, fp: &str) -> Option<DispatchResult> {
+/// 载入本会话最新 run trace 的 steps_json；无快照或解析失败返回空 Vec。
+/// 精确指纹去重与同路径检索计数共用同一份快照，避免一次检索两次反序列化。
+fn load_latest_run_steps(conn: &rusqlite::Connection, session_id: &str) -> Vec<Value> {
+    conn.query_row(
+        "SELECT steps_json FROM agent_run_traces WHERE session_id=?1 ORDER BY id DESC LIMIT 1",
+        params![session_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Vec<Value>>(&raw).ok())
+    .unwrap_or_default()
+}
+
+/// 检索路径归一化：去首尾空白与末尾斜杠，使 "./src" 与 "src/" 计数同口径。
+fn normalize_search_path(path: &str) -> String {
+    path.trim().trim_end_matches('/').to_string()
+}
+
+/// 在 steps 快照中定位最近一次同参成功检索（期间有 edit/write 则缓存失效）。
+/// 返回 (step_id, 原输出文本, output_id)。
+fn find_cached_search(
+    steps: &[Value],
+    fp: &str,
+) -> Option<(i64, String, Option<String>)> {
     const INVALIDATING_ACTIONS: &[&str] = &["edit", "write"];
-    let conn = db.reader().ok()?;
-    let steps_json: String = conn
-        .query_row(
-            "SELECT steps_json FROM agent_run_traces WHERE session_id=?1 ORDER BY id DESC LIMIT 1",
-            params![session_id],
-            |r| r.get(0),
-        )
-        .ok()?;
-    let steps: Vec<Value> = serde_json::from_str(&steps_json).ok()?;
     let mut cached: Option<(i64, String, Option<String>)> = None;
-    for s in &steps {
+    for s in steps {
         match s.get("action").and_then(Value::as_str) {
             Some("search") => {
                 if s.get("status").and_then(Value::as_str) != Some("succeeded") {
@@ -97,8 +104,20 @@ fn lookup_cached_search(db: &DbState, session_id: &str, fp: &str) -> Option<Disp
             }
         }
     }
-    let (step_id, output, mut output_id) = cached?;
+    cached
+}
 
+/// 同参命中后的去重回执：只投「锚点 + output_id 句柄」，绝不二次灌全量
+/// hits——全量回放在历史上等于把物理去重省下的 IO 原样烧回 Token；
+/// 句柄指向 agent_step_logs 持久化原文，compaction 脱水后仍可经
+/// task_store.get_step_output / search_step_output 取回。
+fn cached_search_dispatch_result(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    step_id: i64,
+    output: String,
+    mut output_id: Option<String>,
+) -> DispatchResult {
     // 补 output_id 字段前的旧快照回退：按会话+步号从 agent_step_logs 取句柄
     if output_id.is_none() {
         output_id = conn
@@ -146,12 +165,35 @@ fn lookup_cached_search(db: &DbState, session_id: &str, fp: &str) -> Option<Disp
         ),
     }
 
-    Some(DispatchResult {
+    DispatchResult {
         stdout: anchor,
         stderr: String::new(),
         success: true,
         route: "retrieval-cache".to_string(),
-    })
+    }
+}
+
+/// 统计本会话此前在同一路径下已完成的成功检索次数（不限 query）。
+/// 精确指纹去重只拦"完全同参复读"；"换词重搜同一目录"（实测同一路径
+/// 反复检索数十次）参数不同会绕过——供放行后注入软引导 signpost。
+/// 入参与快照路径双边归一化，调用方无需自行 trim。
+fn count_prior_same_path_searches(steps: &[Value], path: &str) -> usize {
+    let normalized_path = normalize_search_path(path);
+    if normalized_path.is_empty() {
+        return 0;
+    }
+    steps
+        .iter()
+        .filter(|s| {
+            s.get("action").and_then(Value::as_str) == Some("search")
+                && s.get("status").and_then(Value::as_str) == Some("succeeded")
+                && s.get("params")
+                    .and_then(|p| p.get("path"))
+                    .and_then(Value::as_str)
+                    .map(|p| normalize_search_path(p) == normalized_path)
+                    .unwrap_or(false)
+        })
+        .count()
 }
 
 /// 统一联邦检索调度入口
@@ -211,12 +253,24 @@ pub fn dispatch_search(
     let wants_history = kinds.iter().any(|k| k == "history" || k == "all");
     let wants_code = kinds.iter().any(|k| k == "code" || k == "all");
 
-    // 会话内去重：同参成功检索直接复用（edit/write 会使其失效，见 lookup_cached_search）
-    if let Some(fp) = canonical_search_fingerprint(params_value) {
-        if let Some(cached) = lookup_cached_search(db, session_id, &fp) {
-            return cached;
+    // 会话内去重：同参成功检索直接复用（edit/write 会使其失效，见 find_cached_search）。
+    // steps 快照只载入一次：精确指纹去重与同路径检索计数复用同一份数据。
+    // conn 作用域必须收窄到此块内：reader() 在连接池缺省时降级为 db.0 同一把
+    // 互斥锁，跨块存活会让下方 history 分支的 db.0.lock() 自锁死。
+    let prior_steps = {
+        let conn = db.reader().ok();
+        let steps = conn
+            .as_ref()
+            .map(|c| load_latest_run_steps(c, session_id))
+            .unwrap_or_default();
+        if let (Some(conn), Some(fp)) = (conn.as_ref(), canonical_search_fingerprint(params_value))
+        {
+            if let Some((step_id, output, out_id)) = find_cached_search(&steps, &fp) {
+                return cached_search_dispatch_result(conn, session_id, step_id, output, out_id);
+            }
         }
-    }
+        steps
+    };
 
     let mut history_ok = !wants_history;
     if wants_history {
@@ -310,6 +364,24 @@ pub fn dispatch_search(
         }
     }
 
+    // 同路径重搜 signpost：同参指纹只拦完全复读；"换词重搜同一目录"参数不同
+    // 会绕过（实测同一路径反复检索数十次）——放行后统计同路径历史检索次数，
+    // ≥2 次即注入软引导，把模型推向定向读取/工件内检索而非继续盲搜。
+    if let Some(path) = params
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        let prior = count_prior_same_path_searches(&prior_steps, path);
+        if prior >= 2 {
+            notes.push(format!(
+                "检索 signpost：路径「{}」本会话此前已成功检索 {} 次（含不同关键词），换词重搜同一路径收益递减——建议改用 local_file 定向读取已命中文件，或用 task_store.search_step_output 在既有输出的 output_id 上做工件内检索。",
+                path, prior
+            ));
+        }
+    }
+
     let success = history_ok && code_ok;
 
     let mut result_payload = json!({
@@ -345,6 +417,23 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn test_count_prior_same_path_searches_normalizes_and_filters() {
+        let steps = vec![
+            json!({"id": 1, "action": "search", "status": "succeeded", "params": {"path": "src/context", "query": "a"}}),
+            json!({"id": 2, "action": "search", "status": "succeeded", "params": {"path": "src/context/", "query": "b"}}),
+            json!({"id": 3, "action": "search", "status": "failed", "params": {"path": "src/context", "query": "c"}}),
+            json!({"id": 4, "action": "search", "status": "succeeded", "params": {"path": "src/other", "query": "a"}}),
+            json!({"id": 5, "action": "read", "status": "succeeded", "params": {"path": "src/context"}}),
+            json!({"id": 6, "action": "search", "status": "succeeded", "params": {"kinds": ["history"], "query": "x"}}),
+        ];
+        // 末尾斜杠归一化、failed 与非 search 步骤不计、无 path 的历史检索不计
+        assert_eq!(count_prior_same_path_searches(&steps, "src/context"), 2);
+        assert_eq!(count_prior_same_path_searches(&steps, "src/context/"), 2);
+        assert_eq!(count_prior_same_path_searches(&steps, "src/other"), 1);
+        assert_eq!(count_prior_same_path_searches(&steps, ""), 0);
+    }
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

@@ -295,10 +295,17 @@ fn execute_read(
         resolved.display_path, total_lines, start_line, slice_end
     );
 
-    // 导航提示：窗口式读取时提示"可整读"，引导模型一次性建立文件全貌而非碎片化重读
-    if (start_line > 1 || slice_end < total_lines) && total_lines <= 1200 {
+    // 导航提示：窗口式读取时提示"可整读"，引导模型一次性建立文件全貌而非碎片化重读。
+    // 阈值与 SINGLE_OBSERVATION_INGRESS_CAP(4k tokens) 对齐：含行号前缀后
+    // ~300 行是整读无损上限；301~1200 行整读会触发头尾采样（中部经句柄回查）。
+    if (start_line > 1 || slice_end < total_lines) && total_lines <= 300 {
         output.push_str(&format!(
             "\n💡 该文件共 {} 行，未指定行号区间即可一次读取全文，避免碎片化重读。\n",
+            total_lines
+        ));
+    } else if (start_line > 1 || slice_end < total_lines) && total_lines <= 1200 {
+        output.push_str(&format!(
+            "\n💡 该文件共 {} 行：整读会按入口预算截为头尾摘要+output_id 句柄（中部不在上下文内），如需中部内容请按行号窗口定向读取。\n",
             total_lines
         ));
     }

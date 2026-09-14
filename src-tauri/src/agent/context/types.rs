@@ -23,6 +23,10 @@ pub struct ReadLedgerEntry {
     pub count: u32,
     pub sample: String,
     pub line_count: usize,
+    /// 最近一次成功读取的持久化句柄：拦截回执据此指向 output_id，
+    /// 使模型在压缩/脱水后仍能通过 task_store 定向回查而非原样重读。
+    #[serde(default)]
+    pub last_output_id: Option<String>,
 }
 
 /// 方案门禁状态投影：由 checkpoint 每轮规划前生成，注入底部状态卡，
@@ -289,8 +293,13 @@ pub struct SandwichContext {
     pub consecutive_failures: u32,
     /// 重复读取台账：key = "工具|路径"，记录内容哈希/次数/内容摘要。
     /// 上下文压缩发生时清零（压缩后模型遗忘旧内容，重读重新合法）。
+    /// 注意：低水位批量脱水不清台账——句柄仍可回查，重读依旧非法。
     #[serde(default)]
     pub read_ledger: std::collections::BTreeMap<String, ReadLedgerEntry>,
+    /// 低水位批量脱水的滞后重扫阈值（历史估算 tokens）：上次扫描无可脱
+    /// 对象时记录"再累积多少历史才允许重扫"，避免每步空扫。0 = 立即可触发。
+    #[serde(default)]
+    pub dehydration_rearm_tokens: usize,
     /// P4 连续批发派发解析失败计数（达 2 次触发 3 步熔断降级）
     #[serde(default)]
     pub consecutive_batch_dispatch_errors: usize,
@@ -356,6 +365,7 @@ impl SandwichContext {
             last_step_failed: false,
             consecutive_failures: 0,
             read_ledger: std::collections::BTreeMap::new(),
+            dehydration_rearm_tokens: 0,
             consecutive_batch_dispatch_errors: 0,
             batch_dispatch_circuit_breaker_remaining: 0,
             active_tool: None,
@@ -442,6 +452,7 @@ impl SandwichContext {
             count: 0,
             sample: content.chars().take(200).collect(),
             line_count,
+            last_output_id: None,
         });
         if entry.content_hash != hash {
             // 内容已变化（改后重读合法）：重置指纹
@@ -450,6 +461,7 @@ impl SandwichContext {
                 count: 1,
                 sample: content.chars().take(200).collect(),
                 line_count,
+                last_output_id: None,
             };
             return None;
         }
@@ -458,11 +470,20 @@ impl SandwichContext {
             let sample = entry.sample.clone();
             let lines = entry.line_count;
             let times = entry.count;
+            // 句柄优先：脱水/压缩后旧原文不再驻留上下文，必须指路持久化句柄
+            // 定向回查，否则"内容仍在此前的上下文里"会变成诱使重搜的假话。
+            let handle_hint = match entry.last_output_id.as_deref() {
+                Some(oid) => format!(
+                    "上次读取内容已持久化（output_id={}）：可用 task_store.search_step_output 按关键词定位片段，或 get_step_output 按 offset/limit 分页回查",
+                    oid
+                ),
+                None => "内容仍在你此前的上下文里；要定位片段请用 grep/搜索工具按关键词提取".to_string(),
+            };
             // 正常累加计数（不再使用哨兵值：报出"已读取 2147483647 次"既荒谬又无信息量）。
             // 内容变化时上方已重置指纹，因此 >=3 后持续拦截，直至文件真正被修改。
             return Some(format!(
-                "【重复读取拦截】该文件你已连续读取 {} 次且内容未变化（哈希一致，共 {} 行）。上次读取的内容开头：\n{}\n内容仍在你此前的上下文里；要定位片段请用 grep/搜索工具按关键词提取，或先修改文件后再读取。严禁原样重读。",
-                times, lines, sample
+                "【重复读取拦截】该文件你已连续读取 {} 次且内容未变化（哈希一致，共 {} 行）。上次读取的内容开头：\n{}\n{}；如需重读请先修改文件。严禁原样重读。",
+                times, lines, sample, handle_hint
             ));
         }
         None
@@ -473,13 +494,13 @@ impl SandwichContext {
         self.read_ledger.clear();
     }
 
-    /// 派发层入口：识别读取型指令，提取路径，宿主读文件后执行四条件判定。
-    /// 非读取型工具 / 路径不可解析 / 文件不可读 → None（放行，让工具自己报错）。
-    pub fn check_repeat_read_dispatch(
-        &mut self,
+    /// 读取型指令的台账目标解析：识别工具形态 → 提取 path → canonicalize。
+    /// 返回 Some((tool, canonical_path)) 时宿主可对该路径执行读取台账判定；
+    /// check_repeat_read_dispatch 与 note_read_output_id 共用同一路径口径。
+    fn resolve_read_target(
         instruction: &crate::agent::types::AgentInstruction,
         workspace_dir: &std::path::Path,
-    ) -> Option<String> {
+    ) -> Option<(String, String)> {
         const READ_TOOLS: &[&str] = &[
             "read_text_file", "read_file", "get_file_content", "get_code_snippet",
         ];
@@ -515,6 +536,18 @@ impl SandwichContext {
         if !canonical.is_file() {
             return None;
         }
+        Some((tool, canonical.to_string_lossy().to_string()))
+    }
+
+    /// 派发层入口：识别读取型指令，提取路径，宿主读文件后执行四条件判定。
+    /// 非读取型工具 / 路径不可解析 / 文件不可读 → None（放行，让工具自己报错）。
+    pub fn check_repeat_read_dispatch(
+        &mut self,
+        instruction: &crate::agent::types::AgentInstruction,
+        workspace_dir: &std::path::Path,
+    ) -> Option<String> {
+        let (tool, ledger_path) = Self::resolve_read_target(instruction, workspace_dir)?;
+        let canonical = std::path::PathBuf::from(&ledger_path);
         // 上限保护：超大文件只取头部指纹段参与哈希，避免整读大文件
         let Ok(metadata) = std::fs::metadata(&canonical) else { return None; };
         let content = if metadata.len() > 1_000_000 {
@@ -527,8 +560,25 @@ impl SandwichContext {
         } else {
             std::fs::read_to_string(&canonical).ok()?
         };
-        let ledger_path = canonical.to_string_lossy().to_string();
         self.check_repeat_read(&tool, &ledger_path, &content)
+    }
+
+    /// 读取成功后回填持久化句柄：让拦截回执能指向 output_id 证据，
+    /// 压缩/脱水后模型仍可用 task_store 句柄回查而非重新整读。
+    pub fn note_read_output_id(
+        &mut self,
+        instruction: &crate::agent::types::AgentInstruction,
+        workspace_dir: &std::path::Path,
+        output_id: &str,
+    ) {
+        let Some((tool, ledger_path)) = Self::resolve_read_target(instruction, workspace_dir)
+        else {
+            return;
+        };
+        let key = format!("{}|{}", tool, ledger_path);
+        if let Some(entry) = self.read_ledger.get_mut(&key) {
+            entry.last_output_id = Some(output_id.to_string());
+        }
     }
 
     pub fn active_plan_id(&self) -> Option<&str> {

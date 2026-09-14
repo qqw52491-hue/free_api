@@ -2356,6 +2356,12 @@ async fn run_agent_main_loop_in_workspace_inner(
 
         context.add_step(&instruction, &output_text, &output_id);
 
+        // 读取型工具：把本次读取的 output_id 回填进重复读取台账，
+        // 让后续拦截回执指向持久化句柄（脱水/压缩后仍可用 task_store 定向回查）
+        if result.success {
+            context.note_read_output_id(&instruction, &workspace_dir, &output_id);
+        }
+
         // ── 防虚假勾选：将当步真实 output_id 回填到标记为 done 但缺少证据的 Todo（需在 output_id 已知后执行）
         if !instruction.todo_update.is_empty() {
             for item in &mut instruction.todo_update {

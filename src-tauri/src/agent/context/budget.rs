@@ -150,6 +150,27 @@ impl ContextBudget {
     pub const DEFAULT_HIGH_WATERMARK_RATIO: f64 = 0.85; // 85% 高水位触发
     pub const DEFAULT_LOW_WATERMARK_RATIO: f64 = 0.50; // 50% 目标回落水位
     pub const RECENT_PROTECTED_RATIO: f64 = 0.25; // 25% 近期保护区
+    /// 批量脱水低水位（历史估算 tokens）：大窗口下 85% 高水位（deep_coding
+    /// ≈255k）日常任务不可达，旧输出会被逐步全量携带；超过该阈值触发一次性
+    /// 批量脱水——前缀缓存只在事件点断裂一次，摊薄到后续全部步数；区别于
+    /// 每步滚动改写历史（会持续击穿缓存且模型认知不稳）。
+    pub const DEHYDRATION_WATERMARK_TOKENS: usize = 45_000;
+    /// 低水位脱水的固定尾部保护区（tokens）：不用 recent_protected_ratio
+    ///（deep_coding 下 ≈75k > 45k 水位，会让触发空转），固定小额尾窗恰好
+    /// 覆盖模型的即时消费窗口（≈最近 5~8 步大输出）。
+    pub const DEHYDRATION_PROTECTED_TOKENS: usize = 15_000;
+    /// 扫无可脱对象时的滞后重扫步距（tokens）：避免每步空扫。
+    pub const DEHYDRATION_REARM_DELTA_TOKENS: usize = 15_000;
+
+    /// 脱水水位支持 env 覆盖（FREE_API_DEHYDRATE_WATERMARK_TOKENS），
+    /// 便于按模型窗口与任务画像现场调参；非法值回落默认 45k。
+    pub fn dehydration_watermark_tokens() -> usize {
+        std::env::var("FREE_API_DEHYDRATE_WATERMARK_TOKENS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(Self::DEHYDRATION_WATERMARK_TOKENS)
+    }
 
     /// 按模型上下文窗口推导活跃历史工作集上限（使用默认配置）。
     pub fn active_history_cap_for(window: usize) -> usize {

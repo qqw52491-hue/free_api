@@ -229,6 +229,77 @@ impl SandwichContext {
         )
     }
 
+    /// 低水位批量脱水：大窗口模型下 85% 高水位（deep_coding ≈255k）日常任务
+    /// 不可达，旧输出会被逐步全量携带。历史估算超过脱水水位时仅执行一次性
+    /// 批量脱水：固定尾窗保护区、不清读取台账（output_id 句柄仍可回查）、
+    /// 不动手册/纪元标记——前缀缓存只在事件点断裂一次，摊薄到后续全部步数。
+    /// 扫无可脱对象时滞后重扫（dehydration_rearm_tokens），避免每步空转。
+    fn maybe_dehydrate_low_watermark(&mut self, budget: &ContextBudget, current_tokens: usize) {
+        // 与上方高水位同源的真实校准：本地保守估算会高估 CJK/JSON/代码，
+        // 用最近一次服务端回传的完整 prompt 反推历史真实占用。
+        let history_volume = match (
+            self.last_reported_prompt_tokens.filter(|tokens| *tokens > 0),
+            self.last_reported_history_estimate_tokens,
+        ) {
+            (Some(real_total), Some(history_at_request)) => real_total
+                .saturating_sub(budget.static_prefix_tokens)
+                .saturating_sub(budget.tail_state_tokens)
+                .saturating_add(current_tokens.saturating_sub(history_at_request)),
+            _ => current_tokens,
+        };
+        let watermark = ContextBudget::dehydration_watermark_tokens();
+        if history_volume <= watermark || history_volume < self.dehydration_rearm_tokens {
+            return;
+        }
+        // 固定尾窗保护区：比例的 recent_protected（deep_coding ≈75k）在 45k
+        // 历史下会吞掉全部消息导致空转；低水位路径用固定小额覆盖即时消费窗口。
+        let mut protected_from_back = 0usize;
+        let mut back_tokens = 0usize;
+        for msg in self.turns_history.iter().rev() {
+            back_tokens += match &msg.content {
+                serde_json::Value::String(s) => conservative_token_estimate(s),
+                other => conservative_token_estimate(&other.to_string()),
+            };
+            protected_from_back += 1;
+            if back_tokens >= ContextBudget::DEHYDRATION_PROTECTED_TOKENS
+                && protected_from_back >= 2
+            {
+                break;
+            }
+        }
+        let dehydrate_limit = self
+            .turns_history
+            .len()
+            .saturating_sub(protected_from_back);
+        let mut dehydrated_count = 0usize;
+        for msg in self.turns_history.iter_mut().take(dehydrate_limit) {
+            let before = match &msg.content {
+                serde_json::Value::String(s) => s.len(),
+                other => other.to_string().len(),
+            };
+            *msg = crate::agent::context::assembler::dehydrate_historical_turn(msg);
+            let after_len = match &msg.content {
+                serde_json::Value::String(s) => s.len(),
+                other => other.to_string().len(),
+            };
+            if after_len != before {
+                dehydrated_count += 1;
+            }
+        }
+        let after = self.history_estimated_tokens();
+        if dehydrated_count > 0 && after < current_tokens.saturating_sub(2_000) {
+            println!(
+                "🧊 [Dehydration·低水位] 历史 ~{} tokens 触线（水位 {}）：保护区外 {} 条老输出就地脱水 → ~{} tokens（缓存仅本步断裂一次，台账保留可句柄回查）",
+                current_tokens, watermark, dehydrated_count, after
+            );
+            self.dehydration_rearm_tokens = watermark;
+        } else {
+            // 扫无可脱：滞后重扫，避免每步空转
+            self.dehydration_rearm_tokens = history_volume
+                .saturating_add(ContextBudget::DEHYDRATION_REARM_DELTA_TOKENS);
+        }
+    }
+
     /// 工业级自适应前缀压缩引擎 (Prompt-Cache Friendly Compaction)
     ///
     /// 核心设计：
@@ -264,8 +335,10 @@ impl SandwichContext {
             .map(|tokens| tokens > prompt_high_watermark)
             .unwrap_or(current_tokens > budget.high_watermark_tokens);
 
-        // 未达高水位，绝不轻易压缩（保护前缀缓存命中率）
+        // 未达高水位，绝不轻易压缩（保护前缀缓存命中率）；
+        // 但大窗口下高水位日常不可达——先检查低水位批量脱水（一次性事件，非滚动改写）。
         if !reached_high_watermark {
+            self.maybe_dehydrate_low_watermark(&budget, current_tokens);
             return;
         }
         // 压缩即将改写历史：模型对旧读取内容的记忆随之失效，读取台账清零使重读重新合法
@@ -482,11 +555,63 @@ impl SandwichContext {
             current_tokens, after_tokens, budget.low_watermark_tokens
         );
     }
+
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_low_watermark_dehydration_fires_below_high_watermark() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+        // 1M 窗口：高水位 ≈255k 日常不可达，但历史超过 45k 应触发低水位批量脱水
+        ctx.context_window_tokens = 1_000_000;
+
+        let big_payload = "Data content line with information.\n".repeat(200);
+        for i in 1..=25 {
+            ctx.turns_history.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: json!(format!("计划: 测试 | 工具: tool_{} | 动作: exec", i)),
+            });
+            ctx.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!(
+                    "【执行输出】\noutput_id: out_{}\n{}",
+                    i, big_payload
+                )),
+            });
+        }
+
+        let before = ctx.history_estimated_tokens();
+        assert!(before > ContextBudget::DEHYDRATION_WATERMARK_TOKENS);
+        assert!(before < ctx.current_budget().high_watermark_tokens);
+
+        ctx.maybe_compact_history();
+
+        let after = ctx.history_estimated_tokens();
+        assert!(after < before, "低水位批量脱水必须削减历史体积");
+        // 固定尾窗保护区内消息保持原样（不被脱水）
+        let tail_text = ctx
+            .turns_history
+            .last()
+            .unwrap()
+            .content
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            tail_text.contains("Data content line"),
+            "保护区尾部必须原样保留"
+        );
+        // 保护区外老输出已定型为 output_id 存根
+        let head_text = ctx.turns_history[1].content.as_str().unwrap().to_string();
+        assert!(
+            head_text.contains("完整详细数据已安全持久化至 SQLite"),
+            "保护区外老输出必须脱水为句柄，实际头部: {}",
+            head_text.chars().take(80).collect::<String>()
+        );
+    }
 
     #[test]
     fn test_rule_based_summarizer_never_fails() {

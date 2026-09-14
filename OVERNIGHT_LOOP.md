@@ -15,7 +15,24 @@
 
 **未动项**：按龄脱水（TTL dehydration）单独立项——会打断前缀缓存（`assembler.rs:213` 刻意只在 compaction 事件内脱水），需先算清缓存断点成本账；`SINGLE_OBSERVATION_INGRESS_CAP=4000` 入口阈值维持不动，它是"刚读出即消费"内容的安全通道，调低只会逼模型多走一步回查。
 
-## 阶段六：功能性问题猎捕（计划变更：统计类暂停，专挖病灶）
+## 阶段八：批量脱水低水位线 + 同路径重搜 signpost + 重读句柄回执 — 2026-09-14
+
+阶段七"未动项"的落地版：否决每步滚动脱水（持续击穿前缀缓存尾部，稳态为负），
+改为**阈值触发的一次性批量脱水**——缓存只在事件点断一次，摊薄到后续全部步数。
+全部 **code-green**（557 agent 测试通过，含 2 个新增回归），live 验证待下轮实弹。
+
+| 改动 | 位置 | 病灶/设计要点 | 验证 |
+|---|---|---|---|
+| **批量脱水低水位线** | `budget.rs` `DEHYDRATION_WATERMARK_TOKENS=45_000`（`FREE_API_DEHYDRATE_WATERMARK_TOKENS` 可覆盖）+ `DEHYDRATION_PROTECTED_TOKENS=15_000` + `REARM_DELTA=15_000`；`compaction.rs` `maybe_dehydrate_low_watermark` | 1M 窗口下 85% 高水位（≈255k）日常不可达，旧输出被逐步全量携带。触发即走现成 step-0 脱水，但**三处与归档路径不同**：固定 15k 尾窗保护区（比例的 75k 会让 45k 触发空转）、不清 read_ledger（句柄仍可回查）、扫无可脱滞后 +15k 防每步空扫。用服务端真实回传校准历史体积（同高水位同源口径） | code-green（新增 `test_low_watermark_dehydration_fires_below_high_watermark`：1M 窗口 62k 历史 → 尾部保留、头部变存根） |
+| **同路径重搜 signpost** | `retrieval/mod.rs` `count_prior_same_path_searches` + dispatch_search 放行后注入 notes | 阶段六①病灶漏网场景：同参指纹只拦完全复读；"换词重搜同一目录"（实测 ec7c4653 同一路径 ×27）参数不同会绕过。同 path 已成功检索 ≥2 次后注入软引导（指向 local_file 定向读取 / task_store 工件内检索），纯提示零拦截 | code-green（新增 `test_count_prior_same_path_searches_normalizes_and_filters`） |
+| **重读拦截回执补句柄** | `context/types.rs` `ReadLedgerEntry.last_output_id` + `resolve_read_target` 抽出共用 + `note_read_output_id`；`main_loop.rs` 步完成后回填 | 脱水/压缩后"内容仍在你此前的上下文里"是假话——回执改指向 `output_id` 句柄（`search_step_output`/`get_step_output` 定向回查），与阶段七锚点+句柄同构 | code-green |
+| **整读口径收紧** | `prompt_assembly.rs:242` + `local_file.rs` 导航提示 | 原"≤1200 行建议整读"与 4k 入口闸门脱节：含行号前缀后 ~300 行≈4k tokens 才是无损整读上限。提示分层：≤300 行可整读；301~1200 行明示"整读将触发头尾采样，中部按行号窗口定向读取" | code-green |
+
+**连带修复**：`dispatch_search` 去重 conn 作用域收窄——`db.reader()` 在连接池缺省时降级为
+`db.0` 同一把互斥锁，跨块存活会让 history 分支 `db.0.lock()` 自锁死（测试环境必现）。
+
+**未动项**：P3 终态 degraded 逃生口（无真人 ask_human 时三锁同开仍空转，属活性修复非
+上下文优化，另立项）；steps_json 全量反序列化/整写 O(n²) 轻债暂记不还。
 
 **方法学披露**：`agent_gate_fires` 不是"拦截事件表"——它是**按步盖章的挂起状态量表**
 （main_loop.rs:1678-1704：只要 `evidence_blockers` 非空，每一步都记一行）。
