@@ -744,3 +744,12 @@ pub fn delete_mcp_plugin(state: State<'_, DbState>, name: String) -> Result<(), 
     invalidate_plugin(&name);
     Ok(())
 }
+
+/// 一键安装类入口的就绪探针：前端"安装 MCP"按钮可先调本命令，
+/// 返回 uv 解析结果或（缺失时）自动下载官方 release 后的路径。
+/// 就绪后 stdio 插件的 uvx 调用由 spawn 层自动改写到该路径。
+#[tauri::command]
+pub async fn ensure_uv_runtime(app: tauri::AppHandle) -> Result<String, String> {
+    let path = crate::agent::uv_runtime::ensure_uv(&app).await?;
+    Ok(path.to_string_lossy().to_string())
+}

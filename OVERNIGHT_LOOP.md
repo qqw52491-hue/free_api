@@ -52,6 +52,17 @@ live 验证待下轮运维类实弹（卸载/服务管理任务应一次通过�
 代码域伪造引用、裸结论拦截、零交集工作区内判定逐条保留——收紧只作用于
 "通用探针"这一新增通道。
 
+### 阶段十一：uv 运行时跨平台自动就绪（MCP 一键装前置）
+
+- 新模块 `agent/uv_runtime.rs`：解析序 **进程缓存 → Tauri sidecar → PATH →
+  app_data 缓存 → 联网下载**（GitHub 官方 release + sha256 强制校验，校验值
+  取不到即拒装）。`uvx pkg` 统一改写 `uv tool run pkg`——单二进制覆盖，
+  uv 自举受管 Python，宿主机零依赖。
+- `McpClient::spawn` 内改写 uv/uvx 调用；UV_CACHE_DIR 指 app_data。
+- `session_bootstrap`：DB 管理插件需 uvx 且未就绪 → 延迟到锁外
+  ensure_uv 后补 spawn（下载不持锁），进度事件提示"正在下载 uv 运行时"。
+- Tauri 命令 `ensure_uv_runtime`：给前端"一键安装 MCP"按钮预留就绪探针。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。

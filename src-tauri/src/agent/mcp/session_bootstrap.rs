@@ -28,6 +28,8 @@ pub async fn sync_mcp_plugins_for_session(
         }),
     );
     let mut newly_spawned = Vec::new();
+    // 需要 uv/uvx 但运行时未就绪的插件：先延迟，锁块外 ensure_uv 后补 spawn
+    let mut uv_deferred: Vec<crate::commands::ManagedMcpPlugin> = Vec::new();
     {
         let cwd = workspace_dir.to_path_buf();
         let mut registry = registry_state.lock().await;
@@ -93,6 +95,13 @@ pub async fn sync_mcp_plugins_for_session(
             // YAML 同名必须显式拒绝（不能静默忽略 DB 配置），孤儿项防御性跳过
             match registry.classify(&name) {
                 None => {
+                    // uv 依赖检查：需 uvx 的插件且 uv 未就绪 → 延迟到锁外 ensure 后补 spawn
+                    if crate::agent::uv_runtime::is_uv_invocation(&managed.config.command)
+                        && crate::agent::uv_runtime::resolve_uv(Some(app)).is_none()
+                    {
+                        uv_deferred.push(managed);
+                        continue;
+                    }
                     // 全新插件 → spawn 并以 ManagedDb 来源注册
                     match McpClient::spawn(managed.config) {
                         Ok(client) => {
@@ -138,6 +147,60 @@ pub async fn sync_mcp_plugins_for_session(
             registry.clients.len(),
             is_first_init
         );
+    }
+
+    // uv 依赖补装重试：需 uvx 的 stdio 插件在锁外 ensure_uv（联网下载官方
+    // release+sha256 校验）后重试 spawn——下载耗时不定，绝不能持锁执行。
+    if !uv_deferred.is_empty() {
+        let names: Vec<String> = uv_deferred.iter().map(|m| m.config.name.clone()).collect();
+        let _ = app.emit(
+            &format!("agent-progress-{}", session_id),
+            json!({
+                "type": "action_phase",
+                "phase": "mcp",
+                "description": format!("⬇️ 插件 [{}] 需要 uv 运行时，正在自动下载...", names.join(", "))
+            }),
+        );
+        match crate::agent::uv_runtime::ensure_uv(app).await {
+            Ok(uv_path) => {
+                println!("🧰 uv 运行时就绪: {}", uv_path.display());
+                let mut registry = registry_state.lock().await;
+                for managed in uv_deferred {
+                    let name = managed.config.name.clone();
+                    if registry.classify(&name).is_some() {
+                        continue; // 防御：期间已被挂载
+                    }
+                    match McpClient::spawn(managed.config) {
+                        Ok(client) => {
+                            let client_arc = Arc::new(client);
+                            match registry.insert_with_source(
+                                name.clone(),
+                                client_arc.clone(),
+                                crate::agent::mcp::registry::PluginSource::ManagedDb,
+                            ) {
+                                Ok(()) => {
+                                    newly_spawned.push((name.clone(), client_arc));
+                                    println!("🔌 挂载延迟的 DB 插件: {}", name);
+                                }
+                                Err(error) => {
+                                    eprintln!("❌ DB 插件 [{}] 注册被拒绝: {}", name, error);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("❌ uv 就绪后插件 [{}] 仍启动失败: {}", name, error)
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "❌ uv 运行时自动就绪失败，以下插件未挂载 [{}]: {}",
+                    names.join(", "),
+                    error
+                );
+            }
+        }
     }
 
     if !newly_spawned.is_empty() {

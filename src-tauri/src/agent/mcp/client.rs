@@ -63,13 +63,23 @@ impl McpClient {
             ));
         }
 
-        let mut cmd = Command::new(&config.command);
-        cmd.args(&config.args)
+        // uv/uvx 命令改写到解析结果：sidecar → PATH → app_data 缓存。
+        // `uvx pkg` 等价 `uv tool run pkg`；解析不到则原样透传
+        // （spawn 报 command not found——ensure_uv 已在上游把该补的装好）。
+        let (program, args, uv_env) = crate::agent::uv_runtime::rewrite_uvx_invocation(
+            &config.command,
+            &config.args,
+        );
+        let mut cmd = Command::new(&program);
+        cmd.args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .env("PYTHONUNBUFFERED", "1")
             .env("NODE_NO_WARNINGS", "1");
+        for (k, v) in uv_env {
+            cmd.env(k, v);
+        }
 
         for (k, v) in &config.env {
             cmd.env(k, resolve_env_value(v)?);

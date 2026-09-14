@@ -55,6 +55,7 @@ pub mod tool_manual;
 pub mod tools;
 pub mod types;
 pub mod utils;
+pub mod uv_runtime;
 pub mod watch_engine;
 pub mod web_search;
 pub mod path_guard;
