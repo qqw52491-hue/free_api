@@ -198,6 +198,12 @@ pub fn delete_session_completely(
     );
     let _ = conn.execute("DELETE FROM agent_task_resources WHERE session_id=?1", rusqlite::params![id]);
     let _ = conn.execute("DELETE FROM agent_checkpoints WHERE run_id=?1", rusqlite::params![id]);
+    // agent_run_steps 按 run_id 键（非 session_id）：必须先经 traces 表取回本 session
+    // 全部 run_id 级联删除，顺序不可与下一行对调。
+    let _ = conn.execute(
+        "DELETE FROM agent_run_steps WHERE run_id IN (SELECT id FROM agent_run_traces WHERE session_id=?1)",
+        rusqlite::params![id],
+    );
     let _ = conn.execute("DELETE FROM agent_run_traces WHERE session_id=?1", rusqlite::params![id]);
     let _ = conn.execute("DELETE FROM agent_child_runs WHERE parent_session_id=?1", rusqlite::params![id]);
     let _ = conn.execute("DELETE FROM agent_background_jobs WHERE parent_session_id=?1", rusqlite::params![id]);
@@ -244,6 +250,8 @@ pub fn cleanup_orphaned_session_data(conn: &Connection) -> Result<usize> {
         "DELETE FROM agent_task_resources WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
         "DELETE FROM agent_checkpoints WHERE run_id NOT IN (SELECT id FROM chat_sessions)",
         "DELETE FROM agent_run_traces WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
+        // 步骤行表按 run_id 键：清掉父 trace 已消失（含刚被上一行删除）的孤儿步
+        "DELETE FROM agent_run_steps WHERE run_id NOT IN (SELECT id FROM agent_run_traces)",
         "DELETE FROM agent_child_runs WHERE parent_session_id NOT IN (SELECT id FROM chat_sessions)",
         "DELETE FROM agent_background_jobs WHERE parent_session_id NOT IN (SELECT id FROM chat_sessions)",
         "DELETE FROM agent_llm_calls WHERE session_id NOT IN (SELECT id FROM chat_sessions)",

@@ -42,20 +42,22 @@ pub fn append_step(
     seq: i64,
     step: &Value,
 ) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let mut conn = db.0.lock().map_err(|error| error.to_string())?;
     let step_json = serde_json::to_string(step).map_err(|error| error.to_string())?;
     let now = Utc::now().to_rfc3339();
-    conn.execute(
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    tx.execute(
         "INSERT INTO agent_run_steps (run_id, seq, step_json) VALUES (?1, ?2, ?3)
          ON CONFLICT(run_id, seq) DO UPDATE SET step_json=excluded.step_json",
         params![run_id, seq, step_json],
     )
     .map_err(|error| error.to_string())?;
-    conn.execute(
+    tx.execute(
         "UPDATE agent_run_traces SET updated_at=?2 WHERE id=?1",
         params![run_id, now],
     )
     .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
 

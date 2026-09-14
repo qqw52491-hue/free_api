@@ -62,8 +62,12 @@ pub async fn delete_session(
     id: String,
 ) -> Result<(), String> {
     let app_dir = app.path().app_data_dir().ok();
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-    crate::db::delete_session_completely(&conn, &id, app_dir.as_deref())
+    {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        crate::db::delete_session_completely(&conn, &id, app_dir.as_deref())?;
+    }
+    crate::agent::retrieval::clear_session_search_index(&id);
+    Ok(())
 }
 
 #[tauri::command]

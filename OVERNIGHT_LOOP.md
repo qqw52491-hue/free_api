@@ -206,6 +206,16 @@ spec 测试用修复提交自带的测试 diff 做 test_patch（case_10/11），
 
 **live 验证点**：①检索去重/同路径 signpost 行为与旧路一致（索引路径已等价测试，实弹看拦截文案照常出现）；②死锁会话在 ~8 连拒后落 `RUN_INTERRUPTED_ROUTE` 而非空转（轨迹可查 `🛑 [GateDeadlock]`）；③长会话后期单步持久化耗时下降（append_step 单行写 vs 整写）。
 
+**复审连带（agent 初审 + 人工补刀）**：
+- `append_step` 两行写并入 `conn.transaction()`（崩溃半写防护）——agent 修复 ✅；
+- `SessionSearchIndex` 加 `last_accessed` + `MAX_CACHED_SESSION_INDEXES=128` LRU 兜底 +
+  `clear_session_search_index`（`delete_session` 联动释放）——agent 修复 ✅；
+- **agent 漏判、人工补**：`delete_session_completely` 未级联 `agent_run_steps`
+  （按 run_id 键，须在删 traces 前级联）→ 磁盘孤儿行；`cleanup_orphaned_session_data`
+  补同款孤儿清扫；HTTP 通道 `handler_delete_session` 此前未清内存索引，已补调用。
+- 已评审暂不修：`consecutive_gate_blocked` 单步非门禁路由即清零的敏感度——
+  若实弹发现模型"穿插无关只读探针"打断计数，再升级滑动窗口拒绝率。
+
 ## 阶段五存档：夜间自主测试计划（A→E，已完成）
 
 ### 【A】方差科学扩容 — 数据齐，统计如下

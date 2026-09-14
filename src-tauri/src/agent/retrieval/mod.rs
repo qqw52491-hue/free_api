@@ -52,6 +52,7 @@ struct SessionSearchIndex {
     searches: Vec<IndexedSearch>,
     last_write_seq: Option<i64>,
     path_counts: std::collections::HashMap<String, usize>,
+    last_accessed: std::time::Instant,
 }
 
 struct IndexedSearch {
@@ -62,6 +63,8 @@ struct IndexedSearch {
     output_nonempty: bool,
 }
 
+const MAX_CACHED_SESSION_INDEXES: usize = 128;
+
 static SEARCH_STEP_INDEX: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, SessionSearchIndex>>,
 > = std::sync::OnceLock::new();
@@ -70,6 +73,13 @@ fn search_step_index(
 ) -> &'static std::sync::Mutex<std::collections::HashMap<String, SessionSearchIndex>> {
     SEARCH_STEP_INDEX
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 显式清理会话的检索缓存，在会话被物理删除时调用避免内存泄漏
+pub fn clear_session_search_index(session_id: &str) {
+    if let Ok(mut map) = search_step_index().lock() {
+        map.remove(session_id);
+    }
 }
 
 fn index_step(idx: &mut SessionSearchIndex, seq: i64, step: &Value) {
@@ -147,6 +157,17 @@ fn sync_search_index(conn: &rusqlite::Connection, session_id: &str) -> bool {
         map.remove(session_id);
         return false;
     }
+    if map.len() >= MAX_CACHED_SESSION_INDEXES && !map.contains_key(session_id) {
+        if let Some(oldest_key) = map
+            .iter()
+            .filter(|(k, _)| k.as_str() != session_id)
+            .min_by_key(|(_, v)| v.last_accessed)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest_key);
+        }
+    }
+    let now = std::time::Instant::now();
     let idx = map.entry(session_id.to_string()).or_insert_with(|| {
         SessionSearchIndex {
             run_id: run_id.clone(),
@@ -154,8 +175,10 @@ fn sync_search_index(conn: &rusqlite::Connection, session_id: &str) -> bool {
             searches: Vec::new(),
             last_write_seq: None,
             path_counts: std::collections::HashMap::new(),
+            last_accessed: now,
         }
     });
+    idx.last_accessed = now;
     if idx.run_id != run_id {
         *idx = SessionSearchIndex {
             run_id: run_id.clone(),
@@ -163,6 +186,7 @@ fn sync_search_index(conn: &rusqlite::Connection, session_id: &str) -> bool {
             searches: Vec::new(),
             last_write_seq: None,
             path_counts: std::collections::HashMap::new(),
+            last_accessed: now,
         };
     }
     let mut stmt = match conn.prepare(

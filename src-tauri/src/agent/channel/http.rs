@@ -147,6 +147,7 @@ async fn handler_delete_session(
         let app_dir = state.app.path().app_data_dir().ok();
         let _ = crate::db::delete_session_completely(&conn, id, app_dir.as_deref());
     }
+    crate::agent::retrieval::clear_session_search_index(id);
     notify_session_event(id, "deleted");
     let _ = state.app.emit("channel-run-done", json!({ "session_id": id, "status": "deleted", "at": now_ts() }));
     Ok(Json(json!({ "ok": true, "session_id": id })))
