@@ -15,12 +15,26 @@
         </div>
       </div>
       <div class="header-actions">
-        <button class="add-btn" @click="openAddModal">
+        <button class="add-btn" v-if="activeTab === 'installed'" @click="openAddModal">
           <span class="icon">+</span> 接入 MCP
         </button>
       </div>
     </div>
-    <section class="capability-summary" aria-label="能力概览">
+
+    <!-- 页面级 Tabs：市场发现 / 已接入管理 / Skill 库 -->
+    <nav class="page-tabs" aria-label="能力管理分区">
+      <button type="button" class="page-tab" :class="{ active: activeTab === 'installed' }" @click="activeTab = 'installed'">
+        🔌 已接入 <span v-if="plugins.length" class="tab-count">{{ plugins.length }}</span>
+      </button>
+      <button type="button" class="page-tab" :class="{ active: activeTab === 'market' }" @click="activeTab = 'market'">
+        🛒 MCP 市场
+      </button>
+      <button type="button" class="page-tab" :class="{ active: activeTab === 'skills' }" @click="activeTab = 'skills'">
+        📝 Skill 库 <span v-if="customInstructions.length" class="tab-count">{{ customInstructions.length }}</span>
+      </button>
+    </nav>
+
+    <section v-if="activeTab === 'installed'" class="capability-summary" aria-label="能力概览">
       <article class="capability-card">
         <div class="capability-card-heading"><span class="capability-kicker">MCP 连接</span><strong>{{ plugins.filter((plugin) => plugin.enabled).length }} 已启用</strong></div>
         <p>通过 Streamable HTTP、SSE 或本地 stdio 连接。支持单条或批量 JSON/清单导入，能力卡保存在 SQLite 中。</p>
@@ -31,7 +45,7 @@
       </article>
     </section>
 
-    <section class="instruction-library" aria-label="自定义提示词与 Skill 库">
+    <section v-if="activeTab === 'skills'" class="instruction-library" aria-label="自定义提示词与 Skill 库">
       <div class="library-heading">
         <div>
           <span class="library-kicker">PROMPTS &amp; SKILLS</span>
@@ -75,7 +89,7 @@
     </section>
 
     <!-- 插件卡片网格 -->
-    <div class="plugin-grid" v-if="plugins.length > 0">
+    <div class="plugin-grid" v-if="activeTab === 'installed' && plugins.length > 0">
       <div v-for="p in plugins" :key="p.id" class="plugin-card" :class="{ disabled: !p.enabled }">
         <div class="card-header">
           <div class="plugin-icon" :class="{ active: p.enabled }">{{ p.name.charAt(0).toUpperCase() }}</div>
@@ -120,11 +134,97 @@
     </div>
 
     <!-- 空状态 -->
-    <div v-else class="empty-state">
+    <div v-if="activeTab === 'installed' && plugins.length === 0" class="empty-state">
       <div class="empty-icon">🔌</div>
       <h3>还没有加载任何 MCP 插件</h3>
       <p>MCP 插件可以让你的 AI Agent 操作 Excel、搜索网页、管理文件等</p>
       <button class="add-btn" @click="openAddModal">立即接入第一个</button>
+      <button class="text-btn market-link" @click="activeTab = 'market'">或去 MCP 市场逛逛 →</button>
+    </div>
+
+    <!-- MCP 市场：官方 Registry 在线检索 + 精选一键安装 -->
+    <section v-if="activeTab === 'market'" class="market-section" aria-label="MCP 市场">
+      <div class="library-heading">
+        <div>
+          <span class="library-kicker">MCP REGISTRY</span>
+          <h2>MCP 市场</h2>
+          <p>官方 Registry 在线检索。本地包自动经内置 uv 拉起（首次会下载 uv 运行时），远程 HTTP 直连零安装。</p>
+        </div>
+      </div>
+      <div class="market-search">
+        <input v-model.trim="marketQuery" placeholder="搜索官方 MCP Registry（如 excel / powerpoint / filesystem）…" @keyup.enter="searchRegistry" />
+        <button class="save-btn market-search-btn" type="button" :disabled="marketSearching || !marketQuery" @click="searchRegistry">
+          {{ marketSearching ? '搜索中…' : '🔍 搜索' }}
+        </button>
+      </div>
+      <p v-if="marketError" class="market-error">⚠️ {{ marketError }}</p>
+
+      <h3 class="market-subhead">✨ 办公精选</h3>
+      <div class="market-grid">
+        <article v-for="f in featuredMcps" :key="f.name" class="market-card">
+          <div class="market-card-head">
+            <span class="market-icon">{{ f.icon }}</span>
+            <h4>{{ f.title }}</h4>
+            <span class="kind-badge">{{ f.install_kind }}</span>
+          </div>
+          <p class="market-desc">{{ f.desc }}</p>
+          <div class="market-card-foot">
+            <code class="pkg-tag">{{ f.package }}</code>
+            <button class="install-btn" type="button" :disabled="Boolean(installing)" @click="installEntry(f, {})">
+              {{ installing === f.name ? '⏳ 安装中…' : '安装' }}
+            </button>
+          </div>
+        </article>
+      </div>
+
+      <template v-if="marketSearched">
+        <h3 class="market-subhead">🔍 搜索结果 <span v-if="marketResults.length" class="result-count">{{ marketResults.length }} 条</span></h3>
+        <div v-if="!marketResults.length" class="instruction-empty">
+          <strong>没有找到匹配项</strong>
+          <span>换个关键词试试，或确认网络可访问 registry.modelcontextprotocol.io</span>
+        </div>
+        <div class="market-grid">
+          <article v-for="r in marketResults" :key="r.name" class="market-card">
+            <div class="market-card-head">
+              <h4>{{ r.title }}</h4>
+              <span class="kind-badge" :class="r.install_kind">{{ r.install_kind }}</span>
+            </div>
+            <p class="market-desc">{{ r.description || '（无描述）' }}</p>
+            <div class="market-card-foot">
+              <code class="pkg-tag">{{ r.package || r.remote_url || r.name }}<template v-if="r.version">@{{ r.version }}</template></code>
+              <button v-if="r.install_kind !== 'unsupported' && r.install_kind !== 'mcpb'" class="install-btn" type="button" :disabled="Boolean(installing)" @click="openInstallModal(r)">
+                {{ installing === r.name ? '⏳ 安装中…' : '安装' }}
+              </button>
+              <span v-else class="unsupported-tag">需手动接入</span>
+            </div>
+            <p v-if="r.required_secrets.length" class="secrets-hint">🔑 需要凭据: {{ r.required_secrets.join('、') }}</p>
+          </article>
+        </div>
+      </template>
+    </section>
+
+    <!-- 市场安装确认弹窗（需要凭据/密钥时收集） -->
+    <div v-if="installTarget" class="modal-overlay" @click.self="installTarget = null">
+      <div class="modal-content plugin-modal">
+        <h3 class="install-modal-title">安装 {{ installTarget.title || installTarget.name }}</h3>
+        <p class="modal-hint">
+          形态：<span class="kind-badge">{{ installTarget.install_kind }}</span>
+          <code class="pkg-tag">{{ installTarget.package || installTarget.remote_url }}</code>
+        </p>
+        <template v-if="installTarget.required_secrets.length">
+          <p class="modal-hint">该服务声明需要以下凭据（存入插件 env/headers，不会明文展示）：</p>
+          <div v-for="s in installTarget.required_secrets" :key="s" class="form-group">
+            <label>{{ s }}</label>
+            <input v-model="installSecrets[s]" type="password" :placeholder="'填入 ' + s" />
+          </div>
+        </template>
+        <div class="form-actions">
+          <button class="cancel-btn" type="button" @click="installTarget = null">取消</button>
+          <button class="save-btn" type="button" :disabled="Boolean(installing)" @click="installEntry(installTarget, installSecrets)">
+            {{ installing ? '⏳ 安装中…' : '确认安装' }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- 自定义 Skill / 提示词弹窗 (支持单个与批量) -->
@@ -443,6 +543,96 @@ const batchSkillText = ref('');
 const batchSkillModelId = ref('');
 const batchSkillLoading = ref(false);
 const batchSkillResults = ref([]);
+
+// 页面级 Tab：installed（已接入）/ market（市场）/ skills（Skill 库）
+const activeTab = ref('installed');
+
+// MCP 市场
+const marketQuery = ref('');
+const marketResults = ref([]);
+const marketSearching = ref(false);
+const marketSearched = ref(false);
+const marketError = ref('');
+const installing = ref('');
+const installTarget = ref(null);
+const installSecrets = ref({});
+
+// 办公精选：本地内置清单——包名即安装依据，不依赖 Registry 查询
+const featuredMcps = [
+  {
+    name: 'excel-mcp-server', icon: '📊', title: 'Excel 读写',
+    desc: '读写工作簿、公式、图表、透视表与数据校验——无需安装 Office。',
+    install_kind: 'uvx', package: 'excel-mcp-server', runtime_args: ['stdio'],
+    remote_url: null, required_secrets: [],
+  },
+  {
+    name: 'office-powerpoint-mcp-server', icon: '📽️', title: 'PowerPoint 生成',
+    desc: '创建 PPT、加页、写标题/正文/图片，支持模板复用。',
+    install_kind: 'uvx', package: 'office-powerpoint-mcp-server', runtime_args: [],
+    remote_url: null, required_secrets: [],
+  },
+  {
+    name: 'mcp-server-fetch', icon: '🌐', title: '网页抓取',
+    desc: '官方 fetch 服务：抓取网页并提取可读正文喂给模型。',
+    install_kind: 'uvx', package: 'mcp-server-fetch', runtime_args: [],
+    remote_url: null, required_secrets: [],
+  },
+  {
+    name: 'server-filesystem', icon: '📁', title: '文件系统',
+    desc: '官方 filesystem 服务：读写指定目录下的文件（需 Node.js）。',
+    install_kind: 'npx', package: '@modelcontextprotocol/server-filesystem', runtime_args: [],
+    remote_url: null, required_secrets: [],
+  },
+];
+
+const searchRegistry = async () => {
+  if (!marketQuery.value.trim()) return;
+  marketSearching.value = true;
+  marketError.value = '';
+  try {
+    marketResults.value = await invoke('search_mcp_registry', { query: marketQuery.value.trim() });
+    marketSearched.value = true;
+  } catch (err) {
+    marketError.value = String(err);
+    marketResults.value = [];
+    marketSearched.value = true;
+  } finally {
+    marketSearching.value = false;
+  }
+};
+
+// 有必填凭据 → 弹窗收集；否则直接装
+const openInstallModal = (entry) => {
+  if (entry.required_secrets?.length) {
+    installSecrets.value = {};
+    entry.required_secrets.forEach((s) => { installSecrets.value[s] = ''; });
+    installTarget.value = entry;
+  } else {
+    installEntry(entry, {});
+  }
+};
+
+const installEntry = async (entry, secrets) => {
+  installing.value = entry.name;
+  try {
+    await invoke('install_mcp_registry_entry', {
+      name: entry.name,
+      installKind: entry.install_kind,
+      package: entry.package || null,
+      runtimeArgs: entry.runtime_args || [],
+      remoteUrl: entry.remote_url || null,
+      bearerToken: secrets?.Authorization || null,
+      envValues: entry.install_kind === 'http' ? {} : (secrets || {}),
+    });
+    installTarget.value = null;
+    await loadPlugins();
+    activeTab.value = 'installed';
+  } catch (err) {
+    alert('安装失败: ' + err);
+  } finally {
+    installing.value = '';
+  }
+};
 
 const loadAllModels = async () => {
   try {
@@ -1179,6 +1369,152 @@ select option { background-color: #18181b !important; color: #f4f4f5 !important;
   border-color: rgba(108, 99, 255, 0.35);
   font-weight: 600;
 }
+
+/* ── 页面级 Tabs ── */
+.page-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 10px;
+}
+.page-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: #8e8e93;
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.page-tab:hover { color: #f4f4f5; background: rgba(255, 255, 255, 0.05); }
+.page-tab.active {
+  color: #ffffff;
+  background: rgba(108, 99, 255, 0.15);
+  border-color: rgba(108, 99, 255, 0.35);
+  font-weight: 600;
+}
+.tab-count {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 11px;
+}
+
+/* ── MCP 市场 ── */
+.market-section { margin-top: 4px; }
+.market-search {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.market-search input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 9px 14px;
+  color: #f4f4f5;
+  font-size: 13px;
+  outline: none;
+}
+.market-search input:focus { border-color: rgba(108, 99, 255, 0.5); }
+.market-search-btn { white-space: nowrap; }
+.market-error { color: #fbbf24; font-size: 12.5px; margin: -8px 0 12px; }
+.market-subhead {
+  font-size: 13px;
+  font-weight: 600;
+  color: #d4d4d8;
+  margin: 18px 0 10px;
+}
+.result-count { color: #8e8e93; font-weight: 400; }
+.market-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.market-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.market-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.market-icon { font-size: 18px; }
+.market-card-head h4 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #f4f4f5;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kind-badge {
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(108, 99, 255, 0.18);
+  color: #b4aeff;
+  border: 1px solid rgba(108, 99, 255, 0.3);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.kind-badge.http { background: rgba(34, 197, 94, 0.15); color: #86efac; border-color: rgba(34, 197, 94, 0.3); }
+.kind-badge.npx { background: rgba(251, 146, 60, 0.15); color: #fdba74; border-color: rgba(251, 146, 60, 0.3); }
+.market-desc {
+  margin: 0;
+  font-size: 12px;
+  color: #a1a1aa;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  flex: 1;
+}
+.market-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.pkg-tag {
+  font-size: 10.5px;
+  color: #71717a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.install-btn {
+  background: #f4f4f5;
+  color: #18181b;
+  border: none;
+  padding: 5px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.install-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.unsupported-tag { font-size: 11px; color: #71717a; flex-shrink: 0; }
+.secrets-hint { margin: 0; font-size: 11px; color: #fbbf24; }
+.install-modal-title { margin: 0 0 10px; font-size: 15px; color: #f4f4f5; }
+.market-link { margin-top: 10px; }
 
 .form-row {
   display: flex;

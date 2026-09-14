@@ -135,6 +135,8 @@ pub fn run() {
             commands::delete_mcp_plugin,
             commands::toggle_mcp_plugin,
             commands::ensure_uv_runtime,
+            commands::search_mcp_registry,
+            commands::install_mcp_registry_entry,
             // 自定义提示词与 Skill 库
             commands::get_agent_custom_instructions,
             commands::generate_skill_capability_card,
