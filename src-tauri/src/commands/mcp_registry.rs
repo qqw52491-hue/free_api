@@ -285,25 +285,29 @@ pub async fn install_mcp_registry_entry(
         n.rsplit('/').next().unwrap_or(n).to_string()
     };
 
+    let mut uv_path_buf = None;
     let (command, args, url, headers, env) = match install_kind.as_str() {
         "uvx" => {
             let pkg = package
+                .clone()
                 .filter(|p| !p.trim().is_empty())
                 .ok_or_else(|| "缺少 pypi 包标识符".to_string())?;
             // uv 运行时自动就绪（首次联网下载官方 release + sha256 校验）
-            crate::agent::uv_runtime::ensure_uv(&app)
+            let uv = crate::agent::uv_runtime::ensure_uv(&app)
                 .await
                 .map_err(|e| format!("uv 运行时就绪失败: {e}"))?;
+            uv_path_buf = Some(uv);
             let mut a = vec![pkg];
-            a.extend(runtime_args.unwrap_or_default());
+            a.extend(runtime_args.clone().unwrap_or_default());
             ("uvx".to_string(), a, None, Default::default(), env_values.unwrap_or_default())
         }
         "npx" => {
             let pkg = package
+                .clone()
                 .filter(|p| !p.trim().is_empty())
                 .ok_or_else(|| "缺少 npm 包标识符".to_string())?;
             let mut a = vec!["-y".to_string(), pkg];
-            a.extend(runtime_args.unwrap_or_default());
+            a.extend(runtime_args.clone().unwrap_or_default());
             ("npx".to_string(), a, None, Default::default(), env_values.unwrap_or_default())
         }
         "http" => {
@@ -322,24 +326,104 @@ pub async fn install_mcp_registry_entry(
     // 真机验证安装：spawn + initialize + list_tools——uvx 形态在此实际
     // 下载受管 Python 与包（首次数十秒）；失败直接报错、不落库，
     // 避免"装了但根本跑不起来"的半成品污染插件表。
-    let config = PluginConfig {
+    let build_config = |args: &[String]| PluginConfig {
         name: plugin_name.clone(),
         command: command.clone(),
-        args: args.clone(),
+        args: args.to_vec(),
         url: url.clone(),
         headers: headers.clone(),
         env: env.clone(),
         capability_card: None,
     };
-    let client = McpClient::spawn(config.clone())
-        .map_err(|e| format!("启动 MCP 进程失败: {e}"))?;
-    let tools = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-        client.initialize().await?;
-        client.list_tools().await
-    })
-    .await
-    .map_err(|_| "MCP 握手/拉包超时（120s）".to_string())?
-    .map_err(|e| format!("MCP 初始化失败: {e}"))?;
+    let handshake = |config: PluginConfig| async move {
+        let client = McpClient::spawn(config.clone())
+            .map_err(|e| format!("启动 MCP 进程失败: {e}"))?;
+        let tools = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            client.initialize().await?;
+            client.list_tools().await
+        })
+        .await
+        .map_err(|_| "MCP 握手/拉包超时（120s）".to_string())?
+        .map_err(|e| format!("MCP 初始化失败: {e}"))?;
+        Ok::<_, String>((config, tools))
+    };
+
+    // 首试：包名=可执行名的常规形态
+    let (config, tools) = match handshake(build_config(&args)).await {
+        Ok(ok) => ok,
+        Err(first_err) => {
+            // uvx 自愈阶梯（全部基于 cache-hit 重探针拿 stderr 分类，不猜）：
+            //  ① "executables are available" → 包名≠可执行名（office-powerpoint-
+            //     mcp-server → ppt_mcp_server），改 `--from <pkg> <exe>` 重试
+            //  ② stderr 含 "pin '<spec>'" 迁移提示 → 依赖版本断代（mcp 2.x
+            //     改名 fastmcp），加 `--with <spec>` 钉版本重试
+            //  ③ 两种病灶可叠加：--from 仍挂 → 再探针拿新 stderr 找 pin 提示
+            if install_kind == "uvx" {
+                let (Some(uv), Some(pkg)) = (uv_path_buf.as_ref(), package.as_ref())
+                else {
+                    return Err(first_err);
+                };
+                let rt = runtime_args.clone().unwrap_or_default();
+                let base = [
+                    "tool".to_string(),
+                    "run".to_string(),
+                    pkg.clone(),
+                ];
+                let UvProbe::Failed(stderr) = probe_uv_tool_run(uv, &base).await
+                else {
+                    return Err(first_err);
+                };
+                if let Some(exe) = parse_uv_available_executable(&stderr) {
+                    let mut a2 = vec!["--from".to_string(), pkg.clone(), exe.clone()];
+                    a2.extend(rt.clone());
+                    match handshake(build_config(&a2)).await {
+                        Ok(ok) => ok,
+                        Err(e2) => {
+                            let probe2_args = [
+                                "tool".to_string(),
+                                "run".to_string(),
+                                "--from".to_string(),
+                                pkg.clone(),
+                                exe.clone(),
+                            ];
+                            match probe_uv_tool_run(uv, &probe2_args).await {
+                                UvProbe::Failed(s2) => {
+                                    if let Some(spec) = parse_uv_pin_hint(&s2) {
+                                        let mut a3 = vec![
+                                            "--from".to_string(),
+                                            pkg.clone(),
+                                            "--with".to_string(),
+                                            spec.clone(),
+                                            exe,
+                                        ];
+                                        a3.extend(rt);
+                                        handshake(build_config(&a3)).await.map_err(|e3| {
+                                            format!(
+                                                "{e2}（--with {spec} 重试亦失败: {e3}）"
+                                            )
+                                        })?
+                                    } else {
+                                        return Err(e2);
+                                    }
+                                }
+                                _ => return Err(e2),
+                            }
+                        }
+                    }
+                } else if let Some(spec) = parse_uv_pin_hint(&stderr) {
+                    let mut a2 = vec!["--with".to_string(), spec.clone(), pkg.clone()];
+                    a2.extend(rt);
+                    handshake(build_config(&a2)).await.map_err(|e2| {
+                        format!("{first_err}（--with {spec} 重试亦失败: {e2}）")
+                    })?
+                } else {
+                    return Err(first_err);
+                }
+            } else {
+                return Err(first_err);
+            }
+        }
+    };
     crate::agent::mcp_catalog::remember_tools(&config, &tools);
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -358,12 +442,12 @@ pub async fn install_mcp_registry_entry(
         rusqlite::params![
             id,
             plugin_name,
-            command,
-            serde_json::to_string(&args).map_err(|e| e.to_string())?,
-            serde_json::to_string(&env).map_err(|e| e.to_string())?,
+            config.command.clone(),
+            serde_json::to_string(&config.args).map_err(|e| e.to_string())?,
+            serde_json::to_string(&config.env).map_err(|e| e.to_string())?,
             now,
-            url.unwrap_or_default(),
-            serde_json::to_string(&headers).map_err(|e| e.to_string())?,
+            config.url.as_deref().unwrap_or(""),
+            serde_json::to_string(&config.headers).map_err(|e| e.to_string())?,
         ],
     )
     .map_err(|e| format!("保存插件失败: {e}"))?;
@@ -375,8 +459,8 @@ pub async fn install_mcp_registry_entry(
         row: McpPluginRow {
             id,
             name: plugin_name,
-            command,
-            args,
+            command: config.command.clone(),
+            args: config.args.clone(),
             env,
             capability_card: String::new(),
             enabled: true,
@@ -384,6 +468,66 @@ pub async fn install_mcp_registry_entry(
         },
         tool_count: tools.len(),
     })
+}
+
+/// `uv tool run` 探针结果三态：
+/// - Failed(stderr)：快速非零退出，stderr 可供病灶分类（包已缓存，重跑极快）
+/// - Clean：快速零退出——健康 stdio 服务读到 stdin EOF 干净退出，原名可用
+/// - Alive：超时仍在跑——服务常驻，原名可用
+enum UvProbe {
+    Alive,
+    Clean,
+    Failed(String),
+}
+
+/// 轻量 spawn `uv <args>`（stdin/stdout 关闭，stderr 捕获，10s 上限）。
+/// 健康 MCP 服务 stdin EOF 即退 → Clean/Alive；装包级错误（可执行名缺失、
+/// 依赖断代 ImportError）秒级非零退 → Failed 带 stderr 供分类。
+async fn probe_uv_tool_run(uv: &std::path::Path, args: &[String]) -> UvProbe {
+    use std::process::Stdio;
+    let Ok(child) = tokio::process::Command::new(uv)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    else {
+        return UvProbe::Clean;
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(Ok(o)) if o.status.success() => UvProbe::Clean,
+        Ok(Ok(o)) => UvProbe::Failed(String::from_utf8_lossy(&o.stderr).to_string()),
+        _ => UvProbe::Alive,
+    }
+}
+
+/// 从 uv "executable not provided" 报错里解析第一个可用入口名：
+/// "The following executables are available:\n- <name>"
+fn parse_uv_available_executable(stderr: &str) -> Option<String> {
+    let pos = stderr.find("executables are available")?;
+    stderr[pos..]
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.trim().strip_prefix('-').map(str::trim))
+        .find(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// 从 stderr 解析依赖迁移给出的钉版本提示——Python 包断代报错常自带
+/// 可机读指引（mcp 2.x: "pin 'mcp<2' to keep running v1 code"）。
+/// 解析出 spec 后以 `--with <spec>` 注入环境约束重试。
+fn parse_uv_pin_hint(stderr: &str) -> Option<String> {
+    let pos = stderr.find("pin '")?;
+    let rest = &stderr[pos + 5..];
+    let end = rest.find('\'')?;
+    let spec = rest[..end].trim();
+    (!spec.is_empty()).then(|| spec.to_string())
 }
 
 #[cfg(test)]
@@ -451,5 +595,59 @@ mod tests {
         assert_eq!(urlencoding("中"), "%E4%B8%AD");
         assert_eq!(urlencoding("excel mcp"), "excel%20mcp");
         assert_eq!(urlencoding("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn parse_uv_executable_mismatch() {
+        // office-powerpoint-mcp-server 实机报错原文：包名≠可执行名
+        let stderr = "An executable named `office-powerpoint-mcp-server` is not provided \
+                      by package `office-powerpoint-mcp-server`.\n\
+                      The following executables are available:\n\
+                      - ppt_mcp_server\n\
+                      \nUse `uv tool run --from office-powerpoint-mcp-server ppt_mcp_server` \
+                      instead.\n";
+        assert_eq!(
+            parse_uv_available_executable(stderr).as_deref(),
+            Some("ppt_mcp_server")
+        );
+
+        // 多个入口取第一个
+        let multi = "The following executables are available:\n- exe_a\n- exe_b\n";
+        assert_eq!(
+            parse_uv_available_executable(multi).as_deref(),
+            Some("exe_a")
+        );
+
+        // 无关错误（网络失败/包不存在/需要参数）→ None，不走 --from 重试
+        assert_eq!(
+            parse_uv_available_executable("error: Failed to download package"),
+            None
+        );
+        assert_eq!(parse_uv_available_executable(""), None);
+        // 有标题行但无列表项 → None
+        assert_eq!(
+            parse_uv_available_executable("executables are available:\n\nerror tail"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_uv_pin_hint_from_migration_message() {
+        // mcp 2.x 实机报错原文（fastmcp → MCPServer 改名断代）
+        let stderr = "ModuleNotFoundError: No module named 'mcp.server.fastmcp'. \
+                      This is mcp 2.x, where FastMCP was renamed to MCPServer \
+                      (from mcp.server.mcpserver import MCPServer) and other APIs changed; \
+                      see the migration guide at https://py.sdk.modelcontextprotocol.io/v2/migration/ \
+                      or pin 'mcp<2' to keep running v1 code.";
+        assert_eq!(parse_uv_pin_hint(stderr).as_deref(), Some("mcp<2"));
+
+        // 无提示的普通崩溃 → None
+        assert_eq!(
+            parse_uv_pin_hint("ModuleNotFoundError: No module named 'foo'"),
+            None
+        );
+        assert_eq!(parse_uv_pin_hint(""), None);
+        // 空 spec → None
+        assert_eq!(parse_uv_pin_hint("pin '' today"), None);
     }
 }

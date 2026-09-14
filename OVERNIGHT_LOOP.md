@@ -89,6 +89,33 @@ live 验证待下轮运维类实弹（卸载/服务管理任务应一次通过�
 checkpoint 侧效果合并（去重无唯一 id，窗口窄）；`pipx list` 类恒 0 探针因无对象
 token 天然不绑定，属无害死项。
 
+### 阶段十三：MCP 市场安装自愈阶梯（实弹病灶驱动）— 2026-09-15
+
+| 步 | 行为 | 根因层 | 必要/浪费 | 修复 |
+|---|---|---|---|---|
+| M1 | 市场点装 `office-powerpoint-mcp-server` 报"插件进程已退出/断开" | 宿主（uv 调用约定假设） | 安装必要；`uv tool run <pkg>` 默认包名=可执行名的假设是病灶 | `probe_uv_tool_run` cache-hit 重探针拿 stderr，解析 "executables are available" 列表 → `--from <pkg> <exe>` 重试 |
+| M2 | `--from` 修正可执行名后仍退：`from mcp.server.fastmcp import FastMCP` ImportError | 包元数据（包依赖未钉 `mcp<2`，上游 2.x 改名断代） | 重试必要；宿主无法预知包的坏 dep spec | stderr 解析 `pin '<spec>'` 迁移提示 → `--with <spec>` 注入约束再重试；两类病灶可叠加（先 --from 再 --with） |
+| M3 | spawn stderr `Stdio::null()` 吞掉 uv 全部诊断 | 宿主（可观测性缺口） | 探针机制必要——用 cache-hit 重跑拿 stderr，不改 client 热路径 | 安装路径失败分类走 `probe_uv_tool_run`；`McpClient` stderr 捕获留作下轮改进项 |
+
+**重试阶梯**（全部基于探针 stderr 物理分类，不猜）：握手失败 → 探针重跑
+`uv tool run <pkg>` 取 stderr → ①可执行名列表 → `--from` 握手；仍挂 → ②再探针
+`--from` 形态取新 stderr → `pin '<spec>'` → `--with <spec>` 握手；②不适用但
+①的 stderr 直含 pin 提示（包名=可执行名+坏 dep）→ `--with` 直改原名重试。
+最终生效的 argv 持久化进 `mcp_plugins.args`——自愈结果跨会话复用，不重探。
+
+**验证**：
+- 单测：`parse_uv_available_executable`（实机 stderr 原文/多入口/无关错误/空列表）+
+  `parse_uv_pin_hint`（mcp 2.x 迁移原文/裸 ModuleNotFound/空 spec）——确定性 fixture，
+  不依赖网络。全量 **618 tests 绿**，vite build 过。
+- **live-green**：`uv tool run --from office-powerpoint-mcp-server --with 'mcp<2'
+  ppt_mcp_server` 实弹 initialize + tools/list 成功，**37 个工具**（create_presentation/
+  add_slide 等）。excel-mcp-server 原名直跑无碍（包名=可执行名）。
+
+**已知边界**：探针 10s 上限——首装大包下载超时会误判"原名可用"→ 走原 args 握手，
+失败后自愈阶梯仍兜底（失败时 stderr 探针是 cache-hit 快路径）；`pin '<spec>'`
+仅识别 Python 迁移文案形态，非通用 dep 冲突解算器（generic `ModuleNotFoundError`
+无 pin 提示时仍报原始错，静默 fail-closed）。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。
