@@ -173,13 +173,13 @@ pub fn dispatch(
     })();
 
     match result {
-        Ok(payload) => DispatchResult {
+        Ok(payload) => DispatchResult { view: None,
             stdout: serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()),
             stderr: String::new(),
             success: true,
             route: format!("task_store:{}", action),
         },
-        Err(err) => DispatchResult {
+        Err(err) => DispatchResult { view: None,
             stdout: String::new(),
             stderr: err,
             success: false,

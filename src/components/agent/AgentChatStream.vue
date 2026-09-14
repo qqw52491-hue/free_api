@@ -389,6 +389,32 @@
                                             <em v-if="step.metrics?.toolDurationMs != null">{{ formatDurationSeconds(step.metrics.toolDurationMs) }} · {{ step.source }}</em>
                                             <em v-else>{{ step.source }}</em>
                                         </button>
+
+                                        <!-- 4. 工具直供结构化视图卡片：后端 view 字段（kind 判别联合），
+                                             有值时渲染类型化卡片，脱离文本启发式猜测 -->
+                                        <div v-if="step.view?.kind === 'search'" class="tool-view-card" @click.stop="$emit('select-step', step.id)">
+                                            <div class="tool-view-head">
+                                                <span class="tool-view-badge">检索</span>
+                                                <span class="tool-view-query">{{ (step.view as any).query }}</span>
+                                                <em class="tool-view-count">{{ (step.view as any).total_hits }} 条命中<template v-if="(step.view as any).truncated">（已截断）</template></em>
+                                            </div>
+                                            <ul class="tool-view-hits">
+                                                <li v-for="(hit, hi) in ((step.view as any).hits || []).slice(0, 6)" :key="hi">
+                                                    <span class="hit-path">{{ hit.path }}</span>
+                                                    <span v-if="hit.snippet" class="hit-snippet">{{ hit.snippet }}</span>
+                                                </li>
+                                                <li v-if="((step.view as any).hits || []).length > 6" class="hit-more">…共 {{ (step.view as any).hits.length }} 条，点开看全部</li>
+                                            </ul>
+                                        </div>
+                                        <div v-else-if="step.view?.kind === 'search-cache'" class="tool-view-card is-cache" @click.stop="$emit('select-step', step.id)">
+                                            <div class="tool-view-head">
+                                                <span class="tool-view-badge cache">去重锚点</span>
+                                                <span class="tool-view-query">复用第 {{ (step.view as any).step_id }} 步结果 · {{ (step.view as any).total_hits }} 条命中</span>
+                                            </div>
+                                            <ul class="tool-view-hits">
+                                                <li v-for="(p, pi) in ((step.view as any).top_paths || [])" :key="pi"><span class="hit-path">{{ p }}</span></li>
+                                            </ul>
+                                        </div>
                                     </div>
                                     <div v-if="isSubAgentTool(step.tool) || isWaitJobsTool(step.tool)" class="subagent-inline-capsule" role="button" tabindex="0" :title="'点击查看当前步骤派发的子任务详情：' + extractSubagentTask(step)" @click="$emit('open-team-deck', step.id)" @keydown.enter="$emit('open-team-deck', step.id)">
                                         <div class="capsule-left">

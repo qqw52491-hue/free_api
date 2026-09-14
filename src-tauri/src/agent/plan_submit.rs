@@ -28,7 +28,7 @@ pub async fn handle_submit_plan(
     checkpoint: &mut AgentCheckpoint,
     interrupt_rx: watch::Receiver<u64>,
 ) -> DispatchResult {
-    let reject = |stderr: String, route: &str| DispatchResult {
+    let reject = |stderr: String, route: &str| DispatchResult { view: None,
         success: false,
         stdout: String::new(),
         stderr,
@@ -232,7 +232,7 @@ pub async fn handle_submit_plan(
                 &snapshot,
                 step_id,
             );
-            DispatchResult {
+            DispatchResult { view: None,
                 success: true,
                 stdout: format!(
                     "【✅ 方案已提交并进入审查】结构化方案已落账，Tech Lead 方案评审已异步派发（child_run_id: {}，第 {} 轮）。\n\

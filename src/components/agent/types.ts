@@ -146,6 +146,28 @@ export interface AgentStepMetrics {
     totalDurationMs?: number;
 }
 
+/** 工具直供的结构化视图（kind 判别联合）：有值时渲染类型化卡片，无值回退文本启发式 */
+export interface SearchToolView {
+    kind: "search";
+    query: string;
+    resolved_root?: string | null;
+    total_hits: number;
+    truncated: boolean;
+    hits: Array<{ kind?: string; path: string; snippet?: string }>;
+    notes?: string[];
+    errors?: string[];
+}
+
+export interface SearchCacheToolView {
+    kind: "search-cache";
+    step_id: number;
+    output_id?: string | null;
+    total_hits: number;
+    top_paths: string[];
+}
+
+export type ToolView = SearchToolView | SearchCacheToolView | ({ kind: string } & Record<string, unknown>);
+
 export interface AgentStepItem {
     id: string;
     stepId: number;
@@ -165,6 +187,7 @@ export interface AgentStepItem {
     result?: unknown;
     rawParams?: unknown;
     rawResult?: unknown;
+    view?: ToolView;
     metrics?: AgentStepMetrics;
     timestamp: number;
 }

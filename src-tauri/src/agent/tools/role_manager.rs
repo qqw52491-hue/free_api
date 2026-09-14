@@ -693,13 +693,13 @@ pub fn dispatch(db: &DbState, action: &str, params: &Value) -> crate::agent::typ
         )),
     };
     match result {
-        Ok(stdout) => crate::agent::types::DispatchResult {
+        Ok(stdout) => crate::agent::types::DispatchResult { view: None,
             stdout,
             stderr: String::new(),
             success: true,
             route: format!("internal:role_manager/{act}"),
         },
-        Err(error) => crate::agent::types::DispatchResult {
+        Err(error) => crate::agent::types::DispatchResult { view: None,
             stdout: String::new(),
             stderr: error,
             success: false,

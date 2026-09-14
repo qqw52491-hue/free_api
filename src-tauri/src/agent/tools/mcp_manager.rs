@@ -84,7 +84,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
         "list" => {
             let conn = match db.0.lock() {
                 Ok(c) => c,
-                Err(e) => return DispatchResult {
+                Err(e) => return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("获取数据库锁失败: {}", e),
                     success: false,
@@ -93,7 +93,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             };
             let mut stmt = match conn.prepare("SELECT id, name, command, args, env, capability_card, enabled, created_at FROM mcp_plugins ORDER BY created_at DESC") {
                 Ok(s) => s,
-                Err(e) => return DispatchResult {
+                Err(e) => return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("查询失败: {}", e),
                     success: false,
@@ -131,7 +131,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 Ok(record)
             }).ok().map(|iter| iter.flatten().collect()).unwrap_or_default();
 
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".to_string()),
                 stderr: String::new(),
                 success: true,
@@ -141,7 +141,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
         "add_http" | "quick_connect" => {
             let raw_url = params.get("url").or_else(|| params.get("remote_url")).and_then(|v| v.as_str()).unwrap_or("").trim();
             if raw_url.is_empty() {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: "❌ 缺少必填参数 url。请提供远端 MCP URL (如 https://example.com/mcp)".to_string(),
                     success: false,
@@ -166,7 +166,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             // 当前仅支持 streamable-http 传输；显式拒绝其它值（如 sse），不做静默降级。
             let transport_normalized = transport.trim().to_ascii_lowercase();
             if !transport.is_empty() && transport_normalized != "streamable-http" {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!(
                         "❌ 不支持的传输协议 transport='{}'。当前仅支持 \"streamable-http\"；SSE 暂不支持。",
@@ -196,7 +196,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
 
             let client = match crate::agent::mcp::McpClient::spawn(config) {
                 Ok(c) => c,
-                Err(e) => return DispatchResult {
+                Err(e) => return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("启动客户端失败: {}", e),
                     success: false,
@@ -292,7 +292,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 Ok((tool_count, card)) => {
                     let conn = match db.0.lock() {
                         Ok(c) => c,
-                        Err(e) => return DispatchResult {
+                        Err(e) => return DispatchResult { view: None,
                             stdout: String::new(),
                             stderr: format!("数据库锁获取失败: {}", e),
                             success: false,
@@ -311,7 +311,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                          ON CONFLICT(name) DO UPDATE SET command=?3, args=?4, env=?5, capability_card=?6, url=?8, headers=?9",
                         rusqlite::params![id, plugin_name, command, args_json, env_json, card, now, raw_url, headers_json],
                     ) {
-                        return DispatchResult {
+                        return DispatchResult { view: None,
                             stdout: String::new(),
                             stderr: format!("插件 [{}] 连接验证成功，但配置写库失败: {}", plugin_name, e),
                             success: false,
@@ -326,14 +326,14 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                         _ => "⚠️ 智能能力卡未生成（连接与配置保存成功；可稍后重试接入或手动填写）".to_string(),
                     };
 
-                    DispatchResult {
+                    DispatchResult { view: None,
                         stdout: format!("✅ 成功接入 MCP 插件 [{}] (包含 {} 个工具)！\n{}", plugin_name, tool_count, card_note),
                         stderr: String::new(),
                         success: true,
                         route: "mcp_manager:add_http".to_string(),
                     }
                 }
-                Err(e) => DispatchResult {
+                Err(e) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("连接并提炼 MCP 失败: {}", e),
                     success: false,
@@ -345,7 +345,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let confirm = params.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
             if name.is_empty() {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: "❌ 缺少必填参数 name".to_string(),
                     success: false,
@@ -353,7 +353,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 };
             }
             if !confirm {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("⚠️ 警告：删除 MCP 插件 [{}] 将永久移除配置，请再次确认并在 command 中附带 confirm: true", name),
                     success: false,
@@ -362,7 +362,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             }
             let conn = match db.0.lock() {
                 Ok(c) => c,
-                Err(e) => return DispatchResult {
+                Err(e) => return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("数据库锁获取失败: {}", e),
                     success: false,
@@ -375,7 +375,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             );
             match affected {
                 Ok(0) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("❌ 未找到名为 [{}] 的 MCP 插件；请先用 list 查看现有插件", name),
                         success: false,
@@ -383,7 +383,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     };
                 }
                 Err(e) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("删除插件 [{}] 写库失败: {}", name, e),
                         success: false,
@@ -394,7 +394,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             }
             invalidate_plugin(name);
 
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: format!("✅ 已成功删除 MCP 插件 [{}]（运行中的插件将在下一次任务会话同步时卸载）", name),
                 stderr: String::new(),
                 success: true,
@@ -406,7 +406,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
             let conn = match db.0.lock() {
                 Ok(c) => c,
-                Err(e) => return DispatchResult {
+                Err(e) => return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("数据库锁获取失败: {}", e),
                     success: false,
@@ -419,7 +419,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             );
             match affected {
                 Ok(0) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("❌ 未找到名为 [{}] 的 MCP 插件；请先用 list 查看现有插件", name),
                         success: false,
@@ -427,7 +427,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     };
                 }
                 Err(e) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("切换插件 [{}] 状态写库失败: {}", name, e),
                         success: false,
@@ -438,14 +438,14 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             }
             invalidate_plugin(name);
 
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: format!("✅ 插件 [{}] 已切换为 {}（将在下一次任务会话同步时生效）", name, if enabled { "启用" } else { "停用" }),
                 stderr: String::new(),
                 success: true,
                 route: "mcp_manager:toggle".to_string(),
             }
         }
-        _ => DispatchResult {
+        _ => DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!("❌ 未知的 mcp_manager 动作 action='{}'。支持的动作: list, add_http, quick_connect (add_http 的别名), toggle, delete", act),
             success: false,

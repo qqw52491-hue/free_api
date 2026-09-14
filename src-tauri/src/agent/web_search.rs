@@ -655,7 +655,7 @@ pub fn dispatch(tool: &str, params: &serde_json::Value) -> DispatchResult {
             .trim();
 
         if query.is_empty() {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "web_search 缺少必填参数 'query' (搜索关键词)".to_string(),
                 success: false,
@@ -684,14 +684,14 @@ pub fn dispatch(tool: &str, params: &serde_json::Value) -> DispatchResult {
                         item.snippet
                     ));
                 }
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: md,
                     stderr: String::new(),
                     success: true,
                     route: "web_search_success".to_string(),
                 }
             }
-            Err(e) => DispatchResult {
+            Err(e) => DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("网络搜索异常: {}", e),
                 success: false,
@@ -707,7 +707,7 @@ pub fn dispatch(tool: &str, params: &serde_json::Value) -> DispatchResult {
             .trim();
 
         if url.is_empty() {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "web_fetch 缺少必填参数 'url' (目标网页地址)".to_string(),
                 success: false,
@@ -717,13 +717,13 @@ pub fn dispatch(tool: &str, params: &serde_json::Value) -> DispatchResult {
 
         let url_str = url.to_string();
         match block_on_async(async move { fetch_url_markdown(&url_str).await }) {
-            Ok(content) => DispatchResult {
+            Ok(content) => DispatchResult { view: None,
                 stdout: format!("### 📄 网页正文提纯 ({})\n\n{}", url, content),
                 stderr: String::new(),
                 success: true,
                 route: "web_fetch_success".to_string(),
             },
-            Err(e) => DispatchResult {
+            Err(e) => DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("提取网页正文失败 ({}): {}", url, e),
                 success: false,
@@ -731,7 +731,7 @@ pub fn dispatch(tool: &str, params: &serde_json::Value) -> DispatchResult {
             },
         }
     } else {
-        DispatchResult {
+        DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!("未知网络工具: {}", tool),
             success: false,

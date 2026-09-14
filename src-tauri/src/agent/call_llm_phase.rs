@@ -166,7 +166,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     .unwrap_or_else(|| "用户请求中断当前模型输出。".to_string());
                 return Ok(StepExecutionOutcome {
                     instruction: AgentInstruction::default(),
-                    result: DispatchResult {
+                    result: DispatchResult { view: None,
                         success: true,
                         stdout: reason,
                         stderr: String::new(),
@@ -328,7 +328,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         if let Some(reason) = take_pending_interrupt(rx) {
             return Ok(StepExecutionOutcome {
                 instruction: inst,
-                result: DispatchResult {
+                result: DispatchResult { view: None,
                     success: true,
                     stdout: reason,
                     stderr: String::new(),
@@ -399,7 +399,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         if let Some(reason) = take_pending_interrupt(rx) {
             return Ok(StepExecutionOutcome {
                 instruction: inst,
-                result: DispatchResult {
+                result: DispatchResult { view: None,
                     success: true,
                     stdout: reason,
                     stderr: String::new(),

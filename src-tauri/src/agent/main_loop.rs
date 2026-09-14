@@ -1439,7 +1439,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     result.route,
                 );
                 println!("🛑 [GateDeadlock] {}", reason);
-                result = DispatchResult {
+                result = DispatchResult { view: None,
                     success: true,
                     stdout: reason,
                     stderr: String::new(),
@@ -1867,6 +1867,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     open_todos.len()
                 ),
                 None,
+                None,
             );
             // 调优：finish 被质询 = 交付未达标，下一轮重写升维处理（规则模式直接升 Pro，
             // 打分模式累加连续失败权重）。实测依据：Flash 档反复守不住交付披露纪律。
@@ -1930,6 +1931,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     Some(true),
                     "终态收据复用：验证与终审结论在 diff 未变下仍有效，直接提交",
                     None,
+                    None,
                 );
             } else {
             // Level 0 机械门禁：零 Token 快速拦截（Scope 边界越界等）
@@ -1952,6 +1954,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     Some("finish".to_string()),
                     Some(false),
                     &format!("机械拦截：改动超出目标块预定范围（{} 项越界）", scope_violations.len()),
+                    None,
                     None,
                 );
                 context.record_step_outcome(false);
@@ -2009,6 +2012,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                         Some(false),
                         "机械拦截：方案声明目标与实际改动零交集",
                         None,
+                        None,
                     );
                     context.record_step_outcome(false);
                     // 跳过终审：机械事实已足够打回，省一次审查
@@ -2054,6 +2058,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                         Some("finish".to_string()),
                         Some(false),
                         &format!("义务宿主验证失败 {} 项", obligation_failures.len()),
+                        None,
                         None,
                     );
                     context.record_step_outcome(false);
@@ -2208,6 +2213,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                             review_res.blocking_issues.len()
                         ),
                         None,
+                        None,
                     );
                     context.record_step_outcome(false);
                 } else {
@@ -2229,6 +2235,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 "终态审查熔断放行（已重试 3 次）：仍有 {} 项未收敛缺陷已附带警告交付",
                                 review_res.blocking_issues.len()
                             ),
+                            None,
                             None,
                         );
                     } else {
@@ -2262,6 +2269,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 risk_flags.join(", ")
                             ),
                             None,
+                            None,
                         );
                         context.record_step_outcome(false);
                     }
@@ -2284,6 +2292,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     Some("finish".to_string()),
                     Some(true),
                     &output_text,
+                    None,
                     None,
                 );
             }
@@ -2350,6 +2359,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 Some("prepare_finish".to_string()),
                 Some(receipt.is_ready()),
                 &output_text,
+                None,
                 None,
             );
         } else if !is_finish {
@@ -2548,6 +2558,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             "status": outcome_str,
             "output": output_text.clone(),
             "output_id": output_id.clone(),
+            "view": result.view.clone(),
             "resource_scope_revision": context.resource_scope.revision,
             "metrics": metrics_json,
             "token_usage": metrics_json,

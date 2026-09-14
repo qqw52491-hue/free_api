@@ -27,7 +27,7 @@ pub fn run_plan_tree_sync(
     // 硬拒绝第一道：任何深度出现超限/空并行组，整棵树拒绝执行，一个分支都不跑。
     if let Err(error) = validate_plan_tree_parallel_fanout(plan_node) {
         println!("🚫 [PlanTree: {}] 并行扇出越界，拒绝执行: {}", session_id, error);
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: error,
             success: false,
@@ -79,7 +79,7 @@ pub fn run_plan_tree_sync(
     let success = report.success;
     let feedback = report.to_llm_feedback();
 
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: feedback.clone(),
         stderr: if success { String::new() } else { feedback },
         success,

@@ -22,7 +22,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
         "delete" => delete(db, params),
         "list_resources" => list_resources(db, params),
         "add_resource" => add_resource(db, params),
-        _ => DispatchResult {
+        _ => DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!(
                 "project_manager 未知 action='{}'。可用：list() / create(name, root_path, confirm: true) / delete(project_id, confirm: true) / list_resources(project_id) / add_resource(project_id, path, label?)",
@@ -57,7 +57,7 @@ fn list(db: &DbState) -> DispatchResult {
         })
         .map(|iter| iter.flatten().collect())
         .unwrap_or_default();
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".to_string()),
         stderr: String::new(),
         success: true,
@@ -83,7 +83,7 @@ fn create(db: &DbState, params: &serde_json::Value) -> DispatchResult {
         Err(e) => return fail("create", &format!("获取数据库锁失败: {e}")),
     };
     match crate::commands::projects::create_project_row(&conn, &name, &root_path) {
-        Ok(project) => DispatchResult {
+        Ok(project) => DispatchResult { view: None,
             stdout: serde_json::to_string_pretty(&serde_json::json!({
                 "message": "项目已创建，之后可在任务/定时计划里通过 project_id 绑定该工作区。",
                 "id": project.id,
@@ -123,7 +123,7 @@ fn delete(db: &DbState, params: &serde_json::Value) -> DispatchResult {
         rusqlite::params![project_id],
     ) {
         Ok(0) => fail("delete", "项目不存在或已删除"),
-        Ok(_) => DispatchResult {
+        Ok(_) => DispatchResult { view: None,
             stdout: "项目已删除（关联的会话关系与资源登记已级联清除，工作区文件不受影响）。".to_string(),
             stderr: String::new(),
             success: true,
@@ -160,7 +160,7 @@ fn list_resources(db: &DbState, params: &serde_json::Value) -> DispatchResult {
         })
         .map(|iter| iter.flatten().collect())
         .unwrap_or_default();
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".to_string()),
         stderr: String::new(),
         success: true,
@@ -185,7 +185,7 @@ fn add_resource(db: &DbState, params: &serde_json::Value) -> DispatchResult {
         Err(e) => return fail("add_resource", &format!("获取数据库锁失败: {e}")),
     };
     match crate::commands::projects::add_project_resource_row(&conn, &project_id, &raw_path) {
-        Ok(resource) => DispatchResult {
+        Ok(resource) => DispatchResult { view: None,
             stdout: serde_json::to_string_pretty(&serde_json::json!({
                 "message": "已登记为受管资源，同项目所有会话可按 resource_id 读取。",
                 "resource_id": resource.resource_id,
@@ -202,7 +202,7 @@ fn add_resource(db: &DbState, params: &serde_json::Value) -> DispatchResult {
 }
 
 fn fail(action: &str, message: &str) -> DispatchResult {
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: String::new(),
         stderr: message.to_string(),
         success: false,

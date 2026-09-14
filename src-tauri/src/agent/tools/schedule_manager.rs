@@ -24,7 +24,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
         "toggle" => toggle(params),
         "delete" => delete(params),
         "run_now" => run_now(db, params),
-        _ => DispatchResult {
+        _ => DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!(
                 "schedule_manager 未知 action='{}'。可用：list() / save(name, goal, kind, ...) / toggle(id, enabled) / delete(id, confirm: true) / run_now(id)",
@@ -56,7 +56,7 @@ fn list() -> DispatchResult {
                     })
                 })
                 .collect();
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: serde_json::to_string_pretty(&rows)
                     .unwrap_or_else(|_| "[]".to_string()),
                 stderr: String::new(),
@@ -64,7 +64,7 @@ fn list() -> DispatchResult {
                 route: "schedule_manager:list".to_string(),
             }
         }
-        Err(error) => DispatchResult {
+        Err(error) => DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!("读取定时任务失败: {error}"),
             success: false,
@@ -147,7 +147,7 @@ fn save(params: &serde_json::Value) -> DispatchResult {
             if let Err(error) = save_schedules(&items) {
                 return fail("save", &format!("保存计划失败: {error}"));
             }
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: format!("{message}。调度器每 30 秒巡检一次，到点自动派发；完成后结果会推送到主人微信。"),
                 stderr: String::new(),
                 success: true,
@@ -183,7 +183,7 @@ fn toggle(params: &serde_json::Value) -> DispatchResult {
             if let Err(error) = save_schedules(&items) {
                 return fail("toggle", &format!("保存计划失败: {error}"));
             }
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: format!("定时任务「{name}」已{}", if enabled { "启用" } else { "停用" }),
                 stderr: String::new(),
                 success: true,
@@ -215,7 +215,7 @@ fn delete(params: &serde_json::Value) -> DispatchResult {
     if let Err(error) = save_schedules(&items) {
         return fail("delete", &format!("保存计划失败: {error}"));
     }
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: "已删除定时任务。".to_string(),
         stderr: String::new(),
         success: true,
@@ -322,7 +322,7 @@ fn run_now(db: &DbState, params: &serde_json::Value) -> DispatchResult {
         None,
     )
     {
-        Ok(run_id) => DispatchResult {
+        Ok(run_id) => DispatchResult { view: None,
             stdout: format!(
                 "已立即派发「{}」（run {run_id}），完成后结果会推送到主人微信。",
                 item.name
@@ -363,7 +363,7 @@ fn create_session(
 }
 
 fn fail(action: &str, message: &str) -> DispatchResult {
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: String::new(),
         stderr: message.to_string(),
         success: false,

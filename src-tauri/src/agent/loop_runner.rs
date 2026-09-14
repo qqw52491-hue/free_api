@@ -117,7 +117,7 @@ pub async fn run_tool_phase(
             &inst.get_action(),
             &inst.get_params(),
         ) {
-            return Ok(DispatchResult {
+            return Ok(DispatchResult { view: None,
                 success: false,
                 stdout: String::new(),
                 stderr: reason,
@@ -131,7 +131,7 @@ pub async fn run_tool_phase(
                 &format!("agent-log-{}", final_session_id),
                 "🛑 重复读取已拦截：内容未变化，强制切换策略".to_string(),
             );
-            return Ok(DispatchResult {
+            return Ok(DispatchResult { view: None,
                 success: false,
                 stdout: String::new(),
                 stderr: block_msg,
@@ -165,11 +165,12 @@ pub async fn run_tool_phase(
         None,
         "",
         None,
+        None,
     );
 
     if let Some(submission) = submit_plan_request {
         let result = if inst.has_executable_entry() {
-            DispatchResult {
+            DispatchResult { view: None,
                 success: false,
                 stdout: String::new(),
                 stderr: "【⚠️ submit_plan 协议误用】方案提交是独立的状态转换动作，必须与工具调用分步提交。\n请单独输出 {\"submit_plan\": {...}}，不要附带 tool/action/params。".to_string(),
@@ -211,6 +212,7 @@ pub async fn run_tool_phase(
             Some(result.success),
             if result.success { &result.stdout } else { &result.stderr },
             Some(tool_started_at.elapsed().as_millis()),
+            None,
         );
         return Ok(result);
     }
@@ -220,14 +222,14 @@ pub async fn run_tool_phase(
     // emit 完成事件，避免与 main_loop 的权威收据事件重复。
     if inst.prepare_finish.is_some() {
         let result = if inst.has_executable_entry() {
-            DispatchResult {
+            DispatchResult { view: None,
                 success: false,
                 stdout: String::new(),
                 stderr: "【⚠️ prepare_finish 协议误用】终态预检是独立的评估动作，必须与工具调用分步提交。\n请单独输出 {\"prepare_finish\": {\"summary\": \"...\"}}，不要附带 tool/action/params。".to_string(),
                 route: "finalization:prepare_mixed".to_string(),
             }
         } else {
-            DispatchResult {
+            DispatchResult { view: None,
                 success: true,
                 stdout: inst
                     .prepare_finish
@@ -259,6 +261,7 @@ pub async fn run_tool_phase(
                 Some(false),
                 &result.stderr,
                 Some(tool_started_at.elapsed().as_millis()),
+                None,
             );
         }
         return Ok(result);
@@ -276,7 +279,7 @@ pub async fn run_tool_phase(
             },
         );
         if inst.is_bare_exploration_extension_request() {
-            let result = DispatchResult {
+            let result = DispatchResult { view: None,
                 success: verdict.granted,
                 stdout: if verdict.granted {
                     verdict.message.clone()
@@ -300,6 +303,7 @@ pub async fn run_tool_phase(
                 Some(verdict.granted),
                 &verdict.message,
                 Some(tool_started_at.elapsed().as_millis()),
+                None,
             );
             return Ok(result);
         }
@@ -328,13 +332,14 @@ pub async fn run_tool_phase(
             Some(false),
             &rejection.stderr,
             Some(tool_started_at.elapsed().as_millis()),
+            None,
         );
         return Ok(rejection);
     }
 
     // --- B1. 协议终态：finish 不创建 pending、不派发工具，由主循环在终态自检裁决后统一收敛状态与发送事件。 ---
     if is_finish_instruction(inst) {
-        let result = DispatchResult {
+        let result = DispatchResult { view: None,
             stdout: inst
                 .command
                 .as_ref()
@@ -352,7 +357,7 @@ pub async fn run_tool_phase(
 
     // --- B1.5 P4 连续批发派发解析失败降级熔断检查 ---
     if let Err(breaker_msg) = context.check_batch_dispatch_allowed(inst.has_dispatches()) {
-        return Ok(DispatchResult {
+        return Ok(DispatchResult { view: None,
             stdout: String::new(),
             stderr: breaker_msg,
             success: false,
@@ -406,6 +411,7 @@ pub async fn run_tool_phase(
                 Some(false),
                 &rejection.stderr,
                 Some(tool_started_at.elapsed().as_millis()),
+                None,
             );
             return Ok(rejection);
         }
@@ -422,7 +428,7 @@ pub async fn run_tool_phase(
                 >= crate::agent::checkpoint::max_plan_reviewer_rounds()
             {
                 let limit_msg = crate::agent::gate_messages::reviewer_retry_limit();
-                let result = DispatchResult {
+                let result = DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: limit_msg,
                     success: false,
@@ -448,6 +454,7 @@ pub async fn run_tool_phase(
                     Some(false),
                     &result.stderr,
                     Some(tool_started_at.elapsed().as_millis()),
+                    None,
                 );
                 return Ok(result);
             }
@@ -685,7 +692,7 @@ pub async fn run_tool_phase(
                 if inst.is_mixed_dispatch_format() {
                     stdout = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches。\n\n{}", stdout);
                 }
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout,
                     stderr: String::new(),
                     success: true,
@@ -693,7 +700,7 @@ pub async fn run_tool_phase(
                 }
             } else {
                 let err_msg = item_reports.into_iter().next().unwrap_or_else(|| "派发失败".to_string());
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: err_msg,
                     success: false,
@@ -717,7 +724,7 @@ pub async fn run_tool_phase(
             }
             let breaker_alert = context.record_batch_dispatch_outcome(success_count > 0);
             if success_count > 0 {
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: summary,
                     stderr: String::new(),
                     success: true,
@@ -728,7 +735,7 @@ pub async fn run_tool_phase(
                 if let Some(alert) = breaker_alert {
                     err = format!("{}\n\n{}", err, alert);
                 }
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: err,
                     success: false,
@@ -775,7 +782,7 @@ pub async fn run_tool_phase(
                     &format!("agent-log-{}", final_session_id),
                     format!("👁️ 持续监听已启动: {}", watch_id),
                 );
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: format!(
                         "持续监听已启动，watch_id: {}。此后每个巡检周期内若目标发生变化，变化事件会作为 watch_event 自动注入你的上下文（无需轮询读取）；若长时间无变化则不会产生任何事件。任务收尾前请调用 watch_stop 释放该监听，否则 finish 会被拦截。",
                         watch_id
@@ -785,7 +792,7 @@ pub async fn run_tool_phase(
                     route: "watch:started".to_string(),
                 }
             }
-            Err(error) => DispatchResult {
+            Err(error) => DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: error,
                 success: false,
@@ -805,13 +812,13 @@ pub async fn run_tool_phase(
                 .map(|rows| format!("已停止全部持续监听（{} 行）", rows)),
         };
         match stop_outcome {
-            Ok(summary) => DispatchResult {
+            Ok(summary) => DispatchResult { view: None,
                 stdout: summary,
                 stderr: String::new(),
                 success: true,
                 route: "watch:stopped".to_string(),
             },
-            Err(error) => DispatchResult {
+            Err(error) => DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: error,
                 success: false,
@@ -990,7 +997,7 @@ pub async fn run_tool_phase(
                 if inst.is_mixed_dispatch_format() {
                     stdout = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches。\n\n{}", stdout);
                 }
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout,
                     stderr: String::new(),
                     success: true,
@@ -998,7 +1005,7 @@ pub async fn run_tool_phase(
                 }
             } else {
                 let err_msg = item_reports.into_iter().next().unwrap_or_else(|| "派发失败".to_string());
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: err_msg,
                     success: false,
@@ -1022,7 +1029,7 @@ pub async fn run_tool_phase(
             }
             let breaker_alert = context.record_batch_dispatch_outcome(success_count > 0);
             if success_count > 0 {
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: summary,
                     stderr: String::new(),
                     success: true,
@@ -1033,7 +1040,7 @@ pub async fn run_tool_phase(
                 if let Some(alert) = breaker_alert {
                     err = format!("{}\n\n{}", err, alert);
                 }
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: err,
                     success: false,
@@ -1209,7 +1216,7 @@ pub async fn run_tool_phase(
                 if inst.is_mixed_dispatch_format() {
                     stdout = format!("⚠️ 检测到混合格式（同时包含 dispatches 与单发字段），系统已优先采用 dispatches。\n\n{}", stdout);
                 }
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout,
                     stderr: String::new(),
                     success: true,
@@ -1217,7 +1224,7 @@ pub async fn run_tool_phase(
                 }
             } else {
                 let err_msg = item_reports.into_iter().next().unwrap_or_else(|| "派发失败".to_string());
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: err_msg,
                     success: false,
@@ -1241,7 +1248,7 @@ pub async fn run_tool_phase(
             }
             let breaker_alert = context.record_batch_dispatch_outcome(success_count > 0);
             if success_count > 0 {
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: summary,
                     stderr: String::new(),
                     success: true,
@@ -1252,7 +1259,7 @@ pub async fn run_tool_phase(
                 if let Some(alert) = breaker_alert {
                     err = format!("{}\n\n{}", err, alert);
                 }
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: err,
                     success: false,
@@ -1637,14 +1644,14 @@ pub async fn run_tool_phase(
                         ));
                     }
                 }
-                DispatchResult {
+                DispatchResult { view: None,
                     stdout: out,
                     stderr: String::new(),
                     success: true,
                     route: "wait_jobs:resolved".to_string(),
                 }
             }
-            Err(err) => DispatchResult {
+            Err(err) => DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: err,
                 success: false,
@@ -1675,14 +1682,14 @@ pub async fn run_tool_phase(
             .map(|s| s.trim().to_string());
 
         if target_child_id.is_empty() {
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "❌ resume_child 缺少必要参数 child_run_id。".to_string(),
                 success: false,
                 route: "host_rejection:missing_child_run_id".to_string(),
             }
         } else if followup_msg.is_empty() {
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "❌ resume_child 缺少必要参数 message（对该子任务的追问或补充要求）。".to_string(),
                 success: false,
@@ -1709,7 +1716,7 @@ pub async fn run_tool_phase(
             };
 
             match child_data {
-                Err(err) => DispatchResult {
+                Err(err) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: err,
                     success: false,
@@ -1717,7 +1724,7 @@ pub async fn run_tool_phase(
                 },
                 Ok((status, kind, ws_copy, hist_json, child_model, root_str, prev_result_json)) => {
                     if status != "succeeded" {
-                        DispatchResult {
+                        DispatchResult { view: None,
                             stdout: String::new(),
                             stderr: format!("❌ 仅能追问已成功的子任务（该任务当前状态为「{}」）；如需继续请直接派发新任务。", status),
                             success: false,
@@ -1730,7 +1737,7 @@ pub async fn run_tool_phase(
                             None => Vec::new(),
                         };
                         if messages.is_empty() {
-                            DispatchResult {
+                            DispatchResult { view: None,
                                 stdout: String::new(),
                                 stderr: "❌ 该审查任务未留存历史对话记录，无法恢复对质。".to_string(),
                                 success: false,
@@ -1782,7 +1789,7 @@ pub async fn run_tool_phase(
                                     id
                                 }
                                 Err(err) => {
-                                    return Ok(DispatchResult {
+                                    return Ok(DispatchResult { view: None,
                                         stdout: String::new(),
                                         stderr: format!("❌ 创建审查对质任务失败: {}", err),
                                         success: false,
@@ -1794,7 +1801,7 @@ pub async fn run_tool_phase(
                             let mut config = match ModelConfig::from_db_state(state.inner(), &model_to_use) {
                                 Ok(cfg) => cfg,
                                 Err(err) => {
-                                    return Ok(DispatchResult {
+                                    return Ok(DispatchResult { view: None,
                                         stdout: String::new(),
                                         stderr: format!("❌ 加载模型配置失败: {}", err),
                                         success: false,
@@ -1806,7 +1813,7 @@ pub async fn run_tool_phase(
                             if !checkpoint.plan_phase.is_approved() {
                                 // 反驳对质同样消耗审查预算：必须走统一预扣，堵住无上限自增旁路
                                 if let Err(reason) = checkpoint.reserve_plan_review_round() {
-                                    return Ok(DispatchResult {
+                                    return Ok(DispatchResult { view: None,
                                         stdout: String::new(),
                                         stderr: format!("【审查轮数已达上限】{}\n{}", reason, crate::agent::gate_messages::reviewer_retry_limit()),
                                         success: false,
@@ -1955,7 +1962,7 @@ pub async fn run_tool_phase(
                                 );
                             });
 
-                            DispatchResult {
+                            DispatchResult { view: None,
                                 stdout: format!(
                                     "✅ 审查专家对质已成功启动：新 child_run_id={}（纯上下文继承唤醒，正在重新研判反驳）。你可以继续执行其他工作，或使用 wait_jobs 等待结果。",
                                     new_child_run_id
@@ -1972,7 +1979,7 @@ pub async fn run_tool_phase(
                             _ => PathBuf::new(),
                         };
                         if ws_path.as_os_str().is_empty() {
-                            DispatchResult {
+                            DispatchResult { view: None,
                                 stdout: String::new(),
                                 stderr: "❌ 该子任务的工作副本已随父运行结束回收，无法继续追问，请重新派发新任务。".to_string(),
                                 success: false,
@@ -1984,7 +1991,7 @@ pub async fn run_tool_phase(
                                 None => Vec::new(),
                             };
                             if messages.is_empty() {
-                                DispatchResult {
+                                DispatchResult { view: None,
                                     stdout: String::new(),
                                     stderr: "❌ 该子任务未留存历史对话记录，无法恢复。".to_string(),
                                     success: false,
@@ -2028,7 +2035,7 @@ pub async fn run_tool_phase(
                                 ) {
                                     Ok(id) => id,
                                     Err(err) => {
-                                        return Ok(DispatchResult {
+                                        return Ok(DispatchResult { view: None,
                                             stdout: String::new(),
                                             stderr: format!("❌ 创建追问子任务失败: {}", err),
                                             success: false,
@@ -2040,7 +2047,7 @@ pub async fn run_tool_phase(
                                 let config = match ModelConfig::from_db_state(state.inner(), &model_to_use) {
                                     Ok(cfg) => cfg,
                                     Err(err) => {
-                                        return Ok(DispatchResult {
+                                        return Ok(DispatchResult { view: None,
                                             stdout: String::new(),
                                             stderr: format!("❌ 加载模型配置失败: {}", err),
                                             success: false,
@@ -2093,6 +2100,7 @@ pub async fn run_tool_phase(
                                             Some(false),
                                             &rejection.stderr,
                                             Some(tool_started_at.elapsed().as_millis()),
+                                            None,
                                         );
                                         return Ok(rejection);
                                     }
@@ -2130,7 +2138,7 @@ pub async fn run_tool_phase(
                                         Some(max_steps),
                                     ));
 
-                                    DispatchResult {
+                                    DispatchResult { view: None,
                                         stdout: format!(
                                             "✅ 写入 worker 追问已成功启动：新 child_run_id={}（继承上轮历史与工作区副本，步数上限减半为 {} 步）。你可以继续执行其他工作，或使用 wait_jobs 等待结果。",
                                             new_child_run_id, max_steps
@@ -2162,7 +2170,7 @@ pub async fn run_tool_phase(
                                         Some(max_steps),
                                     ));
 
-                                    DispatchResult {
+                                    DispatchResult { view: None,
                                         stdout: format!(
                                             "✅ 侦察 worker 追问已成功启动：新 child_run_id={}（继承上轮历史，步数上限减半为 {} 步）。你可以继续执行其他工作，或使用 wait_jobs 等待结果。",
                                             new_child_run_id, max_steps
@@ -2212,8 +2220,9 @@ pub async fn run_tool_phase(
                     Some(false),
                     &cooldown_msg,
                     Some(tool_started_at.elapsed().as_millis()),
+                    None,
                 );
-                return Ok(DispatchResult {
+                return Ok(DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: cooldown_msg,
                     success: false,
@@ -2247,8 +2256,9 @@ pub async fn run_tool_phase(
                         Some(false),
                         &quota_err,
                         Some(tool_started_at.elapsed().as_millis()),
+                        None,
                     );
-                    return Ok(DispatchResult {
+                    return Ok(DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: quota_err,
                         success: false,
@@ -2268,8 +2278,9 @@ pub async fn run_tool_phase(
                     Some(false),
                     &dup_err,
                     Some(tool_started_at.elapsed().as_millis()),
+                    None,
                 );
-                return Ok(DispatchResult {
+                return Ok(DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: dup_err,
                     success: false,
@@ -2343,7 +2354,7 @@ pub async fn run_tool_phase(
         let reply = match rx.recv().await {
             Some(HumanControl::Answer(reply)) => reply,
             Some(HumanControl::ReplaceGoal(goal)) => {
-                return Ok(DispatchResult {
+                return Ok(DispatchResult { view: None,
                     success: true,
                     stdout: format!("用户提交了新的任务目标：{}", goal),
                     stderr: String::new(),
@@ -2351,7 +2362,7 @@ pub async fn run_tool_phase(
                 })
             }
             Some(HumanControl::Cancel) => {
-                return Ok(DispatchResult {
+                return Ok(DispatchResult { view: None,
                     success: true,
                     stdout: "用户请求停止当前任务。".to_string(),
                     stderr: String::new(),
@@ -2475,7 +2486,7 @@ pub async fn run_tool_phase(
         .ok();
 
         // 伪造一个成功的执行结果，把人类的话当作工具输出返回给大模型
-        crate::agent::types::DispatchResult {
+        crate::agent::types::DispatchResult { view: None,
             success: true,
             stdout: format!("人类的回复是: {}", reply),
             stderr: String::new(),
@@ -2489,7 +2500,7 @@ pub async fn run_tool_phase(
                 .resource_scope
                 .guard_known_outside_write(&inst.get_tool(), &inst.get_params())
             {
-                let result = DispatchResult {
+                let result = DispatchResult { view: None,
                     success: false,
                     stdout: String::new(),
                     stderr: format!(
@@ -2508,6 +2519,7 @@ pub async fn run_tool_phase(
                     Some(false),
                     &result.stderr,
                     Some(tool_started_at.elapsed().as_millis()),
+                    None,
                 );
                 return Ok(result);
             }
@@ -2566,7 +2578,7 @@ pub async fn run_tool_phase(
                                 &format!("agent-log-{}", final_session_id),
                                 "⚠️ 写盘操作耗时超 1.5s，已强制安全终止。".to_string(),
                             ).ok();
-                            DispatchResult {
+                            DispatchResult { view: None,
                                 success: false,
                                 stdout: interrupt_reason,
                                 stderr: String::new(),
@@ -2576,7 +2588,7 @@ pub async fn run_tool_phase(
                     }
                 } else {
                     // 只读/网络/查询类工具：0 毫秒立刻中断退出
-                    DispatchResult {
+                    DispatchResult { view: None,
                         success: false,
                         stdout: interrupt_reason,
                         stderr: String::new(),
@@ -2669,6 +2681,7 @@ pub async fn run_tool_phase(
         Some(dispatch_result.success),
         result_text,
         Some(tool_started_at.elapsed().as_millis()),
+        dispatch_result.view.as_ref(),
     );
 
     Ok(dispatch_result)

@@ -138,7 +138,7 @@ pub fn dispatch(
                 "safe_to_retry": true,
                 "recommended_action": "provide_workspace_root",
             });
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("❌ [系统错误] 未提供当前活跃的工作区路径，拒绝执行 shell 命令。\n<!-- 结构化元数据: {} -->", payload),
                 success: false,
@@ -161,7 +161,7 @@ pub fn dispatch(
                 "safe_to_retry": true,
                 "recommended_action": "provide_command_field",
             });
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("❌ local_shell 缺少必填参数 'command'（待执行的命令行）。\n<!-- 结构化元数据: {} -->", payload),
                 success: false,
@@ -198,7 +198,7 @@ pub fn dispatch(
                 route: "shell_tool_misuse:file_read_via_shell",
             },
         );
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             success: false,
             route: "local_shell:file_read_misuse".to_string(),
@@ -223,7 +223,7 @@ pub fn dispatch(
                         "safe_to_retry": true,
                         "recommended_action": "use_path_within_workspace",
                     });
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("❌ [执行目录拒绝] 指定的 cwd 不在合法白名单内: {}\n<!-- 结构化元数据: {} -->", e, payload),
                         success: false,
@@ -451,7 +451,7 @@ fn execute_command_blocking(
                 "truncated": is_truncated,
             });
 
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: format!("{}\n\n<!-- 结构化元数据: {} -->", formatted_stdout.trim_end(), payload),
                 stderr: if success { String::new() } else { format!("命令退出码: {}", exit_code) },
                 success,
@@ -471,7 +471,7 @@ fn execute_command_blocking(
                 "recommended_action": recommended_action,
             });
 
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("❌ {}\n<!-- 结构化元数据: {} -->", err_msg, payload),
                 success: false,

@@ -346,19 +346,22 @@ fn cached_search_dispatch_result(
         "🎯【检索去重】本会话第 {} 步已执行完全同参的检索且期间无文件修改（未重新检索）。",
         step_id
     );
+    let mut top_paths: Vec<String> = Vec::new();
+    let mut total_hits = 0u64;
     if let Ok(payload) = serde_json::from_str::<Value>(&output) {
-        let total = payload
+        total_hits = payload
             .get("total_hits")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        anchor.push_str(&format!(" 共 {} 条命中，完整结果已在上文呈现。", total));
-        let top_paths: Vec<&str> = payload
+        anchor.push_str(&format!(" 共 {} 条命中，完整结果已在上文呈现。", total_hits));
+        top_paths = payload
             .get("hits")
             .and_then(|h| h.as_array())
             .map(|hits| {
                 hits.iter()
                     .filter_map(|h| h.get("id_or_path").and_then(Value::as_str))
                     .take(3)
+                    .map(|s| s.to_string())
                     .collect()
             })
             .unwrap_or_default();
@@ -368,7 +371,7 @@ fn cached_search_dispatch_result(
     } else {
         anchor.push_str(" 完整结果已在上文呈现。");
     }
-    match output_id {
+    match &output_id {
         Some(id) => anchor.push_str(&format!(
             " 如需复核请用 task_store.search_step_output(output_id=\"{}\", pattern=...) 定向检索或 get_step_output 分页回查，切勿重复发起同参检索；建议直接基于上述命中推进分析，或对命中文件做定向行范围读取。",
             id
@@ -378,7 +381,14 @@ fn cached_search_dispatch_result(
         ),
     }
 
-    DispatchResult {
+    let view = json!({
+        "kind": "search-cache",
+        "step_id": step_id,
+        "output_id": output_id,
+        "total_hits": total_hits,
+        "top_paths": top_paths,
+    });
+    DispatchResult { view: Some(view),
         stdout: anchor,
         stderr: String::new(),
         success: true,
@@ -432,7 +442,7 @@ pub fn dispatch_search(
                     limit: Some(10),
                 }
             } else {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!(
                         "❌ [search] 参数格式解析失败: {}\n💡 正确调用示例:\n  - 检索代码: {{\"query\": \"关键词\", \"kinds\": [\"code\"], \"path\": \".\"}}\n  - 检索历史: {{\"query\": \"关键词\", \"kinds\": [\"history\"]}}",
@@ -636,7 +646,24 @@ pub fn dispatch_search(
         result_payload["notes"] = json!(notes);
     }
 
-    DispatchResult {
+    // UI 结构化视图：模型拿 pretty JSON（上文 result_payload），前端拿类型化卡片数据。
+    // 同一事实两路投影——hits 截断到 12 条、snippet 收敛到 160 字符防卡片膨胀。
+    let view = json!({
+        "kind": "search",
+        "query": params.query,
+        "resolved_root": result_payload.get("resolved_root").cloned().unwrap_or(Value::Null),
+        "total_hits": all_hits.len(),
+        "truncated": all_hits.len() > 12,
+        "hits": all_hits.iter().take(12).map(|h| json!({
+            "kind": h.kind,
+            "path": h.id_or_path,
+            "snippet": h.snippet.chars().take(160).collect::<String>(),
+        })).collect::<Vec<_>>(),
+        "notes": notes,
+        "errors": errors,
+    });
+
+    DispatchResult { view: Some(view),
         stdout: serde_json::to_string_pretty(&result_payload)
             .unwrap_or_else(|_| result_payload.to_string()),
         stderr: if errors.is_empty() {
@@ -922,6 +949,12 @@ mod tests {
         assert!(str_query.success);
         let str_payload: Value = serde_json::from_str(&str_query.stdout).unwrap();
         assert_eq!(str_payload["total_hits"], 1);
+
+        // view 结构化视图：与模型向文本同事实、两路投影
+        let v = str_query.view.as_ref().expect("检索应产出结构化 view");
+        assert_eq!(v["kind"], "search");
+        assert_eq!(v["total_hits"], 1);
+        assert!(v["hits"].as_array().unwrap()[0]["path"].is_string());
     }
 
     /// 行表索引路径的测试库：在 setup_test_db 基础上补 run_traces/run_steps/step_logs。

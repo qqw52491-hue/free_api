@@ -664,14 +664,14 @@ pub fn dispatch(
                         "status": rec.status,
                         "message": format!("交付物文件「{}」已安全写入受管目录并登记入账 (ID: {})", rec.display_name, rec.id)
                     });
-                    DispatchResult {
+                    DispatchResult { view: None,
                         stdout: serde_json::to_string_pretty(&result_payload).unwrap_or_default(),
                         stderr: String::new(),
                         success: true,
                         route: "artifact_manager:create_document".to_string(),
                     }
                 }
-                Err(err) => DispatchResult {
+                Err(err) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("❌ [产物管理错误] 写入交付物失败: {}", err),
                     success: false,
@@ -689,7 +689,7 @@ pub fn dispatch(
                 .unwrap_or("");
 
             if path.trim().is_empty() {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: "❌ [产物管理错误] 必须提供 path 参数（工作区内文件路径）".to_string(),
                     success: false,
@@ -709,14 +709,14 @@ pub fn dispatch(
                         "status": rec.status,
                         "message": format!("工作区文件「{}」已登记入产物账本，任务完成时将自动回推给用户 (ID: {})", rec.display_name, rec.id),
                     });
-                    DispatchResult {
+                    DispatchResult { view: None,
                         stdout: serde_json::to_string_pretty(&result_payload).unwrap_or_default(),
                         stderr: String::new(),
                         success: true,
                         route: "artifact_manager:register_file".to_string(),
                     }
                 }
-                Err(err) => DispatchResult {
+                Err(err) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("❌ [产物管理错误] 登记工作区产物失败: {}", err),
                     success: false,
@@ -727,14 +727,14 @@ pub fn dispatch(
         "list_artifacts" | "list" => {
             match list_session_artifacts(db, session_id) {
                 Ok(records) => {
-                    DispatchResult {
+                    DispatchResult { view: None,
                         stdout: serde_json::to_string_pretty(&records).unwrap_or_default(),
                         stderr: String::new(),
                         success: true,
                         route: "artifact_manager:list_artifacts".to_string(),
                     }
                 }
-                Err(err) => DispatchResult {
+                Err(err) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("❌ [产物管理错误] 查询产物失败: {}", err),
                     success: false,
@@ -749,7 +749,7 @@ pub fn dispatch(
                 .unwrap_or("");
 
             if artifact_id.is_empty() {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: "❌ [产物管理错误] 必须提供 artifact_id 参数".to_string(),
                     success: false,
@@ -758,13 +758,13 @@ pub fn dispatch(
             }
 
             match read_artifact_content(db, artifact_id) {
-                Ok(content) => DispatchResult {
+                Ok(content) => DispatchResult { view: None,
                     stdout: content,
                     stderr: String::new(),
                     success: true,
                     route: "artifact_manager:read_artifact".to_string(),
                 },
-                Err(err) => DispatchResult {
+                Err(err) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("❌ [产物管理错误] 读取产物失败: {}", err),
                     success: false,
@@ -772,7 +772,7 @@ pub fn dispatch(
                 },
             }
         }
-        unknown => DispatchResult {
+        unknown => DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!("❌ [产物管理错误] 未知的 action: '{}'。支持的 action: create_document, register_file, list_artifacts, read_artifact", unknown),
             success: false,

@@ -216,6 +216,21 @@ spec 测试用修复提交自带的测试 diff 做 test_patch（case_10/11），
 - 已评审暂不修：`consecutive_gate_blocked` 单步非门禁路由即清零的敏感度——
   若实弹发现模型"穿插无关只读探针"打断计数，再升级滑动窗口拒绝率。
 
+**工具输出三权分立 MVP（参照 DeepSeek Harness `render()/presentResult` 思路落地）**：
+- `DispatchResult.view: Option<Value>`：执行者直供的结构化 UI 数据，与 stdout/stderr
+  （模型向文本）正交——同一事实两路投影。252 处构造点脚本化补 `view: None`。
+- 管道：`emit_tool_event` + `AgentToolEvent.view` → 前端 `AgentStepItem.view`
+  （live 事件 + trace 回放两条路径都接）；前端按 `view.kind` 路由类型化卡片，
+  无 view 回退既有 `inferStepIntent` 文本启发式。
+- 首个接入：`dispatch_search` 产 `kind:"search"`（query/total_hits/hits≤12 条截断/
+  snippet≤160ch/notes/errors）+ `kind:"search-cache"`（去重锚点：step_id/output_id/
+  total_hits/top_paths）。新卡片组件 + CSS 已落。
+- 未抄 DSH 仪式：canonical schema 校验/冻结、`presentationMeta` 回放——
+  `output_id` + step 持久化已覆盖等效能力。
+- 扩展方式（以后每个想自定义外观的工具）：返回时塞 `view:{kind:...}` +
+  前端加对应 kind 分支组件。
+- 验证：cargo check 干净、586 测试全绿、vue-tsc 无错；检索 view 回归已断言。
+
 ## 阶段五存档：夜间自主测试计划（A→E，已完成）
 
 ### 【A】方差科学扩容 — 数据齐，统计如下

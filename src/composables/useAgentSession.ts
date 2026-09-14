@@ -679,6 +679,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 result,
                 rawParams: params,
                 rawResult: result,
+                view: (step.view && typeof step.view === "object" ? step.view : undefined) as AgentStepItem["view"],
                 metrics: (() => {
                     const rawM = asRecord(step.metrics || step.token_usage);
                     if (!Object.keys(rawM).length) return undefined;
@@ -907,6 +908,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         const result = payload.result_summary ?? payload.result;
         const rawParams = payload.params ?? payload.params_summary;
         const rawResult = payload.result ?? payload.result_summary;
+        const view = (payload.view && typeof payload.view === "object" ? payload.view : undefined) as AgentStepItem["view"];
 
         const status: AgentToolStatus = eventType === "finish_challenged" || eventType === "challenged"
             ? "challenged"
@@ -946,6 +948,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 result: result !== undefined ? result : current.result,
                 rawParams: rawParams !== undefined ? rawParams : current.rawParams,
                 rawResult: rawResult !== undefined ? rawResult : current.rawResult,
+                view: view !== undefined ? view : current.view,
             };
         } else {
             const newStep: AgentStepItem = {
@@ -964,6 +967,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 result,
                 rawParams,
                 rawResult,
+                view,
                 timestamp: toTimestamp(payload.timestamp),
             };
             steps.value.push(newStep);

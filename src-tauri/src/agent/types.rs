@@ -704,6 +704,10 @@ pub struct DispatchResult {
     pub stderr: String,
     pub success: bool,
     pub route: String,
+    /// 可选结构化视图：工具执行者直供的 UI 渲染数据（kind 判别联合），
+    /// 前端按 view.kind 路由到类型化卡片；None 时走既有文本启发式渲染。
+    /// 与 stdout/stderr（模型向文本）正交分离——同一事实，两路投影。
+    pub view: Option<serde_json::Value>,
 }
 
 /// 子 Agent 派发时的结构化交接上下文（P2 交接契约升级）

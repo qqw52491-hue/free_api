@@ -17,7 +17,7 @@ pub fn dispatch(_db: &DbState, action: &str, params: &serde_json::Value) -> Disp
 
     match act {
         "overview" | "list" => overview(),
-        _ => DispatchResult {
+        _ => DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!(
                 "system_info 未知 action='{}'。可用：overview()",
@@ -65,7 +65,7 @@ fn overview() -> DispatchResult {
         "disks": disk_rows,
     });
 
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: serde_json::to_string_pretty(&payload).unwrap_or_default(),
         stderr: String::new(),
         success: true,

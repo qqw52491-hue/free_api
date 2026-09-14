@@ -457,6 +457,10 @@ pub struct AgentToolEvent {
     pub result_summary: String,
     pub duration_ms: Option<u128>,
     pub timestamp: String,
+    /// 工具直供的结构化视图（kind 判别联合）：有值时前端渲染类型化卡片，
+    /// 无值回退 params/result_summary 的文本启发式路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<serde_json::Value>,
 }
 
 pub fn event_summary(value: &str, limit: usize) -> String {
@@ -478,6 +482,7 @@ pub fn emit_tool_event(
     success: Option<bool>,
     result: &str,
     duration_ms: Option<u128>,
+    view: Option<&serde_json::Value>,
 ) {
     let payload = AgentToolEvent {
         event_type: event_type.to_string(),
@@ -491,6 +496,7 @@ pub fn emit_tool_event(
         result_summary: event_summary(result, 16000),
         duration_ms,
         timestamp: Utc::now().to_rfc3339(),
+        view: view.cloned(),
     };
     let _ = app.emit(&format!("agent-tool-event-{}", session_id), payload);
 }
@@ -578,7 +584,7 @@ fn dispatch_project_resources(
     params: &serde_json::Value,
 ) -> DispatchResult {
     if !is_project_session(db, session_id) {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: "当前会话未关联项目，不能访问项目受管资源。".to_string(),
             success: false,
@@ -596,7 +602,7 @@ fn dispatch_project_resources(
     let conn = match db.0.lock() {
         Ok(conn) => conn,
         Err(error) => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("项目资源账本不可用: {}", error),
                 success: false,
@@ -620,14 +626,14 @@ fn dispatch_project_resources(
                             })
                         })
                         .collect::<Vec<_>>();
-                    DispatchResult {
+                    DispatchResult { view: None,
                         stdout: json!({"resources": projection}).to_string(),
                         stderr: String::new(),
                         success: true,
                         route: "internal:project_resources/list".to_string(),
                     }
                 }
-                Err(error) => DispatchResult {
+                Err(error) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: error,
                     success: false,
@@ -640,7 +646,7 @@ fn dispatch_project_resources(
                 .get("resource_id")
                 .and_then(serde_json::Value::as_str)
             else {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr:
                         "project_resources.read_resource 缺少 resource_id；请先 list_resources。"
@@ -654,7 +660,7 @@ fn dispatch_project_resources(
                 session_id,
                 resource_id,
             ) {
-                Ok(preview) => DispatchResult {
+                Ok(preview) => DispatchResult { view: None,
                     stdout: json!({
                         "resource": {
                             "resource_id": preview.resource.resource_id,
@@ -671,7 +677,7 @@ fn dispatch_project_resources(
                     success: true,
                     route: "internal:project_resources/read".to_string(),
                 },
-                Err(error) => DispatchResult {
+                Err(error) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: error,
                     success: false,
@@ -687,7 +693,7 @@ fn dispatch_project_resources(
                 .or_else(|| params.get("canonical_path"))
                 .and_then(serde_json::Value::as_str);
             let Some(raw_path) = raw_path else {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: "project_resources.register_resource 缺少 path 参数（文件相对或绝对路径）。".to_string(),
                     success: false,
@@ -701,7 +707,7 @@ fn dispatch_project_resources(
                 raw_path,
                 label,
             ) {
-                Ok(resource) => DispatchResult {
+                Ok(resource) => DispatchResult { view: None,
                     stdout: json!({
                         "message": "成功将文件登记为项目受管资源，同项目下的所有会话均可按 resource_id 读取。",
                         "resource": {
@@ -716,7 +722,7 @@ fn dispatch_project_resources(
                     success: true,
                     route: "internal:project_resources/register".to_string(),
                 },
-                Err(error) => DispatchResult {
+                Err(error) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: error,
                     success: false,
@@ -724,7 +730,7 @@ fn dispatch_project_resources(
                 },
             }
         }
-        _ => DispatchResult {
+        _ => DispatchResult { view: None,
             stdout: String::new(),
             stderr:
                 "project_resources 支持 list_resources()、read_resource(resource_id: string) 与 register_resource(path: string, label?: string)。"
@@ -758,7 +764,7 @@ pub(crate) fn execute_command_inner(
         || lower_action.contains("set_workspace")
     {
         if is_project_session(db, session_id) {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "❌ [宿主安全保护] 当前为专属项目会话，工作区已锁定在项目根目录，禁止越界切换。如需操作外部项目，请在通用临时会话中操作。".to_string(),
                 success: false,
@@ -823,7 +829,7 @@ pub(crate) fn execute_command_inner(
                 .or_else(|| params.get("confirm").and_then(|v| v.as_bool()))
                 .unwrap_or(false);
             if !user_approved {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: "❌ [权限安全拦截] 严禁在执行代码或排错任务中擅自调用 mcp_manager 添加、修改或重连 MCP 插件！\n💡 关键提醒：当前已连接的 MCP 工具（如 remote-hub 下的 read_text_file, edit_file, ripgrep_search 等）已经全部就绪且立即可用！请直接以 {\"tool\": \"remote-hub/具体工具名\", \"command\": {...}} 格式调用，绝不需要也不允许调用 mcp_manager 或派发空步骤去‘加载’或‘重连’！".to_string(),
                     success: false,
@@ -889,7 +895,7 @@ pub(crate) fn execute_command_inner(
 
     if let Some(plugin) = registry.get(&plugin_name) {
         if mcp_service_requires_concrete_tool(tool, action) {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!(
                     "❌ [工具契约] MCP 服务‘{}’是服务名称而非具体工具。\n💡 正确调用示范: {{\"tool\": \"{}/具体工具名\", \"command\": {{...}}}}（例如: \"{}/read_text_file\" 或 \"{}/ripgrep_search\"）。请勿遗漏斜杠与子工具名。",
@@ -933,14 +939,14 @@ pub(crate) fn execute_command_inner(
                     .unwrap_or("")
                     .to_string();
                 if is_error {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: content,
                         success: false,
                         route: format!("plugin:{}/{}", plugin_name, tool_name),
                     };
                 } else {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: content,
                         stderr: String::new(),
                         success: true,
@@ -949,7 +955,7 @@ pub(crate) fn execute_command_inner(
                 }
             }
             Err(e) => {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("插件调用异常: {:?}", e),
                     success: false,
@@ -961,7 +967,7 @@ pub(crate) fn execute_command_inner(
 
     // 5. 针对将 parallel 误写为独立工具的精准纠错
     if tool == "parallel" || action == "parallel" {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: "❌ 'parallel' 不是独立工具名，而是顶层并行执行模式字段。\n正确格式示例：{\"plan_title\": \"...\", \"parallel_reason\": \"...\", \"parallel\": [{\"tool\": \"工具1\", \"command\": {...}}, {\"tool\": \"工具2\", \"command\": {...}}]}。\n请重新按标准 JSON 格式输出！".to_string(),
             success: false,
@@ -993,7 +999,7 @@ pub(crate) fn execute_command_inner(
     };
 
     let builtin_list = crate::agent::prompt_assembly::build_builtin_tools_compact_list();
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: String::new(),
         stderr: format!(
             "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n可用原生内置工具：{}；{}\n外部 MCP 工具调用格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
@@ -1016,7 +1022,7 @@ pub fn run_agent_step(
 ) -> DispatchResult {
     let tool_name = instruction.get_tool().to_lowercase();
     if is_finish_instruction(instruction) {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: instruction
                 .command
                 .as_ref()
@@ -1033,7 +1039,7 @@ pub fn run_agent_step(
     // --- 场景 A0: 树形/并行计划树 PlanTree Execution ---
     if let Some(ref par_cmds) = instruction.parallel {
         if let Err(error) = validate_controlled_parallel_batch(par_cmds) {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: error,
                 success: false,
@@ -1129,7 +1135,7 @@ pub fn run_agent_step(
                     "   🚫 Step {} 执行失败，流水线立即熔断！原因: {}",
                     step_idx, res.stderr
                 );
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: total_stdout,
                     stderr: format!("流水线在第 {} 步崩溃: {}", step_idx, res.stderr),
                     success: false,
@@ -1138,7 +1144,7 @@ pub fn run_agent_step(
             }
         }
 
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: total_stdout,
             stderr: String::new(),
             success: true,

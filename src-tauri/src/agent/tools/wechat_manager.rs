@@ -23,7 +23,7 @@ pub fn dispatch(_db: &DbState, action: &str, params: &serde_json::Value) -> Disp
         "set_heartbeat" => set_heartbeat(params),
         "set_report_style" => set_report_style(params),
         "recent_runs" => recent_runs(params),
-        _ => DispatchResult {
+        _ => DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!(
                 "wechat_manager 未知 action='{}'。可用：status() / notify(text) / set_heartbeat(minutes) / set_report_style(action_milestone_steps?, phase_pushes?) / recent_runs(limit?)",
@@ -50,7 +50,7 @@ fn status() -> DispatchResult {
             .to_string_lossy(),
         "hint": "bridge_last_seen 为最近一次成功探测的桥状态；null 表示桥未运行或从未连通。",
     });
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: serde_json::to_string_pretty(&payload).unwrap_or_default(),
         stderr: String::new(),
         success: true,
@@ -79,7 +79,7 @@ fn notify(params: &serde_json::Value) -> DispatchResult {
                     .unwrap_or_default();
                 crate::agent::channel::notify_wechat(&config, &text).await;
             });
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: "已发起微信推送（异步送达，桥离线时会在日志中记录失败）。".to_string(),
                 stderr: String::new(),
                 success: true,
@@ -105,7 +105,7 @@ fn set_heartbeat(params: &serde_json::Value) -> DispatchResult {
         return fail("set_heartbeat", &format!("保存配置失败: {error}"));
     }
     crate::agent::channel::sync_shared_config(&config);
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: format!("✅ 已调整为每 {minutes} 分钟汇报一次进度（仅影响微信侧任务）。"),
         stderr: String::new(),
         success: true,
@@ -139,7 +139,7 @@ fn set_report_style(params: &serde_json::Value) -> DispatchResult {
         return fail("set_report_style", &format!("保存配置失败: {error}"));
     }
     crate::agent::channel::sync_shared_config(&config);
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: format!(
             "✅ 汇报风格已更新：动作里程碑每 {} 个动作{}；阶段里程碑{}。对之后提交的任务生效。",
             config.action_milestone_steps,
@@ -174,7 +174,7 @@ fn recent_runs(params: &serde_json::Value) -> DispatchResult {
             })
         })
         .collect();
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".to_string()),
         stderr: String::new(),
         success: true,
@@ -183,7 +183,7 @@ fn recent_runs(params: &serde_json::Value) -> DispatchResult {
 }
 
 fn fail(action: &str, message: &str) -> DispatchResult {
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: String::new(),
         stderr: message.to_string(),
         success: false,

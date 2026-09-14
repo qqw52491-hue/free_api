@@ -27,7 +27,7 @@ pub fn dispatch(
     let ws_root = match workspace_root {
         Some(p) => p,
         None => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "❌ [系统错误] 未提供当前活跃的工作区路径，拒绝操作文件。".to_string(),
                 success: false,
@@ -50,7 +50,7 @@ pub fn dispatch(
         "write" => execute_write(ws_root, session_id, params),
         "edit" => execute_edit(ws_root, session_id, params),
         "list" => execute_list(ws_root, session_id, params),
-        unknown => DispatchResult {
+        unknown => DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!(
                 "❌ [非法动作] local_file 不支持 action='{}'。允许的 action 必须严格为：read、write、edit、list 之一。",
@@ -191,7 +191,7 @@ fn execute_read(
     let raw_path = match params.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
         _ => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "❌ read 操作缺少必填参数 'path'。".to_string(),
                 success: false,
@@ -203,7 +203,7 @@ fn execute_read(
     let resolved = match ensure_allowed_path(raw_path, workspace_root, Some(session_id), false) {
         Ok(r) => r,
         Err(e) => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: e,
                 success: false,
@@ -213,7 +213,7 @@ fn execute_read(
     };
 
     if !resolved.canonical_path.exists() {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!("❌ 文件不存在: {}", resolved.display_path),
             success: false,
@@ -224,7 +224,7 @@ fn execute_read(
     let metadata = match std::fs::metadata(&resolved.canonical_path) {
         Ok(m) => m,
         Err(e) => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("无法读取文件元数据 ({}): {}", resolved.display_path, e),
                 success: false,
@@ -234,7 +234,7 @@ fn execute_read(
     };
 
     if metadata.len() > MAX_READ_BYTES as u64 {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!(
                 "❌ 文件过大 ({} 字节 > 2MB 上限)。请使用 start_line 与 end_line 分片读取。",
@@ -248,7 +248,7 @@ fn execute_read(
     let bytes = match std::fs::read(&resolved.canonical_path) {
         Ok(b) => b,
         Err(e) => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("读取文件失败 ({}): {}", resolved.display_path, e),
                 success: false,
@@ -279,7 +279,7 @@ fn execute_read(
         .unwrap_or(total_lines);
 
     if start_line > total_lines && total_lines > 0 {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: format!("文件共 {} 行，指定的起始行号 {} 超出范围。", total_lines, start_line),
             stderr: String::new(),
             success: true,
@@ -315,7 +315,7 @@ fn execute_read(
         output.push_str(&format!("{:4}: {}\n", line_num, line));
     }
 
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: output,
         stderr: String::new(),
         success: true,
@@ -331,7 +331,7 @@ fn execute_write(
     let raw_path = match params.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
         _ => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "❌ write 操作缺少必填参数 'path'。".to_string(),
                 success: false,
@@ -343,7 +343,7 @@ fn execute_write(
     let content = match params.get("content").and_then(|v| v.as_str()) {
         Some(c) => c,
         None => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "❌ write 操作缺少必填参数 'content'。".to_string(),
                 success: false,
@@ -355,7 +355,7 @@ fn execute_write(
     let resolved = match ensure_allowed_path(raw_path, workspace_root, Some(session_id), true) {
         Ok(r) => r,
         Err(e) => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: e,
                 success: false,
@@ -367,7 +367,7 @@ fn execute_write(
     if let Some(parent) = resolved.canonical_path.parent() {
         if !parent.exists() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("创建文件上级目录失败 ({}): {}", parent.display(), e),
                     success: false,
@@ -394,7 +394,7 @@ fn execute_write(
                             "safe_to_retry": false,
                             "recommended_action": "read_latest_file_before_write",
                         });
-                        return DispatchResult {
+                        return DispatchResult { view: None,
                             stdout: String::new(),
                             stderr: format!(
                                 "❌ [并发冲突拦截] 文件 \"{}\" 自上次读取后已被外部修改 (哈希不匹配: 读时={}, 当前={})。\n💡 建议：为防止意外覆盖外部修改（丢失更新），写入已中止。请先调用 local_file.read 读取最新内容，或在确实需要强行覆盖时传入 force: true。\n<!-- 结构化元数据: {} -->",
@@ -413,7 +413,7 @@ fn execute_write(
                             "safe_to_retry": false,
                             "recommended_action": "read_existing_file_before_overwrite",
                         });
-                        return DispatchResult {
+                        return DispatchResult { view: None,
                             stdout: String::new(),
                             stderr: format!(
                                 "❌ [全量覆盖保护拦截] 待写入的文件 \"{}\" 在磁盘上已存在，但本会话尚未通过 local_file.read 读取过该文件（缺少内容基线）。\n💡 建议：全量写入（write）会彻底覆写既有代码（高爆炸半径）。为防止误覆盖现有代码，请先调用 local_file.read 建立基线核对内容；若确信无需核对并要强行全量覆盖，请显式传入 force: true。\n<!-- 结构化元数据: {} -->",
@@ -430,7 +430,7 @@ fn execute_write(
     }
 
     if let Err(e) = std::fs::write(&resolved.canonical_path, content) {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!("写入文件失败 ({}): {}", resolved.display_path, e),
             success: false,
@@ -448,7 +448,7 @@ fn execute_write(
         "message": format!("✅ 已成功写入 \"{}\"（共 {} 字节）", resolved.display_path, content.len())
     });
 
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: serde_json::to_string_pretty(&payload).unwrap_or_default(),
         stderr: String::new(),
         success: true,
@@ -464,7 +464,7 @@ fn execute_edit(
     let raw_path = match params.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
         _ => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "❌ edit 操作缺少必填参数 'path'。".to_string(),
                 success: false,
@@ -476,7 +476,7 @@ fn execute_edit(
     let target_content = match params.get("target_content").and_then(|v| v.as_str()) {
         Some(t) if !t.is_empty() => t,
         _ => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "❌ edit 操作缺少必填参数 'target_content'（待替换的目标原文本）。".to_string(),
                 success: false,
@@ -488,7 +488,7 @@ fn execute_edit(
     let replacement_content = match params.get("replacement_content").and_then(|v| v.as_str()) {
         Some(r) => r,
         None => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: "❌ edit 操作缺少必填参数 'replacement_content'（替换后的新内容）。".to_string(),
                 success: false,
@@ -500,7 +500,7 @@ fn execute_edit(
     let resolved = match ensure_allowed_path(raw_path, workspace_root, Some(session_id), false) {
         Ok(r) => r,
         Err(e) => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: e,
                 success: false,
@@ -510,7 +510,7 @@ fn execute_edit(
     };
 
     if !resolved.canonical_path.exists() {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!("❌ 待编辑的文件不存在: {}", resolved.display_path),
             success: false,
@@ -521,7 +521,7 @@ fn execute_edit(
     let current_content = match std::fs::read_to_string(&resolved.canonical_path) {
         Ok(c) => c,
         Err(e) => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("读取待编辑文件失败 ({}): {}", resolved.display_path, e),
                 success: false,
@@ -543,7 +543,7 @@ fn execute_edit(
                 "safe_to_retry": false,
                 "recommended_action": "read_latest_file_before_edit",
             });
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!(
                     "❌ [并发冲突拦截] 文件 \"{}\" 自上次读取后已被外部修改 (哈希不匹配: 读时={}, 当前={})。\n💡 建议：为防止基于过时代码上下文产生错误局部替换，编辑已中止。请先调用 local_file.read 读取最新代码核对行号与上下文，或在确实需要强行修改时传入 force: true。\n<!-- 结构化元数据: {} -->",
@@ -559,7 +559,7 @@ fn execute_edit(
     let matches: Vec<(usize, &str)> = current_content.match_indices(target_content).collect();
 
     if matches.is_empty() {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!(
                 "❌ [编辑失败：目标文本未找到] 在文件 \"{}\" 中未找到指定的 target_content。\n💡 建议：请先调用 local_file.read 读取该文件的最新内容，核对准确的文本、换行符和缩进。",
@@ -575,7 +575,7 @@ fn execute_edit(
             .iter()
             .map(|(idx, _)| current_content[..*idx].lines().count() + 1)
             .collect();
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!(
                 "❌ [编辑失败：目标文本不唯一] 在文件 \"{}\" 中找到了 {} 处匹配（分别位于第 {:?} 行）。\n💡 建议：为避免误伤，请在 target_content 中多包含前后几行独特的上下文代码，确保在文件中全局唯一后重试。",
@@ -597,7 +597,7 @@ fn execute_edit(
     let new_content = current_content.replacen(target_content, replacement_content, 1);
 
     if let Err(e) = std::fs::write(&resolved.canonical_path, &new_content) {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!("写入编辑结果失败 ({}): {}", resolved.display_path, e),
             success: false,
@@ -620,7 +620,7 @@ fn execute_edit(
         )
     });
 
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: serde_json::to_string_pretty(&payload).unwrap_or_default(),
         stderr: String::new(),
         success: true,
@@ -641,7 +641,7 @@ fn execute_list(
     let resolved = match ensure_allowed_path(raw_path, workspace_root, Some(session_id), false) {
         Ok(r) => r,
         Err(e) => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: e,
                 success: false,
@@ -651,7 +651,7 @@ fn execute_list(
     };
 
     if !resolved.canonical_path.is_dir() {
-        return DispatchResult {
+        return DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!("指定的路径不是目录: {}", resolved.display_path),
             success: false,
@@ -662,7 +662,7 @@ fn execute_list(
     let read_res = match std::fs::read_dir(&resolved.canonical_path) {
         Ok(r) => r,
         Err(e) => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("列取目录失败 ({}): {}", resolved.display_path, e),
                 success: false,
@@ -702,7 +702,7 @@ fn execute_list(
         "entries": entries,
     });
 
-    DispatchResult {
+    DispatchResult { view: None,
         stdout: serde_json::to_string_pretty(&payload).unwrap_or_default(),
         stderr: String::new(),
         success: true,

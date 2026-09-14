@@ -5,7 +5,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
     let conn = match db.0.lock() {
         Ok(c) => c,
         Err(e) => {
-            return DispatchResult {
+            return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("数据库锁获取失败: {}", e),
                 success: false,
@@ -26,13 +26,13 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
     match act {
         "list_specs" => {
             match crate::db::get_all_model_specs(&conn) {
-                Ok(specs) => DispatchResult {
+                Ok(specs) => DispatchResult { view: None,
                     stdout: serde_json::to_string_pretty(&specs).unwrap_or_else(|_| "[]".to_string()),
                     stderr: String::new(),
                     success: true,
                     route: "model_manager:list_specs".to_string(),
                 },
-                Err(e) => DispatchResult {
+                Err(e) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("获取模型规格列表失败: {}", e),
                     success: false,
@@ -44,7 +44,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let name = match params.get("name").and_then(|v| v.as_str()) {
                 Some(n) if !n.trim().is_empty() => n.trim().to_string(),
                 _ => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: "❌ 缺少必填参数 name (模型规格名称)".to_string(),
                         success: false,
@@ -86,7 +86,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             };
 
             match crate::db::upsert_model_spec_record(&conn, &spec) {
-                Ok(_) => DispatchResult {
+                Ok(_) => DispatchResult { view: None,
                     stdout: format!(
                         "✅ 成功保存模型规格 [{}] (context_window: {}, max_tokens: {}, supports_thinking: {})",
                         spec.name, spec.context_window, spec.max_tokens, spec.supports_thinking
@@ -95,7 +95,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     success: true,
                     route: "model_manager:upsert_spec".to_string(),
                 },
-                Err(e) => DispatchResult {
+                Err(e) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("保存模型规格失败: {}", e),
                     success: false,
@@ -111,7 +111,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             {
                 Some(t) if !t.trim().is_empty() => t.trim(),
                 _ => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: "❌ 缺少必填参数 name 或 id (要删除的模型规格)".to_string(),
                         success: false,
@@ -125,7 +125,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if !confirm {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!(
                         "⚠️ 警告：删除规格 [{}] 将影响所有基于该规格引用的模型配置。如确认删除，请再次调用并传入 confirm: true。",
@@ -139,14 +139,14 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             match crate::db::delete_model_spec_record(&conn, target) {
                 Ok(count) => {
                     if count > 0 {
-                        DispatchResult {
+                        DispatchResult { view: None,
                             stdout: format!("✅ 已成功删除模型规格 [{}]", target),
                             stderr: String::new(),
                             success: true,
                             route: "model_manager:delete_spec".to_string(),
                         }
                     } else {
-                        DispatchResult {
+                        DispatchResult { view: None,
                             stdout: String::new(),
                             stderr: format!("未找到名称或ID为 [{}] 的模型规格", target),
                             success: false,
@@ -154,7 +154,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                         }
                     }
                 }
-                Err(e) => DispatchResult {
+                Err(e) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("删除模型规格失败: {}", e),
                     success: false,
@@ -168,7 +168,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             ) {
                 Ok(s) => s,
                 Err(e) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("查询平台失败: {}", e),
                         success: false,
@@ -190,7 +190,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 .map(|rows| rows.flatten().collect())
                 .unwrap_or_default();
 
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: serde_json::to_string_pretty(&platforms).unwrap_or_else(|_| "[]".to_string()),
                 stderr: String::new(),
                 success: true,
@@ -201,7 +201,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let name = match params.get("name").and_then(|v| v.as_str()) {
                 Some(n) if !n.trim().is_empty() => n.trim().to_string(),
                 _ => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: "❌ 缺少必填参数 name (平台名称，如 OpenRouter)".to_string(),
                         success: false,
@@ -212,7 +212,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let base_url = match params.get("base_url").and_then(|v| v.as_str()) {
                 Some(u) if !u.trim().is_empty() => u.trim().to_string(),
                 _ => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: "❌ 缺少必填参数 base_url (API 基础地址，如 https://openrouter.ai/api/v1)".to_string(),
                         success: false,
@@ -246,7 +246,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 "INSERT INTO platforms (id, name, base_url, api_key, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![platform_id, name, base_url, api_key, now],
             ) {
-                Ok(_) => DispatchResult {
+                Ok(_) => DispatchResult { view: None,
                     stdout: format!(
                         "✅ 成功添加平台 [{}] (base_url: {}, ID: {}){}",
                         name, base_url, platform_id, key_info
@@ -255,7 +255,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     success: true,
                     route: "model_manager:add_platform".to_string(),
                 },
-                Err(e) => DispatchResult {
+                Err(e) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("添加平台失败: {}", e),
                     success: false,
@@ -272,7 +272,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             {
                 Some(p) if !p.trim().is_empty() => p.trim(),
                 _ => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: "❌ 缺少必填参数 platform_id 或 platform_name (要更新的平台标识)".to_string(),
                         success: false,
@@ -290,7 +290,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let (id, cur_name, cur_base_url, cur_api_key) = match platform_row {
                 Ok(vals) => vals,
                 Err(_) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("未找到平台 [{}]。请先调用 `list_platforms` 确认已有平台。", platform_target),
                         success: false,
@@ -326,7 +326,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 "UPDATE platforms SET name = ?1, base_url = ?2, api_key = ?3 WHERE id = ?4",
                 rusqlite::params![new_name, new_base_url, new_api_key, id],
             ) {
-                Ok(_) => DispatchResult {
+                Ok(_) => DispatchResult { view: None,
                     stdout: format!(
                         "✅ 成功更新平台 [{}] (base_url: {}, ID: {}){}",
                         new_name, new_base_url, id, key_info
@@ -335,7 +335,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     success: true,
                     route: "model_manager:update_platform".to_string(),
                 },
-                Err(e) => DispatchResult {
+                Err(e) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("更新平台失败: {}", e),
                     success: false,
@@ -351,7 +351,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             {
                 Some(p) if !p.trim().is_empty() => p.trim(),
                 _ => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: "❌ 缺少必填参数 platform_id 或 platform_name".to_string(),
                         success: false,
@@ -363,7 +363,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let model_name = match params.get("model_name").and_then(|v| v.as_str()) {
                 Some(m) if !m.trim().is_empty() => m.trim().to_string(),
                 _ => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: "❌ 缺少必填参数 model_name (实际模型标识)".to_string(),
                         success: false,
@@ -383,7 +383,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let platform_id = match platform_id_res {
                 Ok(id) => id,
                 Err(e) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: e,
                         success: false,
@@ -431,7 +431,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
                 rusqlite::params![model_id, platform_id, model_name, display_name, cw, mt, temp, now],
             ) {
-                Ok(_) => DispatchResult {
+                Ok(_) => DispatchResult { view: None,
                     stdout: format!(
                         "✅ 成功将模型 [{}] 添加至平台 [{}] (ID: {}, 上下文窗口: {}, 最大Tokens: {})",
                         model_name, platform_target, model_id, cw, mt
@@ -440,7 +440,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     success: true,
                     route: "model_manager:add_model".to_string(),
                 },
-                Err(e) => DispatchResult {
+                Err(e) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("添加模型失败: {}", e),
                     success: false,
@@ -456,7 +456,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             {
                 Some(m) if !m.trim().is_empty() => m.trim(),
                 _ => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: "❌ 缺少必填参数 model_id 或 model_name".to_string(),
                         success: false,
@@ -470,7 +470,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if !confirm {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!(
                         "⚠️ 警告：从渠道删除模型 [{}] 将无法在对话中选择该模型。如确认删除，请再次调用并传入 confirm: true。",
@@ -487,14 +487,14 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             ) {
                 Ok(count) => {
                     if count > 0 {
-                        DispatchResult {
+                        DispatchResult { view: None,
                             stdout: format!("✅ 已成功删除模型 [{}] (受影响行数: {})", target, count),
                             stderr: String::new(),
                             success: true,
                             route: "model_manager:delete_model".to_string(),
                         }
                     } else {
-                        DispatchResult {
+                        DispatchResult { view: None,
                             stdout: String::new(),
                             stderr: format!("未找到标识为 [{}] 的模型", target),
                             success: false,
@@ -502,7 +502,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                         }
                     }
                 }
-                Err(e) => DispatchResult {
+                Err(e) => DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("删除模型失败: {}", e),
                     success: false,
@@ -510,7 +510,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 },
             }
         }
-        _ => DispatchResult {
+        _ => DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!(
                 "❌ 未知的 model_manager 动作 action='{}'。\n💡 支持的常用动作及范例:\n  - 查平台与模型: {{\"tool\": \"model_manager\", \"action\": \"list_platforms\"}}\n  - 添加平台: {{\"tool\": \"model_manager\", \"action\": \"add_platform\", \"params\": {{\"name\": \"OpenAI\", \"base_url\": \"https://api.openai.com/v1\", \"api_key\": \"sk-...\"}}}}\n  - 添加模型: {{\"tool\": \"model_manager\", \"action\": \"add_model\", \"params\": {{\"platform\": \"OpenAI\", \"model_id\": \"gpt-4o\"}}}}\n  (其余支持动作: list_specs, upsert_spec, delete_spec, update_platform, delete_model)",

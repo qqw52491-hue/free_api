@@ -16,7 +16,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let conn = match db.0.lock() {
                 Ok(c) => c,
                 Err(e) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("获取数据库锁失败: {}", e),
                         success: false,
@@ -26,7 +26,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             };
             let mut stmt = match conn.prepare("SELECT id, kind, name, description, content, enabled, updated_at FROM agent_custom_instructions ORDER BY updated_at DESC") {
                 Ok(s) => s,
-                Err(e) => return DispatchResult {
+                Err(e) => return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("查询失败: {}", e),
                     success: false,
@@ -49,7 +49,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 .map(|iter| iter.flatten().collect())
                 .unwrap_or_default();
 
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".to_string()),
                 stderr: String::new(),
                 success: true,
@@ -81,7 +81,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 .map(|s| s.to_string());
 
             if name.is_empty() || content.is_empty() {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: "❌ 缺少必填参数 name 或 content".to_string(),
                     success: false,
@@ -154,7 +154,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let conn = match db.0.lock() {
                 Ok(c) => c,
                 Err(e) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("数据库锁获取失败: {}", e),
                         success: false,
@@ -173,7 +173,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                  VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
                 rusqlite::params![id, kind, name, desc_val, content, now],
             ) {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("保存 Skill [{}] 写库失败: {}", name, e),
                     success: false,
@@ -197,7 +197,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 s => format!("💡 技能触发卡: {}", s),
             };
 
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: format!("✅ 成功保存 {} [{}]！\n{}", kind_label, name, card_note),
                 stderr: String::new(),
                 success: true,
@@ -215,7 +215,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if target.is_empty() {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: "❌ 缺少必填参数 id 或 name".to_string(),
                     success: false,
@@ -223,7 +223,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 };
             }
             if !confirm {
-                return DispatchResult {
+                return DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: format!("⚠️ 警告：删除 [{}] 将永久移除配置，请确认并在 command 中附带 confirm: true", target),
                     success: false,
@@ -233,7 +233,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             let conn = match db.0.lock() {
                 Ok(c) => c,
                 Err(e) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("数据库锁获取失败: {}", e),
                         success: false,
@@ -247,7 +247,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             );
             match affected {
                 Ok(0) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!(
                             "❌ 未找到名为 [{}] 的 Skill 或提示词；请先用 list 查看现有条目",
@@ -258,7 +258,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     };
                 }
                 Err(e) => {
-                    return DispatchResult {
+                    return DispatchResult { view: None,
                         stdout: String::new(),
                         stderr: format!("删除 Skill [{}] 写库失败: {}", target, e),
                         success: false,
@@ -268,14 +268,14 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 Ok(_) => {}
             }
 
-            DispatchResult {
+            DispatchResult { view: None,
                 stdout: format!("✅ 已成功删除 [{}]", target),
                 stderr: String::new(),
                 success: true,
                 route: "skill_manager:delete".to_string(),
             }
         }
-        _ => DispatchResult {
+        _ => DispatchResult { view: None,
             stdout: String::new(),
             stderr: format!(
                 "❌ 未知的 skill_manager 动作 action='{}'。支持的动作: list, add, delete",

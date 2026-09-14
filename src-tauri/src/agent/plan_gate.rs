@@ -421,7 +421,7 @@ pub(crate) fn check_cross_review_exploration_gate(
     {
         return None;
     }
-    Some(DispatchResult {
+    Some(DispatchResult { view: None,
         success: false,
         stdout: String::new(),
         stderr: gate_messages::cross_review_exploration_budget_exhausted(
@@ -528,7 +528,7 @@ pub(crate) fn check_pre_write_gatekeeper(
             .or_else(|| checkpoint.stage_review_rebuttal_run_id.clone())
             .unwrap_or_default();
         let final_only_summary = checkpoint.stage_review_final_only.join("\n");
-        return Some(DispatchResult {
+        return Some(DispatchResult { view: None,
             success: false,
             stdout: String::new(),
             stderr: crate::agent::gate_messages::stage_review_blocking_open(
@@ -585,7 +585,7 @@ fn gate_interception(
             } else {
                 crate::agent::gate_messages::plan_approval_need_human_approval()
             };
-            Some(DispatchResult {
+            Some(DispatchResult { view: None,
                 success: false,
                 stdout: String::new(),
                 stderr,
@@ -603,7 +603,7 @@ fn gate_interception(
                 && !checkpoint.plan_review_batch.expected_run_ids.is_empty();
 
             if checkpoint.plan_reviewer_retry_count == 0 {
-                Some(DispatchResult {
+                Some(DispatchResult { view: None,
                     success: false,
                     stdout: String::new(),
                     stderr: crate::agent::gate_messages::cross_review_need_reviewer_dispatch(),
@@ -622,7 +622,7 @@ fn gate_interception(
                 } else {
                     crate::agent::gate_messages::cross_review_need_wait_reviewer_jobs()
                 };
-                Some(DispatchResult {
+                Some(DispatchResult { view: None,
                     success: false,
                     stdout: String::new(),
                     stderr,
@@ -632,7 +632,7 @@ fn gate_interception(
                 // 已消耗过审查轮次，但后台既没有在跑的任务、也没有待回收的结论 ——
                 // 说明上一次派发并未真正启动（角色卡未授权/不存在、参数非法等）。
                 // 此时必须引导模型重新派发，否则它会一直 wait_jobs 收空信箱而永久无法写入。
-                Some(DispatchResult {
+                Some(DispatchResult { view: None,
                     success: false,
                     stdout: String::new(),
                     stderr: crate::agent::gate_messages::cross_review_reviewer_result_missing(),
@@ -650,7 +650,7 @@ fn gate_interception(
                     .map(|(id, r)| format!("- 审查任务 `{}`: {}", id, r))
                     .collect();
                 let summary = reasons.join("\n");
-                Some(DispatchResult {
+                Some(DispatchResult { view: None,
                     success: false,
                     stdout: String::new(),
                     stderr: crate::agent::gate_messages::cross_review_batch_all_failed(&summary, budget_exhausted),
@@ -664,7 +664,7 @@ fn gate_interception(
                 };
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
                     >= crate::agent::checkpoint::max_plan_reviewer_rounds();
-                Some(DispatchResult {
+                Some(DispatchResult { view: None,
                     success: false,
                     stdout: String::new(),
                     stderr: format!(
@@ -701,7 +701,7 @@ fn gate_interception(
                             if b.suggestion.is_empty() { "请修复该致命设计隐患" } else { &b.suggestion }
                         ));
                     }
-                    Some(DispatchResult {
+                    Some(DispatchResult { view: None,
                         success: false,
                         stdout: String::new(),
                         stderr: crate::agent::gate_messages::cross_review_blocking_findings_with_details(
@@ -714,7 +714,7 @@ fn gate_interception(
                 } else if scorecard.is_abnormally_low() {
                     // 弱作用兜底：无 blocking 缺陷但评分异常偏低（正确性或安全性得分 < 60 分），防审查员放水，转人工核验
                     let reason = scorecard.gate_rejection_reason().unwrap_or_else(|| "审查评分异常偏低（正确性或安全性得分 < 60 分），存在放水嫌疑，需人工核验".to_string());
-                    Some(DispatchResult {
+                    Some(DispatchResult { view: None,
                         success: false,
                         stdout: String::new(),
                         stderr: crate::agent::gate_messages::cross_review_scorecard_failed(&reason, budget_exhausted),
@@ -744,7 +744,7 @@ fn gate_interception(
                 // fail-closed：审查结论缺失评分卡时绝不默认放行（旧的 fail-open 暗道）
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
                     >= crate::agent::checkpoint::max_plan_reviewer_rounds();
-                Some(DispatchResult {
+                Some(DispatchResult { view: None,
                     success: false,
                     stdout: String::new(),
                     stderr: crate::agent::gate_messages::cross_review_scorecard_missing(budget_exhausted),
@@ -754,7 +754,7 @@ fn gate_interception(
         }
         crate::agent::checkpoint::PlanExecutionMode::Auto => {
             if !is_resume_child && step_id == 0 && context.turns_history.is_empty() {
-                Some(DispatchResult {
+                Some(DispatchResult { view: None,
                     success: false,
                     stdout: String::new(),
                     stderr: crate::agent::gate_messages::auto_mode_need_plan(),
@@ -826,7 +826,7 @@ fn gate_interception(
                              2. 根据 Tech Lead 的结构化裁决行动：若 approved 则直接放行；若 rebuttal 则微调方案；若 escalate 则按推荐专家（建议：{}）并发派发联合会审！",
                             reason, matched_pattern, suggested_roles.join(", ")
                         );
-                        Some(DispatchResult {
+                        Some(DispatchResult { view: None,
                             success: false,
                             stdout: String::new(),
                             stderr,
@@ -834,7 +834,7 @@ fn gate_interception(
                         })
                     }
                     crate::agent::agent_policy::PolicyDecision::Block { reason } => {
-                        Some(DispatchResult {
+                        Some(DispatchResult { view: None,
                             success: false,
                             stdout: String::new(),
                             stderr: format!("【安全策略强力阻断】\n{}", reason),
