@@ -166,7 +166,17 @@ export interface SearchCacheToolView {
     top_paths: string[];
 }
 
-export type ToolView = SearchToolView | SearchCacheToolView | ({ kind: string } & Record<string, unknown>);
+export interface ReadToolView {
+    kind: "read";
+    path: string;
+    start_line: number;
+    end_line: number;
+    total_lines: number;
+    preview?: string;
+    preview_truncated?: boolean;
+}
+
+export type ToolView = SearchToolView | SearchCacheToolView | ReadToolView | ({ kind: string } & Record<string, unknown>);
 
 export interface AgentStepItem {
     id: string;

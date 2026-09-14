@@ -315,7 +315,26 @@ fn execute_read(
         output.push_str(&format!("{:4}: {}\n", line_num, line));
     }
 
-    DispatchResult { view: None,
+    // UI 结构化视图：路径/行区间/总行数 + 前 40 行行号预览（完整输出仍在 stdout，
+    // 预览只是卡片缩略，避免把整段文件内容在 step json 里重复持久化一份）。
+    const PREVIEW_MAX_LINES: usize = 40;
+    let preview_slice = &all_lines[slice_start..slice_end.min(slice_start + PREVIEW_MAX_LINES)];
+    let mut preview = String::new();
+    for (idx, line) in preview_slice.iter().enumerate() {
+        preview.push_str(&format!("{:4}: {}\n", slice_start + idx + 1, line));
+    }
+    let view = serde_json::json!({
+        "kind": "read",
+        "path": resolved.display_path,
+        "start_line": start_line,
+        "end_line": slice_end,
+        "total_lines": total_lines,
+        "preview": preview,
+        "preview_truncated": slice_end - slice_start > PREVIEW_MAX_LINES,
+    });
+
+    DispatchResult {
+        view: Some(view),
         stdout: output,
         stderr: String::new(),
         success: true,

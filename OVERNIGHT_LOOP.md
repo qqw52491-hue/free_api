@@ -231,6 +231,17 @@ spec 测试用修复提交自带的测试 diff 做 test_patch（case_10/11），
   前端加对应 kind 分支组件。
 - 验证：cargo check 干净、586 测试全绿、vue-tsc 无错；检索 view 回归已断言。
 
+**视图组件注册表化（前端收敛）**：
+- `src/components/agent/views/`：每 kind 一个独立 Vue 组件（SearchView /
+  SearchCacheView / ReadView）+ `index.ts` 注册表 `toolViewComponents`；
+  `AgentChatStream.vue` 内联分支收敛为单个 `<component :is>` 分发器，
+  kind 未注册自动回退通用行。
+- 共享卡片样式迁至 `views/tool-views.css`（各组件 scoped 引入）；
+  `agent-chat-stream.css` 原块删除留指针注释。
+- `local_file.read` 接入 `kind:"read"`：path/行区间/总行数 + 前 40 行行号预览
+  （preview 是卡片缩略，完整输出仍在 stdout，不在 step json 重复持久化整段）。
+- 验证：cargo check 干净、local_file 10 项测试全绿、vue-tsc 无错。
+
 ## 阶段五存档：夜间自主测试计划（A→E，已完成）
 
 ### 【A】方差科学扩容 — 数据齐，统计如下
