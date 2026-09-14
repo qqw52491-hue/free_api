@@ -108,6 +108,124 @@ fn normalized_status(verification: &ChangeVerification) -> Option<String> {
     matches!(status.as_str(), "verified" | "waived").then_some(status)
 }
 
+/// 通用状态探测/断言命令：非编码任务（运维/系统/外部资源）的天然验证手段。
+/// 识别依据是"命令本身构成一次客观状态断言"（退出码/输出即判据），而非生态工具名；
+/// 纯只读浏览命令（git status / cat / ls）不构成断言，不收录。
+/// 成功执行即算验证发生；其中"缺失即证"子集的非零退出同样是状态断言（见
+/// is_absence_probe_command）。
+pub fn is_state_probe_command(cmd: &str) -> bool {
+    let lower = cmd.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    const PROBE_PATTERNS: &[&str] = &[
+        // 存在性/可定位断言
+        "which ",
+        "command -v",
+        "type -p",
+        "whereis ",
+        "test -",
+        "[ -",
+        "[[ -",
+        "stat ",
+        // 包/安装状态断言
+        "pacman -q",
+        "dpkg -s",
+        "dpkg -l",
+        "dpkg-query",
+        "rpm -q",
+        "apt list --installed",
+        "apt-cache policy",
+        "brew list",
+        "flatpak info",
+        "snap list",
+        "pkg info",
+        // 服务/进程状态断言
+        "systemctl status",
+        "systemctl is-active",
+        "systemctl is-enabled",
+        "systemctl is-failed",
+        "systemctl show",
+        "journalctl",
+        "pgrep",
+        "pidof",
+        "ps -p",
+        // 网络/HTTP 断言（-f/-w/-o 断言形态；裸 curl 不收录——它只证明发出了请求）
+        "curl -f",
+        "curl --fail",
+        "curl -o /dev/null",
+        "-w '%{http_code}",
+        "-w \"%{http_code}",
+        "curl -i ",
+        "curl -I ",
+        "curl --head",
+        "wget --spider",
+        "nc -z",
+        "ping -c",
+        // 输出匹配断言（退出码即判据）
+        "grep -q",
+        "grep --quiet",
+        "rg -q",
+        "rg --quiet",
+        "diff -q",
+        "cmp -s",
+        "jq -e",
+        "jq --exit-status",
+        // 容器/编排/系统资源存在性断言
+        "docker inspect",
+        "kubectl get",
+        "hostnamectl",
+        "timedatectl",
+    ];
+    if PROBE_PATTERNS.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    // service <name> status 形态
+    lower.starts_with("service ") && lower.contains(" status")
+}
+
+/// "缺失即断言成立"的纯存在性探针子集：这些命令的非零退出本身就是一次状态观测
+/// （卸载后 `which x` 失败、禁用后 `systemctl is-active` 失败都构成有效验证证据）。
+/// 输出匹配类（grep -q/diff -q）不在此列——其失败更可能是调试中途而非状态断言。
+pub fn is_absence_probe_command(cmd: &str) -> bool {
+    let lower = cmd.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    const ABSENCE_PATTERNS: &[&str] = &[
+        "which ",
+        "command -v",
+        "type -p",
+        "whereis ",
+        "test -",
+        "[ -",
+        "[[ -",
+        "stat ",
+        "pacman -q",
+        "dpkg -s",
+        "dpkg -l",
+        "dpkg-query",
+        "rpm -q",
+        "brew list",
+        "flatpak info",
+        "snap list",
+        "pkg info",
+        "systemctl is-active",
+        "systemctl is-enabled",
+        "systemctl is-failed",
+        "pgrep",
+        "pidof",
+        "ps -p",
+        "docker inspect",
+        "kubectl get",
+        "nc -z",
+        "ping -c",
+        "curl -f",
+        "curl --fail",
+    ];
+    ABSENCE_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 /// 判断给定的 shell 命令是否包含明确的自动化测试、类型检查或构建验证特征
 pub fn is_test_or_verification_command(cmd: &str) -> bool {
     let lower = cmd.trim().to_lowercase();
@@ -452,6 +570,69 @@ mod tests {
         assert!(!is_test_or_verification_command("cat src/main.rs"));
         assert!(!is_test_or_verification_command("ls -la"));
     }
+
+    #[test]
+    fn state_probe_commands_count_as_verification() {
+        // 非编码任务的天然验证手段：命令本身即客观状态断言（退出码/输出即判据）
+        for cmd in [
+            "which workbuddy",
+            "command -v workbuddy",
+            "test -e /opt/WorkBuddy",
+            "[ -f /usr/bin/workbuddy ]",
+            "stat /opt/WorkBuddy",
+            "pacman -Q workbuddy",
+            "pacman -Qs workbuddy",
+            "dpkg -s workbuddy",
+            "rpm -q workbuddy",
+            "systemctl status workbuddy.service",
+            "systemctl is-active workbuddy",
+            "pgrep -x workbuddy",
+            "curl -f http://localhost:8790/health",
+            "curl -s -o /dev/null -w '%{http_code}' http://x",
+            "wget --spider http://x",
+            "nc -z 127.0.0.1 8045",
+            "ping -c 1 127.0.0.1",
+            "journalctl -u foo.service -n 20",
+            "docker inspect workbuddy",
+            "kubectl get pods",
+            "grep -q needle haystack.txt",
+            "diff -q a.txt b.txt",
+            "service nginx status",
+        ] {
+            assert!(is_state_probe_command(cmd), "应为状态探针: {cmd}");
+        }
+        // 纯浏览命令不构成断言
+        for cmd in [
+            "git status",
+            "cat src/main.rs",
+            "ls -la",
+            "grep foo bar.txt", // 无 -q 的过滤不是断言
+            "curl http://x",    // 裸 curl 只证明发了请求
+            "tail -f log.txt",
+        ] {
+            assert!(!is_state_probe_command(cmd), "非断言命令不应算验证: {cmd}");
+        }
+    }
+
+    #[test]
+    fn absence_probes_verify_on_nonzero_exit() {
+        // "缺失即证"子集：卸载/禁用/删除任务中探针失败恰是目标状态证据
+        for cmd in [
+            "which workbuddy",
+            "test -e /opt/WorkBuddy",
+            "pacman -Q workbuddy",
+            "systemctl is-active workbuddy",
+            "pgrep -f workbuddy",
+        ] {
+            assert!(is_absence_probe_command(cmd), "应为缺失探针: {cmd}");
+        }
+        // 输出匹配类不在此列：失败更可能是调试中途而非状态断言
+        assert!(!is_absence_probe_command("grep -q x f.txt"));
+        assert!(!is_absence_probe_command("diff -q a b"));
+        // 非探针一律不算
+        assert!(!is_absence_probe_command("git status"));
+    }
+
 
     #[test]
     fn test_ui_and_doc_path_detection() {

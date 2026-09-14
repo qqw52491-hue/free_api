@@ -33,6 +33,7 @@ pub mod protocol;
 pub mod retrieval;
 pub mod review_contract;
 pub mod reviewer_gatekeeper;
+pub mod gate_applicability;
 pub mod gate_messages;
 pub mod finalization;
 pub mod finish_guard;

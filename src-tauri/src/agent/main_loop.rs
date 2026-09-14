@@ -1768,6 +1768,40 @@ async fn run_agent_main_loop_in_workspace_inner(
                 },
             );
         }
+        // 门禁适用域交接：义务证据全部为非代码形态（命令输出/退出码/运维状态）时，
+        // diff/静态定位对账无判据——机械门不适用，生成 Gate Notice 移交终审 + Skip 遥测。
+        // Skip 绝不静默：审计侧靠 finish_obligation_evidence:noncode_refs:not_applicable
+        // 的触发率发现"系统性钻空子"（如模型故意只填不可解析引用来逃对账）。
+        let mut gate_notices: Vec<String> = context
+            .review_contract
+            .as_ref()
+            .map(|c| {
+                crate::agent::finish_guard::noncode_evidence_skip_reasons(
+                    c,
+                    side_effect_count,
+                    diff_context.as_ref(),
+                    Some(workspace_dir.as_path()),
+                )
+                .into_iter()
+                .filter_map(|reason| {
+                    crate::agent::gate_applicability::GateApplicability::not_applicable_owned(reason)
+                        .handoff_notice("契约义务证据对账门")
+                })
+                .collect()
+            })
+            .unwrap_or_default();
+        if !gate_notices.is_empty() {
+            crate::agent::telemetry::record_gate_fire(
+                state.inner(),
+                &crate::agent::telemetry::GateFireRecord {
+                    run_id: &run_id,
+                    session_id: &final_session_id,
+                    step_id: step_id as i64,
+                    gate: "finish_obligation_evidence",
+                    route: "finish_obligation_evidence:noncode_refs:not_applicable",
+                },
+            );
+        }
         let complex_delivery_blocker =
             complex_delivery_blocker(&context, &instruction, is_finish, result.success);
         let complex_delivery_unresolved = complex_delivery_blocker.is_some();
@@ -1968,15 +2002,54 @@ async fn run_agent_main_loop_in_workspace_inner(
                     .map(|p| p.target_files.as_slice())
                     .filter(|t| !t.is_empty())
                     .or(checkpoint.approved_target_files.as_deref());
+                // 适用域自证（applies_to）：声明目标里至少一个位于工作区内，
+                // diff/副作用对账才有判据；目标全部位于工作区外（运维/系统路径，
+                // 如 /usr/bin、/opt、~/.config）时 Git diff 物理上不可能命中 →
+                // 本门证据域不存在 → NotApplicable 跳过移交终审，
+                // 绝不把"前提不成立"硬当"违规"（实测教训：pacman 卸载被此门死锁打回）。
                 let declared_but_untouched = plan_targets
                     .map(|targets| {
-                        let diff_files: Vec<&String> = diff_context
+                        let has_ws_target = targets.iter().any(|t| {
+                            crate::agent::gate_applicability::is_workspace_target(
+                                t,
+                                &workspace_dir,
+                            )
+                        });
+                        if !has_ws_target {
+                            if let Some(notice) =
+                                crate::agent::gate_applicability::GateApplicability::not_applicable(
+                                    "方案声明目标全部位于工作区外（运维/系统路径），Git diff 对账无判据",
+                                )
+                                .handoff_notice("零交集对账门")
+                            {
+                                gate_notices.push(notice);
+                            }
+                            crate::agent::telemetry::record_gate_fire(
+                                state.inner(),
+                                &crate::agent::telemetry::GateFireRecord {
+                                    run_id: &run_id,
+                                    session_id: &final_session_id,
+                                    step_id: step_id as i64,
+                                    gate: "finish_review",
+                                    route: "finish_review:plan_target_mismatch:not_applicable",
+                                },
+                            );
+                            return false;
+                        }
+                        // 判据域：真实 diff ∪ 副作用台账路径
+                        //（非 git 写入同样构成"目标被动过"的物理事实）
+                        let touched: Vec<&String> = diff_context
                             .as_ref()
-                            .map(|d| d.changed_files.keys().collect())
+                            .map(|d| {
+                                d.changed_files
+                                    .keys()
+                                    .chain(d.all_affected_paths.iter())
+                                    .collect()
+                            })
                             .unwrap_or_default();
                         !targets.iter().any(|tf| {
-                            diff_files.iter().any(|df| {
-                                crate::agent::finish_guard::diff::file_paths_match(tf, df)
+                            touched.iter().any(|p| {
+                                crate::agent::finish_guard::diff::file_paths_match(tf, p)
                             })
                         })
                     })
@@ -2110,6 +2183,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     &checkpoint.stage_review_final_only,
                     host_verification.as_deref(),
                     human_waivers.as_deref(),
+                    &gate_notices,
                     checkpoint.approved_target_files.as_deref(),
                     Some(checkpoint.plan_mode),
                 )
@@ -2315,6 +2389,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 &model_routing,
                 &mut interrupt_rx,
                 &open_todos,
+                &gate_notices,
                 instruction.prepare_finish.as_ref(),
             )
             .await;
@@ -2520,10 +2595,19 @@ async fn run_agent_main_loop_in_workspace_inner(
                 format!("{}: {}", instruction.description, safe_params),
                 affected_paths,
             );
-        } else if result.success {
+        } else {
             // 🌟 写入验证智能自愈与自动感知 (Auto-verification):
             // 当存在未闭合的本地写入，且当前执行的命令是测试/验证命令且执行成功时，系统自动闭合为 verified！
-            try_auto_verify_change(&mut context, step_id, &instruction, &app, &final_session_id);
+            // 失败的命令同样进入判定：存在性探针（which/test -e/pacman -Q 等）的
+            // 非零退出本身就是"目标已不存在"的状态断言——运维任务的天然验证证据。
+            try_auto_verify_change(
+                &mut context,
+                step_id,
+                &instruction,
+                &app,
+                &final_session_id,
+                result.success,
+            );
         }
 
         context.current_observation = output_text.clone();
@@ -2830,6 +2914,7 @@ fn try_auto_verify_change(
     instruction: &AgentInstruction,
     app: &AppHandle,
     session_id: &str,
+    command_succeeded: bool,
 ) {
     if context.side_effects.len() <= context.inherited_side_effects_count
         || context
@@ -2847,6 +2932,9 @@ fn try_auto_verify_change(
     };
 
     let is_test_cmd = crate::agent::change_verification::is_test_or_verification_command(&cmd);
+    // 通用状态探针（which/test -e/pacman -Q/systemctl/curl -f/grep -q 等）：
+    // 非编码任务的天然验证手段——命令本身即一次客观状态断言
+    let is_probe_cmd = crate::agent::change_verification::is_state_probe_command(&cmd);
     let is_inferred_cmd = context
         .inferred_verification_command()
         .as_deref()
@@ -2863,24 +2951,42 @@ fn try_auto_verify_change(
         })
     });
 
-    if is_test_cmd || matches_contract_verify || is_inferred_cmd {
+    let qualifies = if command_succeeded {
+        is_test_cmd || is_probe_cmd || matches_contract_verify || is_inferred_cmd
+    } else {
+        // "缺失即证"探针：which/test -e/pacman -Q 等的非零退出本身是状态观测
+        // （卸载/禁用/删除任务中，探针失败恰是目标状态的客观证据）
+        crate::agent::change_verification::is_absence_probe_command(&cmd)
+    };
+
+    if qualifies {
         let snippet = if cmd.chars().count() > 60 {
             format!("{}...", cmd.chars().take(60).collect::<String>())
         } else {
             cmd
         };
+        let evidence = if command_succeeded {
+            format!("step_{} ({})", step_id, snippet)
+        } else {
+            format!("step_{} ({} → 非零退出=状态断言)", step_id, snippet)
+        };
         context.change_verification = Some(crate::agent::change_verification::ChangeVerification {
             status: "verified".to_string(),
-            evidence_refs: vec![format!("step_{} ({})", step_id, snippet)],
+            evidence_refs: vec![evidence],
             waived_reason: None,
         });
-        let _ = app.emit(
-            &format!("agent-log-{}", session_id),
+        let log_msg = if command_succeeded {
             format!(
                 "🧪 系统自动感知：检测到验证命令 `{}` 成功执行，已自动标记写入验证通过 (verified)",
                 snippet
-            ),
-        );
+            )
+        } else {
+            format!(
+                "🧪 系统自动感知：存在性断言 `{}` 返回非零退出（状态观测成立），已自动标记写入验证通过 (verified)",
+                snippet
+            )
+        };
+        let _ = app.emit(&format!("agent-log-{}", session_id), log_msg);
     }
 }
 

@@ -474,6 +474,9 @@ pub async fn evaluate_finish_diff(
     stage_carry_over: &[String],
     host_verification: Option<&str>,
     human_waivers: Option<&str>,
+    // 门禁适用域交接：机械门 NotApplicable 跳过的检查项说明（Skip 不静默，
+    // 终审须以命令退出码/终端输出/API 响应等语义证据核验这些项）
+    gate_notices: &[String],
     approved_target_files: Option<&[String]>,
     // 保留参数：未来"控制面自改"机械升级规则将按模式分流（当前不变量由提示词契约承担）
     _plan_mode: Option<crate::agent::checkpoint::PlanExecutionMode>,
@@ -513,6 +516,18 @@ pub async fn evaluate_finish_diff(
     // 宿主实测验证：真实退出码，替代模型自报的"测试通过"
     if let Some(hv) = host_verification {
         review_material.push_str(&format!("\n\n【宿主实测验证（宿主亲自执行，非模型自报）】\n{}\n", hv));
+    }
+
+    // 门禁适用域交接：机械门因证据域不存在而跳过的检查项绝不静默——
+    // 终审是语义层，须直接核验这些项对应的语义证据（命令退出码、终端输出、
+    // API 响应、系统状态），而不是依赖不存在的 diff 对账结果。
+    if !gate_notices.is_empty() {
+        review_material.push_str(
+            "\n\n【门禁适用域交接：以下机械检查对本任务不适用（证据域不存在），请终审直接核验语义证据】\n",
+        );
+        for notice in gate_notices {
+            review_material.push_str(&format!("- {}\n", notice));
+        }
     }
 
     // 2. 防敷衍拦截：若代码未变 (diff_hash 相同) 且上次审查未通过，

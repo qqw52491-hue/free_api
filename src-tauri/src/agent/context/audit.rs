@@ -199,6 +199,45 @@ impl AuditLedger {
             return false;
         }
 
+        // 前置包装器剥壳：sudo/timeout/nice 等包装命令的真实命令在内层——
+        // 不剥壳会让 `sudo pacman -Q` 这类只读探针被误记为副作用
+        // （副作用入账会清空 change_verification，形成"探测即重置验证态"的死锁）。
+        // 保守策略：只剥能静态确定参数边界的形态，剥不动就按非只读处理。
+        let mut tok_idx = 0usize;
+        while tok_idx < tokens.len() {
+            match tokens[tok_idx] {
+                // 仅剥 "sudo cmd" 直跟形态；sudo -u foo cmd 等带参旗标不剥
+                "sudo" | "doas" | "pkexec" => {
+                    if tokens
+                        .get(tok_idx + 1)
+                        .map_or(false, |t| !t.starts_with('-'))
+                    {
+                        tok_idx += 1;
+                    } else {
+                        break;
+                    }
+                }
+                "timeout" | "nice" | "nohup" | "stdbuf" | "time" => {
+                    tok_idx += 1;
+                    // 跳过包装器自身旗标（-k/-s/-n/-o 等）
+                    while tokens.get(tok_idx).map_or(false, |t| t.starts_with('-')) {
+                        tok_idx += 1;
+                    }
+                    // timeout/nice 的数值操作数（时长/优先级，如 "5"、"0.5"）
+                    while tokens.get(tok_idx).map_or(false, |t| {
+                        t.chars().next().map_or(false, |c| c.is_ascii_digit())
+                    }) {
+                        tok_idx += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let tokens = &tokens[tok_idx..];
+        if tokens.is_empty() {
+            return false;
+        }
+
         let first = tokens[0];
         let base_cmd = first.split('/').last().unwrap_or(first).trim();
 
@@ -245,6 +284,105 @@ impl AuditLedger {
             return Self::is_sed_readonly(&tokens);
         }
 
+        // 多态命令按子命令/旗标细分：查询态只读（可作状态断言证据），变更态记副作用。
+        // 判别失败一律落到"非只读"（宁可误记副作用，不可漏记真实写入）。
+        match base_cmd {
+            "pacman" => return Self::pacman_is_readonly(&tokens),
+            "dpkg" | "dpkg-query" => return Self::dpkg_is_readonly(&tokens),
+            "rpm" => {
+                return tokens[1..].iter().any(|a| {
+                    a.strip_prefix("--").map_or(false, |r| r.starts_with("query"))
+                        || a.strip_prefix('-').map_or(false, |r| r.starts_with('q'))
+                });
+            }
+            "apt" | "apt-get" => return Self::apt_is_readonly(&tokens),
+            "apt-cache" => return true,
+            "brew" => {
+                return Self::first_operand_in(
+                    &tokens,
+                    &["list", "info", "search", "cat", "home", "leaves", "deps", "uses", "outdated"],
+                );
+            }
+            "snap" => {
+                return Self::first_operand_in(&tokens, &["list", "info", "find", "changes", "tasks"]);
+            }
+            "flatpak" => {
+                return Self::first_operand_in(
+                    &tokens,
+                    &["list", "info", "search", "remote-ls", "history"],
+                );
+            }
+            "systemctl" => {
+                return Self::first_operand_in(
+                    &tokens,
+                    &[
+                        "status", "is-active", "is-enabled", "is-failed", "is-system-running",
+                        "is-online", "show", "cat", "help", "list-units", "list-unit-files",
+                        "list-timers", "list-sockets", "list-dependencies", "get-default",
+                        "show-environment", "log-level", "log-target",
+                    ],
+                );
+            }
+            "service" => return tokens.get(2).map_or(false, |a| *a == "status"),
+            "docker" | "podman" => {
+                return Self::first_operand_in(
+                    &tokens,
+                    &[
+                        "ps", "inspect", "images", "logs", "info", "version", "top", "port",
+                        "diff", "stats", "search", "history",
+                    ],
+                );
+            }
+            "kubectl" => {
+                return Self::first_operand_in(
+                    &tokens,
+                    &[
+                        "get", "describe", "logs", "top", "version", "cluster-info",
+                        "api-resources", "api-versions", "explain", "diff",
+                    ],
+                );
+            }
+            "hostnamectl" | "timedatectl" | "localectl" | "loginctl" | "resolvectl"
+            | "networkctl" | "bootctl" | "coredumpctl" => {
+                return tokens[1..]
+                    .iter()
+                    .find(|a| !a.starts_with('-'))
+                    .map_or(true, |op| {
+                        matches!(*op, "status" | "show" | "list" | "query" | "statistics" | "dump")
+                    });
+            }
+            // journalctl 无子命令（参数全是旗标/过滤表达式），变更靠特定长旗标
+            "journalctl" => {
+                return !tokens[1..].iter().any(|a| {
+                    a.starts_with("--vacuum")
+                        || matches!(
+                            *a,
+                            "--rotate" | "--flush" | "--sync" | "--relinquish-var"
+                                | "--smart-relinquish-var" | "--update-catalog"
+                        )
+                });
+            }
+            "ip" => return Self::ip_is_readonly(&tokens),
+            "ifconfig" | "iwconfig" => {
+                return !tokens[1..].iter().any(|a| !a.starts_with('-'));
+            }
+            "nc" | "ncat" | "netcat" => {
+                return tokens[1..].iter().any(|a| *a == "-z" || *a == "--zero");
+            }
+            "curl" => return Self::curl_is_readonly(&tokens),
+            "wget" => return Self::wget_is_readonly(&tokens),
+            "mount" => return !tokens[1..].iter().any(|a| !a.starts_with('-')),
+            "command" => return matches!(tokens.get(1), Some(&"-v") | Some(&"-V")),
+            "env" => {
+                return tokens[1..]
+                    .iter()
+                    .all(|a| a.starts_with('-') || a.contains('='));
+            }
+            "tar" => return Self::tar_is_readonly(&tokens),
+            "unzip" => return tokens[1..].iter().any(|a| matches!(*a, "-l" | "-t" | "-Z")),
+            _ => {}
+        }
+
         matches!(
             base_cmd,
             "ls" | "cat"
@@ -259,7 +397,296 @@ impl AuditLedger {
                 | "pwd"
                 | "which"
                 | "whereis"
+                // 存在性/状态断言探针：退出码即判据（卸载、禁用、删除任务的天然验证手段）
+                | "test"
+                | "["
+                | "[["
+                | "stat"
+                | "pgrep"
+                | "pidof"
+                | "ps"
+                | "type"
+                | "ping"
+                | "ping6"
+                | "traceroute"
+                | "tracepath"
+                // 校验/比较/编码类纯读取
+                | "file"
+                | "diff"
+                | "cmp"
+                | "comm"
+                | "md5sum"
+                | "sha1sum"
+                | "sha256sum"
+                | "sha512sum"
+                | "cksum"
+                | "b2sum"
+                | "readlink"
+                | "realpath"
+                | "basename"
+                | "dirname"
+                // 系统状态只读观测
+                | "ss"
+                | "netstat"
+                | "lsof"
+                | "df"
+                | "du"
+                | "free"
+                | "hostname"
+                | "uptime"
+                | "id"
+                | "whoami"
+                | "date"
+                | "uname"
+                | "printenv"
+                | "nproc"
+                | "arch"
+                | "lsblk"
+                | "lspci"
+                | "lsusb"
+                | "lscpu"
+                | "sw_vers"
+                | "dig"
+                | "host"
+                | "nslookup"
+                // 文本过滤器与杂项只读（重定向 > 已在上方排除）
+                | "jq"
+                | "sort"
+                | "uniq"
+                | "tr"
+                | "cut"
+                | "paste"
+                | "join"
+                | "column"
+                | "fold"
+                | "fmt"
+                | "tree"
+                | "zipinfo"
+                | "zcat"
+                | "zless"
+                | "zgrep"
+                | "bzcat"
+                | "xzcat"
+                | "sleep"
+                | "true"
+                | "false"
         )
+    }
+
+    /// 第一个非旗标操作数是否落在只读子命令集合内（子命令位判定）。
+    fn first_operand_in(tokens: &[&str], readonly_ops: &[&str]) -> bool {
+        tokens[1..]
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .map_or(false, |op| readonly_ops.contains(op))
+    }
+
+    /// pacman 只读判定：操作位（首个旗标首字符或 --xxx 长旗标）为 -Q/--query/-T/--deptest 才算查询态。
+    /// pacman 的操作是合并短旗标的首字符：-Qs 查询、-Rns 删除、-Syu 安装。
+    fn pacman_is_readonly(tokens: &[&str]) -> bool {
+        for arg in &tokens[1..] {
+            if let Some(rest) = arg.strip_prefix("--") {
+                return rest.starts_with("query") || rest.starts_with("deptest");
+            }
+            if let Some(rest) = arg.strip_prefix('-') {
+                if !rest.is_empty() {
+                    return rest.starts_with('Q') || rest.starts_with('T');
+                }
+                continue;
+            }
+            // 裸操作数出现在操作位之前属异常形态 → 保守按非只读
+            return false;
+        }
+        false
+    }
+
+    /// dpkg 只读判定：-l/-s/-L/-p/-V 及对应长旗标为查询/审计态。
+    fn dpkg_is_readonly(tokens: &[&str]) -> bool {
+        for arg in &tokens[1..] {
+            if let Some(rest) = arg.strip_prefix("--") {
+                let name = rest.split('=').next().unwrap_or("");
+                return matches!(
+                    name,
+                    "list" | "status" | "listfiles" | "print-avail" | "print-architecture"
+                        | "print-foreign-architectures" | "query" | "audit" | "compare-versions"
+                        | "verify" | "get-selections" | "yet-to-unpack"
+                );
+            }
+            if let Some(rest) = arg.strip_prefix('-') {
+                if !rest.is_empty() {
+                    return matches!(
+                        rest.chars().next().unwrap(),
+                        'l' | 's' | 'L' | 'p' | 'V' | 'C'
+                    );
+                }
+                continue;
+            }
+            return false;
+        }
+        false
+    }
+
+    /// apt/apt-get 只读判定：查询类子命令只读；-s/--simulate/--dry-run 模拟运行不算变更。
+    fn apt_is_readonly(tokens: &[&str]) -> bool {
+        if tokens[1..]
+            .iter()
+            .any(|a| matches!(*a, "-s" | "--simulate" | "--dry-run" | "--just-print"))
+        {
+            return true;
+        }
+        Self::first_operand_in(
+            tokens,
+            &[
+                "list", "show", "search", "policy", "depends", "rdepends", "madison",
+                "dumpavail", "showpkg", "showsrc", "stats", "check", "changelog",
+            ],
+        )
+    }
+
+    /// ip 只读判定：show/list/查询族只读；出现 set/add/del/change/replace/flush 即变更。
+    fn ip_is_readonly(tokens: &[&str]) -> bool {
+        let ops: Vec<&&str> = tokens[1..].iter().filter(|a| !a.starts_with('-')).collect();
+        if ops.iter().any(|a| {
+            matches!(
+                **a,
+                "set" | "add" | "del" | "delete" | "replace" | "flush" | "change" | "save"
+                    | "restore"
+            )
+        }) {
+            return false;
+        }
+        ops.first().map_or(false, |op| {
+            matches!(
+                **op,
+                "a" | "addr" | "address" | "l" | "link" | "r" | "route" | "neigh"
+                    | "neighbour" | "rule" | "maddr" | "mroute" | "show" | "list" | "help"
+                    | "stats" | "monitor"
+            )
+        })
+    }
+
+    /// curl 只读判定：GET/HEAD/OPTIONS 及 /dev/null 输出断言只读；
+    /// -d/--data/-F/--form/-T/--upload-file（上传）、-X 写动词、-o/-O 落盘 → 非只读。
+    fn curl_is_readonly(tokens: &[&str]) -> bool {
+        let mut i = 1;
+        while i < tokens.len() {
+            let a = tokens[i];
+            match a {
+                "-X" | "--request" => {
+                    let verb = tokens
+                        .get(i + 1)
+                        .map(|s| s.to_uppercase())
+                        .unwrap_or_default();
+                    if !matches!(verb.as_str(), "GET" | "HEAD" | "OPTIONS") {
+                        return false;
+                    }
+                    i += 1;
+                }
+                "-d" | "--data" | "--data-raw" | "--data-binary" | "--data-ascii"
+                | "--data-urlencode" | "-T" | "--upload-file" | "-F" | "--form"
+                | "--json" => return false,
+                "-o" | "--output" => {
+                    // 输出落盘即写文件；写到 /dev/null（HTTP 断言惯用法）仍只读
+                    match tokens.get(i + 1) {
+                        Some(&t) if t == "/dev/null" => i += 1,
+                        _ => return false,
+                    }
+                }
+                "-O" | "--remote-name" | "--remote-name-all" | "-J" | "--remote-header-name" => {
+                    return false;
+                }
+                _ => {
+                    let la = a.to_lowercase();
+                    if la.starts_with("--data")
+                        || la.starts_with("--form")
+                        || la.starts_with("--upload")
+                        || la.starts_with("--json")
+                    {
+                        return false;
+                    }
+                    if let Some(rest) = a.strip_prefix("--output=") {
+                        if rest != "/dev/null" {
+                            return false;
+                        }
+                    } else if a.starts_with("-o") && a.len() > 2 {
+                        if &a[2..] != "/dev/null" {
+                            return false;
+                        }
+                    } else if (a.starts_with("-d") || a.starts_with("-T") || a.starts_with("-F"))
+                        && a.len() > 2
+                    {
+                        return false;
+                    } else if let Some(rest) = a.strip_prefix("-X") {
+                        if !rest.is_empty()
+                            && !matches!(rest.to_uppercase().as_str(), "GET" | "HEAD" | "OPTIONS")
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// wget 只读判定：--spider/默认 GET 只读；--post-data/--method 写动词、-O 落盘 → 非只读。
+    fn wget_is_readonly(tokens: &[&str]) -> bool {
+        let mut i = 1;
+        while i < tokens.len() {
+            let a = tokens[i];
+            match a {
+                "--post-data" | "--post-file" | "--body-data" | "--body-file" => return false,
+                "--method" => {
+                    let verb = tokens
+                        .get(i + 1)
+                        .map(|s| s.to_uppercase())
+                        .unwrap_or_default();
+                    if !matches!(verb.as_str(), "GET" | "HEAD") {
+                        return false;
+                    }
+                    i += 1;
+                }
+                "-O" | "--output-document" => {
+                    match tokens.get(i + 1) {
+                        Some(&t) if t == "/dev/null" => i += 1,
+                        _ => return false,
+                    }
+                }
+                _ => {
+                    if a.starts_with("--post") || a.starts_with("--body") {
+                        return false;
+                    }
+                    if let Some(rest) = a.strip_prefix("--output-document=") {
+                        if rest != "/dev/null" {
+                            return false;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// tar 只读判定：操作簇含 t（list）且不含 c/x/r/u/A（创建/解包/追加）即只读。
+    /// 兼容无横线旧式形态（tar tf x.tar）与 -tf/--list。
+    fn tar_is_readonly(tokens: &[&str]) -> bool {
+        for arg in &tokens[1..] {
+            if let Some(rest) = arg.strip_prefix("--") {
+                let name = rest.split('=').next().unwrap_or("");
+                return name.starts_with("list") || name.starts_with("test-label");
+            }
+            let letters = arg.strip_prefix('-').unwrap_or(arg);
+            if letters.is_empty() {
+                continue;
+            }
+            return letters.contains('t')
+                && !letters
+                    .chars()
+                    .any(|c| matches!(c, 'c' | 'x' | 'r' | 'u' | 'A'));
+        }
+        false
     }
 
     /// 抹掉引号内的内容（保留字符位置结构），用于重定向/管道等结构性检测——
@@ -552,5 +979,88 @@ mod tests {
         // 必须能够被重新解析为合法 JSON
         let parsed: serde_json::Value = serde_json::from_str(&formatted).unwrap();
         assert_eq!(parsed["path"], "/home/user/project/src/main.rs");
+    }
+
+    #[test]
+    fn state_probe_commands_are_readonly_not_side_effects() {
+        // 运维探针必须判只读：若误记为副作用会清空 change_verification，
+        // 形成"探测即重置验证态"的死锁（pacman 卸载事故现场）。
+        let ro = |cmd: &str| {
+            AuditLedger::is_readonly_shell_command(&serde_json::json!({ "command": cmd }))
+        };
+        // 存在性/包/服务探针
+        assert!(ro("which workbuddy"), "which");
+        assert!(ro("command -v workbuddy"));
+        assert!(ro("test -e /opt/WorkBuddy"));
+        assert!(ro("[ -e /usr/bin/workbuddy ]"));
+        assert!(ro("[[ -d /opt/WorkBuddy ]]"));
+        assert!(ro("stat /usr/bin/workbuddy"));
+        assert!(ro("pacman -Q workbuddy"));
+        assert!(ro("pacman -Qs workbuddy"));
+        assert!(ro("pacman --query workbuddy"));
+        assert!(ro("dpkg -s workbuddy"));
+        assert!(ro("dpkg -l"));
+        assert!(ro("rpm -q workbuddy"));
+        assert!(ro("apt list --installed"));
+        assert!(ro("apt-get -s install foo"), "模拟运行只读");
+        assert!(ro("systemctl status workbuddy.service"));
+        assert!(ro("systemctl --user is-active foo"));
+        assert!(ro("systemctl is-enabled foo"));
+        assert!(ro("service nginx status"));
+        assert!(ro("pgrep -x workbuddy"));
+        assert!(ro("ps -p 1234"));
+        assert!(ro("journalctl -u foo.service -n 50"));
+        assert!(ro("hostnamectl"));
+        assert!(ro("timedatectl status"));
+        // HTTP/网络断言
+        assert!(ro("curl -f http://localhost:8790/health"));
+        assert!(ro("curl -s -o /dev/null -w '%{http_code}' http://x"));
+        assert!(ro("curl -fsSI http://x"));
+        assert!(ro("nc -z 127.0.0.1 8045"));
+        assert!(ro("ping -c 1 127.0.0.1"));
+        assert!(ro("wget --spider http://x"));
+        // 校验/过滤族
+        assert!(ro("sha256sum app.tar.gz"));
+        assert!(ro("diff -q a.txt b.txt"));
+        assert!(ro("jq -e '.ok' resp.json"));
+        assert!(ro("sleep 2"));
+        // 包装器剥壳
+        assert!(ro("sudo pacman -Q workbuddy"), "sudo 剥壳后仍是查询");
+        assert!(ro("timeout 5 curl -f http://x"), "timeout 剥壳");
+        // 变更形态保持非只读（判别失败一律保守记副作用）
+        assert!(!ro("sudo pacman -Rns workbuddy"), "卸载是真实写入");
+        assert!(!ro("pacman -S workbuddy"));
+        assert!(!ro("systemctl stop workbuddy"));
+        assert!(!ro("systemctl --user disable foo"));
+        assert!(!ro("service nginx restart"));
+        assert!(!ro("apt install foo"));
+        assert!(!ro("apt remove foo"));
+        assert!(!ro("dpkg -i foo.deb"));
+        assert!(!ro("curl -X POST http://x/api"));
+        assert!(!ro("curl -d 'a=b' http://x"));
+        assert!(!ro("curl -o out.html http://x"), "落盘即写文件");
+        assert!(!ro("curl -F 'f=@a.txt' http://x"));
+        assert!(!ro("wget -O out.html http://x"));
+        assert!(!ro("journalctl --vacuum-size=100M"));
+        assert!(!ro("journalctl --rotate"));
+        assert!(!ro("ip link set eth0 up"));
+        assert!(!ro("ip addr add 10.0.0.1/24 dev eth0"));
+        assert!(!ro("mount /dev/sda1 /mnt"));
+        assert!(!ro("env FOO=1 rm x"), "env 携带命令即执行");
+        assert!(!ro("command rm x"));
+        assert!(!ro("tar czf out.tgz src/"));
+        assert!(!ro("tar xf a.tar"));
+        assert!(ro("tar tf a.tar"), "tar -t 列档只读");
+        assert!(ro("tar --list a.tar"));
+        assert!(ro("ip addr show"), "ip 查询只读");
+        assert!(ro("ip a"));
+        assert!(ro("docker inspect workbuddy"));
+        assert!(ro("docker ps -a"));
+        assert!(ro("kubectl get pods"));
+        assert!(!ro("docker run --rm alpine true"));
+        assert!(!ro("kubectl delete pod x"));
+        assert!(ro("nc -z localhost 22"));
+        assert!(!ro("nc -l 8080"), "监听态非只读");
+        assert!(!ro("umount /mnt"));
     }
 }

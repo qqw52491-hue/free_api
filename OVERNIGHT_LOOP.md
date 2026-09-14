@@ -3,6 +3,35 @@
 > 纪律：每项控制面改动（门禁/判据/收割/预算/审查契约）在此登记：改了什么、为什么、commit、验证状态。
 > 状态标注：code-green（单测/编译过）| live-green（实弹验证过）| calib-green（基线校准过）| unverified（未验证）
 
+## 阶段十：门禁适用域（applies_to）三值层落地 — 2026-09-14
+
+**病灶定性**：「门禁无差别生效」是设计病不是单点 bug——所有机械门只有 Pass/Block 二值，
+把"本门证据域在当前任务不存在"硬塞进"违规"格。实弹现场：`sudo pacman -Rns` 卸载
+WorkBuddy 完美完成后，零交集门拿 Git diff 尺子卡 /usr/bin、/opt 目标，第 40–49 步
+连续打回成死循环。
+
+**更深层根因**（本次审计新发现）：`is_readonly_shell_command` 白名单没有
+pacman -Q/systemctl/test/curl 等探针 → 探针被当**副作用**入账 → `record_side_effect`
+清空 change_verification → **每次探测都重置验证态**，验证闭环物理上不可能闭合。
+修复必须两头打：探针不再误记副作用 + auto-verify 认得探针。
+
+| 改动 | 位置 | 设计要点 | 验证 |
+|---|---|---|---|
+| **GateApplicability 三值 enum** | `agent/gate_applicability.rs`（新） | `Applicable`/`NotApplicable{reason}` + `handoff_notice()` 生成终审交接语 + `is_workspace_target()`（相对路径=区内，绝对路径须 workspace 前缀，~/ 展开，盘符/URL=区外） | code-green（2 新测试） |
+| **零交集门 → 第一个适用域范例** | `main_loop.rs` finish 路径 | applies_to 自证：声明目标全在工作区外 → NotApplicable 跳过+Notice+telemetry（`finish_review:plan_target_mismatch:not_applicable`）；对账判据扩为 diff ∪ affected_paths（非 git 写入同样构成"目标被动过"物理事实） | code-green |
+| **契约证据三分法** | `finish_guard/diff.rs` | refs 分三域：file:line 可解析→照常对账；形似代码位置（`src/x.rs:abc`、可落盘裸路径）→ 仍属代码域判失败（防"写个路径蒙混"逃对账）；全非代码且含真实观测形态（`looks_like_operational_evidence`：已知命令头/output_id/step_N/退出码/返回结果）→ 不适用跳过；**裸结论（"已完成优化"）仍拦截**——不是证据 | code-green（4 新测试） |
+| **只读白名单扩容** | `context/audit.rs` `is_readonly_shell_command` | 包装器剥壳（sudo 直跟/timeout/nice/nohup/stdbuf/time 吃旗标+数值操作数）+ 多态命令子命令判别（pacman 只认 -Q/-T 操作位、systemctl 查询族、dpkg -l/-s/-L/-p/-V、apt list/show/-s、curl 禁 -d/-F/-T/-X写动词/-o非devnull、journalctl 禁 vacuum/rotate/flush、ip 禁 set/add/del/flush、tar 含t不含cx、service 仅 status、nc 仅 -z、mount 仅裸跑、command 仅 -v、env 仅全赋值）；恒只读新收录 test/[ /[[/stat/pgrep/ps/diff/cmp/sha256sum/ss/lsof/df/du/free/jq/sleep 等 | code-green（`state_probe_commands_are_readonly_not_side_effects` 60+ 断言） |
+| **auto-verify 通用探针识别** | `change_verification.rs` `is_state_probe_command` + `is_absence_probe_command` | 成功：which/test -[/pacman -Q/systemctl 状态族/curl -f/-w http_code/grep -q/diff -q/docker inspect/kubectl get 等算验证；**失败**：缺失探针子集（which/test -e/pacman -Q/systemctl is-*/pgrep 等纯存在性查询）的非零退出=状态断言，自动 verified（证据标注"非零退出=状态断言"）；grep -q/diff -q 不入缺失子集（失败可能是调试中途） | code-green（2 新测试） |
+| **Gate Notice 终审交接 + Skip telemetry** | `main_loop.rs`/`finalization.rs`/`reviewer_gatekeeper.rs` | `gate_notices: Vec<String>` 沿 finish 路径汇入 `evaluate_finish_diff`，追加进 review_material【门禁适用域交接】段；prepare_finish 同链路带参；Skip 全量 record_gate_fire（`...:not_applicable` 后缀路由），Skip 率可审计防系统性钻空子 | code-green |
+
+**验证**：`cargo check` 绿；`agent::` 全套 **575/575** 通过（含 9 个新增回归用例）。
+live 验证待下轮运维类实弹（卸载/服务管理任务应一次通过而非死锁）。
+
+**遗留风险**：①`has_code_modification_intent` 的关键词表（修改/修复/write/fix…）
+仍是 NLP 启发式，只作附加保险丝，物理层（工作区目标判定）吸收其误判；
+②非代码证据移交终审后，审查看的是"语义证据"——若终审放水，Skip 率遥测
+（`noncode_refs:not_applicable`/`plan_target_mismatch:not_applicable`）是审计抓手。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。

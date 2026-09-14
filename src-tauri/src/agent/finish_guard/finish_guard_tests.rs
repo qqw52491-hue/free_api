@@ -1920,6 +1920,146 @@ index 123..456 100644
         assert!(!miss.is_empty(), "证据未落入真实 diff 必须拦截");
     }
 
+    #[test]
+    fn noncode_evidence_skips_mechanical_gate_and_leaves_notice() {
+        // 运维任务场景（pacman 卸载）：义务证据是命令输出/退出码，
+        // file:line 对账域不存在 → 机械门不适用不拦截，但必须留下移交终审的 skip 原因
+        let ctx = DiffContext::from_diff_and_paths(None, &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let contract = diagnostic_contract_with_refs(&[
+            "pacman -Qs workbuddy 返回空",
+            "output_id: step_7 显示 package not found",
+        ]);
+        let blockers = review_contract_evidence_blockers(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(
+            blockers.is_empty(),
+            "非代码证据不应被 file:line 对账拦截: {blockers:?}"
+        );
+        let skips = crate::agent::finish_guard::noncode_evidence_skip_reasons(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+        );
+        assert_eq!(skips.len(), 1, "跳过的义务必须留交接原因供终审核验");
+        assert!(skips[0].contains("root-cause"));
+        assert!(skips[0].contains("非代码形态"));
+    }
+
+    #[test]
+    fn noncode_evidence_skips_even_with_real_diff() {
+        // 有真实 diff 时同样适用：证据形态决定适用域，不是"有 diff 就强制 file:line"
+        let raw_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,3 +10,4 @@\n fn a() {}\n";
+        let ctx = DiffContext::from_diff_and_paths(Some(raw_diff), &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let contract = diagnostic_contract_with_refs(&["systemctl status x 返回 inactive（预期状态）"]);
+        let blockers = review_contract_evidence_blockers(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(blockers.is_empty(), "非代码证据在有 diff 时同样不适用对账: {blockers:?}");
+    }
+
+    #[test]
+    fn malformed_file_ref_stays_in_code_domain_and_blocks() {
+        // src/x.rs:abc 是"编错的 file:line"——仍属代码证据域，必须拦截而非当非代码证据放行
+        let ctx = DiffContext::from_diff_and_paths(None, &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let contract =
+            diagnostic_contract_with_refs(&["src/agent/finish_guard/diff.rs:abc"]);
+        let blockers = review_contract_evidence_blockers(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(
+            !blockers.is_empty(),
+            "形似 file:line 但行号非法的引用必须拦截（代码证据域）"
+        );
+    }
+
+    #[test]
+    fn bare_existing_path_ref_is_code_domain() {
+        // 裸路径且磁盘可定位 → 代码证据域（缺行号照样拦）
+        let ctx = DiffContext::from_diff_and_paths(None, &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let contract =
+            diagnostic_contract_with_refs(&["src/agent/finish_guard/diff.rs"]);
+        let blockers = review_contract_evidence_blockers(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(!blockers.is_empty(), "裸路径引用属代码域，缺行号应拦截");
+    }
+
+    #[test]
+    fn mixed_code_and_noncode_refs_still_judge_the_code_part() {
+        // 混合引用：代码域引用对账失败 → 拦截；非代码引用不参与判定
+        let raw_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,3 +10,4 @@\n fn a() {}\n";
+        let ctx = DiffContext::from_diff_and_paths(Some(raw_diff), &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let contract = diagnostic_contract_with_refs(&[
+            "src/never_touched.rs:10",
+            "cargo test 输出显示全部通过",
+        ]);
+        let blockers = review_contract_evidence_blockers(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(!blockers.is_empty(), "代码域引用未命中 diff 必须拦截");
+        assert!(blockers[0].contains("never_touched"));
+        // 混合场景不走"全非代码"跳过通道
+        let skips = crate::agent::finish_guard::noncode_evidence_skip_reasons(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+        );
+        assert!(skips.is_empty(), "含代码域引用的义务不生成 skip 交接");
+    }
+
+    #[test]
+    fn bare_claim_without_observation_is_blocked_not_skipped() {
+        // 三分法的第三条腿："已完成优化"这类裸结论既非代码位置也非观测记录，
+        // 不能伪装成"非代码证据"逃过机械门——证据不成立仍拦截，且不产生 skip 交接
+        let ctx = DiffContext::from_diff_and_paths(None, &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let contract = diagnostic_contract_with_refs(&["已完成优化", "验证一切正常"]);
+        let blockers = review_contract_evidence_blockers(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+        );
+        assert!(!blockers.is_empty(), "裸结论不是证据，必须拦截");
+        assert!(blockers[0].contains("不构成可核验"));
+        let skips = crate::agent::finish_guard::noncode_evidence_skip_reasons(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+        );
+        assert!(skips.is_empty(), "裸结论不生成 skip 交接");
+    }
+
 
 #[test]
 fn review_finding_todos_cannot_be_silently_dropped() {

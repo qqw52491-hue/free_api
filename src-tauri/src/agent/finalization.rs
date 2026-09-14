@@ -186,6 +186,7 @@ pub async fn evaluate_prepare_finish(
     model_routing: &crate::agent::router::ModelRoutingConfig,
     interrupt_rx: &mut watch::Receiver<u64>,
     open_todos: &[String],
+    gate_notices: &[String],
     prepare_request: Option<&crate::agent::types::PrepareFinishRequest>,
 ) -> FinalizationReceipt {
     let current_diff_hash = baseline
@@ -290,6 +291,7 @@ pub async fn evaluate_prepare_finish(
                 &checkpoint.stage_review_final_only,
                 host_verification.as_deref(),
                 human_waivers.as_deref(),
+                gate_notices,
                 checkpoint.approved_target_files.as_deref(),
                 Some(checkpoint.plan_mode),
             )

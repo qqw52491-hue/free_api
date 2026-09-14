@@ -15,7 +15,8 @@ pub use diff::{
     file_paths_match, parse_file_line_ref, parse_unified_diff, DiffContext,
 };
 pub(crate) use diff::{
-    delivery_claims_code_modification, review_contract_evidence_blockers,
+    delivery_claims_code_modification, noncode_evidence_skip_reasons,
+    review_contract_evidence_blockers,
 };
 pub(crate) use state_updates::{apply_todo_update_guarded, apply_instruction_state_updates};
 
