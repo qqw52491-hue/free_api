@@ -9,6 +9,7 @@
 //! 不启动进程——spawn 发生在下个会话的 session_bootstrap 同步点。
 
 use super::mcp::McpPluginRow;
+use crate::agent::mcp::{McpClient, PluginConfig};
 use crate::db::DbState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -36,6 +37,14 @@ pub struct McpRegistryEntry {
     pub runtime_args: Vec<String>,
     /// 必填的 env/header 名列表（安装时向用户收集）
     pub required_secrets: Vec<String>,
+}
+
+/// 安装结果：插件行 + 握手实拉到的工具数（前端提示"已安装（N 个工具）"）。
+#[derive(Debug, Clone, Serialize)]
+pub struct McpRegistryInstallResult {
+    #[serde(flatten)]
+    pub row: McpPluginRow,
+    pub tool_count: usize,
 }
 
 #[tauri::command]
@@ -266,7 +275,7 @@ pub async fn install_mcp_registry_entry(
     remote_url: Option<String>,
     bearer_token: Option<String>,
     env_values: Option<std::collections::HashMap<String, String>>,
-) -> Result<McpPluginRow, String> {
+) -> Result<McpRegistryInstallResult, String> {
     let plugin_name = {
         let n = name.trim();
         if n.is_empty() {
@@ -310,6 +319,29 @@ pub async fn install_mcp_registry_entry(
         other => return Err(format!("暂不支持自动安装形态: {other}")),
     };
 
+    // 真机验证安装：spawn + initialize + list_tools——uvx 形态在此实际
+    // 下载受管 Python 与包（首次数十秒）；失败直接报错、不落库，
+    // 避免"装了但根本跑不起来"的半成品污染插件表。
+    let config = PluginConfig {
+        name: plugin_name.clone(),
+        command: command.clone(),
+        args: args.clone(),
+        url: url.clone(),
+        headers: headers.clone(),
+        env: env.clone(),
+        capability_card: None,
+    };
+    let client = McpClient::spawn(config.clone())
+        .map_err(|e| format!("启动 MCP 进程失败: {e}"))?;
+    let tools = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        client.initialize().await?;
+        client.list_tools().await
+    })
+    .await
+    .map_err(|_| "MCP 握手/拉包超时（120s）".to_string())?
+    .map_err(|e| format!("MCP 初始化失败: {e}"))?;
+    crate::agent::mcp_catalog::remember_tools(&config, &tools);
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -339,15 +371,18 @@ pub async fn install_mcp_registry_entry(
 
     crate::agent::mcp_catalog::invalidate_plugin(&plugin_name);
 
-    Ok(McpPluginRow {
-        id,
-        name: plugin_name,
-        command,
-        args,
-        env,
-        capability_card: String::new(),
-        enabled: true,
-        created_at: now,
+    Ok(McpRegistryInstallResult {
+        row: McpPluginRow {
+            id,
+            name: plugin_name,
+            command,
+            args,
+            env,
+            capability_card: String::new(),
+            enabled: true,
+            created_at: now,
+        },
+        tool_count: tools.len(),
     })
 }
 

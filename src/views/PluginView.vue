@@ -148,7 +148,7 @@
         <div>
           <span class="library-kicker">MCP REGISTRY</span>
           <h2>MCP 市场</h2>
-          <p>官方 Registry 在线检索。本地包自动经内置 uv 拉起（首次会下载 uv 运行时），远程 HTTP 直连零安装。</p>
+          <p>官方 Registry 在线检索。本地包安装时经内置 uv 实际下载并握手验证（首次数十秒，含 Python 运行时），失败不入库；远程 HTTP 直连零安装。</p>
         </div>
       </div>
       <div class="market-search">
@@ -157,6 +157,7 @@
           {{ marketSearching ? '搜索中…' : '🔍 搜索' }}
         </button>
       </div>
+      <p v-if="marketNotice" class="market-notice">{{ marketNotice }}</p>
       <p v-if="marketError" class="market-error">⚠️ {{ marketError }}</p>
 
       <h3 class="market-subhead">✨ 办公精选</h3>
@@ -170,8 +171,9 @@
           <p class="market-desc">{{ f.desc }}</p>
           <div class="market-card-foot">
             <code class="pkg-tag">{{ f.package }}</code>
-            <button class="install-btn" type="button" :disabled="Boolean(installing)" @click="installEntry(f, {})">
-              {{ installing === f.name ? '⏳ 安装中…' : '安装' }}
+            <button v-if="isInstalled(f.name)" class="install-btn installed" type="button" disabled>✓ 已安装</button>
+            <button v-else class="install-btn" type="button" :disabled="Boolean(installing)" @click="installEntry(f, {})">
+              {{ installing === f.name ? '⏳ 拉包并握手中…' : '安装' }}
             </button>
           </div>
         </article>
@@ -192,8 +194,9 @@
             <p class="market-desc">{{ r.description || '（无描述）' }}</p>
             <div class="market-card-foot">
               <code class="pkg-tag">{{ r.package || r.remote_url || r.name }}<template v-if="r.version">@{{ r.version }}</template></code>
-              <button v-if="r.install_kind !== 'unsupported' && r.install_kind !== 'mcpb'" class="install-btn" type="button" :disabled="Boolean(installing)" @click="openInstallModal(r)">
-                {{ installing === r.name ? '⏳ 安装中…' : '安装' }}
+              <button v-if="isInstalled(r.name)" class="install-btn installed" type="button" disabled>✓ 已安装</button>
+              <button v-else-if="r.install_kind !== 'unsupported' && r.install_kind !== 'mcpb'" class="install-btn" type="button" :disabled="Boolean(installing)" @click="openInstallModal(r)">
+                {{ installing === r.name ? '⏳ 拉包并握手中…' : '安装' }}
               </button>
               <span v-else class="unsupported-tag">需手动接入</span>
             </div>
@@ -221,7 +224,7 @@
         <div class="form-actions">
           <button class="cancel-btn" type="button" @click="installTarget = null">取消</button>
           <button class="save-btn" type="button" :disabled="Boolean(installing)" @click="installEntry(installTarget, installSecrets)">
-            {{ installing ? '⏳ 安装中…' : '确认安装' }}
+            {{ installing ? '⏳ 拉包并握手中…' : '确认安装' }}
           </button>
         </div>
       </div>
@@ -556,6 +559,12 @@ const marketError = ref('');
 const installing = ref('');
 const installTarget = ref(null);
 const installSecrets = ref({});
+const marketNotice = ref('');
+
+// 已安装名集合：registry 全名截最后一段即本地名（与后端入库逻辑一致）
+const installedLeaf = (name) => (name || '').split('/').pop();
+const isInstalled = (name) =>
+  plugins.value.some((p) => p.name === installedLeaf(name));
 
 // 办公精选：本地内置清单——包名即安装依据，不依赖 Registry 查询
 const featuredMcps = [
@@ -614,8 +623,10 @@ const openInstallModal = (entry) => {
 
 const installEntry = async (entry, secrets) => {
   installing.value = entry.name;
+  marketNotice.value = '';
+  marketError.value = '';
   try {
-    await invoke('install_mcp_registry_entry', {
+    const res = await invoke('install_mcp_registry_entry', {
       name: entry.name,
       installKind: entry.install_kind,
       package: entry.package || null,
@@ -626,9 +637,10 @@ const installEntry = async (entry, secrets) => {
     });
     installTarget.value = null;
     await loadPlugins();
-    activeTab.value = 'installed';
+    // 留在市场页：卡片变"已安装"，顶部提示工具数——不抢跳页
+    marketNotice.value = `✅ ${installedLeaf(entry.name)} 已安装并就绪（${res.tool_count} 个工具）——可在「已接入」页查看`;
   } catch (err) {
-    alert('安装失败: ' + err);
+    marketError.value = '安装失败: ' + err;
   } finally {
     installing.value = '';
   }
@@ -1511,6 +1523,13 @@ select option { background-color: #18181b !important; color: #f4f4f5 !important;
   flex-shrink: 0;
 }
 .install-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.install-btn.installed {
+  background: rgba(34, 197, 94, 0.15);
+  color: #86efac;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  opacity: 1;
+}
+.market-notice { color: #86efac; font-size: 12.5px; margin: -8px 0 12px; }
 .unsupported-tag { font-size: 11px; color: #71717a; flex-shrink: 0; }
 .secrets-hint { margin: 0; font-size: 11px; color: #fbbf24; }
 .install-modal-title { margin: 0 0 10px; font-size: 15px; color: #f4f4f5; }
