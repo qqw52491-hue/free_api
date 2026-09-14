@@ -1484,8 +1484,24 @@ async fn handler_trace_detail(
         .optional()
         .map_err(internal_error)?;
     let mut trace = row.ok_or_else(|| not_found("执行记录不存在"))?;
-    let steps_json = trace["steps_json"].as_str().unwrap_or("[]").to_string();
-    let mut steps = serde_json::from_str::<Value>(&steps_json).unwrap_or_else(|_| json!([]));
+    // 行优先：增量持久化后 steps_json 只在启动/终态整写，中途读取须看 agent_run_steps
+    let trace_id_owned = trace["id"].as_str().unwrap_or_default().to_string();
+    let row_steps: Vec<Value> = conn
+        .prepare("SELECT step_json FROM agent_run_steps WHERE run_id=?1 ORDER BY seq ASC")
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![trace_id_owned], |r| r.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .collect();
+    let mut steps = if !row_steps.is_empty() {
+        Value::Array(row_steps)
+    } else {
+        let steps_json = trace["steps_json"].as_str().unwrap_or("[]").to_string();
+        serde_json::from_str::<Value>(&steps_json).unwrap_or_else(|_| json!([]))
+    };
     sanitize_trace_steps(&mut steps);
     let completion: Value = trace["completion"]
         .as_str()

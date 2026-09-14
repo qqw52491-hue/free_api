@@ -775,6 +775,11 @@ pub struct AgentCheckpoint {
     /// 门禁文案显式指示模型去 ask_human（如预算耗尽转人工）时置位：此时求助是合法的，冷却豁免
     #[serde(default)]
     pub gate_human_escape_directed: bool,
+    /// 连续"整步只产出门禁/求助拒绝"的派发计数（P3 降级逃生口依据）：
+    /// 写门禁拦截 + 审查轮数耗尽 + ask_human 冷却/配额 会构成互相推诿的死循环
+    /// （门禁让求助→冷却让回门禁→回门禁再被拦），任何一步真实产出即清零。
+    #[serde(default)]
+    pub consecutive_gate_blocked: u32,
     /// shell 类工具造成的文件变更累计数（git 探针实测；非 git 环境按每次调用计 1）。
     /// 防旁路：shell_exec 一条命令可改 N 个文件且全部绕过 write_file 门禁，
     /// 该计数让阶段审查的文件数阈值对 shell 副作用同样生效。
@@ -900,6 +905,7 @@ impl AgentCheckpoint {
             plan_reviewer_last_dispatch: None,
             recent_gate_block_step: None,
             gate_human_escape_directed: false,
+            consecutive_gate_blocked: 0,
             uncovered_shell_mutations: 0,
             stage_review_shell_baseline: 0,
             stage_review_final_only: Vec::new(),

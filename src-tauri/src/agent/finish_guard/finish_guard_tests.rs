@@ -1118,6 +1118,31 @@
         assert!(is_write_or_side_effect_tool(&child_writer_inst));
     }
 
+    #[test]
+    fn move_rename_remove_named_tools_are_gated() {
+        // 名字不含 write/edit/delete/save 的破坏性工具也必须在门禁内：
+        // move_file 可覆盖目标文件、worktree_remove 删整棵隔离树、
+        // vscode_renameSymbol 跨工作区改写符号。
+        for tool in [
+            "move_file",
+            "worktree_remove",
+            "vscode_renameSymbol",
+            "remote-hub/move_file",
+        ] {
+            assert!(
+                is_write_or_side_effect_tool(&inst_with_tool(tool)),
+                "{tool} 应被判定为写操作"
+            );
+        }
+        // 对照：只读工具不受影响
+        for tool in ["read_text_file", "list_directory", "search_graph", "release_lock"] {
+            assert!(
+                !is_write_or_side_effect_tool(&inst_with_tool(tool)),
+                "{tool} 不应被误判为写操作"
+            );
+        }
+    }
+
     fn inst_with_tool(tool: &str) -> AgentInstruction {
         AgentInstruction {
             tool: Some(tool.to_string()),

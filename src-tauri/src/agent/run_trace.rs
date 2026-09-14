@@ -34,8 +34,50 @@ pub fn upsert_snapshot(
     Ok(())
 }
 
+/// 逐步追加：单步 INSERT，替代每步整写 steps_json 的 O(n) 序列化+整行重写。
+/// seq 取 steps 数组下标（追加顺序单调递增）；同时轻触父行 updated_at 供监控排序。
+pub fn append_step(
+    db: &DbState,
+    run_id: &str,
+    seq: i64,
+    step: &Value,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let step_json = serde_json::to_string(step).map_err(|error| error.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO agent_run_steps (run_id, seq, step_json) VALUES (?1, ?2, ?3)
+         ON CONFLICT(run_id, seq) DO UPDATE SET step_json=excluded.step_json",
+        params![run_id, seq, step_json],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "UPDATE agent_run_traces SET updated_at=?2 WHERE id=?1",
+        params![run_id, now],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// 行优先读取：agent_run_steps 有数据时按 seq 顺序重组（增量路径）；
+/// 为空时回退 steps_json 列（旧快照/测试直接播种/终态整写路径）。
 pub fn load_run_steps(db: &DbState, run_id: &str) -> Result<Vec<Value>, String> {
     let conn = db.reader()?;
+    let mut statement = conn
+        .prepare("SELECT step_json FROM agent_run_steps WHERE run_id=?1 ORDER BY seq ASC")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![run_id], |r| r.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    let mut steps: Vec<Value> = Vec::new();
+    for row in rows {
+        let raw = row.map_err(|error| error.to_string())?;
+        steps.push(serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null));
+    }
+    drop(statement);
+    if !steps.is_empty() {
+        return Ok(steps);
+    }
     let row: Option<String> = conn
         .query_row(
             "SELECT steps_json FROM agent_run_traces WHERE id = ?1",
@@ -80,7 +122,22 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
     rows.map(|row| {
         let (id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at) =
             row.map_err(|error| error.to_string())?;
-        let steps = serde_json::from_str::<Value>(&steps_json).unwrap_or_else(|_| json!([]));
+        // 行优先：增量持久化后 steps_json 只在启动/终态整写
+        let row_steps: Vec<Value> = conn
+            .prepare("SELECT step_json FROM agent_run_steps WHERE run_id=?1 ORDER BY seq ASC")
+            .and_then(|mut stmt| {
+                stmt.query_map(params![id], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .collect();
+        let steps = if !row_steps.is_empty() {
+            Value::Array(row_steps)
+        } else {
+            serde_json::from_str::<Value>(&steps_json).unwrap_or_else(|_| json!([]))
+        };
         let completion = completion_json
             .as_deref()
             .and_then(|value| serde_json::from_str::<Value>(value).ok())

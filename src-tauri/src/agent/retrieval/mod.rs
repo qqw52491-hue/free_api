@@ -10,7 +10,7 @@ pub use workspace_search::*;
 
 use crate::agent::types::DispatchResult;
 use crate::db::DbState;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -41,8 +41,197 @@ fn canonical_search_fingerprint(params_value: &Value) -> Option<String> {
     serde_json::to_string(&parsed).ok()
 }
 
+/// 会话级检索步索引：steps 改为逐行持久化（agent_run_steps）后，
+/// 去重/同路径统计不再整载 steps_json 做 O(n) 反序列化——同步只解析
+/// seq ≥ next_seq 的新行（O(delta)），索引在 run 生命周期内常驻内存。
+/// 语义与原全量扫描严格等价：edit/write 使之前的缓存命中失效，
+/// 同路径统计只计成功 search 步。
+struct SessionSearchIndex {
+    run_id: String,
+    next_seq: i64,
+    searches: Vec<IndexedSearch>,
+    last_write_seq: Option<i64>,
+    path_counts: std::collections::HashMap<String, usize>,
+}
+
+struct IndexedSearch {
+    seq: i64,
+    step_id: i64,
+    fingerprint: Option<String>,
+    output_id: Option<String>,
+    output_nonempty: bool,
+}
+
+static SEARCH_STEP_INDEX: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, SessionSearchIndex>>,
+> = std::sync::OnceLock::new();
+
+fn search_step_index(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, SessionSearchIndex>> {
+    SEARCH_STEP_INDEX
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn index_step(idx: &mut SessionSearchIndex, seq: i64, step: &Value) {
+    match step.get("action").and_then(Value::as_str) {
+        Some("search") => {
+            if step.get("status").and_then(Value::as_str) != Some("succeeded") {
+                return;
+            }
+            if let Some(path) = step
+                .get("params")
+                .and_then(|p| p.get("path"))
+                .and_then(Value::as_str)
+                .map(normalize_search_path)
+                .filter(|p| !p.is_empty())
+            {
+                *idx.path_counts.entry(path).or_default() += 1;
+            }
+            idx.searches.push(IndexedSearch {
+                seq,
+                step_id: step.get("id").and_then(Value::as_i64).unwrap_or(0),
+                fingerprint: step.get("params").and_then(canonical_search_fingerprint),
+                output_id: step
+                    .get("output_id")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.to_string()),
+                output_nonempty: step
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
+            });
+        }
+        // edit/write 步（不论成败）使此前的缓存命中失效——与原全量扫描的
+        // INVALIDATING_ACTIONS 语义一致：cached 在写步之后清零。
+        Some("edit") | Some("write") => {
+            idx.last_write_seq = Some(idx.last_write_seq.map_or(seq, |w| w.max(seq)));
+        }
+        _ => {}
+    }
+}
+
+/// 将本会话最新 run 的 agent_run_steps 增量并入索引。
+/// 返回 false 表示行表为空（旧数据/直接播种 steps_json 的测试），
+/// 调用方应回退 load_latest_run_steps 的整载路径。
+/// 注意锁序：调用方先持有 db reader（可能是 db.0 降级互斥），本函数再取
+/// 索引锁——全程只有 db→index 单向次序，不存在反向持锁路径。
+fn sync_search_index(conn: &rusqlite::Connection, session_id: &str) -> bool {
+    let run_id: String = match conn
+        .query_row(
+            "SELECT id FROM agent_run_traces WHERE session_id=?1 ORDER BY id DESC LIMIT 1",
+            params![session_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    {
+        Some(id) => id,
+        None => return false,
+    };
+    let has_rows = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_run_steps WHERE run_id=?1)",
+            params![run_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|v| v != 0)
+        .unwrap_or(false);
+    let mut map = match search_step_index().lock() {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if !has_rows {
+        map.remove(session_id);
+        return false;
+    }
+    let idx = map.entry(session_id.to_string()).or_insert_with(|| {
+        SessionSearchIndex {
+            run_id: run_id.clone(),
+            next_seq: 0,
+            searches: Vec::new(),
+            last_write_seq: None,
+            path_counts: std::collections::HashMap::new(),
+        }
+    });
+    if idx.run_id != run_id {
+        *idx = SessionSearchIndex {
+            run_id: run_id.clone(),
+            next_seq: 0,
+            searches: Vec::new(),
+            last_write_seq: None,
+            path_counts: std::collections::HashMap::new(),
+        };
+    }
+    let mut stmt = match conn.prepare(
+        "SELECT seq, step_json FROM agent_run_steps WHERE run_id=?1 AND seq>=?2 ORDER BY seq ASC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let rows: Vec<(i64, String)> = stmt
+        .query_map(params![run_id, idx.next_seq], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })
+        .ok()
+        .map(|mapped| mapped.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+    drop(stmt);
+    for (seq, raw) in rows {
+        if let Ok(step) = serde_json::from_str::<Value>(&raw) {
+            index_step(idx, seq, &step);
+        }
+        idx.next_seq = seq + 1;
+    }
+    true
+}
+
+/// 索引版 find_cached_search：最近一次同参且非空输出的成功检索，
+/// 其 seq 须大于最后一次 edit/write（等价原扫描"写步后 cached 清零"）。
+/// 命中时按 seq 单行回取 step_json 拿 output 文本（O(1) 解析单步）。
+fn indexed_find_cached_search(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    fp: &str,
+) -> Option<(i64, String, Option<String>)> {
+    let map = search_step_index().lock().ok()?;
+    let idx = map.get(session_id)?;
+    let candidate = idx.searches.iter().rev().find(|s| {
+        s.fingerprint.as_deref() == Some(fp)
+            && s.output_nonempty
+            && s.seq > idx.last_write_seq.unwrap_or(-1)
+    })?;
+    let raw: String = conn
+        .query_row(
+            "SELECT step_json FROM agent_run_steps WHERE run_id=?1 AND seq=?2",
+            params![idx.run_id, candidate.seq],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let step = serde_json::from_str::<Value>(&raw).ok()?;
+    let out = step
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if out.is_empty() {
+        return None;
+    }
+    Some((candidate.step_id, out, candidate.output_id.clone()))
+}
+
+/// 索引版同路径计数；无索引（回退路径）返回 None，调用方改走整载统计。
+fn indexed_same_path_count(session_id: &str, normalized_path: &str) -> Option<usize> {
+    let map = search_step_index().lock().ok()?;
+    map.get(session_id)
+        .and_then(|idx| idx.path_counts.get(normalized_path).copied().or(Some(0)))
+}
+
 /// 载入本会话最新 run trace 的 steps_json；无快照或解析失败返回空 Vec。
 /// 精确指纹去重与同路径检索计数共用同一份快照，避免一次检索两次反序列化。
+/// 仅作为行表为空时的回退路径（旧快照、直接播种 steps_json 的测试）。
 fn load_latest_run_steps(conn: &rusqlite::Connection, session_id: &str) -> Vec<Value> {
     conn.query_row(
         "SELECT steps_json FROM agent_run_traces WHERE session_id=?1 ORDER BY id DESC LIMIT 1",
@@ -254,22 +443,45 @@ pub fn dispatch_search(
     let wants_code = kinds.iter().any(|k| k == "code" || k == "all");
 
     // 会话内去重：同参成功检索直接复用（edit/write 会使其失效，见 find_cached_search）。
-    // steps 快照只载入一次：精确指纹去重与同路径检索计数复用同一份数据。
+    // 快路径走每会话步索引（agent_run_steps 增量同步，只解析新行）；
+    // 行表为空（旧快照/测试直接播种 steps_json）回退整载——两条路径语义等价。
     // conn 作用域必须收窄到此块内：reader() 在连接池缺省时降级为 db.0 同一把
     // 互斥锁，跨块存活会让下方 history 分支的 db.0.lock() 自锁死。
     let prior_steps = {
         let conn = db.reader().ok();
-        let steps = conn
-            .as_ref()
-            .map(|c| load_latest_run_steps(c, session_id))
-            .unwrap_or_default();
-        if let (Some(conn), Some(fp)) = (conn.as_ref(), canonical_search_fingerprint(params_value))
-        {
-            if let Some((step_id, output, out_id)) = find_cached_search(&steps, &fp) {
-                return cached_search_dispatch_result(conn, session_id, step_id, output, out_id);
+        let mut fallback_steps: Vec<Value> = Vec::new();
+        let mut indexed = false;
+        if let Some(conn) = conn.as_ref() {
+            if sync_search_index(conn, session_id) {
+                indexed = true;
+                if let Some(fp) = canonical_search_fingerprint(params_value) {
+                    if let Some((step_id, output, out_id)) =
+                        indexed_find_cached_search(conn, session_id, &fp)
+                    {
+                        return cached_search_dispatch_result(
+                            conn, session_id, step_id, output, out_id,
+                        );
+                    }
+                }
             }
         }
-        steps
+        if !indexed {
+            let steps = conn
+                .as_ref()
+                .map(|c| load_latest_run_steps(c, session_id))
+                .unwrap_or_default();
+            if let (Some(conn), Some(fp)) =
+                (conn.as_ref(), canonical_search_fingerprint(params_value))
+            {
+                if let Some((step_id, output, out_id)) = find_cached_search(&steps, &fp) {
+                    return cached_search_dispatch_result(
+                        conn, session_id, step_id, output, out_id,
+                    );
+                }
+            }
+            fallback_steps = steps;
+        }
+        fallback_steps
     };
 
     let mut history_ok = !wants_history;
@@ -373,7 +585,8 @@ pub fn dispatch_search(
         .map(str::trim)
         .filter(|p| !p.is_empty())
     {
-        let prior = count_prior_same_path_searches(&prior_steps, path);
+        let prior = indexed_same_path_count(session_id, &normalize_search_path(path))
+            .unwrap_or_else(|| count_prior_same_path_searches(&prior_steps, path));
         if prior >= 2 {
             notes.push(format!(
                 "检索 signpost：路径「{}」本会话此前已成功检索 {} 次（含不同关键词），换词重搜同一路径收益递减——建议改用 local_file 定向读取已命中文件，或用 task_store.search_step_output 在既有输出的 output_id 上做工件内检索。若剩余探索面横跨多个模块/目录，优先 child_worker dispatches 一步批量并行派发只读侦察，比主循环串行搜索省步数。",
@@ -685,6 +898,178 @@ mod tests {
         assert!(str_query.success);
         let str_payload: Value = serde_json::from_str(&str_query.stdout).unwrap();
         assert_eq!(str_payload["total_hits"], 1);
+    }
+
+    /// 行表索引路径的测试库：在 setup_test_db 基础上补 run_traces/run_steps/step_logs。
+    fn setup_index_db() -> Connection {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "CREATE TABLE agent_run_traces (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, goal TEXT NOT NULL,
+                status TEXT NOT NULL, steps_json TEXT NOT NULL DEFAULT '[]',
+                completion_json TEXT, started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, completed_at TEXT);
+             CREATE TABLE agent_run_steps (
+                run_id TEXT NOT NULL, seq INTEGER NOT NULL, step_json TEXT NOT NULL,
+                PRIMARY KEY (run_id, seq));
+             CREATE TABLE agent_step_logs (
+                output_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                step_id INTEGER NOT NULL, raw_output TEXT NOT NULL, created_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_run_step(conn: &Connection, run_id: &str, seq: i64, step: &Value) {
+        conn.execute(
+            "INSERT INTO agent_run_steps (run_id, seq, step_json) VALUES (?1,?2,?3)",
+            params![run_id, seq, serde_json::to_string(step).unwrap()],
+        )
+        .unwrap();
+    }
+
+    fn seed_trace(conn: &Connection, session_id: &str, run_id: &str) {
+        conn.execute(
+            "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at)
+             VALUES (?1,?2,'g','running','[]','2026-01-01','2026-01-01')",
+            params![run_id, session_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_indexed_dedup_hit_and_incremental_sync() {
+        let conn = setup_index_db();
+        let session = "sess-idx-dedup";
+        seed_trace(&conn, session, "run-i1");
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+
+        // 第一次派发：行表无任何步 → 正常检索路径（索引同步成功但无命中）
+        let params = json!({"query": "数据库连接池", "kinds": ["history"], "path": "src"});
+        let first = dispatch_search(&db, session, &params, None);
+        assert_eq!(first.route, "retrieval", "无历史步时应正常检索而非命中缓存");
+
+        // 落一步"同参成功检索"行 → 第二次派发应经增量索引命中去重锚点
+        {
+            let conn = db.0.lock().unwrap();
+            insert_run_step(
+                &conn,
+                "run-i1",
+                0,
+                &json!({
+                    "id": 1, "action": "search", "status": "succeeded",
+                    "params": params,
+                    "output": "{\"query\":\"数据库连接池\",\"total_hits\":3,\"hits\":[]}",
+                    "output_id": "out-dedup-1"
+                }),
+            );
+        }
+        let second = dispatch_search(&db, session, &params, None);
+        assert_eq!(second.route, "retrieval-cache", "同参重搜应命中增量索引去重");
+        assert!(second.stdout.contains("检索去重"));
+        assert!(second.stdout.contains("out-dedup-1"), "锚点应携带 output_id 句柄");
+    }
+
+    #[test]
+    fn test_indexed_dedup_invalidated_by_write_step() {
+        let conn = setup_index_db();
+        let session = "sess-idx-inval";
+        seed_trace(&conn, session, "run-i2");
+        let params = json!({"query": "配置项", "kinds": ["history"]});
+        insert_run_step(
+            &conn,
+            "run-i2",
+            0,
+            &json!({
+                "id": 1, "action": "search", "status": "succeeded",
+                "params": params,
+                "output": "{\"total_hits\":1}", "output_id": "o1"
+            }),
+        );
+        // 写步使之前的缓存命中失效——与原全量扫描 INVALIDATING_ACTIONS 语义一致
+        insert_run_step(
+            &conn,
+            "run-i2",
+            1,
+            &json!({"id": 2, "action": "edit", "status": "succeeded", "params": {}}),
+        );
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(&db, session, &params, None);
+        assert_eq!(result.route, "retrieval", "写步之后的同参检索不得命中缓存");
+    }
+
+    #[test]
+    fn test_indexed_same_path_signpost_counts() {
+        let conn = setup_index_db();
+        let session = "sess-idx-signpost";
+        seed_trace(&conn, session, "run-i3");
+        for (seq, id, q) in [(0, 1, "甲"), (1, 2, "乙")] {
+            insert_run_step(
+                &conn,
+                "run-i3",
+                seq,
+                &json!({
+                    "id": id, "action": "search", "status": "succeeded",
+                    "params": {"query": q, "kinds": ["history"], "path": "src/context"},
+                    "output": "{\"total_hits\":1}"
+                }),
+            );
+        }
+        // 干扰项：失败检索与异路径检索不应计数
+        insert_run_step(
+            &conn,
+            "run-i3",
+            2,
+            &json!({"id": 3, "action": "search", "status": "failed",
+                    "params": {"query": "丙", "path": "src/context"}}),
+        );
+        insert_run_step(
+            &conn,
+            "run-i3",
+            3,
+            &json!({"id": 4, "action": "search", "status": "succeeded",
+                    "params": {"query": "丁", "path": "src/other"},
+                    "output": "{\"total_hits\":1}"}),
+        );
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            session,
+            &json!({"query": "戊", "kinds": ["history"], "path": "src/context"}),
+            None,
+        );
+        assert!(
+            result.stdout.contains("检索 signpost") && result.stdout.contains("2 次"),
+            "索引路径的同路径计数应与整载一致，实际: {}",
+            result.stdout
+        );
+    }
+
+    #[test]
+    fn test_indexed_empty_output_match_does_not_shadow_earlier_hit() {
+        // 语义对齐 find_cached_search：空输出的同参匹配不覆盖更早的非空命中
+        let conn = setup_index_db();
+        let session = "sess-idx-emptyout";
+        seed_trace(&conn, session, "run-i4");
+        let params = json!({"query": "重试策略", "kinds": ["history"]});
+        insert_run_step(
+            &conn,
+            "run-i4",
+            0,
+            &json!({"id": 7, "action": "search", "status": "succeeded",
+                    "params": params, "output": "{\"total_hits\":2}", "output_id": "o7"}),
+        );
+        insert_run_step(
+            &conn,
+            "run-i4",
+            1,
+            &json!({"id": 8, "action": "search", "status": "succeeded",
+                    "params": params, "output": ""}),
+        );
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(&db, session, &params, None);
+        assert_eq!(result.route, "retrieval-cache");
+        assert!(result.stdout.contains("第 7 步"), "应锚定更早的非空命中: {}", result.stdout);
     }
 
     #[test]

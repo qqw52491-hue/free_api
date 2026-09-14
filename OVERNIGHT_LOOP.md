@@ -41,8 +41,7 @@
 致定位调用全部 Invalid payload，已修（详见 mcp-remote-setup/AGENTS.md）。
 Hub 与原生工具的分工约定：文件读写走原生（台账/门禁/句柄链更深），导航/图谱/协作走 Hub。
 
-**未动项**：P3 终态 degraded 逃生口（无真人 ask_human 时三锁同开仍空转，属活性修复非
-上下文优化，另立项）；steps_json 全量反序列化/整写 O(n²) 轻债暂记不还。
+**未动项**：~~P3 终态 degraded 逃生口~~、~~steps_json O(n²)~~ —— 均已在阶段九偿还。
 
 **方法学披露**：`agent_gate_fires` 不是"拦截事件表"——它是**按步盖章的挂起状态量表**
 （main_loop.rs:1678-1704：只要 `evidence_blockers` 非空，每一步都记一行）。
@@ -193,6 +192,19 @@ spec 测试用修复提交自带的测试 diff 做 test_patch（case_10/11），
 ---
 
 ---
+
+## 阶段九：三笔技术债偿还（写门禁漏词 + P3 死锁逃生口 + steps_json O(n²)）— 2026-09-14
+
+阶段八"未动项"两笔 + 接 Hub 时新发现的门禁漏词，一次还清。
+全部 **code-green**（586 agent 测试通过，含 6 个新增回归），live 验证待下轮实弹。
+
+| 改动 | 位置 | 病灶/设计要点 | 验证 |
+|---|---|---|---|
+| **写门禁补 move/rename/remove 语义** | `dispatcher.rs` `is_write_or_side_effect_tool`：动作级（action ∈ move/rename/remove/move_file/worktree_remove）+ 名称级（move_file/worktree_remove 不命中 write/edit/delete/save 关键词的裸奔洞） | Hub `move_file`/`worktree_remove` 此前全程零审查（改名覆盖文件、删 worktree 无闸）。管理类工具动作是 `delete` 本来就被拦，无 `remove` 动作 → 零误伤；与 `audit.rs`/`plan_tree_dispatch.rs` 既有 move/remove=变更 口径一致 | code-green（finish_guard_tests 回归） |
+| **P3 跨门禁死锁降级逃生口** | `checkpoint.rs` `consecutive_gate_blocked`（持久化计数）+ `main_loop.rs` `is_gate_block_route` + 每步结果处判定，`MAX_CONSECUTIVE_GATE_BLOCKS=8` | 三锁推诿链：写门禁拦→文案指引 ask_human→冷却/配额拒→回门禁再被拦，无真人值守时永不收敛（历史实弹曾空转数百步）。连续 8 次派发全部落在门禁/求助拒绝路由（plan_gatekeeper:*、finish_review:*、stage_review:blocking_open、ask_human 冷却/配额/重复、repeat_read、contract_rejected 等）即改写为 `RUN_INTERRUPTED_ROUTE` 走 `finish_interrupted_run`：标 failed、存检查点与轨迹、取消子任务，人工可介入续跑。真实工具失败不计入（由失败重试/无进展各自兜底），任何一步真实产出即清零 | code-green（新增 `gate_deadlock_tests` 2 项：死锁路由全计入、真实工作/参数失败不计入） |
+| **steps_json O(n²) → 逐步行表** | `db.rs` 新表 `agent_run_steps(run_id,seq,step_json)`；`run_trace.rs` `append_step`（单步 INSERT）+ `load_run_steps` 行优先列回退；`main_loop.rs` 每步整写→单行追加 + 恢复回填；`evaluation_runner.rs` 监控 SQL 与 `channel/http.rs` 读取同步行优先；`retrieval/mod.rs` `SessionSearchIndex` 进程级索引 | 旧路每步 `to_string(全历史)`+整行重写、每次检索 `from_str(全历史)`——O(n²) CPU/IO。新路：写 O(1) 单行 INSERT、读按 seq 增量同步只解析新行（O(delta)）。指纹去重与同路径计数语义与全量扫描严格等价（edit/write 失效、空输出不遮蔽早命中、failed/无 path 不计数）；行表为空自动回退整载 steps_json（旧快照/测试播种兼容）；resume 回填使行表自启动即完整 | code-green（新增 4 项索引测试：去重命中+增量同步、写步失效、同路径计数、空输出不遮蔽） |
+
+**live 验证点**：①检索去重/同路径 signpost 行为与旧路一致（索引路径已等价测试，实弹看拦截文案照常出现）；②死锁会话在 ~8 连拒后落 `RUN_INTERRUPTED_ROUTE` 而非空转（轨迹可查 `🛑 [GateDeadlock]`）；③长会话后期单步持久化耗时下降（append_step 单行写 vs 整写）。
 
 ## 阶段五存档：夜间自主测试计划（A→E，已完成）
 

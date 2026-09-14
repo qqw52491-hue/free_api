@@ -528,6 +528,17 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_agent_run_traces_session
             ON agent_run_traces(session_id, started_at ASC);
 
+        -- 逐步增量持久化的运行轨迹：每步一行，替代每步整写 steps_json 的 O(n²) 序列化。
+        -- steps_json 列仍保留（启动快照/终态快照/旧数据兼容），读者按「行优先、列回退」。
+        CREATE TABLE IF NOT EXISTS agent_run_steps (
+            run_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            step_json TEXT NOT NULL,
+            PRIMARY KEY (run_id, seq)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_run_steps_run
+            ON agent_run_steps(run_id, seq ASC);
+
         -- 受管产物持久化账本：记录由 Agent 生成或登记的文件元数据，统一按 artifact_id 管理
         CREATE TABLE IF NOT EXISTS agent_artifacts (
             id TEXT PRIMARY KEY,

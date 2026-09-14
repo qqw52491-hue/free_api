@@ -202,8 +202,11 @@ fn read_structured_monitor_snapshot(
     let trace_row = conn
         .query_row(
             "SELECT id, status, updated_at,
-                    json_array_length(steps_json),
-                    json_extract(steps_json, '$[#-1]'),
+                    CASE WHEN EXISTS(SELECT 1 FROM agent_run_steps WHERE run_id=t.id)
+                         THEN (SELECT COUNT(*) FROM agent_run_steps WHERE run_id=t.id)
+                         ELSE json_array_length(steps_json) END,
+                    COALESCE((SELECT step_json FROM agent_run_steps WHERE run_id=t.id ORDER BY seq DESC LIMIT 1),
+                             json_extract(steps_json, '$[#-1]')),
                     (SELECT COUNT(*) FROM agent_run_traces WHERE session_id=t.session_id)
              FROM agent_run_traces t WHERE t.session_id=?1
              ORDER BY t.started_at DESC, t.id DESC LIMIT 1",

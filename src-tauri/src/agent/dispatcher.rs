@@ -387,16 +387,24 @@ pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
     }
 
     // 1. 核心代码与文件写盘工具（edit_file / write_file / child_writer 等）：无论何时必须由门禁严格把关！
+    // move/rename/remove 同属破坏性写：move_file 可覆盖目标、worktree_remove 可删
+    // 整棵隔离树、vscode_renameSymbol 会跨工作区改写符号——名字不含写动词不等于安全。
     let is_code_write_tool = tool.contains("write")
         || tool.contains("edit")
         || tool.contains("delete")
         || tool.contains("save")
+        || tool.contains("move")
+        || tool.contains("rename")
+        || tool.contains("remove")
         || tool.contains("excel")
         || tool.eq_ignore_ascii_case("child_writer")
         || action.starts_with("write")
         || action.starts_with("edit")
         || action.starts_with("delete")
-        || action.starts_with("save");
+        || action.starts_with("save")
+        || action.starts_with("move")
+        || action.starts_with("rename")
+        || action.starts_with("remove");
 
     if is_code_write_tool {
         return true;

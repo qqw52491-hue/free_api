@@ -17,7 +17,7 @@ use crate::agent::mcp::{McpClient, PluginRegistry};
 use crate::agent::review_contract::{apply_review_contract_update, ReviewContract};
 use crate::agent::run_state::{AgentRunEvent, AgentRunMachine, AgentRunState};
 use crate::agent::task_store;
-use crate::agent::types::{AgentInstruction, TodoItem, RUN_INTERRUPTED_ROUTE};
+use crate::agent::types::{AgentInstruction, DispatchResult, TodoItem, RUN_INTERRUPTED_ROUTE};
 use crate::db::DbState;
 use chrono::Utc;
 use serde_json::json;
@@ -68,6 +68,33 @@ fn token_budget_stop_reason(
 /// 正常会话只做短暂态请求重试；后台回归可显式提高到上限以避免 Provider 波动中断取证。
 pub(crate) const DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 3;
 const MAX_TRANSIENT_LLM_REQUEST_RETRIES: u32 = 100;
+
+/// P3 降级逃生口阈值：连续 N 次派发全部落在门禁/求助拒绝路由上（零真实产出）
+/// 即判定跨门禁死锁，改写为 RUN_INTERRUPTED_ROUTE 强制降级终止。
+const MAX_CONSECUTIVE_GATE_BLOCKS: u32 = 8;
+
+/// 门禁/求助拒绝路由判定：这些路由代表宿主拒绝了本次派发、未产生任何真实工作。
+/// 真实工具失败（路径错、参数错等模型已尝试的调用）不计入——模型在尝试，只是失败，
+/// 由失败重试/无进展检测各自兜底；这里只管"每步都被宿主拒之门外"的死锁形态。
+fn is_gate_block_route(route: &str) -> bool {
+    route.starts_with("plan_gatekeeper:")
+        || route.starts_with("finish_review:")
+        || route.starts_with("shell_tool_misuse:")
+        || matches!(
+            route,
+            "stage_review:blocking_open"
+                | "host_rejection:ask_human_cooldown"
+                | "host_rejection:ask_human_duplicate"
+                | "host_rejection:ask_human_quota_exhausted"
+                | "host_rejection:repeat_read"
+                | "host_rejection:batch_circuit_breaker"
+                | "parallel_contract_rejected"
+                | "plan_tree_parallel_rejected"
+                | "plan_liveness:extension_denied"
+                | "scope_guard:outside"
+                | "watch:rejected"
+        )
+}
 
 /// 仅将协议明确定义为未完成的 Todo 视为终态质询信号。
 /// 未知状态不做猜测，`done` 与 `failed` 则已是模型显式关闭的事项。
@@ -290,6 +317,16 @@ async fn run_agent_main_loop_in_workspace_inner(
         None,
     ) {
         eprintln!("[run-trace] 无法创建运行轨迹: {error}");
+    }
+    // 行表回填：恢复的历史步（来自 steps_json 列的旧格式）补进 agent_run_steps，
+    // 使行表自启动起即为完整事实源；INSERT OR REPLACE 幂等，崩溃重跑安全。
+    for (i, step) in run_trace_steps.iter().enumerate() {
+        let _ = crate::agent::run_trace::append_step(
+            state.inner(),
+            &run_id,
+            i as i64,
+            step,
+        );
     }
     let (project_workspace, project_resources) = if workspace_override.is_none() {
         let conn = state.0.lock().map_err(|error| error.to_string())?;
@@ -1380,9 +1417,38 @@ async fn run_agent_main_loop_in_workspace_inner(
                 return Err(error);
             }
         };
-        let (mut instruction, result) = (outcome.instruction, outcome.result);
+        let (mut instruction, mut result) = (outcome.instruction, outcome.result);
         // 结构化路由信号：按真实 DispatchResult 记录成功/失败（替代对反馈文本 ❌ 的脆弱匹配）
         context.record_step_outcome(result.success);
+        // P3 降级逃生口：跨门禁死锁——写门禁拦截→文案指引 ask_human→冷却/配额拒绝→回门禁
+        // 再被拦的推诿循环中，每步派发都只产出门禁拒绝而零真实进展（无真人在 ask_human
+        // 那头时此循环永不收敛）。连续达到阈值即改写为 RUN_INTERRUPTED_ROUTE 借
+        // finish_interrupted_run 强制降级收尾：标记失败、持久化检查点与轨迹、取消子任务，
+        // 留事故记录可查可续，而不是无限空转烧 token。任何一步真实产出即清零，
+        // 不影响正常门禁的"拦一次→照做→放行"节奏。
+        if is_gate_block_route(&result.route) {
+            checkpoint.consecutive_gate_blocked =
+                checkpoint.consecutive_gate_blocked.saturating_add(1);
+            if checkpoint.consecutive_gate_blocked >= MAX_CONSECUTIVE_GATE_BLOCKS {
+                let reason = format!(
+                    "【宿主强制降级终止】连续 {} 次派发均被门禁/求助拒绝且无任何有效产出，判定为跨门禁死锁（写门禁拦截 + 审查预算耗尽 + ask_human 冷却/配额互相推诿，且人工通道无人值守）。未决阻断：阶段审查 {} 项、计划审查已重试 {} 次、阶段审查已重试 {} 次；最后拒绝路由 {}。已完成的步骤、证据与工作区改动仍保留在轨迹与检查点中，可人工介入后续跑。",
+                    checkpoint.consecutive_gate_blocked,
+                    checkpoint.stage_review_blockers_open,
+                    checkpoint.plan_reviewer_retry_count,
+                    checkpoint.reviewer_retry_count,
+                    result.route,
+                );
+                println!("🛑 [GateDeadlock] {}", reason);
+                result = DispatchResult {
+                    success: true,
+                    stdout: reason,
+                    stderr: String::new(),
+                    route: RUN_INTERRUPTED_ROUTE.to_string(),
+                };
+            }
+        } else {
+            checkpoint.consecutive_gate_blocked = 0;
+        }
         if result.route == RUN_INTERRUPTED_ROUTE {
             finish_interrupted_run(
                 &app,
@@ -2487,16 +2553,18 @@ async fn run_agent_main_loop_in_workspace_inner(
             "token_usage": metrics_json,
             "timestamp": Utc::now().timestamp_millis(),
         }));
-        if let Err(error) = crate::agent::run_trace::upsert_snapshot(
-            state.inner(),
-            &run_id,
-            &final_session_id,
-            &goal,
-            "running",
-            &run_trace_steps,
-            None,
-        ) {
-            eprintln!("[run-trace] 无法保存步骤快照: {error}");
+        // 增量持久化：每步单行 INSERT 进 agent_run_steps，替代整写 steps_json 的
+        // O(n²) 序列化+整行重写。steps_json 列仅在启动/终态快照整写一次，
+        // 读者（load_run_steps / 监控 SQL / 检索索引）按行优先、列回退。
+        if let Some(step_value) = run_trace_steps.last() {
+            if let Err(error) = crate::agent::run_trace::append_step(
+                state.inner(),
+                &run_id,
+                (run_trace_steps.len() - 1) as i64,
+                step_value,
+            ) {
+                eprintln!("[run-trace] 无法追加步骤快照: {error}");
+            }
         }
         // 工具结果已经进入可恢复上下文。先提交 durable phase/cursor，再通知前端；
         // 这样崩溃恢复不会把已经完成的普通步骤当作待执行，也不会把 finish 误续跑。
@@ -2837,5 +2905,52 @@ mod budget_tests {
         let budget = AgentRunBudget { max_steps: Some(5), max_prompt_tokens: None };
         assert!(token_budget_stop_reason(Some(&budget), i64::MAX).is_none());
         assert!(token_budget_stop_reason(None, i64::MAX).is_none());
+    }
+}
+
+#[cfg(test)]
+mod gate_deadlock_tests {
+    use super::is_gate_block_route;
+
+    #[test]
+    fn deadlock_routes_count_toward_escape_hatch() {
+        // P3 三锁推诿循环的全部组成路由都应计入
+        for route in [
+            "plan_gatekeeper:reviewer_retry_limit",
+            "plan_gatekeeper:need_human_approval",
+            "plan_gatekeeper:scorecard_missing",
+            "stage_review:blocking_open",
+            "finish_review:blocking",
+            "host_rejection:ask_human_cooldown",
+            "host_rejection:ask_human_quota_exhausted",
+            "host_rejection:ask_human_duplicate",
+            "host_rejection:repeat_read",
+            "parallel_contract_rejected",
+            "plan_tree_parallel_rejected",
+            "scope_guard:outside",
+            "watch:rejected",
+        ] {
+            assert!(is_gate_block_route(route), "应计入死锁: {route}");
+        }
+    }
+
+    #[test]
+    fn real_work_and_real_failures_reset_counter() {
+        // 成功产出与"模型尝试过但失败"的工具错误都不计入——后者由失败重试/无进展兜底
+        for route in [
+            "local_file:read:success",
+            "local_file:edit:target_not_found",
+            "local_file:missing_workspace",
+            "child_worker:spawned",
+            "child_reviewer:rejected_or_failed",
+            "wait_jobs:resolved",
+            "finish",
+            "retrieval",
+            "web_search_failed",
+            "host_rejection:missing_child_run_id",
+            "unknown",
+        ] {
+            assert!(!is_gate_block_route(route), "不应计入死锁: {route}");
+        }
     }
 }
