@@ -1505,7 +1505,9 @@ impl AuditLedger {
     /// `&>`/`&>>` 中的 `>` 同样命中（写盘）；`2>&1`、`>&-` 不命中（fd 操作）；
     /// `\>` 是转义字面量（`test a \> b` 的比较语法）不命中——奇数连续反斜杠
     /// 才转义，偶数（`\\>`）末尾的 `>` 仍是重定向。
-    fn has_write_redirect(blanked: &str) -> bool {
+    /// 重定向写盘检测（入参须先经 blank_quoted_segments 抹除引号内容）。
+    /// dispatcher 与台账共用此判定，保证"只读探针"两侧口径一致。
+    pub(crate) fn has_write_redirect(blanked: &str) -> bool {
         let b = blanked.as_bytes();
         for i in 0..b.len() {
             if b[i] == b'>' {
@@ -1553,7 +1555,17 @@ impl AuditLedger {
                             .map_or(true, |c| {
                                 !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
                             })
-                    });
+                    }) || {
+                        // Windows 哑设备：`> nul`/`>NUL` 同 /dev/null
+                        rest.len() >= 3
+                            && rest[..3].eq_ignore_ascii_case("nul")
+                            && rest[3..].chars().next().map_or(true, |c| {
+                                !(c.is_ascii_alphanumeric()
+                                    || c == '_'
+                                    || c == '-'
+                                    || c == '.')
+                            })
+                    };
                     if !is_noop {
                         return true;
                     }

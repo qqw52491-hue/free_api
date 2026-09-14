@@ -81,6 +81,8 @@ live 验证待下轮运维类实弹（卸载/服务管理任务应一次通过�
 | R6 | args-only 形态 `{"args":["ls","-la"]}` 两侧提取不一致（dispatcher 识别、audit 记空） | 门禁（audit↔dispatcher 不对称） | 同参两侧不同判 | audit 空 command 时以 args.join 合成命令串 |
 | R7 | `read_only:true` 模型可自填绕过 dispatcher 前置拦截 | 设计残留 | 纵深：审计台账不认该 flag，挂账仍留痕 | 不修——记录为已知软点（拦截层可绕、台账层不可绕） |
 | R7 | `is_workspace_target("../x")` `..` 逃逸相对路径判"区内" → diff 对账门对区外目标强索覆盖 | 门禁（applicability） | 假拦截 | 组件级深度计数，depth<0 即区外 |
+| R9 | dispatcher `has_file_write_redirection` 是旧实现：`[[ a > b ]]`/转义 `\>`/`/dev/fd/*`/`>&-`/`>nul` 全判写盘 → audit 判只读的探针被前置拦截（只读命令进不了执行 = 假拦截整类） | 门禁（dispatcher↔audit 漂移） | 假拦截 | 整函数委托审计同款判定 + `[[..]]` 比较域抹除；audit 侧补 `nul` 豁免保证对称 |
+| R10 | 管道藏写双通道：`cmd \| tee f`（落盘）、`ls \| xargs rm`（执行）不被拦截 | 门禁（dispatcher） | 漏记 | tee/xargs 进 pipe-to-interpreter 词表（audit 本就判其 mutating，两侧同严） |
 | R8 | 复审缓存：`!is_passed()` 才复用（FAIL 重放、PASS 必重跑）、契约变更 diff 不变仍拦 | — | 语义已正确 | 无需修，验证通过 |
 
 **残留边界（明确不修/留痕）**：checkpoint 恢复时 `context.side_effects` 非空则放弃

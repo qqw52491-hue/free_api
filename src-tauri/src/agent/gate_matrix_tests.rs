@@ -567,6 +567,44 @@ mod gate_matrix_tests {
     }
 
     // ────────────────────────────────────────────────────────────────
+    // 场景 M：dispatcher↔audit 重定向口径一致——只读探针不能被前置拦截，
+    // 真写盘不能被放行（两侧漂移 = 假拦截或漏记）
+    // ────────────────────────────────────────────────────────────────
+    #[test]
+    fn scenario_redirect_parity() {
+        use crate::agent::dispatcher::has_file_write_redirection as w;
+        // 比较/哑目标/fd 复制——dispatcher 不得判写盘（audit 同款语义）
+        for c in [
+            "[[ $a > $b ]]",
+            "[[ a > b && c < d ]]",
+            "test a \\> b",
+            "ls / > /dev/null",
+            "ls / > /dev/stdout",
+            "ls / > /dev/fd/1",
+            "ls / 2>/dev/null",
+            "ls / >nul",
+            "ls / >NUL",
+            "ls / 2>&1",
+            "ls / >&-",
+            "grep 'a > b' f.txt",
+        ] {
+            assert!(!w(c), "dispatcher 误判写盘: {c}");
+            assert!(ro(c), "audit 误判写入: {c}");
+        }
+        // 真写盘——两侧都必须识别
+        for c in [
+            "[[ x > y ]] > /tmp/out",
+            "ls > /tmp/ls.txt",
+            "echo x >> log.txt",
+            "ls / > /dev/sda",
+            "ls / &> /tmp/both.log",
+        ] {
+            assert!(w(c), "dispatcher 漏判写盘: {c}");
+            assert!(!ro(c), "audit 漏记写入: {c}");
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
     // 场景 I：MCP 命名空间工具——写动词词表覆盖不到的变化操作必须入账
     // ────────────────────────────────────────────────────────────────
     #[test]

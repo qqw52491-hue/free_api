@@ -209,76 +209,54 @@ pub fn split_shell_segments(cmd: &str) -> Vec<&str> {
 }
 
 /// 检测命令行中是否存在真正写盘的文件重定向（如 `> file.txt`、`>> out.log`）。
-/// 自动放行：
-/// 1. 引号内部的 `>`（如 `curl 'http://...?a>1'` 或 `awk '$1 > 2'`）
-/// 2. 丢弃到空设备（如 `>/dev/null`、`2>/dev/null`、`&>/dev/null`、`>>/dev/null`、`2> /dev/null`、`>nul` 等）
-/// 3. 文件描述符重定向（如 `2>&1`、`1>&2`、`>&2`）
+/// 判定委托给审计台账同款 has_write_redirect（引号抹除 + 转义 \> + fd 复制
+/// `>&N`/`>&-` + 哑目标 /dev/null|stdout|stderr|tty|pts/*|fd/*|nul 豁免），
+/// 外加 `[[ a > b ]]` 比较域抹除——两侧对"只读探针"口径一致，不再各自漂移。
 pub fn has_file_write_redirection(cmd: &str) -> bool {
-    let bytes = cmd.as_bytes();
-    let len = bytes.len();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut i = 0;
+    let blanked = crate::agent::context::AuditLedger::blank_quoted_segments(cmd);
+    let masked = mask_double_bracket_regions(&blanked);
+    crate::agent::context::AuditLedger::has_write_redirect(&masked)
+}
 
-    while i < len {
-        let b = bytes[i];
-        if b == b'\'' && !in_double_quote {
-            in_single_quote = !in_single_quote;
-            i += 1;
-            continue;
-        }
-        if b == b'"' && !in_single_quote {
-            in_double_quote = !in_double_quote;
-            i += 1;
-            continue;
-        }
-
-        if !in_single_quote && !in_double_quote && b == b'>' {
-            let mut next_idx = i + 1;
-            // 支持 >> 或 >|
-            if next_idx < len && (bytes[next_idx] == b'>' || bytes[next_idx] == b'|') {
-                next_idx += 1;
+/// 抹除 `[[ ... ]]` 成对括号内的内容（保留 `]]` 之后的部分——
+/// `[[ x ]] > f` 的写盘重定向仍须被检出）。引号内容已被上游抹除，
+/// 残留 `[[` 必是结构性的。未闭合的 `[[` 不抹除（保守：内部 > 仍按重定向计）。
+fn mask_double_bracket_regions(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = bytes.to_vec();
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            // 找最近的 "]]"
+            let mut j = i + 2;
+            let mut close = None;
+            while j + 1 < bytes.len() {
+                if bytes[j] == b']' && bytes[j + 1] == b']' {
+                    close = Some(j + 2);
+                    break;
+                }
+                j += 1;
             }
-            // 跳过空格和 tab
-            while next_idx < len && (bytes[next_idx] == b' ' || bytes[next_idx] == b'\t') {
-                next_idx += 1;
-            }
-            let rest = &cmd[next_idx..];
-            // 1. 丢弃到 /dev/null（包括 2>/dev/null, >/dev/null, &>/dev/null 等）
-            let is_dev_null = rest.starts_with("/dev/null");
-            let is_win_nul = if rest.starts_with("nul") || rest.starts_with("NUL") {
-                let after = &rest[3..];
-                after.is_empty()
-                    || after.starts_with(' ')
-                    || after.starts_with('\t')
-                    || after.starts_with(';')
-                    || after.starts_with('&')
-                    || after.starts_with('|')
-            } else {
-                false
-            };
-            if is_dev_null || is_win_nul {
-                let skip_len = if is_dev_null { "/dev/null".len() } else { 3 };
-                i = next_idx + skip_len;
+            if let Some(end) = close {
+                for k in i..end {
+                    out[k] = b' ';
+                }
+                i = end;
                 continue;
             }
-            // 2. 文件描述符重定向（如 2>&1, 1>&2, >&2, >&1）
-            if rest.starts_with("&1") || rest.starts_with("&2") {
-                i = next_idx + 2;
-                continue;
-            }
-            // 3. 其余均为真实文件重定向写盘
-            return true;
         }
-
         i += 1;
     }
-
-    false
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn is_pipe_to_interpreter(lower: &str) -> bool {
-    let interpreters = ["bash", "sh", "zsh", "python", "node", "perl", "ruby"];
+    // tee 带文件参数即落盘写入；xargs 把管道输出变成任意命令的参数——
+    // 与解释器同级的"管道藏副作用"通道
+    let interpreters = [
+        "bash", "sh", "zsh", "python", "python3", "node", "perl", "ruby",
+        "tee", "xargs",
+    ];
     for interp in &interpreters {
         for prefix in &[format!("| {}", interp), format!("|{}", interp)] {
             let mut search_from = 0;
