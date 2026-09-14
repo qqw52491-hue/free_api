@@ -32,6 +32,26 @@ live 验证待下轮运维类实弹（卸载/服务管理任务应一次通过�
 ②非代码证据移交终审后，审查看的是"语义证据"——若终审放水，Skip 率遥测
 （`noncode_refs:not_applicable`/`plan_target_mismatch:not_applicable`）是审计抓手。
 
+### 阶段十追加：设计复核后的三处收紧（同行评审反馈）
+
+复审发现初版实现把「观测到状态」与「达成目标」混为一谈、且只读白名单扩容
+引入了复合命令误判面。三处收紧全部落为物理判定，不做语义猜测：
+
+| 收紧点 | 病灶 | 修法 |
+|---|---|---|
+| **复合命令逐段判定**（audit.rs） | `which x && rm y` 首段只读→整串误判只读→写入漏记副作用（旧代码已有此洞，扩容放大暴露面）；`$(cmd)`/反引号/`<(`/`>(` 内层不可审计 | 按 `&&/||/;/|/&/换行` 在原文扫描拆段（引号内分隔符不拆、`>&`/`|&`/`&>`不误拆、`[[ a || b ]]` 未闭合片段回合并），每段独立判只读；命令/进程替换一律非只读 |
+| **探针-写入绑定**（change_verification + main_loop） | 写代码后随手 `which python` 也能闭合验证——"发生了一次断言"≠"断言的是这次变更" | `probe_binds_to_pending_writes`：探针 token（去命令头/旗标/噪声词，路径拆段）必须与待验证副作用描述或受影响路径字符串重合才自动闭合；绑定失败→验证保持未闭合，模型走显式举证 |
+| **失败探针不自动 verified**（main_loop） | `which x` 非零退出是否达标取决于任务意图（卸载 vs 安装方向相反），宿主猜意图是语义越权 | 绑定的存在性探针失败→add_error_feedback 指引模型用 change_verification_update(verified, [step_N]) 显式举证；终审凭 step_N 核验该断言 |
+| **观测形态收紧**（diff.rs） | "返回正常"类措辞凭裸词就能算观测证据 | 句柄须带对象：`output_id:<值>`、`step_<数字>`、结果词（退出码/exit/http/状态码/返回/→）+ 数字三态之一；裸结论仍拦截 |
+
+**验证**：`agent::` 全套 **577/577**（新增 `compound_commands_require_every_segment_readonly`
+26 断言 + `probe_binding_requires_shared_object_with_pending_writes`）。
+
+**复核确认不动的部分**：生态测试命令（cargo/npm/pytest）、契约 verify_command
+匹配、宿主推断验证命令仍无条件自动闭合（宿主可自证其来源）；file:line 对账、
+代码域伪造引用、裸结论拦截、零交集工作区内判定逐条保留——收紧只作用于
+"通用探针"这一新增通道。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。

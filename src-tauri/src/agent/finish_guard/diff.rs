@@ -597,23 +597,15 @@ fn head_has_path_shape(head: &str, workspace_root: Option<&std::path::Path>) -> 
 
 /// 非代码证据的"可观测形态"判定：引用必须指向一次真实发生的观测——
 /// 要么以已知命令/探针二进制开头（可与 side_effects 台账对账），
-/// 要么显式携带结果句柄（output_id/step_N/退出码/返回/HTTP 状态等）。
-/// 裸结论（"已完成优化"/"验证通过"）没有观测对象，不算证据。
+/// 要么显式携带指向具体对象的句柄（output_id:值 / step_N / 结果词+数字）。
+/// 裸结论（"已完成优化"/"验证通过"/"返回正常"）没有可核验对象，不算证据。
 fn looks_like_operational_evidence(raw: &str) -> bool {
     let s = raw.trim();
     if s.is_empty() {
         return false;
     }
     let lower = s.to_lowercase();
-    // 结果句柄形态：显式指向一次观测记录
-    const HANDLE_TOKENS: &[&str] = &[
-        "output_id", "step_", "退出码", "exit code", "exit=", "exit ",
-        "返回", "输出", "响应", "状态码", "→", "->", "=>", "http", "stdout", "stderr",
-    ];
-    if HANDLE_TOKENS.iter().any(|t| lower.contains(t)) {
-        return true;
-    }
-    // 命令形态：首个 token 是已知命令/探针二进制（可与 side_effects 台账核验）
+    // ① 命令形态：首个 token 是已知命令/探针二进制（可与 side_effects 台账核验）
     const CMD_HEADS: &[&str] = &[
         "which", "test", "stat", "pacman", "dpkg", "rpm", "apt", "apt-get", "apt-cache",
         "brew", "snap", "flatpak", "pkg", "systemctl", "service", "journalctl",
@@ -627,7 +619,36 @@ fn looks_like_operational_evidence(raw: &str) -> bool {
     let head = s.split_whitespace().next().unwrap_or("");
     let base = head.rsplit('/').next().unwrap_or(head);
     let base = base.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
-    CMD_HEADS.contains(&base)
+    if CMD_HEADS.contains(&base) {
+        return true;
+    }
+    // ② 句柄形态：必须指向具体对象——句柄词 + 紧跟的值/数字才算"有观测对象"
+    let has_digit = lower.chars().any(|c| c.is_ascii_digit());
+    // output_id:<值> / output_id=<值> / output_id <值>
+    if let Some(pos) = lower.find("output_id") {
+        let rest = lower[pos + "output_id".len()..].trim_start_matches([':', '=', '：']);
+        if !rest.trim().is_empty() {
+            return true;
+        }
+    }
+    // step_<数字>（指向具体步骤）
+    if let Some(pos) = lower.find("step_") {
+        if lower[pos + "step_".len()..]
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    // 结果词 + 数字：退出码 0 / exit code 1 / HTTP 200 / 状态码 204 / 返回 200 / → 0
+    const RESULT_WORDS: &[&str] = &[
+        "退出码", "exit", "http", "状态码", "返回", "→", "->", "=>", "stdout", "stderr",
+    ];
+    if has_digit && RESULT_WORDS.iter().any(|w| lower.contains(w)) {
+        return true;
+    }
+    false
 }
 
 /// 义务的证据引用是否全部为非代码形态且至少一条指向真实观测（命令/句柄/结果）。

@@ -190,11 +190,111 @@ impl AuditLedger {
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
 
-        let mut tokens: Vec<&str> = raw_cmd.split_whitespace().collect();
-        if !explicit_args.is_empty() {
-            tokens.extend(explicit_args);
+        // 命令替换/进程替换守卫：$(cmd)、`cmd`、<(cmd)、>(cmd) 内层不可静态审计，
+        // 必须扫原文（双引号内的 $() 同样会执行，不能用抹除引号后的文本判断）。
+        if raw_cmd.contains("$(")
+            || raw_cmd.contains('`')
+            || raw_cmd.contains("<(")
+            || raw_cmd.contains(">(")
+        {
+            return false;
         }
 
+        // 复合命令拆解：&&/||/;/|/&/换行 的每个子命令段都必须各自只读，
+        // 否则 `which x && rm y`（首段只读）会把整串误判为只读、漏记副作用。
+        // 直接在原文上扫描并跟踪引号状态——不能用 blank_quoted_segments 定位，
+        // 多字节字符被抹成单空格会导致字节偏移错位。
+        let bytes = raw_cmd.as_bytes();
+        let mut quote: Option<u8> = None;
+        let mut segments: Vec<&str> = Vec::new();
+        let mut last = 0usize;
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if let Some(q) = quote {
+                if b == q {
+                    quote = None;
+                }
+                i += 1;
+                continue;
+            }
+            if b == b'\'' || b == b'"' {
+                quote = Some(b);
+                i += 1;
+                continue;
+            }
+            let mut sep_len = 0usize;
+            match b {
+                b';' | b'\n' => sep_len = 1,
+                b'|' => {
+                    // `||` 与 `|&`（stderr 管道）各占两字符
+                    if matches!(bytes.get(i + 1), Some(b'|') | Some(b'&')) {
+                        sep_len = 2;
+                    } else {
+                        sep_len = 1;
+                    }
+                }
+                b'&' => {
+                    // `>&` 与 `|&` 中的 & 属重定向/管道符号；`&>`/`&>>` 的 &
+                    // 与重定向同属一段（后续 > 检测会处理），均不作命令分隔
+                    let prev = i > 0 && matches!(bytes[i - 1], b'>' | b'|');
+                    let next_gt = bytes.get(i + 1) == Some(&b'>');
+                    if !prev && !next_gt {
+                        sep_len = if bytes.get(i + 1) == Some(&b'&') { 2 } else { 1 };
+                    }
+                }
+                _ => {}
+            }
+            if sep_len > 0 {
+                segments.push(raw_cmd[last..i].trim());
+                i += sep_len;
+                last = i;
+            } else {
+                i += 1;
+            }
+        }
+        segments.push(raw_cmd[last..].trim());
+        segments.retain(|s| !s.is_empty());
+
+        // `[[ a || b ]]` 内的 ||/&& 是测试表达式而非命令分隔：把未闭合 [[ 的
+        // 片段与后续片段重新合并，否则该常用只读探针会被误判为写入、清空验证态。
+        let mut merged: Vec<String> = Vec::new();
+        for seg in segments {
+            if let Some(prev) = merged.last_mut() {
+                let opens = prev.matches("[[").count();
+                let closes = prev.matches("]]").count();
+                if opens > closes {
+                    prev.push_str(" || ");
+                    prev.push_str(seg);
+                    continue;
+                }
+            }
+            merged.push(seg.to_string());
+        }
+        let segments: Vec<String> = merged;
+
+        if segments.is_empty() {
+            return false;
+        }
+        // 命令串含分隔符时 args 归属不明（属于哪一段不确定），保守按非只读
+        if segments.len() > 1 && !explicit_args.is_empty() {
+            return false;
+        }
+
+        segments.iter().all(|seg| {
+            let mut tokens: Vec<&str> = seg.split_whitespace().collect();
+            if explicit_args.is_empty() {
+                Self::is_readonly_command_segment(&tokens)
+            } else {
+                // 单段命令 + 显式 args：args 接在命令后
+                tokens.extend(explicit_args.iter().copied());
+                Self::is_readonly_command_segment(&tokens)
+            }
+        })
+    }
+
+    /// 单段命令（无 &&/||/;/| 分隔）的只读判定：包装器剥壳 → 重定向 → 命令名分派。
+    fn is_readonly_command_segment(tokens: &[&str]) -> bool {
         if tokens.is_empty() {
             return false;
         }
@@ -241,9 +341,10 @@ impl AuditLedger {
         let first = tokens[0];
         let base_cmd = first.split('/').last().unwrap_or(first).trim();
 
-        // 重定向即写入：带 `>` 输出重定向的命令不再算只读（如 `echo x >> file`、`git diff > patch`）。
-        // 引号内的 `>` 字面量不触发——先抹掉引号内内容再做结构检测。
-        if Self::blank_quoted_segments(&tokens.join(" ")).contains('>') {
+        // 重定向即写入：`>`/`>>`/`&>` 输出重定向不再算只读（`echo x >> file`）。
+        // `2>&1`/`>&-` 是 fd 复制不写文件，不触发。引号内 `>` 字面量不计——
+        // 先抹掉引号内内容再做结构检测。
+        if Self::has_write_redirect(&Self::blank_quoted_segments(&tokens.join(" "))) {
             return false;
         }
 
@@ -281,21 +382,21 @@ impl AuditLedger {
         }
 
         if base_cmd == "sed" {
-            return Self::is_sed_readonly(&tokens);
+            return Self::is_sed_readonly(tokens);
         }
 
         // 多态命令按子命令/旗标细分：查询态只读（可作状态断言证据），变更态记副作用。
         // 判别失败一律落到"非只读"（宁可误记副作用，不可漏记真实写入）。
         match base_cmd {
-            "pacman" => return Self::pacman_is_readonly(&tokens),
-            "dpkg" | "dpkg-query" => return Self::dpkg_is_readonly(&tokens),
+            "pacman" => return Self::pacman_is_readonly(tokens),
+            "dpkg" | "dpkg-query" => return Self::dpkg_is_readonly(tokens),
             "rpm" => {
                 return tokens[1..].iter().any(|a| {
                     a.strip_prefix("--").map_or(false, |r| r.starts_with("query"))
                         || a.strip_prefix('-').map_or(false, |r| r.starts_with('q'))
                 });
             }
-            "apt" | "apt-get" => return Self::apt_is_readonly(&tokens),
+            "apt" | "apt-get" => return Self::apt_is_readonly(tokens),
             "apt-cache" => return true,
             "brew" => {
                 return Self::first_operand_in(
@@ -304,7 +405,7 @@ impl AuditLedger {
                 );
             }
             "snap" => {
-                return Self::first_operand_in(&tokens, &["list", "info", "find", "changes", "tasks"]);
+                return Self::first_operand_in(tokens, &["list", "info", "find", "changes", "tasks"]);
             }
             "flatpak" => {
                 return Self::first_operand_in(
@@ -362,15 +463,15 @@ impl AuditLedger {
                         )
                 });
             }
-            "ip" => return Self::ip_is_readonly(&tokens),
+            "ip" => return Self::ip_is_readonly(tokens),
             "ifconfig" | "iwconfig" => {
                 return !tokens[1..].iter().any(|a| !a.starts_with('-'));
             }
             "nc" | "ncat" | "netcat" => {
                 return tokens[1..].iter().any(|a| *a == "-z" || *a == "--zero");
             }
-            "curl" => return Self::curl_is_readonly(&tokens),
-            "wget" => return Self::wget_is_readonly(&tokens),
+            "curl" => return Self::curl_is_readonly(tokens),
+            "wget" => return Self::wget_is_readonly(tokens),
             "mount" => return !tokens[1..].iter().any(|a| !a.starts_with('-')),
             "command" => return matches!(tokens.get(1), Some(&"-v") | Some(&"-V")),
             "env" => {
@@ -378,7 +479,7 @@ impl AuditLedger {
                     .iter()
                     .all(|a| a.starts_with('-') || a.contains('='));
             }
-            "tar" => return Self::tar_is_readonly(&tokens),
+            "tar" => return Self::tar_is_readonly(tokens),
             "unzip" => return tokens[1..].iter().any(|a| matches!(*a, "-l" | "-t" | "-Z")),
             _ => {}
         }
@@ -685,6 +786,23 @@ impl AuditLedger {
                 && !letters
                     .chars()
                     .any(|c| matches!(c, 'c' | 'x' | 'r' | 'u' | 'A'));
+        }
+        false
+    }
+
+    /// 写入重定向检测：任一 `>` 且其后不是 `&<数字>`/`&-` 的 fd 复制形式。
+    /// `&>`/`&>>` 中的 `>` 同样命中（写盘）；`2>&1`、`>&-` 不命中（fd 操作）。
+    fn has_write_redirect(blanked: &str) -> bool {
+        let b = blanked.as_bytes();
+        for i in 0..b.len() {
+            if b[i] == b'>' {
+                let fd_dup = b.get(i + 1) == Some(&b'&')
+                    && b.get(i + 2)
+                        .map_or(false, |c| c.is_ascii_digit() || *c == b'-');
+                if !fd_dup {
+                    return true;
+                }
+            }
         }
         false
     }
@@ -1062,5 +1180,38 @@ mod tests {
         assert!(ro("nc -z localhost 22"));
         assert!(!ro("nc -l 8080"), "监听态非只读");
         assert!(!ro("umount /mnt"));
+    }
+
+    #[test]
+    fn compound_commands_require_every_segment_readonly() {
+        let ro = |cmd: &str| {
+            AuditLedger::is_readonly_shell_command(&serde_json::json!({ "command": cmd }))
+        };
+        // 全段只读 → 只读
+        assert!(ro("which workbuddy && pacman -Qs workbuddy"));
+        assert!(ro("test -e /opt/x || echo missing"));
+        assert!(ro("ls /opt; stat /opt/WorkBuddy"));
+        assert!(ro("cat a.txt | grep foo"));
+        assert!(ro("[[ -e a || -e b ]]"), "[[ ]] 内 || 是表达式非命令分隔");
+        assert!(ro("[[ -e a ]] && [[ -e b ]]"));
+        // 首段只读 + 后段写入 → 非只读（堵漏：which x && rm y）
+        assert!(!ro("which workbuddy && rm -rf /opt/WorkBuddy"), "首段只读不得掩护后段写入");
+        assert!(!ro("ls /opt; rm x"));
+        assert!(!ro("cat a | tee b.txt"), "管道末段 tee 写文件");
+        assert!(!ro("which x || pacman -Rns x"));
+        assert!(!ro("echo ok & rm -rf /tmp/x"), "后台段也是命令");
+        // 重定向/命令替换/进程替换守卫
+        assert!(!ro("echo done > /tmp/marker"));
+        assert!(!ro("echo $(rm -rf /tmp/x)"), "命令替换内层不可审计");
+        assert!(!ro("echo `id`"));
+        assert!(!ro("diff <(cat a) b"), "进程替换会执行内层命令");
+        assert!(!ro("ls >(cat > out.txt)"));
+        // 非分隔符形态不得误拆
+        assert!(ro("curl -f http://x 2>&1"), "2>&1 的 & 不是分隔");
+        assert!(!ro("curl -o out.txt http://x 2>&1"), "仍检出 -o 写盘");
+        assert!(!ro("cmd &> /tmp/log"), "&> 重定向整体检出");
+        // 引号内分隔符不拆段
+        assert!(ro("echo \"a && b\""), "引号内 && 不是命令分隔");
+        assert!(ro("grep -q 'a|b' file.txt"), "引号内 | 不是管道");
     }
 }

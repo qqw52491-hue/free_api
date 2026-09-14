@@ -66,7 +66,10 @@ pub fn change_verification_blocker(
     }
 
     Some(format!(
-        "本会话已记录 {} 次真实写入，但最近写入后尚无验证证据或明确豁免",
+        "本会话已记录 {} 次真实写入，但最近写入后尚无验证证据或明确豁免\
+        （运行与本次写入相关的验证命令/状态探针后，用 change_verification_update 以 \
+        verified + 指向该步骤的 evidence_refs=[\"step_N\"] 闭合；存在性探针的非零退出\
+        若是目标状态同样可用）",
         side_effect_count
     ))
 }
@@ -111,8 +114,9 @@ fn normalized_status(verification: &ChangeVerification) -> Option<String> {
 /// 通用状态探测/断言命令：非编码任务（运维/系统/外部资源）的天然验证手段。
 /// 识别依据是"命令本身构成一次客观状态断言"（退出码/输出即判据），而非生态工具名；
 /// 纯只读浏览命令（git status / cat / ls）不构成断言，不收录。
-/// 成功执行即算验证发生；其中"缺失即证"子集的非零退出同样是状态断言（见
-/// is_absence_probe_command）。
+/// 成功执行且能与待验证写入批次物理绑定（probe_binds_to_pending_writes）即算验证
+/// 发生——无关探针（写代码后 `which python`）不自动闭合。"缺失即证"子集的非零退出
+/// 是状态观测，但是否达标取决于任务意图，只触发举证提示（is_absence_probe_command）。
 pub fn is_state_probe_command(cmd: &str) -> bool {
     let lower = cmd.trim().to_lowercase();
     if lower.is_empty() {
@@ -184,9 +188,67 @@ pub fn is_state_probe_command(cmd: &str) -> bool {
     lower.starts_with("service ") && lower.contains(" status")
 }
 
+/// 探针命令与待验证写入批次的物理绑定判定：探针必须引用某条副作用记录中的
+/// 具体对象（路径片段或名称 token），否则只是无关观测，不能自动闭合验证。
+/// 纯字符串重合，不做语义猜测；判不出绑定即不自动闭合（由模型显式举证）。
+pub fn probe_binds_to_pending_writes(cmd: &str, pending_refs: &[String]) -> bool {
+    let lower = cmd.to_lowercase();
+    cmd_meaningful_tokens(&lower)
+        .iter()
+        .any(|tok| pending_refs.iter().any(|text| text.to_lowercase().contains(tok.as_str())))
+}
+
+/// 从探针命令中提取"可绑定" token：跳过命令头、旗标、纯数字与通用噪声词，
+/// 路径/URL 拆出各层级片段（`/opt/WorkBuddy` → opt, workbuddy）。
+fn cmd_meaningful_tokens(cmd_lower: &str) -> Vec<String> {
+    // 探针/包装器命令名与通用动词——它们出现在两侧不证明相关性
+    const NOISE: &[&str] = &[
+        "which", "command", "type", "whereis", "test", "stat", "ls", "cat", "find",
+        "pacman", "dpkg", "rpm", "apt", "brew", "snap", "flatpak", "pkg",
+        "systemctl", "service", "journalctl", "pgrep", "pidof", "ps", "ss",
+        "curl", "wget", "nc", "ping", "grep", "rg", "diff", "cmp", "jq",
+        "docker", "podman", "kubectl", "git", "cargo", "npm", "npx", "pnpm",
+        "pytest", "python", "python3", "go", "echo", "sudo", "doas", "pkexec",
+        "timeout", "nice", "nohup", "stdbuf", "time", "lsof", "netstat", "ip",
+        "tar", "unzip", "env", "bash", "sh", "zsh", "fish",
+        "status", "show", "list", "get", "info", "query", "check", "inspect",
+        "is-active", "is-enabled", "is-failed",
+        "http", "https", "localhost", "dev", "null", "json", "text", "html",
+        "true", "false", "error", "warn", "debug", "output",
+    ];
+    let mut out = Vec::new();
+    for (idx, raw_tok) in cmd_lower.split_whitespace().enumerate() {
+        if idx == 0 {
+            continue; // 命令头本身不用于绑定
+        }
+        let tok = raw_tok.trim_matches(|c: char| {
+            !c.is_ascii_alphanumeric()
+                && c != '/' && c != '.' && c != '_' && c != '-' && c != ':'
+        });
+        if tok.is_empty() || tok.starts_with('-') {
+            continue;
+        }
+        for seg in tok.split(['/', '?', '&', '=', ':', '\\', '.']) {
+            let seg = seg.trim_matches(|c: char| {
+                !c.is_ascii_alphanumeric() && c != '_' && c != '.' && c != '-'
+            });
+            if seg.chars().count() >= 3
+                && !NOISE.contains(&seg)
+                && !seg.chars().all(|c| c.is_ascii_digit())
+            {
+                out.push(seg.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// "缺失即断言成立"的纯存在性探针子集：这些命令的非零退出本身就是一次状态观测
 /// （卸载后 `which x` 失败、禁用后 `systemctl is-active` 失败都构成有效验证证据）。
 /// 输出匹配类（grep -q/diff -q）不在此列——其失败更可能是调试中途而非状态断言。
+/// 注意：非零退出是否构成"目标已不存在"取决于任务意图（卸载与安装方向相反），
+/// 宿主不做语义猜测——本表只用于在失败时提示模型用 change_verification_update
+/// 显式举证闭合，不直接自动判 verified。
 pub fn is_absence_probe_command(cmd: &str) -> bool {
     let lower = cmd.trim().to_lowercase();
     if lower.is_empty() {
@@ -616,7 +678,9 @@ mod tests {
 
     #[test]
     fn absence_probes_verify_on_nonzero_exit() {
-        // "缺失即证"子集：卸载/禁用/删除任务中探针失败恰是目标状态证据
+        // "缺失即证"子集：识别"非零退出可能是状态观测"的探针形态。
+        // 注意：本表只决定失败时是否提示显式举证，不再直接自动 verified——
+        // 探针失败是否达标取决于任务意图（卸载 vs 安装方向相反）。
         for cmd in [
             "which workbuddy",
             "test -e /opt/WorkBuddy",
@@ -633,6 +697,25 @@ mod tests {
         assert!(!is_absence_probe_command("git status"));
     }
 
+    #[test]
+    fn probe_binding_requires_shared_object_with_pending_writes() {
+        // 待验证写入批次：卸载 workbuddy（副作用描述含命令原文）
+        let pending = vec![
+            "卸载软件: {\"command\": \"sudo pacman -Rns workbuddy --noconfirm\"}".to_string(),
+            "/opt/WorkBuddy".to_string(),
+        ];
+        // 绑定：探针引用了副作用记录中的具体对象
+        assert!(probe_binds_to_pending_writes("which workbuddy", &pending));
+        assert!(probe_binds_to_pending_writes("pacman -Qs workbuddy", &pending));
+        assert!(probe_binds_to_pending_writes("test -e /opt/WorkBuddy", &pending));
+        assert!(probe_binds_to_pending_writes("systemctl status workbuddy.service", &pending));
+        // 不绑定：无关探针——命令头同名不算绑定（pacman -Q 查别的包）
+        assert!(!probe_binds_to_pending_writes("which python", &pending));
+        assert!(!probe_binds_to_pending_writes("pacman -Q nginx", &pending));
+        assert!(!probe_binds_to_pending_writes("systemctl status sshd", &pending));
+        // 空批次不绑定
+        assert!(!probe_binds_to_pending_writes("which workbuddy", &[]));
+    }
 
     #[test]
     fn test_ui_and_doc_path_detection() {

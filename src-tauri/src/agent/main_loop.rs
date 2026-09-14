@@ -2951,12 +2951,50 @@ fn try_auto_verify_change(
         })
     });
 
+    // 探针-写入物理绑定：探针命令必须引用待验证副作用记录中的具体对象
+    // （路径/名称 token），否则 `which python` 这类无关探针不能替代码写入结账。
+    let pending_refs: Vec<String> = context.side_effects[context.inherited_side_effects_count..]
+        .iter()
+        .flat_map(|r| {
+            std::iter::once(r.description.clone()).chain(r.affected_paths.iter().cloned())
+        })
+        .collect();
+    let probe_bound =
+        crate::agent::change_verification::probe_binds_to_pending_writes(&cmd, &pending_refs);
+
     let qualifies = if command_succeeded {
-        is_test_cmd || is_probe_cmd || matches_contract_verify || is_inferred_cmd
+        // 成功路径：生态测试命令、契约声明或宿主推断的验证命令无条件认账；
+        // 通用状态探针需与待验证写入物理绑定——"发生了一次断言"不等于
+        // "断言的是这次变更"。
+        is_test_cmd || (is_probe_cmd && probe_bound) || matches_contract_verify || is_inferred_cmd
     } else {
-        // "缺失即证"探针：which/test -e/pacman -Q 等的非零退出本身是状态观测
-        // （卸载/禁用/删除任务中，探针失败恰是目标状态的客观证据）
-        crate::agent::change_verification::is_absence_probe_command(&cmd)
+        // 失败路径不自动闭合：非零退出是否达标取决于任务意图
+        // （卸载 vs 安装方向相反），宿主不猜。对绑定的存在性探针发举证指引，
+        // 让模型显式声明"该状态即目标"，终审可凭 step_N 核验。
+        if probe_bound
+            && crate::agent::change_verification::is_absence_probe_command(&cmd)
+        {
+            let snippet: String = if cmd.chars().count() > 60 {
+                format!("{}...", cmd.chars().take(60).collect::<String>())
+            } else {
+                cmd.clone()
+            };
+            context.add_error_feedback(&format!(
+                "存在性探针 `{}` 返回非零退出（step_{}）。若该状态正是目标\
+                （卸载/禁用/删除类任务），请调用 change_verification_update\
+                （status=verified, evidence_refs=[\"step_{}\"]）显式举证闭合验证；\
+                若目标相反（安装/启用/部署），请修复后重试。",
+                snippet, step_id, step_id
+            ));
+            let _ = app.emit(
+                &format!("agent-log-{}", session_id),
+                format!(
+                    "🧪 存在性断言 `{}` 返回非零退出（step_{}）——是否达标取决于任务意图，已提示显式举证",
+                    snippet, step_id
+                ),
+            );
+        }
+        false
     };
 
     if qualifies {
@@ -2965,28 +3003,19 @@ fn try_auto_verify_change(
         } else {
             cmd
         };
-        let evidence = if command_succeeded {
-            format!("step_{} ({})", step_id, snippet)
-        } else {
-            format!("step_{} ({} → 非零退出=状态断言)", step_id, snippet)
-        };
+        let evidence = format!("step_{} ({} → exit 0)", step_id, snippet);
         context.change_verification = Some(crate::agent::change_verification::ChangeVerification {
             status: "verified".to_string(),
             evidence_refs: vec![evidence],
             waived_reason: None,
         });
-        let log_msg = if command_succeeded {
+        let _ = app.emit(
+            &format!("agent-log-{}", session_id),
             format!(
                 "🧪 系统自动感知：检测到验证命令 `{}` 成功执行，已自动标记写入验证通过 (verified)",
                 snippet
-            )
-        } else {
-            format!(
-                "🧪 系统自动感知：存在性断言 `{}` 返回非零退出（状态观测成立），已自动标记写入验证通过 (verified)",
-                snippet
-            )
-        };
-        let _ = app.emit(&format!("agent-log-{}", session_id), log_msg);
+            ),
+        );
     }
 }
 
