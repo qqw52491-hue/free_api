@@ -44,6 +44,10 @@ fn canonical_search_fingerprint(params_value: &Value) -> Option<String> {
 /// 会话内检索去重：同参会话中，与此前某次**成功** search 参数完全一致、且其后未发生
 /// 文件修改（edit/write）时，直接复用上一次的结果——物理短路，不依赖模型自觉。
 /// （缓存只读自 trace 快照，若该步尚未落盘则自然 miss，属尽力而为。）
+///
+/// 回执只投「锚点 + output_id 句柄」、绝不二次灌全量 hits：全量回放在历史上等于把
+/// 物理去重省下的 IO 原样烧回 Token；句柄指向 agent_step_logs 的持久化原文，
+/// compaction 脱水后仍可经 task_store.get_step_output / search_step_output 取回。
 fn lookup_cached_search(db: &DbState, session_id: &str, fp: &str) -> Option<DispatchResult> {
     const INVALIDATING_ACTIONS: &[&str] = &["edit", "write"];
     let conn = db.reader().ok()?;
@@ -55,7 +59,7 @@ fn lookup_cached_search(db: &DbState, session_id: &str, fp: &str) -> Option<Disp
         )
         .ok()?;
     let steps: Vec<Value> = serde_json::from_str(&steps_json).ok()?;
-    let mut cached: Option<(i64, String)> = None;
+    let mut cached: Option<(i64, String, Option<String>)> = None;
     for s in &steps {
         match s.get("action").and_then(Value::as_str) {
             Some("search") => {
@@ -74,8 +78,13 @@ fn lookup_cached_search(db: &DbState, session_id: &str, fp: &str) -> Option<Disp
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
+                    let out_id = s
+                        .get("output_id")
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v.to_string());
                     if !out.is_empty() {
-                        cached = Some((id, out));
+                        cached = Some((id, out, out_id));
                     }
                 }
             }
@@ -88,12 +97,57 @@ fn lookup_cached_search(db: &DbState, session_id: &str, fp: &str) -> Option<Disp
             }
         }
     }
-    let (step_id, output) = cached?;
-    Some(DispatchResult {
-        stdout: format!(
-            "🎯【检索去重】本会话第 {} 步已执行完全同参的检索且期间无文件修改，直接复用其结果（物理缓存，未重新检索）：\n{}\n\n如需刷新请改换关键词或加 path 约束强制重检。",
-            step_id, output
+    let (step_id, output, mut output_id) = cached?;
+
+    // 补 output_id 字段前的旧快照回退：按会话+步号从 agent_step_logs 取句柄
+    if output_id.is_none() {
+        output_id = conn
+            .query_row(
+                "SELECT output_id FROM agent_step_logs WHERE session_id=?1 AND step_id=?2 ORDER BY created_at DESC LIMIT 1",
+                params![session_id, step_id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+    }
+
+    let mut anchor = format!(
+        "🎯【检索去重】本会话第 {} 步已执行完全同参的检索且期间无文件修改（未重新检索）。",
+        step_id
+    );
+    if let Ok(payload) = serde_json::from_str::<Value>(&output) {
+        let total = payload
+            .get("total_hits")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        anchor.push_str(&format!(" 共 {} 条命中，完整结果已在上文呈现。", total));
+        let top_paths: Vec<&str> = payload
+            .get("hits")
+            .and_then(|h| h.as_array())
+            .map(|hits| {
+                hits.iter()
+                    .filter_map(|h| h.get("id_or_path").and_then(Value::as_str))
+                    .take(3)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !top_paths.is_empty() {
+            anchor.push_str(&format!(" 核心命中: {}。", top_paths.join(", ")));
+        }
+    } else {
+        anchor.push_str(" 完整结果已在上文呈现。");
+    }
+    match output_id {
+        Some(id) => anchor.push_str(&format!(
+            " 如需复核请用 task_store.search_step_output(output_id=\"{}\", pattern=...) 定向检索或 get_step_output 分页回查，切勿重复发起同参检索；建议直接基于上述命中推进分析，或对命中文件做定向行范围读取。",
+            id
+        )),
+        None => anchor.push_str(
+            " 请勿以改换关键词/路径约束的方式变相重搜；建议直接基于上文已呈现的结果推进分析，或对命中文件做定向行范围读取。"
         ),
+    }
+
+    Some(DispatchResult {
+        stdout: anchor,
         stderr: String::new(),
         success: true,
         route: "retrieval-cache".to_string(),

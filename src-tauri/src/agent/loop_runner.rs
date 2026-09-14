@@ -1588,7 +1588,39 @@ pub async fn run_tool_phase(
                 }
                 let mut out = String::new();
                 if completed_jobs.is_empty() {
-                    out.push_str("等待结束：当前无新完成的后台任务，或所有后台任务已结束。");
+                    // 空结果消歧：区分「仍在途 / 结论待回收 / 已全部收口 / 从未派发」，
+                    // 避免模型对已交付完毕的结果反复空轮询（旧会话曾连刷 295 步）。
+                    if crate::agent::child_reviewer::has_running_child_runs(
+                        state.inner(),
+                        parent_run_id,
+                    ) {
+                        out.push_str("等待结束：仍有后台任务在运行中，本次等待窗口内无新完成。可再次 wait_jobs 挂起等待，或先推进其他独立操作（结论产出后会自动注入）。");
+                    } else if crate::agent::child_reviewer::has_pending_review_results(
+                        state.inner(),
+                        parent_run_id,
+                    ) {
+                        out.push_str("等待结束：存在已终态但尚未回收的审查结论，请再次调用 wait_jobs 收取。");
+                    } else {
+                        let total_dispatched: i64 = state
+                            .inner()
+                            .0
+                            .lock()
+                            .ok()
+                            .and_then(|conn| {
+                                conn.query_row(
+                                    "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id = ?1",
+                                    rusqlite::params![parent_run_id],
+                                    |r| r.get(0),
+                                )
+                                .ok()
+                            })
+                            .unwrap_or(0);
+                        if total_dispatched == 0 {
+                            out.push_str("等待结束：当前没有已派发的后台任务（wait_jobs 仅对已派发的 child 任务生效）。请直接推进后续行动。");
+                        } else {
+                            out.push_str("等待结束：所有已派发任务的结论均已交付并消费完毕，当前无挂起任务——结果已在你的上下文中，请直接基于其推进后续行动，无需再次 wait_jobs。");
+                        }
+                    }
                 } else {
                     out.push_str(&failover_notes);
                     out.push_str(&stage_notes);

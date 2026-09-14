@@ -3,6 +3,18 @@
 > 纪律：每项控制面改动（门禁/判据/收割/预算/审查契约）在此登记：改了什么、为什么、commit、验证状态。
 > 状态标注：code-green（单测/编译过）| live-green（实弹验证过）| calib-green（基线校准过）| unverified（未验证）
 
+## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
+
+依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。
+
+| 改动 | 位置 | 病灶 | 验证 |
+|---|---|---|---|
+| **检索去重回执收口（锚点+句柄）** | `retrieval/mod.rs` `lookup_cached_search` + `main_loop.rs` steps_json 补 `output_id` 字段 | P2：缓存命中仍全量 Dump hits，省 IO 不省 Token，且尾句"改换关键词强制重检"主动诱导重搜 | code-green |
+| **wait_jobs 空结果三态消歧** | `loop_runner.rs` wait_jobs 交付路径 | P5：空结果只报"无新完成"，不区分"在途/待收/已全部交付"，诱发空轮询（旧会话 295 步连刷） | code-green |
+| **submit_plan 静态风险预检** | `plan_gate.rs` `plan_risk_preflight` | 返工段 52–64%：初版方案缺防御设计被打回。target_files 命中 敏感凭据/缓存/重试循环/持久化 四类模式且文本未显式陈述防御设计时拦截指路；含「不涉及/只读」等显式豁免逃生口，不造无解打回链 | code-green（新增 `test_plan_risk_preflight_blocks_silent_sensitive_plans`） |
+
+**未动项**：按龄脱水（TTL dehydration）单独立项——会打断前缀缓存（`assembler.rs:213` 刻意只在 compaction 事件内脱水），需先算清缓存断点成本账；`SINGLE_OBSERVATION_INGRESS_CAP=4000` 入口阈值维持不动，它是"刚读出即消费"内容的安全通道，调低只会逼模型多走一步回查。
+
 ## 阶段六：功能性问题猎捕（计划变更：统计类暂停，专挖病灶）
 
 **方法学披露**：`agent_gate_fires` 不是"拦截事件表"——它是**按步盖章的挂起状态量表**

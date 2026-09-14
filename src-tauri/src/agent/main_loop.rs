@@ -2475,6 +2475,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             "plan_title": context.active_plan_title().map(str::to_string).unwrap_or_else(|| crate::agent::context::types::clip_plan_title(&context.user_goal)),
             "status": outcome_str,
             "output": output_text.clone(),
+            "output_id": output_id.clone(),
             "resource_scope_revision": context.resource_scope.revision,
             "metrics": metrics_json,
             "token_usage": metrics_json,
