@@ -31,6 +31,16 @@
 **连带修复**：`dispatch_search` 去重 conn 作用域收窄——`db.reader()` 在连接池缺省时降级为
 `db.0` 同一把互斥锁，跨块存活会让 history 分支 `db.0.lock()` 自锁死（测试环境必现）。
 
+**追加（同日）**：同路径 signpost 文案补"探索面横跨多模块时优先 `child_worker dispatches`
+批量并行侦察"引导；`child_worker` 工具卡 summary 补触发条件（预计多步串行检索/跨模块时
+优先扇出）。病灶数据：`child_worker` 全库仅 11 次调用 vs 同期 69 簇串行重搜——扇出基建
+（worker/reviewer/writer + dispatches + wait_jobs 扇入 + resume_child）是现成的，缺的是
+模型不选它；本轮为纯文案引导，live 验证看 worker 派发率是否抬升。
+另：`wxhjy` MCP Hub（Node 聚合服务：文件/ripgrep/shell/vscode-ide/图谱）已接入调通——
+其 vscode_* 桥此前声明坐标式 schema 与扩展真实契约（filePath+symbol 按名定位）漂移，
+致定位调用全部 Invalid payload，已修（详见 mcp-remote-setup/AGENTS.md）。
+Hub 与原生工具的分工约定：文件读写走原生（台账/门禁/句柄链更深），导航/图谱/协作走 Hub。
+
 **未动项**：P3 终态 degraded 逃生口（无真人 ask_human 时三锁同开仍空转，属活性修复非
 上下文优化，另立项）；steps_json 全量反序列化/整写 O(n²) 轻债暂记不还。
 

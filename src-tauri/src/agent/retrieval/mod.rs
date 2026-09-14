@@ -376,7 +376,7 @@ pub fn dispatch_search(
         let prior = count_prior_same_path_searches(&prior_steps, path);
         if prior >= 2 {
             notes.push(format!(
-                "检索 signpost：路径「{}」本会话此前已成功检索 {} 次（含不同关键词），换词重搜同一路径收益递减——建议改用 local_file 定向读取已命中文件，或用 task_store.search_step_output 在既有输出的 output_id 上做工件内检索。",
+                "检索 signpost：路径「{}」本会话此前已成功检索 {} 次（含不同关键词），换词重搜同一路径收益递减——建议改用 local_file 定向读取已命中文件，或用 task_store.search_step_output 在既有输出的 output_id 上做工件内检索。若剩余探索面横跨多个模块/目录，优先 child_worker dispatches 一步批量并行派发只读侦察，比主循环串行搜索省步数。",
                 path, prior
             ));
         }

@@ -2,8 +2,10 @@
 # 该 local 文件已被 .gitignore 忽略；不要把真实 token 写进可提交的 YAML。
 
 # 🌟 推荐方式：原生 Rust HTTP 直连 (0 本地外部进程、0 uv 依赖、毫秒级响应)
+# ?profile=nav：只暴露导航/图谱/IDE/协作类工具（33 个），文件读写走原生
+# local_file/search/local_shell；全量 59 工具去掉 query 即可。
 name: remote-hub
-url: "https://mcp.wxhjy.dpdns.org/mcp"
+url: "https://mcp.wxhjy.dpdns.org/mcp?profile=nav"
 headers:
   Authorization: "Bearer ${FREE_API_REMOTE_MCP_TOKEN}"
 

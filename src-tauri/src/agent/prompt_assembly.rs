@@ -94,7 +94,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "child_worker",
-        summary: "L2 只读侦察 worker：独立上下文中自行读文件/列目录/执行只读命令完成侦察，回交结构化结论；支持单发或 dispatches 批量派发；结果经 wait_jobs 或信箱自动回收",
+        summary: "L2 只读侦察 worker：独立上下文中自行读文件/列目录/执行只读命令完成侦察，回交结构化结论；支持单发或 dispatches 批量派发；结果经 wait_jobs 或信箱自动回收。何时用：探索面横跨多模块、或预计需多步串行检索才能定位时，优先 dispatches 一步批量扇出多个侦察兵分头排查，比主循环逐步搜索更省步数",
         actions: &[
             "dispatch(task: string [自包含侦察任务], focus_paths?: string[] <=3 [工作区内路径], role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, dispatches?: Array<{task, focus_paths?, role?, ...}> [一步批量派发多个 worker])",
         ],
