@@ -28,6 +28,43 @@
     margin-bottom: 4px;
 }
 
+/* 内联展开/收起 chevron：时间线默认收起，点击浅层展开；点开卡片本体仍进详情抽屉 */
+.view-chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.view-chevron svg {
+    transform: rotate(-90deg);
+    transition: transform 0.15s ease;
+}
+
+.view-chevron.open svg {
+    transform: rotate(0deg);
+}
+
+.view-chevron:hover {
+    color: #e2e8f0;
+}
+
+.term-chevron {
+    color: #475569;
+}
+
+.term-chevron:hover {
+    color: #94a3b8;
+}
+
 .tool-view-badge {
     color: #38bdf8;
     background: rgba(56, 189, 248, 0.12);

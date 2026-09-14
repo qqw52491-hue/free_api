@@ -2,6 +2,9 @@
     <div class="diff-card" :class="{ 'is-detail': detail }" @click.stop="$emit('select')">
         <!-- GitHub 式文件头：文件名 + 增删统计条 + 行区间 -->
         <div class="diff-filehead">
+            <button class="view-chevron" :class="{ open: effectiveExpanded }" @click.stop="toggle" title="展开/收起">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
             <svg class="diff-fileicon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                 <polyline points="14 2 14 8 20 8" />
@@ -19,25 +22,32 @@
             </em>
         </div>
         <!-- hunk 头 + 逐行差异（详情态若 params 里有完整 target/replacement 则不受 30 行截断） -->
-        <div class="diff-hunk-head">@@ L{{ view.start_line }}–{{ view.end_line }} @@</div>
-        <div class="diff-lines">
-            <div v-for="(line, i) in shownRemoved" :key="'r' + i" class="diff-line del">
-                <span class="diff-sign">−</span><span class="diff-text">{{ line }}</span>
+        <div v-show="effectiveExpanded">
+            <div class="diff-hunk-head">@@ L{{ view.start_line }}–{{ view.end_line }} @@</div>
+            <div class="diff-lines">
+                <div v-for="(line, i) in shownRemoved" :key="'r' + i" class="diff-line del">
+                    <span class="diff-sign">−</span><span class="diff-text">{{ line }}</span>
+                </div>
+                <div v-for="(line, i) in shownAdded" :key="'a' + i" class="diff-line add">
+                    <span class="diff-sign">+</span><span class="diff-text">{{ line }}</span>
+                </div>
             </div>
-            <div v-for="(line, i) in shownAdded" :key="'a' + i" class="diff-line add">
-                <span class="diff-sign">+</span><span class="diff-text">{{ line }}</span>
-            </div>
+            <div v-if="view.truncated && !hasFullFromParams" class="hit-more">…点开看完整改动</div>
         </div>
-        <div v-if="view.truncated && !hasFullFromParams" class="hit-more">…点开看完整改动</div>
     </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
 import type { DiffToolView } from "../types";
+import { useExpandable } from "./useExpandable";
 
 const props = defineProps<{ view: DiffToolView; detail?: boolean; output?: string; params?: unknown }>();
 defineEmits<{ select: [] }>();
+
+// 约定：diff 默认展开——"改了什么"是编辑步骤的核心信息
+const { expanded, toggle } = useExpandable(true);
+const effectiveExpanded = computed(() => props.detail || expanded.value);
 
 const fileName = computed(() => props.view.path.split("/").pop() || props.view.path);
 const dirName = computed(() => {
