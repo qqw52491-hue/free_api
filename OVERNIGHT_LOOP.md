@@ -176,6 +176,16 @@ affected_paths + tmp 桥接已够判据，`foo.md` 声明未落盘仍照拦。
 **已知边界**：预览靠宿主已装的 soffice/pdftoppm（非捆绑），缺了回退系统打开；
 10 页上限防大文档爆 token/内存；LibreOffice 用独立 profile 防与用户实例互斥。
 
+### 阶段十六：市场条目详情弹窗（装前看清再动手）— 2026-09-15
+
+| 改动 | 位置 | 设计要点 |
+|---|---|---|
+| 详情字段透传 | `commands/mcp_registry.rs` | `McpRegistryEntry` 增 `secrets`/`packages`/`remotes` 三字段：凭据详情含官方填法说明（"Bearer <API_KEY> from …"）+ header/env 位置 + 必填标记；包/远端列出 registry 声明的全部形态——此前只取首选形态，其余全丢 |
+| 详情弹窗 | `PluginView.vue` | 搜索卡片加「详情」按钮 → 弹窗展示全名/版本/描述全文/仓库链接（全局链接拦截走系统浏览器）/首选形态+参数/全部包与远端/凭据声明；弹窗内可直接转安装 |
+| 安装表单富化 | 同上 | 必填凭据输入框挂官方说明 + header/env 位置标签——GcExcel 类"请填完整 Bearer 串"提示不再靠猜 |
+
+`cargo test --lib mcp_registry` 4/4 绿、`cargo check` 干净、`vue-tsc` 无错。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。

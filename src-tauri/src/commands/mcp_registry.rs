@@ -37,6 +37,39 @@ pub struct McpRegistryEntry {
     pub runtime_args: Vec<String>,
     /// 必填的 env/header 名列表（安装时向用户收集）
     pub required_secrets: Vec<String>,
+    /// 首选安装形态声明的全部凭据详情（含官方填写说明）——详情/安装弹窗共用
+    pub secrets: Vec<McpRegistrySecret>,
+    /// registry 声明的全部包形态（详情弹窗展示可选安装入口）
+    pub packages: Vec<McpRegistryPackage>,
+    /// registry 声明的全部远端形态
+    pub remotes: Vec<McpRegistryRemote>,
+}
+
+/// 凭据声明详情：名称 + 官方填写说明 + 位置——用户照着说明填不会填错形态。
+#[derive(Debug, Clone, Serialize)]
+pub struct McpRegistrySecret {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+    pub is_secret: bool,
+    /// header（远端 HTTP 头）/ env（本地包环境变量）
+    pub location: String,
+}
+
+/// registry 声明的一个可选包形态。
+#[derive(Debug, Clone, Serialize)]
+pub struct McpRegistryPackage {
+    pub registry_type: String,
+    pub identifier: String,
+    pub version: String,
+    pub transport: String,
+}
+
+/// registry 声明的一个远端形态。
+#[derive(Debug, Clone, Serialize)]
+pub struct McpRegistryRemote {
+    pub kind: String,
+    pub url: String,
 }
 
 /// 安装结果：插件行 + 握手实拉到的工具数（前端提示"已安装（N 个工具）"）。
@@ -144,15 +177,18 @@ fn normalize_entry(server: &serde_json::Value, status: String) -> McpRegistryEnt
     };
 
     let mut required_secrets: Vec<String> = Vec::new();
+    let mut secrets: Vec<McpRegistrySecret> = Vec::new();
     let (install_kind, remote_url, package, runtime_args) = if let Some(pkg) =
         pick_pkg("pypi")
     {
-        let (id, args, secrets) = package_parts(pkg);
-        required_secrets = secrets;
+        let (id, args, names) = package_parts(pkg);
+        required_secrets = names;
+        secrets = env_secret_details(pkg);
         ("uvx".to_string(), None, Some(id), args)
     } else if let Some(pkg) = pick_pkg("npm") {
-        let (id, args, secrets) = package_parts(pkg);
-        required_secrets = secrets;
+        let (id, args, names) = package_parts(pkg);
+        required_secrets = names;
+        secrets = env_secret_details(pkg);
         ("npx".to_string(), None, Some(id), args)
     } else if let Some(remote) = remotes.iter().find(|r| {
         r.get("type").and_then(|v| v.as_str()) == Some("streamable-http")
@@ -171,11 +207,26 @@ fn normalize_entry(server: &serde_json::Value, status: String) -> McpRegistryEnt
                 .get("isRequired")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let Some(n) = h.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
             if required {
-                if let Some(n) = h.get("name").and_then(|v| v.as_str()) {
-                    required_secrets.push(n.to_string());
-                }
+                required_secrets.push(n.to_string());
             }
+            secrets.push(McpRegistrySecret {
+                name: n.to_string(),
+                description: h
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                required,
+                is_secret: h
+                    .get("isSecret")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+                location: "header".to_string(),
+            });
         }
         ("http".to_string(), url, None, Vec::new())
     } else if pick_pkg("mcpb").is_some() {
@@ -183,6 +234,45 @@ fn normalize_entry(server: &serde_json::Value, status: String) -> McpRegistryEnt
     } else {
         ("unsupported".to_string(), None, None, Vec::new())
     };
+
+    let packages_detail: Vec<McpRegistryPackage> = packages
+        .iter()
+        .filter_map(|p| {
+            let registry_type = p.get("registryType")?.as_str()?.to_string();
+            Some(McpRegistryPackage {
+                registry_type,
+                identifier: p
+                    .get("identifier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                version: p
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| str_field("version")),
+                transport: p
+                    .pointer("/transport/type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("stdio")
+                    .to_string(),
+            })
+        })
+        .collect();
+    let remotes_detail: Vec<McpRegistryRemote> = remotes
+        .iter()
+        .filter_map(|r| {
+            let url = r.get("url")?.as_str()?.to_string();
+            Some(McpRegistryRemote {
+                kind: r
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("streamable-http")
+                    .to_string(),
+                url,
+            })
+        })
+        .collect();
 
     McpRegistryEntry {
         name: str_field("name"),
@@ -203,6 +293,9 @@ fn normalize_entry(server: &serde_json::Value, status: String) -> McpRegistryEnt
         package,
         runtime_args,
         required_secrets,
+        secrets,
+        packages: packages_detail,
+        remotes: remotes_detail,
     }
 }
 
@@ -243,6 +336,37 @@ fn package_parts(pkg: &serde_json::Value) -> (String, Vec<String>, Vec<String>) 
         })
         .unwrap_or_default();
     (id, args, secrets)
+}
+
+/// 包声明的 environmentVariables 完整详情（含可选变量与官方说明）——详情/安装弹窗展示用。
+fn env_secret_details(pkg: &serde_json::Value) -> Vec<McpRegistrySecret> {
+    pkg.get("environmentVariables")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let name = e.get("name")?.as_str()?.to_string();
+                    Some(McpRegistrySecret {
+                        name,
+                        description: e
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        required: e
+                            .get("isRequired")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        is_secret: e
+                            .get("isSecret")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true),
+                        location: "env".to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Authorization 头值规范化：裸 token（无空白、无 scheme）补 `Bearer ` 前缀；

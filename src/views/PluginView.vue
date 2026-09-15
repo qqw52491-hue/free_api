@@ -194,6 +194,7 @@
             <p class="market-desc">{{ r.description || '（无描述）' }}</p>
             <div class="market-card-foot">
               <code class="pkg-tag">{{ r.package || r.remote_url || r.name }}<template v-if="r.version">@{{ r.version }}</template></code>
+              <button class="detail-btn" type="button" @click="detailTarget = r">详情</button>
               <button v-if="isInstalled(r.name)" class="install-btn installed" type="button" disabled>✓ 已安装</button>
               <button v-else-if="r.install_kind !== 'unsupported' && r.install_kind !== 'mcpb'" class="install-btn" type="button" :disabled="Boolean(installing)" @click="openInstallModal(r)">
                 {{ installing === r.name ? '⏳ 拉包并握手中…' : '安装' }}
@@ -217,7 +218,8 @@
         <template v-if="installTarget.required_secrets.length">
           <p class="modal-hint">该服务声明需要以下凭据（存入插件 env/headers，不会明文展示）：</p>
           <div v-for="s in installTarget.required_secrets" :key="s" class="form-group">
-            <label>{{ s }}</label>
+            <label>{{ s }}<span class="secret-location">{{ secretLocation(installTarget, s) }}</span></label>
+            <p v-if="secretDesc(installTarget, s)" class="secret-desc">{{ secretDesc(installTarget, s) }}</p>
             <input v-model="installSecrets[s]" type="password" :placeholder="'填入 ' + s" />
           </div>
         </template>
@@ -225,6 +227,75 @@
           <button class="cancel-btn" type="button" @click="installTarget = null">取消</button>
           <button class="save-btn" type="button" :disabled="Boolean(installing)" @click="installEntry(installTarget, installSecrets)">
             {{ installing ? '⏳ 拉包并握手中…' : '确认安装' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 市场条目详情弹窗：装前看清全部形态/凭据/仓库信息 -->
+    <div v-if="detailTarget" class="modal-overlay" @click.self="detailTarget = null">
+      <div class="modal-content plugin-modal detail-modal">
+        <h3 class="install-modal-title">{{ detailTarget.title || detailTarget.name }}</h3>
+        <p class="detail-meta">
+          <code>{{ detailTarget.name }}</code>
+          <span class="kind-badge" :class="detailTarget.install_kind">{{ detailTarget.install_kind }}</span>
+          <span v-if="detailTarget.version" class="detail-version">v{{ detailTarget.version }}</span>
+          <span v-if="detailTarget.status && detailTarget.status !== 'active'" class="detail-status">{{ detailTarget.status }}</span>
+        </p>
+        <p class="detail-desc">{{ detailTarget.description || '（无描述）' }}</p>
+        <dl class="detail-grid">
+          <template v-if="detailTarget.repository_url">
+            <dt>仓库</dt>
+            <dd><a :href="detailTarget.repository_url" target="_blank" rel="noopener noreferrer">{{ detailTarget.repository_url }}</a></dd>
+          </template>
+          <template v-if="detailTarget.remote_url">
+            <dt>远端地址</dt>
+            <dd><code class="detail-code">{{ detailTarget.remote_url }}</code></dd>
+          </template>
+          <template v-if="detailTarget.package">
+            <dt>安装包</dt>
+            <dd><code class="detail-code">{{ detailTarget.package }}<template v-if="detailTarget.version">@{{ detailTarget.version }}</template></code></dd>
+          </template>
+          <template v-if="detailTarget.runtime_args?.length">
+            <dt>运行参数</dt>
+            <dd><code class="detail-code">{{ detailTarget.runtime_args.join(' ') }}</code></dd>
+          </template>
+          <template v-if="detailTarget.packages?.length">
+            <dt>可选包形态</dt>
+            <dd>
+              <div v-for="(p, i) in detailTarget.packages" :key="i" class="detail-line">
+                <code class="detail-code">{{ p.registry_type }}: {{ p.identifier }}<template v-if="p.version">@{{ p.version }}</template></code>
+                <span class="detail-sub">{{ p.transport }}</span>
+              </div>
+            </dd>
+          </template>
+          <template v-if="detailTarget.remotes?.length">
+            <dt>可选远端</dt>
+            <dd>
+              <div v-for="(rm, i) in detailTarget.remotes" :key="i" class="detail-line">
+                <code class="detail-code">{{ rm.url }}</code>
+                <span class="detail-sub">{{ rm.kind }}</span>
+              </div>
+            </dd>
+          </template>
+          <template v-if="detailTarget.secrets?.length">
+            <dt>凭据声明</dt>
+            <dd>
+              <div v-for="s in detailTarget.secrets" :key="s.name" class="detail-line">
+                <code class="detail-code">{{ s.name }}</code>
+                <span class="detail-sub">{{ s.location === 'header' ? 'HTTP 头' : '环境变量' }} · {{ s.required ? '必填' : '可选' }}</span>
+                <p v-if="s.description" class="secret-desc">{{ s.description }}</p>
+              </div>
+            </dd>
+          </template>
+        </dl>
+        <div class="form-actions">
+          <button class="cancel-btn" type="button" @click="detailTarget = null">关闭</button>
+          <button
+            v-if="!isInstalled(detailTarget.name) && detailTarget.install_kind !== 'unsupported' && detailTarget.install_kind !== 'mcpb'"
+            class="save-btn" type="button" :disabled="Boolean(installing)"
+            @click="openInstallModal(detailTarget); detailTarget = null">
+            安装
           </button>
         </div>
       </div>
@@ -559,6 +630,7 @@ const marketError = ref('');
 const installing = ref('');
 const installTarget = ref(null);
 const installSecrets = ref({});
+const detailTarget = ref(null);
 const marketNotice = ref('');
 
 // 已安装名集合：registry 全名截最后一段即本地名（与后端入库逻辑一致）
@@ -608,6 +680,15 @@ const searchRegistry = async () => {
   } finally {
     marketSearching.value = false;
   }
+};
+
+// 凭据详情查询：详情/安装弹窗共用——展示官方填法说明（如"Bearer <API_KEY>"）
+const findSecret = (entry, name) =>
+  (entry?.secrets || []).find((s) => s.name === name);
+const secretDesc = (entry, name) => findSecret(entry, name)?.description || '';
+const secretLocation = (entry, name) => {
+  const loc = findSecret(entry, name)?.location;
+  return loc === 'header' ? 'HTTP 头' : loc === 'env' ? '环境变量' : '';
 };
 
 // 有必填凭据 → 弹窗收集；否则直接装
@@ -1534,6 +1615,44 @@ select option { background-color: #18181b !important; color: #f4f4f5 !important;
 .unsupported-tag { font-size: 11px; color: #71717a; flex-shrink: 0; }
 .secrets-hint { margin: 0; font-size: 11px; color: #fbbf24; }
 .install-modal-title { margin: 0 0 10px; font-size: 15px; color: #f4f4f5; }
+
+/* 市场详情弹窗 */
+.detail-btn {
+  background: transparent;
+  color: #a1a1aa;
+  border: 1px solid #3f3f46;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.detail-btn:hover { color: #e4e4e7; border-color: #71717a; }
+.detail-modal { max-height: 78vh; overflow-y: auto; }
+.detail-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: -4px 0 10px; font-size: 11.5px; color: #71717a;
+}
+.detail-meta code { font-size: 11px; color: #a1a1aa; }
+.detail-version { color: #a1a1aa; }
+.detail-status { color: #fbbf24; }
+.detail-desc { font-size: 12.5px; color: #d4d4d8; line-height: 1.6; margin: 0 0 14px; }
+.detail-grid {
+  display: grid; grid-template-columns: 76px 1fr; gap: 8px 12px;
+  margin: 0; font-size: 12px;
+}
+.detail-grid dt { color: #71717a; padding-top: 1px; }
+.detail-grid dd { margin: 0; min-width: 0; color: #d4d4d8; }
+.detail-grid dd a { color: #7dd3fc; word-break: break-all; }
+.detail-code {
+  font-size: 11px; color: #a1a1aa; word-break: break-all;
+  background: rgba(255, 255, 255, 0.04); padding: 1px 5px; border-radius: 4px;
+}
+.detail-line { margin-bottom: 6px; }
+.detail-line:last-child { margin-bottom: 0; }
+.detail-sub { font-size: 10.5px; color: #71717a; margin-left: 6px; }
+.secret-desc { font-size: 11px; color: #8e8e93; margin: 3px 0 6px; line-height: 1.5; }
+.secret-location { font-size: 10px; color: #71717a; margin-left: 6px; }
 .market-link { margin-top: 10px; }
 
 .form-row {
