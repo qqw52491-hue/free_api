@@ -347,10 +347,20 @@ fn collect_session_tmp_material(
                 .metadata()
                 .map(|m| format!("{} KB", m.len() / 1024))
                 .unwrap_or_else(|_| "未知".to_string());
-            sections.push(format!(
-                "【会话产物·二进制】文件: {} (类型: {}, 大小: {})",
-                display, ext, size_str
-            ));
+            // 办公/数据类二进制（xlsx/docx/pdf 等）抽内容预览——否则审查者只见文件名+大小，
+            // "整列空/映射丢字段"这类语义缺陷对终审天然不可见。失败则退回元数据行。
+            let preview = extract_office_preview(path);
+            if let Some(preview) = preview {
+                sections.push(format!(
+                    "--- 会话产物: {} (类型: {}, 大小: {}) ---\n{}",
+                    display, ext, size_str, preview
+                ));
+            } else {
+                sections.push(format!(
+                    "【会话产物·二进制】文件: {} (类型: {}, 大小: {})",
+                    display, ext, size_str
+                ));
+            }
         } else if let Ok(content) = std::fs::read_to_string(path) {
             let sample = if content.chars().count() > 2000 {
                 format!(
@@ -382,6 +392,42 @@ fn collect_session_tmp_material(
         combined
     };
     Some((final_text, hash_hex))
+}
+
+/// 从办公/数据类二进制产物中抽取内容预览（xlsx→sheet markdown、docx/pdf→文本摘录），
+/// 让终审能看到数据列内容而非仅文件名+大小。仅对有内容可取的类型返回 Some；
+/// 图片/压缩包等无可读文本的类型返回 None，由调用方退回元数据行。
+fn extract_office_preview(path: &std::path::Path) -> Option<String> {
+    use crate::agent::file_parser::{parse_file, ExtractedContent};
+    const MAX_PREVIEW_CHARS: usize = 1800;
+    let content = parse_file(path, Some(MAX_PREVIEW_CHARS)).ok()?;
+    let text = match content {
+        ExtractedContent::Spreadsheet { sheets, summary } => {
+            let mut out = summary;
+            for s in &sheets {
+                out.push_str(&format!(
+                    "\n[Sheet: {} | {}行x{}列]\n{}",
+                    s.name, s.row_count, s.col_count, s.preview_markdown
+                ));
+            }
+            out
+        }
+        ExtractedContent::Document { text, .. } | ExtractedContent::Pdf { text, .. } => text,
+        ExtractedContent::Text { text, .. } => text,
+        _ => return None,
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(if text.chars().count() > MAX_PREVIEW_CHARS {
+        format!(
+            "{}...\n[预览截断]",
+            text.chars().take(MAX_PREVIEW_CHARS).collect::<String>()
+        )
+    } else {
+        text.to_string()
+    })
 }
 
 /// 审查阻塞性缺陷结构
@@ -1011,6 +1057,42 @@ mod tests {
         assert!(is_binary_file("backup.zip"));
         assert!(!is_binary_file("src/main.rs"));
         assert!(!is_binary_file("README.md"));
+    }
+
+    /// 数据类二进制（xlsx）必须向终审透出列内容预览——
+    /// 否则"整列空/字段映射丢失"这类语义缺陷对审查者天然不可见（实测踩坑）。
+    #[test]
+    fn test_extract_office_preview_surfaces_xlsx_columns() {
+        use std::io::Write;
+        // 手工构造最小合法 xlsx：表头 + 一行数据（其中一列留空）
+        let mut buf = Vec::new();
+        {
+            let mut z = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opt = zip::write::SimpleFileOptions::default();
+            z.start_file("[Content_Types].xml", opt).unwrap();
+            z.write_all(r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#.as_bytes()).unwrap();
+            z.start_file("_rels/.rels", opt).unwrap();
+            z.write_all(r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.as_bytes()).unwrap();
+            z.start_file("xl/workbook.xml", opt).unwrap();
+            z.write_all(r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#.as_bytes()).unwrap();
+            z.start_file("xl/_rels/workbook.xml.rels", opt).unwrap();
+            z.write_all(r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.as_bytes()).unwrap();
+            z.start_file("xl/worksheets/sheet1.xml", opt).unwrap();
+            z.write_all(r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>车牌</t></is></c><c r="B1" t="inlineStr"><is><t>开票状态</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>晋A12345</t></is></c></row></sheetData></worksheet>"#.as_bytes()).unwrap();
+            z.finish().unwrap();
+        }
+        let dir = std::env::temp_dir().join(format!("rgk_xlsx_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("orders.xlsx");
+        std::fs::write(&path, &buf).unwrap();
+        let preview = extract_office_preview(&path).expect("xlsx 应产出内容预览");
+        assert!(preview.contains("车牌"), "预览应含表头列名: {}", preview);
+        assert!(preview.contains("晋A12345"), "预览应含数据行: {}", preview);
+        // 图片等无可读文本类型仍返回 None，由调用方退回元数据行
+        let png = dir.join("a.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
+        assert!(extract_office_preview(&png).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

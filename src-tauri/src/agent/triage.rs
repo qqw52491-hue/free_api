@@ -330,6 +330,13 @@ pub async fn run_triage(
 - final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。
 - evidence_policy：none=方案不需证据引用；source_refs=资料/需求来源即可；code_refs=须引用已读代码证据；operational_probes=须命令输出/探针证据。
 
+【验收能力边界（系统事实，非分类规则）】
+- mechanical_only 终审只校验：产物存在、已登记、可解析、数量/规模对账；
+- 它读不到产物的内容语义：数据列含义、字段映射正确性、单位换算、页面渲染效果、文字质量。
+- 因此：产物正确性依赖内容语义时（数据报表、导出表格、渲染页面、文案类交付），
+  需评估是否用语义级终审；产物"可解析即正确"时（纯结构配置、契约性 JSON），
+  mechanical_only 足够。以上由你按任务个案裁量，不是固定映射。
+
 【判定纪律】
 - 宁可低估不要拔高：简单明确的任务判 direct，让门禁松手；
 - 但触及已有代码修改、多文件扩散、删除改名、生产配置一律不低于 technical_plan；
