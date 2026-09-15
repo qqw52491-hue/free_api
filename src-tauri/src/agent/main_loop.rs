@@ -454,8 +454,15 @@ async fn run_agent_main_loop_in_workspace_inner(
     }
     // 运行起始时间：成功完成时自动登记运行期间新生成的工作区产物（微信回推文件链路）
     let run_started_at = chrono::Utc::now();
-    // 捕获任务起点 Git 基准快照（用于 finish 时进行精准增量 Diff 审查）
-    let git_baseline = crate::agent::reviewer_gatekeeper::GitBaseline::capture(&workspace_dir);
+    // 捕获任务起点 Git 基准快照（用于 finish 时进行精准增量 Diff 审查）。
+    // 自由会话（未选项目）的 workspace_dir 是进程 cwd 的"事故目录"——若它恰好
+    // 落在 git repo 里（如 src-tauri），基线会把宿主自己未提交的脏 diff 误算进
+    // 本次任务审查材料。证据域缺失 → 降级为非 git 基线，审查改靠副作用台账/产物链。
+    let git_baseline = if is_explicit_workspace || auto_pilot {
+        crate::agent::reviewer_gatekeeper::GitBaseline::capture(&workspace_dir)
+    } else {
+        crate::agent::reviewer_gatekeeper::GitBaseline::non_git()
+    };
     // 项目会话进入前先拿工作区软锁（独占该目录直到本次 run 结束）
     let _workspace_run_lock = if is_project_session {
         Some(acquire_workspace_lock(&workspace_dir, &final_session_id, &run_id, &goal).await?)
@@ -2071,10 +2078,37 @@ async fn run_agent_main_loop_in_workspace_inner(
                 );
             } else {
             // Level 0 机械门禁：零 Token 快速拦截（Scope 边界越界等）
-            let scope_violations = crate::agent::reviewer_gatekeeper::mechanical_precheck_violations(
-                &workspace_dir,
-                context.active_target_block(),
-            );
+            // 适用域：scope 预检的证据是 workspace 的 git diff——自由会话（未选项目）
+            // 里 workspace_dir 是进程启动目录的"事故 cwd"，其 diff 反映宿主环境
+            // 脏状态而非本任务改动 → 证据域缺失 → NotApplicable，移交终审语义判定。
+            let scope_violations = if is_explicit_workspace || auto_pilot {
+                crate::agent::reviewer_gatekeeper::mechanical_precheck_violations(
+                    &workspace_dir,
+                    context.active_target_block(),
+                )
+            } else {
+                if context.active_target_block().is_some() {
+                    if let Some(notice) =
+                        crate::agent::gate_applicability::GateApplicability::not_applicable(
+                            "自由会话未绑定真实工作区，scope 预检的 git diff 判据缺失",
+                        )
+                        .handoff_notice("Scope 边界预检门")
+                    {
+                        gate_notices.push(notice);
+                    }
+                    crate::agent::telemetry::record_gate_fire(
+                        state.inner(),
+                        &crate::agent::telemetry::GateFireRecord {
+                            run_id: &run_id,
+                            session_id: &final_session_id,
+                            step_id: step_id as i64,
+                            gate: "finish_review",
+                            route: "finish_review:scope_precheck:not_applicable",
+                        },
+                    );
+                }
+                Vec::new()
+            };
             if !scope_violations.is_empty() {
                 checkpoint.finish_reviewed = true;
                 context.add_error_feedback(&format!(

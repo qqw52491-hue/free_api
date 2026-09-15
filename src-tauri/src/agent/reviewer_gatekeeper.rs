@@ -38,6 +38,16 @@ impl GitBaseline {
         }
     }
 
+    /// 自由会话降级构造：无真实工作区锚点（workspace_dir 实为进程 cwd 的"事故目录"）
+    /// 时使用——等价于"工作区非 git 仓库"，diff 域证据全部缺席，审查改靠
+    /// 副作用台账与产物注册链。与 capture() 命中非 repo 目录的结果一致。
+    pub fn non_git() -> Self {
+        Self {
+            is_git: false,
+            base_head: None,
+        }
+    }
+
     /// 提取相对起点的审查材料：
     /// 1. 有 Git 仓库：提取 Git Diff（并结合未跟踪新文件）
     /// 2. 无 Git 仓库 / 临时目录：扫描任务启动后新增/修改的文本文件与二进制产物元数据（若无改动则 0ms 免检）
@@ -114,6 +124,11 @@ impl GitBaseline {
 
     /// Git 模式下的代码变更 Diff 提取
     pub fn collect_git_diff(&self, workspace: &Path) -> Option<(String, String)> {
+        // 非 git 基线（含自由会话 non_git() 降级态）不跑任何 git 命令——
+        // 否则在"恰好是 repo 的事故 cwd"上会把宿主自己的脏 diff 误当任务改动。
+        if !self.is_git {
+            return None;
+        }
         // 1. 获取 Git Diff 文本
         let diff_args = if let Some(ref base) = self.base_head {
             vec!["diff", base.as_str()]

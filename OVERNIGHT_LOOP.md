@@ -147,6 +147,21 @@ live 验证待下轮产物类实弹（PPT/报告生成应一次通过，被拒�
 ②PPT 审美属 MCP 模板层问题，不在门禁域；③跨会话 tmp 写入不计入 touched
 （保守侧，真出现再说）。
 
+**同日追加：自由会话的"事故工作区"降级**。用户实弹复盘点破：PPT run 根本没选
+项目，`workspace_dir` 落 `std::env::current_dir()`（dev server 的 src-tauri，
+恰好在 git repo 里——模型的 `mkdir tmp` 自救才侥幸生效；cwd 若不在 repo，
+连这条自救路都没有）。两处 workspace 锚定机械检查的证据域在自由会话缺失：
+
+| 改动 | 修法 |
+|---|---|
+| `GitBaseline::non_git()` + `collect_git_diff` 尊重 `is_git` | 自由会话不再对事故 cwd 跑 git——否则基线会把宿主自己未提交的脏 diff 混进审查材料，误导终审 |
+| scope 预检降级 | `!is_explicit_workspace && !auto_pilot` 且有 target_block 声明时 → NotApplicable + Gate Notice + `finish_review:scope_precheck:not_applicable` 遥测；语义边界移交终审 |
+
+零交集门**不降级**：relative 声明经 path_guard 物理落到 cwd（真实可写白名单），
+affected_paths + tmp 桥接已够判据，`foo.md` 声明未落盘仍照拦。
+
+**验证**：`cargo test --lib` 621/621 绿。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。
