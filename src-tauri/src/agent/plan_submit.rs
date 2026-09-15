@@ -157,7 +157,7 @@ pub async fn handle_submit_plan(
         "plan_summary": submission.plan_summary.trim(),
         "target_files": target_files,
         "discussion_round": discussion_round,
-        "user_goal": context.user_goal,
+        "user_goal": context.effective_goal(),
         "root_cause": submission.root_cause.trim(),
         "assumptions": submission.assumptions,
         "open_questions": submission.open_questions,

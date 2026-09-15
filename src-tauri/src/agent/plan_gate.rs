@@ -812,7 +812,7 @@ fn gate_interception(
                     }
                 }
 
-                let plan_text = format!("{} {}", context.user_goal, context.progress_summary);
+                let plan_text = format!("{} {}", context.effective_goal(), context.progress_summary);
                 let decision = crate::agent::agent_policy::evaluate_plan_policy(
                     &policy,
                     &target_files,

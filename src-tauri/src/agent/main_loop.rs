@@ -160,7 +160,7 @@ fn persist_challenged_step(
         "command": instruction.get_params(),
         "params": instruction.get_params(),
         "plan_id": context.active_plan_id().unwrap_or_default(),
-        "plan_title": context.active_plan_title().map(str::to_string).unwrap_or_else(|| crate::agent::context::types::clip_plan_title(&context.user_goal)),
+        "plan_title": context.active_plan_title().map(str::to_string).unwrap_or_else(|| crate::agent::context::types::clip_plan_title(context.effective_goal())),
         "status": status,
         "output": output_text,
         "output_id": output_id,
@@ -769,7 +769,13 @@ async fn run_agent_main_loop_in_workspace_inner(
             existing.restore_context(&mut context);
             let mut cp = existing;
             if cp.phase == AgentPhase::WaitUser {
-                if !goal.trim().is_empty() && cp.data.user_goal != goal {
+                // 等待中任务的目标以 current_goal 为准（旧 checkpoint 无此字段时回退锚点）
+                let waiting_goal = if cp.data.current_goal.is_empty() {
+                    &cp.data.user_goal
+                } else {
+                    &cp.data.current_goal
+                };
+                if !goal.trim().is_empty() && waiting_goal != &goal {
                     context.add_error_feedback(&format!("【人类回复】{}", goal));
                 }
                 // 保持原本的任务主目标不变
@@ -2919,7 +2925,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             "command": instruction.get_params(),
             "params": instruction.get_params(),
             "plan_id": context.active_plan_id().unwrap_or_default(),
-            "plan_title": context.active_plan_title().map(str::to_string).unwrap_or_else(|| crate::agent::context::types::clip_plan_title(&context.user_goal)),
+            "plan_title": context.active_plan_title().map(str::to_string).unwrap_or_else(|| crate::agent::context::types::clip_plan_title(context.effective_goal())),
             "status": outcome_str,
             "output": output_text.clone(),
             "output_id": output_id.clone(),

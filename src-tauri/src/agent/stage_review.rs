@@ -512,7 +512,7 @@ fn build_stage_evidence(
     const MAX_EVIDENCE_CHARS: usize = 6_000;
 
     let mut evidence = String::new();
-    evidence.push_str(&format!("【任务目标】{}\n", context.user_goal));
+    evidence.push_str(&format!("【任务目标】{}\n", context.effective_goal()));
     let todos = context
         .todo_list
         .iter()

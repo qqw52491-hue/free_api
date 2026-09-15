@@ -441,7 +441,8 @@ impl SandwichContext {
                 "🎯 [Compaction] 提升最新任务目标到 M1 静态区: {:?}",
                 new_goal
             );
-            self.user_goal = new_goal;
+            self.user_goal = new_goal.clone();
+            self.current_goal = new_goal;
         }
 
         // ── 4. 使用双层混合总结器进行安全归档 ──

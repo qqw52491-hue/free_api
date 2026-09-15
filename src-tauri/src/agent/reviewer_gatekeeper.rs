@@ -811,7 +811,7 @@ pub async fn evaluate_finish_diff(
 
     let user_prompt = format!(
         "【任务目标】\n{}\n\n【本次交付的变更材料 / 成果物】\n```\n{}\n```{}\n\n请严格对照判定原则与验收标准输出合法的 JSON 审查结果。",
-        context.user_goal,
+        context.effective_goal(),
         review_material,
         extra_guidance
     );

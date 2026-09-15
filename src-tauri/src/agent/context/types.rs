@@ -206,7 +206,13 @@ pub struct SandwichContext {
     /// 系统核心契约与安全规则 (core_logic.md + 内置工具手册)
     pub system_prompt: String,
     /// 用户的终极任务目标 (如 "部署 Rust + PostgreSQL 项目并在 8080 启动")
+    /// ⚠️ M1 静态锚点：跨轮次刻意保持为首轮目标以稳定前缀缓存，
+    ///    审查/验收类消费点必须用 `effective_goal()`（当前轮目标），禁止直接读此字段。
     pub user_goal: String,
+    /// 当前轮次的任务目标（每轮随新用户消息更新；与 M1 锚点分离，
+    /// 终审/阶段审查/方案门等"本任务是什么"的判定以此为准）。
+    #[serde(default)]
+    pub current_goal: String,
     /// 当前按需展开的活跃工具/Skill 规格详情 (通过 next_tool_hint 懒加载，其余时间为空)
     pub active_tool_detail: String,
 
@@ -338,7 +344,9 @@ impl SandwichContext {
     pub fn new(system_prompt: String, user_goal: String) -> Self {
         Self {
             system_prompt,
+            current_goal: user_goal.clone(),
             user_goal,
+
             memories: BTreeMap::new(),
             failed_attempts: Vec::new(),
             side_effects: Vec::new(),
@@ -377,6 +385,18 @@ impl SandwichContext {
             budget_config: crate::agent::context::budget::ContextBudgetConfig::default(),
             compaction_model_config: None,
             plan_gate: None,
+        }
+    }
+
+    /// 当前轮次的任务目标：`current_goal` 非空时优先，旧 checkpoint 无此字段
+    /// 时回退 M1 锚点 `user_goal`（旧数据二者本就一致，语义等价）。
+    /// 终审/阶段审查/方案门等需要"本任务是什么"的判定一律走此访问器，
+    /// 禁止直接读 `user_goal`——那是跨轮冻结的 M1 前缀缓存锚点。
+    pub fn effective_goal(&self) -> &str {
+        if self.current_goal.is_empty() {
+            &self.user_goal
+        } else {
+            &self.current_goal
         }
     }
 

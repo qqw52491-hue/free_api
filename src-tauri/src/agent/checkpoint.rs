@@ -228,6 +228,10 @@ impl PendingToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DurableAgentContext {
     pub user_goal: String,
+    /// 当前轮次任务目标（与 M1 锚点 user_goal 分离；旧 checkpoint 缺字段时
+    /// 恢复回退 user_goal，二者在单轮语义下本就一致）。
+    #[serde(default)]
+    pub current_goal: String,
     pub memories: std::collections::BTreeMap<String, String>,
     /// 任务数据区目录，数据行仍由 agent_task_records 独立实时持久化。
     #[serde(default)]
@@ -267,6 +271,7 @@ impl DurableAgentContext {
     pub fn capture(context: &SandwichContext) -> Self {
         Self {
             user_goal: context.user_goal.clone(),
+            current_goal: context.effective_goal().to_string(),
             memories: context.memories.clone(),
             task_resources: context.task_resources.clone(),
             todo_list: context.todo_list.clone(),
@@ -297,6 +302,12 @@ impl DurableAgentContext {
 
     pub fn restore_into(&self, context: &mut SandwichContext) {
         context.user_goal = self.user_goal.clone();
+        // 旧 checkpoint 无 current_goal 字段（反序列化为空串）→ 回退锚点，语义等价
+        context.current_goal = if self.current_goal.is_empty() {
+            self.user_goal.clone()
+        } else {
+            self.current_goal.clone()
+        };
         context.memories = self.memories.clone();
         context.task_resources = self.task_resources.clone();
         context.todo_list = self.todo_list.clone();
@@ -362,6 +373,8 @@ impl DurableAgentContext {
     /// failed_attempts、side_effects。工具正文仍以磁盘 / output_id 为准。
     pub fn inherit_filling_into(&self, context: &mut SandwichContext) {
         // 保持 M1 静态目标锚点不变（跨轮前缀 100% 缓存命中），新提问已作为 user 消息追加在 chat_tail 尾部。
+        // 注意：只回写锚点 user_goal，绝不动 current_goal——新轮上下文已携带本轮新目标，
+        // 若一并继承会把终审/阶段审查的"当前任务"错绑回旧任务（实测导致拿任务1目标审任务2产物）。
         if !self.user_goal.is_empty() {
             context.user_goal = self.user_goal.clone();
         }
@@ -1852,7 +1865,11 @@ pub async fn get_agent_checkpoint(
             plan_mode: Some(cp.plan_mode.as_str().to_string()),
             auto_pilot: cp.auto_pilot,
             step_id: cp.step_id,
-            user_goal: cp.data.user_goal,
+            user_goal: if cp.data.current_goal.is_empty() {
+                cp.data.user_goal
+            } else {
+                cp.data.current_goal
+            },
             last_error: cp.last_error,
             is_waiting_human: cp.phase == AgentPhase::WaitUser,
             form,
@@ -2272,6 +2289,13 @@ mod tests {
             next.user_goal, "配置 OpenRouter",
             "M1 静态锚点跨轮不变，确保 100% 前缀缓存命中"
         );
+        // 当前轮目标必须保持为新任务——终审/阶段审查按 effective_goal 判定，
+        // 若被旧锚点污染会拿上一轮目标审本轮产物（实测 finish_review 误判 blocking）
+        assert_eq!(
+            next.current_goal, "为什么 list_models 报错",
+            "current_goal 不随 M1 锚点继承，保持本轮新目标"
+        );
+        assert_eq!(next.effective_goal(), "为什么 list_models 报错");
         assert!(next.todo_list.is_empty(), "新任务不继承旧 todo");
         assert_eq!(
             next.memories.get("platform").map(String::as_str),
