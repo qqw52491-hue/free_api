@@ -198,6 +198,41 @@ fn build_touched_set(d: &DiffContext, session_tmp: &std::path::Path) -> Vec<Stri
     touched
 }
 
+/// 把会话 tmp 目录实物桥接为 `tmp/<rel>` 声明形态并入对账集。
+/// tmp/ 写入不入副作用台账、不进工作区 diff——目录实物是 finish 门唯一的对账判据。
+fn extend_touched_with_session_tmp(touched: &mut Vec<String>, session_tmp: &std::path::Path) {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, depth: usize, out: &mut Vec<String>) {
+        if depth > 6 || out.len() >= 1000 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if let Ok(rel) = p.strip_prefix(root) {
+                out.push(format!("tmp/{}", rel.to_string_lossy()));
+            }
+            if p.is_dir() {
+                walk(&p, root, depth + 1, out);
+            }
+        }
+    }
+    if session_tmp.is_dir() {
+        walk(session_tmp, session_tmp, 0, touched);
+    }
+}
+
+/// 声明形态归一：物理 session_tmp 绝对路径 → `tmp/<rel>`；
+/// `tmp/`/`./tmp/` 相对形态与其他目标原样返回。
+fn normalize_tmp_declared(target: &str, session_tmp: &std::path::Path) -> String {
+    let t = target.trim();
+    if let Ok(rel) = std::path::Path::new(t).strip_prefix(session_tmp) {
+        return format!("tmp/{}", rel.to_string_lossy());
+    }
+    t.to_string()
+}
+
 /// 渲染每轮投射到 M_Tail 的可操作文件边界卡片。
 ///
 /// 文案与 path_guard 路由规则、artifact_manager 登记入口、finish 门禁的
@@ -2190,17 +2225,24 @@ async fn run_agent_main_loop_in_workspace_inner(
                             );
                             return false;
                         }
-                        // 判据域：真实 diff ∪ 副作用台账路径
+                        // 判据域：真实 diff ∪ 副作用台账路径 ∪ 会话 tmp 产物实物
                         //（非 git 写入同样构成"目标被动过"的物理事实）
                         let session_tmp =
                             crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
-                        let touched: Vec<String> = diff_context
+                        let mut touched: Vec<String> = diff_context
                             .as_ref()
                             .map(|d| build_touched_set(d, &session_tmp))
                             .unwrap_or_default();
+                        // tmp/ 产物实物对账（scope 卡片承诺的直认通道）：tmp/ 写入按设计
+                        // 不入副作用台账、也不在工作区 diff 内——不把目录实物桥接进对账集，
+                        // 则声明 tmp/x 的任务结构性零交集 → finish 死锁。
+                        extend_touched_with_session_tmp(&mut touched, &session_tmp);
                         !targets.iter().any(|tf| {
                             touched.iter().any(|p| {
-                                crate::agent::finish_guard::diff::file_paths_match(tf, p)
+                                crate::agent::finish_guard::diff::file_paths_match(
+                                    &normalize_tmp_declared(tf, &session_tmp),
+                                    p,
+                                )
                             })
                         })
                     })
@@ -3260,7 +3302,7 @@ mod gate_deadlock_tests {
 
 #[cfg(test)]
 mod artifact_bridge_tests {
-    use super::build_touched_set;
+    use super::{build_touched_set, extend_touched_with_session_tmp, normalize_tmp_declared};
     use crate::agent::finish_guard::{diff::file_paths_match, DiffContext};
     use std::path::PathBuf;
 
@@ -3309,6 +3351,42 @@ mod artifact_bridge_tests {
         let d = DiffContext::from_diff_and_paths(None, &["src/main.rs".to_string()]);
         let touched = build_touched_set(&d, &session_tmp);
         assert!(touched.iter().any(|p| p == "src/main.rs"));
+    }
+
+    /// 实弹病灶（2026-09 冒烟复测）：tmp/ 写入不入副作用台账也不在工作区
+    /// diff 内 → 声明 tmp/x 的任务对账集结构性为空 → 零交集门误伤 finish。
+    /// 目录实物必须桥接为 tmp/<rel> 声明形态参与对账。
+    #[test]
+    fn session_tmp_products_extend_touched_for_zero_intersection_gate() {
+        let session_tmp = std::env::temp_dir().join(format!("fac-tmpgate-{}", std::process::id()));
+        std::fs::create_dir_all(session_tmp.join("sub")).unwrap();
+        std::fs::write(session_tmp.join("hello_smoke.md"), "# smoke").unwrap();
+        std::fs::write(session_tmp.join("sub/report.md"), "r").unwrap();
+
+        let mut touched = Vec::new();
+        extend_touched_with_session_tmp(&mut touched, &session_tmp);
+        assert!(touched.iter().any(|p| p == "tmp/hello_smoke.md"));
+        assert!(touched.iter().any(|p| p == "tmp/sub/report.md"));
+
+        // 声明形态归一：物理 session_tmp 声明 → tmp/<rel>
+        let abs = session_tmp.join("hello_smoke.md");
+        assert_eq!(
+            normalize_tmp_declared(&abs.to_string_lossy(), &session_tmp),
+            "tmp/hello_smoke.md"
+        );
+        assert_eq!(normalize_tmp_declared("tmp/x.md", &session_tmp), "tmp/x.md");
+        assert_eq!(
+            normalize_tmp_declared("src/main.rs", &session_tmp),
+            "src/main.rs"
+        );
+
+        // 对账：声明 tmp/hello_smoke.md 命中实物
+        let hit = touched.iter().any(|p| {
+            crate::agent::finish_guard::diff::file_paths_match("tmp/hello_smoke.md", p)
+        });
+        assert!(hit, "声明 tmp/x 必须与会话 tmp 实物对账命中");
+
+        let _ = std::fs::remove_dir_all(&session_tmp);
     }
 }
 

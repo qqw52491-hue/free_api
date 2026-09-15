@@ -773,3 +773,26 @@ telemetry `ORDER BY id DESC` → `started_at DESC`；E2E 终态轮询同步修�
 | `0e0e200` | 判据方向化/危害性裁决/零改动短路/跨域零命中兜底 | live-green（5/5 PASS） |
 | `f41782e` | 判据 run 关联改 `started_at DESC`（UUID id 无序） | live-green |
 | `c3f8163` | 终审 reviewer 补危害性裁决 + 判据② diff 方向断言 | live-green |
+
+---
+
+## 阶段四存档：channel API 实弹冒烟（2026-09-15）
+
+启动环境：本机 Wayland 直连报协议错误 → `GDK_BACKEND=x11 + WEBKIT_DISABLE_DMABUF_RENDERER=1 + WEBKIT_DISABLE_COMPOSITING_MODE=1` 拉起（webview 白屏但 channel API 正常，8790 + x-channel-token）。
+
+冒烟任务（session `4138ce20`，pro=gemini-3.1-pro / flash=gemini-3.8-flash-high，Antigravity 代理 127.0.0.1:8045）：
+
+**修复前实弹链（run `5b20f3e7`，8+ 步 → waiting_human 死锁）**：
+1. `local_file` 写 `tmp/hello_smoke.md` → 方案门禁拦（需 submit_plan）；
+2. `submit_plan` → evidence_refs 判空打回（新建文件无证据可引）；
+3. 方案放行后误重交 → "submit_plan 不适用"打回；
+4. `finish` → **零交集门误伤**：声明 `tmp/hello_smoke.md`，对账集空（tmp/ 写入不入副作用台账 `!is_tmp_write`、不在工作区 diff）→ 结构性零交集；
+5. `register_file` 成功（实物+账本都在）→ 模型走投无路 `ask_human` 挂起。
+
+**根因**：文案-机制漂移的活体实例——scope 卡片承诺"声明 tmp/x 与本目录产物自动对账"，机制层却把 tmp/ 从对账数据源双侧剔除。
+
+**修复**：`extend_touched_with_session_tmp` 把会话 tmp 目录实物桥接为 `tmp/<rel>` 并入对账集 + `normalize_tmp_declared` 归一物理 session_tmp 声明形态（`5c56642` 后 commit）。
+
+**修复后实弹（run `6076d188`）**：4 步一把过 `succeeded`——write tmp/ → echo → register → finish，产物正常登记交付。回归 `cargo test --lib` 全绿（新增 `session_tmp_products_extend_touched_for_zero_intersection_gate`）。
+
+**遗留观察（未改，待裁）**：方案门禁对 tmp/ 纯草稿首写仍要 submit_plan + Tech Lead 评审——与卡片"草稿免审豁免"存在张力（本次靠 checkpoint 已批准方案放行）。新建文件任务的 evidence_refs 硬要求（1~6 条已读证据）对"从零创建"类目标偏苛。
