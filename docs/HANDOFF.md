@@ -496,6 +496,16 @@ fixture 无答案，杜绝批量解题）。
    执行轨迹摘要（agent_step_logs 最近 15 步首行——核对自述谎报与已知
    证据地图）；ReviewResult 增 missing_evidence 结构化缺口字段。
    实战已抓到主 Agent 谎称"已修正"（reviewer 实地读文件证伪）。
+   Live 实测矩阵（test/eval_cases/case_ft_forensic_*）：虚构统计数→
+   审查者实测打脸拒绝→修复→复核放行；残缺清单冒充完整→拒绝→修复轮
+   read_file+list_dir+python 三路独立枚举，还抓到漏 .git 的残余偏差；
+   纯文档任务触发 artifact_quality 分流并满预算核对文档引用的源码
+   字面量；预算=0 直判、预算=1/2 强制收敛边界均按契约执行；
+   gemini-3.1-pro-high（旧 35s 时超时率 41%）60/120s 下 0 超时；
+   审查者曾尝试 python 内 subprocess 绕过白名单被护栏拦截后自适应
+   改写纯 python。注意：纯产物任务（无代码改动）会被 triage 判
+   mechanical_only 跳过终审——要审产物需任务含代码变更或后续
+   调整 triage 策略。
 7. **shell 防旁路**：git 脏文件探针实测 shell 变更数（`uncovered_shell_mutations`），
    独立触发阶段审查（防 shell 批量改文件绕过 write_file 门禁）。
 8. **可靠性**：审查者 failover 链（invalid_output→同参重试；超时→跨平台备用审查员；
