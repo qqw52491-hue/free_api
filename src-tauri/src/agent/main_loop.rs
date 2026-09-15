@@ -198,6 +198,46 @@ fn build_touched_set(d: &DiffContext, session_tmp: &std::path::Path) -> Vec<Stri
     touched
 }
 
+/// 渲染每轮投射到 M_Tail 的可操作文件边界卡片。
+///
+/// 文案与 path_guard 路由规则、artifact_manager 登记入口、finish 门禁的
+/// tmp/ 对账行为必须保持一致——见 `path_scope_manifest_*` 测试。
+fn build_path_scope_manifest(
+    workspace_dir: &std::path::Path,
+    session_tmp_dir: &std::path::Path,
+    has_workspace_scope: bool,
+) -> String {
+    if has_workspace_scope {
+        format!(
+            "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
+             • 项目物理工作区: `{}`\n\
+               - 相对路径默认基于此目录解析（如 \"src/main.rs\"、\"package.json\"）；修改已有文件优先调用 `local_file` 的 `edit` 局部替换，禁止动辄全量重写。\n\
+               - 门禁与台账规则: 对项目源码的写操作受阶段审查门禁保护，成功写入将记入不可逆副作用台账。\n\
+             • 会话专属临时目录: `{}`\n\
+               - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
+               - 临时与未明确路径产物隔离: 凡未明确指定项目路径的临时文件、数据导出或中间草稿，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入项目物理工作区根目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
+               - 交付门禁直接认 tmp/ 产物：方案 target_files 声明 \"tmp/x\" 与本目录产物/登记记录自动对账，finish 时无需也不许把产物拷入项目工作区——拷贝副本只会污染用户仓库。\n\
+               - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
+             • 物理牢笼约束: 任何超出上述双白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
+            workspace_dir.display(),
+            session_tmp_dir.display()
+        )
+    } else {
+        format!(
+            "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
+             • 通用自由会话（未绑定项目工作区）\n\
+               - 当前对话为通用会话模式，未绑定具体项目工作区，工作区保持为空。请勿臆造或宣称已绑定任何本地项目工程目录。\n\
+             • 会话专属临时目录: `{}`\n\
+               - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
+               - 临时产物与草稿隔离: 凡未明确要求存放于项目工程中的临时文件、数据导出或中间脚本，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入宿主当前运行目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
+               - 交付门禁直接认 tmp/ 产物：方案 target_files 声明 \"tmp/x\" 与本目录产物/登记记录自动对账，finish 时无需也不许把产物拷入当前目录——拷贝副本只会污染宿主项目目录。\n\
+               - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
+             • 物理牢笼约束: 任何超出临时目录白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
+            session_tmp_dir.display()
+        )
+    }
+}
+
 /// 仅将协议明确定义为未完成的 Todo 视为终态质询信号。
 /// 未知状态不做猜测，`done` 与 `failed` 则已是模型显式关闭的事项。
 
@@ -624,35 +664,11 @@ async fn run_agent_main_loop_in_workspace_inner(
     }
 
     // 动态可操作文件边界卡片挂载在底层面包（M_Tail），每轮伴随状态卡投射，绝不污染 M0 顶层长前缀缓存
-    let mut manifest_text = if is_explicit_workspace || auto_pilot {
-        format!(
-            "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
-             • 项目物理工作区: `{}`\n\
-               - 相对路径默认基于此目录解析（如 \"src/main.rs\"、\"package.json\"）；修改已有文件优先调用 `local_file` 的 `edit` 局部替换，禁止动辄全量重写。\n\
-               - 门禁与台账规则: 对项目源码的写操作受阶段审查门禁保护，成功写入将记入不可逆副作用台账。\n\
-             • 会话专属临时目录: `{}`\n\
-               - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
-               - 临时与未明确路径产物隔离: 凡未明确指定项目路径的临时文件、数据导出或中间草稿，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入项目物理工作区根目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
-               - 交付门禁直接认 tmp/ 产物：方案 target_files 声明 \"tmp/x\" 与本目录产物/登记记录自动对账，finish 时无需也不许把产物拷入项目工作区——拷贝副本只会污染用户仓库。\n\
-               - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
-             • 物理牢笼约束: 任何超出上述双白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
-            workspace_dir.display(),
-            session_tmp_dir.display()
-        )
-    } else {
-        format!(
-            "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
-             • 通用自由会话（未绑定项目工作区）\n\
-               - 当前对话为通用会话模式，未绑定具体项目工作区，工作区保持为空。请勿臆造或宣称已绑定任何本地项目工程目录。\n\
-             • 会话专属临时目录: `{}`\n\
-               - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
-               - 临时产物与草稿隔离: 凡未明确要求存放于项目工程中的临时文件、数据导出或中间脚本，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入宿主当前运行目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
-               - 交付门禁直接认 tmp/ 产物：方案 target_files 声明 \"tmp/x\" 与本目录产物/登记记录自动对账，finish 时无需也不许把产物拷入当前目录——拷贝副本只会污染宿主项目目录。\n\
-               - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
-             • 物理牢笼约束: 任何超出临时目录白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
-            session_tmp_dir.display()
-        )
-    };
+    let mut manifest_text = build_path_scope_manifest(
+        &workspace_dir,
+        &session_tmp_dir,
+        is_explicit_workspace || auto_pilot,
+    );
 
     if is_project_session {
         if project_resources.is_empty() {
@@ -3293,5 +3309,34 @@ mod artifact_bridge_tests {
         let d = DiffContext::from_diff_and_paths(None, &["src/main.rs".to_string()]);
         let touched = build_touched_set(&d, &session_tmp);
         assert!(touched.iter().any(|p| p == "src/main.rs"));
+    }
+}
+
+#[cfg(test)]
+mod path_scope_manifest_tests {
+    use super::build_path_scope_manifest;
+    use std::path::PathBuf;
+
+    /// 文案-机制一致性护栏：作用域卡片必须覆盖 path_guard 的 tmp/ 路由、
+    /// artifact_manager 的登记入口、finish 门禁的 tmp/ 直认+禁拷规则。
+    /// 上次漂移（文案漏写 tmp/ 直认）导致模型为迎合门禁把产物拷进工作区。
+    #[test]
+    fn scope_card_covers_tmp_route_register_and_no_copy_rule() {
+        let ws = PathBuf::from("/proj/ws");
+        let tmp = PathBuf::from("/data/free-api-chat/tmp/sid-1");
+        for has_ws in [true, false] {
+            let card = build_path_scope_manifest(&ws, &tmp, has_ws);
+            for anchor in [
+                "tmp/filename.ext",
+                "register_file",
+                "无需也不许",
+                "tmp/",
+            ] {
+                assert!(
+                    card.contains(anchor),
+                    "scope card (has_ws={has_ws}) 缺失锚点: {anchor}"
+                );
+            }
+        }
     }
 }

@@ -294,4 +294,19 @@ mod tests {
             !tool.name.is_empty() && !tool.summary.is_empty() && !tool.actions.is_empty()
         }));
     }
+
+    #[test]
+    fn register_file_description_names_tmp_as_valid_drop() {
+        // path_guard 认 tmp/ 路由，工具文案必须同步说清——上次漏写导致模型
+        // 照"工作区"字面意思把会话产物拷进项目目录。
+        let menu = build_local_tools_menu();
+        let line = menu
+            .lines()
+            .find(|l| l.contains("register_file(path: string)"))
+            .expect("register_file action 缺失");
+        assert!(
+            line.contains("tmp/"),
+            "register_file 描述未提 tmp/：与 path_guard 路由/finish 对账脱节"
+        );
+    }
 }
