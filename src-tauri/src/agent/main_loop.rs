@@ -96,6 +96,108 @@ fn is_gate_block_route(route: &str) -> bool {
         )
 }
 
+/// 统一步骤记录里的 token/耗时指标块（run_trace_steps 的 metrics/token_usage 字段）。
+/// outcome 在派发后被部分 move（instruction/result 拆出），故按字段传参而非借整个结构。
+fn step_metrics_json(
+    token_usage: Option<&crate::agent::types::TokenUsage>,
+    thinking_duration_ms: u64,
+    tool_duration_ms: u64,
+) -> Option<serde_json::Value> {
+    token_usage.map(|u| {
+        json!({
+            "prompt_tokens": u.prompt_tokens,
+            "completion_tokens": u.completion_tokens,
+            "total_tokens": u.total_tokens,
+            "cached_tokens": u.cached_tokens,
+            "cache_hit_rate": u.cache_hit_rate,
+            "tokens_per_second": u.tokens_per_second,
+            "ttft_ms": u.ttft_ms,
+            "thinking_duration_ms": thinking_duration_ms,
+            "tool_duration_ms": tool_duration_ms,
+            "total_duration_ms": thinking_duration_ms + tool_duration_ms,
+        })
+    })
+}
+
+/// 机械门禁早退分支的链上留痕：被打回的 finish 步骤必须写入 agent_run_steps。
+/// 这些分支 `continue` 发生在统一步骤落盘之前——实时事件已发但行没落库，
+/// 重启看板后整段门禁交锋人间蒸发，只剩"任务成功"的假象。
+/// 与统一步骤落盘（run_trace_steps.push）字段口径保持一致。
+#[allow(clippy::too_many_arguments)]
+fn persist_challenged_step(
+    db: &DbState,
+    run_trace_steps: &mut Vec<serde_json::Value>,
+    run_id: &str,
+    session_id: &str,
+    step_id: usize,
+    instruction: &AgentInstruction,
+    context: &context::SandwichContext,
+    status: &str,
+    output_text: &str,
+    view: &Option<serde_json::Value>,
+    metrics: Option<serde_json::Value>,
+) {
+    let output_id = crate::agent::run_trace::save_step_output_with_meta(
+        db,
+        session_id,
+        step_id,
+        &instruction.get_tool(),
+        &instruction.description,
+        status,
+        output_text,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("⚠️ 无法保存 step_output: {}", e);
+        "unknown_output_id".to_string()
+    });
+    run_trace_steps.push(json!({
+        "id": step_id,
+        "description": instruction.description.clone(),
+        "reflection": instruction.reflection.clone(),
+        "thought": instruction.thought.clone(),
+        "tool": instruction.get_tool(),
+        "action": instruction.get_action(),
+        "command": instruction.get_params(),
+        "params": instruction.get_params(),
+        "plan_id": context.active_plan_id().unwrap_or_default(),
+        "plan_title": context.active_plan_title().map(str::to_string).unwrap_or_else(|| crate::agent::context::types::clip_plan_title(&context.user_goal)),
+        "status": status,
+        "output": output_text,
+        "output_id": output_id,
+        "view": view.clone(),
+        "resource_scope_revision": context.resource_scope.revision,
+        "metrics": metrics.clone(),
+        "token_usage": metrics,
+        "timestamp": Utc::now().timestamp_millis(),
+    }));
+    if let Some(step_value) = run_trace_steps.last() {
+        if let Err(e) = crate::agent::run_trace::append_step(db, run_id, step_id as i64, step_value)
+        {
+            eprintln!("⚠️ 无法持久化步骤 {}: {}", step_id, e);
+        }
+    }
+}
+
+/// 汇总"目标被动过"的物理事实集：git changed_files ∪ 副作用受影响路径。
+/// 桥接受管产物域：MCP 产物/受管文件写入会话 tmp（物理在工作区外），方案却常以
+/// `tmp/<name>` 声明交付目标；把本会话 tmp 内的受影响路径归一为 `tmp/<rel>` 并入
+/// 集合，让"产物已产出"的物理事实能对上声明目标。只扩 touched 侧，不反向改写方案声明；
+/// 跨会话 tmp 路径不脱 sid 归一，避免撞名。
+fn build_touched_set(d: &DiffContext, session_tmp: &std::path::Path) -> Vec<String> {
+    let mut touched: Vec<String> = d
+        .changed_files
+        .keys()
+        .cloned()
+        .chain(d.all_affected_paths.iter().cloned())
+        .collect();
+    for p in &d.all_affected_paths {
+        if let Ok(rel) = std::path::Path::new(p).strip_prefix(session_tmp) {
+            touched.push(format!("tmp/{}", rel.to_string_lossy()));
+        }
+    }
+    touched
+}
+
 /// 仅将协议明确定义为未完成的 Todo 视为终态质询信号。
 /// 未知状态不做猜测，`done` 与 `failed` 则已是模型显式关闭的事项。
 
@@ -2038,14 +2140,11 @@ async fn run_agent_main_loop_in_workspace_inner(
                         }
                         // 判据域：真实 diff ∪ 副作用台账路径
                         //（非 git 写入同样构成"目标被动过"的物理事实）
-                        let touched: Vec<&String> = diff_context
+                        let session_tmp =
+                            crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
+                        let touched: Vec<String> = diff_context
                             .as_ref()
-                            .map(|d| {
-                                d.changed_files
-                                    .keys()
-                                    .chain(d.all_affected_paths.iter())
-                                    .collect()
-                            })
+                            .map(|d| build_touched_set(d, &session_tmp))
                             .unwrap_or_default();
                         !targets.iter().any(|tf| {
                             touched.iter().any(|p| {
@@ -2060,11 +2159,12 @@ async fn run_agent_main_loop_in_workspace_inner(
                         .map(|d| d.changed_files.keys().cloned().collect())
                         .unwrap_or_default();
                     checkpoint.finish_reviewed = true;
-                    context.add_error_feedback(&format!(
+                    let reject_msg = format!(
                         "【⚠️ 交付门禁拦截打回：方案声明的目标文件与实际改动零交集，finish 未生效！】\n方案声明目标：{}\n实际改动文件：{}\n（0 Token 机械打回，终审无需介入）。\n【必须采取的行动】：①若尚未真正修改，请先完成对声明目标的实际改动并重跑验证；②若实现路径已变，请重新 submit_plan 更新 target_files 后再 finish；③若本任务本就无需改这些文件，请用 ask_human 说明理由。",
                         plan_targets.unwrap_or(&[]).join(", "),
                         if actual.is_empty() { "（无：当前工作区零改动）".to_string() } else { actual.join(", ") }
-                    ));
+                    );
+                    context.add_error_feedback(&reject_msg);
                     crate::agent::telemetry::record_gate_fire(
                         state.inner(),
                         &crate::agent::telemetry::GateFireRecord {
@@ -2088,6 +2188,19 @@ async fn run_agent_main_loop_in_workspace_inner(
                         None,
                     );
                     context.record_step_outcome(false);
+                    persist_challenged_step(
+                        state.inner(),
+                        &mut run_trace_steps,
+                        &run_id,
+                        &final_session_id,
+                        step_id,
+                        &instruction,
+                        &context,
+                        "finish_challenged",
+                        &reject_msg,
+                        &result.view,
+                        step_metrics_json(outcome.token_usage.as_ref(), outcome.thinking_duration_ms, outcome.tool_duration_ms),
+                    );
                     // 跳过终审：机械事实已足够打回，省一次审查
                     let _ = save_checkpoint(state.inner(), &mut checkpoint);
                     continue;
@@ -2118,10 +2231,11 @@ async fn run_agent_main_loop_in_workspace_inner(
                     .collect();
                 if !obligation_failures.is_empty() {
                     checkpoint.finish_reviewed = true;
-                    context.add_error_feedback(&format!(
+                    let reject_msg = format!(
                         "【⚠️ 交付门禁拦截打回：契约绑定的宿主验证命令未通过，finish 未生效！】\n{}\n（说明：命令退出码即为判定依据，冻结脚本不可修改）。\n【必须采取的行动】：请真实修复对应代码使验证通过后重试；严禁未验证直接提交交付。",
                         obligation_failures.join("\n")
-                    ));
+                    );
+                    context.add_error_feedback(&reject_msg);
                     crate::agent::dispatcher::emit_tool_event(
                         &app,
                         &final_session_id,
@@ -2135,6 +2249,19 @@ async fn run_agent_main_loop_in_workspace_inner(
                         None,
                     );
                     context.record_step_outcome(false);
+                    persist_challenged_step(
+                        state.inner(),
+                        &mut run_trace_steps,
+                        &run_id,
+                        &final_session_id,
+                        step_id,
+                        &instruction,
+                        &context,
+                        "finish_challenged",
+                        &reject_msg,
+                        &result.view,
+                        step_metrics_json(outcome.token_usage.as_ref(), outcome.thinking_duration_ms, outcome.tool_duration_ms),
+                    );
                     // 跳过终审：机械事实已足够打回，省一次审查
                     let _ = save_checkpoint(state.inner(), &mut checkpoint);
                     continue;
@@ -2613,20 +2740,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         context.current_observation = output_text.clone();
         // 复盘轨迹使用与 step_new 相同的语义字段，但与 Agent prompt/checkpoint 隔离。
         // 这使历史会话既能恢复思考、计划和工具调用，又不会放大运行时上下文。
-        let metrics_json = outcome.token_usage.as_ref().map(|u| {
-            json!({
-                "prompt_tokens": u.prompt_tokens,
-                "completion_tokens": u.completion_tokens,
-                "total_tokens": u.total_tokens,
-                "cached_tokens": u.cached_tokens,
-                "cache_hit_rate": u.cache_hit_rate,
-                "tokens_per_second": u.tokens_per_second,
-                "ttft_ms": u.ttft_ms,
-                "thinking_duration_ms": outcome.thinking_duration_ms,
-                "tool_duration_ms": outcome.tool_duration_ms,
-                "total_duration_ms": outcome.thinking_duration_ms + outcome.tool_duration_ms,
-            })
-        });
+        let metrics_json = step_metrics_json(outcome.token_usage.as_ref(), outcome.thinking_duration_ms, outcome.tool_duration_ms);
 
         run_trace_steps.push(json!({
             "id": step_id,
@@ -3089,5 +3203,59 @@ mod gate_deadlock_tests {
         ] {
             assert!(!is_gate_block_route(route), "不应计入死锁: {route}");
         }
+    }
+}
+
+#[cfg(test)]
+mod artifact_bridge_tests {
+    use super::build_touched_set;
+    use crate::agent::finish_guard::{diff::file_paths_match, DiffContext};
+    use std::path::PathBuf;
+
+    /// 实弹病灶：PPT 产物任务声明 `tmp/SWE-2_Introduction.pptx`，产物物理落在
+    /// 会话 tmp（工作区外）。桥接后 touched 集必须含 `tmp/<rel>` 形态，
+    /// 否则零交集门会把"产物已产出"误判成"目标未动"→ finish 死循环。
+    #[test]
+    fn session_tmp_artifact_bridges_to_tmp_display_form() {
+        let session_tmp = PathBuf::from("/data/free-api-chat/tmp/sid-1");
+        let d = DiffContext::from_diff_and_paths(
+            None,
+            &[
+                "/data/free-api-chat/tmp/sid-1/SWE-2_Introduction.pptx".to_string(),
+                "/data/free-api-chat/tmp/sid-1".to_string(), // mkdir 裸目录 → "tmp/" 哨兵
+            ],
+        );
+        let touched = build_touched_set(&d, &session_tmp);
+        assert!(touched
+            .iter()
+            .any(|p| p == "tmp/SWE-2_Introduction.pptx"));
+        // 声明侧两种形态都应对上：带 tmp/ 前缀与裸文件名
+        assert!(file_paths_match(
+            "tmp/SWE-2_Introduction.pptx",
+            "tmp/SWE-2_Introduction.pptx"
+        ));
+        assert!(touched
+            .iter()
+            .any(|p| file_paths_match("SWE-2_Introduction.pptx", p)));
+    }
+
+    #[test]
+    fn cross_session_tmp_is_not_bridged() {
+        let session_tmp = PathBuf::from("/data/free-api-chat/tmp/sid-1");
+        let d = DiffContext::from_diff_and_paths(
+            None,
+            &["/data/free-api-chat/tmp/sid-OTHER/evil.pptx".to_string()],
+        );
+        let touched = build_touched_set(&d, &session_tmp);
+        // 跨会话 tmp 不脱 sid 归一 → 声明 tmp/evil.pptx 依然对不上（保守不误放）
+        assert!(!touched.iter().any(|p| file_paths_match("tmp/evil.pptx", p)));
+    }
+
+    #[test]
+    fn workspace_affected_paths_pass_through_unmodified() {
+        let session_tmp = PathBuf::from("/data/free-api-chat/tmp/sid-1");
+        let d = DiffContext::from_diff_and_paths(None, &["src/main.rs".to_string()]);
+        let touched = build_touched_set(&d, &session_tmp);
+        assert!(touched.iter().any(|p| p == "src/main.rs"));
     }
 }

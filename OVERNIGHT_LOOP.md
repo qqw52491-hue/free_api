@@ -116,6 +116,37 @@ token 天然不绑定，属无害死项。
 仅识别 Python 迁移文案形态，非通用 dep 冲突解算器（generic `ModuleNotFoundError`
 无 pin 提示时仍报原始错，静默 fail-closed）。
 
+### 阶段十四：产物域桥接 + 被拒步骤链上留痕 — 2026-09-15
+
+**实弹病灶**（SWE-2 PPT 任务 run `2f08c463`，seq 15–22 共 8 次 finish 打回）：
+方案声明 `tmp/SWE-2_Introduction.pptx`，产物物理落在会话 tmp
+（`~/.local/share/free-api-chat/tmp/<sid>/`，工作区外）。`is_workspace_target`
+把 `tmp/` 相对路径判为工作区内 → 零交集门 applies → touched 集
+（git diff ∪ affected_paths）里只有绝对物理路径，`tmp/x` 永远对不上 →
+打回死循环。产物本身早在 seq 11/13/20 产出并登记 artifact，门禁却看不见
+"交付物存在"这一物理事实。模型最终靠 `mkdir tmp && cp` 把产物复制进工作区
+git 视野才解锁（聪明的绕路，但不该需要绕路）。
+
+**第二病灶**：零交集门/义务验证门两个早退 `continue` 分支位于统一步骤落盘
+（run_trace_steps.push + append_step）**之前**——live 事件已发但
+`agent_run_steps` 无行，重启看板后整段门禁交锋人间蒸发（用户实报：
+"确认之后还是没办法交付，结束之后那些错误就没有存储到链条"）。
+
+| 改动 | 位置 | 设计要点 |
+|---|---|---|
+| **build_touched_set 产物域桥接** | `main_loop.rs` | 本会话 tmp 内受影响路径归一为 `tmp/<rel>` 并入 touched 集——"产物已产出"物理事实对上 `tmp/` 声明目标（裸文件名声明也经 ends_with 命中）；只扩 touched 侧不改写方案声明；跨会话 tmp 不脱 sid 归一（保守防撞名） |
+| **persist_challenged_step 被拒步骤落盘** | `main_loop.rs` | 两个早退分支 continue 前写 step 行：status=`finish_challenged`、output=打回文案、含 output_id/metrics/plan 上下文，字段口径与统一落盘一致 |
+| `step_metrics_json` 提取 | `main_loop.rs` | metrics 块三处共用（原内联块收敛为调用）；outcome 派发后被部分 move，按字段传参 |
+
+**验证**：`cargo check` 绿；`cargo test --lib` **621/621**（新增
+`artifact_bridge_tests` 3 用例：会话内桥接命中/跨会话不脱 sid/工作区路径原样透传）。
+live 验证待下轮产物类实弹（PPT/报告生成应一次通过，被拒步骤应在复盘链可见）。
+
+**遗留**：①`submit_plan` 中途改 target_files 被拒（seq 处 "将 target_files 更新为空"
+失败）——方案冻结后声明目标无法纠正，仍是潜在死锁源，本次靠物理桥接绕过；
+②PPT 审美属 MCP 模板层问题，不在门禁域；③跨会话 tmp 写入不计入 touched
+（保守侧，真出现再说）。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。
