@@ -787,6 +787,78 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
+
+    // 🧭 任务入口 LLM 分流（Triage）：新 turn 起步时由 Pro 档做一次结构化复杂度判决，
+    // 判决落 checkpoint 后各门禁按 route 分流；恢复中的 run 沿用既有判决，不重复烧 Token。
+    // 任何失败都返回保守 fallback（等价维持旧行为），机械安全地板不被判决推翻。
+    if !is_resuming_existing && checkpoint.triage_verdict.is_none() {
+        let reviewer_names: Vec<String> =
+            crate::agent::tools::role_manager::list_cards(state.inner(), false)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| {
+                    c.allows_kind("reviewer")
+                        && !crate::agent::tools::role_manager::is_card_disabled_for(
+                            &model_routing.disabled_role_cards,
+                            &c.name,
+                            "reviewer",
+                        )
+                })
+                .map(|c| c.name)
+                .collect();
+        let scope_manifest = context
+            .project_resource_manifest
+            .clone()
+            .unwrap_or_default();
+        let verdict = crate::agent::triage::run_triage(
+            &app,
+            state.inner(),
+            &model_routing,
+            &goal,
+            &scope_manifest,
+            &reviewer_names,
+            &final_session_id,
+            interrupt_rx.clone(),
+        )
+        .await;
+        let telemetry_route = if verdict.fallback.is_some() {
+            "triage:fallback".to_string()
+        } else {
+            format!("triage:{}", verdict.route)
+        };
+        crate::agent::telemetry::record_gate_fire(
+            state.inner(),
+            &crate::agent::telemetry::GateFireRecord {
+                run_id: &run_id,
+                session_id: &final_session_id,
+                step_id: 0,
+                gate: "triage",
+                route: &telemetry_route,
+            },
+        );
+        let log_line = if let Some(ref fb) = verdict.fallback {
+            format!(
+                "🧭 任务分流: {} — {}（分流调用降级: {}）",
+                verdict.route, verdict.reason, fb
+            )
+        } else {
+            format!("🧭 任务分流: {} — {}", verdict.route, verdict.reason)
+        };
+        let _ = app.emit(&format!("agent-log-{}", final_session_id), log_line);
+        // 需求歧义判决：提示模型先 ask_human 澄清，澄清前不要写文件（仅注入提示，不改门禁）
+        if verdict.needs_user_clarification() {
+            context.turns_history.push(crate::agent::context::ChatMessage {
+                role: "user".to_string(),
+                content: json!(format!(
+                    "【🧭 任务分流判决：需求存在歧义，须先澄清】\n{}\n【必须执行的操作】：请先调用 ask_human 向用户澄清上述疑点；澄清结论返回前不要写入任何文件。",
+                    verdict.reason
+                )),
+            });
+        }
+        checkpoint.triage_verdict = Some(verdict);
+        save_checkpoint(state.inner(), &mut checkpoint)?;
+    }
+
     // 模式切换守卫：按目标执行模式（全自动/交叉审查/方案审批）规范化方案阶段；人工确认过的方案永久保留。
     let target_plan_mode = crate::agent::checkpoint::PlanExecutionMode::from_str_or_auto_pilot(
         plan_mode.as_deref(),
@@ -2406,6 +2478,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     human_waivers.as_deref(),
                     &gate_notices,
                     checkpoint.approved_target_files.as_deref(),
+                    checkpoint.triage_verdict.as_ref(),
                     Some(checkpoint.plan_mode),
                 )
                 .await;

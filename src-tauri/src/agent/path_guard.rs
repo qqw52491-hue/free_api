@@ -184,6 +184,92 @@ pub fn ensure_allowed_path(
     }
 }
 
+/// 机械兜底豁免判定：仅当任务入口分流未产生判决（无 TriageVerdict 的旧 checkpoint
+/// 恢复）时，由写入门禁调用本函数判定本次写入是否属于"零爆炸半径"的小活。
+/// 有判决时一律按 TriageVerdict.route 分流，本函数不当主判官。
+///
+/// 方案门护的是"已有资产不被未对齐改动"——下列写入此前提不成立，豁免：
+///   - tmp/ 会话产物（草稿或交付物，均不动已有资产）；
+///   - 磁盘上不存在的新文件（从零创建，无"已读对象"可引）；
+///   - 单文件局部小编辑（target/replacement 均 ≤12 非空行：改颜色/加日志级）。
+/// 例外：本会话已触及 ≥2 个互异工作区文件且本次写第 3 个新目标 → 不豁免
+///   （多文件扩散 = 复杂度信号，升级回慢路径走方案门）。
+/// 非 local_file 的写入（child_writer/shell/MCP）目标不可静态界定，一律不豁免。
+pub fn is_plan_gate_exempt_write(
+    inst: &crate::agent::types::AgentInstruction,
+    session_id: Option<&str>,
+    workspace_dir: &Path,
+    workspace_touched: &[String],
+) -> bool {
+    if !inst.get_tool().eq_ignore_ascii_case("local_file") {
+        return false;
+    }
+    let action = inst.get_action().to_ascii_lowercase();
+    let action = if action.is_empty() || action == "local_file" {
+        inst.get_params()
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    } else {
+        action
+    };
+    let is_write = action.starts_with("write");
+    let is_edit = action.starts_with("edit");
+    if !is_write && !is_edit {
+        return false;
+    }
+    let params = inst.get_params();
+    let Some(path_str) = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    if is_path_in_session_tmp(path_str, session_id) {
+        return true;
+    }
+    let p = Path::new(path_str);
+    let resolved = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        workspace_dir.join(p)
+    };
+    // 工作区外路径：path_guard 自有拦截，不属于本豁免职责
+    if !resolved.starts_with(workspace_dir) {
+        return false;
+    }
+    // 多文件扩散升级：已触及 ≥2 个互异工作区文件，本次写第 3 个新目标 → 回慢路径
+    let touched_set: std::collections::HashSet<String> = workspace_touched
+        .iter()
+        .map(|t| t.trim().trim_start_matches("./").to_string())
+        .collect();
+    let this_norm = path_str.trim_start_matches("./").to_string();
+    if touched_set.len() >= 2 && !touched_set.contains(&this_norm) {
+        return false;
+    }
+    // 从零新建：无已存在资产受损、无"已读对象"可引 → 快路径
+    if !resolved.exists() {
+        return true;
+    }
+    // 已存在文件：仅小编辑豁免（全量覆写/大改仍走方案门）
+    if is_edit {
+        let count_nonempty = |key: &str| -> usize {
+            inst.get_params()
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+                .unwrap_or(usize::MAX)
+        };
+        const TRIVIAL_EDIT_MAX_LINES: usize = 12;
+        return count_nonempty("target_content") <= TRIVIAL_EDIT_MAX_LINES
+            && count_nonempty("replacement_content") <= TRIVIAL_EDIT_MAX_LINES;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

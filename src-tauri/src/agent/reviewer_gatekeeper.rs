@@ -307,6 +307,83 @@ impl GitBaseline {
     }
 }
 
+/// 会话 tmp 实物审查材料扫描：tmp/ 写入不入副作用台账、不进工作区 git diff——
+/// 纯产物任务（PPT/HTML/报告写进会话沙箱）若无本扫描，终审永远 skipped_empty 盲放行。
+/// 文本文件给 ≤2000 字符预览+相对 tmp/ 路径；二进制列文件名+大小+扩展名；
+/// 总量截断 MAX_DIFF_CHARS。无本轮新文件时返回 None。
+fn collect_session_tmp_material(
+    session_id: &str,
+    run_started_at: chrono::DateTime<chrono::Utc>,
+) -> Option<(String, String)> {
+    let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(session_id);
+    if !tmp_dir.is_dir() {
+        return None;
+    }
+    let since_sys = std::time::UNIX_EPOCH
+        + std::time::Duration::from_millis(run_started_at.timestamp_millis().max(0) as u64);
+    let mut files = Vec::new();
+    GitBaseline::scan_modified_files(&tmp_dir, 0, since_sys, &mut files);
+    if files.is_empty() {
+        return None;
+    }
+
+    let mut sections = Vec::new();
+    for path in &files {
+        let rel = path
+            .strip_prefix(&tmp_dir)
+            .map(|r| r.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+        if is_noise_path(&rel) {
+            continue;
+        }
+        let display = format!("tmp/{}", rel);
+        if is_binary_file(&rel) {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("bin")
+                .to_string();
+            let size_str = path
+                .metadata()
+                .map(|m| format!("{} KB", m.len() / 1024))
+                .unwrap_or_else(|_| "未知".to_string());
+            sections.push(format!(
+                "【会话产物·二进制】文件: {} (类型: {}, 大小: {})",
+                display, ext, size_str
+            ));
+        } else if let Ok(content) = std::fs::read_to_string(path) {
+            let sample = if content.chars().count() > 2000 {
+                format!(
+                    "{}...\n[文件过长截断]",
+                    content.chars().take(2000).collect::<String>()
+                )
+            } else {
+                content
+            };
+            sections.push(format!("--- 会话产物: {} ---\n{}", display, sample));
+        }
+    }
+    let combined = sections.join("\n\n").trim().to_string();
+    if combined.is_empty() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(combined.as_bytes());
+    let hash_hex = format!("{:x}", hasher.finalize());
+
+    let final_text = if combined.chars().count() > MAX_DIFF_CHARS {
+        format!(
+            "{}\n\n... [会话产物材料过长，已安全截断前 {} 字符进行审查]",
+            combined.chars().take(MAX_DIFF_CHARS).collect::<String>(),
+            MAX_DIFF_CHARS
+        )
+    } else {
+        combined
+    };
+    Some((final_text, hash_hex))
+}
+
 /// 审查阻塞性缺陷结构
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockingIssue {
@@ -371,6 +448,20 @@ impl ReviewResult {
             duration_ms: 0,
             model_id: model_id.to_string(),
             diff_hash: diff_hash.to_string(),
+        }
+    }
+
+    /// 分流判决 mechanical_only 的直通结果：终审只需机械校验，不调 LLM。
+    pub fn mechanical_pass(summary: &str) -> Self {
+        Self {
+            verdict: "passed".to_string(),
+            score: 100,
+            blocking_issues: Vec::new(),
+            nit_issues: Vec::new(),
+            summary: summary.to_string(),
+            duration_ms: 0,
+            model_id: "triage:mechanical_only".to_string(),
+            diff_hash: String::new(),
         }
     }
 
@@ -493,15 +584,32 @@ pub async fn evaluate_finish_diff(
     // 终审须以命令退出码/终端输出/API 响应等语义证据核验这些项）
     gate_notices: &[String],
     approved_target_files: Option<&[String]>,
+    // 任务入口分流判决：mechanical_only 短路、终审角色与产物质量标准分流均由此驱动
+    triage: Option<&crate::agent::triage::TriageVerdict>,
     // 保留参数：未来"控制面自改"机械升级规则将按模式分流（当前不变量由提示词契约承担）
     _plan_mode: Option<crate::agent::checkpoint::PlanExecutionMode>,
 ) -> ReviewResult {
     let started_at = std::time::Instant::now();
 
-    // 1. 提取审查材料（Git Diff 或 非 Git 修改文件/产物清单）
-    let Some((mut review_material, diff_hash)) = baseline.collect_review_material(workspace, context, run_started_at) else {
-        return ReviewResult::skipped_empty();
-    };
+    // 0. 分流判决：终审仅需机械校验（mechanical_only）→ 直接通过，不调 LLM。
+    // 机械检查（义务验证/宿主验证/scope 对账）在进入本函数前已由上游执行完毕。
+    if triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only")) {
+        return ReviewResult::mechanical_pass(
+            "任务分流判决：终审仅需机械校验（mechanical_only），已跳过 LLM 审查",
+        );
+    }
+
+    // 1. 提取审查材料（Git Diff 或 非 Git 修改文件/产物清单）；
+    //    无台账副作用时兜底扫描会话 tmp 实物——tmp/ 写入不入台账、不进工作区 diff，
+    //    纯产物任务（PPT/HTML/报告）缺了这一步终审永远盲放行。
+    let (mut review_material, diff_hash) =
+        match baseline.collect_review_material(workspace, context, run_started_at) {
+            Some(material) => material,
+            None => match collect_session_tmp_material(session_id, run_started_at) {
+                Some(material) => material,
+                None => return ReviewResult::skipped_empty(),
+            },
+        };
 
     // 🌟 1.5 范围漂移校验（全模式降级为审查重点提示，不再硬拦）：
     // 排查是发现驱动的，实现阶段扩围是常态——人类审批方案时同样无法预知全部涉改文件，
@@ -557,8 +665,19 @@ pub async fn evaluate_finish_diff(
         }
     }
 
-    // 3. 解析评审模型与角色人设（要求角色卡明确授权 allows_kind("reviewer")）
-    let (model_id, persona_extra) = if let Ok(Some(card)) = resolve_enabled_card(db, "reviewer") {
+    // 3. 解析评审模型与角色人设（要求角色卡明确授权 allows_kind("reviewer")）。
+    // 分流判决指定 final_review_roles 时优先挂载第一位可用角色；查不到/未授权回退默认 "reviewer"。
+    let resolved_card = triage
+        .and_then(|v| {
+            v.final_review_roles
+                .iter()
+                .find(|r| !r.trim().is_empty())
+                .map(|r| r.trim().to_string())
+        })
+        .and_then(|role| resolve_enabled_card(db, &role).ok().flatten())
+        .filter(|card| card.allows_kind("reviewer"))
+        .or_else(|| resolve_enabled_card(db, "reviewer").ok().flatten());
+    let (model_id, persona_extra) = if let Some(card) = resolved_card {
         if card.allows_kind("reviewer") {
             let mid = if !card.model_id.trim().is_empty() {
                 card.model_id.trim().to_string()
@@ -665,6 +784,13 @@ pub async fn evaluate_finish_diff(
                 report.what_changed, report.rationale, report.uncertainties
             ));
         }
+    }
+
+    // 分流判决 artifact_quality：交付物为非代码产物，按产物质量标准审，不要求代码 diff 证据
+    if triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("artifact_quality")) {
+        block_sections.push(
+            "【产物质量审查模式（分流判决）】本次交付物为非代码产物（文档/演示稿/报告/表格等）。\n👉 审查强制要求：按产物质量标准审——需求覆盖度、结构完整性、内容可用性与专业度；不要求代码 diff 证据，不得以「无代码变更」为由判空放行，也不得把产物格式本身当缺陷打回。".to_string(),
+        );
     }
 
     if let Some(waivers) = human_waivers {

@@ -383,14 +383,63 @@ pub async fn run_tool_phase(
                 }
             }
         }
-        if let Some(rejection) = check_pre_write_gatekeeper(
-            checkpoint,
-            context,
-            state.inner(),
-            parent_run_id,
-            step_id,
-            false,
-        ) {
+        // 🧭 任务入口分流驱动的方案门判定（TriageVerdict 已在 main_loop 落 checkpoint）：
+        // 有判决 → route 决定是否需要方案门，但机械安全地板（删改名动作、多文件扩散、
+        // 用户显式选择的方案审批模式）不被判决推翻；
+        // 无判决（分流未执行的旧 checkpoint 恢复）→ 退回机械兜底辅助：
+        // 零爆炸半径小活（tmp/ 产物、全新文件、小编辑）仍放行，其余维持方案门。
+        let floor_reason =
+            crate::agent::triage::write_floor_violation(inst, context, final_session_id);
+        let plan_needed = match &checkpoint.triage_verdict {
+            Some(v) => {
+                v.requires_plan_gate()
+                    || floor_reason.is_some()
+                    || checkpoint.plan_mode
+                        == crate::agent::checkpoint::PlanExecutionMode::PlanApproval
+            }
+            None => {
+                checkpoint.plan_mode == crate::agent::checkpoint::PlanExecutionMode::PlanApproval
+                    || !crate::agent::path_guard::is_plan_gate_exempt_write(
+                        inst,
+                        Some(final_session_id),
+                        workspace_dir,
+                        &context.new_affected_paths(),
+                    )
+            }
+        };
+        // 判决被机械地板推翻 = 升级信号，记遥测供观测误分流率（每次命中都记）
+        if let Some(reason) = floor_reason {
+            if checkpoint
+                .triage_verdict
+                .as_ref()
+                .is_some_and(|v| !v.requires_plan_gate())
+            {
+                crate::agent::telemetry::record_gate_fire(
+                    state.inner(),
+                    &crate::agent::telemetry::GateFireRecord {
+                        run_id: parent_run_id,
+                        session_id: &final_session_id,
+                        step_id: step_id as i64,
+                        gate: "triage",
+                        route: &format!("triage_escalated:{}", reason),
+                    },
+                );
+            }
+        }
+        let rejection = if plan_needed {
+            check_pre_write_gatekeeper(
+                checkpoint,
+                context,
+                state.inner(),
+                parent_run_id,
+                step_id,
+                false,
+            )
+        } else {
+            // 分流放行 ≠ 放行一切：已判出的阶段 blocker（中间态错误）仍须拦住写入
+            crate::agent::plan_gate::stage_blocker_interception(checkpoint)
+        };
+        if let Some(rejection) = rejection {
             crate::agent::telemetry::record_gate_fire(
                 state.inner(),
                 &crate::agent::telemetry::GateFireRecord {
@@ -414,6 +463,17 @@ pub async fn run_tool_phase(
                 None,
             );
             return Ok(rejection);
+        }
+        if !plan_needed && context.side_effects.len() == context.inherited_side_effects_count {
+            let route = checkpoint
+                .triage_verdict
+                .as_ref()
+                .map(|v| v.route.as_str())
+                .unwrap_or("mechanical_fallback");
+            let _ = app.emit(
+                &format!("agent-log-{}", final_session_id),
+                format!("🧭 分流放行：本任务 route={}，写入不触发方案门", route),
+            );
         }
     }
 

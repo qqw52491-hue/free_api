@@ -293,6 +293,7 @@ pub async fn evaluate_prepare_finish(
                 human_waivers.as_deref(),
                 gate_notices,
                 checkpoint.approved_target_files.as_deref(),
+                checkpoint.triage_verdict.as_ref(),
                 Some(checkpoint.plan_mode),
             )
             .await;

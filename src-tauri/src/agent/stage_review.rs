@@ -57,6 +57,15 @@ pub fn should_fire(
     instruction: &AgentInstruction,
     model_routing: &ModelRoutingConfig,
 ) -> Option<String> {
+    // 任务入口分流判决 stage_review_mode="none" → 阶段审查整体关闭；
+    // 注意这只关闭"中段复审"，已判出的 stage blockers 拦截在写入门禁处仍生效。
+    if checkpoint
+        .triage_verdict
+        .as_ref()
+        .is_some_and(|v| !v.needs_stage_review())
+    {
+        return None;
+    }
     // 0. 会话级阶段审查门禁覆盖检查（若为 disabled/none 则直通免审）
     if let Some(ref ovr) = model_routing.stage_reviewer_override {
         let clean = ovr.trim();
@@ -861,6 +870,29 @@ mod tests {
         assert!(should_fire(&cp_baselined, &context, &instruction, &routing).is_some(), "基线上增量 6 触发");
 
         let _ = cp; let _ = cp5;
+    }
+
+    #[test]
+    fn should_fire_short_circuits_when_triage_disables_stage_review() {
+        let mut context = SandwichContext::new("system".to_string(), "goal".to_string());
+        context.record_side_effect(1, "write_file".to_string(), "a.rs".to_string());
+        let instruction = instruction_with_todo_done();
+        let routing = default_routing();
+
+        // 判决 stage_review_mode="none"：即便写入+todo 完成也不触发
+        let mut cp = approved_checkpoint();
+        let mut verdict = crate::agent::triage::TriageVerdict::fallback("test");
+        verdict.stage_review_mode = "none".to_string();
+        verdict.route = "direct".to_string();
+        cp.triage_verdict = Some(verdict);
+        assert!(should_fire(&cp, &context, &instruction, &routing).is_none());
+
+        // 判决 milestone：正常触发
+        let mut cp2 = approved_checkpoint();
+        let mut v2 = crate::agent::triage::TriageVerdict::fallback("test");
+        v2.stage_review_mode = "milestone".to_string();
+        cp2.triage_verdict = Some(v2);
+        assert!(should_fire(&cp2, &context, &instruction, &routing).is_some());
     }
 
     #[test]

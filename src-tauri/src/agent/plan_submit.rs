@@ -56,8 +56,14 @@ pub async fn handle_submit_plan(
     }
 
     // ---- 结构校验：方案必须带来源证据，防止空想方案进入审查 ----
+    // 证据强度由任务入口分流判决驱动（evidence_policy=none/source_refs 时允许空证据），
+    // 无判决默认要求证据（旧行为）。
+    let evidence_required = checkpoint
+        .triage_verdict
+        .as_ref()
+        .map_or(true, |v| v.evidence_required());
     let (target_files, evidence_refs) =
-        match crate::agent::plan_gate::validate_plan_submission(submission) {
+        match crate::agent::plan_gate::validate_plan_submission(submission, evidence_required) {
             Ok(validated) => validated,
             Err(reason) => return reject(reason, "plan_liveness:submit_plan_invalid"),
         };

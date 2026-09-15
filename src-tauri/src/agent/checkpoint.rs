@@ -795,6 +795,11 @@ pub struct AgentCheckpoint {
     /// 任务内已向人类发起过提问的问题列表（用于相同/高度相似问题去重）
     #[serde(default)]
     pub asked_human_questions: Vec<String>,
+    /// 任务入口 LLM 分流判决（TriageVerdict）：门禁按 route 分流的权威依据。
+    /// None = 未分流（旧 checkpoint 恢复或分流未执行），门禁按保守旧行为处理；
+    /// 判决不推翻机械安全地板（path_guard / 删改名动作 / 多文件扩散）。
+    #[serde(default)]
+    pub triage_verdict: Option<crate::agent::triage::TriageVerdict>,
     /// 运行模式兼容字段：true 为全自动/自主模式，false 为方案审批模式
     #[serde(default = "default_auto_pilot")]
     pub auto_pilot: bool,
@@ -910,6 +915,7 @@ impl AgentCheckpoint {
             stage_review_shell_baseline: 0,
             stage_review_final_only: Vec::new(),
             asked_human_questions: Vec::new(),
+            triage_verdict: None,
             auto_pilot: true,
             last_error: None,
             version: 0,

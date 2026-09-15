@@ -260,9 +260,12 @@ pub(crate) fn submit_plan_rejection(checkpoint: &AgentCheckpoint) -> Option<Stri
 }
 
 /// submit_plan 结构校验：方案必须带来源证据，防止空想方案进入审查。
+/// `evidence_required` 由任务入口分流判决驱动（evidence_policy=code_refs/operational_probes
+/// 或无判决时为 true；判决为 none/source_refs 时允许 0~6 条——产物类方案没有"已读代码"可引）。
 /// 成功返回 (规范化 target_files, 去重 evidence_refs)。
 pub(crate) fn validate_plan_submission(
     submission: &crate::agent::types::PlanSubmission,
+    evidence_required: bool,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     if submission.plan_summary.trim().chars().count() < 10 {
         return Err(
@@ -288,9 +291,15 @@ pub(crate) fn validate_plan_submission(
         .filter(|r| !r.is_empty())
         .collect();
     evidence_refs.dedup();
-    if evidence_refs.is_empty() || evidence_refs.len() > 6 {
+    if evidence_required && evidence_refs.is_empty() {
         return Err(
             "【⚠️ submit_plan 结构不合法】evidence_refs 必须包含 1~6 条你已实际读取过的证据引用（文件路径或证据标识）；空手提交方案没有审查意义。"
+                .to_string(),
+        );
+    }
+    if evidence_refs.len() > 6 {
+        return Err(
+            "【⚠️ submit_plan 结构不合法】evidence_refs 最多 6 条，请精选最关键的证据引用。"
                 .to_string(),
         );
     }
@@ -505,6 +514,35 @@ pub(crate) fn parse_plan_approval_decision(reply: &str) -> Option<bool> {
     None
 }
 
+/// 阶段审查拦截判定（独立于方案门禁：Approved 后的写入也要过阶段审查这一关）。
+/// blocking_regardless 未解决 → 拦截写入；解套唯一路径是 resume_child 对质撤回。
+/// final_only 不在此拦截，由收尾审查兜底。
+/// triage 分流豁免方案门时本拦截仍须执行——它是已判出中间态错误的物理拦杆。
+pub(crate) fn stage_blocker_interception(checkpoint: &AgentCheckpoint) -> Option<DispatchResult> {
+    if checkpoint.stage_review_blockers_open == 0 {
+        return None;
+    }
+    let stage_run_id = checkpoint
+        .stage_review_run_ids
+        .first()
+        .cloned()
+        .or_else(|| checkpoint.stage_review_run_id.clone())
+        .or_else(|| checkpoint.stage_review_rebuttal_run_id.clone())
+        .unwrap_or_default();
+    let final_only_summary = checkpoint.stage_review_final_only.join("\n");
+    Some(DispatchResult {
+        view: None,
+        success: false,
+        stdout: String::new(),
+        stderr: crate::agent::gate_messages::stage_review_blocking_open(
+            checkpoint.stage_review_blockers_open,
+            &stage_run_id,
+            &final_only_summary,
+        ),
+        route: "stage_review:blocking_open".to_string(),
+    })
+}
+
 /// 统合前置写入门禁判定（支持全自动、双 Agent 交叉审查、人工方案审批三种模式）
 /// - 若放行返回 None，并适时将 plan_phase 置为 Approved；
 /// - 若拦截返回 Some(DispatchResult)。
@@ -516,28 +554,9 @@ pub(crate) fn check_pre_write_gatekeeper(
     step_id: usize,
     is_resume_child: bool,
 ) -> Option<DispatchResult> {
-    // ---- 阶段级审查拦截（独立于方案门禁：Approved 后的写入也要过阶段审查这一关）----
-    // blocking_regardless 未解决 → 拦截写入；解套唯一路径是 resume_child 对质撤回。
-    // final_only 不在此拦截，由收尾审查兜底。
-    if checkpoint.stage_review_blockers_open > 0 {
-        let stage_run_id = checkpoint
-            .stage_review_run_ids
-            .first()
-            .cloned()
-            .or_else(|| checkpoint.stage_review_run_id.clone())
-            .or_else(|| checkpoint.stage_review_rebuttal_run_id.clone())
-            .unwrap_or_default();
-        let final_only_summary = checkpoint.stage_review_final_only.join("\n");
-        return Some(DispatchResult { view: None,
-            success: false,
-            stdout: String::new(),
-            stderr: crate::agent::gate_messages::stage_review_blocking_open(
-                checkpoint.stage_review_blockers_open,
-                &stage_run_id,
-                &final_only_summary,
-            ),
-            route: "stage_review:blocking_open".to_string(),
-        });
+    // ---- 阶段级审查拦截先于方案门（triage 分流豁免方案门时它仍单独执行）----
+    if let Some(blocked) = stage_blocker_interception(checkpoint) {
+        return Some(blocked);
     }
 
     if checkpoint.plan_phase.is_approved() && checkpoint.stage_review_blockers_open == 0 {
@@ -1470,28 +1489,39 @@ mod tests {
     #[test]
     fn test_validate_plan_submission_structure() {
         // 合法提交
-        let (files, refs) = validate_plan_submission(&valid_submission()).unwrap();
+        let (files, refs) = validate_plan_submission(&valid_submission(), true).unwrap();
         assert_eq!(files, vec!["src/agent/checkpoint.rs"]);
         assert_eq!(refs, vec!["src/agent/checkpoint.rs:922"]);
 
         // 摘要过短
         let mut s = valid_submission();
         s.plan_summary = "修 bug".to_string();
-        assert!(validate_plan_submission(&s).unwrap_err().contains("plan_summary"));
+        assert!(validate_plan_submission(&s, true).unwrap_err().contains("plan_summary"));
 
         // 无目标文件 / 过多目标文件
         let mut s = valid_submission();
         s.target_files = vec![];
-        assert!(validate_plan_submission(&s).unwrap_err().contains("target_files"));
+        assert!(validate_plan_submission(&s, true).unwrap_err().contains("target_files"));
         s.target_files = (0..51).map(|i| format!("f{i}.rs")).collect();
-        assert!(validate_plan_submission(&s).unwrap_err().contains("target_files"));
+        assert!(validate_plan_submission(&s, true).unwrap_err().contains("target_files"));
 
         // 无证据 / 证据超上限
         let mut s = valid_submission();
         s.evidence_refs = vec!["  ".to_string()];
-        assert!(validate_plan_submission(&s).unwrap_err().contains("evidence_refs"));
+        assert!(validate_plan_submission(&s, true).unwrap_err().contains("evidence_refs"));
         s.evidence_refs = (0..7).map(|i| format!("src/f{i}.rs")).collect();
-        assert!(validate_plan_submission(&s).unwrap_err().contains("evidence_refs"));
+        assert!(validate_plan_submission(&s, true).unwrap_err().contains("evidence_refs"));
+    }
+
+    #[test]
+    fn test_validate_plan_submission_evidence_optional_under_triage() {
+        // triage 判决 evidence_policy=none/source_refs → 0 条证据也放行（产物类方案无"已读代码"可引）
+        let mut s = valid_submission();
+        s.evidence_refs = vec![];
+        assert!(validate_plan_submission(&s, false).is_ok());
+        // 上限仍然生效：超过 6 条照样拒绝
+        s.evidence_refs = (0..7).map(|i| format!("src/f{i}.rs")).collect();
+        assert!(validate_plan_submission(&s, false).unwrap_err().contains("evidence_refs"));
     }
 
     #[test]
@@ -1499,7 +1529,7 @@ mod tests {
         // 命中敏感模块但摘要无防御陈述 → 预检拦截并指路
         let mut s = valid_submission();
         s.target_files = vec!["src/auth/token_store.rs".to_string()];
-        let err = validate_plan_submission(&s).unwrap_err();
+        let err = validate_plan_submission(&s, true).unwrap_err();
         assert!(err.contains("预检拦截"));
         assert!(err.contains("敏感凭据"));
 
@@ -1507,22 +1537,22 @@ mod tests {
         let mut s = valid_submission();
         s.target_files = vec!["src/auth/token_store.rs".to_string()];
         s.plan_summary.push_str("；日志对 token 做脱敏处理，不落盘明文");
-        assert!(validate_plan_submission(&s).is_ok());
+        assert!(validate_plan_submission(&s, true).is_ok());
 
         // 缓存模块缺有界陈述 → 拦截
         let mut s = valid_submission();
         s.target_files = vec!["src/cache/memo_store.rs".to_string()];
-        let err = validate_plan_submission(&s).unwrap_err();
+        let err = validate_plan_submission(&s, true).unwrap_err();
         assert!(err.contains("缓存/内存结构"));
 
         // 显式豁免陈述（逃生口：声明风险不适用即放行）→ 放行
         let mut s = valid_submission();
         s.target_files = vec!["src/cache/memo_store.rs".to_string()];
         s.plan_summary.push_str("；本次为只读访问，不涉及容量变更");
-        assert!(validate_plan_submission(&s).is_ok());
+        assert!(validate_plan_submission(&s, true).is_ok());
 
         // 普通文件不触发预检 → 放行
-        assert!(validate_plan_submission(&valid_submission()).is_ok());
+        assert!(validate_plan_submission(&valid_submission(), true).is_ok());
     }
 
     #[test]

@@ -59,6 +59,7 @@ pub mod uv_runtime;
 pub mod watch_engine;
 pub mod web_search;
 pub mod path_guard;
+pub mod triage;
 
 pub use checkpoint::*;
 pub use control::*;
