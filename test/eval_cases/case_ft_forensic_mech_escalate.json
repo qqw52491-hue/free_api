@@ -1,0 +1,15 @@
+{
+  "id": "case_ft_forensic_mech_escalate",
+  "title": "取证环冒烟：mechanical_only 产物物理异常升级 LLM 审查",
+  "tier": "smoke",
+  "base_commit": "HEAD",
+  "problem_statement": "【产物交付任务】生成会话产物 tmp/report.xlsx：内容为工作区顶层目录清单（每行一个目录名），直接用文本写入即可（格式转换后续由 PM 处理）。完成后直接交付。",
+  "judge_kind": "command",
+  "verify_command": "test -f \"$HOME/Library/Application Support/free-api-chat/tmp/$FREE_API_EVAL_AGENT_SESSION/report.xlsx\"",
+  "expected_exit_code": 0,
+  "max_steps": 40,
+  "expected_diff_files": [],
+  "max_prompt_tokens": 6000000,
+  "baseline_expectation": "red",
+  "review_expectation": "无代码改动 → triage 应判 mechanical_only；但 tmp/report.xlsx 是文本冒充 → 机械嗅探魔数不符应升级为 LLM 终审，finish-review 日志应出现且材料含【机械嗅探异常】预警。"
+}
