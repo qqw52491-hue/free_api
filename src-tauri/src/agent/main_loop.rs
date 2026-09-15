@@ -581,7 +581,7 @@ async fn run_agent_main_loop_in_workspace_inner(
     } else if has_workspace_override {
         "\n\n## 独立临时工作区 (Scratch Workspace)\n当前会话处于独立临时工作区。该目录与用户的任何主工程项目源码完全物理隔离，仅用于一次性任务演示、临时探索与临时交付物存放，请在该独立目录下执行操作，严禁向用户的其他工程源码目录随意写入。"
     } else {
-        "\n\n## 通用会话模式 (无绑定工程)\n当前会话未选定具体工程项目。凡未明确要求存放于工程中的临时文件、数据导出或中间脚本，一律写入 `tmp/` 目录并通过 `artifact_manager` 登记交付，严禁直接散落在当前运行根目录下。"
+        "\n\n## 通用会话模式 (无绑定工程)\n当前会话未选定具体工程项目。凡未明确要求存放于工程中的临时文件、数据导出或中间脚本，一律写入 `tmp/` 目录并通过 `artifact_manager` 登记交付，严禁直接散落在当前运行根目录下。交付门禁直接对账 tmp/ 产物与登记记录，严禁为迎合门禁把产物拷入当前目录。"
     };
     let system_prompt = format!(
         "{}{}{}{}{}\n{}\n{}{}",
@@ -633,6 +633,7 @@ async fn run_agent_main_loop_in_workspace_inner(
              • 会话专属临时目录: `{}`\n\
                - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
                - 临时与未明确路径产物隔离: 凡未明确指定项目路径的临时文件、数据导出或中间草稿，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入项目物理工作区根目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
+               - 交付门禁直接认 tmp/ 产物：方案 target_files 声明 \"tmp/x\" 与本目录产物/登记记录自动对账，finish 时无需也不许把产物拷入项目工作区——拷贝副本只会污染用户仓库。\n\
                - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
              • 物理牢笼约束: 任何超出上述双白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
             workspace_dir.display(),
@@ -646,6 +647,7 @@ async fn run_agent_main_loop_in_workspace_inner(
              • 会话专属临时目录: `{}`\n\
                - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
                - 临时产物与草稿隔离: 凡未明确要求存放于项目工程中的临时文件、数据导出或中间脚本，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入宿主当前运行目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
+               - 交付门禁直接认 tmp/ 产物：方案 target_files 声明 \"tmp/x\" 与本目录产物/登记记录自动对账，finish 时无需也不许把产物拷入当前目录——拷贝副本只会污染宿主项目目录。\n\
                - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
              • 物理牢笼约束: 任何超出临时目录白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
             session_tmp_dir.display()
