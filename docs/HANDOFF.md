@@ -489,8 +489,12 @@ fixture 无答案，杜绝批量解题）。
    import 链需要 mime.types），拒绝域=所有用户家目录（~/.ssh ~/.aws 等）；
    run_command 保持严格两根围栏（命令参数是审查者显式点名，无需系统区）。
    终审 evaluate_finish_diff 也有取证环（同一预算），超时复用 child_timeout_secs
-   （默认 60s、ClaudeThinking 120s、env 可配——取证环上下文逐轮变大，35s 实测
-   会在收敛判决轮超时）。
+   （默认 60s、ClaudeThinking/-high 推理档 120s、env 可配——取证环上下文逐轮
+   变大，35s 实测会在收敛判决轮超时）；终审与子审查超时均按 2× 同参重试一次
+   才降级/timed_out（幂等只读，重试不耗取证预算也不传染后续轮次）。
+   终审材料另附：会话 tmp 产物紧凑清单（有 diff 时兜底扫描不触发）+
+   执行轨迹摘要（agent_step_logs 最近 15 步首行——核对自述谎报与已知
+   证据地图）；ReviewResult 增 missing_evidence 结构化缺口字段。
    实战已抓到主 Agent 谎称"已修正"（reviewer 实地读文件证伪）。
 7. **shell 防旁路**：git 脏文件探针实测 shell 变更数（`uncovered_shell_mutations`），
    独立触发阶段审查（防 shell 批量改文件绕过 write_file 门禁）。

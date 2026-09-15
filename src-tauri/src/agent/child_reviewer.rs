@@ -1308,7 +1308,7 @@ pub async fn spawn_child_reviewer(
 {}",
         persona,
         if reviewer_tool_steps > 0 {
-            format!("【只读取证工具（预算 {} 步，用尽后必须收敛）】当证据包不足以核实某个疑点时，输出且仅输出一个 JSON 对象请求取证：{{\"tool\":\"read_file\",\"path\":\"src/foo.rs\"}} / {{\"tool\":\"read_file\",\"path\":\"tmp/产物.xlsx\"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；read_file 大文件用 \"start_line\":221 翻页，单次最多 220 行）/ {{\"tool\":\"grep_search\",\"pattern\":\"函数名\"}} / {{\"tool\":\"git_diff\"}} / {{\"tool\":\"git_log\",\"n\":10}} / {{\"tool\":\"list_dir\",\"path\":\"src/\"}} / {{\"tool\":\"run_command\",\"command\":\"cat \\\"$SESSION_TMP/data.csv\\\" | head -20\"}}（仅 ls/cat/grep/rg/jq/stat/diff 等只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{\"tool\":\"python\",\"code\":\"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ...\"}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）。宿主会返回取证结果供你继续研判。规则：先取证再下结论，finding 的 location 必须是可复核的真实路径:行号，禁止臆测；所有取证请求完成后输出最终审查 JSON（含 findings 键）。", reviewer_tool_steps)
+            format!("【只读取证工具（预算 {} 步，用尽后必须收敛）】当证据包不足以核实某个疑点时，输出且仅输出一个 JSON 对象请求取证：{{\"tool\":\"read_file\",\"path\":\"src/foo.rs\"}} / {{\"tool\":\"read_file\",\"path\":\"tmp/产物.xlsx\"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；read_file 大文件用 \"start_line\":221 翻页，单次最多 220 行）/ {{\"tool\":\"grep_search\",\"pattern\":\"函数名\"}}（覆盖工作区与会话产物区） / {{\"tool\":\"git_diff\"}} / {{\"tool\":\"git_log\",\"n\":10}} / {{\"tool\":\"list_dir\",\"path\":\"src/\"}} / {{\"tool\":\"run_command\",\"command\":\"cat \\\"$SESSION_TMP/data.csv\\\" | head -20\"}}（仅 ls/cat/grep/rg/jq/stat/diff 等只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{\"tool\":\"python\",\"code\":\"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ...\"}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）。宿主会返回取证结果供你继续研判。规则：先取证再下结论，finding 的 location 必须是可复核的真实路径:行号，禁止臆测；所有取证请求完成后输出最终审查 JSON（含 findings 键）。", reviewer_tool_steps)
         } else {
             "不得调用任何工具：只评估证据包内的事实，证据不足时在 missing_evidence 说明。".to_string()
         }
@@ -1394,6 +1394,11 @@ pub async fn spawn_child_reviewer(
         // 归档计数：本子运行内的第几次 LLM 调用（取证循环每轮一次）
         let mut llm_call_index = 0usize;
         let child_log_suffix = format!("child-{}", child_run_id_clone);
+        // 与终审取证环同款：单次超时先按 2× 超时同参重试一次（幂等只读），
+        // 再超时才落 timed_out 交给编排层 failover——实测取证环末轮判决
+        // 带着膨胀后的全量历史最慢，恰好是最不该直接超时放弃的一棒。
+        let mut timeout_retried = false;
+        let mut cur_timeout_secs = child_timeout_secs(&config.model_name);
         let (duration_ms, completion_tokens, prompt_tokens, final_parsed, final_raw) = loop {
             llm_call_index += 1;
             let call = llm::stream_with_retry(
@@ -1405,7 +1410,7 @@ pub async fn spawn_child_reviewer(
                 &mut on_stream_event,
             );
             let stream_result = match tokio::time::timeout(
-                Duration::from_secs(child_timeout_secs(&config.model_name)),
+                Duration::from_secs(cur_timeout_secs),
                 call,
             )
             .await
@@ -1419,8 +1424,13 @@ pub async fn spawn_child_reviewer(
                         &messages,
                         None,
                         "request_error",
-                        Some("timeout"),
+                        Some(if timeout_retried { "timeout_after_retry" } else { "timeout" }),
                     );
+                    if !timeout_retried {
+                        timeout_retried = true;
+                        cur_timeout_secs = cur_timeout_secs.saturating_mul(2).min(600);
+                        continue;
+                    }
                     let duration_ms = started_at.elapsed().as_millis() as u64;
                     finish_child_run(
                         &db_clone,
@@ -1489,6 +1499,9 @@ pub async fn spawn_child_reviewer(
                         "success",
                         None,
                     );
+                    // 本棒成功：恢复基础超时（重试只救当前一棒，不传染后续轮次）
+                    timeout_retried = false;
+                    cur_timeout_secs = child_timeout_secs(&config.model_name);
                     result
                 }
             };

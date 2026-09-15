@@ -443,6 +443,49 @@ fn collect_session_tmp_manifest(
     ))
 }
 
+/// 执行轨迹摘要：agent_step_logs 本会话最近 15 步输出的首行（各 ~100 字符）。
+/// 审查者据此核对"执行者声称做过的验证"是否真的跑过——自述与轨迹不一致
+/// （如声称跑过测试但轨迹无对应步）是最典型的谎报信号；对取证环也是
+/// 免费的"已知证据地图"：轨迹里跑过的命令审查者无需重复执行。
+fn collect_step_trace_digest(db: &DbState, session_id: &str) -> Option<String> {
+    let conn = db.0.lock().ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT step_id, raw_output FROM agent_step_logs \
+             WHERE session_id = ?1 ORDER BY step_id DESC LIMIT 15",
+        )
+        .ok()?;
+    let mut items: Vec<(i64, String)> = stmt
+        .query_map(rusqlite::params![session_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })
+        .ok()?
+        .flatten()
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    items.reverse(); // 恢复时间升序
+    let mut lines = Vec::new();
+    for (step_id, raw) in items {
+        // 每步取首行截断：命令回显/写文件回执/检索首条命中都在首行
+        let first = raw.lines().next().unwrap_or("").trim();
+        let preview: String = first.chars().take(100).collect();
+        if preview.is_empty() {
+            continue;
+        }
+        lines.push(format!("- step {}: {}", step_id, preview));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\n【执行轨迹摘要（执行者实际工具输出首行，最近 {} 步——可用于交叉核对自述中声称做过的验证是否真实执行）】\n{}",
+        lines.len(),
+        lines.join("\n")
+    ))
+}
+
 /// 从办公/数据类二进制产物中抽取内容预览（xlsx→sheet markdown、docx/pdf→文本摘录），
 /// 让终审能看到数据列内容而非仅文件名+大小。仅对有内容可取的类型返回 Some；
 /// 图片/压缩包等无可读文本的类型返回 None，由调用方退回元数据行。
@@ -751,6 +794,12 @@ pub async fn evaluate_finish_diff(
         review_material.push_str(&format!("\n\n【宿主实测验证（宿主亲自执行，非模型自报）】\n{}\n", hv));
     }
 
+    // 执行轨迹摘要：审查者核对"声称做过的验证"是否真实执行（谎报检测），
+    // 也兼作已知证据地图减少重复取证。
+    if let Some(digest) = collect_step_trace_digest(db, session_id) {
+        review_material.push_str(&digest);
+    }
+
     // 门禁适用域交接：机械门因证据域不存在而跳过的检查项绝不静默——
     // 终审是语义层，须直接核验这些项对应的语义证据（命令退出码、终端输出、
     // API 响应、系统状态），而不是依赖不存在的 diff 对账结果。
@@ -827,7 +876,7 @@ pub async fn evaluate_finish_diff(
         format!(
             r#"【只读取证工具（可选，预算 {} 步，用尽后必须输出判决 JSON）】
 材料不足以核实疑点时，可输出一个取证请求 JSON 替代判决：
-{{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字"}} / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）。
+{{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字"}}（覆盖工作区与会话 tmp 产物区） / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）。
 数据/报表类交付物强烈建议取证：机械材料只见文件名与大小，列全空、字段映射错、单位错这类语义缺陷只有读了内容才看得见。
 规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。"#,
             forensic_budget
