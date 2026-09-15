@@ -26,10 +26,15 @@ pub const MAX_CHILD_REVIEWS_PER_PARENT_RUN: u8 = MAX_CHILDREN_PER_KIND_PER_RUN;
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map(|v| v.clamp(30, 600))
             .unwrap_or_else(|| {
-                if matches!(
+                let thinking_class = matches!(
                     crate::agent::model_filter::detect_model_family(model_name, ""),
                     crate::agent::model_filter::ModelFamily::ClaudeThinking
-                ) {
+                )
+                // "-high" 等推理档位后缀：实测 finish-review 落账 gemini-3.1-pro-high
+                // 35s 超时率 29/70（41%），同会话普通 pro 仅 1/12——高档位必须按
+                // 慢思考家族给超时，否则取证环每轮都在赌延迟。
+                || model_name.to_lowercase().contains("-high");
+                if thinking_class {
                     120
                 } else {
                     // 60s：实测 pro 审查大证据包 45s 下 2/4 超时（quota 健康时也逼近上限）

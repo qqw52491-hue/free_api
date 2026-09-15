@@ -532,6 +532,17 @@ impl AuditLedger {
                     .iter()
                     .any(|a| *a == "-o" || a.starts_with("--output"));
             }
+            // xargs 本质是命令执行器：仅接受 xargs 自身无旗标的形态——
+            // 即 tokens[1] 必须直接是内层命令（xargs 旗标一律先于命令出现，
+            // 如 `-I ls rm` 会把白名单命令名当旗标值，必须整体拒掉）。
+            // 内层命令递归过同一白名单；其自身旗标（wc -l）不受影响。
+            "xargs" => {
+                let inner = &tokens[1..];
+                if inner.is_empty() || inner[0].starts_with('-') {
+                    return false;
+                }
+                return Self::is_readonly_command_segment(inner);
+            }
             // date -s/--set 或纯数字操作数（MMDDhhmm 格式）设置系统时间
             "date" => {
                 return !tokens[1..].iter().any(|a| {
@@ -1686,6 +1697,29 @@ impl SandwichContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xargs_recurses_into_inner_command() {
+        let ro = |cmd: &str| {
+            AuditLedger::is_readonly_shell_command(&serde_json::json!({ "command": cmd }))
+        };
+        // 无旗标 + 只读内层：放行（实测审查者 `find | xargs wc -l` 被拒的自救护栏位）
+        assert!(ro("find src -name '*.rs' | xargs wc -l"));
+        assert!(ro("xargs wc -l"));
+        assert!(ro("xargs ls"));
+        // 内层非只读：整条拒绝
+        assert!(!ro("xargs rm"));
+        assert!(!ro("find . | xargs rm -rf"));
+        assert!(!ro("xargs sed -i s/a/b/"));
+        // 带旗标：保守拒绝——旗标值可能与白名单命令同名（-I ls rm 若只看
+        // "首个非旗标词元"会把 ls 当内层命令误判只读，实际执行的是 rm）
+        assert!(!ro("xargs -0 wc"));
+        assert!(!ro("xargs -I {} echo {}"));
+        assert!(!ro("xargs -I ls rm"));
+        assert!(!ro("xargs -n1 rm"));
+        // 空 xargs / 单独 xargs：拒绝
+        assert!(!ro("xargs"));
+    }
 
     #[test]
     fn output_redirection_disqualifies_readonly() {
