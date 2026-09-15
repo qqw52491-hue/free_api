@@ -393,6 +393,56 @@ fn collect_session_tmp_material(
     Some((final_text, hash_hex))
 }
 
+/// 紧凑产物清单：diff 存在时 tmp 材料不走兜底扫描（collect_session_tmp_material
+/// 仅在无台账路径调用），审查者只能靠自述提示猜产物存在性、再烧一步 list_dir
+/// 确认。此处总是列出本轮 tmp 产物的路径+大小（不含内容预览），让取证请求
+/// 直接点名文件。无本轮新产物返回 None。
+fn collect_session_tmp_manifest(
+    session_id: &str,
+    run_started_at: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(session_id);
+    if !tmp_dir.is_dir() {
+        return None;
+    }
+    let since_sys = std::time::UNIX_EPOCH
+        + std::time::Duration::from_millis(run_started_at.timestamp_millis().max(0) as u64);
+    let mut files = Vec::new();
+    GitBaseline::scan_modified_files(&tmp_dir, 0, since_sys, &mut files);
+    if files.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for path in &files {
+        let rel = path
+            .strip_prefix(&tmp_dir)
+            .map(|r| r.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+        if is_noise_path(&rel) {
+            continue;
+        }
+        let size_str = path
+            .metadata()
+            .map(|m| {
+                if m.len() >= 1024 {
+                    format!("{} KB", m.len() / 1024)
+                } else {
+                    format!("{} B", m.len())
+                }
+            })
+            .unwrap_or_else(|_| "未知".to_string());
+        lines.push(format!("- tmp/{} ({})", rel, size_str));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\n【会话 tmp 产物清单（本轮新增 {} 个；仅列名与大小，内容经取证工具核查——read_file tmp/<路径> 或 python）】\n{}",
+        lines.len(),
+        lines.join("\n")
+    ))
+}
+
 /// 从办公/数据类二进制产物中抽取内容预览（xlsx→sheet markdown、docx/pdf→文本摘录），
 /// 让终审能看到数据列内容而非仅文件名+大小。仅对有内容可取的类型返回 Some；
 /// 图片/压缩包等无可读文本的类型返回 None，由调用方退回元数据行。
@@ -657,7 +707,14 @@ pub async fn evaluate_finish_diff(
     //    纯产物任务（PPT/HTML/报告）缺了这一步终审永远盲放行。
     let (mut review_material, diff_hash) =
         match baseline.collect_review_material(workspace, context, run_started_at) {
-            Some(material) => material,
+            Some(mut material) => {
+                // 有 diff 时 tmp 产物不在兜底扫描内——补一条紧凑清单，
+                // 审查者无需 list_dir 即可点名核查（实测为此白烧过取证步数）。
+                if let Some(manifest) = collect_session_tmp_manifest(session_id, run_started_at) {
+                    material.0.push_str(&manifest);
+                }
+                material
+            }
             None => match collect_session_tmp_material(session_id, run_started_at) {
                 Some(material) => material,
                 None => return ReviewResult::skipped_empty(),

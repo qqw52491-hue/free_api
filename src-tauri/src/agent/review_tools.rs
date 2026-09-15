@@ -403,6 +403,11 @@ pub fn execute(
             }
             let mut matches = Vec::new();
             walk_match(workspace, &pattern, &mut matches, 0);
+            // 会话 tmp 产物区同权可搜——tmp 里的文本产物（脚本/报告/CSV）
+            // 此前对 grep 不可见，审查者只能逐个 read_file 猜内容。
+            if let Some(tmp) = session_tmp {
+                walk_match(tmp, &pattern, &mut matches, 0);
+            }
             if matches.is_empty() {
                 Ok(format!("无匹配: {}", pattern))
             } else {
