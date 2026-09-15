@@ -186,6 +186,22 @@ affected_paths + tmp 桥接已够判据，`foo.md` 声明未落盘仍照拦。
 
 `cargo test --lib mcp_registry` 4/4 绿、`cargo check` 干净、`vue-tsc` 无错。
 
+### 阶段十六补：清扫函数磁盘副作用隔离——cargo test 误删真实产物事故 — 2026-09-15
+
+**事故**：`cargo test --lib` 每跑一轮就把真实 `~/.local/share/free-api-chat/tmp/` 清空。
+根因：`cleanup_orphaned_session_data`/`delete_session_completely` 的 session tmp 删除
+用 `dirs_next::data_dir()`（真实数据目录），而测试传入的是空临时 DB——真实 tmp
+全部 sid 在空库眼里皆孤儿 → remove_dir_all 全删。磁盘副作用与 DB 判据解耦失败。
+
+**修复**：tmp 根注入化——`delete_session_completely` 优先用传入的 `app_data_dir`；
+`cleanup_orphaned_session_data` 拆出 `_at(conn, tmp_root)` 内部函数，
+测试注入 `temp_dir/tmp`。新增断言：孤儿 tmp 目录删除 ✓、**活会话目录保留** ✓
+（正是本次事故形态的反例覆盖）。
+
+**教训**：任何「DB 判据 → 磁盘副作用」的函数，磁盘目标必须可注入；
+测试只给临时 DB 不够，副作用面也得在临时沙箱里。
+`cargo test --lib` 621/621 绿。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。

@@ -193,8 +193,13 @@ pub fn delete_session_completely(
 
     // 2.5 清理会话专属临时目录 tmp/{session_id}——产物文件（pptx/xlsx/草稿）的真身落盘处；
     // agent_artifacts 表行已级联删除，磁盘文件不删就成了永久孤儿。
-    if let Some(data_dir) = dirs_next::data_dir() {
-        let session_tmp = data_dir.join("free-api-chat").join("tmp").join(id);
+    // 优先用注入的 app_data_dir（生产=app.path().app_data_dir()，测试=临时目录）；
+    // 仅在未注入时才落回 dirs_next——测试绝不许碰真实数据目录。
+    let session_tmp_root = app_data_dir
+        .map(|d| d.join("tmp"))
+        .or_else(|| dirs_next::data_dir().map(|d| d.join("free-api-chat").join("tmp")));
+    if let Some(tmp_root) = session_tmp_root {
+        let session_tmp = tmp_root.join(id);
         if session_tmp.exists() {
             let _ = std::fs::remove_dir_all(session_tmp);
         }
@@ -236,6 +241,18 @@ pub fn delete_session_completely(
 
 /// 自动清扫由于历史版本缺失级联逻辑而残留在数据库中的孤儿会话历史数据
 pub fn cleanup_orphaned_session_data(conn: &Connection) -> Result<usize> {
+    // 生产路径：真实数据目录下的 tmp 根
+    let tmp_root =
+        dirs_next::data_dir().map(|d| d.join("free-api-chat").join("tmp"));
+    cleanup_orphaned_session_data_at(conn, tmp_root.as_deref())
+}
+
+/// 可注入 tmp 根的实现——测试必须注入临时目录，
+/// 否则「测试 DB 为空 → 真实 tmp 目录全员孤儿」会误删真实产物文件。
+fn cleanup_orphaned_session_data_at(
+    conn: &Connection,
+    tmp_root: Option<&std::path::Path>,
+) -> Result<usize> {
     let mut total_cleaned = 0;
 
     // 清理无主溢出落盘的 .log 文件
@@ -282,9 +299,8 @@ pub fn cleanup_orphaned_session_data(conn: &Connection) -> Result<usize> {
 
     // 孤儿会话 tmp 目录清扫：tmp/<sid> 子目录若无对应 chat_sessions 行，
     // 说明其会话已被删除（或属历史版本残留），产物文件一并清除。
-    if let Some(data_dir) = dirs_next::data_dir() {
-        let tmp_root = data_dir.join("free-api-chat").join("tmp");
-        if let Ok(entries) = std::fs::read_dir(&tmp_root) {
+    if let Some(tmp_root) = tmp_root {
+        if let Ok(entries) = std::fs::read_dir(tmp_root) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if !path.is_dir() {
@@ -1221,8 +1237,12 @@ mod migration_tests {
             [],
         ).unwrap();
 
-        // 2. 执行彻底删除
+        // 2. 执行彻底删除（temp_dir 注入隔离：session tmp 删的是 temp_dir/tmp/<sid>）
+        let session_tmp = temp_dir.join("tmp").join(s_id);
+        std::fs::create_dir_all(&session_tmp).unwrap();
+        std::fs::write(session_tmp.join("artifact.pptx"), b"x").unwrap();
         delete_session_completely(&conn, s_id, Some(&temp_dir)).unwrap();
+        assert!(!session_tmp.exists());
 
         // 3. 验证所有关联表为 0
         let msg_count: i64 = conn.query_row("SELECT count(*) FROM chat_messages WHERE session_id=?1", [s_id], |r| r.get(0)).unwrap();
@@ -1249,10 +1269,24 @@ mod migration_tests {
             "INSERT INTO agent_llm_calls (session_id, step_id, created_at) VALUES ('ghost-session', 1, '2026-01-01')",
             [],
         ).unwrap();
-        let cleaned = cleanup_orphaned_session_data(&conn).unwrap();
+        // tmp 清扫必须注入隔离根——测试 DB 为空时扫真实数据目录会把全部
+        // 真实会话 tmp 当孤儿误删（曾真实发生：cargo test 清空用户产物）。
+        let fake_tmp_root = temp_dir.join("tmp");
+        std::fs::create_dir_all(fake_tmp_root.join("ghost-session")).unwrap();
+        std::fs::create_dir_all(fake_tmp_root.join("alive-session")).unwrap();
+        std::fs::write(fake_tmp_root.join("alive-session").join("a.pptx"), b"x").unwrap();
+        conn.execute(
+            "INSERT INTO chat_sessions (id, title, model_id, created_at, updated_at) VALUES ('alive-session', 'T', 'm1', '2026-01-01', '2026-01-01')",
+            [],
+        ).unwrap();
+        let cleaned =
+            cleanup_orphaned_session_data_at(&conn, Some(fake_tmp_root.as_path())).unwrap();
         assert!(cleaned >= 2);
         let orphan_child: i64 = conn.query_row("SELECT count(*) FROM agent_child_runs WHERE id='orphan-1'", [], |r| r.get(0)).unwrap();
         assert_eq!(orphan_child, 0);
+        // 孤儿 tmp 目录被删、活会话目录保留——本次事故的两面各断一次
+        assert!(!fake_tmp_root.join("ghost-session").exists());
+        assert!(fake_tmp_root.join("alive-session").join("a.pptx").exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
