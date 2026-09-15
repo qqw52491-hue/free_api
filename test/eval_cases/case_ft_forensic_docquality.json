@@ -1,0 +1,15 @@
+{
+  "id": "case_ft_forensic_docquality",
+  "title": "取证环冒烟：纯文档交付物质量审查（artifact_quality 分流探测）",
+  "tier": "smoke",
+  "base_commit": "HEAD",
+  "problem_statement": "【文档交付任务】阅读 src-tauri/src/agent/review_tools.rs 与 reviewer_gatekeeper.rs，撰写 docs/review-forensics.md 评估报告，须包含三节：## 现状分析（取证工具清单与各自围栏）、## 风险评估（至少两条具体风险）、## 改进建议。内容必须基于实际代码，不得虚构工具名或参数名。完成后直接交付。",
+  "judge_kind": "command",
+  "verify_command": "test -f docs/review-forensics.md && grep -q '风险评估' docs/review-forensics.md",
+  "expected_exit_code": 0,
+  "max_steps": 60,
+  "expected_diff_files": ["docs/review-forensics.md"],
+  "max_prompt_tokens": 6000000,
+  "baseline_expectation": "red",
+  "review_expectation": "纯文档任务探测 triage 是否分流 artifact_quality；审查者应 read_file 抽查文档所述工具名/参数名与真实代码是否一致（如 start_line、SESSION_TMP）。"
+}
