@@ -1,0 +1,12 @@
+{
+  "id": "case_ft_forensic_semantic",
+  "title": "取证环语义核查：常量修改 + 可交叉验证的数据产物",
+  "tier": "smoke",
+  "base_commit": "HEAD",
+  "problem_statement": "【可验证交付任务】1) 修改 src-tauri/src/agent/review_tools.rs：将常量 MAX_READ_LINES 的值从 220 改为 200（仅此一处改动，禁止动其他任何代码）；2) 用 python3+openpyxl 生成 tmp/check.xlsx：sheet1 两列 [指标,数值] 含三行数据——rs文件总数、总行数、平均每文件行数（保留1位小数）；sheet2 按行数降序列出行数最多的前 10 个 .rs 文件（两列：文件名,行数）；3) 统计范围=src-tauri/src/agent/ 目录下递归所有 .rs 文件，数值必须与 find src-tauri/src/agent -name '*.rs' | xargs wc -l 的真实结果一致。完成后直接交付。",
+  "verify_command": "test -f \"$HOME/Library/Application Support/free-api-chat/tmp/$FREE_API_EVAL_AGENT_SESSION/check.xlsx\" && grep -q 'MAX_READ_LINES: usize = 200' src-tauri/src/agent/review_tools.rs",
+  "judge_kind": "command",
+  "expected_exit_code": 0,
+  "max_steps": 40,
+  "baseline_expectation": "red"
+}
