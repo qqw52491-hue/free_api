@@ -396,8 +396,8 @@ fn collect_session_tmp_material(
 /// 紧凑产物清单：diff 存在时 tmp 材料不走兜底扫描（collect_session_tmp_material
 /// 仅在无台账路径调用），审查者只能靠自述提示猜产物存在性、再烧一步 list_dir
 /// 确认。此处总是列出本轮 tmp 产物的路径+大小（不含内容预览），让取证请求
-/// 直接点名文件。无本轮新产物返回 None。
-fn collect_session_tmp_manifest(
+/// 直接点名文件。阶段审查复用（中途产物同样可见）。无本轮新产物返回 None。
+pub(crate) fn collect_session_tmp_manifest(
     session_id: &str,
     run_started_at: chrono::DateTime<chrono::Utc>,
 ) -> Option<String> {
@@ -447,7 +447,8 @@ fn collect_session_tmp_manifest(
 /// 审查者据此核对"执行者声称做过的验证"是否真的跑过——自述与轨迹不一致
 /// （如声称跑过测试但轨迹无对应步）是最典型的谎报信号；对取证环也是
 /// 免费的"已知证据地图"：轨迹里跑过的命令审查者无需重复执行。
-fn collect_step_trace_digest(db: &DbState, session_id: &str) -> Option<String> {
+/// 阶段审查复用（中途核查"该阶段声称做过的事"同一诉求）。
+pub(crate) fn collect_step_trace_digest(db: &DbState, session_id: &str) -> Option<String> {
     let conn = db.0.lock().ok()?;
     let mut stmt = conn
         .prepare(

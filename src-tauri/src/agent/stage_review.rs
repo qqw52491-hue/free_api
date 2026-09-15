@@ -369,7 +369,7 @@ pub async fn dispatch(
             }
         };
 
-        let evidence = build_stage_evidence(context, workspace, None);
+        let evidence = build_stage_evidence(context, workspace, None, &stage_extra_sections(db, session_id));
         let question = "阶段级写入审查：审查当前阶段变更是否满足阶段目标且无 blocking 缺陷".to_string();
         let params = json!({
             "role": "stage_reviewer",
@@ -441,7 +441,7 @@ pub async fn dispatch(
             }
         };
 
-        let evidence = build_stage_evidence(context, workspace, focus_context.as_deref());
+        let evidence = build_stage_evidence(context, workspace, focus_context.as_deref(), &stage_extra_sections(db, session_id));
         let question = format!(
             "阶段级写入审查（专家角色：{}）：审查当前阶段变更是否满足阶段目标、无 blocking 缺陷并符合角色规范",
             card.label
@@ -501,13 +501,36 @@ pub async fn dispatch(
     Ok(())
 }
 
+/// 阶段审查补充材料：会话 tmp 产物清单 + 执行轨迹摘要（与终审同源复用）。
+/// 阶段审查不止看 diff——中途产物存在性、"声称跑过的验证"是否真跑过，
+/// 在阶段层就该进审查视野；拿不到则略过（非致命材料）。
+/// 产物清单列全量而非"本轮新增"：session tmp 按会话隔离，区内产物均属本会话，
+/// 阶段审查关心的是产物区当前状态而非增量。
+fn stage_extra_sections(db: &DbState, session_id: &str) -> Vec<String> {
+    let mut extras = Vec::new();
+    let epoch = chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH);
+    if let Some(m) =
+        crate::agent::reviewer_gatekeeper::collect_session_tmp_manifest(session_id, epoch)
+    {
+        extras.push(m);
+    }
+    if let Some(t) = crate::agent::reviewer_gatekeeper::collect_step_trace_digest(db, session_id) {
+        extras.push(t);
+    }
+    extras
+}
+
 /// 组装阶段审查证据包：任务目标 + 阶段计划 + 专项材料(如有) + diff 尾部。
 /// 硬约束：总长不得超过 child_reviewer 的 evidence_excerpt 预算（6000 字符），
 /// 超限会导致派发在解析层被静默拒绝（实测教训）。diff 取尾部——最近的变更与当前阶段最相关。
+/// extra_sections：tmp 产物清单/执行轨迹摘要等补充材料（阶段审查不止看 diff——
+/// 中途产物与"声称跑过的验证"也该进证据视野），计入同一 6000 字符预算，
+/// 挤占的是 diff 配额（全文 diff 审查者可经 git_diff 工具自取）。
 fn build_stage_evidence(
     context: &SandwichContext,
     workspace: &Path,
     focus_context: Option<&str>,
+    extra_sections: &[String],
 ) -> String {
     const MAX_EVIDENCE_CHARS: usize = 6_000;
 
@@ -531,6 +554,16 @@ fn build_stage_evidence(
         todos
     ));
 
+    // 中途产物清单与执行轨迹摘要：阶段审查不止于 diff——产物存在性、
+    // "声称测过但没跑"类谎报在阶段层就该被看见
+    for extra in extra_sections {
+        let trimmed = extra.trim();
+        if !trimmed.is_empty() {
+            evidence.push_str(trimmed);
+            evidence.push_str("\n\n");
+        }
+    }
+
     // 如果角色卡提取了 focus_domains 材料，按预算（最多 1500 字符）安全注入
     if let Some(focus) = focus_context {
         let focus_clean = focus.trim();
@@ -544,7 +577,7 @@ fn build_stage_evidence(
         .collect_git_diff(workspace)
     {
         Some((diff, _)) => format!(
-            "【当前累计变更 diff（含自上次阶段审查以来的全部写入，尾部为最新变更）】\n{}",
+            "【当前累计变更 diff（按路径排序，含自上次阶段审查以来的全部写入；全文可经 git_diff 工具复核）】\n{}",
             diff
         ),
         None => "【当前累计变更 diff】（无法获取 git diff，请基于方案与目标做结构性审查）\n".to_string(),
@@ -819,7 +852,7 @@ mod tests {
             });
         }
 
-        let evidence = build_stage_evidence(&context, &dir, None);
+        let evidence = build_stage_evidence(&context, &dir, None, &[]);
         assert!(
             evidence.chars().count() <= 6_000,
             "证据包超限会被 child_reviewer 解析层拒绝（实测教训）: {}",
@@ -830,15 +863,21 @@ mod tests {
 
         // 小 diff 不截断
         std::fs::write(dir.join("big.rs"), "fn small() {}\n").unwrap();
-        let evidence2 = build_stage_evidence(&context, &dir, None);
+        let evidence2 = build_stage_evidence(&context, &dir, None, &[]);
         assert!(!evidence2.contains("前段截断"));
         assert!(evidence2.chars().count() <= 6_000);
 
         // 验证 focus_context 注入且总长度仍受 6000 字符限制
         let focus_mat = "【关注领域重点】: 前端组件及可访问性规范".repeat(20);
-        let evidence3 = build_stage_evidence(&context, &dir, Some(&focus_mat));
+        let evidence3 = build_stage_evidence(&context, &dir, Some(&focus_mat), &[]);
         assert!(evidence3.contains("【审查专家专项关注材料】"));
         assert!(evidence3.chars().count() <= 6_000);
+
+        // extra_sections（产物清单/轨迹摘要）应进证据包且挤占 diff 配额仍不超限
+        let extras = vec!["【会话 tmp 产物清单（本轮新增 1 个）】\n- tmp/x.csv (1 KB)".to_string()];
+        let evidence4 = build_stage_evidence(&context, &dir, None, &extras);
+        assert!(evidence4.contains("tmp/x.csv"), "产物清单应注入证据包");
+        assert!(evidence4.chars().count() <= 6_000);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
