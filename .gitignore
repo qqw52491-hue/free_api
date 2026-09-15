@@ -44,3 +44,6 @@ src-tauri/.rpa_profile/
 .writer-*/
 *.db
 *.sqlite*
+
+# Agent shell 相对路径 tmp/ 会落在 src-tauri 进程 cwd，产物不应入库
+/src-tauri/tmp/
