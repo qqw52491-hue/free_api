@@ -476,8 +476,11 @@ fixture 无答案，杜绝批量解题）。
    每连接独立线程+10s 读写超时（修复过单连接阻塞拖死全部验题的根因）。
 5. **阶段审查**（`stage_review.rs`）：双触发、finality 两级处置、覆盖记账竞态修复
    （基线在派发时记录）。
-6. **reviewer 工具化**：只读取证工具白名单（read_file/grep_search/git_diff/git_log/list_dir，
-   `review_tools.rs`，路径围栏+输出截断），步数预算 `reviewer_tool_steps` 默认 5；
+6. **reviewer 工具化**：只读取证工具白名单（read_file/grep_search/git_diff/git_log/list_dir/
+   run_command/python，`review_tools.rs`，双根路径围栏=工作区+会话 tmp（tmp/ 前缀映射），
+   输出截断），步数预算 `reviewer_tool_steps` 默认 8（child reviewer 与终审取证环共用）；
+   run_command 走 is_readonly_shell_command 白名单，python 带运行时只读护栏（patch
+   open/os/shutil/pathlib 写函数）；终审 evaluate_finish_diff 也有取证环（同一预算）。
    实战已抓到主 Agent 谎称"已修正"（reviewer 实地读文件证伪）。
 7. **shell 防旁路**：git 脏文件探针实测 shell 变更数（`uncovered_shell_mutations`），
    独立触发阶段审查（防 shell 批量改文件绕过 write_file 门禁）。

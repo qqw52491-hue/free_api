@@ -73,8 +73,10 @@ pub struct ChannelConfig {
     /// None = 默认 6。
     #[serde(default)]
     pub stage_review_max_files: Option<u32>,
-    /// reviewer 只读取证步数预算（read_file/grep_search/git_diff/git_log/list_dir）。
-    /// 0 = 关闭（回到"瞎子"模式，只评估证据包）；None = 默认 5。
+    /// reviewer 只读取证步数预算（read_file/grep_search/git_diff/git_log/list_dir/
+    /// run_command/python；tmp/ 前缀可达会话产物区）。
+    /// 0 = 关闭（回到"瞎子"模式，只评估证据包）；None = 默认 8。
+    /// 同时作为终审（finish-review）取证环的预算上限。
     #[serde(default)]
     pub reviewer_tool_steps: Option<u32>,
     /// 宿主执行验证命令（如 "cargo test"）：收尾审查前宿主亲自执行，

@@ -397,7 +397,7 @@ fn collect_session_tmp_material(
 /// 从办公/数据类二进制产物中抽取内容预览（xlsx→sheet markdown、docx/pdf→文本摘录），
 /// 让终审能看到数据列内容而非仅文件名+大小。仅对有内容可取的类型返回 Some；
 /// 图片/压缩包等无可读文本的类型返回 None，由调用方退回元数据行。
-fn extract_office_preview(path: &std::path::Path) -> Option<String> {
+pub(crate) fn extract_office_preview(path: &std::path::Path) -> Option<String> {
     use crate::agent::file_parser::{parse_file, ExtractedContent};
     const MAX_PREVIEW_CHARS: usize = 1800;
     let content = parse_file(path, Some(MAX_PREVIEW_CHARS)).ok()?;
@@ -792,7 +792,13 @@ pub async fn evaluate_finish_diff(
   "summary": "一句话审查评价与结论"
 }}
 
-注：若成果已满足需求且无严重阻塞性缺陷，blocking_issues 必须为空数组 [] 并将 verdict 设为 "passed"。"#,
+注：若成果已满足需求且无严重阻塞性缺陷，blocking_issues 必须为空数组 [] 并将 verdict 设为 "passed"。
+
+【只读取证工具（可选，预算有限，用尽后必须输出判决 JSON）】
+材料不足以核实疑点时，可输出一个取证请求 JSON 替代判决：
+{{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀直达会话产物区，办公/数据文件自动返回内容预览）/ {{"tool":"list_dir","path":"."}} / {{"tool":"run_command","command":"cat tmp/data.csv | head -20"}}（仅只读命令，重定向与写操作会被拒绝）/ {{"tool":"python","code":"import openpyxl; wb=openpyxl.load_workbook('tmp/xx.xlsx'); ..."}}（只读 python：写/删/移动文件会被宿主护栏拦截）。
+数据/报表类交付物强烈建议取证：机械材料只见文件名与大小，列全空、字段映射错、单位错这类语义缺陷只有读了内容才看得见。
+规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。"#,
         if persona_extra.trim().is_empty() {
             ""
         } else {
@@ -862,7 +868,7 @@ pub async fn evaluate_finish_diff(
         extra_guidance
     );
 
-    let messages = vec![
+    let mut messages = vec![
         json!({ "role": "system", "content": system_prompt }),
         json!({ "role": "user", "content": user_prompt }),
     ];
@@ -874,62 +880,127 @@ pub async fn evaluate_finish_diff(
         }
     };
 
+    // 终审取证环：与 child_reviewer 同构——审查者可先请求只读工具核实产物
+    // （tmp/ 前缀直达会话产物区），预算用尽后强制收敛为判决 JSON。
+    let forensic_budget = crate::agent::channel::channel_config_shared()
+        .read()
+        .ok()
+        .and_then(|cfg| cfg.reviewer_tool_steps)
+        .unwrap_or(8);
+    let session_tmp_root = crate::agent::path_guard::get_session_tmp_dir(session_id);
+    let mut tool_steps_used: u32 = 0;
+    let mut forced_final = false;
+    let mut llm_call_index = 0usize;
+
     let mut ignore_stream = |_: llm::StreamEvent<'_>| true;
-    let call = llm::stream_with_retry(
-        &model_config,
-        &messages,
-        "auto",
-        interrupt_rx,
-        1,
-        &mut ignore_stream,
-    );
+    let (response_text, duration_ms) = loop {
+        llm_call_index += 1;
+        let call = llm::stream_with_retry(
+            &model_config,
+            &messages,
+            "auto",
+            interrupt_rx,
+            1,
+            &mut ignore_stream,
+        );
 
-    let stream_result = match tokio::time::timeout(Duration::from_secs(REVIEW_TIMEOUT_SECS), call).await {
-        Ok(res) => res,
-        Err(_) => {
-            crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                session_id,
-                "finish-review",
-                1,
-                &model_config,
-                &messages,
-                None,
-                "request_error",
-                Some("timeout"),
-            );
-            return ReviewResult::failed_open("Reviewer 审查超时（>35s），已降级放行", &model_id, &diff_hash);
-        }
-    };
+        let stream_result = match tokio::time::timeout(Duration::from_secs(REVIEW_TIMEOUT_SECS), call).await {
+            Ok(res) => res,
+            Err(_) => {
+                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                    session_id,
+                    "finish-review",
+                    llm_call_index,
+                    &model_config,
+                    &messages,
+                    None,
+                    "request_error",
+                    Some("timeout"),
+                );
+                return ReviewResult::failed_open("Reviewer 审查超时（>35s），已降级放行", &model_id, &diff_hash);
+            }
+        };
 
-    let duration_ms = started_at.elapsed().as_millis() as u64;
+        let duration_ms = started_at.elapsed().as_millis() as u64;
+        let raw = match stream_result {
+            Ok(output) => {
+                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                    session_id,
+                    "finish-review",
+                    llm_call_index,
+                    &model_config,
+                    &messages,
+                    Some(&output),
+                    "success",
+                    None,
+                );
+                output.full_response
+            }
+            Err(e) => {
+                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                    session_id,
+                    "finish-review",
+                    llm_call_index,
+                    &model_config,
+                    &messages,
+                    None,
+                    "request_error",
+                    Some(&e),
+                );
+                return ReviewResult::failed_open(&format!("Reviewer 调用失败: {}", e), &model_id, &diff_hash);
+            }
+        };
 
-    let response_text = match stream_result {
-        Ok(output) => {
-            crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                session_id,
-                "finish-review",
-                1,
-                &model_config,
-                &messages,
-                Some(&output),
-                "success",
-                None,
-            );
-            output.full_response
+        // a. 判决 JSON（含 verdict 键）→ 收敛，交给下游统一解析
+        let clean = extract_json_str(&raw);
+        let as_value = serde_json::from_str::<serde_json::Value>(&clean).ok();
+        let is_tool_request = as_value
+            .as_ref()
+            .map(|v| v.get("tool").is_some() && v.get("verdict").is_none())
+            .unwrap_or(false);
+
+        // b. 取证请求：预算内执行并回灌；预算外强制收敛；强制后仍请求 → 判不合规（fail-open）
+        if is_tool_request {
+            if forced_final {
+                return ReviewResult::failed_open(
+                    "Reviewer 强制收敛后仍请求取证工具，已降级放行",
+                    &model_id,
+                    &diff_hash,
+                );
+            }
+            let req = as_value.unwrap();
+            if tool_steps_used < forensic_budget {
+                let tool_name = req.get("tool").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                let observation = match crate::agent::review_tools::execute(
+                    workspace,
+                    Some(&session_tmp_root),
+                    &tool_name,
+                    &req,
+                ) {
+                    Ok(out) => out,
+                    Err(e) => format!("取证请求被拒绝: {}", e),
+                };
+                tool_steps_used += 1;
+                messages.push(json!({"role": "assistant", "content": raw}));
+                messages.push(json!({
+                    "role": "user",
+                    "content": format!(
+                        "【取证结果 step {}/{}】\n{}\n\n继续研判：证据足够则输出判决 JSON；仍不足且预算未尽可再次请求取证。",
+                        tool_steps_used, forensic_budget, observation
+                    ),
+                }));
+                continue;
+            }
+            messages.push(json!({"role": "assistant", "content": raw}));
+            messages.push(json!({
+                "role": "user",
+                "content": "【系统】取证预算已用尽。请立即基于已有证据输出判决 JSON（含 verdict 键），不要再请求取证。"
+            }));
+            forced_final = true;
+            continue;
         }
-        Err(e) => {
-            crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                session_id,
-                "finish-review",
-                1,
-                &model_config,
-                &messages,
-                None,
-                "request_error",
-                Some(&e),
-            );
-            return ReviewResult::failed_open(&format!("Reviewer 调用失败: {}", e), &model_id, &diff_hash);
-        }
+
+        break (raw, duration_ms);
     };
 
     // 5. 解析 LLM 输出的 JSON
