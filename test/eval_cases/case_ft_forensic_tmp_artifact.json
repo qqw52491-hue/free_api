@@ -1,0 +1,12 @@
+{
+  "id": "case_ft_forensic_tmp_artifact",
+  "title": "取证环冒烟：工作区文档+tmp 数据产物交付 + 终审实地核查",
+  "tier": "smoke",
+  "base_commit": "HEAD",
+  "problem_statement": "【双产物交付任务】1) 阅读 src-tauri/src/agent/review_tools.rs，在 docs/forensic-smoke.md 写三条中文机制说明（每行一条，必须与代码实际行为相符，禁止编造）；2) 在 src-tauri/src/agent/review_tools.rs 顶部常量区追加一行注释 `// forensic smoke marker`（只加注释，禁止改动任何代码逻辑）；3) 统计 src-tauri/src/agent/ 目录下 .rs 文件数与总行数，用 python3+openpyxl 生成 stats.xlsx 写入会话 tmp 目录（tmp/ 前缀），sheet1 为汇总、sheet2 为文件名+行数明细。完成后直接交付。",
+  "verify_command": "test -f docs/forensic-smoke.md && test -f \"$HOME/Library/Application Support/free-api-chat/tmp/$FREE_API_EVAL_AGENT_SESSION/stats.xlsx\"",
+  "judge_kind": "command",
+  "expected_exit_code": 0,
+  "max_steps": 40,
+  "baseline_expectation": "red"
+}

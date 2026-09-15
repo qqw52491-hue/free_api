@@ -2,8 +2,10 @@
 //!
 //! reviewer 此前是"瞎子"——它看到的世界完全由主 Agent 喂给，主 Agent 漏掉的
 //! 代码路径它永远不知道存在（相关盲区），跨家族模型收益被吃掉大半。本模块给
-//! reviewer 一个最小只读白名单（read_file/grep_search/git_diff/git_log/list_dir），
-//! 让它拿着 findings 疑点自己去仓库核实。禁写、禁执行、路径围栏、输出截断。
+//! reviewer 一个最小只读白名单（read_file/grep_search/git_diff/git_log/list_dir/
+//! run_command/python），让它拿着 findings 疑点自己去仓库核实。禁写、路径围栏
+//! （read_file/list_dir 走 contained_multi；run_command 的词元级路径审计与
+//! python 的解释器内护栏同口径限定工作区+会话 tmp 两根）、输出截断。
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -14,6 +16,161 @@ const MAX_GREP_MATCHES: usize = 30;
 const MAX_READ_LINES: usize = 220;
 const MAX_WALK_DEPTH: usize = 6;
 const SKIP_DIRS: [&str; 6] = [".git", "target", "node_modules", "dist", ".writer-tmp", "build"];
+/// 取证预算默认值与硬上限：每一步都是一次带完整历史的 LLM 调用，
+/// 不设帽时失控配置会把单次审查成本放大到不可接受。
+const DEFAULT_FORENSIC_BUDGET: u32 = 8;
+const MAX_FORENSIC_BUDGET: u32 = 30;
+
+/// reviewer 取证步数预算：channel-config.reviewer_tool_steps。
+/// None = 默认 8；0 = 关闭取证（调用方据此裁剪提示词工具段，回到"瞎子"模式）；
+/// 任何取值被 MAX_FORENSIC_BUDGET 封顶。child reviewer 与终审共用。
+pub fn forensic_budget() -> u32 {
+    crate::agent::channel::channel_config_shared()
+        .read()
+        .ok()
+        .and_then(|cfg| cfg.reviewer_tool_steps)
+        .unwrap_or(DEFAULT_FORENSIC_BUDGET)
+        .min(MAX_FORENSIC_BUDGET)
+}
+
+/// 允许根集合：工作区 + 可选会话 tmp（均已 canonicalize）。
+fn allowed_roots(workspace: &Path, session_tmp: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(w) = workspace.canonicalize() {
+        roots.push(w);
+    }
+    if let Some(t) = session_tmp {
+        if let Ok(c) = t.canonicalize() {
+            roots.push(c);
+        }
+    }
+    roots
+}
+
+/// 取证子进程注入的环境变量：SESSION_TMP（会话产物物理根，材料中 tmp/ 前缀的
+/// 真实落点）与 REVIEW_ALLOWED_ROOTS（python 护栏的读路径围栏依据）。
+fn forensic_envs(workspace: &Path, session_tmp: Option<&Path>) -> Vec<(String, String)> {
+    let mut envs = Vec::new();
+    let mut roots = vec![workspace.to_path_buf()];
+    if let Some(tmp) = session_tmp {
+        envs.push((
+            "SESSION_TMP".to_string(),
+            tmp.to_string_lossy().to_string(),
+        ));
+        roots.push(tmp.to_path_buf());
+    }
+    if let Ok(joined) = std::env::join_paths(roots.iter()) {
+        envs.push((
+            "REVIEW_ALLOWED_ROOTS".to_string(),
+            joined.to_string_lossy().to_string(),
+        ));
+    }
+    envs
+}
+
+/// 引号感知切词：引号内空白保持为单一词元（`cat "/a b"` 不能拆开审计）。
+/// 不处理转义——$()/` 等命令替换已被上游只读白名单拒绝，剩余形态里
+/// 反斜杠不构成路径语义。
+fn shell_tokens(cmd: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    for c in cmd.chars() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    started = true;
+                }
+                c if c.is_whitespace() => {
+                    if started || !cur.is_empty() {
+                        tokens.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                }
+                _ => cur.push(c),
+            },
+        }
+    }
+    if started || !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// run_command 的词元级路径围栏：shell 白名单只管命令动词不管路径参数，
+/// `cat ~/.ssh/id_rsa`、`cat /etc/passwd`、`ls ../../` 这类"只读命令+越界路径"
+/// 会把宿主任意文件内容回灌进审查上下文。此处把命令按词元扫描，凡能
+/// canonicalize 为真实路径的词元（含 $SESSION_TMP/$HOME/~ 展开与 --flag=value
+/// 右值）都必须落在允许根内；解析不了的词元读不到内容，放行。
+/// 已知边界：词元扫描是启发式，挡不住命令自身的间接读（如 `git config
+/// --get` 读 ~/.gitconfig）——残余面由审查者提示词纪律承担。
+fn command_paths_fenced(
+    cmd: &str,
+    cwd: &Path,
+    roots: &[PathBuf],
+    session_tmp: Option<&Path>,
+) -> Result<(), String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    for raw_tok in shell_tokens(cmd) {
+        // VAR=value / --flag=value 的右值同样可能是路径
+        for piece in raw_tok.split('=') {
+            let mut tok = piece.trim().to_string();
+            if tok.is_empty() {
+                continue;
+            }
+            if let Some(tmp) = session_tmp {
+                let tmp_str = tmp.to_string_lossy().to_string();
+                tok = tok
+                    .replace("${SESSION_TMP}", &tmp_str)
+                    .replace("$SESSION_TMP", &tmp_str);
+            }
+            if !home.is_empty() {
+                tok = tok.replace("${HOME}", &home).replace("$HOME", &home);
+            }
+            if tok == "~" || tok.starts_with("~/") {
+                if home.is_empty() {
+                    return Err("无法展开 ~ 路径（HOME 未设置）".to_string());
+                }
+                tok = format!("{}{}", home, &tok[1..]);
+            } else if tok.starts_with('~') {
+                // ~user 形态无法精确展开，保守拒绝
+                return Err(format!("~user 形态路径不支持: {}", piece));
+            }
+            let looks_pathy =
+                tok.starts_with('/') || tok == ".." || tok.starts_with("../") || tok.contains('/');
+            if !looks_pathy {
+                continue;
+            }
+            let abs = if Path::new(&tok).is_absolute() {
+                PathBuf::from(&tok)
+            } else {
+                cwd.join(&tok)
+            };
+            let Ok(canon) = abs.canonicalize() else {
+                continue; // 解析不了 = 该路径不存在，读不到内容
+            };
+            if canon == Path::new("/dev/null") {
+                continue;
+            }
+            if !roots.iter().any(|r| canon.starts_with(r)) {
+                return Err(format!(
+                    "路径越界（命令中的路径限工作区与会话 tmp 内）: {}",
+                    piece
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// 双根围栏：工作区 + 可选会话 tmp 目录（tmp/ 前缀路径直接映射到会话 tmp 根）。
 /// 会话 tmp 产物在物理上位于工作区外，缺了它审查者对 tmp 交付物永远够不到。
@@ -159,6 +316,13 @@ pub fn execute(
             if raw.is_empty() {
                 return Err("read_file 需要 path 参数".to_string());
             }
+            // 可选 start_line：大文件翻页——实测审查者为看 220 行之后的内容
+            // 重发同一请求白烧一步预算。
+            let start_line = args
+                .get("start_line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .max(1) as usize;
             let target = contained_multi(workspace, session_tmp, &Path::new(&raw))
                 .ok_or_else(|| format!("路径越界（只能访问工作区与会话 tmp 内文件）: {}", raw))?;
             // 办公/数据类二进制（xlsx/docx/pdf…）走解析器透出内容预览，
@@ -178,9 +342,18 @@ pub fn execute(
             }
             let content = std::fs::read_to_string(&target)
                 .map_err(|e| format!("读取失败: {}", e))?;
+            let total_lines = content.lines().count();
             let mut out = String::new();
-            for (idx, line) in content.lines().take(MAX_READ_LINES).enumerate() {
+            for (idx, line) in content
+                .lines()
+                .enumerate()
+                .filter(|(idx, _)| *idx >= start_line - 1)
+                .take(MAX_READ_LINES)
+            {
                 out.push_str(&format!("{}: {}\n", idx + 1, line));
+            }
+            if out.is_empty() && start_line > 1 {
+                out = format!("（起始行 {} 超出文件总行数 {}）", start_line, total_lines);
             }
             Ok(cap(out))
         }
@@ -199,20 +372,29 @@ pub fn execute(
                         .to_string(),
                 );
             }
-            let cwd = session_tmp.unwrap_or(workspace);
-            run_captured("sh", &["-c", &cmd], cwd)
+            // 词元级路径围栏：白名单只审命令动词，`cat /etc/passwd` 这类越界读在此拦截。
+            let roots = allowed_roots(workspace, session_tmp);
+            command_paths_fenced(&cmd, workspace, &roots, session_tmp)?;
+            // cwd 固定为工作区（与 read_file 的相对路径语义一致）；
+            // 会话产物经 $SESSION_TMP 环境变量可达——tmp/ 前缀是
+            // read_file/list_dir 的虚拟命名空间，shell 不理解。
+            let envs = forensic_envs(workspace, session_tmp);
+            run_captured("sh", &["-c", &cmd], workspace, &envs)
         }
         "python" => {
             let code = get_str("code");
             if code.is_empty() {
                 return Err("python 需要 code 参数".to_string());
             }
-            // 运行时只读护栏：进解释器前 patch 掉 open 写模式与 os/shutil 的写类函数，
-            // 让意外/诱导式写操作显式抛错而非静默落盘。
+            // 运行时只读护栏：进解释器前 patch 掉 open 系（builtins/io/os/Path.open）
+            // 的写模式与越界读、os/shutil 写类函数、进程派生与网络/FFI 模块，
+            // 让意外/诱导式操作显式抛错而非静默生效。
             // 说明：这是对"注入材料诱导写盘/手滑误写"的机械底线，不是完整沙箱——
-            // 刻意绕过（importlib 重载/ctypes）无法机械防住，边界由审查者提示词纪律承担。
-            let cwd = session_tmp.unwrap_or(workspace);
-            run_captured("python3", &["-c", PYTHON_GUARD_SRC, &code], cwd)
+            // 刻意绕过（importlib 重载/sys.modules 摘除）无法机械防住，
+            // 边界由审查者提示词纪律承担。
+            // cwd 固定为工作区；会话产物经 $SESSION_TMP 环境变量可达。
+            let envs = forensic_envs(workspace, session_tmp);
+            run_captured("python3", &["-c", PYTHON_GUARD_SRC, &code], workspace, &envs)
         }
         "grep_search" => {
             let pattern = get_str("pattern");
@@ -274,24 +456,73 @@ pub fn execute(
     }
 }
 
-/// 只读 Python 护栏源码：在 exec 用户代码前 patch 掉 open 的写类模式与
-/// os/shutil/pathlib 的常见写函数，使误写/诱导写显式抛 PermissionError。
-/// 通过 argv 传递（python3 -c GUARD CODE），规避 shell 引号地狱。
+/// 只读 Python 护栏源码：在 exec 用户代码前 patch 掉 open 系入口的写模式与
+/// 越界读、os/shutil/pathlib 的写类函数、进程派生函数，并预阻塞
+/// subprocess/socket/ctypes 等模块。通过 argv 传递（python3 -c GUARD CODE），
+/// 规避 shell 引号地狱。读路径围栏依据 REVIEW_ALLOWED_ROOTS（冒号分隔）。
 const PYTHON_GUARD_SRC: &str = r#"
-import builtins, os, shutil, sys, pathlib
+import builtins, io, os, shutil, sys, pathlib
+# 读路径围栏：白名单 = REVIEW_ALLOWED_ROOTS（工作区+会话 tmp）+ 解释器库目录
+# + 系统区（/etc、/usr、/opt、/System、/Library 等——解释器 import 链会读
+# mime.types/证书/源码；实测 openpyxl import 因 /etc/mime.types 被拒而整体失败）。
+# 拒绝域 = 所有用户家目录（~/.ssh、~/.aws、~/Library 凭据面）中不在白名单的部分。
+_ROOTS = [os.path.realpath(p) for p in os.environ.get('REVIEW_ALLOWED_ROOTS', '').split(os.pathsep) if p]
+_ROOTS += [os.path.realpath(p) for p in sys.path if p]
+_HOME = os.path.realpath(os.path.expanduser('~'))
+_HOME_PARENT = os.path.dirname(_HOME)  # /Users 或 /home：所有用户家目录一并拒绝
+_SYS_OK = []
+for _p in ('/etc', '/usr', '/opt', '/System', '/Library', '/bin', '/sbin', '/dev', '/tmp'):
+    if os.path.exists(_p):
+        _SYS_OK.append(os.path.realpath(_p))
+def _in_roots(p):
+    try:
+        rp = os.path.realpath(os.fspath(p))
+    except Exception:
+        return False
+    for r in _ROOTS:
+        if rp == r or rp.startswith(r + os.sep):
+            return True
+    if _HOME_PARENT and rp.startswith(_HOME_PARENT + os.sep):
+        return False
+    for r in _SYS_OK:
+        if rp == r or rp.startswith(r + os.sep):
+            return True
+    return False
+def _blocked(*a, **k):
+    raise PermissionError('reviewer 只读取证：禁止写操作/进程派生')
 _open = builtins.open
 def _ro_open(f, mode='r', *a, **k):
-    if any(c in mode for c in 'wax+'):
+    if isinstance(mode, str) and any(c in mode for c in 'wax+'):
         raise PermissionError('reviewer 只读取证：禁止文件写入')
+    if not _in_roots(f):
+        raise PermissionError('reviewer 取证：路径越界（限工作区与会话 tmp 内文件）')
     return _open(f, mode, *a, **k)
 builtins.open = _ro_open
-def _blocked(*a, **k):
-    raise PermissionError('reviewer 只读取证：禁止文件系统写操作')
+io.open = _ro_open  # pathlib.Path.open/zipfile 等内部走 io.open，必须同步 patch
+def _ro_path_open(self, mode='r', *a, **k):
+    return _ro_open(os.fspath(self), mode, *a, **k)
+pathlib.Path.open = _ro_path_open
+if hasattr(os, 'open'):  # 低级 fd 入口：os.open(fd, O_WRONLY) 绕过 builtins.open
+    _os_open = os.open
+    def _ro_os_open(path, flags, *a, **k):
+        _WR = getattr(os, 'O_WRONLY', 1) | getattr(os, 'O_RDWR', 2) \
+            | getattr(os, 'O_CREAT', 64) | getattr(os, 'O_TRUNC', 512) \
+            | getattr(os, 'O_APPEND', 1024)
+        if flags & _WR:
+            raise PermissionError('reviewer 只读取证：禁止文件写入')
+        if not _in_roots(path):
+            raise PermissionError('reviewer 取证：路径越界（限工作区与会话 tmp 内文件）')
+        return _os_open(path, flags, *a, **k)
+    os.open = _ro_os_open
 for _fn in ('remove','unlink','rmdir','rename','replace','makedirs','mkdir',
             'chmod','chown','symlink','link','truncate','utime','removedirs',
-            'renames','mktemp','mkfifo','mknod'):
+            'renames','mktemp','mkfifo','mknod','system','popen','kill','killpg',
+            'fork','forkpty','posix_spawn','posix_spawnp','startfile'):
     if hasattr(os, _fn):
         setattr(os, _fn, _blocked)
+for _name in dir(os):  # spawn*/exec* 全家族（execv/execve/spawnl/spawnv…）
+    if _name.startswith(('spawn', 'exec')):
+        setattr(os, _name, _blocked)
 for _fn in ('rmtree','move','copy','copy2','copytree','copyfile','copyfileobj'):
     if hasattr(shutil, _fn):
         setattr(shutil, _fn, _blocked)
@@ -299,15 +530,25 @@ for _fn in ('write_text','write_bytes','mkdir','rmdir','unlink','rename',
             'replace','chmod','symlink_to','hardlink_to','touch'):
     if hasattr(pathlib.Path, _fn):
         setattr(pathlib.Path, _fn, _blocked)
+# 进程派生/网络/FFI 模块整体预阻塞：sys.modules 置 None 使 import 直接 ImportError
+for _mod in ('subprocess', 'pty', 'socket', 'ctypes', 'multiprocessing', '_posixsubprocess'):
+    sys.modules[_mod] = None
 exec(compile(sys.argv[1], '<reviewer>', 'exec'))
 "#;
 
 /// 运行子命令并合并 stdout/stderr，限时 15s（超时强杀），输出按 MAX_TOOL_OUTPUT_CHARS 截断。
-/// 取证命令固定 cwd 在允许根内（session_tmp 优先——tmp 产物检查的默认工作目录）。
-fn run_captured(program: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
+/// 取证命令 cwd 固定为工作区（与 read_file 相对路径语义一致）；
+/// 会话产物经 extra_envs 注入的 SESSION_TMP 可达。
+fn run_captured(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    extra_envs: &[(String, String)],
+) -> Result<String, String> {
     use std::io::Read;
     use std::time::Instant;
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(cwd)
         // 最小环境：PATH 留给解释器/动态库解析，清掉代理与凭据类变量防外泄面
@@ -316,7 +557,11 @@ fn run_captured(program: &str, args: &[&str], cwd: &Path) -> Result<String, Stri
         .env("HOME", std::env::var("HOME").unwrap_or_default())
         .env("LANG", "C.UTF-8")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in extra_envs {
+        command.env(k, v);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| format!("命令启动失败: {}", e))?;
     let deadline = Instant::now() + std::time::Duration::from_secs(15);
@@ -429,6 +674,59 @@ mod tests {
     }
 
     #[test]
+    fn run_command_path_fence_and_session_tmp_env() {
+        let ws = std::env::temp_dir().join(format!("rtools-fws-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("rtools-ftmp-{}", uuid::Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!("rtools-fout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("w.txt"), "ws-body").unwrap();
+        std::fs::write(tmp.join("art.csv"), "a,b,c").unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+
+        // $SESSION_TMP 展开后可读会话产物（cwd 为工作区，tmp/ 前缀对 shell 无意义）
+        let out = execute(&ws, Some(&tmp), "run_command",
+            &json!({"command": "cat $SESSION_TMP/art.csv"})).unwrap();
+        assert!(out.contains("a,b,c"), "SESSION_TMP 展开应可读: {}", out);
+        let out = execute(&ws, Some(&tmp), "run_command",
+            &json!({"command": "cat \"$SESSION_TMP/art.csv\""})).unwrap();
+        assert!(out.contains("a,b,c"));
+        // 工作区相对路径照常
+        let out = execute(&ws, Some(&tmp), "run_command",
+            &json!({"command": "cat w.txt"})).unwrap();
+        assert!(out.contains("ws-body"));
+
+        // 越界路径：绝对路径 / ~ / .. 逃逸 / $HOME / --flag=value 右值 → 全部拒绝
+        let secret_abs = outside.join("secret.txt").to_string_lossy().to_string();
+        for cmd in [
+            format!("cat {}", secret_abs),
+            format!("cat {}", outside.to_string_lossy()),
+            "cat /etc/hosts".to_string(),
+            "ls ~".to_string(),
+            "cat ~/.".to_string(),
+            "ls ..".to_string(),
+            "cat $HOME".to_string(),
+            format!("head --file={}", secret_abs),
+        ] {
+            assert!(
+                execute(&ws, Some(&tmp), "run_command", &json!({"command": cmd})).is_err(),
+                "越界命令应被拒绝: {}",
+                cmd
+            );
+        }
+
+        // 无 SESSION_TMP 时 $SESSION_TMP 不展开——残留字面量路径解析不了，读不到内容，放行即可
+        let out = execute(&ws, None, "run_command",
+            &json!({"command": "cat w.txt"})).unwrap();
+        assert!(out.contains("ws-body"));
+
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
     fn python_guard_blocks_writes_but_allows_reads() {
         // 环境无 python3 时跳过（CI/容器可能缺解释器）
         if Command::new("python3").arg("--version").output().is_err() {
@@ -459,6 +757,44 @@ mod tests {
         let rm = execute(&dir, None, "python", &json!({"code": "import os; os.remove('data.txt')"}));
         assert!(rm.is_err() || rm.as_ref().unwrap().contains("PermissionError") || rm.as_ref().unwrap().contains("只读"));
         assert!(dir.join("data.txt").exists(), "data.txt 不应被删除");
+
+        // os.system / subprocess / Path.open 写 / 越界读 → 全部拦截
+        let sys = execute(
+            &dir, None, "python", &json!({"code": "import os; os.system('touch hacked.txt')"}));
+        assert!(sys.is_err() || sys.as_ref().unwrap().contains("PermissionError") || sys.as_ref().unwrap().contains("只读"),
+            "os.system 应被拦截: {:?}", sys);
+        assert!(!dir.join("hacked.txt").exists());
+        let sp = execute(
+            &dir, None, "python", &json!({"code": "import subprocess"}));
+        assert!(sp.is_err() || sp.as_ref().unwrap().contains("ImportError") || sp.as_ref().unwrap().contains("import"),
+            "subprocess import 应被拦截: {:?}", sp);
+        let pw = execute(
+            &dir, None, "python",
+            &json!({"code": "from pathlib import Path; Path('evil2.txt').open('w').write('x')"}));
+        assert!(pw.is_err() || pw.as_ref().unwrap().contains("PermissionError") || pw.as_ref().unwrap().contains("只读"),
+            "Path.open 写模式应被拦截: {:?}", pw);
+        assert!(!dir.join("evil2.txt").exists());
+        // 系统区可读（解释器 import 链需要 /etc/mime.types 等），家目录拒绝
+        let sysread = execute(
+            &dir, None, "python",
+            &json!({"code": "from pathlib import Path; print(len(Path('/etc/hosts').read_text()))"}));
+        assert!(sysread.is_ok(), "系统区文件应可读: {:?}", sysread);
+        let homeread = execute(
+            &dir, None, "python",
+            &json!({"code": "import os; open(os.path.expanduser('~/.sentinel-secret')).read()"}));
+        assert!(homeread.is_err() || homeread.as_ref().unwrap().contains("PermissionError") || homeread.as_ref().unwrap().contains("越界"),
+            "家目录读应被拦截（无论文件是否存在）: {:?}", homeread);
+
+        // $SESSION_TMP 内文件可读
+        let tmp = std::env::temp_dir().join(format!("rtools-pyt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("art.txt"), "tmp-art").unwrap();
+        let out = execute(
+            &dir, Some(&tmp), "python",
+            &json!({"code": "import os; print(open(os.environ['SESSION_TMP']+'/art.txt').read())"}),
+        ).unwrap();
+        assert!(out.contains("tmp-art"), "SESSION_TMP 内文件应可读: {}", out);
+        let _ = std::fs::remove_dir_all(&tmp);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

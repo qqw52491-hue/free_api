@@ -478,9 +478,19 @@ fixture 无答案，杜绝批量解题）。
    （基线在派发时记录）。
 6. **reviewer 工具化**：只读取证工具白名单（read_file/grep_search/git_diff/git_log/list_dir/
    run_command/python，`review_tools.rs`，双根路径围栏=工作区+会话 tmp（tmp/ 前缀映射），
-   输出截断），步数预算 `reviewer_tool_steps` 默认 8（child reviewer 与终审取证环共用）；
-   run_command 走 is_readonly_shell_command 白名单，python 带运行时只读护栏（patch
-   open/os/shutil/pathlib 写函数）；终审 evaluate_finish_diff 也有取证环（同一预算）。
+   输出截断），步数预算 `reviewer_tool_steps` 默认 8、上限 30、0=关闭（child reviewer
+   与终审取证环共用，0 时提示词工具段整体裁掉）；run_command 走
+   is_readonly_shell_command 白名单+词元级路径围栏（cwd=工作区，会话产物经
+   $SESSION_TMP 环境变量可达——tmp/ 前缀是 read_file/list_dir 的虚拟命名空间，
+   shell/python 不认），read_file 支持 start_line 翻页（单次 220 行）；
+   python 带运行时只读护栏（patch open 系写模式与越界读、
+   os/shutil/pathlib 写函数、进程派生，预阻塞 subprocess/socket/ctypes 等模块）；
+   python 读围栏=工作区+会话 tmp+解释器库目录+系统区（/etc /usr /System 等——
+   import 链需要 mime.types），拒绝域=所有用户家目录（~/.ssh ~/.aws 等）；
+   run_command 保持严格两根围栏（命令参数是审查者显式点名，无需系统区）。
+   终审 evaluate_finish_diff 也有取证环（同一预算），超时复用 child_timeout_secs
+   （默认 60s、ClaudeThinking 120s、env 可配——取证环上下文逐轮变大，35s 实测
+   会在收敛判决轮超时）。
    实战已抓到主 Agent 谎称"已修正"（reviewer 实地读文件证伪）。
 7. **shell 防旁路**：git 脏文件探针实测 shell 变更数（`uncovered_shell_mutations`），
    独立触发阶段审查（防 shell 批量改文件绕过 write_file 门禁）。
