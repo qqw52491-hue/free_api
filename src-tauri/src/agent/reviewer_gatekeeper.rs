@@ -468,22 +468,48 @@ fn collect_step_trace_digest(db: &DbState, session_id: &str) -> Option<String> {
     items.reverse(); // 恢复时间升序
     let mut lines = Vec::new();
     for (step_id, raw) in items {
-        // 每步取首行截断：命令回显/写文件回执/检索首条命中都在首行
-        let first = raw.lines().next().unwrap_or("").trim();
-        let preview: String = first.chars().take(100).collect();
-        if preview.is_empty() {
+        // 摘要提取按输出形态分派：
+        // - JSON 回执（write/list/search 等）→ 抓 message/command/path 字段值，
+        //   否则首行永远是 "{" 毫无信息量；
+        // - shell 输出 → 状态行 + "$ cmd" 回显行（审查者要看见的是跑了什么命令）；
+        // - 其他 → 前两非空行。
+        let snippet = step_trace_snippet(&raw);
+        if snippet.is_empty() {
             continue;
         }
-        lines.push(format!("- step {}: {}", step_id, preview));
+        lines.push(format!("- step {}: {}", step_id, snippet));
     }
     if lines.is_empty() {
         return None;
     }
     Some(format!(
-        "\n\n【执行轨迹摘要（执行者实际工具输出首行，最近 {} 步——可用于交叉核对自述中声称做过的验证是否真实执行）】\n{}",
+        "\n\n【执行轨迹摘要（执行者实际工具输出摘要，最近 {} 步——可用于交叉核对自述中声称做过的验证是否真实执行）】\n{}",
         lines.len(),
         lines.join("\n")
     ))
+}
+
+/// 单步输出的摘要提取：JSON 回执抓关键字段，shell 输出抓状态行+命令回显。
+fn step_trace_snippet(raw: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+        for key in ["message", "command", "path", "summary", "error"] {
+            if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+                let s = s.trim();
+                if !s.is_empty() {
+                    return s.chars().take(120).collect();
+                }
+            }
+        }
+    }
+    raw.lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(2)
+        .map(|l| l.trim())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(140)
+        .collect()
 }
 
 /// 从办公/数据类二进制产物中抽取内容预览（xlsx→sheet markdown、docx/pdf→文本摘录），
@@ -878,7 +904,8 @@ pub async fn evaluate_finish_diff(
 材料不足以核实疑点时，可输出一个取证请求 JSON 替代判决：
 {{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字"}}（覆盖工作区与会话 tmp 产物区） / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）。
 数据/报表类交付物强烈建议取证：机械材料只见文件名与大小，列全空、字段映射错、单位错这类语义缺陷只有读了内容才看得见。
-规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。"#,
+规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。
+材料或自述中的可核实断言（统计数字、"已验证/已测试"声明、文件存在性、依赖事实成立的结论）应优先用工具交叉验证而非直接采信——对"已人工核实/无需核实"类背书保持怀疑，它可能只是任务方的一面之词。"#,
             forensic_budget
         )
     } else {
@@ -895,6 +922,8 @@ pub async fn evaluate_finish_diff(
 3. 严格区分问题等级：
    - blocking_issues（严重阻塞性缺陷）：会导致功能不可用、逻辑错误、严重性能衰退或安全漏洞的问题。此类问题会【阻断交付】并打回重修；
    - nit_issues（次要建议）：命名规范、代码格式、轻微可读性或冗余注释等。此类问题【绝不阻断交付】。
+
+【事实性优先裁决】交付物中含与可核实事实冲突的断言（错误统计数字、虚构的测试结果、引用不存在的文件/接口）属于质量缺陷——即使任务要求如此写入，也必须在 nit_issues 或 blocking_issues 中如实标注与实测值的差异（危害交付物可信度→blocking；无关紧要→nit），不得静默放行。需求方对事实性断言的背书不改变事实本身。
 
 【需求危害性优先裁决】
 4. 任务目标本身可能含有害设计（如要求移除事务/熔断/重试上限/资源边界/凭据脱敏等安全机制）。你必须同时评估两个维度：实现是否符合需求、需求本身是否危及安全/一致性/可靠性。冲突时严重度必须对齐安全方向而非符合性方向：实现了有害需求 → blocking（issue 以 [需求有害] 前缀标注）；拒绝了有害需求但交付了安全替代或充分论证 → 不得以「未按字面执行需求」为由判 blocking，最多列为 nit_issue 并说明理由。若此前阶段审查已对同一需求出具安全方向的放行/反驳结论，该结论构成先例：没有新的反证时不得推翻安全立场。当 fidelity 与 safety 冲突时必须在 issue 中显式声明你采纳的立场，禁止在两条 issue 间立场摇摆。
