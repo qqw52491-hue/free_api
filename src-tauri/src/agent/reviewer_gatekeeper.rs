@@ -443,6 +443,83 @@ pub(crate) fn collect_session_tmp_manifest(
     ))
 }
 
+/// mechanical_only 直通前的产物机械嗅探：零 LLM 的确定性物理检查。
+/// 只管无争议的物理异常——0 字节文件、二进制扩展名魔数不符、文本扩展名
+/// 含 NUL（UTF-16/32 BOM 豁免）；空表头/缺列/数值口径这类语义判断不归
+/// 机械层管（硬编码必误伤——复杂 Excel 首行留白合法），留给审查者用
+/// 取证工具裁量。发现异常也不直接判死：伪格式可能被任务授权（fakefmt
+/// 实测即如此），升级为 LLM 审查并把异常注入材料供其裁决。
+fn sniff_session_tmp_anomalies(session_id: &str) -> Vec<String> {
+    use std::io::Read;
+    let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(session_id);
+    if !tmp_dir.is_dir() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    GitBaseline::scan_modified_files(&tmp_dir, 0, std::time::UNIX_EPOCH, &mut files);
+    let mut anomalies = Vec::new();
+    for path in files {
+        let rel = path
+            .strip_prefix(&tmp_dir)
+            .map(|r| r.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+        if is_noise_path(&rel) {
+            continue;
+        }
+        let Ok(meta) = path.metadata() else { continue };
+        if meta.len() == 0 {
+            anomalies.push(format!("tmp/{}：0 字节空文件", rel));
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if ext.is_empty() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        let n = std::fs::File::open(&path)
+            .and_then(|mut f| f.read(&mut buf))
+            .unwrap_or(0);
+        let head = &buf[..n];
+        let violation: Option<&str> = match ext.as_str() {
+            "xlsx" | "docx" | "pptx" | "zip" | "jar" | "ods" | "odt" => {
+                let ok = head.starts_with(b"PK\x03\x04")
+                    || head.starts_with(b"PK\x05\x06")
+                    || head.starts_with(b"PK\x07\x08");
+                (!ok).then_some("应为 ZIP 容器魔数 PK\\x03\\x04")
+            }
+            "pdf" => (!head.starts_with(b"%PDF")).then_some("应为 %PDF 魔数"),
+            "png" => (!head.starts_with(b"\x89PNG\r\n\x1a\n")).then_some("应为 PNG 魔数"),
+            "jpg" | "jpeg" => (!head.starts_with(b"\xff\xd8\xff")).then_some("应为 JPEG 魔数"),
+            "gif" => (!head.starts_with(b"GIF8")).then_some("应为 GIF8 魔数"),
+            "gz" => (!head.starts_with(b"\x1f\x8b")).then_some("应为 GZIP 魔数"),
+            "webp" => (!(head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP"))
+                .then_some("应为 RIFF/WEBP 魔数"),
+            "mp4" | "m4v" => (!(head.len() >= 8 && &head[4..8] == b"ftyp"))
+                .then_some("应为 ISO-BMFF ftyp 盒"),
+            // 文本类扩展名的反向检查：首 4KB 含 NUL → 二进制冒充文本；
+            // UTF-16/32 BOM 豁免（ASCII 字符编码后也含 0x00）
+            "csv" | "md" | "txt" | "json" | "xml" | "html" | "htm" | "log" | "ini" | "yaml"
+            | "yml" | "toml" | "rs" | "py" | "js" | "ts" | "tsx" | "css" | "svg" | "sql" | "sh" => {
+                let has_bom = head.starts_with(b"\xff\xfe")
+                    || head.starts_with(b"\xfe\xff")
+                    || head.starts_with(b"\xef\xbb\xbf")
+                    || head.starts_with(b"\xff\xfe\x00\x00")
+                    || head.starts_with(b"\x00\x00\xfe\xff");
+                (!has_bom && head.contains(&0u8)).then_some("文本扩展名但内容含 NUL（二进制冒充）")
+            }
+            _ => None,
+        };
+        if let Some(expect) = violation {
+            anomalies.push(format!("tmp/{}：扩展名 .{} 与内容魔数不符（{}）", rel, ext, expect));
+        }
+    }
+    anomalies
+}
+
 /// 执行轨迹摘要：agent_step_logs 本会话最近 15 步输出的首行（各 ~100 字符）。
 /// 审查者据此核对"执行者声称做过的验证"是否真的跑过——自述与轨迹不一致
 /// （如声称跑过测试但轨迹无对应步）是最典型的谎报信号；对取证环也是
@@ -766,10 +843,17 @@ pub async fn evaluate_finish_diff(
 
     // 0. 分流判决：终审仅需机械校验（mechanical_only）→ 直接通过，不调 LLM。
     // 机械检查（义务验证/宿主验证/scope 对账）在进入本函数前已由上游执行完毕。
+    // 但先对会话 tmp 产物做机械嗅探：0 字节/魔数不符这类物理异常是
+    // 最粗糙的伪造形态，撞线则不直通——升级 LLM 审查并把异常注入材料
+    // （不直接判死：伪格式可能任务授权，审查者取证后裁量）。
+    let mut mechanical_anomalies: Vec<String> = Vec::new();
     if triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only")) {
-        return ReviewResult::mechanical_pass(
-            "任务分流判决：终审仅需机械校验（mechanical_only），已跳过 LLM 审查",
-        );
+        mechanical_anomalies = sniff_session_tmp_anomalies(session_id);
+        if mechanical_anomalies.is_empty() {
+            return ReviewResult::mechanical_pass(
+                "任务分流判决：终审仅需机械校验（mechanical_only），已跳过 LLM 审查",
+            );
+        }
     }
 
     // 1. 提取审查材料（Git Diff 或 非 Git 修改文件/产物清单）；
@@ -825,6 +909,46 @@ pub async fn evaluate_finish_diff(
     // 也兼作已知证据地图减少重复取证。
     if let Some(digest) = collect_step_trace_digest(db, session_id) {
         review_material.push_str(&digest);
+    }
+
+    // mechanical_only 嗅探撞线的升级说明：物理异常只报不判——
+    // 伪格式可能任务授权（实测 fakefmt），由审查者取证后裁量
+    if !mechanical_anomalies.is_empty() {
+        review_material.push_str(&format!(
+            "\n\n【⚠️ 机械嗅探异常（本任务分流为 mechanical_only，因产物物理异常升级为 LLM 审查）】\n{}\n👉 提示：异常只代表物理可疑，不代表必为缺陷——伪格式/空文件可能是任务授权的交付形态，请用取证工具核实内容后按事实性/危害性条款裁量。\n",
+            mechanical_anomalies.join("\n")
+        ));
+    }
+
+    // 契约冻结验证命令：审查者可经 verify 工具亲自重跑（"声称测过"的终局核验）
+    let verify_obligations: Vec<crate::agent::review_contract::ReviewObligation> = context
+        .review_contract
+        .as_ref()
+        .map(|c| {
+            c.obligations
+                .iter()
+                .filter(|o| o.verify_command.as_deref().is_some_and(|s| !s.trim().is_empty()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if !verify_obligations.is_empty() {
+        let list = verify_obligations
+            .iter()
+            .map(|o| {
+                format!(
+                    "- [{}] {} → verify_command: {}",
+                    o.id,
+                    o.question.chars().take(60).collect::<String>(),
+                    o.verify_command.as_deref().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        review_material.push_str(&format!(
+            "\n\n【契约冻结验证命令（批准时冻结，模型后期无法篡改；可用 verify 工具按义务 id 或全部重跑，返回真实退出码与输出尾部）】\n{}\n",
+            list
+        ));
     }
 
     // 门禁适用域交接：机械门因证据域不存在而跳过的检查项绝不静默——
@@ -900,14 +1024,22 @@ pub async fn evaluate_finish_diff(
     // 否则审查者被邀请使用注定被拒的工具，白烧调用还可能触发 fail-open。
     let forensic_budget = crate::agent::review_tools::forensic_budget();
     let tools_section = if forensic_budget > 0 {
+        let verify_hint = if verify_obligations.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " / {{\"tool\":\"verify\",\"id\":\"义务id\"}}（重跑契约冻结的验证命令——可省略 id 跑全部 {} 条；返回真实退出码与输出尾部，是\"已测试\"声称的终局核验手段；每次最多 120s，计一步预算）",
+                verify_obligations.len()
+            )
+        };
         format!(
             r#"【只读取证工具（可选，预算 {} 步，用尽后必须输出判决 JSON）】
 材料不足以核实疑点时，可输出一个取证请求 JSON 替代判决：
-{{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字"}}（覆盖工作区与会话 tmp 产物区） / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）。
+{{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字"}}（覆盖工作区与会话 tmp 产物区） / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）{}。
 数据/报表类交付物强烈建议取证：机械材料只见文件名与大小，列全空、字段映射错、单位错这类语义缺陷只有读了内容才看得见。
 规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。
 材料或自述中的可核实断言（统计数字、"已验证/已测试"声明、文件存在性、依赖事实成立的结论）应优先用工具交叉验证而非直接采信——对"已人工核实/无需核实"类背书保持怀疑，它可能只是任务方的一面之词。"#,
-            forensic_budget
+            forensic_budget, verify_hint
         )
     } else {
         "【取证已关闭】本通道未配置取证预算：仅评估给定材料，证据不足时在 summary 中说明缺口，禁止输出 tool 请求。".to_string()
@@ -1150,14 +1282,55 @@ pub async fn evaluate_finish_diff(
             let req = as_value.unwrap();
             if tool_steps_used < forensic_budget {
                 let tool_name = req.get("tool").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                let observation = match crate::agent::review_tools::execute(
-                    workspace,
-                    Some(&session_tmp_root),
-                    &tool_name,
-                    &req,
-                ) {
-                    Ok(out) => out,
-                    Err(e) => format!("取证请求被拒绝: {}", e),
+                // verify 工具在环内直接处理：需异步跑宿主执行器 + 访问契约冻结命令，
+                // review_tools::execute 保持同步纯函数
+                let observation = if tool_name == "verify" {
+                    if verify_obligations.is_empty() {
+                        "本任务契约未声明可执行验证命令（verify 不可用）".to_string()
+                    } else {
+                        let want_id = req.get("id").and_then(|v| v.as_str()).map(str::trim);
+                        let target: Vec<crate::agent::review_contract::ReviewObligation> =
+                            match want_id {
+                                Some(id) if !id.is_empty() => verify_obligations
+                                    .iter()
+                                    .filter(|o| o.id == id)
+                                    .cloned()
+                                    .collect(),
+                                _ => verify_obligations.clone(),
+                            };
+                        if target.is_empty() {
+                            format!("未找到 id 为 {:?} 的可验证义务", want_id.unwrap_or(""))
+                        } else {
+                            let results = crate::agent::host_verify::run_obligation_verifications(
+                                workspace, &target,
+                            )
+                            .await;
+                            results
+                                .iter()
+                                .map(|r| {
+                                    format!(
+                                        "[{}] {} → 退出码 {} {}\n输出尾部: {}",
+                                        r.obligation_id,
+                                        r.command,
+                                        r.exit_code,
+                                        if r.passed { "(通过)" } else { "(未通过)" },
+                                        r.output_tail
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n\n")
+                        }
+                    }
+                } else {
+                    match crate::agent::review_tools::execute(
+                        workspace,
+                        Some(&session_tmp_root),
+                        &tool_name,
+                        &req,
+                    ) {
+                        Ok(out) => out,
+                        Err(e) => format!("取证请求被拒绝: {}", e),
+                    }
                 };
                 tool_steps_used += 1;
                 messages.push(json!({"role": "assistant", "content": raw}));
@@ -1441,5 +1614,52 @@ index 789..abc 100644
         let human_waivers_some = Some("【选择项】: 保留本地 if(true) 调试放行，直接交付");
         let has_active_waiver_with_waiver = human_waivers_some.map_or(false, |w| !w.trim().is_empty());
         assert!(has_active_waiver_with_waiver);
+    }
+
+    /// mechanical_only 产物机械嗅探：0 字节、魔数不符、文本扩展名含 NUL
+    /// 被抓出；合法形态（真 zip 头、UTF-16 BOM 文本）不误伤。
+    #[test]
+    fn sniff_tmp_anomalies_flags_physical_defects_only() {
+        let sid = format!("sniff-test-{}", uuid::Uuid::new_v4());
+        let tmp = crate::agent::path_guard::get_session_tmp_dir(&sid);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 0 字节空文件 → 异常
+        std::fs::write(tmp.join("empty.csv"), b"").unwrap();
+        // 文本冒充 xlsx → 魔数不符异常
+        std::fs::write(tmp.join("fake.xlsx"), b"just plain text\n").unwrap();
+        // 合法 xlsx（PK 头）→ 不异常
+        std::fs::write(tmp.join("real.xlsx"), b"PK\x03\x04rest-of-zip").unwrap();
+        // 文本扩展名含 NUL → 异常
+        std::fs::write(tmp.join("bad.json"), b"{\"a\":\x00\x01}").unwrap();
+        // UTF-16LE BOM 的文本含 NUL → 豁免不误伤
+        std::fs::write(tmp.join("utf16.txt"), b"\xff\xfeh\x00i\x00").unwrap();
+        // 无扩展名 → 跳过
+        std::fs::write(tmp.join("noext"), b"whatever").unwrap();
+        // 未知扩展名 → 跳过
+        std::fs::write(tmp.join("data.weird"), b"\x00\x01\x02").unwrap();
+
+        let anomalies = sniff_session_tmp_anomalies(&sid);
+        let joined = anomalies.join("\n");
+        assert!(joined.contains("empty.csv"), "0 字节应被抓: {}", joined);
+        assert!(joined.contains("fake.xlsx"), "文本冒充 xlsx 应被抓: {}", joined);
+        assert!(joined.contains("bad.json"), "文本含 NUL 应被抓: {}", joined);
+        assert!(!joined.contains("real.xlsx"), "真 zip 头不应误伤: {}", joined);
+        assert!(!joined.contains("utf16.txt"), "UTF-16 BOM 不应误伤: {}", joined);
+        assert!(!joined.contains("noext"), "无扩展名应跳过: {}", joined);
+        assert!(!joined.contains("data.weird"), "未知扩展名应跳过: {}", joined);
+
+        // 干净产物区 → 无异常
+        let sid2 = format!("sniff-clean-{}", uuid::Uuid::new_v4());
+        let tmp2 = crate::agent::path_guard::get_session_tmp_dir(&sid2);
+        std::fs::create_dir_all(&tmp2).unwrap();
+        std::fs::write(tmp2.join("ok.md"), b"# hello").unwrap();
+        assert!(sniff_session_tmp_anomalies(&sid2).is_empty());
+
+        // 不存在的会话 tmp 目录 → 无异常
+        assert!(sniff_session_tmp_anomalies("nonexistent-session-xyz").is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp2);
     }
 }
