@@ -611,6 +611,9 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
     out.push_str("> 2. 目标：要产出什么（清晰可验收的标准）；\n");
     out.push_str("> 3. 相关材料：涉及的文件路径/既有结论/约束。\n");
     out.push_str("> 建议在派发参数中携带可选的 context_excerpts（包含 background、todo_slice、file_hints、prior_findings），避免模糊派发。\n");
+    out.push_str("> custom_inputs 支持三个渲染保留键：`verified_facts`（宿主已核实事实）、`hard_constraints`（判定边界）、`definition_of_done`（完成定义），\n");
+    out.push_str("> 它们会被升格为独立一级小节优先呈现给子 Agent；派发审查/写作类子任务时建议主动填写，钉死事实与验收标准。\n");
+    out.push_str("> 若角色卡声明了 input_schema 必填入参，custom_inputs 必须实际供给，否则派发会被系统拒绝。\n");
     Ok(out)
 }
 
@@ -651,6 +654,46 @@ pub fn persona_block(card: &RoleCard) -> String {
         return String::new();
     }
     format!("\n\n【专精角色人设：{}】{}", card.label, card.persona_prompt)
+}
+
+/// 派发入参校验（input_schema 输入侧硬约束，与输出侧 custom_schema 对称）：
+/// 角色卡声明了必填入参字段时，custom_inputs 必须实际供给；
+/// 缺失返回列出字段名与说明的可读错误，供派发点直接透出拒绝。
+pub fn validate_dispatch_inputs(card: &RoleCard, custom_inputs: Option<&Value>) -> Result<(), String> {
+    let schema = match card.parse_input_schema() {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(()),
+    };
+    let obj = custom_inputs.and_then(|v| v.as_object());
+    let missing: Vec<String> = schema
+        .fields
+        .iter()
+        .filter(|f| f.required)
+        .filter(|f| match obj.and_then(|m| m.get(&f.name)) {
+            // 缺键/null/空白串/空数组/空对象一律按缺失计；number/bool 存在即算有
+            None | Some(Value::Null) => true,
+            Some(Value::String(s)) => s.trim().is_empty(),
+            Some(Value::Array(a)) => a.is_empty(),
+            Some(Value::Object(o)) => o.is_empty(),
+            Some(_) => false,
+        })
+        .map(|f| {
+            if f.description.trim().is_empty() {
+                f.name.clone()
+            } else {
+                format!("{}（{}）", f.name, f.description)
+            }
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "【⚠️ 子任务派发被拒绝】角色卡 `{}` 声明的必填入参缺失: {}。请在 custom_inputs 中补齐后重新派发。",
+            card.name,
+            missing.join("、")
+        ))
+    }
 }
 
 pub fn dispatch(db: &DbState, action: &str, params: &Value) -> crate::agent::types::DispatchResult {
@@ -1002,6 +1045,57 @@ mod tests {
         // 未配置的 card_c 任何工位都不被禁用
         assert!(!is_card_disabled_for(&disabled, "card_c", "writer"));
         assert!(!is_card_disabled_for(&disabled, "card_c", "reviewer"));
+    }
+
+    #[test]
+    fn validate_dispatch_inputs_enforces_required_fields() {
+        let input_schema = json!({
+            "fields": [
+                {"name": "plan_summary", "field_type": "string", "required": true, "description": "方案摘要"},
+                {"name": "target_files", "field_type": "string[]", "required": true, "description": "拟修改文件列表"},
+                {"name": "note", "field_type": "string", "required": false, "description": "备注"},
+                {"name": "round", "field_type": "number", "required": true, "description": "轮次"}
+            ],
+            "strict_closed_set": false
+        })
+        .to_string();
+        let card = RoleCard {
+            name: "tech_lead".into(),
+            input_schema,
+            ..Default::default()
+        };
+
+        // 无 schema 的卡一律放行
+        let no_schema = RoleCard { name: "plain".into(), ..Default::default() };
+        assert!(validate_dispatch_inputs(&no_schema, None).is_ok());
+        assert!(validate_dispatch_inputs(&no_schema, Some(&json!({"x": 1}))).is_ok());
+
+        // 必填缺失 → Err 含字段名与说明
+        let err = validate_dispatch_inputs(&card, Some(&json!({"note": "x"}))).unwrap_err();
+        assert!(err.contains("plan_summary"), "错误应列出缺失字段名: {}", err);
+        assert!(err.contains("target_files"), "错误应列出缺失字段名: {}", err);
+        assert!(err.contains("方案摘要"), "错误应附带字段说明: {}", err);
+        assert!(err.contains("tech_lead"), "错误应指出角色卡: {}", err);
+        assert!(!err.contains("note"), "非必填字段不参与校验: {}", err);
+
+        // 空白串/空数组/null/空对象按缺失计
+        for bad in [
+            json!({"plan_summary": "   ", "target_files": ["a.rs"], "round": 1}),
+            json!({"plan_summary": "x", "target_files": [], "round": 1}),
+            json!({"plan_summary": null, "target_files": ["a.rs"], "round": 1}),
+            json!({"plan_summary": "x", "target_files": ["a.rs"]}),
+        ] {
+            assert!(validate_dispatch_inputs(&card, Some(&bad)).is_err(), "应判缺失: {}", bad);
+        }
+
+        // 补齐 → Ok（number 存在即算有；非必填不校验）
+        let ok_inputs = json!({"plan_summary": "改 A 模块", "target_files": ["a.rs"], "round": 2});
+        assert!(validate_dispatch_inputs(&card, Some(&ok_inputs)).is_ok());
+
+        // custom_inputs 缺失或非 object → 有必填即算缺失
+        assert!(validate_dispatch_inputs(&card, None).is_err());
+        assert!(validate_dispatch_inputs(&card, Some(&json!("not-an-object"))).is_err());
+        assert!(validate_dispatch_inputs(&card, Some(&json!([]))).is_err());
     }
 }
 

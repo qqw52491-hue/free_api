@@ -168,6 +168,57 @@ impl TriageVerdict {
     }
 }
 
+/// 把任务入口分流判决合并进子任务派发的 custom_inputs（纯函数，可单测）：
+/// verified_facts / hard_constraints 是渲染层保留键，会被升格为独立一级小节；
+/// 模型自填的同名键不覆盖、改为数组合并（自填在前、判决生成在后）。
+pub fn merge_brief_into_inputs(
+    inputs: Option<&serde_json::Value>,
+    verdict: &TriageVerdict,
+) -> serde_json::Value {
+    let mut obj = inputs
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let append_items = |obj: &mut serde_json::Map<String, serde_json::Value>,
+                        key: &str,
+                        extra: Vec<String>| {
+        if extra.is_empty() {
+            return;
+        }
+        let mut items: Vec<serde_json::Value> = match obj.remove(key) {
+            Some(serde_json::Value::Array(arr)) => arr,
+            Some(serde_json::Value::Null) | None => Vec::new(),
+            Some(other) => vec![other],
+        };
+        items.extend(extra.into_iter().map(serde_json::Value::String));
+        obj.insert(key.to_string(), serde_json::Value::Array(items));
+    };
+
+    let mut facts = Vec::new();
+    if !verdict.route.trim().is_empty() {
+        let reason = verdict.reason.trim();
+        facts.push(if reason.is_empty() {
+            format!("任务入口分流判决 route={}", verdict.route)
+        } else {
+            format!("任务入口分流判决 route={}（{}）", verdict.route, reason)
+        });
+    }
+    if !verdict.evidence_policy.trim().is_empty() {
+        facts.push(format!("证据要求 evidence_policy={}", verdict.evidence_policy));
+    }
+    append_items(&mut obj, "verified_facts", facts);
+
+    let triggers: Vec<String> = verdict
+        .escalation_triggers
+        .iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    append_items(&mut obj, "hard_constraints", triggers);
+
+    serde_json::Value::Object(obj)
+}
+
 /// 机械安全地板：判决不可推翻的硬升级信号。返回 Some(触发原因) 表示命中地板，
 /// 调用方据此强制回到方案门。与判决的 escalation_triggers 互为冗余（模型自报不可全信）。
 pub fn write_floor_violation(
@@ -597,5 +648,63 @@ mod tests {
             );
         }
         assert_eq!(write_floor_violation(&inst, &tmp_only, "sess"), None);
+    }
+
+    #[test]
+    fn merge_brief_into_inputs_injects_verdict_brief() {
+        let verdict = parse(
+            r#"{
+            "route": "technical_plan",
+            "reason": "改已有代码",
+            "evidence_policy": "code_refs",
+            "escalation_triggers": ["扩散到 4 个文件", "涉及鉴权改动"]
+        }"#,
+        );
+
+        // 无 inputs：判决生成 verified_facts 与 hard_constraints
+        let merged = merge_brief_into_inputs(None, &verdict);
+        let facts = merged["verified_facts"].as_array().unwrap();
+        assert!(facts.iter().any(|f| f.as_str().unwrap().contains("route=technical_plan")));
+        assert!(facts.iter().any(|f| f.as_str().unwrap().contains("evidence_policy=code_refs")));
+        let constraints = merged["hard_constraints"].as_array().unwrap();
+        assert_eq!(constraints.len(), 2);
+        assert!(constraints.iter().any(|c| c.as_str().unwrap().contains("鉴权改动")));
+
+        // 非 object inputs：按空对象处理，普通键与判决键共存
+        let merged = merge_brief_into_inputs(Some(&json!("junk")), &verdict);
+        assert!(merged["verified_facts"].is_array());
+
+        // 模型自填同键不覆盖：自填在前、判决在后
+        let inputs = json!({
+            "plan_summary": "方案A",
+            "verified_facts": ["模型自填事实"],
+            "hard_constraints": "禁止删除文件"
+        });
+        let merged = merge_brief_into_inputs(Some(&inputs), &verdict);
+        assert_eq!(merged["plan_summary"], "方案A");
+        let facts = merged["verified_facts"].as_array().unwrap();
+        assert_eq!(facts[0], "模型自填事实", "模型自填的必须在前");
+        assert!(facts.len() > 1, "判决事实应追加在后");
+        let constraints = merged["hard_constraints"].as_array().unwrap();
+        assert_eq!(constraints[0], "禁止删除文件");
+        assert_eq!(constraints.len(), 3);
+    }
+
+    #[test]
+    fn merge_brief_into_inputs_skips_empty_verdict_fields() {
+        // 判决无触发条件 → 不凭空造 hard_constraints；普通键原样保留
+        let mut verdict = TriageVerdict::fallback("测试降级");
+        verdict.escalation_triggers = Vec::new();
+        let inputs = json!({"plan_summary": "方案A", "hard_constraints": ["自填边界"]});
+        let merged = merge_brief_into_inputs(Some(&inputs), &verdict);
+        assert_eq!(merged["plan_summary"], "方案A");
+        let constraints = merged["hard_constraints"].as_array().unwrap();
+        assert_eq!(constraints.len(), 1, "空触发条件不得追加内容");
+        assert_eq!(constraints[0], "自填边界");
+
+        // 模型未填 hard_constraints 且判决无触发 → 键不注入
+        let merged = merge_brief_into_inputs(Some(&json!({"a": 1})), &verdict);
+        assert!(merged.get("hard_constraints").is_none());
+        assert_eq!(merged["a"], 1);
     }
 }

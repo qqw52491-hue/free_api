@@ -545,6 +545,8 @@ pub async fn run_tool_phase(
         let mut spawned_ids = Vec::new();
         let mut success_count = 0;
         let mut fail_count = 0;
+        // 单发场景标记：唯一派发项因角色卡必填入参缺失被拒时，route 透出 input_incomplete 便于门禁归因
+        let mut dispatch_input_incomplete = false;
 
         for (idx, child_params) in items.iter().enumerate() {
             let item_num = idx + 1;
@@ -589,6 +591,19 @@ pub async fn run_tool_phase(
                         }
                         let focus_domains = card.parse_focus_domains();
                         let custom_inputs = child_params.get("custom_inputs");
+                        // 角色卡 input_schema 必填校验（输入侧硬约束）：必填入参未供给按项拒绝派发
+                        if let Err(err) = crate::agent::tools::role_manager::validate_dispatch_inputs(&card, custom_inputs) {
+                            item_reports.push(format!("[{}/{}] ❌ {}", item_num, total, err));
+                            fail_count += 1;
+                            dispatch_input_incomplete = true;
+                            continue;
+                        }
+                        // 任务入口分流判决简报并入 custom_inputs（verified_facts/hard_constraints 保留键升格一级小节）
+                        let merged_inputs = checkpoint
+                            .triage_verdict
+                            .as_ref()
+                            .map(|v| crate::agent::triage::merge_brief_into_inputs(custom_inputs, v));
+                        let custom_inputs = merged_inputs.as_ref().or(custom_inputs);
                         let last_verify_log = child_params
                             .get("last_verify_log")
                             .or_else(|| child_params.get("verify_log"))
@@ -600,6 +615,9 @@ pub async fn run_tool_phase(
                             custom_inputs,
                         ).await {
                             effective_params["specialized_context"] = json!(spec_ctx);
+                        }
+                        if let Some(merged) = merged_inputs {
+                            effective_params["custom_inputs"] = merged;
                         }
                     }
                     Ok(None) => {
@@ -760,11 +778,16 @@ pub async fn run_tool_phase(
                 }
             } else {
                 let err_msg = item_reports.into_iter().next().unwrap_or_else(|| "派发失败".to_string());
+                let route = if dispatch_input_incomplete {
+                    "child_dispatch:input_incomplete"
+                } else {
+                    "child_reviewer:rejected_or_failed"
+                };
                 DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: err_msg,
                     success: false,
-                    route: "child_reviewer:rejected_or_failed".to_string(),
+                    route: route.to_string(),
                 }
             }
         } else {
@@ -904,6 +927,8 @@ pub async fn run_tool_phase(
         let mut spawned_ids = Vec::new();
         let mut success_count = 0;
         let mut fail_count = 0;
+        // 单发场景标记：唯一派发项因角色卡必填入参缺失被拒时，route 透出 input_incomplete 便于门禁归因
+        let mut dispatch_input_incomplete = false;
 
         for (idx, writer_params) in items.iter().enumerate() {
             let item_num = idx + 1;
@@ -955,6 +980,19 @@ pub async fn run_tool_phase(
                         }
                         let focus_domains = card.parse_focus_domains();
                         let custom_inputs = writer_params.get("custom_inputs");
+                        // 角色卡 input_schema 必填校验（输入侧硬约束）：必填入参未供给按项拒绝派发
+                        if let Err(err) = crate::agent::tools::role_manager::validate_dispatch_inputs(&card, custom_inputs) {
+                            item_reports.push(format!("[{}/{}] ❌ {}", item_num, total, err));
+                            fail_count += 1;
+                            dispatch_input_incomplete = true;
+                            continue;
+                        }
+                        // 任务入口分流判决简报并入 custom_inputs（verified_facts/hard_constraints 保留键升格一级小节）
+                        let merged_inputs = checkpoint
+                            .triage_verdict
+                            .as_ref()
+                            .map(|v| crate::agent::triage::merge_brief_into_inputs(custom_inputs, v));
+                        let custom_inputs = merged_inputs.as_ref().or(custom_inputs);
                         let last_verify_log = writer_params
                             .get("last_verify_log")
                             .or_else(|| writer_params.get("verify_log"))
@@ -966,6 +1004,9 @@ pub async fn run_tool_phase(
                             custom_inputs,
                         ).await {
                             effective_params["specialized_context"] = json!(spec_ctx);
+                        }
+                        if let Some(merged) = merged_inputs {
+                            effective_params["custom_inputs"] = merged;
                         }
                     }
                     Ok(None) => {
@@ -1065,11 +1106,16 @@ pub async fn run_tool_phase(
                 }
             } else {
                 let err_msg = item_reports.into_iter().next().unwrap_or_else(|| "派发失败".to_string());
+                let route = if dispatch_input_incomplete {
+                    "child_dispatch:input_incomplete"
+                } else {
+                    "child_writer:rejected_or_failed"
+                };
                 DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: err_msg,
                     success: false,
-                    route: "child_writer:rejected_or_failed".to_string(),
+                    route: route.to_string(),
                 }
             }
         } else {
@@ -1127,6 +1173,8 @@ pub async fn run_tool_phase(
         let mut spawned_ids = Vec::new();
         let mut success_count = 0;
         let mut fail_count = 0;
+        // 单发场景标记：唯一派发项因角色卡必填入参缺失被拒时，route 透出 input_incomplete 便于门禁归因
+        let mut dispatch_input_incomplete = false;
 
         for (idx, worker_params) in items.iter().enumerate() {
             let item_num = idx + 1;
@@ -1174,6 +1222,19 @@ pub async fn run_tool_phase(
                         }
                         let focus_domains = card.parse_focus_domains();
                         let custom_inputs = worker_params.get("custom_inputs");
+                        // 角色卡 input_schema 必填校验（输入侧硬约束）：必填入参未供给按项拒绝派发
+                        if let Err(err) = crate::agent::tools::role_manager::validate_dispatch_inputs(&card, custom_inputs) {
+                            item_reports.push(format!("[{}/{}] ❌ {}", item_num, total, err));
+                            fail_count += 1;
+                            dispatch_input_incomplete = true;
+                            continue;
+                        }
+                        // 任务入口分流判决简报并入 custom_inputs（verified_facts/hard_constraints 保留键升格一级小节）
+                        let merged_inputs = checkpoint
+                            .triage_verdict
+                            .as_ref()
+                            .map(|v| crate::agent::triage::merge_brief_into_inputs(custom_inputs, v));
+                        let custom_inputs = merged_inputs.as_ref().or(custom_inputs);
                         let last_verify_log = worker_params
                             .get("last_verify_log")
                             .or_else(|| worker_params.get("verify_log"))
@@ -1185,6 +1246,9 @@ pub async fn run_tool_phase(
                             custom_inputs,
                         ).await {
                             effective_worker_params["specialized_context"] = json!(spec_ctx);
+                        }
+                        if let Some(merged) = merged_inputs {
+                            effective_worker_params["custom_inputs"] = merged;
                         }
                     }
                     Ok(None) => {
@@ -1284,11 +1348,16 @@ pub async fn run_tool_phase(
                 }
             } else {
                 let err_msg = item_reports.into_iter().next().unwrap_or_else(|| "派发失败".to_string());
+                let route = if dispatch_input_incomplete {
+                    "child_dispatch:input_incomplete"
+                } else {
+                    "child_worker:rejected_or_failed"
+                };
                 DispatchResult { view: None,
                     stdout: String::new(),
                     stderr: err_msg,
                     success: false,
-                    route: "child_worker:rejected_or_failed".to_string(),
+                    route: route.to_string(),
                 }
             }
         } else {

@@ -164,6 +164,17 @@ pub async fn handle_submit_plan(
         "intended_verification": submission.intended_verification.trim(),
         "risk_level": submission.risk_level.trim(),
     });
+    // ---- 角色卡 input_schema 必填校验（输入侧硬约束，与输出侧 custom_schema 对称）----
+    if let Err(err) =
+        crate::agent::tools::role_manager::validate_dispatch_inputs(&card, Some(&custom_inputs))
+    {
+        return reject(err, "plan_liveness:submit_plan_invalid");
+    }
+    // 任务入口分流判决简报并入 custom_inputs（verified_facts/hard_constraints 保留键升格一级小节）
+    let custom_inputs = match checkpoint.triage_verdict.as_ref() {
+        Some(v) => crate::agent::triage::merge_brief_into_inputs(Some(&custom_inputs), v),
+        None => custom_inputs,
+    };
     let specialized_context = crate::agent::context_collector::assemble_focus_context(
         &card.parse_focus_domains(),
         workspace_dir,

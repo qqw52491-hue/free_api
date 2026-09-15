@@ -14,6 +14,14 @@ pub const MAX_VERIFY_LOG_LINES: usize = 40;
 /// 验证日志最大字符数
 pub const MAX_VERIFY_LOG_CHARS: usize = 1500;
 
+/// custom_inputs 渲染保留键：这三键升格为独立一级小节，置于通用平铺块之前优先呈现；
+/// string 与 array-of-string 皆收（非 string 元素按 to_string 计，trim 后空白项跳过）。
+const RESERVED_INPUT_SECTIONS: &[(&str, &str)] = &[
+    ("verified_facts", "【✅ 宿主已核实事实（已由系统担保为真，禁止重新推导或质疑）】"),
+    ("hard_constraints", "【🚫 判定边界（以下结论/行为不允许出现，违反即视为审查失真）】"),
+    ("definition_of_done", "【🏁 完成定义（满足以下条件才算交付）】"),
+];
+
 /// 异步采集工作区当前未暂存及已暂存的变更文件清单
 pub async fn collect_changed_files(workspace_root: &Path) -> Option<String> {
     let output = Command::new("git")
@@ -153,9 +161,38 @@ pub async fn assemble_focus_context(
     if let Some(inputs) = custom_inputs {
         if let Some(obj) = inputs.as_object() {
             if !obj.is_empty() {
+                // 保留键升格为一级小节（先于通用平铺块呈现），内容为空则不渲染该小节
+                for &(key, title) in RESERVED_INPUT_SECTIONS {
+                    let raw_items: Vec<String> = match obj.get(key) {
+                        Some(Value::String(s)) => vec![s.clone()],
+                        Some(Value::Array(arr)) => arr
+                            .iter()
+                            .map(|item| match item {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let items: Vec<String> = raw_items
+                        .into_iter()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !items.is_empty() {
+                        let mut lines = vec![title.to_string()];
+                        for item in items {
+                            lines.push(format!("- {}", item));
+                        }
+                        sections.push(lines.join("\n"));
+                    }
+                }
+                // 其余键照旧平铺为 Custom Inputs 块（保留键不再重复出现）
                 let mut input_lines = Vec::new();
-                input_lines.push("【📌 主调度传递的专项业务参数 (Custom Inputs)】".to_string());
                 for (k, v) in obj {
+                    if RESERVED_INPUT_SECTIONS.iter().any(|(key, _)| *key == k.as_str()) {
+                        continue;
+                    }
                     let val_str = match v {
                         Value::String(s) => s.clone(),
                         Value::Array(arr) => {
@@ -169,7 +206,13 @@ pub async fn assemble_focus_context(
                     };
                     input_lines.push(format!("- **{}**: {}", k, val_str));
                 }
-                sections.push(input_lines.join("\n"));
+                if !input_lines.is_empty() {
+                    input_lines.insert(
+                        0,
+                        "【📌 主调度传递的专项业务参数 (Custom Inputs)】".to_string(),
+                    );
+                    sections.push(input_lines.join("\n"));
+                }
             }
         }
     }
@@ -248,6 +291,64 @@ mod tests {
         assert!(text.contains("business_goal"));
         assert!(text.contains("重构权限模块"));
         assert!(text.contains("impact_scope"));
+    }
+
+    #[tokio::test]
+    async fn test_assemble_focus_context_reserved_keys_promoted() {
+        let inputs = json!({
+            "business_goal": "重构权限模块",
+            "verified_facts": ["分流判决 route=technical_plan", "证据要求 evidence_policy=code_refs"],
+            "hard_constraints": "禁止删除现有接口",
+            "definition_of_done": ["测试全绿", "无新增警告"],
+        });
+
+        let ctx = assemble_focus_context(&[], Path::new("/tmp"), None, Some(&inputs))
+            .await
+            .unwrap();
+
+        // 三个保留键小节齐全，且按序位于通用 Custom Inputs 块之前
+        let facts_pos = ctx.find("【✅ 宿主已核实事实").unwrap();
+        let bounds_pos = ctx.find("【🚫 判定边界").unwrap();
+        let dod_pos = ctx.find("【🏁 完成定义").unwrap();
+        let flat_pos = ctx.find("【📌 主调度传递的专项业务参数 (Custom Inputs)】").unwrap();
+        assert!(facts_pos < bounds_pos && bounds_pos < dod_pos && dod_pos < flat_pos,
+            "保留键小节须按序置于平铺块之前: {}", ctx);
+
+        // 小节条目逐项渲染
+        assert!(ctx.contains("- 分流判决 route=technical_plan"));
+        assert!(ctx.contains("- 禁止删除现有接口"));
+        assert!(ctx.contains("- 测试全绿"));
+
+        // 普通键仍进平铺块；保留键不再重复出现
+        assert!(ctx.contains("- **business_goal**: 重构权限模块"));
+        assert!(!ctx.contains("**verified_facts**"), "保留键不得进平铺块: {}", ctx);
+        assert!(!ctx.contains("**hard_constraints**"));
+        assert!(!ctx.contains("**definition_of_done**"));
+    }
+
+    #[tokio::test]
+    async fn test_assemble_focus_context_empty_reserved_keys_skipped() {
+        // 空数组/空白串的保留键不渲染小节；仅剩保留键时平铺块也不出现
+        let inputs = json!({
+            "verified_facts": [],
+            "hard_constraints": "   ",
+            "definition_of_done": ["", "  "],
+        });
+        let ctx = assemble_focus_context(&[], Path::new("/tmp"), None, Some(&inputs)).await;
+        assert!(ctx.is_none(), "全空保留键不应产出任何小节: {:?}", ctx);
+
+        let inputs = json!({
+            "verified_facts": ["已担保事实"],
+            "hard_constraints": [],
+            "business_goal": "目标X",
+        });
+        let ctx = assemble_focus_context(&[], Path::new("/tmp"), None, Some(&inputs))
+            .await
+            .unwrap();
+        assert!(ctx.contains("【✅ 宿主已核实事实"));
+        assert!(!ctx.contains("【🚫 判定边界"), "空数组保留键不渲染: {}", ctx);
+        assert!(!ctx.contains("【🏁 完成定义"));
+        assert!(ctx.contains("- **business_goal**: 目标X"));
     }
 
     #[tokio::test]
