@@ -846,14 +846,15 @@ pub async fn evaluate_finish_diff(
     // 但先对会话 tmp 产物做机械嗅探：0 字节/魔数不符这类物理异常是
     // 最粗糙的伪造形态，撞线则不直通——升级 LLM 审查并把异常注入材料
     // （不直接判死：伪格式可能任务授权，审查者取证后裁量）。
-    let mut mechanical_anomalies: Vec<String> = Vec::new();
-    if triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only")) {
-        mechanical_anomalies = sniff_session_tmp_anomalies(session_id);
-        if mechanical_anomalies.is_empty() {
-            return ReviewResult::mechanical_pass(
-                "任务分流判决：终审仅需机械校验（mechanical_only），已跳过 LLM 审查",
-            );
-        }
+    // 嗅探对所有分流模式都跑：code_review/artifact_quality 的产物异常
+    // 同样注入材料作预警（此前只 mechanical_only 用，其他模式只能碰运气）。
+    let mechanical_anomalies: Vec<String> = sniff_session_tmp_anomalies(session_id);
+    if triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only"))
+        && mechanical_anomalies.is_empty()
+    {
+        return ReviewResult::mechanical_pass(
+            "任务分流判决：终审仅需机械校验（mechanical_only），已跳过 LLM 审查",
+        );
     }
 
     // 1. 提取审查材料（Git Diff 或 非 Git 修改文件/产物清单）；
@@ -911,11 +912,12 @@ pub async fn evaluate_finish_diff(
         review_material.push_str(&digest);
     }
 
-    // mechanical_only 嗅探撞线的升级说明：物理异常只报不判——
-    // 伪格式可能任务授权（实测 fakefmt），由审查者取证后裁量
+    // 机械嗅探异常预警：物理异常只报不判——伪格式可能任务授权（实测
+    // fakefmt），由审查者取证后裁量。mechanical_only 模式下本预警即
+    // 升级触发源；其余模式下仅为材料内的核查提示。
     if !mechanical_anomalies.is_empty() {
         review_material.push_str(&format!(
-            "\n\n【⚠️ 机械嗅探异常（本任务分流为 mechanical_only，因产物物理异常升级为 LLM 审查）】\n{}\n👉 提示：异常只代表物理可疑，不代表必为缺陷——伪格式/空文件可能是任务授权的交付形态，请用取证工具核实内容后按事实性/危害性条款裁量。\n",
+            "\n\n【⚠️ 机械嗅探异常】\n{}\n👉 提示：异常只代表物理可疑，不代表必为缺陷——伪格式/空文件可能是任务授权的交付形态，请用取证工具核实内容后按事实性/危害性条款裁量。\n",
             mechanical_anomalies.join("\n")
         ));
     }
