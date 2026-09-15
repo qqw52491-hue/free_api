@@ -765,7 +765,8 @@
     min-height: 0;
 }
 
-/* 🌟 运行中阶段展开：限制视窗高度约3-4行，开启平滑滚动并隔离滚轮穿透 */
+/* 🌟 阶段步骤展开视窗：限制高度并在内容溢出时开启纵向滚动与微型滚动条 */
+.plan-children-wrapper.expanded .plan-children-inner,
 .plan-node.is-active-plan .plan-children-inner {
     max-height: 240px;
     overflow-y: auto;
@@ -775,18 +776,20 @@
     scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
     position: relative;
     padding-right: 2px;
-    scroll-behavior: smooth;
 }
 
+.plan-children-wrapper.expanded .plan-children-inner::-webkit-scrollbar,
 .plan-node.is-active-plan .plan-children-inner::-webkit-scrollbar {
     width: 4px;
 }
 
+.plan-children-wrapper.expanded .plan-children-inner::-webkit-scrollbar-thumb,
 .plan-node.is-active-plan .plan-children-inner::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.2);
     border-radius: 4px;
 }
 
+.plan-children-wrapper.expanded .plan-children-inner::-webkit-scrollbar-thumb:hover,
 .plan-node.is-active-plan .plan-children-inner::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.35);
 }

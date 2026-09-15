@@ -224,6 +224,23 @@ affected_paths + tmp 桥接已够判据，`foo.md` 声明未落盘仍照拦。
 
 `cargo check` 干净、`cargo test --lib` 621/621 绿。
 
+### 阶段十八：终端卡片滚动失灵根因——数据端尾巴太短而非 CSS — 2026-09-15
+
+**现象**：主流程命令执行卡片无滚动条、改 CSS 后"完全没变化"。
+
+**根因链**：`.term-body` 原是 `overflow:hidden`（agent 已修为 auto + 吸底跟随），
+但卡片数据源 `output_tail` 只取末 **8 行** ≈ 160px < 190px 视窗——
+内容从未溢出容器，滚动条自然永不出现。CSS 对、数据端没跟上。
+
+**修复**：`output_tail` 末 48 行 + 8KB 字符兜底（防单行 minified 输出爆卡）；
+agent 侧改动一并保留：展开态滚动条放宽到非运行态、TerminalView 12px 容差吸底、
+deck-body webkit 微型滚动条。
+
+**已知边界**：执行中无流式输出（命令完成才发 view），"执行中吸底"需另建
+流式通道，本次未做；展开卡片滚动的是完成后快照。
+
+`cargo check`/`vue-tsc` 干净，local_shell 9/9 测试绿。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。

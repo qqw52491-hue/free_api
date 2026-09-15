@@ -370,7 +370,27 @@
 .term-body {
     padding: 6px 10px;
     max-height: 190px;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
+.term-body::-webkit-scrollbar {
+    width: 5px;
+}
+
+.term-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.term-body::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+}
+
+.term-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.25);
 }
 
 .term-body pre {

@@ -451,8 +451,9 @@ fn execute_command_blocking(
                 "truncated": is_truncated,
             });
 
-            // UI 结构化视图：命令/退出码/耗时 + 输出尾巴（合并 stdout+stderr 末 8 行，
-            // 卡片缩略；完整输出仍在 stdout 与 step 日志）。
+            // UI 结构化视图：命令/退出码/耗时 + 输出尾巴（合并 stdout+stderr 末 48 行
+            // 且限 8KB——要够溢出 190px 卡片视窗才滚得动，8 行时代内容从未超过容器、
+            // 滚动条形同虚设；完整输出仍在 stdout 与 step 日志）。
             let mut combined = String::new();
             if !stdout_trimmed.is_empty() {
                 combined.push_str(&stdout_trimmed);
@@ -464,12 +465,22 @@ fn execute_command_blocking(
                 combined.push_str(&stderr_trimmed);
             }
             let tail: Vec<&str> = combined.lines().collect();
-            let output_tail: String = tail
+            let mut output_tail: String = tail
                 .iter()
-                .skip(tail.len().saturating_sub(8))
+                .skip(tail.len().saturating_sub(48))
                 .copied()
                 .collect::<Vec<_>>()
                 .join("\n");
+            if output_tail.len() > 8192 {
+                // 超长单行（如 minified js）按字符截尾部，保末尾上下文
+                let cut = output_tail.len() - 8192;
+                let boundary = output_tail
+                    .char_indices()
+                    .find(|(i, _)| *i >= cut)
+                    .map(|(i, _)| i)
+                    .unwrap_or(output_tail.len());
+                output_tail = output_tail[boundary..].to_string();
+            }
             let view = json!({
                 "kind": "terminal",
                 "command": cmd_str,

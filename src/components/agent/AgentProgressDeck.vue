@@ -849,7 +849,20 @@ function formatDurationMs(ms?: number): string | null {
     padding: 4px 6px;
     position: relative;
     scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.deck-body::-webkit-scrollbar {
+    width: 4px;
+}
+
+.deck-body::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 4px;
+}
+
+.deck-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
 }
 
 .todolist-container {
