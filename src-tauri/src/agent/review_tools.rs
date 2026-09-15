@@ -181,21 +181,27 @@ fn contained_multi(workspace: &Path, session_tmp: Option<&Path>, target: &Path) 
     if let Some(tmp) = session_tmp {
         if let Ok(tmp_root) = tmp.canonicalize() {
             let raw = target.to_string_lossy();
-            let stripped = raw
+            let normalized = raw.strip_prefix("./").unwrap_or(&raw);
+            // 裸 "tmp"/"tmp/" 也映射到会话 tmp 根（实测审查者 list_dir "tmp" 列产物区被拒）
+            let stripped = normalized
                 .strip_prefix("tmp/")
-                .or_else(|| raw.strip_prefix("./tmp/"));
+                .or_else(|| (normalized == "tmp").then_some(""));
             let tmp_absolute = match (target.is_absolute(), stripped) {
                 (true, _) => target.to_path_buf(),
                 (false, Some(rel)) => tmp_root.join(rel),
                 (false, None) => tmp_root.join(target),
             };
-            if let Ok(tt) = tmp_absolute.canonicalize() {
-                if tt.starts_with(&tmp_root) {
+            match tmp_absolute.canonicalize() {
+                Ok(tt) if tt.starts_with(&tmp_root) => {
                     // 非 tmp/ 前缀的相对路径不优先映射到 tmp 根，避免吞掉工作区相对路径
                     if target.is_absolute() || stripped.is_some() {
                         return Some(tt);
                     }
                 }
+                // tmp/ 显式命名空间越界（tmp/../x）或指向不存在产物——
+                // 属于 tmp 命名空间语义，拒绝而非落到工作区撞同名文件
+                _ if stripped.is_some() => return None,
+                _ => {}
             }
         }
     }
@@ -648,6 +654,13 @@ mod tests {
         assert!(execute(&ws, Some(&tmp), "read_file", &json!({"path": "/etc/hosts"})).is_err());
         // tmp/../ 逃逸 → 拒绝
         assert!(execute(&ws, Some(&tmp), "read_file", &json!({"path": "tmp/../a.txt"})).is_err());
+        // 裸 tmp / tmp/ / ./tmp 均映射到会话 tmp 根（list_dir 列产物区）
+        for p in ["tmp", "tmp/", "./tmp", "./tmp/"] {
+            let out = execute(&ws, Some(&tmp), "list_dir", &json!({"path": p})).unwrap();
+            assert!(out.contains("report.md"), "list_dir {p} 应列出会话 tmp 产物");
+        }
+        // tmp/ 命名空间内不存在的产物 → 拒绝（不落工作区撞同名路径）
+        assert!(execute(&ws, Some(&tmp), "read_file", &json!({"path": "tmp/ghost.txt"})).is_err());
         // session_tmp 为 None 时 tmp/ 前缀不映射，工作区内无此文件则失败
         assert!(execute(&ws, None, "read_file", &json!({"path": "tmp/report.md"})).is_err());
 
