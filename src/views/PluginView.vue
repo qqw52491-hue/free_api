@@ -632,8 +632,9 @@ const installEntry = async (entry, secrets) => {
       package: entry.package || null,
       runtimeArgs: entry.runtime_args || [],
       remoteUrl: entry.remote_url || null,
-      bearerToken: secrets?.Authorization || null,
+      bearerToken: null,
       envValues: entry.install_kind === 'http' ? {} : (secrets || {}),
+      headerValues: entry.install_kind === 'http' ? (secrets || {}) : null,
     });
     installTarget.value = null;
     await loadPlugins();

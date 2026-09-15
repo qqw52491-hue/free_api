@@ -164,6 +164,7 @@ pub fn run() {
             commands::open_artifact_in_system,
             commands::show_artifact_in_folder,
             commands::read_artifact_file,
+            commands::render_artifact_preview,
             commands::resolve_artifact_absolute_path,
             commands::parse_attachment_file,
             commands::save_and_parse_uploaded_attachment,

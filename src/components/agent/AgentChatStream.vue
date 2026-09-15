@@ -722,6 +722,27 @@ async function handlePreviewArtifact(artifact: ArtifactDescriptor) {
     }
 
     if (!artifact.content) {
+        // PDF/Office 文档：经宿主转换管道（soffice → pdf → pdftoppm → 逐页 PNG）
+        // 渲染为内联 HTML 直接上画布；转换链不可用则回退系统程序打开。
+        const fmt = (artifact.format || "").toLowerCase().replace(/^\./, "");
+        const convertibleExts = ["pdf", "pptx", "ppt", "docx", "doc", "xlsx", "xls", "odt", "ods", "odp", "rtf"];
+        if (convertibleExts.includes(fmt) && artifact.localPath) {
+            try {
+                const res = await invoke<{ html?: string }>("render_artifact_preview", { path: artifact.localPath });
+                if (res?.html) {
+                    emit("open-preview", res.html);
+                    return;
+                }
+            } catch {
+                // 缺 LibreOffice/poppler 或转换失败 → 走系统打开兜底
+            }
+            if (artifact.artifactId) {
+                await openArtifactById(artifact.artifactId);
+            } else {
+                await openArtifactInSystem(artifact.localPath);
+            }
+            return;
+        }
         if (artifact.artifactId) {
             const { readArtifactById } = await import("../../utils/artifact");
             const text = await readArtifactById(artifact.artifactId);

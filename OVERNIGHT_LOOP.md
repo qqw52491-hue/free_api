@@ -162,6 +162,20 @@ affected_paths + tmp 桥接已够判据，`foo.md` 声明未落盘仍照拦。
 
 **验证**：`cargo test --lib` 621/621 绿。
 
+### 阶段十五：MCP 市场凭据通道补齐 + 二进制产物预览 — 2026-09-15
+
+| 改动 | 位置 | 设计要点 |
+|---|---|---|
+| **HTTP header 凭据泛化** | `commands/mcp_registry.rs` | `header_values: HashMap` 全量透传进插件 headers（X-Api-Key/token 等非 Authorization 头不再掉虚空）；`Authorization` 值规范化：裸 token 补 `Bearer `，已带 scheme 整串原样（治"Bearer Bearer xxx"双前缀）；env_values 仍走 stdio env |
+| **npx 缺失友好报错** | 同上 | npx 无运行时兜底（Node 非单二进制，装它要 nvm/fnm 级工程）——安装前探测 `npx --version`，缺了直接报"需安装 Node.js"指引，不再漏 spawn 原始错 |
+| **`render_artifact_preview` 命令** | `commands/chat.rs` | 二进制产物预览：pdf 直走 `pdftoppm -png -r110`；pptx/docx/xlsx/odt/rtf 先 `soffice --headless -env:UserInstallation=<独立profile> --convert-to pdf` 再 pdftoppm；逐页 PNG base64 内联成 `<div>` HTML——复用既有 `open-preview` 画布通道零新 UI。缓存 `previews/<路径+mtime指纹>/` 同文件秒开；前 10 页封顶 + pdfinfo 判截断；缺工具报可操作错误前端回退系统打开 |
+| 前端接线 | `artifact.ts`/`AgentChatStream.vue`/`PluginView.vue` | 可转换格式移出预览黑名单；`handlePreviewArtifact` 二进制分支 invoke 渲染→ emit open-preview(html)，失败静默回退系统打开；市场安装 http 条目改传 headerValues |
+
+**实弹验证**：soffice→pdftoppm 全链跑通（SWE-2 PPT 4 页 → 4 PNG）。
+`cargo test --lib` 621/621 绿，`vue-tsc` 无错。
+**已知边界**：预览靠宿主已装的 soffice/pdftoppm（非捆绑），缺了回退系统打开；
+10 页上限防大文档爆 token/内存；LibreOffice 用独立 profile 防与用户实例互斥。
+
 ## 阶段七：Token 压缩三项 Quick Win（P2/P5/返工段对症）— 2026-09-14
 
 依据阶段六 E 项解剖结论落地的三处零副作用收口，全部 **code-green**（554 agent 测试通过，含新增预检回归），live 验证待下轮实弹。

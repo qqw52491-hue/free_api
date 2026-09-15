@@ -186,13 +186,22 @@ export function isSafeArtifactUrl(value?: string): boolean {
 export function isArtifactPreviewable(artifact: ArtifactDescriptor): boolean {
   const fmt = (artifact.format || "").toLowerCase().replace(/^\./, "");
   
-  // 1. 二进制/不可内联预览的文件扩展名黑名单（如 Excel, Word, PPT, 压缩包等）
+  // 1. 二进制/不可内联预览的文件扩展名黑名单（压缩包/可执行/数据库等）
   const binaryUnpreviewableExts = [
-    "xlsx", "xls", "docx", "doc", "pptx", "ppt", "zip", "tar", "gz", "7z", "rar",
-    "pdf", "exe", "bin", "dll", "so", "dylib", "db", "sqlite"
+    "zip", "tar", "gz", "7z", "rar",
+    "exe", "bin", "dll", "so", "dylib", "db", "sqlite"
   ];
   if (fmt && binaryUnpreviewableExts.includes(fmt)) {
     return false;
+  }
+
+  // 1.5 PDF/Office 文档经宿主转换管道（soffice → pdf → pdftoppm → 逐页 PNG）
+  // 可渲染预览；宿主缺转换工具时 handlePreviewArtifact 会回退"系统程序打开"
+  const convertiblePreviewExts = [
+    "pdf", "pptx", "ppt", "docx", "doc", "xlsx", "xls", "odt", "ods", "odp", "rtf"
+  ];
+  if (fmt && convertiblePreviewExts.includes(fmt)) {
+    return true;
   }
 
   // 2. 如果已经拥有非空内联正文

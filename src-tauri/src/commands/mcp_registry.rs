@@ -245,6 +245,21 @@ fn package_parts(pkg: &serde_json::Value) -> (String, Vec<String>, Vec<String>) 
     (id, args, secrets)
 }
 
+/// Authorization 头值规范化：裸 token（无空白、无 scheme）补 `Bearer ` 前缀；
+/// 已含 scheme 的整串（"Bearer xxx"/"Basic xxx"/"token xxx"）原样保留——
+/// Registry 的填写提示本来就是"填完整值"，用户两种贴法都得能跑。
+fn normalize_authorization_header(v: &str) -> String {
+    let v = v.trim();
+    if v.is_empty() {
+        return v.to_string();
+    }
+    if v.contains(char::is_whitespace) {
+        v.to_string()
+    } else {
+        format!("Bearer {v}")
+    }
+}
+
 /// percent-encode（application/x-www-form-urlencoded 简化版）：
 /// 必须按 UTF-8 字节编码——中文等码位直接 %XXXX 是错的
 fn urlencoding(s: &str) -> String {
@@ -263,7 +278,8 @@ fn urlencoding(s: &str) -> String {
 /// - uvx → ensure_uv 就绪后写 command=uvx（spawn 层自动改写为内置 uv）
 /// - npx → 直写 npx（依赖用户 PATH 上的 Node）
 /// - http → 直写 url（零子进程）
-/// secrets：env_values 为本地包环境变量；http 形态的 bearer_token 进 Authorization 头。
+/// secrets：env_values 为本地包环境变量；http 形态的 header_values 原样进请求头
+/// （兼容旧参数 bearer_token → 规范化进 Authorization 头）。
 #[tauri::command]
 pub async fn install_mcp_registry_entry(
     app: tauri::AppHandle,
@@ -275,6 +291,7 @@ pub async fn install_mcp_registry_entry(
     remote_url: Option<String>,
     bearer_token: Option<String>,
     env_values: Option<std::collections::HashMap<String, String>>,
+    header_values: Option<std::collections::HashMap<String, String>>,
 ) -> Result<McpRegistryInstallResult, String> {
     let plugin_name = {
         let n = name.trim();
@@ -306,6 +323,22 @@ pub async fn install_mcp_registry_entry(
                 .clone()
                 .filter(|p| !p.trim().is_empty())
                 .ok_or_else(|| "缺少 npm 包标识符".to_string())?;
+            // npx 无运行时兜底（Node 不是单二进制，装它需要 nvm/fnm 级别的版本管理器，
+            // 超出 uv 自动就绪的工程量级）——提前探测，缺了就给可操作的明确指引，
+            // 别让 spawn 失败的原始错漏到用户面前。
+            if std::process::Command::new("npx")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| !s.success())
+                .unwrap_or(true)
+            {
+                return Err(
+                    "此插件为 npm 包（npx 形态），但当前系统 PATH 中未找到 Node.js/npx。\n请安装 Node.js（如 pacman -S nodejs npm 或官网 LTS 版）后重试安装。"
+                        .to_string(),
+                );
+            }
             let mut a = vec!["-y".to_string(), pkg];
             a.extend(runtime_args.clone().unwrap_or_default());
             ("npx".to_string(), a, None, Default::default(), env_values.unwrap_or_default())
@@ -314,9 +347,16 @@ pub async fn install_mcp_registry_entry(
             let u = remote_url
                 .filter(|u| !u.trim().is_empty())
                 .ok_or_else(|| "缺少远端 URL".to_string())?;
-            let mut h = std::collections::HashMap::new();
+            // header_values 全量透传（X-Api-Key/token 等非 Authorization 头凭据）；
+            // Authorization 值规范化：裸 token 补 Bearer 前缀，已带 scheme 的整串原样。
+            let mut h = header_values.unwrap_or_default();
+            h.retain(|k, v| !k.trim().is_empty() && !v.trim().is_empty());
+            if let Some(auth) = h.get_mut("Authorization") {
+                *auth = normalize_authorization_header(auth);
+            }
             if let Some(t) = bearer_token.filter(|t| !t.trim().is_empty()) {
-                h.insert("Authorization".to_string(), format!("Bearer {}", t.trim()));
+                h.entry("Authorization".to_string())
+                    .or_insert_with(|| normalize_authorization_header(&t));
             }
             (String::new(), Vec::new(), Some(u), h, Default::default())
         }
