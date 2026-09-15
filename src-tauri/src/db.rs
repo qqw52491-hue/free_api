@@ -191,6 +191,15 @@ pub fn delete_session_completely(
         }
     }
 
+    // 2.5 清理会话专属临时目录 tmp/{session_id}——产物文件（pptx/xlsx/草稿）的真身落盘处；
+    // agent_artifacts 表行已级联删除，磁盘文件不删就成了永久孤儿。
+    if let Some(data_dir) = dirs_next::data_dir() {
+        let session_tmp = data_dir.join("free-api-chat").join("tmp").join(id);
+        if session_tmp.exists() {
+            let _ = std::fs::remove_dir_all(session_tmp);
+        }
+    }
+
     // 3. 严格级联清理所有关联表（覆盖全部 16 张表，包含子审查员历史、Telemetry 指标、产物账本等）
     let _ = conn.execute(
         "DELETE FROM agent_task_records WHERE resource_id IN (SELECT resource_id FROM agent_task_resources WHERE session_id=?1)",
@@ -268,6 +277,34 @@ pub fn cleanup_orphaned_session_data(conn: &Connection) -> Result<usize> {
     for sql in &cleanup_sqls {
         if let Ok(affected) = conn.execute(sql, []) {
             total_cleaned += affected;
+        }
+    }
+
+    // 孤儿会话 tmp 目录清扫：tmp/<sid> 子目录若无对应 chat_sessions 行，
+    // 说明其会话已被删除（或属历史版本残留），产物文件一并清除。
+    if let Some(data_dir) = dirs_next::data_dir() {
+        let tmp_root = data_dir.join("free-api-chat").join("tmp");
+        if let Ok(entries) = std::fs::read_dir(&tmp_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Some(sid) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                    continue;
+                };
+                let alive: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM chat_sessions WHERE id=?1)",
+                        rusqlite::params![sid],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .map(|v| v == 1)
+                    .unwrap_or(true); // 查询失败宁可保留，不赌误删
+                if !alive && std::fs::remove_dir_all(&path).is_ok() {
+                    total_cleaned += 1;
+                }
+            }
         }
     }
 
