@@ -503,9 +503,12 @@ fixture 无答案，杜绝批量解题）。
    字面量；预算=0 直判、预算=1/2 强制收敛边界均按契约执行；
    gemini-3.1-pro-high（旧 35s 时超时率 41%）60/120s 下 0 超时；
    审查者曾尝试 python 内 subprocess 绕过白名单被护栏拦截后自适应
-   改写纯 python。注意：纯产物任务（无代码改动）会被 triage 判
-   mechanical_only 跳过终审——要审产物需任务含代码变更或后续
-   调整 triage 策略。
+   改写纯 python。
+   mechanical_only 覆盖缺口已补两层：产物机械嗅探（0 字节/扩展名-
+   魔数不符/文本含 NUL，BOM 豁免）撞线自动升级 LLM 终审并把异常
+   注入材料裁量——零 LLM 成本，只拦物理异常不碰语义判断；
+   终审新增 verify 工具可重跑契约冻结 verify_command（冻结脚本
+   sha256 核验），"声称已测试"从轨迹推断升级为退出码实证。
 7. **shell 防旁路**：git 脏文件探针实测 shell 变更数（`uncovered_shell_mutations`），
    独立触发阶段审查（防 shell 批量改文件绕过 write_file 门禁）。
 8. **可靠性**：审查者 failover 链（invalid_output→同参重试；超时→跨平台备用审查员；
