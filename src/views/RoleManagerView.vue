@@ -1130,6 +1130,9 @@ function applyPreset(tpl: typeof presetTemplates[0]) {
 function editCard(card: RoleCard) {
   isCreating.value = false;
   isEditing.value = true;
+  // 清空孵化器对话——上一张卡的调优历史若带入本会话，会作为 history 污染
+  // 当前卡的 AI 上下文（currentCard 单独传，历史无需保留）
+  aiChatHistory.value = [];
   let parsedFields: SchemaFieldFormItem[] = [];
   if (card.custom_schema) {
     try {
@@ -1283,22 +1286,33 @@ async function generateWithAi() {
     aiChatHistory.value.push({ role: 'assistant', content: res.reply });
 
     const roleData = res.card;
-    isCreating.value = true;
-    isEditing.value = false;
+    // 编辑态保护：AI 微调已有卡片时保持编辑上下文，不得跳转为"新建"
+    // （upsert 按 name 落库虽不丢数据，但界面状态错乱会让用户以为在改新卡）
+    const wasEditing = isEditing.value;
+    isCreating.value = !wasEditing;
+    isEditing.value = wasEditing;
 
-    form.name = roleData.name || form.name || '';
+    // 编辑态下锁定主键 name——AI 若擅自改名，保存会 upsert 成新卡而原卡原封不动，
+    // 表现为"改了没生效"。改名需求应走「另存新卡」而非编辑流。
+    form.name = wasEditing ? form.name : (roleData.name || form.name || '');
     form.label = roleData.label || form.label || '';
     form.model_id = aiModelId.value || form.model_id || '';
     form.persona_prompt = roleData.persona_prompt || form.persona_prompt || '';
-    form.scope_hints = roleData.scope_hints || '';
-    form.default_test_command = roleData.default_test_command || '';
-    form.allowed_kinds = Array.isArray(roleData.allowed_kinds) ? [...roleData.allowed_kinds] : [];
-    form.hard_scope = roleData.hard_scope || '';
-    form.max_concurrency = 0;
-    form.enabled = true;
-    form.focus_domains = Array.isArray(roleData.focus_domains)
-      ? [...roleData.focus_domains]
-      : ['git_diff', 'changed_files'];
+    // 合并语义：AI 返回中「出现过的键」才覆盖（显式空串=用户要求清空，合法）；
+    // 未返回的键一律保留现状——防止微调已有卡片时把 AI 没管的字段静默洗掉。
+    if ('scope_hints' in roleData) form.scope_hints = roleData.scope_hints ?? '';
+    if ('default_test_command' in roleData) form.default_test_command = roleData.default_test_command ?? '';
+    if (Array.isArray(roleData.allowed_kinds)) form.allowed_kinds = [...roleData.allowed_kinds];
+    if ('hard_scope' in roleData) form.hard_scope = roleData.hard_scope ?? '';
+    if (!wasEditing) {
+      form.max_concurrency = 0;
+      form.enabled = true;
+    }
+    if (Array.isArray(roleData.focus_domains) && roleData.focus_domains.length) {
+      form.focus_domains = [...roleData.focus_domains];
+    } else if (!wasEditing && !form.focus_domains.length) {
+      form.focus_domains = ['git_diff', 'changed_files'];
+    }
 
     if (Array.isArray(roleData.input_fields)) {
       form.input_fields = roleData.input_fields.map((f: any) => ({
