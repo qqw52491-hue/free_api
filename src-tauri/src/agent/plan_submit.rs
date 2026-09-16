@@ -130,7 +130,11 @@ pub async fn handle_submit_plan(
         } else {
             submission.root_cause.trim()
         },
-        target_files.join(", "),
+        if target_files.is_empty() {
+            "（无：声明为纯分析/只读交付，不产生文件改动）".to_string()
+        } else {
+            target_files.join(", ")
+        },
     );
     if !submission.assumptions.is_empty() {
         evidence_excerpt.push_str(&format!("\n关键假设：{}", submission.assumptions.join("；")));

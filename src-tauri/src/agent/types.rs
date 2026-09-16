@@ -110,7 +110,8 @@ pub struct PlanSubmission {
     /// 方案核心摘要与实施步骤（必填）
     #[serde(default)]
     pub plan_summary: String,
-    /// 拟修改或创建的文件路径列表（必填，1~50 条）
+    /// 拟修改或创建的文件路径列表（0~50 条；纯分析/只读审查/报告类交付可传空数组，
+    /// 表示交付物为结论文本而非文件改动——由 Tech Lead 审查裁定声明是否合理）
     #[serde(default)]
     pub target_files: Vec<String>,
     /// 根因假设/问题定性（强烈建议填写）

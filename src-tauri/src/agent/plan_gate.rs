@@ -279,9 +279,12 @@ pub(crate) fn validate_plan_submission(
         .map(|f| f.trim().to_string())
         .filter(|f| !f.is_empty())
         .collect();
-    if target_files.is_empty() || target_files.len() > 50 {
+    // 空数组合法：纯分析/只读审查/报告类交付没有"拟改文件"可声明，交付物即结论文本。
+    // 下游已消化空声明——policy 层判 FastPass，finish 零交集对账门对空声明自然
+    // NotApplicable（plan_targets=None → 跳过），scope 预检只认非空 block.scope。
+    if target_files.len() > 50 {
         return Err(
-            "【⚠️ submit_plan 结构不合法】target_files 必须包含 1~50 条非空文件路径。".to_string(),
+            "【⚠️ submit_plan 结构不合法】target_files 最多 50 条非空文件路径；纯分析/只读任务可传空数组 []。".to_string(),
         );
     }
     let mut evidence_refs: Vec<String> = submission
@@ -1498,10 +1501,10 @@ mod tests {
         s.plan_summary = "修 bug".to_string();
         assert!(validate_plan_submission(&s, true).unwrap_err().contains("plan_summary"));
 
-        // 无目标文件 / 过多目标文件
+        // 目标文件可空（纯分析/只读交付），但上限仍生效
         let mut s = valid_submission();
         s.target_files = vec![];
-        assert!(validate_plan_submission(&s, true).unwrap_err().contains("target_files"));
+        assert!(validate_plan_submission(&s, true).is_ok());
         s.target_files = (0..51).map(|i| format!("f{i}.rs")).collect();
         assert!(validate_plan_submission(&s, true).unwrap_err().contains("target_files"));
 
