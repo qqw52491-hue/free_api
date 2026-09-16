@@ -1,4 +1,4 @@
-use crate::agent::types::TokenUsage;
+use crate::agent::types::{ChildErrorKind, TokenUsage};
 use crate::commands::projects::read_project_resource_excerpts_for_session;
 use crate::db::DbState;
 use crate::llm::{self, ModelConfig};
@@ -541,15 +541,10 @@ impl ReviewerDeliveryData {
 impl ChildReviewResult {
     /// 判定本次结果是否属于基础设施或执行异常（如超时/取消/崩溃/格式损坏/请求层失败，非有效业务审查结论）
     pub fn is_infra_failure(&self) -> bool {
-        matches!(
-            self.error_kind.as_deref(),
-            Some("timed_out")
-                | Some("timeout")
-                | Some("interrupted")
-                | Some("cancelled")
-                | Some("invalid_output")
-                | Some("request_or_stream")
-        )
+        self.error_kind
+            .as_deref()
+            .map(|raw| ChildErrorKind::parse(raw).is_infra_failure())
+            .unwrap_or(false)
     }
 
     /// 提取审查员的纯业务领域交付数据
@@ -1107,7 +1102,7 @@ pub(crate) fn finish_child_run(
     status: &str,
     duration_ms: u64,
     completion_tokens: i64,
-    error_kind: Option<&str>,
+    error_kind: Option<ChildErrorKind>,
     result_json: Option<&str>,
 ) {
     finish_child_run_with_history(
@@ -1128,7 +1123,7 @@ pub(crate) fn finish_child_run_with_history(
     status: &str,
     duration_ms: u64,
     completion_tokens: i64,
-    error_kind: Option<&str>,
+    error_kind: Option<ChildErrorKind>,
     result_json: Option<&str>,
     message_history_json: Option<&str>,
 ) {
@@ -1146,7 +1141,7 @@ pub(crate) fn finish_child_run_with_history(
             chrono::Utc::now().to_rfc3339(),
             duration_ms as i64,
             completion_tokens,
-            error_kind,
+            error_kind.map(|k| k.db_value()),
             result_json,
             message_history_json,
         ],
@@ -1167,7 +1162,7 @@ pub(crate) fn child_invalid_result_json(
 ) -> String {    let mut value: serde_json::Value = serde_json::from_str(&child_error_result_json(
         child_run_id,
         "invalid_output",
-        "invalid_output",
+        &ChildErrorKind::InvalidOutput,
         duration_ms,
         completion_tokens,
         None,
@@ -1181,7 +1176,7 @@ pub(crate) fn child_invalid_result_json(
 fn child_error_result_json(
     child_run_id: &str,
     status: &str,
-    error_kind: &str,
+    error_kind: &ChildErrorKind,
     duration_ms: u64,
     completion_tokens: i64,
     error_detail: Option<&str>,
@@ -1451,11 +1446,11 @@ pub async fn spawn_child_reviewer(
                         "timed_out",
                         duration_ms,
                         0,
-                        Some("timeout"),
+                        Some(ChildErrorKind::Timeout),
                         Some(&child_error_result_json(
                             &child_run_id_clone,
                             "timed_out",
-                            "timeout",
+                            &ChildErrorKind::Timeout,
                             duration_ms,
                             0,
                             None,
@@ -1481,9 +1476,9 @@ pub async fn spawn_child_reviewer(
                         "failed"
                     };
                     let error_kind = if status == "cancelled" {
-                        "cancelled"
+                        ChildErrorKind::Cancelled
                     } else {
-                        "request_or_stream"
+                        ChildErrorKind::RequestOrStream
                     };
                     finish_child_run(
                         &db_clone,
@@ -1491,11 +1486,11 @@ pub async fn spawn_child_reviewer(
                         status,
                         duration_ms,
                         0,
-                        Some(error_kind),
+                        Some(error_kind.clone()),
                         Some(&child_error_result_json(
                             &child_run_id_clone,
                             status,
-                            error_kind,
+                            &error_kind,
                             duration_ms,
                             0,
                             Some(error.as_str()),
@@ -1545,7 +1540,7 @@ pub async fn spawn_child_reviewer(
                     "invalid_output",
                     duration_ms,
                     completion_tokens,
-                    Some("invalid_output"),
+                    Some(ChildErrorKind::InvalidOutput),
                     Some(&child_invalid_result_json(
                         &child_run_id_clone,
                         duration_ms,
@@ -1671,7 +1666,7 @@ pub async fn spawn_child_reviewer(
                         "invalid_output",
                         duration_ms,
                         completion_tokens,
-                        Some(&format!("contract_violation: {}", err)),
+                        Some(ChildErrorKind::ContractViolation(err)),
                         result_json.as_deref(),
                         serde_json::to_string(&messages).ok().as_deref(),
                     );
@@ -1829,7 +1824,7 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
             params![
                 child_run_id,
                 now.to_rfc3339(),
-                child_error_result_json(&child_run_id, "timed_out", "reaped_stale", age_secs.max(0) as u64 * 1000, 0, None)
+                child_error_result_json(&child_run_id, "timed_out", &ChildErrorKind::ReapedStale, age_secs.max(0) as u64 * 1000, 0, None)
             ],
         );
         // 清理日志：reap 只做标记不撕关联——迟到结果仍允许落库（见 finish 守卫），
@@ -1931,7 +1926,7 @@ pub fn recover_orphaned_child_runs_on_session_start(
             params![
                 child_run_id,
                 now,
-                child_error_result_json(child_run_id, "interrupted", "interrupted", 0, 0, None)
+                child_error_result_json(child_run_id, "interrupted", &ChildErrorKind::Interrupted, 0, 0, None)
             ],
         );
     }
@@ -3001,8 +2996,8 @@ mod tests {
             "timed_out",
             45_000,
             0,
-            Some("timeout"),
-            Some(&child_error_result_json(&child_id, "timed_out", "timeout", 45_000, 0, None)),
+            Some(ChildErrorKind::Timeout),
+            Some(&child_error_result_json(&child_id, "timed_out", &ChildErrorKind::Timeout, 45_000, 0, None)),
         );
 
         // 主循环信箱轮询也能取到失败终态（此前失败结果会被静默丢弃）

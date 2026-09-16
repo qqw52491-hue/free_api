@@ -950,38 +950,40 @@
         let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
 
+        use crate::agent::types::ChildErrorKind as K;
+
         // 预扣 2 轮后两次超时：各退 1 轮
         checkpoint.plan_reviewer_retry_count = 0;
         let _ = checkpoint.reserve_plan_review_round();
         let _ = checkpoint.reserve_plan_review_round();
-        assert!(checkpoint.refund_infra_failed_review_round(Some("timed_out")));
+        assert!(checkpoint.refund_infra_failed_review_round(Some(K::Timeout)));
         assert_eq!(checkpoint.plan_reviewer_retry_count, 1);
-        assert!(checkpoint.refund_infra_failed_review_round(Some("interrupted")));
+        assert!(checkpoint.refund_infra_failed_review_round(Some(K::Interrupted)));
         assert_eq!(checkpoint.plan_reviewer_retry_count, 0);
         assert_eq!(checkpoint.reviewer_budget_refunds, 2);
 
         // 预算为 0 时不再退款
-        assert!(!checkpoint.refund_infra_failed_review_round(Some("timed_out")));
+        assert!(!checkpoint.refund_infra_failed_review_round(Some(K::Timeout)));
 
         // 审查者技术失败（invalid_output）应退款：技术失败与业务驳回是两笔账
         // （实测教训：error_kind 落库值是 "timeout" 不是 "timed_out"，也要认）
         checkpoint.plan_reviewer_retry_count = 2;
         checkpoint.reviewer_budget_refunds = 0;
-        assert!(checkpoint.refund_infra_failed_review_round(Some("invalid_output")));
+        assert!(checkpoint.refund_infra_failed_review_round(Some(K::InvalidOutput)));
         assert_eq!(checkpoint.plan_reviewer_retry_count, 1);
-        assert!(checkpoint.refund_infra_failed_review_round(Some("timeout")));
+        assert!(checkpoint.refund_infra_failed_review_round(Some(K::Timeout)));
         assert_eq!(checkpoint.plan_reviewer_retry_count, 0);
 
         // 请求层失败（402/断流等零产出）同属 infra 失败，也应退款
         checkpoint.plan_reviewer_retry_count = 1;
         checkpoint.reviewer_budget_refunds = 0;
-        assert!(checkpoint.refund_infra_failed_review_round(Some("request_or_stream")));
+        assert!(checkpoint.refund_infra_failed_review_round(Some(K::RequestOrStream)));
         assert_eq!(checkpoint.plan_reviewer_retry_count, 0);
 
         // 退款封顶 3 次：防持续故障下预算永不耗尽
         checkpoint.plan_reviewer_retry_count = 5;
         checkpoint.reviewer_budget_refunds = 3;
-        assert!(!checkpoint.refund_infra_failed_review_round(Some("timed_out")));
+        assert!(!checkpoint.refund_infra_failed_review_round(Some(K::Timeout)));
         assert_eq!(checkpoint.plan_reviewer_retry_count, 5);
     }
 

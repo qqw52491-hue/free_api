@@ -820,6 +820,109 @@ pub fn is_task_thin(task: &str) -> bool {
     !has_newline && !has_path_or_file && !has_command_or_symbol && t.chars().count() < 30
 }
 
+/// 子任务（审查/对质/收割）`error_kind` 列的统一分类学。
+///
+/// 生产端只能写枚举值、消费端只认谓词——新增 kind 时编译器强制所有
+/// match 点表态，杜绝"生产了但消费名单漏配"的静默失效（实测教训：
+/// request_or_stream 生产端存在已久，failover/退款名单漏配导致 402
+/// 欠费的备用审查员被当作"裁决"直接交付）。
+///
+/// worker/writer 的 error_kind 存自由文本（如 "writer 单步调用超时"），
+/// 不在此列；stage_review 等别的表另有取值空间。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildErrorKind {
+    /// 超时（落库统一 "timeout"；历史拼写 "timed_out" 由 parse 归一）
+    Timeout,
+    /// 随父任务/用户中断
+    Interrupted,
+    /// 流被主动打断取消
+    Cancelled,
+    /// 模型有响应但输出不合审查契约（含强制收敛后仍吐工具调用）
+    InvalidOutput,
+    /// 请求/流式层失败：402 欠费、断流、DNS 等零产出
+    RequestOrStream,
+    /// 收割器对僵死 running 行的占位标记，迟到真实结果可覆盖
+    ReapedStale,
+    /// 特化契约校验违例（载荷=违规详情），按实质结果交付不走故障转移
+    ContractViolation(String),
+    /// 未收编值：worker/writer 自由文本、未来新增 kind。
+    /// 显式变体而非 `_` 通配——谓词用裸 match 全列举，新增具名变体时
+    /// 所有谓词编译报错强制表态，这正是本枚举存在的意义。
+    Other(String),
+}
+
+impl ChildErrorKind {
+    /// 落库字符串（与历史数据格式逐字节一致；Other 原样透传）
+    pub fn db_value(&self) -> String {
+        match self {
+            Self::Timeout => "timeout".to_string(),
+            Self::Interrupted => "interrupted".to_string(),
+            Self::Cancelled => "cancelled".to_string(),
+            Self::InvalidOutput => "invalid_output".to_string(),
+            Self::RequestOrStream => "request_or_stream".to_string(),
+            Self::ReapedStale => "reaped_stale".to_string(),
+            Self::ContractViolation(detail) => format!("contract_violation: {detail}"),
+            Self::Other(raw) => raw.clone(),
+        }
+    }
+
+    /// 从落库字符串解析（恒成功）；容忍历史拼写 "timed_out" 与裸
+    /// "contract_violation"；无法识别的值收编为 Other 原样保留。
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "timeout" | "timed_out" => Self::Timeout,
+            "interrupted" => Self::Interrupted,
+            "cancelled" => Self::Cancelled,
+            "invalid_output" => Self::InvalidOutput,
+            "request_or_stream" => Self::RequestOrStream,
+            "reaped_stale" => Self::ReapedStale,
+            _ => raw.strip_prefix("contract_violation").map_or_else(
+                || Self::Other(raw.to_string()),
+                |rest| Self::ContractViolation(rest.trim_start_matches(':').trim().to_string()),
+            ),
+        }
+    }
+
+    /// 基础设施/执行异常：零实质产出（区别于业务驳回/实质裁决）。
+    /// ReapedStale 是占位标记、ContractViolation 按实质结果交付、
+    /// Other 按非 infra 处理（与旧字符串未命中的行为一致）。
+    /// 【纪律】裸 match 全列举，禁止 `_` 通配：新增变体必须当场表态。
+    pub fn is_infra_failure(&self) -> bool {
+        match self {
+            Self::Timeout
+            | Self::Interrupted
+            | Self::Cancelled
+            | Self::InvalidOutput
+            | Self::RequestOrStream => true,
+            Self::ReapedStale | Self::ContractViolation(_) | Self::Other(_) => false,
+        }
+    }
+
+    /// 是否触发审查者故障转移换备用审查员。
+    /// 用户主动取消/中断不重派；契约违例与收割占位按结果路径交付。
+    pub fn is_failover_eligible(&self) -> bool {
+        match self {
+            Self::InvalidOutput | Self::Timeout | Self::RequestOrStream => true,
+            Self::Interrupted
+            | Self::Cancelled
+            | Self::ReapedStale
+            | Self::ContractViolation(_)
+            | Self::Other(_) => false,
+        }
+    }
+
+    /// 审查轮次退款资格：与 infra 同集，零产出不烧预算
+    pub fn is_refundable(&self) -> bool {
+        self.is_infra_failure()
+    }
+}
+
+impl std::fmt::Display for ChildErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.db_value())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

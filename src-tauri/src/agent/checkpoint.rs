@@ -1265,16 +1265,14 @@ impl AgentCheckpoint {
     /// "timeout" 而非 "timed_out"，且 invalid_output 未纳入退款，glm 实弹中模型为
     /// 审查员的故障买了单；402 欠费等 request_or_stream 同属零产出 infra 失败）。
     /// 退款封顶 3 次，防止持续故障下预算永不耗尽、模型无限空转。
-    pub fn refund_infra_failed_review_round(&mut self, error_kind: Option<&str>) -> bool {
-        let infra = matches!(
-            error_kind,
-            Some("timed_out")
-                | Some("timeout")
-                | Some("interrupted")
-                | Some("cancelled")
-                | Some("invalid_output")
-                | Some("request_or_stream")
-        );
+    /// kind 归一由 ChildErrorKind::parse 承担（"timed_out"/"timeout" 同义）。
+    pub fn refund_infra_failed_review_round(
+        &mut self,
+        error_kind: Option<crate::agent::types::ChildErrorKind>,
+    ) -> bool {
+        let infra = error_kind
+            .map(|k| k.is_refundable())
+            .unwrap_or(false);
         if !infra || self.reviewer_budget_refunds >= 3 || self.plan_reviewer_retry_count == 0 {
             return false;
         }

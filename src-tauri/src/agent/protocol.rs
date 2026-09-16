@@ -665,7 +665,8 @@ impl DispatchEnvelope {
         }
         if let Err(err) = receipt.validate_against_schema(&self.custom_schema) {
             receipt.status = "invalid_output".to_string();
-            receipt.error_kind = Some(format!("contract_violation: {}", err));
+            receipt.error_kind =
+                Some(crate::agent::types::ChildErrorKind::ContractViolation(err.clone()).db_value());
             return Err(err);
         }
         Ok(())
@@ -782,15 +783,10 @@ impl DeliveryReceipt {
 
     /// 是否属于基础设施/执行异常（超时、中断、崩溃、请求层失败，非业务拒绝）
     pub fn is_infra_failure(&self) -> bool {
-        matches!(
-            self.error_kind.as_deref(),
-            Some("timed_out")
-                | Some("timeout")
-                | Some("interrupted")
-                | Some("cancelled")
-                | Some("invalid_output")
-                | Some("request_or_stream")
-        )
+        self.error_kind
+            .as_deref()
+            .map(|raw| crate::agent::types::ChildErrorKind::parse(raw).is_infra_failure())
+            .unwrap_or(false)
     }
 
     /// 是否正常执行成功

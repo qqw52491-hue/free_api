@@ -1456,13 +1456,29 @@ pub async fn run_tool_phase(
                         let value = serde_json::from_str::<serde_json::Value>(&job.result_json)
                             .unwrap_or(serde_json::json!({}));
                         let error_kind = value.get("error_kind").and_then(|e| e.as_str()).map(|s| s.to_string());
-                        if matches!(
-                            error_kind.as_deref(),
-                            Some("timed_out")
-                                | Some("interrupted")
-                                | Some("cancelled")
-                                | Some("request_or_stream")
-                        ) {
+                        let parsed_kind = error_kind
+                            .as_deref()
+                            .map(crate::agent::types::ChildErrorKind::parse);
+                        // 对质子任务技术性失败（审查员输出非法，未产生有效裁决）：
+                        // 原 blocking 异议保留（不能因空 findings 误清账——那会把"审查
+                        // 员失联"当成"异议撤回"），也不计对质拒撤回次数；允许重新
+                        // resume_child 对质或等宿主判分越过该阶段自动清账。
+                        // 须先于通用 infra 判定——InvalidOutput 同属 infra 集合。
+                        if is_rebuttal_result
+                            && parsed_kind == Some(crate::agent::types::ChildErrorKind::InvalidOutput)
+                        {
+                            checkpoint.remove_stage_review_run(&job.job_id);
+                            checkpoint.stage_review_rebuttal_run_id = None;
+                            stage_notes.push_str(
+                                "\n⚖️ 对质子任务技术性失败（审查员输出非法，未产生有效裁决）：原 blocking 异议保留，可重新 resume_child 对质，或等宿主判分越过该阶段自动清账。",
+                            );
+                            continue;
+                        }
+                        if parsed_kind
+                            .as_ref()
+                            .map(|k| k.is_infra_failure())
+                            .unwrap_or(false)
+                        {
                             checkpoint.remove_stage_review_run(&job.job_id);
                             if is_rebuttal_result {
                                 checkpoint.stage_review_rebuttal_run_id = None;
@@ -1472,18 +1488,6 @@ pub async fn run_tool_phase(
                             // 若在此处判断 has_in_flight_stage_review() 会误判为 true 而漏退款）
                             had_infra_failure_for_refund = true;
                             stage_notes.push_str("\n⚠️ 阶段审查未正常完成，该阶段视为未审。");
-                            continue;
-                        }
-                        // 对质子任务技术性失败（审查员输出非法，未产生有效裁决）：
-                        // 原 blocking 异议保留（不能因空 findings 误清账——那会把"审查
-                        // 员失联"当成"异议撤回"），也不计对质拒撤回次数；允许重新
-                        // resume_child 对质或等宿主判分越过该阶段自动清账。
-                        if is_rebuttal_result && error_kind.as_deref() == Some("invalid_output") {
-                            checkpoint.remove_stage_review_run(&job.job_id);
-                            checkpoint.stage_review_rebuttal_run_id = None;
-                            stage_notes.push_str(
-                                "\n⚖️ 对质子任务技术性失败（审查员输出非法，未产生有效裁决）：原 blocking 异议保留，可重新 resume_child 对质，或等宿主判分越过该阶段自动清账。",
-                            );
                             continue;
                         }
                         let mut withdrawn: Vec<String> = value
@@ -1601,25 +1605,29 @@ pub async fn run_tool_phase(
                     if !(job.job_type == "child_reviewer" || job.job_type.contains("reviewer")) {
                         continue;
                     }
-                    // 基础设施失败（超时/取消/中断）不是实质性审查：退款且不算消费过
-                    // 注意子任务 error_kind 落库值是 "timeout"（status 才是 "timed_out"），两者都要认
+                    // 基础设施失败（超时/取消/中断/非法输出/请求层失败）不是实质性审查：
+                    // 可故障转移的先换备用审查员重派，兜底退款且不算消费过。
+                    // kind 归一由 ChildErrorKind::parse 承担（"timed_out"/"timeout" 同义）。
                     let infra_kind = serde_json::from_str::<serde_json::Value>(&job.result_json)
                         .ok()
                         .and_then(|v| v.get("error_kind").and_then(|e| e.as_str()).map(|s| s.to_string()));
-                    let is_infra = matches!(
-                        infra_kind.as_deref(),
-                        Some("timed_out")
-                            | Some("timeout")
-                            | Some("interrupted")
-                            | Some("cancelled")
-                            | Some("request_or_stream")
-                    );
-                    if is_infra {
-                        let kind = infra_kind.as_deref().unwrap_or("timed_out");
-                        // 【冒烟实测抓到的坑】超时类失败必须先走 failover 重派备用审查员；
+                    let parsed_kind = infra_kind
+                        .as_deref()
+                        .map(crate::agent::types::ChildErrorKind::parse);
+                    if parsed_kind
+                        .as_ref()
+                        .map(|k| k.is_infra_failure())
+                        .unwrap_or(false)
+                    {
+                        // 【冒烟实测抓到的坑】失败类结论必须先走 failover 重派备用审查员；
                         // 只退款的话主 Agent 会对着已失败的审查任务永远 wait（信箱无结论可收）。
-                        // request_or_stream（402 欠费/断流等零产出失败）与超时同性质，同样换平台重派。
-                        if matches!(kind, "timeout" | "timed_out" | "request_or_stream") {
+                        // request_or_stream（402 欠费/断流等零产出失败）与超时同性质，同样换平台重派；
+                        // invalid_output 也走同一链（此前单列分支，语义一致故合并）。
+                        if parsed_kind
+                            .as_ref()
+                            .map(|k| k.is_failover_eligible())
+                            .unwrap_or(false)
+                        {
                             match crate::agent::main_loop::try_plan_reviewer_failover(
                                 app,
                                 state.inner(),
@@ -1628,7 +1636,7 @@ pub async fn run_tool_phase(
                                 workspace_dir,
                                 checkpoint,
                                 interrupt_rx.clone(),
-                                kind,
+                                parsed_kind.as_ref().unwrap(),
                             )
                             .await
                             {
@@ -1636,7 +1644,7 @@ pub async fn run_tool_phase(
                                     checkpoint.replace_expected_reviewer_run_id(&job.job_id, &new_run_id);
                                     failover_notes.push_str(&format!(
                                         "\n🔁 审查者故障转移：上次结论异常（{}），已自动改用备用审查员重派 (child_run_id: {})\n",
-                                        kind, new_run_id
+                                        parsed_kind.as_ref().unwrap(), new_run_id
                                     ));
                                     continue;
                                 }
@@ -1644,36 +1652,8 @@ pub async fn run_tool_phase(
                             }
                         }
                         checkpoint.record_reviewer_failure_for_run(&job.job_id, infra_kind.as_deref().unwrap_or("infra_failure"));
-                        checkpoint.refund_infra_failed_review_round(infra_kind.as_deref());
+                        checkpoint.refund_infra_failed_review_round(parsed_kind);
                         continue;
-                    }
-                    // 【冒烟实测抓到的坑】invalid_output 的结论若从 wait_jobs 交付，
-                    // 必须同样走故障转移重派（此前只覆盖超时类）——否则模型只能对着
-                    // 一段错误 JSON 重复派发或直接 ask_human 弃赛。
-                    if infra_kind.as_deref() == Some("invalid_output") {
-                        match crate::agent::main_loop::try_plan_reviewer_failover(
-                            app,
-                            state.inner(),
-                            parent_run_id,
-                            final_session_id,
-                            workspace_dir,
-                            checkpoint,
-                            interrupt_rx.clone(),
-                            "invalid_output",
-                        )
-                        .await
-                        {
-                            Ok(Some(new_run_id)) => {
-                                checkpoint.replace_expected_reviewer_run_id(&job.job_id, &new_run_id);
-                                failover_notes.push_str(&format!(
-                                    "\n🔁 审查者故障转移：上次结论异常（invalid_output），已自动改用备用审查员重派 (child_run_id: {})\n",
-                                    new_run_id
-                                ));
-                                continue;
-                            }
-                            _ => {}
-                        }
-                        checkpoint.record_reviewer_failure_for_run(&job.job_id, "invalid_output");
                     }
                     // wait_jobs 交付路径通过 record_reviewer_delivery_for_run 实现齐套屏障、幂等去重与现场真聚合
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&job.result_json) {
@@ -2001,7 +1981,7 @@ pub async fn run_tool_phase(
                                             "failed",
                                             started_at.elapsed().as_millis() as u64,
                                             0,
-                                            Some("request_or_stream"),
+                                            Some(crate::agent::types::ChildErrorKind::RequestOrStream),
                                             None,
                                         );
                                         return;
@@ -2023,7 +2003,7 @@ pub async fn run_tool_phase(
                                             "timed_out",
                                             started_at.elapsed().as_millis() as u64,
                                             0,
-                                            Some("timeout"),
+                                            Some(crate::agent::types::ChildErrorKind::Timeout),
                                             None,
                                         );
                                         return;
@@ -2055,7 +2035,7 @@ pub async fn run_tool_phase(
                                                 "invalid_output",
                                                 duration_ms,
                                                 completion_tokens,
-                                                Some("invalid_output"),
+                                                Some(crate::agent::types::ChildErrorKind::InvalidOutput),
                                                 Some(&crate::agent::child_reviewer::child_invalid_result_json(
                                                     &new_child_run_id_clone,
                                                     duration_ms,

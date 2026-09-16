@@ -1302,7 +1302,10 @@ pub async fn run_writer_loop(
         &result.status,
         result.duration_ms,
         result.completion_tokens,
-        result.error_kind.as_deref(),
+        result
+            .error_kind
+            .as_deref()
+            .map(|s| crate::agent::types::ChildErrorKind::Other(s.to_string())),
         Some(&serde_json::to_string(&result).unwrap_or_default()),
         hist_json.as_deref(),
     );

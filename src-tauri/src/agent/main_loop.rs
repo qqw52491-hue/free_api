@@ -394,9 +394,9 @@ pub(crate) async fn try_plan_reviewer_failover(
     workspace_dir: &std::path::Path,
     checkpoint: &mut AgentCheckpoint,
     interrupt_rx: watch::Receiver<u64>,
-    // 当前仅 invalid_output/timed_out 共用同一重派动作；保留参数供 〇·二 待议的
-    // "invalid_output 纳入退款"设计分化行为（届时启用）
-    _error_kind: &str,
+    // 当前仅 invalid_output/timeout/request_or_stream 共用同一重派动作；保留参数供
+    // 后续"按 kind 分化重派策略"设计（届时启用）
+    _error_kind: &crate::agent::types::ChildErrorKind,
 ) -> Result<Option<String>, String> {
     if checkpoint.plan_reviewer_failover_count >= 2
         || checkpoint.plan_reviewer_last_dispatch.is_none()
@@ -1345,13 +1345,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                             // 【审查者故障转移链】invalid_output → 同参数重试；超时/请求层失败 → 切换跨平台备用审查员。
                             // 封顶 2 次；两次都失败 → 退款 + 升级人工（ask_human 路径不变）。
                             // request_or_stream（402/网络断流等零产出失败）与超时同性质，必须触发换平台重派。
-                            let failover_eligible = matches!(
-                                receipt.error_kind.as_deref(),
-                                Some("invalid_output")
-                                    | Some("timed_out")
-                                    | Some("timeout")
-                                    | Some("request_or_stream")
-                            );
+                            let receipt_kind = receipt
+                                .error_kind
+                                .as_deref()
+                                .map(crate::agent::types::ChildErrorKind::parse);
+                            let failover_eligible = receipt_kind
+                                .as_ref()
+                                .map(|k| k.is_failover_eligible())
+                                .unwrap_or(false);
                             if failover_eligible {
                                 match try_plan_reviewer_failover(
                                     &app,
@@ -1361,7 +1362,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                                     &workspace_dir,
                                     &mut checkpoint,
                                     interrupt_rx.clone(),
-                                    receipt.error_kind.as_deref().unwrap_or("?"),
+                                    receipt_kind.as_ref().unwrap(),
                                 )
                                 .await
                                 {
@@ -1386,7 +1387,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                                     &receipt.child_run_id,
                                     receipt.error_kind.as_deref().unwrap_or("infra_failure"),
                                 );
-                                checkpoint.refund_infra_failed_review_round(receipt.error_kind.as_deref());
+                                checkpoint.refund_infra_failed_review_round(receipt_kind);
                             } else {
                                 let delivery = receipt.as_reviewer_delivery().unwrap_or_else(|| {
                                     crate::agent::child_reviewer::ReviewerDeliveryData {
@@ -1446,15 +1447,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                         let failed_kind = job
                             .error_kind
                             .as_deref()
-                            .filter(|k| {
-                                matches!(
-                                    *k,
-                                    "timed_out"
-                                        | "invalid_output"
-                                        | "timeout"
-                                        | "request_or_stream"
-                                )
-                            });
+                            .map(crate::agent::types::ChildErrorKind::parse)
+                            .filter(|k| k.is_failover_eligible());
                         if let Some(kind) = failed_kind {
                             match try_plan_reviewer_failover(
                                 &app,
@@ -1464,7 +1458,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 &workspace_dir,
                                 &mut checkpoint,
                                 interrupt_rx.clone(),
-                                kind,
+                                &kind,
                             )
                             .await
                             {
