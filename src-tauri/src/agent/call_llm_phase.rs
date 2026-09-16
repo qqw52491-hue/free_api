@@ -480,6 +480,19 @@ pub async fn run_call_llm_and_run_tool_phases(
                 "duration_ms": total_dur,
                 "timestamp": chrono::Utc::now().timestamp_millis(),
             }));
+            // 行表同步落库：快照 upsert 只写 steps_json，缺了这行 agent_run_steps
+            // 就没有失败步——重启/行表驱动的步骤条里拦截交锋整段蒸发，且后续
+            // 步骤 seq 相对快照 id 偏移（实测偏移 2 导致 read 拦截步隐形）。
+            if let Some(step_value) = run_trace_steps.last() {
+                if let Err(e) = crate::agent::run_trace::append_step(
+                    state.inner(),
+                    run_id,
+                    (run_trace_steps.len() - 1) as i64,
+                    step_value,
+                ) {
+                    eprintln!("[run-trace] 无法持久化失败尝试步骤: {e}");
+                }
+            }
             let _ = crate::agent::run_trace::upsert_snapshot(
                 state.inner(),
                 run_id,

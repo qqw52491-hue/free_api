@@ -7,7 +7,7 @@ use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::{AgentInstruction, TodoItem};
 use crate::llm::ModelConfig;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -452,9 +452,10 @@ impl SandwichContext {
         }
     }
 
-    /// 重复读取硬拦截（四条件签名）：同工具+同路径第 3 次读取且内容未变 → 拒绝。
+    /// 重复读取硬拦截（四条件签名）：同工具+同路径+同窗口第 3 次读取且内容未变 → 拒绝。
     /// 返回 Some(拒绝消息) 时宿主不得执行该读取；None = 放行并记账。
     /// 合法重读自动放行：文件内容变了（改后验证）、首次/前两次读取。
+    /// path 由调用方传入"路径|窗口"复合键——窗口不同即不同信息，不计复读。
     pub fn check_repeat_read(
         &mut self,
         tool: &str,
@@ -502,7 +503,7 @@ impl SandwichContext {
             // 正常累加计数（不再使用哨兵值：报出"已读取 2147483647 次"既荒谬又无信息量）。
             // 内容变化时上方已重置指纹，因此 >=3 后持续拦截，直至文件真正被修改。
             return Some(format!(
-                "【重复读取拦截】该文件你已连续读取 {} 次且内容未变化（哈希一致，共 {} 行）。上次读取的内容开头：\n{}\n{}；如需重读请先修改文件。严禁原样重读。",
+                "【重复读取拦截】该文件同一读取区间你已连续读取 {} 次且内容未变化（哈希一致，共 {} 行）。上次读取的内容开头：\n{}\n{}；如需重读请先修改文件。严禁原样重读；其它行号区间的读取不受此限制。",
                 times, lines, sample, handle_hint
             ));
         }
@@ -559,6 +560,28 @@ impl SandwichContext {
         Some((tool, canonical.to_string_lossy().to_string()))
     }
 
+    /// 读取窗口参数归一化为判重令牌：start_line/end_line/offset/limit/head/tail
+    /// 任一不同即不同窗口。无窗口参数 = 整读语义（空串）。顺序精读大文件的
+    /// 不同行窗是新信息而非复读——实测同一文件 L1-150/L151-300/L301-500
+    /// 曾被"文件哈希一致"误拦，把模型逼回搜索循环。
+    fn read_window_token(params: &Value) -> String {
+        const WINDOW_KEYS: &[&str] = &[
+            "start_line", "end_line", "startLine", "endLine", "offset", "limit", "head", "tail",
+        ];
+        let mut token = String::new();
+        for k in WINDOW_KEYS {
+            if let Some(v) = params.get(*k) {
+                if !token.is_empty() {
+                    token.push(';');
+                }
+                token.push_str(k);
+                token.push('=');
+                token.push_str(&v.to_string());
+            }
+        }
+        token
+    }
+
     /// 派发层入口：识别读取型指令，提取路径，宿主读文件后执行四条件判定。
     /// 非读取型工具 / 路径不可解析 / 文件不可读 → None（放行，让工具自己报错）。
     pub fn check_repeat_read_dispatch(
@@ -580,7 +603,9 @@ impl SandwichContext {
         } else {
             std::fs::read_to_string(&canonical).ok()?
         };
-        self.check_repeat_read(&tool, &ledger_path, &content)
+        let window = Self::read_window_token(&instruction.get_params());
+        let ledger_key = format!("{}|{}", ledger_path, window);
+        self.check_repeat_read(&tool, &ledger_key, &content)
     }
 
     /// 读取成功后回填持久化句柄：让拦截回执能指向 output_id 证据，
@@ -595,7 +620,8 @@ impl SandwichContext {
         else {
             return;
         };
-        let key = format!("{}|{}", tool, ledger_path);
+        let window = Self::read_window_token(&instruction.get_params());
+        let key = format!("{}|{}|{}", tool, ledger_path, window);
         if let Some(entry) = self.read_ledger.get_mut(&key) {
             entry.last_output_id = Some(output_id.to_string());
         }
@@ -1137,6 +1163,51 @@ mod repeat_read_tests {
         // 重置后计数从 1 起：再连续两次放行，第 3 次同内容又拦（count ≥ 3）
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_none(), "重置后第 2 次放行");
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_some(), "第 3 次同内容再拦");
+    }
+
+    #[test]
+    fn sequential_window_reads_of_same_file_are_not_deduped() {
+        // 回归：顺序窗口精读大文件是规定动作——同一文件不同行窗各自计数，
+        // 只有"同窗口+同内容"第 3 次才拦（实测 L1-150/L151-300/L301-500
+        // 曾被误拦，把模型逼回搜索循环；与 search→read 硬闸形成双堵死锁）。
+        let mut context = ctx();
+        let ws = std::env::temp_dir().join(format!("eval-window-read-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let file = ws.join("big.txt");
+        std::fs::write(
+            &file,
+            (1..=400)
+                .map(|i| format!("line{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let path_str = file.to_string_lossy().to_string();
+
+        let read_window = |s: i64, e: i64| crate::agent::types::AgentInstruction {
+            tool: Some("local_file".to_string()),
+            action: Some("read".to_string()),
+            command: Some(serde_json::json!({
+                "path": path_str.clone(),
+                "start_line": s,
+                "end_line": e,
+            })),
+            ..Default::default()
+        };
+
+        // 三个不同行窗顺序精读：全部放行（修前第三窗会被"哈希一致"误拦）
+        assert!(context.check_repeat_read_dispatch(&read_window(1, 150), &ws).is_none(), "窗口1 首读放行");
+        assert!(context.check_repeat_read_dispatch(&read_window(151, 300), &ws).is_none(), "窗口2 首读放行");
+        assert!(context.check_repeat_read_dispatch(&read_window(301, 400), &ws).is_none(), "窗口3 首读放行");
+
+        // 同一窗口同内容复读：第 3 次仍拦（保护原语义不退化）
+        assert!(context.check_repeat_read_dispatch(&read_window(1, 150), &ws).is_none(), "窗口1 第 2 次放行");
+        assert!(
+            context.check_repeat_read_dispatch(&read_window(1, 150), &ws).is_some(),
+            "窗口1 第 3 次同内容必须拦截"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
