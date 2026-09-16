@@ -77,12 +77,16 @@
             v-for="session in projectSessionList(project.id)"
             :key="session.id"
             class="child-leaf-row session-leaf"
-            :class="{ active: activeSessionId === session.id, 'is-draft': session.isDraft }"
+            :class="{ active: activeSessionId === session.id, 'is-draft': session.isDraft, 'is-running': isSessionRunning(session.id) }"
             @click="emit('open-session', session)"
             @dblclick="startRename(session)"
           >
-            <svg class="child-icon-svg" viewBox="0 0 24 24">
+            <span class="task-state" :class="{ running: isSessionRunning(session.id) }"></span>
+            <svg v-if="!isSessionRunning(session.id)" class="child-icon-svg" viewBox="0 0 24 24">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+            </svg>
+            <svg v-else class="child-icon-svg running-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
             </svg>
             <input
               v-if="renamingId === session.id"
@@ -319,7 +323,7 @@ const props = defineProps<{
   allModels: ModelOption[];
   activeSessionId?: string;
   activeProjectId?: string;
-  drafts?: Array<{ id: string; label: string; projectId?: string; isDraft?: boolean }>;
+  drafts?: Array<{ id: string; label: string; projectId?: string; isDraft?: boolean; running?: boolean }>;
 }>();
 
 const emit = defineEmits<{
@@ -393,6 +397,12 @@ function projectSessionList(projectId: string): TreeSessionItem[] {
     list.push({ id: p.id, title: p.title || "未命名对话", isDraft: false, projectId });
   }
   return list;
+}
+
+// 与外部 Tasks 列表同一数据源：tab.running 由 AgentPanel 的 update:running 事件维护，
+// tab.id 即 session.id——项目内会话无需额外轮询即可复用同一运行态
+function isSessionRunning(sessionId: string): boolean {
+  return props.drafts?.some((d) => d.id === sessionId && d.running === true) ?? false;
 }
 
 async function toggleExpand(projectId: string) {
@@ -826,6 +836,36 @@ onMounted(() => {
   stroke: currentColor;
   stroke-width: 1.8;
   flex-shrink: 0;
+}
+
+.task-state {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #52525b;
+  transition: all 0.2s ease;
+}
+
+.task-state.running {
+  background: #38bdf8;
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.8);
+  animation: task-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes task-pulse {
+  0%, 100% { transform: scale(0.85); opacity: 0.6; }
+  50% { transform: scale(1.2); opacity: 1; }
+}
+
+.running-spinner {
+  color: #38bdf8;
+  animation: tree-spin 1s linear infinite;
+}
+
+@keyframes tree-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .leaf-label {
