@@ -288,6 +288,7 @@ fn build_path_scope_manifest(
             "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
              • 通用自由会话（未绑定项目工作区）\n\
                - 当前对话为通用会话模式，未绑定具体项目工作区，工作区保持为空。请勿臆造或宣称已绑定任何本地项目工程目录。\n\
+               - 用户问及\"工作区/工作目录\"时应如实回答：本会话未绑定任何工作区，仅有下列会话临时目录作为产物与草稿的暂存区——它是暂存区而非工作区，切勿将其称作\"工作区\"\"项目目录\"或\"工作目录\"。\n\
              • 会话专属临时目录: `{}`\n\
                - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录。\n\
                - 临时产物与草稿隔离: 凡未明确要求存放于项目工程中的临时文件、数据导出或中间脚本，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入宿主当前运行目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
@@ -3563,6 +3564,17 @@ mod path_scope_manifest_tests {
                     "scope card (has_ws={has_ws}) 缺失锚点: {anchor}"
                 );
             }
+        }
+    }
+
+    /// 自由会话卡片必须钉死"未绑定工作区 + tmp 是暂存区非工作区"的语义——
+    /// 防模型 pwd 探到会话目录后将其报成"已绑定工作区/工作目录"（实测复现）。
+    #[test]
+    fn free_session_card_distinguishes_scratch_dir_from_workspace() {
+        let tmp = PathBuf::from("/data/free-api-chat/tmp/sid-2");
+        let card = build_path_scope_manifest(&tmp, &tmp, false);
+        for anchor in ["未绑定", "暂存区而非工作区", "会话专属临时目录"] {
+            assert!(card.contains(anchor), "自由会话卡片缺失语义锚点: {anchor}");
         }
     }
 }
