@@ -75,16 +75,19 @@
                             <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
                             <button
                                 type="button"
-                                class="msg-fork-btn"
-                                :disabled="isRunning"
-                                :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '从此处分叉为新会话（复制此前的历史与任务状态）'"
-                                @click.stop="$emit('fork', { messageId: message.id })"
+                                class="msg-copy-btn"
+                                :class="{ copied: copiedMessageId === `legacy-${message.id}` }"
+                                :title="copiedMessageId === `legacy-${message.id}` ? '已复制到剪贴板' : '复制消息内容'"
+                                @click.stop="copyMessageContent(`legacy-${message.id}`, parseUserMessageAttachments(message.content).cleanText || message.content)"
                             >
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
-                                    <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                                <svg v-if="copiedMessageId === `legacy-${message.id}`" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="20 6 9 17 4 12" />
                                 </svg>
-                                <span>分叉</span>
+                                <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                                    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                                </svg>
+                                <span>{{ copiedMessageId === `legacy-${message.id}` ? "已复制" : "复制" }}</span>
                             </button>
                         </div>
                     </template>
@@ -108,19 +111,25 @@
                         v-if="parseUserMessageAttachments(entry.content).cleanText"
                         :text="parseUserMessageAttachments(entry.content).cleanText"
                     />
-                    <button
-                        type="button"
-                        class="msg-fork-btn"
-                        :disabled="isRunning"
-                        :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '从此处分叉为新会话（复制此前的历史与任务状态）'"
-                        @click.stop="$emit('fork', { timestampMs: entry.timestamp })"
-                    >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
-                            <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
-                        </svg>
-                        <span>分叉</span>
-                    </button>
+                    <div class="msg-side-actions">
+                        <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                        <button
+                            type="button"
+                            class="msg-copy-btn"
+                            :class="{ copied: copiedMessageId === `user-${entry.id}` }"
+                            :title="copiedMessageId === `user-${entry.id}` ? '已复制到剪贴板' : '复制消息内容'"
+                            @click.stop="copyMessageContent(`user-${entry.id}`, parseUserMessageAttachments(entry.content).cleanText || entry.content)"
+                        >
+                            <svg v-if="copiedMessageId === `user-${entry.id}`" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                            <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                            </svg>
+                            <span>{{ copiedMessageId === `user-${entry.id}` ? "已复制" : "复制" }}</span>
+                        </button>
+                    </div>
                 </article>
                 <article v-else-if="entry.type === 'message'" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
                     <template v-if="entry.role === 'agent' || entry.role === 'assistant'">
@@ -183,16 +192,19 @@
                             <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                             <button
                                 type="button"
-                                class="msg-fork-btn"
-                                :disabled="isRunning"
-                                :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '从此处分叉为新会话（复制此前的历史与任务状态）'"
-                                @click.stop="$emit('fork', { timestampMs: entry.timestamp })"
+                                class="msg-copy-btn"
+                                :class="{ copied: copiedMessageId === `human-${entry.id}` }"
+                                :title="copiedMessageId === `human-${entry.id}` ? '已复制到剪贴板' : '复制消息内容'"
+                                @click.stop="copyMessageContent(`human-${entry.id}`, parseUserMessageAttachments(entry.content).cleanText || entry.content)"
                             >
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
-                                    <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                                <svg v-if="copiedMessageId === `human-${entry.id}`" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="20 6 9 17 4 12" />
                                 </svg>
-                                <span>分叉</span>
+                                <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                                    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                                </svg>
+                                <span>{{ copiedMessageId === `human-${entry.id}` ? "已复制" : "复制" }}</span>
                             </button>
                         </div>
                     </template>

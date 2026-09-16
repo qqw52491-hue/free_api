@@ -2224,6 +2224,18 @@ button.root-row {
 .msg-side-actions .msg-clock {
     margin-top: 0;
 }
+.msg-side-actions .msg-copy-btn {
+    opacity: 0;
+    transition: opacity 0.18s cubic-bezier(0.16, 1, 0.3, 1), background 0.15s ease, color 0.15s ease;
+}
+article:hover .msg-side-actions .msg-copy-btn,
+.saved-message:hover .msg-side-actions .msg-copy-btn,
+.user-message:hover .msg-side-actions .msg-copy-btn {
+    opacity: 1;
+}
+.msg-side-actions .msg-copy-btn.copied {
+    opacity: 1 !important;
+}
 .msg-fork-btn {
     display: inline-flex;
     align-items: center;
