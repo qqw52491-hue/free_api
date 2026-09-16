@@ -1595,7 +1595,16 @@ mod tests {
             "fn alpha_one() {}\nfn alpha_two() {}\nfn alpha_three() {}\nfn alpha_four() {}\nfn alpha_five() {}\n",
         )
         .unwrap();
-        let path = file.to_str().unwrap().to_string();
+        // 必须返回 canonical 路径：生产侧 resolved_root 一律 canonicalize 后
+        // 持久化，硬闸判定键同径归一；macOS 上 temp_dir 经 /var→/private/var
+        // 软链，若种子写未 canonical 的原始路径，闸键与步键对不上、硬闸静默
+        // 失效（本文件三个 gate 用例曾因此在本机全挂）。
+        let path = file
+            .canonicalize()
+            .unwrap_or_else(|_| file.clone())
+            .to_str()
+            .unwrap()
+            .to_string();
         (temp, path)
     }
 

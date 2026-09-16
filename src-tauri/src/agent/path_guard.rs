@@ -152,7 +152,19 @@ pub fn ensure_allowed_path(
         false
     };
 
-    if in_workspace {
+    // 会话 tmp 身份优先于工作区归属：自由会话里 workspace_root 即 session_tmp
+    // （见 main_loop::resolve_workspace_dir），若先判工作区会把 tmp 产物全部误标
+    // is_session_tmp=false，破坏草稿免审与盲写基线豁免。项目会话两区天然不相交
+    // （tmp 在应用数据目录下），判定顺序对其无影响。
+    if in_tmp {
+        let display = canonical.to_string_lossy().to_string();
+        Ok(AllowedPathResolution {
+            canonical_path: canonical,
+            display_path: display,
+            is_session_tmp: true,
+            newly_created_dir: newly_created,
+        })
+    } else if in_workspace {
         let display = canonical
             .strip_prefix(&ws_canonical)
             .unwrap_or(&canonical)
@@ -162,14 +174,6 @@ pub fn ensure_allowed_path(
             canonical_path: canonical,
             display_path: display,
             is_session_tmp: false,
-            newly_created_dir: newly_created,
-        })
-    } else if in_tmp {
-        let display = canonical.to_string_lossy().to_string();
-        Ok(AllowedPathResolution {
-            canonical_path: canonical,
-            display_path: display,
-            is_session_tmp: true,
             newly_created_dir: newly_created,
         })
     } else {
@@ -308,6 +312,35 @@ mod tests {
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("工作区越界拦截"));
         let _ = std::fs::remove_dir_all(ws);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    /// 自由会话场景：workspace_root 即 session_tmp 时，tmp 路径仍须判定为
+    /// is_session_tmp=true（tmp 身份优先于工作区归属），否则草稿免审与
+    /// 盲写基线豁免失效，tmp 覆写会误撞"未读基线"拦截。
+    #[test]
+    fn test_session_tmp_identity_wins_when_workspace_is_tmp() {
+        let session_id = format!("test_sess_{}", uuid::Uuid::new_v4());
+        let tmp_root = get_session_tmp_dir(&session_id);
+        std::fs::create_dir_all(&tmp_root).unwrap();
+        std::fs::write(tmp_root.join("draft.md"), "v1").unwrap();
+
+        // workspace_root == session_tmp：tmp 内路径须归 tmp 而非工作区
+        let res = ensure_allowed_path("tmp/draft.md", &tmp_root, Some(&session_id), false)
+            .unwrap();
+        assert!(res.is_session_tmp, "tmp 路径在 workspace==tmp 下仍须保持 tmp 身份");
+
+        // 工作区外仍拒绝
+        let outside = temp_dir();
+        assert!(ensure_allowed_path(
+            outside.join("x.txt").to_str().unwrap(),
+            &tmp_root,
+            Some(&session_id),
+            false
+        )
+        .is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp_root);
         let _ = std::fs::remove_dir_all(outside);
     }
 

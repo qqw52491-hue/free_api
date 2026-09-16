@@ -245,6 +245,24 @@ fn normalize_tmp_declared(target: &str, session_tmp: &std::path::Path) -> String
 ///
 /// 文案与 path_guard 路由规则、artifact_manager 登记入口、finish 门禁的
 /// tmp/ 对账行为必须保持一致——见 `path_scope_manifest_*` 测试。
+/// 解析会话物理工作区：显式 override > 项目绑定 > 自由会话回落到会话产物目录。
+/// 自由会话绝不回落进程 cwd——cwd 是宿主"事故目录"（从哪启动就是哪，常是仓库
+/// 本体）：path_guard 双白名单会把它整个放行，提示词承诺的"工作区为空"与物理
+/// 现实矛盾，模型 pwd/ls 一探即把宿主目录报成"已绑定工作区"（实测复现）。
+fn resolve_workspace_dir(
+    workspace_override: Option<std::path::PathBuf>,
+    project_workspace: Option<std::path::PathBuf>,
+    session_id: &str,
+) -> std::path::PathBuf {
+    workspace_override.or(project_workspace).unwrap_or_else(|| {
+        let t = crate::agent::path_guard::get_session_tmp_dir(session_id);
+        // 必须落盘存在：path_guard 每次校验都 canonicalize workspace_root，
+        // 目录不存在会让全部路径检查报错（tmp 懒创建只在写入时触发，等不到）。
+        let _ = std::fs::create_dir_all(&t);
+        t
+    })
+}
+
 fn build_path_scope_manifest(
     workspace_dir: &std::path::Path,
     session_tmp_dir: &std::path::Path,
@@ -529,18 +547,16 @@ async fn run_agent_main_loop_in_workspace_inner(
     let has_workspace_override = workspace_override.is_some();
     let is_explicit_workspace = is_project_session || has_workspace_override;
     // Skill、插件与 shell 工具共享本轮运行时工作目录；恢复时会重新读取并按哈希复用未变更的 Skill。
-    let workspace_dir = workspace_override
-        .or(project_workspace)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace_dir =
+        resolve_workspace_dir(workspace_override, project_workspace, &final_session_id);
     if !workspace_dir.is_dir() {
         return Err(format!("Agent 工作区不可用：{}", workspace_dir.display()));
     }
     // 运行起始时间：成功完成时自动登记运行期间新生成的工作区产物（微信回推文件链路）
     let run_started_at = chrono::Utc::now();
     // 捕获任务起点 Git 基准快照（用于 finish 时进行精准增量 Diff 审查）。
-    // 自由会话（未选项目）的 workspace_dir 是进程 cwd 的"事故目录"——若它恰好
-    // 落在 git repo 里（如 src-tauri），基线会把宿主自己未提交的脏 diff 误算进
-    // 本次任务审查材料。证据域缺失 → 降级为非 git 基线，审查改靠副作用台账/产物链。
+    // 自由会话（未选项目）的 workspace_dir 是会话产物目录而非真实工程——
+    // 证据域缺失 → 降级为非 git 基线，审查改靠副作用台账/产物链。
     let git_baseline = if is_explicit_workspace || auto_pilot {
         crate::agent::reviewer_gatekeeper::GitBaseline::capture(&workspace_dir)
     } else {
@@ -2222,8 +2238,8 @@ async fn run_agent_main_loop_in_workspace_inner(
             } else {
             // Level 0 机械门禁：零 Token 快速拦截（Scope 边界越界等）
             // 适用域：scope 预检的证据是 workspace 的 git diff——自由会话（未选项目）
-            // 里 workspace_dir 是进程启动目录的"事故 cwd"，其 diff 反映宿主环境
-            // 脏状态而非本任务改动 → 证据域缺失 → NotApplicable，移交终审语义判定。
+            // 的 workspace_dir 是会话产物目录而非真实工程，无 git 判据
+            // → 证据域缺失 → NotApplicable，移交终审语义判定。
             let scope_violations = if is_explicit_workspace || auto_pilot {
                 crate::agent::reviewer_gatekeeper::mechanical_precheck_violations(
                     &workspace_dir,
@@ -3483,8 +3499,49 @@ mod artifact_bridge_tests {
 
 #[cfg(test)]
 mod path_scope_manifest_tests {
-    use super::build_path_scope_manifest;
+    use super::{build_path_scope_manifest, resolve_workspace_dir};
     use std::path::PathBuf;
+
+    /// 自由会话（无 override 无项目）的物理工作区必须回落到会话产物目录，
+    /// 绝不许落进程 cwd——cwd 会被 path_guard 双白名单整体放行，模型一探
+    /// 就把宿主目录报成"已绑定工作区"。
+    #[test]
+    fn free_session_workspace_falls_back_to_session_tmp_not_cwd() {
+        let sid = format!("ws_fallback_{}", uuid::Uuid::new_v4());
+        let ws = resolve_workspace_dir(None, None, &sid);
+        let expected = crate::agent::path_guard::get_session_tmp_dir(&sid);
+        assert_eq!(ws, expected, "自由会话工作区应为会话产物目录");
+        assert_ne!(
+            ws,
+            std::env::current_dir().unwrap_or_default(),
+            "自由会话工作区不得为进程 cwd"
+        );
+        assert!(ws.is_dir(), "回落目录必须已落盘（canonicalize 依赖存在性）");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 显式 override 与项目绑定优先于自由回落，行为不回归。
+    #[test]
+    fn explicit_workspace_and_override_win_over_fallback() {
+        let sid = format!("ws_explicit_{}", uuid::Uuid::new_v4());
+        let override_dir = std::env::temp_dir().join(format!("ovr_{}", uuid::Uuid::new_v4()));
+        let project_dir = std::env::temp_dir().join(format!("prj_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        assert_eq!(
+            resolve_workspace_dir(Some(override_dir.clone()), Some(project_dir.clone()), &sid),
+            override_dir,
+            "override 应优先于项目绑定"
+        );
+        assert_eq!(
+            resolve_workspace_dir(None, Some(project_dir.clone()), &sid),
+            project_dir,
+            "项目绑定应优先于会话 tmp 回落"
+        );
+        let _ = std::fs::remove_dir_all(&override_dir);
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
 
     /// 文案-机制一致性护栏：作用域卡片必须覆盖 path_guard 的 tmp/ 路由、
     /// artifact_manager 的登记入口、finish 门禁的 tmp/ 直认+禁拷规则。
