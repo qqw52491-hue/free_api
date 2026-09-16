@@ -128,9 +128,12 @@ fn index_step(idx: &mut SessionSearchIndex, seq: i64, step: &Value) {
 /// 注意锁序：调用方先持有 db reader（可能是 db.0 降级互斥），本函数再取
 /// 索引锁——全程只有 db→index 单向次序，不存在反向持锁路径。
 fn sync_search_index(conn: &rusqlite::Connection, session_id: &str) -> bool {
+    // 取最新 run 必须按 started_at 排序：id 是 UUID v4，字典序与时间无关——
+    // 实测曾把索引绑到"字典序最大但更早完成"的旧 run 上，当前 run 的步永不进
+    // 索引，同参去重与同路径 signpost 双双静默失效。id DESC 仅作同刻决胜键。
     let run_id: String = match conn
         .query_row(
-            "SELECT id FROM agent_run_traces WHERE session_id=?1 ORDER BY id DESC LIMIT 1",
+            "SELECT id FROM agent_run_traces WHERE session_id=?1 ORDER BY started_at DESC, id DESC LIMIT 1",
             params![session_id],
             |r| r.get::<_, String>(0),
         )
@@ -258,7 +261,7 @@ fn indexed_same_path_count(session_id: &str, normalized_path: &str) -> Option<us
 /// 仅作为行表为空时的回退路径（旧快照、直接播种 steps_json 的测试）。
 fn load_latest_run_steps(conn: &rusqlite::Connection, session_id: &str) -> Vec<Value> {
     conn.query_row(
-        "SELECT steps_json FROM agent_run_traces WHERE session_id=?1 ORDER BY id DESC LIMIT 1",
+        "SELECT steps_json FROM agent_run_traces WHERE session_id=?1 ORDER BY started_at DESC, id DESC LIMIT 1",
         params![session_id],
         |r| r.get::<_, String>(0),
     )
@@ -607,6 +610,32 @@ pub fn dispatch_search(
                     }
                 }
             }
+        }
+    }
+
+    // 命中集中度引导：≥3 条 code 命中落在同一文件时，显式点名"该文件的完整
+    // 区块请用 local_file 窗口精读"——实测模型曾拿换词探测当逐行翻页器，
+    // 单文件被搜 45 次只为还原一段 12 行模板。
+    {
+        let mut file_hit_counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for h in all_hits.iter().filter(|h| h.kind == "code") {
+            let file = h
+                .id_or_path
+                .rsplit_once(':')
+                .map(|(f, _)| f)
+                .unwrap_or(h.id_or_path.as_str());
+            *file_hit_counts.entry(file).or_default() += 1;
+        }
+        if let Some((file, n)) = file_hit_counts
+            .iter()
+            .max_by_key(|(_, n)| *n)
+            .filter(|(_, n)| **n >= 3)
+        {
+            notes.push(format!(
+                "命中集中度提示：{} 条命中均位于「{}」。若需要该处完整结构（组件属性/函数体/模板块），请 local_file(action=read, start_line/end_line) 按行号窗口一次取回，勿换关键词对同一文件反复探测。",
+                n, file
+            ));
         }
     }
 
@@ -1055,6 +1084,49 @@ mod tests {
         assert_eq!(result.route, "retrieval", "写步之后的同参检索不得命中缓存");
     }
 
+    /// 回归：最新 run 须按 started_at 判定，不能按 UUID 字典序。
+    /// 实测事故：旧 run 的 UUID 字典序更大（'z' > 'a'），ORDER BY id DESC 把索引
+    /// 绑死在已完成的旧 run 上，当前 run 的步永不进索引——同参去重与 signpost
+    /// 整轮静默失效（单 run 内同参重搜 4 次无一命中缓存）。
+    #[test]
+    fn test_indexed_dedup_binds_to_latest_run_by_started_at() {
+        let conn = setup_index_db();
+        let session = "sess-idx-latest-run";
+        // 旧 run：已完成，id 字典序更大；新 run：进行中，id 字典序更小
+        conn.execute(
+            "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at)
+             VALUES ('run-zzz-old', ?1, 'g', 'succeeded', '[]', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            params![session],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at)
+             VALUES ('run-aaa-new', ?1, 'g', 'running', '[]', '2026-02-01T00:00:00+00:00', '2026-02-01T00:00:00+00:00')",
+            params![session],
+        )
+        .unwrap();
+        let params = json!({"query": "去重锚点", "kinds": ["history"]});
+        // 同参检索步落在进行中的新 run 里：绑错到旧 run 时索引内无此步，去重必失
+        insert_run_step(
+            &conn,
+            "run-aaa-new",
+            0,
+            &json!({
+                "id": 1, "action": "search", "status": "succeeded",
+                "params": params,
+                "output": "{\"total_hits\":1}", "output_id": "o-latest"
+            }),
+        );
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(&db, session, &params, None);
+        assert_eq!(
+            result.route, "retrieval-cache",
+            "索引须绑定 started_at 最新的 run 而非字典序最大的 run，实际: {}",
+            result.stdout
+        );
+        assert!(result.stdout.contains("o-latest"));
+    }
+
     #[test]
     fn test_indexed_same_path_signpost_counts() {
         let conn = setup_index_db();
@@ -1224,6 +1296,69 @@ mod tests {
             "resolved_root 必须是绝对路径，实际: {}",
             resolved
         );
+    }
+
+    /// 单文件检索：命中自带 ±3 行上下文窗口（行号 + '>' 标记命中行），
+    /// 避免模型拿换词探测当逐行翻页器重建同一段代码块。
+    #[test]
+    fn test_code_search_file_path_returns_context_window() {
+        let temp = TempSearchDir::new("ctx-window");
+        let file = temp.0.join("props.vue");
+        std::fs::write(
+            &file,
+            "<template>\n  <Sidebar\n    ref=\"treeRef\"\n    :active=\"activeId\"\n    :models=\"allModels\"\n    @open=\"openSession\"\n  />\n</template>\n",
+        )
+        .unwrap();
+
+        let conn = setup_test_db();
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            "session-ctx-window",
+            &json!({
+                "query": "treeRef",
+                "kinds": ["code"],
+                "path": file.to_str().unwrap(),
+            }),
+            None,
+        );
+
+        assert!(result.success, "{}", result.stderr);
+        let payload: Value = serde_json::from_str(&result.stdout).unwrap();
+        let snippet = payload["hits"][0]["snippet"].as_str().unwrap();
+        // 命中行（第3行）带 '>' 标记，且窗口包含上下相邻行——一次检索即可看到属性块
+        assert!(snippet.contains(">    3|     ref=\"treeRef\""), "命中行应有行号与 '>' 标记: {}", snippet);
+        assert!(snippet.contains(":active=\"activeId\""), "窗口应含命中行之后的上下文: {}", snippet);
+        assert!(snippet.contains("<Sidebar"), "窗口应含命中行之前的上下文: {}", snippet);
+    }
+
+    /// 目录级检索保持单行命中（职责是定位分布，不带上下文防膨胀）
+    #[test]
+    fn test_code_search_directory_hits_stay_single_line() {
+        let temp = TempSearchDir::new("dir-no-ctx");
+        std::fs::write(
+            temp.0.join("a.rs"),
+            "fn alpha() {}\nfn beta() { alpha(); }\nfn gamma() {}\n",
+        )
+        .unwrap();
+
+        let conn = setup_test_db();
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            "session-dir-no-ctx",
+            &json!({
+                "query": "fn beta",
+                "kinds": ["code"],
+                "path": temp.0.to_str().unwrap(),
+            }),
+            None,
+        );
+
+        assert!(result.success, "{}", result.stderr);
+        let payload: Value = serde_json::from_str(&result.stdout).unwrap();
+        let snippet = payload["hits"][0]["snippet"].as_str().unwrap();
+        assert_eq!(snippet.trim(), "fn beta() { alpha(); }", "目录级命中应保持单行: {}", snippet);
     }
 
     #[test]
