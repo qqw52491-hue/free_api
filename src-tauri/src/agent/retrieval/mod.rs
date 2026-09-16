@@ -52,6 +52,7 @@ struct SessionSearchIndex {
     searches: Vec<IndexedSearch>,
     last_write_seq: Option<i64>,
     path_counts: std::collections::HashMap<String, usize>,
+    unread_file_search_counts: std::collections::HashMap<String, usize>,
     last_accessed: std::time::Instant,
 }
 
@@ -64,6 +65,7 @@ struct IndexedSearch {
 }
 
 const MAX_CACHED_SESSION_INDEXES: usize = 128;
+const SAME_FILE_SEARCH_HARD_LIMIT: usize = 3;
 
 static SEARCH_STEP_INDEX: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, SessionSearchIndex>>,
@@ -88,14 +90,13 @@ fn index_step(idx: &mut SessionSearchIndex, seq: i64, step: &Value) {
             if step.get("status").and_then(Value::as_str) != Some("succeeded") {
                 return;
             }
-            if let Some(path) = step
-                .get("params")
-                .and_then(|p| p.get("path"))
-                .and_then(Value::as_str)
-                .map(normalize_search_path)
-                .filter(|p| !p.is_empty())
-            {
+            if let Some(path) = step_normalized_path(step) {
                 *idx.path_counts.entry(path).or_default() += 1;
+            }
+            if !is_cached_search_step(step) {
+                if let Some(key) = step_gate_file_key(step) {
+                    *idx.unread_file_search_counts.entry(key).or_default() += 1;
+                }
             }
             idx.searches.push(IndexedSearch {
                 seq,
@@ -113,10 +114,18 @@ fn index_step(idx: &mut SessionSearchIndex, seq: i64, step: &Value) {
                     .unwrap_or(false),
             });
         }
+        Some("read") => {
+            if is_meaningful_file_read_step(step) {
+                if let Some(key) = step_gate_file_key(step) {
+                    idx.unread_file_search_counts.remove(&key);
+                }
+            }
+        }
         // edit/write 步（不论成败）使此前的缓存命中失效——与原全量扫描的
         // INVALIDATING_ACTIONS 语义一致：cached 在写步之后清零。
         Some("edit") | Some("write") => {
             idx.last_write_seq = Some(idx.last_write_seq.map_or(seq, |w| w.max(seq)));
+            idx.unread_file_search_counts.clear();
         }
         _ => {}
     }
@@ -178,6 +187,7 @@ fn sync_search_index(conn: &rusqlite::Connection, session_id: &str) -> bool {
             searches: Vec::new(),
             last_write_seq: None,
             path_counts: std::collections::HashMap::new(),
+            unread_file_search_counts: std::collections::HashMap::new(),
             last_accessed: now,
         }
     });
@@ -189,6 +199,7 @@ fn sync_search_index(conn: &rusqlite::Connection, session_id: &str) -> bool {
             searches: Vec::new(),
             last_write_seq: None,
             path_counts: std::collections::HashMap::new(),
+            unread_file_search_counts: std::collections::HashMap::new(),
             last_accessed: now,
         };
     }
@@ -422,6 +433,117 @@ fn count_prior_same_path_searches(steps: &[Value], path: &str) -> usize {
         .count()
 }
 
+fn step_normalized_path(step: &Value) -> Option<String> {
+    step.get("params")
+        .and_then(|p| p.get("path"))
+        .and_then(Value::as_str)
+        .map(normalize_search_path)
+        .filter(|p| !p.is_empty())
+}
+
+/// 硬闸判定键：优先取持久化 view 里的 canonical 路径（search→resolved_root，
+/// read→resolved_path），缺失时回退 params.path。raw 串 "./x" 与 "x" 同键化，
+/// 杜绝改写路径拼写绕过计数或让 read 复位落空。
+fn step_gate_file_key(step: &Value) -> Option<String> {
+    step.pointer("/view/resolved_root")
+        .or_else(|| step.pointer("/view/resolved_path"))
+        .or_else(|| step.pointer("/params/path"))
+        .and_then(Value::as_str)
+        .map(normalize_search_path)
+        .filter(|p| !p.is_empty())
+}
+
+/// 检索根解析：相对路径锚定会话工作区而非进程 CWD——与 dispatch_search
+/// 主路径同一套解析，供硬闸键与 code 分支共用。
+fn resolve_search_root(
+    raw_path: &str,
+    workspace_root: Option<&Path>,
+) -> std::path::PathBuf {
+    let raw = Path::new(raw_path);
+    match (raw.is_absolute(), workspace_root) {
+        (false, Some(ws)) => std::path::PathBuf::from(ws).join(raw),
+        _ => std::path::PathBuf::from(raw),
+    }
+}
+
+fn is_cached_search_step(step: &Value) -> bool {
+    step.get("view")
+        .and_then(|v| v.get("kind"))
+        .and_then(Value::as_str)
+        == Some("search-cache")
+        || step
+            .get("output")
+            .and_then(Value::as_str)
+            .map(|o| o.contains("【检索去重】"))
+            .unwrap_or(false)
+}
+
+fn is_meaningful_file_read_step(step: &Value) -> bool {
+    step.get("action").and_then(Value::as_str) == Some("read")
+        && step.get("status").and_then(Value::as_str) == Some("succeeded")
+        && step
+            .get("view")
+            .and_then(|v| v.get("kind"))
+            .and_then(Value::as_str)
+            == Some("read")
+}
+
+fn indexed_unread_file_search_count(session_id: &str, normalized_path: &str) -> Option<usize> {
+    let map = search_step_index().lock().ok()?;
+    map.get(session_id).map(|idx| {
+        idx.unread_file_search_counts
+            .get(normalized_path)
+            .copied()
+            .unwrap_or(0)
+    })
+}
+
+fn count_unread_file_searches(steps: &[Value], gate_key: &str) -> usize {
+    let gate_key = normalize_search_path(gate_key);
+    if gate_key.is_empty() {
+        return 0;
+    }
+    let mut count = 0usize;
+    for step in steps.iter().rev() {
+        match step.get("action").and_then(Value::as_str) {
+            Some("edit") | Some("write") => break,
+            Some("read") => {
+                if is_meaningful_file_read_step(step)
+                    && step_gate_file_key(step).as_deref() == Some(gate_key.as_str())
+                {
+                    break;
+                }
+            }
+            Some("search") => {
+                if step.get("status").and_then(Value::as_str) == Some("succeeded")
+                    && !is_cached_search_step(step)
+                    && step_gate_file_key(step).as_deref() == Some(gate_key.as_str())
+                {
+                    count += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+fn search_read_required_result(path: &str, count: usize) -> DispatchResult {
+    DispatchResult {
+        view: Some(json!({
+            "kind": "search-read-required",
+            "path": path,
+            "searches_since_read": count,
+            "required_tool": "local_file",
+            "required_action": "read"
+        })),
+        stdout: String::new(),
+        stderr: format!("❌ [search→read 硬闸] 文件「{}」自上次有效读取后已执行 {} 次不同检索，检索通道已暂停。请从已有 file:line 命中选择目标区块，调用 local_file(action=\"read\", path=\"{}\", start_line=..., end_line=...) 一次读取完整窗口（建议锚点 ±15 行）；读取成功后自动解除。不要换关键词或改写同一路径继续探测。", path, count, path),
+        success: false,
+        route: "host_rejection:search_read_required".to_string(),
+    }
+}
+
 /// 统一联邦检索调度入口
 pub fn dispatch_search(
     db: &DbState,
@@ -479,6 +601,31 @@ pub fn dispatch_search(
     let wants_history = kinds.iter().any(|k| k == "history" || k == "all");
     let wants_code = kinds.iter().any(|k| k == "code" || k == "all");
 
+    // 同文件硬闸的判定键：仅当 code 检索路径解析后确为单文件才建键
+    // （目录检索与无效路径不进闸）；canonical 化使 ./x 与绝对路径同键。
+    // 必须在去重缓存命中之前判定——已达阈值后同参复读命中缓存仍会烧轮次，
+    // 且缓存行不计数，硬闸须先于一切"成功回执"拦截。
+    let gate_file: Option<(String, String)> = if wants_code {
+        params
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .and_then(|raw_path| {
+                let root = resolve_search_root(raw_path, workspace_root);
+                root.is_file().then(|| {
+                    let canonical = root
+                        .canonicalize()
+                        .unwrap_or_else(|_| root.clone())
+                        .to_string_lossy()
+                        .to_string();
+                    (raw_path.to_string(), normalize_search_path(&canonical))
+                })
+            })
+    } else {
+        None
+    };
+
     // 会话内去重：同参成功检索直接复用（edit/write 会使其失效，见 find_cached_search）。
     // 快路径走每会话步索引（agent_run_steps 增量同步，只解析新行）；
     // 行表为空（旧快照/测试直接播种 steps_json）回退整载——两条路径语义等价。
@@ -491,6 +638,13 @@ pub fn dispatch_search(
         if let Some(conn) = conn.as_ref() {
             if sync_search_index(conn, session_id) {
                 indexed = true;
+                if let Some((raw_path, key)) = gate_file.as_ref() {
+                    let unread =
+                        indexed_unread_file_search_count(session_id, key).unwrap_or(0);
+                    if unread >= SAME_FILE_SEARCH_HARD_LIMIT {
+                        return search_read_required_result(raw_path, unread);
+                    }
+                }
                 if let Some(fp) = canonical_search_fingerprint(params_value) {
                     if let Some((step_id, output, out_id)) =
                         indexed_find_cached_search(conn, session_id, &fp)
@@ -507,6 +661,12 @@ pub fn dispatch_search(
                 .as_ref()
                 .map(|c| load_latest_run_steps(c, session_id))
                 .unwrap_or_default();
+            if let Some((raw_path, key)) = gate_file.as_ref() {
+                let unread = count_unread_file_searches(&steps, key);
+                if unread >= SAME_FILE_SEARCH_HARD_LIMIT {
+                    return search_read_required_result(raw_path, unread);
+                }
+            }
             if let (Some(conn), Some(fp)) =
                 (conn.as_ref(), canonical_search_fingerprint(params_value))
             {
@@ -575,11 +735,7 @@ pub fn dispatch_search(
                 // 【工作区隔离】相对路径以当前会话工作区为根解析，而不是进程 CWD——
                 // 评测隔离工作区下按 CWD 解析会让模型检索到宿主项目目录（实测教训：
                 // deepseek 实弹曾据此把宿主 docs/前端样式翻了个遍，预算烧在错误工作区）。
-                let raw = Path::new(raw_path);
-                let root = match (raw.is_absolute(), workspace_root) {
-                    (false, Some(ws)) => std::path::PathBuf::from(ws).join(raw),
-                    _ => std::path::PathBuf::from(raw),
-                };
+                let root = resolve_search_root(raw_path, workspace_root);
                 if !root.is_dir() && !root.is_file() {
                     errors.push(format!(
                         "path 不是有效目录或文件: {}（已按当前工作区解析为 {}，不存在；注意 src/ 目录可能尚未生成，先运行 npm test 让宿主创建题目文件）",
@@ -1429,5 +1585,307 @@ mod tests {
             "相对路径必须投影出绝对 resolved_root，实际: {}",
             resolved
         );
+    }
+
+    fn seed_gate_file(temp_tag: &str, name: &str) -> (TempSearchDir, String) {
+        let temp = TempSearchDir::new(temp_tag);
+        let file = temp.0.join(name);
+        std::fs::write(
+            &file,
+            "fn alpha_one() {}\nfn alpha_two() {}\nfn alpha_three() {}\nfn alpha_four() {}\nfn alpha_five() {}\n",
+        )
+        .unwrap();
+        let path = file.to_str().unwrap().to_string();
+        (temp, path)
+    }
+
+    fn insert_succeeded_file_search(
+        conn: &Connection,
+        run_id: &str,
+        seq: i64,
+        path: &str,
+        query: &str,
+    ) {
+        insert_run_step(
+            conn,
+            run_id,
+            seq,
+            &json!({
+                "id": seq + 1, "action": "search", "status": "succeeded",
+                "params": {"query": query, "kinds": ["code"], "path": path},
+                "output": "{\"total_hits\":1}",
+                "view": {"kind": "search", "resolved_root": path}
+            }),
+        );
+    }
+
+    #[test]
+    fn test_search_read_hard_gate_blocks_after_three_unread_file_searches() {
+        let (_temp, file_str) = seed_gate_file("gate-block", "gate_target.rs");
+        let conn = setup_index_db();
+        let session = "sess-gate-block";
+        seed_trace(&conn, session, "run-g1");
+        for (seq, query) in ["alpha_one", "alpha_two", "alpha_three"]
+            .iter()
+            .enumerate()
+        {
+            insert_succeeded_file_search(&conn, "run-g1", seq as i64, &file_str, query);
+        }
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            session,
+            &json!({"query": "alpha_four", "kinds": ["code"], "path": file_str}),
+            None,
+        );
+        assert!(!result.success, "第 4 次换词检索应被硬闸拦截");
+        assert_eq!(result.route, "host_rejection:search_read_required");
+        assert!(result.stderr.contains("local_file"), "{}", result.stderr);
+        assert!(result.stderr.contains("±15"), "{}", result.stderr);
+        let view = result.view.expect("硬闸应产出结构化 view");
+        assert_eq!(view["kind"], "search-read-required");
+        assert_eq!(view["searches_since_read"], json!(3));
+    }
+
+    #[test]
+    fn test_meaningful_file_read_releases_search_gate() {
+        let (_temp, file_str) = seed_gate_file("gate-read", "gate_target.rs");
+        let conn = setup_index_db();
+        let session = "sess-gate-read";
+        seed_trace(&conn, session, "run-g2");
+        for (seq, query) in ["alpha_one", "alpha_two", "alpha_three"]
+            .iter()
+            .enumerate()
+        {
+            insert_succeeded_file_search(&conn, "run-g2", seq as i64, &file_str, query);
+        }
+        insert_run_step(
+            &conn,
+            "run-g2",
+            3,
+            &json!({
+                "id": 4, "action": "read", "status": "succeeded",
+                "params": {"path": file_str},
+                "view": {"kind": "read", "resolved_path": file_str}
+            }),
+        );
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            session,
+            &json!({"query": "alpha_four", "kinds": ["code"], "path": file_str}),
+            None,
+        );
+        assert!(result.success, "有效读取后应解除搜索暂停: {}", result.stderr);
+        assert_eq!(result.route, "retrieval");
+    }
+
+    #[test]
+    fn test_cached_search_hits_do_not_count_toward_gate() {
+        let (_temp, file_str) = seed_gate_file("gate-cache", "gate_target.rs");
+        let conn = setup_index_db();
+        let session = "sess-gate-cache";
+        seed_trace(&conn, session, "run-g3");
+        insert_succeeded_file_search(&conn, "run-g3", 0, &file_str, "alpha_one");
+        for (seq, query) in ["alpha_two", "alpha_three"].iter().enumerate() {
+            insert_run_step(
+                &conn,
+                "run-g3",
+                seq as i64 + 1,
+                &json!({
+                    "id": seq + 2, "action": "search", "status": "succeeded",
+                    "params": {"query": query, "kinds": ["code"], "path": file_str},
+                    "output": "🎯【检索去重】本会话第 1 步已执行完全同参的检索且期间无文件修改（未重新检索）。",
+                    "view": {"kind": "search-cache"}
+                }),
+            );
+        }
+        insert_run_step(
+            &conn,
+            "run-g3",
+            3,
+            &json!({
+                "id": 4, "action": "search", "status": "succeeded",
+                "params": {"query": "alpha_four", "kinds": ["code"], "path": file_str},
+                "output": "🎯【检索去重】本会话第 1 步已执行完全同参的检索且期间无文件修改（未重新检索）。"
+            }),
+        );
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            session,
+            &json!({"query": "alpha_five", "kinds": ["code"], "path": file_str}),
+            None,
+        );
+        assert!(result.success, "去重回执不应计入硬闸: {}", result.stderr);
+        assert_eq!(result.route, "retrieval");
+    }
+
+    #[test]
+    fn test_write_step_clears_unread_file_search_counts() {
+        let (_temp, file_str) = seed_gate_file("gate-write", "gate_target.rs");
+        let conn = setup_index_db();
+        let session = "sess-gate-write";
+        seed_trace(&conn, session, "run-g4");
+        for (seq, query) in ["alpha_one", "alpha_two", "alpha_three"]
+            .iter()
+            .enumerate()
+        {
+            insert_succeeded_file_search(&conn, "run-g4", seq as i64, &file_str, query);
+        }
+        insert_run_step(
+            &conn,
+            "run-g4",
+            3,
+            &json!({
+                "id": 4, "action": "write", "status": "succeeded",
+                "params": {"path": file_str}
+            }),
+        );
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            session,
+            &json!({"query": "alpha_four", "kinds": ["code"], "path": file_str}),
+            None,
+        );
+        assert!(result.success, "写步之后不应再被硬闸拦截: {}", result.stderr);
+        assert_eq!(result.route, "retrieval");
+    }
+
+    #[test]
+    fn test_search_gate_is_scoped_per_file_path() {
+        let temp = TempSearchDir::new("gate-scope");
+        let file_a = temp.0.join("file_a.rs");
+        let file_b = temp.0.join("file_b.rs");
+        std::fs::write(
+            &file_a,
+            "fn alpha_one() {}\nfn alpha_two() {}\nfn alpha_three() {}\n",
+        )
+        .unwrap();
+        std::fs::write(&file_b, "fn alpha_four() {}\nfn alpha_five() {}\n").unwrap();
+        let path_a = file_a.to_str().unwrap().to_string();
+        let path_b = file_b.to_str().unwrap().to_string();
+
+        let conn = setup_index_db();
+        let session = "sess-gate-scope";
+        seed_trace(&conn, session, "run-g5");
+        for (seq, query) in ["alpha_one", "alpha_two", "alpha_three"]
+            .iter()
+            .enumerate()
+        {
+            insert_succeeded_file_search(&conn, "run-g5", seq as i64, &path_a, query);
+        }
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            session,
+            &json!({"query": "alpha_four", "kinds": ["code"], "path": path_b}),
+            None,
+        );
+        assert!(result.success, "文件 B 的检索不应被文件 A 的计数拦截: {}", result.stderr);
+        assert_eq!(result.route, "retrieval");
+    }
+
+    #[test]
+    fn test_search_read_gate_fallback_scans_steps_json() {
+        let (_temp, file_str) = seed_gate_file("gate-fallback", "gate_target.rs");
+        let conn = setup_index_db();
+        let session = "sess-gate-fallback";
+        let steps: Vec<Value> = ["alpha_one", "alpha_two", "alpha_three"]
+            .iter()
+            .enumerate()
+            .map(|(i, query)| {
+                json!({
+                    "id": i + 1, "action": "search", "status": "succeeded",
+                    "params": {"query": query, "kinds": ["code"], "path": file_str},
+                    "output": "{\"total_hits\":1}",
+                    "view": {"kind": "search", "resolved_root": file_str}
+                })
+            })
+            .collect();
+        conn.execute(
+            "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at)
+             VALUES ('run-g6', ?1, 'g', 'running', ?2, '2026-01-01', '2026-01-01')",
+            params![session, serde_json::to_string(&steps).unwrap()],
+        )
+        .unwrap();
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            session,
+            &json!({"query": "alpha_four", "kinds": ["code"], "path": file_str}),
+            None,
+        );
+        assert!(!result.success, "steps_json 回退路径同样应被硬闸拦截");
+        assert_eq!(result.route, "host_rejection:search_read_required");
+        assert_eq!(result.view.unwrap()["searches_since_read"], json!(3));
+    }
+
+    #[test]
+    fn test_hard_gate_fires_before_exact_cache_hit() {
+        // 回归：硬闸必须先于同参去重回执——否则达到阈值后复读旧指纹
+        // 仍可拿到缓存回执，模型靠重放既有查询无限烧轮次。
+        let (_temp, file_str) = seed_gate_file("gate-cache-order", "gate_target.rs");
+        let conn = setup_index_db();
+        let session = "sess-gate-cache-order";
+        seed_trace(&conn, session, "run-g7");
+        for (seq, query) in ["alpha_one", "alpha_two", "alpha_three"]
+            .iter()
+            .enumerate()
+        {
+            insert_succeeded_file_search(&conn, "run-g7", seq as i64, &file_str, query);
+        }
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        // 与第 1 次检索完全同参——旧实现会命中缓存返回 retrieval-cache。
+        let result = dispatch_search(
+            &db,
+            session,
+            &json!({"query": "alpha_one", "kinds": ["code"], "path": file_str}),
+            None,
+        );
+        assert!(!result.success, "达阈值后同参复读也应被硬闸拦截，而非命中缓存");
+        assert_eq!(result.route, "host_rejection:search_read_required");
+    }
+
+    #[test]
+    fn test_meaningful_read_resets_gate_across_path_aliases() {
+        // 回归：计数与复位都按 canonical 路径——检索用绝对路径、read 的
+        // params 写成 "/abs/./file" 别名，view.resolved_path 仍应复位计数。
+        let (_temp, file_str) = seed_gate_file("gate-alias", "gate_target.rs");
+        let conn = setup_index_db();
+        let session = "sess-gate-alias";
+        seed_trace(&conn, session, "run-g8");
+        for (seq, query) in ["alpha_one", "alpha_two", "alpha_three"]
+            .iter()
+            .enumerate()
+        {
+            insert_succeeded_file_search(&conn, "run-g8", seq as i64, &file_str, query);
+        }
+        // read 的 params.path 用别名拼写，view.resolved_path 是 canonical。
+        let alias = file_str.replace("gate_target.rs", "./gate_target.rs");
+        insert_run_step(
+            &conn,
+            "run-g8",
+            3,
+            &json!({
+                "id": 4, "action": "read", "status": "succeeded",
+                "params": {"path": alias},
+                "view": {"kind": "read", "resolved_path": file_str}
+            }),
+        );
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let result = dispatch_search(
+            &db,
+            session,
+            &json!({"query": "alpha_four", "kinds": ["code"], "path": file_str}),
+            None,
+        );
+        assert!(
+            result.success,
+            "read 的 canonical resolved_path 应复位别名路径的计数: {}",
+            result.stderr
+        );
+        assert_eq!(result.route, "retrieval");
     }
 }

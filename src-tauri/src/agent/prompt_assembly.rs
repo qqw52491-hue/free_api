@@ -62,8 +62,8 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "search",
-        summary: "检索会话历史、记忆与工作区代码（定位用：回答 X 在哪；需要看清某处完整结构时拿到 file:line 锚点后应转 local_file 窗口精读，勿换关键词对同一文件反复探测）",
-        actions: &["search(query: string, kinds?: history|code|all, path?: string for code) — path 指向单文件时命中自带 ±3 行上下文"],
+        summary: "代码与历史定位工具：search 只回答“在哪”；取得 file:line 后必须转 local_file.read 读取完整目标区块，不能靠换关键词拼接代码",
+        actions: &["search(query: string, kinds?: history|code|all, path?: string for code) — 单文件命中带 ±3 行；连续 3 次真实检索未 read 时暂停该文件搜索"],
     },
     BuiltinToolSpec {
         name: "task_store",
@@ -239,7 +239,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "local_file",
         summary: "本地文件读写与精准局部替换（受双白名单保护与SHA256乐观并发锁防覆盖保护）：修改已有文件优先使用 edit 局部替换。注：tmp/ 相对路径自动路由到会话专属临时草稿目录",
         actions: &[
-            "read(path: string, start_line?: number, end_line?: number) — 读取文件（自动建立并发哈希基线）。≤300 行的中小文件建议省略行号一次读取全文；超过 300 行的文件整读会按入口预算截为头尾摘要+output_id 句柄，宜先 search 定位再按行号窗口精读；search 命中返回的 file:line 即读窗锚点，一次窗口覆盖目标区块（如锚点 ±15 行），严禁换关键词对同一文件逐行探测、严禁同一区间碎片化重复读取",
+            "read(path: string, start_line?: number, end_line?: number) — 读取文件并建立并发哈希基线。≤300 行可整读；大文件先 search 定位一次，再按 file:line 锚点 ±15 行读取完整目标区块。成功读取会解除该文件的搜索暂停",
             "write(path: string, content: string, force?: boolean) — 全量写入文件。⚠️【前置门禁】调用前必须已完成 child_reviewer 审查且获取 ReviewScorecard，否则系统底层无条件拦截丢弃！",
             "edit(path: string, target_content: string, replacement_content: string, force?: boolean) — 精准局部替换。⚠️【前置门禁】调用前必须已完成 child_reviewer 审查且获取 ReviewScorecard，否则系统底层无条件拦截丢弃！",
             "list(path?: string, depth?: number)",
@@ -308,6 +308,19 @@ mod tests {
         assert!(
             line.contains("tmp/"),
             "register_file 描述未提 tmp/：与 path_guard 路由/finish 对账脱节"
+        );
+    }
+
+    #[test]
+    fn search_and_read_actions_document_search_read_gate() {
+        let menu = build_local_tools_menu();
+        assert!(
+            menu.contains("连续 3 次真实检索未 read"),
+            "search 动作描述应声明同文件 3 次未读即暂停的硬闸"
+        );
+        assert!(
+            menu.contains("成功读取会解除该文件的搜索暂停"),
+            "read 动作描述应声明成功读取解除搜索暂停"
         );
     }
 

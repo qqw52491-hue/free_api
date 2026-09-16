@@ -465,6 +465,7 @@ async function handleFork(payload: {
     timestampMs?: number;
     upToMessageId?: string;
     upToTimestampMs?: number;
+    promptSeed?: string;
 } = {}) {
     if (forking.value) return;
     const sessionId = props.panelId;
@@ -481,6 +482,7 @@ async function handleFork(payload: {
             beforeTimestampMs: payload.timestampMs ?? null,
             upToMessageId: payload.upToMessageId ?? null,
             upToTimestampMs: payload.upToTimestampMs ?? null,
+            promptSeed: payload.promptSeed ?? null,
         });
         emit("forked", {
             sessionId: report.new_session_id,

@@ -66,18 +66,42 @@ pub async fn fork_agent_session(
     before_timestamp_ms: Option<i64>,
     up_to_message_id: Option<String>,
     up_to_timestamp_ms: Option<i64>,
+    prompt_seed: Option<String>,
 ) -> Result<crate::agent::session_fork::ForkReport, String> {
     let mut conn = state.0.lock().map_err(|e| e.to_string())?;
-    let fork_point = if let Some(id) = before_message_id {
-        crate::agent::session_fork::ForkPoint::BeforeMessage(id)
-    } else if let Some(ts) = before_timestamp_ms {
-        let id = crate::agent::session_fork::resolve_boundary_message(&conn, &session_id, ts)?;
-        match id {
-            Some(i) => crate::agent::session_fork::ForkPoint::BeforeMessage(i),
-            None => crate::agent::session_fork::ForkPoint::Full,
+    let message_exists = |conn: &rusqlite::Connection, sid: &str, mid: &str| -> bool {
+        conn.query_row(
+            "SELECT 1 FROM chat_messages WHERE session_id=?1 AND id=?2 LIMIT 1",
+            rusqlite::params![sid, mid],
+            |_| Ok(()),
+        )
+        .is_ok()
+    };
+
+    let fork_point = if let Some(ts) = before_timestamp_ms {
+        // 时间戳分叉：直接根据时间戳截断，prompt_seed 直接由前端传递的用户原话回填
+        crate::agent::session_fork::ForkPoint::BeforeTimestamp {
+            timestamp_ms: ts,
+            prompt_seed,
+        }
+    } else if let Some(id) = before_message_id {
+        if message_exists(&conn, &session_id, &id) {
+            crate::agent::session_fork::ForkPoint::BeforeMessage(id)
+        } else {
+            crate::agent::session_fork::ForkPoint::Full
         }
     } else if let Some(id) = up_to_message_id {
-        crate::agent::session_fork::ForkPoint::UpToMessage(id)
+        if message_exists(&conn, &session_id, &id) {
+            crate::agent::session_fork::ForkPoint::UpToMessage(id)
+        } else if let Some(ts) = up_to_timestamp_ms {
+            let resolved = crate::agent::session_fork::resolve_boundary_message(&conn, &session_id, ts)?;
+            match resolved {
+                Some(i) => crate::agent::session_fork::ForkPoint::UpToMessage(i),
+                None => crate::agent::session_fork::ForkPoint::Full,
+            }
+        } else {
+            crate::agent::session_fork::ForkPoint::UpToMessage(id)
+        }
     } else if let Some(ts) = up_to_timestamp_ms {
         let id = crate::agent::session_fork::resolve_boundary_message(&conn, &session_id, ts)?;
         match id {

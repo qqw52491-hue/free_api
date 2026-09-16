@@ -75,6 +75,19 @@
                             <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
                             <button
                                 type="button"
+                                class="msg-fork-btn"
+                                :disabled="isRunning"
+                                :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '在此分叉新会话（带入该对话内容作为草稿继续探索）'"
+                                @click.stop="$emit('fork', { messageId: message.id })"
+                            >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                                    <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                                </svg>
+                                <span>分叉</span>
+                            </button>
+                            <button
+                                type="button"
                                 class="msg-copy-btn"
                                 :class="{ copied: copiedMessageId === `legacy-${message.id}` }"
                                 :title="copiedMessageId === `legacy-${message.id}` ? '已复制到剪贴板' : '复制消息内容'"
@@ -113,6 +126,19 @@
                     />
                     <div class="msg-side-actions">
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                        <button
+                            type="button"
+                            class="msg-fork-btn"
+                            :disabled="isRunning"
+                            :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '在此分叉新会话（带入该对话内容作为草稿继续探索）'"
+                            @click.stop="$emit('fork', { timestampMs: entry.timestamp, promptSeed: parseUserMessageAttachments(entry.content).cleanText || entry.content })"
+                        >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                                <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                            </svg>
+                            <span>分叉</span>
+                        </button>
                         <button
                             type="button"
                             class="msg-copy-btn"
@@ -190,6 +216,19 @@
                         />
                         <div class="msg-side-actions">
                             <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                            <button
+                                type="button"
+                                class="msg-fork-btn"
+                                :disabled="isRunning"
+                                :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '在此分叉新会话（带入该对话内容作为草稿继续探索）'"
+                                @click.stop="$emit('fork', { timestampMs: entry.timestamp })"
+                            >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                                    <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                                </svg>
+                                <span>分叉</span>
+                            </button>
                             <button
                                 type="button"
                                 class="msg-copy-btn"
@@ -858,7 +897,7 @@ const emit = defineEmits<{
     "open-preview": [code: string];
     "open-team-deck": [stepId?: string];
     "open-diff": [payload: FileDiffPayload];
-    "fork": [payload: { messageId?: string; timestampMs?: number; upToMessageId?: string; upToTimestampMs?: number }];
+    "fork": [payload: { messageId?: string; timestampMs?: number; upToMessageId?: string; upToTimestampMs?: number; promptSeed?: string }];
 }>();
 
 function extractSubagentTask(step: any): string {

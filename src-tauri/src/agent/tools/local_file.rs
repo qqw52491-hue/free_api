@@ -326,6 +326,7 @@ fn execute_read(
     let view = serde_json::json!({
         "kind": "read",
         "path": resolved.display_path,
+        "resolved_path": resolved.canonical_path.to_string_lossy(),
         "start_line": start_line,
         "end_line": slice_end,
         "total_lines": total_lines,

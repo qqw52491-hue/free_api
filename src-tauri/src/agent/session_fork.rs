@@ -127,6 +127,11 @@ pub enum ForkPoint {
     BeforeMessage(String),
     /// 截断到某条消息为止（包含该消息，用于总结/AI回答处分叉，prompt_seed 为 None，以此回答为基准开新分支继续）
     UpToMessage(String),
+    /// 截断到某个时间戳之前（按时间戳截断所有小于该时间戳的消息和回合，prompt_seed 直接由前端透传回填）
+    BeforeTimestamp {
+        timestamp_ms: i64,
+        prompt_seed: Option<String>,
+    },
 }
 
 /// 生产入口：按真实数据目录推导两侧 tmp 路径。
@@ -207,6 +212,25 @@ fn fork_session_at(
                 None
             };
             (next_idx, None, ts)
+        }
+        // 时间线条目时间戳≈该轮 run.started_at，而当轮用户消息的 created_at
+        // 晚落库约 2s——按 target 直接切，当轮消息与 run 自然落在边界外；
+        // prompt_seed 由前端透传用户原话，不再回查 chat_messages 猜锚点。
+        ForkPoint::BeforeTimestamp {
+            timestamp_ms,
+            prompt_seed,
+        } => {
+            let target = chrono::DateTime::from_timestamp_millis(*timestamp_ms)
+                .ok_or_else(|| "分叉时间戳非法".to_string())?;
+            let idx = messages
+                .iter()
+                .position(|m| {
+                    chrono::DateTime::parse_from_rfc3339(&m.3)
+                        .map(|d| d.with_timezone(&Utc) >= target)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(messages.len());
+            (idx, prompt_seed.clone(), Some(target.to_rfc3339()))
         }
     };
     let copied_msgs = &messages[..boundary_idx];
@@ -350,7 +374,10 @@ fn fork_session_at(
     }
 
     // checkpoint：分叉点→最近的历史锚点快照；整会话克隆→当前最新 checkpoint
-    let is_point_fork = matches!(fork_point, ForkPoint::BeforeMessage(_) | ForkPoint::UpToMessage(_));
+    let is_point_fork = matches!(
+        fork_point,
+        ForkPoint::BeforeMessage(_) | ForkPoint::UpToMessage(_) | ForkPoint::BeforeTimestamp { .. }
+    );
     let checkpoint_copied = if is_point_fork {
         let mut hs = tx
             .prepare(
@@ -1242,6 +1269,44 @@ mod tests {
         assert_eq!(trace_ids.len(), 1);
         assert_ne!(trace_ids[0], TRACE1);
         // 历史快照只带锚点 a1 那条
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM agent_checkpoint_history WHERE session_id=?1", DST),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fork_before_timestamp_truncates_by_run_start_and_uses_passed_seed() {
+        let mut conn = test_conn();
+        let dir = std::env::temp_dir().join(format!("fork-test-{}", Uuid::new_v4()));
+        let src_tmp = dir.join("src");
+        let dst_tmp = dir.join("dst");
+        seed(&conn, &src_tmp);
+
+        // 第二轮 run.started_at = t(3)：时间戳分叉只保留第一轮世界状态，
+        // prompt_seed 是前端透传的用户原话而非库内查到的消息。
+        let t3_ms = chrono::DateTime::parse_from_rfc3339(&t(3))
+            .unwrap()
+            .timestamp_millis();
+        let report = fork_session_at(
+            &mut conn,
+            SRC,
+            ForkPoint::BeforeTimestamp {
+                timestamp_ms: t3_ms,
+                prompt_seed: Some("第二轮任务".to_string()),
+            },
+            DST,
+            &src_tmp,
+            &dst_tmp,
+        )
+        .unwrap();
+
+        assert_eq!(report.prompt_seed.as_deref(), Some("第二轮任务"));
+        assert_eq!(report.copied_messages, 2); // u1 + a1，当轮 u2 不入新会话
+        assert_eq!(report.copied_traces, 1); // 第二轮 run 不复制
+        assert!(report.checkpoint_copied); // 锚点=a1 的历史快照而非最新
         assert_eq!(
             count(&conn, "SELECT COUNT(*) FROM agent_checkpoint_history WHERE session_id=?1", DST),
             1
