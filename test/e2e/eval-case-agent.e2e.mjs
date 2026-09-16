@@ -5,8 +5,14 @@
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-const appDb = "/Users/wx/Library/Application Support/free-api-chat/data_v2.db";
+// 应用数据目录按平台解析：macOS 用 Application Support，Linux 走 XDG data dir
+const appDb =
+  process.platform === "darwin"
+    ? path.join(os.homedir(), "Library/Application Support/free-api-chat/data_v2.db")
+    : path.join(os.homedir(), ".local/share/free-api-chat/data_v2.db");
 const modelId = process.env.FREE_API_LIVE_MODEL_ID?.trim();
 const reviewerModelId = process.env.FREE_API_LIVE_REVIEWER_MODEL_ID?.trim() || null;
 const fixtureDir = process.env.FREE_API_LIVE_FIXTURE_DIR?.trim();
