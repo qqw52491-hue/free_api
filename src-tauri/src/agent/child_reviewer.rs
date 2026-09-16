@@ -1532,26 +1532,9 @@ pub async fn spawn_child_reviewer(
                 break (duration_ms, completion_tokens, prompt_tokens, parsed, raw);
             }
 
-            // 2. 已强制收敛仍不合规 → invalid_output
-            if forced_final {
-                finish_child_run(
-                    &db_clone,
-                    &child_run_id_clone,
-                    "invalid_output",
-                    duration_ms,
-                    completion_tokens,
-                    Some(ChildErrorKind::InvalidOutput),
-                    Some(&child_invalid_result_json(
-                        &child_run_id_clone,
-                        duration_ms,
-                        completion_tokens,
-                        &raw,
-                    )),
-                );
-                return;
-            }
-
-            // 3. 取证请求（含 "tool" 键）且预算未尽 → 执行并回灌（同样宽松提取）
+            // 2. 取证请求（含 "tool" 键，宽松提取）：合规输出永不因改正旗标被拒——
+            //    forced_final 只约束"非合规输出"，预算未尽的取证请求照常执行
+            //    （实测：空响应→改正→合法 read_file 曾被误判 invalid_output）。
             let tool_request = serde_json::from_str::<serde_json::Value>(&raw)
                 .ok()
                 .or_else(|| {
@@ -1581,7 +1564,25 @@ pub async fn spawn_child_reviewer(
                     }));
                     continue;
                 }
-                // 预算用尽：强制收敛
+                // 预算用尽：已强制收敛后仍要取证 → 判负（子审查无 fail-open，
+                // 失败即交编排层 failover）；未强制过 → 提示收敛再给一棒。
+                if forced_final {
+                    finish_child_run(
+                        &db_clone,
+                        &child_run_id_clone,
+                        "invalid_output",
+                        duration_ms,
+                        completion_tokens,
+                        Some(ChildErrorKind::InvalidOutput),
+                        Some(&child_invalid_result_json(
+                            &child_run_id_clone,
+                            duration_ms,
+                            completion_tokens,
+                            &raw,
+                        )),
+                    );
+                    return;
+                }
                 messages.push(json!({"role": "assistant", "content": raw}));
                 messages.push(json!({
                     "role": "user",
@@ -1589,6 +1590,25 @@ pub async fn spawn_child_reviewer(
                 }));
                 forced_final = true;
                 continue;
+            }
+
+            // 3. 非取证输出：已给过改正机会仍不合规 → invalid_output
+            if forced_final {
+                finish_child_run(
+                    &db_clone,
+                    &child_run_id_clone,
+                    "invalid_output",
+                    duration_ms,
+                    completion_tokens,
+                    Some(ChildErrorKind::InvalidOutput),
+                    Some(&child_invalid_result_json(
+                        &child_run_id_clone,
+                        duration_ms,
+                        completion_tokens,
+                        &raw,
+                    )),
+                );
+                return;
             }
 
             // 4. 输出既非最终 JSON 也非取证请求 → 给一次改正机会
