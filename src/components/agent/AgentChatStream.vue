@@ -36,9 +36,10 @@
                                 @preview-doc="openDocPreview"
                             />
                         </div>
-                        <p v-if="parseUserMessageAttachments(message.content).cleanText" class="user-text-content">
-                            {{ parseUserMessageAttachments(message.content).cleanText }}
-                        </p>
+                        <CollapsibleUserText
+                            v-if="parseUserMessageAttachments(message.content).cleanText"
+                            :text="parseUserMessageAttachments(message.content).cleanText"
+                        />
                         <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
                     </template>
                 </article>
@@ -57,9 +58,10 @@
                         />
                     </div>
                     <!-- 用户指令文本 -->
-                    <p v-if="parseUserMessageAttachments(entry.content).cleanText" class="user-text-content">
-                        {{ parseUserMessageAttachments(entry.content).cleanText }}
-                    </p>
+                    <CollapsibleUserText
+                        v-if="parseUserMessageAttachments(entry.content).cleanText"
+                        :text="parseUserMessageAttachments(entry.content).cleanText"
+                    />
                 </article>
                 <article v-else-if="entry.type === 'message'" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
                     <template v-if="entry.role === 'agent' || entry.role === 'assistant'">
@@ -83,9 +85,10 @@
                                 @preview-doc="openDocPreview"
                             />
                         </div>
-                        <p v-if="parseUserMessageAttachments(entry.content).cleanText" class="user-text-content">
-                            {{ parseUserMessageAttachments(entry.content).cleanText }}
-                        </p>
+                        <CollapsibleUserText
+                            v-if="parseUserMessageAttachments(entry.content).cleanText"
+                            :text="parseUserMessageAttachments(entry.content).cleanText"
+                        />
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                     </template>
                 </article>
@@ -537,6 +540,7 @@
 import { computed, nextTick, reactive, ref, shallowReactive, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AttachmentCard from "./AttachmentCard.vue";
+import CollapsibleUserText from "./CollapsibleUserText.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
 import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule } from "./types";
 import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtLineInfo } from "./diffUtils";

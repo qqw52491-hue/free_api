@@ -121,6 +121,57 @@
     overflow-wrap: anywhere;
 }
 
+/* 用户长消息折叠态：行钳制 + 底部渐隐 + 展开按钮 */
+.user-text-clip {
+    position: relative;
+}
+
+.user-text-clip.collapsed {
+    cursor: pointer;
+}
+
+.user-text-clip.collapsed .user-text-content {
+    display: -webkit-box;
+    -webkit-line-clamp: 5;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.user-text-fade {
+    position: absolute;
+    left: -15px;
+    right: -15px;
+    bottom: 0;
+    height: 2.6em;
+    background: linear-gradient(to bottom, rgba(39, 39, 42, 0), #27272a);
+    border-radius: 0 0 4px 16px;
+    pointer-events: none;
+}
+
+.user-text-toggle {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #8ab4f8;
+    font-size: 12px;
+    cursor: pointer;
+    opacity: 0.85;
+}
+
+.user-text-toggle:hover {
+    opacity: 1;
+    text-decoration: underline;
+}
+
+.user-text-trunc-note {
+    margin: 4px 0 0;
+    color: #a1a1aa;
+    font-size: 11px;
+    font-style: italic;
+}
+
 /* 📎 附件缩略图与文件卡片托盘 */
 .stream-attachments-tray {
     display: flex;
