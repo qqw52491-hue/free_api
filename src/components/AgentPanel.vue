@@ -15,6 +15,23 @@
                 </button>
                 <button
                     class="icon-control"
+                    :class="{ 'is-forking': forking }"
+                    type="button"
+                    :disabled="session.isRunning.value || panelId.startsWith('draft-') || forking"
+                    title="分叉当前会话（完整克隆当前对话全部历史与状态为新会话）"
+                    data-testid="fork-current-session"
+                    @click="handleFork()"
+                >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="6" cy="6" r="2.5" />
+                        <circle cx="18" cy="6" r="2.5" />
+                        <circle cx="6" cy="18" r="2.5" />
+                        <path d="M6 8.5v7" />
+                        <path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                    </svg>
+                </button>
+                <button
+                    class="icon-control"
                     type="button"
                     :disabled="session.isRunning.value"
                     data-testid="run-readonly-regression"
@@ -269,6 +286,7 @@ const emit = defineEmits<{
     "update:title": [title: string];
     "promoted": [oldId: string, newId: string, title: string, projectId?: string];
     "forked": [payload: { sessionId: string; title: string; promptSeed?: string | null }];
+    "show-toast": [text: string, type?: "success" | "info" | "warning"];
 }>();
 const composerRef = ref<InstanceType<typeof AgentComposer> | null>(null);
 const settingsOpen = ref(false);
@@ -442,16 +460,27 @@ interface ForkReport {
     prompt_seed?: string | null;
 }
 const forking = ref(false);
-async function handleFork(payload: { messageId?: string; timestampMs?: number }) {
+async function handleFork(payload: {
+    messageId?: string;
+    timestampMs?: number;
+    upToMessageId?: string;
+    upToTimestampMs?: number;
+} = {}) {
     if (forking.value) return;
     const sessionId = props.panelId;
-    if (sessionId.startsWith("draft-") || session.isRunning.value) return;
+    if (sessionId.startsWith("draft-")) return;
+    if (session.isRunning.value) {
+        emit("show-toast", "当前任务正在执行中，请等待完成或停止后再分叉", "warning");
+        return;
+    }
     forking.value = true;
     try {
         const report = await invoke<ForkReport>("fork_agent_session", {
             sessionId,
             beforeMessageId: payload.messageId ?? null,
             beforeTimestampMs: payload.timestampMs ?? null,
+            upToMessageId: payload.upToMessageId ?? null,
+            upToTimestampMs: payload.upToTimestampMs ?? null,
         });
         emit("forked", {
             sessionId: report.new_session_id,
@@ -460,6 +489,7 @@ async function handleFork(payload: { messageId?: string; timestampMs?: number })
         });
     } catch (e) {
         console.error("[fork] failed:", e);
+        emit("show-toast", "分叉会话失败: " + String(e), "warning");
     } finally {
         forking.value = false;
     }
@@ -753,6 +783,17 @@ defineExpose({
 .icon-control:disabled {
     cursor: not-allowed;
     opacity: 0.4;
+}
+.icon-control.is-forking {
+    opacity: 0.8;
+    color: #a5b4fc;
+    border-color: rgba(129, 140, 248, 0.4);
+    background: rgba(129, 140, 248, 0.1);
+    animation: icon-fork-pulse 1s ease-in-out infinite;
+}
+@keyframes icon-fork-pulse {
+    0%, 100% { transform: scale(1); opacity: 0.8; }
+    50% { transform: scale(1.08); opacity: 1; }
 }
 
 .manus-agent-shell {

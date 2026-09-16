@@ -94,6 +94,18 @@
             />
             <span v-else class="leaf-label" :title="session.title">{{ session.title || "新对话" }}</span>
             <button
+              v-if="!session.isDraft"
+              type="button"
+              class="leaf-action-btn fork-btn"
+              title="分叉此对话（完整克隆全部历史与状态为新会话）"
+              @click.stop="emit('fork-session', session)"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+              </svg>
+            </button>
+            <button
               type="button"
               class="leaf-close-btn"
               title="关闭/删除对话"
@@ -300,6 +312,7 @@ export interface TreeSessionItem {
   id: string;
   title: string;
   isDraft?: boolean;
+  projectId?: string;
 }
 
 const props = defineProps<{
@@ -314,6 +327,7 @@ const emit = defineEmits<{
   (event: "select-project", project: AgentProject): void;
   (event: "new-project-session", project: AgentProject): void;
   (event: "session-deleted", sessionId: string): void;
+  (event: "fork-session", session: TreeSessionItem): void;
 }>();
 
 const projects = ref<AgentProject[]>([]);
@@ -370,13 +384,13 @@ function projectSessionList(projectId: string): TreeSessionItem[] {
   if (props.drafts) {
     for (const d of props.drafts) {
       if (d.projectId === projectId && d.isDraft) {
-        list.push({ id: d.id, title: d.label || "新对话", isDraft: true });
+        list.push({ id: d.id, title: d.label || "新对话", isDraft: true, projectId });
       }
     }
   }
   const persisted = projectSessionsMap[projectId] || [];
   for (const p of persisted) {
-    list.push({ id: p.id, title: p.title || "未命名对话", isDraft: false });
+    list.push({ id: p.id, title: p.title || "未命名对话", isDraft: false, projectId });
   }
   return list;
 }
@@ -831,7 +845,8 @@ onMounted(() => {
   color: #f4f4f5;
 }
 
-.leaf-close-btn {
+.leaf-close-btn,
+.leaf-action-btn {
   display: none;
   width: 16px;
   height: 16px;
@@ -841,17 +856,29 @@ onMounted(() => {
   color: #71717a;
   cursor: pointer;
   background: transparent;
+  align-items: center;
+  justify-content: center;
   font-size: 13px;
   line-height: 1;
+  transition: all 0.15s;
 }
 
 .child-leaf-row:hover .leaf-close-btn {
   display: block;
 }
 
+.child-leaf-row:hover .leaf-action-btn {
+  display: inline-flex;
+}
+
 .leaf-close-btn:hover {
   color: #fff;
   background: rgba(255, 255, 255, 0.15);
+}
+
+.leaf-action-btn:hover {
+  color: #a5b4fc;
+  background: rgba(129, 140, 248, 0.15);
 }
 
 .empty-children-hint {

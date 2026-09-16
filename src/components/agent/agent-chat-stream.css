@@ -1179,42 +1179,6 @@ button.root-row {
     background: transparent;
 }
 
-.final-response-footer {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 10px;
-    padding-top: 4px;
-}
-
-.final-copy-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 11px;
-    border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(255, 255, 255, 0.04);
-    color: #a1a1aa;
-    font-size: 11.5px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    user-select: none;
-}
-
-.final-copy-btn:hover {
-    color: #f4f4f5;
-    background: rgba(255, 255, 255, 0.09);
-    border-color: rgba(255, 255, 255, 0.2);
-    transform: translateY(-0.5px);
-}
-
-.final-copy-btn.copied {
-    color: #34d399;
-    border-color: rgba(52, 211, 153, 0.35);
-    background: rgba(52, 211, 153, 0.12);
-}
 
 .final-artifacts {
     display: flex;
@@ -2277,11 +2241,29 @@ button.root-row {
     user-select: none;
 }
 article:hover > .msg-fork-btn,
-article:hover .msg-side-actions .msg-fork-btn {
+article:hover .msg-side-actions .msg-fork-btn,
+article:hover .msg-header-actions .msg-fork-btn {
     opacity: 1;
 }
-.msg-fork-btn:hover {
+.msg-header-actions .msg-fork-btn {
+    opacity: 0.65;
+}
+.msg-fork-btn:hover,
+.msg-header-actions .msg-fork-btn:hover {
     color: #a5b4fc;
     background: rgba(129, 140, 248, 0.1);
     border-color: rgba(129, 140, 248, 0.25);
+    opacity: 1;
+}
+.msg-fork-btn:disabled,
+.msg-header-actions .msg-fork-btn:disabled,
+article:hover > .msg-fork-btn:disabled,
+article:hover .msg-side-actions .msg-fork-btn:disabled,
+article:hover .msg-header-actions .msg-fork-btn:disabled {
+    opacity: 0.28 !important;
+    cursor: not-allowed !important;
+    background: transparent !important;
+    border-color: transparent !important;
+    color: #52525b !important;
+    pointer-events: auto;
 }

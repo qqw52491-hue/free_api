@@ -23,6 +23,19 @@
                             <div class="msg-header-actions">
                                 <button
                                     type="button"
+                                    class="msg-fork-btn"
+                                    :disabled="isRunning"
+                                    :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '分叉此轮回答（以此回答为基准克隆新会话继续探索）'"
+                                    @click.stop="$emit('fork', { upToMessageId: message.id })"
+                                >
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                                        <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                                    </svg>
+                                    <span>分叉</span>
+                                </button>
+                                <button
+                                    type="button"
                                     class="msg-copy-btn"
                                     :class="{ copied: copiedMessageId === `legacy-${message.id}` }"
                                     :title="copiedMessageId === `legacy-${message.id}` ? '已复制到剪贴板' : '复制回答内容 (Markdown)'"
@@ -63,7 +76,8 @@
                             <button
                                 type="button"
                                 class="msg-fork-btn"
-                                title="从此处分叉为新会话（复制此前的历史与任务状态）"
+                                :disabled="isRunning"
+                                :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '从此处分叉为新会话（复制此前的历史与任务状态）'"
                                 @click.stop="$emit('fork', { messageId: message.id })"
                             >
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -97,7 +111,8 @@
                     <button
                         type="button"
                         class="msg-fork-btn"
-                        title="从此处分叉为新会话（复制此前的历史与任务状态）"
+                        :disabled="isRunning"
+                        :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '从此处分叉为新会话（复制此前的历史与任务状态）'"
                         @click.stop="$emit('fork', { timestampMs: entry.timestamp })"
                     >
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -113,6 +128,19 @@
                             <span class="agent-logo-pill">⚡ Free API</span>
                             <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                             <div class="msg-header-actions">
+                                <button
+                                    type="button"
+                                    class="msg-fork-btn"
+                                    :disabled="isRunning"
+                                    :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '分叉此轮回答（以此回答为基准克隆新会话继续探索）'"
+                                    @click.stop="$emit('fork', { upToTimestampMs: entry.timestamp })"
+                                >
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                                        <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                                    </svg>
+                                    <span>分叉</span>
+                                </button>
                                 <button
                                     type="button"
                                     class="msg-copy-btn"
@@ -156,7 +184,8 @@
                             <button
                                 type="button"
                                 class="msg-fork-btn"
-                                title="从此处分叉为新会话（复制此前的历史与任务状态）"
+                                :disabled="isRunning"
+                                :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '从此处分叉为新会话（复制此前的历史与任务状态）'"
                                 @click.stop="$emit('fork', { timestampMs: entry.timestamp })"
                             >
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -580,6 +609,19 @@
                         <div class="msg-header-actions">
                             <button
                                 type="button"
+                                class="msg-fork-btn"
+                                :disabled="isRunning"
+                                :title="isRunning ? '任务正在执行中，请等待完成或停止后再分叉' : '分叉此轮总结（以此为基准克隆新独立会话继续探索）'"
+                                @click.stop="$emit('fork', { upToTimestampMs: entry.timestamp })"
+                            >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                                    <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                                </svg>
+                                <span>分叉</span>
+                            </button>
+                            <button
+                                type="button"
                                 class="msg-copy-btn"
                                 :class="{ copied: copiedMessageId === `comp-hdr-${entry.id}` }"
                                 :title="copiedMessageId === `comp-hdr-${entry.id}` ? '已复制到剪贴板' : '复制最终回答 (Markdown)'"
@@ -598,24 +640,6 @@
                     </div>
                     <div class="summary-rich">
                         <RichContentRenderer :content="entry.summary || entry.title" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
-                    </div>
-                    <div class="final-response-footer">
-                        <button
-                            type="button"
-                            class="final-copy-btn"
-                            :class="{ copied: copiedMessageId === `comp-ftr-${entry.id}` }"
-                            :title="copiedMessageId === `comp-ftr-${entry.id}` ? '已复制到剪贴板' : '复制完整回答 Markdown'"
-                            @click.stop="copyMessageContent(`comp-ftr-${entry.id}`, entry.summary || entry.title)"
-                        >
-                            <svg v-if="copiedMessageId === `comp-ftr-${entry.id}`" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                                <polyline points="20 6 9 17 4 12" />
-                            </svg>
-                            <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
-                                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
-                            </svg>
-                            <span>{{ copiedMessageId === `comp-ftr-${entry.id}` ? "已复制回答 Markdown" : "复制回答 Markdown" }}</span>
-                        </button>
                     </div>
                     <div v-if="entry.artifacts && entry.artifacts.length" class="final-artifacts">
                         <ArtifactList
@@ -822,7 +846,7 @@ const emit = defineEmits<{
     "open-preview": [code: string];
     "open-team-deck": [stepId?: string];
     "open-diff": [payload: FileDiffPayload];
-    "fork": [payload: { messageId?: string; timestampMs?: number }];
+    "fork": [payload: { messageId?: string; timestampMs?: number; upToMessageId?: string; upToTimestampMs?: number }];
 }>();
 
 function extractSubagentTask(step: any): string {

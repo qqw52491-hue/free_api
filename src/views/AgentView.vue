@@ -138,6 +138,7 @@
                         @open-session="openTreeSession"
                         @new-project-session="handleNewProjectSession"
                         @session-deleted="handleSessionDeleted"
+                        @fork-session="(s) => forkSessionDirectly(s.id)"
                     />
                 </div>
 
@@ -171,6 +172,18 @@
                                 @click.stop
                             />
                             <span v-else class="task-label" :title="tab.label">{{ tab.label }}</span>
+                            <button
+                                v-if="!tab.isDraft"
+                                type="button"
+                                class="task-action-btn fork-btn"
+                                title="分叉此任务（完整克隆全部历史与状态为新会话）"
+                                @click.stop="forkSessionDirectly(tab.id)"
+                            >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                                    <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                                </svg>
+                            </button>
                             <button type="button" class="task-close" title="关闭任务" @click.stop="closeTab(tab.id)">×</button>
                         </div>
                     </div>
@@ -220,6 +233,7 @@
                             @update:title="(title) => { updateTabTitle(tab.id, title); }"
                             @promoted="handleSessionPromoted"
                             @forked="handleForked"
+                            @show-toast="(text, type) => showToast(text, type)"
                             :initial-draft="forkDrafts[tab.id]"
                         />
                     </div>
@@ -536,6 +550,7 @@ function openTreeSession(session: TreeSessionItem) {
             label: session.title || "未命名对话",
             running: false,
             isDraft: session.isDraft,
+            projectId: session.projectId,
         });
     }
     activeTabId.value = session.id;
@@ -543,13 +558,46 @@ function openTreeSession(session: TreeSessionItem) {
 }
 
 // ⑂ 分叉产物：打开新会话 tab，并把分叉点消息正文预填进它的输入框
+interface ForkReport {
+    new_session_id: string;
+    title: string;
+    prompt_seed?: string | null;
+}
 const forkDrafts = ref<Record<string, string>>({});
-function handleForked(payload: { sessionId: string; title: string; promptSeed?: string | null }) {
+async function handleForked(payload: { sessionId: string; title: string; promptSeed?: string | null }) {
     if (payload.promptSeed) {
         forkDrafts.value[payload.sessionId] = payload.promptSeed;
     }
+    await loadSessions();
     openTreeSession({ id: payload.sessionId, title: payload.title, isDraft: false });
     projectTreeRef.value?.refreshProjects();
+    showToast(payload.promptSeed ? "已成功在此分叉新会话" : "已成功克隆并打开新会话", "success");
+}
+
+async function forkSessionDirectly(sessionId: string) {
+    if (sessionId.startsWith("draft-")) return;
+    const tab = tabs.value.find((t) => t.id === sessionId);
+    if (tab?.running) {
+        showToast("该会话正在执行任务，请等待完成或停止后再分叉", "warning");
+        return;
+    }
+    try {
+        const report = await invoke<ForkReport>("fork_agent_session", {
+            sessionId,
+            beforeMessageId: null,
+            beforeTimestampMs: null,
+            upToMessageId: null,
+            upToTimestampMs: null,
+        });
+        await handleForked({
+            sessionId: report.new_session_id,
+            title: report.title,
+            promptSeed: report.prompt_seed,
+        });
+    } catch (e) {
+        console.error("[forkSessionDirectly] failed:", e);
+        showToast("分叉会话失败: " + String(e), "warning");
+    }
 }
 
 // 草稿会话在用户发送第一条消息后成功持久化，升级为正式数据库会话
@@ -1148,7 +1196,8 @@ onUnmounted(() => {
     font-size: 12.5px;
 }
 
-.task-close {
+.task-close,
+.task-action-btn {
     display: none;
     width: 16px;
     height: 16px;
@@ -1158,12 +1207,17 @@ onUnmounted(() => {
     color: #71717a;
     cursor: pointer;
     background: transparent;
+    align-items: center;
+    justify-content: center;
     font-size: 13px;
     line-height: 1;
+    transition: all 0.15s;
 }
 
 .task-row:hover .task-close { display: block; }
+.task-row:hover .task-action-btn { display: inline-flex; }
 .task-close:hover { color: #fff; background: rgba(255, 255, 255, 0.15); }
+.task-action-btn:hover { color: #a5b4fc; background: rgba(129, 140, 248, 0.15); }
 
 .task-rename-box {
     min-width: 0;

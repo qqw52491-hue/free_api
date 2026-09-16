@@ -119,23 +119,33 @@ pub fn resolve_boundary_message(
     Ok(found)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkPoint {
+    /// 全量整会话克隆（全部消息与最新 checkpoint）
+    Full,
+    /// 截断到某条消息之前（不含该消息，该消息文本作为 prompt_seed 回填输入框，供用户修改后重问）
+    BeforeMessage(String),
+    /// 截断到某条消息为止（包含该消息，用于总结/AI回答处分叉，prompt_seed 为 None，以此回答为基准开新分支继续）
+    UpToMessage(String),
+}
+
 /// 生产入口：按真实数据目录推导两侧 tmp 路径。
 pub fn fork_session(
     conn: &mut Connection,
     src_session_id: &str,
-    before_message_id: Option<&str>,
+    fork_point: ForkPoint,
 ) -> Result<ForkReport, String> {
     let new_session_id = Uuid::new_v4().to_string();
     let src_tmp = crate::agent::path_guard::get_session_tmp_dir(src_session_id);
     let dst_tmp = crate::agent::path_guard::get_session_tmp_dir(&new_session_id);
-    fork_session_at(conn, src_session_id, before_message_id, &new_session_id, &src_tmp, &dst_tmp)
+    fork_session_at(conn, src_session_id, fork_point, &new_session_id, &src_tmp, &dst_tmp)
 }
 
 /// 可注入 tmp 根的实现——测试必须注入临时目录，不得触真实数据目录。
 fn fork_session_at(
     conn: &mut Connection,
     src_session_id: &str,
-    before_message_id: Option<&str>,
+    fork_point: ForkPoint,
     new_session_id: &str,
     src_tmp: &Path,
     dst_tmp: &Path,
@@ -174,17 +184,31 @@ fn fork_session_at(
         .map_err(|e| e.to_string())?;
     drop(stmt);
 
-    let boundary_idx = match before_message_id {
-        Some(mid) => messages
-            .iter()
-            .position(|m| m.0 == mid)
-            .ok_or_else(|| "分叉点消息不存在于该会话".to_string())?,
-        None => messages.len(),
+    let (boundary_idx, prompt_seed, boundary_ts) = match &fork_point {
+        ForkPoint::Full => (messages.len(), None, None),
+        ForkPoint::BeforeMessage(mid) => {
+            let idx = messages
+                .iter()
+                .position(|m| &m.0 == mid)
+                .ok_or_else(|| "分叉点消息不存在于该会话".to_string())?;
+            let seed = Some(messages[idx].2.clone());
+            let ts = Some(messages[idx].3.clone());
+            (idx, seed, ts)
+        }
+        ForkPoint::UpToMessage(mid) => {
+            let idx = messages
+                .iter()
+                .position(|m| &m.0 == mid)
+                .ok_or_else(|| "分叉点消息不存在于该会话".to_string())?;
+            let next_idx = idx + 1;
+            let ts = if next_idx < messages.len() {
+                Some(messages[next_idx].3.clone())
+            } else {
+                None
+            };
+            (next_idx, None, ts)
+        }
     };
-    let prompt_seed = before_message_id.map(|_| messages[boundary_idx].2.clone());
-    // 时间边界：分叉点消息的 created_at；严格小于 → 排除"该消息那一轮"产生的运行数据
-    let boundary_ts: Option<String> =
-        before_message_id.map(|_| messages[boundary_idx].3.clone());
     let copied_msgs = &messages[..boundary_idx];
 
     // ---------- Pass A：收集需要重映射的 id ----------
@@ -326,7 +350,8 @@ fn fork_session_at(
     }
 
     // checkpoint：分叉点→最近的历史锚点快照；整会话克隆→当前最新 checkpoint
-    let checkpoint_copied = if before_message_id.is_some() {
+    let is_point_fork = matches!(fork_point, ForkPoint::BeforeMessage(_) | ForkPoint::UpToMessage(_));
+    let checkpoint_copied = if is_point_fork {
         let mut hs = tx
             .prepare(
                 "SELECT anchor_message_id, phase, snapshot_json FROM agent_checkpoint_history
@@ -353,6 +378,25 @@ fn fork_session_at(
             )
             .map_err(|e| e.to_string())?;
             true
+        } else if boundary_idx == messages.len() {
+            let row = tx
+                .query_row(
+                    "SELECT phase, snapshot_json FROM agent_checkpoints WHERE run_id=?1",
+                    params![src_session_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .ok();
+            if let Some((phase, sj)) = row {
+                tx.execute(
+                    "INSERT INTO agent_checkpoints (run_id, phase, snapshot_json, version, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+                    params![new_session_id, phase, rw.apply(&sj), now, now],
+                )
+                .map_err(|e| e.to_string())?;
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -1057,7 +1101,7 @@ mod tests {
         seed(&conn, &src_tmp);
 
         let report =
-            fork_session_at(&mut conn, SRC, None, DST, &src_tmp, &dst_tmp).unwrap();
+            fork_session_at(&mut conn, SRC, ForkPoint::Full, DST, &src_tmp, &dst_tmp).unwrap();
 
         assert_eq!(report.copied_messages, 4);
         assert_eq!(report.copied_traces, 2);
@@ -1179,7 +1223,7 @@ mod tests {
         let dst_tmp = dir.join("dst");
         seed(&conn, &src_tmp);
 
-        let report = fork_session_at(&mut conn, SRC, Some(MSG_U2), DST, &src_tmp, &dst_tmp).unwrap();
+        let report = fork_session_at(&mut conn, SRC, ForkPoint::BeforeMessage(MSG_U2.to_string()), DST, &src_tmp, &dst_tmp).unwrap();
 
         assert_eq!(report.prompt_seed.as_deref(), Some("第二轮任务"));
         assert_eq!(report.copied_messages, 2); // u1 + a1
@@ -1207,6 +1251,24 @@ mod tests {
     }
 
     #[test]
+    fn fork_at_completion_includes_turn_and_no_prompt_seed() {
+        let mut conn = test_conn();
+        let dir = std::env::temp_dir().join(format!("fork-test-{}", Uuid::new_v4()));
+        let src_tmp = dir.join("src");
+        let dst_tmp = dir.join("dst");
+        seed(&conn, &src_tmp);
+
+        let report = fork_session_at(&mut conn, SRC, ForkPoint::UpToMessage(MSG_A1.to_string()), DST, &src_tmp, &dst_tmp).unwrap();
+
+        assert_eq!(report.prompt_seed, None);
+        assert_eq!(report.copied_messages, 2); // u1 + a1
+        assert_eq!(report.copied_traces, 1);
+        assert!(report.checkpoint_copied); // 锚点=a1 的历史快照
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn fork_before_any_turn_gets_no_checkpoint() {
         let mut conn = test_conn();
         let dir = std::env::temp_dir().join(format!("fork-test-{}", Uuid::new_v4()));
@@ -1214,7 +1276,7 @@ mod tests {
         let dst_tmp = dir.join("dst");
         seed(&conn, &src_tmp);
 
-        let report = fork_session_at(&mut conn, SRC, Some(MSG_U1), DST, &src_tmp, &dst_tmp).unwrap();
+        let report = fork_session_at(&mut conn, SRC, ForkPoint::BeforeMessage(MSG_U1.to_string()), DST, &src_tmp, &dst_tmp).unwrap();
         assert_eq!(report.copied_messages, 0);
         assert!(!report.checkpoint_copied);
         assert_eq!(
@@ -1235,8 +1297,8 @@ mod tests {
         seed(&conn, &src_tmp);
 
         const MID: &str = "33333333-3333-3333-3333-333333333333";
-        fork_session_at(&mut conn, SRC, None, MID, &src_tmp, &mid_tmp).unwrap();
-        let r2 = fork_session_at(&mut conn, MID, None, DST, &mid_tmp, &dst_tmp).unwrap();
+        fork_session_at(&mut conn, SRC, ForkPoint::Full, MID, &src_tmp, &mid_tmp).unwrap();
+        let r2 = fork_session_at(&mut conn, MID, ForkPoint::Full, DST, &mid_tmp, &dst_tmp).unwrap();
         assert_eq!(r2.copied_messages, 4);
         assert!(r2.checkpoint_copied);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM chat_messages WHERE session_id=?1", DST), 4);

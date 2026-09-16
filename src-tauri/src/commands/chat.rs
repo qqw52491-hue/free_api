@@ -64,16 +64,30 @@ pub async fn fork_agent_session(
     session_id: String,
     before_message_id: Option<String>,
     before_timestamp_ms: Option<i64>,
+    up_to_message_id: Option<String>,
+    up_to_timestamp_ms: Option<i64>,
 ) -> Result<crate::agent::session_fork::ForkReport, String> {
     let mut conn = state.0.lock().map_err(|e| e.to_string())?;
-    let resolved = match (&before_message_id, before_timestamp_ms) {
-        (Some(id), _) => Some(id.clone()),
-        (None, Some(ts)) => {
-            crate::agent::session_fork::resolve_boundary_message(&conn, &session_id, ts)?
+    let fork_point = if let Some(id) = before_message_id {
+        crate::agent::session_fork::ForkPoint::BeforeMessage(id)
+    } else if let Some(ts) = before_timestamp_ms {
+        let id = crate::agent::session_fork::resolve_boundary_message(&conn, &session_id, ts)?;
+        match id {
+            Some(i) => crate::agent::session_fork::ForkPoint::BeforeMessage(i),
+            None => crate::agent::session_fork::ForkPoint::Full,
         }
-        (None, None) => None,
+    } else if let Some(id) = up_to_message_id {
+        crate::agent::session_fork::ForkPoint::UpToMessage(id)
+    } else if let Some(ts) = up_to_timestamp_ms {
+        let id = crate::agent::session_fork::resolve_boundary_message(&conn, &session_id, ts)?;
+        match id {
+            Some(i) => crate::agent::session_fork::ForkPoint::UpToMessage(i),
+            None => crate::agent::session_fork::ForkPoint::Full,
+        }
+    } else {
+        crate::agent::session_fork::ForkPoint::Full
     };
-    crate::agent::session_fork::fork_session(&mut conn, &session_id, resolved.as_deref())
+    crate::agent::session_fork::fork_session(&mut conn, &session_id, fork_point)
 }
 
 #[tauri::command]
