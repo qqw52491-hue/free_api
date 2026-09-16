@@ -519,6 +519,15 @@ fixture 无答案，杜绝批量解题）。
    子任务 prompt_tokens 可观测、oracle 判分服务并发化。
 9. **测试**：Rust 测试全过、零警告（09-07 实测 437）。测试文件集中在
    `finish_guard.rs`（门禁/预算/failover）、`stage_review.rs`、`router.rs`、`child_reviewer.rs`。
+10. **自由会话工作区去 cwd 化**（a57e46c）：未选项目时 `workspace_dir` 回落
+    `get_session_tmp_dir`（eager create）而非进程 cwd——此前 cwd 事故目录
+    会被 path_guard 双白名单整体放行，提示词"工作区为空"承诺与物理现实
+    矛盾，模型实测把宿主 src-tauri 报成"已绑定工作区"；host_verify 还曾
+    拿宿主仓库跑 verify_test_command 当终审证据。`ensure_allowed_path`
+    的 tmp 身份判定相应提至工作区归属之前（workspace==tmp 时 tmp 路径
+    仍保 is_session_tmp=true，护住草稿免审/盲写豁免）。顺带修复 macOS
+    /var→/private/var 软链导致 retrieval 硬闸三测试本机静默失效
+    （种子 resolved_root 未 canonical，与生产持久化口径不一致）。
 
 ## 三、实弹评测：已测模型与结论（重要——注意结论的适用边界）
 
