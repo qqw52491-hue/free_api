@@ -121,7 +121,8 @@
     overflow-wrap: anywhere;
 }
 
-/* 用户长消息折叠态：行钳制 + 底部渐隐 + 展开按钮 */
+/* 用户长消息折叠态：max-height 钳制（比 line-clamp 在 WebKitGTK 下更稳）+
+   底部渐隐 + 底部居中 chevron 展开条 */
 .user-text-clip {
     position: relative;
 }
@@ -131,9 +132,7 @@
 }
 
 .user-text-clip.collapsed .user-text-content {
-    display: -webkit-box;
-    -webkit-line-clamp: 5;
-    -webkit-box-orient: vertical;
+    max-height: 8em; /* ≈5 行 × line-height 1.6 */
     overflow: hidden;
 }
 
@@ -148,21 +147,31 @@
     pointer-events: none;
 }
 
-.user-text-toggle {
-    display: inline-block;
-    margin-top: 4px;
-    padding: 0;
-    border: none;
-    background: transparent;
-    color: #8ab4f8;
-    font-size: 12px;
+/* 底部居中 chevron 展开条：只占一条细带，不抢视觉 */
+.user-text-expandbar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 2px -15px -9px;
+    padding: 3px 0 4px;
+    color: #71717a;
     cursor: pointer;
-    opacity: 0.85;
+    border-radius: 0 0 4px 16px;
+    transition: color 0.15s ease, background 0.15s ease;
+    user-select: none;
 }
 
-.user-text-toggle:hover {
-    opacity: 1;
-    text-decoration: underline;
+.user-text-expandbar:hover {
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.user-text-expandbar .chev {
+    transition: transform 0.18s ease;
+}
+
+.user-text-expandbar .chev.up {
+    transform: rotate(180deg);
 }
 
 .user-text-trunc-note {

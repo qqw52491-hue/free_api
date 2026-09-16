@@ -2,13 +2,13 @@
 import { computed, ref } from "vue";
 
 /**
- * 用户消息正文：默认折叠展示（行钳制+底部渐隐），点击展开；
- * 展开后仍按字符上限截断，超长指令不会把整条时间线撑爆。
+ * 用户消息正文：默认折叠（max-height + 底部渐隐 + 底部居中 chevron），
+ * 点击展开；展开后仍按字符上限截断，超长指令不会把整条时间线撑爆。
  */
 const props = defineProps<{ text: string }>();
 
 const COLLAPSE_CHARS = 240; // 字符数阈值（粗略快速路径）
-const COLLAPSE_LINES = 5; // 折叠态可见行数
+const COLLAPSE_LINES = 5; // 折叠态约可见行数（配合 CSS max-height）
 const EXPANDED_MAX_CHARS = 6000; // 展开态仍截断的硬上限
 
 const expanded = ref(false);
@@ -24,6 +24,10 @@ const shown = computed(() =>
         ? props.text.slice(0, EXPANDED_MAX_CHARS)
         : props.text,
 );
+
+function toggle() {
+    expanded.value = !expanded.value;
+}
 </script>
 
 <template>
@@ -32,7 +36,7 @@ const shown = computed(() =>
             class="user-text-clip"
             :class="{ collapsed: isLong && !expanded }"
             :title="isLong && !expanded ? '点击展开全文' : undefined"
-            @click="isLong && !expanded && (expanded = true)"
+            @click="isLong && !expanded && toggle()"
         >
             <p class="user-text-content">{{ shown }}</p>
             <div v-if="isLong && !expanded" class="user-text-fade" aria-hidden="true" />
@@ -40,13 +44,27 @@ const shown = computed(() =>
         <p v-if="expanded && truncated" class="user-text-trunc-note">
             内容过长，仅展示前 {{ EXPANDED_MAX_CHARS }} 字符
         </p>
-        <button
+        <div
             v-if="isLong"
-            type="button"
-            class="user-text-toggle"
-            @click.stop="expanded = !expanded"
+            class="user-text-expandbar"
+            role="button"
+            :title="expanded ? '收起' : '展开全文'"
+            @click.stop="toggle"
         >
-            {{ expanded ? "收起" : "展开全文" }}
-        </button>
+            <svg
+                class="chev"
+                :class="{ up: expanded }"
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+            >
+                <polyline points="6 9 12 15 18 9" />
+            </svg>
+        </div>
     </div>
 </template>
