@@ -256,12 +256,14 @@ pub fn repair_json(text: &str) -> Option<String> {
                         (raw_after_quote, None)
                     };
 
+                    // 切片末尾是 `..."\n  },\n  ` 这类混杂尾巴：先 trim() 再逐字符剥
+                    // 的旧顺序会让前面五次 trim_end_matches 全部空转（末尾是空白不
+                    // 匹配任何目标字符），残留的引号/闭合括号/逗号原样漏进正文。
+                    // 改为闭包字符集循环剥离：空白与结构符号一并从尾部持续剥除。
                     let clean_summary = summary_text
-                        .trim_end_matches('}')
-                        .trim_end_matches(']')
-                        .trim_end_matches(',')
-                        .trim_end_matches('"')
-                        .trim_end_matches('}')
+                        .trim_end_matches(|c: char| {
+                            c.is_whitespace() || c == '}' || c == ']' || c == ',' || c == '"'
+                        })
                         .trim();
 
                     let mut rescued = serde_json::json!({
@@ -569,6 +571,24 @@ mod tests {
         normalize_raw_instruction_value(&mut v2);
         assert!(v2["dispatches"].is_array());
         assert_eq!(v2["dispatches"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_repair_json_summary_strips_mixed_trailing_junk() {
+        // summary 正文含未转义引号导致标准解析失败 → 走终极兜底救赎；
+        // 切片尾巴 `"\n  },\n  ` 曾让五次 trim_end_matches 因末尾空白全部空转，
+        // 残留的 `"`/`}`/`,` 原样漏进 summary 文本（用户可见的多余符号）。
+        let broken = concat!(
+            "{\"tool\": \"finish\", \"command\": {\"summary\": \"报告引用 \"target_files\" 字段，分析完成。\"\n  },\n  ",
+            "\"change_verification_update\": null}"
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(broken).is_err());
+        let rescued = repair_json(broken).expect("兜底救赎应成功");
+        let v: serde_json::Value = serde_json::from_str(&rescued).unwrap();
+        let summary = v["command"]["summary"].as_str().unwrap();
+        assert_eq!(summary, "报告引用 \"target_files\" 字段，分析完成。");
+        // 尾部系统字段仍被还原，不丢审查状态
+        assert!(v.get("change_verification_update").is_some());
     }
 }
 
