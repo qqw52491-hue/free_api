@@ -7,8 +7,8 @@ import { computed, ref } from "vue";
  */
 const props = defineProps<{ text: string }>();
 
-const COLLAPSE_CHARS = 240; // 字符数阈值（粗略快速路径）
-const COLLAPSE_LINES = 5; // 折叠态约可见行数（配合 CSS max-height）
+const COLLAPSE_CHARS = 550; // 字符数阈值（约 9-10 行）
+const COLLAPSE_LINES = 9; // 折叠态换行数阈值（超 9 行即折叠）
 const EXPANDED_MAX_CHARS = 6000; // 展开态仍截断的硬上限
 
 const expanded = ref(false);
@@ -20,9 +20,7 @@ const isLong = computed(
 );
 const truncated = computed(() => props.text.length > EXPANDED_MAX_CHARS);
 const shown = computed(() =>
-    expanded.value && truncated.value
-        ? props.text.slice(0, EXPANDED_MAX_CHARS)
-        : props.text,
+    truncated.value ? props.text.slice(0, EXPANDED_MAX_CHARS) : props.text,
 );
 
 function toggle() {
@@ -48,8 +46,11 @@ function toggle() {
             v-if="isLong"
             class="user-text-expandbar"
             role="button"
+            tabindex="0"
             :title="expanded ? '收起' : '展开全文'"
             @click.stop="toggle"
+            @keydown.enter.prevent="toggle"
+            @keydown.space.prevent="toggle"
         >
             <svg
                 class="chev"
@@ -68,3 +69,80 @@ function toggle() {
         </div>
     </div>
 </template>
+
+<style scoped>
+.user-text-wrap {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.user-text-content {
+    margin: 0;
+    color: #f4f4f5;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+/* 用户长消息折叠态：约 9 行 max-height 钳制 + 底部渐隐 + 底部居中 chevron 展开条 */
+.user-text-clip {
+    position: relative;
+}
+
+.user-text-clip.collapsed {
+    cursor: pointer;
+}
+
+.user-text-clip.collapsed .user-text-content {
+    max-height: 14.5em; /* ≈9 行 × line-height 1.6 */
+    overflow: hidden;
+}
+
+.user-text-fade {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3.2em;
+    background: linear-gradient(to bottom, rgba(39, 39, 42, 0), #27272a);
+    pointer-events: none;
+}
+
+/* 底部居中 chevron 展开条：只占一条细带，不抢视觉，也不造成历史时间戳错位 */
+.user-text-expandbar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 4px;
+    padding: 2px 0;
+    color: #71717a;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: color 0.15s ease, background 0.15s ease;
+    user-select: none;
+    outline: none;
+}
+
+.user-text-expandbar:hover,
+.user-text-expandbar:focus-visible {
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.user-text-expandbar .chev {
+    transition: transform 0.18s ease;
+}
+
+.user-text-expandbar .chev.up {
+    transform: rotate(180deg);
+}
+
+.user-text-trunc-note {
+    margin: 4px 0 0;
+    color: #a1a1aa;
+    font-size: 11px;
+    font-style: italic;
+}
+</style>

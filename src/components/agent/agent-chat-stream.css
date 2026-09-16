@@ -111,76 +111,6 @@
     box-sizing: border-box;
 }
 
-.user-text-content {
-    margin: 0;
-    color: #f4f4f5;
-    font-size: 13px;
-    line-height: 1.6;
-    white-space: pre-wrap;
-    word-break: break-word;
-    overflow-wrap: anywhere;
-}
-
-/* 用户长消息折叠态：max-height 钳制（比 line-clamp 在 WebKitGTK 下更稳）+
-   底部渐隐 + 底部居中 chevron 展开条 */
-.user-text-clip {
-    position: relative;
-}
-
-.user-text-clip.collapsed {
-    cursor: pointer;
-}
-
-.user-text-clip.collapsed .user-text-content {
-    max-height: 8em; /* ≈5 行 × line-height 1.6 */
-    overflow: hidden;
-}
-
-.user-text-fade {
-    position: absolute;
-    left: -15px;
-    right: -15px;
-    bottom: 0;
-    height: 2.6em;
-    background: linear-gradient(to bottom, rgba(39, 39, 42, 0), #27272a);
-    border-radius: 0 0 4px 16px;
-    pointer-events: none;
-}
-
-/* 底部居中 chevron 展开条：只占一条细带，不抢视觉 */
-.user-text-expandbar {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin: 2px -15px -9px;
-    padding: 3px 0 4px;
-    color: #71717a;
-    cursor: pointer;
-    border-radius: 0 0 4px 16px;
-    transition: color 0.15s ease, background 0.15s ease;
-    user-select: none;
-}
-
-.user-text-expandbar:hover {
-    color: #a1a1aa;
-    background: rgba(255, 255, 255, 0.05);
-}
-
-.user-text-expandbar .chev {
-    transition: transform 0.18s ease;
-}
-
-.user-text-expandbar .chev.up {
-    transform: rotate(180deg);
-}
-
-.user-text-trunc-note {
-    margin: 4px 0 0;
-    color: #a1a1aa;
-    font-size: 11px;
-    font-style: italic;
-}
-
 /* 📎 附件缩略图与文件卡片托盘 */
 .stream-attachments-tray {
     display: flex;
@@ -396,6 +326,41 @@
     font-weight: 700;
     color: var(--orange);
     margin-bottom: 3px;
+}
+
+.msg-header-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.msg-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: #71717a;
+    font-size: 11px;
+    cursor: pointer;
+    line-height: 1;
+    transition: all 0.15s ease;
+    user-select: none;
+}
+
+.msg-copy-btn:hover {
+    color: #e4e4e7;
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+.msg-copy-btn.copied {
+    color: #34d399;
+    background: rgba(52, 211, 153, 0.1);
+    border-color: rgba(52, 211, 153, 0.2);
 }
 
 /* ── 📝 Markdown 优雅排版 (标题/段落/列表/表格/代码) ── */
@@ -1212,6 +1177,43 @@ button.root-row {
     padding: 4px 0 16px;
     border: 0;
     background: transparent;
+}
+
+.final-response-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 4px;
+}
+
+.final-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 11px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.04);
+    color: #a1a1aa;
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    user-select: none;
+}
+
+.final-copy-btn:hover {
+    color: #f4f4f5;
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(255, 255, 255, 0.2);
+    transform: translateY(-0.5px);
+}
+
+.final-copy-btn.copied {
+    color: #34d399;
+    border-color: rgba(52, 211, 153, 0.35);
+    background: rgba(52, 211, 153, 0.12);
 }
 
 .final-artifacts {

@@ -20,6 +20,24 @@
                         <div class="agent-msg-header">
                             <span class="agent-logo-pill">⚡ Free API</span>
                             <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
+                            <div class="msg-header-actions">
+                                <button
+                                    type="button"
+                                    class="msg-copy-btn"
+                                    :class="{ copied: copiedMessageId === `legacy-${message.id}` }"
+                                    :title="copiedMessageId === `legacy-${message.id}` ? '已复制到剪贴板' : '复制回答内容 (Markdown)'"
+                                    @click.stop="copyMessageContent(`legacy-${message.id}`, message.content)"
+                                >
+                                    <svg v-if="copiedMessageId === `legacy-${message.id}`" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                        <polyline points="20 6 9 17 4 12" />
+                                    </svg>
+                                    <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                                        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                                    </svg>
+                                    <span>{{ copiedMessageId === `legacy-${message.id}` ? "已复制" : "复制" }}</span>
+                                </button>
+                            </div>
                         </div>
                         <div class="agent-text-body">
                             <RichContentRenderer :content="message.content" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
@@ -68,6 +86,24 @@
                         <div class="agent-msg-header">
                             <span class="agent-logo-pill">⚡ Free API</span>
                             <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                            <div class="msg-header-actions">
+                                <button
+                                    type="button"
+                                    class="msg-copy-btn"
+                                    :class="{ copied: copiedMessageId === `entry-${entry.id}` }"
+                                    :title="copiedMessageId === `entry-${entry.id}` ? '已复制到剪贴板' : '复制回答内容 (Markdown)'"
+                                    @click.stop="copyMessageContent(`entry-${entry.id}`, entry.content)"
+                                >
+                                    <svg v-if="copiedMessageId === `entry-${entry.id}`" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                        <polyline points="20 6 9 17 4 12" />
+                                    </svg>
+                                    <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                                        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                                    </svg>
+                                    <span>{{ copiedMessageId === `entry-${entry.id}` ? "已复制" : "复制" }}</span>
+                                </button>
+                            </div>
                         </div>
                         <div class="agent-text-body">
                             <RichContentRenderer :content="entry.content" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
@@ -501,9 +537,45 @@
                     <div class="agent-msg-header">
                         <span class="agent-logo-pill">⚡ Free API</span>
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                        <div class="msg-header-actions">
+                            <button
+                                type="button"
+                                class="msg-copy-btn"
+                                :class="{ copied: copiedMessageId === `comp-hdr-${entry.id}` }"
+                                :title="copiedMessageId === `comp-hdr-${entry.id}` ? '已复制到剪贴板' : '复制最终回答 (Markdown)'"
+                                @click.stop="copyMessageContent(`comp-hdr-${entry.id}`, entry.summary || entry.title)"
+                            >
+                                <svg v-if="copiedMessageId === `comp-hdr-${entry.id}`" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                                <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                                    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                                </svg>
+                                <span>{{ copiedMessageId === `comp-hdr-${entry.id}` ? "已复制" : "复制" }}</span>
+                            </button>
+                        </div>
                     </div>
                     <div class="summary-rich">
                         <RichContentRenderer :content="entry.summary || entry.title" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
+                    </div>
+                    <div class="final-response-footer">
+                        <button
+                            type="button"
+                            class="final-copy-btn"
+                            :class="{ copied: copiedMessageId === `comp-ftr-${entry.id}` }"
+                            :title="copiedMessageId === `comp-ftr-${entry.id}` ? '已复制到剪贴板' : '复制完整回答 Markdown'"
+                            @click.stop="copyMessageContent(`comp-ftr-${entry.id}`, entry.summary || entry.title)"
+                        >
+                            <svg v-if="copiedMessageId === `comp-ftr-${entry.id}`" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                            <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                            </svg>
+                            <span>{{ copiedMessageId === `comp-ftr-${entry.id}` ? "已复制回答 Markdown" : "复制回答 Markdown" }}</span>
+                        </button>
                     </div>
                     <div v-if="entry.artifacts && entry.artifacts.length" class="final-artifacts">
                         <ArtifactList
@@ -588,6 +660,35 @@ function parseUserMessageAttachments(content: string): { cleanText: string; atta
 
 const previewImageModal = ref<ParsedAttachment | null>(null);
 const previewDocModal = ref<ParsedAttachment | null>(null);
+const copiedMessageId = ref<string | null>(null);
+let copyTimer: number | null = null;
+
+async function copyMessageContent(id: string, content: string) {
+    if (!content) return;
+    try {
+        await navigator.clipboard.writeText(content);
+    } catch {
+        try {
+            const ta = document.createElement("textarea");
+            ta.value = content;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+        } catch (e) {
+            console.warn("复制文本失败:", e);
+            return;
+        }
+    }
+    copiedMessageId.value = id;
+    if (copyTimer !== null) clearTimeout(copyTimer);
+    copyTimer = window.setTimeout(() => {
+        copiedMessageId.value = null;
+        copyTimer = null;
+    }, 2000);
+}
 
 async function openImagePreview(att: ParsedAttachment) {
     if (att.image_data_url) {
