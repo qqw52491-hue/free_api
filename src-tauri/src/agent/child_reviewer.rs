@@ -1398,7 +1398,13 @@ pub async fn spawn_child_reviewer(
 
         // ===== 取证循环：模型可先请求只读工具核实疑点，预算用尽必须收敛为最终审查 JSON =====
         let mut tool_steps_used: u32 = 0;
-        let mut forced_final = false;
+        // 非合规输出计数制（替代一次性 forced_final）：空响应/乱码输出给多次改正——
+        // 模型偶发抽风不该直接判死（实测：空响应一次后合法取证请求被误杀）。
+        // 仍保留上界终止保证：连续累计 3 次非合规输出 → invalid_output；
+        // 预算内取证请求成功执行即清零（合规进展的证明）。
+        let mut non_compliant_strikes: u32 = 0;
+        const MAX_NON_COMPLIANT_STRIKES: u32 = 3;
+        let mut budget_warned = false;
         // 归档计数：本子运行内的第几次 LLM 调用（取证循环每轮一次）
         let mut llm_call_index = 0usize;
         let child_log_suffix = format!("child-{}", child_run_id_clone);
@@ -1532,9 +1538,8 @@ pub async fn spawn_child_reviewer(
                 break (duration_ms, completion_tokens, prompt_tokens, parsed, raw);
             }
 
-            // 2. 取证请求（含 "tool" 键，宽松提取）：合规输出永不因改正旗标被拒——
-            //    forced_final 只约束"非合规输出"，预算未尽的取证请求照常执行
-            //    （实测：空响应→改正→合法 read_file 曾被误判 invalid_output）。
+            // 2. 取证请求（含 "tool" 键，宽松提取）：预算未尽永远执行——合规进展
+            //    顺带清零非合规计数（模型偶发抽风不该连累后续合法取证）。
             let tool_request = serde_json::from_str::<serde_json::Value>(&raw)
                 .ok()
                 .or_else(|| {
@@ -1554,6 +1559,7 @@ pub async fn spawn_child_reviewer(
                         Err(e) => format!("取证请求被拒绝: {}", e),
                     };
                     tool_steps_used += 1;
+                    non_compliant_strikes = 0;
                     messages.push(json!({"role": "assistant", "content": raw}));
                     messages.push(json!({
                         "role": "user",
@@ -1564,36 +1570,22 @@ pub async fn spawn_child_reviewer(
                     }));
                     continue;
                 }
-                // 预算用尽：已强制收敛后仍要取证 → 判负（子审查无 fail-open，
-                // 失败即交编排层 failover）；未强制过 → 提示收敛再给一棒。
-                if forced_final {
-                    finish_child_run(
-                        &db_clone,
-                        &child_run_id_clone,
-                        "invalid_output",
-                        duration_ms,
-                        completion_tokens,
-                        Some(ChildErrorKind::InvalidOutput),
-                        Some(&child_invalid_result_json(
-                            &child_run_id_clone,
-                            duration_ms,
-                            completion_tokens,
-                            &raw,
-                        )),
-                    );
-                    return;
+                // 预算用尽：首次提示收敛不记罚；此后仍要取证按非合规计数。
+                if !budget_warned {
+                    messages.push(json!({"role": "assistant", "content": raw}));
+                    messages.push(json!({
+                        "role": "user",
+                        "content": "【系统】取证预算已用尽。请立即基于已有证据输出最终审查 JSON（含 findings/scorecard），不要再请求取证。证据缺口写入 missing_evidence。"
+                    }));
+                    budget_warned = true;
+                    continue;
                 }
-                messages.push(json!({"role": "assistant", "content": raw}));
-                messages.push(json!({
-                    "role": "user",
-                    "content": "【系统】取证预算已用尽。请立即基于已有证据输出最终审查 JSON（含 findings/scorecard），不要再请求取证。证据缺口写入 missing_evidence。"
-                }));
-                forced_final = true;
-                continue;
             }
 
-            // 3. 非取证输出：已给过改正机会仍不合规 → invalid_output
-            if forced_final {
+            // 3. 非合规输出（乱码/空响应/预算耗尽后仍要取证）：计数判罚，
+            //    累计 3 次才 invalid_output——给模型多次改正机会，仍有上界。
+            non_compliant_strikes += 1;
+            if non_compliant_strikes >= MAX_NON_COMPLIANT_STRIKES {
                 finish_child_run(
                     &db_clone,
                     &child_run_id_clone,
@@ -1610,14 +1602,14 @@ pub async fn spawn_child_reviewer(
                 );
                 return;
             }
-
-            // 4. 输出既非最终 JSON 也非取证请求 → 给一次改正机会
             messages.push(json!({"role": "assistant", "content": raw}));
             messages.push(json!({
                 "role": "user",
-                "content": "【系统】输出不合规：必须是最终审查 JSON（含 findings 键）或取证请求 JSON（含 tool 键）。请重新输出。"
+                "content": format!(
+                    "【系统】输出不合规（第 {}/{} 次）：必须是最终审查 JSON（含 findings 键）或取证请求 JSON（含 tool 键）。请重新输出。",
+                    non_compliant_strikes, MAX_NON_COMPLIANT_STRIKES
+                )
             }));
-            forced_final = true;
         };
 
         let (findings, confidence, evidence_refs, missing_evidence, routing, scorecard, objection_verdicts, withdrawn_findings) = final_parsed;

@@ -157,6 +157,18 @@ class WorktreeSandbox {
       stdio: 'pipe',
     });
 
+    // 考题与判据文件不进沙盒：实弹 agent 曾 read 到 test/eval_cases/ 下自己本题的
+    // verify_command 与期望文件清单（判分标准泄露=reward hacking 敞口）。
+    // sparse-checkout 只移出工作区文件、不动索引——git status/diff 与基线对账不受影响。
+    try {
+      execSync(`git -C "${this.sandboxPath}" sparse-checkout init --no-cone`, { stdio: 'pipe' });
+      execSync(`git -C "${this.sandboxPath}" sparse-checkout set '/*' '!/test/eval_cases'`, {
+        stdio: 'pipe',
+      });
+    } catch (e) {
+      console.warn(`   ⚠️ sparse-checkout 剔除考题目录失败（将继续评测但判据可见）: ${e.message}`);
+    }
+
     this.active = true;
     return this.sandboxPath;
   }
