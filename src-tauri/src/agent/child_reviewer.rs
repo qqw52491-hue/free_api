@@ -1400,10 +1400,11 @@ pub async fn spawn_child_reviewer(
         let mut tool_steps_used: u32 = 0;
         // 非合规输出计数制（替代一次性 forced_final）：空响应/乱码输出给多次改正——
         // 模型偶发抽风不该直接判死（实测：空响应一次后合法取证请求被误杀）。
-        // 仍保留上界终止保证：连续累计 3 次非合规输出 → invalid_output；
-        // 预算内取证请求成功执行即清零（合规进展的证明）。
+        // 上界的作用只是烧钱止损而非纪律要求：每次 strike 仅回一句纠正提示，
+        // 模型恢复即清零继续干活；彻底卡死的审查员最多白烧 MAX 次调用。
+        // 次数无"正确值"——实测恢复都在 1 次内完成，给 20 属于刻意放宽。
         let mut non_compliant_strikes: u32 = 0;
-        const MAX_NON_COMPLIANT_STRIKES: u32 = 3;
+        const MAX_NON_COMPLIANT_STRIKES: u32 = 20;
         let mut budget_warned = false;
         // 归档计数：本子运行内的第几次 LLM 调用（取证循环每轮一次）
         let mut llm_call_index = 0usize;
