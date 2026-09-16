@@ -1342,11 +1342,15 @@ async fn run_agent_main_loop_in_workspace_inner(
                                     });
                                 }
                             }
-                            // 【审查者故障转移链】invalid_output → 同参数重试；超时 → 切换跨平台备用审查员。
+                            // 【审查者故障转移链】invalid_output → 同参数重试；超时/请求层失败 → 切换跨平台备用审查员。
                             // 封顶 2 次；两次都失败 → 退款 + 升级人工（ask_human 路径不变）。
+                            // request_or_stream（402/网络断流等零产出失败）与超时同性质，必须触发换平台重派。
                             let failover_eligible = matches!(
                                 receipt.error_kind.as_deref(),
-                                Some("invalid_output") | Some("timed_out") | Some("timeout")
+                                Some("invalid_output")
+                                    | Some("timed_out")
+                                    | Some("timeout")
+                                    | Some("request_or_stream")
                             );
                             if failover_eligible {
                                 match try_plan_reviewer_failover(
@@ -1443,7 +1447,13 @@ async fn run_agent_main_loop_in_workspace_inner(
                             .error_kind
                             .as_deref()
                             .filter(|k| {
-                                matches!(*k, "timed_out" | "invalid_output" | "timeout")
+                                matches!(
+                                    *k,
+                                    "timed_out"
+                                        | "invalid_output"
+                                        | "timeout"
+                                        | "request_or_stream"
+                                )
                             });
                         if let Some(kind) = failed_kind {
                             match try_plan_reviewer_failover(

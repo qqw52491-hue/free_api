@@ -1260,10 +1260,11 @@ impl AgentCheckpoint {
         self.stage_review_rebuttal_run_id = None;
     }
 
-    /// 审查者技术失败的审查轮次退款：超时/取消/中断/非法输出不是实质性审查，不应烧掉
-    /// 请求方的预算——技术失败和业务驳回是两笔账（实测教训：error_kind 落库值是
+    /// 审查者技术失败的审查轮次退款：超时/取消/中断/非法输出/请求层失败不是实质性审查，
+    /// 不应烧掉请求方的预算——技术失败和业务驳回是两笔账（实测教训：error_kind 落库值是
     /// "timeout" 而非 "timed_out"，且 invalid_output 未纳入退款，glm 实弹中模型为
-    /// 审查员的故障买了单）。退款封顶 3 次，防止持续故障下预算永不耗尽、模型无限空转。
+    /// 审查员的故障买了单；402 欠费等 request_or_stream 同属零产出 infra 失败）。
+    /// 退款封顶 3 次，防止持续故障下预算永不耗尽、模型无限空转。
     pub fn refund_infra_failed_review_round(&mut self, error_kind: Option<&str>) -> bool {
         let infra = matches!(
             error_kind,
@@ -1272,6 +1273,7 @@ impl AgentCheckpoint {
                 | Some("interrupted")
                 | Some("cancelled")
                 | Some("invalid_output")
+                | Some("request_or_stream")
         );
         if !infra || self.reviewer_budget_refunds >= 3 || self.plan_reviewer_retry_count == 0 {
             return false;

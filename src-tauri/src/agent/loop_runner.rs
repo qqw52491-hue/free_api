@@ -1458,7 +1458,10 @@ pub async fn run_tool_phase(
                         let error_kind = value.get("error_kind").and_then(|e| e.as_str()).map(|s| s.to_string());
                         if matches!(
                             error_kind.as_deref(),
-                            Some("timed_out") | Some("interrupted") | Some("cancelled")
+                            Some("timed_out")
+                                | Some("interrupted")
+                                | Some("cancelled")
+                                | Some("request_or_stream")
                         ) {
                             checkpoint.remove_stage_review_run(&job.job_id);
                             if is_rebuttal_result {
@@ -1605,13 +1608,18 @@ pub async fn run_tool_phase(
                         .and_then(|v| v.get("error_kind").and_then(|e| e.as_str()).map(|s| s.to_string()));
                     let is_infra = matches!(
                         infra_kind.as_deref(),
-                        Some("timed_out") | Some("timeout") | Some("interrupted") | Some("cancelled")
+                        Some("timed_out")
+                            | Some("timeout")
+                            | Some("interrupted")
+                            | Some("cancelled")
+                            | Some("request_or_stream")
                     );
                     if is_infra {
                         let kind = infra_kind.as_deref().unwrap_or("timed_out");
                         // 【冒烟实测抓到的坑】超时类失败必须先走 failover 重派备用审查员；
-                        // 只退款的话主 Agent 会对着已失败的审查任务永远 wait（信箱无结论可收）
-                        if matches!(kind, "timeout" | "timed_out") {
+                        // 只退款的话主 Agent 会对着已失败的审查任务永远 wait（信箱无结论可收）。
+                        // request_or_stream（402 欠费/断流等零产出失败）与超时同性质，同样换平台重派。
+                        if matches!(kind, "timeout" | "timed_out" | "request_or_stream") {
                             match crate::agent::main_loop::try_plan_reviewer_failover(
                                 app,
                                 state.inner(),

@@ -539,7 +539,7 @@ impl ReviewerDeliveryData {
 }
 
 impl ChildReviewResult {
-    /// 判定本次结果是否属于基础设施或执行异常（如超时/取消/崩溃/格式损坏，非有效业务审查结论）
+    /// 判定本次结果是否属于基础设施或执行异常（如超时/取消/崩溃/格式损坏/请求层失败，非有效业务审查结论）
     pub fn is_infra_failure(&self) -> bool {
         matches!(
             self.error_kind.as_deref(),
@@ -548,6 +548,7 @@ impl ChildReviewResult {
                 | Some("interrupted")
                 | Some("cancelled")
                 | Some("invalid_output")
+                | Some("request_or_stream")
         )
     }
 
@@ -1169,6 +1170,7 @@ pub(crate) fn child_invalid_result_json(
         "invalid_output",
         duration_ms,
         completion_tokens,
+        None,
     ))
     .unwrap_or(serde_json::json!({}));
     let truncated: String = raw.chars().take(4000).collect();
@@ -1182,14 +1184,25 @@ fn child_error_result_json(
     error_kind: &str,
     duration_ms: u64,
     completion_tokens: i64,
+    error_detail: Option<&str>,
 ) -> String {
+    // 请求层失败把真实错误（如 "402 Insufficient Balance"）带进 missing_evidence：
+    // 主 Agent/人工呈报环节能看到死因，决定重派、换模型还是先修上游，而不是对着
+    // 干巴巴的 kind 猜。（截断防超长错误体撑爆注入）
+    let missing_msg = match error_detail {
+        Some(detail) => {
+            let truncated: String = detail.chars().take(240).collect();
+            format!("子审查任务未能产出结论（{}: {}）", error_kind, truncated)
+        }
+        None => format!("子审查任务未能产出结论（{}）", error_kind),
+    };
     serde_json::to_string(&ChildReviewResult {
         child_run_id: child_run_id.to_string(),
         status: status.to_string(),
         findings: vec![],
         confidence: "unverified".to_string(),
         evidence_refs: vec![],
-        missing_evidence: vec![format!("子审查任务未能产出结论（{}）", error_kind)],
+        missing_evidence: vec![missing_msg],
         duration_ms,
         completion_tokens,
         prompt_tokens: 0,
@@ -1445,6 +1458,7 @@ pub async fn spawn_child_reviewer(
                             "timeout",
                             duration_ms,
                             0,
+                            None,
                         )),
                     );
                     return;
@@ -1484,6 +1498,7 @@ pub async fn spawn_child_reviewer(
                             error_kind,
                             duration_ms,
                             0,
+                            Some(error.as_str()),
                         )),
                     );
                     return;
@@ -1814,7 +1829,7 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
             params![
                 child_run_id,
                 now.to_rfc3339(),
-                child_error_result_json(&child_run_id, "timed_out", "reaped_stale", age_secs.max(0) as u64 * 1000, 0)
+                child_error_result_json(&child_run_id, "timed_out", "reaped_stale", age_secs.max(0) as u64 * 1000, 0, None)
             ],
         );
         // 清理日志：reap 只做标记不撕关联——迟到结果仍允许落库（见 finish 守卫），
@@ -1916,7 +1931,7 @@ pub fn recover_orphaned_child_runs_on_session_start(
             params![
                 child_run_id,
                 now,
-                child_error_result_json(child_run_id, "interrupted", "interrupted", 0, 0)
+                child_error_result_json(child_run_id, "interrupted", "interrupted", 0, 0, None)
             ],
         );
     }
@@ -2987,7 +3002,7 @@ mod tests {
             45_000,
             0,
             Some("timeout"),
-            Some(&child_error_result_json(&child_id, "timed_out", "timeout", 45_000, 0)),
+            Some(&child_error_result_json(&child_id, "timed_out", "timeout", 45_000, 0, None)),
         );
 
         // 主循环信箱轮询也能取到失败终态（此前失败结果会被静默丢弃）

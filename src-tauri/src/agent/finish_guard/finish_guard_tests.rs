@@ -972,6 +972,12 @@
         assert!(checkpoint.refund_infra_failed_review_round(Some("timeout")));
         assert_eq!(checkpoint.plan_reviewer_retry_count, 0);
 
+        // 请求层失败（402/断流等零产出）同属 infra 失败，也应退款
+        checkpoint.plan_reviewer_retry_count = 1;
+        checkpoint.reviewer_budget_refunds = 0;
+        assert!(checkpoint.refund_infra_failed_review_round(Some("request_or_stream")));
+        assert_eq!(checkpoint.plan_reviewer_retry_count, 0);
+
         // 退款封顶 3 次：防持续故障下预算永不耗尽
         checkpoint.plan_reviewer_retry_count = 5;
         checkpoint.reviewer_budget_refunds = 3;

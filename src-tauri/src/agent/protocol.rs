@@ -780,7 +780,7 @@ impl DeliveryReceipt {
         TaskAttemptKey::new(&self.task_id, self.attempt_id)
     }
 
-    /// 是否属于基础设施/执行异常（超时、中断、崩溃，非业务拒绝）
+    /// 是否属于基础设施/执行异常（超时、中断、崩溃、请求层失败，非业务拒绝）
     pub fn is_infra_failure(&self) -> bool {
         matches!(
             self.error_kind.as_deref(),
@@ -789,6 +789,7 @@ impl DeliveryReceipt {
                 | Some("interrupted")
                 | Some("cancelled")
                 | Some("invalid_output")
+                | Some("request_or_stream")
         )
     }
 
