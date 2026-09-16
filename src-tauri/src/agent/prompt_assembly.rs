@@ -249,7 +249,8 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "local_shell",
         summary: "本地工作区终端命令执行工具：执行构建、测试、代码检查与环境探针（受工作区物理边界与超时保护，工具链PATH自动补齐）。⚠️【工具排他约束】严禁挪用为文件阅读器：读取文件必须用 local_file(action: \"read\")，代码检索必须用 search",
         actions: &[
-            "exec(command: string, args?: string[], cwd?: string, timeout_secs?: number, env?: object) — 在项目工作区执行 shell 命令行（支持参数数组与自定义环境变量）",
+            "exec(command: string, args?: string[], cwd?: string, timeout_secs?: number, env?: object) — 在项目工作区执行 shell 命令行（支持参数数组与自定义环境变量；已注入 $SESSION_TMP_DIR/$TMPDIR=会话产物物理根）",
+            "⚠️【产物落点】shell 内写交付产物一律用 \"$SESSION_TMP_DIR/文件名\" 落点——裸相对路径 tmp/x 会落在当前执行目录下的 tmp/，既不是会话产物区也不随会话清理（系统会检测并提醒）；tmp/ 前缀路由只在 local_file/register_file 等工具参数中有效",
             "⚠️【严禁滥用】禁止用 cat/sed/head/tail 等命令查看或读取文件内容——shell 读文件无法建立乐观并发哈希基线（后续 edit/write 该文件会被硬拦截），且纯文件读取命令会被工具误用拦截器软驳回并引导纠正",
         ],
     },
@@ -308,5 +309,19 @@ mod tests {
             line.contains("tmp/"),
             "register_file 描述未提 tmp/：与 path_guard 路由/finish 对账脱节"
         );
+    }
+
+    #[test]
+    fn local_shell_description_names_session_tmp_env() {
+        // shell 里裸相对 tmp/ 会落到执行目录而非会话产物区（实测把订单 xlsx
+        // 写进了 src-tauri/tmp 差点提交进库）——SESSION_TMP_DIR 环境变量早已注入
+        // 但工具文案从未提及，模型无从知晓。此断言防文案与机制再次脱节。
+        let menu = build_local_tools_menu();
+        let line = menu
+            .lines()
+            .find(|l| l.contains("产物落点"))
+            .expect("local_shell 描述未说明 SESSION_TMP_DIR 产物落点约定");
+        assert!(line.contains("$SESSION_TMP_DIR"), "落点说明应给出 SESSION_TMP_DIR 写法");
+        assert!(line.contains("tmp/"), "落点说明应同时讲清 tmp/ 前缀的适用层");
     }
 }

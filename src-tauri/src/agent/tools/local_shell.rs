@@ -267,6 +267,12 @@ fn execute_command_blocking(
     let _ = std::fs::create_dir_all(&session_tmp_dir);
     let session_tmp_str = session_tmp_dir.to_string_lossy().to_string();
 
+    // 落点纠偏快照：shell 里裸相对 tmp/ 会落在执行目录（不随会话清理），
+    // 跑完后 diff cwd/tmp 新增文件并在输出尾部提醒改用 $SESSION_TMP_DIR。
+    // 不拦不搬只提醒——cwd/tmp 可能是项目自有目录，硬干预会误伤。
+    let cwd_tmp_dir = cwd.join("tmp");
+    let cwd_tmp_before = snapshot_dir_entries(&cwd_tmp_dir);
+
     // 使用 tokio 异步派发并挂载独立 Reactor 与超时控制
     let fut = async move {
         #[cfg(target_os = "windows")]
@@ -438,6 +444,28 @@ fn execute_command_blocking(
                 formatted_stdout.push_str(&format!("\n--- STDERR ---\n{}", stderr_trimmed));
             }
 
+            // 落点纠偏提醒：cwd/tmp 冒出新文件且该目录并非会话产物区本身时提示
+            if !cwd_tmp_is_session_tmp(cwd, &session_tmp_dir) {
+                let new_entries: Vec<String> = snapshot_dir_entries(&cwd_tmp_dir)
+                    .difference(&cwd_tmp_before)
+                    .cloned()
+                    .collect();
+                if !new_entries.is_empty() {
+                    let shown: Vec<&str> = new_entries.iter().take(8).map(|s| s.as_str()).collect();
+                    formatted_stdout.push_str(&format!(
+                        "\n\n💡 [落点提醒] 检测到 {}/tmp/ 下新增 {} 个条目（{}{}）。\
+                         该目录是当前执行目录下的 tmp/，并非会话产物区，不随会话清理、也不会被产物登记/终审自动对账。\
+                         若这些是交付产物，请改用 \"$SESSION_TMP_DIR/文件名\"（={}）重新落点，\
+                         或在 local_file/register_file 等工具参数中使用 tmp/ 前缀路由到会话产物区。",
+                        cwd.display(),
+                        new_entries.len(),
+                        shown.join(", "),
+                        if new_entries.len() > 8 { " 等" } else { "" },
+                        session_tmp_dir.display(),
+                    ));
+                }
+            }
+
             let payload = json!({
                 "command": cmd_str,
                 "cwd": cwd.display().to_string(),
@@ -530,6 +558,41 @@ fn execute_command_blocking(
             }
         }
     }
+}
+
+/// 快照目录内条目相对路径集合（浅递归、封顶防爆），用于 shell 前后 diff。
+fn snapshot_dir_entries(dir: &Path) -> std::collections::BTreeSet<String> {
+    use std::collections::BTreeSet;
+    fn walk(d: &Path, base: &Path, set: &mut BTreeSet<String>, depth: usize) {
+        if depth > 4 || set.len() >= 2000 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(d) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if let Ok(rel) = p.strip_prefix(base) {
+                set.insert(rel.to_string_lossy().to_string());
+            }
+            if p.is_dir() {
+                walk(&p, base, set, depth + 1);
+            }
+        }
+    }
+    let mut set = BTreeSet::new();
+    walk(dir, dir, &mut set, 0);
+    set
+}
+
+/// cwd/tmp 是否等价于会话产物区：cwd 本身在会话 tmp 内（自定义 cwd=SESSION_TMP_DIR）
+/// 或 cwd/tmp 软链到会话 tmp 时，裸 tmp/ 落点即正确，无需提醒。
+fn cwd_tmp_is_session_tmp(cwd: &Path, session_tmp: &Path) -> bool {
+    let (Ok(c), Ok(s)) = (cwd.canonicalize(), session_tmp.canonicalize()) else {
+        return false;
+    };
+    if c.starts_with(&s) {
+        return true;
+    }
+    c.join("tmp").canonicalize().map_or(false, |t| t == s)
 }
 
 /// 友好详细的进程启动异常诊断
@@ -736,6 +799,36 @@ mod tests {
         let res = dispatch(&test_db(), "test_sess_tmp_check", "exec", &params, Some(ws));
         assert!(res.success);
         assert!(res.stdout.contains("test_sess_tmp_check"));
+    }
+
+    #[test]
+    fn test_local_shell_cwd_tmp_write_triggers_landing_nudge() {
+        // 裸相对 tmp/ 落到执行目录 → 输出尾部应附"落点提醒"引导到 $SESSION_TMP_DIR
+        let temp = TempDirGuard::new();
+        let ws = temp.path();
+
+        let res = dispatch(
+            &test_db(),
+            "test_sess_nudge",
+            "exec",
+            &json!({"command": "mkdir -p tmp && echo hi > tmp/stray.txt"}),
+            Some(ws),
+        );
+        assert!(res.success);
+        assert!(res.stdout.contains("落点提醒"), "cwd/tmp 新文件应触发落点提醒: {}", res.stdout);
+        assert!(res.stdout.contains("SESSION_TMP_DIR"), "提醒应指向 SESSION_TMP_DIR: {}", res.stdout);
+        assert!(ws.join("tmp/stray.txt").exists(), "文件应真实落在工作区 tmp/");
+
+        // 对照：不写 tmp/ 的普通命令不触发提醒
+        let res2 = dispatch(
+            &test_db(),
+            "test_sess_nudge",
+            "exec",
+            &json!({"command": "echo plain"}),
+            Some(ws),
+        );
+        assert!(res2.success);
+        assert!(!res2.stdout.contains("落点提醒"), "无 tmp 写入不应提醒: {}", res2.stdout);
     }
 
     #[test]
