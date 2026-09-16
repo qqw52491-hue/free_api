@@ -55,6 +55,27 @@ pub async fn create_session(
     })
 }
 
+/// 会话分叉：整会话克隆（均不传）或从某条消息/时间点分叉。
+/// 复制消息历史 + checkpoint（分叉点取回合历史快照）+ 全部会话级 Agent
+/// 表（id 全量重映射）+ 会话 tmp 目录物理拷贝。
+#[tauri::command]
+pub async fn fork_agent_session(
+    state: State<'_, DbState>,
+    session_id: String,
+    before_message_id: Option<String>,
+    before_timestamp_ms: Option<i64>,
+) -> Result<crate::agent::session_fork::ForkReport, String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    let resolved = match (&before_message_id, before_timestamp_ms) {
+        (Some(id), _) => Some(id.clone()),
+        (None, Some(ts)) => {
+            crate::agent::session_fork::resolve_boundary_message(&conn, &session_id, ts)?
+        }
+        (None, None) => None,
+    };
+    crate::agent::session_fork::fork_session(&mut conn, &session_id, resolved.as_deref())
+}
+
 #[tauri::command]
 pub async fn delete_session(
     app: AppHandle,

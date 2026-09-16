@@ -219,6 +219,8 @@
                             @update:running="(val) => { tab.running = val; }"
                             @update:title="(title) => { updateTabTitle(tab.id, title); }"
                             @promoted="handleSessionPromoted"
+                            @forked="handleForked"
+                            :initial-draft="forkDrafts[tab.id]"
                         />
                     </div>
                 </template>
@@ -538,6 +540,16 @@ function openTreeSession(session: TreeSessionItem) {
     }
     activeTabId.value = session.id;
     currentNavView.value = "agent";
+}
+
+// ⑂ 分叉产物：打开新会话 tab，并把分叉点消息正文预填进它的输入框
+const forkDrafts = ref<Record<string, string>>({});
+function handleForked(payload: { sessionId: string; title: string; promptSeed?: string | null }) {
+    if (payload.promptSeed) {
+        forkDrafts.value[payload.sessionId] = payload.promptSeed;
+    }
+    openTreeSession({ id: payload.sessionId, title: payload.title, isDraft: false });
+    projectTreeRef.value?.refreshProjects();
 }
 
 // 草稿会话在用户发送第一条消息后成功持久化，升级为正式数据库会话

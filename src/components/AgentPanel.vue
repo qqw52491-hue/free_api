@@ -123,6 +123,7 @@
                             @open-preview="handleOpenPreview"
                             @open-team-deck="handleOpenTeamDeck"
                             @open-diff="handleOpenDiff"
+                            @fork="handleFork"
                         />
                     </div>
                 </div>
@@ -258,6 +259,7 @@ const props = defineProps<{
     panelId: string;
     allModels: AgentModelOption[];
     projectId?: string;
+    initialDraft?: string;
 }>();
 const emit = defineEmits<{
     "new-session": [];
@@ -266,6 +268,7 @@ const emit = defineEmits<{
     "update:running": [running: boolean];
     "update:title": [title: string];
     "promoted": [oldId: string, newId: string, title: string, projectId?: string];
+    "forked": [payload: { sessionId: string; title: string; promptSeed?: string | null }];
 }>();
 const composerRef = ref<InstanceType<typeof AgentComposer> | null>(null);
 const settingsOpen = ref(false);
@@ -278,6 +281,11 @@ const session = useAgentSession(props.panelId, {
         emit("promoted", oldId, newId, title, projectId);
     },
 });
+
+// 分叉落地：把分叉点消息正文预填进输入框，用户可改写后再开跑
+watch(() => props.initialDraft, (v) => {
+    if (v) session.goalInput.value = v;
+}, { immediate: true });
 
 
 watch(session.sessionTitle, (newTitle) => {
@@ -425,6 +433,36 @@ watch(() => session.isRunning.value, (running, prevRunning) => {
 function clearNarrativeSelection() {
     selectedHumanEventId.value = null;
     selectedActiveThought.value = false;
+}
+
+// ⑂ 会话分叉：从某条消息/时间点把历史与任务状态复制为全新会话
+interface ForkReport {
+    new_session_id: string;
+    title: string;
+    prompt_seed?: string | null;
+}
+const forking = ref(false);
+async function handleFork(payload: { messageId?: string; timestampMs?: number }) {
+    if (forking.value) return;
+    const sessionId = props.panelId;
+    if (sessionId.startsWith("draft-") || session.isRunning.value) return;
+    forking.value = true;
+    try {
+        const report = await invoke<ForkReport>("fork_agent_session", {
+            sessionId,
+            beforeMessageId: payload.messageId ?? null,
+            beforeTimestampMs: payload.timestampMs ?? null,
+        });
+        emit("forked", {
+            sessionId: report.new_session_id,
+            title: report.title,
+            promptSeed: report.prompt_seed,
+        });
+    } catch (e) {
+        console.error("[fork] failed:", e);
+    } finally {
+        forking.value = false;
+    }
 }
 function handleStepSelect(id: string) {
     clearNarrativeSelection();

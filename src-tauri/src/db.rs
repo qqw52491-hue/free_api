@@ -212,6 +212,7 @@ pub fn delete_session_completely(
     );
     let _ = conn.execute("DELETE FROM agent_task_resources WHERE session_id=?1", rusqlite::params![id]);
     let _ = conn.execute("DELETE FROM agent_checkpoints WHERE run_id=?1", rusqlite::params![id]);
+    let _ = conn.execute("DELETE FROM agent_checkpoint_history WHERE session_id=?1", rusqlite::params![id]);
     // agent_run_steps 按 run_id 键（非 session_id）：必须先经 traces 表取回本 session
     // 全部 run_id 级联删除，顺序不可与下一行对调。
     let _ = conn.execute(
@@ -275,6 +276,7 @@ fn cleanup_orphaned_session_data_at(
         "DELETE FROM agent_task_records WHERE resource_id NOT IN (SELECT resource_id FROM agent_task_resources)",
         "DELETE FROM agent_task_resources WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
         "DELETE FROM agent_checkpoints WHERE run_id NOT IN (SELECT id FROM chat_sessions)",
+        "DELETE FROM agent_checkpoint_history WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
         "DELETE FROM agent_run_traces WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
         // 步骤行表按 run_id 键：清掉父 trace 已消失（含刚被上一行删除）的孤儿步
         "DELETE FROM agent_run_steps WHERE run_id NOT IN (SELECT id FROM agent_run_traces)",
@@ -574,6 +576,20 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_agent_checkpoints_phase
             ON agent_checkpoints(phase, updated_at DESC);
+        -- 分叉支持：每回合终态提交时留存一份 checkpoint 快照（append-only）。
+        -- agent_checkpoints 本体仍是最新态单行（崩溃恢复语义）；本表让
+        -- fork_session 能取回任意回合边界的历史状态。anchor_message_id 指向
+        -- 本回合写入的 assistant 消息，作为分叉点定位锚。
+        CREATE TABLE IF NOT EXISTS agent_checkpoint_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            anchor_message_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_checkpoint_history_session
+            ON agent_checkpoint_history(session_id, id);
         -- 每个会话回合的可复盘过程树快照；不同于 checkpoint，即使任务完成也会保留。
         CREATE TABLE IF NOT EXISTS agent_run_traces (
             id TEXT PRIMARY KEY,

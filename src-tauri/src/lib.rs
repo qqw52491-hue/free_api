@@ -103,6 +103,7 @@ pub fn run() {
             commands::get_sessions,
             commands::create_session,
             commands::delete_session,
+            commands::fork_agent_session,
             commands::rename_session,
             commands::vacuum_database,
             // 项目、项目会话与用户明确授权的项目内资源

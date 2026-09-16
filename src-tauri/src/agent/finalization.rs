@@ -371,10 +371,11 @@ pub fn commit_finalization(
 
     // 1) checkpoint：乐观锁一次尝试；冲突整体回滚
     checkpoint.updated_at = now.clone();
-    if checkpoint.version == 0 {
-        checkpoint.version = 1;
-        let snapshot_json =
-            serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+    let previous_version = checkpoint.version;
+    checkpoint.version += 1;
+    let snapshot_json =
+        serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+    if previous_version == 0 {
         tx.execute(
             "INSERT INTO agent_checkpoints (run_id, phase, snapshot_json, version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -388,10 +389,6 @@ pub fn commit_finalization(
         )
         .map_err(|error| error.to_string())?;
     } else {
-        let previous_version = checkpoint.version;
-        checkpoint.version += 1;
-        let snapshot_json =
-            serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
         let rows = tx
             .execute(
                 "UPDATE agent_checkpoints SET phase = ?1, snapshot_json = ?2, version = ?3, updated_at = ?4 WHERE run_id = ?5 AND version = ?6",
@@ -431,11 +428,12 @@ pub fn commit_finalization(
     .map_err(|error| error.to_string())?;
 
     // 3) 会话 assistant 消息 + session 计数
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id)
          VALUES (?1, ?2, 'assistant', ?3, NULL, ?4, ?5)",
         params![
-            uuid::Uuid::new_v4().to_string(),
+            assistant_message_id,
             session_id,
             assistant_message,
             now,
@@ -446,6 +444,20 @@ pub fn commit_finalization(
     tx.execute(
         "UPDATE chat_sessions SET updated_at=?1, message_count=message_count+1 WHERE id=?2",
         params![now, session_id],
+    )
+    .map_err(|error| error.to_string())?;
+
+    // 4) 回合边界 checkpoint 历史快照（append-only，供会话分叉取回该回合的状态）
+    tx.execute(
+        "INSERT INTO agent_checkpoint_history (session_id, anchor_message_id, phase, snapshot_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            session_id,
+            assistant_message_id,
+            checkpoint.phase.as_str(),
+            snapshot_json,
+            now
+        ],
     )
     .map_err(|error| error.to_string())?;
 
@@ -464,6 +476,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE agent_checkpoints (run_id TEXT PRIMARY KEY, phase TEXT NOT NULL, snapshot_json TEXT NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             CREATE TABLE agent_checkpoint_history (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, anchor_message_id TEXT NOT NULL, phase TEXT NOT NULL, snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL);
              CREATE TABLE agent_run_traces (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, goal TEXT NOT NULL, status TEXT NOT NULL, steps_json TEXT, completion_json TEXT, started_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT);
              CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, model_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE chat_messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, attachments TEXT, created_at TEXT NOT NULL, model_id TEXT);",

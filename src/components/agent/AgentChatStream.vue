@@ -58,7 +58,21 @@
                             v-if="parseUserMessageAttachments(message.content).cleanText"
                             :text="parseUserMessageAttachments(message.content).cleanText"
                         />
-                        <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
+                        <div class="msg-side-actions">
+                            <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
+                            <button
+                                type="button"
+                                class="msg-fork-btn"
+                                title="从此处分叉为新会话（复制此前的历史与任务状态）"
+                                @click.stop="$emit('fork', { messageId: message.id })"
+                            >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                                    <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                                </svg>
+                                <span>分叉</span>
+                            </button>
+                        </div>
                     </template>
                 </article>
             </section>
@@ -80,6 +94,18 @@
                         v-if="parseUserMessageAttachments(entry.content).cleanText"
                         :text="parseUserMessageAttachments(entry.content).cleanText"
                     />
+                    <button
+                        type="button"
+                        class="msg-fork-btn"
+                        title="从此处分叉为新会话（复制此前的历史与任务状态）"
+                        @click.stop="$emit('fork', { timestampMs: entry.timestamp })"
+                    >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                            <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                        </svg>
+                        <span>分叉</span>
+                    </button>
                 </article>
                 <article v-else-if="entry.type === 'message'" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
                     <template v-if="entry.role === 'agent' || entry.role === 'assistant'">
@@ -125,7 +151,21 @@
                             v-if="parseUserMessageAttachments(entry.content).cleanText"
                             :text="parseUserMessageAttachments(entry.content).cleanText"
                         />
-                        <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                        <div class="msg-side-actions">
+                            <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                            <button
+                                type="button"
+                                class="msg-fork-btn"
+                                title="从此处分叉为新会话（复制此前的历史与任务状态）"
+                                @click.stop="$emit('fork', { timestampMs: entry.timestamp })"
+                            >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" />
+                                    <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
+                                </svg>
+                                <span>分叉</span>
+                            </button>
+                        </div>
                     </template>
                 </article>
                 <article
@@ -782,6 +822,7 @@ const emit = defineEmits<{
     "open-preview": [code: string];
     "open-team-deck": [stepId?: string];
     "open-diff": [payload: FileDiffPayload];
+    "fork": [payload: { messageId?: string; timestampMs?: number }];
 }>();
 
 function extractSubagentTask(step: any): string {
