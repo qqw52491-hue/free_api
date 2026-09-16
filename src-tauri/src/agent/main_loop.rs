@@ -171,8 +171,16 @@ fn persist_challenged_step(
         "timestamp": Utc::now().timestamp_millis(),
     }));
     if let Some(step_value) = run_trace_steps.last() {
-        if let Err(e) = crate::agent::run_trace::append_step(db, run_id, step_id as i64, step_value)
-        {
+        // seq 必须用 vec 下标而非 step_id：attempt 幽灵步会推高 len()，使下标与
+        // step_id 脱节；用 step_id 当 seq 会经 ON CONFLICT(run_id,seq) 覆盖
+        // 掉占据该位置的合法步骤行（实测 run e99d53da 的 seq28 被 finish_challenged
+        // 覆写，快照 index33 与行表错位）。统一口径 = run_trace_steps.len()-1。
+        if let Err(e) = crate::agent::run_trace::append_step(
+            db,
+            run_id,
+            (run_trace_steps.len() - 1) as i64,
+            step_value,
+        ) {
             eprintln!("⚠️ 无法持久化步骤 {}: {}", step_id, e);
         }
     }
