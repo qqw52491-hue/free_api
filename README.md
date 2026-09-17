@@ -26,6 +26,7 @@
 | **检索去重与索引** | 同参检索锚点复用、同路径 signpost 软引导、进程级 SessionSearchIndex（LRU 128 上限 + 删除即清） | ✅ 生产就绪 |
 | **门禁与质量对账** | submit_plan 风险预检、方案交叉审查（child_reviewer）、阶段写入审查、finish 终态对账（Git Diff 行级证据） | ✅ 生产就绪 |
 | **多智能体并发** | child_worker / child_writer / child_reviewer + job_engine 异步任务池 + wait_jobs 信箱语义 | ✅ 生产就绪 |
+| **隔离写入机械合入** | `child_writer.apply`：指纹校验 + 字节级搬运 + patch 兜底，冲突整体拒绝，幂等可重放 | ✅ 生产就绪 |
 | **安全护栏** | 工作区路径牢笼、写副作用门（含 move/rename/remove 命名空间剥离）、破坏性命令拦截、工作区软锁 | ✅ 生产就绪 |
 | **死锁逃生** | 连续 8 次门禁拦截 → 确定性降级中断（`consecutive_gate_blocked` 持久化计数） | ✅ 生产就绪 |
 | **人机协同 (HITL)** | 异步抢方向盘（安全点拦截）+ AI 阻塞式求助（ask_human） | ✅ 生产就绪 |
@@ -218,7 +219,7 @@ pub struct SearchQuery {
 
 ### 4. 写副作用门（执行面）
 
-`dispatcher.rs::is_write_or_side_effect_tool` 同时按**工具名与 action** 双重判定，剥离 MCP/插件命名空间后匹配 `write/edit/delete/save/move/rename/remove`——`remote-hub/move_file` 之类照样被拦截；`read_text_file`/`list_directory`/`search_graph`/`release_lock` 等只读工具不误伤。
+`dispatcher/`（`is_write_or_side_effect_tool`）同时按**工具名与 action** 双重判定，剥离 MCP/插件命名空间后匹配 `write/edit/delete/save/move/rename/remove`——`remote-hub/move_file` 之类照样被拦截；`read_text_file`/`list_directory`/`search_graph`/`release_lock` 等只读工具不误伤。
 
 ---
 
@@ -227,7 +228,7 @@ pub struct SearchQuery {
 宏观任务级并发（比单步多工具并发更难的部分）：
 
 - **`child_worker`**：侦察兵/执行员，独立沙箱上下文与 Token 预算，完成只回精炼结论——父会话上下文不爆炸；
-- **`child_writer`**：隔离的写入执行员；
+- **`child_writer`**：隔离的写入执行员——在物理隔离副本中改码跑测试，产出结构化 diff 回执（`changed_files` + 三态指纹 + `patch_ref`）；主 Agent 审查后调 **`child_writer.apply`** 由宿主机械合入：优先副本字节搬运、patch artifact 兜底、逐文件指纹冲突则**整体拒绝**（宁可不合并也不盲覆盖），合入后须在真实工作区重跑验证；
 - **`child_reviewer`**：独立审查员（交叉审查/阶段审查的执行体）；
 - **`job_engine`**：异步任务池，`dispatches: [...]` 一步批量扇出多个子任务并行推进；
 - **`wait_jobs` 信箱语义**：精确区分「在途任务」「待回收结论」「已消费」「未派发」四种状态，杜绝空轮询烧 Token；
@@ -284,51 +285,74 @@ pub struct DispatchResult {
 
 1. `prompts/tools/xxx.md` 写 Agent 可读的使用说明；
 2. `agent/tools/xxx.rs` 实现 `dispatch()`；
-3. `dispatcher.rs` 注册一行路由；
+3. `dispatcher/` 注册一行路由；
 4.（可选）`commands/` 暴露配套 Tauri Command。
 
 ---
 
 ## 八、代码库目录索引
 
-### 1. Agent 内核（`src-tauri/src/agent/`，112 个 Rust 文件）
+### 1. Agent 内核（`src-tauri/src/agent/`，191 个 Rust 文件，按域分目录）
+
+**运行主线（一次任务的生命周期链路）**
 
 | 模块 | 职责 |
 |:---|:---|
-| `main_loop.rs` | 任务顶层状态机：跨步流转、门禁拦截、P3 死锁逃生口、TaskStore 同步、完成结算 |
-| `loop_runner.rs` | 单步原子流水线：协议动作解析（submit_plan/prepare_finish/finish）、工具执行、事件发射 |
+| `main_loop/` | 任务顶层状态机：`mod`（主循环体：步循环、门禁拦截、P3 死锁逃生）、`entry`（入口装配）、`helpers`（前置辅助）、`auto_verify`（写入验证自愈）、`precheck`（prepare_finish 终态预检）、`finalize`（终态提交事务）、`post_step`（步尾收尾：todo 证据回填/lesson 血缘/副作用台账） |
+| `loop_runner/` | 单步原子流水线：`mod`（派发壳 + `DispatchCtx` 共享上下文）、`dispatch_*` 八条工具域派发臂（child_writer / child_reviewer / child_worker / resume_child / jobs / watch / ask_human / local） |
 | `call_llm_phase.rs` | LLM 调用相：流式推理、Token 计量、中断信号接入 |
-| `dispatcher.rs` | 工具分发中枢：写副作用门、只读预算拦截、内置/MCP 分流 |
-| `plan_gate.rs` | 方案审批结论解析与前置写入门禁 |
-| `stage_review.rs` | 阶段级写入审查（批准→收尾的中段缺口） |
-| `reviewer_gatekeeper.rs` | 审查员结果解析、评分卡裁决、预算管控 |
-| `review_contract.rs` | 审查输入/输出契约定义 |
-| `finish_guard/` | finish 终态质询：Diff 物理对账、行号漂移地图、Receipt 签发 |
-| `finalization.rs` | 终态收敛与交付结算 |
-| `agent_policy.rs` | Policy-as-Code 安全策略引擎（危险模式阻断/联合会审升级） |
-| `gate_messages.rs` | 门禁驳回话术集中管理 |
-| `job_engine.rs` | 异步任务池：子任务派发、生命周期、结果信箱 |
-| `child_worker.rs` / `child_writer.rs` / `child_reviewer.rs` | 三类子 Agent 角色（侦察/写入/审查） |
-| `wait_jobs`（内嵌） | 信箱语义：在途/待回收/已消费/未派发 四态区分 |
-| `watch_engine.rs` | 持续监听引擎：变化事件自动注入 |
-| `scheduler.rs` | 定时触发器（daily/interval 主动任务） |
-| `workspace_lock.rs` | 工作区软锁：单 run 排他、僵尸自愈、防踩踏释放 |
-| `checkpoint.rs` | 幂等断点快照 + 故障自愈（`RecoveryDecision`）、`consecutive_gate_blocked` 持久化 |
-| `run_state.rs` | 权威运行状态机 `AgentRunMachine` → 前端事件 |
-| `run_trace.rs` | 运行轨迹持久化：`agent_run_steps` 行式存储 + 事务化 append |
+| `dispatcher/` | 工具分发中枢：`shell_safety`（命令安全谓词：段切分/重定向/危险命令）、`tool_events`（前端事件）、`project_dispatch`（项目资源派发）、`command_exec`（命令执行内核）、`mod`（写副作用门 + `run_agent_step` 编排） |
+| `run_state.rs` / `run_trace.rs` | 权威运行状态机 → 前端事件 / 运行轨迹持久化（`agent_run_steps` 行式存储 + 事务化 append） |
 | `conversation.rs` / `control.rs` | 会话生命周期 / 人机干预通道 |
-| `retrieval/` | 联邦检索：FTS5 引擎、路标召回、SessionSearchIndex（LRU）、`search`/`view` 产出 |
-| `context/` | 三明治引擎：assembler/budget/compaction/determinism/memory/render/sampling/audit/no_progress |
-| `mcp/` | MCP 协议：stdio Actor + HTTP/SSE 客户端、注册表、会话引导 |
+
+**子 Agent 体系**
+
+| 模块 | 职责 |
+|:---|:---|
+| `child_writer/` | 隔离写入执行员：`workspace`（副本基线/worktree）、`actions`（写动作拦截）、`fingerprint`（三态指纹 CleanReplay/AlreadyApplied/Conflict）、`apply`（机械合入真实工作区）、`cleanup`（孤儿副本回收） |
+| `child_reviewer/` | 独立审查员：`types`（数据结构）、`parse`（裁决解析）、`lifecycle`（spawn/监控）、`poll`（结果轮询） |
+| `child_worker.rs` | 侦察兵子 Agent：只读沙箱上下文、独立 Token 预算、回精炼结论 |
+| `job_engine.rs` | 异步任务池：子任务派发、生命周期、wait_jobs 信箱语义 |
+| `session_fork/` | 会话分叉（子会话继承上下文派生） |
+| `triage.rs` | 任务分诊：复杂度评估、角色路由表、取证任务单 |
+| `plan_tree/` + `plan_tree_dispatch.rs` | 计划树执行引擎（seq/par）+ 受控并行分发（单批≤2） |
+
+**门禁与终态（质量护城河）**
+
+| 模块 | 职责 |
+|:---|:---|
+| `plan_gate/` | 方案审批结论解析与前置写入门禁 |
+| `stage_review/` | 阶段级写入审查（批准→收尾的中段缺口） |
+| `reviewer_gatekeeper/` | 审查门禁：`baseline`（GitBaseline 起点快照）、`evidence`（证据收集）、`finish_diff`（终态 Diff 对账）、`verdict_parse`（评分卡裁决解析）、`git_utils` |
+| `finish_guard/` | finish 终态质询：`diff`（行级对账/漂移地图）、`state_updates`（todo 守卫）+ 按主题拆分的 6 个测试文件 + `testkit` 夹具 |
+| `finalization.rs` | 终态收敛：Receipt 签发、交付结算、原子提交事务 |
+| `agent_policy.rs` / `gate_applicability.rs` / `gate_messages.rs` | Policy-as-Code 策略引擎 / 门禁适用性判定 / 驳回话术 |
+| `impact_pack.rs` / `review_contract.rs` / `review_tools.rs` | 影响面证据包（漏问防线）/ 审查契约 / 审查工具 |
+
+**上下文与检索**
+
+| 模块 | 职责 |
+|:---|:---|
+| `context/` | 三明治引擎：`assembler`（组装）、`budget`（水位）、`compaction/`（压缩摘要）、`audit/`（不可逆台账 + `shell_readonly` 命令白名单）、`determinism`/`memory`/`render`/`sampling`/`no_progress`/`resource_scope`/`zero_hit`/`types/` |
+| `retrieval/` | 联邦检索：`fts_engine`（SQLite FTS5）、`workspace_search`（ripgrep 实时代码检索）、`memory_signpost`（路标召回）、`types` |
+| `checkpoint/` | 断点快照：`types`（数据结构）、`durable`（持久化）、`plan_ops`/`plan_batch`（计划操作）、`inquiry_ops`（问询操作）；含 `RecoveryDecision` 自愈与 `consecutive_gate_blocked` 持久化 |
+| `task_store.rs` / `task_summary.rs` / `artifact_manager.rs` | 结构化数据区 / 交付物汇总 / 工件管理（自动登记） |
+| `lesson.rs` / `skill_context.rs` | 避坑经验血缘（召回记录 + 因果反馈打分）/ 技能装载 |
+
+**通道与基础设施**
+
+| 模块 | 职责 |
+|:---|:---|
+| `channel/` | 多通道接入：`http/`（mod 路由壳 + session_ops / run_spawn / run_control / data_queries / views / upload / router + `mobile_web/` 资产）、`bridge`/`config`/`runtime` |
+| `mcp/` + `mcp_catalog.rs` | MCP 协议：stdio Actor + HTTP/SSE 客户端、注册表、会话引导、插件目录 |
 | `model_filter/` | 模型族检测/normalizer/healer（provider 差异适配） |
-| `plan_tree/` + `plan_tree_dispatch.rs` | 计划树执行引擎（seq/par）、受控并行分发（单批≤2） |
-| `channel/` | 多通道接入：HTTP 服务、mobile_web、bridge |
-| `evaluation*.rs` / `eval_oracle*.rs` | 实弹评测：回放器、阶段断言、Token/步数统计、分析 |
-| `tools/` | 原生工具箱：local_file、local_shell、mcp_manager、model_manager、role_manager、skill_manager、project_manager、schedule_manager、system_info、wechat_manager |
-| `host_verify.rs` / `change_verification.rs` / `target_block.rs` | 宿主侧验证、变更核验、目标区块 |
-| `task_store.rs` / `task_summary.rs` / `artifact_manager.rs` | 结构化数据区 / 交付物汇总 / 工件管理 |
-| `telemetry.rs` / `tool_manual.rs` / `protocol.rs` | 遥测 / 工具手册 / 协议定义 |
-| `skill_context.rs` / `lesson.rs` / `router.rs` / `project_map.rs` / `web_search.rs` / `file_parser.rs` / `context_collector.rs` / `prompt_assembly.rs` | 技能装载 / 避坑经验 / 模型路由 / 项目地图 / 联网搜索 / 文件解析 / 上下文采集 / 提示词组装 |
+| `utils/` | `json_pipeline`（指令解析修复）、`llm_client`（provider 归一化）、`log_sampler`、`subprocess` |
+| `protocol/` / `types/` | 协议动作定义（finish/submit_plan/prepare_finish 判别）/ 核心类型（AgentInstruction/DispatchResult/TodoItem） |
+| `watch_engine.rs` / `scheduler.rs` / `workspace_lock.rs` | 持续监听引擎 / 定时触发器 / 工作区软锁 |
+| `evaluation*.rs` / `eval_oracle.rs` | 实弹评测：回放器、阶段断言、Token/步数统计、分析 |
+| `tools/` | 原生工具箱：local_file/、local_shell、mcp_manager、model_manager、role_manager/、project_manager、schedule_manager、skill_manager、system_info、wechat_manager |
+| `prompt_assembly.rs` / `tool_manual.rs` / `context_collector.rs` | 提示词组装 / 工具手册按需加载 / 上下文采集 |
+| `host_verify.rs` / `change_verification.rs` / `path_guard.rs` / `target_block.rs` / `project_map.rs` / `telemetry.rs` / `uv_runtime.rs` / `web_search.rs` / `file_parser.rs` / `plan_submit.rs` / `router.rs` | 宿主验证 / 变更核验 / 路径牢笼 / 目标区块 / 项目地图 / 遥测 / uv 运行时 / 联网搜索 / 文件解析 / 方案提交 / 模型路由 |
 
 ### 2. 前端（`src/`，Vue 3 + TS + Vite）
 
@@ -344,9 +368,10 @@ pub struct DispatchResult {
 
 ### 3. 基座与命令层
 
-- `src-tauri/src/db.rs`：SQLite 连接池 + schema 迁移（含 `agent_run_steps`）；
-- `src-tauri/src/commands/`：chat/models/mcp/skills/tasks 五个交互控制器；
-- `src-tauri/src/llm.rs` / `task_registry.rs` / `lib.rs` / `main.rs`；
+- `src-tauri/src/db/`：`init`（schema 迁移 + 连接池）、`maintenance`（会话级联清理/VACUUM）、`model_specs`（模型规格 CRUD + uvx 迁移）；
+- `src-tauri/src/commands/`：`chat/`（sessions/messages/send/misc/artifacts 五域命令）、models/mcp/mcp_registry/projects/skills/tasks/roles；
+- `src-tauri/src/llm/`：`mod`（ModelConfig）、`api_keys`（多 Key 轮询/脱敏/可轮换判定）、`sse`（流式事件解析）、`stream`（单次请求）、`retry`（退避/限流/调用总预算）；
+- `src-tauri/src/task_registry.rs` / `lib.rs` / `main.rs`；
 - `src-tauri/prompts/`：core_logic、agent_system_prompt、skills/、tools/；
 - `plugins/`：MCP 插件 YAML 目录；`scripts/eval_runner.mjs`：实弹评测入口。
 
@@ -363,7 +388,7 @@ pub struct DispatchResult {
 git clone <repo> && cd free_api
 npm install
 
-# 后端单元测试（580+ 项）
+# 后端单元测试（688 项）
 cargo test --lib --manifest-path src-tauri/Cargo.toml
 
 # 前端类型检查 + 构建
@@ -392,6 +417,8 @@ npm run eval:real:dry   # 干跑校验配置
 - [x] `agent_run_steps` 行式存储（消除 O(n²) 步持久化）
 - [x] 工具输出三权分立（`DispatchResult.view`）
 - [x] 工作区软锁、HTTP/Mobile Web 通道、watch 监听引擎、定时调度器
+- [x] `child_writer.apply` 机械合入：指纹校验 + 字节搬运 + patch 兜底 + 冲突整体拒绝（3.8flash/3.1pro 实弹验证正常链路 + 冲突拒绝回退）
+- [x] 长文件按域模块化：3 万余行迁入子目录，测试统一独立 `tests.rs`（全程 688 项测试零回归）
 
 ### 进行中 / 规划
 - [ ] **Sleep-Time Compute**：睡眠期异步经验蒸馏 + Lesson 淘汰门禁（RFC 定稿）
