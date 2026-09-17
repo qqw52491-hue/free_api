@@ -543,7 +543,7 @@
                                                 {{ formatStepOperation(step).badgeLabel }}
                                             </span>
                                             <span :class="{ 'subagent-action-text': isSubAgentTool(step.tool), 'waitjobs-action-text': isWaitJobsTool(step.tool) }">
-                                                {{ isSubAgentTool(step.tool) ? (step.status === 'running' ? '⚡ 正在后台独立执行调查审查，点击右侧抽屉可查看证据包与发现…' : (step.action || step.explanation || '已生成审查结论 · 点击查看详情')) : (isWaitJobsTool(step.tool) ? (step.status === 'running' ? '⏳ 当前协程已反应式挂起等待后台通知，0 Token 0 CPU 消耗…' : '✅ 后台任务已完成，已唤醒并回收全部结论') : shortText(formatStepOperation(step).actionText || step.action || step.explanation || '执行操作', 110)) }}
+                                                {{ isSubAgentTool(step.tool) ? (step.status === 'running' ? '⚡ 正在后台独立执行调查审查，点击右侧抽屉可查看证据包与发现…' : (step.action || step.explanation || '已生成审查结论 · 点击查看详情')) : (isWaitJobsTool(step.tool) ? waitJobsTileText(step) : shortText(formatStepOperation(step).actionText || step.action || step.explanation || '执行操作', 110)) }}
                                             </span>
                                             <em v-if="step.metrics?.toolDurationMs != null">{{ formatDurationSeconds(step.metrics.toolDurationMs) }} · {{ step.source }}</em>
                                             <em v-else>{{ step.source }}</em>
@@ -1610,6 +1610,17 @@ function getSubAgentBadgeText(step: any): string {
 function isWaitJobsTool(tool?: string): boolean {
     const t = (tool || "").toLowerCase();
     return t.includes("wait_jobs") || t.includes("wait_job");
+}
+// wait_jobs 瓷砖文案按真实结果区分：空超时（无新完成）≠ 回收成功。
+// 此前完成态一律显示"已唤醒并回收全部结论"，把满屏空等待渲染成了成功假象。
+function waitJobsTileText(step: AgentStepItem): string {
+    if (step.status === "running") return "⏳ 当前协程已反应式挂起等待后台通知，0 Token 0 CPU 消耗…";
+    const out = [step.result, step.rawResult].map((v) => (typeof v === "string" ? v : "")).join(" ");
+    if (out.includes("无新完成")) return "⏱️ 等待窗口超时——任务仍在后台运行（本窗口未收到新结论）";
+    if (out.includes("尚未回收")) return "📬 后台任务已终态，结论待回收——请再次 wait_jobs 收取";
+    if (out.includes("消费完毕")) return "☑️ 全部结论已交付消费，无挂起任务";
+    if (out.includes("没有已派发")) return "ℹ️ 当前无已派发后台任务";
+    return "✅ 后台任务已完成，已唤醒并回收全部结论";
 }
 function formatConversationTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "numeric", day: "numeric" }); }
 watch(() => [timelineEntries.value.length, props.completionMessage, props.historyTurns.length], () => { followLatest(); }, { flush: "post" });

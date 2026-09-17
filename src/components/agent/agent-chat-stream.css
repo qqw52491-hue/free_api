@@ -95,11 +95,13 @@
     width: 100%;
 }
 
-/* 👤 用户消息气泡 (深色精致圆角气泡) */
+/* 👤 用户消息气泡 (深色精致圆角气泡，平时紧凑无额外行，悬停在右下角浮现操作栏) */
 .saved-message.from-user, .user-message {
+    position: relative;
     align-self: flex-end;
     max-width: min(680px, 88%);
-    padding: 9px 15px;
+    min-width: 175px;
+    padding: 8px 14px;
     border-radius: 16px 16px 4px 16px;
     background: #27272a;
     border: 1px solid rgba(255, 255, 255, 0.08);
@@ -109,6 +111,67 @@
     word-break: break-word;
     overflow-wrap: anywhere;
     box-sizing: border-box;
+}
+
+/* 👤 用户消息专属操作栏：平时完全隐藏不占行不露时间，悬停在右下角浮现轻量毛玻璃胶囊 */
+.saved-message.from-user .msg-side-actions,
+.user-message .msg-side-actions {
+    position: absolute;
+    right: 8px;
+    bottom: 5px;
+    margin: 0;
+    display: inline-flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    width: max-content;
+    white-space: nowrap;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border-radius: 9999px;
+    background: rgba(24, 24, 27, 0.88);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.18s ease, visibility 0.18s ease, transform 0.18s ease;
+    transform: translateY(2px);
+    z-index: 5;
+    flex-shrink: 0;
+}
+
+.saved-message.from-user:hover .msg-side-actions,
+.user-message:hover .msg-side-actions {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+.saved-message.from-user .msg-side-actions .msg-clock,
+.user-message .msg-side-actions .msg-clock {
+    font-size: 10px;
+    color: #a1a1aa;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.saved-message.from-user .msg-side-actions .msg-fork-btn,
+.user-message .msg-side-actions .msg-fork-btn,
+.saved-message.from-user .msg-side-actions .msg-copy-btn,
+.user-message .msg-side-actions .msg-copy-btn {
+    opacity: 0.85;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.saved-message.from-user .msg-side-actions .msg-fork-btn:hover,
+.user-message .msg-side-actions .msg-fork-btn:hover,
+.saved-message.from-user .msg-side-actions .msg-copy-btn:hover,
+.user-message .msg-side-actions .msg-copy-btn:hover {
+    opacity: 1;
 }
 
 /* 📎 附件缩略图与文件卡片托盘 */
@@ -2213,13 +2276,16 @@ button.root-row {
 /* 工具直供结构化视图卡片样式已迁移至 views/tool-views.css
    （DispatchResult.view → kind 判别联合，各视图组件 scoped 引入共享样式） */
 
-/* 分叉按钮：贴靠消息时钟，默认低存在感，悬停浮现 */
+/* 分叉与复制按钮：紧凑贴靠在消息底部右侧，默认低存在感，悬停浮现 */
 .msg-side-actions {
     display: flex;
     align-items: center;
     justify-content: flex-end;
     gap: 6px;
-    margin-top: 3px;
+    margin-top: 2px;
+    margin-left: auto;
+    flex-shrink: 0;
+    line-height: 1;
 }
 .msg-side-actions .msg-clock {
     margin-top: 0;
