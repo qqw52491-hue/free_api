@@ -1,0 +1,17 @@
+{
+  "id": "case_hd_phantom_steps",
+  "title": "失败/拦截尝试步行表蒸发（run_trace_steps 幽灵步只写快照不落行表）",
+  "tier": "gold",
+  "base_commit": "1485a3bae50be0bc0151bf348e3061aca2b119a0",
+  "problem_statement": "【持久化缺陷报障】用户反馈：任务运行中被门禁拦截或工具失败的步骤，在实时事件流里能看到红卡，但刷新/重载后从步骤时间线整段消失——事后核查 agent_run_steps 行表缺这些行（只在 agent_run_traces.steps_json 快照里存在），且其后步骤的 seq 相对快照 id 整体偏移。请定位并修复：任何推入 run_trace_steps 的失败尝试步都必须同步落入 agent_run_steps 行表，seq 与其在轨迹数组中的位置一致，使行表与快照逐位对齐、时间线刷新后不丢失败交锋。",
+  "judge_kind": "command",
+  "verify_command": "DB=\"$HOME/Library/Application Support/free-api-chat/data_v2.db\"; [ -f \"$DB\" ] || DB=\"$HOME/.local/share/free-api-chat/data_v2.db\"; awk '/run_trace_steps\\.push/,/upsert_snapshot/' src-tauri/src/agent/call_llm_phase.rs | grep -q 'append_step' && [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN EXISTS (SELECT 1 FROM agent_child_runs WHERE kind='review' AND parent_session_id='$FREE_API_EVAL_AGENT_SESSION' AND (result_json LIKE '%行表%' OR result_json LIKE '%快照%' OR result_json LIKE '%持久化%' OR result_json LIKE '%幽灵%' OR result_json LIKE '%append_step%' OR result_json LIKE '%错位%')) THEN 1 ELSE 0 END\")\" = \"1\" ] && [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "expected_exit_code": 0,
+  "max_steps": 90,
+  "plan_mode": "cross_review",
+  "expected_diff_files": [
+    "src-tauri/src/agent/call_llm_phase.rs"
+  ],
+  "max_prompt_tokens": 8000000,
+  "judge_semantics": "三段复合：①审查产物提及行表/快照/持久化/幽灵步/append_step/错位相关关键词（协作机器真实参与）；②结构性不变量——call_llm_phase 中 run_trace_steps.push（失败尝试幽灵步）到 upsert_snapshot 的区间内必须出现 append_step 行表落库（基线 push→upsert 直连、行表蒸发）；③会话终态=succeeded。审查者须核对幽灵步 seq 与 vec 下标同径，防止把 step_id 当 seq 造成二次错位。"
+}

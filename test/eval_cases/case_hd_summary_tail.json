@@ -1,0 +1,18 @@
+{
+  "id": "case_hd_summary_tail",
+  "title": "finish 交付文本尾部残留 JSON 结构符号（兜底救赎清洗链时序缺陷）",
+  "tier": "gold",
+  "base_commit": "e89869a95f15ff146e480fda8e8063a983087498",
+  "problem_statement": "【体验缺陷报障】多位用户反馈：Agent 每次交付长篇结论文本时，正文末尾都会多出几个不属于正文的 JSON 结构符号——常见为尾随的英文双引号 `\"` 和 `},`，正文越长、含引号引用越多的技术报告几乎必现。用户看到的效果：报告结尾莫名其妙跟着 `\"`、`},` 之类的残留字符。请定位并修复交付文本（finish summary）在解析/兜底链路中把 JSON 语法符号带进正文的缺陷：无论切片尾部混入多少空白、引号、逗号与闭合括号，都必须剥干净；同时不得误伤正文自身的合法结尾。",
+  "judge_kind": "cargo_test",
+  "test_patch": "test/eval_cases/patches/case_hd_summary_tail.test.patch",
+  "verify_command": "cargo test --manifest-path src-tauri/Cargo.toml --lib eval_judge_summary_tail_stripped",
+  "expected_exit_code": 0,
+  "max_steps": 90,
+  "plan_mode": "cross_review",
+  "expected_diff_files": [
+    "src-tauri/src/agent/utils/json_pipeline.rs"
+  ],
+  "max_prompt_tokens": 8000000,
+  "judge_semantics": "隐藏行为判据：判分时才注入测试——构造 summary 含未转义引号且后随 change_verification_update 同级字段的坏 JSON 喂 repair_json，断言 ①救出正文字节级干净（引号/闭合括号/逗号/空白零残留）②尾部系统字段仍被还原。题面只给现象不给解法；naive 修法（再追加几个 trim_end_matches）在字符乱序组合下仍会漏，判据物理断言'无论何种混杂顺序都剥净'。"
+}

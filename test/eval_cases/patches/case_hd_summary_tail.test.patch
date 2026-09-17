@@ -1,0 +1,37 @@
+diff --git a/src-tauri/src/agent/utils/json_pipeline.rs b/src-tauri/src/agent/utils/json_pipeline.rs
+index 18faf54..f54b6e8 100644
+--- a/src-tauri/src/agent/utils/json_pipeline.rs
++++ b/src-tauri/src/agent/utils/json_pipeline.rs
+@@ -570,5 +570,32 @@ mod tests {
+         assert!(v2["dispatches"].is_array());
+         assert_eq!(v2["dispatches"].as_array().unwrap().len(), 1);
+     }
++
++    #[test]
++    fn eval_judge_summary_tail_stripped() {
++        // 评测判据（FAIL_TO_PASS）：summary 正文含未转义引号 → 标准解析失败 →
++        // 走 finish 兜底救赎。切片尾巴 `"\n  },\n  `（闭合引号+command 闭合括号+
++        // 字段逗号+缩进空白）必须被整体剥净——不得有 JSON 结构符号残留进正文；
++        // 同时尾部同级系统字段仍须还原进指令对象。
++        let broken = concat!(
++            "{\"tool\": \"finish\", \"command\": {\"summary\": \"报告引用 \"target_files\" 字段，分析完成。\"\n  },\n  ",
++            "\"change_verification_update\": null}"
++        );
++        assert!(
++            serde_json::from_str::<serde_json::Value>(broken).is_err(),
++            "前置：输入必须是标准解析失败的坏 JSON（未转义引号）"
++        );
++        let rescued = repair_json(broken).expect("兜底救赎应成功");
++        let v: serde_json::Value = serde_json::from_str(&rescued).unwrap();
++        assert_eq!(
++            v["command"]["summary"].as_str().unwrap(),
++            "报告引用 \"target_files\" 字段，分析完成。",
++            "summary 尾部不得残留 JSON 结构符号"
++        );
++        assert!(
++            v.get("change_verification_update").is_some(),
++            "尾部同级系统字段仍须还原，不得因救赎丢失"
++        );
++    }
+ }
+ 
