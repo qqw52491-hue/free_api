@@ -87,9 +87,10 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "child_writer",
-        summary: "L3 隔离写入 worker：宿主把工作区复制成私有副本，worker 在副本内修改代码并自行运行你指定的测试命令，回交逐文件 diff 与测试证据；你审阅后亲自落实真实修改；支持单发或 dispatches 批量派发",
+        summary: "L3 隔离写入 worker：宿主把工作区复制成私有副本，worker 在副本内修改代码并自行运行你指定的测试命令，回交逐文件 diff 与测试证据；你审阅后可调用 apply 让宿主把补丁原样机械合入真实工作区（任一文件指纹冲突即整体拒绝，绝不覆盖），也可自行用常规写工具落实；支持单发或 dispatches 批量派发",
         actions: &[
             "dispatch(task: string, test_command: string [单条，如 npm test], focus_paths?: string[] <=5, role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, custom_inputs?: object [专项业务参数；保留键 verified_facts/hard_constraints/definition_of_done 升格一级小节], dispatches?: Array<{task, test_command, ...}> [一步批量派发多个 writer])",
+            "apply(child_run_id: string) [审阅 diff 后机械合入：宿主逐文件现算冲突指纹，全部干净才搬运，任何冲突整体拒绝；副本已回收时自动退化到补丁工件合入]",
         ],
     },
     BuiltinToolSpec {

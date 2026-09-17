@@ -410,20 +410,61 @@
                             </div>
                         </template>
 
-                        <!-- 正在思考与实时推进流 (带微型呼吸动效) -->
+                        <!-- 正在思考与实时推进流 (带脑部图标、流光滚动、大字号、可折叠展开) -->
                         <div
                             v-if="entry.status === 'running' && isRunning"
                             class="ambient-live-text-row"
                         >
-                            <span class="ambient-action-lead">
-                                <span class="action-tag action-tag-think">
-                                    <span class="ambient-live-spinner manus-spinner mini"></span>
-                                    {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中' : '推进中' }}
+                            <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
+                                <span class="ambient-action-lead">
+                                    <span class="action-tag action-tag-think">
+                                        <span class="action-tag-icon">🧠</span>
+                                        {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中' : '推进中' }}
+                                        <span class="ambient-live-spinner manus-spinner mini"></span>
+                                    </span>
                                 </span>
-                            </span>
-                            <span class="ambient-live-text">
-                                {{ liveThoughtInfo.text || getPlanRunningPreview(entry).line3.text || '正在深入分析全局上下文与决策规划 …' }}
-                            </span>
+                                <div class="ambient-live-viewport">
+                                    <span
+                                        v-scroll-tail
+                                        class="ambient-live-scroll-text text-shimmer-flow"
+                                        :title="getLine3FullText(entry)"
+                                    >
+                                        {{ getLine3DisplayText(entry) }}
+                                    </span>
+                                </div>
+                                <button
+                                    type="button"
+                                    class="thought-expand-btn"
+                                    :title="isLiveThoughtExpanded ? '收起完整思考' : '展开查看完整思考过程'"
+                                    @click.stop="toggleLiveThoughtExpanded"
+                                >
+                                    <span class="thought-expand-text">{{ isLiveThoughtExpanded ? '收起' : '展开' }}</span>
+                                    <svg
+                                        width="11"
+                                        height="11"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2.5"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        :class="{ 'rotate-180': isLiveThoughtExpanded }"
+                                    >
+                                        <polyline points="6 9 12 15 18 9" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <Transition name="thought-accordion">
+                                <div v-if="isLiveThoughtExpanded" class="ambient-live-thought-expanded">
+                                    <div class="thought-expanded-header">
+                                        <span class="thought-expanded-title">实时思考推演</span>
+                                        <span class="thought-char-count">{{ (props.thought || liveThoughtInfo.text || '').length }} 字</span>
+                                    </div>
+                                    <div class="thought-expanded-body">
+                                        {{ props.thought || liveThoughtInfo.text || '正在深入分析全局上下文与决策规划 …' }}
+                                    </div>
+                                </div>
+                            </Transition>
                         </div>
                     </div>
 
@@ -784,15 +825,56 @@
                 >
                     <div v-if="streamViewMode === 'ambient'" class="ambient-plan-stream">
                         <div class="ambient-live-text-row">
-                            <span class="ambient-action-lead">
-                                <span class="action-tag action-tag-think">
-                                    <span class="ambient-live-spinner manus-spinner mini"></span>
-                                    思考中
+                            <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
+                                <span class="ambient-action-lead">
+                                    <span class="action-tag action-tag-think">
+                                        <span class="action-tag-icon">🧠</span>
+                                        思考中
+                                        <span class="ambient-live-spinner manus-spinner mini"></span>
+                                    </span>
                                 </span>
-                            </span>
-                            <span class="ambient-live-text">
-                                {{ liveThoughtInfo.text || '正在深度思考规划执行策略 …' }}
-                            </span>
+                                <div class="ambient-live-viewport">
+                                    <span
+                                        v-scroll-tail
+                                        class="ambient-live-scroll-text text-shimmer-flow"
+                                        :title="liveThoughtInfo.text"
+                                    >
+                                        {{ liveThoughtInfo.text || '正在深度思考规划执行策略 …' }}
+                                    </span>
+                                </div>
+                                <button
+                                    type="button"
+                                    class="thought-expand-btn"
+                                    :title="isLiveThoughtExpanded ? '收起完整思考' : '展开查看完整思考过程'"
+                                    @click.stop="toggleLiveThoughtExpanded"
+                                >
+                                    <span class="thought-expand-text">{{ isLiveThoughtExpanded ? '收起' : '展开' }}</span>
+                                    <svg
+                                        width="11"
+                                        height="11"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2.5"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        :class="{ 'rotate-180': isLiveThoughtExpanded }"
+                                    >
+                                        <polyline points="6 9 12 15 18 9" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <Transition name="thought-accordion">
+                                <div v-if="isLiveThoughtExpanded" class="ambient-live-thought-expanded">
+                                    <div class="thought-expanded-header">
+                                        <span class="thought-expanded-title">实时思考推演</span>
+                                        <span class="thought-char-count">{{ (props.thought || liveThoughtInfo.text || '').length }} 字</span>
+                                    </div>
+                                    <div class="thought-expanded-body">
+                                        {{ props.thought || liveThoughtInfo.text || '正在深度思考规划执行策略 …' }}
+                                    </div>
+                                </div>
+                            </Transition>
                         </div>
                     </div>
                     <template v-else>
@@ -840,9 +922,22 @@
                     </template>
                 </article>
 
-                <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
+                <article
+                    v-else-if="entry.type === 'completion'"
+                    class="saved-message from-agent final-response"
+                    :class="{
+                        failed: entry.failed,
+                        'is-streaming': isRunning && entry.id === 'live-completion'
+                    }"
+                >
+                    <!-- 流光渐进顶部扫描条 (在加载/输出中持续流转) -->
+                    <div v-if="isRunning && entry.id === 'live-completion'" class="completion-stream-shimmer-beam"></div>
+
                     <div class="agent-msg-header">
-                        <span class="agent-logo-pill">⚡ Free API</span>
+                        <span class="agent-logo-pill" :class="{ 'is-shimmering': isRunning && entry.id === 'live-completion' }">
+                            <span v-if="isRunning && entry.id === 'live-completion'" class="agent-pulse-dot"></span>
+                            ⚡ Free API
+                        </span>
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                         <div class="msg-header-actions">
                             <button
@@ -876,7 +971,7 @@
                             </button>
                         </div>
                     </div>
-                    <div class="summary-rich">
+                    <div class="summary-rich" :class="{ 'is-streaming-text': isRunning && entry.id === 'live-completion' }">
                         <RichContentRenderer :content="entry.summary || entry.title" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
                     </div>
                     <div v-if="entry.artifacts && entry.artifacts.length" class="final-artifacts">
@@ -1173,6 +1268,11 @@ const streamElement = ref<HTMLElement | null>(null);
 const activeThoughtStartedAt = ref<number | null>(null);
 const followLiveTail = ref(true);
 const planExpandedState = reactive<Record<string, boolean>>({});
+const isLiveThoughtExpanded = ref(false);
+
+function toggleLiveThoughtExpanded() {
+    isLiveThoughtExpanded.value = !isLiveThoughtExpanded.value;
+}
 
 // 🌟 视图模式：'ambient' (环境感知/叙事简报，默认) | 'detailed' (完整工程链路)
 const streamViewMode = ref<'ambient' | 'detailed'>((() => {

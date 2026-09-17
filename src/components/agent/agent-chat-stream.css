@@ -1425,30 +1425,152 @@
     font-variant-numeric: tabular-nums;
 }
 
-/* 实时思考与推进纯文本行 */
+/* 🌟 实时思考与推进行 (高质感流光、滚动尾随、大字号、可折叠展开) */
 .ambient-live-text-row {
     display: flex;
+    flex-direction: column;
+    width: 100%;
+    margin: 4px 0;
+    border-radius: 6px;
+    user-select: text;
+}
+
+.ambient-live-text-bar {
+    display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 3px 8px;
-    font-size: 12px;
-    line-height: 1.45;
-    color: #94a3b8;
+    gap: 8px;
+    width: 100%;
+    padding: 3px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.12s ease;
+}
+
+.ambient-live-text-bar:hover {
+    background: rgba(255, 255, 255, 0.04);
 }
 
 .ambient-live-spinner {
-    width: 10px;
-    height: 10px;
+    width: 9px;
+    height: 9px;
     border-width: 1.5px;
     margin: 0;
+    margin-left: 2px;
 }
 
-.ambient-live-text {
-    color: #94a3b8;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+.ambient-live-viewport {
     flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    position: relative;
+    mask-image: linear-gradient(to right, transparent 0, #000 8px, #000 calc(100% - 14px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 8px, #000 calc(100% - 14px), transparent 100%);
+}
+
+.ambient-live-scroll-text {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.45;
+    color: #e2e8f0;
+    display: inline-block;
+    cursor: pointer;
+}
+
+/* 展开折叠按钮 */
+.thought-expand-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1.5px 6px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: #94a3b8;
+    font-size: 10.5px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+    user-select: none;
+}
+
+.thought-expand-btn:hover {
+    color: #e2e8f0;
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.16);
+}
+
+.thought-expand-btn svg {
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.thought-expand-btn svg.rotate-180 {
+    transform: rotate(180deg);
+}
+
+/* 展开状态思考面板 */
+.ambient-live-thought-expanded {
+    width: 100%;
+    margin-top: 5px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: rgba(18, 18, 22, 0.7);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.thought-expanded-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.thought-expanded-title {
+    font-size: 11px;
+    font-weight: 500;
+    color: #94a3b8;
+    letter-spacing: 0.2px;
+}
+
+.thought-char-count {
+    font-size: 10px;
+    color: #64748b;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.thought-expanded-body {
+    font-size: 13px;
+    line-height: 1.68;
+    color: #cbd5e1;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 280px;
+    overflow-y: auto;
+    user-select: text;
+    padding-right: 4px;
+}
+
+/* 展开折叠动效 */
+.thought-accordion-enter-active,
+.thought-accordion-leave-active {
+    transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    max-height: 360px;
+    opacity: 1;
+    overflow: hidden;
+}
+
+.thought-accordion-enter-from,
+.thought-accordion-leave-to {
+    max-height: 0;
+    opacity: 0;
+    margin-top: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    overflow: hidden;
 }
 
 .goal-node {
@@ -1761,13 +1883,105 @@ button.root-row {
     color: #93c5fd;
 }
 
-/* 交付物与总结 */
+/* 交付物与总结 (支持流光与渐进式流式输出) */
 .final-response {
+    position: relative;
     width: 100%;
     max-width: 100%;
-    padding: 4px 0 16px;
+    padding: 6px 0 16px;
     border: 0;
     background: transparent;
+    transition: all 0.25s ease;
+}
+
+/* 🌟 流光渐进顶部扫描条 (在生成/流式输出时如同极光流淌) */
+.completion-stream-shimmer-beam {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(56, 189, 248, 0.2) 15%,
+        rgba(56, 189, 248, 0.9) 50%,
+        rgba(168, 85, 247, 0.9) 75%,
+        transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: completionShimmerSweep 1.8s ease-in-out infinite;
+    pointer-events: none;
+    z-index: 2;
+}
+
+@keyframes completionShimmerSweep {
+    0% {
+        background-position: -150% 0;
+        opacity: 0.5;
+    }
+    50% {
+        opacity: 1;
+    }
+    100% {
+        background-position: 150% 0;
+        opacity: 0.5;
+    }
+}
+
+/* 正在输出时的闪烁流式光标与渐进动效 */
+.summary-rich.is-streaming-text {
+    position: relative;
+}
+
+.summary-rich.is-streaming-text::after {
+    content: '▋';
+    display: inline-block;
+    margin-left: 4px;
+    color: #38bdf8;
+    font-size: 0.88em;
+    vertical-align: baseline;
+    animation: streamCursorBlink 0.85s infinite;
+    text-shadow: 0 0 8px rgba(56, 189, 248, 0.7);
+}
+
+@keyframes streamCursorBlink {
+    0%, 100% { opacity: 1; transform: scaleY(1); }
+    50% { opacity: 0.15; transform: scaleY(0.9); }
+}
+
+/* 最终回复的文本整体渐进浮现动效 */
+.final-response .summary-rich {
+    animation: textProgressiveFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes textProgressiveFadeIn {
+    from {
+        opacity: 0.85;
+        transform: translateY(2px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* 徽标微呼吸脉冲点 */
+.agent-pulse-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #38bdf8;
+    box-shadow: 0 0 6px #38bdf8;
+    margin-right: 2px;
+    animation: pulseDot 1.2s ease-in-out infinite;
+}
+
+@keyframes pulseDot {
+    0%, 100% { transform: scale(0.9); opacity: 0.7; }
+    50% { transform: scale(1.3); opacity: 1; }
 }
 
 

@@ -91,6 +91,19 @@ pub struct ChangedFile {
     pub result_hash: Option<String>,
     #[serde(default)]
     pub root_hash: Option<String>,
+    /// 基线时刻文件是否已存在：区分"已有空文件"与"全新创建"——
+    /// 决定机械 apply 的语义是覆盖还是新建（新建文件 spawn_hash 记为 "empty/deleted"）
+    #[serde(default)]
+    pub existed_before: Option<bool>,
+}
+
+/// 首次修改前的文件基线：before 内容 + 当时是否已存在。
+/// existed_before=false 时 spawn 指纹按缺失文件哨兵 "empty/deleted" 记录，
+/// 使三态冲突检测对新建文件给出正确语义（父工作区仍无此文件 → CleanReplay）。
+#[derive(Debug, Clone)]
+pub struct WriteBaseline {
+    pub content: String,
+    pub existed_before: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,7 +473,7 @@ pub async fn execute_writer_action(
     copy_root: &Path,
     action: &str,
     params: &Value,
-    changes: &mut BTreeMap<String, String>,
+    changes: &mut BTreeMap<String, WriteBaseline>,
     writes_used: &mut usize,
     test_command: &str,
     test_evidence: &mut Option<(String, bool, String)>,
@@ -520,12 +533,16 @@ pub async fn execute_writer_action(
                 .unwrap_or(&canonical)
                 .to_string_lossy()
                 .to_string();
-            // 首次修改前留底，供 diff 生成
+            // 首次修改前留底，供 diff 生成（同时记录文件当时是否存在）
             if !changes.contains_key(&relative) {
-                let before = std::fs::read(&canonical)
-                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
-                    .unwrap_or_default();
-                changes.insert(relative.clone(), before);
+                let before = std::fs::read(&canonical).ok();
+                changes.insert(relative.clone(), WriteBaseline {
+                    content: before
+                        .as_deref()
+                        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                        .unwrap_or_default(),
+                    existed_before: before.is_some(),
+                });
             }
             if let Some(parent) = canonical.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| format!("创建目录失败: {}", error))?;
@@ -567,12 +584,16 @@ pub async fn execute_writer_action(
                 return Err(format!("待编辑的文件不存在: {}", relative));
             }
 
-            // 首次修改前留底，供 diff 生成
+            // 首次修改前留底，供 diff 生成（同时记录文件当时是否存在）
             if !changes.contains_key(&relative) {
-                let before = std::fs::read(&canonical)
-                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
-                    .unwrap_or_default();
-                changes.insert(relative.clone(), before);
+                let before = std::fs::read(&canonical).ok();
+                changes.insert(relative.clone(), WriteBaseline {
+                    content: before
+                        .as_deref()
+                        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                        .unwrap_or_default(),
+                    existed_before: before.is_some(),
+                });
             }
 
             let current_content = std::fs::read_to_string(&canonical)
@@ -752,6 +773,243 @@ pub async fn refresh_file_conflicts(
     }
 }
 
+/// 机械合入：主 Agent 审阅 writer 回执后，由宿主把候选修改原样搬回真实工作区。
+///
+/// 安全协议（宁缺毋滥）：
+/// 1. 逐文件以 apply 瞬间的主工作区实况重算冲突指纹（闭合 TOCTOU 窗口）；
+/// 2. 任一文件 Conflict → 整体拒绝，绝不盲目覆盖；
+/// 3. 搬运优先走仍存活的隔离副本（字节级精确，兼容非 git/二进制/新建文件），
+///    且副本内源文件指纹必须等于回执 result_hash（副本被污染则拒绝）；
+/// 4. 副本已被回收时退化为 patch 工件 + `git apply --check` 干跑校验。
+pub async fn apply_writer_result(
+    db: &DbState,
+    child_run_id: &str,
+    parent_session_id: &str,
+    parent_root: &Path,
+) -> Result<String, String> {
+    let parent = parent_root
+        .canonicalize()
+        .map_err(|error| format!("工作区不可用: {}", error))?;
+    let git_available = parent.join(".git").exists();
+
+    let (kind, status, run_session, row_copy, result_json) = {
+        let conn = db.0.lock().map_err(|error| error.to_string())?;
+        conn.query_row(
+            "SELECT kind, status, parent_session_id, workspace_copy, result_json FROM agent_child_runs WHERE id = ?1",
+            rusqlite::params![child_run_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("未找到子任务 {}: {}", child_run_id, error))?
+    };
+    if kind != "writer" {
+        return Err(format!(
+            "child_run_id {} 不是写入工兵（kind={}），只有 writer 结果可机械合入。",
+            child_run_id, kind
+        ));
+    }
+    if run_session != parent_session_id {
+        return Err("该 writer 不属于当前会话，拒绝合入。".to_string());
+    }
+    if status == "running" {
+        return Err("该 writer 仍在运行，请先 wait_jobs 回收其回执后再合入。".to_string());
+    }
+    let raw = result_json.ok_or_else(|| "该 writer 未留下可合入的结果数据。".to_string())?;
+    let mut wr: WriterResult = serde_json::from_str(&raw)
+        .map_err(|error| format!("writer 结果解析失败: {}", error))?;
+    if wr.changed_files.is_empty() {
+        return Ok(format!("writer {} 未产生文件变更，无需合入。", child_run_id));
+    }
+
+    refresh_file_conflicts(&mut wr.changed_files, &parent, git_available).await;
+
+    let conflicts: Vec<String> = wr
+        .changed_files
+        .iter()
+        .filter(|f| f.conflict_status == Some(ConflictStatus::Conflict))
+        .map(|f| f.path.clone())
+        .collect();
+    if !conflicts.is_empty() {
+        return Err(format!(
+            "❌ 机械合入已整体拒绝：以下 {} 个文件在 writer 开工后被改动（指纹不一致），绝不盲目覆盖：\n{}\n请 read_file 查看最新内容后自行落实，或 resume_child 让 writer 基于新基线重做。",
+            conflicts.len(),
+            conflicts
+                .iter()
+                .map(|p| format!("- {}", p))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    let clean: Vec<ChangedFile> = wr
+        .changed_files
+        .iter()
+        .filter(|f| f.conflict_status == Some(ConflictStatus::CleanReplay))
+        .cloned()
+        .collect();
+    let already = wr.changed_files.len() - clean.len();
+    if clean.is_empty() {
+        return Ok(format!(
+            "✅ writer {} 的全部 {} 个变更在主工作区已一致（无需重复合入）。",
+            child_run_id, already
+        ));
+    }
+
+    // 合入前全量校验路径合法性（防逃逸）：f.path 必须是相对路径且不越出工作区
+    for f in &clean {
+        let rel = Path::new(&f.path);
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!("非法合入路径: {}", f.path));
+        }
+    }
+
+    let copy_root = row_copy
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            let wc = wr.workspace_copy.trim().to_string();
+            if wc.is_empty() { None } else { Some(wc) }
+        })
+        .map(PathBuf::from)
+        .filter(|p| p.exists());
+
+    if let Some(copy_root) = copy_root {
+        let mut applied = Vec::new();
+        for f in &clean {
+            let src = copy_root.join(&f.path);
+            if !src.exists() {
+                return Err(format!(
+                    "隔离副本中的结果文件缺失: {}；副本可能已被清理，请按回执 diff 手动落实。",
+                    f.path
+                ));
+            }
+            let src_hash = compute_file_hash(&src, git_available).await;
+            if f.result_hash.as_deref() != Some(src_hash.as_str()) {
+                return Err(format!(
+                    "副本内 {} 的内容指纹与回执不一致（副本疑似被污染），拒绝合入。",
+                    f.path
+                ));
+            }
+            let dest = parent.join(&f.path);
+            if let Some(dir) = dest.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|error| format!("创建目录失败 {}: {}", dir.display(), error))?;
+            }
+            std::fs::copy(&src, &dest)
+                .map_err(|error| format!("合入文件失败 {}: {}", f.path, error))?;
+            applied.push(f.path.clone());
+        }
+        let mut report = format!(
+            "✅ 机械合入完成：已把 writer {} 的 {} 个变更原样搬回真实工作区{}。\n已合入：\n{}",
+            child_run_id,
+            applied.len(),
+            if already > 0 {
+                format!("（另 {} 个文件原本已一致，跳过）", already)
+            } else {
+                String::new()
+            },
+            applied
+                .iter()
+                .map(|p| format!("- {}", p))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        if wr.test_status != "passed" {
+            report.push_str(&format!(
+                "\n⚠️ writer 测试状态: {}——合入后请在真实工作区自行运行 test_command 完成最终验证。",
+                wr.test_status
+            ));
+        } else {
+            report.push_str("\n⚠️ writer 的测试证据来自隔离副本；合入后请仍在真实工作区重跑 test_command 做最终验证。");
+        }
+        return Ok(report);
+    }
+
+    // 副本已回收的退化路径：权威 patch 工件 + git apply 干跑校验
+    let patch_id = wr.patch_ref.clone().ok_or_else(|| {
+        "隔离副本已回收且该 writer 无完整补丁工件；请按回执 diff 手动落实。".to_string()
+    })?;
+    if !git_available {
+        return Err("隔离副本已回收且工作区非 git 仓库，无法机械应用补丁；请按回执 diff 手动落实。".to_string());
+    }
+    let patch = crate::agent::artifact_manager::read_artifact_content(db, &patch_id)
+        .map_err(|error| format!("读取补丁工件失败: {}", error))?;
+    let tmp_patch = std::env::temp_dir().join(format!(
+        "freeapi-writer-apply-{}.patch",
+        &child_run_id[..8.min(child_run_id.len())]
+    ));
+    std::fs::write(&tmp_patch, &patch)
+        .map_err(|error| format!("写入临时补丁失败: {}", error))?;
+
+    // 只合入仍 CleanReplay 的文件；AlreadyApplied 的条目用 --include 过滤掉避免重复应用
+    let mut apply_args: Vec<String> = clean
+        .iter()
+        .map(|f| format!("--include={}", f.path))
+        .collect();
+    apply_args.push("--whitespace=nowarn".to_string());
+    apply_args.push(tmp_patch.to_string_lossy().to_string());
+
+    let check = tokio::process::Command::new("git")
+        .arg("apply")
+        .arg("--check")
+        .args(&apply_args)
+        .current_dir(&parent)
+        .output()
+        .await;
+    match check {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let _ = std::fs::remove_file(&tmp_patch);
+            return Err(format!(
+                "补丁干跑校验失败（git apply --check 拒绝），未做任何修改：\n{}\n请按回执 diff 手动落实。",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp_patch);
+            return Err(format!("无法执行 git apply 干跑: {}", error));
+        }
+    }
+    let applied = tokio::process::Command::new("git")
+        .arg("apply")
+        .args(&apply_args)
+        .current_dir(&parent)
+        .output()
+        .await;
+    let _ = std::fs::remove_file(&tmp_patch);
+    match applied {
+        Ok(out) if out.status.success() => Ok(format!(
+            "✅ 机械合入完成：已通过补丁工件把 writer {} 的 {} 个变更应用到真实工作区{}。\n已合入：\n{}\n⚠️ 请在真实工作区重跑 test_command 做最终验证。",
+            child_run_id,
+            clean.len(),
+            if already > 0 {
+                format!("（另 {} 个文件原本已一致，跳过）", already)
+            } else {
+                String::new()
+            },
+            clean.iter()
+                .map(|f| format!("- {}", f.path))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )),
+        Ok(out) => Err(format!(
+            "git apply 执行失败：\n{}\n请按回执 diff 手动落实。",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(error) => Err(format!("无法执行 git apply: {}", error)),
+    }
+}
+
 /// 从 Git 全量 diff 中截取指定相对路径文件的独立 diff 块
 pub fn extract_file_diff(full_diff: &str, relative_path: &str) -> Option<String> {
     let clean_path = relative_path.replace('\\', "/");
@@ -885,7 +1143,7 @@ pub fn cleanup_orphaned_writer_workspaces(db: &DbState) -> usize {
 
 /// 依据修改留底与 Git 快照基线生成 Unified Hunk，并执行 48KB 分级降级与三态冲突检测
 async fn build_changed_files(
-    changes: &BTreeMap<String, String>,
+    changes: &BTreeMap<String, WriteBaseline>,
     copy_root: &Path,
     parent_root: &Path,
     git_available: bool,
@@ -920,6 +1178,22 @@ async fn build_changed_files(
     let mut file_diffs: BTreeMap<String, String> = BTreeMap::new();
 
     if git_available && !git_full_diff.is_empty() {
+        // 权威全量补丁始终登记为受管工件：它是机械 apply 的合入凭据与审计留底；
+        // 内联展示仍按 48KB 预算分级截断，但工件本身不截断
+        let patch_title = format!("patch-{}.diff", &child_run_id[..8.min(child_run_id.len())]);
+        if let Ok(art) = crate::agent::artifact_manager::save_managed_artifact(
+            db,
+            parent_session_id,
+            None,
+            &patch_title,
+            &git_full_diff,
+            Some("diff"),
+            Some("patch"),
+            Some("writer_patch"),
+        ) {
+            patch_ref = Some(art.id.clone());
+        }
+
         if total_chars <= MAX_DIFF_TOTAL_CHARS {
             // Tier 1: 全量 hunk 在 48KB 预算内，逐文件提取
             for rel in changes.keys() {
@@ -945,21 +1219,7 @@ async fn build_changed_files(
                     }
                 }
             } else {
-                // Tier 3 & 4: 完整补丁登记为 Artifact 工件，内联文件首头 + patch_ref
-                let patch_title = format!("patch-{}.diff", &child_run_id[..8.min(child_run_id.len())]);
-                if let Ok(art) = crate::agent::artifact_manager::save_managed_artifact(
-                    db,
-                    parent_session_id,
-                    None,
-                    &patch_title,
-                    &git_full_diff,
-                    Some("diff"),
-                    Some("patch"),
-                    Some("writer_patch"),
-                ) {
-                    patch_ref = Some(art.id.clone());
-                }
-
+                // Tier 3 & 4: 内联仅保留文件首头，完整补丁经 patch_ref 工件取回
                 for rel in changes.keys() {
                     let fd = extract_file_diff(&git_full_diff, rel).unwrap_or_default();
                     let head_preview: String = fd.lines().take(10).collect::<Vec<_>>().join("\n");
@@ -980,7 +1240,7 @@ async fn build_changed_files(
     }
 
     let mut result_files = Vec::new();
-    for (relative, before) in changes {
+    for (relative, baseline) in changes {
         let canonical_copy = copy_root.join(relative);
         let canonical_parent = parent_root.join(relative);
 
@@ -988,25 +1248,32 @@ async fn build_changed_files(
         let diff = if let Some(d) = file_diffs.get(relative) {
             d.clone()
         } else if git_available {
-            line_diff(before, &after)
+            line_diff(&baseline.content, &after)
         } else {
-            format!("⚠️ git 不可用，回执为无行号简化 diff:\n{}", line_diff(before, &after))
+            format!("⚠️ git 不可用，回执为无行号简化 diff:\n{}", line_diff(&baseline.content, &after))
         };
 
-        let spawn_h = compute_str_hash(before, git_available, copy_root).await;
+        // 新建文件的 spawn 指纹记为缺失哨兵，与 compute_file_hash 对不存在文件的返回值一致：
+        // 父工作区至今仍无此文件 → CleanReplay；被人抢先建出同名异内容文件 → Conflict
+        let spawn_h = if baseline.existed_before {
+            compute_str_hash(&baseline.content, git_available, copy_root).await
+        } else {
+            "empty/deleted".to_string()
+        };
         let result_h = compute_file_hash(&canonical_copy, git_available).await;
         let root_now_h = compute_file_hash(&canonical_parent, git_available).await;
         let conflict_status = evaluate_file_conflict(&spawn_h, &result_h, &root_now_h);
 
         result_files.push(ChangedFile {
             path: relative.clone(),
-            bytes_before: before.len(),
+            bytes_before: baseline.content.len(),
             bytes_after: after.len(),
             diff,
             conflict_status: Some(conflict_status),
             spawn_hash: Some(spawn_h),
             result_hash: Some(result_h),
             root_hash: Some(root_now_h),
+            existed_before: Some(baseline.existed_before),
         });
     }
 
@@ -1036,7 +1303,7 @@ pub async fn run_writer_loop(
     let mut prompt_tokens: i64 = 0;
     let mut steps_used: usize = 0;
     let mut writes_used: usize = 0;
-    let mut changes: BTreeMap<String, String> = BTreeMap::new();
+    let mut changes: BTreeMap<String, WriteBaseline> = BTreeMap::new();
     let mut test_evidence: Option<(String, bool, String)> = None;
     let mut test_nudged = false;
     let mut findings: Vec<String> = Vec::new();
@@ -1566,12 +1833,18 @@ mod tests {
         assert!(out.contains("已写入 src/sum.mjs"));
         assert_eq!(writes, 1);
         let before = changes.get("src/sum.mjs").unwrap();
-        assert!(before.contains("return a - b;"), "首次写入前必须留底原内容");
-        // 新建文件：留底为空
+        assert!(before.content.contains("return a - b;"), "首次写入前必须留底原内容");
+        assert!(before.existed_before, "既有文件的 existed_before 必须为 true");
+        // 新建文件：留底为空且 existed_before=false
         execute_writer_action(&copy, "write_file", &json!({
             "path": "src/new-helper.mjs", "content": "export const ok = true;\n"
         }), &mut changes, &mut writes, "npm test", &mut test_evidence, "src/").await.unwrap();
         assert!(changes.contains_key("src/new-helper.mjs"));
+        assert_eq!(
+            changes.get("src/new-helper.mjs").map(|b| b.existed_before),
+            Some(false),
+            "新建文件的 existed_before 必须为 false"
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -1790,6 +2063,7 @@ mod tests {
             result_hash: Some("result_hash_abc".to_string()),
             root_hash: Some(spawn_hash.clone()),
             conflict_status: Some(ConflictStatus::CleanReplay),
+            existed_before: Some(true),
         };
 
         let mut files = vec![changed_file];
