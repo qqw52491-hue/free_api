@@ -1,0 +1,17 @@
+{
+  "id": "case_hd_run_binding",
+  "title": "跨 run 检索索引静默失效（症状距根因 4 层：UUID 无序性绑错 run）",
+  "tier": "gold",
+  "base_commit": "675966b55d8e405147044e9ec7264a81ea8b32b6",
+  "problem_statement": "【线上缺陷报障】用户反馈一个只在'二次运行'时才出现的诡异缺陷：同一会话里第一个 run 中，搜索去重完全正常——同样的检索参数重复发起会返回'复用第 N 步结果'的去重回执，同一路径反复检索也有引导提示。但只要该会话再发起第二个 run，去重机制就彻底静默失效——同参搜索每次都真实执行、复用回执绝迹、signpost 引导全消，模型随即陷入换词重搜失控循环（实测单 run 对同一文件搜索 45 次无一拦截，烧数百万 token）。注意：缺陷并非每次必现，只有一定概率触发，一旦触发则整轮失效。请定位根因并修复：去重索引必须始终绑定到当前正在运行的 run，任何查询'最新 run'的路径都不得再绑错。",
+  "judge_kind": "command",
+  "verify_command": "F=src-tauri/src/agent/retrieval/mod.rs; DB=\"$HOME/Library/Application Support/free-api-chat/data_v2.db\"; [ -f \"$DB\" ] || DB=\"$HOME/.local/share/free-api-chat/data_v2.db\"; ! grep -qE 'ORDER BY[[:space:]]+id[[:space:]]+DESC' \"$F\" && grep -qE 'ORDER BY[^\"]*started_at[[:space:]]+DESC' \"$F\" && [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN EXISTS (SELECT 1 FROM agent_child_runs WHERE kind='review' AND parent_session_id='$FREE_API_EVAL_AGENT_SESSION' AND (result_json LIKE '%去重%' OR result_json LIKE '%索引%' OR result_json LIKE '%绑定%' OR result_json LIKE '%UUID%' OR result_json LIKE '%started_at%' OR result_json LIKE '%排序%')) THEN 1 ELSE 0 END\")\" = \"1\" ] && [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "expected_exit_code": 0,
+  "max_steps": 90,
+  "plan_mode": "cross_review",
+  "expected_diff_files": [
+    "src-tauri/src/agent/retrieval/mod.rs"
+  ],
+  "max_prompt_tokens": 8000000,
+  "judge_semantics": "症状距根因 4 层的深度排障题：行为失控(搜索去重哑火)→去重索引→最新 run 查询→UUIDv4 无序性。题面只给'第二个 run 起概率性失效'的现象，不提 SQL/UUID/索引绑定任何线索——考察模型能否从'概率性+跨 run'两个特征推出随机抽签绑定。判据：①ORDER BY id DESC 单一排序必须消失（ORDER BY started_at DESC, id DESC 决胜键合法）②至少一处 started_at DESC 排序存在③审查产物含去重/索引/绑定/UUID/排序关键词④会话成功。等价实现（如 MAX(started_at) 子查询）由审查者按'索引必绑当前 run'不变量人工核实。"
+}
