@@ -884,6 +884,19 @@ async fn run_agent_main_loop_in_workspace_inner(
                 )),
             });
         }
+        // 取证任务单：方案路由任务把 Pro 分流的调查方向注入探索期上下文——
+        // 执行模型按单取证而不是自由漫游；非方案路由（direct 等）不注入。
+        if verdict.requires_plan_gate() {
+            if let Some(brief) = verdict.investigation_brief_text() {
+                context.turns_history.push(crate::agent::context::ChatMessage {
+                    role: "user".to_string(),
+                    content: json!(format!(
+                        "【🧭 取证任务单（入口分流给出）】\n{}\n请按任务单定向取证；证据成熟后输出 submit_plan 提交调查结论与初步方案——Tech Lead 评审时有权直接修订定稿，以定稿版本为执行依据。",
+                        brief
+                    )),
+                });
+            }
+        }
         checkpoint.triage_verdict = Some(verdict);
         // 审查覆盖面观测行：分流判决如何塑形阶段/终审一目了然；判决关闭阶段审查
         // 时额外落 gate 留痕（step_id 此处未就位，与上方 triage 记录一致用 0）。
@@ -1455,6 +1468,16 @@ async fn run_agent_main_loop_in_workspace_inner(
                                     }
                                 });
                                 checkpoint.record_reviewer_delivery_for_run(Some(&receipt.child_run_id), &delivery);
+                                // Tech Lead 定稿通知：revised_* 已覆盖 submitted_plan 对应字段，
+                                // 执行方必须以审查者定稿版本为准（字段清单提示，内容见审查结论）。
+                                if let Some(rev) =
+                                    crate::agent::checkpoint::AgentCheckpoint::plan_revision_from(&delivery)
+                                {
+                                    injection.push_str(&format!(
+                                        "\n📝 Tech Lead 已在 1v1 中修订并定稿方案（修订字段: {}）——请按定稿版本执行，勿沿用你此前提交的原文。\n",
+                                        rev.describe_fields()
+                                    ));
+                                }
                                 injection.push_str(&format!(
                                     "\n📊 本轮异议动态: 新增 {} / 撤回 {} / 维持 {}（连续多轮撤回≈新增且总数不降 = 审查空转，请评估转人工）\n",
                                     checkpoint.review_objection_added,

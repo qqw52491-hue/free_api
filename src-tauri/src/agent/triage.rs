@@ -59,6 +59,14 @@ pub struct TriageVerdict {
     /// 判决自报的升级触发条件（观测用，门禁侧另有机械地板兜底）
     #[serde(default)]
     pub escalation_triggers: Vec<String>,
+    /// 取证任务单：Pro 档分流给出的调查问题清单（探索期注入主 Agent 上下文，
+    /// 让执行模型按单取证而非自由漫游；仅方案路由任务有意义）
+    #[serde(default)]
+    pub investigation_questions: Vec<String>,
+    /// 取证任务单：方案成立前必须拿到的证据类型（同时并入审查输入，
+    /// 供 Tech Lead 核对取证覆盖度）
+    #[serde(default)]
+    pub required_evidence: Vec<String>,
     /// 实际给出判决的模型 id（宿主回填，非模型输出）
     #[serde(default)]
     pub model_id: String,
@@ -116,6 +124,9 @@ impl TriageVerdict {
         self.pre_review_roles.retain(|r| !r.trim().is_empty());
         self.stage_review_roles.retain(|r| !r.trim().is_empty());
         self.final_review_roles.retain(|r| !r.trim().is_empty());
+        self.investigation_questions
+            .retain(|q| !q.trim().is_empty());
+        self.required_evidence.retain(|e| !e.trim().is_empty());
     }
 
     /// 是否需要 submit_plan 技术方案门（technical_plan / expert_panel 才需要）
@@ -144,6 +155,48 @@ impl TriageVerdict {
         self.route.trim().eq_ignore_ascii_case("user_clarification")
     }
 
+    /// 取证任务单文本（探索期注入执行模型上下文）：Pro 定调查方向、Flash 按单取证。
+    /// 无内容返回 None；条数与单条长度均有上限，防判决膨胀污染 prompt。
+    pub fn investigation_brief_text(&self) -> Option<String> {
+        let cap_items = |items: &[String], n: usize, w: usize| -> Vec<String> {
+            items
+                .iter()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .take(n)
+                .map(|s| s.chars().take(w).collect())
+                .collect()
+        };
+        let questions = cap_items(&self.investigation_questions, 6, 160);
+        let evidence = cap_items(&self.required_evidence, 6, 120);
+        if questions.is_empty() && evidence.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !questions.is_empty() {
+            parts.push(format!(
+                "必须回答的调查问题：\n{}",
+                questions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| format!("{}. {}", i + 1, q))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        if !evidence.is_empty() {
+            parts.push(format!(
+                "方案成立前必须拿到的证据：\n{}",
+                evidence
+                    .iter()
+                    .map(|e| format!("- {}", e))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        Some(parts.join("\n"))
+    }
+
     /// 失败降级判决：等价于「维持现状行为」——方案门照开、阶段审查保留、
     /// 证据要求不放宽。fallback 记录降级原因供审计。
     pub fn fallback(reason: &str) -> Self {
@@ -162,6 +215,8 @@ impl TriageVerdict {
             confidence: 0.0,
             reason: "分流调用失败，已按保守默认降级".to_string(),
             escalation_triggers: Vec::new(),
+            investigation_questions: Vec::new(),
+            required_evidence: Vec::new(),
             model_id: String::new(),
             fallback: Some(reason.to_string()),
         }
@@ -215,6 +270,16 @@ pub fn merge_brief_into_inputs(
         .filter(|t| !t.is_empty())
         .collect();
     append_items(&mut obj, "hard_constraints", triggers);
+
+    // 取证任务单的"必备证据"并入硬约束：Tech Lead 评审时据此核对取证覆盖度，
+    // 方案漏取关键证据本身就构成审查意见。
+    let required: Vec<String> = verdict
+        .required_evidence
+        .iter()
+        .map(|e| format!("必备证据：{}", e.trim()))
+        .filter(|e| e.len() > 5)
+        .collect();
+    append_items(&mut obj, "hard_constraints", required);
 
     serde_json::Value::Object(obj)
 }
@@ -312,7 +377,9 @@ pub async fn run_triage(
   "evidence_policy": "none|source_refs|code_refs|operational_probes",
   "confidence": 0.85,
   "reason": "一句话判决理由",
-  "escalation_triggers": ["会把本任务升级回重路径的触发条件"]
+  "escalation_triggers": ["会把本任务升级回重路径的触发条件"],
+  "investigation_questions": ["仅 technical_plan/expert_panel 路由填写：执行方取证时必须回答的调查问题，1~6 条"],
+  "required_evidence": ["仅 technical_plan/expert_panel 路由填写：方案成立前必须拿到的证据类型，1~6 条"]
 }
 
 【枚举语义】
@@ -329,6 +396,7 @@ pub async fn run_triage(
 - stage_review_mode：none=中段无需阶段审查；milestone=按里程碑/写入阈值做阶段审查。
 - final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。
 - evidence_policy：none=方案不需证据引用；source_refs=资料/需求来源即可；code_refs=须引用已读代码证据；operational_probes=须命令输出/探针证据。
+- investigation_questions / required_evidence：仅当 route 为 technical_plan/expert_panel 时填写——你负责定调查方向，执行模型按你的任务单取证并提交方案，Tech Lead 据此核对取证覆盖度；其他路由一律留空数组。
 
 【验收能力边界（系统事实，非分类规则）】
 - mechanical_only 终审只校验：产物存在、已登记、可解析、数量/规模对账；
@@ -585,6 +653,49 @@ mod tests {
         // 围栏包装的可提取
         let fenced = parse_triage_json("前缀噪音\n```json\n{\"route\":\"direct\"}\n```\n后缀");
         assert!(fenced.is_some());
+    }
+
+    #[test]
+    fn investigation_brief_renders_questions_and_evidence() {
+        let v = parse(
+            r#"{
+            "route": "technical_plan",
+            "investigation_questions": ["workspace_dir 在哪创建", "path_guard 谁消费", "", "  "],
+            "required_evidence": ["path_guard 分类逻辑", "现有测试"]
+        }"#,
+        );
+        let brief = v.investigation_brief_text().expect("有内容必须产出任务单");
+        assert!(brief.contains("workspace_dir 在哪创建"));
+        assert!(brief.contains("path_guard 谁消费"));
+        assert!(brief.contains("必备") || brief.contains("必须拿到的证据"));
+        // 空串项已被 normalize 过滤
+        assert!(!brief.contains("3. \n"), "空问题不得进入任务单");
+    }
+
+    #[test]
+    fn investigation_brief_empty_returns_none() {
+        let v = parse(r#"{"route": "technical_plan"}"#);
+        assert!(v.investigation_brief_text().is_none());
+        assert!(v.investigation_questions.is_empty());
+        assert!(v.required_evidence.is_empty());
+    }
+
+    #[test]
+    fn merge_brief_appends_required_evidence_to_hard_constraints() {
+        let v = parse(
+            r#"{
+            "route": "technical_plan",
+            "required_evidence": ["path_guard 分类逻辑"]
+        }"#,
+        );
+        let merged = merge_brief_into_inputs(None, &v);
+        let constraints = merged
+            .get("hard_constraints")
+            .and_then(|c| c.as_array())
+            .expect("必备证据必须并入 hard_constraints");
+        assert!(constraints
+            .iter()
+            .any(|c| c.as_str().map_or(false, |s| s.contains("path_guard 分类逻辑"))));
     }
 
     #[test]

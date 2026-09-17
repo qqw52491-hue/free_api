@@ -32,7 +32,7 @@ pub fn cross_review_need_reviewer_dispatch() -> String {
         （兼容方式：调用 child_reviewer 并指定 role: \"tech_lead\"，自行传入 plan_summary、target_files 与 discussion_round 进行 1v1 方案对齐）；\n\
      2. 随后调用 wait_jobs 等待审查裁决；\n\
      3. 严格按其返回的结构化结论（decision）行动：\n\
-        - 若 approved：方案已放行，可直接执行代码写入；\n\
+        - 若 approved：方案已放行，可直接执行代码写入。注意 Tech Lead 是定稿负责人——若结论携带 revised_* 修订字段，以修订后的方案为准执行，勿沿用你提交的原文；\n\
         - 若 rebuttal：根据意见调整方案并继续 1v1 讨论；\n\
         - 若 escalate：按照其指定的 escalate_roles 专家列表，并发派发多专家联合会审（通过 dispatches 数组），会审通过后方可动笔！\n\
      严禁跳过审查直接写代码或结项！".to_string()

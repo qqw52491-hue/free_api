@@ -710,12 +710,17 @@ pub struct AgentCheckpoint {
     /// 交叉审查探索期累计获批追加的探索步数（并入有效硬上限，受绝对上限封顶）
     #[serde(default)]
     pub plan_exploration_granted_steps: u32,
-    /// 最近一次 submit_plan 落账的结构化方案（审查注册与派发的母本；重提时覆盖）
+    /// 最近一次 submit_plan 落账的结构化方案（审查注册与派发的母本；重提时覆盖；
+    /// Tech Lead 1v1 定稿后本字段即修订后的权威执行版本）
     #[serde(default)]
     pub submitted_plan: Option<crate::agent::types::PlanSubmission>,
     /// submitted_plan 落账时的 step_id（审计与血缘追踪）
     #[serde(default)]
     pub submitted_plan_step: Option<usize>,
+    /// 方案最终定稿人：Some("tech_lead") = Tech Lead 在 1v1 中修订定稿，
+    /// submitted_plan 已是审查者版本而非提交方原版（血缘标记，供审计与回放）
+    #[serde(default)]
+    pub plan_finalized_by: Option<String>,
     /// 方案审查最新评分卡（正确性、破坏性风险、代码规范、测试覆盖）
     #[serde(default)]
     pub last_review_scorecard: Option<crate::agent::child_reviewer::ReviewScorecard>,
@@ -826,6 +831,36 @@ fn default_auto_pilot() -> bool {
     true
 }
 
+/// Tech Lead 1v1 定稿修订产物：revised_* 扁平字段经截断/过滤后的非空部分。
+/// 详见 AgentCheckpoint::plan_revision_from。
+#[derive(Debug, Clone, Default)]
+pub struct PlanRevision {
+    pub plan_summary: Option<String>,
+    pub root_cause: Option<String>,
+    pub target_files: Option<Vec<String>>,
+    pub intended_verification: Option<String>,
+}
+
+impl PlanRevision {
+    /// 被修订字段的逗号清单（观测/通知文案用）
+    pub fn describe_fields(&self) -> String {
+        let mut names = Vec::new();
+        if self.plan_summary.is_some() {
+            names.push("plan_summary");
+        }
+        if self.root_cause.is_some() {
+            names.push("root_cause");
+        }
+        if self.target_files.is_some() {
+            names.push("target_files");
+        }
+        if self.intended_verification.is_some() {
+            names.push("intended_verification");
+        }
+        names.join(", ")
+    }
+}
+
 /// 计算两个规范化字符串的字符 Bigram Jaccard 相似度（0.0 ~ 1.0）
 pub fn question_bigram_similarity(s1: &str, s2: &str) -> f64 {
     let chars1: Vec<char> = s1.chars().collect();
@@ -901,6 +936,7 @@ impl AgentCheckpoint {
             plan_exploration_granted_steps: 0,
             submitted_plan: None,
             submitted_plan_step: None,
+            plan_finalized_by: None,
             last_review_scorecard: None,
             last_review_blocking_count: 0,
             review_objection_added: 0,
@@ -939,6 +975,50 @@ impl AgentCheckpoint {
 
     pub fn refresh_context(&mut self, context: &SandwichContext) {
         self.data = DurableAgentContext::capture(context);
+    }
+
+    /// Tech Lead 1v1 定稿修订：从审查交付 extra 提取 revised_* 扁平字段。
+    /// 字段契约见 child_reviewer 方案评审条款（plan_review 派发时授权输出）；
+    /// 全部为空返回 None（未修订），任一非空字段即构成有效修订。
+    /// 长度/条数上限防恶意或失控输出污染执行方案。
+    pub fn plan_revision_from(
+        delivery: &crate::agent::child_reviewer::ReviewerDeliveryData,
+    ) -> Option<PlanRevision> {
+        let take_str = |key: &str, cap: usize| -> Option<String> {
+            delivery
+                .get_extra_str(key)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.chars().take(cap).collect())
+        };
+        let target_files = delivery
+            .get_extra("revised_target_files")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .take(50)
+                    .map(|s| s.chars().take(300).collect())
+                    .collect::<Vec<String>>()
+            })
+            .filter(|v| !v.is_empty());
+        let rev = PlanRevision {
+            plan_summary: take_str("revised_plan_summary", 2000),
+            root_cause: take_str("revised_root_cause", 2000),
+            target_files,
+            intended_verification: take_str("revised_verification", 1000),
+        };
+        if rev.plan_summary.is_none()
+            && rev.root_cause.is_none()
+            && rev.target_files.is_none()
+            && rev.intended_verification.is_none()
+        {
+            None
+        } else {
+            Some(rev)
+        }
     }
 
     /// 读取方案审查最近派发的强类型参数快照（若存在且格式合法）
@@ -1058,6 +1138,29 @@ impl AgentCheckpoint {
                     );
                     delivery.scorecard =
                         Some(crate::agent::child_reviewer::ReviewScorecard::synthesized_baseline());
+                }
+                // Tech Lead 定稿权：approved 携带 revised_* 修订字段时，以审查者版本
+                // 覆盖 submitted_plan 成为最终执行方案（省掉"打回→重提"整轮往返）。
+                if let Some(rev) = Self::plan_revision_from(&delivery) {
+                    if let Some(sub) = self.submitted_plan.as_mut() {
+                        if let Some(v) = rev.plan_summary {
+                            sub.plan_summary = v;
+                        }
+                        if let Some(v) = rev.root_cause {
+                            sub.root_cause = v;
+                        }
+                        if let Some(v) = rev.intended_verification {
+                            sub.intended_verification = v;
+                        }
+                        if let Some(files) = &rev.target_files {
+                            sub.target_files = files.clone();
+                        }
+                    }
+                    if let Some(files) = rev.target_files {
+                        self.approved_target_files = Some(files);
+                    }
+                    self.plan_finalized_by = Some("tech_lead".to_string());
+                    eprintln!("[checkpoint] Tech Lead 已携带 revised_* 修订定稿，submitted_plan 已切换为审查者版本");
                 }
             }
         }
@@ -2770,6 +2873,163 @@ mod tests {
         assert!(ids.contains(&"SEC-1"));
         assert!(ids.contains(&"ARCH-1"));
         assert_eq!(cp.last_review_blocking_count, 2);
+    }
+
+    /// Tech Lead 定稿权：approved + revised_* 时 submitted_plan 被审查者版本覆盖，
+    /// plan_finalized_by 留痕，修订的 target_files 同步为批准范围。
+    #[test]
+    fn tech_lead_revised_plan_overrides_submission_on_approved() {
+        use crate::agent::child_reviewer::{ReviewScorecard, ReviewerDeliveryData};
+        use crate::agent::types::PlanSubmission;
+
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-revised".to_string(), &ctx);
+        cp.register_plan_reviewer_batch(&["rev-1".to_string()]);
+        cp.submitted_plan = Some(PlanSubmission {
+            plan_summary: "原始方案：直接改 workspace_dir".to_string(),
+            root_cause: "原始根因".to_string(),
+            target_files: vec!["src/a.rs".to_string()],
+            evidence_refs: vec!["src/a.rs".to_string()],
+            assumptions: Vec::new(),
+            open_questions: Vec::new(),
+            intended_verification: "cargo test".to_string(),
+            risk_level: "medium".to_string(),
+        });
+
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("decision".to_string(), serde_json::json!("approved"));
+        extra.insert(
+            "revised_plan_summary".to_string(),
+            serde_json::json!("修订方案：新增会话 tmp 缓冲目录而非复用 workspace_dir"),
+        );
+        extra.insert(
+            "revised_target_files".to_string(),
+            serde_json::json!(["src/b.rs", "src/c.rs"]),
+        );
+        let del = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "confirmed".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard {
+                correctness: 90,
+                risk: 90,
+                style: 90,
+                test_coverage: Some(80),
+                null_reason: None,
+                synthesized: false,
+            }),
+            extra,
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
+
+        let plan = cp.submitted_plan.as_ref().expect("submitted_plan 必须存在");
+        assert_eq!(
+            plan.plan_summary,
+            "修订方案：新增会话 tmp 缓冲目录而非复用 workspace_dir"
+        );
+        assert_eq!(plan.root_cause, "原始根因", "未修订字段保持提交方版本");
+        assert_eq!(plan.target_files, vec!["src/b.rs", "src/c.rs"]);
+        assert_eq!(cp.plan_finalized_by.as_deref(), Some("tech_lead"));
+        assert_eq!(
+            cp.approved_target_files.as_deref(),
+            Some(&["src/b.rs".to_string(), "src/c.rs".to_string()][..]),
+            "修订的 target_files 必须同步为批准范围"
+        );
+    }
+
+    /// approved 未携带 revised_* 时 submitted_plan 原样保留、无定稿标记。
+    #[test]
+    fn approved_without_revision_keeps_submission() {
+        use crate::agent::child_reviewer::{ReviewScorecard, ReviewerDeliveryData};
+        use crate::agent::types::PlanSubmission;
+
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-norev".to_string(), &ctx);
+        cp.register_plan_reviewer_batch(&["rev-1".to_string()]);
+        cp.submitted_plan = Some(PlanSubmission {
+            plan_summary: "原始方案".to_string(),
+            ..Default::default()
+        });
+
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("decision".to_string(), serde_json::json!("approved"));
+        let del = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "confirmed".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard {
+                correctness: 90,
+                risk: 90,
+                style: 90,
+                test_coverage: Some(80),
+                null_reason: None,
+                synthesized: false,
+            }),
+            extra,
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
+
+        assert_eq!(
+            cp.submitted_plan.as_ref().unwrap().plan_summary,
+            "原始方案"
+        );
+        assert!(cp.plan_finalized_by.is_none());
+    }
+
+    /// rebuttal 携带 revised_* 不生效——修订只在 approved 定稿语义下应用。
+    #[test]
+    fn rebuttal_revision_is_ignored() {
+        use crate::agent::child_reviewer::{ReviewScorecard, ReviewerDeliveryData};
+        use crate::agent::types::PlanSubmission;
+
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-rebuttal".to_string(), &ctx);
+        cp.register_plan_reviewer_batch(&["rev-1".to_string()]);
+        cp.submitted_plan = Some(PlanSubmission {
+            plan_summary: "原始方案".to_string(),
+            ..Default::default()
+        });
+
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("decision".to_string(), serde_json::json!("rebuttal"));
+        extra.insert(
+            "revised_plan_summary".to_string(),
+            serde_json::json!("不该被应用的修订"),
+        );
+        let del = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "confirmed".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: None,
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard {
+                correctness: 70,
+                risk: 80,
+                style: 90,
+                test_coverage: Some(80),
+                null_reason: None,
+                synthesized: false,
+            }),
+            extra,
+        };
+        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
+
+        assert_eq!(
+            cp.submitted_plan.as_ref().unwrap().plan_summary,
+            "原始方案",
+            "rebuttal 下的修订字段不得生效"
+        );
+        assert!(cp.plan_finalized_by.is_none());
     }
 }
 

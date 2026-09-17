@@ -1691,6 +1691,17 @@ pub async fn run_tool_phase(
                             }
                         });
                         checkpoint.record_reviewer_delivery_for_run(Some(&job.job_id), &delivery);
+                        if let Some(rev) =
+                            crate::agent::checkpoint::AgentCheckpoint::plan_revision_from(&delivery)
+                        {
+                            let _ = app.emit(
+                                &format!("agent-log-{}", final_session_id),
+                                format!(
+                                    "📝 Tech Lead 已在 1v1 中修订并定稿方案（修订字段: {}），submitted_plan 已切换为审查者版本",
+                                    rev.describe_fields()
+                                ),
+                            );
+                        }
                     } else {
                         checkpoint.record_reviewer_failure_for_run(&job.job_id, "corrupted_json_output");
                     }

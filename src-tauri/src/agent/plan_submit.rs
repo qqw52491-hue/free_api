@@ -210,6 +210,8 @@ pub async fn handle_submit_plan(
         "evidence_excerpt": evidence_excerpt,
         "evidence_refs": evidence_refs,
         "custom_inputs": custom_inputs,
+        // 1v1 方案评审标记：授权审查输出 revised_* 定稿字段（见 child_reviewer 提示词条款）
+        "plan_review": true,
     });
     if !impact.refs.is_empty() {
         effective_params["impact_pack_refs"] = json!(impact.refs);
