@@ -1,0 +1,23 @@
+{
+  "id": "case_hd_goal_anchor",
+  "title": "终审拿首轮目标审后续任务（冻结锚点被误当当前目标——幼稚修法会破前缀缓存）",
+  "tier": "gold",
+  "base_commit": "ae3983ae0e5ed98f6e53927b34d1a44dc0d59ee3",
+  "problem_statement": "【线上缺陷报障】多轮会话中审查判定基准跑偏：第一轮任务终审正常，但从第二轮起，阶段审查与终审总拿第一轮的任务目标当验收标准——产物明明是本轮要求的交付，却被误判成答非所问、blocking 打回；会话轮次越多跑偏越离谱（实测：第 1 轮交付 tmp/a.md，第 3 轮要求写完全不同的内容，终审仍按第 1 轮的 a.md 标准审）。请定位根因并修复。",
+  "judge_kind": "command",
+  "verify_command": "cd src-tauri/src/agent; VIOL=0; for f in plan_gate plan_submit reviewer_gatekeeper stage_review; do awk '/#\\[cfg\\(test\\)\\]/{exit} {print}' \"$f.rs\" | grep -qE 'context\\.user_goal|\\.user_goal\\b' && { echo \"VIOLATION: $f 仍直读 user_goal\"; VIOL=1; }; done; [ \"$VIOL\" = \"0\" ] && grep -rqE 'effective_goal|current_goal' . && DB=\"$HOME/Library/Application Support/free-api-chat/data_v2.db\"; [ -f \"$DB\" ] || DB=\"$HOME/.local/share/free-api-chat/data_v2.db\"; [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN EXISTS (SELECT 1 FROM agent_child_runs WHERE kind='review' AND parent_session_id='$FREE_API_EVAL_AGENT_SESSION' AND (result_json LIKE '%目标%' OR result_json LIKE '%锚点%' OR result_json LIKE '%锚定%' OR result_json LIKE '%轮次%' OR result_json LIKE '%终审%' OR result_json LIKE '%goal%')) THEN 1 ELSE 0 END\")\" = \"1\" ] && [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "expected_exit_code": 0,
+  "max_steps": 90,
+  "plan_mode": "cross_review",
+  "expected_diff_files": [
+    "src-tauri/src/agent/context/types.rs",
+    "src-tauri/src/agent/checkpoint.rs",
+    "src-tauri/src/agent/main_loop.rs",
+    "src-tauri/src/agent/plan_gate.rs",
+    "src-tauri/src/agent/plan_submit.rs",
+    "src-tauri/src/agent/reviewer_gatekeeper.rs",
+    "src-tauri/src/agent/stage_review.rs"
+  ],
+  "max_prompt_tokens": 8000000,
+  "judge_semantics": "架构性陈旧锚点题（纯症状题面）：user_goal 被有意冻结为首轮值（前缀缓存优化，compaction.rs 注释可查），但终审/阶段审查/方案门把它当'当前任务目标'消费。题面只给'第二轮起判定基准跑偏'现象，不提示缓存陷阱——幼稚修法（每轮更新 user_goal）功能上能修症状但破坏前缀缓存且消费端仍直读 .user_goal，判据会打红，考的就是'改之前先查清为什么冻结'。判据：①四个判定消费文件（剥离 #[cfg(test)] 后）不得再直读 .user_goal ②存在 effective_goal/current_goal 类本轮目标访问器③审查产物含目标/锚点/轮次/终审关键词④会话成功。等价实现（新字段+访问器）合法。"
+}
