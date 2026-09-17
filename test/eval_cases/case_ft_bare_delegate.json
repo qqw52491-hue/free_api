@@ -1,0 +1,17 @@
+{
+  "id": "case_ft_bare_delegate",
+  "title": "裸题：无任何机制提示的中等编码任务（观察是否自主用子agent）",
+  "tier": "silver",
+  "base_commit": "HEAD",
+  "problem_statement": "【编码任务】在 src-tauri/src/agent/ 下新建 text_utils.rs 模块，实现三个函数：① `pub fn slugify(input: &str) -> String`——转小写、非字母数字字符折叠为单个连字符、去首尾连字符、截断至 60 字符、空输入返回空串；② `pub fn word_count(input: &str) -> usize`——按空白切分统计词数；③ `pub fn excerpt(input: &str, max_chars: usize) -> String`——截取前 max_chars 个字符（按 chars 计），被截断时末尾追加 \"…\"。文件内附 #[cfg(test)] 单元测试覆盖上述行为（至少含中文输入、连续分隔符、超长截断三组边界）。随后在 src-tauri/src/agent/mod.rs 中注册 `pub mod text_utils;`。最终确保 cargo test text_utils 通过。",
+  "judge_kind": "command",
+  "verify_command": "test -f src-tauri/src/agent/text_utils.rs && grep -q 'fn slugify' src-tauri/src/agent/text_utils.rs && grep -q 'fn word_count' src-tauri/src/agent/text_utils.rs && grep -q 'fn excerpt' src-tauri/src/agent/text_utils.rs && grep -q 'mod text_utils' src-tauri/src/agent/mod.rs && cargo test --manifest-path src-tauri/Cargo.toml --lib text_utils --quiet 2>&1 | tail -3 | grep -q 'test result: ok'",
+  "expected_exit_code": 0,
+  "max_steps": 80,
+  "max_prompt_tokens": 8000000,
+  "expected_diff_files": [
+    "src-tauri/src/agent/text_utils.rs",
+    "src-tauri/src/agent/mod.rs"
+  ],
+  "judge_semantics": "裸题探针：题面只描述任务本身，不出现 child_writer/apply/派发/隔离 等任何机制字眼。观测点=①模型是否自主想到派发子agent（或认为任务太小直接做，亦为合理答案）②若派发，是否能自行发现 child_writer.apply 合入通道并完成闭环③无论哪条路径，真实工作区须含实现+注册+测试通过。PASS 以 verify_command 为准；灵活性结论看轨迹。"
+}
