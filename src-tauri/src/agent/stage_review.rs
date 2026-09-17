@@ -352,6 +352,27 @@ pub async fn dispatch(
     // 新一轮阶段审查重置拦截状态（final_only 跨阶段累加 carry-over 到收尾审查，不可清空）
     checkpoint.stage_review_blockers_open = 0;
 
+    // ---- 影响面机械枚举：从累计 diff 提取改动符号 → 跨文件消费点 ----
+    // 阶段审查天然有真 diff，消费点枚举比方案期（按 target_files 推导）更准；
+    // refs 透传进 params，审查输出侧由 child_reviewer 强制逐条裁决。
+    let impact = if crate::agent::impact_pack::impact_pack_enabled() {
+        crate::agent::reviewer_gatekeeper::GitBaseline::capture(workspace)
+            .collect_git_diff(workspace)
+            .map(|(d, _)| crate::agent::impact_pack::build_from_diff(workspace, &d))
+            .unwrap_or_default()
+    } else {
+        crate::agent::impact_pack::ImpactPack::default()
+    };
+    let impact_refs_json = if impact.refs.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(impact.refs)
+    };
+    let mut extras = stage_extra_sections(db, session_id);
+    if !impact.section.is_empty() {
+        extras.push(impact.section.clone());
+    }
+
     if role_cards.is_empty() {
         // 无挂载专家卡：走系统默认的跨家族异构对抗模型兜底
         let (model_to_use, cross_family_note) = {
@@ -369,13 +390,14 @@ pub async fn dispatch(
             }
         };
 
-        let evidence = build_stage_evidence(context, workspace, None, &stage_extra_sections(db, session_id));
+        let evidence = build_stage_evidence(context, workspace, None, &extras);
         let question = "阶段级写入审查：审查当前阶段变更是否满足阶段目标且无 blocking 缺陷".to_string();
         let params = json!({
             "role": "stage_reviewer",
             "role_label": "🛡️ 阶段综合审查官",
             "question": question,
             "evidence_excerpt": evidence,
+            "impact_pack_refs": impact_refs_json,
         });
 
         let envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
@@ -441,7 +463,7 @@ pub async fn dispatch(
             }
         };
 
-        let evidence = build_stage_evidence(context, workspace, focus_context.as_deref(), &stage_extra_sections(db, session_id));
+        let evidence = build_stage_evidence(context, workspace, focus_context.as_deref(), &extras);
         let question = format!(
             "阶段级写入审查（专家角色：{}）：审查当前阶段变更是否满足阶段目标、无 blocking 缺陷并符合角色规范",
             card.label
@@ -451,6 +473,7 @@ pub async fn dispatch(
             "role_label": card.label,
             "question": question,
             "evidence_excerpt": evidence,
+            "impact_pack_refs": impact_refs_json,
         });
 
         let mut envelope = crate::agent::protocol::DispatchEnvelope::reviewer(

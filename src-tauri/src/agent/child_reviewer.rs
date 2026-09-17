@@ -1358,6 +1358,35 @@ pub async fn spawn_child_reviewer(
     let session_id_clone = parent_session_id.to_string();
     let param_role = params.get("role").cloned();
     let param_role_label = params.get("role_label").cloned();
+    // 影响面包裁决义务清单：派发方机械枚举的跨文件消费点 refs。
+    // 非空时审查输出必须含 consumer_verdicts 逐条覆盖（见下方校验）。
+    let impact_pack_refs: Vec<String> = params
+        .get("impact_pack_refs")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    // 闭集契约兼容：strict_closed_set 的角色卡会把 consumer_verdicts 当未声明字段拒收，
+    // pack 在场时向内存 schema 副本临时注入该字段定义（不改 DB 卡片本身）。
+    let mut custom_schema = custom_schema;
+    if !impact_pack_refs.is_empty() {
+        if let Some(schema) = custom_schema.as_mut() {
+            if schema.strict_closed_set
+                && !schema.fields.iter().any(|f| f.name == "consumer_verdicts")
+            {
+                schema.fields.push(crate::agent::protocol::ContractFieldDef {
+                    name: "consumer_verdicts".to_string(),
+                    field_type: crate::agent::protocol::ContractFieldType::StringArray,
+                    description: "影响面消费点逐条裁决：每个消费点一条 \"path:line => HOLDS|BROKEN|NA: 理由\"".to_string(),
+                    required: true,
+                    allowed_values: None,
+                });
+            }
+        }
+    }
 
     tokio::spawn(async move {
         let started_at = std::time::Instant::now();
@@ -1686,6 +1715,25 @@ pub async fn spawn_child_reviewer(
                     return;
                 }
             }
+        }
+        // 影响面覆盖校验：pack 列出的每个消费点必须被 consumer_verdicts 逐条裁决。
+        // 机制对齐 custom_schema 违约通道——缺项即 contract_violation → failover 重派，
+        // 防"拿到材料却逐条不看"（实测两轮审查引证 path_guard 仍放行的失效模式）。
+        if let Err(err) =
+            crate::agent::impact_pack::check_consumer_verdicts(&impact_pack_refs, &result_val)
+        {
+            let result_json = serde_json::to_string(&result_val).ok();
+            finish_child_run_with_history(
+                &db_clone,
+                &child_run_id_clone,
+                "invalid_output",
+                duration_ms,
+                completion_tokens,
+                Some(ChildErrorKind::ContractViolation(err)),
+                result_json.as_deref(),
+                serde_json::to_string(&messages).ok().as_deref(),
+            );
+            return;
         }
 
         let result_json = serde_json::to_string(&result_val).ok();

@@ -186,6 +186,23 @@ pub async fn handle_submit_plan(
         Some(&custom_inputs),
     )
     .await;
+    // ---- 影响面机械枚举：target_files 的契约面/use 依赖边 → 跨文件消费点 ----
+    // 方案期无 diff，按目标文件的 pub 定义与 use 导入推导潜在耦合半径；
+    // refs 透传进 params，审查输出侧由 child_reviewer 强制逐条裁决（防"引而不看"）。
+    let impact = if crate::agent::impact_pack::impact_pack_enabled() {
+        // 方案文本（摘要+根因+假设）一并挖矿：值流耦合（局部变量→谓词）不在
+        // use 边/pub 项里，但模型写方案时几乎必然点名涉事符号。
+        let plan_text = format!(
+            "{}\n{}\n{}\n{}",
+            submission.plan_summary,
+            submission.root_cause,
+            submission.assumptions.join("\n"),
+            submission.open_questions.join("\n"),
+        );
+        crate::agent::impact_pack::build_for_targets(workspace_dir, &target_files, &plan_text)
+    } else {
+        crate::agent::impact_pack::ImpactPack::default()
+    };
     let mut effective_params = json!({
         "role": card.name,
         "role_label": card.label,
@@ -194,6 +211,15 @@ pub async fn handle_submit_plan(
         "evidence_refs": evidence_refs,
         "custom_inputs": custom_inputs,
     });
+    if !impact.refs.is_empty() {
+        effective_params["impact_pack_refs"] = json!(impact.refs);
+    }
+    let specialized_context = match (specialized_context, impact.section.is_empty()) {
+        (Some(spec), false) => Some(format!("{}\n\n{}", spec, impact.section)),
+        (Some(spec), true) => Some(spec),
+        (None, false) => Some(impact.section),
+        (None, true) => None,
+    };
     if let Some(spec) = specialized_context {
         effective_params["specialized_context"] = json!(spec);
     }

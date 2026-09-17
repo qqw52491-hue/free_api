@@ -42,6 +42,7 @@ pub const BASELINE_RESERVED_FIELDS: &[&str] = &[
     "routing",
     "withdrawn_findings",
     "objection_verdicts",
+    "consumer_verdicts",
     "scorecard",
     // 工兵基线
     "changed_files",

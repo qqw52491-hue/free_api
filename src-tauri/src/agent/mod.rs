@@ -42,6 +42,7 @@ pub mod stage_review;
 pub mod review_tools;
 pub mod eval_oracle;
 pub mod host_verify;
+pub mod impact_pack;
 pub mod router;
 pub mod run_state;
 pub mod run_trace;

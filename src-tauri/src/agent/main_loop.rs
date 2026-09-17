@@ -885,6 +885,35 @@ async fn run_agent_main_loop_in_workspace_inner(
             });
         }
         checkpoint.triage_verdict = Some(verdict);
+        // 审查覆盖面观测行：分流判决如何塑形阶段/终审一目了然；判决关闭阶段审查
+        // 时额外落 gate 留痕（step_id 此处未就位，与上方 triage 记录一致用 0）。
+        if let Some(v) = checkpoint.triage_verdict.as_ref() {
+            let _ = app.emit(
+                &format!("agent-log-{}", final_session_id),
+                format!(
+                    "🧭 分流判决审查覆盖面：stage_review={} | final_review={} | final_roles={}",
+                    v.stage_review_mode,
+                    v.final_review_mode,
+                    if v.final_review_roles.is_empty() {
+                        "default".to_string()
+                    } else {
+                        v.final_review_roles.join(",")
+                    }
+                ),
+            );
+            if !v.needs_stage_review() {
+                crate::agent::telemetry::record_gate_fire(
+                    state.inner(),
+                    &crate::agent::telemetry::GateFireRecord {
+                        run_id: &run_id,
+                        session_id: &final_session_id,
+                        step_id: 0,
+                        gate: "triage",
+                        route: "triage:stage_review_disabled",
+                    },
+                );
+            }
+        }
         save_checkpoint(state.inner(), &mut checkpoint)?;
     }
 
@@ -2677,8 +2706,21 @@ async fn run_agent_main_loop_in_workspace_inner(
                 }
             } else {
                 // 审查 100% 通过（或无代码修改 / 仅次要建议放行）
-                checkpoint.last_reviewed_diff_hash = None;
-                checkpoint.last_review_result = None;
+                // 落盘通过态收据（观测向）：复用防敷衍逻辑要求"上次未通过"才复用
+                // （reviewer_gatekeeper 侧条件含 !last_res.is_passed()），
+                // 存 passed 结果不会误触发复用拦截。
+                checkpoint.last_reviewed_diff_hash = Some(review_res.diff_hash.clone());
+                checkpoint.last_review_result = Some(review_res.clone());
+                crate::agent::telemetry::record_gate_fire(
+                    state.inner(),
+                    &crate::agent::telemetry::GateFireRecord {
+                        run_id: &run_id,
+                        session_id: &final_session_id,
+                        step_id: step_id as i64,
+                        gate: "finish_review",
+                        route: "finish_review:passed",
+                    },
+                );
                 // 宿主状态机：复位重试计数并推进当前目标块至 Completed，激活下一块
                 if let Some(block) = context.active_target_block_mut() {
                     block.reset_review_retries();
