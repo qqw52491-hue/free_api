@@ -1413,7 +1413,7 @@ pub async fn run_tool_phase(
         let timeout_secs = params
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
-            .unwrap_or(45);
+            .unwrap_or(180);
 
         let _ = app.emit(
             &format!("agent-log-{}", final_session_id),
