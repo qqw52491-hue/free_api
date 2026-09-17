@@ -300,6 +300,39 @@ mod tests {
     }
 
     #[test]
+    fn clip_thinking_for_trace_truncates_at_cap() {
+        let short = "先分析根因再动手";
+        assert_eq!(clip_thinking_for_trace(short), short);
+        let long = "思".repeat(MAX_TRACE_THINKING_CHARS + 500);
+        let clipped = clip_thinking_for_trace(&long);
+        assert_eq!(clipped.chars().count(), MAX_TRACE_THINKING_CHARS);
+        // thinking 字段随步骤 JSON 原样往返（快照→行表→回放）
+        let db = test_db();
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE agent_run_steps (
+                    run_id TEXT NOT NULL, seq INTEGER NOT NULL, step_json TEXT NOT NULL,
+                    PRIMARY KEY (run_id, seq));",
+            )
+            .unwrap();
+        append_step(
+            &db,
+            "run-thinking",
+            0,
+            &json!({"id": 0, "thought": "简述", "thinking": clipped}),
+        )
+        .unwrap();
+        let steps = load_run_steps(&db, "run-a-missing").unwrap_or_default();
+        assert!(steps.is_empty());
+        let loaded = load_run_steps(&db, "run-thinking").unwrap();
+        assert_eq!(
+            loaded[0]["thinking"].as_str().unwrap().chars().count(),
+            MAX_TRACE_THINKING_CHARS
+        );
+    }
+
+    #[test]
     fn saves_and_loads_steps_in_session_order() {
         let db = test_db();
         upsert_snapshot(
