@@ -1,0 +1,226 @@
+use super::*;
+use crate::agent::types::{ChildErrorKind, TokenUsage};
+use crate::commands::projects::read_project_resource_excerpts_for_session;
+use crate::db::DbState;
+use crate::llm::{self, ModelConfig};
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter};
+use tokio::sync::watch;
+use uuid::Uuid;
+
+
+pub(crate) fn begin_child_run(
+    db: &DbState,
+    parent_run_id: &str,
+    parent_session_id: &str,
+    workspace_root: &Path,
+    model_id: &str,
+    evidence_ref_count: usize,
+    kind: &str,
+    custom_cap: Option<i64>,
+) -> Result<String, String> {
+    begin_child_run_extended(
+        db,
+        parent_run_id,
+        parent_session_id,
+        workspace_root,
+        model_id,
+        evidence_ref_count,
+        kind,
+        custom_cap,
+        None,
+        None,
+    )
+}
+
+pub(crate) fn begin_child_run_extended(
+    db: &DbState,
+    parent_run_id: &str,
+    parent_session_id: &str,
+    workspace_root: &Path,
+    model_id: &str,
+    evidence_ref_count: usize,
+    kind: &str,
+    custom_cap: Option<i64>,
+    workspace_copy: Option<&str>,
+    resumed_from: Option<&str>,
+) -> Result<String, String> {
+    let child_run_id = Uuid::new_v4().to_string();
+    let root = workspace_root
+        .canonicalize()
+        .map_err(|error| format!("child_reviewer 工作区不可用: {}", error))?;
+    let conn = db.0.lock().map_err(|error| error.to_string())?;
+
+    // 第一道看门：全局瞬时并发看门（所有正在 running 的子任务数，上限 MAX_TOTAL_CHILDREN_PER_RUN = 6）
+    let running_children: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND status='running'",
+            params![parent_run_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if running_children >= i64::from(MAX_TOTAL_CHILDREN_PER_RUN) {
+        return Err(format!(
+            "每个父运行最多同时并发执行 {} 个子任务（全局看门上限已满，当前正在运行 {} 个）。请等待现有任务完成或使用 wait_jobs 等待。",
+            MAX_TOTAL_CHILDREN_PER_RUN, running_children
+        ));
+    }
+
+    // 第二道看门：单 kind / 角色卡弹性瞬时并发配额（角色卡 max_concurrency 优先覆盖，0 则跟随默认）
+    let effective_kind_cap = match custom_cap {
+        Some(cap) if cap > 0 => cap,
+        _ => i64::from(MAX_CHILDREN_PER_KIND_PER_RUN),
+    };
+
+    let running_kind_children: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND kind=?2 AND status='running'",
+            params![parent_run_id, kind],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if running_kind_children >= effective_kind_cap {
+        return Err(format!(
+            "每个父运行最多同时并发执行 {} 个 {} 子任务（当前配额 {} 已满）。请等待现有任务完成或使用 wait_jobs 等待。",
+            effective_kind_cap, kind, effective_kind_cap
+        ));
+    }
+    conn.execute(
+        "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, evidence_ref_count, kind, workspace_copy, resumed_from) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10)",
+        params![
+            child_run_id,
+            parent_run_id,
+            parent_session_id,
+            root.to_string_lossy(),
+            model_id,
+            chrono::Utc::now().to_rfc3339(),
+            evidence_ref_count as i64,
+            kind,
+            workspace_copy,
+            resumed_from,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(child_run_id)
+}
+
+pub(crate) fn finish_child_run(
+    db: &DbState,
+    child_run_id: &str,
+    status: &str,
+    duration_ms: u64,
+    completion_tokens: i64,
+    error_kind: Option<ChildErrorKind>,
+    result_json: Option<&str>,
+) {
+    finish_child_run_with_history(
+        db,
+        child_run_id,
+        status,
+        duration_ms,
+        completion_tokens,
+        error_kind,
+        result_json,
+        None,
+    );
+}
+
+pub(crate) fn finish_child_run_with_history(
+    db: &DbState,
+    child_run_id: &str,
+    status: &str,
+    duration_ms: u64,
+    completion_tokens: i64,
+    error_kind: Option<ChildErrorKind>,
+    result_json: Option<&str>,
+    message_history_json: Option<&str>,
+) {
+    let Ok(conn) = db.0.lock() else {
+        return;
+    };
+    let _ = conn.execute(
+        // 单向迁移：running -> 终态；例外——被 reap 标记为 reaped_stale 的行仍允许
+        // 迟到结果落库（真实结论覆盖收割占位结果），归档元数据与会话同寿命保留，
+        // 复盘可查"曾超时"与"实际结论"双重事实；cancelled/interrupted 依旧拒绝覆盖。
+        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1 AND (status='running' OR (status='timed_out' AND error_kind='reaped_stale'))",
+        params![
+            child_run_id,
+            status,
+            chrono::Utc::now().to_rfc3339(),
+            duration_ms as i64,
+            completion_tokens,
+            error_kind.map(|k| k.db_value()),
+            result_json,
+            message_history_json,
+        ],
+    );
+    // ⚡ 唤醒挂起等待中的协程（watch 版本号广播，不存在丢失通知的竞态窗口）
+    crate::agent::job_engine::notify_job_state_changed();
+}
+
+/// 为失败/超时/取消的子审查构造可被信箱消费的结果 JSON。
+/// 统一让所有终态都携带 result_json，消费机制（置 NULL）才能对所有终态生效。
+/// invalid_output 专用：在标准错误结果上注入审查员原始输出（截断 4000 字符），
+/// 补"invalid 无从诊断"的盲区——宽松解析时代仍失败的案例，raw 是唯一证据。
+pub(crate) fn child_invalid_result_json(
+    child_run_id: &str,
+    duration_ms: u64,
+    completion_tokens: i64,
+    raw: &str,
+) -> String {    let mut value: serde_json::Value = serde_json::from_str(&child_error_result_json(
+        child_run_id,
+        "invalid_output",
+        &ChildErrorKind::InvalidOutput,
+        duration_ms,
+        completion_tokens,
+        None,
+    ))
+    .unwrap_or(serde_json::json!({}));
+    let truncated: String = raw.chars().take(4000).collect();
+    value["raw_result_json"] = serde_json::Value::String(truncated);
+    value.to_string()
+}
+
+pub(crate) fn child_error_result_json(
+    child_run_id: &str,
+    status: &str,
+    error_kind: &ChildErrorKind,
+    duration_ms: u64,
+    completion_tokens: i64,
+    error_detail: Option<&str>,
+) -> String {
+    // 请求层失败把真实错误（如 "402 Insufficient Balance"）带进 missing_evidence：
+    // 主 Agent/人工呈报环节能看到死因，决定重派、换模型还是先修上游，而不是对着
+    // 干巴巴的 kind 猜。（截断防超长错误体撑爆注入）
+    let missing_msg = match error_detail {
+        Some(detail) => {
+            let truncated: String = detail.chars().take(240).collect();
+            format!("子审查任务未能产出结论（{}: {}）", error_kind, truncated)
+        }
+        None => format!("子审查任务未能产出结论（{}）", error_kind),
+    };
+    serde_json::to_string(&ChildReviewResult {
+        child_run_id: child_run_id.to_string(),
+        status: status.to_string(),
+        findings: vec![],
+        confidence: "unverified".to_string(),
+        evidence_refs: vec![],
+        missing_evidence: vec![missing_msg],
+        duration_ms,
+        completion_tokens,
+        prompt_tokens: 0,
+        error_kind: Some(error_kind.to_string()),
+        raw_result_json: None,
+        kind: None,
+        routing: Some("blocked".to_string()),
+        withdrawn_findings: vec![],
+        objection_verdicts: vec![],
+        scorecard: None,
+    })
+    .unwrap_or_default()
+}

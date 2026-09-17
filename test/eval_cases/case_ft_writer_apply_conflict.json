@@ -1,0 +1,16 @@
+{
+  "id": "case_ft_writer_apply_conflict",
+  "title": "写入工兵合入冲突拒绝与回退演练",
+  "tier": "silver",
+  "base_commit": "HEAD",
+  "problem_statement": "【协议演练任务】本任务演练写入工兵的合入冲突处置，请严格按序执行：① 派发 child_writer，任务为在 src-tauri/src/agent/mod.rs 文件顶部添加一行注释 `// writer-marker`（test_command 填 `true`）；② 派发成功后，立即用 edit_file 在真实工作区的 src-tauri/src/agent/mod.rs 末尾追加一行注释 `// root-marker`；③ 用 wait_jobs 回收 writer 回执；④ 调用 child_writer.apply 尝试机械合入，观察其返回结果；⑤ 若 apply 因文件指纹冲突被整体拒绝，则改用手工方式在 mod.rs 顶部补上 `// writer-marker` 注释完成交付；⑥ 交卷前用 read 确认两个 marker 都存在于文件中。",
+  "judge_kind": "command",
+  "verify_command": "grep -q 'writer-marker' src-tauri/src/agent/mod.rs && grep -q 'root-marker' src-tauri/src/agent/mod.rs",
+  "expected_exit_code": 0,
+  "max_steps": 80,
+  "max_prompt_tokens": 8000000,
+  "expected_diff_files": [
+    "src-tauri/src/agent/mod.rs"
+  ],
+  "judge_semantics": "PASS=mod.rs 同时含 writer-marker 与 root-marker。观测点=apply 是否因 root 抢改触发指纹冲突而整体拒绝；模型是否正确理解拒绝语义并回退手工落实，而非重试强刷或放弃 writer-marker。"
+}

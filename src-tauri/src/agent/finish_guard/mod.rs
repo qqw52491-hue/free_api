@@ -9,7 +9,20 @@ pub mod diff;
 pub mod state_updates;
 
 #[cfg(test)]
-mod finish_guard_tests;
+#[cfg(test)]
+mod testkit;
+#[cfg(test)]
+mod tests_finish_contract;
+#[cfg(test)]
+mod tests_lifecycle;
+#[cfg(test)]
+mod tests_mode_gate;
+#[cfg(test)]
+mod tests_obligation;
+#[cfg(test)]
+mod tests_plan_gate;
+#[cfg(test)]
+mod tests_stage_review;
 
 pub use diff::{
     file_paths_match, parse_file_line_ref, parse_unified_diff, DiffContext,

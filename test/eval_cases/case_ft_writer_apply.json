@@ -1,0 +1,17 @@
+{
+  "id": "case_ft_writer_apply",
+  "title": "写入工兵回执机械合入链路实测",
+  "tier": "silver",
+  "base_commit": "HEAD",
+  "problem_statement": "【编码任务】请完成一个小型工具函数：新建 src-tauri/src/agent/label_utils.rs，实现 `pub fn sanitize_label(input: &str) -> String`——去除首尾空白、将内部连续空白折叠为单个空格、截取前 40 个字符（按 chars 计）、空输入返回空串；并在同文件内写至少 1 个 #[cfg(test)] 单元测试覆盖上述行为。随后在 src-tauri/src/agent/mod.rs 中注册 `pub mod label_utils;`。建议：该任务机械且边界清晰，适合派发 child_writer 在隔离副本中完成；回执到达后按流程审阅并合入其修改，最终以真实工作区的编译状态为准。",
+  "judge_kind": "command",
+  "verify_command": "test -f src-tauri/src/agent/label_utils.rs && grep -q 'fn sanitize_label' src-tauri/src/agent/label_utils.rs && grep -q 'mod label_utils' src-tauri/src/agent/mod.rs && cargo test --manifest-path src-tauri/Cargo.toml --lib label_utils --quiet 2>&1 | tail -3 | grep -q 'test result: ok'",
+  "expected_exit_code": 0,
+  "max_steps": 80,
+  "max_prompt_tokens": 8000000,
+  "expected_diff_files": [
+    "src-tauri/src/agent/label_utils.rs",
+    "src-tauri/src/agent/mod.rs"
+  ],
+  "judge_semantics": "PASS=①label_utils.rs 存在且含 sanitize_label 实现②mod.rs 已注册模块③单测真实执行且通过④终态 succeeded。观测点=模型是否派发 child_writer；若派发，是否调用 child_writer.apply 机械合入（而非手工重写），以及 apply 冲突/幂等语义是否被正确处理。"
+}
