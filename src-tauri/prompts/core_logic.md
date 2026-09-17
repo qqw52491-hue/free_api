@@ -158,6 +158,9 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 {
   "tool": "task_store",
   "session_title": "任务全局精炼宏观主旨（如‘MCP熔断超时排查’、‘北京天气分析’；仅在人类发起新任务或干预时提供4~12字宏观名词短语，严禁输出‘任务结束/局部操作’等狭隘词）",
+  "thought": "面向用户的阶段解说，默认留空——仅在阶段开始/新发现/关键突破/受阻说明/收官小结时写 1~3 句第一人称陈述，常规连续步骤严禁填写、不复述 description",
+  "finding": "可选：仅当本轮有阶段突破/关键结论/里程碑进展/风险阻碍时给 1~2 句结论",
+  "finding_kind": "可选：start|breakthrough|milestone|summary|warning|blocker",
   "description": "读取会话资源列表以分析当前数据",
   "plan_id": "inspect-env",
   "plan_title": "分析项目环境",

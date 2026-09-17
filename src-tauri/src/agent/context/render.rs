@@ -269,11 +269,11 @@ impl ContextRenderer {
     pub fn render_decision_instruction(compact_tools: Option<&str>) -> String {
         if let Some(tools) = compact_tools.filter(|s| !s.trim().is_empty()) {
             format!(
-                "【当前可用工具快速索引】(只能从以下调用，严禁臆造 core/bash 等未声明工具)\n{}\n\n请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自可用工具清单。在 description 字段给出面向用户的一句话进度；仅当上一步失败或被拦截时，才在 reflection 中补一句原因与改法。",
+                "【当前可用工具快速索引】(只能从以下调用，严禁臆造 core/bash 等未声明工具)\n{}\n\n请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自可用工具清单。thought 字段默认留空——仅当进入新工作阶段(plan_title 切换)、拿到改变判断的新证据/新发现、关键突破或里程碑、遇阻需要向用户说明、任务收官小结时，才写 1~3 句面向用户的解说（第一人称、不复述 description）；常规连续步骤严禁填写；description 字段保持一句话进度标签；仅当上一步失败或被拦截时在 reflection 补一句原因与改法；本轮若取得阶段突破、关键结论、里程碑进展或发现风险阻碍，额外输出 finding(1~2 句结论) 与 finding_kind(start|breakthrough|milestone|summary|warning|blocker)。",
                 tools
             )
         } else {
-            "请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自上方工具菜单。在 description 字段给出面向用户的一句话进度；仅当上一步失败或被拦截时，才在 reflection 中补一句原因与改法。".to_string()
+            "请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自上方工具菜单。thought 字段默认留空——仅当进入新工作阶段(plan_title 切换)、拿到改变判断的新证据/新发现、关键突破或里程碑、遇阻需要向用户说明、任务收官小结时，才写 1~3 句面向用户的解说（第一人称、不复述 description）；常规连续步骤严禁填写；description 字段保持一句话进度标签；仅当上一步失败或被拦截时在 reflection 补一句原因与改法；本轮若取得阶段突破、关键结论、里程碑进展或发现风险阻碍，额外输出 finding(1~2 句结论) 与 finding_kind(start|breakthrough|milestone|summary|warning|blocker)。".to_string()
         }
     }
 }

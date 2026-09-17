@@ -368,6 +368,12 @@ pub struct AgentInstruction {
     pub thought: String,
     #[serde(default)]
     pub description: String,
+    /// 面向用户的阶段解说/关键发现（1~2 句）：突破、里程碑结论、风险预警等显式标记
+    #[serde(default)]
+    pub finding: Option<String>,
+    /// finding 性质分类：start|breakthrough|milestone|summary|warning|blocker
+    #[serde(default)]
+    pub finding_kind: Option<String>,
     /// 当前动作所属的稳定计划节点。相同 plan_id 的连续动作会收敛到同一父节点。
     #[serde(default)]
     pub plan_id: Option<String>,

@@ -282,50 +282,144 @@
                         }
                     ]"
                 >
-                    <!-- 🌟 模式 A：极简纯文本叙事简报 (纯文本、无图标、无点点、无特效，结论正常字号，过程紧凑小字号) -->
+                    <!-- 🌟 模式 A：极简高信噪比动作流 (融合智谱纯净度与精美矢量图标，去除厚重光框与连续检索噪音) -->
                     <div v-if="streamViewMode === 'ambient'" class="ambient-plan-stream">
-                        <article
-                            v-for="step in getAmbientKeySteps(entry)"
-                            :key="step.id"
-                            class="ambient-text-row"
-                            :class="[
-                                `status-${step.status}`,
-                                {
-                                    'is-milestone': getAmbientStepText(step).isMilestone,
-                                    'is-warning': getAmbientStepText(step).isWarning
-                                }
-                            ]"
-                            @click="$emit('select-step', step.id)"
-                        >
-                            <span class="ambient-text-content">
-                                <!-- 1. 代码变更 Diff 胶囊前置 (无重复文字，微标直接表达修改了哪个文件及增删行) -->
-                                <span
-                                    v-if="getAmbientStepText(step).chip"
-                                    class="ambient-text-diff clickable"
-                                    :title="actionCardTitle(step)"
-                                    @click.stop="handleActionCardClick(step)"
-                                >
-                                    <FileIcon :name="getAmbientStepText(step).chip?.fileName || ''" kind="code" :size="11" />
-                                    <span class="chip-file-name">{{ getAmbientStepText(step).chip?.fileName }}</span>
-                                    <span v-if="(getAmbientStepText(step).chip?.additions || 0) > 0" class="chip-diff-add">+{{ getAmbientStepText(step).chip?.additions }}</span>
-                                    <span v-if="(getAmbientStepText(step).chip?.deletions || 0) > 0" class="chip-diff-del">−{{ getAmbientStepText(step).chip?.deletions }}</span>
-                                </span>
+                        <template v-for="item in getAmbientDisplayItems(entry)" :key="item.id">
+                            <!-- 0. 阶段解说段落 (每轮 thought 叙述：学到什么/当前判断/下一步意图) -->
+                            <p
+                                v-if="item.type === 'narrative'"
+                                class="ambient-narrative"
+                            >{{ item.text }}</p>
 
-                                <!-- 2. 步骤描述 / 为何修改说明紧跟其后 -->
-                                <span v-if="getAmbientStepText(step).text" class="ambient-text-body">
-                                    {{ getAmbientStepText(step).text }}
-                                </span>
-                            </span>
-                            <time class="ambient-text-time">{{ formatClock(step.timestamp) }}</time>
-                        </article>
+                            <!-- 1. 单项动作行 (修改/新建/读取/终端/单次检索/突破) -->
+                            <article
+                                v-else-if="item.type === 'step'"
+                                class="ambient-text-row"
+                                :class="[
+                                    `status-${item.step.status}`,
+                                    `action-${item.action.actionKind}`,
+                                    {
+                                        'is-milestone': item.action.isMilestone,
+                                        'is-warning': item.action.isWarning
+                                    }
+                                ]"
+                                @click="$emit('select-step', item.step.id)"
+                            >
+                                <span class="ambient-text-content">
+                                    <span
+                                        class="ambient-action-lead clickable"
+                                        :class="`lead-${item.action.actionKind}`"
+                                        :title="item.action.tooltip"
+                                        @click.stop="handleAmbientChipClick(item.step, item.action)"
+                                    >
+                                        <!-- 1.1 动作类型微标 -->
+                                        <span v-if="item.action.actionKind === 'edit'" class="action-tag action-tag-edit">✏️ 编辑</span>
+                                        <span v-else-if="item.action.actionKind === 'write'" class="action-tag action-tag-write">📄 新建</span>
+                                        <span v-else-if="item.action.actionKind === 'read'" class="action-tag action-tag-read">📖 读取</span>
+                                        <span v-else-if="item.action.actionKind === 'shell'" class="action-tag action-tag-shell">⚡ 终端</span>
+                                        <span v-else-if="item.action.actionKind === 'search'" class="action-tag action-tag-search">🔍 检索</span>
+                                        <span v-else-if="item.action.actionKind === 'web'" class="action-tag action-tag-web">{{ item.action.iconEmoji || '🌐' }} 网页</span>
+                                        <span v-else-if="item.action.actionKind === 'mcp'" class="action-tag action-tag-mcp">🧩 MCP</span>
+                                        <span v-else-if="item.action.actionKind === 'milestone'" class="action-tag action-tag-milestone">{{ item.action.iconEmoji || '💡' }} {{ item.action.capsuleTitle }}</span>
+                                        <span v-else class="action-tag action-tag-general">⚡ 操作</span>
 
-                        <!-- 正在思考与实时推进流 (纯文本无图标无特效) -->
+                                        <!-- 1.2 专属语言/文件矢量图标 (FileIcon) -->
+                                        <FileIcon
+                                            v-if="item.action.fileName || item.action.iconKind"
+                                            :name="item.action.fileName || ''"
+                                            :kind="item.action.iconKind || ''"
+                                            :size="12"
+                                            class="chip-file-icon"
+                                        />
+
+                                        <!-- 1.3 核心文件名或命令 (milestone 类型标题已由动作标签渲染，避免重复) -->
+                                        <span v-if="item.action.actionKind !== 'milestone'" class="chip-file-name">{{ item.action.capsuleTitle }}</span>
+
+                                        <!-- 1.4 所在目录简写 (如 src/bin/) -->
+                                        <span v-if="item.action.filePath && getDirName(item.action.filePath)" class="chip-file-dir">
+                                            {{ getDirName(item.action.filePath) }}
+                                        </span>
+
+                                        <!-- 1.5 行号或耗时 (如 #L70-120, 0.5s，排除重复的 'MCP'/'新建'/'修改' 标签) -->
+                                        <span v-if="item.action.capsuleBadge && item.action.capsuleBadge !== 'MCP' && item.action.capsuleBadge !== '新建' && item.action.capsuleBadge !== '修改'" class="chip-line-range">
+                                            {{ item.action.capsuleBadge }}
+                                        </span>
+
+                                        <!-- 1.6 Diff 增删行微标 (如 +22 -163) -->
+                                        <span v-if="(item.action.additions || 0) > 0" class="chip-diff-add">+{{ item.action.additions }}</span>
+                                        <span v-if="(item.action.deletions || 0) > 0" class="chip-diff-del">−{{ item.action.deletions }}</span>
+                                        <span v-if="item.action.isIntercepted" class="chip-intercepted">已拦截</span>
+                                    </span>
+
+                                    <!-- 1.7 说明文字 -->
+                                    <span v-if="item.action.explanation" class="ambient-text-body" :class="{ 'is-milestone': item.action.isMilestone }">
+                                        {{ item.action.explanation }}
+                                    </span>
+                                </span>
+                                <time class="ambient-text-time">{{ formatClock(item.step.timestamp) }}</time>
+                            </article>
+
+                            <!-- 2. 连续检索智能微折叠卡片 (大量 ripgrep 静默汇聚) -->
+                            <div
+                                v-else-if="item.type === 'search-group'"
+                                class="ambient-search-group"
+                                :class="{ 'is-expanded': isSearchGroupExpanded(item.id) }"
+                            >
+                                <div class="ambient-search-group-header" @click="toggleSearchGroup(item.id)">
+                                    <div class="search-group-left">
+                                        <span class="action-tag action-tag-search">🔍 检索</span>
+                                        <span class="search-group-summary">{{ item.summary }}</span>
+                                        <span v-if="item.targetFiles.length > 0" class="search-group-files">
+                                            · {{ item.targetFiles.slice(0, 3).join(', ') }}{{ item.targetFiles.length > 3 ? ' 等' : '' }}
+                                        </span>
+                                        <span v-if="item.durationBadge" class="chip-duration">{{ item.durationBadge }}</span>
+                                    </div>
+                                    <div class="search-group-right">
+                                        <button type="button" class="search-group-toggle-btn" @click.stop="toggleSearchGroup(item.id)">
+                                            <span>{{ isSearchGroupExpanded(item.id) ? '收起明细' : `展开 ${item.count} 项检索` }}</span>
+                                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" :class="{ 'rotate-180': isSearchGroupExpanded(item.id) }">
+                                                <polyline points="6 9 12 15 18 9" />
+                                            </svg>
+                                        </button>
+                                        <time class="ambient-text-time">{{ formatClock(item.timestamp) }}</time>
+                                    </div>
+                                </div>
+
+                                <!-- 展开后的检索明细列表 -->
+                                <div v-if="isSearchGroupExpanded(item.id)" class="ambient-search-group-list">
+                                    <article
+                                        v-for="subStep in item.steps"
+                                        :key="subStep.id"
+                                        class="ambient-search-sub-row"
+                                        @click="$emit('select-step', subStep.id)"
+                                    >
+                                        <span class="search-sub-bullet">·</span>
+                                        <span class="search-sub-lead">
+                                            <FileIcon
+                                                v-if="getAmbientAction(subStep).fileName"
+                                                :name="getAmbientAction(subStep).fileName || ''"
+                                                :size="12"
+                                                class="chip-file-icon"
+                                            />
+                                            <span class="search-sub-title">{{ getAmbientAction(subStep).capsuleTitle }}</span>
+                                        </span>
+                                        <span class="search-sub-body">{{ getAmbientAction(subStep).explanation }}</span>
+                                        <time class="ambient-text-time mini">{{ formatClock(subStep.timestamp) }}</time>
+                                    </article>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- 正在思考与实时推进流 (带微型呼吸动效) -->
                         <div
                             v-if="entry.status === 'running' && isRunning"
                             class="ambient-live-text-row"
                         >
-                            <span class="ambient-live-label">
-                                {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中:' : '正在推进:' }}
+                            <span class="ambient-action-lead">
+                                <span class="action-tag action-tag-think">
+                                    <span class="ambient-live-spinner manus-spinner mini"></span>
+                                    {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中' : '推进中' }}
+                                </span>
                             </span>
                             <span class="ambient-live-text">
                                 {{ liveThoughtInfo.text || getPlanRunningPreview(entry).line3.text || '正在深入分析全局上下文与决策规划 …' }}
@@ -690,7 +784,12 @@
                 >
                     <div v-if="streamViewMode === 'ambient'" class="ambient-plan-stream">
                         <div class="ambient-live-text-row">
-                            <span class="ambient-live-label">思考中:</span>
+                            <span class="ambient-action-lead">
+                                <span class="action-tag action-tag-think">
+                                    <span class="ambient-live-spinner manus-spinner mini"></span>
+                                    思考中
+                                </span>
+                            </span>
                             <span class="ambient-live-text">
                                 {{ liveThoughtInfo.text || '正在深度思考规划执行策略 …' }}
                             </span>
@@ -1211,107 +1310,516 @@ function hasFileOperation(step: AgentStepItem): boolean {
     return !!(parsed.chips.length > 0 || parsed.chip || parsed.readFiles.length > 0 || op.fileName || (op.hasDiff && op.filePath));
 }
 
-export interface AmbientStepTextDisplay {
-    text: string;
-    isMilestone: boolean;
-    isWarning: boolean;
+export interface AmbientActionDisplay {
+    actionKind: 'read' | 'edit' | 'write' | 'shell' | 'search' | 'web' | 'mcp' | 'milestone' | 'general';
+    capsuleTitle: string;
+    fileName?: string;
+    filePath?: string;
+    iconKind?: string;
+    iconEmoji?: string;
+    capsuleBadge?: string;
+    additions?: number;
+    deletions?: number;
+    isIntercepted?: boolean;
+    hasDiff?: boolean;
     chip?: FileChangeChip;
+    explanation: string;
+    isWarning: boolean;
+    isMilestone: boolean;
+    tooltip: string;
+}
+
+export interface AmbientStepItemDisplay {
+    type: 'step';
+    id: string;
+    step: AgentStepItem;
+    action: AmbientActionDisplay;
+}
+
+export interface AmbientSearchGroupDisplay {
+    type: 'search-group';
+    id: string;
+    steps: AgentStepItem[];
+    count: number;
+    summary: string;
+    targetFiles: string[];
+    querySample: string;
+    durationBadge?: string;
+    timestamp: number;
+}
+
+export interface AmbientNarrativeDisplay {
+    type: 'narrative';
+    id: string;
+    text: string;
+    timestamp?: number;
+}
+
+export type AmbientDisplayItem = AmbientStepItemDisplay | AmbientSearchGroupDisplay | AmbientNarrativeDisplay;
+
+const expandedSearchGroupIds = reactive(new Set<string>());
+
+function toggleSearchGroup(groupId: string) {
+    if (expandedSearchGroupIds.has(groupId)) {
+        expandedSearchGroupIds.delete(groupId);
+    } else {
+        expandedSearchGroupIds.add(groupId);
+    }
+}
+
+function isSearchGroupExpanded(groupId: string): boolean {
+    return expandedSearchGroupIds.has(groupId);
+}
+
+function getDirName(filePath?: string): string {
+    if (!filePath) return '';
+    const clean = filePath.replace(/\\/g, '/');
+    const lastSlash = clean.lastIndexOf('/');
+    if (lastSlash <= 0) return '';
+    const dir = clean.substring(0, lastSlash);
+    const parts = dir.split('/').filter(Boolean);
+    if (parts.length === 0) return '';
+    if (parts.length >= 2) {
+        return parts.slice(-2).join('/') + '/';
+    }
+    return parts[parts.length - 1] + '/';
+}
+
+function buildSearchGroupSummary(steps: AgentStepItem[]): { summary: string; targetFiles: string[]; querySample: string } {
+    const files = new Set<string>();
+    const queryTerms: string[] = [];
+    const explanations: string[] = [];
+
+    for (const s of steps) {
+        const op = formatStepOperation(s);
+        if (op.fileName) files.add(op.fileName);
+        let p: any = s.params || s.rawParams;
+        if (typeof p === 'string') {
+            try { p = JSON.parse(p); } catch {}
+        }
+        if (p && typeof p === 'object') {
+            const q = String(p.query || p.pattern || p.Query || p.regex || '').trim();
+            if (q && !queryTerms.includes(q)) queryTerms.push(q);
+        }
+        let desc = (s.description || '').replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        desc = desc.replace(/^(检索|搜索|查找|检查)\s*(代码|相关代码|历史日志)?\s*(以|为了|来|用于|：|:)?\s*/i, '').trim();
+        if (desc && desc !== '执行操作' && !explanations.includes(desc)) {
+            explanations.push(desc);
+        }
+    }
+
+    const targetFiles = Array.from(files);
+    let summary = '';
+    if (explanations.length > 0) {
+        summary = explanations[0];
+        if (explanations.length > 1) {
+            summary += ` 等 ${explanations.length} 处检索`;
+        }
+    } else if (queryTerms.length > 0) {
+        summary = `检索 "${queryTerms.slice(0, 2).map(q => q.length > 16 ? q.slice(0, 14) + '…' : q).join('", "')}"${queryTerms.length > 2 ? ` 等 ${queryTerms.length} 处` : ''}`;
+    } else {
+        summary = '检索相关关联代码与门禁规则';
+    }
+
+    const querySample = queryTerms.slice(0, 3).join(', ');
+    return { summary, targetFiles, querySample };
 }
 
 function isAmbientKeyStep(step: AgentStepItem): boolean {
-    // 用户需求：任何动作方法、查看文件、MCP 工具、命令运行、代码修改、结论等全部平铺显示
-    return !!(step && (step.tool || step.description || step.finding || step.action));
+    if (!step) return false;
+    const tool = (step.tool || '').toLowerCase();
+    const desc = (step.description || '').trim();
+
+    // 1. 过滤内部调度与编排工具 (parallel, core, agent_core, wait_jobs, dispatch)
+    if (tool === 'parallel' || tool === 'core' || tool === 'agent_core' || tool === 'wait_jobs' || tool === 'dispatch') {
+        return false;
+    }
+    // 过滤流水账式内部心跳/调度描述
+    if (desc === '执行下一步操作' || desc === '执行操作' || desc === '推进阶段目标') {
+        if (tool === 'core' || tool === 'parallel' || !tool) return false;
+    }
+
+    // 2. 纯风险阻碍或执行异常保留展示
+    if (step.status === 'failed' || step.status === 'challenged' || step.findingKind === 'warning' || step.findingKind === 'blocker') {
+        return true;
+    }
+
+    // 3. 常规阶段结论/思考/计划不作为动作行展示 (由顶层 narrative 叙事段落统领，避免重复报账)
+    if (!tool || tool === 'thought' || tool === 'thinking' || tool === 'plan' || tool === 'milestone' || tool === 'summary') {
+        return false;
+    }
+
+    // 4. 有文件操作 (修改、新建、读取、Diff)
+    if (hasFileOperation(step)) return true;
+
+    // 5. 其余产生动作行为的步骤 (MCP / 终端 / 网页等)
+    return true;
 }
 
-function getAmbientKeySteps(entry: PlanEntry): AgentStepItem[] {
-    const steps = entry.steps || [];
-    return steps.filter((step) => isAmbientKeyStep(step));
+// 阶段解说段落：thought 作为面向用户的每轮叙述（区别于 description 一句话进度标签）
+function stepNarrative(step: AgentStepItem): string {
+    const narr = (step.thought || '').trim();
+    if (!narr) return '';
+    const desc = (step.description || '').trim();
+    if (narr === desc) return '';
+    return narr;
 }
 
-function getAmbientStepText(step: AgentStepItem): AmbientStepTextDisplay {
+function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
+    const rawSteps = entry.steps || [];
+    const items: AmbientDisplayItem[] = [];
+
+    let i = 0;
+    let lastNarrative = '';
+    while (i < rawSteps.length) {
+        const step = rawSteps[i];
+
+        // 叙述段落先于动作条目渲染；被 key 过滤掉的纯思维节拍，其叙述仍然保留；
+        // 与上一条解说完全重复的叙述跳过——模型若逐步流水账也不至于刷屏
+        const narr = stepNarrative(step);
+        if (narr && narr !== lastNarrative) {
+            lastNarrative = narr;
+            items.push({ type: 'narrative', id: `narr-${step.id}`, text: narr, timestamp: step.timestamp });
+        }
+        if (!isAmbientKeyStep(step)) {
+            i++;
+            continue;
+        }
+        const action = getAmbientAction(step);
+
+        // 检索微折叠：只合并"无叙述"的连续检索——带解说的检索步自成一节，不进折叠组
+        if (action.actionKind === 'search') {
+            const searchSteps: AgentStepItem[] = [step];
+            let j = i + 1;
+            while (j < rawSteps.length) {
+                const nextStep = rawSteps[j];
+                if (!isAmbientKeyStep(nextStep)) {
+                    if (stepNarrative(nextStep)) break;
+                    j++;
+                    continue;
+                }
+                if (getAmbientAction(nextStep).actionKind === 'search' && !stepNarrative(nextStep)) {
+                    searchSteps.push(nextStep);
+                    j++;
+                } else {
+                    break;
+                }
+            }
+
+            // 连续检索 >= 2 条，聚合成微折叠组
+            if (searchSteps.length >= 2) {
+                const groupId = `search-group-${entry.id}-${step.id}-${searchSteps.length}`;
+                const { summary, targetFiles, querySample } = buildSearchGroupSummary(searchSteps);
+
+                let totalDurationMs = 0;
+                for (const s of searchSteps) {
+                    if (s.metrics?.toolDurationMs) totalDurationMs += s.metrics.toolDurationMs;
+                }
+
+                items.push({
+                    type: 'search-group',
+                    id: groupId,
+                    steps: searchSteps,
+                    count: searchSteps.length,
+                    summary,
+                    targetFiles,
+                    querySample,
+                    durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
+                    timestamp: searchSteps[searchSteps.length - 1].timestamp || step.timestamp,
+                });
+                i = j;
+                continue;
+            }
+        }
+
+        // 单个动作行
+        items.push({
+            type: 'step',
+            id: step.id,
+            step,
+            action,
+        });
+        i++;
+    }
+
+    return items;
+}
+
+const ambientActionMemo = new WeakMap<object, AmbientActionDisplay>();
+
+function getAmbientAction(step: AgentStepItem): AmbientActionDisplay {
+    if (!step) {
+        return {
+            actionKind: 'general',
+            capsuleTitle: '执行操作',
+            explanation: '',
+            isWarning: false,
+            isMilestone: false,
+            tooltip: '',
+        };
+    }
+    const hit = ambientActionMemo.get(step);
+    if (hit) return hit;
+    const action = computeAmbientAction(step);
+    try { ambientActionMemo.set(step, action); } catch {}
+    return action;
+}
+
+function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
     const chip = getStepMiniChip(step);
+    const op = formatStepOperation(step);
     const desc = (step.description || '').trim();
     const explicitFinding = (step.finding || '').trim();
     const kind = step.findingKind;
-
-    // 1. AI 显式赋值字段：根据 AI 赋予的类型进行结构化展示（真正的结论：正常字号）
-    if (explicitFinding || kind) {
-        let text = (explicitFinding || desc).replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
-        const isWarning = kind === 'warning' || kind === 'blocker';
-        const isMilestone = !isWarning && kind !== 'start';
-
-        return {
-            text,
-            isMilestone,
-            isWarning,
-            chip,
-        };
-    }
-
-    // 2. 碰到了别的阻碍（报错、门禁拦截、失败）：仅文字带警告颜色，无图标
-    if (step.status === 'failed' || step.status === 'challenged' || chip?.isIntercepted) {
-        let text = (desc || '执行遇到异常或阻碍').replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
-        return {
-            text,
-            isMilestone: false,
-            isWarning: true,
-            chip,
-        };
-    }
-
-    // 3. 代码修改 (胶囊放在最前面，后面只展示步骤意图/为何修改，绝不重复写'修改了某文件')
-    if (chip && ((chip.additions || 0) > 0 || (chip.deletions || 0) > 0)) {
-        let reason = (step.explanation || desc).trim();
-        const fn = chip.fileName;
-        const escapedFn = fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // 去除开头重复的 "修改/编辑/写入 xxx (以/为了/来/用于)"
-        reason = reason.replace(new RegExp(`^(修改|编辑|写入|更新|重构|调整)\\s*(${escapedFn}|[^\\s，,以为了]+)?\\s*(以|为了|来|用于|：|:)?\\s*`, 'i'), '').trim();
-        reason = reason.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
-        if (reason === fn || reason === '执行操作') reason = '';
-
-        return {
-            text: reason,
-            isMilestone: false,
-            isWarning: false,
-            chip,
-        };
-    }
-
-    // 4. 查看/读取文件 (纯文本，紧凑排版)
-    const op = formatStepOperation(step);
     const toolLower = (step.tool || '').toLowerCase();
-    if (toolLower.includes('read') || toolLower.includes('view') || toolLower.includes('cat')) {
-        let text = desc && desc !== '执行操作' && desc !== '读取文件内容' ? desc : op.actionText || '读取文件内容';
-        text = text.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+    const actionLower = (step.action || '').toLowerCase();
+
+    // 1. 风险阻碍预警 (仅保留真正异常与阻塞情况的醒目预警；常规阶段结论统领于顶层叙事段落中，不生成冗余动作条)
+    if (kind === 'warning' || kind === 'blocker') {
+        let explanation = explicitFinding || desc;
+        explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+
         return {
-            text,
+            actionKind: 'milestone',
+            capsuleTitle: '风险预警',
+            iconEmoji: '⚠️',
+            explanation,
+            isWarning: true,
             isMilestone: false,
-            isWarning: false,
-            chip: undefined,
+            tooltip: '风险预警 · 点击查看详情',
         };
     }
 
-    // 5. MCP 工具调用或命令执行
+    // 2. 发生错误 / 门禁拦截 / 挑战失败
+    if (step.status === 'failed' || step.status === 'challenged' || chip?.isIntercepted) {
+        const fileName = chip?.fileName || op.fileName;
+        const isInter = chip?.isIntercepted || step.status === 'challenged';
+        return {
+            actionKind: 'edit',
+            capsuleTitle: fileName || op.badgeLabel || '操作拦截',
+            fileName,
+            filePath: op.filePath || chip?.path,
+            iconKind: fileName ? 'code' : 'reviewer',
+            isIntercepted: isInter,
+            isWarning: true,
+            isMilestone: false,
+            chip,
+            explanation: (desc || (isInter ? '已被门禁规则安全拦截' : '执行遇到异常或阻碍')).replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim(),
+            tooltip: isInter ? '操作已被安全策略拦截' : '步骤执行失败',
+        };
+    }
+
+    // 3. 代码修改 (Edit / Diff)
+    if (chip && ((chip.additions || 0) > 0 || (chip.deletions || 0) > 0)) {
+        const fileName = chip.fileName || op.fileName || '代码变更';
+        let reason = (step.explanation || desc).trim();
+        const escapedFn = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // 去除开头重复的 "修改/编辑/写入 xxx (以/为了/来/用于/关于/针对)"
+        reason = reason.replace(new RegExp(`^(修改|编辑|写入|更新|重构|调整)\\s*(${escapedFn}|[^\\s，,以为了]+)?\\s*(\\d+[-~到至]\\d+\\s*行)?\\s*(以|为了|来|用于|关于|针对|：|:)?\\s*`, 'i'), '').trim();
+        reason = reason.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        if (reason === fileName || reason === '执行操作') reason = '';
+
+        return {
+            actionKind: 'edit',
+            capsuleTitle: fileName,
+            fileName,
+            filePath: op.filePath || chip?.path,
+            iconKind: 'code',
+            additions: chip.additions,
+            deletions: chip.deletions,
+            hasDiff: true,
+            chip,
+            capsuleBadge: op.lineRange || undefined,
+            explanation: reason,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: actionCardTitle(step),
+        };
+    }
+
+    // 4. 新建 / 写入文件 (Write / Create)
+    if (op.badgeLabel === '写入' || toolLower.includes('write') || toolLower.includes('create_file') || actionLower.startsWith('write')) {
+        const fileName = op.fileName || chip?.fileName || '新文件';
+        let reason = (step.explanation || desc).trim();
+        const escapedFn = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        reason = reason.replace(new RegExp(`^(写入|新建|创建)\\s*(${escapedFn}|[^\\s，,以为了]+)?\\s*(\\d+[-~到至]\\d+\\s*行)?\\s*(以|为了|来|用于|关于|针对|：|:)?\\s*`, 'i'), '').trim();
+        reason = reason.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        if (reason === fileName || reason === '写入文件' || reason === '执行操作') reason = '';
+
+        return {
+            actionKind: 'write',
+            capsuleTitle: fileName,
+            fileName,
+            filePath: op.filePath || chip?.path,
+            iconKind: 'create',
+            capsuleBadge: op.diffStat?.additions ? `+${op.diffStat.additions}行` : undefined,
+            additions: op.diffStat?.additions,
+            hasDiff: op.hasDiff,
+            chip,
+            explanation: reason,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: op.filePath ? `写入 ${op.filePath}` : '新建/写入文件',
+        };
+    }
+
+    // 5. 查看 / 读取文件 (Read)
+    if (toolLower.includes('read') || toolLower.includes('view') || toolLower.includes('cat') || op.badgeLabel === '读取') {
+        const fileName = op.fileName || '文件内容';
+        let reason = (step.explanation || desc).trim();
+        const escapedFn = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        reason = reason.replace(new RegExp(`^(读取|查看|检查|分析|浏览)\\s*(${escapedFn}|[^\\s，,以为了]+)?\\s*(\\d+[-~到至]\\d+\\s*行)?\\s*(以|为了|来|用于|关于|针对|：|:)?\\s*`, 'i'), '').trim();
+        reason = reason.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        if (reason === fileName || reason === '读取文件内容' || reason === '执行操作') reason = '';
+
+        return {
+            actionKind: 'read',
+            capsuleTitle: fileName,
+            fileName,
+            filePath: op.filePath || chip?.path,
+            iconKind: 'read',
+            capsuleBadge: op.lineRange || undefined,
+            explanation: reason,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: op.filePath ? `读取 ${op.filePath} ${op.lineRange || ''}` : '读取文件',
+        };
+    }
+
+    // 6. 终端命令与脚本 (Shell / Command)
+    if (toolLower.includes('shell') || toolLower.includes('bash') || toolLower.includes('command') || toolLower.includes('exec') || toolLower.includes('terminal') || op.badgeLabel === '终端') {
+        let cmd = '';
+        const p: any = step.params || step.rawParams;
+        if (p && typeof p === 'object') {
+            cmd = String(p.CommandLine || p.command || p.cmd || p.script || '').trim();
+        } else if (typeof p === 'string') {
+            try {
+                const parsed = JSON.parse(p);
+                cmd = String(parsed.CommandLine || parsed.command || parsed.cmd || parsed.script || '').trim();
+            } catch {
+                cmd = p.trim();
+            }
+        }
+        if (!cmd) cmd = op.actionText || '终端命令';
+        const shortCmd = cmd.length > 36 ? cmd.slice(0, 33) + '…' : cmd;
+
+        let durationBadge = '';
+        if (step.metrics?.toolDurationMs != null) {
+            durationBadge = formatDurationSeconds(step.metrics.toolDurationMs);
+        }
+
+        let explanation = desc && desc !== '执行操作' ? desc : '';
+        explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        explanation = explanation.replace(/^(执行|运行|调用)\s*(终端命令|命令|shell)?\s*(以|为了|来|用于|关于|针对|：|:)?\\s*/i, '').trim();
+
+        return {
+            actionKind: 'shell',
+            capsuleTitle: shortCmd,
+            filePath: op.filePath,
+            iconKind: 'terminal',
+            capsuleBadge: durationBadge || undefined,
+            explanation,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: cmd ? `执行: ${cmd}` : '执行终端命令',
+        };
+    }
+
+    // 7. 代码检索 / 全局搜索 (Search / Grep)
+    if (toolLower.includes('search') || toolLower.includes('grep') || toolLower.includes('find') || toolLower.includes('ripgrep') || op.badgeLabel?.includes('检索')) {
+        let pattern = '';
+        const p: any = step.params || step.rawParams;
+        if (p && typeof p === 'object') {
+            pattern = String(p.query || p.pattern || p.Query || p.regex || '').trim();
+        }
+        // 🌟 核心降噪：胶囊标题优先目标文件，若无文件则展示简短关键词或"代码定义"
+        const fileName = op.fileName;
+        const capsuleTitle = fileName || (pattern ? (pattern.length > 20 ? pattern.slice(0, 18) + '…' : pattern) : '代码定义');
+        
+        let explanation = desc && desc !== '执行操作' ? desc : (pattern ? `检索 "${pattern.length > 32 ? pattern.slice(0, 29) + '…' : pattern}"` : '检索相关代码');
+        explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        explanation = explanation.replace(/^(检索|搜索|查找|检查)\s*(代码|相关代码|历史日志)?\s*(以|为了|来|用于|关于|针对|：|:)?\\s*/i, '').trim();
+
+        return {
+            actionKind: 'search',
+            capsuleTitle,
+            fileName,
+            filePath: op.filePath,
+            iconKind: fileName ? 'code' : 'search',
+            capsuleBadge: undefined,
+            explanation,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: pattern ? `检索: ${pattern}` : (op.actionText || '检索代码'),
+        };
+    }
+
+    // 8. 全网搜索与网页抓取 (Web Search / Web Fetch)
+    if (toolLower.includes('web_search') || toolLower.includes('web_fetch') || toolLower.includes('duckduckgo') || toolLower.includes('bing') || op.badgeLabel?.includes('全网')) {
+        let query = '';
+        const p: any = step.params || step.rawParams;
+        if (p && typeof p === 'object') {
+            query = String(p.query || p.q || p.url || p.Url || '').trim();
+        }
+        const isFetch = toolLower.includes('fetch');
+        const capsuleTitle = isFetch ? '网页抓取' : '全网检索';
+        let explanation = desc && desc !== '执行操作' ? desc : (query ? `查询 "${query.length > 35 ? query.slice(0, 32) + '…' : query}"` : '');
+        explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+
+        return {
+            actionKind: 'web',
+            capsuleTitle,
+            iconEmoji: isFetch ? '🌍' : '🌐',
+            explanation,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: query || op.actionText,
+        };
+    }
+
+    // 9. MCP 工具调用
     if (step.source === 'MCP' || toolLower.startsWith('mcp_') || toolLower.includes('/')) {
-        let text = desc && desc !== '执行操作' ? desc : `调用 ${op.badgeLabel || step.tool} · ${op.actionText}`;
-        text = text.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        const title = op.badgeLabel || step.tool || 'MCP 工具';
+        let explanation = desc && desc !== '执行操作' ? desc : op.actionText;
+        explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+
+        let durationBadge = '';
+        if (step.metrics?.toolDurationMs != null) {
+            durationBadge = formatDurationSeconds(step.metrics.toolDurationMs);
+        }
+
         return {
-            text,
-            isMilestone: false,
+            actionKind: 'mcp',
+            capsuleTitle: title,
+            iconEmoji: '🧩',
+            capsuleBadge: durationBadge || undefined,
+            explanation,
             isWarning: false,
-            chip: undefined,
+            isMilestone: false,
+            tooltip: `调用 MCP 工具 · ${op.actionText}`,
         };
     }
 
-    // 6. 当前正在运行的活跃步骤或常规步骤
+    // 10. 常规兜底动作
     let text = desc && desc !== '执行操作' ? desc : op.actionText || '执行操作';
     text = text.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
     return {
-        text,
-        isMilestone: false,
+        actionKind: 'general',
+        capsuleTitle: op.badgeLabel || step.tool || '操作',
+        iconEmoji: '⚡',
+        explanation: text,
         isWarning: false,
-        chip,
+        isMilestone: false,
+        tooltip: op.actionText || '查看详情',
     };
+}
+
+function handleAmbientChipClick(step: AgentStepItem, action: AmbientActionDisplay) {
+    if (action.hasDiff && action.chip && chipHasDiffContent(action.chip)) {
+        emit('open-diff', diffPayloadFromChip(action.chip));
+        return;
+    }
+    emit('select-step', step.id);
 }
 
 // ── 🌟 运行态计划步骤视窗滚动与智能吸底 ──

@@ -1313,6 +1313,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 reflection,
                 thought: thoughtText,
                 thinking: toText(rawStep.thinking) || undefined,
+                finding: toText(rawStep.finding) || undefined,
+                findingKind: (rawStep.finding_kind || rawStep.findingKind) as any || undefined,
                 tool,
                 action: toText(rawStep.action) || tool,
                 source: sourceFrom("", tool),
