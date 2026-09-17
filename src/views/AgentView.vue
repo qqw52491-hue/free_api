@@ -220,7 +220,7 @@
             <!-- 1. 🤖 Agent 对话主面板 -->
             <div v-show="currentNavView === 'agent'" class="full-view-panel">
                 <template v-for="tab in tabs" :key="tab.uid">
-                    <div v-show="activeTabId === tab.id" class="agent-panel-frame">
+                    <div v-if="activatedPanelIds.has(tab.id)" v-show="activeTabId === tab.id" class="agent-panel-frame">
                         <AgentPanel
                             :ref="(el) => { if (el) panelRefs[tab.id] = el }"
                             :panel-id="tab.id"
@@ -249,6 +249,7 @@
                     @open-session="openTreeSession"
                     @start-task="handleStartProjectTask"
                     @project-deleted="handleProjectDeleted"
+                    @session-deleted="handleSessionDeleted"
                     @refresh-projects="projectTreeRef?.refreshProjects()"
                 />
             </div>
@@ -319,7 +320,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import AgentPanel from "../components/AgentPanel.vue";
@@ -349,6 +350,10 @@ const tabs = ref<TabInfo[]>([]);
 const activeTabId = ref("");
 const taskSearchQuery = ref("");
 const panelRefs = reactive<Record<string, any>>({});
+// AgentPanel 懒挂载：只有被激活过的 tab 才渲染面板。每个 panel 挂载即拉取历史消息、
+// 注册事件监听——全量挂载数百条会话会拖垮启动。watch activeTabId 覆盖所有激活路径。
+const activatedPanelIds = reactive(new Set<string>());
+watch(activeTabId, (id) => { if (id) activatedPanelIds.add(id); }, { immediate: true });
 const projectTreeRef = ref<InstanceType<typeof ProjectSidebarTree> | null>(null);
 const projectWorkspaceRef = ref<InstanceType<typeof ProjectWorkspace> | null>(null);
 
@@ -543,7 +548,8 @@ function handleNewProjectSession(project: AgentProject) {
 
 // 打开树形菜单中的会话
 function openTreeSession(session: TreeSessionItem) {
-    if (!tabs.value.some((tab) => tab.id === session.id)) {
+    const existing = tabs.value.find((tab) => tab.id === session.id);
+    if (!existing) {
         tabs.value.unshift({
             uid: `tab-${session.id}`,
             id: session.id,
@@ -552,6 +558,13 @@ function openTreeSession(session: TreeSessionItem) {
             isDraft: session.isDraft,
             projectId: session.projectId,
         });
+    } else {
+        if (session.projectId && !existing.projectId) {
+            existing.projectId = session.projectId;
+        }
+        if (session.title && (existing.label === "未命名对话" || !existing.label)) {
+            existing.label = session.title;
+        }
     }
     activeTabId.value = session.id;
     currentNavView.value = "agent";
@@ -608,6 +621,8 @@ function handleSessionPromoted(oldId: string, newId: string, title: string, proj
         tab.label = title;
         tab.isDraft = false;
         if (projectId) tab.projectId = projectId;
+        activatedPanelIds.delete(oldId);
+        activatedPanelIds.add(newId);
     }
     if (activeTabId.value === oldId) {
         activeTabId.value = newId;
@@ -623,6 +638,7 @@ function handleSessionDeleted(sessionId: string) {
     const index = tabs.value.findIndex((t) => t.id === sessionId);
     if (index >= 0) {
         tabs.value.splice(index, 1);
+        activatedPanelIds.delete(sessionId);
         delete panelRefs[sessionId];
         if (activeTabId.value === sessionId) {
             activeTabId.value = tabs.value[0]?.id || "";
@@ -697,22 +713,29 @@ async function backfillSessionTitles(sessions: ChatSessionRow[]) {
 async function loadSessions() {
     try {
         const sessions = await invoke<ChatSessionRow[]>("get_sessions");
-        const currentDrafts = tabs.value.filter((t) => t.isDraft);
         
-        // 增量合并现有 tabs，避免冲掉正在编辑的草稿与正在运行的 UI 状态
-        const newTabs: TabInfo[] = [...currentDrafts];
+        // 增量合并现有 tabs：草稿与已激活(用户打开过)的 tab 永久保留——项目会话掉出
+        // get_sessions 的 LIMIT 窗口也绝不被轮询踢掉并重置 activeTabId；
+        // 仅驱逐"从未激活且已不在会话列表中"的纯列表条目（已删除会话的墓碑）
+        const sessionIds = new Set(sessions.map((s) => s.id));
+        const existingTabs = tabs.value.filter(
+            (t) => t.isDraft || activatedPanelIds.has(t.id) || sessionIds.has(t.id)
+        );
+        const existingMap = new Map(existingTabs.map((t) => [t.id, t]));
+        
         for (const s of sessions) {
-            const existing = tabs.value.find((t) => t.id === s.id);
+            const existing = existingMap.get(s.id);
             if (existing) {
                 if (s.title && s.title !== existing.label && !existing.label.includes("…")) {
                     existing.label = s.title;
                 }
-                newTabs.push(existing);
             } else {
-                newTabs.push(asTab(s));
+                const newTab = asTab(s);
+                existingTabs.push(newTab);
+                existingMap.set(s.id, newTab);
             }
         }
-        tabs.value = newTabs;
+        tabs.value = existingTabs;
         if (!tabs.value.length) {
             createNewTask();
             return;
@@ -731,6 +754,7 @@ async function closeTab(id: string) {
         await invoke("delete_session", { id });
     }
     tabs.value.splice(index, 1);
+    activatedPanelIds.delete(id);
     delete panelRefs[id];
     if (!tabs.value.length) { createNewTask(); return; }
     if (activeTabId.value === id) activeTabId.value = tabs.value[Math.max(0, index - 1)].id;

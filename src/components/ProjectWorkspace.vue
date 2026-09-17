@@ -650,6 +650,7 @@ const emit = defineEmits<{
   (event: "open-session", session: { id: string; title: string }): void;
   (event: "start-task", projectId: string, goal: string): void;
   (event: "project-deleted", projectId: string): void;
+  (event: "session-deleted", sessionId: string): void;
   (event: "refresh-projects"): void;
 }>();
 
@@ -1058,6 +1059,7 @@ async function removeResource(resourceId: string) {
 async function deleteSession(sessionId: string) {
   try {
     await invoke("delete_session", { id: sessionId });
+    emit("session-deleted", sessionId);
     await loadProject();
     emit("refresh-projects");
   } catch (e) {
