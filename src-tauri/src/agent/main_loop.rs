@@ -136,6 +136,7 @@ fn persist_challenged_step(
     output_text: &str,
     view: &Option<serde_json::Value>,
     metrics: Option<serde_json::Value>,
+    thinking_text: &str,
 ) {
     let output_id = crate::agent::run_trace::save_step_output_with_meta(
         db,
@@ -155,6 +156,7 @@ fn persist_challenged_step(
         "description": instruction.description.clone(),
         "reflection": instruction.reflection.clone(),
         "thought": instruction.thought.clone(),
+        "thinking": crate::agent::run_trace::clip_thinking_for_trace(thinking_text),
         "tool": instruction.get_tool(),
         "action": instruction.get_action(),
         "command": instruction.get_params(),
@@ -2451,6 +2453,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                         &reject_msg,
                         &result.view,
                         step_metrics_json(outcome.token_usage.as_ref(), outcome.thinking_duration_ms, outcome.tool_duration_ms),
+                        &outcome.thinking_text,
                     );
                     // 跳过终审：机械事实已足够打回，省一次审查
                     let _ = save_checkpoint(state.inner(), &mut checkpoint);
@@ -2512,6 +2515,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                         &reject_msg,
                         &result.view,
                         step_metrics_json(outcome.token_usage.as_ref(), outcome.thinking_duration_ms, outcome.tool_duration_ms),
+                        &outcome.thinking_text,
                     );
                     // 跳过终审：机械事实已足够打回，省一次审查
                     let _ = save_checkpoint(state.inner(), &mut checkpoint);
@@ -3012,6 +3016,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             "description": instruction.description.clone(),
             "reflection": instruction.reflection.clone(),
             "thought": instruction.thought.clone(),
+            "thinking": crate::agent::run_trace::clip_thinking_for_trace(&outcome.thinking_text),
             "tool": instruction.get_tool(),
             "action": instruction.get_action(),
             "command": instruction.get_params(),

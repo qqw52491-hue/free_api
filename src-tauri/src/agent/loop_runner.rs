@@ -29,6 +29,8 @@ pub struct StepExecutionOutcome {
     pub token_usage: Option<crate::agent::types::TokenUsage>,
     pub thinking_duration_ms: u64,
     pub tool_duration_ms: u64,
+    /// 本步模型推理全文（reasoning stream）。只进复盘轨迹与落库，不回灌模型上下文。
+    pub thinking_text: String,
 }
 
 /// 执行一个可恢复步骤的 CallLlm 与 RunTool 阶段。

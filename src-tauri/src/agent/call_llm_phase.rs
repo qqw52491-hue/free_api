@@ -52,6 +52,7 @@ pub async fn run_call_llm_and_run_tool_phases(
     const MAX_PLANNING_RETRIES: usize = 1;
     let mut last_token_usage: Option<crate::agent::types::TokenUsage>;
     let mut last_thinking_duration_ms: u64 = 0;
+    let mut last_thinking_text = String::new();
     let mut last_tool_duration_ms: u64;
 
     // LLM 回复已落盘但工具尚未开始时，恢复直接进入同一工具处理器。
@@ -91,6 +92,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 token_usage: None,
                 thinking_duration_ms: 0,
                 tool_duration_ms,
+                thinking_text: String::new(),
             });
         }
 
@@ -159,6 +161,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             Ok(r) => {
                 last_thinking_duration_ms = planning_start.elapsed().as_millis() as u64;
                 last_token_usage = Some(r.1.clone());
+                last_thinking_text = r.2.clone();
                 r
             }
             Err(e) if e == crate::llm::STREAM_INTERRUPTED_ERROR => {
@@ -175,6 +178,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     token_usage: None,
                     thinking_duration_ms: last_thinking_duration_ms,
                     tool_duration_ms: 0,
+                    thinking_text: last_thinking_text.clone(),
                 });
             }
             Err(e) => {
@@ -337,6 +341,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 token_usage: last_token_usage,
                 thinking_duration_ms: last_thinking_duration_ms,
                 tool_duration_ms: 0,
+                thinking_text: thinking_text.clone(),
             });
         }
         // 通知前端：发现了新计划（含反思）
@@ -361,6 +366,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     "description": inst.description.clone(),
                     "reflection": inst.reflection.clone(),
                     "thought": inst.thought.clone(),
+                    "thinking": crate::agent::run_trace::clip_thinking_for_trace(&thinking_text),
                     "tool": inst.get_tool(),
                     "action": inst.get_action(),
                     "command": inst.get_params(),
@@ -408,6 +414,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 token_usage: last_token_usage,
                 thinking_duration_ms: last_thinking_duration_ms,
                 tool_duration_ms: last_tool_duration_ms,
+                thinking_text: thinking_text.clone(),
             });
         }
         // --- C. 判断执行结果 ---
@@ -468,6 +475,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 "description": format!("{} (失败重试 #{})", inst.description, retry_count),
                 "reflection": inst.reflection.clone(),
                 "thought": inst.thought.clone(),
+                "thinking": crate::agent::run_trace::clip_thinking_for_trace(&thinking_text),
                 "tool": inst.get_tool(),
                 "action": inst.get_action(),
                 "command": inst.get_params(),
@@ -633,6 +641,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         token_usage: last_token_usage,
         thinking_duration_ms: last_thinking_duration_ms,
         tool_duration_ms: last_tool_duration_ms,
+        thinking_text: last_thinking_text,
     })
 }
 

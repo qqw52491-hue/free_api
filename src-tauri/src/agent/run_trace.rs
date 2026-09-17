@@ -167,6 +167,13 @@ pub fn get_outputs_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("./data/outputs"))
 }
 
+/// 落库到步骤快照的 thinking 上限：reasoning 全文仅作取证留痕，超长截断保护快照体积。
+pub(crate) const MAX_TRACE_THINKING_CHARS: usize = 64_000;
+
+pub(crate) fn clip_thinking_for_trace(text: &str) -> String {
+    text.chars().take(MAX_TRACE_THINKING_CHARS).collect()
+}
+
 pub fn save_step_output_with_meta(
     db: &DbState,
     session_id: &str,

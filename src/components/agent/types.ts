@@ -217,6 +217,8 @@ export interface AgentStepItem {
     modelTier?: string;
     reflection?: string;
     thought?: string;
+    /** 模型推理全文（reasoning stream 落库回放用，不进模型上下文） */
+    thinking?: string;
     explanation?: string;
     tool: string;
     action: string;
