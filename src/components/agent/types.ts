@@ -231,6 +231,8 @@ export interface AgentStepItem {
     rawResult?: unknown;
     view?: ToolView;
     metrics?: AgentStepMetrics;
+    finding?: string;
+    findingKind?: "breakthrough" | "warning" | "milestone" | "summary" | "start" | "blocker" | (string & {});
     timestamp: number;
 }
 

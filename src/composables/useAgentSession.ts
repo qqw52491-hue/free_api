@@ -672,6 +672,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 thought: toText(step.thought) || undefined,
                 thinking: toText(step.thinking) || undefined,
                 explanation: toText(step.explanation) || undefined,
+                finding: toText(step.finding) || undefined,
+                findingKind: (step.finding_kind || step.findingKind) as any || undefined,
                 tool,
                 action: toText(step.action) || tool,
                 source: sourceFrom(step.route, tool),
@@ -1417,6 +1419,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const existing = getLatestStep(stepId);
             if (existing) {
                 existing.status = "succeeded";
+                if (payload.finding) existing.finding = toText(payload.finding);
+                if (payload.finding_kind || payload.findingKind) existing.findingKind = (payload.finding_kind || payload.findingKind) as any;
                 syncWorkersFromStep(existing);
                 if (payload.metrics || payload.token_usage) {
                     const rawM = asRecord(payload.metrics || payload.token_usage);

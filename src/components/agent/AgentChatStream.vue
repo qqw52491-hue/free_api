@@ -1,6 +1,28 @@
 <template>
     <div ref="streamElement" class="process-tree" :class="{ 'is-running': isRunning }" aria-label="Agent 分层执行过程" @scroll.passive="onStreamScroll">
-        <button v-if="isRunning && !followLiveTail" type="button" class="follow-latest" @click="resumeLiveFollow">跟随最新输出</button>
+        <div class="stream-sticky-actions">
+            <button v-if="isRunning && !followLiveTail" type="button" class="follow-latest" @click="resumeLiveFollow">跟随最新输出</button>
+            <div class="stream-view-toggle floating-view-toggle" @click.stop>
+                <button
+                    type="button"
+                    class="toggle-btn"
+                    :class="{ active: streamViewMode === 'ambient' }"
+                    title="简报模式：完全无框极简叙事流，突出大字号关键突破"
+                    @click.stop="setStreamViewMode('ambient')"
+                >
+                    <span class="toggle-text">🍃 简报</span>
+                </button>
+                <button
+                    type="button"
+                    class="toggle-btn"
+                    :class="{ active: streamViewMode === 'detailed' }"
+                    title="全量模式：阶段卡片与底层工具调用细节"
+                    @click.stop="setStreamViewMode('detailed')"
+                >
+                    <span class="toggle-text">⚡ 全量</span>
+                </button>
+            </div>
+        </div>
 
         <div class="stream-centered-content">
             <section v-if="!currentGoal && !timelineEntries.length && !legacyMessages.length" class="empty-conversation">
@@ -250,8 +272,8 @@
                 </article>
                 <article
                     v-else-if="entry.type === 'plan'"
-                    class="plan-node"
-                    :class="[
+                    :class="streamViewMode === 'ambient' ? 'ambient-plan-wrapper' : [
+                        'plan-node',
                         `status-${entry.status}`,
                         {
                             'is-active-plan': isPlanRunning(entry),
@@ -260,10 +282,63 @@
                         }
                     ]"
                 >
-                    <!-- 🌟 正在执行卡片顶栏 (Image 2: ○ 阶段 N · 标题  进行中 · 第 4/6 步) -->
-                    <div
-                        v-if="isPlanRunning(entry)"
-                        class="plan-row is-running-row"
+                    <!-- 🌟 模式 A：极简纯文本叙事简报 (纯文本、无图标、无点点、无特效，结论正常字号，过程紧凑小字号) -->
+                    <div v-if="streamViewMode === 'ambient'" class="ambient-plan-stream">
+                        <article
+                            v-for="step in getAmbientKeySteps(entry)"
+                            :key="step.id"
+                            class="ambient-text-row"
+                            :class="[
+                                `status-${step.status}`,
+                                {
+                                    'is-milestone': getAmbientStepText(step).isMilestone,
+                                    'is-warning': getAmbientStepText(step).isWarning
+                                }
+                            ]"
+                            @click="$emit('select-step', step.id)"
+                        >
+                            <span class="ambient-text-content">
+                                <!-- 1. 代码变更 Diff 胶囊前置 (无重复文字，微标直接表达修改了哪个文件及增删行) -->
+                                <span
+                                    v-if="getAmbientStepText(step).chip"
+                                    class="ambient-text-diff clickable"
+                                    :title="actionCardTitle(step)"
+                                    @click.stop="handleActionCardClick(step)"
+                                >
+                                    <FileIcon :name="getAmbientStepText(step).chip?.fileName || ''" kind="code" :size="11" />
+                                    <span class="chip-file-name">{{ getAmbientStepText(step).chip?.fileName }}</span>
+                                    <span v-if="(getAmbientStepText(step).chip?.additions || 0) > 0" class="chip-diff-add">+{{ getAmbientStepText(step).chip?.additions }}</span>
+                                    <span v-if="(getAmbientStepText(step).chip?.deletions || 0) > 0" class="chip-diff-del">−{{ getAmbientStepText(step).chip?.deletions }}</span>
+                                </span>
+
+                                <!-- 2. 步骤描述 / 为何修改说明紧跟其后 -->
+                                <span v-if="getAmbientStepText(step).text" class="ambient-text-body">
+                                    {{ getAmbientStepText(step).text }}
+                                </span>
+                            </span>
+                            <time class="ambient-text-time">{{ formatClock(step.timestamp) }}</time>
+                        </article>
+
+                        <!-- 正在思考与实时推进流 (纯文本无图标无特效) -->
+                        <div
+                            v-if="entry.status === 'running' && isRunning"
+                            class="ambient-live-text-row"
+                        >
+                            <span class="ambient-live-label">
+                                {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中:' : '正在推进:' }}
+                            </span>
+                            <span class="ambient-live-text">
+                                {{ liveThoughtInfo.text || getPlanRunningPreview(entry).line3.text || '正在深入分析全局上下文与决策规划 …' }}
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- 🌟 模式 B：工程全量链路 (保留原有的阶段卡片、顶栏条条与折叠展开树) -->
+                    <template v-else>
+                        <!-- 🌟 正在执行卡片顶栏 (Image 2: ○ 阶段 N · 标题  进行中 · 第 4/6 步) -->
+                        <div
+                            v-if="isPlanRunning(entry)"
+                            class="plan-row is-running-row"
                         role="button"
                         tabindex="0"
                         title="点击展开/折叠步骤详情"
@@ -599,58 +674,71 @@
                             </button>
                         </div>
                     </div>
+                    </template>
                 </article>
                 <article
                     v-else-if="entry.type === 'active-thought'"
-                    class="plan-node status-running is-active-plan is-collapsed"
-                    :class="{ selected: selectedNarrative === 'active-thought' }"
+                    :class="[
+                        streamViewMode === 'ambient' ? 'ambient-plan-wrapper' : 'plan-node status-running is-active-plan is-collapsed',
+                        { selected: selectedNarrative === 'active-thought' }
+                    ]"
                     role="button"
                     tabindex="0"
                     title="点击查看完整思考过程"
                     @click="$emit('select-active-thought')"
                     @keydown.enter="$emit('select-active-thought')"
                 >
-                    <div class="plan-row is-running-row">
-                        <span class="stage-spinner-ring manus-spinner mini"></span>
-                        <span class="plan-title-bold">阶段 1 · 规划执行策略</span>
-                        <span class="plan-running-badge badge-step-switch">进行中 · 准备中</span>
-                        <div class="plan-row-spacer"></div>
-                        <time class="plan-running-time">{{ formatClock(entry.timestamp) }}</time>
+                    <div v-if="streamViewMode === 'ambient'" class="ambient-plan-stream">
+                        <div class="ambient-live-text-row">
+                            <span class="ambient-live-label">思考中:</span>
+                            <span class="ambient-live-text">
+                                {{ liveThoughtInfo.text || '正在深度思考规划执行策略 …' }}
+                            </span>
+                        </div>
                     </div>
-
-                    <div class="plan-running-preview">
-                        <!-- 第 1 行：环境准备 -->
-                        <div class="running-preview-line line-recent-action line-step-switch">
-                            <span class="preview-icon">📋</span>
-                            <span class="preview-text">准备阶段上下文与工作区环境</span>
-                            <span class="preview-duration">0.2s</span>
+                    <template v-else>
+                        <div class="plan-row is-running-row">
+                            <span class="stage-spinner-ring manus-spinner mini"></span>
+                            <span class="plan-title-bold">阶段 1 · 规划执行策略</span>
+                            <span class="plan-running-badge badge-step-switch">进行中 · 准备中</span>
+                            <div class="plan-row-spacer"></div>
+                            <time class="plan-running-time">{{ formatClock(entry.timestamp) }}</time>
                         </div>
 
-                        <!-- 第 2 行：锚定任务目标 (绝不与第3行思考重复) -->
-                        <div class="running-preview-line line-thought line-step-switch" :title="props.currentGoal ? '目标：' + props.currentGoal : '规划：按阶段目标制定实施方案并有序推进'">
-                            <span class="preview-icon">🎯</span>
-                            <span class="preview-text">{{ props.currentGoal ? '目标：' + shortText(props.currentGoal, 60) : '规划：按阶段目标制定实施方案并有序推进' }}</span>
-                        </div>
+                        <div class="plan-running-preview">
+                            <!-- 第 1 行：环境准备 -->
+                            <div class="running-preview-line line-recent-action line-step-switch">
+                                <span class="preview-icon">📋</span>
+                                <span class="preview-text">准备阶段上下文与工作区环境</span>
+                                <span class="preview-duration">0.2s</span>
+                            </div>
 
-                        <!-- 第 3 行：当前高速滚动推演的思考流光 (Ticker 滚动窗口，带有流光与垂直翻牌) -->
-                        <div class="running-preview-line line-active-action">
-                            <span class="preview-spinner manus-spinner mini"></span>
-                            <span class="preview-tool-icon icon-anim-switch">💭</span>
-                            <span class="preview-think-tag">思考:</span>
-                            <div class="preview-flip-ticker-viewport">
-                                <Transition name="ticker-flip">
-                                    <span
-                                        :key="`init-think-${liveThoughtInfo.lineKey}`"
-                                        v-scroll-tail
-                                        class="preview-text text-shimmer-flow"
-                                        :title="liveThoughtInfo.text"
-                                    >
-                                        {{ liveThoughtInfo.text || '正在连接模型并深度思考规划执行步骤 …' }}
-                                    </span>
-                                </Transition>
+                            <!-- 第 2 行：锚定任务目标 (绝不与第3行思考重复) -->
+                            <div class="running-preview-line line-thought line-step-switch" :title="props.currentGoal ? '目标：' + props.currentGoal : '规划：按阶段目标制定实施方案并有序推进'">
+                                <span class="preview-icon">🎯</span>
+                                <span class="preview-text">{{ props.currentGoal ? '目标：' + shortText(props.currentGoal, 60) : '规划：按阶段目标制定实施方案并有序推进' }}</span>
+                            </div>
+
+                            <!-- 第 3 行：当前高速滚动推演的思考流光 (Ticker 滚动窗口，带有流光与垂直翻牌) -->
+                            <div class="running-preview-line line-active-action">
+                                <span class="preview-spinner manus-spinner mini"></span>
+                                <span class="preview-tool-icon icon-anim-switch">💭</span>
+                                <span class="preview-think-tag">思考:</span>
+                                <div class="preview-flip-ticker-viewport">
+                                    <Transition name="ticker-flip">
+                                        <span
+                                            :key="`init-think-${liveThoughtInfo.lineKey}`"
+                                            v-scroll-tail
+                                            class="preview-text text-shimmer-flow"
+                                            :title="liveThoughtInfo.text"
+                                        >
+                                            {{ liveThoughtInfo.text || '正在连接模型并深度思考规划执行步骤 …' }}
+                                        </span>
+                                    </Transition>
+                                </div>
                             </div>
                         </div>
-                    </div>
+                    </template>
                 </article>
 
                 <article v-else-if="entry.type === 'completion'" class="saved-message from-agent final-response" :class="{ failed: entry.failed }">
@@ -987,6 +1075,22 @@ const activeThoughtStartedAt = ref<number | null>(null);
 const followLiveTail = ref(true);
 const planExpandedState = reactive<Record<string, boolean>>({});
 
+// 🌟 视图模式：'ambient' (环境感知/叙事简报，默认) | 'detailed' (完整工程链路)
+const streamViewMode = ref<'ambient' | 'detailed'>((() => {
+    try {
+        const saved = localStorage.getItem('free_api_stream_view_mode');
+        if (saved === 'ambient' || saved === 'detailed') return saved;
+    } catch {}
+    return 'ambient';
+})());
+
+function setStreamViewMode(mode: 'ambient' | 'detailed') {
+    streamViewMode.value = mode;
+    try {
+        localStorage.setItem('free_api_stream_view_mode', mode);
+    } catch {}
+}
+
 // 🌟 换行感知实时思考流与上下垂直翻牌切换 (Flip-up Ticker)
 // 1. 严格保留大模型思考过程中的换行 \n 节奏，提取当前正在活跃输出的最后有效行并从头渲染；
 // 2. 换行触发 lineKey 自增，配合 Vue Transition 触发上下翻牌推挤（旧行被顶出，新行从下方翻入）；
@@ -1105,6 +1209,109 @@ function hasFileOperation(step: AgentStepItem): boolean {
     const parsed = parseStepFileChanges(step);
     const op = formatStepOperation(step);
     return !!(parsed.chips.length > 0 || parsed.chip || parsed.readFiles.length > 0 || op.fileName || (op.hasDiff && op.filePath));
+}
+
+export interface AmbientStepTextDisplay {
+    text: string;
+    isMilestone: boolean;
+    isWarning: boolean;
+    chip?: FileChangeChip;
+}
+
+function isAmbientKeyStep(step: AgentStepItem): boolean {
+    // 用户需求：任何动作方法、查看文件、MCP 工具、命令运行、代码修改、结论等全部平铺显示
+    return !!(step && (step.tool || step.description || step.finding || step.action));
+}
+
+function getAmbientKeySteps(entry: PlanEntry): AgentStepItem[] {
+    const steps = entry.steps || [];
+    return steps.filter((step) => isAmbientKeyStep(step));
+}
+
+function getAmbientStepText(step: AgentStepItem): AmbientStepTextDisplay {
+    const chip = getStepMiniChip(step);
+    const desc = (step.description || '').trim();
+    const explicitFinding = (step.finding || '').trim();
+    const kind = step.findingKind;
+
+    // 1. AI 显式赋值字段：根据 AI 赋予的类型进行结构化展示（真正的结论：正常字号）
+    if (explicitFinding || kind) {
+        let text = (explicitFinding || desc).replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        const isWarning = kind === 'warning' || kind === 'blocker';
+        const isMilestone = !isWarning && kind !== 'start';
+
+        return {
+            text,
+            isMilestone,
+            isWarning,
+            chip,
+        };
+    }
+
+    // 2. 碰到了别的阻碍（报错、门禁拦截、失败）：仅文字带警告颜色，无图标
+    if (step.status === 'failed' || step.status === 'challenged' || chip?.isIntercepted) {
+        let text = (desc || '执行遇到异常或阻碍').replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        return {
+            text,
+            isMilestone: false,
+            isWarning: true,
+            chip,
+        };
+    }
+
+    // 3. 代码修改 (胶囊放在最前面，后面只展示步骤意图/为何修改，绝不重复写'修改了某文件')
+    if (chip && ((chip.additions || 0) > 0 || (chip.deletions || 0) > 0)) {
+        let reason = (step.explanation || desc).trim();
+        const fn = chip.fileName;
+        const escapedFn = fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // 去除开头重复的 "修改/编辑/写入 xxx (以/为了/来/用于)"
+        reason = reason.replace(new RegExp(`^(修改|编辑|写入|更新|重构|调整)\\s*(${escapedFn}|[^\\s，,以为了]+)?\\s*(以|为了|来|用于|：|:)?\\s*`, 'i'), '').trim();
+        reason = reason.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        if (reason === fn || reason === '执行操作') reason = '';
+
+        return {
+            text: reason,
+            isMilestone: false,
+            isWarning: false,
+            chip,
+        };
+    }
+
+    // 4. 查看/读取文件 (纯文本，紧凑排版)
+    const op = formatStepOperation(step);
+    const toolLower = (step.tool || '').toLowerCase();
+    if (toolLower.includes('read') || toolLower.includes('view') || toolLower.includes('cat')) {
+        let text = desc && desc !== '执行操作' && desc !== '读取文件内容' ? desc : op.actionText || '读取文件内容';
+        text = text.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        return {
+            text,
+            isMilestone: false,
+            isWarning: false,
+            chip: undefined,
+        };
+    }
+
+    // 5. MCP 工具调用或命令执行
+    if (step.source === 'MCP' || toolLower.startsWith('mcp_') || toolLower.includes('/')) {
+        let text = desc && desc !== '执行操作' ? desc : `调用 ${op.badgeLabel || step.tool} · ${op.actionText}`;
+        text = text.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        return {
+            text,
+            isMilestone: false,
+            isWarning: false,
+            chip: undefined,
+        };
+    }
+
+    // 6. 当前正在运行的活跃步骤或常规步骤
+    let text = desc && desc !== '执行操作' ? desc : op.actionText || '执行操作';
+    text = text.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+    return {
+        text,
+        isMilestone: false,
+        isWarning: false,
+        chip,
+    };
 }
 
 // ── 🌟 运行态计划步骤视窗滚动与智能吸底 ──
