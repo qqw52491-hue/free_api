@@ -559,6 +559,13 @@ function openTreeSession(session: TreeSessionItem) {
             projectId: session.projectId,
         });
     } else {
+        // 已存在的 tab 提到最前——增量合并后新会话沉在列表末尾，
+        // 打开（含 fork 落地）必须保证其在 Tasks 顶部可见
+        const idx = tabs.value.indexOf(existing);
+        if (idx > 0) {
+            tabs.value.splice(idx, 1);
+            tabs.value.unshift(existing);
+        }
         if (session.projectId && !existing.projectId) {
             existing.projectId = session.projectId;
         }
