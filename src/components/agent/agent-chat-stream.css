@@ -1049,21 +1049,45 @@
     background: rgba(129, 140, 248, 0.08);
 }
 
-/* 真正的结论/关键突破：内敛不刺眼，自然融入流中 */
+/* 真正的结论/关键突破：高光结论卡——左缘强调条 + 微染底，与普通动作行拉开层级 */
 .ambient-text-row.is-milestone {
-    background: transparent;
-    padding-left: 6px;
+    background: linear-gradient(90deg, rgba(52, 211, 153, 0.10), rgba(52, 211, 153, 0.015) 72%);
+    border-left: 2.5px solid rgba(52, 211, 153, 0.55);
+    border-radius: 6px;
+    padding: 5px 8px 5px 9px;
+    margin: 3px 0;
 }
 
 .ambient-text-row.is-milestone:hover {
-    background: rgba(16, 185, 129, 0.04);
+    background: linear-gradient(90deg, rgba(52, 211, 153, 0.15), rgba(52, 211, 153, 0.03) 72%);
 }
 
 .ambient-text-row.is-milestone .ambient-text-body {
-    font-size: 12px;
-    font-weight: 500;
-    color: #e2e8f0;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #d1fae5;
 }
+
+/* 按 finding_kind 换强调色：突破=暖金（"啊哈"时刻），总结=静蓝，起步=青 */
+.ambient-text-row.is-milestone.finding-breakthrough {
+    background: linear-gradient(90deg, rgba(250, 204, 21, 0.10), rgba(250, 204, 21, 0.015) 72%);
+    border-left-color: rgba(250, 204, 21, 0.6);
+}
+.ambient-text-row.is-milestone.finding-breakthrough:hover {
+    background: linear-gradient(90deg, rgba(250, 204, 21, 0.15), rgba(250, 204, 21, 0.03) 72%);
+}
+.ambient-text-row.is-milestone.finding-breakthrough .ambient-text-body { color: #fef9c3; }
+.ambient-text-row.is-milestone.finding-breakthrough .action-tag-milestone { color: #facc15; background: rgba(250, 204, 21, 0.10); }
+
+.ambient-text-row.is-milestone.finding-summary {
+    background: linear-gradient(90deg, rgba(96, 165, 250, 0.10), rgba(96, 165, 250, 0.015) 72%);
+    border-left-color: rgba(96, 165, 250, 0.6);
+}
+.ambient-text-row.is-milestone.finding-summary:hover {
+    background: linear-gradient(90deg, rgba(96, 165, 250, 0.15), rgba(96, 165, 250, 0.03) 72%);
+}
+.ambient-text-row.is-milestone.finding-summary .ambient-text-body { color: #dbeafe; }
+.ambient-text-row.is-milestone.finding-summary .action-tag-milestone { color: #60a5fa; background: rgba(96, 165, 250, 0.10); }
 
 /* 警告/异常/门禁拦截：仅文字微暖，杜绝全框高亮 */
 .ambient-text-row.is-warning,

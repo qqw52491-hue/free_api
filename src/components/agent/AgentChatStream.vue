@@ -300,7 +300,8 @@
                                     `action-${item.action.actionKind}`,
                                     {
                                         'is-milestone': item.action.isMilestone,
-                                        'is-warning': item.action.isWarning
+                                        'is-warning': item.action.isWarning,
+                                        [`finding-${item.step.findingKind}`]: item.action.isMilestone && item.step.findingKind
                                     }
                                 ]"
                                 @click="$emit('select-step', item.step.id)"
