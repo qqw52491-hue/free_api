@@ -1023,6 +1023,27 @@
     margin-top: 2px;
 }
 
+/* 解说抑制小行：冷却窗口内的 thought 降级——保留叙事轨迹但不再占段落视觉 */
+.ambient-narrative-mini {
+    margin: 1px 4px;
+    padding: 1px 0 1px 8px;
+    font-size: 10.5px;
+    line-height: 1.45;
+    color: #64748b;
+    font-style: italic;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: default;
+    user-select: text;
+}
+
+.ambient-narrative-mini:hover {
+    white-space: pre-wrap;
+    overflow: visible;
+    color: #94a3b8;
+}
+
 /* 🌟 环境感知动作行 (Cursor 级超低视觉负担、紧凑内敛动作行，无厚重边框与喧宾夺主背景) */
 .ambient-text-row {
     display: flex;
@@ -1049,45 +1070,20 @@
     background: rgba(129, 140, 248, 0.08);
 }
 
-/* 真正的结论/关键突破：高光结论卡——左缘强调条 + 微染底，与普通动作行拉开层级 */
+/* 真正的结论/关键突破：与开头总结段落 (.ambient-narrative) 一样直接展示，无渐变卡片、无左边框特效 */
 .ambient-text-row.is-milestone {
-    background: linear-gradient(90deg, rgba(52, 211, 153, 0.10), rgba(52, 211, 153, 0.015) 72%);
-    border-left: 2.5px solid rgba(52, 211, 153, 0.55);
-    border-radius: 6px;
-    padding: 5px 8px 5px 9px;
-    margin: 3px 0;
-}
-
-.ambient-text-row.is-milestone:hover {
-    background: linear-gradient(90deg, rgba(52, 211, 153, 0.15), rgba(52, 211, 153, 0.03) 72%);
+    background: transparent;
+    border: none;
+    padding: 6px 4px 4px;
+    margin: 4px 0 2px;
 }
 
 .ambient-text-row.is-milestone .ambient-text-body {
-    font-size: 12.5px;
-    font-weight: 600;
-    color: #d1fae5;
+    font-size: 13.5px;
+    line-height: 1.68;
+    font-weight: 500;
+    color: #f1f5f9;
 }
-
-/* 按 finding_kind 换强调色：突破=暖金（"啊哈"时刻），总结=静蓝，起步=青 */
-.ambient-text-row.is-milestone.finding-breakthrough {
-    background: linear-gradient(90deg, rgba(250, 204, 21, 0.10), rgba(250, 204, 21, 0.015) 72%);
-    border-left-color: rgba(250, 204, 21, 0.6);
-}
-.ambient-text-row.is-milestone.finding-breakthrough:hover {
-    background: linear-gradient(90deg, rgba(250, 204, 21, 0.15), rgba(250, 204, 21, 0.03) 72%);
-}
-.ambient-text-row.is-milestone.finding-breakthrough .ambient-text-body { color: #fef9c3; }
-.ambient-text-row.is-milestone.finding-breakthrough .action-tag-milestone { color: #facc15; background: rgba(250, 204, 21, 0.10); }
-
-.ambient-text-row.is-milestone.finding-summary {
-    background: linear-gradient(90deg, rgba(96, 165, 250, 0.10), rgba(96, 165, 250, 0.015) 72%);
-    border-left-color: rgba(96, 165, 250, 0.6);
-}
-.ambient-text-row.is-milestone.finding-summary:hover {
-    background: linear-gradient(90deg, rgba(96, 165, 250, 0.15), rgba(96, 165, 250, 0.03) 72%);
-}
-.ambient-text-row.is-milestone.finding-summary .ambient-text-body { color: #dbeafe; }
-.ambient-text-row.is-milestone.finding-summary .action-tag-milestone { color: #60a5fa; background: rgba(96, 165, 250, 0.10); }
 
 /* 警告/异常/门禁拦截：仅文字微暖，杜绝全框高亮 */
 .ambient-text-row.is-warning,
@@ -1185,12 +1181,6 @@
 .action-tag.action-tag-mcp {
     color: #c084fc;
     background: rgba(168, 85, 247, 0.08);
-}
-
-.action-tag.action-tag-milestone {
-    color: #34d399;
-    background: rgba(16, 185, 129, 0.08);
-    font-weight: 500;
 }
 
 .action-tag.action-tag-general {

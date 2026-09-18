@@ -291,6 +291,12 @@
                                 class="ambient-narrative"
                             >{{ item.text }}</p>
 
+                            <!-- 0.5 解说抑制小行：关键时刻之外的高频 thought 降级为灰色小行 -->
+                            <p
+                                v-else-if="item.type === 'narrative-mini'"
+                                class="ambient-narrative-mini"
+                            >{{ item.text }}</p>
+
                             <!-- 1. 单项动作行 (修改/新建/读取/终端/单次检索/突破) -->
                             <article
                                 v-else-if="item.type === 'step'"
@@ -321,7 +327,6 @@
                                         <span v-else-if="item.action.actionKind === 'search'" class="action-tag action-tag-search">🔍 检索</span>
                                         <span v-else-if="item.action.actionKind === 'web'" class="action-tag action-tag-web">{{ item.action.iconEmoji || '🌐' }} 网页</span>
                                         <span v-else-if="item.action.actionKind === 'mcp'" class="action-tag action-tag-mcp">🧩 MCP</span>
-                                        <span v-else-if="item.action.actionKind === 'milestone'" class="action-tag action-tag-milestone">{{ item.action.iconEmoji || '💡' }} {{ item.action.capsuleTitle }}</span>
                                         <span v-else class="action-tag action-tag-general">⚡ 操作</span>
 
                                         <!-- 1.2 专属语言/文件矢量图标 (FileIcon) -->
@@ -1450,7 +1455,7 @@ export interface AmbientSearchGroupDisplay {
 }
 
 export interface AmbientNarrativeDisplay {
-    type: 'narrative';
+    type: 'narrative' | 'narrative-mini';
     id: string;
     text: string;
     timestamp?: number;
@@ -1545,11 +1550,6 @@ function isAmbientKeyStep(step: AgentStepItem): boolean {
         return true;
     }
 
-    // 2.5 模型显式标注的正向高光步（突破/里程碑/总结/起步），即使底层是普通读取/思考也提升为卡片
-    if ((step.finding || '').trim() && (step.findingKind === 'breakthrough' || step.findingKind === 'milestone' || step.findingKind === 'summary' || step.findingKind === 'start')) {
-        return true;
-    }
-
     // 3. 常规阶段结论/思考/计划不作为动作行展示 (由顶层 narrative 叙事段落统领，避免重复报账)
     if (!tool || tool === 'thought' || tool === 'thinking' || tool === 'plan' || tool === 'milestone' || tool === 'summary') {
         return false;
@@ -1577,6 +1577,10 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
 
     let i = 0;
     let lastNarrative = '';
+    // 解说抑制窗口：每条完整解说段后，后续 N 个关键步内的解说降级为灰色小行；
+    // 关键事件步（异常/拦截/finding）立即重置窗口，保证重要时刻的解说不被降级
+    let narrativeCooldown = 0;
+    const NARRATIVE_COOLDOWN_STEPS = 3;
     while (i < rawSteps.length) {
         const step = rawSteps[i];
 
@@ -1585,8 +1589,28 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
         const narr = stepNarrative(step);
         if (narr && narr !== lastNarrative) {
             lastNarrative = narr;
-            items.push({ type: 'narrative', id: `narr-${step.id}`, text: narr, timestamp: step.timestamp });
+            const keyMoment = step.status === 'failed' || step.status === 'challenged'
+                || !!step.finding
+                || step.findingKind === 'warning' || step.findingKind === 'blocker';
+            if (keyMoment) narrativeCooldown = 0;
+            if (narrativeCooldown <= 0) {
+                items.push({ type: 'narrative', id: `narr-${step.id}`, text: narr, timestamp: step.timestamp });
+                narrativeCooldown = NARRATIVE_COOLDOWN_STEPS;
+            } else {
+                items.push({ type: 'narrative-mini', id: `narr-mini-${step.id}`, text: narr, timestamp: step.timestamp });
+            }
         }
+
+        // 🌟 用户需求：关键突破/阶段总结/突破发现直接与开头总结一样展示为纯文本叙事段落，不加特效卡片与小标签
+        const finding = (step.finding || '').trim();
+        if (finding && (step.findingKind === 'breakthrough' || step.findingKind === 'milestone' || step.findingKind === 'summary' || step.findingKind === 'start')) {
+            const cleanFinding = finding.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+            if (cleanFinding && cleanFinding !== lastNarrative) {
+                lastNarrative = cleanFinding;
+                items.push({ type: 'narrative', id: `finding-${step.id}`, text: cleanFinding, timestamp: step.timestamp });
+            }
+        }
+
         if (!isAmbientKeyStep(step)) {
             i++;
             continue;
@@ -1633,6 +1657,7 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
                     durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
                     timestamp: searchSteps[searchSteps.length - 1].timestamp || step.timestamp,
                 });
+                if (narrativeCooldown > 0) narrativeCooldown--;
                 i = j;
                 continue;
             }
@@ -1645,6 +1670,7 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
             step,
             action,
         });
+        if (narrativeCooldown > 0) narrativeCooldown--;
         i++;
     }
 
@@ -1686,42 +1712,12 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
         explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
 
         return {
-            actionKind: 'milestone',
+            actionKind: 'general',
             capsuleTitle: '风险预警',
-            iconEmoji: '⚠️',
             explanation,
             isWarning: true,
             isMilestone: false,
             tooltip: '风险预警 · 点击查看详情',
-        };
-    }
-
-    // 1.5 正向关键结论卡：模型显式标注的高光步，若有文件改动则挂为证据胶囊
-    if (explicitFinding && (kind === 'breakthrough' || kind === 'milestone' || kind === 'summary' || kind === 'start')) {
-        const kindLabel = kind === 'breakthrough' ? '关键突破'
-            : kind === 'summary' ? '阶段总结'
-            : kind === 'start' ? '起步进展'
-            : '里程碑';
-        const kindIcon = kind === 'breakthrough' ? '💡'
-            : kind === 'summary' ? '📌'
-            : kind === 'start' ? '🚀'
-            : '🎯';
-        const explanation = explicitFinding.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
-        const fileName = chip?.fileName || op.fileName;
-        return {
-            actionKind: 'milestone',
-            capsuleTitle: kindLabel,
-            iconEmoji: kindIcon,
-            fileName,
-            filePath: op.filePath || chip?.path,
-            iconKind: fileName ? 'code' : undefined,
-            additions: chip?.additions,
-            deletions: chip?.deletions,
-            chip,
-            explanation,
-            isWarning: false,
-            isMilestone: true,
-            tooltip: `${kindLabel} · 点击查看详情`,
         };
     }
 
