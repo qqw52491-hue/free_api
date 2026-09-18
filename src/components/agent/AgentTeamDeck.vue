@@ -48,8 +48,8 @@
                         v-for="(worker, wIdx) in displayedWorkers"
                         :key="worker.id"
                         class="topo-vertical-node"
-                        :class="[`status-${worker.status}`, { active: activeTab === worker.id, 'is-last': wIdx === displayedWorkers.length - 1 }]"
-                        @click="activeTab = worker.id"
+                        :class="[`status-${worker.status}`, { active: !compact && activeTab === worker.id, 'is-last': wIdx === displayedWorkers.length - 1 }]"
+                        @click="handleWorkerClick(worker.id)"
                     >
                         <!-- 树干分支连线 -->
                         <div class="tree-spine-col">
@@ -96,7 +96,7 @@
         </section>
 
         <!-- ================= 2. 下半部分：横向短标题多 Tab 链路与独立进度 (Bottom Half: Horizontal Short Tabs) ================= -->
-        <section class="agent-chains-tabs-section">
+        <section v-if="!compact" class="agent-chains-tabs-section">
             <!-- 横向排列短标题 Tab 栏 -->
             <div v-if="isMultiAgent" class="chains-tab-nav">
                 <button
@@ -387,6 +387,8 @@ const props = withDefaults(
         masterStepDescription?: string;
         onlyActive?: boolean;
         selectedStep?: AgentStepItem | null;
+        /** 轻量协作栏模式：只渲染拓扑概览，点击子 Agent 由父级打开完整详情 */
+        compact?: boolean;
     }>(),
     {
         teamState: () => ({
@@ -400,12 +402,22 @@ const props = withDefaults(
         masterStepDescription: "",
         onlyActive: false,
         selectedStep: null,
+        compact: false,
     }
 );
 
-defineEmits<{
+const emit = defineEmits<{
     "clear-selected-step": [];
+    "open-detail": [workerId: string];
 }>();
+
+function handleWorkerClick(workerId: string) {
+    if (props.compact) {
+        emit("open-detail", workerId);
+        return;
+    }
+    activeTab.value = workerId;
+}
 
 // 从当前选中的历史步骤中解析出绑定的子 Agent (用于历史回看，支持 wait_jobs 溯源关联)
 const stepWorkers = computed(() => {

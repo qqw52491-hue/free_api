@@ -104,6 +104,8 @@
                                 :current-goal="session.currentGoal.value"
                                 :master-step-description="session.statusDescription.value"
                                 :only-active="true"
+                                compact
+                                @open-detail="handleOpenTeamDeck()"
                             />
                         </div>
                     </aside>
