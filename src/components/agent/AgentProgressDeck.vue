@@ -2,8 +2,8 @@
     <transition name="deck-slide">
         <div v-if="shouldShow" class="agent-progress-deck-wrap">
             <div class="agent-progress-deck" :class="{ 'is-running': isRunning, 'is-expanded': isExpanded }">
-                <!-- 🌟 展开的文件列表 (位于常驻摘要条上方，贴合底部输入框体验) -->
-                <transition name="deck-drawer">
+                <!-- 🌟 展开的文件列表 (位于常驻摘要条上方，平滑上下平移动画) -->
+                <transition name="deck-drawer-slide">
                     <div v-if="isExpanded && allModifiedFiles.length > 0" class="deck-files-drawer">
                         <div
                             v-for="file in allModifiedFiles"
@@ -12,16 +12,15 @@
                             title="点击查看代码改动对比"
                             @click="$emit('open-diff', diffPayloadFromChip(file))"
                         >
-                            <!-- 状态方点 ⊡ -->
-                            <span
-                                class="file-state-badge"
-                                :class="'is-' + (file.actionKind || 'modify')"
-                                :title="file.actionKind === 'create' ? '新建' : '修改'"
-                            >
-                                <span class="file-state-dot"></span>
-                            </span>
+                            <!-- 文件类型专属矢量图标 (Vue/TS/JS等) -->
+                            <FileIcon
+                                :name="file.fileName"
+                                :kind="file.actionKind === 'modify' ? 'code' : ''"
+                                :size="14"
+                                class="file-row-icon"
+                            />
 
-                            <!-- +新增 -删除 统计 -->
+                            <!-- +新增 -删除 统计 (纯色文本无背景) -->
                             <span v-if="file.additions && file.additions > 0" class="diff-stat-add">+{{ file.additions }}</span>
                             <span v-if="file.deletions && file.deletions > 0" class="diff-stat-del">-{{ file.deletions }}</span>
 
@@ -116,6 +115,7 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import type { AgentStepItem, AgentTokenUsage, AgentToolStatus, StageState, StageFailureState, FileChangeChip, FileDiffPayload, ReviewerVerdict, StageActionCapsule } from './types';
 import { diffPayloadFromChip, parseStepFileChanges, aggregateFileChips, extractStageChronologicalCapsules } from './diffUtils';
+import FileIcon from './FileIcon.vue';
 
 export interface Level1TodoItem {
     id: string;
@@ -508,34 +508,44 @@ function formatDurationMs(ms?: number): string | null {
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), 0 0 1px rgba(99, 102, 241, 0.3);
 }
 
-/* 抽屉平滑展开收起动画 */
-.deck-drawer-enter-active,
-.deck-drawer-leave-active {
-    transition: max-height 0.22s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.18s ease;
+/* 平移上移/下移动画 (纯粹的 transform: translateY 配合 max-height) */
+.deck-drawer-slide-enter-active {
+    transition: max-height 0.28s cubic-bezier(0.16, 1, 0.3, 1),
+                opacity 0.22s ease,
+                transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
     overflow: hidden;
 }
 
-.deck-drawer-enter-from,
-.deck-drawer-leave-to {
-    max-height: 0;
-    opacity: 0;
+.deck-drawer-slide-leave-active {
+    transition: max-height 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+                opacity 0.18s ease,
+                transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    overflow: hidden;
 }
 
-.deck-drawer-enter-to,
-.deck-drawer-leave-from {
+.deck-drawer-slide-enter-from,
+.deck-drawer-slide-leave-to {
+    max-height: 0 !important;
+    opacity: 0;
+    transform: translateY(16px);
+}
+
+.deck-drawer-slide-enter-to,
+.deck-drawer-slide-leave-from {
     max-height: 280px;
     opacity: 1;
+    transform: translateY(0);
 }
 
-/* 🌟 展开的文件抽屉列表 (在底部摘要条上方) */
+/* 🌟 展开的文件抽屉列表 (在底部摘要条上方，纯净无背景，与底卡融为一体) */
 .deck-files-drawer {
     display: flex;
     flex-direction: column;
-    gap: 1.5px;
+    gap: 2px;
     max-height: 240px;
     overflow-y: auto;
-    padding: 6px 8px;
-    background: rgba(18, 18, 20, 0.95);
+    padding: 6px 10px;
+    background: transparent;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     box-sizing: border-box;
     scrollbar-width: thin;
@@ -555,16 +565,17 @@ function formatDurationMs(ms?: number): string | null {
     background: rgba(255, 255, 255, 0.3);
 }
 
-/* 单个文件行：对齐用户标杆样式 [⊙] +23 -105 FileName path */
+/* 单个文件行：展示真实文件矢量图标，纯文本无色块背景 */
 .deck-file-row {
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 3.5px 8px;
-    border-radius: 5px;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 6px;
     font-size: 12px;
     line-height: 1.4;
     color: #cbd5e1;
+    background: transparent;
     user-select: text;
     transition: background 0.12s ease;
 }
@@ -574,58 +585,32 @@ function formatDurationMs(ms?: number): string | null {
 }
 
 .deck-file-row.is-clickable:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.05);
 }
 
 .deck-file-row.is-clickable:hover .file-row-name {
     color: #38bdf8;
 }
 
-/* 状态方点 ⊡ */
-.file-state-badge {
+.file-row-icon {
+    flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 13px;
-    height: 13px;
-    border-radius: 3px;
-    border: 1.2px solid rgba(245, 158, 11, 0.6);
-    background: rgba(245, 158, 11, 0.12);
-    flex-shrink: 0;
-    box-sizing: border-box;
 }
 
-.file-state-badge .file-state-dot {
-    width: 4px;
-    height: 4px;
-    border-radius: 50%;
-    background: #f59e0b;
-}
-
-.file-state-badge.is-create {
-    border-color: rgba(16, 185, 129, 0.6);
-    background: rgba(16, 185, 129, 0.12);
-}
-
-.file-state-badge.is-create .file-state-dot {
-    background: #10b981;
-}
-
-.file-state-badge.is-delete {
-    border-color: rgba(239, 68, 68, 0.6);
-    background: rgba(239, 68, 68, 0.12);
-}
-
-.file-state-badge.is-delete .file-state-dot {
-    background: #ef4444;
-}
-
-/* +新增 -删除 统计标签 */
+/* +新增 -删除 统计标签：纯色文字，坚决无任何浅绿/浅红背景胶囊 */
 .diff-stat-add {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 11px;
     font-weight: 600;
-    color: #22c55e;
+    color: #22c55e !important;
+    background: none !important;
+    background-color: transparent !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
     flex-shrink: 0;
 }
 
@@ -633,14 +618,20 @@ function formatDurationMs(ms?: number): string | null {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 11px;
     font-weight: 600;
-    color: #ef4444;
+    color: #ef4444 !important;
+    background: none !important;
+    background-color: transparent !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
     flex-shrink: 0;
 }
 
 .diff-stat-add.mini,
 .diff-stat-del.mini {
     font-size: 10.5px;
-    opacity: 0.85;
+    opacity: 0.9;
     margin-left: 2px;
 }
 
