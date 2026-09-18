@@ -374,7 +374,8 @@ export function aggregateFileChips(chips: FileChangeChip[]): FileChangeChip[] {
             if (chip.oldContent && !existing.oldContent) existing.oldContent = chip.oldContent;
             if (chip.rawDiff) existing.rawDiff = chip.rawDiff;
             if (chip.stepId) existing.stepId = chip.stepId;
-            if (chip.isIntercepted) existing.isIntercepted = true;
+            // 拦截标记取"且"语义：后续存在真实落地的写入时，此前的拦截记录不再算数
+            existing.isIntercepted = Boolean(existing.isIntercepted) && Boolean(chip.isIntercepted);
         }
     }
     return [...map.values()];

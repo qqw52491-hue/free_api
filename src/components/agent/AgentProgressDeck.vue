@@ -174,11 +174,12 @@ const allModifiedFiles = computed<FileChangeChip[]>(() => {
     const rawChips: FileChangeChip[] = [];
     for (const step of props.steps || []) {
         const changes = parseStepFileChanges(step);
-        if (changes.chip && ((changes.chip.additions || 0) > 0 || (changes.chip.deletions || 0) > 0 || changes.chip.actionKind === 'modify' || changes.chip.actionKind === 'create')) {
+        // 被拦截/失败的写入未真正落地，不计入"修改过的文件"
+        if (changes.chip && !changes.chip.isIntercepted && ((changes.chip.additions || 0) > 0 || (changes.chip.deletions || 0) > 0 || changes.chip.actionKind === 'modify' || changes.chip.actionKind === 'create')) {
             rawChips.push(changes.chip);
         }
         for (const c of changes.chips || []) {
-            if ((c.additions || 0) > 0 || (c.deletions || 0) > 0 || c.actionKind === 'modify' || c.actionKind === 'create') {
+            if (!c.isIntercepted && ((c.additions || 0) > 0 || (c.deletions || 0) > 0 || c.actionKind === 'modify' || c.actionKind === 'create')) {
                 rawChips.push(c);
             }
         }

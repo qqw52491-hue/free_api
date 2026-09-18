@@ -241,6 +241,50 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
     }
 
     // -------------------------------------------------------------
+    // 1.5 pipeline 批量命令：params.commands[] 内嵌 local_file 等子命令，
+    //     逐条按嵌套 action 语义解析（edit/write/delete/read），否则批量写盘在托盘全隐形
+    // -------------------------------------------------------------
+    if (t === "pipeline" || t.includes("pipeline")) {
+        let p: any = step.params ?? step.rawParams;
+        if (typeof p === "string") {
+            try { p = JSON.parse(p); } catch { p = {}; }
+        }
+        const commands = p && typeof p === "object" && Array.isArray(p.commands) ? p.commands : [];
+        for (const entry of commands) {
+            const cmd = entry && typeof entry === "object" ? entry.command : undefined;
+            if (!cmd || typeof cmd !== "object") continue;
+            const action = String(cmd.action || "").toLowerCase();
+            const path = cleanFilePath(String(cmd.path || cmd.file || cmd.target_file || ""));
+            if (!path || path.includes("{")) continue;
+            if (action === "read" || action === "view") {
+                pushRead(path);
+                continue;
+            }
+            if (action === "edit" || action === "write" || action === "create" || action === "delete" || action === "remove") {
+                const newContent = typeof cmd.replacement_content === "string" ? cmd.replacement_content
+                    : (typeof cmd.content === "string" ? cmd.content : (typeof cmd.CodeContent === "string" ? cmd.CodeContent : undefined));
+                const oldContent = typeof cmd.target_content === "string" ? cmd.target_content : undefined;
+                const fileName = path.split("/").pop() || path;
+                pushChip({
+                    path,
+                    fileName,
+                    displayLabel: truncateFileName(fileName),
+                    actionKind: (action === "delete" || action === "remove") ? "delete"
+                        : ((action === "write" || action === "create") ? (oldContent ? "modify" : "create") : "modify"),
+                    additions: newContent ? newContent.split("\n").length : 0,
+                    deletions: oldContent ? oldContent.split("\n").length : 0,
+                    oldContent,
+                    newContent,
+                    stepId: step.id,
+                    isIntercepted: step.status === "failed" || step.status === "challenged",
+                });
+            }
+        }
+        if (res.chips.length > 0) res.chip = res.chips[0];
+        return res;
+    }
+
+    // -------------------------------------------------------------
     // 2. 主 Agent 单步执行检查 (单步工具调用)
     // -------------------------------------------------------------
     const op = formatStepOperation(step);
@@ -257,10 +301,18 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
     // 代码修改与 Diff 解析（先于检索判定，避免 find_and_replace 类工具被误归为搜索）
     const diff = extractDiffFromStep(step);
     if (diff) {
+        // 动作语义判定：local_file 等工具的真实动作在 step.action/command.action
+        // （write=全量写、edit=局部改、delete=删除），工具名本身不含语义
+        let actionVerb = (step.action || "").toLowerCase();
+        const p: any = step.params ?? step.rawParams;
+        if (p && typeof p === "object" && typeof p.action === "string") {
+            actionVerb = actionVerb || p.action.toLowerCase();
+        }
         let actionKind: "modify" | "create" | "delete" = "modify";
-        if (t.includes("write") || t.includes("create")) {
-            actionKind = "create";
-        } else if (t.includes("delete") || t.includes("remove") || t === "rm") {
+        if (t.includes("write") || t.includes("create") || actionVerb === "write" || actionVerb === "create") {
+            // 全量写：无旧内容=新建，有旧内容=覆写仍算修改
+            actionKind = diff.oldContent ? "modify" : "create";
+        } else if (t.includes("delete") || t.includes("remove") || t === "rm" || actionVerb === "delete" || actionVerb === "remove") {
             actionKind = "delete";
         }
         const cleanPath = cleanFilePath(diff.filePath || "untitled");
@@ -277,7 +329,8 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
             rawDiff: diff.rawDiff,
             startLine: diff.startLine,
             stepId: step.id,
-            isIntercepted: diff.isIntercepted,
+            // 写入未落地即视为拦截态：门禁挑战/执行失败的写步不产生真实修改
+            isIntercepted: diff.isIntercepted || step.status === "failed" || step.status === "challenged",
         };
         res.chip = chip;
         res.chips = [chip];
