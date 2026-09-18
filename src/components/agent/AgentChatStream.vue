@@ -1584,9 +1584,13 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
     while (i < rawSteps.length) {
         const step = rawSteps[i];
 
+        // 互斥兜底：本步 finding 将渲染时，thought 解说不再单独渲染（防同一步两段大白话）
+        const finding = (step.finding || '').trim();
+        const findingRenderable = !!finding && (step.findingKind === 'breakthrough' || step.findingKind === 'milestone' || step.findingKind === 'summary' || step.findingKind === 'start');
+
         // 叙述段落先于动作条目渲染；被 key 过滤掉的纯思维节拍，其叙述仍然保留；
         // 与上一条解说完全重复的叙述跳过——模型若逐步流水账也不至于刷屏
-        const narr = stepNarrative(step);
+        const narr = findingRenderable ? '' : stepNarrative(step);
         if (narr && narr !== lastNarrative) {
             lastNarrative = narr;
             const keyMoment = step.status === 'failed' || step.status === 'challenged'
@@ -1602,8 +1606,7 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
         }
 
         // 🌟 用户需求：关键突破/阶段总结/突破发现直接与开头总结一样展示为纯文本叙事段落，不加特效卡片与小标签
-        const finding = (step.finding || '').trim();
-        if (finding && (step.findingKind === 'breakthrough' || step.findingKind === 'milestone' || step.findingKind === 'summary' || step.findingKind === 'start')) {
+        if (findingRenderable) {
             const cleanFinding = finding.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
             if (cleanFinding && cleanFinding !== lastNarrative) {
                 lastNarrative = cleanFinding;
