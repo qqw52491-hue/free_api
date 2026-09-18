@@ -1544,6 +1544,11 @@ function isAmbientKeyStep(step: AgentStepItem): boolean {
         return true;
     }
 
+    // 2.5 模型显式标注的正向高光步（突破/里程碑/总结/起步），即使底层是普通读取/思考也提升为卡片
+    if ((step.finding || '').trim() && (step.findingKind === 'breakthrough' || step.findingKind === 'milestone' || step.findingKind === 'summary' || step.findingKind === 'start')) {
+        return true;
+    }
+
     // 3. 常规阶段结论/思考/计划不作为动作行展示 (由顶层 narrative 叙事段落统领，避免重复报账)
     if (!tool || tool === 'thought' || tool === 'thinking' || tool === 'plan' || tool === 'milestone' || tool === 'summary') {
         return false;
@@ -1687,6 +1692,35 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
             isWarning: true,
             isMilestone: false,
             tooltip: '风险预警 · 点击查看详情',
+        };
+    }
+
+    // 1.5 正向关键结论卡：模型显式标注的高光步，若有文件改动则挂为证据胶囊
+    if (explicitFinding && (kind === 'breakthrough' || kind === 'milestone' || kind === 'summary' || kind === 'start')) {
+        const kindLabel = kind === 'breakthrough' ? '关键突破'
+            : kind === 'summary' ? '阶段总结'
+            : kind === 'start' ? '起步进展'
+            : '里程碑';
+        const kindIcon = kind === 'breakthrough' ? '💡'
+            : kind === 'summary' ? '📌'
+            : kind === 'start' ? '🚀'
+            : '🎯';
+        const explanation = explicitFinding.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        const fileName = chip?.fileName || op.fileName;
+        return {
+            actionKind: 'milestone',
+            capsuleTitle: kindLabel,
+            iconEmoji: kindIcon,
+            fileName,
+            filePath: op.filePath || chip?.path,
+            iconKind: fileName ? 'code' : undefined,
+            additions: chip?.additions,
+            deletions: chip?.deletions,
+            chip,
+            explanation,
+            isWarning: false,
+            isMilestone: true,
+            tooltip: `${kindLabel} · 点击查看详情`,
         };
     }
 
