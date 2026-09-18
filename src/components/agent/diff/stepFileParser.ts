@@ -253,7 +253,20 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
         const commands = p && typeof p === "object"
             ? (Array.isArray(p.commands) ? p.commands : (Array.isArray(p.parallel) ? p.parallel : []))
             : [];
-        for (const entry of commands) {
+        // pipeline 熔断语义：route=pipeline_fail_at_K / "第 K 步崩溃"——
+        // K 之前的命令已真实落地，第 K 步未落地，K 之后从未执行（不算尝试）
+        const stepFailed = step.status === "failed" || step.status === "challenged";
+        let crashIdx = -1;
+        if (stepFailed) {
+            const text = `${step.result ?? ""}${step.rawResult ?? ""}`;
+            const m = text.match(/第\s*(\d+)\s*步崩溃/) || text.match(/pipeline_fail_at_(\d+)/);
+            if (m) crashIdx = parseInt(m[1], 10);
+        }
+        for (let ci = 0; ci < commands.length; ci++) {
+            const entry = commands[ci];
+            const ord = ci + 1;
+            if (stepFailed && crashIdx > 0 && ord > crashIdx) continue;
+            const cmdLanded = !stepFailed || (crashIdx > 0 ? ord < crashIdx : false);
             const cmd = entry && typeof entry === "object" ? entry.command : undefined;
             if (!cmd || typeof cmd !== "object") continue;
             const action = String(cmd.action || "").toLowerCase();
@@ -279,7 +292,7 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
                     oldContent,
                     newContent,
                     stepId: step.id,
-                    isIntercepted: step.status === "failed" || step.status === "challenged",
+                    isIntercepted: !cmdLanded,
                 });
             }
         }
