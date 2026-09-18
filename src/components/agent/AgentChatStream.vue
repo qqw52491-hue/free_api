@@ -319,15 +319,14 @@
                                         :title="item.action.tooltip"
                                         @click.stop="handleAmbientChipClick(item.step, item.action)"
                                     >
-                                        <!-- 1.1 动作类型微标 -->
-                                        <span v-if="item.action.actionKind === 'edit'" class="action-tag action-tag-edit">✏️ 编辑</span>
+                                        <!-- 1.1 动作类型微标 (有特定业务意图才显示，无修改不加'编辑'标签，通用操作不打'操作'标签) -->
+                                        <span v-if="item.action.actionKind === 'subagent'" class="action-tag action-tag-subagent">{{ item.action.subagentTag || '🤖 子代理' }}</span>
                                         <span v-else-if="item.action.actionKind === 'write'" class="action-tag action-tag-write">📄 新建</span>
                                         <span v-else-if="item.action.actionKind === 'read'" class="action-tag action-tag-read">📖 读取</span>
                                         <span v-else-if="item.action.actionKind === 'shell'" class="action-tag action-tag-shell">⚡ 终端</span>
                                         <span v-else-if="item.action.actionKind === 'search'" class="action-tag action-tag-search">🔍 检索</span>
                                         <span v-else-if="item.action.actionKind === 'web'" class="action-tag action-tag-web">{{ item.action.iconEmoji || '🌐' }} 网页</span>
                                         <span v-else-if="item.action.actionKind === 'mcp'" class="action-tag action-tag-mcp">🧩 MCP</span>
-                                        <span v-else class="action-tag action-tag-general">⚡ 操作</span>
 
                                         <!-- 1.2 专属语言/文件矢量图标 (FileIcon) -->
                                         <FileIcon
@@ -339,7 +338,7 @@
                                         />
 
                                         <!-- 1.3 核心文件名或命令 (milestone 类型标题已由动作标签渲染，避免重复) -->
-                                        <span v-if="item.action.actionKind !== 'milestone'" class="chip-file-name">{{ item.action.capsuleTitle }}</span>
+                                        <span v-if="item.action.actionKind !== 'milestone' && item.action.capsuleTitle" class="chip-file-name">{{ item.action.capsuleTitle }}</span>
 
                                         <!-- 1.4 所在目录简写 (如 src/bin/) -->
                                         <span v-if="item.action.filePath && getDirName(item.action.filePath)" class="chip-file-dir">
@@ -354,7 +353,7 @@
                                         <!-- 1.6 Diff 增删行微标 (如 +22 -163) -->
                                         <span v-if="(item.action.additions || 0) > 0" class="chip-diff-add">+{{ item.action.additions }}</span>
                                         <span v-if="(item.action.deletions || 0) > 0" class="chip-diff-del">−{{ item.action.deletions }}</span>
-                                        <span v-if="item.action.isIntercepted" class="chip-intercepted">已拦截</span>
+                                        <span v-if="item.action.isIntercepted" class="chip-intercepted">{{ item.action.actionKind === 'subagent' ? '未闭合' : '已拦截' }}</span>
                                     </span>
 
                                     <!-- 1.7 说明文字 -->
@@ -1417,7 +1416,8 @@ function hasFileOperation(step: AgentStepItem): boolean {
 }
 
 export interface AmbientActionDisplay {
-    actionKind: 'read' | 'edit' | 'write' | 'shell' | 'search' | 'web' | 'mcp' | 'milestone' | 'general';
+    actionKind: 'read' | 'edit' | 'write' | 'shell' | 'search' | 'web' | 'mcp' | 'milestone' | 'subagent' | 'general';
+    subagentTag?: string;
     capsuleTitle: string;
     fileName?: string;
     filePath?: string;
@@ -1721,16 +1721,103 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
         };
     }
 
-    // 2. 发生错误 / 门禁拦截 / 挑战失败
+    // 2. 子智能体审查与独立子任务 (Reviewer / Subagent / Child Worker / Child Writer)
+    // 🌟 核心保真：子审查拥有专属徽标与自身标识符号，绝不可误标为"编辑"或笼统"操作"
+    const isSubAgent = isSubAgentTool(step.tool) || isSubAgentTool(step.action) ||
+        op.badgeLabel === '子审查' || op.badgeLabel === '子代理' || op.badgeLabel === '子写入' || op.badgeLabel === '追问对质' ||
+        toolLower.includes('reviewer') || actionLower.includes('reviewer');
+
+    if (isSubAgent) {
+        const isReviewer = toolLower.includes('reviewer') || actionLower.includes('reviewer') || op.badgeLabel === '子审查';
+        const isWriter = toolLower.includes('writer') || actionLower.includes('writer') || op.badgeLabel === '子写入';
+        const isResume = toolLower.includes('resume') || op.badgeLabel === '追问对质';
+
+        let subagentTag = '🤖 子代理';
+        if (isReviewer) {
+            subagentTag = '🤖 子审查';
+        } else if (isWriter) {
+            subagentTag = '✍️ 子写入';
+        } else if (isResume) {
+            subagentTag = '🔄 追问对质';
+        } else {
+            const roleBadge = getSubAgentBadgeText(step);
+            if (roleBadge && roleBadge !== '子任务' && roleBadge.length <= 10) {
+                subagentTag = `🤖 ${roleBadge}`;
+            }
+        }
+
+        const isChallenged = step.status === 'challenged';
+        const isFailed = step.status === 'failed';
+        const isWarning = isChallenged || isFailed;
+
+        let explanation = explicitFinding || (desc && desc !== '执行操作' ? desc : '') || op.actionText || extractSubagentTask(step);
+        explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        explanation = explanation.replace(/^(子审查|子代理|审查|子任务|协同任务)[：:\s]*/i, '').trim();
+
+        const fileName = chip?.fileName || op.fileName;
+        // 如果没有特定目标文件，胶囊标题留空，避免和 subagentTag 重复显示
+        const capsuleTitle = fileName || '';
+
+        return {
+            actionKind: 'subagent',
+            subagentTag,
+            capsuleTitle,
+            fileName,
+            filePath: op.filePath || chip?.path,
+            iconKind: fileName ? 'code' : (isReviewer ? 'reviewer' : undefined),
+            iconEmoji: isReviewer ? '🤖' : undefined,
+            isIntercepted: isChallenged,
+            isWarning,
+            isMilestone: false,
+            chip,
+            additions: chip?.additions,
+            deletions: chip?.deletions,
+            hasDiff: !!(chip && ((chip.additions || 0) > 0 || (chip.deletions || 0) > 0)),
+            explanation,
+            tooltip: isChallenged ? '子审查提出质疑 / 门禁未闭合' : (isFailed ? '子任务执行失败' : (isReviewer ? '子智能体协同审查' : '子代理协同任务')),
+        };
+    }
+
+    // 3. 异步挂起等待 (Wait Jobs)
+    if (isWaitJobsTool(step.tool) || isWaitJobsTool(step.action)) {
+        return {
+            actionKind: 'subagent',
+            subagentTag: '⏳ 协同等待',
+            capsuleTitle: '',
+            explanation: desc && desc !== '执行操作' ? desc : op.actionText,
+            isWarning: step.status === 'failed',
+            isMilestone: false,
+            tooltip: '等待后台子任务完成',
+        };
+    }
+
+    // 4. 发生错误 / 门禁拦截 / 挑战失败 (非子代理的常规工具执行失败或拦截)
     if (step.status === 'failed' || step.status === 'challenged' || chip?.isIntercepted) {
         const fileName = chip?.fileName || op.fileName;
         const isInter = chip?.isIntercepted || step.status === 'challenged';
+
+        // 🌟 杜绝误标记：只有真正发生代码修改时才为 'edit'，其他工具保持自身语义或 general
+        let actualKind: AmbientActionDisplay['actionKind'] = 'general';
+        if (chip && ((chip.additions || 0) > 0 || (chip.deletions || 0) > 0)) {
+            actualKind = 'edit';
+        } else if (toolLower.includes('shell') || toolLower.includes('bash') || toolLower.includes('command')) {
+            actualKind = 'shell';
+        } else if (toolLower.includes('search') || toolLower.includes('grep')) {
+            actualKind = 'search';
+        } else if (step.source === 'MCP' || toolLower.startsWith('mcp_')) {
+            actualKind = 'mcp';
+        } else if (toolLower.includes('read') || toolLower.includes('view')) {
+            actualKind = 'read';
+        } else if (toolLower.includes('write') || toolLower.includes('create')) {
+            actualKind = 'write';
+        }
+
         return {
-            actionKind: 'edit',
-            capsuleTitle: fileName || op.badgeLabel || '操作拦截',
+            actionKind: actualKind,
+            capsuleTitle: fileName || op.badgeLabel || (isInter ? '门禁拦截' : '步骤异常'),
             fileName,
             filePath: op.filePath || chip?.path,
-            iconKind: fileName ? 'code' : 'reviewer',
+            iconKind: fileName ? 'code' : (actualKind === 'shell' ? 'terminal' : undefined),
             isIntercepted: isInter,
             isWarning: true,
             isMilestone: false,
@@ -1948,6 +2035,10 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
 function handleAmbientChipClick(step: AgentStepItem, action: AmbientActionDisplay) {
     if (action.hasDiff && action.chip && chipHasDiffContent(action.chip)) {
         emit('open-diff', diffPayloadFromChip(action.chip));
+        return;
+    }
+    if (action.actionKind === 'subagent') {
+        emit('open-team-deck', step.id);
         return;
     }
     emit('select-step', step.id);
@@ -2415,13 +2506,20 @@ const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimelineEntri
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败", challenged: "验证未闭合" }[status] || "未知"; }
 function isSubAgentTool(tool?: string): boolean {
     const t = (tool || "").toLowerCase();
-    return t.includes("child_reviewer") || t.includes("child_writer") || t.includes("child_worker") || t.includes("sub_agent");
+    return (
+        t.includes("child_reviewer") ||
+        t.includes("child_writer") ||
+        t.includes("child_worker") ||
+        t.includes("sub_agent") ||
+        t.includes("invoke_subagent") ||
+        t.includes("reviewer")
+    );
 }
 function getSubAgentBadgeText(step: any): string {
     const tool = (step?.tool || step?.action || "").toLowerCase();
-    const isReviewer = tool.includes("child_reviewer");
+    const isReviewer = tool.includes("child_reviewer") || tool.includes("reviewer");
     const isWriter = tool.includes("child_writer");
-    const isWorker = tool.includes("child_worker");
+    const isWorker = tool.includes("child_worker") || tool.includes("sub_agent");
     const defaultKindLabel = isReviewer ? "审查" : isWriter ? "写入" : isWorker ? "侦察" : "子任务";
 
     const params = step?.params || step?.params_summary;
@@ -2445,13 +2543,13 @@ function getSubAgentBadgeText(step: any): string {
     }
 
     if (roleLabel) {
-        if (roleLabel.length <= 14) {
+        if (roleLabel.length <= 10) {
             return `${roleLabel} · ${defaultKindLabel}`;
         }
         return roleLabel;
     }
 
-    return `子智能体 · ${defaultKindLabel}`;
+    return isReviewer ? "子审查" : isWriter ? "子写入" : "子代理";
 }
 function isWaitJobsTool(tool?: string): boolean {
     const t = (tool || "").toLowerCase();
