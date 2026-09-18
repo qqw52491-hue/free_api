@@ -241,15 +241,18 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
     }
 
     // -------------------------------------------------------------
-    // 1.5 pipeline 批量命令：params.commands[] 内嵌 local_file 等子命令，
-    //     逐条按嵌套 action 语义解析（edit/write/delete/read），否则批量写盘在托盘全隐形
+    // 1.5 pipeline/parallel 批量命令：params.commands[]|params.parallel[] 内嵌
+    //     local_file 等子命令，逐条按嵌套 action 语义解析（edit/write/delete/read），
+    //     否则批量写盘在托盘全隐形
     // -------------------------------------------------------------
-    if (t === "pipeline" || t.includes("pipeline")) {
+    if (t === "pipeline" || t === "parallel" || t.includes("pipeline") || t.includes("parallel")) {
         let p: any = step.params ?? step.rawParams;
         if (typeof p === "string") {
             try { p = JSON.parse(p); } catch { p = {}; }
         }
-        const commands = p && typeof p === "object" && Array.isArray(p.commands) ? p.commands : [];
+        const commands = p && typeof p === "object"
+            ? (Array.isArray(p.commands) ? p.commands : (Array.isArray(p.parallel) ? p.parallel : []))
+            : [];
         for (const entry of commands) {
             const cmd = entry && typeof entry === "object" ? entry.command : undefined;
             if (!cmd || typeof cmd !== "object") continue;

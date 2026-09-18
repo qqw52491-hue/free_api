@@ -776,7 +776,8 @@ export function extractStageChronologicalCapsules(steps: AgentStepItem[]): Stage
                 if (existing) {
                     existing.additions = (existing.additions || 0) + (chip.additions || 0);
                     existing.deletions = (existing.deletions || 0) + (chip.deletions || 0);
-                    if (chip.isIntercepted) existing.isIntercepted = true;
+                    // 与 aggregateFileChips 同语义：后续落地写入清除早期拦截态
+                    existing.isIntercepted = Boolean(existing.isIntercepted) && Boolean(chip.isIntercepted);
                     if (chip.rawDiff) existing.chip = chip;
                 } else {
                     capsules.push({
