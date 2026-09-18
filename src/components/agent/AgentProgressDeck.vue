@@ -3,7 +3,7 @@
         <div v-if="shouldShow" class="agent-progress-deck-wrap">
             <div class="agent-progress-deck" :class="{ 'is-running': isRunning, 'is-expanded': isExpanded }">
                 <!-- 头部状态摘要条 (极简顶栏) -->
-                <div class="deck-header" @click="toggleExpanded">
+                <div class="deck-header" @click="allActionItems.length > 3 && toggleExpanded()">
                     <div class="header-left">
                         <!-- 状态图标：进行中转圈，完成打勾，等待圆点 -->
                         <div class="status-icon-wrap">
@@ -24,8 +24,11 @@
                             <span v-if="isRunning && currentExecutingSubStep" class="status-sub">
                                 · {{ currentExecutingSubStep }}
                             </span>
-                            <span v-else-if="!isRunning && level1Todos.length > 0" class="status-sub">
-                                · {{ completedPlansCount }}/{{ level1Todos.length }} 阶段已达成
+                            <span v-else-if="allModifiedFiles.length > 0" class="status-sub">
+                                · 修改了 {{ allModifiedFiles.length }} 个文件
+                            </span>
+                            <span v-else-if="allActionItems.length > 0" class="status-sub">
+                                · 完成了 {{ allActionItems.length }} 项操作
                             </span>
                         </div>
                     </div>
@@ -46,20 +49,12 @@
                             </span>
                         </div>
 
-                        <!-- 展开/折叠箭头 -->
-                        <button type="button" class="deck-toggle-btn" :title="isExpanded ? '收起进度概括' : '展开进度概括'">
-                            <span class="toggle-count">{{ level1Todos.length > 0 ? `${completedPlansCount}/${level1Todos.length}` : '' }}</span>
-                            <svg viewBox="0 0 24 24" class="chevron-icon" :class="{ 'is-flipped': isExpanded }">
-                                <path d="m6 9 6 6 6-6" />
-                            </svg>
-                        </button>
-
                         <!-- 完成时的关闭按钮 -->
                         <button
                             v-if="!isRunning"
                             type="button"
                             class="deck-close-btn"
-                            title="隐藏任务进度"
+                            title="隐藏任务概括"
                             @click.stop="dismiss"
                         >
                             <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -67,173 +62,47 @@
                     </div>
                 </div>
 
-                <!-- 展开的大步骤概括列表 (纯最外层大阶段进度，无二级展开树) -->
-                <transition name="deck-expand">
+                <!-- 🌟 用户标杆：改动文件与关键动作托盘 (带多了隐藏、底部半透明遮罩与展开小箭头) -->
+                <div v-if="allActionItems.length > 0" class="deck-actions-viewport-wrap">
                     <div
-                        v-if="isExpanded && level1Todos.length > 0"
-                        ref="deckBodyRef"
-                        class="deck-body"
+                        class="deck-actions-viewport"
+                        :class="{ 'is-collapsed-mask': !isExpanded && allActionItems.length > 3 }"
                     >
-                        <div class="todolist-container">
-                            <div
-                                v-for="(todo, pIdx) in level1Todos"
-                                :key="todo.id || pIdx"
-                                class="stage-summary-card"
-                                :class="[
-                                    todo.status,
-                                    `state-${todo.stageState}`,
-                                    {
-                                        'is-stage-active-pulse': todo.isCurrent && isRunning,
-                                        'has-capsules': todo.capsules.length > 0
-                                    }
-                                ]"
-                            >
-                                <!-- 🌟 当前执行阶段专属流光穿梭层 (在那个阶段然后条条就闪烁流光) -->
-                                <div v-if="todo.isCurrent && isRunning" class="stage-shimmer-beam"></div>
-
-                                <!-- 第一行：大步骤状态、概括标题与耗时/进度 -->
-                                <div class="stage-card-row">
-                                    <div class="stage-status-icon">
-                                        <span v-if="todo.isCurrent && isRunning" class="manus-spinner mini"></span>
-                                        <span v-else-if="todo.status === 'succeeded'" class="stage-check-icon">✓</span>
-                                        <span v-else-if="todo.status === 'failed'" class="stage-fail-icon">✕</span>
-                                        <span v-else class="stage-dot-icon">○</span>
-                                    </div>
-
-                                    <div class="stage-title-wrap">
-                                        <span class="stage-title-text" :class="{ 'is-active-title': todo.isCurrent && isRunning }">
-                                            {{ getTodoDisplayTitle(todo, pIdx) }}
-                                        </span>
-                                        <span
-                                            v-if="todo.failureState === 'recovered'"
-                                            class="stage-fail-tag tag-recovered"
-                                            title="此阶段曾有子步骤失败，但随后已自动重试恢复成功"
-                                        >
-                                            已重试恢复
-                                        </span>
-                                        <span
-                                            v-else-if="todo.failureState === 'retrying'"
-                                            class="stage-fail-tag tag-retrying"
-                                            title="此阶段有步骤失败，正在重试恢复中"
-                                        >
-                                            失败重试中
-                                        </span>
-                                    </div>
-
-                                    <div class="stage-right-meta">
-                                        <span v-if="todo.isCurrent && isRunning" class="stage-live-badge">
-                                            <span class="live-blink-dot"></span>
-                                            执行中 · {{ currentStepDurationText }}
-                                        </span>
-                                        <span v-else class="stage-done-meta">
-                                            {{ getTodoMetaSummary(todo) }}
-                                        </span>
-                                    </div>
-                                </div>
-
-                                <!-- 第二行：阶段概括动作胶囊 (整洁单行排列，使用高质量矢量 FileIcon) -->
-                                <div v-if="todo.capsules.length > 0 || todo.status === 'succeeded'" class="stage-capsules-row">
-                                    <!-- 纯读取阶段徽标 -->
-                                    <span v-if="todo.capsules.length === 0" class="pill-pure-read">
-                                        <FileIcon kind="read" :size="12" class="capsule-file-icon" />
-                                        <span class="pill-text">本阶段无文件改动 (纯读取)</span>
-                                    </span>
-
-                                    <!-- 动作胶囊列表 (Excel、Word、PDF、代码修改、Reviewer、等待等) -->
-                                    <template v-else>
-                                        <template v-for="cap in todo.capsules.slice(0, 4)" :key="cap.id">
-                                            <!-- 1. 代码修改/新增 (带行数，点击快速打开 Diff) -->
-                                            <div
-                                                v-if="cap.kind === 'code'"
-                                                class="deck-chip clickable"
-                                                :title="cap.isIntercepted
-                                                    ? `${cap.label} · 写入已被门禁拦截（点击查看尝试内容）`
-                                                    : `${cap.label} · 点击查看代码改动`"
-                                                @click.stop="cap.chip && handleChipClick(todo, cap.chip)"
-                                            >
-                                                <FileIcon :name="cap.chip?.fileName || cap.label" kind="code" :size="12" class="capsule-file-icon" />
-                                                <span class="chip-name">{{ cap.label }}</span>
-                                                <span v-if="cap.additions && cap.additions > 0" class="chip-add">+{{ cap.additions }}</span>
-                                                <span v-if="cap.deletions && cap.deletions > 0" class="chip-del">−{{ cap.deletions }}</span>
-                                                <span v-if="cap.isIntercepted" class="chip-blocked">已拦截</span>
-                                            </div>
-
-                                            <!-- 2. Excel 数据表格产物 -->
-                                            <div
-                                                v-else-if="cap.kind === 'excel'"
-                                                class="deck-chip capsule-excel"
-                                                :class="{ clickable: !!cap.chip }"
-                                                :title="`Excel 数据表格: ${cap.label}`"
-                                                @click.stop="cap.chip && handleChipClick(todo, cap.chip)"
-                                            >
-                                                <FileIcon :name="cap.label" kind="excel" :size="12" class="capsule-file-icon" />
-                                                <span class="chip-name">{{ cap.label }}</span>
-                                                <span v-if="cap.additions && cap.additions > 0" class="chip-add">+{{ cap.additions }}</span>
-                                            </div>
-
-                                            <!-- 3. 文档 / 研报 -->
-                                            <div
-                                                v-else-if="cap.kind === 'doc'"
-                                                class="deck-chip capsule-doc"
-                                                :class="{ clickable: !!cap.chip }"
-                                                :title="`文档/研报: ${cap.label}`"
-                                                @click.stop="cap.chip && handleChipClick(todo, cap.chip)"
-                                            >
-                                                <FileIcon :name="cap.label" kind="doc" :size="12" class="capsule-file-icon" />
-                                                <span class="chip-name">{{ cap.label }}</span>
-                                                <span v-if="cap.additions && cap.additions > 0" class="chip-add">+{{ cap.additions }}</span>
-                                            </div>
-
-                                            <!-- 4. Reviewer 审查结论 -->
-                                            <span
-                                                v-else-if="cap.kind === 'reviewer'"
-                                                class="deck-chip-reviewer"
-                                                :class="{ 'is-fail': cap.verdict === 'fail' }"
-                                            >
-                                                <FileIcon kind="reviewer" :size="12" class="capsule-file-icon" />
-                                                <span class="chip-name">{{ cap.label }}</span>
-                                            </span>
-
-                                            <!-- 5. 挂起等待 -->
-                                            <span
-                                                v-else-if="cap.kind === 'wait'"
-                                                class="deck-chip-wait"
-                                            >
-                                                <FileIcon kind="wait" :size="12" class="capsule-file-icon" />
-                                                <span class="chip-name">{{ cap.label }}</span>
-                                            </span>
-
-                                            <!-- 6. 读取文件上下文 (带专属文件图标与微标签) -->
-                                            <div
-                                                v-else-if="cap.kind === 'read'"
-                                                class="deck-chip capsule-read"
-                                                :title="cap.tooltip || `读取上下文: ${cap.label}`"
-                                            >
-                                                <FileIcon :name="cap.label" :size="12" class="capsule-file-icon" />
-                                                <span class="chip-read-tag">读</span>
-                                                <span class="chip-name">{{ cap.label }}</span>
-                                            </div>
-
-                                            <!-- 7. 终端命令 / 其他工具动作 -->
-                                            <span
-                                                v-else
-                                                class="deck-chip-general"
-                                            >
-                                                <FileIcon :name="cap.label" :kind="cap.kind" :size="12" class="capsule-file-icon" />
-                                                <span class="chip-name">{{ cap.label }}</span>
-                                            </span>
-                                        </template>
-
-                                        <!-- 超出 4 个动作折叠徽标 -->
-                                        <span v-if="todo.capsules.length > 4" class="deck-chip-overflow" :title="`该阶段共涉及 ${todo.capsules.length} 项动作`">
-                                            +{{ todo.capsules.length - 4 }}
-                                        </span>
-                                    </template>
-                                </div>
-                            </div>
+                        <div
+                            v-for="item in (isExpanded ? allActionItems : allActionItems.slice(0, 10))"
+                            :key="item.id"
+                            class="deck-action-row"
+                            :class="{ 'is-clickable': !!item.chip }"
+                            :title="item.chip ? '点击查看代码改动对比' : undefined"
+                            @click="item.chip && $emit('open-diff', diffPayloadFromChip(item.chip))"
+                        >
+                            <FileIcon
+                                v-if="item.chip?.fileName"
+                                :name="item.chip.fileName"
+                                :size="12"
+                                class="action-row-file-icon"
+                            />
+                            <span v-else class="action-row-icon">{{ item.icon }}</span>
+                            <span class="action-row-text">{{ item.text }}</span>
+                            <span v-if="item.subText" class="action-row-sub">{{ item.subText }}</span>
+                            <span v-if="item.additions && item.additions > 0" class="chip-add">+{{ item.additions }}</span>
+                            <span v-if="item.deletions && item.deletions > 0" class="chip-del">−{{ item.deletions }}</span>
                         </div>
                     </div>
-                </transition>
+
+                    <!-- 底部渐隐折叠悬浮小箭头 (多了隐藏，点击展开更多) -->
+                    <button
+                        v-if="allActionItems.length > 3"
+                        type="button"
+                        class="deck-actions-expand-btn"
+                        :title="isExpanded ? '收起列表' : `展开全部 (${allActionItems.length} 项)`"
+                        @click.stop="toggleExpanded"
+                    >
+                        <svg viewBox="0 0 24 24" class="chevron-mini-icon" :class="{ 'is-flipped': isExpanded }">
+                            <path d="m6 9 6 6 6-6" />
+                        </svg>
+                    </button>
+                </div>
             </div>
         </div>
     </transition>
@@ -242,8 +111,18 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import type { AgentStepItem, AgentTokenUsage, AgentToolStatus, StageState, StageFailureState, FileChangeChip, FileDiffPayload, ReviewerVerdict, StageActionCapsule } from './types';
-import { diffPayloadFromChip, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, extractStageChronologicalCapsules } from './diffUtils';
+import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, extractStageChronologicalCapsules } from './diffUtils';
 import FileIcon from './FileIcon.vue';
+
+export interface DeckActionItem {
+    id: string;
+    icon: string;
+    text: string;
+    subText?: string;
+    chip?: FileChangeChip;
+    additions?: number;
+    deletions?: number;
+}
 
 export interface Level1TodoItem {
     id: string;
@@ -283,14 +162,95 @@ const props = defineProps<{
     planGate?: any;
 }>();
 
-const emit = defineEmits<{
+defineEmits<{
     (e: 'select-step', step: AgentStepItem): void;
     (e: 'open-diff', payload: FileDiffPayload): void;
 }>();
 
-const isExpanded = ref(true);
+const isExpanded = ref(false);
 const isDismissed = ref(false);
-const deckBodyRef = ref<HTMLElement | null>(null);
+
+const allModifiedFiles = computed<FileChangeChip[]>(() => {
+    const rawChips: FileChangeChip[] = [];
+    for (const step of props.steps || []) {
+        const changes = parseStepFileChanges(step);
+        if (changes.chip && ((changes.chip.additions || 0) > 0 || (changes.chip.deletions || 0) > 0 || changes.chip.actionKind === 'modify' || changes.chip.actionKind === 'create')) {
+            rawChips.push(changes.chip);
+        }
+        for (const c of changes.chips || []) {
+            if ((c.additions || 0) > 0 || (c.deletions || 0) > 0 || c.actionKind === 'modify' || c.actionKind === 'create') {
+                rawChips.push(c);
+            }
+        }
+    }
+    return aggregateFileChips(rawChips);
+});
+
+const allActionItems = computed<DeckActionItem[]>(() => {
+    const items: DeckActionItem[] = [];
+    const seenKeys = new Set<string>();
+
+    // 1. 优先列出真实改动/新增的文件 (高价值产物，点击可直接打开 Diff 视图)
+    for (const f of allModifiedFiles.value) {
+        const key = `file-${f.path || f.fileName}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        items.push({
+            id: key,
+            icon: f.actionKind === 'create' ? '✨' : '📄',
+            text: f.actionKind === 'create' ? `Created ${f.fileName}` : `Edited ${f.fileName}`,
+            subText: f.path && f.path !== f.fileName ? f.path : undefined,
+            chip: f,
+            additions: f.additions,
+            deletions: f.deletions,
+        });
+    }
+
+    // 2. 依次聚合步骤中的关键操作 (终端命令 Ran command:, 查看文件 Viewed:, 检索 Searched for:, MCP 等)
+    for (const s of props.steps || []) {
+        const op = formatStepOperation(s);
+        const changes = parseStepFileChanges(s);
+
+        // 如果这个步骤产生的改动文件已经在上面展示了，且无独立命令，则跳过避免重复
+        if (changes.chip && (changes.chip.additions || 0) > 0 && items.some(it => it.chip?.fileName === changes.chip?.fileName)) {
+            continue;
+        }
+
+        const rawTool = (s.tool || s.action || '').toLowerCase();
+        let formattedText = '';
+        let icon = op.badgeIcon || '⚡';
+
+        if (rawTool.includes('shell') || rawTool.includes('command') || rawTool.includes('run_command')) {
+            formattedText = op.actionText.startsWith('Ran command:') ? op.actionText : `Ran command: ${op.actionText}`;
+            icon = '⚡';
+        } else if (rawTool.includes('search') || rawTool.includes('grep')) {
+            formattedText = `Searched for ${op.actionText}`;
+            icon = '🔍';
+        } else if (rawTool.includes('view') || rawTool.includes('read')) {
+            formattedText = `Viewed ${op.actionText}`;
+            icon = '📖';
+        } else {
+            const desc = (s.description || '').replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+            formattedText = desc && desc !== '执行操作' ? desc : op.actionText;
+        }
+
+        if (!formattedText || formattedText === '执行下一步操作') continue;
+        const key = `action-${s.id}-${formattedText}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+
+        items.push({
+            id: key,
+            icon,
+            text: formattedText,
+            chip: changes.chip,
+            additions: changes.chip?.additions,
+            deletions: changes.chip?.deletions,
+        });
+    }
+
+    return items;
+});
 
 // 计时器
 const stepStartTime = ref<number>(Date.now());
@@ -340,35 +300,6 @@ function toggleExpanded() {
 
 function dismiss() {
     isDismissed.value = true;
-}
-
-function getTodoDisplayTitle(todo: Level1TodoItem, idx: number): string {
-    return formatStageTitle(todo.title, idx + 1);
-}
-
-function getTodoMetaSummary(todo: Level1TodoItem): string {
-    const parts: string[] = [];
-    parts.push(`${todo.steps.length} 步`);
-    if (todo.searchCount > 0) parts.push(`搜 ${todo.searchCount}`);
-    if (todo.readCount > 0) parts.push(`读 ${todo.readCount}`);
-    if (todo.fileChips.length > 0) parts.push(`${todo.fileChips.length} 改动`);
-    if (todo.durationMs > 0) parts.push(formatStageDuration(todo.durationMs));
-    return parts.join(' · ');
-}
-
-/**
- * Chip 点击：有真实 Diff 内容 → 打开 Diff；否则选中该步骤
- */
-function handleChipClick(todo: Level1TodoItem, chip: FileChangeChip | undefined) {
-    if (!chip) return;
-    if (chipHasDiffContent(chip)) {
-        emit('open-diff', diffPayloadFromChip(chip));
-        return;
-    }
-    const step = todo.steps.find(s => s.id === chip.stepId);
-    if (step) {
-        emit('select-step', step);
-    }
 }
 
 // -----------------------------------------------------------------------------
@@ -541,9 +472,6 @@ const gateBadge = computed(() => {
 
 const headerTitle = computed(() => {
     if (props.isRunning) {
-        if (level1Todos.value.length > 0) {
-            return `任务进度 (${completedPlansCount.value}/${level1Todos.value.length})`;
-        }
         return props.isThinking ? '思考规划中...' : '执行任务中...';
     }
     if (props.sessionTitle) {
@@ -553,10 +481,13 @@ const headerTitle = computed(() => {
         const firstLine = props.summary.split('\n')[0].replace(/^[#*\-•\s`>]+/, '').trim();
         if (firstLine && firstLine.length <= 35) return firstLine;
     }
-    if (level1Todos.value.length > 0) {
-        return `任务达成 (${level1Todos.value.length} 个阶段已完成)`;
+    if (allModifiedFiles.value.length > 0) {
+        return `已完成 · 修改了 ${allModifiedFiles.value.length} 个文件`;
     }
-    return '就绪';
+    if (allActionItems.value.length > 0) {
+        return `已完成 · 执行了 ${allActionItems.value.length} 项操作`;
+    }
+    return '执行完成';
 });
 
 const currentStepDurationText = computed(() => {
@@ -638,6 +569,124 @@ function formatDurationMs(ms?: number): string | null {
 .agent-progress-deck.is-running {
     border-color: rgba(99, 102, 241, 0.3);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), 0 0 1px rgba(99, 102, 241, 0.3);
+}
+
+/* 🌟 改动文件与关键动作托盘 */
+.deck-actions-viewport-wrap {
+    position: relative;
+    padding: 6px 12px 10px;
+    background: rgba(0, 0, 0, 0.25);
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.deck-actions-viewport {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    max-height: 280px;
+    overflow-y: auto;
+    transition: max-height 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 溢出折叠渐变遮罩 (多了隐藏) */
+.deck-actions-viewport.is-collapsed-mask {
+    max-height: 84px;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, #000 45%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 45%, transparent 100%);
+}
+
+.deck-action-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2.5px 6px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: #cbd5e1;
+    user-select: text;
+    transition: background 0.12s ease;
+}
+
+.deck-action-row.is-clickable {
+    cursor: pointer;
+}
+
+.deck-action-row.is-clickable:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: #38bdf8;
+}
+
+.action-row-icon {
+    font-size: 11px;
+    flex-shrink: 0;
+    opacity: 0.85;
+}
+
+.action-row-text {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    font-weight: 500;
+    color: #e2e8f0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.action-row-sub {
+    font-size: 10px;
+    color: #64748b;
+    margin-left: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 180px;
+}
+
+/* 底部居中悬浮展开小箭头按钮 */
+.deck-actions-expand-btn {
+    position: absolute;
+    bottom: 3px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 18px;
+    background: #27272a;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 10px;
+    color: #94a3b8;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+    transition: all 0.15s ease;
+    z-index: 2;
+}
+
+.deck-actions-expand-btn:hover {
+    background: #3f3f46;
+    color: #f1f5f9;
+    border-color: rgba(255, 255, 255, 0.25);
+    transform: translateX(-50%) scale(1.08);
+}
+
+.chevron-mini-icon {
+    width: 12px;
+    height: 12px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: transform 0.2s ease;
+}
+
+.chevron-mini-icon.is-flipped {
+    transform: rotate(180deg);
 }
 
 /* 顶栏 (精简紧凑高度) */

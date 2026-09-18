@@ -998,21 +998,81 @@
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
+/* 🌟 环境感知叙事流包装器 (支持超长步骤溢出渐变折叠与居中展开小箭头) */
+.ambient-plan-stream-wrap {
+    position: relative;
+    width: 100%;
+}
+
 /* 🌟 环境感知叙事流容器 (紧凑高信噪比) */
 .ambient-plan-stream {
     display: flex;
     flex-direction: column;
     gap: 3px;
-    padding: 2px 0;
+    padding: 2px 0 8px;
     width: 100%;
+    transition: max-height 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 溢出折叠渐变遮罩 (多了隐藏，契合截图标杆) */
+.ambient-plan-stream.is-collapsed-mask {
+    max-height: 180px;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, #000 50%, rgba(0, 0, 0, 0.35) 75%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 50%, rgba(0, 0, 0, 0.35) 75%, transparent 100%);
+}
+
+/* 底部居中悬浮展开小箭头按钮 */
+.ambient-stream-expand-btn {
+    position: absolute;
+    bottom: -5px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 18px;
+    background: rgba(30, 30, 34, 0.88);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    color: #94a3b8;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    transition: all 0.15s ease;
+    z-index: 5;
+}
+
+.ambient-stream-expand-btn:hover {
+    background: #3f3f46;
+    color: #f1f5f9;
+    border-color: rgba(255, 255, 255, 0.28);
+    transform: translateX(-50%) scale(1.08);
+}
+
+.chevron-mini-icon {
+    width: 12px;
+    height: 12px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: transform 0.2s ease;
+}
+
+.chevron-mini-icon.is-flipped {
+    transform: rotate(180deg);
 }
 
 /* 🌟 阶段解说段落 (每轮 thought 叙述：第一人称自然语言，Devin/Cursor 式叙事节拍，统领全局) */
 .ambient-narrative {
-    margin: 10px 4px 5px;
+    margin: 7px 4px 3px;
     padding: 0 0 0 2px;
-    font-size: 13.5px;
-    line-height: 1.68;
+    font-size: 13px;
+    line-height: 1.58;
+    font-weight: 500;
     color: #f1f5f9;
     white-space: pre-wrap;
     word-break: break-word;
@@ -1047,11 +1107,12 @@
 /* 🌟 环境感知动作行 (Cursor 级超低视觉负担、紧凑内敛动作行，无厚重边框与喧宾夺主背景) */
 .ambient-text-row {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
     gap: 8px;
     width: 100%;
-    padding: 2px 6px;
+    padding: 2.5px 6px;
+    min-height: 24px;
     border-radius: 4px;
     font-size: 11.5px;
     line-height: 1.4;
@@ -1291,8 +1352,9 @@
     font-weight: 500;
 }
 
-/* 🌟 连续检索智能微折叠卡片 (高信噪比收拢连续搜索) */
-.ambient-search-group {
+/* 🌟 连续动作智能微折叠卡片 (高信噪比收拢连续搜索与连续 MCP 工具调用) */
+.ambient-search-group,
+.ambient-action-group {
     display: flex;
     flex-direction: column;
     width: 100%;
@@ -1300,23 +1362,27 @@
     transition: background 0.15s ease;
 }
 
-.ambient-search-group-header {
+.ambient-search-group-header,
+.ambient-action-group-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 2px 6px;
+    padding: 2.5px 6px;
+    min-height: 24px;
     border-radius: 4px;
     cursor: pointer;
     transition: background 0.12s ease;
     user-select: none;
 }
 
-.ambient-search-group-header:hover {
+.ambient-search-group-header:hover,
+.ambient-action-group-header:hover {
     background: rgba(255, 255, 255, 0.035);
 }
 
-.search-group-left {
+.search-group-left,
+.action-group-left {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -1325,7 +1391,8 @@
     overflow: hidden;
 }
 
-.search-group-summary {
+.search-group-summary,
+.action-group-summary {
     font-size: 11.5px;
     color: #94a3b8;
     overflow: hidden;
@@ -1343,14 +1410,16 @@
     flex-shrink: 0;
 }
 
-.search-group-right {
+.search-group-right,
+.action-group-right {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
 }
 
-.search-group-toggle-btn {
+.search-group-toggle-btn,
+.action-group-toggle-btn {
     display: inline-flex;
     align-items: center;
     gap: 3px;
@@ -1364,21 +1433,25 @@
     transition: all 0.15s ease;
 }
 
-.search-group-toggle-btn:hover {
+.search-group-toggle-btn:hover,
+.action-group-toggle-btn:hover {
     color: #94a3b8;
     background: rgba(255, 255, 255, 0.07);
     border-color: rgba(255, 255, 255, 0.12);
 }
 
-.search-group-toggle-btn svg {
+.search-group-toggle-btn svg,
+.action-group-toggle-btn svg {
     transition: transform 0.2s ease;
 }
 
-.search-group-toggle-btn svg.rotate-180 {
+.search-group-toggle-btn svg.rotate-180,
+.action-group-toggle-btn svg.rotate-180 {
     transform: rotate(180deg);
 }
 
-.ambient-search-group-list {
+.ambient-search-group-list,
+.ambient-action-group-list {
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -1387,7 +1460,8 @@
     border-left: 1.5px solid rgba(255, 255, 255, 0.06);
 }
 
-.ambient-search-sub-row {
+.ambient-search-sub-row,
+.ambient-action-sub-row {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -1399,12 +1473,14 @@
     transition: background 0.1s ease;
 }
 
-.ambient-search-sub-row:hover {
+.ambient-search-sub-row:hover,
+.ambient-action-sub-row:hover {
     background: rgba(255, 255, 255, 0.03);
     color: #cbd5e1;
 }
 
-.search-sub-bullet {
+.search-sub-bullet,
+.action-sub-bullet {
     color: #475569;
     font-size: 12px;
     line-height: 1;
@@ -1417,13 +1493,19 @@
     flex-shrink: 0;
 }
 
-.search-sub-title {
+.search-sub-title,
+.action-sub-title {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
+    color: #c084fc;
+}
+
+.search-sub-title {
     color: #94a3b8;
 }
 
-.search-sub-body {
+.search-sub-body,
+.action-sub-body {
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;

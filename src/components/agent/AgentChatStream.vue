@@ -282,8 +282,12 @@
                         }
                     ]"
                 >
-                    <!-- 🌟 模式 A：极简高信噪比动作流 (融合智谱纯净度与精美矢量图标，去除厚重光框与连续检索噪音) -->
-                    <div v-if="streamViewMode === 'ambient'" class="ambient-plan-stream">
+                    <!-- 🌟 模式 A：极简高信噪比动作流 (融合智谱纯净度与精美矢量图标，支持超长步骤智能折叠与底部渐隐) -->
+                    <div v-if="streamViewMode === 'ambient'" class="ambient-plan-stream-wrap">
+                        <div
+                            class="ambient-plan-stream"
+                            :class="{ 'is-collapsed-mask': shouldCollapseAmbientStream(entry) }"
+                        >
                         <template v-for="item in getAmbientDisplayItems(entry)" :key="item.id">
                             <!-- 0. 阶段解说段落 (每轮 thought 叙述：学到什么/当前判断/下一步意图) -->
                             <p
@@ -319,7 +323,7 @@
                                         :title="item.action.tooltip"
                                         @click.stop="handleAmbientChipClick(item.step, item.action)"
                                     >
-                                        <!-- 1.1 动作类型微标 (有特定业务意图才显示，无修改不加'编辑'标签，通用操作不打'操作'标签) -->
+                                        <!-- 1.1 动作类型微标 (有特定业务意图才显示，无修改不加'编辑'标签，通用操作统一兜底保证左侧垂直扫描对齐) -->
                                         <span v-if="item.action.actionKind === 'subagent'" class="action-tag action-tag-subagent">{{ item.action.subagentTag || '🤖 子代理' }}</span>
                                         <span v-else-if="item.action.actionKind === 'write'" class="action-tag action-tag-write">📄 新建</span>
                                         <span v-else-if="item.action.actionKind === 'read'" class="action-tag action-tag-read">📖 读取</span>
@@ -327,18 +331,19 @@
                                         <span v-else-if="item.action.actionKind === 'search'" class="action-tag action-tag-search">🔍 检索</span>
                                         <span v-else-if="item.action.actionKind === 'web'" class="action-tag action-tag-web">{{ item.action.iconEmoji || '🌐' }} 网页</span>
                                         <span v-else-if="item.action.actionKind === 'mcp'" class="action-tag action-tag-mcp">🧩 MCP</span>
+                                        <span v-else class="action-tag action-tag-general">⚡ 操作</span>
 
-                                        <!-- 1.2 专属语言/文件矢量图标 (FileIcon) -->
+                                        <!-- 1.2 专属语言/文件矢量图标 (FileIcon，过滤占位文件名避免出现假标签) -->
                                         <FileIcon
-                                            v-if="item.action.fileName || item.action.iconKind"
-                                            :name="item.action.fileName || ''"
+                                            v-if="item.action.fileName && item.action.fileName !== '新文件' && item.action.fileName !== '文件内容' && item.action.fileName !== '代码变更'"
+                                            :name="item.action.fileName"
                                             :kind="item.action.iconKind || ''"
                                             :size="12"
                                             class="chip-file-icon"
                                         />
 
-                                        <!-- 1.3 核心文件名或命令 (milestone 类型标题已由动作标签渲染，避免重复) -->
-                                        <span v-if="item.action.actionKind !== 'milestone' && item.action.capsuleTitle" class="chip-file-name">{{ item.action.capsuleTitle }}</span>
+                                        <!-- 1.3 核心文件名或命令 (milestone 类型标题已由动作标签渲染，避免重复；过滤占位名) -->
+                                        <span v-if="item.action.actionKind !== 'milestone' && item.action.capsuleTitle && item.action.capsuleTitle !== '新文件' && item.action.capsuleTitle !== '文件内容' && item.action.capsuleTitle !== '代码变更'" class="chip-file-name">{{ item.action.capsuleTitle }}</span>
 
                                         <!-- 1.4 所在目录简写 (如 src/bin/) -->
                                         <span v-if="item.action.filePath && getDirName(item.action.filePath)" class="chip-file-dir">
@@ -413,6 +418,46 @@
                                     </article>
                                 </div>
                             </div>
+
+                            <!-- 2.5 连续 MCP 操作智能微折叠卡片 (高信噪比收拢连续工具调用) -->
+                            <div
+                                v-else-if="item.type === 'mcp-group'"
+                                class="ambient-action-group ambient-mcp-group"
+                                :class="{ 'is-expanded': isMcpGroupExpanded(item.id) }"
+                            >
+                                <div class="ambient-action-group-header" @click="toggleMcpGroup(item.id)">
+                                    <div class="action-group-left">
+                                        <span class="action-tag action-tag-mcp">🧩 MCP</span>
+                                        <span class="action-group-summary">{{ item.summary }}</span>
+                                        <span v-if="item.durationBadge" class="chip-duration">{{ item.durationBadge }}</span>
+                                    </div>
+                                    <div class="action-group-right">
+                                        <button type="button" class="action-group-toggle-btn" @click.stop="toggleMcpGroup(item.id)">
+                                            <span>{{ isMcpGroupExpanded(item.id) ? '收起明细' : `展开 ${item.count} 项操作` }}</span>
+                                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" :class="{ 'rotate-180': isMcpGroupExpanded(item.id) }">
+                                                <polyline points="6 9 12 15 18 9" />
+                                            </svg>
+                                        </button>
+                                        <time class="ambient-text-time">{{ formatClock(item.timestamp) }}</time>
+                                    </div>
+                                </div>
+
+                                <!-- 展开后的 MCP 明细列表 -->
+                                <div v-if="isMcpGroupExpanded(item.id)" class="ambient-action-group-list">
+                                    <article
+                                        v-for="subStep in item.steps"
+                                        :key="subStep.id"
+                                        class="ambient-action-sub-row"
+                                        @click="$emit('select-step', subStep.id)"
+                                    >
+                                        <span class="action-sub-bullet">·</span>
+                                        <span class="action-sub-title">{{ getAmbientAction(subStep).capsuleTitle }}</span>
+                                        <span v-if="getAmbientAction(subStep).capsuleBadge" class="chip-line-range mini">{{ getAmbientAction(subStep).capsuleBadge }}</span>
+                                        <span class="action-sub-body">{{ getAmbientAction(subStep).explanation }}</span>
+                                        <time class="ambient-text-time mini">{{ formatClock(subStep.timestamp) }}</time>
+                                    </article>
+                                </div>
+                            </div>
                         </template>
 
                         <!-- 正在思考与实时推进流 (带脑部图标、流光滚动、大字号、可折叠展开) -->
@@ -471,6 +516,20 @@
                                 </div>
                             </Transition>
                         </div>
+                        </div>
+
+                        <!-- 底部渐隐折叠悬浮小箭头 (多了隐藏，点击展开更多，完全契合用户标杆截图) -->
+                        <button
+                            v-if="getAmbientDisplayItems(entry).length > 5 && !isPlanRunning(entry)"
+                            type="button"
+                            class="ambient-stream-expand-btn"
+                            :title="isAmbientStreamExpanded(entry.id) ? '收起动作明细' : `展开全部 (${getAmbientDisplayItems(entry).length} 项动作)`"
+                            @click.stop="toggleAmbientStreamExpand(entry.id)"
+                        >
+                            <svg viewBox="0 0 24 24" class="chevron-mini-icon" :class="{ 'is-flipped': isAmbientStreamExpanded(entry.id) }">
+                                <path d="m6 9 6 6 6-6" />
+                            </svg>
+                        </button>
                     </div>
 
                     <!-- 🌟 模式 B：工程全量链路 (保留原有的阶段卡片、顶栏条条与折叠展开树) -->
@@ -976,8 +1035,13 @@
                             </button>
                         </div>
                     </div>
-                    <div class="summary-rich" :class="{ 'is-streaming-text': isRunning && entry.id === 'live-completion' }">
-                        <RichContentRenderer :content="entry.summary || entry.title" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
+                    <div
+                        class="summary-rich"
+                        :class="{ 'is-streaming-text': isStreamingCompletion(entry) }"
+                        title="点击可直接瞬间完成渐显"
+                        @click="finishTypewriterInstantly(entry.id, entry.summary || entry.title)"
+                    >
+                        <RichContentRenderer :content="getCompletionDisplayText(entry)" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
                     </div>
                     <div v-if="entry.artifacts && entry.artifacts.length" class="final-artifacts">
                         <ArtifactList
@@ -1018,6 +1082,7 @@ import CollapsibleUserText from "./CollapsibleUserText.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
 import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule } from "./types";
 import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtLineInfo } from "./diffUtils";
+import type { StepOperationDisplay } from "./diff/toolOperation";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
 import { formatClock, formatDurationSeconds, formatMilliseconds, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
@@ -1396,6 +1461,80 @@ function handleActionCardClick(step: AgentStepItem) {
     emit('select-step', step.id);
 }
 
+// 🌟 终态交付 Markdown 丝滑流式打字渐显 (Typewriter Stream Reveal)
+const typewriterTexts = reactive<Record<string, string>>({});
+const typewriterDoneIds = new Set<string>();
+const typewriterAnimFrames = new Map<string, number>();
+
+function getCompletionDisplayText(entry: { id: string; summary?: string; title?: string }): string {
+    const fullText = entry.summary || entry.title || '';
+    if (!fullText) return '';
+
+    // 若已经完成过动画，直接返回全文
+    if (typewriterDoneIds.has(entry.id)) {
+        return fullText;
+    }
+
+    // 若正在打字中，返回已输出的部分
+    if (typewriterTexts[entry.id] !== undefined) {
+        return typewriterTexts[entry.id];
+    }
+
+    // 短文本（小于 25 字）直接显示，不开启打字动画
+    if (fullText.length < 25) {
+        typewriterDoneIds.add(entry.id);
+        return fullText;
+    }
+
+    // 启动流式打字渐显
+    startTypewriter(entry.id, fullText);
+    return typewriterTexts[entry.id] || '';
+}
+
+function isStreamingCompletion(entry: { id: string }): boolean {
+    return (props.isRunning && entry.id === 'live-completion') || (!typewriterDoneIds.has(entry.id) && !!typewriterTexts[entry.id]);
+}
+
+function finishTypewriterInstantly(id: string, fullText?: string) {
+    if (typewriterAnimFrames.has(id)) {
+        cancelAnimationFrame(typewriterAnimFrames.get(id)!);
+        typewriterAnimFrames.delete(id);
+    }
+    typewriterDoneIds.add(id);
+    if (fullText) {
+        typewriterTexts[id] = fullText;
+    }
+}
+
+function startTypewriter(id: string, fullText: string) {
+    if (typewriterAnimFrames.has(id)) return;
+    typewriterTexts[id] = '';
+    const totalChars = fullText.length;
+    // 渐显时间控制在 0.6s ~ 1.1s，丝滑舒展且绝不拖泥带水
+    const durationMs = Math.min(1100, Math.max(500, totalChars * 2));
+    const startTime = performance.now();
+
+    function frame(now: number) {
+        const elapsed = now - startTime;
+        const progress = Math.min(1, elapsed / durationMs);
+        // 先快后微减速的自然流光手感
+        const eased = 1 - Math.pow(1 - progress, 2);
+        const count = Math.max(1, Math.floor(eased * totalChars));
+        typewriterTexts[id] = fullText.slice(0, count);
+
+        if (progress < 1) {
+            const handle = requestAnimationFrame(frame);
+            typewriterAnimFrames.set(id, handle);
+        } else {
+            typewriterTexts[id] = fullText;
+            typewriterDoneIds.add(id);
+            typewriterAnimFrames.delete(id);
+        }
+    }
+    const handle = requestAnimationFrame(frame);
+    typewriterAnimFrames.set(id, handle);
+}
+
 /** 操作卡片悬浮提示 */
 function actionCardTitle(step: AgentStepItem): string {
     const chip = getStepMiniChip(step);
@@ -1454,6 +1593,16 @@ export interface AmbientSearchGroupDisplay {
     timestamp: number;
 }
 
+export interface AmbientMcpGroupDisplay {
+    type: 'mcp-group';
+    id: string;
+    steps: AgentStepItem[];
+    count: number;
+    summary: string;
+    durationBadge?: string;
+    timestamp: number;
+}
+
 export interface AmbientNarrativeDisplay {
     type: 'narrative' | 'narrative-mini';
     id: string;
@@ -1461,7 +1610,7 @@ export interface AmbientNarrativeDisplay {
     timestamp?: number;
 }
 
-export type AmbientDisplayItem = AmbientStepItemDisplay | AmbientSearchGroupDisplay | AmbientNarrativeDisplay;
+export type AmbientDisplayItem = AmbientStepItemDisplay | AmbientSearchGroupDisplay | AmbientMcpGroupDisplay | AmbientNarrativeDisplay;
 
 const expandedSearchGroupIds = reactive(new Set<string>());
 
@@ -1475,6 +1624,40 @@ function toggleSearchGroup(groupId: string) {
 
 function isSearchGroupExpanded(groupId: string): boolean {
     return expandedSearchGroupIds.has(groupId);
+}
+
+const expandedMcpGroupIds = reactive(new Set<string>());
+
+function toggleMcpGroup(groupId: string) {
+    if (expandedMcpGroupIds.has(groupId)) {
+        expandedMcpGroupIds.delete(groupId);
+    } else {
+        expandedMcpGroupIds.add(groupId);
+    }
+}
+
+function isMcpGroupExpanded(groupId: string): boolean {
+    return expandedMcpGroupIds.has(groupId);
+}
+
+// -----------------------------------------------------------------------------
+// 🌟 环境感知动作流卡片折叠与展开 (契合多了隐藏、底部渐隐遮罩与居中展开小箭头)
+// -----------------------------------------------------------------------------
+const expandedAmbientStreamMap = ref<Record<string, boolean>>({});
+
+function isAmbientStreamExpanded(entryId: string): boolean {
+    return !!expandedAmbientStreamMap.value[entryId];
+}
+
+function toggleAmbientStreamExpand(entryId: string) {
+    expandedAmbientStreamMap.value[entryId] = !expandedAmbientStreamMap.value[entryId];
+}
+
+function shouldCollapseAmbientStream(entry: PlanEntry): boolean {
+    if (isAmbientStreamExpanded(entry.id)) return false;
+    if (isPlanRunning(entry)) return false;
+    const items = getAmbientDisplayItems(entry);
+    return items.length > 5;
 }
 
 function getDirName(filePath?: string): string {
@@ -1529,6 +1712,46 @@ function buildSearchGroupSummary(steps: AgentStepItem[]): { summary: string; tar
 
     const querySample = queryTerms.slice(0, 3).join(', ');
     return { summary, targetFiles, querySample };
+}
+
+function buildMcpGroupSummary(steps: AgentStepItem[]): { summary: string } {
+    const titles: string[] = [];
+    const explanations: string[] = [];
+
+    for (const s of steps) {
+        const action = getAmbientAction(s);
+        if (action.capsuleTitle && action.capsuleTitle !== 'MCP 工具' && action.capsuleTitle !== '操作' && !titles.includes(action.capsuleTitle)) {
+            titles.push(action.capsuleTitle);
+        }
+        let desc = (s.description || '').replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+        if (desc && desc !== '执行操作' && !explanations.includes(desc)) {
+            explanations.push(desc);
+        }
+    }
+
+    let summary = '';
+    if (explanations.length > 0) {
+        summary = explanations[0];
+        if (steps.length > 1) {
+            summary += ` 等 ${steps.length} 项操作`;
+        }
+    } else if (titles.length > 0) {
+        summary = `${titles.slice(0, 2).join('、')} 等 ${steps.length} 项操作`;
+    } else {
+        summary = `执行 ${steps.length} 项 MCP 工具操作`;
+    }
+    return { summary };
+}
+
+function isMcpStep(step: AgentStepItem, op?: StepOperationDisplay): boolean {
+    if (!step) return false;
+    if (step.source === 'MCP') return true;
+    if (op?.badgeIcon === '🧩' || op?.badgeLabel === 'MCP') return true;
+    const t = (step.tool || '').toLowerCase();
+    const act = (step.action || '').toLowerCase();
+    if (t.startsWith('mcp_') || t.includes('/') || act.startsWith('mcp_') || act.includes('/')) return true;
+    if (t.includes('worksheet') || t.includes('workbook') || t.includes('format_range') || t.includes('create_workbook') || t.includes('get_workbook')) return true;
+    return false;
 }
 
 function isAmbientKeyStep(step: AgentStepItem): boolean {
@@ -1659,6 +1882,49 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
                     querySample,
                     durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
                     timestamp: searchSteps[searchSteps.length - 1].timestamp || step.timestamp,
+                });
+                if (narrativeCooldown > 0) narrativeCooldown--;
+                i = j;
+                continue;
+            }
+        }
+
+        // 连续 MCP 工具微折叠：将连续 >= 2 个无 narrative 的 MCP 操作汇聚收拢
+        if (action.actionKind === 'mcp') {
+            const mcpSteps: AgentStepItem[] = [step];
+            let j = i + 1;
+            while (j < rawSteps.length) {
+                const nextStep = rawSteps[j];
+                if (!isAmbientKeyStep(nextStep)) {
+                    if (stepNarrative(nextStep)) break;
+                    j++;
+                    continue;
+                }
+                if (getAmbientAction(nextStep).actionKind === 'mcp' && !stepNarrative(nextStep)) {
+                    mcpSteps.push(nextStep);
+                    j++;
+                } else {
+                    break;
+                }
+            }
+
+            if (mcpSteps.length >= 2) {
+                const groupId = `mcp-group-${entry.id}-${step.id}-${mcpSteps.length}`;
+                const { summary } = buildMcpGroupSummary(mcpSteps);
+
+                let totalDurationMs = 0;
+                for (const s of mcpSteps) {
+                    if (s.metrics?.toolDurationMs) totalDurationMs += s.metrics.toolDurationMs;
+                }
+
+                items.push({
+                    type: 'mcp-group',
+                    id: groupId,
+                    steps: mcpSteps,
+                    count: mcpSteps.length,
+                    summary,
+                    durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
+                    timestamp: mcpSteps[mcpSteps.length - 1].timestamp || step.timestamp,
                 });
                 if (narrativeCooldown > 0) narrativeCooldown--;
                 i = j;
@@ -1807,7 +2073,7 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
             actualKind = 'shell';
         } else if (toolLower.includes('search') || toolLower.includes('grep')) {
             actualKind = 'search';
-        } else if (step.source === 'MCP' || toolLower.startsWith('mcp_')) {
+        } else if (isMcpStep(step, op)) {
             actualKind = 'mcp';
         } else if (toolLower.includes('read') || toolLower.includes('view')) {
             actualKind = 'read';
@@ -1999,7 +2265,7 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
     }
 
     // 9. MCP 工具调用
-    if (step.source === 'MCP' || toolLower.startsWith('mcp_') || toolLower.includes('/')) {
+    if (isMcpStep(step, op)) {
         const title = op.badgeLabel || step.tool || 'MCP 工具';
         let explanation = desc && desc !== '执行操作' ? desc : op.actionText;
         explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
