@@ -57,6 +57,23 @@
                 >
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>
                 </button>
+                <!-- 👥 多 Agent 协同快捷入口 (存在 Worker 时亮起) -->
+                <button
+                    v-if="session.teamState.value && session.teamState.value.workers && session.teamState.value.workers.length > 0"
+                    class="icon-control team-toggle-btn"
+                    :class="{ active: !inspectorCollapsed && inspectorRef?.activeTab === 'team' }"
+                    type="button"
+                    :title="`查看协作 Worker (${session.teamState.value.workers.length} 个) · 点击在右侧面板打开`"
+                    @click="handleOpenTeamDeck()"
+                >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="9" cy="7" r="4"></circle>
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                    </svg>
+                    <span class="team-badge-num">{{ session.teamState.value.workers.length }}</span>
+                </button>
                 <button
                     class="icon-control preview-toggle-btn"
                     :class="{ active: !inspectorCollapsed }"
@@ -78,73 +95,40 @@
             :style="{ gridTemplateColumns: inspectorCollapsed ? 'minmax(0, 1fr) 0px 0px' : `minmax(0, 1fr) 6px ${inspectorWidth}px` }"
         >
             <main class="chat-column">
-                <div class="chat-workspace-split">
-                    <!-- 🤖 中间左列：动态 Agent 协作流面板 (自适应竖排，支持一键折叠) -->
-                    <aside
-                        class="team-side-rail"
-                        :class="{ 'is-collapsed': teamRailCollapsed }"
-                    >
-                        <div class="team-rail-header">
-                            <span class="rail-title">⚡ 协作 Worker</span>
-                            <button
-                                type="button"
-                                class="btn-rail-collapse"
-                                :title="teamRailCollapsed ? '展开协作列' : '收起协作列'"
-                                @click="teamRailCollapsed = !teamRailCollapsed"
-                            >
-                                <svg viewBox="0 0 24 24" class="rail-chevron" :class="{ flipped: teamRailCollapsed }">
-                                    <polyline points="15 18 9 12 15 6"></polyline>
-                                </svg>
-                            </button>
-                        </div>
-                        <div v-show="!teamRailCollapsed" class="team-rail-inner">
-                            <AgentTeamDeck
-                                :team-state="session.teamState.value"
-                                :steps="session.steps.value"
-                                :current-goal="session.currentGoal.value"
-                                :master-step-description="session.statusDescription.value"
-                                :only-active="true"
-                                compact
-                                @open-detail="handleOpenTeamDeck()"
-                            />
-                        </div>
-                    </aside>
-
-                    <!-- 💬 中间右列：主对话流历史记录 (Chat Stream) -->
-                    <div class="chat-stream-column">
-                        <AgentChatStream
-                            :current-goal="session.currentGoal.value"
-                            :legacy-messages="session.legacyConversationMessages.value"
-                            :history-turns="session.historyTurns.value"
-                            :steps="session.steps.value"
-                            :selected-step-id="session.selectedStepId.value"
-                            :selected-subpart="selectedSubpart"
-                            :selected-narrative="selectedNarrativeId"
-                            :thought="session.thought.value"
-                            :is-thinking="session.isThinking.value"
-                            :human-interventions="session.humanInterventions.value"
-                            :state-description="session.statusDescription.value"
-                            :is-running="session.isRunning.value"
-                            :completion-message="session.completionMessage.value"
-                            :final-summary="session.finalSummary.value"
-                            :final-artifacts="session.finalArtifacts.value"
-                            :has-error="session.hasError.value"
-                            :human-form="session.humanForm.value"
-                            :pause-reason="session.pauseReason.value"
-                            :is-waiting-for-human="session.isWaitingForHuman.value"
-                            :is-sending-human="session.isSendingHuman.value"
-                            :team-state="session.teamState.value"
-                            @select-step="handleStepSelect"
-                            @select-step-thought="handleStepThought"
-                            @select-human="handleHumanSelect"
-                            @select-active-thought="handleActiveThoughtSelect"
-                            @submit-human="session.answerHuman($event)"
-                            @open-preview="handleOpenPreview"
-                            @open-team-deck="handleOpenTeamDeck"
-                            @open-diff="handleOpenDiff"
-                            @fork="handleFork"
-                        />
-                    </div>
+                <!-- 💬 全宽主对话流 (无左侧狭窄侧栏挤压) -->
+                <div class="chat-stream-column">
+                    <AgentChatStream
+                        :current-goal="session.currentGoal.value"
+                        :legacy-messages="session.legacyConversationMessages.value"
+                        :history-turns="session.historyTurns.value"
+                        :steps="session.steps.value"
+                        :selected-step-id="session.selectedStepId.value"
+                        :selected-subpart="selectedSubpart"
+                        :selected-narrative="selectedNarrativeId"
+                        :thought="session.thought.value"
+                        :is-thinking="session.isThinking.value"
+                        :human-interventions="session.humanInterventions.value"
+                        :state-description="session.statusDescription.value"
+                        :is-running="session.isRunning.value"
+                        :completion-message="session.completionMessage.value"
+                        :final-summary="session.finalSummary.value"
+                        :final-artifacts="session.finalArtifacts.value"
+                        :has-error="session.hasError.value"
+                        :human-form="session.humanForm.value"
+                        :pause-reason="session.pauseReason.value"
+                        :is-waiting-for-human="session.isWaitingForHuman.value"
+                        :is-sending-human="session.isSendingHuman.value"
+                        :team-state="session.teamState.value"
+                        @select-step="handleStepSelect"
+                        @select-step-thought="handleStepThought"
+                        @select-human="handleHumanSelect"
+                        @select-active-thought="handleActiveThoughtSelect"
+                        @submit-human="session.answerHuman($event)"
+                        @open-preview="handleOpenPreview"
+                        @open-team-deck="handleOpenTeamDeck"
+                        @open-diff="handleOpenDiff"
+                        @fork="handleFork"
+                    />
                 </div>
                 <AgentProgressDeck
                     :steps="activeDeckSteps"
@@ -270,7 +254,6 @@ import AgentProgressDeck from "./agent/AgentProgressDeck.vue";
 import AgentInspector from "./agent/AgentInspector.vue";
 import AgentRecordPreview from "./agent/AgentRecordPreview.vue";
 import AgentSettingsDrawer from "./agent/AgentSettingsDrawer.vue";
-import AgentTeamDeck from "./agent/AgentTeamDeck.vue";
 import type { AgentModelOption, FileDiffPayload } from "./agent/types";
 import { useAgentSession } from "../composables/useAgentSession";
 
@@ -531,7 +514,6 @@ function handleActiveThoughtSelect() {
 function handleOpenTeamDeck(stepId?: string) {
     inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("team");
-    teamRailCollapsed.value = false;
     if (stepId) {
         session.selectedStepId.value = stepId;
     }
@@ -565,17 +547,6 @@ const inspectorWidth = ref(380);
 const inspectorCollapsed = ref(true);
 const isResizing = ref(false);
 const activePreviewContent = ref("");
-const teamRailCollapsed = ref(true);
-
-watch(
-    () => session.teamState.value.workers.length,
-    (count) => {
-        if (count > 0) {
-            teamRailCollapsed.value = false;
-        }
-    },
-    { immediate: true }
-);
 
 function startResize(e: MouseEvent) {
     if (inspectorCollapsed.value) return;
@@ -893,90 +864,7 @@ defineExpose({
     background: #141416;
 }
 
-.chat-workspace-split {
-    display: flex;
-    flex: 1;
-    min-height: 0;
-    min-width: 0;
-    overflow: hidden;
-    position: relative;
-}
-
-/* 🤖 中间左侧动态 Agent 协作列 */
-.team-side-rail {
-    width: 280px;
-    max-width: 320px;
-    flex-shrink: 0;
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
-    background: #16161a;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.team-side-rail.is-collapsed {
-    width: 32px;
-}
-
-.team-rail-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 10px;
-    background: #1b1b22;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    flex-shrink: 0;
-}
-
-.rail-title {
-    font-size: 11px;
-    font-weight: 700;
-    color: #e4e4e7;
-    white-space: nowrap;
-}
-
-.is-collapsed .rail-title {
-    display: none;
-}
-
-.btn-rail-collapse {
-    background: transparent;
-    border: none;
-    color: #71717a;
-    cursor: pointer;
-    padding: 2px;
-    display: grid;
-    place-items: center;
-    border-radius: 4px;
-    transition: color 0.15s;
-}
-
-.btn-rail-collapse:hover {
-    color: #f4f4f5;
-    background: rgba(255, 255, 255, 0.06);
-}
-
-.rail-chevron {
-    width: 13px;
-    height: 13px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2.2;
-    transition: transform 0.2s ease;
-}
-
-.rail-chevron.flipped {
-    transform: rotate(180deg);
-}
-
-.team-rail-inner {
-    flex: 1;
-    overflow-y: auto;
-    padding: 6px;
-}
-
-/* 💬 中间右侧主对话流列 */
+/* 💬 全宽主对话流列 */
 .chat-stream-column {
     flex: 1;
     min-width: 0;
@@ -984,6 +872,28 @@ defineExpose({
     display: flex;
     flex-direction: column;
     overflow: hidden;
+}
+
+/* 顶部协作按钮与徽标 */
+.team-toggle-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: #38bdf8;
+}
+
+.team-toggle-btn.active {
+    background: rgba(56, 189, 248, 0.18);
+    color: #38bdf8;
+    border-color: rgba(56, 189, 248, 0.35);
+}
+
+.team-badge-num {
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 /* 窄屏自适应：禁止向下堆叠！保持 100% 满高单列，展开时以抽屉浮层覆盖在右侧 */

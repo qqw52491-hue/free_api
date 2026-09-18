@@ -2266,41 +2266,222 @@ button.root-row {
     border: 1px dashed rgba(245, 158, 11, 0.25);
 }
 
-.subagent-inline-capsule {
+/* ==========================================================================
+   👥 模式1：内嵌式多 Agent 协作微卡片 (Inline Orchestration Card)
+   ========================================================================== */
+.subagent-orchestration-card {
+    display: flex;
+    flex-direction: column;
+    margin: 8px 0 10px 0;
+    border-radius: 10px;
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.65) 0%, rgba(15, 23, 42, 0.8) 100%);
+    border: 1px solid rgba(99, 102, 241, 0.22);
+    box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    cursor: pointer;
+    overflow: hidden;
+    transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.subagent-orchestration-card:hover {
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.8) 0%, rgba(15, 23, 42, 0.9) 100%);
+    border-color: rgba(99, 102, 241, 0.45);
+    transform: translateY(-1.5px);
+    box-shadow: 0 8px 24px -4px rgba(99, 102, 241, 0.2), 0 0 0 1px rgba(99, 102, 241, 0.25);
+}
+
+.subagent-orchestration-card:hover .header-action {
+    color: #a5b4fc;
+}
+
+.subagent-orchestration-card:hover .header-action svg {
+    transform: translateX(2px);
+}
+
+.orchestration-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin: 4px 0 6px 16px;
-    padding: 6px 12px;
-    border-radius: 8px;
-    background: rgba(56, 189, 248, 0.06);
-    border: 1px solid rgba(56, 189, 248, 0.25);
-    cursor: pointer;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.subagent-inline-capsule:hover {
-    background: rgba(56, 189, 248, 0.12);
-    border-color: rgba(56, 189, 248, 0.45);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(56, 189, 248, 0.15);
+.header-main {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
 }
 
-.capsule-left {
+.team-icon {
+    font-size: 13px;
+    line-height: 1;
+}
+
+.orchestration-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #f1f5f9;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+}
+
+.worker-count-pill {
+    padding: 1px 7px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: #a5b4fc;
+    background: rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 12px;
+    white-space: nowrap;
+}
+
+.header-action {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #94a3b8;
+    white-space: nowrap;
+    transition: color 0.15s;
+}
+
+.header-action svg {
+    transition: transform 0.15s ease;
+}
+
+.orchestration-body {
+    padding: 7px 12px 9px 12px;
+}
+
+.worker-chips-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.worker-chip-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 9px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    font-size: 11.5px;
+    transition: background 0.15s;
+}
+
+.worker-chip-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.worker-chip-item.status-running {
+    border-color: rgba(56, 189, 248, 0.28);
+    background: rgba(56, 189, 248, 0.05);
+}
+
+.worker-chip-item.status-succeeded {
+    border-color: rgba(34, 197, 94, 0.22);
+    background: rgba(34, 197, 94, 0.03);
+}
+
+.worker-chip-item.status-failed {
+    border-color: rgba(239, 68, 68, 0.28);
+    background: rgba(239, 68, 68, 0.05);
+}
+
+.worker-state-indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
+.worker-state-indicator .manus-spinner.mini {
+    width: 11px;
+    height: 11px;
+    border: 1.5px solid rgba(56, 189, 248, 0.25);
+    border-top-color: #38bdf8;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+.worker-check {
+    color: #4ade80;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.worker-cross {
+    color: #f87171;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.worker-dot {
+    color: #64748b;
+    font-size: 9px;
+}
+
+.worker-name {
+    font-weight: 600;
+    color: #e2e8f0;
+    font-size: 11.5px;
+    white-space: nowrap;
+}
+
+.worker-role-tag {
+    padding: 1px 5px;
+    font-size: 9.5px;
+    border-radius: 4px;
+    background: rgba(148, 163, 184, 0.12);
+    color: #94a3b8;
+    white-space: nowrap;
+}
+
+.worker-task-desc {
+    flex: 1;
+    color: #cbd5e1;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.worker-duration {
+    font-size: 10px;
+    color: #64748b;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+}
+
+.single-subagent-task {
     display: flex;
     align-items: center;
     gap: 8px;
+    font-size: 11.5px;
+    color: #cbd5e1;
 }
 
 .capsule-pulse-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: #38bdf8;
-    box-shadow: 0 0 8px #38bdf8;
+    background: #818cf8;
+    box-shadow: 0 0 8px #818cf8;
+    flex-shrink: 0;
 }
 
 .capsule-pulse-dot.is-running {
+    background: #38bdf8;
+    box-shadow: 0 0 8px #38bdf8;
     animation: capsule-dot-pulse 1.2s infinite ease-in-out;
 }
 
@@ -2309,20 +2490,19 @@ button.root-row {
     50% { transform: scale(1.4); opacity: 1; box-shadow: 0 0 12px #38bdf8; }
 }
 
-.capsule-text {
-    font-size: 11.5px;
-    font-weight: 600;
-    color: #e0f2fe;
+.task-desc-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
-.capsule-action {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    color: #38bdf8;
-    font-weight: 600;
+.task-desc-text strong {
+    color: #f1f5f9;
+    font-weight: 500;
 }
+
 
 /* ==========================================================================
    📱 移动端专属微调 (Chat Stream & Step Cards <= 768px)

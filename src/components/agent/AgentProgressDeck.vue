@@ -16,7 +16,7 @@
                             <FileIcon
                                 :name="file.fileName"
                                 :kind="file.actionKind === 'modify' ? 'code' : ''"
-                                :size="14"
+                                :size="16"
                                 class="file-row-icon"
                             />
 
@@ -570,10 +570,10 @@ function formatDurationMs(ms?: number): string | null {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 4px 8px;
+    padding: 5px 10px;
     border-radius: 6px;
-    font-size: 12px;
-    line-height: 1.4;
+    font-size: 13px;
+    line-height: 1.45;
     color: #cbd5e1;
     background: transparent;
     user-select: text;
@@ -602,7 +602,7 @@ function formatDurationMs(ms?: number): string | null {
 /* +新增 -删除 统计标签：纯色文字，坚决无任何浅绿/浅红背景胶囊 */
 .diff-stat-add {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     color: #22c55e !important;
     background: none !important;
@@ -616,7 +616,7 @@ function formatDurationMs(ms?: number): string | null {
 
 .diff-stat-del {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     color: #ef4444 !important;
     background: none !important;
@@ -630,22 +630,22 @@ function formatDurationMs(ms?: number): string | null {
 
 .diff-stat-add.mini,
 .diff-stat-del.mini {
-    font-size: 10.5px;
+    font-size: 11px;
     opacity: 0.9;
-    margin-left: 2px;
+    margin-left: 3px;
 }
 
 /* 文件名称与相对路径 */
 .file-row-name {
-    font-size: 11.5px;
+    font-size: 13px;
     font-weight: 500;
     color: #f1f5f9;
     flex-shrink: 0;
 }
 
 .file-row-path {
-    font-size: 10.5px;
-    color: #64748b;
+    font-size: 11.5px;
+    color: #94a3b8;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -658,7 +658,7 @@ function formatDurationMs(ms?: number): string | null {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 12px;
+    padding: 7px 14px;
     user-select: none;
     background: #18181b;
     transition: background 0.15s ease;
@@ -676,7 +676,7 @@ function formatDurationMs(ms?: number): string | null {
 .summary-left {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 9px;
     min-width: 0;
     flex: 1;
 }
@@ -685,30 +685,32 @@ function formatDurationMs(ms?: number): string | null {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
     flex-shrink: 0;
 }
 
 .summary-file-icon {
     color: #94a3b8;
     flex-shrink: 0;
+    width: 15px;
+    height: 15px;
 }
 
 .status-check {
     color: #10b981;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
 }
 
 .status-dot {
     color: #71717a;
-    font-size: 12px;
+    font-size: 13px;
 }
 
 .manus-spinner {
-    width: 12px;
-    height: 12px;
+    width: 13px;
+    height: 13px;
     border: 1.5px solid rgba(255, 255, 255, 0.15);
     border-top-color: #818cf8;
     border-radius: 50%;
@@ -723,17 +725,18 @@ function formatDurationMs(ms?: number): string | null {
 .summary-text-wrap {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 7px;
     min-width: 0;
     overflow: hidden;
-    font-size: 12px;
+    font-size: 13px;
 }
 
 .summary-title {
-    font-weight: 500;
+    font-weight: 600;
     color: #f4f4f5;
     white-space: nowrap;
     flex-shrink: 0;
+    font-size: 13px;
 }
 
 .summary-sub {
@@ -741,7 +744,7 @@ function formatDurationMs(ms?: number): string | null {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    font-size: 11.5px;
+    font-size: 12px;
 }
 
 .gate-status-badge {
@@ -785,8 +788,8 @@ function formatDurationMs(ms?: number): string | null {
 .summary-metrics {
     display: flex;
     align-items: center;
-    gap: 4px;
-    font-size: 11.5px;
+    gap: 5px;
+    font-size: 12px;
     color: #a1a1aa;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }

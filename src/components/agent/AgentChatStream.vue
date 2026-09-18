@@ -833,17 +833,67 @@
                                             @select="$emit('select-step', step.id)"
                                         />
                                     </div>
-                                    <div v-if="isSubAgentTool(step.tool) || isWaitJobsTool(step.tool)" class="subagent-inline-capsule" role="button" tabindex="0" :title="'点击查看当前步骤派发的子任务详情：' + extractSubagentTask(step)" @click="$emit('open-team-deck', step.id)" @keydown.enter="$emit('open-team-deck', step.id)">
-                                        <div class="capsule-left">
-                                            <span class="capsule-pulse-dot" :class="{ 'is-running': step.status === 'running' }"></span>
-                                            <span class="capsule-text">
-                                                {{ step.status === 'running' ? '⚡ 正在独立执行：' : '✅ 协同任务已完成：' }}
-                                                <strong>{{ extractSubagentTask(step) }}</strong>
-                                            </span>
+                                    <!-- 👥 模式1：内嵌多 Agent 协作微卡片 (轻量清爽，点击直通右侧 Inspector 查看) -->
+                                    <div
+                                        v-if="isSubAgentTool(step.tool) || isWaitJobsTool(step.tool)"
+                                        class="subagent-orchestration-card"
+                                        role="button"
+                                        tabindex="0"
+                                        :title="'点击在右侧抽屉查看多 Agent 协同链路：' + extractSubagentTask(step)"
+                                        @click="$emit('open-team-deck', step.id)"
+                                        @keydown.enter="$emit('open-team-deck', step.id)"
+                                    >
+                                        <!-- 卡片顶栏：标题与右侧查看提示 -->
+                                        <div class="orchestration-header">
+                                            <div class="header-main">
+                                                <span class="team-icon">👥</span>
+                                                <span class="orchestration-title">
+                                                    {{ step.status === 'running' ? '并发协作 · 正在调度子任务' : '并发协作 · 协同任务已交付' }}
+                                                </span>
+                                                <span v-if="getStepActiveWorkers(step).length > 0" class="worker-count-pill">
+                                                    {{ getStepActiveWorkers(step).length }} 个 Worker
+                                                </span>
+                                            </div>
+                                            <div class="header-action">
+                                                <span>在右侧查看详情</span>
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                                    <polyline points="9 18 15 12 9 6" />
+                                                </svg>
+                                            </div>
                                         </div>
-                                        <div class="capsule-action">
-                                            <span>实时看板</span>
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
+
+                                        <!-- 卡片内容体：展示 Workers 并行列表或具体子任务 -->
+                                        <div class="orchestration-body">
+                                            <div v-if="getStepActiveWorkers(step).length > 0" class="worker-chips-list">
+                                                <div
+                                                    v-for="worker in getStepActiveWorkers(step)"
+                                                    :key="worker.id"
+                                                    class="worker-chip-item"
+                                                    :class="`status-${worker.status}`"
+                                                >
+                                                    <span class="worker-state-indicator">
+                                                        <span v-if="worker.status === 'running'" class="manus-spinner mini"></span>
+                                                        <span v-else-if="worker.status === 'succeeded'" class="worker-check">✓</span>
+                                                        <span v-else-if="worker.status === 'failed'" class="worker-cross">✕</span>
+                                                        <span v-else class="worker-dot">○</span>
+                                                    </span>
+                                                    <span class="worker-name">{{ worker.name }}</span>
+                                                    <span v-if="worker.roleLabel" class="worker-role-tag">{{ worker.roleLabel }}</span>
+                                                    <span class="worker-task-desc">
+                                                        {{ worker.currentStep || worker.currentTool || (worker.status === 'succeeded' ? '已完成并回传主调度' : '等待派发') }}
+                                                    </span>
+                                                    <span v-if="worker.durationMs" class="worker-duration">
+                                                        {{ (worker.durationMs / 1000).toFixed(1) }}s
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <div v-else class="single-subagent-task">
+                                                <span class="capsule-pulse-dot" :class="{ 'is-running': step.status === 'running' }"></span>
+                                                <span class="task-desc-text">
+                                                    {{ step.status === 'running' ? '正在独立执行：' : '协同已交付：' }}
+                                                    <strong>{{ extractSubagentTask(step) }}</strong>
+                                                </span>
+                                            </div>
                                         </div>
                                     </div>
                                 </article>
@@ -1080,7 +1130,7 @@ import { invoke } from "@tauri-apps/api/core";
 import AttachmentCard from "./AttachmentCard.vue";
 import CollapsibleUserText from "./CollapsibleUserText.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
-import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule } from "./types";
+import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, AgentWorkerItem, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule } from "./types";
 import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtLineInfo } from "./diffUtils";
 import type { StepOperationDisplay } from "./diff/toolOperation";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
@@ -1282,6 +1332,20 @@ function extractSubagentTask(step: any): string {
     if (step.action && step.action !== "执行操作") return `${rolePrefix}${step.action}`;
     return isSubAgentTool(step.tool) ? "独立子任务执行与审查" : "后台协同任务";
 }
+
+function getStepActiveWorkers(step: any): AgentWorkerItem[] {
+    const workers = props.teamState?.workers || [];
+    if (!workers.length) return [];
+    const stepJobId = step?.jobId || (step?.toolCall as any)?.id;
+    if (stepJobId) {
+        const matched = workers.filter(
+            (w) => w.id === stepJobId || (w.extra as any)?.jobId === stepJobId || (w.extra as any)?.stepId === step?.id
+        );
+        if (matched.length > 0) return matched;
+    }
+    return workers;
+}
+
 
 async function handlePreviewArtifact(artifact: ArtifactDescriptor) {
     const { isArtifactPreviewable, openArtifactById, openArtifactInSystem } = await import("../../utils/artifact");
