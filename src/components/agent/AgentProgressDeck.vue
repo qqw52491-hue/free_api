@@ -2,17 +2,79 @@
     <transition name="deck-slide">
         <div v-if="shouldShow" class="agent-progress-deck-wrap">
             <div class="agent-progress-deck" :class="{ 'is-running': isRunning, 'is-expanded': isExpanded }">
-                <!-- 头部状态摘要条 (极简顶栏) -->
-                <div class="deck-header" @click="allModifiedFiles.length > 3 && toggleExpanded()">
-                    <div class="header-left">
-                        <!-- 状态图标：进行中转圈，完成打勾，等待圆点 -->
-                        <div class="status-icon-wrap">
+                <!-- 🌟 展开的文件列表 (位于常驻摘要条上方，贴合底部输入框体验) -->
+                <transition name="deck-drawer">
+                    <div v-if="isExpanded && allModifiedFiles.length > 0" class="deck-files-drawer">
+                        <div
+                            v-for="file in allModifiedFiles"
+                            :key="file.path || file.fileName"
+                            class="deck-file-row is-clickable"
+                            title="点击查看代码改动对比"
+                            @click="$emit('open-diff', diffPayloadFromChip(file))"
+                        >
+                            <!-- 状态方点 ⊡ -->
+                            <span
+                                class="file-state-badge"
+                                :class="'is-' + (file.actionKind || 'modify')"
+                                :title="file.actionKind === 'create' ? '新建' : '修改'"
+                            >
+                                <span class="file-state-dot"></span>
+                            </span>
+
+                            <!-- +新增 -删除 统计 -->
+                            <span v-if="file.additions && file.additions > 0" class="diff-stat-add">+{{ file.additions }}</span>
+                            <span v-if="file.deletions && file.deletions > 0" class="diff-stat-del">-{{ file.deletions }}</span>
+
+                            <!-- 文件名与路径 -->
+                            <span class="file-row-name">{{ file.fileName }}</span>
+                            <span v-if="file.path && file.path !== file.fileName" class="file-row-path">{{ file.path }}</span>
+                        </div>
+                    </div>
+                </transition>
+
+                <!-- 🌟 底部摘要条 (点击整条展开/收起) -->
+                <div
+                    class="deck-summary-bar"
+                    :class="{ 'is-clickable': allModifiedFiles.length > 0 }"
+                    :title="allModifiedFiles.length > 0 ? (isExpanded ? '点击收起文件列表' : '点击展开文件列表') : ''"
+                    @click="allModifiedFiles.length > 0 && toggleExpanded()"
+                >
+                    <div class="summary-left">
+                        <div class="summary-icon-wrap">
                             <span v-if="isRunning" class="manus-spinner"></span>
+                            <svg
+                                v-else-if="allModifiedFiles.length > 0"
+                                class="summary-file-icon"
+                                viewBox="0 0 24 24"
+                                width="14"
+                                height="14"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="2"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                            >
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                <polyline points="14 2 14 8 20 8" />
+                                <line x1="16" y1="13" x2="8" y2="13" />
+                                <line x1="16" y1="17" x2="8" y2="17" />
+                            </svg>
                             <span v-else-if="allSucceeded" class="status-check">✓</span>
                             <span v-else class="status-dot">○</span>
                         </div>
-                        <div class="status-text-wrap">
-                            <span class="status-title">{{ headerTitle }}</span>
+
+                        <div class="summary-text-wrap">
+                            <span v-if="isRunning" class="summary-title">{{ runningTitle }}</span>
+                            <span v-else-if="allModifiedFiles.length > 0" class="summary-title">
+                                {{ allModifiedFiles.length }} {{ allModifiedFiles.length === 1 ? 'File' : 'Files' }} With Changes
+                            </span>
+                            <span v-else class="summary-title">{{ headerTitle }}</span>
+
+                            <!-- 增删量摘要 (当折叠或概览时一目了然) -->
+                            <span v-if="allModifiedFiles.length > 0 && totalAdditions > 0" class="diff-stat-add mini">+{{ totalAdditions }}</span>
+                            <span v-if="allModifiedFiles.length > 0 && totalDeletions > 0" class="diff-stat-del mini">-{{ totalDeletions }}</span>
+
+                            <!-- 门禁状态徽标 -->
                             <span
                                 v-if="gateBadge"
                                 class="gate-status-badge"
@@ -21,18 +83,16 @@
                             >
                                 {{ gateBadge.label }}
                             </span>
-                            <span v-if="isRunning && currentExecutingSubStep" class="status-sub">
+
+                            <span v-if="isRunning && currentExecutingSubStep" class="summary-sub">
                                 · {{ currentExecutingSubStep }}
-                            </span>
-                            <span v-else-if="allModifiedFiles.length > 0" class="status-sub">
-                                · 修改了 {{ allModifiedFiles.length }} 个文件
                             </span>
                         </div>
                     </div>
 
-                    <div class="header-right">
-                        <!-- 右侧指标统计 (本轮生成累加与总耗时) -->
-                        <div v-if="totalCompletionTokensCount > 0 || displayDurationText || isRunning" class="header-metrics">
+                    <div class="summary-right">
+                        <!-- 右侧指标统计 (Token 与耗时) -->
+                        <div v-if="totalCompletionTokensCount > 0 || displayDurationText || isRunning" class="summary-metrics">
                             <span
                                 v-if="totalCompletionTokensCount > 0"
                                 class="metric-num"
@@ -45,58 +105,7 @@
                                 {{ displayDurationText }}
                             </span>
                         </div>
-
-                        <!-- 完成时的关闭按钮 -->
-                        <button
-                            v-if="!isRunning"
-                            type="button"
-                            class="deck-close-btn"
-                            title="隐藏文件变更"
-                            @click.stop="dismiss"
-                        >
-                            <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
-                        </button>
                     </div>
-                </div>
-
-                <!-- 🌟 用户标杆：更新文件变更托盘 (严格仅展示文件变更，不显示步骤；带多了隐藏、底部半透明遮罩与展开小箭头) -->
-                <div v-if="allModifiedFiles.length > 0" class="deck-actions-viewport-wrap">
-                    <div
-                        class="deck-actions-viewport"
-                        :class="{ 'is-collapsed-mask': !isExpanded && allModifiedFiles.length > 3 }"
-                    >
-                        <div
-                            v-for="file in (isExpanded ? allModifiedFiles : allModifiedFiles.slice(0, 10))"
-                            :key="file.path || file.fileName"
-                            class="deck-action-row is-clickable"
-                            title="点击查看代码改动对比"
-                            @click="$emit('open-diff', diffPayloadFromChip(file))"
-                        >
-                            <FileIcon
-                                :name="file.fileName"
-                                :kind="file.actionKind === 'modify' ? 'code' : ''"
-                                :size="12"
-                                class="action-row-file-icon"
-                            />
-                            <span class="action-row-text">{{ file.fileName }}</span>
-                            <span v-if="file.path && file.path !== file.fileName" class="action-row-sub">{{ file.path }}</span>
-                            <span v-if="file.additions && file.additions > 0" class="chip-add">+{{ file.additions }}</span>
-                            <span v-if="file.deletions && file.deletions > 0" class="chip-del">−{{ file.deletions }}</span>
-                        </div>
-                    </div>
-
-                    <!-- 底部渐隐折叠悬浮小箭头 (多了隐藏，点击展开更多) -->
-                    <button
-                        v-if="allModifiedFiles.length > 3"
-                        type="button"
-                        class="deck-actions-expand-btn"
-                        :title="isExpanded ? '收起列表' : `展开全部 (${allModifiedFiles.length} 个文件)`"
-                        @click.stop="toggleExpanded"
-                    >
-                        <svg viewBox="0 0 24 24" class="chevron-mini-icon" :class="{ 'is-flipped': isExpanded }">
-                            <path d="m6 9 6 6 6-6" />
-                        </svg>
-                    </button>
                 </div>
             </div>
         </div>
@@ -107,7 +116,6 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import type { AgentStepItem, AgentTokenUsage, AgentToolStatus, StageState, StageFailureState, FileChangeChip, FileDiffPayload, ReviewerVerdict, StageActionCapsule } from './types';
 import { diffPayloadFromChip, parseStepFileChanges, aggregateFileChips, extractStageChronologicalCapsules } from './diffUtils';
-import FileIcon from './FileIcon.vue';
 
 export interface Level1TodoItem {
     id: string;
@@ -152,8 +160,15 @@ defineEmits<{
     (e: 'open-diff', payload: FileDiffPayload): void;
 }>();
 
-const isExpanded = ref(false);
-const isDismissed = ref(false);
+const isExpanded = ref(true);
+
+const totalAdditions = computed(() => {
+    return allModifiedFiles.value.reduce((acc, f) => acc + (f.additions || 0), 0);
+});
+
+const totalDeletions = computed(() => {
+    return allModifiedFiles.value.reduce((acc, f) => acc + (f.deletions || 0), 0);
+});
 
 const allModifiedFiles = computed<FileChangeChip[]>(() => {
     const rawChips: FileChangeChip[] = [];
@@ -172,7 +187,6 @@ const allModifiedFiles = computed<FileChangeChip[]>(() => {
     return aggregateFileChips(rawChips);
 });
 
-
 // 计时器
 const stepStartTime = ref<number>(Date.now());
 const nowTime = ref<number>(Date.now());
@@ -180,7 +194,7 @@ let timerInterval: ReturnType<typeof setInterval> | null = null;
 
 watch(() => props.isRunning, (running) => {
     if (running) {
-        isDismissed.value = false;
+        isExpanded.value = true;
         stepStartTime.value = Date.now();
         startTimer();
     } else {
@@ -211,17 +225,21 @@ onUnmounted(() => {
 });
 
 const shouldShow = computed(() => {
-    if (isDismissed.value) return false;
-    // 严格遵从用户要求：仅展示更新的文件变更，无文件变更时不展示
+    if (props.isRunning) return true;
     return allModifiedFiles.value.length > 0;
+});
+
+const runningTitle = computed(() => {
+    if (props.isThinking) return '思考规划中...';
+    if (props.actionPhaseText) return props.actionPhaseText;
+    if (allModifiedFiles.value.length > 0) {
+        return `正在修改 (${allModifiedFiles.value.length} 个文件)...`;
+    }
+    return '正在执行任务...';
 });
 
 function toggleExpanded() {
     isExpanded.value = !isExpanded.value;
-}
-
-function dismiss() {
-    isDismissed.value = true;
 }
 
 // -----------------------------------------------------------------------------
@@ -490,141 +508,181 @@ function formatDurationMs(ms?: number): string | null {
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), 0 0 1px rgba(99, 102, 241, 0.3);
 }
 
-/* 🌟 改动文件与关键动作托盘 */
-.deck-actions-viewport-wrap {
-    position: relative;
-    padding: 6px 12px 10px;
-    background: rgba(0, 0, 0, 0.25);
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
+/* 抽屉平滑展开收起动画 */
+.deck-drawer-enter-active,
+.deck-drawer-leave-active {
+    transition: max-height 0.22s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.18s ease;
+    overflow: hidden;
 }
 
-.deck-actions-viewport {
+.deck-drawer-enter-from,
+.deck-drawer-leave-to {
+    max-height: 0;
+    opacity: 0;
+}
+
+.deck-drawer-enter-to,
+.deck-drawer-leave-from {
+    max-height: 280px;
+    opacity: 1;
+}
+
+/* 🌟 展开的文件抽屉列表 (在底部摘要条上方) */
+.deck-files-drawer {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    max-height: 280px;
+    gap: 1.5px;
+    max-height: 240px;
     overflow-y: auto;
-    transition: max-height 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    padding: 6px 8px;
+    background: rgba(18, 18, 20, 0.95);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    box-sizing: border-box;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 
-/* 溢出折叠渐变遮罩 (多了隐藏) */
-.deck-actions-viewport.is-collapsed-mask {
-    max-height: 84px;
-    overflow: hidden;
-    -webkit-mask-image: linear-gradient(to bottom, #000 45%, transparent 100%);
-    mask-image: linear-gradient(to bottom, #000 45%, transparent 100%);
+.deck-files-drawer::-webkit-scrollbar {
+    width: 4px;
 }
 
-.deck-action-row {
+.deck-files-drawer::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 4px;
+}
+
+.deck-files-drawer::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+/* 单个文件行：对齐用户标杆样式 [⊙] +23 -105 FileName path */
+.deck-file-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 2.5px 6px;
-    border-radius: 4px;
-    font-size: 11.5px;
+    gap: 7px;
+    padding: 3.5px 8px;
+    border-radius: 5px;
+    font-size: 12px;
     line-height: 1.4;
     color: #cbd5e1;
     user-select: text;
     transition: background 0.12s ease;
 }
 
-.deck-action-row.is-clickable {
+.deck-file-row.is-clickable {
     cursor: pointer;
 }
 
-.deck-action-row.is-clickable:hover {
-    background: rgba(255, 255, 255, 0.05);
+.deck-file-row.is-clickable:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.deck-file-row.is-clickable:hover .file-row-name {
     color: #38bdf8;
 }
 
-.action-row-icon {
-    font-size: 11px;
-    flex-shrink: 0;
-    opacity: 0.85;
-}
-
-.action-row-text {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11px;
-    font-weight: 500;
-    color: #e2e8f0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-    min-width: 0;
-}
-
-.action-row-sub {
-    font-size: 10px;
-    color: #64748b;
-    margin-left: 4px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 180px;
-}
-
-/* 底部居中悬浮展开小箭头按钮 */
-.deck-actions-expand-btn {
-    position: absolute;
-    bottom: 3px;
-    left: 50%;
-    transform: translateX(-50%);
+/* 状态方点 ⊡ */
+.file-state-badge {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
-    height: 18px;
-    background: #27272a;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 10px;
-    color: #94a3b8;
-    cursor: pointer;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
-    transition: all 0.15s ease;
-    z-index: 2;
+    width: 13px;
+    height: 13px;
+    border-radius: 3px;
+    border: 1.2px solid rgba(245, 158, 11, 0.6);
+    background: rgba(245, 158, 11, 0.12);
+    flex-shrink: 0;
+    box-sizing: border-box;
 }
 
-.deck-actions-expand-btn:hover {
-    background: #3f3f46;
+.file-state-badge .file-state-dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #f59e0b;
+}
+
+.file-state-badge.is-create {
+    border-color: rgba(16, 185, 129, 0.6);
+    background: rgba(16, 185, 129, 0.12);
+}
+
+.file-state-badge.is-create .file-state-dot {
+    background: #10b981;
+}
+
+.file-state-badge.is-delete {
+    border-color: rgba(239, 68, 68, 0.6);
+    background: rgba(239, 68, 68, 0.12);
+}
+
+.file-state-badge.is-delete .file-state-dot {
+    background: #ef4444;
+}
+
+/* +新增 -删除 统计标签 */
+.diff-stat-add {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    font-weight: 600;
+    color: #22c55e;
+    flex-shrink: 0;
+}
+
+.diff-stat-del {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    font-weight: 600;
+    color: #ef4444;
+    flex-shrink: 0;
+}
+
+.diff-stat-add.mini,
+.diff-stat-del.mini {
+    font-size: 10.5px;
+    opacity: 0.85;
+    margin-left: 2px;
+}
+
+/* 文件名称与相对路径 */
+.file-row-name {
+    font-size: 11.5px;
+    font-weight: 500;
     color: #f1f5f9;
-    border-color: rgba(255, 255, 255, 0.25);
-    transform: translateX(-50%) scale(1.08);
+    flex-shrink: 0;
 }
 
-.chevron-mini-icon {
-    width: 12px;
-    height: 12px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2.5;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    transition: transform 0.2s ease;
+.file-row-path {
+    font-size: 10.5px;
+    color: #64748b;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
 }
 
-.chevron-mini-icon.is-flipped {
-    transform: rotate(180deg);
-}
-
-/* 顶栏 (精简紧凑高度) */
-.deck-header {
+/* 🌟 底部摘要条 (常驻贴紧输入框) */
+.deck-summary-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 5px 10px;
-    cursor: pointer;
+    padding: 6px 12px;
     user-select: none;
-    background: rgba(255, 255, 255, 0.02);
+    background: #18181b;
     transition: background 0.15s ease;
+    box-sizing: border-box;
 }
 
-.deck-header:hover {
+.deck-summary-bar.is-clickable {
+    cursor: pointer;
+}
+
+.deck-summary-bar.is-clickable:hover {
     background: rgba(255, 255, 255, 0.04);
 }
 
-.header-left {
+.summary-left {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -632,12 +690,17 @@ function formatDurationMs(ms?: number): string | null {
     flex: 1;
 }
 
-.status-icon-wrap {
+.summary-icon-wrap {
     display: flex;
     align-items: center;
     justify-content: center;
     width: 16px;
     height: 16px;
+    flex-shrink: 0;
+}
+
+.summary-file-icon {
+    color: #94a3b8;
     flex-shrink: 0;
 }
 
@@ -662,17 +725,11 @@ function formatDurationMs(ms?: number): string | null {
     display: inline-block;
 }
 
-.manus-spinner.mini {
-    width: 11px;
-    height: 11px;
-    border-width: 1.5px;
-}
-
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
 
-.status-text-wrap {
+.summary-text-wrap {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -681,18 +738,19 @@ function formatDurationMs(ms?: number): string | null {
     font-size: 12px;
 }
 
-.status-title {
+.summary-title {
     font-weight: 500;
     color: #f4f4f5;
     white-space: nowrap;
     flex-shrink: 0;
 }
 
-.status-sub {
+.summary-sub {
     color: #a1a1aa;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    font-size: 11.5px;
 }
 
 .gate-status-badge {
@@ -726,14 +784,14 @@ function formatDurationMs(ms?: number): string | null {
     border: 1px solid rgba(16, 185, 129, 0.35);
 }
 
-.header-right {
+.summary-right {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
 }
 
-.header-metrics {
+.summary-metrics {
     display: flex;
     align-items: center;
     gap: 4px;
@@ -749,64 +807,6 @@ function formatDurationMs(ms?: number): string | null {
 .metric-timer {
     color: #e4e4e7;
     font-weight: 500;
-}
-
-.deck-toggle-btn {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    background: transparent;
-    border: 0;
-    padding: 2px 4px;
-    color: #71717a;
-    font-size: 11px;
-    cursor: pointer;
-    transition: color 0.15s ease;
-}
-
-.deck-toggle-btn:hover {
-    color: #d4d4d8;
-}
-
-.toggle-count {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-.chevron-icon {
-    width: 12px;
-    height: 12px;
-    stroke: currentColor;
-    stroke-width: 2;
-    fill: none;
-    transition: transform 0.2s ease;
-}
-
-.chevron-icon.is-flipped {
-    transform: rotate(180deg);
-}
-
-.deck-close-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: transparent;
-    border: 0;
-    padding: 2px;
-    color: #71717a;
-    cursor: pointer;
-    transition: color 0.15s ease;
-}
-
-.deck-close-btn:hover {
-    color: #d4d4d8;
-}
-
-.deck-close-btn svg {
-    width: 12px;
-    height: 12px;
-    stroke: currentColor;
-    stroke-width: 2;
-    fill: none;
 }
 
 /* 列表主体容器 (极简大步骤概括，精简紧凑高度) */
