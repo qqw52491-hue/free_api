@@ -871,9 +871,11 @@ pub async fn spawn_child_writer(
     };
     {
         let conn = db.0.lock().map_err(|error| error.to_string())?;
+        // 配额语义=并发上限：只统计仍在运行中的工兵，已终态（succeeded/failed/
+        // cancelled/interrupted/timed_out）的不得继续占用额度，否则第二个工兵永远派不出去。
         let existing: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id = ?1 AND kind = 'writer'",
+                "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id = ?1 AND kind = 'writer' AND status = 'running'",
                 rusqlite::params![parent_run_id],
                 |row| row.get(0),
             )

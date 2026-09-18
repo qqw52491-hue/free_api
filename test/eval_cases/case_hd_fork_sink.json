@@ -1,0 +1,16 @@
+{
+  "id": "case_hd_fork_sink",
+  "title": "fork 新会话在 Tasks 列表隐形（症状距根因 2 层：增量合并把新条目压到末尾）",
+  "tier": "gold",
+  "base_commit": "3721d1086776b206ab22c874d4951071300ef50b",
+  "problem_statement": "【体验缺陷报障】用户反馈：对会话点 fork（分叉）之后，界面看起来'什么都没发生'——但查数据库 chat_sessions 明明多了一条 ⑂ 开头的新会话，消息也复制了。反复点几次 fork，DB 里就多几条 ⑂ 记录，可左侧 Tasks 列表里一条都找不到，用户以为功能坏了。请定位根因并修复：fork 成功落地的新会话必须在 Tasks 列表顶部立即可见（与此前'新会话出现在最上方'的行为一致），且不得破坏增量合并'已激活/草稿 tab 不被轮询驱逐'的现有语义。",
+  "judge_kind": "command",
+  "verify_command": "F=src/views/AgentView.vue; A=$(awk '/const existing = tabs.value.find/,/activeTabId.value = session.id/' \"$F\" | grep -cE 'splice|unshift'); B=$(awk '/function loadSessions/,/^}/' \"$F\" | grep -cE 'sort|updated_at.*DESC|DESC.*updated_at'); ([ \"$A\" -ge 1 ] || [ \"$B\" -ge 1 ]) && npx vue-tsc --noEmit 2>/dev/null && [ \"$(sqlite3 \"$HOME/Library/Application Support/free-api-chat/data_v2.db\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "expected_exit_code": 0,
+  "max_steps": 60,
+  "expected_diff_files": [
+    "src/views/AgentView.vue"
+  ],
+  "max_prompt_tokens": 8000000,
+  "judge_semantics": "症状距根因 2 层的真实回归题（增量合并引入的排序退化）。题面只给'DB 有记录但列表隐形'的对照与'顶部立即可见'的不变量，不提 append/unshift/排序 任何线索。判据：接受两类等价修复——A) openTreeSession 命中已有 tab 时 splice/unshift 置顶；B) loadSessions 增量合并恢复按 updated_at 排序使新会话自然落顶（更早层、更根本的修法）。vue-tsc 通过 + 会话成功。"
+}
