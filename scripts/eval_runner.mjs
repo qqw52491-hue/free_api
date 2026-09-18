@@ -342,12 +342,29 @@ function runCalibration(sandboxPath, caseDef) {
 // ---- 检查 Git Diff 边界 ----
 function inspectGitDiff(sandboxPath) {
   try {
-    const stat = execSync(`git diff --stat`, { cwd: sandboxPath, encoding: 'utf8' }).trim();
-    const patch = execSync(`git diff`, { cwd: sandboxPath, encoding: 'utf8' }).trim();
-    const changedFiles = execSync(`git diff --name-only`, { cwd: sandboxPath, encoding: 'utf8' })
+    let stat = execSync(`git diff --stat`, { cwd: sandboxPath, encoding: 'utf8' }).trim();
+    let patch = execSync(`git diff`, { cwd: sandboxPath, encoding: 'utf8' }).trim();
+
+    // porcelain 覆盖全部变更形态——纯 git diff 对未跟踪新文件完全失明，
+    // "新建文件"类考题的主产物会被漏报（case_ft_bare_delegate 实测踩中）。
+    const porcelain = execSync(`git status --porcelain=v1 --untracked-files=all`, { cwd: sandboxPath, encoding: 'utf8' })
       .trim()
       .split('\n')
       .filter(Boolean);
+    const changedFiles = porcelain.map((l) => l.slice(3).trim());
+    const untrackedFiles = porcelain.filter((l) => l.startsWith('?? ')).map((l) => l.slice(3).trim());
+
+    for (const f of untrackedFiles) {
+      // 新文件补 stat 行与完整 patch（--no-index 有差异时 exit=1，需捕获输出而非报错）
+      try {
+        const lines = execSync(`wc -l < "${f}"`, { cwd: sandboxPath, encoding: 'utf8' }).trim();
+        stat += `${stat ? '\n' : ''} ${f} | ${lines} ${'+'.repeat(Math.min(Number(lines) || 0, 38))}`;
+      } catch { /* 文件被并发清理则跳过 stat */ }
+      try {
+        const p = execSync(`git diff --no-index -- /dev/null "${f}" || true`, { cwd: sandboxPath, encoding: 'utf8' }).trim();
+        if (p) patch += `${patch ? '\n' : ''}${p}`;
+      } catch { /* 读不到就跳过 patch */ }
+    }
 
     return { stat, patch, changedFiles };
   } catch {

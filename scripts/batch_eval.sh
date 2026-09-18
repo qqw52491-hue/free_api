@@ -10,8 +10,13 @@ resolve_model() {
   sqlite3 "$DB" "SELECT id FROM models WHERE name='$1' AND enabled=1 LIMIT 1"
 }
 
-FLASH="${FREE_API_EVAL_FLASH_NAME:-gemini-3.7-flash}"
-PRO="${FREE_API_EVAL_PRO_NAME:-gemini-3.1-pro}"
+# 默认两档都用本地代理实测活模型（gemini-3.8-flash-high@127.0.0.1:8045，
+# 当日遥测 300+ 次成功调用）。需要分档对照时用环境变量覆盖，如
+# FREE_API_EVAL_PRO_NAME=gemini-3-pro-high。
+# 注意：gemini-3.1-pro@zhandou.online 远端代理已实测挂死（连接建立但
+# 流式永不返回，单次调用烧满 240s 预算链式拖垮整轮），勿用。
+FLASH="${FREE_API_EVAL_FLASH_NAME:-gemini-3.8-flash-high}"
+PRO="${FREE_API_EVAL_PRO_NAME:-gemini-3.8-flash-high}"
 FLASH_ID="$(resolve_model "$FLASH")"
 PRO_ID="$(resolve_model "$PRO")"
 
