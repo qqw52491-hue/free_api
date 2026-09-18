@@ -676,7 +676,7 @@
 
 .plan-title-bold {
     font-weight: 600;
-    font-size: 13px;
+    font-size: 14px;
     color: #f1f5f9;
     letter-spacing: -0.01em;
     max-width: 560px;
@@ -812,7 +812,7 @@
 }
 
 .plan-title-text {
-    font-size: 12px;
+    font-size: 13.5px;
     font-weight: 550;
     color: #f4f4f5;
     letter-spacing: -0.01em;
@@ -821,8 +821,8 @@
 .plan-meta-inline {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-size: 11px;
+    gap: 5px;
+    font-size: 12px;
     color: #71717a;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-weight: 450;
@@ -1068,10 +1068,10 @@
 
 /* 🌟 阶段解说段落 (每轮 thought 叙述：第一人称自然语言，Devin/Cursor 式叙事节拍，统领全局) */
 .ambient-narrative {
-    margin: 7px 4px 3px;
+    margin: 8px 4px 4px;
     padding: 0 0 0 2px;
-    font-size: 13px;
-    line-height: 1.58;
+    font-size: 14px;
+    line-height: 1.62;
     font-weight: 500;
     color: #f1f5f9;
     white-space: pre-wrap;
@@ -1085,11 +1085,11 @@
 
 /* 解说抑制小行：冷却窗口内的 thought 降级——保留叙事轨迹但不再占段落视觉 */
 .ambient-narrative-mini {
-    margin: 1px 4px;
+    margin: 2px 4px;
     padding: 1px 0 1px 8px;
-    font-size: 10.5px;
+    font-size: 11.5px;
     line-height: 1.45;
-    color: #64748b;
+    color: #71717a;
     font-style: italic;
     white-space: nowrap;
     overflow: hidden;
@@ -1111,11 +1111,11 @@
     justify-content: space-between;
     gap: 8px;
     width: 100%;
-    padding: 2.5px 6px;
-    min-height: 24px;
-    border-radius: 4px;
-    font-size: 11.5px;
-    line-height: 1.4;
+    padding: 3.5px 8px;
+    min-height: 28px;
+    border-radius: 5px;
+    font-size: 13px;
+    line-height: 1.45;
     color: #94a3b8;
     cursor: pointer;
     background: transparent;
@@ -1124,7 +1124,7 @@
 }
 
 .ambient-text-row:hover {
-    background: rgba(255, 255, 255, 0.035);
+    background: rgba(255, 255, 255, 0.04);
 }
 
 .ambient-text-row.selected {
@@ -1140,7 +1140,7 @@
 }
 
 .ambient-text-row.is-milestone .ambient-text-body {
-    font-size: 13.5px;
+    font-size: 14px;
     line-height: 1.68;
     font-weight: 500;
     color: #f1f5f9;
@@ -1158,21 +1158,21 @@
 .ambient-text-row.status-failed .ambient-text-body,
 .ambient-text-row.status-challenged .ambient-text-body {
     color: #f59e0b;
-    font-size: 11.5px;
+    font-size: 13px;
 }
 
 .ambient-text-content {
     display: flex;
     align-items: baseline;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 7px;
     min-width: 0;
     flex: 1;
 }
 
 .ambient-text-body {
-    color: #8b949e;
-    font-size: 11.5px;
+    color: #94a3b8;
+    font-size: 13px;
     word-break: break-word;
 }
 
@@ -1185,7 +1185,7 @@
 .ambient-action-lead {
     display: inline-flex;
     align-items: center;
-    gap: 4.5px;
+    gap: 5px;
     line-height: 1.35;
     flex-shrink: 0;
     user-select: none;
@@ -1199,12 +1199,12 @@
 .action-tag {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
-    font-size: 10px;
+    gap: 3.5px;
+    font-size: 11.5px;
     font-weight: 500;
-    padding: 0.5px 4.5px;
-    border-radius: 3px;
-    line-height: 1.3;
+    padding: 1px 6px;
+    border-radius: 4px;
+    line-height: 1.35;
     flex-shrink: 0;
     letter-spacing: 0.1px;
 }
@@ -1271,11 +1271,11 @@
 /* 文件名 (等宽内敛，悬浮高亮) */
 .chip-file-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11px;
+    font-size: 12.5px;
     font-weight: 500;
     color: #cbd5e1;
     letter-spacing: -0.2px;
-    max-width: 260px;
+    max-width: 280px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1290,7 +1290,7 @@
 /* 所在目录简写 (如 src/bin/，极度轻柔) */
 .chip-file-dir {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 10.5px;
+    font-size: 11.5px;
     color: #64748b;
     margin-left: -1px;
     letter-spacing: -0.2px;
@@ -1299,13 +1299,13 @@
 /* 行号与耗时微标 (#L70-120, 0.5s) */
 .chip-line-range {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 500;
     color: #94a3b8;
     background: rgba(255, 255, 255, 0.04);
-    padding: 0.5px 3.5px;
+    padding: 1px 5px;
     border-radius: 3px;
-    line-height: 1.2;
+    line-height: 1.25;
 }
 
 /* Diff 增删行微标 (+22 -163，鲜明优雅) */
@@ -1313,41 +1313,41 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     color: #34d399;
     font-weight: 500;
-    font-size: 10.5px;
+    font-size: 11.5px;
 }
 
 .chip-diff-del {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     color: #f87171;
     font-weight: 500;
-    font-size: 10.5px;
+    font-size: 11.5px;
 }
 
 .chip-intercepted {
-    font-size: 9.5px;
+    font-size: 10.5px;
     font-weight: 600;
     color: #f87171;
     background: rgba(239, 68, 68, 0.15);
     border-radius: 3px;
-    padding: 0 4px;
+    padding: 0 5px;
 }
 
 /* 终端命令微丸 */
 .chip-cmd-pill {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11.5px;
+    font-size: 12.5px;
     color: #fef08a;
     background: rgba(255, 255, 255, 0.04);
-    padding: 0.5px 5px;
+    padding: 1px 6px;
     border-radius: 3px;
-    max-width: 220px;
+    max-width: 260px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
 .chip-duration {
-    font-size: 10.5px;
+    font-size: 11.5px;
     color: #eab308;
     font-weight: 500;
 }
@@ -1368,9 +1368,9 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 2.5px 6px;
-    min-height: 24px;
-    border-radius: 4px;
+    padding: 3.5px 8px;
+    min-height: 28px;
+    border-radius: 5px;
     cursor: pointer;
     transition: background 0.12s ease;
     user-select: none;
@@ -1385,7 +1385,7 @@
 .action-group-left {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 7px;
     min-width: 0;
     flex: 1;
     overflow: hidden;
@@ -1393,7 +1393,7 @@
 
 .search-group-summary,
 .action-group-summary {
-    font-size: 11.5px;
+    font-size: 13px;
     color: #94a3b8;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1402,7 +1402,7 @@
 
 .search-group-files {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-size: 12px;
     color: #64748b;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1702,16 +1702,16 @@ button.root-row {
     text-align: left;
 }
 
-/* 具体执行步骤行 (极紧凑，高 22px) */
+/* 具体执行步骤行 (高 26px) */
 .goal-row {
     display: flex;
     align-items: center;
-    gap: 6px;
-    min-height: 22px;
-    padding: 2px 6px;
-    border-radius: 4px;
+    gap: 7px;
+    min-height: 26px;
+    padding: 3px 8px;
+    border-radius: 5px;
     color: #d4d4d8;
-    font-size: 12px;
+    font-size: 13.5px;
     width: 100%;
     transition: background 0.12s;
 }
@@ -1804,12 +1804,13 @@ button.root-row {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-size: 13.5px;
     font-weight: 500;
 }
 
 .step-metrics-badge {
-    font-size: 10px;
-    padding: 0 5px;
+    font-size: 11px;
+    padding: 1px 6px;
     border-radius: 3px;
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid rgba(255, 255, 255, 0.06);
@@ -1822,7 +1823,7 @@ button.root-row {
 
 .row-status {
     margin-left: 0;
-    font-size: 10px;
+    font-size: 11.5px;
     color: #71717a;
     font-style: normal;
     flex-shrink: 0;
@@ -1831,33 +1832,33 @@ button.root-row {
 .goal-row time,
 .plan-row time,
 .child-row time {
-    font-size: 9.5px;
+    font-size: 10.5px;
     color: #52525b;
     font-family: ui-monospace, monospace;
     flex-shrink: 0;
     margin-left: 6px;
 }
 
-/* 子步骤与思考 (极紧凑，高 20px) */
+/* 子步骤与思考 */
 .node-children {
     position: relative;
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: 2px;
     margin-left: 6px;
     padding-left: 10px;
     border-left: 1px solid rgba(255, 255, 255, 0.06);
-    margin-bottom: 2px;
+    margin-bottom: 3px;
 }
 
 .child-row {
     display: flex;
     align-items: center;
     gap: 6px;
-    min-height: 20px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-size: 11px;
+    min-height: 24px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 12.5px;
     color: #8e8e93;
     width: 100%;
     transition: background 0.12s;
@@ -1874,15 +1875,15 @@ button.root-row {
 }
 
 .step-tool-emoji {
-    font-size: 11.5px;
+    font-size: 12.5px;
     line-height: 1;
     flex-shrink: 0;
     margin-right: 1px;
 }
 
 .child-mark {
-    width: 3px;
-    height: 3px;
+    width: 4px;
+    height: 4px;
     border-radius: 50%;
     background: #71717a;
     flex-shrink: 0;
@@ -1892,9 +1893,9 @@ button.root-row {
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    padding: 1px 6px;
+    padding: 1.5px 7px;
     border-radius: 4px;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     flex-shrink: 0;
@@ -3211,13 +3212,13 @@ button.root-row {
 .child-action-card {
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 5px 12px;
-    margin: 3px 0 3px 18px;
-    border-radius: 6px;
+    gap: 8px;
+    padding: 6px 13px;
+    margin: 4px 0 4px 18px;
+    border-radius: 7px;
     background: rgba(255, 255, 255, 0.025);
     border: 1px solid rgba(255, 255, 255, 0.06);
-    font-size: 11.5px;
+    font-size: 13px;
     color: #cbd5e1;
     position: relative;
     transition: all 0.15s ease;
@@ -3237,12 +3238,12 @@ button.root-row {
 .child-action-card .card-action-label {
     color: #94a3b8;
     font-weight: 500;
-    font-size: 11px;
+    font-size: 12px;
     letter-spacing: 0.2px;
 }
 
 .child-action-card .card-file-icon {
-    font-size: 12px;
+    font-size: 14px;
     line-height: 1;
     opacity: 0.85;
 }
@@ -3251,33 +3252,33 @@ button.root-row {
     color: #e2e8f0;
     font-weight: 500;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11.5px;
+    font-size: 13px;
 }
 
 .child-action-card .card-line-range {
     color: #38bdf8;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 500;
 }
 
 .child-action-card .card-diff-add {
     color: #4ade80;
     font-weight: 600;
-    font-size: 11px;
+    font-size: 12px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .child-action-card .card-diff-del {
     color: #f87171;
     font-weight: 600;
-    font-size: 11px;
+    font-size: 12px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .child-action-card .card-view-diff-hint {
     margin-left: auto;
-    font-size: 11px;
+    font-size: 12px;
     color: #38bdf8;
     opacity: 0.75;
     font-weight: 500;
@@ -3292,7 +3293,7 @@ button.root-row {
 
 .child-action-card .card-duration {
     color: #64748b;
-    font-size: 9.5px;
+    font-size: 10.5px;
     font-style: normal;
     margin-left: 6px;
 }

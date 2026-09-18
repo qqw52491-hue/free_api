@@ -338,7 +338,7 @@
                                             v-if="item.action.fileName && item.action.fileName !== '新文件' && item.action.fileName !== '文件内容' && item.action.fileName !== '代码变更'"
                                             :name="item.action.fileName"
                                             :kind="item.action.iconKind || ''"
-                                            :size="12"
+                                            :size="14"
                                             class="chip-file-icon"
                                         />
 
@@ -793,7 +793,7 @@
                                             <span class="child-mark"></span>
                                             <span class="card-action-label">{{ formatStepOperation(step).badgeLabel }}</span>
                                             <span class="card-file-icon">
-                                                <FileIcon :name="formatStepOperation(step).fileName || getStepMiniChip(step)?.fileName" :size="13" />
+                                                <FileIcon :name="formatStepOperation(step).fileName || getStepMiniChip(step)?.fileName" :size="15" />
                                             </span>
                                             <span class="card-file-name">{{ formatStepOperation(step).fileName || getStepMiniChip(step)?.fileName }}</span>
                                             <span v-if="formatStepOperation(step).lineRange" class="card-line-range">{{ formatStepOperation(step).lineRange }}</span>
