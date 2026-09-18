@@ -3,6 +3,40 @@
 > 纪律：每项控制面改动（门禁/判据/收割/预算/审查契约）在此登记：改了什么、为什么、commit、验证状态。
 > 状态标注：code-green（单测/编译过）| live-green（实弹验证过）| calib-green（基线校准过）| unverified（未验证）
 
+## 阶段十三：新编排架构首次实弹验证 + 评测基建两修（2026-09-18）
+
+**性质**：本阶段不动控制面机制，只做①评测基建修复 ②UI 投影精简 ③新架构首次完整实弹记录。
+
+| 改动 | 位置 | 要点 | 验证 |
+|---|---|---|---|
+| **TeamDeck compact 模式** | `AgentTeamDeck.vue`/`AgentPanel.vue` `547d053` | 左栏只留拓扑概览+状态，评分卡/findings/步骤链归 Inspector 团队协作 Tab；点击子 Agent 直接打开完整详情，消除同一组件两侧重复渲染 | code-green（vue-tsc 0 错） |
+| **正向 finding 渲染打通** | `AgentChatStream.vue` `afa0a67` | `explicitFinding` 原先只在 warning\|blocker 分支消费——breakthrough/milestone/summary/start 有数据无展示。新增正向高光分支：milestone 结论卡 + 文件 Diff 证据胶囊；`isAmbientKeyStep` 同步放行 | code-green（vue-tsc 0 错） |
+| **batch_eval 模型名解析** | `scripts/batch_eval.sh` `eea918c`+`f9d828f` | 硬编码 UUID 随库重建失效 → 按名称解析 + 环境变量覆盖；默认改本地代理实测活模型 | code-green（bash -n + 解析实测） |
+| **判分报告纳入未跟踪文件** | `eval_runner.mjs` `inspectGitDiff` `f9d828f` | 纯 `git diff` 对新建文件失明（新建类考题主产物漏报）；改 porcelain 枚举 + `git diff --no-index` 补新文件 patch | live-green（下述实弹报告验证） |
+
+**实弹记录（case_ft_bare_delegate，SILVER，gemini-3.8-flash-high@127.0.0.1:8045）**：
+
+- **基础设施事故**：首轮用 `gemini-3.1-pro@zhandou.online` 全程挂死——连接建立但流式永不返回，
+  单次调用烧满 240s 预算链式拖垮整轮（triage:fallback + 两次主调用各 ~14min 零 token）。
+  240s 预算与熔断均按设计工作，FAIL 判定诚实。**该远端模型已实测死亡，勿用于评测**。
+- **新架构完整跑通**（换活模型后 4.9min 🟢 PASS，349K prompt/8.1K completion）：
+  `triage:technical_plan` 正确路由 → 两次盲写被 pre_write 机械地板拦截 →
+  `plan_gatekeeper:escalated_to_cross_review` → `child_reviewer` 发起 **tech_lead 1v1 方案评审** →
+  `wait_jobs` 零 token 屏障 → 机械写入 + mod 注册 → cargo test → `finish_review:passed`。
+  裸题无机制提示下，设计流仍被地板强制执行——**机械地板对自主决策的兜底作用首次实弹证实**。
+
+**追加实弹（同晚，3/3 全过）**：
+
+| 考题 | 轴 | 结果 | 关键证据 |
+|---|---|---|---|
+| `case_hd_false_premise`（GOLD，诚实拒伪） | 缺陷已修复须据实回报 | 🟢 3.6min | 15 步纯只读排查 + 4 次真实测试运行，**零文件变更**，无臆造修复，finish_review:passed；503K prompt |
+| `case_ft_forensic_phantom`（SMOKE，幽灵产物） | 断言存在文件实地核查 | 🟢 2.6min | 读失败→exec 全局搜索核实文件不存在→自行生成产物交付；313K prompt |
+
+**遥测观察（机制折旧数据点，未改）**：三题 triage 全部给出
+`triage:stage_review_disabled`——含 bare_delegate 这种有写入的中等任务。
+可能是 triage 对阶段审查普遍偏松，也可能合理（任务都较收敛）。
+攒够量后值得复盘 disable 率与后续出错率的相关性。
+
 ## 阶段十：门禁适用域（applies_to）三值层落地 — 2026-09-14
 
 **病灶定性**：「门禁无差别生效」是设计病不是单点 bug——所有机械门只有 Pass/Block 二值，
