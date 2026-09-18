@@ -3,7 +3,7 @@
         <div v-if="shouldShow" class="agent-progress-deck-wrap">
             <div class="agent-progress-deck" :class="{ 'is-running': isRunning, 'is-expanded': isExpanded }">
                 <!-- 头部状态摘要条 (极简顶栏) -->
-                <div class="deck-header" @click="allActionItems.length > 3 && toggleExpanded()">
+                <div class="deck-header" @click="allModifiedFiles.length > 3 && toggleExpanded()">
                     <div class="header-left">
                         <!-- 状态图标：进行中转圈，完成打勾，等待圆点 -->
                         <div class="status-icon-wrap">
@@ -26,9 +26,6 @@
                             </span>
                             <span v-else-if="allModifiedFiles.length > 0" class="status-sub">
                                 · 修改了 {{ allModifiedFiles.length }} 个文件
-                            </span>
-                            <span v-else-if="allActionItems.length > 0" class="status-sub">
-                                · 完成了 {{ allActionItems.length }} 项操作
                             </span>
                         </div>
                     </div>
@@ -54,7 +51,7 @@
                             v-if="!isRunning"
                             type="button"
                             class="deck-close-btn"
-                            title="隐藏任务概括"
+                            title="隐藏文件变更"
                             @click.stop="dismiss"
                         >
                             <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -62,40 +59,38 @@
                     </div>
                 </div>
 
-                <!-- 🌟 用户标杆：改动文件与关键动作托盘 (带多了隐藏、底部半透明遮罩与展开小箭头) -->
-                <div v-if="allActionItems.length > 0" class="deck-actions-viewport-wrap">
+                <!-- 🌟 用户标杆：更新文件变更托盘 (严格仅展示文件变更，不显示步骤；带多了隐藏、底部半透明遮罩与展开小箭头) -->
+                <div v-if="allModifiedFiles.length > 0" class="deck-actions-viewport-wrap">
                     <div
                         class="deck-actions-viewport"
-                        :class="{ 'is-collapsed-mask': !isExpanded && allActionItems.length > 3 }"
+                        :class="{ 'is-collapsed-mask': !isExpanded && allModifiedFiles.length > 3 }"
                     >
                         <div
-                            v-for="item in (isExpanded ? allActionItems : allActionItems.slice(0, 10))"
-                            :key="item.id"
-                            class="deck-action-row"
-                            :class="{ 'is-clickable': !!item.chip }"
-                            :title="item.chip ? '点击查看代码改动对比' : undefined"
-                            @click="item.chip && $emit('open-diff', diffPayloadFromChip(item.chip))"
+                            v-for="file in (isExpanded ? allModifiedFiles : allModifiedFiles.slice(0, 10))"
+                            :key="file.path || file.fileName"
+                            class="deck-action-row is-clickable"
+                            title="点击查看代码改动对比"
+                            @click="$emit('open-diff', diffPayloadFromChip(file))"
                         >
                             <FileIcon
-                                v-if="item.chip?.fileName"
-                                :name="item.chip.fileName"
+                                :name="file.fileName"
+                                :kind="file.actionKind === 'modify' ? 'code' : ''"
                                 :size="12"
                                 class="action-row-file-icon"
                             />
-                            <span v-else class="action-row-icon">{{ item.icon }}</span>
-                            <span class="action-row-text">{{ item.text }}</span>
-                            <span v-if="item.subText" class="action-row-sub">{{ item.subText }}</span>
-                            <span v-if="item.additions && item.additions > 0" class="chip-add">+{{ item.additions }}</span>
-                            <span v-if="item.deletions && item.deletions > 0" class="chip-del">−{{ item.deletions }}</span>
+                            <span class="action-row-text">{{ file.fileName }}</span>
+                            <span v-if="file.path && file.path !== file.fileName" class="action-row-sub">{{ file.path }}</span>
+                            <span v-if="file.additions && file.additions > 0" class="chip-add">+{{ file.additions }}</span>
+                            <span v-if="file.deletions && file.deletions > 0" class="chip-del">−{{ file.deletions }}</span>
                         </div>
                     </div>
 
                     <!-- 底部渐隐折叠悬浮小箭头 (多了隐藏，点击展开更多) -->
                     <button
-                        v-if="allActionItems.length > 3"
+                        v-if="allModifiedFiles.length > 3"
                         type="button"
                         class="deck-actions-expand-btn"
-                        :title="isExpanded ? '收起列表' : `展开全部 (${allActionItems.length} 项)`"
+                        :title="isExpanded ? '收起列表' : `展开全部 (${allModifiedFiles.length} 个文件)`"
                         @click.stop="toggleExpanded"
                     >
                         <svg viewBox="0 0 24 24" class="chevron-mini-icon" :class="{ 'is-flipped': isExpanded }">
@@ -111,18 +106,8 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import type { AgentStepItem, AgentTokenUsage, AgentToolStatus, StageState, StageFailureState, FileChangeChip, FileDiffPayload, ReviewerVerdict, StageActionCapsule } from './types';
-import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, extractStageChronologicalCapsules } from './diffUtils';
+import { diffPayloadFromChip, parseStepFileChanges, aggregateFileChips, extractStageChronologicalCapsules } from './diffUtils';
 import FileIcon from './FileIcon.vue';
-
-export interface DeckActionItem {
-    id: string;
-    icon: string;
-    text: string;
-    subText?: string;
-    chip?: FileChangeChip;
-    additions?: number;
-    deletions?: number;
-}
 
 export interface Level1TodoItem {
     id: string;
@@ -187,71 +172,6 @@ const allModifiedFiles = computed<FileChangeChip[]>(() => {
     return aggregateFileChips(rawChips);
 });
 
-const allActionItems = computed<DeckActionItem[]>(() => {
-    const items: DeckActionItem[] = [];
-    const seenKeys = new Set<string>();
-
-    // 1. 优先列出真实改动/新增的文件 (高价值产物，点击可直接打开 Diff 视图)
-    for (const f of allModifiedFiles.value) {
-        const key = `file-${f.path || f.fileName}`;
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        items.push({
-            id: key,
-            icon: f.actionKind === 'create' ? '✨' : '📄',
-            text: f.actionKind === 'create' ? `Created ${f.fileName}` : `Edited ${f.fileName}`,
-            subText: f.path && f.path !== f.fileName ? f.path : undefined,
-            chip: f,
-            additions: f.additions,
-            deletions: f.deletions,
-        });
-    }
-
-    // 2. 依次聚合步骤中的关键操作 (终端命令 Ran command:, 查看文件 Viewed:, 检索 Searched for:, MCP 等)
-    for (const s of props.steps || []) {
-        const op = formatStepOperation(s);
-        const changes = parseStepFileChanges(s);
-
-        // 如果这个步骤产生的改动文件已经在上面展示了，且无独立命令，则跳过避免重复
-        if (changes.chip && (changes.chip.additions || 0) > 0 && items.some(it => it.chip?.fileName === changes.chip?.fileName)) {
-            continue;
-        }
-
-        const rawTool = (s.tool || s.action || '').toLowerCase();
-        let formattedText = '';
-        let icon = op.badgeIcon || '⚡';
-
-        if (rawTool.includes('shell') || rawTool.includes('command') || rawTool.includes('run_command')) {
-            formattedText = op.actionText.startsWith('Ran command:') ? op.actionText : `Ran command: ${op.actionText}`;
-            icon = '⚡';
-        } else if (rawTool.includes('search') || rawTool.includes('grep')) {
-            formattedText = `Searched for ${op.actionText}`;
-            icon = '🔍';
-        } else if (rawTool.includes('view') || rawTool.includes('read')) {
-            formattedText = `Viewed ${op.actionText}`;
-            icon = '📖';
-        } else {
-            const desc = (s.description || '').replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
-            formattedText = desc && desc !== '执行操作' ? desc : op.actionText;
-        }
-
-        if (!formattedText || formattedText === '执行下一步操作') continue;
-        const key = `action-${s.id}-${formattedText}`;
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-
-        items.push({
-            id: key,
-            icon,
-            text: formattedText,
-            chip: changes.chip,
-            additions: changes.chip?.additions,
-            deletions: changes.chip?.deletions,
-        });
-    }
-
-    return items;
-});
 
 // 计时器
 const stepStartTime = ref<number>(Date.now());
@@ -292,7 +212,8 @@ onUnmounted(() => {
 
 const shouldShow = computed(() => {
     if (isDismissed.value) return false;
-    return props.isRunning || props.steps.length > 0;
+    // 严格遵从用户要求：仅展示更新的文件变更，无文件变更时不展示
+    return allModifiedFiles.value.length > 0;
 });
 
 function toggleExpanded() {
@@ -483,12 +404,9 @@ const headerTitle = computed(() => {
         if (firstLine && firstLine.length <= 35) return firstLine;
     }
     if (allModifiedFiles.value.length > 0) {
-        return `已完成 · 修改了 ${allModifiedFiles.value.length} 个文件`;
+        return `已修改 ${allModifiedFiles.value.length} 个文件`;
     }
-    if (allActionItems.value.length > 0) {
-        return `已完成 · 执行了 ${allActionItems.value.length} 项操作`;
-    }
-    return '执行完成';
+    return '文件变更';
 });
 
 const currentStepDurationText = computed(() => {
