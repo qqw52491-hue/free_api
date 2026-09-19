@@ -1261,9 +1261,8 @@
 
 .action-tag.action-tag-think {
     color: #38bdf8;
-    background: linear-gradient(135deg, rgba(56, 189, 248, 0.14) 0%, rgba(99, 102, 241, 0.12) 100%);
-    border: 1px solid rgba(56, 189, 248, 0.28);
-    box-shadow: 0 0 10px rgba(56, 189, 248, 0.15);
+    background: rgba(56, 189, 248, 0.08);
+    border: 1px solid rgba(56, 189, 248, 0.2);
 }
 
 /* 🧠 极简矢量思维大脑 / 深度思考矢量图标 */
@@ -1285,8 +1284,6 @@
 
 .action-tag-think .thought-icon-svg {
     color: #38bdf8;
-    filter: drop-shadow(0 0 3px rgba(56, 189, 248, 0.5));
-    animation: thought-icon-pulse 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
 @keyframes thought-icon-pulse {
@@ -1597,8 +1594,8 @@
 .live-think-label {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-size: 14px;
+    gap: 6px;
+    font-size: 13.5px;
     font-weight: 600;
     color: #38bdf8;
     white-space: nowrap;
@@ -1607,15 +1604,39 @@
     line-height: 1.45;
 }
 
-.ambient-live-spinner {
-    width: 10px;
-    height: 10px;
-    border: 1.5px solid rgba(56, 189, 248, 0.25);
-    border-top-color: #38bdf8;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    margin: 0;
+.live-think-square-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.26);
+    color: #38bdf8;
     flex-shrink: 0;
+    box-sizing: border-box;
+    transition: all 0.15s ease;
+}
+
+.live-think-square-icon.is-action {
+    background: rgba(234, 179, 8, 0.1);
+    border-color: rgba(234, 179, 8, 0.26);
+    color: #e2b340;
+}
+
+.thought-square-svg {
+    width: 11px;
+    height: 11px;
+    stroke: currentColor;
+    flex-shrink: 0;
+}
+
+.live-think-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: #38bdf8;
+    letter-spacing: 0.1px;
 }
 
 .ambient-live-viewport {
@@ -2851,30 +2872,31 @@ button.root-row {
     will-change: transform, opacity;
 }
 
-/* 🌟 字体的流光动画 (Text Shimmer Flow - 极速流转推进感) */
+/* 🌟 字体的纯净流光动画 (Text Light Flow - 真实质感单色光流，拒绝彩虹假光效) */
 @keyframes textShimmerFlow {
     0% {
-        background-position: -200% 0;
+        background-position: 200% 0;
     }
     100% {
-        background-position: 200% 0;
+        background-position: -200% 0;
     }
 }
 
 .text-shimmer-flow {
     background: linear-gradient(
         90deg,
-        #2563eb 0%,
-        #38bdf8 20%,
-        #ffffff 45%,
-        #818cf8 70%,
-        #2563eb 100%
+        #475569 0%,
+        #475569 30%,
+        #0f172a 50%,
+        #475569 70%,
+        #475569 100%
     );
-    background-size: 200% auto;
+    background-size: 200% 100%;
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
-    animation: textShimmerFlow 1.5s linear infinite;
-    font-weight: 550;
+    animation: textShimmerFlow 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    font-weight: 500;
     display: inline-block;
 }
 
@@ -2882,14 +2904,15 @@ button.root-row {
 .dark .text-shimmer-flow {
     background: linear-gradient(
         90deg,
-        #60a5fa 0%,
-        #38bdf8 20%,
+        rgba(226, 232, 240, 0.65) 0%,
+        rgba(226, 232, 240, 0.65) 30%,
         #ffffff 50%,
-        #a78bfa 75%,
-        #60a5fa 100%
+        rgba(226, 232, 240, 0.65) 70%,
+        rgba(226, 232, 240, 0.65) 100%
     );
-    background-size: 200% auto;
+    background-size: 200% 100%;
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 

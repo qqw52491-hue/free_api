@@ -467,8 +467,20 @@
                         >
                             <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
                                 <span class="live-think-label">
-                                    <span class="ambient-live-spinner manus-spinner mini"></span>
-                                    {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中：' : '推进中：' }}
+                                    <span class="live-think-square-icon" :class="{ 'is-action': getPlanRunningPreview(entry).line3.actionKind !== 'think' }">
+                                        <svg v-if="getPlanRunningPreview(entry).line3.actionKind === 'think'" class="thought-square-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+                                            <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+                                            <path d="M12 5v13"/>
+                                            <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
+                                            <path d="M16 12a4 4 0 0 0-8 0"/>
+                                            <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
+                                        </svg>
+                                        <svg v-else class="thought-square-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                                        </svg>
+                                    </span>
+                                    <span class="live-think-title">{{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中：' : '推进中：' }}</span>
                                 </span>
                                 <div class="ambient-live-viewport">
                                     <span
@@ -948,8 +960,17 @@
                         <div class="ambient-live-text-row">
                             <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
                                 <span class="live-think-label">
-                                    <span class="ambient-live-spinner manus-spinner mini"></span>
-                                    思考中：
+                                    <span class="live-think-square-icon">
+                                        <svg class="thought-square-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+                                            <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+                                            <path d="M12 5v13"/>
+                                            <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
+                                            <path d="M16 12a4 4 0 0 0-8 0"/>
+                                            <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
+                                        </svg>
+                                    </span>
+                                    <span class="live-think-title">思考中：</span>
                                 </span>
                                 <div class="ambient-live-viewport">
                                     <span
