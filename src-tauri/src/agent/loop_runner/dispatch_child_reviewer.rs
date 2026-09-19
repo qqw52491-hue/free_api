@@ -240,8 +240,8 @@ pub(super) async fn dispatch_child_reviewer(
                 }
             }
 
-            if reviewer_model == routing.model_id {
-                // 未被角色卡钉死时应用配置级异构优选；说明写进派发报告，人工可见
+            if reviewer_model == routing.model_id && !explicit_reviewer_slot {
+                // 未被角色卡钉死且未被会话显式指定时应用配置级异构优选；说明写进派发报告，人工可见
                 let (preferred, note) = crate::agent::router::prefer_cross_family_reviewer(
                     &*ctx.state.inner().0.lock().unwrap(),
                     &reviewer_model,
