@@ -821,7 +821,7 @@
                                             <span v-if="(getStepMiniChip(step)?.additions || 0) > 0" class="card-diff-add">+{{ getStepMiniChip(step)?.additions }}</span>
                                             <span v-if="(getStepMiniChip(step)?.deletions || 0) > 0" class="card-diff-del">−{{ getStepMiniChip(step)?.deletions }}</span>
                                             <span v-if="getStepMiniChip(step)?.isIntercepted" class="card-blocked">已拦截</span>
-                                            <span v-if="chipHasDiffContent(getStepMiniChip(step))" class="card-view-diff-hint">查看 Diff →</span>
+                                            <span v-if="getStepMiniChip(step) || hasFileOperation(step)" class="card-view-diff-hint">查看 Diff →</span>
                                             <em v-if="step.metrics?.toolDurationMs != null" class="card-duration">{{ formatDurationSeconds(step.metrics.toolDurationMs) }}</em>
                                         </div>
 
@@ -1167,7 +1167,7 @@ import AttachmentCard from "./AttachmentCard.vue";
 import CollapsibleUserText from "./CollapsibleUserText.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
 import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, AgentWorkerItem, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule } from "./types";
-import { diffPayloadFromChip, formatStepOperation, parseStepFileChanges, aggregateFileChips, chipHasDiffContent, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtLineInfo } from "./diffUtils";
+import { diffPayloadFromChip, extractDiffFromStep, formatStepOperation, parseStepFileChanges, aggregateFileChips, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtLineInfo } from "./diffUtils";
 import type { StepOperationDisplay } from "./diff/toolOperation";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
 import { formatClock, formatDurationSeconds, formatMilliseconds, getToolIcon, shortText } from "./format";
@@ -1538,24 +1538,23 @@ const vScrollTail = {
 
 // ── 🛠️ 步骤文件变更与计划摘要解析 ──
 /**
- * Chip 点击：有真实 Diff 内容 → 打开 Diff；否则回落到对应步骤详情
- * （如仅声明目标文件的写入派发步骤），避免打开空 Diff。
+ * Chip 点击：直接跳转到文件变更 (Diff)，不再回落到步骤详情
  */
-function handleChipClick(entry: PlanEntry, chip: FileChangeChip | undefined) {
+function handleChipClick(_entry: PlanEntry | undefined, chip: FileChangeChip | undefined) {
     if (!chip) return;
-    if (chipHasDiffContent(chip)) {
+    emit('open-diff', diffPayloadFromChip(chip));
+}
+
+/** 子步骤操作卡片点击：文件操作卡片直接看文件变更 Diff */
+function handleActionCardClick(step: AgentStepItem) {
+    const chip = getStepMiniChip(step);
+    if (chip) {
         emit('open-diff', diffPayloadFromChip(chip));
         return;
     }
-    const step = entry.steps.find(s => s.id === chip.stepId);
-    if (step) emit('select-step', step.id);
-}
-
-/** 子步骤操作卡片点击：有内容看 Diff，无内容看步骤详情 */
-function handleActionCardClick(step: AgentStepItem) {
-    const chip = getStepMiniChip(step);
-    if (chipHasDiffContent(chip)) {
-        emit('open-diff', diffPayloadFromChip(chip!));
+    const diff = extractDiffFromStep(step);
+    if (diff) {
+        emit('open-diff', diff);
         return;
     }
     emit('select-step', step.id);
@@ -1640,8 +1639,7 @@ function startTypewriter(id: string, fullText: string) {
 function actionCardTitle(step: AgentStepItem): string {
     const chip = getStepMiniChip(step);
     if (chip?.isIntercepted) return `${chip.path} · 写入已被门禁拦截（点击查看尝试内容）`;
-    if (chipHasDiffContent(chip)) return '点击在右侧查看代码改动 Diff';
-    return formatStepOperation(step).filePath || '点击查看步骤详情';
+    return '点击在右侧查看代码改动 Diff';
 }
 
 function getStepMiniChip(step: AgentStepItem): FileChangeChip | undefined {
@@ -2412,9 +2410,16 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
 }
 
 function handleAmbientChipClick(step: AgentStepItem, action: AmbientActionDisplay) {
-    if (action.hasDiff && action.chip && chipHasDiffContent(action.chip)) {
+    if (action.chip) {
         emit('open-diff', diffPayloadFromChip(action.chip));
         return;
+    }
+    if (action.hasDiff) {
+        const diff = extractDiffFromStep(step);
+        if (diff) {
+            emit('open-diff', diff);
+            return;
+        }
     }
     if (action.actionKind === 'subagent') {
         emit('open-team-deck', step.id);

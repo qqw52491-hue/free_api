@@ -389,6 +389,24 @@ watch(() => props.activeIndex, (idx) => {
     }
 }, { immediate: true });
 
+watch(
+    () => [props.filePath, props.fileName],
+    ([p, n]) => {
+        if (!p && !n) return;
+        const target = (p || n || '').trim();
+        if (!target) return;
+        const idx = effectiveFiles.value.findIndex(
+            (f) => (f.filePath && f.filePath === p) ||
+                   (f.fileName && f.fileName === n) ||
+                   (f.filePath && f.filePath.endsWith(target))
+        );
+        if (idx >= 0) {
+            currentFileIndex.value = idx;
+        }
+    },
+    { immediate: true }
+);
+
 const activeFile = computed<FileDiffPayload>(() => {
     return effectiveFiles.value[currentFileIndex.value] || effectiveFiles.value[0] || {
         filePath: props.filePath,

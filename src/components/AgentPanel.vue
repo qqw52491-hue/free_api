@@ -522,10 +522,8 @@ function handleOpenTeamDeck(stepId?: string) {
     }
 }
 function handleOpenDiff(payload: FileDiffPayload) {
-    if (payload.stepId) {
-        clearNarrativeSelection();
-        selectedSubpart.value = "tool";
-        session.selectStep(payload.stepId);
+    if (payload.stepId && !payload.viewAll) {
+        session.selectedStepId.value = payload.stepId;
     }
     inspectorCollapsed.value = false;
     inspectorRef.value?.openDiff(payload);

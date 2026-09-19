@@ -537,7 +537,7 @@
                     :all-files="effectiveDiffPayload.allFiles || allFilesFromSteps"
                     :view-all="effectiveDiffPayload.viewAll"
                     :active-index="effectiveDiffPayload.activeIndex"
-                    @close="activeTab = 'detail'"
+                    @close="handleCloseDiff"
                     @select-file="handleDiffFileSelect"
                 />
                 <div v-else class="detail-placeholder">
@@ -673,7 +673,8 @@ watch(
     () => props.selectedStep?.id,
     (newId, oldId) => {
         if (newId !== oldId) {
-            if (customDiffPayload.value && customDiffPayload.value.stepId !== newId) {
+            // 只有在非 Diff 标签页下，切换步骤才清理 customDiffPayload，避免正在看 Diff 时被干扰
+            if (activeTab.value !== "diff" && customDiffPayload.value && customDiffPayload.value.stepId !== newId) {
                 customDiffPayload.value = null;
             }
         }
@@ -682,11 +683,19 @@ watch(
 
 function switchTab(tab: "preview" | "detail" | "diff" | "team" | "context" | "resources") {
     activeTab.value = tab;
+    if (tab !== "diff") {
+        customDiffPayload.value = null;
+    }
 }
 
 function openDiff(payload: FileDiffPayload) {
     customDiffPayload.value = payload;
     activeTab.value = "diff";
+}
+
+function handleCloseDiff() {
+    customDiffPayload.value = null;
+    activeTab.value = "detail";
 }
 
 defineExpose({
@@ -1110,11 +1119,11 @@ watch(
     }
 );
 
-// 当用户在左侧对话流中点击了某个步骤、思维链或介入记录时，自动切换回详情视图
+// 当用户在左侧对话流中点击了人工介入或全局思维链时，切换回详情视图 (步骤点击由 handleStepSelect 显式调用 switchTab('detail'))
 watch(
-    () => [props.selectedStep, props.selectedHuman, props.selectedActiveThought],
-    ([step, human, thought]) => {
-        if (step || human || thought) {
+    () => [props.selectedHuman, props.selectedActiveThought],
+    ([human, thought]) => {
+        if ((human || thought) && activeTab.value !== "diff") {
             activeTab.value = "detail";
         }
     }
