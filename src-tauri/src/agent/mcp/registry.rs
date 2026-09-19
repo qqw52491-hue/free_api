@@ -352,9 +352,18 @@ impl PluginRegistry {
                 target_plugin,
                 matched.first().map(|(_, t)| t.name.as_str()).unwrap_or("tool_name")
             ));
-            for (plugin, tool) in &matched {
+            // 超大插件截断展示，完整清单按需逐条点名 {插件名/工具名} 取回
+            const MAX_TOOL_DETAIL_ENTRIES: usize = 40;
+            for (plugin, tool) in matched.iter().take(MAX_TOOL_DETAIL_ENTRIES) {
                 let desc = tool.description.lines().next().unwrap_or("").trim();
                 detail.push_str(&format!("- {}/{}: {}\n", plugin, tool.name, desc));
+            }
+            if matched.len() > MAX_TOOL_DETAIL_ENTRIES {
+                detail.push_str(&format!(
+                    "- …（另有 {} 个未列出，按 {{\"next_tool_hint\": \"{}/工具名\"}} 点名取回规格）\n",
+                    matched.len() - MAX_TOOL_DETAIL_ENTRIES,
+                    target_plugin
+                ));
             }
         } else {
             for (plugin, tool) in &matched {
