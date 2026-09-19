@@ -118,28 +118,38 @@ pub fn prefer_cross_family_reviewer(
     conn: &rusqlite::Connection,
     current_model: &str,
 ) -> (String, Option<String>) {
-    let current_family = model_family(current_model);
+    // 家族判定必须用模型【名称】——传入的 current_model 与候选均为 UUID，
+    // 对 UUID 判家族恒为 "other"（与 reviewer_failover_model 修过的生产 bug 同源）。
+    // 查名失败时回退用原值判（兼容直接传模型名的调用方）。
+    let current_name: String = conn
+        .query_row(
+            "SELECT name FROM models WHERE id = ?1",
+            [current_model],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| current_model.to_string());
+    let current_family = model_family(&current_name);
     if current_family == "other" {
         return (current_model.to_string(), None);
     }
-    let models: Vec<String> = {
-        let Ok(mut stmt) = conn.prepare("SELECT id FROM models WHERE enabled = 1") else {
+    let models: Vec<(String, String)> = {
+        let Ok(mut stmt) = conn.prepare("SELECT id, name FROM models WHERE enabled = 1") else {
             return (current_model.to_string(), None);
         };
-        stmt.query_map([], |row| row.get::<_, String>(0))
+        stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
             .unwrap_or_default()
     };
-    let alternative = models.iter().find(|m| {
-        let family = model_family(m);
+    let alternative = models.iter().find(|(_, name)| {
+        let family = model_family(name);
         family != current_family && family != "other"
     });
     match alternative {
-        Some(m) => (
+        Some((m, m_name)) => (
             m.clone(),
             Some(format!(
                 " reviewer 异构优选：{}（{} 系）→ {}（{} 系），与规划者模型家族错开以互补盲区。",
-                current_model, current_family, m, model_family(m)
+                current_model, current_family, m, model_family(m_name)
             )),
         ),
         None => (
@@ -609,6 +619,7 @@ mod tests {
         let conn = init_db(&dir.join("t.db")).unwrap();
 
         // 多家族可用：openai 规划者 → 切到非 openai 家族
+        // （id 是不含家族线索的标识、name 携带家族关键词——与真实 models 表形态一致）
         conn.execute(
             "INSERT OR REPLACE INTO platforms (id, name, base_url, api_key, created_at) VALUES ('p','test','https://example.com','sk-test','2026-01-01T00:00:00Z')",
             [],
@@ -616,9 +627,9 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO models (id, platform_id, name, display_name, enabled, created_at) VALUES
-             ('gpt-x','p','n','d',1,'2026-01-01T00:00:00Z'),
-             ('claude-y','p','n','d',1,'2026-01-01T00:00:00Z'),
-             ('glm-z','p','n','d',1,'2026-01-01T00:00:00Z')",
+             ('uuid-gpt','p','gpt-x','d',1,'2026-01-01T00:00:00Z'),
+             ('uuid-claude','p','claude-y','d',1,'2026-01-01T00:00:00Z'),
+             ('uuid-glm','p','glm-z','d',1,'2026-01-01T00:00:00Z')",
             [],
         )
         .unwrap();
@@ -627,7 +638,7 @@ mod tests {
         assert!(note.unwrap().contains("异构优选"));
 
         // 单家族：无异构可选 → 保持原模型 + 显式告警
-        conn.execute("DELETE FROM models WHERE id IN ('claude-y','glm-z')", []).unwrap();
+        conn.execute("DELETE FROM models WHERE id IN ('uuid-claude','uuid-glm')", []).unwrap();
         let (model, note) = super::prefer_cross_family_reviewer(&conn, "gpt-x");
         assert_eq!(model, "gpt-x");
         assert!(note.unwrap().contains("无异构家族可选"));
