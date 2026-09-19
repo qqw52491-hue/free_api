@@ -466,21 +466,9 @@
                             class="ambient-live-text-row"
                         >
                             <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
-                                <span class="ambient-action-lead">
-                                    <span class="action-tag action-tag-think">
-                                        <span class="action-tag-icon">
-                                            <svg class="thought-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
-                                                <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
-                                                <path d="M12 5v13"/>
-                                                <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
-                                                <path d="M16 12a4 4 0 0 0-8 0"/>
-                                                <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
-                                            </svg>
-                                        </span>
-                                        {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中' : '推进中' }}
-                                        <span class="ambient-live-spinner manus-spinner mini"></span>
-                                    </span>
+                                <span class="live-think-label">
+                                    <span class="ambient-live-spinner manus-spinner mini"></span>
+                                    {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中：' : '推进中：' }}
                                 </span>
                                 <div class="ambient-live-viewport">
                                     <span
@@ -959,21 +947,9 @@
                     <div v-if="streamViewMode === 'ambient'" class="ambient-plan-stream">
                         <div class="ambient-live-text-row">
                             <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
-                                <span class="ambient-action-lead">
-                                    <span class="action-tag action-tag-think">
-                                        <span class="action-tag-icon">
-                                            <svg class="thought-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
-                                                <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
-                                                <path d="M12 5v13"/>
-                                                <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
-                                                <path d="M16 12a4 4 0 0 0-8 0"/>
-                                                <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
-                                            </svg>
-                                        </span>
-                                        思考中
-                                        <span class="ambient-live-spinner manus-spinner mini"></span>
-                                    </span>
+                                <span class="live-think-label">
+                                    <span class="ambient-live-spinner manus-spinner mini"></span>
+                                    思考中：
                                 </span>
                                 <div class="ambient-live-viewport">
                                     <span
@@ -1473,9 +1449,9 @@ const liveThoughtInfo = computed(() => {
 function getLine3DisplayText(entry: PlanEntry): string {
     const preview = getPlanRunningPreview(entry);
     if (preview.line3.actionKind === "think") {
-        return liveThoughtInfo.value.text || preview.line3.text || "正在深入分析全局上下文与决策规划 …";
+        return (liveThoughtInfo.value.text || preview.line3.text || "正在深入分析全局上下文与决策规划 …").trim();
     }
-    return preview.line3.text || "正在执行操作 …";
+    return (preview.line3.text || "正在执行操作 …").trim();
 }
 
 function getLine3FullText(entry: PlanEntry): string {
