@@ -196,13 +196,26 @@ function getFileName(file: FileChangeChip): string {
 }
 
 function handleFileClick(file: FileChangeChip) {
-    emit('open-diff', diffPayloadFromChip(file));
+    const filePayloads = allModifiedFiles.value.map(diffPayloadFromChip);
+    const targetPayload = diffPayloadFromChip(file);
+    const idx = filePayloads.findIndex(f => (f.filePath || f.fileName) === (targetPayload.filePath || targetPayload.fileName));
+    emit('open-diff', {
+        ...targetPayload,
+        allFiles: filePayloads,
+        viewAll: false,
+        activeIndex: idx >= 0 ? idx : 0,
+    });
 }
 
 function handleViewAll() {
-    if (allModifiedFiles.value.length > 0) {
-        emit('open-diff', diffPayloadFromChip(allModifiedFiles.value[0]));
-    }
+    if (allModifiedFiles.value.length === 0) return;
+    const filePayloads = allModifiedFiles.value.map(diffPayloadFromChip);
+    emit('open-diff', {
+        ...filePayloads[0],
+        allFiles: filePayloads,
+        viewAll: true,
+        activeIndex: 0,
+    });
 }
 </script>
 

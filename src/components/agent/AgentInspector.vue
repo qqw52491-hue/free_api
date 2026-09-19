@@ -526,6 +526,7 @@
                 <FileDiffViewer
                     v-if="effectiveDiffPayload"
                     :file-path="effectiveDiffPayload.filePath"
+                    :file-name="effectiveDiffPayload.fileName"
                     :old-content="effectiveDiffPayload.oldContent"
                     :new-content="effectiveDiffPayload.newContent"
                     :raw-diff="effectiveDiffPayload.rawDiff"
@@ -533,7 +534,11 @@
                     :additions="effectiveDiffPayload.additions"
                     :deletions="effectiveDiffPayload.deletions"
                     :intercepted="effectiveDiffPayload.isIntercepted"
+                    :all-files="effectiveDiffPayload.allFiles || allFilesFromSteps"
+                    :view-all="effectiveDiffPayload.viewAll"
+                    :active-index="effectiveDiffPayload.activeIndex"
                     @close="activeTab = 'detail'"
+                    @select-file="handleDiffFileSelect"
                 />
                 <div v-else class="detail-placeholder">
                     <div class="placeholder-glyph">📄</div>
@@ -547,7 +552,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTeamState, AgentTokenUsage, AgentToolStatus, FileDiffPayload, LlmParseErrorItem } from "./types";
+import type { AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTeamState, AgentTokenUsage, AgentToolStatus, FileDiffPayload, FileChangeChip, LlmParseErrorItem } from "./types";
 import type { AgentArtifactInput } from "../../types/artifact";
 import { formatClock, formatMilliseconds, formatNumber, formatPayload } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
@@ -555,7 +560,7 @@ import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 import AgentTeamDeck from "./AgentTeamDeck.vue";
 import FileDiffViewer from "./FileDiffViewer.vue";
 import { toolViewComponents } from "./views";
-import { extractDiffFromStep } from "./diffUtils";
+import { extractDiffFromStep, parseStepFileChanges, aggregateFileChips, diffPayloadFromChip } from "./diffUtils";
 import { extractSubagentsFromStep, formatFinding } from "./workerUtils";
 
 const props = withDefaults(
@@ -597,7 +602,7 @@ const props = withDefaults(
     }
 );
 
-defineEmits<{
+const emit = defineEmits<{
     "refresh-resources": [];
     "preview-resource": [resource: AgentTaskResource];
     "agent-submit": [data: any];
@@ -617,6 +622,23 @@ const stepDiffPayload = computed<FileDiffPayload | null>(() => {
     return extractDiffFromStep(props.selectedStep);
 });
 
+const allFilesFromSteps = computed<FileDiffPayload[]>(() => {
+    const rawChips: FileChangeChip[] = [];
+    for (const step of props.steps || []) {
+        const changes = parseStepFileChanges(step);
+        const candidateChips = (changes.chips && changes.chips.length > 0)
+            ? changes.chips
+            : (changes.chip ? [changes.chip] : []);
+
+        for (const c of candidateChips) {
+            if (!c.isIntercepted && ((c.additions || 0) > 0 || (c.deletions || 0) > 0 || c.actionKind === 'modify' || c.actionKind === 'create' || c.actionKind === 'delete')) {
+                rawChips.push(c);
+            }
+        }
+    }
+    return aggregateFileChips(rawChips).map(diffPayloadFromChip);
+});
+
 const effectiveDiffPayload = computed<FileDiffPayload | null>(() => {
     return customDiffPayload.value || stepDiffPayload.value;
 });
@@ -624,11 +646,28 @@ const effectiveDiffPayload = computed<FileDiffPayload | null>(() => {
 const diffStatsBadge = computed(() => {
     const diff = effectiveDiffPayload.value;
     if (!diff) return null;
+    const files = (diff.allFiles && diff.allFiles.length > 0) ? diff.allFiles : allFilesFromSteps.value;
+    if (files && files.length > 0) {
+        const adds = files.reduce((acc, f) => acc + (f.additions || 0), 0);
+        const dels = files.reduce((acc, f) => acc + (f.deletions || 0), 0);
+        return { additions: adds, deletions: dels };
+    }
     return {
         additions: diff.additions || 0,
         deletions: diff.deletions || 0,
     };
 });
+
+function handleDiffFileSelect(file: FileDiffPayload) {
+    customDiffPayload.value = {
+        ...file,
+        allFiles: customDiffPayload.value?.allFiles || allFilesFromSteps.value,
+        viewAll: false,
+    };
+    if (file.stepId) {
+        props.selectedStep?.id !== file.stepId && emit("select-step", file.stepId);
+    }
+}
 
 watch(
     () => props.selectedStep?.id,

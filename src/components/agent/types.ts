@@ -476,6 +476,9 @@ export interface FileDiffPayload {
     deletions?: number;
     stepId?: string;
     isIntercepted?: boolean;
+    allFiles?: FileDiffPayload[];
+    viewAll?: boolean;
+    activeIndex?: number;
 }
 export interface RunningPreviewLine1 {
     icon: string;
