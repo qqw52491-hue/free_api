@@ -19,7 +19,10 @@ const MAX_SYMBOLS: usize = 10;
 /// 每个符号最多展示的消费点行数
 const MAX_HITS_PER_SYMBOL: usize = 4;
 /// 消费点 refs 总数上限（= 裁决义务上限；再大模型容易漏项且校验噪声大）
-pub const MAX_CONSUMER_REFS: usize = 16;
+// 上限 8：契约要求逐条裁决全覆盖，16 点实测三个模型 5 次派发全 contract_violation
+//（3.1pro 最好漏 6、k3 最差漏 15）——超过 ~8 点模型覆盖率崩塌，审查预算空转烧光。
+// 清单按 def-site 优先排序，截断尾部低值点不削弱义务严肃性。
+pub const MAX_CONSUMER_REFS: usize = 8;
 /// 渲染小节总字符上限
 const MAX_PACK_CHARS: usize = 1800;
 /// 单条消费点行截断长度
@@ -229,6 +232,23 @@ struct ConsumerHit {
     is_def_site: bool,
 }
 
+/// 测试/fixture 文件不计入影响面消费点——测试代码的破坏由测试套件本身兜底验证，
+/// 让审查为 mock-server/fixture/_tests.rs 逐条裁决只会稀释契约、烧光审查预算
+///（实测 16 点清单混入 4 条测试路径，3 个模型 5 次派发全部 contract_violation）。
+fn is_test_or_fixture(rel: &str) -> bool {
+    let p = rel.to_lowercase();
+    p.starts_with("test/")
+        || p.contains("/test/")
+        || p.contains("/tests/")
+        || p.contains("/fixtures/")
+        || p.ends_with("_test.rs")
+        || p.ends_with("_tests.rs")
+        || p.ends_with(".test.ts")
+        || p.ends_with(".spec.ts")
+        || p.ends_with(".test.mjs")
+        || p.ends_with(".spec.mjs")
+}
+
 /// 全仓扫描某符号的消费点；exclude 为改动文件相对路径集（改动文件自身命中不算下游）
 fn scan_consumers(workspace: &Path, sym: &str, exclude: &BTreeSet<String>) -> Vec<ConsumerHit> {
     let mut files = Vec::new();
@@ -240,7 +260,7 @@ fn scan_consumers(workspace: &Path, sym: &str, exclude: &BTreeSet<String>) -> Ve
             .unwrap_or(&f)
             .to_string_lossy()
             .replace('\\', "/");
-        if exclude.contains(&rel) {
+        if exclude.contains(&rel) || is_test_or_fixture(&rel) {
             continue;
         }
         let Ok(content) = std::fs::read_to_string(&f) else { continue };
