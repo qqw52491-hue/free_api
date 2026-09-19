@@ -130,20 +130,6 @@
                         @fork="handleFork"
                     />
                 </div>
-                <AgentProgressDeck
-                    :steps="activeDeckSteps"
-                    :is-running="session.isRunning.value"
-                    :is-thinking="session.isThinking.value"
-                    :thought="session.thought.value"
-                    :action-phase-text="session.actionPhaseText.value"
-                    :token-usage="session.tokenUsage.value"
-                    :active-step-number="session.activeStepNumber.value"
-                    :session-title="deckSessionTitle"
-                    :summary="deckSummary"
-                    :plan-gate="session.planGate.value"
-                    @select-step="handleStepSelect($event.id)"
-                    @open-diff="handleOpenDiff"
-                />
                 <AgentComposer
                     ref="composerRef"
                     :draft="composerDraft"
@@ -175,7 +161,24 @@
                     @submit="submitComposer"
                     @cancel-queue="session.removeQueuedGoal"
                     @stop="session.requestStop"
-                />
+                >
+                    <template #deck>
+                        <AgentProgressDeck
+                            :steps="activeDeckSteps"
+                            :is-running="session.isRunning.value"
+                            :is-thinking="session.isThinking.value"
+                            :thought="session.thought.value"
+                            :action-phase-text="session.actionPhaseText.value"
+                            :token-usage="session.tokenUsage.value"
+                            :active-step-number="session.activeStepNumber.value"
+                            :session-title="deckSessionTitle"
+                            :summary="deckSummary"
+                            :plan-gate="session.planGate.value"
+                            @select-step="handleStepSelect($event.id)"
+                            @open-diff="handleOpenDiff"
+                        />
+                    </template>
+                </AgentComposer>
             </main>
 
             <!-- 可拖拽调节宽度的分割条 (侧栏打开时展示) -->

@@ -8,6 +8,9 @@
             @dragleave.prevent="isDraggingOver = false"
             @drop.prevent="handleFileDrop"
         >
+            <!-- 🌟 顶部槽位：文件改动预览栏 (Progress Deck) -->
+            <slot name="deck" />
+
             <!-- 📎 附件缩略图与文件卡片预览托盘 (Attachment Tray) -->
             <div v-if="attachments.length > 0" class="composer-attachments-tray">
                 <AttachmentCard
