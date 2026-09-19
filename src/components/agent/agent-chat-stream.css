@@ -1257,8 +1257,46 @@
 
 .action-tag.action-tag-think {
     color: #38bdf8;
-    background: rgba(56, 189, 248, 0.08);
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.14) 0%, rgba(99, 102, 241, 0.12) 100%);
+    border: 1px solid rgba(56, 189, 248, 0.28);
+    box-shadow: 0 0 10px rgba(56, 189, 248, 0.15);
 }
+
+/* 🧠 极简矢量思维大脑 / 深度思考矢量图标 */
+.thought-icon-svg {
+    width: 13.5px;
+    height: 13.5px;
+    display: inline-block;
+    vertical-align: -1.5px;
+    flex-shrink: 0;
+    color: currentColor;
+    transition: transform 0.2s ease;
+}
+
+.thought-icon-svg.mini {
+    width: 11.5px;
+    height: 11.5px;
+    vertical-align: -1px;
+}
+
+.action-tag-think .thought-icon-svg {
+    color: #38bdf8;
+    filter: drop-shadow(0 0 3px rgba(56, 189, 248, 0.5));
+    animation: thought-icon-pulse 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes thought-icon-pulse {
+    0%, 100% {
+        transform: scale(1);
+        opacity: 0.88;
+    }
+    50% {
+        transform: scale(1.12);
+        opacity: 1;
+        filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.8));
+    }
+}
+
 
 /* 专属语言/文件矢量图标 */
 .chip-file-icon {
@@ -1904,6 +1942,9 @@ button.root-row {
 }
 
 .thought-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     color: #e879f9;
     background: rgba(232, 121, 249, 0.12);
     border-color: rgba(232, 121, 249, 0.2);

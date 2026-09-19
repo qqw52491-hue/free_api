@@ -468,7 +468,16 @@
                             <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
                                 <span class="ambient-action-lead">
                                     <span class="action-tag action-tag-think">
-                                        <span class="action-tag-icon">🧠</span>
+                                        <span class="action-tag-icon">
+                                            <svg class="thought-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+                                                <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+                                                <path d="M12 5v13"/>
+                                                <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
+                                                <path d="M16 12a4 4 0 0 0-8 0"/>
+                                                <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
+                                            </svg>
+                                        </span>
                                         {{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中' : '推进中' }}
                                         <span class="ambient-live-spinner manus-spinner mini"></span>
                                     </span>
@@ -777,7 +786,17 @@
                                         <!-- 1. 思考行 (如果有思考过程) -->
                                         <button v-if="step.thought" class="child-row thought-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'thought' }" type="button" @click="$emit('select-step-thought', step.id)">
                                             <span class="child-mark"></span>
-                                            <span class="tool-tag thought-tag">🧠 思考</span>
+                                            <span class="tool-tag thought-tag">
+                                                <svg class="thought-icon-svg mini" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                    <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+                                                    <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+                                                    <path d="M12 5v13"/>
+                                                    <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
+                                                    <path d="M16 12a4 4 0 0 0-8 0"/>
+                                                    <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
+                                                </svg>
+                                                思考
+                                            </span>
                                             <span>{{ shortText(step.thought, 110) }}</span>
                                             <em v-if="step.metrics?.thinkingDurationMs != null">{{ formatDurationSeconds(step.metrics.thinkingDurationMs) }}</em>
                                             <em v-else>已分析</em>
@@ -942,7 +961,16 @@
                             <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
                                 <span class="ambient-action-lead">
                                     <span class="action-tag action-tag-think">
-                                        <span class="action-tag-icon">🧠</span>
+                                        <span class="action-tag-icon">
+                                            <svg class="thought-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+                                                <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+                                                <path d="M12 5v13"/>
+                                                <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
+                                                <path d="M16 12a4 4 0 0 0-8 0"/>
+                                                <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
+                                            </svg>
+                                        </span>
                                         思考中
                                         <span class="ambient-live-spinner manus-spinner mini"></span>
                                     </span>
@@ -1017,7 +1045,16 @@
                             <!-- 第 3 行：当前高速滚动推演的思考流光 (Ticker 滚动窗口，带有流光与垂直翻牌) -->
                             <div class="running-preview-line line-active-action">
                                 <span class="preview-spinner manus-spinner mini"></span>
-                                <span class="preview-tool-icon icon-anim-switch">💭</span>
+                                <span class="preview-tool-icon icon-anim-switch">
+                                    <svg class="thought-icon-svg mini" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+                                        <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+                                        <path d="M12 5v13"/>
+                                        <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
+                                        <path d="M16 12a4 4 0 0 0-8 0"/>
+                                        <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
+                                    </svg>
+                                </span>
                                 <span class="preview-think-tag">思考:</span>
                                 <div class="preview-flip-ticker-viewport">
                                     <Transition name="ticker-flip">
@@ -2438,7 +2475,7 @@ watch(
 
 function getRunningStateText(entry: PlanEntry): string {
     if (entry.isThinking) {
-        return props.thought ? `🧠 ${props.thought.slice(0, 80)}...` : '🧠 正在深入思考与规划下一步行动…';
+        return props.thought ? `✦ ${props.thought.slice(0, 80)}...` : '✦ 正在深入思考与规划下一步行动…';
     }
     const runningStep = entry.steps.find(s => s.status === 'running') || entry.steps[entry.steps.length - 1];
     if (runningStep) {
