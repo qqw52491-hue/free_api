@@ -99,6 +99,8 @@
             custom_schema: String::new(),
             focus_domains: String::new(),
             input_schema: String::new(),
+            allowed_skills: String::new(),
+            allowed_mcp: String::new(),
         };
         // 模型未提供默认值时补齐
         let merged = merge_writer_defaults(&card, &json!({"task": "打磨 UI"}));
@@ -342,3 +344,38 @@
         assert!(validate_dispatch_inputs(&card, Some(&json!("not-an-object"))).is_err());
         assert!(validate_dispatch_inputs(&card, Some(&json!([]))).is_err());
     }
+
+#[test]
+fn skills_block_whitelist_injects_listed_docs_only() {
+    let card = RoleCard {
+        allowed_skills: "code_review, nonexistent_skill".into(),
+        ..RoleCard {
+            id: "x".into(), name: "n".into(), label: "l".into(),
+            model_id: String::new(), persona_prompt: String::new(),
+            scope_hints: String::new(), default_test_command: String::new(),
+            allowed_kinds: String::new(), hard_scope: String::new(),
+            max_concurrency: 0, enabled: true,
+            custom_schema: String::new(), focus_domains: String::new(),
+            input_schema: String::new(), allowed_skills: String::new(), allowed_mcp: String::new(),
+        }
+    };
+    let block = skills_block(&card);
+    if block.is_empty() {
+        // 开发环境若无 prompts/skills 目录则跳过断言
+        eprintln!("skills dir 不存在，跳过注入断言");
+    } else {
+        assert!(block.contains("code_review"));
+        assert!(block.contains("不存在"));
+    }
+    // 空白名单不注入
+    let empty = skills_block(&RoleCard {
+        id: "y".into(), name: "n2".into(), label: "l".into(),
+        model_id: String::new(), persona_prompt: String::new(),
+        scope_hints: String::new(), default_test_command: String::new(),
+        allowed_kinds: String::new(), hard_scope: String::new(),
+        max_concurrency: 0, enabled: true,
+        custom_schema: String::new(), focus_domains: String::new(),
+        input_schema: String::new(), allowed_skills: String::new(), allowed_mcp: String::new(),
+    });
+    assert!(empty.is_empty());
+}

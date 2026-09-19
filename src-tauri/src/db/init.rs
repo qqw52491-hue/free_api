@@ -572,6 +572,15 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         "ALTER TABLE agent_role_cards ADD COLUMN input_schema TEXT NOT NULL DEFAULT '';",
         [],
     );
+    // 角色级技能/MCP 白名单：逗号分隔名称；空=不注入（保持当前行为，子任务默认无技能手册与 MCP）
+    let _ = conn.execute(
+        "ALTER TABLE agent_role_cards ADD COLUMN allowed_skills TEXT NOT NULL DEFAULT '';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_role_cards ADD COLUMN allowed_mcp TEXT NOT NULL DEFAULT '';",
+        [],
+    );
     // P5 副本生命周期与脱水追问字段：workspace_copy / resumed_from / message_history_json
     let _ = conn.execute(
         "ALTER TABLE agent_child_runs ADD COLUMN workspace_copy TEXT;",

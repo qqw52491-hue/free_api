@@ -404,6 +404,30 @@ pub(crate) fn skill_index_entries(skills_dir: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
+/// 定位 skill 手册目录：优先已登记目录（register_app_skills_dir），
+/// 其次相对候选（prompts/skills / src-tauri/prompts/skills 等），
+/// 与 capability_index 的索引覆盖范围一致——搜得到 ⇒ 能加载。
+/// 主循环与子任务角色白名单注入共用此解析。
+pub fn resolve_skills_dir() -> std::path::PathBuf {
+    known_app_skills_dirs()
+        .into_iter()
+        .find(|d| d.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("prompts/skills"))
+}
+
+/// 按名称加载单个 skill 手册全文（角色白名单注入用），截断防爆。
+/// 返回 None 表示该 skill 不存在（白名单笔误时由调用方决定是否提示）。
+pub fn load_skill_doc(skills_dir: &Path, name: &str, max_chars: usize) -> Option<String> {
+    let path = skills_dir.join(format!("{}.md", name));
+    let content = std::fs::read_to_string(path).ok()?;
+    if content.chars().count() > max_chars {
+        let truncated: String = content.chars().take(max_chars).collect();
+        Some(format!("{}\n…（手册截断至 {} 字符）", truncated, max_chars))
+    } else {
+        Some(content)
+    }
+}
+
 /// 扫描 skills 目录，生成轻量目录摘要（仅名称 + 智能能力卡描述）。
 /// excluded 列表中的 Skill 已固定编译进系统提示词，不再重复罗列。
 /// 完整手册内容通过 next_tool_hint: "skill_name" 按需加载到 active_tool_detail。

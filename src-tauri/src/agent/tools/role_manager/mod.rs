@@ -35,6 +35,10 @@ pub struct RoleCard {
     pub focus_domains: String,      // 角色关注领域白名单列表 (JSON 序列化的 Vec<FocusDomain>)
     #[serde(default)]
     pub input_schema: String,       // 角色自定义入参契约 (JSON 序列化的 ContractSchema)
+    #[serde(default)]
+    pub allowed_skills: String,     // 逗号分隔 skill 名白名单；空=不注入技能手册
+    #[serde(default)]
+    pub allowed_mcp: String,        // 逗号分隔 MCP 插件名白名单；空=不授权 MCP（前向兼容字段）
 }
 
 impl RoleCard {
@@ -122,11 +126,13 @@ fn map_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoleCard> {
         custom_schema: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
         focus_domains: row.get::<_, Option<String>>(12)?.unwrap_or_else(|| "[]".to_string()),
         input_schema: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
+        allowed_skills: row.get::<_, Option<String>>(14).ok().flatten().unwrap_or_default(),
+        allowed_mcp: row.get::<_, Option<String>>(15).ok().flatten().unwrap_or_default(),
     })
 }
 
 const CARD_COLUMNS: &str =
-    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema";
+    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp";
 
 
 pub fn list_cards(db: &DbState, include_disabled: bool) -> Result<Vec<RoleCard>, String> {
@@ -167,7 +173,7 @@ use rusqlite::OptionalExtension;
 
 fn validate_card_input(
     params: &Value,
-) -> Result<(String, String, String, String, String, String, String, String, i64, String, String, String), String> {
+) -> Result<(String, String, String, String, String, String, String, String, i64, String, String, String, String, String), String> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -251,6 +257,8 @@ fn validate_card_input(
     };
 
     let input_schema = take("input_schema", 10_000, "");
+    let allowed_skills = take("allowed_skills", 2_000, "");
+    let allowed_mcp = take("allowed_mcp", 2_000, "");
     if !input_schema.is_empty() {
         let schema: crate::agent::protocol::ContractSchema = serde_json::from_str(&input_schema)
             .map_err(|e| format!("input_schema 不是有效的 JSON Schema: {}", e))?;
@@ -280,6 +288,8 @@ fn validate_card_input(
         custom_schema,
         focus_domains,
         input_schema,
+        allowed_skills,
+        allowed_mcp,
     ))
 }
 
@@ -297,6 +307,8 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
         custom_schema,
         focus_domains,
         input_schema,
+        allowed_skills,
+        allowed_mcp,
     ) = validate_card_input(params)?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let count: i64 = conn
@@ -316,8 +328,8 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
     }
     let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
     conn.execute(
-        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14, ?14)
+        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
          ON CONFLICT(name) DO UPDATE SET
             label=excluded.label, model_id=excluded.model_id, persona_prompt=excluded.persona_prompt,
             scope_hints=excluded.scope_hints, default_test_command=excluded.default_test_command,
@@ -325,8 +337,10 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
             custom_schema=excluded.custom_schema,
             focus_domains=excluded.focus_domains,
             input_schema=excluded.input_schema,
+            allowed_skills=excluded.allowed_skills,
+            allowed_mcp=excluded.allowed_mcp,
             enabled=1, updated_at=excluded.updated_at",
-        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, custom_schema, focus_domains, input_schema, now],
+        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, now],
     )
     .map_err(|e| e.to_string())?;
     drop(conn);
@@ -654,6 +668,55 @@ pub fn persona_block(card: &RoleCard) -> String {
         return String::new();
     }
     format!("\n\n【专精角色人设：{}】{}", card.label, card.persona_prompt)
+}
+
+/// 逗号分隔白名单解析（allowed_skills / allowed_mcp / hard_scope 同构）
+fn parse_csv_list(raw: &str) -> Vec<String> {
+    raw.split(|c| c == ',' || c == '；' || c == ' ' || c == '\n')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+impl RoleCard {
+    pub fn parse_allowed_skills(&self) -> Vec<String> {
+        parse_csv_list(&self.allowed_skills)
+    }
+    pub fn parse_allowed_mcp(&self) -> Vec<String> {
+        parse_csv_list(&self.allowed_mcp)
+    }
+}
+
+/// 单本手册注入上限：子任务没有主循环的 next_tool_hint 按需取回通道，
+/// 白名单项直接注入全文——上限防超长手册撑爆子任务上下文。
+const SKILL_DOC_MAX_CHARS: usize = 6000;
+
+/// 角色技能手册注入块：allowed_skills 白名单中的 skill 文档全文注入子任务
+/// system prompt（scout/reviewer/writer 通用，知识注入而非工具授权）。
+/// 空白名单返回空串保持现状；白名单中的无效 skill 名显式列出便于修正配置。
+pub fn skills_block(card: &RoleCard) -> String {
+    let names = card.parse_allowed_skills();
+    if names.is_empty() {
+        return String::new();
+    }
+    let dir = crate::agent::skill_context::resolve_skills_dir();
+    let mut docs = Vec::new();
+    let mut missing = Vec::new();
+    for name in &names {
+        match crate::agent::skill_context::load_skill_doc(&dir, name, SKILL_DOC_MAX_CHARS) {
+            Some(doc) => docs.push(format!("### 📖 技能手册 `{}`\n{}", name, doc)),
+            None => missing.push(name.clone()),
+        }
+    }
+    if docs.is_empty() {
+        return String::new();
+    }
+    let mut block = format!("\n\n【角色授权技能手册（白名单 {} 本，按手册执行对应领域工作）】\n", docs.len());
+    block.push_str(&docs.join("\n\n"));
+    if !missing.is_empty() {
+        block.push_str(&format!("\n\n⚠️ 白名单中以下 skill 不存在，配置可能有误：{}", missing.join(", ")));
+    }
+    block
 }
 
 /// 派发入参校验（input_schema 输入侧硬约束，与输出侧 custom_schema 对称）：
