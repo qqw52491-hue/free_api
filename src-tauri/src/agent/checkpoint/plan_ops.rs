@@ -469,6 +469,7 @@ impl AgentCheckpoint {
         self.stage_review_blockers_open = self.stage_review_blockers_open.saturating_sub(count);
         if self.stage_review_blockers_open == 0 {
             self.stage_review_blocker_stage = None;
+            self.stage_review_blocker_source_run_id = None;
         }
         self.stage_review_confrontation_failures = 0;
         self.stage_review_confrontation_target = None;
@@ -493,6 +494,7 @@ impl AgentCheckpoint {
         ));
         self.stage_review_blockers_open = 0;
         self.stage_review_blocker_stage = None;
+        self.stage_review_blocker_source_run_id = None;
         Some(format!(
             "⏰ 宿主判分已越过历史阶段（blocker 出生索引 {born} < 当前进度 {oracle_index}），遗留的阶段审查 blocker 属僵尸拦截，已自动清账放行；遗留项以 final_only 带入收尾审查。"
         ))

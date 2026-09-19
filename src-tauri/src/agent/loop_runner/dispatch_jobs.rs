@@ -151,8 +151,15 @@ pub(super) async fn dispatch_wait_jobs(
                             ctx.checkpoint.stage_review_blockers_open = ctx.checkpoint
                                 .stage_review_blockers_open
                                 .saturating_sub(withdrawn_count);
+                            if ctx.checkpoint.stage_review_blockers_open == 0 {
+                                ctx.checkpoint.stage_review_blocker_source_run_id = None;
+                            }
                         } else {
                             ctx.checkpoint.stage_review_blockers_open += new_blockers;
+                            if new_blockers > 0 {
+                                ctx.checkpoint.stage_review_blocker_source_run_id =
+                                    Some(job.job_id.clone());
+                            }
                         }
 
                         // 僵尸 blocker 治理：记录出生时的宿主判分阶段索引；宿主越过它即自动清账

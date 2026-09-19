@@ -672,6 +672,9 @@ pub fn apply_stage_receipt(
         checkpoint.stage_review_blockers_open = checkpoint
             .stage_review_blockers_open
             .saturating_sub(withdrawn);
+        if checkpoint.stage_review_blockers_open == 0 {
+            checkpoint.stage_review_blocker_source_run_id = None;
+        }
 
         // 【对质新/维持 blocker 兜底】对质分支中 new_blockers（审查员仍持有或新增的
         // blocking 异议）不直接加回 blockers_open（避免与其他在途专家的计数双加），
@@ -694,6 +697,9 @@ pub fn apply_stage_receipt(
         }
     } else {
         checkpoint.stage_review_blockers_open += new_blockers;
+        if new_blockers > 0 {
+            checkpoint.stage_review_blocker_source_run_id = Some(receipt.child_run_id.clone());
+        }
     }
 
     // 僵尸 blocker 治理：记录出生阶段索引（无 blocker 时清空，避免陈旧索引干扰）

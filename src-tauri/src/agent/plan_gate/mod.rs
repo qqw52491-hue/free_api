@@ -526,9 +526,9 @@ pub(crate) fn stage_blocker_interception(checkpoint: &AgentCheckpoint) -> Option
         return None;
     }
     let stage_run_id = checkpoint
-        .stage_review_run_ids
-        .first()
-        .cloned()
+        .stage_review_blocker_source_run_id
+        .clone()
+        .or_else(|| checkpoint.stage_review_run_ids.first().cloned())
         .or_else(|| checkpoint.stage_review_run_id.clone())
         .or_else(|| checkpoint.stage_review_rebuttal_run_id.clone())
         .unwrap_or_default();

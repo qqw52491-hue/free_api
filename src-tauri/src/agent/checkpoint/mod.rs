@@ -145,6 +145,11 @@ pub struct AgentCheckpoint {
     /// 阶段审查未解决的 blocking_regardless 数（>0 时拦截写入，直到对质撤回）
     #[serde(default)]
     pub stage_review_blockers_open: u32,
+    /// 产出当前未解决 blocker 的审查 child_run_id——run_ids 是在途表，
+    /// 审查完成即被 remove_stage_review_run 清出，门禁提示需要它给 resume_child 指路
+    ///（实测 goal_anchor：blocker 门禁打出 child_run_id:"" 空串，模型无处可去重试烧光预算）
+    #[serde(default)]
+    pub stage_review_blocker_source_run_id: Option<String>,
     /// 同一 blocking 异议连续被审查员维持（对质拒撤回）的次数——达到阈值自动
     /// 降级为 final_only 记账（吵不赢就降级放行，账要还），防止三方锁死
     /// （审查员不撤 + 写入全禁 + 模型无处可去 = 实测死锁形态）。
@@ -333,6 +338,7 @@ impl AgentCheckpoint {
             stage_review_confrontation_target: None,
             stage_review_baseline_side_effects: 0,
             stage_review_blockers_open: 0,
+            stage_review_blocker_source_run_id: None,
             stage_review_confrontation_failures: 0,
             stage_review_blocker_stage: None,
             plan_reviewer_failover_count: 0,
