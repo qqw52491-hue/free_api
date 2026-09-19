@@ -140,9 +140,10 @@ pub fn prefer_cross_family_reviewer(
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
             .unwrap_or_default()
     };
-    let alternative = models.iter().find(|(_, name)| {
+    let failed = recently_failed_models(conn);
+    let alternative = models.iter().find(|(id, name)| {
         let family = model_family(name);
-        family != current_family && family != "other"
+        family != current_family && family != "other" && !failed.contains(id)
     });
     match alternative {
         Some((m, m_name)) => (
@@ -160,6 +161,21 @@ pub fn prefer_cross_family_reviewer(
             )),
         ),
     }
+}
+
+/// 近 30 分钟内派发失败的模型集合——enabled=1 不代表平台可达，
+/// request_or_stream 失败的模型就是"平台已死"的实证，优选与故障转移必须跳过，
+/// 否则会反复选中同一批死平台模型烧光审查预算（goal_anchor 实弹踩过）。
+fn recently_failed_models(conn: &rusqlite::Connection) -> std::collections::BTreeSet<String> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT DISTINCT model_id FROM agent_child_runs
+         WHERE status = 'failed' AND started_at > datetime('now', '-30 minutes')",
+    ) else {
+        return Default::default();
+    };
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
 }
 
 /// 审查者故障转移选型：主审查员模型不可靠（超时/非法输出）时，
@@ -192,11 +208,12 @@ pub fn reviewer_failover_model(
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
     };
+    let failed = recently_failed_models(conn);
     let candidates: Vec<(String, String)> = models
         .into_iter()
         .filter(|(id, name, _)| {
             let f = model_family(name);
-            f != primary_family && f != "other" && id != primary_model_id
+            f != primary_family && f != "other" && id != primary_model_id && !failed.contains(id)
         })
         .map(|(id, _, platform)| (id, platform))
         .collect();
