@@ -53,7 +53,7 @@
               class="dropdown-search-input"
               placeholder="搜索模型标识、名称或平台 (如 flash, r1, deepseek)..."
               @keydown.esc="closeDropdown"
-              @keydown.enter.prevent="selectFirstMatch"
+              @keydown.enter="handleSearchEnter"
             />
             <button
               v-if="searchQuery"
@@ -334,6 +334,14 @@ function selectFirstMatch() {
       return
     }
   }
+}
+
+function handleSearchEnter(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) {
+    return
+  }
+  event.preventDefault()
+  selectFirstMatch()
 }
 
 watch(isOpen, async (val) => {

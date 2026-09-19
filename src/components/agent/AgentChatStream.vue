@@ -501,7 +501,7 @@
                                 <div class="ambient-live-viewport">
                                     <span
                                         v-scroll-tail
-                                        class="ambient-live-scroll-text text-shimmer-flow"
+                                        class="ambient-live-scroll-text"
                                         :title="getLine3FullText(entry)"
                                     >
                                         {{ getLine3DisplayText(entry) }}
@@ -977,7 +977,7 @@
                                 <div class="ambient-live-viewport">
                                     <span
                                         v-scroll-tail
-                                        class="ambient-live-scroll-text text-shimmer-flow"
+                                        class="ambient-live-scroll-text"
                                         :title="liveThoughtInfo.text"
                                     >
                                         {{ liveThoughtInfo.text || '正在深度思考规划执行策略 …' }}
@@ -1760,11 +1760,20 @@ function getAmbientStepCount(entry: PlanEntry): number {
 }
 
 function shouldCollapseAmbientStream(entry: PlanEntry): boolean {
+    // 1. 运行态阶段（刚开始/进行中）：绝不折叠，实时显示完整链路与每个步骤
+    if (isPlanRunning(entry)) return false;
+
+    // 2. 若用户已手动展开，则不折叠
     if (isAmbientStreamExpanded(entry.id)) return false;
+
+    // 3. 完成之后且步骤很长（> 4 项），才折叠并呈现渐隐遮罩
     return getAmbientStepCount(entry) > 4;
 }
 
 function shouldShowAmbientExpandBtn(entry: PlanEntry): boolean {
+    // 运行态不显示折叠小按钮（因为处于全展开状态）
+    if (isPlanRunning(entry)) return false;
+    // 完成之后且步骤很长，显示小箭头支持用户展开/收起
     return getAmbientStepCount(entry) > 4;
 }
 

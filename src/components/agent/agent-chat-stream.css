@@ -1673,7 +1673,9 @@
     font-size: 13.5px;
     font-weight: 500;
     line-height: 1.45;
-    color: #e2e8f0;
+    color: #f1f5f9;
+    -webkit-text-fill-color: #f1f5f9;
+    background: none;
     display: inline-block;
     cursor: pointer;
 }
@@ -1746,13 +1748,28 @@
 .thought-expanded-body {
     font-size: 13px;
     line-height: 1.68;
-    color: #cbd5e1;
+    color: #e2e8f0;
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 280px;
     overflow-y: auto;
     user-select: text;
-    padding-right: 4px;
+    padding-right: 6px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.35) transparent;
+}
+
+.thought-expanded-body::-webkit-scrollbar {
+    width: 4px;
+}
+
+.thought-expanded-body::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.35);
+    border-radius: 4px;
+}
+
+.thought-expanded-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.55);
 }
 
 /* 展开折叠动效 */
@@ -2071,13 +2088,24 @@ button.root-row {
 .active-thought-stream header time { color: #73737a; font-size: 10px; }
 
 .active-thought-content {
-    max-height: 90px;
+    max-height: 120px;
     margin: 0;
     padding: 4px 8px 6px;
     overflow: auto;
-    color: #a9a9af;
-    font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #e2e8f0;
+    font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
     white-space: pre-wrap;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.35) transparent;
+}
+
+.active-thought-content::-webkit-scrollbar {
+    width: 4px;
+}
+
+.active-thought-content::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.35);
+    border-radius: 2px;
 }
 
 .active-thought-initial {
@@ -2901,11 +2929,11 @@ button.root-row {
 .text-shimmer-flow {
     background: linear-gradient(
         90deg,
-        #475569 0%,
-        #475569 30%,
-        #0f172a 50%,
-        #475569 70%,
-        #475569 100%
+        rgba(226, 232, 240, 0.9) 0%,
+        rgba(226, 232, 240, 0.9) 30%,
+        #ffffff 50%,
+        rgba(226, 232, 240, 0.9) 70%,
+        rgba(226, 232, 240, 0.9) 100%
     );
     background-size: 200% 100%;
     -webkit-background-clip: text;
@@ -2920,11 +2948,11 @@ button.root-row {
 .dark .text-shimmer-flow {
     background: linear-gradient(
         90deg,
-        rgba(226, 232, 240, 0.65) 0%,
-        rgba(226, 232, 240, 0.65) 30%,
+        rgba(226, 232, 240, 0.9) 0%,
+        rgba(226, 232, 240, 0.9) 30%,
         #ffffff 50%,
-        rgba(226, 232, 240, 0.65) 70%,
-        rgba(226, 232, 240, 0.65) 100%
+        rgba(226, 232, 240, 0.9) 70%,
+        rgba(226, 232, 240, 0.9) 100%
     );
     background-size: 200% 100%;
     -webkit-background-clip: text;
