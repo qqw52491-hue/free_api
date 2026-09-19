@@ -337,7 +337,11 @@ pub fn skill_catalog_string(
     let mut files: Vec<_> = entries.flatten().collect();
     files.sort_by_key(|e| e.file_name());
 
+    // Skill 目录条数上限：大规模安装时截断 M0 注入，完整清单可经 next_tool_hint 按名取回
+    const MAX_SKILL_CATALOG_ENTRIES: usize = 60;
+
     let mut lines = Vec::new();
+    let mut skipped = 0usize;
     for entry in files {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
@@ -384,7 +388,15 @@ pub fn skill_catalog_string(
 
             rule_summary
         };
+        if lines.len() >= MAX_SKILL_CATALOG_ENTRIES {
+            skipped += 1;
+            continue;
+        }
         lines.push(format!("- {}: {}", name, summary));
+    }
+
+    if skipped > 0 {
+        lines.push(format!("- …（另有 {} 个未列出，按 next_tool_hint: \"skill_name\" 点名加载）", skipped));
     }
 
     if lines.is_empty() {

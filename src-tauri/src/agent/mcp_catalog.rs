@@ -342,6 +342,9 @@ pub fn concise_menu(
     ];
     let mut valid_count = 0;
 
+    // 单插件工具数上限：超大插件截断展示，完整清单走 next_tool_hint 按需取回
+    const MAX_TOOLS_PER_PLUGIN_MENU: usize = 25;
+
     for (name, mut tools, _card_opt) in sorted_items {
         // 🚨 核心过滤：若该插件工具列表为空（连接失败、离线或无可用动作），绝不注入工具目录，杜绝诱导模型调用幽灵工具
         if tools.is_empty() {
@@ -351,10 +354,15 @@ pub fn concise_menu(
         // 工具列表也严格按名称字母序排序。能力卡由模型生成，不能充当参数契约，
         // 因此不投影到执行提示词；模型只能看到服务声明的字段。
         tools.sort_by(|a, b| a.name.cmp(&b.name));
-        let tool_summaries = tools
+        let total = tools.len();
+        let shown: Vec<_> = tools.iter().take(MAX_TOOLS_PER_PLUGIN_MENU).collect();
+        let mut tool_summaries = shown
             .iter()
             .map(|tool| format!("{}({})", tool.name, concise_schema_fields(&tool.schema)))
             .collect::<Vec<_>>();
+        if total > shown.len() {
+            tool_summaries.push(format!("…+{} 更多(next_tool_hint 取全量)", total - shown.len()));
+        }
         lines.push(format!("- {}: [{}]", name, tool_summaries.join("; ")));
     }
     if valid_count == 0 {

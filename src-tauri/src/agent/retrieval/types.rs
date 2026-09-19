@@ -13,6 +13,9 @@ pub struct SearchParams {
     pub path: Option<String>, // code 检索必填：要搜索的目录绝对路径
     #[serde(default)]
     pub limit: Option<usize>,
+    /// history 检索域："session"(默认，仅本会话) / "global"(跨会话，自动排除评测会话)
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -156,6 +156,9 @@ pub fn search_history(
     if !session_id.is_empty() {
         sql.push_str(" AND session_id = ?2");
         params_vec.push(session_id.to_string().into());
+    } else {
+        // 全局域：排除评测会话产生的历史，防止考题/演练数据污染真实排查
+        sql.push_str(" AND session_id NOT LIKE 'agent-evaluation-%'");
     }
 
     let normalized_outcome = outcome_filter
@@ -236,6 +239,9 @@ fn search_history_short_like(
         let next_idx = params_vec.len() + 1;
         sql.push_str(&format!(" AND session_id = ?{}", next_idx));
         params_vec.push(session_id.to_string().into());
+    } else {
+        // 全局域：排除评测会话产生的历史
+        sql.push_str(" AND session_id NOT LIKE 'agent-evaluation-%'");
     }
 
     let normalized_outcome = outcome_filter

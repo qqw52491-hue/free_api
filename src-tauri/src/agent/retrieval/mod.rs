@@ -565,6 +565,7 @@ pub fn dispatch_search(
                     since_step: None,
                     path: None,
                     limit: Some(10),
+                    scope: None,
                 }
             } else {
                 return DispatchResult { view: None,
@@ -683,11 +684,16 @@ pub fn dispatch_search(
 
     let mut history_ok = !wants_history;
     if wants_history {
+        // 作用域解析：session(默认)=本会话围栏；global/all=跨会话检索。
+        // 空 session_id 走引擎全局分支，该分支自动排除 agent-evaluation-* 评测会话的节点。
+        let scope = params.scope.as_deref().unwrap_or("session").to_lowercase();
+        let global_scope = scope == "global" || scope == "all";
+        let history_session_id = if global_scope { "" } else { session_id };
         if let Ok(conn) = db.0.lock() {
             let mut history_branch_hits = Vec::new();
             if let Ok(hits) = search_history(
                 &conn,
-                session_id,
+                history_session_id,
                 &params.query,
                 params.outcome.as_deref(),
                 params.since_step,
@@ -697,9 +703,13 @@ pub fn dispatch_search(
             }
 
             // 联动查询三级记忆节点库 (Level 0~2 知识、Episode 与 Lesson)
-            if let Ok(mem_hits) =
-                search_memory_nodes_enriched(&conn, session_id, &params.query, None, limit)
-            {
+            if let Ok(mem_hits) = search_memory_nodes_enriched(
+                &conn,
+                history_session_id,
+                &params.query,
+                None,
+                limit,
+            ) {
                 history_branch_hits.extend(mem_hits);
             }
 

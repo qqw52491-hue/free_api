@@ -228,7 +228,13 @@ async fn run_agent_main_loop_in_workspace_inner(
             .await;
         registry.prewarm_all_for_session(&final_session_id);
 
+        // Progressive disclosure：工具总量超阈值时不再平铺全部工具名
+        // （每轮决策指令的固定开销），降级为"插件名(数量)"，细节走
+        // M0 工具目录与 next_tool_hint 按需取回。
+        const MCP_INDEX_NAME_LIMIT: usize = 40;
         let mut mcp_lines = Vec::new();
+        let mut total_tool_count = 0usize;
+        let mut per_plugin: Vec<(String, Vec<String>)> = Vec::new();
         for (p_name, p_client) in &registry.clients {
             let tools = crate::agent::mcp_catalog::cached_tools(&p_client.config)
                 .unwrap_or_else(|| p_client.last_known_tools());
@@ -236,7 +242,17 @@ async fn run_agent_main_loop_in_workspace_inner(
                 .iter()
                 .map(|t| format!("{}/{}", p_name, t.name))
                 .collect::<Vec<_>>();
+            total_tool_count += names.len();
             if !names.is_empty() {
+                per_plugin.push((p_name.clone(), names));
+            }
+        }
+        if total_tool_count > MCP_INDEX_NAME_LIMIT {
+            for (p_name, names) in &per_plugin {
+                mcp_lines.push(format!("  * {}({} 个工具)", p_name, names.len()));
+            }
+        } else {
+            for (p_name, names) in &per_plugin {
                 mcp_lines.push(format!("  * {}: {}", p_name, names.join(", ")));
             }
         }

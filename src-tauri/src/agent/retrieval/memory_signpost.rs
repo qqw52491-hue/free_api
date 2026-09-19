@@ -74,6 +74,9 @@ pub fn search_memory_nodes_enriched(
     if !session_id.is_empty() {
         sql.push_str(" AND n.session_id = ?2");
         params_vec.push(session_id.to_string().into());
+    } else {
+        // 全局域：排除评测会话产生的记忆节点，防止考题数据污染真实排查
+        sql.push_str(" AND n.session_id NOT LIKE 'agent-evaluation-%'");
     }
 
     if let Some(kind) = kind_filter {
