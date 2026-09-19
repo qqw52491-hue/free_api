@@ -14,7 +14,11 @@ const appDb =
     ? path.join(os.homedir(), "Library/Application Support/free-api-chat/data_v2.db")
     : path.join(os.homedir(), ".local/share/free-api-chat/data_v2.db");
 const modelId = process.env.FREE_API_LIVE_MODEL_ID?.trim();
+const proModelId = process.env.FREE_API_LIVE_MODEL_ID_PRO?.trim() || modelId;
+const flashModelId = process.env.FREE_API_LIVE_MODEL_ID_FLASH?.trim() || modelId;
+const visionModelId = process.env.FREE_API_LIVE_MODEL_ID_VISION?.trim() || modelId;
 const reviewerModelId = process.env.FREE_API_LIVE_REVIEWER_MODEL_ID?.trim() || null;
+const roleModelsRaw = process.env.FREE_API_ROLE_MODELS?.trim() || "";
 const fixtureDir = process.env.FREE_API_LIVE_FIXTURE_DIR?.trim();
 const maxDurationMinutes = Number(process.env.FREE_API_LIVE_MAX_DURATION_MINUTES ?? 20);
 const sessionFile = process.env.FREE_API_EVAL_SESSION_FILE?.trim();
@@ -43,16 +47,18 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
       { timeout: 60_000, interval: 2_000, timeoutMsg: "Tauri IPC 桥 60s 未就绪" },
     );
 
-    const started = await browser.executeAsync(async (model, reviewerModel, workspace, plan, minutes, stepsCap, tokensCap, done) => {
+    const started = await browser.executeAsync(async (proModel, flashModel, visionModel, reviewerModel, roleModelsJson, workspace, plan, minutes, stepsCap, tokensCap, done) => {
       try {
         const { invoke } = window.__TAURI__.core;
+        const parsedRoleModels = roleModelsJson ? JSON.parse(roleModelsJson) : null;
         const result = await invoke("start_background_agent_evaluation", {
           modelRouting: {
-            pro: model,
-            flash: model,
-            vision: model,
+            pro: proModel,
+            flash: flashModel,
+            vision: visionModel,
             reasoning_effort: "high",
-            ...(reviewerModel ? { role_models: { reviewer: reviewerModel } } : {}),
+            ...(parsedRoleModels ? { role_models: parsedRoleModels } : {}),
+            ...(reviewerModel ? { role_models: { ...(parsedRoleModels || {}), reviewer: reviewerModel } } : {}),
           },
           maxDurationMinutes: minutes,
           scenario: "custom_goal",
@@ -64,7 +70,7 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
         });
         done({ ok: true, result });
       } catch (error) { done({ ok: false, error: String(error) }); }
-    }, modelId, reviewerModelId, fixtureDir, planMode, maxDurationMinutes, maxSteps, maxPromptTokens);
+    }, proModelId, flashModelId, visionModelId, reviewerModelId, roleModelsRaw, fixtureDir, planMode, maxDurationMinutes, maxSteps, maxPromptTokens);
     assert.equal(started?.ok, true, started?.error ?? "后台评测启动失败");
     const sessionId = started.result?.session_id;
     assert.ok(sessionId, "缺少 session_id");

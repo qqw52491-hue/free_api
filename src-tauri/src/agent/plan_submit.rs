@@ -233,7 +233,12 @@ pub async fn handle_submit_plan(
         step_id,
         crate::agent::router::roles::REVIEWER,
     );
-    let mut reviewer_model = if card.model_id.is_empty() {
+    let has_explicit_reviewer_slot = model_routing
+        .role_models
+        .get(crate::agent::router::roles::REVIEWER)
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let mut reviewer_model = if card.model_id.is_empty() || has_explicit_reviewer_slot {
         routing.model_id.clone()
     } else {
         card.model_id.clone()

@@ -73,8 +73,16 @@ function parseCliArgs() {
       options.live = true;
     } else if (a === '--model') {
       options.model = args[++i];
+    } else if (a === '--pro') {
+      options.proModel = args[++i];
+    } else if (a === '--flash') {
+      options.flashModel = args[++i];
+    } else if (a === '--vision') {
+      options.visionModel = args[++i];
     } else if (a === '--reviewer-model') {
       options.reviewerModel = args[++i];
+    } else if (a === '--role-models') {
+      options.roleModels = args[++i];
     } else if (a === '--duration') {
       options.durationMinutes = Number(args[++i]);
     } else if (a === '-v' || a === '--verbose') {
@@ -623,7 +631,11 @@ async function runEvaluation() {
           ...process.env,
           CARGO_TARGET_DIR: path.join(rootDir, 'src-tauri', 'target'),
           FREE_API_LIVE_MODEL_ID: options.model,
+          ...(options.proModel ? { FREE_API_LIVE_MODEL_ID_PRO: options.proModel } : {}),
+          ...(options.flashModel ? { FREE_API_LIVE_MODEL_ID_FLASH: options.flashModel } : {}),
+          ...(options.visionModel ? { FREE_API_LIVE_MODEL_ID_VISION: options.visionModel } : {}),
           ...(options.reviewerModel ? { FREE_API_LIVE_REVIEWER_MODEL_ID: options.reviewerModel } : {}),
+          ...(options.roleModels ? { FREE_API_ROLE_MODELS: options.roleModels } : {}),
           FREE_API_LIVE_FIXTURE_DIR: sandboxPath,
           FREE_API_EVALUATION_SCENARIO: 'custom_goal',
           FREE_API_EVAL_CUSTOM_GOAL: caseDef.problem_statement,

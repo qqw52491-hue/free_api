@@ -439,10 +439,10 @@ pub async fn dispatch(
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false);
 
-            if !card.model_id.is_empty() {
-                card.model_id.clone()
-            } else if has_explicit_reviewer_slot {
+            if has_explicit_reviewer_slot {
                 routing.model_id.clone()
+            } else if !card.model_id.is_empty() {
+                card.model_id.clone()
             } else {
                 router::prefer_cross_family_reviewer(&conn, &routing.model_id).0
             }

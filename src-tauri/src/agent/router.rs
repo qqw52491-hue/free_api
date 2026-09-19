@@ -842,3 +842,13 @@ mod tests {
         assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Flash);
     }
 }
+
+#[cfg(test)]
+mod serde_probe {
+    #[test]
+    fn role_models_deserializes_from_js_shape() {
+        let json = r#"{"pro":"34217be8","flash":"34217be8","vision":"34217be8","reasoning_effort":"high","role_models":{"reviewer":"4b78ff71-0be8-43e1-a02c-5a5b77f7d6b4"}}"#;
+        let cfg: super::ModelRoutingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.role_models.get("reviewer").map(|s| s.as_str()), Some("4b78ff71-0be8-43e1-a02c-5a5b77f7d6b4"));
+    }
+}
