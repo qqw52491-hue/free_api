@@ -460,7 +460,22 @@
                             </div>
                         </template>
 
-                        <!-- 正在思考与实时推进流 (带脑部图标、流光滚动、大字号、可折叠展开) -->
+                        </div>
+
+                        <!-- 底部渐隐折叠悬浮小箭头 (具体步骤多了隐藏，点击展开更多) -->
+                        <button
+                            v-if="shouldShowAmbientExpandBtn(entry)"
+                            type="button"
+                            class="ambient-stream-expand-btn"
+                            :title="isAmbientStreamExpanded(entry.id) ? '收起具体步骤' : `展开全部 (${getAmbientStepCount(entry)} 项步骤)`"
+                            @click.stop="toggleAmbientStreamExpand(entry.id)"
+                        >
+                            <svg viewBox="0 0 24 24" class="chevron-mini-icon" :class="{ 'is-flipped': isAmbientStreamExpanded(entry.id) }">
+                                <path d="m6 9 6 6 6-6" />
+                            </svg>
+                        </button>
+
+                        <!-- 正在思考与实时推进流 (独立放在下方，保证折叠时也清晰可见) -->
                         <div
                             v-if="entry.status === 'running' && isRunning"
                             class="ambient-live-text-row"
@@ -525,20 +540,6 @@
                                 </div>
                             </Transition>
                         </div>
-                        </div>
-
-                        <!-- 底部渐隐折叠悬浮小箭头 (多了隐藏，点击展开更多，完全契合用户标杆截图) -->
-                        <button
-                            v-if="getAmbientDisplayItems(entry).length > 5 && !isPlanRunning(entry)"
-                            type="button"
-                            class="ambient-stream-expand-btn"
-                            :title="isAmbientStreamExpanded(entry.id) ? '收起动作明细' : `展开全部 (${getAmbientDisplayItems(entry).length} 项动作)`"
-                            @click.stop="toggleAmbientStreamExpand(entry.id)"
-                        >
-                            <svg viewBox="0 0 24 24" class="chevron-mini-icon" :class="{ 'is-flipped': isAmbientStreamExpanded(entry.id) }">
-                                <path d="m6 9 6 6 6-6" />
-                            </svg>
-                        </button>
                     </div>
 
                     <!-- 🌟 模式 B：工程全量链路 (保留原有的阶段卡片、顶栏条条与折叠展开树) -->
@@ -1568,8 +1569,9 @@ function getCompletionDisplayText(entry: { id: string; summary?: string; title?:
     const fullText = entry.summary || entry.title || '';
     if (!fullText) return '';
 
-    // 若已经完成过动画，直接返回全文
-    if (typewriterDoneIds.has(entry.id)) {
+    // 历史会话消息 / 重新打开对话 / 非运行态，严禁重复播放打字动画，直接输出全文
+    if (entry.id.startsWith('history-') || !props.isRunning || typewriterDoneIds.has(entry.id)) {
+        typewriterDoneIds.add(entry.id);
         return fullText;
     }
 
@@ -1751,11 +1753,18 @@ function toggleAmbientStreamExpand(entryId: string) {
     expandedAmbientStreamMap.value[entryId] = !expandedAmbientStreamMap.value[entryId];
 }
 
+function getAmbientStepCount(entry: PlanEntry): number {
+    const items = getAmbientDisplayItems(entry);
+    return items.filter(item => item.type !== 'narrative').length;
+}
+
 function shouldCollapseAmbientStream(entry: PlanEntry): boolean {
     if (isAmbientStreamExpanded(entry.id)) return false;
-    if (isPlanRunning(entry)) return false;
-    const items = getAmbientDisplayItems(entry);
-    return items.length > 5;
+    return getAmbientStepCount(entry) > 4;
+}
+
+function shouldShowAmbientExpandBtn(entry: PlanEntry): boolean {
+    return getAmbientStepCount(entry) > 4;
 }
 
 function getDirName(filePath?: string): string {
@@ -2934,6 +2943,13 @@ function waitJobsTileText(step: AgentStepItem): string {
     return "✅ 后台任务已完成，已唤醒并回收全部结论";
 }
 function formatConversationTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "numeric", day: "numeric" }); }
+watch(() => props.historyTurns, (turns) => {
+    if (Array.isArray(turns)) {
+        for (const turn of turns) {
+            typewriterDoneIds.add(`history-completion-${turn.id}`);
+        }
+    }
+}, { immediate: true });
 watch(() => [timelineEntries.value.length, props.completionMessage, props.historyTurns.length], () => { followLatest(); }, { flush: "post" });
 watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunning) { followLiveTail.value = true; followLatest(); } if (!running && wasRunning) followLatest(); });
 </script>
