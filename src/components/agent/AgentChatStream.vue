@@ -1760,20 +1760,20 @@ function getAmbientStepCount(entry: PlanEntry): number {
 }
 
 function shouldCollapseAmbientStream(entry: PlanEntry): boolean {
-    // 1. 运行态阶段（刚开始/进行中）：绝不折叠，实时显示完整链路与每个步骤
-    if (isPlanRunning(entry)) return false;
+    // 1. 任务运行期间（没有运行结束）：绝不折叠，实时全量显示每一个步骤链路
+    if (props.isRunning) return false;
 
     // 2. 若用户已手动展开，则不折叠
     if (isAmbientStreamExpanded(entry.id)) return false;
 
-    // 3. 完成之后且步骤很长（> 4 项），才折叠并呈现渐隐遮罩
+    // 3. 任务彻底运行完成之后，且步骤很长（> 4 项），才折叠并呈现渐隐遮罩
     return getAmbientStepCount(entry) > 4;
 }
 
 function shouldShowAmbientExpandBtn(entry: PlanEntry): boolean {
-    // 运行态不显示折叠小按钮（因为处于全展开状态）
-    if (isPlanRunning(entry)) return false;
-    // 完成之后且步骤很长，显示小箭头支持用户展开/收起
+    // 运行期间保持全量展示，不显示折叠小箭头
+    if (props.isRunning) return false;
+    // 任务彻底运行完成之后且步骤很长，显示小箭头支持用户展开/收起
     return getAmbientStepCount(entry) > 4;
 }
 
