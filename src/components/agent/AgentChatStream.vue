@@ -314,6 +314,7 @@
                                         [`finding-${item.step.findingKind}`]: item.action.isMilestone && item.step.findingKind
                                     }
                                 ]"
+                                :title="item.action.tooltip"
                                 @click="$emit('select-step', item.step.id)"
                             >
                                 <span class="ambient-text-content">
@@ -1123,8 +1124,8 @@
                     <div
                         class="summary-rich"
                         :class="{ 'is-streaming-text': isStreamingCompletion(entry) }"
-                        title="点击可直接瞬间完成渐显"
-                        @click="finishTypewriterInstantly(entry.id, entry.summary || entry.title)"
+                        :title="isStreamingCompletion(entry) ? '点击可直接瞬间完成渐显' : undefined"
+                        @click="isStreamingCompletion(entry) && finishTypewriterInstantly(entry.id, entry.summary || entry.title)"
                     >
                         <RichContentRenderer :content="getCompletionDisplayText(entry)" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
                     </div>
@@ -1906,11 +1907,9 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
     const items: AmbientDisplayItem[] = [];
 
     let i = 0;
+    let hasNarrative = false;
     let lastNarrative = '';
-    // 解说抑制窗口：每条完整解说段后，后续 N 个关键步内的解说降级为灰色小行；
-    // 关键事件步（异常/拦截/finding）立即重置窗口，保证重要时刻的解说不被降级
-    let narrativeCooldown = 0;
-    const NARRATIVE_COOLDOWN_STEPS = 3;
+
     while (i < rawSteps.length) {
         const step = rawSteps[i];
 
@@ -1918,21 +1917,13 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
         const finding = (step.finding || '').trim();
         const findingRenderable = !!finding && (step.findingKind === 'breakthrough' || step.findingKind === 'milestone' || step.findingKind === 'summary' || step.findingKind === 'start');
 
-        // 叙述段落先于动作条目渲染；被 key 过滤掉的纯思维节拍，其叙述仍然保留；
-        // 与上一条解说完全重复的叙述跳过——模型若逐步流水账也不至于刷屏
+        // 🌟 阶段统领叙述：每个大阶段开头展示一段核心解说作为总纲；
+        // 过程中的内部思考挂载在动作行 tooltip/详情中，绝不在动作行之间插入零散段落破坏步骤垂直间距节奏
         const narr = findingRenderable ? '' : stepNarrative(step);
-        if (narr && narr !== lastNarrative) {
+        if (narr && !hasNarrative) {
+            hasNarrative = true;
             lastNarrative = narr;
-            const keyMoment = step.status === 'failed' || step.status === 'challenged'
-                || !!step.finding
-                || step.findingKind === 'warning' || step.findingKind === 'blocker';
-            if (keyMoment) narrativeCooldown = 0;
-            if (narrativeCooldown <= 0) {
-                items.push({ type: 'narrative', id: `narr-${step.id}`, text: narr, timestamp: step.timestamp });
-                narrativeCooldown = NARRATIVE_COOLDOWN_STEPS;
-            } else {
-                items.push({ type: 'narrative-mini', id: `narr-mini-${step.id}`, text: narr, timestamp: step.timestamp });
-            }
+            items.push({ type: 'narrative', id: `narr-${step.id}`, text: narr, timestamp: step.timestamp });
         }
 
         // 🌟 用户需求：关键突破/阶段总结/突破发现直接与开头总结一样展示为纯文本叙事段落，不加特效卡片与小标签
@@ -1940,6 +1931,7 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
             const cleanFinding = finding.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
             if (cleanFinding && cleanFinding !== lastNarrative) {
                 lastNarrative = cleanFinding;
+                hasNarrative = true;
                 items.push({ type: 'narrative', id: `finding-${step.id}`, text: cleanFinding, timestamp: step.timestamp });
             }
         }
@@ -1990,7 +1982,6 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
                     durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
                     timestamp: searchSteps[searchSteps.length - 1].timestamp || step.timestamp,
                 });
-                if (narrativeCooldown > 0) narrativeCooldown--;
                 i = j;
                 continue;
             }
@@ -2033,7 +2024,6 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
                     durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
                     timestamp: mcpSteps[mcpSteps.length - 1].timestamp || step.timestamp,
                 });
-                if (narrativeCooldown > 0) narrativeCooldown--;
                 i = j;
                 continue;
             }
@@ -2046,7 +2036,6 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
             step,
             action,
         });
-        if (narrativeCooldown > 0) narrativeCooldown--;
         i++;
     }
 
@@ -2069,6 +2058,11 @@ function getAmbientAction(step: AgentStepItem): AmbientActionDisplay {
     const hit = ambientActionMemo.get(step);
     if (hit) return hit;
     const action = computeAmbientAction(step);
+    // 步骤内部思考/重试原因保留挂载在 tooltip 中，悬停即可查看完整详情
+    const thought = (step.thought || '').trim();
+    if (thought && thought !== action.explanation && !action.tooltip?.includes(thought)) {
+        action.tooltip = action.tooltip ? `${action.tooltip} · ${thought}` : thought;
+    }
     try { ambientActionMemo.set(step, action); } catch {}
     return action;
 }

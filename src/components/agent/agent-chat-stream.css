@@ -975,7 +975,7 @@
 }
 
 .ambient-plan-wrapper + .ambient-plan-wrapper {
-    margin-top: 4px !important;
+    margin-top: 0 !important;
 }
 
 .stream-sticky-actions {
@@ -1008,7 +1008,7 @@
     width: 100%;
 }
 
-/* 🌟 环境感知叙事流容器 (紧凑高信噪比) */
+/* 🌟 环境感知叙事流容器 (紧凑高信噪比，所有步骤统一严格 2px 间距) */
 .ambient-plan-stream {
     display: flex;
     flex-direction: column;
@@ -1070,12 +1070,12 @@
     transform: rotate(180deg);
 }
 
-/* 🌟 阶段解说段落 (每轮 thought 叙述：第一人称自然语言，Devin/Cursor 式叙事节拍，统领全局) */
+/* 🌟 阶段解说段落 (每阶段开头的统领大白话叙述，间距紧凑自然) */
 .ambient-narrative {
-    margin: 8px 4px 4px;
+    margin: 6px 4px 3px;
     padding: 0 0 0 2px;
-    font-size: 14px;
-    line-height: 1.62;
+    font-size: 13.5px;
+    line-height: 1.5;
     font-weight: 500;
     color: #f1f5f9;
     white-space: pre-wrap;
@@ -1084,15 +1084,16 @@
 }
 
 .ambient-narrative:first-child {
-    margin-top: 2px;
+    margin-top: 0;
 }
 
-/* 解说抑制小行：冷却窗口内的 thought 降级——保留叙事轨迹但不再占段落视觉 */
+/* 解说抑制小行：单行紧凑高信噪比，不产生额外外边距 */
 .ambient-narrative-mini {
-    margin: 2px 4px;
-    padding: 1px 0 1px 8px;
-    font-size: 11.5px;
-    line-height: 1.45;
+    margin: 0 4px;
+    padding: 0 0 0 6px;
+    font-size: 11px;
+    line-height: 20px;
+    min-height: 20px;
     color: #71717a;
     font-style: italic;
     white-space: nowrap;
@@ -1108,64 +1109,48 @@
     color: #94a3b8;
 }
 
-/* 🌟 环境感知动作行 (Cursor 级超低视觉负担、紧凑内敛动作行，无厚重边框与喧宾夺主背景) */
+/* 🌟 环境感知动作行 (Cursor 级超低视觉负担、紧凑内敛动作行，统一严格 22px 高度与 0 外边距) */
 .ambient-text-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
     width: 100%;
-    padding: 3.5px 8px;
-    min-height: 28px;
-    border-radius: 5px;
-    font-size: 13px;
-    line-height: 1.45;
+    margin: 0;
+    padding: 2px 6px;
+    min-height: 22px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    line-height: 1.4;
     color: #94a3b8;
     cursor: pointer;
     background: transparent;
     transition: background 0.12s ease;
-    user-select: text;
+    user-select: none;
+    overflow: hidden;
+    white-space: nowrap;
 }
 
 .ambient-text-row:hover {
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(255, 255, 255, 0.035);
 }
 
 .ambient-text-row.selected {
     background: rgba(129, 140, 248, 0.08);
 }
 
-/* 真正的结论/关键突破：与开头总结段落 (.ambient-narrative) 一样直接展示，无渐变卡片、无左边框特效 */
+/* 真正的结论/关键突破：高度与行距完全对齐普通动作行，严禁上下产生多余间距 */
 .ambient-text-row.is-milestone {
     background: transparent;
     border: none;
-    padding: 6px 4px 4px;
-    margin: 4px 0 2px;
-}
-
-.ambient-text-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
     padding: 2px 6px;
+    margin: 0;
     min-height: 22px;
-    border-radius: 4px;
-    cursor: pointer;
-    transition: background 0.12s ease;
-    user-select: none;
-    width: 100%;
-    overflow: hidden;
-    white-space: nowrap;
-}
-
-.ambient-text-row:hover {
-    background: rgba(255, 255, 255, 0.03);
 }
 
 .ambient-text-row.is-milestone .ambient-text-body {
-    font-size: 13.5px;
-    line-height: 1.6;
+    font-size: 11.5px;
+    line-height: 1.4;
     font-weight: 500;
     color: #f1f5f9;
 }
