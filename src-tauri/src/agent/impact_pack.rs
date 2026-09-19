@@ -321,35 +321,56 @@ pub fn changed_files_from_diff(diff: &str) -> BTreeSet<String> {
     out
 }
 
-fn render_pack(by_symbol: &BTreeMap<String, Vec<ConsumerHit>>, refs: &[String]) -> String {
+/// 渲染影响面包并返回实际展示的消费点 refs——【所见即所裁】：
+/// pack 文本受 MAX_PACK_CHARS 预算约束，超出时按整符号段取舍（不拦腰斩段），
+/// refs 只含真正展示给审查员的点，保证 consumer_verdicts 义务裁的都是看得见的点。
+/// （此前拦腰截断导致尾部消费点不可见仍被契约要求裁决，三模型连炸 5 次的根因）
+fn render_pack(by_symbol: &BTreeMap<String, Vec<ConsumerHit>>) -> (String, Vec<String>) {
     let mut s = String::from(
         "【🧨 影响面机械枚举（宿主静态扫描结果，非模型推断）】\n\
         本次改动触及的符号存在以下跨文件消费点——审查义务不是评估方案本身，\n\
         而是逐点核实\"改动后该处原假设是否仍成立\"（例如两个条件谓词开始同址重叠、\n\
         语义收束导致判定顺序改变、签名变化影响调用链）：\n",
     );
+    // 义务段尾部也要计入预算——先渲染占位再回填实际数量
+    let obligation_fmt = |n: usize| {
+        format!(
+            "【硬义务】输出 JSON 必须含 \"consumer_verdicts\": [\"<path:line> => HOLDS|BROKEN|NA: 一句话理由\", ...]，\n\
+            覆盖上面列出的全部 {} 个消费点；确认无关的点可判 NA 但禁止漏项（缺项按 contract_violation 打回重修）。\n\
+            HOLDS = 核实该消费点在改动后行为不变；BROKEN = 改动破坏该处假设（须同步产出 blocking finding）。\n\
+            本清单为宿主机械枚举的下限，仅保证列出项有据可查，不替代你主动探查清单外的耦合点。",
+            n
+        )
+    };
+    let mut shown_refs: Vec<String> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut dropped = 0usize;
     for (sym, hits) in by_symbol {
         if hits.is_empty() {
             continue;
         }
-        s.push_str(&format!("◆ 符号 `{}` 的下游消费点：\n", sym));
+        let mut section = format!("◆ 符号 `{}` 的下游消费点：\n", sym);
         for h in hits {
-            s.push_str(&format!("  - {}:{} | {}\n", h.rel_path, h.line_no, h.snippet));
+            section.push_str(&format!("  - {}:{} | {}\n", h.rel_path, h.line_no, h.snippet));
+        }
+        // 预算判断：正文 + 该段 + 义务尾部（按最坏数字位数估算）不超限才整段采纳
+        if s.chars().count() + section.chars().count() + 450 > MAX_PACK_CHARS {
+            dropped += hits.len();
+            continue;
+        }
+        s.push_str(&section);
+        for h in hits {
+            let r = format!("{}:{}", h.rel_path, h.line_no);
+            if seen.insert(r.clone()) {
+                shown_refs.push(r);
+            }
         }
     }
-    s.push_str(&format!(
-        "【硬义务】输出 JSON 必须含 \"consumer_verdicts\": [\"<path:line> => HOLDS|BROKEN|NA: 一句话理由\", ...]，\n\
-        覆盖上面列出的全部 {} 个消费点；确认无关的点可判 NA 但禁止漏项（缺项按 contract_violation 打回重修）。\n\
-        HOLDS = 核实该消费点在改动后行为不变；BROKEN = 改动破坏该处假设（须同步产出 blocking finding）。\n\
-        本清单为宿主机械枚举的下限，仅保证列出项有据可查，不替代你主动探查清单外的耦合点。",
-        refs.len()
-    ));
-    if s.chars().count() > MAX_PACK_CHARS {
-        let mut truncated: String = s.chars().take(MAX_PACK_CHARS).collect();
-        truncated.push_str("\n…（pack 截断；refs 清单以 impact_pack_refs 为准）");
-        return truncated;
+    if dropped > 0 {
+        s.push_str(&format!("（另有 {} 个低优先消费点因篇幅未列示，仅作参考不要求裁决）\n", dropped));
     }
-    s
+    s.push_str(&obligation_fmt(shown_refs.len()));
+    (s, shown_refs)
 }
 
 fn build(workspace: &Path, changed_files: BTreeSet<String>, symbols: Vec<String>) -> ImpactPack {
@@ -357,8 +378,6 @@ fn build(workspace: &Path, changed_files: BTreeSet<String>, symbols: Vec<String>
         return ImpactPack::default();
     }
     let mut by_symbol: BTreeMap<String, Vec<ConsumerHit>> = BTreeMap::new();
-    let mut refs: Vec<String> = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
     // 聚合级去重（跨符号）：同一文件内 snippet 完全相同的行是同一条证据——
     // 既压掉"多符号共命中同一行"的重复列示，也压掉同文件同文调用行的堆叠。
     // 键含 rel_path：跨文件同文行仍是独立消费点，不误删（宁多勿漏）。
@@ -367,24 +386,17 @@ fn build(workspace: &Path, changed_files: BTreeSet<String>, symbols: Vec<String>
         let hits = scan_consumers(workspace, &sym, &changed_files);
         let mut kept: Vec<ConsumerHit> = Vec::with_capacity(hits.len());
         for h in hits {
-            if !seen_snippets.insert((h.rel_path.clone(), h.snippet.clone())) {
-                continue;
+            if seen_snippets.insert((h.rel_path.clone(), h.snippet.clone())) {
+                kept.push(h);
             }
-            let r = format!("{}:{}", h.rel_path, h.line_no);
-            if seen.insert(r.clone()) && refs.len() < MAX_CONSUMER_REFS {
-                refs.push(r);
-            }
-            kept.push(h);
         }
         by_symbol.insert(sym, kept);
     }
+    let (section, refs) = render_pack(&by_symbol);
     if refs.is_empty() {
         return ImpactPack::default();
     }
-    ImpactPack {
-        section: render_pack(&by_symbol, &refs),
-        refs,
-    }
+    ImpactPack { section, refs }
 }
 
 /// 阶段审查入口：有真实累计 diff 时按改动行提取符号
