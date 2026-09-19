@@ -257,16 +257,30 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
         // K 之前的命令已真实落地，第 K 步未落地，K 之后从未执行（不算尝试）
         const stepFailed = step.status === "failed" || step.status === "challenged";
         let crashIdx = -1;
+        let parallelOk: boolean[] | null = null;
         if (stepFailed) {
-            const text = `${step.result ?? ""}${step.rawResult ?? ""}`;
+            const text = `${step.result ?? ""}\n${step.rawResult ?? ""}`;
             const m = text.match(/第\s*(\d+)\s*步崩溃/) || text.match(/pipeline_fail_at_(\d+)/);
             if (m) crashIdx = parseInt(m[1], 10);
+            // parallel 分支语义：分支相互独立，部分失败≠全部未落地。
+            // 后端执行报告的 results 为与 commands 严格同序的逐分支数组，
+            // 每个分支带 ok 布尔；按序提取 ok 标志，命中数≥命令数才采用，
+            // 否则保守回退（全标拦截，不误计未证实落地的文件）。
+            if (t.includes("parallel")) {
+                const oks = [...text.matchAll(/"ok"\s*:\s*(true|false)/g)]
+                    .map(mm => mm[1] === "true");
+                if (oks.length >= commands.length && commands.length > 0) {
+                    parallelOk = oks.slice(0, commands.length);
+                }
+            }
         }
         for (let ci = 0; ci < commands.length; ci++) {
             const entry = commands[ci];
             const ord = ci + 1;
             if (stepFailed && crashIdx > 0 && ord > crashIdx) continue;
-            const cmdLanded = !stepFailed || (crashIdx > 0 ? ord < crashIdx : false);
+            const cmdLanded = parallelOk
+                ? parallelOk[ci] === true
+                : (!stepFailed || (crashIdx > 0 ? ord < crashIdx : false));
             const cmd = entry && typeof entry === "object" ? entry.command : undefined;
             if (!cmd || typeof cmd !== "object") continue;
             const action = String(cmd.action || "").toLowerCase();
