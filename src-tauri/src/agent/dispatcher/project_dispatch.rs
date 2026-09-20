@@ -133,8 +133,11 @@ pub(crate) fn dispatch_project_resources(
         "list_resources" => {
             match crate::commands::projects::project_resources_for_session(&conn, session_id) {
                 Ok(resources) => {
-                    // 提示词承诺"按需分页取回"：offset/limit 必须真实生效，
-                    // 不传参数时返回全量（登记量小的常态路径行为不变）。
+                    // 提示词承诺"按需分页取回"：offset/limit 必须真实生效且必须有界——
+                    // 不传 limit 按默认页返回，超大 limit 收敛到硬上限，否则一次全量
+                    // 倾倒就绕过了尾部清单的 20 条展示预算。
+                    const LIST_RESOURCES_DEFAULT_LIMIT: usize = 50;
+                    const LIST_RESOURCES_MAX_LIMIT: usize = 200;
                     let total = resources.len();
                     let offset = params
                         .get("offset")
@@ -143,11 +146,12 @@ pub(crate) fn dispatch_project_resources(
                     let limit = params
                         .get("limit")
                         .and_then(serde_json::Value::as_u64)
-                        .map(|v| v as usize);
+                        .map(|v| (v as usize).min(LIST_RESOURCES_MAX_LIMIT))
+                        .unwrap_or(LIST_RESOURCES_DEFAULT_LIMIT);
                     let page = resources
                         .into_iter()
                         .skip(offset)
-                        .take(limit.unwrap_or(usize::MAX))
+                        .take(limit)
                         .map(|resource| {
                             json!({
                                 "resource_id": resource.resource_id,
@@ -164,6 +168,7 @@ pub(crate) fn dispatch_project_resources(
                             "resources": page,
                             "total": total,
                             "offset": offset,
+                            "limit": limit,
                             "has_more": has_more,
                         })
                         .to_string(),

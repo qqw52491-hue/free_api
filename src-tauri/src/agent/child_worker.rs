@@ -621,6 +621,7 @@ pub async fn run_worker_loop(
         &result.status,
         result.duration_ms,
         result.completion_tokens,
+        result.prompt_tokens,
         result.error_kind.map(crate::agent::types::ChildErrorKind::Other),
         Some(&result_json),
         hist_json.as_deref(),

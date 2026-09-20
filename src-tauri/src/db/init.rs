@@ -136,6 +136,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             finished_at TEXT,
             duration_ms INTEGER,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
             evidence_ref_count INTEGER NOT NULL DEFAULT 0,
             error_kind TEXT,
             result_json TEXT,
@@ -580,6 +581,12 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     );
     let _ = conn.execute(
         "ALTER TABLE agent_child_runs ADD COLUMN consumed_at TEXT;",
+        [],
+    );
+    // 子任务成本台账补齐 prompt 侧：多 Agent 的隐性成本大头在 prompt（继承历史 +
+    // 证据包），只记 completion 会让成本观测系统性偏低（旧库自愈）。
+    let _ = conn.execute(
+        "ALTER TABLE agent_child_runs ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0;",
         [],
     );
     if let Err(error) = migrate_uvx_bridge_plugins_to_native(&conn) {

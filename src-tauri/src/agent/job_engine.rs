@@ -227,6 +227,36 @@ pub fn has_any_running_jobs(db: &DbState, parent_run_id: &str) -> bool {
     has_running_jobs(db, parent_run_id) || crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id)
 }
 
+/// 定向语义：给定目标 id 集合中是否还有处于 running 的任务（两张表都查）。
+/// 定向 wait 的早退判据必须是「目标是否仍在途」，不能用全局 running 计数——
+/// 否则目标已全部终态/已消费、只有无关任务在跑时，调用方会被迫空等满超时。
+fn has_running_targets(db: &DbState, parent_run_id: &str, targets: &[String]) -> bool {
+    if targets.is_empty() {
+        return false;
+    }
+    let Ok(conn) = db.0.lock() else { return false; };
+    let marks = std::iter::repeat("?")
+        .take(targets.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    for table in ["agent_background_jobs", "agent_child_runs"] {
+        let sql = format!(
+            "SELECT COUNT(*) FROM {} WHERE parent_run_id = ? AND status = 'running' AND id IN ({})",
+            table, marks
+        );
+        let params_vec: Vec<&dyn rusqlite::ToSql> = std::iter::once(&parent_run_id as &dyn rusqlite::ToSql)
+            .chain(targets.iter().map(|t| t as &dyn rusqlite::ToSql))
+            .collect();
+        let count: i64 = conn
+            .query_row(&sql, rusqlite::params_from_iter(params_vec), |row| row.get(0))
+            .unwrap_or(0);
+        if count > 0 {
+            return true;
+        }
+    }
+    false
+}
+
 /// 将子审查/工兵/侦察终态回执映射为统一的信箱结果条目
 fn collect_completed_child_results(
     db: &DbState,
@@ -340,7 +370,14 @@ pub async fn wait_for_jobs(
     }
     collected.extend(collect_completed_child_results(db, parent_run_id, target_job_ids));
 
-    if found_target(&collected) || !has_any_running_jobs(db, parent_run_id) {
+    // 早退判据：无目标时看全局 running；有目标时只看目标是否仍在途——
+    // 无关任务还在跑不构成继续等待的理由。
+    let no_pending = || match target_job_ids {
+        None => !has_any_running_jobs(db, parent_run_id),
+        Some(targets) => !has_running_targets(db, parent_run_id, targets),
+    };
+
+    if found_target(&collected) || no_pending() {
         enrich_and_refresh_collected_results(db, &mut collected).await;
         return Ok(collected);
     }
@@ -371,7 +408,7 @@ pub async fn wait_for_jobs(
                     }
                 }
                 collected.extend(collect_completed_child_results(db, parent_run_id, target_job_ids));
-                if found_target(&collected) || !has_any_running_jobs(db, parent_run_id) {
+                if found_target(&collected) || no_pending() {
                     enrich_and_refresh_collected_results(db, &mut collected).await;
                     return Ok(collected);
                 }

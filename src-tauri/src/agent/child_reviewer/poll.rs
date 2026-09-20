@@ -141,7 +141,7 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
             params![
                 child_run_id,
                 now.to_rfc3339(),
-                child_error_result_json(&child_run_id, "timed_out", &ChildErrorKind::ReapedStale, age_secs.max(0) as u64 * 1000, 0, None)
+                child_error_result_json(&child_run_id, "timed_out", &ChildErrorKind::ReapedStale, age_secs.max(0) as u64 * 1000, 0, 0, None)
             ],
         );
         // 清理日志：reap 只做标记不撕关联——迟到结果仍允许落库（见 finish 守卫），
@@ -243,7 +243,7 @@ pub fn recover_orphaned_child_runs_on_session_start(
             params![
                 child_run_id,
                 now,
-                child_error_result_json(child_run_id, "interrupted", &ChildErrorKind::Interrupted, 0, 0, None)
+                child_error_result_json(child_run_id, "interrupted", &ChildErrorKind::Interrupted, 0, 0, 0, None)
             ],
         );
     }
@@ -253,9 +253,13 @@ pub fn recover_orphaned_child_runs_on_session_start(
     Ok(stale_ids.len())
 }
 
+/// 子任务结果的模型可见投影：强类型字段全量保留，raw_result_json 里的
+/// custom_schema 扩展字段（角色特化产物，如 cve_refs/risk_level）也合并进来——
+/// 投影要收窄的是体积，不是语义；强类型外字段丢失会让角色卡契约形同虚设。
 pub fn result_as_dispatch_output(result: ChildReviewResult) -> String {
-    json!({
+    let mut view = json!({
         "child_run_id": result.child_run_id,
+        "kind": result.kind,
         "status": result.status,
         "findings": result.findings,
         "confidence": result.confidence,
@@ -264,16 +268,30 @@ pub fn result_as_dispatch_output(result: ChildReviewResult) -> String {
         "duration_ms": result.duration_ms,
         "completion_tokens": result.completion_tokens,
         "prompt_tokens": result.prompt_tokens,
+        "error_kind": result.error_kind,
         "routing": result.routing,
         "withdrawn_findings": result.withdrawn_findings,
-    })
-    .to_string()
+        "objection_verdicts": result.objection_verdicts,
+        "scorecard": result.scorecard,
+    });
+    if let (Some(raw), Some(view_map)) = (
+        result.raw_result_json.as_deref(),
+        view.as_object_mut(),
+    ) {
+        if let Ok(serde_json::Value::Object(raw_map)) = serde_json::from_str::<Value>(raw) {
+            for (k, v) in raw_map {
+                view_map.entry(k).or_insert(v);
+            }
+        }
+    }
+    view.to_string()
 }
 
 pub fn child_result_token_usage(result: &ChildReviewResult) -> TokenUsage {
     TokenUsage {
+        prompt_tokens: result.prompt_tokens,
         completion_tokens: result.completion_tokens,
-        total_tokens: result.completion_tokens,
+        total_tokens: result.prompt_tokens + result.completion_tokens,
         ..TokenUsage::default()
     }
 }

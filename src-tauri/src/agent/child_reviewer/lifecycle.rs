@@ -109,12 +109,42 @@ pub(crate) fn begin_child_run_extended(
     Ok(child_run_id)
 }
 
+/// resume_child 专用加载：必须带会话归属谓词——child_run_id 是会话内凭据，
+/// 跨会话命中按"未找到"处理，不能读取/复活其他会话的历史与工作区副本
+/// （与 child_writer.apply 的会话校验同纪律）。返回
+/// (status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json)。
+#[allow(clippy::type_complexity)]
+pub(crate) fn load_child_run_for_resume(
+    db: &DbState,
+    child_run_id: &str,
+    parent_session_id: &str,
+) -> Result<(String, String, Option<String>, Option<String>, String, String, Option<String>), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json FROM agent_child_runs WHERE id = ?1 AND parent_session_id = ?2",
+        params![child_run_id, parent_session_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        },
+    )
+    .map_err(|e| format!("未找到子任务「{}」记录: {}", child_run_id, e))
+}
+
 pub(crate) fn finish_child_run(
     db: &DbState,
     child_run_id: &str,
     status: &str,
     duration_ms: u64,
     completion_tokens: i64,
+    prompt_tokens: i64,
     error_kind: Option<ChildErrorKind>,
     result_json: Option<&str>,
 ) {
@@ -124,6 +154,7 @@ pub(crate) fn finish_child_run(
         status,
         duration_ms,
         completion_tokens,
+        prompt_tokens,
         error_kind,
         result_json,
         None,
@@ -136,6 +167,7 @@ pub(crate) fn finish_child_run_with_history(
     status: &str,
     duration_ms: u64,
     completion_tokens: i64,
+    prompt_tokens: i64,
     error_kind: Option<ChildErrorKind>,
     result_json: Option<&str>,
     message_history_json: Option<&str>,
@@ -147,7 +179,7 @@ pub(crate) fn finish_child_run_with_history(
         // 单向迁移：running -> 终态；例外——被 reap 标记为 reaped_stale 的行仍允许
         // 迟到结果落库（真实结论覆盖收割占位结果），归档元数据与会话同寿命保留，
         // 复盘可查"曾超时"与"实际结论"双重事实；cancelled/interrupted 依旧拒绝覆盖。
-        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1 AND (status='running' OR (status='timed_out' AND error_kind='reaped_stale'))",
+        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, prompt_tokens=?9, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1 AND (status='running' OR (status='timed_out' AND error_kind='reaped_stale'))",
         params![
             child_run_id,
             status,
@@ -157,6 +189,7 @@ pub(crate) fn finish_child_run_with_history(
             error_kind.map(|k| k.db_value()),
             result_json,
             message_history_json,
+            prompt_tokens,
         ],
     );
     // ⚡ 唤醒挂起等待中的协程（watch 版本号广播，不存在丢失通知的竞态窗口）
@@ -171,6 +204,7 @@ pub(crate) fn child_invalid_result_json(
     child_run_id: &str,
     duration_ms: u64,
     completion_tokens: i64,
+    prompt_tokens: i64,
     raw: &str,
 ) -> String {    let mut value: serde_json::Value = serde_json::from_str(&child_error_result_json(
         child_run_id,
@@ -178,6 +212,7 @@ pub(crate) fn child_invalid_result_json(
         &ChildErrorKind::InvalidOutput,
         duration_ms,
         completion_tokens,
+        prompt_tokens,
         None,
     ))
     .unwrap_or(serde_json::json!({}));
@@ -192,6 +227,7 @@ pub(crate) fn child_error_result_json(
     error_kind: &ChildErrorKind,
     duration_ms: u64,
     completion_tokens: i64,
+    prompt_tokens: i64,
     error_detail: Option<&str>,
 ) -> String {
     // 请求层失败把真实错误（如 "402 Insufficient Balance"）带进 missing_evidence：
@@ -213,7 +249,7 @@ pub(crate) fn child_error_result_json(
         missing_evidence: vec![missing_msg],
         duration_ms,
         completion_tokens,
-        prompt_tokens: 0,
+        prompt_tokens,
         error_kind: Some(error_kind.to_string()),
         raw_result_json: None,
         kind: None,

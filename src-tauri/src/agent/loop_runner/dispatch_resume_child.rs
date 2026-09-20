@@ -62,24 +62,12 @@ pub(super) async fn dispatch_resume_child(
                 route: "host_rejection:missing_followup_message".to_string(),
             }
         } else {
-            let child_data: Result<(String, String, Option<String>, Option<String>, String, String, Option<String>), String> = {
-                let conn = ctx.state.0.lock().map_err(|e| e.to_string())?;
-                conn.query_row(
-                    "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json FROM agent_child_runs WHERE id = ?1",
-                    rusqlite::params![target_child_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, String>(5)?,
-                            row.get::<_, Option<String>>(6)?,
-                        ))
-                    },
-                ).map_err(|e| format!("未找到子任务「{}」记录: {}", target_child_id, e))
-            };
+            // 会话归属校验由加载函数内聚承担（child_run_id 是会话内凭据）
+            let child_data = crate::agent::child_reviewer::load_child_run_for_resume(
+                ctx.state.inner(),
+                target_child_id,
+                ctx.final_session_id,
+            );
 
             match child_data {
                 Err(err) => DispatchResult { view: None,
@@ -230,6 +218,7 @@ pub(super) async fn dispatch_resume_child(
                                             "failed",
                                             started_at.elapsed().as_millis() as u64,
                                             0,
+                                            0,
                                             Some(crate::agent::types::ChildErrorKind::RequestOrStream),
                                             None,
                                         );
@@ -252,6 +241,7 @@ pub(super) async fn dispatch_resume_child(
                                             "timed_out",
                                             started_at.elapsed().as_millis() as u64,
                                             0,
+                                            0,
                                             Some(crate::agent::types::ChildErrorKind::Timeout),
                                             None,
                                         );
@@ -272,6 +262,7 @@ pub(super) async fn dispatch_resume_child(
 
                                 let duration_ms = started_at.elapsed().as_millis() as u64;
                                 let completion_tokens = stream_result.usage.map(|u| u.completion_tokens).unwrap_or(0);
+                                let prompt_tokens = stream_result.usage.map(|u| u.prompt_tokens).unwrap_or(0);
                                 let (findings, confidence, evidence_refs, missing_evidence, routing, objection_verdicts, withdrawn_findings) = 
                                     match crate::agent::child_reviewer::parse_child_review_rebuttal_output(&stream_result.full_response) {
                                         Ok(res) => res,
@@ -284,11 +275,13 @@ pub(super) async fn dispatch_resume_child(
                                                 "invalid_output",
                                                 duration_ms,
                                                 completion_tokens,
+                                                prompt_tokens,
                                                 Some(crate::agent::types::ChildErrorKind::InvalidOutput),
                                                 Some(&crate::agent::child_reviewer::child_invalid_result_json(
                                                     &new_child_run_id_clone,
                                                     duration_ms,
                                                     completion_tokens,
+                                                    prompt_tokens,
                                                     &format!("解析错误: {parse_err}\n原始输出: {}", stream_result.full_response),
                                                 )),
                                             );
@@ -305,7 +298,7 @@ pub(super) async fn dispatch_resume_child(
                                     missing_evidence,
                                     duration_ms,
                                     completion_tokens,
-        prompt_tokens: 0,
+                                    prompt_tokens,
                                     error_kind: None,
                                     raw_result_json: None,
                                     kind: Some("review".to_string()),
@@ -322,6 +315,7 @@ pub(super) async fn dispatch_resume_child(
                                     "succeeded",
                                     duration_ms,
                                     completion_tokens,
+                                    prompt_tokens,
                                     None,
                                     res_json.as_deref(),
                                     serde_json::to_string(&messages).ok().as_deref(),

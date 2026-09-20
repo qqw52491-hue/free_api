@@ -70,7 +70,7 @@ mod tests_inner {
         // 迟到真实结果落库：守卫不再拦截 reaped_stale 行
         let real = r#"{"status":"succeeded","findings":[{"id":"F1","severity":"suggestion"}]}"#;
         crate::agent::child_reviewer::finish_child_run(
-            &db, "reaped1", "succeeded", 73_000, 512, None, Some(real),
+            &db, "reaped1", "succeeded", 73_000, 512, 0, None, Some(real),
         );
 
         let conn = db.0.lock().unwrap();
@@ -102,7 +102,7 @@ mod tests_inner {
         // 正常迁移：running -> succeeded
         insert_child_run(&db, "c1", "test_run", "running", None, None);
         crate::agent::child_reviewer::finish_child_run(
-            &db, "c1", "succeeded", 100, 0, None, Some("{}"),
+            &db, "c1", "succeeded", 100, 0, 0, None, Some("{}"),
         );
         {
             let conn = db.0.lock().unwrap();
@@ -117,7 +117,7 @@ mod tests_inner {
         insert_child_run(&db, "c2", "test_run", "running", None, None);
         crate::agent::child_reviewer::cancel_running_child_runs(&db, "test_run").unwrap();
         crate::agent::child_reviewer::finish_child_run(
-            &db, "c2", "succeeded", 100, 0, None, Some("{}"),
+            &db, "c2", "succeeded", 100, 0, 0, None, Some("{}"),
         );
         let conn = db.0.lock().unwrap();
         let status: String = conn

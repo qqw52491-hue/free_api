@@ -24,7 +24,7 @@ impl ContextFingerprint {
     pub fn capture(context: &SandwichContext) -> Self {
         let messages = context.assemble_messages();
         let mut history_step_hashes = Vec::new();
-        let mut prefix_buffer = String::new();
+        let mut prefix_hasher = Sha256::new();
 
         let system_prompt_hash = sha256_hex(&context.system_prompt);
         let active_tool_hash = sha256_hex(&context.active_tool_detail);
@@ -35,9 +35,13 @@ impl ContextFingerprint {
                 other => other.to_string(),
             };
 
-            let step_hash = sha256_hex(&content_str);
+            // 帧化哈希（role + 字节长度 + content）：裸拼接 content 存在
+            // ["ab","c"] vs ["a","bc"] 的边界歧义，会让指纹误报"前缀未变"。
+            let step_hash = sha256_hex(&format!("{}:{}", msg.role, content_str));
             if idx < messages.len().saturating_sub(1) {
-                prefix_buffer.push_str(&content_str);
+                prefix_hasher.update(msg.role.as_bytes());
+                prefix_hasher.update((content_str.len() as u64).to_le_bytes());
+                prefix_hasher.update(content_str.as_bytes());
                 history_step_hashes.push(step_hash);
             }
         }
@@ -50,7 +54,7 @@ impl ContextFingerprint {
             })
             .unwrap_or_default();
 
-        let combined_prefix_hash = sha256_hex(&prefix_buffer);
+        let combined_prefix_hash = format!("{:x}", prefix_hasher.finalize());
 
         Self {
             system_prompt_hash,
@@ -114,6 +118,23 @@ mod tests {
         // 验证不同输入产生不同结果
         let h3 = sha256_hex("hello world!");
         assert_ne!(h1, h3, "Different inputs must produce different hashes");
+    }
+
+    #[test]
+    fn test_prefix_hash_distinguishes_message_boundaries() {
+        // 帧化（role+len+content）回归：裸拼接 content 无法区分
+        // ["ab","c"] 与 ["a","bc"] 两种消息切分，会让指纹误报"前缀未变"。
+        let mut ctx_a = SandwichContext::new("sys".to_string(), "goal".to_string());
+        ctx_a.add_assistant_raw_message("ab");
+        ctx_a.add_assistant_raw_message("c");
+        let mut ctx_b = SandwichContext::new("sys".to_string(), "goal".to_string());
+        ctx_b.add_assistant_raw_message("a");
+        ctx_b.add_assistant_raw_message("bc");
+        assert_ne!(
+            ContextFingerprint::capture(&ctx_a).combined_prefix_hash,
+            ContextFingerprint::capture(&ctx_b).combined_prefix_hash,
+            "消息边界不同必须产生不同前缀指纹"
+        );
     }
 
     #[test]

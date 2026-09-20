@@ -745,5 +745,25 @@
         assert_eq!(payload["offset"], 2);
         assert_eq!(payload["has_more"], true);
 
+        // 分页必须有界：缺省按默认页（50），超限 limit 收敛到硬上限（200），
+        // 否则一次 list_resources() 全量倾倒就绕过了尾部清单的展示预算。
+        let default_page = crate::agent::dispatcher::project_dispatch::dispatch_project_resources(
+            &db,
+            &session.id,
+            "list_resources",
+            &json!({}),
+        );
+        let payload: serde_json::Value = serde_json::from_str(&default_page.stdout).unwrap();
+        assert_eq!(payload["limit"], 50, "缺省 limit 应为默认页大小");
+
+        let capped = crate::agent::dispatcher::project_dispatch::dispatch_project_resources(
+            &db,
+            &session.id,
+            "list_resources",
+            &json!({"limit": 99999}),
+        );
+        let payload: serde_json::Value = serde_json::from_str(&capped.stdout).unwrap();
+        assert_eq!(payload["limit"], 200, "超限 limit 必须收敛到硬上限");
+
         let _ = std::fs::remove_dir_all(base);
     }

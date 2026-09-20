@@ -933,26 +933,10 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 // 🌟 核心：在父 Agent 消费回执的瞬间现算指纹，闭合 TOCTOU 竞争窗口！
                                 crate::agent::child_writer::refresh_file_conflicts(&mut wr.changed_files, &workspace_dir, git_available).await;
                                 injection.push_str(&format!(
-                                    "\n【🛠️ 写入工兵已完成 (child_run_id: {})】\n状态: {}, 测试: {}\n",
-                                    wr.child_run_id, wr.status, wr.test_status
+                                    "\n【🛠️ 写入工兵已完成 (child_run_id: {})】\n{}",
+                                    wr.child_run_id,
+                                    crate::agent::child_writer::writer_result_model_view(wr)
                                 ));
-                                if !wr.test_output_tail.is_empty() {
-                                    injection.push_str(&format!("测试输出摘要:\n{}\n", wr.test_output_tail));
-                                }
-                                injection.push_str("修改文件与冲突状态（主工作区实时现算）:\n");
-                                for cf in &wr.changed_files {
-                                    let status_label = cf.conflict_status.map(|s| s.label()).unwrap_or("未知");
-                                    injection.push_str(&format!("- {} [{}]\n", cf.path, status_label));
-                                    if !cf.diff.is_empty() {
-                                        injection.push_str(&format!("```diff\n{}\n```\n", cf.diff));
-                                    }
-                                }
-                                if let Some(ref pr) = wr.patch_ref {
-                                    injection.push_str(&format!("完整补丁工件: 可用 artifact_manager(action: \"get\", id: \"{}\") 查看\n", pr));
-                                }
-                                if !wr.findings.is_empty() {
-                                    injection.push_str(&format!("修改说明:\n- {}\n", wr.findings.join("\n- ")));
-                                }
                             } else {
                                 let findings = receipt.findings();
                                 let formatted_findings = if findings.is_empty() {

@@ -272,13 +272,14 @@ pub(crate) fn execute_command_inner(
             .unwrap_or_else(|| p_client.last_known_tools());
         mcp_tool_count += tools.len();
         if !tools.is_empty() {
-            mcp_tool_hints.push((
-                p_name.clone(),
-                tools
-                    .iter()
-                    .map(|t| format!("{}/{}", p_name, t.name))
-                    .collect::<Vec<_>>(),
-            ));
+            // 插件内工具名同样排序：缓存目录顺序随刷新漂移会让同一错误的
+            // 提示文本字节不稳定，破坏可复现性与前缀缓存复用。
+            let mut names: Vec<String> = tools
+                .iter()
+                .map(|t| format!("{}/{}", p_name, t.name))
+                .collect();
+            names.sort();
+            mcp_tool_hints.push((p_name.clone(), names));
         }
     }
     mcp_tool_hints.sort_by(|a, b| a.0.cmp(&b.0));

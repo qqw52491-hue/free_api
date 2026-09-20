@@ -785,6 +785,7 @@ pub async fn run_writer_loop(
         &result.status,
         result.duration_ms,
         result.completion_tokens,
+        result.prompt_tokens,
         result
             .error_kind
             .as_deref()
@@ -805,6 +806,31 @@ pub async fn run_writer_loop(
         );
     }
     // P5: copy_root 保留保活，供后续 resume_child 追问复用；待父 run 终态由 cleanup_child_workspaces 统一回收
+}
+
+/// writer 回执的模型可见投影：主循环自动注入与 wait_jobs 手动收取共用同一视图，
+/// 避免两条消费路径各写一份格式而漂移。diff 内联已在 build_changed_files 里按
+/// 预算分级降级（超限只留首头），完整补丁始终是受管工件经 patch_ref 取回。
+pub fn writer_result_model_view(wr: &WriterResult) -> String {
+    let mut out = format!("状态: {}, 测试: {}\n", wr.status, wr.test_status);
+    if !wr.test_output_tail.is_empty() {
+        out.push_str(&format!("测试输出摘要:\n{}\n", wr.test_output_tail));
+    }
+    out.push_str("修改文件与冲突状态（主工作区实时现算）:\n");
+    for cf in &wr.changed_files {
+        let status_label = cf.conflict_status.map(|s| s.label()).unwrap_or("未知");
+        out.push_str(&format!("- {} [{}]\n", cf.path, status_label));
+        if !cf.diff.is_empty() {
+            out.push_str(&format!("```diff\n{}\n```\n", cf.diff));
+        }
+    }
+    if let Some(ref pr) = wr.patch_ref {
+        out.push_str(&format!("完整补丁工件: 可用 artifact_manager(action: \"get\", id: \"{}\") 查看\n", pr));
+    }
+    if !wr.findings.is_empty() {
+        out.push_str(&format!("修改说明:\n- {}\n", wr.findings.join("\n- ")));
+    }
+    out
 }
 
 /// 渲染 writer 的初始首条 user 提示词（P2：有 context_excerpts 则分区渲染，无则保持经典紧凑格式）

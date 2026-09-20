@@ -493,7 +493,7 @@
         assert_ne!(first, second);
         assert!(begin_child_run(&state, "parent-run", "parent-session", &workspace, "model-a", 0, "review", None).is_err());
 
-        finish_child_run(&state, &first, "succeeded", 12, 34, None, None);
+        finish_child_run(&state, &first, "succeeded", 12, 34, 0, None, None);
         let conn = state.0.lock().unwrap();
         let (status, tokens, refs, error_kind): (String, i64, i64, Option<String>) = conn
             .query_row(
@@ -547,7 +547,7 @@
             scorecard: None,
         };
         let sample_json = serde_json::to_string(&sample_result).unwrap();
-        finish_child_run(&state, &run_id, "succeeded", 150, 45, None, Some(&sample_json));
+        finish_child_run(&state, &run_id, "succeeded", 150, 45, 0, None, Some(&sample_json));
 
         // 第一次轮询：获取到结果
         let polled = poll_completed_child_runs(&state, "parent-run-poll").unwrap();
@@ -581,7 +581,7 @@
         assert!(!has_running_child_runs(&state, "parent-run-2"));
 
         // 完成 child run -> 返回 false
-        finish_child_run(&state, &child_1, "succeeded", 100, 20, None, None);
+        finish_child_run(&state, &child_1, "succeeded", 100, 20, 0, None, None);
         assert!(!has_running_child_runs(&state, "parent-run-1"));
 
         let _ = std::fs::remove_dir_all(base);
@@ -600,7 +600,7 @@
         let child_2 = begin_child_run(&state, "parent-run-c", "session-c", &workspace, "model-a", 0, "review", None).unwrap();
 
         // child_1 正常成功完成
-        finish_child_run(&state, &child_1, "succeeded", 50, 10, None, None);
+        finish_child_run(&state, &child_1, "succeeded", 50, 10, 0, None, None);
 
         // 取消父任务下的所有 running 子任务
         let cancelled_count = cancel_running_child_runs(&state, "parent-run-c").unwrap();
@@ -673,7 +673,7 @@
         objection_verdicts: vec![],
             scorecard: None,
         };
-        finish_child_run(&state, &child_1, "succeeded", 200, 30, None, Some(&serde_json::to_string(&res_1).unwrap()));
+        finish_child_run(&state, &child_1, "succeeded", 200, 30, 0, None, Some(&serde_json::to_string(&res_1).unwrap()));
 
         // 第一轮轮询：消费 child_1
         let polled_1 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
@@ -708,7 +708,7 @@
         objection_verdicts: vec![],
             scorecard: None,
         };
-        finish_child_run(&state, &child_2, "succeeded", 350, 40, None, Some(&serde_json::to_string(&res_2).unwrap()));
+        finish_child_run(&state, &child_2, "succeeded", 350, 40, 0, None, Some(&serde_json::to_string(&res_2).unwrap()));
 
         // 第二轮轮询：消费 child_2，不重复消费 child_1
         let polled_2 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
@@ -776,7 +776,7 @@
             "changed_files": []
         }).to_string();
 
-        finish_child_run(&state, &run_id, "succeeded", 100, 50, None, Some(&writer_json));
+        finish_child_run(&state, &run_id, "succeeded", 100, 50, 0, None, Some(&writer_json));
 
         let polled = poll_completed_child_runs(&state, "parent-poll-w").unwrap();
         assert_eq!(polled.len(), 1);
@@ -824,7 +824,7 @@
             "routing": "certain",
             "withdrawn_findings": []
         }).to_string();
-        finish_child_run(&state, &rev_run_id, "succeeded", 120, 40, None, Some(&rev_json));
+        finish_child_run(&state, &rev_run_id, "succeeded", 120, 40, 0, None, Some(&rev_json));
 
         // 2. 模拟写入工兵任务
         let wrt_run_id = begin_child_run(&state, "parent-receipt-p1", "session-rc1", &workspace, "model-w", 2, "writer", None).unwrap();
@@ -840,7 +840,7 @@
             "completion_tokens": 80,
             "changed_files": []
         }).to_string();
-        finish_child_run(&state, &wrt_run_id, "succeeded", 200, 80, None, Some(&wrt_json));
+        finish_child_run(&state, &wrt_run_id, "succeeded", 200, 80, 0, None, Some(&wrt_json));
 
         // 统一轮询回执流
         let receipts = poll_completed_delivery_receipts(&state, "parent-receipt-p1", None).unwrap();
@@ -883,6 +883,7 @@
             "succeeded",
             120,
             25,
+            0,
             None,
             Some(&sample_success_json(&child_id, "审查结论：主根因成立")),
         );
@@ -940,6 +941,7 @@
                 "succeeded",
                 45,
                 20,
+                0,
                 None,
                 Some(&sample_success_json(&child_clone, "后台完成的结论")),
             );
@@ -983,6 +985,7 @@
             "succeeded",
             80,
             15,
+            0,
             None,
             Some(&sample_success_json(&finished, "先完成的兄弟任务")),
         );
@@ -1031,8 +1034,9 @@
             "timed_out",
             45_000,
             0,
+            0,
             Some(ChildErrorKind::Timeout),
-            Some(&child_error_result_json(&child_id, "timed_out", &ChildErrorKind::Timeout, 45_000, 0, None)),
+            Some(&child_error_result_json(&child_id, "timed_out", &ChildErrorKind::Timeout, 45_000, 0, 0, None)),
         );
 
         // 主循环信箱轮询也能取到失败终态（此前失败结果会被静默丢弃）
@@ -1055,7 +1059,7 @@
         )));
 
         let child_id = begin_child_run(&state, "parent-run-corrupt", "session-corrupt", &workspace, "model-a", 0, "review", None).unwrap();
-        finish_child_run(&state, &child_id, "succeeded", 100, 10, None, Some("{not-valid-json"));
+        finish_child_run(&state, &child_id, "succeeded", 100, 10, 0, None, Some("{not-valid-json"));
         {
             let conn = state.0.lock().unwrap();
             conn.execute(
@@ -1192,6 +1196,120 @@
             [],
         ).unwrap();
         assert!(begin_child_run(&state, "p-run-3", "s-3", &workspace, "m", 0, "writer", Some(3)).is_ok(), "释放一个并发名额后应成功进入");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn resume_child_load_is_scoped_to_parent_session() {
+        // child_run_id 是会话内凭据：跨会话命中必须按"未找到"处理，
+        // 不能读取/复活其他会话的历史与工作区副本。
+        let base = std::env::temp_dir().join(format!("free-api-resume-scope-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        let child_id = begin_child_run(&state, "run-a", "session-a", &workspace, "model-a", 0, "review", None).unwrap();
+        finish_child_run(&state, &child_id, "succeeded", 10, 5, 0, None, Some("{}"));
+
+        assert!(load_child_run_for_resume(&state, &child_id, "session-a").is_ok(), "同会话可查");
+        assert!(load_child_run_for_resume(&state, &child_id, "session-b").is_err(), "跨会话命中同 id 必须按未找到处理");
+        assert!(load_child_run_for_resume(&state, "ghost-id", "session-a").is_err());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn targeted_wait_returns_early_when_targets_not_running() {
+        // 目标已交付消费、只剩无关任务在跑：定向等待必须立即返回空，
+        // 不能对着别人的 running 任务空等满超时。
+        let base = std::env::temp_dir().join(format!("free-api-wait-target-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        let done = begin_child_run(&state, "run-t", "sess-t", &workspace, "m", 0, "review", None).unwrap();
+        finish_child_run(&state, &done, "succeeded", 10, 5, 0, None, Some(&sample_success_json(&done, "ok")));
+        let _running = begin_child_run(&state, "run-t", "sess-t", &workspace, "m", 0, "worker", None).unwrap();
+
+        let first = crate::agent::job_engine::wait_for_jobs(&state, "run-t", Some(&[done.clone()]), 1, None).await.unwrap();
+        assert_eq!(first.len(), 1, "首次定向等待取回目标结果");
+
+        let started = std::time::Instant::now();
+        let again = crate::agent::job_engine::wait_for_jobs(&state, "run-t", Some(&[done.clone()]), 10, None).await.unwrap();
+        assert!(again.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(3), "目标已消费后定向等待必须早退，不得被无关 running 任务拖住");
+
+        let started2 = std::time::Instant::now();
+        let none = crate::agent::job_engine::wait_for_jobs(&state, "run-t", Some(&["ghost".to_string()]), 10, None).await.unwrap();
+        assert!(none.is_empty());
+        assert!(started2.elapsed() < Duration::from_secs(3), "不存在/已终态的目标必须立即返回");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn dispatch_output_projection_preserves_full_receipt_fields() {
+        // 投影收窄的是体积不是语义：kind/error_kind/objection_verdicts/scorecard
+        // 与 custom_schema 扩展字段都必须出现在模型可见输出里。
+        let raw = serde_json::json!({
+            "child_run_id": "c1",
+            "status": "succeeded",
+            "findings": [{"id":"F1","severity":"blocking","finality":"regardless","location":"a.rs:1","current":"c","why":"w","suggestion":"s","evidence_strength":"confirmed"}],
+            "confidence": "confirmed",
+            "evidence_refs": [],
+            "missing_evidence": [],
+            "duration_ms": 5,
+            "completion_tokens": 7,
+            "prompt_tokens": 42,
+            "error_kind": null,
+            "kind": "review",
+            "routing": "certain",
+            "withdrawn_findings": ["F0"],
+            "objection_verdicts": [{"finding_id":"F0","verdict":"withdraw","reason":"r"}],
+            "scorecard": {"correctness":80,"risk":70,"style":90,"test_coverage":null,"null_reason":"n/a","synthesized":false},
+            "cve_refs": ["CVE-2024-0001"]
+        });
+        let mut result: ChildReviewResult = serde_json::from_value(raw.clone()).unwrap();
+        result.raw_result_json = Some(raw.to_string());
+        let out = result_as_dispatch_output(result);
+        let view: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(view["scorecard"]["correctness"], 80);
+        assert_eq!(view["objection_verdicts"][0]["verdict"], "withdraw");
+        assert_eq!(view["prompt_tokens"], 42);
+        assert_eq!(view["kind"], "review");
+        assert_eq!(view["cve_refs"][0], "CVE-2024-0001", "custom_schema 扩展字段不丢");
+    }
+
+    #[test]
+    fn finish_child_run_persists_prompt_tokens_ledger() {
+        // 成本台账：prompt_tokens 与 completion_tokens 一样落 agent_child_runs 列，
+        // 多 Agent 的隐性成本大头在 prompt 侧（继承历史+证据包）。
+        let base = std::env::temp_dir().join(format!("free-api-child-ledger-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        let child_id = begin_child_run(&state, "run-ledger", "sess-ledger", &workspace, "m", 0, "review", None).unwrap();
+        finish_child_run(&state, &child_id, "succeeded", 10, 500, 12_000, None, Some("{}"));
+
+        let conn = state.0.lock().unwrap();
+        let (comp, prompt): (i64, i64) = conn
+            .query_row(
+                "SELECT completion_tokens, prompt_tokens FROM agent_child_runs WHERE id = ?1",
+                params![child_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(comp, 500);
+        assert_eq!(prompt, 12_000);
 
         let _ = std::fs::remove_dir_all(base);
     }
