@@ -87,6 +87,14 @@ pub(crate) fn execute_command_inner(
         return retrieval::dispatch_search(db, session_id, params, workspace_root);
     }
 
+    // 3.1 核心原生工具 C2: capability_search (内置/MCP/Skill/指令/角色卡统一能力检索；
+    //     目录截断后的发现层——模型不知确切名称时先搜这里再 next_tool_hint 精确加载)
+    if tool.eq_ignore_ascii_case("capability_search")
+        || tool.eq_ignore_ascii_case("search_capabilities")
+    {
+        return crate::agent::capability_index::search(db, registry, workspace_root, params);
+    }
+
     // 3.5 核心原生工具 D: web_search / web_fetch (互联网全网检索与网页正文 Markdown 提取)
     if tool.eq_ignore_ascii_case("web_search") || tool.eq_ignore_ascii_case("web_fetch") {
         return web_search::dispatch(tool, params);
@@ -350,6 +358,39 @@ pub(crate) fn take_mcp_durable_output(
     view.take().map(|v| {
         serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
     })
+}
+
+/// task_store 回查侧投影：持久化的是完整 sidecar，模型回读默认拿到可读形态。
+/// raw=true 时调用方跳过本投影，原始 JSON（含 _meta/二进制）仍可完整取证。
+pub(crate) fn project_mcp_durable_output(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if !is_mcp_raw_results_view(&value) {
+        return None;
+    }
+    let items = value.get("items")?.as_array()?;
+    let mut out = String::new();
+    out.push_str(&format!("【MCP 证据包投影：{} 次调用】\n", items.len()));
+    for (index, item) in items.iter().enumerate() {
+        let plugin = item.get("plugin").and_then(|v| v.as_str()).unwrap_or("?");
+        let tool = item.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
+        let args = item
+            .get("arguments")
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "{}".to_string());
+        out.push_str(&format!(
+            "── #{} {}/{} ──\n参数: {}\n",
+            index + 1,
+            plugin,
+            tool,
+            args
+        ));
+        if let Some(result) = item.get("result") {
+            out.push_str(&format_mcp_model_output(result));
+        }
+        out.push('\n');
+    }
+    out.push_str("（注：_meta、二进制负载与未投影字段仍完整保留在该 output_id 原始记录中；确需原始 JSON 时以参数 raw=true 重新回查。）");
+    Some(out)
 }
 
 fn mcp_block_descriptor(block: &serde_json::Value, index: usize) -> String {

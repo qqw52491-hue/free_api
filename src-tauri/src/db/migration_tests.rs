@@ -175,8 +175,14 @@
             "INSERT INTO chat_sessions (id, title, model_id, created_at, updated_at) VALUES ('alive-session', 'T', 'm1', '2026-01-01', '2026-01-01')",
             [],
         ).unwrap();
-        let cleaned =
-            cleanup_orphaned_session_data_at(&conn, Some(fake_tmp_root.as_path())).unwrap();
+        let fake_outputs_root = temp_dir.join("outputs");
+        std::fs::create_dir_all(fake_outputs_root.join("blobs")).unwrap();
+        let cleaned = cleanup_orphaned_session_data_at(
+            &conn,
+            Some(fake_tmp_root.as_path()),
+            Some(fake_outputs_root.as_path()),
+        )
+        .unwrap();
         assert!(cleaned >= 2);
         let orphan_child: i64 = conn.query_row("SELECT count(*) FROM agent_child_runs WHERE id='orphan-1'", [], |r| r.get(0)).unwrap();
         assert_eq!(orphan_child, 0);

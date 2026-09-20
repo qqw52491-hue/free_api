@@ -653,3 +653,35 @@
         assert!(take_mcp_durable_output(&mut view).is_none());
         assert_eq!(view.as_ref().unwrap(), &malformed);
     }
+
+    #[test]
+    fn mcp_durable_projection_renders_all_items_without_raw_leak() {
+        let secret_b64 = "U0VDUkVULUJMT0ItU0VOVElORUw=";
+        let sidecar = serde_json::to_string_pretty(&json!({
+            "kind": "mcp_raw_results",
+            "items": [
+                {
+                    "plugin": "p1", "tool": "t1", "arguments": {"a": 1},
+                    "result": {"content": [{"type": "text", "text": "第一块正文"}], "_meta": {"k": "META-SECRET"}}
+                },
+                {
+                    "plugin": "p2", "tool": "t2", "arguments": {"b": 2},
+                    "result": {"content": [{"type": "image", "data": secret_b64, "mimeType": "image/png"}]}
+                }
+            ]
+        }))
+        .unwrap();
+        let projected = project_mcp_durable_output(&sidecar).expect("sidecar 必须可投影");
+        assert!(projected.contains("2 次调用"));
+        assert!(projected.contains("p1/t1"));
+        assert!(projected.contains("p2/t2"));
+        assert!(projected.contains("第一块正文"));
+        assert!(projected.contains("image/png"));
+        assert!(!projected.contains(secret_b64));
+        assert!(!projected.contains("META-SECRET"));
+        assert!(projected.contains("raw=true") || projected.contains("raw: true"));
+
+        assert!(project_mcp_durable_output("普通文本输出").is_none());
+        assert!(project_mcp_durable_output("{\"kind\":\"other\"}").is_none());
+        assert!(project_mcp_durable_output("{broken json").is_none());
+    }

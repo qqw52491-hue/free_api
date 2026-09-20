@@ -35,27 +35,21 @@ const NO_PROGRESS_SUCCESS_THRESHOLD: u32 = 3;
 const NO_PROGRESS_FAILURE_THRESHOLD: u32 = 2;
 /// 有界状态：签名数超限后整体重置，检测是启发式而非审计账本。
 const MAX_TRACKED_SIGNATURES: usize = 64;
-/// 指纹只取输出头部：尾部的时间戳、耗时类噪声不应掩盖"结果相同"的事实。
-const FINGERPRINT_HEAD_CHARS: usize = 512;
 
+/// 输出指纹必须覆盖完整正文：只取头部会把「前缀相同、尾部状态不同」
+/// 的两个结果误判成相同证据（例如 status: running → completed 的轮询）。
+/// 提示文案声称"相同结果"，证据就必须真的相同。
 fn output_fingerprint(success: bool, output: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     success.hash(&mut hasher);
-    output
-        .chars()
-        .take(FINGERPRINT_HEAD_CHARS)
-        .collect::<String>()
-        .hash(&mut hasher);
+    output.hash(&mut hasher);
     hasher.finish()
 }
 
+/// 参数签名使用完整序列化：serde_json::Map 是 BTreeMap，to_string 自带
+/// 键序规范化；截断参数会把尾部不同的调用折叠成同一签名。
 fn action_signature(tool: &str, params: &Value) -> String {
-    let params_text = params.to_string();
-    format!(
-        "{} | {}",
-        tool,
-        params_text.chars().take(360).collect::<String>()
-    )
+    format!("{} | {}", tool, params.to_string())
 }
 
 impl NoProgressTracker {

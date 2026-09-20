@@ -4,6 +4,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 const DEFAULT_PAGE_SIZE: usize = 25;
@@ -65,12 +66,28 @@ pub fn dispatch(
     action: &str,
     params_value: &Value,
 ) -> DispatchResult {
+    let raw_requested = params_value
+        .get("raw")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || params_value
+            .get("projection")
+            .and_then(|v| v.as_str())
+            == Some("raw");
     let result = (|| -> Result<Value, String> {
         if action == "get_step_output" || action == "get_output" {
             let output_id = optional_string(params_value, "output_id")
                 .or_else(|| optional_string(params_value, "id"))
                 .ok_or_else(|| "task_store 参数缺少 'output_id'。\n💡 正确示例: {\"action\": \"get_step_output\", \"params\": {\"output_id\": \"out-xxx\"}}".to_string())?;
-            let text = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
+            let persisted = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
+            let projected = !raw_requested
+                && crate::agent::dispatcher::project_mcp_durable_output(&persisted).is_some();
+            let text = if projected {
+                crate::agent::dispatcher::project_mcp_durable_output(&persisted)
+                    .unwrap_or(persisted)
+            } else {
+                persisted
+            };
             let offset = params_value
                 .get("offset")
                 .and_then(|v| v.as_u64())
@@ -96,7 +113,12 @@ pub fn dispatch(
                 "total_chars": total,
                 "raw_output": sliced,
                 "has_more": offset.saturating_add(returned_chars) < total,
-                "notice": "工件回查按页返回。若仍需证据，请先用关键词、文件路径、函数/符号或 diff hunk 缩小范围，再请求下一个最小片段。"
+                "projected": projected,
+                "notice": if projected {
+                    "该 output_id 为 MCP 证据包，默认返回模型可读投影；二进制/_meta/未投影字段在原始记录中，传 raw: true 可取回完整 JSON。若仍需证据，请先用关键词、文件路径、函数/符号或 diff hunk 缩小范围，再请求下一个最小片段。"
+                } else {
+                    "工件回查按页返回。若仍需证据，请先用关键词、文件路径、函数/符号或 diff hunk 缩小范围，再请求下一个最小片段。"
+                }
             }));
         }
 
@@ -118,7 +140,15 @@ pub fn dispatch(
                 .unwrap_or(4) as usize;
             let context_lines = requested_context_lines.min(MAX_STEP_OUTPUT_CONTEXT_LINES);
             let max_matches = requested_max_matches.clamp(1, MAX_STEP_OUTPUT_MATCHES);
-            let text = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
+            let persisted = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
+            let projected = !raw_requested
+                && crate::agent::dispatcher::project_mcp_durable_output(&persisted).is_some();
+            let text = if projected {
+                crate::agent::dispatcher::project_mcp_durable_output(&persisted)
+                    .unwrap_or(persisted)
+            } else {
+                persisted
+            };
 
             let lines: Vec<&str> = text.lines().collect();
             let lower_pattern = pattern.to_lowercase();
@@ -150,7 +180,12 @@ pub fn dispatch(
                 "requested_max_matches": requested_max_matches,
                 "effective_max_matches": max_matches,
                 "matches": matches,
-                "notice": "搜索结果已受预算限制。若命中过多，请使用更具体的函数名、路径、错误码或 diff hunk 再次定向检索。"
+                "projected": projected,
+                "notice": if projected {
+                    "该 output_id 为 MCP 证据包，检索针对模型可读投影；二进制/_meta 不参与匹配，传 raw: true 可检索原始 JSON。"
+                } else {
+                    "搜索结果已受预算限制。若命中过多，请使用更具体的函数名、路径、错误码或 diff hunk 再次定向检索。"
+                }
             }));
         }
 
@@ -165,8 +200,9 @@ pub fn dispatch(
             "list_records" => list_records(&conn, session_id, params_value),
             "get_record" => get_record(&conn, session_id, params_value),
             "update_resource" => update_resource(&mut conn, session_id, params_value),
+            "mcp_dedup_stats" => mcp_dedup_stats(&conn, session_id),
             _ => Err(format!(
-                "task_store 不支持 action='{}'。可用动作：create_resource、upsert_records、list_resources、get_resource、list_records、get_record、update_resource, get_step_output, search_step_output",
+                "task_store 不支持 action='{}'。可用动作：create_resource、upsert_records、list_resources、get_resource、list_records、get_record、update_resource, get_step_output, search_step_output, mcp_dedup_stats",
                 action
             )),
         }
@@ -186,6 +222,85 @@ pub fn dispatch(
             route: format!("task_store:{}", action),
         },
     }
+}
+
+/// 会话级 MCP 去重收益统计：只读聚合 agent_run_steps 里的指纹字段，
+/// 不触碰步骤输出原文；用于观测折叠命中率与高频重复调用。
+fn mcp_dedup_stats(conn: &Connection, session_id: &str) -> Result<Value, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT rs.step_json FROM agent_run_steps rs
+             JOIN agent_run_traces t ON t.id = rs.run_id
+             WHERE t.session_id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![session_id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+
+    let mut evidence_steps = 0usize;
+    let mut folded_steps = 0usize;
+    let mut anchors: HashSet<String> = HashSet::new();
+    let mut per_call: HashMap<String, usize> = HashMap::new();
+    let mut folded_chars = 0usize;
+
+    for row in rows.flatten() {
+        let Ok(step) = serde_json::from_str::<Value>(&row) else {
+            continue;
+        };
+        let Some(call_hash) = step
+            .get("mcp_call_hash")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        evidence_steps += 1;
+        *per_call.entry(call_hash.to_string()).or_default() += 1;
+        if step
+            .get("duplicate_of_step")
+            .and_then(|v| v.as_i64())
+            .is_some()
+        {
+            folded_steps += 1;
+            folded_chars += step
+                .get("output")
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().count())
+                .unwrap_or(0);
+            if let Some(canonical) = step
+                .get("canonical_output_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                anchors.insert(canonical.to_string());
+            }
+        }
+    }
+
+    let mut repeated: Vec<(String, usize)> = per_call
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .collect();
+    repeated.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    repeated.truncate(10);
+
+    Ok(json!({
+        "session_id": session_id,
+        "mcp_evidence_steps": evidence_steps,
+        "folded_duplicate_steps": folded_steps,
+        "distinct_canonical_anchors": anchors.len(),
+        "folded_context_chars": folded_chars,
+        "repeat_call_groups": repeated.len(),
+        "top_repeated_calls": repeated
+            .iter()
+            .map(|(hash, count)| json!({
+                "call_hash_prefix": &hash[..hash.len().min(12)],
+                "count": count,
+            }))
+            .collect::<Vec<_>>(),
+        "note": "mcp_evidence_steps=产生完整证据 sidecar 的步数；folded_duplicate_steps=同参同结果且旧表示仍驻留上下文、被折叠为引用的步数；无法证明重复的调用一律全文放行。",
+    }))
 }
 
 fn create_resource(
@@ -822,5 +937,136 @@ mod tests {
         assert_eq!(page["records"][0]["key"], "p-2");
 
         assert!(list_records_page(&db, "session-b", "people", Some(0), Some(1)).is_err());
+    }
+
+    fn memory_db_with_step_logs() -> DbState {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_step_logs (
+                output_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                step_id INTEGER NOT NULL,
+                raw_output TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_run_traces (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL
+            );
+            CREATE TABLE agent_run_steps (
+                run_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                step_json TEXT NOT NULL,
+                PRIMARY KEY (run_id, seq)
+            );",
+        )
+        .unwrap();
+        DbState(Arc::new(Mutex::new(conn)))
+    }
+
+    #[test]
+    fn get_step_output_projects_mcp_sidecar_and_raw_opt_in() {
+        let db = memory_db_with_step_logs();
+        let sidecar = serde_json::to_string_pretty(
+            &crate::agent::dispatcher::mcp_raw_result_view(
+                "weather",
+                "get",
+                &json!({"q": "x"}),
+                &json!({
+                    "content": [
+                        {"type": "text", "text": "可见正文"},
+                        {"type": "image", "data": "QkFTRTY0U0VOVElORUw=", "mimeType": "image/png"}
+                    ],
+                    "_meta": {"token": "SECRET-META"},
+                }),
+            ),
+        )
+        .unwrap();
+        let oid = crate::agent::run_trace::save_step_output_with_meta(
+            &db, "s-proj", 0, "weather/get", "call", "succeeded", &sidecar,
+        )
+        .unwrap();
+
+        let res = dispatch(&db, "s-proj", "get_step_output", &json!({"output_id": oid}));
+        assert!(res.success);
+        let out: Value = serde_json::from_str(&res.stdout).unwrap();
+        assert_eq!(out["projected"], true);
+        let body = out["raw_output"].as_str().unwrap();
+        assert!(body.contains("可见正文"));
+        assert!(body.contains("weather/get"));
+        assert!(!body.contains("SECRET-META"));
+        assert!(!body.contains("QkFTRTY0U0VOVElORUw="));
+
+        let raw_res = dispatch(
+            &db,
+            "s-proj",
+            "get_step_output",
+            &json!({"output_id": oid, "raw": true}),
+        );
+        let raw_out: Value = serde_json::from_str(&raw_res.stdout).unwrap();
+        assert_eq!(raw_out["projected"], false);
+        assert!(raw_out["raw_output"].as_str().unwrap().contains("SECRET-META"));
+
+        let search = dispatch(
+            &db,
+            "s-proj",
+            "search_step_output",
+            &json!({"output_id": oid, "pattern": "SECRET-META"}),
+        );
+        let search_out: Value = serde_json::from_str(&search.stdout).unwrap();
+        assert_eq!(search_out["projected"], true);
+        assert_eq!(search_out["total_matches"], 0);
+
+        let plain_id = crate::agent::run_trace::save_step_output_with_meta(
+            &db, "s-proj", 1, "local_file", "read", "succeeded", "普通正文",
+        )
+        .unwrap();
+        let plain = dispatch(
+            &db,
+            "s-proj",
+            "get_step_output",
+            &json!({"output_id": plain_id}),
+        );
+        let plain_out: Value = serde_json::from_str(&plain.stdout).unwrap();
+        assert_eq!(plain_out["projected"], false);
+        assert_eq!(plain_out["raw_output"], "普通正文");
+    }
+
+    #[test]
+    fn mcp_dedup_stats_aggregates_trace_fields() {
+        let db = memory_db_with_step_logs();
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agent_run_traces (id, session_id) VALUES ('r1', 's-stat')",
+                [],
+            )
+            .unwrap();
+            let steps = [
+                json!({"id": 0, "output": "正文", "mcp_call_hash": "hash-a", "mcp_raw_output_hash": "r1", "mcp_model_output_hash": "m1", "output_id": "o1", "canonical_output_id": "o1"}),
+                json!({"id": 1, "output": "【MCP 重复结果已折叠】", "mcp_call_hash": "hash-a", "mcp_raw_output_hash": "r1", "mcp_model_output_hash": "m1", "output_id": "o2", "canonical_output_id": "o1", "duplicate_of_step": 0}),
+                json!({"id": 2, "output": "正文B", "mcp_call_hash": "hash-b", "mcp_raw_output_hash": "r2", "mcp_model_output_hash": "m2", "output_id": "o3"}),
+                json!({"id": 3, "output": "非 MCP 步"}),
+            ];
+            for (seq, step) in steps.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO agent_run_steps (run_id, seq, step_json) VALUES ('r1', ?1, ?2)",
+                    params![seq as i64, step.to_string()],
+                )
+                .unwrap();
+            }
+        }
+        let res = dispatch(&db, "s-stat", "mcp_dedup_stats", &json!({}));
+        assert!(res.success);
+        let out: Value = serde_json::from_str(&res.stdout).unwrap();
+        assert_eq!(out["mcp_evidence_steps"], 3);
+        assert_eq!(out["folded_duplicate_steps"], 1);
+        assert_eq!(out["distinct_canonical_anchors"], 1);
+        assert_eq!(out["repeat_call_groups"], 1);
+        assert_eq!(out["top_repeated_calls"][0]["count"], 2);
+
+        let other = dispatch(&db, "s-other", "mcp_dedup_stats", &json!({}));
+        let other_out: Value = serde_json::from_str(&other.stdout).unwrap();
+        assert_eq!(other_out["mcp_evidence_steps"], 0);
     }
 }

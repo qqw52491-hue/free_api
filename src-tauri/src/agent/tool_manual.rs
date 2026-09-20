@@ -27,20 +27,25 @@ pub async fn load_tool_manual_for_next_step(
     let is_explicit = instruction.next_tool_hint.is_some();
 
     for raw_target in targets {
-        let tool_key = raw_target
+        // dedup/命中键使用完整目标：支持 "插件名/工具名" 粒度——
+        // 大插件手册只列工具名清单，单工具 Schema 需要按完整目标取回。
+        let target = raw_target.trim().to_string();
+        // 文件手册/插件存在性检查仍用首段名（Skill 与插件名都不含 /）。
+        let tool_key = target
             .split('/')
             .next()
-            .unwrap_or(&raw_target)
+            .unwrap_or(target.as_str())
             .trim()
             .to_string();
         if tool_key.is_empty() || tool_key == "finish" || tool_key == "core" {
             continue;
         }
-        if context.has_tool_manual(&tool_key) {
+        if context.has_tool_manual(&target) {
             continue;
         }
 
         load_single_tool_manual(
+            &target,
             &tool_key,
             is_explicit,
             &resource_dir,
@@ -52,6 +57,7 @@ pub async fn load_tool_manual_for_next_step(
 }
 
 async fn load_single_tool_manual(
+    target: &str,
     tool_key: &str,
     is_explicit_hint: bool,
     resource_dir: &std::path::Path,
@@ -107,7 +113,9 @@ async fn load_single_tool_manual(
                 }
             }
             let registry = registry_state.lock().await;
-            tool_detail = registry.format_tool_detail(tool_key);
+            // 完整目标直通 format_tool_detail："plugin/tool" 取单工具 Schema，
+            // "plugin" 取插件级清单（内部已有超大插件截断）。
+            tool_detail = registry.format_tool_detail(target);
         } else if is_explicit_hint {
             // 显式 hint 未命中任何手册/Skill/插件时必须给模型可行动的纠错事实，
             // 否则它会重复猜测不存在的名字，永远拿不到工具契约。
@@ -120,7 +128,7 @@ async fn load_single_tool_manual(
                 .contains(&format!("miss:{}", tool_key))
             {
                 hint_miss_feedback = Some(format!(
-                    "【next_tool_hint 未命中: {}】不存在名为「{}」的内置工具手册、Skill 或 MCP 插件。当前已连接的 MCP 插件：{}。请改用上述确切插件名重新设置 next_tool_hint，或直接按 MCP 工具目录中的「插件名/工具名」格式调用。",
+                    "【next_tool_hint 未命中: {}】不存在名为「{}」的内置工具手册、Skill 或 MCP 插件。当前已连接的 MCP 插件：{}。可先用 capability_search(query: \"关键词\") 检索全部内置工具/MCP 工具/Skill/角色卡拿到确切 id，再设置 next_tool_hint 或直接按「插件名/工具名」格式调用。",
                     tool_key,
                     tool_key,
                     if plugin_names.is_empty() {
@@ -149,22 +157,22 @@ async fn load_single_tool_manual(
                 role: "user".to_string(),
                 content: json!(format!(
                     "【插件不可用提示】插件/工具 [{}] 当前处于离线或连接失败状态，暂无可用工具，请勿尝试调用该插件下的动作。",
-                    tool_key
+                    target
                 )),
             });
-            context.fetched_tools.insert(tool_key.to_string());
-            println!("⚠️ [Tool Manifest] 插件 [{}] 处于离线/连接失败状态，已注入不可用简短提示", tool_key);
+            context.fetched_tools.insert(target.to_string());
+            println!("⚠️ [Tool Manifest] 插件 [{}] 处于离线/连接失败状态，已注入不可用简短提示", target);
         } else {
             context.turns_history.push(ChatMessage {
                 role: "user".to_string(),
                 content: json!(format!(
                     "【工具/Skill 操作手册: {}】\n{}\n(已写入历史流，后续调用可直接参考此规格)",
-                    tool_key,
+                    target,
                     tool_detail.trim()
                 )),
             });
-            context.fetched_tools.insert(tool_key.to_string());
-            println!("📖 [Tool Manifest Cache] 首次引入工具手册 [{}] 并作为事件追加至历史流 (已标记 fetched)", tool_key);
+            context.fetched_tools.insert(target.to_string());
+            println!("📖 [Tool Manifest Cache] 首次引入工具手册 [{}] 并作为事件追加至历史流 (已标记 fetched)", target);
         }
     }
 }

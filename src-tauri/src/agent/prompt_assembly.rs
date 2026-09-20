@@ -34,10 +34,15 @@ pub fn load_base_prompt(app: &AppHandle) -> String {
 }
 
 #[derive(Clone, Copy)]
-struct BuiltinToolSpec {
-    name: &'static str,
-    summary: &'static str,
-    actions: &'static [&'static str],
+pub(crate) struct BuiltinToolSpec {
+    pub(crate) name: &'static str,
+    pub(crate) summary: &'static str,
+    pub(crate) actions: &'static [&'static str],
+}
+
+/// 能力索引（capability_search）索引内置工具用的只读视图。
+pub(crate) fn builtin_tool_specs() -> &'static [BuiltinToolSpec] {
+    BUILTIN_TOOL_SPECS
 }
 
 /// 内置工具的首轮最小可执行契约。
@@ -59,6 +64,13 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "get_step_output",
         summary: "分页取回已有工具输出的原文",
         actions: &["get_step_output(output_id: string, offset?: number, limit?: number)"],
+    },
+    BuiltinToolSpec {
+        name: "capability_search",
+        summary: "统一能力检索：在全部内置工具、MCP 工具、Skill、自定义指令与角色卡中按关键词找候选——当目录被截断或你不确定确切工具/Skill 名时先搜这里，拿到 id 后用 next_tool_hint 加载完整手册或 Schema",
+        actions: &[
+            "search(query: string, kind?: builtin|mcp|skill|instruction|role, namespace?: string [插件名/目录名], limit?: <=15)",
+        ],
     },
     BuiltinToolSpec {
         name: "search",

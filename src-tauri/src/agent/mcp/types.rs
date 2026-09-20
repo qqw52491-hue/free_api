@@ -54,6 +54,10 @@ pub struct McpToolDef {
     pub name: String,
     pub description: String,
     pub schema: serde_json::Value,
+    /// 服务端声明的标准 annotations（readOnlyHint/destructiveHint/idempotentHint/
+    /// openWorldHint 等）：仅作参考提示保存与展示，不作为宿主安全裁决依据。
+    #[serde(default)]
+    pub annotations: serde_json::Value,
 }
 
 pub type RequestEnvelope = (

@@ -251,6 +251,9 @@ async fn run_agent_main_loop_in_workspace_inner(
             for (p_name, names) in &per_plugin {
                 mcp_lines.push(format!("  * {}({} 个工具)", p_name, names.len()));
             }
+            mcp_lines.push(
+                "  * 不知确切工具名时先用 capability_search(query) 检索全部插件工具".to_string(),
+            );
         } else {
             for (p_name, names) in &per_plugin {
                 mcp_lines.push(format!("  * {}: {}", p_name, names.join(", ")));
@@ -342,8 +345,13 @@ async fn run_agent_main_loop_in_workspace_inner(
         if project_resources.is_empty() {
             manifest_text.push_str("- 当前项目暂无登记的受管数据文件。当在工作区生成重要产物或分析报告时，可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。\n");
         } else {
-            manifest_text.push_str(&format!("- 本项目已登记受管数据文件（共 {} 个，已建立资源句柄可直接读取分析）：\n", project_resources.len()));
-            for r in &project_resources {
+            // 资源清单有界：登记量大时尾部状态卡不逐条全列（该卡每轮重发），
+            // 完整清单经 `project_resources.list_resources()` 按需分页取回。
+            const MAX_MANIFEST_RESOURCES: usize = 20;
+            manifest_text.push_str(&format!("- 本项目已登记受管数据文件（共 {} 个，已建立资源句柄可直接读取分析{}）：\n",
+                project_resources.len(),
+                if project_resources.len() > MAX_MANIFEST_RESOURCES { "，下列仅前 20 个" } else { "" }));
+            for r in project_resources.iter().take(MAX_MANIFEST_RESOURCES) {
                 let size_kb = (r.size_bytes as f64) / 1024.0;
                 manifest_text.push_str(&format!(
                     "  - [{}] `{}` (resource_id: `{}`, 大小: {:.1} KB, 标签: \"{}\")\n",
@@ -353,6 +361,9 @@ async fn run_agent_main_loop_in_workspace_inner(
                     size_kb,
                     r.label
                 ));
+            }
+            if project_resources.len() > MAX_MANIFEST_RESOURCES {
+                manifest_text.push_str(&format!("  - …另有 {} 个未列出，调用 `project_resources.list_resources()` 取回完整清单。\n", project_resources.len() - MAX_MANIFEST_RESOURCES));
             }
             manifest_text.push_str("- 提示：调用 `project_resources.read_resource(resource_id)` 可直接读取上述文件内容；在工作区发现或生成新核心交付物时可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。\n");
         }
@@ -2426,9 +2437,11 @@ async fn run_agent_main_loop_in_workspace_inner(
             "failed"
         };
         let model_output_text = output_text.clone();
+        let mcp_evidence =
+            crate::agent::dispatcher::take_mcp_durable_output(&mut result.view);
+        let has_mcp_evidence = mcp_evidence.is_some();
         let durable_output_text =
-            crate::agent::dispatcher::take_mcp_durable_output(&mut result.view)
-                .unwrap_or_else(|| model_output_text.clone());
+            mcp_evidence.unwrap_or_else(|| model_output_text.clone());
         let output_id = crate::agent::run_trace::save_step_output_with_meta(
             state.inner(),
             &final_session_id,
@@ -2446,7 +2459,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         let dedup = deduplicate_mcp_output(
             state.inner(),
             &final_session_id,
-            &result.route,
+            has_mcp_evidence,
             &instruction,
             outcome_str,
             &durable_output_text,

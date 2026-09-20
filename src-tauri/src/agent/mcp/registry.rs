@@ -299,7 +299,7 @@ impl PluginRegistry {
 
         let mut lines: Vec<String> = Vec::new();
         lines
-            .push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\")".to_string());
+            .push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\" 或 \"插件名/工具名\"；不知确切名称时先用 capability_search 检索)".to_string());
         lines.extend(
             menu.trim_start_matches(
                 "\n## MCP 工具目录（动态能力卡缓存；如需完整参数规范请使用 next_tool_hint）",

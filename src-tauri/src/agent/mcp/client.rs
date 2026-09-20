@@ -594,10 +594,15 @@ impl McpClient {
                     .unwrap_or("")
                     .to_string();
                 let schema = t.get("inputSchema").cloned().unwrap_or(json!({}));
+                let annotations = t
+                    .get("annotations")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 Some(McpToolDef {
                     name,
                     description,
                     schema,
+                    annotations,
                 })
             })
             .collect();

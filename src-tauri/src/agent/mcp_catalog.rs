@@ -315,17 +315,56 @@ fn concise_schema_fields(schema: &serde_json::Value) -> String {
         .collect();
     let mut names = properties.keys().map(String::as_str).collect::<Vec<_>>();
     names.sort_unstable();
-    names
-        .into_iter()
-        .map(|name| {
-            if required.contains(name) {
-                format!("{}*", name)
-            } else {
-                format!("{}?", name)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+    // 菜单行字段上限：单工具声明几十个 properties 时不再撑爆目录行；
+    // 必填字段优先展示，可选字段按字母序补足，完整 Schema 经 next_tool_hint 取回。
+    const MAX_SCHEMA_FIELDS: usize = 12;
+    let total_fields = names.len();
+    let (required_names, optional_names): (Vec<&str>, Vec<&str>) = names
+        .iter()
+        .copied()
+        .partition(|name| required.contains(name));
+    let mut rendered: Vec<String> = required_names
+        .iter()
+        .map(|name| format!("{}*", name))
+        .collect();
+    rendered.extend(
+        optional_names
+            .iter()
+            .take(MAX_SCHEMA_FIELDS.saturating_sub(rendered.len()))
+            .map(|name| format!("{}?", name)),
+    );
+    if total_fields > rendered.len() {
+        rendered.push(format!("…+{}", total_fields - rendered.len()));
+    }
+    rendered.join(", ")
+}
+
+/// 服务端声明 hint 的紧凑旗标：仅作提示展示，不参与宿主安全/读写裁决。
+fn annotation_flags(tool: &McpToolDef) -> String {
+    let hint = |key: &str| {
+        tool.annotations
+            .get(key)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    };
+    let mut flags = Vec::new();
+    if hint("destructiveHint") {
+        flags.push("destructive");
+    }
+    if hint("readOnlyHint") {
+        flags.push("readOnly");
+    }
+    if hint("idempotentHint") {
+        flags.push("idempotent");
+    }
+    if hint("openWorldHint") {
+        flags.push("openWorld");
+    }
+    if flags.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", flags.join(","))
+    }
 }
 
 pub fn concise_menu(
@@ -336,8 +375,43 @@ pub fn concise_menu(
     // 严格按插件名称字母序排序，消除 HashMap 遍历导致的随机性与前缀缓存击穿
     sorted_items.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // 全局上限：每插件 25 条只防"单个大插件"，插件数量一多目录仍会线性膨胀。
+    // 总工具数超阈值时整体降级为插件级索引（与 Anthropic tool search /
+    // OpenAI defer_loading 的 namespace 常驻同构）：常驻只剩名称+数量+能力卡，
+    // 具体工具经 capability_search 检索或 next_tool_hint 点名取回。
+    const GLOBAL_MENU_TOOL_CAP: usize = 80;
+    let grand_total: usize = sorted_items.iter().map(|(_, t, _)| t.len()).sum();
+    if grand_total > GLOBAL_MENU_TOOL_CAP {
+        let mut lines = vec![format!(
+            "\n## MCP 工具目录（共 {} 个工具，超阈值降级为插件级索引；用 capability_search(query) 检索全部工具，或 next_tool_hint: \"插件名\"/\"插件名/工具名\" 取回详情）",
+            grand_total
+        )];
+        let mut valid_count = 0;
+        for (name, tools, card_opt) in sorted_items {
+            if tools.is_empty() {
+                continue;
+            }
+            valid_count += 1;
+            let card_line = card_opt
+                .as_deref()
+                .and_then(|c| c.lines().find(|l| !l.trim().is_empty()))
+                .map(|l| l.trim().chars().take(100).collect::<String>())
+                .unwrap_or_default();
+            if card_line.is_empty() {
+                lines.push(format!("- {}: {} 个工具", name, tools.len()));
+            } else {
+                lines.push(format!("- {}: {} 个工具 — {}", name, tools.len(), card_line));
+            }
+        }
+        if valid_count == 0 {
+            return String::new();
+        }
+        lines.push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}；参数契约经检索/点名取回后严格按服务声明字段调用。".to_string());
+        return lines.join("\n");
+    }
+
     let mut lines = vec![
-        "\n## MCP 工具目录（字段来自服务声明的 JSON Schema；* 为必填，? 为可选；需要约束细节请使用 next_tool_hint）"
+        "\n## MCP 工具目录（字段来自服务声明的 JSON Schema；* 为必填，? 为可选；[ ] 内为服务端声明 hint，仅供参考不作安全裁决；需要约束细节请使用 next_tool_hint）"
             .to_string(),
     ];
     let mut valid_count = 0;
@@ -358,7 +432,14 @@ pub fn concise_menu(
         let shown: Vec<_> = tools.iter().take(MAX_TOOLS_PER_PLUGIN_MENU).collect();
         let mut tool_summaries = shown
             .iter()
-            .map(|tool| format!("{}({})", tool.name, concise_schema_fields(&tool.schema)))
+            .map(|tool| {
+                format!(
+                    "{}({}){}",
+                    tool.name,
+                    concise_schema_fields(&tool.schema),
+                    annotation_flags(tool)
+                )
+            })
             .collect::<Vec<_>>();
         if total > shown.len() {
             tool_summaries.push(format!("…+{} 更多(next_tool_hint 取全量)", total - shown.len()));
@@ -398,6 +479,7 @@ mod tests {
                 name: "search".to_string(),
                 description: "search code and files".to_string(),
                 schema: json!({}),
+                annotations: json!({"readOnlyHint": true}),
             }],
         );
         assert_eq!(cached_tools(&cfg).unwrap().len(), 1);
@@ -435,11 +517,13 @@ mod tests {
                     },
                     "required": ["pattern"]
                 }),
+                annotations: json!({"readOnlyHint": true, "openWorldHint": true}),
             }],
             None,
         )]);
 
-        assert!(menu.contains("ripgrep_search(cwd?, glob?, pattern*)"));
+        // 必填字段优先展示（截断时必填项不被字母序挤掉）
+        assert!(menu.contains("ripgrep_search(pattern*, cwd?, glob?)[readOnly,openWorld]"));
         assert!(!menu.contains("path?"));
         assert!(!menu.contains("include?"));
     }
@@ -460,11 +544,53 @@ mod tests {
                     name: "do_something".to_string(),
                     description: "active tool".to_string(),
                     schema: json!({ "properties": {} }),
+                    annotations: serde_json::Value::Null,
                 }],
                 None,
             ),
         ]);
         assert!(!mixed_menu.contains("offline_plugin"));
         assert!(mixed_menu.contains("active_plugin: [do_something(无参数)]"));
+    }
+
+    #[test]
+    fn concise_menu_degrades_to_plugin_index_beyond_global_cap() {
+        // 总量 >80 工具时降级为插件级索引：名称+数量+能力卡，不逐条列工具
+        let make_tools = |count: usize| {
+            (0..count)
+                .map(|i| McpToolDef {
+                    name: format!("tool_{:02}", i),
+                    description: "d".to_string(),
+                    schema: json!({"properties": {"q": {"type": "string"}}}),
+                    annotations: serde_json::Value::Null,
+                })
+                .collect::<Vec<_>>()
+        };
+        let menu = concise_menu(vec![
+            ("alpha".to_string(), make_tools(30), Some("GitHub 仓库操作能力卡".to_string())),
+            ("beta".to_string(), make_tools(30), None),
+            ("gamma".to_string(), make_tools(30), None),
+        ]);
+        assert!(menu.contains("共 90 个工具"), "降级索引应显示总量: {}", menu);
+        assert!(menu.contains("- alpha: 30 个工具 — GitHub 仓库操作能力卡"));
+        assert!(menu.contains("- beta: 30 个工具"));
+        assert!(menu.contains("capability_search"));
+        assert!(!menu.contains("tool_00("), "降级后不应平铺工具名");
+    }
+
+    #[test]
+    fn concise_schema_fields_caps_and_prioritizes_required() {
+        let mut props = serde_json::Map::new();
+        // 15 个可选字段 + 1 个必填字段（字母序靠后，验证必填不被截掉）
+        for i in 0..15 {
+            props.insert(format!("opt_{:02}", i), json!({"type": "string"}));
+        }
+        props.insert("zzz_required".to_string(), json!({"type": "string"}));
+        let schema = json!({"properties": props, "required": ["zzz_required"]});
+        let rendered = concise_schema_fields(&schema);
+        assert!(rendered.contains("zzz_required*"), "必填字段必须保留: {}", rendered);
+        assert!(rendered.contains("…+"), "超限应显示剩余数: {}", rendered);
+        let shown = rendered.split(", ").count();
+        assert!(shown <= 13, "最多 12 字段 + 余量标记: {}", rendered);
     }
 }

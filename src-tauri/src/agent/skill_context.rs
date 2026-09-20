@@ -323,6 +323,56 @@ pub fn set_cached_skill_summary(name: &str, content: &str, summary: String) {
     }
 }
 
+/// Skill 目录行内摘要的统一长度上限（字符）。
+pub(crate) const MAX_SKILL_SUMMARY_CHARS: usize = 120;
+
+/// 纯规则摘要解析链：依次尝试 <summary> 标签、front-matter
+/// description、正文首行兜底。返回 (summary, declared)——declared=true
+/// 表示作者显式声明的摘要，不需要 LLM 升级。不触发 LLM——供目录渲染与
+/// 能力索引共用。
+fn rule_based_skill_summary(name: &str, content: &str) -> (String, bool) {
+    if let Some(tag_summary) = content.find("<summary>").and_then(|start| {
+        content
+            .find("</summary>")
+            .map(|end| content[start + 9..end].trim().to_string())
+    }) {
+        set_cached_skill_summary(name, content, tag_summary.clone());
+        return (tag_summary, true);
+    }
+    if let Some(front_matter_summary) = front_matter_description(content) {
+        set_cached_skill_summary(name, content, front_matter_summary.clone());
+        return (front_matter_summary, true);
+    }
+    let rule_summary = fallback_skill_summary(content, name);
+    set_cached_skill_summary(name, content, rule_summary.clone());
+    (rule_summary, false)
+}
+
+/// 能力索引（capability_search）专用：列出目录下全部 Skill 的
+/// (名称, 规则摘要)，无条数截断——索引的价值恰恰在于覆盖被目录
+/// MAX_SKILL_CATALOG_ENTRIES 截掉的尾部条目。
+pub(crate) fn skill_index_entries(skills_dir: &Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(skills_dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<_> = entries.flatten().collect();
+    files.sort_by_key(|e| e.file_name());
+    files
+        .iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                return None;
+            }
+            let name = path.file_stem()?.to_str()?.to_string();
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let summary = cached_skill_summary(&name, &content)
+                .unwrap_or_else(|| rule_based_skill_summary(&name, &content).0);
+            Some((name, summary))
+        })
+        .collect()
+}
+
 /// 扫描 skills 目录，生成轻量目录摘要（仅名称 + 智能能力卡描述）。
 /// excluded 列表中的 Skill 已固定编译进系统提示词，不再重复罗列。
 /// 完整手册内容通过 next_tool_hint: "skill_name" 按需加载到 active_tool_detail。
@@ -357,33 +407,23 @@ pub fn skill_catalog_string(
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let summary = if let Some(cached) = cached_skill_summary(&name, &content) {
             cached
-        } else if let Some(tag_summary) = content.find("<summary>").and_then(|start| {
-            content
-                .find("</summary>")
-                .map(|end| content[start + 9..end].trim().to_string())
-        }) {
-            set_cached_skill_summary(&name, &content, tag_summary.clone());
-            tag_summary
-        } else if let Some(front_matter_summary) = front_matter_description(&content) {
-            set_cached_skill_summary(&name, &content, front_matter_summary.clone());
-            front_matter_summary
         } else {
-            let rule_summary = fallback_skill_summary(&content, &name);
+            let (rule_summary, declared) = rule_based_skill_summary(&name, &content);
 
-            set_cached_skill_summary(&name, &content, rule_summary.clone());
-
-            // 若有模型配置，后台异步升级为 LLM 智能能力卡
-            if let Some(cfg) = model_config {
-                let name_clone = name.clone();
-                let content_clone = content.clone();
-                let cfg_clone = cfg.clone();
-                tokio::spawn(async move {
-                    if let Ok(llm_sum) =
-                        generate_llm_skill_summary(&name_clone, &content_clone, &cfg_clone).await
-                    {
-                        set_cached_skill_summary(&name_clone, &content_clone, llm_sum);
-                    }
-                });
+            // 仅兜底摘要升级为 LLM 智能能力卡；声明型摘要（tag/front-matter）已是作者意图
+            if !declared {
+                if let Some(cfg) = model_config {
+                    let name_clone = name.clone();
+                    let content_clone = content.clone();
+                    let cfg_clone = cfg.clone();
+                    tokio::spawn(async move {
+                        if let Ok(llm_sum) =
+                            generate_llm_skill_summary(&name_clone, &content_clone, &cfg_clone).await
+                        {
+                            set_cached_skill_summary(&name_clone, &content_clone, llm_sum);
+                        }
+                    });
+                }
             }
 
             rule_summary
@@ -392,11 +432,16 @@ pub fn skill_catalog_string(
             skipped += 1;
             continue;
         }
+        // 单条摘要统一限长：LLM/tag 摘要失控时目录行也不会无限膨胀
+        let summary: String = summary.chars().take(MAX_SKILL_SUMMARY_CHARS).collect();
         lines.push(format!("- {}: {}", name, summary));
     }
 
     if skipped > 0 {
-        lines.push(format!("- …（另有 {} 个未列出，按 next_tool_hint: \"skill_name\" 点名加载）", skipped));
+        lines.push(format!(
+            "- …（另有 {} 个未列出，可用 capability_search 检索全部 Skill，或按 next_tool_hint: \"skill_name\" 点名加载）",
+            skipped
+        ));
     }
 
     if lines.is_empty() {

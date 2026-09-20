@@ -7,47 +7,11 @@ use std::collections::HashMap;
 /// 待诊断样本积累误报/收益数据后再评估调整。
 pub const ZERO_HIT_NOTICE_THRESHOLD: u32 = 4;
 
-/// 检索工具族：只有明确"以查询为目的"的已声明工具才参与零命中统计。
-/// 读文件、列目录、执行命令等即使返回空也不计入（那是合法探查，不是检索偏航）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RetrievalFamily {
-    /// 内容搜索：关键词/正则在文件内容中检索
-    ContentSearch,
-    /// 文件名/路径搜索：按名称模式定位文件
-    FilenameSearch,
-    /// 网络搜索
-    WebSearch,
-}
-
-impl RetrievalFamily {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ContentSearch => "内容检索",
-            Self::FilenameSearch => "文件名检索",
-            Self::WebSearch => "网络检索",
-        }
-    }
-
-    /// 按工具 leaf 名归类（`插件名/工具名` 取斜杠后的叶子）。
-    /// 保守集合：不在清单内的工具一律不参与统计。
-    fn of_tool(tool_identity: &str) -> Option<Self> {
-        let leaf = tool_identity.rsplit('/').next().unwrap_or(tool_identity);
-        match leaf {
-            "search" | "ripgrep_search" | "ripgrep_search_files" | "grep" | "code_search" => {
-                Some(Self::ContentSearch)
-            }
-            "search_files" | "find_files" | "find" | "glob" => Some(Self::FilenameSearch),
-            "web_search" | "websearch" => Some(Self::WebSearch),
-            _ => None,
-        }
-    }
-}
-
-/// 检索结果是否为"成功执行但明确零命中"。
-/// 只认结构化信号：JSON 顶层计数字段为 0，或结果集字段为空数组。
-/// 无法解析为 JSON 的文本输出（格式不可知）宁可漏报也不误报，
-/// 失败输出不计入（失败走 no_progress 的既有路径）。
+/// 零命中判定只认输出形态证据，不按工具名归类：
+/// 任何工具只要返回"结果集字段为空数组"或"计数字段显式为 0"的 JSON 对象，
+/// 都视为一次可判定的空结果；无法解析为 JSON 或没有结果集字段的输出不臆测。
+/// 这样新接入的 MCP 检索工具无需在中央名单登记即可被覆盖，
+/// 而返回非结果集形态的输出（空文本、状态对象）天然不计入。
 fn is_explicit_zero_hit(output: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(output) else {
         return false;
@@ -143,8 +107,8 @@ struct ZeroHitState {
 ///
 /// 语义约束（与 no_progress 同一纪律）：
 /// - 只注入提示事实，不修改、不拒绝、不强制 finish；
-/// - 只统计已声明检索工具族 + 成功执行 + 结构化零命中；
-/// - 按 (工具族, 作用域) 归组独立计数，换族/换域即换组（变阵本身不被惩罚）；
+/// - 只统计成功执行 + 结构化零命中证据（结果集形态由输出自证，不查工具名）；
+/// - 按作用域归组独立计数，换域即换组（变阵本身不被惩罚）；
 /// - 任何一次命中清空全部状态；
 /// - 每组只提示一次，命中/换组后重新累计才可能再提示。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -164,19 +128,20 @@ pub struct ZeroHitTracker {
 
 impl ZeroHitTracker {
     /// 记录一次工具执行，返回应注入的宿主提示（若有）。
+    /// tool_identity 仅保留于签名与日志，不参与"是否检索工具"的判定——
+    /// 判定完全由输出的结果集形态承担。
     pub fn record(
         &mut self,
-        tool_identity: &str,
+        _tool_identity: &str,
         params: &Value,
         success: bool,
         output: &str,
     ) -> Option<String> {
-        let family = RetrievalFamily::of_tool(tool_identity)?;
         if !success {
             // 失败不计入：失败重试由 no_progress 按"相同签名重复"覆盖
             return None;
         }
-        let group_key = format!("{:?}/{}", family, scope_key(params));
+        let group_key = scope_key(params);
 
         if is_explicit_hit(output) {
             // 任何命中都说明调查在推进：清空全部组的零命中状态
@@ -204,9 +169,8 @@ impl ZeroHitTracker {
             state.notice_issued = true;
             self.group_notice_fired_in_streak = true;
             return Some(format!(
-                "【检索零命中提示】连续 {} 次在当前作用域内以{}未命中。请先检查关键词、目录范围、目标是否存在或是否属于另一个系统；若已有两个独立方向均未命中，可说明证据边界或向用户澄清前提。不要只替换近义词继续盲搜。",
-                ZERO_HIT_NOTICE_THRESHOLD,
-                family.as_str()
+                "【检索零命中提示】连续 {} 次在当前作用域内查询结果为空。请先检查关键词、目录范围、目标是否存在或是否属于另一个系统；若已有两个独立方向均未命中，可说明证据边界或向用户澄清前提。不要只替换近义词继续盲搜。",
+                ZERO_HIT_NOTICE_THRESHOLD
             ));
         }
         if self.global_streak.consecutive_zero_hits >= ZERO_HIT_NOTICE_THRESHOLD
@@ -282,7 +246,7 @@ mod tests {
         for _ in 0..ZERO_HIT_NOTICE_THRESHOLD - 1 {
             tracker.record("p/search", &params, true, zero_output());
         }
-        // 另一族同作用域也积累了部分零命中
+        // 另一种结果集形态同作用域也积累了部分零命中
         tracker.record("p/search_files", &other, true, r#"{"files":[]}"#);
 
         // 一次命中清空全部组
@@ -303,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn switching_scope_or_family_isolated_from_each_other() {
+    fn switching_scope_isolated_from_each_other() {
         let mut tracker = ZeroHitTracker::default();
         let repo_a = json!({"query": "q", "path": "/repo_a"});
         let repo_b = json!({"query": "q", "path": "/repo_b"});
@@ -328,19 +292,15 @@ mod tests {
         assert!(scoped.is_some(), "A 组内达阈值仍应发作用域提示");
         assert!(scoped.unwrap().contains("作用域"));
 
-        // 换工具族（内容→文件名）：新组从零计数，不继承旧族计数
+        // 换工具但同作用域：组键只按作用域归组，不同工具的空结果集累计同组
         let mut tracker2 = ZeroHitTracker::default();
         for _ in 0..ZERO_HIT_NOTICE_THRESHOLD {
             tracker2.record("p/search", &repo_a, true, zero_output());
         }
-        for _ in 0..ZERO_HIT_NOTICE_THRESHOLD - 1 {
-            assert!(
-                tracker2
-                    .record("p/search_files", &repo_a, true, r#"{"files":[]}"#)
-                    .is_none(),
-                "文件名族是新组：阈值内不应提示"
-            );
-        }
+        // 另一工具同域继续空结果：组内 notice 已发不再重发
+        assert!(tracker2
+            .record("p/search_files", &repo_a, true, r#"{"files":[]}"#)
+            .is_none());
     }
 
     #[test]
@@ -371,24 +331,24 @@ mod tests {
     }
 
     #[test]
-    fn non_retrieval_tools_are_ignored_entirely() {
+    fn non_result_set_outputs_are_ignored_regardless_of_tool() {
         let mut tracker = ZeroHitTracker::default();
         let params = json!({"path": "/repo"});
-        // 读文件/列目录/执行命令即使输出为空也不计入（合法探查）
+        // 判定只看输出形态：非结果集形态（空文本、状态对象、非 JSON）一律不计入
         for _ in 0..10 {
             assert!(tracker
                 .record("p/read_text_file", &params, true, "")
                 .is_none());
-            assert!(tracker
-                .record("p/list_directory", &params, true, r#"{"items":[]}"#)
-                .is_none());
             assert!(tracker.record("p/shell_exec", &params, true, "").is_none());
-            // 分页/继续读取（read 类）不属于检索族
             assert!(tracker
-                .record("p/read_multiple_files", &params, true, r#"{"results":[]}"#)
+                .record("p/anything", &params, true, r#"{"status":"ok"}"#)
                 .is_none());
         }
         assert!(tracker.states.is_empty());
+
+        // 反过来：任何工具返回"结果集为空"的形态都被计入——不查工具名
+        tracker.record("p/list_directory", &params, true, r#"{"items":[]}"#);
+        assert_eq!(tracker.states.len(), 1);
     }
 
     #[test]

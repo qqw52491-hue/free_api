@@ -161,10 +161,65 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
 /// 超过该字符阈值（约 2,000 字符 / ~500 Tokens）时自动溢出落盘到本地独立文件
 pub const DISK_SPILL_THRESHOLD_CHARS: usize = 2_000;
 
+/// 溢出内容按 SHA-256 内容寻址：同一份大输出（如重复 MCP 证据包）物理上只写一次，
+/// 多个 output_id 行共享同一 blob。marker 形态 `[[cas_blob:<hash>]]`，
+/// 文件落在 outputs/blobs/<hash>.log；删除归属由 agent_step_logs 行引用计数裁决。
+pub(crate) const CAS_BLOB_PREFIX: &str = "[[cas_blob:";
+pub(crate) const CAS_BLOB_SUFFIX: &str = "]]";
+
 pub fn get_outputs_dir() -> std::path::PathBuf {
     dirs_next::data_dir()
         .map(|d| d.join("free-api-chat").join("outputs"))
         .unwrap_or_else(|| std::path::PathBuf::from("./data/outputs"))
+}
+
+pub(crate) fn cas_blob_path(outputs_dir: &std::path::Path, hash: &str) -> std::path::PathBuf {
+    outputs_dir.join("blobs").join(format!("{}.log", hash))
+}
+
+fn is_valid_blob_hash(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// 该 blob 是否仍被任何会话的 step_logs 行引用（跨会话共享判定）。
+/// 查询失败宁可视为仍被引用，绝不误删共享证据。
+pub(crate) fn cas_blob_still_referenced(conn: &rusqlite::Connection, hash: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_step_logs WHERE raw_output = ?1)",
+        params![format!("{}{}{}", CAS_BLOB_PREFIX, hash, CAS_BLOB_SUFFIX)],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|v| v == 1)
+    .unwrap_or(true)
+}
+
+/// 孤儿 blob 清扫：outputs/blobs/ 下没有任何 step_logs 行引用的文件物理删除。
+/// 供会话级联删除与孤儿数据清理调用；目录缺失/读取失败一律静默跳过。
+pub(crate) fn sweep_orphan_output_blobs(
+    conn: &rusqlite::Connection,
+    outputs_dir: &std::path::Path,
+) -> usize {
+    let blobs_dir = outputs_dir.join("blobs");
+    let Ok(entries) = std::fs::read_dir(&blobs_dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("log") {
+            continue;
+        }
+        let Some(hash) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !is_valid_blob_hash(hash) || cas_blob_still_referenced(conn, hash) {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// 落库到步骤快照的 thinking 上限：reasoning 全文仅作取证留痕，超长截断保护快照体积。
@@ -189,10 +244,19 @@ pub fn save_step_output_with_meta(
 
     let sqlite_content = if raw_output.chars().count() > DISK_SPILL_THRESHOLD_CHARS {
         let outputs_dir = get_outputs_dir();
-        let _ = std::fs::create_dir_all(&outputs_dir);
-        let log_file = outputs_dir.join(format!("{}.log", output_id));
-        if std::fs::write(&log_file, raw_output).is_ok() {
-            format!("[[spilled_to_disk:{}]]", log_file.display())
+        let blobs_dir = outputs_dir.join("blobs");
+        let hash = crate::agent::context::determinism::sha256_hex(raw_output);
+        let blob_file = cas_blob_path(&outputs_dir, &hash);
+        // 写一次共享多次：先写临时文件再原子 rename，崩溃不会留下半截 blob
+        // 被后续 exists() 短路当成完好证据。
+        let persisted = blob_file.exists() || {
+            let tmp_file = blobs_dir.join(format!(".{}.tmp-{}", hash, uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&blobs_dir).is_ok()
+                && std::fs::write(&tmp_file, raw_output).is_ok()
+                && std::fs::rename(&tmp_file, &blob_file).is_ok()
+        };
+        if persisted {
+            format!("{}{}{}", CAS_BLOB_PREFIX, hash, CAS_BLOB_SUFFIX)
         } else {
             raw_output.to_string()
         }
@@ -277,6 +341,23 @@ pub fn get_step_output(db: &DbState, session_id: &str, output_id: &str) -> Resul
             format!(
                 "工件原文不可用 (output_id: {}, path: {}): {}",
                 output_id, path_str, error
+            )
+        });
+    }
+    if let Some(hash) = raw
+        .strip_prefix(CAS_BLOB_PREFIX)
+        .and_then(|value| value.strip_suffix(CAS_BLOB_SUFFIX))
+    {
+        if !is_valid_blob_hash(hash) {
+            return Err(format!("工件 blob 引用非法 (output_id: {})", output_id));
+        }
+        let path = cas_blob_path(&get_outputs_dir(), hash);
+        return std::fs::read_to_string(&path).map_err(|error| {
+            format!(
+                "工件 blob 不可用 (output_id: {}, path: {}): {}",
+                output_id,
+                path.display(),
+                error
             )
         });
     }
@@ -409,7 +490,8 @@ mod tests {
             &spilled_body,
         )
         .unwrap();
-        let spill_path: String = {
+        let spilled_hash = crate::agent::context::determinism::sha256_hex(&spilled_body);
+        let blob_path = {
             let conn = db.0.lock().unwrap();
             let raw: String = conn
                 .query_row(
@@ -418,25 +500,65 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            raw.strip_prefix("[[spilled_to_disk:")
-                .and_then(|v| v.strip_suffix("]]"))
-                .expect("超长正文必须落盘为 spill 文件")
-                .to_string()
+            let hash = raw
+                .strip_prefix(CAS_BLOB_PREFIX)
+                .and_then(|v| v.strip_suffix(CAS_BLOB_SUFFIX))
+                .expect("超长正文必须落盘为 cas blob");
+            assert_eq!(hash, spilled_hash);
+            cas_blob_path(&get_outputs_dir(), hash)
         };
-        let spilled_hash = crate::agent::context::determinism::sha256_hex(&spilled_body);
         assert!(step_output_matches_hash(
             &db,
             session,
             &spilled_id,
             &spilled_hash
         ));
-        std::fs::remove_file(&spill_path).unwrap();
+        std::fs::remove_file(&blob_path).unwrap();
         assert!(!step_output_matches_hash(
             &db,
             session,
             &spilled_id,
             &spilled_hash
         ));
+    }
+
+    #[test]
+    fn cas_blob_shares_one_file_across_duplicate_outputs() {
+        let db = step_output_test_db();
+        let session = "sess-cas";
+        let body = "重复的大正文\n".repeat(DISK_SPILL_THRESHOLD_CHARS);
+        let first_id = save_step_output_with_meta(
+            &db, session, 0, "mcp", "call", "succeeded", &body,
+        )
+        .unwrap();
+        let second_id = save_step_output_with_meta(
+            &db, session, 1, "mcp", "call", "succeeded", &body,
+        )
+        .unwrap();
+        let hash = crate::agent::context::determinism::sha256_hex(&body);
+        let blob = cas_blob_path(&get_outputs_dir(), &hash);
+        assert!(blob.exists());
+        assert_eq!(get_step_output(&db, session, &first_id).unwrap(), body);
+        assert_eq!(get_step_output(&db, session, &second_id).unwrap(), body);
+
+        // 删除一个引用后 blob 仍被另一行引用；全部行删除后才可回收
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute(
+                "DELETE FROM agent_step_logs WHERE output_id=?1",
+                params![first_id],
+            )
+            .unwrap();
+            assert!(cas_blob_still_referenced(&conn, &hash));
+            conn.execute(
+                "DELETE FROM agent_step_logs WHERE output_id=?1",
+                params![second_id],
+            )
+            .unwrap();
+            assert!(!cas_blob_still_referenced(&conn, &hash));
+            assert_eq!(sweep_orphan_output_blobs(&conn, &get_outputs_dir()), 1);
+        }
+        assert!(!blob.exists());
     }
 
     #[test]

@@ -311,11 +311,14 @@ fn canonical_output_resident_in_history(
     })
 }
 
+/// has_mcp_evidence = 本步 DispatchResult.view 被识别为 mcp_raw_results sidecar。
+/// 证据驱动准入：直调插件、commands 流水线、plan_tree 一视同仁；
+/// 无 sidecar 的步骤（含 MCP 传输层异常）不参与折叠判定。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn deduplicate_mcp_output(
     db: &DbState,
     session_id: &str,
-    route: &str,
+    has_mcp_evidence: bool,
     instruction: &AgentInstruction,
     outcome: &str,
     durable_output: &str,
@@ -332,7 +335,7 @@ pub(crate) fn deduplicate_mcp_output(
         canonical_output_id: None,
         duplicate_of_step: None,
     };
-    if !route.starts_with("plugin:") {
+    if !has_mcp_evidence {
         return full_result(None, None, None);
     }
     let call_doc = json!({
@@ -517,6 +520,34 @@ mod tests {
         step
     }
 
+    fn mcp_prior_step_for_instruction(
+        instruction: &AgentInstruction,
+        step_id: i64,
+        status: &str,
+        durable: &str,
+        model: &str,
+        output_id: &str,
+    ) -> serde_json::Value {
+        let call_doc = json!({
+            "tool": instruction.get_tool(),
+            "action": instruction.get_action(),
+            "params": instruction.get_params(),
+        });
+        let mut step = prior_step_json(
+            step_id,
+            instruction.get_params(),
+            status,
+            model,
+            output_id,
+        );
+        step["tool"] = json!(instruction.get_tool());
+        step["action"] = json!(instruction.get_action());
+        step["mcp_call_hash"] = json!(context::determinism::sha256_hex(&call_doc.to_string()));
+        step["mcp_raw_output_hash"] = json!(context::determinism::sha256_hex(durable));
+        step["mcp_model_output_hash"] = json!(context::determinism::sha256_hex(model));
+        step
+    }
+
     fn persist_output(db: &DbState, step_id: usize, body: &str) -> String {
         crate::agent::run_trace::save_step_output_with_meta(
             db,
@@ -573,7 +604,7 @@ mod tests {
         deduplicate_mcp_output(
             db,
             "s1",
-            "plugin:weather/get",
+            true,
             instruction,
             "succeeded",
             durable,
@@ -604,7 +635,7 @@ mod tests {
         let dedup = deduplicate_mcp_output(
             &db,
             "s1",
-            "core:local_file",
+            false,
             &instruction,
             "succeeded",
             "正文",
@@ -1051,11 +1082,10 @@ mod tests {
     fn mcp_output_dedup_call_fingerprint_normalizes_key_order() {
         let db = mcp_dedup_test_db();
         let mut ctx = context::SandwichContext::new("SYS".to_string(), "GOAL".to_string());
-        let route = "plugin:weather/get";
         let a = deduplicate_mcp_output(
             &db,
             "s1",
-            route,
+            true,
             &mcp_instruction(json!({"a": 1, "b": 2})),
             "succeeded",
             "x",
@@ -1067,7 +1097,7 @@ mod tests {
         let b = deduplicate_mcp_output(
             &db,
             "s1",
-            route,
+            true,
             &mcp_instruction(json!({"b": 2, "a": 1})),
             "succeeded",
             "x",
@@ -1081,7 +1111,7 @@ mod tests {
         let c = deduplicate_mcp_output(
             &db,
             "s1",
-            route,
+            true,
             &mcp_instruction(json!({"k": [1, 2]})),
             "succeeded",
             "x",
@@ -1093,7 +1123,7 @@ mod tests {
         let d = deduplicate_mcp_output(
             &db,
             "s1",
-            route,
+            true,
             &mcp_instruction(json!({"k": [2, 1]})),
             "succeeded",
             "x",
@@ -1223,5 +1253,103 @@ mod tests {
         assert!(message_with_output_id(&ctx, &current_id)
             .unwrap()
             .contains(body));
+    }
+
+    #[test]
+    fn mcp_output_dedup_pipeline_evidence_folds_when_identical() {
+        let db = mcp_dedup_test_db();
+        let instruction: AgentInstruction = serde_json::from_value(json!({
+            "commands": [
+                {"tool": "remote-hub/read_text_file", "command": {"path": "a.rs"}},
+                {"tool": "remote-hub/ripgrep_search", "command": {"pattern": "fn main"}}
+            ]
+        }))
+        .unwrap();
+        let model = "\n[Step 1 Result]: 文件内容A\n[Step 2 Result]: 命中B";
+        let sidecar = serde_json::to_string_pretty(
+            &crate::agent::dispatcher::mcp_raw_results_view(vec![
+                crate::agent::dispatcher::mcp_raw_result_view(
+                    "remote-hub",
+                    "read_text_file",
+                    &json!({"path": "a.rs"}),
+                    &json!({"content": [{"type": "text", "text": "文件内容A"}]}),
+                )["items"][0]
+                    .clone(),
+                crate::agent::dispatcher::mcp_raw_result_view(
+                    "remote-hub",
+                    "ripgrep_search",
+                    &json!({"pattern": "fn main"}),
+                    &json!({"content": [{"type": "text", "text": "命中B"}]}),
+                )["items"][0]
+                    .clone(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let canonical_id = persist_output(&db, 0, &sidecar);
+        let current_id = persist_output(&db, 1, &sidecar);
+        let mut ctx = ctx_after_add_step(
+            vec![("user", exec_msg(&canonical_id, model))],
+            &instruction,
+            model,
+            &current_id,
+        );
+        let prior = vec![mcp_prior_step_for_instruction(
+            &instruction,
+            3,
+            "succeeded",
+            &sidecar,
+            model,
+            &canonical_id,
+        )];
+        let dedup = run_dedup(&db, &instruction, &sidecar, model, &prior, &mut ctx, &current_id);
+        assert!(dedup.displayed_output.contains("【MCP 重复结果已折叠】"));
+        assert_eq!(
+            dedup.canonical_output_id.as_deref(),
+            Some(canonical_id.as_str())
+        );
+        assert_eq!(dedup.duplicate_of_step, Some(3));
+
+        let other_instruction: AgentInstruction = serde_json::from_value(json!({
+            "commands": [{"tool": "remote-hub/read_text_file", "command": {"path": "b.rs"}}]
+        }))
+        .unwrap();
+        let dedup = deduplicate_mcp_output(
+            &db,
+            "s1",
+            true,
+            &other_instruction,
+            "succeeded",
+            &sidecar,
+            model,
+            &prior,
+            &mut ctx,
+            &current_id,
+        );
+        assert_eq!(dedup.displayed_output, model);
+        assert!(dedup.canonical_output_id.is_none());
+    }
+
+    #[test]
+    fn mcp_output_dedup_without_evidence_sidecar_stays_inert() {
+        let db = mcp_dedup_test_db();
+        let instruction = mcp_instruction(json!({"q": "x"}));
+        let mut ctx = ctx_after_add_step(Vec::new(), &instruction, "传输层超时", "cur-1");
+        let dedup = deduplicate_mcp_output(
+            &db,
+            "s1",
+            false,
+            &instruction,
+            "failed",
+            "传输层超时",
+            "传输层超时",
+            &[],
+            &mut ctx,
+            "cur-1",
+        );
+        assert_eq!(dedup.displayed_output, "传输层超时");
+        assert!(dedup.call_hash.is_none());
+        assert!(dedup.raw_output_hash.is_none());
+        assert!(dedup.model_output_hash.is_none());
     }
 }

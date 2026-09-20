@@ -40,7 +40,24 @@ pub fn delete_session_completely(
         return Ok(());
     }
 
-    // 1. 清理该会话溢出落盘到本地 outputs/ 的 .log 大文本文件
+    // 1. 清理该会话溢出落盘到本地 outputs/ 的 .log 大文本文件；
+    //    cas_blob 是跨会话共享的内容寻址证据，先记下哈希，待本会话行删除后
+    //    再按"无剩余引用"逐个裁决（别的会话仍引用就保留）。
+    let mut cas_hashes = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT raw_output FROM agent_step_logs WHERE session_id=?1 AND raw_output LIKE '[[cas_blob:%'"
+    ) {
+        if let Ok(rows) = stmt.query_map(rusqlite::params![id], |row| row.get::<_, String>(0)) {
+            for raw in rows.flatten() {
+                if let Some(hash) = raw
+                    .strip_prefix(crate::agent::run_trace::CAS_BLOB_PREFIX)
+                    .and_then(|s| s.strip_suffix(crate::agent::run_trace::CAS_BLOB_SUFFIX))
+                {
+                    cas_hashes.push(hash.to_string());
+                }
+            }
+        }
+    }
     if let Ok(mut stmt) = conn.prepare(
         "SELECT raw_output FROM agent_step_logs WHERE session_id=?1 AND raw_output LIKE '[[spilled_to_disk:%'"
     ) {
@@ -113,6 +130,21 @@ pub fn delete_session_completely(
     conn.execute("DELETE FROM chat_sessions WHERE id=?1", rusqlite::params![id])
         .map_err(|e| format!("删除会话主记录失败: {e}"))?;
 
+    // 3.5 本会话的 step_logs 行已删除，此刻裁决 cas_blob 是否还有其它会话引用。
+    // outputs 根目录沿用既有注入约定（生产=app_data_dir/free-api-chat，测试=临时目录）。
+    if !cas_hashes.is_empty() {
+        let outputs_dir = app_data_dir
+            .map(|d| d.join("free-api-chat").join("outputs"))
+            .unwrap_or_else(crate::agent::run_trace::get_outputs_dir);
+        for hash in cas_hashes {
+            if !crate::agent::run_trace::cas_blob_still_referenced(conn, &hash) {
+                let _ = std::fs::remove_file(
+                    crate::agent::run_trace::cas_blob_path(&outputs_dir, &hash),
+                );
+            }
+        }
+    }
+
     // 4. 清理内存中该会话的 local_file 乐观并发基线缓存（防止孤儿会话内存残留）
     crate::agent::tools::local_file::cleanup_session_baselines(id);
 
@@ -124,14 +156,17 @@ pub fn cleanup_orphaned_session_data(conn: &Connection) -> Result<usize> {
     // 生产路径：真实数据目录下的 tmp 根
     let tmp_root =
         dirs_next::data_dir().map(|d| d.join("free-api-chat").join("tmp"));
-    cleanup_orphaned_session_data_at(conn, tmp_root.as_deref())
+    let outputs_dir = crate::agent::run_trace::get_outputs_dir();
+    cleanup_orphaned_session_data_at(conn, tmp_root.as_deref(), Some(outputs_dir.as_path()))
 }
 
 /// 可注入 tmp 根的实现——测试必须注入临时目录，
 /// 否则「测试 DB 为空 → 真实 tmp 目录全员孤儿」会误删真实产物文件。
+/// outputs_dir 同理：传 None 跳过孤儿 blob 清扫，绝不让测试碰真实数据目录。
 pub(crate) fn cleanup_orphaned_session_data_at(
     conn: &Connection,
     tmp_root: Option<&std::path::Path>,
+    outputs_dir: Option<&std::path::Path>,
 ) -> Result<usize> {
     let mut total_cleaned = 0;
 
@@ -176,6 +211,13 @@ pub(crate) fn cleanup_orphaned_session_data_at(
         if let Ok(affected) = conn.execute(sql, []) {
             total_cleaned += affected;
         }
+    }
+
+    // 孤儿 step_logs 行删除后，其持有的 cas_blob 引用随之消失：
+    // 对 outputs/blobs 做一次引用计数清扫，回收不再被任何会话引用的证据文件。
+    if let Some(outputs_root) = outputs_dir {
+        total_cleaned +=
+            crate::agent::run_trace::sweep_orphan_output_blobs(conn, outputs_root);
     }
 
     // 孤儿会话 tmp 目录清扫：tmp/<sid> 子目录若无对应 chat_sessions 行，
