@@ -153,19 +153,33 @@ fn collect_entries(
     entries
 }
 
+fn is_cjk_char(c: char) -> bool {
+    matches!(c as u32,
+        0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x20000..=0x2A6DF | 0xF900..=0xFAFF)
+}
+
+/// 查询分词：字母数字/_// 为 token 字符。
+/// CJK 无空格分词——整串做子串匹配之外，再切二元组（bigram），
+/// 使「文件检索」能靠公共片段命中描述为「文件搜索」的条目。
 fn tokenize(query: &str) -> Vec<String> {
-    query
-        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '/' && !c.is_ascii())
-        .filter(|s| !s.is_empty())
-        .flat_map(|part| {
-            // CJK 串无空格分词：整段作为 token 参与子串匹配，同时 ASCII 部分拆开
-            part.to_lowercase()
-                .split(|c: char| c.is_ascii() && !c.is_alphanumeric() && c != '_' && c != '/')
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        })
-        .filter(|s| !s.is_empty())
-        .collect()
+    let mut tokens: Vec<String> = Vec::new();
+    for raw in query.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '/')) {
+        if raw.is_empty() {
+            continue;
+        }
+        let lower = raw.to_lowercase();
+        tokens.push(lower.clone());
+        let chars: Vec<char> = lower.chars().collect();
+        if chars.len() > 2 && chars.iter().any(|c| is_cjk_char(*c)) {
+            for pair in chars.windows(2) {
+                let bigram: String = pair.iter().collect();
+                if !tokens.contains(&bigram) {
+                    tokens.push(bigram);
+                }
+            }
+        }
+    }
+    tokens
 }
 
 fn score_entry(entry: &CapabilityEntry, tokens: &[String], whole_query: &str) -> i64 {
@@ -179,19 +193,23 @@ fn score_entry(entry: &CapabilityEntry, tokens: &[String], whole_query: &str) ->
         score += 60;
     }
     for token in tokens {
+        // 短 token（CJK 二元组、两字符缩写）只给部分权重：
+        // 它们用于召回而非定名，防止碎片命中刷掉真正的整词匹配。
+        let strong = token.chars().count() > 2;
+        let (id_w, desc_w, extra_w, ns_w) = if strong { (40, 12, 6, 8) } else { (10, 4, 2, 2) };
         if id == *token {
             score += 100;
         } else if id.contains(token.as_str()) {
-            score += 40;
+            score += id_w;
         }
         if desc.contains(token.as_str()) {
-            score += 12;
+            score += desc_w;
         }
         if extra.contains(token.as_str()) {
-            score += 6;
+            score += extra_w;
         }
         if ns.contains(token.as_str()) {
-            score += 8;
+            score += ns_w;
         }
     }
     score
@@ -336,6 +354,46 @@ mod tests {
         assert!(tokens.contains(&"file".to_string()));
         assert!(tokens.contains(&"search".to_string()));
         assert!(tokens.contains(&"文件检索".to_string()));
+        // CJK 二元切分：供片段召回用
+        assert!(tokens.contains(&"文件".to_string()));
+        assert!(tokens.contains(&"检索".to_string()));
+    }
+
+    #[test]
+    fn cjk_bigram_recalls_partial_overlap_descriptions() {
+        // 查询「文件检索」与描述「文件搜索工具」无整串重合；
+        // 若无 bigram 切分则整串不命中、得分为 0。
+        let entry = CapabilityEntry {
+            kind: "skill",
+            namespace: "skills".to_string(),
+            id: "file_finder".to_string(),
+            description: "文件搜索工具".to_string(),
+            extra_text: String::new(),
+            load_hint: String::new(),
+        };
+        let tokens = tokenize("文件检索");
+        let score = score_entry(&entry, &tokens, "文件检索");
+        assert!(score > 0, "bigram 片段命中应得分>0, got {}", score);
+
+        // 完全无关的查询仍不得分（bigram 不会凭空命中）
+        let tokens_none = tokenize("数据库备份");
+        assert_eq!(score_entry(&entry, &tokens_none, "数据库备份"), 0);
+    }
+
+    #[test]
+    fn end_to_end_cjk_query_recalls_relevant_builtin() {
+        // 端到端：中文查询能把描述相关的中文内置工具召回进 matches
+        let db = test_db();
+        let registry = PluginRegistry::default();
+        let res = search(&db, &registry, None, &json!({"query": "文件读取", "limit": 15}));
+        let out: Value = serde_json::from_str(&res.stdout).unwrap();
+        let ids: Vec<&str> = out["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"local_file"), "应召回 local_file: {:?}", ids);
     }
 
     #[test]
