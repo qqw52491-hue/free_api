@@ -304,6 +304,144 @@ fn scan_consumers(workspace: &Path, sym: &str, exclude: &BTreeSet<String>) -> Ve
     hits
 }
 
+/// 提取 diff 中被赋值的字段/变量名（写侧符号）：
+/// + 行里裸 `=` 左侧最近的标识符。排除 let 绑定（新变量非既有状态写方）。
+/// 读侧消费点只回答"谁受影响"，写侧清单回答"谁在碰这块状态"——
+/// 新增写方是否破坏"唯一写者/冻结锚点"类契约，只有列出既有写方才审得出来。
+fn write_targets_from_diff(diff: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in diff.lines() {
+        let Some(body) = line.strip_prefix('+') else { continue };
+        if line.starts_with("+++") {
+            continue;
+        }
+        let body = body.trim();
+        if body.starts_with("let ") || body.starts_with("//") {
+            continue;
+        }
+        let bytes = body.as_bytes();
+        for i in 0..bytes.len() {
+            if bytes[i] == b'='
+                && (i + 1 >= bytes.len() || (bytes[i + 1] != b'=' && bytes[i + 1] != b'>'))
+                && (i == 0
+                    || (bytes[i - 1] != b'=' && bytes[i - 1] != b'!'
+                        && bytes[i - 1] != b'<' && bytes[i - 1] != b'>'))
+            {
+                // = 左侧末尾最近的标识符即被写目标（self.x / obj.field / field 均可）
+                let name: String = body[..i]
+                    .trim_end()
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                if is_candidate_ident(&name) {
+                    out.push(name);
+                }
+                break;
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.truncate(4);
+    out
+}
+
+/// 单字段的写侧情报：声明点（含紧邻不变量注释）+ 全仓既有写方
+struct WriteContext {
+    /// 声明行 + 其上连续 /// 或 // 注释（不变量/契约声明的语义居住地）
+    decl_block: Option<String>,
+    /// 既有写方站点 path:line（不含本次改动文件——diff 里已是新写方）
+    write_sites: Vec<String>,
+}
+
+fn scan_write_context(workspace: &Path, field: &str, exclude: &BTreeSet<String>) -> WriteContext {
+    let mut files = Vec::new();
+    collect_scan_files(workspace, &mut files, 0);
+    let mut ctx = WriteContext { decl_block: None, write_sites: Vec::new() };
+    let assign = format!("{} =", field);
+    let decl_pat = format!("{}:", field);
+    'files: for f in files {
+        let rel = f
+            .strip_prefix(workspace)
+            .unwrap_or(&f)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Ok(content) = std::fs::read_to_string(&f) else { continue };
+        let lines: Vec<&str> = content.lines().collect();
+        for (idx, l) in lines.iter().enumerate() {
+            let t = l.trim();
+            // 写方：`field =` 或 `.field =`（裸等号词边界；== / => 天然含紧邻字符被排除）
+            if t.contains(&assign) || t.contains(&format!(".{}", assign)) {
+                if t.starts_with("//") {
+                    continue;
+                }
+                if let Some(pos) = t.find(&assign) {
+                    let after = t[pos + assign.len()..].trim_start();
+                    if !after.starts_with('=') && !after.starts_with('>') {
+                        if !exclude.contains(&rel) {
+                            ctx.write_sites.push(format!("{}:{}", rel, idx + 1));
+                        }
+                    }
+                }
+            }
+            // 声明点：`pub field:` / `field:` 在 struct/初始化语境
+            if ctx.decl_block.is_none() && t.contains(&decl_pat) && !t.starts_with("//") {
+                let mut block = vec![format!("{}:{} | {}", rel, idx + 1, t)];
+                // 向上吸收紧邻注释行（不变量文档的语义居住地）
+                let mut j = idx;
+                while j > 0 && lines[j - 1].trim_start().starts_with("//") {
+                    j -= 1;
+                    block.insert(0, lines[j].trim().to_string());
+                }
+                ctx.decl_block = Some(block.join("\n    "));
+            }
+            if ctx.write_sites.len() >= 6 && ctx.decl_block.is_some() {
+                break 'files;
+            }
+        }
+    }
+    ctx.write_sites.truncate(6);
+    ctx
+}
+
+/// 渲染写侧契约段（纯情报，不产生裁决义务）：新增写方 → 既有写方 + 声明不变量
+fn render_write_context(workspace: &Path, diff: &str, exclude: &BTreeSet<String>) -> String {
+    let fields = write_targets_from_diff(diff);
+    if fields.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "【✍️ 写方契约情报】本次改动对以下字段新增/变更了写方——\n\
+        请核实是否破坏\"唯一写者 / 冻结锚点 / 不变量\"类契约（若声明点注释写明专属写者或冻结语义，新增写方须拦）：\n",
+    );
+    let mut used = s.chars().count();
+    for field in &fields {
+        let ctx = scan_write_context(workspace, field, exclude);
+        if ctx.write_sites.is_empty() && ctx.decl_block.is_none() {
+            continue;
+        }
+        let mut seg = format!("◆ 字段 `{}`：\n", field);
+        if let Some(d) = &ctx.decl_block {
+            seg.push_str(&format!("    声明点: {}\n", d));
+        }
+        if ctx.write_sites.is_empty() {
+            seg.push_str("    既有写方: （无——本次改动是首个写方）\n");
+        } else {
+            seg.push_str(&format!("    既有写方: {}\n", ctx.write_sites.join(", ")));
+        }
+        if used + seg.chars().count() > 900 {
+            break;
+        }
+        used += seg.chars().count();
+        s.push_str(&seg);
+    }
+    s
+}
+
 /// 由 git diff 解析改动文件相对路径集（+++ b/path / diff --git a/x b/y）
 pub fn changed_files_from_diff(diff: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
@@ -403,7 +541,18 @@ fn build(workspace: &Path, changed_files: BTreeSet<String>, symbols: Vec<String>
 pub fn build_from_diff(workspace: &Path, diff: &str) -> ImpactPack {
     let changed = changed_files_from_diff(diff);
     let symbols = symbols_from_diff(diff);
-    build(workspace, changed, symbols)
+    let mut pack = build(workspace, changed.clone(), symbols);
+    // 写侧契约情报：即使消费点为空，新增写方本身也须暴露给审查
+    let write_ctx = render_write_context(workspace, diff, &changed);
+    if !write_ctx.is_empty() {
+        if pack.refs.is_empty() {
+            // 无消费点可裁时也要给出写方情报——此时 refs 空属正常（纯写方审查）
+            pack.section = write_ctx;
+        } else {
+            pack.section.push_str(&write_ctx);
+        }
+    }
+    pack
 }
 
 /// 方案审查入口：尚无 diff，符号源三路并采——
@@ -614,5 +763,30 @@ mod tests {
         let syms = symbols_from_file_content(content);
         assert!(syms.contains(&"resolve_workspace_dir".to_string()));
         assert!(syms.contains(&"get_session_tmp_dir".to_string()));
+    }
+#[test]
+    fn write_context_surfaces_sole_writer_violation() {
+        let dir = std::env::temp_dir().join(format!("impact_pack_write_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = &dir;
+        // compaction 是唯一合法写方 + 声明点注释写明冻结语义
+        write(root, "src/compaction.rs",
+              "struct C {\n    /// M1 静态锚点：仅 compaction 写入，字节级冻结供前缀缓存\n    pub user_goal: String,\n}\nfn lift(c: &mut C, g: String) { c.user_goal = g; }\n");
+        // 消费点文件（ assembler 读侧）
+        write(root, "src/assembler.rs", "fn render(c: &C) { let _ = &c.user_goal; }\n");
+        // 改动：main_loop 里新增写方
+        let diff = "diff --git a/src/main_loop.rs b/src/main_loop.rs\n+++ b/src/main_loop.rs\n@@\n+    ctx.user_goal = format!(\"{}\", goal);\n";
+        let pack = build_from_diff(root, diff);
+        assert!(pack.section.contains("写方契约情报"), "pack 应含写侧段:\n{}", pack.section);
+        assert!(pack.section.contains("user_goal"));
+        assert!(pack.section.contains("compaction.rs"), "应列出既有写方 compaction:\n{}", pack.section);
+        assert!(pack.section.contains("静态锚点"), "声明点注释应透出冻结不变量:\n{}", pack.section);
+    }
+
+    #[test]
+    fn write_targets_skip_let_and_comments() {
+        let diff = "+    let new_var = compute();\n+    // foo = bar\n+    ctx.field_x = 1;\n";
+        let targets = write_targets_from_diff(diff);
+        assert_eq!(targets, vec!["field_x".to_string()]);
     }
 }
