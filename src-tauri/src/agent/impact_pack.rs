@@ -176,7 +176,11 @@ fn collect_scan_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) {
         "hpp", "cs", "rb", "php", "swift", "sh",
     ];
     let Ok(rd) = std::fs::read_dir(root) else { return };
-    for entry in rd.flatten() {
+    // 目录序不确定 → pack 内容随之漂移，前缀缓存与"首个声明点命中"都受害；
+    // 按文件名排序保证同一代码两次扫描产出逐字节一致。
+    let mut entries: Vec<_> = rd.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
         if out.len() >= MAX_SCAN_FILES {
             return;
         }
@@ -429,7 +433,8 @@ fn render_write_context(workspace: &Path, fields: &[String], exclude: &BTreeSet<
     }
     let mut s = String::from(
         "【✍️ 写方契约情报】本次改动对以下字段新增/变更了写方——\n\
-        请核实是否破坏\"唯一写者 / 冻结锚点 / 不变量\"类契约（若声明点注释写明专属写者或冻结语义，新增写方须拦）：\n",
+        下列声明点注释为原始文档（可能过期，非裁决依据）；请对照既有写方清单核实\n\
+        \"唯一写者 / 冻结锚点 / 不变量\"类契约是否仍生效，确有破坏再升级为 blocking：\n",
     );
     let mut used = s.chars().count();
     for field in fields {
