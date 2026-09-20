@@ -900,218 +900,39 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         let step_id = checkpoint.step_id;
 
+        // 🔄 子任务交付回执消费：三条通道（自动轮询 / wait_jobs / 后台信箱）
+        // 统一汇聚到 child_receipt reducer——状态变更、故障转移、退款、投影
+        // 只有一个事实源，杜绝通道间语义漂移。
+        let receipt_env = crate::agent::child_receipt::ReceiptEnv {
+            app: Some(&app),
+            db: state.inner(),
+            parent_run_id: &run_id,
+            session_id: &final_session_id,
+            workspace_dir: &workspace_dir,
+            interrupt_rx: interrupt_rx.clone(),
+        };
+        // 阶段审查退款须批后统一结算（逐条结算会误判在途而漏退）
+        let mut stage_refund_pending = false;
+
         // 🔄 异步子任务结果轮询（审查/工兵/侦察）：自动注入父 Agent 上下文
         if let Ok(completed) = crate::agent::child_reviewer::poll_completed_delivery_receipts(state.inner(), &run_id, None) {
             if !completed.is_empty() {
                 let mut injection = String::new();
-                let git_available = crate::agent::child_writer::is_git_available(&workspace_dir).await;
                 for receipt in completed {
-                    // 阶段审查结果走独立语义（不占用方案审查状态，基础设施失败不烧预算且视为未审）
-                    if checkpoint.matches_stage_review_run(&receipt.child_run_id)
-                        || Some(receipt.child_run_id.as_str())
-                            == checkpoint.stage_review_rebuttal_run_id.as_deref()
-                    {
-                        let oracle_index = crate::agent::eval_oracle::query_active_progress()
-                            .await
-                            .map(|(idx, _, _)| idx as u32);
-                        let note = crate::agent::stage_review::apply_stage_receipt(
-                            &mut checkpoint,
-                            &receipt,
-                            &context,
-                            oracle_index,
+                    let effects = crate::agent::child_receipt::reduce_child_receipt(
+                        &receipt_env,
+                        &mut checkpoint,
+                        &mut context,
+                        &receipt,
+                    )
+                    .await;
+                    stage_refund_pending |= effects.stage_refund_pending;
+                    injection.push_str(&format!("\n{}\n", effects.model_text));
+                    for notice in &effects.ui_notices {
+                        let _ = app.emit(
+                            &format!("agent-log-{}", final_session_id),
+                            notice.clone(),
                         );
-                        injection.push_str(&format!(
-                            "\n【📋 阶段审查 (child_run_id: {})】\n{}\n",
-                            receipt.child_run_id, note
-                        ));
-                        continue;
-                    }
-                    match receipt.kind.as_str() {
-                        "writer" => {
-                            let mut writer_res = receipt.as_writer_result();
-                            if let Some(ref mut wr) = writer_res {
-                                // 🌟 核心：在父 Agent 消费回执的瞬间现算指纹，闭合 TOCTOU 竞争窗口！
-                                crate::agent::child_writer::refresh_file_conflicts(&mut wr.changed_files, &workspace_dir, git_available).await;
-                                injection.push_str(&format!(
-                                    "\n【🛠️ 写入工兵已完成 (child_run_id: {})】\n{}",
-                                    wr.child_run_id,
-                                    crate::agent::child_writer::writer_result_model_view(wr)
-                                ));
-                            } else {
-                                let findings = receipt.findings();
-                                let formatted_findings = if findings.is_empty() {
-                                    "（无具体发现）".to_string()
-                                } else {
-                                    findings.iter().map(|f| f.display_line()).collect::<Vec<_>>().join("\n- ")
-                                };
-                                injection.push_str(&format!(
-                                    "\n【🛠️ 写入工兵已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
-                                    receipt.child_run_id, receipt.confidence(), formatted_findings
-                                ));
-                            }
-                        }
-                        "worker" => {
-                            let (confidence, formatted_findings, action_logs) = if let Some(ref wrk) = receipt.as_worker_result() {
-                                let findings_str = if wrk.findings.is_empty() {
-                                    "（无具体发现）".to_string()
-                                } else {
-                                    wrk.findings.join("\n- ")
-                                };
-                                (wrk.confidence.clone(), findings_str, wrk.action_log.clone())
-                            } else {
-                                let findings = receipt.findings();
-                                let findings_str = if findings.is_empty() {
-                                    "（无具体发现）".to_string()
-                                } else {
-                                    findings.iter().map(|f| f.display_line()).collect::<Vec<_>>().join("\n- ")
-                                };
-                                (receipt.confidence(), findings_str, Vec::new())
-                            };
-                            injection.push_str(&format!(
-                                "\n【🕵️ 只读侦察任务已完成 (child_run_id: {})】\n结论: {}\n发现:\n- {}\n",
-                                receipt.child_run_id, confidence, formatted_findings
-                            ));
-                            if !action_logs.is_empty() {
-                                injection.push_str(&format!("执行动作记录:\n- {}\n", action_logs.join("\n- ")));
-                            }
-                        }
-                        _ => {
-                            let findings = receipt.findings();
-                            let formatted_findings = if findings.is_empty() {
-                                "（无具体发现）".to_string()
-                            } else {
-                                findings.iter().map(|f| f.display_line()).collect::<Vec<_>>().join("\n- ")
-                            };
-                            let routing_opt = receipt.routing();
-                            let routing_str = routing_opt.as_deref().unwrap_or("certain");
-                            let scorecard_desc = if let Some(ref sc) = receipt.scorecard() {
-                                let tc_str = sc.test_coverage.map_or_else(|| "N/A".to_string(), |tc| format!("{}/100", tc));
-                                format!(
-                                    "\n审查评分卡: 综合平均 {} 分 (正确性: {}/100, 破坏性风险: {}/100, 代码规范: {}/100, 测试覆盖: {}) -> 门禁状态: [{}]\n",
-                                    sc.average_score(), sc.correctness, sc.risk, sc.style, tc_str,
-                                    if sc.passes_gate() { "✅合格放行" } else { "🚨未达标拦截(均分需>=75且risk需>=60)" }
-                                )
-                            } else {
-                                String::new()
-                            };
-                            injection.push_str(&format!(
-                                "\n【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]{}成本: 输入 {} / 输出 {} tokens, 耗时 {}ms\n发现:\n- {}\n",
-                                receipt.child_run_id, receipt.confidence(), routing_str, scorecard_desc, receipt.prompt_tokens, receipt.completion_tokens, receipt.duration_ms, formatted_findings
-                            ));
-                            // 审查发现自动闭环：登记为待办条目，finish 门禁要求逐条闭合——
-                            // 修复第八轮实测的"pro 审查员发现真缺口但被主脑静默丢弃"问题
-                            {
-                                let next_id = context
-                                    .todo_list
-                                    .iter()
-                                    .map(|t| t.id)
-                                    .max()
-                                    .map_or(0, |m| m + 1);
-                                for (offset, f) in findings.iter().enumerate() {
-                                    let desc = format!("[审查发现] {}", f.display_line());
-                                    if context.todo_list.iter().any(|t| t.description == desc) {
-                                        continue; // 去重：同一发现不重复登记
-                                    }
-                                    context.todo_list.push(crate::agent::types::TodoItem {
-                                        id: next_id + offset,
-                                        status: "pending".to_string(),
-                                        description: desc,
-                                        evidence_output_id: None,
-                                    });
-                                }
-                            }
-                            // 【审查者故障转移链】invalid_output → 同参数重试；超时/请求层失败 → 切换跨平台备用审查员。
-                            // 封顶 2 次；两次都失败 → 退款 + 升级人工（ask_human 路径不变）。
-                            // request_or_stream（402/网络断流等零产出失败）与超时同性质，必须触发换平台重派。
-                            let receipt_kind = receipt
-                                .error_kind
-                                .as_deref()
-                                .map(crate::agent::types::ChildErrorKind::parse);
-                            let failover_eligible = receipt_kind
-                                .as_ref()
-                                .map(|k| k.is_failover_eligible())
-                                .unwrap_or(false);
-                            if failover_eligible {
-                                match try_plan_reviewer_failover(
-                                    &app,
-                                    state.inner(),
-                                    &run_id,
-                                    &final_session_id,
-                                    &workspace_dir,
-                                    &mut checkpoint,
-                                    interrupt_rx.clone(),
-                                    receipt_kind.as_ref().unwrap(),
-                                )
-                                .await
-                                {
-                                    Ok(Some(new_run_id)) => {
-                                        injection.push_str(&format!(
-                                            "\n🔁 审查者故障转移：上次结论异常（{}），已自动改用备用审查员重派 (child_run_id: {})\n",
-                                            receipt.error_kind.as_deref().unwrap_or("?"), new_run_id
-                                        ));
-                                        continue;
-                                    }
-                                    Ok(None) => {}
-                                    Err(spawn_err) => {
-                                        injection.push_str(&format!(
-                                            "\n⚠️ 审查者故障转移重派失败: {}（转人工裁决路径不受影响）\n", spawn_err
-                                        ));
-                                    }
-                                }
-                            }
-                            // 基础设施失败：退款、不算消费过（超时不是审查，不应烧预算），同时记录批次失败收口
-                            if receipt.is_infra_failure() {
-                                checkpoint.record_reviewer_failure_for_run(
-                                    &receipt.child_run_id,
-                                    receipt.error_kind.as_deref().unwrap_or("infra_failure"),
-                                );
-                                checkpoint.refund_infra_failed_review_round(receipt_kind);
-                            } else {
-                                let delivery = receipt.as_reviewer_delivery().unwrap_or_else(|| {
-                                    crate::agent::child_reviewer::ReviewerDeliveryData {
-                                        findings: receipt.findings(),
-                                        confidence: receipt.confidence(),
-                                        evidence_refs: Vec::new(),
-                                        missing_evidence: receipt.missing_evidence(),
-                                        routing: receipt.routing(),
-                                        withdrawn_findings: Vec::new(),
-                                        objection_verdicts: Vec::new(),
-                                        scorecard: receipt.scorecard(),
-                                        extra: Default::default(),
-                                    }
-                                });
-                                checkpoint.record_reviewer_delivery_for_run(Some(&receipt.child_run_id), &delivery);
-                                // Tech Lead 定稿通知：revised_* 已覆盖 submitted_plan 对应字段，
-                                // 执行方必须以审查者定稿版本为准（字段清单提示，内容见审查结论）。
-                                if let Some(rev) =
-                                    crate::agent::checkpoint::AgentCheckpoint::plan_revision_from(&delivery)
-                                {
-                                    injection.push_str(&format!(
-                                        "\n📝 Tech Lead 已在 1v1 中修订并定稿方案（修订字段: {}）——请按定稿版本执行，勿沿用你此前提交的原文。\n",
-                                        rev.describe_fields()
-                                    ));
-                                }
-                                injection.push_str(&format!(
-                                    "\n📊 本轮异议动态: 新增 {} / 撤回 {} / 维持 {}（连续多轮撤回≈新增且总数不降 = 审查空转，请评估转人工）\n",
-                                    checkpoint.review_objection_added,
-                                    checkpoint.review_objection_withdrawn,
-                                    checkpoint.review_objection_maintained
-                                ));
-                                if !delivery.withdrawn_findings.is_empty() {
-                                    injection.push_str(&format!(
-                                        "\n♻️ 审查者已撤回异议: {}（以最新裁决为准，撤回理由见审查结论）\n",
-                                        delivery.withdrawn_findings.join(", ")
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    let missing = receipt.missing_evidence();
-                    if !missing.is_empty() {
-                        injection.push_str(&format!("缺失证据/未完成项: {}\n", missing.join(", ")));
-                    }
-                    if let Some(ref err) = receipt.error_kind {
-                        injection.push_str(&format!("异常类别: {}（子任务未正常完成，请谨慎对待输出）\n", err));
                     }
                 }
                 if !injection.is_empty() {
@@ -1129,48 +950,26 @@ async fn run_agent_main_loop_in_workspace_inner(
             if !jobs.is_empty() {
                 let mut job_injection = String::new();
                 for job in jobs {
-                    if job.job_type == "child_reviewer" || job.job_type.contains("reviewer") {
-                        // 与 wait_jobs 结果路径共用 failover 链：失败类结论（超时/非法输出）
-                        // 先尝试重派备用审查员，不置 consumed——否则主 Agent 永远等不到结论
-                        let failed_kind = job
-                            .error_kind
-                            .as_deref()
-                            .map(crate::agent::types::ChildErrorKind::parse)
-                            .filter(|k| k.is_failover_eligible());
-                        if let Some(kind) = failed_kind {
-                            match try_plan_reviewer_failover(
-                                &app,
-                                state.inner(),
-                                &run_id,
-                                &final_session_id,
-                                &workspace_dir,
-                                &mut checkpoint,
-                                interrupt_rx.clone(),
-                                &kind,
-                            )
-                            .await
-                            {
-                                Ok(Some(new_run_id)) => {
-                                    job_injection.push_str(&format!(
-                                        "\n🔁 审查者故障转移：上次结论异常（{}），已自动改用备用审查员重派 (child_run_id: {})\n",
-                                        kind, new_run_id
-                                    ));
-                                    continue;
-                                }
-                                Ok(None) => {
-                                    checkpoint.plan_reviewer_consumed = true;
-                                }
-                                Err(spawn_err) => {
-                                    checkpoint.plan_reviewer_consumed = true;
-                                    job_injection.push_str(&format!(
-                                        "\n⚠️ 审查者故障转移重派失败: {}（转人工裁决路径不受影响）\n",
-                                        spawn_err
-                                    ));
-                                }
-                            }
-                        } else {
-                            checkpoint.plan_reviewer_consumed = true;
+                    // 子任务回执走统一 reducer（failover/交付/退款语义单点）；
+                    // 非子任务的后台任务（watch 等）保持通用倾倒。
+                    if job.job_type.starts_with("child_") || job.job_type.contains("reviewer") {
+                        let receipt = job.to_delivery_receipt();
+                        let effects = crate::agent::child_receipt::reduce_child_receipt(
+                            &receipt_env,
+                            &mut checkpoint,
+                            &mut context,
+                            &receipt,
+                        )
+                        .await;
+                        stage_refund_pending |= effects.stage_refund_pending;
+                        job_injection.push_str(&format!("\n{}\n", effects.model_text));
+                        for notice in &effects.ui_notices {
+                            let _ = app.emit(
+                                &format!("agent-log-{}", final_session_id),
+                                notice.clone(),
+                            );
                         }
+                        continue;
                     }
                     job_injection.push_str(&format!(
                         "\n【⚡ 后台异步任务已完成 (ID: {}, 类型: {})】\n任务描述: {}\n执行状态: {}\n耗时: {}ms\n输出/结论:\n{}\n",
@@ -1193,6 +992,12 @@ async fn run_agent_main_loop_in_workspace_inner(
                     );
                 }
             }
+        }
+        // 两路回执合并后统一结算一次阶段审查退款
+        if stage_refund_pending && checkpoint.settle_stage_review_refund() {
+            context.add_error_feedback(
+                "\n🔄 阶段审查次数已退还（本轮含 infra 失败且无专家产出 blocking，视为未有效审查）。",
+            );
         }
         let resume_instruction = recovered_instruction.take();
         // 每轮规划前把方案门禁状态投影进上下文底部状态卡：模型在决策时即可见

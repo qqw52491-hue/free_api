@@ -145,9 +145,14 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
 /// 返回 Ok(Some(new_run_id)) = 已重派；Ok(None) = 不满足重派条件（封顶/已批准/无派发记录）。
 /// 【冒烟实测抓到的坑】failover 原来只挂在 wait_jobs 结果路径上——超时结果若经
 /// 通用后台信箱（poll_pending_inbox）路径消费，会绕过 failover 且无条件置 consumed，
-/// 主 Agent 将永远等不到备用审查员的结论。两条路径必须共用本函数。
+/// 主 Agent 将永远等不到备用审查员的结论。所有消费路径必须共用本函数。
+///
+/// failed_run_id：被替换的失败任务 id。重派成功后本函数内部完成
+/// 齐套屏障的预期 id 替换（replace_expected_reviewer_run_id）——该步骤收编在此
+/// 而非留给调用方：曾因 wait_jobs 路径换 id 而自动注入路径漏换，旧 id 永远
+/// 无法交付，齐套屏障死锁。收编后结构性杜绝调用方遗忘。
 pub(crate) async fn try_plan_reviewer_failover(
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     state: &DbState,
     run_id: &str,
     session_id: &str,
@@ -157,6 +162,7 @@ pub(crate) async fn try_plan_reviewer_failover(
     // 当前仅 invalid_output/timeout/request_or_stream 共用同一重派动作；保留参数供
     // 后续"按 kind 分化重派策略"设计（届时启用）
     _error_kind: &crate::agent::types::ChildErrorKind,
+    failed_run_id: Option<&str>,
 ) -> Result<Option<String>, String> {
     if checkpoint.plan_reviewer_failover_count >= 2
         || checkpoint.plan_reviewer_last_dispatch.is_none()
@@ -189,7 +195,7 @@ pub(crate) async fn try_plan_reviewer_failover(
     }
     match dispatch
         .spawn(
-            Some(app.clone()),
+            app.cloned(),
             state,
             run_id,
             session_id,
@@ -201,6 +207,10 @@ pub(crate) async fn try_plan_reviewer_failover(
         Ok(new_run_id) => {
             checkpoint.plan_reviewer_failover_count += 1;
             checkpoint.set_plan_reviewer_dispatch_snapshot(&dispatch);
+            // 齐套屏障无缝转移：旧失败 id → 新重派 id，批次可正常收口
+            if let Some(old_id) = failed_run_id {
+                checkpoint.replace_expected_reviewer_run_id(old_id, &new_run_id);
+            }
             Ok(Some(new_run_id))
         }
         Err(spawn_err) => Err(spawn_err),

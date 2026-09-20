@@ -274,7 +274,7 @@
             objection_verdicts: vec![],
             scorecard: None,
         };
-        let note = apply_stage_result(&mut cp, &result, &context, None);
+        let note = apply_stage_result(&mut cp, &result, None).note;
         assert_eq!(cp.stage_review_blockers_open, 1, "仅 regardless 计入拦截");
         assert_eq!(cp.stage_review_final_only.len(), 1, "final_only 仅记账");
         assert_eq!(cp.stage_review_baseline_side_effects, 2, "消费不得覆盖派发时基线（防覆盖记账竞态）");
@@ -311,12 +311,46 @@
             objection_verdicts: vec![],
             scorecard: None,
         };
-        let _ = apply_stage_result(&mut cp, &result, &context, None);
+        let out = apply_stage_result(&mut cp, &result, None);
+        // 退款改为批后结算：回执层只标记 refund_pending，由调用方 settle。
+        assert!(out.refund_pending, "infra 失败应标记待结算退款");
+        assert_eq!(cp.stage_review_budget_used, 1, "回执层不再内联退款");
+        assert!(cp.settle_stage_review_refund(), "批后统一结算完成退款");
         // 预算退还 + 基线不动（视为未审，会重新触发）+ 不产生拦截
         assert_eq!(cp.stage_review_budget_used, 0);
         assert_eq!(cp.stage_review_baseline_side_effects, 0);
         assert_eq!(cp.stage_review_blockers_open, 0);
         assert!(cp.stage_review_run_id.is_none());
+    }
+
+    #[test]
+    fn rebuttal_invalid_output_preserves_blockers_without_refund() {
+        // 对质子任务技术性失败：未产生有效裁决 → 原 blocking 异议保留、
+        // 不计对质失败、不退款；可重新 resume_child 对质或等宿主判分清账。
+        use crate::agent::protocol::DeliveryReceipt;
+        let mut cp = approved_checkpoint();
+        cp.stage_review_rebuttal_run_id = Some("reb-1".to_string());
+        cp.stage_review_blockers_open = 2;
+        cp.stage_review_budget_used = 1;
+
+        let receipt = DeliveryReceipt {
+            child_run_id: "reb-1".to_string(),
+            task_id: "reb-1".to_string(),
+            attempt_id: 1,
+            kind: "review".to_string(),
+            status: "invalid_output".to_string(),
+            duration_ms: 100,
+            completion_tokens: 0,
+            prompt_tokens: 0,
+            error_kind: Some("invalid_output".to_string()),
+            payload: None,
+            raw_text: Some("{半截非法".to_string()),
+        };
+        let out = apply_stage_receipt(&mut cp, &receipt, None);
+        assert!(!out.refund_pending, "对质非法输出不退还阶段次数");
+        assert_eq!(cp.stage_review_blockers_open, 2, "原 blocking 异议必须保留");
+        assert!(cp.stage_review_rebuttal_run_id.is_none());
+        assert!(out.note.contains("技术性失败"));
     }
 
     #[test]
@@ -341,9 +375,11 @@
             payload: None,
             raw_text: None,
         };
-        let note = apply_stage_receipt(&mut cp, &receipt, &context, None);
+        let out = apply_stage_receipt(&mut cp, &receipt, None);
+        assert!(out.refund_pending);
+        assert!(out.note.contains("阶段审查任务未正常完成"));
+        assert!(cp.settle_stage_review_refund(), "批后结算完成退款");
         assert_eq!(cp.stage_review_budget_used, 0);
-        assert!(note.contains("阶段审查任务未正常完成"));
     }
 
     #[test]
@@ -378,7 +414,7 @@
             })),
             raw_text: None,
         };
-        let note1 = apply_stage_receipt(&mut cp, &receipt1, &context, None);
+        let note1 = apply_stage_receipt(&mut cp, &receipt1, None).note;
         assert_eq!(cp.stage_review_blockers_open, 1, "前端专家产出 1 个 blocking");
         assert_eq!(cp.stage_review_final_only.len(), 1);
         assert_eq!(cp.stage_review_run_ids, vec!["rev-be".to_string()]);
@@ -407,7 +443,7 @@
             })),
             raw_text: None,
         };
-        let note2 = apply_stage_receipt(&mut cp, &receipt2, &context, None);
+        let note2 = apply_stage_receipt(&mut cp, &receipt2, None).note;
         assert_eq!(cp.stage_review_blockers_open, 3, "联合会审累计 1 + 2 = 3 个 blocking");
         assert_eq!(cp.stage_review_final_only.len(), 2, "final_only 汇总 2 条");
         assert!(cp.stage_review_run_ids.is_empty(), "所有专家均已交付");
@@ -438,7 +474,7 @@
             })),
             raw_text: None,
         };
-        let reb_note = apply_stage_receipt(&mut cp, &rebuttal_receipt, &context, None);
+        let reb_note = apply_stage_receipt(&mut cp, &rebuttal_receipt, None).note;
         assert_eq!(cp.stage_review_blockers_open, 2, "撤回 1 条后 blocking 降为 2");
         assert!(reb_note.contains("对质复检结论"));
     }

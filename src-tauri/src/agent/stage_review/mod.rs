@@ -626,33 +626,58 @@ fn build_stage_evidence(
     evidence
 }
 
+/// 阶段审查回执处理结果：模型可见摘要 + 待结算退款标记。
+/// refund_pending 的语义见 settle_stage_review_refund：退款必须在批循环
+/// 结束后统一结算，循环内逐条结算会因后续专家的 run_ids 尚未移除而误判在途。
+pub struct StageReceiptOutcome {
+    pub note: String,
+    pub refund_pending: bool,
+}
+
 /// 消费阶段审查交付回执（成功或基础设施失败均走这里）。
 /// oracle_index：宿主判分「下一未解阶段」索引（None = 无 oracle 场景）。
 /// blockers>0 时记录出生索引，供僵尸 blocker 清账判定。
-/// 返回注入父 Agent 上下文的摘要文案。
+/// 单一事实源：主循环自动注入与 wait_jobs 手动收取都经 reducer 汇聚到本函数。
 pub fn apply_stage_receipt(
     checkpoint: &mut AgentCheckpoint,
     receipt: &crate::agent::protocol::DeliveryReceipt,
-    _context: &SandwichContext,
     oracle_index: Option<u32>,
-) -> String {
+) -> StageReceiptOutcome {
     let was_rebuttal = checkpoint.stage_review_rebuttal_run_id.as_deref()
         == Some(receipt.child_run_id.as_str());
     checkpoint.remove_stage_review_run(&receipt.child_run_id);
+    let parsed_kind = receipt
+        .error_kind
+        .as_deref()
+        .map(crate::agent::types::ChildErrorKind::parse);
+
+    // 对质子任务技术性失败特判（须先于通用 infra 分支与完成登记）：
+    // 审查员输出非法 = 未产生有效裁决。原 blocking 异议必须保留——不能因
+    // 空 findings 误清账（那会把"审查员失联"当成"异议撤回"）；不计对质拒
+    // 撤回次数、不退还阶段次数；允许重新 resume_child 对质，或等宿主判分
+    // 越过该阶段自动清账。
+    if was_rebuttal
+        && parsed_kind == Some(crate::agent::types::ChildErrorKind::InvalidOutput)
+    {
+        checkpoint.stage_review_rebuttal_run_id = None;
+        return StageReceiptOutcome {
+            note: "⚖️ 对质子任务技术性失败（审查员输出非法，未产生有效裁决）：原 blocking 异议保留，可重新 resume_child 对质，或等宿主判分越过该阶段自动清账。".to_string(),
+            refund_pending: false,
+        };
+    }
+
     if was_rebuttal {
         checkpoint.record_stage_review_completed(&receipt.child_run_id);
         checkpoint.stage_review_rebuttal_run_id = None;
     }
 
-    // 基础设施失败：退还阶段审查次数、基线不清零（该阶段视为「未审」，会重新触发）
+    // 基础设施失败：该阶段视为「未审」，会重新触发。
+    // 退款不在此内联结算——标记 refund_pending 由调用方批后统一 settle。
     if receipt.is_infra_failure() {
-        if !checkpoint.has_in_flight_stage_review() {
-            if checkpoint.reviewer_budget_refunds < 3 && checkpoint.stage_review_budget_used > 0 {
-                checkpoint.stage_review_budget_used -= 1;
-                checkpoint.reviewer_budget_refunds += 1;
-            }
-        }
-        return "⚠️ 阶段审查任务未正常完成（阶段审查次数已退还）。该阶段视为未审，累计写入达到阈值后将自动重审。".to_string();
+        return StageReceiptOutcome {
+            note: "⚠️ 阶段审查任务未正常完成。该阶段视为未审，累计写入达到阈值后将自动重审。".to_string(),
+            refund_pending: true,
+        };
     }
 
     // 基线已在派发时记录（见 dispatch）；此处不得用当前台账长度覆盖，
@@ -700,6 +725,9 @@ pub fn apply_stage_receipt(
         if new_blockers > 0 {
             checkpoint.stage_review_blocker_source_run_id = Some(receipt.child_run_id.clone());
         }
+        // 新一轮非对质审查交付：上一轮对质遗留的拒撤回计数已失效，清零
+        checkpoint.stage_review_confrontation_failures = 0;
+        checkpoint.stage_review_confrontation_target = None;
     }
 
     // 僵尸 blocker 治理：记录出生阶段索引（无 blocker 时清空，避免陈旧索引干扰）
@@ -752,18 +780,20 @@ pub fn apply_stage_receipt(
             text.push_str(&format!("\n- {}", line));
         }
     }
-    text
+    StageReceiptOutcome {
+        note: text,
+        refund_pending: false,
+    }
 }
 
 /// 兼容老接口：将 ChildReviewResult 转换为 DeliveryReceipt 交付回执后处理
 pub fn apply_stage_result(
     checkpoint: &mut AgentCheckpoint,
     result: &crate::agent::child_reviewer::ChildReviewResult,
-    context: &SandwichContext,
     oracle_index: Option<u32>,
-) -> String {
+) -> StageReceiptOutcome {
     let receipt: crate::agent::protocol::DeliveryReceipt = result.clone().into();
-    apply_stage_receipt(checkpoint, &receipt, context, oracle_index)
+    apply_stage_receipt(checkpoint, &receipt, oracle_index)
 }
 
 #[cfg(test)]

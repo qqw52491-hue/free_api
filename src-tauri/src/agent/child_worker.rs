@@ -61,6 +61,23 @@ pub struct WorkerResult {
     pub action_log: Vec<String>,
 }
 
+/// worker 交付的模型可见有界视图：结论 + 发现 + 动作记录。
+/// 与 writer_result_model_view 同一原则——完整 result_json 持久化在
+/// agent_child_runs，注入上下文的只保留结论性投影。两条消费通道
+/// （主循环自动注入 / wait_jobs 手动收取）共用本视图，禁止各写各的。
+pub fn worker_result_model_view(wr: &WorkerResult) -> String {
+    let findings_str = if wr.findings.is_empty() {
+        "（无具体发现）".to_string()
+    } else {
+        wr.findings.join("\n- ")
+    };
+    let mut out = format!("结论: {}\n发现:\n- {}\n", wr.confidence, findings_str);
+    if !wr.action_log.is_empty() {
+        out.push_str(&format!("执行动作记录:\n- {}\n", wr.action_log.join("\n- ")));
+    }
+    out
+}
+
 pub fn parse_worker_request(params: &Value) -> Result<WorkerRequest, String> {
     let task = params
         .get("task")

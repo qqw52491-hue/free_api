@@ -419,6 +419,27 @@ impl AgentCheckpoint {
         true
     }
 
+    /// 阶段审查退款统一结算（批循环结束后调用一次）。
+    /// 为什么不能在回执处理循环内逐条结算：completed 回执按序处理，本条 infra
+    /// 失败专家的 run_id 移除时，后续成功专家的 run_id 尚未移除，
+    /// has_in_flight_stage_review() 会误判为 true 而永久错过退款窗口。
+    /// 仅当在途清空且无 blocker 留存（本轮无实质产出）时才退还预算；
+    /// 若已有专家交付了真实 blocking，本轮审查有实质输出，不退款。
+    /// 返回 true = 实际完成了一次退款。
+    pub fn settle_stage_review_refund(&mut self) -> bool {
+        if !self.has_in_flight_stage_review()
+            && self.stage_review_blockers_open == 0
+            && self.reviewer_budget_refunds < 3
+            && self.stage_review_budget_used > 0
+        {
+            self.stage_review_budget_used -= 1;
+            self.reviewer_budget_refunds += 1;
+            true
+        } else {
+            false
+        }
+    }
+
     /// 对质失败自动降级：blocking 异议经对质仍被审查员维持（confirmed 证据拒不撤回）
     /// 时累计失败次数；达到 threshold 后把未解决 blockers 降级为 final_only 记账
     /// 带入收尾审查，安全扣减 blockers_open 放行写入。返回 true = 本次触发降级。

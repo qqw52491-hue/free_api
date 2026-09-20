@@ -34,6 +34,44 @@ pub struct BackgroundJobResult {
     pub error_kind: Option<String>,
 }
 
+impl BackgroundJobResult {
+    /// 归一为 DeliveryReceipt：wait_jobs / 后台信箱等传输层的结果统一转成
+    /// 交付回执，消费语义只由 reducer（child_receipt）决定，与运输通道无关。
+    /// job_type → kind 映射：含 "writer"/"worker"/"review" 的归为对应子任务类型，
+    /// 其余原样保留（reducer 对未知类型只做投影、不做状态变更）。
+    pub fn to_delivery_receipt(&self) -> crate::agent::protocol::DeliveryReceipt {
+        let payload = serde_json::from_str::<serde_json::Value>(&self.result_json).ok();
+        let kind = if self.job_type.contains("writer") {
+            "writer".to_string()
+        } else if self.job_type.contains("worker") {
+            "worker".to_string()
+        } else if self.job_type.contains("review") {
+            "review".to_string()
+        } else {
+            self.job_type.clone()
+        };
+        crate::agent::protocol::DeliveryReceipt {
+            child_run_id: self.job_id.clone(),
+            task_id: self.job_id.clone(),
+            attempt_id: 1,
+            kind,
+            status: self.status.clone(),
+            duration_ms: self.duration_ms,
+            completion_tokens: payload
+                .as_ref()
+                .and_then(|p| p.get("completion_tokens").and_then(|v| v.as_i64()))
+                .unwrap_or(0),
+            prompt_tokens: payload
+                .as_ref()
+                .and_then(|p| p.get("prompt_tokens").and_then(|v| v.as_i64()))
+                .unwrap_or(0),
+            error_kind: self.error_kind.clone(),
+            payload,
+            raw_text: Some(self.result_json.clone()),
+        }
+    }
+}
+
 /// 登记并启动一个新的后台异步任务，返回 job_id
 pub fn begin_job(
     db: &DbState,
