@@ -123,6 +123,63 @@ impl AgentCheckpoint {
         self.plan_review_batch.replace_expected_run_id(old_id, new_id);
     }
 
+    /// 齐套屏障自愈对账（保险丝，非主流程）。
+    /// 点名「人到齐没」之前顺手核对台账：凡是 agent_child_runs 里已终态
+    /// 且回执已被消费、却仍挂在 expected 里的 run_id——说明它的交付/失败
+    /// 记账被绕过（如历史 failover 漏换 id、损坏回执被丢弃）——该任务
+    /// 永远不可能交付，按失败从预期中划掉；台账里根本不存在的 id 同理。
+    /// 防的是「记账漂移让屏障等一个死人」的死锁：改名单的动作漏了，
+    /// 点名动作自己纠错，最多卡一拍而非卡死。
+    /// 已终态但回执未消费的不动——回执仍在信箱里等正常消费，不能抢判。
+    /// 返回本次划掉的数量。
+    pub fn reconcile_plan_reviewer_batch(&mut self, db: &DbState) -> usize {
+        let pending: Vec<String> = self
+            .plan_review_batch
+            .expected_run_ids
+            .iter()
+            .filter(|id| {
+                !self.plan_review_batch.delivered_run_ids.contains(*id)
+                    && !self.plan_review_batch.failed_run_ids.contains_key(*id)
+            })
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            return 0;
+        }
+        let Ok(conn) = db.0.lock() else { return 0 };
+        const TERMINAL: [&str; 6] = [
+            "succeeded",
+            "timed_out",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "invalid_output",
+        ];
+        let mut pruned = 0;
+        for id in pending {
+            let row = conn.query_row(
+                "SELECT status, consumed_at FROM agent_child_runs WHERE id = ?1",
+                rusqlite::params![id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            );
+            let orphan_reason = match row {
+                Err(rusqlite::Error::QueryReturnedNoRows) => Some("ledger_row_missing"),
+                Ok((status, Some(_consumed_at))) if TERMINAL.contains(&status.as_str()) => {
+                    Some("consumed_terminal_orphan")
+                }
+                _ => None,
+            };
+            if let Some(reason) = orphan_reason {
+                self.plan_review_batch.record_failure(&id, reason);
+                pruned += 1;
+            }
+        }
+        if pruned > 0 && self.plan_review_batch.is_complete() {
+            self.plan_reviewer_consumed = true;
+        }
+        pruned
+    }
+
     /// 消费并记录一个审查员的交付结论（支持幂等去重与齐套现场真聚合）
     pub fn record_reviewer_delivery_for_run(
         &mut self,

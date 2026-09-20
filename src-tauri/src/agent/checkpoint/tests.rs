@@ -1037,3 +1037,61 @@
         );
         assert!(cp.plan_finalized_by.is_none());
     }
+
+    #[test]
+    fn reconcile_plan_reviewer_batch_prunes_dead_orphans() {
+        // 齐套屏障自愈保险丝：expected 名单上的 run 在台账中已终态且回执
+        // 已被消费（交付/失败记账被绕过，如历史 failover 漏换 id）→ 点名时
+        // 按失败划掉，否则屏障永远等一个不会交付的死人。
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_child_runs (
+                id TEXT PRIMARY KEY, status TEXT NOT NULL, consumed_at TEXT);
+             INSERT INTO agent_child_runs VALUES
+                ('dead-1', 'timed_out', '2024-01-01'),
+                ('pending-1', 'timed_out', NULL),
+                ('running-1', 'running', NULL);",
+        )
+        .unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("run-heal".to_string(), &ctx);
+        cp.register_plan_reviewer_batch(&[
+            "dead-1".to_string(),
+            "pending-1".to_string(),
+            "running-1".to_string(),
+            "never-spawned".to_string(),
+        ]);
+        assert!(!cp.plan_reviewer_consumed);
+        assert_eq!(cp.plan_review_batch.pending_count(), 4);
+
+        // dead-1：终态+已消费的孤儿；never-spawned：台账不存在 → 均划掉
+        let pruned = cp.reconcile_plan_reviewer_batch(&db);
+        assert_eq!(pruned, 2);
+        assert!(cp.plan_review_batch.failed_run_ids.contains_key("dead-1"));
+        assert!(cp.plan_review_batch.failed_run_ids.contains_key("never-spawned"));
+        // pending-1（回执还在信箱）与 running-1（在途）不得抢判
+        assert!(!cp.plan_review_batch.failed_run_ids.contains_key("pending-1"));
+        assert!(!cp.plan_review_batch.failed_run_ids.contains_key("running-1"));
+        assert_eq!(cp.plan_review_batch.pending_count(), 2);
+        assert!(!cp.plan_reviewer_consumed, "仍有真实待办成员，不得放行");
+
+        // pending-1 回执被消费、running-1 也终态消费后 → 再点名全部划完 → 放行
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute(
+                "UPDATE agent_child_runs SET consumed_at = 'x', status = 'succeeded' WHERE id = 'pending-1'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE agent_child_runs SET consumed_at = 'x', status = 'failed' WHERE id = 'running-1'",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(cp.reconcile_plan_reviewer_batch(&db), 2);
+        assert!(cp.plan_review_batch.is_complete());
+        assert!(cp.plan_reviewer_consumed, "名单全部划完后屏障应放行");
+    }

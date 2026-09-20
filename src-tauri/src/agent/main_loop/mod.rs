@@ -999,6 +999,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                 "\n🔄 阶段审查次数已退还（本轮含 infra 失败且无专家产出 blocking，视为未有效审查）。",
             );
         }
+
+        // 齐套屏障自愈对账（保险丝）：点名前核对台账，凡是"已终态且已消费"
+        // 却仍挂在 expected 的 run_id 一律按失败划掉——防止任何记账漂移
+        // 让屏障等一个永远不会交付的死人。正常路径下永远返回 0，只在
+        // 交付/失败记账被绕过的异常场景兜底生效。
+        if !checkpoint.plan_reviewer_consumed && !checkpoint.plan_review_batch.is_empty() {
+            checkpoint.reconcile_plan_reviewer_batch(state.inner());
+        }
         let resume_instruction = recovered_instruction.take();
         // 每轮规划前把方案门禁状态投影进上下文底部状态卡：模型在决策时即可见
         // 当前模式与放行条件，不再靠写入被拒（一整轮 LLM 往返）反推门禁规则。
