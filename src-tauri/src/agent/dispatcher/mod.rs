@@ -278,6 +278,7 @@ pub fn run_agent_step(
             batch_commands.len()
         );
         let mut total_stdout = String::new();
+        let mut mcp_raw_items = Vec::new();
 
         for (idx, cmd_val) in batch_commands.iter().enumerate() {
             let step_idx = idx + 1;
@@ -302,6 +303,7 @@ pub fn run_agent_step(
             let step_params = cmd_val.get("command").cloned().unwrap_or_else(|| cmd_val.clone());
             let res =
                 execute_command_inner(db, session_id, step_tool, &step_action, &step_params, registry, workspace_root);
+            append_mcp_raw_results(&mut mcp_raw_items, res.view.as_ref());
 
             // 拼接输出结果
             if !res.stdout.is_empty() {
@@ -314,7 +316,7 @@ pub fn run_agent_step(
                     "   🚫 Step {} 执行失败，流水线立即熔断！原因: {}",
                     step_idx, res.stderr
                 );
-                return DispatchResult { view: None,
+                return DispatchResult { view: mcp_raw_results_view(mcp_raw_items),
                     stdout: total_stdout,
                     stderr: format!("流水线在第 {} 步崩溃: {}", step_idx, res.stderr),
                     success: false,
@@ -323,7 +325,7 @@ pub fn run_agent_step(
             }
         }
 
-        return DispatchResult { view: None,
+        return DispatchResult { view: mcp_raw_results_view(mcp_raw_items),
             stdout: total_stdout,
             stderr: String::new(),
             success: true,

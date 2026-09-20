@@ -4,13 +4,15 @@
 //! 同步执行；validate_controlled_parallel_batch 在执行前校验单批分支数
 //! 不超过 MAX_CONTROLLED_PARALLEL_BRANCHES（响亮拒绝而非静默截断）。
 
-use crate::agent::dispatcher::{emit_tool_event, execute_command_inner};
+use crate::agent::dispatcher::{
+    append_mcp_raw_results, emit_tool_event, execute_command_inner, mcp_raw_results_view,
+};
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::plan_tree::PlanNode;
 use crate::agent::types::DispatchResult;
 use crate::db::DbState;
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // ═══════════════════════════════════════════════════════════════════════
 // 常量
@@ -38,11 +40,14 @@ pub fn run_plan_tree_sync(
     let db_clone = db.clone();
     let sid = session_id.to_string();
     let reg_clone = registry.clone();
+    let mcp_raw_items = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let mcp_raw_collector = mcp_raw_items.clone();
 
     let invoker: crate::agent::plan_tree::ToolInvoker = Arc::new(move |tool, args| {
         let db_c = db_clone.clone();
         let sid_c = sid.clone();
         let reg_c = reg_clone.clone();
+        let items_c = mcp_raw_items.clone();
 
         Box::pin(async move {
             let action = args
@@ -58,6 +63,9 @@ pub fn run_plan_tree_sync(
             })
             .await
             .map_err(|e| format!("工具执行任务崩溃: {}", e))?;
+            if let Ok(mut items) = items_c.lock() {
+                append_mcp_raw_results(&mut items, res.view.as_ref());
+            }
             if res.success {
                 let parsed_val: serde_json::Value = serde_json::from_str(&res.stdout)
                     .unwrap_or_else(|_| serde_json::json!({ "output": res.stdout }));
@@ -78,8 +86,12 @@ pub fn run_plan_tree_sync(
 
     let success = report.success;
     let feedback = report.to_llm_feedback();
+    let collected = mcp_raw_collector
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
 
-    DispatchResult { view: None,
+    DispatchResult { view: mcp_raw_results_view(collected),
         stdout: feedback.clone(),
         stderr: if success { String::new() } else { feedback },
         success,

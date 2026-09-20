@@ -2425,7 +2425,10 @@ async fn run_agent_main_loop_in_workspace_inner(
         } else {
             "failed"
         };
-        let raw_output_text = output_text.clone();
+        let model_output_text = output_text.clone();
+        let durable_output_text =
+            crate::agent::dispatcher::take_mcp_durable_output(&mut result.view)
+                .unwrap_or_else(|| model_output_text.clone());
         let output_id = crate::agent::run_trace::save_step_output_with_meta(
             state.inner(),
             &final_session_id,
@@ -2433,20 +2436,21 @@ async fn run_agent_main_loop_in_workspace_inner(
             &instruction.get_tool(),
             &instruction.description,
             outcome_str,
-            &raw_output_text,
+            &durable_output_text,
         )
         .unwrap_or_else(|e| {
             eprintln!("⚠️ 无法保存 step_output: {}", e);
             "unknown_output_id".to_string()
         });
-        context.add_step(&instruction, &raw_output_text, &output_id);
+        context.add_step(&instruction, &model_output_text, &output_id);
         let dedup = deduplicate_mcp_output(
             state.inner(),
             &final_session_id,
             &result.route,
             &instruction,
             outcome_str,
-            &raw_output_text,
+            &durable_output_text,
+            &model_output_text,
             &run_trace_steps,
             &mut context,
             &output_id,
@@ -2538,6 +2542,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             "output_id": output_id.clone(),
             "mcp_call_hash": dedup.call_hash.clone(),
             "mcp_raw_output_hash": dedup.raw_output_hash.clone(),
+            "mcp_model_output_hash": dedup.model_output_hash.clone(),
             "canonical_output_id": dedup.call_hash.as_ref().map(|_| canonical_output_id.clone()),
             "duplicate_of_step": dedup.duplicate_of_step,
             "view": result.view.clone(),

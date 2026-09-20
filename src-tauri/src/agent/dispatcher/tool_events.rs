@@ -74,7 +74,11 @@ pub fn emit_tool_event(
         result_summary: event_summary(result, 16000),
         duration_ms,
         timestamp: Utc::now().to_rfc3339(),
-        view: view.cloned(),
+        view: view
+            .filter(|v| {
+                v.get("kind").and_then(|k| k.as_str()) != Some(MCP_RAW_RESULTS_KIND)
+            })
+            .cloned(),
     };
     let _ = app.emit(&format!("agent-tool-event-{}", session_id), payload);
 }

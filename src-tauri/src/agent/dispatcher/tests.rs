@@ -433,3 +433,223 @@
         }));
         assert!(!is_write_or_side_effect_tool(&inst_sh_c), "带 2>/dev/null 的网络探针与编码转换必须作为只读放行");
     }
+
+    #[test]
+    fn mcp_model_output_single_text_exact() {
+        let text = "第一行 含 空白 \n\n第二行\t制表符\n末尾换行\n";
+        let result = json!({
+            "content": [{"type": "text", "text": text}],
+            "isError": false,
+        });
+        assert_eq!(format_mcp_model_output(&result), text);
+
+        let legacy_no_type = json!({
+            "content": [{"text": text}],
+        });
+        assert_eq!(format_mcp_model_output(&legacy_no_type), text);
+    }
+
+    #[test]
+    fn mcp_model_output_error_text_keeps_legacy_plain_output() {
+        let result = json!({
+            "content": [{"type": "text", "text": "工具内部错误: quota"}],
+            "isError": true,
+        });
+        assert_eq!(format_mcp_model_output(&result), "工具内部错误: quota");
+    }
+
+    #[test]
+    fn mcp_model_output_multiple_text_blocks_in_order() {
+        let result = json!({
+            "content": [
+                {"type": "text", "text": "第一段"},
+                {"type": "text", "text": "第二段"},
+            ],
+            "isError": false,
+        });
+        assert_eq!(format_mcp_model_output(&result), "第一段\n\n第二段");
+    }
+
+    #[test]
+    fn mcp_model_output_structured_omitted_when_text_exists() {
+        let result = json!({
+            "content": [{"type": "text", "text": "概要正文"}],
+            "structuredContent": {"rows": [1, 2, 3]},
+            "_meta": {"secret": "should-not-appear"},
+        });
+        let output = format_mcp_model_output(&result);
+        assert_eq!(output, "概要正文");
+        assert!(!output.contains("rows"));
+        assert!(!output.contains("should-not-appear"));
+    }
+
+    #[test]
+    fn mcp_model_output_structured_shown_when_no_text() {
+        let structured = json!({"rows": [1, 2], "note": "仅结构化"});
+        let result = json!({
+            "content": [{"type": "image", "data": "aGk=", "mimeType": "image/png"}],
+            "structuredContent": structured,
+        });
+        let output = format_mcp_model_output(&result);
+        assert!(output.contains("image"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output[output.find('{').unwrap()..]).unwrap();
+        assert_eq!(parsed, structured);
+    }
+
+    #[test]
+    fn mcp_model_output_image_audio_described_without_base64() {
+        let sentinel = "aGVsbG8tZnJlZS1hcGktc2VudGluZWw=";
+        let result = json!({
+            "content": [
+                {"type": "image", "data": sentinel, "mimeType": "image/png"},
+                {"type": "audio", "data": sentinel, "mimeType": "audio/wav",
+                 "annotations": {"audience": ["user"]}},
+            ],
+        });
+        let output = format_mcp_model_output(&result);
+        assert!(!output.contains(sentinel));
+        assert!(output.contains("image"));
+        assert!(output.contains("audio"));
+        assert!(output.contains("image/png"));
+        assert!(output.contains("audio/wav"));
+        assert!(output.contains(&sentinel.chars().count().to_string()));
+        assert!(output.contains("annotations"));
+    }
+
+    #[test]
+    fn mcp_model_output_embedded_resource_text_included_blob_excluded() {
+        let blob = "YmluYXJ5LWJsb2Itc2VudGluZWw=";
+        let result = json!({
+            "content": [
+                {"type": "resource", "resource": {"uri": "file:///tmp/a.txt", "mimeType": "text/plain", "text": "内嵌资源正文"}},
+                {"type": "resource", "resource": {"uri": "file:///tmp/x.bin", "mimeType": "application/octet-stream", "blob": blob}},
+            ],
+        });
+        let output = format_mcp_model_output(&result);
+        assert!(output.contains("内嵌资源正文"));
+        assert!(output.contains("file:///tmp/a.txt"));
+        assert!(output.contains("file:///tmp/x.bin"));
+        assert!(output.contains(&blob.chars().count().to_string()));
+        assert!(!output.contains(blob));
+    }
+
+    #[test]
+    fn mcp_model_output_resource_link_described() {
+        let result = json!({
+            "content": [{
+                "type": "resource_link",
+                "name": "report.csv",
+                "title": "季度报表",
+                "uri": "file:///tmp/report.csv",
+                "mimeType": "text/csv",
+                "description": "含逗号分隔数据",
+            }],
+        });
+        let output = format_mcp_model_output(&result);
+        for needle in ["report.csv", "季度报表", "file:///tmp/report.csv", "text/csv", "含逗号分隔数据"] {
+            assert!(output.contains(needle), "缺描述字段: {}", needle);
+        }
+    }
+
+    #[test]
+    fn mcp_model_output_unknown_block_bounded_no_raw_leak() {
+        let result = json!({
+            "content": [
+                {"type": "vendor-x", "secret_payload": "TOP-SECRET-BASE64-BLOB"},
+                "not-an-object",
+            ],
+        });
+        let output = format_mcp_model_output(&result);
+        assert!(output.contains("vendor-x"));
+        assert!(output.contains("#0"));
+        assert!(output.contains("#1"));
+        assert!(output.contains("output_id"));
+        assert!(!output.contains("TOP-SECRET-BASE64-BLOB"));
+    }
+
+    #[test]
+    fn mcp_model_output_empty_fallback_nonempty() {
+        for result in [
+            json!({}),
+            json!({"content": []}),
+            json!({"content": "not-an-array"}),
+            serde_json::Value::Null,
+        ] {
+            let output = format_mcp_model_output(&result);
+            assert!(!output.is_empty());
+            assert!(output.contains("output_id"));
+        }
+    }
+
+    #[test]
+    fn mcp_raw_evidence_direct_sidecar_round_trip() {
+        let arguments = json!({"q": "shanghai", "units": "metric"});
+        let result = json!({
+            "content": [
+                {"type": "text", "text": "概要"},
+                {"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"},
+            ],
+            "structuredContent": {"rows": [1, 2]},
+            "_meta": {"trace": "abc"},
+            "isError": false,
+            "vendorExtension": {"x": 1},
+        });
+        let view = mcp_raw_result_view("weather", "get", &arguments, &result);
+        assert_eq!(view["kind"], "mcp_raw_results");
+        assert_eq!(view["items"].as_array().unwrap().len(), 1);
+        let item = &view["items"][0];
+        assert_eq!(item["plugin"], "weather");
+        assert_eq!(item["tool"], "get");
+        assert_eq!(item["arguments"], arguments);
+        assert_eq!(item["result"], result);
+
+        let mut view_opt = Some(view);
+        let durable = take_mcp_durable_output(&mut view_opt).expect("必须消费精确 sidecar");
+        assert!(view_opt.is_none());
+        let parsed: serde_json::Value = serde_json::from_str(&durable).unwrap();
+        assert_eq!(parsed["items"][0]["result"]["_meta"], json!({"trace": "abc"}));
+        assert_eq!(parsed["items"][0]["result"]["structuredContent"], json!({"rows": [1, 2]}));
+        assert_eq!(parsed["items"][0]["result"]["content"][1]["data"], "aGVsbG8=");
+    }
+
+    #[test]
+    fn mcp_raw_evidence_aggregation_preserves_call_order() {
+        let mut items = Vec::new();
+        let first = mcp_raw_result_view("p1", "t1", &json!({"a": 1}), &json!({"content": []}));
+        let second = mcp_raw_result_view("p2", "t2", &json!({"b": 2}), &json!({"content": []}));
+        append_mcp_raw_results(&mut items, Some(&first));
+        append_mcp_raw_results(&mut items, Some(&second));
+        let view = mcp_raw_results_view(items).expect("两项必须聚合");
+        let arr = view["items"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["plugin"], "p1");
+        assert_eq!(arr[1]["plugin"], "p2");
+        assert!(mcp_raw_results_view(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn mcp_raw_evidence_ignores_malformed_or_foreign_view() {
+        let mut items = Vec::new();
+        append_mcp_raw_results(&mut items, None);
+        append_mcp_raw_results(&mut items, Some(&json!({"kind": "other", "items": []})));
+        append_mcp_raw_results(&mut items, Some(&json!({"kind": "mcp_raw_results", "items": "x"})));
+        append_mcp_raw_results(&mut items, Some(&json!({"no-kind": true})));
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn mcp_raw_evidence_take_consumes_exact_sidecar_leaves_foreign() {
+        let foreign = json!({"kind": "ui_card", "data": 1});
+        let mut view = Some(foreign.clone());
+        assert!(take_mcp_durable_output(&mut view).is_none());
+        assert_eq!(view.as_ref().unwrap(), &foreign);
+
+        let mut none_view: Option<serde_json::Value> = None;
+        assert!(take_mcp_durable_output(&mut none_view).is_none());
+
+        let malformed = json!({"kind": "mcp_raw_results", "items": 7});
+        let mut view = Some(malformed.clone());
+        assert!(take_mcp_durable_output(&mut view).is_none());
+        assert_eq!(view.as_ref().unwrap(), &malformed);
+    }

@@ -194,13 +194,13 @@ pub(crate) fn execute_command_inner(
             handle.block_on(plugin.call_tool_for_session(
                 Some(session_id),
                 &tool_name,
-                clean_params,
+                clean_params.clone(),
             ))
         } else {
             futures::executor::block_on(plugin.call_tool_for_session(
                 Some(session_id),
                 &tool_name,
-                clean_params,
+                clean_params.clone(),
             ))
         };
         match call_res {
@@ -209,23 +209,22 @@ pub(crate) fn execute_command_inner(
                     .get("isError")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let content = out
-                    .get("content")
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| arr.get(0))
-                    .and_then(|m| m.get("text"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let content = format_mcp_model_output(&out);
+                let view = Some(mcp_raw_result_view(
+                    &plugin_name,
+                    &tool_name,
+                    &clean_params,
+                    &out,
+                ));
                 if is_error {
-                    return DispatchResult { view: None,
+                    return DispatchResult { view,
                         stdout: String::new(),
                         stderr: content,
                         success: false,
                         route: format!("plugin:{}/{}", plugin_name, tool_name),
                     };
                 } else {
-                    return DispatchResult { view: None,
+                    return DispatchResult { view,
                         stdout: content,
                         stderr: String::new(),
                         success: true,
@@ -290,6 +289,195 @@ pub(crate) fn execute_command_inner(
         success: false,
         route: "unknown".to_string(),
     }
+}
+
+pub(crate) const MCP_RAW_RESULTS_KIND: &str = "mcp_raw_results";
+
+pub(crate) fn mcp_raw_result_view(
+    plugin: &str,
+    tool: &str,
+    arguments: &serde_json::Value,
+    result: &serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "kind": MCP_RAW_RESULTS_KIND,
+        "items": [{
+            "plugin": plugin,
+            "tool": tool,
+            "arguments": arguments.clone(),
+            "result": result.clone(),
+        }],
+    })
+}
+
+pub(crate) fn is_mcp_raw_results_view(view: &serde_json::Value) -> bool {
+    view.get("kind").and_then(|k| k.as_str()) == Some(MCP_RAW_RESULTS_KIND)
+        && view.get("items").is_some_and(|i| i.is_array())
+}
+
+pub(crate) fn append_mcp_raw_results(
+    target: &mut Vec<serde_json::Value>,
+    view: Option<&serde_json::Value>,
+) {
+    let Some(view) = view else {
+        return;
+    };
+    if !is_mcp_raw_results_view(view) {
+        return;
+    }
+    if let Some(items) = view.get("items").and_then(|i| i.as_array()) {
+        target.extend(items.iter().cloned());
+    }
+}
+
+pub(crate) fn mcp_raw_results_view(items: Vec<serde_json::Value>) -> Option<serde_json::Value> {
+    if items.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "kind": MCP_RAW_RESULTS_KIND,
+        "items": items,
+    }))
+}
+
+pub(crate) fn take_mcp_durable_output(
+    view: &mut Option<serde_json::Value>,
+) -> Option<String> {
+    let is_exact = view.as_ref().is_some_and(is_mcp_raw_results_view);
+    if !is_exact {
+        return None;
+    }
+    view.take().map(|v| {
+        serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
+    })
+}
+
+fn mcp_block_descriptor(block: &serde_json::Value, index: usize) -> String {
+    let type_name = block
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing>");
+    format!(
+        "[MCP 内容块 #{} 类型={}：完整原始块已持久化到本步骤 output_id]",
+        index, type_name
+    )
+}
+
+pub(crate) fn format_mcp_model_output(result: &serde_json::Value) -> String {
+    if let Some(object) = result.as_object() {
+        let simple_top_level = object
+            .keys()
+            .all(|key| key == "content" || key == "isError")
+            && object
+                .get("isError")
+                .is_none_or(serde_json::Value::is_boolean);
+        if simple_top_level {
+            if let Some(blocks) = object.get("content").and_then(serde_json::Value::as_array) {
+                if let [block] = blocks.as_slice() {
+                    if let Some(block_object) = block.as_object() {
+                        let simple_text_block = block_object
+                            .keys()
+                            .all(|key| key == "type" || key == "text")
+                            && block_object
+                                .get("type")
+                                .is_none_or(|kind| kind.as_str() == Some("text"));
+                        if simple_text_block {
+                            if let Some(text) =
+                                block_object.get("text").and_then(serde_json::Value::as_str)
+                            {
+                                return text.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut pieces: Vec<String> = Vec::new();
+    let mut has_text_payload = false;
+    if let Some(blocks) = result.get("content").and_then(serde_json::Value::as_array) {
+        for (index, block) in blocks.iter().enumerate() {
+            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+            match block_type {
+                "text" => {
+                    if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                        pieces.push(text.to_string());
+                        has_text_payload = true;
+                    } else {
+                        pieces.push(mcp_block_descriptor(block, index));
+                    }
+                }
+                "resource" => {
+                    let resource = block.get("resource").cloned().unwrap_or_else(|| json!({}));
+                    let uri = resource.get("uri").and_then(|v| v.as_str()).unwrap_or_default();
+                    let mime = resource
+                        .get("mimeType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    if let Some(text) = resource.get("text").and_then(|v| v.as_str()) {
+                        pieces.push(format!("[MCP resource uri={} mimeType={}]\n{}", uri, mime, text));
+                        has_text_payload = true;
+                    } else {
+                        let blob_chars = resource
+                            .get("blob")
+                            .and_then(|v| v.as_str())
+                            .map(|b| b.chars().count())
+                            .unwrap_or(0);
+                        pieces.push(format!(
+                            "[MCP resource uri={} mimeType={} blob_chars={}：完整内容已持久化到本步骤 output_id]",
+                            uri, mime, blob_chars
+                        ));
+                    }
+                }
+                "resource_link" => {
+                    let field = |key: &str| {
+                        block.get(key).and_then(|v| v.as_str()).unwrap_or_default()
+                    };
+                    pieces.push(format!(
+                        "[MCP resource_link name={} title={} uri={} mimeType={} description={}]",
+                        field("name"),
+                        field("title"),
+                        field("uri"),
+                        field("mimeType"),
+                        field("description")
+                    ));
+                }
+                "image" | "audio" => {
+                    let mime = block
+                        .get("mimeType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let data_chars = block
+                        .get("data")
+                        .and_then(|v| v.as_str())
+                        .map(|d| d.chars().count())
+                        .unwrap_or(0);
+                    let annotations = if block.get("annotations").is_some() {
+                        " annotations=present"
+                    } else {
+                        ""
+                    };
+                    pieces.push(format!(
+                        "[MCP {} mimeType={} base64_chars={}{}：完整内容已持久化到本步骤 output_id]",
+                        block_type, mime, data_chars, annotations
+                    ));
+                }
+                _ => pieces.push(mcp_block_descriptor(block, index)),
+            }
+        }
+    }
+    if !has_text_payload {
+        if let Some(structured) = result.get("structuredContent") {
+            pieces.push(
+                serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string()),
+            );
+        }
+    }
+    if pieces.is_empty() {
+        return "（MCP 工具未返回模型可见 content；完整原始结果已持久化到本步骤 output_id）".to_string();
+    }
+    pieces.join("\n\n")
 }
 
 #[tauri::command]
