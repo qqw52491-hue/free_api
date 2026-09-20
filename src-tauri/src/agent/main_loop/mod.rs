@@ -2425,6 +2425,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         } else {
             "failed"
         };
+        let raw_output_text = output_text.clone();
         let output_id = crate::agent::run_trace::save_step_output_with_meta(
             state.inner(),
             &final_session_id,
@@ -2432,12 +2433,34 @@ async fn run_agent_main_loop_in_workspace_inner(
             &instruction.get_tool(),
             &instruction.description,
             outcome_str,
-            &output_text,
+            &raw_output_text,
         )
         .unwrap_or_else(|e| {
             eprintln!("⚠️ 无法保存 step_output: {}", e);
             "unknown_output_id".to_string()
         });
+        context.add_step(&instruction, &raw_output_text, &output_id);
+        let dedup = deduplicate_mcp_output(
+            state.inner(),
+            &final_session_id,
+            &result.route,
+            &instruction,
+            outcome_str,
+            &raw_output_text,
+            &run_trace_steps,
+            &mut context,
+            &output_id,
+        );
+        output_text = dedup.displayed_output.clone();
+        let canonical_output_id = dedup
+            .canonical_output_id
+            .clone()
+            .unwrap_or_else(|| output_id.clone());
+        let evidence_output_id = if dedup.call_hash.is_some() {
+            canonical_output_id.clone()
+        } else {
+            output_id.clone()
+        };
 
         // 🌟 工具执行失败时，自动沉淀到「避坑教训库 (Failed Attempts)」，供后续步骤长效避坑
         if !result.success {
@@ -2457,7 +2480,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 instruction.get_action(),
                 &instruction.get_params(),
                 short_error,
-                Some(output_id.clone()),
+                Some(evidence_output_id.clone()),
             );
         }
 
@@ -2465,15 +2488,13 @@ async fn run_agent_main_loop_in_workspace_inner(
             block.on_step_finish();
         }
 
-        context.add_step(&instruction, &output_text, &output_id);
-
         // 读取型工具：把本次读取的 output_id 回填进重复读取台账，
         // 让后续拦截回执指向持久化句柄（脱水/压缩后仍可用 task_store 定向回查）
         if result.success {
-            context.note_read_output_id(&instruction, &workspace_dir, &output_id);
+            context.note_read_output_id(&instruction, &workspace_dir, &evidence_output_id);
         }
 
-            post_step::backfill_todo_evidence(&mut context, &mut instruction, &output_id);
+            post_step::backfill_todo_evidence(&mut context, &mut instruction, &evidence_output_id);
 
             post_step::record_lesson_lineage(
                 state.inner(),
@@ -2515,6 +2536,10 @@ async fn run_agent_main_loop_in_workspace_inner(
             "status": outcome_str,
             "output": output_text.clone(),
             "output_id": output_id.clone(),
+            "mcp_call_hash": dedup.call_hash.clone(),
+            "mcp_raw_output_hash": dedup.raw_output_hash.clone(),
+            "canonical_output_id": dedup.call_hash.as_ref().map(|_| canonical_output_id.clone()),
+            "duplicate_of_step": dedup.duplicate_of_step,
             "view": result.view.clone(),
             "resource_scope_revision": context.resource_scope.revision,
             "metrics": metrics_json,

@@ -244,6 +244,17 @@ pub fn save_step_output_with_meta(
     Ok(output_id)
 }
 
+pub(crate) fn step_output_matches_hash(
+    db: &DbState,
+    session_id: &str,
+    output_id: &str,
+    expected_hash: &str,
+) -> bool {
+    get_step_output(db, session_id, output_id)
+        .map(|raw| crate::agent::context::determinism::sha256_hex(&raw) == expected_hash)
+        .unwrap_or(false)
+}
+
 pub fn get_step_output(db: &DbState, session_id: &str, output_id: &str) -> Result<String, String> {
     // 先通过 SQLite 校验 output_id 归属，再读取可能的溢出文件，避免跨 session 工件泄露。
     let raw: Option<String> = {
@@ -330,6 +341,102 @@ mod tests {
             loaded[0]["thinking"].as_str().unwrap().chars().count(),
             MAX_TRACE_THINKING_CHARS
         );
+    }
+
+    fn step_output_test_db() -> DbState {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE agent_step_logs (
+                output_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                step_id INTEGER NOT NULL,
+                raw_output TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );",
+            )
+            .unwrap();
+        DbState(Arc::new(Mutex::new(connection)))
+    }
+
+    #[test]
+    fn step_output_matches_hash_covers_inline_spill_and_missing() {
+        let db = step_output_test_db();
+        let session = "sess-hash";
+
+        let inline_body = "短结果正文".to_string();
+        let inline_id = save_step_output_with_meta(
+            &db,
+            session,
+            0,
+            "remote-http-mcp",
+            "call",
+            "succeeded",
+            &inline_body,
+        )
+        .unwrap();
+        let inline_hash = crate::agent::context::determinism::sha256_hex(&inline_body);
+        assert!(step_output_matches_hash(
+            &db,
+            session,
+            &inline_id,
+            &inline_hash
+        ));
+        assert!(!step_output_matches_hash(
+            &db, session, &inline_id, "deadbeef"
+        ));
+        assert!(!step_output_matches_hash(
+            &db,
+            session,
+            "no-such-id",
+            &inline_hash
+        ));
+        assert!(!step_output_matches_hash(
+            &db,
+            "other-session",
+            &inline_id,
+            &inline_hash
+        ));
+
+        let spilled_body = "溢出行\n".repeat(DISK_SPILL_THRESHOLD_CHARS);
+        let spilled_id = save_step_output_with_meta(
+            &db,
+            session,
+            1,
+            "remote-http-mcp",
+            "call",
+            "succeeded",
+            &spilled_body,
+        )
+        .unwrap();
+        let spill_path: String = {
+            let conn = db.0.lock().unwrap();
+            let raw: String = conn
+                .query_row(
+                    "SELECT raw_output FROM agent_step_logs WHERE output_id=?1",
+                    params![spilled_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            raw.strip_prefix("[[spilled_to_disk:")
+                .and_then(|v| v.strip_suffix("]]"))
+                .expect("超长正文必须落盘为 spill 文件")
+                .to_string()
+        };
+        let spilled_hash = crate::agent::context::determinism::sha256_hex(&spilled_body);
+        assert!(step_output_matches_hash(
+            &db,
+            session,
+            &spilled_id,
+            &spilled_hash
+        ));
+        std::fs::remove_file(&spill_path).unwrap();
+        assert!(!step_output_matches_hash(
+            &db,
+            session,
+            &spilled_id,
+            &spilled_hash
+        ));
     }
 
     #[test]

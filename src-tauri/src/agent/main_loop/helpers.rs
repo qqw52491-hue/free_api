@@ -283,3 +283,794 @@ pub(crate) fn build_path_scope_manifest(
         )
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct McpOutputDedup {
+    pub displayed_output: String,
+    pub call_hash: Option<String>,
+    pub raw_output_hash: Option<String>,
+    pub canonical_output_id: Option<String>,
+    pub duplicate_of_step: Option<i64>,
+}
+
+fn canonical_output_resident_in_history(
+    context: &context::SandwichContext,
+    canonical_output_id: &str,
+) -> bool {
+    let needle = format!("output_id: {}", canonical_output_id);
+    context.turns_history.iter().any(|msg| {
+        let Some(text) = msg.content.as_str() else {
+            return false;
+        };
+        msg.role == "user"
+            && text.starts_with("【执行输出")
+            && text.lines().any(|line| line.trim() == needle)
+            && !text.contains("完整详细数据已安全持久化至 SQLite")
+            && !text.contains("已深度压缩为句柄")
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn deduplicate_mcp_output(
+    db: &DbState,
+    session_id: &str,
+    route: &str,
+    instruction: &AgentInstruction,
+    outcome: &str,
+    raw_output: &str,
+    prior_steps: &[serde_json::Value],
+    context: &mut context::SandwichContext,
+    current_output_id: &str,
+) -> McpOutputDedup {
+    let full_result = |call_hash, raw_output_hash| McpOutputDedup {
+        displayed_output: raw_output.to_string(),
+        call_hash,
+        raw_output_hash,
+        canonical_output_id: None,
+        duplicate_of_step: None,
+    };
+    if !route.starts_with("plugin:") {
+        return full_result(None, None);
+    }
+    let call_doc = json!({
+        "tool": instruction.get_tool(),
+        "action": instruction.get_action(),
+        "params": instruction.get_params(),
+    });
+    let call_hash = context::determinism::sha256_hex(&call_doc.to_string());
+    let raw_output_hash = context::determinism::sha256_hex(raw_output);
+
+    let anchor = prior_steps.iter().rev().find_map(|step| {
+        if step.get("status").and_then(|v| v.as_str()) != Some(outcome) {
+            return None;
+        }
+        let prior_call_hash = step
+            .get("mcp_call_hash")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())?;
+        if prior_call_hash != call_hash {
+            return None;
+        }
+        let prior_raw_hash = step
+            .get("mcp_raw_output_hash")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())?;
+        if prior_raw_hash != raw_output_hash {
+            return None;
+        }
+        let canonical_id = step
+            .get("canonical_output_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                step.get("output_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            })?;
+        if !canonical_output_resident_in_history(context, canonical_id) {
+            return None;
+        }
+        if !crate::agent::run_trace::step_output_matches_hash(
+            db,
+            session_id,
+            canonical_id,
+            &raw_output_hash,
+        ) {
+            return None;
+        }
+        Some((
+            canonical_id.to_string(),
+            step.get("id").and_then(|v| v.as_i64()),
+        ))
+    });
+    let Some((canonical_id, prior_step_id)) = anchor else {
+        return full_result(Some(call_hash), Some(raw_output_hash));
+    };
+
+    let folded_text = format!(
+        "【MCP 重复结果已折叠】\n本次 MCP 调用已真实执行；规范化参数与完整结果均和本会话先前步骤完全一致。旧结果的上下文表示（全文或相同采样）仍驻留当前上下文，因此未再次注入重复全文。\ncanonical_output_id: {}\n如后续上下文压缩后确需回查，请用 task_store.search_step_output 或 get_step_output 定向取回；当前请直接基于已有证据推进，避免原样重复调用。",
+        canonical_id
+    );
+    let current_needle = format!("output_id: {}", current_output_id);
+    let current_msg = context.turns_history.iter_mut().rev().find(|msg| {
+        msg.role == "user"
+            && msg.content.as_str().is_some_and(|text| {
+                text.starts_with("【执行输出")
+                    && text.lines().any(|line| line.trim() == current_needle)
+            })
+    });
+    let Some(current_msg) = current_msg else {
+        return full_result(Some(call_hash), Some(raw_output_hash));
+    };
+    current_msg.content = json!(format!(
+        "【执行输出 (v{})】\noutput_id: {}\n{}",
+        crate::agent::context::sampling::SAMPLER_VERSION,
+        current_output_id,
+        folded_text
+    ));
+
+    McpOutputDedup {
+        displayed_output: folded_text,
+        call_hash: Some(call_hash),
+        raw_output_hash: Some(raw_output_hash),
+        canonical_output_id: Some(canonical_id),
+        duplicate_of_step: prior_step_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::sync::Mutex;
+
+    fn mcp_dedup_test_db() -> DbState {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE agent_step_logs (
+                output_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                step_id INTEGER NOT NULL,
+                raw_output TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );",
+            )
+            .unwrap();
+        DbState(Arc::new(Mutex::new(connection)))
+    }
+
+    fn mcp_instruction(params: serde_json::Value) -> AgentInstruction {
+        serde_json::from_value(json!({
+            "tool": "remote-http-mcp",
+            "action": "call_tool",
+            "params": params,
+        }))
+        .unwrap()
+    }
+
+    fn prior_step_json(
+        step_id: i64,
+        params: serde_json::Value,
+        status: &str,
+        output: &str,
+        output_id: &str,
+    ) -> serde_json::Value {
+        json!({
+            "id": step_id,
+            "tool": "remote-http-mcp",
+            "action": "call_tool",
+            "params": params,
+            "status": status,
+            "output": output,
+            "output_id": output_id,
+        })
+    }
+
+    fn mcp_prior_step_json(
+        step_id: i64,
+        params: serde_json::Value,
+        status: &str,
+        output: &str,
+        output_id: &str,
+    ) -> serde_json::Value {
+        let call_doc = json!({
+            "tool": "remote-http-mcp",
+            "action": "call_tool",
+            "params": params.clone(),
+        });
+        let mut step = prior_step_json(step_id, params, status, output, output_id);
+        step["mcp_call_hash"] = json!(context::determinism::sha256_hex(&call_doc.to_string()));
+        step["mcp_raw_output_hash"] = json!(context::determinism::sha256_hex(output));
+        step
+    }
+
+    fn persist_output(db: &DbState, step_id: usize, body: &str) -> String {
+        crate::agent::run_trace::save_step_output_with_meta(
+            db,
+            "s1",
+            step_id,
+            "remote-http-mcp",
+            "call_tool",
+            "succeeded",
+            body,
+        )
+        .unwrap()
+    }
+
+    fn exec_msg(output_id: &str, body: &str) -> String {
+        format!(
+            "【执行输出 (v{})】\noutput_id: {}\n{}",
+            crate::agent::context::sampling::SAMPLER_VERSION,
+            output_id,
+            body
+        )
+    }
+
+    fn ctx_with_messages(messages: Vec<(&str, String)>) -> context::SandwichContext {
+        let mut ctx = context::SandwichContext::new("SYS".to_string(), "GOAL".to_string());
+        for (role, content) in messages {
+            ctx.turns_history.push(context::ChatMessage {
+                role: role.to_string(),
+                content: json!(content),
+            });
+        }
+        ctx
+    }
+
+    fn ctx_after_add_step(
+        prior_msgs: Vec<(&str, String)>,
+        instruction: &AgentInstruction,
+        current_body: &str,
+        current_output_id: &str,
+    ) -> context::SandwichContext {
+        let mut ctx = ctx_with_messages(prior_msgs);
+        ctx.add_step(instruction, current_body, current_output_id);
+        ctx
+    }
+
+    fn run_dedup(
+        db: &DbState,
+        instruction: &AgentInstruction,
+        raw: &str,
+        prior: &[serde_json::Value],
+        ctx: &mut context::SandwichContext,
+        current_output_id: &str,
+    ) -> McpOutputDedup {
+        deduplicate_mcp_output(
+            db,
+            "s1",
+            "plugin:weather/get",
+            instruction,
+            "succeeded",
+            raw,
+            prior,
+            ctx,
+            current_output_id,
+        )
+    }
+
+    fn message_with_output_id<'a>(
+        ctx: &'a context::SandwichContext,
+        output_id: &str,
+    ) -> Option<&'a str> {
+        let needle = format!("output_id: {}", output_id);
+        ctx.turns_history
+            .iter()
+            .filter_map(|m| m.content.as_str())
+            .find(|text| text.lines().any(|line| line.trim() == needle))
+    }
+
+    #[test]
+    fn mcp_output_dedup_non_plugin_route_returns_full() {
+        let db = mcp_dedup_test_db();
+        let instruction = mcp_instruction(json!({"q": "x"}));
+        let mut ctx = ctx_after_add_step(Vec::new(), &instruction, "正文", "cur-1");
+        let history_len = ctx.turns_history.len();
+        let dedup = deduplicate_mcp_output(
+            &db,
+            "s1",
+            "core:local_file",
+            &instruction,
+            "succeeded",
+            "正文",
+            &[],
+            &mut ctx,
+            "cur-1",
+        );
+        assert_eq!(
+            dedup,
+            McpOutputDedup {
+                displayed_output: "正文".to_string(),
+                call_hash: None,
+                raw_output_hash: None,
+                canonical_output_id: None,
+                duplicate_of_step: None,
+            }
+        );
+        assert_eq!(ctx.turns_history.len(), history_len);
+    }
+
+    #[test]
+    fn mcp_output_dedup_first_observation_stays_full() {
+        let db = mcp_dedup_test_db();
+        let instruction = mcp_instruction(json!({"q": "x"}));
+        let mut ctx = ctx_after_add_step(Vec::new(), &instruction, "正文A", "cur-1");
+        let dedup = run_dedup(&db, &instruction, "正文A", &[], &mut ctx, "cur-1");
+        assert_eq!(dedup.displayed_output, "正文A");
+        assert!(dedup.call_hash.is_some());
+        assert!(dedup.raw_output_hash.is_some());
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(dedup.duplicate_of_step.is_none());
+        assert!(message_with_output_id(&ctx, "cur-1")
+            .unwrap()
+            .contains("正文A"));
+    }
+
+    #[test]
+    fn mcp_output_dedup_collapses_when_all_proofs_hold() {
+        let db = mcp_dedup_test_db();
+        let params = json!({"q": "shanghai"});
+        let instruction = mcp_instruction(params.clone());
+        let body = "天气结果正文";
+        let canonical_id = persist_output(&db, 0, body);
+        let current_id = persist_output(&db, 1, body);
+        let mut ctx = ctx_after_add_step(
+            vec![("user", exec_msg(&canonical_id, body))],
+            &instruction,
+            body,
+            &current_id,
+        );
+        let prior = vec![mcp_prior_step_json(
+            3,
+            params,
+            "succeeded",
+            body,
+            &canonical_id,
+        )];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert!(dedup.displayed_output.contains("【MCP 重复结果已折叠】"));
+        assert!(dedup
+            .displayed_output
+            .contains(&format!("canonical_output_id: {}", canonical_id)));
+        assert_eq!(
+            dedup.canonical_output_id.as_deref(),
+            Some(canonical_id.as_str())
+        );
+        assert_eq!(dedup.duplicate_of_step, Some(3));
+
+        assert!(message_with_output_id(&ctx, &canonical_id)
+            .unwrap()
+            .contains(body));
+        let current_text = message_with_output_id(&ctx, &current_id).unwrap();
+        assert!(current_text.contains("【MCP 重复结果已折叠】"));
+        assert!(current_text.contains(&format!("canonical_output_id: {}", canonical_id)));
+        assert!(!current_text.contains(body));
+
+        let raw_hash = context::determinism::sha256_hex(body);
+        assert!(crate::agent::run_trace::step_output_matches_hash(
+            &db,
+            "s1",
+            &current_id,
+            &raw_hash
+        ));
+    }
+
+    #[test]
+    fn mcp_output_dedup_rehydrates_when_prior_message_is_stub() {
+        let db = mcp_dedup_test_db();
+        let params = json!({"q": "shanghai"});
+        let instruction = mcp_instruction(params.clone());
+        let body = "天气结果正文";
+        let canonical_id = persist_output(&db, 0, body);
+        let current_id = persist_output(&db, 1, body);
+        let mut ctx = ctx_after_add_step(
+            vec![(
+                "user",
+                format!(
+                    "【执行输出精简句柄】\noutput_id: {}\n[提示: 已深度压缩为句柄，完整输出已存 SQLite，调用 search_step_output / get_step_output(output_id={}) 获取]",
+                    canonical_id, canonical_id
+                ),
+            )],
+            &instruction,
+            body,
+            &current_id,
+        );
+        let prior = vec![mcp_prior_step_json(
+            3,
+            params,
+            "succeeded",
+            body,
+            &canonical_id,
+        )];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(dedup.duplicate_of_step.is_none());
+        assert!(message_with_output_id(&ctx, &current_id)
+            .unwrap()
+            .contains(body));
+    }
+
+    #[test]
+    fn mcp_output_dedup_rehydrates_when_prior_message_is_dehydrated() {
+        let db = mcp_dedup_test_db();
+        let params = json!({"q": "shanghai"});
+        let instruction = mcp_instruction(params.clone());
+        let body = "天气结果正文";
+        let canonical_id = persist_output(&db, 0, body);
+        let current_id = persist_output(&db, 1, body);
+        let mut ctx = ctx_after_add_step(
+            vec![(
+                "user",
+                format!(
+                    "{}\n(完整详细数据已安全持久化至 SQLite，可通过 output_id={} 精准检索)",
+                    exec_msg(&canonical_id, &body.chars().take(60).collect::<String>()),
+                    canonical_id
+                ),
+            )],
+            &instruction,
+            body,
+            &current_id,
+        );
+        let prior = vec![mcp_prior_step_json(
+            3,
+            params,
+            "succeeded",
+            body,
+            &canonical_id,
+        )];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(message_with_output_id(&ctx, &current_id)
+            .unwrap()
+            .contains(body));
+    }
+
+    #[test]
+    fn mcp_output_dedup_archive_card_and_assistant_message_not_resident() {
+        let db = mcp_dedup_test_db();
+        let params = json!({"q": "shanghai"});
+        let instruction = mcp_instruction(params.clone());
+        let body = "天气结果正文";
+        let canonical_id = persist_output(&db, 0, body);
+        let current_id = persist_output(&db, 1, body);
+        let prior = vec![mcp_prior_step_json(
+            3,
+            params.clone(),
+            "succeeded",
+            body,
+            &canonical_id,
+        )];
+
+        let mut ctx = ctx_after_add_step(
+            vec![("assistant", exec_msg(&canonical_id, body))],
+            &instruction,
+            body,
+            &current_id,
+        );
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(message_with_output_id(&ctx, &current_id)
+            .unwrap()
+            .contains(body));
+
+        let mut ctx = ctx_after_add_step(
+            vec![(
+                "user",
+                format!("【历史归档摘要】\noutput_id: {}\n{}", canonical_id, body),
+            )],
+            &instruction,
+            body,
+            &current_id,
+        );
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(message_with_output_id(&ctx, &current_id)
+            .unwrap()
+            .contains(body));
+    }
+
+    #[test]
+    fn mcp_output_dedup_sampled_envelope_is_resident_and_folds() {
+        let db = mcp_dedup_test_db();
+        let params = json!({"q": "shanghai"});
+        let instruction = mcp_instruction(params.clone());
+        let body = "天气结果正文";
+        let canonical_id = persist_output(&db, 0, body);
+        let current_id = persist_output(&db, 1, body);
+        let mut ctx = ctx_after_add_step(
+            vec![(
+                "user",
+                format!(
+                    "【执行输出采样 (v{})】\noutput_id: {}\nestimated_tokens: 9000\ntruncated: true\n{}\n\n[宿主提示：已保存为工件]",
+                    crate::agent::context::sampling::SAMPLER_VERSION,
+                    canonical_id,
+                    body.chars().take(30).collect::<String>()
+                ),
+            )],
+            &instruction,
+            body,
+            &current_id,
+        );
+        let prior = vec![mcp_prior_step_json(
+            3,
+            params,
+            "succeeded",
+            body,
+            &canonical_id,
+        )];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert!(dedup.displayed_output.contains("【MCP 重复结果已折叠】"));
+        assert!(dedup
+            .displayed_output
+            .contains("旧结果的上下文表示（全文或相同采样）仍驻留当前上下文"));
+        assert_eq!(
+            dedup.canonical_output_id.as_deref(),
+            Some(canonical_id.as_str())
+        );
+        assert_eq!(dedup.duplicate_of_step, Some(3));
+        assert!(message_with_output_id(&ctx, &current_id)
+            .unwrap()
+            .contains("【MCP 重复结果已折叠】"));
+    }
+
+    #[test]
+    fn mcp_output_dedup_legacy_prior_without_mcp_hashes_stays_full() {
+        let db = mcp_dedup_test_db();
+        let params = json!({"q": "shanghai"});
+        let instruction = mcp_instruction(params.clone());
+        let body = "天气结果正文";
+        let canonical_id = persist_output(&db, 0, body);
+        let current_id = persist_output(&db, 1, body);
+        let mut ctx = ctx_after_add_step(
+            vec![("user", exec_msg(&canonical_id, body))],
+            &instruction,
+            body,
+            &current_id,
+        );
+        let prior = vec![prior_step_json(3, params, "succeeded", body, &canonical_id)];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(dedup.duplicate_of_step.is_none());
+        assert!(message_with_output_id(&ctx, &current_id)
+            .unwrap()
+            .contains(body));
+    }
+
+    #[test]
+    fn mcp_output_dedup_fails_open_when_current_message_missing() {
+        let db = mcp_dedup_test_db();
+        let params = json!({"q": "shanghai"});
+        let instruction = mcp_instruction(params.clone());
+        let body = "天气结果正文";
+        let canonical_id = persist_output(&db, 0, body);
+        let prior = vec![mcp_prior_step_json(
+            3,
+            params.clone(),
+            "succeeded",
+            body,
+            &canonical_id,
+        )];
+
+        let mut ctx = ctx_with_messages(vec![("user", exec_msg(&canonical_id, body))]);
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, "cur-absent");
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(dedup.duplicate_of_step.is_none());
+        assert!(message_with_output_id(&ctx, &canonical_id)
+            .unwrap()
+            .contains(body));
+
+        let mut ctx = ctx_with_messages(vec![
+            ("user", exec_msg(&canonical_id, body)),
+            (
+                "user",
+                format!("【历史归档摘要】\noutput_id: cur-bad\n{}", body),
+            ),
+        ]);
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, "cur-bad");
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(message_with_output_id(&ctx, "cur-bad")
+            .unwrap()
+            .contains("【历史归档摘要】"));
+    }
+
+    #[test]
+    fn mcp_output_dedup_fails_open_when_persistence_missing_or_mismatched() {
+        let db = mcp_dedup_test_db();
+        let params = json!({"q": "shanghai"});
+        let instruction = mcp_instruction(params.clone());
+        let body = "天气结果正文";
+
+        let current_id = persist_output(&db, 1, body);
+        let mut ctx = ctx_after_add_step(
+            vec![("user", exec_msg("ghost-output-id", body))],
+            &instruction,
+            body,
+            &current_id,
+        );
+        let prior = vec![mcp_prior_step_json(
+            3,
+            params.clone(),
+            "succeeded",
+            body,
+            "ghost-output-id",
+        )];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(message_with_output_id(&ctx, &current_id)
+            .unwrap()
+            .contains(body));
+
+        let canonical_id = persist_output(&db, 0, "已被覆盖的不同正文");
+        let mut ctx = ctx_after_add_step(
+            vec![("user", exec_msg(&canonical_id, "已被覆盖的不同正文"))],
+            &instruction,
+            body,
+            &current_id,
+        );
+        let prior = vec![mcp_prior_step_json(
+            3,
+            params,
+            "succeeded",
+            body,
+            &canonical_id,
+        )];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(message_with_output_id(&ctx, &current_id)
+            .unwrap()
+            .contains(body));
+    }
+
+    #[test]
+    fn mcp_output_dedup_different_params_or_output_stays_full() {
+        let db = mcp_dedup_test_db();
+        let body = "天气结果正文";
+        let canonical_id = persist_output(&db, 0, body);
+        let current_id = persist_output(&db, 1, body);
+        let instruction = mcp_instruction(json!({"q": "shanghai"}));
+        let mut ctx = ctx_after_add_step(
+            vec![("user", exec_msg(&canonical_id, body))],
+            &instruction,
+            body,
+            &current_id,
+        );
+
+        let prior = vec![mcp_prior_step_json(
+            3,
+            json!({"q": "beijing"}),
+            "succeeded",
+            body,
+            &canonical_id,
+        )];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+
+        let prior = vec![mcp_prior_step_json(
+            3,
+            json!({"q": "shanghai"}),
+            "succeeded",
+            "另一份结果正文",
+            &canonical_id,
+        )];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+
+        let prior = vec![mcp_prior_step_json(
+            3,
+            json!({"q": "shanghai"}),
+            "failed",
+            body,
+            &canonical_id,
+        )];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(dedup.displayed_output, body);
+        assert!(dedup.canonical_output_id.is_none());
+        assert!(message_with_output_id(&ctx, &current_id)
+            .unwrap()
+            .contains(body));
+    }
+
+    #[test]
+    fn mcp_output_dedup_call_fingerprint_normalizes_key_order() {
+        let db = mcp_dedup_test_db();
+        let mut ctx = context::SandwichContext::new("SYS".to_string(), "GOAL".to_string());
+        let route = "plugin:weather/get";
+        let a = deduplicate_mcp_output(
+            &db,
+            "s1",
+            route,
+            &mcp_instruction(json!({"a": 1, "b": 2})),
+            "succeeded",
+            "x",
+            &[],
+            &mut ctx,
+            "cur-a",
+        );
+        let b = deduplicate_mcp_output(
+            &db,
+            "s1",
+            route,
+            &mcp_instruction(json!({"b": 2, "a": 1})),
+            "succeeded",
+            "x",
+            &[],
+            &mut ctx,
+            "cur-b",
+        );
+        assert_eq!(a.call_hash, b.call_hash);
+
+        let c = deduplicate_mcp_output(
+            &db,
+            "s1",
+            route,
+            &mcp_instruction(json!({"k": [1, 2]})),
+            "succeeded",
+            "x",
+            &[],
+            &mut ctx,
+            "cur-c",
+        );
+        let d = deduplicate_mcp_output(
+            &db,
+            "s1",
+            route,
+            &mcp_instruction(json!({"k": [2, 1]})),
+            "succeeded",
+            "x",
+            &[],
+            &mut ctx,
+            "cur-d",
+        );
+        assert_ne!(c.call_hash, d.call_hash);
+    }
+
+    #[test]
+    fn mcp_output_dedup_folded_row_chains_to_original_canonical() {
+        let db = mcp_dedup_test_db();
+        let params = json!({"q": "shanghai"});
+        let instruction = mcp_instruction(params.clone());
+        let body = "天气结果正文";
+        let canonical_id = persist_output(&db, 0, body);
+        let current_id = persist_output(&db, 1, body);
+        let mut ctx = ctx_after_add_step(
+            vec![("user", exec_msg(&canonical_id, body))],
+            &instruction,
+            body,
+            &current_id,
+        );
+
+        let mut folded_row =
+            mcp_prior_step_json(2, params.clone(), "succeeded", body, "folded-out-id");
+        folded_row["output"] = json!(format!(
+            "【MCP 重复结果已折叠】\ncanonical_output_id: {}",
+            canonical_id
+        ));
+        folded_row["canonical_output_id"] = json!(canonical_id);
+        let prior = vec![
+            mcp_prior_step_json(1, params, "succeeded", body, &canonical_id),
+            folded_row,
+        ];
+        let dedup = run_dedup(&db, &instruction, body, &prior, &mut ctx, &current_id);
+        assert_eq!(
+            dedup.canonical_output_id.as_deref(),
+            Some(canonical_id.as_str())
+        );
+        assert_eq!(dedup.duplicate_of_step, Some(2));
+        assert!(dedup.displayed_output.contains("【MCP 重复结果已折叠】"));
+        assert!(message_with_output_id(&ctx, &current_id)
+            .unwrap()
+            .contains(&format!("canonical_output_id: {}", canonical_id)));
+    }
+}
