@@ -285,6 +285,15 @@ impl SandwichContext {
             if after_len != before {
                 dehydrated_count += 1;
             }
+            // 手册脱水的配套动作：摘除已加载标记，否则 has_tool_manual
+            // 会把已脱水的手册当作仍驻留，next_tool_hint 永远重载不回来。
+            if let serde_json::Value::String(s) = &msg.content {
+                if let Some(key) =
+                    crate::agent::context::assembler::dehydrated_manual_key(s)
+                {
+                    self.fetched_tools.remove(&key);
+                }
+            }
         }
         let after = self.history_estimated_tokens();
         if dehydrated_count > 0 && after < current_tokens.saturating_sub(2_000) {
@@ -365,6 +374,13 @@ impl SandwichContext {
         let dehydrate_limit = self.turns_history.len().saturating_sub(protected_from_back);
         for msg in self.turns_history.iter_mut().take(dehydrate_limit) {
             *msg = crate::agent::context::assembler::dehydrate_historical_turn(msg);
+            if let serde_json::Value::String(s) = &msg.content {
+                if let Some(key) =
+                    crate::agent::context::assembler::dehydrated_manual_key(s)
+                {
+                    self.fetched_tools.remove(&key);
+                }
+            }
         }
         let tokens_after_dehydrate = self.history_estimated_tokens();
         if tokens_after_dehydrate <= budget.high_watermark_tokens {
