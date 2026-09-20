@@ -168,6 +168,14 @@ pub(crate) const CAS_BLOB_PREFIX: &str = "[[cas_blob:";
 pub(crate) const CAS_BLOB_SUFFIX: &str = "]]";
 
 pub fn get_outputs_dir() -> std::path::PathBuf {
+    // 测试/评测可注入隔离目录：blob 落盘与孤儿清扫若指向真实数据目录，
+    // 测试会把真实会话的产物当孤儿物理删除（实测全量套件删了 137 个 blob）。
+    if let Ok(dir) = std::env::var("FREE_API_OUTPUTS_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir);
+        }
+    }
     dirs_next::data_dir()
         .map(|d| d.join("free-api-chat").join("outputs"))
         .unwrap_or_else(|| std::path::PathBuf::from("./data/outputs"))
@@ -462,8 +470,32 @@ mod tests {
         DbState(Arc::new(Mutex::new(connection)))
     }
 
+    /// 序列化所有触碰 outputs 目录的用例：env 覆盖是进程全局的，
+    /// 并行测试须排队并各自持有独立临时目录，互不扫到对方 blob。
+    static OUTPUTS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct IsolatedOutputs(std::path::PathBuf);
+    impl IsolatedOutputs {
+        fn new() -> (std::sync::MutexGuard<'static, ()>, Self) {
+            let guard = OUTPUTS_TEST_LOCK.lock().unwrap();
+            let dir = std::env::temp_dir().join(format!(
+                "frc_outputs_{}_{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::env::set_var("FREE_API_OUTPUTS_DIR", &dir);
+            (guard, Self(dir))
+        }
+    }
+    impl Drop for IsolatedOutputs {
+        fn drop(&mut self) {
+            std::env::remove_var("FREE_API_OUTPUTS_DIR");
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn step_output_matches_hash_covers_inline_spill_and_missing() {
+        let (_outputs_guard, _iso_outputs) = IsolatedOutputs::new();
         let db = step_output_test_db();
         let session = "sess-hash";
 
@@ -546,6 +578,7 @@ mod tests {
 
     #[test]
     fn cas_blob_shares_one_file_across_duplicate_outputs() {
+        let (_outputs_guard, _iso_outputs) = IsolatedOutputs::new();
         let db = step_output_test_db();
         let session = "sess-cas";
         let body = "重复的大正文\n".repeat(DISK_SPILL_THRESHOLD_CHARS);
