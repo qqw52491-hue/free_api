@@ -1095,3 +1095,39 @@
         assert!(cp.plan_review_batch.is_complete());
         assert!(cp.plan_reviewer_consumed, "名单全部划完后屏障应放行");
     }
+
+    #[test]
+    fn reconcile_stage_review_runs_prunes_dead_inflight_orphans() {
+        // 阶段审查同款保险丝：run_ids 里挂着"已终态且已消费"的孤儿会让
+        // has_in_flight_stage_review() 永远为真，后续阶段审查全部派不出去。
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_child_runs (
+                id TEXT PRIMARY KEY, status TEXT NOT NULL, consumed_at TEXT);
+             INSERT INTO agent_child_runs VALUES
+                ('stage-dead', 'invalid_output', 'x'),
+                ('stage-pending', 'succeeded', NULL),
+                ('stage-running', 'running', NULL);",
+        )
+        .unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("run-stage-heal".to_string(), &ctx);
+        cp.stage_review_run_ids = vec![
+            "stage-dead".to_string(),
+            "stage-pending".to_string(),
+            "stage-running".to_string(),
+            "stage-ghost".to_string(),
+        ];
+        cp.stage_review_rebuttal_run_id = Some("stage-dead".to_string());
+
+        let pruned = cp.reconcile_stage_review_runs(&db);
+        assert_eq!(pruned, 2, "stage-dead 与台账不存在的 stage-ghost 应被清掉");
+        assert!(!cp.stage_review_run_ids.contains(&"stage-dead".to_string()));
+        assert!(!cp.stage_review_run_ids.contains(&"stage-ghost".to_string()));
+        assert!(cp.stage_review_run_ids.contains(&"stage-pending".to_string()));
+        assert!(cp.stage_review_run_ids.contains(&"stage-running".to_string()));
+        assert!(cp.stage_review_rebuttal_run_id.is_none(), "rebuttal 指针同步清掉");
+        assert!(cp.has_in_flight_stage_review(), "真在途成员仍在");
+    }

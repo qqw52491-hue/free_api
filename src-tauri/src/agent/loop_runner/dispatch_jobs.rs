@@ -180,27 +180,7 @@ pub(super) async fn dispatch_wait_jobs(
     }))
 }
 
-/// wait_jobs 输出的模型可见投影：保存与展示分离——完整 result_json 已持久化在
-/// agent_child_runs，模型侧只给有界视图。writer 走与主循环自动注入相同的结构化
-/// 视图（diff 已由 build_changed_files 分级降级，全量补丁经 patch_ref 工件取回）；
-/// 其余类型按字符硬上限截断，防止一个巨型回执淹掉后续所有上下文。
+/// wait_jobs 输出的模型可见投影（委托统一实现 BackgroundJobResult::model_projection）。
 fn project_job_result_for_model(job: &crate::agent::job_engine::BackgroundJobResult) -> String {
-    const JOB_RESULT_PROJECTION_MAX_CHARS: usize = 16_000;
-    if job.result_json.is_empty() {
-        return "（无附加输出）".to_string();
-    }
-    if job.job_type == "child_writer" {
-        if let Ok(wr) = serde_json::from_str::<crate::agent::child_writer::WriterResult>(&job.result_json) {
-            return crate::agent::child_writer::writer_result_model_view(&wr);
-        }
-    }
-    let total = job.result_json.chars().count();
-    if total <= JOB_RESULT_PROJECTION_MAX_CHARS {
-        return job.result_json.clone();
-    }
-    let head: String = job.result_json.chars().take(JOB_RESULT_PROJECTION_MAX_CHARS).collect();
-    format!(
-        "{}\n…（输出共 {} 字符，已截断展示；完整结果持久化于子任务账本 child_run_id={}，可经 resume_child 追问复查）",
-        head, total, job.job_id
-    )
+    job.model_projection()
 }

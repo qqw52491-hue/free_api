@@ -10,6 +10,32 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tauri::AppHandle;
 
+/// agent_child_runs 的终态枚举（'running' 以外全部）
+const TERMINAL_RUN_STATUSES: [&str; 6] = [
+    "succeeded",
+    "timed_out",
+    "failed",
+    "cancelled",
+    "interrupted",
+    "invalid_output",
+];
+
+/// 台账孤儿判定：该 run 永远不可能再产生交付动作——
+/// 「已终态且回执已消费」= 交付/失败记账被绕过（如历史 failover 漏换 id、
+/// 损坏回执被丢弃）；「台账行缺失」= 从未真正存在。
+/// 已终态但回执未消费返回 false：回执仍在信箱等正常消费，不抢判。
+fn child_run_is_delivery_orphan(conn: &rusqlite::Connection, run_id: &str) -> bool {
+    match conn.query_row(
+        "SELECT status, consumed_at FROM agent_child_runs WHERE id = ?1",
+        rusqlite::params![run_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+    ) {
+        Err(rusqlite::Error::QueryReturnedNoRows) => true,
+        Ok((status, Some(_consumed_at))) => TERMINAL_RUN_STATUSES.contains(&status.as_str()),
+        _ => false,
+    }
+}
+
 impl AgentCheckpoint {
 
     /// Tech Lead 1v1 定稿修订：从审查交付 extra 提取 revised_* 扁平字段。
@@ -147,35 +173,52 @@ impl AgentCheckpoint {
             return 0;
         }
         let Ok(conn) = db.0.lock() else { return 0 };
-        const TERMINAL: [&str; 6] = [
-            "succeeded",
-            "timed_out",
-            "failed",
-            "cancelled",
-            "interrupted",
-            "invalid_output",
-        ];
         let mut pruned = 0;
         for id in pending {
-            let row = conn.query_row(
-                "SELECT status, consumed_at FROM agent_child_runs WHERE id = ?1",
-                rusqlite::params![id],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-            );
-            let orphan_reason = match row {
-                Err(rusqlite::Error::QueryReturnedNoRows) => Some("ledger_row_missing"),
-                Ok((status, Some(_consumed_at))) if TERMINAL.contains(&status.as_str()) => {
-                    Some("consumed_terminal_orphan")
-                }
-                _ => None,
-            };
-            if let Some(reason) = orphan_reason {
-                self.plan_review_batch.record_failure(&id, reason);
+            if child_run_is_delivery_orphan(&conn, &id) {
+                self.plan_review_batch
+                    .record_failure(&id, "delivery_orphan");
                 pruned += 1;
             }
         }
         if pruned > 0 && self.plan_review_batch.is_complete() {
             self.plan_reviewer_consumed = true;
+        }
+        pruned
+    }
+
+    /// 阶段审查在途名单自愈（与审查批次同款的保险丝）。
+    /// stage_review_run_ids / rebuttal 指针里挂着「已终态且已消费」或
+    /// 台账不存在的 run_id 时清掉——孤儿在途 id 会让
+    /// has_in_flight_stage_review() 永远为真，后续所有阶段审查都派不出去。
+    /// 只清在途名单，不动 blockers 计数：blocker 的结清走对质/仲裁/
+    /// 僵尸治理原路径，不在这里抢判。返回清理数量。
+    pub fn reconcile_stage_review_runs(&mut self, db: &DbState) -> usize {
+        let mut candidates: Vec<String> = self.stage_review_run_ids.clone();
+        for extra in [
+            self.stage_review_run_id.as_ref(),
+            self.stage_review_rebuttal_run_id.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !candidates.contains(extra) {
+                candidates.push(extra.clone());
+            }
+        }
+        if candidates.is_empty() {
+            return 0;
+        }
+        let Ok(conn) = db.0.lock() else { return 0 };
+        let mut pruned = 0;
+        for id in candidates {
+            if child_run_is_delivery_orphan(&conn, &id) {
+                self.remove_stage_review_run(&id);
+                if self.stage_review_rebuttal_run_id.as_deref() == Some(id.as_str()) {
+                    self.stage_review_rebuttal_run_id = None;
+                }
+                pruned += 1;
+            }
         }
         pruned
     }

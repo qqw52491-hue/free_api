@@ -70,6 +70,38 @@ impl BackgroundJobResult {
             raw_text: Some(self.result_json.clone()),
         }
     }
+
+    /// 模型可见有界投影：保存与展示分离——完整 result_json 持久化在任务
+    /// 账本里，模型侧只给收敛视图。writer 走结构化视图（diff 已由
+    /// build_changed_files 分级降级，全量补丁经 patch_ref 工件取回）；
+    /// 其余类型按字符硬上限截断，防止一个巨型回执淹掉后续所有上下文。
+    /// wait_jobs 输出与主循环后台信箱倾倒共用本投影。
+    pub fn model_projection(&self) -> String {
+        const JOB_RESULT_PROJECTION_MAX_CHARS: usize = 16_000;
+        if self.result_json.is_empty() {
+            return "（无附加输出）".to_string();
+        }
+        if self.job_type == "child_writer" {
+            if let Ok(wr) =
+                serde_json::from_str::<crate::agent::child_writer::WriterResult>(&self.result_json)
+            {
+                return crate::agent::child_writer::writer_result_model_view(&wr);
+            }
+        }
+        let total = self.result_json.chars().count();
+        if total <= JOB_RESULT_PROJECTION_MAX_CHARS {
+            return self.result_json.clone();
+        }
+        let head: String = self
+            .result_json
+            .chars()
+            .take(JOB_RESULT_PROJECTION_MAX_CHARS)
+            .collect();
+        format!(
+            "{}\n…（输出共 {} 字符，已截断展示；完整结果持久化于任务账本 job_id={}）",
+            head, total, self.job_id
+        )
+    }
 }
 
 /// 登记并启动一个新的后台异步任务，返回 job_id

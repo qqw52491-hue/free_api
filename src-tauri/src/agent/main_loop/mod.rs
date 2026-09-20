@@ -978,7 +978,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                         job.title,
                         job.status,
                         job.duration_ms,
-                        if job.result_json.is_empty() { "（无附加输出）" } else { &job.result_json }
+                        job.model_projection()
                     ));
                     if let Some(ref err) = job.error_kind {
                         job_injection.push_str(&format!("异常类别: {}\n", err));
@@ -1000,12 +1000,15 @@ async fn run_agent_main_loop_in_workspace_inner(
             );
         }
 
-        // 齐套屏障自愈对账（保险丝）：点名前核对台账，凡是"已终态且已消费"
-        // 却仍挂在 expected 的 run_id 一律按失败划掉——防止任何记账漂移
-        // 让屏障等一个永远不会交付的死人。正常路径下永远返回 0，只在
+        // 齐套屏障+阶段审查在途名单自愈对账（保险丝）：点名前核对台账，
+        // 凡是"已终态且已消费"却仍挂在名单的 run_id 一律划掉——防止任何
+        // 记账漂移让门禁等一个永远不会交付的死人。正常路径返回 0，只在
         // 交付/失败记账被绕过的异常场景兜底生效。
         if !checkpoint.plan_reviewer_consumed && !checkpoint.plan_review_batch.is_empty() {
             checkpoint.reconcile_plan_reviewer_batch(state.inner());
+        }
+        if checkpoint.has_in_flight_stage_review() {
+            checkpoint.reconcile_stage_review_runs(state.inner());
         }
         let resume_instruction = recovered_instruction.take();
         // 每轮规划前把方案门禁状态投影进上下文底部状态卡：模型在决策时即可见
