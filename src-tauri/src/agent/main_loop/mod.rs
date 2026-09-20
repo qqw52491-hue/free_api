@@ -247,6 +247,12 @@ async fn run_agent_main_loop_in_workspace_inner(
                 per_plugin.push((p_name.clone(), names));
             }
         }
+        // 确定性排序：HashMap 遍历顺序跨进程不稳定，决策指令每轮注入，
+        // 乱序会破坏跨会话的前缀缓存复用与输出可复现性。
+        per_plugin.sort_by(|a, b| a.0.cmp(&b.0));
+        for (_, names) in &mut per_plugin {
+            names.sort();
+        }
         if total_tool_count > MCP_INDEX_NAME_LIMIT {
             for (p_name, names) in &per_plugin {
                 mcp_lines.push(format!("  * {}({} 个工具)", p_name, names.len()));
@@ -283,6 +289,8 @@ async fn run_agent_main_loop_in_workspace_inner(
         } else {
             skills_dir_dev
         };
+        // 登记解析结果：capability_index 等无 AppHandle 的链路复用同一目录口径
+        crate::agent::skill_context::register_app_skills_dir(skills_dir.clone());
         // 全量动态扫描 prompts/skills/ 目录下所有 Skill 手册并提取/升级智能能力卡
         crate::agent::skill_context::skill_catalog_string(&skills_dir, &[], maybe_model_cfg)
     };
@@ -363,7 +371,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 ));
             }
             if project_resources.len() > MAX_MANIFEST_RESOURCES {
-                manifest_text.push_str(&format!("  - …另有 {} 个未列出，调用 `project_resources.list_resources()` 取回完整清单。\n", project_resources.len() - MAX_MANIFEST_RESOURCES));
+                manifest_text.push_str(&format!("  - …另有 {} 个未列出，调用 `project_resources.list_resources(offset?, limit?)` 分页取回完整清单。\n", project_resources.len() - MAX_MANIFEST_RESOURCES));
             }
             manifest_text.push_str("- 提示：调用 `project_resources.read_resource(resource_id)` 可直接读取上述文件内容；在工作区发现或生成新核心交付物时可调用 `project_resources.register_resource(path, label)` 登记为跨会话共享资源。\n");
         }
@@ -1566,6 +1574,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             registry_state.inner(),
             &mut context,
             &instruction,
+            &workspace_dir,
         )
         .await;
 

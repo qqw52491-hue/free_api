@@ -206,7 +206,26 @@ pub(crate) fn sweep_orphan_output_blobs(
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("log") {
+        if !path.is_file() {
+            continue;
+        }
+        // 崩溃残留的未完成临时文件（.<hash>.tmp-<uuid>）：永远不会被引用。
+        // 留 10 分钟宽限期，避免删掉正在写入的对端临时文件。
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with('.') && name.contains(".tmp-") {
+                let stale = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > std::time::Duration::from_secs(600));
+                if stale && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+                continue;
+            }
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("log") {
             continue;
         }
         let Some(hash) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -238,10 +257,11 @@ pub fn save_step_output_with_meta(
     outcome: &str,
     raw_output: &str,
 ) -> Result<String, String> {
-    let conn = db.0.lock().map_err(|error| error.to_string())?;
     let output_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
+    // blob 落盘必须先于获取 SQLite 锁完成：大文件写盘耗时不可控，
+    // 在锁内做文件 IO 会阻塞同一进程的其他数据库读写者。
     let sqlite_content = if raw_output.chars().count() > DISK_SPILL_THRESHOLD_CHARS {
         let outputs_dir = get_outputs_dir();
         let blobs_dir = outputs_dir.join("blobs");
@@ -263,6 +283,8 @@ pub fn save_step_output_with_meta(
     } else {
         raw_output.to_string()
     };
+
+    let conn = db.0.lock().map_err(|error| error.to_string())?;
 
     conn.execute(
         "INSERT INTO agent_step_logs (output_id, session_id, step_id, raw_output, created_at)

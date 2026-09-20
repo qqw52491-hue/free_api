@@ -133,8 +133,21 @@ pub(crate) fn dispatch_project_resources(
         "list_resources" => {
             match crate::commands::projects::project_resources_for_session(&conn, session_id) {
                 Ok(resources) => {
-                    let projection = resources
+                    // 提示词承诺"按需分页取回"：offset/limit 必须真实生效，
+                    // 不传参数时返回全量（登记量小的常态路径行为不变）。
+                    let total = resources.len();
+                    let offset = params
+                        .get("offset")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    let limit = params
+                        .get("limit")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|v| v as usize);
+                    let page = resources
                         .into_iter()
+                        .skip(offset)
+                        .take(limit.unwrap_or(usize::MAX))
                         .map(|resource| {
                             json!({
                                 "resource_id": resource.resource_id,
@@ -145,8 +158,15 @@ pub(crate) fn dispatch_project_resources(
                             })
                         })
                         .collect::<Vec<_>>();
+                    let has_more = offset.saturating_add(page.len()) < total;
                     DispatchResult { view: None,
-                        stdout: json!({"resources": projection}).to_string(),
+                        stdout: json!({
+                            "resources": page,
+                            "total": total,
+                            "offset": offset,
+                            "has_more": has_more,
+                        })
+                        .to_string(),
                         stderr: String::new(),
                         success: true,
                         route: "internal:project_resources/list".to_string(),
@@ -252,7 +272,7 @@ pub(crate) fn dispatch_project_resources(
         _ => DispatchResult { view: None,
             stdout: String::new(),
             stderr:
-                "project_resources 支持 list_resources()、read_resource(resource_id: string) 与 register_resource(path: string, label?: string)。"
+                "project_resources 支持 list_resources(offset?, limit?)、read_resource(resource_id: string) 与 register_resource(path: string, label?: string)。"
                     .to_string(),
             success: false,
             route: "host_rejection:project_resource_unknown_action".to_string(),

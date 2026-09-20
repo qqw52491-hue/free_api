@@ -82,17 +82,20 @@ fn collect_entries(
         });
     }
 
-    // 3. 文件系统 Skill（应用资源目录候选路径 + 工作区 skills/ 目录）
-    let mut skill_dirs = vec![
-        std::path::PathBuf::from("src-tauri/prompts/skills"),
-        std::path::PathBuf::from("prompts/skills"),
-        std::path::PathBuf::from("../src-tauri/prompts/skills"),
-    ];
+    // 3. 文件系统 Skill（工作区 skills/ + 应用资源目录，与 tool_manual
+    //    的加载候选路径共用同一解析口径：索引覆盖即加载覆盖）。
+    //    同名 Skill 按加载优先级去重——工作区优先于应用内置。
+    let mut skill_dirs: Vec<std::path::PathBuf> = Vec::new();
     if let Some(root) = workspace_root {
         skill_dirs.push(root.join("skills"));
     }
+    skill_dirs.extend(crate::agent::skill_context::known_app_skills_dirs());
+    let mut seen_skills = std::collections::HashSet::new();
     for dir in skill_dirs {
         for (name, summary) in crate::agent::skill_context::skill_index_entries(&dir) {
+            if !seen_skills.insert(name.clone()) {
+                continue;
+            }
             entries.push(CapabilityEntry {
                 kind: "skill",
                 namespace: dir.display().to_string(),

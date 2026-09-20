@@ -1,8 +1,7 @@
+use crate::agent::context::determinism::sha256_hex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 /// 无进展重复的运行时检测与策略级提示。
 ///
@@ -20,7 +19,7 @@ pub struct NoProgressTracker {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct NoProgressEntry {
     occurrences: u32,
-    last_fingerprint: u64,
+    last_fingerprint: String,
     consecutive_same: u32,
     /// 一次性提示标记：同一签名连续重复的提示只发一次，
     /// 直到输出指纹变化（新证据/新失败方式）才复位——
@@ -39,17 +38,18 @@ const MAX_TRACKED_SIGNATURES: usize = 64;
 /// 输出指纹必须覆盖完整正文：只取头部会把「前缀相同、尾部状态不同」
 /// 的两个结果误判成相同证据（例如 status: running → completed 的轮询）。
 /// 提示文案声称"相同结果"，证据就必须真的相同。
-fn output_fingerprint(success: bool, output: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    success.hash(&mut hasher);
-    output.hash(&mut hasher);
-    hasher.finish()
+/// 用 SHA-256 而非 DefaultHasher：64 位非加密哈希在超大输出上碰撞概率
+/// 不可忽视，且指纹落进 serde 持久化状态后跨进程仍须稳定。
+fn output_fingerprint(success: bool, output: &str) -> String {
+    sha256_hex(&serde_json::json!({"success": success, "output": output}).to_string())
 }
 
-/// 参数签名使用完整序列化：serde_json::Map 是 BTreeMap，to_string 自带
+/// 参数签名使用完整序列化再哈希：serde_json::Map 是 BTreeMap，to_string 自带
 /// 键序规范化；截断参数会把尾部不同的调用折叠成同一签名。
+/// 签名哈希后保存——直接把完整参数 JSON 当 HashMap key 会让单条参数
+/// 无界占内存（条目数有界、单条长度无界等于整体无界）。
 fn action_signature(tool: &str, params: &Value) -> String {
-    format!("{} | {}", tool, params.to_string())
+    sha256_hex(&serde_json::json!({"tool": tool, "params": params}).to_string())
 }
 
 impl NoProgressTracker {

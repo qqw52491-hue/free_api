@@ -17,6 +17,7 @@ pub async fn load_tool_manual_for_next_step(
     registry_state: &Arc<Mutex<PluginRegistry>>,
     context: &mut SandwichContext,
     instruction: &AgentInstruction,
+    workspace_root: &std::path::Path,
 ) {
     let targets = instruction.get_next_tool_hints();
     if targets.is_empty() {
@@ -49,6 +50,7 @@ pub async fn load_tool_manual_for_next_step(
             &tool_key,
             is_explicit,
             &resource_dir,
+            workspace_root,
             registry_state,
             context,
         )
@@ -61,11 +63,19 @@ async fn load_single_tool_manual(
     tool_key: &str,
     is_explicit_hint: bool,
     resource_dir: &std::path::Path,
+    workspace_root: &std::path::Path,
     registry_state: &Arc<Mutex<PluginRegistry>>,
     context: &mut SandwichContext,
 ) {
+    // 含 "/" 的目标是 "插件/工具" 精确粒度，必须直通 registry：
+    // 若先做本地文件手册查找，恰好同名的 <插件>.md Skill 会返回
+    // 文档而不是 MCP 工具 Schema（名称碰撞）。
+    let is_exact_mcp_target = target.contains('/');
     let tool_filename = format!("{}.md", tool_key);
+    // 与 capability_index 的 Skill 索引口径保持一致：
+    // 工作区 skills/ 与应用资源 skills/ 都可被搜索到，也必须可加载。
     let candidate_paths = [
+        workspace_root.join("skills").join(&tool_filename),
         std::path::PathBuf::from("src-tauri/prompts/tools").join(&tool_filename),
         std::path::PathBuf::from("prompts/tools").join(&tool_filename),
         std::path::PathBuf::from("../src-tauri/prompts/tools").join(&tool_filename),
@@ -77,10 +87,12 @@ async fn load_single_tool_manual(
     ];
 
     let mut tool_detail = String::new();
-    for cp in &candidate_paths {
-        if let Ok(content) = std::fs::read_to_string(cp) {
-            tool_detail = content;
-            break;
+    if !is_exact_mcp_target {
+        for cp in &candidate_paths {
+            if let Ok(content) = std::fs::read_to_string(cp) {
+                tool_detail = content;
+                break;
+            }
         }
     }
     let mut hint_miss_feedback: Option<String> = None;

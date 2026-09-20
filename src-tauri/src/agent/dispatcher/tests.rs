@@ -685,3 +685,65 @@
         assert!(project_mcp_durable_output("{\"kind\":\"other\"}").is_none());
         assert!(project_mcp_durable_output("{broken json").is_none());
     }
+
+    #[test]
+    fn project_resources_list_supports_offset_limit_pagination() {
+        // 提示词承诺"按需分页取回"，工具必须真实支持 offset/limit。
+        let base = std::env::temp_dir().join(format!("free-api-res-page-{}", uuid::Uuid::new_v4()));
+        let root = base.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..5 {
+            std::fs::write(root.join(format!("r{i}.md")), "x").unwrap();
+        }
+        let conn = init_db(&base.join("test.db")).expect("init db");
+        let project = crate::commands::projects::create_project_row(
+            &conn,
+            "分页项目",
+            root.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        let session = crate::commands::projects::create_project_session_row(
+            &conn,
+            &project.id,
+            "分页会话",
+            "model-a",
+        )
+        .unwrap();
+        for i in 0..5 {
+            crate::commands::projects::add_project_resource_row(
+                &conn,
+                &project.id,
+                root.join(format!("r{i}.md")).to_string_lossy().as_ref(),
+            )
+            .unwrap();
+        }
+        let db = DbState(Arc::new(Mutex::new(conn)));
+
+        // 无参数：全量返回 + total/has_more 元数据
+        let all = crate::agent::dispatcher::project_dispatch::dispatch_project_resources(
+            &db,
+            &session.id,
+            "list_resources",
+            &json!({}),
+        );
+        assert!(all.success);
+        let payload: serde_json::Value = serde_json::from_str(&all.stdout).unwrap();
+        assert_eq!(payload["total"], 5);
+        assert_eq!(payload["has_more"], false);
+        assert_eq!(payload["resources"].as_array().unwrap().len(), 5);
+
+        // offset+limit 分页生效
+        let page = crate::agent::dispatcher::project_dispatch::dispatch_project_resources(
+            &db,
+            &session.id,
+            "list_resources",
+            &json!({"offset": 2, "limit": 2}),
+        );
+        let payload: serde_json::Value = serde_json::from_str(&page.stdout).unwrap();
+        assert_eq!(payload["resources"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["total"], 5);
+        assert_eq!(payload["offset"], 2);
+        assert_eq!(payload["has_more"], true);
+
+        let _ = std::fs::remove_dir_all(base);
+    }

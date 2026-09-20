@@ -348,6 +348,37 @@ fn rule_based_skill_summary(name: &str, content: &str) -> (String, bool) {
     (rule_summary, false)
 }
 
+/// 已登记的应用 Skill 目录：提示词装配时按 resource_dir/开发相对路径
+/// 解析一次并登记；此后无 AppHandle 的链路（capability_index 等）
+/// 与目录装配共用同一解析结果，保证「搜得到 ⇒ 能加载」。
+static REGISTERED_APP_SKILLS_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn register_app_skills_dir(dir: PathBuf) {
+    let _ = REGISTERED_APP_SKILLS_DIR.set(dir);
+}
+
+/// 应用内置 Skill 可能存在的目录集合：已登记目录优先，其余相对候选
+/// 与 tool_manual 的加载路径保持一致——索引覆盖范围必须与加载范围
+/// 相同，不能出现搜得到却找不到文件、或找得到文件却搜不到。
+pub fn known_app_skills_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = REGISTERED_APP_SKILLS_DIR
+        .get()
+        .cloned()
+        .into_iter()
+        .collect();
+    for rel in [
+        "src-tauri/prompts/skills",
+        "prompts/skills",
+        "../src-tauri/prompts/skills",
+    ] {
+        let candidate = PathBuf::from(rel);
+        if !dirs.contains(&candidate) {
+            dirs.push(candidate);
+        }
+    }
+    dirs
+}
+
 /// 能力索引（capability_search）专用：列出目录下全部 Skill 的
 /// (名称, 规则摘要)，无条数截断——索引的价值恰恰在于覆盖被目录
 /// MAX_SKILL_CATALOG_ENTRIES 截掉的尾部条目。
@@ -432,8 +463,19 @@ pub fn skill_catalog_string(
             skipped += 1;
             continue;
         }
-        // 单条摘要统一限长：LLM/tag 摘要失控时目录行也不会无限膨胀
-        let summary: String = summary.chars().take(MAX_SKILL_SUMMARY_CHARS).collect();
+        // 单条摘要统一限长：LLM/tag 摘要失控时目录行也不会无限膨胀；
+        // 截断必须带标记，否则模型无法区分"完整摘要"与"被截断的摘要"。
+        let summary: String = if summary.chars().count() > MAX_SKILL_SUMMARY_CHARS {
+            format!(
+                "{}…",
+                summary
+                    .chars()
+                    .take(MAX_SKILL_SUMMARY_CHARS.saturating_sub(1))
+                    .collect::<String>()
+            )
+        } else {
+            summary
+        };
         lines.push(format!("- {}: {}", name, summary));
     }
 

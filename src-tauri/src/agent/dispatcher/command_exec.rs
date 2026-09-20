@@ -261,26 +261,45 @@ pub(crate) fn execute_command_inner(
         };
     }
 
-    // 6. 未知工具或格式错误报错（动态生成当前所有已连接 MCP 插件及子工具清单，协助模型无硬编码纠错）
+    // 6. 未知工具或格式错误报错（协助模型无硬编码纠错）。
+    // 小目录全列便于直接纠错；大目录只给"插件名+数量"，否则一条报错
+    // 会把整个工具目录重新灌进上下文，绕过菜单的全局限流。
+    const UNKNOWN_TOOL_FULL_LIST_LIMIT: usize = 40;
     let mut mcp_tool_hints = Vec::new();
+    let mut mcp_tool_count = 0usize;
     for (p_name, p_client) in &registry.clients {
         let tools = crate::agent::mcp_catalog::cached_tools(&p_client.config)
             .unwrap_or_else(|| p_client.last_known_tools());
-        let tool_names = tools
-            .iter()
-            .map(|t| format!("{}/{}", p_name, t.name))
-            .collect::<Vec<_>>();
-        if !tool_names.is_empty() {
-            mcp_tool_hints.push(format!("- {}: {}", p_name, tool_names.join(", ")));
+        mcp_tool_count += tools.len();
+        if !tools.is_empty() {
+            mcp_tool_hints.push((
+                p_name.clone(),
+                tools
+                    .iter()
+                    .map(|t| format!("{}/{}", p_name, t.name))
+                    .collect::<Vec<_>>(),
+            ));
         }
     }
+    mcp_tool_hints.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mcp_guide = if mcp_tool_hints.is_empty() {
         "（当前未连接任何 MCP 插件）".to_string()
+    } else if mcp_tool_count <= UNKNOWN_TOOL_FULL_LIST_LIMIT {
+        let lines = mcp_tool_hints
+            .iter()
+            .map(|(name, tools)| format!("- {}: {}", name, tools.join(", ")))
+            .collect::<Vec<_>>();
+        format!("\n当前已连接的 MCP 插件及可用工具：\n{}", lines.join("\n"))
     } else {
+        let lines = mcp_tool_hints
+            .iter()
+            .map(|(name, tools)| format!("- {}（{} 个工具）", name, tools.len()))
+            .collect::<Vec<_>>();
         format!(
-            "\n当前已连接的 MCP 插件及可用工具：\n{}",
-            mcp_tool_hints.join("\n")
+            "\n当前已连接的 MCP 插件（共 {} 个工具，清单过大不逐项列出）：\n{}\n用 capability_search 检索正确工具名，或 next_tool_hint: \"插件名/工具名\" 取回完整 Schema。",
+            mcp_tool_count,
+            lines.join("\n")
         )
     };
 

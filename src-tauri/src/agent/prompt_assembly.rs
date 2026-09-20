@@ -233,7 +233,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "project_resources",
         summary: "仅项目会话可用：查看或读取受管文件，支持将项目内关键文件登记为跨会话共享受管资源",
         actions: &[
-            "list_resources()",
+            "list_resources(offset?, limit?)",
             "read_resource(resource_id: string)",
             "register_resource(path: string, label?: string)",
         ],

@@ -47,12 +47,13 @@ fn is_explicit_zero_hit(output: &str) -> bool {
     false
 }
 
-/// 检索调用是否"成功且有结果"（命中）——任何命中都说明调查在推进，
-/// 应清空全部零命中状态，而不是只清当前组。
+/// 检索调用是否"成功且有结果"（命中）——命中和零命中同样要求结构化证据。
+/// 非 JSON 文本输出不判定为命中：无关工具的非空文本（如读文件内容）
+/// 不是"检索找到东西"的证据，不该清空已累计的零命中连击；
+/// 它也不计入零命中——无法证明时保持中性，既不加分也不清零。
 fn is_explicit_hit(output: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(output) else {
-        // 文本输出视为有内容：非空即命中（零命中必须结构化显式声明）
-        return !output.trim().is_empty();
+        return false;
     };
     let Some(object) = value.as_object() else {
         return false;
@@ -377,6 +378,27 @@ mod tests {
             notice = tracker.record("p/search", &json!({"query":"x","path":p}), true, zero_output());
         }
         assert!(notice.is_some(), "命中清零后新一轮跨域连击应再次提示");
+    }
+
+    #[test]
+    fn plain_text_output_is_neutral_neither_hit_nor_zero() {
+        let mut tracker = ZeroHitTracker::default();
+        let params = json!({"query": "q", "path": "/repo"});
+
+        // 3 次结构化零命中后，穿插无关工具的非空文本输出（读文件/执行命令）
+        for _ in 0..ZERO_HIT_NOTICE_THRESHOLD - 1 {
+            tracker.record("p/search", &params, true, zero_output());
+        }
+        tracker.record("p/read_text_file", &json!({"path":"/repo/a.rs"}), true, "fn main() {}");
+        tracker.record("p/shell_exec", &params, true, "build ok");
+
+        // 文本不是命中证据：连击不被无关输出清空，第 4 次零命中仍触发提示
+        let notice = tracker.record("p/search", &params, true, zero_output());
+        assert!(
+            notice.as_deref().unwrap_or("").contains("零命中"),
+            "非结构化文本输出不得清空零命中连击"
+        );
+        // 也不是零命中：若误计入，提示会更早触发（上面第 3 次就满阈值了）
     }
 
     #[test]

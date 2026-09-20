@@ -325,14 +325,17 @@ fn concise_schema_fields(schema: &serde_json::Value) -> String {
         .partition(|name| required.contains(name));
     let mut rendered: Vec<String> = required_names
         .iter()
+        .take(MAX_SCHEMA_FIELDS)
         .map(|name| format!("{}*", name))
         .collect();
-    rendered.extend(
-        optional_names
-            .iter()
-            .take(MAX_SCHEMA_FIELDS.saturating_sub(rendered.len()))
-            .map(|name| format!("{}?", name)),
-    );
+    if rendered.len() < MAX_SCHEMA_FIELDS {
+        rendered.extend(
+            optional_names
+                .iter()
+                .take(MAX_SCHEMA_FIELDS - rendered.len())
+                .map(|name| format!("{}?", name)),
+        );
+    }
     if total_fields > rendered.len() {
         rendered.push(format!("…+{}", total_fields - rendered.len()));
     }
@@ -592,5 +595,22 @@ mod tests {
         assert!(rendered.contains("…+"), "超限应显示剩余数: {}", rendered);
         let shown = rendered.split(", ").count();
         assert!(shown <= 13, "最多 12 字段 + 余量标记: {}", rendered);
+    }
+
+    #[test]
+    fn concise_schema_fields_caps_when_all_fields_required() {
+        // 20 个字段全部必填：必填优先不能让上限失效，仍限 12 + 余量标记
+        let mut props = serde_json::Map::new();
+        let mut required = Vec::new();
+        for i in 0..20 {
+            let name = format!("req_{:02}", i);
+            props.insert(name.clone(), json!({"type": "string"}));
+            required.push(name);
+        }
+        let schema = json!({"properties": props, "required": required});
+        let rendered = concise_schema_fields(&schema);
+        let shown = rendered.split(", ").count();
+        assert!(shown <= 13, "全必填场景也必须受字段上限约束: {}", rendered);
+        assert!(rendered.contains("…+8"), "应标记剩余 8 个未列出: {}", rendered);
     }
 }
