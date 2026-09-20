@@ -309,14 +309,28 @@ fn scan_consumers(workspace: &Path, sym: &str, exclude: &BTreeSet<String>) -> Ve
 /// 读侧消费点只回答"谁受影响"，写侧清单回答"谁在碰这块状态"——
 /// 新增写方是否破坏"唯一写者/冻结锚点"类契约，只有列出既有写方才审得出来。
 fn write_targets_from_diff(diff: &str) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut lines = Vec::new();
     for line in diff.lines() {
-        let Some(body) = line.strip_prefix('+') else { continue };
-        if line.starts_with("+++") {
-            continue;
+        if let Some(body) = line.strip_prefix('+') {
+            if !line.starts_with("+++") {
+                lines.push(body);
+            }
         }
-        let body = body.trim();
-        if body.starts_with("let ") || body.starts_with("//") {
+    }
+    write_targets_from_lines(lines.iter().map(|l| *l))
+}
+
+/// 方案/文本中的写侧符号：方案文本常含 `context.user_goal = goal` 这类
+/// 代码片段——计划阶段的"拟写目标"同样破坏唯一写者契约，提前暴露给审查。
+fn write_targets_from_text(text: &str) -> Vec<String> {
+    write_targets_from_lines(text.lines())
+}
+
+fn write_targets_from_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in lines {
+        let body = raw.trim();
+        if body.starts_with("let ") || body.starts_with("//") || body.starts_with('*') {
             continue;
         }
         let bytes = body.as_bytes();
@@ -409,8 +423,7 @@ fn scan_write_context(workspace: &Path, field: &str, exclude: &BTreeSet<String>)
 }
 
 /// 渲染写侧契约段（纯情报，不产生裁决义务）：新增写方 → 既有写方 + 声明不变量
-fn render_write_context(workspace: &Path, diff: &str, exclude: &BTreeSet<String>) -> String {
-    let fields = write_targets_from_diff(diff);
+fn render_write_context(workspace: &Path, fields: &[String], exclude: &BTreeSet<String>) -> String {
     if fields.is_empty() {
         return String::new();
     }
@@ -419,7 +432,7 @@ fn render_write_context(workspace: &Path, diff: &str, exclude: &BTreeSet<String>
         请核实是否破坏\"唯一写者 / 冻结锚点 / 不变量\"类契约（若声明点注释写明专属写者或冻结语义，新增写方须拦）：\n",
     );
     let mut used = s.chars().count();
-    for field in &fields {
+    for field in fields {
         let ctx = scan_write_context(workspace, field, exclude);
         if ctx.write_sites.is_empty() && ctx.decl_block.is_none() {
             continue;
@@ -543,7 +556,7 @@ pub fn build_from_diff(workspace: &Path, diff: &str) -> ImpactPack {
     let symbols = symbols_from_diff(diff);
     let mut pack = build(workspace, changed.clone(), symbols);
     // 写侧契约情报：即使消费点为空，新增写方本身也须暴露给审查
-    let write_ctx = render_write_context(workspace, diff, &changed);
+    let write_ctx = render_write_context(workspace, &write_targets_from_diff(diff), &changed);
     if !write_ctx.is_empty() {
         if pack.refs.is_empty() {
             // 无消费点可裁时也要给出写方情报——此时 refs 空属正常（纯写方审查）
@@ -587,7 +600,18 @@ pub fn build_for_targets(
             *freq.entry(tok).or_insert(0) += 2;
         }
     }
-    build(workspace, changed, rank_symbols(freq))
+    let mut pack = build(workspace, changed.clone(), rank_symbols(freq));
+    // 方案文本里的拟写目标（`context.x = ...` 代码片段）也要查写方契约——
+    // 计划阶段就破坏"唯一写者/冻结锚点"的方案，应在写代码之前被拦下
+    let write_ctx = render_write_context(workspace, &write_targets_from_text(plan_text), &changed);
+    if !write_ctx.is_empty() {
+        if pack.refs.is_empty() {
+            pack.section = write_ctx;
+        } else {
+            pack.section.push_str(&write_ctx);
+        }
+    }
+    pack
 }
 
 /// 覆盖校验：result 的 consumer_verdicts 必须以 "path:line" 前缀逐条裁决 refs 中每个消费点。
