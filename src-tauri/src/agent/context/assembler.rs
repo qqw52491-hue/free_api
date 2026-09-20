@@ -265,23 +265,7 @@ pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
         }
     }
 
-    // 2. 工具/Skill 手册事件：手册是可再获取物（next_tool_hint 可原样重载），
-    // 符合"能证明可找回即可脱水"的证据纪律。存根刻意不复用原手册头——
-    // has_tool_manual 会按历史头扫描判定已加载，保留原头会让手册脱水后
-    // 仍被当作已加载而无法重载。调用方负责把 key 从 fetched_tools 摘除。
-    if let Some(key) = manual_event_key(text) {
-        if text.len() > MANUAL_DEHYDRATE_MIN_CHARS {
-            return ChatMessage {
-                role: "user".to_string(),
-                content: json!(format!(
-                    "{}{}】\n(操作手册已移出活跃上下文；仍需该规格时可用 next_tool_hint: \"{}\" 重新加载)",
-                    MANUAL_DEHYDRATE_MARKER, key, key
-                )),
-            };
-        }
-    }
-
-    // 3. 如果是历史早期的格式/执行错误且已过去（> 300 字符），压缩冗余报错堆栈
+    // 2. 如果是历史早期的格式/执行错误且已过去（> 300 字符），压缩冗余报错堆栈
     if text.starts_with("【❌ 格式或执行错误】") && text.len() > 300 {
         let first_err_line = text.lines().nth(1).unwrap_or("执行异常");
         let compact_err: String = first_err_line.chars().take(120).collect();
@@ -295,30 +279,6 @@ pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
     }
 
     msg.clone()
-}
-
-/// 手册脱水存根标记：刻意与 `【工具/Skill 操作手册:` 不同，避免
-/// has_tool_manual / sync_fetched_tools_from_history 的历史头扫描误命中。
-pub(crate) const MANUAL_DEHYDRATE_MARKER: &str = "【手册已脱水:";
-/// 手册正文超过该长度才脱水：小手册驻留的成本低于重载一次的往返。
-pub(crate) const MANUAL_DEHYDRATE_MIN_CHARS: usize = 1200;
-const MANUAL_EVENT_HEADER: &str = "【工具/Skill 操作手册: ";
-
-/// 从手册事件消息提取目标键（支持 "plugin/tool" 粒度）。非手册消息返回 None。
-fn manual_event_key(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix(MANUAL_EVENT_HEADER)?;
-    let end = rest.find('】')?;
-    let key = rest[..end].trim();
-    if key.is_empty() { None } else { Some(key) }
-}
-
-/// 从已脱水的手册存根提取目标键：调用方用它把该 key 从 fetched_tools
-/// 摘除，使 next_tool_hint 可以重新加载手册。
-pub(crate) fn dehydrated_manual_key(text: &str) -> Option<String> {
-    let rest = text.strip_prefix(MANUAL_DEHYDRATE_MARKER)?;
-    let end = rest.find('】')?;
-    let key = rest[..end].trim();
-    if key.is_empty() { None } else { Some(key.to_string()) }
 }
 
 /// 纯函数：将消息队列中连续相同角色的文本消息用换行合并为一条。
@@ -570,63 +530,6 @@ mod tests {
             .map(|m| serde_json::to_string(m).unwrap())
             .collect();
         assert_eq!(prefix1, prefix2, "上一轮稳定前缀必须在下一轮逐字节复现");
-    }
-
-    #[test]
-    fn manual_event_dehydrates_to_reloadable_stub() {
-        let big_manual = format!("【工具/Skill 操作手册: github/create_issue】\n{}", "x".repeat(5000));
-        let msg = ChatMessage { role: "user".to_string(), content: json!(big_manual) };
-        let out = dehydrate_historical_turn(&msg);
-        let stub = out.content.as_str().unwrap();
-        // 存根带独立标记 + 重载指引，且不含原手册头（否则 has_tool_manual 误判仍驻留）
-        assert!(stub.contains("【手册已脱水:github/create_issue】"));
-        assert!(stub.contains("next_tool_hint"));
-        assert!(!stub.contains("【工具/Skill 操作手册:"));
-        assert_eq!(
-            dehydrated_manual_key(stub).as_deref(),
-            Some("github/create_issue")
-        );
-
-        // 小手册不脱水（驻留成本低于一次重载往返）
-        let small = format!("【工具/Skill 操作手册: tiny】\n{}", "x".repeat(200));
-        let msg2 = ChatMessage { role: "user".to_string(), content: json!(small.clone()) };
-        let out2 = dehydrate_historical_turn(&msg2);
-        assert_eq!(out2.content.as_str().unwrap(), small.as_str());
-    }
-
-    #[test]
-    fn low_watermark_dehydration_unrefetches_manuals() {
-        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
-        ctx.context_window_tokens = 1_000_000; // 大窗口：高水位不可达，走低水位脱水
-        ctx.fetched_tools.insert("github".to_string());
-        ctx.turns_history.push(ChatMessage {
-            role: "user".to_string(),
-            content: json!(format!(
-                "【工具/Skill 操作手册: github】\n{}",
-                "手册正文".repeat(400)
-            )),
-        });
-        // 填充保护区外历史，使总量越过 45k 脱水水位
-        for i in 0..80 {
-            ctx.turns_history.push(ChatMessage {
-                role: "user".to_string(),
-                content: json!(format!(
-                    "【执行输出】\noutput_id: out-{}\n{}",
-                    i,
-                    "A".repeat(3000)
-                )),
-            });
-        }
-        ctx.maybe_compact_history();
-        assert!(
-            !ctx.fetched_tools.contains("github"),
-            "手册脱水后必须摘除 fetched 标记以便重新加载"
-        );
-        assert!(ctx.turns_history.iter().any(|m| m
-            .content
-            .as_str()
-            .map(|s| s.contains("【手册已脱水:github】"))
-            .unwrap_or(false)));
     }
 
     #[test]
