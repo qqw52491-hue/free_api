@@ -144,7 +144,12 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             workspace_copy TEXT,
             resumed_from TEXT,
             message_history_json TEXT,
-            consumed_at TEXT
+            consumed_at TEXT,
+            task_id TEXT,
+            attempt_id INTEGER NOT NULL DEFAULT 1,
+            purpose TEXT,
+            batch_id TEXT,
+            contract_id TEXT
         );
         CREATE TABLE IF NOT EXISTS agent_role_cards (
             id TEXT PRIMARY KEY,
@@ -587,6 +592,28 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     // 证据包），只记 completion 会让成本观测系统性偏低（旧库自愈）。
     let _ = conn.execute(
         "ALTER TABLE agent_child_runs ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0;",
+        [],
+    );
+    // DispatchEnvelope 逻辑身份落库：task_id 在同一逻辑任务的多次物理尝试间稳定
+    // （failover/重试/resume 共享，attempt_id 递增）；purpose 标记用途
+    // （plan_review/stage_review/rebuttal/writer/worker），batch_id 归组同批联合会审，
+    // contract_id 记录交付契约版本。落库后"谁在等结果/这道题烧了多少钱"变成查询
+    // 而非 checkpoint 里手动维护的名单。
+    let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN task_id TEXT;", []);
+    let _ = conn.execute(
+        "ALTER TABLE agent_child_runs ADD COLUMN attempt_id INTEGER NOT NULL DEFAULT 1;",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN purpose TEXT;", []);
+    let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN batch_id TEXT;", []);
+    let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN contract_id TEXT;", []);
+    // 存量回填：旧行的物理 run 就是它自己的逻辑任务，purpose 取 kind
+    let _ = conn.execute(
+        "UPDATE agent_child_runs SET task_id = id WHERE task_id IS NULL;",
+        [],
+    );
+    let _ = conn.execute(
+        "UPDATE agent_child_runs SET purpose = kind WHERE purpose IS NULL;",
         [],
     );
     if let Err(error) = migrate_uvx_bridge_plugins_to_native(&conn) {

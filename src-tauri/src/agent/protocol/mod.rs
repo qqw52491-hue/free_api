@@ -20,6 +20,8 @@ pub const BASELINE_RESERVED_FIELDS: &[&str] = &[
     "persona",
     "timeout_secs",
     "input_payload",
+    "purpose",
+    "batch_id",
     "custom_schema",
     "focus_domains",
     "specialized_context",
@@ -500,6 +502,12 @@ pub struct DispatchEnvelope {
     /// 超时时间（秒）
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// 用途标记（plan_review / stage_review / rebuttal / writer / worker / ...）
+    #[serde(default)]
+    pub purpose: Option<String>,
+    /// 同批联合会审归组 id（独立派发为 None）
+    #[serde(default)]
+    pub batch_id: Option<String>,
     /// 领域特定入参载荷（由具体角色解析，宿主通用层不干涉内部字段）
     #[serde(default)]
     pub input_payload: Value,
@@ -515,8 +523,10 @@ pub struct DispatchEnvelope {
 }
 
 impl DispatchEnvelope {
+    /// task_id 是逻辑任务身份（落库后在台账里按它归因/联查），不是语义名——
+    /// 默认自动生成；调用方需要稳定语义标签时用 `with_task_id` 覆盖
+    /// （如 stage_review_{step}_{card}），重试/failover 继承时同样用它复用旧身份。
     pub fn new(
-        task_id: impl Into<String>,
         role_id: impl Into<String>,
         contract_id: impl Into<String>,
         parent_run_id: impl Into<String>,
@@ -525,7 +535,7 @@ impl DispatchEnvelope {
         input_payload: Value,
     ) -> Self {
         Self {
-            task_id: task_id.into(),
+            task_id: format!("task-{}", uuid::Uuid::new_v4()),
             attempt_id: default_attempt_id(),
             role_id: role_id.into(),
             contract_id: contract_id.into(),
@@ -536,6 +546,8 @@ impl DispatchEnvelope {
             reasoning_effort: default_effort(),
             persona: String::new(),
             timeout_secs: default_timeout_secs(),
+            purpose: None,
+            batch_id: None,
             input_payload,
             custom_schema: ContractSchema::default(),
             focus_domains: Vec::new(),
@@ -550,7 +562,6 @@ impl DispatchEnvelope {
         input_payload: Value,
     ) -> Self {
         Self::new(
-            "review",
             "child_reviewer",
             "reviewer.v1",
             parent_run_id,
@@ -558,6 +569,7 @@ impl DispatchEnvelope {
             model_id,
             input_payload,
         )
+        .with_purpose("review")
     }
 
     pub fn writer(
@@ -567,14 +579,14 @@ impl DispatchEnvelope {
         input_payload: Value,
     ) -> Self {
         let mut env = Self::new(
-            "writer",
             "child_writer",
             "writer.v1",
             parent_run_id,
             parent_session_id,
             model_id,
             input_payload,
-        );
+        )
+        .with_purpose("writer");
         env.timeout_secs = 180;
         env
     }
@@ -586,7 +598,6 @@ impl DispatchEnvelope {
         input_payload: Value,
     ) -> Self {
         Self::new(
-            "worker",
             "child_worker",
             "worker.v1",
             parent_run_id,
@@ -594,10 +605,21 @@ impl DispatchEnvelope {
             model_id,
             input_payload,
         )
+        .with_purpose("worker")
     }
 
     pub fn with_task_id(mut self, task_id: impl Into<String>) -> Self {
         self.task_id = task_id.into();
+        self
+    }
+
+    pub fn with_purpose(mut self, purpose: impl Into<String>) -> Self {
+        self.purpose = Some(purpose.into());
+        self
+    }
+
+    pub fn with_batch_id(mut self, batch_id: impl Into<String>) -> Self {
+        self.batch_id = Some(batch_id.into());
         self
     }
 
@@ -693,6 +715,8 @@ impl DispatchEnvelope {
             self.persona.clone()
         };
 
+        let identity =
+            crate::agent::child_reviewer::ChildRunIdentity::from_envelope(self);
         match self.role_id.as_str() {
             "child_writer" | "writer" => {
                 crate::agent::child_writer::spawn_child_writer(
@@ -706,6 +730,7 @@ impl DispatchEnvelope {
                     &self.input_payload,
                     final_persona,
                     interrupt_rx,
+                    &identity,
                 )
                 .await
             }
@@ -721,6 +746,7 @@ impl DispatchEnvelope {
                     &self.input_payload,
                     final_persona,
                     interrupt_rx,
+                    &identity,
                 )
                 .await
             }
@@ -743,6 +769,7 @@ impl DispatchEnvelope {
                     &final_persona,
                     schema_opt,
                     interrupt_rx,
+                    &identity,
                 )
                 .await
             }
@@ -926,8 +953,9 @@ impl From<crate::agent::child_reviewer::ChildReviewResult> for DeliveryReceipt {
 
         Self {
             child_run_id: res.child_run_id.clone(),
-            task_id: res.child_run_id.clone(),
-            attempt_id: 1,
+            // 真逻辑身份：poll 从台账列透出；旧数据/合成结果回退为 run_id 自身
+            task_id: res.task_id.clone().unwrap_or_else(|| res.child_run_id.clone()),
+            attempt_id: res.attempt_id.unwrap_or(1),
             kind,
             status: res.status,
             duration_ms: res.duration_ms,

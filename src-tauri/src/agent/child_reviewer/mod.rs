@@ -38,12 +38,13 @@ pub async fn spawn_child_reviewer(
     persona: &str,
     custom_schema: Option<crate::agent::protocol::ContractSchema>,
     mut interrupt_rx: watch::Receiver<u64>,
+    identity: &ChildRunIdentity,
 ) -> Result<String, String> {
     let request = parse_child_review_request(params)?;
     let (evidence_excerpt, allowed_refs) =
         build_managed_resource_evidence(db, parent_session_id, &request)?;
     let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
-    let child_run_id = begin_child_run(
+    let child_run_id = begin_child_run_extended(
         db,
         parent_run_id,
         parent_session_id,
@@ -52,6 +53,9 @@ pub async fn spawn_child_reviewer(
         allowed_refs.len(),
         "review",
         custom_cap,
+        None,
+        None,
+        identity,
     )?;
 
     let mut config = ModelConfig::from_db_state(db, model_id)?;
@@ -530,6 +534,8 @@ pub async fn spawn_child_reviewer(
             withdrawn_findings,
             objection_verdicts,
             scorecard,
+            task_id: None,
+            attempt_id: None,
         };
         // 动态合并 LLM 产物中的扩展字段（如 cve_refs, risk_level 等），确保强类型外产物不丢失
         let mut result_val = serde_json::to_value(&result).unwrap_or_default();

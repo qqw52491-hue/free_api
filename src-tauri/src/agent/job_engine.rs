@@ -32,6 +32,10 @@ pub struct BackgroundJobResult {
     pub duration_ms: u64,
     pub result_json: String,
     pub error_kind: Option<String>,
+    /// 子任务的逻辑任务身份（agent_child_runs.task_id 透出；通用后台任务为 None）
+    pub task_id: Option<String>,
+    /// 同逻辑任务的第几次尝试（通用后台任务恒为 1）
+    pub attempt_id: u32,
 }
 
 impl BackgroundJobResult {
@@ -52,8 +56,8 @@ impl BackgroundJobResult {
         };
         crate::agent::protocol::DeliveryReceipt {
             child_run_id: self.job_id.clone(),
-            task_id: self.job_id.clone(),
-            attempt_id: 1,
+            task_id: self.task_id.clone().unwrap_or_else(|| self.job_id.clone()),
+            attempt_id: self.attempt_id.max(1),
             kind,
             status: self.status.clone(),
             duration_ms: self.duration_ms,
@@ -233,6 +237,8 @@ pub fn poll_pending_inbox(
             duration_ms: duration_ms.unwrap_or(0) as u64,
             result_json: result_json.unwrap_or_default(),
             error_kind,
+            task_id: None,
+            attempt_id: 1,
         });
     }
 
@@ -285,6 +291,8 @@ pub fn poll_targeted_inbox(
                 duration_ms: duration_ms.unwrap_or(0) as u64,
                 result_json: result_json.unwrap_or_default(),
                 error_kind,
+                task_id: None,
+                attempt_id: 1,
             });
         }
     }
@@ -361,6 +369,8 @@ fn collect_completed_child_results(
                     status: receipt.status,
                     duration_ms: receipt.duration_ms,
                     error_kind: receipt.error_kind,
+                    task_id: Some(receipt.task_id.clone()),
+                    attempt_id: receipt.attempt_id,
                 }
             })
             .collect(),

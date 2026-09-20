@@ -99,6 +99,12 @@ pub struct PlanReviewerDispatchSnapshot {
     pub focus_domains: Vec<crate::agent::protocol::FocusDomain>,
     #[serde(default)]
     pub specialized_context: Option<String>,
+    /// 用途标记（plan_review 等），落库到 agent_child_runs.purpose
+    #[serde(default)]
+    pub purpose: Option<String>,
+    /// 同批联合会审归组 id，落库到 agent_child_runs.batch_id
+    #[serde(default)]
+    pub batch_id: Option<String>,
 }
 
 impl PlanReviewerDispatchSnapshot {
@@ -118,7 +124,19 @@ impl PlanReviewerDispatchSnapshot {
             custom_schema: Default::default(),
             focus_domains: Vec::new(),
             specialized_context: None,
+            purpose: None,
+            batch_id: None,
         }
+    }
+
+    pub fn with_purpose(mut self, purpose: impl Into<String>) -> Self {
+        self.purpose = Some(purpose.into());
+        self
+    }
+
+    pub fn with_batch_id(mut self, batch_id: impl Into<String>) -> Self {
+        self.batch_id = Some(batch_id.into());
+        self
     }
 
     pub fn with_custom_schema(mut self, schema: crate::agent::protocol::ContractSchema) -> Self {
@@ -144,7 +162,9 @@ impl PlanReviewerDispatchSnapshot {
         serde_json::from_str(s).ok()
     }
 
-    /// 依据当前快照派发子审查任务
+    /// 依据当前快照派发子审查任务。
+    /// `retry_of` 为重试/故障转移的前驱 run_id：新 run 继承其 task_id
+    /// （attempt_id 由落库侧按同 task_id 自动递增），逻辑任务身份不漂移。
     pub async fn spawn(
         &self,
         app: Option<AppHandle>,
@@ -153,6 +173,7 @@ impl PlanReviewerDispatchSnapshot {
         parent_session_id: &str,
         workspace_root: &Path,
         interrupt_rx: watch::Receiver<u64>,
+        retry_of: Option<&str>,
     ) -> Result<String, String> {
         let mut envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
             parent_run_id,
@@ -163,6 +184,19 @@ impl PlanReviewerDispatchSnapshot {
         .with_tier(&self.tier)
         .with_effort(&self.effort)
         .with_persona(&self.persona);
+
+        // 继承前驱 run 的逻辑任务身份（task_id 复用，attempt 自动 +1）
+        if let Some(prev) = retry_of {
+            if let Some(prev_identity) = crate::agent::child_reviewer::load_run_identity(db, prev) {
+                envelope = envelope.with_task_id(prev_identity.task_id);
+            }
+        }
+        if let Some(p) = &self.purpose {
+            envelope = envelope.with_purpose(p.clone());
+        }
+        if let Some(b) = &self.batch_id {
+            envelope = envelope.with_batch_id(b.clone());
+        }
 
         if !self.custom_schema.is_empty() {
             envelope = envelope.with_custom_schema(self.custom_schema.clone());
@@ -430,6 +464,12 @@ pub struct ChildReviewResult {
     /// 结构化审查评分卡（4个维度，各 0~100 分）
     #[serde(default)]
     pub scorecard: Option<ReviewScorecard>,
+    /// 逻辑任务身份（台账列透出；旧数据缺省回退为 child_run_id）
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// 同逻辑任务的第几次尝试（台账列透出；旧数据缺省为 1）
+    #[serde(default)]
+    pub attempt_id: Option<u32>,
 }
 
 /// 方案/代码审查员的业务领域交付产物（与宿主执行耗时、网络超时等物理事实解耦）

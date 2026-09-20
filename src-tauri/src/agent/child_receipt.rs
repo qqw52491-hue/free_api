@@ -449,26 +449,43 @@ mod tests {
                 [],
             ).unwrap();
         }
+        // 真实落一行旧 run（带逻辑身份）：备胎应继承其 task_id 且 attempt+1
+        let old_identity = crate::agent::child_reviewer::ChildRunIdentity {
+            task_id: "task-planreview-x".to_string(),
+            attempt_id: 1,
+            purpose: Some("plan_review".to_string()),
+            batch_id: Some("batch-x".to_string()),
+            contract_id: Some("reviewer.v1".to_string()),
+        };
+        let old_id = crate::agent::child_reviewer::begin_child_run_extended(
+            &db, "run-1", "sess-1", &ws, "m1", 0, "review", None, None, None, &old_identity,
+        )
+        .unwrap();
+
         let env = test_env(&db, &ws);
         let mut context = SandwichContext::new("sys".into(), "goal".into());
         let mut cp = AgentCheckpoint::new("run-1".into(), &context);
-        cp.register_plan_reviewer_batch(&["rev-old".to_string()]);
-        cp.set_plan_reviewer_dispatch_snapshot(&PlanReviewerDispatchSnapshot::new(
-            "m1",
-            "flash",
-            "high",
-            "",
-            json!({"question": "审查本方案", "evidence_excerpt": "代码摘录"}),
-        ));
+        cp.register_plan_reviewer_batch(&[old_id.clone()]);
+        cp.set_plan_reviewer_dispatch_snapshot(
+            &PlanReviewerDispatchSnapshot::new(
+                "m1",
+                "flash",
+                "high",
+                "",
+                json!({"question": "审查本方案", "evidence_excerpt": "代码摘录"}),
+            )
+            .with_purpose("plan_review")
+            .with_batch_id("batch-x"),
+        );
 
-        let r = receipt("review", "rev-old", Some("timed_out"), json!({"status":"timed_out"}));
+        let r = receipt("review", &old_id, Some("timed_out"), json!({"status":"timed_out"}));
         let effects = reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
 
         let new_id = effects
             .redispatched_to
             .expect("failover-eligible 失败应触发重派");
         assert!(
-            !cp.plan_review_batch.expected_run_ids.contains("rev-old"),
+            !cp.plan_review_batch.expected_run_ids.contains(&old_id),
             "旧失败 id 必须从预期集合移除"
         );
         assert!(
@@ -476,6 +493,57 @@ mod tests {
             "新重派 id 必须接管预期集合，否则齐套屏障永不收口"
         );
         assert_eq!(cp.plan_reviewer_failover_count, 1);
+
+        // 逻辑身份继承：同一道题两次作答，task_id 不变、attempt 递增、purpose/batch 沿用
+        {
+            let conn = db.0.lock().unwrap();
+            let (new_task, new_attempt, new_purpose, new_batch): (String, i64, Option<String>, Option<String>) =
+                conn.query_row(
+                    "SELECT task_id, attempt_id, purpose, batch_id FROM agent_child_runs WHERE id = ?1",
+                    rusqlite::params![new_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(new_task, "task-planreview-x", "备胎必须继承同一逻辑任务身份");
+            assert_eq!(new_attempt, 2, "attempt 由落库侧自动递增");
+            assert_eq!(new_purpose.as_deref(), Some("plan_review"));
+            assert_eq!(new_batch.as_deref(), Some("batch-x"));
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn attempt_id_auto_derives_within_same_task() {
+        // 同 (parent_run, task_id) 的多次落库 attempt 自动递增——
+        // 调用方无需记忆/传递尝试序号，语义由台账保证。
+        let (base, db) = test_db("attempt-derive");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let id1 = crate::agent::child_reviewer::ChildRunIdentity {
+            task_id: "task-shared".to_string(),
+            attempt_id: 1,
+            purpose: Some("worker".to_string()),
+            batch_id: None,
+            contract_id: Some("worker.v1".to_string()),
+        };
+        let r1 = crate::agent::child_reviewer::begin_child_run_extended(
+            &db, "run-1", "sess-1", &ws, "m1", 0, "worker", None, None, None, &id1,
+        )
+        .unwrap();
+        // 第二次：同 task_id、调用方仍传 attempt=1 → 落库侧推导为 2
+        let r2 = crate::agent::child_reviewer::begin_child_run_extended(
+            &db, "run-1", "sess-1", &ws, "m1", 0, "worker", None, None, None, &id1,
+        )
+        .unwrap();
+        let conn = db.0.lock().unwrap();
+        let a1: i64 = conn
+            .query_row("SELECT attempt_id FROM agent_child_runs WHERE id=?1", rusqlite::params![r1], |r| r.get(0))
+            .unwrap();
+        let a2: i64 = conn
+            .query_row("SELECT attempt_id FROM agent_child_runs WHERE id=?1", rusqlite::params![r2], |r| r.get(0))
+            .unwrap();
+        assert_eq!(a1, 1);
+        assert_eq!(a2, 2);
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -550,6 +618,8 @@ mod tests {
             duration_ms: 42,
             result_json: json!({"prompt_tokens": 11, "completion_tokens": 7, "findings": []}).to_string(),
             error_kind: None,
+            task_id: None,
+            attempt_id: 1,
         };
         let r = job.to_delivery_receipt();
         assert_eq!(r.child_run_id, "j-1");

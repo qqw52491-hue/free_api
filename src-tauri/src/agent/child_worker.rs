@@ -708,6 +708,7 @@ pub async fn spawn_child_worker(
     params: &Value,
     persona: String,
     interrupt_rx: watch::Receiver<u64>,
+    identity: &crate::agent::child_reviewer::ChildRunIdentity,
 ) -> Result<String, String> {
     let request = parse_worker_request(params)?;
     let workspace = workspace_root
@@ -725,6 +726,7 @@ pub async fn spawn_child_worker(
         custom_cap,
         Some(workspace.to_string_lossy().as_ref()),
         None,
+        identity,
     )?;
     let mut config = ModelConfig::from_db_state(db, model_id)?;
     config.max_tokens = if config.max_tokens <= 0 {

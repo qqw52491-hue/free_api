@@ -96,6 +96,8 @@ pub(super) async fn dispatch_child_reviewer(
         let items = inst.get_dispatch_items();
         let total = items.len();
         let is_batch = total > 1;
+        // 同批联合会审归组：全部成员共享 batch_id，台账可按批联查
+        let batch_id = format!("batch-{}", uuid::Uuid::new_v4());
 
         let mut item_reports = Vec::new();
         let mut spawned_ids = Vec::new();
@@ -258,7 +260,9 @@ pub(super) async fn dispatch_child_reviewer(
                 &reasoning_effort,
                 &reviewer_persona,
                 effective_params.clone(),
-            );
+            )
+            .with_purpose("plan_review")
+            .with_batch_id(batch_id.clone());
             if let Some(schema) = reviewer_custom_schema {
                 snapshot = snapshot.with_custom_schema(schema);
             }
@@ -274,6 +278,7 @@ pub(super) async fn dispatch_child_reviewer(
                     ctx.final_session_id,
                     ctx.workspace_dir,
                     ctx.interrupt_rx.clone(),
+                    None,
                 )
                 .await
             {

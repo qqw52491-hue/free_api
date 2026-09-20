@@ -273,6 +273,8 @@
             withdrawn_findings: vec![],
             objection_verdicts: vec![],
             scorecard: None,
+            task_id: None,
+            attempt_id: None,
         };
         let note = apply_stage_result(&mut cp, &result, None).note;
         assert_eq!(cp.stage_review_blockers_open, 1, "仅 regardless 计入拦截");
@@ -310,6 +312,8 @@
             withdrawn_findings: vec![],
             objection_verdicts: vec![],
             scorecard: None,
+            task_id: None,
+            attempt_id: None,
         };
         let out = apply_stage_result(&mut cp, &result, None);
         // 退款改为批后结算：回执层只标记 refund_pending，由调用方 settle。

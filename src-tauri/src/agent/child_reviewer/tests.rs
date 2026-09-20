@@ -71,6 +71,8 @@
             withdrawn_findings: vec!["F2".to_string()],
             objection_verdicts: vec![verdict("F1", "maintain"), verdict("F2", "withdraw")],
             scorecard: None,
+            task_id: None,
+            attempt_id: None,
         };
         let (added, withdrawn, maintained) = result.objection_stats();
         assert_eq!(added, 1, "F3 无裁决覆盖，计为新增");
@@ -145,6 +147,8 @@
             withdrawn_findings: vec![],
             objection_verdicts: vec![],
             scorecard: None,
+            task_id: None,
+            attempt_id: None,
         };
         assert_eq!(result.stage_blocking_open(), 1);
         assert_eq!(result.stage_final_only_lines().len(), 1);
@@ -181,6 +185,8 @@
                 withdrawn_findings: withdrawn,
                 objection_verdicts: verdicts,
                 scorecard: None,
+                task_id: None,
+                attempt_id: None,
             }),
             1
         );
@@ -239,6 +245,8 @@
             withdrawn_findings: vec!["F1".to_string()],
             objection_verdicts: vec![verdict("F1", "withdraw")],
             scorecard: Some(ReviewScorecard::new(90, 80, 85, Some(70))),
+            task_id: None,
+            attempt_id: None,
         };
         // F1 已撤回、F2 仍 blocking：收敛判据为 1
         assert_eq!(result.unwithdrawn_blocking_count(), 1);
@@ -545,6 +553,8 @@
             withdrawn_findings: vec![],
         objection_verdicts: vec![],
             scorecard: None,
+            task_id: None,
+            attempt_id: None,
         };
         let sample_json = serde_json::to_string(&sample_result).unwrap();
         finish_child_run(&state, &run_id, "succeeded", 150, 45, 0, None, Some(&sample_json));
@@ -672,6 +682,8 @@
             withdrawn_findings: vec![],
         objection_verdicts: vec![],
             scorecard: None,
+            task_id: None,
+            attempt_id: None,
         };
         finish_child_run(&state, &child_1, "succeeded", 200, 30, 0, None, Some(&serde_json::to_string(&res_1).unwrap()));
 
@@ -707,6 +719,8 @@
             withdrawn_findings: vec![],
         objection_verdicts: vec![],
             scorecard: None,
+            task_id: None,
+            attempt_id: None,
         };
         finish_child_run(&state, &child_2, "succeeded", 350, 40, 0, None, Some(&serde_json::to_string(&res_2).unwrap()));
 
@@ -749,6 +763,8 @@
             withdrawn_findings: vec![],
         objection_verdicts: vec![],
             scorecard: None,
+            task_id: None,
+            attempt_id: None,
         })
         .unwrap()
     }

@@ -193,6 +193,8 @@ pub(crate) async fn try_plan_reviewer_failover(
         };
         obj.insert("role_label".to_string(), serde_json::json!(label));
     }
+    // retry_of 传入失败 run：备胎继承同一 task_id，attempt 由落库侧自动递增——
+    // 台账里"同一道题换了模型重答"一脉相承，成本可归因到同一逻辑任务。
     match dispatch
         .spawn(
             app.cloned(),
@@ -201,6 +203,7 @@ pub(crate) async fn try_plan_reviewer_failover(
             session_id,
             workspace_dir,
             interrupt_rx,
+            failed_run_id,
         )
         .await
     {

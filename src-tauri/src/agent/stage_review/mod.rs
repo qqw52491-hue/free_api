@@ -407,6 +407,7 @@ pub async fn dispatch(
             params,
         )
         .with_task_id(format!("stage_review_{}", checkpoint.step_id))
+        .with_purpose("stage_review")
         .with_tier(&routing.tier.to_string())
         .with_effort(model_routing.reasoning_effort_for(&routing.tier));
 
@@ -429,6 +430,8 @@ pub async fn dispatch(
     }
 
     // 挂载专家审查（单审或多专家联合会审并发派发）
+    // 同批专家共享 batch_id：台账可按批联查这批审查的全部成本与交付
+    let stage_batch_id = format!("stage-batch-{}-{}", checkpoint.step_id, uuid::Uuid::new_v4());
     let mut dispatched_run_ids = Vec::new();
     for card in &role_cards {
         let model_to_use = {
@@ -483,6 +486,8 @@ pub async fn dispatch(
             params,
         )
         .with_task_id(format!("stage_review_{}_{}", checkpoint.step_id, card.name))
+        .with_purpose("stage_review")
+        .with_batch_id(stage_batch_id.clone())
         .with_tier(&routing.tier.to_string())
         .with_effort(model_routing.reasoning_effort_for(&routing.tier));
 

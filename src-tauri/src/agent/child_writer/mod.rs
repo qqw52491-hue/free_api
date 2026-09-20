@@ -885,6 +885,7 @@ pub async fn spawn_child_writer(
     params: &Value,
     persona: String,
     interrupt_rx: watch::Receiver<u64>,
+    identity: &crate::agent::child_reviewer::ChildRunIdentity,
 ) -> Result<String, String> {
     let request = parse_writer_request(params)?;
     let parent = workspace_root
@@ -930,6 +931,7 @@ pub async fn spawn_child_writer(
         custom_cap,
         Some(copy_root.to_string_lossy().as_ref()),
         None,
+        identity,
     )?;
 
     let mut config = ModelConfig::from_db_state(db, model_id)?;

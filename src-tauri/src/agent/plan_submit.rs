@@ -256,7 +256,9 @@ pub async fn handle_submit_plan(
         model_routing.reasoning_effort_for(&routing.tier),
         crate::agent::tools::role_manager::persona_block(&card),
         effective_params.clone(),
-    );
+    )
+    .with_purpose("plan_review")
+    .with_batch_id(format!("batch-{}", uuid::Uuid::new_v4()));
     if let Some(schema) = card.parse_custom_schema() {
         snapshot = snapshot.with_custom_schema(schema);
     }
@@ -276,6 +278,7 @@ pub async fn handle_submit_plan(
             final_session_id,
             workspace_dir,
             interrupt_rx,
+            None,
         )
         .await
     {

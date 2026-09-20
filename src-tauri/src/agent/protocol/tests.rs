@@ -18,6 +18,8 @@
             custom_schema: ContractSchema::default(),
             focus_domains: vec![FocusDomain::GitDiff],
             specialized_context: None,
+            purpose: None,
+            batch_id: None,
         };
 
         let key = envelope.attempt_key();
@@ -118,6 +120,8 @@
                 }
             ],
             scorecard: Some(ReviewScorecard::new(80, 70, 85, Some(90))),
+            task_id: None,
+            attempt_id: None,
         };
 
         let receipt: DeliveryReceipt = res.into();
@@ -227,6 +231,8 @@
             withdrawn_findings: vec![],
             objection_verdicts: vec![],
             scorecard: None,
+            task_id: None,
+            attempt_id: None,
         };
         let val = serde_json::to_value(&child_res).unwrap();
         for key in val.as_object().unwrap().keys() {

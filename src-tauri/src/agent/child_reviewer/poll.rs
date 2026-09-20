@@ -24,23 +24,29 @@ pub fn poll_completed_child_runs_filtered(
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, result_json, kind FROM agent_child_runs
+            "SELECT id, result_json, kind, COALESCE(task_id, id), COALESCE(attempt_id, 1) FROM agent_child_runs
              WHERE parent_run_id = ?1
                AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'invalid_output')
                AND result_json IS NOT NULL
                AND (consumed_at IS NULL OR consumed_at = '')",
         )
         .map_err(|error| error.to_string())?;
-    let rows: Vec<(String, String, String)> = stmt
+    let rows: Vec<(String, String, String, String, i64)> = stmt
         .query_map(params![parent_run_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
         })
         .map_err(|error| error.to_string())?
         .filter_map(|r| r.ok())
         .collect();
     let mut results = Vec::new();
     let now = chrono::Utc::now().to_rfc3339();
-    for (id, json_str, kind) in rows {
+    for (id, json_str, kind, task_id, attempt_id) in rows {
         // 定向模式：非目标 ID 的结果不消费，保留给后续 wait_jobs 或信箱轮询
         if let Some(targets) = targets {
             if !targets.iter().any(|t| t == &id) {
@@ -51,6 +57,8 @@ pub fn poll_completed_child_runs_filtered(
             Ok(mut result) => {
                 result.raw_result_json = Some(json_str);
                 result.kind = Some(kind);
+                result.task_id = Some(task_id);
+                result.attempt_id = Some(attempt_id.max(1) as u32);
                 results.push(result);
                 let _ = conn.execute(
                     "UPDATE agent_child_runs SET consumed_at = ?1 WHERE id = ?2",

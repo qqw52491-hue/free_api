@@ -14,6 +14,83 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 
+/// 子任务逻辑身份（DispatchEnvelope 落库元数据）。
+/// task_id 在同一逻辑任务的多次物理尝试间保持稳定——failover 换模型重派、
+/// resume 追问续跑都继承同一个 task_id，attempt_id 递增；
+/// purpose 标记用途（plan_review/stage_review/rebuttal/writer/worker），
+/// batch_id 归组同批联合会审成员，contract_id 记录交付契约版本。
+/// 落库后"这道题烧了多少钱/谁在等它的结果"变成台账查询，
+/// 而非 checkpoint 里靠约定维护的名单。
+#[derive(Debug, Clone)]
+pub(crate) struct ChildRunIdentity {
+    pub task_id: String,
+    pub attempt_id: u32,
+    pub purpose: Option<String>,
+    pub batch_id: Option<String>,
+    pub contract_id: Option<String>,
+}
+
+impl ChildRunIdentity {
+    /// 全新逻辑任务：task_id 生成一次，attempt=1
+    pub fn fresh(purpose: impl Into<String>) -> Self {
+        Self {
+            task_id: format!("task-{}", Uuid::new_v4()),
+            attempt_id: 1,
+            purpose: Some(purpose.into()),
+            batch_id: None,
+            contract_id: None,
+        }
+    }
+
+    /// 从派发信封取身份
+    pub fn from_envelope(env: &crate::agent::protocol::DispatchEnvelope) -> Self {
+        Self {
+            task_id: env.task_id.clone(),
+            attempt_id: env.attempt_id,
+            purpose: env.purpose.clone(),
+            batch_id: env.batch_id.clone(),
+            contract_id: Some(env.contract_id.clone()),
+        }
+    }
+
+    /// 继承前驱 run 的逻辑身份（resume/追问/对质续跑）：
+    /// task_id 与 batch/contract 一脉相承，attempt_id 由落库侧自动递增。
+    /// purpose 可覆盖（如对质重审标 rebuttal），未给则继承原用途。
+    pub fn inherited(prev: &ChildRunIdentity, purpose: Option<String>) -> Self {
+        Self {
+            task_id: prev.task_id.clone(),
+            attempt_id: 1,
+            purpose: purpose.or_else(|| prev.purpose.clone()),
+            batch_id: prev.batch_id.clone(),
+            contract_id: prev.contract_id.clone(),
+        }
+    }
+}
+
+/// 查询 run 的逻辑任务身份（failover/resume 继承用）。
+/// 返回 (task_id, attempt_id, purpose, batch_id)；旧行 task_id 可能为 NULL
+/// 时回退为 run_id 本身（旧 run 就是自己的逻辑任务）。
+pub(crate) fn load_run_identity(
+    db: &DbState,
+    child_run_id: &str,
+) -> Option<ChildRunIdentity> {
+    let conn = db.0.lock().ok()?;
+    conn.query_row(
+        "SELECT COALESCE(task_id, id), attempt_id, purpose, batch_id, contract_id FROM agent_child_runs WHERE id = ?1",
+        params![child_run_id],
+        |row| {
+            Ok(ChildRunIdentity {
+                task_id: row.get::<_, String>(0)?,
+                attempt_id: row.get::<_, i64>(1)?.max(1) as u32,
+                purpose: row.get::<_, Option<String>>(2)?,
+                batch_id: row.get::<_, Option<String>>(3)?,
+                contract_id: row.get::<_, Option<String>>(4)?,
+            })
+        },
+    )
+    .ok()
+}
+
 pub(crate) fn begin_child_run(
     db: &DbState,
     parent_run_id: &str,
@@ -35,6 +112,7 @@ pub(crate) fn begin_child_run(
         custom_cap,
         None,
         None,
+        &ChildRunIdentity::fresh(kind),
     )
 }
 
@@ -49,6 +127,7 @@ pub(crate) fn begin_child_run_extended(
     custom_cap: Option<i64>,
     workspace_copy: Option<&str>,
     resumed_from: Option<&str>,
+    identity: &ChildRunIdentity,
 ) -> Result<String, String> {
     let child_run_id = Uuid::new_v4().to_string();
     let root = workspace_root
@@ -90,8 +169,20 @@ pub(crate) fn begin_child_run_extended(
             effective_kind_cap, kind, effective_kind_cap
         ));
     }
+    // attempt_id 按 (parent_run_id, task_id) 自动推导：同逻辑任务的已有
+    // 最大 attempt + 1，调用方显式给的更大的值优先。重试/failover/resume
+    // 只需继承 task_id，attempt 计数在这里自动正确，调用方想传错都难。
+    let derived_attempt: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(attempt_id), 0) + 1 FROM agent_child_runs WHERE task_id = ?1 AND parent_run_id = ?2",
+            params![identity.task_id, parent_run_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(1);
+    let attempt_id = derived_attempt.max(identity.attempt_id as i64);
+
     conn.execute(
-        "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, evidence_ref_count, kind, workspace_copy, resumed_from) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, evidence_ref_count, kind, workspace_copy, resumed_from, task_id, attempt_id, purpose, batch_id, contract_id) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             child_run_id,
             parent_run_id,
@@ -103,6 +194,11 @@ pub(crate) fn begin_child_run_extended(
             kind,
             workspace_copy,
             resumed_from,
+            identity.task_id,
+            attempt_id,
+            identity.purpose,
+            identity.batch_id,
+            identity.contract_id,
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -112,16 +208,16 @@ pub(crate) fn begin_child_run_extended(
 /// resume_child 专用加载：必须带会话归属谓词——child_run_id 是会话内凭据，
 /// 跨会话命中按"未找到"处理，不能读取/复活其他会话的历史与工作区副本
 /// （与 child_writer.apply 的会话校验同纪律）。返回
-/// (status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json)。
+/// (status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json, identity)。
 #[allow(clippy::type_complexity)]
 pub(crate) fn load_child_run_for_resume(
     db: &DbState,
     child_run_id: &str,
     parent_session_id: &str,
-) -> Result<(String, String, Option<String>, Option<String>, String, String, Option<String>), String> {
+) -> Result<(String, String, Option<String>, Option<String>, String, String, Option<String>, ChildRunIdentity), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     conn.query_row(
-        "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json FROM agent_child_runs WHERE id = ?1 AND parent_session_id = ?2",
+        "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json, COALESCE(task_id, id), COALESCE(attempt_id, 1), purpose, batch_id, contract_id FROM agent_child_runs WHERE id = ?1 AND parent_session_id = ?2",
         params![child_run_id, parent_session_id],
         |row| {
             Ok((
@@ -132,6 +228,13 @@ pub(crate) fn load_child_run_for_resume(
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, Option<String>>(6)?,
+                ChildRunIdentity {
+                    task_id: row.get::<_, String>(7)?,
+                    attempt_id: row.get::<_, i64>(8)?.max(1) as u32,
+                    purpose: row.get::<_, Option<String>>(9)?,
+                    batch_id: row.get::<_, Option<String>>(10)?,
+                    contract_id: row.get::<_, Option<String>>(11)?,
+                },
             ))
         },
     )
@@ -257,6 +360,8 @@ pub(crate) fn child_error_result_json(
         withdrawn_findings: vec![],
         objection_verdicts: vec![],
         scorecard: None,
+        task_id: None,
+        attempt_id: None,
     })
     .unwrap_or_default()
 }

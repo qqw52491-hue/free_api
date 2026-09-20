@@ -76,7 +76,7 @@ pub(super) async fn dispatch_resume_child(
                     success: false,
                     route: "host_rejection:child_not_found".to_string(),
                 },
-                Ok((status, kind, ws_copy, hist_json, child_model, root_str, prev_result_json)) => {
+                Ok((status, kind, ws_copy, hist_json, child_model, root_str, prev_result_json, prev_identity)) => {
                     if status != "succeeded" {
                         DispatchResult { view: None,
                             stdout: String::new(),
@@ -123,6 +123,17 @@ pub(super) async fn dispatch_resume_child(
                             };
                             let reasoning_effort = ctx.model_routing.reasoning_effort_for(&routing.tier).to_string();
 
+                            // 对质目标是阶段审查任务时标记 rebuttal 用途；其余继承原任务用途
+                            let is_rebuttal_target = ctx.checkpoint.is_stage_review_target(target_child_id);
+                            let resume_identity = crate::agent::child_reviewer::ChildRunIdentity::inherited(
+                                &prev_identity,
+                                if is_rebuttal_target {
+                                    Some("rebuttal".to_string())
+                                } else {
+                                    prev_identity.purpose.clone().or(Some("review".to_string()))
+                                },
+                            );
+
                             let new_child_run_id = match crate::agent::child_reviewer::begin_child_run_extended(
                                 ctx.state.inner(),
                                 ctx.parent_run_id,
@@ -134,10 +145,11 @@ pub(super) async fn dispatch_resume_child(
                                 None,
                                 None,
                                 Some(target_child_id),
+                                &resume_identity,
                             ) {
                                 Ok(id) => {
                                     // 对质目标是阶段审查任务时，登记复检 run id 以便结果回流阶段语义
-                                    if ctx.checkpoint.is_stage_review_target(target_child_id) {
+                                    if is_rebuttal_target {
                                         ctx.checkpoint.stage_review_rebuttal_run_id = Some(id.clone());
                                     }
                                     id
@@ -306,6 +318,8 @@ pub(super) async fn dispatch_resume_child(
                                     withdrawn_findings,
                                     objection_verdicts,
                                     scorecard: None,
+                                    task_id: None,
+                                    attempt_id: None,
                                 };
 
                                 let res_json = serde_json::to_string(&review_res).ok();
@@ -381,6 +395,12 @@ pub(super) async fn dispatch_resume_child(
                                 };
                                 let reasoning_effort = ctx.model_routing.reasoning_effort_for(&routing.tier).to_string();
 
+                                // 追问续跑继承原任务逻辑身份：task_id/batch 不变，
+                                // attempt 由落库侧按同 task_id 自动递增
+                                let resume_identity = crate::agent::child_reviewer::ChildRunIdentity::inherited(
+                                    &prev_identity,
+                                    None,
+                                );
                                 let new_child_run_id = match crate::agent::child_reviewer::begin_child_run_extended(
                                     ctx.state.inner(),
                                     ctx.parent_run_id,
@@ -392,6 +412,7 @@ pub(super) async fn dispatch_resume_child(
                                     None,
                                     Some(ws_path.to_string_lossy().as_ref()),
                                     Some(target_child_id),
+                                    &resume_identity,
                                 ) {
                                     Ok(id) => id,
                                     Err(err) => {
