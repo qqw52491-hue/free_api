@@ -76,8 +76,9 @@ pub struct AgentCheckpoint {
     /// 方案审查结果是否已被主循环或 wait_jobs 消费并注入上下文（“问过”且“听过”）
     #[serde(default)]
     pub plan_reviewer_consumed: bool,
-    /// 方案审查并发批次状态（齐套屏障、幂等去重与现场真聚合）
-    #[serde(default)]
+    /// 旧版方案审查批次名单：仅作旧 checkpoint 反序列化入口，
+    /// 加载后经 adopt_legacy_membership 收养进台账后清空；新写入不再序列化。
+    #[serde(default, skip_serializing)]
     pub plan_review_batch: PlanReviewBatchState,
     /// 1v1 方案评审是否裁决必须升级多专家联合会审（Some 时存储建议拉起的专家角色列表）
     #[serde(default)]
@@ -125,16 +126,29 @@ pub struct AgentCheckpoint {
     /// 已派发的阶段审查次数
     #[serde(default)]
     pub stage_review_budget_used: u32,
-    /// 在途阶段审查任务的 child_run_id（含其 rebuttal 对质任务）
+    /// ── 台账锚点：成员身份/在途/齐套全部由 agent_child_runs 的
+    /// batch_id + consumed_at + status 推导，checkpoint 只记"当前批次是谁"。
+    /// 手写名单退役后不再有"忘了换名字"的漂移面。
     #[serde(default)]
+    pub plan_review_batch_id: Option<String>,
+    /// 批次登记时的成员数（派发时刻的既定事实，标量不漂移）
+    #[serde(default)]
+    pub plan_review_expected_count: u32,
+    /// 已交付成员的解析产物缓存（run_id → 交付数据）——内容缓存而非成员名单，
+    /// 幂等去重天然由 HashMap key 承担
+    #[serde(default)]
+    pub plan_review_deliveries: std::collections::HashMap<String, crate::agent::child_reviewer::ReviewerDeliveryData>,
+    #[serde(default)]
+    pub stage_review_batch_id: Option<String>,
+    /// ── 旧版手写名单：仅作旧 checkpoint 反序列化入口，加载后经
+    /// adopt_legacy_membership 一次性收养进台账并清空；新写入不再序列化。
+    #[serde(default, skip_serializing)]
     pub stage_review_run_id: Option<String>,
-    /// 联合会审模式下在途阶段审查任务的 child_run_id 列表
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub stage_review_run_ids: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub stage_review_rebuttal_run_id: Option<String>,
-    /// 最近已完成或已对质的历史阶段审查任务 ID 列表（用于 resume_child 对质时识别阶段审查目标，最多保留 20 条）
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub stage_review_completed_run_ids: Vec<String>,
     /// 当前正在对质的目标审查任务 ID（用于对质失败计数隔离，防多专家交叉借分）
     #[serde(default)]
@@ -316,6 +330,10 @@ impl AgentCheckpoint {
             plan_mode: PlanExecutionMode::Auto,
             plan_reviewer_consumed: false,
             plan_review_batch: PlanReviewBatchState::default(),
+            plan_review_batch_id: None,
+            plan_review_expected_count: 0,
+            plan_review_deliveries: std::collections::HashMap::new(),
+            stage_review_batch_id: None,
             plan_escalation_required: None,
             plan_exploration_extensions_used: 0,
             plan_exploration_granted_steps: 0,

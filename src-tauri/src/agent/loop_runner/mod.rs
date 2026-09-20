@@ -473,7 +473,7 @@ pub async fn run_tool_phase(
             )
         } else {
             // 分流放行 ≠ 放行一切：已判出的阶段 blocker（中间态错误）仍须拦住写入
-            crate::agent::plan_gate::stage_blocker_interception(checkpoint)
+            crate::agent::plan_gate::stage_blocker_interception(checkpoint, state.inner())
         };
         if let Some(rejection) = rejection {
             crate::agent::telemetry::record_gate_fire(

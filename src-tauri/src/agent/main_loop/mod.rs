@@ -994,22 +994,17 @@ async fn run_agent_main_loop_in_workspace_inner(
             }
         }
         // 两路回执合并后统一结算一次阶段审查退款
-        if stage_refund_pending && checkpoint.settle_stage_review_refund() {
+        if stage_refund_pending && checkpoint.settle_stage_review_refund(state.inner()) {
             context.add_error_feedback(
                 "\n🔄 阶段审查次数已退还（本轮含 infra 失败且无专家产出 blocking，视为未有效审查）。",
             );
         }
 
-        // 齐套屏障+阶段审查在途名单自愈对账（保险丝）：点名前核对台账，
-        // 凡是"已终态且已消费"却仍挂在名单的 run_id 一律划掉——防止任何
-        // 记账漂移让门禁等一个永远不会交付的死人。正常路径返回 0，只在
-        // 交付/失败记账被绕过的异常场景兜底生效。
-        if !checkpoint.plan_reviewer_consumed && !checkpoint.plan_review_batch.is_empty() {
-            checkpoint.reconcile_plan_reviewer_batch(state.inner());
-        }
-        if checkpoint.has_in_flight_stage_review() {
-            checkpoint.reconcile_stage_review_runs(state.inner());
-        }
+        // 步边界状态刷新：收养旧 checkpoint 的手写名单（升级一次性迁移）
+        // 并按台账重算 consumed 标志。名单退役后"在途/齐套"全部由
+        // batch_id+consumed_at 推导——孤儿 id 让门禁等死人的死锁类
+        // 结构性消失，无需再对账。
+        checkpoint.refresh_consumed_flags(state.inner());
         let resume_instruction = recovered_instruction.take();
         // 每轮规划前把方案门禁状态投影进上下文底部状态卡：模型在决策时即可见
         // 当前模式与放行条件，不再靠写入被拒（一整轮 LLM 往返）反推门禁规则。
@@ -1302,7 +1297,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             checkpoint.stage_review_budget_used,
             context.side_effects.len()
         );
-        if let Some(reason) = crate::agent::stage_review::should_fire(&checkpoint, &context, &instruction, &model_routing) {
+        if let Some(reason) = crate::agent::stage_review::should_fire(&checkpoint, state.inner(), &context, &instruction, &model_routing) {
             match crate::agent::stage_review::dispatch(
                 &app,
                 state.inner(),

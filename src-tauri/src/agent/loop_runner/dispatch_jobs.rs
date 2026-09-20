@@ -102,7 +102,7 @@ pub(super) async fn dispatch_wait_jobs(
                 }
                 // 阶段审查退款统一结算（批循环结束后才判断在途/产出终态）
                 let refund_note = if stage_refund_pending
-                    && ctx.checkpoint.settle_stage_review_refund()
+                    && ctx.checkpoint.settle_stage_review_refund(ctx.state.inner())
                 {
                     "\n🔄 阶段审查次数已退还（本轮含 infra 失败且无专家产出 blocking，视为未有效审查）。"
                 } else {

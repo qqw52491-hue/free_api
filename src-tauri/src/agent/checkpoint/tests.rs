@@ -1,5 +1,58 @@
     use super::*;
 
+    /// ── 台账测试辅助：名单退役后，批次/阶段成员身份由 agent_child_runs 行承担 ──
+    fn mk_db(tag: &str) -> (std::path::PathBuf, crate::db::DbState) {
+        let base = std::env::temp_dir().join(format!("cp-ledger-{}-{}", tag, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let state = crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("t.db")).unwrap(),
+        )));
+        (base, state)
+    }
+
+    /// 插一条带 batch/purpose 盖章的子任务台账行；consumed=true 表示回执已被消费
+    ///（终态+已取件），false 表示仍在途/待决。
+    fn ledger_run(
+        db: &crate::db::DbState,
+        parent_run_id: &str,
+        batch: &str,
+        purpose: &str,
+        status: &str,
+        consumed: bool,
+    ) -> String {
+        let id = format!("run-{}", uuid::Uuid::new_v4());
+        db.0.lock().unwrap().execute(
+            "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, kind, task_id, attempt_id, purpose, batch_id, consumed_at)
+             VALUES (?1, ?2, 'sess', '/tmp', 'm', ?3, 't', 'review', ?1, 1, ?4, ?5, ?6)",
+            rusqlite::params![
+                id,
+                parent_run_id,
+                status,
+                purpose,
+                batch,
+                if consumed { Some("2024-01-01T00:00:00Z".to_string()) } else { None }
+            ],
+        ).unwrap();
+        id
+    }
+
+    /// 把在途成员标记为"已终态且已消费"（等价旧名单的 remove/delivered 语义）
+    fn ledger_consume(db: &crate::db::DbState, run_id: &str, status: &str) {
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET status=?1, consumed_at='2024-01-01T00:00:00Z' WHERE id=?2",
+            rusqlite::params![status, run_id],
+        ).unwrap();
+    }
+
+    /// 方案审查批次夹具：n 个在途成员 + checkpoint 锚点
+    fn plan_batch_fixture(cp: &mut AgentCheckpoint, db: &crate::db::DbState, batch: &str, n: usize) -> Vec<String> {
+        let ids: Vec<String> = (0..n)
+            .map(|_| ledger_run(db, &cp.run_id, batch, "plan_review", "running", false))
+            .collect();
+        cp.set_plan_review_batch(batch, ids.len());
+        ids
+    }
+
     #[test]
     fn stale_stage_blocker_clears_when_oracle_passes_birth_stage() {
         // 09-07 pro 终局实测：阶段 07 已过宿主判分，旧 blocker 仍全局拦写（僵尸拦截）。
@@ -90,11 +143,13 @@
         checkpoint.plan_mode = PlanExecutionMode::CrossReview;
         checkpoint.plan_phase = PlanPhase::Reviewing;
         checkpoint.plan_reviewer_retry_count = 2;
-        checkpoint.plan_reviewer_consumed = true;
+        let (_b, db) = mk_db("proj");
 
-        // 模拟批次已派发 2 个审查员，回传 1 个且带有 1 个 blocking
-        checkpoint.plan_review_batch.expected_run_ids.insert("rev-1".to_string());
-        checkpoint.plan_review_batch.expected_run_ids.insert("rev-2".to_string());
+        // 模拟批次已派发 2 个审查员（台账行盖批次章），回传 1 个且带有 1 个 blocking
+        let r1 = ledger_run(&db, &checkpoint.run_id, "b", "plan_review", "running", false);
+        let _r2 = ledger_run(&db, &checkpoint.run_id, "b", "plan_review", "running", false);
+        checkpoint.set_plan_review_batch("b", 2);
+        ledger_consume(&db, &r1, "succeeded");
         let delivery = crate::agent::child_reviewer::ReviewerDeliveryData {
             findings: vec![crate::agent::child_reviewer::ReviewFinding {
                 id: "F1".to_string(),
@@ -115,7 +170,7 @@
             scorecard: None,
             extra: std::collections::HashMap::new(),
         };
-        checkpoint.plan_review_batch.record_delivery(Some("rev-1"), delivery);
+        checkpoint.record_reviewer_delivery_for_run(&db, Some(&r1), &delivery);
 
         let proj = checkpoint.plan_gate_projection();
         assert_eq!(proj.blocking_count, 1);
@@ -605,21 +660,28 @@
 
     #[test]
     fn test_is_stage_review_target_matches_completed_runs() {
+        // 名单退役版：归属由台账 purpose/batch_id 推导——消费与否不影响目标识别
+        //（purpose 盖章是永久的，优于旧 completed_run_ids 的 20 条滚动窗口）
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("test-run-target".to_string(), &ctx);
-        cp.stage_review_run_ids = vec!["expert-1".to_string(), "expert-2".to_string()];
-        assert!(cp.is_stage_review_target("expert-1"));
-        assert!(cp.is_stage_review_target("expert-2"));
-        assert!(!cp.is_stage_review_target("other-run"));
+        let (_base, db) = mk_db("stage-target");
+        let e1 = ledger_run(&db, &cp.run_id, "sb", "stage_review", "running", false);
+        let e2 = ledger_run(&db, &cp.run_id, "sb", "stage_review", "running", false);
+        let other = ledger_run(&db, &cp.run_id, "other", "plan_review", "running", false);
+        cp.stage_review_batch_id = Some("sb".to_string());
 
-        // 当 expert-1 产生结果被 remove 后，matches_stage_review_run 为 false，但 is_stage_review_target 仍为 true
-        cp.remove_stage_review_run("expert-1");
-        assert!(!cp.matches_stage_review_run("expert-1"));
-        assert!(cp.is_stage_review_target("expert-1"));
+        assert!(cp.is_stage_review_target(&db, &e1));
+        assert!(cp.is_stage_review_target(&db, &e2));
+        assert!(!cp.is_stage_review_target(&db, &other));
 
-        // 对质任务完成后记录历史，追问对质任务也识别为阶段审查目标
-        cp.record_stage_review_completed("rebuttal-1");
-        assert!(cp.is_stage_review_target("rebuttal-1"));
+        // expert-1 交付消费后仍是阶段审查目标（purpose 不随消费消失）
+        ledger_consume(&db, &e1, "succeeded");
+        assert!(cp.is_stage_review_target(&db, &e1));
+
+        // 对质任务：purpose='rebuttal' 盖章即被识别为阶段审查目标
+        let reb = ledger_run(&db, &cp.run_id, "sb", "rebuttal", "running", false);
+        assert!(cp.is_stage_review_target(&db, &reb));
+        let _ = std::fs::remove_dir_all(_base);
     }
 
     #[test]
@@ -678,11 +740,12 @@
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("test-barrier".to_string(), &ctx);
         cp.plan_mode = PlanExecutionMode::CrossReview;
-        let batch_ids = vec!["rev-sec".to_string(), "rev-arch".to_string()];
-        cp.register_plan_reviewer_batch(&batch_ids);
+        let (_base, db) = mk_db("barrier");
+        // 台账批次：两名在途审查员
+        let batch_ids = plan_batch_fixture(&mut cp, &db, "batch-1", 2);
 
-        assert!(!cp.plan_review_batch.is_complete());
-        assert_eq!(cp.plan_review_batch.pending_count(), 2);
+        assert!(!cp.plan_review_batch_complete(&db));
+        assert_eq!(cp.plan_review_pending_count(&db), 2);
         assert!(!cp.plan_reviewer_consumed);
 
         // 交付 1：安全审查交付
@@ -704,11 +767,13 @@
             }),
             extra: std::collections::HashMap::new(),
         };
-        cp.record_reviewer_delivery_for_run(Some("rev-sec"), &del1);
+        // 交付 1：台账消费 + reducer 记账
+        ledger_consume(&db, &batch_ids[0], "succeeded");
+        cp.record_reviewer_delivery_for_run(&db, Some(&batch_ids[0]), &del1);
 
         // 齐套屏障拦截：未全部到齐，不得放行 consumed
-        assert!(!cp.plan_review_batch.is_complete());
-        assert_eq!(cp.plan_review_batch.pending_count(), 1);
+        assert!(!cp.plan_review_batch_complete(&db));
+        assert_eq!(cp.plan_review_pending_count(&db), 1);
         assert!(!cp.plan_reviewer_consumed);
 
         // 交付 2：架构审查交付
@@ -730,11 +795,12 @@
             }),
             extra: std::collections::HashMap::new(),
         };
-        cp.record_reviewer_delivery_for_run(Some("rev-arch"), &del2);
+        ledger_consume(&db, &batch_ids[1], "succeeded");
+        cp.record_reviewer_delivery_for_run(&db, Some(&batch_ids[1]), &del2);
 
         // 全部齐套：屏障解除，consumed 置为 true
-        assert!(cp.plan_review_batch.is_complete());
-        assert_eq!(cp.plan_review_batch.pending_count(), 0);
+        assert!(cp.plan_review_batch_complete(&db));
+        assert_eq!(cp.plan_review_pending_count(&db), 0);
         assert!(cp.plan_reviewer_consumed);
 
         // 验证现场真聚合打分：（90+80)/2=85, (95+85)/2=90, (85+95)/2=90, (80+90)/2=85
@@ -743,6 +809,7 @@
         assert_eq!(sc.risk, 90);
         assert_eq!(sc.style, 90);
         assert_eq!(sc.test_coverage, Some(85));
+        let _ = std::fs::remove_dir_all(_base);
     }
 
     #[test]
@@ -751,8 +818,9 @@
 
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("test-idempotent".to_string(), &ctx);
-        let batch_ids = vec!["rev-1".to_string()];
-        cp.register_plan_reviewer_batch(&batch_ids);
+        let (_base, db) = mk_db("idem");
+        let batch_ids = plan_batch_fixture(&mut cp, &db, "b-idem", 1);
+        let rev1 = batch_ids[0].clone();
 
         let del = ReviewerDeliveryData {
             findings: vec![ReviewFinding {
@@ -782,16 +850,17 @@
             extra: std::collections::HashMap::new(),
         };
 
-        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
-        assert_eq!(cp.plan_review_batch.deliveries.len(), 1);
+        cp.record_reviewer_delivery_for_run(&db, Some(&rev1), &del);
+        assert_eq!(cp.plan_review_deliveries.len(), 1);
         assert_eq!(cp.last_review_blocking_count, 1);
         assert_eq!(cp.review_objection_added, 1);
 
         // 重复投递同一 run_id：幂等保护直接忽略，不重复累加
-        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
-        assert_eq!(cp.plan_review_batch.deliveries.len(), 1);
+        cp.record_reviewer_delivery_for_run(&db, Some(&rev1), &del);
+        assert_eq!(cp.plan_review_deliveries.len(), 1);
         assert_eq!(cp.last_review_blocking_count, 1);
         assert_eq!(cp.review_objection_added, 1);
+        let _ = std::fs::remove_dir_all(_base);
     }
 
     #[test]
@@ -800,8 +869,8 @@
 
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("test-union".to_string(), &ctx);
-        let batch_ids = vec!["rev-sec".to_string(), "rev-arch".to_string()];
-        cp.register_plan_reviewer_batch(&batch_ids);
+        let (_base, db) = mk_db("union");
+        let batch_ids = plan_batch_fixture(&mut cp, &db, "b-union", 2);
 
         // 专家 1 提出 SEC-1 (blocking)
         let del1 = ReviewerDeliveryData {
@@ -824,7 +893,7 @@
             scorecard: None,
             extra: std::collections::HashMap::new(),
         };
-        cp.record_reviewer_delivery_for_run(Some("rev-sec"), &del1);
+        cp.record_reviewer_delivery_for_run(&db, Some(&batch_ids[0]), &del1);
 
         // 专家 2 提出 ARCH-1 (blocking), ARCH-2 (blocking 但已撤回), ARCH-3 (advisory 非 blocking)
         let del2 = ReviewerDeliveryData {
@@ -869,16 +938,17 @@
             scorecard: None,
             extra: std::collections::HashMap::new(),
         };
-        cp.record_reviewer_delivery_for_run(Some("rev-arch"), &del2);
+        cp.record_reviewer_delivery_for_run(&db, Some(&batch_ids[1]), &del2);
 
         // 现场真聚合检查：
         // blocking 并集应当包含 SEC-1 和 ARCH-1，不包含已撤回的 ARCH-2，也不包含 advisory 的 ARCH-3
-        let blockings = cp.plan_review_batch.aggregate_unwithdrawn_blockings();
+        let blockings = cp.aggregate_unwithdrawn_blockings();
         assert_eq!(blockings.len(), 2);
         let ids: Vec<&str> = blockings.iter().map(|b| b.id.as_str()).collect();
         assert!(ids.contains(&"SEC-1"));
         assert!(ids.contains(&"ARCH-1"));
         assert_eq!(cp.last_review_blocking_count, 2);
+        let _ = std::fs::remove_dir_all(_base);
     }
 
     /// Tech Lead 定稿权：approved + revised_* 时 submitted_plan 被审查者版本覆盖，
@@ -890,7 +960,8 @@
 
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("test-revised".to_string(), &ctx);
-        cp.register_plan_reviewer_batch(&["rev-1".to_string()]);
+        let (_base, db) = mk_db("revised");
+        let batch_ids = plan_batch_fixture(&mut cp, &db, "b-rev", 1);
         cp.submitted_plan = Some(PlanSubmission {
             plan_summary: "原始方案：直接改 workspace_dir".to_string(),
             root_cause: "原始根因".to_string(),
@@ -930,7 +1001,7 @@
             }),
             extra,
         };
-        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
+        cp.record_reviewer_delivery_for_run(&db, Some(&batch_ids[0]), &del);
 
         let plan = cp.submitted_plan.as_ref().expect("submitted_plan 必须存在");
         assert_eq!(
@@ -955,7 +1026,8 @@
 
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("test-norev".to_string(), &ctx);
-        cp.register_plan_reviewer_batch(&["rev-1".to_string()]);
+        let (_base, db) = mk_db("norev");
+        let batch_ids = plan_batch_fixture(&mut cp, &db, "b-norev", 1);
         cp.submitted_plan = Some(PlanSubmission {
             plan_summary: "原始方案".to_string(),
             ..Default::default()
@@ -981,13 +1053,14 @@
             }),
             extra,
         };
-        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
+        cp.record_reviewer_delivery_for_run(&db, Some(&batch_ids[0]), &del);
 
         assert_eq!(
             cp.submitted_plan.as_ref().unwrap().plan_summary,
             "原始方案"
         );
         assert!(cp.plan_finalized_by.is_none());
+        let _ = std::fs::remove_dir_all(_base);
     }
 
     /// rebuttal 携带 revised_* 不生效——修订只在 approved 定稿语义下应用。
@@ -998,7 +1071,8 @@
 
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("test-rebuttal".to_string(), &ctx);
-        cp.register_plan_reviewer_batch(&["rev-1".to_string()]);
+        let (_base, db) = mk_db("rebuttal");
+        let batch_ids = plan_batch_fixture(&mut cp, &db, "b-reb", 1);
         cp.submitted_plan = Some(PlanSubmission {
             plan_summary: "原始方案".to_string(),
             ..Default::default()
@@ -1028,7 +1102,7 @@
             }),
             extra,
         };
-        cp.record_reviewer_delivery_for_run(Some("rev-1"), &del);
+        cp.record_reviewer_delivery_for_run(&db, Some(&batch_ids[0]), &del);
 
         assert_eq!(
             cp.submitted_plan.as_ref().unwrap().plan_summary,
@@ -1036,98 +1110,85 @@
             "rebuttal 下的修订字段不得生效"
         );
         assert!(cp.plan_finalized_by.is_none());
+        let _ = std::fs::remove_dir_all(_base);
     }
 
+    /// ── 名单退役版语义验证：成员/在途/齐套全部由台账推导 ──
+    /// 旧版死锁形态（名单挂着已死成员永远等不到交付）结构性消失：
+    /// 终态+已消费的行天然出列，failover 备胎盖章自动入批，
+    /// "忘了换名"的漂移面不复存在。
     #[test]
-    fn reconcile_plan_reviewer_batch_prunes_dead_orphans() {
-        // 齐套屏障自愈保险丝：expected 名单上的 run 在台账中已终态且回执
-        // 已被消费（交付/失败记账被绕过，如历史 failover 漏换 id）→ 点名时
-        // 按失败划掉，否则屏障永远等一个不会交付的死人。
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE agent_child_runs (
-                id TEXT PRIMARY KEY, status TEXT NOT NULL, consumed_at TEXT);
-             INSERT INTO agent_child_runs VALUES
-                ('dead-1', 'timed_out', '2024-01-01'),
-                ('pending-1', 'timed_out', NULL),
-                ('running-1', 'running', NULL);",
-        )
-        .unwrap();
-        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
-
+    fn plan_batch_membership_derives_from_ledger() {
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
-        let mut cp = AgentCheckpoint::new("run-heal".to_string(), &ctx);
-        cp.register_plan_reviewer_batch(&[
-            "dead-1".to_string(),
-            "pending-1".to_string(),
-            "running-1".to_string(),
-            "never-spawned".to_string(),
-        ]);
-        assert!(!cp.plan_reviewer_consumed);
-        assert_eq!(cp.plan_review_batch.pending_count(), 4);
+        let mut cp = AgentCheckpoint::new("run-ledger".to_string(), &ctx);
+        let (_base, db) = mk_db("plan-ledger");
 
-        // dead-1：终态+已消费的孤儿；never-spawned：台账不存在 → 均划掉
-        let pruned = cp.reconcile_plan_reviewer_batch(&db);
-        assert_eq!(pruned, 2);
-        assert!(cp.plan_review_batch.failed_run_ids.contains_key("dead-1"));
-        assert!(cp.plan_review_batch.failed_run_ids.contains_key("never-spawned"));
-        // pending-1（回执还在信箱）与 running-1（在途）不得抢判
-        assert!(!cp.plan_review_batch.failed_run_ids.contains_key("pending-1"));
-        assert!(!cp.plan_review_batch.failed_run_ids.contains_key("running-1"));
-        assert_eq!(cp.plan_review_batch.pending_count(), 2);
+        // 批次 batch-x：1 死（终态已消费）+ 1 回执在信箱（终态未消费）+ 1 在跑
+        ledger_run(&db, &cp.run_id, "batch-x", "plan_review", "timed_out", true);
+        ledger_run(&db, &cp.run_id, "batch-x", "plan_review", "succeeded", false);
+        ledger_run(&db, &cp.run_id, "batch-x", "plan_review", "running", false);
+        cp.set_plan_review_batch("batch-x", 3);
+
+        // 待决=2（终态未消费+在途），已消费的死者天然不算待决
+        assert_eq!(cp.plan_review_pending_count(&db), 2);
+        assert_eq!(cp.plan_review_member_count(&db), 3);
+        assert!(!cp.plan_review_batch_complete(&db));
+        cp.refresh_consumed_flags(&db);
         assert!(!cp.plan_reviewer_consumed, "仍有真实待办成员，不得放行");
 
-        // pending-1 回执被消费、running-1 也终态消费后 → 再点名全部划完 → 放行
-        {
-            let conn = db.0.lock().unwrap();
-            conn.execute(
-                "UPDATE agent_child_runs SET consumed_at = 'x', status = 'succeeded' WHERE id = 'pending-1'",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE agent_child_runs SET consumed_at = 'x', status = 'failed' WHERE id = 'running-1'",
-                [],
-            )
-            .unwrap();
-        }
-        assert_eq!(cp.reconcile_plan_reviewer_batch(&db), 2);
-        assert!(cp.plan_review_batch.is_complete());
-        assert!(cp.plan_reviewer_consumed, "名单全部划完后屏障应放行");
+        // failover 备胎：同 batch_id 盖章 → 自动成为批次待决成员，无需登记
+        let _spare = ledger_run(&db, &cp.run_id, "batch-x", "plan_review", "running", false);
+        assert_eq!(cp.plan_review_pending_count(&db), 3, "备胎自动入批待决");
+
+        // 其余成员全部消费后，备胎也交付 → 齐套
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET consumed_at='x' WHERE batch_id='batch-x'", [],
+        ).unwrap();
+        assert!(cp.plan_review_batch_complete(&db));
+        cp.refresh_consumed_flags(&db);
+        assert!(cp.plan_reviewer_consumed, "全员消费后屏障放行");
+
+        // 对质续跑入批（新行同 batch、purpose=rebuttal、未消费）
+        // → consumed 自动回落 false——旧名单时代对质不在名单里，
+        //   标志恒 true 会掩盖在途工作
+        ledger_run(&db, &cp.run_id, "batch-x", "rebuttal", "running", false);
+        cp.refresh_consumed_flags(&db);
+        assert!(!cp.plan_reviewer_consumed, "对质续跑入批后批次重新待决");
+
+        // 迟到回执属旧批次 → 不碰当前批状态（批次归属校验）
+        cp.set_plan_review_batch("batch-y", 1);
+        let old_member = ledger_run(&db, &cp.run_id, "batch-x", "plan_review", "running", false);
+        cp.record_reviewer_failure_for_run(&db, &old_member);
+        assert!(!cp.plan_reviewer_consumed, "旧批次回执不得放行当前批");
+        let _ = std::fs::remove_dir_all(_base);
     }
 
     #[test]
-    fn reconcile_stage_review_runs_prunes_dead_inflight_orphans() {
-        // 阶段审查同款保险丝：run_ids 里挂着"已终态且已消费"的孤儿会让
-        // has_in_flight_stage_review() 永远为真，后续阶段审查全部派不出去。
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE agent_child_runs (
-                id TEXT PRIMARY KEY, status TEXT NOT NULL, consumed_at TEXT);
-             INSERT INTO agent_child_runs VALUES
-                ('stage-dead', 'invalid_output', 'x'),
-                ('stage-pending', 'succeeded', NULL),
-                ('stage-running', 'running', NULL);",
-        )
-        .unwrap();
-        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
-
+    fn stage_review_in_flight_derives_from_ledger() {
+        // 阶段审查同款：在途 = 批次行 consumed_at IS NULL。
+        // 孤儿 id 无法存在——没有名单可挂，台账里没有的行根本不会被算作成员。
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
-        let mut cp = AgentCheckpoint::new("run-stage-heal".to_string(), &ctx);
-        cp.stage_review_run_ids = vec![
-            "stage-dead".to_string(),
-            "stage-pending".to_string(),
-            "stage-running".to_string(),
-            "stage-ghost".to_string(),
-        ];
-        cp.stage_review_rebuttal_run_id = Some("stage-dead".to_string());
+        let mut cp = AgentCheckpoint::new("run-stage-ledger".to_string(), &ctx);
+        let (_base, db) = mk_db("stage-ledger");
 
-        let pruned = cp.reconcile_stage_review_runs(&db);
-        assert_eq!(pruned, 2, "stage-dead 与台账不存在的 stage-ghost 应被清掉");
-        assert!(!cp.stage_review_run_ids.contains(&"stage-dead".to_string()));
-        assert!(!cp.stage_review_run_ids.contains(&"stage-ghost".to_string()));
-        assert!(cp.stage_review_run_ids.contains(&"stage-pending".to_string()));
-        assert!(cp.stage_review_run_ids.contains(&"stage-running".to_string()));
-        assert!(cp.stage_review_rebuttal_run_id.is_none(), "rebuttal 指针同步清掉");
-        assert!(cp.has_in_flight_stage_review(), "真在途成员仍在");
+        // 3 位阶段审查专家：1 死已消费 + 1 待取件 + 1 在跑
+        ledger_run(&db, &cp.run_id, "sb", "stage_review", "invalid_output", true);
+        ledger_run(&db, &cp.run_id, "sb", "stage_review", "succeeded", false);
+        let running = ledger_run(&db, &cp.run_id, "sb", "stage_review", "running", false);
+        cp.stage_review_batch_id = Some("sb".to_string());
+
+        assert!(cp.stage_review_in_flight(&db), "2 名未消费成员在途");
+        assert_eq!(cp.stage_review_in_flight_remaining(&db), 2);
+
+        // 全部消费后自动出在途——无需任何名单清理动作
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET consumed_at='x' WHERE batch_id='sb'", [],
+        ).unwrap();
+        assert!(!cp.stage_review_in_flight(&db));
+
+        // 对质续跑（purpose=rebuttal + 同批次）→ 重新计入在途
+        ledger_run(&db, &cp.run_id, "sb", "rebuttal", "running", false);
+        assert!(cp.stage_review_in_flight(&db), "对质在途 = 阶段仍开放");
+        assert!(cp.is_rebuttal_run(&db, &running) == false);
+        let _ = std::fs::remove_dir_all(_base);
     }

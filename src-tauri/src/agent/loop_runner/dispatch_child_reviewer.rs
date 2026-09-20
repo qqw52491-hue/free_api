@@ -318,7 +318,7 @@ pub(super) async fn dispatch_child_reviewer(
         }
 
         if success_count > 0 {
-            ctx.checkpoint.register_plan_reviewer_batch(&spawned_ids);
+            ctx.checkpoint.set_plan_review_batch(&batch_id, spawned_ids.len());
         }
 
         if !is_batch {

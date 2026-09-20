@@ -53,6 +53,7 @@ fn stage_review_max_files() -> u32 {
 /// 双触发判定。返回 Some(原因) 表示应派发阶段审查。
 pub fn should_fire(
     checkpoint: &AgentCheckpoint,
+    db: &DbState,
     context: &SandwichContext,
     instruction: &AgentInstruction,
     model_routing: &ModelRoutingConfig,
@@ -88,7 +89,7 @@ pub fn should_fire(
         return None;
     }
     // 已有在途审查或尚有未解决的拦截时，不重复派发（等消费或对质收敛）
-    if checkpoint.has_in_flight_stage_review() {
+    if checkpoint.stage_review_in_flight(db) {
         return None;
     }
     if checkpoint.stage_review_blockers_open > 0 {
@@ -400,6 +401,7 @@ pub async fn dispatch(
             "impact_pack_refs": impact_refs_json,
         });
 
+        let stage_batch_id = format!("stage-batch-{}-{}", checkpoint.step_id, uuid::Uuid::new_v4());
         let envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
             parent_run_id,
             session_id,
@@ -408,6 +410,7 @@ pub async fn dispatch(
         )
         .with_task_id(format!("stage_review_{}", checkpoint.step_id))
         .with_purpose("stage_review")
+        .with_batch_id(stage_batch_id.clone())
         .with_tier(&routing.tier.to_string())
         .with_effort(model_routing.reasoning_effort_for(&routing.tier));
 
@@ -415,8 +418,8 @@ pub async fn dispatch(
             .dispatch(Some(app.clone()), db, workspace, interrupt_rx)
             .await?;
 
-        checkpoint.stage_review_run_id = Some(child_run_id.clone());
-        checkpoint.stage_review_run_ids = vec![child_run_id.clone()];
+        // 批次锚点落 checkpoint：在途/收口此后全部由台账推导
+        checkpoint.stage_review_batch_id = Some(stage_batch_id);
         checkpoint.stage_review_budget_used += 1;
         checkpoint.stage_review_shell_baseline = checkpoint.uncovered_shell_mutations;
         checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
@@ -503,11 +506,9 @@ pub async fn dispatch(
             .dispatch(Some(app.clone()), db, workspace, interrupt_rx.clone())
             .await?;
 
-        // ★ 立即注册：dispatch 成功后即刻写入 checkpoint，
-        //   防止后续循环 dispatch 失败时已派出的任务成为孤儿。
+        // 成员身份由台账 batch_id 承担（dispatch 时已盖章）；锚点写一次即可
         dispatched_run_ids.push(child_run_id.clone());
-        checkpoint.stage_review_run_ids = dispatched_run_ids.clone();
-        checkpoint.stage_review_run_id = dispatched_run_ids.first().cloned();
+        checkpoint.stage_review_batch_id = Some(stage_batch_id.clone());
 
         let _ = app.emit(
             &format!("agent-log-{}", session_id),
@@ -645,12 +646,13 @@ pub struct StageReceiptOutcome {
 /// 单一事实源：主循环自动注入与 wait_jobs 手动收取都经 reducer 汇聚到本函数。
 pub fn apply_stage_receipt(
     checkpoint: &mut AgentCheckpoint,
+    db: &DbState,
     receipt: &crate::agent::protocol::DeliveryReceipt,
     oracle_index: Option<u32>,
 ) -> StageReceiptOutcome {
-    let was_rebuttal = checkpoint.stage_review_rebuttal_run_id.as_deref()
-        == Some(receipt.child_run_id.as_str());
-    checkpoint.remove_stage_review_run(&receipt.child_run_id);
+    // 对质判定由台账 purpose='rebuttal' 盖章承担（resume 落库时盖戳），
+    // 不再需要 checkpoint 维护"当前对质指针"
+    let was_rebuttal = checkpoint.is_rebuttal_run(db, &receipt.child_run_id);
     let parsed_kind = receipt
         .error_kind
         .as_deref()
@@ -664,16 +666,10 @@ pub fn apply_stage_receipt(
     if was_rebuttal
         && parsed_kind == Some(crate::agent::types::ChildErrorKind::InvalidOutput)
     {
-        checkpoint.stage_review_rebuttal_run_id = None;
         return StageReceiptOutcome {
             note: "⚖️ 对质子任务技术性失败（审查员输出非法，未产生有效裁决）：原 blocking 异议保留，可重新 resume_child 对质，或等宿主判分越过该阶段自动清账。".to_string(),
             refund_pending: false,
         };
-    }
-
-    if was_rebuttal {
-        checkpoint.record_stage_review_completed(&receipt.child_run_id);
-        checkpoint.stage_review_rebuttal_run_id = None;
     }
 
     // 基础设施失败：该阶段视为「未审」，会重新触发。
@@ -738,7 +734,7 @@ pub fn apply_stage_receipt(
     // 僵尸 blocker 治理：记录出生阶段索引（无 blocker 时清空，避免陈旧索引干扰）
     if checkpoint.stage_review_blockers_open > 0 {
         checkpoint.stage_review_blocker_stage = oracle_index;
-    } else if !checkpoint.has_in_flight_stage_review() {
+    } else if !checkpoint.stage_review_in_flight(db) {
         checkpoint.stage_review_blocker_stage = None;
     }
 
@@ -751,7 +747,7 @@ pub fn apply_stage_receipt(
     checkpoint.review_total_withdrawn += withdrawn;
     checkpoint.review_total_maintained += maintained;
 
-    let in_flight_remaining = checkpoint.stage_review_run_ids.len();
+    let in_flight_remaining = checkpoint.stage_review_in_flight_remaining(db);
     let committee_suffix = if in_flight_remaining > 0 {
         format!("（联合会审仍在途，剩余 {} 位专家）", in_flight_remaining)
     } else {
@@ -794,11 +790,12 @@ pub fn apply_stage_receipt(
 /// 兼容老接口：将 ChildReviewResult 转换为 DeliveryReceipt 交付回执后处理
 pub fn apply_stage_result(
     checkpoint: &mut AgentCheckpoint,
+    db: &DbState,
     result: &crate::agent::child_reviewer::ChildReviewResult,
     oracle_index: Option<u32>,
 ) -> StageReceiptOutcome {
     let receipt: crate::agent::protocol::DeliveryReceipt = result.clone().into();
-    apply_stage_receipt(checkpoint, &receipt, oracle_index)
+    apply_stage_receipt(checkpoint, db, &receipt, oracle_index)
 }
 
 #[cfg(test)]

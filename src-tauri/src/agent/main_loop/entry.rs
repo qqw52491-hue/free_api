@@ -210,10 +210,9 @@ pub(crate) async fn try_plan_reviewer_failover(
         Ok(new_run_id) => {
             checkpoint.plan_reviewer_failover_count += 1;
             checkpoint.set_plan_reviewer_dispatch_snapshot(&dispatch);
-            // 齐套屏障无缝转移：旧失败 id → 新重派 id，批次可正常收口
-            if let Some(old_id) = failed_run_id {
-                checkpoint.replace_expected_reviewer_run_id(old_id, &new_run_id);
-            }
+            // 齐套屏障自动接管：备胎行自带原 batch_id（snapshot 盖章继承），
+            // 台账推导下天然属于本批待决成员——不再需要手动换名单
+            let _ = failed_run_id;
             Ok(Some(new_run_id))
         }
         Err(spawn_err) => Err(spawn_err),

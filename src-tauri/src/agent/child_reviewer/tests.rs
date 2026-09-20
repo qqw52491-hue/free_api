@@ -218,7 +218,7 @@
                 }
             ]
         }"#;
-        let (findings, confidence, refs, missing, routing, verdicts, withdrawn) =
+        let (findings, _confidence, _refs, _missing, _routing, verdicts, withdrawn) =
             parse_child_review_rebuttal_output(json_raw).unwrap();
         assert!(findings.is_empty());
         assert_eq!(verdicts.len(), 1);

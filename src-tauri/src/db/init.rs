@@ -149,7 +149,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             attempt_id INTEGER NOT NULL DEFAULT 1,
             purpose TEXT,
             batch_id TEXT,
-            contract_id TEXT
+            contract_id TEXT,
+            contract_schema TEXT
         );
         CREATE TABLE IF NOT EXISTS agent_role_cards (
             id TEXT PRIMARY KEY,
@@ -607,6 +608,12 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN purpose TEXT;", []);
     let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN batch_id TEXT;", []);
     let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN contract_id TEXT;", []);
+    // 交付契约模式落库：消费端（reducer）按 run 行自带的契约做运行时校验，
+    // 不再依赖"调用方还记得信封里那份 schema"（旧库自愈）。
+    let _ = conn.execute(
+        "ALTER TABLE agent_child_runs ADD COLUMN contract_schema TEXT;",
+        [],
+    );
     // 存量回填：旧行的物理 run 就是它自己的逻辑任务，purpose 取 kind
     let _ = conn.execute(
         "UPDATE agent_child_runs SET task_id = id WHERE task_id IS NULL;",

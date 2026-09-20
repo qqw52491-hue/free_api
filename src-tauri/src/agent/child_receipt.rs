@@ -40,6 +40,45 @@ pub(crate) struct ReceiptEffects {
     pub ui_notices: Vec<String>,
 }
 
+/// 交付契约运行时校验（三条通道汇合后的唯一关口）：
+/// run 台账落库的 contract_schema 存在且交付为成功态时，校验 payload 满足
+/// 扩展字段约束（必填字段/类型/枚举值/闭集白名单）；违规就地降级为
+/// invalid_output，后续走既有的非法输出失败语义（reviewer→记账+可故障转移，
+/// 阶段审查→未审不耗预算）。此前 custom_schema 只在派发时渲染进提示词，
+/// 没有任何运行期校验。
+fn enforce_delivery_contract(db: &DbState, receipt: &mut DeliveryReceipt) {
+    if !receipt.is_success() {
+        return;
+    }
+    let schema_json: Option<String> = db
+        .0
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT contract_schema FROM agent_child_runs WHERE id = ?1",
+                rusqlite::params![receipt.child_run_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+        });
+    let Some(schema_json) = schema_json else { return };
+    let Ok(schema) =
+        serde_json::from_str::<crate::agent::protocol::ContractSchema>(&schema_json)
+    else {
+        return;
+    };
+    if schema.is_empty() {
+        return;
+    }
+    if let Err(err) = receipt.validate_against_schema(&schema) {
+        receipt.status = "invalid_output".to_string();
+        receipt.error_kind =
+            Some(crate::agent::types::ChildErrorKind::ContractViolation(err).db_value());
+    }
+}
+
 /// 消费一张子任务交付回执：checkpoint 状态变更 + 有界模型投影。
 /// 调用方职责：聚合返回的 model_text、批后调用 settle_stage_review_refund、
 /// 广播 ui_notices。
@@ -49,16 +88,19 @@ pub(crate) async fn reduce_child_receipt(
     context: &mut SandwichContext,
     receipt: &DeliveryReceipt,
 ) -> ReceiptEffects {
+    // ── 交付契约运行时校验（所有种类统一）：违规转 invalid_output ──
+    let mut receipt_owned = receipt.clone();
+    enforce_delivery_contract(env.db, &mut receipt_owned);
+    let receipt = &receipt_owned;
+
     // ── 阶段审查/对质回执：独立语义（不占方案审查预算，infra 失败视为未审）──
-    if checkpoint.matches_stage_review_run(&receipt.child_run_id)
-        || checkpoint.stage_review_rebuttal_run_id.as_deref()
-            == Some(receipt.child_run_id.as_str())
-    {
+    // 归属判定由台账 purpose/batch_id 推导（含已交付成员——对质目标是交付过的审查员）
+    if checkpoint.is_stage_review_target(env.db, &receipt.child_run_id) {
         let oracle_index = crate::agent::eval_oracle::query_active_progress()
             .await
             .map(|(idx, _, _)| idx as u32);
         let outcome =
-            crate::agent::stage_review::apply_stage_receipt(checkpoint, receipt, oracle_index);
+            crate::agent::stage_review::apply_stage_receipt(checkpoint, env.db, receipt, oracle_index);
         return ReceiptEffects {
             model_text: format!(
                 "【📋 阶段审查 (child_run_id: {})】\n{}",
@@ -257,10 +299,7 @@ async fn reduce_reviewer_receipt(
     // 基础设施失败（超时/取消/中断/非法输出/请求层失败）不是实质性审查：
     // 记录批次失败 + 退还预算（零产出不烧预算）。
     if receipt.is_infra_failure() {
-        checkpoint.record_reviewer_failure_for_run(
-            &receipt.child_run_id,
-            receipt.error_kind.as_deref().unwrap_or("infra_failure"),
-        );
+        checkpoint.record_reviewer_failure_for_run(env.db, &receipt.child_run_id);
         checkpoint.refund_infra_failed_review_round(receipt_kind);
         return text;
     }
@@ -283,11 +322,11 @@ async fn reduce_reviewer_receipt(
         })
     });
     let Some(delivery) = delivery else {
-        checkpoint.record_reviewer_failure_for_run(&receipt.child_run_id, "corrupted_json_output");
+        checkpoint.record_reviewer_failure_for_run(env.db, &receipt.child_run_id);
         return text;
     };
 
-    checkpoint.record_reviewer_delivery_for_run(Some(&receipt.child_run_id), &delivery);
+    checkpoint.record_reviewer_delivery_for_run(env.db, Some(&receipt.child_run_id), &delivery);
     // Tech Lead 定稿通知：revised_* 已覆盖 submitted_plan 对应字段，
     // 执行方必须以审查者定稿版本为准。
     if let Some(rev) =
@@ -380,6 +419,27 @@ mod tests {
         }
     }
 
+    /// 名单退役版夹具：往台账插一条带 batch/purpose 盖章的子任务行。
+    /// consumed=true 模拟"回执已由 poll 消费"的生产时序（reducer 跑在消费之后）。
+    fn seed_run(
+        db: &DbState,
+        run_id: &str,
+        parent_run_id: &str,
+        batch: &str,
+        purpose: &str,
+        status: &str,
+        consumed: bool,
+    ) {
+        db.0.lock().unwrap().execute(
+            "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, kind, task_id, attempt_id, purpose, batch_id, consumed_at)
+             VALUES (?1, ?2, 'sess-1', '/tmp', 'm', ?3, 't', 'review', ?1, 1, ?4, ?5, ?6)",
+            rusqlite::params![
+                run_id, parent_run_id, status, purpose, batch,
+                if consumed { Some("2024-01-01T00:00:00Z".to_string()) } else { None }
+            ],
+        ).unwrap();
+    }
+
     #[tokio::test]
     async fn reviewer_delivery_records_batch_and_registers_todos() {
         let (base, db) = test_db("delivery");
@@ -388,6 +448,9 @@ mod tests {
         let env = test_env(&db, &ws);
         let mut context = SandwichContext::new("sys".into(), "goal".into());
         let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        // 台账夹具：批次 b1 单成员 rev-1，回执已消费（模拟 poll 先标记的时序）
+        seed_run(&db, "rev-1", "run-1", "b1", "plan_review", "succeeded", true);
+        cp.set_plan_review_batch("b1", 1);
 
         let r = receipt(
             "review",
@@ -420,12 +483,16 @@ mod tests {
         let mut context = SandwichContext::new("sys".into(), "goal".into());
         let mut cp = AgentCheckpoint::new("run-1".into(), &context);
         cp.plan_reviewer_retry_count = 1; // 已烧掉一轮预算
+        // 台账夹具：批次成员 rev-x 已终态失败且回执已消费（失败记录 = 台账 status）
+        seed_run(&db, "rev-x", "run-1", "b-x", "plan_review", "timed_out", true);
+        cp.set_plan_review_batch("b-x", 1);
 
         // 无派发快照 → failover 返回 Ok(None) → 落入 infra 记账+退款
         let r = receipt("review", "rev-x", Some("timeout"), json!({"status":"timed_out"}));
         let effects = reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
         assert!(effects.redispatched_to.is_none());
-        assert!(cp.plan_review_batch.failed_run_ids.contains_key("rev-x"));
+        assert_eq!(cp.plan_review_failed_count(&db), 1, "失败记录 = 台账 status");
+        assert!(cp.plan_reviewer_consumed, "批次唯一成员收口 → 齐套放行");
         assert_eq!(cp.plan_reviewer_retry_count, 0, "infra 失败应退还已烧预算");
         assert_eq!(cp.reviewer_budget_refunds, 1);
         let _ = std::fs::remove_dir_all(base);
@@ -456,6 +523,7 @@ mod tests {
             purpose: Some("plan_review".to_string()),
             batch_id: Some("batch-x".to_string()),
             contract_id: Some("reviewer.v1".to_string()),
+            contract_schema: None,
         };
         let old_id = crate::agent::child_reviewer::begin_child_run_extended(
             &db, "run-1", "sess-1", &ws, "m1", 0, "review", None, None, None, &old_identity,
@@ -465,7 +533,12 @@ mod tests {
         let env = test_env(&db, &ws);
         let mut context = SandwichContext::new("sys".into(), "goal".into());
         let mut cp = AgentCheckpoint::new("run-1".into(), &context);
-        cp.register_plan_reviewer_batch(&[old_id.clone()]);
+        cp.set_plan_review_batch("batch-x", 1);
+        // 模拟生产时序：poll 发出回执前已把老 run 标记为终态+已消费
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET status='timed_out', consumed_at='2024-01-01' WHERE id=?1",
+            rusqlite::params![old_id],
+        ).unwrap();
         cp.set_plan_reviewer_dispatch_snapshot(
             &PlanReviewerDispatchSnapshot::new(
                 "m1",
@@ -484,14 +557,11 @@ mod tests {
         let new_id = effects
             .redispatched_to
             .expect("failover-eligible 失败应触发重派");
-        assert!(
-            !cp.plan_review_batch.expected_run_ids.contains(&old_id),
-            "旧失败 id 必须从预期集合移除"
-        );
-        assert!(
-            cp.plan_review_batch.expected_run_ids.contains(&new_id),
-            "新重派 id 必须接管预期集合，否则齐套屏障永不收口"
-        );
+        // 名单退役版断言：备胎靠 batch_id 盖章自动入批——旧成员已消费出列、
+        // 新成员自动成为唯一待决，齐套屏障正确续口而不需任何"换名"动作
+        assert_eq!(cp.plan_review_member_count(&db), 2, "旧成员+备胎同属一批");
+        assert_eq!(cp.plan_review_pending_count(&db), 1, "唯一待决 = 备胎");
+        assert!(!cp.plan_reviewer_consumed, "备胎在途 → 屏障继续拦截");
         assert_eq!(cp.plan_reviewer_failover_count, 1);
 
         // 逻辑身份继承：同一道题两次作答，task_id 不变、attempt 递增、purpose/batch 沿用
@@ -525,6 +595,7 @@ mod tests {
             purpose: Some("worker".to_string()),
             batch_id: None,
             contract_id: Some("worker.v1".to_string()),
+            contract_schema: None,
         };
         let r1 = crate::agent::child_reviewer::begin_child_run_extended(
             &db, "run-1", "sess-1", &ws, "m1", 0, "worker", None, None, None, &id1,
@@ -557,7 +628,9 @@ mod tests {
         let env = test_env(&db, &ws);
         let mut context = SandwichContext::new("sys".into(), "goal".into());
         let mut cp = AgentCheckpoint::new("run-1".into(), &context);
-        cp.stage_review_run_ids = vec!["stage-1".to_string()];
+        // 台账夹具：阶段批次 sb 单成员 stage-1，回执已消费（终态 timed_out）
+        seed_run(&db, "stage-1", "run-1", "sb", "stage_review", "timed_out", true);
+        cp.stage_review_batch_id = Some("sb".to_string());
         cp.stage_review_budget_used = 1;
 
         let r = receipt("review", "stage-1", Some("timeout"), json!({"status":"timed_out"}));
@@ -565,7 +638,7 @@ mod tests {
         assert!(effects.stage_refund_pending, "infra 失败应标记待结算");
         assert!(effects.model_text.contains("阶段审查"));
 
-        assert!(cp.settle_stage_review_refund(), "在途清空且无 blocker → 应退款");
+        assert!(cp.settle_stage_review_refund(&db), "在途清空且无 blocker → 应退款");
         assert_eq!(cp.stage_review_budget_used, 0);
         let _ = std::fs::remove_dir_all(base);
     }
@@ -578,7 +651,10 @@ mod tests {
         let env = test_env(&db, &ws);
         let mut context = SandwichContext::new("sys".into(), "goal".into());
         let mut cp = AgentCheckpoint::new("run-1".into(), &context);
-        cp.stage_review_run_ids = vec!["stage-ok".to_string(), "stage-bad".to_string()];
+        // 台账夹具：阶段批次 sb2 两成员，回执均已消费（终态已落库）
+        seed_run(&db, "stage-ok", "run-1", "sb2", "stage_review", "succeeded", true);
+        seed_run(&db, "stage-bad", "run-1", "sb2", "stage_review", "timed_out", true);
+        cp.stage_review_batch_id = Some("sb2".to_string());
         cp.stage_review_budget_used = 1;
 
         // 先交付一个带 blocker 的成功专家，再收一个 infra 失败专家：
@@ -601,7 +677,7 @@ mod tests {
         let eff2 = reduce_child_receipt(&env, &mut cp, &mut context, &bad).await;
         assert!(eff2.stage_refund_pending);
         assert!(
-            !cp.settle_stage_review_refund(),
+            !cp.settle_stage_review_refund(&db),
             "已有专家交付真实 blocking → 本轮有实质产出，不得退款"
         );
         assert_eq!(cp.stage_review_budget_used, 1);
@@ -628,4 +704,69 @@ mod tests {
         assert_eq!(r.completion_tokens, 7);
         assert!(r.payload.is_some());
     }
+
+    #[tokio::test]
+    async fn contract_schema_violation_downgrades_success_to_invalid_output() {
+        // 运行时校验：run 台账带 contract_schema（必填 cve_refs），
+        // 交付缺失该字段 → 就地转 invalid_output + contract_violation 标记。
+        // 按既定语义：契约违例按实质结果交付（产物为真有缺陷交付，
+        // 不触发 failover——确定性违规换模型照样犯），但必须被标记出来。
+        let (base, db) = test_db("contract");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let schema = crate::agent::protocol::ContractSchema::new(vec![
+            crate::agent::protocol::ContractFieldDef::must_new(
+                "cve_refs",
+                crate::agent::protocol::ContractFieldType::StringArray,
+                "命中的 CVE 编号",
+                true,
+            ),
+        ])
+        .with_strict_closed_set(false);
+        let identity = crate::agent::child_reviewer::ChildRunIdentity {
+            task_id: "task-cve".to_string(),
+            attempt_id: 1,
+            purpose: Some("plan_review".to_string()),
+            batch_id: Some("batch-cve".to_string()),
+            contract_id: Some("reviewer.v1".to_string()),
+            contract_schema: Some(serde_json::to_string(&schema).unwrap()),
+        };
+        let run_id = crate::agent::child_reviewer::begin_child_run_extended(
+            &db, "run-1", "sess-1", &ws, "m1", 0, "review", None, None, None, &identity,
+        )
+        .unwrap();
+
+        let env = test_env(&db, &ws);
+        let mut context = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        // 批次锚点（行已盖 batch-cve 章）+ 模拟回执已消费的生产时序
+        cp.set_plan_review_batch("batch-cve", 1);
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET status='succeeded', consumed_at='2024-01-01' WHERE id=?1",
+            rusqlite::params![run_id],
+        ).unwrap();
+
+        // 成功交付但缺必填扩展字段 cve_refs → 契约违规标记透出到模型文本
+        let r = receipt("review", &run_id, None, json!({"findings": [], "confidence": "high"}));
+        let effects = reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
+        assert!(
+            effects.model_text.contains("contract_violation"),
+            "契约违规必须在模型可见文本中标记 contract_violation，实际: {}",
+            effects.model_text
+        );
+
+        // 对照组：合规交付（带 cve_refs）不应出现违规标记
+        let r2 = receipt(
+            "review",
+            &run_id,
+            None,
+            json!({"findings": [], "confidence": "high", "cve_refs": ["CVE-2024-1"]}),
+        );
+        // 注意：同一 run 已消费过的回执由幂等保护跳过副作用，这里只验证校验不触发标记
+        let mut receipt2 = r2.clone();
+        enforce_delivery_contract(&db, &mut receipt2);
+        assert_eq!(receipt2.status, "succeeded", "合规交付不得降级");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
 }

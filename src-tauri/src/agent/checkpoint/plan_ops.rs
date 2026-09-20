@@ -24,18 +24,6 @@ const TERMINAL_RUN_STATUSES: [&str; 6] = [
 /// 「已终态且回执已消费」= 交付/失败记账被绕过（如历史 failover 漏换 id、
 /// 损坏回执被丢弃）；「台账行缺失」= 从未真正存在。
 /// 已终态但回执未消费返回 false：回执仍在信箱等正常消费，不抢判。
-fn child_run_is_delivery_orphan(conn: &rusqlite::Connection, run_id: &str) -> bool {
-    match conn.query_row(
-        "SELECT status, consumed_at FROM agent_child_runs WHERE id = ?1",
-        rusqlite::params![run_id],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-    ) {
-        Err(rusqlite::Error::QueryReturnedNoRows) => true,
-        Ok((status, Some(_consumed_at))) => TERMINAL_RUN_STATUSES.contains(&status.as_str()),
-        _ => false,
-    }
-}
-
 impl AgentCheckpoint {
 
     /// Tech Lead 1v1 定稿修订：从审查交付 extra 提取 revised_* 扁平字段。
@@ -97,21 +85,220 @@ impl AgentCheckpoint {
         self.plan_reviewer_last_dispatch = Some(snapshot.to_json_string());
     }
 
-    /// 注册本轮并发审查任务批次（齐套屏障：记录预期全部交付的 run_ids）
-    pub fn register_plan_reviewer_batch(&mut self, run_ids: &[String]) {
-        self.plan_review_batch = PlanReviewBatchState {
-            expected_run_ids: run_ids.iter().cloned().collect(),
-            delivered_run_ids: std::collections::BTreeSet::new(),
-            failed_run_ids: std::collections::BTreeMap::new(),
-            deliveries: Vec::new(),
-        };
-        if run_ids.len() > 1 {
+    /// 登记本轮审查批次锚点：成员身份由台账 batch_id 承担，
+    /// checkpoint 只记"当前批次是谁"+"派发时的既定成员数"两个标量。
+    /// failover/对质续跑自动继承 batch_id 加入本批，无需手动换名。
+    pub fn set_plan_review_batch(&mut self, batch_id: impl Into<String>, member_count: usize) {
+        self.plan_review_batch_id = Some(batch_id.into());
+        self.plan_review_expected_count = member_count as u32;
+        self.plan_review_deliveries.clear();
+        if member_count > 1 {
             // 已并发派发了多个审查员（联合会审），清除升级挂起状态
             self.plan_escalation_required = None;
         }
         self.plan_reviewer_consumed = false;
         self.last_review_blocking_count = 0;
         self.last_review_scorecard = None;
+    }
+
+    /// ── 台账推导（成员/在途/齐套一律查 agent_child_runs，唯一事实源）──
+    /// 待决 = 批次成员行存在且回执未消费（consumed_at IS NULL：
+    /// running 在途 + 终态未取件都算待决；回执落库消费后即出列）
+    pub(crate) fn plan_review_pending_count(&self, db: &DbState) -> usize {
+        let Some(ref batch_id) = self.plan_review_batch_id else { return 0 };
+        db.0.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_child_runs WHERE batch_id = ?1 AND consumed_at IS NULL",
+                rusqlite::params![batch_id],
+                |r| r.get::<_, i64>(0),
+            ).ok()
+        }).unwrap_or(0) as usize
+    }
+
+    /// 批次成员总数（台账实有——含 failover 备胎与对质续跑自动入批的成员）
+    pub(crate) fn plan_review_member_count(&self, db: &DbState) -> usize {
+        let Some(ref batch_id) = self.plan_review_batch_id else { return 0 };
+        db.0.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_child_runs WHERE batch_id = ?1",
+                rusqlite::params![batch_id],
+                |r| r.get::<_, i64>(0),
+            ).ok()
+        }).unwrap_or(0) as usize
+    }
+
+    /// 齐套屏障：批次有成员且无人待决。
+    /// 死锁类问题结构性消失：failover 备胎自带 batch_id 自动入批，
+    /// 终态成员消费后自然出列，不存在"名单忘了换名"的窗口。
+    pub(crate) fn plan_review_batch_complete(&self, db: &DbState) -> bool {
+        self.plan_review_member_count(db) > 0 && self.plan_review_pending_count(db) == 0
+    }
+
+    /// 已交付成员数（消费过且成功态）
+    pub(crate) fn plan_review_delivered_count(&self, db: &DbState) -> usize {
+        let Some(ref batch_id) = self.plan_review_batch_id else { return 0 };
+        db.0.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_child_runs WHERE batch_id = ?1 AND consumed_at IS NOT NULL AND status = 'succeeded'",
+                rusqlite::params![batch_id],
+                |r| r.get::<_, i64>(0),
+            ).ok()
+        }).unwrap_or(0) as usize
+    }
+
+    /// 已失败成员数（消费过但非成功终态）
+    pub(crate) fn plan_review_failed_count(&self, db: &DbState) -> usize {
+        let Some(ref batch_id) = self.plan_review_batch_id else { return 0 };
+        db.0.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_child_runs WHERE batch_id = ?1 AND consumed_at IS NOT NULL AND status != 'succeeded'",
+                rusqlite::params![batch_id],
+                |r| r.get::<_, i64>(0),
+            ).ok()
+        }).unwrap_or(0) as usize
+    }
+
+    /// run_id 是否属于当前审查批次（防止旧批次的迟到回执污染当前批状态）
+    pub(crate) fn run_belongs_to_plan_batch(&self, db: &DbState, run_id: &str) -> bool {
+        let Some(ref batch_id) = self.plan_review_batch_id else { return false };
+        db.0.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT batch_id FROM agent_child_runs WHERE id = ?1",
+                rusqlite::params![run_id],
+                |r| r.get::<_, Option<String>>(0),
+            ).ok().flatten()
+        }).as_deref() == Some(batch_id.as_str())
+    }
+
+    /// 阶段审查在途判定：当前阶段批次存在未消费成员（含对质续跑）
+    pub(crate) fn stage_review_in_flight(&self, db: &DbState) -> bool {
+        self.stage_review_in_flight_remaining(db) > 0
+    }
+
+    pub(crate) fn stage_review_in_flight_remaining(&self, db: &DbState) -> usize {
+        let Some(ref batch_id) = self.stage_review_batch_id else { return 0 };
+        db.0.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_child_runs WHERE batch_id = ?1 AND consumed_at IS NULL",
+                rusqlite::params![batch_id],
+                |r| r.get::<_, i64>(0),
+            ).ok()
+        }).unwrap_or(0) as usize
+    }
+
+    /// 判定 run_id 是否属阶段审查语义（含已完成的——对质目标是已交付的审查员）：
+    /// 优先 purpose 盖章（stage_review/rebuttal），兜底批次归属匹配
+    /// （旧库未盖 purpose 的行靠 batch_id 仍能命中）。
+    pub(crate) fn is_stage_review_target(&self, db: &DbState, run_id: &str) -> bool {
+        db.0.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT purpose, batch_id FROM agent_child_runs WHERE id = ?1",
+                rusqlite::params![run_id],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+            ).ok()
+        }).map(|(purpose, batch)| {
+            matches!(purpose.as_deref(), Some("stage_review") | Some("rebuttal"))
+                || batch == self.stage_review_batch_id && batch.is_some()
+        }).unwrap_or(false)
+    }
+
+    /// run_id 是否是一条对质续跑任务（purpose='rebuttal' 盖章）
+    pub(crate) fn is_rebuttal_run(&self, db: &DbState, run_id: &str) -> bool {
+        db.0.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT purpose FROM agent_child_runs WHERE id = ?1",
+                rusqlite::params![run_id],
+                |r| r.get::<_, Option<String>>(0),
+            ).ok().flatten()
+        }).as_deref() == Some("rebuttal")
+    }
+
+    /// 门禁提示的 resume 指路：优先 blocker 产出者，否则当前阶段批次的任一成员
+    pub(crate) fn stage_review_resume_hint(&self, db: &DbState) -> Option<String> {
+        if let Some(ref src) = self.stage_review_blocker_source_run_id {
+            return Some(src.clone());
+        }
+        let batch_id = self.stage_review_batch_id.as_ref()?;
+        db.0.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT id FROM agent_child_runs WHERE batch_id = ?1 ORDER BY started_at DESC LIMIT 1",
+                rusqlite::params![batch_id],
+                |r| r.get::<_, String>(0),
+            ).ok()
+        })
+    }
+
+    /// 旧版手写名单 → 台账锚点收养（升级一次性迁移）：
+    /// 旧 checkpoint 反序列化出的 expected/stage id 列表逐一盖章 batch_id，
+    /// 之后成员身份全部由台账推导。新存档不再携带这些字段（skip_serializing）。
+    pub(crate) fn adopt_legacy_membership(&mut self, db: &DbState) {
+        let Ok(conn) = db.0.lock() else { return };
+        // 先收养阶段审查名单（其成员 kind='review' 与方案批次同型，先盖章防止被方案批次兜底吞并）
+        let stage_legacy: Vec<String> = self
+            .stage_review_run_ids
+            .iter()
+            .cloned()
+            .chain(self.stage_review_run_id.iter().cloned())
+            .chain(self.stage_review_completed_run_ids.iter().cloned())
+            .collect();
+        if self.stage_review_batch_id.is_none() && (!stage_legacy.is_empty() || self.stage_review_rebuttal_run_id.is_some()) {
+            let batch_id = format!("stage-batch-legacy-{}", uuid::Uuid::new_v4());
+            for id in &stage_legacy {
+                let _ = conn.execute(
+                    "UPDATE agent_child_runs SET batch_id=?1, purpose=COALESCE(purpose,'stage_review') WHERE id=?2",
+                    rusqlite::params![batch_id, id],
+                );
+            }
+            if let Some(ref reb) = self.stage_review_rebuttal_run_id {
+                let _ = conn.execute(
+                    "UPDATE agent_child_runs SET batch_id=?1, purpose='rebuttal' WHERE id=?2",
+                    rusqlite::params![batch_id, reb],
+                );
+            }
+            self.stage_review_batch_id = Some(batch_id);
+        }
+        self.stage_review_run_id = None;
+        self.stage_review_run_ids.clear();
+        self.stage_review_rebuttal_run_id = None;
+        self.stage_review_completed_run_ids.clear();
+
+        // 再收养方案审查名单
+        if self.plan_review_batch_id.is_none() && !self.plan_review_batch.expected_run_ids.is_empty() {
+            let batch_id = format!("batch-legacy-{}", uuid::Uuid::new_v4());
+            for id in &self.plan_review_batch.expected_run_ids {
+                let _ = conn.execute(
+                    "UPDATE agent_child_runs SET batch_id=?1, purpose=COALESCE(purpose,'plan_review') WHERE id=?2",
+                    rusqlite::params![batch_id, id],
+                );
+            }
+            // 兜底收养：同父 run 下未消费、无批次的审查行（failover 备胎等历史漏登记）。
+            // kind 枚举是 child_reviewer/child_writer/child_worker；
+            // purpose 口径上 review=方案审查历史值，stage_review 行已被前一步收养盖章排除在外。
+            let _ = conn.execute(
+                "UPDATE agent_child_runs SET batch_id=?1, purpose=COALESCE(purpose,'plan_review')
+                 WHERE parent_run_id=?2 AND batch_id IS NULL AND consumed_at IS NULL
+                   AND kind IN ('child_reviewer','review','reviewer')
+                   AND (purpose IS NULL OR purpose IN ('review','plan_review'))",
+                rusqlite::params![batch_id, self.run_id],
+            );
+            self.plan_review_batch_id = Some(batch_id);
+            self.plan_review_expected_count = self
+                .plan_review_batch
+                .expected_run_ids
+                .len()
+                .max(self.plan_review_member_count(db)) as u32;
+        }
+        self.plan_review_batch = Default::default();
+    }
+
+    /// 步边界状态刷新：收养旧名单 + 按台账重算 consumed 标志。
+    /// 双向重算——批次齐套置 true；对质续跑等新成员入批后自动回落 false
+    /// （旧手写名单时代对质续跑不在名单里，标志恒 true 掩盖了在途工作）。
+    pub(crate) fn refresh_consumed_flags(&mut self, db: &DbState) {
+        self.adopt_legacy_membership(db);
+        if self.plan_review_batch_id.is_some() {
+            self.plan_reviewer_consumed = self.plan_review_batch_complete(db);
+        }
     }
 
     /// submit_plan 的一致状态提交：方案落账 + 阶段推进 + 预算预扣 + 批次注册 + 派发快照。
@@ -122,7 +309,7 @@ impl AgentCheckpoint {
     pub fn commit_plan_submission(
         &mut self,
         submission: crate::agent::types::PlanSubmission,
-        child_run_id: &str,
+        batch_id: &str,
         snapshot: &crate::agent::child_reviewer::PlanReviewerDispatchSnapshot,
         step_id: usize,
     ) {
@@ -132,103 +319,42 @@ impl AgentCheckpoint {
             self.plan_phase = PlanPhase::Reviewing;
         }
         let _ = self.reserve_plan_review_round();
-        self.register_plan_reviewer_batch(&[child_run_id.to_string()]);
+        // 批次锚点 = 快照派发时盖在行上的 batch_id（plan_submit 生成后透传）
+        self.set_plan_review_batch(batch_id, 1);
         self.set_plan_reviewer_dispatch_snapshot(snapshot);
     }
 
-    /// 登记审查任务失败/异常退出（超时、崩溃、格式错误等，收口防死锁）
-    pub fn record_reviewer_failure_for_run(&mut self, run_id: &str, reason: &str) {
-        self.plan_review_batch.record_failure(run_id, reason);
-        if self.plan_review_batch.is_complete() {
-            self.plan_reviewer_consumed = true;
-        }
-    }
-
-    /// 审查者故障转移重派时，将旧任务 ID 替换为新重派的任务 ID
-    pub fn replace_expected_reviewer_run_id(&mut self, old_id: &str, new_id: &str) {
-        self.plan_review_batch.replace_expected_run_id(old_id, new_id);
-    }
-
-    /// 齐套屏障自愈对账（保险丝，非主流程）。
-    /// 点名「人到齐没」之前顺手核对台账：凡是 agent_child_runs 里已终态
-    /// 且回执已被消费、却仍挂在 expected 里的 run_id——说明它的交付/失败
-    /// 记账被绕过（如历史 failover 漏换 id、损坏回执被丢弃）——该任务
-    /// 永远不可能交付，按失败从预期中划掉；台账里根本不存在的 id 同理。
-    /// 防的是「记账漂移让屏障等一个死人」的死锁：改名单的动作漏了，
-    /// 点名动作自己纠错，最多卡一拍而非卡死。
-    /// 已终态但回执未消费的不动——回执仍在信箱里等正常消费，不能抢判。
-    /// 返回本次划掉的数量。
-    pub fn reconcile_plan_reviewer_batch(&mut self, db: &DbState) -> usize {
-        let pending: Vec<String> = self
-            .plan_review_batch
-            .expected_run_ids
-            .iter()
-            .filter(|id| {
-                !self.plan_review_batch.delivered_run_ids.contains(*id)
-                    && !self.plan_review_batch.failed_run_ids.contains_key(*id)
-            })
-            .cloned()
-            .collect();
-        if pending.is_empty() {
-            return 0;
-        }
-        let Ok(conn) = db.0.lock() else { return 0 };
-        let mut pruned = 0;
-        for id in pending {
-            if child_run_is_delivery_orphan(&conn, &id) {
-                self.plan_review_batch
-                    .record_failure(&id, "delivery_orphan");
-                pruned += 1;
-            }
-        }
-        if pruned > 0 && self.plan_review_batch.is_complete() {
-            self.plan_reviewer_consumed = true;
-        }
-        pruned
-    }
-
-    /// 阶段审查在途名单自愈（与审查批次同款的保险丝）。
-    /// stage_review_run_ids / rebuttal 指针里挂着「已终态且已消费」或
-    /// 台账不存在的 run_id 时清掉——孤儿在途 id 会让
-    /// has_in_flight_stage_review() 永远为真，后续所有阶段审查都派不出去。
-    /// 只清在途名单，不动 blockers 计数：blocker 的结清走对质/仲裁/
-    /// 僵尸治理原路径，不在这里抢判。返回清理数量。
-    pub fn reconcile_stage_review_runs(&mut self, db: &DbState) -> usize {
-        let mut candidates: Vec<String> = self.stage_review_run_ids.clone();
-        for extra in [
-            self.stage_review_run_id.as_ref(),
-            self.stage_review_rebuttal_run_id.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
+    /// 登记审查任务失败/异常退出（超时、崩溃、格式错误等）。
+    /// 批次归属校验：迟到回执属旧批次时不污染当前批的齐套判定。
+    pub fn record_reviewer_failure_for_run(&mut self, db: &DbState, run_id: &str) {
+        if self.run_belongs_to_plan_batch(db, run_id)
+            && self.plan_review_batch_complete(db)
         {
-            if !candidates.contains(extra) {
-                candidates.push(extra.clone());
-            }
+            self.plan_reviewer_consumed = true;
         }
-        if candidates.is_empty() {
-            return 0;
-        }
-        let Ok(conn) = db.0.lock() else { return 0 };
-        let mut pruned = 0;
-        for id in candidates {
-            if child_run_is_delivery_orphan(&conn, &id) {
-                self.remove_stage_review_run(&id);
-                if self.stage_review_rebuttal_run_id.as_deref() == Some(id.as_str()) {
-                    self.stage_review_rebuttal_run_id = None;
-                }
-                pruned += 1;
-            }
-        }
-        pruned
     }
 
     /// 消费并记录一个审查员的交付结论（支持幂等去重与齐套现场真聚合）
     pub fn record_reviewer_delivery_for_run(
         &mut self,
+        db: &DbState,
         run_id: Option<&str>,
         delivery: &crate::agent::child_reviewer::ReviewerDeliveryData,
     ) {
+        // 批次归属守卫必须最先执行：迟到回执属其他批次时整体忽略——
+        // 否则其 decision/blocking 会污染当前批的升级判定与聚合计数。
+        // fail-open：当前批锚点不存在时无批可污染，照常受理。
+        let in_batch = match run_id {
+            Some(id) => {
+                self.plan_review_batch_id.is_none()
+                    || self.run_belongs_to_plan_batch(db, id)
+            }
+            None => true, // 无 run_id 的旧接口兼容路径
+        };
+        if !in_batch {
+            return;
+        }
+
         let mut delivery = delivery.clone();
         // 🌟 1v1 Tech Lead 方案评审扩展契约解析与定级联动
         if let Some(dec) = delivery.get_extra_str("decision") {
@@ -300,9 +426,24 @@ impl AgentCheckpoint {
             }
         }
 
-        let is_new = self.plan_review_batch.record_delivery(run_id, delivery.clone());
+        let is_new = run_id
+            .map(|id| {
+                self.plan_review_deliveries
+                    .insert(id.to_string(), delivery.clone())
+                    .is_none()
+            })
+            .unwrap_or_else(|| {
+                // 无 run_id 的旧接口：附加以保持兼容
+                true
+            });
         if !is_new {
             return; // 幂等：重复交付忽略，防重复计数
+        }
+        if run_id.is_none() {
+            self.plan_review_deliveries.insert(
+                format!("anon-{}", self.plan_review_deliveries.len()),
+                delivery.clone(),
+            );
         }
 
         let (added, withdrawn, maintained) = delivery.objection_stats();
@@ -314,25 +455,71 @@ impl AgentCheckpoint {
 
         // 现场真聚合：blocking 缺陷取并集，四维评分取算术均值
         self.last_review_blocking_count = self
-            .plan_review_batch
             .aggregate_unwithdrawn_blockings()
             .len() as u32;
-        self.last_review_scorecard = self.plan_review_batch.aggregate_scorecard();
+        self.last_review_scorecard = self.aggregate_scorecard();
 
-        // 齐套屏障：只有全部预期任务到齐才置 consumed 为 true
-        if self.plan_review_batch.is_complete() {
+        // 齐套屏障：台账推导——批次全部成员回执已消费才置 consumed
+        if self.plan_review_batch_complete(db) {
             self.plan_reviewer_consumed = true;
         }
     }
 
+    /// 现场真聚合：提取所有已交付审查员的未撤回 blocking 级缺陷（并集）
+    pub fn aggregate_unwithdrawn_blockings(&self) -> Vec<crate::agent::child_reviewer::ReviewFinding> {
+        let mut blockings = Vec::new();
+        for del in self.plan_review_deliveries.values() {
+            for f in &del.findings {
+                if f.severity.eq_ignore_ascii_case("blocking")
+                    && !del.withdrawn_findings.iter().any(|w| w == &f.id)
+                {
+                    blockings.push(f.clone());
+                }
+            }
+        }
+        blockings
+    }
+
+    /// 现场真聚合：计算所有已交付审查员 Scorecard 的算术平均值（真平均）
+    pub fn aggregate_scorecard(&self) -> Option<crate::agent::child_reviewer::ReviewScorecard> {
+        let scorecards: Vec<&crate::agent::child_reviewer::ReviewScorecard> = self
+            .plan_review_deliveries
+            .values()
+            .filter_map(|d| d.scorecard.as_ref())
+            .collect();
+        if scorecards.is_empty() {
+            return None;
+        }
+        let n = scorecards.len() as u32;
+        let correctness = scorecards.iter().map(|s| s.correctness).sum::<u32>() / n;
+        let risk = scorecards.iter().map(|s| s.risk).sum::<u32>() / n;
+        let style = scorecards.iter().map(|s| s.style).sum::<u32>() / n;
+        let covs: Vec<u32> = scorecards.iter().filter_map(|s| s.test_coverage).collect();
+        let test_coverage = if covs.is_empty() {
+            None
+        } else {
+            Some(covs.iter().sum::<u32>() / covs.len() as u32)
+        };
+        Some(crate::agent::child_reviewer::ReviewScorecard {
+            correctness,
+            risk,
+            style,
+            test_coverage,
+            null_reason: scorecards.iter().find_map(|s| s.null_reason.clone()),
+            synthesized: scorecards.iter().any(|s| s.synthesized),
+        })
+    }
+
     /// 消费并记录一轮合法的方案审查结论（兼容旧接口与单发交付）
-    pub fn record_reviewer_delivery(&mut self, delivery: &crate::agent::child_reviewer::ReviewerDeliveryData) {
-        self.record_reviewer_delivery_for_run(None, delivery);
+    pub fn record_reviewer_delivery(&mut self, db: &DbState, delivery: &crate::agent::child_reviewer::ReviewerDeliveryData) {
+        self.record_reviewer_delivery_for_run(db, None, delivery);
     }
 
     /// 生成方案门禁状态的瞬态投影，供上下文装配层注入底部状态卡（事前可见）。
+    /// 无 db 访问：批次口径用锚点标量（expected_count）+ 交付内容缓存 + consumed 标志，
+    /// 与台账推导口径一致（delivered=已登记交付数，expected=派发时既定成员数）。
     pub fn plan_gate_projection(&self) -> crate::agent::context::types::PlanGateProjection {
-        let unwithdrawn_blockings = self.plan_review_batch.aggregate_unwithdrawn_blockings();
+        let unwithdrawn_blockings = self.aggregate_unwithdrawn_blockings();
         let blocking_count = if unwithdrawn_blockings.is_empty() {
             self.last_review_blocking_count
         } else {
@@ -357,10 +544,11 @@ impl AgentCheckpoint {
             None
         };
 
-        let batch_incomplete = !self.plan_review_batch.expected_run_ids.is_empty()
-            && !self.plan_review_batch.is_complete();
-        let delivered_reviewers = self.plan_review_batch.delivered_run_ids.len();
-        let expected_reviewers = self.plan_review_batch.expected_run_ids.len();
+        // 齐套投影：批次锚点存在且 consumed 未置位 = 尚有成员在途
+        let batch_incomplete = self.plan_review_batch_id.is_some()
+            && !self.plan_reviewer_consumed;
+        let delivered_reviewers = self.plan_review_deliveries.len();
+        let expected_reviewers = self.plan_review_expected_count as usize;
         let budget_exhausted = self.plan_reviewer_retry_count >= MAX_PLAN_REVIEWER_RETRIES;
         let human_waived = self.human_waiver_text().is_some();
         // 探索预算三态投影：仅交叉审查 + Exploring + 尚未派审时有意义，
@@ -448,54 +636,8 @@ impl AgentCheckpoint {
         self.plan_reviewer_consumed = false;
         self.last_review_blocking_count = 0;
         self.last_review_scorecard = None;
-        self.plan_review_batch = PlanReviewBatchState::default();
+        self.plan_review_deliveries.clear();
         Ok(())
-    }
-
-    /// 判定是否存在在途的阶段审查任务（支持单审与联合会审）
-    pub fn has_in_flight_stage_review(&self) -> bool {
-        self.stage_review_run_id.is_some()
-            || !self.stage_review_run_ids.is_empty()
-            || self.stage_review_rebuttal_run_id.is_some()
-    }
-
-    /// 判定指定任务 ID 是否属于当前在途的阶段审查任务
-    pub fn matches_stage_review_run(&self, run_id: &str) -> bool {
-        self.stage_review_run_id.as_deref() == Some(run_id)
-            || self.stage_review_run_ids.iter().any(|r| r == run_id)
-    }
-
-    /// 判定指定任务 ID 是否属于在途或已完成的阶段审查任务（用于对质目标识别）
-    pub fn is_stage_review_target(&self, run_id: &str) -> bool {
-        self.matches_stage_review_run(run_id)
-            || self.stage_review_rebuttal_run_id.as_deref() == Some(run_id)
-            || self.stage_review_completed_run_ids.iter().any(|r| r == run_id)
-    }
-
-    /// 记录已完成的阶段审查或对质任务 ID（最多保留 20 条）
-    pub fn record_stage_review_completed(&mut self, run_id: &str) {
-        if !self.stage_review_completed_run_ids.iter().any(|r| r == run_id) {
-            self.stage_review_completed_run_ids.push(run_id.to_string());
-            if self.stage_review_completed_run_ids.len() > 20 {
-                self.stage_review_completed_run_ids.remove(0);
-            }
-        }
-    }
-
-    /// 移除已完成的阶段审查任务 ID；若列表中仍有其他任务则继续维持，否则清空
-    pub fn remove_stage_review_run(&mut self, run_id: &str) {
-        self.stage_review_run_ids.retain(|r| r != run_id);
-        if self.stage_review_run_id.as_deref() == Some(run_id) {
-            self.stage_review_run_id = self.stage_review_run_ids.first().cloned();
-        }
-        self.record_stage_review_completed(run_id);
-    }
-
-    /// 清空全部阶段审查在途任务 ID
-    pub fn clear_stage_review_runs(&mut self) {
-        self.stage_review_run_id = None;
-        self.stage_review_run_ids.clear();
-        self.stage_review_rebuttal_run_id = None;
     }
 
     /// 审查者技术失败的审查轮次退款：超时/取消/中断/非法输出/请求层失败不是实质性审查，
@@ -521,13 +663,13 @@ impl AgentCheckpoint {
 
     /// 阶段审查退款统一结算（批循环结束后调用一次）。
     /// 为什么不能在回执处理循环内逐条结算：completed 回执按序处理，本条 infra
-    /// 失败专家的 run_id 移除时，后续成功专家的 run_id 尚未移除，
-    /// has_in_flight_stage_review() 会误判为 true 而永久错过退款窗口。
+    /// 失败专家刚被消费时后续成功专家的回执尚未被消费，
+    /// 台账在途判定会（正确地）视为仍有在途而推迟到批后统一结算。
     /// 仅当在途清空且无 blocker 留存（本轮无实质产出）时才退还预算；
     /// 若已有专家交付了真实 blocking，本轮审查有实质输出，不退款。
     /// 返回 true = 实际完成了一次退款。
-    pub fn settle_stage_review_refund(&mut self) -> bool {
-        if !self.has_in_flight_stage_review()
+    pub fn settle_stage_review_refund(&mut self, db: &DbState) -> bool {
+        if !self.stage_review_in_flight(db)
             && self.stage_review_blockers_open == 0
             && self.reviewer_budget_refunds < 3
             && self.stage_review_budget_used > 0

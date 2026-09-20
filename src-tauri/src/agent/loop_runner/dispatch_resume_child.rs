@@ -124,7 +124,7 @@ pub(super) async fn dispatch_resume_child(
                             let reasoning_effort = ctx.model_routing.reasoning_effort_for(&routing.tier).to_string();
 
                             // 对质目标是阶段审查任务时标记 rebuttal 用途；其余继承原任务用途
-                            let is_rebuttal_target = ctx.checkpoint.is_stage_review_target(target_child_id);
+                            let is_rebuttal_target = ctx.checkpoint.is_stage_review_target(ctx.state.inner(), target_child_id);
                             let resume_identity = crate::agent::child_reviewer::ChildRunIdentity::inherited(
                                 &prev_identity,
                                 if is_rebuttal_target {
@@ -148,10 +148,9 @@ pub(super) async fn dispatch_resume_child(
                                 &resume_identity,
                             ) {
                                 Ok(id) => {
-                                    // 对质目标是阶段审查任务时，登记复检 run id 以便结果回流阶段语义
-                                    if is_rebuttal_target {
-                                        ctx.checkpoint.stage_review_rebuttal_run_id = Some(id.clone());
-                                    }
+                                    // 对质身份已由台账 purpose='rebuttal' 盖章承担
+                                    //（resume_identity 落库时写入），无需 checkpoint 指针
+                                    let _ = is_rebuttal_target;
                                     id
                                 }
                                 Err(err) => {

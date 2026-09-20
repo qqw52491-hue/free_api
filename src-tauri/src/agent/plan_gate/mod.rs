@@ -521,16 +521,13 @@ pub(crate) fn parse_plan_approval_decision(reply: &str) -> Option<bool> {
 /// blocking_regardless 未解决 → 拦截写入；解套唯一路径是 resume_child 对质撤回。
 /// final_only 不在此拦截，由收尾审查兜底。
 /// triage 分流豁免方案门时本拦截仍须执行——它是已判出中间态错误的物理拦杆。
-pub(crate) fn stage_blocker_interception(checkpoint: &AgentCheckpoint) -> Option<DispatchResult> {
+pub(crate) fn stage_blocker_interception(checkpoint: &AgentCheckpoint, db: &DbState) -> Option<DispatchResult> {
     if checkpoint.stage_review_blockers_open == 0 {
         return None;
     }
+    // resume 指路：优先 blocker 产出者，否则取当前阶段批次的最新成员（台账推导）
     let stage_run_id = checkpoint
-        .stage_review_blocker_source_run_id
-        .clone()
-        .or_else(|| checkpoint.stage_review_run_ids.first().cloned())
-        .or_else(|| checkpoint.stage_review_run_id.clone())
-        .or_else(|| checkpoint.stage_review_rebuttal_run_id.clone())
+        .stage_review_resume_hint(db)
         .unwrap_or_default();
     let final_only_summary = checkpoint.stage_review_final_only.join("\n");
     Some(DispatchResult {
@@ -558,7 +555,7 @@ pub(crate) fn check_pre_write_gatekeeper(
     is_resume_child: bool,
 ) -> Option<DispatchResult> {
     // ---- 阶段级审查拦截先于方案门（triage 分流豁免方案门时它仍单独执行）----
-    if let Some(blocked) = stage_blocker_interception(checkpoint) {
+    if let Some(blocked) = stage_blocker_interception(checkpoint, db) {
         return Some(blocked);
     }
 
@@ -621,8 +618,9 @@ fn gate_interception(
             // 若不区分，后者会让模型只会反复调用 wait_jobs 收空信箱，而 consumed 永远置不上位，写入被无限拦截。
             let reviewer_running =
                 crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id);
-            let is_batch_incomplete = !checkpoint.plan_review_batch.is_complete()
-                && !checkpoint.plan_review_batch.expected_run_ids.is_empty();
+            // 齐套判定由台账推导：批次有成员且仍有回执未消费 = 未齐套
+            let is_batch_incomplete = checkpoint.plan_review_batch_id.is_some()
+                && !checkpoint.plan_review_batch_complete(db);
 
             if checkpoint.plan_reviewer_retry_count == 0 {
                 Some(DispatchResult { view: None,
@@ -638,8 +636,10 @@ fn gate_interception(
             {
                 let stderr = if is_batch_incomplete {
                     crate::agent::gate_messages::cross_review_batch_incomplete(
-                        checkpoint.plan_review_batch.delivered_run_ids.len(),
-                        checkpoint.plan_review_batch.expected_run_ids.len(),
+                        checkpoint.plan_review_delivered_count(db),
+                        checkpoint.plan_review_member_count(db).max(
+                            checkpoint.plan_review_expected_count as usize,
+                        ),
                     )
                 } else {
                     crate::agent::gate_messages::cross_review_need_wait_reviewer_jobs()
@@ -660,17 +660,27 @@ fn gate_interception(
                     stderr: crate::agent::gate_messages::cross_review_reviewer_result_missing(),
                     route: "plan_gatekeeper:reviewer_result_missing".to_string(),
                 })
-            } else if checkpoint.plan_review_batch.deliveries.is_empty()
-                && !checkpoint.plan_review_batch.failed_run_ids.is_empty()
+            } else if checkpoint.plan_review_deliveries.is_empty()
+                && checkpoint.plan_review_failed_count(db) > 0
             {
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
                     >= crate::agent::checkpoint::max_plan_reviewer_rounds();
+                // 失败原因从台账 error_kind 直查（台账是唯一事实源）
                 let reasons: Vec<String> = checkpoint
-                    .plan_review_batch
-                    .failed_run_ids
-                    .iter()
-                    .map(|(id, r)| format!("- 审查任务 `{}`: {}", id, r))
-                    .collect();
+                    .plan_review_batch_id
+                    .as_ref()
+                    .and_then(|bid| {
+                        db.0.lock().ok().and_then(|conn| {
+                            let mut stmt = conn.prepare(
+                                "SELECT id, COALESCE(error_kind, status) FROM agent_child_runs WHERE batch_id = ?1 AND consumed_at IS NOT NULL AND status != 'succeeded'"
+                            ).ok()?;
+                            let rows = stmt.query_map(rusqlite::params![bid], |r| {
+                                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                            }).ok()?;
+                            Some(rows.flatten().map(|(id, r)| format!("- 审查任务 `{}`: {}", id, r)).collect())
+                        })
+                    })
+                    .unwrap_or_default();
                 let summary = reasons.join("\n");
                 Some(DispatchResult { view: None,
                     success: false,
@@ -703,7 +713,7 @@ fn gate_interception(
             } else if let Some(ref scorecard) = checkpoint.last_review_scorecard {
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
                     >= crate::agent::checkpoint::max_plan_reviewer_rounds();
-                let unwithdrawn_blockings = checkpoint.plan_review_batch.aggregate_unwithdrawn_blockings();
+                let unwithdrawn_blockings = checkpoint.aggregate_unwithdrawn_blockings();
                 let blocking_count = if unwithdrawn_blockings.is_empty() {
                     checkpoint.last_review_blocking_count
                 } else {

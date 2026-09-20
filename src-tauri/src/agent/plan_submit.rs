@@ -283,12 +283,16 @@ pub async fn handle_submit_plan(
         .await
     {
         Ok(child_run_id) => {
+            // 批次锚点 = 快照盖章的 batch_id（子 run 行已写入），
+            // 成员身份此后全部由台账 batch_id+consumed_at 推导
+            let batch_id = snapshot.batch_id.clone().unwrap_or_default();
             checkpoint.commit_plan_submission(
                 submission.clone(),
-                &child_run_id,
+                &batch_id,
                 &snapshot,
                 step_id,
             );
+            let _ = child_run_id;
             DispatchResult { view: None,
                 success: true,
                 stdout: format!(

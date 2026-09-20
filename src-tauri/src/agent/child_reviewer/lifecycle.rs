@@ -28,6 +28,8 @@ pub(crate) struct ChildRunIdentity {
     pub purpose: Option<String>,
     pub batch_id: Option<String>,
     pub contract_id: Option<String>,
+    /// 交付契约模式 JSON（custom_schema 序列化），消费端按它做运行时校验
+    pub contract_schema: Option<String>,
 }
 
 impl ChildRunIdentity {
@@ -39,6 +41,7 @@ impl ChildRunIdentity {
             purpose: Some(purpose.into()),
             batch_id: None,
             contract_id: None,
+            contract_schema: None,
         }
     }
 
@@ -50,6 +53,11 @@ impl ChildRunIdentity {
             purpose: env.purpose.clone(),
             batch_id: env.batch_id.clone(),
             contract_id: Some(env.contract_id.clone()),
+            contract_schema: if env.custom_schema.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&env.custom_schema).ok()
+            },
         }
     }
 
@@ -63,6 +71,7 @@ impl ChildRunIdentity {
             purpose: purpose.or_else(|| prev.purpose.clone()),
             batch_id: prev.batch_id.clone(),
             contract_id: prev.contract_id.clone(),
+            contract_schema: prev.contract_schema.clone(),
         }
     }
 }
@@ -76,7 +85,7 @@ pub(crate) fn load_run_identity(
 ) -> Option<ChildRunIdentity> {
     let conn = db.0.lock().ok()?;
     conn.query_row(
-        "SELECT COALESCE(task_id, id), attempt_id, purpose, batch_id, contract_id FROM agent_child_runs WHERE id = ?1",
+        "SELECT COALESCE(task_id, id), attempt_id, purpose, batch_id, contract_id, contract_schema FROM agent_child_runs WHERE id = ?1",
         params![child_run_id],
         |row| {
             Ok(ChildRunIdentity {
@@ -85,6 +94,7 @@ pub(crate) fn load_run_identity(
                 purpose: row.get::<_, Option<String>>(2)?,
                 batch_id: row.get::<_, Option<String>>(3)?,
                 contract_id: row.get::<_, Option<String>>(4)?,
+                contract_schema: row.get::<_, Option<String>>(5)?,
             })
         },
     )
@@ -182,7 +192,7 @@ pub(crate) fn begin_child_run_extended(
     let attempt_id = derived_attempt.max(identity.attempt_id as i64);
 
     conn.execute(
-        "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, evidence_ref_count, kind, workspace_copy, resumed_from, task_id, attempt_id, purpose, batch_id, contract_id) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, evidence_ref_count, kind, workspace_copy, resumed_from, task_id, attempt_id, purpose, batch_id, contract_id, contract_schema) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             child_run_id,
             parent_run_id,
@@ -199,6 +209,7 @@ pub(crate) fn begin_child_run_extended(
             identity.purpose,
             identity.batch_id,
             identity.contract_id,
+            identity.contract_schema,
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -217,7 +228,7 @@ pub(crate) fn load_child_run_for_resume(
 ) -> Result<(String, String, Option<String>, Option<String>, String, String, Option<String>, ChildRunIdentity), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     conn.query_row(
-        "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json, COALESCE(task_id, id), COALESCE(attempt_id, 1), purpose, batch_id, contract_id FROM agent_child_runs WHERE id = ?1 AND parent_session_id = ?2",
+        "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json, COALESCE(task_id, id), COALESCE(attempt_id, 1), purpose, batch_id, contract_id, contract_schema FROM agent_child_runs WHERE id = ?1 AND parent_session_id = ?2",
         params![child_run_id, parent_session_id],
         |row| {
             Ok((
@@ -234,6 +245,7 @@ pub(crate) fn load_child_run_for_resume(
                     purpose: row.get::<_, Option<String>>(9)?,
                     batch_id: row.get::<_, Option<String>>(10)?,
                     contract_id: row.get::<_, Option<String>>(11)?,
+                    contract_schema: row.get::<_, Option<String>>(12)?,
                 },
             ))
         },
