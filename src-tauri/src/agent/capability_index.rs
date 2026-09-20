@@ -451,4 +451,93 @@ mod tests {
         assert!(!res.success);
         assert!(res.stderr.contains("query"));
     }
+
+    /// 构造 url 型 McpClient：不发起任何网络请求，目录经 remember_tools 注入。
+    fn make_plugin(name: &str, tool_count: usize) -> (String, crate::agent::mcp::PluginConfig) {
+        let config = crate::agent::mcp::types::PluginConfig {
+            name: name.to_string(),
+            command: String::new(),
+            args: vec![],
+            url: Some("http://localhost:9/mcp".to_string()),
+            headers: Default::default(),
+            env: Default::default(),
+            capability_card: None,
+        };
+        let tools: Vec<crate::agent::mcp::types::McpToolDef> = (0..tool_count)
+            .map(|i| crate::agent::mcp::types::McpToolDef {
+                name: format!("tool_{}_{:02}", name, i),
+                description: format!("{} 插件的 {} 号操作（处理 {} 相关数据）", name, i, name),
+                schema: json!({"properties": {"input": {"type": "string"}}, "required": ["input"]}),
+                annotations: serde_json::Value::Null,
+            })
+            .collect();
+        crate::agent::mcp_catalog::remember_tools(&config, &tools);
+        (name.to_string(), config)
+    }
+
+    #[test]
+    fn scale_search_covers_truncated_entries() {
+        use crate::agent::mcp::{McpClient, PluginRegistry, PluginSource};
+        use std::sync::Arc;
+
+        // ── 模拟 8 插件 × 30 工具 = 240 个 MCP 工具（远超菜单 80 全局阈值）──
+        let mut registry = PluginRegistry::new();
+        for p in 0..8 {
+            let (name, config) = make_plugin(&format!("bulk{}", p), 30);
+            let client = Arc::new(McpClient::spawn(config).expect("url 型 spawn 不联网"));
+            registry
+                .insert_with_source(name, client, PluginSource::Yaml)
+                .unwrap();
+        }
+
+        // ── 模拟工作区 120 个 Skill（远超目录 60 条上限）──
+        let base = std::env::temp_dir().join(format!("cap-index-{}", uuid::Uuid::new_v4()));
+        let skills_dir = base.join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        for i in 0..120 {
+            std::fs::write(
+                skills_dir.join(format!("skill_{:03}.md", i)),
+                format!("# Skill {:03}\n<summary>第 {} 号数据处理技能，处理报表_{:03} 任务</summary>\n", i, i, i),
+            )
+            .unwrap();
+        }
+        // 一个藏在字母序末尾的 Skill（必然超出目录 60 条截断）
+        std::fs::write(
+            skills_dir.join("zzz_hidden_audit.md"),
+            "# 隐藏审计技能\n<summary>对账审计专用：核对订单流水与发票差异</summary>\n",
+        )
+        .unwrap();
+
+        let db = test_db();
+
+        // 1) 超截断的 Skill 可按关键词搜到
+        let res = search(&db, &registry, Some(&base), &json!({"query": "发票差异"}));
+        let out: Value = serde_json::from_str(&res.stdout).unwrap();
+        let ids: Vec<&str> = out["matches"].as_array().unwrap()
+            .iter().filter_map(|m| m["id"].as_str()).collect();
+        assert!(ids.contains(&"zzz_hidden_audit"),
+            "超出目录截断的 Skill 必须可检索: {:?}", ids);
+
+        // 2) 超截断的 MCP 工具可按名搜到（bulk7/tool_29 在每插件25条+全局80双截断之外）
+        let res = search(&db, &registry, Some(&base), &json!({"query": "tool_bulk7_29"}));
+        let out: Value = serde_json::from_str(&res.stdout).unwrap();
+        let m = &out["matches"].as_array().unwrap()[0];
+        assert_eq!(m["id"], "bulk7/tool_bulk7_29");
+        assert_eq!(m["kind"], "mcp_tool");
+        assert!(m["load_hint"].as_str().unwrap().contains("bulk7/tool_bulk7_29"));
+
+        // 3) 插件命名空间过滤 + 中文描述命中
+        let res = search(&db, &registry, Some(&base),
+            &json!({"query": "处理 bulk3 数据", "kind": "mcp", "namespace": "bulk3", "limit": 3}));
+        let out: Value = serde_json::from_str(&res.stdout).unwrap();
+        let matches = out["matches"].as_array().unwrap();
+        assert!(!matches.is_empty() && matches.len() <= 3);
+        assert!(matches.iter().all(|m| m["namespace"] == "bulk3"));
+
+        // 4) 索引规模断言：240 MCP + ≥121 skill + ≥20 builtin
+        assert!(out["total_scanned"].as_u64().unwrap() >= 380,
+            "索引应覆盖全部源: {}", out["total_scanned"]);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
 }
