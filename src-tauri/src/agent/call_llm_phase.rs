@@ -50,7 +50,7 @@ pub async fn run_call_llm_and_run_tool_phases(
     let max_retries = 3;
     let mut planning_retry_count = 0;
     const MAX_PLANNING_RETRIES: usize = 1;
-    let mut last_token_usage: Option<crate::agent::types::TokenUsage>;
+    let mut last_token_usage: Option<crate::agent::types::TokenUsage> = None;
     let mut last_thinking_duration_ms: u64 = 0;
     let mut last_thinking_text = String::new();
     let mut last_tool_duration_ms: u64;
@@ -142,11 +142,26 @@ pub async fn run_call_llm_and_run_tool_phases(
         let can_early_challenge_finish = false;
 
         let planning_start = Instant::now();
-        let (mut inst, token_usage, thinking_text, history_estimate_at_request) = match call_llm(
+        // 外层看门狗：单次 call_llm 内部含请求级 timeout 与瞬时重试，但挂死点
+        // 也可能落在两者都罩不住的地方（通道漏唤醒、select 陷阱、上游 socket
+        // 僵死）。不设上限的等待会让会话僵尸化越过一切内部时限——实弹已两次
+        // 观测到。封顶取「单请求超时×(重试+1)+裕量」，超时即按普通调用失败
+        // 返回错误，让主循环以失败步继续心跳而非永久冻结。
+        let llm_watchdog_secs = {
+            let base = 120u64.max(
+                crate::llm::ModelConfig::from_db(&state, &routing.model_id)
+                    .map(|c| c.timeout_secs)
+                    .unwrap_or(120),
+            );
+            base.saturating_mul(transient_llm_request_retries as u64 + 1)
+                .saturating_add(180)
+        };
+        let tier_name = routing.tier.to_string();
+        let llm_call = call_llm(
             &context,
             &state,
             routing.model_id.clone(),
-            &routing.tier.to_string(),
+            &tier_name,
             Some(&app),
             step_id,
             &final_session_id,
@@ -155,15 +170,27 @@ pub async fn run_call_llm_and_run_tool_phases(
             model_routing.reasoning_effort_for(&routing.tier),
             can_early_challenge_finish,
             interrupt_rx,
+        );
+        let llm_call_result = match tokio::time::timeout(
+            std::time::Duration::from_secs(llm_watchdog_secs),
+            llm_call,
         )
         .await
         {
-            Ok(r) => {
-                last_thinking_duration_ms = planning_start.elapsed().as_millis() as u64;
-                last_token_usage = Some(r.1.clone());
-                last_thinking_text = r.2.clone();
-                r
-            }
+            Err(_elapsed) => Err(format!(
+                "LLM 调用看门狗超时（{}s 无任何产出）——请求可能僵死，已按失败处理避免会话冻结。",
+                llm_watchdog_secs
+            )),
+            Ok(r) => r,
+        }
+        .map(|r| {
+            last_thinking_duration_ms = planning_start.elapsed().as_millis() as u64;
+            last_token_usage = Some(r.1.clone());
+            last_thinking_text = r.2.clone();
+            r
+        });
+        let (mut inst, token_usage, thinking_text, history_estimate_at_request) = match llm_call_result
+        {
             Err(e) if e == crate::llm::STREAM_INTERRUPTED_ERROR => {
                 let reason = take_pending_interrupt(rx)
                     .unwrap_or_else(|| "用户请求中断当前模型输出。".to_string());
@@ -233,6 +260,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 );
                 return Err(format!("❌ AI 规划失败: {}", e));
             }
+            Ok(r) => r,
         };
 
         let model_tier = routing.tier.to_string();
