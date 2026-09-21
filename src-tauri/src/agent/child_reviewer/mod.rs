@@ -127,7 +127,7 @@ pub async fn spawn_child_reviewer(
         String::new()
     } else {
         format!(
-            "\n        9. 【证据范围强制逐条裁决】方案把 {} 个文件引为证据却未列入修改目标（见证据摘录【📎 证据范围对账】）：这些文件可能依赖被改对象的语义。输出必须额外包含 \"evidence_scope_verdicts\": [\"<path> => HOLDS|BROKEN|NA: 一句话理由\", ...] 字段，逐条覆盖——语义在新方案下仍成立判 HOLDS，被破坏则判 BROKEN 并在 findings 中给出 blocking 缺陷与建议补入 target_files，纯背景证据判 NA；漏项按契约违例判无效重修。本字段经宿主显式授权，不受第 7 条\"禁止额外字段\"限制。",
+            "\n        9. 【证据范围强制逐条裁决】方案把 {} 个文件引为证据却未列入修改目标（见证据摘录【📎 证据范围对账】）：这些文件可能依赖被改对象的语义。输出必须额外包含 \"evidence_scope_verdicts\": [\"<path> => HOLDS|BROKEN|NA: 理由\", ...] 字段逐条覆盖。判 HOLDS 有举证门槛：必须先写明该文件消费了被改对象的哪个值/语义/符号，再推演该值在新方案取新值后、其相关判定分支的输出是否仍正确——仅复述\"输入换了所以没问题\"不算裁决。被破坏则判 BROKEN 并在 findings 中给出 blocking 缺陷与建议补入 target_files；纯背景证据判 NA；漏项按契约违例判无效重修。本字段经宿主显式授权，不受第 7 条\"禁止额外字段\"限制。",
             evidence_scope_refs.len()
         )
     };
