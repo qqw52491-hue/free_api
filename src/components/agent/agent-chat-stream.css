@@ -485,6 +485,14 @@
     margin: 2px 0 4px;
 }
 
+/* 分割线 (弱化水平分割线) */
+.markdown-content :deep(hr) {
+    border: none;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.08);
+    margin: 14px 0;
+}
+
 /* 引用块 */
 .markdown-content :deep(blockquote) {
     margin: 10px 0;

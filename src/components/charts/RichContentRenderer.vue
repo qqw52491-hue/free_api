@@ -229,6 +229,14 @@ function getHtmlTitle(htmlCode: string): string {
 .markdown-segment :deep(h3) { font-size: 14px; }
 .markdown-segment :deep(h4) { font-size: 13px; }
 
+/* 分割线 (弱化水平分割线) */
+.markdown-segment :deep(hr) {
+  border: none;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 14px 0;
+}
+
 /* 段落与列表 */
 .markdown-segment :deep(p) {
   margin: 4px 0 8px;
