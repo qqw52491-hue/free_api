@@ -8,11 +8,13 @@ import { writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// 应用数据目录按平台解析：macOS 用 Application Support，Linux 走 XDG data dir
+// 应用数据目录按平台解析：macOS 用 Application Support，Linux 走 XDG data dir。
+// 评测隔离：runner 注入 FREE_API_DB_PATH 时会话落在独立副本上，判分轮询必须同址。
 const appDb =
-  process.platform === "darwin"
+  process.env.FREE_API_DB_PATH?.trim() ||
+  (process.platform === "darwin"
     ? path.join(os.homedir(), "Library/Application Support/free-api-chat/data_v2.db")
-    : path.join(os.homedir(), ".local/share/free-api-chat/data_v2.db");
+    : path.join(os.homedir(), ".local/share/free-api-chat/data_v2.db"));
 const modelId = process.env.FREE_API_LIVE_MODEL_ID?.trim();
 const proModelId = process.env.FREE_API_LIVE_MODEL_ID_PRO?.trim() || modelId;
 const flashModelId = process.env.FREE_API_LIVE_MODEL_ID_FLASH?.trim() || modelId;

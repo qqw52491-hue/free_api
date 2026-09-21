@@ -5,7 +5,7 @@
   "base_commit": "HEAD",
   "problem_statement": "【排障能力增强任务】用户反馈：LLM 请求出现 4xx/5xx 时排障如同黑盒，现有 agent_logs 归档只记录 messages_sent_to_model，看不到传输层实际请求。产品要求：当 LLM 请求失败（非 2xx）时，把该次请求的摘要（方法、URL、HTTP 状态码、耗时、已用重试次数）与请求头清单追加写入 agent_logs/<session>.json；其中 Authorization、api-key、Cookie 等凭据字段必须脱敏（可复用现有 mask_api_key），请求体只记录截断摘要（至多 2KB）。约束：不破坏现有归档格式兼容；失败路径的记录不得改变既有重试与预算语义。",
   "judge_kind": "command",
-  "verify_command": "git diff | grep '^+' | grep -iqE 'mask|redact|脱敏|sanitize' && git diff | grep '^+' | grep -iqE 'status|agent_log|log' && [ \"$(sqlite3 \"$HOME/Library/Application Support/free-api-chat/data_v2.db\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "verify_command": "git diff | grep '^+' | grep -iqE 'mask|redact|脱敏|sanitize' && git diff | grep '^+' | grep -iqE 'status|agent_log|log' && [ \"$(sqlite3 \"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
   "expected_exit_code": 0,
   "max_steps": 100,
   "max_prompt_tokens": 12000000,

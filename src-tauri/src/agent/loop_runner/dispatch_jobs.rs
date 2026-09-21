@@ -55,6 +55,7 @@ pub(super) async fn dispatch_wait_jobs(
         );
 
         let mut rx_watch = ctx.interrupt_rx.clone();
+        crate::agent::control::mark_stage(ctx.final_session_id, "wait_jobs:enter");
         match crate::agent::job_engine::wait_for_jobs(
             ctx.state.inner(),
             ctx.parent_run_id,
@@ -65,6 +66,10 @@ pub(super) async fn dispatch_wait_jobs(
         .await
         {
             Ok(completed_jobs) => {
+                crate::agent::control::mark_stage(
+                    ctx.final_session_id,
+                    "wait_jobs:reduce_receipts",
+                );
                 // 消费语义统一汇聚到 child_receipt reducer（与主循环自动注入同一
                 // 事实源）：阶段审查、故障转移、交付聚合、退款记账只在一处定义。
                 // 每条回执的模型可见投影由 reducer 产出，按下方的 job_id 投影表

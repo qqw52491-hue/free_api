@@ -190,6 +190,7 @@ pub(super) async fn dispatch_ask_human(
                 question: ask_msg.clone(),
             },
         )?;
+        crate::agent::control::mark_stage(ctx.final_session_id, "ask_human:waiting_reply");
         let reply = match ctx.rx.recv().await {
             Some(HumanControl::Answer(reply)) => reply,
             Some(HumanControl::ReplaceGoal(goal)) => {

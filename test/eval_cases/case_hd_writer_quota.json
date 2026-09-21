@@ -5,7 +5,7 @@
   "base_commit": "fbf5d6db9de00220730a224d9c153a9798bd96d5",
   "problem_statement": "【线上缺陷报障】用户反馈一个写入工兵编排怪象：同一个任务运行里，第一次派发 child_writer 一切正常，工兵跑完、回执也 wait_jobs 回收了；但只要想再派第二个写入工兵，必然被拒绝，提示'每个父运行最多 1 个写入 worker'——明明当前没有任何工兵在跑，额度却像被第一个工兵永远占住了。只有换个新 run 才能再派。请定位根因并修复：配额语义应当是'正在运行的工兵数'而非'历史上存在过的工兵数'，已终态（成功/失败/取消/中断）的工兵不得再占用额度；默认上限 1 的语义保持不变。",
   "judge_kind": "command",
-  "verify_command": "Q=$(grep -rn 'COUNT(\\*) FROM agent_child_runs' src-tauri/src/agent/child_writer/ -A4 | grep -ic 'status'); [ \"$Q\" -ge 1 ] && cargo test --manifest-path src-tauri/Cargo.toml --lib child_writer --quiet 2>&1 | tail -3 | grep -q 'test result: ok' && [ \"$(sqlite3 \"$HOME/Library/Application Support/free-api-chat/data_v2.db\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "verify_command": "Q=$(grep -rn 'COUNT(\\*) FROM agent_child_runs' src-tauri/src/agent/child_writer/ -A4 | grep -ic 'status'); [ \"$Q\" -ge 1 ] && cargo test --manifest-path src-tauri/Cargo.toml --lib child_writer --quiet 2>&1 | tail -3 | grep -q 'test result: ok' && [ \"$(sqlite3 \"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
   "expected_exit_code": 0,
   "max_steps": 60,
   "expected_diff_files": [

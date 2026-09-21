@@ -123,6 +123,10 @@ pub async fn run_tool_phase(
 ) -> Result<DispatchResult, String> {
     let instruction_tool = inst.get_tool();
     let instruction_action = inst.get_action();
+    crate::agent::control::mark_stage(
+        final_session_id,
+        &format!("dispatch:{}:{}", instruction_tool, instruction_action),
+    );
     // submit_plan 优先裁决：它是探索期的合法收敛出口，独立于探索预算门禁与工具派发链。
     // 与工具调用混发属协议误用（提交语义含糊），直接拒绝让模型单独重提。
     let submit_plan_request = inst.submit_plan.clone();

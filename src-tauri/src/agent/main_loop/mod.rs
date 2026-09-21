@@ -145,11 +145,18 @@ async fn run_agent_main_loop_in_workspace_inner(
                 let phase = crate::agent::checkpoint::load_checkpoint(&w_db, &w_run)
                     .ok()
                     .flatten()
+                    .or_else(|| {
+                        crate::agent::checkpoint::load_checkpoint(&w_db, &w_session)
+                            .ok()
+                            .flatten()
+                    })
                     .map(|cp| format!("{:?}", cp.phase))
                     .unwrap_or_else(|| "unknown".to_string());
+                let stage = crate::agent::control::read_stage(&w_session)
+                    .unwrap_or_else(|| "unknown".to_string());
                 let reason = format!(
-                    "会话看门狗：主循环已停滞 {}s（相位={}），判定任务挂死并安全终止",
-                    idle, phase
+                    "会话看门狗：主循环已停滞 {}s（相位={}, 阶段={}），判定任务挂死并安全终止",
+                    idle, phase, stage
                 );
                 let _ = crate::agent::run_trace::upsert_snapshot(
                     &w_db,
@@ -1026,6 +1033,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 .unwrap_or(0),
             std::sync::atomic::Ordering::Relaxed,
         );
+        crate::agent::control::mark_stage(&final_session_id, "loop_top:receipt_poll");
         // token 预算在步骤边界检查：一旦跨线立即收敛出报告，不再派发新步骤
         if let Some(reason) = token_budget_stop_reason(run_budget.as_ref(), spent_prompt_tokens) {
             budget_stop_reason = Some(reason);
@@ -1243,6 +1251,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         let mut resume_instruction_opt = resume_instruction;
         let mut phases_failure_count: u32 = 0;
         let outcome = loop {
+            crate::agent::control::mark_stage(&final_session_id, "phases:call_llm_and_dispatch");
             let phases_err = match run_call_llm_and_run_tool_phases(
                 &app,
                 &state,

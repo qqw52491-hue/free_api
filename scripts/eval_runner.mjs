@@ -22,7 +22,7 @@
  *                                                              # 应用会话按 session_id 收取轨迹并判分
  */
 
-import { execSync, spawnSync } from 'node:child_process';
+import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,7 +33,7 @@ const casesDir = path.join(rootDir, 'test', 'eval_cases');
 const artifactsDir = path.join(rootDir, 'test-artifacts');
 const worktreeBaseDir = path.join(artifactsDir, 'worktrees');
 const evaluationsDir = path.join(rootDir, 'agent_evaluations');
-const appDbPath = path.join(
+let appDbPath = path.join(
   process.env.HOME || '',
   'Library',
   'Application Support',
@@ -307,6 +307,7 @@ function runCalibration(sandboxPath, caseDef) {
     const expectation = caseDef.baseline_expectation || 'red';
     const runResult = runCommand(sandboxPath, caseDef.verify_command, CALIBRATION_TIMEOUT_MS, {
       FREE_API_EVAL_AGENT_SESSION: '',
+      FREE_API_DB_PATH: appDbPath,
     });
     if (runResult.timedOut) {
       return { status: 'invalid', kind, reason: '行为类判据在校准期超时——判据本身疑似挂起，考题无效', exitCode: null };
@@ -627,9 +628,27 @@ async function runEvaluation() {
         if (fs.existsSync(sessionFile)) fs.rmSync(sessionFile);
         if (fs.existsSync(`${sessionFile}.status`)) fs.rmSync(`${sessionFile}.status`);
         const planMode = caseDef.plan_mode || '';
+        // DB 隔离：评测实例用共享库的在线备份副本，与日常实例/其它评测僵尸
+        // 实例各持独立文件锁——否则一个实例持写事务挂死会级联冻结后续所有
+        // 实例的 DB 调用（实弹已见 R13/R15/R18 三连僵尸）。
+        const isolatedDbDir = path.join(artifactsDir, 'eval-dbs');
+        fs.mkdirSync(isolatedDbDir, { recursive: true });
+        const isolatedDbPath = path.join(
+          isolatedDbDir,
+          `eval-${caseDef.id || 'case'}-${Date.now()}.db`
+        );
+        execFileSync('sqlite3', [appDbPath, `.backup '${isolatedDbPath}'`]);
+        const isolatedOutputsDir = path.join(
+          isolatedDbDir,
+          `outputs-${caseDef.id || 'case'}-${Date.now()}`
+        );
+        fs.mkdirSync(isolatedOutputsDir, { recursive: true });
+        appDbPath = isolatedDbPath;
         const wdioEnv = {
           ...process.env,
           CARGO_TARGET_DIR: path.join(rootDir, 'src-tauri', 'target'),
+          FREE_API_DB_PATH: isolatedDbPath,
+          FREE_API_OUTPUTS_DIR: isolatedOutputsDir,
           FREE_API_LIVE_MODEL_ID: options.model,
           ...(options.proModel ? { FREE_API_LIVE_MODEL_ID_PRO: options.proModel } : {}),
           ...(options.flashModel ? { FREE_API_LIVE_MODEL_ID_FLASH: options.flashModel } : {}),
@@ -733,6 +752,7 @@ async function runEvaluation() {
 
         const runResult = runCommand(sandboxPath, caseDef.verify_command, JUDGE_TIMEOUT_MS, {
           FREE_API_EVAL_AGENT_SESSION: sessionId,
+          FREE_API_DB_PATH: appDbPath,
         });
         result = {
           ...evaluateJudge(caseDef, runResult),
@@ -759,6 +779,7 @@ async function runEvaluation() {
 
         const runResult = runCommand(sandboxPath, caseDef.verify_command, JUDGE_TIMEOUT_MS, {
           FREE_API_EVAL_AGENT_SESSION: options.agentSession,
+          FREE_API_DB_PATH: appDbPath,
         });
         result = {
           ...evaluateJudge(caseDef, runResult),

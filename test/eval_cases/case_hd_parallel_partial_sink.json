@@ -5,7 +5,7 @@
   "base_commit": "HEAD",
   "problem_statement": "【展示层缺陷报障】托盘文件统计存在盲区：执行 parallel 并行批量写盘指令时，只要其中某一个分支失败（比如批量写 3 个文件、中间 1 个因内容不合规被拦），进度托盘就显示“修改了 0 个文件”——但磁盘上其余 2 个分支的文件其实已真实写入。用户看到的统计与真实落盘完全脱节。请排查并修复这个展示问题：parallel 分支相互独立，部分失败不等于全部未落地，托盘应只统计真实落地的分支文件；同时保持全成功与全失败两种边界场景的正确性。",
   "judge_kind": "command",
-  "verify_command": "cd \"$FREE_API_EVAL_WORKTREE\" && grep -nE 'ok|landed|branch' src/components/agent/diff/stepFileParser.ts | grep -iE 'parallel|branch|cmd|ok' | head -5 && [ \"$(sqlite3 \"$HOME/Library/Application Support/free-api-chat/data_v2.db\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "verify_command": "cd \"$FREE_API_EVAL_WORKTREE\" && grep -nE 'ok|landed|branch' src/components/agent/diff/stepFileParser.ts | grep -iE 'parallel|branch|cmd|ok' | head -5 && [ \"$(sqlite3 \"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
   "expected_exit_code": 0,
   "max_steps": 60,
   "expected_diff_files": [

@@ -27,6 +27,33 @@ pub fn stream_interrupt_channels() -> &'static Arc<Mutex<HashMap<String, watch::
     CHANNELS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
+/// 会话执行位置面包屑：主循环在关键 await 边界打点，停滞看门狗触发时读取。
+/// 纯内存态、不进 checkpoint——把"卡在 RunTool"细化到具体挂死的子阶段，
+/// 用于定位 await 死锁/漏唤醒/panic 逃逸的确切现场。
+fn stall_stages() -> &'static std::sync::Mutex<HashMap<String, String>> {
+    static STAGES: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
+    STAGES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn mark_stage(session_id: &str, stage: &str) {
+    if let Ok(mut stages) = stall_stages().lock() {
+        stages.insert(session_id.to_string(), stage.to_string());
+    }
+}
+
+pub(crate) fn read_stage(session_id: &str) -> Option<String> {
+    stall_stages()
+        .lock()
+        .ok()
+        .and_then(|stages| stages.get(session_id).cloned())
+}
+
+pub(crate) fn clear_stage(session_id: &str) {
+    if let Ok(mut stages) = stall_stages().lock() {
+        stages.remove(session_id);
+    }
+}
+
 pub async fn notify_stream_interrupt(session_id: &str) {
     if let Some(sender) = stream_interrupt_channels()
         .lock()

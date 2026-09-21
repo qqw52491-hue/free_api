@@ -5,7 +5,7 @@
   "base_commit": "b4fac6fb4780ff9421db3d961e1495cca0c19299",
   "problem_statement": "【体验缺陷报障】多位用户反馈：进度盘输入框上方的'修改了 N 个文件'托盘经常虚报——明明看到 Agent 用 pipeline 批量命令把好几个文件都改了，托盘却冷冰冰显示'修改了 0 个文件'；而同一会话里用 local_file 单独写的文件又能正常出现在托盘里。用户怀疑是统计口径漏了批量执行这条通道。请定位并修复：批量执行（pipeline/parallel）里内嵌的文件写盘必须像单独写盘一样出现在修改文件托盘，新建/修改语义与行数统计口径与单写保持一致；被门禁拦下的写入不得计入。",
   "judge_kind": "command",
-  "verify_command": "F=src/components/agent/diff/stepFileParser.ts; grep -qE 'pipeline|parallel' \"$F\" && grep -qE 'commands|parallel' \"$F\" && npx vue-tsc --noEmit 2>/dev/null && [ \"$(sqlite3 \"$HOME/Library/Application Support/free-api-chat/data_v2.db\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "verify_command": "F=src/components/agent/diff/stepFileParser.ts; grep -qE 'pipeline|parallel' \"$F\" && grep -qE 'commands|parallel' \"$F\" && npx vue-tsc --noEmit 2>/dev/null && [ \"$(sqlite3 \"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
   "expected_exit_code": 0,
   "max_steps": 60,
   "expected_diff_files": [
