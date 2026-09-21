@@ -408,23 +408,82 @@ pub fn read_clipboard_image() -> Result<Option<ClipboardImagePayload>, String> {
 
     #[cfg(target_os = "windows")]
     {
-        let script = "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) }";
+        let mut payload = ClipboardImagePayload { data_urls: vec![], file_paths: vec![] };
+        // 1. 图像数据（截图/复制的图像内容）
+        let script_img = "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) }";
         if let Ok(output) = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", script])
+            .args(["-NoProfile", "-Command", script_img])
             .output()
         {
             let b64 = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !b64.is_empty() {
-                return Ok(Some(format!("data:image/png;base64,{}", b64)));
+                payload.data_urls.push(format!("data:image/png;base64,{}", b64));
             }
+        }
+        // 2. 文件复制（资源管理器 Ctrl+C 的 CF_HDROP 列表）
+        let script_files = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::GetFileDropList() | ForEach-Object { $_ }";
+        if let Ok(output) = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", script_files])
+            .output()
+        {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let p = std::path::PathBuf::from(line.trim());
+                if p.is_file() {
+                    payload.file_paths.push(p.to_string_lossy().into_owned());
+                }
+            }
+        }
+        if !payload.data_urls.is_empty() || !payload.file_paths.is_empty() {
+            payload.file_paths.sort();
+            payload.file_paths.dedup();
+            return Ok(Some(payload));
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        let script = "try\nset theImage to the clipboard as «class PNGf»\nreturn true\non error\nreturn false\nend try";
-        // macOS 可通过 osascript 或 pbpaste 配合转换为 base64
+        let mut payload = ClipboardImagePayload { data_urls: vec![], file_paths: vec![] };
+        // 1. Finder 文件复制 → «class furl» 取 POSIX 路径
+        if let Ok(out) = std::process::Command::new("osascript")
+            .args(["-e", "try\nPOSIX path of (the clipboard as «class furl»)\non error\n\"\"\nend try"])
+            .output()
+        {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() && std::path::Path::new(&p).is_file() {
+                payload.file_paths.push(p);
+            }
+        }
+        // 2. 图像数据 → «class PNGf» 落临时文件再读回（osascript 不便直接吐二进制）
+        let script_img = concat!(
+            "try\n",
+            "set pngData to the clipboard as «class PNGf»\n",
+            "set outPath to (POSIX path of (path to temporary items folder)) & \"freeapi_clip_\" & (random number from 100000 to 999999) & \".png\"\n",
+            "set fh to open for access (POSIX file outPath) with write permission\n",
+            "set eof fh to 0\n",
+            "write pngData to fh\n",
+            "close access fh\n",
+            "return outPath\n",
+            "on error\nreturn \"\"\nend try"
+        );
+        if let Ok(out) = std::process::Command::new("osascript")
+            .args(["-e", script_img])
+            .output()
+        {
+            let tmp = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !tmp.is_empty() {
+                if let Ok(bytes) = std::fs::read(&tmp) {
+                    if !bytes.is_empty() {
+                        payload.data_urls.push(format!("data:image/png;base64,{}", b64enc(&bytes)));
+                    }
+                }
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+        if !payload.data_urls.is_empty() || !payload.file_paths.is_empty() {
+            return Ok(Some(payload));
+        }
     }
 
+    let _ = &b64enc; // 非三桌面平台构建时抑制 unused 告警
     Ok(None)
 }

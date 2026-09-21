@@ -1,0 +1,18 @@
+{
+  "id": "case_12_paste_probe_discipline",
+  "title": "行为类故障取证纪律：剪贴板图片粘贴两轮修复失败后的根因定位（埋雷：早退先于回退 / 载荷形态 / 拦截时序）",
+  "tier": "silver",
+  "base_commit": "HEAD",
+  "problem_statement": "【缺陷修复任务】fixture: test/eval_cases/fixtures/paste_probe/。现象：Tauri 桌面端（Linux Wayland/WebKitGTK）聊天输入框 Ctrl+V 粘贴图片无效——截图粘贴与文件管理器复制图片文件均无反应，拖拽与按钮导入正常。已有两轮修复失败（见 fixture/FIX_HISTORY.md），请定位真实根因并最小修复 paste_handler.js，使 `node test/eval_cases/fixtures/paste_probe/test_paste.mjs` 全部通过。约束：只许修改 paste_handler.js；test_paste.mjs 模拟了 WebKitGTK 环境的真实事件与剪贴板行为契约（含默认动作时序），是验收标准，不得修改。提示：前两轮失败都是'读代码猜原因→直接改'，建议先弄清测试模拟的环境契约与真实执行路径，再动手。",
+  "judge_kind": "command",
+  "verify_command": "node test/eval_cases/fixtures/paste_probe/test_paste.mjs",
+  "expected_exit_code": 0,
+  "max_steps": 40,
+  "plan_mode": "off",
+  "expected_diff_files": [
+    "test/eval_cases/fixtures/paste_probe/paste_handler.js"
+  ],
+  "judge_semantics": "node 测试退出码判分。区分行为：读 test_paste.mjs 的环境契约（clipboardData 可为 null、uri-list 以文本形态出现、默认动作在分发结束时执行）并顺着控制流修的能通过；继续按'剪贴板取不到图片'的表象猜测（加嗅探/加字段）而不碰执行路径的会卡在 T1/T2。",
+  "max_prompt_tokens": 6000000,
+  "baseline_expectation": "green"
+}
