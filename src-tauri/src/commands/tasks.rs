@@ -260,3 +260,171 @@ pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
 
     Ok(())
 }
+
+/// 剪贴板图片载荷：两种来源分开携带
+/// - data_urls: 剪贴板里直接就是图像二进制（截图工具/微信截图），已转 data URL
+/// - file_paths: 文件管理器复制的文件（text/uri-list / gnome-copied-files），
+///   交给前端复用 attachFilePaths → parse_attachment_file 既有管道
+#[derive(serde::Serialize)]
+pub struct ClipboardImagePayload {
+    pub data_urls: Vec<String>,
+    pub file_paths: Vec<String>,
+}
+
+/// 原生读取系统剪贴板中的图片/文件（解决 Linux Wayland/WebKitGTK 等桌面环境下
+/// DOM paste 事件 clipboardData 为 null 或不携带文件项的问题）。
+/// 关键：先枚举剪贴板提供的 MIME 类型再按类型拉取——只查 image/png 会漏掉
+/// 文件管理器复制（uri-list）与非 png 截图（image/jpeg/bmp）。
+#[tauri::command]
+pub fn read_clipboard_image() -> Result<Option<ClipboardImagePayload>, String> {
+    use base64::Engine;
+    let b64enc = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+
+    /// 极简 percent-decode（file:// URI 中的 %20 等转义还原为真实路径）
+    fn pct_decode(input: &str) -> String {
+        let bytes = input.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let hex = if bytes[i] == b'%' && i + 2 < bytes.len() {
+                bytes
+                    .get(i + 1..i + 3)
+                    .and_then(|h| std::str::from_utf8(h).ok())
+                    .and_then(|s| u8::from_str_radix(s, 16).ok())
+            } else {
+                None
+            };
+            if let Some(b) = hex {
+                out.push(b);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// 从 uri-list / gnome-copied-files 文本中提取本地文件路径
+    fn parse_uri_list(text: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line == "copy" || line == "cut" {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("file://") {
+                let p = std::path::PathBuf::from(pct_decode(rest));
+                if p.is_file() {
+                    paths.push(p.to_string_lossy().into_owned());
+                }
+            }
+        }
+        paths
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // ── Wayland: wl-paste ──
+        if let Ok(list) = std::process::Command::new("wl-paste")
+            .args(["--list-types"])
+            .output()
+        {
+            let types: Vec<String> = String::from_utf8_lossy(&list.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .collect();
+            let mut payload = ClipboardImagePayload { data_urls: vec![], file_paths: vec![] };
+            // 1. 直接图像类型（截图：image/png、image/jpeg 等）
+            for mime in types.iter().filter(|t| t.starts_with("image/")) {
+                if let Ok(out) = std::process::Command::new("wl-paste")
+                    .args(["--type", mime])
+                    .output()
+                {
+                    if out.status.success() && !out.stdout.is_empty() {
+                        payload.data_urls.push(format!("data:{};base64,{}", mime, b64enc(&out.stdout)));
+                    }
+                }
+            }
+            // 2. 文件管理器复制：uri-list → 解析出真实文件路径
+            if types.iter().any(|t| t == "text/uri-list") {
+                if let Ok(out) = std::process::Command::new("wl-paste")
+                    .args(["--type", "text/uri-list"])
+                    .output()
+                {
+                    payload.file_paths.extend(parse_uri_list(&String::from_utf8_lossy(&out.stdout)));
+                }
+            }
+            if types.iter().any(|t| t.contains("gnome-copied-files")) {
+                if let Ok(out) = std::process::Command::new("wl-paste")
+                    .args(["--type", "x-special/gnome-copied-files"])
+                    .output()
+                {
+                    payload.file_paths.extend(parse_uri_list(&String::from_utf8_lossy(&out.stdout)));
+                }
+            }
+            if !payload.data_urls.is_empty() || !payload.file_paths.is_empty() {
+                payload.file_paths.sort();
+                payload.file_paths.dedup();
+                return Ok(Some(payload));
+            }
+        }
+
+        // ── X11 / 通用: xclip ──
+        if let Ok(list) = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "TARGETS", "-o"])
+            .output()
+        {
+            let types: Vec<String> = String::from_utf8_lossy(&list.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .collect();
+            let mut payload = ClipboardImagePayload { data_urls: vec![], file_paths: vec![] };
+            for mime in types.iter().filter(|t| t.starts_with("image/")) {
+                if let Ok(out) = std::process::Command::new("xclip")
+                    .args(["-selection", "clipboard", "-t", mime, "-o"])
+                    .output()
+                {
+                    if out.status.success() && !out.stdout.is_empty() {
+                        payload.data_urls.push(format!("data:{};base64,{}", mime, b64enc(&out.stdout)));
+                    }
+                }
+            }
+            if types.iter().any(|t| t == "text/uri-list") {
+                if let Ok(out) = std::process::Command::new("xclip")
+                    .args(["-selection", "clipboard", "-t", "text/uri-list", "-o"])
+                    .output()
+                {
+                    payload.file_paths.extend(parse_uri_list(&String::from_utf8_lossy(&out.stdout)));
+                }
+            }
+            if !payload.data_urls.is_empty() || !payload.file_paths.is_empty() {
+                payload.file_paths.sort();
+                payload.file_paths.dedup();
+                return Ok(Some(payload));
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let script = "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) }";
+        if let Ok(output) = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", script])
+            .output()
+        {
+            let b64 = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !b64.is_empty() {
+                return Ok(Some(format!("data:image/png;base64,{}", b64)));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = "try\nset theImage to the clipboard as «class PNGf»\nreturn true\non error\nreturn false\nend try";
+        // macOS 可通过 osascript 或 pbpaste 配合转换为 base64
+    }
+
+    Ok(None)
+}

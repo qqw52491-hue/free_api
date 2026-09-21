@@ -158,6 +158,7 @@ pub fn run() {
             commands::delete_artifact_by_id,
             commands::export_artifact_to_file,
             commands::copy_file_to_clipboard,
+            commands::read_clipboard_image,
             commands::get_agent_read_only_regression_goal,
             commands::begin_agent_read_only_regression,
             commands::generate_agent_evaluation_report,

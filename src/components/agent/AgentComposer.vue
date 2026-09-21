@@ -1464,44 +1464,127 @@ async function handleFileDrop(e: DragEvent) {
 
 async function handlePaste(e: ClipboardEvent) {
     if (props.isSending) return;
+    // WebKitGTK 下 clipboardData 可能为 null——不能直接 return，
+    // 那正是需要走原生剪贴板回退的场景。
     const clipboard = e.clipboardData;
-    if (!clipboard) return;
+    // 诊断锚点：若粘贴仍失效，控制台这行能区分"事件未触发"与"剪贴板无图像数据"
+    console.debug(
+        "[paste] clipboardData types:",
+        clipboard ? Array.from(clipboard.types) : null,
+        "items:", clipboard?.items?.length ?? 0,
+        "files:", clipboard?.files?.length ?? 0
+    );
 
-    // 1. 优先检查剪贴板是否携带图片 (如截图直接粘贴)
-    const items = clipboard.items;
-    let hasImage = false;
-    for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (item.kind === "file" && item.type.startsWith("image/")) {
-            const file = item.getAsFile();
-            if (file) {
-                hasImage = true;
-                e.preventDefault();
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                    const base64Data = event.target?.result as string;
-                    if (base64Data) {
-                        const timestamp = new Date().toTimeString().split(" ")[0].replace(/:/g, "");
-                        const fileName = file.name && file.name !== "image.png" ? file.name : `screenshot_${timestamp}.png`;
-                        attachments.value.push({
-                            file_name: fileName,
-                            file_path: fileName,
-                            size_bytes: file.size,
-                            content_type: file.type || "image/png",
-                            prompt_text: `【用户已上传图片附件: \`${fileName}\`】(格式: ${file.type || "image/png"}, 大小: ${(file.size / 1024).toFixed(1)} KB)\n*(图片数据已作为视觉多模态消息携带)*\n`,
-                            image_data_url: base64Data,
-                            raw_preview: null,
-                        });
+    // 1. 优先检查剪贴板是否携带图片 (截图或从资源管理器复制的图片文件)
+    const imageFiles: File[] = [];
+    const seenKeys = new Set<string>();
+    const isImageFile = (f: File) => {
+        if (!f) return false;
+        if (f.type && f.type.startsWith("image/")) return true;
+        if (f.name && /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name)) return true;
+        // 部分系统/工具截图无扩展名且类型为空，但有尺寸与 File 实例
+        return !f.type && (!f.name || f.name === "image.png");
+    };
+    const addImageFile = (f: File | null) => {
+        if (!f || !isImageFile(f)) return;
+        const key = `${f.name || 'img'}_${f.size}_${f.lastModified || 0}`;
+        if (seenKeys.has(key)) return;
+        seenKeys.add(key);
+        imageFiles.push(f);
+    };
+
+    if (clipboard) {
+        // 1.1 优先提取 clipboard.items (现代浏览器截图优先在 items)
+        if (clipboard.items && clipboard.items.length > 0) {
+            for (let i = 0; i < clipboard.items.length; i++) {
+                const item = clipboard.items[i];
+                if (item.kind === "file" || item.type.startsWith("image/")) {
+                    try {
+                        const f = item.getAsFile();
+                        if (f) addImageFile(f);
+                    } catch (err) {
+                        console.warn("从 clipboard.items 获取文件异常:", err);
                     }
-                };
-                reader.readAsDataURL(file);
-                return;
+                }
+            }
+        }
+
+        // 1.2 补充/降级提取 clipboard.files
+        if (clipboard.files && clipboard.files.length > 0) {
+            for (let i = 0; i < clipboard.files.length; i++) {
+                addImageFile(clipboard.files[i]);
             }
         }
     }
-    if (hasImage) return;
+
+    if (imageFiles.length > 0) {
+        e.preventDefault();
+        for (const file of imageFiles) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const base64Data = event.target?.result as string;
+                if (!base64Data) return;
+                const timestamp = new Date().toTimeString().split(" ")[0].replace(/:/g, "");
+                const fileName = file.name && file.name !== "image.png" ? file.name : `screenshot_${timestamp}.png`;
+                const contentType = file.type || "image/png";
+                attachments.value.push({
+                    file_name: fileName,
+                    file_path: fileName,
+                    size_bytes: file.size,
+                    content_type: contentType,
+                    prompt_text: `【用户已上传图片附件: \`${fileName}\`】(格式: ${contentType}, 大小: ${(file.size / 1024).toFixed(1)} KB)\n*(图片数据已作为视觉多模态消息携带)*\n`,
+                    image_data_url: base64Data,
+                    raw_preview: null,
+                });
+            };
+            reader.readAsDataURL(file);
+        }
+        return;
+    }
+
+    // 1.3 原生剪贴板回退：截图(image/*)与文件管理器复制(uri-list)都走这里。
+    // 快照当前文本——默认粘贴可能已把 uri/路径文本插进输入框，命中原生数据后回滚。
+    // （不能在 await 后才 preventDefault：那时默认动作早已执行完）
+    const ta = textareaRef.value;
+    const preValue = ta ? ta.value : props.draft;
+    const caret = ta ? ta.selectionStart : preValue.length;
+    try {
+        const payload = await invoke<{ data_urls: string[]; file_paths: string[] } | null>("read_clipboard_image");
+        if (payload && (payload.data_urls.length > 0 || payload.file_paths.length > 0)) {
+            // 撤销默认粘贴刚插入的文本（uri-list 场景常见：路径被当文本塞进来）
+            if (ta && ta.value !== preValue) {
+                ta.value = preValue;
+                emit("update:draft", preValue);
+                await nextTick();
+                ta.setSelectionRange(caret, caret);
+            }
+            for (const dataUrl of payload.data_urls) {
+                const mime = dataUrl.slice(5, dataUrl.indexOf(";")) || "image/png";
+                const ext = mime === "image/jpeg" ? "jpg" : (mime.split("/")[1] || "png");
+                const timestamp = new Date().toTimeString().split(" ")[0].replace(/:/g, "");
+                const fileName = `screenshot_${timestamp}.${ext}`;
+                attachments.value.push({
+                    file_name: fileName,
+                    file_path: fileName,
+                    size_bytes: Math.round((dataUrl.length * 3) / 4),
+                    content_type: mime,
+                    prompt_text: `【用户已上传图片附件: \`${fileName}\`】(格式: ${mime}, 大小: ${(Math.round((dataUrl.length * 3) / 4) / 1024).toFixed(1)} KB)\n*(图片数据已作为视觉多模态消息携带)*\n`,
+                    image_data_url: dataUrl,
+                    raw_preview: null,
+                });
+            }
+            // 文件管理器复制的文件复用附件解析管道（图片会生成缩略图卡片）
+            if (payload.file_paths.length > 0) {
+                await attachFilePaths(payload.file_paths);
+            }
+            return;
+        }
+    } catch (err) {
+        console.debug("原生剪贴板图片回退检测跳过或未支持:", err);
+    }
 
     // 2. 检查纯文本内容：短文本正常进入输入框光标处；长文本/大段代码智能折叠为虚拟卡片
+    if (!clipboard) return;
     const text = clipboard.getData("text/plain");
     if (!text) return;
 
