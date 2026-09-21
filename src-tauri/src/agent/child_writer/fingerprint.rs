@@ -15,45 +15,53 @@ use tokio::sync::watch;
 
 /// 初始化副本内的 Git 基线快照（解决副本无 .git 仓库无法 diff 的问题）
 pub async fn init_git_baseline(copy_root: &Path) -> bool {
-    let init = tokio::process::Command::new("git")
-        .arg("init")
-        .arg("-q")
-        .current_dir(copy_root)
-        .output()
-        .await;
+    let init = crate::agent::utils::subprocess::command_output_with_timeout(
+        tokio::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(copy_root),
+        30,
+    )
+    .await;
     if init.is_err() || !init.as_ref().unwrap().status.success() {
         return false;
     }
-    let add = tokio::process::Command::new("git")
-        .arg("add")
-        .arg("-A")
-        .current_dir(copy_root)
-        .output()
-        .await;
+    let add = crate::agent::utils::subprocess::command_output_with_timeout(
+        tokio::process::Command::new("git")
+            .arg("add")
+            .arg("-A")
+            .current_dir(copy_root),
+        60,
+    )
+    .await;
     if add.is_err() || !add.as_ref().unwrap().status.success() {
         return false;
     }
-    let commit = tokio::process::Command::new("git")
-        .args(&[
-            "-c", "user.email=agent@local",
-            "-c", "user.name=writer",
-            "commit", "-qm", "spawn baseline", "--allow-empty"
-        ])
-        .current_dir(copy_root)
-        .output()
-        .await;
+    let commit = crate::agent::utils::subprocess::command_output_with_timeout(
+        tokio::process::Command::new("git")
+            .args(&[
+                "-c", "user.email=agent@local",
+                "-c", "user.name=writer",
+                "commit", "-qm", "spawn baseline", "--allow-empty"
+            ])
+            .current_dir(copy_root),
+        60,
+    )
+    .await;
     commit.is_ok() && commit.unwrap().status.success()
 }
 
 /// 检查指定路径下 git 命令是否可用且可执行
 pub async fn is_git_available(cwd: &Path) -> bool {
-    tokio::process::Command::new("git")
-        .arg("--version")
-        .current_dir(cwd)
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    crate::agent::utils::subprocess::command_output_with_timeout(
+        tokio::process::Command::new("git")
+            .arg("--version")
+            .current_dir(cwd),
+        15,
+    )
+    .await
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 /// 计算字节数据的指纹（优先使用 git hash-object --stdin，git 不可用时回退到 sha256）
@@ -74,7 +82,12 @@ pub async fn compute_bytes_hash(bytes: &[u8], git_available: bool, cwd: &Path) -
                 let _ = stdin.write_all(bytes).await;
                 drop(stdin);
             }
-            if let Ok(out) = child.wait_with_output().await {
+            let wait_out = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                child.wait_with_output(),
+            )
+            .await;
+            if let Ok(Ok(out)) = wait_out {
                 if out.status.success() {
                     let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if !h.is_empty() {

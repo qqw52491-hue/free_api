@@ -371,18 +371,22 @@ async fn build_changed_files(
     let mut git_full_diff = String::new();
 
     if git_available {
-        let _ = tokio::process::Command::new("git")
-            .arg("add")
-            .arg("-A")
-            .current_dir(copy_root)
-            .output()
-            .await;
+        let _ = crate::agent::utils::subprocess::command_output_with_timeout(
+            tokio::process::Command::new("git")
+                .arg("add")
+                .arg("-A")
+                .current_dir(copy_root),
+            30,
+        )
+        .await;
 
-        if let Ok(out) = tokio::process::Command::new("git")
-            .args(&["diff", "--cached", "--unified=3"])
-            .current_dir(copy_root)
-            .output()
-            .await
+        if let Ok(out) = crate::agent::utils::subprocess::command_output_with_timeout(
+            tokio::process::Command::new("git")
+                .args(&["diff", "--cached", "--unified=3"])
+                .current_dir(copy_root),
+            60,
+        )
+        .await
         {
             if out.status.success() {
                 git_full_diff = String::from_utf8_lossy(&out.stdout).to_string();
@@ -419,11 +423,13 @@ async fn build_changed_files(
             }
         } else {
             // Tier 2: 超出预算，尝试 --unified=0 降级重算（砍掉上下文行）
-            let u0_res = tokio::process::Command::new("git")
-                .args(&["diff", "--cached", "--unified=0"])
-                .current_dir(copy_root)
-                .output()
-                .await;
+            let u0_res = crate::agent::utils::subprocess::command_output_with_timeout(
+                tokio::process::Command::new("git")
+                    .args(&["diff", "--cached", "--unified=0"])
+                    .current_dir(copy_root),
+                60,
+            )
+            .await;
             let u0_diff = u0_res
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())

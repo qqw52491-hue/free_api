@@ -1,6 +1,7 @@
 use crate::agent::protocol::FocusDomain;
 use serde_json::Value;
 use std::path::Path;
+use std::time::Duration;
 use tokio::process::Command;
 
 /// diff 最大允许注入的行数上限（防止撑爆模型上下文）
@@ -23,13 +24,26 @@ const RESERVED_INPUT_SECTIONS: &[(&str, &str)] = &[
 ];
 
 /// 异步采集工作区当前未暂存及已暂存的变更文件清单
+/// 子进程兜底超时：git/外部命令在 worktree 锁、fsmonitor、磁盘 stall 下可
+/// 永久不返回——曾造成派发子审查时整个会话冻死（实弹三连）。采集属可选
+/// 增强，超时按"无数据"降级，绝不阻塞主循环。
+const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn git_output(workspace_root: &Path, args: &[&str]) -> Option<std::process::Output> {
+    tokio::time::timeout(
+        SUBPROCESS_TIMEOUT,
+        Command::new("git")
+            .args(args)
+            .current_dir(workspace_root)
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+}
+
 pub async fn collect_changed_files(workspace_root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(workspace_root)
-        .output()
-        .await
-        .ok()?;
+    let output = git_output(workspace_root, &["status", "--porcelain"]).await?;
 
     if !output.status.success() {
         return None;
@@ -59,30 +73,15 @@ pub async fn collect_changed_files(workspace_root: &Path) -> Option<String> {
 /// 异步采集工作区关键变更切片（带行数和字符预算硬截断与自取引导）
 pub async fn collect_git_diff(workspace_root: &Path) -> Option<String> {
     // 优先尝试 git diff HEAD（兼顾已暂存与未暂存），失败时 fallback 到 git diff
-    let output = match Command::new("git")
-        .args(["diff", "HEAD"])
-        .current_dir(workspace_root)
-        .output()
-        .await
-    {
-        Ok(out) if out.status.success() => out,
-        _ => Command::new("git")
-            .arg("diff")
-            .current_dir(workspace_root)
-            .output()
-            .await
-            .ok()?,
+    let output = match git_output(workspace_root, &["diff", "HEAD"]).await {
+        Some(out) if out.status.success() => out,
+        _ => git_output(workspace_root, &["diff"]).await?,
     };
 
     let mut diff = String::from_utf8_lossy(&output.stdout).to_string();
     if diff.trim().is_empty() {
         // 如果 HEAD 无差异，再试一次 git diff
-        if let Ok(fallback) = Command::new("git")
-            .arg("diff")
-            .current_dir(workspace_root)
-            .output()
-            .await
-        {
+        if let Some(fallback) = git_output(workspace_root, &["diff"]).await {
             diff = String::from_utf8_lossy(&fallback.stdout).to_string();
         }
     }
