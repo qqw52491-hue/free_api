@@ -70,7 +70,7 @@
                             <div class="worker-card-right">
                                 <span class="worker-status-badge" :class="`status-${worker.status}`">
                                     <i v-if="worker.status === 'running'" class="spinner-dot"></i>
-                                    {{ worker.status === 'succeeded' ? '100%' : (worker.status === 'running' ? `${worker.progress}%` : '等待') }}
+                                    {{ worker.status === 'succeeded' ? '100%' : (worker.status === 'running' ? `${worker.progress}%` : statusText(worker.status)) }}
                                 </span>
                             </div>
                         </div>
@@ -111,7 +111,7 @@
                     <span class="tab-icon">{{ getRoleIcon(worker.role) }}</span>
                     <span class="tab-title">{{ formatWorkerName(worker.name) }}</span>
                     <span class="tab-progress-tag" :class="`status-${worker.status}`">
-                        {{ worker.status === 'succeeded' ? '完成' : `${worker.progress}%` }}
+                        {{ worker.status === 'succeeded' ? '完成' : (worker.status === 'running' ? `${worker.progress}%` : statusText(worker.status)) }}
                     </span>
                 </button>
             </div>
@@ -133,7 +133,7 @@
                                 ⏱ {{ (selectedWorker.durationMs / 1000).toFixed(2) }}s
                             </span>
                             <span class="stage-metric-pill" :class="`status-${selectedWorker.status}`">
-                                {{ selectedWorker.status === 'succeeded' ? '已完成' : (selectedWorker.status === 'running' ? '执行中' : '排队中') }}
+                                {{ statusText(selectedWorker.status) }}
                             </span>
                         </div>
                     </div>
