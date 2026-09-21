@@ -94,6 +94,83 @@ async fn run_agent_main_loop_in_workspace_inner(
         .await
         .insert(final_session_id.clone(), interrupt_tx);
 
+    // 🐕 会话停滞看门狗：主循环每轮刷新原子心跳；若超过阈值仍无新步且会话
+    // 仍 running，说明任务在 await 死锁/panic 逃逸（实弹已见三场僵尸会话：
+    // 进程活着、线程全闲、updated_at 停摆、内部时限无法自救）。看门狗把会话
+    // 落为 failed 终态并记录最后相位，止损 + 留证，而非永久假装存活。
+    // 阈值取 900s：高于单步最长合法耗时（call_llm 看门狗上限 660s + 派发余量），
+    // 不误伤慢模型。
+    let stall_probe = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    ));
+    {
+        let probe = stall_probe.clone();
+        let w_app = app.clone();
+        let w_db = crate::db::DbState(state.inner().0.clone());
+        let w_session = final_session_id.clone();
+        let w_run = run_id.clone();
+        let w_goal = goal.clone();
+        tauri::async_runtime::spawn(async move {
+            const STALL_THRESHOLD_SECS: u64 = 900;
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let status: Option<String> = w_db
+                    .0
+                    .lock()
+                    .ok()
+                    .and_then(|conn| {
+                        conn.query_row(
+                            "SELECT status FROM agent_run_traces WHERE id=?1",
+                            rusqlite::params![w_run],
+                            |r| r.get(0),
+                        )
+                        .ok()
+                    });
+                match status.as_deref() {
+                    Some("running") | Some("waiting_human") => {}
+                    // 已到终态（含无行）：看门狗使命结束
+                    _ => break,
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let idle = now.saturating_sub(probe.load(std::sync::atomic::Ordering::Relaxed));
+                if idle <= STALL_THRESHOLD_SECS {
+                    continue;
+                }
+                let phase = crate::agent::checkpoint::load_checkpoint(&w_db, &w_run)
+                    .ok()
+                    .flatten()
+                    .map(|cp| format!("{:?}", cp.phase))
+                    .unwrap_or_else(|| "unknown".to_string());
+                let reason = format!(
+                    "会话看门狗：主循环已停滞 {}s（相位={}），判定任务挂死并安全终止",
+                    idle, phase
+                );
+                let _ = crate::agent::run_trace::upsert_snapshot(
+                    &w_db,
+                    &w_run,
+                    &w_session,
+                    &w_goal,
+                    "failed",
+                    &[],
+                    Some(&serde_json::json!({ "summary": reason })),
+                );
+                let _ = w_app.emit(
+                    &format!("agent-log-{}", w_session),
+                    format!("⏱️ {}", reason),
+                );
+                intervention_channels().lock().await.remove(&w_session);
+                stream_interrupt_channels().lock().await.remove(&w_session);
+                break;
+            }
+        });
+    }
+
     let mut run_trace_steps: Vec<serde_json::Value> =
         crate::agent::run_trace::load_run_steps(state.inner(), &run_id).unwrap_or_default();
     let mut run_machine = AgentRunMachine::new();
@@ -941,6 +1018,14 @@ async fn run_agent_main_loop_in_workspace_inner(
     let mut spent_prompt_tokens: i64 = 0;
     let mut budget_stop_reason: Option<String> = None;
     while checkpoint.step_id < max_steps {
+        // 心跳：每轮步边界刷新——停滞看门狗据此区分"慢"与"死"
+        stall_probe.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // token 预算在步骤边界检查：一旦跨线立即收敛出报告，不再派发新步骤
         if let Some(reason) = token_budget_stop_reason(run_budget.as_ref(), spent_prompt_tokens) {
             budget_stop_reason = Some(reason);
