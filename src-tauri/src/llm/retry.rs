@@ -200,12 +200,10 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                                     current_key_idx = (current_key_idx + 1) % total_keys;
                                 }
                             },
-                            changed = interrupt_rx.changed() => {
-                                if changed.is_ok() {
-                                    return Err(STREAM_INTERRUPTED_ERROR.to_string());
-                                } else {
-                                    std::future::pending::<()>().await;
-                                }
+                            _changed = interrupt_rx.changed() => {
+                                // sender 已销毁＝再无人能中断：pending() 会把重试
+                                // 退避永久挂死（实弹已见会话僵尸化），按中断返回。
+                                return Err(STREAM_INTERRUPTED_ERROR.to_string());
                             }
                         }
                     }
@@ -306,13 +304,9 @@ pub async fn stream_with_resilient_retry<F: FnMut(StreamEvent) -> bool>(
         );
         let cancelled = tokio::select! {
             _ = tokio::time::sleep(wait) => false,
-            changed = interrupt_rx.changed() => {
-                if changed.is_ok() {
-                    true
-                } else {
-                    std::future::pending::<()>().await;
-                    unreachable!()
-                }
+            _changed = interrupt_rx.changed() => {
+                // sender 已销毁＝中断通道失效：按已中断处理，不进入永久挂起。
+                true
             }
         };
         if cancelled {
