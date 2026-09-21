@@ -854,7 +854,7 @@ fn gate_interception(
                              原因: {}\n\
                              命中规则: `{}`\n\
                              系统已将任务切换为方案审查模式。在动笔修改代码前，请严格遵循两阶段固定审查流程：\n\
-                             1. 优先调用 `child_reviewer`（指定 role: \"tech_lead\"）进行 1v1 方案对齐讨论（传入 plan_summary、target_files 与 discussion_round）；\n\
+                             1. 优先调用 `child_reviewer`（指定 role: \"tech_lead\"）进行 1v1 方案对齐讨论（custom_inputs 传 plan_summary/target_files/discussion_round，且须三选一携带 evidence_refs/evidence_excerpt/resource_ids——通常就是刚读过的 target_files）；\n\
                              2. 根据 Tech Lead 的结构化裁决行动：若 approved 则直接放行；若 rebuttal 则微调方案；若 escalate 则按推荐专家（建议：{}）并发派发联合会审！",
                             reason, matched_pattern, suggested_roles.join(", ")
                         );

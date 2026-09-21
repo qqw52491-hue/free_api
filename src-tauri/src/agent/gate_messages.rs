@@ -29,7 +29,7 @@ pub fn cross_review_need_reviewer_dispatch() -> String {
      【原因】当前处于【方案审查模式】。在首次动笔修改代码前，必须先完成方案对齐推演。\n\
      【必须执行的固定流程】：\n\
      1. 推荐方式：单独输出 {\"submit_plan\": {\"plan_summary\": \"...\", \"target_files\": [...], \"evidence_refs\": [...], \"root_cause\": \"...\", \"assumptions\": [...], \"open_questions\": [...], \"intended_verification\": \"...\"}} 提交结构化方案——宿主将原子完成方案登记与 Tech Lead 派发（target_files 为拟改动文件清单；纯分析/只读审查类任务可传空数组 []，交付物即结论文本）；\n\
-        （兼容方式：调用 child_reviewer 并指定 role: \"tech_lead\"，自行传入 plan_summary、target_files 与 discussion_round 进行 1v1 方案对齐）；\n\
+        （兼容方式：调用 child_reviewer 并指定 role: \"tech_lead\"，传入 custom_inputs: {plan_summary, target_files, discussion_round} 做 1v1 方案对齐；⚠️ 仍需证据三选一：evidence_refs/evidence_excerpt/resource_ids 至少一项，通常是刚读过的 target_files 本身）；\n\
      2. 随后调用 wait_jobs 等待审查裁决；\n\
      3. 严格按其返回的结构化结论（decision）行动：\n\
         - 若 approved：方案已放行，可直接执行代码写入。注意 Tech Lead 是定稿负责人——若结论携带 revised_* 修订字段，以修订后的方案为准执行，勿沿用你提交的原文；\n\
@@ -56,7 +56,7 @@ pub fn cross_review_exploration_budget_exhausted(
         "【⚠️ 方案探索预算已耗尽：本步操作已被拒绝！】\n\
          【原因】当前处于交叉审查模式，已执行 {} 个探索步骤但仍未派发首次方案审查。继续扩散搜索会增加成本而不推进审查状态。\n\
          【必须执行的操作】：\n\
-         1. 请立即基于已有证据提交方案：推荐输出 submit_plan 字段（plan_summary、target_files、evidence_refs 等），宿主将原子完成方案登记与 Tech Lead 派发；也可直接调用 child_reviewer（role: \"tech_lead\"）；随后调用 wait_jobs 接收裁决；\n\
+         1. 请立即基于已有证据提交方案：推荐输出 submit_plan 字段（plan_summary、target_files、evidence_refs 等），宿主将原子完成方案登记与 Tech Lead 派发；也可直接调用 child_reviewer（role: \"tech_lead\"，注意除 custom_inputs 外仍须三选一携带 evidence_refs/evidence_excerpt/resource_ids）；随后调用 wait_jobs 接收裁决；\n\
          {}\
          {}. 若现有信息确实不足以形成方案，请调用 ask_human 明确说明缺失信息，禁止继续无边界搜索。",
         effective_limit,
