@@ -245,6 +245,17 @@ mod tests_inner {
         checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
         checkpoint.plan_reviewer_retry_count = 1;
         checkpoint.plan_reviewer_consumed = true;
+        checkpoint.submitted_plan = Some(crate::agent::types::PlanSubmission {
+            plan_summary: "修复内存泄漏：补全释放路径".to_string(),
+            target_files: vec!["src/mem.rs".to_string()],
+            root_cause: "提前 return 跳过释放".to_string(),
+            evidence_refs: vec!["src/mem.rs:88".to_string()],
+            assumptions: vec![],
+            open_questions: vec![],
+            intended_verification: "cargo test mem".to_string(),
+            risk_level: "medium".to_string(),
+            revision_reason: String::new(),
+        });
 
         // 均分达标但 risk < 60：即使平均分 90+ 也必须硬拦截
         checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(95, 40, 95, Some(95)));

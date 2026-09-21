@@ -118,6 +118,7 @@
         let mut cp = AgentCheckpoint::new("test-run".to_string(), &context);
         cp.plan_mode = PlanExecutionMode::CrossReview;
         cp.plan_reviewer_retry_count = 1;
+        cp.submitted_plan = Some(valid_submission());
 
         let batch = vec!["rev-1".to_string(), "rev-2".to_string()];
         for id in &batch {
@@ -288,6 +289,7 @@
         let mut cp = AgentCheckpoint::new("test-tech-lead-ok".to_string(), &context);
         cp.plan_mode = PlanExecutionMode::CrossReview;
         cp.plan_reviewer_retry_count = 1;
+        cp.submitted_plan = Some(valid_submission());
 
         seed_review(&db, "rev-tl", &cp.run_id, "b1", "running", false);
         cp.set_plan_review_batch("b1", 1);
@@ -321,6 +323,49 @@
         assert_eq!(cp.plan_phase, PlanPhase::Approved);
     }
 
+    /// 旁路通道防线：investigate 直连 Tech Lead 也能把 plan_phase 推进 Reviewing
+    /// 并拿到 approved 裁决，但没有 submitted_plan 落账的批准没有契约锚点——
+    /// 必须拦截并要求结构化提交（workspace_leak 实测绕过路径）。
+    #[test]
+    fn test_approval_requires_submitted_plan_on_record() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-no-plan".to_string(), &context);
+        cp.plan_mode = PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+        // 不种 submitted_plan：模拟 investigate 直连派发拿到批准
+        seed_review(&db, "rev-tl", &cp.run_id, "b1", "running", false);
+        cp.set_plan_review_batch("b1", 1);
+
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("decision".to_string(), serde_json::json!("approved"));
+        let del = ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "confirmed".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: Some("certain".to_string()),
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: Some(ReviewScorecard::new(90, 80, 85, None)),
+            extra,
+        };
+        mark_succeeded(&db, "rev-tl");
+        cp.record_reviewer_delivery_for_run(&db, Some("rev-tl"), &del);
+
+        let res = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-no-plan", 1, false);
+        let rej = res.expect("无 submitted_plan 在案时批准不得放行");
+        assert_eq!(rej.route, "plan_gatekeeper:no_submitted_plan");
+        assert!(rej.stderr.contains("submit_plan"), "应指引结构化提交: {}", rej.stderr);
+        assert!(!cp.plan_phase.is_approved(), "阶段不得推进到 Approved");
+
+        // 补上结构化提交后，同一批准结论即可放行
+        cp.submitted_plan = Some(valid_submission());
+        let res2 = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-no-plan", 2, false);
+        assert!(res2.is_none(), "方案落账后同批准结论应放行");
+        assert_eq!(cp.plan_phase, PlanPhase::Approved);
+    }
+
     /// FREE_API_EVAL_REVIEW_PANEL 是进程级 env，凡读写它的测试共用一把锁防并发竞态
     static PANEL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -332,6 +377,7 @@
         let mut cp = AgentCheckpoint::new("test-tech-lead-esc".to_string(), &context);
         cp.plan_mode = PlanExecutionMode::CrossReview;
         cp.plan_reviewer_retry_count = 1;
+        cp.submitted_plan = Some(valid_submission());
 
         // 1. Tech Lead 1v1 评审判定 escalate
         seed_review(&db, "rev-tl", &cp.run_id, "b1", "running", false);

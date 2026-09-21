@@ -757,6 +757,19 @@ fn gate_interception(
                         stderr: crate::agent::gate_messages::cross_review_scorecard_failed(&reason, budget_exhausted),
                         route: "plan_gatekeeper:scorecard_failed".to_string(),
                     })
+                } else if checkpoint.submitted_plan.is_none() {
+                    // 结构化方案未落账不构成放行依据：investigate 直连 Tech Lead 也能
+                    // 派发方案评审并把 plan_phase 推进到 Reviewing，但批准必须锚定
+                    // submit_plan 落账的契约字段（target_files/evidence_refs/root_cause
+                    // /intended_verification），否则证据范围对账、修订通道、target_files
+                    // diff 对账全部失去锚点（workspace_leak 实测：模型绕过 submit_plan
+                    // 直派 investigate，方案未落账即被"批准"）。
+                    Some(DispatchResult { view: None,
+                        success: false,
+                        stdout: String::new(),
+                        stderr: crate::agent::gate_messages::plan_approval_requires_submission(),
+                        route: "plan_gatekeeper:no_submitted_plan".to_string(),
+                    })
                 } else {
                     if checkpoint.approved_target_files.is_none() {
                         let mut target_files = Vec::new();

@@ -246,6 +246,16 @@ pub fn cross_review_blocking_findings_open(count: u32, budget_exhausted: bool) -
     cross_review_blocking_findings_with_details(count, "", budget_exhausted)
 }
 
+/// 审查结论已返回但无结构化方案在案时的拦截提示：
+/// investigate 直连派发可以推进方案讨论，但批准必须锚定 submit_plan 落账的契约字段。
+pub fn plan_approval_requires_submission() -> String {
+    "【⚠️ 方案门禁拦截：审查已有结论，但没有结构化方案在案，不能放行】\n\
+     【原因】方案批准必须锚定 submit_plan 落账的契约字段（target_files / evidence_refs / root_cause / intended_verification）；\
+     直接派发 investigate 审查可以推进讨论，但审查结论不构成放行依据——没有结构化方案，修订通道、证据范围对账与目标文件 diff 对账全部失去锚点。\n\
+     【必须执行的操作】：\n\
+     请输出 {\"submit_plan\": {\"plan_summary\": \"...\", \"target_files\": [...], \"root_cause\": \"...\", \"evidence_refs\": [...], \"intended_verification\": \"...\", \"risk_level\": \"low|medium|high\"}} 把本轮已成熟的方案结构化落账；落账后系统自动派发 Tech Lead 复核，通过后写入立即放行。".to_string()
+}
+
 /// 方案审查轮次预算耗尽的统一提示（常规派发与反驳对质共用）
 pub fn reviewer_retry_limit() -> String {
     "【❌ 操作受限：方案审查轮数已达上限（2 轮）】\n\

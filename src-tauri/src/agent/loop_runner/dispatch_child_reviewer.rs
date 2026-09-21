@@ -256,6 +256,62 @@ pub(super) async fn dispatch_child_reviewer(
                 }
             }
 
+            // ---- 证据范围对账（investigate 通道）----
+            // submit_plan 通道在 handle_submit_plan 已做同样计算；investigate 直连
+            // Tech Lead 的派发若缺这一步，模型就能用自定义 custom_inputs 绕过证据
+            // 校验——实弹实测（workspace_leak）正是此路径漏掉了「引而未改」的文件。
+            // 未批准阶段的方案审查才计算；diff 只认声明字段的集合差，不判语义对错。
+            if !ctx.checkpoint.plan_phase.is_approved()
+                && effective_params.get("evidence_scope_refs").is_none()
+            {
+                let targets: Vec<String> = effective_params
+                    .get("custom_inputs")
+                    .and_then(|v| v.get("target_files"))
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let cited_refs: Vec<String> = effective_params
+                    .get("evidence_refs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let scope = crate::agent::impact_pack::evidence_scope_refs(
+                    &targets,
+                    &cited_refs,
+                    Some(ctx.workspace_dir),
+                );
+                if !scope.is_empty() {
+                    if let Some(obj) = effective_params.as_object_mut() {
+                        obj["evidence_scope_refs"] = json!(scope);
+                        let exc = obj
+                            .get("evidence_excerpt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        obj["evidence_excerpt"] = json!(format!(
+                            "{}\n\n【📎 证据范围对账】以下文件被方案引为证据但未列入拟修改目标：{}",
+                            exc,
+                            obj["evidence_scope_refs"]
+                                .as_array()
+                                .map(|a| a
+                                    .iter()
+                                    .filter_map(|x| x.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", "))
+                                .unwrap_or_default()
+                        ));
+                    }
+                }
+            }
+
             let mut snapshot = crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::new(
                 &reviewer_model,
                 &model_tier,

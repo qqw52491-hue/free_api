@@ -97,6 +97,17 @@ mod tests_inner {
         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Exploring;
         checkpoint.plan_reviewer_retry_count = 0;
         checkpoint.plan_reviewer_consumed = false;
+        checkpoint.submitted_plan = Some(crate::agent::types::PlanSubmission {
+            plan_summary: "修复拖拽穿透".to_string(),
+            target_files: vec!["src/dnd.rs".to_string()],
+            root_cause: "命中测试未穿透".to_string(),
+            evidence_refs: vec!["src/dnd.rs:10".to_string()],
+            assumptions: vec![],
+            open_questions: vec![],
+            intended_verification: "cargo test dnd".to_string(),
+            risk_level: "low".to_string(),
+            revision_reason: String::new(),
+        });
 
         // 阶段 1: 尚未派发 reviewer，尝试写代码 -> 拦截 need_reviewer_dispatch
         let rej1 = crate::agent::loop_runner::check_pre_write_gatekeeper(

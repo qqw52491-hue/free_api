@@ -877,6 +877,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 实弹复现：方案引用 path_guard.rs:144/host_verify.rs:43 但 target 仅 main_loop。
+    #[test]
+    fn evidence_scope_real_submission() {
+        let targets = vec!["src-tauri/src/agent/main_loop.rs".to_string()];
+        let evidence = vec![
+            "src-tauri/src/agent/main_loop.rs:532-548".to_string(),
+            "src-tauri/src/agent/path_guard.rs:144".to_string(),
+            "src-tauri/src/agent/host_verify.rs:43".to_string(),
+        ];
+        let refs = evidence_scope_refs(&targets, &evidence, None);
+        assert_eq!(
+            refs,
+            vec![
+                "src-tauri/src/agent/host_verify.rs".to_string(),
+                "src-tauri/src/agent/path_guard.rs".to_string(),
+            ]
+        );
+    }
+
     /// evidence_scope_verdicts 覆盖校验：漏项/缺字段判违约，空 refs 豁免。
     #[test]
     fn evidence_scope_verdict_coverage() {
