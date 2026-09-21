@@ -1,6 +1,7 @@
 ---
 name: code_review
 description: 深度代码与架构审查（Code & Architecture Review）。当用户要求“Review 这段代码”、“检查我的修改”、或“Review against main”时触发。
+when_to_use: 用户要求审查代码/改动、Review against main、评估代码质量或架构合理性时
 ---
 
 # 双轴深度审查专家 (Two-Axis Code Review Expert)

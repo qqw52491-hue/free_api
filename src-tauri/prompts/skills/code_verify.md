@@ -1,6 +1,7 @@
 ---
 name: code_verify
 description: 代码与方案的全面测试与验证（Code Verification & Falsification）。当你需要验证一段代码是否健壮，或者测试修改是否破坏了系统状态时触发。
+when_to_use: 修改完成后需要真实验证、测试改动是否破坏系统状态、设计可证伪的探针或断言、需要区分编译通过与行为正确时
 ---
 
 # 深度代码验证与试错专家 (Code Verification Expert)

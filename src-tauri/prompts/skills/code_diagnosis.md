@@ -1,6 +1,7 @@
 ---
 name: code_diagnosis
 description: 深度故障排查与根因分析（Deep Debug & Root Cause Analysis）。当遭遇运行时报错、空指针异常、内存泄漏、架构层 Bug，或需要顺藤摸瓜定位底层故障时触发。
+when_to_use: 运行时报错、功能静默失效（无报错但行为不符预期）、修复后用户反馈"还是不行/没变化"的重复失效、需要区分症状与根因或设计可证伪探针时。
 ---
 
 # 深度故障排查与根因分析专家 (Code Diagnosis Expert)

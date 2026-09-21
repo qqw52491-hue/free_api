@@ -1,6 +1,7 @@
 ---
 name: code_simplify
 description: 代码精炼与重构专家（Code Simplification & Refactoring Expert）。当需要优化现有代码质量、消除技术债务、精简逻辑或重构冗余实现时触发。
+when_to_use: 代码明显冗长/嵌套过深/重复度高，用户要求精简、重构降复杂度或清理坏味道时
 ---
 
 # 代码精炼与重构专家 (Code Simplification & Refactoring)

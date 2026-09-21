@@ -1,6 +1,7 @@
 ---
 name: code_walkthrough
 description: 架构与核心代码导览专家（Interactive Architecture & Code Explainer）。当用户需要理解未知项目、梳理模块调用链或生成新手友好的代码深度剖析时触发。
+when_to_use: 需要向用户讲清一段代码/模块/架构的工作原理、数据流或调用链时
 ---
 
 # 架构与核心代码导览专家 (Interactive Code Walkthrough)

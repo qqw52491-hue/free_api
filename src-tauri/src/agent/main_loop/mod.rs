@@ -468,17 +468,65 @@ async fn run_agent_main_loop_in_workspace_inner(
             .project_resource_manifest
             .clone()
             .unwrap_or_default();
-        let verdict = crate::agent::triage::run_triage(
+        // Skill 路由输入 1：紧凑触发清单（name + when_to_use/摘要），
+        // 不含手册正文——triage 只负责"选哪个"，加载由宿主执行。
+        let skill_index_text =
+            crate::agent::skill_context::skill_routing_index(&crate::agent::skill_context::resolve_skills_dir());
+        // Skill 路由输入 2：有界的最近对话背景——"上一轮宣称修复 + 本轮用户
+        // 反馈无效"这类证据只有带着历史才能看见，只传末尾几条并截断防膨胀。
+        let recent_context = {
+            let tail: Vec<String> = context
+                .turns_history
+                .iter()
+                .rev()
+                .take(4)
+                .filter_map(|m| {
+                    m.content.as_str().map(|s| {
+                        let clipped: String = s.chars().take(800).collect();
+                        format!("{}: {}", m.role, clipped)
+                    })
+                })
+                .collect();
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n---\n")
+        };
+        let mut verdict = crate::agent::triage::run_triage(
             &app,
             state.inner(),
             &model_routing,
             &goal,
             &scope_manifest,
             &reviewer_names,
+            &skill_index_text,
+            &recent_context,
             &final_session_id,
             interrupt_rx.clone(),
         )
         .await;
+        // Skill 路由执行：宿主按判决自动预载手册（与 next_tool_hint 同一
+        // Write-Once 事件 + fetched_tools 去重口径），执行模型不再需要
+        // "想起"主动请求——合规性从模型自觉移到宿主保证。
+        if !verdict.skill_recommendations.is_empty() {
+            let skills_dir = crate::agent::skill_context::resolve_skills_dir();
+            crate::agent::tool_manual::apply_triage_skill_recommendations(
+                &mut context,
+                &mut verdict,
+                &skills_dir,
+            );
+            if !verdict.loaded_skills.is_empty() || !verdict.skill_load_failures.is_empty() {
+                let _ = app.emit(
+                    &format!("agent-log-{}", final_session_id),
+                    format!(
+                        "📚 Skill 路由：已加载 [{}]{}",
+                        verdict.loaded_skills.join(", "),
+                        if verdict.skill_load_failures.is_empty() {
+                            String::new()
+                        } else {
+                            format!("（未命中: {}）", verdict.skill_load_failures.join(", "))
+                        }
+                    ),
+                );
+            }
+        }
         let telemetry_route = if verdict.fallback.is_some() {
             "triage:fallback".to_string()
         } else {

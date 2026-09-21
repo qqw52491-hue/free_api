@@ -1,6 +1,7 @@
 ---
 name: deep_research
 description: 深度全网调研与多源事实求证专家（Deep Research & Fact-Checked Synthesis）。当需要就某一复杂主题进行全网广泛调研、多源交叉核验并生成权威研报时触发。
+when_to_use: 需要就复杂主题做全网多源调研、交叉核验事实、产出权威研报时
 ---
 
 # 深度全网调研专家 (Deep Research & Fact-Checked Synthesis)

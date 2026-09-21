@@ -1,6 +1,7 @@
 ---
 name: frontend_design
 description: 前端 UI 与交互设计专家（Frontend UI/UX Expert）。当需要编写或重构前端页面、组件，或用户需要你提供高质量的 Web 界面设计时触发。
+when_to_use: 编写或重构前端页面/组件、需要高质量 Web 界面与交互设计时
 ---
 
 # 顶尖前端设计专家 (Frontend Design Expert)

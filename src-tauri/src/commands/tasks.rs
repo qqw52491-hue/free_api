@@ -487,3 +487,86 @@ pub fn read_clipboard_image() -> Result<Option<ClipboardImagePayload>, String> {
     let _ = &b64enc; // 非三桌面平台构建时抑制 unused 告警
     Ok(None)
 }
+
+#[cfg(test)]
+mod clipboard_tests {
+    //! 真实剪贴板 E2E（Linux/Wayland）：wl-copy 播种 → read_clipboard_image() 实读。
+    //! 注意：会临时覆盖用户剪贴板内容。
+    use super::*;
+    use std::process::Command;
+
+    fn has(cmd: &str) -> bool {
+        Command::new("sh")
+            .args(["-c", &format!("command -v {}", cmd)])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn skip() -> bool {
+        !cfg!(target_os = "linux") || !has("wl-copy") || !has("wl-paste")
+    }
+
+    fn seed(mime: &str, data: &[u8]) {
+        let mut child = Command::new("wl-copy")
+            .args(["-t", mime])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("wl-copy spawn");
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(data).unwrap();
+        child.wait().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    // 1x1 PNG
+    const PNG_1PX: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc,
+        0xff, 0xff, 0x3f, 0x03, 0x00, 0x05, 0xfe, 0x02, 0xfe, 0xa7, 0x20, 0x42, 0xb2, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    /// 两个场景合并为单测：真实剪贴板是全局共享态，并行测试会互相覆盖。
+    #[test]
+    fn wayland_clipboard_end_to_end() {
+        if skip() {
+            eprintln!("skip: 非 Linux/Wayland 或缺 wl-copy/wl-paste");
+            return;
+        }
+        // 场景1：截图二进制 → data URL
+        seed("image/png", PNG_1PX);
+        let p = read_clipboard_image().expect("command ok").expect("剪贴板图像应被识别");
+        assert!(
+            p.data_urls.iter().any(|u| u.starts_with("data:image/png;base64,")),
+            "截图应产出 image/png data URL: {:?}",
+            p.data_urls
+        );
+        // 场景2：文件管理器复制（uri-list + %20 转义）→ 真实文件路径
+        uri_list_case();
+    }
+
+    fn uri_list_case() {
+        if skip() {
+            eprintln!("skip: 非 Linux/Wayland 或缺 wl-copy/wl-paste");
+            return;
+        }
+        let dir = std::env::temp_dir().join("clip e2e");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("paste test.png");
+        std::fs::write(&file, PNG_1PX).unwrap();
+        // file:// URI 带 %20 转义 → 验证 pct_decode 走通真实路径
+        let uri = format!("file://{}", file.display().to_string().replace(' ', "%20"));
+        seed("text/uri-list", format!("{}\r\n", uri).as_bytes());
+        let payload = read_clipboard_image().expect("command ok");
+        let p = payload.expect("uri-list 应被识别为文件");
+        assert!(
+            p.file_paths.iter().any(|f| f == &file.to_string_lossy()),
+            "应解析出真实文件路径 {:?}，实际 {:?}",
+            file,
+            p.file_paths
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

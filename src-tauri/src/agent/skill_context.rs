@@ -258,24 +258,46 @@ fn is_usable_skill_summary(summary: &str) -> bool {
     !normalized.is_empty() && normalized != "---"
 }
 
-fn front_matter_description(content: &str) -> Option<String> {
+fn front_matter_field<'a>(content: &'a str, key: &str) -> Option<String> {
     let mut lines = content.lines().map(str::trim);
     if lines.next()? != "---" {
         return None;
     }
 
+    let prefix = format!("{}:", key);
     for line in lines {
         if line == "---" {
             break;
         }
-        if let Some(description) = line.strip_prefix("description:") {
-            let description = description.trim().trim_matches(['\"', '\'']).trim();
-            if !description.is_empty() {
-                return Some(description.chars().take(160).collect());
+        if let Some(value) = line.strip_prefix(prefix.as_str()) {
+            let value = value.trim().trim_matches(['\"', '\'']).trim();
+            if !value.is_empty() {
+                return Some(value.chars().take(160).collect());
             }
         }
     }
     None
+}
+
+fn front_matter_description(content: &str) -> Option<String> {
+    front_matter_field(content, "description")
+}
+
+/// Skill 作者显式声明的触发面（when_to_use）。与 description 分工：
+/// description 说"是什么"，when_to_use 说"什么时候该加载"——路由判决
+/// 主要看后者，缺失时回退 description。
+/// 兼容两种载体：front-matter `when_to_use:` 与 `<when_to_use>` 标签
+///（与既有 `<summary>` 约定对齐，无 front-matter 的 Skill 也能声明）。
+fn front_matter_when_to_use(content: &str) -> Option<String> {
+    front_matter_field(content, "when_to_use").or_else(|| {
+        const TAG: &str = "<when_to_use>";
+        content.find(TAG).and_then(|start| {
+            content
+                .find("</when_to_use>")
+                .filter(|end| start + TAG.len() < *end)
+                .map(|end| content[start + TAG.len()..end].trim().chars().take(160).collect())
+        })
+    })
 }
 
 fn fallback_skill_summary(content: &str, name: &str) -> String {
@@ -379,10 +401,21 @@ pub fn known_app_skills_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Skill 路由索引条目：名称 + 摘要 + 作者显式声明的触发面。
+/// capability_search 与 triage Skill 路由共用此结构——判决模型按
+/// when_to_use 做匹配，执行模型按 name 加载。
+#[derive(Debug, Clone)]
+pub(crate) struct SkillIndexEntry {
+    pub name: String,
+    pub summary: String,
+    /// front-matter `when_to_use:`；未声明时为空串（调用方回退 summary）。
+    pub when_to_use: String,
+}
+
 /// 能力索引（capability_search）专用：列出目录下全部 Skill 的
-/// (名称, 规则摘要)，无条数截断——索引的价值恰恰在于覆盖被目录
+/// 路由条目，无条数截断——索引的价值恰恰在于覆盖被目录
 /// MAX_SKILL_CATALOG_ENTRIES 截掉的尾部条目。
-pub(crate) fn skill_index_entries(skills_dir: &Path) -> Vec<(String, String)> {
+pub(crate) fn skill_index_entries(skills_dir: &Path) -> Vec<SkillIndexEntry> {
     let Ok(entries) = std::fs::read_dir(skills_dir) else {
         return Vec::new();
     };
@@ -399,9 +432,31 @@ pub(crate) fn skill_index_entries(skills_dir: &Path) -> Vec<(String, String)> {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             let summary = cached_skill_summary(&name, &content)
                 .unwrap_or_else(|| rule_based_skill_summary(&name, &content).0);
-            Some((name, summary))
+            let when_to_use = front_matter_when_to_use(&content).unwrap_or_default();
+            Some(SkillIndexEntry {
+                name,
+                summary,
+                when_to_use,
+            })
         })
         .collect()
+}
+
+/// 供 triage 判决的紧凑 Skill 路由清单：name + 触发面（when_to_use 优先，
+/// 缺省回退 summary）。只列名称与触发描述，不含手册正文。
+pub fn skill_routing_index(skills_dir: &Path) -> String {
+    skill_index_entries(skills_dir)
+        .iter()
+        .map(|e| {
+            let trigger = if e.when_to_use.is_empty() {
+                &e.summary
+            } else {
+                &e.when_to_use
+            };
+            format!("- {}: {}", e.name, trigger)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 定位 skill 手册目录：优先已登记目录（register_app_skills_dir），
@@ -500,7 +555,12 @@ pub fn skill_catalog_string(
         } else {
             summary
         };
-        lines.push(format!("- {}: {}", name, summary));
+        // 作者显式声明的触发面单独渲染：触发词与"是什么"分开后，
+        // "静默失效/修复无效"这类不带报错表象的场景也能挂上路子。
+        let trigger = front_matter_when_to_use(&content)
+            .map(|t| format!("｜触发: {}", t))
+            .unwrap_or_default();
+        lines.push(format!("- {}: {}{}", name, summary, trigger));
     }
 
     if skipped > 0 {
@@ -514,7 +574,8 @@ pub fn skill_catalog_string(
         String::new()
     } else {
         format!(
-            "\n## 📚 可按需加载的 Skill 手册（设置 next_tool_hint: \"skill_name\" 加载完整版到当前步骤）\n{}\n",
+            "\n## 📚 Skill 手册（匹配即须加载，跳过须说明理由）\n\
+            使用规则：当前任务明显匹配某条 Skill 的描述或「触发」面时，必须先设 next_tool_hint: \"skill_name\" 加载其完整手册再动手；明显相关却选择跳过，须用一句话说明理由。不确定是否匹配时可加载也可用 capability_search 查更多候选。\n{}\n",
             lines.join("\n")
         )
     }
@@ -610,5 +671,52 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(workspace);
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir() -> PathBuf {
+        let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let p = std::env::temp_dir().join(format!("skill_routing_{n}"));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn catalog_renders_when_to_use_trigger_surface() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("code_diagnosis.md"),
+            "---\nname: code_diagnosis\ndescription: 深度故障排查\nwhen_to_use: 静默失效、修复后仍无效\n---\n# 正文",
+        )
+        .unwrap();
+        let catalog = skill_catalog_string(&dir, &[], None);
+        assert!(
+            catalog.contains("- code_diagnosis: 深度故障排查｜触发: 静默失效、修复后仍无效"),
+            "目录行应渲染 when_to_use 触发面: {}",
+            catalog
+        );
+        assert!(catalog.contains("匹配即须加载"), "目录头应升级为 must-use 指令");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn when_to_use_tag_variant_supported() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("chart.md"),
+            "# 图表\n<summary>图表可视化</summary>\n<when_to_use>需要生成专业图表时</when_to_use>\n正文",
+        )
+        .unwrap();
+        let entries = skill_index_entries(&dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].when_to_use, "需要生成专业图表时");
+        let index = skill_routing_index(&dir);
+        assert!(index.contains("- chart: 需要生成专业图表时"), "路由索引应优先用 when_to_use: {}", index);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

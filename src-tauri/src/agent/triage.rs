@@ -18,6 +18,18 @@ use tokio::sync::watch;
 
 const TRIAGE_TIMEOUT_SECS: u64 = 45;
 
+/// Skill 路由推荐：triage 依据任务事实（而非固定关键词映射）从目录中
+/// 选出 0~2 个应预载的专业手册。宿主负责校验存在性与去重加载。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillRecommendation {
+    /// 目录中列出的 Skill 名（如 code_diagnosis）
+    #[serde(default)]
+    pub name: String,
+    /// 推荐证据：任务/对话中的具体事实，不允许"感觉相关"式空理由
+    #[serde(default)]
+    pub reason: String,
+}
+
 /// 任务分流的结构化判决。所有字段容错反序列化：缺失/非法值由 normalize() 收敛到安全默认。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriageVerdict {
@@ -67,6 +79,16 @@ pub struct TriageVerdict {
     /// 供 Tech Lead 核对取证覆盖度）
     #[serde(default)]
     pub required_evidence: Vec<String>,
+    /// Skill 路由：triage 从宿主提供的 Skill 目录中选出应预载的手册（0~2 个，
+    /// 必须附任务证据；无充分匹配证据时返回空数组——空比乱选安全）。
+    #[serde(default)]
+    pub skill_recommendations: Vec<SkillRecommendation>,
+    /// 实际被宿主成功加载的 Skill（宿主回填，非模型输出；区分"推荐过"与"真加载了"）
+    #[serde(default)]
+    pub loaded_skills: Vec<String>,
+    /// 推荐但加载失败的 Skill 名（宿主回填：名字不存在/读不到文件）
+    #[serde(default)]
+    pub skill_load_failures: Vec<String>,
     /// 实际给出判决的模型 id（宿主回填，非模型输出）
     #[serde(default)]
     pub model_id: String,
@@ -127,6 +149,12 @@ impl TriageVerdict {
         self.investigation_questions
             .retain(|q| !q.trim().is_empty());
         self.required_evidence.retain(|e| !e.trim().is_empty());
+        // Skill 推荐收敛：空名剔除、名称去重、最多 3 个——
+        // 防判决模型把目录整本点名（推荐爆炸等于没有路由）。
+        let mut seen = std::collections::HashSet::new();
+        self.skill_recommendations
+            .retain(|r| !r.name.trim().is_empty() && seen.insert(r.name.trim().to_string()));
+        self.skill_recommendations.truncate(3);
     }
 
     /// 是否需要 submit_plan 技术方案门（technical_plan / expert_panel 才需要）
@@ -217,6 +245,9 @@ impl TriageVerdict {
             escalation_triggers: Vec::new(),
             investigation_questions: Vec::new(),
             required_evidence: Vec::new(),
+            skill_recommendations: Vec::new(),
+            loaded_skills: Vec::new(),
+            skill_load_failures: Vec::new(),
             model_id: String::new(),
             fallback: Some(reason.to_string()),
         }
@@ -330,13 +361,15 @@ pub fn write_floor_violation(
 
 /// 任务入口分流判决：由 Pro 档模型产出结构化 TriageVerdict。
 /// 任何失败（模型缺失/调用失败/超时/JSON 解析失败）都返回保守 fallback，绝不中断主循环。
-pub async fn run_triage(
-    app: &AppHandle,
+pub async fn run_triage<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     db: &DbState,
     model_routing: &ModelRoutingConfig,
     goal: &str,
     scope_manifest: &str,
     reviewer_names: &[String],
+    skill_index_text: &str,
+    recent_context: &str,
     session_id: &str,
     mut interrupt_rx: watch::Receiver<u64>,
 ) -> TriageVerdict {
@@ -379,7 +412,8 @@ pub async fn run_triage(
   "reason": "一句话判决理由",
   "escalation_triggers": ["会把本任务升级回重路径的触发条件"],
   "investigation_questions": ["仅 technical_plan/expert_panel 路由填写：执行方取证时必须回答的调查问题，1~6 条"],
-  "required_evidence": ["仅 technical_plan/expert_panel 路由填写：方案成立前必须拿到的证据类型，1~6 条"]
+  "required_evidence": ["仅 technical_plan/expert_panel 路由填写：方案成立前必须拿到的证据类型，1~6 条"],
+  "skill_recommendations": [{"name": "目录中列出的 Skill 名", "reason": "基于任务/对话事实的推荐理由"}]
 }
 
 【枚举语义】
@@ -396,7 +430,13 @@ pub async fn run_triage(
 - stage_review_mode：none=中段无需阶段审查；milestone=按里程碑/写入阈值做阶段审查。
 - final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。
 - evidence_policy：none=方案不需证据引用；source_refs=资料/需求来源即可；code_refs=须引用已读代码证据；operational_probes=须命令输出/探针证据。
-- investigation_questions / required_evidence：仅当 route 为 technical_plan/expert_panel 时填写——你负责定调查方向，执行模型按你的任务单取证并提交方案，Tech Lead 据此核对取证覆盖度；其他路由一律留空数组。
+- investigation_questions / required_evidence：仅当 route 为 technical_plan/expert_panel 时填写——你负责定调查方向，执行模型按你的任务单取证并提交方案，Tech Lead 据此核对覆盖度；其他路由一律留空数组。
+- skill_recommendations（Skill 路由，0~2 个）：
+  - 只能从下方【可选 Skill 目录】中按名称选择；name 必须与目录条目完全一致；
+  - 判定依据是任务事实与最近对话证据（例如：上一轮修复被用户明确否定、任务描述落在某个 Skill 的触发面上），不是固定关键词映射；
+  - reason 必须写具体证据（如"用户反馈修复后仍无法粘贴，属静默行为失效"），不允许"感觉相关"；
+  - 无充分匹配证据时返回空数组——选错 Skill 会污染执行上下文，空比乱选安全；
+  - 若目录为空或无可选项，一律返回空数组。
 
 【验收能力边界（系统事实，非分类规则）】
 - mechanical_only 终审只校验：产物存在、已登记、可解析、数量/规模对账；
@@ -416,10 +456,12 @@ pub async fn run_triage(
         reviewer_names.join(", ")
     };
     let user_prompt = format!(
-        "【任务目标】\n{}\n\n【可操作文件边界 / 作用域清单】\n{}\n\n【可派发的审查角色清单】\n{}\n\n请输出分流判决 JSON。",
+        "【任务目标】\n{}\n\n【可操作文件边界 / 作用域清单】\n{}\n\n【可派发的审查角色清单】\n{}\n\n【可选 Skill 目录】（name: 触发面；仅可从中选择）\n{}\n\n【最近对话背景】（供判断「修复被否定 / 任务延续」等证据；可为空）\n{}\n\n请输出分流判决 JSON。",
         goal,
         if scope_manifest.trim().is_empty() { "（无作用域信息）" } else { scope_manifest },
-        reviewer_list
+        reviewer_list,
+        if skill_index_text.trim().is_empty() { "（无可选 Skill）" } else { skill_index_text },
+        if recent_context.trim().is_empty() { "（无历史对话）" } else { recent_context },
     );
     let messages = vec![
         json!({ "role": "system", "content": system_prompt }),
@@ -826,3 +868,142 @@ mod tests {
         assert_eq!(merged["a"], 1);
     }
 }
+
+#[cfg(test)]
+mod skill_routing_tests {
+    use super::*;
+
+    #[test]
+    fn skill_recommendations_parse_and_normalize() {
+        let raw = r#"{
+            "route": "direct",
+            "skill_recommendations": [
+                {"name": "code_diagnosis", "reason": "用户反馈修复后仍失效"},
+                {"name": " ", "reason": "空名应剔除"},
+                {"name": "code_diagnosis", "reason": "重复应去重"},
+                {"name": "a", "reason": "x"},
+                {"name": "b", "reason": "y"},
+                {"name": "c", "reason": "z"}
+            ]
+        }"#;
+        let mut v = parse_triage_json(raw).unwrap();
+        v.normalize();
+        // 空名剔除 + 去重 + 截断 3：剩 code_diagnosis, a, b
+        assert_eq!(v.skill_recommendations.len(), 3);
+        assert_eq!(v.skill_recommendations[0].name, "code_diagnosis");
+        assert_eq!(v.skill_recommendations[1].name, "a");
+    }
+
+    #[test]
+    fn old_verdict_without_skill_fields_deserializes() {
+        let raw = r#"{"route": "direct", "reason": "简单任务"}"#;
+        let v = parse_triage_json(raw).unwrap();
+        assert!(v.skill_recommendations.is_empty());
+        assert!(v.loaded_skills.is_empty());
+        assert!(v.skill_load_failures.is_empty());
+    }
+
+    #[test]
+    fn fallback_has_no_skill_recommendations() {
+        let v = TriageVerdict::fallback("降级");
+        assert!(v.skill_recommendations.is_empty(), "降级判决不应伪造 Skill 推荐");
+    }
+}
+
+#[cfg(test)]
+mod live_triage_tests {
+    //! 实弹判决测试：mock_app + 真实 DB 副本 + 真实模型，验证 triage 的
+    //! Skill 路由在真实 LLM 下能否选对 code_diagnosis。
+    //! 手动运行：cargo test triage_live -- --ignored --nocapture
+    use super::*;
+    use crate::agent::router::ModelRoutingConfig;
+    use rusqlite::Connection;
+    use std::sync::{Arc, Mutex};
+
+    const DB_PATH: &str = ".local/share/free-api-chat/data_v2.db";
+    // deepseek-v4-pro（triage 固定走 pro 档）
+    const PRO_MODEL: &str = "3d70070b-8b44-4364-b66c-df55c0e18de2"; // gemini-3.1-pro（Antigravity）
+
+    fn live_db() -> Option<crate::db::DbState> {
+        let home = std::env::var("HOME").ok()?;
+        let src = std::path::Path::new(&home).join(DB_PATH);
+        if !src.is_file() {
+            return None;
+        }
+        let tmp = std::env::temp_dir().join(format!("triage_live_{}.db", std::process::id()));
+        std::fs::copy(&src, &tmp).ok()?;
+        let _ = std::fs::copy(src.with_extension("db-wal"), tmp.with_extension("db-wal"));
+        let conn = Connection::open(&tmp).ok()?;
+        Some(crate::db::DbState(Arc::new(Mutex::new(conn))))
+    }
+
+    #[tokio::test]
+    #[ignore = "需要真实模型与网络，手动跑"]
+    async fn triage_live_skill_routing_matrix() {
+        let Some(db) = live_db() else {
+            eprintln!("skip: 无本地 DB");
+            return;
+        };
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+        let routing = ModelRoutingConfig {
+            pro: PRO_MODEL.to_string(),
+            ..Default::default()
+        };
+        let skills_dir = crate::agent::skill_context::resolve_skills_dir();
+        let skill_index = crate::agent::skill_context::skill_routing_index(&skills_dir);
+        assert!(!skill_index.is_empty(), "Skill 目录为空无法测路由");
+        println!("\n=== Skill 路由索引（triage 看到的清单）===\n{}", skill_index);
+
+        // (场景名, goal, 最近对话背景, 期望命中的 Skill 集合——空集=期望 skip)
+        let cases: &[(&str, &str, &str, &[&str])] = &[
+            ("无关写作任务", "帮我把这段工作周报润色得更简洁一些", "", &[]),
+            ("粘贴静默失效", "这个输入框就是复制图片为啥无法复制呢倒是现在拖拽和导入都可以了倒是", "", &["code_diagnosis"]),
+            ("修复被否定续诊", "用户反馈粘贴图片仍然无法使用，请继续排查",
+             "assistant: 已完成修复，图片粘贴问题已解决\n---\nuser: 还是不行，复制图片进来没反应",
+             &["code_diagnosis"]),
+            ("跨层复杂重构", "把项目的鉴权模块从 session 迁移到 JWT，涉及中间件、用户表、前端 token 刷新链路，要求兼容旧会话", "", &["code_development"]),
+            ("行业深度调研", "帮我调研 2026 年中国 RPA 行业格局，交叉核验主要厂商市场份额并产出研报", "", &["deep_research"]),
+            ("数据大屏", "给我做一个实时监控大屏页面，要有折线趋势图、柱状对比图和力导向的服务依赖图", "", &["chart_visualization", "frontend_design"]),
+            ("安全审计", "对我们项目的登录接口代码做安全合规自查，确认是否存在注入、越权和敏感信息泄露风险并加固", "", &["security_audit"]),
+        ];
+
+        let mut failures = Vec::new();
+        for (i, (name, goal, recent, expect)) in cases.iter().enumerate() {
+            let (_tx, rx) = watch::channel(0u64);
+            let v = run_triage(
+                &app_handle, &db, &routing, goal, "", &[], &skill_index, recent,
+                &format!("triage-live-m{}", i), rx,
+            )
+            .await;
+            let picks: Vec<&str> = v.skill_recommendations.iter().map(|r| r.name.as_str()).collect();
+            println!("\n[{}] {}\n  route={} fallback={:?}\n  skills={:?}",
+                i, name, v.route, v.fallback, picks);
+            for r in &v.skill_recommendations {
+                println!("    - {} ← {}", r.name, r.reason);
+            }
+            if v.fallback.is_some() {
+                failures.push(format!("{}: 判决降级（模型调用失败）", name));
+                continue;
+            }
+            if expect.is_empty() {
+                if !picks.is_empty() {
+                    failures.push(format!("{}: 期望 skip 却推荐了 {:?}", name, picks));
+                }
+            } else {
+                let hit = expect.iter().any(|e| picks.iter().any(|p| p == e));
+                if !hit {
+                    failures.push(format!("{}: 期望 {:?} 实际 {:?}", name, expect, picks));
+                }
+            }
+            if picks.len() > 3 {
+                failures.push(format!("{}: 推荐超过 3 个（{:?}）", name, picks));
+            }
+        }
+
+        println!("\n=== 矩阵结果 ===");
+        for f in &failures { println!("  ❌ {}", f); }
+        assert!(failures.is_empty(), "{} 个场景未达预期", failures.len());
+    }
+}
+

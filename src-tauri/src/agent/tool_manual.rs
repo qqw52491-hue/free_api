@@ -6,6 +6,7 @@
 
 use crate::agent::context::types::{ChatMessage, SandwichContext};
 use crate::agent::mcp::PluginRegistry;
+use crate::agent::triage::TriageVerdict;
 use crate::agent::types::AgentInstruction;
 use serde_json::json;
 use std::sync::Arc;
@@ -186,5 +187,83 @@ async fn load_single_tool_manual(
             context.fetched_tools.insert(target.to_string());
             println!("📖 [Tool Manifest Cache] 首次引入工具手册 [{}] 并作为事件追加至历史流 (已标记 fetched)", target);
         }
+    }
+}
+
+/// Triage Skill 路由执行：按判决推荐自动预载手册——与 next_tool_hint
+/// 走同一 Write-Once 历史事件 + fetched_tools 去重口径，区别只在来源
+/// （triage 判决 vs 模型自荐）。加载结果回填 verdict.loaded_skills /
+/// skill_load_failures，让"推荐过"与"真加载了"可审计。
+pub fn apply_triage_skill_recommendations(
+    context: &mut SandwichContext,
+    verdict: &mut TriageVerdict,
+    skills_dir: &std::path::Path,
+) {
+    const SKILL_DOC_MAX_CHARS: usize = 20_000;
+    for rec in &verdict.skill_recommendations {
+        let name = rec.name.trim();
+        if name.is_empty() || context.has_tool_manual(name) {
+            continue;
+        }
+        match crate::agent::skill_context::load_skill_doc(skills_dir, name, SKILL_DOC_MAX_CHARS) {
+            Some(doc) => {
+                context.turns_history.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: json!(format!(
+                        "【工具/Skill 操作手册: {}】\n{}\n(分流路由预载：{}；已写入历史流，后续可直接参考此规格)",
+                        name,
+                        doc.trim(),
+                        if rec.reason.trim().is_empty() { "任务匹配" } else { rec.reason.trim() }
+                    )),
+                });
+                context.fetched_tools.insert(name.to_string());
+                verdict.loaded_skills.push(name.to_string());
+            }
+            None => verdict.skill_load_failures.push(name.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::triage::SkillRecommendation;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_skills_dir() -> std::path::PathBuf {
+        let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let p = std::env::temp_dir().join(format!("tool_manual_skills_{n}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn triage_recommendations_load_dedup_and_report_failures() {
+        let dir = temp_skills_dir();
+        std::fs::write(dir.join("code_diagnosis.md"), "# 诊断手册\n先取证再改").unwrap();
+
+        let mut ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut verdict = TriageVerdict::fallback("test");
+        verdict.skill_recommendations = vec![
+            SkillRecommendation { name: "code_diagnosis".into(), reason: "修复被否定".into() },
+            SkillRecommendation { name: "code_diagnosis".into(), reason: "重复".into() },
+            SkillRecommendation { name: "ghost_skill".into(), reason: "不存在".into() },
+        ];
+        apply_triage_skill_recommendations(&mut ctx, &mut verdict, &dir);
+
+        assert_eq!(verdict.loaded_skills, vec!["code_diagnosis".to_string()], "存在的手册应加载且去重");
+        assert_eq!(verdict.skill_load_failures, vec!["ghost_skill".to_string()], "不存在的名应记失败不静默");
+        assert!(ctx.has_tool_manual("code_diagnosis"));
+        let manuals = ctx.turns_history.iter().filter(|m| {
+            m.content.as_str().map_or(false, |s| s.contains("【工具/Skill 操作手册: code_diagnosis】"))
+        }).count();
+        assert_eq!(manuals, 1, "手册事件只应注入一次");
+
+        // 二次调用不重复注入（与 next_tool_hint 同一去重口径）
+        let mut verdict2 = TriageVerdict::fallback("test2");
+        verdict2.skill_recommendations = vec![SkillRecommendation { name: "code_diagnosis".into(), reason: "again".into() }];
+        apply_triage_skill_recommendations(&mut ctx, &mut verdict2, &dir);
+        assert!(verdict2.loaded_skills.is_empty(), "已加载的 Skill 不应重复注入");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -92,17 +92,17 @@ fn collect_entries(
     skill_dirs.extend(crate::agent::skill_context::known_app_skills_dirs());
     let mut seen_skills = std::collections::HashSet::new();
     for dir in skill_dirs {
-        for (name, summary) in crate::agent::skill_context::skill_index_entries(&dir) {
-            if !seen_skills.insert(name.clone()) {
+        for entry in crate::agent::skill_context::skill_index_entries(&dir) {
+            if !seen_skills.insert(entry.name.clone()) {
                 continue;
             }
             entries.push(CapabilityEntry {
                 kind: "skill",
                 namespace: dir.display().to_string(),
-                id: name.clone(),
-                description: summary,
-                extra_text: String::new(),
-                load_hint: format!("next_tool_hint: \"{}\"", name),
+                id: entry.name.clone(),
+                description: entry.summary,
+                extra_text: entry.when_to_use,
+                load_hint: format!("next_tool_hint: \"{}\"", entry.name),
             });
         }
     }

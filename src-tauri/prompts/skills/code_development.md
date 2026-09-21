@@ -1,6 +1,7 @@
 ---
 name: code_development
 description: 稳健特性开发与工程实现（Robust Feature Development & Implementation）。当用户要求“实现某个新功能/特性”、“写代码/加接口/写组件”、“改造业务逻辑”或进行代码落地时触发。
+when_to_use: 用户要求实现新功能/特性、写代码加接口或组件、改造业务逻辑、按方案落地代码时
 ---
 
 # 稳健特性开发与工程实现专家 (Code Development Expert)

@@ -1,6 +1,7 @@
 ---
 name: security_audit
 description: 代码安全审计专家（Security Audit & Threat Modeling Expert）。当需要对项目进行安全性审查、排查注入漏洞、越权、敏感数据泄露或合规风险时触发。
+when_to_use: 需要安全审计、漏洞排查、权限/注入/敏感信息风险评估时
 ---
 
 # 代码安全审计专家 (Security Audit & Vulnerability Assessment)
