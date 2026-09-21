@@ -1192,3 +1192,116 @@
         assert!(cp.is_rebuttal_run(&db, &running) == false);
         let _ = std::fs::remove_dir_all(_base);
     }
+
+    /// ── 回执消费原子提交：checkpoint + applied_at 同事务，同生共死 ──
+
+    #[test]
+    fn consume_commit_marks_applied_and_writes_verdict_atomically() {
+        let (_base, db) = mk_db("consume-commit");
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("run-cc".to_string(), &ctx);
+        // 两条已投递回执：一条正常、一条契约违规裁决
+        let ok_id = ledger_run(&db, "run-cc", "b1", "plan_review", "succeeded", true);
+        let bad_id = ledger_run(&db, "run-cc", "b1", "plan_review", "succeeded", true);
+
+        save_checkpoint_and_consume(
+            &db,
+            &mut cp,
+            &ctx,
+            &[
+                AppliedReceipt { run_id: ok_id.clone(), verdict: None },
+                AppliedReceipt {
+                    run_id: bad_id.clone(),
+                    verdict: Some(("invalid_output".to_string(), "contract_violation:missing".to_string())),
+                },
+            ],
+        )
+        .unwrap();
+
+        let conn = db.0.lock().unwrap();
+        let ok_applied: Option<String> = conn
+            .query_row("SELECT applied_at FROM agent_child_runs WHERE id=?1", rusqlite::params![ok_id], |r| r.get(0))
+            .unwrap();
+        assert!(ok_applied.is_some(), "正常回执 applied_at 必须落账");
+        let (bad_status, bad_err, bad_applied): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, error_kind, applied_at FROM agent_child_runs WHERE id=?1",
+                rusqlite::params![bad_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(bad_status, "invalid_output", "契约违规裁决须回写台账 status");
+        assert_eq!(bad_err.as_deref(), Some("contract_violation:missing"));
+        assert!(bad_applied.is_some());
+        // checkpoint 本体也落盘了
+        let cp_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_checkpoints WHERE run_id='run-cc'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cp_rows, 1);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(_base);
+    }
+
+    #[test]
+    fn consume_commit_failure_leaves_receipts_unapplied() {
+        // 原子性反向证明：checkpoint 写入失败 → applied_at 绝不能单独落账，
+        // 否则"效果未持久化但回执已销毁"的丢件窗口就回来了。
+        let (_base, db) = mk_db("consume-fail");
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("run-cf".to_string(), &ctx);
+        let rid = ledger_run(&db, "run-cf", "b1", "plan_review", "succeeded", true);
+
+        // 人为制造写入失败：目标表不存在 → INSERT 必错
+        db.0.lock().unwrap().execute("DROP TABLE agent_checkpoints", []).unwrap();
+        let res = save_checkpoint_and_consume(
+            &db,
+            &mut cp,
+            &ctx,
+            &[AppliedReceipt { run_id: rid.clone(), verdict: None }],
+        );
+        assert!(res.is_err(), "checkpoint 写入失败必须返回错误");
+
+        let applied: Option<String> = db
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT applied_at FROM agent_child_runs WHERE id=?1", rusqlite::params![rid], |r| r.get(0))
+            .unwrap();
+        assert!(applied.is_none(), "checkpoint 未落账时 applied_at 不得先行标记");
+        let _ = std::fs::remove_dir_all(_base);
+    }
+
+    #[test]
+    fn consume_commit_conflict_retries_and_marks_land_once() {
+        // 乐观锁冲突路径：库中 version 被顶高 → 首次 UPDATE 不命中 →
+        // 合并重试 → 成功提交时 applied_at 才随之落账（不重复、不抢先）。
+        let (_base, db) = mk_db("consume-conflict");
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("run-cr".to_string(), &ctx);
+        let rid = ledger_run(&db, "run-cr", "b1", "plan_review", "succeeded", true);
+        save_checkpoint(&db, &mut cp).unwrap();
+        // 模拟另一保存者并发推进 version
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_checkpoints SET version = 5 WHERE run_id = 'run-cr'", [],
+        ).unwrap();
+
+        save_checkpoint_and_consume(
+            &db,
+            &mut cp,
+            &ctx,
+            &[AppliedReceipt { run_id: rid.clone(), verdict: None }],
+        )
+        .unwrap();
+
+        let conn = db.0.lock().unwrap();
+        let applied: Option<String> = conn
+            .query_row("SELECT applied_at FROM agent_child_runs WHERE id=?1", rusqlite::params![rid], |r| r.get(0))
+            .unwrap();
+        assert!(applied.is_some(), "冲突重试成功后标记随最终提交落账");
+        let version: i64 = conn
+            .query_row("SELECT version FROM agent_checkpoints WHERE run_id='run-cr'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 6, "应合并到最新 version 后 +1");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(_base);
+    }

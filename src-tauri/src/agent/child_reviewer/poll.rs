@@ -28,7 +28,7 @@ pub fn poll_completed_child_runs_filtered(
              WHERE parent_run_id = ?1
                AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'invalid_output')
                AND result_json IS NOT NULL
-               AND (consumed_at IS NULL OR consumed_at = '')",
+               AND (applied_at IS NULL OR applied_at = '')",
         )
         .map_err(|error| error.to_string())?;
     let rows: Vec<(String, String, String, String, i64)> = stmt
@@ -60,16 +60,19 @@ pub fn poll_completed_child_runs_filtered(
                 result.task_id = Some(task_id);
                 result.attempt_id = Some(attempt_id.max(1) as u32);
                 results.push(result);
+                // consumed_at = 已投递（信息位）；applied_at 由消费方在
+                // checkpoint 落账的同一事务里写——投递与落账解耦是崩溃重放的根基。
                 let _ = conn.execute(
                     "UPDATE agent_child_runs SET consumed_at = ?1 WHERE id = ?2",
                     params![now, id],
                 );
             }
             Err(error) => {
-                // 损坏的结果行无法被消费，标记 consumed_at 让该行退出信箱，同时保留 result_json 供排查。
+                // 损坏的结果行无任何效果可落账，直接双标记退出信箱与重投集，
+                // 同时保留 result_json 供排查。
                 eprintln!("[child-reviewer] 结果 JSON 解析失败，跳过损坏行 {}: {}", id, error);
                 let _ = conn.execute(
-                    "UPDATE agent_child_runs SET consumed_at = ?1 WHERE id = ?2",
+                    "UPDATE agent_child_runs SET consumed_at = ?1, applied_at = ?1 WHERE id = ?2",
                     params![now, id],
                 );
             }
@@ -190,7 +193,7 @@ pub fn has_pending_review_results(db: &DbState, parent_run_id: &str) -> bool {
              WHERE parent_run_id = ?1
                AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'invalid_output')
                AND result_json IS NOT NULL
-               AND (consumed_at IS NULL OR consumed_at = '')
+               AND (applied_at IS NULL OR applied_at = '')
                AND (kind IS NULL OR kind = '' OR kind = 'review')",
             params![parent_run_id],
             |row| row.get(0),

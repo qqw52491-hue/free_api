@@ -23,8 +23,8 @@
         conn.execute(
             &format!(
                 "INSERT OR REPLACE INTO agent_child_runs
-                 (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, kind, result_json, consumed_at)
-                 VALUES ('{id}', '{parent}', 'sess', '{ws}', 'model', '{status}', '2026-01-01T00:00:00Z', 'review', {result}, {consumed})",
+                 (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, kind, result_json, consumed_at, applied_at)
+                 VALUES ('{id}', '{parent}', 'sess', '{ws}', 'model', '{status}', '2026-01-01T00:00:00Z', 'review', {result}, {consumed}, {consumed})",
                 id = id,
                 parent = parent_run_id,
                 ws = std::env::temp_dir().display(),

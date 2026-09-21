@@ -185,9 +185,21 @@ impl PlanReviewerDispatchSnapshot {
         .with_effort(&self.effort)
         .with_persona(&self.persona);
 
-        // 继承前驱 run 的逻辑任务身份（task_id 复用，attempt 自动 +1）
+        // 继承前驱 run 的逻辑任务身份（task_id 复用，attempt 自动 +1）。
+        // 幂等收口：若同 task_id 已有更晚的在途/未落账 attempt（崩溃窗口里备胎
+        // 已 INSERT 但父 checkpoint 回滚，重放会再次走到这里），直接认养该行
+        // 而不再 spawn——否则一次重放就会多派一个备胎。
         if let Some(prev) = retry_of {
             if let Some(prev_identity) = crate::agent::child_reviewer::load_run_identity(db, prev) {
+                if let Some(live_id) = crate::agent::child_reviewer::live_attempt_for_task(
+                    db,
+                    parent_run_id,
+                    &prev_identity.task_id,
+                    prev,
+                    prev_identity.attempt_id,
+                ) {
+                    return Ok(live_id);
+                }
                 envelope = envelope.with_task_id(prev_identity.task_id);
             }
         }

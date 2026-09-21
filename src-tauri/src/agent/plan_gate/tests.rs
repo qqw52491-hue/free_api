@@ -24,6 +24,7 @@
                 batch_id TEXT,
                 contract_id TEXT,
                 contract_schema TEXT,
+                applied_at TEXT,
                 started_at TEXT
             );",
         )
@@ -42,8 +43,8 @@
         consumed: bool,
     ) {
         db.0.lock().unwrap().execute(
-            "INSERT INTO agent_child_runs (id, parent_run_id, child_run_id, status, kind, purpose, batch_id, task_id, attempt_id, consumed_at, started_at)
-             VALUES (?1, ?2, ?1, ?3, 'review', 'plan_review', ?4, ?1, 1, ?5, 't')",
+            "INSERT INTO agent_child_runs (id, parent_run_id, child_run_id, status, kind, purpose, batch_id, task_id, attempt_id, consumed_at, applied_at, started_at)
+             VALUES (?1, ?2, ?1, ?3, 'review', 'plan_review', ?4, ?1, 1, ?5, ?5, 't')",
             rusqlite::params![
                 id, parent, status, batch,
                 if consumed { Some("2024-01-01T00:00:00Z".to_string()) } else { None }
@@ -54,14 +55,14 @@
     /// 交付消费（生产时序：poll 先标终态+已消费，reducer 再记账）
     fn mark_succeeded(db: &DbState, id: &str) {
         db.0.lock().unwrap().execute(
-            "UPDATE agent_child_runs SET status='succeeded', consumed_at='2024-01-01' WHERE id=?1",
+            "UPDATE agent_child_runs SET status='succeeded', consumed_at='2024-01-01', applied_at='2024-01-01' WHERE id=?1",
             rusqlite::params![id],
         ).unwrap();
     }
 
     fn mark_failed(db: &DbState, id: &str, kind: &str) {
         db.0.lock().unwrap().execute(
-            "UPDATE agent_child_runs SET status='timed_out', error_kind=?2, consumed_at='2024-01-01' WHERE id=?1",
+            "UPDATE agent_child_runs SET status='timed_out', error_kind=?2, consumed_at='2024-01-01', applied_at='2024-01-01' WHERE id=?1",
             rusqlite::params![id, kind],
         ).unwrap();
     }

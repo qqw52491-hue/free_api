@@ -145,6 +145,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             resumed_from TEXT,
             message_history_json TEXT,
             consumed_at TEXT,
+            applied_at TEXT,
             task_id TEXT,
             attempt_id INTEGER NOT NULL DEFAULT 1,
             purpose TEXT,
@@ -623,6 +624,20 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         "ALTER TABLE agent_child_runs ADD COLUMN contract_schema TEXT;",
         [],
     );
+    // 回执消费两段标记：consumed_at = 已投递给 reducer（首次投递时间，信息位）；
+    // applied_at = 效果已随 checkpoint 原子落账（消费门槛）。崩溃/提交失败留下的
+    // "已投递未落账"行会被重新投递，重放安全由提交事务的原子性保证。
+    // 仅在首迁（列刚创建）时回填存量已消费行，避免把真正的崩溃待重放行误封。
+    if conn
+        .execute("ALTER TABLE agent_child_runs ADD COLUMN applied_at TEXT;", [])
+        .is_ok()
+    {
+        let _ = conn.execute(
+            "UPDATE agent_child_runs SET applied_at = consumed_at
+             WHERE consumed_at IS NOT NULL AND consumed_at != '' AND applied_at IS NULL;",
+            [],
+        );
+    }
     // 存量回填：旧行的物理 run 就是它自己的逻辑任务，purpose 取 kind
     let _ = conn.execute(
         "UPDATE agent_child_runs SET task_id = id WHERE task_id IS NULL;",

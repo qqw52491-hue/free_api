@@ -335,6 +335,21 @@ fn has_running_targets(db: &DbState, parent_run_id: &str, targets: &[String]) ->
     false
 }
 
+/// 批内去重投递：同一 job_id 在一次 wait 内只入列一次。
+/// 子任务回执的 applied_at 要等消费方 checkpoint 提交才写，行在此之前
+/// 会在多轮收割里重复出现；信箱 consumed 置位先于返回，但兜底仍按 id 幂等。
+fn push_dedup(
+    collected: &mut Vec<BackgroundJobResult>,
+    seen: &mut std::collections::HashSet<String>,
+    jobs: Vec<BackgroundJobResult>,
+) {
+    for job in jobs {
+        if seen.insert(job.job_id.clone()) {
+            collected.push(job);
+        }
+    }
+}
+
 /// 将子审查/工兵/侦察终态回执映射为统一的信箱结果条目
 fn collect_completed_child_results(
     db: &DbState,
@@ -435,20 +450,27 @@ pub async fn wait_for_jobs(
     let _ = job_rx.borrow_and_update();
 
     // 1. 初查：通用信箱 + 已到终态的子审查结果
+    //    applied_at 未随 checkpoint 落账前，同一行会在本轮多次收割中重复出现
+    //    （投递 ≠ 落账），按 job_id 去重保证一次等待内不重复入账。
     let mut collected = Vec::new();
+    let mut seen_job_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     match target_job_ids {
         None => {
             if let Ok(immediate) = poll_pending_inbox(db, parent_run_id, 10) {
-                collected.extend(immediate);
+                push_dedup(&mut collected, &mut seen_job_ids, immediate);
             }
         }
         Some(targets) => {
             if let Ok(targeted) = poll_targeted_inbox(db, parent_run_id, targets) {
-                collected.extend(targeted);
+                push_dedup(&mut collected, &mut seen_job_ids, targeted);
             }
         }
     }
-    collected.extend(collect_completed_child_results(db, parent_run_id, target_job_ids));
+    push_dedup(
+        &mut collected,
+        &mut seen_job_ids,
+        collect_completed_child_results(db, parent_run_id, target_job_ids),
+    );
 
     // 早退判据：无目标时看全局 running；有目标时只看目标是否仍在途——
     // 无关任务还在跑不构成继续等待的理由。
@@ -478,16 +500,20 @@ pub async fn wait_for_jobs(
                 match target_job_ids {
                     None => {
                         if let Ok(new_jobs) = poll_pending_inbox(db, parent_run_id, 10) {
-                            collected.extend(new_jobs);
+                            push_dedup(&mut collected, &mut seen_job_ids, new_jobs);
                         }
                     }
                     Some(targets) => {
                         if let Ok(new_jobs) = poll_targeted_inbox(db, parent_run_id, targets) {
-                            collected.extend(new_jobs);
+                            push_dedup(&mut collected, &mut seen_job_ids, new_jobs);
                         }
                     }
                 }
-                collected.extend(collect_completed_child_results(db, parent_run_id, target_job_ids));
+                push_dedup(
+                    &mut collected,
+                    &mut seen_job_ids,
+                    collect_completed_child_results(db, parent_run_id, target_job_ids),
+                );
                 if found_target(&collected) || no_pending() {
                     enrich_and_refresh_collected_results(db, &mut collected).await;
                     return Ok(collected);
@@ -499,15 +525,23 @@ pub async fn wait_for_jobs(
                 match target_job_ids {
                     None => {
                         if let Ok(new_jobs) = poll_pending_inbox(db, parent_run_id, 10) {
-                            collected.extend(new_jobs);
+                            push_dedup(&mut collected, &mut seen_job_ids, new_jobs);
                         }
-                        collected.extend(collect_completed_child_results(db, parent_run_id, None));
+                        push_dedup(
+                            &mut collected,
+                            &mut seen_job_ids,
+                            collect_completed_child_results(db, parent_run_id, None),
+                        );
                     }
                     Some(targets) => {
                         if let Ok(new_jobs) = poll_targeted_inbox(db, parent_run_id, targets) {
-                            collected.extend(new_jobs);
+                            push_dedup(&mut collected, &mut seen_job_ids, new_jobs);
                         }
-                        collected.extend(collect_completed_child_results(db, parent_run_id, target_job_ids));
+                        push_dedup(
+                            &mut collected,
+                            &mut seen_job_ids,
+                            collect_completed_child_results(db, parent_run_id, target_job_ids),
+                        );
                     }
                 }
                 break;

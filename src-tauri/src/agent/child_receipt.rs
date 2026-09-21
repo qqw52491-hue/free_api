@@ -38,6 +38,9 @@ pub(crate) struct ReceiptEffects {
     pub stage_refund_pending: bool,
     /// 需广播到前端的 UI 通知（如 Tech Lead 定稿）
     pub ui_notices: Vec<String>,
+    /// 交付契约违规：消费端裁决降级的 error_kind 值（contract_violation:...）。
+    /// 调用方在提交点把它回写到台账 status/error_kind，与 applied_at 同事务落账。
+    pub contract_violation: Option<String>,
 }
 
 /// 交付契约运行时校验（三条通道汇合后的唯一关口）：
@@ -91,6 +94,14 @@ pub(crate) async fn reduce_child_receipt(
     // ── 交付契约运行时校验（所有种类统一）：违规转 invalid_output ──
     let mut receipt_owned = receipt.clone();
     enforce_delivery_contract(env.db, &mut receipt_owned);
+    // 降级发生的判据：原本成功 → 违规后 invalid_output。裁决随提交点回写台账。
+    let contract_violation = if receipt.is_success()
+        && receipt_owned.status == "invalid_output"
+    {
+        receipt_owned.error_kind.clone()
+    } else {
+        None
+    };
     let receipt = &receipt_owned;
 
     // ── 阶段审查/对质回执：独立语义（不占方案审查预算，infra 失败视为未审）──
@@ -107,11 +118,15 @@ pub(crate) async fn reduce_child_receipt(
                 receipt.child_run_id, outcome.note
             ),
             stage_refund_pending: outcome.refund_pending,
+            contract_violation,
             ..Default::default()
         };
     }
 
-    let mut effects = ReceiptEffects::default();
+    let mut effects = ReceiptEffects {
+        contract_violation,
+        ..Default::default()
+    };
     match receipt.kind.as_str() {
         "writer" => {
             let mut writer_res = receipt.as_writer_result();
@@ -766,6 +781,170 @@ mod tests {
         let mut receipt2 = r2.clone();
         enforce_delivery_contract(&db, &mut receipt2);
         assert_eq!(receipt2.status, "succeeded", "合规交付不得降级");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn contract_violation_verdict_persists_to_ledger_on_commit() {
+        // 消费端裁决一致性：reducer 判 invalid_output 后，提交点把裁决
+        // 随 applied_at 同事务回写台账——模型所见与库中所记不得分叉。
+        let (base, db) = test_db("contract-wb");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let schema = crate::agent::protocol::ContractSchema::new(vec![
+            crate::agent::protocol::ContractFieldDef::must_new(
+                "cve_refs",
+                crate::agent::protocol::ContractFieldType::StringArray,
+                "命中的 CVE 编号",
+                true,
+            ),
+        ]);
+        let identity = crate::agent::child_reviewer::ChildRunIdentity {
+            task_id: "task-wb".to_string(),
+            attempt_id: 1,
+            purpose: Some("worker".to_string()),
+            batch_id: None,
+            contract_id: None,
+            contract_schema: Some(serde_json::to_string(&schema).unwrap()),
+        };
+        let run_id = crate::agent::child_reviewer::begin_child_run_extended(
+            &db, "run-1", "sess-1", &ws, "m1", 0, "worker", None, None, None, &identity,
+        )
+        .unwrap();
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET status='succeeded', consumed_at='2024-01-01' WHERE id=?1",
+            rusqlite::params![run_id],
+        ).unwrap();
+
+        let env = test_env(&db, &ws);
+        let mut context = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        // worker 缺必填 cve_refs → 违规裁决透出到 effects
+        let r = receipt("worker", &run_id, None, json!({"test_status": "passed", "findings": []}));
+        let effects = reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
+        assert!(
+            effects.contract_violation.is_some(),
+            "契约违规必须透出裁决供提交点回写台账"
+        );
+
+        crate::agent::checkpoint::save_checkpoint_and_consume(
+            &db,
+            &mut cp,
+            &context,
+            &[crate::agent::checkpoint::AppliedReceipt {
+                run_id: run_id.clone(),
+                verdict: effects
+                    .contract_violation
+                    .clone()
+                    .map(|e| ("invalid_output".to_string(), e)),
+            }],
+        )
+        .unwrap();
+
+        let (status, error_kind, applied): (String, Option<String>, Option<String>) = db
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status, error_kind, applied_at FROM agent_child_runs WHERE id=?1",
+                rusqlite::params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "invalid_output", "台账 status 须与消费端裁决一致");
+        assert!(
+            error_kind.as_deref().unwrap_or("").starts_with("contract_violation"),
+            "error_kind 须携带 contract_violation 标记"
+        );
+        assert!(applied.is_some());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn crash_between_delivery_and_commit_replays_receipt_once() {
+        // P0 全链路崩溃恢复：真实台账行 → poll 投递 → reducer 入账 →
+        // （模拟崩溃：commit 未发生，checkpoint/context 丢弃）→ 重建后
+        // 回执重投 → 再次入账 → 提交 → 退出信箱。效果恰好一次。
+        let (base, db) = test_db("crash-replay");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let env = test_env(&db, &ws);
+
+        let run_id = crate::agent::child_reviewer::begin_child_run(
+            &db, "run-1", "sess-1", &ws, "m1", 0, "review", None,
+        )
+        .unwrap();
+        let result_json = json!({
+            "child_run_id": run_id,
+            "status": "succeeded",
+            "findings": [{"id":"F1","severity":"blocking","finality":"regardless","location":"a.rs:1","current":"c","why":"w","suggestion":"s","evidence_strength":"confirmed"}],
+            "confidence": "confirmed",
+            "evidence_refs": [],
+            "missing_evidence": [],
+            "duration_ms": 10,
+            "completion_tokens": 5
+        })
+        .to_string();
+        crate::agent::child_reviewer::finish_child_run(
+            &db, &run_id, "succeeded", 10, 5, 0, None, Some(&result_json),
+        );
+
+        // ── 第一遍：投递 + 入账，但"进程"在提交点前崩溃（cp/context 丢弃）──
+        {
+            let mut context = SandwichContext::new("sys".into(), "goal".into());
+            let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+            let first = crate::agent::child_reviewer::poll_completed_delivery_receipts(
+                &db, "run-1", None,
+            )
+            .unwrap();
+            assert_eq!(first.len(), 1);
+            let _effects =
+                reduce_child_receipt(&env, &mut cp, &mut context, &first[0]).await;
+            // 崩溃：save_checkpoint_and_consume 从未调用，cp/context 随作用域丢弃
+        }
+
+        // ── 重启：回执必须重投（applied_at 未落账 → 仍在信箱）──
+        let mut context = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        let replayed = crate::agent::child_reviewer::poll_completed_delivery_receipts(
+            &db, "run-1", None,
+        )
+        .unwrap();
+        assert_eq!(
+            replayed.len(),
+            1,
+            "已投递未落账的回执崩溃后必须重投，否则永久丢件"
+        );
+        reduce_child_receipt(&env, &mut cp, &mut context, &replayed[0]).await;
+        assert_eq!(
+            cp.plan_review_deliveries.len(),
+            1,
+            "重投后的入账应聚合一份交付"
+        );
+
+        crate::agent::checkpoint::save_checkpoint_and_consume(
+            &db,
+            &mut cp,
+            &context,
+            &[crate::agent::checkpoint::AppliedReceipt {
+                run_id: run_id.clone(),
+                verdict: None,
+            }],
+        )
+        .unwrap();
+
+        // ── 提交后：退出信箱，永不再投 ──
+        let drained = crate::agent::child_reviewer::poll_completed_delivery_receipts(
+            &db, "run-1", None,
+        )
+        .unwrap();
+        assert!(drained.is_empty(), "落账后不得重复投递");
+
+        // 磁盘上的 checkpoint 携带入账效果（交付聚合持久化）
+        let persisted = crate::agent::checkpoint::load_checkpoint(&db, "run-1")
+            .unwrap()
+            .expect("checkpoint 已提交");
+        assert_eq!(persisted.plan_review_deliveries.len(), 1);
         let _ = std::fs::remove_dir_all(base);
     }
 

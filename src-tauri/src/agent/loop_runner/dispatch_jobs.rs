@@ -78,10 +78,17 @@ pub(super) async fn dispatch_wait_jobs(
                     interrupt_rx: ctx.interrupt_rx.clone(),
                 };
                 let mut stage_refund_pending = false;
+                let mut applied_receipts: Vec<crate::agent::checkpoint::AppliedReceipt> =
+                    Vec::new();
+                let mut seen_receipt_ids: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 let mut projections: std::collections::HashMap<String, String> =
                     std::collections::HashMap::new();
                 for job in completed_jobs.iter() {
                     if job.job_type.starts_with("child_") || job.job_type.contains("reviewer") {
+                        if !seen_receipt_ids.insert(job.job_id.clone()) {
+                            continue;
+                        }
                         let receipt = job.to_delivery_receipt();
                         let effects = crate::agent::child_receipt::reduce_child_receipt(
                             &receipt_env,
@@ -91,6 +98,13 @@ pub(super) async fn dispatch_wait_jobs(
                         )
                         .await;
                         stage_refund_pending |= effects.stage_refund_pending;
+                        applied_receipts.push(crate::agent::checkpoint::AppliedReceipt {
+                            run_id: job.job_id.clone(),
+                            verdict: effects
+                                .contract_violation
+                                .clone()
+                                .map(|err| ("invalid_output".to_string(), err)),
+                        });
                         projections.insert(job.job_id.clone(), effects.model_text);
                         for notice in &effects.ui_notices {
                             let _ = ctx.app.emit(
@@ -108,6 +122,16 @@ pub(super) async fn dispatch_wait_jobs(
                 } else {
                     ""
                 };
+                // 回执提交点：checkpoint（含 context 投影）+ applied_at + 裁决回写
+                // 同事务原子落账——崩溃重投/重放安全由此保证。
+                if !applied_receipts.is_empty() {
+                    crate::agent::checkpoint::save_checkpoint_and_consume(
+                        ctx.state.inner(),
+                        ctx.checkpoint,
+                        ctx.context,
+                        &applied_receipts,
+                    )?;
+                }
                 let mut out = String::new();
                 if completed_jobs.is_empty() {
                     // 空结果消歧：区分「仍在途 / 结论待回收 / 已全部收口 / 从未派发」，

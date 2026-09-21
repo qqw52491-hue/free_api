@@ -539,6 +539,110 @@ pub fn load_checkpoint(db: &DbState, run_id: &str) -> Result<Option<AgentCheckpo
     }
 }
 
+enum WriteOutcome {
+    Saved,
+    Conflict,
+}
+
+/// 在已持有的连接上做一次乐观锁写入（INSERT 首存 / UPDATE 乐观锁）。
+/// 冲突时恢复 checkpoint.version 并返回 Conflict，由调用方决定重试策略。
+/// 供 save_checkpoint（独立提交）与 save_checkpoint_and_consume（同事务附带
+/// 回执 applied_at 落账）共用——两个入口的乐观锁语义必须完全一致。
+fn write_checkpoint_on(
+    conn: &rusqlite::Connection,
+    checkpoint: &mut AgentCheckpoint,
+) -> Result<WriteOutcome, String> {
+    if checkpoint.version == 0 {
+        // snapshot JSON 与表中 revision 必须一致；否则第一次恢复会错误地再次 INSERT。
+        checkpoint.version = 1;
+        let snapshot_json =
+            serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+        conn.execute(
+            "INSERT INTO agent_checkpoints (run_id, phase, snapshot_json, version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                checkpoint.run_id,
+                checkpoint.phase.as_str(),
+                snapshot_json,
+                checkpoint.version,
+                checkpoint.created_at,
+                checkpoint.updated_at
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(WriteOutcome::Saved)
+    } else {
+        let previous_version = checkpoint.version;
+        checkpoint.version += 1;
+        let snapshot_json =
+            serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+        let rows = conn
+            .execute(
+                "UPDATE agent_checkpoints SET phase = ?1, snapshot_json = ?2, version = ?3, updated_at = ?4 WHERE run_id = ?5 AND version = ?6",
+                params![
+                    checkpoint.phase.as_str(),
+                    snapshot_json,
+                    checkpoint.version,
+                    checkpoint.updated_at,
+                    checkpoint.run_id,
+                    previous_version
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        if rows == 1 {
+            Ok(WriteOutcome::Saved)
+        } else {
+            // 乐观锁冲突：数据库中的 version 已被其他保存者推进。
+            checkpoint.version = previous_version;
+            Ok(WriteOutcome::Conflict)
+        }
+    }
+}
+
+/// 乐观锁冲突后的重载+合并：把当前持有的关键字段叠加到库中最新快照上。
+/// ⚠️ 必须在释放 db.0 锁之后调用（内部会再取锁），否则同线程二次加锁自死锁。
+fn reload_and_merge_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result<(), String> {
+    let reloaded = load_checkpoint(db, &checkpoint.run_id)?;
+    match reloaded {
+        Some(mut latest) => {
+            latest.data = checkpoint.data.clone();
+            latest.phase = checkpoint.phase;
+            latest.plan_phase = checkpoint.plan_phase;
+            latest.plan_reviewer_retry_count = checkpoint.plan_reviewer_retry_count;
+            latest.approved_plan_summary = checkpoint.approved_plan_summary.clone();
+            latest.plan_mode = checkpoint.plan_mode;
+            latest.plan_reviewer_consumed = checkpoint.plan_reviewer_consumed;
+            latest.auto_pilot = checkpoint.auto_pilot;
+            latest.finish_reviewed = checkpoint.finish_reviewed;
+            latest.finish_challenge_count = checkpoint.finish_challenge_count;
+            latest.pending = checkpoint.pending.clone();
+            latest.prepared_instruction = checkpoint.prepared_instruction.clone();
+            latest.step_id = checkpoint.step_id;
+            latest.last_error = checkpoint.last_error.clone();
+            checkpoint.version = latest.version;
+            checkpoint.data = latest.data;
+            checkpoint.phase = latest.phase;
+            checkpoint.plan_phase = latest.plan_phase;
+            checkpoint.plan_reviewer_retry_count = latest.plan_reviewer_retry_count;
+            checkpoint.approved_plan_summary = latest.approved_plan_summary;
+            checkpoint.plan_mode = latest.plan_mode;
+            checkpoint.plan_reviewer_consumed = latest.plan_reviewer_consumed;
+            checkpoint.auto_pilot = latest.auto_pilot;
+            checkpoint.finish_reviewed = latest.finish_reviewed;
+            checkpoint.finish_challenge_count = latest.finish_challenge_count;
+            checkpoint.pending = latest.pending;
+            checkpoint.prepared_instruction = latest.prepared_instruction;
+            checkpoint.step_id = latest.step_id;
+            checkpoint.last_error = latest.last_error;
+        }
+        None => {
+            // 记录已被删除，重置为首次写入。
+            checkpoint.version = 0;
+        }
+    }
+    Ok(())
+}
+
 /// 通过 revision 进行乐观锁更新；一次 UPDATE 同时写 phase、pending 和 data，避免恢复到不自洽状态。
 ///
 /// 当检测到乐观锁冲突（rows != 1）时，自动重新加载最新 checkpoint，
@@ -558,57 +662,9 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
         // 使用者（IPC 命令/监控/仲裁/HTTP）全部排队冻结、tokio 工作线程耗尽、
         // 连不碰 DB 的 HTTP 路由也无人接单。因此锁内只做一次写入尝试，
         // 冲突必须先 Drop 锁再走 load+merge 重试。
-        enum WriteOutcome {
-            Saved,
-            Conflict,
-        }
         let outcome = {
             let conn = db.0.lock().map_err(|_| "数据库锁已中毒".to_string())?;
-            if checkpoint.version == 0 {
-                // snapshot JSON 与表中 revision 必须一致；否则第一次恢复会错误地再次 INSERT。
-                checkpoint.version = 1;
-                let snapshot_json =
-                    serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
-                conn.execute(
-                    "INSERT INTO agent_checkpoints (run_id, phase, snapshot_json, version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        checkpoint.run_id,
-                        checkpoint.phase.as_str(),
-                        snapshot_json,
-                        checkpoint.version,
-                        checkpoint.created_at,
-                        checkpoint.updated_at
-                    ],
-                )
-                .map_err(|error| error.to_string())?;
-                WriteOutcome::Saved
-            } else {
-                let previous_version = checkpoint.version;
-                checkpoint.version += 1;
-                let snapshot_json =
-                    serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
-                let rows = conn
-                    .execute(
-                        "UPDATE agent_checkpoints SET phase = ?1, snapshot_json = ?2, version = ?3, updated_at = ?4 WHERE run_id = ?5 AND version = ?6",
-                        params![
-                            checkpoint.phase.as_str(),
-                            snapshot_json,
-                            checkpoint.version,
-                            checkpoint.updated_at,
-                            checkpoint.run_id,
-                            previous_version
-                        ],
-                    )
-                    .map_err(|error| error.to_string())?;
-
-                if rows == 1 {
-                    WriteOutcome::Saved
-                } else {
-                    // 乐观锁冲突：数据库中的 version 已被其他保存者推进。
-                    checkpoint.version = previous_version;
-                    WriteOutcome::Conflict
-                }
-            }
+            write_checkpoint_on(&conn, checkpoint)?
         };
         // conn 守卫已在此 Drop——重试路径再碰 db.0 是安全的。
 
@@ -618,46 +674,86 @@ pub fn save_checkpoint(db: &DbState, checkpoint: &mut AgentCheckpoint) -> Result
                 if attempt >= max_attempts {
                     return Err("checkpoint 已被另一条任务更新，请重新加载后再保存".to_string());
                 }
-
                 // 自动重试：重新加载最新 checkpoint 并合并当前关键状态。
-                let reloaded = load_checkpoint(db, &checkpoint.run_id)?;
-                match reloaded {
-                    Some(mut latest) => {
-                        latest.data = checkpoint.data.clone();
-                        latest.phase = checkpoint.phase;
-                        latest.plan_phase = checkpoint.plan_phase;
-                        latest.plan_reviewer_retry_count = checkpoint.plan_reviewer_retry_count;
-                        latest.approved_plan_summary = checkpoint.approved_plan_summary.clone();
-                        latest.plan_mode = checkpoint.plan_mode;
-                        latest.plan_reviewer_consumed = checkpoint.plan_reviewer_consumed;
-                        latest.auto_pilot = checkpoint.auto_pilot;
-                        latest.finish_reviewed = checkpoint.finish_reviewed;
-                        latest.finish_challenge_count = checkpoint.finish_challenge_count;
-                        latest.pending = checkpoint.pending.clone();
-                        latest.prepared_instruction = checkpoint.prepared_instruction.clone();
-                        latest.step_id = checkpoint.step_id;
-                        latest.last_error = checkpoint.last_error.clone();
-                        checkpoint.version = latest.version;
-                        checkpoint.data = latest.data;
-                        checkpoint.phase = latest.phase;
-                        checkpoint.plan_phase = latest.plan_phase;
-                        checkpoint.plan_reviewer_retry_count = latest.plan_reviewer_retry_count;
-                        checkpoint.approved_plan_summary = latest.approved_plan_summary;
-                        checkpoint.plan_mode = latest.plan_mode;
-                        checkpoint.plan_reviewer_consumed = latest.plan_reviewer_consumed;
-                        checkpoint.auto_pilot = latest.auto_pilot;
-                        checkpoint.finish_reviewed = latest.finish_reviewed;
-                        checkpoint.finish_challenge_count = latest.finish_challenge_count;
-                        checkpoint.pending = latest.pending;
-                        checkpoint.prepared_instruction = latest.prepared_instruction;
-                        checkpoint.step_id = latest.step_id;
-                        checkpoint.last_error = latest.last_error;
+                reload_and_merge_checkpoint(db, checkpoint)?;
+            }
+        }
+    }
+}
+
+/// 一张已投递回执的落账记录：applied_at 随 checkpoint 在同一事务写入。
+/// verdict = 消费端裁决回写（如契约违规降级为 invalid_output）——
+/// 让台账 status/error_kind 与模型所见一致，不再"内存判违规、库里记成功"。
+pub struct AppliedReceipt {
+    pub run_id: String,
+    /// (status, error_kind)；None = 按原终态仅记 applied_at
+    pub verdict: Option<(String, String)>,
+}
+
+/// 回执消费提交点：checkpoint 快照 + 本批回执 applied_at 标记 + 裁决回写
+/// 在同一 SQLite 事务内原子落账。崩溃只可能落在事务两侧：
+/// - COMMIT 前：两者一起回滚，行仍 applied_at IS NULL → 下次轮询重新投递，
+///   重放到"从未见过该回执"的 checkpoint 上，效果只生效一次；
+/// - COMMIT 后：两者一起持久化，永不重投。
+/// 唯一绕过事务的副作用（failover 备胎 spawn）由 task_id 查重兜底。
+///
+/// context 先 refresh 进 checkpoint 再序列化——todo/注入文本等 context 变更
+/// 必须与 applied_at 同生共死，否则"标了已落账但效果丢了"。
+pub fn save_checkpoint_and_consume(
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    context: &crate::agent::context::SandwichContext,
+    applied: &[AppliedReceipt],
+) -> Result<(), String> {
+    if applied.is_empty() {
+        return save_checkpoint(db, checkpoint);
+    }
+    checkpoint.refresh_context(context);
+    let mut attempt = 0;
+    let max_attempts = 3;
+
+    loop {
+        attempt += 1;
+        checkpoint.updated_at = Utc::now().to_rfc3339();
+        let now = checkpoint.updated_at.clone();
+
+        let outcome = {
+            let mut conn = db.0.lock().map_err(|_| "数据库锁已中毒".to_string())?;
+            let tx = conn
+                .transaction()
+                .map_err(|error| error.to_string())?;
+            match write_checkpoint_on(&tx, checkpoint)? {
+                WriteOutcome::Saved => {
+                    for receipt in applied {
+                        if let Some((status, error_kind)) = &receipt.verdict {
+                            tx.execute(
+                                "UPDATE agent_child_runs SET applied_at = ?1, status = ?2, error_kind = ?3 WHERE id = ?4",
+                                params![now, status, error_kind, receipt.run_id],
+                            )
+                            .map_err(|error| error.to_string())?;
+                        } else {
+                            tx.execute(
+                                "UPDATE agent_child_runs SET applied_at = ?1 WHERE id = ?2",
+                                params![now, receipt.run_id],
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
                     }
-                    None => {
-                        // 记录已被删除，重置为首次写入。
-                        checkpoint.version = 0;
-                    }
+                    tx.commit().map_err(|error| error.to_string())?;
+                    WriteOutcome::Saved
                 }
+                // 冲突：事务随 drop 回滚，applied_at 标记绝不先于 checkpoint 落盘
+                WriteOutcome::Conflict => WriteOutcome::Conflict,
+            }
+        };
+
+        match outcome {
+            WriteOutcome::Saved => return Ok(()),
+            WriteOutcome::Conflict => {
+                if attempt >= max_attempts {
+                    return Err("checkpoint 已被另一条任务更新，请重新加载后再保存".to_string());
+                }
+                reload_and_merge_checkpoint(db, checkpoint)?;
             }
         }
     }

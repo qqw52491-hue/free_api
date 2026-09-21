@@ -913,12 +913,20 @@ async fn run_agent_main_loop_in_workspace_inner(
         };
         // 阶段审查退款须批后统一结算（逐条结算会误判在途而漏退）
         let mut stage_refund_pending = false;
+        // 本批已投递回执的落账清单：applied_at 与 checkpoint 在下方同一事务提交。
+        // seen 去重：信箱与台账两个来源可能携带同一子任务结果，跨通道只入账一次。
+        let mut applied_receipts: Vec<crate::agent::checkpoint::AppliedReceipt> = Vec::new();
+        let mut seen_receipt_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // 🔄 异步子任务结果轮询（审查/工兵/侦察）：自动注入父 Agent 上下文
         if let Ok(completed) = crate::agent::child_reviewer::poll_completed_delivery_receipts(state.inner(), &run_id, None) {
             if !completed.is_empty() {
                 let mut injection = String::new();
                 for receipt in completed {
+                    if !seen_receipt_ids.insert(receipt.child_run_id.clone()) {
+                        continue;
+                    }
                     let effects = crate::agent::child_receipt::reduce_child_receipt(
                         &receipt_env,
                         &mut checkpoint,
@@ -927,6 +935,13 @@ async fn run_agent_main_loop_in_workspace_inner(
                     )
                     .await;
                     stage_refund_pending |= effects.stage_refund_pending;
+                    applied_receipts.push(crate::agent::checkpoint::AppliedReceipt {
+                        run_id: receipt.child_run_id.clone(),
+                        verdict: effects
+                            .contract_violation
+                            .clone()
+                            .map(|err| ("invalid_output".to_string(), err)),
+                    });
                     injection.push_str(&format!("\n{}\n", effects.model_text));
                     for notice in &effects.ui_notices {
                         let _ = app.emit(
@@ -953,6 +968,9 @@ async fn run_agent_main_loop_in_workspace_inner(
                     // 子任务回执走统一 reducer（failover/交付/退款语义单点）；
                     // 非子任务的后台任务（watch 等）保持通用倾倒。
                     if job.job_type.starts_with("child_") || job.job_type.contains("reviewer") {
+                        if !seen_receipt_ids.insert(job.job_id.clone()) {
+                            continue;
+                        }
                         let receipt = job.to_delivery_receipt();
                         let effects = crate::agent::child_receipt::reduce_child_receipt(
                             &receipt_env,
@@ -962,6 +980,13 @@ async fn run_agent_main_loop_in_workspace_inner(
                         )
                         .await;
                         stage_refund_pending |= effects.stage_refund_pending;
+                        applied_receipts.push(crate::agent::checkpoint::AppliedReceipt {
+                            run_id: job.job_id.clone(),
+                            verdict: effects
+                                .contract_violation
+                                .clone()
+                                .map(|err| ("invalid_output".to_string(), err)),
+                        });
                         job_injection.push_str(&format!("\n{}\n", effects.model_text));
                         for notice in &effects.ui_notices {
                             let _ = app.emit(
@@ -998,6 +1023,18 @@ async fn run_agent_main_loop_in_workspace_inner(
             context.add_error_feedback(
                 "\n🔄 阶段审查次数已退还（本轮含 infra 失败且无专家产出 blocking，视为未有效审查）。",
             );
+        }
+
+        // 🔒 回执提交点：checkpoint 快照（含 context 最新投影）+ applied_at +
+        // 契约裁决回写 同事务原子落账。此点之前崩溃 = 两笔账一起回滚、回执重投；
+        // 此点之后 = 永不重投。投递与落账之间不再有"已消费但效果未持久化"的窗口。
+        if !applied_receipts.is_empty() {
+            crate::agent::checkpoint::save_checkpoint_and_consume(
+                state.inner(),
+                &mut checkpoint,
+                &context,
+                &applied_receipts,
+            )?;
         }
 
         // 步边界状态刷新：收养旧 checkpoint 的手写名单（升级一次性迁移）

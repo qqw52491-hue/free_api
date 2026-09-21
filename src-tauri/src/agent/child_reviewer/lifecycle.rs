@@ -101,6 +101,30 @@ pub(crate) fn load_run_identity(
     .ok()
 }
 
+/// 幂等查重：同一 task_id 下是否已有比 prev 更晚的活 attempt
+///（running 在途 / 已终态但回执未落账——后者仍在信箱等投递）。
+/// 崩溃重放路径依赖它：备胎 INSERT 先于父 checkpoint 提交落盘时，
+/// 重放不能再派新备胎，只能认养已存在的那个。
+pub(crate) fn live_attempt_for_task(
+    db: &DbState,
+    parent_run_id: &str,
+    task_id: &str,
+    exclude_run_id: &str,
+    exclude_attempt: u32,
+) -> Option<String> {
+    let conn = db.0.lock().ok()?;
+    conn.query_row(
+        "SELECT id FROM agent_child_runs
+         WHERE parent_run_id = ?1 AND task_id = ?2 AND id != ?3
+           AND COALESCE(attempt_id, 1) > ?4
+           AND (status = 'running' OR applied_at IS NULL OR applied_at = '')
+         ORDER BY COALESCE(attempt_id, 1) DESC LIMIT 1",
+        params![parent_run_id, task_id, exclude_run_id, exclude_attempt],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
 pub(crate) fn begin_child_run(
     db: &DbState,
     parent_run_id: &str,

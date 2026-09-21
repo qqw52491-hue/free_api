@@ -696,31 +696,33 @@ fn fork_session_at(
         let mut cs = tx
             .prepare(
                 "SELECT id, parent_run_id, workspace_root, model_id, status, started_at, finished_at, duration_ms,
-                        completion_tokens, evidence_ref_count, error_kind, result_json, kind, workspace_copy, resumed_from, message_history_json, consumed_at
+                        completion_tokens, evidence_ref_count, error_kind, result_json, kind, workspace_copy, resumed_from, message_history_json, consumed_at, applied_at
                  FROM agent_child_runs WHERE parent_session_id=?1",
             )
             .map_err(|e| e.to_string())?;
-        let rows: Vec<(String, String, String, String, String, String, Option<String>, Option<i64>, i64, i64, Option<String>, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>)> = cs
+        let rows: Vec<(String, String, String, String, String, String, Option<String>, Option<i64>, i64, i64, Option<String>, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = cs
             .query_map(params![src_session_id], |r| {
                 Ok((
                     r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
                     r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?,
-                    r.get(12)?, r.get(13)?, r.get(14)?, r.get(15)?, r.get(16)?,
+                    r.get(12)?, r.get(13)?, r.get(14)?, r.get(15)?, r.get(16)?, r.get(17)?,
                 ))
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?;
         drop(cs);
-        for (cid, prun, ws, mid, status, started, finished, dur, ctoks, erc, ekind, res, kind, wcopy, resumed, mhist, consumed) in rows {
+        for (cid, prun, ws, mid, status, started, finished, dur, ctoks, erc, ekind, res, kind, wcopy, resumed, mhist, consumed, applied) in rows {
             if let Some(bts) = &boundary_ts {
                 if started >= *bts {
                     continue;
                 }
             }
+            // applied_at 随行复制：已落账回执在分叉副本里不得重投
+            // （重映射的 run_id 会使 reducer 的按 id 幂等失效，必须靠标记拦截）
             tx.execute(
-                "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, finished_at, duration_ms, completion_tokens, evidence_ref_count, error_kind, result_json, kind, workspace_copy, resumed_from, message_history_json, consumed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, finished_at, duration_ms, completion_tokens, evidence_ref_count, error_kind, result_json, kind, workspace_copy, resumed_from, message_history_json, consumed_at, applied_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     id_map[&cid],
                     map_or(&id_map, &prun, &new_session_id),
@@ -739,7 +741,8 @@ fn fork_session_at(
                     wcopy,
                     resumed,
                     mhist.as_deref().map(|m| rw.apply(m)),
-                    consumed
+                    consumed,
+                    applied
                 ],
             )
             .map_err(|e| e.to_string())?;

@@ -565,9 +565,23 @@
         assert_eq!(polled[0].child_run_id, run_id);
         assert_eq!(polled[0].confidence, "confirmed");
 
-        // 第二次轮询：因为 result_json 已标记 consumed_at，不再重复消费
+        // 第二次轮询：投递 ≠ 落账。applied_at 未写时回执必须重新投递
+        // （崩溃恢复语义）；重复消费由「投递后同批处理 + 提交时 applied_at
+        // 随 checkpoint 原子落账」保证，而不是靠 poll 即销毁。
         let polled_again = poll_completed_child_runs(&state, "parent-run-poll").unwrap();
-        assert_eq!(polled_again.len(), 0);
+        assert_eq!(polled_again.len(), 1, "applied_at 未落账的回执必须重投，否则崩溃即丢件");
+
+        // 效果随 checkpoint 提交落账（applied_at）后，回执才真正退出信箱
+        {
+            let conn = state.0.lock().unwrap();
+            conn.execute(
+                "UPDATE agent_child_runs SET applied_at = '2024-01-02T00:00:00Z' WHERE id = ?1",
+                rusqlite::params![run_id],
+            )
+            .unwrap();
+        }
+        let drained = poll_completed_child_runs(&state, "parent-run-poll").unwrap();
+        assert_eq!(drained.len(), 0, "applied_at 落账后回执不得重复投递");
 
         let _ = std::fs::remove_dir_all(base);
     }
@@ -691,6 +705,15 @@
         let polled_1 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
         assert_eq!(polled_1.len(), 1);
         assert_eq!(polled_1[0].child_run_id, child_1);
+        // 模拟生产时序：投递 → 入账 → applied_at 随 checkpoint 提交落账
+        {
+            let conn = state.0.lock().unwrap();
+            conn.execute(
+                "UPDATE agent_child_runs SET applied_at = '2024-01-02T00:00:00Z' WHERE id = ?1",
+                rusqlite::params![child_1],
+            )
+            .unwrap();
+        }
 
         // child_2 后完成
         let res_2 = ChildReviewResult {
@@ -724,10 +747,18 @@
         };
         finish_child_run(&state, &child_2, "succeeded", 350, 40, 0, None, Some(&serde_json::to_string(&res_2).unwrap()));
 
-        // 第二轮轮询：消费 child_2，不重复消费 child_1
+        // 第二轮轮询：消费 child_2，不重复投递已落账的 child_1
         let polled_2 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
         assert_eq!(polled_2.len(), 1);
         assert_eq!(polled_2[0].child_run_id, child_2);
+        {
+            let conn = state.0.lock().unwrap();
+            conn.execute(
+                "UPDATE agent_child_runs SET applied_at = '2024-01-02T00:00:00Z' WHERE id = ?1",
+                rusqlite::params![child_2],
+            )
+            .unwrap();
+        }
 
         // 第三轮轮询：全空
         let polled_3 = poll_completed_child_runs(&state, "parent-run-multi").unwrap();
@@ -876,7 +907,15 @@
         assert_eq!(writer_data.findings, vec!["已创建新模块".to_string()]);
         assert_eq!(writer_data.test_status, "passed");
 
-        // 消费幂等性校验：再次轮询必须为空
+        // 消费幂等性校验：applied_at 落账后再次轮询必须为空
+        {
+            let conn = state.0.lock().unwrap();
+            conn.execute(
+                "UPDATE agent_child_runs SET applied_at = consumed_at WHERE parent_run_id = 'parent-receipt-p1' AND consumed_at IS NOT NULL",
+                [],
+            )
+            .unwrap();
+        }
         let empty_receipts = poll_completed_delivery_receipts(&state, "parent-receipt-p1", None).unwrap();
         assert!(empty_receipts.is_empty());
 
@@ -920,7 +959,15 @@
         assert_eq!(results[0].status, "succeeded");
         assert!(results[0].result_json.contains("主根因成立"));
 
-        // 消费后不可重复获取（幂等）
+        // 效果落账（applied_at）后不可重复投递（幂等）；未落账前会重投
+        {
+            let conn = state.0.lock().unwrap();
+            conn.execute(
+                "UPDATE agent_child_runs SET applied_at = '2024-01-02T00:00:00Z' WHERE id = ?1",
+                params![child_id],
+            )
+            .unwrap();
+        }
         let again = crate::agent::job_engine::wait_for_jobs(
             &state,
             "parent-run-wait",
@@ -1254,6 +1301,15 @@
 
         let first = crate::agent::job_engine::wait_for_jobs(&state, "run-t", Some(&[done.clone()]), 1, None).await.unwrap();
         assert_eq!(first.len(), 1, "首次定向等待取回目标结果");
+        // 模拟提交落账：applied_at 随 checkpoint 写后，目标才算真正消费完毕
+        {
+            let conn = state.0.lock().unwrap();
+            conn.execute(
+                "UPDATE agent_child_runs SET applied_at = '2024-01-02T00:00:00Z' WHERE id = ?1",
+                params![done],
+            )
+            .unwrap();
+        }
 
         let started = std::time::Instant::now();
         let again = crate::agent::job_engine::wait_for_jobs(&state, "run-t", Some(&[done.clone()]), 10, None).await.unwrap();
@@ -1327,5 +1383,71 @@
         assert_eq!(comp, 500);
         assert_eq!(prompt, 12_000);
 
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn retry_spawn_adopts_existing_live_attempt_instead_of_respawning() {
+        // 崩溃重放幂等：备胎行已存在（崩溃时序：备胎 INSERT 已提交、
+        // 父 checkpoint 回滚 → 旧失败回执重投 → failover 重走）时，
+        // spawn 必须认养在途 attempt 而不是再造一个。
+        let base = std::env::temp_dir().join(format!("free-api-adopt-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+
+        // 前驱失败行：task_id 固定为 "task-f"，attempt 1
+        let prev_identity = ChildRunIdentity {
+            task_id: "task-f".to_string(),
+            attempt_id: 1,
+            purpose: Some("plan_review".to_string()),
+            batch_id: Some("batch-f".to_string()),
+            contract_id: None,
+            contract_schema: None,
+        };
+        let failed = begin_child_run_extended(
+            &state, "parent-f", "sess-f", &workspace, "m", 1, "review", None, None, None, &prev_identity,
+        )
+        .unwrap();
+        finish_child_run(&state, &failed, "timed_out", 100, 0, 0, Some(crate::agent::types::ChildErrorKind::Timeout), Some("{}"));
+
+        // 已存在的备胎：同 task_id，attempt 2，仍在途（崩溃窗口的真实形状）
+        let spare_identity = ChildRunIdentity {
+            task_id: "task-f".to_string(),
+            attempt_id: 2,
+            purpose: Some("plan_review".to_string()),
+            batch_id: Some("batch-f".to_string()),
+            contract_id: None,
+            contract_schema: None,
+        };
+        let spare = begin_child_run_extended(
+            &state, "parent-f", "sess-f", &workspace, "m2", 1, "review", None, None, None, &spare_identity,
+        )
+        .unwrap();
+
+        // 重放 failover：spawn(retry_of=failed) 应认养 spare，不产生新行
+        let snapshot = PlanReviewerDispatchSnapshot::new(
+            "m3", "tier", "effort", "persona", serde_json::json!({"role": "tech_lead"}),
+        );
+        let (_tx, rx) = tokio::sync::watch::channel(0u64);
+        let adopted = snapshot
+            .spawn(None, &state, "parent-f", "sess-f", &workspace, rx, Some(&failed))
+            .await
+            .unwrap();
+        assert_eq!(adopted, spare, "重放必须认养已在途的备胎行而非重派");
+
+        let count: i64 = state
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM agent_child_runs WHERE task_id = 'task-f'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "认养不得新增台账行（重复 failover 会被拒）");
         let _ = std::fs::remove_dir_all(base);
     }
