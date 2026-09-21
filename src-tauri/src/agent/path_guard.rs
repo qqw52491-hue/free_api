@@ -417,7 +417,9 @@ mod tests {
         )
         .unwrap();
         assert!(!resw.is_session_tmp);
-        assert_eq!(resw.canonical_path, ws.join("main.rs").canonicalize().unwrap_or_else(|_| ws.join("main.rs")));
+        // main.rs 未落盘，canonicalize 不存在的叶子会 Err；对存在的 ws 目录规范化再 join。
+        let ws_canonical = ws.canonicalize().unwrap_or_else(|_| ws.clone());
+        assert_eq!(resw.canonical_path, ws_canonical.join("main.rs"));
 
         // session-tmp:// 的 .. 逃逸由下游白名单拦截
         assert!(ensure_allowed_path(
