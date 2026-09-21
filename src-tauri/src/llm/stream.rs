@@ -60,8 +60,10 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
             if changed.is_ok() {
                 return Err(STREAM_INTERRUPTED_ERROR.to_string());
             } else {
-                std::future::pending::<()>().await;
-                unreachable!()
+                // sender 已销毁（会话控制被释放）——通道永远等不到值；
+                // pending() 会把任务永久挂死并废掉 reqwest 超时与主循环
+                // 时限兜底；按"已中断"干净返回。
+                return Err(STREAM_INTERRUPTED_ERROR.to_string());
             }
         }
     };
@@ -91,8 +93,10 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
                     if changed.is_ok() {
                         return Err(STREAM_INTERRUPTED_ERROR.to_string());
                     } else {
-                        std::future::pending::<()>().await;
-                        unreachable!()
+                        // sender 已销毁（会话控制被释放）——通道永远等不到值，
+                        // pending() 会把任务永久挂死并废掉 reqwest 超时与主循环
+                        // 时限兜底；按"已中断"干净返回。
+                        return Err(STREAM_INTERRUPTED_ERROR.to_string());
                     }
                 }
             };
@@ -122,8 +126,10 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
                 if changed.is_ok() {
                     return Err(STREAM_INTERRUPTED_ERROR.to_string());
                 } else {
-                    std::future::pending::<()>().await;
-                    unreachable!()
+                    // sender 已销毁（会话控制被释放）——通道永远等不到值；
+                    // pending() 会把任务永久挂死并废掉 reqwest 超时与主循环
+                    // 时限兜底；按"已中断"干净返回。
+                    return Err(STREAM_INTERRUPTED_ERROR.to_string());
                 }
             }
         };
