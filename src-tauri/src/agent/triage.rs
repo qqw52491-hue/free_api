@@ -1005,5 +1005,74 @@ mod live_triage_tests {
         for f in &failures { println!("  ❌ {}", f); }
         assert!(failures.is_empty(), "{} 个场景未达预期", failures.len());
     }
+
+    /// 金档文档化难题：直接读 eval_cases 的 problem_statement 喂 triage——
+    /// 症状距根因 2~4 层的线上报障，路由应选 code_diagnosis 且取证问题
+    /// 应指向机制层而非表象层。
+    #[tokio::test]
+    #[ignore = "需要真实模型与网络，手动跑"]
+    async fn triage_live_hard_eval_cases() {
+        let Some(db) = live_db() else {
+            eprintln!("skip: 无本地 DB");
+            return;
+        };
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+        let routing = ModelRoutingConfig {
+            pro: PRO_MODEL.to_string(),
+            ..Default::default()
+        };
+        let skill_index = crate::agent::skill_context::skill_routing_index(
+            &crate::agent::skill_context::resolve_skills_dir(),
+        );
+        let cases_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("test/eval_cases");
+        // (case 文件, 期望必中的 Skill)
+        let cases: &[(&str, &str)] = &[
+            ("case_hd_run_binding.json", "code_diagnosis"),      // 根因距症状 4 层：UUID 绑错 run
+            ("case_hd_goal_anchor.json", "code_diagnosis"),      // 冻结锚点误当当前目标
+            ("case_hd_phantom_steps.json", "code_diagnosis"),    // 行表/快照 seq 错位
+            ("case_01_subagent_failover.json", "code_diagnosis"),// 子代理超时死锁
+            ("case_06s_tx_batch_optimization.json", "code_development"), // 批量写优化保事务
+        ];
+        let mut failures = Vec::new();
+        for (i, (file, expect)) in cases.iter().enumerate() {
+            let path = cases_dir.join(file);
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                failures.push(format!("{}: 读不到题目文件", file));
+                continue;
+            };
+            let goal: String = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v.get("problem_statement").and_then(|p| p.as_str()).map(String::from))
+                .unwrap_or_default();
+            assert!(!goal.is_empty(), "{} 缺 problem_statement", file);
+            let (_tx, rx) = watch::channel(0u64);
+            let v = run_triage(
+                &app_handle, &db, &routing, &goal, "", &[], &skill_index, "",
+                &format!("triage-live-hd{}", i), rx,
+            )
+            .await;
+            let picks: Vec<&str> = v.skill_recommendations.iter().map(|r| r.name.as_str()).collect();
+            println!("\n[{}] {}\n  route={} conf={} fallback={:?}\n  skills={:?}",
+                i, file, v.route, v.confidence, v.fallback, picks);
+            for r in &v.skill_recommendations {
+                println!("    - {} ← {}", r.name, r.reason);
+            }
+            println!("  investigation_questions:");
+            for q in v.investigation_questions.iter().take(3) {
+                println!("    ? {}", q.chars().take(110).collect::<String>());
+            }
+            if v.fallback.is_some() {
+                failures.push(format!("{}: 判决降级", file));
+            } else if !picks.iter().any(|p| p == expect) {
+                failures.push(format!("{}: 期望含 {} 实际 {:?}", file, expect, picks));
+            }
+        }
+        println!("\n=== 难题矩阵结果 ===");
+        for f in &failures { println!("  ❌ {}", f); }
+        assert!(failures.is_empty(), "{} 个场景未达预期", failures.len());
+    }
 }
 
