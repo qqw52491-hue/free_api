@@ -1921,7 +1921,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                         .unwrap_or_default();
                     checkpoint.finish_reviewed = true;
                     let reject_msg = format!(
-                        "【⚠️ 交付门禁拦截打回：方案声明的目标文件与实际改动零交集，finish 未生效！】\n方案声明目标：{}\n实际改动文件：{}\n（0 Token 机械打回，终审无需介入）。\n【必须采取的行动】：①若尚未真正修改，请先完成对声明目标的实际改动并重跑验证；②若实现路径已变，请重新 submit_plan 更新 target_files 后再 finish；③若本任务本就无需改这些文件，请用 ask_human 说明理由。",
+                        "【⚠️ 交付门禁拦截打回：方案声明的目标文件与实际改动零交集，finish 未生效！】\n方案声明目标：{}\n实际改动文件：{}\n（0 Token 机械打回，终审无需介入）。\n【必须采取的行动】：①若尚未真正修改，请先完成对声明目标的实际改动并重跑验证；②若实现路径已变，请重新 submit_plan 更新 target_files（已批准方案须附 revision_reason 说明变更依据，将重开评审）后再 finish；③若本任务本就无需改这些文件，请用 ask_human 说明理由。",
                         plan_targets.unwrap_or(&[]).join(", "),
                         if actual.is_empty() { "（无：当前工作区零改动）".to_string() } else { actual.join(", ") }
                     );

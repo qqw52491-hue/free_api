@@ -649,6 +649,7 @@
             open_questions: vec![],
             intended_verification: "cargo test --lib plan_gate".to_string(),
             risk_level: "medium".to_string(),
+            revision_reason: String::new(),
         }
     }
 
@@ -657,25 +658,25 @@
         // 交叉审查 + Exploring + 未派审 → 放行
         let mut cp =
             exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
-        assert!(submit_plan_rejection(&cp).is_none());
+        assert!(submit_plan_rejection(&cp, &valid_submission()).is_none());
 
         // Auto 模式 → 不适用
         let auto = exploration_checkpoint(PlanExecutionMode::Auto, PlanPhase::Exploring, 0);
-        assert!(submit_plan_rejection(&auto).unwrap().contains("不适用"));
+        assert!(submit_plan_rejection(&auto, &valid_submission()).unwrap().contains("不适用"));
 
         // PlanApproval 模式 → 不适用（应走 ask_human）
         let approval =
             exploration_checkpoint(PlanExecutionMode::PlanApproval, PlanPhase::Exploring, 0);
-        assert!(submit_plan_rejection(&approval).unwrap().contains("不适用"));
+        assert!(submit_plan_rejection(&approval, &valid_submission()).unwrap().contains("不适用"));
 
         // 已放行 → 不适用
         let approved =
             exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Approved, 0);
-        assert!(submit_plan_rejection(&approved).unwrap().contains("已获放行"));
+        assert!(submit_plan_rejection(&approved, &valid_submission()).unwrap().contains("已获放行"));
 
         // 升级挂起 → 拒绝并指引联合会审
         cp.plan_escalation_required = Some(vec!["architect".to_string()]);
-        let rej = submit_plan_rejection(&cp).unwrap();
+        let rej = submit_plan_rejection(&cp, &valid_submission()).unwrap();
         assert!(rej.contains("联合会审"));
         assert!(rej.contains("architect"));
         cp.plan_escalation_required = None;
@@ -683,15 +684,15 @@
         // 审查轮次未闭合（已预扣未消费）→ 拒绝重复提交
         cp.plan_reviewer_retry_count = 1;
         cp.plan_reviewer_consumed = false;
-        assert!(submit_plan_rejection(&cp).unwrap().contains("在途"));
+        assert!(submit_plan_rejection(&cp, &valid_submission()).unwrap().contains("在途"));
 
         // 上一轮已消费 → 允许新一轮提交
         cp.plan_reviewer_consumed = true;
-        assert!(submit_plan_rejection(&cp).is_none());
+        assert!(submit_plan_rejection(&cp, &valid_submission()).is_none());
 
         // 预算耗尽 → 拒绝
         cp.plan_reviewer_retry_count = crate::agent::checkpoint::max_plan_reviewer_rounds();
-        assert!(submit_plan_rejection(&cp).unwrap().contains("上限"));
+        assert!(submit_plan_rejection(&cp, &valid_submission()).unwrap().contains("上限"));
     }
 
     #[test]
@@ -790,7 +791,61 @@
         assert_eq!(cp.plan_review_member_count(&db), 1);
         assert!(cp.plan_reviewer_last_dispatch.is_some());
         // 提交后门禁应把后续提交视为「轮次未闭合」
-        assert!(submit_plan_rejection(&cp).unwrap().contains("在途"));
+        assert!(submit_plan_rejection(&cp, &valid_submission()).unwrap().contains("在途"));
+    }
+
+    #[test]
+    fn test_post_approval_plan_revision_reopens_review() {
+        // 已批准 + 无理由重提 → 拒绝（防误重复提交）
+        let approved =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Approved, 1);
+        assert!(submit_plan_rejection(&approved, &valid_submission())
+            .unwrap()
+            .contains("已获放行"));
+
+        // 已批准 + 附 revision_reason → 放行进入修订轮（前轮审查已消费闭合）
+        let mut rev = valid_submission();
+        rev.revision_reason =
+            "path_guard 白名单在 workspace_root==session_tmp 下会误标 tmp 身份".to_string();
+        let mut cp =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Approved, 1);
+        cp.plan_reviewer_consumed = true;
+        assert!(submit_plan_rejection(&cp, &rev).is_none());
+
+        // 修订轮照常受审查预算约束：轮次耗尽后即使有理由也拒绝（逃生口走 ask_human）
+        cp.plan_reviewer_retry_count = crate::agent::checkpoint::max_plan_reviewer_rounds();
+        assert!(submit_plan_rejection(&cp, &rev).unwrap().contains("上限"));
+    }
+
+    #[test]
+    fn test_commit_plan_submission_supersedes_approval() {
+        // 修订提交的一致落账：阶段回退 Reviewing、旧批准痕迹作废、预算正常预扣
+        let mut cp =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Approved, 1);
+        cp.plan_reviewer_consumed = true;
+        cp.approved_target_files = Some(vec!["src/old.rs".to_string()]);
+        cp.approved_plan_summary = Some("用户批准了旧方案".to_string());
+        let db = setup_test_db();
+        let snapshot = crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::new(
+            "model-x",
+            "pro",
+            "high",
+            "persona",
+            serde_json::json!({"role": "tech_lead"}),
+        )
+        .with_batch_id("b-rev");
+        seed_review(&db, "rev-r1", &cp.run_id, "b-rev", "running", false);
+
+        let mut rev = valid_submission();
+        rev.revision_reason = "执行中发现原方案未覆盖的共享判定顺序问题".to_string();
+        cp.commit_plan_submission(rev, "b-rev", &snapshot, 20);
+
+        assert_eq!(cp.plan_phase, PlanPhase::Reviewing);
+        assert!(cp.approved_target_files.is_none());
+        assert!(cp.approved_plan_summary.is_none());
+        assert_eq!(cp.plan_reviewer_retry_count, 2);
+        assert!(!cp.plan_reviewer_consumed);
+        assert_eq!(cp.submitted_plan_step, Some(20));
     }
 
     #[test]

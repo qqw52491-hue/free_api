@@ -619,19 +619,70 @@ pub fn build_for_targets(
     pack
 }
 
-/// 覆盖校验：result 的 consumer_verdicts 必须以 "path:line" 前缀逐条裁决 refs 中每个消费点。
+/// 证据范围对账：方案把某文件引为证据（读过、用作推断依据）却未列入
+/// target_files——「引用 ≠ 管辖」。被引用文件可能依赖被修改对象的语义
+/// （如白名单判定依赖 workspace_root 取值），纯集合差集把这类文件显性
+/// 摆到审查者面前裁决，而不是靠审查者碰巧注意到。
+/// 只认物理事实：引用须能解析出磁盘文件（file:line / file#L10 / 裸路径形态），
+/// output_id、命令输出、step_N 等非文件证据不进清单；已在 target_files 中的
+/// 文件天然有审查覆盖，也不重复列出。
+pub fn evidence_scope_refs(
+    target_files: &[String],
+    evidence_refs: &[String],
+    workspace_root: Option<&Path>,
+) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for raw in evidence_refs {
+        let path = if let Some((p, _, _)) =
+            crate::agent::finish_guard::diff::parse_file_line_ref(raw)
+        {
+            Some(p)
+        } else if crate::agent::finish_guard::diff::looks_like_file_ref(raw, workspace_root) {
+            let s = raw
+                .trim()
+                .trim_matches(|c| matches!(c, '`' | '*' | '"' | '\''))
+                .trim_end_matches(['。', '，', ',', '；', ';', ')']);
+            Some(s.to_string())
+        } else {
+            None
+        };
+        let Some(path) = path else { continue };
+        let norm = path.trim().trim_start_matches("./").replace('\\', "/");
+        if norm.is_empty() {
+            continue;
+        }
+        // 已列入修改目标的文件不算"引而未改"
+        if target_files
+            .iter()
+            .any(|t| crate::agent::finish_guard::diff::file_paths_match(&norm, t))
+        {
+            continue;
+        }
+        out.insert(norm);
+    }
+    out.into_iter().collect()
+}
+
+/// 覆盖校验（通用）：result 的指定字段必须以 ref 前缀逐条裁决 refs 中每一项。
 /// refs 为空直接放行；verdicts 缺失或漏项返回违约定因（供 contract_violation 通道使用）。
-pub fn check_consumer_verdicts(refs: &[String], result: &Value) -> Result<(), String> {
+fn check_named_verdicts(
+    refs: &[String],
+    result: &Value,
+    field: &str,
+    label: &str,
+) -> Result<(), String> {
     if refs.is_empty() {
         return Ok(());
     }
     let verdicts = result
-        .get("consumer_verdicts")
+        .get(field)
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
             format!(
-                "缺少必填字段 consumer_verdicts：影响面包附带了 {} 个消费点须逐条裁决",
-                refs.len()
+                "缺少必填字段 {}：审查包附带了 {} 个{}须逐条裁决",
+                field,
+                refs.len(),
+                label
             )
         })?;
     let texts: Vec<&str> = verdicts.iter().filter_map(|v| v.as_str()).collect();
@@ -648,12 +699,25 @@ pub fn check_consumer_verdicts(refs: &[String], result: &Value) -> Result<(), St
         Ok(())
     } else {
         Err(format!(
-            "consumer_verdicts 漏裁决影响面消费点（共 {} 个，缺 {} 个）：{}",
+            "{} 漏裁决{}（共 {} 个，缺 {} 个）：{}",
+            field,
+            label,
             refs.len(),
             missing.len(),
             missing.join(", ")
         ))
     }
+}
+
+/// 覆盖校验：result 的 consumer_verdicts 必须以 "path:line" 前缀逐条裁决 refs 中每个消费点。
+pub fn check_consumer_verdicts(refs: &[String], result: &Value) -> Result<(), String> {
+    check_named_verdicts(refs, result, "consumer_verdicts", "跨文件消费点")
+}
+
+/// 覆盖校验：result 的 evidence_scope_verdicts 必须以路径前缀逐条裁决
+/// refs 中每个"引为证据但未列入修改目标"的文件。
+pub fn check_evidence_scope_verdicts(refs: &[String], result: &Value) -> Result<(), String> {
+    check_named_verdicts(refs, result, "evidence_scope_verdicts", "证据范围文件")
 }
 
 #[cfg(test)]
@@ -781,6 +845,49 @@ mod tests {
 
         // 空 refs 豁免
         assert!(check_consumer_verdicts(&[], &no_field).is_ok());
+    }
+
+    /// 证据范围对账：引为证据但未列入 target_files 的文件必须浮出水面；
+    /// 已列入目标的、非文件证据、目标文件自身引用都不进清单。
+    #[test]
+    fn evidence_scope_diffs_cited_but_unmodified_files() {
+        let dir = std::env::temp_dir().join(format!("evidence_scope_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "src/agent/path_guard.rs", "pub fn check() {}\n");
+        write(&dir, "src/agent/host_verify.rs", "pub fn run() {}\n");
+
+        let targets = vec!["src/agent/main_loop.rs".to_string()];
+        let evidence = vec![
+            "src/agent/main_loop.rs:532".to_string(),       // 目标文件自身 → 不算差集
+            "src/agent/path_guard.rs:65-120".to_string(),   // 引而未改 → 进清单
+            "src/agent/host_verify.rs".to_string(),          // 裸路径引用 → 进清单
+            "output_id:abc123".to_string(),                  // 非文件证据 → 排除
+            "cargo check → exit 0".to_string(),              // 命令输出 → 排除
+        ];
+        let refs = evidence_scope_refs(&targets, &evidence, Some(&dir));
+        assert_eq!(
+            refs,
+            vec![
+                "src/agent/host_verify.rs".to_string(),
+                "src/agent/path_guard.rs".to_string(),
+            ],
+            "只有引而未改的文件进清单: {:?}",
+            refs
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// evidence_scope_verdicts 覆盖校验：漏项/缺字段判违约，空 refs 豁免。
+    #[test]
+    fn evidence_scope_verdict_coverage() {
+        let refs = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let ok = json!({"evidence_scope_verdicts": ["src/a.rs => HOLDS: 仅作背景", "src/b.rs => BROKEN: 依赖被改语义"]});
+        assert!(check_evidence_scope_verdicts(&refs, &ok).is_ok());
+        let missing = json!({"evidence_scope_verdicts": ["src/a.rs => HOLDS: x"]});
+        assert!(check_evidence_scope_verdicts(&refs, &missing).unwrap_err().contains("src/b.rs"));
+        let no_field = json!({"findings": []});
+        assert!(check_evidence_scope_verdicts(&refs, &no_field).is_err());
+        assert!(check_evidence_scope_verdicts(&[], &no_field).is_ok());
     }
 
     #[test]

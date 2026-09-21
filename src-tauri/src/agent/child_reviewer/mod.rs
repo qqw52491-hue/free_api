@@ -111,6 +111,26 @@ pub async fn spawn_child_reviewer(
             impact_pack_refs.len()
         )
     };
+    // 证据范围对账清单：方案引为证据但未列入拟修改目标的文件。
+    // 「引用 ≠ 管辖」——被引用文件可能依赖被改对象的语义，差集迫使审查者
+    // 逐项裁决其语义在新方案下是否仍成立，而非靠审查者碰巧注意到。
+    let evidence_scope_refs: Vec<String> = params
+        .get("evidence_scope_refs")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let evidence_scope_clause = if evidence_scope_refs.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n        9. 【证据范围强制逐条裁决】方案把 {} 个文件引为证据却未列入修改目标（见证据摘录【📎 证据范围对账】）：这些文件可能依赖被改对象的语义。输出必须额外包含 \"evidence_scope_verdicts\": [\"<path> => HOLDS|BROKEN|NA: 一句话理由\", ...] 字段，逐条覆盖——语义在新方案下仍成立判 HOLDS，被破坏则判 BROKEN 并在 findings 中给出 blocking 缺陷与建议补入 target_files，纯背景证据判 NA；漏项按契约违例判无效重修。本字段经宿主显式授权，不受第 7 条\"禁止额外字段\"限制。",
+            evidence_scope_refs.len()
+        )
+    };
     // 1v1 方案评审定稿权（plan_submit 派发标记）：Tech Lead 是方案负责人而非
     // 仅审批者——方向对但细节有偏差时直接修订定稿放行，省掉"打回→执行方重提"
     // 的一整轮往返。四个扁平可选字段（ContractSchema 无 object 类型故平铺）。
@@ -119,7 +139,7 @@ pub async fn spawn_child_reviewer(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let finalize_clause = if is_plan_review {
-        "\n        9. 【方案定稿权】你是本方案的定稿负责人而非仅审批者：若方案方向正确但根因/范围/验证方式有偏差，decision 取 \"approved\" 并额外输出可选字段修订对应项——\"revised_plan_summary\"(string)、\"revised_root_cause\"(string)、\"revised_target_files\"(string[])、\"revised_verification\"(string)；非空字段将覆盖提交方版本成为最终执行方案，修订须基于证据而非凭空重写。方案无需修订时四个字段全部省略。这些字段经宿主显式授权，不受第 7 条\"禁止额外字段\"限制。"
+        "\n        10. 【方案定稿权】你是本方案的定稿负责人而非仅审批者：若方案方向正确但根因/范围/验证方式有偏差，decision 取 \"approved\" 并额外输出可选字段修订对应项——\"revised_plan_summary\"(string)、\"revised_root_cause\"(string)、\"revised_target_files\"(string[])、\"revised_verification\"(string)；非空字段将覆盖提交方版本成为最终执行方案，修订须基于证据而非凭空重写。方案无需修订时四个字段全部省略。这些字段经宿主显式授权，不受第 7 条\"禁止额外字段\"限制。"
     } else {
         ""
     };
@@ -169,7 +189,7 @@ pub async fn spawn_child_reviewer(
         } else {
             "不得调用任何工具：只评估证据包内的事实，证据不足时在 missing_evidence 说明。".to_string()
         }
-    ) + &consumer_clause + finalize_clause;
+    ) + &consumer_clause + &evidence_scope_clause + finalize_clause;
     let specialized_context = params
         .get("specialized_context")
         .and_then(|v| v.as_str())
@@ -219,6 +239,17 @@ pub async fn spawn_child_reviewer(
                     name: "consumer_verdicts".to_string(),
                     field_type: crate::agent::protocol::ContractFieldType::StringArray,
                     description: "影响面消费点逐条裁决：每个消费点一条 \"path:line => HOLDS|BROKEN|NA: 理由\"".to_string(),
+                    required: true,
+                    allowed_values: None,
+                });
+            }
+            if !evidence_scope_refs.is_empty()
+                && !schema.fields.iter().any(|f| f.name == "evidence_scope_verdicts")
+            {
+                schema.fields.push(crate::agent::protocol::ContractFieldDef {
+                    name: "evidence_scope_verdicts".to_string(),
+                    field_type: crate::agent::protocol::ContractFieldType::StringArray,
+                    description: "证据范围逐条裁决：每个被引为证据但未列入修改目标的文件一条 \"path => HOLDS|BROKEN|NA: 理由\"".to_string(),
                     required: true,
                     allowed_values: None,
                 });
@@ -587,6 +618,26 @@ pub async fn spawn_child_reviewer(
         if let Err(err) =
             crate::agent::impact_pack::check_consumer_verdicts(&impact_pack_refs, &result_val)
         {
+            let result_json = serde_json::to_string(&result_val).ok();
+            finish_child_run_with_history(
+                &db_clone,
+                &child_run_id_clone,
+                "invalid_output",
+                duration_ms,
+                completion_tokens,
+                prompt_tokens,
+                Some(ChildErrorKind::ContractViolation(err)),
+                result_json.as_deref(),
+                serde_json::to_string(&messages).ok().as_deref(),
+            );
+            return;
+        }
+        // 证据范围覆盖校验：被引为证据但未列入修改目标的文件必须被
+        // evidence_scope_verdicts 逐条裁决——同样是"拿到材料却逐条不看"的防线。
+        if let Err(err) = crate::agent::impact_pack::check_evidence_scope_verdicts(
+            &evidence_scope_refs,
+            &result_val,
+        ) {
             let result_json = serde_json::to_string(&result_val).ok();
             finish_child_run_with_history(
                 &db_clone,

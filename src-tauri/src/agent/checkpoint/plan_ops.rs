@@ -315,9 +315,13 @@ impl AgentCheckpoint {
     ) {
         self.submitted_plan = Some(submission);
         self.submitted_plan_step = Some(step_id);
-        if !self.plan_phase.is_approved() {
-            self.plan_phase = PlanPhase::Reviewing;
-        }
+        // 新提交一律回到审查中：批准后修订（revision_reason 通道）同样须重审，
+        // 旧放行状态不得沿用——写入门禁随之重新生效，直至新方案过审。
+        self.plan_phase = PlanPhase::Reviewing;
+        // 被取代方案的批准痕迹作废：旧 target_files 不再约束新方案的 diff 对账，
+        // 人工批准留痕属于旧方案，修订未经人工确认不得继承。
+        self.approved_target_files = None;
+        self.approved_plan_summary = None;
         let _ = self.reserve_plan_review_round();
         // 批次锚点 = 快照派发时盖在行上的 batch_id（plan_submit 生成后透传）
         self.set_plan_review_batch(batch_id, 1);

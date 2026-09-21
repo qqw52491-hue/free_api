@@ -132,6 +132,11 @@ pub struct PlanSubmission {
     /// 自评风险等级：low | medium | high（可选）
     #[serde(default)]
     pub risk_level: String,
+    /// 方案修订理由（仅当已有方案获放行后再次提交时必填）：陈述执行中新发现的
+    /// 证据为何与已批准方案冲突。批准后重提视为修订轮——重开 Tech Lead 评审、
+    /// 照常校验证据并消耗审查预算；留空则按误重复提交拒绝。
+    #[serde(default)]
+    pub revision_reason: String,
 }
 
 /// 终态预检（prepare_finish）：模型请求宿主按 finish 同一套门禁做交付就绪评估。

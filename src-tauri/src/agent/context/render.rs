@@ -165,7 +165,7 @@ impl ContextRenderer {
                 ""
             };
             return format!(
-                "【方案门禁状态】🟢 门禁已放行{}\n指引: 门禁放行中，写入工具已全面解锁，可按方案执行写入并验证；新一批写入前的状态变更会反映在本卡。\n\n",
+                "【方案门禁状态】🟢 门禁已放行{}\n指引: 按已批准方案执行写入并验证。若执行中新证据、验证失败或已批准假设被推翻，须停止沿用旧方案并重新 submit_plan，填写 revision_reason 且提交更新后的 evidence_refs；仅措辞优化、主观偏好或无新增证据不得重开。修订会撤销旧批准、重新锁定写入并消耗审查轮次。\n\n",
                 waiver_hint
             );
         }
@@ -378,6 +378,9 @@ mod tests {
         )));
         assert!(out.contains("门禁已放行"));
         assert!(!out.contains("将被拦截"), "放行后不应再出现拦截警告: {out}");
+        assert!(out.contains("revision_reason"), "批准后应显示有证据修订通道: {out}");
+        assert!(out.contains("无新增证据不得重开"), "应抑制无依据反复修订: {out}");
+        assert!(out.contains("重新锁定写入"), "应披露修订的门禁后果: {out}");
     }
 
     #[test]

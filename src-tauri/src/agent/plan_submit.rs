@@ -36,7 +36,10 @@ pub async fn handle_submit_plan(
     };
 
     // ---- 适用性门禁（纯 checkpoint 判定）----
-    if let Some(reason) = crate::agent::plan_gate::submit_plan_rejection(checkpoint) {
+    let is_revision = checkpoint.plan_phase.is_approved();
+    if let Some(reason) =
+        crate::agent::plan_gate::submit_plan_rejection(checkpoint, submission)
+    {
         let route = if reason.contains("审查轮数已达上限") {
             "plan_gatekeeper:reviewer_retry_limit"
         } else if reason.contains("在途") {
@@ -117,10 +120,24 @@ pub async fn handle_submit_plan(
         .chars()
         .take(400)
         .collect();
-    let question: String = format!("【方案评审·第 {} 轮】{}", discussion_round, summary_flat)
-        .chars()
-        .take(1900)
-        .collect();
+    // 修订轮上下文共享：被取代的已批准方案 + 前轮裁决一并交给 Tech Lead，
+    // 审查者在既有讨论基础上裁决"变更是否成立"，而不是零起点重审。
+    let superseded_summary: Option<String> = if is_revision {
+        checkpoint.submitted_plan.as_ref().map(|p| {
+            let s: String = p.plan_summary.trim().chars().take(800).collect();
+            s
+        })
+    } else {
+        None
+    };
+    let question: String = if is_revision {
+        format!("【方案修订评审·第 {} 轮】{}", discussion_round, summary_flat)
+    } else {
+        format!("【方案评审·第 {} 轮】{}", discussion_round, summary_flat)
+    }
+    .chars()
+    .take(1900)
+    .collect();
 
     let mut evidence_excerpt = format!(
         "方案摘要：{}\n根因假设：{}\n拟修改文件：{}",
@@ -154,6 +171,36 @@ pub async fn handle_submit_plan(
     if !submission.risk_level.trim().is_empty() {
         evidence_excerpt.push_str(&format!("\n自评风险等级：{}", submission.risk_level.trim()));
     }
+    if is_revision {
+        let prev_verdict = checkpoint
+            .plan_review_deliveries
+            .values()
+            .find_map(|d| d.get_extra_str("decision"))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "（无前轮裁决记录）".to_string());
+        evidence_excerpt.push_str(&format!(
+            "\n\n【方案修订轮】本提交取代此前已批准方案。修订理由：{}\n被取代方案摘要：{}\n前轮审查裁决：{}",
+            submission.revision_reason.trim(),
+            superseded_summary.as_deref().unwrap_or("（无）"),
+            prev_verdict,
+        ));
+    }
+    // ---- 证据范围对账（机械差集，非语义判断）----
+    // 「引为证据 ≠ 列入修改目标」：被引用文件可能依赖被改对象的语义——
+    // workspace_leak 实测教训：方案引用 path_guard.rs 却未列入 target_files，
+    // 而其判定顺序恰被 workspace_root 的新取值颠覆。差集只摆事实不判对错，
+    // 逐项 HOLDS/BROKEN/NA 裁决义务由审查输出侧强制覆盖。
+    let evidence_scope_refs = crate::agent::impact_pack::evidence_scope_refs(
+        &target_files,
+        &evidence_refs,
+        Some(workspace_dir),
+    );
+    if !evidence_scope_refs.is_empty() {
+        evidence_excerpt.push_str(&format!(
+            "\n\n【📎 证据范围对账】以下文件被方案引为证据但未列入拟修改目标：{}",
+            evidence_scope_refs.join(", ")
+        ));
+    }
     let evidence_excerpt: String = evidence_excerpt.chars().take(5500).collect();
     let evidence_refs: Vec<String> = evidence_refs.iter().map(|r| flatten(r)).collect();
 
@@ -167,6 +214,9 @@ pub async fn handle_submit_plan(
         "open_questions": submission.open_questions,
         "intended_verification": submission.intended_verification.trim(),
         "risk_level": submission.risk_level.trim(),
+        "is_plan_revision": is_revision,
+        "revision_reason": submission.revision_reason.trim(),
+        "superseded_plan_summary": superseded_summary,
     });
     // ---- 角色卡 input_schema 必填校验（输入侧硬约束，与输出侧 custom_schema 对称）----
     if let Err(err) =
@@ -215,6 +265,9 @@ pub async fn handle_submit_plan(
     });
     if !impact.refs.is_empty() {
         effective_params["impact_pack_refs"] = json!(impact.refs);
+    }
+    if !evidence_scope_refs.is_empty() {
+        effective_params["evidence_scope_refs"] = json!(evidence_scope_refs);
     }
     let specialized_context = match (specialized_context, impact.section.is_empty()) {
         (Some(spec), false) => Some(format!("{}\n\n{}", spec, impact.section)),
@@ -297,11 +350,20 @@ pub async fn handle_submit_plan(
             let _ = child_run_id;
             DispatchResult { view: None,
                 success: true,
-                stdout: format!(
-                    "【✅ 方案已提交并进入审查】结构化方案已落账，Tech Lead 方案评审已异步派发（child_run_id: {}，第 {} 轮）。\n\
-                     请调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待裁决；结论注入后按 decision 行动：approved 放行写入、rebuttal 修订后重审、escalate 按指定专家派联合会审。",
-                    child_run_id, discussion_round, child_run_id
-                ),
+                stdout: if is_revision {
+                    format!(
+                        "【✅ 修订方案已提交并重开审查】原放行状态已撤销，写入门禁重新生效。Tech Lead 修订评审已异步派发（child_run_id: {}，第 {} 轮）。\n\
+                         请调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待裁决；结论注入后按 decision 行动：approved 恢复写入、rebuttal 继续修订重审、escalate 按指定专家派联合会审。\n\
+                         【修订轮附带义务】获批后请用 todo_update 对照新方案核对任务台账：作废与新方案无关的待办、补充新工作项；已完成的有效工作保持 done 不受影响。",
+                        child_run_id, discussion_round, child_run_id
+                    )
+                } else {
+                    format!(
+                        "【✅ 方案已提交并进入审查】结构化方案已落账，Tech Lead 方案评审已异步派发（child_run_id: {}，第 {} 轮）。\n\
+                         请调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待裁决；结论注入后按 decision 行动：approved 放行写入、rebuttal 修订后重审、escalate 按指定专家派联合会审。",
+                        child_run_id, discussion_round, child_run_id
+                    )
+                },
                 stderr: String::new(),
                 route: "submit_plan:dispatched".to_string(),
             }

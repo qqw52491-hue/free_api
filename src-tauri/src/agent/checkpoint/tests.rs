@@ -971,6 +971,7 @@
             open_questions: Vec::new(),
             intended_verification: "cargo test".to_string(),
             risk_level: "medium".to_string(),
+            revision_reason: String::new(),
         });
 
         let mut extra = std::collections::HashMap::new();

@@ -219,7 +219,10 @@ pub(crate) fn adjudicate_exploration_extension_with(
 /// submit_plan 适用性预检（纯 checkpoint 判定，不含 DB 在途行检查）。
 /// 返回 Some(reason) 表示当前状态不可用提交；None 放行。
 /// 覆盖：模式/阶段/升级挂起/未闭合审查轮次/预算上限。
-pub(crate) fn submit_plan_rejection(checkpoint: &AgentCheckpoint) -> Option<String> {
+pub(crate) fn submit_plan_rejection(
+    checkpoint: &AgentCheckpoint,
+    submission: &crate::agent::types::PlanSubmission,
+) -> Option<String> {
     if checkpoint.plan_mode != PlanExecutionMode::CrossReview {
         return Some(format!(
             "【ℹ️ submit_plan 不适用】当前执行模式为 {:?}，方案提交通道仅在交叉审查模式（cross_review）下有效。\n\
@@ -227,9 +230,11 @@ pub(crate) fn submit_plan_rejection(checkpoint: &AgentCheckpoint) -> Option<Stri
             checkpoint.plan_mode
         ));
     }
-    if checkpoint.plan_phase.is_approved() {
+    if checkpoint.plan_phase.is_approved() && submission.revision_reason.trim().is_empty() {
         return Some(
-            "【ℹ️ submit_plan 不适用】方案已获放行，无需再次提交。请按已批准方案执行写入与验证。"
+            "【ℹ️ submit_plan 不适用】方案已获放行，无需再次提交。请按已批准方案执行写入与验证。\n\
+             若执行中新发现的证据与已批准方案冲突（如取证引用过的文件在新语义下不再成立），\
+             请附 revision_reason 说明冲突证据重新提交——修订轮将重开 Tech Lead 评审并消耗审查预算。"
                 .to_string(),
         );
     }

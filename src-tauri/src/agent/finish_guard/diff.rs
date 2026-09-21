@@ -559,7 +559,7 @@ fn ref_statically_locatable(
 /// - 无分隔符：整条引用本身是磁盘上可定位的路径 → 代码域（缺行号的裸路径引用）。
 /// 其余（`pacman -Qs x 返回空`、`output_id:xx`、`POST /api → 200` 等）→ 非代码证据域。
 /// 判定只认物理事实（磁盘存在性/路径形态），不做自然语言猜测。
-fn looks_like_file_ref(raw: &str, workspace_root: Option<&std::path::Path>) -> bool {
+pub(crate) fn looks_like_file_ref(raw: &str, workspace_root: Option<&std::path::Path>) -> bool {
     let s = raw
         .trim()
         .trim_matches(|c| matches!(c, '`' | '*' | '"' | '\''))
