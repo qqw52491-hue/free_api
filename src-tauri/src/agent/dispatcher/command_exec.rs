@@ -20,6 +20,87 @@ use tauri::{AppHandle, Emitter, State};
 
 use super::*;
 
+/// MCP 出站路径归一：外部进程不认识宿主侧的 "tmp/" 快捷路由（会按自己的 cwd
+/// 解析到错误位置），也不该猜"相对谁"。把 path 类参数值翻译成绝对路径再透传：
+///   tmp/x 或 ./tmp/x  → 会话专属临时目录；
+///   其他相对路径形态   → 当前工作区根（自由会话回落到会话 tmp，与内部工具一致）；
+///   绝对路径/URL/纯标识符（无分隔符无扩展名）→ 原样透传，不碰契约。
+pub(crate) fn looks_like_path_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    k.contains("path")
+        || k.contains("file")
+        || k.contains("dir")
+        || k.contains("folder")
+        || k.contains("output")
+        || k.contains("save")
+        || k.contains("dest")
+        || matches!(k.as_str(), "src" | "source" | "target" | "root" | "workspace" | "filename")
+}
+
+pub(crate) fn route_path_value(raw: &str, session_tmp: &std::path::Path, effective_ws: &std::path::Path) -> Option<String> {
+    let v = raw.trim();
+    if v.is_empty() || v.contains("://") || v.starts_with('~') {
+        return None;
+    }
+    // Windows 盘符/UNC 已是绝对形态
+    if v.len() >= 2 && v.as_bytes()[1] == b':' && v.as_bytes()[0].is_ascii_alphabetic() {
+        return None;
+    }
+    if let Some(rel) = v.strip_prefix("./tmp/").or_else(|| v.strip_prefix("tmp/")) {
+        if rel.is_empty() || rel.split('/').any(|seg| seg == "..") {
+            return None;
+        }
+        return Some(session_tmp.join(rel).to_string_lossy().into_owned());
+    }
+    let v = v.strip_prefix("./").unwrap_or(v);
+    let p = std::path::Path::new(v);
+    if p.is_absolute() {
+        return None;
+    }
+    // 相对形态必须像路径（含分隔符或扩展名）；纯标识符（如 "presentation_1"）不动
+    if !v.contains('/') && !v.contains('\\') && p.extension().is_none() {
+        return None;
+    }
+    if v.split(['/', '\\']).any(|seg| seg == "..") {
+        return None;
+    }
+    Some(effective_ws.join(v).to_string_lossy().into_owned())
+}
+
+pub(crate) fn normalize_mcp_path_params(
+    v: &mut serde_json::Value,
+    session_tmp: &std::path::Path,
+    effective_ws: &std::path::Path,
+) -> usize {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut n = 0;
+            for (key, val) in map.iter_mut() {
+                let rewritten = match val {
+                    serde_json::Value::String(s) if looks_like_path_key(key) => {
+                        route_path_value(s, session_tmp, effective_ws)
+                    }
+                    _ => None,
+                };
+                if let Some(new_val) = rewritten {
+                    if let serde_json::Value::String(s) = val {
+                        *s = new_val;
+                    }
+                    n += 1;
+                } else {
+                    n += normalize_mcp_path_params(val, session_tmp, effective_ws);
+                }
+            }
+            n
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .map(|i| normalize_mcp_path_params(i, session_tmp, effective_ws))
+            .sum(),
+        _ => 0,
+    }
+}
+
 /// 执行单条指令的内部路由逻辑（4大核心原生工具 + MCP 插件路由，彻底杜绝历史兼容包袱）
 pub(crate) fn execute_command_inner(
     db: &DbState,
@@ -193,7 +274,25 @@ pub(crate) fn execute_command_inner(
             };
         }
         // MCP 子工具参数必须逐字按模型提供的契约透传；宿主不得补全、别名映射或截断。
-        let clean_params = params.clone();
+        // 唯一例外：tmp/ 与裸相对路径是宿主侧的路由约定——外部进程按其自身 cwd
+        // 解析会落到错误位置，这里统一翻译成绝对路径（模型写相对或绝对形式都正确）。
+        let mut clean_params = params.clone();
+        {
+            let session_tmp = crate::agent::path_guard::get_session_tmp_dir(session_id);
+            let effective_ws = workspace_root
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| session_tmp.clone());
+            let rewritten =
+                normalize_mcp_path_params(&mut clean_params, &session_tmp, &effective_ws);
+            if rewritten > 0 {
+                println!(
+                    "[mcp] 路径参数归一 {} 处（tmp/→{}, 相对→{}）",
+                    rewritten,
+                    session_tmp.display(),
+                    effective_ws.display()
+                );
+            }
+        }
         println!(
             "执行动作调用外部插件: {}/{} (会话: {}, 参数: {:?})",
             plugin_name, tool_name, session_id, clean_params

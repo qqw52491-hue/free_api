@@ -767,3 +767,47 @@
 
         let _ = std::fs::remove_dir_all(base);
     }
+
+    #[test]
+    fn mcp_outbound_tmp_and_relative_paths_become_absolute() {
+        let tmp = std::path::Path::new("/data/tmp/sess-1");
+        let ws = std::path::Path::new("/repo/proj");
+        let mut params = json!({
+            "file_path": "tmp/report.pptx",
+            "output_dir": "./tmp/out",
+            "source": "src/main.rs",
+            "save_to": "plain_name.txt",
+            "presentation_id": "presentation_1",
+            "dest_url": "https://x.dev/tmp/a",
+            "absolute": "/etc/passwd",
+            "nested": {"in": [{"target_file": "tmp/deep.csv"}]}
+        });
+        let n = normalize_mcp_path_params(&mut params, tmp, ws);
+        assert_eq!(n, 5, "tmp/×2 + 相对×2 + 嵌套×1");
+        assert_eq!(params["file_path"], "/data/tmp/sess-1/report.pptx");
+        assert_eq!(params["output_dir"], "/data/tmp/sess-1/out");
+        assert_eq!(params["source"], "/repo/proj/src/main.rs");
+        assert_eq!(params["save_to"], "/repo/proj/plain_name.txt");
+        assert_eq!(params["nested"]["in"][0]["target_file"], "/data/tmp/sess-1/deep.csv");
+        // 不该碰的：纯标识符、URL、绝对路径
+        assert_eq!(params["presentation_id"], "presentation_1");
+        assert_eq!(params["dest_url"], "https://x.dev/tmp/a");
+        assert_eq!(params["absolute"], "/etc/passwd");
+    }
+
+    #[test]
+    fn mcp_outbound_path_normalization_rejects_traversal_and_odd_values() {
+        let tmp = std::path::Path::new("/data/tmp/sess-1");
+        let ws = std::path::Path::new("/repo/proj");
+        let mut params = json!({
+            "file_path": "tmp/../escape.txt",
+            "other_path": "../up.txt",
+            "win_abs": "C:\\Windows\\x.dll",
+            "empty_path": "  ",
+            "title": "tmp/not-a-path-key"
+        });
+        let n = normalize_mcp_path_params(&mut params, tmp, ws);
+        assert_eq!(n, 0, "逃逸/绝对/空值/非path键一律不碰");
+        assert_eq!(params["file_path"], "tmp/../escape.txt");
+        assert_eq!(params["title"], "tmp/not-a-path-key", "非 path 键的字符串值不受路由约定约束");
+    }
