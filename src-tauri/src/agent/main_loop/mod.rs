@@ -114,7 +114,13 @@ async fn run_agent_main_loop_in_workspace_inner(
         let w_run = run_id.clone();
         let w_goal = goal.clone();
         tauri::async_runtime::spawn(async move {
-            const STALL_THRESHOLD_SECS: u64 = 900;
+            // 阈值 env 可调：评测短周期迭代用小阈值快速暴露挂点，
+            // 生产默认 900s 高于单步最长合法耗时（LLM 看门狗 660s + 派发余量）。
+            let stall_threshold_secs: u64 = std::env::var("FREE_API_STALL_SECS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .filter(|v| *v >= 60)
+                .unwrap_or(900);
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 let status: Option<String> = w_db
@@ -139,7 +145,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let idle = now.saturating_sub(probe.load(std::sync::atomic::Ordering::Relaxed));
-                if idle <= STALL_THRESHOLD_SECS {
+                if idle <= stall_threshold_secs {
                     continue;
                 }
                 let phase = crate::agent::checkpoint::load_checkpoint(&w_db, &w_run)

@@ -167,6 +167,10 @@ pub(super) async fn dispatch_child_reviewer(
                             .get("last_verify_log")
                             .or_else(|| child_params.get("verify_log"))
                             .and_then(|v| v.as_str());
+                        crate::agent::control::mark_stage(
+                            ctx.final_session_id,
+                            "child_reviewer:focus_context",
+                        );
                         if let Some(spec_ctx) = crate::agent::context_collector::assemble_focus_context(
                             &focus_domains,
                             ctx.workspace_dir,
@@ -328,6 +332,10 @@ pub(super) async fn dispatch_child_reviewer(
                 snapshot = snapshot.with_specialized_context(spec);
             }
 
+            crate::agent::control::mark_stage(
+                ctx.final_session_id,
+                "child_reviewer:envelope_spawn",
+            );
             match snapshot
                 .spawn(
                     Some(ctx.app.clone()),
