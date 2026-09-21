@@ -218,7 +218,7 @@ impl ContextRenderer {
                 );
             }
             return format!(
-                "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）\n指引: 首次写入前必须先完成方案审查：证据成熟后输出 submit_plan 提交结构化方案（宿主自动派发 Tech Lead），或调用 child_reviewer 手动派发；直接写工具将被门禁拦截。\n\n",
+                "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）\n指引: 首次写入前必须先完成方案审查：证据成熟后输出 submit_plan 提交结构化方案（宿主自动派发 Tech Lead）——submit_plan 是顶层独立动作：单独输出 {{\"submit_plan\": {{...}}}}，勿放进 tool/action/params；或调用 child_reviewer 手动派发；直接写工具将被门禁拦截。\n\n",
                 gate.reviewer_budget_used, gate.reviewer_budget_max
             );
         }

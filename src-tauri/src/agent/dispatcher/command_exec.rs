@@ -416,12 +416,23 @@ pub(crate) fn execute_command_inner(
     };
 
     let builtin_list = crate::agent::prompt_assembly::build_builtin_tools_compact_list();
+    // 顶层独立动作被误当工具调用：模型熟悉的 {"tool","action","params"} 形状
+    // 不适用于方案提交/交付预检这类状态转换动作，报错须点破格式而非只说"拼写错"。
+    let standalone_hint = if matches!(tool, "submit_plan" | "prepare_finish") {
+        format!(
+            "\n提示：'{}' 是顶层独立动作而非工具——请单独输出 {{\"{}\": {{...}}}}，不要附带 tool/action/params。",
+            tool, tool
+        )
+    } else {
+        String::new()
+    };
     DispatchResult { view: None,
         stdout: String::new(),
         stderr: format!(
-            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！\n可用原生内置工具：{}；{}\n外部 MCP 工具调用格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
+            "❌ 未知工具 tool='{}' (action='{}')。请检查拼写！{}\n可用原生内置工具：{}；{}\n外部 MCP 工具调用格式为：{{\"tool\": \"插件名/工具名\", \"command\": {{...}}}}。",
             tool,
             action,
+            standalone_hint,
             builtin_list,
             mcp_guide
         ),
