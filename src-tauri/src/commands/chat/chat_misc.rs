@@ -78,6 +78,14 @@ pub async fn fetch_url_markdown(url: String) -> Result<String, String> {
 pub fn resolve_safe_artifact_path(raw: &str) -> Result<std::path::PathBuf, String> {
     let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
     let clean = trimmed.strip_prefix("file://").unwrap_or(trimmed).trim();
+    // 显式作用域 URI：session-tmp://x ≡ tmp/x（与写入侧路由同一约定）
+    let scheme_stripped;
+    let clean = if let Some(rest) = clean.strip_prefix("session-tmp://") {
+        scheme_stripped = format!("tmp/{}", rest.trim_start_matches('/'));
+        scheme_stripped.as_str()
+    } else {
+        clean
+    };
     if clean.is_empty() || clean == "[object Object]" {
         return Err("未提供有效的文件路径".to_string());
     }

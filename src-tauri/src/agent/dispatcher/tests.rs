@@ -775,6 +775,8 @@
         let mut params = json!({
             "file_path": "tmp/report.pptx",
             "output_dir": "./tmp/out",
+            "out_path": "session-tmp://chart.png",
+            "target_dir": "workspace://docs/spec.md",
             "source": "src/main.rs",
             "save_to": "plain_name.txt",
             "presentation_id": "presentation_1",
@@ -783,9 +785,11 @@
             "nested": {"in": [{"target_file": "tmp/deep.csv"}]}
         });
         let n = normalize_mcp_path_params(&mut params, tmp, ws);
-        assert_eq!(n, 5, "tmp/×2 + 相对×2 + 嵌套×1");
+        assert_eq!(n, 7, "tmp/×2 + URI×2 + 相对×2 + 嵌套×1");
         assert_eq!(params["file_path"], "/data/tmp/sess-1/report.pptx");
         assert_eq!(params["output_dir"], "/data/tmp/sess-1/out");
+        assert_eq!(params["out_path"], "/data/tmp/sess-1/chart.png");
+        assert_eq!(params["target_dir"], "/repo/proj/docs/spec.md");
         assert_eq!(params["source"], "/repo/proj/src/main.rs");
         assert_eq!(params["save_to"], "/repo/proj/plain_name.txt");
         assert_eq!(params["nested"]["in"][0]["target_file"], "/data/tmp/sess-1/deep.csv");

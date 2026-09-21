@@ -39,6 +39,18 @@ pub(crate) fn looks_like_path_key(key: &str) -> bool {
 
 pub(crate) fn route_path_value(raw: &str, session_tmp: &std::path::Path, effective_ws: &std::path::Path) -> Option<String> {
     let v = raw.trim();
+    // 显式作用域 URI（宿主私有 scheme，非真 URL——只做前缀剥头，容忍 2/3 斜杠）：
+    //   session-tmp://x → 会话临时目录；workspace://x → 当前工作区根。
+    // 放在 :// 通用放行之前，我们自己的 scheme 必须被翻译。
+    for (scheme, root) in [("session-tmp://", session_tmp), ("workspace://", effective_ws)] {
+        if let Some(rest) = v.strip_prefix(scheme) {
+            let rel = rest.trim_start_matches('/');
+            if rel.is_empty() || rel.split('/').any(|seg| seg == "..") {
+                return None;
+            }
+            return Some(root.join(rel).to_string_lossy().into_owned());
+        }
+    }
     if v.is_empty() || v.contains("://") || v.starts_with('~') {
         return None;
     }

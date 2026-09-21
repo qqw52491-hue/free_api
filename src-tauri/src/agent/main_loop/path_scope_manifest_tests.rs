@@ -56,6 +56,7 @@
                 "register_file",
                 "无需也不许",
                 "tmp/",
+                "session-tmp://",
             ] {
                 assert!(
                     card.contains(anchor),
@@ -63,6 +64,23 @@
                 );
             }
         }
+    }
+
+    /// 显式作用域 URI 的声明归一：session-tmp://x ≡ tmp/x（对账同形态），
+    /// workspace://x ≡ 项目相对路径——与 path_guard/MCP 出站归一同一约定。
+    #[test]
+    fn scope_uri_declared_forms_normalize_to_canonical() {
+        use super::normalize_tmp_declared;
+        let tmp = PathBuf::from("/data/free-api-chat/tmp/sid-3");
+        assert_eq!(normalize_tmp_declared("session-tmp://a.pptx", &tmp), "tmp/a.pptx");
+        assert_eq!(normalize_tmp_declared("session-tmp:///sub/b.png", &tmp), "tmp/sub/b.png");
+        assert_eq!(normalize_tmp_declared("workspace://src/main.rs", &tmp), "src/main.rs");
+        // 物理绝对路径与原形态不受影响
+        assert_eq!(
+            normalize_tmp_declared("/data/free-api-chat/tmp/sid-3/c.txt", &tmp),
+            "tmp/c.txt"
+        );
+        assert_eq!(normalize_tmp_declared("tmp/d.md", &tmp), "tmp/d.md");
     }
 
     /// 自由会话卡片必须钉死"未绑定工作区 + tmp 是暂存区非工作区"的语义——

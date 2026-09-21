@@ -17,7 +17,10 @@ pub fn get_session_tmp_dir(session_id: &str) -> PathBuf {
 /// 判定给定路径是否物理位于当前会话临时目录或全局会话临时根目录下，或是 tmp/ 相对快捷路径
 pub fn is_path_in_session_tmp(raw_path: &str, session_id: Option<&str>) -> bool {
     let trimmed = raw_path.trim();
-    if trimmed.starts_with("tmp/") || trimmed.starts_with("./tmp/") {
+    if trimmed.starts_with("tmp/")
+        || trimmed.starts_with("./tmp/")
+        || trimmed.starts_with("session-tmp://")
+    {
         return true;
     }
     let p = Path::new(trimmed);
@@ -81,20 +84,31 @@ pub fn ensure_allowed_path(
     let mut newly_created = None;
 
     let target = if let Some(ref tmp_root) = session_tmp_buf {
-        let p = Path::new(trimmed);
-        if p.starts_with(tmp_root) {
-            p.to_path_buf()
-        } else if trimmed.starts_with("tmp/") || trimmed.starts_with("./tmp/") {
-            let stripped = trimmed.trim_start_matches('.').trim_start_matches('/');
-            let sub = stripped.strip_prefix("tmp/").unwrap_or(stripped);
-            tmp_root.join(sub)
-        } else if p.is_relative() {
-            ws_canonical.join(p)
+        // 显式作用域 URI（宿主私有 scheme）：session-tmp://x ≡ tmp/x，
+        // workspace://x ≡ 工作区相对路径——与 tmp/ 快捷路由同源判定。
+        if let Some(rest) = trimmed.strip_prefix("session-tmp://") {
+            tmp_root.join(rest.trim_start_matches('/'))
+        } else if let Some(rest) = trimmed.strip_prefix("workspace://") {
+            ws_canonical.join(rest.trim_start_matches('/'))
         } else {
-            p.to_path_buf()
+            let p = Path::new(trimmed);
+            if p.starts_with(tmp_root) {
+                p.to_path_buf()
+            } else if trimmed.starts_with("tmp/") || trimmed.starts_with("./tmp/") {
+                let stripped = trimmed.trim_start_matches('.').trim_start_matches('/');
+                let sub = stripped.strip_prefix("tmp/").unwrap_or(stripped);
+                tmp_root.join(sub)
+            } else if p.is_relative() {
+                ws_canonical.join(p)
+            } else {
+                p.to_path_buf()
+            }
         }
     } else {
-        let p = Path::new(trimmed);
+        if trimmed.starts_with("session-tmp://") {
+            return Err("session-tmp:// 需要会话上下文（无 session_id 无法解析会话临时目录）".to_string());
+        }
+        let p = Path::new(trimmed.strip_prefix("workspace://").unwrap_or(trimmed));
         if p.is_relative() {
             ws_canonical.join(p)
         } else {
@@ -364,6 +378,60 @@ mod tests {
 
         // 清理
         let _ = std::fs::remove_dir_all(tmp_root);
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn test_scope_uri_routes_session_tmp_and_workspace() {
+        let ws = temp_dir();
+        let session_id = format!("test_sess_{}", uuid::Uuid::new_v4());
+
+        // session-tmp:// 显式路由到会话 tmp（等价 tmp/ 前缀）
+        let res = ensure_allowed_path(
+            "session-tmp://draft.md",
+            &ws,
+            Some(&session_id),
+            true,
+        )
+        .unwrap();
+        assert!(res.is_session_tmp, "session-tmp:// 必须判定为会话 tmp 身份");
+        assert!(res.canonical_path.to_string_lossy().contains(&session_id));
+        assert!(res.canonical_path.to_string_lossy().ends_with("draft.md"));
+
+        // 三斜杠形态容忍
+        let res3 = ensure_allowed_path(
+            "session-tmp:///sub/x.txt",
+            &ws,
+            Some(&session_id),
+            true,
+        )
+        .unwrap();
+        assert!(res3.canonical_path.to_string_lossy().ends_with("sub/x.txt"));
+
+        // workspace:// 显式路由到工作区
+        let resw = ensure_allowed_path(
+            "workspace://main.rs",
+            &ws,
+            Some(&session_id),
+            false,
+        )
+        .unwrap();
+        assert!(!resw.is_session_tmp);
+        assert_eq!(resw.canonical_path, ws.join("main.rs").canonicalize().unwrap_or_else(|_| ws.join("main.rs")));
+
+        // session-tmp:// 的 .. 逃逸由下游白名单拦截
+        assert!(ensure_allowed_path(
+            "session-tmp://../escape.txt",
+            &ws,
+            Some(&session_id),
+            true,
+        )
+        .is_err());
+
+        // is_path_in_session_tmp 识别 URI 形态
+        assert!(is_path_in_session_tmp("session-tmp://x.txt", Some(&session_id)));
+
+        let _ = std::fs::remove_dir_all(&get_session_tmp_dir(&session_id));
         let _ = std::fs::remove_dir_all(ws);
     }
 }
