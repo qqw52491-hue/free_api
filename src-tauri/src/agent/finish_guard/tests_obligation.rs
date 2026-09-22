@@ -119,7 +119,7 @@ index 123..456 100644
             Some(&diff_ctx),
             None,
             None,
-        );
+            &[]        );
         assert!(
             blockers.is_empty(),
             "单次编辑同时覆盖多项义务时必须放行，不按写入次数误伤：{:?}",
@@ -172,7 +172,7 @@ def main():
             Some(&diff_ctx),
             None,
             None,
-        );
+            &[]        );
 
         assert_eq!(blockers.len(), 1);
         assert!(
@@ -254,7 +254,7 @@ index 123..456 100644
             Some(&diff_ctx),
             None,
             None,
-        );
+            &[]        );
 
         // scroll 命中 line 445 放行；render 引用 line 126 未被修改，被精准拦截！
         assert_eq!(blockers.len(), 1);
@@ -305,7 +305,7 @@ index 123..456 100644
             Some(&diff_ctx),
             None,
             None,
-        );
+            &[]        );
 
         assert_eq!(blockers.len(), 1);
         assert!(blockers[0].contains("缺少具体代码行号"));
@@ -338,7 +338,7 @@ index 123..456 100644
             None,
             None,
             None,
-        );
+            &[]        );
         assert!(blockers.is_empty());
 
         // 场景 2：豁免义务 (waived) 不做 diff 校验
@@ -372,7 +372,7 @@ index 123..456 100644
             Some(&empty_diff),
             None,
             None,
-        );
+            &[]        );
         assert!(blockers.is_empty());
 
         // 场景 3：带有可执行 verify_command 的义务由 host_verify 处理，免除 diff 行号检查
@@ -400,7 +400,7 @@ index 123..456 100644
             Some(&empty_diff),
             None,
             None,
-        );
+            &[]        );
         assert!(blockers.is_empty());
     }
 
@@ -422,6 +422,69 @@ index 123..456 100644
             ..Default::default()
         };
         assert!(is_write_or_side_effect_tool(&write_inst));
+    }
+
+    #[test]
+    fn triage_diagnostic_obligation_uses_static_location_not_diff() {
+        // 事故现场：有真实 diff 时，triage 下发的诊断义务引用"读过的文件"（diff 外）
+        // 应放行；同一义务若不在取证单里则仍按 diff 对账拦截。
+        let raw_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,3 +10,4 @@\n fn a() {}\n";
+        let ctx = DiffContext::from_diff_and_paths(Some(raw_diff), &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let mut contract =
+            diagnostic_contract_with_refs(&["src-tauri/src/agent/finish_guard/diff.rs:1"]);
+        contract.obligations[0].question =
+            "历史消息重载时的图片路径解析逻辑是否存在偏差？".to_string();
+        let questions =
+            vec!["历史消息重载时的图片路径解析逻辑是否存在偏差？".to_string()];
+
+        let pass = review_contract_evidence_blockers(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+            &questions,
+        );
+        assert!(pass.is_empty(), "诊断义务的静态可定位引用应放行: {pass:?}");
+
+        let blocked = review_contract_evidence_blockers(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+            &[],
+        );
+        assert_eq!(blocked.len(), 1, "非取证义务引用 diff 外位置必须拦截");
+    }
+
+    #[test]
+    fn diagnostic_ref_with_fullwidth_annotation_resolves_by_path() {
+        // 实测形态：模型给引用挂中文注释（全角括号）导致行号解析失败，
+        // 诊断义务按"文件客观存在"放行，行级语义由终审核验。
+        let raw_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,3 +10,4 @@\n fn a() {}\n";
+        let ctx = DiffContext::from_diff_and_paths(Some(raw_diff), &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let mut contract = diagnostic_contract_with_refs(&[
+            "src-tauri/src/agent/finish_guard/diff.rs:999999（某函数注释）",
+        ]);
+        contract.obligations[0].question =
+            "历史消息重载时的图片路径解析逻辑是否存在偏差？".to_string();
+        let questions =
+            vec!["历史消息重载时的图片路径解析逻辑是否存在偏差？".to_string()];
+
+        let pass = review_contract_evidence_blockers(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+            &questions,
+        );
+        assert!(pass.is_empty(), "行号损坏但文件存在的诊断引用应放行: {pass:?}");
     }
 
     fn diagnostic_contract_with_refs(refs: &[&str]) -> ReviewContract {
@@ -451,7 +514,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(blockers.is_empty(), "诊断引用静态可定位时应放行: {blockers:?}");
 
         // 工作区相对路径（不带 src-tauri/ 前缀）同样可定位
@@ -461,7 +524,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(blockers.is_empty(), "工作区相对诊断引用应放行: {blockers:?}");
     }
 
@@ -476,6 +539,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             Some(delivery_text),
+            &[],
         );
         assert_eq!(blockers.len(), 1, "声称修改但无 diff 必须拦截");
         assert!(blockers[0].contains("声称已修改/修复代码"));
@@ -491,7 +555,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(!blockers.is_empty(), "行号越界的引用必须拦截");
         assert!(blockers[0].contains("未能在当前工作区源码中定位"));
     }
@@ -509,7 +573,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(hit.is_empty(), "证据落入真实 diff 应放行: {hit:?}");
 
         let miss = review_contract_evidence_blockers(
@@ -518,7 +582,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(!miss.is_empty(), "证据未落入真实 diff 必须拦截");
     }
 
@@ -538,7 +602,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(
             blockers.is_empty(),
             "非代码证据不应被 file:line 对账拦截: {blockers:?}"
@@ -567,7 +631,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(blockers.is_empty(), "非代码证据在有 diff 时同样不适用对账: {blockers:?}");
     }
 
@@ -584,7 +648,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(
             !blockers.is_empty(),
             "形似 file:line 但行号非法的引用必须拦截（代码证据域）"
@@ -604,7 +668,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(!blockers.is_empty(), "裸路径引用属代码域，缺行号应拦截");
     }
 
@@ -624,7 +688,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(!blockers.is_empty(), "代码域引用未命中 diff 必须拦截");
         assert!(blockers[0].contains("never_touched"));
         // 混合场景不走"全非代码"跳过通道
@@ -650,7 +714,7 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             None,
-        );
+            &[]        );
         assert!(!blockers.is_empty(), "裸结论不是证据，必须拦截");
         assert!(blockers[0].contains("不构成可核验"));
         let skips = crate::agent::finish_guard::noncode_evidence_skip_reasons(

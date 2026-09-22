@@ -263,12 +263,29 @@ pub fn parse_file_line_ref(raw: &str) -> Option<(String, u32, u32)> {
 /// 3. 无真实 diff 但交付**声称已修改代码** → 照常拦截（撒谎 writer 不因"无 diff"放行）；
 /// 4. 义务带宿主可执行验证命令 (verify_command) 的，交由宿主执行器判定，此处不核对；
 /// 5. 纯只读任务（side_effect_count == 0）不进入本门禁。
+/// 诊断义务判别：义务的 question 与分流判决（triage）下发的
+/// investigation_questions 规范化一致即为诊断义务——其证据天然位于
+/// "读过的文件"而非 diff 内，走静态定位校验而非 diff 对账。
+/// 判别依据是宿主侧持久化的 triage 原单，模型无法伪造归属。
+fn obligation_is_diagnostic(question: &str, diagnostic_questions: &[String]) -> bool {
+    let norm = |s: &str| {
+        s.split_whitespace()
+            .collect::<String>()
+            .to_lowercase()
+            .trim_end_matches(['？', '?', '。', '.'])
+            .to_string()
+    };
+    let q = norm(question);
+    !q.is_empty() && diagnostic_questions.iter().any(|d| norm(d) == q)
+}
+
 pub(crate) fn review_contract_evidence_blockers(
     contract: &ReviewContract,
     side_effect_count: usize,
     diff_context: Option<&DiffContext>,
     workspace_root: Option<&std::path::Path>,
     delivery_text: Option<&str>,
+    diagnostic_questions: &[String],
 ) -> Vec<String> {
     if side_effect_count == 0 {
         return Vec::new();
@@ -330,17 +347,38 @@ pub(crate) fn review_contract_evidence_blockers(
             continue;
         }
 
+        // 诊断义务（triage 取证单下发的问题）的证据天然位于"读过的文件"，
+        // 强行要求落入 diff 属于门型错配——只要引用客观存在于工作区即可成立，
+        // 语义成立性由终审逐条核销。修复义务维持 diff 对账。
+        let is_diagnostic = obligation_is_diagnostic(&obligation.question, diagnostic_questions);
+
         let mut has_valid_evidence = false;
         let mut failed_refs = Vec::new();
 
         for ref_str in &obligation.evidence_refs {
             if let Some((ref_path, start_line, end_line)) = parse_file_line_ref(ref_str) {
-                if ctx.matches_diff(&ref_path, start_line, end_line) {
+                if ctx.matches_diff(&ref_path, start_line, end_line)
+                    || (is_diagnostic
+                        && ref_statically_locatable(&ref_path, start_line, workspace_root))
+                {
                     has_valid_evidence = true;
                     break;
                 }
                 failed_refs.push(ref_str.trim().to_string());
             } else if looks_like_file_ref(ref_str, workspace_root) {
+                // 诊断义务放宽一档：行号损坏（如全角括号注释）但文件客观存在，
+                // 也算"找到位置"——行级语义由终审核验，不在此死磕格式。
+                let head = ref_str
+                    .trim()
+                    .trim_matches(|c| matches!(c, '`' | '*' | '"' | '\''))
+                    .split([':', '#'])
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if is_diagnostic && ref_resolves_on_disk(head, workspace_root) {
+                    has_valid_evidence = true;
+                    break;
+                }
                 // 形似代码位置声明但行号缺失/非法 → 仍属代码证据域判失败，
                 // 防止把"写个路径蒙混"伪装成非代码证据逃避对账
                 failed_refs.push(ref_str.trim().to_string());
@@ -380,6 +418,13 @@ pub(crate) fn review_contract_evidence_blockers(
                     obligation.id,
                     obligation.question.trim(),
                     diff_map
+                ));
+            } else if !failed_refs.is_empty() && is_diagnostic {
+                blockers.push(format!(
+                    "审查义务 [{}]（{}）为分流下发的诊断问题，免于 diff 对账——但引用的代码证据 `{}` 未能在当前工作区源码中定位（文件须客观存在、行号须在文件行数内）。请核对路径与行号；或引用真实命令观测（`命令 → 结果`/output_id）；或改 waived 并说明理由。",
+                    obligation.id,
+                    obligation.question.trim(),
+                    failed_refs.join(", "),
                 ));
             } else if !failed_refs.is_empty() {
                 blockers.push(format!(

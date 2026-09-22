@@ -75,6 +75,8 @@ pub(crate) fn should_challenge_finish(
 }
 
 /// 汇总 finish 时仍未闭合的责任（带代码 Diff 上下文）。
+/// `diagnostic_questions`：triage 下发的取证问题清单——命中的义务按
+/// 诊断义务处理（静态定位即可），其余义务维持 diff 对账。
 pub(crate) fn finish_blockers_with_diff(
     todos: &[TodoItem],
     review_contract: Option<&ReviewContract>,
@@ -84,6 +86,7 @@ pub(crate) fn finish_blockers_with_diff(
     diff_context: Option<&DiffContext>,
     workspace_root: Option<&std::path::Path>,
     delivery_text: Option<&str>,
+    diagnostic_questions: &[String],
 ) -> Vec<String> {
     let mut blockers = open_todo_descriptions(todos);
     if review_contract_started_this_turn {
@@ -98,6 +101,7 @@ pub(crate) fn finish_blockers_with_diff(
                 diff_context,
                 workspace_root,
                 delivery_text,
+                diagnostic_questions,
             ));
         }
     }
@@ -126,6 +130,7 @@ pub(crate) fn finish_blockers(
         None,
         None,
         None,
+        &[],
     )
 }
 

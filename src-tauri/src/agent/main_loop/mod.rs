@@ -1725,6 +1725,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                     .and_then(|req| req.summary.clone())
             });
 
+        // 诊断义务（triage 取证单下发的问题）与修复义务分流：
+        // 前者证据位于"读过的文件"，静态定位即可成立；
+        // 后者维持 diff 对账。判别锚点是宿主持久化的判决原单，模型改不了。
+        let diagnostic_questions: &[String] = checkpoint
+            .triage_verdict
+            .as_ref()
+            .map(|v| v.investigation_questions.as_slice())
+            .unwrap_or(&[]);
         let mut open_todos = finish_blockers_with_diff(
             &context.todo_list,
             context.review_contract.as_ref(),
@@ -1734,6 +1742,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             diff_context.as_ref(),
             Some(workspace_dir.as_path()),
             instruction_summary.as_deref(),
+            diagnostic_questions,
         );
         let evidence_blockers = context
             .review_contract
@@ -1745,6 +1754,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     diff_context.as_ref(),
                     Some(workspace_dir.as_path()),
                     instruction_summary.as_deref(),
+                    diagnostic_questions,
                 )
             })
             .unwrap_or_default();
