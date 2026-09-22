@@ -171,11 +171,17 @@ pub(super) async fn dispatch_child_reviewer(
                             ctx.final_session_id,
                             "child_reviewer:focus_context",
                         );
-                        if let Some(spec_ctx) = crate::agent::context_collector::assemble_focus_context(
+                        // 派发材料装配硬封顶：上下文采集内部含 git 子进程/文件遍历，
+                        // 实弹中曾在此相位冻死整场会话——封顶后降级为无专项材料继续派发。
+                        let focus_fut = crate::agent::context_collector::assemble_focus_context(
                             &focus_domains,
                             ctx.workspace_dir,
                             last_verify_log,
                             custom_inputs,
+                        );
+                        if let Ok(Some(spec_ctx)) = tokio::time::timeout(
+                            std::time::Duration::from_secs(45),
+                            focus_fut,
                         ).await {
                             effective_params["specialized_context"] = json!(spec_ctx);
                         }
@@ -248,12 +254,24 @@ pub(super) async fn dispatch_child_reviewer(
                 }
             }
 
+            crate::agent::control::mark_stage(
+                ctx.final_session_id,
+                "child_reviewer:cross_family_check",
+            );
             if reviewer_model == routing.model_id && !explicit_reviewer_slot {
                 // 未被角色卡钉死且未被会话显式指定时应用配置级异构优选；说明写进派发报告，人工可见
+                // 有界锁：实弹中派发曾在 DB 取用处冻死（无界 lock 在持锁者冻结时焊死 tokio 任务）
+                let conn = ctx
+                    .state
+                    .inner()
+                    .writer_bounded(std::time::Duration::from_secs(15))
+                    .await
+                    .map_err(|e| format!("派发审查官时获取写锁失败: {e}"))?;
                 let (preferred, note) = crate::agent::router::prefer_cross_family_reviewer(
-                    &*ctx.state.inner().0.lock().unwrap(),
+                    &conn,
                     &reviewer_model,
                 );
+                drop(conn);
                 reviewer_model = preferred;
                 if let Some(note) = note {
                     item_reports.push(format!("[{}/{}]{}", item_num, total, note));
@@ -265,6 +283,10 @@ pub(super) async fn dispatch_child_reviewer(
             // Tech Lead 的派发若缺这一步，模型就能用自定义 custom_inputs 绕过证据
             // 校验——实弹实测（workspace_leak）正是此路径漏掉了「引而未改」的文件。
             // 未批准阶段的方案审查才计算；diff 只认声明字段的集合差，不判语义对错。
+            crate::agent::control::mark_stage(
+                ctx.final_session_id,
+                "child_reviewer:evidence_scope",
+            );
             if !ctx.checkpoint.plan_phase.is_approved()
                 && effective_params.get("evidence_scope_refs").is_none()
             {

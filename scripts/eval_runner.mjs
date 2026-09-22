@@ -873,6 +873,13 @@ async function runEvaluation() {
         tests_failed: result.testsFailed,
         duration_ms: result.durationMs,
         diff_changed_files: diffInfo.changedFiles,
+        // 判具污染红旗：judge fixture/test_patch 路径出现在 diff 里说明模型改的是
+        // 判具而非被测代码——此时 exit_code=1 可能是判具被改坏，不等同实现失败。
+        judge_modified: (diffInfo.changedFiles || []).some((f) =>
+          /test\/eval_cases\/fixtures\//.test(f) ||
+          (caseDef.test_patch && f === caseDef.test_patch) ||
+          /judge\.(mjs|js|ts|patch)$/.test(f)
+        ),
         telemetry,
         is_dry_run: options.dryRun,
         agent_session: options.agentSession || null,

@@ -43,7 +43,8 @@ try:
     foreign = sum(c["count"] for c in calls if c["model_id"] != wanted and c["outcome"] == "instruction_ready")
     steps = len(t.get("traces") or [])
     tokens = (t.get("main_prompt") or 0) + (t.get("main_completion") or 0)
-    print(f"{d.get('passed')},{t.get('session_id','')},{steps},{own},{foreign},{tokens}")
+    jm = "+jm" if d.get("judge_modified") else ""
+    print(f"{d.get('passed')}{jm},{t.get('session_id','')},{steps},{own},{foreign},{tokens}")
 except Exception:
     print("parse_err,,0,0,0,0")
 PY

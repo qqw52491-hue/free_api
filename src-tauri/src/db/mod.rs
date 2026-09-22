@@ -39,14 +39,52 @@ impl DbState {
         self.0.lock().map_err(|e| format!("获取数据库写锁失败: {e}"))
     }
 
+    /// 有界写锁：std Mutex 的 lock() 在持锁者冻结时会无限阻塞调用方线程——
+    /// 在 tokio worker 上等于把整个任务焊死（实弹：child_reviewer 派发冻结，
+    /// 超时/看门狗全部失效因为任务从不 yield）。
+    /// try_lock + yield 循环把无界等待变为有界失败，且保持任务可被取消。
+    pub async fn writer_bounded(
+        &self,
+        max_wait: std::time::Duration,
+    ) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
+        let deadline = std::time::Instant::now() + max_wait;
+        loop {
+            // try_lock 的 Result<MutexGuard> 不能活着跨过 await（MutexGuard !Send 会
+            // 把整条 async 链传染成 !Send）——先在独立作用域里消费掉再睡。
+            let busy = {
+                match self.0.try_lock() {
+                    Ok(g) => return Ok(g),
+                    Err(std::sync::TryLockError::Poisoned(e)) => return Err(e.to_string()),
+                    Err(std::sync::TryLockError::WouldBlock) => true,
+                }
+            };
+            let _ = busy;
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "数据库写锁等待超过 {:?}，按失败处理避免会话冻结",
+                    max_wait
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     /// 取得并发只读连接（优先从 r2d2 读连接池借出，多读完全并发，0 锁争用；
     /// 若连接池未配置/测试环境下未初始化，自动平滑降级为互斥锁）
     #[inline]
     pub fn reader(&self) -> Result<DbReaderConnection<'_>, String> {
         if let Some(pool) = READ_POOL.get() {
-            pool.get()
-                .map(DbReaderConnection::Pooled)
-                .map_err(|e| format!("从只读连接池获取连接失败: {e}"))
+            // 池耗尽时 get() 会无限阻塞在 condvar 上（实弹卡死疑似路径之一：
+            // 全部连接被长查询/泄漏的借用占住，后续读全部冻死）。
+            // 给获取加封顶，超时回退写互斥锁，读路径永不永久阻塞。
+            match pool.get_timeout(std::time::Duration::from_secs(10)) {
+                Ok(conn) => Ok(DbReaderConnection::Pooled(conn)),
+                Err(_) => self
+                    .0
+                    .lock()
+                    .map(DbReaderConnection::Locked)
+                    .map_err(|e| format!("获取数据库连接失败: {e}")),
+            }
         } else {
             self.0
                 .lock()

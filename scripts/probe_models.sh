@@ -43,6 +43,17 @@ for r in $(seq 1 "$ROUNDS"); do
     node scripts/eval_runner.mjs --case "$CASE" --live --model "$MID" --pro "$PRO" --duration "$DUR" \
       > "$LOG_DIR/${MNAME}-r${r}.log" 2>&1
     REPORT=$(ls -t agent_evaluations/real-eval-${CASE}-*.json 2>/dev/null | head -1)
+    # 防陈旧报告污染：报告必须比本轮启动时间新，否则视为未产出
+    if [ -n "$REPORT" ] && [ "$(stat -f %m "$REPORT")" -lt "$BEFORE" ]; then
+      REPORT=""
+    fi
+    if [ -z "$REPORT" ]; then
+      ROW="no_report,,0,0,0"
+      echo "$r,$MNAME,$MID,$ROW," >> "$OUT"
+      [ -n "$ORIG" ] && sqlite3 "$DB" "UPDATE models SET enabled=$ORIG WHERE id='$MID'"
+      echo "    -> no_report ($(($(date +%s)-BEFORE))s)"
+      continue
+    fi
     ROW=$(python3 - "$REPORT" "$MID" <<'PY'
 import json, sys
 try:
@@ -59,6 +70,10 @@ except Exception as e:
 PY
 )
     echo "$r,$MNAME,$MID,$ROW,$REPORT" >> "$OUT"
+    # 收完数据即删本场 eval DB（每场 ~480MB 全量复制，攒多了会塞满磁盘；
+    # 结果已在报告 JSON + CSV 里，DB 只对失败深挖有用——探针一律删）
+    NEWDB=$(ls -t test-artifacts/eval-dbs/eval-${CASE}-*.db 2>/dev/null | head -1)
+    [ -n "$NEWDB" ] && rm -f "$NEWDB"
     # 还原 enabled（探针不该改动用户模型配置）
     [ -n "$ORIG" ] && sqlite3 "$DB" "UPDATE models SET enabled=$ORIG WHERE id='$MID'"
     echo "    -> $ROW ($(($(date +%s)-BEFORE))s)"

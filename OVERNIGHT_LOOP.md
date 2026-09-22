@@ -902,3 +902,23 @@ sensenova-6.8+glm-5.2 首场：54 步撞 25min 时限（终态 running→判 FAI
 **新实锤 host bug**：`run_tool_phase` 裸 await 无超时——child_reviewer(role=tech_lead) 派发在 spawn 内永久冻结（db 锁嫌疑已被看门狗成功写入排除；await 未决方向）。已加 `run_tool_phase_guarded`（480s 封顶，超时转失败步+stage 面包屑）与 child_spawn 分段面包屑（parse_request/evidence/begin_run/spawn_returned），下次复现将直接报出卡点。（commit `3e84e52`）
 
 **观察（未改）**：修复轨道"零写入交付"能被终审放行——glm-5.2 把诊断报告当交付通过。机械侧可加"零 diff + 修复类路由 → 给终审显式红旗"信号，但裁决仍属终审语义，不自动拦。
+
+### 轮换批次2（Antigravity 阵容，Shantung 配额已尽 quota_exceeded）
+
+| 执行者 | 场 | 步 | 终态 | 死因 |
+|---|---|---|---|---|
+| 3.8-flash-medium/low ×6 | 全灭 | 0 | — | **模型 enabled=0 空转**（脚本已修：临时启用+还原） |
+| 3.7-flash-high | 1 | 61 | failed | child_reviewer(tech_lead) 派发挂死，stage=focus_context |
+| 3.7-flash-high | 2 | 68 | failed | 同挂点复现（看门狗收割 906s） |
+| 3.7-flash-high | 3 | 16 | failed | 早夭（wdio 窗口内未收敛） |
+| 3.1-pro+pro监督 | 1 | 62 | succeeded→FAIL | **写码+编译过+终审过但 judge FAIL**；judge.mjs 被改（污染判具） |
+| 3.1-pro | 2 | 141调用 | failed | 8.5M token 烧穿 |
+
+**确认 host bug（修完已提交 274e6b5）**：
+1. `run_tool_phase` 裸 await 无封顶 → `run_tool_phase_guarded` 480s + gate_fire 落盘
+2. `child_reviewer`+tech_lead 派发确定性冻结（4+次复现，stage=focus_context 相位）
+   ——卡点窗口已收窄至 focus_context 标记与 envelope_spawn 之间，埋了分段面包屑待下次复现定位
+3. **SWMR 读池从未接线**：init.rs set 的是自己模块的 READ_POOL，mod.rs reader() 读的静态永远为空 → 全部读路径走写互斥锁
+4. judge_modified 红旗进报告（模型反复改判具 judge.mjs，3次）
+
+**门禁修复实弹验证**：`undiffed_refs:not_applicable` 通道生效——Pro 场 finish 申报的可定位引用走披露通道而非死循环（7次放行+1次终审过）。
