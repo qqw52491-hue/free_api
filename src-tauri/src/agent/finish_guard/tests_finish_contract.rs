@@ -218,7 +218,7 @@ mod tests_inner {
             ..Default::default()
         };
 
-        let review_started = apply_instruction_state_updates(&mut context, &instruction);
+        let review_started = apply_instruction_state_updates(&mut context, &instruction, 10);
 
         assert!(!review_started);
         assert!(context.review_contract.is_none());

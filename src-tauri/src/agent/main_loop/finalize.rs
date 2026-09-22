@@ -39,7 +39,7 @@ pub(crate) fn commit_completed_run(
         })
         .unwrap_or(serde_json::Value::Null);
 
-    let persisted_summary = finish_payload
+    let mut persisted_summary = finish_payload
         .get("summary")
         .and_then(|value| value.as_str())
         .or_else(|| {
@@ -49,7 +49,25 @@ pub(crate) fn commit_completed_run(
         })
         .unwrap_or(output_text)
         .to_string();
-    // 完成区域展示模型自己的最终回复；若存在 3 次审查熔断遗留警告，注入到 emitted_finish
+    // 审查警告必须落在用户可见的持久化摘要里——只塞进 completion_json 结构字段
+    // 而聊天消息不展示，等于把"带病交付"静默伪装成"完全成功"。
+    if let Some(warnings) = reviewer_warnings_delivered {
+        let issue_lines = warnings
+            .blocking_issues
+            .iter()
+            .enumerate()
+            .map(|(i, b)| format!("{}. [{}] {}", i + 1, b.file, b.issue))
+            .collect::<Vec<_>>()
+            .join("\n");
+        persisted_summary.push_str(&format!(
+            "\n\n---\n\n> ⚠️ **审查警告：经人工仲裁放行，{} 项缺陷未完全收敛**（终审评分 {}/100）：{}\n{}",
+            warnings.blocking_issues.len(),
+            warnings.score,
+            warnings.summary,
+            issue_lines
+        ));
+    }
+    // 完成区域展示模型自己的最终回复；若存在审查熔断遗留警告，注入到 emitted_finish
     let mut emitted_finish = match finish_payload {
         serde_json::Value::Object(object) => serde_json::Value::Object(object),
         _ => json!({ "summary": persisted_summary }),

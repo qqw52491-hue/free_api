@@ -19,6 +19,60 @@ fn tail(s: &str, max: usize) -> String {
     }
 }
 
+/// 宿主权威验证的结构化结果：退出码 + 输出尾部 + 通过与否。
+/// 与 run() 的文本报告不同，这里把"是否通过"显式结构化——调用方据此做硬判。
+pub struct HostVerifyOutcome {
+    pub passed: bool,
+    pub exit_code: String,
+    pub output_tail: String,
+}
+
+/// 宿主亲自执行一条验证命令。净化 IDE 调试器注入（NODE_OPTIONS 里的
+/// js-debug bootloader 会让 node 子进程退出时挂在 "Waiting for the debugger
+/// to disconnect"）、stdin 置空（.output() 默认即如此）、kill_on_drop 保证
+/// 超时丢弃 future 时子进程被回收而非成孤儿。
+pub async fn run_command(
+    workspace: &Path,
+    cmd: &str,
+    timeout_secs: u64,
+) -> HostVerifyOutcome {
+    let mut command = tokio::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(workspace)
+        .kill_on_drop(true);
+    crate::agent::tools::local_shell::sanitize_debugger_env(&mut command);
+    let result = tokio::time::timeout(Duration::from_secs(timeout_secs), command.output()).await;
+    match result {
+        Err(_) => HostVerifyOutcome {
+            passed: false,
+            exit_code: "timeout".to_string(),
+            output_tail: format!("{}s 超时，宿主强制终止", timeout_secs),
+        },
+        Ok(Err(e)) => HostVerifyOutcome {
+            passed: false,
+            exit_code: "spawn-failed".to_string(),
+            output_tail: format!("启动失败: {e}"),
+        },
+        Ok(Ok(out)) => {
+            let code = out.status.code().unwrap_or(-1);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let mut output_tail = tail(&stdout, 1200);
+            if !stderr.trim().is_empty() {
+                output_tail.push_str(" | stderr: ");
+                output_tail.push_str(&tail(&stderr, 400));
+            }
+            HostVerifyOutcome {
+                passed: code == 0,
+                exit_code: code.to_string(),
+                output_tail,
+            }
+        }
+    }
+}
+
 /// 执行配置的验证命令。未配置或命令为空返回 None。
 pub async fn run(workspace: &Path) -> Option<String> {
     let cmd = crate::agent::channel::channel_config_shared()
@@ -33,38 +87,17 @@ pub async fn run(workspace: &Path) -> Option<String> {
         .unwrap_or(120)
         .clamp(10, 600);
 
-    let workspace = workspace.to_path_buf();
-    let cmd_clone = cmd.clone();
-    let result = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&cmd_clone)
-            .current_dir(&workspace)
-            .output(),
-    )
-    .await;
-
-    Some(match result {
-        Err(_) => format!(
+    let outcome = run_command(workspace, &cmd, timeout_secs).await;
+    Some(match outcome.exit_code.as_str() {
+        "timeout" => format!(
             "命令: {}\n结果: 超时（{}s 上限，宿主强制终止）",
             cmd, timeout_secs
         ),
-        Ok(Err(e)) => format!("命令: {}\n结果: 启动失败: {}", cmd, e),
-        Ok(Ok(out)) => {
-            let code = out
-                .status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string());
-            format!(
-                "命令: {}\n退出码: {}\nstdout 尾部:\n{}\nstderr 尾部:\n{}",
-                cmd,
-                code,
-                tail(&String::from_utf8_lossy(&out.stdout), 1200),
-                tail(&String::from_utf8_lossy(&out.stderr), 1200)
-            )
-        }
+        "spawn-failed" => format!("命令: {}\n结果: 启动失败: {}", cmd, outcome.output_tail),
+        code => format!(
+            "命令: {}\n退出码: {}\n输出尾部:\n{}",
+            cmd, code, outcome.output_tail
+        ),
     })
 }
 
@@ -140,15 +173,14 @@ pub async fn run_obligation_verifications(
             }
             _ => command.to_string(),
         };
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(120),
-            tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(&effective_command)
-                .current_dir(workspace)
-                .output(),
-        )
-        .await;
+        let mut verify_cmd = tokio::process::Command::new("sh");
+        verify_cmd
+            .arg("-c")
+            .arg(&effective_command)
+            .current_dir(workspace)
+            .kill_on_drop(true);
+        crate::agent::tools::local_shell::sanitize_debugger_env(&mut verify_cmd);
+        let outcome = tokio::time::timeout(Duration::from_secs(120), verify_cmd.output()).await;
         let (exit_code, tail, passed) = match outcome {
             Err(_) => ("timeout".to_string(), "120s 超时，宿主强制终止".to_string(), false),
             Ok(Err(e)) => (fail_closed(), format!("启动失败: {e}"), false),

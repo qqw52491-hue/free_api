@@ -92,8 +92,17 @@ pub(crate) fn record_side_effect_or_verify(
 ) {
     let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
         && crate::agent::tools::local_file::is_dispatch_result_tmp(result);
+    // 纯验证/类型检查命令不算副作用——它们的退出码本身就是判据，不是待验证的写入。
+    // 若把 `npx vue-tsc` 记成一笔副作用，验证命令自己制造挂账，永远无法自动闭合。
+    // 复合命令（测试 + 其它动作拼接）仍按副作用入账，宁可保守也不漏记。
+    let is_verification_cmd = crate::agent::change_verification::extract_command_from_params(
+        &instruction.get_params(),
+    )
+    .map(|c| crate::agent::change_verification::is_test_or_verification_command(&c))
+    .unwrap_or(false);
     if result.success
         && !is_tmp_write
+        && !is_verification_cmd
         && crate::agent::context::AuditLedger::is_mutating_side_effect_with_action(
             &instruction.get_tool(),
             &instruction.get_action(),

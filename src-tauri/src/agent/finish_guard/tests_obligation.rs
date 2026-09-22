@@ -679,7 +679,7 @@ fn review_finding_todos_cannot_be_silently_dropped() {
         }],
         ..Default::default()
     };
-    apply_instruction_state_updates(&mut context, &drop_instruction);
+    apply_instruction_state_updates(&mut context, &drop_instruction, 10);
 
     assert!(
         context.todo_list.iter().any(|t| t.description.starts_with("[审查发现]")),
@@ -709,7 +709,7 @@ fn review_finding_kept_with_explicit_closure_is_accepted() {
         }],
         ..Default::default()
     };
-    apply_instruction_state_updates(&mut context, &close_instruction);
+    apply_instruction_state_updates(&mut context, &close_instruction, 10);
 
     assert_eq!(context.todo_list.len(), 1);
     assert_eq!(context.todo_list[0].status, "done");

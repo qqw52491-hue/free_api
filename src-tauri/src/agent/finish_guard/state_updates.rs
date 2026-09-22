@@ -11,6 +11,7 @@ use crate::agent::types::AgentInstruction;
 pub(crate) fn apply_instruction_state_updates(
     context: &mut context::SandwichContext,
     instruction: &AgentInstruction,
+    current_step_id: usize,
 ) -> bool {
     if !instruction.todo_update.is_empty() {
         apply_todo_update_guarded(context, &instruction.todo_update);
@@ -27,11 +28,20 @@ pub(crate) fn apply_instruction_state_updates(
     }
 
     if let Some(update) = instruction.change_verification_update.clone() {
-        if let Err(error) =
-            apply_change_verification_update(&mut context.change_verification, update)
-        {
+        let evidence_window = crate::agent::change_verification::EvidenceWindow {
+            last_write_step: context.side_effects[context.inherited_side_effects_count..]
+                .iter()
+                .map(|r| r.step_id)
+                .max(),
+            current_step: current_step_id,
+        };
+        if let Err(error) = apply_change_verification_update(
+            &mut context.change_verification,
+            update,
+            &evidence_window,
+        ) {
             context.add_error_feedback(&format!(
-                "【写入验证更新未采纳】{}\n真实写入后，必须以 verified + evidence_refs 或 waived + waived_reason 闭合；新写入会自动使旧验证失效。",
+                "【写入验证更新未采纳】{}\n真实写入后，必须以 verified + 指向「写入之后新执行步骤」的 evidence_refs=[\"step_N\"] 闭合，或以 waived + waived_reason 豁免；早于最近一次写入的旧凭据不得重复引用。",
                 error
             ));
         }

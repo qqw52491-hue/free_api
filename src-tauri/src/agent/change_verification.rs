@@ -38,9 +38,20 @@ impl ChangeVerification {
     }
 }
 
+/// 证据时效窗口：verified 声明的证据必须能回查到「最近一次真实写入之后」的
+/// 真实执行步骤。自由文本摘要（"npx vue-tsc 成功"）不构成证据——它无法证明时序。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EvidenceWindow {
+    /// 当前挂账写入批次中最近一次副作用的 step_id；无挂账写入时为 None。
+    pub last_write_step: Option<usize>,
+    /// 当前指令将占用的 step_id（证据只能指向 < 该值的已执行步骤）。
+    pub current_step: usize,
+}
+
 pub fn apply_change_verification_update(
     current: &mut Option<ChangeVerification>,
     update: ChangeVerification,
+    evidence_window: &EvidenceWindow,
 ) -> Result<(), String> {
     validate_change_verification(&update)?;
 
@@ -53,8 +64,80 @@ pub fn apply_change_verification_update(
         return Ok(());
     }
 
+    verify_evidence_freshness(&update, evidence_window)?;
     *current = Some(update);
     Ok(())
+}
+
+/// 证据世代校验：写入使旧验证作废，同样使「写入之前产生的证据」作废。
+/// 模型可以在 finish 指令里再次提交 change_verification_update——若只查
+/// "evidence_refs 非空"，已被作废的旧 output_id/step_N 就能原样贴回重新闭合，
+/// 形成"写完代码不验证，拿写入前的旧测试结果交卷"的漏洞。这里把 verified 的证据
+/// 绑定到可回查的执行步骤：至少一个 step_N 引用，且全部落在 (最后写入步, 当前步)
+/// 开区间内。无法证明新鲜度的引用形式（output_id/自由文本）不允许单独成立。
+fn verify_evidence_freshness(
+    update: &ChangeVerification,
+    window: &EvidenceWindow,
+) -> Result<(), String> {
+    if normalized_status(update).as_deref() != Some("verified") {
+        return Ok(());
+    }
+    // 无挂账写入时验证状态无关紧要——不拦截（fail-open）。
+    let Some(last_write) = window.last_write_step else {
+        return Ok(());
+    };
+    let step_refs = extract_step_refs(&update.evidence_refs);
+    if step_refs.is_empty() {
+        return Err(format!(
+            "verified 的 evidence_refs 必须至少包含一个 step_N 引用（指向产生证据的真实执行步骤，\
+            最近一次真实写入发生在 step_{}）；output_id 或自由文本摘要无法证明晚于该写入，\
+            不能单独作为证据。请重新执行验证命令后以新步骤号举证。",
+            last_write
+        ));
+    }
+    for n in step_refs {
+        if n <= last_write {
+            return Err(format!(
+                "证据引用 step_{} 早于最近一次真实写入 step_{}——该凭据已随写入作废。\
+                请重新执行验证命令，并引用新步骤的 step_N 举证。",
+                n, last_write
+            ));
+        }
+        if n >= window.current_step {
+            return Err(format!(
+                "证据引用 step_{} 指向尚未完成的步骤（当前步为 step_{}）——只能引用已执行完毕的步骤。",
+                n, window.current_step
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 提取 evidence_refs 中的 step_N 引用（大小写不敏感，逐字节扫描避免 UTF-8 边界问题）。
+fn extract_step_refs(refs: &[String]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for r in refs {
+        let lower = r.to_ascii_lowercase();
+        let bytes = lower.as_bytes();
+        let mut i = 0;
+        while i + 5 <= bytes.len() {
+            if &bytes[i..i + 5] == b"step_" {
+                let mut j = i + 5;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 5 {
+                    if let Ok(n) = lower[i + 5..j].parse::<usize>() {
+                        out.push(n);
+                    }
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 pub fn change_verification_blocker(
@@ -790,21 +873,30 @@ mod tests {
 
     #[test]
     fn only_verified_or_waived_can_close_real_writes() {
-        assert!(apply_change_verification_update(&mut None, verified()).is_ok());
+        assert!(
+            apply_change_verification_update(&mut None, verified(), &EvidenceWindow::default())
+                .is_ok()
+        );
 
         let waived = ChangeVerification {
             status: "waived".to_string(),
             evidence_refs: Vec::new(),
             waived_reason: Some("用户明确要求只修改，不运行测试。".to_string()),
         };
-        assert!(apply_change_verification_update(&mut None, waived).is_ok());
+        assert!(
+            apply_change_verification_update(&mut None, waived, &EvidenceWindow::default())
+                .is_ok()
+        );
 
         let invalid = ChangeVerification {
             status: "verified".to_string(),
             evidence_refs: Vec::new(),
             waived_reason: None,
         };
-        assert!(apply_change_verification_update(&mut None, invalid).is_err());
+        assert!(
+            apply_change_verification_update(&mut None, invalid, &EvidenceWindow::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -817,14 +909,20 @@ mod tests {
     #[test]
     fn closed_verification_is_idempotent_but_cannot_be_rewritten() {
         let mut current = Some(verified());
-        assert!(apply_change_verification_update(&mut current, verified()).is_ok());
+        assert!(
+            apply_change_verification_update(&mut current, verified(), &EvidenceWindow::default())
+                .is_ok()
+        );
 
         let rewrite = ChangeVerification {
             status: "waived".to_string(),
             evidence_refs: Vec::new(),
             waived_reason: Some("改成豁免".to_string()),
         };
-        assert!(apply_change_verification_update(&mut current, rewrite).is_err());
+        assert!(
+            apply_change_verification_update(&mut current, rewrite, &EvidenceWindow::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -965,5 +1063,80 @@ mod tests {
 
         let empty_paths: Vec<String> = Vec::new();
         assert_eq!(infer_adaptive_verification_command(&empty_paths), None);
+    }
+
+    fn verified_with_refs(refs: &[&str]) -> ChangeVerification {
+        ChangeVerification {
+            status: "verified".to_string(),
+            evidence_refs: refs.iter().map(|s| s.to_string()).collect(),
+            waived_reason: None,
+        }
+    }
+
+    /// 回归：写入前的旧验证凭据不得重复贴回——证据必须晚于最近一次真实写入。
+    /// （事故场景：vue-tsc 在 step_44 跑过，step_51 又写入代码后直接拿旧结果交付）
+    #[test]
+    fn stale_evidence_refs_are_rejected_after_later_write() {
+        let window = EvidenceWindow {
+            last_write_step: Some(51),
+            current_step: 55,
+        };
+        // 旧凭据 step_44 ≤ 最后写入 step_51 → 拒收
+        let stale = verified_with_refs(&["step_44 (npx vue-tsc --noEmit → exit 0)"]);
+        assert!(apply_change_verification_update(&mut None, stale, &window).is_err());
+
+        // 新凭据 step_52 > step_51 → 接受
+        let fresh = verified_with_refs(&["step_52 (npx vue-tsc --noEmit → exit 0)"]);
+        assert!(apply_change_verification_update(&mut None, fresh, &window).is_ok());
+    }
+
+    /// 回归：自由文本摘要无法证明时序，有挂账写入时必须至少含一个 step_N 引用。
+    #[test]
+    fn prose_only_evidence_is_rejected_while_writes_pending() {
+        let window = EvidenceWindow {
+            last_write_step: Some(51),
+            current_step: 55,
+        };
+        let prose = verified_with_refs(&["output_id:61b39423-...", "npx vue-tsc --noEmit 成功退出 0"]);
+        assert!(apply_change_verification_update(&mut None, prose, &window).is_err());
+
+        // 无挂账写入时验证无关紧要——保持原有宽松（fail-open）
+        let no_writes = EvidenceWindow {
+            last_write_step: None,
+            current_step: 55,
+        };
+        let prose = verified_with_refs(&["output_id:61b39423-..."]);
+        assert!(apply_change_verification_update(&mut None, prose, &no_writes).is_ok());
+    }
+
+    /// 回归：不能引用当前步或未来步作为证据（证据只能指向已执行完毕的步骤）。
+    #[test]
+    fn future_or_self_step_refs_are_rejected() {
+        let window = EvidenceWindow {
+            last_write_step: Some(51),
+            current_step: 55,
+        };
+        let self_ref = verified_with_refs(&["step_55"]);
+        assert!(apply_change_verification_update(&mut None, self_ref, &window).is_err());
+        let future_ref = verified_with_refs(&["step_99"]);
+        assert!(apply_change_verification_update(&mut None, future_ref, &window).is_err());
+    }
+
+    /// 混合引用中只要有一条过期即拒收；waived 不受时效窗口约束。
+    #[test]
+    fn mixed_refs_any_stale_rejects_and_waived_is_unaffected() {
+        let window = EvidenceWindow {
+            last_write_step: Some(51),
+            current_step: 55,
+        };
+        let mixed = verified_with_refs(&["step_52 ok", "step_44 old"]);
+        assert!(apply_change_verification_update(&mut None, mixed, &window).is_err());
+
+        let waived = ChangeVerification {
+            status: "waived".to_string(),
+            evidence_refs: Vec::new(),
+            waived_reason: Some("纯文档改动，无自动化验证可用".to_string()),
+        };
+        assert!(apply_change_verification_update(&mut None, waived, &window).is_ok());
     }
 }

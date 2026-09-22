@@ -158,7 +158,8 @@ fn apply_child_env(
 /// 每个 node 子进程；IDE 自动 attach 后进程退出时卡在 "Waiting for the debugger to
 /// disconnect" 直到超时被杀（vue-tsc 5 秒的活挂 60 秒即此机制）。
 /// 只剔除可识别的注入片段，保留用户合法的 NODE_OPTIONS（如 --max-old-space-size）。
-fn sanitize_debugger_env(c: &mut tokio::process::Command) {
+/// pub(crate)：host_verify/义务验证等所有宿主 spawn 子进程的通道共用同一净化口径。
+pub(crate) fn sanitize_debugger_env(c: &mut tokio::process::Command) {
     for k in ["VSCODE_INSPECTOR_OPTIONS", "VSCODE_INJECTION"] {
         c.env_remove(k);
     }

@@ -1204,10 +1204,13 @@ async fn run_agent_main_loop_in_workspace_inner(
             AgentRunEvent::BeginPlanning { step_id },
         )?;
 
-        // 宿主状态机：追踪当前目标块步数并触发硬顶防翻车警报
+        // 宿主状态机：追踪当前目标块步数并触发超限收敛提醒。
+        // 只在越过上限的那一步告警一次，之后每超 10 步提醒一次——
+        // 每步重复注入同一句警告是纯噪音，会持续稀释模型对当前真实阻塞的注意力。
         let hard_limit_warning = if let Some(block) = context.active_target_block_mut() {
             block.on_step_start();
-            if block.is_hard_limit_exceeded() {
+            let over = block.steps_count.saturating_sub(block.hard_step_limit);
+            if block.is_hard_limit_exceeded() && (over == 0 || over % 10 == 0) {
                 Some((block.id.clone(), block.steps_count, block.hard_step_limit))
             } else {
                 None
@@ -1218,7 +1221,7 @@ async fn run_agent_main_loop_in_workspace_inner(
 
         if let Some((id, count, limit)) = hard_limit_warning {
             context.add_error_feedback(&format!(
-                "【⚠️ 目标块步数超限警报】当前活跃目标块 [{}] 已经执行了 {} 步（达到硬顶上限 {} 步）。\n请停止零散动作，检查当前方案是否受阻。若受阻请在 progress_summary 中指出并申请验收或进入收敛。",
+                "【⚠️ 目标块步数超限提醒】当前活跃目标块 [{}] 已执行 {} 步（参考上限 {} 步；此为收敛提醒，不会强制停止）。\n请检查当前方案是否受阻：受阻请在 progress_summary 中说明、收敛收尾或申请验收；若确需继续推进则正常执行，本提醒将每 10 步重复一次。",
                 id, count, limit
             ));
         }
@@ -1441,7 +1444,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         // --- 更新任务规划 + 核心记忆 ---
         // 两类责任账本独立更新，避免审查契约的拒绝路径吞掉写入验证更新。
         let review_contract_started_this_turn =
-            apply_instruction_state_updates(&mut context, &instruction);
+            apply_instruction_state_updates(&mut context, &instruction, step_id);
 
         // --- 阶段级写入审查（双触发：todo 阶段推进 / 累计写入文件数兜底）---
         // 首次评估先建立覆盖基线（存量副作用不计入"未覆盖写入"）
@@ -1619,6 +1622,99 @@ async fn run_agent_main_loop_in_workspace_inner(
             .side_effects
             .len()
             .saturating_sub(context.inherited_side_effects_count);
+
+        // 🧪 宿主权威验证兜底：finish/prepare_finish 时仍有挂账写入而验证未闭合，
+        // 且宿主能推断出验证命令 → 宿主亲自执行，真实退出码即判据。
+        // 成功 → 写入批次自动闭合 verified（宿主回执，非模型自述）；
+        // 红灯 → 直接打回且不消耗质询熔断额度——确定性失败绝不因"重试次数用尽"放行。
+        // 模型已显式 waived 的批次不重复执行（豁免理由的正确性由终审核对）。
+        if finish_gate_requested
+            && result.success
+            && side_effect_count > 0
+            && context
+                .change_verification
+                .as_ref()
+                .map_or(true, |v| !v.is_resolved())
+        {
+            if let Some(verify_cmd) = context.inferred_verification_command() {
+                let verify_timeout = crate::agent::channel::channel_config_shared()
+                    .read()
+                    .ok()
+                    .and_then(|c| c.verify_timeout_secs)
+                    .unwrap_or(120)
+                    .clamp(10, 600);
+                let verify_outcome = crate::agent::host_verify::run_command(
+                    &workspace_dir,
+                    &verify_cmd,
+                    verify_timeout,
+                )
+                .await;
+                if verify_outcome.passed {
+                    context.change_verification = Some(ChangeVerification {
+                        status: "verified".to_string(),
+                        evidence_refs: vec![format!(
+                            "host_verify:step_{} (`{}` → exit {})",
+                            step_id, verify_cmd, verify_outcome.exit_code
+                        )],
+                        waived_reason: None,
+                    });
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        format!(
+                            "🧪 宿主权威验证通过：`{}` → exit {}，写入批次自动闭合 verified",
+                            verify_cmd, verify_outcome.exit_code
+                        ),
+                    );
+                } else if is_finish {
+                    let reject_msg = format!(
+                        "【🛑 宿主权威验证未通过，finish 未生效！】\n宿主亲自执行: `{}`\n退出码: {}\n输出尾部:\n{}\n\n该判定为宿主实测结果，不接受文本声明覆盖，也不消耗质询熔断额度。\n【必须采取的行动】：请依据上方真实输出修复后重试；若确认该检查不适用于本改动，可用 change_verification_update 提交 waived + waived_reason 显式豁免（终审将核对豁免理由）。",
+                        verify_cmd, verify_outcome.exit_code, verify_outcome.output_tail
+                    );
+                    context.add_error_feedback(&reject_msg);
+                    crate::agent::dispatcher::emit_tool_event(
+                        &app,
+                        &final_session_id,
+                        step_id,
+                        &instruction,
+                        "host_verify_challenged",
+                        Some("finish".to_string()),
+                        Some(false),
+                        &format!(
+                            "宿主权威验证未通过：`{}` → 退出码 {}",
+                            verify_cmd, verify_outcome.exit_code
+                        ),
+                        None,
+                        None,
+                    );
+                    context.record_step_outcome(false);
+                    checkpoint.finish_reviewed = true;
+                    persist_challenged_step(
+                        state.inner(),
+                        &mut run_trace_steps,
+                        &run_id,
+                        &final_session_id,
+                        step_id,
+                        &instruction,
+                        &context,
+                        "host_verify_challenged",
+                        &reject_msg,
+                        &result.view,
+                        step_metrics_json(outcome.token_usage.as_ref(), outcome.thinking_duration_ms, outcome.tool_duration_ms),
+                        &outcome.thinking_text,
+                    );
+                    let _ = save_checkpoint(state.inner(), &mut checkpoint);
+                    continue;
+                } else {
+                    // prepare_finish：预检不拦截，但把宿主实测失败如实反馈，
+                    // 收据中验证项保持未闭合状态
+                    context.add_error_feedback(&format!(
+                        "【宿主权威验证未通过（预检）】`{}` → 退出码 {}：{}",
+                        verify_cmd, verify_outcome.exit_code, verify_outcome.output_tail
+                    ));
+                }
+            }
+        }
+
         let diff_context = if side_effect_count > 0 {
             let affected_paths = context.new_affected_paths();
             let raw_diff = git_baseline.collect_git_diff(&workspace_dir).map(|(d, _)| d);
@@ -2282,12 +2378,26 @@ async fn run_agent_main_loop_in_workspace_inner(
                     );
                     context.record_step_outcome(false);
                 } else {
-                    // 达到 3 次熔断上限：低风险带警告交付；高风险（鉴权/密钥/迁移/并发/安全策略）
-                    // 不享受熔断放行额度——继续按未通过处理并引导 ask_human 人工仲裁。
+                    // 达到 3 次熔断上限：一律转人工仲裁，不再按风险分级自动放行。
+                    // "低风险自动带警告交付"会把未修复的硬伤静默标成 succeeded——
+                    // 阻塞性缺陷未收敛时，成功交付的唯一合法路径是用户显式仲裁。
                     let risk_flags =
                         crate::agent::finalization::detect_risk_flags(&context.new_affected_paths());
-                    if risk_flags.is_empty() {
+                    let human_waived = checkpoint
+                        .human_waiver_text()
+                        .map_or(false, |w| !w.trim().is_empty());
+                    if human_waived {
                         reviewer_warnings_delivered = Some(review_res.clone());
+                        crate::agent::telemetry::record_gate_fire(
+                            state.inner(),
+                            &crate::agent::telemetry::GateFireRecord {
+                                run_id: &run_id,
+                                session_id: &final_session_id,
+                                step_id: step_id as i64,
+                                gate: "finish_review",
+                                route: "finish_review:human_arbitrated",
+                            },
+                        );
                         crate::agent::dispatcher::emit_tool_event(
                             &app,
                             &final_session_id,
@@ -2297,7 +2407,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                             Some("finish".to_string()),
                             Some(true),
                             &format!(
-                                "终态审查熔断放行（已重试 3 次）：仍有 {} 项未收敛缺陷已附带警告交付",
+                                "终态审查经人工仲裁放行（重试已用尽）：仍有 {} 项未收敛缺陷，已随交付如实披露",
                                 review_res.blocking_issues.len()
                             ),
                             None,
@@ -2313,13 +2423,39 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 session_id: &final_session_id,
                                 step_id: step_id as i64,
                                 gate: "finish_review",
-                                route: "finish_review:high_risk_escalated",
+                                route: if risk_flags.is_empty() {
+                                    "finish_review:exhausted_escalated"
+                                } else {
+                                    "finish_review:high_risk_escalated"
+                                },
                             },
                         );
+                        let issues_text = review_res
+                            .blocking_issues
+                            .iter()
+                            .enumerate()
+                            .map(|(i, b)| {
+                                format!(
+                                    "{}. 【{}】{}\n   👉 修复要求: {}",
+                                    i + 1,
+                                    b.file,
+                                    b.issue,
+                                    b.requirement
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         context.add_error_feedback(&format!(
-                            "【⚠️ 高风险交付审查未收敛（已重试 3 次），禁止自动带警告交付！】\n检测到高风险改动信号：{}\n仍有 {} 项阻塞性缺陷未解决。\n【必须采取的行动】：高风险改动不享受熔断放行额度——请继续修复缺陷后重试 finish；若认为审查意见有误，请调用 ask_human 申请人工仲裁。",
-                            risk_flags.join(", "),
-                            review_res.blocking_issues.len()
+                            "【⚠️ 终态审查连续 3 次未通过，已熔断升级人工仲裁，finish 未生效！】\n审查模型（{}）评分: {}/100\n审查评价: {}\n{}仍未解决的阻塞性缺陷：\n{}\n\n【必须采取的行动】：\n- 若缺陷属实：继续修复后重试 finish；\n- 若认为审查意见有误或风险可接受：调用 ask_human 向用户呈报缺陷清单申请人工仲裁（用户批准后重试 finish 即放行）；\n- 严禁未经人工仲裁反复提交 finish 消耗步骤预算。",
+                            review_res.model_id,
+                            review_res.score,
+                            review_res.summary,
+                            if risk_flags.is_empty() {
+                                String::new()
+                            } else {
+                                format!("\n检测到高风险改动信号：{}\n", risk_flags.join(", "))
+                            },
+                            issues_text
                         ));
                         crate::agent::dispatcher::emit_tool_event(
                             &app,
@@ -2330,8 +2466,12 @@ async fn run_agent_main_loop_in_workspace_inner(
                             Some("finish".to_string()),
                             Some(false),
                             &format!(
-                                "高风险改动审查未收敛（{}），已熔断升级人工仲裁",
-                                risk_flags.join(", ")
+                                "终态审查连续 3 次未通过{}，已熔断升级人工仲裁",
+                                if risk_flags.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("（{}）", risk_flags.join(", "))
+                                }
                             ),
                             None,
                             None,
