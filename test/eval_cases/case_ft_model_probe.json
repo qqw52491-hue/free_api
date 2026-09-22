@@ -1,0 +1,16 @@
+{
+  "id": "case_ft_model_probe",
+  "title": "模型通道可用性探针（最小真实任务：读取+交付）",
+  "tier": "smoke",
+  "base_commit": "HEAD",
+  "problem_statement": "读取工作区根目录的 package.json，回答其 name 与 version 字段值。这是纯只读任务，严禁修改任何文件；拿到答案后直接交付（finish）并在交付总结中写出两个字段值。",
+  "judge_kind": "command",
+  "verify_command": "test \"$(sqlite3 \"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}\" \"SELECT COUNT(*) FROM agent_run_traces WHERE session_id='${FREE_API_EVAL_AGENT_SESSION}' AND status='succeeded'\")\" -ge 1",
+  "expected_exit_code": 0,
+  "max_steps": 15,
+  "plan_mode": "off",
+  "max_prompt_tokens": 800000,
+  "expected_diff_files": [],
+  "baseline_expectation": "red",
+  "notes": "用途：模型矩阵稳定性探针。最小真实 Agent 任务验证「指定模型真的能产出指令并完成一轮读+交付」，配合报告里的执行者完整性行（telemetry.executor_calls 按 model_id 分账）检测静默替身/回退。判据=会话终态 succeeded；模型侧能力/稳定性差异体现在 executor_calls 分布与失败类型上。"
+}

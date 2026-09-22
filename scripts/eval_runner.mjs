@@ -384,11 +384,13 @@ function inspectGitDiff(sandboxPath) {
 // ---- 从 SQLite 提取真实 Token 账单与遥测 ----
 function querySessionTelemetry(sessionId) {
   const empty = {
+    session_id: sessionId,
     main_prompt: 0,
     main_completion: 0,
     review_prompt: 0,
     review_completion: 0,
     gate_fires: [],
+    executor_calls: [],
     traces: [],
   };
   if (!sessionId || !fs.existsSync(appDbPath)) return empty;
@@ -421,6 +423,25 @@ function querySessionTelemetry(sessionId) {
       // 兼容尚未建表的轻量环境
     }
 
+    // 执行者完整性核验：路由"升维救场"会在被测模型 request_error 后把指令生产
+    // 静默换成 Pro——生产上是韧性兜底，评测上却是被测对象被替换而不留痕。
+    // 统计本 session 产出有效指令的 model_id 分布，凡非指定模型产出即标记。
+    let executorCalls = [];
+    try {
+      const rawCalls = execSync(
+        `sqlite3 "${appDbPath}" "SELECT model_id, outcome, count(*) FROM agent_llm_calls WHERE session_id='${sessionId}' AND step_id > 0 AND outcome IN ('instruction_ready','parse_error') GROUP BY model_id, outcome"`,
+        { encoding: 'utf8' }
+      ).trim();
+      if (rawCalls) {
+        executorCalls = rawCalls.split('\n').map((line) => {
+          const [model_id, outcome, count] = line.split('|');
+          return { model_id, outcome, count: Number(count) };
+        });
+      }
+    } catch {
+      // 兼容尚未建表的轻量环境
+    }
+
     // 轨迹：agent_run_traces.steps_json 为整轮步骤 JSON 数组
     let traces = [];
     try {
@@ -445,18 +466,61 @@ function querySessionTelemetry(sessionId) {
     }
 
     return {
+      session_id: sessionId,
       main_prompt: Number(rawTokens[0] || 0),
       main_completion: Number(rawTokens[1] || 0),
       review_prompt: Number(rawReview[0] || 0),
       review_completion: Number(rawReview[1] || 0),
       review_runs: Number(rawReview[2] || 0),
       gate_fires: gateFires,
+      executor_calls: executorCalls,
       traces,
     };
   } catch (e) {
     console.warn(`⚠️ 遥测查询提示: ${e.message}`);
     return empty;
   }
+}
+
+// 执行者完整性：统计本 session 产出有效指令的 model_id 分布。
+// 路由规则 2（上一步失败→升维 Pro 救场）与 triage/retriage/子审查调用
+// 都会让非指定模型产出指令——生产上是韧性兜底，但评测必须披露真实驱动占比，
+// 否则"测 Flash"实际测的是"Flash+Pro 混合体"。
+function executorBreakdown(telemetry) {
+  const calls = telemetry.executor_calls || [];
+  const ready = calls.filter((c) => c.outcome === 'instruction_ready');
+  const total = ready.reduce((s, c) => s + c.count, 0);
+  return { calls, ready, total };
+}
+
+function executorForeignCalls(telemetry, mode) {
+  const wanted = (mode.executorModelId || '').trim();
+  if (!wanted || !telemetry.executor_calls?.length) return [];
+  return telemetry.executor_calls.filter((c) => c.model_id !== wanted);
+}
+
+function executorIntegrityLine(telemetry, mode) {
+  const { calls, ready, total } = executorBreakdown(telemetry);
+  if (!calls.length) return '`无调用记录`';
+  const byModel = new Map();
+  for (const c of ready) byModel.set(c.model_id, (byModel.get(c.model_id) || 0) + c.count);
+  const wanted = (mode.executorModelId || '').trim();
+  const parts = [...byModel.entries()].map(([id, n]) => {
+    const tag = id === wanted ? '被测' : '替身/监督';
+    return `${id.slice(0, 8)}(${tag}) ${n} 次 ${Math.round((n / total) * 100)}%`;
+  });
+  return `\`${parts.join(' + ')}\``;
+}
+
+function executorIntegrityBadge(telemetry, mode) {
+  const { ready, total } = executorBreakdown(telemetry);
+  if (!ready.length) return '⚠️ 无法核验';
+  const wanted = (mode.executorModelId || '').trim();
+  const own = ready.filter((c) => c.model_id === wanted).reduce((s, c) => s + c.count, 0);
+  const share = own / total;
+  if (share >= 0.9) return '✅ 未被替换';
+  if (share >= 0.5) return `⚠️ 被测模型仅驱动 ${Math.round(share * 100)}% 指令`;
+  return `❌ 被测模型仅驱动 ${Math.round(share * 100)}% 指令（实际由替身完成）`;
 }
 
 // ---- 生成 Markdown 报告 ----
@@ -491,6 +555,7 @@ function generateMarkdownReport(caseDef, result, telemetry, diffInfo, mode, cali
 | **测试耗时** | \`${(result.durationMs / 1000).toFixed(2)}s\` | ≤ 校准/判分超时上限 | ✅ 正常 |
 | **修改文件数** | \`${diffInfo.changedFiles.length}\` 个 | 预估 ≤ ${caseDef.expected_diff_files?.length || 5} 个 | ${diffInfo.changedFiles.length > (caseDef.expected_diff_files?.length || 5) ? '⚠️ 存在范围扩散' : '✅ 范围可控'} |
 | **门禁拦截次数** | \`${telemetry.gate_fires.length}\` 次 | 0 次（或纠偏后收敛） | ${telemetry.gate_fires.length === 0 ? '✅ 完美合规' : '⚠️ 发生过干预'} |
+| **执行者完整性** | ${executorIntegrityLine(telemetry, mode)} | 指令必须由指定 --model 产出 | ${executorIntegrityBadge(telemetry, mode)} |
 | **Token 总开销** | \`${totalPrompt + totalCompletion}\` tokens | 主模型: ${telemetry.main_prompt}, 审查员: ${telemetry.review_prompt} | ℹ️ 见账单 |
 
 ---
@@ -735,7 +800,7 @@ async function runEvaluation() {
           : 'unknown';
         console.log(`   🧾 [LIVE] 会话 ${sessionId} 终态: ${traceStatus}`);
 
-        mode = { isDryRun: false, label: `🔵 LIVE (model=${options.model.slice(0, 8)}, session=${sessionId}, 终态=${traceStatus})` };
+        mode = { isDryRun: false, label: `🔵 LIVE (model=${options.model.slice(0, 8)}, session=${sessionId}, 终态=${traceStatus})`, executorModelId: options.model };
 
         // agent 作业环境不含卷子：判分前才注入测试补丁（--3way 容忍 agent 编辑导致的上下文漂移，
         // 失败降级 -C1 宽松匹配；agent 若恰好写了同名测试，参考卷已用规格专属名避免撞车）
