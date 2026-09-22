@@ -78,6 +78,19 @@ async fn run_tool_phase_guarded(
         Err(_elapsed) => {
             let stage = crate::agent::control::read_stage(final_session_id)
                 .unwrap_or_else(|| "unknown".to_string());
+            let route = "tool_watchdog:timeout".to_string();
+            // 挂死定位证据必须即时持久化——会话可能随后被 900s 停滞看门狗收割，
+            // 只靠 stderr 反馈的话面包屑会随会话一起蒸发。
+            crate::agent::telemetry::record_gate_fire(
+                state.inner(),
+                &crate::agent::telemetry::GateFireRecord {
+                    run_id,
+                    session_id: final_session_id,
+                    step_id: step_id as i64,
+                    gate: "tool_watchdog",
+                    route: &format!("{}|stage={}", route, stage),
+                },
+            );
             Ok(DispatchResult {
                 view: None,
                 success: false,
@@ -86,7 +99,7 @@ async fn run_tool_phase_guarded(
                     "工具派发看门狗超时（{}s 未返回，stage={}）——该次派发可能内部挂死，已按本步失败处理避免会话冻结。若是异步子任务派发，请改用 wait_jobs 主动等待结论；若同一调用再次超时，请换用其他取证路径或 ask_human 报告卡住点。",
                     secs, stage
                 ),
-                route: "tool_watchdog:timeout".to_string(),
+                route,
             })
         }
         Ok(r) => r,

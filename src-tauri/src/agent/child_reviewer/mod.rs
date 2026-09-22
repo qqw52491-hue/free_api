@@ -40,10 +40,13 @@ pub async fn spawn_child_reviewer(
     mut interrupt_rx: watch::Receiver<u64>,
     identity: &ChildRunIdentity,
 ) -> Result<String, String> {
+    crate::agent::control::mark_stage(parent_session_id, "child_spawn:parse_request");
     let request = parse_child_review_request(params)?;
+    crate::agent::control::mark_stage(parent_session_id, "child_spawn:evidence");
     let (evidence_excerpt, allowed_refs) =
         build_managed_resource_evidence(db, parent_session_id, &request)?;
     let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
+    crate::agent::control::mark_stage(parent_session_id, "child_spawn:begin_run");
     let child_run_id = begin_child_run_extended(
         db,
         parent_run_id,

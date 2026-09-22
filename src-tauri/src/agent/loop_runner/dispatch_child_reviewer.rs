@@ -349,6 +349,10 @@ pub(super) async fn dispatch_child_reviewer(
                 .await
             {
                 Ok(child_run_id) => {
+                    crate::agent::control::mark_stage(
+                        ctx.final_session_id,
+                        "child_reviewer:spawn_returned",
+                    );
                     // 派发快照：供消费端在 reviewer 故障（invalid_output/超时）时自动故障转移重派
                     if !ctx.checkpoint.plan_phase.is_approved() {
                         ctx.checkpoint.set_plan_reviewer_dispatch_snapshot(&snapshot);

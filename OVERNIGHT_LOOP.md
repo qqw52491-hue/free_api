@@ -889,3 +889,16 @@ telemetry `ORDER BY id DESC` → `started_at DESC`；E2E 终态轮询同步修�
 ### case_20 连场进行中
 
 sensenova-6.8+glm-5.2 首场：54 步撞 25min 时限（终态 running→判 FAIL），3.1M token——sensenova 无缓存全量重发 ~57K/步，慢而贵；retriage@25 glm 判 continue 准确。轮换中（flash-high×4 → sensenova×3 → deepseek-v4-flash×3 → kimi-k3×3 → 3.1-pro×2 → 3.7-fh×2 → 3.8-fm×2，各30min上限）。
+
+### case_20 连场记录（gemini-3.8-flash-high × 4 + glm-5.2 监督）
+
+| # | 步 | 终态 | 死因 | 亲产率 |
+|---|---|---|---|---|
+| 1 | 115 | failed | 漫游至 6M token 上限（零写入） | 91% |
+| 2 | 39 | failed | **child_reviewer 派发挂死**（checkpoint=run_tool，0 子运行落账，14min 后停滞看门狗收割） | 77% |
+| 3 | 78 | failed | 同上——**同挂点复现**，`role=tech_lead` 派发两次必挂 | 91% |
+| 4 | 30 | succeeded | ⚠️ **修复轨道零写入收尾**：模型交纯诊断报告（根因分析极准），finish_review 放行，judge FAIL | 80% |
+
+**新实锤 host bug**：`run_tool_phase` 裸 await 无超时——child_reviewer(role=tech_lead) 派发在 spawn 内永久冻结（db 锁嫌疑已被看门狗成功写入排除；await 未决方向）。已加 `run_tool_phase_guarded`（480s 封顶，超时转失败步+stage 面包屑）与 child_spawn 分段面包屑（parse_request/evidence/begin_run/spawn_returned），下次复现将直接报出卡点。（commit `3e84e52`）
+
+**观察（未改）**：修复轨道"零写入交付"能被终审放行——glm-5.2 把诊断报告当交付通过。机械侧可加"零 diff + 修复类路由 → 给终审显式红旗"信号，但裁决仍属终审语义，不自动拦。

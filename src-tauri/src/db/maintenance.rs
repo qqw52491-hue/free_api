@@ -9,8 +9,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub type ReadPool = Pool<SqliteConnectionManager>;
 
-static READ_POOL: OnceLock<ReadPool> = OnceLock::new();
-
 
 use super::*;
 

@@ -9,9 +9,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub type ReadPool = Pool<SqliteConnectionManager>;
 
-static READ_POOL: OnceLock<ReadPool> = OnceLock::new();
-
-
 use super::*;
 
 pub fn init_read_pool(path: &PathBuf) -> Result<ReadPool, String> {
@@ -29,7 +26,10 @@ pub fn init_read_pool(path: &PathBuf) -> Result<ReadPool, String> {
         .min_idle(Some(2))
         .build(manager)
         .map_err(|e| format!("初始化只读连接池失败: {e}"))?;
-    let _ = READ_POOL.set(pool.clone());
+    // 必须写入 db/mod.rs 里 reader() 真正读取的那个静态——此前本模块声明了
+    // 同名私有静态，池 set 到了没人读的位置，reader() 永远回退写互斥锁，
+    // SWMR 多读设计实际上从未生效（读写全串行在同一个 Mutex 上）。
+    let _ = super::READ_POOL.set(pool.clone());
     Ok(pool)
 }
 
