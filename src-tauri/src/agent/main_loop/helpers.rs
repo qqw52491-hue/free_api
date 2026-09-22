@@ -61,7 +61,6 @@ pub(crate) fn token_budget_stop_reason(
 pub(crate) fn is_gate_block_route(route: &str) -> bool {
     route.starts_with("plan_gatekeeper:")
         || route.starts_with("finish_review:")
-        || route.starts_with("shell_tool_misuse:")
         || matches!(
             route,
             "stage_review:blocking_open"

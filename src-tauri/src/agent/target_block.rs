@@ -46,12 +46,6 @@ pub struct TargetBlock {
     /// 验收标准清单（Checklist），Reviewer 将拿着逐条量取证据
     #[serde(default)]
     pub checklist: Vec<String>,
-    /// 单块硬顶步数上限（默认 15 步，防止陷入死循环）
-    #[serde(default = "default_hard_limit")]
-    pub hard_step_limit: usize,
-    /// 当前块已执行步数（宿主代码计数，不靠模型自觉）
-    #[serde(default)]
-    pub steps_count: usize,
     /// 允许主动呼叫 Pro 援助的剩余配额（默认 2 次）
     #[serde(default = "default_escalate_quota")]
     pub escalate_quota: usize,
@@ -75,10 +69,6 @@ fn default_tier() -> String {
     "flash".to_string()
 }
 
-fn default_hard_limit() -> usize {
-    15
-}
-
 fn default_escalate_quota() -> usize {
     2
 }
@@ -91,8 +81,6 @@ impl TargetBlock {
             scope: Vec::new(),
             tier: default_tier(),
             checklist: Vec::new(),
-            hard_step_limit: default_hard_limit(),
-            steps_count: 0,
             escalate_quota: default_escalate_quota(),
             active_escalation: false,
             review_retry_count: 0,
@@ -101,9 +89,8 @@ impl TargetBlock {
         }
     }
 
-    /// 执行一步，自增步数；如果上一步使用了逃生通道，在本步开始时自动重置
+    /// 本步开始：推进块状态（Pending → InProgress）
     pub fn on_step_start(&mut self) {
-        self.steps_count = self.steps_count.saturating_add(1);
         if self.status == BlockStatus::Pending {
             self.status = BlockStatus::InProgress;
         }
@@ -149,11 +136,6 @@ impl TargetBlock {
     /// 审查成功时复位重试计数
     pub fn reset_review_retries(&mut self) {
         self.review_retry_count = 0;
-    }
-
-    /// 检查是否已达到硬顶步数上限
-    pub fn is_hard_limit_exceeded(&self) -> bool {
-        self.steps_count >= self.hard_step_limit
     }
 
     /// 校验实际改动的文件是否超出了 scope 范围（如果 scope 为空则视为不限）
@@ -245,7 +227,6 @@ mod tests {
         // 第 1 步启动
         block.on_step_start();
         assert_eq!(block.status, BlockStatus::InProgress);
-        assert_eq!(block.steps_count, 1);
 
         // 申请 Pro 支援逃生通道（第 1 次）
         assert!(block.request_pro_escalation().is_ok());

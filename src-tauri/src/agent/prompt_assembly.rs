@@ -264,7 +264,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         actions: &[
             "exec(command: string, args?: string[], cwd?: string, timeout_secs?: number [默认 60s，构建/全量测试等长任务须显式加大], env?: object) — 在项目工作区执行 shell 命令行（支持参数数组与自定义环境变量；已注入 $SESSION_TMP_DIR/$TMPDIR=会话产物物理根）",
             "⚠️【产物落点】shell 内写交付产物一律用 \"$SESSION_TMP_DIR/文件名\" 落点——裸相对路径 tmp/x 会落在当前执行目录下的 tmp/，既不是会话产物区也不随会话清理（系统会检测并提醒）；tmp/ 前缀路由只在 local_file/register_file 等工具参数中有效",
-            "⚠️【严禁滥用】禁止用 cat/sed/head/tail 等命令查看或读取文件内容——shell 读文件无法建立乐观并发哈希基线（后续 edit/write 该文件会被硬拦截），且纯文件读取命令会被工具误用拦截器软驳回并引导纠正",
+            "⚠️【基线提示】读取文件建议用 local_file(action: \"read\")——shell 读文件不建立乐观并发哈希基线，后续 write/edit 该既有文件会因缺基线被硬拦截",
         ],
     },
 ];

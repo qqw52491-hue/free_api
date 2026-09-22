@@ -82,14 +82,12 @@ impl SandwichContext {
                     .join("; ")
             };
             bottom_state_card.push_str(&format!(
-                "【当前活跃目标块】id={} | title={}\n• 预设档位: {}\n• 边界范围(Scope): {}\n• 验收清单(Checklist): {}\n• 步数已用: {}/{} (参考上限，超限仅提醒)\n\n",
+                "【当前活跃目标块】id={} | title={}\n• 预设档位: {}\n• 边界范围(Scope): {}\n• 验收清单(Checklist): {}\n\n",
                 block.id,
                 block.title,
                 block.tier,
                 if block.scope.is_empty() { "不限".to_string() } else { block.scope.join(", ") },
                 checklist_desc,
-                block.steps_count,
-                block.hard_step_limit
             ));
         }
 

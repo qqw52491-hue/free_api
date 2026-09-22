@@ -1204,26 +1204,10 @@ async fn run_agent_main_loop_in_workspace_inner(
             AgentRunEvent::BeginPlanning { step_id },
         )?;
 
-        // 宿主状态机：追踪当前目标块步数并触发超限收敛提醒。
-        // 只在越过上限的那一步告警一次，之后每超 10 步提醒一次——
-        // 每步重复注入同一句警告是纯噪音，会持续稀释模型对当前真实阻塞的注意力。
-        let hard_limit_warning = if let Some(block) = context.active_target_block_mut() {
+        // 目标块步数计数保留（升维标记按步复位的载体），不再注入超限提醒——
+        // 步数不能代理收敛与否，认知判断归模型。
+        if let Some(block) = context.active_target_block_mut() {
             block.on_step_start();
-            let over = block.steps_count.saturating_sub(block.hard_step_limit);
-            if block.is_hard_limit_exceeded() && (over == 0 || over % 10 == 0) {
-                Some((block.id.clone(), block.steps_count, block.hard_step_limit))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some((id, count, limit)) = hard_limit_warning {
-            context.add_error_feedback(&format!(
-                "【⚠️ 目标块步数超限提醒】当前活跃目标块 [{}] 已执行 {} 步（参考上限 {} 步；此为收敛提醒，不会强制停止）。\n请检查当前方案是否受阻：受阻请在 progress_summary 中说明、收敛收尾或申请验收；若确需继续推进则正常执行，本提醒将每 10 步重复一次。",
-                id, count, limit
-            ));
         }
 
         app.emit(

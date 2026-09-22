@@ -224,7 +224,7 @@ async fn join_drains(
 }
 
 pub fn dispatch(
-    db: &DbState,
+    _db: &DbState,
     session_id: &str,
     _action: &str,
     params: &serde_json::Value,
@@ -283,34 +283,6 @@ pub fn dispatch(
         .unwrap_or_default();
 
     let final_cmd = build_full_command(raw_cmd, &args_list);
-
-    // 工具误用引导（非安全边界）：纯文件读取命令应使用类型化工具 local_file(read)
-    // 建立 SHA256 乐观并发基线，而非 shell（shell 读文件会让后续 edit/write 既有文件
-    // 因缺基线被硬拦，且绕过结构化审计）。仅拦"单条、无管道、无重定向的纯读取"；
-    // 任何歧义（管道组合/重定向/设备路径）一律放行，交给审计台账与 finish 三分法门禁兜底。
-    if pure_file_read_command(&final_cmd) {
-        crate::agent::telemetry::record_gate_fire(
-            db,
-            &crate::agent::telemetry::GateFireRecord {
-                run_id: session_id,
-                session_id: &session_id,
-                step_id: 0,
-                gate: "shell_tool_misuse",
-                route: "shell_tool_misuse:file_read_via_shell",
-            },
-        );
-        return DispatchResult { view: None,
-            stdout: String::new(),
-            success: false,
-            route: "local_shell:file_read_misuse".to_string(),
-            stderr: "❌ [工具误用拦截] 检测到你正通过 shell 执行纯文件读取命令。\n\
-                     💡 系统规范：查看/读取文件必须调用类型化工具 `local_file(action: \"read\", path: \"...\", start_line?: number, end_line?: number)`，代码检索调用 `search`。\n\
-                     原因：① shell 读文件无法建立乐观并发哈希基线，后续 edit/write 该既有文件会被硬拦截；② 绕过结构化审计与行号定位。\n\
-                     构建、测试、代码检查与环境探针类命令不受此约束，可正常执行。\n\
-                     <!-- 结构化元数据: {\"kind\":\"file_read_via_shell\",\"retryable\":false,\"safe_to_retry\":false,\"recommended_action\":\"use_local_file_read\"} -->"
-                .to_string(),
-        };
-    }
 
     // 确定执行工作目录 (cwd)，受 path_guard 严格约束
     let execution_cwd: PathBuf = match params.get("cwd").and_then(|v| v.as_str()) {
@@ -752,36 +724,6 @@ fn truncate_output(s: &str, max_bytes: usize) -> String {
     )
 }
 
-/// 判定命令是否为"纯文件读取"（工具误用引导，非安全边界）。
-/// 仅当整条命令为单条、无管道/重定向/命令分隔的文件内容读取时才命中；
-/// 任何歧义（管道组合如 `cargo test | tail`、重定向落盘、`/dev` `/proc` 设备路径、
-/// 组合命令）一律放行——误拦的代价（模型对抗绕行）高于漏拦（已有审计台账与
-/// finish 三分法门禁兜底）。rg/grep 不拦：检索是 shell 的合法用途。
-fn pure_file_read_command(cmd: &str) -> bool {
-    let structural = AuditLedger::blank_quoted_segments(cmd);
-    if structural.contains(['|', '>', '<', ';', '&']) {
-        return false;
-    }
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    let Some(first) = tokens.first() else {
-        return false;
-    };
-    let unquoted = first.trim_matches(|c| c == '\'' || c == '"');
-    let base = unquoted.rsplit('/').next().unwrap_or(unquoted);
-    if !matches!(base, "cat" | "sed" | "head" | "tail" | "less" | "more") {
-        return false;
-    }
-    // 设备与虚拟路径有合法用途（如 head -c 32 /dev/urandom 取随机数），放行
-    if tokens.iter().any(|t| t.contains("/dev/") || t.contains("/proc/")) {
-        return false;
-    }
-    if base == "sed" {
-        return AuditLedger::is_sed_readonly(&tokens);
-    }
-    // tail -f 属持续读取（会挂起到超时），同样按文件读取引导到 local_file
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,34 +735,6 @@ mod tests {
         DbState(std::sync::Arc::new(std::sync::Mutex::new(
             crate::db::init_db(&base.join("test.db")).unwrap(),
         )))
-    }
-
-    #[test]
-    fn pure_file_read_classifier_hits_only_unambiguous_reads() {
-        // 命中：单条、无管道、无重定向的文件内容读取
-        assert!(pure_file_read_command("sed -n '265,340p' src-tauri/src/agent/main_loop.rs"));
-        assert!(pure_file_read_command("cat foo.txt"));
-        assert!(pure_file_read_command("tail -20 build.log"));
-        assert!(pure_file_read_command("head -n 50 src/lib.rs"));
-        assert!(pure_file_read_command("sed -n '1p;2p' file.txt"));
-        // 放行：管道组合（输出过滤/统计是 shell 的合法用途）
-        assert!(!pure_file_read_command("cargo test 2>&1 | tail -20"));
-        assert!(!pure_file_read_command("cat config.yaml | grep port | wc -l"));
-        // 放行：重定向落盘（写入类，交审计台账记账）
-        assert!(!pure_file_read_command("cat a.txt > b.txt"));
-        // 放行：设备/虚拟路径（如取随机数）
-        assert!(!pure_file_read_command("head -c 32 /dev/urandom"));
-        // 放行：非读取命令
-        assert!(!pure_file_read_command("cargo build --release"));
-        assert!(!pure_file_read_command("grep -n foo src/**/*.rs"));
-        assert!(!pure_file_read_command("rg pattern src/"));
-        // 放行：组合命令（歧义，交给台账与 finish 三分法兜底）
-        assert!(!pure_file_read_command("cat a; cat b"));
-        // 拦截：sed 带原地写入/脚本写文件能力
-        assert!(!pure_file_read_command("sed -i 's/a/b/' file.txt"));
-        assert!(!pure_file_read_command("sed -n '2w /tmp/out.txt' file.txt"));
-        // 引号内 `>`/`|` 字面量不改变结构判定
-        assert!(pure_file_read_command("sed -n 's/a|b/c/p' file.txt"));
     }
 
     struct TempDirGuard(PathBuf);
