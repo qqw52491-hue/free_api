@@ -75,7 +75,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     BuiltinToolSpec {
         name: "search",
         summary: "代码与历史定位工具：search 只回答“在哪”；取得 file:line 后必须转 local_file.read 读取完整目标区块，不能靠换关键词拼接代码",
-        actions: &["search(query: string, kinds?: history|code|all, path?: string for code) — 单文件命中带 ±3 行；连续 3 次真实检索未 read 时暂停该文件搜索"],
+        actions: &["search(query: string, kinds?: history|code|all, path?: string [kinds 含 code 时必填，缺省会被拒], ...) — 单文件命中带 ±3 行；连续 3 次真实检索未 read 时暂停该文件搜索"],
     },
     BuiltinToolSpec {
         name: "task_store",
@@ -262,7 +262,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "local_shell",
         summary: "本地工作区终端命令执行工具：执行构建、测试、代码检查与环境探针（受工作区物理边界与超时保护，工具链PATH自动补齐）。⚠️【工具排他约束】严禁挪用为文件阅读器：读取文件必须用 local_file(action: \"read\")，代码检索必须用 search",
         actions: &[
-            "exec(command: string, args?: string[], cwd?: string, timeout_secs?: number, env?: object) — 在项目工作区执行 shell 命令行（支持参数数组与自定义环境变量；已注入 $SESSION_TMP_DIR/$TMPDIR=会话产物物理根）",
+            "exec(command: string, args?: string[], cwd?: string, timeout_secs?: number [默认 60s，构建/全量测试等长任务须显式加大], env?: object) — 在项目工作区执行 shell 命令行（支持参数数组与自定义环境变量；已注入 $SESSION_TMP_DIR/$TMPDIR=会话产物物理根）",
             "⚠️【产物落点】shell 内写交付产物一律用 \"$SESSION_TMP_DIR/文件名\" 落点——裸相对路径 tmp/x 会落在当前执行目录下的 tmp/，既不是会话产物区也不随会话清理（系统会检测并提醒）；tmp/ 前缀路由只在 local_file/register_file 等工具参数中有效",
             "⚠️【严禁滥用】禁止用 cat/sed/head/tail 等命令查看或读取文件内容——shell 读文件无法建立乐观并发哈希基线（后续 edit/write 该文件会被硬拦截），且纯文件读取命令会被工具误用拦截器软驳回并引导纠正",
         ],

@@ -82,7 +82,7 @@ impl SandwichContext {
                     .join("; ")
             };
             bottom_state_card.push_str(&format!(
-                "【当前活跃目标块】id={} | title={}\n• 预设档位: {}\n• 边界范围(Scope): {}\n• 验收清单(Checklist): {}\n• 步数已用: {}/{} (硬顶上限)\n\n",
+                "【当前活跃目标块】id={} | title={}\n• 预设档位: {}\n• 边界范围(Scope): {}\n• 验收清单(Checklist): {}\n• 步数已用: {}/{} (参考上限，超限仅提醒)\n\n",
                 block.id,
                 block.title,
                 block.tier,

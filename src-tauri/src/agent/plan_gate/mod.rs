@@ -871,9 +871,9 @@ fn gate_interception(
                             "【智能自适应门禁：触发按需升级审查】\n\
                              原因: {}\n\
                              命中规则: `{}`\n\
-                             系统已将任务切换为方案审查模式。在动笔修改代码前，请严格遵循两阶段固定审查流程：\n\
-                             1. 优先调用 `child_reviewer`（指定 role: \"tech_lead\"）进行 1v1 方案对齐讨论（custom_inputs 传 plan_summary/target_files/discussion_round，且须三选一携带 evidence_refs/evidence_excerpt/resource_ids——通常就是刚读过的 target_files）；\n\
-                             2. 根据 Tech Lead 的结构化裁决行动：若 approved 则直接放行；若 rebuttal 则微调方案；若 escalate 则按推荐专家（建议：{}）并发派发联合会审！",
+                             系统已将任务切换为方案审查模式。在动笔修改代码前，请按顺序完成两步：\n\
+                             1. 调用 `child_reviewer`（指定 role: \"tech_lead\"）进行方案对齐（custom_inputs 传 plan_summary/target_files/discussion_round，且须三选一携带 evidence_refs/evidence_excerpt/resource_ids——通常就是刚读过的 target_files）；\n\
+                             2. 拿到裁决后调用 `submit_plan` 落账正式方案以获得 plan_id（含各 target_block 的 checklist）——【注意】即使 Tech Lead 返回 approved，缺少 submitted_plan 状态的写入仍会被拦截；若裁决为 rebuttal 则修订后再讨论，escalate 则按推荐专家（建议：{}）并发派发联合会审后再落账。",
                             reason, matched_pattern, suggested_roles.join(", ")
                         );
                         Some(DispatchResult { view: None,
