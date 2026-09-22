@@ -363,6 +363,16 @@ pub async fn evaluate_finish_diff(
         }
     }
 
+    // 入口分流预判的问题清单贯穿到终审：triage 在任务入口已把题面转成
+    // 调查问题与证据要求（Pro 判决产物），执行模型可能没按单取证——
+    // 终审拿这份单子逐条核销，不依赖执行者自己记得覆盖了哪些症状。
+    if let Some(brief) = triage.and_then(|v| v.investigation_brief_text()) {
+        block_sections.push(format!(
+            "【入口分流预判的问题与证据清单（Pro 判决产物）】\n{}\n👉 审查强制要求：上述每一条都必须能在交付材料或已核实的代码路径中找到对应证据；任一条无证据支持 → 判为 blocking_issue（issue 注明该问题未被覆盖）。不得因整体方案合理而合并核销——这份清单早于执行产生，恰是执行者最可能漏掉的那部分。",
+            brief
+        ));
+    }
+
     // 分流判决 artifact_quality：交付物为非代码产物，按产物质量标准审，不要求代码 diff 证据
     if triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("artifact_quality")) {
         block_sections.push(
