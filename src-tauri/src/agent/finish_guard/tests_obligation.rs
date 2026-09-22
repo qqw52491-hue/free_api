@@ -186,8 +186,8 @@ def main():
             blockers[0]
         );
         assert!(
-            blockers[0].contains("不在本次真实改动 (diff) 覆盖区间内"),
-            "拦截文案必须明确原因: {}",
+            blockers[0].contains("无法定位") || blockers[0].contains("无法在"),
+            "拦截文案必须明确原因（引用不可定位）: {}",
             blockers[0]
         );
         assert!(
@@ -449,6 +449,10 @@ index 123..456 100644
         );
         assert!(pass.is_empty(), "诊断义务的静态可定位引用应放行: {pass:?}");
 
+        // 物种二分修正：可定位但未落 diff 的引用对任何义务都放行机械门
+        // （存在性=机械事实；该不该落 diff=语义判断=终审核销），不再按
+        // 「问题文本逐字匹配」区分义务类型——实测同义改写曾把诊断义务
+        // 错当修复义务逼入物理无解的打回循环。
         let blocked = review_contract_evidence_blockers(
             &contract,
             1,
@@ -457,7 +461,10 @@ index 123..456 100644
             None,
             &[],
         );
-        assert_eq!(blocked.len(), 1, "非取证义务引用 diff 外位置必须拦截");
+        assert!(blocked.is_empty(), "可定位的 diff 外引用应放行移交终审: {blocked:?}");
+        // 但披露清单必须留痕给终审
+        let notices = undiffed_locatable_notices(&contract, Some(&ctx), Some(root));
+        assert_eq!(notices.len(), 1, "未落 diff 的可定位引用须生成终审披露");
     }
 
     #[test]
@@ -783,4 +790,56 @@ fn review_finding_kept_with_explicit_closure_is_accepted() {
     assert_eq!(context.todo_list.len(), 1);
     assert_eq!(context.todo_list[0].status, "done");
 }
+
+    #[test]
+    fn test_paraphrased_diagnostic_obligation_with_locatable_refs_passes() {
+        // 实弹回归（case_20, gemini-3.8-flash）：模型把 triage 取证问题同义改写
+        // 进契约后，逐字匹配把诊断义务错当修复义务——引用未修改但真实存在的
+        // 文件行号永远过不了 diff 对账，finish 物理无解连拒 6 次熔断。
+        // 新语义：file:line 客观可定位 = 机械门放行 + Gate Notice 移交终审。
+        let raw_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,3 +10,4 @@\n fn a() {}\n";
+        let ctx = DiffContext::from_diff_and_paths(Some(raw_diff), &[]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let mut contract = diagnostic_contract_with_refs(&[
+            "src-tauri/src/agent/finish_guard/diff.rs:1-5",
+        ]);
+        contract.obligations[0].question =
+            "图片粘贴/拖拽后，前端如何保存图片及路径如何传递？".to_string();
+        let diagnostic_questions = vec![
+            "图片被粘贴/拖拽后，前端调用了哪个方法进行本地存储或处理？保存路径是什么？".to_string(),
+        ];
+        let blockers = review_contract_evidence_blockers(
+            &contract,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+            &diagnostic_questions,
+        );
+        assert!(
+            blockers.is_empty(),
+            "同义改写的诊断义务+可定位引用必须放行: {blockers:?}"
+        );
+        assert_eq!(
+            undiffed_locatable_notices(&contract, Some(&ctx), Some(root)).len(),
+            1,
+            "可定位但未落 diff 的引用必须留终审披露"
+        );
+
+        // 伪造证据仍须硬拦：行号越界（文件存在但该位置不存在）
+        let mut forged = diagnostic_contract_with_refs(&[
+            "src-tauri/src/agent/finish_guard/diff.rs:99999999",
+        ]);
+        forged.obligations[0].question = contract.obligations[0].question.clone();
+        let blocked = review_contract_evidence_blockers(
+            &forged,
+            1,
+            Some(&ctx),
+            Some(root),
+            None,
+            &diagnostic_questions,
+        );
+        assert_eq!(blocked.len(), 1, "磁盘上不可定位的引用必须继续拦截");
+    }
 }

@@ -267,7 +267,7 @@ pub fn parse_file_line_ref(raw: &str) -> Option<(String, u32, u32)> {
 /// investigation_questions 规范化一致即为诊断义务——其证据天然位于
 /// "读过的文件"而非 diff 内，走静态定位校验而非 diff 对账。
 /// 判别依据是宿主侧持久化的 triage 原单，模型无法伪造归属。
-fn obligation_is_diagnostic(question: &str, diagnostic_questions: &[String]) -> bool {
+pub(crate) fn obligation_is_diagnostic(question: &str, diagnostic_questions: &[String]) -> bool {
     let norm = |s: &str| {
         s.split_whitespace()
             .collect::<String>()
@@ -357,17 +357,22 @@ pub(crate) fn review_contract_evidence_blockers(
 
         for ref_str in &obligation.evidence_refs {
             if let Some((ref_path, start_line, end_line)) = parse_file_line_ref(ref_str) {
-                if ctx.matches_diff(&ref_path, start_line, end_line)
-                    || (is_diagnostic
-                        && ref_statically_locatable(&ref_path, start_line, workspace_root))
-                {
+                if ctx.matches_diff(&ref_path, start_line, end_line) {
+                    has_valid_evidence = true;
+                    break;
+                }
+                // 证据形状分层（物种二分）：file:line 能在磁盘上真实定位 = 具体、
+                // 可审计、非凭空编造的代码证据——机械门到此为止。它「该不该落在
+                // diff 里」是语义判断（诊断义务的证据天然在未修改文件里；模型
+                // 对取证单做同义改写时逐字匹配靠不住），移交终审逐条核销。
+                if ref_statically_locatable(&ref_path, start_line, workspace_root) {
                     has_valid_evidence = true;
                     break;
                 }
                 failed_refs.push(ref_str.trim().to_string());
             } else if looks_like_file_ref(ref_str, workspace_root) {
-                // 诊断义务放宽一档：行号损坏（如全角括号注释）但文件客观存在，
-                // 也算"找到位置"——行级语义由终审核验，不在此死磕格式。
+                // 行号缺失/损坏但文件客观存在 → 同样按"可定位"放行移交终审；
+                // 行级语义本来就不归机械门管。
                 let head = ref_str
                     .trim()
                     .trim_matches(|c| matches!(c, '`' | '*' | '"' | '\''))
@@ -375,41 +380,16 @@ pub(crate) fn review_contract_evidence_blockers(
                     .next()
                     .unwrap_or("")
                     .trim();
-                if is_diagnostic && ref_resolves_on_disk(head, workspace_root) {
+                if ref_resolves_on_disk(head, workspace_root) {
                     has_valid_evidence = true;
                     break;
                 }
-                // 形似代码位置声明但行号缺失/非法 → 仍属代码证据域判失败，
-                // 防止把"写个路径蒙混"伪装成非代码证据逃避对账
+                // 形似代码位置声明但磁盘上根本不存在 → 伪造证据，仍然拦截
                 failed_refs.push(ref_str.trim().to_string());
             }
             // 非代码证据（命令输出/退出码/API 响应/运维状态）不参与 diff 对账：
             // 由 noncode_evidence_skip_reasons 生成 Gate Notice 移交终审语义核验
         }
-
-        // 逐文件修正建议：对每个失败引用，直接给出该文件在 diff 中的实际区间，
-        // 把"驳回→模型自行换算行号→可能再次失败"的多轮循环压缩为"照抄建议"的一次性修正
-        let fix_suggestions = {
-            let mut seen = std::collections::BTreeSet::new();
-            let mut suggestions = Vec::new();
-            for r in &failed_refs {
-                if let Some((ref_path, _, _)) = parse_file_line_ref(r) {
-                    for (df, hs) in &ctx.changed_files {
-                        if file_paths_match(&ref_path, df) && seen.insert(df.clone()) {
-                            let ranges = hs
-                                .iter()
-                                .map(|(a, b)| format!("{}-{}", a, b))
-                                .collect::<Vec<_>>()
-                                .join(",");
-                            suggestions
-                                .push(format!("`{}` 的 diff 实际区间为 [{}] → 可引用 {}:<区间内行号>", ref_path, ranges, df));
-                            break;
-                        }
-                    }
-                }
-            }
-            suggestions.join("\n")
-        };
 
         if !has_valid_evidence {
             if obligation.evidence_refs.is_empty() {
@@ -427,13 +407,13 @@ pub(crate) fn review_contract_evidence_blockers(
                     failed_refs.join(", "),
                 ));
             } else if !failed_refs.is_empty() {
+                // 走到这里的引用解析形态像 file:line 但磁盘上无法定位——
+                // 文件不存在或行号越界，属伪造/陈旧证据域，仍然硬拦。
                 blockers.push(format!(
-                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的代码证据 `{}` 不在本次真实改动 (diff) 覆盖区间内。\n【直接修法——二选一，不要原样重发 finish】① 在 `review_contract_update` 中把该义务的 evidence_refs 改为下方 diff 区间内的行号（你的编辑已使行号漂移，旧行号一律无效，finish 报告正文里的行号不参与校验，必须更新契约义务本身）；② 若该义务靠命令/测试输出证明 → 改挂 `verify_command` 由宿主执行判分；若属「解释病因」类义务、病灶代码无需改动 → 改 waived 并说明理由。\n{}\n💡 可引用区间：\n{}",
+                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的代码证据 `{}` 在当前工作区无法定位（文件不存在，或行号超出文件实际行数）。\n【修法——任选，不要原样重发 finish】① 用 local_file 重新确认目标位置的真实行号（此前的编辑可能已使行号漂移），并在 `review_contract_update` 中更新该义务的 evidence_refs；② 若靠命令/测试输出证明 → 挂 `verify_command` 由宿主执行判分；③ 若义务不再适用 → 改 waived 并说明理由。",
                     obligation.id,
                     obligation.question.trim(),
                     failed_refs.join(", "),
-                    diff_map,
-                    fix_suggestions
                 ));
             } else if !obligation
                 .evidence_refs
@@ -477,6 +457,55 @@ pub(crate) fn delivery_claims_code_modification(delivery_text: &str) -> bool {
 
 /// 无真实 diff 时的诊断证据校验：引用能通过 affected_paths 回退，
 /// 或 file:line 在当前工作区源码中静态可定位（文件存在且行号在行数范围内）。
+/// 「可定位但未落 diff」披露清单：义务已证实且引用了真实存在的代码位置，
+/// 但没有任何引用落在本次改动区间内。这类证据放行不拦截（机械门只裁决
+/// 「证据是否客观存在」），但须生成 Gate Notice 移交终审复核语义充分性——
+/// 可能是诊断义务（证据本就在未修改文件里），也可能是修复义务引用了
+/// 漂移前的陈旧行号，语义判定权在终审。
+pub(crate) fn undiffed_locatable_notices(
+    contract: &ReviewContract,
+    diff_context: Option<&DiffContext>,
+    workspace_root: Option<&std::path::Path>,
+) -> Vec<String> {
+    let Some(ctx) = diff_context else {
+        return Vec::new();
+    };
+    if ctx.changed_files.is_empty() {
+        return Vec::new();
+    }
+    let mut notices = Vec::new();
+    for obligation in &contract.obligations {
+        if obligation.status.trim().to_ascii_lowercase() != "evidenced" {
+            continue;
+        }
+        if obligation.verify_command.is_some() || obligation.verify_script.is_some() {
+            continue;
+        }
+        let mut in_diff = false;
+        let mut locatable = false;
+        for ref_str in &obligation.evidence_refs {
+            if let Some((ref_path, start_line, end_line)) = parse_file_line_ref(ref_str) {
+                if ctx.matches_diff(&ref_path, start_line, end_line) {
+                    in_diff = true;
+                }
+                if ref_statically_locatable(&ref_path, start_line, workspace_root) {
+                    locatable = true;
+                }
+            } else if looks_like_file_ref(ref_str, workspace_root) {
+                locatable = true;
+            }
+        }
+        if locatable && !in_diff {
+            notices.push(format!(
+                "义务 [{}]（{}）的代码证据真实可定位但不在本次 diff 覆盖区间内（诊断型证据或行号漂移所致），其语义充分性移交终审逐条核验",
+                obligation.id,
+                obligation.question.trim(),
+            ));
+        }
+    }
+    notices
+}
+
 fn diagnostic_static_evidence_blockers(
     contract: &ReviewContract,
     ctx: &DiffContext,

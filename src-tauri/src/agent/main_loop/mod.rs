@@ -1861,6 +1861,38 @@ async fn run_agent_main_loop_in_workspace_inner(
                 },
             );
         }
+        // 「可定位但未落 diff」披露：证据客观存在但不在改动区间——可能是诊断义务
+        // （证据本就在只读文件）或陈旧行号。放行不拦截，移交终审做语义核验。
+        let undiffed_notices: Vec<String> = context
+            .review_contract
+            .as_ref()
+            .map(|c| {
+                crate::agent::finish_guard::undiffed_locatable_notices(
+                    c,
+                    diff_context.as_ref(),
+                    Some(workspace_dir.as_path()),
+                )
+                .into_iter()
+                .filter_map(|reason| {
+                    crate::agent::gate_applicability::GateApplicability::not_applicable_owned(reason)
+                        .handoff_notice("契约义务证据对账门")
+                })
+                .collect()
+            })
+            .unwrap_or_default();
+        if !undiffed_notices.is_empty() {
+            crate::agent::telemetry::record_gate_fire(
+                state.inner(),
+                &crate::agent::telemetry::GateFireRecord {
+                    run_id: &run_id,
+                    session_id: &final_session_id,
+                    step_id: step_id as i64,
+                    gate: "finish_obligation_evidence",
+                    route: "finish_obligation_evidence:undiffed_refs:not_applicable",
+                },
+            );
+            gate_notices.extend(undiffed_notices);
+        }
         let complex_delivery_blocker =
             complex_delivery_blocker(&context, &instruction, is_finish, result.success);
         let complex_delivery_unresolved = complex_delivery_blocker.is_some();

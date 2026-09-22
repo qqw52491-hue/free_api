@@ -29,7 +29,7 @@ pub use diff::{
 };
 pub(crate) use diff::{
     delivery_claims_code_modification, noncode_evidence_skip_reasons,
-    review_contract_evidence_blockers,
+    obligation_is_diagnostic, review_contract_evidence_blockers, undiffed_locatable_notices,
 };
 pub(crate) use state_updates::{apply_todo_update_guarded, apply_instruction_state_updates};
 
