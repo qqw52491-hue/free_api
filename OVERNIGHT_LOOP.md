@@ -862,3 +862,30 @@ telemetry `ORDER BY id DESC` → `started_at DESC`；E2E 终态轮询同步修�
 **修复后实弹（run `6076d188`）**：4 步一把过 `succeeded`——write tmp/ → echo → register → finish，产物正常登记交付。回归 `cargo test --lib` 全绿（新增 `session_tmp_products_extend_touched_for_zero_intersection_gate`）。
 
 **遗留观察（未改，待裁）**：方案门禁对 tmp/ 纯草稿首写仍要 submit_plan + Tech Lead 评审——与卡片"草稿免审豁免"存在张力（本次靠 checkpoint 已批准方案放行）。新建文件任务的 evidence_refs 硬要求（1~6 条已读证据）对"从零创建"类目标偏苛。
+
+---
+
+## 阶段六存档：模型矩阵探针 + 执行者完整性核验（2026-09-22 夜）
+
+### 静默替身根因（评测可信度 bug，非生产 bug）
+
+名义"测 Sonnet"的场次实际由 gemini-3.1-pro 代打——路由规则 2（`router.rs` 上一步失败→升维 Pro 救场）在被测模型 request_error/parse_error 后把执行权切走，报告零标注。生产上是韧性兜底，评测上是被测对象被偷换。
+
+**修复**：报告新增「执行者完整性」行——`agent_llm_calls` 按 `model_id×outcome` 分账（step_id>0，排除设计内首步 Pro 规划/triage），逐模型指令产出占比 + 替身率分级（≥90% ✅ / ≥50% ⚠️ / <50% ❌）。`telemetry.executor_calls` + `session_id` 入 reportJson 供批处理。（commit `b23f86e`）
+
+### 模型矩阵探针结果（case_ft_model_probe，14 候选 × 3 轮 = 42 次）
+
+**结论：通道死活泾渭分明，与平台强相关**
+
+| 分组 | 模型 | 结果 |
+|---|---|---|
+| Shantung ✅ | glm-5.2 / sensenova-6.8-flash-lite / kimi-k3 / deepseek-v4-flash / deepseek-v4-pro | 3/3 亲产 |
+| Antigravity-Gemini ✅ | 3.8-flash-high/medium/low、3.7-flash-high、3.1-pro、3.1-pro-high | 3/3 亲产 |
+| Antigravity-Claude 🔄 | claude-opus-4.6 / opus-4.6-thinking / sonnet-4-6（早前） | 0/3 亲产，全被替身——**Claude 全系请求级必挂** |
+| 死通道 ❌ | sensenova-6.7-flash-lite | 0/3 零调用（8min 无任何产出） |
+
+新考题 `case_ft_model_probe`（最小真实任务=读 package.json+交付）+ `scripts/probe_models.sh` 矩阵驱动 + `scripts/batch_case20.sh`/`case20_rotation.sh` 连场轮换；新增磁盘保护（每场 eval DB ~480MB，收完即删/仅留近5个FAIL DB）与陈旧报告防线（mtime 校验）。
+
+### case_20 连场进行中
+
+sensenova-6.8+glm-5.2 首场：54 步撞 25min 时限（终态 running→判 FAIL），3.1M token——sensenova 无缓存全量重发 ~57K/步，慢而贵；retriage@25 glm 判 continue 准确。轮换中（flash-high×4 → sensenova×3 → deepseek-v4-flash×3 → kimi-k3×3 → 3.1-pro×2 → 3.7-fh×2 → 3.8-fm×2，各30min上限）。

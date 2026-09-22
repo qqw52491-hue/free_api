@@ -22,6 +22,77 @@ use tokio::sync::{mpsc, watch};
 use crate::agent::loop_runner::{run_tool_phase, StepExecutionOutcome, REPEATED_FAILURE_BLOCKED_ROUTE};
 use crate::agent::plan_gate::check_pre_write_gatekeeper;
 
+/// run_tool 看门狗包装：与 call_llm 同款外层封顶。派发臂大多有内部自限时
+/// （wait_jobs 默认 180s / exec 有 timeout_secs / 子任务 spawn 为同步建账），
+/// 但挂死点也可能落在自限时罩不住的地方——实弹已观测到 child_reviewer
+/// 派发在 spawn 内部永久冻结、checkpoint 停在 run_tool 相位、零子运行落账，
+/// 只能靠 900s 会话级看门狗连整场一起收割。此处封顶把挂死收敛为
+/// 「本步失败+带阶段面包屑的反馈」，循环继续而非冻死整场。
+/// 阈值须高于 wait_jobs 合法挂起时长（默认 180s + 回执处理），env 可调。
+fn tool_watchdog_secs() -> u64 {
+    std::env::var("FREE_API_TOOL_WATCHDOG_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|v| *v >= 60)
+        .unwrap_or(480)
+}
+
+async fn run_tool_phase_guarded(
+    app: &AppHandle,
+    state: &State<'_, DbState>,
+    registry_state: &State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
+    model_routing: &crate::agent::router::ModelRoutingConfig,
+    run_id: &str,
+    workspace_dir: &Path,
+    final_session_id: &String,
+    step_id: usize,
+    inst: &AgentInstruction,
+    context: &mut crate::agent::context::SandwichContext,
+    checkpoint: &mut AgentCheckpoint,
+    run_machine: &mut AgentRunMachine,
+    rx: &mut mpsc::Receiver<HumanControl>,
+    interrupt_rx: &mut watch::Receiver<u64>,
+) -> Result<DispatchResult, String> {
+    let secs = tool_watchdog_secs();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(secs),
+        run_tool_phase(
+            app,
+            state,
+            registry_state,
+            model_routing,
+            run_id,
+            workspace_dir,
+            final_session_id,
+            step_id,
+            inst,
+            context,
+            checkpoint,
+            run_machine,
+            rx,
+            interrupt_rx,
+        ),
+    )
+    .await
+    {
+        Err(_elapsed) => {
+            let stage = crate::agent::control::read_stage(final_session_id)
+                .unwrap_or_else(|| "unknown".to_string());
+            Ok(DispatchResult {
+                view: None,
+                success: false,
+                stdout: String::new(),
+                stderr: format!(
+                    "工具派发看门狗超时（{}s 未返回，stage={}）——该次派发可能内部挂死，已按本步失败处理避免会话冻结。若是异步子任务派发，请改用 wait_jobs 主动等待结论；若同一调用再次超时，请换用其他取证路径或 ask_human 报告卡住点。",
+                    secs, stage
+                ),
+                route: "tool_watchdog:timeout".to_string(),
+            })
+        }
+        Ok(r) => r,
+    }
+}
+
 pub async fn run_call_llm_and_run_tool_phases(
 
     app: &AppHandle,
@@ -67,7 +138,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             },
         )?;
         let tool_start = Instant::now();
-        let dispatch_result = run_tool_phase(
+        let dispatch_result = run_tool_phase_guarded(
             app,
             state,
             registry_state,
@@ -412,7 +483,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         .map_err(|e| e.to_string())?;
 
         let tool_start = Instant::now();
-        let dispatch_result = run_tool_phase(
+        let dispatch_result = run_tool_phase_guarded(
             app,
             state,
             registry_state,
