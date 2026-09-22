@@ -447,7 +447,11 @@ pub async fn run_triage<R: tauri::Runtime>(
 
 【判定纪律】
 - 宁可低估不要拔高：简单明确的任务判 direct，让门禁松手；
-- 但触及已有代码修改、多文件扩散、删除改名、生产配置一律不低于 technical_plan；
+- 复杂度按「改动的影响面 + 决策含量」判，不按「是否触碰已有代码」：
+  单点修改且方案显而易见（换组件/改样式/修小段逻辑，几行改动）→ direct；
+  多文件扩散、实现路径有多种取舍、数据/协议格式变更、删除改名、生产配置 → technical_plan 起步；
+- coordination_scope 同理按"改动"计：理解过程横跨多文件不算 multi_component，
+  只有改动本身落在多个组件上才算；
 - 拿不准且做错代价高 → user_clarification；拿不准但方向可逆 → technical_plan。"#;
 
     let reviewer_list = if reviewer_names.is_empty() {

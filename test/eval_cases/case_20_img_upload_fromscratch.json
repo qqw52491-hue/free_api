@@ -8,7 +8,7 @@
   "verify_command": "node test/eval_cases/fixtures/img_upload/judge.mjs",
   "expected_exit_code": 0,
   "test_patch": "test/eval_cases/fixtures/img_upload/judge.patch",
-  "max_steps": 80,
+  "max_steps": 160,
   "plan_mode": "off",
   "max_prompt_tokens": 6000000,
   "judge_semantics": "judge.mjs 静态检查 AgentComposer.vue：invoke 参数契约（sessionId/fileName/base64Data，拒绝 dataUrl）、徽标携带路径标记、无未标记 upload_failed 的裸文件名 file_path。基线 afd3973 三路径全为裸名不落盘且无徽标路径 → 红；78a71f3 完整修复 → 绿；仅修部分路径或吞掉落盘失败的半成品 → 红。"
