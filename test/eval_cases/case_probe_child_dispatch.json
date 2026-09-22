@@ -1,0 +1,15 @@
+{
+  "id": "case_probe_child_dispatch",
+  "title": "子审查官派发链路探针：强制 child_reviewer(tech_lead) 派发验证宿主派发路径",
+  "tier": "probe",
+  "base_commit": "HEAD",
+  "problem_statement": "【协议测试任务】第一步：立即调用 child_reviewer 工具，参数 role=\"tech_lead\"、action=\"investigate\"、question=\"当前仓库的入口文件和主模块结构是什么？\"、evidence_refs=[\"src-tauri/src/lib.rs\"]。收到子审查结果后，第二步：在工作区根目录创建文件 PROBE_OK.txt，内容为子审查返回的 findings 摘要。第三步调用 finish 结束。不要先做别的探索。",
+  "judge_kind": "command",
+  "verify_command": "test -f PROBE_OK.txt",
+  "expected_exit_code": 0,
+  "max_steps": 15,
+  "plan_mode": "off",
+  "expected_diff_files": ["PROBE_OK.txt"],
+  "judge_semantics": "判据：PROBE_OK.txt 存在即绿（基线无此文件为红）。真正验证目标是宿主 child_reviewer 派发路径不冻结——以 agent_stage_marks/agent_child_runs 落库为准。",
+  "max_prompt_tokens": 2000000
+}

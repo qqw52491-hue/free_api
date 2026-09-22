@@ -347,6 +347,10 @@ pub(super) async fn dispatch_child_reviewer(
             )
             .with_purpose("plan_review")
             .with_batch_id(batch_id.clone());
+            crate::agent::control::mark_stage(
+                ctx.final_session_id,
+                "child_reviewer:scope_done",
+            );
             if let Some(schema) = reviewer_custom_schema {
                 snapshot = snapshot.with_custom_schema(schema);
             }
