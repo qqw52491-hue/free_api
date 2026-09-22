@@ -1,4 +1,5 @@
     use super::*;
+    use crate::agent::checkpoint::PlanPhase;
     use crate::agent::child_reviewer::{ReviewFinding, ReviewScorecard, ReviewerDeliveryData};
     use crate::agent::context::SandwichContext;
     use std::sync::{Arc, Mutex};
@@ -504,185 +505,6 @@
         cp
     }
 
-    #[test]
-    fn test_exploration_gate_fires_only_after_budget() {
-        let cp = exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
-        assert!(check_cross_review_exploration_gate(&cp, 19, "read_file", "", 20).is_none());
-        let res = check_cross_review_exploration_gate(&cp, 20, "grep_search", "", 20);
-        assert!(res.is_some());
-        let dispatch = res.unwrap();
-        assert_eq!(
-            dispatch.route,
-            "plan_gatekeeper:exploration_budget_exhausted"
-        );
-        assert!(!dispatch.success);
-        assert!(dispatch.stderr.contains("20"));
-        assert!(dispatch.stderr.contains("child_reviewer"));
-    }
-
-    #[test]
-    fn test_exploration_gate_allows_reviewer_dispatch_and_human_escalation() {
-        let cp = exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
-        assert!(check_cross_review_exploration_gate(&cp, 20, "child_reviewer", "", 20).is_none());
-        assert!(check_cross_review_exploration_gate(&cp, 20, "", "child_reviewer", 20).is_none());
-        assert!(check_cross_review_exploration_gate(&cp, 20, "ask_human", "", 20).is_none());
-        assert!(check_cross_review_exploration_gate(&cp, 20, "", "ask", 20).is_none());
-    }
-
-    #[test]
-    fn test_exploration_gate_ignores_non_exploring_states() {
-        let auto = exploration_checkpoint(PlanExecutionMode::Auto, PlanPhase::Exploring, 0);
-        assert!(check_cross_review_exploration_gate(&auto, 100, "read_file", "", 20).is_none());
-
-        let retried =
-            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 1);
-        assert!(check_cross_review_exploration_gate(&retried, 100, "read_file", "", 20).is_none());
-
-        let approved =
-            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Approved, 0);
-        assert!(check_cross_review_exploration_gate(&approved, 100, "read_file", "", 20).is_none());
-    }
-
-    // ---------- 探索延期裁决（软提醒 + 结构化延长 + 绝对上限） ----------
-
-    fn extension_cfg() -> ExplorationBudgetConfig {
-        ExplorationBudgetConfig {
-            soft_steps: 10,
-            base_steps: 20,
-            per_extension_steps: 8,
-            max_extensions: 2,
-            absolute_steps: 40,
-        }
-    }
-
-    fn valid_extension_request() -> crate::agent::types::ExplorationExtensionRequest {
-        crate::agent::types::ExplorationExtensionRequest {
-            unresolved_question: "尚未确认 checkpoint 与 wait_jobs 的失败交付边界".to_string(),
-            next_queries: vec!["定位 record_reviewer_failure_for_run 的调用点".to_string()],
-            extra_steps: None,
-            reason: String::new(),
-        }
-    }
-
-    #[test]
-    fn test_extension_grant_raises_effective_limit() {
-        let cfg = extension_cfg();
-        let mut cp =
-            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
-        let verdict =
-            adjudicate_exploration_extension_with(&mut cp, &valid_extension_request(), cfg);
-        assert!(verdict.granted);
-        assert_eq!(verdict.granted_steps, 8);
-        assert_eq!(verdict.route, "plan_liveness:extension_granted");
-        assert_eq!(cp.plan_exploration_extensions_used, 1);
-        assert_eq!(cp.plan_exploration_granted_steps, 8);
-        // 有效上限从 20 抬升到 28：第 25 步的搜索在授予后被放行
-        assert!(check_cross_review_exploration_gate(&cp, 25, "search", "", 28).is_none());
-    }
-
-    #[test]
-    fn test_extension_denied_without_unresolved_question() {
-        let cfg = extension_cfg();
-        let mut cp =
-            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
-        let mut req = valid_extension_request();
-        req.unresolved_question = "   ".to_string();
-        let verdict = adjudicate_exploration_extension_with(&mut cp, &req, cfg);
-        assert!(!verdict.granted);
-        assert_eq!(verdict.route, "plan_liveness:extension_denied");
-        // 结构不合法的拒绝不消耗延期次数
-        assert_eq!(cp.plan_exploration_extensions_used, 0);
-        assert_eq!(cp.plan_exploration_granted_steps, 0);
-    }
-
-    #[test]
-    fn test_extension_denied_without_concrete_queries() {
-        let cfg = extension_cfg();
-        let mut cp =
-            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
-        let mut req = valid_extension_request();
-        req.next_queries = vec!["  ".to_string()];
-        let verdict = adjudicate_exploration_extension_with(&mut cp, &req, cfg);
-        assert!(!verdict.granted);
-        assert_eq!(cp.plan_exploration_extensions_used, 0);
-
-        req.next_queries = (0..7).map(|i| format!("query {}", i)).collect();
-        let verdict = adjudicate_exploration_extension_with(&mut cp, &req, cfg);
-        assert!(!verdict.granted, "超过 6 条取证项同样拒绝");
-        assert_eq!(cp.plan_exploration_extensions_used, 0);
-    }
-
-    #[test]
-    fn test_extension_count_capped_by_max_extensions() {
-        let cfg = extension_cfg();
-        let mut cp =
-            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
-        let req = valid_extension_request();
-        assert!(adjudicate_exploration_extension_with(&mut cp, &req, cfg).granted);
-        assert!(adjudicate_exploration_extension_with(&mut cp, &req, cfg).granted);
-        let third = adjudicate_exploration_extension_with(&mut cp, &req, cfg);
-        assert!(!third.granted, "第三次申请必须被次数上限拒绝");
-        assert_eq!(cp.plan_exploration_extensions_used, 2);
-        assert_eq!(cp.plan_exploration_granted_steps, 16);
-    }
-
-    #[test]
-    fn test_extension_never_exceeds_absolute_cap() {
-        let cfg = extension_cfg(); // base 20 + abs 40 → 最多再授 20 步
-        let mut cp =
-            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
-        let mut req = valid_extension_request();
-        req.extra_steps = Some(8);
-        adjudicate_exploration_extension_with(&mut cp, &req, cfg); // +8 → 28
-        adjudicate_exploration_extension_with(&mut cp, &req, cfg); // +8 → 36
-        // 次数已用完；把次数上限抬高后，余量只剩 40-36=4 步
-        let loose_cfg = ExplorationBudgetConfig { max_extensions: 9, ..cfg };
-        let verdict = adjudicate_exploration_extension_with(&mut cp, &req, loose_cfg);
-        assert!(verdict.granted);
-        assert_eq!(verdict.granted_steps, 4, "授予量必须被绝对上限截断");
-        assert_eq!(cfg.effective_limit(cp.plan_exploration_granted_steps), 40);
-    }
-
-    #[test]
-    fn test_extension_not_applicable_outside_exploring() {
-        let cfg = extension_cfg();
-        let req = valid_extension_request();
-        let mut auto = exploration_checkpoint(PlanExecutionMode::Auto, PlanPhase::Exploring, 0);
-        let v = adjudicate_exploration_extension_with(&mut auto, &req, cfg);
-        assert!(!v.granted);
-        assert_eq!(v.route, "plan_liveness:extension_not_applicable");
-
-        let mut dispatched =
-            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Reviewing, 1);
-        let v = adjudicate_exploration_extension_with(&mut dispatched, &req, cfg);
-        assert!(!v.granted);
-
-        let mut approved =
-            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Approved, 0);
-        let v = adjudicate_exploration_extension_with(&mut approved, &req, cfg);
-        assert!(!v.granted);
-        // 不适用裁决不得污染延期账本
-        assert_eq!(auto.plan_exploration_extensions_used, 0);
-        assert_eq!(dispatched.plan_exploration_granted_steps, 0);
-        assert_eq!(approved.plan_exploration_extensions_used, 0);
-    }
-
-    #[test]
-    fn test_extension_request_makes_bare_instruction_executable() {
-        let bare = crate::agent::types::AgentInstruction {
-            request_exploration_extension: Some(valid_extension_request()),
-            ..Default::default()
-        };
-        assert!(bare.validate_executable_shape().is_ok());
-        assert!(bare.is_bare_exploration_extension_request());
-
-        let mut attached = crate::agent::types::AgentInstruction::default();
-        attached.tool = Some("search".to_string());
-        attached.request_exploration_extension = Some(valid_extension_request());
-        assert!(attached.validate_executable_shape().is_ok());
-        assert!(!attached.is_bare_exploration_extension_request());
-    }
-
     // ---------- submit_plan：适用性预检 / 结构校验 / 一致提交 ----------
 
     fn valid_submission() -> crate::agent::types::PlanSubmission {
@@ -903,7 +725,7 @@
         };
         assert!(bare.validate_executable_shape().is_ok());
         assert!(bare.is_bare_plan_submission());
-        assert!(!bare.is_bare_exploration_extension_request());
+        assert!(!bare.is_bare_retriage_request());
 
         // 附带工具入口 → 非 bare（宿主会以协议误用拒绝混发）
         let mut mixed = crate::agent::types::AgentInstruction::default();

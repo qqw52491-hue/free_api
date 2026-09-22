@@ -560,7 +560,8 @@ fn parse_triage_json(raw_text: &str) -> Option<TriageVerdict> {
     serde_json::from_str::<TriageVerdict>(&clean).ok()
 }
 
-fn extract_json_str(text: &str) -> String {
+/// 围栏/花括号容错提取（retriage 复核判决复用同款解析策略）
+pub(crate) fn extract_json_str(text: &str) -> String {
     let trimmed = text.trim();
     if let Some(start) = trimmed.find("```json") {
         if let Some(end) = trimmed[start + 7..].find("```") {

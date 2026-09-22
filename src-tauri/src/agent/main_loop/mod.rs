@@ -1045,6 +1045,46 @@ async fn run_agent_main_loop_in_workspace_inner(
             budget_stop_reason = Some(reason);
             break;
         }
+
+        // 🧭 retriage 资源里程点（实验，默认关）：只看资源事实（探索相位 + 步数
+        // 阈值 + 从未复核），由 supervisor 判断漫游是否合理——宿主不碰认知。
+        let milestone = crate::agent::retriage::retriage_milestone_steps();
+        if milestone > 0
+            && checkpoint.plan_phase == crate::agent::checkpoint::PlanPhase::Exploring
+            && checkpoint.retriage_used == 0
+            && checkpoint.step_id >= milestone
+        {
+            let revision = crate::agent::retriage::run_retriage(
+                &app,
+                state.inner(),
+                &model_routing,
+                &checkpoint,
+                &context.user_goal,
+                "budget_milestone",
+                "",
+                &[],
+                &final_session_id,
+                interrupt_rx.clone(),
+            )
+            .await;
+            let feedback =
+                crate::agent::retriage::apply_retriage_revision(&mut context, &mut checkpoint, &revision);
+            context.add_error_feedback(&feedback);
+            crate::agent::telemetry::record_gate_fire(
+                state.inner(),
+                &crate::agent::telemetry::GateFireRecord {
+                    run_id: &run_id,
+                    session_id: &final_session_id,
+                    step_id: checkpoint.step_id as i64,
+                    gate: "retriage",
+                    route: "retriage:milestone",
+                },
+            );
+            let _ = app.emit(
+                &format!("agent-log-{}", final_session_id),
+                format!("🧭 分流复核(里程点): {} — {}", revision.decision, revision.reason),
+            );
+        }
         let step_id = checkpoint.step_id;
 
         // 🔄 子任务交付回执消费：三条通道（自动轮询 / wait_jobs / 后台信箱）

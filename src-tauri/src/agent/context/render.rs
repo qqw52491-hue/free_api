@@ -189,36 +189,10 @@ impl ContextRenderer {
         }
 
         // 4. 交叉审查模式分支 (cross_review) —— 细分且互斥的单一活跃状态
-        // 4.1 尚未派发审查员 —— 按探索预算分三态（正常 / 收敛区软提醒 / 硬上限预告）
+        // 4.1 尚未派发审查员 —— 探索节奏由模型自定；宿主不按步数催促收敛
         if !gate.reviewer_dispatched {
-            // 硬上限已触达：与门禁拦截文案保持一致，预先说明剩余逃生通道
-            if gate.exploration_hard_limit > 0 && gate.exploration_steps >= gate.exploration_hard_limit
-            {
-                let extension_hint = if gate.exploration_extensions_left > 0 {
-                    format!(
-                        "或在指令中附 request_exploration_extension 申请延期（剩余 {} 次，需 unresolved_question + next_queries）",
-                        gate.exploration_extensions_left
-                    )
-                } else {
-                    "探索延期额度已用完".to_string()
-                };
-                return format!(
-                    "【方案门禁状态】⛔ 交叉审查 (cross_review) | 探索预算已耗尽（步数 {}/{}）\n指引: 普通工具调用将被门禁拒绝；请立即输出 submit_plan 提交结构化方案（宿主自动派发 Tech Lead）或调用 child_reviewer，{}，或调用 ask_human 说明缺失信息。\n\n",
-                    gate.exploration_steps, gate.exploration_hard_limit, extension_hint
-                );
-            }
-            // 软提醒区：不拦截，只引导收敛（模型仍保有继续取证或立即派审的决定权）
-            if gate.exploration_soft_limit > 0 && gate.exploration_steps >= gate.exploration_soft_limit
-            {
-                return format!(
-                    "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）| 探索收敛区（步数 {}/硬上限 {}）\n指引: 请停止扩散搜索，汇总根因、目标文件与风险后输出 submit_plan 提交方案（宿主将自动派发 Tech Lead）；证据确实不足可在指令中附 request_exploration_extension 申请延期（剩余 {} 次，需 unresolved_question + next_queries）。\n\n",
-                    gate.reviewer_budget_used, gate.reviewer_budget_max,
-                    gate.exploration_steps, gate.exploration_hard_limit,
-                    gate.exploration_extensions_left
-                );
-            }
             return format!(
-                "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）\n指引: 首次写入前必须先完成方案审查：证据成熟后输出 submit_plan 提交结构化方案（宿主自动派发 Tech Lead）——submit_plan 是顶层独立动作：单独输出 {{\"submit_plan\": {{...}}}}，勿放进 tool/action/params；或调用 child_reviewer 手动派发；直接写工具将被门禁拦截。\n\n",
+                "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）\n指引: 首次写入前必须先完成方案审查：证据成熟后输出 submit_plan 提交结构化方案（宿主自动派发 Tech Lead）——submit_plan 是顶层独立动作：单独输出 {{\"submit_plan\": {{...}}}}，勿放进 tool/action/params；或调用 child_reviewer 手动派发；直接写工具将被门禁拦截。若探索中发现任务实际形状与初始分流不符（范围骤扩/方向被证伪），可单独输出 {{\"request_retriage\": {{\"reason\": \"...\", \"unresolved_questions\": [...]}}}} 申请一次独立复核分流。\n\n",
                 gate.reviewer_budget_used, gate.reviewer_budget_max
             );
         }

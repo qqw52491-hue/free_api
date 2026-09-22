@@ -89,12 +89,12 @@ pub struct AgentCheckpoint {
     /// 1v1 方案评审是否裁决必须升级多专家联合会审（Some 时存储建议拉起的专家角色列表）
     #[serde(default)]
     pub plan_escalation_required: Option<Vec<String>>,
-    /// 交叉审查探索期已消耗的延期申请次数（request_exploration_extension 批准计数）
+    /// 本轮已消耗的 retriage（重新分流）次数（每 run 限额，防监管循环）
     #[serde(default)]
-    pub plan_exploration_extensions_used: u32,
-    /// 交叉审查探索期累计获批追加的探索步数（并入有效硬上限，受绝对上限封顶）
+    pub retriage_used: u32,
+    /// retriage 判决历史：追加式，永不覆盖原 triage_verdict（审计链完整）
     #[serde(default)]
-    pub plan_exploration_granted_steps: u32,
+    pub triage_revisions: Vec<crate::agent::types::TriageRevision>,
     /// 最近一次 submit_plan 落账的结构化方案（审查注册与派发的母本；重提时覆盖；
     /// Tech Lead 1v1 定稿后本字段即修订后的权威执行版本）
     #[serde(default)]
@@ -343,8 +343,8 @@ impl AgentCheckpoint {
             plan_review_deliveries: std::collections::HashMap::new(),
             stage_review_batch_id: None,
             plan_escalation_required: None,
-            plan_exploration_extensions_used: 0,
-            plan_exploration_granted_steps: 0,
+            retriage_used: 0,
+            triage_revisions: Vec::new(),
             submitted_plan: None,
             submitted_plan_step: None,
             plan_finalized_by: None,

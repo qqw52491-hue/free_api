@@ -153,23 +153,51 @@ pub struct PrepareFinishRequest {
     pub details: Option<String>,
 }
 
-/// 交叉审查探索阶段的结构化延期申请。
-/// 模型保留「还需要查什么」的决定权；宿主只裁决预算是否合法：
-/// 单次步数有上限、总次数有上限、且绝不突破探索绝对上限。
+/// 执行模型主动申请的重新分流（retriage）。
+/// 模型在探索中自认方向存疑时请求独立 supervisor 用已收集证据做一次结构化复核；
+/// 宿主只负责机械组装证据包与配额裁决，不判断「探索是否足够」。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct ExplorationExtensionRequest {
-    /// 尚未解决的关键问题（必填）：还缺哪条证据、它将如何改变方案
-    #[serde(default)]
-    pub unresolved_question: String,
-    /// 接下来打算执行的有限取证清单（必填，1~6 条，防止无边界续探）
-    #[serde(default)]
-    pub next_queries: Vec<String>,
-    /// 申请追加的探索步数（缺省按单次授予上限；超出部分被截断）
-    #[serde(default)]
-    pub extra_steps: Option<u32>,
-    /// 补充说明（可选）
+pub struct RetriageRequest {
+    /// 为什么请求重新分流（必填）：发现了什么让原判决失效的证据
     #[serde(default)]
     pub reason: String,
+    /// 目前仍未解决的关键问题清单（供 supervisor 判断缺的是证据还是方向）
+    #[serde(default)]
+    pub unresolved_questions: Vec<String>,
+}
+
+/// 一次 retriage（重新分流）的结构化判决记录。
+/// 追加进 checkpoint.triage_revisions——原 triage_verdict 永不改写，
+/// 终审可回看「判决 A 被什么证据推翻成判决 B」的完整链条。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TriageRevision {
+    /// 判决发生时的步数
+    #[serde(default)]
+    pub at_step: usize,
+    /// 触发来源：agent_request（模型主动申请）或 budget_milestone（资源里程点兜底）
+    #[serde(default)]
+    pub trigger: String,
+    /// 判决：continue|narrow|split|replan|escalate
+    #[serde(default)]
+    pub decision: String,
+    /// supervisor 给出的判决理由
+    #[serde(default)]
+    pub reason: String,
+    /// narrow 判决点名的后续取证问题（供主 Agent 继续探索）
+    #[serde(default)]
+    pub next_questions: Vec<String>,
+    /// split 判决给出的可并行窄子任务（供主 Agent 自行 dispatches 派发）
+    #[serde(default)]
+    pub split_tasks: Vec<String>,
+    /// escalate 判决的建议档位：current|stronger
+    #[serde(default)]
+    pub recommended_tier: String,
+    /// 实际给出判决的模型 id（宿主回填）
+    #[serde(default)]
+    pub model_id: String,
+    /// 非空 = 调用失败降级产物而非真实判决（值为降级原因）
+    #[serde(default)]
+    pub fallback: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -422,10 +450,10 @@ pub struct AgentInstruction {
     /// 动态申请扩展当前活跃块的修改范围边界 (Scope)，避免跨文件联动修改被机械门禁误杀
     #[serde(default)]
     pub scope_extension: Option<ScopeExtensionRequest>,
-    /// 探索阶段的结构化延期申请（仅交叉审查 Exploring 且未派审时有效）；
-    /// 可单独提交，也可随工具调用附带，由宿主在工具派发前裁决
+    /// 执行模型主动申请重新分流（retriage）：宿主将已收集证据打包交给
+    /// supervisor 档模型做一次结构化复核。必须单独成步（不与工具调用混发）。
     #[serde(default)]
-    pub request_exploration_extension: Option<ExplorationExtensionRequest>,
+    pub request_retriage: Option<RetriageRequest>,
     /// 结构化方案提交：提交后宿主原子完成「登记方案 + 预扣预算 + 注册批次 + 派发 Tech Lead」。
     /// 必须单独成步（不与工具调用混发）；仅在交叉审查模式且方案未放行前有效。
     #[serde(default)]
@@ -516,10 +544,10 @@ impl AgentInstruction {
         has_tool || has_legacy_action
     }
 
-    /// 是否为「纯探索延期申请」：携带 request_exploration_extension 但没有任何工具入口。
-    /// 纯申请不派发工具，由宿主裁决后直接以裁决结果作为本步结果。
-    pub fn is_bare_exploration_extension_request(&self) -> bool {
-        self.request_exploration_extension.is_some() && !self.has_executable_entry()
+    /// 是否为「纯重新分流申请」：携带 request_retriage 但没有任何工具入口。
+    /// 分流是独立的状态判断动作，不与工具调用混发。
+    pub fn is_bare_retriage_request(&self) -> bool {
+        self.request_retriage.is_some() && !self.has_executable_entry()
     }
 
     /// 是否为「纯方案提交」：携带 submit_plan 但没有任何工具入口。
@@ -536,7 +564,7 @@ impl AgentInstruction {
 
     pub fn validate_executable_shape(&self) -> Result<(), String> {
         if self.has_executable_entry()
-            || self.request_exploration_extension.is_some()
+            || self.request_retriage.is_some()
             || self.submit_plan.is_some()
             || self.prepare_finish.is_some()
         {

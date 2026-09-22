@@ -555,20 +555,6 @@ impl AgentCheckpoint {
         let expected_reviewers = self.plan_review_expected_count as usize;
         let budget_exhausted = self.plan_reviewer_retry_count >= MAX_PLAN_REVIEWER_RETRIES;
         let human_waived = self.human_waiver_text().is_some();
-        // 探索预算三态投影：仅交叉审查 + Exploring + 尚未派审时有意义，
-        // 其余阶段清零（渲染层对应分支不会被命中）。
-        let exploration_active = self.plan_mode == PlanExecutionMode::CrossReview
-            && self.plan_phase == PlanPhase::Exploring
-            && self.plan_reviewer_retry_count == 0;
-        let (exploration_soft, exploration_hard, exploration_extensions_left) = if exploration_active {
-            (
-                crate::agent::plan_gate::cross_review_exploration_soft_steps(),
-                crate::agent::plan_gate::cross_review_exploration_effective_limit(self),
-                crate::agent::plan_gate::cross_review_exploration_extensions_left(self),
-            )
-        } else {
-            (0, 0, 0)
-        };
 
         crate::agent::context::types::PlanGateProjection {
             mode: self.plan_mode.as_str().to_string(),
@@ -584,10 +570,6 @@ impl AgentCheckpoint {
             expected_reviewers,
             budget_exhausted,
             human_waived,
-            exploration_steps: if exploration_active { self.step_id } else { 0 },
-            exploration_soft_limit: exploration_soft,
-            exploration_hard_limit: exploration_hard,
-            exploration_extensions_left,
         }
     }
 

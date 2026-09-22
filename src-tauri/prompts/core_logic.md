@@ -310,4 +310,5 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
    Reviewer 将对照 Checklist 逐项量取 Diff 行号核验你的披露；未经测试验证的完成声明与越界修改会被零 Token 拦截。**同块连续 3 次审查未过触发熔断，永久升维 Pro 接管重构。**
 2. **正当修改边界扩展 (`scope_extension`)**：执行中确需改动 scope 外文件时，当步附带 `"scope_extension": {"paths": ["src/types.rs"], "reason": "追加公共字段支持新路由参数"}` 报备；reason 非空即自动放行扩 scope，静默越界会被门禁拦截。
 3. **复杂推理逃生通道 (`request_escalation`)**：默认 Flash 跑日常步骤；遇超出当前模型极限的复杂架构死锁/并发竞争等，当步顶级设 `"request_escalation": true` 申请 Pro 强模型执行该单步（每目标块限 2 次）；严禁常规读写滥用。
+4. **重新分流复核 (`request_retriage`)**：探索中发现任务实际形状与初始分流不符（范围骤扩、假设被证伪、方向拿不准）时，单独输出 `{"request_retriage": {"reason": "证伪证据", "unresolved_questions": ["还缺什么"]}}` 申请一次 supervisor 复核——宿主打包你已收集的证据交由更强模型判决 continue/narrow/split/replan/escalate。必须与工具调用分步提交，每任务限 1 次；只是复核方向，不代替你自己的取证。
 

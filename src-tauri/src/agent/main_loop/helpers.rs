@@ -71,7 +71,7 @@ pub(crate) fn is_gate_block_route(route: &str) -> bool {
                 | "host_rejection:batch_circuit_breaker"
                 | "parallel_contract_rejected"
                 | "plan_tree_parallel_rejected"
-                | "plan_liveness:extension_denied"
+                | "plan_liveness:retriage_rejected"
                 | "scope_guard:outside"
                 | "watch:rejected"
         )

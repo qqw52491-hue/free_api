@@ -3,6 +3,20 @@
 > 纪律：每项控制面改动（门禁/判据/收割/预算/审查契约）在此登记：改了什么、为什么、commit、验证状态。
 > 状态标注：code-green（单测/编译过）| live-green（实弹验证过）| calib-green（基线校准过）| unverified（未验证）
 
+## 阶段十四：探索期认知门禁拆除 + retriage 复核通道（2026-09-23）
+
+**性质**：物种二分落地——删除以步数代理认知成熟度的探索门禁，新增一次性的
+"判断外包"复核通道（认知归 supervisor 档模型，宿主只管事实与配额）。
+
+| 改动 | 位置 | 要点 | 验证 |
+|---|---|---|---|
+| **拆除探索预算门禁** | `plan_gate/mod.rs`/`loop_runner`/`render`/`plan_ops` | 14 步软提醒、24 步硬拦截、8×2 延期仪式全删；探索节奏完全归模型，宿主不再按步数催促收敛 | code-green（785 测全绿） |
+| **retriage 复核通道** | `agent/retriage.rs`（新）/`types`/`checkpoint`/`loop_runner`/`main_loop` | 模型主动 `request_retriage`（独立动作、reason 必填、每 run 限 1 次）→ 宿主机械组证据包（triage 判决+轨迹摘要+模型自述分层标注）→ supervisor 档一次性判决 continue/narrow/split/replan/escalate → 追加式落 `triage_revisions`（原判决不改写，审计链完整）；降级判决不烧配额；escalate 接现有 target_block 升维通道 | code-green（5 新单测：配额/降级/窄化回灌/无块降级/升维消耗） |
+| **里程点兜底（实验，默认关）** | `main_loop` 循环顶 + `FREE_API_RETRIAGE_MILESTONE_STEPS` | 只看资源事实（相位+步数阈值+从未复核），不判断探索质量；0=关闭 | unverified（待实弹对照决定是否默认开） |
+
+**设计约束**：supervisor 无工具、一次性调用、45s 超时、解析失败降级 continue；
+判决只可加严（升维/拆分/重规划），无任何放宽门禁的路径。
+
 ## 阶段十三：新编排架构首次实弹验证 + 评测基建两修（2026-09-18）
 
 **性质**：本阶段不动控制面机制，只做①评测基建修复 ②UI 投影精简 ③新架构首次完整实弹记录。

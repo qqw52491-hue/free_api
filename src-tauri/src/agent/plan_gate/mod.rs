@@ -1,7 +1,7 @@
 //! 方案审批结论解析与前置写入门禁。
 //! 从 loop_runner.rs 原样抽出，行为不变；loop_runner 通过 re-export 维持原引用路径。
 
-use crate::agent::checkpoint::{AgentCheckpoint, PlanExecutionMode, PlanPhase};
+use crate::agent::checkpoint::{AgentCheckpoint, PlanExecutionMode};
 use crate::agent::child_reviewer::{has_pending_review_results, has_running_child_runs};
 use crate::agent::gate_messages;
 use crate::agent::types::DispatchResult;
@@ -12,209 +12,6 @@ use crate::db::DbState;
 const PLAN_DECISION_MARKER_PREFIX: &str = "<!--plan-decision:";
 const PLAN_DECISION_MARKER_SUFFIX: &str = "-->";
 
-const DEFAULT_CROSS_REVIEW_EXPLORATION_MAX_STEPS: usize = 24;
-const DEFAULT_CROSS_REVIEW_EXPLORATION_SOFT_STEPS: usize = 14;
-const DEFAULT_CROSS_REVIEW_EXPLORATION_EXTENSION_STEPS: u32 = 8;
-const DEFAULT_CROSS_REVIEW_EXPLORATION_MAX_EXTENSIONS: u32 = 2;
-const DEFAULT_CROSS_REVIEW_EXPLORATION_ABSOLUTE_STEPS: usize = 48;
-
-/// 探索预算配置：全部环境变量可调，默认值仅为起始点，后续按历史轨迹调优。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ExplorationBudgetConfig {
-    /// 软提醒阈值：到达后状态卡转为收敛指引，不拦截
-    pub soft_steps: usize,
-    /// 初始硬上限：到达后普通操作被门禁拒绝
-    pub base_steps: usize,
-    /// 单次延期最多可追加的步数
-    pub per_extension_steps: u32,
-    /// 延期申请次数上限
-    pub max_extensions: u32,
-    /// 无论如何不可突破的绝对上限
-    pub absolute_steps: usize,
-}
-
-impl ExplorationBudgetConfig {
-    pub(crate) fn from_env() -> Self {
-        Self {
-            soft_steps: cross_review_exploration_soft_steps(),
-            base_steps: cross_review_exploration_max_steps(),
-            per_extension_steps: cross_review_exploration_extension_steps(),
-            max_extensions: cross_review_exploration_max_extensions(),
-            absolute_steps: cross_review_exploration_absolute_steps(),
-        }
-    }
-
-    /// 有效硬上限 = min(基础上限 + 已批延期步数, 绝对上限)
-    pub(crate) fn effective_limit(&self, granted_steps: u32) -> usize {
-        self.base_steps
-            .saturating_add(granted_steps as usize)
-            .min(self.absolute_steps)
-    }
-}
-
-pub(crate) fn cross_review_exploration_max_steps() -> usize {
-    std::env::var("FREE_API_CROSS_REVIEW_EXPLORATION_MAX_STEPS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .map(|value| value.clamp(8, 100))
-        .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_MAX_STEPS)
-}
-
-pub(crate) fn cross_review_exploration_soft_steps() -> usize {
-    std::env::var("FREE_API_CROSS_REVIEW_EXPLORATION_SOFT_STEPS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .map(|value| value.clamp(4, 80))
-        .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_SOFT_STEPS)
-}
-
-pub(crate) fn cross_review_exploration_extension_steps() -> u32 {
-    std::env::var("FREE_API_CROSS_REVIEW_EXPLORATION_EXTENSION_STEPS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .map(|value| value.clamp(1, 32))
-        .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_EXTENSION_STEPS)
-}
-
-pub(crate) fn cross_review_exploration_max_extensions() -> u32 {
-    std::env::var("FREE_API_CROSS_REVIEW_EXPLORATION_MAX_EXTENSIONS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .map(|value| value.clamp(0, 8))
-        .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_MAX_EXTENSIONS)
-}
-
-pub(crate) fn cross_review_exploration_absolute_steps() -> usize {
-    std::env::var("FREE_API_CROSS_REVIEW_EXPLORATION_ABSOLUTE_STEPS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .map(|value| value.clamp(16, 200))
-        .unwrap_or(DEFAULT_CROSS_REVIEW_EXPLORATION_ABSOLUTE_STEPS)
-}
-
-/// 多专家联合会审面板开关（A/B 对照实验用）。
-/// `FREE_API_EVAL_REVIEW_PANEL=off|0|disabled|false` → 钉死 1v1：Tech Lead 的
-/// escalate 裁决被降级为 rebuttal，plan_escalation_required 不置位，
-/// submit_plan 的 1v1 通道保持可用。缺省=on（生产行为不变）。
-pub(crate) fn review_panel_enabled() -> bool {
-    !matches!(
-        std::env::var("FREE_API_EVAL_REVIEW_PANEL")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .as_deref(),
-        Some("off") | Some("0") | Some("disabled") | Some("false")
-    )
-}
-
-/// 当前有效探索硬上限（基础上限 + 已批延期，受绝对上限封顶）
-pub(crate) fn cross_review_exploration_effective_limit(checkpoint: &AgentCheckpoint) -> usize {
-    ExplorationBudgetConfig::from_env()
-        .effective_limit(checkpoint.plan_exploration_granted_steps)
-}
-
-/// 剩余可申请的延期次数
-pub(crate) fn cross_review_exploration_extensions_left(checkpoint: &AgentCheckpoint) -> u32 {
-    cross_review_exploration_max_extensions()
-        .saturating_sub(checkpoint.plan_exploration_extensions_used)
-}
-
-/// 探索延期裁决结果： granted 表示已入账并抬升有效上限；
-/// message 为面向模型的裁决说明（注入上下文或作为纯申请的本步结果）。
-#[derive(Debug)]
-pub(crate) struct ExtensionVerdict {
-    pub granted: bool,
-    pub granted_steps: u32,
-    pub message: String,
-    pub route: &'static str,
-}
-
-/// 裁决模型的探索延期申请（生产入口：预算配置取自环境变量）。
-pub(crate) fn adjudicate_exploration_extension(
-    checkpoint: &mut AgentCheckpoint,
-    request: &crate::agent::types::ExplorationExtensionRequest,
-) -> ExtensionVerdict {
-    adjudicate_exploration_extension_with(
-        checkpoint,
-        request,
-        ExplorationBudgetConfig::from_env(),
-    )
-}
-
-/// 探索延期裁决（显式配置版，供测试注入确定性预算）。
-///
-/// 判定顺序：
-/// 1. 适用性——仅交叉审查 + Exploring + 尚未派发过首次审查；
-/// 2. 结构——unresolved_question 非空、next_queries 为 1~6 条非空取证项；
-/// 3. 预算——延期次数与绝对上限余量；
-/// 全部通过后一次性入账：extensions_used +1、granted_steps += grant。
-/// 除入账两个字段外不触碰其他状态：模型仍须自己决定何时派发审查。
-pub(crate) fn adjudicate_exploration_extension_with(
-    checkpoint: &mut AgentCheckpoint,
-    request: &crate::agent::types::ExplorationExtensionRequest,
-    cfg: ExplorationBudgetConfig,
-) -> ExtensionVerdict {
-    let applicable = checkpoint.plan_mode == PlanExecutionMode::CrossReview
-        && checkpoint.plan_phase == PlanPhase::Exploring
-        && checkpoint.plan_reviewer_retry_count == 0;
-    if !applicable {
-        return ExtensionVerdict {
-            granted: false,
-            granted_steps: 0,
-            message: gate_messages::exploration_extension_not_applicable(),
-            route: "plan_liveness:extension_not_applicable",
-        };
-    }
-
-    let extensions_left = cfg
-        .max_extensions
-        .saturating_sub(checkpoint.plan_exploration_extensions_used);
-    let deny = |reason: &str| ExtensionVerdict {
-        granted: false,
-        granted_steps: 0,
-        message: gate_messages::exploration_extension_denied(reason, extensions_left),
-        route: "plan_liveness:extension_denied",
-    };
-
-    if request.unresolved_question.trim().is_empty() {
-        return deny("unresolved_question 不能为空：必须明确还缺哪条关键证据、它将如何改变方案。");
-    }
-    let concrete_queries = request
-        .next_queries
-        .iter()
-        .filter(|q| !q.trim().is_empty())
-        .count();
-    if concrete_queries == 0 || concrete_queries > 6 {
-        return deny("next_queries 必须包含 1~6 条非空的具体取证项，防止无边界续探。");
-    }
-
-    let effective = cfg.effective_limit(checkpoint.plan_exploration_granted_steps);
-    let room = cfg.absolute_steps.saturating_sub(effective) as u32;
-    if extensions_left == 0 {
-        return deny("延期申请次数已用尽。");
-    }
-    if room == 0 {
-        return deny("已到达探索绝对上限，无法追加任何步骤。");
-    }
-
-    let grant = request
-        .extra_steps
-        .unwrap_or(cfg.per_extension_steps)
-        .clamp(1, cfg.per_extension_steps)
-        .min(room);
-    checkpoint.plan_exploration_extensions_used += 1;
-    checkpoint.plan_exploration_granted_steps += grant;
-    let new_limit = cfg.effective_limit(checkpoint.plan_exploration_granted_steps);
-    ExtensionVerdict {
-        granted: true,
-        granted_steps: grant,
-        message: gate_messages::exploration_extension_granted(
-            grant,
-            new_limit,
-            extensions_left - 1,
-        ),
-        route: "plan_liveness:extension_granted",
-    }
-}
 
 /// submit_plan 适用性预检（纯 checkpoint 判定，不含 DB 在途行检查）。
 /// 返回 Some(reason) 表示当前状态不可用提交；None 放行。
@@ -415,38 +212,18 @@ fn plan_risk_preflight(
     Some(msg)
 }
 
-/// 探索活性门禁：交叉审查 + Exploring + 尚未派审 时，超过有效硬上限的探索被拒绝。
-/// effective_limit 由调用方按「基础 + 已批延期（封顶绝对上限）」计算后传入，
-/// 使本函数保持纯判定、可用任意预算做确定性测试。
-pub(crate) fn check_cross_review_exploration_gate(
-    checkpoint: &AgentCheckpoint,
-    step_id: usize,
-    tool: &str,
-    action: &str,
-    effective_limit: usize,
-) -> Option<DispatchResult> {
-    let reviewer_dispatch = tool.eq_ignore_ascii_case("child_reviewer")
-        || action.eq_ignore_ascii_case("child_reviewer");
-    let human_escalation =
-        tool.eq_ignore_ascii_case("ask_human") || action.eq_ignore_ascii_case("ask");
-    if checkpoint.plan_mode != PlanExecutionMode::CrossReview
-        || checkpoint.plan_phase != PlanPhase::Exploring
-        || checkpoint.plan_reviewer_retry_count > 0
-        || step_id < effective_limit
-        || reviewer_dispatch
-        || human_escalation
-    {
-        return None;
-    }
-    Some(DispatchResult { view: None,
-        success: false,
-        stdout: String::new(),
-        stderr: gate_messages::cross_review_exploration_budget_exhausted(
-            effective_limit,
-            cross_review_exploration_extensions_left(checkpoint),
-        ),
-        route: "plan_gatekeeper:exploration_budget_exhausted".to_string(),
-    })
+/// 多专家联合会审面板开关（A/B 对照实验用）。
+/// `FREE_API_EVAL_REVIEW_PANEL=off|0|disabled|false` → 钉死 1v1：Tech Lead 的
+/// escalate 裁决被降级为 rebuttal，plan_escalation_required 不置位，
+/// submit_plan 的 1v1 通道保持可用。缺省=on（生产行为不变）。
+pub(crate) fn review_panel_enabled() -> bool {
+    !matches!(
+        std::env::var("FREE_API_EVAL_REVIEW_PANEL")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("off") | Some("0") | Some("disabled") | Some("false")
+    )
 }
 
 /// 方案审批的结构化结论（标记载荷的类型化契约）。
