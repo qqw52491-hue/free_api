@@ -12,7 +12,7 @@
 |---|---|---|---|
 | **拆除探索预算门禁** | `plan_gate/mod.rs`/`loop_runner`/`render`/`plan_ops` | 14 步软提醒、24 步硬拦截、8×2 延期仪式全删；探索节奏完全归模型，宿主不再按步数催促收敛 | code-green（785 测全绿） |
 | **retriage 复核通道** | `agent/retriage.rs`（新）/`types`/`checkpoint`/`loop_runner`/`main_loop` | 模型主动 `request_retriage`（独立动作、reason 必填、每 run 限 1 次）→ 宿主机械组证据包（triage 判决+轨迹摘要+模型自述分层标注）→ supervisor 档一次性判决 continue/narrow/split/replan/escalate → 追加式落 `triage_revisions`（原判决不改写，审计链完整）；降级判决不烧配额；escalate 接现有 target_block 升维通道 | code-green（5 新单测：配额/降级/窄化回灌/无块降级/升维消耗） |
-| **里程点兜底（实验，默认关）** | `main_loop` 循环顶 + `FREE_API_RETRIAGE_MILESTONE_STEPS` | 只看资源事实（相位+步数阈值+从未复核），不判断探索质量；0=关闭 | unverified（待实弹对照决定是否默认开） |
+| **里程点兜底（实验，默认关）** | `main_loop` 循环顶 + `FREE_API_RETRIAGE_MILESTONE_STEPS` | 只看资源事实（相位+步数阈值+从未复核），不判断探索质量；0=关闭 | live-green（case_ft_retriage_probe：步12自动触发，glm-5.2 supervisor 判 continue——识别出步8-10工具误用但方向正确未干预；41步 succeeded，审计链完整） |
 
 **设计约束**：supervisor 无工具、一次性调用、45s 超时、解析失败降级 continue；
 判决只可加严（升维/拆分/重规划），无任何放宽门禁的路径。
