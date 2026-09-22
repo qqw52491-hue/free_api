@@ -2,9 +2,13 @@
     <div
         class="attachment-chip-card"
         :class="{ 'is-image': isImage }"
-        :title="isImage ? '点击放大预览图片' : '点击预览解析内容'"
+        :title="attachment.upload_failed
+            ? '附件落盘失败：仅作为本条消息的内存数据发送，历史记录中无法回显'
+            : (isImage ? '点击放大预览图片' : '点击预览解析内容')"
         @click.stop="handleClick"
     >
+        <!-- ⚠️ 落盘失败标记：如实披露附件未持久化，绝不伪装成已保存 -->
+        <span v-if="attachment.upload_failed" class="upload-failed-badge">⚠️</span>
         <!-- 1. 图片缩略图卡片 -->
         <template v-if="isImage">
             <div class="thumb-wrap">
@@ -161,6 +165,7 @@ function handleClick() {
 
 <style scoped>
 .attachment-chip-card {
+    position: relative;
     display: inline-flex;
     align-items: center;
     gap: 8px;
@@ -173,6 +178,16 @@ function handleClick() {
     user-select: none;
     box-sizing: border-box;
     cursor: pointer;
+}
+
+.upload-failed-badge {
+    position: absolute;
+    top: -6px;
+    left: -6px;
+    font-size: 12px;
+    line-height: 1;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+    z-index: 2;
 }
 
 .attachment-chip-card:hover {

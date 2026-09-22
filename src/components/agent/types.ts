@@ -12,6 +12,8 @@ export interface ParsedAttachment {
     image_data_url?: string | null;
     raw_preview?: string | null;
     is_pasted_snippet?: boolean;
+    /** 落盘失败标记：附件仅以内存数据随本条消息发送，历史记录中无法按路径回显 */
+    upload_failed?: boolean;
 }
 
 export interface AgentModelOption {

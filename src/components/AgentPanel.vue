@@ -133,6 +133,7 @@
                 <AgentComposer
                     ref="composerRef"
                     :draft="composerDraft"
+                    :session-id="panelId"
                     :is-running="session.isRunning.value"
                     :is-waiting-for-human="session.isWaitingForHuman.value"
                     :is-sending="session.isSendingHuman.value"

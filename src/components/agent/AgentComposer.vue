@@ -1219,6 +1219,7 @@ import {
 
 const props = defineProps<{
     draft: string;
+    sessionId: string;
     isRunning: boolean;
     isWaitingForHuman: boolean;
     isSending: boolean;
@@ -1357,12 +1358,59 @@ interface ParsedAttachment {
     image_data_url?: string | null;
     raw_preview?: string | null;
     is_pasted_snippet?: boolean;
+    upload_failed?: boolean;
 }
 
 const attachments = ref<ParsedAttachment[]>([]);
 const isDraggingOver = ref(false);
 const previewImageModal = ref<ParsedAttachment | null>(null);
 const previewDocModal = ref<ParsedAttachment | null>(null);
+
+// 异步落盘任务登记簿：submit 前做有界等待，避免极速回车丢掉尚未完成的附件
+const pendingAttachmentSaves = new Set<Promise<void>>();
+
+function trackAttachmentSave(task: Promise<void>) {
+    pendingAttachmentSaves.add(task);
+    void task.finally(() => pendingAttachmentSaves.delete(task));
+}
+
+function readFileAsDataUrl(file: File): Promise<string | null> {
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (event) => resolve((event.target?.result as string) || null);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(file);
+    });
+}
+
+// 后端契约：save_and_parse_uploaded_attachment(sessionId, fileName, base64Data)。
+// 失败返回 null，由调用方决定降级形态——绝不在这里静默吞掉假装成功。
+async function saveUploadedAttachment(fileName: string, base64Data: string): Promise<ParsedAttachment | null> {
+    try {
+        return await invoke<ParsedAttachment>("save_and_parse_uploaded_attachment", {
+            sessionId: props.sessionId,
+            fileName,
+            base64Data,
+        });
+    } catch (err) {
+        console.warn("附件落盘失败:", err);
+        return null;
+    }
+}
+
+// 落盘失败的图片仍可作为本条消息的多模态数据发送，但打 upload_failed 标记如实披露
+function fallbackImageAttachment(fileName: string, sizeBytes: number, contentType: string, dataUrl: string): ParsedAttachment {
+    return {
+        file_name: fileName,
+        file_path: fileName,
+        size_bytes: sizeBytes,
+        content_type: contentType,
+        prompt_text: `【用户已上传图片附件: \`${fileName}\`】(格式: ${contentType}, 大小: ${(sizeBytes / 1024).toFixed(1)} KB)\n*(图片数据已作为视觉多模态消息携带；落盘未成功，历史记录中无法按路径回显)*\n`,
+        image_data_url: dataUrl,
+        raw_preview: null,
+        upload_failed: true,
+    };
+}
 
 function openImagePreview(item: ParsedAttachment) {
     previewImageModal.value = item;
@@ -1427,38 +1475,23 @@ async function handleFileDrop(e: DragEvent) {
     const files = e.dataTransfer?.files;
     if (!files || files.length === 0) return;
 
-    for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const reader = new FileReader();
-        reader.onload = async (event) => {
-            const base64Data = event.target?.result as string;
+    for (const file of Array.from(files)) {
+        const task = (async () => {
+            const base64Data = await readFileAsDataUrl(file);
             if (!base64Data) return;
-            try {
-                if (file.type.startsWith("image/")) {
-                    attachments.value.push({
-                        file_name: file.name,
-                        file_path: file.name,
-                        size_bytes: file.size,
-                        content_type: file.type,
-                        prompt_text: `【用户已上传图片附件: \`${file.name}\`】(格式: ${file.type}, 大小: ${(file.size / 1024).toFixed(1)} KB)\n*(图片数据已作为视觉多模态消息携带)*\n`,
-                        image_data_url: base64Data,
-                        raw_preview: null,
-                    });
-                } else {
-                    const parsed = await invoke<ParsedAttachment>("save_and_parse_uploaded_attachment", {
-                        sessionId: "temp-session",
-                        fileName: file.name,
-                        base64Data,
-                    });
-                    if (parsed) {
-                        attachments.value.push(parsed);
-                    }
-                }
-            } catch (err) {
-                console.warn("解析拖拽文件失败:", err);
+            const saved = await saveUploadedAttachment(file.name, base64Data);
+            if (saved) {
+                attachments.value.push({
+                    ...saved,
+                    image_data_url: saved.image_data_url ?? (file.type.startsWith("image/") ? base64Data : null),
+                });
+            } else if (file.type.startsWith("image/")) {
+                // 图片仍可作为本条消息的多模态数据携带，但必须如实标记落盘失败
+                attachments.value.push(fallbackImageAttachment(file.name, file.size, file.type || "image/png", base64Data));
             }
-        };
-        reader.readAsDataURL(file);
+            // 非图片文件没有可携带的内存数据，落盘失败即不可用——不制造"看似成功"的裸名附件
+        })();
+        trackAttachmentSave(task);
     }
 }
 
@@ -1520,24 +1553,18 @@ async function handlePaste(e: ClipboardEvent) {
     if (imageFiles.length > 0) {
         e.preventDefault();
         for (const file of imageFiles) {
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                const base64Data = event.target?.result as string;
+            const task = (async () => {
+                const base64Data = await readFileAsDataUrl(file);
                 if (!base64Data) return;
                 const timestamp = new Date().toTimeString().split(" ")[0].replace(/:/g, "");
                 const fileName = file.name && file.name !== "image.png" ? file.name : `screenshot_${timestamp}.png`;
                 const contentType = file.type || "image/png";
-                attachments.value.push({
-                    file_name: fileName,
-                    file_path: fileName,
-                    size_bytes: file.size,
-                    content_type: contentType,
-                    prompt_text: `【用户已上传图片附件: \`${fileName}\`】(格式: ${contentType}, 大小: ${(file.size / 1024).toFixed(1)} KB)\n*(图片数据已作为视觉多模态消息携带)*\n`,
-                    image_data_url: base64Data,
-                    raw_preview: null,
-                });
-            };
-            reader.readAsDataURL(file);
+                const saved = await saveUploadedAttachment(fileName, base64Data);
+                attachments.value.push(saved
+                    ? { ...saved, image_data_url: saved.image_data_url ?? base64Data }
+                    : fallbackImageAttachment(fileName, file.size, contentType, base64Data));
+            })();
+            trackAttachmentSave(task);
         }
         return;
     }
@@ -1559,19 +1586,18 @@ async function handlePaste(e: ClipboardEvent) {
                 ta.setSelectionRange(caret, caret);
             }
             for (const dataUrl of payload.data_urls) {
-                const mime = dataUrl.slice(5, dataUrl.indexOf(";")) || "image/png";
-                const ext = mime === "image/jpeg" ? "jpg" : (mime.split("/")[1] || "png");
-                const timestamp = new Date().toTimeString().split(" ")[0].replace(/:/g, "");
-                const fileName = `screenshot_${timestamp}.${ext}`;
-                attachments.value.push({
-                    file_name: fileName,
-                    file_path: fileName,
-                    size_bytes: Math.round((dataUrl.length * 3) / 4),
-                    content_type: mime,
-                    prompt_text: `【用户已上传图片附件: \`${fileName}\`】(格式: ${mime}, 大小: ${(Math.round((dataUrl.length * 3) / 4) / 1024).toFixed(1)} KB)\n*(图片数据已作为视觉多模态消息携带)*\n`,
-                    image_data_url: dataUrl,
-                    raw_preview: null,
-                });
+                const task = (async () => {
+                    const mime = dataUrl.slice(5, dataUrl.indexOf(";")) || "image/png";
+                    const ext = mime === "image/jpeg" ? "jpg" : (mime.split("/")[1] || "png");
+                    const timestamp = new Date().toTimeString().split(" ")[0].replace(/:/g, "");
+                    const fileName = `screenshot_${timestamp}.${ext}`;
+                    const sizeBytes = Math.round((dataUrl.length * 3) / 4);
+                    const saved = await saveUploadedAttachment(fileName, dataUrl);
+                    attachments.value.push(saved
+                        ? { ...saved, image_data_url: saved.image_data_url ?? dataUrl }
+                        : fallbackImageAttachment(fileName, sizeBytes, mime, dataUrl));
+                })();
+                trackAttachmentSave(task);
             }
             // 文件管理器复制的文件复用附件解析管道（图片会生成缩略图卡片）
             if (payload.file_paths.length > 0) {
@@ -2339,13 +2365,26 @@ const canSubmit = computed(() => {
     return Boolean(props.draft.trim()) || attachments.value.length > 0;
 });
 
-function submit(explicitMode?: "interrupt" | "queue" | Event) {
+async function submit(explicitMode?: "interrupt" | "queue" | Event) {
     if (!canSubmit.value || props.isSending) return;
 
     let userText = props.draft.trim();
-    const currentAtts = [...attachments.value];
     const mode = (typeof explicitMode === "string" ? explicitMode : undefined)
         || (props.isRunning && !props.isWaitingForHuman ? submitMode.value : undefined);
+
+    // 先清输入框：等待落盘期间用户的新输入属于下一条消息，不能被本次提交吞掉
+    emit("update:draft", "");
+
+    // 极速回车竞态：粘贴/拖拽的落盘是异步的，提交前给在途任务一个有界等待窗口。
+    // 窗口耗尽仍未完成的附件不阻塞发送——落盘失败的图片会以 upload_failed 标记如实降级。
+    if (pendingAttachmentSaves.size > 0) {
+        await Promise.race([
+            Promise.allSettled([...pendingAttachmentSaves]),
+            new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+        ]);
+    }
+
+    const currentAtts = [...attachments.value];
 
     if (currentAtts.length > 0) {
         // 🌟 分流：粘贴的纯文本片段 (is_pasted_snippet) vs 物理附件 (拖拽或上传的文件/图片)
@@ -2354,10 +2393,13 @@ function submit(explicitMode?: "interrupt" | "queue" | Event) {
 
         const promptParts: string[] = [];
 
-        // 1. 真实物理文件：生成附件徽标，并传递给后端走沙箱与分层挂载
+        // 1. 真实物理文件：生成附件徽标（携带绝对路径，方便消息流组件精确定位与图片缩略图直接加载），并传递给后端走沙箱与分层挂载
         if (realAttachments.length > 0) {
             const briefBadges = realAttachments
-                .map((a) => `📎 [附件: ${a.file_name} (${formatFileSize(a.size_bytes)})]`)
+                .map((a) => {
+                    const pathInfo = a.file_path && a.file_path !== a.file_name ? ` | 路径: ${a.file_path}` : "";
+                    return `📎 [附件: ${a.file_name} (${formatFileSize(a.size_bytes)})${pathInfo}]`;
+                })
                 .join("\n");
             promptParts.push(briefBadges);
         }
@@ -2379,11 +2421,9 @@ function submit(explicitMode?: "interrupt" | "queue" | Event) {
         }
 
         const visiblePrompt = promptParts.join("\n\n");
-        emit("update:draft", "");
         attachments.value = [];
         emit("submit", { text: visiblePrompt, attachments: realAttachments, mode });
     } else {
-        emit("update:draft", "");
         emit("submit", { text: userText, attachments: [], mode });
     }
 }
