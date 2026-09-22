@@ -1,24 +1,23 @@
 //! 语义级打转检测（Semantic Stall Detector）。
 //!
 //! `NoProgressTracker` 只抓"相同工具+相同参数+相同输出"的机械重复；
-//! 本组件抓语义级空转：连续多步纯调查（读/搜/探测），未触及任何
-//! 此前未读过的路径、未产生任何状态变更——即"把所有相关文件读了三遍
-//! 仍未形成方案"的形态（实测：闭卷修复任务 80 步耗尽，后 40 步全为
-//! 换窗口复读同一批函数）。
+//! 本组件抓语义级空转：连续多步纯调查（读/搜/探测）且未产生任何
+//! 状态变更——实测已见两种打转形态：
+//!   ① 换窗口复读同一批函数（闭卷修复 80 步耗尽，后 40 步全复读）；
+//!   ② 不断漂向新的无关文件（每步都读"新"路径，路径新颖性≠证据新颖性）。
+//! 因此判据是"产出性"而非"新颖性"：读永远是准备动作，只有状态变更
+//! （写入/计划/契约/派发/自述/升维/人类交互/验证命令成功）才算进展。
 //!
 //! 行为契约（fail-open）：只注入收敛提示 / 代花 Pro 升维配额，
-//! 绝不拦截或拒绝执行。阈值提示各只发一次，出现真实进展信号后复位。
+//! 绝不拦截或拒绝执行。阈值提示各只发一次，出现进展信号后复位。
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 /// 连续 N 步静默调查 → 注入收敛提示（强制综合假设）。
 const STALL_NOTICE_THRESHOLD: u32 = 12;
 /// 连续 N 步静默调查 → 宿主代花一次 Pro 升维配额
 /// （真卡死的模型往往没有"该呼救"的元认知——实测打转 20+ 步零呼救）。
 const STALL_ESCALATE_THRESHOLD: u32 = 20;
-/// 已读路径集合有界：超限整体清空（启发式检测，不是审计账本）。
-const MAX_TRACKED_PATHS: usize = 256;
 
 /// 宿主检测结论——由调用方决定注入提示还是执行升维。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,13 +30,9 @@ pub enum StallSignal {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SemanticStallTracker {
-    /// 连续"静默调查"步数：无状态变更、无新路径证据。
+    /// 连续"静默调查"步数：无状态变更。
     #[serde(default)]
     streak: u32,
-    /// 本会话读过的规范化路径集合（路径级，不含窗口——
-    /// 换窗口复读同一文件仍是同一证据面）。
-    #[serde(default)]
-    seen_paths: BTreeSet<String>,
     /// 收敛提示只发一次：重复广播无信息量且污染前缀。
     #[serde(default)]
     notice_issued: bool,
@@ -47,71 +42,21 @@ pub struct SemanticStallTracker {
 }
 
 impl SemanticStallTracker {
-    /// 上下文压缩后调用：模型已遗忘旧读取，复读重新合法。
+    /// 上下文压缩后调用：旧判定语境已丢失，检测复位。
     pub fn reset(&mut self) {
         self.streak = 0;
-        self.seen_paths.clear();
         self.notice_issued = false;
         self.escalation_issued = false;
     }
 
-    /// 提取本步读取/列举的规范化路径（若有）。
-    /// 与 read_ledger 共用同一口径，但接受目录（list/tree 的新目录同样是新证据）。
-    fn extract_read_path(
-        instruction: &crate::agent::types::AgentInstruction,
-        workspace_dir: &std::path::Path,
-    ) -> Option<String> {
-        let tool = instruction.get_tool().to_lowercase();
-        let action = instruction.get_action().to_lowercase();
-        let is_native_read = tool == "local_file"
-            && (action.starts_with("read") || action.starts_with("list"));
-        let is_read_tool = matches!(
-            tool.as_str(),
-            "read_file" | "read_text_file" | "read_media_file" | "read_multiple_files"
-                | "get_file_content" | "get_code_snippet" | "list_directory"
-                | "list_directory_with_sizes" | "directory_tree" | "get_file_info"
-        );
-        if !is_native_read && !is_read_tool {
-            return None;
-        }
-        let params = instruction.get_params();
-        let raw = params
-            .get("path")
-            .or_else(|| params.get("filePath"))
-            .or_else(|| params.get("file_path"))
-            .or_else(|| params.get("dir"))
-            .or_else(|| params.get("directory"))
-            .and_then(|v| v.as_str())?;
-        if raw.trim().is_empty() || raw.chars().count() > 1_000 {
-            return None;
-        }
-        let candidate = std::path::PathBuf::from(raw.trim());
-        let target = if candidate.is_relative() {
-            workspace_dir.join(candidate)
-        } else {
-            candidate
-        };
-        // 优先 canonicalize；失败（不存在的路径）退化为规范化拼接——
-        // 读不存在路径同样是"重复踩同一坑"的证据，不能因 canonicalize 失败而漏记。
-        Some(
-            target
-                .canonicalize()
-                .map(|c| c.to_string_lossy().to_string())
-                .unwrap_or_else(|_| target.to_string_lossy().to_string()),
-        )
-    }
-
-    /// 进展信号：本步是否产生了真实状态变更/新证据/新失败。
+    /// 进展信号：本步是否产生了真实状态变更/验证证据。
     /// 任一成立即非静默——宁漏判不误判（fail-open）。
+    /// 注意：门禁打回、格式错误等失败不改变任何状态，同样计入静默——
+    /// "被打回→换个姿势再试→再被打回"本身就是打转形态之一。
     fn has_progress_signal(
         instruction: &crate::agent::types::AgentInstruction,
         result_success: bool,
-        novel_path: bool,
     ) -> bool {
-        // 失败即新信息（诊断失败原因本身就是进展）。
-        if !result_success {
-            return true;
-        }
         // 真实写入/副作用。
         if crate::agent::context::AuditLedger::is_mutating_side_effect_with_action(
             &instruction.get_tool(),
@@ -119,6 +64,16 @@ impl SemanticStallTracker {
             &instruction.get_params(),
         ) {
             return true;
+        }
+        // 成功的验证/测试命令是证据产出（auto_verify 依赖同一判据口径）。
+        if result_success {
+            if let Some(cmd) = crate::agent::change_verification::extract_command_from_params(
+                &instruction.get_params(),
+            ) {
+                if crate::agent::change_verification::is_test_or_verification_command(&cmd) {
+                    return true;
+                }
+            }
         }
         // 状态域字段变更：计划/契约/Todo/验证/自述/扩 scope/升维/记忆/摘要。
         if instruction.submit_plan.is_some()
@@ -152,14 +107,9 @@ impl SemanticStallTracker {
             return true;
         }
         let tool = instruction.get_tool().to_lowercase();
-        if matches!(tool.as_str(), "ask_human" | "finish")
+        matches!(tool.as_str(), "ask_human" | "finish")
             || tool.contains("child_")
             || tool.contains("dispatch")
-        {
-            return true;
-        }
-        // 读到了本会话从未读过的新路径 = 新证据。
-        novel_path
     }
 
     /// 中性步：挂起等待/监听注册——在等异步结果，不是打转。
@@ -176,22 +126,12 @@ impl SemanticStallTracker {
         &mut self,
         instruction: &crate::agent::types::AgentInstruction,
         result_success: bool,
-        workspace_dir: &std::path::Path,
+        _workspace_dir: &std::path::Path,
     ) -> Option<StallSignal> {
         if Self::is_neutral_step(instruction) {
             return None;
         }
-        let read_path = Self::extract_read_path(instruction, workspace_dir);
-        let novel_path = match &read_path {
-            Some(p) => {
-                if self.seen_paths.len() >= MAX_TRACKED_PATHS {
-                    self.seen_paths.clear();
-                }
-                self.seen_paths.insert(p.clone())
-            }
-            None => false,
-        };
-        if Self::has_progress_signal(instruction, result_success, novel_path) {
+        if Self::has_progress_signal(instruction, result_success) {
             // 出现真实进展：整段打转期结束，提示标记一并复位。
             self.streak = 0;
             self.notice_issued = false;
@@ -238,11 +178,17 @@ mod tests {
         i
     }
 
+    fn verify_step() -> crate::agent::types::AgentInstruction {
+        let mut i = crate::agent::types::AgentInstruction::default();
+        i.tool = Some("local_shell".to_string());
+        i.params = Some(json!({"command": "npx vue-tsc --noEmit"}));
+        i
+    }
+
     #[test]
     fn silent_streak_fires_notice_then_escalate() {
         let mut t = SemanticStallTracker::default();
         let ws = std::path::Path::new("/nonexistent-ws");
-        // 同一文件反复读（canonicalize 失败也照常记录）：累计静默
         let mut signals = Vec::new();
         for _ in 0..25 {
             if let Some(s) = t.record(&read_step("src/a.rs"), true, ws) {
@@ -256,19 +202,21 @@ mod tests {
     }
 
     #[test]
-    fn novel_reads_reset_streak() {
+    fn drifting_through_new_files_is_still_silent() {
+        // 实测形态②：每步读"新"路径但零产出——仍然是打转。
         let mut t = SemanticStallTracker::default();
         let ws = std::path::Path::new("/nonexistent-ws");
-        for i in 0..30 {
-            assert!(t
-                .record(&read_step(&format!("src/f{}.rs", i)), true, ws)
-                .is_none());
+        let mut signals = Vec::new();
+        for i in 0..15 {
+            if let Some(s) = t.record(&read_step(&format!("src/f{}.rs", i)), true, ws) {
+                signals.push(s);
+            }
         }
-        assert_eq!(t.streak, 0);
+        assert!(signals.contains(&StallSignal::Notice(12)));
     }
 
     #[test]
-    fn write_and_search_reset() {
+    fn state_changes_and_verify_reset() {
         let mut t = SemanticStallTracker::default();
         let ws = std::path::Path::new("/nonexistent-ws");
         for _ in 0..11 {
@@ -276,18 +224,27 @@ mod tests {
         }
         assert!(t.record(&write_step(), true, ws).is_none());
         assert_eq!(t.streak, 0);
-        // 失败步也是进展
-        t.record(&search_step(), false, ws);
+        // 成功的验证命令同样是证据产出
+        for _ in 0..11 {
+            t.record(&search_step(), true, ws);
+        }
+        t.record(&verify_step(), true, ws);
         assert_eq!(t.streak, 0);
     }
 
     #[test]
-    fn wait_jobs_is_neutral() {
+    fn failures_and_wait_jobs_do_not_reset() {
         let mut t = SemanticStallTracker::default();
         let ws = std::path::Path::new("/nonexistent-ws");
+        // 失败不产出状态变更 → 计入静默（门禁打回循环是打转形态之一）
+        for _ in 0..12 {
+            t.record(&search_step(), false, ws);
+        }
+        assert!(t.streak >= 12);
+        // wait_jobs 中性：不累计也不复位
         let mut i = crate::agent::types::AgentInstruction::default();
         i.tool = Some("wait_jobs".to_string());
         t.record(&i, true, ws);
-        assert_eq!(t.streak, 0); // 不累计
+        assert_eq!(t.streak, 12);
     }
 }
