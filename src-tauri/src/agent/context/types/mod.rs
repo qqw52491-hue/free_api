@@ -270,11 +270,6 @@ pub struct SandwichContext {
     /// 的运行时事实（换措辞盲搜的空洞检测，每组只提示一次）。
     #[serde(default)]
     pub zero_hit: ZeroHitTracker,
-    /// 语义级打转检测：连续多步纯调查且无新路径证据、无状态变更。
-    /// 与 no_progress 互补——后者抓同参数机械重复，本项抓换窗口复读的
-    /// 语义空转；只注入收敛提示或代花升维配额，绝不拦截。
-    #[serde(default)]
-    pub semantic_stall: crate::agent::context::semantic_stall::SemanticStallTracker,
     /// 服务端回传的最近一次完整 Agent prompt tokens（总口径：system+goal+历史+尾部）。
     /// 它必须与同一完整请求发送时的历史估算快照成对使用；隔离 JSON 修复请求
     /// 不覆盖这组基线，避免将短修复 prompt 误用于下一次完整上下文的水位校准。
@@ -370,7 +365,6 @@ impl SandwichContext {
             epoch_system_prompt: None,
             no_progress: NoProgressTracker::default(),
             zero_hit: ZeroHitTracker::default(),
-            semantic_stall: crate::agent::context::semantic_stall::SemanticStallTracker::default(),
             last_reported_prompt_tokens: None,
             last_persisted_summary: None,
             persisted_summary_revision: 0,
@@ -517,10 +511,8 @@ impl SandwichContext {
     }
 
     /// 上下文压缩后调用：模型已遗忘旧读取内容，台账清零使重读重新合法。
-    /// 语义打转的已读路径集合同步清零——压缩后复读是合法重建证据面。
     pub fn reset_read_ledger(&mut self) {
         self.read_ledger.clear();
-        self.semantic_stall.reset();
     }
 
     /// 读取型指令的台账目标解析：识别工具形态 → 提取 path → canonicalize。

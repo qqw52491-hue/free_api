@@ -9,7 +9,6 @@ pub mod no_progress;
 pub mod render;
 pub mod resource_scope;
 pub mod sampling;
-pub mod semantic_stall;
 pub mod types;
 pub mod zero_hit;
 
