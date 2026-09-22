@@ -3,7 +3,7 @@
   "title": "真实前端缺陷从零修复：图片上传缩略图破损与点击无法预览（三上传路径落盘+徽标路径+失败如实标记）",
   "tier": "silver",
   "base_commit": "afd3973",
-  "problem_statement": "【缺陷修复任务】现象：聊天输入框粘贴截图或拖拽图片发送后，消息里的图片显示为带问号的破损占位图，点击也无法打开预览；历史消息重载后同样失效。请定位真实根因并最小修复。验收契约（判据会静态核验）：① 图片附件必须经后端 save_and_parse_uploaded_attachment 持久化，invoke 参数名必须为 sessionId/fileName/base64Data；② 发送消息中的附件徽标必须携带真实文件路径（\"路径:\" 标记），保证历史重载后仍能还原；③ 落盘失败的图片必须如实标记（如 upload_failed），严禁静默降级为裸文件名 file_path。注意覆盖全部图片上传入口（粘贴/拖拽/原生剪贴板回退），不要只修其中一条。",
+  "problem_statement": "【缺陷修复任务】现象：聊天输入框粘贴截图或拖拽图片发送后，消息里的图片显示为带问号的破损占位图，点击也无法打开预览；历史消息重载后同样失效。请定位真实根因并完整修复。",
   "judge_kind": "command",
   "verify_command": "node test/eval_cases/fixtures/img_upload/judge.mjs",
   "expected_exit_code": 0,
