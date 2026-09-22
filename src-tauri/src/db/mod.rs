@@ -9,6 +9,20 @@ pub type ReadPool = Pool<SqliteConnectionManager>;
 
 static READ_POOL: OnceLock<ReadPool> = OnceLock::new();
 
+/// 全局 DbState 句柄：Tauri manage() 之外的兜底访问通道。
+/// 供无上下文打点（mark_stage 落库）等场景使用——只在启动时 set 一次。
+static GLOBAL_DB: OnceLock<DbState> = OnceLock::new();
+
+/// 启动时登记全局句柄；重复调用安全（OnceLock 只取第一次）。
+pub fn set_global_db(state: &DbState) {
+    let _ = GLOBAL_DB.set(state.clone());
+}
+
+/// 取全局句柄；未初始化（如纯单元测试）返回 None。
+pub fn global_db() -> Option<&'static DbState> {
+    GLOBAL_DB.get()
+}
+
 /// 读连接持有包装器（自动解引用为 Connection，借用结束自动归还池中）
 pub enum DbReaderConnection<'a> {
     Pooled(r2d2::PooledConnection<SqliteConnectionManager>),

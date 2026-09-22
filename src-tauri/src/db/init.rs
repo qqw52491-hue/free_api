@@ -153,6 +153,12 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             contract_id TEXT,
             contract_schema TEXT
         );
+        CREATE TABLE IF NOT EXISTS agent_stage_marks (
+            session_id TEXT PRIMARY KEY,
+            stage TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS agent_role_cards (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,

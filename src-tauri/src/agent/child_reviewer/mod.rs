@@ -280,6 +280,10 @@ pub async fn spawn_child_reviewer(
 
     tokio::spawn(async move {
         let started_at = std::time::Instant::now();
+        // 子任务内部位置落库（agent_stage_marks，key=child:{run_id}）——
+        // 让"子 Agent 卡在哪"可实时查询，而非只在收割时留下一行结果。
+        let stage_key = format!("child:{}", child_run_id_clone);
+        crate::agent::control::mark_stage(&stage_key, "child_task:spawned");
         let app_handle = app;
         let mut on_stream_event = |event: llm::StreamEvent<'_>| -> bool {
             if let Some(ref handle) = app_handle {
@@ -335,6 +339,10 @@ pub async fn spawn_child_reviewer(
         let mut cur_timeout_secs = child_timeout_secs(&config.model_name);
         let (duration_ms, completion_tokens, prompt_tokens, final_parsed, final_raw) = loop {
             llm_call_index += 1;
+            crate::agent::control::mark_stage(
+                &stage_key,
+                &format!("child_task:llm_call:{}", llm_call_index),
+            );
             let call = llm::stream_with_retry(
                 &config,
                 &messages,
@@ -473,6 +481,10 @@ pub async fn spawn_child_reviewer(
             if let Some(req) = tool_request {
                 if tool_steps_used < reviewer_tool_steps {
                     let tool_name = req.get("tool").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                    crate::agent::control::mark_stage(
+                        &stage_key,
+                        &format!("child_task:tool:{}", tool_name),
+                    );
                     let observation = match crate::agent::review_tools::execute(
                         &workspace_root_owned,
                         Some(&session_tmp_owned),
@@ -538,6 +550,7 @@ pub async fn spawn_child_reviewer(
             }));
         };
 
+        crate::agent::control::mark_stage(&stage_key, "child_task:reduce");
         let (findings, confidence, evidence_refs, missing_evidence, routing, scorecard, objection_verdicts, withdrawn_findings) = final_parsed;
 
         // 契约驱动机械判定：若任务契约未绑定自动化验证义务，机械置 test_coverage 为 None (N/A)

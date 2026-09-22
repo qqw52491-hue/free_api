@@ -39,6 +39,21 @@ pub(crate) fn mark_stage(session_id: &str, stage: &str) {
     if let Ok(mut stages) = stall_stages().lock() {
         stages.insert(session_id.to_string(), stage.to_string());
     }
+    // 尽力落库：让"卡在哪个子阶段"可实时查询（UI/CLI/看门狗之外的观察者）。
+    // 必须 try_lock 非阻塞——mark_stage 位于派发等热路径上，若阻塞等待
+    // 反而会成为它要诊断的冻结源之一；写不进去时内存态仍然是真相。
+    if let Some(db) = crate::db::global_db() {
+        if let Ok(conn) = db.0.try_lock() {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO agent_stage_marks (session_id, stage, updated_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    session_id,
+                    stage,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            );
+        }
+    }
 }
 
 pub(crate) fn read_stage(session_id: &str) -> Option<String> {
@@ -51,6 +66,14 @@ pub(crate) fn read_stage(session_id: &str) -> Option<String> {
 pub(crate) fn clear_stage(session_id: &str) {
     if let Ok(mut stages) = stall_stages().lock() {
         stages.remove(session_id);
+    }
+    if let Some(db) = crate::db::global_db() {
+        if let Ok(conn) = db.0.try_lock() {
+            let _ = conn.execute(
+                "DELETE FROM agent_stage_marks WHERE session_id = ?1",
+                rusqlite::params![session_id],
+            );
+        }
     }
 }
 

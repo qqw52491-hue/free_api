@@ -32,8 +32,11 @@ pub fn run() {
     #[cfg(feature = "wdio")]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
 
+    let db_state = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+    db::set_global_db(&db_state);
+
     builder
-        .manage(DbState(std::sync::Arc::new(std::sync::Mutex::new(conn))))
+        .manage(db_state)
         .manage(registry)
         .setup(|app| {
             // 启动清理：上次进程遗留的 running trace 标记为已中断（无跨进程恢复，僵尸记录防堆积）
