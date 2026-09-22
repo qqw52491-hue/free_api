@@ -1909,9 +1909,32 @@ async fn run_agent_main_loop_in_workspace_inner(
                 .map(|todo| format!("- {todo}"))
                 .collect::<Vec<_>>()
                 .join("\n");
+            // 空转检测：同一组 blocker 连续未变 = 模型只重发 finish 不改证据。
+            // 第 3 次起升级指引——不再泛泛说"别草率结项"，直接点破两条出路。
+            let blocker_sig = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                blocker_summary.hash(&mut h);
+                h.finish()
+            };
+            if checkpoint.last_finish_blocker_sig == Some(blocker_sig) {
+                checkpoint.repeated_blocker_count =
+                    checkpoint.repeated_blocker_count.saturating_add(1);
+            } else {
+                checkpoint.last_finish_blocker_sig = Some(blocker_sig);
+                checkpoint.repeated_blocker_count = 1;
+            }
+            let escalation = if checkpoint.repeated_blocker_count >= 3 {
+                format!(
+                    "\n\n【🚨 同一阻塞已连续 {} 次未变化——判定为空转】你此前的 finish 只是重发相同证据，契约义务里的 evidence_refs 根本没动。立即二选一，禁止再次原样重试：\n① 用 `review_contract_update` 把受阻义务的 evidence_refs 改为上方 diff 区间内的行号（注意是更新契约义务本身，不是改报告正文）；\n② 认为义务不适用或证据无法落入 diff → 调用 `ask_human` 向用户呈报阻塞清单申请人工仲裁。",
+                    checkpoint.repeated_blocker_count
+                )
+            } else {
+                String::new()
+            };
             context.add_error_feedback(&format!(
-                "【⚠️ 交付门禁拦截打回：任务尚未满足结项标准，finish 未生效！】\n【未闭合项/证据缺失】：\n{}\n任务仍在运行中。请勿在未闭合上述事项时草率结项！\n【必须采取的行动】：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新并完成验证后，方可再次提交 finish 交付；如需先评估就绪状态而不提交终态，可单独一步输出 prepare_finish 做预检。",
-                blocker_summary
+                "【⚠️ 交付门禁拦截打回：任务尚未满足结项标准，finish 未生效！】\n【未闭合项/证据缺失】：\n{}\n任务仍在运行中。请勿在未闭合上述事项时草率结项！\n【必须采取的行动】：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新并完成验证后，方可再次提交 finish 交付；如需先评估就绪状态而不提交终态，可单独一步输出 prepare_finish 做预检。{}",
+                blocker_summary, escalation
             ));
             crate::agent::dispatcher::emit_tool_event(
                 &app,

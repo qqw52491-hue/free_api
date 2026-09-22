@@ -186,8 +186,13 @@ def main():
             blockers[0]
         );
         assert!(
-            blockers[0].contains("未在本次真实代码改动 (diff) 中找到对应修改行"),
+            blockers[0].contains("不在本次真实改动 (diff) 覆盖区间内"),
             "拦截文案必须明确原因: {}",
+            blockers[0]
+        );
+        assert!(
+            blockers[0].contains("review_contract_update"),
+            "拦截文案必须给出可执行修法: {}",
             blockers[0]
         );
     }

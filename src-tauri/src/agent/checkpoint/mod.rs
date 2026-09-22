@@ -42,6 +42,12 @@ pub struct AgentCheckpoint {
     /// 终态代码审查重试次数（达到上限后熔断升级，防止死循环）
     #[serde(default)]
     pub reviewer_retry_count: u32,
+    /// 上一次 finish 质询时 blocker 集合的签名（用于识别"原样重发"的空转）
+    #[serde(default)]
+    pub last_finish_blocker_sig: Option<u64>,
+    /// 同一组 blocker 连续未变的次数（>=3 时升级指引：要求改契约引用或转 ask_human）
+    #[serde(default)]
+    pub repeated_blocker_count: u32,
     /// 上次审查的 Diff Hash（防重复重试相同 Diff）
     #[serde(default)]
     pub last_reviewed_diff_hash: Option<String>,
@@ -318,6 +324,8 @@ impl AgentCheckpoint {
             finish_reviewed: false,
             finish_challenge_count: 0,
             reviewer_retry_count: 0,
+            last_finish_blocker_sig: None,
+            repeated_blocker_count: 0,
             last_reviewed_diff_hash: None,
             last_review_result: None,
             pending_finalization: None,

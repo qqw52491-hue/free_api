@@ -383,7 +383,7 @@ pub(crate) fn review_contract_evidence_blockers(
                 ));
             } else if !failed_refs.is_empty() {
                 blockers.push(format!(
-                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的代码证据 `{}` 未在本次真实代码改动 (diff) 中找到对应修改行——注意：你的编辑会使此前的行号发生漂移，陈旧行号不再有效。请对照下方真实覆盖区间重新引用；若该义务靠命令/测试输出证明，改挂 `verify_command` 由宿主执行判分；或改 waived 并说明理由。\n{}\n💡 修正建议（照抄即可）：\n{}",
+                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的代码证据 `{}` 不在本次真实改动 (diff) 覆盖区间内。\n【直接修法——二选一，不要原样重发 finish】① 在 `review_contract_update` 中把该义务的 evidence_refs 改为下方 diff 区间内的行号（你的编辑已使行号漂移，旧行号一律无效，finish 报告正文里的行号不参与校验，必须更新契约义务本身）；② 若该义务靠命令/测试输出证明 → 改挂 `verify_command` 由宿主执行判分；若属「解释病因」类义务、病灶代码无需改动 → 改 waived 并说明理由。\n{}\n💡 可引用区间：\n{}",
                     obligation.id,
                     obligation.question.trim(),
                     failed_refs.join(", "),
