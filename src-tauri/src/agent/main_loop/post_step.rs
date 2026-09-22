@@ -7,6 +7,51 @@ use crate::db::DbState;
 use tauri::AppHandle;
 
 use super::auto_verify::try_auto_verify_change;
+use crate::agent::context::semantic_stall::StallSignal;
+
+/// 语义打转收尾检测：连续纯调查（复读已知路径、无状态变更）累计到阈值时
+/// 注入收敛提示；深度打转时宿主代花一次 Pro 升维配额——模型卡死时往往
+/// 没有"该呼救"的元认知，触发权由宿主接管（fail-open，永不拦截）。
+pub(crate) fn detect_semantic_stall(
+    context: &mut SandwichContext,
+    instruction: &AgentInstruction,
+    result: &DispatchResult,
+    workspace_dir: &std::path::Path,
+) {
+    match context
+        .semantic_stall
+        .record(instruction, result.success, workspace_dir)
+    {
+        Some(StallSignal::Notice(streak)) => {
+            context.add_error_feedback(&format!(
+                "【🧭 收敛提示】你已连续 {} 步纯调查（未触及新路径证据、未产生任何状态变更）。\n\
+                 继续复读同一批文件不会产生新信息。【必须采取的行动】：下一步先综合当前证据——\n\
+                 列出已确证的事实、候选根因假设与各自缺口，然后收敛为一个可执行动作\
+                 （submit_plan / 写入修改 / 派发侦察 / 验证命令），不要继续无目标泛读。",
+                streak
+            ));
+        }
+        Some(StallSignal::Escalate(streak)) => {
+            // 宿主代花升维配额：配额耗尽或没有活跃目标块时降级为纯提示。
+            let escalated = context
+                .active_target_block_mut()
+                .map(|b| b.request_pro_escalation().is_ok())
+                .unwrap_or(false);
+            let suffix = if escalated {
+                "宿主已代你申请一次 Pro 强模型支援，下一步将自动路由 Pro 执行收敛推理。"
+            } else {
+                "升维配额不可用（无活跃目标块或配额已用尽）——请用当前模型立即收敛为可执行动作。"
+            };
+            context.add_error_feedback(&format!(
+                "【🚨 深度打转】你已连续 {} 步纯调查未收敛——证据面大概率已足够，缺的\
+                 是把证据组装成假设。{}\n【必须采取的行动】：停止泛读，立即输出当前最优假设\
+                 与最小证伪/修复动作。",
+                streak, suffix
+            ));
+        }
+        None => {}
+    }
+}
 
 /// 防虚假勾选：将当步真实 output_id 回填到标记为 done 但缺少证据的 Todo（需在 output_id 已知后执行）
 pub(crate) fn backfill_todo_evidence(

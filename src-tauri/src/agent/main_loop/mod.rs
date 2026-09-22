@@ -2683,6 +2683,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                 &final_session_id,
             );
 
+            // 语义打转检测：连续纯调查无新证据/无状态变更 → 收敛提示或代花升维配额
+            post_step::detect_semantic_stall(
+                &mut context,
+                &instruction,
+                &result,
+                &workspace_dir,
+            );
+
         context.current_observation = output_text.clone();
         // 复盘轨迹使用与 step_new 相同的语义字段，但与 Agent prompt/checkpoint 隔离。
         // 这使历史会话既能恢复思考、计划和工具调用，又不会放大运行时上下文。
