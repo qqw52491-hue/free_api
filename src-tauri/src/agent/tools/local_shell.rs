@@ -8,7 +8,12 @@
 //! 5. 自定义环境变量支持：支持传入 env: { "KEY": "VAL" } 灵活注入环境变量；
 //! 6. 工作区物理边界牢笼：命令默认在当前项目工作区根目录执行，自定义 cwd 必须通过 path_guard 双白名单核验；
 //! 7. 详细友好的 ENOENT 诊断：明确区分工作目录不存在与命令未在 PATH 中找到，并输出排查指引；
-//! 8. 结构化结果输出与诊断建议：输出 exit_code、duration_ms、kind、retryable、safe_to_retry、recommended_action，辅助大模型自愈纠错。
+//! 8. 结构化结果输出与诊断建议：输出 exit_code、duration_ms、kind、retryable、safe_to_retry、recommended_action，辅助大模型自愈纠错；
+//! 9. IDE 调试器注入剥离与非交互 stdin：清除 js-debug autoAttach 注入的 NODE_OPTIONS/VSCODE_INSPECTOR_OPTIONS
+//!    （否则每个 node 子进程被 IDE 挂上 inspector，退出时等 "debugger to disconnect" 挂到超时）；
+//!    stdin 一律 /dev/null，杜绝交互式等待与后台进程组读 TTY 触发 SIGTTIN；
+//! 10. 管道排空有界化：主进程退出后只给残余输出有界排空窗口——孙进程继承管道不退出时
+//!    EOF 永不到达（守护进程/npm notifier），绝不能让收集输出反过来挂住主流程。
 
 use crate::agent::context::AuditLedger;
 use crate::agent::path_guard::ensure_allowed_path;
@@ -120,6 +125,101 @@ fn kill_process_group(pid: u32, signal: &str) {
             .args(&["/F", "/T", "/PID", &pid.to_string()])
             .status();
     }
+}
+
+/// 向子进程统一应用 PATH/会话 tmp/stdin-stdio 与 IDE 调试器注入净化。
+/// custom_env 在净化之后应用，显式传参始终优先（保留刻意调试的逃生门）。
+fn apply_child_env(
+    c: &mut tokio::process::Command,
+    enriched_path: &str,
+    session_tmp_str: &str,
+    custom_env: Option<&HashMap<String, String>>,
+) {
+    c.env("PATH", enriched_path);
+    c.env("SESSION_TMP_DIR", session_tmp_str);
+    c.env("TMPDIR", session_tmp_str);
+    sanitize_debugger_env(c);
+    if let Some(env_map) = custom_env {
+        for (k, v) in env_map {
+            c.env(k, v);
+        }
+    }
+    // stdin 一律 /dev/null：非交互工具继承宿主 stdin 只会引入挂死面——
+    // 子进程读交互提示（npx 安装确认等）永远等不到输入；stdin 为 TTY 时
+    // process_group(0) 的后台进程组读 TTY 还会触发 SIGTTIN 整组暂停。
+    c.stdin(std::process::Stdio::null());
+    c.stdout(std::process::Stdio::piped());
+    c.stderr(std::process::Stdio::piped());
+}
+
+/// 剥离 IDE 调试器自动注入：VS Code 系 IDE 的 js-debug autoAttach 会向集成终端写入
+/// NODE_OPTIONS="--require .../ms-vscode.js-debug/.../bootloader.js --inspect-publish-uid=http"
+/// 与 VSCODE_INSPECTOR_OPTIONS/VSCODE_INJECTION。宿主应用经该终端启动后原样继承，再透传给
+/// 每个 node 子进程；IDE 自动 attach 后进程退出时卡在 "Waiting for the debugger to
+/// disconnect" 直到超时被杀（vue-tsc 5 秒的活挂 60 秒即此机制）。
+/// 只剔除可识别的注入片段，保留用户合法的 NODE_OPTIONS（如 --max-old-space-size）。
+fn sanitize_debugger_env(c: &mut tokio::process::Command) {
+    for k in ["VSCODE_INSPECTOR_OPTIONS", "VSCODE_INJECTION"] {
+        c.env_remove(k);
+    }
+    if let Ok(raw) = std::env::var("NODE_OPTIONS") {
+        match filter_injected_node_options(&raw) {
+            Some(filtered) if filtered.trim().is_empty() => {
+                c.env_remove("NODE_OPTIONS");
+            }
+            Some(filtered) => {
+                c.env("NODE_OPTIONS", filtered);
+            }
+            None => {}
+        }
+    }
+}
+
+/// 过滤 NODE_OPTIONS 中的 IDE 调试器注入片段。命中注入特征时返回过滤后的串
+/// （可能为空串）；未命中任何注入特征返回 None 表示原样保留。
+fn filter_injected_node_options(raw: &str) -> Option<String> {
+    let toks: Vec<&str> = raw.split_whitespace().collect();
+    let injected_path = |s: &str| s.contains("js-debug") || s.contains("bootloader.js");
+    let mut kept: Vec<&str> = Vec::with_capacity(toks.len());
+    let mut i = 0;
+    while i < toks.len() {
+        let t = toks[i];
+        // --require <path> 是双 token 选项：路径命中注入特征时连同选项一起剔除
+        if (t == "--require" || t == "-r")
+            && toks.get(i + 1).map_or(false, |p| injected_path(p))
+        {
+            i += 2;
+            continue;
+        }
+        if (t.starts_with("--require=") || t.starts_with("-r=")) && injected_path(t) {
+            i += 1;
+            continue;
+        }
+        // js-debug 注入的 inspector 端口发布参数；无 bootloader 时本无意义
+        if t.starts_with("--inspect-publish-uid") {
+            i += 1;
+            continue;
+        }
+        kept.push(t);
+        i += 1;
+    }
+    (kept.len() != toks.len()).then(|| kept.join(" "))
+}
+
+/// 主进程退出/被杀后，有界收集 stdout/stderr 排空任务的残余输出。
+/// 超过 grace 仍未等到 EOF（孙进程持管不退）则放弃——排空任务随运行时回收。
+async fn join_drains(
+    stdout_task: tokio::task::JoinHandle<Vec<u8>>,
+    stderr_task: tokio::task::JoinHandle<Vec<u8>>,
+    grace: Duration,
+) -> (Vec<u8>, Vec<u8>) {
+    tokio::time::timeout(grace, async move {
+        let out = stdout_task.await.unwrap_or_default();
+        let err = stderr_task.await.unwrap_or_default();
+        (out, err)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 pub fn dispatch(
@@ -280,16 +380,7 @@ fn execute_command_blocking(
             let mut c = tokio::process::Command::new("cmd.exe");
             c.arg("/C").arg(cmd_str);
             c.current_dir(cwd);
-            c.env("PATH", &enriched_path);
-            c.env("SESSION_TMP_DIR", &session_tmp_str);
-            c.env("TMPDIR", &session_tmp_str);
-            if let Some(ref env_map) = custom_env {
-                for (k, v) in env_map {
-                    c.env(k, v);
-                }
-            }
-            c.stdout(std::process::Stdio::piped());
-            c.stderr(std::process::Stdio::piped());
+            apply_child_env(&mut c, &enriched_path, &session_tmp_str, custom_env.as_ref());
             c.spawn().map_err(|e| format_spawn_error(e, cmd_str, cwd, &enriched_path))?
         };
 
@@ -298,17 +389,8 @@ fn execute_command_blocking(
             let mut c = tokio::process::Command::new("sh");
             c.arg("-c").arg(cmd_str);
             c.current_dir(cwd);
-            c.env("PATH", &enriched_path);
-            c.env("SESSION_TMP_DIR", &session_tmp_str);
-            c.env("TMPDIR", &session_tmp_str);
             c.process_group(0); // 独立进程组：以子进程为主导组长，方便超时按组整棵树杀死
-            if let Some(ref env_map) = custom_env {
-                for (k, v) in env_map {
-                    c.env(k, v);
-                }
-            }
-            c.stdout(std::process::Stdio::piped());
-            c.stderr(std::process::Stdio::piped());
+            apply_child_env(&mut c, &enriched_path, &session_tmp_str, custom_env.as_ref());
             c.spawn().map_err(|e| format_spawn_error(e, cmd_str, cwd, &enriched_path))?
         };
 
@@ -316,36 +398,44 @@ fn execute_command_blocking(
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
 
-        let mut stdout_bytes = Vec::new();
-        let mut stderr_bytes = Vec::new();
+        // 读端独立为后台排空任务：必须与 wait() 并发运行（否则输出超 64KB 管道容量
+        // 时子进程写满阻塞、永远退不出 → wait() 死等）。主进程退出后只给有界排空
+        // 窗口收尾残余输出——孙进程继承管道不退出时 EOF 永不到达（守护进程、
+        // npm notifier 等），不能为等 EOF 把主流程挂死。
+        use tokio::io::AsyncReadExt;
+        let drain_stdout = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut r) = stdout_handle {
+                let _ = r.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+        let drain_stderr = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut r) = stderr_handle {
+                let _ = r.read_to_end(&mut buf).await;
+            }
+            buf
+        });
 
         let timeout_dur = Duration::from_secs(timeout_secs);
 
-        let wait_fut = async {
-            use tokio::io::AsyncReadExt;
-            let read_stdout = async {
-                if let Some(mut r) = stdout_handle {
-                    let _ = r.read_to_end(&mut stdout_bytes).await;
-                }
-            };
-            let read_stderr = async {
-                if let Some(mut r) = stderr_handle {
-                    let _ = r.read_to_end(&mut stderr_bytes).await;
-                }
-            };
-            let ((), (), status_res) = tokio::join!(read_stdout, read_stderr, child.wait());
-            status_res
-        };
-
-        match tokio::time::timeout(timeout_dur, wait_fut).await {
-            Ok(Ok(status)) => Ok((status, stdout_bytes, stderr_bytes)),
-            Ok(Err(e)) => Err((
-                "spawn_error".to_string(),
-                false,
-                true,
-                "check_command_path_and_permissions".to_string(),
-                format!("命令等待执行结果失败: {e}"),
-            )),
+        match tokio::time::timeout(timeout_dur, child.wait()).await {
+            Ok(Ok(status)) => {
+                let (stdout_bytes, stderr_bytes) =
+                    join_drains(drain_stdout, drain_stderr, Duration::from_secs(3)).await;
+                Ok((status, stdout_bytes, stderr_bytes))
+            }
+            Ok(Err(e)) => {
+                let _ = join_drains(drain_stdout, drain_stderr, Duration::from_secs(2)).await;
+                Err((
+                    "spawn_error".to_string(),
+                    false,
+                    true,
+                    "check_command_path_and_permissions".to_string(),
+                    format!("命令等待执行结果失败: {e}"),
+                ))
+            }
             Err(_) => {
                 // 1. 发送 SIGTERM 软杀整个进程组（向负 PID 发信号）
                 if let Some(pid) = child_pid {
@@ -360,15 +450,26 @@ fn execute_command_blocking(
                     let _ = child.kill().await;
                 }
 
+                // 3. 收集被终止前已产生的部分输出附进错误——诊断线索不能再随超时整体丢弃
+                //    （"Debugger attached." 这类挂死因证据就写在 stderr 里）
+                let (stdout_bytes, stderr_bytes) =
+                    join_drains(drain_stdout, drain_stderr, Duration::from_secs(2)).await;
+                let mut err_msg = format!(
+                    "⚠️ [执行超时] 命令运行超过 {} 秒上限，已被系统强制终止杀死（已向进程树发送清理信号）。",
+                    timeout_secs
+                );
+                let partial =
+                    truncate_output(&format!("{}{}", String::from_utf8_lossy(&stdout_bytes), String::from_utf8_lossy(&stderr_bytes)), 4096);
+                if !partial.is_empty() {
+                    err_msg.push_str(&format!("\n--- 被终止前的部分输出 ---\n{}", partial));
+                }
+
                 Err((
                     "process_timeout".to_string(),
                     true,
                     false,
                     "check_state_before_retry_or_increase_timeout".to_string(),
-                    format!(
-                        "⚠️ [执行超时] 命令运行超过 {} 秒上限，已被系统强制终止杀死（已向进程树发送清理信号）。",
-                        timeout_secs
-                    ),
+                    err_msg,
                 ))
             }
         }
@@ -879,5 +980,52 @@ mod tests {
     fn test_enriched_path_has_entries() {
         let enriched = get_enriched_path_env();
         assert!(!enriched.is_empty());
+    }
+
+    #[test]
+    fn filter_injected_node_options_strips_ide_debugger_bits() {
+        // IDE 注入原型（实测 NODE_OPTIONS 值）：整串过滤后应为空
+        let injected = " --require /opt/antigravity-ide/resources/app/extensions/ms-vscode.js-debug/src/bootloader.js  --inspect-publish-uid=http";
+        assert_eq!(
+            filter_injected_node_options(injected).as_deref(),
+            Some("")
+        );
+        // --require=<path> 单 token 形态同样剔除
+        let injected_eq = "--require=/x/extensions/ms-vscode.js-debug/src/bootloader.js";
+        assert_eq!(
+            filter_injected_node_options(injected_eq).as_deref(),
+            Some("")
+        );
+        // 混合：合法选项保留，注入片段剔除
+        let mixed = "--max-old-space-size=4096 --require /x/js-debug/bootloader.js --inspect-publish-uid=http";
+        assert_eq!(
+            filter_injected_node_options(mixed).as_deref(),
+            Some("--max-old-space-size=4096")
+        );
+        // 无注入特征 → None（原样保留，不触发 env 改写）
+        assert_eq!(filter_injected_node_options("--max-old-space-size=4096"), None);
+        // 普通 --require 不命中注入特征 → 保留
+        assert_eq!(
+            filter_injected_node_options("--require ts-node/register"),
+            None
+        );
+        // 空串 → None
+        assert_eq!(filter_injected_node_options("   "), None);
+    }
+
+    #[test]
+    fn test_local_shell_stdin_is_dev_null() {
+        // 子进程 stdin 必须是 /dev/null：read 应立即 EOF 失败而非永久等待输入
+        let temp = TempDirGuard::new();
+        let ws = temp.path();
+        let res = dispatch(
+            &test_db(),
+            "test_sess_stdin",
+            "exec",
+            &json!({"command": "read -t 2 line && echo GOT || echo EOF_FAST", "timeout_secs": 30}),
+            Some(ws),
+        );
+        assert!(res.success, "stdin=null 下 read 应立即 EOF: {}", res.stderr);
+        assert!(res.stdout.contains("EOF_FAST"));
     }
 }
