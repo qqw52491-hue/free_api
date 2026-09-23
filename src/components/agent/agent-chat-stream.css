@@ -1086,9 +1086,19 @@
     line-height: 1.5;
     font-weight: 500;
     color: #f1f5f9;
-    white-space: pre-wrap;
+    white-space: normal;
     word-break: break-word;
     user-select: text;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+/* 消除富文本首尾段落的多余边距，使流式排版紧凑协调 */
+.ambient-narrative :deep(.markdown-segment p:first-child) {
+    margin-top: 0;
+}
+.ambient-narrative :deep(.markdown-segment p:last-child) {
+    margin-bottom: 0;
 }
 
 .ambient-narrative:first-child {

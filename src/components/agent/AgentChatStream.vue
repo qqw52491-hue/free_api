@@ -290,12 +290,15 @@
                         >
                         <template v-for="item in getAmbientDisplayItems(entry)" :key="item.id">
                             <!-- 0. 阶段解说段落 (每轮 thought 叙述：学到什么/当前判断/下一步意图) -->
-                            <p
+                            <RichContentRenderer
                                 v-if="item.type === 'narrative'"
                                 class="ambient-narrative"
-                            >{{ item.text }}</p>
+                                :content="item.text || ''"
+                                :compact-html="true"
+                                @open-preview="$emit('open-preview', $event)"
+                            />
 
-                            <!-- 0.5 解说抑制小行：关键时刻之外的高频 thought 降级为灰色小行 -->
+                            <!-- 0.5 解说抑制小行：关键时刻之外的高频 thought 降级为灰色小行 (保持单行紧凑截断) -->
                             <p
                                 v-else-if="item.type === 'narrative-mini'"
                                 class="ambient-narrative-mini"

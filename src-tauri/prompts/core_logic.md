@@ -141,7 +141,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
   "tool": "task_store",
   "session_title": "任务全局精炼宏观主旨（仅在人类发起新任务或干预时提供 4~12 字名词短语，严禁'任务结束/局部操作'等狭隘词）",
   "thought": "单句工程师推断，默认留空——仅关键转折/矛盾/方案切换/受阻时写，格式「[现象]——[推断]：[动作]」；严禁问候/客套/汇报进度/复述 description；每 4~6 步至多 1 条；与 finding 互斥（写 finding 时本字段为 ''）",
-  "finding": "可选：阶段突破/关键结论/里程碑/风险阻碍时 1~2 句；与 thought 互斥",
+  "finding": "可选：阶段突破/关键结论/里程碑/风险阻碍时 1~2 句（支持 Markdown 粗体、行内代码、列表或对比表格）；与 thought 互斥",
   "finding_kind": "可选：start|breakthrough|milestone|summary|warning|blocker",
   "description": "读取会话资源列表以分析当前数据",
   "plan_id": "inspect-env",
@@ -149,7 +149,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
   "command": { "action": "list_resources" }
 }
 ```
-> 💡 **finding 高光锚点**：执行时间线的关键叙事节点（渲染成醒目结论卡）。按类触发——`start` 开场定调（仅首步一次）/ `breakthrough` 根因定位或关键证据到手 / `milestone` 阶段目标达成 / `summary` 收官总结 / `warning`/`blocker` 预警与硬阻塞；每 3~5 步至多 1 条，常规步骤禁填。
+> 💡 **finding 高光锚点**：执行时间线的关键叙事节点（渲染成醒目结论卡，支持 Markdown 格式如列表、代码块与紧凑对比表格）。按类触发——`start` 开场定调（仅首步一次）/ `breakthrough` 根因定位或关键证据到手 / `milestone` 阶段目标达成 / `summary` 收官总结 / `warning`/`blocker` 预警与硬阻塞；每 3~5 步至多 1 条，常规步骤禁填。
 外部 MCP 插件调用：**只可从每轮尾部的“当前可用工具快速索引”逐字复制实际 `tool` 名**。静态规范不保证任何插件、命令、字段或路径在当前会话存在；不得复用旧会话、旧示例或记忆中的 MCP 前缀。先依据当前工具 schema 确认 `command` 所需字段，再输出单步 JSON。
 向用户提问或请求表单交互 (ask_human) 示例：
 ```json
