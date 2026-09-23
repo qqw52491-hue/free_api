@@ -13,12 +13,23 @@ token 烧穿仍零方案。pro 靠自发写 11 条 finding 不掉坑，flash 不
 
 | 改动 | 位置 | 要点 | 验证 |
 |---|---|---|---|
-| **取证台账** | `context/types`（EvidenceReceiptEntry + evidence_ledger + note_evidence_receipt）/ `render.rs` / `assembler.rs` / `main_loop` / `checkpoint/durable.rs` | 成功执行的读取/列目录/检索/句柄回查按「形态\|目标\|范围」聚合：count、首末步号、最近 output_id；渲染最近 20 条。**跨压缩保留且随 checkpoint 持久化**——恢复后索引仍在，不退化回重读；新任务不继承（台账标的是本任务足迹）。被拦截的读取不记账。与 read_ledger（拦截用、压缩清零）职责分离 | code-green（5 新单测：聚合/拦截清零不影响/action 归一/渲染有界/checkpoint 往返） |
-| **运行遥测** | `context/types`（current_step_id + run_prompt/completion_tokens）/ `render.rs` / `call_llm_phase` / `checkpoint/durable.rs` | 状态卡注入「step=N \| 主循环累计 prompt/completion \| 上次请求 prompt=X/窗口Y(Z%)」。累计按每次实际 LLM 调用落账（含步骤内规划重试），随 checkpoint 恢复继续累计。上下文规模如实标为「上次请求」——本次尚未发出无从先知。首步前不渲染空卡；文案无节奏暗示词 | code-green（单测断言无「收敛/停止/上限/尽快/太多」字样） |
+| **取证台账** | `context/types`（EvidenceReceiptEntry + evidence_ledger + note_evidence_receipt）/ `render.rs` / `assembler.rs` / `main_loop` / `checkpoint/durable.rs` | 成功执行的读取/列目录/检索/句柄回查按「形态\|目标\|范围」聚合：count、首末步号、最近 output_id；渲染最近 20 条。**跨压缩保留且随 checkpoint 持久化**——恢复后索引仍在，不退化回重读；新任务不继承（台账标的是本任务足迹）。被拦截的读取不记账。与 read_ledger（拦截用、压缩清零）职责分离 | **live-tested，负结果**（详见下方实弹记录） |
+| **运行遥测** | `context/types`（current_step_id + run_prompt/completion_tokens）/ `render.rs` / `call_llm_phase` / `checkpoint/durable.rs` | 状态卡注入「step=N \| 主循环累计 prompt/completion \| 上次请求 prompt=X/窗口Y(Z%)」。累计按每次实际 LLM 调用落账（含步骤内规划重试），随 checkpoint 恢复继续累计。上下文规模如实标为「上次请求」——本次尚未发出无从先知。首步前不渲染空卡；文案无节奏暗示词 | **live-tested**（同上） |
 
-**待实弹验证**：flash 重跑 case_20，对照指标=重读次数、`get_step_output` 调用数、
-finding 产出、是否走到 submit_plan/写入、判据结果。只验证「失忆→重读」这一半；
-若重读消失仍不提交，另一半（完成感校准/档位路由）另行处理。
+**实弹验证（2026-09-23，case_20 闭卷，token 上限 6M，retriage 里程点关闭）**：
+
+| Run | 执行者 | 结局 | get_step_output | finding | submit_plan | 写入 |
+|---|---|---|---|---|---|---|
+| 基线 | gemini-3.8-flash-tiered | 113 步烧穿 | 0 | ~1 | 0 | 0 |
+| +台账 | gemini-3.8-flash-high | 113 步烧穿 | **0**（台账 114/114 步注入） | ~2 | 0 | 0 |
+| +台账 | gemini-3.1-pro | 120 步烧穿 | — | 有 | **有**（step 105/112，过审+人工审批） | **chat_artifacts.rs 落 diff** |
+
+裁决：**状态投影对弱模型收敛零收益**——flash 的死因不是「忘了读过什么」
+（同窗口重复读本就只有 4 次），而是「证据→结晶→提方案」的判断链断裂，
+这是能力地板不是投影问题。台账保留依据只剩观测/审计价值（低成本+调试盘好用），
+不再期待行为收益。pro 死于预算耗尽但管线全通（调查→方案→审查→人工→首刀），
+属任务难度（闭卷）+方差。宪法结论再确认：弱执行者开放式任务的唯一出路是
+**判决×执行者档位分解路由**。
 
 ## 阶段十四：探索期认知门禁拆除 + retriage 复核通道（2026-09-23）
 
