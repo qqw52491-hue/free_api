@@ -15,6 +15,24 @@ role_models.planner 配置形同虚设。
 | **plan_required 投影** | `context/types`（PlanGateProjection 新字段）/ `checkpoint/plan_ops` | 重方案门成立 = triage 判 technical_plan/expert_panel 或模式为 cross_review/plan_approval；Auto+direct 为 false，轻任务不占强档 | code-green |
 | **相位感知角色路由** | `router.rs` `route_for_step` | `plan_required && phase != approved` → planner；批准后 → executor。仅命中 role_models 显式钉死时生效，未配置时零行为差异（自动路由不变） | code-green（新单测：历史非空+探索中→planner、批准→executor、轻任务→executor、无配置→行为不变） |
 
+**实弹结果（case_20，planner=pro / executor+scout+writer=flash）**：
+run `agent-evaluation-000ee062`（25min 窗口）——**相位移交机械链路全通**：
+triage 判 technical_plan → pro 全程取证定案（27 调用）→ 写尝试触发策略
+升级 CrossReview → Tech Lead 过审 → **批准后移交 flash**（11 调用执行
+Cargo.toml/tauri.conf.json + cargo check）→ finish。**7.9min / 175 万 token**
+交付，为 case_20 迄今最便宜的完整收敛（此前 pro 单干 120 步烧穿 600 万未写完）。
+**判据 FAIL**：方案选了 assetProtocol 配置方向，未触碰前端——裸文件名从未
+落盘，assetProtocol 无文件可服务，方案前提即错。Tech Lead 1v1 审过此错案，
+同分布盲区再次应验。**瓶颈精确落在方案正确性，与路由/执行无关**。
+scout 提示词引导本轮未触发派发（pro 仍亲自取证）。
+
+**衍生决策**：否决"前提断言机械门"（盲区前提不会被自己写成检查+文本匹配
+验不了分支语义）与"独立诊断双跑"（flash 开放式定位两次实弹失败+双倍成本）。
+改采**症状锚定验证**（§阶段四）：验证须针对用户现象而非方案产物，改前跑红
+改后跑绿，复现不了显式披露；Tech Lead 审查附加一问"验证测的是症状还是
+方案自证"。探针证据：flash-high 对封闭枚举题全对（38K token），导航探针
+15 步定位三坏点（问题含答案方向提示，仅作参考）。
+
 **实弹待验**：`--role-models '{"planner":"pro","executor":"flash"}'` 跑 case_20，
 观测点=批准前步骤是否全走 pro、批准后写入是否移交 flash、pro 诊断质量
 （上轮 pro 方案漏判拖拽落盘与徽标标记，属规划质量风险非路由问题）。
