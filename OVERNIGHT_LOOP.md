@@ -15,6 +15,13 @@ role_models.planner 配置形同虚设。
 | **plan_required 投影** | `context/types`（PlanGateProjection 新字段）/ `checkpoint/plan_ops` | 重方案门成立 = triage 判 technical_plan/expert_panel 或模式为 cross_review/plan_approval；Auto+direct 为 false，轻任务不占强档 | code-green |
 | **相位感知角色路由** | `router.rs` `route_for_step` | `plan_required && phase != approved` → planner；批准后 → executor。仅命中 role_models 显式钉死时生效，未配置时零行为差异（自动路由不变） | code-green（新单测：历史非空+探索中→planner、批准→executor、轻任务→executor、无配置→行为不变） |
 
+**实弹结果二（同日二场，症状验证提示词版）**：run `agent-evaluation-a3d819b6`
+——**诊断与修法方向全对**：handleFileDrop 图片分支真改 invoke +
+props.sessionId，flash 执行 20 调用忠实落地；判据 FAIL 于**覆盖不全**
+（漏 `路径:` 徽标与 `upload_failed` 标记——判据契约不在可见症状内）。
+三场演化：错方案→对方案漏覆盖。机制链全通，剩余缺口=模型对方案完整性
+的判断，属能力边界非机制问题，停止加层。
+
 **实弹结果（case_20，planner=pro / executor+scout+writer=flash）**：
 run `agent-evaluation-000ee062`（25min 窗口）——**相位移交机械链路全通**：
 triage 判 technical_plan → pro 全程取证定案（27 调用）→ 写尝试触发策略
