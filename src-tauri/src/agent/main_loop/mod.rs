@@ -1334,16 +1334,10 @@ async fn run_agent_main_loop_in_workspace_inner(
             Ok(res) => {
                 // 预算计量放在 outcome 定案处：含被门禁打回的 finish 步，
                 // 被拒步骤消耗的 LLM 调用同样计入 token 上限。
+                // 展示用累计量不在这里加——call_llm_phase 已按每次实际调用
+                // 落账（含步骤内规划重试），此处再加会双计。
                 if let Some(u) = res.token_usage.as_ref() {
                     spent_prompt_tokens += u.prompt_tokens;
-                    // 同步累计进上下文遥测（状态卡投影用；随 checkpoint 持久，
-                    // 崩溃恢复后继续累计，口径比本函数局部变量更完整）
-                    context.run_prompt_tokens = context
-                        .run_prompt_tokens
-                        .saturating_add(u.prompt_tokens.max(0) as u64);
-                    context.run_completion_tokens = context
-                        .run_completion_tokens
-                        .saturating_add(u.completion_tokens.max(0) as u64);
                 }
                 res
             }

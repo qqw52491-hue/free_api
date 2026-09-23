@@ -13,8 +13,8 @@ token 烧穿仍零方案。pro 靠自发写 11 条 finding 不掉坑，flash 不
 
 | 改动 | 位置 | 要点 | 验证 |
 |---|---|---|---|
-| **取证台账** | `context/types`（EvidenceReceiptEntry + evidence_ledger + note_evidence_receipt）/ `render.rs` / `assembler.rs` / `main_loop` | 成功执行的读取/列目录/检索/句柄回查按「形态\|目标\|范围」聚合：count、首末步号、最近 output_id；渲染最近 20 条。**跨压缩保留**（压缩只动 turns_history），这正是脱水后最需要的索引。被拦截的读取不记账（没执行就没有回执）。与 read_ledger（拦截用、压缩清零）职责分离 | code-green（4 新单测：聚合/跨压缩保留/action 归一/渲染有界） |
-| **运行遥测** | `context/types`（current_step_id + run_prompt/completion_tokens）/ `render.rs` / `call_llm_phase` / `main_loop` | 状态卡注入「step=N \| 累计 prompt/completion \| 当前上下文≈X/窗口Y(Z%)」。随 checkpoint 持久化、恢复后继续累计（口径优于重启即零的 spent_prompt_tokens 局部变量）。首步前不渲染空卡。文案经审查不含节奏暗示词 | code-green（单测断言无「收敛/停止/上限/尽快/太多」字样） |
+| **取证台账** | `context/types`（EvidenceReceiptEntry + evidence_ledger + note_evidence_receipt）/ `render.rs` / `assembler.rs` / `main_loop` / `checkpoint/durable.rs` | 成功执行的读取/列目录/检索/句柄回查按「形态\|目标\|范围」聚合：count、首末步号、最近 output_id；渲染最近 20 条。**跨压缩保留且随 checkpoint 持久化**——恢复后索引仍在，不退化回重读；新任务不继承（台账标的是本任务足迹）。被拦截的读取不记账。与 read_ledger（拦截用、压缩清零）职责分离 | code-green（5 新单测：聚合/拦截清零不影响/action 归一/渲染有界/checkpoint 往返） |
+| **运行遥测** | `context/types`（current_step_id + run_prompt/completion_tokens）/ `render.rs` / `call_llm_phase` / `checkpoint/durable.rs` | 状态卡注入「step=N \| 主循环累计 prompt/completion \| 上次请求 prompt=X/窗口Y(Z%)」。累计按每次实际 LLM 调用落账（含步骤内规划重试），随 checkpoint 恢复继续累计。上下文规模如实标为「上次请求」——本次尚未发出无从先知。首步前不渲染空卡；文案无节奏暗示词 | code-green（单测断言无「收敛/停止/上限/尽快/太多」字样） |
 
 **待实弹验证**：flash 重跑 case_20，对照指标=重读次数、`get_step_output` 调用数、
 finding 产出、是否走到 submit_plan/写入、判据结果。只验证「失忆→重读」这一半；

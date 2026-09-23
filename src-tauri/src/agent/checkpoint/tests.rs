@@ -564,6 +564,54 @@
     }
 
     #[test]
+    fn evidence_ledger_and_run_tokens_survive_restore_but_not_new_task() {
+        let mut source = SandwichContext::new("system".to_string(), "调查上传链路".to_string());
+        source.note_evidence_receipt(
+            12,
+            &crate::agent::types::AgentInstruction {
+                tool: Some("local_file".to_string()),
+                action: Some("read".to_string()),
+                command: Some(serde_json::json!({
+                    "path": "src/views/ChatView.vue", "start_line": 1, "end_line": 120
+                })),
+                ..Default::default()
+            },
+            "out-abc",
+        );
+        source.run_prompt_tokens = 1_234_567;
+        source.run_completion_tokens = 45_678;
+        let checkpoint = AgentCheckpoint::new("run-ledger".to_string(), &source);
+
+        // 崩溃恢复：台账与累计用量原样回来——脱水后取回原文的索引不能丢
+        let mut resumed = SandwichContext::new("system".to_string(), "resume".to_string());
+        checkpoint.data.restore_into(&mut resumed);
+        assert_eq!(resumed.evidence_ledger.len(), 1);
+        let e = resumed
+            .evidence_ledger
+            .get("read|src/views/ChatView.vue|L1-120")
+            .expect("台账条目应跨 checkpoint 保留");
+        assert_eq!(e.output_id.as_deref(), Some("out-abc"));
+        assert_eq!(resumed.run_prompt_tokens, 1_234_567);
+        assert_eq!(resumed.run_completion_tokens, 45_678);
+
+        // 旧 checkpoint 缺字段 → 默认空，不炸
+        let mut legacy = serde_json::to_value(&checkpoint).unwrap();
+        legacy
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("evidence_ledger");
+        let restored_legacy: AgentCheckpoint = serde_json::from_value(legacy).unwrap();
+        assert!(restored_legacy.data.evidence_ledger.is_empty());
+
+        // 新任务不继承：台账标的是「本任务」足迹，跨任务带入会误导
+        let mut next_task = SandwichContext::new("system".to_string(), "新任务".to_string());
+        checkpoint.data.inherit_filling_into(&mut next_task);
+        assert!(next_task.evidence_ledger.is_empty());
+        assert_eq!(next_task.run_prompt_tokens, 0);
+    }
+
+    #[test]
     fn test_question_deduplication() {
         let context = SandwichContext::new("system".to_string(), "查天气".to_string());
         let mut cp = AgentCheckpoint::new("run-dedup".to_string(), &context);

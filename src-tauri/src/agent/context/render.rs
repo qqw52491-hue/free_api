@@ -302,12 +302,15 @@ impl ContextRenderer {
         if run_prompt_tokens == 0 && step_id == 0 {
             return String::new();
         }
+        // 口径说明（不写给模型，只留注释）：累计数按主循环每次实际 LLM 调用
+        // 落账；上下文规模取上一次完整请求回传的 prompt_tokens（是「上次」
+        // 而非「本次」——本次请求尚未发出，无从先知）。
         let mut line = format!(
-            "【运行遥测】当前 step={} | 本任务累计 prompt={} / completion={} tokens",
+            "【运行遥测】step={} | 主循环累计 prompt={} / completion={} tokens",
             step_id, run_prompt_tokens, run_completion_tokens
         );
         if let Some(ctx_tokens) = last_context_tokens {
-            line.push_str(&format!(" | 当前上下文 ≈{}", ctx_tokens));
+            line.push_str(&format!(" | 上次请求 prompt={}", ctx_tokens));
             if context_window > 0 {
                 line.push_str(&format!(
                     " / 窗口 {} ({:.0}%)",

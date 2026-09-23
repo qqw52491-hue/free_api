@@ -380,6 +380,14 @@ pub async fn run_call_llm_and_run_tool_phases(
         // 真实 usage 只能与发出该完整上下文请求时的历史快照成对保存。
         // 隔离 JSON 修复请求返回 None，保留已有完整上下文基线。
         if token_usage.prompt_tokens > 0 {
+            // 累计用量按「每次实际 LLM 调用」落账：含步骤内的规划重试，
+            // 口径比主循环 outcome 定案处更全（那里只见得到最后一次调用）。
+            context.run_prompt_tokens = context
+                .run_prompt_tokens
+                .saturating_add(token_usage.prompt_tokens.max(0) as u64);
+            context.run_completion_tokens = context
+                .run_completion_tokens
+                .saturating_add(token_usage.completion_tokens.max(0) as u64);
             if let Some(history_tokens) = history_estimate_at_request {
                 context.last_reported_prompt_tokens = Some(token_usage.prompt_tokens as usize);
                 context.last_reported_history_estimate_tokens = Some(history_tokens);

@@ -715,13 +715,12 @@ impl SandwichContext {
                     .map(|v| format!("depth={}", v))
                     .unwrap_or_default();
                 ("list", path, depth)
-            } else {
-                // local_file 其余形态（read / action 缺省同名）按读取记账；
-                // write/edit 在上面 list 分支之外同样落到此处，须排除
-                if action.starts_with("write") || action.starts_with("edit") {
-                    return;
-                }
+            } else if action.starts_with("read") || action == tool {
+                // 白名单：只认 read 与缺省同名形态（实弹里 action="local_file"
+                // 且带行窗参数的就是读）；write/edit/delete/move 等一律不记
                 ("read", path, Self::receipt_window_label(&params))
+            } else {
+                return;
             }
         } else if READ_TOOLS.iter().any(|t| tool.contains(t)) {
             let Some(path) = str_param(&["path", "filePath", "file_path"]) else {

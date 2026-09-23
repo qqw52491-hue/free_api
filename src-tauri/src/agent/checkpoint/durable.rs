@@ -50,6 +50,15 @@ pub struct DurableAgentContext {
     pub last_persisted_summary: Option<String>,
     #[serde(default)]
     pub persisted_summary_revision: u64,
+    /// 取证台账（展示投影）：崩溃/恢复后仍要知道「读过什么、句柄在哪」，
+    /// 否则恢复后上下文已脱水、索引又丢，退化回重复读取。
+    #[serde(default)]
+    pub evidence_ledger: BTreeMap<String, crate::agent::context::types::EvidenceReceiptEntry>,
+    /// 本 run 累计 LLM 用量（恢复后继续累计，不重置为零）。
+    #[serde(default)]
+    pub run_prompt_tokens: u64,
+    #[serde(default)]
+    pub run_completion_tokens: u64,
     #[serde(default)]
     pub needs_observation_refresh: bool,
 }
@@ -82,6 +91,9 @@ impl DurableAgentContext {
             last_reported_history_estimate_tokens: context.last_reported_history_estimate_tokens,
             last_persisted_summary: context.last_persisted_summary.clone(),
             persisted_summary_revision: context.persisted_summary_revision,
+            evidence_ledger: context.evidence_ledger.clone(),
+            run_prompt_tokens: context.run_prompt_tokens,
+            run_completion_tokens: context.run_completion_tokens,
             // 浏览器/DOM 可能已变化，恢复后不能相信旧观测。
             needs_observation_refresh: !context.current_observation.is_empty(),
         }
@@ -111,6 +123,9 @@ impl DurableAgentContext {
         context.last_reported_history_estimate_tokens = self.last_reported_history_estimate_tokens;
         context.last_persisted_summary = self.last_persisted_summary.clone();
         context.persisted_summary_revision = self.persisted_summary_revision;
+        context.evidence_ledger = self.evidence_ledger.clone();
+        context.run_prompt_tokens = self.run_prompt_tokens;
+        context.run_completion_tokens = self.run_completion_tokens;
 
         // 🌟 统一不变性保护：保持已有会话的 M0 顶层系统提示词绝对恒定，稳吃 Prefix Cache！
         if let Some(baseline_prompt) = &self.epoch_system_prompt {
