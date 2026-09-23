@@ -53,6 +53,16 @@ scout 提示词引导本轮未触发派发（pro 仍亲自取证）。
 eval 报告新增「独立方案审查」计分行（派发 N / 成功 M / 仲裁放行披露）。
 role_override 顺带修 UUID 错标 tier 的显示 bug。
 
+**实弹结果三（同日三场，reviewer 钉 pro 后首场 PASS）**：run
+`agent-evaluation-4f65a931` —— 🟢 **判据 PASS**（case_20 首次转绿）：
+落盘参数/徽标路径/无静默降级三项全过。链路全要素首次齐备：pro 取证定案
+→ plan_review 真实产出（pro 钉死，12.7K token，裁决 rebuttal 打回）→
+修订过审 → writer(flash) 隔离写入 39.5K → executor(flash) 收尾。
+3.09M token / 50 步交付。「独立方案审查」计分行与未经审查披露链路
+实测生效。归因保留：PASS 由审查修订/症状提示词/诊断运气共同作用，
+单场不能分辨权重；能确定的是审查层从「零产出」变成「真打回」。
+系列演化：错方案（零审查）→ 对方案漏覆盖（零审查）→ PASS（真审查）。
+
 **实弹待验**：`--role-models '{"planner":"pro","executor":"flash"}'` 跑 case_20，
 观测点=批准前步骤是否全走 pro、批准后写入是否移交 flash、pro 诊断质量
 （上轮 pro 方案漏判拖拽落盘与徽标标记，属规划质量风险非路由问题）。
