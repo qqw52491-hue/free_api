@@ -295,6 +295,7 @@ pub async fn evaluate_prepare_finish(
                 checkpoint.approved_target_files.as_deref(),
                 checkpoint.triage_verdict.as_ref(),
                 Some(checkpoint.plan_mode),
+                prepare_request.and_then(|r| r.summary.as_deref()),
             )
             .await;
             if review_res.is_passed() {

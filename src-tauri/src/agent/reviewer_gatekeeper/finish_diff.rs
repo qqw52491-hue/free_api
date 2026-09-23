@@ -16,6 +16,18 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 
 
+/// 防敷衍复用指纹：diff 与交付摘要的联合哈希。
+/// diff 相同的两次 finish 若摘要不同，指纹不同——文本型交付的"修复"发生在
+/// 摘要里而非代码里，纯 diff 键会把改进版锁死在旧拦截上（实弹死循环）。
+pub(crate) fn compose_review_fingerprint(diff_hash: &str, finish_summary: Option<&str>) -> String {
+    let mut h = Sha256::new();
+    h.update(diff_hash.as_bytes());
+    if let Some(s) = finish_summary {
+        h.update(s.as_bytes());
+    }
+    format!("{:x}", h.finalize())
+}
+
 /// 执行终态审查（Reviewer Gatekeeper）
 pub async fn evaluate_finish_diff(
     app: &AppHandle,
@@ -41,6 +53,10 @@ pub async fn evaluate_finish_diff(
     triage: Option<&crate::agent::triage::TriageVerdict>,
     // 保留参数：未来"控制面自改"机械升级规则将按模式分流（当前不变量由提示词契约承担）
     _plan_mode: Option<crate::agent::checkpoint::PlanExecutionMode>,
+    // 本次 finish 携带的交付摘要文本。分析/解答/报告类任务的成果物在 summary
+    // 里而非 diff——终审必须能看到它，且它参与复用指纹（否则摘要改进永远
+    // 撞在「Diff 未变」缓存上，实弹死循环）。
+    finish_summary: Option<&str>,
 ) -> ReviewResult {
     let started_at = std::time::Instant::now();
 
@@ -75,14 +91,31 @@ pub async fn evaluate_finish_diff(
             }
             None => match collect_session_tmp_material(session_id, run_started_at) {
                 Some(material) => material,
-                None => return ReviewResult::skipped_empty(),
+                None => (String::new(), String::new()),
             },
         };
 
+    // 交付摘要注入：文本型交付（分析/解答/报告）的成果物本体在 summary 里——
+    // 终审看不到交付文本时，无 diff 任务会被误判「无产物」0 分打回。
+    if let Some(summary_text) = finish_summary.map(str::trim).filter(|s| !s.is_empty()) {
+        let trimmed: String = summary_text.chars().take(4000).collect();
+        review_material.push_str(&format!(
+            "\n\n【交付摘要（finish summary——本次终态交付的文本成果本体，文本型任务的主要审查对象）】\n{}\n",
+            trimmed
+        ));
+    }
+    if review_material.trim().is_empty() {
+        return ReviewResult::skipped_empty();
+    }
+
+    // 防敷衍复用键 = diff + 交付摘要联合指纹：摘要改进（即使 diff 没变）必须触发重审，
+    // 否则文本型交付一旦被打回就永久锁死在旧拦截上。
+    let review_fingerprint = compose_review_fingerprint(&diff_hash, finish_summary);
+
     // 🧨 1.6 影响面机械枚举：改动符号的跨文件消费点清单注入审查材料，
     // refs 同时驱动下方取证环的 consumer_verdicts 逐条覆盖校验。
-    // 注意：pack 追加在 diff_hash 计算之后——哈希仍是纯 diff 指纹，
-    // 防敷衍复用键（下文 last_reviewed_hash == diff_hash）语义不变。
+    // 注意：pack 追加在 diff_hash 计算之后——防敷衍复用键为
+    // review_fingerprint（diff + 交付摘要联合指纹，见上）。
     let impact = if crate::agent::impact_pack::impact_pack_enabled() {
         baseline
             .collect_git_diff(workspace)
@@ -185,13 +218,13 @@ pub async fn evaluate_finish_diff(
         }
     }
 
-    // 2. 防敷衍拦截：若代码未变 (diff_hash 相同) 且上次审查未通过，
+    // 2. 防敷衍拦截：若审查对象未变（diff+摘要联合指纹相同）且上次审查未通过，
     // 且期间未发生人类人工仲裁特赦（无 human_waivers 介入），直接复用上次拦截结果，避免浪费 Token 重跑
     if let (Some(last_hash), Some(last_res)) = (last_reviewed_hash, last_review_result) {
         let has_active_waiver = human_waivers.map_or(false, |w| !w.trim().is_empty());
-        if !last_hash.is_empty() && last_hash == diff_hash && !last_res.is_passed() && !has_active_waiver {
+        if !last_hash.is_empty() && last_hash == review_fingerprint && !last_res.is_passed() && !has_active_waiver {
             let mut reused = last_res.clone();
-            reused.summary = format!("【复用上次拦截 (Diff 未变)】检测到代码未做任何修复: {}", last_res.summary);
+            reused.summary = format!("【复用上次拦截 (交付材料未变)】{}", last_res.summary);
             reused.duration_ms = 0;
             return reused;
         }
@@ -227,7 +260,7 @@ pub async fn evaluate_finish_diff(
     };
 
     if model_id.trim().is_empty() {
-        return ReviewResult::failed_open("未配置有效的 Reviewer 模型", "none", &diff_hash);
+        return ReviewResult::failed_open("未配置有效的 Reviewer 模型", "none", &review_fingerprint);
     }
 
     // 3. 广播审查进度通知前端
@@ -411,7 +444,7 @@ pub async fn evaluate_finish_diff(
     let model_config = match ModelConfig::from_db_state(db, &model_id) {
         Ok(cfg) => cfg,
         Err(e) => {
-            return ReviewResult::failed_open(&format!("加载 Reviewer 模型配置失败: {}", e), &model_id, &diff_hash);
+            return ReviewResult::failed_open(&format!("加载 Reviewer 模型配置失败: {}", e), &model_id, &review_fingerprint);
         }
     };
 
@@ -473,7 +506,7 @@ pub async fn evaluate_finish_diff(
                             cur_timeout_secs
                         ),
                         &model_id,
-                        &diff_hash,
+                        &review_fingerprint,
                     );
                 }
             };
@@ -507,7 +540,7 @@ pub async fn evaluate_finish_diff(
                     "request_error",
                     Some(&e),
                 );
-                return ReviewResult::failed_open(&format!("Reviewer 调用失败: {}", e), &model_id, &diff_hash);
+                return ReviewResult::failed_open(&format!("Reviewer 调用失败: {}", e), &model_id, &review_fingerprint);
             }
         };
 
@@ -525,7 +558,7 @@ pub async fn evaluate_finish_diff(
                 return ReviewResult::failed_open(
                     "Reviewer 强制收敛后仍请求取证工具，已降级放行",
                     &model_id,
-                    &diff_hash,
+                    &review_fingerprint,
                 );
             }
             let req = as_value.unwrap();
@@ -634,7 +667,7 @@ pub async fn evaluate_finish_diff(
     };
 
     // 5. 解析 LLM 输出的 JSON
-    let mut parsed = parse_reviewer_json(&response_text, &model_id, &diff_hash, duration_ms);
+    let mut parsed = parse_reviewer_json(&response_text, &model_id, &review_fingerprint, duration_ms);
     // 覆盖重写上限用尽后放行的留痕：不翻转判决，落结构化观测信号
     if consumer_coverage_incomplete {
         parsed.missing_evidence.push(

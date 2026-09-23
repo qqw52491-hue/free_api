@@ -2364,6 +2364,11 @@ async fn run_agent_main_loop_in_workspace_inner(
                     checkpoint.approved_target_files.as_deref(),
                     checkpoint.triage_verdict.as_ref(),
                     Some(checkpoint.plan_mode),
+                    instruction
+                        .command
+                        .as_ref()
+                        .and_then(|c| c.get("summary"))
+                        .and_then(|s| s.as_str()),
                 )
                 .await;
 

@@ -152,6 +152,19 @@ index 789..abc 100644
         assert!(has_active_waiver_with_waiver);
     }
 
+    /// 复用指纹回归：diff 不变但交付摘要改进 → 指纹必须不同（重审）；
+    /// 否则文本型交付（分析/解答）一旦被打回将永久锁死——实弹事故。
+    #[test]
+    pub(crate) fn review_fingerprint_tracks_summary_changes() {
+        let base = super::finish_diff::compose_review_fingerprint("diff-abc", Some("摘要 v1"));
+        let same = super::finish_diff::compose_review_fingerprint("diff-abc", Some("摘要 v1"));
+        let revised = super::finish_diff::compose_review_fingerprint("diff-abc", Some("摘要 v2 补充了根因证据"));
+        let diff_changed = super::finish_diff::compose_review_fingerprint("diff-def", Some("摘要 v1"));
+        assert_eq!(base, same);
+        assert_ne!(base, revised, "摘要改进必须产生新指纹以触发重审");
+        assert_ne!(base, diff_changed);
+    }
+
     /// mechanical_only 产物机械嗅探：0 字节、魔数不符、文本扩展名含 NUL
     /// 被抓出；合法形态（真 zip 头、UTF-16 BOM 文本）不误伤。
     #[test]
