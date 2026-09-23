@@ -1,0 +1,15 @@
+{
+  "id": "case_ft_narrow_imgfix",
+  "title": "分解路由探针：已定位的窄任务执行（图片三路径落盘+徽标路径+失败标记）",
+  "tier": "silver",
+  "base_commit": "afd3973",
+  "problem_statement": "【修复任务——根因已定位，按下列指定改动执行，勿再扩大排查】\n文件：src/components/agent/AgentComposer.vue\n缺陷：三条图片入队路径都把 file_path 写成裸文件名、图片从未落盘，消息重载后 convertFileSrc(裸名) 必然失败。\n要求（全部做到）：\n1. 三个图片入队点统一改为调用 invoke('save_and_parse_uploaded_attachment', { sessionId, fileName, base64Data }) 真正落盘，用返回对象的 file_path 等字段构造附件：\n   a. 拖拽路径中 image/* 分支（当前对图片直接 push file_path: file.name，不走 invoke）；\n   b. handlePaste 中截图分支（当前 push file_path: fileName）；\n   c. read_clipboard_image 原生回退里 data_urls 分支（当前 push file_path: fileName）。\n   sessionId 沿用本文件内已有 invoke 调用的取值方式。\n2. 三个附件的 prompt_text 徽标中携带 \"路径: <真实 file_path>\" 标记。\n3. invoke 失败时仍入队附件，file_path 保留文件名，且 prompt_text 中必须含 upload_failed 标记（如实失败，不静默）。\n4. 不改动非图片文件的既有分支，不改其它文件。\n自验：node test/eval_cases/fixtures/img_upload/judge.mjs 应退出码 0。",
+  "judge_kind": "command",
+  "verify_command": "node test/eval_cases/fixtures/img_upload/judge.mjs",
+  "expected_exit_code": 0,
+  "test_patch": "test/eval_cases/fixtures/img_upload/judge.patch",
+  "max_steps": 80,
+  "plan_mode": "off",
+  "max_prompt_tokens": 3000000,
+  "judge_semantics": "与 case_20 同一机械判据。本题验证「强模型分解→弱模型执行窄任务」路线：题面已给全定位与契约，执行者只需定点改造；PASS=flash 具备窄任务执行力，FAIL=连指定改动都做不对，分解路由也救不了。"
+}
