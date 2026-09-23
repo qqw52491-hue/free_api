@@ -1336,6 +1336,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                 // 被拒步骤消耗的 LLM 调用同样计入 token 上限。
                 if let Some(u) = res.token_usage.as_ref() {
                     spent_prompt_tokens += u.prompt_tokens;
+                    // 同步累计进上下文遥测（状态卡投影用；随 checkpoint 持久，
+                    // 崩溃恢复后继续累计，口径比本函数局部变量更完整）
+                    context.run_prompt_tokens = context
+                        .run_prompt_tokens
+                        .saturating_add(u.prompt_tokens.max(0) as u64);
+                    context.run_completion_tokens = context
+                        .run_completion_tokens
+                        .saturating_add(u.completion_tokens.max(0) as u64);
                 }
                 res
             }
@@ -2727,6 +2735,9 @@ async fn run_agent_main_loop_in_workspace_inner(
         // 让后续拦截回执指向持久化句柄（脱水/压缩后仍可用 task_store 定向回查）
         if result.success {
             context.note_read_output_id(&instruction, &workspace_dir, &evidence_output_id);
+            // 取证台账（展示用）：读取/列目录/检索/回查成功即记账，
+            // 跨压缩保留——脱水后模型据 output_id 回查而非原样重读
+            context.note_evidence_receipt(step_id, &instruction, &evidence_output_id);
         }
 
             post_step::backfill_todo_evidence(&mut context, &mut instruction, &evidence_output_id);

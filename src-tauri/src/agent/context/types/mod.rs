@@ -29,6 +29,20 @@ pub struct ReadLedgerEntry {
     pub last_output_id: Option<String>,
 }
 
+/// 取证回执条目（展示台账）：按「形态|目标|范围」聚合的已执行取证事实。
+/// 与 read_ledger（复读拦截、压缩清零）职责不同——本表跨压缩保留：
+/// 脱水/压缩后原文离场，模型更需要「读过什么 + 按何句柄取回」的索引。
+/// 纯事实投影：不拦截、不催办、不评判证据是否足够。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceReceiptEntry {
+    pub count: u32,
+    pub first_step: usize,
+    pub last_step: usize,
+    /// 最近一次结果的持久化句柄（get_step_output 可按此取回完整原文）
+    #[serde(default)]
+    pub output_id: Option<String>,
+}
+
 /// 方案门禁状态投影：由 checkpoint 每轮规划前生成，注入底部状态卡，
 /// 让模型在「决策前可见」当前执行模式与放行条件，避免靠写入被拒学习门禁规则。
 /// 纯瞬态投影：不入持久化捕获，每轮从 checkpoint 事实状态重算。
@@ -289,6 +303,21 @@ pub struct SandwichContext {
     /// 注意：低水位批量脱水不清台账——句柄仍可回查，重读依旧非法。
     #[serde(default)]
     pub read_ledger: std::collections::BTreeMap<String, ReadLedgerEntry>,
+    /// 取证台账（事实投影）：本 run 已执行的读取/列目录/检索/句柄回查，
+    /// 键 = "形态|目标|范围"。跨压缩保留（压缩只动 turns_history）——
+    /// 正是脱水后模型最需要的「读过什么、去哪取回」索引。
+    #[serde(default)]
+    pub evidence_ledger: BTreeMap<String, EvidenceReceiptEntry>,
+    /// 当前步号（宿主每步规划前写入；状态卡遥测与回执记账共用此口径，
+    /// 与 run_trace 步骤 id、避坑台账 Step N 同基准）。
+    #[serde(default)]
+    pub current_step_id: usize,
+    /// 本 run 累计 LLM 用量（含被门禁打回的步骤；随 checkpoint 持久化，
+    /// 崩溃恢复后继续累计，比重启即零的局部变量口径更真）。
+    #[serde(default)]
+    pub run_prompt_tokens: u64,
+    #[serde(default)]
+    pub run_completion_tokens: u64,
     /// 低水位批量脱水的滞后重扫阈值（历史估算 tokens）：上次扫描无可脱
     /// 对象时记录"再累积多少历史才允许重扫"，避免每步空扫。0 = 立即可触发。
     #[serde(default)]
@@ -360,6 +389,10 @@ impl SandwichContext {
             last_step_failed: false,
             consecutive_failures: 0,
             read_ledger: std::collections::BTreeMap::new(),
+            evidence_ledger: BTreeMap::new(),
+            current_step_id: 0,
+            run_prompt_tokens: 0,
+            run_completion_tokens: 0,
             dehydration_rearm_tokens: 0,
             consecutive_batch_dispatch_errors: 0,
             batch_dispatch_circuit_breaker_remaining: 0,
@@ -611,6 +644,126 @@ impl SandwichContext {
         let key = format!("{}|{}|{}", tool, ledger_path, window);
         if let Some(entry) = self.read_ledger.get_mut(&key) {
             entry.last_output_id = Some(output_id.to_string());
+        }
+    }
+
+    /// 读取窗口参数 → 紧凑展示标签：L1-150 / head=N / tail=N / offset+limit / 整读。
+    fn receipt_window_label(params: &Value) -> String {
+        let num = |k: &str| {
+            params.get(k).and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+            })
+        };
+        let start = num("start_line").or_else(|| num("startLine"));
+        let end = num("end_line").or_else(|| num("endLine"));
+        match (start, end) {
+            (Some(s), Some(e)) => return format!("L{}-{}", s, e),
+            (Some(s), None) => return format!("L{}-", s),
+            (None, Some(e)) => return format!("L1-{}", e),
+            _ => {}
+        }
+        if let Some(h) = num("head") {
+            return format!("head={}", h);
+        }
+        if let Some(t) = num("tail") {
+            return format!("tail={}", t);
+        }
+        if let (Some(o), Some(l)) = (num("offset"), num("limit")) {
+            return format!("offset={}+{}", o, l);
+        }
+        "整读".to_string()
+    }
+
+    /// 取证成功后记一条展示回执（纯事实投影，不拦截、不评判证据是否足够）。
+    /// 覆盖：读文件 / 列目录 / 检索 / 句柄回查；写操作与其余工具忽略——
+    /// 写入归副作用台账管辖，语义不同源。
+    pub fn note_evidence_receipt(
+        &mut self,
+        step_id: usize,
+        instruction: &crate::agent::types::AgentInstruction,
+        output_id: &str,
+    ) {
+        let tool_raw = instruction.get_tool().to_lowercase();
+        let tool = tool_raw.rsplit('/').next().unwrap_or(&tool_raw);
+        let params = instruction.get_params();
+        // 与 dispatcher 同一归一口径：action 缺省或等于工具名时取 params.action
+        let mut action = instruction.get_action().to_lowercase();
+        if action == tool || action.is_empty() {
+            if let Some(act) = params.get("action").and_then(|v| v.as_str()) {
+                action = act.to_lowercase();
+            }
+        }
+        let str_param = |keys: &[&str]| -> Option<String> {
+            keys.iter()
+                .find_map(|k| params.get(*k).and_then(|v| v.as_str()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        };
+
+        const READ_TOOLS: &[&str] = &[
+            "read_text_file", "read_file", "get_file_content", "get_code_snippet",
+        ];
+        let (kind, target, detail): (&str, String, String) = if tool == "local_file" {
+            let Some(path) = str_param(&["path", "filePath", "file_path"]) else {
+                return;
+            };
+            if action.starts_with("list") {
+                let depth = params
+                    .get("depth")
+                    .map(|v| format!("depth={}", v))
+                    .unwrap_or_default();
+                ("list", path, depth)
+            } else {
+                // local_file 其余形态（read / action 缺省同名）按读取记账；
+                // write/edit 在上面 list 分支之外同样落到此处，须排除
+                if action.starts_with("write") || action.starts_with("edit") {
+                    return;
+                }
+                ("read", path, Self::receipt_window_label(&params))
+            }
+        } else if READ_TOOLS.iter().any(|t| tool.contains(t)) {
+            let Some(path) = str_param(&["path", "filePath", "file_path"]) else {
+                return;
+            };
+            ("read", path, Self::receipt_window_label(&params))
+        } else if tool.contains("search") {
+            let Some(query) = str_param(&["query", "pattern", "keyword"]) else {
+                return;
+            };
+            let scope =
+                str_param(&["path", "scope", "directory"]).unwrap_or_else(|| ".".to_string());
+            let q: String = query.chars().take(60).collect();
+            ("search", q, format!("@ {}", scope))
+        } else if tool == "get_step_output"
+            || (tool == "task_store" && action.contains("output"))
+        {
+            let Some(oid) = str_param(&["output_id", "id", "resource_id"]) else {
+                return;
+            };
+            ("retrieve", oid, String::new())
+        } else {
+            return;
+        };
+
+        let key = format!("{}|{}|{}", kind, target, detail);
+        let entry = self
+            .evidence_ledger
+            .entry(key)
+            .or_insert(EvidenceReceiptEntry {
+                count: 0,
+                first_step: step_id,
+                last_step: step_id,
+                output_id: None,
+            });
+        entry.count = entry.count.saturating_add(1);
+        entry.last_step = step_id;
+        if entry.first_step > step_id {
+            entry.first_step = step_id;
+        }
+        if !output_id.is_empty() {
+            entry.output_id = Some(output_id.to_string());
         }
     }
 

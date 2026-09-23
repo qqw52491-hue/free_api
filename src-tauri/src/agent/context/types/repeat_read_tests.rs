@@ -134,3 +134,117 @@
         // 4. 熔断保护期结束：恢复允许批发
         assert!(context.check_batch_dispatch_allowed(true).is_ok());
     }
+
+    // ═══ 取证台账（展示投影）═══
+
+    fn inst(tool: &str, action: &str, params: serde_json::Value) -> crate::agent::types::AgentInstruction {
+        crate::agent::types::AgentInstruction {
+            tool: Some(tool.to_string()),
+            action: Some(action.to_string()),
+            command: Some(params),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn evidence_receipt_aggregates_reads_searches_and_retrievals() {
+        let mut context = ctx();
+
+        // 同一文件同一窗口读两次 → 聚合为一条，步号取首末
+        let read = inst(
+            "local_file",
+            "read",
+            serde_json::json!({"path": "src/views/ChatView.vue", "start_line": 1, "end_line": 120}),
+        );
+        context.note_evidence_receipt(3, &read, "out-a");
+        context.note_evidence_receipt(57, &read, "out-b");
+        // 不同窗口 → 不同条目
+        let read2 = inst(
+            "local_file",
+            "read",
+            serde_json::json!({"path": "src/views/ChatView.vue", "start_line": 200, "end_line": 300}),
+        );
+        context.note_evidence_receipt(58, &read2, "out-c");
+        // 列目录 / 检索 / 回查
+        context.note_evidence_receipt(4, &inst("local_file", "list", serde_json::json!({"path": "src", "depth": 2})), "out-d");
+        context.note_evidence_receipt(9, &inst("search", "search", serde_json::json!({"query": "paste", "path": "src/"})), "out-e");
+        context.note_evidence_receipt(60, &inst("get_step_output", "get_step_output", serde_json::json!({"output_id": "out-a"})), "out-f");
+        // 写操作不进取证台账
+        context.note_evidence_receipt(61, &inst("local_file", "write", serde_json::json!({"path": "src/x.rs"})), "out-g");
+
+        assert_eq!(context.evidence_ledger.len(), 5, "读×2条目+list+search+retrieve，write 不记账");
+        let read_key = "read|src/views/ChatView.vue|L1-120";
+        let e = &context.evidence_ledger[read_key];
+        assert_eq!(e.count, 2);
+        assert_eq!(e.first_step, 3);
+        assert_eq!(e.last_step, 57);
+        assert_eq!(e.output_id.as_deref(), Some("out-b"), "句柄取最近一次");
+    }
+
+    #[test]
+    fn evidence_ledger_survives_blocking_ledger_reset() {
+        let mut context = ctx();
+        context.note_evidence_receipt(
+            10,
+            &inst("local_file", "read", serde_json::json!({"path": "a.rs"})),
+            "out-1",
+        );
+        // 压缩时只清拦截台账；展示台账保留——脱水后模型更需要这张索引
+        context.reset_read_ledger();
+        assert!(context.read_ledger.is_empty());
+        assert_eq!(context.evidence_ledger.len(), 1, "取证台账跨压缩保留");
+    }
+
+    #[test]
+    fn evidence_ledger_action_normalization_matches_dispatcher() {
+        let mut context = ctx();
+        // action 字段缺省为工具名、真实动作在 params.action（实弹轨迹形态）
+        // → 与 dispatcher 同口径归一为 list
+        let i = inst("local_file", "local_file", serde_json::json!({"action": "list", "path": "src/components"}));
+        context.note_evidence_receipt(2, &i, "out-1");
+        assert!(context.evidence_ledger.contains_key("list|src/components|"));
+        // action=read + params.action=list 的混合形态：与 dispatcher 一致仍按 read 记
+        // （归一仅在 action 缺省/同名时取 params.action）
+        let i = inst("local_file", "read", serde_json::json!({"action": "list", "path": "src/components"}));
+        context.note_evidence_receipt(3, &i, "out-2");
+        assert!(context.evidence_ledger.contains_key("read|src/components|整读"));
+    }
+
+    #[test]
+    fn evidence_ledger_render_sorted_bounded_and_shows_handle() {
+        let mut context = ctx();
+        for i in 0..25usize {
+            context.note_evidence_receipt(
+                i,
+                &inst("local_file", "read", serde_json::json!({"path": format!("f{:02}.rs", i)})),
+                &format!("out-{}", i),
+            );
+        }
+        let rendered = crate::agent::context::render::ContextRenderer::render_evidence_ledger(
+            &context.evidence_ledger,
+        );
+        assert!(rendered.contains("【取证台账】"));
+        assert!(rendered.contains("get_step_output"));
+        assert!(rendered.contains("out-24"), "最近步的记录应含句柄: {}", rendered);
+        assert!(rendered.contains("另有 5 项更早记录未列出"));
+        // 最近步优先，超出上限的最旧记录不渲染
+        assert!(rendered.contains("f24.rs"), "最近记录必须渲染: {}", rendered);
+        assert!(rendered.find("f00.rs").is_none(), "超出 20 行上限的最旧记录不渲染");
+    }
+
+    #[test]
+    fn run_telemetry_renders_facts_only() {
+        use crate::agent::context::render::ContextRenderer;
+        // 首步之前无遥测
+        assert!(ContextRenderer::render_run_telemetry(0, 0, 0, None, 0).is_empty());
+        let out = ContextRenderer::render_run_telemetry(12, 1_234_567, 45_678, Some(67_890), 1_000_000);
+        assert!(out.contains("step=12"));
+        assert!(out.contains("1234567"));
+        assert!(out.contains("45678"));
+        assert!(out.contains("67890"));
+        assert!(out.contains("(7%)"));
+        // 不含任何节奏暗示词
+        for banned in ["收敛", "停止", "上限", "尽快", "太多"] {
+            assert!(!out.contains(banned), "遥测卡不得含认知暗示词 {}: {}", banned, out);
+        }
+    }

@@ -3,6 +3,23 @@
 > 纪律：每项控制面改动（门禁/判据/收割/预算/审查契约）在此登记：改了什么、为什么、commit、验证状态。
 > 状态标注：code-green（单测/编译过）| live-green（实弹验证过）| calib-green（基线校准过）| unverified（未验证）
 
+## 阶段十五：状态卡事实投影补全——取证台账 + 运行遥测（2026-09-23）
+
+**性质**：纯事实投影，非门禁。case_20 双轨对比实证：flash 113 步 113 次读/搜
+仅 1 条 finding、prompt 体积停在 6~7 万而消息数涨到 229——原文脱水成句柄后
+模型「忘了自己读过什么」→ 同一文件反复重读、同一问题问三遍（step 31/56/110），
+token 烧穿仍零方案。pro 靠自发写 11 条 finding 不掉坑，flash 不写。
+补的是宿主已掌握的机械事实，不碰任何门禁、不催收敛。
+
+| 改动 | 位置 | 要点 | 验证 |
+|---|---|---|---|
+| **取证台账** | `context/types`（EvidenceReceiptEntry + evidence_ledger + note_evidence_receipt）/ `render.rs` / `assembler.rs` / `main_loop` | 成功执行的读取/列目录/检索/句柄回查按「形态\|目标\|范围」聚合：count、首末步号、最近 output_id；渲染最近 20 条。**跨压缩保留**（压缩只动 turns_history），这正是脱水后最需要的索引。被拦截的读取不记账（没执行就没有回执）。与 read_ledger（拦截用、压缩清零）职责分离 | code-green（4 新单测：聚合/跨压缩保留/action 归一/渲染有界） |
+| **运行遥测** | `context/types`（current_step_id + run_prompt/completion_tokens）/ `render.rs` / `call_llm_phase` / `main_loop` | 状态卡注入「step=N \| 累计 prompt/completion \| 当前上下文≈X/窗口Y(Z%)」。随 checkpoint 持久化、恢复后继续累计（口径优于重启即零的 spent_prompt_tokens 局部变量）。首步前不渲染空卡。文案经审查不含节奏暗示词 | code-green（单测断言无「收敛/停止/上限/尽快/太多」字样） |
+
+**待实弹验证**：flash 重跑 case_20，对照指标=重读次数、`get_step_output` 调用数、
+finding 产出、是否走到 submit_plan/写入、判据结果。只验证「失忆→重读」这一半；
+若重读消失仍不提交，另一半（完成感校准/档位路由）另行处理。
+
 ## 阶段十四：探索期认知门禁拆除 + retriage 复核通道（2026-09-23）
 
 **性质**：物种二分落地——删除以步数代理认知成熟度的探索门禁，新增一次性的

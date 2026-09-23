@@ -1,5 +1,6 @@
 use crate::agent::change_verification::{change_verification_blocker, ChangeVerification};
-use crate::agent::context::types::{FailedAttempt, PlanGateProjection};
+use crate::agent::context::types::{EvidenceReceiptEntry, FailedAttempt, PlanGateProjection};
+use std::collections::BTreeMap;
 use crate::agent::review_contract::ReviewContract;
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::TodoItem;
@@ -238,6 +239,85 @@ impl ContextRenderer {
             "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 结论已消费（预算 {}/{}）\n指引: 审查结论已研判闭合（无 Blocking 缺陷）；请输出完善后的技术方案，门禁核验通过后放行写入。\n\n",
             gate.reviewer_budget_used, gate.reviewer_budget_max
         )
+    }
+
+    /// 取证台账投影：宿主记录的读取/列目录/检索/回查足迹，跨压缩保留。
+    /// 只列机械事实（什么、第几步、句柄在哪），不评判、不催促——
+    /// 证据是否足够由模型自己判断。原文可按 output_id 经 get_step_output 取回。
+    pub fn render_evidence_ledger(ledger: &BTreeMap<String, EvidenceReceiptEntry>) -> String {
+        if ledger.is_empty() {
+            return String::new();
+        }
+        // 最近活跃优先，同序按键字典序兜底，保证渲染确定性
+        let mut entries: Vec<(&String, &EvidenceReceiptEntry)> = ledger.iter().collect();
+        entries.sort_by(|a, b| b.1.last_step.cmp(&a.1.last_step).then(a.0.cmp(b.0)));
+        const MAX_LINES: usize = 20;
+        let total = entries.len();
+        let mut lines = Vec::new();
+        for (key, e) in entries.into_iter().take(MAX_LINES) {
+            let mut parts = key.splitn(3, '|');
+            let kind = parts.next().unwrap_or("");
+            let target = parts.next().unwrap_or("");
+            let detail = parts.next().unwrap_or("");
+            let steps = if e.count <= 1 {
+                format!("step={}", e.first_step)
+            } else {
+                format!("×{} (step {}~{})", e.count, e.first_step, e.last_step)
+            };
+            let oid = e
+                .output_id
+                .as_deref()
+                .map(|id| format!(" → {}", id))
+                .unwrap_or_default();
+            let detail_str = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", detail)
+            };
+            lines.push(format!("- {} {}{} · {}{}", kind, target, detail_str, steps, oid));
+        }
+        let more = if total > MAX_LINES {
+            format!("\n…另有 {} 项更早记录未列出", total - MAX_LINES)
+        } else {
+            String::new()
+        };
+        format!(
+            "【取证台账】本任务已执行的读取/检索足迹（完整原文可按 output_id 经 get_step_output 取回）:\n{}{}\n\n",
+            lines.join("\n"),
+            more
+        )
+    }
+
+    /// 运行遥测投影：当前步号与本 run 累计 token 消耗——宿主 100% 可核实
+    /// 的机械事实。只报数，不带任何「该收敛/该停止」类暗示；节奏判断归模型。
+    /// 步号口径与取证台账/避坑台账/run_trace 的 step id 一致。
+    pub fn render_run_telemetry(
+        step_id: usize,
+        run_prompt_tokens: u64,
+        run_completion_tokens: u64,
+        last_context_tokens: Option<usize>,
+        context_window: usize,
+    ) -> String {
+        // 首步之前（尚无一次完整 LLM 往返）无遥测可报，不渲染空卡
+        if run_prompt_tokens == 0 && step_id == 0 {
+            return String::new();
+        }
+        let mut line = format!(
+            "【运行遥测】当前 step={} | 本任务累计 prompt={} / completion={} tokens",
+            step_id, run_prompt_tokens, run_completion_tokens
+        );
+        if let Some(ctx_tokens) = last_context_tokens {
+            line.push_str(&format!(" | 当前上下文 ≈{}", ctx_tokens));
+            if context_window > 0 {
+                line.push_str(&format!(
+                    " / 窗口 {} ({:.0}%)",
+                    context_window,
+                    ctx_tokens as f64 * 100.0 / context_window as f64
+                ));
+            }
+        }
+        line.push_str("\n\n");
+        line
     }
 
     pub fn render_decision_instruction(compact_tools: Option<&str>) -> String {

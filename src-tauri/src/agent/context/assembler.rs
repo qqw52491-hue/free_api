@@ -120,8 +120,24 @@ impl SandwichContext {
             &self.failed_attempts,
         ));
 
+        // (3.1) 运行遥测（纯事实：当前步号 + 累计 token + 当前上下文规模；
+        // 只报数不带节奏暗示——是否该收敛由模型判断，宿主不代理认知）
+        bottom_state_card.push_str(&ContextRenderer::render_run_telemetry(
+            self.current_step_id,
+            self.run_prompt_tokens,
+            self.run_completion_tokens,
+            self.last_reported_prompt_tokens,
+            self.context_window_tokens,
+        ));
+
         // (4) 不可逆操作安全台账
         bottom_state_card.push_str(&AuditLedger::render_ledger(&self.side_effects));
+
+        // (4.1) 取证台账（事实投影：已读/已搜足迹 + output_id 句柄；
+        // 跨压缩保留，正是脱水后最需要的「读过什么、去哪取回」索引）
+        bottom_state_card.push_str(&ContextRenderer::render_evidence_ledger(
+            &self.evidence_ledger,
+        ));
 
         // (5) 核心事实记忆库（按 BTreeMap 严格确定性字母序）
         bottom_state_card.push_str(&MemoryManager::render_memory_card(&self.memories));
