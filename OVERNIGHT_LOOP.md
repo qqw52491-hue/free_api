@@ -48,10 +48,16 @@ scout 提示词引导本轮未触发派发（pro 仍亲自取证）。
 **审查可用性修复（同日补建）**：跨家族自动优选改为开关
 （`auto_cross_family_reviewer`，默认关，请求可开）——未配置 reviewer 时
 跟随常规回退链，不再自动改派可能未充值/未订阅的异构账号；批准时若
-`plan_reviewer_consumed=false`（零审查结论）打 `plan_unreviewed_release`
-持久标记，交付摘要是 finish_guard 可恢复拦截项（须写明「未经独立审查」），
-eval 报告新增「独立方案审查」计分行（派发 N / 成功 M / 仲裁放行披露）。
+零审查结论交付（`plan_review_deliveries` 空——**注意不能用
+plan_reviewer_consumed**：全失败批次也计「齐套」会置真，实测语义陷阱）
+打 `plan_unreviewed_release` 持久标记，交付摘要是 finish_guard 可恢复
+拦截项（须写明「未经独立审查」），eval 报告新增「独立方案审查」计分行。
 role_override 顺带修 UUID 错标 tier 的显示 bug。
+
+**终审死循环修复（同日，用户实弹撞出）**：纯分析任务 finish 连拦 6 次——
+审查材料只装 diff/tmp 产物，摘要文本从未注入 → 终审误判「无成果物」；
+复用键又只看 diff_hash → 文本型交付的"修复"（改摘要）永远撞「Diff 未变」
+缓存。修：摘要截断 4K 注入审查材料 + 复用指纹改为 diff+summary 联合哈希。
 
 **实弹结果三（同日三场，reviewer 钉 pro 后首场 PASS）**：run
 `agent-evaluation-4f65a931` —— 🟢 **判据 PASS**（case_20 首次转绿）：

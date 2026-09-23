@@ -51,7 +51,7 @@ pub struct AgentCheckpoint {
     /// 上次审查的 Diff Hash（防重复重试相同 Diff）
     #[serde(default)]
     pub last_reviewed_diff_hash: Option<String>,
-    /// 上次审查结果（当 diff_hash 未变时复用上次拦截，避免浪费 Token）
+    /// 上次审查结果（审查指纹=diff+交付摘要未变时复用上次拦截，避免浪费 Token）
     #[serde(default)]
     pub last_review_result: Option<crate::agent::reviewer_gatekeeper::ReviewResult>,
     /// prepare_finish 沉淀的终态收据：diff/scope/契约未变时 finish 直接复用其结论，

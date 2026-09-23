@@ -468,6 +468,11 @@ impl AgentCheckpoint {
         if self.plan_review_batch_complete(db) {
             self.plan_reviewer_consumed = true;
         }
+        // 真结论落账则撤销「未经审查放行」标记：此前的放行已被迟到的审查补上，
+        // 留着旧标记会让交付被迫披露一个已不成立的事实。
+        if !self.plan_review_deliveries.is_empty() {
+            self.plan_unreviewed_release = false;
+        }
     }
 
     /// 现场真聚合：提取所有已交付审查员的未撤回 blocking 级缺陷（并集）
