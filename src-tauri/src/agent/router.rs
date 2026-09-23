@@ -839,6 +839,12 @@ mod tests {
             "some-uuid-xyz"
         );
 
+        // 钉具体 UUID 且命中已知槽位时档位必须归位（曾错标 Flash 导致推理强度错配）
+        config.role_models.insert(roles::REVIEWER.to_string(), "model-pro".into());
+        let pinned = AgentRouter::route_for_role(&context, &config, 3, roles::REVIEWER);
+        assert_eq!(pinned.model_id, "model-pro");
+        assert_eq!(pinned.tier, RoutingTier::Pro);
+
         // 空串 = 跟随自动路由
         config.role_models.insert(roles::REVIEWER.to_string(), String::new());
         assert_eq!(AgentRouter::route_for_role(&context, &config, 3, roles::REVIEWER).tier, RoutingTier::Flash);
