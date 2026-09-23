@@ -114,12 +114,14 @@ pub(super) async fn dispatch_resume_child(
                             );
                             let model_to_use = if !child_model.is_empty() {
                                 child_model
-                            } else {
+                            } else if ctx.model_routing.auto_cross_family_reviewer {
                                 let (preferred, _note) = crate::agent::router::prefer_cross_family_reviewer(
                                     &*ctx.state.inner().0.lock().unwrap(),
                                     &routing.model_id,
                                 );
                                 preferred
+                            } else {
+                                routing.model_id.clone()
                             };
                             let reasoning_effort = ctx.model_routing.reasoning_effort_for(&routing.tier).to_string();
 

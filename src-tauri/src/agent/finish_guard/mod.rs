@@ -175,6 +175,31 @@ pub(crate) fn complex_delivery_blocker(
     if !is_finish || !succeeded {
         return None;
     }
+    // 未经独立审查放行的披露义务：方案在审查未派发/全部失败的情况下经人工或
+    // 仲裁放行，交付必须如实声明，不许静默。检查摘要而非拦截执行——事实边界
+    // 已发生，这里只保证它被说出来。优先于无副作用早退：披露义务挂在批准
+    // 事件上，不挂在改动量上。
+    if context
+        .plan_gate
+        .as_ref()
+        .map_or(false, |g| g.unreviewed_release)
+    {
+        let disclosed = instruction
+            .command
+            .as_ref()
+            .and_then(|command| command.get("summary"))
+            .and_then(|summary| summary.as_str())
+            .map_or(false, |s| {
+                s.contains("未经独立审查") || s.contains("未经审查") || s.contains("未经过独立审查")
+            });
+        if !disclosed {
+            return Some(
+                "本次方案放行时未收到任何独立审查结论（审查未派发或审查员全部失败）。\
+                 交付摘要必须如实写明「方案未经独立审查」，不得静默交付"
+                    .to_string(),
+            );
+        }
+    }
     // 对于纯对话、解释答疑、或没有任何新增代码文件修改的任务，免除严苛的主根因四件套拦截
     if context.side_effects.len() == context.inherited_side_effects_count {
         return None;

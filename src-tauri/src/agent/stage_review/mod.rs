@@ -384,7 +384,7 @@ pub async fn dispatch(
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false);
 
-            if has_explicit_reviewer_slot {
+            if has_explicit_reviewer_slot || !model_routing.auto_cross_family_reviewer {
                 (routing.model_id.clone(), None)
             } else {
                 router::prefer_cross_family_reviewer(&conn, &routing.model_id)
@@ -449,8 +449,10 @@ pub async fn dispatch(
                 routing.model_id.clone()
             } else if !card.model_id.is_empty() {
                 card.model_id.clone()
-            } else {
+            } else if model_routing.auto_cross_family_reviewer {
                 router::prefer_cross_family_reviewer(&conn, &routing.model_id).0
+            } else {
+                routing.model_id.clone()
             }
         };
 

@@ -67,6 +67,10 @@ pub struct AgentCheckpoint {
     /// 最终批准的方案摘要（用于防方案漂移与核对）
     #[serde(default)]
     pub approved_plan_summary: Option<String>,
+    /// 方案在没有任何成功审查结论的情况下被放行（人工批准/仲裁时审查全败或未派发）。
+    /// 持久化披露标记：交付与报告须如实声明「未经独立审查」，不许静默放行。
+    #[serde(default)]
+    pub plan_unreviewed_release: bool,
     /// 人类主人明确批准的特赦/豁免指示（用于在代码审查门禁中豁免特定改动）
     #[serde(default)]
     pub human_waivers: Vec<String>,
@@ -332,6 +336,7 @@ impl AgentCheckpoint {
             plan_phase: PlanPhase::Exploring,
             plan_reviewer_retry_count: 0,
             approved_plan_summary: None,
+            plan_unreviewed_release: false,
             human_waivers: Vec::new(),
             approved_target_files: None,
             policy_decision_summary: None,

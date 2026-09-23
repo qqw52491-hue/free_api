@@ -406,6 +406,27 @@ function querySessionTelemetry(sessionId) {
       { encoding: 'utf8' }
     ).trim().split('|');
 
+    // 独立审查实况：plan_review 子任务按状态分组——派发≠产出，
+    // 全部失败后经仲裁放行的方案必须在报告中显式标出「未经独立审查」。
+    let planReviewStats = { dispatched: 0, succeeded: 0, failed: 0 };
+    try {
+      const rawPR = execSync(
+        `sqlite3 "${appDbPath}" "SELECT status, count(*) FROM agent_child_runs WHERE parent_session_id='${sessionId}' AND purpose='plan_review' GROUP BY status"`,
+        { encoding: 'utf8' }
+      ).trim();
+      if (rawPR) {
+        for (const line of rawPR.split('\n')) {
+          const [status, count] = line.split('|');
+          const n = Number(count) || 0;
+          planReviewStats.dispatched += n;
+          if (status === 'succeeded') planReviewStats.succeeded += n;
+          else if (status === 'failed') planReviewStats.failed += n;
+        }
+      }
+    } catch {
+      // 兼容尚未建表的轻量环境
+    }
+
     // 门禁拦截遥测（run_id 记录的是触发时的运行标识，通常等于会话 id）
     let gateFires = [];
     try {
@@ -474,6 +495,7 @@ function querySessionTelemetry(sessionId) {
       review_runs: Number(rawReview[2] || 0),
       gate_fires: gateFires,
       executor_calls: executorCalls,
+      plan_review: planReviewStats,
       traces,
     };
   } catch (e) {
@@ -555,6 +577,7 @@ function generateMarkdownReport(caseDef, result, telemetry, diffInfo, mode, cali
 | **测试耗时** | \`${(result.durationMs / 1000).toFixed(2)}s\` | ≤ 校准/判分超时上限 | ✅ 正常 |
 | **修改文件数** | \`${diffInfo.changedFiles.length}\` 个 | 预估 ≤ ${caseDef.expected_diff_files?.length || 5} 个 | ${diffInfo.changedFiles.length > (caseDef.expected_diff_files?.length || 5) ? '⚠️ 存在范围扩散' : '✅ 范围可控'} |
 | **门禁拦截次数** | \`${telemetry.gate_fires.length}\` 次 | 0 次（或纠偏后收敛） | ${telemetry.gate_fires.length === 0 ? '✅ 完美合规' : '⚠️ 发生过干预'} |
+| **独立方案审查** | ${(() => { const r = telemetry.plan_review || { dispatched: 0, succeeded: 0, failed: 0 }; if (r.dispatched === 0) return '未派发方案审查'; if (r.succeeded === 0) return `派发 ${r.dispatched} 次全部失败（${r.failed} 次 failed）——方案经仲裁/人工放行`; return `${r.succeeded}/${r.dispatched} 次产出审查结论`; })()} | 放行前应取得至少一条审查结论 | ${(() => { const r = telemetry.plan_review || { dispatched: 0, succeeded: 0, failed: 0 }; if (r.succeeded > 0) return '✅ 有独立审查'; if (r.dispatched === 0) return '⚠️ 未经独立审查（未派发）'; return '❌ 未经独立审查（审查员全部失败）'; })()} |
 | **执行者完整性** | ${executorIntegrityLine(telemetry, mode)} | 指令必须由指定 --model 产出 | ${executorIntegrityBadge(telemetry, mode)} |
 | **Token 总开销** | \`${totalPrompt + totalCompletion}\` tokens | 主模型: ${telemetry.main_prompt}, 审查员: ${telemetry.review_prompt} | ℹ️ 见账单 |
 
@@ -681,7 +704,7 @@ async function runEvaluation() {
           stderrSnippet: '',
         };
         diffInfo = inspectGitDiff(sandboxPath);
-        telemetry = { main_prompt: 0, main_completion: 0, review_prompt: 0, review_completion: 0, gate_fires: [], traces: [] };
+        telemetry = { main_prompt: 0, main_completion: 0, review_prompt: 0, review_completion: 0, gate_fires: [], plan_review: { dispatched: 0, succeeded: 0, failed: 0 }, traces: [] };
       } else if (options.live) {
         // LIVE 编排：唤起 wdio 实弹 spec（应用内后台评测跑在沙盒工作区），结束后注入卷子机械判分
         if (!options.model) {

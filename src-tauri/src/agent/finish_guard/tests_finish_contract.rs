@@ -129,6 +129,46 @@ mod tests_inner {
     }
 
     #[test]
+    fn unreviewed_release_requires_disclosure_in_summary() {
+        let mut context =
+            context::SandwichContext::new("system".to_string(), "修复图片上传".to_string());
+        context.side_effects.push(crate::agent::context::SideEffectRecord {
+            step_id: 1,
+            tool: "write".to_string(),
+            description: "fake".to_string(),
+            timestamp: "now".to_string(),
+            affected_paths: Vec::new(),
+        });
+        context.plan_gate = Some(crate::agent::context::types::PlanGateProjection {
+            mode: "cross_review".to_string(),
+            phase: "approved".to_string(),
+            unreviewed_release: true,
+            ..Default::default()
+        });
+        // 未经审查放行 + 摘要未披露 → 拦截
+        let silent = AgentInstruction {
+            command: Some(serde_json::json!({ "summary": "# 修复完成\n已修改图片上传逻辑。" })),
+            ..Default::default()
+        };
+        assert!(complex_delivery_blocker(&context, &silent, true, true).is_some());
+        // 摘要如实披露「未经独立审查」→ 放行
+        let disclosed = AgentInstruction {
+            command: Some(serde_json::json!({ "summary": "# 修复完成\n已修改图片上传逻辑。注意：本方案未经独立审查（审查员全部失败，经人工放行）。" })),
+            ..Default::default()
+        };
+        assert!(complex_delivery_blocker(&context, &disclosed, true, true).is_none());
+        // 审查正常消费过的运行不受影响
+        context.plan_gate = Some(crate::agent::context::types::PlanGateProjection {
+            mode: "cross_review".to_string(),
+            phase: "approved".to_string(),
+            unreviewed_release: false,
+            reviewer_consumed: true,
+            ..Default::default()
+        });
+        assert!(complex_delivery_blocker(&context, &silent, true, true).is_none());
+    }
+
+    #[test]
     fn review_contract_blocks_first_finish_without_forcing_step_counts() {
         let open_contract = ReviewContract {
             scope_statement: "审查上下文设计".to_string(),

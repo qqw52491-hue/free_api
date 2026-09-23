@@ -258,7 +258,10 @@ pub(super) async fn dispatch_child_reviewer(
                 ctx.final_session_id,
                 "child_reviewer:cross_family_check",
             );
-            if reviewer_model == routing.model_id && !explicit_reviewer_slot {
+            if ctx.model_routing.auto_cross_family_reviewer
+                && reviewer_model == routing.model_id
+                && !explicit_reviewer_slot
+            {
                 // 未被角色卡钉死且未被会话显式指定时应用配置级异构优选；说明写进派发报告，人工可见
                 // 有界锁：实弹中派发曾在 DB 取用处冻死（无界 lock 在持锁者冻结时焊死 tokio 任务）
                 let conn = ctx

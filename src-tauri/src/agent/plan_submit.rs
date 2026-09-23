@@ -296,7 +296,10 @@ pub async fn handle_submit_plan(
     } else {
         card.model_id.clone()
     };
-    if reviewer_model == routing.model_id && !has_explicit_reviewer_slot {
+    if model_routing.auto_cross_family_reviewer
+        && reviewer_model == routing.model_id
+        && !has_explicit_reviewer_slot
+    {
         let (preferred, _note) = crate::agent::router::prefer_cross_family_reviewer(
             &*db.0.lock().unwrap(),
             &reviewer_model,

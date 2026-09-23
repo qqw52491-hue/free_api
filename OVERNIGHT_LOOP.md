@@ -19,18 +19,23 @@ role_models.planner 配置形同虚设。
 ——**诊断与修法方向全对**：handleFileDrop 图片分支真改 invoke +
 props.sessionId，flash 执行 20 调用忠实落地；判据 FAIL 于**覆盖不全**
 （漏 `路径:` 徽标与 `upload_failed` 标记——判据契约不在可见症状内）。
+本场方案审查同样零产出（跨家族改派全死，仲裁放行——与上场同因）。
 三场演化：错方案→对方案漏覆盖。机制链全通，剩余缺口=模型对方案完整性
 的判断，属能力边界非机制问题，停止加层。
 
 **实弹结果（case_20，planner=pro / executor+scout+writer=flash）**：
 run `agent-evaluation-000ee062`（25min 窗口）——**相位移交机械链路全通**：
 triage 判 technical_plan → pro 全程取证定案（27 调用）→ 写尝试触发策略
-升级 CrossReview → Tech Lead 过审 → **批准后移交 flash**（11 调用执行
+升级 CrossReview → **批准后移交 flash**（11 调用执行
 Cargo.toml/tauri.conf.json + cargo check）→ finish。**7.9min / 175 万 token**
 交付，为 case_20 迄今最便宜的完整收敛（此前 pro 单干 120 步烧穿 600 万未写完）。
 **判据 FAIL**：方案选了 assetProtocol 配置方向，未触碰前端——裸文件名从未
-落盘，assetProtocol 无文件可服务，方案前提即错。Tech Lead 1v1 审过此错案，
-同分布盲区再次应验。**瓶颈精确落在方案正确性，与路由/执行无关**。
+落盘，assetProtocol 无文件可服务，方案前提即错。
+**⚠️ 台账更正（同日补查）**：本场方案审查实际**零产出**——跨家族优选把
+reviewer 自动改派到 deepseek/kimi/glm/doubao，全部因欠费/订阅失效秒挂
+（`request_or_stream`，0 token），方案最终由「无人值守自动仲裁」放行。
+此前记录的「Tech Lead 审过错案、同分布盲区应验」**不成立，予以撤销**；
+真实结论是**审查层当时不存在**，判据是唯一生效的兜底。
 scout 提示词引导本轮未触发派发（pro 仍亲自取证）。
 
 **衍生决策**：否决"前提断言机械门"（盲区前提不会被自己写成检查+文本匹配
@@ -39,6 +44,14 @@ scout 提示词引导本轮未触发派发（pro 仍亲自取证）。
 改后跑绿，复现不了显式披露；Tech Lead 审查附加一问"验证测的是症状还是
 方案自证"。探针证据：flash-high 对封闭枚举题全对（38K token），导航探针
 15 步定位三坏点（问题含答案方向提示，仅作参考）。
+
+**审查可用性修复（同日补建）**：跨家族自动优选改为开关
+（`auto_cross_family_reviewer`，默认关，请求可开）——未配置 reviewer 时
+跟随常规回退链，不再自动改派可能未充值/未订阅的异构账号；批准时若
+`plan_reviewer_consumed=false`（零审查结论）打 `plan_unreviewed_release`
+持久标记，交付摘要是 finish_guard 可恢复拦截项（须写明「未经独立审查」），
+eval 报告新增「独立方案审查」计分行（派发 N / 成功 M / 仲裁放行披露）。
+role_override 顺带修 UUID 错标 tier 的显示 bug。
 
 **实弹待验**：`--role-models '{"planner":"pro","executor":"flash"}'` 跑 case_20，
 观测点=批准前步骤是否全走 pro、批准后写入是否移交 flash、pro 诊断质量

@@ -20,6 +20,9 @@ pub(crate) struct PartialRouting {
     pub(crate) routing_mode: Option<String>,
     /// 角色级覆盖：系统角色名（planner/executor/...）→ 档位或模型 UUID
     role_models: Option<std::collections::BTreeMap<String, String>>,
+    /// 审查员跨家族自动优选开关：缺省/不传 = 关闭（跟随常规回退链）；
+    /// true = 恢复自动挑选异构家族模型的旧行为。
+    pub(crate) auto_cross_family_reviewer: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -218,6 +221,9 @@ pub(crate) async fn handler_task(
                 .into_iter()
                 .filter(|(_, model)| !model.trim().is_empty())
                 .collect();
+        }
+        if let Some(v) = overrides.auto_cross_family_reviewer {
+            routing.auto_cross_family_reviewer = v;
         }
     }
     if routing.pro.is_empty() {

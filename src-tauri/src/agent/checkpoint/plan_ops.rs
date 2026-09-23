@@ -322,6 +322,7 @@ impl AgentCheckpoint {
         // 人工批准留痕属于旧方案，修订未经人工确认不得继承。
         self.approved_target_files = None;
         self.approved_plan_summary = None;
+        self.plan_unreviewed_release = false;
         let _ = self.reserve_plan_review_round();
         // 批次锚点 = 快照派发时盖在行上的 batch_id（plan_submit 生成后透传）
         self.set_plan_review_batch(batch_id, 1);
@@ -578,6 +579,7 @@ impl AgentCheckpoint {
             expected_reviewers,
             budget_exhausted,
             human_waived,
+            unreviewed_release: self.plan_unreviewed_release,
         }
     }
 

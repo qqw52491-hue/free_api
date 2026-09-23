@@ -42,6 +42,11 @@ pub struct ModelRoutingConfig {
     /// 本会话排除/休眠的角色卡标识列表（无需修改全局工坊，即可在当前会话动态启闭某专家）
     #[serde(default)]
     pub disabled_role_cards: Vec<String>,
+    /// 审查员跨家族自动优选开关。默认关闭：未显式配置 reviewer 角色时跟随常规回退链，
+    /// 不自动改派异构家族模型（自动挑选可能落到未充值/未订阅的账号，实弹实测 7 派 7 死
+    /// 且方案静默经仲裁放行）。true = 恢复旧的跨家族优选行为。
+    #[serde(default)]
+    pub auto_cross_family_reviewer: bool,
 }
 
 impl Default for ModelRoutingConfig {
@@ -61,6 +66,7 @@ impl Default for ModelRoutingConfig {
             stage_reviewer_override: None,
             stage_review_committee: false,
             disabled_role_cards: Vec::new(),
+            auto_cross_family_reviewer: false,
         }
     }
 }
@@ -296,11 +302,21 @@ impl ModelRoutingConfig {
                 tier: RoutingTier::Vision,
                 reason: format!("角色 {} 手动钉在 Vision 档", role),
             },
-            other => RoutingDecision {
-                model_id: other.to_string(),
-                tier: RoutingTier::Flash,
-                reason: format!("角色 {} 手动指定具体模型", role),
-            },
+            other => {
+                // 具体 UUID：按命中槽位归正确档位，避免错标 tier 进而错配推理强度
+                let tier = if other == self.pro {
+                    RoutingTier::Pro
+                } else if other == self.vision {
+                    RoutingTier::Vision
+                } else {
+                    RoutingTier::Flash
+                };
+                RoutingDecision {
+                    model_id: other.to_string(),
+                    tier,
+                    reason: format!("角色 {} 手动指定具体模型", role),
+                }
+            }
         };
         (!decision.model_id.is_empty()).then_some(decision)
     }

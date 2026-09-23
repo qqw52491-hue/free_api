@@ -880,6 +880,7 @@ mod tests {
             stage_reviewer_override: None,
             stage_review_committee: false,
             disabled_role_cards: Default::default(),
+            auto_cross_family_reviewer: false,
         };
 
         let (resolved, metadata) = fixed_evaluation_model_routing(&db, requested, None).unwrap();

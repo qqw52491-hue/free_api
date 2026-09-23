@@ -221,6 +221,16 @@ pub(super) async fn dispatch_ask_human(
                 Some(true) => {
                     // 人类在方案审批卡片中批准放行
                     ctx.checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                    // 未经独立审查披露：本批审查没有任何结论被消费（未派发或全部失败）
+                    // 即获人工放行时打标——交付与报告必须如实声明，不许静默。
+                    ctx.checkpoint.plan_unreviewed_release = !ctx.checkpoint.plan_reviewer_consumed;
+                    if ctx.checkpoint.plan_unreviewed_release {
+                        ctx.app.emit(
+                            &format!("agent-log-{}", ctx.final_session_id),
+                            "⚠️ 方案经人工放行，但未收到任何独立审查结论（审查未派发或全部失败）".to_string(),
+                        )
+                        .ok();
+                    }
                     ctx.checkpoint.gate_human_escape_directed = false;
                     ctx.checkpoint.recent_gate_block_step = None;
                     if ctx.checkpoint.stage_review_blockers_open > 0 {
@@ -253,6 +263,14 @@ pub(super) async fn dispatch_ask_human(
                         && trimmed != "我再想想"
                     {
                         ctx.checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
+                        ctx.checkpoint.plan_unreviewed_release = !ctx.checkpoint.plan_reviewer_consumed;
+                        if ctx.checkpoint.plan_unreviewed_release {
+                            ctx.app.emit(
+                                &format!("agent-log-{}", ctx.final_session_id),
+                                "⚠️ 方案经人工放行，但未收到任何独立审查结论（审查未派发或全部失败）".to_string(),
+                            )
+                            .ok();
+                        }
                         ctx.checkpoint.gate_human_escape_directed = false;
                         ctx.checkpoint.recent_gate_block_step = None;
                         if ctx.checkpoint.stage_review_blockers_open > 0 {

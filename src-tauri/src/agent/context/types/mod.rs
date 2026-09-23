@@ -86,6 +86,10 @@ pub struct PlanGateProjection {
     /// Auto+direct 为 false——轻任务的探索期不算规划相位。
     #[serde(default)]
     pub plan_required: bool,
+    /// 方案在无任何成功审查结论时被放行（人工批准/仲裁兜底）。
+    /// 交付层据此强制披露「未经独立审查」，不许静默交付。
+    #[serde(default)]
+    pub unreviewed_release: bool,
 }
 
 /// 失败教训记录（用于防止大模型在长任务中重复尝试已知失败的方法）
