@@ -559,6 +559,14 @@ impl AgentCheckpoint {
         crate::agent::context::types::PlanGateProjection {
             mode: self.plan_mode.as_str().to_string(),
             phase: self.plan_phase.as_str().to_string(),
+            plan_required: self
+                .triage_verdict
+                .as_ref()
+                .map_or(false, |v| v.requires_plan_gate())
+                || matches!(
+                    self.plan_mode,
+                    PlanExecutionMode::CrossReview | PlanExecutionMode::PlanApproval
+                ),
             reviewer_dispatched: self.plan_reviewer_retry_count > 0,
             reviewer_consumed: self.plan_reviewer_consumed,
             reviewer_budget_used: self.plan_reviewer_retry_count,

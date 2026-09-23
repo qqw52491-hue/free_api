@@ -80,6 +80,12 @@ pub struct PlanGateProjection {
     /// 是否已获人工审批/豁免特批放行
     #[serde(default)]
     pub human_waived: bool,
+    /// 本 run 是否挂了重方案门（triage 判 technical_plan/expert_panel，
+    /// 或模式为 cross_review/plan_approval）。供路由把「批准前」识别为
+    /// planner 相位：强模型取证定案，批准后回落 executor 档执行。
+    /// Auto+direct 为 false——轻任务的探索期不算规划相位。
+    #[serde(default)]
+    pub plan_required: bool,
 }
 
 /// 失败教训记录（用于防止大模型在长任务中重复尝试已知失败的方法）

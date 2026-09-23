@@ -322,8 +322,15 @@ impl AgentRouter {
                 reason: "受控评测首轮规划，固定使用 Pro 建立推理基线".to_string(),
             };
         }
-        // 角色覆盖优先：首步视为 planner，其余视为 executor
-        let role = if context.turns_history.is_empty() {
+        // 角色覆盖优先：planner = 首步，或挂了重方案门且尚未批准（分解路由的
+        // 「强模型取证定案」相位）；相位事实来自 checkpoint 投影而非历史猜测——
+        // triage 注入取证单后历史已非空，旧判法会让生产会话的规划步错误落到
+        // executor 档。未配置 role_models 时本分支不产生任何行为差异。
+        let planning_active = context
+            .plan_gate
+            .as_ref()
+            .map_or(false, |g| g.plan_required && g.phase != "approved");
+        let role = if context.turns_history.is_empty() || planning_active {
             roles::PLANNER
         } else {
             roles::EXECUTOR
@@ -833,6 +840,64 @@ mod tests {
         config.role_models.insert(roles::PLANNER.to_string(), "planner-uuid".into());
         let fresh = SandwichContext::new("system".to_string(), "目标".to_string());
         assert_eq!(AgentRouter::route_for_step(&fresh, &config, 0).model_id, "planner-uuid");
+    }
+
+    #[test]
+    fn plan_phase_selects_planner_over_history_emptiness() {
+        let mut config = ModelRoutingConfig {
+            routing_mode: "rules".into(),
+            ..mixed_config()
+        };
+        config.role_models.insert(roles::PLANNER.to_string(), "pro".into());
+        config.role_models.insert(roles::EXECUTOR.to_string(), "flash".into());
+
+        // 重方案门 + 探索中：即使历史非空（triage 已注入取证单）仍属 planner 相位
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut context, "上一步反馈：执行成功");
+        context.record_step_outcome(true);
+        context.plan_gate = Some(crate::agent::context::types::PlanGateProjection {
+            plan_required: true,
+            phase: "exploring".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(
+            AgentRouter::route_for_step(&context, &config, 3).model_id,
+            "model-pro",
+            "批准前的规划相位必须归 planner"
+        );
+
+        // 批准后移交 executor
+        context.plan_gate.as_mut().unwrap().phase = "approved".to_string();
+        assert_eq!(
+            AgentRouter::route_for_step(&context, &config, 4).model_id,
+            "model-flash",
+            "方案批准后执行归 executor"
+        );
+
+        // 轻任务（Auto+direct：未挂重方案门）探索期不占 planner 档
+        let gate = context.plan_gate.as_mut().unwrap();
+        gate.phase = "exploring".to_string();
+        gate.plan_required = false;
+        assert_eq!(
+            AgentRouter::route_for_step(&context, &config, 5).model_id,
+            "model-flash"
+        );
+
+        // 未配置角色钉死时行为不变：plan_required 不影响既有规则路由
+        let bare = ModelRoutingConfig {
+            routing_mode: "rules".into(),
+            ..mixed_config()
+        };
+        context.plan_gate = Some(crate::agent::context::types::PlanGateProjection {
+            plan_required: true,
+            phase: "exploring".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(
+            AgentRouter::route_for_step(&context, &bare, 6).model_id,
+            "model-flash",
+            "无角色配置时相位不参与路由，默认行为不变"
+        );
     }
 
     #[test]

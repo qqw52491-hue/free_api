@@ -3,6 +3,27 @@
 > 纪律：每项控制面改动（门禁/判据/收割/预算/审查契约）在此登记：改了什么、为什么、commit、验证状态。
 > 状态标注：code-green（单测/编译过）| live-green（实弹验证过）| calib-green（基线校准过）| unverified（未验证）
 
+## 阶段十六：判决×执行者档位——相位感知角色路由（2026-09-23）
+
+**性质**：分解路由的最小闭环接线。按 checkpoint 投影的方案相位（而非历史
+非空）解析 planner/executor 角色——triage 在 step 0 前向历史注入取证单，
+旧判法 `turns_history.is_empty()` 让生产会话的规划步永远落不到 planner 档，
+role_models.planner 配置形同虚设。
+
+| 改动 | 位置 | 要点 | 验证 |
+|---|---|---|---|
+| **plan_required 投影** | `context/types`（PlanGateProjection 新字段）/ `checkpoint/plan_ops` | 重方案门成立 = triage 判 technical_plan/expert_panel 或模式为 cross_review/plan_approval；Auto+direct 为 false，轻任务不占强档 | code-green |
+| **相位感知角色路由** | `router.rs` `route_for_step` | `plan_required && phase != approved` → planner；批准后 → executor。仅命中 role_models 显式钉死时生效，未配置时零行为差异（自动路由不变） | code-green（新单测：历史非空+探索中→planner、批准→executor、轻任务→executor、无配置→行为不变） |
+
+**实弹待验**：`--role-models '{"planner":"pro","executor":"flash"}'` 跑 case_20，
+观测点=批准前步骤是否全走 pro、批准后写入是否移交 flash、pro 诊断质量
+（上轮 pro 方案漏判拖拽落盘与徽标标记，属规划质量风险非路由问题）。
+
+**窄题实弹口径修正（同日）**：`case_ft_narrow_imgfix` 10 步 PASS 中 pro 的
+LLM 调用经 agent_llm_calls 核实为 triage 判决/强制首步基线/失败重试升维
+——全部属评测机械件与既有规则，非方案救场/收尾；真实改造与 finish 由
+flash 完成。窄任务执行力证据比 executor_calls 表面数字更干净。
+
 ## 阶段十五：状态卡事实投影补全——取证台账 + 运行遥测（2026-09-23）
 
 **性质**：纯事实投影，非门禁。case_20 双轨对比实证：flash 113 步 113 次读/搜
@@ -24,19 +45,18 @@ token 烧穿仍零方案。pro 靠自发写 11 条 finding 不掉坑，flash 不
 | +台账 | gemini-3.8-flash-high | 113 步烧穿 | **0**（台账 114/114 步注入） | ~2 | 0 | 0 |
 | +台账 | gemini-3.1-pro | 120 步烧穿 | — | 有 | **有**（step 105/112，过审+人工审批） | **chat_artifacts.rs 落 diff** |
 
-裁决：**状态投影对弱模型收敛零收益**——flash 的死因不是「忘了读过什么」
-（同窗口重复读本就只有 4 次），而是「证据→结晶→提方案」的判断链断裂，
-这是能力地板不是投影问题。台账保留依据只剩观测/审计价值（低成本+调试盘好用），
-不再期待行为收益。pro 死于预算耗尽但管线全通（调查→方案→审查→人工→首刀），
-属任务难度（闭卷）+方差。宪法结论再确认：弱执行者开放式任务的唯一出路是
-**判决×执行者档位分解路由**。
+观察：有台账的 flash-high 仍在 113 步触发 token 上限，没有提交方案；
+但旧对照用的是 flash-tiered，不能归因台账「零收益」。只统计完全相同
+path+行窗的重复读取为 4 次，不排除跨行窗/同问题反复检索。pro 也触发
+预算上限，且方案误判了拖拽图片是否已落盘；不能称管线已经充分验证。
 
-**分解路由首次实弹正证据（同日追加，`case_ft_narrow_imgfix`）**：同模型
-flash-high、同判据、同基线，题面换成「已定位+指定改动契约」的窄任务——
-**10 步 4.4min PASS**，轨迹全程定点无漫游（读目标→找三入队点→查 sessionId
-约定→看判据→自验→finish）。对照开放式题面的 113 步烧穿，证明：
-flash 缺的是「自己走到这一步」的收敛判断，不是执行指定修改的能力。
-分解路由从「宪法推断」升级为「有实测背书的方向」。
+**窄题试跑（同日追加，`case_ft_narrow_imgfix`）**：题面直接给出完整
+根因、目标文件和三个入队点，10 步 4.4min 静态判据 PASS。但报告的
+executor_calls 显示 flash-high 8 次 instruction_ready、pro 2 次，
+并非 Flash 单独完成；判据只查源码字符串形状，没有验证图片端到端预览
+或逐路径的真实行为。说明「精确指令有希望」而非「自动分解路由已验证」。
+下一步先复用显式 planner/executor 路由，检验强模型是否能独立从症状
+获得正确方案以及弱模型是否能在不换强模型救场时执行通过。
 
 ## 阶段十四：探索期认知门禁拆除 + retriage 复核通道（2026-09-23）
 
