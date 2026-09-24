@@ -2,7 +2,7 @@
  "id": "case_office_csv_report",
  "title": "办公场景：三季销售 CSV 合并去重生成 Excel 汇总报表",
  "tier": "silver",
- "problem_statement": "【办公资料处理任务】test/eval_cases/fixtures/office_report/input/ 下有三个季度销售 CSV（q1/q2/q3_sales.csv，各 20/22/18 行），其中订单号跨表重复、日期格式三种（MM/DD/YYYY、ISO、DD-MM-YYYY）。\n要求：\n1. 合并三表并按 order_id 去重（重复订单保留先出现的行）；\n2. 生成 output/汇总.xlsx：至少两个 sheet——「明细」放全部去重后记录（含表头），「按月汇总」按订单日期月份聚合（月份+订单数+金额合计）；\n3. 写 output/汇总说明.md：说明三个季度各自原始行数、合并后唯一订单数。\n工具提示：python3 可用，openpyxl 已装（或 uv run --with openpyxl）。\n自验：python3 test/eval_cases/fixtures/office_report/judge_report.py 退出码 0。",
+ "problem_statement": "【办公资料处理任务】office_materials/csv_report/ 下有三个季度销售 CSV（q1/q2/q3_sales.csv，各 20/22/18 行），其中订单号跨表重复、日期格式三种（MM/DD/YYYY、ISO、DD-MM-YYYY）。\n要求：\n1. 合并三表并按 order_id 去重（重复订单保留先出现的行）；\n2. 生成 output/汇总.xlsx：至少两个 sheet——「明细」放全部去重后记录（含表头），「按月汇总」按订单日期月份聚合（月份+订单数+金额合计）；\n3. 写 output/汇总说明.md：说明三个季度各自原始行数、合并后唯一订单数。\n工具提示：python3 可用，openpyxl 已装（或 uv run --with openpyxl）。",
  "judge_kind": "command",
  "verify_command": "python3 test/eval_cases/fixtures/office_report/judge_report.py",
  "expected_exit_code": 0,
@@ -11,5 +11,6 @@
  "plan_mode": "off",
  "max_prompt_tokens": 3000000,
  "judge_semantics": "办公场景真实操作题：输入已就位、判据只核输出物（xlsx 行数/sheet 结构/说明覆盖），不测代码修改。PASS=模型能用 shell+python 完成数据合并→xlsx 产出→说明文档的完整办公链路。",
- "base_commit": "4e5dc63"
+ "base_commit": "4e5dc63",
+ "test_patch": "test/eval_cases/patches/case_office_report_judge.test.patch"
 }
