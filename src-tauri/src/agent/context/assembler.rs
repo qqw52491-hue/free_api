@@ -53,10 +53,17 @@ impl SandwichContext {
         // 变化点集中在末尾，绝对不砸前面的长缓存；且离输出端最近，强化注意力防遗忘
         // ════════════════════════════════════════════════════════════════
         let mut bottom_state_card = String::new();
+        // 状态卡档位：Minimal 只保留门禁面向段（计划/目标块/todo/契约/验证/plan_gate），
+        // 定向辅助段（工具指针/摘要/失败记录/遥测/台账/记忆/资源）仅 Full 渲染。
+        // 契约与验证等未闭合义务任何档位都必须可见，否则模型无法闭合、finish 死锁。
+        let card_full = self.budget_config.state_card_level
+            == crate::agent::context::budget::StateCardLevel::Full;
 
         // (0) 活跃工具指针（任务目标已静态锚定在 M1，底部卡片仅保留动态变化的指针）
-        if let Some(tool) = &self.active_tool {
-            bottom_state_card.push_str(&format!("【当前活跃工具】: {}\n\n", tool));
+        if card_full {
+            if let Some(tool) = &self.active_tool {
+                bottom_state_card.push_str(&format!("【当前活跃工具】: {}\n\n", tool));
+            }
         }
 
         // (1) 阶段计划
@@ -93,7 +100,7 @@ impl SandwichContext {
 
         // (2) 全局进度摘要：完整版已事件化入历史（set_progress_summary），
         // 尾部只携带首行+版本指针；事件缺失（旧会话/异常路径）回退全文。
-        if !self.progress_summary.is_empty() {
+        if card_full && !self.progress_summary.is_empty() {
             if self.last_persisted_summary.as_deref() == Some(self.progress_summary.as_str()) {
                 let first_line: String = self
                     .progress_summary
@@ -115,51 +122,53 @@ impl SandwichContext {
             }
         }
 
-        // (3) 避坑指南（失败教训）
-        bottom_state_card.push_str(&ContextRenderer::render_failed_attempts(
-            &self.failed_attempts,
-        ));
+        if card_full {
+            // (3) 避坑指南（失败教训）
+            bottom_state_card.push_str(&ContextRenderer::render_failed_attempts(
+                &self.failed_attempts,
+            ));
 
-        // (3.1) 运行遥测（纯事实：当前步号 + 累计 token + 当前上下文规模；
-        // 只报数不带节奏暗示——是否该收敛由模型判断，宿主不代理认知）
-        bottom_state_card.push_str(&ContextRenderer::render_run_telemetry(
-            self.current_step_id,
-            self.run_prompt_tokens,
-            self.run_completion_tokens,
-            self.last_reported_prompt_tokens,
-            self.context_window_tokens,
-        ));
+            // (3.1) 运行遥测（纯事实：当前步号 + 累计 token + 当前上下文规模；
+            // 只报数不带节奏暗示——是否该收敛由模型判断，宿主不代理认知）
+            bottom_state_card.push_str(&ContextRenderer::render_run_telemetry(
+                self.current_step_id,
+                self.run_prompt_tokens,
+                self.run_completion_tokens,
+                self.last_reported_prompt_tokens,
+                self.context_window_tokens,
+            ));
 
-        // (4) 不可逆操作安全台账
-        bottom_state_card.push_str(&AuditLedger::render_ledger(&self.side_effects));
+            // (4) 不可逆操作安全台账
+            bottom_state_card.push_str(&AuditLedger::render_ledger(&self.side_effects));
 
-        // (4.1) 取证台账（事实投影：已读/已搜足迹 + output_id 句柄；
-        // 跨压缩保留，正是脱水后最需要的「读过什么、去哪取回」索引）
-        bottom_state_card.push_str(&ContextRenderer::render_evidence_ledger(
-            &self.evidence_ledger,
-        ));
+            // (4.1) 取证台账（事实投影：已读/已搜足迹 + output_id 句柄；
+            // 跨压缩保留，正是脱水后最需要的「读过什么、去哪取回」索引）
+            bottom_state_card.push_str(&ContextRenderer::render_evidence_ledger(
+                &self.evidence_ledger,
+            ));
 
-        // (5) 核心事实记忆库（按 BTreeMap 严格确定性字母序）
-        bottom_state_card.push_str(&MemoryManager::render_memory_card(&self.memories));
+            // (5) 核心事实记忆库（按 BTreeMap 严格确定性字母序）
+            bottom_state_card.push_str(&MemoryManager::render_memory_card(&self.memories));
 
-        // (6) 活跃资源作用域契约；独立于历史与压缩，每轮均从事实状态投影。
-        let resource_scope_projection = self.resource_scope.render_projection();
-        if !resource_scope_projection.is_empty() {
-            bottom_state_card.push_str(&format!("{}\n\n", resource_scope_projection));
-        }
-
-        // (6.1) 项目受管文件清单与句柄 (Project Resource Manifest)
-        // 动态放在尾部状态卡，既能让模型实时感知最新文件，又绝对不破坏 M0 顶层长前缀缓存！
-        if let Some(manifest) = &self.project_resource_manifest {
-            if !manifest.is_empty() {
-                bottom_state_card.push_str(&format!("{}\n\n", manifest));
+            // (6) 活跃资源作用域契约；独立于历史与压缩，每轮均从事实状态投影。
+            let resource_scope_projection = self.resource_scope.render_projection();
+            if !resource_scope_projection.is_empty() {
+                bottom_state_card.push_str(&format!("{}\n\n", resource_scope_projection));
             }
-        }
 
-        // (7) 会话任务数据区目录 (TaskStore 资源摘要)
-        bottom_state_card.push_str(&ContextRenderer::render_task_resources(
-            &self.task_resources,
-        ));
+            // (6.1) 项目受管文件清单与句柄 (Project Resource Manifest)
+            // 动态放在尾部状态卡，既能让模型实时感知最新文件，又绝对不破坏 M0 顶层长前缀缓存！
+            if let Some(manifest) = &self.project_resource_manifest {
+                if !manifest.is_empty() {
+                    bottom_state_card.push_str(&format!("{}\n\n", manifest));
+                }
+            }
+
+            // (7) 会话任务数据区目录 (TaskStore 资源摘要)
+            bottom_state_card.push_str(&ContextRenderer::render_task_resources(
+                &self.task_resources,
+            ));
+        }
 
         // (8) 任务清单 (Todo List)
         bottom_state_card.push_str(&ContextRenderer::render_todo_list(&self.todo_list));

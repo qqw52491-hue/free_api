@@ -77,6 +77,25 @@ pub struct ContextBudgetConfig {
     pub recent_protected_ratio: f64,
     /// 防爆窗安全防御余量比例（例如 0.10）
     pub safety_margin_ratio: f64,
+    /// 尾部状态卡档位（旧配置无此字段 → 默认 Full 保持原行为）
+    #[serde(default = "default_state_card_full")]
+    pub state_card_level: StateCardLevel,
+}
+
+const fn default_state_card_full() -> StateCardLevel {
+    StateCardLevel::Full
+}
+
+/// 尾部状态卡渲染档位。
+/// 门禁面向段（计划/目标块/todo/契约/验证/plan_gate）任何档位都必须渲染——
+/// 不显示模型就无从闭合义务，finish 会死锁；裁剪只作用于定向辅助段
+/// （失败记录/台账/取证/记忆/遥测等弱模型防打转脚手架，强模型可省缓存 miss）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StateCardLevel {
+    /// 仅门禁面向段——强模型/省钱模式
+    Minimal,
+    /// 门禁段 + 全部定向辅助段——弱模型默认
+    Full,
 }
 
 impl Default for ContextBudgetConfig {
@@ -98,6 +117,7 @@ impl ContextBudgetConfig {
             low_watermark_ratio: 0.50,
             recent_protected_ratio: 0.25,
             safety_margin_ratio: 0.10,
+            state_card_level: StateCardLevel::Full,
         }
     }
 
@@ -112,6 +132,7 @@ impl ContextBudgetConfig {
             low_watermark_ratio: 0.35,
             recent_protected_ratio: 0.20,
             safety_margin_ratio: 0.15,
+            state_card_level: StateCardLevel::Minimal,
         }
     }
 
@@ -126,6 +147,7 @@ impl ContextBudgetConfig {
             low_watermark_ratio: 0.25,
             recent_protected_ratio: 0.15,
             safety_margin_ratio: 0.15,
+            state_card_level: StateCardLevel::Minimal,
         }
     }
 }
