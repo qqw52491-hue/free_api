@@ -39,11 +39,14 @@ impl Summarizer for RuleBasedSummarizer {
 }
 
 /// 异步调用 LLM 生成语义级继续工作摘要（带 20s 硬超时与多格式兼容提取）
-/// 摘要请求复用会话真实消息作为前缀（system+历史逐字节命中 provider 前缀缓存），
-/// 摘要指令追加在尾部——整段历史近零成本送达摘要模型，比另起炉灶组装便宜一个量级。
-/// 同时解除 12K 截断盲区：全文缓存命中后无需再为省 token 只送开头一段。
+/// 摘要请求复用会话真实前缀（system+M1+历史逐字节命中 provider 前缀缓存），
+/// 摘要指令追加在尾部——整段历史近零成本送达摘要模型。
+/// 前缀构造必须复刻 assemble_messages 的逐字节规则（含 M1 与历史首条去重），
+/// 差一个字节即从第 0 token 起全部 miss。
 pub async fn generate_llm_summary(
     config: &ModelConfig,
+    system_prompt: &str,
+    user_goal: &str,
     history_messages: &[ChatMessage],
 ) -> Result<String, String> {
     if history_messages.is_empty() {
@@ -53,13 +56,32 @@ pub async fn generate_llm_summary(
     let url = config.endpoint_url();
     let headers = config.auth_headers();
 
-    let mut messages: Vec<serde_json::Value> = history_messages
-        .iter()
-        .map(|m| serde_json::to_value(m).unwrap_or_else(|_| json!({"role": m.role, "content": ""})))
-        .collect();
-    messages.push(json!({
-        "role": "user",
-        "content": "【上下文压缩指令】以上是本 Agent 执行长程任务的完整历史（含步骤计划、工具调用、执行输出与报错）。\n\
+    let mut msgs: Vec<ChatMessage> = Vec::new();
+    // M0 system + M1 任务目标锚点：与 assemble_messages 完全同构
+    msgs.push(ChatMessage {
+        role: "system".to_string(),
+        content: json!(system_prompt),
+    });
+    if !user_goal.is_empty() {
+        msgs.push(ChatMessage {
+            role: "user".to_string(),
+            content: json!(format!("【任务目标】\n{}", user_goal)),
+        });
+    }
+    // 复刻 M1/历史首条去重：首条历史 == user_goal 时跳过（同 assemble_messages）
+    let history_slice = if let Some(first) = history_messages.first() {
+        if first.role == "user" && first.content.as_str() == Some(user_goal) {
+            &history_messages[1..]
+        } else {
+            history_messages
+        }
+    } else {
+        history_messages
+    };
+    msgs.extend(history_slice.iter().cloned());
+    msgs.push(ChatMessage {
+        role: "user".to_string(),
+        content: json!("【上下文压缩指令】以上是本 Agent 执行长程任务的完整历史（含步骤计划、工具调用、执行输出与报错）。\n\
         请提取并生成一份高度凝练的【阶段性任务继续摘要】，严格包含以下 4 个结构化板块：\n\n\
         ## 1. 已完成事项与关键产物\n\
         - 简明列出已成功完成的阶段、生成的文件路径、创建的数据表等\n\n\
@@ -69,8 +91,18 @@ pub async fn generate_llm_summary(
         - 列出失败过的操作、错误的参数/action、服务端报错及后续如何纠正的（避免后续步骤重蹈覆辙）\n\n\
         ## 4. 未完成事项与下一步建议\n\
         - 基于前面的进展，明确指出当前尚未完成的工作点与建议方向\n\n\
-        ⚠️ 注意：禁止流水账重复，只保留具有决策指导意义的硬事实与结论；如有 output_id 引用、文件路径或行号请准确保留。"
-    }));
+        ⚠️ 注意：禁止流水账重复，只保留具有决策指导意义的硬事实与结论；如有 output_id 引用、文件路径或行号请准确保留。"),
+    });
+
+    // provider 归一化与真实请求同口径（严格交替路由合并连续同角色），
+    // 保证线上前缀 = 真实请求线上前缀；不合并不止可能被 422，还会破坏命中。
+    if crate::agent::utils::llm_client::provider_requires_alternating_roles(config) {
+        msgs = crate::agent::context::assembler::consolidate_consecutive_messages(msgs);
+    }
+    let messages: Vec<serde_json::Value> = msgs
+        .iter()
+        .map(|m| serde_json::to_value(m).unwrap_or_else(|_| json!({"role": m.role, "content": ""})))
+        .collect();
 
     let effective_max_tokens = if config.max_tokens > 0 && config.max_tokens < 4096 {
         4096
@@ -156,6 +188,9 @@ pub async fn generate_llm_summary(
 /// 第二层：LLM 提炼语义摘要 (目标、决策、教训、待办)；失败时优雅降级
 pub struct HybridSummarizer<'a> {
     pub model_config: Option<&'a ModelConfig>,
+    /// 摘要请求前缀复用所需的静态锚点（缺省时退化为无 system/M1 的普通请求）
+    pub system_prompt: Option<&'a str>,
+    pub user_goal: Option<&'a str>,
 }
 
 impl<'a> Summarizer for HybridSummarizer<'a> {
@@ -166,8 +201,12 @@ impl<'a> Summarizer for HybridSummarizer<'a> {
         if let Some(cfg) = self.model_config {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let cfg_clone = cfg.clone();
+                let sys = self.system_prompt.unwrap_or_default().to_string();
+                let goal = self.user_goal.unwrap_or_default().to_string();
                 let llm_res = tokio::task::block_in_place(|| {
-                    handle.block_on(async { generate_llm_summary(&cfg_clone, messages).await })
+                    handle.block_on(async {
+                        generate_llm_summary(&cfg_clone, &sys, &goal, messages).await
+                    })
                 });
                 match llm_res {
                     Ok(summary) => {
@@ -429,6 +468,9 @@ impl SandwichContext {
                 None
             }
         });
+        // 摘要请求前缀必须等于「压缩前最后一次真实请求」的前缀——
+        // 目标提升前的旧 user_goal 才是当时 M1 的字节，新目标是给后续请求用的。
+        let goal_before_promotion = self.user_goal.clone();
         if let Some(new_goal) = promoted_goal {
             println!(
                 "🎯 [Compaction] 提升最新任务目标到 M1 静态区: {:?}",
@@ -441,6 +483,8 @@ impl SandwichContext {
         // ── 4. 使用双层混合总结器进行安全归档 ──
         let summarizer = HybridSummarizer {
             model_config: self.compaction_model_config.as_ref(),
+            system_prompt: Some(&self.system_prompt),
+            user_goal: Some(&goal_before_promotion),
         };
         let archive_text = summarizer
             .summarize(&to_compact)

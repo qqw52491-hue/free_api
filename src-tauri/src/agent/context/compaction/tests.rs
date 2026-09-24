@@ -74,7 +74,11 @@ fn test_rule_based_summarizer_never_fails() {
 
 #[test]
 fn test_hybrid_summarizer_falls_back_gracefully() {
-    let summarizer = HybridSummarizer { model_config: None };
+    let summarizer = HybridSummarizer {
+        model_config: None,
+        system_prompt: None,
+        user_goal: None,
+    };
     let messages = vec![
         ChatMessage {
             role: "assistant".to_string(),

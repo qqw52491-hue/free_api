@@ -761,7 +761,7 @@ mod tests {
 /// Anthropic Messages API 以交替 turn 训练（现行服务端会把连续 turn 自动
 /// 合并为单 turn，历史上曾直接 422，保守起见仍客户端归并）。OpenAI 兼容
 /// 路由接受连续同角色消息，保持原序列以稳定前缀缓存。
-fn provider_requires_alternating_roles(config: &crate::llm::ModelConfig) -> bool {
+pub(crate) fn provider_requires_alternating_roles(config: &crate::llm::ModelConfig) -> bool {
     match config.requires_alternating_roles {
         1 => true,
         0 => false,
