@@ -197,10 +197,25 @@
 
         let formatted = AuditLedger::format_side_effect_params(&params);
         assert!(formatted.contains("/home/user/project/src/main.rs"));
-        assert!(formatted.contains("[...已写入内容已持久化...]"));
+        assert!(formatted.contains("[...content 载荷已持久化，略...]"));
         // 必须能够被重新解析为合法 JSON
         let parsed: serde_json::Value = serde_json::from_str(&formatted).unwrap();
         assert_eq!(parsed["path"], "/home/user/project/src/main.rs");
+
+        // edit 载荷键（target_content/replacement_content）与超长命令同样瘦身
+        let edit_params = json!({
+            "action": "edit",
+            "path": "src/foo.rs",
+            "target_content": "Y".repeat(300),
+            "replacement_content": "Z".repeat(300),
+        });
+        let formatted_edit = AuditLedger::format_side_effect_params(&edit_params);
+        assert!(!formatted_edit.contains("YYYY"));
+        assert!(formatted_edit.contains("target_content 载荷已持久化"));
+        assert!(formatted_edit.contains("replacement_content 载荷已持久化"));
+        // 短参数原样保留
+        let small = json!({"command": "cargo check"});
+        assert!(AuditLedger::format_side_effect_params(&small).contains("cargo check"));
     }
 
     #[test]

@@ -1295,16 +1295,29 @@ impl AuditLedger {
     }
 
     /// 提取不可逆副作用的干净结构化参数元数据（保留合法完整的 JSON，绝不用 ... 截断破坏元数据）
+    ///
+    /// 瘦身规则改为按值体积截断（而非按字段名）：edit 的 target_content/replacement_content、
+    /// write 的 content、带 heredoc 的超长 shell 命令等载荷原文一律占位——台账只需
+    /// 「发生过写入+碰了哪个文件」，载荷真凭据在 step_logs/CAS，不进上下文。
     pub fn format_side_effect_params(params: &serde_json::Value) -> String {
+        const MAX_FIELD_CHARS: usize = 200;
         if let serde_json::Value::Object(map) = params {
             let mut cleaned = map.clone();
-            // 如果包含庞大的正文内容（如 write_file 的整个文件 content），精简 content 字段避免打爆台账，但保留 path 等核心参数
-            if let Some(content) = cleaned.get("content") {
-                if content.as_str().map(|s| s.len() > 120).unwrap_or(false) {
-                    cleaned.insert(
-                        "content".to_string(),
-                        serde_json::json!("[...已写入内容已持久化...]"),
-                    );
+            for (key, value) in cleaned.iter_mut() {
+                let oversized = match value {
+                    serde_json::Value::String(s) => s.chars().count() > MAX_FIELD_CHARS,
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                        serde_json::to_string(value)
+                            .map(|s| s.chars().count() > MAX_FIELD_CHARS)
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                };
+                if oversized {
+                    *value = serde_json::json!(format!(
+                        "[...{} 载荷已持久化，略...]",
+                        key
+                    ));
                 }
             }
             serde_json::to_string(&cleaned).unwrap_or_else(|_| params.to_string())
