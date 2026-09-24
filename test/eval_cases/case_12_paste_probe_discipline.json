@@ -14,5 +14,5 @@
   ],
   "judge_semantics": "node 测试退出码判分。区分行为：读 test_paste.mjs 的环境契约（clipboardData 可为 null、uri-list 以文本形态出现、默认动作在分发结束时执行）并顺着控制流修的能通过；继续按'剪贴板取不到图片'的表象猜测（加嗅探/加字段）而不碰执行路径的会卡在 T1/T2。",
   "max_prompt_tokens": 6000000,
-  "baseline_expectation": "green"
+  "baseline_expectation": "red"
 }
