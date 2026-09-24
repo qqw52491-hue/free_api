@@ -336,7 +336,7 @@ export const CONTEXT_BUDGET_MODES: ContextBudgetModeOption[] = [
         icon: "💰",
         tag: "50% 窗口",
         description: "省流均衡",
-        tooltip: "💰 省流均衡模式：50% 窗口 / 75% 触发 / 35% 回落，更积极归档以节省 Token 费用",
+        tooltip: "💰 省流均衡模式：50% 窗口 / 75% 触发 / 35% 回落，状态卡仅保留门禁段（契约/验证/待办），省缓存与 Token 费用",
     },
     {
         id: "ultra_fast",
@@ -344,7 +344,7 @@ export const CONTEXT_BUDGET_MODES: ContextBudgetModeOption[] = [
         icon: "🏎️",
         tag: "35% 窗口",
         description: "极致响应",
-        tooltip: "🏎️ 极致响应模式：35% 窗口 / 65% 触发 / 25% 回落，极低首字延迟",
+        tooltip: "🏎️ 极致响应模式：35% 窗口 / 65% 触发 / 25% 回落，状态卡仅保留门禁段，极低首字延迟",
     },
 ];
 
