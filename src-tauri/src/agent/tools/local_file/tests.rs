@@ -91,6 +91,33 @@ fn test_local_file_invalid_action_rejected() {
 }
 
 #[test]
+fn test_toolname_in_action_slot_recovers_as_read() {
+    let ws = temp_dir();
+    let db = mock_db();
+    std::fs::write(ws.join("note.txt"), "hello").unwrap();
+
+    // 读形状（行窗、无内容字段）→ 按缺省 read 处置，不再报错
+    let p = json!({"action": "local_file", "path": "note.txt", "start_line": 1, "end_line": 5});
+    let res = dispatch(&db, "s1", "local_file", &p, Some(&ws));
+    assert!(res.success, "toolname-action 读形状应恢复为 read，实得: {}", res.stderr);
+    assert!(res.stdout.contains("hello"));
+
+    // 仅 path 无行窗——仍按 read 恢复（read 是 action 缺省值且非破坏）
+    let p2 = json!({"action": "local_file", "path": "note.txt"});
+    let res2 = dispatch(&db, "s1", "local_file", &p2, Some(&ws));
+    assert!(res2.success, "toolname-action 仅 path 也应恢复 read");
+
+    // 带内容字段（写意图不明）→ 不猜，回错并附范例
+    let p3 = json!({"action": "local_file", "path": "note.txt", "content": "x"});
+    let res3 = dispatch(&db, "s1", "local_file", &p3, Some(&ws));
+    assert!(!res3.success);
+    assert!(res3.stderr.contains("非法动作"));
+    assert!(res3.stderr.contains("action='read'"), "错误应含矫正范例: {}", res3.stderr);
+
+    let _ = std::fs::remove_dir_all(ws);
+}
+
+#[test]
 fn test_optimistic_lock_normal_read_write_succeeds() {
     let ws = temp_dir();
     let db = mock_db();

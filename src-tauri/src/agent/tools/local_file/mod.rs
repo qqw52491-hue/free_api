@@ -50,15 +50,34 @@ pub fn dispatch(
         "write" => execute_write(ws_root, session_id, params),
         "edit" => execute_edit(ws_root, session_id, params),
         "list" => execute_list(ws_root, session_id, params),
-        unknown => DispatchResult { view: None,
-            stdout: String::new(),
-            stderr: format!(
-                "❌ [非法动作] local_file 不支持 action='{}'。允许的 action 必须严格为：read、write、edit、list 之一。",
-                unknown
-            ),
-            success: false,
-            route: "local_file:invalid_action".to_string(),
-        },
+        unknown => {
+            // 模型常见格式错误（多模型实测复现）：把工具名误填进 action 槽
+            // （action='local_file'）。该形状可机械判定——没有任何工具的 action
+            // 等于自己的名字。参数呈纯读形状（有行窗或无内容字段）时按缺省 read
+            // 处置：read 非破坏且本就是 action 缺省值，纠错比回错省一整轮往返；
+            // 带内容字段（写/改意图不明）不猜，回错并附正确范例。
+            let write_shaped = params.get("content").is_some()
+                || params.get("target_content").is_some()
+                || params.get("replacement_content").is_some();
+            if unknown == "local_file" && !write_shaped {
+                execute_read(ws_root, session_id, params)
+            } else {
+                let hint = if unknown == "local_file" {
+                    "（你把工具名填进了 action。若意图是读取：action='read'；写入：action='write'+content；替换：action='edit'+target_content+replacement_content；列目录：action='list'）"
+                } else {
+                    ""
+                };
+                DispatchResult { view: None,
+                    stdout: String::new(),
+                    stderr: format!(
+                        "❌ [非法动作] local_file 不支持 action='{}'。允许的 action 必须严格为：read、write、edit、list 之一。{}",
+                        unknown, hint
+                    ),
+                    success: false,
+                    route: "local_file:invalid_action".to_string(),
+                }
+            }
+        }
     }
 }
 
