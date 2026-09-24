@@ -151,11 +151,18 @@ pub(super) async fn dispatch_local_tool(
                 ResourceOperation::Read
             },
         ) {
-            let annotation = scope_observation.render();
-            if dispatch_result.success {
-                dispatch_result.stdout = format!("{}\n\n{}", dispatch_result.stdout, annotation);
-            } else {
-                dispatch_result.stderr = format!("{}\n\n{}", dispatch_result.stderr, annotation);
+            // relation=unknown 的观测对模型零信息量（"不知道"教不了任何动作），
+            // 实测每条失败输出尾巴多 5 行噪音放大恐慌重试——内部记账保留，
+            // 只在有真实信号（inside 确认 / outside 写守卫）时才注入输出。
+            if scope_observation.relation != crate::agent::context::resource_scope::ResourceRelation::Unknown {
+                let annotation = scope_observation.render();
+                if dispatch_result.success {
+                    dispatch_result.stdout =
+                        format!("{}\n\n{}", dispatch_result.stdout, annotation);
+                } else {
+                    dispatch_result.stderr =
+                        format!("{}\n\n{}", dispatch_result.stderr, annotation);
+                }
             }
         }
         // 无进展重复检测：只在"相同工具+相同参数+相同输出/失败"反复发生时注入

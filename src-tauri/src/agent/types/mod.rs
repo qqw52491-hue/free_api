@@ -556,6 +556,41 @@ impl AgentInstruction {
         self.submit_plan.is_some() && !self.has_executable_entry()
     }
 
+    /// 顶层动作误写为工具调用的兼容解包：{"tool":"submit_plan","command":{...}}
+    /// → submit_plan 字段（prepare_finish 同理）。实测跨场复犯的格式摩擦——
+    /// 语义与独立动作完全等价，就地归一比打回重学省一整轮。
+    /// 仅在恰好是「单工具调用且工具名为顶层动作」时解包；payload 不合法
+    /// 返回 None 维持原样（走未知工具报错）。混发（另带 tool/commands）
+    /// 不解包——那条歧义仍归协议误用分支处理。
+    pub fn unwrap_standalone_tool_alias(&self) -> Option<AgentInstruction> {
+        if self.submit_plan.is_some()
+            || self.prepare_finish.is_some()
+            || self.parallel.is_some()
+            || self.plan_tree.is_some()
+            || !self.commands.is_empty()
+            || self.has_dispatches()
+        {
+            return None;
+        }
+        let tool = self.tool.as_deref().map(str::trim)?;
+        if !matches!(tool, "submit_plan" | "prepare_finish") {
+            return None;
+        }
+        let mut next = self.clone();
+        let payload = next.command.take().or_else(|| next.params.take())?;
+        match tool {
+            "submit_plan" => {
+                next.submit_plan = serde_json::from_value(payload).ok()?;
+            }
+            _ => {
+                next.prepare_finish = serde_json::from_value(payload).ok()?;
+            }
+        }
+        next.tool = None;
+        next.action = None;
+        Some(next)
+    }
+
     /// 是否为「纯终态预检」：携带 prepare_finish 但没有任何工具入口。
     /// 预检是独立的评估动作，由宿主在主循环门禁段处理，不与工具调用混发。
     pub fn is_bare_prepare_finish(&self) -> bool {

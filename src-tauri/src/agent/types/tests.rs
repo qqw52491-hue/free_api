@@ -238,3 +238,51 @@
         assert!(mixed.has_executable_entry());
         assert!(!mixed.is_bare_prepare_finish());
     }
+
+    #[test]
+    fn standalone_action_wrapped_as_tool_is_unwrapped() {
+        // {"tool":"submit_plan","command":{...}} → 解包为顶层 submit_plan
+        let inst: AgentInstruction = serde_json::from_value(json!({
+            "tool": "submit_plan",
+            "command": {
+                "plan_summary": "修复菜单样式：重写 .budget-dropdown-menu 定位",
+                "target_blocks": [{"id":"b1","objective":"修样式","checklist":["验证"],"scope_files":[]}],
+                "target_files": ["src/components/ProjectWorkspace.vue"]
+            }
+        }))
+        .unwrap();
+        let unwrapped = inst
+            .unwrap_standalone_tool_alias()
+            .expect("wrapped submit_plan should unwrap");
+        assert!(unwrapped.submit_plan.is_some());
+        assert!(unwrapped.is_bare_plan_submission());
+        assert!(!unwrapped.has_executable_entry());
+
+        // params 承载同样解包
+        let inst_p: AgentInstruction = serde_json::from_value(json!({
+            "tool": "prepare_finish",
+            "params": { "summary": "done" }
+        }))
+        .unwrap();
+        let u2 = inst_p
+            .unwrap_standalone_tool_alias()
+            .expect("wrapped prepare_finish should unwrap");
+        assert!(u2.is_bare_prepare_finish());
+
+        // 非顶层动作名 → 不解包
+        let normal: AgentInstruction = serde_json::from_value(json!({
+            "tool": "search",
+            "command": {"query": "x"}
+        }))
+        .unwrap();
+        assert!(normal.unwrap_standalone_tool_alias().is_none());
+
+        // 混发（submit_plan + 真工具）→ 不解包，留协议误用分支判
+        let mixed: AgentInstruction = serde_json::from_value(json!({
+            "tool": "submit_plan",
+            "command": {"plan_summary": "x"},
+            "commands": [{"tool": "search", "command": {"query": "y"}}]
+        }))
+        .unwrap();
+        assert!(mixed.unwrap_standalone_tool_alias().is_none());
+    }

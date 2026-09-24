@@ -121,6 +121,16 @@ pub async fn run_tool_phase(
     rx: &mut mpsc::Receiver<HumanControl>,
     interrupt_rx: &mut watch::Receiver<u64>,
 ) -> Result<DispatchResult, String> {
+    // 顶层动作误写为工具调用的兼容解包：{"tool":"submit_plan","command":{...}}
+    // 实测跨场复犯的格式摩擦，就地归一为独立动作（语义等价），免打回重学。
+    let normalized_inst;
+    let inst = match inst.unwrap_standalone_tool_alias() {
+        Some(n) => {
+            normalized_inst = n;
+            &normalized_inst
+        }
+        None => inst,
+    };
     let instruction_tool = inst.get_tool();
     let instruction_action = inst.get_action();
     crate::agent::control::mark_stage(
