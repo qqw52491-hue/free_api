@@ -343,6 +343,20 @@ pub async fn spawn_child_reviewer(
                 &stage_key,
                 &format!("child_task:llm_call:{}", llm_call_index),
             );
+            // 心跳：LLM 调用开始的动作事件——审查循环此前全程静默，
+            // 前端只见流式 chunk，provider 慢/不流式时表现为"假死"。
+            if let Some(ref handle) = app_handle {
+                let _ = handle.emit(
+                    &format!("agent-progress-{}", session_id_clone),
+                    json!({
+                        "type": "child_reviewer_action",
+                        "child_run_id": &child_run_id_clone,
+                        "step": llm_call_index,
+                        "action": "deliberate",
+                        "params": { "round": llm_call_index },
+                    }),
+                );
+            }
             let call = llm::stream_with_retry(
                 &config,
                 &messages,
@@ -485,6 +499,19 @@ pub async fn spawn_child_reviewer(
                         &stage_key,
                         &format!("child_task:tool:{}", tool_name),
                     );
+                    // 取证动作事件：让前端步骤链实时显示「审查员在读什么」
+                    if let Some(ref handle) = app_handle {
+                        let _ = handle.emit(
+                            &format!("agent-progress-{}", session_id_clone),
+                            json!({
+                                "type": "child_reviewer_action",
+                                "child_run_id": &child_run_id_clone,
+                                "step": tool_steps_used + 1,
+                                "action": &tool_name,
+                                "params": &req,
+                            }),
+                        );
+                    }
                     let observation = match crate::agent::review_tools::execute(
                         &workspace_root_owned,
                         Some(&session_tmp_owned),

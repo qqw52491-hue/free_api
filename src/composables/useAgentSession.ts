@@ -1120,16 +1120,33 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             return;
         }
 
-        // 👣 异步子 Agent 单步动作通知 (动态步骤链)
-        if (eventType === "child_worker_action") {
+        // 👣 异步子 Agent 单步动作通知 (动态步骤链)——worker 与 reviewer 同构
+        if (eventType === "child_worker_action" || eventType === "child_reviewer_action") {
+            const isReviewerAction = eventType === "child_reviewer_action";
             const childRunId = toText(payload.child_run_id);
             const stepNum = Number(payload.step) || 1;
             const action = toText(payload.action);
             const params = payload.params;
 
             let worker = childRunId ? teamWorkers.value.find((w) => w.id === childRunId) : undefined;
-            if (!worker && (!childRunId || childRunId === "worker-1")) {
-                worker = teamWorkers.value.find((w) => w.role === "worker");
+            if (!worker && (!childRunId || childRunId === "worker-1" || childRunId === "reviewer-1")) {
+                worker = teamWorkers.value.find((w) => isReviewerAction ? w.role === "reviewer" : w.role === "worker");
+            }
+            // 审查员动作先于卡片创建时兜底建卡——否则静默丢事件=用户视角假死
+            if (!worker && isReviewerAction && childRunId) {
+                worker = {
+                    id: childRunId,
+                    name: "代码质量审查员",
+                    role: "reviewer",
+                    roleLabel: "审查员",
+                    status: "running",
+                    currentStep: "正在审查...",
+                    currentTool: "child_reviewer",
+                    progress: 40,
+                    startedAt: Date.now(),
+                    thought: "",
+                };
+                teamWorkers.value.push(worker);
             }
             if (worker) {
                 if (!worker.steps) {
@@ -1148,11 +1165,15 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 });
 
                 let title = `执行 ${action}`;
-                if (params && typeof params === "object") {
+                if (action === "deliberate") {
+                    title = `生成审查判决（第 ${(params as any)?.round || stepNum} 轮）`;
+                } else if (params && typeof params === "object") {
                     const p = params as any;
                     if (p.path) title = `${action}: ${p.path}`;
                     else if (p.command) title = `运行命令: ${p.command}`;
                     else if (p.query) title = `检索: ${p.query}`;
+                    else if (p.pattern) title = `检索: ${p.pattern}`;
+                    else if (p.id) title = `重跑验证: ${p.id}`;
                 }
 
                 worker.steps.push({
