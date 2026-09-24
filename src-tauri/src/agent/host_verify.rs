@@ -19,6 +19,51 @@ fn tail(s: &str, max: usize) -> String {
     }
 }
 
+/// 验证命令的工作目录解析：模型/审查员声明的 verify 命令常是裸工具调用
+/// （如 `cargo test --lib`），而仓库 manifest 常在子目录（如 src-tauri/）。
+/// 在 worktree 根裸跑必然 "could not find manifest" —— 实测一场 finish 被同一
+/// 无效命令拦 12 次。项目根是机械事实：按命令工具链找 manifest，单一命中才改
+/// 用该目录；根目录已有 manifest 或多义时保持现状不猜。
+fn resolve_verify_dir(workspace: &Path, cmd: &str) -> std::path::PathBuf {
+    let head = cmd.trim_start();
+    // 已显式 cd 的命令尊重作者意图，不干预
+    if head.starts_with("cd ") {
+        return workspace.to_path_buf();
+    }
+    let manifest: &str = if head.starts_with("cargo ") || head.starts_with("cargo-") {
+        "Cargo.toml"
+    } else if head.starts_with("npm ")
+        || head.starts_with("pnpm ")
+        || head.starts_with("yarn ")
+        || head.starts_with("bun ")
+        || head.starts_with("npx ")
+        || head.starts_with("vitest")
+        || head.starts_with("jest")
+    {
+        "package.json"
+    } else if head.starts_with("pytest") || head.starts_with("python -m pytest") {
+        "pyproject.toml"
+    } else if head.starts_with("go test") || head.starts_with("go build") {
+        "go.mod"
+    } else {
+        return workspace.to_path_buf();
+    };
+    if workspace.join(manifest).exists() {
+        return workspace.to_path_buf();
+    }
+    // 只下探一层：恰好一个直接子目录含该 manifest 时才采用，多义不猜
+    let mut hits = std::fs::read_dir(workspace)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir() && e.path().join(manifest).exists())
+        .map(|e| e.path());
+    match (hits.next(), hits.next()) {
+        (Some(dir), None) => dir,
+        _ => workspace.to_path_buf(),
+    }
+}
+
 /// 宿主权威验证的结构化结果：退出码 + 输出尾部 + 通过与否。
 /// 与 run() 的文本报告不同，这里把"是否通过"显式结构化——调用方据此做硬判。
 pub struct HostVerifyOutcome {
@@ -40,7 +85,7 @@ pub async fn run_command(
     command
         .arg("-c")
         .arg(cmd)
-        .current_dir(workspace)
+        .current_dir(resolve_verify_dir(workspace, cmd))
         .kill_on_drop(true);
     crate::agent::tools::local_shell::sanitize_debugger_env(&mut command);
     let result = tokio::time::timeout(Duration::from_secs(timeout_secs), command.output()).await;
@@ -177,7 +222,7 @@ pub async fn run_obligation_verifications(
         verify_cmd
             .arg("-c")
             .arg(&effective_command)
-            .current_dir(workspace)
+            .current_dir(resolve_verify_dir(workspace, &effective_command))
             .kill_on_drop(true);
         crate::agent::tools::local_shell::sanitize_debugger_env(&mut verify_cmd);
         let outcome = tokio::time::timeout(Duration::from_secs(120), verify_cmd.output()).await;
@@ -209,4 +254,59 @@ pub async fn run_obligation_verifications(
 
 fn fail_closed() -> String {
     "fail-closed".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_verify_dir;
+    use std::fs;
+
+    #[test]
+    fn bare_cargo_resolves_to_single_manifest_subdir() {
+        let ws = std::env::temp_dir().join(format!("hv-ws-{}", std::process::id()));
+        fs::create_dir_all(ws.join("src-tauri")).unwrap();
+        fs::write(ws.join("src-tauri/Cargo.toml"), "[package]").unwrap();
+        let got = resolve_verify_dir(&ws, "cargo test --lib");
+        assert_eq!(got, ws.join("src-tauri"));
+        fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn manifest_at_root_stays() {
+        let ws = std::env::temp_dir().join(format!("hv-root-{}", std::process::id()));
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("Cargo.toml"), "[package]").unwrap();
+        assert_eq!(resolve_verify_dir(&ws, "cargo test"), ws);
+        fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn ambiguous_manifests_keep_root() {
+        let ws = std::env::temp_dir().join(format!("hv-amb-{}", std::process::id()));
+        fs::create_dir_all(ws.join("a")).unwrap();
+        fs::create_dir_all(ws.join("b")).unwrap();
+        fs::write(ws.join("a/Cargo.toml"), "[package]").unwrap();
+        fs::write(ws.join("b/Cargo.toml"), "[package]").unwrap();
+        assert_eq!(resolve_verify_dir(&ws, "cargo test"), ws);
+        fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn explicit_cd_and_unknown_tool_untouched() {
+        let ws = std::env::temp_dir().join(format!("hv-cd-{}", std::process::id()));
+        fs::create_dir_all(ws.join("src-tauri")).unwrap();
+        fs::write(ws.join("src-tauri/Cargo.toml"), "[package]").unwrap();
+        assert_eq!(resolve_verify_dir(&ws, "cd src-tauri && cargo test"), ws);
+        assert_eq!(resolve_verify_dir(&ws, "node scripts/check.mjs"), ws);
+        fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn npm_resolves_package_json_subdir() {
+        let ws = std::env::temp_dir().join(format!("hv-npm-{}", std::process::id()));
+        fs::create_dir_all(ws.join("web")).unwrap();
+        fs::write(ws.join("web/package.json"), "{}").unwrap();
+        assert_eq!(resolve_verify_dir(&ws, "npm test"), ws.join("web"));
+        fs::remove_dir_all(&ws).ok();
+    }
 }
