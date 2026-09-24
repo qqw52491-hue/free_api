@@ -511,6 +511,7 @@
                 verify_command: None,
                 verify_script: None,
                 verify_sha256: None,
+                closure_form: None,
                 id: "restore".to_string(),
                 question: "checkpoint 是否恢复审查契约？".to_string(),
                 status: "evidenced".to_string(),

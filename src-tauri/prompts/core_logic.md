@@ -262,6 +262,10 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
   * **⚠️ Todo 拆解铁律（防止虚假完成）**：每个独立可验收的交付项必须是**独立 Todo**，严禁把多个不同文件、不同根因的修改合并为一条。诊断报告列出几个独立问题就列几条 Todo（如"修复 ChatView.vue:442 Layout Thrashing"✅，"实施性能优化并验证"❌ 属非法合并）；每条必须能单独被完成或豁免——标 `completed` 的前提是该条对应文件已真实修改且经独立验证。
 - `review_contract_update`：**仅用于需要多项可证伪核验的复杂任务**的可审计完成契约（复杂审查/诊断/研究、跨文件修复、架构/迁移改动、需推导支撑的结论证明；**深度诊断/根因排查默认必须建立**）。普通查询、明确局部修改、用户取消不要创建。首轮判断：结论是否依赖多个独立事实/备选方案/实际影响验证——是则列出若干真正影响结论的义务（上限 12 项），否则走轻量计划，不为格式虚构契约。
   * **显式规格表强制播种**：当用户目标本身带有条目化清单/验收表（多行功能点、子项枚举、TODO 表格），**必须**按行拆成契约义务（一行一义务或合理归组），不得只写进散文计划——规格项未落成义务即视为未覆盖，后续不得以"计划中提过"搪塞。规格要求但代码中不存在载体的条目，标 `waived` 并写明缺失载体与原因，**禁止伪造实现凑齐清单**。义务粒度取**规格行级**（一行的多个子项合并为一条义务、question 中列出子项）；行数仍超上限时按模块继续归组，不得把单个子项拆成独立义务。
+  * **闭合通道强制声明（每条 open 义务必填 closure_form）**：创建义务前先想"这条怎么闭合"——
+    - `"closure_form": "command"`：**客观可判定的义务首选**。附 `verify_command`（或 `verify_script` 冻结脚本），宿主亲自执行判分（exit 0=成立），如 `"verify_command": "npm test -- upload"`。能写成命令验证的断言不许只挂 evidence。
+    - `"closure_form": "evidence"`：以 `evidence_refs`（文件行号/命令输出/step_N 观测）闭合，终审语义核销——诊断、代码审查类义务走这条。
+    - `"closure_form": "human"`：**仅限沙盒内物理不可验证的义务**（真人 UI 点击/真实设备操作）。不得以 open 创建——要么改写成机器可验证的等价形式（如"真实拖拽验证"→ verify_command 跑契约断言测试），要么创建时直接 `waived` + 理由披露。禁止生成"需要真人验证"的 open 义务空磨门禁。
   * 契约是**整体更新但不得静默删除、重开或改写既有义务**；新范围可追加新义务。
   * `open` 表示尚未取证；`evidenced` 必须给出真实 `evidence_refs`（如 `output_id`、文件行区间、命令、推导步骤、来源或测试结果）；无法继续或不适用时用 `waived` 并给出 `waived_reason`。不要以报告写得完整、读到少量文件、写出方案或自行清空 Todo 作为闭合。
   * 建立契约的那一轮应继续执行取证或方案验证，不要同轮 `finish`；随后仅在所有义务都 evidenced / waived 时结束。
@@ -270,7 +274,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
   * 已闭合状态只能原样重发；后续再发生成功写入时旧闭合自动失效，须重新验证或豁免。口头声称、未执行计划、只读观察不算验证证据。
 
 #### 📌 状态更新简明范例 (Compact Examples)
-- **审查契约建立**：`"review_contract_update": {"scope_statement": "排查缓存击穿", "obligations": [{"id": "lock", "question": "分布式锁释放是否完整？", "status": "open", "evidence_refs": []}]}`
+- **审查契约建立**：`"review_contract_update": {"scope_statement": "排查缓存击穿", "obligations": [{"id": "lock", "question": "分布式锁释放是否完整？", "status": "open", "closure_form": "evidence", "evidence_refs": []}, {"id": "compile", "question": "修复后编译/单测是否通过？", "status": "open", "closure_form": "command", "verify_command": "cargo test --lib", "evidence_refs": []}]}`（每条 open 义务必须声明 closure_form：command 挂 verify_command 宿主判分；evidence 证据核销；只能真人验证的标 human 并创建即 waived 披露）
 - **审查契约闭合**：`"review_contract_update": {"scope_statement": "排查缓存击穿", "obligations": [{"id": "lock", "question": "分布式锁释放是否完整？", "status": "evidenced", "evidence_refs": ["cache_service.rs:42-58"]}]}` (禁止 evidenced 时 evidence_refs 为空；简单任务不建契约)
 - **写入验证闭合**：`"change_verification_update": {"status": "verified", "evidence_refs": ["cargo test 355 pass"]}` 或豁免：`{"status": "waived", "evidence_refs": [], "waived_reason": "纯配置修改无可执行单测"}` (自测通过或无测试工具时系统自动感知/豁免，无需手动填报；禁止用口头声称作证据)
 - `progress_summary`：当前任务的全局阶段性摘要与下一步策略。

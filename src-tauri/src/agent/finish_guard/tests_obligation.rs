@@ -79,6 +79,7 @@ index 123..456 100644
                     verify_command: None,
                     verify_script: None,
                     verify_sha256: None,
+                closure_form: None,
                 },
                 ReviewObligation {
                     id: "render".to_string(),
@@ -89,6 +90,7 @@ index 123..456 100644
                     verify_command: None,
                     verify_script: None,
                     verify_sha256: None,
+                closure_form: None,
                 },
                 ReviewObligation {
                     id: "virtual".to_string(),
@@ -99,6 +101,7 @@ index 123..456 100644
                     verify_command: None,
                     verify_script: None,
                     verify_sha256: None,
+                closure_form: None,
                 },
             ],
         };
@@ -153,6 +156,7 @@ def main():
                     verify_command: None,
                     verify_script: None,
                     verify_sha256: None,
+                closure_form: None,
                 },
             ],
         };
@@ -225,6 +229,7 @@ index 123..456 100644
                     verify_command: None,
                     verify_script: None,
                     verify_sha256: None,
+                closure_form: None,
                 },
                 ReviewObligation {
                     id: "render".to_string(),
@@ -235,6 +240,7 @@ index 123..456 100644
                     verify_command: None,
                     verify_script: None,
                     verify_sha256: None,
+                closure_form: None,
                 },
             ],
         };
@@ -286,6 +292,7 @@ index 123..456 100644
                     verify_command: None,
                     verify_script: None,
                     verify_sha256: None,
+                closure_form: None,
                 },
             ],
         };
@@ -326,6 +333,7 @@ index 123..456 100644
                     verify_command: None,
                     verify_script: None,
                     verify_sha256: None,
+                closure_form: None,
                 },
             ],
         };
@@ -354,6 +362,7 @@ index 123..456 100644
                     verify_command: None,
                     verify_script: None,
                     verify_sha256: None,
+                closure_form: None,
                 },
             ],
         };
@@ -388,6 +397,7 @@ index 123..456 100644
                     verify_command: Some("npm test".to_string()),
                     verify_script: None,
                     verify_sha256: None,
+                closure_form: None,
                 },
             ],
         };
@@ -506,6 +516,7 @@ index 123..456 100644
                 verify_command: None,
                 verify_script: None,
                 verify_sha256: None,
+                closure_form: None,
             }],
         }
     }

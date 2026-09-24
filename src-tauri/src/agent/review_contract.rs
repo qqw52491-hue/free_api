@@ -38,6 +38,14 @@ pub struct ReviewObligation {
     /// 冻结脚本内容的 SHA-256（执行前核验副本完整性）。
     #[serde(default)]
     pub verify_sha256: Option<String>,
+    /// 义务的闭合通道声明（创建时必填）：
+    /// - "command"：verify_command/verify_script 由宿主执行判分（客观义务首选）；
+    /// - "evidence"：以 evidence_refs 证据闭合，终审语义核销（诊断/审查类）；
+    /// - "human"：agent 沙盒内物理不可验证（真人 UI 操作等）——不得以 open 存在，
+    ///   创建时即 waived + 理由披露，防止生成"永远闭不上"的义务空磨门禁。
+    /// None = 旧契约兼容（既有义务不强制，新 open 义务必须声明）。
+    #[serde(default)]
+    pub closure_form: Option<String>,
 }
 
 impl ReviewContract {
@@ -50,6 +58,13 @@ impl ReviewContract {
     /// 更新不得移除旧义务，也不得把已闭合义务退回 open。
     pub fn apply_update(&mut self, update: ReviewContract) -> Result<(), String> {
         validate_contract(&update)?;
+
+        // 新增 open 义务必须声明闭合通道——实测：未声明验证方式的 e2e 义务
+        // 在沙盒内物理闭不上，每步 not_applicable 空磨 28 步直到熔断。
+        for item in &update.obligations {
+            let is_new = !self.obligations.iter().any(|e| e.id == item.id);
+            validate_obligation_closure(item, is_new)?;
+        }
 
         if self.obligations.is_empty() {
             *self = update;
@@ -239,6 +254,51 @@ fn validate_contract(contract: &ReviewContract) -> Result<(), String> {
     Ok(())
 }
 
+/// 义务闭合通道一致性校验（机械层，不问语义）：
+/// - 所有声明了 closure_form 的义务：command→必须挂 verify_command/verify_script；
+///   human→只能以 waived 存在（真人验证义务不可挂 open）；
+/// - 新增 open 义务（id 不在既有契约中）：closure_form 必填，否则拒绝——
+///   逼着模型在创建时想好"这条怎么闭合"，而不是 finish 时才发现闭不上。
+///   既有 open 义务（旧契约/恢复）不追溯，兼容放行。
+fn validate_obligation_closure(item: &ReviewObligation, is_new: bool) -> Result<(), String> {
+    let status = item.status.trim().to_ascii_lowercase();
+    if let Some(form) = item.closure_form.as_deref().map(str::trim) {
+        match form {
+            "command" => {
+                if item.verify_command.is_none() && item.verify_script.is_none() {
+                    return Err(format!(
+                        "审查义务 {} 声明 command 闭合通道但未挂 verify_command/verify_script——客观义务请给出宿主可执行的验证命令（exit 0=成立）。",
+                        item.id
+                    ));
+                }
+            }
+            "evidence" => {}
+            "human" => {
+                if status != "waived" {
+                    return Err(format!(
+                        "审查义务 {} 声明 human 闭合通道（agent 沙盒内物理不可验证）却标 {}——此类义务创建时只能以 waived + waived_reason 披露，或改写成机器可验证的等价形式。",
+                        item.id, status
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "审查义务 {} 的 closure_form 仅可为 command/evidence/human，收到 {:?}。",
+                    item.id, form
+                ));
+            }
+        }
+        return Ok(());
+    }
+    if is_new && status == "open" {
+        return Err(format!(
+            "审查义务 {} 未声明闭合通道 closure_form——每项 open 义务创建时必须想好怎么验证：\n  * 可机器判定 → closure_form:\"command\" + verify_command（宿主执行判分，exit 0=成立）；\n  * 以证据闭合（文件行号/命令输出/step_N 观测）→ closure_form:\"evidence\"；\n  * 只能真人操作验证（UI 点击/真实设备）→ 不得以 open 创建，改写为机器可验证形式或以 waived + 理由披露。",
+            item.id
+        ));
+    }
+    Ok(())
+}
+
 fn normalized_status(item: &ReviewObligation) -> Option<String> {
     let status = item.status.trim().to_ascii_lowercase();
     (!status.is_empty()).then_some(status)
@@ -266,6 +326,11 @@ mod tests {
             verify_command: None,
             verify_script: None,
             verify_sha256: None,
+            closure_form: if status == "open" {
+                Some("evidence".to_string())
+            } else {
+                None
+            },
             id: id.to_string(),
             question: question.to_string(),
             status: status.to_string(),
@@ -343,5 +408,69 @@ mod tests {
             vec!["审查义务 scope：审查范围是否明确？"]
         );
         assert!(!review.is_complete());
+    }
+
+    #[test]
+    fn new_open_obligations_must_declare_closure_channel() {
+        // 未声明 closure_form 的新 open 义务 → 拒绝（e2e 空磨事故防线）
+        let mut unverifiable = obligation("e2e", "粘贴/拖拽是否经真实验证？", "open");
+        unverifiable.closure_form = None;
+        assert!(ReviewContract {
+            scope_statement: "s".into(),
+            obligations: vec![]
+        }
+        .apply_update(contract(vec![unverifiable.clone()]))
+        .is_err());
+
+        // command 通道没挂 verify_* → 拒绝
+        let mut bad_cmd = unverifiable.clone();
+        bad_cmd.closure_form = Some("command".to_string());
+        assert!(ReviewContract {
+            scope_statement: "s".into(),
+            obligations: vec![]
+        }
+        .apply_update(contract(vec![bad_cmd]))
+        .is_err());
+
+        // human 通道挂 open → 拒绝；waived+理由 → 放行
+        let mut human_open = unverifiable.clone();
+        human_open.closure_form = Some("human".to_string());
+        assert!(ReviewContract {
+            scope_statement: "s".into(),
+            obligations: vec![]
+        }
+        .apply_update(contract(vec![human_open]))
+        .is_err());
+        let mut human_waived = unverifiable.clone();
+        human_waived.closure_form = Some("human".to_string());
+        human_waived.status = "waived".to_string();
+        human_waived.waived_reason = Some("需真人 UI 操作，沙盒不可验证".to_string());
+        assert!(ReviewContract {
+            scope_statement: "s".into(),
+            obligations: vec![]
+        }
+        .apply_update(contract(vec![human_waived]))
+        .is_ok());
+
+        // command + verify_command → 放行
+        let mut good_cmd = unverifiable.clone();
+        good_cmd.closure_form = Some("command".to_string());
+        good_cmd.verify_command = Some("npm test -- upload".to_string());
+        assert!(ReviewContract {
+            scope_statement: "s".into(),
+            obligations: vec![]
+        }
+        .apply_update(contract(vec![good_cmd]))
+        .is_ok());
+
+        // 既有 open 义务无 closure_form（旧契约兼容）→ 不追溯
+        let mut existing = ReviewContract {
+            scope_statement: "s".into(),
+            obligations: vec![unverifiable.clone()],
+        };
+        let mut keep = unverifiable.clone();
+        keep.evidence_refs = vec!["step_5".to_string()];
+        keep.status = "evidenced".to_string();
+        assert!(existing.apply_update(contract(vec![keep])).is_ok());
     }
 }
