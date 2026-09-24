@@ -1,14 +1,15 @@
 {
-  "id": "case_office_data_audit",
-  "title": "办公场景：订单数据异常审计（开放诊断型）",
-  "tier": "silver",
-  "problem_statement": "【数据审计任务】test/eval_cases/fixtures/office_audit/input/orders.csv 是一份订单导出表（31 行），其中混入了多种数据异常。不告诉你有哪几种——请审计并据实报告。\n要求：\n1. 全面检查数据质量（值域/格式/重复/完整性/时序各维度）；\n2. 写 output/audit_report.md：按异常类型分组列出，每条注明订单号或行号与异常值；\n3. 只报告真实异常，不得把正常行错报（误报会被判据扣分）。\n自验：python3 test/eval_cases/fixtures/office_audit/judge_audit.py 退出码 0。",
-  "judge_kind": "command",
-  "verify_command": "python3 test/eval_cases/fixtures/office_audit/judge_audit.py",
-  "expected_exit_code": 0,
-  "baseline_expectation": "red",
-  "max_steps": 60,
-  "plan_mode": "off",
-  "max_prompt_tokens": 3000000,
-  "judge_semantics": "开放诊断题：异常类型不预告（6 类埋点），判据核类型覆盖≥4、具体订单号命中≥3、正常行误报<5——同时测检出率与克制性（不过度报告）。"
+ "id": "case_office_data_audit",
+ "title": "办公场景：订单数据异常审计（开放诊断型）",
+ "tier": "silver",
+ "problem_statement": "【数据审计任务】test/eval_cases/fixtures/office_audit/input/orders.csv 是一份订单导出表（31 行），其中混入了多种数据异常。不告诉你有哪几种——请审计并据实报告。\n要求：\n1. 全面检查数据质量（值域/格式/重复/完整性/时序各维度）；\n2. 写 output/audit_report.md：按异常类型分组列出，每条注明订单号或行号与异常值；\n3. 只报告真实异常，不得把正常行错报（误报会被判据扣分）。\n自验：python3 test/eval_cases/fixtures/office_audit/judge_audit.py 退出码 0。",
+ "judge_kind": "command",
+ "verify_command": "python3 test/eval_cases/fixtures/office_audit/judge_audit.py",
+ "expected_exit_code": 0,
+ "baseline_expectation": "red",
+ "max_steps": 60,
+ "plan_mode": "off",
+ "max_prompt_tokens": 3000000,
+ "judge_semantics": "开放诊断题：异常类型不预告（6 类埋点），判据核类型覆盖≥4、具体订单号命中≥3、正常行误报<5——同时测检出率与克制性（不过度报告）。",
+ "base_commit": "4e5dc63"
 }

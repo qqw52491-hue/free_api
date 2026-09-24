@@ -1,14 +1,15 @@
 {
-  "id": "case_office_docs_organize",
-  "title": "办公场景：散乱资料分类整理+索引文档生成",
-  "tier": "silver",
-  "problem_statement": "【办公资料整理任务】test/eval_cases/fixtures/office_docs/input/ 下有 10 个散乱资料文件（会议纪要/流程说明/技术草稿/待办清单/拜访记录/摘录混杂，文件名不规范）。\n要求：\n1. 按内容类型分类，在 output/organized/ 下建对应子目录（如 会议纪要/技术文档/行政流程/待办清单 等，自行按内容判定），把 10 个文件全部归档（移动或复制均可）；\n2. 生成 output/INDEX.md：逐条列出 文件名 | 类型 | 一句话摘要，覆盖全部 10 个文件。\n自验：python3 test/eval_cases/fixtures/office_docs/judge_organize.py 退出码 0。",
-  "judge_kind": "command",
-  "verify_command": "python3 test/eval_cases/fixtures/office_docs/judge_organize.py",
-  "expected_exit_code": 0,
-  "baseline_expectation": "red",
-  "max_steps": 60,
-  "plan_mode": "off",
-  "max_prompt_tokens": 3000000,
-  "judge_semantics": "开放整理题：分类标准不给死（语义自由度），只机械核验归档完整性（10 文件归位）、同类聚合（纪要集中）、索引覆盖度。PASS=模型完成读文→判类→归档→索引全流程。"
+ "id": "case_office_docs_organize",
+ "title": "办公场景：散乱资料分类整理+索引文档生成",
+ "tier": "silver",
+ "problem_statement": "【办公资料整理任务】test/eval_cases/fixtures/office_docs/input/ 下有 10 个散乱资料文件（会议纪要/流程说明/技术草稿/待办清单/拜访记录/摘录混杂，文件名不规范）。\n要求：\n1. 按内容类型分类，在 output/organized/ 下建对应子目录（如 会议纪要/技术文档/行政流程/待办清单 等，自行按内容判定），把 10 个文件全部归档（移动或复制均可）；\n2. 生成 output/INDEX.md：逐条列出 文件名 | 类型 | 一句话摘要，覆盖全部 10 个文件。\n自验：python3 test/eval_cases/fixtures/office_docs/judge_organize.py 退出码 0。",
+ "judge_kind": "command",
+ "verify_command": "python3 test/eval_cases/fixtures/office_docs/judge_organize.py",
+ "expected_exit_code": 0,
+ "baseline_expectation": "red",
+ "max_steps": 60,
+ "plan_mode": "off",
+ "max_prompt_tokens": 3000000,
+ "judge_semantics": "开放整理题：分类标准不给死（语义自由度），只机械核验归档完整性（10 文件归位）、同类聚合（纪要集中）、索引覆盖度。PASS=模型完成读文→判类→归档→索引全流程。",
+ "base_commit": "4e5dc63"
 }
