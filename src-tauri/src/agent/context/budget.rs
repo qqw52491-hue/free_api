@@ -92,7 +92,10 @@ const fn default_state_card_full() -> StateCardLevel {
 /// （失败记录/台账/取证/记忆/遥测等弱模型防打转脚手架，强模型可省缓存 miss）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StateCardLevel {
-    /// 仅门禁面向段——强模型/省钱模式
+    /// 只保留带未闭合义务的自愈门禁段（契约/验证/plan_gate 有待闭合才渲染），
+    /// 其余一律不渲染——防死锁的最低限度，强模型极限省 token
+    Off,
+    /// 仅门禁面向段（计划/目标块/todo/契约/验证/plan_gate）——强模型/省钱模式
     Minimal,
     /// 门禁段 + 全部定向辅助段——弱模型默认
     Full,

@@ -875,6 +875,7 @@ mod tests {
             vision_reasoning_effort: String::new(),
             force_pro_on_first_step: false,
             context_budget_mode: "deep_coding".to_string(),
+            state_card_level: String::new(),
             routing_mode: String::new(),
             role_models: Default::default(),
             stage_reviewer_override: None,

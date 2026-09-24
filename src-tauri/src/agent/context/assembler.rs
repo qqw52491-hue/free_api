@@ -53,11 +53,15 @@ impl SandwichContext {
         // 变化点集中在末尾，绝对不砸前面的长缓存；且离输出端最近，强化注意力防遗忘
         // ════════════════════════════════════════════════════════════════
         let mut bottom_state_card = String::new();
-        // 状态卡档位：Minimal 只保留门禁面向段（计划/目标块/todo/契约/验证/plan_gate），
-        // 定向辅助段（工具指针/摘要/失败记录/遥测/台账/记忆/资源）仅 Full 渲染。
+        // 状态卡三档：
+        //   Off     = 仅自愈门禁段（契约/验证/plan_gate 有待闭合时自带内容才渲染）
+        //   Minimal = +计划/目标块/todo（门禁面向段全量）
+        //   Full    = +定向辅助段（工具指针/摘要/失败记录/遥测/台账/记忆/资源）
         // 契约与验证等未闭合义务任何档位都必须可见，否则模型无法闭合、finish 死锁。
-        let card_full = self.budget_config.state_card_level
-            == crate::agent::context::budget::StateCardLevel::Full;
+        use crate::agent::context::budget::StateCardLevel;
+        let card_level = self.budget_config.state_card_level;
+        let card_full = card_level == StateCardLevel::Full;
+        let card_minimal = card_level != StateCardLevel::Off;
 
         // (0) 活跃工具指针（任务目标已静态锚定在 M1，底部卡片仅保留动态变化的指针）
         if card_full {
@@ -67,35 +71,40 @@ impl SandwichContext {
         }
 
         // (1) 阶段计划
-        if let (Some(id), Some(title)) = (&self.plan_state.active_id, &self.plan_state.active_title)
-        {
-            bottom_state_card.push_str(&format!(
-                "【当前活动计划】id={} | title={}\n如下一步仍属于此阶段，复用相同 plan_id/plan_title；只有真正切换工作阶段才创建新计划。\n\n",
-                id, title
-            ));
+        if card_minimal {
+            if let (Some(id), Some(title)) =
+                (&self.plan_state.active_id, &self.plan_state.active_title)
+            {
+                bottom_state_card.push_str(&format!(
+                    "【当前活动计划】id={} | title={}\n如下一步仍属于此阶段，复用相同 plan_id/plan_title；只有真正切换工作阶段才创建新计划。\n\n",
+                    id, title
+                ));
+            }
         }
 
         // (1.1) 目标块（TargetBlock）状态机投影
-        if let Some(block) = self.active_target_block() {
-            let checklist_desc = if block.checklist.is_empty() {
-                "无明确 Checklist".to_string()
-            } else {
-                block
-                    .checklist
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| format!("{}. {}", i + 1, c))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            };
-            bottom_state_card.push_str(&format!(
-                "【当前活跃目标块】id={} | title={}\n• 预设档位: {}\n• 边界范围(Scope): {}\n• 验收清单(Checklist): {}\n\n",
-                block.id,
-                block.title,
-                block.tier,
-                if block.scope.is_empty() { "不限".to_string() } else { block.scope.join(", ") },
-                checklist_desc,
-            ));
+        if card_minimal {
+            if let Some(block) = self.active_target_block() {
+                let checklist_desc = if block.checklist.is_empty() {
+                    "无明确 Checklist".to_string()
+                } else {
+                    block
+                        .checklist
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| format!("{}. {}", i + 1, c))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                };
+                bottom_state_card.push_str(&format!(
+                    "【当前活跃目标块】id={} | title={}\n• 预设档位: {}\n• 边界范围(Scope): {}\n• 验收清单(Checklist): {}\n\n",
+                    block.id,
+                    block.title,
+                    block.tier,
+                    if block.scope.is_empty() { "不限".to_string() } else { block.scope.join(", ") },
+                    checklist_desc,
+                ));
+            }
         }
 
         // (2) 全局进度摘要：完整版已事件化入历史（set_progress_summary），
@@ -170,8 +179,10 @@ impl SandwichContext {
             ));
         }
 
-        // (8) 任务清单 (Todo List)
-        bottom_state_card.push_str(&ContextRenderer::render_todo_list(&self.todo_list));
+        // (8) 任务清单 (Todo List) —— Minimal 起渲染；Off 档连 todo 都不投影
+        if card_minimal {
+            bottom_state_card.push_str(&ContextRenderer::render_todo_list(&self.todo_list));
+        }
 
         // (9) 审查契约仅在复杂审查/诊断任务显式建立时出现，普通任务不增加状态卡。
         bottom_state_card.push_str(&ContextRenderer::render_review_contract(

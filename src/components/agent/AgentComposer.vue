@@ -999,6 +999,23 @@
                                     </div>
                                     <svg v-if="opt.id === (modelRouting.context_budget_mode || 'deep_coding')" class="check-icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
                                 </button>
+                                <div class="budget-menu-header" style="margin-top:6px;border-top:1px solid var(--border-color,rgba(128,128,128,.2));padding-top:6px;">状态卡携带量</div>
+                                <button
+                                    v-for="opt in cardLevels"
+                                    :key="opt.id"
+                                    type="button"
+                                    class="budget-menu-item"
+                                    :class="{ selected: opt.id === (modelRouting.state_card_level || 'auto') }"
+                                    @click="selectCardLevel(opt.id)"
+                                >
+                                    <div class="opt-text">
+                                        <div class="opt-title">
+                                            <strong>{{ opt.label }}</strong>
+                                        </div>
+                                        <small class="opt-sub">{{ opt.description }}</small>
+                                    </div>
+                                    <svg v-if="opt.id === (modelRouting.state_card_level || 'auto')" class="check-icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+                                </button>
                             </div>
                         </Teleport>
                     </div>
@@ -1207,6 +1224,7 @@ import AttachmentCard from "./AttachmentCard.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
 import {
     CONTEXT_BUDGET_MODES,
+    STATE_CARD_LEVELS,
     type AgentHumanForm,
     type AgentModelOption,
     type AgentSessionTelemetry,
@@ -1215,6 +1233,7 @@ import {
     type PlanExecutionMode,
     type ReasoningEffort,
     type RoleCard,
+    type StateCardLevel,
 } from "./types";
 
 const props = defineProps<{
@@ -2005,6 +2024,7 @@ function setConcurrencyMode(mode: "adaptive" | "committee") {
 }
 
 const budgetModes = CONTEXT_BUDGET_MODES;
+const cardLevels = STATE_CARD_LEVELS;
 const currentBudgetModeObj = computed(() => {
     const mode = props.modelRouting?.context_budget_mode || "deep_coding";
     return budgetModes.find((item) => item.id === mode) || budgetModes[0];
@@ -2281,6 +2301,14 @@ function selectBudgetMode(mode: ContextBudgetMode) {
     emit("update:model-routing", {
         ...props.modelRouting,
         context_budget_mode: mode,
+    });
+    budgetMenuOpen.value = false;
+}
+
+function selectCardLevel(level: StateCardLevel) {
+    emit("update:model-routing", {
+        ...props.modelRouting,
+        state_card_level: level,
     });
     budgetMenuOpen.value = false;
 }

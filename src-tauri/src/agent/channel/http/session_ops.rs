@@ -16,6 +16,8 @@ pub(crate) struct PartialRouting {
     pub vision: Option<String>,
     /// 上下文压缩策略：deep_coding（长程）| cost_saving（省流）| ultra_fast（极速）
     pub(crate) context_budget_mode: Option<String>,
+    /// 状态卡携带量覆盖："auto"/缺省=跟随预算模式 | "off"/"minimal"/"full"
+    pub(crate) state_card_level: Option<String>,
     /// 路由模式：rules | scored
     pub(crate) routing_mode: Option<String>,
     /// 角色级覆盖：系统角色名（planner/executor/...）→ 档位或模型 UUID
@@ -212,6 +214,11 @@ pub(crate) async fn handler_task(
         }
         if let Some(mode) = overrides.context_budget_mode.clone() {
             routing.context_budget_mode = mode;
+        }
+        if let Some(level) = overrides.state_card_level.clone() {
+            // "auto" 归一化为空串 = 跟随预算模式档位
+            routing.state_card_level =
+                if level == "auto" { String::new() } else { level };
         }
         if let Some(mode) = overrides.routing_mode.clone() {
             routing.routing_mode = mode;

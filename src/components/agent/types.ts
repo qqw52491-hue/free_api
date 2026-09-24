@@ -352,6 +352,22 @@ export type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
 
 export type RoutingMode = "rules" | "scored";
 
+/** 尾部状态卡携带量：auto=跟随预算模式 | off=仅未闭合门禁段 | minimal=门禁段全量 | full=全量定向辅助 */
+export type StateCardLevel = "auto" | "off" | "minimal" | "full";
+
+export interface StateCardLevelOption {
+    id: StateCardLevel;
+    label: string;
+    description: string;
+}
+
+export const STATE_CARD_LEVELS: StateCardLevelOption[] = [
+    { id: "auto", label: "跟随模式", description: "随预算模式：长程=全量卡，省流/极速=仅门禁段" },
+    { id: "off", label: "极简", description: "只保留未闭合的契约/验证/门禁——极限省 token" },
+    { id: "minimal", label: "精简", description: "门禁段全量（计划/目标块/待办/契约/验证）" },
+    { id: "full", label: "全量", description: "门禁段+定向辅助（失败记录/台账/取证/记忆），弱模型防打转" },
+];
+
 export interface ModelRouting {
     reasoning_effort_version: 2;
     pro: string;
@@ -361,6 +377,8 @@ export interface ModelRouting {
     flash_reasoning_effort: ReasoningEffort;
     vision_reasoning_effort: ReasoningEffort;
     context_budget_mode: ContextBudgetMode;
+    /** 状态卡携带量覆盖：undefined/"auto" = 跟随预算模式；off/minimal/full = 显式档位 */
+    state_card_level?: StateCardLevel;
     /** 路由模式：rules = 规则分流（默认）；scored = 难度打分制 */
     routing_mode: RoutingMode;
     /** 角色档位覆盖：角色 → ""(跟随自动) | "pro"/"flash"/"vision"(档位别名) | 具体模型 UUID */

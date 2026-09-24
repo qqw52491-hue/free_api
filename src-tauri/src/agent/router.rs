@@ -25,6 +25,10 @@ pub struct ModelRoutingConfig {
     /// 上下文预算与压缩策略模式：deep_coding (长程默认) | cost_saving (省流) | ultra_fast (极速)
     #[serde(default = "default_context_budget_mode")]
     pub context_budget_mode: String,
+    /// 尾部状态卡携带量独立覆盖：""=跟随预算模式档位 | "off"=仅未闭合门禁自愈段
+    /// | "minimal"=门禁段全量 | "full"=全量（含失败记录/台账/记忆等弱模型定向辅助）
+    #[serde(default)]
+    pub state_card_level: String,
     /// 路由模式：rules（默认，现行规则分流）| scored（难度打分制）
     #[serde(default)]
     pub routing_mode: String,
@@ -61,6 +65,7 @@ impl Default for ModelRoutingConfig {
             vision_reasoning_effort: String::new(),
             force_pro_on_first_step: false,
             context_budget_mode: "deep_coding".to_string(),
+            state_card_level: String::new(),
             routing_mode: String::new(),
             role_models: BTreeMap::new(),
             stage_reviewer_override: None,

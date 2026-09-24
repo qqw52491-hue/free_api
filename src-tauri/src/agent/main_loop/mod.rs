@@ -491,6 +491,16 @@ async fn run_agent_main_loop_in_workspace_inner(
         "ultra_fast" => crate::agent::context::budget::ContextBudgetConfig::ultra_fast(),
         _ => crate::agent::context::budget::ContextBudgetConfig::deep_coding(),
     };
+    // 状态卡携带量独立覆盖：显式指定时压过预算模式自带的档位
+    match model_routing.state_card_level.as_str() {
+        "off" => context.budget_config.state_card_level =
+            crate::agent::context::budget::StateCardLevel::Off,
+        "minimal" => context.budget_config.state_card_level =
+            crate::agent::context::budget::StateCardLevel::Minimal,
+        "full" => context.budget_config.state_card_level =
+            crate::agent::context::budget::StateCardLevel::Full,
+        _ => {}
+    }
     context.turns_history =
         crate::agent::conversation::recent_history(state.inner(), &final_session_id)?;
     // 审查任务在首次模型调用前注入轻量项目地图。它只包含目录、入口和 Git 元数据，

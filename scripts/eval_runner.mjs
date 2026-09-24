@@ -773,8 +773,15 @@ async function runEvaluation() {
               ).stdout?.trim()
             : '';
           if (probeBaseUrl) {
+            // /models 多数平台要 Authorization——带上平台 api_key，
+            // 否则 key 门控端点(如 Antigravity 本地代理)会 401 误杀可用平台
+            const probeKey = spawnSync(
+              `sqlite3 "${appDbPath}" "SELECT api_key FROM platforms WHERE id='${probePlatformId}'"`,
+              { shell: true, encoding: 'utf8' }
+            ).stdout?.trim();
+            const authArg = probeKey ? ` -H 'Authorization: Bearer ${probeKey}'` : '';
             const probe = spawnSync(
-              `curl -s -o /dev/null -w '%{http_code}' --max-time 5 '${probeBaseUrl.replace(/\/+$/, '')}/models'`,
+              `curl -s -o /dev/null -w '%{http_code}' --max-time 5 ${authArg} '${probeBaseUrl.replace(/\/+$/, '')}/models'`,
               { shell: true, encoding: 'utf8' }
             );
             const httpCode = (probe.stdout || '').trim();
