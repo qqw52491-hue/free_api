@@ -1,0 +1,5 @@
+# 权限模块需求
+- 角色：admin/editor/viewer 三级
+- editor 可改文档不可管用户
+- viewer 只读+可评论
+- 审计日志保留 180 天

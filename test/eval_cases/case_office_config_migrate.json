@@ -1,0 +1,14 @@
+{
+  "id": "case_office_config_migrate",
+  "title": "办公场景：混合格式遗留配置统一迁移 JSON+冲突报告",
+  "tier": "silver",
+  "problem_statement": "【配置迁移任务】test/eval_cases/fixtures/office_migrate/input/ 下是四个不同格式的遗留配置文件（app.ini / db.properties / features.conf / notes.txt），各文件头部标注了更新日期，同键在不同文件里可能值不同。\n要求：\n1. 解析全部四个文件，合并为 output/config.json（嵌套或扁平 key 均可，但须覆盖所有配置项）；\n2. 同名键冲突时取「更新日期」较新文件的值；\n3. 写 output/migration_report.md：列出发生过的键冲突及取舍依据。\n自验：python3 test/eval_cases/fixtures/office_migrate/judge_migrate.py 退出码 0。",
+  "judge_kind": "command",
+  "verify_command": "python3 test/eval_cases/fixtures/office_migrate/judge_migrate.py",
+  "expected_exit_code": 0,
+  "baseline_expectation": "red",
+  "max_steps": 60,
+  "plan_mode": "off",
+  "max_prompt_tokens": 3000000,
+  "judge_semantics": "格式解析+规则推理混合题：判据只核 config.json 五个关键冲突键的正确取值与冲突报告存在性，不限制 JSON 结构形态。PASS=多格式解析正确且冲突规则被真实执行。"
+}
