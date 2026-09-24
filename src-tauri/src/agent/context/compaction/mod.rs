@@ -39,20 +39,27 @@ impl Summarizer for RuleBasedSummarizer {
 }
 
 /// 异步调用 LLM 生成语义级继续工作摘要（带 20s 硬超时与多格式兼容提取）
+/// 摘要请求复用会话真实消息作为前缀（system+历史逐字节命中 provider 前缀缓存），
+/// 摘要指令追加在尾部——整段历史近零成本送达摘要模型，比另起炉灶组装便宜一个量级。
+/// 同时解除 12K 截断盲区：全文缓存命中后无需再为省 token 只送开头一段。
 pub async fn generate_llm_summary(
     config: &ModelConfig,
-    archived_history_text: &str,
+    history_messages: &[ChatMessage],
 ) -> Result<String, String> {
+    if history_messages.is_empty() {
+        return Err("无历史可压缩".to_string());
+    }
     let client = config.build_client()?;
     let url = config.endpoint_url();
     let headers = config.auth_headers();
 
-    // 限制送入摘要模型的历史文本上限（最多取前 12,000 字符），防止单次摘要 Prompt 爆窗
-    let capped_history: String = archived_history_text.chars().take(12_000).collect();
-
-    let prompt = format!(
-        "你是一个自主 Agent 的上下文归档与状态压缩专家。\n\
-        以下是 Agent 在执行长程任务期间早期历史的流水记录（包含步骤计划、工具调用、执行输出与报错）。\n\
+    let mut messages: Vec<serde_json::Value> = history_messages
+        .iter()
+        .map(|m| serde_json::to_value(m).unwrap_or_else(|_| json!({"role": m.role, "content": ""})))
+        .collect();
+    messages.push(json!({
+        "role": "user",
+        "content": "【上下文压缩指令】以上是本 Agent 执行长程任务的完整历史（含步骤计划、工具调用、执行输出与报错）。\n\
         请提取并生成一份高度凝练的【阶段性任务继续摘要】，严格包含以下 4 个结构化板块：\n\n\
         ## 1. 已完成事项与关键产物\n\
         - 简明列出已成功完成的阶段、生成的文件路径、创建的数据表等\n\n\
@@ -62,21 +69,8 @@ pub async fn generate_llm_summary(
         - 列出失败过的操作、错误的参数/action、服务端报错及后续如何纠正的（避免后续步骤重蹈覆辙）\n\n\
         ## 4. 未完成事项与下一步建议\n\
         - 基于前面的进展，明确指出当前尚未完成的工作点与建议方向\n\n\
-        ⚠️ 注意：禁止流水账重复，只保留具有决策指导意义的硬事实与结论；如有 output_id 引用、文件路径或行号请准确保留。\n\n\
-        【待压缩历史记录】\n{}",
-        capped_history
-    );
-
-    let messages = vec![
-        json!({
-            "role": "system",
-            "content": "你是资深的 AI Agent 上下文工程专家，擅长从复杂的执行历史中提炼高密度的状态恢复摘要。"
-        }),
-        json!({
-            "role": "user",
-            "content": prompt
-        }),
-    ];
+        ⚠️ 注意：禁止流水账重复，只保留具有决策指导意义的硬事实与结论；如有 output_id 引用、文件路径或行号请准确保留。"
+    }));
 
     let effective_max_tokens = if config.max_tokens > 0 && config.max_tokens < 4096 {
         4096
@@ -172,9 +166,8 @@ impl<'a> Summarizer for HybridSummarizer<'a> {
         if let Some(cfg) = self.model_config {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let cfg_clone = cfg.clone();
-                let raw_text = rule_index.clone();
                 let llm_res = tokio::task::block_in_place(|| {
-                    handle.block_on(async { generate_llm_summary(&cfg_clone, &raw_text).await })
+                    handle.block_on(async { generate_llm_summary(&cfg_clone, messages).await })
                 });
                 match llm_res {
                     Ok(summary) => {
