@@ -948,6 +948,19 @@ textarea::placeholder {
     gap: 4px;
     backdrop-filter: blur(16px);
     animation: popIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    overflow-y: auto;
+    max-height: min(70vh, 420px);
+    overscroll-behavior: contain;
+}
+.budget-dropdown-menu::-webkit-scrollbar {
+    width: 6px;
+}
+.budget-dropdown-menu::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+}
+.budget-dropdown-menu::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.25);
 }
 
 .budget-dropdown-menu.placement-top {
@@ -985,6 +998,7 @@ textarea::placeholder {
     border: 1px solid transparent !important;
     border-radius: 6px !important;
     cursor: pointer;
+    flex-shrink: 0 !important;
     text-align: left;
     transition: all 0.15s ease;
 }
@@ -1065,6 +1079,20 @@ textarea::placeholder {
     gap: 4px;
     backdrop-filter: blur(16px);
     animation: popIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    overflow-y: auto;
+    max-height: min(70vh, 420px);
+    overscroll-behavior: contain;
+}
+
+.plan-dropdown-menu::-webkit-scrollbar {
+    width: 6px;
+}
+.plan-dropdown-menu::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+}
+.plan-dropdown-menu::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.25);
 }
 
 .plan-dropdown-menu.placement-top {
@@ -1089,6 +1117,7 @@ textarea::placeholder {
 .plan-menu-item {
     display: flex !important;
     align-items: center !important;
+    flex-shrink: 0 !important;
     width: 100% !important;
     height: auto !important;
     padding: 8px 10px !important;
