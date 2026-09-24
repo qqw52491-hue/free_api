@@ -6,6 +6,7 @@
   "problem_statement": "【架构诊断任务】梳理 src-tauri/src/agent 下「会话从发起到终态」的完整生命周期：列出所有可能让会话永远停在 running 状态不收敛的环节（调用挂死、子任务失联、审查未归、人工等待等），每个环节给出文件:行号证据。本任务为纯只读诊断，严禁修改任何文件；完成分析后直接在交付总结中给出清单。",
   "verify_command": "test \"$(sqlite3 \"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}\" \"SELECT COUNT(*) FROM agent_gate_fires WHERE gate='retriage'\")\" -ge 1",
   "judge_kind": "command",
+  "env": {"FREE_API_RETRIAGE_MILESTONE_STEPS": "15"},
   "expected_exit_code": 0,
   "max_steps": 60,
   "max_prompt_tokens": 3000000,

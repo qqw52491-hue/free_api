@@ -1031,3 +1031,32 @@ sensenova-6.8+glm-5.2 首场：54 步撞 25min 时限（终态 running→判 FAI
 4. judge_modified 红旗进报告（模型反复改判具 judge.mjs，3次）
 
 **门禁修复实弹验证**：`undiffed_refs:not_applicable` 通道生效——Pro 场 finish 申报的可定位引用走披露通道而非死循环（7次放行+1次终审过）。
+
+## 2026-09-24 多题型轮换实测（3.8-flash-high 执行 + 3.1-pro 监督）
+
+驱动：scripts/rotation.sh + analyze_run.py（过程病理自动解剖）。
+46 场队列（20 场首轮 + 26 场追加多方向：安全/资源/认识论/并发/取证防线/办公场景）。
+
+### 已确认结论
+
+- **child_reviewer 派发冻结已消失**：24+ 场、30+ 次派发（含 tech_lead/审查/取证子任务）零复发；
+  子任务面包屑（child:{run_id} → spawned→llm_call:N→tool:X→reduce）实弹落库全程可见。
+- **轻中量题（≤45步）基本全绿**：probe/readonly/ft_writer/forensic/narrow_imgfix 全过。
+- **重量级题统一死于时长熔断**：66-131 步取消——子审查 3-5min/个 × wait_jobs 串行等待烧预算，
+  非挂死（stage 面包屑持续更新、子任务真实推进）。
+- **EXECUTOR_MIX 普遍存在**：Pro 规则-2 救场占 15-40% 步数（parse_error/失败后升维），
+  设计内韧性但稀释"执行者稳定性"归因。
+- **+jm 判具污染跨模型复发**：3.8-flash-high 也改 judge.mjs（第 3 次实锤，模型侧习惯）。
+
+### 本轮修复
+
+| 提交 | 内容 |
+|---|---|
+| 79a0580 | case_12 基线期望标错（green→red）+ 分析器/轮换驱动入库 |
+| 52cf5bb | **验证命令 manifest 感知**——裸 cargo/npm/pytest 义务命令在 worktree 根必挂的真 bug |
+| 86c416b | 办公场景考题×4（CSV→xlsx 报表/资料整理/配置迁移/数据审计） |
+
+### 待研判
+
+- wait_jobs 串行等待吞吐：子审查过慢时父会话空转——是否值得"派发后并行干活"提示或子任务加速？
+- 埋雷题（mine）对 3.8-flash 档位过重：连续 4 题熔断/失败——能力地板证据。

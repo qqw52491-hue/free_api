@@ -755,6 +755,14 @@ async function runEvaluation() {
           ...(caseDef.max_prompt_tokens ? { FREE_API_EVAL_MAX_PROMPT_TOKENS: String(caseDef.max_prompt_tokens) } : {}),
           // A/B 对照：review_panel:"off" 钉死 1v1（escalate 降级 rebuttal），缺省=面板可用
           ...(caseDef.review_panel ? { FREE_API_EVAL_REVIEW_PANEL: String(caseDef.review_panel) } : {}),
+          // 考卷级环境变量注入：机制探针题需开启默认关的实验通道
+          // （如 retriage 里程点阈值 FREE_API_RETRIAGE_MILESTONE_STEPS）。
+          // 键必须 FREE_API_ 前缀，防止考题意外改宿主核心环境。
+          ...Object.fromEntries(
+            Object.entries(caseDef.env || {})
+              .filter(([k]) => k.startsWith('FREE_API_'))
+              .map(([k, v]) => [k, String(v)])
+          ),
         };
         console.log(`   🚀 [LIVE] 唤起实弹 Agent (model=${options.model.slice(0, 8)}, plan=${planMode || '默认'}, 上限 ${options.durationMinutes} 分钟)`);
         console.log(`   📂 [LIVE] 沙盒工作区: ${sandboxPath}`);
