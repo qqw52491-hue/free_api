@@ -243,6 +243,9 @@ pub async fn run_call_llm_and_run_tool_phases(
                 .saturating_add(180)
         };
         let tier_name = routing.tier.to_string();
+        // 规则文案事件化：首次激活/恢复缺事件/压缩重发在同一点补齐，
+        // 补齐后尾部状态卡只投影动态状态行，规则文本进可缓存前缀。
+        context.ensure_rule_events();
         let llm_call = call_llm(
             &context,
             &state,

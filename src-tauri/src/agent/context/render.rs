@@ -5,6 +5,15 @@ use crate::agent::review_contract::ReviewContract;
 use crate::agent::task_store::TaskResourceRef;
 use crate::agent::types::TodoItem;
 
+/// 写入后验证的完整规则文案（静态）：首次有待闭合写入时作为一次性
+/// 历史事件注入（见 SandwichContext::ensure_rule_events）；此后尾部
+/// 只投影一行待闭合状态，不再每轮重发这段规则。
+pub(crate) const VERIFICATION_RULES_TEXT: &str = "- 智能感知与主动闭环规则：\n  * 🚀 主动验证授权：代码写入完成后，无需向用户申请许可，请主动调用终端工具运行自测或编译命令；若测试报错，直接依据错误输出就地修复；\n  * 若运行了验证命令（如 cargo test / npm test / pytest 等）且成功通过，系统将自动标记为 verified，无须手动声明；\n  * 非编码任务（运维/系统/文件外产物）的验证手段自选：which/test -e/pacman -Q/systemctl status/curl -f 等状态探针成功即可——但探针命令必须引用本次改动的具体对象（路径/名称），无关探针不自动认账；\n  * 存在性探针返回非零（找不到/不存在）若正是目标状态（卸载/删除/禁用类），请用手动声明 verified + evidence_refs=[\"step_N\"] 举证；\n  * 若工程中无可用测试套件，或改动全为纯静态资源（样式/图片/文档等），系统在提交 finish 时将自动豁免 (waived)；\n- 若需在调用 finish 交付时手动声明闭合（在顶层 JSON 中二选一填空，严禁拼入 summary 正文中）：\n  1. 已验证：\"change_verification_update\": {\"status\": \"verified\", \"evidence_refs\": [\"step_N 或 命令输出摘要\"]}\n  2. 免测豁免：\"change_verification_update\": {\"status\": \"waived\", \"waived_reason\": \"说明免测理由，如UI微调/无自动化单测环境\"}";
+
+/// 审查契约的闭合规则文案（静态）：契约存在时作为一次性历史事件注入；
+/// 尾部契约卡此后只渲染范围+义务清单动态值。
+pub(crate) const CONTRACT_RULES_TEXT: &str = "终态前：每项必须以 evidenced + evidence_refs 或 waived + waived_reason 闭合。evidence_refs 形态随证据域走：代码任务用 `文件:行号`（须落入真实 diff），非代码任务（运维/系统/外部产物）可用 `step_N`、命令+输出摘要等可核验观测（机械行号门将不适用跳过，终审按语义证据核验）；若义务本质是\"命令可通过\"，可给该项挂 `verify_command` 由宿主亲自执行判分（构造 exit 0=义务成立），无需行号证据。";
+
 pub struct ContextRenderer;
 
 impl ContextRenderer {
@@ -59,12 +68,25 @@ impl ContextRenderer {
         if todos.is_empty() {
             return "【当前任务面板 (Todo List)】\n[]\n\n".to_string();
         }
-
-        let json_str = serde_json::to_string_pretty(todos).unwrap_or_else(|_| "[]".to_string());
-        format!("【当前任务面板 (Todo List)】\n{}\n\n", json_str)
+        // 紧凑行式：pretty JSON 里 ~76% 是排版空白，状态卡每轮重发不划算
+        let lines: Vec<String> = todos
+            .iter()
+            .map(|t| {
+                let ev = t
+                    .evidence_output_id
+                    .as_deref()
+                    .map(|id| format!(" (证据 {})", id))
+                    .unwrap_or_default();
+                format!("- [{}] #{} {}{}", t.status, t.id, t.description, ev)
+            })
+            .collect();
+        format!("【当前任务面板 (Todo List)】\n{}\n\n", lines.join("\n"))
     }
 
-    pub fn render_review_contract(contract: Option<&ReviewContract>) -> String {
+    pub fn render_review_contract(
+        contract: Option<&ReviewContract>,
+        rules_emitted: bool,
+    ) -> String {
         let Some(contract) = contract else {
             return String::new();
         };
@@ -96,49 +118,53 @@ impl ContextRenderer {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        format!(
-            "【审查契约】\n范围：{}\n{}\n终态前：每项必须以 evidenced + evidence_refs 或 waived + waived_reason 闭合。evidence_refs 形态随证据域走：代码任务用 `文件:行号`（须落入真实 diff），非代码任务（运维/系统/外部产物）可用 `step_N`、命令+输出摘要等可核验观测（机械行号门将不适用跳过，终审按语义证据核验）；若义务本质是\"命令可通过\"，可给该项挂 `verify_command` 由宿主亲自执行判分（构造 exit 0=义务成立），无需行号证据。\n\n",
-            contract.scope_statement, obligations
-        )
+        if rules_emitted {
+            // 闭合规则已事件化进历史（可缓存前缀），尾部只投影动态义务清单
+            format!(
+                "【审查契约】\n范围：{}\n{}\n（闭合规则见历史规则卡）\n\n",
+                contract.scope_statement, obligations
+            )
+        } else {
+            format!(
+                "【审查契约】\n范围：{}\n{}\n{}\n\n",
+                contract.scope_statement, obligations, CONTRACT_RULES_TEXT
+            )
+        }
     }
 
     pub fn render_change_verification(
         side_effect_count: usize,
         verification: Option<&ChangeVerification>,
         suggested_cmd: Option<&str>,
+        rules_emitted: bool,
     ) -> String {
         if side_effect_count == 0 {
             return String::new();
         }
         if let Some(blocker) = change_verification_blocker(side_effect_count, verification) {
-            let mut prompt = format!(
-                "【写入后验证】\n\
-                - {}\n\
-                - 智能感知与主动闭环规则：\n\
-                  * 🚀 主动验证授权：代码写入完成后，无需向用户申请许可，请主动调用终端工具运行自测或编译命令；若测试报错，直接依据错误输出就地修复；\n",
-                blocker
-            );
-            if let Some(cmd) = suggested_cmd {
-                prompt.push_str(&format!(
-                    "  * 💡 系统自适应探测到当前工程推荐验证命令: `{}`，执行成功后系统将自动标记为 verified，无须手动声明；\n",
-                    cmd
-                ));
-            } else {
-                prompt.push_str(
-                    "  * 若运行了验证命令（如 cargo test / npm test / pytest 等）且成功通过，系统将自动标记为 verified，无须手动声明；\n",
+            if rules_emitted {
+                // 完整闭合规则已事件化进历史（可缓存前缀），尾部只留一行
+                // 动态待闭合状态 + 推荐验证命令（命令本身是动态探测结果）。
+                let cmd_hint = suggested_cmd
+                    .map(|cmd| format!("；推荐验证命令: `{}`", cmd))
+                    .unwrap_or_default();
+                return format!(
+                    "【写入后验证】⚠️ 待闭合：{}（闭合方式见历史规则卡{}）\n\n",
+                    blocker, cmd_hint
                 );
             }
-            prompt.push_str(
-                "  * 非编码任务（运维/系统/文件外产物）的验证手段自选：which/test -e/pacman -Q/systemctl status/curl -f 等状态探针成功即可——但探针命令必须引用本次改动的具体对象（路径/名称），无关探针不自动认账；\n\
-                  * 存在性探针返回非零（找不到/不存在）若正是目标状态（卸载/删除/禁用类），请用下方手动声明 verified + evidence_refs=[\"step_N\"] 举证；\n",
+            let cmd_hint = suggested_cmd
+                .map(|cmd| {
+                    format!(
+                        "\n  * 💡 系统自适应探测到当前工程推荐验证命令: `{}`，执行成功后系统将自动标记为 verified，无须手动声明；",
+                        cmd
+                    )
+                })
+                .unwrap_or_default();
+            return format!(
+                "【写入后验证】\n- {}\n{}{}\n\n",
+                blocker, VERIFICATION_RULES_TEXT, cmd_hint
             );
-            prompt.push_str(
-                "  * 若工程中无可用测试套件，或改动全为纯静态资源（样式/图片/文档等），系统在提交 finish 时将自动豁免 (waived)；\n\
-                - 若需在调用 finish 交付时手动声明闭合（在顶层 JSON 中二选一填空，严禁拼入 summary 正文中）：\n\
-                  1. 已验证：\"change_verification_update\": {\"status\": \"verified\", \"evidence_refs\": [\"step_N 或 命令输出摘要\"]}\n\
-                  2. 免测豁免：\"change_verification_update\": {\"status\": \"waived\", \"waived_reason\": \"说明免测理由，如UI微调/无自动化单测环境\"}\n\n",
-            );
-            return prompt;
         }
         format!(
             "【写入后验证】\n- 最近写入：{}\n终态前：后续若无新增代码写入，调用 finish 将直接放行；若发生新的真实写入，将重新激活闭合要求。\n\n",
@@ -472,7 +498,7 @@ mod tests {
 
     #[test]
     fn render_change_verification_empty_when_no_writes() {
-        assert!(ContextRenderer::render_change_verification(0, None, None).is_empty());
+        assert!(ContextRenderer::render_change_verification(0, None, None, false).is_empty());
     }
 
     #[test]
@@ -481,6 +507,7 @@ mod tests {
             1,
             None,
             Some("npx vue-tsc --noEmit"),
+            false,
         );
         assert!(out.contains("写入后验证"));
         assert!(out.contains("主动验证授权"));
@@ -496,7 +523,7 @@ mod tests {
             evidence_refs: vec!["cargo test all pass".to_string()],
             waived_reason: None,
         };
-        let out = ContextRenderer::render_change_verification(1, Some(&verified), None);
+        let out = ContextRenderer::render_change_verification(1, Some(&verified), None, false);
         assert!(out.contains("已验证：cargo test all pass"));
         assert!(out.contains("直接放行"));
     }

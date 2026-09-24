@@ -295,6 +295,13 @@ pub struct SandwichContext {
     /// 历史，尾部状态卡此后只携带首行摘要+版本指针，削减每轮全量重发。
     #[serde(default)]
     pub last_persisted_summary: Option<String>,
+    /// 写入后验证的完整规则文案是否已作为一次性历史事件注入。
+    /// 事件化后尾部只投影一行待闭合状态；压缩清空历史时重置以便重发。
+    #[serde(default)]
+    pub verification_rules_emitted: bool,
+    /// 审查契约的闭合规则文案是否已作为一次性历史事件注入。
+    #[serde(default)]
+    pub contract_rules_emitted: bool,
     /// 进度摘要的历史事件版本号。
     #[serde(default)]
     pub persisted_summary_revision: u64,
@@ -393,6 +400,8 @@ impl SandwichContext {
             zero_hit: ZeroHitTracker::default(),
             last_reported_prompt_tokens: None,
             last_persisted_summary: None,
+            verification_rules_emitted: false,
+            contract_rules_emitted: false,
             persisted_summary_revision: 0,
             last_reported_history_estimate_tokens: None,
             task_resources: Vec::new(),
@@ -1110,6 +1119,41 @@ impl SandwichContext {
             self.last_persisted_summary = Some(trimmed.to_string());
         }
         self.progress_summary = trimmed.to_string();
+    }
+
+    /// 规则文案事件化（write-once）：门禁类固定说明只在首次激活时作为
+    /// 历史事件注入一次，此后进缓存前缀；尾部状态卡只投影动态状态行。
+    /// 每步 LLM 调用前由 call_llm_phase reconcile——首次激活、会话恢复
+    /// 缺事件、压缩排空后（标志位被重置）三种场景在同一点补齐。
+    /// 未走该路径的调用方保持旧行为：尾部照常渲染完整规则文案。
+    pub fn ensure_rule_events(&mut self) {
+        // 写入后验证：存在待闭合写入时才需要完整闭合规则
+        let verification_pending = crate::agent::change_verification::change_verification_blocker(
+            self.side_effects.len(),
+            self.change_verification.as_ref(),
+        )
+        .is_some();
+        if verification_pending && !self.verification_rules_emitted {
+            self.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!(format!(
+                    "【写入后验证规则卡（一次性历史事件，后续轮次以此为准）】\n{}",
+                    crate::agent::context::render::VERIFICATION_RULES_TEXT
+                )),
+            });
+            self.verification_rules_emitted = true;
+        }
+        // 审查契约：契约存在时注入一次闭合规则
+        if self.review_contract.is_some() && !self.contract_rules_emitted {
+            self.turns_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!(format!(
+                    "【审查契约规则卡（一次性历史事件，后续轮次以此为准）】\n{}",
+                    crate::agent::context::render::CONTRACT_RULES_TEXT
+                )),
+            });
+            self.contract_rules_emitted = true;
+        }
     }
 
     pub fn has_tool_manual(&self, tool_key: &str) -> bool {

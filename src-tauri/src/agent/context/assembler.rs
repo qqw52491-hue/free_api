@@ -187,12 +187,14 @@ impl SandwichContext {
         // (9) 审查契约仅在复杂审查/诊断任务显式建立时出现，普通任务不增加状态卡。
         bottom_state_card.push_str(&ContextRenderer::render_review_contract(
             self.review_contract.as_ref(),
+            self.contract_rules_emitted,
         ));
         // (10) 仅在已有成功写入时显示；将验证闭合的下一步保持在模型当前上下文内。
         bottom_state_card.push_str(&ContextRenderer::render_change_verification(
             self.side_effects.len(),
             self.change_verification.as_ref(),
             self.inferred_verification_command().as_deref(),
+            self.verification_rules_emitted,
         ));
         // (11) 方案门禁状态投影：决策前可见当前模式与放行条件，避免靠写入被拒学习规则。
         bottom_state_card.push_str(&ContextRenderer::render_plan_gate(
@@ -219,9 +221,9 @@ impl SandwichContext {
             ));
         }
 
-        final_user_parts.push(ContextRenderer::render_decision_instruction(
-            self.compact_tools_index.as_deref(),
-        ));
+        // 工具快速索引不再随决策指令每轮重发：完整工具目录在 M0 system
+        // prompt 里（可缓存前缀），尾部只保留输出格式规则。
+        final_user_parts.push(ContextRenderer::render_decision_instruction(None));
 
         let final_user_str = final_user_parts.join("\n\n");
         if !final_user_str.trim().is_empty() {
@@ -644,5 +646,85 @@ mod tests {
         let closed = serde_json::to_string(&ctx.assemble_messages()).unwrap();
         assert!(closed.contains("最近写入：已验证：output_id: check-42"));
         assert!(!closed.contains("尚无验证证据或明确豁免"));
+    }
+
+    /// 三档状态卡体积对比：构造典型中段任务状态，量化 off/minimal/full 的
+    /// 每步尾部字节差（≈每步固定 miss token）。cargo test -- --nocapture 看输出。
+    #[test]
+    fn state_card_level_byte_comparison() {
+        use crate::agent::context::budget::StateCardLevel;
+
+        let mut ctx = SandwichContext::new("SYS".to_string(), "修复图片上传三路径落盘".to_string());
+        ctx.active_tool = Some("local_file".to_string());
+        ctx.plan_state.active_id = Some("plan-3".to_string());
+        ctx.plan_state.active_title = Some("修复粘贴路径落盘".to_string());
+        for i in 0..12 {
+            ctx.record_side_effect(
+                i + 1,
+                "local_file".to_string(),
+                format!("编辑文件 src/components/Comp{}.vue", i),
+            );
+        }
+        for i in 0..4 {
+            ctx.failed_attempts.push(crate::agent::context::types::FailedAttempt {
+                step_id: 10 + i,
+                tool: "local_file".to_string(),
+                action: "edit".to_string(),
+                params_fingerprint: format!("fp{}", i),
+                error_summary: "目标文本未找到，oldText 精确匹配失败".to_string(),
+                output_id: None,
+            });
+        }
+        for i in 0..6 {
+            ctx.todo_list.push(crate::agent::types::TodoItem {
+                id: i + 1,
+                status: if i < 3 { "done" } else { "pending" }.to_string(),
+                description: format!("修复上传路径 {} 的落盘与徽标标记", i),
+                evidence_output_id: None,
+            });
+        }
+        ctx.review_contract = Some(crate::agent::review_contract::ReviewContract {
+            scope_statement: "图片上传三路径落盘修复验收".to_string(),
+            obligations: (0..3)
+                .map(|i| crate::agent::review_contract::ReviewObligation {
+                    verify_command: None,
+                    verify_script: None,
+                    verify_sha256: None,
+                    id: format!("e2e_{}", i),
+                    question: format!("路径 {} 的粘贴/拖拽落盘是否经真实验证？", i),
+                    status: "open".to_string(),
+                    evidence_refs: Vec::new(),
+                    waived_reason: None,
+                })
+                .collect(),
+        });
+        ctx.memories.insert("k1".to_string(), "编辑器用 tauri invoke 落盘".to_string());
+        ctx.progress_summary = "已定位三处上传入口，修复粘贴路径中".to_string();
+
+        let card_len = |level: StateCardLevel| -> usize {
+            let mut c = ctx.clone();
+            c.budget_config.state_card_level = level;
+            c.assemble_messages()
+                .iter()
+                .find(|m| {
+                    m.content
+                        .as_str()
+                        .map(|s| s.contains("【审查契约】"))
+                        .unwrap_or(false)
+                })
+                .map(|m| m.content.as_str().unwrap().len())
+                .unwrap_or(0)
+        };
+
+        let off = card_len(StateCardLevel::Off);
+        let minimal = card_len(StateCardLevel::Minimal);
+        let full = card_len(StateCardLevel::Full);
+        eprintln!(
+            "状态卡字节数: off={} minimal={} full={} (off→full 差 {}B ≈ {}tok/步)",
+            off, minimal, full, full - off, (full - off) / 4
+        );
+        assert!(off < minimal && minimal < full, "档位体积应递增");
+        // Off 档仍需保留未闭合契约（否则 finish 死锁）
+        assert!(off > 0, "有待闭合义务时 Off 档不能是零字节");
     }
 }
