@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -509,12 +509,19 @@ impl ResourceScopeContract {
         let requested = requested_locator(params);
         let resolved_from_output = resolved_locator_from_output(output);
         if is_known_filesystem_tool(tool_identity) {
-            let resolved = resolved_from_output.as_deref().or_else(|| {
+            // 文件系统工具的相对定位符语义确定=文件相对 primary，直接解析
+            // （与执行层 ensure_allowed_path 同一口径："."/"src/x"→工作区内）
+            let resolved = resolved_from_output.or_else(|| {
                 requested
                     .as_deref()
-                    .filter(|locator| Path::new(locator).is_absolute())
+                    .and_then(|locator| self.resolve_to_primary(locator))
             });
-            return Some(self.observe_filesystem_tool(tool_identity, params, resolved, operation));
+            return Some(self.observe_filesystem_tool(
+                tool_identity,
+                params,
+                resolved.as_deref(),
+                operation,
+            ));
         }
         if let Some(resolved) = resolved_from_output.as_deref() {
             return Some(self.observe_filesystem_tool(
@@ -524,7 +531,40 @@ impl ResourceScopeContract {
                 operation,
             ));
         }
-        requested.map(|_| self.observe_unknown_tool(tool_identity, params, operation))
+        requested.map(|req| {
+            // 不透明工具：绝对路径天然可归类；相对路径只在来自 cwd 键时解析
+            // （cwd 语义跨工具通用=工作目录）。path/source 等键的相对值语义
+            // 未知（可能是服务内部 ID），不推测 → 维持 unknown。
+            let joined = if Path::new(&req).is_absolute() {
+                Some(req.clone())
+            } else if params.get("cwd").and_then(Value::as_str) == Some(req.as_str()) {
+                self.resolve_to_primary(&req)
+            } else {
+                None
+            };
+            match joined {
+                Some(res) => self.observe_filesystem_tool(
+                    tool_identity,
+                    params,
+                    Some(&res),
+                    operation,
+                ),
+                None => self.observe_unknown_tool(tool_identity, params, operation),
+            }
+        })
+    }
+
+    /// 定位符按 primary 绑定解析：绝对路径原样返回；相对路径 join primary
+    /// 后词法规整（"."/"src/x"→界内，"../etc"→界外）。无 primary 绑定时 None。
+    fn resolve_to_primary(&self, locator: &str) -> Option<String> {
+        if Path::new(locator).is_absolute() {
+            return Some(locator.to_string());
+        }
+        self.primary_filesystem().map(|binding| {
+            lexically_normalize(&Path::new(&binding.locator).join(locator))
+                .to_string_lossy()
+                .to_string()
+        })
     }
 
     /// 仅在已知文件系统写工具且请求已明确为绝对越界定位符时守卫；不推测相对路径。
@@ -629,6 +669,22 @@ fn is_path_within(candidate: &Path, root: &Path) -> bool {
     let candidate_components: Vec<Component<'_>> = candidate.components().collect();
     let root_components: Vec<Component<'_>> = root.components().collect();
     candidate_components.starts_with(&root_components)
+}
+
+/// 词法级路径规整：不动文件系统，把 ".." 和 "." 组件折掉——
+/// 供观测层把相对定位符 join primary 后归类 inside/outside。
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -862,5 +918,35 @@ mod tests {
 
         assert_eq!(observation.relation, ResourceRelation::Unknown);
         assert!(!observation.should_guard);
+    }
+
+    #[test]
+    fn relative_cwd_resolves_against_primary_and_dotdot_escapes_outside() {
+        let mut contract = primary_contract();
+        let output = r#"{"command":"find .","exit_code":0}"#;
+
+        // cwd:"." → primary 根 → inside（实测：local_shell 每步都传 "."，
+        // 此前一律 unknown 纯属观测层不认相对路径）
+        let obs = contract
+            .observe_tool_result(
+                "local_shell",
+                &json!({"command": "find .", "cwd": "."}),
+                output,
+                ResourceOperation::Read,
+            )
+            .unwrap();
+        assert_eq!(obs.relation, ResourceRelation::Inside);
+
+        // cwd:"../other" → primary/../other → outside（相对路径逃逸
+        // 此前也是 unknown——写守卫对 ../ 形同虚设的缺口一并堵上）
+        let obs2 = contract
+            .observe_tool_result(
+                "local_shell",
+                &json!({"command": "ls", "cwd": "../other"}),
+                output,
+                ResourceOperation::Read,
+            )
+            .unwrap();
+        assert_eq!(obs2.relation, ResourceRelation::Outside);
     }
 }

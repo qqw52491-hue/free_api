@@ -151,10 +151,12 @@ pub(super) async fn dispatch_local_tool(
                 ResourceOperation::Read
             },
         ) {
-            // relation=unknown 的观测对模型零信息量（"不知道"教不了任何动作），
-            // 实测每条失败输出尾巴多 5 行噪音放大恐慌重试——内部记账保留，
-            // 只在有真实信号（inside 确认 / outside 写守卫）时才注入输出。
-            if scope_observation.relation != crate::agent::context::resource_scope::ResourceRelation::Unknown {
+            // 只有 outside（越界/写守卫）才值得贴给模型——inside 是默认预期、
+            // unknown 是零信息量，两者每步都贴纯属噪音（实测 19 条/场）。
+            // 内部记账（mismatch/revision）不受影响。
+            if scope_observation.relation
+                == crate::agent::context::resource_scope::ResourceRelation::Outside
+            {
                 let annotation = scope_observation.render();
                 if dispatch_result.success {
                     dispatch_result.stdout =
