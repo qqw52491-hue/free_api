@@ -11,6 +11,6 @@
  "plan_mode": "off",
  "max_prompt_tokens": 3000000,
  "judge_semantics": "开放诊断题：异常类型不预告（6 类埋点），判据核类型覆盖≥4、具体订单号命中≥3、正常行误报<5——同时测检出率与克制性（不过度报告）。",
- "base_commit": "4e5dc63",
+ "base_commit": "c09d2eb",
  "test_patch": "test/eval_cases/patches/case_office_audit_judge.test.patch"
 }

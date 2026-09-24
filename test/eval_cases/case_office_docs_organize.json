@@ -11,6 +11,6 @@
  "plan_mode": "off",
  "max_prompt_tokens": 3000000,
  "judge_semantics": "开放整理题：分类标准不给死（语义自由度），只机械核验归档完整性（10 文件归位）、同类聚合（纪要集中）、索引覆盖度。PASS=模型完成读文→判类→归档→索引全流程。",
- "base_commit": "4e5dc63",
+ "base_commit": "c09d2eb",
  "test_patch": "test/eval_cases/patches/case_office_docs_judge.test.patch"
 }

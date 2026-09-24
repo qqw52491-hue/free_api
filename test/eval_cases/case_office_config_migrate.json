@@ -11,6 +11,6 @@
  "plan_mode": "off",
  "max_prompt_tokens": 3000000,
  "judge_semantics": "格式解析+规则推理混合题：判据只核 config.json 五个关键冲突键的正确取值与冲突报告存在性，不限制 JSON 结构形态。PASS=多格式解析正确且冲突规则被真实执行。",
- "base_commit": "4e5dc63",
+ "base_commit": "c09d2eb",
  "test_patch": "test/eval_cases/patches/case_office_migrate_judge.test.patch"
 }

@@ -11,6 +11,6 @@
  "plan_mode": "off",
  "max_prompt_tokens": 3000000,
  "judge_semantics": "办公场景真实操作题：输入已就位、判据只核输出物（xlsx 行数/sheet 结构/说明覆盖），不测代码修改。PASS=模型能用 shell+python 完成数据合并→xlsx 产出→说明文档的完整办公链路。",
- "base_commit": "4e5dc63",
+ "base_commit": "c09d2eb",
  "test_patch": "test/eval_cases/patches/case_office_report_judge.test.patch"
 }
