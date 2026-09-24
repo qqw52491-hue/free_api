@@ -781,6 +781,11 @@ async function runEvaluation() {
             if (!httpCode || httpCode === '000') {
               throw new Error(`LLM 代理预检失败：${probeBaseUrl} 不可达（连接被拒或超时）。请先恢复本地反代（Docker/OrbStack 与 antigravity-manager 容器）再跑实弹。`);
             }
+            // 非 2xx/3xx 也判死：401/403=鉴权失效、5xx=上游故障——
+            // 端点"活着但不可用"会让 agent 整轮空转直到超时才取消（2026-09-24 实测：401 通过预检，会话 15.6 分钟零产出）
+            if (!/^[23]/.test(httpCode)) {
+              throw new Error(`LLM 代理预检失败：${probeBaseUrl} 返回 HTTP ${httpCode}（鉴权失效或上游故障）。请检查该平台 API Key/代理状态再跑实弹。`);
+            }
             console.log(`   🩺 [LIVE] LLM 代理预检通过 (${probeBaseUrl} → HTTP ${httpCode})`);
           }
         }
