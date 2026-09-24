@@ -319,24 +319,21 @@ pub(super) async fn dispatch_child_reviewer(
                 );
                 if !scope.is_empty() {
                     if let Some(obj) = effective_params.as_object_mut() {
-                        obj["evidence_scope_refs"] = json!(scope);
+                        let scope_str = scope.join(", ");
+                        obj.insert("evidence_scope_refs".to_string(), json!(scope));
                         let exc = obj
                             .get("evidence_excerpt")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        obj["evidence_excerpt"] = json!(format!(
-                            "{}\n\n【📎 证据范围对账】以下文件被方案引为证据但未列入拟修改目标：{}",
-                            exc,
-                            obj["evidence_scope_refs"]
-                                .as_array()
-                                .map(|a| a
-                                    .iter()
-                                    .filter_map(|x| x.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", "))
-                                .unwrap_or_default()
-                        ));
+                        obj.insert(
+                            "evidence_excerpt".to_string(),
+                            json!(format!(
+                                "{}\n\n【📎 证据范围对账】以下文件被方案引为证据但未列入拟修改目标：{}",
+                                exc,
+                                scope_str
+                            )),
+                        );
                     }
                 }
             }

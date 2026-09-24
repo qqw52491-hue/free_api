@@ -724,3 +724,54 @@ export function extractSubagentsFromStep(
 
     return workers;
 }
+
+export function formatWorkerName(name: string): string {
+    if (!name) return "子 Agent";
+    if (/[🎨🛡️🔧⚡🔍🧠🎭🤖💻]/.test(name) || /审查官|审查员|专家|架构师|写入员|工作者|设计官/.test(name)) {
+        if (name.includes("：") || name.includes(":")) {
+            const parts = name.split(/[:：]/);
+            if (/角色|专家|挂载/.test(parts[0]) && parts[1]?.trim()) {
+                return parts[1].trim().slice(0, 14);
+            }
+        }
+        return name.length > 14 ? name.slice(0, 13) + "…" : name;
+    }
+    if (name.includes("：") || name.includes(":")) {
+        const prefix = name.split(/[:：]/)[0].trim();
+        if (prefix.length <= 10) return prefix;
+    }
+    const match = name.match(/(Agent\s*[-_]?[A-Za-z0-9]+)/i);
+    if (match && match[1]) {
+        return match[1].replace(/[-_]/g, " ");
+    }
+    if (name.length > 12) {
+        return name.slice(0, 11) + "…";
+    }
+    return name;
+}
+
+export function getRoleIcon(role: string): string {
+    switch (role) {
+        case "reviewer":
+            return "🛡️";
+        case "coder":
+            return "⚡";
+        case "researcher":
+            return "🔍";
+        case "master":
+            return "👑";
+        default:
+            return "⚡";
+    }
+}
+
+export function workerStatusText(status: string): string {
+    const map: Record<string, string> = {
+        running: "执行中",
+        succeeded: "已完成",
+        failed: "失败",
+        pending: "待命中",
+        challenged: "验证未闭合",
+    };
+    return map[status] || "待命";
+}

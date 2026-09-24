@@ -222,6 +222,7 @@
                     @preview-resource="session.openResourcePreview"
                     @agent-submit="handleInspectorAgentSubmit"
                     @select-step="session.selectedStepId.value = $event || null"
+                    @open-diff="handleOpenDiff"
                     @close="inspectorCollapsed = true"
                 />
             </div>

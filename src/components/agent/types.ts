@@ -394,11 +394,25 @@ export interface AgentWorkerStep {
     stepNumber: number;
     title: string;
     tool?: string;
+    action?: string;
     status: AgentToolStatus;
     description?: string;
     summary?: string;
     durationMs?: number;
     output?: string;
+    view?: ToolView;
+    params?: unknown;
+    result?: unknown;
+    metrics?: AgentStepMetrics;
+    fileName?: string;
+    lineRange?: string;
+    badgeLabel?: string;
+    additions?: number;
+    deletions?: number;
+    isIntercepted?: boolean;
+    diffPayload?: string;
+    thought?: string;
+    timestamp?: number;
 }
 
 export interface ContractFieldDef {

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-const MAX_REVIEW_OBLIGATIONS: usize = 6;
+// 上限需容纳用户显式规格表（一行一义务，典型 8-10 行）；仍封顶防过度拆分。
+const MAX_REVIEW_OBLIGATIONS: usize = 12;
 const MAX_SCOPE_CHARS: usize = 500;
 const MAX_OBLIGATION_ID_CHARS: usize = 64;
 const MAX_OBLIGATION_TEXT_CHARS: usize = 360;

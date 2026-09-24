@@ -85,19 +85,84 @@
 
         <!-- 模式 B：标准调用详情与执行状态模式 (专注思维链、参数、报错与上下文) -->
         <template v-else>
-            <header class="inspector-top">
-                <div>
-                    <span>EXECUTION &amp; DEBUG</span>
-                    <h2>{{ stateMeta.category }}</h2>
-                    <p>{{ statusDescription }}</p>
-                </div>
-                <div class="inspector-top-controls">
-                    <span class="state-badge" :class="`state-${runState}`">{{ stateMeta.label }}</span>
-                    <button type="button" class="btn-close-inspector" title="收起面板" @click="$emit('close')">
+            <!-- 🌟 0. 顶置 Agent 协同导航栏 (仅当有子 Agent 参与协同或派发时出现，置于第一行，永远在右侧最顶部) -->
+            <div v-if="displayedWorkersList.length > 0" class="inspector-global-agent-nav">
+                <nav class="agent-nav-scroll-list">
+                    <!-- 👑 主调度 Master -->
+                    <button
+                        type="button"
+                        class="agent-nav-pill"
+                        :class="{ active: selectedAgentId === 'master', 'is-running': teamState?.masterStatus === 'running' }"
+                        title="查看主调度全局运行详情、参数与思维链"
+                        @click="selectedAgentId = 'master'"
+                    >
+                        <span class="pill-icon">👑</span>
+                        <span class="pill-label">主调度</span>
+                        <span class="pill-status-dot" :class="`status-${teamState?.masterStatus || runState}`"></span>
+                    </button>
+
+                    <!-- 🤖 子 Agent Tabs -->
+                    <button
+                        v-for="worker in displayedWorkersList"
+                        :key="worker.id"
+                        type="button"
+                        class="agent-nav-pill"
+                        :class="{ active: selectedAgentId === worker.id, 'is-running': worker.status === 'running' }"
+                        :title="worker.name"
+                        @click="selectedAgentId = worker.id"
+                    >
+                        <span class="pill-icon">{{ getRoleIcon(worker.role) }}</span>
+                        <span class="pill-label">{{ formatWorkerName(worker.name) }}</span>
+                        <span class="pill-status-badge" :class="`status-${worker.status}`">
+                            {{ worker.status === 'succeeded' ? '完成' : (worker.status === 'running' ? `${worker.progress}%` : workerStatusText(worker.status)) }}
+                        </span>
+                    </button>
+                </nav>
+
+                <div class="agent-nav-actions">
+                    <button type="button" class="btn-close-topbar" title="收起面板" @click="$emit('close')">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                     </button>
                 </div>
-            </header>
+            </div>
+
+            <!-- 🌟 当选中的是子 Agent 时：覆盖右侧，直接全高展示该子 Agent 专属流程工作台 -->
+            <section v-if="selectedAgentId !== 'master'" class="inspector-scroll dedicated-worker-pane">
+                <AgentTeamDeck
+                    :team-state="teamState"
+                    :steps="steps"
+                    :selected-step="selectedStep"
+                    :current-goal="currentGoal"
+                    :active-worker-id="selectedAgentId"
+                    :hide-top-tab-bar="true"
+                    :only-active="false"
+                    @clear-selected-step="$emit('select-step', '')"
+                    @open-diff="$emit('open-diff', $event)"
+                    @select-worker="selectedAgentId = $event"
+                />
+            </section>
+
+            <!-- 🌟 当选中的是主调度 Master 时：展示主调度的标准调试与调用详情 -->
+            <template v-else>
+                <header class="inspector-top">
+                    <div>
+                        <span>EXECUTION &amp; DEBUG</span>
+                        <h2>{{ stateMeta.category }}</h2>
+                        <p>{{ statusDescription }}</p>
+                    </div>
+                    <div class="inspector-top-controls">
+                        <span class="state-badge" :class="`state-${runState}`">{{ stateMeta.label }}</span>
+                        <button
+                            v-if="displayedWorkersList.length === 0"
+                            type="button"
+                            class="btn-close-inspector"
+                            title="收起面板"
+                            @click="$emit('close')"
+                        >
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        </button>
+                    </div>
+                </header>
 
             <div class="inspector-metrics">
                 <div><span>运行</span><strong>{{ elapsedLabel }}</strong></div>
@@ -500,8 +565,10 @@
                     :team-state="teamState"
                     :steps="steps"
                     :selected-step="selectedStep"
+                    :current-goal="currentGoal"
                     :only-active="!selectedStep"
                     @clear-selected-step="$emit('select-step', '')"
+                    @open-diff="$emit('open-diff', $event)"
                 />
             </section>
 
@@ -547,6 +614,7 @@
                 </div>
             </section>
         </template>
+        </template>
     </aside>
 </template>
 
@@ -561,7 +629,7 @@ import AgentTeamDeck from "./AgentTeamDeck.vue";
 import FileDiffViewer from "./FileDiffViewer.vue";
 import { toolViewComponents } from "./views";
 import { extractDiffFromStep, parseStepFileChanges, aggregateFileChips, diffPayloadFromChip } from "./diffUtils";
-import { extractSubagentsFromStep, formatFinding } from "./workerUtils";
+import { extractSubagentsFromStep, formatFinding, getRoleIcon, formatWorkerName, workerStatusText } from "./workerUtils";
 
 const props = withDefaults(
     defineProps<{
@@ -608,12 +676,60 @@ const emit = defineEmits<{
     "agent-submit": [data: any];
     "agent-cancel": [reason: string];
     "select-step": [id: string];
+    "open-diff": [diffPayload: any];
     "close": [];
 }>();
 
 const currentStepSubagents = computed(() => {
     return extractSubagentsFromStep(props.selectedStep, props.steps);
 });
+
+const selectedAgentId = ref<string>("master");
+
+const displayedWorkersList = computed(() => {
+    if (currentStepSubagents.value && currentStepSubagents.value.length > 0) {
+        return currentStepSubagents.value;
+    }
+    return props.teamState?.workers || [];
+});
+
+// 🌟 步骤选择监听：
+// 当点击普通步骤时 -> 必须回到主调度视图，展示该步骤本身的详细调用详情 (参数、输出、错误、思维链)
+// 只有当点击子任务派发步骤时 -> 才切到对应子 Agent 专属流程！
+watch(
+    () => props.selectedStep ? (props.selectedStep.id || String(props.selectedStep.stepId)) : null,
+    (stepIdentifier) => {
+        if (!stepIdentifier) {
+            return;
+        }
+        if (currentStepSubagents.value.length > 0) {
+            // 点击的是派发了子任务的步骤（例如子审查派发或 wait_jobs）-> 切到子 Agent 视图
+            selectedAgentId.value = currentStepSubagents.value[0].id;
+        } else {
+            // 🌟 点击普通步骤（如读取、终端、修改、检索）：右侧绝对展示该步骤原本的调用详情！
+            selectedAgentId.value = "master";
+            if (activeTab.value === "team") {
+                activeTab.value = "detail";
+            }
+        }
+    },
+    { immediate: true }
+);
+
+watch(
+    () => displayedWorkersList.value.map(w => `${w.id}:${w.status}`).join(','),
+    () => {
+        const workers = displayedWorkersList.value;
+        if (workers.length > 0 && selectedAgentId.value !== 'master') {
+            const exists = workers.some(w => w.id === selectedAgentId.value);
+            if (!exists) {
+                selectedAgentId.value = "master";
+            }
+        } else if (workers.length === 0) {
+            selectedAgentId.value = "master";
+        }
+    }
+);
 
 const activeTab = ref<"preview" | "detail" | "diff" | "team" | "context" | "resources">("detail");
 const customDiffPayload = ref<FileDiffPayload | null>(null);
@@ -685,6 +801,14 @@ function switchTab(tab: "preview" | "detail" | "diff" | "team" | "context" | "re
     activeTab.value = tab;
     if (tab !== "diff") {
         customDiffPayload.value = null;
+    }
+    if (tab === "team") {
+        if (displayedWorkersList.value.length > 0) {
+            const running = displayedWorkersList.value.find(w => w.status === "running");
+            selectedAgentId.value = running ? running.id : displayedWorkersList.value[0].id;
+        }
+    } else {
+        selectedAgentId.value = "master";
     }
 }
 
@@ -2046,6 +2170,142 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     overflow-y: auto;
     background: #09090b;
     border-color: rgba(239, 68, 68, 0.2);
+}
+
+/* 🌟 顶置 Agent 协同导航栏 (置于第一行，永远在右侧最顶部，随时一键切换主调度与各子 Agent) */
+.inspector-global-agent-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    background: #14141a;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    flex-shrink: 0;
+}
+
+.agent-nav-scroll-list {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    min-width: 0;
+    flex: 1;
+}
+
+.agent-nav-scroll-list::-webkit-scrollbar {
+    display: none;
+}
+
+.agent-nav-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 5px;
+    color: #94a3b8;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.agent-nav-pill:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #e2e8f0;
+    border-color: rgba(255, 255, 255, 0.15);
+}
+
+.agent-nav-pill.active {
+    background: rgba(56, 189, 248, 0.12);
+    border-color: rgba(56, 189, 248, 0.4);
+    color: #38bdf8;
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.12);
+}
+
+.pill-icon {
+    font-size: 12px;
+    line-height: 1;
+}
+
+.pill-label {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pill-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #64748b;
+}
+
+.pill-status-dot.status-running {
+    background: #38bdf8;
+    box-shadow: 0 0 5px #38bdf8;
+}
+
+.pill-status-dot.status-succeeded {
+    background: #34d399;
+}
+
+.pill-status-badge {
+    font-size: 9px;
+    padding: 0.5px 4px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #94a3b8;
+}
+
+.pill-status-badge.status-running {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+}
+
+.pill-status-badge.status-succeeded {
+    background: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
+}
+
+.pill-status-badge.status-failed {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+}
+
+.btn-close-topbar {
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: #71717a;
+    cursor: pointer;
+    transition: all 0.12s ease;
+    flex-shrink: 0;
+}
+
+.btn-close-topbar:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #f4f4f5;
+}
+
+.dedicated-worker-pane {
+    padding: 8px 12px;
+    flex: 1;
+    overflow-y: auto;
 }
 
 @media (max-width: 980px) { .manus-inspector { min-height: 460px; border-top: 1px solid rgba(255, 255, 255, 0.08); border-left: 0; } }

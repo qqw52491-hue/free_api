@@ -1165,22 +1165,72 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 });
 
                 let title = `执行 ${action}`;
+                let fileName: string | undefined = undefined;
+                let lineRange: string | undefined = undefined;
+                let badgeLabel = "操作";
+                let view: any = undefined;
+
                 if (action === "deliberate") {
                     title = `生成审查判决（第 ${(params as any)?.round || stepNum} 轮）`;
+                    badgeLabel = "判决";
                 } else if (params && typeof params === "object") {
                     const p = params as any;
-                    if (p.path) title = `${action}: ${p.path}`;
-                    else if (p.command) title = `运行命令: ${p.command}`;
-                    else if (p.query) title = `检索: ${p.query}`;
-                    else if (p.pattern) title = `检索: ${p.pattern}`;
-                    else if (p.id) title = `重跑验证: ${p.id}`;
+                    if (p.path) {
+                        fileName = p.path;
+                        if (p.start_line) lineRange = `#L${p.start_line}-${p.end_line || p.start_line + 50}`;
+                        if (action === "read_file" || action === "read") {
+                            title = `读取 ${p.path}`;
+                            badgeLabel = "读取";
+                            view = {
+                                kind: "read",
+                                path: p.path,
+                                start_line: p.start_line || 1,
+                                end_line: p.end_line || 100,
+                                total_lines: 100,
+                            };
+                        } else if (action === "edit_file" || action === "write_file") {
+                            title = `修改 ${p.path}`;
+                            badgeLabel = "操作";
+                        } else {
+                            title = `${action}: ${p.path}`;
+                        }
+                    } else if (p.command) {
+                        title = `运行命令: ${p.command}`;
+                        badgeLabel = "终端";
+                        view = {
+                            kind: "terminal",
+                            command: p.command,
+                            exit_code: 0,
+                        };
+                    } else if (p.query || p.pattern) {
+                        const q = p.query || p.pattern;
+                        title = `检索: ${q}`;
+                        badgeLabel = "检索";
+                        view = {
+                            kind: "search",
+                            query: q,
+                            total_hits: 1,
+                            truncated: false,
+                            hits: [],
+                        };
+                    } else if (p.id) {
+                        title = `重跑验证: ${p.id}`;
+                        badgeLabel = "验证";
+                    }
                 }
 
                 worker.steps.push({
                     stepNumber: Math.max(stepNum + 1, worker.steps.length + 1),
                     title,
                     tool: action,
+                    action,
                     status: "running",
+                    badgeLabel,
+                    fileName,
+                    lineRange,
+                    view,
+                    params,
+                    timestamp: Date.now(),
                 });
                 worker.currentStep = title;
                 worker.currentTool = action;

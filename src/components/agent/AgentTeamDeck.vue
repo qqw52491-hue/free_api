@@ -13,19 +13,54 @@
             </button>
         </div>
 
-        <!-- ================= 1. 上半部分：竖向 Agent 拓扑树 (Top Half: Vertical Topology Tree) ================= -->
-        <section class="topology-overview-section">
-            <div class="deck-header-bar">
-                <div class="title-with-dot">
-                    <span class="live-pulse-dot" :class="`state-${teamState.masterStatus}`"></span>
-                    <span class="header-title-text">{{ isMultiAgent ? (isViewingHistoryStep ? '历史协同拓扑' : 'Agent 协同拓扑') : 'Agent 调度拓扑' }}</span>
-                </div>
-                <div class="header-status-pill" :class="`pill-${teamState.masterStatus}`">
-                    {{ isViewingHistoryStep ? '历史回溯' : statusText(teamState.masterStatus) }}
-                </div>
-            </div>
+        <!-- ================= 1. 顶部：全局 Agent 切换 Tab 栏 (点击在右侧无缝展示对应 Agent 流程) ================= -->
+        <nav v-if="!hideTopTabBar" class="agent-unified-tab-bar">
+            <!-- 👑 主调度 Master Tab -->
+            <button
+                type="button"
+                class="agent-tab-pill"
+                :class="{ active: activeTab === 'master', 'is-running': teamState.masterStatus === 'running' }"
+                title="查看主调度全局状态与调度大纲"
+                @click="activeTab = 'master'"
+            >
+                <span class="tab-pill-icon">👑</span>
+                <span class="tab-pill-title">主调度</span>
+                <span class="tab-pill-status" :class="`status-${teamState.masterStatus}`">
+                    <i v-if="teamState.masterStatus === 'running'" class="spinner-dot"></i>
+                    {{ isViewingHistoryStep ? '回溯' : statusText(teamState.masterStatus) }}
+                </span>
+            </button>
 
-            <!-- 竖向拓扑连接卡片 -->
+            <!-- 🤖 子 Agent 动态切换 Tabs (每个子 Agent 一个清晰现代 Tab) -->
+            <button
+                v-for="worker in displayedWorkers"
+                :key="worker.id"
+                type="button"
+                class="agent-tab-pill"
+                :class="{ active: activeTab === worker.id, 'is-running': worker.status === 'running' }"
+                :title="worker.name"
+                @click="activeTab = worker.id"
+            >
+                <span class="tab-pill-icon">{{ getRoleIcon(worker.role) }}</span>
+                <span class="tab-pill-title">{{ formatWorkerName(worker.name) }}</span>
+                <span class="tab-pill-status" :class="`status-${worker.status}`">
+                    <i v-if="worker.status === 'running'" class="spinner-dot"></i>
+                    {{ worker.status === 'succeeded' ? '完成' : (worker.status === 'running' ? `${worker.progress}%` : statusText(worker.status)) }}
+                </span>
+            </button>
+        </nav>
+
+        <!-- 协同拓扑折叠条 (轻量收拢，绝不霸占下方宝贵的步骤展示高度) -->
+        <div v-if="isMultiAgent" class="topology-collapsible-bar">
+            <button type="button" class="btn-toggle-topology" @click="showTopologyTree = !showTopologyTree">
+                <span class="topology-toggle-icon">{{ showTopologyTree ? '▼' : '▶' }}</span>
+                <span>{{ showTopologyTree ? '收起协同拓扑树' : '展开多 Agent 协同拓扑树' }}</span>
+                <small class="topology-worker-summary">（{{ displayedWorkers.length }} 个活跃子任务）</small>
+            </button>
+        </div>
+
+        <!-- 选开式协同拓扑树 (默认收拢，点击上方条才展开) -->
+        <section v-if="showTopologyTree" class="topology-overview-section">
             <div class="topo-diagram-card">
                 <!-- 👑 主调度 Master 根节点 -->
                 <div class="topo-master-node" :class="{ 'is-running': teamState.masterStatus === 'running' }">
@@ -42,7 +77,7 @@
                     </span>
                 </div>
 
-                <!-- 竖向分支列表 (自上而下垂直展开，舒适间距，点击联动下方 Tab) -->
+                <!-- 竖向分支列表 -->
                 <div v-if="isMultiAgent" class="topo-vertical-branches">
                     <div
                         v-for="(worker, wIdx) in displayedWorkers"
@@ -76,47 +111,11 @@
                         </div>
                     </div>
                 </div>
-
-                <!-- 实时模式：所有子任务均已完成时的轻量提示 -->
-                <div v-else-if="props.onlyActive && workersList.length > 0" class="topo-all-done-hint">
-                    <span class="done-icon">🎉</span>
-                    <span class="done-title">所有子任务已完成</span>
-                    <span class="done-desc">已成功回传主调度并退出实时队列</span>
-                    <button type="button" class="btn-toggle-done" @click="showAllCompleted = !showAllCompleted">
-                        {{ showAllCompleted ? '仅看活跃' : `查看全部已完成 (${workersList.length})` }}
-                    </button>
-                </div>
-
-                <!-- 单 Agent 待命或独立运行状态提示 -->
-                <div v-else class="topo-single-hint">
-                    <span class="hint-dot">●</span>
-                    <span class="hint-text">单 Agent 调度中 · 派发子任务时自动向下展开分支</span>
-                </div>
             </div>
         </section>
 
-        <!-- ================= 2. 下半部分：横向短标题多 Tab 链路与独立进度 (Bottom Half: Horizontal Short Tabs) ================= -->
+        <!-- ================= 2. 下半部分：当前选中的 Agent 专属全高流程工作台 ================= -->
         <section v-if="!compact" class="agent-chains-tabs-section">
-            <!-- 横向排列短标题 Tab 栏 -->
-            <div v-if="isMultiAgent" class="chains-tab-nav">
-                <button
-                    v-for="worker in displayedWorkers"
-                    :key="worker.id"
-                    type="button"
-                    class="chain-tab-btn"
-                    :class="{ active: activeTab === worker.id, 'is-running': worker.status === 'running' }"
-                    :title="worker.name"
-                    @click="activeTab = worker.id"
-                >
-                    <span class="tab-icon">{{ getRoleIcon(worker.role) }}</span>
-                    <span class="tab-title">{{ formatWorkerName(worker.name) }}</span>
-                    <span class="tab-progress-tag" :class="`status-${worker.status}`">
-                        {{ worker.status === 'succeeded' ? '完成' : (worker.status === 'running' ? `${worker.progress}%` : statusText(worker.status)) }}
-                    </span>
-                </button>
-            </div>
-
-            <!-- Tab 内容主体区 -->
             <div class="chain-tab-content-panel">
                 <!-- 选中的子 Agent 专属独立链路 -->
                 <div v-if="selectedWorker" class="chain-detail-view worker-view">
@@ -147,6 +146,66 @@
                                 :style="{ width: `${selectedWorker.progress}%` }"
                             ></div>
                         </div>
+                    </div>
+
+                    <!-- 🌟 子 Agent 流式思考滚动条 (与主 Agent ambient-live-text-bar 完全一致，支持横向平滑滚动 + 展开纵向深度推演) -->
+                    <div v-if="isWorkerThinking" class="ambient-live-text-row worker-live-thought-row">
+                        <div class="ambient-live-text-bar" @click="isWorkerThoughtExpanded = !isWorkerThoughtExpanded">
+                            <span class="live-think-label">
+                                <span class="live-think-square-icon">
+                                    <svg class="thought-square-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+                                        <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+                                        <path d="M12 5v13"/>
+                                        <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
+                                        <path d="M16 12a4 4 0 0 0-8 0"/>
+                                        <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
+                                    </svg>
+                                </span>
+                                <span class="live-think-title">{{ selectedWorker.status === 'running' ? '思考中：' : '思考过程：' }}</span>
+                            </span>
+                            <div class="ambient-live-viewport">
+                                <span
+                                    v-scroll-tail
+                                    class="ambient-live-scroll-text"
+                                    :title="workerThoughtText || '正在后台深入推导与研判相关代码与风险…'"
+                                >
+                                    {{ workerThoughtText || '正在后台深入推导与研判相关代码与风险…' }}
+                                </span>
+                            </div>
+                            <button
+                                type="button"
+                                class="thought-expand-btn"
+                                :title="isWorkerThoughtExpanded ? '收起完整思考' : '展开查看完整思考过程'"
+                                @click.stop="isWorkerThoughtExpanded = !isWorkerThoughtExpanded"
+                            >
+                                <span class="thought-expand-text">{{ isWorkerThoughtExpanded ? '收起' : '展开' }}</span>
+                                <svg
+                                    width="11"
+                                    height="11"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="2.5"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                    :class="{ 'rotate-180': isWorkerThoughtExpanded }"
+                                >
+                                    <polyline points="6 9 12 15 18 9" />
+                                </svg>
+                            </button>
+                        </div>
+                        <Transition name="thought-accordion">
+                            <div v-if="isWorkerThoughtExpanded" class="ambient-live-thought-expanded">
+                                <div class="thought-expanded-header">
+                                    <span class="thought-expanded-title">实时思考推演</span>
+                                    <span class="thought-char-count">{{ workerThoughtText.length }} 字</span>
+                                </div>
+                                <div class="thought-expanded-body">
+                                    {{ workerThoughtText || '正在后台深入推导与研判相关代码与风险…' }}
+                                </div>
+                            </div>
+                        </Transition>
                     </div>
 
                     <!-- 📊 ReviewScorecard 审查评分卡 (正确性、破坏性风险、代码规范、测试覆盖) -->
@@ -248,74 +307,80 @@
                         </button>
                     </div>
 
-                    <div class="worker-steps-chain compact">
-                        <!-- 前置步骤 (折叠时展示前3步，展开时展示全部) -->
+                    <div class="worker-steps-stream-deck">
                         <div
-                            v-for="st in headSteps"
+                            v-for="st in displayedSteps"
                             :key="st.stepNumber"
-                            class="worker-step-node compact-node"
-                            :class="[`status-${st.status}`, { 'is-active': st.status === 'running' }]"
+                            class="worker-step-item-wrap"
                         >
-                            <div class="step-compact-line">
-                                <span class="step-seq-tag">#{{ String(st.stepNumber).padStart(2, '0') }}</span>
-                                <span v-if="st.tool" class="step-tool-badge">{{ getShortToolName(st.tool) }}</span>
-                                <!-- 第一层：语义概括与意图标题 (加粗醒目，不再是冰冷命令) -->
-                                <strong class="step-intent-title" :title="st.title">{{ st.title }}</strong>
-                                <span class="step-status-tag" :class="`status-${st.status}`">
-                                    {{ st.status === 'running' ? '•' : (st.status === 'succeeded' ? '✔' : (st.status === 'failed' ? '✕' : '•')) }}
-                                </span>
-                            </div>
-                            <!-- 第二层：真实底层调用命令/参数 (浅灰等宽小字，清晰呈现细节) -->
-                            <div v-if="st.description && st.description !== st.title" class="step-detail-cmd">
-                                <span class="cmd-prompt-icon">›_</span>
-                                <span class="cmd-text" :title="st.description">{{ st.description }}</span>
-                            </div>
-                            <!-- 第三层：关键发现与推导总结 (如有) -->
-                            <div v-if="st.summary" class="step-summary-box-compact">
-                                <span class="summary-icon">💡</span>
-                                <span class="summary-text">{{ st.summary }}</span>
-                            </div>
-                        </div>
+                            <AgentStepRow
+                                :step="st"
+                                @open-diff="$emit('open-diff', $event)"
+                                @select="toggleStepExpand(st.stepNumber)"
+                            />
 
-                        <!-- 智能折叠提示条 (点击展开) -->
-                        <button
-                            v-if="shouldFoldSteps"
-                            type="button"
-                            class="folded-steps-indicator-bar"
-                            title="点击展开中间被收起的常规只读步骤"
-                            @click="expandAllSteps = true"
-                        >
-                            <span class="fold-line"></span>
-                            <span class="fold-badge">↕ 期间执行了 {{ foldedCount }} 次只读探查操作 (点击展开)</span>
-                            <span class="fold-line"></span>
-                        </button>
+                            <!-- 就地展开步骤调用详情与证据 (绝不跳出子 Agent 视图) -->
+                            <Transition name="step-expand-slide">
+                                <div v-if="expandedStepNumbers.has(st.stepNumber)" class="worker-step-inline-detail">
+                                    <div class="inline-detail-header">
+                                        <div class="inline-title-meta">
+                                            <span class="inline-step-num">步骤 #{{ st.stepNumber }}</span>
+                                            <strong class="inline-step-title">{{ st.title }}</strong>
+                                            <span v-if="st.durationMs" class="inline-step-dur">⏱ {{ (st.durationMs / 1000).toFixed(2) }}s</span>
+                                        </div>
+                                        <button
+                                            v-if="st.diffPayload || (st.additions && st.additions > 0)"
+                                            type="button"
+                                            class="btn-inline-open-diff"
+                                            @click.stop="$emit('open-diff', st.diffPayload || { path: st.fileName, rawDiff: '' })"
+                                        >
+                                            查看代码 Diff 变动 ↗
+                                        </button>
+                                    </div>
 
-                        <!-- 后置步骤 (折叠时展示后3步) -->
-                        <div
-                            v-for="st in tailSteps"
-                            :key="st.stepNumber"
-                            class="worker-step-node compact-node"
-                            :class="[`status-${st.status}`, { 'is-active': st.status === 'running' }]"
-                        >
-                            <div class="step-compact-line">
-                                <span class="step-seq-tag">#{{ String(st.stepNumber).padStart(2, '0') }}</span>
-                                <span v-if="st.tool" class="step-tool-badge">{{ getShortToolName(st.tool) }}</span>
-                                <!-- 第一层：语义概括与意图标题 (加粗醒目，不再是冰冷命令) -->
-                                <strong class="step-intent-title" :title="st.title">{{ st.title }}</strong>
-                                <span class="step-status-tag" :class="`status-${st.status}`">
-                                    {{ st.status === 'running' ? '•' : (st.status === 'succeeded' ? '✔' : (st.status === 'failed' ? '✕' : '•')) }}
-                                </span>
-                            </div>
-                            <!-- 第二层：真实底层调用命令/参数 (浅灰等宽小字，清晰呈现细节) -->
-                            <div v-if="st.description && st.description !== st.title" class="step-detail-cmd">
-                                <span class="cmd-prompt-icon">›_</span>
-                                <span class="cmd-text" :title="st.description">{{ st.description }}</span>
-                            </div>
-                            <!-- 第三层：关键发现与推导总结 (如有) -->
-                            <div v-if="st.summary" class="step-summary-box-compact">
-                                <span class="summary-icon">💡</span>
-                                <span class="summary-text">{{ st.summary }}</span>
-                            </div>
+                                    <!-- 💭 步骤内部思考与推理 -->
+                                    <div v-if="st.thought" class="inline-detail-section">
+                                        <div class="detail-sec-head">
+                                            <span class="sec-icon">💭</span>
+                                            <span class="sec-title">思考与推导过程</span>
+                                        </div>
+                                        <p class="sec-text thought-text">{{ st.thought }}</p>
+                                    </div>
+
+                                    <!-- ⚙️ 调用入参 (params) -->
+                                    <div v-if="hasPayload(st.params)" class="inline-detail-section">
+                                        <div class="detail-sec-head">
+                                            <span class="sec-icon">⚙️</span>
+                                            <span class="sec-title">调用入参 (Parameters)</span>
+                                            <button type="button" class="btn-mini-copy" @click.stop="copyTextContent(formatPayload(st.params), `p-${st.stepNumber}`)">
+                                                {{ copiedKey === `p-${st.stepNumber}` ? '已复制 ✓' : '复制' }}
+                                            </button>
+                                        </div>
+                                        <pre class="sec-code">{{ formatPayload(st.params) }}</pre>
+                                    </div>
+
+                                    <!-- 📋 执行输出 / 结果证据 (output / result) -->
+                                    <div v-if="hasPayload(st.output) || hasPayload(st.result)" class="inline-detail-section">
+                                        <div class="detail-sec-head">
+                                            <span class="sec-icon">📋</span>
+                                            <span class="sec-title">执行输出 / 结果证据 (Output)</span>
+                                            <button type="button" class="btn-mini-copy" @click.stop="copyTextContent(formatPayload(st.output || st.result), `o-${st.stepNumber}`)">
+                                                {{ copiedKey === `o-${st.stepNumber}` ? '已复制 ✓' : '复制' }}
+                                            </button>
+                                        </div>
+                                        <pre class="sec-code">{{ formatPayload(st.output || st.result) }}</pre>
+                                    </div>
+
+                                    <!-- 🎯 意图说明 / 阶段总结 -->
+                                    <div v-if="st.description || st.summary" class="inline-detail-section">
+                                        <div class="detail-sec-head">
+                                            <span class="sec-icon">🎯</span>
+                                            <span class="sec-title">意图说明</span>
+                                        </div>
+                                        <p class="sec-text">{{ st.description || st.summary }}</p>
+                                    </div>
+                                </div>
+                            </Transition>
                         </div>
                     </div>
 
@@ -329,7 +394,51 @@
                     </div>
                 </div>
 
-                <!-- 实时模式全部完成时的占位 -->
+                <!-- 主调度全局掌控台 (当选中主调度 Tab 时呈现) -->
+                <div v-else-if="activeTab === 'master' || !selectedWorker" class="chain-detail-view master-view">
+                    <div class="agent-detail-header">
+                        <div class="detail-header-left">
+                            <span class="agent-big-icon">👑</span>
+                            <div class="detail-name-meta">
+                                <strong class="detail-agent-name">主调度 Master 掌控台</strong>
+                                <span class="detail-agent-tool">{{ isMultiAgent ? `正在协同 ${displayedWorkers.length} 个子任务` : '自主单兵执行全流程' }}</span>
+                            </div>
+                        </div>
+                        <div class="detail-header-right">
+                            <span class="stage-metric-pill" :class="`status-${teamState.masterStatus}`">
+                                {{ statusText(teamState.masterStatus) }}
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="master-goal-deck">
+                        <div class="goal-header">🎯 当前任务目标</div>
+                        <p class="goal-text">{{ currentGoal || '自主全流程执行' }}</p>
+                    </div>
+
+                    <!-- 派发给各子 Agent 的任务进度一览 -->
+                    <div v-if="displayedWorkers.length > 0" class="master-workers-overview">
+                        <div class="overview-title">📋 协同子任务快速索引 (点击直达对应流程)</div>
+                        <div class="workers-pill-grid">
+                            <div
+                                v-for="worker in displayedWorkers"
+                                :key="worker.id"
+                                class="worker-overview-card"
+                                :class="`status-${worker.status}`"
+                                @click="activeTab = worker.id"
+                            >
+                                <div class="w-card-top">
+                                    <span class="w-icon">{{ getRoleIcon(worker.role) }}</span>
+                                    <strong class="w-name">{{ formatWorkerName(worker.name) }}</strong>
+                                    <span class="w-status-badge" :class="`status-${worker.status}`">
+                                        {{ worker.status === 'succeeded' ? '完成' : (worker.status === 'running' ? `${worker.progress}%` : statusText(worker.status)) }}
+                                    </span>
+                                </div>
+                                <div class="w-card-desc">{{ worker.currentStep || worker.currentTool || '执行中' }}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
                 <div v-else-if="props.onlyActive && workersList.length > 0" class="no-workers-standby-box">
                     <span class="standby-icon">🎉</span>
                     <strong class="standby-title">子 Agent 均已完成</strong>
@@ -352,6 +461,9 @@ import { computed, ref, watch } from "vue";
 import type { AgentTeamState, AgentWorkerItem, AgentToolStatus, AgentStepItem, AgentWorkerStep, ReviewScorecard } from "./types";
 import { extractSubagentsFromStep, formatFinding } from "./workerUtils";
 import ExtraContractDeck from "./ExtraContractDeck.vue";
+import AgentStepRow from "./AgentStepRow.vue";
+
+const showTopologyTree = ref(false);
 
 function computeScorecardAverage(sc?: ReviewScorecard): number {
     if (!sc) return 0;
@@ -389,6 +501,8 @@ const props = withDefaults(
         selectedStep?: AgentStepItem | null;
         /** 轻量协作栏模式：只渲染拓扑概览，点击子 Agent 由父级打开完整详情 */
         compact?: boolean;
+        activeWorkerId?: string;
+        hideTopTabBar?: boolean;
     }>(),
     {
         teamState: () => ({
@@ -403,15 +517,109 @@ const props = withDefaults(
         onlyActive: false,
         selectedStep: null,
         compact: false,
+        activeWorkerId: "",
+        hideTopTabBar: false,
     }
 );
 
 const emit = defineEmits<{
     "clear-selected-step": [];
     "open-detail": [workerId: string];
+    "open-diff": [diffPayload: any];
+    "select-worker": [workerId: string];
 }>();
 
+// ── 🌟 平滑尾随滚动指令 (Smooth Tail-follow Scroll，复刻主 Agent) ──
+const scrollTailPending = new Set<HTMLElement>();
+let scrollTailRafId: number | null = null;
+
+function flushScrollTail() {
+    scrollTailRafId = null;
+    for (const el of scrollTailPending) {
+        if (el.scrollWidth > el.clientWidth) {
+            el.scrollLeft = el.scrollWidth - el.clientWidth;
+        } else {
+            el.scrollLeft = 0;
+        }
+        if (el.scrollLeft > 6) {
+            el.classList.add("has-left-overflow");
+        } else {
+            el.classList.remove("has-left-overflow");
+        }
+    }
+    scrollTailPending.clear();
+}
+
+const vScrollTail = {
+    mounted(el: HTMLElement) {
+        el.scrollLeft = 0;
+        el.classList.remove("has-left-overflow");
+        scrollTailPending.add(el);
+        if (scrollTailRafId === null) {
+            scrollTailRafId = requestAnimationFrame(flushScrollTail);
+        }
+    },
+    updated(el: HTMLElement) {
+        scrollTailPending.add(el);
+        if (scrollTailRafId === null) {
+            scrollTailRafId = requestAnimationFrame(flushScrollTail);
+        }
+    },
+};
+
+// ── 💭 子 Agent 实时流式思考与推演 ──
+const isWorkerThoughtExpanded = ref(false);
+
+const workerThoughtText = computed(() => {
+    return selectedWorker.value?.thought?.trim() || "";
+});
+
+const isWorkerThinking = computed(() => {
+    if (!selectedWorker.value) return false;
+    return selectedWorker.value.status === "running" || !!workerThoughtText.value;
+});
+
+// ── 👣 子 Agent 步骤就地展开与详情对账 ──
+const expandedStepNumbers = ref<Set<number>>(new Set());
+
+function toggleStepExpand(stepNum: number) {
+    if (expandedStepNumbers.value.has(stepNum)) {
+        expandedStepNumbers.value.delete(stepNum);
+    } else {
+        expandedStepNumbers.value.add(stepNum);
+    }
+}
+
+const copiedKey = ref("");
+async function copyTextContent(text: string, key: string) {
+    if (!text) return;
+    try {
+        await navigator.clipboard.writeText(text);
+        copiedKey.value = key;
+        setTimeout(() => {
+            if (copiedKey.value === key) copiedKey.value = "";
+        }, 1500);
+    } catch {}
+}
+
+function hasPayload(val: unknown): boolean {
+    if (val === undefined || val === null) return false;
+    if (typeof val === "string") return val.trim().length > 0;
+    if (typeof val === "object") return Object.keys(val).length > 0;
+    return true;
+}
+
+function formatPayload(payload: unknown): string {
+    if (typeof payload === "string") return payload;
+    try {
+        return JSON.stringify(payload, null, 2);
+    } catch {
+        return String(payload);
+    }
+}
+
 function handleWorkerClick(workerId: string) {
+    emit("select-worker", workerId);
     if (props.compact) {
         emit("open-detail", workerId);
         return;
@@ -456,10 +664,22 @@ const isMultiAgent = computed(() => {
 
 const activeTab = ref<string>("");
 
+// 监听外部指定的 activeWorkerId 同步激活 Tab
+watch(
+    () => props.activeWorkerId,
+    (val) => {
+        if (val) {
+            activeTab.value = val;
+        }
+    },
+    { immediate: true }
+);
+
 // 当有新的子 Agent 派发出来时，优先聚焦到正在 running 的活跃子 Agent Tab
 watch(
     () => displayedWorkers.value.map((w) => `${w.id}-${w.status}`).join(","),
     () => {
+        if (props.activeWorkerId) return;
         const workers = displayedWorkers.value;
         if (workers.length > 0) {
             if (workers.some((w) => w.id === activeTab.value)) {
@@ -475,7 +695,8 @@ watch(
 );
 
 const selectedWorker = computed(() => {
-    return displayedWorkers.value.find((w) => w.id === activeTab.value) || displayedWorkers.value[0];
+    if (activeTab.value === "master") return null;
+    return displayedWorkers.value.find((w) => w.id === activeTab.value) || (displayedWorkers.value.length > 0 ? displayedWorkers.value[0] : null);
 });
 
 const activeWorkerSteps = computed<AgentWorkerStep[]>(() => {
@@ -483,7 +704,7 @@ const activeWorkerSteps = computed<AgentWorkerStep[]>(() => {
     if (selectedWorker.value.steps && selectedWorker.value.steps.length > 0) {
         return selectedWorker.value.steps;
     }
-    // 自适应生成动态分层步骤链
+    // 自适应生成动态分层步骤链 (统一为紧凑的高密度 IDE 风格动作行)
     const w = selectedWorker.value;
     const isDone = w.status === "succeeded";
     const isFailed = w.status === "failed";
@@ -492,24 +713,33 @@ const activeWorkerSteps = computed<AgentWorkerStep[]>(() => {
     return [
         {
             stepNumber: 1,
-            title: "任务拆解与环境安全隔离",
+            title: "安全隔离",
             tool: "task_init",
+            badgeLabel: "隔离",
+            fileName: "sandbox_env",
             description: "解析父级任务约束，初始化只读隔离上下文",
             status: "succeeded",
         },
         {
             stepNumber: 2,
-            title: w.currentStep || "执行核心操作与事实证据探查",
-            tool: w.currentTool || w.role,
-            description: `调用工具 [${getShortToolName(w.currentTool || w.role)}] 深入分析代码与运行日志`,
-            summary: w.thought ? (w.thought.slice(0, 110) + (w.thought.length > 110 ? "…" : "")) : undefined,
+            title: w.currentStep || "方案与代码研判",
+            tool: "child_reviewer",
+            badgeLabel: "审查",
+            fileName: "plan_review",
+            lineRange: "深层研判",
+            description: `调用 [${getShortToolName(w.currentTool || w.role)}] 深入分析代码规范与风险`,
+            thought: w.thought,
+            summary: w.thought ? (w.thought.slice(0, 80) + (w.thought.length > 80 ? "…" : "")) : undefined,
             status: isDone ? "succeeded" : isFailed ? "failed" : "running",
         },
         {
             stepNumber: 3,
-            title: isDone ? "提炼核心发现并交付主调度" : (isFailed ? "任务异常中断并上报主调度" : "等待分析收敛与结果汇总"),
+            title: isDone ? "提炼交付" : (isFailed ? "异常上报" : "等待收敛"),
             tool: "finish",
+            badgeLabel: "交付",
+            fileName: "review_verdict",
             description: isDone ? "事实证据已充分，成功将全部成果回传至主调度会话" : "等待子任务循环结束",
+            output: w.output,
             summary: firstFinding,
             status: isDone ? "succeeded" : isFailed ? "failed" : "pending",
         },
@@ -518,23 +748,11 @@ const activeWorkerSteps = computed<AgentWorkerStep[]>(() => {
 
 const expandAllSteps = ref(false);
 
-const shouldFoldSteps = computed(() => {
-    return activeWorkerSteps.value.length > 8 && !expandAllSteps.value;
-});
-
-const headSteps = computed(() => {
-    if (!shouldFoldSteps.value) return activeWorkerSteps.value;
-    return activeWorkerSteps.value.slice(0, 3);
-});
-
-const tailSteps = computed(() => {
-    if (!shouldFoldSteps.value) return [];
-    return activeWorkerSteps.value.slice(-3);
-});
-
-const foldedCount = computed(() => {
-    if (!shouldFoldSteps.value) return 0;
-    return activeWorkerSteps.value.length - headSteps.value.length - tailSteps.value.length;
+const displayedSteps = computed(() => {
+    if (expandAllSteps.value || activeWorkerSteps.value.length <= 8) {
+        return activeWorkerSteps.value;
+    }
+    return activeWorkerSteps.value.slice(0, 8);
 });
 
 function formatWorkerName(name: string): string {
@@ -611,13 +829,12 @@ async function copyOutput(text?: string) {
 .agent-workspace-deck {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
     width: 100%;
-    background: #141419;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px;
-    padding: 10px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
     user-select: none;
 }
 
@@ -1085,13 +1302,13 @@ async function copyOutput(text?: string) {
 
 /* Tab 面板主体 */
 .chain-tab-content-panel {
-    background: #181822;
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 8px;
-    padding: 8px;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
 }
 
 .agent-detail-header {
@@ -1198,24 +1415,24 @@ async function copyOutput(text?: string) {
 
 /* 🎯 核心结论与发现卡片 */
 .worker-scorecard-deck {
-    margin-top: 14px;
-    padding: 12px 14px;
-    background: rgba(18, 22, 34, 0.75);
-    border: 1px solid rgba(80, 100, 160, 0.25);
-    border-radius: 8px;
+    margin-top: 6px;
+    padding: 6px 10px;
+    background: rgba(18, 22, 34, 0.6);
+    border: 1px solid rgba(80, 100, 160, 0.2);
+    border-radius: 6px;
 }
 .scorecard-header {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 12px;
+    gap: 6px;
+    margin-bottom: 6px;
 }
-.scorecard-icon { font-size: 16px; }
-.scorecard-title { font-size: 13px; font-weight: 600; color: #e2e8f0; }
+.scorecard-icon { font-size: 13px; }
+.scorecard-title { font-size: 11px; font-weight: 600; color: #e2e8f0; }
 .scorecard-badge {
     margin-left: auto;
-    font-size: 11px;
-    padding: 2px 8px;
+    font-size: 9.5px;
+    padding: 1px 6px;
     border-radius: 4px;
     font-weight: 500;
 }
@@ -1232,24 +1449,24 @@ async function copyOutput(text?: string) {
 .scorecard-grid {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
-    gap: 10px 16px;
+    gap: 6px 12px;
 }
 .scorecard-item {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 3px;
 }
 .item-label-row {
     display: flex;
     justify-content: space-between;
-    font-size: 12px;
+    font-size: 10px;
 }
 .dim-name { color: #94a3b8; }
 .dim-val { color: #f1f5f9; font-weight: 600; font-family: monospace; }
 .dim-val.text-danger { color: #f87171; }
 .progress-track {
     width: 100%;
-    height: 6px;
+    height: 4px;
     background: rgba(255, 255, 255, 0.08);
     border-radius: 999px;
     overflow: hidden;
@@ -1696,5 +1913,565 @@ async function copyOutput(text?: string) {
 @keyframes spin-pulse {
     0%, 100% { opacity: 0.4; transform: scale(0.8); }
     50% { opacity: 1; transform: scale(1.2); }
+}
+
+/* 🌟 1. 顶部全局 Agent 切换 Tab 栏 */
+.agent-unified-tab-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: rgba(18, 18, 22, 0.7);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    overflow-x: auto;
+    scrollbar-width: none;
+    backdrop-filter: blur(8px);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+.agent-unified-tab-bar::-webkit-scrollbar {
+    display: none;
+}
+
+.agent-tab-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    color: #94a3b8;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+
+.agent-tab-pill:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #e2e8f0;
+    border-color: rgba(255, 255, 255, 0.15);
+}
+
+.agent-tab-pill.active {
+    background: rgba(56, 189, 248, 0.12);
+    border-color: rgba(56, 189, 248, 0.4);
+    color: #38bdf8;
+    box-shadow: 0 0 10px rgba(56, 189, 248, 0.15);
+}
+
+.agent-tab-pill.is-running {
+    border-color: rgba(56, 189, 248, 0.5);
+}
+
+.tab-pill-icon {
+    font-size: 13px;
+    line-height: 1;
+}
+
+.tab-pill-title {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tab-pill-status {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #94a3b8;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.tab-pill-status.status-running {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+}
+
+.tab-pill-status.status-succeeded {
+    background: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
+}
+
+.tab-pill-status.status-failed {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+}
+
+/* 🌟 2. 拓扑折叠条 */
+.topology-collapsible-bar {
+    padding: 4px 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.btn-toggle-topology {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: none;
+    color: #64748b;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: color 0.12s ease;
+}
+
+.btn-toggle-topology:hover {
+    color: #94a3b8;
+}
+
+.topology-toggle-icon {
+    font-size: 9px;
+}
+
+.topology-worker-summary {
+    color: #475569;
+}
+
+/* 🌟 3. 步骤流容器 */
+.worker-steps-stream-deck {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 0 16px 0;
+}
+
+/* 🌟 4. Master 视图卡片 */
+.master-view .master-goal-deck {
+    margin: 12px 0;
+    padding: 10px 14px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+}
+
+.master-view .goal-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: #94a3b8;
+    margin-bottom: 4px;
+}
+
+.master-view .goal-text {
+    font-size: 13px;
+    color: #e2e8f0;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.master-workers-overview {
+    margin-top: 14px;
+}
+
+.overview-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #94a3b8;
+    margin-bottom: 8px;
+}
+
+.workers-pill-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.worker-overview-card {
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.worker-overview-card:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(56, 189, 248, 0.3);
+}
+
+.w-card-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.w-card-top .w-name {
+    font-size: 13px;
+    color: #f1f5f9;
+}
+
+.w-card-top .w-status-badge {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 4px;
+}
+
+.w-card-desc {
+    font-size: 11.5px;
+    color: #94a3b8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── 💭 子 Agent 流式思考滚动条 (复刻主 Agent ambient-live-text-bar 动效与滚动机制) ── */
+.worker-live-thought-row {
+    margin: 8px 0 10px;
+    width: 100%;
+}
+
+.worker-live-thought-row .ambient-live-text-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.45);
+    border: 1px solid rgba(56, 189, 248, 0.22);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    user-select: none;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.worker-live-thought-row .ambient-live-text-bar:hover {
+    background: rgba(15, 23, 42, 0.65);
+    border-color: rgba(56, 189, 248, 0.4);
+}
+
+.live-think-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.live-think-square-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #38bdf8;
+}
+
+.thought-square-svg {
+    width: 12px;
+    height: 12px;
+    stroke: currentColor;
+    flex-shrink: 0;
+    animation: thought-pulse 2s ease-in-out infinite;
+}
+
+@keyframes thought-pulse {
+    0%, 100% { opacity: 0.8; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.08); filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.6)); }
+}
+
+.live-think-title {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #38bdf8;
+    letter-spacing: 0.1px;
+}
+
+.ambient-live-viewport {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    position: relative;
+    mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 14px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 14px), transparent 100%);
+}
+
+.ambient-live-viewport.has-left-overflow {
+    mask-image: linear-gradient(to right, transparent 0, #000 12px, #000 calc(100% - 14px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 12px, #000 calc(100% - 14px), transparent 100%);
+}
+
+.ambient-live-scroll-text {
+    font-size: 11.5px;
+    font-weight: 500;
+    line-height: 1.45;
+    color: #f1f5f9;
+    display: inline-block;
+    letter-spacing: -0.1px;
+}
+
+.thought-expand-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #94a3b8;
+    font-size: 10.5px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+}
+
+.thought-expand-btn:hover {
+    color: #e2e8f0;
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.thought-expand-btn svg {
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.thought-expand-btn svg.rotate-180 {
+    transform: rotate(180deg);
+}
+
+.ambient-live-thought-expanded {
+    width: 100%;
+    margin-top: 6px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.7);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(56, 189, 248, 0.2);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    box-sizing: border-box;
+}
+
+.thought-expanded-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.thought-expanded-title {
+    font-size: 11px;
+    font-weight: 500;
+    color: #94a3b8;
+}
+
+.thought-char-count {
+    font-size: 10px;
+    color: #64748b;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.thought-expanded-body {
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: #e2e8f0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 220px;
+    overflow-y: auto;
+    user-select: text;
+    padding-right: 6px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+}
+
+.thought-expanded-body::-webkit-scrollbar {
+    width: 4px;
+}
+
+.thought-expanded-body::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.3);
+    border-radius: 4px;
+}
+
+.thought-accordion-enter-active,
+.thought-accordion-leave-active {
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    overflow: hidden;
+}
+
+.thought-accordion-enter-from,
+.thought-accordion-leave-to {
+    opacity: 0;
+    transform: translateY(-4px);
+    max-height: 0;
+}
+
+/* ── 👣 子 Agent 步骤就地展开卡片 (Inline Step Detail) ── */
+.worker-step-item-wrap {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+}
+
+.worker-step-inline-detail {
+    margin: 2px 0 8px 0;
+    padding: 8px 10px;
+    background: rgba(18, 20, 28, 0.85);
+    border: 1px solid rgba(56, 189, 248, 0.2);
+    border-radius: 6px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.inline-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.inline-title-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.inline-step-num {
+    font-size: 9.5px;
+    font-weight: 600;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.12);
+    padding: 0.5px 4.5px;
+    border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.inline-step-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #f1f5f9;
+}
+
+.inline-step-dur {
+    font-size: 10px;
+    color: #94a3b8;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.btn-inline-open-diff {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10.5px;
+    font-weight: 500;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.1);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    border-radius: 4px;
+    padding: 1.5px 6px;
+    cursor: pointer;
+    transition: all 0.12s ease;
+}
+
+.btn-inline-open-diff:hover {
+    background: rgba(56, 189, 248, 0.2);
+    border-color: rgba(56, 189, 248, 0.45);
+}
+
+.inline-detail-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.detail-sec-head {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    font-weight: 600;
+    color: #94a3b8;
+}
+
+.sec-icon {
+    font-size: 10px;
+}
+
+.sec-title {
+    color: #cbd5e1;
+}
+
+.btn-mini-copy {
+    margin-left: auto;
+    font-size: 9.5px;
+    color: #38bdf8;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 0 4px;
+}
+
+.btn-mini-copy:hover {
+    text-decoration: underline;
+}
+
+.sec-code {
+    margin: 0;
+    padding: 6px 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10px;
+    line-height: 1.45;
+    color: #e2e8f0;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 4px;
+    max-height: 160px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+}
+
+.sec-text {
+    margin: 0;
+    font-size: 10.5px;
+    line-height: 1.5;
+    color: #cbd5e1;
+}
+
+.sec-text.thought-text {
+    padding: 5px 8px;
+    background: rgba(56, 189, 248, 0.05);
+    border-left: 2px solid #38bdf8;
+    border-radius: 3px;
+    color: #e2e8f0;
+    font-size: 11px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.step-expand-slide-enter-active,
+.step-expand-slide-leave-active {
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    overflow: hidden;
+}
+
+.step-expand-slide-enter-from,
+.step-expand-slide-leave-to {
+    opacity: 0;
+    transform: translateY(-4px);
+    max-height: 0;
 }
 </style>
