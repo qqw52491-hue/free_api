@@ -22,6 +22,8 @@ pub(crate) use fingerprint::*;
 pub(crate) use workspace::*;
 /// L3 隔离写入 worker 预算：比侦察 worker 更宽，但仍受步数/时长/写入量硬顶约束。
 pub const MAX_WRITER_STEPS: usize = 14;
+/// step_budget 覆盖的宿主硬上限：模型可声称"这活复杂"，但不许无限膨胀。
+pub const WRITER_STEP_BUDGET_CAP: usize = 40;
 pub const WRITER_TIMEOUT_SECS: u64 = 300;
 const WRITER_MAX_OUTPUT_TOKENS: i64 = 1_200;
 const MAX_TASK_CHARS: usize = 2_000;
@@ -53,6 +55,9 @@ pub struct WriterRequest {
     pub focus_paths: Vec<String>,
     pub context_excerpts: Option<crate::agent::types::DispatchContext>,
     pub hard_scope: String,
+    /// 步数预算覆盖：复杂任务派工时可声明更大预算；宿主机械钳位上限，
+    /// 缺省走 MAX_WRITER_STEPS（防"预算无限"型滥用）。
+    pub step_budget: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,12 +198,20 @@ pub fn parse_writer_request(params: &Value) -> Result<WriterRequest, String> {
         .and_then(|v| v.as_str())
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
+    // step_budget：非正整数或非法类型一律按缺省处理（fail-open 到默认预算），
+    // 超限钳位到硬上限——复杂度判断是模型的，边界是宿主的。
+    let step_budget = params
+        .get("step_budget")
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as usize).min(WRITER_STEP_BUDGET_CAP))
+        .filter(|v| *v > 0);
     Ok(WriterRequest {
         task,
         test_command,
         focus_paths,
         context_excerpts,
         hard_scope,
+        step_budget,
     })
 }
 
@@ -951,6 +964,7 @@ pub async fn spawn_child_writer(
     let child_clone = child_run_id.clone();
     let session_clone = parent_session_id.to_string();
     let reasoning = reasoning_effort.to_string();
+    let step_budget = request.step_budget;
     let _ = (files, bytes); // 副本规模仅作日志观测，超预算在复制阶段已拒绝
     tokio::spawn(run_writer_loop(
         db_clone,
@@ -965,7 +979,7 @@ pub async fn spawn_child_writer(
         persona,
         interrupt_rx,
         None,
-        None,
+        step_budget,
     ));
     Ok(child_run_id)
 }

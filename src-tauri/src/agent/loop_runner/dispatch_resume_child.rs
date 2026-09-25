@@ -501,6 +501,7 @@ pub(super) async fn dispatch_resume_child(
                                         focus_paths: Vec::new(),
                                         context_excerpts: None,
                                         hard_scope: String::new(),
+                                        step_budget: None,
                                     };
                                     let max_steps = crate::agent::child_writer::MAX_WRITER_STEPS / 2;
                                     let parent_root = PathBuf::from(&root_str);

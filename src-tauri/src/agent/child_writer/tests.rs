@@ -26,6 +26,16 @@
         assert!(parse_writer_request(&json!({"task": "x", "test_command": "a; b"})).is_err());
         assert!(parse_writer_request(&json!({"task": "x", "test_command": "npm test", "focus_paths": ["1","2","3","4","5","6"]})).is_err());
 
+        // step_budget：合法值钳位到硬顶；非法类型/零/负数 fail-open 到 None（默认预算）
+        let with_budget = parse_writer_request(&json!({"task": "x", "test_command": "t", "step_budget": 30})).unwrap();
+        assert_eq!(with_budget.step_budget, Some(30));
+        let over_cap = parse_writer_request(&json!({"task": "x", "test_command": "t", "step_budget": 999})).unwrap();
+        assert_eq!(over_cap.step_budget, Some(crate::agent::child_writer::WRITER_STEP_BUDGET_CAP));
+        let bad_type = parse_writer_request(&json!({"task": "x", "test_command": "t", "step_budget": "30"})).unwrap();
+        assert_eq!(bad_type.step_budget, None);
+        let zero = parse_writer_request(&json!({"task": "x", "test_command": "t", "step_budget": 0})).unwrap();
+        assert_eq!(zero.step_budget, None);
+
         // 带有 context_excerpts
         let with_ctx = parse_writer_request(&json!({
             "task": "修复 sum 函数边界",
@@ -50,6 +60,7 @@
             focus_paths: vec!["src/main.rs".into()],
             context_excerpts: None,
             hard_scope: String::new(),
+            step_budget: None,
         };
         let p1 = render_writer_initial_prompt(Path::new("/tmp/copy"), "src/main.rs", &req_simple);
         assert!(p1.starts_with("副本工作区根目录：/tmp/copy\n关注路径：src/main.rs"));
@@ -65,6 +76,7 @@
                 prior_findings: vec!["之前已发现 panic".into()],
             }),
             hard_scope: String::new(),
+            step_budget: None,
         };
         let p2 = render_writer_initial_prompt(Path::new("/tmp/copy"), "src/main.rs", &req_rich);
         assert!(p2.contains("### 背景信息\n这是详细背景"));
