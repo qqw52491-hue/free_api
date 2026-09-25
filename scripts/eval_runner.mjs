@@ -40,6 +40,71 @@ let appDbPath = path.join(
   'free-api-chat',
   'data_v2.db'
 );
+const sourceAppDbPath = appDbPath; // 保持不可变基准备份源，切断快照轮转清理与备份源耦合
+
+/**
+ * 自动轮转并清理旧评测快照与临时工件
+ * 默认保留最新 keepCount 份，单次评测 ~480MB，避免持续累积导致磁盘耗尽
+ */
+function pruneEvalArtifacts(keepCount = 3, currentDb = null, currentOutputs = null) {
+  if (keepCount <= 0) return;
+  const isolatedDbDir = path.join(artifactsDir, 'eval-dbs');
+  if (!fs.existsSync(isolatedDbDir)) return;
+
+  try {
+    const entries = fs.readdirSync(isolatedDbDir, { withFileTypes: true });
+
+    // 1. 轮转清理 eval-*.db 及其附随 wal/shm 碎片
+    const dbFiles = entries
+      .filter((e) => e.isFile() && e.name.startsWith('eval-') && e.name.endsWith('.db'))
+      .map((e) => {
+        const fullPath = path.join(isolatedDbDir, e.name);
+        let mtime = 0;
+        try { mtime = fs.statSync(fullPath).mtimeMs; } catch {}
+        return { name: e.name, fullPath, mtime };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+
+    const dbsToDelete = dbFiles.slice(keepCount);
+    for (const item of dbsToDelete) {
+      if (currentDb && path.resolve(item.fullPath) === path.resolve(currentDb)) continue;
+      try {
+        if (fs.existsSync(item.fullPath)) fs.unlinkSync(item.fullPath);
+        const wal = `${item.fullPath}-wal`;
+        const shm = `${item.fullPath}-shm`;
+        if (fs.existsSync(wal)) fs.unlinkSync(wal);
+        if (fs.existsSync(shm)) fs.unlinkSync(shm);
+      } catch (err) {
+        console.warn(`   ⚠️ [Prune] 清理旧快照 ${item.name} 失败 (忽略): ${err.message}`);
+      }
+    }
+
+    // 2. 轮转清理 outputs-* 目录
+    const outputDirs = entries
+      .filter((e) => e.isDirectory() && e.name.startsWith('outputs-'))
+      .map((e) => {
+        const fullPath = path.join(isolatedDbDir, e.name);
+        let mtime = 0;
+        try { mtime = fs.statSync(fullPath).mtimeMs; } catch {}
+        return { name: e.name, fullPath, mtime };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+
+    const outputsToDelete = outputDirs.slice(keepCount);
+    for (const item of outputsToDelete) {
+      if (currentOutputs && path.resolve(item.fullPath) === path.resolve(currentOutputs)) continue;
+      try {
+        if (fs.existsSync(item.fullPath)) {
+          fs.rmSync(item.fullPath, { recursive: true, force: true });
+        }
+      } catch (err) {
+        console.warn(`   ⚠️ [Prune] 清理旧 outputs 目录 ${item.name} 失败 (忽略): ${err.message}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`   ⚠️ [Prune] 遍历清理目录异常 (忽略): ${err.message}`);
+  }
+}
 
 const CALIBRATION_TIMEOUT_MS = 900_000; // 校准含基线冷编译，放宽到 15 分钟
 const JUDGE_TIMEOUT_MS = 600_000;
@@ -47,6 +112,9 @@ const JUDGE_TIMEOUT_MS = 600_000;
 // ---- 参数解析 ----
 function parseCliArgs() {
   const args = process.argv.slice(2);
+  const envKeep = Number.parseInt(process.env.FREE_API_EVAL_KEEP_DBS ?? '3', 10);
+  const defaultKeep = Number.isInteger(envKeep) && envKeep >= 0 ? envKeep : 3;
+
   const options = {
     dryRun: false,
     caseId: null,
@@ -57,6 +125,8 @@ function parseCliArgs() {
     model: process.env.FREE_API_LIVE_MODEL_ID?.trim() || null,
     reviewerModel: process.env.FREE_API_LIVE_REVIEWER_MODEL_ID?.trim() || null,
     durationMinutes: Number(process.env.FREE_API_LIVE_MAX_DURATION_MINUTES ?? 25),
+    keepDbs: defaultKeep,
+    noPrune: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -85,6 +155,13 @@ function parseCliArgs() {
       options.roleModels = args[++i];
     } else if (a === '--duration') {
       options.durationMinutes = Number(args[++i]);
+    } else if (a === '--keep-dbs') {
+      const val = Number.parseInt(args[++i], 10);
+      if (Number.isInteger(val) && val >= 0) {
+        options.keepDbs = val;
+      }
+    } else if (a === '--no-prune') {
+      options.noPrune = true;
     } else if (a === '-v' || a === '--verbose') {
       options.verbose = true;
     }
@@ -668,6 +745,7 @@ async function runEvaluation() {
 
     const sandbox = new WorktreeSandbox(caseDef);
     let sandboxPath = '';
+    let isolatedOutputsDir = '';
 
     try {
       sandboxPath = sandbox.setup();
@@ -727,8 +805,8 @@ async function runEvaluation() {
           isolatedDbDir,
           `eval-${caseDef.id || 'case'}-${Date.now()}.db`
         );
-        execFileSync('sqlite3', [appDbPath, `.backup '${isolatedDbPath}'`]);
-        const isolatedOutputsDir = path.join(
+        execFileSync('sqlite3', [sourceAppDbPath, `.backup '${isolatedDbPath}'`]);
+        isolatedOutputsDir = path.join(
           isolatedDbDir,
           `outputs-${caseDef.id || 'case'}-${Date.now()}`
         );
@@ -976,6 +1054,9 @@ async function runEvaluation() {
       });
     } finally {
       sandbox.cleanup();
+      if (!options.noPrune) {
+        pruneEvalArtifacts(options.keepDbs, isolatedOutputsDir);
+      }
     }
   }
 
