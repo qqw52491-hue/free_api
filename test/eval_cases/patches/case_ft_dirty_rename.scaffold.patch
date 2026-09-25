@@ -1,0 +1,12 @@
+diff --git a/src-tauri/src/task_registry.rs b/src-tauri/src/task_registry.rs
+index e063730..ea277e8 100644
+--- a/src-tauri/src/task_registry.rs
++++ b/src-tauri/src/task_registry.rs
+@@ -226,3 +226,7 @@ impl TaskRegistry {
+         self.tasks.lock().unwrap().len()
+     }
+ }
++
++pub fn priority_queue_draft() -> {
++    let queue =
++}
