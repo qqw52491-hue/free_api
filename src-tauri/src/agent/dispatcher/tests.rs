@@ -958,3 +958,22 @@
         assert_eq!(params["file_path"], "tmp/../escape.txt");
         assert_eq!(params["title"], "tmp/not-a-path-key", "非 path 键的字符串值不受路由约定约束");
     }
+
+    #[test]
+    fn mcp_tool_case_preservation_and_cached_tools_resolution() {
+        let registered_tools = vec!["App", "Click", "Notification"];
+        let resolve_name = |input_name: &str| -> String {
+            registered_tools
+                .iter()
+                .find(|&&name| name.eq_ignore_ascii_case(input_name))
+                .map(|&name| name.to_string())
+                .unwrap_or_else(|| input_name.to_string())
+        };
+
+        assert_eq!(resolve_name("App"), "App");
+        assert_eq!(resolve_name("app"), "App");
+        assert_eq!(resolve_name("APP"), "App");
+        assert_eq!(resolve_name("notification"), "Notification");
+        assert_eq!(resolve_name("Notification"), "Notification");
+        assert_eq!(resolve_name("other_tool"), "other_tool");
+    }

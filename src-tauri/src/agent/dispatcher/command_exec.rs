@@ -266,7 +266,7 @@ pub(crate) fn execute_command_inner(
     }
 
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
-    let (plugin_name, tool_name) = if tool.contains('/') {
+    let (plugin_name, mut tool_name) = if tool.contains('/') {
         let parts: Vec<&str> = tool.split('/').collect();
         (parts[0].to_string(), parts[1].to_string())
     } else {
@@ -274,6 +274,15 @@ pub(crate) fn execute_command_inner(
     };
 
     if let Some(plugin) = registry.get(&plugin_name) {
+        // 容错与大小写纠偏：通过 cached_tools 查找真实注册的原生工具名称，
+        // 避免因模型输出全小写或首字母大写不一致引发 FastMCP/下游服务端报 Unknown tool。
+        let cached = plugin.last_known_tools();
+        if let Some(matched) = cached.iter().find(|t| t.name.eq_ignore_ascii_case(&tool_name)) {
+            if matched.name != tool_name {
+                println!("[mcp] 纠偏工具名大小写: '{}' -> '{}' (插件: {})", tool_name, matched.name, plugin_name);
+                tool_name = matched.name.clone();
+            }
+        }
         if mcp_service_requires_concrete_tool(tool, action) {
             return DispatchResult { view: None,
                 stdout: String::new(),

@@ -199,7 +199,7 @@ pub fn run_agent_step(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
-    let tool_name = instruction.get_tool().to_lowercase();
+    let tool_name = instruction.get_tool();
     if is_finish_instruction(instruction) {
         return DispatchResult { view: None,
             stdout: instruction
@@ -334,7 +334,7 @@ pub fn run_agent_step(
     }
 
     // --- 场景 B: 传统单步指令 Single Execution ---
-    let mut action = instruction.get_action().trim().to_lowercase();
+    let mut action = instruction.get_action().trim().to_string();
 
     // --- 幻觉纠偏：如果 action 为空但 extra_fields 里有 tool_name，尝试打捞 ---
     if action.is_empty() {
@@ -343,7 +343,7 @@ pub fn run_agent_step(
             .get("tool_name")
             .and_then(|v| v.as_str())
         {
-            action = name.to_lowercase();
+            action = name.trim().to_string();
         }
     }
 

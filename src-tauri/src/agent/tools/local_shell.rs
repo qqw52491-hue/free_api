@@ -776,10 +776,30 @@ fn execute_command_blocking(
                 "output_tail": output_tail,
             });
 
+            // 失败时 stderr 必须带真实诊断尾部——重试链路只回传 stderr 字段，
+            // 只写"退出码: N"等于让模型盲改（实测：cargo 编译错模型连续重读
+            // 文件找不存在的错因）。stderr 优先，空则退 stdout 尾部（合并诊断）。
+            let stderr_field = if success {
+                String::new()
+            } else {
+                let diag = if !stderr_trimmed.is_empty() {
+                    stderr_trimmed.clone()
+                } else {
+                    stdout_trimmed.clone()
+                };
+                let tail: Vec<&str> = diag.lines().collect();
+                let tail_text = tail
+                    .iter()
+                    .skip(tail.len().saturating_sub(60))
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("命令退出码: {}\n{}", exit_code, tail_text)
+            };
             DispatchResult {
                 view: Some(view),
                 stdout: format!("{}\n\n<!-- 结构化元数据: {} -->", formatted_stdout.trim_end(), payload),
-                stderr: if success { String::new() } else { format!("命令退出码: {}", exit_code) },
+                stderr: stderr_field,
                 success,
                 route: format!("local_shell:{}", kind),
             }
