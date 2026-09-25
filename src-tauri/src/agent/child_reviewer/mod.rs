@@ -142,7 +142,8 @@ pub async fn spawn_child_reviewer(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let finalize_clause = if is_plan_review {
-        "\n        10. 【方案定稿权】你是本方案的定稿负责人而非仅审批者：若方案方向正确但根因/范围/验证方式有偏差，decision 取 \"approved\" 并额外输出可选字段修订对应项——\"revised_plan_summary\"(string)、\"revised_root_cause\"(string)、\"revised_target_files\"(string[])、\"revised_verification\"(string)；非空字段将覆盖提交方版本成为最终执行方案，修订须基于证据而非凭空重写。方案无需修订时四个字段全部省略。这些字段经宿主显式授权，不受第 7 条\"禁止额外字段\"限制。"
+        "\n        10. 【方案定稿权】你是本方案的定稿负责人而非仅审批者：若方案方向正确但根因/范围/验证方式有偏差，decision 取 \"approved\" 并额外输出可选字段修订对应项——\"revised_plan_summary\"(string)、\"revised_root_cause\"(string)、\"revised_target_files\"(string[])、\"revised_verification\"(string)；非空字段将覆盖提交方版本成为最终执行方案，修订须基于证据而非凭空重写。方案无需修订时四个字段全部省略。这些字段经宿主显式授权，不受第 7 条\"禁止额外字段\"限制。\n\
+        11. 【病根核对】方案材料末尾附「原始任务目标（题面）」。你必须独立核对：题面描述的症状/需求，方案的根因假设是否足以解释？逐项推演「即使按此根因修好，题面症状是否仍会复现」——若仍会复现，说明根因定错了方向（常见盲区：只修「值从哪来」的写入侧，漏查「谁在消费错值」的读取侧），输出 \"root_cause_verdict\":\"insufficient\" 并给出 blocking finding；足以解释则 \"root_cause_verdict\":\"explains\"；题面非缺陷报障类（无症状可核对）则 \"na\"。本字段经宿主显式授权，不受第 7 条限制。"
     } else {
         ""
     };
@@ -211,9 +212,18 @@ pub async fn spawn_child_reviewer(
         json!({
             "role": "user",
             "content": format!(
-                "审查问题：{}\n\n{}{}\n\n父 Agent 明确提供的证据引用：{}\n\n证据摘录（可能为空；不得假定摘录外事实）：{}",
+                "审查问题：{}\n\n{}{}{}\n\n父 Agent 明确提供的证据引用：{}\n\n证据摘录（可能为空；不得假定摘录外事实）：{}",
                 request.question,
                 contract_verify_hint,
+                // plan_review 时附题面原文：审查员核对「根因能否解释症状」需要
+                // 独立的事实源，而不是只拿方案自称的问题（此前 user_goal 传进
+                // params 但从未渲染——审查员对题面完全盲）。
+                params
+                    .get("user_goal")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| is_plan_review && !s.trim().is_empty())
+                    .map(|g| format!("原始任务目标（题面）：{}", g))
+                    .unwrap_or_default(),
                 focus_section,
                 if allowed_refs.is_empty() { "（无）".to_string() } else { allowed_refs.join(", ") },
                 if evidence_excerpt.is_empty() { "（无）".to_string() } else { evidence_excerpt },
@@ -263,6 +273,7 @@ pub async fn spawn_child_reviewer(
                     ("revised_root_cause", crate::agent::protocol::ContractFieldType::String, "方案定稿：修订后的根因定性（无需修订则省略）"),
                     ("revised_target_files", crate::agent::protocol::ContractFieldType::StringArray, "方案定稿：修订后的目标文件清单（无需修订则省略）"),
                     ("revised_verification", crate::agent::protocol::ContractFieldType::String, "方案定稿：修订后的验证方式（无需修订则省略）"),
+                    ("root_cause_verdict", crate::agent::protocol::ContractFieldType::String, "病根核对：题面症状能否被该根因解释（explains|insufficient|na）"),
                 ] {
                     if !schema.fields.iter().any(|f| f.name == name) {
                         schema.fields.push(crate::agent::protocol::ContractFieldDef {
