@@ -551,6 +551,41 @@ pub fn dispatch_search(
     params_value: &Value,
     workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
+    // 空查询是静默失败洞：query="" 能过 serde、search_code 对空串直接返回空
+    // 命中——实测模型把文件读参数(start_line/end_line)误塞进来时拿到空结果，
+    // 会把「参数形状错了」误读成「没搜到」继续盲探。对象形态先查 query：
+    // 缺失或空白一律显式报错（在 serde 解析前拦，覆盖两种形态）。
+    if let Some(obj) = params_value.as_object() {
+        let q = obj
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if q.trim().is_empty() {
+            let stray_keys: Vec<String> = ["start_line", "end_line", "startLine", "endLine", "head", "tail", "offset"]
+                .iter()
+                .filter(|k| obj.contains_key(*k as &str))
+                .map(|k| k.to_string())
+                .collect();
+            let stray_hint = if stray_keys.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n⚠️ 检测到文件读取参数（{}）——这些属于 local_file(action=read)，search 只接受 query/kinds/path/limit/outcome/since_step/scope。",
+                    stray_keys.join(", ")
+                )
+            };
+            return DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: format!(
+                    "❌ [search] query 为空或缺失：检索必须给关键词。{}\n💡 正确调用示例:\n  - 检索代码: {{\"query\": \"关键词\", \"kinds\": [\"code\"], \"path\": \".\"}}\n  - 检索历史: {{\"query\": \"关键词\", \"kinds\": [\"history\"]}}\n  - 读文件片段: {{\"action\": \"read\", \"path\": \"...\", \"start_line\": N, \"end_line\": M}}（用 local_file，不是 search）",
+                    stray_hint
+                ),
+                success: false,
+                route: "retrieval".to_string(),
+            };
+        }
+    }
+
     // 语法层归一化：无歧义自动适配大模型常见的标量字符串输入（如 "kinds": "code" 自动转为 ["code"]）
     let normalized_value = normalize_scalar_kinds(params_value);
 

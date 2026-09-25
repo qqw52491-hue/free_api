@@ -277,6 +277,34 @@
         assert!(v["hits"].as_array().unwrap()[0]["path"].is_string());
     }
 
+    /// 空 query 静默失败洞：query="" 过 serde 后 search_code 返回空命中，
+    /// 模型会把「参数形状错」误读成「没搜到」。必须显式报错并指路正确工具。
+    #[test]
+    fn test_search_empty_query_reports_error_with_stray_param_hint() {
+        let conn = setup_test_db();
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        // 文件读参数误塞进 search（实测轨迹形态）
+        let res = dispatch_search(
+            &db,
+            "sess-emptyq",
+            &json!({"path": "src/a.rs", "start_line": 1, "end_line": 50, "kinds": ["code"]}),
+            None,
+        );
+        assert!(!res.success, "缺 query 必须显式失败");
+        assert!(res.stderr.contains("query"), "错误应点名 query: {}", res.stderr);
+        assert!(res.stderr.contains("start_line"), "应识别误塞的行窗参数");
+        assert!(res.stderr.contains("local_file"), "应指路正确工具");
+
+        // query 显式空串同样拦截
+        let res2 = dispatch_search(
+            &db,
+            "sess-emptyq",
+            &json!({"query": "  ", "kinds": ["history"]}),
+            None,
+        );
+        assert!(!res2.success, "空白 query 必须显式失败");
+    }
+
     /// 截断事实必须如实上报：命中超 limit 时 has_more=true + 附不全清单警告。
     /// （goal_anchor/run_binding 实测教训：limit=3 截断被 total_hits 冒充完整清单，
     /// 模型据此漏修残留站点。）
