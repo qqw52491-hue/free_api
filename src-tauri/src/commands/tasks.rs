@@ -276,7 +276,17 @@ pub struct ClipboardImagePayload {
 /// 关键：先枚举剪贴板提供的 MIME 类型再按类型拉取——只查 image/png 会漏掉
 /// 文件管理器复制（uri-list）与非 png 截图（image/jpeg/bmp）。
 #[tauri::command]
-pub fn read_clipboard_image() -> Result<Option<ClipboardImagePayload>, String> {
+pub async fn read_clipboard_image() -> Result<Option<ClipboardImagePayload>, String> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || read_clipboard_image_sync()),
+    )
+    .await
+    .map_err(|_| "剪贴板读取超时".to_string())?
+    .map_err(|e| e.to_string())?
+}
+
+fn read_clipboard_image_sync() -> Result<Option<ClipboardImagePayload>, String> {
     use base64::Engine;
     let b64enc = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
 
@@ -529,25 +539,25 @@ mod clipboard_tests {
     ];
 
     /// 两个场景合并为单测：真实剪贴板是全局共享态，并行测试会互相覆盖。
-    #[test]
-    fn wayland_clipboard_end_to_end() {
+    #[tokio::test]
+    async fn wayland_clipboard_end_to_end() {
         if skip() {
             eprintln!("skip: 非 Linux/Wayland 或缺 wl-copy/wl-paste");
             return;
         }
         // 场景1：截图二进制 → data URL
         seed("image/png", PNG_1PX);
-        let p = read_clipboard_image().expect("command ok").expect("剪贴板图像应被识别");
+        let p = read_clipboard_image().await.expect("command ok").expect("剪贴板图像应被识别");
         assert!(
             p.data_urls.iter().any(|u| u.starts_with("data:image/png;base64,")),
             "截图应产出 image/png data URL: {:?}",
             p.data_urls
         );
         // 场景2：文件管理器复制（uri-list + %20 转义）→ 真实文件路径
-        uri_list_case();
+        uri_list_case().await;
     }
 
-    fn uri_list_case() {
+    async fn uri_list_case() {
         if skip() {
             eprintln!("skip: 非 Linux/Wayland 或缺 wl-copy/wl-paste");
             return;
@@ -559,7 +569,7 @@ mod clipboard_tests {
         // file:// URI 带 %20 转义 → 验证 pct_decode 走通真实路径
         let uri = format!("file://{}", file.display().to_string().replace(' ', "%20"));
         seed("text/uri-list", format!("{}\r\n", uri).as_bytes());
-        let payload = read_clipboard_image().expect("command ok");
+        let payload = read_clipboard_image().await.expect("command ok");
         let p = payload.expect("uri-list 应被识别为文件");
         assert!(
             p.file_paths.iter().any(|f| f == &file.to_string_lossy()),
