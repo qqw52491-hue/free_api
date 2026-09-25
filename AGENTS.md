@@ -104,6 +104,7 @@ triage 判决、plan、假设清单都是**先验**，不是终判。后续证�
 | 2026-09-26 | eval_runner 产出 `rc-tauri/` 截断路径 76 条：porcelain `XY ` 前缀中 ` M` 首字符是空格，`.trim()` 削掉首行前缀 → slice(3) 多吃一字符 | **结构性 trim bug**：只截断每行第一个文件，且只在首项为未暂存修改时现形——藏在 diff_changed_files 里污染 judge_modified/test_neutered 匹配 | 已修（7c24277）：split 后 filter 替代整体 trim |
 | 2026-09-26 | goal_anchor 场三次 plan_review 全缺席 `root_cause_verdict` 却判 succeeded——required 在 schema 链路三层断裂：注入嵌 strict 块内、无卡路径无 schema、contract_schema 只存原始卡 schema | **「提示词必填」≠「机制必填」**：字段要拦得住需要 schema 声明+校验执行+落库三者同物。该字段是第一个走 required 路径的宿主注入项，把接缝炸出来了 | 已修（1102afa）：无卡建最小契约+注入无条件+有效 schema 落账+insufficient×approved 自洽降级 |
 | 2026-09-26 | 死模型 `190c3bdf` 连派 41 次零成功——recently_failed_models 只在 failover 选型侧查询，主选路径（显式钉死/角色卡）跳过健康检查 | 健康检查覆盖不对称：failover 已筛但主选盲选 | 已修（1de5ec6）：主选落定后同查失败集，命中走 failover+披露 |
+| 2026-09-26 | goal_anchor 带新机制复测：root_cause_verdict=explains 吐出+落账+审查员看到题面——但模型只加了 `frozen_initial_goal` 字段壳、`inherit_filling_into` 覆写逻辑一行没改（仍覆写 user_goal），超时判红 | **机制链全通，能力地板显形**：审查员对"方案文本"判 explains 是合理裁决（方案思路本身能解释症状）；真问题是 pro 也反复读同函数 6+ 遍不敢动手——收敛黑洞 | 不动机制；记录为「方案说对但执行不落地」判例——病根核对审的是方案不是 diff，执行断链另属执行层问题 |
 
 ## 已评估暂缓（有触发条件才建）
 
