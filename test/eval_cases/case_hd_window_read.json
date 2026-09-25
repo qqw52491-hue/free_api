@@ -1,17 +1,17 @@
 {
-  "id": "case_hd_window_read",
-  "title": "分窗精读误拦（判重签名缺维度：修复须同时保住真复读拦截）",
-  "tier": "gold",
-  "base_commit": "1485a3bae50be0bc0151bf348e3061aca2b119a0",
-  "judge_kind": "command",
-  "verify_command": "DB=\"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}}\"; [ -f \"$DB\" ] || DB=\"$HOME/.local/share/free-api-chat/data_v2.db\"; [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN EXISTS (SELECT 1 FROM agent_child_runs WHERE kind='review' AND parent_session_id='$FREE_API_EVAL_AGENT_SESSION' AND (result_json LIKE '%窗口%' OR result_json LIKE '%区间%' OR result_json LIKE '%判重%' OR result_json LIKE '%误拦%' OR result_json LIKE '%复读%' OR result_json LIKE '%签名%')) THEN 1 ELSE 0 END\")\" = \"1\" ] && grep -qE 'read_window_token|WINDOW_KEYS|window_sig|window_key|read_window' src-tauri/src/agent/context/types.rs && grep -q '重复读取拦截' src-tauri/src/agent/context/types.rs && [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
-  "expected_exit_code": 0,
-  "max_steps": 90,
-  "plan_mode": "cross_review",
-  "expected_diff_files": [
-    "src-tauri/src/agent/context/types.rs"
-  ],
-  "judge_semantics": "三段复合：①审查产物提及窗口/区间/判重/误拦/复读/签名相关关键词（协作机器真实参与）；②types.rs 引入窗口维度判重键（read_window_token/WINDOW_KEYS 或等价窗口签名机制）且【重复读取拦截】语义保留—— naive 修法是直接拆掉判重，判据物理断言双条件防偷懒；③会话终态=succeeded。审查者须核对修复后同窗口复读仍被拦、异窗口放行两条路径才能判定正确性。",
-  "max_prompt_tokens": 8000000,
-  "problem_statement": "【体验缺陷报障】多位用户反馈：让 Agent 分段精读大文件时，按行号区间顺序读取（先 read L1-150，再 read L151-300、L301-500）从第二次起就被【重复读取拦截】挡住——读的根本不是同一段内容，却被当成'原样重读'拒绝，逼得 Agent 只能放弃精读转回搜索循环。请定位并修复：重复读取判定必须把读取窗口参数纳入签名（不同行号区间=不同信息，不计复读）；同时真·同窗口原样重读的拦截语义必须完整保留（防无脑复读的既有防线不能拆）。"
+ "id": "case_hd_window_read",
+ "title": "分窗精读误拦（判重签名缺维度：修复须同时保住真复读拦截）",
+ "tier": "gold",
+ "base_commit": "1485a3bae50be0bc0151bf348e3061aca2b119a0",
+ "judge_kind": "command",
+ "verify_command": "DB=\"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}}\"; [ -f \"$DB\" ] || DB=\"$HOME/.local/share/free-api-chat/data_v2.db\"; [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN EXISTS (SELECT 1 FROM agent_child_runs WHERE kind='review' AND parent_session_id='$FREE_API_EVAL_AGENT_SESSION' AND (result_json LIKE '%窗口%' OR result_json LIKE '%区间%' OR result_json LIKE '%判重%' OR result_json LIKE '%误拦%' OR result_json LIKE '%复读%' OR result_json LIKE '%签名%')) THEN 1 ELSE 0 END\")\" = \"1\" ] && grep -qE 'read_window_token|WINDOW_KEYS|window_sig|window_key|read_window' src-tauri/src/agent/context/types/mod.rs && grep -q '重复读取拦截' src-tauri/src/agent/context/types/mod.rs && [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+ "expected_exit_code": 0,
+ "max_steps": 90,
+ "plan_mode": "cross_review",
+ "expected_diff_files": [
+  "src-tauri/src/agent/context/types.rs"
+ ],
+ "judge_semantics": "三段复合：①审查产物提及窗口/区间/判重/误拦/复读/签名相关关键词（协作机器真实参与）；②types.rs 引入窗口维度判重键（read_window_token/WINDOW_KEYS 或等价窗口签名机制）且【重复读取拦截】语义保留—— naive 修法是直接拆掉判重，判据物理断言双条件防偷懒；③会话终态=succeeded。审查者须核对修复后同窗口复读仍被拦、异窗口放行两条路径才能判定正确性。",
+ "max_prompt_tokens": 8000000,
+ "problem_statement": "【体验缺陷报障】多位用户反馈：让 Agent 分段精读大文件时，按行号区间顺序读取（先 read L1-150，再 read L151-300、L301-500）从第二次起就被【重复读取拦截】挡住——读的根本不是同一段内容，却被当成'原样重读'拒绝，逼得 Agent 只能放弃精读转回搜索循环。请定位并修复：重复读取判定必须把读取窗口参数纳入签名（不同行号区间=不同信息，不计复读）；同时真·同窗口原样重读的拦截语义必须完整保留（防无脑复读的既有防线不能拆）。"
 }

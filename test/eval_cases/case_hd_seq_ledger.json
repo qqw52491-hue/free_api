@@ -1,17 +1,17 @@
 {
-  "id": "case_hd_seq_ledger",
-  "title": "行表 seq 覆写错位（症状级排障：不变量横跨 append_step 全部调用点）",
-  "tier": "gold",
-  "base_commit": "5ef0f456861ef31fc8b0d3a09855637ee0021756",
-  "judge_kind": "command",
-  "verify_command": "DB=\"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}}\"; [ -f \"$DB\" ] || DB=\"$HOME/.local/share/free-api-chat/data_v2.db\"; [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN EXISTS (SELECT 1 FROM agent_child_runs WHERE kind='review' AND parent_session_id='$FREE_API_EVAL_AGENT_SESSION' AND (result_json LIKE '%seq%' OR result_json LIKE '%覆盖%' OR result_json LIKE '%覆写%' OR result_json LIKE '%下标%' OR result_json LIKE '%口径%' OR result_json LIKE '%冲突%' OR result_json LIKE '%错位%')) THEN 1 ELSE 0 END\")\" = \"1\" ] && awk '/fn persist_challenged_step/,/^}/' src-tauri/src/agent/main_loop.rs | grep -qE 'run_trace_steps\\.len\\(\\)[[:space:]]*(-[[:space:]]*1|\\.saturating_sub\\(1\\))' && [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
-  "expected_exit_code": 0,
-  "max_steps": 90,
-  "plan_mode": "cross_review",
-  "expected_diff_files": [
-    "src-tauri/src/agent/main_loop.rs"
-  ],
-  "judge_semantics": "三段复合：①审查产物提及 seq/覆盖/下标/口径/错位相关风险关键词（协作机器真实参与对质）；②persist_challenged_step 内 append_step 的 seq 改用 run_trace_steps.len()-1 vec 下标口径（与统一步骤落盘一致，修复 ON CONFLICT(run_id,seq) 覆写合法行）；③会话终态=succeeded。题面仅给症状不给解法——审查者须自行核对 append_step 各调用点的 seq 口径是否一致才能判定修复正确性，属跨调用点不变量盘查题。",
-  "max_prompt_tokens": 8000000,
-  "problem_statement": "【线上缺陷报障】用户反馈：任务运行中触发 finish 质询（finish_challenged 打回重修）后，事后核查 agent_run_steps 行表发现步骤记录被覆盖——一条原本合法成功的步骤行消失了，被质询步记录占据其位置；行表总行数比 steps_json 快照少一行，且之后步骤顺序整体错位。请定位根因并修复：行表与快照必须按位置逐条对齐，任何路径写入行表都不得再覆写合法步骤。"
+ "id": "case_hd_seq_ledger",
+ "title": "行表 seq 覆写错位（症状级排障：不变量横跨 append_step 全部调用点）",
+ "tier": "gold",
+ "base_commit": "5ef0f456861ef31fc8b0d3a09855637ee0021756",
+ "judge_kind": "command",
+ "verify_command": "DB=\"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}}\"; [ -f \"$DB\" ] || DB=\"$HOME/.local/share/free-api-chat/data_v2.db\"; [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN EXISTS (SELECT 1 FROM agent_child_runs WHERE kind='review' AND parent_session_id='$FREE_API_EVAL_AGENT_SESSION' AND (result_json LIKE '%seq%' OR result_json LIKE '%覆盖%' OR result_json LIKE '%覆写%' OR result_json LIKE '%下标%' OR result_json LIKE '%口径%' OR result_json LIKE '%冲突%' OR result_json LIKE '%错位%')) THEN 1 ELSE 0 END\")\" = \"1\" ] && awk '/fn persist_challenged_step/,/^}/' src-tauri/src/agent/main_loop/mod.rs | grep -qE 'run_trace_steps\\.len\\(\\)[[:space:]]*(-[[:space:]]*1|\\.saturating_sub\\(1\\))' && [ \"$(sqlite3 \"$DB\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+ "expected_exit_code": 0,
+ "max_steps": 90,
+ "plan_mode": "cross_review",
+ "expected_diff_files": [
+  "src-tauri/src/agent/main_loop.rs"
+ ],
+ "judge_semantics": "三段复合：①审查产物提及 seq/覆盖/下标/口径/错位相关风险关键词（协作机器真实参与对质）；②persist_challenged_step 内 append_step 的 seq 改用 run_trace_steps.len()-1 vec 下标口径（与统一步骤落盘一致，修复 ON CONFLICT(run_id,seq) 覆写合法行）；③会话终态=succeeded。题面仅给症状不给解法——审查者须自行核对 append_step 各调用点的 seq 口径是否一致才能判定修复正确性，属跨调用点不变量盘查题。",
+ "max_prompt_tokens": 8000000,
+ "problem_statement": "【线上缺陷报障】用户反馈：任务运行中触发 finish 质询（finish_challenged 打回重修）后，事后核查 agent_run_steps 行表发现步骤记录被覆盖——一条原本合法成功的步骤行消失了，被质询步记录占据其位置；行表总行数比 steps_json 快照少一行，且之后步骤顺序整体错位。请定位根因并修复：行表与快照必须按位置逐条对齐，任何路径写入行表都不得再覆写合法步骤。"
 }
