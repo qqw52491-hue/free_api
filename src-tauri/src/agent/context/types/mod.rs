@@ -342,6 +342,13 @@ pub struct SandwichContext {
     /// P4 连续批发派发解析失败计数（达 2 次触发 3 步熔断降级）
     #[serde(default)]
     pub consecutive_batch_dispatch_errors: usize,
+    /// wait_jobs 同批连等计数：同一 job 集合连续等待时窗口自适应放大——
+    /// 实测单场 21 次 wait_jobs×45s 纯轮询，每圈烧一整次 LLM 往返。
+    /// 键 = 排序后的 job_ids 串；换批即清零。
+    #[serde(default)]
+    pub wait_jobs_streak: u32,
+    #[serde(default)]
+    pub wait_jobs_last_key: String,
     /// P4 批发派发熔断保护期剩余步数（>0 时阻止 dispatches 并注入降级单发指引）
     #[serde(default)]
     pub batch_dispatch_circuit_breaker_remaining: usize,
@@ -414,6 +421,8 @@ impl SandwichContext {
             run_completion_tokens: 0,
             dehydration_rearm_tokens: 0,
             consecutive_batch_dispatch_errors: 0,
+            wait_jobs_streak: 0,
+            wait_jobs_last_key: String::new(),
             batch_dispatch_circuit_breaker_remaining: 0,
             active_tool: None,
             compact_tools_index: None,

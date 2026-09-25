@@ -41,6 +41,28 @@ pub(super) async fn dispatch_wait_jobs(
             .and_then(|v| v.as_u64())
             .unwrap_or(180);
 
+        // 同批连等自适应窗口：模型对同一 job 集合反复 wait_jobs 时，
+        // 每多一圈等于烧一次完整 LLM 往返只为「还在跑吗」——实测单场
+        // 21 次轮询 ≈ 1M prompt token。窗口按连等次数递增封顶 600s，
+        // 换批即重置；返回值里披露放大后的窗口，模型仍可自主决定继续等
+        // 或转去推进其他操作（不剥夺选择权，只减少空转往返）。
+        let wait_key = target_ids
+            .as_ref()
+            .map(|ids| {
+                let mut v = ids.clone();
+                v.sort();
+                v.join(",")
+            })
+            .unwrap_or_else(|| "<all>".to_string());
+        if ctx.context.wait_jobs_last_key == wait_key {
+            ctx.context.wait_jobs_streak = ctx.context.wait_jobs_streak.saturating_add(1);
+        } else {
+            ctx.context.wait_jobs_last_key = wait_key;
+            ctx.context.wait_jobs_streak = 0;
+        }
+        let streak = ctx.context.wait_jobs_streak;
+        let effective_timeout = (timeout_secs << streak.min(3)).min(600);
+
         let _ = ctx.app.emit(
             &format!("agent-log-{}", ctx.final_session_id),
             format!("⏳ 正在挂起等待后台异步任务完成 (超时限制: {}s)...", timeout_secs),
@@ -60,7 +82,7 @@ pub(super) async fn dispatch_wait_jobs(
             ctx.state.inner(),
             ctx.parent_run_id,
             target_ids.as_deref(),
-            timeout_secs,
+            effective_timeout,
             Some(&mut rx_watch),
         )
         .await
@@ -145,7 +167,15 @@ pub(super) async fn dispatch_wait_jobs(
                         ctx.state.inner(),
                         ctx.parent_run_id,
                     ) {
-                        out.push_str("等待结束：仍有后台任务在运行中，本次等待窗口内无新完成。可再次 wait_jobs 挂起等待，或先推进其他独立操作（结论产出后会自动注入）。");
+                        if streak > 0 {
+                            out.push_str(&format!(
+                                "等待结束：仍有后台任务在运行中（本次为第 {} 次连等同一批任务，窗口已自适应扩至 {}s）。可再次 wait_jobs 挂起等待，或先推进其他独立操作（结论产出后会自动注入）。",
+                                streak + 1,
+                                effective_timeout
+                            ));
+                        } else {
+                            out.push_str("等待结束：仍有后台任务在运行中，本次等待窗口内无新完成。可再次 wait_jobs 挂起等待，或先推进其他独立操作（结论产出后会自动注入）。");
+                        }
                     } else if crate::agent::child_reviewer::has_pending_review_results(
                         ctx.state.inner(),
                         ctx.parent_run_id,
