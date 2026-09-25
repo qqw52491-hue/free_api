@@ -17,7 +17,7 @@ use uuid::Uuid;
 pub fn parse_child_review_request(params: &Value) -> Result<ChildReviewRequest, String> {
     let raw: RawChildReviewRequest = serde_json::from_value(params.clone())
         .map_err(|_| "child_reviewer 参数必须是 JSON 对象。".to_string())?;
-    let question = normalize_nonempty(&raw.question, MAX_QUESTION_CHARS, "question")?;
+    let question = normalize_question(&raw.question, MAX_QUESTION_CHARS, "question")?;
     if raw.evidence_excerpt.chars().count() > MAX_EVIDENCE_CHARS {
         return Err(format!(
             "child_reviewer.evidence_excerpt 最多 {} 个字符；请先由父 Agent 收缩证据。",
@@ -129,6 +129,30 @@ pub(crate) fn normalize_nonempty(value: &str, max_chars: usize, field: &str) -> 
         return Err(format!("child_reviewer.{} 含不可接受的控制字符。", field));
     }
     Ok(normalized.to_string())
+}
+
+/// question 专用归一化：换行/制表等控制符折叠为单空格继续走，不打回。
+/// 实测 27 次「含不可接受的控制字符」全是模型写多行问题被格式拒收——
+/// 约束本意是单行展示，压平即可满足，拒绝是白烧一步重试。
+pub(crate) fn normalize_question(value: &str, max_chars: usize, field: &str) -> Result<String, String> {
+    let flattened: String = value
+        .trim()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    if flattened.is_empty() {
+        return Err(format!("child_reviewer 缺少 {}。", field));
+    }
+    if flattened.chars().count() > max_chars {
+        return Err(format!(
+            "child_reviewer.{} 最多 {} 个字符。",
+            field, max_chars
+        ));
+    }
+    Ok(flattened)
 }
 
 pub fn parse_child_review_rebuttal_output(

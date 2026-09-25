@@ -363,6 +363,26 @@
     }
 
     #[test]
+    fn question_multiline_is_flattened_not_rejected() {
+        // 实测 27 次「控制字符」拒收全是模型写多行问题——换行压平成单空格继续走
+        let request = parse_child_review_request(&json!({
+            "question": "【方案审查】\n根因假设：\n1. persist 用错 seq\n2. 需核对消费端",
+            "evidence_refs": ["out-1"],
+        }))
+        .unwrap();
+        assert_eq!(
+            request.question,
+            "【方案审查】 根因假设： 1. persist 用错 seq 2. 需核对消费端"
+        );
+        // 路径类字段仍严格拒收控制符（防止混入隐蔽路径注入）
+        assert!(parse_child_review_request(&json!({
+            "question": "x",
+            "evidence_refs": ["a\nb"],
+        }))
+        .is_err());
+    }
+
+    #[test]
     fn resource_ids_are_deduplicated_and_bounded() {
         let request = parse_child_review_request(&json!({
             "question": "检查已登记资源是否支持当前判断",
