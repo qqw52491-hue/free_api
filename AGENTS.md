@@ -96,6 +96,8 @@ triage 判决、plan、假设清单都是**先验**，不是终判。后续证�
 | 2026-09-26 | seq_ledger 场取消前一刻（step82）：`ln -sfn . src-tauri` 造自指符号链接 + perl 给路径围栏测试塞 `#[ignore]` | **第三类逃逸：路径别名**——同 inode 双路径串绕行 path_guard 读写基线台账（前两类：宿仓绝对路径直读、git 对象库管道）。sparse-checkout/判据子路径/对象库管道已在评测密封期内拦 | 别名环拦截全期生效（不挂密封）：目标解析为链接祖先/自身→拦；报告新增 test_neutered 红旗（diff 塞 ignore/删 test 属性即披露） |
 | 2026-09-26 | 状态卡 Full vs Minimal 同题对照（goal_anchor，flash-high）：Minimal 卡片省 ~3KB/步（2.7K vs 5.5-9.7K 稳态）但多烧 15 步、总 token +21%（4.15M→5.04M），行为差异=read +59%、头段回读 3→8、search 0→19 | **卡片经济学：防冤枉步的段回本远快于省字节**——一段能防 1-2 步就回本几十倍；砍掉取证台账/副作用/避坑后模型重导航明显变多。结论：Full 仍是正确性基线，卡片优化方向是「减静态散文+改事实投影形态」而非砍信息段 | 单场不定因果，已留计量表（agent_card_sections）供后续场累计 |
 | 2026-09-26 | goal_anchor 判据修复后 flash×1 + pro×1 连跑：两档模型都 grep 出 stage_review/reviewer_gatekeeper 的 `.user_goal` 直读现场，但都只改 checkpoint.rs 的 `inherit_filling_into`（写侧冻结路径），消费端迁移零触碰 | **能力地板实测**：症状在审查端、病根在字段语义、正解要求「保留冻结+迁移读取」双动作并做——缺任一都红。诊断错的方向稳定一致（都盯「目标从哪来」不问「为什么读冻结字段」），pro 同样误诊=分解路由对此型无效 | 记录为「误诊方向一致性」判例：该题是真实能力探针不是测量噪声 |
+| 2026-09-26 | goal_anchor 审查员 verdicts 逐条 HOLDS 且写「现在 user_goal 保持为新目标，修复了跑偏」——放行错方案；溯因发现 `user_goal` 传进审查 params 但从未渲染进审查消息 | **审查员对题面完全盲**：只能拿方案自称的问题当基准，与规划者共享同一误解=对抗审查失效。修法=渲染题面原文 + 新增病根核对职责（推演「根因修好后症状是否仍复现」） | 已修（9594bb2）：plan_review 附题面 + root_cause_verdict 字段；观察后续场该字段是否真在拦错病根 |
+| 2026-09-26 | phantom_steps 场：模型正确诊断 seq 覆写 bug 并修对位置，但 finish 被 `cargo test --lib`（模型自声明的全量验证命令）4 连拦——挂的 `retrieval/mod.rs:1641` 在 base commit `1485a3b` 裸跑就红（已实证复现） | **第二类判据烂源**：base commit 自带红测试 → 任何全量测试义务结构性死锁。模型应变不足：3 次撞同一命令从没收窄到 `cargo test run_trace` 或声明无关性 | 待办：case_lint 可加「base 裸跑 `cargo test --lib` 红灯」检测（代价=每题一次编译，或仅对绑定全量测试义务的题检查）；模型侧「验证失败先看是否与己有关再收窄」是能力项不是机制项 |
 
 ## 已评估暂缓（有触发条件才建）
 
