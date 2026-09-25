@@ -414,6 +414,14 @@
           <button 
             type="button" 
             class="tab-btn" 
+            :class="{ active: mcpTab === 'ref' }" 
+            @click="mcpTab = 'ref'"
+          >
+            🔗 引用安装
+          </button>
+          <button 
+            type="button" 
+            class="tab-btn" 
             :class="{ active: mcpTab === 'custom' }" 
             @click="mcpTab = 'custom'"
           >
@@ -465,6 +473,25 @@
             <button class="cancel-btn" @click="showAddModal = false">取消</button>
             <button class="save-btn" :disabled="!quickForm.remoteUrl.trim() || quickConnecting" @click="handleQuickConnectMcp">
               {{ quickConnecting ? '⏳ 正在连接并提炼能力卡…' : '⚡️ 一键连接提炼并保存' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 引用安装 Tab：粘贴包名/GitHub地址/本地目录 -->
+        <div v-else-if="mcpTab === 'ref'">
+          <p class="modal-hint">粘贴 <strong>包名</strong>（如 <code>excel-mcp-server</code>）、<strong>GitHub/Gitee 仓库地址</strong>或<strong>本地目录路径</strong>，自动解析运行方式并握手验证，装不上不落库。</p>
+          <div class="form-group">
+            <label>插件引用（必填）</label>
+            <input v-model.trim="refForm.reference" placeholder="@scope/mcp-xxx 或 https://github.com/org/repo 或 /path/to/dir" />
+          </div>
+          <div v-if="refResult" class="form-group" :class="{ 'ref-result-ok': refResult.ok, 'ref-result-fail': !refResult.ok }">
+            <p v-if="refResult.ok">✅ 已安装「{{ refResult.name }}」（{{ refResult.toolCount }} 个工具，形态: {{ refResult.kind }}）<br><code class="cmd-snippet">{{ refResult.command }} {{ refResult.args.join(' ') }}</code></p>
+            <p v-else>❌ {{ refResult.error }}</p>
+          </div>
+          <div class="form-actions">
+            <button class="cancel-btn" @click="showAddModal = false">取消</button>
+            <button class="save-btn" :disabled="!refForm.reference.trim() || refInstalling" @click="handleRefInstall">
+              {{ refInstalling ? '⏳ 解析并握手中…（首次拉包可能数十秒）' : '🔗 解析并安装' }}
             </button>
           </div>
         </div>
@@ -569,10 +596,13 @@ const allModels = ref([]);
 
 // MCP Modal
 const showAddModal = ref(false);
-const mcpTab = ref('quick'); // 'quick' | 'custom' | 'batch'
+const mcpTab = ref('quick'); // 'quick' | 'ref' | 'custom' | 'batch'
 const editingPluginName = ref('');
 const quickConnecting = ref(false);
 const generatingMcpCard = ref(false);
+const refInstalling = ref(false);
+const refForm = ref({ reference: '' });
+const refResult = ref(null);
 
 const quickForm = ref({
   name: '',
@@ -819,6 +849,29 @@ const handleQuickConnectMcp = async () => {
     alert('极速连接与提炼失败: ' + err);
   } finally {
     quickConnecting.value = false;
+  }
+};
+
+const handleRefInstall = async () => {
+  const reference = refForm.value.reference.trim();
+  if (!reference) return;
+  refInstalling.value = true;
+  refResult.value = null;
+  try {
+    const res = await invoke('install_mcp_from_ref', { reference });
+    refResult.value = {
+      ok: true,
+      name: res.plugin_name,
+      command: res.command,
+      args: res.args,
+      toolCount: res.tool_count,
+      kind: res.resolved_kind,
+    };
+    await loadPlugins();
+  } catch (err) {
+    refResult.value = { ok: false, error: String(err) };
+  } finally {
+    refInstalling.value = false;
   }
 };
 
@@ -1694,6 +1747,20 @@ select option { background-color: #18181b !important; color: #f4f4f5 !important;
 .batch-result-item.fail {
   border-color: rgba(255, 71, 87, 0.25);
   background: rgba(255, 71, 87, 0.03);
+}
+.ref-result-ok {
+  background: rgba(46, 213, 115, 0.06);
+  border: 1px solid rgba(46, 213, 115, 0.25);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.ref-result-fail {
+  background: rgba(255, 71, 87, 0.06);
+  border: 1px solid rgba(255, 71, 87, 0.25);
+  border-radius: 6px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 .result-head {
   display: flex;

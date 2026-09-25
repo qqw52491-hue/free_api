@@ -1,6 +1,7 @@
 pub mod chat;
 pub mod mcp;
 pub mod mcp_registry;
+pub mod mcp_ref_install;
 pub mod models;
 pub mod projects;
 pub mod roles;
