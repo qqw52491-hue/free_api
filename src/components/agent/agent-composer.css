@@ -2902,3 +2902,42 @@ textarea::placeholder {
 .context-ring.badge-safe { color: #4ade80; }
 .context-ring.badge-warn { color: #fbbf24; }
 .context-ring.badge-danger { color: #f87171; }
+
+/* 上下文圆环悬浮明细：分段占比气泡卡 */
+.context-detail-pop {
+    position: absolute;
+    bottom: 44px;
+    right: -8px;
+    min-width: 200px;
+    background: rgba(24, 24, 28, 0.97);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 8px 10px;
+    z-index: 50;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+}
+.cd-title {
+    font-size: 10px;
+    color: #8e8e93;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+.cd-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+    font-size: 10px;
+}
+.cd-name { color: #c9c9ce; width: 68px; flex-shrink: 0; }
+.cd-bar-wrap {
+    flex: 1;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 2px;
+    overflow: hidden;
+}
+.cd-bar { display: block; height: 100%; background: #4ade80; border-radius: 2px; }
+.cd-val { color: #8e8e93; width: 28px; text-align: right; flex-shrink: 0; }
+.cd-empty { font-size: 10px; color: #71717a; }

@@ -176,6 +176,7 @@ pub fn run() {
             commands::save_and_parse_uploaded_attachment,
             commands::search_web,
             commands::fetch_url_markdown,
+            commands::get_context_snapshot,
             // Agent 执行
             agent::execute_command,
             agent::run_agent_main_loop,

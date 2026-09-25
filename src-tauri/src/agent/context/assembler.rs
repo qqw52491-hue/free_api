@@ -414,6 +414,52 @@ pub(crate) fn measure_card_sections(messages: &[ChatMessage]) -> Vec<(String, us
     sections
 }
 
+/// 整提示分桶计量（圆环悬浮明细数据源）：按角色把实际发给模型的
+/// api_messages 切成大桶，返回 (桶名, 字节数)。字节口径与
+/// measure_card_sections 一致——悬浮明细展示占比，不冒充精确 token。
+/// 首条 system = 静态系统提示词；其余 system = 动态注入卡（状态/检查点）。
+pub(crate) fn measure_prompt_breakdown(
+    api_messages: &[ChatMessage],
+) -> Vec<(String, usize)> {
+    let mut order: Vec<&'static str> = Vec::new();
+    let mut buckets = std::collections::HashMap::<&'static str, usize>::new();
+    let mut seen_system = false;
+    for m in api_messages {
+        let role = m.role.as_str();
+        let bytes = match &m.content {
+            serde_json::Value::String(s) => s.len(),
+            serde_json::Value::Array(parts) => {
+                parts.iter().map(|p| p.to_string().len()).sum()
+            }
+            serde_json::Value::Null => 0,
+            other => other.to_string().len(),
+        };
+        let total = bytes;
+        if total == 0 {
+            continue;
+        }
+        let name = match role {
+            "system" if !seen_system => {
+                seen_system = true;
+                "系统提示词"
+            }
+            "system" => "状态卡/注入",
+            "user" => "用户消息",
+            "assistant" => "模型回复",
+            "tool" | "function" => "工具回执",
+            _ => "其他",
+        };
+        if !buckets.contains_key(name) {
+            order.push(name);
+        }
+        *buckets.entry(name).or_insert(0) += total;
+    }
+    order
+        .into_iter()
+        .map(|n| (n.to_string(), buckets[n]))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,7 +483,43 @@ mod tests {
     }
 
     #[test]
-    fn test_measure_card_sections_ignores_non_card() {
+    #[test]
+    fn test_measure_prompt_breakdown_buckets_by_role() {
+        let msgs = vec![
+            crate::agent::context::types::ChatMessage {
+                role: "system".into(),
+                content: serde_json::Value::String("系统提示词主体".repeat(10)),
+            },
+            crate::agent::context::types::ChatMessage {
+                role: "system".into(),
+                content: serde_json::Value::String("【状态卡】注入".repeat(3))
+            },
+            crate::agent::context::types::ChatMessage {
+                role: "user".into(),
+                content: serde_json::Value::String("用户问题".repeat(5))
+            },
+            crate::agent::context::types::ChatMessage {
+                role: "assistant".into(),
+                content: serde_json::Value::String("模型回复".repeat(8))
+            },
+            crate::agent::context::types::ChatMessage {
+                role: "tool".into(),
+                content: serde_json::Value::String("工具结果".repeat(20))
+            },
+        ];
+        let b = measure_prompt_breakdown(&msgs);
+        let names: Vec<&str> = b.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["系统提示词", "状态卡/注入", "用户消息", "模型回复", "工具回执"],
+            "分桶名: {:?}",
+            names
+        );
+        // 工具回执桶字节数最大（repeat(20)）
+        assert!(b[4].1 > b[3].1 && b[4].1 > b[0].1 / 10);
+    }
+
+        fn test_measure_card_sections_ignores_non_card() {
         let msgs = vec![ChatMessage { role: "user".into(), content: json!("【提示】仅一段") }];
         assert!(measure_card_sections(&msgs).is_empty());
     }

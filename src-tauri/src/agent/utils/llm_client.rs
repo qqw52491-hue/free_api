@@ -277,6 +277,14 @@ pub async fn call_llm(
                 state, session_id, step_id, level, &sections,
             );
         }
+        // 整提示分桶（圆环悬浮明细数据源）：与卡片分段同表异 level 落库。
+        let breakdown =
+            crate::agent::context::assembler::measure_prompt_breakdown(&api_messages);
+        if !breakdown.is_empty() {
+            crate::agent::telemetry::record_card_sections(
+                state, session_id, step_id, "prompt_breakdown", &breakdown,
+            );
+        }
     }
 
     // �📊 逐调用 telemetry 的当轮上下文快照（循环外算一次，各请求行共用）：

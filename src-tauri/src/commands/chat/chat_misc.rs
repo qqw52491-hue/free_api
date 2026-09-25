@@ -75,6 +75,54 @@ pub async fn fetch_url_markdown(url: String) -> Result<String, String> {
     crate::agent::web_search::fetch_url_markdown(&url).await
 }
 
+/// 上下文水位快照（圆环+悬浮明细数据源）：
+/// 最近一次 llm 调用的 prompt/window/percent + 最近一次整提示分桶。
+/// 会话静默态也能回显上次值（落库持久、不因 run 结束消失）。
+#[tauri::command]
+pub async fn get_context_snapshot(
+    state: State<'_, DbState>,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let latest = conn
+        .query_row(
+            "SELECT prompt_tokens, context_window, usage_percent, total_tokens, cached_tokens
+             FROM agent_llm_calls WHERE session_id = ?1 AND prompt_tokens > 0
+             ORDER BY id DESC LIMIT 1",
+            params![session_id],
+            |row| {
+                Ok(json!({
+                    "prompt_tokens": row.get::<_, i64>(0)?,
+                    "context_window": row.get::<_, i64>(1)?,
+                    "usage_percent": row.get::<_, f64>(2)?,
+                    "total_tokens": row.get::<_, i64>(3)?,
+                    "cached_tokens": row.get::<_, i64>(4)?,
+                }))
+            },
+        )
+        .ok();
+    let breakdown: serde_json::Value = conn
+        .query_row(
+            "SELECT sections_json, total_bytes FROM agent_card_sections
+             WHERE session_id = ?1 AND card_level = 'prompt_breakdown'
+             ORDER BY rowid DESC LIMIT 1",
+            params![session_id],
+            |row| {
+                Ok(json!({
+                    "sections": serde_json::from_str::<serde_json::Value>(
+                        &row.get::<_, String>(0)?
+                    ).unwrap_or(json!({})),
+                    "total_bytes": row.get::<_, i64>(1)?,
+                }))
+            },
+        )
+        .unwrap_or_else(|_| json!({"sections": {}, "total_bytes": 0}));
+    Ok(json!({
+        "latest": latest,
+        "breakdown": breakdown,
+    }))
+}
+
 pub fn resolve_safe_artifact_path(raw: &str) -> Result<std::path::PathBuf, String> {
     let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
     let clean = trimmed.strip_prefix("file://").unwrap_or(trimmed).trim();

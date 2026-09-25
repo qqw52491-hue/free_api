@@ -1104,22 +1104,32 @@
                     </div>
                 </div>
                 <div class="composer-actions">
-                    <!-- 上下文水位圆环：最近一次调用 prompt 占窗口比 -->
+                    <!-- 上下文水位圆环：最近一次调用 prompt 占窗口比（悬浮看分桶明细，静默态回显上次值） -->
                     <div
-                        v-if="telemetry?.contextWindow && telemetry.contextWindow > 0"
+                        v-if="ringPercent !== null"
                         class="context-ring"
                         :class="contextLevelClass"
-                        :title="`上下文占用：${formatTokens(telemetry.totalTokens)} / ${formatTokens(telemetry.contextWindow)}（${(telemetry.contextUsagePercent ?? 0).toFixed(1)}%）`"
+                        @mouseenter="contextDetailOpen = true"
+                        @mouseleave="contextDetailOpen = false"
                     >
                         <svg viewBox="0 0 36 36" class="context-ring-svg">
                             <circle class="ring-track" cx="18" cy="18" r="15.9155" />
                             <circle
                                 class="ring-fill"
                                 cx="18" cy="18" r="15.9155"
-                                :stroke-dasharray="`${Math.min(100, telemetry.contextUsagePercent ?? 0)} 100`"
+                                :stroke-dasharray="`${Math.min(100, ringPercent)} 100`"
                             />
                         </svg>
-                        <span class="ring-pct">{{ Math.round(telemetry.contextUsagePercent ?? 0) }}%</span>
+                        <span class="ring-pct">{{ Math.round(ringPercent) }}%</span>
+                        <div v-if="contextDetailOpen" class="context-detail-pop">
+                            <div class="cd-title">上下文构成 · {{ formatTokens(ringTokens) }} tok</div>
+                            <div v-for="row in ringBreakdown" :key="row.name" class="cd-row">
+                                <span class="cd-name">{{ row.name }}</span>
+                                <span class="cd-bar-wrap"><span class="cd-bar" :style="{ width: row.pct + '%' }"></span></span>
+                                <span class="cd-val">{{ row.pct }}%</span>
+                            </div>
+                            <div v-if="ringBreakdown.length === 0" class="cd-empty">暂无分段数据（下一次调用后产生）</div>
+                        </div>
                     </div>
                     <button v-if="isRunning" class="stop-control" type="button" :disabled="stopRequested" @click="$emit('stop')">{{ stopRequested ? '停止中' : '停止' }}</button>
                     
@@ -2474,11 +2484,44 @@ async function submit(explicitMode?: "interrupt" | "queue" | Event) {
 }
 
 const contextLevelClass = computed(() => {
-    const p = props.telemetry?.contextUsagePercent ?? 0;
+    const p = ringPercent.value ?? 0;
     if (p >= 80) return "badge-danger";
     if (p >= 60) return "badge-warn";
     return "badge-safe";
 });
+
+// 上下文水位快照：运行中吃实时 telemetry，静默态回显库内最近值
+const contextSnapshot = ref<any>(null);
+const contextDetailOpen = ref(false);
+
+const ringPercent = computed<number | null>(() => {
+    const live = props.telemetry?.contextUsagePercent;
+    if (live !== undefined && live !== null && (props.telemetry?.contextWindow ?? 0) > 0) return live;
+    const snap = contextSnapshot.value?.latest;
+    if (snap && snap.context_window > 0) return snap.usage_percent;
+    return null;
+});
+const ringTokens = computed(() =>
+    props.telemetry?.totalTokens || contextSnapshot.value?.latest?.prompt_tokens || 0
+);
+const ringBreakdown = computed(() => {
+    const sections = contextSnapshot.value?.breakdown?.sections;
+    const total = contextSnapshot.value?.breakdown?.total_bytes;
+    if (!sections || !total) return [];
+    return Object.entries(sections)
+        .map(([name, bytes]: [string, any]) => ({ name, pct: Math.round((bytes / total) * 100) }))
+        .sort((a, b) => b.pct - a.pct);
+});
+
+const loadContextSnapshot = async () => {
+    if (!props.sessionId) return;
+    try {
+        contextSnapshot.value = await invoke("get_context_snapshot", { sessionId: props.sessionId });
+    } catch { /* 快照失败仅影响展示，静默降级 */ }
+};
+watch(() => props.sessionId, () => loadContextSnapshot(), { immediate: true });
+// 运行期 telemetry 是权威值；静默时缓慢刷新快照保证"上次值"不落伍
+watch(() => props.telemetry?.totalTokens, (v) => { if (v) loadContextSnapshot(); });
 
 defineExpose({
     attachFilePaths,
