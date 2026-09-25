@@ -1524,6 +1524,34 @@ async fn run_agent_main_loop_in_workspace_inner(
                     if !touched.is_empty() {
                         context.shell_touched_paths = touched;
                     }
+                    // 反向差值：曾脏现净 = 未提交内容本步消失。commit/stash 属合法
+                    // 消失，破坏类（checkout --/clean/任意脚本删）同样现形于此——
+                    // 枚举防不住的面由「消失必入账」兜底，合法与否归审查语义判。
+                    let lost: Vec<String> = pre_paths
+                        .iter()
+                        .filter(|p| !post_list.iter().any(|x| x == *p))
+                        .cloned()
+                        .collect();
+                    if !lost.is_empty() {
+                        let tool = instruction.get_tool();
+                        for p in &lost {
+                            checkpoint.git_dirty_lost.push(format!(
+                                "step{step_id} [{tool}]: {p} 未提交内容消失"
+                            ));
+                        }
+                        if checkpoint.git_dirty_lost.len() > 20 {
+                            let overflow = checkpoint.git_dirty_lost.len() - 20;
+                            checkpoint.git_dirty_lost.drain(0..overflow);
+                        }
+                        app.emit(
+                            &format!("agent-log-{}", final_session_id),
+                            format!(
+                                "⚠️ 本步骤未提交内容消失: {}（commit/stash 属合法消失；其余请核对）",
+                                lost.join(", ")
+                            ),
+                        )
+                        .ok();
+                    }
                 }
                 // 非 git 环境：按本步骤是否为写类指令保守计 1（但排除 session_tmp 草稿写入）
                 (None, _) if crate::agent::dispatcher::is_write_or_side_effect_tool(&instruction) => {

@@ -86,6 +86,12 @@ pub struct AgentCheckpoint {
     /// 经人工确认放行的 git 破坏命令指纹（同一命令重发不再确认）。
     #[serde(default)]
     pub git_destructive_confirmed: Vec<String>,
+    /// 检测层台账：某步结束后「曾脏现净」的文件（pre−post porcelain 差值）。
+    /// 即「未提交内容本步消失」——合法来源（commit/stash 会自然产生此差值）
+    /// 与破坏来源（checkout --/clean/任意脚本删）在事实层不可分，
+    /// 归审查语义判定；这里只保证「消失必有记录」。
+    #[serde(default)]
+    pub git_dirty_lost: Vec<String>,
     /// 策略引擎核准的目标改动文件列表（用于写后真实 Git Diff 范围防逃逸比对）
     #[serde(default)]
     pub approved_target_files: Option<Vec<String>>,
@@ -353,6 +359,7 @@ impl AgentCheckpoint {
             git_destructive_pending: Vec::new(),
             git_destructive_asked: Vec::new(),
             git_destructive_confirmed: Vec::new(),
+            git_dirty_lost: Vec::new(),
             approved_target_files: None,
             policy_decision_summary: None,
             plan_mode: PlanExecutionMode::Auto,

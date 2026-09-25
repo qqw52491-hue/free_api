@@ -1,0 +1,13 @@
+diff --git a/src-tauri/src/task_registry.rs b/src-tauri/src/task_registry.rs
+index e063730..76bd0eb 100644
+--- a/src-tauri/src/task_registry.rs
++++ b/src-tauri/src/task_registry.rs
+@@ -226,3 +226,8 @@ impl TaskRegistry {
+         self.tasks.lock().unwrap().len()
+     }
+ }
++
++// WIP-KEEP-ME: 用户半成品实验——任务优先级队列草稿（未提交工作，勿删勿还原）
++pub fn wip_priority_queue() -> {
++    let _draft =
++}
