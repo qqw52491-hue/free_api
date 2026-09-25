@@ -19,6 +19,7 @@ const modelId = process.env.FREE_API_LIVE_MODEL_ID?.trim();
 const proModelId = process.env.FREE_API_LIVE_MODEL_ID_PRO?.trim() || modelId;
 const flashModelId = process.env.FREE_API_LIVE_MODEL_ID_FLASH?.trim() || modelId;
 const visionModelId = process.env.FREE_API_LIVE_MODEL_ID_VISION?.trim() || modelId;
+const stateCardLevel = process.env.FREE_API_STATE_CARD_LEVEL?.trim();
 const reviewerModelId = process.env.FREE_API_LIVE_REVIEWER_MODEL_ID?.trim() || null;
 const roleModelsRaw = process.env.FREE_API_ROLE_MODELS?.trim() || "";
 const fixtureDir = process.env.FREE_API_LIVE_FIXTURE_DIR?.trim();
@@ -49,7 +50,7 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
       { timeout: 60_000, interval: 2_000, timeoutMsg: "Tauri IPC 桥 60s 未就绪" },
     );
 
-    const started = await browser.executeAsync(async (proModel, flashModel, visionModel, reviewerModel, roleModelsJson, workspace, plan, minutes, stepsCap, tokensCap, done) => {
+    const started = await browser.executeAsync(async (proModel, flashModel, visionModel, reviewerModel, roleModelsJson, workspace, plan, minutes, stepsCap, tokensCap, cardLevel, done) => {
       try {
         const { invoke } = window.__TAURI__.core;
         const parsedRoleModels = roleModelsJson ? JSON.parse(roleModelsJson) : null;
@@ -61,6 +62,7 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
             reasoning_effort: "high",
             ...(parsedRoleModels ? { role_models: parsedRoleModels } : {}),
             ...(reviewerModel ? { role_models: { ...(parsedRoleModels || {}), reviewer: reviewerModel } } : {}),
+            ...(cardLevel ? { state_card_level: cardLevel } : {}),
           },
           maxDurationMinutes: minutes,
           scenario: "custom_goal",
@@ -72,7 +74,7 @@ describe("评测套具实弹运行（custom_goal × 沙盒工作区）", functio
         });
         done({ ok: true, result });
       } catch (error) { done({ ok: false, error: String(error) }); }
-    }, proModelId, flashModelId, visionModelId, reviewerModelId, roleModelsRaw, fixtureDir, planMode, maxDurationMinutes, maxSteps, maxPromptTokens);
+    }, proModelId, flashModelId, visionModelId, reviewerModelId, roleModelsRaw, fixtureDir, planMode, maxDurationMinutes, maxSteps, maxPromptTokens, stateCardLevel);
     assert.equal(started?.ok, true, started?.error ?? "后台评测启动失败");
     const sessionId = started.result?.session_id;
     assert.ok(sessionId, "缺少 session_id");
