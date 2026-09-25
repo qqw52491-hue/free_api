@@ -1104,6 +1104,23 @@
                     </div>
                 </div>
                 <div class="composer-actions">
+                    <!-- 上下文水位圆环：最近一次调用 prompt 占窗口比 -->
+                    <div
+                        v-if="telemetry?.contextWindow && telemetry.contextWindow > 0"
+                        class="context-ring"
+                        :class="contextLevelClass"
+                        :title="`上下文占用：${formatTokens(telemetry.totalTokens)} / ${formatTokens(telemetry.contextWindow)}（${(telemetry.contextUsagePercent ?? 0).toFixed(1)}%）`"
+                    >
+                        <svg viewBox="0 0 36 36" class="context-ring-svg">
+                            <circle class="ring-track" cx="18" cy="18" r="15.9155" />
+                            <circle
+                                class="ring-fill"
+                                cx="18" cy="18" r="15.9155"
+                                :stroke-dasharray="`${Math.min(100, telemetry.contextUsagePercent ?? 0)} 100`"
+                            />
+                        </svg>
+                        <span class="ring-pct">{{ Math.round(telemetry.contextUsagePercent ?? 0) }}%</span>
+                    </div>
                     <button v-if="isRunning" class="stop-control" type="button" :disabled="stopRequested" @click="$emit('stop')">{{ stopRequested ? '停止中' : '停止' }}</button>
                     
                     <!-- 运行中模式切换：立即打断 vs 排队执行 -->

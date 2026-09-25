@@ -94,8 +94,17 @@
         <div class="card-header">
           <div class="plugin-icon" :class="{ active: p.enabled }">{{ p.name.charAt(0).toUpperCase() }}</div>
           <div class="plugin-info">
-            <h3>{{ p.name }}</h3>
+            <h3>
+              {{ p.name }}
+              <span
+                class="status-dot"
+                :class="catalogOf(p.name)?.cached ? 'ok' : 'idle'"
+                :title="catalogOf(p.name)?.cached ? `目录已握手缓存：${catalogOf(p.name).tool_count} 个工具` : '尚未握手过——点击刷新连接实拉工具目录'"
+              ></span>
+              <span v-if="catalogOf(p.name)?.cached" class="tool-count-badge">{{ catalogOf(p.name).tool_count }} 工具</span>
+            </h3>
             <code class="cmd-snippet">{{ p.command }} {{ p.args.join(' ') }}</code>
+            <p v-if="refreshError[p.name]" class="refresh-error">⚠️ {{ refreshError[p.name] }}</p>
           </div>
           <label class="toggle-switch">
             <input type="checkbox" :checked="p.enabled" @change="togglePlugin(p.name, !p.enabled)">
@@ -120,6 +129,9 @@
         <div class="card-footer">
           <span class="created-at">{{ formatDate(p.created_at) }}</span>
           <div class="footer-actions">
+            <button class="text-btn" :disabled="refreshingName === p.name" @click="refreshConnection(p.name)">
+              {{ refreshingName === p.name ? '⏳' : '🔄' }} 连接
+            </button>
             <button class="text-btn" @click="openEditPlugin(p)">编辑/提炼</button>
             <button class="delete-btn" @click="confirmDelete(p.name)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
@@ -603,6 +615,9 @@ const generatingMcpCard = ref(false);
 const refInstalling = ref(false);
 const refForm = ref({ reference: '' });
 const refResult = ref(null);
+const catalogMap = ref({});
+const refreshError = ref({});
+const refreshingName = ref('');
 
 const quickForm = ref({
   name: '',
@@ -769,8 +784,27 @@ const loadAllModels = async () => {
 const loadPlugins = async () => {
   try {
     plugins.value = await invoke('get_mcp_plugins');
+    // 目录状态合入（工具数/是否握手缓存过——不 spawn，零成本）
+    const catalogs = await invoke('get_mcp_tool_catalog', { name: null });
+    const map = {};
+    for (const c of catalogs || []) map[c.name] = c;
+    catalogMap.value = map;
   } catch (err) {
     console.error('加载插件失败:', err);
+  }
+};
+
+const catalogOf = (name) => catalogMap.value[name] || null;
+const refreshConnection = async (name) => {
+  refreshingName.value = name;
+  refreshError.value = { ...refreshError.value, [name]: '' };
+  try {
+    const updated = await invoke('refresh_mcp_plugin_connection', { name });
+    catalogMap.value = { ...catalogMap.value, [name]: updated };
+  } catch (err) {
+    refreshError.value = { ...refreshError.value, [name]: String(err) };
+  } finally {
+    refreshingName.value = '';
   }
 };
 
@@ -1791,4 +1825,17 @@ select option { background-color: #18181b !important; color: #f4f4f5 !important;
 .instruction-modal { max-width: 580px; }
 .instruction-modal textarea { min-height: 120px; }
 .plugin-modal { max-width: 580px; }
+
+.status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-left:6px; vertical-align:middle; }
+.status-dot.ok { background:#4ade80; box-shadow:0 0 4px rgba(74,222,128,.5); }
+.status-dot.idle { background:#71717a; }
+.tool-count-badge { font-size:10px; color:#4ade80; background:rgba(74,222,128,.12); padding:1px 6px; border-radius:8px; margin-left:6px; font-weight:600; }
+.refresh-error { font-size:11px; color:#f87171; margin:4px 0 0; }
+
+.status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-left:6px; vertical-align:middle; }
+.status-dot.ok { background:#4ade80; box-shadow:0 0 4px rgba(74,222,128,.5); }
+.status-dot.idle { background:#71717a; }
+.tool-count-badge { font-size:10px; color:#4ade80; background:rgba(74,222,128,.12); padding:1px 6px; border-radius:8px; margin-left:6px; font-weight:600; }
+.refresh-error { font-size:11px; color:#f87171; margin:4px 0 0; }
 </style>
+
