@@ -167,14 +167,31 @@ pub(super) async fn dispatch_wait_jobs(
                         ctx.state.inner(),
                         ctx.parent_run_id,
                     ) {
+                        // 未完成待办数是纯事实披露：有可并行工作时干等是浪费，
+                        // 没有可做的时等待本身合理——数字摆出来由模型判断。
+                        let open_todos = ctx
+                            .context
+                            .todo_list
+                            .iter()
+                            .filter(|t| t.status == "pending" || t.status == "in_progress")
+                            .count();
+                        let todo_hint = if open_todos > 0 {
+                            format!("（当前另有 {} 项未完成待办可并行推进）", open_todos)
+                        } else {
+                            String::new()
+                        };
                         if streak > 0 {
                             out.push_str(&format!(
-                                "等待结束：仍有后台任务在运行中（本次为第 {} 次连等同一批任务，窗口已自适应扩至 {}s）。可再次 wait_jobs 挂起等待，或先推进其他独立操作（结论产出后会自动注入）。",
+                                "等待结束：仍有后台任务在运行中（本次为第 {} 次连等同一批任务，窗口已自适应扩至 {}s）{}。可再次 wait_jobs 挂起等待，或先推进其他独立操作（结论产出后会自动注入）。",
                                 streak + 1,
-                                effective_timeout
+                                effective_timeout,
+                                todo_hint
                             ));
                         } else {
-                            out.push_str("等待结束：仍有后台任务在运行中，本次等待窗口内无新完成。可再次 wait_jobs 挂起等待，或先推进其他独立操作（结论产出后会自动注入）。");
+                            out.push_str(&format!(
+                                "等待结束：仍有后台任务在运行中，本次等待窗口内无新完成{}。可再次 wait_jobs 挂起等待，或先推进其他独立操作（结论产出后会自动注入）。",
+                                todo_hint
+                            ));
                         }
                     } else if crate::agent::child_reviewer::has_pending_review_results(
                         ctx.state.inner(),

@@ -51,9 +51,23 @@ pub async fn handle_submit_plan(
     }
     // DB 在途守卫：崩溃孤儿行（spawn 成功但批次未注册）也要挡住重复提交
     if crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id) {
+        // 披露可并行路径而非只指 wait_jobs：子任务结论产出后主循环自动注入，
+        // 有未完成待办时干等是纯烧 token（实测单场 21 次串行轮询）。
+        let open_todos = context
+            .todo_list
+            .iter()
+            .filter(|t| t.status == "pending" || t.status == "in_progress")
+            .count();
+        let parallel_hint = if open_todos > 0 {
+            format!("当前还有 {} 项未完成待办可并行推进；", open_todos)
+        } else {
+            String::new()
+        };
         return reject(
-            "【⚠️ submit_plan 已拒绝】仍有子任务在后台运行。请先调用 wait_jobs 收取结论后再决定是否需要新一轮评审。"
-                .to_string(),
+            format!(
+                "【⚠️ submit_plan 已拒绝】仍有子任务在后台运行。{}子任务结论产出后会自动注入上下文——可先推进独立工作，或调用 wait_jobs 挂起等待收取结论。",
+                parallel_hint
+            ),
             "plan_liveness:submit_plan_in_flight",
         );
     }
