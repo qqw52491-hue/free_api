@@ -47,6 +47,42 @@ function extractPaths(text) {
   return found;
 }
 
+// --base-tests：对每个唯一 base_commit 建 worktree 实跑测试套件——
+// base 自带红测试会让「全量测试」义务结构性死锁（phantom_steps 实测：
+// base 1485a3b 的 retrieval/mod.rs:1641 裸跑就红，finish 门禁 4 连拦）。
+// 贵（每 base 一次编译）所以默认关，按需跑。
+if (process.argv.includes("--base-tests")) {
+  const commits = new Set();
+  for (const f of readdirSync(CASE_DIR).filter((f) => f.endsWith(".json"))) {
+    const def = JSON.parse(readFileSync(join(CASE_DIR, f), "utf8"));
+    if (def.base_commit) commits.add(def.base_commit);
+  }
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  let red = 0;
+  for (const commit of commits) {
+    const wt = mkdtempSync(join(tmpdir(), "case-base-test-"));
+    try {
+      execSync(`git worktree add --detach -f "${wt}" ${commit}`, { cwd: ROOT, stdio: "pipe" });
+      const res = execSync(
+        `cd "${join(wt, "src-tauri")}" && cargo test --lib 2>&1 | tail -3`,
+        { encoding: "utf8", timeout: 600000 }
+      );
+      const ok = /test result: ok\./.test(res);
+      console.log(`${ok ? "🟢" : "🔴"} ${commit.slice(0, 10)}: ${res.trim().split("\n").pop()}`);
+      if (!ok) red++;
+    } catch (e) {
+      red++;
+      console.log(`🔴 ${commit.slice(0, 10)}: 测试套件崩溃/超时——${String(e.message).slice(0, 120)}`);
+    } finally {
+      try { execSync(`git worktree remove --force "${wt}"`, { cwd: ROOT, stdio: "pipe" }); } catch {}
+      try { rmSync(wt, { recursive: true, force: true }); } catch {}
+    }
+  }
+  console.log(`\n${commits.size} 个唯一 base 检查完毕，${red} 个自带红测试`);
+  process.exit(red ? 1 : 0);
+}
+
 let bad = 0;
 let checked = 0;
 for (const f of readdirSync(CASE_DIR).filter((f) => f.endsWith(".json"))) {

@@ -177,7 +177,7 @@ pub fn prefer_cross_family_reviewer(
 /// 近 30 分钟内派发失败的模型集合——enabled=1 不代表平台可达，
 /// request_or_stream 失败的模型就是"平台已死"的实证，优选与故障转移必须跳过，
 /// 否则会反复选中同一批死平台模型烧光审查预算（goal_anchor 实弹踩过）。
-fn recently_failed_models(conn: &rusqlite::Connection) -> std::collections::BTreeSet<String> {
+pub(crate) fn recently_failed_models(conn: &rusqlite::Connection) -> std::collections::BTreeSet<String> {
     let Ok(mut stmt) = conn.prepare(
         "SELECT DISTINCT model_id FROM agent_child_runs
          WHERE status = 'failed' AND started_at > datetime('now', '-30 minutes')",
