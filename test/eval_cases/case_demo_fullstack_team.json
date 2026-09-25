@@ -1,0 +1,16 @@
+{
+  "id": "case_demo_fullstack_team",
+  "title": "模拟项目：前后端分离 TODO CRUD（领域分工实弹观察）",
+  "tier": "gold",
+  "judge_kind": "command",
+  "expected_exit_code": 0,
+  "baseline_expectation": "red",
+  "max_steps": 90,
+  "plan_mode": "off",
+  "max_prompt_tokens": 3000000,
+  "judge_semantics": "复杂度足够分工的绿野题：后端 4 端点+JSON 文件持久化，前端列表/新增/切换/删除/过滤。判据核联通性（4 端点可用+前端引用接口）。观察点（非判据）：模型是否主动派发领域工兵、是否选对角色卡（backend_writer/frontend_writer）、交接上下文是否带契约、step_budget 是否被合理使用、收尾集成验证是否真实执行。",
+  "problem_statement": "【从零搭建小项目】在工作区内 demo_app/ 目录建一个前后端分离 TODO 应用，规模约 6-8 个文件：\n\n后端 `demo_app/backend/`（纯 Node 内置模块，禁引依赖，监听 8787）：\n- `server.js`：路由 `GET /api/todos`、`POST /api/todos`（body {title}，校验非空，返回新项 201）、`PATCH /api/todos/:id`（切换 done）、`DELETE /api/todos/:id`；项结构固定 `{\"id\": 数, \"title\": \"...\", \"done\": 布尔}`；预置 3 条示例数据\n- `store.js`：数据落盘 `demo_app/backend/db.json`（读入/写回，启动时若无文件用预置数据初始化）\n\n前端 `demo_app/frontend/`（纯静态，无框架）：\n- `index.html` + `app.js` + `style.css`：列表渲染（显示 title+完成态样式区分）、新增表单、点击切换完成、删除按钮、过滤（全部/未完成/已完成）；全部走 `http://localhost:8787/api/todos`\n\n接口契约由后端先定、前端照实消费。完成后必须自验：起服务后 curl 覆盖 4 个端点各至少一次确认联通，再交付。",
+  "base_commit": "HEAD",
+  "verify_command": "node test/eval_cases/fixtures/fullstack_team/judge.mjs",
+  "test_patch": "test/eval_cases/patches/case_demo_fullstack_team.test.patch"
+}

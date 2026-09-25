@@ -140,3 +140,4 @@ node scripts/eval_runner.mjs --case <case> --live --model <id>  # 实弹评测
 
 评测基建：`test/eval_cases/`（考题+机械判据），报告落 `agent_evaluations/`。
 改 agent 行为后先用评测说话，不靠"看起来更合理"。
+| 2026-09-26 | demo_fullstack_split PASS（16 步直写）+ demo_fullstack_team FAIL（16 步，模型把后端改成 .cjs 违犯题面钉死文件名——判据拦规格偏离合法） | **分工主动性实测**：两道小到中等绿野题模型均判"太小不值派"自写——child_writer 机制通但主动性阈值比预想高；spec 钉死文件名被改=.cjs 时判据拦下是对的不是过窄 | 机制不动；领域卡已种（backend_writer→glm-5.2 / frontend_writer→flash-high）待大题验证主动分工 |

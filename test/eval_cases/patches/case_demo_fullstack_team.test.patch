@@ -1,0 +1,48 @@
+diff --git a/test/eval_cases/fixtures/fullstack_team/judge.mjs b/test/eval_cases/fixtures/fullstack_team/judge.mjs
+new file mode 100644
+index 0000000..752bb05
+--- /dev/null
++++ b/test/eval_cases/fixtures/fullstack_team/judge.mjs
+@@ -0,0 +1,42 @@
++// 判据：demo_app TODO CRUD——4 端点联通 + 前端引用接口
++import { spawn } from 'node:child_process';
++import fs from 'node:fs';
++
++const fails = [];
++for (const p of ['demo_app/backend/server.js','demo_app/backend/store.js','demo_app/frontend/index.html','demo_app/frontend/app.js']) {
++  if (!fs.existsSync(p)) fails.push(`${p} 缺失`);
++}
++if (fs.existsSync('demo_app/frontend/app.js')) {
++  const src = fs.readFileSync('demo_app/frontend/app.js','utf8');
++  if (!/api\/todos/.test(src)) fails.push('前端未引用 /api/todos');
++}
++if (fs.existsSync('demo_app/backend/server.js')) {
++  const srv = spawn('node', ['demo_app/backend/server.js'], { stdio: 'pipe', cwd: 'demo_app/backend' });
++  let srvLog=''; srv.stderr.on('data',d=>srvLog+=d); srv.stdout.on('data',d=>srvLog+=d);
++  await new Promise(r=>setTimeout(r,1500));
++  const base='http://127.0.0.1:8787';
++  try {
++    let res = await fetch(base+'/api/todos');
++    let list = await res.json();
++    if (!Array.isArray(list) || list.length<3) fails.push('GET /api/todos 未返回 ≥3 条数组');
++    res = await fetch(base+'/api/todos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'judge_item'})});
++    if (res.status!==200 && res.status!==201) fails.push(`POST /api/todos HTTP ${res.status}`);
++    const created = await res.json().catch(()=>null);
++    const id = created && created.id;
++    if (id===undefined) fails.push('POST 未返回含 id 的新项');
++    else {
++      res = await fetch(`${base}/api/todos/${id}`,{method:'PATCH'});
++      if (!res.ok) fails.push(`PATCH /api/todos/${id} HTTP ${res.status}`);
++      const patched = await res.json().catch(()=>null);
++      if (patched && patched.done===undefined) fails.push('PATCH 响应缺 done 字段');
++      res = await fetch(`${base}/api/todos/${id}`,{method:'DELETE'});
++      if (!res.ok) fails.push(`DELETE /api/todos/${id} HTTP ${res.status}`);
++      res = await fetch(base+'/api/todos');
++      list = await res.json();
++      if (list.some(t=>t.title==='judge_item')) fails.push('DELETE 后项仍存在');
++    }
++  } catch(e) { fails.push('服务不可达: '+e.message+' | '+srvLog.slice(0,300)); }
++  srv.kill();
++}
++if (fails.length) { console.log('JUDGE FAIL:', fails.join(' | ')); process.exit(1); }
++console.log('JUDGE PASS');

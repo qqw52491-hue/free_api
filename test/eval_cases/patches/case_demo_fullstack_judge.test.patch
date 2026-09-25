@@ -1,0 +1,35 @@
+diff --git a/test/eval_cases/fixtures/fullstack_demo/judge.mjs b/test/eval_cases/fixtures/fullstack_demo/judge.mjs
+new file mode 100644
+index 0000000..d6edb7c
+--- /dev/null
++++ b/test/eval_cases/fixtures/fullstack_demo/judge.mjs
+@@ -0,0 +1,29 @@
++// 判据：demo_app 前后端分离 TODO——核产物存在+联通性+契约一致
++import { spawn } from 'node:child_process';
++import fs from 'node:fs';
++
++const fails = [];
++for (const p of ['demo_app/backend/server.js','demo_app/frontend/index.html','demo_app/frontend/app.js']) {
++  if (!fs.existsSync(p)) fails.push(`${p} 缺失`);
++}
++if (fs.existsSync('demo_app/frontend/app.js')) {
++  const src = fs.readFileSync('demo_app/frontend/app.js','utf8');
++  if (!/api\/todos/.test(src)) fails.push('前端 app.js 未引用 /api/todos 接口');
++}
++if (fs.existsSync('demo_app/backend/server.js')) {
++  const srv = spawn('node', ['demo_app/backend/server.js'], { stdio: 'pipe' });
++  let srvLog=''; srv.stderr.on('data',d=>srvLog+=d);
++  await new Promise(r=>setTimeout(r,1500));
++  try {
++    const res = await fetch('http://127.0.0.1:8787/api/todos');
++    if (!res.ok) fails.push(`GET /api/todos HTTP ${res.status}`);
++    else {
++      const j = await res.json();
++      if (!Array.isArray(j) || j.length===0 || j[0].title===undefined || j[0].done===undefined)
++        fails.push('返回不是 [{id,title,done}] 形态的数组');
++    }
++  } catch(e) { fails.push('服务不可达: '+e.message+' | '+srvLog.slice(0,200)); }
++  srv.kill();
++}
++if (fails.length) { console.log('JUDGE FAIL:', fails.join(' | ')); process.exit(1); }
++console.log('JUDGE PASS');

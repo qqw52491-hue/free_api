@@ -1,0 +1,16 @@
+{
+  "id": "case_demo_fullstack_split",
+  "title": "模拟项目：前后端分离 TODO 小应用（多模型分工观察题）",
+  "tier": "silver",
+  "judge_kind": "command",
+  "expected_exit_code": 0,
+  "baseline_expectation": "red",
+  "max_steps": 80,
+  "plan_mode": "off",
+  "max_prompt_tokens": 3000000,
+  "judge_semantics": "绿野新写题（非诊断）：在 demo_app/ 下从零建一个前后端分离 TODO demo。判据只核产物与联通性：后端 server.js 监听 8787 且 GET /api/todos 返回含 title 的 JSON 数组、前端静态页 fetch 该接口渲染。考察派发分工是否按领域拆解（先后端契约、后前端消费）、工兵预算是否合理、交接是否带齐上下文——判据不管内部实现形态。",
+  "problem_statement": "【从零搭建小项目】请在工作区内 demo_app/ 目录下建一个极简前后端分离 TODO demo：\n\n1. 后端 `demo_app/backend/server.js`：用 Node 内置 http 模块（不许引依赖），监听 8787 端口，提供 `GET /api/todos` 返回 JSON 数组，元素形如 `{\"id\": 1, \"title\": \"...\", \"done\": false}`，至少 3 条示例数据。\n2. 前端 `demo_app/frontend/index.html` + `demo_app/frontend/app.js`：静态页面，fetch `/api/todos` 拿到数组后渲染成列表，每条显示 title 和完成状态；样式随意能看就行。\n3. 接口契约（字段名/返回结构）由你定义但必须前后端一致——后端是先产出契约的一方，前端是消费方。\n4. 完成后自验：起服务 curl 一下 `/api/todos` 确认返回 JSON 数组再交付。",
+  "base_commit": "HEAD",
+  "test_patch": "test/eval_cases/patches/case_demo_fullstack_judge.test.patch",
+  "verify_command": "node test/eval_cases/fixtures/fullstack_demo/judge.mjs"
+}
