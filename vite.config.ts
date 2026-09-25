@@ -25,8 +25,8 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri` and writer workspace copies
-      ignored: ["**/src-tauri/**", "**/.writer-*/**"],
+      // 3. tell Vite to ignore watching `src-tauri`, eval worktrees/reports and writer workspace copies
+      ignored: ["**/src-tauri/**", "**/.writer-*/**", "**/test-artifacts/**", "**/agent_evaluations/**"],
     },
   },
   build: {
