@@ -135,6 +135,66 @@ pub async fn run_call_llm_and_run_tool_phases(
         .shell_probe_pre_dirty_paths
         .as_ref()
         .map(|p| p.len() as u32);
+    context.shell_probe_pre_head = crate::agent::review_tools::git_head_sha(workspace_dir);
+    context.shell_probe_pre_stash_count =
+        crate::agent::review_tools::git_stash_count(workspace_dir);
+
+    // 步骤间对账：本 session 写入的文件在上一步快照之间是否还在——
+    // porcelain 差值只看步骤内，跨步骤被外部删/还原的文件只能靠「台账期望 vs
+    // 文件系统实测」抓（别的 agent/用户手动动了我的工作区）。
+    if !context.written_file_digests.is_empty() {
+        let mut tampered: Vec<String> = Vec::new();
+        let mut committed_out: Vec<String> = Vec::new();
+        let mut external_modified: Vec<String> = Vec::new();
+        for (rel, sha) in context.written_file_digests.iter() {
+            let cur = crate::agent::review_tools::git_worktree_blob(workspace_dir, rel);
+            match cur {
+                // 文件消失：看 HEAD 是否已持有该内容指纹——是 = 被提交收走（合法，
+                // 内容可经 git show 取回），否 = 被删除（未提交内容真实蒸发）
+                None => {
+                    if crate::agent::review_tools::git_head_blob(workspace_dir, rel)
+                        .is_some_and(|h| &h == sha)
+                    {
+                        committed_out.push(rel.clone());
+                    } else {
+                        tampered.push(rel.clone());
+                    }
+                }
+                Some(c) if &c == sha => {}
+                // 内容变了：已是 HEAD 版本 = 被还原（未提交增量蒸发）；否则外部修改
+                // （协作常态，仅换指纹基线不报警）
+                Some(c) => {
+                    if crate::agent::review_tools::git_head_blob(workspace_dir, rel)
+                        .is_some_and(|h| h == c)
+                    {
+                        tampered.push(rel.clone());
+                    } else {
+                        external_modified.push(rel.clone());
+                    }
+                }
+            }
+        }
+        for rel in committed_out {
+            context.written_file_digests.remove(&rel);
+        }
+        for rel in external_modified {
+            if let Some(c) = crate::agent::review_tools::git_worktree_blob(workspace_dir, &rel) {
+                context.written_file_digests.insert(rel, c);
+            }
+        }
+        if !tampered.is_empty() {
+            let msg = format!(
+                "⚠️ 本 session 写入的文件被外部销毁（删除或还原为 HEAD）：{}。\
+                 若非本人操作请核对并发进程/其他 agent；内容无提交副本，已不可经 git 找回。",
+                tampered.join(", ")
+            );
+            app.emit(&format!("agent-log-{}", final_session_id), msg.clone()).ok();
+            context.git_dirty_lost.push(format!(
+                "step{step_id} 步骤间对账: 本 session 写入文件被外部销毁: {}",
+                tampered.join(", ")
+            ));
+        }
+    }
     // 状态卡遥测的步号口径：与 run_trace 步骤 id / 取证台账 / 避坑台账同基准。
     context.current_step_id = step_id;
     let mut retry_count = 0;

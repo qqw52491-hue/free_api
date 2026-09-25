@@ -869,10 +869,16 @@
         assert!(!cp.is_git_destructive_confirmed(fp));
         assert_eq!(cp.git_destructive_pending.len(), 1); // 未问到的 pending 保留
 
-        // 3. 问题原文引用命令 + 非拒绝回复 → 核销
+        // 3. 问题原文引用命令 + 明确同意 → 核销；反问/非表态回复不算确认
         cp.git_destructive_mark_asked("需要执行 `git checkout -- scripts/eval_runner.mjs` 清理无关改动，可以吗？");
         assert_eq!(cp.git_destructive_asked.len(), 1);
-        let n = cp.git_destructive_resolve_reply("可以");
+        let n = cp.git_destructive_resolve_reply("为什么要删这个文件？");
+        assert_eq!(n, 0);
+        assert!(!cp.is_git_destructive_confirmed(fp));
+        assert_eq!(cp.git_destructive_pending.len(), 1); // 未表态 → 仍 pending
+        // 再问一次（问题原文引用）+ 明确同意 → 核销
+        cp.git_destructive_mark_asked("需要执行 `git checkout -- scripts/eval_runner.mjs`，请确认");
+        let n = cp.git_destructive_resolve_reply("可以，删吧");
         assert_eq!(n, 1);
         assert!(cp.is_git_destructive_confirmed(fp));
         assert!(cp.git_destructive_pending.is_empty());

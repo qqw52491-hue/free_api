@@ -1524,9 +1524,10 @@ async fn run_agent_main_loop_in_workspace_inner(
                     if !touched.is_empty() {
                         context.shell_touched_paths = touched;
                     }
-                    // 反向差值：曾脏现净 = 未提交内容本步消失。commit/stash 属合法
-                    // 消失，破坏类（checkout --/clean/任意脚本删）同样现形于此——
-                    // 枚举防不住的面由「消失必入账」兜底，合法与否归审查语义判。
+                    // 反向差值：曾脏现净 = 未提交内容本步消失。消失≠销毁——
+                    // commit 收走（HEAD 含同内容指纹）与 stash 收纳（stash 数增长）
+                    // 是合法消失；还原/删除才是真蒸发。分类靠 HEAD/指纹实测，
+                    // 不归模型自报。
                     let lost: Vec<String> = pre_paths
                         .iter()
                         .filter(|p| !post_list.iter().any(|x| x == *p))
@@ -1534,23 +1535,59 @@ async fn run_agent_main_loop_in_workspace_inner(
                         .collect();
                     if !lost.is_empty() {
                         let tool = instruction.get_tool();
+                        let post_head = crate::agent::review_tools::git_head_sha(&workspace_dir);
+                        let post_stash =
+                            crate::agent::review_tools::git_stash_count(&workspace_dir);
+                        let head_moved = match (&context.shell_probe_pre_head, &post_head) {
+                            (Some(a), Some(b)) => a != b,
+                            _ => false,
+                        };
+                        let stash_grew = match (
+                            context.shell_probe_pre_stash_count,
+                            post_stash,
+                        ) {
+                            (Some(a), Some(b)) => b > a,
+                            _ => false,
+                        };
                         for p in &lost {
-                            checkpoint.git_dirty_lost.push(format!(
-                                "step{step_id} [{tool}]: {p} 未提交内容消失"
+                            let mine = context.written_file_digests.get(p).cloned();
+                            let head_has = crate::agent::review_tools::git_head_blob(
+                                &workspace_dir,
+                                p,
+                            );
+                            let (tag, loud) = match mine {
+                                // 我写的消失了：HEAD 持有同指纹 = 被提交（合法，
+                                // 内容可从 HEAD 取回）；否则 = 被删/被还原（蒸发）
+                                Some(sha) if head_has.as_deref() == Some(sha.as_str()) => {
+                                    ("committed".to_string(), false)
+                                }
+                                Some(_) => ("destroyed_mine".to_string(), true),
+                                None if head_moved => ("committed_or_staged".to_string(), false),
+                                None if stash_grew => ("stashed".to_string(), false),
+                                None => ("destroyed_foreign".to_string(), true),
+                            };
+                            context.git_dirty_lost.push(format!(
+                                "step{step_id} [{tool}] {p} -> {tag}"
                             ));
+                            if loud {
+                                app.emit(
+                                    &format!("agent-log-{}", final_session_id),
+                                    format!(
+                                        "⚠️ 未提交内容消失: {p}（{}）",
+                                        if tag == "destroyed_mine" {
+                                            "本 session 写入，无提交副本"
+                                        } else {
+                                            "外来未提交改动，非 commit/stash 途径"
+                                        }
+                                    ),
+                                )
+                                .ok();
+                            }
                         }
-                        if checkpoint.git_dirty_lost.len() > 20 {
-                            let overflow = checkpoint.git_dirty_lost.len() - 20;
-                            checkpoint.git_dirty_lost.drain(0..overflow);
+                        if context.git_dirty_lost.len() > 20 {
+                            let overflow = context.git_dirty_lost.len() - 20;
+                            context.git_dirty_lost.drain(0..overflow);
                         }
-                        app.emit(
-                            &format!("agent-log-{}", final_session_id),
-                            format!(
-                                "⚠️ 本步骤未提交内容消失: {}（commit/stash 属合法消失；其余请核对）",
-                                lost.join(", ")
-                            ),
-                        )
-                        .ok();
                     }
                 }
                 // 非 git 环境：按本步骤是否为写类指令保守计 1（但排除 session_tmp 草稿写入）
@@ -2829,6 +2866,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 &result,
                 &app,
                 &final_session_id,
+                &workspace_dir,
             );
 
         context.current_observation = output_text.clone();

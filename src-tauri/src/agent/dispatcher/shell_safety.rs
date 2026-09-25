@@ -292,7 +292,10 @@ pub fn is_destructive_shell_command(raw_cmd: &str) -> bool {
 pub enum GitDestructiveVerdict {
     /// 非 git 破坏命令
     NotDestructive,
-    /// 无显式路径目标（reset --hard / clean / stash drop·pop·clear /
+    /// 变更型但不销毁既有内容（git stash pop/apply）：归写操作入账，
+    /// 但不需要人工确认——pop 冲突时 git 拒绝并保留 stash，无静默销毁面。
+    SideEffect,
+    /// 无显式路径目标（reset --hard / clean / stash drop·clear /
     /// push -f / branch -D / checkout . / checkout *）——影响面无法按
     /// 路径界定，一律需要人工确认。
     Pathless,
@@ -435,8 +438,11 @@ pub fn git_destructive_review(cmd: &str) -> GitDestructiveVerdict {
                 }
             }
             "stash" => {
-                if tokens.iter().skip(2).any(|t| matches!(t.as_str(), "drop" | "clear" | "pop")) {
+                if tokens.iter().skip(2).any(|t| matches!(t.as_str(), "drop" | "clear")) {
                     return GitDestructiveVerdict::Pathless;
+                }
+                if tokens.iter().skip(2).any(|t| matches!(t.as_str(), "pop" | "apply")) {
+                    return GitDestructiveVerdict::SideEffect;
                 }
             }
             _ => {}

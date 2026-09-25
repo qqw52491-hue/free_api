@@ -206,6 +206,25 @@ pub async fn evaluate_finish_diff(
         ));
     }
 
+    // 未提交内容消失台账：步骤间 porcelain 差值「曾脏现净」——消失≠销毁
+    // （committed/stashed 已机械分类为合法），destroyed_* 条目需终审判语义。
+    // 枚举式防拦追不完的破坏路径在此留痕，审查不得静默略过。
+    if !context.git_dirty_lost.is_empty() {
+        let flagged: Vec<&String> = context
+            .git_dirty_lost
+            .iter()
+            .filter(|l| l.contains("destroyed_"))
+            .collect();
+        if !flagged.is_empty() {
+            review_material.push_str(
+                "\n\n【未提交内容消失台账（破坏性嫌疑，须逐条说明）】\n",
+            );
+            for l in flagged {
+                review_material.push_str(&format!("- {}\n", l));
+            }
+        }
+    }
+
     // 门禁适用域交接：机械门因证据域不存在而跳过的检查项绝不静默——
     // 终审是语义层，须直接核验这些项对应的语义证据（命令退出码、终端输出、
     // API 响应、系统状态），而不是依赖不存在的 diff 对账结果。

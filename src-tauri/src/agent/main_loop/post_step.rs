@@ -89,6 +89,7 @@ pub(crate) fn record_side_effect_or_verify(
     result: &DispatchResult,
     app: &AppHandle,
     final_session_id: &str,
+    workspace_dir: &std::path::Path,
 ) {
     let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
         && crate::agent::tools::local_file::is_dispatch_result_tmp(result);
@@ -126,6 +127,27 @@ pub(crate) fn record_side_effect_or_verify(
             }
             paths
         };
+        // 内容指纹入账：写入时刻的 git blob sha。供「我写的被删/还原/提交」
+        // 判定——porcelain 只报脏净，分不清 commit 与 revert，必须比内容。
+        for p in &affected_paths {
+            let rel = {
+                let path = std::path::Path::new(p);
+                if path.is_absolute() {
+                    path.strip_prefix(workspace_dir)
+                        .ok()
+                        .map(|r| r.to_string_lossy().to_string())
+                } else {
+                    Some(p.clone())
+                }
+            };
+            if let Some(rel) = rel {
+                if let Some(sha) =
+                    crate::agent::review_tools::git_worktree_blob(workspace_dir, &rel)
+                {
+                    context.written_file_digests.insert(rel, sha);
+                }
+            }
+        }
         context.record_side_effect_with_paths(
             step_id,
             instruction.get_tool(),

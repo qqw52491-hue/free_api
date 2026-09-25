@@ -46,6 +46,8 @@ pub(super) async fn dispatch_local_tool(
                     let fp = git_cmd_fingerprint(&cmd_str);
                     let mut foreign_reason: Option<String> = None;
                     match &verdict {
+                        // 变更型但不销毁（stash pop/apply）：入账即可，不请人
+                        GitDestructiveVerdict::SideEffect => {}
                         GitDestructiveVerdict::Pathless => {
                             foreign_reason = Some(
                                 "无显式路径目标，影响面无法按台账界定（整树/历史/远端）"

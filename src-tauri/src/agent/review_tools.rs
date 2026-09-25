@@ -256,6 +256,69 @@ pub fn git_dirty_file_paths(cwd: &Path) -> Option<Vec<String>> {
     )
 }
 
+/// 当前 HEAD commit sha（消失分类基准：HEAD 前移 = 本步发生 commit）。
+pub fn git_head_sha(cwd: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// HEAD:<rel> 的 blob sha——文件在 HEAD 不存在时返回 None。
+/// 与 git hash-object 的工作区指纹同口径，可证明「内容是否被 commit 收走」。
+pub fn git_head_blob(cwd: &Path, rel: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", &format!("HEAD:{rel}")])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// stash 条数（消失分类基准：stash 增长 = 本步发生 stash 收纳）。
+pub fn git_stash_count(cwd: &Path) -> Option<usize> {
+    let out = Command::new("git")
+        .args(["stash", "list"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count(),
+    )
+}
+
+/// 文件当前内容对应的 git blob sha（与 HEAD:<rel> 产物同口径可比对）。
+/// 文件不存在或命令失败返回 None。
+pub fn git_worktree_blob(cwd: &Path, rel: &str) -> Option<String> {
+    let abs = cwd.join(rel);
+    if !abs.exists() {
+        return None;
+    }
+    let out = Command::new("git")
+        .args(["hash-object", rel])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// git 脏文件探针：统计工作区当前变更/未跟踪文件数（shell 前后各测一次，差值即本次
 /// shell 真实改动的文件数）。非 git 目录返回 None（调用方退化为按调用次数计 1）。
 pub fn git_dirty_file_count(workspace: &Path) -> Option<u32> {

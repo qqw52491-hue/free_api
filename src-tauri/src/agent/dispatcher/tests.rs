@@ -529,7 +529,7 @@
             "git push --force-with-lease",
             "git branch -D feat",
             "git stash drop",
-            "git stash pop",
+            "git stash clear",
         ] {
             assert_eq!(
                 git_destructive_review(cmd),
@@ -537,6 +537,16 @@
                 "{cmd} 应判定 Pathless"
             );
         }
+
+        // 变更但不销毁（pop/apply 冲突时 git 自护）→ SideEffect：入账不请人
+        assert_eq!(
+            git_destructive_review("git stash pop"),
+            GitDestructiveVerdict::SideEffect
+        );
+        assert_eq!(
+            git_destructive_review("git stash apply stash@{1}"),
+            GitDestructiveVerdict::SideEffect
+        );
 
         // 歧义/非破坏/试运行 → NotDestructive
         for cmd in [

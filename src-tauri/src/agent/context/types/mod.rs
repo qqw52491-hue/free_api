@@ -253,9 +253,24 @@ pub struct SandwichContext {
     /// 供副作用台账 affected_paths 入账（shell 参数里没有 path 字段，提不出路径）。
     #[serde(default)]
     pub shell_probe_pre_dirty_paths: Option<Vec<String>>,
+    /// 同探针快照：步骤开始前的 HEAD sha 与 stash 条数——
+    /// 「曾脏现净」消失分类的事实基准（HEAD 前移=疑似被提交；stash 增长=疑似被收纳）。
+    #[serde(default)]
+    pub shell_probe_pre_head: Option<String>,
+    #[serde(default)]
+    pub shell_probe_pre_stash_count: Option<usize>,
     /// 上一步 shell 触碰出的新增脏文件（post−pre 差集），record_side_effect 消费后清空。
     #[serde(default)]
     pub shell_touched_paths: Vec<String>,
+    /// 本 session 写入文件的内容指纹台账：工作区相对路径 → 写入时刻 git blob sha。
+    /// 「我写的被删/还原」与「被提交」的区分必须比内容——porcelain 只看脏净。
+    #[serde(default)]
+    pub written_file_digests: std::collections::BTreeMap<String, String>,
+    /// 检测层台账：「曾脏现净」事件（未提交内容消失），带分类标签
+    /// （committed/stashed/reverted/deleted/unknown）。合法消失与破坏在
+    /// 事实层靠 HEAD/内容指纹区分；仍存疑的进台账归审查语义判。
+    #[serde(default)]
+    pub git_dirty_lost: Vec<String>,
     /// 本次运行从之前任务继承的副作用数量（用于区分本轮是否有新增副作用）
     #[serde(default)]
     pub inherited_side_effects_count: usize,
@@ -405,7 +420,11 @@ impl SandwichContext {
             side_effects: Vec::new(),
             shell_probe_pre_dirty: None,
             shell_probe_pre_dirty_paths: None,
+            shell_probe_pre_head: None,
+            shell_probe_pre_stash_count: None,
             shell_touched_paths: Vec::new(),
+            written_file_digests: std::collections::BTreeMap::new(),
+            git_dirty_lost: Vec::new(),
             inherited_side_effects_count: 0,
             todo_list: Vec::new(),
             review_contract: None,

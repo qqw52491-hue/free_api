@@ -213,8 +213,20 @@ impl AgentCheckpoint {
             .iter()
             .any(|w| lower.contains(w));
         if rejected {
+            // 明确拒绝 → 死单移除（重发会重新挂起登记）
             self.git_destructive_pending
                 .retain(|fp| !asked.iter().any(|a| a == fp));
+            return 0;
+        }
+        // 破坏操作要求「明确同意」：非拒绝≠同意——反问、闲聊、复读命令
+        // 都不构成确认。无肯定词时保持 pending（agent 重发仍被拦，需再问）。
+        let affirmative = [
+            "确认", "可以", "同意", "批准", "放行", "执行", "删吧", "动手",
+            "yes", "ok", "proceed", "approve", "go ahead",
+        ]
+        .iter()
+        .any(|w| lower.contains(w));
+        if !affirmative {
             return 0;
         }
         let mut confirmed = 0;
