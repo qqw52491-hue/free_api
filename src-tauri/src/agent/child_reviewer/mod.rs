@@ -268,19 +268,21 @@ pub async fn spawn_child_reviewer(
                 });
             }
             if is_plan_review {
-                for (name, ft, desc) in [
-                    ("revised_plan_summary", crate::agent::protocol::ContractFieldType::String, "方案定稿：修订后的方案摘要（无需修订则省略）"),
-                    ("revised_root_cause", crate::agent::protocol::ContractFieldType::String, "方案定稿：修订后的根因定性（无需修订则省略）"),
-                    ("revised_target_files", crate::agent::protocol::ContractFieldType::StringArray, "方案定稿：修订后的目标文件清单（无需修订则省略）"),
-                    ("revised_verification", crate::agent::protocol::ContractFieldType::String, "方案定稿：修订后的验证方式（无需修订则省略）"),
-                    ("root_cause_verdict", crate::agent::protocol::ContractFieldType::String, "病根核对：题面症状能否被该根因解释（explains|insufficient|na）"),
+                for (name, ft, desc, required) in [
+                    ("revised_plan_summary", crate::agent::protocol::ContractFieldType::String, "方案定稿：修订后的方案摘要（无需修订则省略）", false),
+                    ("revised_root_cause", crate::agent::protocol::ContractFieldType::String, "方案定稿：修订后的根因定性（无需修订则省略）", false),
+                    ("revised_target_files", crate::agent::protocol::ContractFieldType::StringArray, "方案定稿：修订后的目标文件清单（无需修订则省略）", false),
+                    ("revised_verification", crate::agent::protocol::ContractFieldType::String, "方案定稿：修订后的验证方式（无需修订则省略）", false),
+                    // 病根核对必填：可选字段会被跳过（phantom 场实测缺席），
+                    // 「必须输出裁决」是形态强制，裁决内容仍是审查员语义判断。
+                    ("root_cause_verdict", crate::agent::protocol::ContractFieldType::String, "病根核对：题面症状能否被该根因解释（explains|insufficient|na）", true),
                 ] {
                     if !schema.fields.iter().any(|f| f.name == name) {
                         schema.fields.push(crate::agent::protocol::ContractFieldDef {
                             name: name.to_string(),
                             field_type: ft,
                             description: desc.to_string(),
-                            required: false,
+                            required,
                             allowed_values: None,
                         });
                     }
