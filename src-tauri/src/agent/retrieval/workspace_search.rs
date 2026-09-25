@@ -3,7 +3,10 @@ use serde_json::Value;
 use std::path::Path;
 
 /// 实时代码与文件搜索（避免过期快照；必须显式传入检索目录，由调用方校验）
-/// 返回 (命中列表, 是否因正则解析失败降级为字面量匹配)。
+/// 返回 (命中列表, 是否因正则解析失败降级为字面量匹配, 是否命中数达上限被截断)。
+/// 截断位必须如实上报——实测教训：找齐调用点/消费点类检索被默认 limit=3
+/// 截断后 total_hits 报"3"冒充完整清单，模型据此漏修残留站点（goal_anchor、
+/// run_binding 两场判红同因）。
 /// 检索目标为单文件时命中自带 ±3 行上下文窗口：模型对"该文件某区块长什么样"
 /// 类问题不再需要换关键词逐行探测（实测单文件曾被换词重搜 45 次）；
 /// 目录级检索职责是定位分布，保持单行命中不膨胀。
@@ -11,16 +14,20 @@ pub fn search_code(
     search_root: &Path,
     query: &str,
     limit: usize,
-) -> Result<(Vec<SearchHit>, bool), String> {
+) -> Result<(Vec<SearchHit>, bool, bool), String> {
     let clean_query = query.trim();
     if clean_query.is_empty() {
-        return Ok((Vec::new(), false));
+        return Ok((Vec::new(), false, false));
     }
 
     let max_hits = limit.min(20);
     let context_lines: usize = if search_root.is_file() { 3 } else { 0 };
 
-    let mut output = run_ripgrep(clean_query, search_root, max_hits, false, context_lines).map_err(|e| {
+    // rg --max-count 是【按文件】上限：单文件命中超限会被 rg 静默截掉，
+    // Rust 层连第 max_hits+1 条都看不到、无法察觉截断——故按文件上限
+    // 传 max_hits+1 做探测哨兵，全局截断位由下方 match_count 计数判定。
+    let probe_hits = max_hits + 1;
+    let mut output = run_ripgrep(clean_query, search_root, probe_hits, false, context_lines).map_err(|e| {
         format!(
             "无法启动 ripgrep (rg)：{}。代码检索依赖系统安装的 rg，历史检索不受影响",
             e
@@ -31,7 +38,7 @@ pub fn search_code(
     // exit=2 是 rg 的用法/正则解析错误：模型常把 fn foo() 这类含元字符的串当查询词。
     // 降级为 -F 字面量匹配重试一次，而不是把原始正则错误原样抛回引发重复失败。
     if !output.status.success() && output.status.code() == Some(2) {
-        output = run_ripgrep(clean_query, search_root, max_hits, true, context_lines).map_err(|e| {
+        output = run_ripgrep(clean_query, search_root, probe_hits, true, context_lines).map_err(|e| {
             format!(
                 "无法启动 ripgrep (rg)：{}。代码检索依赖系统安装的 rg，历史检索不受影响",
                 e
@@ -152,7 +159,7 @@ pub fn search_code(
         });
     }
 
-    Ok((hits, literal_fallback))
+    Ok((hits, literal_fallback, match_count > max_hits))
 }
 
 fn run_ripgrep(

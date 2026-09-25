@@ -277,6 +277,40 @@
         assert!(v["hits"].as_array().unwrap()[0]["path"].is_string());
     }
 
+    /// 截断事实必须如实上报：命中超 limit 时 has_more=true + 附不全清单警告。
+    /// （goal_anchor/run_binding 实测教训：limit=3 截断被 total_hits 冒充完整清单，
+    /// 模型据此漏修残留站点。）
+    #[test]
+    fn test_search_truncation_reports_has_more() {
+        let dir = std::env::temp_dir().join(format!("search-trunc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 单文件 5 处命中 > 默认 limit=3
+        std::fs::write(
+            dir.join("many.rs"),
+            "fn a(){ marker() }\nfn b(){ marker() }\nfn c(){ marker() }\nfn d(){ marker() }\nfn e(){ marker() }\n",
+        )
+        .unwrap();
+        let conn = setup_test_db();
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let res = dispatch_search(
+            &db,
+            "sess-trunc",
+            &json!({"query": "marker", "kinds": ["code"], "path": "."}),
+            Some(&dir),
+        );
+        assert!(res.success, "code 检索应成功: {}", res.stderr);
+        let payload: Value = serde_json::from_str(&res.stdout).unwrap();
+        assert_eq!(payload["has_more"], true, "命中>limit 必须标 has_more");
+        assert_eq!(payload["total_hits"], 3, "total_hits 为返回条数");
+        let notes = payload["notes"].as_array().expect("截断须附提示");
+        assert!(
+            notes.iter().any(|n| n.as_str().unwrap_or("").contains("被截断")),
+            "notes 应含截断警告: {}",
+            res.stdout
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 行表索引路径的测试库：在 setup_test_db 基础上补 run_traces/run_steps/step_logs。
     fn setup_index_db() -> Connection {
         let conn = setup_test_db();

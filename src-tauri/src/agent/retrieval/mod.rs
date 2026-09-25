@@ -730,6 +730,7 @@ pub fn dispatch_search(
     }
 
     let mut code_ok = !wants_code;
+    let mut code_truncated = false;
     let mut resolved_root: Option<String> = None;
     if wants_code {
         match params
@@ -762,7 +763,7 @@ pub fn dispatch_search(
                             .to_string(),
                     );
                     match search_code(&root, &params.query, limit) {
-                        Ok((hits, literal_fallback)) => {
+                        Ok((hits, literal_fallback, truncated)) => {
                             if literal_fallback {
                                 notes.push(
                                     "query 含无效正则（如未转义的 ( 或 {），已自动降级为字面量匹配；如需正则语义请转义元字符"
@@ -770,6 +771,13 @@ pub fn dispatch_search(
                                 );
                             }
                             all_hits.extend(hits);
+                            code_truncated = truncated;
+                            if truncated {
+                                notes.push(format!(
+                                    "⚠️ 命中数已达 limit={} 上限被截断——当前返回的是不完整清单。若目的是找齐全部调用点/消费点/残留实例，请用更大 limit（≤20）或缩窄 path 复核，切勿按当前条数当全集。",
+                                    limit
+                                ));
+                            }
                             code_ok = true;
                         }
                         Err(e) => errors.push(format!("code 检索失败: {}", e)),
@@ -829,6 +837,7 @@ pub fn dispatch_search(
     let mut result_payload = json!({
         "query": params.query,
         "total_hits": all_hits.len(),
+        "has_more": code_truncated,
         "hits": all_hits
     });
     if let Some(root) = resolved_root {
