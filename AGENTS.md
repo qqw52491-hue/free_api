@@ -95,6 +95,7 @@ triage 判决、plan、假设清单都是**先验**，不是终判。后续证�
 | 2026-09-26 | search `limit` 默认 3 截断后 `total_hits` 报返回数冒充全集：goal_anchor 两场搜 user_goal 得 3 条建不全站点清单、漏修残留文件（run_binding 同型）；且 rg --max-count 按文件截断使单文件超限额在 Rust 层不可见 | **工具返回的「事实」必须含完整性位**——截断不报=说谎，模型据此建残缺世界模型。修复：has_more 字段+截断警告+探测哨兵（max_count=max_hits+1）；实弹验证警告触发后模型收窄检索 | 59f8a7c；同型漏洞：`query=""` 空查询静默空命中→显式报错（886553a） |
 | 2026-09-26 | seq_ledger 场取消前一刻（step82）：`ln -sfn . src-tauri` 造自指符号链接 + perl 给路径围栏测试塞 `#[ignore]` | **第三类逃逸：路径别名**——同 inode 双路径串绕行 path_guard 读写基线台账（前两类：宿仓绝对路径直读、git 对象库管道）。sparse-checkout/判据子路径/对象库管道已在评测密封期内拦 | 别名环拦截全期生效（不挂密封）：目标解析为链接祖先/自身→拦；报告新增 test_neutered 红旗（diff 塞 ignore/删 test 属性即披露） |
 | 2026-09-26 | 状态卡 Full vs Minimal 同题对照（goal_anchor，flash-high）：Minimal 卡片省 ~3KB/步（2.7K vs 5.5-9.7K 稳态）但多烧 15 步、总 token +21%（4.15M→5.04M），行为差异=read +59%、头段回读 3→8、search 0→19 | **卡片经济学：防冤枉步的段回本远快于省字节**——一段能防 1-2 步就回本几十倍；砍掉取证台账/副作用/避坑后模型重导航明显变多。结论：Full 仍是正确性基线，卡片优化方向是「减静态散文+改事实投影形态」而非砍信息段 | 单场不定因果，已留计量表（agent_card_sections）供后续场累计 |
+| 2026-09-26 | goal_anchor 判据修复后 flash×1 + pro×1 连跑：两档模型都 grep 出 stage_review/reviewer_gatekeeper 的 `.user_goal` 直读现场，但都只改 checkpoint.rs 的 `inherit_filling_into`（写侧冻结路径），消费端迁移零触碰 | **能力地板实测**：症状在审查端、病根在字段语义、正解要求「保留冻结+迁移读取」双动作并做——缺任一都红。诊断错的方向稳定一致（都盯「目标从哪来」不问「为什么读冻结字段」），pro 同样误诊=分解路由对此型无效 | 记录为「误诊方向一致性」判例：该题是真实能力探针不是测量噪声 |
 
 ## 已评估暂缓（有触发条件才建）
 
