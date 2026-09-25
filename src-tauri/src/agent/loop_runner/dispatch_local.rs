@@ -79,8 +79,9 @@ pub(super) async fn dispatch_local_tool(
                             let stderr = format!(
                                 "【git 破坏命令待人工确认】`{fp}` —— {reason}，执行将销毁\
                                  非本 session 产生的未提交工作。\n确需执行：用 ask_human \
-                                 询问主人，message 中原样包含完整命令 `{fp}`；主人回复未明确\
-                                 拒绝即视为确认，之后原样重发本命令即可放行。主人拒绝或失联\
+                                 询问主人，message 中原样包含完整命令 `{fp}`；主人回复须明确\
+                                 同意（确认/可以/批准/执行），拒绝或未表态均不放行；放行后\
+                                 原样重发本命令即可。主人拒绝或失联\
                                  → 改用非破坏路径（先复制备份再处理，或放弃该操作）。",
                             );
                             emit_tool_event(
