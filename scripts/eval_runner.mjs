@@ -356,8 +356,10 @@ function inspectGitDiff(sandboxPath) {
 
     // porcelain 覆盖全部变更形态——纯 git diff 对未跟踪新文件完全失明，
     // "新建文件"类考题的主产物会被漏报（case_ft_bare_delegate 实测踩中）。
+    // 注意：不能 .trim() 后再 split——trim 会吃掉第一行 `XY ` 状态列的前导空格
+    // （` M` 变 `M `），slice(3) 截掉路径首字符（实测产出 `rc-tauri/...`）。
     const porcelain = execSync(`git status --porcelain=v1 --untracked-files=all`, { cwd: sandboxPath, encoding: 'utf8' })
-      .trim()
+      .replace(/\r\n/g, '\n')
       .split('\n')
       .filter(Boolean);
     const changedFiles = porcelain.map((l) => l.slice(3).trim());
