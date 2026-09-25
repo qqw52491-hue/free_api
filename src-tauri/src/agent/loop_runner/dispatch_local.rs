@@ -318,11 +318,13 @@ fn foreign_git_targets(
         })
         .unwrap_or_else(|| workspace_dir.to_path_buf());
 
-    // session 写入台账（本轮新增）+ 计划核准目标集
+    // session 写入台账（含本 session 前几轮 run 的继承写入——同会话内
+    // 「自己写的可以删」跨 run 成立；跨 session 的外来文件不在其中，
+    // 照常触发人工确认）+ 计划核准目标集
     let mut allowed: Vec<String> = context
-        .new_affected_paths()
+        .side_effects
         .iter()
-        .map(|p| normalize_with(p, workspace_dir))
+        .flat_map(|e| e.affected_paths.iter().map(|p| normalize_with(p, workspace_dir)))
         .collect();
     if let Some(approved) = &checkpoint.approved_target_files {
         allowed.extend(
