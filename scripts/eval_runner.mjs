@@ -744,6 +744,13 @@ async function runEvaluation() {
           ...(options.reviewerModel ? { FREE_API_LIVE_REVIEWER_MODEL_ID: options.reviewerModel } : {}),
           ...(options.roleModels ? { FREE_API_ROLE_MODELS: options.roleModels } : {}),
           FREE_API_LIVE_FIXTURE_DIR: sandboxPath,
+          // 评测密封边界：判分材料（考题/判据）在宿仓 test/eval_cases 且已按
+          // sparse-checkout 移出沙盒工作区。Agent 的 local_shell 若引用该
+          // 子路径（文件路径或 git pathspec 如 HEAD:test/eval_cases/x）、
+          // 或变更 sparse-checkout 集（add/set/disable 解开剔除）、或访问
+          // 宿仓内沙盒外的绝对路径——一律视为判据泄露尝试予以拦截。
+          FREE_API_EVAL_SEAL_ROOT: rootDir,
+          FREE_API_EVAL_SEAL_SUBPATH: 'test/eval_cases',
           FREE_API_EVALUATION_SCENARIO: 'custom_goal',
           FREE_API_EVAL_CUSTOM_GOAL: caseDef.problem_statement,
           FREE_API_LIVE_MAX_DURATION_MINUTES: String(options.durationMinutes),

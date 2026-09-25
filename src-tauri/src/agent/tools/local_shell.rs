@@ -324,7 +324,99 @@ pub fn dispatch(
                 .collect()
         });
 
+    // 评测密封边界（FREE_API_EVAL_SEAL_ROOT/_SUBPATH 由 eval runner 注入）：
+    // 判分材料按 sparse-checkout 移出沙盒工作区，但对象库与宿仓路径对 shell
+    // 仍可达——实测两个模型分别以 `cat /宿仓/判据` 与 `git sparse-checkout add`
+    // 读到判据全文。密封期内三条机械规则：
+    //   1) 命令引用判据子路径（文件路径或 HEAD:test/... 式 git pathspec）→ 拦；
+    //   2) git sparse-checkout 变更子命令（add/set/disable/reapply）→ 拦；
+    //   3) 宿仓内、沙盒工作区之外的路径（绝对或 cwd 相对解析）→ 拦。
+    if let Some(reason) = sealed_sandbox_violation(&final_cmd, &execution_cwd, ws_root) {
+        let payload = json!({
+            "kind": "sealed_eval_sandbox",
+            "retryable": false,
+            "safe_to_retry": false,
+            "recommended_action": "stay_within_workspace",
+        });
+        return DispatchResult { view: None,
+            stdout: String::new(),
+            stderr: format!("❌ [评测密封拦截] {}：判分材料已移出沙盒工作区，禁止通过 shell 绕行访问。任务所需输入均在当前工作区内。\n<!-- 结构化元数据: {} -->", reason, payload),
+            success: false,
+            route: "local_shell:sealed_eval_sandbox".to_string(),
+        };
+    }
+
     execute_command_blocking(session_id, &final_cmd, &execution_cwd, timeout_secs, custom_env)
+}
+
+/// 评测密封检查：返回违规原因（None=未密封或命令合规）。
+/// 纯词法分析——不触碰文件系统，不含语义判断。
+fn sealed_sandbox_violation<'a>(
+    final_cmd: &str,
+    execution_cwd: &Path,
+    ws_root: &Path,
+) -> Option<&'a str> {
+    let seal_root = std::env::var("FREE_API_EVAL_SEAL_ROOT").ok()?;
+    let seal_root = seal_root.trim();
+    if seal_root.is_empty() {
+        return None;
+    }
+    let seal_root = Path::new(seal_root);
+
+    // 规则 1：判据子路径引用（覆盖文件路径与 git pathspec 两种形态）
+    let subpath = std::env::var("FREE_API_EVAL_SEAL_SUBPATH")
+        .unwrap_or_else(|_| "test/eval_cases".to_string())
+        .replace('\\', "/");
+    if !subpath.is_empty() && final_cmd.replace('\\', "/").contains(subpath.as_str()) {
+        return Some("命令引用密封判据路径");
+    }
+
+    let toks: Vec<&str> = final_cmd
+        .split(|c: char| c.is_whitespace() || "\"'`".contains(c))
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    // 规则 2：sparse-checkout 剔除集变更（set '/*' 不带路径同样解开剔除）
+    if toks.iter().any(|t| t.contains("sparse-checkout"))
+        && toks
+            .iter()
+            .any(|t| matches!(*t, "add" | "set" | "disable" | "reapply"))
+    {
+        return Some("变更 sparse-checkout 剔除集");
+    }
+
+    // 规则 3：宿仓内沙盒外路径（绝对 / cwd 相对 / = 值形式）
+    for tok in &toks {
+        for frag in tok.split('=') {
+            let f = frag.trim_start_matches('-');
+            let cand = if f.starts_with('/') {
+                lex_normalize(Path::new(f))
+            } else if f.contains('/') {
+                lex_normalize(&execution_cwd.join(f))
+            } else {
+                continue;
+            };
+            if cand.starts_with(seal_root) && !cand.starts_with(ws_root) {
+                return Some("访问宿仓内沙盒外路径");
+            }
+        }
+    }
+    None
+}
+
+/// 词法级路径归一：消解 . 与 ..，不触盘。
+fn lex_normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
 }
 
 fn execute_command_blocking(
@@ -752,6 +844,65 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    struct SealEnvGuard;
+    impl SealEnvGuard {
+        fn set(root: &Path) -> Self {
+            std::env::set_var("FREE_API_EVAL_SEAL_ROOT", root);
+            std::env::set_var("FREE_API_EVAL_SEAL_SUBPATH", "test/eval_cases");
+            Self
+        }
+    }
+    impl Drop for SealEnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("FREE_API_EVAL_SEAL_ROOT");
+            std::env::remove_var("FREE_API_EVAL_SEAL_SUBPATH");
+        }
+    }
+
+    #[test]
+    fn test_sealed_sandbox_three_escape_vectors() {
+        // 模拟评测地形：ws 在宿仓 test-artifacts/worktrees 下
+        let repo = TempDirGuard::new();
+        let ws_dir = repo.path().join("test-artifacts/worktrees/case-x");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let _guard = SealEnvGuard::set(repo.path());
+
+        // ① cat 宿仓判据绝对路径 → 拦
+        let p1 = json!({"command": format!("cat {}/test/eval_cases/fixtures/judge.py", repo.path().display())});
+        let r1 = dispatch(&test_db(), "s", "exec", &p1, Some(&ws_dir));
+        assert!(!r1.success && r1.route == "local_shell:sealed_eval_sandbox");
+
+        // ② git sparse-checkout 解开剔除 → 拦
+        let p2 = json!({"command": "git sparse-checkout add test/eval_cases/fixtures"});
+        let r2 = dispatch(&test_db(), "s", "exec", &p2, Some(&ws_dir));
+        assert!(!r2.success && r2.route == "local_shell:sealed_eval_sandbox");
+
+        // ②b sparse-checkout set '/*' 不带路径也拦
+        let p2b = json!({"command": "git sparse-checkout set '/*'"});
+        let r2b = dispatch(&test_db(), "s", "exec", &p2b, Some(&ws_dir));
+        assert!(!r2b.success);
+
+        // ③ git show 对象库读判据 → 拦（pathspec 含子路径）
+        let p3 = json!({"command": "git show HEAD:test/eval_cases/fixtures/judge.py"});
+        let r3 = dispatch(&test_db(), "s", "exec", &p3, Some(&ws_dir));
+        assert!(!r3.success && r3.route == "local_shell:sealed_eval_sandbox");
+
+        // ④ 相对路径 .. 逃逸 → 拦
+        let p4 = json!({"command": "cat ../../test/eval_cases/judge.py"});
+        let r4 = dispatch(&test_db(), "s", "exec", &p4, Some(&ws_dir));
+        assert!(!r4.success && r4.route == "local_shell:sealed_eval_sandbox");
+
+        // ⑤ 工作区内正常命令放行
+        let p5 = json!({"command": "echo hello && ls"});
+        let r5 = dispatch(&test_db(), "s", "exec", &p5, Some(&ws_dir));
+        assert!(r5.success, "工作区内命令应放行: {}", r5.stderr);
+
+        // ⑥ 宿仓外路径（/etc）不受限
+        let p6 = json!({"command": "cat /etc/hosts | head -1"});
+        let r6 = dispatch(&test_db(), "s", "exec", &p6, Some(&ws_dir));
+        assert!(r6.success, "宿仓外路径应放行: {}", r6.stderr);
     }
 
     #[test]
