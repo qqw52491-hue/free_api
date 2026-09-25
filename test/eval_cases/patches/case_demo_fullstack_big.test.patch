@@ -1,0 +1,59 @@
+diff --git a/test/eval_cases/fixtures/fullstack_big/judge.mjs b/test/eval_cases/fixtures/fullstack_big/judge.mjs
+new file mode 100644
+index 0000000..410db36
+--- /dev/null
++++ b/test/eval_cases/fixtures/fullstack_big/judge.mjs
+@@ -0,0 +1,53 @@
++// 判据：demo_app Issue 跟踪器——端点 round-trip + 持久化重启存活 + 前端引用
++import { spawn } from 'node:child_process';
++import fs from 'node:fs';
++
++const fails = [];
++const need = ['demo_app/backend/server.js','demo_app/backend/store.js','demo_app/frontend/index.html','demo_app/frontend/app.js'];
++for (const p of need) if (!fs.existsSync(p)) fails.push(`${p} 缺失`);
++// 前端引用：允许常量拼接（API_BASE+'/issues'），抓 fetch/issues 共现即可
++const frontSrc = ['demo_app/frontend/app.js','demo_app/frontend/views.js','demo_app/frontend/index.html'].map(p=>fs.existsSync(p)?fs.readFileSync(p,'utf8'):'').join('\n');
++if (!/issues/.test(frontSrc) || !/fetch|XMLHttpRequest/.test(frontSrc)) fails.push('前端未见对 issues 接口的请求');
++
++const B='http://127.0.0.1:8787';
++async function start() {
++  const srv = spawn('node',['demo_app/backend/server.js'],{stdio:'pipe'});
++  srv.stderr.on('data',()=>{}); srv.stdout.on('data',()=>{});
++  await new Promise(r=>setTimeout(r,1500));
++  return srv;
++}
++if (fs.existsSync('demo_app/backend/server.js')) {
++  let srv = await start();
++  let newId;
++  try {
++    let res = await fetch(B+'/api/issues');
++    let list = await res.json();
++    if (!Array.isArray(list)||list.length<1) fails.push('GET /api/issues 未返回非空数组');
++    res = await fetch(B+'/api/issues',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'judge_issue',description:'d',labels:['bug']})});
++    if (res.status!==200&&res.status!==201) fails.push(`POST /api/issues HTTP ${res.status}`);
++    else { const c=await res.json(); newId=c.id; if(newId===undefined)fails.push('POST 响应缺 id'); }
++    res = await fetch(B+'/api/issues',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
++    if (res.status!==400) fails.push(`POST 缺 title 未 400（实得 ${res.status}）`);
++    if (newId!==undefined) {
++      res = await fetch(`${B}/api/issues/${newId}`);
++      if (!res.ok) fails.push(`GET 详情 HTTP ${res.status}`);
++      res = await fetch(`${B}/api/issues/${newId}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'closed'})});
++      if (!res.ok) fails.push(`PATCH HTTP ${res.status}`);
++      res = await fetch(`${B}/api/issues/${newId}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:'judge comment'})});
++      if (!res.ok) fails.push(`POST comments HTTP ${res.status}`);
++      res = await fetch(B+'/api/issues?status=closed');
++      const filtered = await res.json();
++      if (!Array.isArray(filtered)||!filtered.some(i=>i.id===newId)) fails.push('?status=closed 过滤未生效');
++    }
++  } catch(e){ fails.push('服务不可达: '+e.message); }
++  srv.kill(); await new Promise(r=>setTimeout(r,500));
++  srv = await start();
++  try {
++    const res = await fetch(B+'/api/issues');
++    const list = await res.json();
++    if (!list.some(i=>i.title==='judge_issue')) fails.push('重启后数据丢失（持久化未生效）');
++  } catch(e){ fails.push('重启后服务不可达'); }
++  srv.kill();
++}
++if (fails.length) { console.log('JUDGE FAIL:', fails.join(' | ')); process.exit(1); }
++console.log('JUDGE PASS');

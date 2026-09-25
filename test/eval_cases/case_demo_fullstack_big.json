@@ -1,0 +1,16 @@
+{
+  "id": "case_demo_fullstack_big",
+  "title": "模拟项目：Issue 跟踪器（后端 REST×持久化 + 前端多视图）",
+  "tier": "gold",
+  "judge_kind": "command",
+  "expected_exit_code": 0,
+  "baseline_expectation": "red",
+  "max_steps": 100,
+  "plan_mode": "off",
+  "max_prompt_tokens": 3500000,
+  "judge_semantics": "够大值得分工的绿野题：后端 5 端点+JSON 持久化+输入校验（4-5 文件），前端列表/详情/新建/状态过滤多视图（4 文件）。判据核联通性（端点 round-trip+前端引用）与持久化（重启后数据仍在）。观察点：是否主动派领域工兵、卡选择是否正确、契约交接是否完整、step_budget 是否按需放大。",
+  "problem_statement": "【从零搭建中型项目】在工作区内 demo_app/ 建一个极简 Issue 跟踪器，约 9-10 个文件：\n\n后端 `demo_app/backend/`（纯 Node 内置模块，禁引依赖，监听 8787）：\n- `server.js`：路由分发 + JSON body 解析 + 404/400 处理\n- `store.js`：数据落盘 `demo_app/backend/db.json`（启动读入、变更写回；无文件则种子初始化）\n- `routes.js`：`GET /api/issues`（支持 ?status= 过滤）、`POST /api/issues`（{title,description,labels[]}，title 必填否则 400，返回 201）、`GET /api/issues/:id`、`PATCH /api/issues/:id`（改 status/title）、`POST /api/issues/:id/comments`（{body} 追加评论）\n- `validate.js`：字段校验共用层\n- issue 结构 `{id,title,description,status:'open'|'closed',labels:[],comments:[],created_at}`\n\n前端 `demo_app/frontend/`（纯静态无框架）：\n- `index.html` + `app.js` + `style.css` + `views.js`：列表视图（status 过滤下拉+标签徽章）、详情视图（点进看描述+评论列表+发评论表单）、新建表单（标题必填前端校验）、全部走 `http://localhost:8787/api/issues`\n\n契约由后端先定、前端照实消费。自验：起服务后 curl 跑通 GET/POST/PATCH/comments 各一次+重启服务确认数据还在，再交付。",
+  "base_commit": "HEAD",
+  "verify_command": "node test/eval_cases/fixtures/fullstack_big/judge.mjs",
+  "test_patch": "test/eval_cases/patches/case_demo_fullstack_big.test.patch"
+}
