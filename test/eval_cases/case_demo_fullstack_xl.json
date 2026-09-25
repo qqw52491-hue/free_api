@@ -1,0 +1,16 @@
+{
+  "id": "case_demo_fullstack_xl",
+  "title": "模拟项目：书签管理器（后端 REST+搜索+统计 / 前端多视图 / CLI+文档）",
+  "tier": "gold",
+  "judge_kind": "command",
+  "expected_exit_code": 0,
+  "baseline_expectation": "red",
+  "max_steps": 120,
+  "plan_mode": "off",
+  "max_prompt_tokens": 3500000,
+  "judge_semantics": "规模足够分工的绿野题（~13 文件三个领域）。判据核联通性：书签 CRUD+tag 过滤+stats 端点 round-trip、持久化重启存活、前端引用接口、README 存在。观察点：是否主动派工兵、串行顺序是否后端先契约、交接是否含契约、领域卡是否被选对。",
+  "problem_statement": "【从零搭建中型项目】在工作区内 demo_app/ 建一个书签管理器，约 12-13 个文件：\n\n后端 `demo_app/backend/`（纯 Node 内置模块，禁引依赖，监听 8787）：\n- `server.js`：HTTP 服务+路由分发+静态文件托管 frontend/\n- `store.js`：数据落盘 `db.json`（启动读入、变更写回；无文件时种子 3 条书签）\n- `routes.js`：`GET /api/bookmarks`（支持 `?tag=`/`?q=` 过滤）、`POST /api/bookmarks`（{url,title,tags[]}，url 必填校验否则 400，返回 201）、`GET /api/bookmarks/:id`、`PATCH /api/bookmarks/:id`（改 title/tags）、`DELETE /api/bookmarks/:id`、`GET /api/stats`（返回 {total, tag_counts: {tag: n}}）\n- `validate.js`：共用校验层（url 格式、title 非空、tags 为字符串数组）\n- bookmark 结构 `{id,url,title,tags:[],created_at}`\n\n前端 `demo_app/frontend/`（纯静态无框架）：\n- `index.html` + `api.js`（封装 fetch 层）+ `app.js`（路由/视图切换）+ `views.js`（列表/详情/表单渲染）+ `style.css`：列表视图（tag 云+搜索框+按 tag 过滤）、新增表单（URL 必填前端校验）、详情视图（可编辑标签）、顶部 stats 栏（总数+热门 tag）\n\nCLI `demo_app/cli.js`：`node cli.js list|add <url> <title>|stats` 直连 API\n\n文档 `demo_app/README.md`：API 契约文档（端点+请求/响应字段形状）。\n\n接口契约由后端先定、前端与 CLI 照实消费。自验：起服务 curl 跑通 CRUD+过滤+stats 各一次、重启确认数据存活、CLI list 能打出列表，再交付。",
+  "base_commit": "HEAD",
+  "verify_command": "node test/eval_cases/fixtures/fullstack_xl/judge.mjs",
+  "test_patch": "test/eval_cases/patches/case_demo_fullstack_xl.test.patch"
+}

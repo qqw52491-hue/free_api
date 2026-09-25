@@ -1,0 +1,51 @@
+diff --git a/test/eval_cases/fixtures/dual_deliverable/judge.mjs b/test/eval_cases/fixtures/dual_deliverable/judge.mjs
+new file mode 100644
+index 0000000..cf4a04d
+--- /dev/null
++++ b/test/eval_cases/fixtures/dual_deliverable/judge.mjs
+@@ -0,0 +1,45 @@
++// 判据：双交付物——A json2csv 转换正确 + B notes 服务联通
++import { spawn } from 'node:child_process';
++import fs from 'node:fs';
++
++const fails = [];
++// A: json2csv
++if (!fs.existsSync('demo_app/json2csv/json2csv.js')) fails.push('json2csv.js 缺失');
++else {
++  fs.mkdirSync('/tmp/j2c_test',{recursive:true});
++  fs.writeFileSync('/tmp/j2c_test/in.json',JSON.stringify([{name:'a,1',note:'he said "hi"',n:1},{name:'b',note:'line\nbreak',n:2}]));
++  const cp = spawn('node',['demo_app/json2csv/json2csv.js','/tmp/j2c_test/in.json','/tmp/j2c_test/out.csv'],{stdio:'pipe'});
++  await new Promise(res=>cp.on('close',res));
++  if (!fs.existsSync('/tmp/j2c_test/out.csv')) fails.push('json2csv 未产出 csv');
++  else {
++    const csv=fs.readFileSync('/tmp/j2c_test/out.csv','utf8');
++    if (!/^name.*note.*n/m.test(csv)&&!csv.includes('name')) fails.push('csv 缺表头');
++    if (!/"a,1"/.test(csv)) fails.push('逗号字段未加引号');
++    if (!/"he said ""hi"""/.test(csv)) fails.push('引号字段未转义');
++    if (!/"line\nbreak"/.test(csv)) fails.push('换行字段未包裹');
++  }
++}
++// B: notes
++if (!fs.existsSync('demo_app/notes/backend/server.js')) fails.push('notes backend 缺失');
++else {
++  const srv = spawn('node',['demo_app/notes/backend/server.js'],{stdio:'pipe'});
++  srv.stderr.on('data',()=>{}); srv.stdout.on('data',()=>{});
++  await new Promise(r=>setTimeout(r,1500));
++  try {
++    const B='http://127.0.0.1:8788';
++    let res = await fetch(B+'/api/notes');
++    if (!res.ok) fails.push(`GET notes HTTP ${res.status}`);
++    res = await fetch(B+'/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'judge note'})});
++    if (res.status!==200&&res.status!==201) fails.push(`POST notes HTTP ${res.status}`);
++    res = await fetch(B+'/api/notes');
++    const list = await res.json();
++    if (!Array.isArray(list)||!list.some(n=>n.text==='judge note')) fails.push('POST 后列表无新项');
++  } catch(e){ fails.push('notes 服务不可达: '+e.message); }
++  srv.kill();
++}
++if (fs.existsSync('demo_app/notes/frontend/app.js')) {
++  const src=fs.readFileSync('demo_app/notes/frontend/app.js','utf8');
++  if (!/notes/.test(src)||!/fetch|XMLHttpRequest/.test(src)) fails.push('notes 前端未见接口请求');
++}
++if (fails.length){console.log('JUDGE FAIL:',fails.join(' | '));process.exit(1);}
++console.log('JUDGE PASS');

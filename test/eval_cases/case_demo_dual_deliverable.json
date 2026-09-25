@@ -1,0 +1,16 @@
+{
+  "id": "case_demo_dual_deliverable",
+  "title": "模拟项目：双独立交付物（JSON转换CLI + 便签Web应用）",
+  "tier": "gold",
+  "judge_kind": "command",
+  "expected_exit_code": 0,
+  "baseline_expectation": "red",
+  "max_steps": 100,
+  "plan_mode": "off",
+  "max_prompt_tokens": 3500000,
+  "judge_semantics": "双独立交付物题（天然诱导批量/顺序分工）。A=json2csv CLI（嵌套数组展开+转义），B=便签 Web（后端 3 端点+前端列表/增删）。判据核两者各自联通性。观察点：模型是否用 dispatches 批量派发/顺序派工兵、工兵卡选择、交接上下文质量、apply 合入路径是否被正确使用。",
+  "problem_statement": "【双交付物任务】在工作区内完成两个互相独立的小项目，均可单独交付：\n\n交付物 A `demo_app/json2csv/`（纯 Node 内置模块）：\n- `json2csv.js`：`node json2csv.js input.json output.csv`——把 JSON 对象数组转 CSV：自动取所有键做表头、嵌套对象 JSON.stringify、含逗号/引号/换行的字段按 RFC4180 双引号包裹\n- `test.sh` 或自验证例\n\n交付物 B `demo_app/notes/`（纯 Node 后端 + 静态前端）：\n- `backend/server.js`：监听 8788，`GET /api/notes`、`POST /api/notes`（{text} 非空校验）、`DELETE /api/notes/:id`；内存存储即可\n- `frontend/index.html` + `frontend/app.js`：便签列表+新增输入框+删除按钮，走 `http://localhost:8788/api/notes`\n\n两个交付物彼此无关、无共享代码、无依赖顺序。完成后分别自验（A 跑转换对拍、B 起服务 curl），交付说明里分开陈述各自验证结果。",
+  "base_commit": "HEAD",
+  "verify_command": "node test/eval_cases/fixtures/dual_deliverable/judge.mjs",
+  "test_patch": "test/eval_cases/patches/case_demo_dual.test.patch"
+}
