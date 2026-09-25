@@ -298,7 +298,12 @@ pub enum GitDestructiveVerdict {
     Pathless,
     /// 有显式路径目标（checkout -- <paths> / restore <paths> / rm/mv <paths>），
     /// 可与 session 写入台账逐条对账。
-    Targets(Vec<String>),
+    /// dirty_gated=true（checkout/restore）：只对「脏=有未提交内容」的目标算外来——
+    /// 干净已提交文件上还原是 no-op，无可销毁物；rm/mv 物理删移文件恒 gated。
+    Targets {
+        paths: Vec<String>,
+        dirty_gated: bool,
+    },
 }
 
 /// 命令指纹：压缩空白后原文——ask_human 的 message 原文引用该指纹即可机械核对
@@ -373,7 +378,10 @@ pub fn git_destructive_review(cmd: &str) -> GitDestructiveVerdict {
                 };
                 targets.retain(|t| t != "." && t != "*");
                 if !targets.is_empty() {
-                    return GitDestructiveVerdict::Targets(targets);
+                    return GitDestructiveVerdict::Targets {
+                        paths: targets,
+                        dirty_gated: true,
+                    };
                 }
                 return GitDestructiveVerdict::Pathless;
             }
@@ -385,7 +393,10 @@ pub fn git_destructive_review(cmd: &str) -> GitDestructiveVerdict {
                     let mut targets = path_args(p + 1);
                     targets.retain(|t| t != "." && t != "*");
                     if !targets.is_empty() {
-                        return GitDestructiveVerdict::Targets(targets);
+                        return GitDestructiveVerdict::Targets {
+                            paths: targets,
+                            dirty_gated: true,
+                        };
                     }
                     return GitDestructiveVerdict::Pathless;
                 }
@@ -398,7 +409,10 @@ pub fn git_destructive_review(cmd: &str) -> GitDestructiveVerdict {
                 if targets.is_empty() {
                     return GitDestructiveVerdict::Pathless;
                 }
-                return GitDestructiveVerdict::Targets(targets);
+                return GitDestructiveVerdict::Targets {
+                    paths: targets,
+                    dirty_gated: false,
+                };
             }
             "clean" => {
                 return GitDestructiveVerdict::Pathless;

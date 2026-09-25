@@ -487,22 +487,34 @@
             git_cmd_fingerprint, git_destructive_review, GitDestructiveVerdict,
         };
 
-        // 显式路径 → Targets（可逐条对账）
+        // 显式路径 → Targets（可逐条对账；checkout/restore 类脏门槛）
         assert_eq!(
             git_destructive_review("git checkout -- scripts/eval_runner.mjs"),
-            GitDestructiveVerdict::Targets(vec!["scripts/eval_runner.mjs".to_string()])
+            GitDestructiveVerdict::Targets {
+                paths: vec!["scripts/eval_runner.mjs".to_string()],
+                dirty_gated: true,
+            }
         );
         assert_eq!(
             git_destructive_review("git checkout -- a.rs b.rs"),
-            GitDestructiveVerdict::Targets(vec!["a.rs".to_string(), "b.rs".to_string()])
+            GitDestructiveVerdict::Targets {
+                paths: vec!["a.rs".to_string(), "b.rs".to_string()],
+                dirty_gated: true,
+            }
         );
         assert_eq!(
             git_destructive_review("git restore --worktree src/lib.rs"),
-            GitDestructiveVerdict::Targets(vec!["src/lib.rs".to_string()])
+            GitDestructiveVerdict::Targets {
+                paths: vec!["src/lib.rs".to_string()],
+                dirty_gated: true,
+            }
         );
         assert_eq!(
             git_destructive_review("git mv old.rs new.rs"),
-            GitDestructiveVerdict::Targets(vec!["old.rs".to_string(), "new.rs".to_string()])
+            GitDestructiveVerdict::Targets {
+                paths: vec!["old.rs".to_string(), "new.rs".to_string()],
+                dirty_gated: false,
+            }
         );
 
         // 无路径/整树/历史/远端形态 → Pathless（影响面不可界定，强制人工确认）

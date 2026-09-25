@@ -52,9 +52,10 @@ pub(super) async fn dispatch_local_tool(
                                     .to_string(),
                             );
                         }
-                        GitDestructiveVerdict::Targets(targets) => {
+                        GitDestructiveVerdict::Targets { paths, dirty_gated } => {
                             let foreign = foreign_git_targets(
-                                targets,
+                                paths,
+                                *dirty_gated,
                                 inst,
                                 ctx.context,
                                 ctx.checkpoint,
@@ -281,10 +282,13 @@ pub(super) async fn dispatch_local_tool(
 /// git 破坏命令的路径对账：返回「不在本 session 写入台账且不在计划核准集」
 /// 的目标列表。归一化口径：命令目标按指令 cwd（缺省 workspace_dir）解析为
 /// 词法绝对路径；台账路径（非绝对时按 workspace_dir 解析）同规后精确匹配。
+/// dirty_gated=true（checkout/restore 形态）时，只把「脏=有未提交内容」的
+/// 目标算外来——干净已提交文件上还原是 no-op，无可销毁物，不该烦主人。
 /// 目标为目录前缀不展开判定（`.`/`*` 已在 Pathless 分流）——界外宁多判为
 /// foreign 触发人工确认，也不放宽到前缀匹配（fail 方向 = 移交而非放行）。
 fn foreign_git_targets(
     targets: &[String],
+    dirty_gated: bool,
     inst: &AgentInstruction,
     context: &crate::agent::context::types::SandwichContext,
     checkpoint: &crate::agent::checkpoint::AgentCheckpoint,
@@ -334,11 +338,41 @@ fn foreign_git_targets(
         );
     }
 
+    // dirty_gated：只对「有未提交内容可销毁」的目标算外来。porcelain 输出为
+    // 仓库根相对路径，归一化基准 = git toplevel（拿不到则退化为 cwd_base 侧，
+    // 仍比「不查脏」精确）。
+    let dirty_abs: std::collections::BTreeSet<String> = if dirty_gated {
+        let repo_root = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&cwd_base)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| cwd_base.clone());
+        crate::agent::review_tools::git_dirty_file_paths(&cwd_base)
+            .unwrap_or_default()
+            .iter()
+            .map(|p| normalize_with(p, &repo_root))
+            .collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+
     targets
         .iter()
         .filter(|t| {
             let norm = normalize_with(t, &cwd_base);
-            !allowed.iter().any(|a| a == &norm)
+            if allowed.iter().any(|a| a == &norm) {
+                return false; // 本 session 写的/计划核准的 = 自清理
+            }
+            // checkout/restore 类：干净已提交文件上还原是 no-op，不算外来
+            if dirty_gated && !dirty_abs.contains(&norm) {
+                return false;
+            }
+            true
         })
         .cloned()
         .collect()

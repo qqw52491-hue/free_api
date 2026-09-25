@@ -228,6 +228,34 @@ fn cap(s: String) -> String {
     }
 }
 
+/// git 脏文件路径集：porcelain 输出的仓库根相对路径（含未跟踪）。
+/// 供破坏性 git 命令按目标对账——目标不脏则 checkout --/restore 对其是
+/// no-op，无未提交工作可销毁（committed 内容可从 HEAD 恢复）。
+/// 返回 None = 非 git 目录/命令失败（调用方按保守方向处理）。
+pub fn git_dirty_file_paths(cwd: &Path) -> Option<Vec<String>> {
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.len() >= 3)
+            .map(|l| {
+                // "XY <path>"；"R  old -> new" 取 new；剥掉引号包裹
+                let rest = &l[3..];
+                let tail = rest.rsplit(" -> ").next().unwrap_or(rest);
+                tail.trim().trim_matches('"').to_string()
+            })
+            .filter(|p| !p.is_empty())
+            .collect(),
+    )
+}
+
 /// git 脏文件探针：统计工作区当前变更/未跟踪文件数（shell 前后各测一次，差值即本次
 /// shell 真实改动的文件数）。非 git 目录返回 None（调用方退化为按调用次数计 1）。
 pub fn git_dirty_file_count(workspace: &Path) -> Option<u32> {
