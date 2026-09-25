@@ -1499,14 +1499,30 @@ async fn run_agent_main_loop_in_workspace_inner(
             checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
         }
         // 【shell 批改探针·后】步骤结束时取差值入账（覆盖单发/批量/重试所有执行路径）
+        // 路径级差值 = 本步 shell 真实触碰的新增脏文件，入账 side_effect.affected_paths，
+        // 使「本 session 写没写过这个文件」对 shell 写入也可机械对账（git 破坏命令门依赖它）。
         {
-            let post = crate::agent::review_tools::git_dirty_file_count(&workspace_dir);
+            let post_paths = crate::agent::review_tools::git_dirty_file_paths(&workspace_dir);
+            let post = post_paths.as_ref().map(|p| p.len() as u32);
             match (context.shell_probe_pre_dirty, post) {
                 (Some(pre), Some(post)) => {
-                    let delta = post.saturating_sub(pre).min(50);
+                    let pre_paths = context
+                        .shell_probe_pre_dirty_paths
+                        .take()
+                        .unwrap_or_default();
+                    let post_list = post_paths.unwrap_or_default();
+                    let touched: Vec<String> = post_list
+                        .iter()
+                        .filter(|p| !pre_paths.iter().any(|x| x == *p))
+                        .cloned()
+                        .collect();
+                    let delta = (post.saturating_sub(pre)).min(50);
                     if delta > 0 {
                         checkpoint.uncovered_shell_mutations =
                             checkpoint.uncovered_shell_mutations.saturating_add(delta);
+                    }
+                    if !touched.is_empty() {
+                        context.shell_touched_paths = touched;
                     }
                 }
                 // 非 git 环境：按本步骤是否为写类指令保守计 1（但排除 session_tmp 草稿写入）
@@ -1521,6 +1537,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 _ => {}
             }
             context.shell_probe_pre_dirty = None;
+            context.shell_probe_pre_dirty_paths = None;
         }
         println!(
             "【阶段审查诊断】step {} | phase={:?} | mode={:?} | uncovered={} | shell_baseline={} | budget={} | side_effects={}",

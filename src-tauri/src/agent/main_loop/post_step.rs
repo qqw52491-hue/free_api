@@ -100,6 +100,8 @@ pub(crate) fn record_side_effect_or_verify(
     )
     .map(|c| crate::agent::change_verification::is_test_or_verification_command(&c))
     .unwrap_or(false);
+    // 无条件取走并清空——验证类/非记账步骤的陈旧差集不得被下一记账步冒领
+    let shell_touched = std::mem::take(&mut context.shell_touched_paths);
     if result.success
         && !is_tmp_write
         && !is_verification_cmd
@@ -112,9 +114,18 @@ pub(crate) fn record_side_effect_or_verify(
         let safe_params = crate::agent::context::AuditLedger::format_side_effect_params(
             &instruction.get_params(),
         );
-        let affected_paths = crate::agent::change_verification::extract_file_paths_from_params(
-            &instruction.get_params(),
-        );
+        let affected_paths = {
+            let mut paths = crate::agent::change_verification::extract_file_paths_from_params(
+                &instruction.get_params(),
+            );
+            // shell 类命令参数里没有 path 字段——回填「步骤真实触碰的新增脏文件」
+            // 差集（脏探针 post−pre），使台账对本 session 的 shell 写入也能按路径对账
+            // （git 破坏命令门的「自清理放行」分支依赖这个集合）。
+            if paths.is_empty() && !shell_touched.is_empty() {
+                paths = shell_touched.clone();
+            }
+            paths
+        };
         context.record_side_effect_with_paths(
             step_id,
             instruction.get_tool(),

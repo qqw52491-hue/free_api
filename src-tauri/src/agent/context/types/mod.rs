@@ -249,6 +249,13 @@ pub struct SandwichContext {
     /// 主循环在步骤结束后取差值入账，使 shell_exec 批量改文件无法绕过阶段审查的文件数阈值。
     #[serde(default)]
     pub shell_probe_pre_dirty: Option<u32>,
+    /// 同探针的路径级快照：步骤结束后 post−pre 差集 = 本 shell 步真实触碰的文件，
+    /// 供副作用台账 affected_paths 入账（shell 参数里没有 path 字段，提不出路径）。
+    #[serde(default)]
+    pub shell_probe_pre_dirty_paths: Option<Vec<String>>,
+    /// 上一步 shell 触碰出的新增脏文件（post−pre 差集），record_side_effect 消费后清空。
+    #[serde(default)]
+    pub shell_touched_paths: Vec<String>,
     /// 本次运行从之前任务继承的副作用数量（用于区分本轮是否有新增副作用）
     #[serde(default)]
     pub inherited_side_effects_count: usize,
@@ -397,6 +404,8 @@ impl SandwichContext {
             failed_attempts: Vec::new(),
             side_effects: Vec::new(),
             shell_probe_pre_dirty: None,
+            shell_probe_pre_dirty_paths: None,
+            shell_touched_paths: Vec::new(),
             inherited_side_effects_count: 0,
             todo_list: Vec::new(),
             review_contract: None,

@@ -129,7 +129,12 @@ pub async fn run_call_llm_and_run_tool_phases(
 ) -> Result<StepExecutionOutcome, String> {
     // 【shell 批改探针·前】步骤开始前快照 git 脏文件数；主循环在步骤结束后取差值。
     // 覆盖单发/批量派发/重试所有路径，防止 shell_exec 批量改文件绕过阶段审查。
-    context.shell_probe_pre_dirty = crate::agent::review_tools::git_dirty_file_count(workspace_dir);
+    context.shell_probe_pre_dirty_paths =
+        crate::agent::review_tools::git_dirty_file_paths(workspace_dir);
+    context.shell_probe_pre_dirty = context
+        .shell_probe_pre_dirty_paths
+        .as_ref()
+        .map(|p| p.len() as u32);
     // 状态卡遥测的步号口径：与 run_trace 步骤 id / 取证台账 / 避坑台账同基准。
     context.current_step_id = step_id;
     let mut retry_count = 0;
