@@ -376,13 +376,22 @@ fn sealed_sandbox_violation<'a>(
         .filter(|t| !t.is_empty())
         .collect();
 
-    // 规则 2：sparse-checkout 剔除集变更（set '/*' 不带路径同样解开剔除）
+    // 规则 2：git 密封材料通道——sparse-checkout 剔除集变更（set '/*'
+    // 不带路径同样解开剔除），以及对象库管道命令（cat-file/ls-tree：
+    // ls-tree 枚举树拿 blob sha → cat-file -p 读内容，全程不带路径字样，
+    // 是 substring 检查唯一漏网形态；二者对 Agent 正当工作几无用例）
     if toks.iter().any(|t| t.contains("sparse-checkout"))
         && toks
             .iter()
             .any(|t| matches!(*t, "add" | "set" | "disable" | "reapply"))
     {
         return Some("变更 sparse-checkout 剔除集");
+    }
+    if toks
+        .iter()
+        .any(|t| matches!(*t, "cat-file" | "ls-tree" | "rev-list"))
+    {
+        return Some("使用 git 对象库管道命令");
     }
 
     // 规则 3：宿仓内沙盒外路径（绝对 / cwd 相对 / = 值形式）
@@ -893,6 +902,11 @@ mod tests {
         let p4 = json!({"command": "cat ../../test/eval_cases/judge.py"});
         let r4 = dispatch(&test_db(), "s", "exec", &p4, Some(&ws_dir));
         assert!(!r4.success && r4.route == "local_shell:sealed_eval_sandbox");
+
+        // ④b 对象库管道（ls-tree 拿 sha → cat-file 读内容）→ 拦
+        let p4b = json!({"command": "git cat-file -p abc1234"});
+        let r4b = dispatch(&test_db(), "s", "exec", &p4b, Some(&ws_dir));
+        assert!(!r4b.success && r4b.route == "local_shell:sealed_eval_sandbox");
 
         // ⑤ 工作区内正常命令放行
         let p5 = json!({"command": "echo hello && ls"});
