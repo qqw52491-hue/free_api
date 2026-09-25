@@ -274,33 +274,90 @@ impl ContextRenderer {
         if ledger.is_empty() {
             return String::new();
         }
-        // 最近活跃优先，同序按键字典序兜底，保证渲染确定性
-        let mut entries: Vec<(&String, &EvidenceReceiptEntry)> = ledger.iter().collect();
-        entries.sort_by(|a, b| b.1.last_step.cmp(&a.1.last_step).then(a.0.cmp(b.0)));
-        const MAX_LINES: usize = 20;
-        let total = entries.len();
-        let mut lines = Vec::new();
-        for (key, e) in entries.into_iter().take(MAX_LINES) {
+        // 同文件的 read|path|LX-Y 明细合并成单行覆盖图：
+        // 「已读 L1-60, L500-850」比 39 条行窗流水更省也更可读——
+        // 长任务中模型据此知道哪些区间已有覆盖，不必回读重新发现。
+        let mut read_files: BTreeMap<String, Vec<(String, &EvidenceReceiptEntry)>> =
+            BTreeMap::new();
+        let mut others: Vec<(&String, &EvidenceReceiptEntry)> = Vec::new();
+        for (key, e) in ledger.iter() {
             let mut parts = key.splitn(3, '|');
             let kind = parts.next().unwrap_or("");
             let target = parts.next().unwrap_or("");
             let detail = parts.next().unwrap_or("");
-            let steps = if e.count <= 1 {
-                format!("step={}", e.first_step)
+            if kind == "read" && !target.is_empty() {
+                read_files
+                    .entry(target.to_string())
+                    .or_default()
+                    .push((detail.to_string(), e));
             } else {
-                format!("×{} (step {}~{})", e.count, e.first_step, e.last_step)
-            };
-            let oid = e
-                .output_id
-                .as_deref()
-                .map(|id| format!(" → {}", id))
-                .unwrap_or_default();
-            let detail_str = if detail.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", detail)
-            };
-            lines.push(format!("- {} {}{} · {}{}", kind, target, detail_str, steps, oid));
+                others.push((key, e));
+            }
+        }
+
+        let mut lines = Vec::new();
+        // 覆盖行按最近活跃排序（与旧行为一致：近的在上面）
+        let mut file_rows: Vec<(usize, String)> = read_files
+            .into_iter()
+            .map(|(path, windows)| {
+                let last_step = windows.iter().map(|(_, e)| e.last_step).max().unwrap_or(0);
+                let first_step = windows.iter().map(|(_, e)| e.first_step).min().unwrap_or(0);
+                let total_count: u32 = windows.iter().map(|(_, e)| e.count).sum();
+                let latest_oid = windows
+                    .iter()
+                    .max_by_key(|(_, e)| e.last_step)
+                    .and_then(|(_, e)| e.output_id.as_deref());
+                let coverage = Self::merge_window_labels(&windows);
+                let oid = latest_oid.map(|id| format!(" → {}", id)).unwrap_or_default();
+                let line = format!(
+                    "- read {} 已读 {} · ×{} (step {}~{}){}",
+                    path, coverage, total_count, first_step, last_step, oid
+                );
+                (last_step, line)
+            })
+            .collect();
+        file_rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+
+        others.sort_by(|a, b| b.1.last_step.cmp(&a.1.last_step).then(a.0.cmp(b.0)));
+        let mut other_rows: Vec<(usize, String)> = others
+            .into_iter()
+            .map(|(key, e)| {
+                let mut parts = key.splitn(3, '|');
+                let kind = parts.next().unwrap_or("");
+                let target = parts.next().unwrap_or("");
+                let detail = parts.next().unwrap_or("");
+                let steps = if e.count <= 1 {
+                    format!("step={}", e.first_step)
+                } else {
+                    format!("×{} (step {}~{})", e.count, e.first_step, e.last_step)
+                };
+                let oid = e
+                    .output_id
+                    .as_deref()
+                    .map(|id| format!(" → {}", id))
+                    .unwrap_or_default();
+                let detail_str = if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", detail)
+                };
+                (
+                    e.last_step,
+                    format!("- {} {}{} · {}{}", kind, target, detail_str, steps, oid),
+                )
+            })
+            .collect();
+
+        // 覆盖行与其余条目统一按最近活跃混排
+        let mut all_rows = Vec::new();
+        all_rows.append(&mut file_rows);
+        all_rows.append(&mut other_rows);
+        all_rows.sort_by(|a, b| b.0.cmp(&a.0));
+
+        const MAX_LINES: usize = 20;
+        let total = all_rows.len();
+        for (_, line) in all_rows.into_iter().take(MAX_LINES) {
+            lines.push(line);
         }
         let more = if total > MAX_LINES {
             format!("\n…另有 {} 项更早记录未列出", total - MAX_LINES)
@@ -312,6 +369,63 @@ impl ContextRenderer {
             lines.join("\n"),
             more
         )
+    }
+
+    /// 行窗明细标签（L1-150 / head=N / 整读…）合并为覆盖区间串：
+    /// 可解析的 L 窗按起点排序并合并重叠/相邻区间，非行窗形态原样保留。
+    fn merge_window_labels(windows: &[(String, &EvidenceReceiptEntry)]) -> String {
+        let mut ranges: Vec<(i64, i64)> = Vec::new();
+        let mut misc: Vec<String> = Vec::new();
+        for (label, _) in windows {
+            let parsed = if let Some(rest) = label.strip_prefix('L') {
+                let mut it = rest.splitn(2, '-');
+                let s = it.next().and_then(|v| v.parse::<i64>().ok());
+                let e = it.next().and_then(|v| v.parse::<i64>().ok());
+                match (s, e) {
+                    (Some(s), Some(e)) => Some((s, e)),
+                    (Some(s), None) => Some((s, i64::MAX / 2)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            match parsed {
+                Some(r) => ranges.push(r),
+                None => misc.push(label.clone()),
+            }
+        }
+        ranges.sort();
+        let mut merged: Vec<(i64, i64)> = Vec::new();
+        for (s, e) in ranges {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 + 1 {
+                    last.1 = last.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+        let mut parts: Vec<String> = merged
+            .iter()
+            .map(|(s, e)| {
+                if *e >= i64::MAX / 2 {
+                    format!("L{}-", s)
+                } else {
+                    format!("L{}-{}", s, e)
+                }
+            })
+            .collect();
+        parts.extend(misc);
+        if parts.is_empty() {
+            return "（无行窗记录）".to_string();
+        }
+        const MAX_PARTS: usize = 8;
+        if parts.len() > MAX_PARTS {
+            let shown = parts[..MAX_PARTS].join(", ");
+            format!("{} …+{}段", shown, parts.len() - MAX_PARTS)
+        } else {
+            parts.join(", ")
+        }
     }
 
     /// 运行遥测投影：当前步号与本 run 累计 token 消耗——宿主 100% 可核实

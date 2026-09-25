@@ -785,6 +785,107 @@ impl SandwichContext {
         }
     }
 
+    /// 读重叠提示（只提示、不拦截——不同行窗仍算不同信息，window_read 判例保留）。
+    /// 新读窗与同文件已读区间重叠、且自最早重叠读之后该文件未被写入时，
+    /// 返回一行可附加到读结果的事实提示：已覆盖区间 + 最近句柄。
+    /// 纯事实投影：覆盖区间与写入时序宿主都可机械判定，不替模型决定要不要重读。
+    pub fn read_overlap_hint(
+        &self,
+        instruction: &crate::agent::types::AgentInstruction,
+    ) -> Option<String> {
+        let tool_raw = instruction.get_tool().to_lowercase();
+        if tool_raw != "local_file" {
+            return None;
+        }
+        let params = instruction.get_params();
+        let mut action = instruction.get_action().to_lowercase();
+        if action == tool_raw || action.is_empty() {
+            if let Some(act) = params.get("action").and_then(|v| v.as_str()) {
+                action = act.to_lowercase();
+            }
+        }
+        if !action.starts_with("read") && action != tool_raw {
+            return None;
+        }
+        let path = params
+            .get("path")
+            .or_else(|| params.get("filePath"))
+            .or_else(|| params.get("file_path"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        let num = |k: &str| {
+            params
+                .get(k)
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+                })
+        };
+        let req_start = num("start_line").or_else(|| num("startLine"));
+        let req_end = num("end_line").or_else(|| num("endLine"));
+        let req = match (req_start, req_end) {
+            // 整读=与任何已读区间都重叠
+            (None, None) => Some((1i64, i64::MAX / 2)),
+            (Some(s), Some(e)) => Some((s, e)),
+            (Some(s), None) => Some((s, i64::MAX / 2)),
+            (None, Some(e)) => Some((1, e)),
+        }?;
+
+        let prefix = format!("read|{}|", path);
+        let mut overlapped: Vec<(i64, i64, usize, Option<&str>)> = Vec::new();
+        for (key, e) in self.evidence_ledger.iter() {
+            let Some(detail) = key.strip_prefix(&prefix) else { continue };
+            let Some(rest) = detail.strip_prefix('L') else { continue };
+            let mut it = rest.splitn(2, '-');
+            let s = it.next().and_then(|v| v.parse::<i64>().ok());
+            let en = it.next().and_then(|v| v.parse::<i64>().ok());
+            let (s, en) = match (s, en) {
+                (Some(s), Some(en)) => (s, en),
+                (Some(s), None) => (s, i64::MAX / 2),
+                _ => continue,
+            };
+            if s <= req.1 && en >= req.0 {
+                overlapped.push((s, en, e.last_step, e.output_id.as_deref()));
+            }
+        }
+        if overlapped.is_empty() {
+            return None;
+        }
+        let earliest = overlapped.iter().map(|(_, _, st, _)| *st).min().unwrap_or(0);
+        // 最早重叠读之后若该文件被写过，重读是正当的——不提示
+        let rewritten = self.side_effects.iter().any(|fx| {
+            fx.step_id > earliest && fx.affected_paths.iter().any(|p| p == path)
+        });
+        if rewritten {
+            return None;
+        }
+        overlapped.sort();
+        let ranges: Vec<String> = overlapped
+            .iter()
+            .take(4)
+            .map(|(s, e, _, _)| {
+                if *e >= i64::MAX / 2 {
+                    format!("L{}-", s)
+                } else {
+                    format!("L{}-{}", s, e)
+                }
+            })
+            .collect();
+        let latest_oid = overlapped
+            .iter()
+            .max_by_key(|(_, _, st, _)| *st)
+            .and_then(|(_, _, _, oid)| *oid);
+        let oid_str = latest_oid
+            .map(|id| format!("（原文句柄 {}，可 get_step_output 取回）", id))
+            .unwrap_or_default();
+        Some(format!(
+            "\n💡 提示：本区间与已读 {} 重叠且文件此后未被修改{}——如只为重读相同内容可跳过，漏了的具体位置请定向取相邻区间。",
+            ranges.join(", "),
+            oid_str
+        ))
+    }
+
     pub fn active_plan_id(&self) -> Option<&str> {
         self.plan_state.active_id.as_deref()
     }

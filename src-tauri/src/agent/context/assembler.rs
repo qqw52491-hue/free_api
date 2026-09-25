@@ -344,9 +344,82 @@ pub(crate) fn consolidate_consecutive_messages(messages: Vec<ChatMessage>) -> Ve
     consolidated
 }
 
+/// 卡片分段计量（审计四问前置取证，只测不改）：
+/// 在最终发出的消息序列中定位尾部状态卡——含最多「行首【段名】」标记的那条；
+/// 按段名边界切分返回 (段名, 字节数) 列表，附带未冠名前缀与总字节。
+/// 行首【…】是当前状态卡各段的统一形态；判据基于字节边界，不含语义。
+pub(crate) fn measure_card_sections(messages: &[ChatMessage]) -> Vec<(String, usize)> {
+    let card_text = messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .filter_map(|m| match &m.content {
+            serde_json::Value::String(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .max_by_key(|text| {
+            text.match_indices("\n【").count()
+                + usize::from(text.starts_with('【'))
+        });
+    let Some(text) = card_text else {
+        return Vec::new();
+    };
+    // 标记数 <3 的消息不是状态卡（单段提示/决策指令不计量）
+    let marker_count =
+        text.match_indices("\n【").count() + usize::from(text.starts_with('【'));
+    if marker_count < 3 {
+        return Vec::new();
+    }
+
+    let mut sections: Vec<(String, usize)> = Vec::new();
+    let mut prev_end = 0usize;
+    let mut prev_name = String::from("<prelude>");
+    for (idx, _) in text.match_indices('【') {
+        // 只认行首标记（段名边界），行内【】引用不切
+        if idx != 0 && !text[..idx].ends_with('\n') {
+            continue;
+        }
+        let name_end = text[idx..].find('】').map(|e| idx + e);
+        let Some(name_end) = name_end else { continue };
+        if idx > prev_end {
+            sections.push((std::mem::take(&mut prev_name), idx - prev_end));
+        }
+        prev_name = text[idx + '【'.len_utf8()..name_end].to_string();
+        prev_end = idx;
+    }
+    if prev_end < text.len() {
+        sections.push((prev_name, text.len() - prev_end));
+    }
+    sections
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_measure_card_sections_splits_named_blocks() {
+        let msgs = vec![
+            ChatMessage { role: "system".into(), content: json!("sys") },
+            ChatMessage {
+                role: "user".into(),
+                content: json!("【计划】abc\n\n【台账】defgh\n\n【遥测】x"),
+            },
+            // 决策指令只有 1 个标记——不应被选为状态卡
+            ChatMessage { role: "user".into(), content: json!("【工具索引】请输出 JSON") },
+        ];
+        let sections = measure_card_sections(&msgs);
+        let names: Vec<&str> = sections.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["计划", "台账", "遥测"], "分段名: {:?}", sections);
+        let total: usize = sections.iter().map(|(_, b)| *b).sum();
+        assert_eq!(total, "【计划】abc\n\n【台账】defgh\n\n【遥测】x".len());
+    }
+
+    #[test]
+    fn test_measure_card_sections_ignores_non_card() {
+        let msgs = vec![ChatMessage { role: "user".into(), content: json!("【提示】仅一段") }];
+        assert!(measure_card_sections(&msgs).is_empty());
+    }
+
 
     #[test]
     fn test_assemble_messages_zero_mutation_top_prefix() {

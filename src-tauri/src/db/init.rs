@@ -159,6 +159,18 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS agent_card_sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            step_id INTEGER NOT NULL,
+            card_level TEXT NOT NULL,
+            sections_json TEXT NOT NULL,
+            total_bytes INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_card_sections_session
+            ON agent_card_sections(session_id, step_id);
+
         CREATE TABLE IF NOT EXISTS agent_role_cards (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,

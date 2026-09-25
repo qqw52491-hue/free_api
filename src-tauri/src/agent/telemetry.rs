@@ -89,6 +89,48 @@ pub fn record_llm_call(db: &DbState, record: &LlmCallRecord) {
     }
 }
 
+/// 记录一次尾部状态卡的分段字节量（审计四问前置取证：先量后裁）。
+/// 尽力写入、失败只打日志——观测不许影响被观测的循环。
+pub fn record_card_sections(
+    db: &DbState,
+    session_id: &str,
+    step_id: usize,
+    card_level: &str,
+    sections: &[(String, usize)],
+) {
+    if sections.is_empty() {
+        return;
+    }
+    let sections_json = serde_json::Map::from_iter(
+        sections
+            .iter()
+            .map(|(name, bytes)| (name.clone(), serde_json::Value::from(*bytes))),
+    );
+    let total: usize = sections.iter().map(|(_, b)| *b).sum();
+    let conn = match db.0.lock() {
+        Ok(conn) => conn,
+        Err(_) => {
+            eprintln!("⚠️ [Telemetry] DB 锁不可用，跳过本条卡片分段记录");
+            return;
+        }
+    };
+    let result = conn.execute(
+        "INSERT INTO agent_card_sections (session_id, step_id, card_level, sections_json, total_bytes, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            session_id,
+            step_id as i64,
+            card_level,
+            serde_json::Value::Object(sections_json).to_string(),
+            total as i64,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    );
+    if let Err(e) = result {
+        eprintln!("⚠️ [Telemetry] 卡片分段写入失败（不阻断主循环）: {}", e);
+    }
+}
+
 /// 按会话读取逐调用记录（评测对照与基线分析用）。
 pub fn list_llm_calls(db: &DbState, session_id: &str) -> Result<Vec<Value>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;

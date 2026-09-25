@@ -266,7 +266,24 @@ pub async fn call_llm(
     let history_estimate_at_request = messages.history_estimated_tokens();
     print_debug_messages(&api_messages);
 
-    // 📊 逐调用 telemetry 的当轮上下文快照（循环外算一次，各请求行共用）：
+    // � 尾部状态卡分段计量（审计四问前置取证）：只测不改——把实际发出的
+    // 卡片按【段名】切成字节数落库，给后续裁剪/降档决策提供分段证据。
+    {
+        let sections =
+            crate::agent::context::assembler::measure_card_sections(&api_messages);
+        if !sections.is_empty() {
+            let level = match messages.budget_config.state_card_level {
+                crate::agent::context::budget::StateCardLevel::Off => "off",
+                crate::agent::context::budget::StateCardLevel::Minimal => "minimal",
+                crate::agent::context::budget::StateCardLevel::Full => "full",
+            };
+            crate::agent::telemetry::record_card_sections(
+                state, session_id, step_id, level, &sections,
+            );
+        }
+    }
+
+    // �📊 逐调用 telemetry 的当轮上下文快照（循环外算一次，各请求行共用）：
     // 前缀指纹仅在完整上下文首次请求时有效；修复重发行固定 NULL。
     let telemetry_history_count = messages.turns_history.len() as i64;
     let telemetry_fetched_tools_count = messages.fetched_tools.len() as i64;

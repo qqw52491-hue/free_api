@@ -2743,6 +2743,12 @@ async fn run_agent_main_loop_in_workspace_inner(
         // 读取型工具：把本次读取的 output_id 回填进重复读取台账，
         // 让后续拦截回执指向持久化句柄（脱水/压缩后仍可用 task_store 定向回查）
         if result.success {
+            // 读重叠提示（先于记账，拿的是"此前已读"的覆盖）：与已读区间重叠
+            // 且期间文件未被写入时，在读结果尾部附一行事实提示。
+            // 不拦截——不同行窗仍是不同信息（window_read 判例），提示权归模型。
+            if let Some(hint) = context.read_overlap_hint(&instruction) {
+                output_text.push_str(&hint);
+            }
             context.note_read_output_id(&instruction, &workspace_dir, &evidence_output_id);
             // 取证台账（展示用）：读取/列目录/检索/回查成功即记账，
             // 跨压缩保留——脱水后模型据 output_id 回查而非原样重读

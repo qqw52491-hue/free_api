@@ -211,6 +211,43 @@
     }
 
     #[test]
+    fn read_overlap_hint_fires_on_overlap_and_suppresses_after_write() {
+        let mut context = ctx();
+        context.note_evidence_receipt(
+            3,
+            &inst("local_file", "read", serde_json::json!({"path": "src/a.rs", "start_line": 1, "end_line": 150})),
+            "out-a",
+        );
+        // 重叠读（不同行窗）→ 提示
+        let overlap = inst(
+            "local_file", "read",
+            serde_json::json!({"path": "src/a.rs", "start_line": 100, "end_line": 260}),
+        );
+        let hint = context.read_overlap_hint(&overlap);
+        assert!(hint.is_some(), "重叠读应出提示");
+        assert!(hint.as_deref().unwrap().contains("L1-150"), "提示应含已覆盖区间: {}", hint.as_deref().unwrap());
+        assert!(hint.as_deref().unwrap().contains("out-a"), "提示应带句柄");
+        // 不重叠读 → 不提示
+        let fresh = inst(
+            "local_file", "read",
+            serde_json::json!({"path": "src/a.rs", "start_line": 500, "end_line": 650}),
+        );
+        assert!(context.read_overlap_hint(&fresh).is_none());
+        // 读后该文件被写过 → 重读正当，不提示
+        context.side_effects.push(crate::agent::context::types::SideEffectRecord {
+            step_id: 10,
+            tool: "local_file".into(),
+            description: "edit".into(),
+            timestamp: "t".into(),
+            affected_paths: vec!["src/a.rs".into()],
+        });
+        assert!(context.read_overlap_hint(&overlap).is_none(), "写后重读不应提示");
+        // 非读指令忽略
+        let w = inst("local_file", "write", serde_json::json!({"path": "src/a.rs", "content": "x"}));
+        assert!(context.read_overlap_hint(&w).is_none());
+    }
+
+    #[test]
     fn evidence_ledger_render_sorted_bounded_and_shows_handle() {
         let mut context = ctx();
         for i in 0..25usize {
