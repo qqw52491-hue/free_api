@@ -163,6 +163,8 @@ pub fn log_llm_exchange_to_file(
 
     if let Ok(s) = serde_json::to_string_pretty(&logs_array) {
         let _ = std::fs::write(&log_path, s);
+        // 成功归档是常规簿记，不广播——每步一行的公告渲染进对话流是纯噪音
+        // （长路径在 md 下显示为一坨链接，实测观感"卡卡"）。只有异常值得披露。
         if let Some(err) = error {
             println!(
                 "📁 [模型异常已记录] 步骤 #{} (尝试 {}) 报错已归档到 {}: {}",
@@ -170,12 +172,6 @@ pub fn log_llm_exchange_to_file(
                 try_index,
                 log_path.display(),
                 err
-            );
-        } else {
-            println!(
-                "📁 [步骤日志已记录] 步骤 #{} 交互已归档到 {}",
-                step_id,
-                log_path.display()
             );
         }
     }

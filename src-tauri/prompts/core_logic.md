@@ -140,7 +140,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 {
   "tool": "task_store",
   "session_title": "任务全局精炼宏观主旨（仅在人类发起新任务或干预时提供 4~12 字名词短语，严禁'任务结束/局部操作'等狭隘词）",
-  "thought": "单句工程师推断，默认留空——仅关键转折/矛盾/方案切换/受阻时写，格式「[现象]——[推断]：[动作]」；严禁问候/客套/汇报进度/复述 description；每 4~6 步至多 1 条；与 finding 互斥（写 finding 时本字段为 ''）",
+  "thought": "简要思考推断，默认留空——仅关键转折/矛盾/方案切换/受阻时写（支持 Markdown 自然表述，直截了当说清楚）；严禁问候/客套/汇报进度/复述 description；每 4~6 步至多 1 条；与 finding 互斥（写 finding 时本字段为 ''）",
   "finding": "可选：阶段突破/关键结论/里程碑/风险阻碍时 1~2 句（支持 Markdown 粗体、行内代码、列表或对比表格）；与 thought 互斥",
   "finding_kind": "可选：start|breakthrough|milestone|summary|warning|blocker",
   "description": "读取会话资源列表以分析当前数据",

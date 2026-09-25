@@ -238,7 +238,8 @@
                                 {{ copiedKey === '思考内容' ? '已复制 ✓' : '复制思考' }}
                             </button>
                         </div>
-                        <p class="narrative-copy">{{ activeThoughtText || '正在等待模型返回思考内容…' }}</p>
+                        <div v-if="activeThoughtText" class="narrative-copy markdown-body" v-html="renderMarkdown(activeThoughtText)"></div>
+                        <p v-else class="narrative-copy empty-placeholder">正在等待模型返回思考内容…</p>
                     </div>
                 </div>
                 <div v-else-if="selectedStep && selectedSubpart === 'thought'" class="narrative-detail">
@@ -257,7 +258,8 @@
                                 {{ copiedKey === '步骤思考' ? '已复制 ✓' : '复制思考' }}
                             </button>
                         </div>
-                        <p class="narrative-copy">{{ selectedStep.thought || selectedStep.reflection || '该步骤没有单独的思考内容。' }}</p>
+                        <div v-if="selectedStep.thought || selectedStep.reflection" class="narrative-copy markdown-body" v-html="renderMarkdown(selectedStep.thought || selectedStep.reflection || '')"></div>
+                        <p v-else class="narrative-copy empty-placeholder">该步骤没有单独的思考内容。</p>
                     </div>
                 </div>
                 <div v-else-if="!selectedStep" class="detail-placeholder">
@@ -622,7 +624,7 @@
 import { computed, ref, watch } from "vue";
 import type { AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTeamState, AgentTokenUsage, AgentToolStatus, FileDiffPayload, FileChangeChip, LlmParseErrorItem } from "./types";
 import type { AgentArtifactInput } from "../../types/artifact";
-import { formatClock, formatMilliseconds, formatNumber, formatPayload } from "./format";
+import { formatClock, formatMilliseconds, formatNumber, formatPayload, renderMarkdown } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 import AgentTeamDeck from "./AgentTeamDeck.vue";
