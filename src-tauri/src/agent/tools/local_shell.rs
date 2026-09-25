@@ -331,6 +331,27 @@ pub fn dispatch(
     //   1) 命令引用判据子路径（文件路径或 HEAD:test/... 式 git pathspec）→ 拦；
     //   2) git sparse-checkout 变更子命令（add/set/disable/reapply）→ 拦；
     //   3) 宿仓内、沙盒工作区之外的路径（绝对或 cwd 相对解析）→ 拦。
+    // 工作区别名绕行（任何会话期生效，不止评测密封）：
+    // `ln -sfn . src-tauri` 造自指符号链接后，`src-tauri/src-tauri/x.rs`
+    // 与 `src-tauri/x.rs` 是同 inode 不同路径串——path_guard 按路径串记
+    // 读基线/副作用台账，别名即盲写护栏绕行敞口。实测 seq_ledger 场
+    // 模型超时前一刻真用了这条（step 82）。机械规则：ln/ln -s 的目标
+    // 解析为链接位置的祖先或其自身 → 构成路径环 → 拦。
+    if let Some(reason) = workspace_alias_link_violation(&final_cmd, &execution_cwd, ws_root) {
+        let payload = json!({
+            "kind": "workspace_alias_link",
+            "retryable": false,
+            "safe_to_retry": false,
+            "recommended_action": "use_real_paths_only",
+        });
+        return DispatchResult { view: None,
+            stdout: String::new(),
+            stderr: format!("❌ [路径别名拦截] {}：在工作区内创建指向其祖先/自身的链接会制造路径环——同一文件出现两个路径串，读写基线台账被绕行。请直接用真实相对路径操作。\n<!-- 结构化元数据: {} -->", reason, payload),
+            success: false,
+            route: "local_shell:workspace_alias".to_string(),
+        };
+    }
+
     if let Some(reason) = sealed_sandbox_violation(&final_cmd, &execution_cwd, ws_root) {
         let payload = json!({
             "kind": "sealed_eval_sandbox",
@@ -408,6 +429,67 @@ fn sealed_sandbox_violation<'a>(
             if cand.starts_with(seal_root) && !cand.starts_with(ws_root) {
                 return Some("访问宿仓内沙盒外路径");
             }
+        }
+    }
+    None
+}
+
+/// 工作区路径别名检查：`ln [opts] TARGET LINK` 中 TARGET 解析后为 LINK
+/// 所在目录的祖先或其自身 → 建成后构成路径环（同一 inode 两个路径串，
+/// 读写基线/副作用台账被绕行）。纯词法，不触盘；不含语义判断。
+/// 返回违规原因；None = 非 ln 命令或不构成环。
+fn workspace_alias_link_violation<'a>(
+    final_cmd: &str,
+    execution_cwd: &Path,
+    ws_root: &Path,
+) -> Option<&'a str> {
+    let toks: Vec<&str> = final_cmd
+        .split(|c: char| c.is_whitespace() || "\"'`".contains(c))
+        .filter(|t| !t.is_empty())
+        .collect();
+    // 逐个 ln 调用单元检查（命令可能经 && / ; 串联，先按分隔符切段再逐段判）
+    let segs: Vec<Vec<&str>> = toks
+        .split(|t| matches!(*t, "&&" | "||" | ";" | "|"))
+        .map(|s| s.to_vec())
+        .collect();
+    for seg in segs {
+        let Some(ln_idx) = seg.iter().position(|t| *t == "ln" || t.ends_with("/ln")) else {
+            continue;
+        };
+        let args: Vec<&str> = seg[ln_idx + 1..]
+            .iter()
+            .filter(|t| !t.starts_with('-'))
+            .copied()
+            .collect();
+        if args.len() < 2 {
+            continue;
+        }
+        // ln TARGET LINK（LINK 缺省=当前目录）；多 TARGET+DIR 形态取末位为落点
+        let link_raw = args[args.len() - 1];
+        let target_raw = args[args.len() - 2];
+        let resolve = |raw: &str| -> PathBuf {
+            let p = Path::new(raw);
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                execution_cwd.join(p)
+            };
+            lex_normalize(&abs)
+        };
+        let target = resolve(target_raw);
+        // LINK 是路径本身：ln -s T dir/x → 链接物为 dir/x；ln -s T dir →
+        // 链接物为 dir/basename(T)。环判定只看前者显式形态与 DIR 形态两者。
+        let link_loc = resolve(link_raw);
+        let link_parent = link_loc.parent().map(|p| p.to_path_buf()).unwrap_or(link_loc.clone());
+        // 目标为链接或其祖先：link 落在 target 之内 → 自指/祖先环
+        let creates_loop = link_loc.starts_with(&target)
+            || link_parent.starts_with(&target);
+        // ws_root 需归一到 canonical 形态再比较（macOS /var→/private/var 符号链：
+        // execution_cwd 已 canonicalize，裸 ws_root 直接 starts_with 恒错位）。
+        let ws_canon = ws_root.canonicalize().unwrap_or_else(|_| ws_root.to_path_buf());
+        let inside_ws = |p: &Path| p.starts_with(&ws_canon) || p.starts_with(ws_root);
+        if inside_ws(&link_loc) && inside_ws(&target) && creates_loop {
+            return Some("创建指向工作区祖先路径的符号链接/硬链接（自指路径环）");
         }
     }
     None
@@ -917,6 +999,42 @@ mod tests {
         let p6 = json!({"command": "cat /etc/hosts | head -1"});
         let r6 = dispatch(&test_db(), "s", "exec", &p6, Some(&ws_dir));
         assert!(r6.success, "宿仓外路径应放行: {}", r6.stderr);
+    }
+
+    /// 路径别名绕行（实测 seq_ledger 场 step82 现行）：`ln -sfn . src-tauri`
+    /// 造自指环后 src-tauri/src-tauri/x.rs ≡ src-tauri/x.rs，path_guard
+    /// 路径串台账被双名绕行。规则不依赖评测密封——任何会话期生效。
+    #[test]
+    fn test_workspace_alias_link_blocked() {
+        let ws = TempDirGuard::new();
+        let src = ws.path().join("src-tauri");
+        std::fs::create_dir_all(&src).unwrap();
+
+        // ① 实测攻击原样：cd src-tauri && ln -sfn . src-tauri → 拦
+        let p1 = json!({"command": "cd src-tauri && ln -sfn . src-tauri", "cwd": "."});
+        let r1 = dispatch(&test_db(), "s", "exec", &p1, Some(ws.path()));
+        assert!(!r1.success && r1.route == "local_shell:workspace_alias", "自指环必须拦: {}", r1.stderr);
+
+        // ② 直接形态（cwd 为 ws 根）：ln -s . sub/alias → 拦
+        let p2 = json!({"command": "ln -s . sub/alias"});
+        let r2 = dispatch(&test_db(), "s", "exec", &p2, Some(ws.path()));
+        assert!(!r2.success);
+
+        // ③ 合法前向链接放行：ln -s dir/file alias（目标非祖先）
+        std::fs::write(src.join("real.rs"), "fn x(){}").unwrap();
+        let p3 = json!({"command": "ln -s src-tauri/real.rs src-tauri/alias.rs"});
+        let r3 = dispatch(&test_db(), "s", "exec", &p3, Some(ws.path()));
+        assert!(r3.success, "前向别名应放行: {}", r3.stderr);
+
+        // ④ 目标在工作区外放行：ln -s /etc/hosts ./h
+        let p4 = json!({"command": "ln -s /etc/hosts ./h"});
+        let r4 = dispatch(&test_db(), "s", "exec", &p4, Some(ws.path()));
+        assert!(r4.success, "外部目标应放行: {}", r4.stderr);
+
+        // ⑤ 普通命令不受影响
+        let p5 = json!({"command": "echo ok"});
+        let r5 = dispatch(&test_db(), "s", "exec", &p5, Some(ws.path()));
+        assert!(r5.success);
     }
 
     #[test]
