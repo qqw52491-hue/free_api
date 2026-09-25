@@ -127,6 +127,9 @@ pub(crate) fn execute_command_inner(
     // 项目专属会话禁止切换工作区（锁定在项目根目录，防止越界串扰）
     let lower_tool = tool.to_ascii_lowercase();
     let lower_action = action.to_ascii_lowercase();
+    // 核心内置工具的 action 走归一小写（模型偶发 "Read"/"Write" 首字母大写
+    // 不影响内置路由）；MCP 插件路径保留 action 原样——它承载子工具原名。
+    let core_action = lower_action.as_str();
     if lower_tool.contains("switch_workspace")
         || lower_tool.contains("switchworkspace")
         || lower_tool.contains("set_workspace")
@@ -158,7 +161,7 @@ pub(crate) fn execute_command_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("list_resources")
         } else {
-            action
+            core_action
         };
         return task_store::dispatch(db, session_id, final_action, params);
     }
@@ -170,7 +173,7 @@ pub(crate) fn execute_command_inner(
         let final_action = if tool.eq_ignore_ascii_case("register_project_resource") {
             "register_resource"
         } else {
-            action
+            core_action
         };
         return dispatch_project_resources(db, session_id, final_action, params);
     }
@@ -195,7 +198,7 @@ pub(crate) fn execute_command_inner(
 
     // 3.6 核心原生工具 E: model_manager (自主管理模型规格与渠道绑定，支持增删改查与安全确认)
     if tool.eq_ignore_ascii_case("model_manager") {
-        return crate::agent::tools::model_manager::dispatch(db, action, params);
+        return crate::agent::tools::model_manager::dispatch(db, core_action, params);
     }
 
     // 3.7 核心原生工具 F: mcp_manager (MCP 外部插件接入、批量导入与能力卡维护)
@@ -217,52 +220,52 @@ pub(crate) fn execute_command_inner(
                 };
             }
         }
-        return crate::agent::tools::mcp_manager::dispatch(db, action, params);
+        return crate::agent::tools::mcp_manager::dispatch(db, core_action, params);
     }
 
     // 3.8 核心原生工具 G: skill_manager (工作区自定义技能与提示词库维护)
     if tool.eq_ignore_ascii_case("skill_manager") {
-        return crate::agent::tools::skill_manager::dispatch(db, action, params);
+        return crate::agent::tools::skill_manager::dispatch(db, core_action, params);
     }
     // 3.9 核心原生工具 H: role_manager (专精角色池维护——角色卡=人设+模型绑定+作用域)
     if tool.eq_ignore_ascii_case("role_manager") {
-        return crate::agent::tools::role_manager::dispatch(db, action, params);
+        return crate::agent::tools::role_manager::dispatch(db, core_action, params);
     }
 
     // 3.9 核心原生工具 H: schedule_manager (定时任务管理——对话内直接建计划)
     if tool.eq_ignore_ascii_case("schedule_manager") {
-        return crate::agent::tools::schedule_manager::dispatch(db, action, params);
+        return crate::agent::tools::schedule_manager::dispatch(db, core_action, params);
     }
 
     // 3.10 核心原生工具 I: project_manager (项目工作区管理)
     if tool.eq_ignore_ascii_case("project_manager") {
-        return crate::agent::tools::project_manager::dispatch(db, action, params);
+        return crate::agent::tools::project_manager::dispatch(db, core_action, params);
     }
 
     // 3.11 核心原生工具 J: system_info (本机运行状态)
     if tool.eq_ignore_ascii_case("system_info") {
-        return crate::agent::tools::system_info::dispatch(db, action, params);
+        return crate::agent::tools::system_info::dispatch(db, core_action, params);
     }
 
     // 3.12 核心原生工具 K: wechat_manager (微信通道状态与主动知会)
     if tool.eq_ignore_ascii_case("wechat_manager") {
-        return crate::agent::tools::wechat_manager::dispatch(db, action, params);
+        return crate::agent::tools::wechat_manager::dispatch(db, core_action, params);
     }
 
     // 3.9 核心原生工具 H: artifact_manager (受管产物物理写入、元数据登记与产物账本管理)
     if tool.eq_ignore_ascii_case("artifact_manager") || tool.eq_ignore_ascii_case("artifact_store")
     {
-        return crate::agent::artifact_manager::dispatch(db, session_id, action, params);
+        return crate::agent::artifact_manager::dispatch(db, session_id, core_action, params);
     }
 
     // 3.13 核心原生工具 L: local_file (工作区与临时目录双白名单本地文件读写/精准局部替换)
     if tool.eq_ignore_ascii_case("local_file") {
-        return crate::agent::tools::local_file::dispatch(db, session_id, action, params, workspace_root);
+        return crate::agent::tools::local_file::dispatch(db, session_id, core_action, params, workspace_root);
     }
 
     // 3.14 核心原生工具 M: local_shell (工作区物理边界与超时保护本地命令行执行)
     if tool.eq_ignore_ascii_case("local_shell") {
-        return crate::agent::tools::local_shell::dispatch(db, session_id, action, params, workspace_root);
+        return crate::agent::tools::local_shell::dispatch(db, session_id, core_action, params, workspace_root);
     }
 
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)
@@ -372,7 +375,7 @@ pub(crate) fn execute_command_inner(
     }
 
     // 5. 针对将 parallel 误写为独立工具的精准纠错
-    if tool == "parallel" || action == "parallel" {
+    if tool == "parallel" || core_action == "parallel" {
         return DispatchResult { view: None,
             stdout: String::new(),
             stderr: "❌ 'parallel' 不是独立工具名，而是顶层并行执行模式字段。\n正确格式示例：{\"plan_title\": \"...\", \"parallel_reason\": \"...\", \"parallel\": [{\"tool\": \"工具1\", \"command\": {...}}, {\"tool\": \"工具2\", \"command\": {...}}]}。\n请重新按标准 JSON 格式输出！".to_string(),
