@@ -5,7 +5,7 @@
   "base_commit": "HEAD",
   "problem_statement": "【可靠性强化任务】用户反馈：端点偶发 5xx/网络抖动时任务成功率仍不够高——stream_with_retry 现有 240s 总预算与熔断器。产品要求：提高可重试失败（HTTP 429/5xx/网络层错误）的重试韧性——允许按错误分类决定是否重试、对退避间隔加入抖动（jitter）防羊群效应；但必须保留 max_retries 次数上限、总时间预算与熔断器语义不削弱。约束：用户中断（STREAM_INTERRUPTED）必须仍然立即返回不得重试；成功路径行为不变。",
   "judge_kind": "command",
-  "verify_command": "grep -q 'max_retries' src-tauri/src/llm.rs && grep -q 'backoff' src-tauri/src/llm.rs && git diff -- src-tauri/src/llm.rs | grep -iqE '^\\+.*(jitter|retryable|分类|抖动|429|classify)' && [ -z \"$(git diff -- src-tauri/src/llm.rs | grep -E '^-.*(max_retries|budget_ms|breaker)')\" ] && [ \"$(sqlite3 \"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "verify_command": "grep -rq 'max_retries' src-tauri/src/llm/ && grep -rq 'backoff' src-tauri/src/llm/ && git diff -- src-tauri/src/llm/ | grep -iqE '^\\+.*(jitter|retryable|分类|抖动|429|classify)' && [ -z \"$(git diff -- src-tauri/src/llm/ | grep -E '^-.*(max_retries|budget_ms|breaker)')\" ] && [ \"$(sqlite3 \"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
   "expected_exit_code": 0,
   "max_steps": 60,
   "max_prompt_tokens": 8000000,

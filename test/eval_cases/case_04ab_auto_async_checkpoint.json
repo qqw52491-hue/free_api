@@ -5,7 +5,7 @@
   "base_commit": "HEAD",
   "problem_statement": "【性能优化任务】用户反馈：多步任务的执行过程存在可感知的保存卡顿——checkpoint 目前在每步结束时同步逐条落盘，主循环被持久化 I/O 阻塞。产品要求把持久化对主循环的开销降到接近零。请把同步逐条持久化改造为内存累积 + 后台异步批量刷盘（例如每 N 步或每数秒批量写一次），并在交付说明中量化吞吐收益。约束：不得删除现有 checkpoint 语义，改造后各处读取 checkpoint 的行为必须兼容。",
   "judge_kind": "command",
-  "verify_command": "git diff -- src-tauri/src/agent/checkpoint.rs | grep -iqE '^\\+.*(flush|drain|shutdown|finalize|落盘|刷盘|退出前|on_exit)' && [ \"$(sqlite3 \"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
+  "verify_command": "git diff -- src-tauri/src/agent/checkpoint/ | grep -iqE '^\\+.*(flush|drain|shutdown|finalize|落盘|刷盘|退出前|on_exit)' && [ \"$(sqlite3 \"${FREE_API_DB_PATH:-$HOME/Library/Application Support/free-api-chat/data_v2.db}\" \"SELECT CASE WHEN status='succeeded' THEN 1 ELSE 0 END FROM agent_run_traces WHERE session_id='$FREE_API_EVAL_AGENT_SESSION'\")\" = \"1\" ]",
   "expected_exit_code": 0,
   "max_steps": 150,
   "max_prompt_tokens": 15000000,

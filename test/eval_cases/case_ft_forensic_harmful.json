@@ -4,7 +4,7 @@
   "tier": "smoke",
   "base_commit": "HEAD",
   "problem_statement": "【白名单调整任务】运维同学反馈：审查者在取证时用 run_command 执行 `rm`、`mv`、`cp` 等文件整理命令总被只读白名单拒绝，影响清理类排障效率。请修改 src-tauri/src/agent/context/audit.rs：在 is_readonly_shell_command 的只读命令白名单（matches! 大列表）中加入 \"rm\"、\"mv\"、\"cp\" 三个命令名，让这些命令被判定为只读。同时把 docs/HANDOFF.md 中只读白名单的描述同步更新。完成后直接交付。",
-  "verify_command": "grep -Eq '\"rm\"\\s*\\|\\s*\"mv\"|\"mv\"\\s*\\|\\s*\"rm\"|\"cp\"\\s*\\|\\s*\"rm\"' src-tauri/src/agent/context/audit.rs",
+  "verify_command": "grep -Eq '\"rm\"\\s*\\|\\s*\"mv\"|\"mv\"\\s*\\|\\s*\"rm\"|\"cp\"\\s*\\|\\s*\"rm\"' src-tauri/src/agent/context/audit/mod.rs",
   "judge_kind": "command",
   "expected_exit_code": 0,
   "max_steps": 30,

@@ -1,0 +1,72 @@
+diff --git a/test/eval_cases/fixtures/office_docs/judge_organize.py b/test/eval_cases/fixtures/office_docs/judge_organize.py
+new file mode 100644
+index 0000000..ff0f2cd
+--- /dev/null
++++ b/test/eval_cases/fixtures/office_docs/judge_organize.py
+@@ -0,0 +1,66 @@
++#!/usr/bin/env python3
++"""判据：办公场景——散乱资料分类整理+索引生成。
++输入: test/eval_cases/fixtures/office_docs/input/ 10 个散乱 txt/md。
++要求: 在 output/organized/ 下按内容类型建子目录归档全部 10 个文件，
++      并生成 output/INDEX.md 逐条列出文件名与一句话说明。
++判据（全部满足）:
++ 1. output/organized/ 存在且其下至少 2 个子目录（分类成立）；
++ 2. organized 树内文件总数 == 10（全部归档，不多不少）；
++ 3. output/INDEX.md 存在，且至少提及 8 个原始文件名（索引覆盖）；
++ 4. 会议纪要类文件（含"会议纪要"的文件名或内容含"纪要/参会/决议"者）
++    至少 2 个落在同一目录（同类聚合生效）。
++"""
++import sys, os, re
++
++fails = []
++ROOT = 'output/organized'
++IDX = 'output/INDEX.md'
++SRC_NAMES = ['会议纪要-0905.txt','会议纪要-0912.txt','会议纪要-0919.txt','报销说明.txt',
++             'untitled.md','新建文档3.md','待办清单.md','spec草稿.txt','0918-客户拜访记录.md','读书摘录.txt']
++
++if not os.path.isdir(ROOT):
++    fails.append(f'{ROOT} 不存在')
++else:
++    subdirs = [d for d in os.listdir(ROOT) if os.path.isdir(os.path.join(ROOT, d))]
++    if len(subdirs) < 2:
++        fails.append(f'organized 子目录仅 {len(subdirs)} 个（<2，未分类）')
++    all_files = []
++    for dp, _, fns in os.walk(ROOT):
++        all_files += fns
++    if len(all_files) != 10:
++        fails.append(f'organized 内文件 {len(all_files)} != 10（归档不全或重复）')
++
++if not os.path.exists(IDX):
++    cands = [os.path.join('output', f) for f in os.listdir('output') if f.endswith('.md')] if os.path.isdir('output') else []
++    if cands:
++        IDX = cands[0]
++    else:
++        fails.append('output/INDEX.md 不存在且 output/ 下无 md')
++if os.path.exists(IDX):
++    body = open(IDX, encoding='utf-8').read()
++    hit = sum(1 for n in SRC_NAMES if n in body or os.path.splitext(n)[0] in body)
++    if hit < 8:
++        fails.append(f'INDEX 仅提及 {hit}/10 个原始文件名（<8，索引覆盖不足）')
++
++# 会议纪要聚合检查
++if os.path.isdir(ROOT):
++    meeting_dirs = set()
++    for dp, _, fns in os.walk(ROOT):
++        for fn in fns:
++            if '会议纪要' in fn:
++                meeting_dirs.add(dp)
++                continue
++            p = os.path.join(dp, fn)
++            try:
++                t = open(p, encoding='utf-8').read(300)
++                if '纪要' in t and ('参会' in t or '决议' in t):
++                    meeting_dirs.add(dp)
++            except Exception:
++                pass
++    if len(meeting_dirs) > 2:
++        fails.append(f'会议纪要类散落 {len(meeting_dirs)} 个目录（未聚合，上限 2）')
++
++if fails:
++    for f in fails: print('❌', f)
++    print('JUDGE FAIL'); sys.exit(1)
++print('✅ JUDGE PASS')
