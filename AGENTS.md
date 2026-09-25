@@ -101,6 +101,9 @@ triage 判决、plan、假设清单都是**先验**，不是终判。后续证�
 | 2026-09-26 | 全库 813 次审查派发分层：invalid_output 121（预算耗尽警告后仍吐不出合规 JSON，机制兜底已存在：警告→3 strike）、pro timed_out 55、`190c3bdf` 41 次零成功 | 审查失败三分：①模型合规能力（invalid_output 散布各档）②pro 审查超时成本 ③**死模型仍被派发**（路由健康检查漏）——①②是能力/成本项，③是机制项 | ③待修：role_models 死账号健康检查（与 dff4440 同类）；①②不归机制 |
 | 2026-09-26 | window_read 场：模型把窗口参数编进 `ledger_key`（`#L1-L150`）——语义正解+双向测试都写了，判红只因没叫 `window_sig`。另发现 `重复读取拦截` 半条 base 恒真不承重 | **第三类判据烂源：命名钉死**——grep 参考实现自创标识符，等价实现必挂。修法=钉**参数词汇封闭集**（行号区间必须叫 start_line/end_line，base 全不存在=承重）不钉实现名 | 已修（6453618）；全库扫描确认同类仅此一例；`root_cause_verdict` 必填字段同场实证输出 `explains` |
 | 2026-09-26 | 成功场过程分析：case_01 同题绿场 76↔220 步差 3 倍；220 步场 83% 是 search（逐符号定位当导航） | 绿场无隐藏机制病——步数方差是模型导航自由度（过程层放开=设计如此）；search 风暴虽低效但不违反任何边界 | 不动机制；证实"防冤枉步"的卡片段价值只在它真防住时 |
+| 2026-09-26 | eval_runner 产出 `rc-tauri/` 截断路径 76 条：porcelain `XY ` 前缀中 ` M` 首字符是空格，`.trim()` 削掉首行前缀 → slice(3) 多吃一字符 | **结构性 trim bug**：只截断每行第一个文件，且只在首项为未暂存修改时现形——藏在 diff_changed_files 里污染 judge_modified/test_neutered 匹配 | 已修（7c24277）：split 后 filter 替代整体 trim |
+| 2026-09-26 | goal_anchor 场三次 plan_review 全缺席 `root_cause_verdict` 却判 succeeded——required 在 schema 链路三层断裂：注入嵌 strict 块内、无卡路径无 schema、contract_schema 只存原始卡 schema | **「提示词必填」≠「机制必填」**：字段要拦得住需要 schema 声明+校验执行+落库三者同物。该字段是第一个走 required 路径的宿主注入项，把接缝炸出来了 | 已修（1102afa）：无卡建最小契约+注入无条件+有效 schema 落账+insufficient×approved 自洽降级 |
+| 2026-09-26 | 死模型 `190c3bdf` 连派 41 次零成功——recently_failed_models 只在 failover 选型侧查询，主选路径（显式钉死/角色卡）跳过健康检查 | 健康检查覆盖不对称：failover 已筛但主选盲选 | 已修（1de5ec6）：主选落定后同查失败集，命中走 failover+披露 |
 
 ## 已评估暂缓（有触发条件才建）
 
