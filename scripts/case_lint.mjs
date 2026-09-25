@@ -76,6 +76,12 @@ for (const f of readdirSync(CASE_DIR).filter((f) => f.endsWith(".json"))) {
   for (const m of (def.verify_command || "").matchAll(/(?:test|\[)\s+-f\s+([\w./-]+)/g)) {
     creationAsserted.add(m[1]);
   }
+  // ${VAR:-default}} 尾巴多花括号笔误：shell 展开在首个 } 闭合、尾部 } 成字面量，
+  // DB 路径恒不存在 → 判据 SQL 全部落空恒红（实测 8 道 hd 题全中招）。
+  if (/\$\{[^}]*:-[^}]*\}\}/.test(def.verify_command || "")) {
+    bad++;
+    console.log(`🔴 ${def.id}: verify_command 含 \${VAR:-default}} 双花括号笔误——回退路径恒被命中，判据结构性恒红`);
+  }
   const missing = [];
   const artifactSuspects = [];
   for (const [p, src] of refs) {
