@@ -20,11 +20,29 @@ impl SandwichContext {
         });
 
         // M1: 任务目标静态锚点（epoch 内不变，压缩时由 compaction 提升最新目标写入 ctx.user_goal）
-        if !self.user_goal.is_empty() {
-            messages.push(ChatMessage {
-                role: "user".to_string(),
-                content: json!(format!("【任务目标】\n{}", self.user_goal)),
-            });
+        // M1.5: 会话可操作路径边界契约并入同一静态区——内容在会话入口一次定型
+        // （工作区/临时目录路径本就不变），原本放尾部状态卡：Minimal 档整段
+        // 丢失（门禁级契约不应随档位消失）+ 每步 ~1.9KB 静态散文全价重发。
+        // 与 M1 合并为同一条 user 消息，规避供应商对连续同 role 消息的差异处理。
+        {
+            let mut m1 = String::new();
+            if !self.user_goal.is_empty() {
+                m1.push_str(&format!("【任务目标】\n{}", self.user_goal));
+            }
+            if let Some(manifest) = &self.project_resource_manifest {
+                if !manifest.trim().is_empty() {
+                    if !m1.is_empty() {
+                        m1.push_str("\n\n");
+                    }
+                    m1.push_str(manifest.trim_end());
+                }
+            }
+            if !m1.is_empty() {
+                messages.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: json!(m1),
+                });
+            }
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -165,13 +183,9 @@ impl SandwichContext {
                 bottom_state_card.push_str(&format!("{}\n\n", resource_scope_projection));
             }
 
-            // (6.1) 项目受管文件清单与句柄 (Project Resource Manifest)
-            // 动态放在尾部状态卡，既能让模型实时感知最新文件，又绝对不破坏 M0 顶层长前缀缓存！
-            if let Some(manifest) = &self.project_resource_manifest {
-                if !manifest.is_empty() {
-                    bottom_state_card.push_str(&format!("{}\n\n", manifest));
-                }
-            }
+            // (6.1) 项目受管文件清单与可操作路径边界契约 → 已上移到 M1 静态前缀
+            // （会话入口定型、不变 → 全吃缓存；顺带修复 Minimal 档整段丢失的
+            // 门禁级契约缺失）。尾部只留一行速记指针保决策时可见性。
 
             // (7) 会话任务数据区目录 (TaskStore 资源摘要)
             bottom_state_card.push_str(&ContextRenderer::render_task_resources(
@@ -200,6 +214,14 @@ impl SandwichContext {
         bottom_state_card.push_str(&ContextRenderer::render_plan_gate(
             self.plan_gate.as_ref(),
         ));
+
+        // (12) 路径边界速记——完整契约在 M1 静态前缀，这里一行保决策时可见
+        // （任何档位都渲染：边界提醒不属于可按档位裁剪的辅助信息）。
+        if let Some(pointer) = &self.path_scope_pointer {
+            if !pointer.trim().is_empty() {
+                bottom_state_card.push_str(&format!("{}\n", pointer.trim_end()));
+            }
+        }
         let trimmed_bottom = bottom_state_card.trim_end();
         if !trimmed_bottom.is_empty() {
             messages.push(ChatMessage {

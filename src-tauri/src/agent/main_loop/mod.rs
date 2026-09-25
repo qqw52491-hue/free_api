@@ -432,7 +432,9 @@ async fn run_agent_main_loop_in_workspace_inner(
             );
     }
 
-    // 动态可操作文件边界卡片挂载在底层面包（M_Tail），每轮伴随状态卡投射，绝不污染 M0 顶层长前缀缓存
+    // 可操作文件边界契约：内容会话入口一次定型 → 挂 M1 静态前缀吃缓存
+    // （此前放尾部状态卡，~1.9KB 静态散文每步全价重发，且 Minimal 档整段
+    // 丢失——门禁级契约不应随档位裁剪）。尾部只留一行速记指针。
     let mut manifest_text = build_path_scope_manifest(
         &workspace_dir,
         &session_tmp_dir,
@@ -470,6 +472,15 @@ async fn run_agent_main_loop_in_workspace_inner(
     }
 
     context.project_resource_manifest = Some(manifest_text);
+    context.path_scope_pointer = Some(if is_explicit_workspace || auto_pilot {
+        format!(
+            "【路径速记】项目工作区 `{}`；临时产物/草稿一律 `tmp/`；越界访问会被 path_guard 拦截。完整契约见会话开头静态段。",
+            workspace_dir.display()
+        )
+    } else {
+        "【路径速记】本会话无项目工作区；临时产物/草稿一律 `tmp/`；越界访问会被 path_guard 拦截。完整契约见会话开头静态段。"
+            .to_string()
+    });
     context.compact_tools_index = Some(compact_tools_index);
     // 注入当前路由模型的上下文窗口大小与压缩配置，用于历史压缩水位动态计算与双层智能归档。
     // 双模型路由下同一段历史会分别发给推理与执行模型，预算必须按两者窗口的

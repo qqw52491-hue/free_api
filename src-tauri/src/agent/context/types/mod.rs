@@ -268,9 +268,15 @@ pub struct SandwichContext {
     /// 活跃资源作用域契约；独立于历史压缩，持续投影到每轮上下文。
     #[serde(default)]
     pub resource_scope: ResourceScopeContract,
-    /// 项目受管文件清单动态投影（放置于底层面包，保障 M0 顶层前缀绝对不变）
+    /// 项目受管文件清单与可操作路径边界契约（会话入口一次定型、epoch 内不变
+    /// → 挂在 M1 后静态前缀吃缓存；此前放尾部状态卡导致 Minimal 档整段丢失
+    /// 且每步全价重发 ~1.9KB 静态散文）
     #[serde(default)]
     pub project_resource_manifest: Option<String>,
+    /// 路径边界速记：尾部状态卡保留的一行指针（任何档位渲染），完整契约在
+    /// 前缀；保留决策时可见性的同时把静态散文从全价尾部挪走。
+    #[serde(default)]
+    pub path_scope_pointer: Option<String>,
     /// 当前纪元（Epoch）锁定的 M0 顶层系统提示词基线（保住跨轮次长前缀缓存）
     #[serde(default)]
     pub epoch_system_prompt: Option<String>,
@@ -402,6 +408,7 @@ impl SandwichContext {
             plan_state: PlanState::new(),
             resource_scope: ResourceScopeContract::default(),
             project_resource_manifest: None,
+            path_scope_pointer: None,
             epoch_system_prompt: None,
             no_progress: NoProgressTracker::default(),
             zero_hit: ZeroHitTracker::default(),
