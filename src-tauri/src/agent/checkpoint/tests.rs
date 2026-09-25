@@ -182,6 +182,73 @@
         assert!(proj.budget_exhausted, "已用 2 轮重试，预算应标记耗尽");
     }
 
+    /// 审查员自洽性机械校验：root_cause_verdict=insufficient（审查员自己宣布
+    /// 根因修好后症状仍会复现）与 decision=approved 互斥——宿主按 escalate→rebuttal
+    /// 同款模式降级，不放行一个自认不成立的根因方向。
+    #[test]
+    fn insufficient_root_cause_verdict_downgrades_approved_to_rebuttal() {
+        let context = SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("run-rcv".to_string(), &context);
+        cp.plan_mode = PlanExecutionMode::CrossReview;
+        cp.plan_phase = PlanPhase::Reviewing;
+        let (_b, db) = mk_db("rcv");
+        let r1 = ledger_run(&db, &cp.run_id, "b", "plan_review", "running", false);
+        cp.set_plan_review_batch("b", 1);
+
+        let mut delivery = crate::agent::child_reviewer::ReviewerDeliveryData {
+            findings: vec![],
+            confidence: "confirmed".to_string(),
+            evidence_refs: vec![],
+            missing_evidence: vec![],
+            routing: None,
+            withdrawn_findings: vec![],
+            objection_verdicts: vec![],
+            scorecard: None,
+            extra: std::collections::HashMap::new(),
+        };
+        delivery
+            .extra
+            .insert("decision".to_string(), serde_json::json!("approved"));
+        delivery
+            .extra
+            .insert("root_cause_verdict".to_string(), serde_json::json!("insufficient"));
+
+        cp.record_reviewer_delivery_for_run(&db, Some(&r1), &delivery);
+        let stored = cp.plan_review_deliveries.get(&r1).expect("delivery 应入账");
+        assert_eq!(
+            stored.get_extra_str("decision"),
+            Some("rebuttal"),
+            "insufficient 与 approved 矛盾必须降级为 rebuttal"
+        );
+        assert_eq!(
+            stored.get_extra_str("original_decision"),
+            Some("approved"),
+            "原始裁决应留档供复盘"
+        );
+        assert!(
+            stored.scorecard.is_none(),
+            "降级为 rebuttal 后不得合成通过评分卡"
+        );
+
+        // 对照组：verdict=explains 时 approved 照常生效
+        let mut cp2 = AgentCheckpoint::new("run-rcv2".to_string(), &context);
+        cp2.plan_mode = PlanExecutionMode::CrossReview;
+        cp2.plan_phase = PlanPhase::Reviewing;
+        let r2 = ledger_run(&db, &cp2.run_id, "b2", "plan_review", "running", false);
+        cp2.set_plan_review_batch("b2", 1);
+        let mut ok_delivery = delivery;
+        ok_delivery
+            .extra
+            .insert("root_cause_verdict".to_string(), serde_json::json!("explains"));
+        cp2.record_reviewer_delivery_for_run(&db, Some(&r2), &ok_delivery);
+        let stored2 = cp2.plan_review_deliveries.get(&r2).unwrap();
+        assert_eq!(stored2.get_extra_str("decision"), Some("approved"));
+        assert!(
+            stored2.scorecard.is_some(),
+            "正常 approved 应补齐基线评分卡"
+        );
+    }
+
     #[test]
     fn plan_gate_projection_defaults_to_auto_exploring_undispatched() {
         let context = SandwichContext::new("system".to_string(), "goal".to_string());

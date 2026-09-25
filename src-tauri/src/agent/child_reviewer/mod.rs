@@ -242,7 +242,17 @@ pub async fn spawn_child_reviewer(
     let param_role_label = params.get("role_label").cloned();
     // 闭集契约兼容：strict_closed_set 的角色卡会把 consumer_verdicts / revised_* 当未
     // 声明字段拒收，在场时向内存 schema 副本临时注入该字段定义（不改 DB 卡片本身）。
+    // plan_review 场景即使无角色卡契约也要建最小非闭集契约：root_cause_verdict
+    // 等宿主注入字段的 required 需要 validate_shape 兜底——否则自定义 schema 为
+    // 空时校验整块跳过，「必填」在默认 system_reviewer 路径上只是提示词许愿
+    // （实测 goal_anchor 场三次审查全缺席 root_cause_verdict）。
     let mut custom_schema = custom_schema;
+    if is_plan_review && custom_schema.is_none() {
+        custom_schema = Some(
+            crate::agent::protocol::ContractSchema::new(Vec::new())
+                .with_strict_closed_set(false),
+        );
+    }
     if let Some(schema) = custom_schema.as_mut() {
         if schema.strict_closed_set {
             if !impact_pack_refs.is_empty()
@@ -267,8 +277,12 @@ pub async fn spawn_child_reviewer(
                     allowed_values: None,
                 });
             }
-            if is_plan_review {
-                for (name, ft, desc, required) in [
+        }
+        // plan_review 宿主字段无条件注入任何 schema（含新建的非闭集最小契约）：
+        // root_cause_verdict 的 required 只有在 schema 声明里才有 validate_shape 兜底；
+        // 此前该块嵌在 strict_closed_set 内，非闭集契约根本拿不到这些字段定义。
+        if is_plan_review {
+            for (name, ft, desc, required) in [
                     ("revised_plan_summary", crate::agent::protocol::ContractFieldType::String, "方案定稿：修订后的方案摘要（无需修订则省略）", false),
                     ("revised_root_cause", crate::agent::protocol::ContractFieldType::String, "方案定稿：修订后的根因定性（无需修订则省略）", false),
                     ("revised_target_files", crate::agent::protocol::ContractFieldType::StringArray, "方案定稿：修订后的目标文件清单（无需修订则省略）", false),
@@ -287,6 +301,22 @@ pub async fn spawn_child_reviewer(
                         });
                     }
                 }
+        }
+    }
+
+    // 注入后的【有效契约】落账到 contract_schema：回执侧 enforce_delivery_contract
+    // 读的是台账里的 schema——此前只存角色卡原始 custom_schema，宿主注入字段
+    // 不在其中，回执侧 required 校验空转（goal_anchor 场实测字段缺席仍判成功）。
+    if let Some(ref effective_schema) = custom_schema {
+        if !effective_schema.is_empty() {
+            if let Ok(conn) = db.0.lock() {
+                let _ = conn.execute(
+                    "UPDATE agent_child_runs SET contract_schema = ?1 WHERE id = ?2",
+                    rusqlite::params![
+                        serde_json::to_string(effective_schema).unwrap_or_default(),
+                        child_run_id
+                    ],
+                );
             }
         }
     }

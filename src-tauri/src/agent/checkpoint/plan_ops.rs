@@ -397,36 +397,71 @@ impl AgentCheckpoint {
                 }
             } else if dec.eq_ignore_ascii_case("approved") {
                 self.plan_escalation_required = None;
-                // 若 Tech Lead 裁决 approved 但未附带底层四维评分卡，自动补齐高分通过卡，避免 scorecard_missing 门禁误杀
-                if delivery.scorecard.is_none() {
-                    eprintln!(
-                        "[checkpoint] Tech Lead 裁决 approved 但未附带评分卡，已合成基线放行评分卡（synthesized，非真实审查评分）"
+                // 审查员自洽性机械校验：root_cause_verdict=insufficient 是审查员
+                // 自己宣布「该根因修好后题面症状仍会复现」——此时 approved 属于
+                // 输出内部矛盾（定稿一个自认不成立的方向），按 escalate 同款
+                // 模式降级为 rebuttal，原始裁决留档。这不是替审查员做语义判断，
+                // 是强制其两条自述结论不得互斥。
+                if delivery
+                    .get_extra_str("root_cause_verdict")
+                    .map(|v| v.eq_ignore_ascii_case("insufficient"))
+                    .unwrap_or(false)
+                {
+                    delivery.extra.insert(
+                        "original_decision".to_string(),
+                        serde_json::json!("approved"),
                     );
-                    delivery.scorecard =
-                        Some(crate::agent::child_reviewer::ReviewScorecard::synthesized_baseline());
+                    delivery
+                        .extra
+                        .insert("decision".to_string(), serde_json::json!("rebuttal"));
+                    delivery.extra.insert(
+                        "panel_note".to_string(),
+                        serde_json::json!(
+                            "审查员自判病根核对=insufficient（根因修好后症状仍会复现），与 approved 裁决矛盾——宿主按自洽性规则降级为 rebuttal：请按病根核对结论重新定位根因后修订方案再提交。"
+                        ),
+                    );
+                    eprintln!(
+                        "[checkpoint] root_cause_verdict=insufficient 与 approved 矛盾，按自洽性规则降级为 rebuttal"
+                    );
                 }
-                // Tech Lead 定稿权：approved 携带 revised_* 修订字段时，以审查者版本
-                // 覆盖 submitted_plan 成为最终执行方案（省掉"打回→重提"整轮往返）。
-                if let Some(rev) = Self::plan_revision_from(&delivery) {
-                    if let Some(sub) = self.submitted_plan.as_mut() {
-                        if let Some(v) = rev.plan_summary {
-                            sub.plan_summary = v;
-                        }
-                        if let Some(v) = rev.root_cause {
-                            sub.root_cause = v;
-                        }
-                        if let Some(v) = rev.intended_verification {
-                            sub.intended_verification = v;
-                        }
-                        if let Some(files) = &rev.target_files {
-                            sub.target_files = files.clone();
-                        }
+                // 降级后的 decision 已非 approved——下面的通过卡合成与定稿覆盖
+                // 必须按【生效裁决】判定，否则 rebuttal 会领到放行评分卡。
+                let still_approved = delivery
+                    .get_extra_str("decision")
+                    .map(|d| d.eq_ignore_ascii_case("approved"))
+                    .unwrap_or(false);
+                if still_approved {
+                    // 若 Tech Lead 裁决 approved 但未附带底层四维评分卡，自动补齐高分通过卡，避免 scorecard_missing 门禁误杀
+                    if delivery.scorecard.is_none() {
+                        eprintln!(
+                            "[checkpoint] Tech Lead 裁决 approved 但未附带评分卡，已合成基线放行评分卡（synthesized，非真实审查评分）"
+                        );
+                        delivery.scorecard =
+                            Some(crate::agent::child_reviewer::ReviewScorecard::synthesized_baseline());
                     }
-                    if let Some(files) = rev.target_files {
-                        self.approved_target_files = Some(files);
+                    // Tech Lead 定稿权：approved 携带 revised_* 修订字段时，以审查者版本
+                    // 覆盖 submitted_plan 成为最终执行方案（省掉"打回→重提"整轮往返）。
+                    if let Some(rev) = Self::plan_revision_from(&delivery) {
+                        if let Some(sub) = self.submitted_plan.as_mut() {
+                            if let Some(v) = rev.plan_summary {
+                                sub.plan_summary = v;
+                            }
+                            if let Some(v) = rev.root_cause {
+                                sub.root_cause = v;
+                            }
+                            if let Some(v) = rev.intended_verification {
+                                sub.intended_verification = v;
+                            }
+                            if let Some(files) = &rev.target_files {
+                                sub.target_files = files.clone();
+                            }
+                        }
+                        if let Some(files) = rev.target_files {
+                            self.approved_target_files = Some(files);
+                        }
+                        self.plan_finalized_by = Some("tech_lead".to_string());
+                        eprintln!("[checkpoint] Tech Lead 已携带 revised_* 修订定稿，submitted_plan 已切换为审查者版本");
                     }
-                    self.plan_finalized_by = Some("tech_lead".to_string());
-                    eprintln!("[checkpoint] Tech Lead 已携带 revised_* 修订定稿，submitted_plan 已切换为审查者版本");
                 }
             }
         }
