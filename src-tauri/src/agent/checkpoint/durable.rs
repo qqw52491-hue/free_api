@@ -61,6 +61,12 @@ pub struct DurableAgentContext {
     pub run_completion_tokens: u64,
     #[serde(default)]
     pub needs_observation_refresh: bool,
+    /// 会话可操作路径边界契约与尾部速记：崩溃恢复后必须原样带回——
+    /// 它现在挂在 M1 静态前缀，丢了等于恢复会话丧失全部边界上下文。
+    #[serde(default)]
+    pub project_resource_manifest: Option<String>,
+    #[serde(default)]
+    pub path_scope_pointer: Option<String>,
 }
 
 impl DurableAgentContext {
@@ -96,6 +102,8 @@ impl DurableAgentContext {
             run_completion_tokens: context.run_completion_tokens,
             // 浏览器/DOM 可能已变化，恢复后不能相信旧观测。
             needs_observation_refresh: !context.current_observation.is_empty(),
+            project_resource_manifest: context.project_resource_manifest.clone(),
+            path_scope_pointer: context.path_scope_pointer.clone(),
         }
     }
 
@@ -126,6 +134,12 @@ impl DurableAgentContext {
         context.evidence_ledger = self.evidence_ledger.clone();
         context.run_prompt_tokens = self.run_prompt_tokens;
         context.run_completion_tokens = self.run_completion_tokens;
+        if let Some(manifest) = &self.project_resource_manifest {
+            context.project_resource_manifest = Some(manifest.clone());
+        }
+        if let Some(pointer) = &self.path_scope_pointer {
+            context.path_scope_pointer = Some(pointer.clone());
+        }
 
         // 🌟 统一不变性保护：保持已有会话的 M0 顶层系统提示词绝对恒定，稳吃 Prefix Cache！
         if let Some(baseline_prompt) = &self.epoch_system_prompt {
