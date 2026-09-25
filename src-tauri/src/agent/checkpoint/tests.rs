@@ -850,6 +850,44 @@
     }
 
     #[test]
+    fn test_git_destructive_confirm_lifecycle() {
+        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("test-git-confirm".to_string(), &ctx);
+        let fp = "git checkout -- scripts/eval_runner.mjs";
+
+        // 1. 挂起登记（幂等）且未确认
+        cp.block_git_destructive(fp);
+        cp.block_git_destructive(fp);
+        assert_eq!(cp.git_destructive_pending.len(), 1);
+        assert!(!cp.is_git_destructive_confirmed(fp));
+
+        // 2. ask_human 问题未引用命令原文 → 不算问过（防串线误确认）
+        cp.git_destructive_mark_asked("把无关文件清理一下可以吗");
+        assert!(cp.git_destructive_asked.is_empty());
+        let n = cp.git_destructive_resolve_reply("可以");
+        assert_eq!(n, 0);
+        assert!(!cp.is_git_destructive_confirmed(fp));
+        assert_eq!(cp.git_destructive_pending.len(), 1); // 未问到的 pending 保留
+
+        // 3. 问题原文引用命令 + 非拒绝回复 → 核销
+        cp.git_destructive_mark_asked("需要执行 `git checkout -- scripts/eval_runner.mjs` 清理无关改动，可以吗？");
+        assert_eq!(cp.git_destructive_asked.len(), 1);
+        let n = cp.git_destructive_resolve_reply("可以");
+        assert_eq!(n, 1);
+        assert!(cp.is_git_destructive_confirmed(fp));
+        assert!(cp.git_destructive_pending.is_empty());
+
+        // 4. 拒绝回复 → asked 从 pending 移除（死单），不产生确认
+        let fp2 = "git reset --hard HEAD~1";
+        cp.block_git_destructive(fp2);
+        cp.git_destructive_mark_asked(&format!("确认执行 `{}`？", fp2));
+        let n = cp.git_destructive_resolve_reply("不行，别动那个文件");
+        assert_eq!(n, 0);
+        assert!(!cp.is_git_destructive_confirmed(fp2));
+        assert!(cp.git_destructive_pending.is_empty());
+    }
+
+    #[test]
     fn test_plan_review_batch_barrier_incomplete_blocks_consumed() {
         use crate::agent::child_reviewer::{ReviewScorecard, ReviewerDeliveryData};
 

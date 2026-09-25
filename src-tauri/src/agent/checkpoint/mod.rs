@@ -74,6 +74,18 @@ pub struct AgentCheckpoint {
     /// 人类主人明确批准的特赦/豁免指示（用于在代码审查门禁中豁免特定改动）
     #[serde(default)]
     pub human_waivers: Vec<String>,
+    /// 被变更层门禁挂起、等待人工确认的 git 破坏命令指纹
+    /// （shell_safety::git_cmd_fingerprint 归一化串）。
+    /// 实测事故 2026-09-25：git checkout -- 销毁他人未提交工作——
+    /// 目标不全在本 session 写入台账/计划核准集的 git 破坏命令须先人工确认。
+    #[serde(default)]
+    pub git_destructive_pending: Vec<String>,
+    /// 已在 ask_human 问题中原文引用、正在等待回复核销的指纹。
+    #[serde(default)]
+    pub git_destructive_asked: Vec<String>,
+    /// 经人工确认放行的 git 破坏命令指纹（同一命令重发不再确认）。
+    #[serde(default)]
+    pub git_destructive_confirmed: Vec<String>,
     /// 策略引擎核准的目标改动文件列表（用于写后真实 Git Diff 范围防逃逸比对）
     #[serde(default)]
     pub approved_target_files: Option<Vec<String>>,
@@ -338,6 +350,9 @@ impl AgentCheckpoint {
             approved_plan_summary: None,
             plan_unreviewed_release: false,
             human_waivers: Vec::new(),
+            git_destructive_pending: Vec::new(),
+            git_destructive_asked: Vec::new(),
+            git_destructive_confirmed: Vec::new(),
             approved_target_files: None,
             policy_decision_summary: None,
             plan_mode: PlanExecutionMode::Auto,

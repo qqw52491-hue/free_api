@@ -154,6 +154,84 @@ impl AgentCheckpoint {
         }
     }
 
+    // ─────────────── git 破坏命令人工确认通道 ───────────────
+    // 机制定位（物种二分）：「目标是否在本 session 写入台账/计划核准集」是
+    // 机械判定；「人类是否批准销毁外来未提交工作」是语义裁决——本组方法只
+    // 负责两者之间的机械核销：挂起登记 → ask_human 原文引用核对 →
+    // 非拒绝回复确认。确认键是命令指纹原文（而非语义匹配），杜绝「问过别的
+    // 问题却顺带放行了这条命令」的串线。
+
+    /// 该指纹是否已被主人确认放行
+    pub fn is_git_destructive_confirmed(&self, fp: &str) -> bool {
+        self.git_destructive_confirmed.iter().any(|x| x == fp)
+    }
+
+    /// 挂起登记（幂等去重，封顶 16 防膨胀）
+    pub fn block_git_destructive(&mut self, fp: &str) {
+        let fp = fp.trim();
+        if fp.is_empty()
+            || self.git_destructive_pending.iter().any(|x| x == fp)
+            || self.git_destructive_confirmed.iter().any(|x| x == fp)
+        {
+            return;
+        }
+        self.git_destructive_pending.push(fp.to_string());
+        if self.git_destructive_pending.len() > 16 {
+            self.git_destructive_pending.remove(0);
+        }
+    }
+
+    /// ask_human 派发时调用：问题文本原文引用了哪些 pending 指纹 → 记入 asked。
+    /// 核对为归一化后子串匹配（指纹=压缩空白后的命令原文）。
+    pub fn git_destructive_mark_asked(&mut self, ask_msg: &str) {
+        let norm = ask_msg.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.git_destructive_asked = self
+            .git_destructive_pending
+            .iter()
+            .filter(|fp| norm.contains(fp.as_str()))
+            .cloned()
+            .collect();
+    }
+
+    /// 人类回复到达时调用：非空且不含拒绝词的回复 → asked 移入 confirmed；
+    /// 拒绝或空回复 → asked 从 pending 移除（死单，重发会重新挂起登记）。
+    /// 返回本次确认的指纹数。
+    pub fn git_destructive_resolve_reply(&mut self, reply: &str) -> usize {
+        let asked = std::mem::take(&mut self.git_destructive_asked);
+        if asked.is_empty() {
+            return 0;
+        }
+        let trimmed = reply.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let rejected = trimmed.is_empty()
+            || trimmed == "人类未回复，通道异常关闭"
+            || trimmed == "我再想想"
+            || [
+                "不行", "不要", "禁止", "拒绝", "不许", "先别", "先不", "再想想",
+                "cancel", "deny", "reject",
+            ]
+            .iter()
+            .any(|w| lower.contains(w));
+        if rejected {
+            self.git_destructive_pending
+                .retain(|fp| !asked.iter().any(|a| a == fp));
+            return 0;
+        }
+        let mut confirmed = 0;
+        for fp in asked {
+            self.git_destructive_pending.retain(|x| x != &fp);
+            if !self.git_destructive_confirmed.iter().any(|x| x == &fp) {
+                self.git_destructive_confirmed.push(fp);
+                confirmed += 1;
+            }
+        }
+        if self.git_destructive_confirmed.len() > 32 {
+            let overflow = self.git_destructive_confirmed.len() - 32;
+            self.git_destructive_confirmed.drain(0..overflow);
+        }
+        confirmed
+    }
+
     /// 汇总当前会话中人类所有生效的特赦与裁决文本
     pub fn human_waiver_text(&self) -> Option<String> {
         let mut parts = Vec::new();

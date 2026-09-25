@@ -435,6 +435,127 @@
     }
 
     #[test]
+    fn test_git_worktree_destructive() {
+        use crate::agent::dispatcher::shell_safety::is_safe_read_only_shell_command;
+
+        // 2026-09-25 实测事故回归：终审指令"撤销无关修改保持提交纯净"被执行成
+        // `git checkout --`，销毁了 eval_runner.mjs 85 行未提交工作且全程未进
+        // 副作用台账（判为只读）。此类命令必须归类为破坏性写操作。
+
+        // 销毁未提交工作/改写历史 → 拦截
+        assert!(!is_safe_read_only_shell_command("git checkout -- scripts/eval_runner.mjs"));
+        assert!(!is_safe_read_only_shell_command("git checkout -- ."));
+        assert!(!is_safe_read_only_shell_command("git checkout ."));
+        assert!(!is_safe_read_only_shell_command("git restore src/lib.rs"));
+        assert!(!is_safe_read_only_shell_command("git restore --staged --worktree ."));
+        assert!(!is_safe_read_only_shell_command("git clean -fd"));
+        assert!(!is_safe_read_only_shell_command("git reset --hard HEAD~1"));
+        assert!(!is_safe_read_only_shell_command("git reset --keep"));
+        assert!(!is_safe_read_only_shell_command("git push --force origin main"));
+        assert!(!is_safe_read_only_shell_command("git push -f"));
+        assert!(!is_safe_read_only_shell_command("git push --force-with-lease"));
+        assert!(!is_safe_read_only_shell_command("git branch -D feature-x"));
+        assert!(!is_safe_read_only_shell_command("git stash drop"));
+        assert!(!is_safe_read_only_shell_command("git stash clear"));
+        assert!(!is_safe_read_only_shell_command("git stash pop"));
+        assert!(!is_safe_read_only_shell_command("git rm -r --cached ."));
+        assert!(!is_safe_read_only_shell_command("git mv a.rs b.rs"));
+
+        // 复合命令藏 git 破坏段 → 全链条一票否决
+        assert!(!is_safe_read_only_shell_command("git status && git checkout -- foo.rs"));
+
+        // git 只读与非破坏写 → 放行（不误伤正常流程）
+        assert!(is_safe_read_only_shell_command("git status"));
+        assert!(is_safe_read_only_shell_command("git diff --stat"));
+        assert!(is_safe_read_only_shell_command("git log --oneline -5"));
+        assert!(is_safe_read_only_shell_command("git checkout -b feat/x"));
+        assert!(is_safe_read_only_shell_command("git checkout main"));
+        assert!(is_safe_read_only_shell_command("git add src-tauri/src/commands/tasks.rs"));
+        assert!(is_safe_read_only_shell_command("git commit -m msg"));
+        assert!(is_safe_read_only_shell_command("git stash"));
+        assert!(is_safe_read_only_shell_command("git stash list"));
+        assert!(is_safe_read_only_shell_command("git branch -d done"));
+
+        // 非 git 语境不串味：restore/clean 等词出现在其他命令里不误拦
+        assert!(is_safe_read_only_shell_command("cargo clean"));
+        assert!(is_safe_read_only_shell_command("npm run clean"));
+    }
+
+    #[test]
+    fn test_git_destructive_review_triage() {
+        use crate::agent::dispatcher::{
+            git_cmd_fingerprint, git_destructive_review, GitDestructiveVerdict,
+        };
+
+        // 显式路径 → Targets（可逐条对账）
+        assert_eq!(
+            git_destructive_review("git checkout -- scripts/eval_runner.mjs"),
+            GitDestructiveVerdict::Targets(vec!["scripts/eval_runner.mjs".to_string()])
+        );
+        assert_eq!(
+            git_destructive_review("git checkout -- a.rs b.rs"),
+            GitDestructiveVerdict::Targets(vec!["a.rs".to_string(), "b.rs".to_string()])
+        );
+        assert_eq!(
+            git_destructive_review("git restore --worktree src/lib.rs"),
+            GitDestructiveVerdict::Targets(vec!["src/lib.rs".to_string()])
+        );
+        assert_eq!(
+            git_destructive_review("git mv old.rs new.rs"),
+            GitDestructiveVerdict::Targets(vec!["old.rs".to_string(), "new.rs".to_string()])
+        );
+
+        // 无路径/整树/历史/远端形态 → Pathless（影响面不可界定，强制人工确认）
+        for cmd in [
+            "git checkout .",
+            "git checkout -- .",
+            "git checkout --",
+            "git restore .",
+            "git clean -fd",
+            "git reset --hard HEAD~1",
+            "git push -f",
+            "git push --force-with-lease",
+            "git branch -D feat",
+            "git stash drop",
+            "git stash pop",
+        ] {
+            assert_eq!(
+                git_destructive_review(cmd),
+                GitDestructiveVerdict::Pathless,
+                "{cmd} 应判定 Pathless"
+            );
+        }
+
+        // 歧义/非破坏/试运行 → NotDestructive
+        for cmd in [
+            "git checkout main",
+            "git checkout -b feat",
+            "git checkout --orphan x",
+            "git status",
+            "git stash",
+            "git stash list",
+            "git branch -d done",
+            "git commit -m msg",
+            "git clean -n",          // dry-run 不落盘
+            "git push -n origin main", // push -n 试运行
+            "echo git checkout -- x", // 非 git 段首
+            "cargo clean",
+        ] {
+            assert_eq!(
+                git_destructive_review(cmd),
+                GitDestructiveVerdict::NotDestructive,
+                "{cmd} 应放行"
+            );
+        }
+
+        // 指纹归一化：空白压缩后原样，ask_human 引用靠它机械核对
+        assert_eq!(
+            git_cmd_fingerprint("git   checkout   --   a.rs"),
+            "git checkout -- a.rs"
+        );
+    }
+
+    #[test]
     fn mcp_model_output_single_text_exact() {
         let text = "第一行 含 空白 \n\n第二行\t制表符\n末尾换行\n";
         let result = json!({

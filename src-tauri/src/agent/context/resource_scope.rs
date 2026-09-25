@@ -673,7 +673,7 @@ fn is_path_within(candidate: &Path, root: &Path) -> bool {
 
 /// 词法级路径规整：不动文件系统，把 ".." 和 "." 组件折掉——
 /// 供观测层把相对定位符 join primary 后归类 inside/outside。
-fn lexically_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexically_normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in path.components() {
         match c {

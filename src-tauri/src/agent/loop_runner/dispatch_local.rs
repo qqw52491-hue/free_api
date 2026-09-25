@@ -30,6 +30,79 @@ pub(super) async fn dispatch_local_tool(
         let is_write_tool = is_write_or_side_effect_tool(inst);
         if is_write_tool {
 
+            // git 工作区破坏命令对账门（实测事故 2026-09-25：终审歧义指令被执行为
+            // `git checkout --` 销毁他人未提交工作，且全程未进副作用台账）：
+            //   · 目标全在本 session 写入台账/计划核准集 → 自清理放行；
+            //   · 无路径形态（reset --hard/clean/push -f…）或含外来目标 → 挂起等
+            //     人工确认；ask_human 原文引用命令指纹 + 非拒绝回复 → 核销重发。
+            if let Some(cmd_str) =
+                crate::agent::dispatcher::extract_shell_command_string(inst)
+            {
+                use crate::agent::dispatcher::{
+                    git_cmd_fingerprint, git_destructive_review, GitDestructiveVerdict,
+                };
+                let verdict = git_destructive_review(&cmd_str);
+                if verdict != GitDestructiveVerdict::NotDestructive {
+                    let fp = git_cmd_fingerprint(&cmd_str);
+                    let mut foreign_reason: Option<String> = None;
+                    match &verdict {
+                        GitDestructiveVerdict::Pathless => {
+                            foreign_reason = Some(
+                                "无显式路径目标，影响面无法按台账界定（整树/历史/远端）"
+                                    .to_string(),
+                            );
+                        }
+                        GitDestructiveVerdict::Targets(targets) => {
+                            let foreign = foreign_git_targets(
+                                targets,
+                                inst,
+                                ctx.context,
+                                ctx.checkpoint,
+                                ctx.workspace_dir,
+                            );
+                            if !foreign.is_empty() {
+                                foreign_reason = Some(format!(
+                                    "目标不在本 session 写入台账或计划核准集: {}",
+                                    foreign.join(", ")
+                                ));
+                            }
+                        }
+                        GitDestructiveVerdict::NotDestructive => {}
+                    }
+                    if let Some(reason) = foreign_reason {
+                        if !ctx.checkpoint.is_git_destructive_confirmed(&fp) {
+                            ctx.checkpoint.block_git_destructive(&fp);
+                            let _ = save_checkpoint(ctx.state.inner(), ctx.checkpoint);
+                            let stderr = format!(
+                                "【git 破坏命令待人工确认】`{fp}` —— {reason}，执行将销毁\
+                                 非本 session 产生的未提交工作。\n确需执行：用 ask_human \
+                                 询问主人，message 中原样包含完整命令 `{fp}`；主人回复未明确\
+                                 拒绝即视为确认，之后原样重发本命令即可放行。主人拒绝或失联\
+                                 → 改用非破坏路径（先复制备份再处理，或放弃该操作）。",
+                            );
+                            emit_tool_event(
+                                ctx.app,
+                                ctx.final_session_id,
+                                ctx.step_id,
+                                inst,
+                                "failed",
+                                Some("git_destructive_needs_confirm".to_string()),
+                                Some(false),
+                                &stderr,
+                                Some(ctx.tool_started_at.elapsed().as_millis()),
+                                None,
+                            );
+                            return Ok(ArmOutcome::Early(DispatchResult { view: None,
+                                success: false,
+                                stdout: String::new(),
+                                stderr,
+                                route: "git_destructive_needs_confirm".to_string(),
+                            }));
+                        }
+                    }
+                }
+            }
+
             if let Some(scope_guard) = ctx.context
                 .resource_scope
                 .guard_known_outside_write(&inst.get_tool(), &inst.get_params())
@@ -203,4 +276,68 @@ pub(super) async fn dispatch_local_tool(
 
         dispatch_result
     }))
+}
+
+/// git 破坏命令的路径对账：返回「不在本 session 写入台账且不在计划核准集」
+/// 的目标列表。归一化口径：命令目标按指令 cwd（缺省 workspace_dir）解析为
+/// 词法绝对路径；台账路径（非绝对时按 workspace_dir 解析）同规后精确匹配。
+/// 目标为目录前缀不展开判定（`.`/`*` 已在 Pathless 分流）——界外宁多判为
+/// foreign 触发人工确认，也不放宽到前缀匹配（fail 方向 = 移交而非放行）。
+fn foreign_git_targets(
+    targets: &[String],
+    inst: &AgentInstruction,
+    context: &crate::agent::context::types::SandwichContext,
+    checkpoint: &crate::agent::checkpoint::AgentCheckpoint,
+    workspace_dir: &std::path::Path,
+) -> Vec<String> {
+    use crate::agent::context::resource_scope::lexically_normalize;
+    use std::path::Path;
+
+    let normalize_with = |raw: &str, base: &Path| -> String {
+        let p = Path::new(raw);
+        let joined = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            base.join(p)
+        };
+        lexically_normalize(&joined).to_string_lossy().to_string()
+    };
+
+    // 命令的 cwd 基准（指令显式 cwd 优先，相对 cwd 以 workspace_dir 为基）
+    let cwd_base = inst
+        .get_params()
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(|cwd| {
+            let p = Path::new(cwd);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                workspace_dir.join(p)
+            }
+        })
+        .unwrap_or_else(|| workspace_dir.to_path_buf());
+
+    // session 写入台账（本轮新增）+ 计划核准目标集
+    let mut allowed: Vec<String> = context
+        .new_affected_paths()
+        .iter()
+        .map(|p| normalize_with(p, workspace_dir))
+        .collect();
+    if let Some(approved) = &checkpoint.approved_target_files {
+        allowed.extend(
+            approved
+                .iter()
+                .map(|p| normalize_with(p, workspace_dir)),
+        );
+    }
+
+    targets
+        .iter()
+        .filter(|t| {
+            let norm = normalize_with(t, &cwd_base);
+            !allowed.iter().any(|a| a == &norm)
+        })
+        .cloned()
+        .collect()
 }

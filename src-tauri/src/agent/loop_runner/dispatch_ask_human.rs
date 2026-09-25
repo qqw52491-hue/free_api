@@ -179,6 +179,10 @@ pub(super) async fn dispatch_ask_human(
 
         // 真正的阻塞点：死等人类回复！
         // ctx.rx 被我们在外层定义过了，这里可以直接 `.recv().await`
+        // git 破坏命令确认链路：若问题原文引用了挂起的命令指纹，标记为
+        // 「本次所问即该命令」——回复回来后按指纹核销（语义上确认与否归人类，
+        // 机械上只认命令原文在场）。
+        ctx.checkpoint.git_destructive_mark_asked(&ask_msg);
         ctx.checkpoint.prepared_instruction = Some(inst.clone());
         ctx.checkpoint.wait_for_human(ask_msg.clone(), ctx.context);
         save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
@@ -211,6 +215,15 @@ pub(super) async fn dispatch_ask_human(
             }
             None => "人类未回复，通道异常关闭".to_string(),
         };
+        // git 破坏命令核销：非拒绝回复 → asked 指纹确认为已放行，重发即通过
+        let git_confirmed = ctx.checkpoint.git_destructive_resolve_reply(&reply);
+        if git_confirmed > 0 {
+            ctx.app.emit(
+                &format!("agent-log-{}", ctx.final_session_id),
+                format!("✅ 主人已确认 {} 条 git 破坏命令，原样重发即可放行", git_confirmed),
+            )
+            .ok();
+        }
         ctx.context.add_error_feedback(&format!("【人类回复】{}", reply));
         if is_approval_context {
             match parse_plan_approval_decision(&reply) {

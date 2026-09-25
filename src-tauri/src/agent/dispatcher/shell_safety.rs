@@ -273,7 +273,171 @@ pub fn is_destructive_shell_command(raw_cmd: &str) -> bool {
         return true;
     }
 
+    // 2.4 git 工作区破坏操作：checkout --/restore/clean/reset --hard 会销毁他人
+    // 未提交工作且绕开文件写入台账（不走 path_guard）。实测事故（2026-09-25）：
+    // 终审指令"撤销无关修改保持提交纯净"被执行为 git checkout -- 销毁了
+    // eval_runner.mjs 85 行未提交工作——此类命令必须归类为破坏性写操作。
+    // 窄口径：checkout -b / checkout <branch>（切分支）不拦，只拦还原路径形态。
+    // 注意传原始大小写串：branch -D(强删) 与 branch -d(安全删) 仅靠大小写区分。
+    if is_git_worktree_destructive(trimmed) {
+        return true;
+    }
+
     false
+}
+
+/// git 破坏命令三态判定：台账对账用——区分「无路径形态（整树/历史/远端）」
+/// 与「可按路径对账」两类，供 dispatch 层决定放行/人工确认。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitDestructiveVerdict {
+    /// 非 git 破坏命令
+    NotDestructive,
+    /// 无显式路径目标（reset --hard / clean / stash drop·pop·clear /
+    /// push -f / branch -D / checkout . / checkout *）——影响面无法按
+    /// 路径界定，一律需要人工确认。
+    Pathless,
+    /// 有显式路径目标（checkout -- <paths> / restore <paths> / rm/mv <paths>），
+    /// 可与 session 写入台账逐条对账。
+    Targets(Vec<String>),
+}
+
+/// 命令指纹：压缩空白后原文——ask_human 的 message 原文引用该指纹即可机械核对
+/// 「主人确认的是不是这条命令」（模型改写措辞不破坏匹配）。
+pub fn git_cmd_fingerprint(cmd: &str) -> String {
+    cmd.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 剥离 shell 词法后的 token 序列（处理引号包裹的路径参数）。
+fn shell_tokens(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<u8> = None;
+    for &b in s.as_bytes() {
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                } else {
+                    cur.push(b as char);
+                }
+            }
+            None => {
+                if b == b'\'' || b == b'"' {
+                    quote = Some(b);
+                } else if b == b' ' || b == b'\t' {
+                    if !cur.is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                } else {
+                    cur.push(b as char);
+                }
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// 提取 git 破坏命令的判定结果。输入原始命令串（不 lowercase——
+/// branch -D 与 -d 语义相反；git 子命令按惯例小写，变体大小写保守不判）。
+pub fn git_destructive_review(cmd: &str) -> GitDestructiveVerdict {
+    for seg in split_shell_segments(cmd) {
+        let s = seg.trim();
+        if !(s == "git" || s.starts_with("git ") || s.starts_with("git\t")) {
+            continue;
+        }
+        let tokens = shell_tokens(s);
+        // tokens[0] = "git"
+        let sub = tokens.get(1).map(|t| t.as_str()).unwrap_or("");
+        // -n/--dry-run 是试运行形态（clean -n / push -n / rm -n / mv -n 均不落盘），放行
+        if tokens.iter().any(|t| t == "-n" || t == "--dry-run") {
+            continue;
+        }
+        // 非 - 开头的尾部参数 = 候选路径目标
+        let path_args = |skip: usize| -> Vec<String> {
+            tokens
+                .iter()
+                .skip(skip)
+                .filter(|t| !t.starts_with('-'))
+                .cloned()
+                .collect()
+        };
+        match sub {
+            "restore" => {
+                // restore 语义无歧义：非 flag 参数即要还原的路径；无路径/整树 → Pathless
+                let mut targets = match tokens.iter().position(|t| t == "--") {
+                    Some(p) => path_args(p + 1),
+                    None => path_args(2),
+                };
+                targets.retain(|t| t != "." && t != "*");
+                if !targets.is_empty() {
+                    return GitDestructiveVerdict::Targets(targets);
+                }
+                return GitDestructiveVerdict::Pathless;
+            }
+            "checkout" => {
+                // 仅 `--` 后的路径与 `.`/`*` 是明确的还原形态；不带 -- 的 <arg>
+                // 无法与分支名机械区分，保守放行（残余面：checkout <path> 形态可
+                // 还原文件，但需刻意规避才成立——记录在案）。
+                if let Some(p) = tokens.iter().position(|t| t == "--") {
+                    let mut targets = path_args(p + 1);
+                    targets.retain(|t| t != "." && t != "*");
+                    if !targets.is_empty() {
+                        return GitDestructiveVerdict::Targets(targets);
+                    }
+                    return GitDestructiveVerdict::Pathless;
+                }
+                if tokens.iter().skip(2).any(|t| t == "." || t == "*") {
+                    return GitDestructiveVerdict::Pathless;
+                }
+            }
+            "rm" | "mv" => {
+                let targets = path_args(2);
+                if targets.is_empty() {
+                    return GitDestructiveVerdict::Pathless;
+                }
+                return GitDestructiveVerdict::Targets(targets);
+            }
+            "clean" => {
+                return GitDestructiveVerdict::Pathless;
+            }
+            "reset" => {
+                if tokens.iter().any(|t| t == "--hard" || t == "--keep") {
+                    return GitDestructiveVerdict::Pathless;
+                }
+            }
+            "push" => {
+                if tokens.iter().any(|t| {
+                    t == "-f" || t.starts_with("--force")
+                }) {
+                    return GitDestructiveVerdict::Pathless;
+                }
+            }
+            "branch" => {
+                if tokens.iter().any(|t| t == "-D") {
+                    return GitDestructiveVerdict::Pathless;
+                }
+            }
+            "stash" => {
+                if tokens.iter().skip(2).any(|t| matches!(t.as_str(), "drop" | "clear" | "pop")) {
+                    return GitDestructiveVerdict::Pathless;
+                }
+            }
+            _ => {}
+        }
+    }
+    GitDestructiveVerdict::NotDestructive
+}
+
+/// git 破坏命令的写分类入口：委托 git_destructive_review 单一口径，
+/// 非 NotDestructive 即记为破坏性写操作（入账+受变更层门禁）。
+/// `git checkout <path>`（不带 --）无法与分支名机械区分，保守不拦；
+/// `git stash`（不含 drop/clear/pop）保留现场可回收，不拦。
+/// 输入为原始大小写命令串（-D 与 -d 语义相反，不能先 lowercase）。
+fn is_git_worktree_destructive(cmd: &str) -> bool {
+    git_destructive_review(cmd) != GitDestructiveVerdict::NotDestructive
 }
 
 /// 兼容性辅助包装：非破坏性即为安全只读
