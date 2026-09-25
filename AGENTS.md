@@ -107,6 +107,8 @@ triage 判决、plan、假设清单都是**先验**，不是终判。后续证�
 | 2026-09-26 | goal_anchor 带新机制复测：root_cause_verdict=explains 吐出+落账+审查员看到题面——但模型只加了 `frozen_initial_goal` 字段壳、`inherit_filling_into` 覆写逻辑一行没改（仍覆写 user_goal），超时判红 | **机制链全通，能力地板显形**：审查员对"方案文本"判 explains 是合理裁决（方案思路本身能解释症状）；真问题是 pro 也反复读同函数 6+ 遍不敢动手——收敛黑洞 | 不动机制；记录为「方案说对但执行不落地」判例——病根核对审的是方案不是 diff，执行断链另属执行层问题 |
 | 2026-09-26 | window_read 复测：模型用了正确语义修法（`start_line`/`end_line` 入判重签名），修后判据静态条款离线验证过——但 `cargo test --lib` 连撞 7 次 base 自带红测试（retrieval/mod.rs:1641）烧完预算超时 | 第二类判据烂源二次显形：`1485a3b` base 对所有 hd 题通用（window_read/phantom_steps 同 base），全量测试义务结构性死锁；模型应变能力=从窄化验证范围自救，两场都没做到 | 判据侧已修（6453618）；模型应变是能力项不归机制；`--base-tests` lint 可标红 base |
 | 2026-09-26 | run_binding PASS（27 步）：首场实弹验证必填牙齿——首个审查员漏吐 root_cause_verdict → contract_violation 降级 invalid_output → failover 重派 → 次场吐 explains → 方案批 → 过 | **三层接缝修复实弹生效**：required 从提示词许愿变成真门禁，且 failover 通道把违约审查换成了合规审查——这正是此前 goal_anchor 场缺失的行为（漏吐却判成功） | 机制端到端闭环；根因核对能力本身仍取决于审查员语义判断（本场判对了） |
+| 2026-09-26 | search_gate 判据第二例命名钉死：`unread|same_file|since_last_read` 私有词承重 + 完全没查 spec 核心「拒绝路径」；实际 diff 只有计数侧没写拒绝=真红 | 判据应钉 spec 硬不变量（拒绝存在）而非实现名；同型第三次显形说明这类判据缺陷分布比预期广 | 已修（62c7365）：核心改钉拒绝词汇+计数结构放宽并集；全库扫描确认钉私有名仅此一处剩例 |
+| 2026-09-26 | child_forensic：模型 finish×4 全声称「已修复+测试通过」但工作区零改动 → plan_target_mismatch 每次正确打回；step20-22 才真改文件，超时截断 | **finish 门首次实弹抓到「空口交差」**：finish 总结先于改动落地，门禁用 diff 对账拦截——这正是变更层硬门的本职工作 | 不动机制；模型执行顺序错误（先交差后干活）归能力侧 |
 
 ## 已评估暂缓（有触发条件才建）
 
