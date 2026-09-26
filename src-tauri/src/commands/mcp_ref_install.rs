@@ -146,6 +146,53 @@ async fn resolve_local_dir(dir: &Path, name: &str) -> Result<Vec<PluginConfig>, 
         capability_card: None,
     };
 
+    // 0) manifest.json（mcpb 官方清单）→ server.mcp_config 权威启动姿势。
+    //    生态自带的答案文件，优先级高于一切启发式推断。
+    let manifest = dir.join("manifest.json");
+    if manifest.is_file() {
+        if let Ok(text) = std::fs::read_to_string(&manifest) {
+            if let Ok(m) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(cfg) = m.pointer("/server/mcp_config") {
+                    let command = cfg.get("command").and_then(|v| v.as_str());
+                    let args = cfg
+                        .get("args")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if let Some(command) = command {
+                        if !command.is_empty() {
+                            candidates.push(mk(command, args));
+                        }
+                    }
+                }
+                // entry_point 兜底：清单给了入口但没给 mcp_config 时按 type 映射
+                if let Some(entry) = m.pointer("/server/entry_point").and_then(|v| v.as_str()) {
+                    if dir.join(entry).is_file() {
+                        let cmd = match m.pointer("/server/type").and_then(|v| v.as_str()) {
+                            Some("node") => "node",
+                            _ => "uv",
+                        };
+                        let args = if cmd == "uv" {
+                            vec![
+                                "run".into(),
+                                "--directory".into(),
+                                dir_str.clone(),
+                                entry.into(),
+                            ]
+                        } else {
+                            vec![dir.join(entry).to_string_lossy().to_string()]
+                        };
+                        candidates.push(mk(cmd, args));
+                    }
+                }
+            }
+        }
+    }
+
     // 1) pyproject.toml → uv run --directory <dir>
     let pyproject = dir.join("pyproject.toml");
     if pyproject.is_file() {
@@ -161,15 +208,22 @@ async fn resolve_local_dir(dir: &Path, name: &str) -> Result<Vec<PluginConfig>, 
                 {
                     let script = line.split('=').next().unwrap_or("").trim();
                     if !script.is_empty() {
-                        candidates.push(mk(
-                            "uv",
-                            vec![
+                        // CLI 类入口（typer/click）裸跑打帮助就退出——除裸调用外
+                        // 枚举 MCP 社区约定的 stdio 传输子命令，握手自然筛出真的。
+                        for extra in [
+                            vec![],
+                            vec!["stdio"],
+                            vec!["serve", "--transport", "stdio"],
+                        ] {
+                            let mut args = vec![
                                 "run".into(),
                                 "--directory".into(),
                                 dir_str.clone(),
                                 script.to_string(),
-                            ],
-                        ));
+                            ];
+                            args.extend(extra.iter().map(|s| s.to_string()));
+                            candidates.push(mk("uv", args));
+                        }
                     }
                 }
             }
@@ -232,7 +286,7 @@ async fn resolve_local_dir(dir: &Path, name: &str) -> Result<Vec<PluginConfig>, 
         ("index.js", "node"),
     ] {
         if dir.join(file).is_file() {
-            let args = if cmd == "uv" {
+            let base_args = if cmd == "uv" {
                 vec![
                     "run".into(),
                     "--directory".into(),
@@ -242,7 +296,11 @@ async fn resolve_local_dir(dir: &Path, name: &str) -> Result<Vec<PluginConfig>, 
             } else {
                 vec![dir.join(file).to_string_lossy().to_string()]
             };
-            candidates.push(mk(cmd, args));
+            candidates.push(mk(cmd, base_args.clone()));
+            // CLI 型入口（argparse/typer）需显式 transport 子命令
+            let mut stdio_args = base_args;
+            stdio_args.push("stdio".into());
+            candidates.push(mk(cmd, stdio_args));
         }
     }
 
@@ -487,5 +545,90 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(resolve_local_dir(&dir, "x").await.is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn test_db() -> DbState {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mcp_plugins (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                command TEXT NOT NULL,
+                args TEXT NOT NULL DEFAULT '[]',
+                env TEXT NOT NULL DEFAULT '{}',
+                capability_card TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                url TEXT NOT NULL DEFAULT '',
+                headers TEXT NOT NULL DEFAULT '{}'
+            );",
+        )
+        .unwrap();
+        DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)))
+    }
+
+    /// 真实联网安装：跑真实 GitHub clone + 握手 + 落库。
+    /// `cargo test --lib real_github_install -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn real_github_install() {
+        let db = test_db();
+        let repos_dir = std::env::temp_dir().join("mcpref-real-repos");
+        // Swift 仓库：无 pyproject/package.json → 应干净报错，不留半成品
+        let swift = install_from_ref_core(
+            &db,
+            "https://github.com/AdelElo13/mac-control-mcp",
+            &repos_dir,
+        )
+        .await;
+        println!("swift repo: {:?}", swift.as_ref().map(|r| r.tool_count));
+        assert!(swift.is_err(), "Swift 仓库不该装得上");
+        let count: i64 = db
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM mcp_plugins", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "失败安装不得留库记录");
+
+        // Python 仓库：excel-mcp-server（pyproject 系）应解析+握手成功
+        let py = install_from_ref_core(
+            &db,
+            "https://github.com/haris-musa/excel-mcp-server",
+            &repos_dir,
+        )
+        .await;
+        println!("python repo: {:?}", py);
+        assert!(py.is_ok(), "Python 仓库安装失败: {:?}", py.err());
+        let r = py.unwrap();
+        assert!(r.tool_count > 0);
+    }
+
+    /// 真实联网安装：npm 包名（npx 链路）+ 已克隆本地目录回装。
+    /// `cargo test --lib real_package_and_local_install -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn real_package_and_local_install() {
+        let db = test_db();
+        let repos_dir = std::env::temp_dir().join("mcpref-real-repos");
+
+        // npm 包：uvx 先败（Python 侧没这名）→ npx -y 兜底握手
+        let pkg = install_from_ref_core(
+            &db,
+            "@modelcontextprotocol/server-everything",
+            &repos_dir,
+        )
+        .await;
+        println!("npm pkg: {:?}", pkg);
+        assert!(pkg.is_ok(), "npm 包安装失败: {:?}", pkg.err());
+        assert!(pkg.unwrap().tool_count > 0);
+
+        // 本地目录：直接指已克隆的 excel-mcp-server → manifest/uv 解析
+        let local = repos_dir.join("excel-mcp-server");
+        if local.is_dir() {
+            let r = install_from_ref_core(&db, local.to_str().unwrap(), &repos_dir).await;
+            println!("local dir: {:?}", r);
+            assert!(r.is_ok(), "本地目录安装失败: {:?}", r.err());
+        }
     }
 }

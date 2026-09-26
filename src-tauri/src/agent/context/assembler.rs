@@ -483,7 +483,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_measure_prompt_breakdown_buckets_by_role() {
         let msgs = vec![
             crate::agent::context::types::ChatMessage {
