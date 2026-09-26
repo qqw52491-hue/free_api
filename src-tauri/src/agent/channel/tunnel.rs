@@ -304,6 +304,16 @@ pub fn ensure_tunnel(
     spawn_and_probe(&bin, &cfg_path, app_root, &url)
 }
 
+/// 强制重启：杀掉现有隧道进程后走完整 ensure（用于手动「重启穿透」）。
+pub fn restart_tunnel(app_root: &Path, config: &ChannelConfig) -> Result<String, String> {
+    let running = cloudflared_pids();
+    if !running.is_empty() {
+        kill_pids(&running);
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+    }
+    ensure_tunnel(app_root, config, None)
+}
+
 /// detached 拉起隧道 + 存活探测（3 秒后还活着即成功）。
 fn spawn_and_probe(
     bin: &Path,

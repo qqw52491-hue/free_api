@@ -197,6 +197,8 @@ pub fn run() {
             agent::channel::bridge::wechat_channel_config_set,
             agent::channel::bridge::wechat_channel_runs,
             agent::channel::bridge::wechat_channel_console_qr,
+            agent::channel::bridge::wechat_tunnel_restart,
+            agent::channel::bridge::wechat_tunnel_status,
             // 定时触发器
             agent::scheduler::wechat_schedule_list,
             agent::scheduler::wechat_schedule_save,

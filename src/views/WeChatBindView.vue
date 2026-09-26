@@ -169,6 +169,28 @@
                   {{ savingUrl ? "保存中" : "保存域名" }}
                 </button>
               </div>
+
+              <!-- cloudflared 隧道托管：绑域名 + 重启按钮 -->
+              <div class="tunnel-row">
+                <input
+                  v-model="tunnelHostnameDraft"
+                  class="tunnel-input"
+                  placeholder="隧道绑定域名（如 agent.example.com，空=关闭托管）"
+                  @keydown.enter="saveTunnel"
+                />
+                <button class="btn primary sm" :disabled="busy || savingTunnel" @click="saveTunnel">
+                  {{ savingTunnel ? "绑定中" : "绑定" }}
+                </button>
+                <button
+                  class="btn sm"
+                  :disabled="busy || restartingTunnel"
+                  title="杀掉现有 cloudflared 进程并按当前配置重新拉起"
+                  @click="restartTunnel"
+                >
+                  {{ restartingTunnel ? "重启中" : "重启穿透" }}
+                </button>
+              </div>
+              <p v-if="tunnelStatusLine" class="tunnel-status">{{ tunnelStatusLine }}</p>
             </div>
           </div>
         </div>
@@ -494,6 +516,10 @@ interface ChannelConfigView {
   help_text: string;
   auto_start_bridge: boolean;
   llm_retries: number | null;
+  auto_start_tunnel: boolean;
+  tunnel_hostname: string;
+  tunnel_dir: string;
+  tunnel_status?: { state?: string; message?: string; url?: string | null; at?: string } | null;
   config_path: string;
 }
 
@@ -626,6 +652,8 @@ async function refreshConfig() {
     form.auto_start_bridge = value.auto_start_bridge !== false;
     form.llm_retries = value.llm_retries ?? "";
     consoleUrlDraft.value = ((value as unknown as Record<string, unknown>).console_base_url as string) || "";
+    tunnelHostnameDraft.value = value.tunnel_hostname || "";
+    tunnelStatus.value = value.tunnel_status || null;
     await refreshConsoleQr();
   } catch {
     /* 配置读取失败保持表单原样 */
@@ -677,6 +705,53 @@ async function saveConsoleUrl() {
     /* 保存失败静默，二维码保持原样 */
   } finally {
     savingUrl.value = false;
+  }
+}
+
+// ---- 隧道托管（cloudflared）----
+const tunnelHostnameDraft = ref("");
+const tunnelStatus = ref<ChannelConfigView["tunnel_status"]>(null);
+const savingTunnel = ref(false);
+const restartingTunnel = ref(false);
+
+const tunnelStatusLine = computed(() => {
+  const s = tunnelStatus.value;
+  if (!s || !s.state || s.state === "idle") return "";
+  const label =
+    s.state === "running" ? "🟢 隧道运行中" :
+    s.state === "skipped" ? "⚪ 未启用" :
+    s.state === "unbound" ? "⚪ 已解绑" : "🔴 异常";
+  const url = s.url ? ` ${s.url}` : "";
+  const msg = s.message ? ` · ${s.message}` : "";
+  return `${label}${url}${msg}`;
+});
+
+async function saveTunnel() {
+  savingTunnel.value = true;
+  try {
+    await invoke("wechat_channel_config_set", {
+      config: {
+        tunnel_hostname: tunnelHostnameDraft.value.trim(),
+        auto_start_tunnel: true,
+      },
+    });
+    await refreshConfig();
+  } catch {
+    /* 保存失败静默 */
+  } finally {
+    savingTunnel.value = false;
+  }
+}
+
+async function restartTunnel() {
+  restartingTunnel.value = true;
+  try {
+    await invoke("wechat_tunnel_restart");
+  } catch (err) {
+    console.error("重启穿透失败:", err);
+  } finally {
+    restartingTunnel.value = false;
+    await refreshConfig().catch(() => {});
   }
 }
 
@@ -1654,6 +1729,13 @@ onUnmounted(() => {
   padding: 5px 8px;
   outline: none;
 }
+.tunnel-status {
+  margin: 0;
+  font-size: 10.5px;
+  color: var(--muted, #8b8b9e);
+  word-break: break-all;
+}
+
 
 .tunnel-input:focus {
   border-color: #38bdf8;

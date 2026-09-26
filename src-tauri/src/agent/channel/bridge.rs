@@ -314,6 +314,34 @@ pub async fn wechat_channel_config_set(config: ConfigPutReq) -> Result<Value, St
     Ok(config_value(&current))
 }
 
+/// 手动「重启穿透」按钮：杀掉现有 cloudflared 再走完整 ensure
+/// （合并 ingress + 拉起 + 探测）。前端从 config_value.tunnel_status 拿结果。
+#[tauri::command]
+pub async fn wechat_tunnel_restart() -> Result<Value, String> {
+    let config = load_channel_config()?;
+    sync_shared_config(&config);
+    let url = tauri::async_runtime::spawn_blocking(move || {
+        let app_root = channel_config_path()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        tunnel::restart_tunnel(&app_root, &config)
+    })
+    .await
+    .map_err(|e| format!("穿透任务执行失败: {e}"))??;
+    Ok(json!({
+        "ok": true,
+        "url": url,
+        "status": tunnel::tunnel_status(),
+    }))
+}
+
+/// 穿透状态查询（不触发动作；config_get 里已带，单独端点供轻量刷新）。
+#[tauri::command]
+pub async fn wechat_tunnel_status() -> Result<Value, String> {
+    Ok(tunnel::tunnel_status())
+}
+
 /// 判断 IP 是否为可用的局域网 IPv4（排除回环 + IANA 保留基准测试段）
 fn is_usable_lan_ip(ip: &str) -> bool {
     !ip.starts_with("127.")
