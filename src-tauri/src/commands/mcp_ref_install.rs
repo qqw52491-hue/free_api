@@ -382,7 +382,12 @@ pub async fn install_from_ref_core(
 
     let (plugin_name, candidates, resolved_kind) = match kind {
         RefKind::PackageName(name) => {
-            let short = name.rsplit('/').next().unwrap_or(&name).to_string();
+            // 作用域包名取后段会撞名（@playwright/mcp → "mcp"）；
+            // 插件名用完整形（@scope/pkg → scope-pkg），有辨识度且唯一。
+            let short = name
+                .trim_start_matches('@')
+                .replace('/', "-")
+                .to_string();
             let mk = |nm: &str, command: &str, args: Vec<String>| PluginConfig {
                 name: nm.to_string(),
                 command: command.to_string(),
@@ -630,5 +635,24 @@ mod tests {
             println!("local dir: {:?}", r);
             assert!(r.is_ok(), "本地目录安装失败: {:?}", r.err());
         }
+    }
+
+    /// 手动触发：往真实应用库安装一个 MCP（默认 playwright-mcp）。
+    /// `cargo test --lib install_real_db -- --ignored --nocapture`
+    /// 可用 MCP_REAL_REF 覆盖安装目标。
+    #[tokio::test]
+    #[ignore]
+    async fn install_real_db() {
+        let reference = std::env::var("MCP_REAL_REF")
+            .unwrap_or_else(|_| "@playwright/mcp".to_string());
+        let db_path = dirs_next::data_dir()
+            .unwrap_or_default()
+            .join("free-api-chat")
+            .join("data_v2.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+        let r = install_from_ref_core(&db, &reference, &default_repos_dir()).await;
+        println!("install {:?} => {:?}", reference, r);
+        assert!(r.is_ok());
     }
 }
