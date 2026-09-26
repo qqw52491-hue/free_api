@@ -344,8 +344,32 @@ async fn run_agent_main_loop_in_workspace_inner(
             names.sort();
         }
         if total_tool_count > MCP_INDEX_NAME_LIMIT {
+            // 塌缩行必须带能力摘要——只有 "插件名(N)" 时模型不知道它是干嘛的，
+            // 就不会去 capability_search 查名字，等于工具存在但语义隐形。
             for (p_name, names) in &per_plugin {
-                mcp_lines.push(format!("  * {}({} 个工具)", p_name, names.len()));
+                let card_hint = registry
+                    .clients
+                    .get(p_name)
+                    .and_then(|c| crate::agent::mcp_catalog::cached_capability_card(&c.config))
+                    .map(|c| {
+                        let first_line = c.lines().next().unwrap_or("").trim().to_string();
+                        if first_line.len() > 60 {
+                            format!("{}…", &first_line[..60])
+                        } else {
+                            first_line
+                        }
+                    })
+                    .unwrap_or_default();
+                if card_hint.is_empty() {
+                    mcp_lines.push(format!("  * {}({} 个工具)", p_name, names.len()));
+                } else {
+                    mcp_lines.push(format!(
+                        "  * {}({} 个工具): {}",
+                        p_name,
+                        names.len(),
+                        card_hint
+                    ));
+                }
             }
             mcp_lines.push(
                 "  * 不知确切工具名时先用 capability_search(query) 检索全部插件工具".to_string(),
