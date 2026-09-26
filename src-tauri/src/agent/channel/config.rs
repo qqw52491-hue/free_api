@@ -87,12 +87,24 @@ pub struct ChannelConfig {
     #[serde(default)]
     pub verify_timeout_secs: Option<u64>,
     /// 网页控制台对外访问基础地址（内网穿透域名，如 https://xxx.example.com）；
-    /// 空 = 自动探测局域网 IPv4。用于生成扫码直达的二维码
+    /// 空 = 优先用 tunnel_hostname 推导的公网地址，再退回自动探测局域网 IPv4。
+    /// 用于生成扫码直达的二维码
     #[serde(default)]
     pub console_base_url: Option<String>,
     /// 单个任务允许向用户发起信息类提问的最大配额（防琐碎问题没完没了；None = 默认 5）
     #[serde(default)]
     pub max_human_inquiry_budget: Option<u32>,
+    /// 内网穿透托管开关：启动后自动确保 cloudflared 把 tunnel_hostname
+    /// 指向本机通道端口。需要 tunnel_dir 下已有命名隧道凭证（config.yml +
+    /// <id>.json + 域名 DNS 路由）；缺凭证则跳过并记状态，不影响启动。
+    #[serde(default = "default_true")]
+    pub auto_start_tunnel: bool,
+    /// 对外固定域名（如 agent.example.com）；空 = 不托管穿透
+    #[serde(default)]
+    pub tunnel_hostname: String,
+    /// cloudflared 配置/凭证目录；空 = ~/.cloudflared
+    #[serde(default)]
+    pub tunnel_dir: String,
 }
 
 fn default_action_milestone() -> u32 {
@@ -144,6 +156,9 @@ impl Default for ChannelConfig {
             phase_pushes: true,
             console_base_url: None,
             max_human_inquiry_budget: None,
+            auto_start_tunnel: true,
+            tunnel_hostname: String::new(),
+            tunnel_dir: String::new(),
         }
     }
 }

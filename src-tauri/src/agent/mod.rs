@@ -60,6 +60,7 @@ pub mod tools;
 pub mod types;
 pub mod utils;
 pub mod node_runtime;
+pub mod tunnel_runtime;
 pub mod uv_runtime;
 pub mod watch_engine;
 pub mod web_search;

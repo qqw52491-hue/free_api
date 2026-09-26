@@ -261,6 +261,15 @@ pub async fn wechat_channel_config_set(config: ConfigPutReq) -> Result<Value, St
         let trimmed = v.trim().to_string();
         current.console_base_url = if trimmed.is_empty() { None } else { Some(trimmed) };
     }
+    if let Some(v) = config.auto_start_tunnel {
+        current.auto_start_tunnel = v;
+    }
+    if let Some(v) = config.tunnel_hostname {
+        current.tunnel_hostname = v.trim().to_string();
+    }
+    if let Some(v) = config.tunnel_dir {
+        current.tunnel_dir = v.trim().to_string();
+    }
     if let Some(v) = config.phase_pushes {
         current.phase_pushes = v;
     }
@@ -336,8 +345,16 @@ pub async fn wechat_channel_console_qr() -> Result<Value, String> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(|v| v.trim_end_matches('/').to_string());
+    let tunnel_base = config
+        .tunnel_hostname
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
     if let Some(base) = &custom {
         urls.push(format!("{base}/?token={token}"));
+    } else if !tunnel_base.is_empty() {
+        // console_base_url 未配时，内网穿透域名就是最自然的公网入口
+        urls.push(format!("https://{tunnel_base}/?token={token}"));
     }
     for ip in lan_ipv4_addresses() {
         let url = format!("http://{ip}:{port}/?token={token}");

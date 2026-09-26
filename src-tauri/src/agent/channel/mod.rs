@@ -28,6 +28,7 @@ pub mod config;
 pub mod http;
 pub mod bridge;
 pub mod runtime;
+pub mod tunnel;
 #[cfg(test)]
 mod tests;
 

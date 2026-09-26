@@ -19,6 +19,9 @@ pub struct ConfigPutReq {
     pub action_milestone_steps: Option<u32>,
     pub phase_pushes: Option<bool>,
     pub console_base_url: Option<String>,
+    pub auto_start_tunnel: Option<bool>,
+    pub tunnel_hostname: Option<String>,
+    pub tunnel_dir: Option<String>,
 }
 
 // ---------------------------------------------------------------- 处理器
@@ -379,6 +382,10 @@ pub(crate) fn config_value(config: &ChannelConfig) -> Value {
         "action_milestone_steps": config.action_milestone_steps,
         "phase_pushes": config.phase_pushes,
         "console_base_url": config.console_base_url,
+        "auto_start_tunnel": config.auto_start_tunnel,
+        "tunnel_hostname": config.tunnel_hostname,
+        "tunnel_dir": config.tunnel_dir,
+        "tunnel_status": crate::agent::channel::tunnel::tunnel_status(),
         "config_path": channel_config_path().to_string_lossy(),
     })
 }

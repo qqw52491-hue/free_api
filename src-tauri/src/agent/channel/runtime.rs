@@ -79,6 +79,24 @@ pub fn spawn_channel_server(app: AppHandle) {
         }
     });
 
+    // 内网穿透托管：auto_start_tunnel + tunnel_hostname 就位时，自动确保
+    // cloudflared 隧道把固定域名指向本机通道（缺凭证则跳过，不阻断应用）。
+    let tunnel_cfg = config.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3)); // 让通道先监听
+        if !tunnel_cfg.auto_start_tunnel || tunnel_cfg.tunnel_hostname.trim().is_empty() {
+            return;
+        }
+        let app_root = channel_config_path()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        match tunnel::ensure_tunnel(&app_root, &tunnel_cfg) {
+            Ok(url) => println!("[channel] 内网穿透就绪: {url}"),
+            Err(error) => eprintln!("[channel] 内网穿透未启用: {error}"),
+        }
+    });
+
     // 自动拉起微信桥（auto_start_bridge=false 可关闭；失败不影响应用）
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
