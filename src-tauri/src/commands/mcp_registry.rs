@@ -629,6 +629,9 @@ pub async fn install_mcp_registry_entry(
             capability_card: String::new(),
             enabled: true,
             created_at: now,
+            last_ok_at: chrono::Utc::now().to_rfc3339(),
+            last_error: String::new(),
+            tool_count: tools.len() as i64,
         },
         tool_count: tools.len(),
     })

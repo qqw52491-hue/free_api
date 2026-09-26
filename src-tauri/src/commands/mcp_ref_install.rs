@@ -26,8 +26,11 @@ pub struct RefInstallResult {
     pub command: String,
     pub args: Vec<String>,
     pub tool_count: usize,
-    /// 解析出的引用形态（git_repo / local_dir / package_name）
+    /// 解析出的引用形态（git_repo / local_dir / package_name / mcpb_bundle）
     pub resolved_kind: String,
+    /// 清单声明的必填环境变量键名（manifest user_config / env 占位符提取）。
+    /// 前端凭此渲染密钥表单；值为空则无需引导。
+    pub required_env: Vec<String>,
 }
 
 /// 引用分类。
@@ -324,6 +327,53 @@ async fn resolve_local_dir(dir: &Path, name: &str) -> Result<Vec<PluginConfig>, 
     Ok(candidates)
 }
 
+/// 清单声明的必填 env 键名收集：
+/// 1) manifest.user_config 中 required/sensitive 字段名（mcpb 规范）；
+/// 2) server.mcp_config.env 值里的 ${user_config.X} / ${X} 占位符引用。
+/// 只产键名不产值——密钥收集归前端表单，后端不碰明文。
+fn manifest_required_env(dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(dir.join("manifest.json")) else {
+        return Vec::new();
+    };
+    let Ok(m) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    if let Some(cfg) = m.get("user_config").and_then(|v| v.as_object()) {
+        for (key, spec) in cfg {
+            let required = spec
+                .get("required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let sensitive = spec
+                .get("sensitive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if required || sensitive {
+                out.push(key.clone());
+            }
+        }
+    }
+    if let Some(env) = m.pointer("/server/mcp_config/env").and_then(|v| v.as_object()) {
+        for (_, v) in env {
+            if let Some(s) = v.as_str() {
+                for cap in s.match_indices("${") {
+                    let rest = &s[cap.0 + 2..];
+                    let name = rest
+                        .split('}')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start_matches("user_config.");
+                    if !name.is_empty() && !out.iter().any(|x| x == name) {
+                        out.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Git 仓库 → clone 到 <repos_dir>/<name>；已克隆则 fast-forward。
 async fn materialize_git_repo(
     repos_dir: &Path,
@@ -577,6 +627,7 @@ pub async fn install_from_ref_core(
 ) -> Result<RefInstallResult, String> {
     let kind = classify_reference(reference)?;
 
+    let mut resolved_dir: Option<PathBuf> = None;
     let (plugin_name, candidates, resolved_kind) = match kind {
         RefKind::PackageName(name) => {
             // 作用域包名取后段会撞名（@playwright/mcp → "mcp"）；
@@ -607,6 +658,7 @@ pub async fn install_from_ref_core(
                 .unwrap_or("local-plugin")
                 .to_string();
             let cands = resolve_local_dir(&dir, &name).await?;
+            resolved_dir = Some(dir);
             (name, cands, "local_dir")
         }
         RefKind::GitRepo(url) => {
@@ -618,11 +670,13 @@ pub async fn install_from_ref_core(
                 .to_string();
             let dir = materialize_git_repo(repos_dir, &url, &name).await?;
             let cands = resolve_local_dir(&dir, &name).await?;
+            resolved_dir = Some(dir);
             (name, cands, "git_repo")
         }
         RefKind::McpbBundle(path) => {
             let (dir, name) = materialize_mcpb(&path, repos_dir).await?;
             let cands = resolve_local_dir(&dir, &name).await?;
+            resolved_dir = Some(dir);
             (name, cands, "mcpb_bundle")
         }
     };
@@ -672,12 +726,18 @@ pub async fn install_from_ref_core(
                     ],
                 )
                 .map_err(|e| format!("保存插件失败: {e}"))?;
+                crate::commands::record_plugin_health(state, &plugin_name, Ok(tool_count));
+                let required_env = resolved_dir
+                    .as_deref()
+                    .map(manifest_required_env)
+                    .unwrap_or_default();
                 return Ok(RefInstallResult {
                     plugin_name,
                     command: cfg.command,
                     args: cfg.args,
                     tool_count,
                     resolved_kind: resolved_kind.to_string(),
+                    required_env,
                 });
             }
             Err(e) => last_err = e,

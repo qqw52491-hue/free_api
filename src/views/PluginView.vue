@@ -96,12 +96,17 @@
           <div class="plugin-info">
             <h3>
               {{ p.name }}
+              <!-- 健康状态源真相：DB 持久列（last_error 红 > last_ok_at 绿 > 未验证灰）；
+                   目录缓存仅在库列全空时作软提示 -->
               <span
                 class="status-dot"
-                :class="catalogOf(p.name)?.cached ? 'ok' : 'idle'"
-                :title="catalogOf(p.name)?.cached ? `目录已握手缓存：${catalogOf(p.name).tool_count} 个工具` : '尚未握手过——点击刷新连接实拉工具目录'"
+                :class="p.last_error ? 'err' : (p.last_ok_at ? 'ok' : 'idle')"
+                :title="p.last_error
+                  ? `上次连接失败：${p.last_error}`
+                  : (p.last_ok_at ? `上次握手成功：${p.last_ok_at}${p.tool_count >= 0 ? `，${p.tool_count} 个工具` : ''}` : '尚未握手验证过——点击刷新连接实拉工具目录')"
               ></span>
-              <span v-if="catalogOf(p.name)?.cached" class="tool-count-badge">{{ catalogOf(p.name).tool_count }} 工具</span>
+              <span v-if="p.tool_count >= 0" class="tool-count-badge" :class="{ 'warn': !!p.last_error }">{{ p.tool_count }} 工具</span>
+              <span v-else-if="catalogOf(p.name)?.cached" class="tool-count-badge">{{ catalogOf(p.name).tool_count }} 工具</span>
             </h3>
             <code class="cmd-snippet">{{ p.command }} {{ p.args.join(' ') }}</code>
             <p v-if="refreshError[p.name]" class="refresh-error">⚠️ {{ refreshError[p.name] }}</p>
@@ -500,6 +505,18 @@
             <p v-if="refResult.ok">✅ 已安装「{{ refResult.name }}」（{{ refResult.toolCount }} 个工具，形态: {{ refResult.kind }}）<br><code class="cmd-snippet">{{ refResult.command }} {{ refResult.args.join(' ') }}</code></p>
             <p v-else>❌ {{ refResult.error }}</p>
           </div>
+          <!-- 装完服务声明了必填 env → 就地收密钥，写库复用 save_mcp_plugin upsert -->
+          <div v-if="refResult?.ok && refResult.requiredEnv?.length" class="form-group ref-env-box">
+            <label>该服务声明了必填配置（密钥不落日志）：</label>
+            <div v-for="key in refResult.requiredEnv" :key="key" class="ref-env-row">
+              <span class="ref-env-key">{{ key }}</span>
+              <input v-model="refSecrets[key]" type="password" :placeholder="'填入 ' + key" autocomplete="off" />
+            </div>
+            <button class="save-btn" type="button" :disabled="refSecretsSaving" @click="saveRefSecrets">
+              {{ refSecretsSaving ? '保存中…' : '保存配置' }}
+            </button>
+            <p v-if="refSecretsSaved" class="ref-env-saved">✅ 配置已写入，将在下一次会话同步时生效</p>
+          </div>
           <div class="form-actions">
             <button class="cancel-btn" @click="showAddModal = false">取消</button>
             <button class="save-btn" :disabled="!refForm.reference.trim() || refInstalling" @click="handleRefInstall">
@@ -615,6 +632,9 @@ const generatingMcpCard = ref(false);
 const refInstalling = ref(false);
 const refForm = ref({ reference: '' });
 const refResult = ref(null);
+const refSecrets = ref({});
+const refSecretsSaving = ref(false);
+const refSecretsSaved = ref(false);
 const catalogMap = ref({});
 const refreshError = ref({});
 const refreshingName = ref('');
@@ -900,12 +920,38 @@ const handleRefInstall = async () => {
       args: res.args,
       toolCount: res.tool_count,
       kind: res.resolved_kind,
+      requiredEnv: res.required_env || [],
     };
+    refSecretsSaved.value = false;
+    refSecrets.value = {};
+    (res.required_env || []).forEach((k) => { refSecrets.value[k] = ''; });
     await loadPlugins();
   } catch (err) {
     refResult.value = { ok: false, error: String(err) };
   } finally {
     refInstalling.value = false;
+  }
+};
+
+// 装完后补写必填 env：复用 save_mcp_plugin upsert（command/args 原样回写，只增 env）。
+const saveRefSecrets = async () => {
+  if (!refResult.value?.ok) return;
+  refSecretsSaving.value = true;
+  try {
+    await invoke('save_mcp_plugin', {
+      name: refResult.value.name,
+      command: refResult.value.command,
+      args: refResult.value.args,
+      env: refSecrets.value,
+      capabilityCard: null,
+      enabled: true,
+    });
+    refSecretsSaved.value = true;
+    await loadPlugins();
+  } catch (err) {
+    alert('保存配置失败: ' + err);
+  } finally {
+    refSecretsSaving.value = false;
   }
 };
 
@@ -1837,5 +1883,11 @@ select option { background-color: #18181b !important; color: #f4f4f5 !important;
 .status-dot.idle { background:#71717a; }
 .tool-count-badge { font-size:10px; color:#4ade80; background:rgba(74,222,128,.12); padding:1px 6px; border-radius:8px; margin-left:6px; font-weight:600; }
 .refresh-error { font-size:11px; color:#f87171; margin:4px 0 0; }
+.status-dot.err { background:#f87171; box-shadow:0 0 4px rgba(248,113,113,.6); }
+.tool-count-badge.warn { color:#fbbf24; background:rgba(251,191,36,.12); }
+.ref-env-box { margin-top:8px; padding:10px; border:1px solid rgba(255,255,255,.1); border-radius:8px; background:rgba(255,255,255,.03); }
+.ref-env-row { display:flex; align-items:center; gap:8px; margin:6px 0; }
+.ref-env-key { font-size:11px; color:#8e8e93; min-width:120px; font-family:monospace; }
+.ref-env-row input { flex:1; }
+.ref-env-saved { font-size:11px; color:#4ade80; margin:6px 0 0; }
 </style>
-

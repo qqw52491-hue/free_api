@@ -526,6 +526,20 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         "ALTER TABLE mcp_plugins ADD COLUMN headers TEXT NOT NULL DEFAULT '{}';",
         [],
     );
+    // 健康持久化：最近一次握手成功时间/失败原因/工具数——
+    // 卡片状态不再靠目录缓存猜，重开 app 也能回显上次真相
+    let _ = conn.execute(
+        "ALTER TABLE mcp_plugins ADD COLUMN last_ok_at TEXT NOT NULL DEFAULT '';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE mcp_plugins ADD COLUMN last_error TEXT NOT NULL DEFAULT '';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE mcp_plugins ADD COLUMN tool_count INTEGER NOT NULL DEFAULT -1;",
+        [],
+    );
     // -1 = 未设置（按 base_url 推断），0 = 显式不要求交替，1 = 显式要求归并连续同角色消息
     let _ = conn.execute(
         "ALTER TABLE platforms ADD COLUMN requires_alternating_roles INTEGER NOT NULL DEFAULT -1;",

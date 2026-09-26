@@ -24,6 +24,12 @@ pub struct McpPluginRow {
     pub capability_card: String,
     pub enabled: bool,
     pub created_at: String,
+    /// 最近一次握手成功时间（ISO8601），空=从未成功过
+    pub last_ok_at: String,
+    /// 最近一次握手/启动失败原因，空=最近没失败
+    pub last_error: String,
+    /// 最近一次握手发现的工具数，-1=未知
+    pub tool_count: i64,
 }
 
 /// Agent Runtime 直接读取的插件配置。SQLite 中的 enabled 标志优先于同名 YAML。
@@ -158,6 +164,31 @@ pub fn load_managed_mcp_plugins(db: &DbState) -> Result<Vec<ManagedMcpPlugin>, S
     Ok(plugins)
 }
 
+/// 健康三列索引（name → last_ok_at/last_error/tool_count），查询失败回空表不致命。
+fn plugin_health_map(
+    db: &DbState,
+) -> std::collections::HashMap<String, (String, String, i64)> {
+    let Ok(conn) = db.0.lock() else { return Default::default() };
+    let Ok(mut stmt) =
+        conn.prepare("SELECT name, last_ok_at, last_error, tool_count FROM mcp_plugins")
+    else {
+        return Default::default();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            (
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ),
+        ))
+    }) else {
+        return Default::default();
+    };
+    rows.flatten().collect()
+}
+
 fn enabled_mcp_config(db: &DbState, name: &str) -> Result<PluginConfig, String> {
     load_managed_mcp_plugins(db)?
         .into_iter()
@@ -171,6 +202,8 @@ fn enabled_mcp_config(db: &DbState, name: &str) -> Result<PluginConfig, String> 
 #[tauri::command]
 pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginRow>, String> {
     let managed = load_managed_mcp_plugins(state.inner())?;
+    // 健康三列按 name 单独拉一张索引（避免改 load_managed 的返回形状波及调用方）
+    let health = plugin_health_map(state.inner());
     let rows = managed
         .into_iter()
         .map(|m| McpPluginRow {
@@ -195,6 +228,9 @@ pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginR
             } else {
                 "本地 stdio 进程".to_string()
             },
+            last_ok_at: health.get(&m.config.name).map(|h| h.0.clone()).unwrap_or_default(),
+            last_error: health.get(&m.config.name).map(|h| h.1.clone()).unwrap_or_default(),
+            tool_count: health.get(&m.config.name).map(|h| h.2).unwrap_or(-1),
         })
         .collect();
     Ok(rows)
@@ -224,10 +260,22 @@ pub async fn refresh_mcp_plugin_connection(
 ) -> Result<McpCatalogStatus, String> {
     let config = enabled_mcp_config(state.inner(), &name)?;
     invalidate_plugin(&name);
-    let client = McpClient::spawn(config.clone())?;
-    client.initialize().await?;
-    let tools = client.list_tools().await?;
+    // 健康持久化：握手成败都落库（last_ok_at/last_error/tool_count），
+    // 卡片状态显示落库真相而非目录缓存猜测。
+    let client = McpClient::spawn(config.clone()).map_err(|e| {
+        record_plugin_health(state.inner(), &name, Err(e.clone()));
+        e
+    })?;
+    client.initialize().await.map_err(|e| {
+        record_plugin_health(state.inner(), &name, Err(e.clone()));
+        e
+    })?;
+    let tools = client.list_tools().await.map_err(|e| {
+        record_plugin_health(state.inner(), &name, Err(e.clone()));
+        e
+    })?;
     remember_tools(&config, &tools);
+    record_plugin_health(state.inner(), &name, Ok(tools.len()));
 
     let card = crate::agent::mcp_catalog::cached_capability_card(&config);
     Ok(McpCatalogStatus {
@@ -238,6 +286,23 @@ pub async fn refresh_mcp_plugin_connection(
         cached: true,
         refreshed_at_ms: Some(Utc::now().timestamp_millis() as u128),
     })
+}
+
+/// 插件健康落库：握手成败统一记 last_ok_at/last_error/tool_count。
+/// 尽力写入——观测失败不阻断主链。
+pub(crate) fn record_plugin_health(db: &DbState, name: &str, result: Result<usize, String>) {
+    let Ok(conn) = db.0.lock() else { return };
+    let now = Utc::now().to_rfc3339();
+    let _ = match result {
+        Ok(tool_count) => conn.execute(
+            "UPDATE mcp_plugins SET last_ok_at=?1, last_error='', tool_count=?2 WHERE name=?3",
+            params![now, tool_count as i64, name],
+        ),
+        Err(e) => conn.execute(
+            "UPDATE mcp_plugins SET last_error=?1 WHERE name=?2",
+            params![e.chars().take(500).collect::<String>(), name],
+        ),
+    };
 }
 
 #[tauri::command]
@@ -417,6 +482,9 @@ pub async fn quick_connect_and_save_mcp(
         capability_card,
         enabled: true,
         created_at: now,
+        last_ok_at: String::new(),
+        last_error: String::new(),
+        tool_count: -1,
     })
 }
 
@@ -712,6 +780,9 @@ pub async fn save_mcp_plugin(
         capability_card: cap_card,
         enabled: is_enabled,
         created_at: now,
+        last_ok_at: String::new(),
+        last_error: String::new(),
+        tool_count: -1,
     })
 }
 
