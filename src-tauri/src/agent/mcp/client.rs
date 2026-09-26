@@ -78,7 +78,7 @@ impl McpClient {
         cmd.args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .env("PYTHONUNBUFFERED", "1")
             .env("NODE_NO_WARNINGS", "1");
         for (k, v) in uv_env {
@@ -103,6 +103,30 @@ impl McpClient {
             .stdout
             .take()
             .ok_or_else(|| format!("[MCP:{}] 无法获取 stdout", config.name))?;
+        // stderr 诊断尾部环形采集（8KB 封顶）：插件启动失败时把真实死因
+        // （uv 编译失败/模块缺失等）带进出错，不再只给"进程已退出"。
+        // 必须持续 drain——不然 stderr 管道写满会把子进程锁死。
+        let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
+        if let Some(mut stderr_pipe) = child.stderr.take() {
+            let buf = stderr_tail.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut tmp = [0u8; 4096];
+                while let Ok(n) = stderr_pipe.read(&mut tmp).await {
+                    if n == 0 {
+                        break;
+                    }
+                    let text = String::from_utf8_lossy(&tmp[..n]);
+                    if let Ok(mut g) = buf.lock() {
+                        g.push_str(&text);
+                        if g.len() > 8192 {
+                            let cut = g.len() - 8192;
+                            *g = g.split_off(cut);
+                        }
+                    }
+                }
+            });
+        }
 
         let (request_tx, mut request_rx) = mpsc::channel::<RequestEnvelope>(64);
         let plugin_name = config.name.clone();
@@ -191,8 +215,20 @@ impl McpClient {
                     }
                 }
 
+                let diag = stderr_tail
+                    .lock()
+                    .map(|g| g.trim().to_string())
+                    .unwrap_or_default();
+                let suffix = if diag.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n—— stderr 尾部诊断 ——\n{}", diag)
+                };
                 for (_, tx) in pending.drain() {
-                    let _ = tx.send(Err(format!("[MCP:{}] 插件进程已退出/断开", plugin_name)));
+                    let _ = tx.send(Err(format!(
+                        "[MCP:{}] 插件进程已退出/断开{}",
+                        plugin_name, suffix
+                    )));
                 }
                 let _ = child.kill().await;
             },

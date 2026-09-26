@@ -209,8 +209,13 @@ async fn resolve_local_dir(dir: &Path, name: &str) -> Result<Vec<PluginConfig>, 
 
     // 1) pyproject.toml → uv run --directory <dir>
     let pyproject = dir.join("pyproject.toml");
+    let pyproject_text = if pyproject.is_file() {
+        std::fs::read_to_string(&pyproject).ok()
+    } else {
+        None
+    };
     if pyproject.is_file() {
-        if let Ok(text) = std::fs::read_to_string(&pyproject) {
+        if let Some(text) = pyproject_text.as_deref() {
             if let Some(scripts_pos) = text.find("[project.scripts]") {
                 let tail = &text[scripts_pos..];
                 if let Some(line) = tail
@@ -318,6 +323,34 @@ async fn resolve_local_dir(dir: &Path, name: &str) -> Result<Vec<PluginConfig>, 
         }
     }
 
+    // Python 版本退避：uv.lock/pyproject 钉死的老依赖在新 Python 下无预编译
+    // wheel（pydantic-core 源码编译事故实测）——给每个 `uv run` 候选补
+    // `--python` 变体殿后，uv 自动下载受管解释器，不污染主候选顺序。
+    // 版本选择遵守 requires-python 声明的下界（3.13 优先：PyO3 系 wheel 上限）。
+    let py_fallbacks: Vec<&str> = {
+        let mut v = Vec::new();
+        let lower_bound = pyproject_text
+            .as_deref()
+            .and_then(|t| python_lower_bound(t));
+        for cand in ["3.13", "3.12"] {
+            if lower_bound.map_or(true, |lb| version_satisfies_lower(cand, lb)) {
+                v.push(cand);
+            }
+        }
+        v
+    };
+    let mut py_fallbacks_cfgs: Vec<PluginConfig> = Vec::new();
+    for c in &candidates {
+        if c.command == "uv" && c.args.first().map(|s| s.as_str()) == Some("run") {
+            for ver in &py_fallbacks {
+                let mut args = c.args.clone();
+                args.splice(1..1, ["--python".to_string(), ver.to_string()]);
+                py_fallbacks_cfgs.push(PluginConfig { args, ..c.clone() });
+            }
+        }
+    }
+    candidates.extend(py_fallbacks_cfgs);
+
     if candidates.is_empty() {
         return Err(format!(
             "目录 {} 下没认出可运行形态：需要 pyproject.toml / package.json / server.py / main.py / server.js / index.js 之一",
@@ -372,6 +405,35 @@ fn manifest_required_env(dir: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// pyproject 里 requires-python 的下界版本号（>=X.Y / ==X.Y 等），
+/// 解析不出返回 None（视为无约束）。
+fn python_lower_bound(pyproject_text: &str) -> Option<(u32, u32)> {
+    let pos = pyproject_text.find("requires-python")?;
+    let spec = pyproject_text[pos..].lines().next()?;
+    for op in [">=", "==", "~="] {
+        if let Some(idx) = spec.find(op) {
+            let ver = spec[idx + op.len()..]
+                .trim_start_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace())
+                .split(|c: char| !c.is_ascii_digit() && c != '.')
+                .next()
+                .unwrap_or("");
+            let mut it = ver.split('.');
+            let major = it.next()?.parse().ok()?;
+            let minor = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            return Some((major, minor));
+        }
+    }
+    None
+}
+
+/// 版本号是否满足下界（major.minor 粗粒度比较，退避候选够用）。
+fn version_satisfies_lower(ver: &str, lower: (u32, u32)) -> bool {
+    let mut it = ver.split('.');
+    let major = it.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    let minor = it.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    (major, minor) >= lower
 }
 
 /// Git 仓库 → clone 到 <repos_dir>/<name>；已克隆则 fast-forward。
