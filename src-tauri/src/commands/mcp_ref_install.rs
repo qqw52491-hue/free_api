@@ -252,18 +252,13 @@ async fn resolve_local_dir(dir: &Path, name: &str) -> Result<Vec<PluginConfig>, 
     Ok(candidates)
 }
 
-/// Git 仓库 → clone 到 <app_data>/mcp_repos/<name>；已克隆则 fast-forward。
+/// Git 仓库 → clone 到 <repos_dir>/<name>；已克隆则 fast-forward。
 async fn materialize_git_repo(
-    app: &tauri::AppHandle,
+    repos_dir: &Path,
     url: &str,
     name: &str,
 ) -> Result<PathBuf, String> {
-    let repos_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("mcp_repos");
-    std::fs::create_dir_all(&repos_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(repos_dir).map_err(|e| e.to_string())?;
     let target = repos_dir.join(name);
     if target.join(".git").is_dir() {
         let out = tokio::process::Command::new("git")
@@ -302,7 +297,22 @@ pub async fn install_mcp_from_ref(
     state: State<'_, DbState>,
     reference: String,
 ) -> Result<RefInstallResult, String> {
-    let kind = classify_reference(&reference)?;
+    let repos_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("mcp_repos");
+    install_from_ref_core(state.inner(), &reference, &repos_dir).await
+}
+
+/// 核心实现：UI 命令与 mcp_manager(install_ref) 共用。
+/// repos_dir 由调用方解析（UI 走 app_data_dir，agent 侧走约定目录）。
+pub async fn install_from_ref_core(
+    state: &DbState,
+    reference: &str,
+    repos_dir: &Path,
+) -> Result<RefInstallResult, String> {
+    let kind = classify_reference(reference)?;
 
     let (plugin_name, candidates, resolved_kind) = match kind {
         RefKind::PackageName(name) => {
@@ -338,7 +348,7 @@ pub async fn install_mcp_from_ref(
                 .next()
                 .unwrap_or("repo-plugin")
                 .to_string();
-            let dir = materialize_git_repo(&app, &url, &name).await?;
+            let dir = materialize_git_repo(repos_dir, &url, &name).await?;
             let cands = resolve_local_dir(&dir, &name).await?;
             (name, cands, "git_repo")
         }

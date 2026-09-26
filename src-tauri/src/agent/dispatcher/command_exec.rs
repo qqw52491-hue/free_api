@@ -204,8 +204,8 @@ pub(crate) fn execute_command_inner(
     // 3.7 核心原生工具 F: mcp_manager (MCP 外部插件接入、批量导入与能力卡维护)
     if tool.eq_ignore_ascii_case("mcp_manager") {
         let act = action.to_ascii_lowercase();
-        // 变更类危险动作（add_http, delete, toggle, quick_connect）必须经过用户明确确认
-        if act.contains("add") || act.contains("delete") || act.contains("toggle") || act.contains("connect") {
+        // 变更类危险动作（add_http, delete, toggle, quick_connect, install_ref）必须经过用户明确确认
+        if act.contains("add") || act.contains("delete") || act.contains("toggle") || act.contains("connect") || act.contains("install") {
             let user_approved = params
                 .get("user_confirmed")
                 .and_then(|v| v.as_bool())

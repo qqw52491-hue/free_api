@@ -401,6 +401,56 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                 route: "mcp_manager:delete".to_string(),
             }
         }
+        // 引用式安装：包名/GitHub 地址/本地目录 → 解析+真实握手+落库。
+        // 复用 UI「引用安装」同一核心；目录落点用应用数据目录的约定子路径。
+        "install_ref" => {
+            let reference = params
+                .get("reference")
+                .or_else(|| params.get("package"))
+                .or_else(|| params.get("url"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if reference.is_empty() {
+                return DispatchResult { view: None,
+                    stdout: String::new(),
+                    stderr: "❌ 缺少必填参数 reference（包名 / github 仓库地址 / 本地目录路径）".to_string(),
+                    success: false,
+                    route: "mcp_manager:install_ref:missing_param".to_string(),
+                };
+            }
+            let repos_dir = dirs_next::data_dir()
+                .unwrap_or_default()
+                .join("free-api-chat")
+                .join("mcp_repos");
+            let handle = tokio::runtime::Handle::try_current();
+            let fut = crate::commands::mcp_ref_install::install_from_ref_core(
+                db, reference, &repos_dir,
+            );
+            // 与 add_http 同模式：spawn_blocking 线程上 Handle::block_on 合法。
+            let res = if let Ok(h) = handle {
+                h.block_on(fut)
+            } else {
+                futures::executor::block_on(fut)
+            };
+            match res {
+                Ok(r) => DispatchResult { view: None,
+                    stdout: format!(
+                        "✅ 已安装 MCP 插件 [{}]（形态: {}，握手实拉 {} 个工具）\n启动命令: {} {}\n将在下一次任务会话同步时生效",
+                        r.plugin_name, r.resolved_kind, r.tool_count, r.command, r.args.join(" ")
+                    ),
+                    stderr: String::new(),
+                    success: true,
+                    route: "mcp_manager:install_ref".to_string(),
+                },
+                Err(e) => DispatchResult { view: None,
+                    stdout: String::new(),
+                    stderr: format!("❌ 引用安装失败: {e}"),
+                    success: false,
+                    route: "mcp_manager:install_ref:failed".to_string(),
+                },
+            }
+        }
         "toggle" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -447,7 +497,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
         }
         _ => DispatchResult { view: None,
             stdout: String::new(),
-            stderr: format!("❌ 未知的 mcp_manager 动作 action='{}'。支持的动作: list, add_http, quick_connect (add_http 的别名), toggle, delete", act),
+            stderr: format!("❌ 未知的 mcp_manager 动作 action='{}'。支持的动作: list, add_http, quick_connect (add_http 的别名), install_ref (包名/GitHub地址/本地目录粘贴即装), toggle, delete", act),
             success: false,
             route: "mcp_manager:unknown".to_string(),
         },
@@ -508,6 +558,7 @@ mod tests {
         assert!(supported_list.contains("list"));
         assert!(supported_list.contains("add_http"));
         assert!(supported_list.contains("quick_connect"));
+        assert!(supported_list.contains("install_ref"));
         assert!(supported_list.contains("toggle"));
         assert!(supported_list.contains("delete"));
     }
@@ -529,6 +580,7 @@ mod tests {
         }
         assert!(manual.contains("`list`"));
         assert!(manual.contains("`add_http`"));
+        assert!(manual.contains("`install_ref`"));
         assert!(manual.contains("`toggle`"));
         assert!(manual.contains("`delete`"));
     }
