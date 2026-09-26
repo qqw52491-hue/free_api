@@ -321,7 +321,7 @@ async fn materialize_git_repo(
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(repos_dir).map_err(|e| e.to_string())?;
     let target = repos_dir.join(name);
-    if target.join(".git").is_dir() {
+    if target.join(".git").is_dir() && git_available().await {
         let out = tokio::process::Command::new("git")
             .args(["pull", "--ff-only"])
             .current_dir(&target)
@@ -336,19 +336,116 @@ async fn materialize_git_repo(
         }
         return Ok(target);
     }
-    let out = tokio::process::Command::new("git")
-        .args(["clone", "--depth", "1", url])
-        .arg(&target)
-        .output()
-        .await
-        .map_err(|e| format!("git clone 失败（需要 git 在 PATH）: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git clone 失败: {}",
+    if git_available().await {
+        let out = tokio::process::Command::new("git")
+            .args(["clone", "--depth", "1", url])
+            .arg(&target)
+            .output()
+            .await
+            .map_err(|e| format!("git clone 失败（需要 git 在 PATH）: {e}"))?;
+        if out.status.success() {
+            return Ok(target);
+        }
+        eprintln!(
+            "[mcp_ref_install] git clone 失败，退回 codeload zip 通道: {}",
             String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        );
     }
-    Ok(target)
+    // 无 git 兜底：GitHub codeload 官方 zip——纯 HTTP+解压，
+    // Windows 裸机（无 git）也能拿到完整仓库快照。
+    download_repo_zip(url, &target).await
+}
+
+async fn git_available() -> bool {
+    tokio::process::Command::new("git")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// GitHub codeload zip 下载（无 git 兜底通道）：
+/// https://codeload.github.com/<owner>/<repo>/zip/refs/heads/<main|master>
+/// zip 内首层目录为 <repo>-<branch>/，剥掉后平铺到 target。
+async fn download_repo_zip(url: &str, target: &Path) -> Result<PathBuf, String> {
+    let path = url
+        .trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let mut parts = path.split('/');
+    if parts.next() != Some("github.com") {
+        return Err(format!("非 GitHub 地址无法走 zip 通道: {url}"));
+    }
+    let (owner, repo) = (
+        parts.next().ok_or("GitHub 地址缺 owner")?,
+        parts.next().ok_or("GitHub 地址缺 repo")?,
+    );
+    let repo = repo.trim_end_matches(".git");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("构建下载客户端失败: {e}"))?;
+    let mut bytes = None;
+    let mut last_err = String::new();
+    for branch in ["main", "master", "HEAD"] {
+        let zip_url =
+            format!("https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}");
+        match client.get(&zip_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                bytes = Some(
+                    resp.bytes()
+                        .await
+                        .map_err(|e| format!("读取仓库 zip 失败: {e}"))?,
+                );
+                break;
+            }
+            Ok(resp) => last_err = format!("{branch} 分支 HTTP {}", resp.status()),
+            Err(e) => last_err = format!("{branch} 分支请求失败: {e}"),
+        }
+    }
+    let bytes = bytes.ok_or_else(|| format!("仓库 zip 下载均失败: {last_err}"))?;
+
+    // 解压到临时目录再整体搬入 target（避免半成品状态）
+    let staging = target.with_extension("staging");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let archive_path = staging.join("repo.zip");
+    std::fs::write(&archive_path, &bytes).map_err(|e| format!("写入 zip 失败: {e}"))?;
+    {
+        let f = std::fs::File::open(&archive_path).map_err(|e| e.to_string())?;
+        let mut z = zip::ZipArchive::new(f).map_err(|e| format!("解析 zip 失败: {e}"))?;
+        for i in 0..z.len() {
+            let mut file = z.by_index(i).map_err(|e| e.to_string())?;
+            // 剥掉首层 <repo>-<branch>/ 前缀
+            let rel = file
+                .name()
+                .split('/')
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join("/");
+            if rel.is_empty() {
+                continue;
+            }
+            let out_path = staging.join(&rel);
+            if file.is_dir() {
+                std::fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
+                continue;
+            }
+            if let Some(p) = out_path.parent() {
+                std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+            }
+            let mut out = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
+            std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
+        }
+    }
+    let _ = std::fs::remove_file(&archive_path);
+    let _ = std::fs::remove_dir_all(target);
+    std::fs::rename(&staging, target).map_err(|e| format!("搬入仓库目录失败: {e}"))?;
+    Ok(target.to_path_buf())
 }
 
 /// 克隆落点统一约定：与 data_v2.db 同根（data_dir/free-api-chat/mcp_repos）。
@@ -635,6 +732,24 @@ mod tests {
             println!("local dir: {:?}", r);
             assert!(r.is_ok(), "本地目录安装失败: {:?}", r.err());
         }
+    }
+
+    /// 无 git 兜底通道实测：codeload zip 下载+剥首层+平铺。
+    /// `cargo test --lib real_repo_zip -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn real_repo_zip() {
+        let target = std::env::temp_dir().join(format!("mcpref-zip-{}", std::process::id()));
+        let r = download_repo_zip(
+            "https://github.com/haris-musa/excel-mcp-server",
+            &target,
+        )
+        .await;
+        println!("{:?}", r);
+        assert!(r.is_ok());
+        assert!(target.join("pyproject.toml").is_file(), "解压后应有 pyproject.toml");
+        assert!(target.join("src").is_dir());
+        std::fs::remove_dir_all(&target).ok();
     }
 
     /// 手动触发：往真实应用库安装一个 MCP（默认 playwright-mcp）。

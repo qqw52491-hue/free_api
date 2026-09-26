@@ -1,0 +1,312 @@
+- generic [ref=f63e2]:
+  - generic [ref=f63e4]:
+    - list [ref=f63e5]:
+      - listitem [ref=f63e6]:
+        - link "首页" [ref=f63e7] [cursor=pointer]:
+          - /url: //www.bilibili.com
+      - listitem [ref=f63e14]:
+        - link "番剧" [ref=f63e15] [cursor=pointer]:
+          - /url: //www.bilibili.com/anime/
+      - listitem [ref=f63e16]:
+        - link "直播" [ref=f63e17] [cursor=pointer]:
+          - /url: //live.bilibili.com/
+      - listitem [ref=f63e18]:
+        - link "游戏中心" [ref=f63e19] [cursor=pointer]:
+          - /url: //game.bilibili.com/
+      - listitem [ref=f63e20]:
+        - link "会员购" [ref=f63e21] [cursor=pointer]:
+          - /url: //show.bilibili.com/platform/home.html?msource=pc_web
+      - listitem [ref=f63e22]:
+        - link "漫画" [ref=f63e23] [cursor=pointer]:
+          - /url: //manga.bilibili.com?from=bill_top_mnav
+      - listitem [ref=f63e24]:
+        - link "赛事" [ref=f63e25] [cursor=pointer]:
+          - /url: //www.bilibili.com/v/game/match/
+    - list [ref=f63e26]:
+      - listitem [ref=f63e27] [cursor=pointer]
+  - generic [ref=f63e32]:
+    - generic [ref=f63e33]:
+      - generic [ref=f63e34]:
+        - heading "2026 热 梗 年 度 总 结 ！！！【上】" [level=1] [ref=f63e37]
+        - generic [ref=f63e39]:
+          - generic [ref=f63e40]: 49万
+          - generic [ref=f63e43]: "811"
+          - generic [ref=f63e46]: 2026-09-25 11:31:35
+      - generic "哔哩哔哩播放器" [ref=f63e57]
+      - generic [ref=f63e67]:
+        - generic [ref=f63e69]:
+          - generic "点赞（Q）" [ref=f63e71] [cursor=pointer]: 4.8万
+          - generic "投币（W）" [ref=f63e76] [cursor=pointer]: "6252"
+          - generic "收藏（E）" [ref=f63e81] [cursor=pointer]: "7864"
+          - generic [ref=f63e85]: "2799"
+        - generic [ref=f63e92] [cursor=pointer]
+      - generic [ref=f63e95]: 简介：一年一度盛会！46个梗你都找到了吗？
+      - generic [ref=f63e98]:
+        - link "万物皆可上背屏" [ref=f63e101] [cursor=pointer]:
+          - /url: https://m.bilibili.com/topic-detail?topic_id=1348112&topic_name=%E4%B8%87%E7%89%A9%E7%9A%86%E5%8F%AF%E4%B8%8A%E8%83%8C%E5%B1%8F&spm_id_from=0.0.top.function_card.click
+        - link "动画" [ref=f63e110] [cursor=pointer]:
+          - /url: //search.bilibili.com/all?keyword=%E5%8A%A8%E7%94%BB&from_source=video_tag
+        - link "搞笑" [ref=f63e113] [cursor=pointer]:
+          - /url: //search.bilibili.com/all?keyword=%E6%90%9E%E7%AC%91&from_source=video_tag
+        - link "高能" [ref=f63e116] [cursor=pointer]:
+          - /url: //search.bilibili.com/all?keyword=%E9%AB%98%E8%83%BD&from_source=video_tag
+        - link "年度热梗" [ref=f63e119] [cursor=pointer]:
+          - /url: //search.bilibili.com/all?keyword=%E5%B9%B4%E5%BA%A6%E7%83%AD%E6%A2%97&from_source=video_tag
+        - link "小米18 Pro Max" [ref=f63e122] [cursor=pointer]:
+          - /url: //search.bilibili.com/all?keyword=%E5%B0%8F%E7%B1%B318%20Pro%20Max&from_source=video_tag
+        - link "小米18 Pro系列" [ref=f63e125] [cursor=pointer]:
+          - /url: //search.bilibili.com/all?keyword=%E5%B0%8F%E7%B1%B318%20Pro%E7%B3%BB%E5%88%97&from_source=video_tag
+        - link "背屏应用卡" [ref=f63e128] [cursor=pointer]:
+          - /url: //search.bilibili.com/all?keyword=%E8%83%8C%E5%B1%8F%E5%BA%94%E7%94%A8%E5%8D%A1&from_source=video_tag
+        - link "琵琶曲" [ref=f63e131] [cursor=pointer]:
+          - /url: //search.bilibili.com/all?keyword=%E7%90%B5%E7%90%B6%E6%9B%B2&from_source=video_tag
+        - link "三十六贱笑" [ref=f63e134] [cursor=pointer]:
+          - /url: //search.bilibili.com/all?keyword=%E4%B8%89%E5%8D%81%E5%85%AD%E8%B4%B1%E7%AC%91&from_source=video_tag
+      - generic [ref=f63e135]:
+        - link:
+          - /url: javascript:void(0);
+          - generic [ref=f63e136] [cursor=pointer]
+    - generic:
+      - generic:
+        - generic [ref=f63e138]:
+          - link [ref=f63e141] [cursor=pointer]:
+            - /url: //space.bilibili.com/90361813/?spm_id_from=333.788.upinfo.head.click
+          - generic [ref=f63e142]:
+            - generic [ref=f63e144]:
+              - generic [ref=f63e145]:
+                - link "三十六贱笑" [ref=f63e146] [cursor=pointer]:
+                  - /url: //space.bilibili.com/90361813/?spm_id_from=333.788.upinfo.detail.click
+                - link " 发消息" [ref=f63e147] [cursor=pointer]:
+                  - /url: //message.bilibili.com/?spm_id_from=333.788.upinfo.detail.click#whisper/mid90361813
+                  - generic [ref=f63e148]: 
+                  - text: 发消息
+              - generic "第三届全国逗比大赛第二名 《情侣100种夜生活》《西游旅行团》《对对子第三季》火热制作中！" [ref=f63e149]
+            - generic [ref=f63e151]:
+              - generic [ref=f63e152] [cursor=pointer]
+              - generic [ref=f63e153] [cursor=pointer]
+        - link "广告 豆包 还有什么是你不会的 豆包 2万人感兴趣" [ref=f63e161] [cursor=pointer]:
+          - /url: javascript:void(0);
+          - generic [ref=f63e162]:
+            - generic [ref=f63e163]: 广告
+            - generic [ref=f63e166]:
+              - generic "豆包 还有什么是你不会的" [ref=f63e167]
+              - generic [ref=f63e168]: 豆包
+              - generic [ref=f63e170]: 2万人感兴趣
+        - generic [ref=f63e175]:
+          - generic [ref=f63e176]:
+            - generic [ref=f63e177]:
+              - generic [ref=f63e178]:
+                - generic [ref=f63e179]: 接下来播放
+                - generic [ref=f63e180] [cursor=pointer]: 自动连播
+              - generic [ref=f63e185]:
+                - link [ref=f63e189] [cursor=pointer]:
+                  - /url: /video/BV13Le462ENR/?spm_id_from=333.788.recommend_more_video.-1&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e190]:
+                  - link [ref=f63e191] [cursor=pointer]:
+                    - /url: /video/BV13Le462ENR/?spm_id_from=333.788.recommend_more_video.-1&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e192]: 琵琶曲丨阿星VS阿奇，正在争夺饽饽山的两人
+                  - link "栋七津" [ref=f63e194] [cursor=pointer]:
+                    - /url: //space.bilibili.com/1185823779/
+                  - generic [ref=f63e197]: 62万 161
+            - generic [ref=f63e201]:
+              - generic [ref=f63e203]:
+                - link [ref=f63e205] [cursor=pointer]:
+                  - /url: https://www.bilibili.com/blackboard/era/ACGNTrend.html?spm_id_from=333.788.specialRecommendByOp.0
+                - generic [ref=f63e206]:
+                  - link [ref=f63e207] [cursor=pointer]:
+                    - /url: https://www.bilibili.com/blackboard/era/ACGNTrend.html?spm_id_from=333.788.specialRecommendByOp.0
+                    - paragraph [ref=f63e208]: 人类对琵琶曲的开发进度>>
+                  - generic [ref=f63e209]: 奖金给你，再来一曲
+              - generic [ref=f63e211]:
+                - link [ref=f63e215] [cursor=pointer]:
+                  - /url: /video/BV1WYt265EyX/?spm_id_from=333.788.recommend_more_video.0&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e216]:
+                  - link [ref=f63e217] [cursor=pointer]:
+                    - /url: /video/BV1WYt265EyX/?spm_id_from=333.788.recommend_more_video.0&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e218]: 妙脆角学功夫!
+                  - link "待到春来冬夏去" [ref=f63e220] [cursor=pointer]:
+                    - /url: //space.bilibili.com/2002540325/
+                  - generic [ref=f63e223]: 247.2万 754
+              - generic [ref=f63e227]:
+                - link [ref=f63e231] [cursor=pointer]:
+                  - /url: /video/BV1wzeQ6MEZ4/?spm_id_from=333.788.recommend_more_video.1&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e232]:
+                  - link [ref=f63e233] [cursor=pointer]:
+                    - /url: /video/BV1wzeQ6MEZ4/?spm_id_from=333.788.recommend_more_video.1&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e234]: 琵琶曲l但是脱缰凯版（侯勇和脱主任）😈
+                  - link "大王和木炭" [ref=f63e236] [cursor=pointer]:
+                    - /url: //space.bilibili.com/1494055379/
+                  - generic [ref=f63e239]: 26.3万 289
+              - generic [ref=f63e243]:
+                - link [ref=f63e247] [cursor=pointer]:
+                  - /url: /video/BV13Hhy6REhN/?spm_id_from=333.788.recommend_more_video.2&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e248]:
+                  - link [ref=f63e249] [cursor=pointer]:
+                    - /url: /video/BV13Hhy6REhN/?spm_id_from=333.788.recommend_more_video.2&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e250]: 盘点那些被烂梗毁掉的神曲（第4期）
+                  - link "红温的熊猫" [ref=f63e252] [cursor=pointer]:
+                    - /url: //space.bilibili.com/1629723074/
+                  - generic [ref=f63e255]: 5.5万 250
+              - generic [ref=f63e259]:
+                - link [ref=f63e263] [cursor=pointer]:
+                  - /url: /video/BV1sVen69EYv/?spm_id_from=333.788.recommend_more_video.3&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e264]:
+                  - link [ref=f63e265] [cursor=pointer]:
+                    - /url: /video/BV1sVen69EYv/?spm_id_from=333.788.recommend_more_video.3&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e266]: 琵琶曲，但是切一下镜头就换人
+                  - link "SovietSharks" [ref=f63e268] [cursor=pointer]:
+                    - /url: //space.bilibili.com/667052030/
+                  - generic [ref=f63e271]: 149.6万 627
+              - generic [ref=f63e275]:
+                - link [ref=f63e279] [cursor=pointer]:
+                  - /url: /video/BV1fhFYzgEYT/?spm_id_from=333.788.recommend_more_video.4&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e280]:
+                  - link [ref=f63e281] [cursor=pointer]:
+                    - /url: /video/BV1fhFYzgEYT/?spm_id_from=333.788.recommend_more_video.4&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e282]: 满级动画
+                  - link "满级搞笑呀" [ref=f63e284] [cursor=pointer]:
+                    - /url: //space.bilibili.com/3546921195014358/
+                  - generic [ref=f63e287]: 6.9万 44
+              - generic [ref=f63e291]:
+                - link [ref=f63e295] [cursor=pointer]:
+                  - /url: /video/BV1smwDzgEdV/?spm_id_from=333.788.recommend_more_video.5&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e296]:
+                  - link [ref=f63e297] [cursor=pointer]:
+                    - /url: /video/BV1smwDzgEdV/?spm_id_from=333.788.recommend_more_video.5&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e298]: 那些太过讽刺，而被下架的动画
+                  - link "壹元影视" [ref=f63e300] [cursor=pointer]:
+                    - /url: //space.bilibili.com/664185960/
+                  - generic [ref=f63e303]: 6.6万 20
+              - generic [ref=f63e307]:
+                - link [ref=f63e311] [cursor=pointer]:
+                  - /url: /video/BV1PsJw6YEag/?spm_id_from=333.788.recommend_more_video.6&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e312]:
+                  - link [ref=f63e313] [cursor=pointer]:
+                    - /url: /video/BV1PsJw6YEag/?spm_id_from=333.788.recommend_more_video.6&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e314]: 你找到了三幻神！
+                  - link "恒子_Hengz" [ref=f63e316] [cursor=pointer]:
+                    - /url: //space.bilibili.com/3546761287174924/
+                  - generic [ref=f63e319]: 25万 91
+              - generic [ref=f63e323]:
+                - link [ref=f63e327] [cursor=pointer]:
+                  - /url: /video/BV1Ba4y1j7uj/?spm_id_from=333.788.recommend_more_video.7&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e328]:
+                  - link [ref=f63e329] [cursor=pointer]:
+                    - /url: /video/BV1Ba4y1j7uj/?spm_id_from=333.788.recommend_more_video.7&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e330]: 阴 阳 怪 气 vs gay 里 gay 气 ！！！
+                  - link "三十六贱笑" [ref=f63e332] [cursor=pointer]:
+                    - /url: //space.bilibili.com/90361813/
+                  - generic [ref=f63e335]: 412.2万 1.3万
+              - generic [ref=f63e339]:
+                - link [ref=f63e343] [cursor=pointer]:
+                  - /url: /video/BV1cYh76YEBf/?spm_id_from=333.788.recommend_more_video.8&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e344]:
+                  - link [ref=f63e345] [cursor=pointer]:
+                    - /url: /video/BV1cYh76YEBf/?spm_id_from=333.788.recommend_more_video.8&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e346]: 《草东没有琵琶曲》
+                  - link "鬼畜厂厂长" [ref=f63e348] [cursor=pointer]:
+                    - /url: //space.bilibili.com/7322269/
+                  - generic [ref=f63e351]: 25万 282
+              - generic [ref=f63e355]:
+                - link [ref=f63e359] [cursor=pointer]:
+                  - /url: /video/BV1Jhjm6LEzb/?spm_id_from=333.788.recommend_more_video.9&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e360]:
+                  - link [ref=f63e361] [cursor=pointer]:
+                    - /url: /video/BV1Jhjm6LEzb/?spm_id_from=333.788.recommend_more_video.9&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e362]: 河北的中考语文真的太简单了！
+                  - link "FNF斯蒂维" [ref=f63e364] [cursor=pointer]:
+                    - /url: //space.bilibili.com/1743477840/
+                  - generic [ref=f63e367]: 1.2万 28
+              - generic [ref=f63e371]:
+                - link [ref=f63e375] [cursor=pointer]:
+                  - /url: /video/BV1b87E6jEuZ/?spm_id_from=333.788.recommend_more_video.10&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e376]:
+                  - link [ref=f63e377] [cursor=pointer]:
+                    - /url: /video/BV1b87E6jEuZ/?spm_id_from=333.788.recommend_more_video.10&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e378]: ⚡2026上半年热梗小合集⚡
+                  - link "失落的名言" [ref=f63e380] [cursor=pointer]:
+                    - /url: //space.bilibili.com/107334607/
+                  - generic [ref=f63e383]: 6.2万 64
+              - generic [ref=f63e387]:
+                - link [ref=f63e391] [cursor=pointer]:
+                  - /url: /video/BV1Z1u66KEvi/?spm_id_from=333.788.recommend_more_video.11&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e392]:
+                  - link [ref=f63e393] [cursor=pointer]:
+                    - /url: /video/BV1Z1u66KEvi/?spm_id_from=333.788.recommend_more_video.11&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e394]: 痒痒盘梗现状
+                  - link "文静地菲旗莱" [ref=f63e396] [cursor=pointer]:
+                    - /url: //space.bilibili.com/435304966/
+                  - generic [ref=f63e399]: 3万 20
+              - generic [ref=f63e403]:
+                - link [ref=f63e407] [cursor=pointer]:
+                  - /url: /video/BV1atjA6zENn/?spm_id_from=333.788.recommend_more_video.12&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e408]:
+                  - link [ref=f63e409] [cursor=pointer]:
+                    - /url: /video/BV1atjA6zENn/?spm_id_from=333.788.recommend_more_video.12&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e410]: 那年动画圈出了位神
+                  - link "三体监控王" [ref=f63e412] [cursor=pointer]:
+                    - /url: //space.bilibili.com/3546867868633208/
+                  - generic [ref=f63e415]: 12万 271
+              - generic [ref=f63e419]:
+                - link [ref=f63e423] [cursor=pointer]:
+                  - /url: /video/BV1MXh466Eif/?spm_id_from=333.788.recommend_more_video.13&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e424]:
+                  - link [ref=f63e425] [cursor=pointer]:
+                    - /url: /video/BV1MXh466Eif/?spm_id_from=333.788.recommend_more_video.13&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e426]: 琵琶曲 完整版（真人无AI手搓）
+                  - link "癫癫零点五" [ref=f63e428] [cursor=pointer]:
+                    - /url: //space.bilibili.com/1652834405/
+                  - generic [ref=f63e431]: 203.8万 661
+              - generic [ref=f63e435]:
+                - link [ref=f63e439] [cursor=pointer]:
+                  - /url: /video/BV1S2aM6REnU/?spm_id_from=333.788.recommend_more_video.14&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e440]:
+                  - link [ref=f63e441] [cursor=pointer]:
+                    - /url: /video/BV1S2aM6REnU/?spm_id_from=333.788.recommend_more_video.14&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e442]: 琵琶曲 | 资本家 vs 罗斯福
+                  - link "星辰光影_" [ref=f63e444] [cursor=pointer]:
+                    - /url: //space.bilibili.com/488488115/
+                  - generic [ref=f63e447]: 12.4万 124
+              - generic [ref=f63e451]:
+                - link [ref=f63e455] [cursor=pointer]:
+                  - /url: /video/BV1bVVQ6aE2y/?spm_id_from=333.788.recommend_more_video.15&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e456]:
+                  - link [ref=f63e457] [cursor=pointer]:
+                    - /url: /video/BV1bVVQ6aE2y/?spm_id_from=333.788.recommend_more_video.15&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e458]: ⚡ 概率这么高真是抱歉 ⚡
+                  - link "Snstar_K" [ref=f63e460] [cursor=pointer]:
+                    - /url: //space.bilibili.com/3493086030203104/
+                  - generic [ref=f63e463]: 11万 148
+              - generic [ref=f63e467]:
+                - link [ref=f63e471] [cursor=pointer]:
+                  - /url: /video/BV1rQ8GzcEXa/?spm_id_from=333.788.recommend_more_video.16&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e472]:
+                  - link [ref=f63e473] [cursor=pointer]:
+                    - /url: /video/BV1rQ8GzcEXa/?spm_id_from=333.788.recommend_more_video.16&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e474]: 《米小圈上学记》中出现的“伪人”
+                  - link "喵尾越橘" [ref=f63e476] [cursor=pointer]:
+                    - /url: //space.bilibili.com/3546840928618779/
+                  - generic [ref=f63e479]: 11.4万 66
+              - generic [ref=f63e483]:
+                - link [ref=f63e487] [cursor=pointer]:
+                  - /url: /video/BV19KeP6WEGe/?spm_id_from=333.788.recommend_more_video.17&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e488]:
+                  - link [ref=f63e489] [cursor=pointer]:
+                    - /url: /video/BV19KeP6WEGe/?spm_id_from=333.788.recommend_more_video.17&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e490]: 琵琶曲 | ⚡苗酱VS小男孩⚡
+                  - link "包拯小作坊" [ref=f63e492] [cursor=pointer]:
+                    - /url: //space.bilibili.com/45818805/
+                  - generic [ref=f63e495]: 20.8万 95
+              - generic [ref=f63e499]:
+                - link [ref=f63e503] [cursor=pointer]:
+                  - /url: /video/BV1gqgp6CEC3/?spm_id_from=333.788.recommend_more_video.18&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                - generic [ref=f63e504]:
+                  - link [ref=f63e505] [cursor=pointer]:
+                    - /url: /video/BV1gqgp6CEC3/?spm_id_from=333.788.recommend_more_video.18&trackid=web_related_0.router-related-2479604-5lvcw.1790383425080.229
+                    - paragraph [ref=f63e506]: 你发现了三个动画…
+                  - link "布丁Game" [ref=f63e508] [cursor=pointer]:
+                    - /url: //space.bilibili.com/3546577488579092/
+                  - generic [ref=f63e511]: 2.1万 4
+            - generic [ref=f63e514] [cursor=pointer]: 展开
+          - link "目前是正在照料水晶球" [ref=f63e516] [cursor=pointer]:
+            - /url: javascript:void(0);
