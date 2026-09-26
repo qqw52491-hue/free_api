@@ -241,6 +241,7 @@ pub async fn get_mcp_tool_catalog(
     state: State<'_, DbState>,
     name: Option<String>,
 ) -> Result<Vec<McpCatalogStatus>, String> {
+    let health = plugin_health_map(state.inner());
     Ok(load_managed_mcp_plugins(state.inner())?
         .into_iter()
         .filter(|plugin| plugin.enabled)
@@ -249,7 +250,19 @@ pub async fn get_mcp_tool_catalog(
                 .map(|target| target == &plugin.config.name)
                 .unwrap_or(true)
         })
-        .map(|plugin| catalog_status(&plugin.config))
+        .map(|plugin| {
+            let mut s = catalog_status(&plugin.config);
+            // 落库健康列合并进目录状态：内存目录为空但库里有握手记录时
+            // 抽屉照样能显示"上次成功/失败"，不再一律"等待验证"
+            if let Some((ok_at, err, tc)) = health.get(&plugin.config.name) {
+                s.last_ok_at = ok_at.clone();
+                s.last_error = err.clone();
+                if s.tool_count == 0 && *tc > 0 {
+                    s.tool_count = *tc as usize;
+                }
+            }
+            s
+        })
         .collect())
 }
 
@@ -285,6 +298,8 @@ pub async fn refresh_mcp_plugin_connection(
         capability_card: card,
         cached: true,
         refreshed_at_ms: Some(Utc::now().timestamp_millis() as u128),
+        last_ok_at: Utc::now().to_rfc3339(),
+        last_error: String::new(),
     })
 }
 

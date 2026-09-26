@@ -17,10 +17,12 @@
                     <div v-else-if="mcpCatalog.length" class="mcp-connection-list">
                         <article v-for="entry in mcpCatalog" :key="entry.name" class="mcp-connection-card">
                             <div class="mcp-connection-main">
-                                <span class="mcp-status-dot" :class="connectionState[entry.name] || (entry.cached ? 'ready' : 'idle')"></span>
+                                <span class="mcp-status-dot" :class="connectionState[entry.name] || (entry.last_error ? 'error' : (entry.cached || entry.last_ok_at ? 'ready' : 'idle'))"></span>
                                 <div>
                                     <strong>{{ entry.name }}</strong>
-                                    <small>{{ entry.tool_count ? `${entry.tool_count} 个工具` : '尚未发现工具' }} · {{ entry.cached ? '目录已缓存' : '等待验证' }}</small>
+                                    <small v-if="entry.last_error" class="mcp-last-err">上次失败：{{ entry.last_error.slice(0, 60) }}</small>
+                                    <small v-else-if="entry.last_ok_at">上次握手 {{ entry.last_ok_at.slice(5, 16) }} · {{ entry.tool_count || '—' }} 工具</small>
+                                    <small v-else>{{ entry.tool_count ? `${entry.tool_count} 个工具` : '尚未发现工具' }} · {{ entry.cached ? '目录已缓存' : '等待验证' }}</small>
                                 </div>
                             </div>
                             <button type="button" class="mcp-refresh" :disabled="connectionState[entry.name] === 'testing'" @click="refreshConnection(entry.name)">
@@ -157,6 +159,8 @@ interface McpCatalogEntry {
     name: string;
     tool_count: number;
     cached: boolean;
+    last_ok_at?: string;
+    last_error?: string;
 }
 const mcpCatalog = ref<McpCatalogEntry[]>([]);
 const catalogLoading = ref(false);
@@ -376,6 +380,7 @@ watch(() => props.open, (open) => {
 .mcp-status-dot.ready { background: #61c096; box-shadow: 0 0 0 3px rgba(97,192,150,.12); }
 .mcp-status-dot.testing { background: var(--chat-accent); animation: mcp-pulse 1.05s ease-in-out infinite; }
 .mcp-status-dot.error { background: #df7b80; }
+.mcp-last-err { color:#df7b80; font-size:10px; }
 .mcp-refresh,.manage-mcp { border: 1px solid var(--chat-line-strong); border-radius: 7px; color: var(--chat-text-soft); cursor: pointer; background: #0d1420; font: 600 10px inherit; }
 .mcp-refresh { align-self: start; padding: 6px 7px; }
 .mcp-refresh:hover:not(:disabled),.manage-mcp:hover { border-color: var(--chat-accent); color: var(--chat-text); background: var(--chat-hover); }

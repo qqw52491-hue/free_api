@@ -23,6 +23,11 @@ pub struct McpCatalogStatus {
     pub capability_card: Option<String>,
     pub cached: bool,
     pub refreshed_at_ms: Option<u128>,
+    /// 持久健康列（DB 落库真相，跨会话保留）——空字符串=无记录
+    #[serde(default)]
+    pub last_ok_at: String,
+    #[serde(default)]
+    pub last_error: String,
 }
 
 static CATALOGS: OnceLock<Mutex<HashMap<String, CachedCatalog>>> = OnceLock::new();
@@ -276,6 +281,8 @@ pub fn status(config: &PluginConfig) -> McpCatalogStatus {
                 capability_card: card,
                 cached: true,
                 refreshed_at_ms: None,
+                last_ok_at: String::new(),
+                last_error: String::new(),
             }
         }
         None => McpCatalogStatus {
@@ -285,6 +292,8 @@ pub fn status(config: &PluginConfig) -> McpCatalogStatus {
             capability_card: None,
             cached: false,
             refreshed_at_ms: None,
+            last_ok_at: String::new(),
+            last_error: String::new(),
         },
     }
 }
