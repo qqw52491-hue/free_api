@@ -2,7 +2,7 @@
 <div id="gate" class="gate hidden">
   <div class="gate-card">
     <h1>🔐 连接远程控制</h1>
-    <p>首次使用需要通道令牌：打开桌面端 <b>微信绑定</b> 页复制 Token（与微信桥共用），或查看 <span class="mono">~/.config/free-api-chat/channel-config.json</span> 的 <span class="mono">token</span> 字段。</p>
+    <p>首次使用需要通道令牌：打开桌面端 <b>微信绑定</b> 页复制 Token（与微信桥共用），或查看 <span class="mono">{{CONFIG_PATH}}</span> 的 <span class="mono">token</span> 字段。</p>
     <input id="gateToken" type="password" placeholder="粘贴通道 Token (X-Channel-Token)" autocomplete="off">
     <div id="gateErr" class="err"></div>
     <button id="gateSave" class="btn primary block">连接</button>

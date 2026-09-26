@@ -4,9 +4,15 @@ use super::*;
 
 /// GET / 与 /web：内嵌网页控制台入口（no-cache 保证升级二进制后页面同步更新）
 pub(crate) async fn handler_web_home() -> impl axum::response::IntoResponse {
+    // 门禁提示里的配置文件路径按本机实际位置渲染（macOS 是 Library/Application Support，
+    // 模板里的 ~/.config/ 在 mac 上是错的）
+    let page = CHANNEL_WEB_PAGE.replace(
+        "{{CONFIG_PATH}}",
+        &channel_config_path().display().to_string(),
+    );
     (
         [(axum::http::header::CACHE_CONTROL, "no-cache")],
-        Html(CHANNEL_WEB_PAGE),
+        Html(page),
     )
 }
 
