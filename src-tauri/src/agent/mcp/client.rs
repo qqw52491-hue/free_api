@@ -70,6 +70,10 @@ impl McpClient {
             &config.command,
             &config.args,
         );
+        // node/npm/npx 命令同样改写到解析结果（PATH → app 数据目录缓存），
+        // npm/npx 经 PATH prepend 找到 node 本体；解析不到原样透传。
+        let (program, args, node_env) =
+            crate::agent::node_runtime::rewrite_node_invocation(&program, &args);
         let mut cmd = Command::new(&program);
         cmd.args(&args)
             .stdin(Stdio::piped())
@@ -78,6 +82,9 @@ impl McpClient {
             .env("PYTHONUNBUFFERED", "1")
             .env("NODE_NO_WARNINGS", "1");
         for (k, v) in uv_env {
+            cmd.env(k, v);
+        }
+        for (k, v) in node_env {
             cmd.env(k, v);
         }
 

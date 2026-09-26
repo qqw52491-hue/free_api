@@ -93,11 +93,18 @@ async fn prepare_node_dir(dir: &Path, entry_exists: bool, has_build: bool) {
     if entry_exists && dir.join("node_modules").is_dir() {
         return;
     }
-    let install = tokio::process::Command::new("npm")
-        .args(["install", "--omit=dev"])
-        .current_dir(dir)
-        .output()
-        .await;
+    // npm 经 rewrite 解析（PATH → app 缓存），自带 PATH prepend 找 node 本体。
+    let (npm_prog, npm_args, npm_env) =
+        crate::agent::node_runtime::rewrite_node_invocation("npm", &[]);
+    let mk_npm = |extra: &[&str]| {
+        let mut c = tokio::process::Command::new(&npm_prog);
+        c.args(&npm_args).args(extra).current_dir(dir);
+        for (k, v) in &npm_env {
+            c.env(k, v);
+        }
+        c
+    };
+    let install = mk_npm(&["install", "--omit=dev"]).output().await;
     match install {
         Ok(o) if !o.status.success() => {
             eprintln!(
@@ -113,11 +120,7 @@ async fn prepare_node_dir(dir: &Path, entry_exists: bool, has_build: bool) {
         _ => {}
     }
     if has_build && !entry_exists {
-        let build = tokio::process::Command::new("npm")
-            .args(["run", "build"])
-            .current_dir(dir)
-            .output()
-            .await;
+        let build = mk_npm(&["run", "build"]).output().await;
         if let Ok(o) = build {
             if !o.status.success() {
                 eprintln!(
@@ -221,7 +224,7 @@ async fn resolve_local_dir(dir: &Path, name: &str) -> Result<Vec<PluginConfig>, 
         }
     }
 
-    // 3) 根目录单文件入口
+    // 3) 根目录单文件入口（node 留裸命令——spawn 期 rewrite_node_invocation 解析）
     for (file, cmd) in [
         ("server.py", "uv"),
         ("main.py", "uv"),
@@ -290,19 +293,24 @@ async fn materialize_git_repo(
     Ok(target)
 }
 
+/// 克隆落点统一约定：与 data_v2.db 同根（data_dir/free-api-chat/mcp_repos）。
+/// UI 与 mcp_manager 两条入口必须共用——Tauri app_data_dir 解析到
+/// bundle id 目录（com.free-api-chat.dev），与真实数据根不一致。
+pub fn default_repos_dir() -> PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("free-api-chat")
+        .join("mcp_repos")
+}
+
 /// 主命令：自由引用 → 解析 → 握手验证 → 落库。
 #[tauri::command]
 pub async fn install_mcp_from_ref(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     state: State<'_, DbState>,
     reference: String,
 ) -> Result<RefInstallResult, String> {
-    let repos_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("mcp_repos");
-    install_from_ref_core(state.inner(), &reference, &repos_dir).await
+    install_from_ref_core(state.inner(), &reference, &default_repos_dir()).await
 }
 
 /// 核心实现：UI 命令与 mcp_manager(install_ref) 共用。
@@ -353,6 +361,26 @@ pub async fn install_from_ref_core(
             (name, cands, "git_repo")
         }
     };
+
+    // 安装期运行时预检：候选里有 node/npm/npx 调用但解析不到 node 时，
+    // 联网自动就绪（nodejs.org 官方 dist + sha256）。失败不致命——
+    // 握手自然败出并带 command not found 原错。
+    let needs_node = candidates
+        .iter()
+        .any(|c| crate::agent::node_runtime::is_node_invocation(&c.command));
+    if needs_node && crate::agent::node_runtime::resolve_node().is_none() {
+        let root = repos_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| repos_dir.to_path_buf());
+        let res = tokio::task::spawn_blocking(move || {
+            crate::agent::node_runtime::ensure_node_blocking(&root)
+        })
+        .await;
+        if let Err(e) = res.map_err(|e| e.to_string()).and_then(|r| r.map(|_| ())) {
+            eprintln!("[mcp_ref_install] node 自动就绪失败（握手将以 command not found 败出）: {e}");
+        }
+    }
 
     let mut last_err = String::new();
     for config in candidates {

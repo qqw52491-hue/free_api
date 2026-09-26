@@ -419,10 +419,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
                     route: "mcp_manager:install_ref:missing_param".to_string(),
                 };
             }
-            let repos_dir = dirs_next::data_dir()
-                .unwrap_or_default()
-                .join("free-api-chat")
-                .join("mcp_repos");
+            let repos_dir = crate::commands::mcp_ref_install::default_repos_dir();
             let handle = tokio::runtime::Handle::try_current();
             let fut = crate::commands::mcp_ref_install::install_from_ref_core(
                 db, reference, &repos_dir,

@@ -30,6 +30,8 @@ pub async fn sync_mcp_plugins_for_session(
     let mut newly_spawned = Vec::new();
     // 需要 uv/uvx 但运行时未就绪的插件：先延迟，锁块外 ensure_uv 后补 spawn
     let mut uv_deferred: Vec<crate::commands::ManagedMcpPlugin> = Vec::new();
+    // 同上，node/npm/npx 系插件走 node 延迟队列
+    let mut node_deferred: Vec<crate::commands::ManagedMcpPlugin> = Vec::new();
     {
         let cwd = workspace_dir.to_path_buf();
         let mut registry = registry_state.lock().await;
@@ -100,6 +102,13 @@ pub async fn sync_mcp_plugins_for_session(
                         && crate::agent::uv_runtime::resolve_uv(Some(app)).is_none()
                     {
                         uv_deferred.push(managed);
+                        continue;
+                    }
+                    // node 依赖同款检查：裸 node/npm/npx 且未就绪 → 延迟补 spawn
+                    if crate::agent::node_runtime::is_node_invocation(&managed.config.command)
+                        && crate::agent::node_runtime::resolve_node().is_none()
+                    {
+                        node_deferred.push(managed);
                         continue;
                     }
                     // 全新插件 → spawn 并以 ManagedDb 来源注册
@@ -196,6 +205,66 @@ pub async fn sync_mcp_plugins_for_session(
             Err(error) => {
                 eprintln!(
                     "❌ uv 运行时自动就绪失败，以下插件未挂载 [{}]: {}",
+                    names.join(", "),
+                    error
+                );
+            }
+        }
+    }
+
+    // node 依赖补装重试：与 uv 块同构——锁外 ensure_node 后补 spawn。
+    if !node_deferred.is_empty() {
+        let names: Vec<String> = node_deferred.iter().map(|m| m.config.name.clone()).collect();
+        let _ = app.emit(
+            &format!("agent-progress-{}", session_id),
+            json!({
+                "type": "action_phase",
+                "phase": "mcp",
+                "description": format!("⬇️ 插件 [{}] 需要 node 运行时，正在自动下载...", names.join(", "))
+            }),
+        );
+        let root = dirs_next::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("free-api-chat");
+        let dl = tokio::task::spawn_blocking(move || {
+            crate::agent::node_runtime::ensure_node_blocking(&root)
+        })
+        .await;
+        match dl.map_err(|e| e.to_string()).and_then(|r| r) {
+            Ok(node_path) => {
+                println!("🧰 node 运行时就绪: {}", node_path.display());
+                let mut registry = registry_state.lock().await;
+                for managed in node_deferred {
+                    let name = managed.config.name.clone();
+                    if registry.classify(&name).is_some() {
+                        continue;
+                    }
+                    match McpClient::spawn(managed.config) {
+                        Ok(client) => {
+                            let client_arc = Arc::new(client);
+                            match registry.insert_with_source(
+                                name.clone(),
+                                client_arc.clone(),
+                                crate::agent::mcp::registry::PluginSource::ManagedDb,
+                            ) {
+                                Ok(()) => {
+                                    newly_spawned.push((name.clone(), client_arc));
+                                    println!("🔌 挂载延迟的 DB 插件: {}", name);
+                                }
+                                Err(error) => {
+                                    eprintln!("❌ DB 插件 [{}] 注册被拒绝: {}", name, error);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("❌ node 就绪后插件 [{}] 仍启动失败: {}", name, error)
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "❌ node 运行时自动就绪失败，以下插件未挂载 [{}]: {}",
                     names.join(", "),
                     error
                 );
