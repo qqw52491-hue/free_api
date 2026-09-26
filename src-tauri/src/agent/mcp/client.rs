@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 pub struct McpClient {
     pub config: PluginConfig,
     request_tx: Option<mpsc::Sender<RequestEnvelope>>,
+    notification_tx: Option<mpsc::Sender<serde_json::Value>>,
     http_client: reqwest::Client,
     session_pool: Arc<RwLock<HashMap<String, String>>>,
     global_session_id: Arc<RwLock<Option<String>>>,
@@ -44,6 +45,7 @@ impl McpClient {
                 return Ok(Self {
                     config,
                     request_tx: None,
+                    notification_tx: None,
                     http_client,
                     session_pool: Arc::new(RwLock::new(HashMap::new())),
                     global_session_id: Arc::new(RwLock::new(None)),
@@ -129,6 +131,9 @@ impl McpClient {
         }
 
         let (request_tx, mut request_rx) = mpsc::channel::<RequestEnvelope>(64);
+        // 真通知通道（fire-and-forget 无 id 帧）：MCP 规范里通知必须不带 id——
+        // 带 id 会被老版 mcp SDK（如 1.9.0）当请求校验直接崩进程。
+        let (notification_tx, mut notification_rx) = mpsc::channel::<serde_json::Value>(16);
         let plugin_name = config.name.clone();
 
         let mut shutdown_rx = TaskRegistry::global().shutdown_signal();
@@ -173,6 +178,21 @@ impl McpClient {
                                                 let _ = tx.send(Err(format!("[MCP:{}] JSON 序列化失败: {}", plugin_name, e)));
                                             }
                                         }
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                        notif_opt = notification_rx.recv() => {
+                            match notif_opt {
+                                Some(frame) => {
+                                    match serde_json::to_vec(&frame) {
+                                        Ok(mut json_bytes) => {
+                                            json_bytes.push(b'\n');
+                                            let _ = async_stdin.write_all(&json_bytes).await;
+                                            let _ = async_stdin.flush().await;
+                                        }
+                                        Err(e) => eprintln!("[MCP:{}] 通知序列化失败: {}", plugin_name, e),
                                     }
                                 }
                                 None => break,
@@ -237,6 +257,7 @@ impl McpClient {
         Ok(Self {
             config,
             request_tx: Some(request_tx),
+            notification_tx: Some(notification_tx),
             http_client,
             session_pool: Arc::new(RwLock::new(HashMap::new())),
             global_session_id: Arc::new(RwLock::new(None)),
@@ -577,6 +598,25 @@ impl McpClient {
             .map(|_| ())
     }
 
+    /// 纯通知帧（无 id、无响应）——JSON-RPC notification，按规范发完就走。
+    /// 与 send_raw_request 的本质区别：不走 pending 表不等待应答，
+    /// 帧里彻底不带 id 字段（带 id 会被老 SDK 当成请求校验）。
+    async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<(), String> {
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        if let Some(ref tx) = self.notification_tx {
+            tx.send(frame)
+                .await
+                .map_err(|_| format!("[MCP:{}] 通知通道已断开", self.config.name))?;
+            Ok(())
+        } else {
+            Err(format!("[MCP:{}] 通知通道不可用", self.config.name))
+        }
+    }
+
     pub async fn ping(&self) -> Result<(), String> {
         self.ping_for_session(None).await
     }
@@ -605,11 +645,7 @@ impl McpClient {
             Ok(v) => {
                 println!("✅ [MCP:{}] 握手成功: {:?}", self.config.name, v);
                 let _ = self
-                    .send_raw_request_with_session(
-                        chat_session_id,
-                        "notifications/initialized",
-                        json!({}),
-                    )
+                    .send_notification("notifications/initialized", json!({}))
                     .await;
                 Ok(())
             }

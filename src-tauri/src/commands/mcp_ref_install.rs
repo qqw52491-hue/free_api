@@ -1016,4 +1016,62 @@ mod tests {
         println!("install {:?} => {:?}", reference, r);
         assert!(r.is_ok());
     }
+
+    /// 手动触发：复刻刷新按钮全链路（spawn→initialize→tools/list 计时）。
+    /// `MCP_REAL_NAME=video-audio-mcp cargo test --lib refresh_real_db -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn refresh_real_db() {
+        use crate::agent::mcp::client::McpClient;
+        use crate::agent::mcp::PluginConfig;
+        use std::time::Instant;
+
+        let name = std::env::var("MCP_REAL_NAME")
+            .unwrap_or_else(|_| "video-audio-mcp".to_string());
+        let db_path = dirs_next::data_dir()
+            .unwrap_or_default()
+            .join("free-api-chat")
+            .join("data_v2.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let (command, args_json, env_json) = conn
+            .query_row(
+                "SELECT command, args, env FROM mcp_plugins WHERE name=?1",
+                rusqlite::params![name],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            )
+            .unwrap();
+        let config = PluginConfig {
+            name: name.clone(),
+            url: None,
+            headers: Default::default(),
+            command,
+            args: serde_json::from_str(&args_json).unwrap_or_default(),
+            env: serde_json::from_str(&env_json).unwrap_or_default(),
+            capability_card: None,
+        };
+        println!("config: {:?}", config);
+
+        let t0 = Instant::now();
+        let client = McpClient::spawn(config).map_err(|e| e.to_string());
+        let client = match client {
+            Ok(c) => c,
+            Err(e) => panic!("spawn failed ({}ms): {}", t0.elapsed().as_millis(), e),
+        };
+        println!("spawn ok ({}ms)", t0.elapsed().as_millis());
+        let init = tokio::time::timeout(
+            std::time::Duration::from_secs(90),
+            client.initialize(),
+        )
+        .await;
+        println!("initialize({}ms): {:?}", t0.elapsed().as_millis(), init.is_ok());
+        let lt = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            client.list_tools(),
+        )
+        .await;
+        match lt {
+            Ok(Ok(tools)) => println!("tools({}ms): {} 个", t0.elapsed().as_millis(), tools.len()),
+            other => println!("list_tools({}ms): FAIL {:?}", t0.elapsed().as_millis(), other),
+        }
+    }
 }
