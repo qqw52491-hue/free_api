@@ -13,8 +13,8 @@
    - `transport` (String, 可选): 传输协议；当前仅支持 `"streamable-http"`（默认），传入其它值（如 `"sse"`）会被拒绝。
    - `model_id` (String, 可选): 提炼能力卡所用大模型 ID，留空使用默认大模型。
    别名：`quick_connect` 与 `add_http` 完全等价。
-3. `install_ref`: 自由引用粘贴即装——支持包名、GitHub 仓库地址、本地目录路径三种输入；自动解析启动方式（uvx/npx/pyproject/package.json），真实握手验证工具后才入库，失败不留半成品。
-   - `reference` (String, 必填): 包名（如 `excel-mcp-server`、`@scope/pkg`）/ GitHub URL（如 `https://github.com/org/repo`）/ 本地目录（如 `/path/to/mcp` 或 `~/mcp`）。
+3. `install_ref`: 自由引用粘贴即装——支持包名、GitHub 仓库地址、本地目录路径、.mcpb 官方打包文件四种输入；自动解析启动方式（manifest/uvx/npx/pyproject/package.json），真实握手验证工具后才入库，失败不留半成品。
+   - `reference` (String, 必填): 包名（如 `excel-mcp-server`、`@scope/pkg`）/ GitHub URL（如 `https://github.com/org/repo`）/ 本地目录（如 `/path/to/mcp` 或 `~/mcp`）/ `.mcpb` 文件路径。
 4. `toggle`: 启用或停用插件（在下一次任务会话同步时生效）。
    - `name` (String, 必填): 插件名称。
    - `enabled` (Boolean, 必填): `true` 为启用，`false` 为停用。

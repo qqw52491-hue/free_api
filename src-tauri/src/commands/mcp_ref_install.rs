@@ -36,6 +36,8 @@ enum RefKind {
     GitRepo(String),
     /// 本地已存在的目录
     LocalDir(PathBuf),
+    /// .mcpb 官方打包文件（zip+manifest）——解包到托管目录
+    McpbBundle(PathBuf),
     /// 裸包名（npm 或 pypi，握手定归属）
     PackageName(String),
 }
@@ -53,7 +55,7 @@ fn classify_reference(reference: &str) -> Result<RefKind, String> {
     {
         return Ok(RefKind::GitRepo(r.trim_end_matches('/').to_string()));
     }
-    // 本地目录：~、/、./、../ 开头且真实存在
+    // 本地目录/文件：~、/、./、../ 开头且真实存在
     let expanded = if let Some(rest) = r.strip_prefix("~/") {
         dirs_next::home_dir().map(|h| h.join(rest))
     } else {
@@ -63,12 +65,21 @@ fn classify_reference(reference: &str) -> Result<RefKind, String> {
         if p.is_dir() {
             return Ok(RefKind::LocalDir(p));
         }
+        // .mcpb 官方打包（zip+manifest）：文件存在且后缀匹配
+        if p.is_file()
+            && p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("mcpb"))
+                .unwrap_or(false)
+        {
+            return Ok(RefKind::McpbBundle(p));
+        }
     }
     if r.chars().all(|c| c.is_alphanumeric() || "._-/@".contains(c)) && !r.contains(' ') {
         return Ok(RefKind::PackageName(r.to_string()));
     }
     Err(format!(
-        "无法识别的引用形态: {r}。支持：包名 / github.com|gitee.com 仓库地址 / 本地目录路径。"
+        "无法识别的引用形态: {r}。支持：包名 / github.com|gitee.com 仓库地址 / 本地目录路径 / .mcpb 打包文件。"
     ))
 }
 
@@ -448,6 +459,95 @@ async fn download_repo_zip(url: &str, target: &Path) -> Result<PathBuf, String> 
     Ok(target.to_path_buf())
 }
 
+/// .mcpb 打包文件解包：zip 整体解到 repos_dir/<name>/，manifest.name 为权威插件名。
+/// 解出后的目录结构与 git clone 产物等价（manifest.json 在根），
+/// 直接走 resolve_local_dir 的 manifest 分支拿权威启动配置。
+async fn materialize_mcpb(mcpb: &Path, repos_dir: &Path) -> Result<(PathBuf, String), String> {
+    let f = std::fs::File::open(mcpb).map_err(|e| format!("打开 .mcpb 失败: {e}"))?;
+    let mut z = zip::ZipArchive::new(f).map_err(|e| format!("解析 .mcpb 失败（不是合法 zip）: {e}"))?;
+
+    // 先找 manifest 拿权威名；没有 manifest 就不是 mcpb
+    let mut plugin_name = mcpb
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mcpb-plugin")
+        .to_string();
+    for i in 0..z.len() {
+        let mut file = z.by_index(i).map_err(|e| e.to_string())?;
+        if file.name().ends_with("manifest.json") && file.name().matches('/').count() <= 1 {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut file, &mut text).map_err(|e| e.to_string())?;
+            if let Ok(m) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(n) = m.get("name").and_then(|v| v.as_str()) {
+                    if !n.is_empty() {
+                        plugin_name = n.to_string();
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    let target = repos_dir.join(&plugin_name);
+    let staging = target.with_extension("staging");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+
+    // 整体解出（剥可选的首层包装目录——有的 bundle 内容直接平铺，有的套一层）
+    let mut top_dirs = std::collections::BTreeSet::new();
+    for i in 0..z.len() {
+        if let Ok(file) = z.by_index(i) {
+            if let Some(first) = file.name().split('/').next() {
+                if !first.is_empty() {
+                    top_dirs.insert(first.to_string());
+                }
+            }
+        }
+    }
+    let strip_prefix = if top_dirs.len() == 1
+        && !top_dirs.contains("manifest.json")
+    {
+        top_dirs.into_iter().next()
+    } else {
+        None
+    };
+
+    let mut found_manifest = false;
+    for i in 0..z.len() {
+        let mut file = z.by_index(i).map_err(|e| e.to_string())?;
+        let raw = file.name().to_string();
+        let rel = if let Some(p) = &strip_prefix {
+            raw.strip_prefix(&format!("{p}/")).unwrap_or(&raw).to_string()
+        } else {
+            raw.clone()
+        };
+        if rel.is_empty() || rel.ends_with('/') {
+            continue;
+        }
+        if rel == "manifest.json" {
+            found_manifest = true;
+        }
+        let out_path = staging.join(&rel);
+        if let Some(p) = out_path.parent() {
+            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        let mut out = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
+        std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
+        // 保留可执行位（bundle 内二进制需要）
+        #[cfg(unix)]
+        if let Some(mode) = file.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
+        }
+    }
+    if !found_manifest {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err("文件解出后未找到 manifest.json——不是合法 .mcpb 打包".to_string());
+    }
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::rename(&staging, &target).map_err(|e| format!("搬入解包目录失败: {e}"))?;
+    Ok((target, plugin_name))
+}
 /// 克隆落点统一约定：与 data_v2.db 同根（data_dir/free-api-chat/mcp_repos）。
 /// UI 与 mcp_manager 两条入口必须共用——Tauri app_data_dir 解析到
 /// bundle id 目录（com.free-api-chat.dev），与真实数据根不一致。
@@ -519,6 +619,11 @@ pub async fn install_from_ref_core(
             let dir = materialize_git_repo(repos_dir, &url, &name).await?;
             let cands = resolve_local_dir(&dir, &name).await?;
             (name, cands, "git_repo")
+        }
+        RefKind::McpbBundle(path) => {
+            let (dir, name) = materialize_mcpb(&path, repos_dir).await?;
+            let cands = resolve_local_dir(&dir, &name).await?;
+            (name, cands, "mcpb_bundle")
         }
     };
 
@@ -750,6 +855,25 @@ mod tests {
         assert!(target.join("pyproject.toml").is_file(), "解压后应有 pyproject.toml");
         assert!(target.join("src").is_dir());
         std::fs::remove_dir_all(&target).ok();
+    }
+
+    /// .mcpb 解包实测：真 bundle 文件 → 解包 → manifest 解析 → 候选生成。
+    /// `cargo test --lib real_mcpb_unpack -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn real_mcpb_unpack() {
+        let mcpb = PathBuf::from("/tmp/exmcptest/excel-mcp-server-0.1.8.mcpb");
+        if !mcpb.is_file() {
+            eprintln!("跳过：素材不存在 {}", mcpb.display());
+            return;
+        }
+        let repos_dir = std::env::temp_dir().join("mcpref-mcpb-repos");
+        let (dir, name) = materialize_mcpb(&mcpb, &repos_dir).await.unwrap();
+        println!("name={} dir={}", name, dir.display());
+        assert!(dir.join("manifest.json").is_file());
+        let cands = resolve_local_dir(&dir, &name).await.unwrap();
+        println!("candidates: {:?}", cands.iter().map(|c| (&c.command, &c.args)).collect::<Vec<_>>());
+        assert!(!cands.is_empty());
     }
 
     /// 手动触发：往真实应用库安装一个 MCP（默认 playwright-mcp）。

@@ -414,7 +414,7 @@ pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> Dispa
             if reference.is_empty() {
                 return DispatchResult { view: None,
                     stdout: String::new(),
-                    stderr: "❌ 缺少必填参数 reference（包名 / github 仓库地址 / 本地目录路径）".to_string(),
+                    stderr: "❌ 缺少必填参数 reference（包名 / github 仓库地址 / 本地目录路径 / .mcpb 打包文件）".to_string(),
                     success: false,
                     route: "mcp_manager:install_ref:missing_param".to_string(),
                 };

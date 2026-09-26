@@ -491,10 +491,10 @@
 
         <!-- 引用安装 Tab：粘贴包名/GitHub地址/本地目录 -->
         <div v-else-if="mcpTab === 'ref'">
-          <p class="modal-hint">粘贴 <strong>包名</strong>（如 <code>excel-mcp-server</code>）、<strong>GitHub/Gitee 仓库地址</strong>或<strong>本地目录路径</strong>，自动解析运行方式并握手验证，装不上不落库。</p>
+          <p class="modal-hint">粘贴 <strong>包名</strong>（如 <code>excel-mcp-server</code>）、<strong>GitHub/Gitee 仓库地址</strong>、<strong>本地目录路径</strong>或 <strong>.mcpb 打包文件</strong>，自动解析运行方式并握手验证，装不上不落库。</p>
           <div class="form-group">
             <label>插件引用（必填）</label>
-            <input v-model.trim="refForm.reference" placeholder="@scope/mcp-xxx 或 https://github.com/org/repo 或 /path/to/dir" />
+            <input v-model.trim="refForm.reference" placeholder="@scope/mcp-xxx 或 https://github.com/org/repo 或 /path/to/dir 或 ./xxx.mcpb" />
           </div>
           <div v-if="refResult" class="form-group" :class="{ 'ref-result-ok': refResult.ok, 'ref-result-fail': !refResult.ok }">
             <p v-if="refResult.ok">✅ 已安装「{{ refResult.name }}」（{{ refResult.toolCount }} 个工具，形态: {{ refResult.kind }}）<br><code class="cmd-snippet">{{ refResult.command }} {{ refResult.args.join(' ') }}</code></p>
