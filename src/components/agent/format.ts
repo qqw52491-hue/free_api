@@ -1,4 +1,5 @@
 import { marked } from "marked";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import hljs from "highlight.js/lib/common";
@@ -411,6 +412,32 @@ export function renderMarkdown(content: string): string {
                 ? `<svg class="link-arrow-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
                 : "";
             return `<a href="${href}"${titleAttr} class="markdown-rich-link" target="_blank" rel="noopener noreferrer">${text}${iconSvg}</a>`;
+        };
+
+        // 4. 本地媒体：![](/abs/path) / ![](file://…) / 相对工程文件
+        //    本地绝对路径走 convertFileSrc（asset:// 协议），远程/内嵌原样透传。
+        //    扩展名分流：<video>/<audio>/<img>——回复里嵌生成物的最后一块砖。
+        renderer.image = function ({ href, title, text }: { href: string; title?: string | null; text: string }) {
+            const escAttr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+            const safeText = escAttr(text || "");
+            const titleAttr = title ? ` title="${escAttr(title)}"` : "";
+
+            let src = href;
+            const isLocalAbs = href.startsWith("/") || /^[A-Za-z]:[\\/]/.test(href);
+            if (/^file:\/\//i.test(href)) {
+                src = convertFileSrc(href.replace(/^file:\/\//i, ""));
+            } else if (isLocalAbs) {
+                src = convertFileSrc(href);
+            }
+            const safeSrc = escAttr(src);
+            const cleanHref = href.split(/[?#]/)[0];
+            if (/\.(mp4|webm|mov|mkv|avi)$/i.test(cleanHref)) {
+                return `<video controls preload="metadata" class="md-media md-video" src="${safeSrc}"${titleAttr}></video>`;
+            }
+            if (/\.(mp3|wav|ogg|m4a|flac|aac)$/i.test(cleanHref)) {
+                return `<audio controls preload="metadata" class="md-media md-audio" src="${safeSrc}"${titleAttr}></audio>`;
+            }
+            return `<img src="${safeSrc}" alt="${safeText}"${titleAttr} class="md-img" loading="lazy" />`;
         };
 
         const html = marked.parse(sanitizedContent, {
