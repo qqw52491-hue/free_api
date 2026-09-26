@@ -351,14 +351,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     .clients
                     .get(p_name)
                     .and_then(|c| crate::agent::mcp_catalog::cached_capability_card(&c.config))
-                    .map(|c| {
-                        let first_line = c.lines().next().unwrap_or("").trim().to_string();
-                        if first_line.len() > 60 {
-                            format!("{}…", &first_line[..60])
-                        } else {
-                            first_line
-                        }
-                    })
+                    .map(|c| capability_card_hint(&c))
                     .unwrap_or_default();
                 if card_hint.is_empty() {
                     mcp_lines.push(format!("  * {}({} 个工具)", p_name, names.len()));
@@ -3088,6 +3081,18 @@ async fn run_agent_main_loop_in_workspace_inner(
     Ok(())
 }
 
+/// 能力卡首行摘要（塌缩索引行尾展示用）——按字符截断，绝不按字节切
+/// （多字节 UTF-8 落在字符中间会 panic）。
+fn capability_card_hint(card: &str) -> String {
+    let first_line = card.lines().next().unwrap_or("").trim().to_string();
+    let truncated: String = first_line.chars().take(60).collect();
+    if truncated.len() < first_line.len() {
+        format!("{}…", truncated)
+    } else {
+        truncated
+    }
+}
+
 #[cfg(test)]
 mod budget_tests;
 
@@ -3099,3 +3104,20 @@ mod artifact_bridge_tests;
 
 #[cfg(test)]
 mod path_scope_manifest_tests;
+
+#[cfg(test)]
+mod capability_hint_tests {
+    #[test]
+    fn chinese_card_truncates_without_panic() {
+        let card = "视频音频剪辑（ffmpeg 系）：裁剪/拼接/转场/字幕/混轨/变速/去静音等 27 工具，重复填充：这是一段很长的能力卡描述用来测试多字节字符截断边界不会炸。";
+        let h = super::capability_card_hint(card);
+        assert!(h.ends_with('…'));
+        assert!(h.chars().count() <= 61);
+    }
+
+    #[test]
+    fn short_card_passes_through() {
+        assert_eq!(super::capability_card_hint("短视频工具"), "短视频工具");
+        assert_eq!(super::capability_card_hint(""), "");
+    }
+}
