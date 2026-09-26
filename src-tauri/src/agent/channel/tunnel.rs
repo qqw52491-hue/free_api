@@ -117,6 +117,27 @@ fn ingress_contains_exact(yaml_text: &str, hostname: &str, service: &str) -> boo
         .unwrap_or(false)
 }
 
+/// 摘除指定 hostname 的 ingress 规则（换域名/关闭穿透时清场）。
+/// 返回 (新文本, 是否有摘除)。
+pub(crate) fn remove_ingress_rule(
+    yaml_text: &str,
+    hostname: &str,
+) -> Result<(String, bool), String> {
+    let mut doc: serde_yaml::Value =
+        serde_yaml::from_str(yaml_text).map_err(|e| format!("config.yml 解析失败: {e}"))?;
+    let ingress = doc
+        .get_mut("ingress")
+        .and_then(|v| v.as_sequence_mut())
+        .ok_or_else(|| "config.yml 缺少 ingress 列表".to_string())?;
+    let before = ingress.len();
+    ingress.retain(|item| {
+        item.get("hostname").and_then(|h| h.as_str()) != Some(hostname)
+    });
+    let changed = ingress.len() != before;
+    let out = serde_yaml::to_string(&doc).map_err(|e| format!("config.yml 序列化失败: {e}"))?;
+    Ok((out, changed))
+}
+
 /// 本机 cloudflared 隧道进程 PID 列表（unix pgrep / windows tasklist）。
 fn cloudflared_pids() -> Vec<u32> {
     #[cfg(unix)]
@@ -156,6 +177,11 @@ fn cloudflared_pids() -> Vec<u32> {
     }
 }
 
+/// 本机是否有 cloudflared 隧道进程在跑（看门狗/状态探测用）。
+pub fn cloudflared_running() -> bool {
+    !cloudflared_pids().is_empty()
+}
+
 fn kill_pids(pids: &[u32]) {
     for pid in pids {
         #[cfg(unix)]
@@ -174,15 +200,55 @@ fn kill_pids(pids: &[u32]) {
 }
 
 /// 托管入口：确保隧道在跑且 ingress 指向当前通道端口。
+/// `prev_hostname` 非空且与当前不同 = 换域名/关闭 → 先摘除旧规则再重启生效。
 /// 可重复调用（幂等）；返回对外 URL 或带原因的错误。
-pub fn ensure_tunnel(app_root: &Path, config: &ChannelConfig) -> Result<String, String> {
+pub fn ensure_tunnel(
+    app_root: &Path,
+    config: &ChannelConfig,
+    prev_hostname: Option<&str>,
+) -> Result<String, String> {
     let hostname = config.tunnel_hostname.trim().trim_end_matches('/').to_string();
+    let url = if hostname.is_empty() {
+        String::new()
+    } else {
+        format!("https://{hostname}")
+    };
+    let dir = tunnel_dir(config);
+    let cfg_path = dir.join("config.yml");
+
+    // 阶段一：旧域名摘除（换绑/关闭路径；即使新域名为空也执行）
+    let prev = prev_hostname.unwrap_or("").trim().to_string();
+    if !prev.is_empty() && prev != hostname {
+        if cfg_path.is_file() {
+            if let Ok(raw0) = std::fs::read_to_string(&cfg_path) {
+                if let Ok((stripped, removed)) = remove_ingress_rule(&raw0, &prev) {
+                    if removed {
+                        let bak = cfg_path.with_extension(format!(
+                            "yml.bak-{}",
+                            chrono::Utc::now().timestamp()
+                        ));
+                        let _ = std::fs::copy(&cfg_path, &bak);
+                        let _ = std::fs::write(&cfg_path, &stripped);
+                        // ingress 变了必须重启隧道进程才生效
+                        let running = cloudflared_pids();
+                        if !running.is_empty() {
+                            kill_pids(&running);
+                            std::thread::sleep(std::time::Duration::from_millis(1200));
+                            respawn_tunnel(&cfg_path, app_root)?;
+                        }
+                    }
+                }
+            }
+        }
+        if hostname.is_empty() {
+            set_status("unbound", "旧域名规则已摘除，无新绑定", None);
+            return Err("tunnel_hostname 未配置".to_string());
+        }
+    }
     if hostname.is_empty() {
         return Err("tunnel_hostname 未配置".to_string());
     }
-    let url = format!("https://{hostname}");
-    let dir = tunnel_dir(config);
-    let cfg_path = dir.join("config.yml");
+
     if !cfg_path.is_file() {
         let msg = format!("缺少隧道配置 {}（先在 cloudflared 侧建好命名隧道+凭证）", cfg_path.display());
         set_status("skipped", &msg, None);
@@ -235,7 +301,16 @@ pub fn ensure_tunnel(app_root: &Path, config: &ChannelConfig) -> Result<String, 
         std::thread::sleep(std::time::Duration::from_millis(1500));
     }
 
-    // spawn 后台隧道，日志落 app 数据目录便于排查
+    spawn_and_probe(&bin, &cfg_path, app_root, &url)
+}
+
+/// detached 拉起隧道 + 存活探测（3 秒后还活着即成功）。
+fn spawn_and_probe(
+    bin: &Path,
+    cfg_path: &Path,
+    app_root: &Path,
+    url: &str,
+) -> Result<String, String> {
     let log_dir = app_root.join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
     let log_file = std::fs::OpenOptions::new()
@@ -244,9 +319,9 @@ pub fn ensure_tunnel(app_root: &Path, config: &ChannelConfig) -> Result<String, 
         .open(log_dir.join("cloudflared.log"))
         .map_err(|e| format!("打开 cloudflared 日志失败: {e}"))?;
     let log_err = log_file.try_clone().map_err(|e| e.to_string())?;
-    let mut child = std::process::Command::new(&bin)
+    let mut child = std::process::Command::new(bin)
         .args(["tunnel", "--config"])
-        .arg(&cfg_path)
+        .arg(cfg_path)
         .arg("run")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
@@ -263,11 +338,18 @@ pub fn ensure_tunnel(app_root: &Path, config: &ChannelConfig) -> Result<String, 
         }
         Ok(None) => {
             // 进程活着即视为成功；外网探测属网络层确认，不阻塞结论
-            set_status("running", "cloudflared 已启动", Some(&url));
-            Ok(url)
+            set_status("running", "cloudflared 已启动", Some(url));
+            Ok(url.to_string())
         }
         Err(e) => Err(format!("cloudflared 状态查询失败: {e}")),
     }
+}
+
+/// 摘除旧域名后按更新后的 config 重启隧道（respawn；不含 ingress 合并）。
+fn respawn_tunnel(cfg_path: &Path, app_root: &Path) -> Result<(), String> {
+    let bin = crate::agent::tunnel_runtime::ensure_cloudflared_blocking(app_root)?;
+    spawn_and_probe(&bin, cfg_path, app_root, "")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -327,5 +409,17 @@ mod tests {
     fn merge_rejects_missing_ingress() {
         let r = merge_ingress_rule("tunnel: x\n", "a.b", "http://localhost:1");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn remove_strips_only_matching_hostname() {
+        let merged = merge_ingress_rule(BASE, "agent.example.com", "http://localhost:8790")
+            .unwrap().0;
+        let (out, changed) = remove_ingress_rule(&merged, "agent.example.com").unwrap();
+        assert!(changed);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&out).unwrap();
+        let seq = doc["ingress"].as_sequence().unwrap();
+        assert_eq!(seq.len(), 2); // mcp 规则与兜底原样保留
+        assert_eq!(seq[0]["hostname"].as_str().unwrap(), "mcp.example.com");
     }
 }

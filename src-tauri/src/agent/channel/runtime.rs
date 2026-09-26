@@ -91,7 +91,7 @@ pub fn spawn_channel_server(app: AppHandle) {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
-        match tunnel::ensure_tunnel(&app_root, &tunnel_cfg) {
+        match tunnel::ensure_tunnel(&app_root, &tunnel_cfg, None) {
             Ok(url) => println!("[channel] 内网穿透就绪: {url}"),
             Err(error) => eprintln!("[channel] 内网穿透未启用: {error}"),
         }
@@ -130,6 +130,29 @@ pub fn spawn_channel_server(app: AppHandle) {
             }
             if let Err(error) = ensure_bridge_running().await {
                 eprintln!("[channel] 看门狗拉起微信桥失败: {error}");
+            }
+        }
+    });
+
+    // 隧道看门狗：cloudflared 进程意外退出时自动复活（手动配置的域名变更
+    // 走 config_set 热更路径，不在此巡检范围）；幂等——活得好就是秒回。
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(300));
+        let cfg = channel_config_shared()
+            .read()
+            .map(|c| c.clone())
+            .unwrap_or_default();
+        if !cfg.auto_start_tunnel || cfg.tunnel_hostname.trim().is_empty() {
+            continue;
+        }
+        if !tunnel::cloudflared_running() {
+            let app_root = channel_config_path()
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            match tunnel::ensure_tunnel(&app_root, &cfg, None) {
+                Ok(url) => println!("[channel] 看门狗复活内网穿透: {url}"),
+                Err(error) => eprintln!("[channel] 看门狗复活穿透失败: {error}"),
             }
         }
     });

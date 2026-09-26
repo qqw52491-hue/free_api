@@ -218,6 +218,12 @@ pub async fn wechat_channel_config_get() -> Result<Value, String> {
 #[tauri::command]
 pub async fn wechat_channel_config_set(config: ConfigPutReq) -> Result<Value, String> {
     let mut current = load_channel_config()?;
+    let prev_tunnel = (
+        current.auto_start_tunnel,
+        current.tunnel_hostname.clone(),
+        current.tunnel_dir.clone(),
+        current.port,
+    );
     if let Some(v) = config.port {
         current.port = v;
     }
@@ -270,11 +276,41 @@ pub async fn wechat_channel_config_set(config: ConfigPutReq) -> Result<Value, St
     if let Some(v) = config.tunnel_dir {
         current.tunnel_dir = v.trim().to_string();
     }
+    let tunnel_dirty = prev_tunnel
+        != (
+            current.auto_start_tunnel,
+            current.tunnel_hostname.clone(),
+            current.tunnel_dir.clone(),
+            current.port,
+        );
     if let Some(v) = config.phase_pushes {
         current.phase_pushes = v;
     }
     save_channel_config(&current)?;
     sync_shared_config(&current);
+
+    // 穿透字段热更：换域名/开关/端口/目录任一变化就后台重对齐
+    // （摘除旧域名规则→合并新规则→按需重启隧道；幂等，不阻塞本请求）。
+    if tunnel_dirty {
+        let new_cfg = current.clone();
+        let prev_host = prev_tunnel.1.clone();
+        std::thread::spawn(move || {
+            let app_root = channel_config_path()
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            // auto_start_tunnel=false 的语义是「app 不托管隧道」——
+            // 不摘规则不碰进程（用户可能手动运维同隧道其他服务）
+            if !new_cfg.auto_start_tunnel {
+                println!("[channel] 内网穿透托管已关闭，隧道进程交由外部管理");
+                return;
+            }
+            match tunnel::ensure_tunnel(&app_root, &new_cfg, Some(&prev_host)) {
+                Ok(url) => println!("[channel] 内网穿透热更新: {url}"),
+                Err(error) => eprintln!("[channel] 内网穿透热更新: {error}"),
+            }
+        });
+    }
     Ok(config_value(&current))
 }
 
