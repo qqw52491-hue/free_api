@@ -677,14 +677,29 @@ fn execute_command_blocking(
             let stderr_trimmed = truncate_output(&raw_stderr, MAX_OUTPUT_BYTES);
             let is_truncated = raw_stdout.len() > MAX_OUTPUT_BYTES || raw_stderr.len() > MAX_OUTPUT_BYTES;
 
+            // 检索类命令的退出码 1 语义是「无匹配」而非执行失败——这是反向证据
+            // （目标可能不存在），若笼统标"失败+修参数"会诱导模型换姿势反复重试
+            // 同一个不存在的符号（实测：幻觉函数名被 grep 追了 30+ 步）。
+            let search_no_match = !success
+                && exit_code == 1
+                && stderr_trimmed.is_empty()
+                && is_search_invocation(&cmd_str);
             let (kind, retryable, safe_to_retry, recommended_action) = if success {
                 ("success", false, true, "done")
+            } else if search_no_match {
+                ("no_matches", false, false, "no_match_means_absent")
             } else {
                 ("non_zero_exit", true, false, "inspect_stderr_and_fix_arguments")
             };
 
             let status_badge = if success {
                 format!("✅ [成功] (exit_code: 0, 耗时: {}ms)", duration_ms)
+            } else if search_no_match {
+                format!(
+                    "🔍 [无匹配] (exit_code: 1 — 检索命令的 1 是'没有命中'不是执行失败，\
+                     目标很可能不存在，请改用 list/read 验证符号或文件名而不是重试, 耗时: {}ms)",
+                    duration_ms
+                )
             } else {
                 format!(
                     "⚠️ [退出码非零] (exit_code: {}, 建议: {}, 耗时: {}ms)",
@@ -781,6 +796,12 @@ fn execute_command_blocking(
             // 文件找不存在的错因）。stderr 优先，空则退 stdout 尾部（合并诊断）。
             let stderr_field = if success {
                 String::new()
+            } else if search_no_match {
+                format!(
+                    "检索命令未命中（exit 1 = 无匹配，非命令错误）：目标 `{}` 很可能不存在于搜索范围。\
+                     建议用 list/read 验证文件名或符号名是否存在，勿仅换参数重试同一目标。",
+                    cmd_str
+                )
             } else {
                 let diag = if !stderr_trimmed.is_empty() {
                     stderr_trimmed.clone()
@@ -838,6 +859,36 @@ fn execute_command_blocking(
 }
 
 /// 快照目录内条目相对路径集合（浅递归、封顶防爆），用于 shell 前后 diff。
+/// 判定命令是否为「检索类」调用（其退出码 1 语义 = 无匹配，而非失败）。
+/// 管线的退出码取最后一个分段——只看 | && || ; 分隔后的末段命令。
+/// 集合：grep 家族/rg/ag/ack/ugrep/git grep/which/command -v（缺席语义相同）。
+fn is_search_invocation(cmd: &str) -> bool {
+    let last_seg = cmd
+        .rsplit(['|', ';'])
+        .next()
+        .and_then(|s| s.rsplit("&&").next())
+        .unwrap_or(cmd)
+        .trim();
+    // 剥掉 VAR=x 前缀赋值取首词
+    let mut tokens = last_seg.split_whitespace();
+    let mut first = "";
+    for t in tokens.by_ref() {
+        if !t.contains('=') || t.starts_with(|c: char| !c.is_alphanumeric() && c != '_') {
+            first = t;
+            break;
+        }
+    }
+    let base = first.rsplit(['/', '\\']).next().unwrap_or(first);
+    let base = base.trim_end_matches(".exe");
+    match base {
+        "grep" | "egrep" | "fgrep" | "rgrep" | "rg" | "ag" | "ack" | "ugrep" | "which" => true,
+        // `git grep` 的 1 同样是"无匹配"；`command -v foo` 不存在返回 1
+        "git" => last_seg.split_whitespace().nth(1) == Some("grep"),
+        "command" => last_seg.split_whitespace().nth(1) == Some("-v"),
+        _ => false,
+    }
+}
+
 fn snapshot_dir_entries(dir: &Path) -> std::collections::BTreeSet<String> {
     use std::collections::BTreeSet;
     fn walk(d: &Path, base: &Path, set: &mut BTreeSet<String>, depth: usize) {
@@ -930,6 +981,24 @@ fn truncate_output(s: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_invocation_detection() {
+        // 检索族：exit 1 = 无匹配
+        assert!(is_search_invocation("grep -rn foo src/"));
+        assert!(is_search_invocation("rg --files"));
+        assert!(is_search_invocation("cat x.txt | grep pattern"));
+        assert!(is_search_invocation("cd dir && rg pattern"));
+        assert!(is_search_invocation("git grep -n symbol"));
+        assert!(is_search_invocation("command -v ffmpeg"));
+        assert!(is_search_invocation("FOO=1 rg pattern src/"));
+        // 非检索族：exit 1 是真错
+        assert!(!is_search_invocation("cargo test"));
+        assert!(!is_search_invocation("find . -name x")); // find 无匹配返回 0，exit1=真错
+        assert!(!is_search_invocation("rg --files | head")); // 末段是 head，退出码不归 rg
+        assert!(!is_search_invocation("git status"));
+        assert!(!is_search_invocation("python script.py"));
+    }
 
     fn test_db() -> DbState {
         let base =
