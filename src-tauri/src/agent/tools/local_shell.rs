@@ -684,10 +684,17 @@ fn execute_command_blocking(
                 && exit_code == 1
                 && stderr_trimmed.is_empty()
                 && is_search_invocation(&cmd_str);
+            // shell 解析层失败（引号不配平/EOF 等）：命令根本没跑起来，
+            // 修复方向是"重写引号或改用 args 数组"，不是重试/改参数语义
+            let shell_syntax_error = !success
+                && !search_no_match
+                && is_shell_parse_error(&stderr_trimmed);
             let (kind, retryable, safe_to_retry, recommended_action) = if success {
                 ("success", false, true, "done")
             } else if search_no_match {
                 ("no_matches", false, false, "no_match_means_absent")
+            } else if shell_syntax_error {
+                ("shell_syntax", true, false, "fix_quoting_or_use_args_array")
             } else {
                 ("non_zero_exit", true, false, "inspect_stderr_and_fix_arguments")
             };
@@ -699,6 +706,12 @@ fn execute_command_blocking(
                     "🔍 [无匹配] (exit_code: 1 — 检索命令的 1 是'没有命中'不是执行失败，\
                      目标很可能不存在，请改用 list/read 验证符号或文件名而不是重试, 耗时: {}ms)",
                     duration_ms
+                )
+            } else if shell_syntax_error {
+                format!(
+                    "❌ [Shell语法错误] (exit_code: {} — 命令未执行：引号/转义不配平。\
+                     含复杂引号的命令请改用 args 数组传参以完全绕过 shell 解析, 耗时: {}ms)",
+                    exit_code, duration_ms
                 )
             } else {
                 format!(
@@ -802,6 +815,12 @@ fn execute_command_blocking(
                      建议用 list/read 验证文件名或符号名是否存在，勿仅换参数重试同一目标。",
                     cmd_str
                 )
+            } else if shell_syntax_error {
+                format!(
+                    "Shell 语法错误（exit {}）：命令未被解析执行——`{}` 存在引号不配平或未闭合结构。\
+                     含多层引号/换行的命令请改用 args 数组形式传参，可完全绕过 shell 引号解析。",
+                    exit_code, cmd_str
+                )
             } else {
                 let diag = if !stderr_trimmed.is_empty() {
                     stderr_trimmed.clone()
@@ -887,6 +906,18 @@ fn is_search_invocation(cmd: &str) -> bool {
         "command" => last_seg.split_whitespace().nth(1) == Some("-v"),
         _ => false,
     }
+}
+
+/// 判定 stderr 是否为 shell 解析层语法错误（命令未进入执行阶段）。
+/// sh/bash/dash 的共同指纹：unexpected EOF / looking for matching / syntax error。
+fn is_shell_parse_error(stderr: &str) -> bool {
+    let l = stderr.to_ascii_lowercase();
+    (l.contains("syntax error")
+        || l.contains("unexpected eof")
+        || l.contains("looking for matching")
+        || l.contains("unterminated quoted string")
+        || l.contains("unexpected end of file"))
+        && (l.contains("sh:") || l.contains("bash:") || l.contains("-c:") || l.contains("dash"))
 }
 
 fn snapshot_dir_entries(dir: &Path) -> std::collections::BTreeSet<String> {
@@ -998,6 +1029,20 @@ mod tests {
         assert!(!is_search_invocation("rg --files | head")); // 末段是 head，退出码不归 rg
         assert!(!is_search_invocation("git status"));
         assert!(!is_search_invocation("python script.py"));
+    }
+
+    #[test]
+    fn shell_parse_error_detection() {
+        // 实测指纹（sh -c 引号未配平）
+        assert!(is_shell_parse_error(
+            "sh: -c: line 0: unexpected EOF while looking for matching `\"'\nsh: -c: line 1: syntax error: unexpected end of file"
+        ));
+        assert!(is_shell_parse_error("bash: -c: line 3: syntax error near unexpected token `('"));
+        assert!(is_shell_parse_error("sh: 1: Syntax error: Unterminated quoted string"));
+        // 正常业务错误不误判
+        assert!(!is_shell_parse_error("grep: pattern not found"));
+        assert!(!is_shell_parse_error("python: syntax error in script.py")); // 无 shell 指纹
+        assert!(!is_shell_parse_error(""));
     }
 
     fn test_db() -> DbState {
