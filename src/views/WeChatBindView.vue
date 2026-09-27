@@ -192,12 +192,20 @@
               </div>
               <p v-if="tunnelStatusLine" class="tunnel-status">{{ tunnelStatusLine }}</p>
 
-              <!-- 自托管更新：经穿透域名分发签名升级包 -->
+              <!-- 自托管更新：经穿透域名分发签名升级包；
+                   后台每小时轮询——发现新版时按钮变绿提示直接安装 -->
               <div class="tunnel-row">
-                <button class="btn sm" :disabled="busy || updateBusy" @click="checkUpdate">
-                  {{ updateBusy ? "检查中" : "检查更新" }}
+                <button
+                  class="btn sm"
+                  :class="{ primary: !!availableUpdate }"
+                  :disabled="busy || updateBusy"
+                  @click="checkUpdate"
+                >
+                  {{ updateBusy ? "检查中" : availableUpdate ? `安装 v${availableUpdate.version}` : "检查更新" }}
                 </button>
-                <p v-if="updateStatus" class="tunnel-status" style="margin: 0">{{ updateStatus }}</p>
+                <p v-if="updateStatus || updateStatusText" class="tunnel-status" style="margin: 0">
+                  {{ updateStatus || updateStatusText }}
+                </p>
               </div>
             </div>
           </div>
@@ -493,8 +501,8 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { availableUpdate, checkUpdateOnce, updateStatusText } from "../composables/useUpdater";
 import ModelSelectDropdown from "../components/common/ModelSelectDropdown.vue";
 
 interface ModelOption {
@@ -719,6 +727,8 @@ async function saveConsoleUrl() {
 }
 
 // ---- 自托管更新（经穿透域名分发，私钥本机签名）----
+// 后台 watcher（App.vue 启动+每小时）已填充 availableUpdate；
+// 按钮：有缓存新版 → 直接装；没有 → 现查一次。
 const updateBusy = ref(false);
 const updateStatus = ref("");
 
@@ -726,13 +736,14 @@ async function checkUpdate() {
   updateBusy.value = true;
   updateStatus.value = "";
   try {
-    const update = await checkForUpdate();
+    const update = availableUpdate.value ?? (await checkUpdateOnce());
     if (!update) {
       updateStatus.value = "已是最新版本 ✅";
       return;
     }
     updateStatus.value = `发现新版本 ${update.version}，下载安装中…`;
     await update.downloadAndInstall();
+    availableUpdate.value = null;
     updateStatus.value = `${update.version} 已安装，即将重启…`;
     setTimeout(() => relaunch(), 1500);
   } catch (err) {
