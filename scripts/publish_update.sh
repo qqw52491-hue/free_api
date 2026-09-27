@@ -35,19 +35,21 @@ NAME="$(basename "$PKG")"
 cp -f "$PKG" "$UPDATES_DIR/$NAME"
 SIGNATURE=$(cat "$SIG")
 
-# 3/3 生成 latest.json（Tauri updater 协议格式）
-python3 - "$UPDATES_DIR/latest.json" <<PYEOF
+# 3/3 生成 latest.json（Tauri updater 协议格式）——只发实际构建的架构
+ARCH=$(uname -m)
+case "$ARCH" in
+  arm64)  PLATFORM="darwin-aarch64" ;;
+  x86_64) PLATFORM="darwin-x86_64" ;;
+  *)      PLATFORM="linux-$ARCH" ;;
+esac
+python3 - "$UPDATES_DIR/latest.json" "$PLATFORM" <<PYEOF
 import json, sys, datetime
 manifest = {
   "version": "$VERSION",
   "notes": "Free API Chat $VERSION",
   "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
   "platforms": {
-    "darwin-aarch64": {
-      "signature": "$SIGNATURE",
-      "url": "https://$ENDPOINT_HOST/update/files/$NAME"
-    },
-    "darwin-x86_64": {
+    sys.argv[2]: {
       "signature": "$SIGNATURE",
       "url": "https://$ENDPOINT_HOST/update/files/$NAME"
     }
@@ -56,5 +58,5 @@ manifest = {
 json.dump(manifest, open(sys.argv[1], "w"), ensure_ascii=False, indent=2)
 PYEOF
 
-echo "==> ✅ 发布完成：$UPDATES_DIR/latest.json → https://$ENDPOINT_HOST/update/latest.json"
-echo "    客户端点「检查更新」即可拉取。x64 版如需另行构建请补跑一次（同脚本会覆盖 manifest）。"
+echo "==> ✅ 发布完成（$PLATFORM）：$UPDATES_DIR/latest.json → https://$ENDPOINT_HOST/update/latest.json"
+echo "    客户端点「检查更新」即可拉取。其他架构需在其本机重跑本脚本合并 manifest。"
