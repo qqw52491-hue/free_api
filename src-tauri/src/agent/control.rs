@@ -114,13 +114,8 @@ pub async fn send_human_intervention(
     {
         eprintln!("[control] 干预消息落盘失败（已送达运行中任务）: {error}");
     }
-    if let Some(app) = crate::agent::channel::runtime::app_handle() {
-        use tauri::Emitter;
-        let _ = app.emit(
-            &format!("agent-message-{session_id}"),
-            serde_json::json!({ "session_id": session_id }),
-        );
-    }
+    // 统一分发中枢：SSE(手机/网页) + Tauri(桌面) 双路齐达
+    crate::agent::channel::notify_session_event(&session_id, "message");
     Ok(())
 }
 

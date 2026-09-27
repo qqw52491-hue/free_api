@@ -152,6 +152,13 @@ fn event_bus() -> &'static tokio::sync::broadcast::Sender<SessionEvent> {
     BUS.get_or_init(|| tokio::sync::broadcast::channel(512).0)
 }
 
+/// 会话事件统一分发中枢：一处调用，三端齐达——
+///  ① SSE event_bus → 手机/网页控制台（EventSource）
+///  ② Tauri emit channel-session-event → 桌面端打开中的会话/侧栏
+/// （微信推送属语义决策不进本中枢，由各业务点显式调 notify_wechat）
+///
+/// 历史教训：事件点手工挑通道发 → 新事件忘发其中一路 = 某端静默不刷新
+/// （run 中人工应答只进内存通道、桌面气泡页永不可见的实测 bug 即此类）。
 pub(crate) fn notify_session_event(session_id: &str, kind: &str) {
     // progress 类事件走主循环热路径（实测可达 10+/s），SSE 端合并到 ≤3/s；
     // state/提问/终态类低频且关键，即时放行。
@@ -167,10 +174,15 @@ pub(crate) fn notify_session_event(session_id: &str, kind: &str) {
         }
         guard.insert(session_id.to_string(), now);
     }
-    let _ = event_bus().send((
-        session_id.to_string(),
-        json!({ "type": kind, "at": now_ts() }),
-    ));
+    let payload = json!({ "type": kind, "at": now_ts() });
+    let _ = event_bus().send((session_id.to_string(), payload.clone()));
+    if let Some(app) = runtime::app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "channel-session-event",
+            json!({ "session_id": session_id, "kind": kind, "at": payload["at"] }),
+        );
+    }
 }
 
 fn now_ts() -> String {
