@@ -90,7 +90,7 @@ pub async fn notify_stream_interrupt(session_id: &str) {
 
 #[tauri::command]
 pub async fn send_human_intervention(
-    _state: State<'_, DbState>,
+    state: State<'_, DbState>,
     session_id: String,
     message: String,
 ) -> Result<(), String> {
@@ -103,9 +103,25 @@ pub async fn send_human_intervention(
         .get(&session_id)
         .ok_or_else(|| "任务已结束或通道不存在".to_string())?;
     sender
-        .send(HumanControl::Answer(message))
+        .send(HumanControl::Answer(message.clone()))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // 落盘成会话消息气泡：run 中时段的问答原来只走干预通道不写库，
+    // 导致桌面/网页会话页永远看不到人的回答。落库失败不阻断应答送达。
+    if let Err(error) =
+        crate::agent::conversation::append_human_intervention(state.inner(), &session_id, &message)
+    {
+        eprintln!("[control] 干预消息落盘失败（已送达运行中任务）: {error}");
+    }
+    if let Some(app) = crate::agent::channel::runtime::app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit(
+            &format!("agent-message-{session_id}"),
+            serde_json::json!({ "session_id": session_id }),
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]

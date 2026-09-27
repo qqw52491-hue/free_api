@@ -1655,6 +1655,15 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 appendLog(`[监听失败] ${channel}: ${toText(error)}`);
             }
         };
+        // 运行中人工干预（含微信通道回复）落库后立即刷新会话气泡——
+        // 否则"人的回答"只在 run 边界（started/done）才重拉，聊天页看不到。
+        await register(`agent-message-${sid}`, async () => {
+            try {
+                await loadConversation();
+            } catch (error) {
+                appendLog(`[消息刷新失败] ${toText(error)}`);
+            }
+        });
         await register(`agent-run-state-${sid}`, (payload) => handleRunState(asRecord(payload)));
         await register(`agent-progress-${sid}`, (payload) => handleProgress(asRecord(payload)));
         await register(`agent-log-${sid}`, handleLog);

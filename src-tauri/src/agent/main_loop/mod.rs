@@ -436,6 +436,17 @@ async fn run_agent_main_loop_in_workspace_inner(
             &conversation_model_id,
             &goal,
         )?;
+    } else {
+        // 续接未完成 checkpoint 时本条用户消息仍是新发言，须落盘成气泡——
+        // 否则桌面/网页会话页静默吞掉这句话（用户发了却看不到）。
+        // 恢复路径由新 goal 驱动上下文，此处纯记账不改语义。
+        if let Err(error) = crate::agent::conversation::append_human_intervention(
+            state.inner(),
+            &final_session_id,
+            &goal,
+        ) {
+            eprintln!("[conversation] 续接轮次用户消息落盘失败: {error}");
+        }
     }
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
     let session_tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
