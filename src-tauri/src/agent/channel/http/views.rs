@@ -2,6 +2,56 @@
 
 use super::*;
 
+/// 自托管更新目录：app 数据根/updates/（publish_update.sh 落点）。
+fn updates_dir() -> PathBuf {
+    channel_config_path()
+        .parent()
+        .map(|p| p.join("updates"))
+        .unwrap_or_else(|| PathBuf::from("updates"))
+}
+
+/// GET /update/latest.json：Tauri updater 的 manifest 端点（免鉴权——客户端拿不到 token）。
+/// 文件不存在 = 还没发布过任何版本，回 404 让 updater 静默当"已是最新"。
+pub(crate) async fn handler_update_manifest() -> impl axum::response::IntoResponse {
+    let path = updates_dir().join("latest.json");
+    match std::fs::read_to_string(&path) {
+        Ok(body) => (
+            StatusCode::OK,
+            [("content-type", "application/json")],
+            body,
+        ),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            [("content-type", "application/json")],
+            json!({ "error": "no update published" }).to_string(),
+        ),
+    }
+}
+
+/// GET /update/files/{name}：分发签名升级包本体。文件名白名单字符防目录穿越。
+pub(crate) async fn handler_update_file(
+    AxumPath(name): AxumPath<String>,
+) -> impl axum::response::IntoResponse {
+    let safe = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !safe || name.starts_with('.') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let path = updates_dir().join(&name);
+    // canonicalize 双重校验：解析后必须仍在 updates/ 内
+    let base = updates_dir().canonicalize().unwrap_or_else(|_| updates_dir());
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
+    if !resolved.starts_with(&base) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let bytes = std::fs::read(&resolved).map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((
+        [("content-type", "application/octet-stream")],
+        bytes,
+    ))
+}
+
 /// GET / 与 /web：内嵌网页控制台入口（no-cache 保证升级二进制后页面同步更新）
 pub(crate) async fn handler_web_home() -> impl axum::response::IntoResponse {
     // 门禁提示里的配置文件路径按本机实际位置渲染（macOS 是 Library/Application Support，

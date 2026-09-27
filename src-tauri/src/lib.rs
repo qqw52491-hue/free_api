@@ -26,7 +26,9 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init());
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
 
     // 仅显式 E2E 测试构建开启内嵌 WebDriver；正常开发与发布版不暴露自动化控制端口。
     #[cfg(feature = "wdio")]

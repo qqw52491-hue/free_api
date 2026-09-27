@@ -7,6 +7,10 @@ pub(crate) fn channel_router(state: Arc<ChannelState>) -> Router {
         .route("/", get(handler_web_home))
         .route("/web", get(handler_web_home))
         .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }))
+        // 自托管更新分发（updater 客户端不带 token，路由必须免鉴权；
+        // 只读 app 数据目录 updates/ 下文件，文件名白名单化防穿越）
+        .route("/update/latest.json", get(handler_update_manifest))
+        .route("/update/files/{name}", get(handler_update_file))
         .route("/channel/projects", get(handler_projects))
         .route("/channel/sessions", get(handler_sessions))
         .route("/channel/session", post(handler_session))

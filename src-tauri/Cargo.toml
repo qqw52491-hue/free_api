@@ -44,6 +44,8 @@ quick-xml = "0.37"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.24"
 ts-rs = { version = "12.0.1", default-features = false, features = ["serde-compat"] }
+tauri-plugin-updater = "2.12.0"
+tauri-plugin-process = "2.4.0"
 
 # 仅 `cargo build --features wdio` 的测试构建载入；正常开发与发布版均不包含 WebDriver。
 [dev-dependencies]
