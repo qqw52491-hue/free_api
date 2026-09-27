@@ -11,6 +11,10 @@ pub(crate) fn channel_router(state: Arc<ChannelState>) -> Router {
         // 只读 app 数据目录 updates/ 下文件，文件名白名单化防穿越）
         .route("/update/latest.json", get(handler_update_manifest))
         .route("/update/files/{name}", get(handler_update_file))
+        // 远端构建机发布端点（X-Channel-Token 鉴权）——Windows/Linux 机
+        // 在本地 build 完把包+manifest 键推上来，本机即成分发源
+        .route("/update/publish/files/{name}", post(handler_update_publish_file))
+        .route("/update/publish/manifest", post(handler_update_publish_manifest))
         .route("/channel/projects", get(handler_projects))
         .route("/channel/sessions", get(handler_sessions))
         .route("/channel/session", post(handler_session))

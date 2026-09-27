@@ -1,9 +1,10 @@
 //! Web 视图与会话列表/轨迹详情 handler。
 
 use super::*;
+use std::path::Path;
 
 /// 自托管更新目录：app 数据根/updates/（publish_update.sh 落点）。
-fn updates_dir() -> PathBuf {
+pub(crate) fn updates_dir() -> PathBuf {
     channel_config_path()
         .parent()
         .map(|p| p.join("updates"))
@@ -50,6 +51,86 @@ pub(crate) async fn handler_update_file(
         [("content-type", "application/octet-stream")],
         bytes,
     ))
+}
+
+/// 合并写入 latest.json：同平台覆盖、异平台并存（Windows/Mac 各发各的互不顶）。
+pub(crate) fn merge_update_manifest(
+    dir: &Path,
+    platform: &str,
+    filename: &str,
+    signature: &str,
+    version: &str,
+    host: &str,
+) -> Result<(), String> {
+    let path = dir.join("latest.json");
+    let mut manifest: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| json!({ "platforms": {} }));
+    manifest["version"] = json!(version);
+    manifest["notes"] = json!(format!("Free API Chat {version}"));
+    manifest["pub_date"] = json!(chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    manifest["platforms"][platform] = json!({
+        "signature": signature,
+        "url": format!("https://{host}/update/files/{filename}"),
+    });
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::write(&path, serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+/// POST /update/publish/files/{name}：远端构建机上传升级包本体（X-Channel-Token 鉴权）。
+pub(crate) async fn handler_update_publish_file(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let safe = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !safe || name.starts_with('.') || body.is_empty() {
+        return Err(bad_request("非法文件名或空文件"));
+    }
+    let dir = updates_dir();
+    std::fs::create_dir_all(&dir).map_err(internal_error)?;
+    std::fs::write(dir.join(&name), &body).map_err(internal_error)?;
+    Ok(Json(json!({ "ok": true, "name": name, "size": body.len() })))
+}
+
+/// POST /update/publish/manifest {platform, filename, signature, version}：
+/// 远端构建机写完文件后调，把该平台键合并进 latest.json（token 鉴权）。
+pub(crate) async fn handler_update_publish_manifest(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    Json(req): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let get_str = |k: &str| req.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let platform = get_str("platform");
+    let filename = get_str("filename");
+    let signature = get_str("signature");
+    let version = get_str("version");
+    let host = get_str("host");
+    let host = if host.is_empty() { config.tunnel_hostname.clone() } else { host };
+    for (label, v) in [("platform", &platform), ("filename", &filename), ("signature", &signature), ("version", &version)] {
+        if v.is_empty() {
+            return Err(bad_request(&format!("缺少字段 {label}")));
+        }
+    }
+    if host.is_empty() {
+        return Err(bad_request("未配置 tunnel_hostname，请显式传 host"));
+    }
+    merge_update_manifest(&updates_dir(), &platform, &filename, &signature, &version, &host)
+        .map_err(internal_error)?;
+    Ok(Json(json!({ "ok": true, "platform": platform, "version": version })))
 }
 
 /// GET / 与 /web：内嵌网页控制台入口（no-cache 保证升级二进制后页面同步更新）

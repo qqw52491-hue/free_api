@@ -8,7 +8,7 @@ mod session_ops;
 mod run_spawn;
 mod data_queries;
 mod run_control;
-mod views;
+pub(crate) mod views;
 mod upload;
 mod router;
 

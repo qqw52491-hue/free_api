@@ -461,3 +461,68 @@ pub async fn wechat_channel_runs() -> Result<Value, String> {
     runs.truncate(20);
     serde_json::to_value(runs).map_err(|e| e.to_string())
 }
+/// 本机一键发布：前端文件选择器传入构建产物路径（.app.tar.gz / .msi.zip / .nsis.zip / .AppImage.tar.gz），
+/// 嗅探版本号+平台 → 拷入 updates/ → 合并 latest.json。签名文件取同名 .sig 兄弟文件。
+#[tauri::command]
+pub async fn publish_update_artifact(path: String) -> Result<Value, String> {
+    use std::path::PathBuf;
+    let src = PathBuf::from(path.trim());
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "无效文件名".to_string())?
+        .to_string();
+    if !src.is_file() {
+        return Err(format!("文件不存在: {}", src.display()));
+    }
+    // 平台+版本嗅探（Tauri 产物命名约定 *_X.Y.Z_<arch>.<bundle>）
+    let platform = if name.contains("aarch64") && name.ends_with(".app.tar.gz") {
+        "darwin-aarch64"
+    } else if name.ends_with(".app.tar.gz") {
+        "darwin-x86_64"
+    } else if name.ends_with(".msi.zip") || name.ends_with(".nsis.zip") || name.contains("setup.exe") {
+        "windows-x86_64"
+    } else if name.contains("AppImage") {
+        "linux-x86_64"
+    } else {
+        return Err(format!("无法从文件名识别平台: {name}"));
+    };
+    let version = name
+        .split('_')
+        .find(|seg| {
+            let parts: Vec<&str> = seg.split('.').collect();
+            parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        })
+        .map(str::to_string)
+        .ok_or_else(|| format!("文件名里没有语义版本号 (_X.Y.Z_): {name}"))?;
+    let sig_path = PathBuf::from(format!("{}.sig", src.display()));
+    if !sig_path.is_file() {
+        return Err(format!("缺签名文件: {}", sig_path.display()));
+    }
+    let signature = std::fs::read_to_string(&sig_path).map_err(|e| e.to_string())?;
+    let signature = signature.trim().to_string();
+
+    let config = channel_config_shared().read().expect("config poisoned").clone();
+    let host = if config.tunnel_hostname.trim().is_empty() {
+        return Err("未配置隧道域名——先在下面绑定 tunnel_hostname".to_string());
+    } else {
+        config.tunnel_hostname.trim().to_string()
+    };
+
+    let dir = crate::agent::channel::http::views::updates_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::copy(&src, dir.join(&name)).map_err(|e| e.to_string())?;
+    crate::agent::channel::http::views::merge_update_manifest(
+        &dir, platform, &name, &signature, &version, &host,
+    )?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "platform": platform,
+        "version": version,
+        "url": format!("https://{host}/update/files/{name}"),
+    }))
+}
+
