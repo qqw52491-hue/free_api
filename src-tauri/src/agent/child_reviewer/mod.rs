@@ -380,6 +380,11 @@ pub async fn spawn_child_reviewer(
         // 带着膨胀后的全量历史最慢，恰好是最不该直接超时放弃的一棒。
         let mut timeout_retried = false;
         let mut cur_timeout_secs = child_timeout_secs(&config.model_name);
+        // 覆盖型契约违例的知情重试计数：缺项清单喂回重答，最多 2 次，
+        // 超限后不再判死——带疤收敛（缺项写入 missing_evidence + 留痕标记）。
+        let mut coverage_fix_attempts: u32 = 0;
+        let mut coverage_gap_note: Option<String> = None;
+
         let (duration_ms, completion_tokens, prompt_tokens, final_parsed, final_raw) = loop {
             llm_call_index += 1;
             crate::agent::control::mark_stage(
@@ -522,9 +527,44 @@ pub async fn spawn_child_reviewer(
                 .unwrap_or_default();
             let raw = stream_result.full_response;
 
-            // 1. 最终审查 JSON（含 findings 键）→ 收敛
+            // 1. 最终审查 JSON（含 findings 键）→ 收敛。
+            //    收敛前先做覆盖型契约校验：缺项时把【具体缺哪些点】喂回模型
+            //    重答（实测：缺项错误只落库、子任务至死不知道漏了啥）。
             if let Ok(parsed) = parse_controlled_output(&raw, &allowed_refs) {
-                break (duration_ms, completion_tokens, prompt_tokens, parsed, raw);
+                let coverage_err = extract_json_object(&raw)
+                    .and_then(|f| serde_json::from_str::<serde_json::Value>(f).ok())
+                    .and_then(|v| {
+                        crate::agent::impact_pack::check_consumer_verdicts(&impact_pack_refs, &v)
+                            .err()
+                            .or_else(|| {
+                                crate::agent::impact_pack::check_evidence_scope_verdicts(
+                                    &evidence_scope_refs,
+                                    &v,
+                                )
+                                .err()
+                            })
+                    });
+                match coverage_err {
+                    Some(err) if coverage_fix_attempts < 2 => {
+                        coverage_fix_attempts += 1;
+                        messages.push(json!({"role": "assistant", "content": raw}));
+                        messages.push(json!({
+                            "role": "user",
+                            "content": format!(
+                                "【系统】契约违例（第 {}/2 次）：{}。请逐条补全裁决——确认无关的点也必须显式写 NA，漏项即不合规。重新输出完整最终审查 JSON。",
+                                coverage_fix_attempts, err
+                            )
+                        }));
+                        continue;
+                    }
+                    Some(err) => {
+                        coverage_gap_note = Some(err);
+                        break (duration_ms, completion_tokens, prompt_tokens, parsed, raw);
+                    }
+                    None => {
+                        break (duration_ms, completion_tokens, prompt_tokens, parsed, raw);
+                    }
+                }
             }
 
             // 2. 取证请求（含 "tool" 键，宽松提取）：预算未尽永远执行——合规进展
@@ -698,46 +738,42 @@ pub async fn spawn_child_reviewer(
                 }
             }
         }
-        // 影响面覆盖校验：pack 列出的每个消费点必须被 consumer_verdicts 逐条裁决。
-        // 机制对齐 custom_schema 违约通道——缺项即 contract_violation → failover 重派，
-        // 防"拿到材料却逐条不看"（实测两轮审查引证 path_guard 仍放行的失效模式）。
-        if let Err(err) =
-            crate::agent::impact_pack::check_consumer_verdicts(&impact_pack_refs, &result_val)
-        {
-            let result_json = serde_json::to_string(&result_val).ok();
-            finish_child_run_with_history(
-                &db_clone,
-                &child_run_id_clone,
-                "invalid_output",
-                duration_ms,
-                completion_tokens,
-                prompt_tokens,
-                Some(ChildErrorKind::ContractViolation(err)),
-                result_json.as_deref(),
-                serde_json::to_string(&messages).ok().as_deref(),
-            );
-            return;
+        // 影响面/证据范围覆盖校验：环内已给过两次带缺项清单的知情重试，
+        // 仍缺项不再判死——带疤收敛（对齐 finish 通道的 consumer_coverage_incomplete
+        // 放行留痕）：缺项写入 missing_evidence + 覆盖缺口标记进 result_val，
+        // findings 照常入账、子任务保持可对质（succeeded）。
+        for (check_fn, refs, flag_key, label) in [
+            (
+                crate::agent::impact_pack::check_consumer_verdicts as fn(&[String], &Value) -> Result<(), String>,
+                &impact_pack_refs,
+                "consumer_coverage_incomplete",
+                "影响面消费点",
+            ),
+            (
+                crate::agent::impact_pack::check_evidence_scope_verdicts as fn(&[String], &Value) -> Result<(), String>,
+                &evidence_scope_refs,
+                "evidence_scope_coverage_incomplete",
+                "证据范围文件",
+            ),
+        ] {
+            if let Err(err) = check_fn(refs, &result_val) {
+                if let Some(map) = result_val.as_object_mut() {
+                    map.insert(flag_key.to_string(), json!(true));
+                    let scar = format!("覆盖缺口（知情重试后仍未补齐）：{}", err);
+                    match map.get_mut("missing_evidence").and_then(|m| m.as_array_mut()) {
+                        Some(arr) => arr.push(json!(scar)),
+                        None => {
+                            map.insert("missing_evidence".to_string(), json!([scar]));
+                        }
+                    }
+                    crate::agent::control::mark_stage(
+                        &stage_key,
+                        &format!("child_task:coverage_scar:{}", label),
+                    );
+                }
+            }
         }
-        // 证据范围覆盖校验：被引为证据但未列入修改目标的文件必须被
-        // evidence_scope_verdicts 逐条裁决——同样是"拿到材料却逐条不看"的防线。
-        if let Err(err) = crate::agent::impact_pack::check_evidence_scope_verdicts(
-            &evidence_scope_refs,
-            &result_val,
-        ) {
-            let result_json = serde_json::to_string(&result_val).ok();
-            finish_child_run_with_history(
-                &db_clone,
-                &child_run_id_clone,
-                "invalid_output",
-                duration_ms,
-                completion_tokens,
-                prompt_tokens,
-                Some(ChildErrorKind::ContractViolation(err)),
-                result_json.as_deref(),
-                serde_json::to_string(&messages).ok().as_deref(),
-            );
-            return;
-        }
+        let _ = coverage_gap_note; // 缺项详情已由上方 check 重跑记入疤
 
         let result_json = serde_json::to_string(&result_val).ok();
         finish_child_run_with_history(
