@@ -4,7 +4,7 @@
       <div
         v-if="block.type === 'markdown'"
         class="markdown-segment markdown-content"
-        v-html="block.html || renderSegmentMarkdown(block.content)"
+        v-html="getBlockHtml(block, idx)"
       ></div>
       <EChartsBlock
         v-else-if="block.type === 'echarts'"
@@ -199,6 +199,73 @@ function getHtmlTitle(htmlCode: string): string {
   const match = htmlCode.match(/<title>([^<]+)<\/title>/i);
   return match ? match[1].trim() : "HTML 交互式页面与应用";
 }
+
+function decorateStreamingTail(html: string): string {
+  if (!html || typeof window === "undefined" || !window.DOMParser) return html;
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    let lastTextNode: Text | null = null;
+    while (walker.nextNode()) {
+      const node = walker.currentNode as Text;
+      if (node.textContent && node.textContent.trim().length > 0) {
+        lastTextNode = node;
+      }
+    }
+
+    if (!lastTextNode || !lastTextNode.textContent) {
+      return html;
+    }
+
+    const fullText = lastTextNode.textContent;
+    const trimmed = fullText.trimEnd();
+    const trailingSpaces = fullText.slice(trimmed.length);
+
+    // 末尾字符呈现从 100% 到 0% 的纯透明度阶梯过渡（无颜色渐变，上一句完全不透明）
+    const opacities = [0.90, 0.78, 0.64, 0.50, 0.36, 0.22, 0.10];
+    const tailCount = Math.min(opacities.length, trimmed.length);
+    if (tailCount <= 0) return html;
+
+    const activeOpacities = opacities.slice(opacities.length - tailCount);
+    const prefix = trimmed.slice(0, trimmed.length - tailCount);
+    const tailChars = Array.from(trimmed.slice(trimmed.length - tailCount));
+
+    const parent = lastTextNode.parentNode;
+    if (!parent) return html;
+
+    const frag = doc.createDocumentFragment();
+    if (prefix) {
+      frag.appendChild(doc.createTextNode(prefix));
+    }
+
+    for (let i = 0; i < tailChars.length; i++) {
+      const span = doc.createElement("span");
+      span.className = "stream-tail-fade";
+      span.style.opacity = String(activeOpacities[i]);
+      span.textContent = tailChars[i];
+      frag.appendChild(span);
+    }
+
+    if (trailingSpaces) {
+      frag.appendChild(doc.createTextNode(trailingSpaces));
+    }
+
+    parent.replaceChild(frag, lastTextNode);
+    return doc.body.innerHTML;
+  } catch {
+    return html;
+  }
+}
+
+function getBlockHtml(block: ContentBlock, idx: number): string {
+  const baseHtml = block.html || renderSegmentMarkdown(block.content);
+  if (!props.streaming || idx !== parsedBlocks.value.length - 1) {
+    return baseHtml;
+  }
+  return decorateStreamingTail(baseHtml);
+}
 </script>
 
 <style scoped>
@@ -258,21 +325,12 @@ function getHtmlTitle(htmlCode: string): string {
   will-change: auto;
 }
 
-.rich-content-stream.is-live-streaming .markdown-segment:last-of-type {
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    #000 0,
-    #000 calc(100% - 4.2em),
-    rgba(0, 0, 0, 0.38) calc(100% - 1.1em),
-    rgba(0, 0, 0, 0.2) 100%
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    #000 0,
-    #000 calc(100% - 4.2em),
-    rgba(0, 0, 0, 0.38) calc(100% - 1.1em),
-    rgba(0, 0, 0, 0.2) 100%
-  );
+/* 🌟 新流入文字纯透明度过渡：无颜色渐变，文字颜色天然继承，上一句完全凝实，末端纯透明度 100% -> 0% 阶梯 */
+.markdown-segment :deep(.stream-tail-fade) {
+  display: inline !important;
+  color: inherit !important;
+  transition: opacity 0.1s linear;
+  will-change: opacity;
 }
 
 /* 标题样式 */

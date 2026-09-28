@@ -1107,9 +1107,6 @@
                         'is-streaming': isRunning && entry.id === 'live-completion'
                     }"
                 >
-                    <!-- 流光渐进顶部扫描条 (在加载/输出中持续流转) -->
-                    <div v-if="isRunning && entry.id === 'live-completion'" class="completion-stream-shimmer-beam"></div>
-
                     <div class="agent-msg-header">
                         <span class="agent-logo-pill" :class="{ 'is-shimmering': isRunning && entry.id === 'live-completion' }">
                             <span v-if="isRunning && entry.id === 'live-completion'" class="agent-pulse-dot"></span>
@@ -1623,44 +1620,90 @@ function handleActionCardClick(step: AgentStepItem) {
 const typewriterTexts = reactive<Record<string, string>>({});
 const typewriterDoneIds = new Set<string>();
 const typewriterAnimFrames = new Map<string, number>();
+const typewriterTargets = new Map<string, string>();
+
+function updateSmoothStream(id: string, targetText: string) {
+    typewriterTargets.set(id, targetText);
+    if (typewriterDoneIds.has(id)) {
+        typewriterTexts[id] = targetText;
+        return;
+    }
+    if (typewriterAnimFrames.has(id)) {
+        // 已经在运行 tick，目标文本已在 typewriterTargets 更新，tick 每帧会读取最新 target
+        return;
+    }
+
+    if (typewriterTexts[id] === undefined) {
+        typewriterTexts[id] = targetText.slice(0, Math.min(2, targetText.length));
+    }
+
+    function tick() {
+        const target = typewriterTargets.get(id) || '';
+        const current = typewriterTexts[id] || '';
+        const remaining = target.length - current.length;
+
+        if (remaining <= 0) {
+            typewriterTexts[id] = target;
+            typewriterAnimFrames.delete(id);
+            if (!props.isRunning) {
+                typewriterDoneIds.add(id);
+            }
+            return;
+        }
+
+        // 自适应帧级阻尼插值：
+        // 1. 如果缓冲区积压很多（后端网络突发大 chunk），动态平滑提速追赶
+        // 2. 如果积压平缓（普通字句输出），每帧推进 1-2 字（约 60-100 字/秒），如流水自然延展
+        let step = 1;
+        if (remaining > 50) {
+            step = Math.max(3, Math.ceil(remaining / 6));
+        } else if (remaining > 20) {
+            step = Math.max(2, Math.ceil(remaining / 8));
+        } else if (remaining > 6) {
+            step = Math.max(1, Math.ceil(remaining / 10));
+        } else {
+            step = 1;
+        }
+
+        const nextLen = Math.min(target.length, current.length + step);
+        typewriterTexts[id] = target.slice(0, nextLen);
+
+        if (nextLen < target.length || props.isRunning) {
+            const handle = requestAnimationFrame(tick);
+            typewriterAnimFrames.set(id, handle);
+        } else {
+            typewriterAnimFrames.delete(id);
+            typewriterDoneIds.add(id);
+        }
+    }
+
+    const handle = requestAnimationFrame(tick);
+    typewriterAnimFrames.set(id, handle);
+}
 
 function getCompletionDisplayText(entry: { id: string; summary?: string; title?: string; timestamp?: number }): string {
     const fullText = entry.summary || entry.title || '';
     if (!fullText) return '';
 
-    // live-completion 运行中本身就是真流式增量（后端逐 chunk 推），
-    // 直接渲染最新快照——再套打字回放反而会滞后于真实流
-    if (props.isRunning && entry.id === 'live-completion') return fullText;
-
-    // 历史会话消息 / 重新打开对话，严禁重复播放打字动画；
-    // 但"刚跑完的回合"（completion 落成 history 条目才几秒）是例外——
-    // 用户亲眼看它完成的报告就该有一次逐字渐显，而不是整段弹出。
+    // 历史非新鲜会话消息，瞬时渲染，不重复播放流式过渡
     const isFreshCompletion = entry.id.startsWith("history-completion-")
         && !!entry.timestamp && Date.now() - entry.timestamp < 15_000;
     const isHistoric = entry.id.startsWith('history-') && !isFreshCompletion;
-    if (isHistoric || (!props.isRunning && !isFreshCompletion) || typewriterDoneIds.has(entry.id)) {
+    if (isHistoric || typewriterDoneIds.has(entry.id)) {
         typewriterDoneIds.add(entry.id);
         return fullText;
     }
 
-    // 若正在打字中，返回已输出的部分
-    if (typewriterTexts[entry.id] !== undefined) {
-        return typewriterTexts[entry.id];
-    }
-
-    // 短文本（小于 25 字）直接显示，不开启打字动画
-    if (fullText.length < 25) {
-        typewriterDoneIds.add(entry.id);
-        return fullText;
-    }
-
-    // 启动流式打字渐显
-    startTypewriter(entry.id, fullText);
-    return typewriterTexts[entry.id] || '';
+    // 运行中（live-completion）或刚完成的回合，走帧级平滑自适应推进
+    updateSmoothStream(entry.id, fullText);
+    return typewriterTexts[entry.id] || fullText.slice(0, 1);
 }
 
-function isStreamingCompletion(entry: { id: string }): boolean {
-    return (props.isRunning && entry.id === 'live-completion') || (!typewriterDoneIds.has(entry.id) && !!typewriterTexts[entry.id]);
+function isStreamingCompletion(entry: { id: string; summary?: string; title?: string }): boolean {
+    if (typewriterDoneIds.has(entry.id)) return false;
+    const target = typewriterTargets.get(entry.id) || entry.summary || entry.title || '';
+    const current = typewriterTexts[entry.id] || '';
+    return (props.isRunning && entry.id === 'live-completion') || (current.length < target.length);
 }
 
 function finishTypewriterInstantly(id: string, fullText?: string) {
@@ -1671,37 +1714,8 @@ function finishTypewriterInstantly(id: string, fullText?: string) {
     typewriterDoneIds.add(id);
     if (fullText) {
         typewriterTexts[id] = fullText;
+        typewriterTargets.set(id, fullText);
     }
-}
-
-function startTypewriter(id: string, fullText: string) {
-    if (typewriterAnimFrames.has(id)) return;
-    typewriterTexts[id] = '';
-    const totalChars = fullText.length;
-    // 逐字渐显 0.6s ~ 2.4s：报告越长播得越久，肉眼能感到字在浮出，
-    // 但不至于像真打字机那样拖几分钟
-    const durationMs = Math.min(2400, Math.max(500, totalChars * 3));
-    const startTime = performance.now();
-
-    function frame(now: number) {
-        const elapsed = now - startTime;
-        const progress = Math.min(1, elapsed / durationMs);
-        // 先快后微减速的自然流光手感
-        const eased = 1 - Math.pow(1 - progress, 2);
-        const count = Math.max(1, Math.floor(eased * totalChars));
-        typewriterTexts[id] = fullText.slice(0, count);
-
-        if (progress < 1) {
-            const handle = requestAnimationFrame(frame);
-            typewriterAnimFrames.set(id, handle);
-        } else {
-            typewriterTexts[id] = fullText;
-            typewriterDoneIds.add(id);
-            typewriterAnimFrames.delete(id);
-        }
-    }
-    const handle = requestAnimationFrame(frame);
-    typewriterAnimFrames.set(id, handle);
 }
 
 /** 操作卡片悬浮提示 */
@@ -3030,7 +3044,16 @@ watch(() => props.historyTurns, (turns) => {
     }
 }, { immediate: true });
 watch(() => [timelineEntries.value.length, props.completionMessage, props.historyTurns.length], () => { followLatest(); }, { flush: "post" });
-watch(() => props.isRunning, (running, wasRunning) => { if (running && !wasRunning) { followLiveTail.value = true; followLatest(); } if (!running && wasRunning) followLatest(); });
+watch(() => props.isRunning, (running, wasRunning) => {
+    if (running && !wasRunning) {
+        typewriterDoneIds.delete('live-completion');
+        delete typewriterTexts['live-completion'];
+        typewriterTargets.delete('live-completion');
+        followLiveTail.value = true;
+        followLatest();
+    }
+    if (!running && wasRunning) followLatest();
+});
 </script>
 <style scoped src="./agent-chat-stream.css"></style>
 

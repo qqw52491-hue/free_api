@@ -2277,62 +2277,9 @@ button.root-row {
     background: transparent;
     transition: all 0.25s ease;
 }
-
-/* 🌟 流光渐进顶部扫描条 (在生成/流式输出时如同极光流淌) */
-.completion-stream-shimmer-beam {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 2px;
-    border-radius: 2px;
-    background: linear-gradient(
-        90deg,
-        transparent 0%,
-        rgba(56, 189, 248, 0.2) 15%,
-        rgba(56, 189, 248, 0.9) 50%,
-        rgba(168, 85, 247, 0.9) 75%,
-        transparent 100%
-    );
-    background-size: 200% 100%;
-    animation: completionShimmerSweep 1.8s ease-in-out infinite;
-    pointer-events: none;
-    z-index: 2;
-}
-
-@keyframes completionShimmerSweep {
-    0% {
-        background-position: -150% 0;
-        opacity: 0.5;
-    }
-    50% {
-        opacity: 1;
-    }
-    100% {
-        background-position: 150% 0;
-        opacity: 0.5;
-    }
-}
-
-/* 正在输出时的闪烁流式光标与渐进动效 */
+/* 正在输出时的流式容器（无需光标与横条，末尾文字自然流动浮现） */
 .summary-rich.is-streaming-text {
     position: relative;
-}
-
-.summary-rich.is-streaming-text::after {
-    content: '▋';
-    display: inline-block;
-    margin-left: 4px;
-    color: #38bdf8;
-    font-size: 0.88em;
-    vertical-align: baseline;
-    animation: streamCursorBlink 0.85s infinite;
-    text-shadow: 0 0 8px rgba(56, 189, 248, 0.7);
-}
-
-@keyframes streamCursorBlink {
-    0%, 100% { opacity: 1; transform: scaleY(1); }
-    50% { opacity: 0.15; transform: scaleY(0.9); }
 }
 
 /* 最终回复的文本整体渐进浮现动效 */
