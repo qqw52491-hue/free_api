@@ -16,6 +16,8 @@ pub struct WebSearchResultItem {
     pub url: String,
     pub snippet: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
 }
 
 /// TinyFish 免费档内置密钥：随仓库分发（私有仓库），保证零配置开箱即用。
@@ -99,6 +101,7 @@ pub async fn execute_web_search(
         url: format!("https://cn.bing.com/search?q={}", urlencoding(q)),
         snippet: format!("未检索到关于 '{}' 的即时权威摘要。如需高精度全局网络搜索，可配置 TAVILY_API_KEY 或 BRAVE_API_KEY。", q),
         source: "Aggregated Search".to_string(),
+        image_url: None,
     }])
 }
 
@@ -148,6 +151,12 @@ async fn search_tinyfish(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let image_url = item
+                .get("image")
+                .or_else(|| item.get("image_url"))
+                .or_else(|| item.get("thumbnail"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             if url.is_empty() {
                 continue;
             }
@@ -156,6 +165,7 @@ async fn search_tinyfish(
                 url,
                 snippet,
                 source: "TinyFish".to_string(),
+                image_url,
             });
         }
     }
@@ -179,6 +189,7 @@ async fn search_tavily(
         "query": query,
         "search_depth": "basic",
         "include_answer": true,
+        "include_images": true,
         "max_results": limit,
     });
 
@@ -198,6 +209,17 @@ async fn search_tavily(
         .await
         .map_err(|e| format!("Tavily JSON 解析失败: {}", e))?;
 
+    // 提取顶层 images 数组 (Tavily 格式: images: ["url1", "url2"])
+    let mut top_images = Vec::new();
+    if let Some(imgs) = data.get("images").and_then(|v| v.as_array()) {
+        for img in imgs {
+            if let Some(s) = img.as_str() {
+                top_images.push(s.to_string());
+            }
+        }
+    }
+    let mut image_iter = top_images.into_iter();
+
     let mut results = Vec::new();
     if let Some(arr) = data.get("results").and_then(|v| v.as_array()) {
         for item in arr.iter().take(limit) {
@@ -216,12 +238,20 @@ async fn search_tavily(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let image_url = item
+                .get("image")
+                .or_else(|| item.get("image_url"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| image_iter.next());
             if !title.is_empty() && !url.is_empty() {
                 results.push(WebSearchResultItem {
                     title,
                     url,
                     snippet,
                     source: "Tavily".to_string(),
+                    image_url,
                 });
             }
         }
@@ -292,6 +322,7 @@ async fn search_brave(
                     title,
                     url,
                     snippet,
+                    image_url: None,
                     source: "Brave Search".to_string(),
                 });
             }
@@ -389,6 +420,7 @@ fn parse_wikipedia_opensearch(
                     snippet
                 },
                 source: "Wikipedia".to_string(),
+                image_url: None,
             });
         }
     }
@@ -461,6 +493,7 @@ pub fn parse_bing_rss_xml(xml: &str, limit: usize) -> Vec<WebSearchResultItem> {
                 url: link.trim().to_string(),
                 snippet: clean_xml_text(&description),
                 source: "Bing (免Key直连)".to_string(),
+                image_url: None,
             });
             if results.len() >= limit {
                 break;
@@ -675,13 +708,19 @@ pub fn dispatch(tool: &str, params: &serde_json::Value) -> DispatchResult {
             Ok(results) => {
                 let mut md = format!("### 🌐 网络检索结果 (关键词: \"{}\")\n\n", query);
                 for (idx, item) in results.iter().enumerate() {
+                    let img_line = if let Some(ref img) = item.image_url {
+                        format!("\n   > 📷 [配图候选]: ![{}]({})", item.title, img)
+                    } else {
+                        String::new()
+                    };
                     md.push_str(&format!(
-                        "{}. **[{}]({})**  *(来源: {})*\n   > {}\n\n",
+                        "{}. **[{}]({})**  *(来源: {})*\n   > {}{}\n\n",
                         idx + 1,
                         item.title,
                         item.url,
                         item.source,
-                        item.snippet
+                        item.snippet,
+                        img_line
                     ));
                 }
                 DispatchResult { view: None,
