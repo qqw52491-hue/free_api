@@ -1624,12 +1624,17 @@ const typewriterTexts = reactive<Record<string, string>>({});
 const typewriterDoneIds = new Set<string>();
 const typewriterAnimFrames = new Map<string, number>();
 
-function getCompletionDisplayText(entry: { id: string; summary?: string; title?: string }): string {
+function getCompletionDisplayText(entry: { id: string; summary?: string; title?: string; timestamp?: number }): string {
     const fullText = entry.summary || entry.title || '';
     if (!fullText) return '';
 
-    // 历史会话消息 / 重新打开对话 / 非运行态，严禁重复播放打字动画，直接输出全文
-    if (entry.id.startsWith('history-') || !props.isRunning || typewriterDoneIds.has(entry.id)) {
+    // 历史会话消息 / 重新打开对话，严禁重复播放打字动画；
+    // 但"刚跑完的回合"（completion 落成 history 条目才几秒）是例外——
+    // 用户亲眼看它完成的报告就该有一次逐字渐显，而不是整段弹出。
+    const isFreshCompletion = entry.id.startsWith("history-completion-")
+        && !!entry.timestamp && Date.now() - entry.timestamp < 15_000;
+    const isHistoric = entry.id.startsWith('history-') && !isFreshCompletion;
+    if (isHistoric || (!props.isRunning && !isFreshCompletion) || typewriterDoneIds.has(entry.id)) {
         typewriterDoneIds.add(entry.id);
         return fullText;
     }
@@ -1669,8 +1674,9 @@ function startTypewriter(id: string, fullText: string) {
     if (typewriterAnimFrames.has(id)) return;
     typewriterTexts[id] = '';
     const totalChars = fullText.length;
-    // 渐显时间控制在 0.6s ~ 1.1s，丝滑舒展且绝不拖泥带水
-    const durationMs = Math.min(1100, Math.max(500, totalChars * 2));
+    // 逐字渐显 0.6s ~ 2.4s：报告越长播得越久，肉眼能感到字在浮出，
+    // 但不至于像真打字机那样拖几分钟
+    const durationMs = Math.min(2400, Math.max(500, totalChars * 3));
     const startTime = performance.now();
 
     function frame(now: number) {
