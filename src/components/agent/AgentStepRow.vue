@@ -335,9 +335,9 @@ function handleLeadClick() {
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: 10.5px;
     font-weight: 500;
-    padding: 0.5px 4.5px;
+    padding: 0.5px 5px;
     border-radius: 3.5px;
     line-height: 1.35;
     flex-shrink: 0;
@@ -384,7 +384,7 @@ function handleLeadClick() {
 /* 文件名 (等宽内敛，悬浮高亮) */
 .chip-file-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11px;
+    font-size: 11.5px;
     font-weight: 500;
     color: #cbd5e1;
     letter-spacing: -0.2px;
@@ -404,7 +404,7 @@ function handleLeadClick() {
 /* 终端命令微丸 */
 .chip-cmd-pill {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11px;
+    font-size: 11.5px;
     color: #fef08a;
     background: rgba(255, 255, 255, 0.05);
     padding: 0.5px 5px;
@@ -418,7 +418,7 @@ function handleLeadClick() {
 /* 所在目录简写 (如 iam/web/，极度轻柔) */
 .chip-file-dir {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 10.5px;
+    font-size: 11px;
     color: #64748b;
     margin-left: -2px;
     letter-spacing: -0.2px;
@@ -427,7 +427,7 @@ function handleLeadClick() {
 /* 行号与耗时微标 (#L70-120, 0.5s) */
 .chip-line-range {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 10px;
+    font-size: 10.5px;
     font-weight: 500;
     color: #94a3b8;
     background: rgba(255, 255, 255, 0.05);
@@ -441,18 +441,18 @@ function handleLeadClick() {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     color: #34d399;
     font-weight: 500;
-    font-size: 10.5px;
+    font-size: 11px;
 }
 
 .chip-diff-del {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     color: #f87171;
     font-weight: 500;
-    font-size: 10.5px;
+    font-size: 11px;
 }
 
 .chip-intercepted {
-    font-size: 9.5px;
+    font-size: 10px;
     font-weight: 600;
     color: #f87171;
     background: rgba(239, 68, 68, 0.15);
@@ -463,7 +463,7 @@ function handleLeadClick() {
 /* 说明文字 (如: 为审计日志注入做准备) */
 .ambient-text-body {
     color: #94a3b8;
-    font-size: 11px;
+    font-size: 11.5px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -475,7 +475,7 @@ function handleLeadClick() {
 /* 右侧时钟时间戳 */
 .ambient-text-time {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 10px;
+    font-size: 10.5px;
     color: #64748b;
     flex-shrink: 0;
     margin-left: auto;

@@ -107,6 +107,8 @@
     border: 1px solid rgba(255, 255, 255, 0.08);
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
     color: #f4f4f5;
+    font-size: 14.5px;
+    line-height: 1.6;
     margin: 2px 0 14px 0;
     word-break: break-word;
     overflow-wrap: anywhere;
@@ -372,7 +374,7 @@
 }
 
 .agent-logo-pill {
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 700;
     color: #f4f4f5;
     letter-spacing: -0.01em;
@@ -495,8 +497,8 @@
 .agent-text-body {
     width: 100%;
     color: #e4e4e7;
-    font-size: 13.5px;
-    line-height: 1.78;
+    font-size: 14.5px;
+    line-height: 1.74;
     letter-spacing: 0.003em;
     overflow-wrap: anywhere;
 }
@@ -511,17 +513,17 @@
     font-weight: 700;
     line-height: 1.35;
     letter-spacing: -0.015em;
-    margin: 16px 0 8px;
+    margin: 18px 0 9px;
 }
 .markdown-content :deep(h1:first-child),
 .markdown-content :deep(h2:first-child),
 .markdown-content :deep(h3:first-child) {
     margin-top: 2px;
 }
-.markdown-content :deep(h1) { font-size: 19px; }
-.markdown-content :deep(h2) { font-size: 16.5px; }
-.markdown-content :deep(h3) { font-size: 14.5px; }
-.markdown-content :deep(h4) { font-size: 13.5px; }
+.markdown-content :deep(h1) { font-size: 21px; }
+.markdown-content :deep(h2) { font-size: 18px; }
+.markdown-content :deep(h3) { font-size: 16px; }
+.markdown-content :deep(h4) { font-size: 14.5px; }
 
 .markdown-content :deep(p) {
     margin: 0 0 10px;
@@ -575,7 +577,7 @@
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 8px;
     overflow: hidden;
-    font-size: 12.5px;
+    font-size: 13.5px;
 }
 .markdown-content :deep(th) {
     padding: 7px 12px;
@@ -608,11 +610,11 @@
 
 /* 行内代码与代码块 */
 .markdown-content :deep(code) {
-    padding: 2px 5px;
+    padding: 2px 6px;
     border-radius: 4px;
     color: #e5c07b;
     background: #1e1e23;
-    font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font: 13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 /* 本地/远程媒体内嵌渲染（renderer.image 产出） */
 .markdown-content :deep(.md-img),
@@ -651,7 +653,7 @@
     background: #202026;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     color: #8e8e93;
-    font-size: 11px;
+    font-size: 12px;
 }
 .markdown-content :deep(pre) {
     margin: 0;
@@ -663,7 +665,7 @@
     padding: 0;
     color: #d9dde5;
     background: transparent;
-    font-size: 12.5px;
+    font-size: 13px;
     line-height: 1.6;
 }
 
