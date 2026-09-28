@@ -214,6 +214,31 @@ function getHtmlTitle(htmlCode: string): string {
   font-size: 13.5px;
 }
 
+/* 🌟 类似 ChatGPT 的自然平滑流式渐入微动效（极快但有丝滑渐显质感） */
+@keyframes chatgpt-stream-fade-in {
+  0% {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.markdown-segment :deep(p),
+.markdown-segment :deep(li),
+.markdown-segment :deep(pre),
+.markdown-segment :deep(blockquote),
+.markdown-segment :deep(table),
+.markdown-segment :deep(h1),
+.markdown-segment :deep(h2),
+.markdown-segment :deep(h3),
+.markdown-segment :deep(h4) {
+  animation: chatgpt-stream-fade-in 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: opacity, transform;
+}
+
 /* 标题样式 */
 .markdown-segment :deep(h1),
 .markdown-segment :deep(h2),

@@ -95,30 +95,30 @@
     width: 100%;
 }
 
-/* 👤 用户消息气泡 (深色精致圆角气泡，平时紧凑无额外行，悬停在右下角浮现操作栏) */
+/* 👤 用户消息气泡 (深色精致圆角气泡，自适应文本宽度，悬停时操作栏在下方平滑浮现) */
 .saved-message.from-user, .user-message {
     position: relative;
     align-self: flex-end;
     max-width: min(780px, 88%);
-    min-width: 175px;
+    width: fit-content;
     padding: 8px 14px;
     border-radius: 16px 16px 4px 16px;
     background: #27272a;
     border: 1px solid rgba(255, 255, 255, 0.08);
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
     color: #f4f4f5;
-    margin: 2px 0;
+    margin: 2px 0 14px 0;
     word-break: break-word;
     overflow-wrap: anywhere;
     box-sizing: border-box;
 }
 
-/* 👤 用户消息专属操作栏：平时完全隐藏不占行不露时间，悬停在右下角浮现轻量毛玻璃胶囊 */
+/* 👤 用户消息专属操作栏：悬停时在气泡正下方浮现轻量毛玻璃胶囊，不侵占气泡内部宽度与高度 */
 .saved-message.from-user .msg-side-actions,
 .user-message .msg-side-actions {
     position: absolute;
-    right: 8px;
-    bottom: 5px;
+    right: 0;
+    top: calc(100% + 4px);
     margin: 0;
     display: inline-flex;
     flex-direction: row;
@@ -136,18 +136,23 @@
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
-    transition: opacity 0.18s ease, visibility 0.18s ease, transform 0.18s ease;
-    transform: translateY(2px);
-    z-index: 5;
+    /* 鼠标移开后延迟 0.45s 才开始优雅淡出，总淡出过渡 0.35s，给用户充裕的操作时间与顺滑手感 */
+    transition: opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.45s, visibility 0.35s ease 0.45s, transform 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.45s;
+    transform: translateY(-2px);
+    z-index: 10;
     flex-shrink: 0;
 }
 
 .saved-message.from-user:hover .msg-side-actions,
-.user-message:hover .msg-side-actions {
+.user-message:hover .msg-side-actions,
+.saved-message.from-user .msg-side-actions:hover,
+.user-message .msg-side-actions:hover {
     opacity: 1;
     visibility: visible;
     pointer-events: auto;
     transform: translateY(0);
+    /* 鼠标悬停进入时立即呈现，无延迟 */
+    transition-delay: 0s;
 }
 
 .saved-message.from-user .msg-side-actions .msg-clock,
