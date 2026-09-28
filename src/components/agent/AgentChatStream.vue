@@ -1628,6 +1628,10 @@ function getCompletionDisplayText(entry: { id: string; summary?: string; title?:
     const fullText = entry.summary || entry.title || '';
     if (!fullText) return '';
 
+    // live-completion 运行中本身就是真流式增量（后端逐 chunk 推），
+    // 直接渲染最新快照——再套打字回放反而会滞后于真实流
+    if (props.isRunning && entry.id === 'live-completion') return fullText;
+
     // 历史会话消息 / 重新打开对话，严禁重复播放打字动画；
     // 但"刚跑完的回合"（completion 落成 history 条目才几秒）是例外——
     // 用户亲眼看它完成的报告就该有一次逐字渐显，而不是整段弹出。
@@ -2944,7 +2948,10 @@ function currentTimeline(): TimelineEntry[] {
         timeline.push({ id: "active-thought", type: "active-thought", timestamp: activeThoughtStartedAt.value || Date.now() });
     }
     const isCompletedOrSettled = !props.isRunning || Boolean(props.completionMessage);
-    if (isCompletedOrSettled && (props.completionMessage || props.finalSummary || props.finalArtifacts.length)) {
+    // 真流式：finish 的 summary 边生成边推流，一有水就挂 live-completion
+    // 边生成边渲染——不必等回合收尾才整段出现
+    const summaryStreamingIn = props.isRunning && Boolean(props.finalSummary?.trim());
+    if ((isCompletedOrSettled || summaryStreamingIn) && (props.completionMessage || props.finalSummary || props.finalArtifacts.length)) {
         timeline.push({ id: "live-completion", type: "completion", timestamp: Date.now(), title: props.completionMessage || (props.hasError ? "任务未能完成" : "任务已完成"), summary: props.finalSummary || props.completionMessage, artifacts: props.finalArtifacts, failed: props.hasError });
     }
     return timeline;
