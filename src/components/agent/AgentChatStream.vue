@@ -1154,7 +1154,7 @@
                         :title="isStreamingCompletion(entry) ? '点击可直接瞬间完成渐显' : undefined"
                         @click="isStreamingCompletion(entry) && finishTypewriterInstantly(entry.id, entry.summary || entry.title)"
                     >
-                        <RichContentRenderer :content="getCompletionDisplayText(entry)" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
+                        <RichContentRenderer :content="getCompletionDisplayText(entry)" :compact-html="true" :streaming="isStreamingCompletion(entry)" @open-preview="$emit('open-preview', $event)" />
                     </div>
                     <div v-if="entry.artifacts && entry.artifacts.length" class="final-artifacts">
                         <ArtifactList

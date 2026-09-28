@@ -1,5 +1,5 @@
 <template>
-  <div class="rich-content-stream">
+  <div class="rich-content-stream" :class="{ 'is-live-streaming': streaming }">
     <template v-for="(block, idx) in parsedBlocks" :key="idx">
       <div
         v-if="block.type === 'markdown'"
@@ -89,9 +89,11 @@ const props = withDefaults(
   defineProps<{
     content: string;
     compactHtml?: boolean;
+    streaming?: boolean;
   }>(),
   {
     compactHtml: false,
+    streaming: false,
   }
 );
 
@@ -237,6 +239,40 @@ function getHtmlTitle(htmlCode: string): string {
 .markdown-segment :deep(h4) {
   animation: chatgpt-stream-fade-in 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   will-change: opacity, transform;
+}
+
+/* 真流式期间：每个 chunk 都整体重建 innerHTML，若保留逐元素入场动画
+   所有元素会反复重放 = 全文闪烁。改为关掉块级动画 +
+   给最后一个 markdown 段挂"底部渐显遮罩"——新流入的文字落在
+   半透明区、随内容生长逐渐凝实，形成"字从淡到浓浮出来"的流动感 */
+.rich-content-stream.is-live-streaming .markdown-segment :deep(p),
+.rich-content-stream.is-live-streaming .markdown-segment :deep(li),
+.rich-content-stream.is-live-streaming .markdown-segment :deep(pre),
+.rich-content-stream.is-live-streaming .markdown-segment :deep(blockquote),
+.rich-content-stream.is-live-streaming .markdown-segment :deep(table),
+.rich-content-stream.is-live-streaming .markdown-segment :deep(h1),
+.rich-content-stream.is-live-streaming .markdown-segment :deep(h2),
+.rich-content-stream.is-live-streaming .markdown-segment :deep(h3),
+.rich-content-stream.is-live-streaming .markdown-segment :deep(h4) {
+  animation: none !important;
+  will-change: auto;
+}
+
+.rich-content-stream.is-live-streaming .markdown-segment:last-of-type {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 0,
+    #000 calc(100% - 4.2em),
+    rgba(0, 0, 0, 0.38) calc(100% - 1.1em),
+    rgba(0, 0, 0, 0.2) 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000 0,
+    #000 calc(100% - 4.2em),
+    rgba(0, 0, 0, 0.38) calc(100% - 1.1em),
+    rgba(0, 0, 0, 0.2) 100%
+  );
 }
 
 /* 标题样式 */
