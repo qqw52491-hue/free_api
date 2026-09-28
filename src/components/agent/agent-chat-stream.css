@@ -391,6 +391,64 @@
     margin-bottom: 3px;
 }
 
+/* 👤 人工干预单行标记：用户在 run 中段的应答/选择折叠成步骤条里的
+   一行（图标+标签+摘要+时间），悬停 tooltip 看全文——不再占独立气泡。 */
+.intervention-marker {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    margin: 1px 0;
+    padding: 2px 8px;
+    min-height: 20px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: #94a3b8;
+    cursor: pointer;
+    background: transparent;
+    transition: background 0.12s ease;
+    user-select: none;
+    overflow: hidden;
+    white-space: nowrap;
+    box-sizing: border-box;
+}
+
+.intervention-marker:hover {
+    background: rgba(255, 255, 255, 0.035);
+}
+
+.intervention-marker-icon {
+    flex-shrink: 0;
+    font-size: 11px;
+}
+
+.intervention-marker-label {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--orange);
+}
+
+.intervention-marker-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #cbd5e1;
+}
+
+.intervention-marker-att {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: #94a3b8;
+}
+
+.intervention-marker .msg-clock {
+    flex-shrink: 0;
+    margin-left: auto;
+}
+
 .msg-header-actions {
     margin-left: auto;
     display: flex;

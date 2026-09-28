@@ -179,6 +179,19 @@
                         </button>
                     </div>
                 </article>
+                <!-- 人工干预：折叠为步骤条内的单行标记（用户的选择/应答），不再渲成独立气泡 -->
+                <div
+                    v-else-if="entry.type === 'message' && entry.isHuman"
+                    class="intervention-marker"
+                    :title="interventionSummary(entry.content)"
+                    @click="$emit('select-human', entry.id)"
+                >
+                    <span class="intervention-marker-icon">👤</span>
+                    <span class="intervention-marker-label">人工干预</span>
+                    <span class="intervention-marker-text">{{ interventionSummary(entry.content) }}</span>
+                    <span v-if="parseUserMessageAttachments(entry.content).attachments.length" class="intervention-marker-att">📎{{ parseUserMessageAttachments(entry.content).attachments.length }}</span>
+                    <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
+                </div>
                 <article v-else-if="entry.type === 'message'" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
                     <template v-if="entry.role === 'agent' || entry.role === 'assistant'">
                         <div class="agent-msg-header">
@@ -1214,6 +1227,16 @@ function parseUserMessageAttachments(content: string): { cleanText: string; atta
     return { cleanText, attachments };
 }
 
+/// 人工干预标记行的摘要文本：剥掉附件标记与 HTML 注释型元数据
+/// （如 <!--plan-decision:{...}-->——协议载荷不该上屏），压缩空白成一行。
+function interventionSummary(content: string): string {
+    const { cleanText } = parseUserMessageAttachments(content || "");
+    return cleanText
+        .replace(/<!--[\s\S]*?-->/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
 const previewImageModal = ref<ParsedAttachment | null>(null);
 const previewDocModal = ref<ParsedAttachment | null>(null);
 const copiedMessageId = ref<string | null>(null);
@@ -1917,7 +1940,6 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
     const items: AmbientDisplayItem[] = [];
 
     let i = 0;
-    let hasNarrative = false;
     let lastNarrative = '';
 
     while (i < rawSteps.length) {
@@ -1927,13 +1949,12 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
         const finding = (step.finding || '').trim();
         const findingRenderable = !!finding && (step.findingKind === 'breakthrough' || step.findingKind === 'milestone' || step.findingKind === 'summary' || step.findingKind === 'start');
 
-        // 🌟 阶段统领叙述：每个大阶段开头展示一段核心解说作为总纲；
-        // 过程中的内部思考挂载在动作行 tooltip/详情中，绝不在动作行之间插入零散段落破坏步骤垂直间距节奏
+        // 🌟 阶段解说与持续思考流：允许呈现不同阶段思考，解除单次置位封锁，配合 trim 去除微小扰动重复
         const narr = findingRenderable ? '' : stepNarrative(step);
-        if (narr && !hasNarrative) {
-            hasNarrative = true;
-            lastNarrative = narr;
-            items.push({ type: 'narrative', id: `narr-${step.id}`, text: narr, timestamp: step.timestamp });
+        const cleanNarr = narr.trim();
+        if (cleanNarr && cleanNarr !== lastNarrative) {
+            lastNarrative = cleanNarr;
+            items.push({ type: 'narrative', id: `narr-${step.id}`, text: cleanNarr, timestamp: step.timestamp });
         }
 
         // 🌟 用户需求：关键突破/阶段总结/突破发现直接与开头总结一样展示为纯文本叙事段落，不加特效卡片与小标签
@@ -1941,7 +1962,6 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
             const cleanFinding = finding.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
             if (cleanFinding && cleanFinding !== lastNarrative) {
                 lastNarrative = cleanFinding;
-                hasNarrative = true;
                 items.push({ type: 'narrative', id: `finding-${step.id}`, text: cleanFinding, timestamp: step.timestamp });
             }
         }
