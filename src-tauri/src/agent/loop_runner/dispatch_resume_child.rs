@@ -77,14 +77,33 @@ pub(super) async fn dispatch_resume_child(
                     route: "host_rejection:child_not_found".to_string(),
                 },
                 Ok((status, kind, ws_copy, hist_json, child_model, root_str, prev_result_json, prev_identity)) => {
-                    if status != "succeeded" {
+                    // 审查类兜底：invalid_output 的审查子任务若产出过可解析的
+                    // findings/objection_verdicts（已计入 blocking 台账），对质
+                    // 通道必须可达——否则门禁开的「resume_child 对质撤回」药方
+                    // 指向死路（实测 3823067c 会话 step47 死锁）。其余非成功态
+                    // （failed/cancelled/running）仍拒绝。
+                    let is_review_kind = kind == "review" || kind == "reviewer";
+                    let invalid_review_with_findings = is_review_kind
+                        && status == "invalid_output"
+                        && prev_result_json
+                            .as_deref()
+                            .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+                            .is_some_and(|v| {
+                                v.get("findings")
+                                    .and_then(|f| f.as_array())
+                                    .is_some_and(|a| !a.is_empty())
+                                    || v.get("objection_verdicts")
+                                        .and_then(|f| f.as_array())
+                                        .is_some_and(|a| !a.is_empty())
+                            });
+                    if status != "succeeded" && !invalid_review_with_findings {
                         DispatchResult { view: None,
                             stdout: String::new(),
                             stderr: format!("❌ 仅能追问已成功的子任务（该任务当前状态为「{}」）；如需继续请直接派发新任务。", status),
                             success: false,
                             route: "host_rejection:status_not_succeeded".to_string(),
                         }
-                    } else if kind == "review" || kind == "reviewer" {
+                    } else if is_review_kind {
                         // 🌟 Reviewer 纯上下文对质分支：只读审查者无工作区副本，纯继承脱水历史进行反驳研判
                         let mut messages: Vec<Value> = match hist_json.as_deref() {
                             Some(raw) => serde_json::from_str(raw).unwrap_or_default(),
