@@ -130,7 +130,7 @@
             </section>
 
             <template v-for="entry in timelineEntries" :key="entry.id">
-                <article v-if="entry.type === 'user'" class="user-message">
+                <article v-if="entry.type === 'user'" class="user-message" :data-tl="entry.id">
                     <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
                     <div v-if="parseUserMessageAttachments(entry.content).attachments.length > 0" class="stream-attachments-tray">
                         <AttachmentCard
@@ -183,6 +183,7 @@
                 <div
                     v-else-if="entry.type === 'message' && entry.isHuman"
                     class="intervention-marker"
+                    :data-tl="entry.id"
                     :title="interventionSummary(entry.content)"
                     @click="$emit('select-human', entry.id)"
                 >
@@ -190,9 +191,16 @@
                     <span class="intervention-marker-label">人工干预</span>
                     <span class="intervention-marker-text">{{ interventionSummary(entry.content) }}</span>
                     <span v-if="parseUserMessageAttachments(entry.content).attachments.length" class="intervention-marker-att">📎{{ parseUserMessageAttachments(entry.content).attachments.length }}</span>
+                    <button
+                        v-if="entry.anchorId"
+                        type="button"
+                        class="intervention-anchor-btn"
+                        title="跳转到该应答对应的步骤位置"
+                        @click.stop="scrollToTimelineEntry(entry.anchorId)"
+                    >↩</button>
                     <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                 </div>
-                <article v-else-if="entry.type === 'message'" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
+                <article v-else-if="entry.type === 'message'" :data-tl="entry.id" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
                     <template v-if="entry.role === 'agent' || entry.role === 'assistant'">
                         <div class="agent-msg-header">
                             <span class="agent-logo-pill">⚡ Free API</span>
@@ -285,6 +293,7 @@
                 </article>
                 <article
                     v-else-if="entry.type === 'plan'"
+                    :data-tl="entry.id"
                     :class="streamViewMode === 'ambient' ? 'ambient-plan-wrapper' : [
                         'plan-node',
                         `status-${entry.status}`,
@@ -964,6 +973,7 @@
                 </article>
                 <article
                     v-else-if="entry.type === 'active-thought'"
+                    :data-tl="entry.id"
                     :class="[
                         streamViewMode === 'ambient' ? 'ambient-plan-wrapper' : 'plan-node status-running is-active-plan is-collapsed',
                         { selected: selectedNarrative === 'active-thought' }
@@ -1090,6 +1100,7 @@
 
                 <article
                     v-else-if="entry.type === 'completion'"
+                    :data-tl="entry.id"
                     class="saved-message from-agent final-response"
                     :class="{
                         failed: entry.failed,
@@ -1237,6 +1248,28 @@ function interventionSummary(content: string): string {
         .trim();
 }
 
+/// 给排好序的条目序列中的人工干预回填 anchorId = 紧邻上一条非干预条目
+/// （通常是它应答的那个 plan/step 条目）——供"↩ 跳转到应答位置"滚动锚定。
+function assignInterventionAnchors(entries: TimelineEntry[]) {
+    let lastAnchor: string | null = null;
+    for (const e of entries) {
+        if (e.type === "message" && e.isHuman) {
+            if (lastAnchor) e.anchorId = lastAnchor;
+        } else {
+            lastAnchor = e.id;
+        }
+    }
+}
+
+function scrollToTimelineEntry(id: string) {
+    const el = document.querySelector(`[data-tl="${CSS.escape(id)}"]`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    // 短暂高亮锚定目标，让"跳到的是哪步"肉眼可辨
+    el.classList.add("tl-anchor-flash");
+    setTimeout(() => el.classList.remove("tl-anchor-flash"), 1600);
+}
+
 const previewImageModal = ref<ParsedAttachment | null>(null);
 const previewDocModal = ref<ParsedAttachment | null>(null);
 const copiedMessageId = ref<string | null>(null);
@@ -1315,7 +1348,7 @@ type PlanEntry = { id: string; type: "plan"; timestamp: number; title: string; s
 type TimelineEntry =
     | PlanEntry
     | { id: string; type: "user"; timestamp: number; content: string }
-    | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean }
+    | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean; anchorId?: string }
     | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: AgentArtifactInput[]; failed: boolean }
     | { id: "active-thought"; type: "active-thought"; timestamp: number };
 
@@ -2857,6 +2890,7 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
                 isHuman: true,
             })),
         ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
+        assignInterventionAnchors(middle);
         timeline.push(...middle);
         if (turn.summary || turn.artifacts.length || ["succeeded", "failed", "cancelled"].includes(turn.status)) {
             const isCancelled = turn.status === "cancelled";
@@ -2898,6 +2932,7 @@ function currentTimeline(): TimelineEntry[] {
         ...plans,
         ...props.humanInterventions.map((item, index) => ({ id: `live-human-${item.timestamp}-${index}`, type: "message" as const, timestamp: item.timestamp, role: "user", content: item.message, isHuman: true })),
     ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
+    assignInterventionAnchors(middle);
     timeline.push(...middle);
     if ((props.isThinking || Boolean(props.thought) || props.isRunning) && !plans.length) {
         timeline.push({ id: "active-thought", type: "active-thought", timestamp: activeThoughtStartedAt.value || Date.now() });
