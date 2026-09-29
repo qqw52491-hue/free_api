@@ -159,6 +159,49 @@ pub(super) async fn dispatch_ask_human(
             None
         };
 
+        // 【审批内容必填】plan_approval 卡片的可审阅区域渲染的是 form.description；
+        // 模型只给标题不带正文时，人类面对的就是一张"裸审批卡"——无法判断在批什么。
+        // 机械校验（非语义）：最终将要展示的正文必须达到最低信息量（≥40 字符），
+        // 不足则拒收并要求补齐方案正文后重发——不消耗挂起/人工通道。
+        if is_approval_context {
+            let effective_desc = final_form_val
+                .as_ref()
+                .and_then(|f| f.get("description"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            const MIN_APPROVAL_DESC_CHARS: usize = 40;
+            if effective_desc.chars().count() < MIN_APPROVAL_DESC_CHARS {
+                let reject_msg = format!(
+                    "【方案审批内容缺失】kind=plan_approval 的审批卡片必须携带可审阅的方案正文，\
+                     当前 description 仅 {} 字符（要求 ≥ {}）。\
+                     请把完整方案（目标 / 改动范围 target_files / 根因与证据 / 验证方式）写入 \
+                     form.description 字段（未提供 form 时写入 message 字段）后重新调用 ask_human；\
+                     人类无法批准一份看不见内容的方案。",
+                    effective_desc.chars().count(),
+                    MIN_APPROVAL_DESC_CHARS
+                );
+                crate::agent::dispatcher::emit_tool_event(
+                    ctx.app,
+                    ctx.final_session_id,
+                    ctx.step_id,
+                    inst,
+                    "failed",
+                    Some("plan_approval_content_missing".to_string()),
+                    Some(false),
+                    &reject_msg,
+                    Some(ctx.tool_started_at.elapsed().as_millis()),
+                    None,
+                );
+                return Ok(ArmOutcome::Early(DispatchResult { view: None,
+                    stdout: String::new(),
+                    stderr: reject_msg,
+                    success: false,
+                    route: "host_rejection:plan_approval_content_missing".to_string(),
+                }));
+            }
+        }
+
         // 通知前端进入暂停状态
         ctx.app.emit(
             &format!("agent-progress-{}", ctx.final_session_id),

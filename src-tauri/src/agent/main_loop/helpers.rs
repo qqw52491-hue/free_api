@@ -65,6 +65,7 @@ pub(crate) fn is_gate_block_route(route: &str) -> bool {
                 | "host_rejection:ask_human_cooldown"
                 | "host_rejection:ask_human_duplicate"
                 | "host_rejection:ask_human_quota_exhausted"
+                | "host_rejection:plan_approval_content_missing"
                 | "host_rejection:repeat_read"
                 | "host_rejection:batch_circuit_breaker"
                 | "parallel_contract_rejected"
