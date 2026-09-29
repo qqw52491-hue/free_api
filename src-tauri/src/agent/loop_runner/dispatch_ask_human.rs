@@ -161,8 +161,9 @@ pub(super) async fn dispatch_ask_human(
 
         // 【审批内容必填】plan_approval 卡片的可审阅区域渲染的是 form.description；
         // 模型只给标题不带正文时，人类面对的就是一张"裸审批卡"——无法判断在批什么。
-        // 机械校验（非语义）：最终将要展示的正文必须达到最低信息量（≥40 字符），
-        // 不足则拒收并要求补齐方案正文后重发——不消耗挂起/人工通道。
+        // 机械校验（非语义）：最终将要展示的正文必须达到最低信息量（≥30 字符，
+        // 约一句完整方案的长度），不足则拒收并要求补齐方案正文后重发——
+        // 不消耗挂起/人工通道。
         if is_approval_context {
             let effective_desc = final_form_val
                 .as_ref()
@@ -170,7 +171,7 @@ pub(super) async fn dispatch_ask_human(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim();
-            const MIN_APPROVAL_DESC_CHARS: usize = 40;
+            const MIN_APPROVAL_DESC_CHARS: usize = 30;
             if effective_desc.chars().count() < MIN_APPROVAL_DESC_CHARS {
                 let reject_msg = format!(
                     "【方案审批内容缺失】kind=plan_approval 的审批卡片必须携带可审阅的方案正文，\
