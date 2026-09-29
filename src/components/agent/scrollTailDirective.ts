@@ -110,33 +110,37 @@ export function animateScrollTail(hostEl: HTMLElement) {
             return;
         }
 
-        // 🌟 动态计算滚动步长与加速度：
-        // 1. 常规平滑速率：lerp 因子 0.22，带 3.5px 最小速度；
-        // 2. 打断加速模式：lerp 因子 0.50，带 15px 最小速度；
-        // 3. 连续打断暴走模式（“没滚动完成下一个来了就加快速度 直接到底部”）：
-        //    lerp 提升至 0.85，带 35px 最小速度，1~2 帧内极速追平最新末尾；
-        // 4. 超大跨度距离（如 > 200px）：强制拉高速度基底
+        // 🌟 动态计算滚动步长与加速度（限速追赶版）：
+        // 1. 常规平滑速率：lerp 0.22，3.5px 起步，封顶 16px/帧——看得见在滚；
+        // 2. 打断加速：lerp 0.50，15px 起步，封顶 42px/帧；
+        // 3. 连续打断暴走（“没滚完下一个来了就加速”）：lerp 0.85、35px 起步、
+        //    封顶 90px/帧——飞快掠过但仍是滚动不是瞬移；
+        // 4. >200px 大跨度：提高速度基底
         let lerp = 0.22;
         let minSpeed = 3.5;
+        let maxSpeed = 16;
 
         if (state.interruptCount >= 2) {
             lerp = 0.85;
             minSpeed = 35;
+            maxSpeed = 90;
         } else if (state.isAccelerated) {
             lerp = 0.50;
             minSpeed = 15;
+            maxSpeed = 42;
         }
 
         if (remaining > 200) {
             lerp = Math.max(lerp, 0.70);
             minSpeed = Math.max(minSpeed, 25);
+            maxSpeed = Math.max(maxSpeed, 60);
         }
 
         let delta = remaining * lerp;
-        if (delta > 0 && delta < minSpeed) {
-            delta = minSpeed;
-        } else if (delta < 0 && delta > -minSpeed) {
-            delta = -minSpeed;
+        if (delta > 0) {
+            delta = Math.min(Math.max(delta, minSpeed), maxSpeed);
+        } else if (delta < 0) {
+            delta = Math.max(Math.min(delta, -minSpeed), -maxSpeed);
         }
 
         state.current += delta;

@@ -2802,8 +2802,13 @@ function followThoughtTail() {
                 return;
             }
             settled = false;
-            // 自适应追赶：剩余 40%/帧平滑滚；积压 >140px 直接跳底，不拖尾巴
-            const step = remaining > 140 ? remaining : Math.max(4, Math.ceil(remaining * 0.4));
+            // 限速追赶滚：阻尼比例让近处缓行，封顶 ~26px/帧 保证肉眼
+            // 看得见滚动过程；积压极大时才允许提速，但绝不瞬移
+            let step = Math.ceil(remaining * 0.14);
+            if (remaining > 600) step = Math.ceil(remaining * 0.45);
+            step = Math.min(step, 26);
+            if (step < 3) step = 3;
+            if (step > remaining) step = remaining;
             el.scrollTop += step;
         });
         thoughtScrollRaf = settled ? null : requestAnimationFrame(tick);
