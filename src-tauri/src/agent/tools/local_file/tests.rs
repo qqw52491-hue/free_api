@@ -78,6 +78,41 @@ fn test_local_file_edit_success_and_ambiguity_protection() {
 }
 
 #[test]
+fn test_local_file_mislabeled_write_action_demotes_to_read() {
+    let ws = temp_dir();
+    let db = mock_db();
+    std::fs::write(ws.join("probe.txt"), "alpha\nbeta").unwrap();
+
+    // 实测复现（2026-09-29）：外层 action 槽误填 "edit"、params.action 显式
+    // 声明 "read" 且无内容字段 → 按内层真实意图纠错为读，而不是按 edit
+    // 报缺参错误或被写入门禁误判拦截。
+    let read_p = json!({
+        "action": "read",
+        "path": "probe.txt",
+        "start_line": 2,
+        "end_line": 2
+    });
+    let res = dispatch(&db, "test_session", "edit", &read_p, Some(&ws));
+    assert!(res.success, "纠错后应按 read 执行: {}", res.stderr);
+    assert!(res.stdout.contains("beta"));
+
+    // 对照：内层声明 read 但带内容字段 = 意图矛盾不猜，保留外层 edit 语义
+    // （此处 target_content 唯一命中会真实执行替换——证明没有静默吞掉写意图）。
+    let conflict_p = json!({
+        "action": "read",
+        "path": "probe.txt",
+        "target_content": "alpha",
+        "replacement_content": "gamma"
+    });
+    let res2 = dispatch(&db, "test_session", "edit", &conflict_p, Some(&ws));
+    assert!(res2.success, "带内容字段应按 edit 语义执行: {}", res2.stderr);
+    let content = std::fs::read_to_string(ws.join("probe.txt")).unwrap();
+    assert!(content.contains("gamma"));
+
+    let _ = std::fs::remove_dir_all(ws);
+}
+
+#[test]
 fn test_local_file_invalid_action_rejected() {
     let ws = temp_dir();
     let db = mock_db();

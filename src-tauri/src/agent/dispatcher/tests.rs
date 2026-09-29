@@ -319,6 +319,68 @@
     }
 
     #[test]
+    fn test_local_file_mislabeled_outer_action_demotes_to_read() {
+        use crate::agent::types::AgentInstruction;
+        use serde_json::json;
+
+        // 实测复现（2026-09-29）：模型发出外层 action="edit"、内层
+        // command.action="read" 的纯读请求，被外层标签误判为写并撞
+        // src-tauri/** 高危门禁。内层显式 read + 无内容字段 = 按只读归类。
+        let mut inst_read = AgentInstruction::default();
+        inst_read.tool = Some("local_file".to_string());
+        inst_read.action = Some("edit".to_string());
+        inst_read.command = Some(json!({
+            "action": "read",
+            "path": "src-tauri/src/agent/plan_submit.rs",
+            "start_line": 151,
+            "end_line": 300
+        }));
+        assert!(
+            !is_write_or_side_effect_tool(&inst_read),
+            "外层 edit + 内层 read + 无内容字段的 local_file 必须按只读归类"
+        );
+
+        // 外层 write + 内层 list 同样降级（列目录不可写）
+        let mut inst_list = AgentInstruction::default();
+        inst_list.tool = Some("local_file".to_string());
+        inst_list.action = Some("write".to_string());
+        inst_list.command = Some(json!({ "action": "list", "path": "src" }));
+        assert!(!is_write_or_side_effect_tool(&inst_list));
+
+        // 对照 1：内层 read 但带内容字段 = 写意图与只读声明矛盾，不猜，仍按写走门禁
+        let mut inst_conflict = AgentInstruction::default();
+        inst_conflict.tool = Some("local_file".to_string());
+        inst_conflict.action = Some("edit".to_string());
+        inst_conflict.command = Some(json!({
+            "action": "read",
+            "path": "src/foo.rs",
+            "target_content": "old",
+            "replacement_content": "new"
+        }));
+        assert!(
+            is_write_or_side_effect_tool(&inst_conflict),
+            "带内容字段的矛盾声明必须按写处理（fail-closed）"
+        );
+
+        // 对照 2：外层写动词且无内层 action 声明 —— 无法证实只读意图，仍按写处理
+        let mut inst_write = AgentInstruction::default();
+        inst_write.tool = Some("local_file".to_string());
+        inst_write.action = Some("edit".to_string());
+        inst_write.command = Some(json!({
+            "path": "src/foo.rs",
+            "target_content": "a",
+            "replacement_content": "b"
+        }));
+        assert!(is_write_or_side_effect_tool(&inst_write));
+
+        // 对照 3：常规 read 不受影响
+        let mut inst_normal = AgentInstruction::default();
+        inst_normal.tool = Some("local_file".to_string());
+        inst_normal.command = Some(json!({ "action": "read", "path": "a.rs" }));
+        assert!(!is_write_or_side_effect_tool(&inst_normal));
+    }
+
+    #[test]
     fn test_is_safe_read_only_shell_command() {
         use crate::agent::types::AgentInstruction;
         use serde_json::json;

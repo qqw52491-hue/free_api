@@ -17,6 +17,30 @@ use std::sync::{LazyLock, Mutex};
 
 const MAX_READ_BYTES: usize = 2 * 1024 * 1024; // 2MB 单次读取上限
 
+/// 有效动作归一（dispatcher 的分类器与本地 dispatch 共用同一口径）：
+/// 外层 action 槽被误填写动词（edit/write）但 params.action 显式声明只读
+/// （read/list）且不带任何内容字段时，以内层真实意图为准降级为只读。
+/// 实测复现：模型发出 {"action":"edit","command":{"action":"read",path..}} 的
+/// 纯读请求，被外层标签判成写并撞高危门禁——而按 edit 分发本就会因缺
+/// target_content/replacement_content 失败，纠错为 read 无损安全。
+/// 带内容字段时写意图与只读声明矛盾——不猜，保留外层交由门禁/缺参报错判定。
+pub fn resolve_act<'a>(act: &'a str, params: &'a serde_json::Value) -> &'a str {
+    if !act.eq_ignore_ascii_case("write") && !act.eq_ignore_ascii_case("edit") {
+        return act;
+    }
+    let write_shaped = params.get("content").is_some()
+        || params.get("target_content").is_some()
+        || params.get("replacement_content").is_some();
+    if write_shaped {
+        return act;
+    }
+    match params.get("action").and_then(|v| v.as_str()) {
+        Some(inner) if inner.eq_ignore_ascii_case("read") => "read",
+        Some(inner) if inner.eq_ignore_ascii_case("list") => "list",
+        _ => act,
+    }
+}
+
 pub fn dispatch(
     _db: &DbState,
     session_id: &str,
@@ -36,14 +60,17 @@ pub fn dispatch(
         }
     };
 
-    let act = if !action.is_empty() {
-        action
-    } else {
-        params
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("read")
-    };
+    let act = resolve_act(
+        if !action.is_empty() {
+            action
+        } else {
+            params
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("read")
+        },
+        params,
+    );
 
     match act {
         "read" => execute_read(ws_root, session_id, params),

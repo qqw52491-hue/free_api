@@ -106,10 +106,16 @@ pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
 
     // 0. local_file 原生工具精准判定：read/list 绝不拦截；write/edit 必须严格由门禁把关！
     if tool.eq_ignore_ascii_case("local_file") {
-        if action.starts_with("read") || action.starts_with("list") {
+        // 与 local_file::resolve_act 同一容错口径：外层 action 槽误填写动词、
+        // 内层 params.action 显式只读且无内容字段时按内层归类——否则一个纯读
+        // 请求会被外层标签误判为写并撞高危门禁（实测 {"action":"edit",
+        // "command":{"action":"read",...}} 读 plan_submit.rs 被 src-tauri/** 拦）。
+        let params = inst.get_params();
+        let act = crate::agent::tools::local_file::resolve_act(&action, &params);
+        if act.starts_with("read") || act.starts_with("list") {
             return false;
         }
-        if action.starts_with("write") || action.starts_with("edit") {
+        if act.starts_with("write") || act.starts_with("edit") {
             return true;
         }
     }
