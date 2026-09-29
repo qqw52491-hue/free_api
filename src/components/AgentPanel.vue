@@ -664,7 +664,7 @@ defineExpose({
     display: grid;
     height: 100%;
     min-height: 0;
-    grid-template-rows: 48px minmax(0, 1fr);
+    grid-template-rows: 52px minmax(0, 1fr);
     overflow: hidden;
     color: #e4e4e7;
     background: #141416;
@@ -674,7 +674,7 @@ defineExpose({
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 16px;
+    padding: 6px 18px 6px 16px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     background: #18181b;
 }
@@ -686,10 +686,11 @@ defineExpose({
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    gap: 7px;
-    padding: 3px 10px;
+    gap: 10px;
+    padding: 4px 12px;
+    margin: 4px 0;
     border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 6px;
+    border-radius: 7px;
     color: #a1a1aa;
     background: rgba(255, 255, 255, 0.025);
     font-size: 11.5px;
@@ -700,19 +701,19 @@ defineExpose({
 .model-spec-info-row .spec-tag {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
 }
 .model-spec-info-row .pro-tag {
-    color: #e4e4e7;
-    font-weight: 500;
+    color: #f4f4f5;
+    font-weight: 550;
 }
 .model-spec-info-row .spec-dot {
     display: inline-block;
-    width: 6px;
-    height: 6px;
+    width: 6.5px;
+    height: 6.5px;
     border-radius: 50%;
-    background: #60a5fa;
-    box-shadow: 0 0 5px rgba(96, 165, 250, 0.5);
+    background: #38bdf8;
+    box-shadow: 0 0 6px rgba(56, 189, 248, 0.7);
 }
 .model-spec-info-row .flash-tag {
     color: #a1a1aa;
@@ -722,10 +723,10 @@ defineExpose({
     font-size: 11px;
 }
 .model-spec-info-row .spec-divider {
-    color: #52525b;
-    font-weight: bold;
-    font-size: 10px;
-    opacity: 0.6;
+    color: rgba(255, 255, 255, 0.18);
+    font-weight: 400;
+    font-size: 11px;
+    margin: 0 2px;
     user-select: none;
 }
 
