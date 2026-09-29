@@ -988,4 +988,35 @@ a.markdown-anchor-link:hover {
   }
 }
 
+.soft-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
 
+.soft-scrollbar:hover {
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.soft-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.soft-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.soft-scrollbar::-webkit-scrollbar-thumb {
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background-color: transparent;
+  transition: background-color 0.2s;
+}
+
+.soft-scrollbar:hover::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.18);
+}
+
+.soft-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.38);
+}

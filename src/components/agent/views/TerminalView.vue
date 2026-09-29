@@ -12,7 +12,7 @@
             </span>
         </div>
         <!-- 输出区：详情态显示完整输出，卡片态支持滚动与自动吸底 -->
-        <div v-show="effectiveExpanded" ref="bodyRef" class="term-body" @scroll="onScroll">
+        <div v-show="effectiveExpanded" ref="bodyRef" class="term-body soft-scrollbar" @scroll="onScroll">
             <pre v-if="view.spawn_error || displayOutput" :class="{ 'term-err': view.spawn_error }">{{ view.spawn_error || displayOutput }}</pre>
             <div v-if="view.truncated && !detail" class="term-more">…输出已截断，点开看全部</div>
         </div>

@@ -563,7 +563,7 @@
                                         <span class="thought-expanded-title">实时思考推演</span>
                                         <span class="thought-char-count">{{ (props.thought || liveThoughtInfo.text || '').length }} 字</span>
                                     </div>
-                                    <div class="thought-expanded-body">
+                                    <div class="thought-expanded-body soft-scrollbar">
                                         {{ props.thought || liveThoughtInfo.text || '正在深入分析全局上下文与决策规划 …' }}
                                     </div>
                                 </div>
@@ -679,6 +679,17 @@
                                 </Transition>
                             </div>
                         </div>
+
+                        <Transition name="live-term-collapse">
+                            <div v-if="props.liveShellOutput" class="live-term-box" @click.stop>
+                                <div class="live-term-head">
+                                    <span class="live-term-dot" :class="{ done: props.liveShellOutput.done }"></span>
+                                    <span class="live-term-cmd" :title="props.liveShellOutput.command">$ {{ props.liveShellOutput.command }}</span>
+                                    <span class="live-term-elapsed">{{ (props.liveShellOutput.elapsedMs / 1000).toFixed(1) }}s</span>
+                                </div>
+                                <pre :ref="setLiveTermBodyRef" class="live-term-body soft-scrollbar" @scroll="onLiveTermScroll">{{ props.liveShellOutput.tail }}</pre>
+                            </div>
+                        </Transition>
                     </div>
 
                     <!-- 🌟 已结束阶段卡片第二行：收拢态动作胶囊 (按时间顺序排列) -->
@@ -964,7 +975,7 @@
 
                                 <article v-if="entry.isThinking && (thought || isRunning)" class="active-thought-stream" :class="{ selected: selectedNarrative === 'active-thought' }" role="button" tabindex="0" @click="$emit('select-active-thought')" @keydown.enter="$emit('select-active-thought')">
                                     <header><span class="thought-pulse-dot" :class="{ 'is-running': isRunning }"><i></i></span><b>思考</b><em>{{ isRunning ? '思考中…' : '思考过程' }}</em><time>{{ formatClock(entry.thinkingTimestamp || entry.timestamp) }}</time></header>
-                                    <pre class="active-thought-content">{{ thought || '正在分析下一步操作…' }}</pre>
+                                    <pre class="active-thought-content soft-scrollbar">{{ thought || '正在分析下一步操作…' }}</pre>
                                 </article>
                             </div>
 
@@ -1051,7 +1062,7 @@
                                         <span class="thought-expanded-title">实时思考推演</span>
                                         <span class="thought-char-count">{{ (props.thought || liveThoughtInfo.text || '').length }} 字</span>
                                     </div>
-                                    <div class="thought-expanded-body">
+                                    <div class="thought-expanded-body soft-scrollbar">
                                         {{ props.thought || liveThoughtInfo.text || '正在深度思考规划执行策略 …' }}
                                     </div>
                                 </div>
@@ -1387,6 +1398,7 @@ const props = withDefaults(
         isWaitingForHuman?: boolean;
         isSendingHuman?: boolean;
         teamState?: AgentTeamState;
+        liveShellOutput?: { command: string; tail: string; elapsedMs: number; done: boolean } | null;
     }>(),
     {
         humanForm: null,
@@ -1394,6 +1406,7 @@ const props = withDefaults(
         isWaitingForHuman: false,
         isSendingHuman: false,
         finalArtifacts: () => [],
+        liveShellOutput: null,
     }
 );
 
@@ -2823,6 +2836,31 @@ function followThoughtTail() {
     };
     thoughtScrollRaf = requestAnimationFrame(tick);
 }
+const liveTermBodyRef = ref<HTMLElement | null>(null);
+// 小框位于阶段 v-for 内：字符串 ref 会被 Vue 收成数组，用函数 ref 取单元素
+function setLiveTermBodyRef(el: unknown) {
+    liveTermBodyRef.value = el instanceof HTMLElement ? el : null;
+}
+let liveTermFollowBottom = true;
+function onLiveTermScroll() {
+    const el = liveTermBodyRef.value;
+    if (!el) return;
+    liveTermFollowBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+}
+watch(
+    () => props.liveShellOutput?.tail,
+    async (tail, prev) => {
+        if (tail === undefined) {
+            liveTermFollowBottom = true;
+            return;
+        }
+        if (prev === undefined) liveTermFollowBottom = true;
+        await nextTick();
+        const el = liveTermBodyRef.value;
+        if (el && liveTermFollowBottom) el.scrollTop = el.scrollHeight;
+    },
+    { flush: "post" }
+);
 watch(() => props.isThinking, (running, wasRunning) => { if (running && !wasRunning) activeThoughtStartedAt.value = Date.now(); if (!running && wasRunning) activeThoughtStartedAt.value = null; }, { immediate: true });
 
 function formatMetricTokenCount(n: number): string {

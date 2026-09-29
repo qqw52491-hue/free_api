@@ -1934,21 +1934,6 @@
     overflow-y: auto;
     user-select: text;
     padding-right: 6px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.35) transparent;
-}
-
-.thought-expanded-body::-webkit-scrollbar {
-    width: 4px;
-}
-
-.thought-expanded-body::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.35);
-    border-radius: 4px;
-}
-
-.thought-expanded-body::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.55);
 }
 
 /* 展开折叠动效 */
@@ -2274,17 +2259,83 @@ button.root-row {
     color: #e2e8f0;
     font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
     white-space: pre-wrap;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.35) transparent;
 }
 
-.active-thought-content::-webkit-scrollbar {
-    width: 4px;
+.live-term-box {
+    margin-top: 6px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    overflow: hidden;
 }
 
-.active-thought-content::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.35);
-    border-radius: 2px;
+.live-term-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #94a3b8;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.live-term-dot {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #38bdf8;
+    animation: live-term-pulse 1.2s ease-in-out infinite;
+}
+
+.live-term-dot.done {
+    background: #4ade80;
+    animation: none;
+}
+
+.live-term-cmd {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: #cbd5e1;
+}
+
+.live-term-elapsed {
+    flex: none;
+    color: #64748b;
+}
+
+.live-term-body {
+    margin: 0;
+    padding: 4px 8px 6px;
+    max-height: 120px;
+    overflow-y: auto;
+    color: #c9d1d9;
+    font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+    cursor: text;
+    user-select: text;
+}
+
+@keyframes live-term-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+.live-term-collapse-enter-active,
+.live-term-collapse-leave-active {
+    transition: max-height 0.26s ease, opacity 0.26s ease, margin-top 0.26s ease;
+    max-height: 170px;
+}
+
+.live-term-collapse-enter-from,
+.live-term-collapse-leave-to {
+    max-height: 0;
+    opacity: 0;
+    margin-top: 0;
 }
 
 .active-thought-initial {

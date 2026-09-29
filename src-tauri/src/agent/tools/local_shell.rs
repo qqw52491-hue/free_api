@@ -22,11 +22,15 @@ use crate::db::DbState;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const MAX_TIMEOUT_SECS: u64 = 300;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024; // 50KB 输出上限
+const LIVE_TAIL_MAX_BYTES: usize = 8 * 1024;
+const LIVE_TAIL_MAX_LINES: usize = 40;
+const LIVE_EMIT_INTERVAL: Duration = Duration::from_millis(150);
 
 /// 常用开发工具链路径自动补齐（避免非交互式桌面进程丢失 pnpm/cargo/node/go 等二进制）
 pub fn get_enriched_path_env() -> String {
@@ -205,6 +209,94 @@ fn filter_injected_node_options(raw: &str) -> Option<String> {
         i += 1;
     }
     (kept.len() != toks.len()).then(|| kept.join(" "))
+}
+
+fn trim_live_tail(tail: &mut String) {
+    if tail.len() > LIVE_TAIL_MAX_BYTES {
+        let mut cut = tail.len() - LIVE_TAIL_MAX_BYTES;
+        while !tail.is_char_boundary(cut) {
+            cut += 1;
+        }
+        tail.drain(..cut);
+    }
+    let newline_count = tail.matches('\n').count();
+    if newline_count > LIVE_TAIL_MAX_LINES {
+        let skip = newline_count - LIVE_TAIL_MAX_LINES;
+        if let Some((idx, _)) = tail.match_indices('\n').nth(skip - 1) {
+            tail.drain(..=idx);
+        }
+    }
+}
+
+fn push_live_chunk(tail: &Mutex<String>, pending: &mut Vec<u8>, chunk: &[u8]) {
+    pending.extend_from_slice(chunk);
+    let text = match std::str::from_utf8(pending) {
+        Ok(valid) => {
+            let owned = valid.to_string();
+            pending.clear();
+            owned
+        }
+        Err(e) if e.error_len().is_none() => {
+            let valid_up_to = e.valid_up_to();
+            let owned = String::from_utf8_lossy(&pending[..valid_up_to]).to_string();
+            pending.drain(..valid_up_to);
+            owned
+        }
+        Err(_) => {
+            let owned = String::from_utf8_lossy(pending).to_string();
+            pending.clear();
+            owned
+        }
+    };
+    if text.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = tail.lock() {
+        guard.push_str(&text);
+        trim_live_tail(&mut guard);
+    }
+}
+
+fn emit_shell_stream(
+    session_id: &str,
+    cmd_str: &str,
+    tail: &str,
+    elapsed_ms: u64,
+) {
+    use tauri::Emitter;
+    if let Some(app) = crate::agent::channel::app_handle() {
+        let _ = app.emit(
+            &format!("agent-progress-{}", session_id),
+            json!({
+                "type": "shell_output_stream",
+                "command": cmd_str,
+                "tail": tail,
+                "elapsed_ms": elapsed_ms,
+            }),
+        );
+    }
+}
+
+async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
+    reader: Option<R>,
+    live_tail: Arc<Mutex<String>>,
+) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    if let Some(mut r) = reader {
+        let mut chunk = [0u8; 4096];
+        let mut pending = Vec::new();
+        loop {
+            match r.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    push_live_chunk(&live_tail, &mut pending, &chunk[..n]);
+                }
+            }
+        }
+    }
+    buf
 }
 
 /// 主进程退出/被杀后，有界收集 stdout/stderr 排空任务的残余输出。
@@ -529,6 +621,9 @@ fn execute_command_blocking(
     let cwd_tmp_dir = cwd.join("tmp");
     let cwd_tmp_before = snapshot_dir_entries(&cwd_tmp_dir);
 
+    let session_id_owned = session_id.to_string();
+    let cmd_owned = cmd_str.to_string();
+
     // 使用 tokio 异步派发并挂载独立 Reactor 与超时控制
     let fut = async move {
         #[cfg(target_os = "windows")]
@@ -558,25 +653,34 @@ fn execute_command_blocking(
         // 时子进程写满阻塞、永远退不出 → wait() 死等）。主进程退出后只给有界排空
         // 窗口收尾残余输出——孙进程继承管道不退出时 EOF 永不到达（守护进程、
         // npm notifier 等），不能为等 EOF 把主流程挂死。
-        use tokio::io::AsyncReadExt;
-        let drain_stdout = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut r) = stdout_handle {
-                let _ = r.read_to_end(&mut buf).await;
+        let live_tail = Arc::new(Mutex::new(String::new()));
+        let drain_stdout = tokio::spawn(drain_pipe(stdout_handle, live_tail.clone()));
+        let drain_stderr = tokio::spawn(drain_pipe(stderr_handle, live_tail.clone()));
+
+        let stream_started = Instant::now();
+        let ticker_tail = live_tail.clone();
+        let ticker_session = session_id_owned.clone();
+        let ticker_cmd = cmd_owned.clone();
+        let ticker = tokio::spawn(async move {
+            let mut last_emitted = String::new();
+            loop {
+                tokio::time::sleep(LIVE_EMIT_INTERVAL).await;
+                let current = ticker_tail.lock().map(|g| g.clone()).unwrap_or_default();
+                if current != last_emitted {
+                    emit_shell_stream(
+                        &ticker_session,
+                        &ticker_cmd,
+                        &current,
+                        stream_started.elapsed().as_millis() as u64,
+                    );
+                    last_emitted = current;
+                }
             }
-            buf
-        });
-        let drain_stderr = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut r) = stderr_handle {
-                let _ = r.read_to_end(&mut buf).await;
-            }
-            buf
         });
 
         let timeout_dur = Duration::from_secs(timeout_secs);
 
-        match tokio::time::timeout(timeout_dur, child.wait()).await {
+        let outcome = match tokio::time::timeout(timeout_dur, child.wait()).await {
             Ok(Ok(status)) => {
                 let (stdout_bytes, stderr_bytes) =
                     join_drains(drain_stdout, drain_stderr, Duration::from_secs(3)).await;
@@ -628,7 +732,19 @@ fn execute_command_blocking(
                     err_msg,
                 ))
             }
+        };
+
+        ticker.abort();
+        let final_tail = live_tail.lock().map(|g| g.clone()).unwrap_or_default();
+        if !final_tail.is_empty() {
+            emit_shell_stream(
+                &session_id_owned,
+                &cmd_owned,
+                &final_tail,
+                stream_started.elapsed().as_millis() as u64,
+            );
         }
+        outcome
     };
 
     let run_in_rt = || -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), (String, bool, bool, String, String)> {

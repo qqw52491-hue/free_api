@@ -353,6 +353,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const tokenUsage = ref<AgentTokenUsage | null>(null);
     const liveSpeed = ref<number | null>(null);
     const liveTtft = ref<number | null>(null);
+    const liveShellOutput = ref<{ command: string; tail: string; elapsedMs: number; done: boolean } | null>(null);
+    let liveShellToken = 0;
 
     const savedRetries = Number(localStorage.getItem("agent_llm_retries"));
     const retryAttempts = ref<number>(
@@ -840,6 +842,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (terminal) {
             runTerminal.value = true;
             isRunning.value = false;
+            finishLiveShellOutput();
             stopElapsedTimer();
             if (isThinking.value) {
                 isThinking.value = false;
@@ -902,6 +905,21 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         appendLog(`[状态变更] ${AGENT_RUN_STATE_CATALOG[state].label}${message ? `: ${message}` : ""}`);
     }
 
+    function clearLiveShellOutput() {
+        liveShellToken += 1;
+        liveShellOutput.value = null;
+    }
+
+    function finishLiveShellOutput() {
+        const current = liveShellOutput.value;
+        if (!current || current.done) return;
+        liveShellOutput.value = { ...current, done: true };
+        const token = ++liveShellToken;
+        setTimeout(() => {
+            if (token === liveShellToken) liveShellOutput.value = null;
+        }, 1200);
+    }
+
     function handleToolEvent(payload: Record<string, unknown>) {
         if (runTerminal.value) return;
         const eventType = String(payload.event_type || payload.type || "started").toLowerCase();
@@ -928,6 +946,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (eventType === "finish_challenged" || eventType === "challenged") {
             streamingSummary.value = "";
             finishOutput.value = null;
+        }
+
+        if (name === "local_shell" && (status === "succeeded" || status === "failed" || status === "challenged")) {
+            finishLiveShellOutput();
         }
 
         // 查找最新的匹配步骤：若前一个步骤已失败/成功/被质询，而新事件重新下发，保留历史错误尝试并追加新条目
@@ -1291,6 +1313,18 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             }
         }
 
+        if (eventType === "shell_output_stream") {
+            if (runTerminal.value) return;
+            liveShellToken += 1;
+            liveShellOutput.value = {
+                command: toText(payload.command),
+                tail: toText(payload.tail),
+                elapsedMs: Number(payload.elapsed_ms) || 0,
+                done: false,
+            };
+            return;
+        }
+
         // 实时捕获增量流式 Markdown 总结
         if (eventType === "summary_stream" || payload.streaming_summary) {
             const content = toText(payload.content || payload.streaming_summary);
@@ -1621,6 +1655,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     function clearSession() {
         runTerminal.value = true;
+        clearLiveShellOutput();
         steps.value = [];
         selectedStepId.value = null;
         thought.value = "";
@@ -2094,6 +2129,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         sessionTelemetry,
         completionMessage,
         streamingSummary,
+        liveShellOutput,
         conversationMessages,
         isConversationLoading,
         hasError,

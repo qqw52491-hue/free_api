@@ -204,7 +204,7 @@
                                     <span class="thought-expanded-title">实时思考推演</span>
                                     <span class="thought-char-count">{{ workerThoughtText.length }} 字</span>
                                 </div>
-                                <div class="thought-expanded-body">
+                                <div class="thought-expanded-body soft-scrollbar">
                                     {{ workerThoughtText || '正在后台深入推导与研判相关代码与风险…' }}
                                 </div>
                             </div>
@@ -2304,17 +2304,6 @@ async function copyOutput(text?: string) {
     overflow-y: auto;
     user-select: text;
     padding-right: 6px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
-}
-
-.thought-expanded-body::-webkit-scrollbar {
-    width: 4px;
-}
-
-.thought-expanded-body::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.3);
-    border-radius: 4px;
 }
 
 .thought-accordion-enter-active,
