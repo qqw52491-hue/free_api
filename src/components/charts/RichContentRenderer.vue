@@ -223,12 +223,17 @@ function decorateStreamingTail(html: string): string {
     const trimmed = fullText.trimEnd();
     const trailingSpaces = fullText.slice(trimmed.length);
 
-    // 末尾字符呈现从 100% 到 0% 的纯透明度阶梯过渡（无颜色渐变，上一句完全不透明）
+    // 末尾字符呈现"模糊显形"阶梯（豆包式 blur-in 末梢版）：
+    // 越新越糊越淡——透明度 0.9→0.1 叠加模糊 0px→3px，
+    // 上一句完全凝实，新字从虚焦里长出来。只做末梢 ~7 个 span，
+    // 避免全文逐词 blur 滤镜并发导致的 GPU 掉帧
     const opacities = [0.90, 0.78, 0.64, 0.50, 0.36, 0.22, 0.10];
+    const blurs = [0, 0.4, 0.8, 1.3, 1.8, 2.4, 3.0];
     const tailCount = Math.min(opacities.length, trimmed.length);
     if (tailCount <= 0) return html;
 
     const activeOpacities = opacities.slice(opacities.length - tailCount);
+    const activeBlurs = blurs.slice(blurs.length - tailCount);
     const prefix = trimmed.slice(0, trimmed.length - tailCount);
     const tailChars = Array.from(trimmed.slice(trimmed.length - tailCount));
 
@@ -244,6 +249,9 @@ function decorateStreamingTail(html: string): string {
       const span = doc.createElement("span");
       span.className = "stream-tail-fade";
       span.style.opacity = String(activeOpacities[i]);
+      if (activeBlurs[i] > 0) {
+        span.style.filter = `blur(${activeBlurs[i]}px)`;
+      }
       span.textContent = tailChars[i];
       frag.appendChild(span);
     }
@@ -329,8 +337,8 @@ function getBlockHtml(block: ContentBlock, idx: number): string {
 .markdown-segment :deep(.stream-tail-fade) {
   display: inline !important;
   color: inherit !important;
-  transition: opacity 0.1s linear;
-  will-change: opacity;
+  transition: opacity 0.12s linear, filter 0.14s linear;
+  will-change: opacity, filter;
 }
 
 /* 标题样式 */
