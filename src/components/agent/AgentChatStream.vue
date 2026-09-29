@@ -1287,13 +1287,33 @@ function interventionSummary(content: string): string {
         .trim();
 }
 
-/// 给排好序的条目序列中的人工干预回填 anchorId = 紧邻上一条非干预条目
-/// （通常是它应答的那个 plan/step 条目）——供"↩ 跳转到应答位置"滚动锚定。
+/// 干预 marker 归位：有归属步骤的应答必须紧贴其所在 plan 条目之后
+/// （同秒时间戳打平时按 id 排序会让"答"漂到"问"上面）。
+/// 无归属的退化为"紧邻上一条非干预条目"锚定。
 function assignInterventionAnchors(entries: TimelineEntry[]) {
+    const stepToPlan = new Map<string, string>();
+    for (const e of entries) {
+        if (e.type === "plan") {
+            for (const s of e.steps) stepToPlan.set(s.id, e.id);
+        }
+    }
+    const linked: TimelineEntry[] = [];
+    for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i];
+        if (e.type === "message" && e.isHuman && e.stepId && stepToPlan.has(e.stepId)) {
+            linked.unshift(entries.splice(i, 1)[0]);
+        }
+    }
+    for (const m of linked) {
+        const planId = stepToPlan.get((m as { stepId?: string }).stepId!);
+        const idx = entries.findIndex(e => e.id === planId);
+        entries.splice(idx + 1, 0, m);
+        (m as { anchorId?: string }).anchorId = planId;
+    }
     let lastAnchor: string | null = null;
     for (const e of entries) {
         if (e.type === "message" && e.isHuman) {
-            if (lastAnchor) e.anchorId = lastAnchor;
+            if (!e.anchorId && lastAnchor) e.anchorId = lastAnchor;
         } else {
             lastAnchor = e.id;
         }
@@ -1463,7 +1483,7 @@ type PlanEntry = { id: string; type: "plan"; timestamp: number; title: string; s
 type TimelineEntry =
     | PlanEntry
     | { id: string; type: "user"; timestamp: number; content: string }
-    | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean; anchorId?: string; question?: string }
+    | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean; anchorId?: string; question?: string; stepId?: string }
     | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: AgentArtifactInput[]; failed: boolean }
     | { id: "active-thought"; type: "active-thought"; timestamp: number };
 
@@ -3142,17 +3162,21 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
         const humanMessages = turn.messages.filter((m) => m.role === "user");
         const middle: TimelineEntry[] = [
             ...planEntries(turn.steps, `history-${turn.id}`),
-            ...humanMessages.map((message) => ({
-                id: `history-message-${turn.id}-${message.id}`,
-                type: "message" as const,
-                timestamp: message.timestamp,
-                role: message.role,
-                content: message.content,
-                isHuman: true,
-                // 历史无 pausedStepId 快照：从"消息之前最近的 ask_human 步骤"回放提问原文
-                question: humanQuestionFromStep(nearestHumanStepBefore(turn.steps, message.timestamp)) || undefined,
-            })),
-        ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
+            ...humanMessages.map((message) => {
+                // 历史无 pausedStepId 快照：从"消息之前最近的 ask_human 步骤"回放提问原文与归属
+                const anchorStep = nearestHumanStepBefore(turn.steps, message.timestamp);
+                return {
+                    id: `history-message-${turn.id}-${message.id}`,
+                    type: "message" as const,
+                    timestamp: message.timestamp,
+                    role: message.role,
+                    content: message.content,
+                    isHuman: true,
+                    question: humanQuestionFromStep(anchorStep) || undefined,
+                    stepId: anchorStep?.id,
+                };
+            }),
+        ].sort((a, b) => a.timestamp - b.timestamp || Number(a.type === "message" && a.isHuman) - Number(b.type === "message" && b.isHuman) || a.id.localeCompare(b.id));
         assignInterventionAnchors(middle);
         timeline.push(...middle);
         if (turn.summary || turn.artifacts.length || ["succeeded", "failed", "cancelled"].includes(turn.status)) {
@@ -3193,8 +3217,8 @@ function currentTimeline(): TimelineEntry[] {
     if (props.currentGoal) timeline.push({ id: "live-user-goal", type: "user", timestamp: firstTimestamp - 1, content: props.currentGoal });
     const middle: TimelineEntry[] = [
         ...plans,
-        ...props.humanInterventions.map((item, index) => ({ id: `live-human-${item.timestamp}-${index}`, type: "message" as const, timestamp: item.timestamp, role: "user", content: item.message, isHuman: true, question: item.question })),
-    ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
+        ...props.humanInterventions.map((item, index) => ({ id: `live-human-${item.timestamp}-${index}`, type: "message" as const, timestamp: item.timestamp, role: "user", content: item.message, isHuman: true, question: item.question, stepId: item.stepId })),
+    ].sort((a, b) => a.timestamp - b.timestamp || Number(a.type === "message" && a.isHuman) - Number(b.type === "message" && b.isHuman) || a.id.localeCompare(b.id));
     assignInterventionAnchors(middle);
     timeline.push(...middle);
     if ((props.isThinking || Boolean(props.thought) || props.isRunning) && !plans.length) {
