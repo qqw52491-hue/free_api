@@ -1840,6 +1840,25 @@
     -webkit-mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
 }
 
+/* 子 agent 运行中的实时动作行：复用 ticker 翻牌+尾随滚动，紧凑小字 */
+.subagent-live-wrap {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    position: relative;
+    height: 22px;
+    display: flex;
+    align-items: center;
+}
+.subagent-live-line {
+    font-size: 12px;
+    font-weight: 500;
+    color: #7dd3fc;
+    -webkit-text-fill-color: #7dd3fc;
+    line-height: 22px;
+    height: 22px;
+}
+
 /* 展开折叠按钮 */
 .thought-expand-btn {
     display: inline-flex;

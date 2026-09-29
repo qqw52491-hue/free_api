@@ -865,7 +865,15 @@
                                             <span class="tool-tag" :style="{ color: getToolIcon(step.tool, step.action).color, background: `${getToolIcon(step.tool, step.action).color}18` }">
                                                 {{ formatStepOperation(step).badgeLabel }}
                                             </span>
-                                            <span :class="{ 'subagent-action-text': isSubAgentTool(step.tool), 'waitjobs-action-text': isWaitJobsTool(step.tool) }">
+                                            <!-- 子 agent 运行中：换成 worker 实时动作行（翻牌+尾随滚动），不再是死文案 -->
+                                            <span v-if="workerLiveLines.get(step.id)" class="subagent-live-wrap">
+                                                <Transition name="ticker-flip">
+                                                    <span :key="workerLiveLines.get(step.id)!.key" v-scroll-tail class="ambient-live-scroll-text subagent-live-line">
+                                                        ⚡ {{ workerLiveLines.get(step.id)!.text }}
+                                                    </span>
+                                                </Transition>
+                                            </span>
+                                            <span v-else :class="{ 'subagent-action-text': isSubAgentTool(step.tool), 'waitjobs-action-text': isWaitJobsTool(step.tool) }">
                                                 {{ isSubAgentTool(step.tool) ? (step.status === 'running' ? '⚡ 正在后台独立执行调查审查，点击右侧抽屉可查看证据包与发现…' : (step.action || step.explanation || '已生成审查结论 · 点击查看详情')) : (isWaitJobsTool(step.tool) ? waitJobsTileText(step) : shortText(formatStepOperation(step).actionText || step.action || step.explanation || '执行操作', 110)) }}
                                             </span>
                                             <em v-if="step.metrics?.toolDurationMs != null">{{ formatDurationSeconds(step.metrics.toolDurationMs) }} · {{ step.source }}</em>
@@ -3055,6 +3063,40 @@ function isSubAgentTool(tool?: string): boolean {
         t.includes("reviewer")
     );
 }
+// 运行中的子 agent 步骤 → 匹配活跃 worker 的实时动作行
+// 痛点修复：以前"派发审查"步骤只显示死文案"后台协同中"，
+// 审查员在干嘛完全看不见。worker.currentStep 逐事件更新、
+// thought 逐 chunk 追加——取它们合成一行活文本
+const workerLiveLines = computed(() => {
+    const map = new Map<string, { key: string; text: string }>();
+    const workers = props.teamState?.workers || [];
+    const running = workers.filter(w => w.status === 'running');
+    if (!running.length) return map;
+    for (const step of props.steps) {
+        if (step.status !== 'running') continue;
+        const isSub = isSubAgentTool(step.tool);
+        const isWait = isWaitJobsTool(step.tool);
+        if (!isSub && !isWait) continue;
+        const tool = (step.tool || '').toLowerCase();
+        const wantReviewer = isSub && (tool.includes('reviewer'));
+        const candidates = running.filter(w => isWait
+            ? true
+            : wantReviewer ? w.role === 'reviewer' : w.role !== 'reviewer');
+        // 并发多个同类 worker 时取最新启动的——该步骤最可能的执行者
+        const w = candidates.sort((a, b) => b.startedAt - a.startedAt)[0];
+        if (!w) continue;
+        const actionText = (w.currentStep || '').trim();
+        const lineInfo = extractActiveThoughtLineInfo(w.thought || '', 120);
+        const generic = /^(正在审查|正在后台|正在执行)/.test(actionText);
+        const text = (!generic && actionText) ? actionText : (lineInfo.text || actionText || '正在后台执行…');
+        map.set(step.id, {
+            key: `${w.id}-s${w.steps?.length ?? 0}-l${lineInfo.lineKey}`,
+            text: `${w.roleLabel || w.name}：${text}`,
+        });
+    }
+    return map;
+});
+
 function getSubAgentBadgeText(step: any): string {
     const tool = (step?.tool || step?.action || "").toLowerCase();
     const isReviewer = tool.includes("child_reviewer") || tool.includes("reviewer");
