@@ -165,13 +165,16 @@
                                 <span class="live-think-title">{{ selectedWorker.status === 'running' ? '思考中：' : '思考过程：' }}</span>
                             </span>
                             <div class="ambient-live-viewport">
-                                <span
-                                    v-scroll-tail
-                                    class="ambient-live-scroll-text"
-                                    :title="workerThoughtText || '正在后台深入推导与研判相关代码与风险…'"
-                                >
-                                    {{ workerThoughtText || '正在后台深入推导与研判相关代码与风险…' }}
-                                </span>
+                                <Transition name="ticker-flip">
+                                    <span
+                                        :key="`worker-think-${selectedWorker?.id || 'none'}-${workerThoughtInfo.lineKey}`"
+                                        v-scroll-tail
+                                        class="ambient-live-scroll-text"
+                                        :title="workerThoughtInfo.text"
+                                    >
+                                        {{ workerThoughtInfo.text || '正在后台深入推导与研判相关代码与风险…' }}
+                                    </span>
+                                </Transition>
                             </div>
                             <button
                                 type="button"
@@ -529,46 +532,16 @@ const emit = defineEmits<{
     "select-worker": [workerId: string];
 }>();
 
-// ── 🌟 平滑尾随滚动指令 (Smooth Tail-follow Scroll，复刻主 Agent) ──
-const scrollTailPending = new Set<HTMLElement>();
-let scrollTailRafId: number | null = null;
-
-function flushScrollTail() {
-    scrollTailRafId = null;
-    for (const el of scrollTailPending) {
-        if (el.scrollWidth > el.clientWidth) {
-            el.scrollLeft = el.scrollWidth - el.clientWidth;
-        } else {
-            el.scrollLeft = 0;
-        }
-        if (el.scrollLeft > 6) {
-            el.classList.add("has-left-overflow");
-        } else {
-            el.classList.remove("has-left-overflow");
-        }
-    }
-    scrollTailPending.clear();
-}
-
-const vScrollTail = {
-    mounted(el: HTMLElement) {
-        el.scrollLeft = 0;
-        el.classList.remove("has-left-overflow");
-        scrollTailPending.add(el);
-        if (scrollTailRafId === null) {
-            scrollTailRafId = requestAnimationFrame(flushScrollTail);
-        }
-    },
-    updated(el: HTMLElement) {
-        scrollTailPending.add(el);
-        if (scrollTailRafId === null) {
-            scrollTailRafId = requestAnimationFrame(flushScrollTail);
-        }
-    },
-};
+// ── 🌟 换行感知与动力学平滑尾随滚动指令 (v-scroll-tail) ──
+import { vScrollTail } from "./scrollTailDirective";
+import { extractActiveThoughtLineInfo } from "./diffUtils";
 
 // ── 💭 子 Agent 实时流式思考与推演 ──
 const isWorkerThoughtExpanded = ref(false);
+
+const workerThoughtInfo = computed(() => {
+    return extractActiveThoughtLineInfo(selectedWorker.value?.thought || "");
+});
 
 const workerThoughtText = computed(() => {
     return selectedWorker.value?.thought?.trim() || "";
@@ -2194,6 +2167,9 @@ async function copyOutput(text?: string) {
     overflow: hidden;
     white-space: nowrap;
     position: relative;
+    height: 20px;
+    display: flex;
+    align-items: center;
     mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 14px), transparent 100%);
     -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 14px), transparent 100%);
 }
@@ -2206,10 +2182,54 @@ async function copyOutput(text?: string) {
 .ambient-live-scroll-text {
     font-size: 11.5px;
     font-weight: 500;
-    line-height: 1.45;
+    line-height: 20px;
+    height: 20px;
     color: #f1f5f9;
-    display: inline-block;
+    display: block;
+    width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: clip;
+    flex: 1 1 auto;
+    min-width: 0;
     letter-spacing: -0.1px;
+}
+
+/* 🌟 垂直翻牌 / 上下翻转 Ticker 动效 (Flip-up Ticker Transition) */
+.ticker-flip-enter-active,
+.ticker-flip-leave-active {
+    transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: transform, opacity;
+}
+
+.ticker-flip-leave-active {
+    position: absolute !important;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    pointer-events: none;
+    width: 100%;
+}
+
+.ticker-flip-enter-from {
+    opacity: 0;
+    transform: translateY(100%);
+}
+
+.ticker-flip-enter-to {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.ticker-flip-leave-from {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.ticker-flip-leave-to {
+    opacity: 0;
+    transform: translateY(-100%);
 }
 
 .thought-expand-btn {

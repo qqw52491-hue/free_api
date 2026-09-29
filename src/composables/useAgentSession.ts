@@ -119,6 +119,8 @@ function normalizeState(value: unknown): AgentRunState {
         recovering: "recovering",
         rescuing: "recovering",
         finalizing: "finalizing",
+        begin_finalizing: "finalizing",
+        beginfinalizing: "finalizing",
         succeeded: "succeeded",
         success: "succeeded",
         failed: "failed",
@@ -954,12 +956,14 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 view: view !== undefined ? view : current.view,
             };
         } else {
+            const fallbackPlanId = steps.value.length > 0 ? (steps.value[steps.value.length - 1].planId || "plan-default") : "plan-default";
+            const fallbackPlanTitle = steps.value.length > 0 ? (steps.value[steps.value.length - 1].planTitle || "执行任务") : "执行任务";
             const newStep: AgentStepItem = {
                 id: `step-${stepId}-attempt-${steps.value.length}`,
                 stepId,
                 description: toText(payload.description) || `${name}: ${action}`,
-                planId: toText(payload.plan_id) || "plan-default",
-                planTitle: sanitizePlanTitle(toText(payload.plan_title), toText(currentGoal.value)),
+                planId: toText(payload.plan_id) || fallbackPlanId,
+                planTitle: sanitizePlanTitle(toText(payload.plan_title), toText(currentGoal.value)) || fallbackPlanTitle,
                 modelTier: toText(payload.model_tier) || undefined,
                 tool: name,
                 action,
@@ -1374,12 +1378,15 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             }
             const isRetry = lastIdx >= 0 && (steps.value[lastIdx].status === "failed" || steps.value[lastIdx].status === "succeeded" || steps.value[lastIdx].status === "challenged");
 
+            const fallbackPlanId = steps.value.length > 0 ? (steps.value[steps.value.length - 1].planId || "plan-default") : "plan-default";
+            const fallbackPlanTitle = steps.value.length > 0 ? (steps.value[steps.value.length - 1].planTitle || "执行任务") : "执行任务";
+
             const stepItem: AgentStepItem = {
                 id: isRetry ? `step-${stepId}-attempt-${steps.value.length}` : `step-${stepId}`,
                 stepId,
                 description,
-                planId: toText(rawStep.plan_id) || "plan-default",
-                planTitle: sanitizePlanTitle(toText(rawStep.plan_title), toText(currentGoal.value)),
+                planId: toText(rawStep.plan_id) || fallbackPlanId,
+                planTitle: sanitizePlanTitle(toText(rawStep.plan_title), toText(currentGoal.value)) || fallbackPlanTitle,
                 modelTier: toText(rawStep.model_tier) || undefined,
                 reflection,
                 thought: thoughtText,

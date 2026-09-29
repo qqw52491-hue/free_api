@@ -524,13 +524,16 @@
                                     <span class="live-think-title">{{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中：' : '推进中：' }}</span>
                                 </span>
                                 <div class="ambient-live-viewport">
-                                    <span
-                                        v-scroll-tail
-                                        class="ambient-live-scroll-text"
-                                        :title="getLine3FullText(entry)"
-                                    >
-                                        {{ getLine3DisplayText(entry) }}
-                                    </span>
+                                    <Transition name="ticker-flip">
+                                        <span
+                                            :key="getLine3Key(entry)"
+                                            v-scroll-tail
+                                            class="ambient-live-scroll-text"
+                                            :title="getLine3FullText(entry)"
+                                        >
+                                            {{ getLine3DisplayText(entry) }}
+                                        </span>
+                                    </Transition>
                                 </div>
                                 <button
                                     type="button"
@@ -1001,13 +1004,16 @@
                                     <span class="live-think-title">思考中：</span>
                                 </span>
                                 <div class="ambient-live-viewport">
-                                    <span
-                                        v-scroll-tail
-                                        class="ambient-live-scroll-text"
-                                        :title="liveThoughtInfo.text"
-                                    >
-                                        {{ liveThoughtInfo.text || '正在深度思考规划执行策略 …' }}
-                                    </span>
+                                    <Transition name="ticker-flip">
+                                        <span
+                                            :key="`ambient-init-think-${liveThoughtInfo.lineKey}`"
+                                            v-scroll-tail
+                                            class="ambient-live-scroll-text"
+                                            :title="liveThoughtInfo.text"
+                                        >
+                                            {{ liveThoughtInfo.text || '正在深度思考规划执行策略 …' }}
+                                        </span>
+                                    </Transition>
                                 </div>
                                 <button
                                     type="button"
@@ -1185,12 +1191,12 @@
     </div>
 </template>
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, shallowReactive, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AttachmentCard from "./AttachmentCard.vue";
 import CollapsibleUserText from "./CollapsibleUserText.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
-import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, AgentWorkerItem, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule } from "./types";
+import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, AgentWorkerItem, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule, AgentRunState } from "./types";
 import { diffPayloadFromChip, extractDiffFromStep, formatStepOperation, parseStepFileChanges, aggregateFileChips, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtLineInfo } from "./diffUtils";
 import type { StepOperationDisplay } from "./diff/toolOperation";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
@@ -1362,6 +1368,7 @@ const props = withDefaults(
         isThinking: boolean;
         humanInterventions: { message: string; timestamp: number }[];
         stateDescription: string;
+        runState?: AgentRunState;
         isRunning: boolean;
         completionMessage: string;
         finalSummary: string;
@@ -1550,47 +1557,9 @@ function getLine3Key(entry: PlanEntry): string {
     return `action-${entry.id}-${preview.line3.actionKind}-${preview.line3.text}`;
 }
 
-// 🌟 平滑尾随滚动指令 (Smooth Tail-follow Scroll)
-// 1. 统一由 rAF 帧调度：在高频 Token 涌入时合并单帧内的重复更新，杜绝强制同步重排；
-// 2. 即时末尾对齐：超长文本时右边每长出一个新字，左边老字被自然顶出视口；
-// 3. 动态 class：只有存在左侧溢出时才激活渐隐 mask，确保新行从头渲染时首字符 100% 清晰锐利。
-const scrollTailPending = new Set<HTMLElement>();
-let scrollTailRafId: number | null = null;
-
-function flushScrollTail() {
-    scrollTailRafId = null;
-    for (const el of scrollTailPending) {
-        if (el.scrollWidth > el.clientWidth) {
-            el.scrollLeft = el.scrollWidth - el.clientWidth;
-        } else {
-            el.scrollLeft = 0;
-        }
-        if (el.scrollLeft > 6) {
-            el.classList.add("has-left-overflow");
-        } else {
-            el.classList.remove("has-left-overflow");
-        }
-    }
-    scrollTailPending.clear();
-}
-
-// 自定义指令：新行挂载时从 0 开始，溢出时自动平滑尾随
-const vScrollTail = {
-    mounted(el: HTMLElement) {
-        el.scrollLeft = 0;
-        el.classList.remove("has-left-overflow");
-        scrollTailPending.add(el);
-        if (scrollTailRafId === null) {
-            scrollTailRafId = requestAnimationFrame(flushScrollTail);
-        }
-    },
-    updated(el: HTMLElement) {
-        scrollTailPending.add(el);
-        if (scrollTailRafId === null) {
-            scrollTailRafId = requestAnimationFrame(flushScrollTail);
-        }
-    },
-};
+// 🌟 换行感知与动力学平滑尾随滚动指令 (v-scroll-tail)
+// 统一抽离至独立模块，支持常规平滑阻尼滑入、未结束被打断暴走冲刺到底部，以及换行垂直翻牌无缝衔接
+import { vScrollTail } from "./scrollTailDirective";
 
 // ── 🛠️ 步骤文件变更与计划摘要解析 ──
 /**
@@ -1703,7 +1672,10 @@ function isStreamingCompletion(entry: { id: string; summary?: string; title?: st
     if (typewriterDoneIds.has(entry.id)) return false;
     const target = typewriterTargets.get(entry.id) || entry.summary || entry.title || '';
     const current = typewriterTexts[entry.id] || '';
-    return (props.isRunning && entry.id === 'live-completion') || (current.length < target.length);
+    // runState=finalizing 时模型已交付、后端在做校验/落库收尾——
+    // 文本不会再长，摘掉流式外观，否则尾部淡字+光标看起来像"卡死"
+    const liveStillGenerating = props.isRunning && entry.id === 'live-completion' && props.runState !== 'finalizing';
+    return liveStillGenerating || current.length < target.length;
 }
 
 function finishTypewriterInstantly(id: string, fullText?: string) {
@@ -2762,11 +2734,81 @@ function followLatest() {
 }
 function onStreamScroll(event: Event) { followLiveTail.value = isNearBottom(event.currentTarget as HTMLElement); }
 function resumeLiveFollow() { followLiveTail.value = true; followLatest(); }
+let thoughtScrollRaf: number | null = null;
+let thoughtScrollRetries = 0;
+// 用户手动上翻过的思考面板：脱离自动追尾，滚回底部附近时恢复
+// 判定用真实手势（wheel/touchmove），不用 scroll 事件——程序性
+// scrollTop 写入也触发 scroll，且新内容到达时距底距离会瞬时拉大，会误伤
+const detachedThoughtPanes = new WeakSet<HTMLElement>();
+function paneFromEvent(event: Event): HTMLElement | null {
+    const el = event.target as HTMLElement;
+    if (!(el instanceof HTMLElement)) return null;
+    return el.matches(".active-thought-content, .thought-expanded-body") ? el : null;
+}
+function onPaneWheelCapture(event: Event) {
+    const el = paneFromEvent(event);
+    if (el && (event as WheelEvent).deltaY < 0) detachedThoughtPanes.add(el); // 上滚=主动离开底部
+}
+function onPaneTouchCapture(event: Event) {
+    const el = paneFromEvent(event);
+    if (!el) return;
+    if (el.scrollHeight - el.clientHeight - el.scrollTop > 12) detachedThoughtPanes.add(el);
+}
+function onPaneScrollCapture(event: Event) {
+    const el = paneFromEvent(event);
+    if (!el) return;
+    if (el.scrollHeight - el.clientHeight - el.scrollTop < 12) detachedThoughtPanes.delete(el); // 回底→恢复
+}
+onMounted(() => {
+    streamElement.value?.addEventListener("wheel", onPaneWheelCapture, { capture: true, passive: true });
+    streamElement.value?.addEventListener("touchmove", onPaneTouchCapture, { capture: true, passive: true });
+    streamElement.value?.addEventListener("scroll", onPaneScrollCapture, true);
+});
+onBeforeUnmount(() => {
+    streamElement.value?.removeEventListener("wheel", onPaneWheelCapture, true);
+    streamElement.value?.removeEventListener("touchmove", onPaneTouchCapture, true);
+    streamElement.value?.removeEventListener("scroll", onPaneScrollCapture, true);
+    if (thoughtScrollRaf !== null) { cancelAnimationFrame(thoughtScrollRaf); thoughtScrollRaf = null; }
+});
 function followThoughtTail() {
-    const el = streamElement.value?.querySelector<HTMLElement>(".active-thought-content");
-    if (el) {
-        el.scrollTop = el.scrollHeight;
-    }
+    // 已有一个滚动动画在跑就不用再起——tick 每帧会重新读 scrollHeight，
+    // 新内容来了自动把剩余距离拉大 → 步长自动变大，天然"追不上就加速"
+    if (thoughtScrollRaf !== null) return;
+    const tick = () => {
+        // 折叠态的 .active-thought-content 与展开态的 .thought-expanded-body
+        // 都可能存在，一起追底（展开面板此前没人滚，一直钉在第一行）
+        const els = streamElement.value?.querySelectorAll<HTMLElement>(
+            ".active-thought-content, .thought-expanded-body"
+        );
+        if (!els || els.length === 0) {
+            // 思考面板还没挂载（条目晚于内容到达）：短窗口内重试几帧
+            if (thoughtScrollRetries++ < 10) {
+                thoughtScrollRaf = requestAnimationFrame(tick);
+            } else {
+                thoughtScrollRaf = null;
+                thoughtScrollRetries = 0;
+            }
+            return;
+        }
+        thoughtScrollRetries = 0;
+        let settled = true;
+        els.forEach((el) => {
+            // 用户在该面板里手动上翻后松手——不打断阅读，回到底部附近再恢复追尾
+            if (detachedThoughtPanes.has(el)) return;
+            const target = el.scrollHeight - el.clientHeight;
+            const remaining = target - el.scrollTop;
+            if (remaining <= 1) {
+                if (el.scrollTop !== target) el.scrollTop = target;
+                return;
+            }
+            settled = false;
+            // 自适应追赶：剩余 40%/帧平滑滚；积压 >140px 直接跳底，不拖尾巴
+            const step = remaining > 140 ? remaining : Math.max(4, Math.ceil(remaining * 0.4));
+            el.scrollTop += step;
+        });
+        thoughtScrollRaf = settled ? null : requestAnimationFrame(tick);
+    };
+    thoughtScrollRaf = requestAnimationFrame(tick);
 }
 watch(() => props.isThinking, (running, wasRunning) => { if (running && !wasRunning) activeThoughtStartedAt.value = Date.now(); if (!running && wasRunning) activeThoughtStartedAt.value = null; }, { immediate: true });
 
@@ -2809,9 +2851,10 @@ function getStepMetricsTooltip(step: AgentStepItem): string {
 watch(
     () => [props.steps.length, props.isRunning, props.finalSummary, props.thought],
     () => {
-        if (props.isRunning && followLiveTail.value) {
+        if (props.isRunning) {
+            // 思考窗格始终自追尾——外层向上翻历史不该把它钉在第一行
             followThoughtTail();
-            followLatest();
+            if (followLiveTail.value) followLatest();
         }
     }
 );
@@ -2839,16 +2882,39 @@ function planStatus(steps: AgentStepItem[], isLiveTaskActive = false): AgentTool
 function planEntries(steps: AgentStepItem[], prefix: string, active = false): PlanEntry[] {
     const isLive = prefix === "live";
     const isTaskActive = isLive && props.isRunning && !props.finalSummary?.trim() && !props.completionMessage?.trim();
-    const groups = new Map<string, PlanEntry>();
+    const rawPlans: PlanEntry[] = [];
+    let currentPlan: (PlanEntry & { _key: string }) | null = null;
+    let planIndex = 0;
+
     for (const step of steps.filter((item) => Boolean(item.description || item.tool || item.action))) {
         const key = step.planId || "plan-default";
-        const existing = groups.get(key) || { id: `${prefix}-plan-${key}`, type: "plan" as const, timestamp: step.timestamp, title: step.planTitle || "执行任务", status: step.status, steps: [], isThinking: false };
-        existing.steps.push(step);
-        existing.timestamp = Math.min(existing.timestamp, step.timestamp);
-        if (step.planTitle) existing.title = step.planTitle;
-        groups.set(key, existing);
+        // 🌟 核心修复：按时间轴顺序连续分段聚合！
+        // 只有连续相邻且相同 planId 的步骤才合并在同一阶段。
+        // 若 planId 发生切换（例如：排查 -> 准备环境 -> 排查），在时间轴上必然是新的后续阶段，
+        // 绝不能使用全局 Map 跨越时间倒流合并到之前的旧阶段中，否则会导致：
+        // 1. 中间阶段（如"工作区准备环境"）被永久固定在底部；
+        // 2. 后续执行的新步骤被逆向追加到上方的旧阶段中，颠倒时间线与视觉顺序；
+        // 3. 运行状态错误：已结束的历史阶段被标为 running，而最新正在运行的阶段被标为 succeeded。
+        if (currentPlan && currentPlan._key === key) {
+            currentPlan.steps.push(step);
+            currentPlan.timestamp = Math.min(currentPlan.timestamp, step.timestamp);
+            if (step.planTitle) currentPlan.title = step.planTitle;
+        } else {
+            planIndex++;
+            const paddedIndex = String(planIndex).padStart(4, "0");
+            currentPlan = {
+                _key: key,
+                id: `${prefix}-plan-${paddedIndex}-${key}`,
+                type: "plan" as const,
+                timestamp: step.timestamp,
+                title: step.planTitle || "执行任务",
+                status: step.status,
+                steps: [step],
+                isThinking: false,
+            };
+            rawPlans.push(currentPlan);
+        }
     }
-    const rawPlans = [...groups.values()];
     const plans = rawPlans.map((plan, idx) => {
         const isLatest = idx === rawPlans.length - 1;
         const calculatedStatus = planStatus(plan.steps, isTaskActive);

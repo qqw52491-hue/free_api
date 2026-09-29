@@ -109,6 +109,7 @@
                         :is-thinking="session.isThinking.value"
                         :human-interventions="session.humanInterventions.value"
                         :state-description="session.statusDescription.value"
+                        :run-state="session.runState.value"
                         :is-running="session.isRunning.value"
                         :completion-message="session.completionMessage.value"
                         :final-summary="session.finalSummary.value"
