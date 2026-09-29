@@ -95,6 +95,16 @@ export interface AgentHumanForm {
     html?: string;
 }
 
+/** 一次人工干预应答的记录：回答内容 + 应答时刻 + 触发它的步骤快照 */
+export interface AgentHumanIntervention {
+    message: string;
+    timestamp: number;
+    /** 发起本次 ask_human 挂起的步骤 id（agent_paused 时快照），供时间线把答复回填进步骤内 */
+    stepId?: string;
+    /** 挂起时向用户展示的提问原文（pauseReason 快照），供标记行内联"问→答"上下文 */
+    question?: string;
+}
+
 export interface AgentToolCall {
     name: string;
     action: string;

@@ -622,7 +622,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTeamState, AgentTokenUsage, AgentToolStatus, FileDiffPayload, FileChangeChip, LlmParseErrorItem } from "./types";
+import type { AgentHumanIntervention, AgentRunState, AgentRunStateMeta, AgentStepItem, AgentTaskResource, AgentTeamState, AgentTokenUsage, AgentToolStatus, FileDiffPayload, FileChangeChip, LlmParseErrorItem } from "./types";
 import type { AgentArtifactInput } from "../../types/artifact";
 import { formatClock, formatMilliseconds, formatNumber, formatPayload, renderMarkdown } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
@@ -645,7 +645,7 @@ const props = withDefaults(
         steps?: AgentStepItem[];
         selectedStep: AgentStepItem | null;
         selectedSubpart: "thought" | "tool" | null;
-        selectedHuman: { message: string; timestamp: number } | null;
+        selectedHuman: AgentHumanIntervention | null;
         selectedActiveThought: boolean;
         activeThoughtText: string;
         resources: AgentTaskResource[];

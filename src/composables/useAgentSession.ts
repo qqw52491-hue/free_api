@@ -22,6 +22,7 @@ import {
     AGENT_RUN_STATE_CATALOG,
     type AgentHumanForm,
     type AgentHumanFormKind,
+    type AgentHumanIntervention,
     type AgentLogEntry,
     type AgentModelOption,
     type AgentRunState,
@@ -234,6 +235,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const statusDescription = ref(AGENT_RUN_STATE_CATALOG.idle.description);
     const isRunning = ref(false);
     const pauseReason = ref("");
+    // agent_paused 时快照发起挂起的步骤 id——人工应答后回填到该步骤行内，
+    // 让"问→答"在时间线上同位可见，而不是孤零零沉到底部。
+    const pausedStepId = ref<string | undefined>(undefined);
     const humanForm = ref<AgentHumanForm | null>(null);
     const humanInput = ref("");
     const pendingReplacementGoal = ref("");
@@ -255,7 +259,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const thinkingStartTime = ref<number | null>(null);
     const thinkingDurationMs = ref(0);
     const logs = ref<AgentLogEntry[]>([]);
-    const humanInterventions = ref<Array<{ message: string; timestamp: number }>>([]);
+    const humanInterventions = ref<AgentHumanIntervention[]>([]);
     const llmParseErrors = ref<LlmParseErrorItem[]>([]);
     const teamWorkers = ref<AgentWorkerItem[]>([]);
 
@@ -1386,6 +1390,25 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             isRunning.value = true;
             isThinking.value = false;
             pauseReason.value = message;
+            // 快照发起本次挂起的步骤：优先最近的 ask_human/human 工具步骤，
+            // 其次最近仍在 running/pending 的步骤——应答送达后回填进该步骤行内。
+            pausedStepId.value = undefined;
+            for (let i = steps.value.length - 1; i >= 0; i--) {
+                const probe = `${steps.value[i].tool || ""} ${steps.value[i].action || ""}`.toLowerCase();
+                if (probe.includes("ask_human") || probe.includes("human")) {
+                    pausedStepId.value = steps.value[i].id;
+                    break;
+                }
+            }
+            if (!pausedStepId.value) {
+                for (let i = steps.value.length - 1; i >= 0; i--) {
+                    const status = steps.value[i].status;
+                    if (status === "running" || status === "pending") {
+                        pausedStepId.value = steps.value[i].id;
+                        break;
+                    }
+                }
+            }
             humanForm.value = normalizeHumanForm(payload.form, message);
             setRunState("waiting_for_human", message);
             appendLog(`⏸️ [人类协助] ${message}`);
@@ -1679,6 +1702,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         hasError.value = false;
         currentGoal.value = "";
         pauseReason.value = "";
+        pausedStepId.value = undefined;
         humanForm.value = null;
         humanInput.value = "";
         stopRequested.value = false;
@@ -1724,6 +1748,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 runTerminal.value = false;
                 isRunning.value = true;
                 isThinking.value = true;
+                // 新代任务起跑：上一轮挂起步骤快照随之作废
+                pausedStepId.value = undefined;
                 setRunState("executing", "Agent 正在执行任务...");
                 await loadRunTraces();
                 await loadConversation();
@@ -1944,6 +1970,15 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         try {
             try {
                 await invoke("send_human_intervention", { sessionId: activeSessionId.value, message });
+                // 应答落账：绑定发起挂起的步骤与当时的提问原文（须在清空 pauseReason 前快照），
+                // 让时间线能把"你的回答"直接回填到对应 ask_human 步骤行内。
+                humanInterventions.value.push({
+                    message: displayMessage,
+                    timestamp: Date.now(),
+                    stepId: pausedStepId.value,
+                    question: pauseReason.value || undefined,
+                });
+                pausedStepId.value = undefined;
                 humanInput.value = "";
                 pauseReason.value = "";
                 humanForm.value = null;
@@ -1990,6 +2025,14 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             if (isWaitingForHuman.value) {
                 try {
                     await invoke("send_human_intervention", { sessionId: activeSessionId.value, message });
+                    // 同 answerHuman：落账时快照步骤与提问，回填时间线步骤行
+                    humanInterventions.value.push({
+                        message: stripPlanDecisionMarker(message),
+                        timestamp: Date.now(),
+                        stepId: pausedStepId.value,
+                        question: pauseReason.value || undefined,
+                    });
+                    pausedStepId.value = undefined;
                     humanInput.value = "";
                     pauseReason.value = "";
                     humanForm.value = null;

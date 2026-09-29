@@ -179,17 +179,18 @@
                         </button>
                     </div>
                 </article>
-                <!-- 人工干预：折叠为步骤条内的单行标记（用户的选择/应答），不再渲成独立气泡 -->
+                <!-- 人工干预：折叠为步骤条内的单行标记（用户的选择/应答），不再渲成独立气泡；
+                     有提问快照时内联"问: … → 答: …"，上下文就地可读、无需跳转 -->
                 <div
                     v-else-if="entry.type === 'message' && entry.isHuman"
                     class="intervention-marker"
                     :data-tl="entry.id"
-                    :title="interventionSummary(entry.content)"
+                    :title="interventionMarkerText(entry)"
                     @click="$emit('select-human', entry.id)"
                 >
                     <span class="intervention-marker-icon">👤</span>
                     <span class="intervention-marker-label">人工干预</span>
-                    <span class="intervention-marker-text">{{ interventionSummary(entry.content) }}</span>
+                    <span class="intervention-marker-text">{{ interventionMarkerText(entry) }}</span>
                     <span v-if="parseUserMessageAttachments(entry.content).attachments.length" class="intervention-marker-att">📎{{ parseUserMessageAttachments(entry.content).attachments.length }}</span>
                     <button
                         v-if="entry.anchorId"
@@ -843,6 +844,22 @@
                                             <em v-else>已分析</em>
                                         </button>
 
+                                        <!-- 1.5 人工应答回填行：本步骤 ask_human 挂起后用户的答复直接贴在步骤内，
+                                             无需跳到底部标记行对照上下文；点击仍走 select-human 打开 Inspector -->
+                                        <button
+                                            v-for="iv in stepInterventions.get(step.id) || []"
+                                            :key="iv.entryId"
+                                            class="child-row intervention-child"
+                                            type="button"
+                                            :title="iv.summary"
+                                            @click.stop="$emit('select-human', iv.entryId)"
+                                        >
+                                            <span class="child-mark"></span>
+                                            <span class="tool-tag intervention-tag">👤 你的回答</span>
+                                            <span>{{ iv.summary }}</span>
+                                            <em>{{ formatClock(iv.timestamp) }}</em>
+                                        </button>
+
                                         <!-- 2. 第2行：简约大气的文件操作卡片 (修改/读取 📄 文件名 #L1-80 +20 -1；有内容看 Diff，无内容看步骤详情) -->
                                         <div
                                             v-if="hasFileOperation(step)"
@@ -1215,7 +1232,7 @@ import { invoke } from "@tauri-apps/api/core";
 import AttachmentCard from "./AttachmentCard.vue";
 import CollapsibleUserText from "./CollapsibleUserText.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
-import type { AgentHumanForm, AgentStepItem, AgentToolStatus, AgentTeamState, AgentWorkerItem, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule, AgentRunState } from "./types";
+import type { AgentHumanForm, AgentHumanIntervention, AgentStepItem, AgentToolStatus, AgentTeamState, AgentWorkerItem, ParsedAttachment, FileChangeChip, FileDiffPayload, StageFailureState, ReviewerVerdict, StageRunningPreview, StageActionCapsule, AgentRunState } from "./types";
 import { diffPayloadFromChip, extractDiffFromStep, formatStepOperation, parseStepFileChanges, aggregateFileChips, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtLineInfo } from "./diffUtils";
 import type { StepOperationDisplay } from "./diff/toolOperation";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
@@ -1282,6 +1299,82 @@ function assignInterventionAnchors(entries: TimelineEntry[]) {
         }
     }
 }
+
+/// 干预标记行文本：有提问时内联"问: … → 答: …"，无提问维持纯回答摘要
+function interventionMarkerText(entry: { content: string; question?: string }): string {
+    const answer = interventionSummary(entry.content);
+    const question = entry.question ? interventionSummary(entry.question) : "";
+    return question ? `问: ${question} → 答: ${answer}` : answer;
+}
+
+/** 从 ask_human 步骤的 params/描述中提取当时向用户提出的问题原文（历史回合没有 pauseReason 快照，只能回放参数） */
+function humanQuestionFromStep(step: AgentStepItem | undefined): string {
+    if (!step) return "";
+    const raw = step.params ?? step.rawParams;
+    let p: any = raw;
+    if (typeof raw === "string") {
+        try { p = JSON.parse(raw); } catch { p = null; }
+    }
+    if (p && typeof p === "object") {
+        const q = String(p.message || p.question || "").trim();
+        if (q) return q;
+    }
+    const desc = (step.description || "").trim();
+    return desc && desc !== "执行操作" ? desc : "";
+}
+
+/** 同一回合内、消息时间戳之前最近一个 ask_human/human 步骤——历史应答的归属启发式 */
+function nearestHumanStepBefore(steps: AgentStepItem[], timestamp: number): AgentStepItem | undefined {
+    let best: AgentStepItem | undefined;
+    for (const s of steps) {
+        if (s.timestamp > timestamp) continue;
+        const probe = `${s.tool || ""} ${s.action || ""}`.toLowerCase();
+        if (!probe.includes("ask_human") && !probe.includes("human")) continue;
+        if (!best || s.timestamp >= best.timestamp) best = s;
+    }
+    return best;
+}
+
+interface StepInterventionRow {
+    /** 对应时间线条目 id（与标记行一致），点击时原样 emit select-human，保证 Inspector 查找命中 */
+    entryId: string;
+    summary: string;
+    timestamp: number;
+}
+
+/**
+ * step.id → 挂在该步骤内的人工应答行。
+ * live：agent_paused 时已快照 pausedStepId，直接按 stepId 归属；
+ * history：无快照可存，按"消息之前最近的 ask_human/human 步骤"启发式回填。
+ */
+const stepInterventions = computed<Map<string, StepInterventionRow[]>>(() => {
+    const map = new Map<string, StepInterventionRow[]>();
+    props.humanInterventions.forEach((item, index) => {
+        if (!item.stepId) return;
+        const list = map.get(item.stepId) || [];
+        list.push({
+            entryId: `live-human-${item.timestamp}-${index}`,
+            summary: interventionSummary(item.message),
+            timestamp: item.timestamp,
+        });
+        map.set(item.stepId, list);
+    });
+    for (const turn of props.historyTurns) {
+        for (const message of turn.messages) {
+            if (message.role !== "user") continue;
+            const anchorStep = nearestHumanStepBefore(turn.steps, message.timestamp);
+            if (!anchorStep) continue;
+            const list = map.get(anchorStep.id) || [];
+            list.push({
+                entryId: `history-message-${turn.id}-${message.id}`,
+                summary: interventionSummary(message.content),
+                timestamp: message.timestamp,
+            });
+            map.set(anchorStep.id, list);
+        }
+    }
+    return map;
+});
 
 function scrollToTimelineEntry(id: string) {
     const el = document.querySelector(`[data-tl="${CSS.escape(id)}"]`);
@@ -1370,7 +1463,7 @@ type PlanEntry = { id: string; type: "plan"; timestamp: number; title: string; s
 type TimelineEntry =
     | PlanEntry
     | { id: string; type: "user"; timestamp: number; content: string }
-    | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean; anchorId?: string }
+    | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean; anchorId?: string; question?: string }
     | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: AgentArtifactInput[]; failed: boolean }
     | { id: "active-thought"; type: "active-thought"; timestamp: number };
 
@@ -1385,7 +1478,7 @@ const props = withDefaults(
         selectedNarrative: string | null;
         thought: string;
         isThinking: boolean;
-        humanInterventions: { message: string; timestamp: number }[];
+        humanInterventions: AgentHumanIntervention[];
         stateDescription: string;
         runState?: AgentRunState;
         isRunning: boolean;
@@ -1553,10 +1646,28 @@ const liveThoughtInfo = computed(() => {
     return extractActiveThoughtLineInfo(raw || "");
 });
 
+// 收拢态第 3 行：若当前运行步骤是子代理/挂起等待且命中 workerLiveLines，
+// 换成 worker 的实时动作行（与展开态步骤行同源），不再停留于死文案。
+// 仅在非 think 分支生效——活跃思考流的优先级最高，不被覆盖。
+function getLine3WorkerLive(entry: PlanEntry, preview: StageRunningPreview): { key: string; text: string } | undefined {
+    if (preview.line3.actionKind === "think") return undefined;
+    const steps = entry.steps;
+    if (!steps.length) return undefined;
+    // 与 getRunningStagePreview 一致的当前步骤定位：首个 running/pending，否则末位步骤
+    const runningStep = steps.find((s) => s.status === "running" || s.status === "pending") || steps[steps.length - 1];
+    if (!runningStep) return undefined;
+    if (!isSubAgentTool(runningStep.tool) && !isWaitJobsTool(runningStep.tool)) return undefined;
+    return workerLiveLines.value.get(runningStep.id);
+}
+
 function getLine3DisplayText(entry: PlanEntry): string {
     const preview = getPlanRunningPreview(entry);
     if (preview.line3.actionKind === "think") {
         return (liveThoughtInfo.value.text || preview.line3.text || "正在深入分析全局上下文与决策规划 …").trim();
+    }
+    const workerLive = getLine3WorkerLive(entry, preview);
+    if (workerLive) {
+        return `⚡ ${workerLive.text}`.trim();
     }
     return (preview.line3.text || "正在执行操作 …").trim();
 }
@@ -1566,6 +1677,10 @@ function getLine3FullText(entry: PlanEntry): string {
     if (preview.line3.actionKind === "think") {
         return props.thought || liveThoughtInfo.value.text || preview.line3.text;
     }
+    const workerLive = getLine3WorkerLive(entry, preview);
+    if (workerLive) {
+        return `⚡ ${workerLive.text}`;
+    }
     return preview.line3.text;
 }
 
@@ -1574,6 +1689,11 @@ function getLine3Key(entry: PlanEntry): string {
     if (preview.line3.actionKind === "think") {
         const keyId = liveThoughtInfo.value.lineKey || preview.line3.lineKey || 0;
         return `think-${entry.id}-${keyId}`;
+    }
+    // worker 行并入其自增 key：worker 动作每次刷新都触发翻牌，而不是原地静默变字
+    const workerLive = getLine3WorkerLive(entry, preview);
+    if (workerLive) {
+        return `worker-${entry.id}-${workerLive.key}`;
     }
     return `action-${entry.id}-${preview.line3.actionKind}-${preview.line3.text}`;
 }
@@ -3029,6 +3149,8 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
                 role: message.role,
                 content: message.content,
                 isHuman: true,
+                // 历史无 pausedStepId 快照：从"消息之前最近的 ask_human 步骤"回放提问原文
+                question: humanQuestionFromStep(nearestHumanStepBefore(turn.steps, message.timestamp)) || undefined,
             })),
         ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
         assignInterventionAnchors(middle);
@@ -3071,7 +3193,7 @@ function currentTimeline(): TimelineEntry[] {
     if (props.currentGoal) timeline.push({ id: "live-user-goal", type: "user", timestamp: firstTimestamp - 1, content: props.currentGoal });
     const middle: TimelineEntry[] = [
         ...plans,
-        ...props.humanInterventions.map((item, index) => ({ id: `live-human-${item.timestamp}-${index}`, type: "message" as const, timestamp: item.timestamp, role: "user", content: item.message, isHuman: true })),
+        ...props.humanInterventions.map((item, index) => ({ id: `live-human-${item.timestamp}-${index}`, type: "message" as const, timestamp: item.timestamp, role: "user", content: item.message, isHuman: true, question: item.question })),
     ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
     assignInterventionAnchors(middle);
     timeline.push(...middle);
@@ -3101,17 +3223,18 @@ function isSubAgentTool(tool?: string): boolean {
         t.includes("reviewer")
     );
 }
-// 运行中的子 agent 步骤 → 匹配活跃 worker 的实时动作行
+// 子 agent / 挂起等待步骤 → 匹配活跃 worker 的实时动作行
 // 痛点修复：以前"派发审查"步骤只显示死文案"后台协同中"，
 // 审查员在干嘛完全看不见。worker.currentStep 逐事件更新、
-// thought 逐 chunk 追加——取它们合成一行活文本
+// thought 逐 chunk 追加——取它们合成一行活文本。
+// 匹配不限步骤状态：异步派发下父步骤常抢先报 succeeded 而 worker 仍在跑，
+// 只按 running 过滤会让活行永远不出现。只看当前 run 的 props.steps，不碰历史。
 const workerLiveLines = computed(() => {
     const map = new Map<string, { key: string; text: string }>();
     const workers = props.teamState?.workers || [];
     const running = workers.filter(w => w.status === 'running');
     if (!running.length) return map;
     for (const step of props.steps) {
-        if (step.status !== 'running') continue;
         const isSub = isSubAgentTool(step.tool);
         const isWait = isWaitJobsTool(step.tool);
         if (!isSub && !isWait) continue;
@@ -3120,9 +3243,14 @@ const workerLiveLines = computed(() => {
         const candidates = running.filter(w => isWait
             ? true
             : wantReviewer ? w.role === 'reviewer' : w.role !== 'reviewer');
-        // 并发多个同类 worker 时取最新启动的——该步骤最可能的执行者
-        const w = candidates.sort((a, b) => b.startedAt - a.startedAt)[0];
-        if (!w) continue;
+        if (!candidates.length) continue;
+        // 优先认领"本步骤派发后启动"（startedAt >= step.timestamp - 5s 容差）的
+        // 最早一个 worker——它最可能是该步骤孵化的执行者（同角色并发时按序认领）；
+        // 无合格候选时退化为同角色最新启动的运行者。
+        const spawned = candidates.filter(w => w.startedAt >= step.timestamp - 5000);
+        const w = spawned.length
+            ? spawned.sort((a, b) => a.startedAt - b.startedAt)[0]
+            : candidates.sort((a, b) => b.startedAt - a.startedAt)[0];
         const actionText = (w.currentStep || '').trim();
         const lineInfo = extractActiveThoughtLineInfo(w.thought || '', 120);
         const generic = /^(正在审查|正在后台|正在执行)/.test(actionText);

@@ -2193,6 +2193,17 @@ button.root-row {
     border-color: rgba(232, 121, 249, 0.2);
 }
 
+/* 👤 步骤内人工应答行：与底部 intervention-marker 同色系（橙），
+   标识"该步骤的 ask_human 已由用户回答"，点击仍可打开 Inspector 详情 */
+.intervention-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--orange, #fbbf24);
+    background: rgba(251, 191, 36, 0.1);
+    border-color: rgba(251, 191, 36, 0.22);
+}
+
 .child-row span:not(.child-mark):not(.tool-tag) {
     overflow: hidden;
     text-overflow: ellipsis;

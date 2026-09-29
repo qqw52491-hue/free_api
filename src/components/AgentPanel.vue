@@ -317,7 +317,12 @@ watch(session.isRunning, (val) => {
     emit("update:running", val);
 }, { immediate: true });
 const selectedNarrativeId = computed(() => selectedActiveThought.value ? "active-thought" : selectedHumanEventId.value);
-const selectedHuman = computed(() => session.humanInterventions.value.find((item, index) => `human-${item.timestamp}-${index}` === selectedHumanEventId.value) || null);
+// 时间线人工应答条目的 id 形如 live-human-{ts}-{idx}（AgentChatStream 生成），
+// 本表按 human-{ts}-{idx} 索引——先剥掉 live- 前缀再比对，否则点击永远落空。
+const selectedHuman = computed(() => {
+    const wanted = (selectedHumanEventId.value || "").replace(/^live-human-/, "human-");
+    return session.humanInterventions.value.find((item, index) => `human-${item.timestamp}-${index}` === wanted) || null;
+});
 
 const activeDeckSteps = computed(() => {
     if (session.steps.value.length > 0) return session.steps.value;
