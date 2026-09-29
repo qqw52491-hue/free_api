@@ -1,12 +1,13 @@
 <template>
     <section class="manus-agent-shell">
         <header class="manus-chat-header">
-            <button class="model-selector" data-testid="agent-model-routing-trigger" type="button" title="当前模型路由；点击配置推理、快速与视觉模型" @click="settingsOpen = true">
-                <span>推理 · {{ activeProModelName }}</span>
-                <small>快速 · {{ activeFlashModelName }}</small>
-                <small data-testid="active-reasoning-policy">档位 · {{ activeReasoningProfileLabel }}</small>
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 9l6 6 6-6" /></svg>
-            </button>
+            <div class="model-spec-info-row" data-testid="agent-model-routing-trigger">
+                <span class="spec-tag pro-tag"><i class="spec-dot"></i>推理 · {{ activeProModelName }}</span>
+                <span class="spec-divider">·</span>
+                <span class="spec-tag flash-tag">快速 · {{ activeFlashModelName }}</span>
+                <span class="spec-divider">·</span>
+                <span class="spec-tag policy-tag" data-testid="active-reasoning-policy">档位 · {{ activeReasoningProfileLabel }}</span>
+            </div>
             <div class="header-actions">
                 <span class="session-status" :class="`state-${session.runState.value}`"><i></i>{{ session.stateMeta.value.category }}</span>
                 <button v-if="session.isRunning.value" class="icon-control stop" type="button" :disabled="session.stopRequested.value" title="停止执行" @click="session.requestStop()"><span>■</span></button>
@@ -678,6 +679,56 @@ defineExpose({
     background: #18181b;
 }
 
+.model-spec-info-row {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    gap: 7px;
+    padding: 3px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.025);
+    font-size: 11.5px;
+    line-height: 1.5;
+    user-select: none;
+    cursor: default;
+}
+.model-spec-info-row .spec-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.model-spec-info-row .pro-tag {
+    color: #e4e4e7;
+    font-weight: 500;
+}
+.model-spec-info-row .spec-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #60a5fa;
+    box-shadow: 0 0 5px rgba(96, 165, 250, 0.5);
+}
+.model-spec-info-row .flash-tag {
+    color: #a1a1aa;
+}
+.model-spec-info-row .policy-tag {
+    color: #71717a;
+    font-size: 11px;
+}
+.model-spec-info-row .spec-divider {
+    color: #52525b;
+    font-weight: bold;
+    font-size: 10px;
+    opacity: 0.6;
+    user-select: none;
+}
+
 .session-picker-btn {
     display: inline-flex;
     align-items: center;
@@ -947,12 +998,13 @@ defineExpose({
         padding: 6px 10px !important;
         gap: 6px !important;
     }
-    .model-selector {
+    .model-spec-info-row {
         max-width: 140px !important;
-        padding: 4px 8px !important;
+        padding: 3px 6px !important;
         font-size: 11px !important;
     }
-    .model-selector small {
+    .model-spec-info-row .spec-divider,
+    .model-spec-info-row .policy-tag {
         display: none !important;
     }
     .icon-control {

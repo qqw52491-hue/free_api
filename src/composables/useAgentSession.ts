@@ -1201,7 +1201,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 let view: any = undefined;
 
                 if (action === "deliberate") {
-                    title = `生成审查判决（第 ${(params as any)?.round || stepNum} 轮）`;
+                    const rawDesc = (params as any)?.question || (params as any)?.task || (params as any)?.goal || (params as any)?.description || "";
+                    const taskDesc = typeof rawDesc === "string" ? rawDesc.trim().replace(/\s+/g, " ") : "";
+                    const truncatedDesc = taskDesc.length > 48 ? taskDesc.slice(0, 48) + "..." : taskDesc;
+                    title = truncatedDesc ? `审查：${truncatedDesc}` : `生成审查判决`;
                     badgeLabel = "判决";
                 } else if (params && typeof params === "object") {
                     const p = params as any;

@@ -14,29 +14,6 @@
         v-else-if="block.type === 'mermaid'"
         :code="block.content"
       />
-      <!-- 紧凑模式下渲染为优雅的单行/胶囊卡片，点击在右侧工作台打开 -->
-      <div
-        v-else-if="block.type === 'html' && compactHtml"
-        class="html-deliverable-card"
-        @click="$emit('open-preview', block.content)"
-      >
-        <div class="card-left">
-          <div class="badge-row">
-            <span class="deliverable-badge">🌐 交互成果</span>
-            <strong class="deliverable-title">{{ getHtmlTitle(block.content) }}</strong>
-          </div>
-          <p class="deliverable-tip">已在右侧工作台为您实时渲染，支持自由交互、全屏与导出</p>
-        </div>
-        <button type="button" class="deliverable-open-btn" @click.stop="$emit('open-preview', block.content)">
-          <span>右侧预览</span>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        </button>
-      </div>
-      <!-- 完整模式下直接渲染可交互沙箱 (用于右侧工作台) -->
-      <HtmlPreviewBlock
-        v-else-if="block.type === 'html'"
-        :code="block.content"
-      />
     </template>
   </div>
 </template>
@@ -74,13 +51,12 @@ function renderSegmentMarkdown(segment: string): string {
 <script setup lang="ts">
 import { computed, defineAsyncComponent } from "vue";
 import { marked } from "marked";
-import HtmlPreviewBlock from "./HtmlPreviewBlock.vue";
 
 const EChartsBlock = defineAsyncComponent(() => import("./EChartsBlock.vue"));
 const MermaidBlock = defineAsyncComponent(() => import("./MermaidBlock.vue"));
 
 interface ContentBlock {
-  type: "markdown" | "echarts" | "mermaid" | "html";
+  type: "markdown" | "echarts" | "mermaid";
   content: string;
   html?: string;
 }
@@ -151,12 +127,6 @@ const parsedBlocks = computed<ContentBlock[]>(() => {
         flushMarkdown();
         blocks.push({ type: "echarts", content: code });
         continue;
-      } else if (lang === "html") {
-        if (/<(?:!doctype|html|body|div|button|canvas|svg|form|input|style|script|section|main|h[1-6])/i.test(code)) {
-          flushMarkdown();
-          blocks.push({ type: "html", content: code });
-          continue;
-        }
       }
     }
 
@@ -177,16 +147,6 @@ const parsedBlocks = computed<ContentBlock[]>(() => {
       }
     }
 
-    // 3. 顶级原生 HTML 自愈（模型直接输出 HTML 结构而未包裹围栏）
-    if (token.type === "html" && token.raw) {
-      const trimmedRaw = token.raw.trim();
-      if (/^<!DOCTYPE html|<html[\s\S]*<\/html>|<div class="container"/i.test(trimmedRaw)) {
-        flushMarkdown();
-        blocks.push({ type: "html", content: trimmedRaw });
-        continue;
-      }
-    }
-
     // 其余普通 token 保持原始文本拼装到 markdown 渲染段中
     accumulatedMarkdown += token.raw || "";
   }
@@ -194,11 +154,6 @@ const parsedBlocks = computed<ContentBlock[]>(() => {
   flushMarkdown();
   return blocks.length ? blocks : [{ type: "markdown", content: text, html: renderSegmentMarkdown(text) }];
 });
-
-function getHtmlTitle(htmlCode: string): string {
-  const match = htmlCode.match(/<title>([^<]+)<\/title>/i);
-  return match ? match[1].trim() : "HTML 交互式页面与应用";
-}
 
 function decorateStreamingTail(html: string): string {
   if (!html || typeof window === "undefined" || !window.DOMParser) return html;
@@ -434,85 +389,5 @@ function getBlockHtml(block: ContentBlock, idx: number): string {
   color: #e5c07b;
   background: #1e1e23;
   font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-/* 优雅紧凑的 HTML 成果胶囊卡片 */
-.html-deliverable-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 16px;
-  border-radius: 10px;
-  border: 1px solid rgba(251, 191, 36, 0.25);
-  background: linear-gradient(135deg, rgba(251, 191, 36, 0.08) 0%, rgba(30, 30, 36, 0.6) 100%);
-  cursor: pointer;
-  transition: all 0.2s ease;
-  margin: 6px 0;
-}
-.html-deliverable-card:hover {
-  border-color: rgba(251, 191, 36, 0.45);
-  background: linear-gradient(135deg, rgba(251, 191, 36, 0.12) 0%, rgba(35, 35, 42, 0.8) 100%);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-}
-
-.card-left {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-
-.badge-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.deliverable-badge {
-  font-size: 10.5px;
-  font-weight: 700;
-  color: #fbbf24;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: rgba(251, 191, 36, 0.15);
-  letter-spacing: 0.02em;
-}
-
-.deliverable-title {
-  font-size: 13.5px;
-  font-weight: 650;
-  color: #f4f4f5;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.deliverable-tip {
-  margin: 0;
-  font-size: 11.5px;
-  color: #a1a1aa;
-}
-
-.deliverable-open-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid rgba(251, 191, 36, 0.35);
-  border-radius: 6px;
-  background: rgba(251, 191, 36, 0.15);
-  color: #fbbf24;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  white-space: nowrap;
-}
-.deliverable-open-btn:hover {
-  background: rgba(251, 191, 36, 0.28);
-  border-color: rgba(251, 191, 36, 0.6);
-  color: #ffffff;
 }
 </style>
