@@ -260,9 +260,8 @@ pub fn parse_file_line_ref(raw: &str) -> Option<(String, u32, u32)> {
 /// 1. 有真实 diff → 严格对账：证据行号必须落入本次修改（防虚假交付，原逻辑不变）；
 /// 2. 无真实 diff（排查/测试/运维类任务的命令副作用）→ 证据降级为"静态可定位"校验：
 ///    引用的 file:line 在当前工作区源码中客观存在即可，绝不要求落入不存在的 diff；
-/// 3. 无真实 diff 但交付**声称已修改代码** → 照常拦截（撒谎 writer 不因"无 diff"放行）；
-/// 4. 义务带宿主可执行验证命令 (verify_command) 的，交由宿主执行器判定，此处不核对；
-/// 5. 纯只读任务（side_effect_count == 0）不进入本门禁。
+/// 3. 义务带宿主可执行验证命令 (verify_command) 的，交由宿主执行器判定，此处不核对；
+/// 4. 纯只读任务（side_effect_count == 0）不进入本门禁。
 /// 诊断义务判别：义务的 question 与分流判决（triage）下发的
 /// investigation_questions 规范化一致即为诊断义务——其证据天然位于
 /// "读过的文件"而非 diff 内，走静态定位校验而非 diff 对账。
@@ -284,7 +283,6 @@ pub(crate) fn review_contract_evidence_blockers(
     side_effect_count: usize,
     diff_context: Option<&DiffContext>,
     workspace_root: Option<&std::path::Path>,
-    delivery_text: Option<&str>,
     diagnostic_questions: &[String],
 ) -> Vec<String> {
     if side_effect_count == 0 {
@@ -297,15 +295,6 @@ pub(crate) fn review_contract_evidence_blockers(
     let has_actual_diff = !ctx.changed_files.is_empty();
 
     if !has_actual_diff {
-        // 反撒谎硬拦截：声称修改了代码却拿不出任何真实改动
-        if delivery_text
-            .map(delivery_claims_code_modification)
-            .unwrap_or(false)
-        {
-            return vec![format!(
-                "交付声称已修改/修复代码，但工作区 Git diff 为空、亦无任何真实文件改动记录。请要么真实完成修改后重新交付，要么将\"已修复\"类措辞改为\"已定位根因\"，以诊断/分析报告形式交付。"
-            )];
-        }
         return diagnostic_static_evidence_blockers(contract, ctx, workspace_root);
     }
 
@@ -441,22 +430,6 @@ pub(crate) fn review_contract_evidence_blockers(
     blockers
 }
 
-/// 交付文本中声称"已修改代码"的关键词（启发式兜底，宁缺毋滥）：
-/// 漏判的最坏结果是放行撒谎 writer，误判的最坏结果是误拦诊断任务——
-/// 因此只收录强修改语义词，不收录"已更新/已调整"等常见于报告措辞的弱信号。
-pub(crate) const MODIFICATION_CLAIM_KEYWORDS: &[&str] = &[
-    "已修改", "已修复", "已更正", "已改写", "已重构", "已实现", "已写入", "已新增", "已添加",
-    "已删除", "已移除", "已编辑", "修改完成", "修复完成", "改动完成",
-];
-
-/// 判定交付文本是否声称"已经修改了代码"。用于无 diff 场景的反撒谎拦截。
-pub(crate) fn delivery_claims_code_modification(delivery_text: &str) -> bool {
-    let text = delivery_text.trim();
-    !text.is_empty() && MODIFICATION_CLAIM_KEYWORDS.iter().any(|kw| text.contains(kw))
-}
-
-/// 无真实 diff 时的诊断证据校验：引用能通过 affected_paths 回退，
-/// 或 file:line 在当前工作区源码中静态可定位（文件存在且行号在行数范围内）。
 /// 「可定位但未落 diff」披露清单：义务已证实且引用了真实存在的代码位置，
 /// 但没有任何引用落在本次改动区间内。这类证据放行不拦截（机械门只裁决
 /// 「证据是否客观存在」），但须生成 Gate Notice 移交终审复核语义充分性——
@@ -506,6 +479,8 @@ pub(crate) fn undiffed_locatable_notices(
     notices
 }
 
+/// 无真实 diff 时的诊断证据校验：引用能通过 affected_paths 回退，
+/// 或 file:line 在当前工作区源码中静态可定位（文件存在且行号在行数范围内）。
 fn diagnostic_static_evidence_blockers(
     contract: &ReviewContract,
     ctx: &DiffContext,

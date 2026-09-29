@@ -14,7 +14,6 @@ use crate::agent::control::{
     take_pending_interrupt, HumanControl,
 };
 use crate::agent::dispatcher::{is_finish_instruction, is_write_or_side_effect_tool};
-use crate::agent::evaluation_analysis::{assess_complex_delivery_summary, summary_makes_root_cause_claim};
 use crate::agent::loop_runner::run_call_llm_and_run_tool_phases;
 use crate::agent::mcp::{McpClient, PluginRegistry};
 use crate::agent::review_contract::{apply_review_contract_update, ReviewContract};
@@ -29,10 +28,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
 use crate::agent::finish_guard::{
-    apply_instruction_state_updates, complex_delivery_blocker, finish_blockers,
-    finish_blockers_with_diff, review_contract_evidence_blockers, DiffContext,
-    should_challenge_finish, should_challenge_finish_with_blockers,
-    should_challenge_finish_with_complex_delivery_blocker,
+    apply_instruction_state_updates, finish_blockers, finish_blockers_with_diff,
+    review_contract_evidence_blockers, should_challenge_finish,
+    should_challenge_finish_with_blockers, should_challenge_finish_with_unresolved, DiffContext,
 };
 use crate::agent::workspace_lock::{acquire_workspace_lock, ChildWorkspaceGuard};
 

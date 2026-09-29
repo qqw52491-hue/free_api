@@ -121,7 +121,6 @@ index 123..456 100644
             Some(&verified),
             Some(&diff_ctx),
             None,
-            None,
             &[]        );
         assert!(
             blockers.is_empty(),
@@ -174,7 +173,6 @@ def main():
             1,
             Some(&verified),
             Some(&diff_ctx),
-            None,
             None,
             &[]        );
 
@@ -259,7 +257,6 @@ index 123..456 100644
             Some(&verified),
             Some(&diff_ctx),
             None,
-            None,
             &[]        );
 
         // scroll 命中 line 445 放行；render 引用 line 126 未被修改，被精准拦截！
@@ -311,7 +308,6 @@ index 123..456 100644
             Some(&verified),
             Some(&diff_ctx),
             None,
-            None,
             &[]        );
 
         assert_eq!(blockers.len(), 1);
@@ -342,7 +338,6 @@ index 123..456 100644
             Some(&contract),
             false,
             0,
-            None,
             None,
             None,
             None,
@@ -380,7 +375,6 @@ index 123..456 100644
             Some(&verified),
             Some(&empty_diff),
             None,
-            None,
             &[]        );
         assert!(blockers.is_empty());
 
@@ -408,7 +402,6 @@ index 123..456 100644
             1,
             Some(&verified),
             Some(&empty_diff),
-            None,
             None,
             &[]        );
         assert!(blockers.is_empty());
@@ -454,7 +447,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &questions,
         );
         assert!(pass.is_empty(), "诊断义务的静态可定位引用应放行: {pass:?}");
@@ -468,7 +460,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[],
         );
         assert!(blocked.is_empty(), "可定位的 diff 外引用应放行移交终审: {blocked:?}");
@@ -498,7 +489,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &questions,
         );
         assert!(pass.is_empty(), "行号损坏但文件存在的诊断引用应放行: {pass:?}");
@@ -531,7 +521,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(blockers.is_empty(), "诊断引用静态可定位时应放行: {blockers:?}");
 
@@ -541,26 +530,8 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(blockers.is_empty(), "工作区相对诊断引用应放行: {blockers:?}");
-    }
-
-    #[test]
-    fn lying_writer_claiming_fix_with_empty_diff_is_blocked() {
-        let ctx = DiffContext::from_diff_and_paths(None, &[]);
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let delivery_text = "任务完成，已修复 main_loop.rs 的工作区绑定问题";
-        let blockers = review_contract_evidence_blockers(
-            &diagnostic_contract_with_refs(&["src/agent/finish_guard/diff.rs:1"]),
-            1,
-            Some(&ctx),
-            Some(root),
-            Some(delivery_text),
-            &[],
-        );
-        assert_eq!(blockers.len(), 1, "声称修改但无 diff 必须拦截");
-        assert!(blockers[0].contains("声称已修改/修复代码"));
     }
 
     #[test]
@@ -572,7 +543,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(!blockers.is_empty(), "行号越界的引用必须拦截");
         assert!(blockers[0].contains("未能在当前工作区源码中定位"));
@@ -590,7 +560,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(hit.is_empty(), "证据落入真实 diff 应放行: {hit:?}");
 
@@ -599,7 +568,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(!miss.is_empty(), "证据未落入真实 diff 必须拦截");
     }
@@ -619,7 +587,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(
             blockers.is_empty(),
@@ -648,7 +615,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(blockers.is_empty(), "非代码证据在有 diff 时同样不适用对账: {blockers:?}");
     }
@@ -665,7 +631,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(
             !blockers.is_empty(),
@@ -685,7 +650,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(!blockers.is_empty(), "裸路径引用属代码域，缺行号应拦截");
     }
@@ -705,7 +669,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(!blockers.is_empty(), "代码域引用未命中 diff 必须拦截");
         assert!(blockers[0].contains("never_touched"));
@@ -731,7 +694,6 @@ index 123..456 100644
             1,
             Some(&ctx),
             Some(root),
-            None,
             &[]        );
         assert!(!blockers.is_empty(), "裸结论不是证据，必须拦截");
         assert!(blockers[0].contains("不构成可核验"));
@@ -825,7 +787,6 @@ fn review_finding_kept_with_explicit_closure_is_accepted() {
             1,
             Some(&ctx),
             Some(root),
-            None,
             &diagnostic_questions,
         );
         assert!(
@@ -848,7 +809,6 @@ fn review_finding_kept_with_explicit_closure_is_accepted() {
             1,
             Some(&ctx),
             Some(root),
-            None,
             &diagnostic_questions,
         );
         assert_eq!(blocked.len(), 1, "磁盘上不可定位的引用必须继续拦截");

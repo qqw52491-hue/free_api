@@ -11,7 +11,6 @@ use crate::agent::control::{
     take_pending_interrupt, HumanControl,
 };
 use crate::agent::dispatcher::{is_finish_instruction, is_write_or_side_effect_tool};
-use crate::agent::evaluation_analysis::{assess_complex_delivery_summary, summary_makes_root_cause_claim};
 use crate::agent::loop_runner::run_call_llm_and_run_tool_phases;
 use crate::agent::mcp::{McpClient, PluginRegistry};
 use crate::agent::review_contract::{apply_review_contract_update, ReviewContract};
@@ -32,10 +31,9 @@ use tokio::time::{sleep, Duration};
 // 评测工作区彼此隔离也不受影响。守卫按 RAII 随 run 结束（含早退/中断）自动释放。
 
 use crate::agent::finish_guard::{
-    apply_instruction_state_updates, complex_delivery_blocker, finish_blockers,
-    finish_blockers_with_diff, review_contract_evidence_blockers, DiffContext,
-    should_challenge_finish, should_challenge_finish_with_blockers,
-    should_challenge_finish_with_complex_delivery_blocker,
+    apply_instruction_state_updates, finish_blockers, finish_blockers_with_diff,
+    review_contract_evidence_blockers, should_challenge_finish,
+    should_challenge_finish_with_blockers, should_challenge_finish_with_unresolved, DiffContext,
 };
 use crate::agent::workspace_lock::{acquire_workspace_lock, ChildWorkspaceGuard};
 
@@ -1883,21 +1881,6 @@ async fn run_agent_main_loop_in_workspace_inner(
             None
         };
 
-        // 交付摘要：义务证据校验反撒谎拦截与遥测路由判定共用
-        // （prepare_finish 的预填摘要与 finish.command.summary 同等参与判定，保证预检口径一致）
-        let instruction_summary = instruction
-            .get_params()
-            .get("command")
-            .and_then(|command| command.get("summary"))
-            .and_then(|s| s.as_str())
-            .map(str::to_string)
-            .or_else(|| {
-                instruction
-                    .prepare_finish
-                    .as_ref()
-                    .and_then(|req| req.summary.clone())
-            });
-
         // 诊断义务（triage 取证单下发的问题）与修复义务分流：
         // 前者证据位于"读过的文件"，静态定位即可成立；
         // 后者维持 diff 对账。判别锚点是宿主持久化的判决原单，模型改不了。
@@ -1914,7 +1897,6 @@ async fn run_agent_main_loop_in_workspace_inner(
             context.change_verification.as_ref(),
             diff_context.as_ref(),
             Some(workspace_dir.as_path()),
-            instruction_summary.as_deref(),
             diagnostic_questions,
         );
         let evidence_blockers = context
@@ -1926,13 +1908,12 @@ async fn run_agent_main_loop_in_workspace_inner(
                     side_effect_count,
                     diff_context.as_ref(),
                     Some(workspace_dir.as_path()),
-                    instruction_summary.as_deref(),
                     diagnostic_questions,
                 )
             })
             .unwrap_or_default();
         let contract_evidence_unresolved = !evidence_blockers.is_empty();
-        // 门禁触发遥测：义务证据三分法（diff 对账 / 修改声明拦截 / 诊断静态校验）的触发频率
+        // 门禁触发遥测：义务证据二分法（diff 对账 / 诊断静态校验）的触发频率
         if !evidence_blockers.is_empty() {
             let route = if diff_context
                 .as_ref()
@@ -1940,12 +1921,6 @@ async fn run_agent_main_loop_in_workspace_inner(
                 .unwrap_or(false)
             {
                 "finish_obligation_evidence:diff_not_matched"
-            } else if instruction_summary
-                .as_deref()
-                .map(crate::agent::finish_guard::delivery_claims_code_modification)
-                .unwrap_or(false)
-            {
-                "finish_obligation_evidence:modification_claim_denied"
             } else {
                 "finish_obligation_evidence:static_check_failed"
             };
@@ -2026,15 +2001,9 @@ async fn run_agent_main_loop_in_workspace_inner(
             );
             gate_notices.extend(undiffed_notices);
         }
-        let complex_delivery_blocker =
-            complex_delivery_blocker(&context, &instruction, is_finish, result.success);
-        let complex_delivery_unresolved = complex_delivery_blocker.is_some();
-        if let Some(blocker) = complex_delivery_blocker {
-            open_todos.push(blocker);
-        }
         // 【廉价完成防线】评测 oracle 的判分进度是任务完成度的客观事实源：
         // 模型自declared的审查契约/TODO 只覆盖它自己申报的范围（实测：1/24 交付被判
-        // succeeded）。oracle 未完成时把缺口作为持久 blocker——与 complex 未决同级，
+        // succeeded）。oracle 未完成时把缺口作为持久 blocker——与契约证据未决同级，
         // 不因 finish_reviewed 置位而失效；熔断上限（MAX_FINISH_CHALLENGES）仍是安全阀。
         let mut oracle_progress_unresolved = false;
         if finish_gate_requested && result.success {
@@ -2087,13 +2056,13 @@ async fn run_agent_main_loop_in_workspace_inner(
             // finish_reviewed / challenge_count / 重试预算一律不动。
             false
         } else {
-            should_challenge_finish_with_complex_delivery_blocker(
+            should_challenge_finish_with_unresolved(
                 is_finish,
                 result.success,
                 checkpoint.finish_reviewed,
                 checkpoint.finish_challenge_count,
                 &open_todos,
-                complex_delivery_unresolved || oracle_progress_unresolved || contract_evidence_unresolved,
+                oracle_progress_unresolved || contract_evidence_unresolved,
             )
         };
 

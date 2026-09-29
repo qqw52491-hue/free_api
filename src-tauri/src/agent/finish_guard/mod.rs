@@ -28,18 +28,14 @@ pub use diff::{
     file_paths_match, parse_file_line_ref, parse_unified_diff, DiffContext,
 };
 pub(crate) use diff::{
-    delivery_claims_code_modification, noncode_evidence_skip_reasons,
-    obligation_is_diagnostic, review_contract_evidence_blockers, undiffed_locatable_notices,
+    noncode_evidence_skip_reasons, obligation_is_diagnostic,
+    review_contract_evidence_blockers, undiffed_locatable_notices,
 };
 pub(crate) use state_updates::{apply_todo_update_guarded, apply_instruction_state_updates};
 
 use crate::agent::change_verification::{change_verification_blocker, ChangeVerification};
 use crate::agent::checkpoint::AgentCheckpoint;
 use crate::agent::context;
-use crate::agent::dispatcher::is_finish_instruction;
-use crate::agent::evaluation_analysis::{
-    assess_complex_delivery_summary, summary_makes_root_cause_claim,
-};
 use crate::agent::review_contract::ReviewContract;
 use crate::agent::types::{AgentInstruction, TodoItem};
 use crate::db::DbState;
@@ -85,7 +81,6 @@ pub(crate) fn finish_blockers_with_diff(
     change_verification: Option<&ChangeVerification>,
     diff_context: Option<&DiffContext>,
     workspace_root: Option<&std::path::Path>,
-    delivery_text: Option<&str>,
     diagnostic_questions: &[String],
 ) -> Vec<String> {
     let mut blockers = open_todo_descriptions(todos);
@@ -100,7 +95,6 @@ pub(crate) fn finish_blockers_with_diff(
                 side_effect_count,
                 diff_context,
                 workspace_root,
-                delivery_text,
                 diagnostic_questions,
             ));
         }
@@ -129,7 +123,6 @@ pub(crate) fn finish_blockers(
         change_verification,
         None,
         None,
-        None,
         &[],
     )
 }
@@ -143,15 +136,15 @@ pub(crate) fn should_challenge_finish_with_blockers(
     is_finish && succeeded && !finish_reviewed && !blockers.is_empty()
 }
 
-/// 主根因的证据边界是交付正确性的前置条件，但绝不能造成无上限的死循环死锁。
+/// 未闭合责任是交付正确性的前置条件，但绝不能造成无上限的死循环死锁。
 /// 累计质询达到 MAX_FINISH_CHALLENGES（2 次）时，硬性熔断放行，避免用户任务卡死。
-pub(crate) fn should_challenge_finish_with_complex_delivery_blocker(
+pub(crate) fn should_challenge_finish_with_unresolved(
     is_finish: bool,
     succeeded: bool,
     finish_reviewed: bool,
     finish_challenge_count: u32,
     blockers: &[String],
-    complex_delivery_unresolved: bool,
+    unresolved: bool,
 ) -> bool {
     const MAX_FINISH_CHALLENGES: u32 = 2;
     if !is_finish || !succeeded || blockers.is_empty() {
@@ -161,84 +154,6 @@ pub(crate) fn should_challenge_finish_with_complex_delivery_blocker(
     if finish_challenge_count >= MAX_FINISH_CHALLENGES {
         return false;
     }
-    !finish_reviewed || complex_delivery_unresolved
-}
-
-/// 复杂诊断 finish 缺少边界披露时复用既有可恢复拦截。
-/// 该检查只消费当前内存中的 summary 生成布尔结论，既不持久化也不回显用户交付正文。
-pub(crate) fn complex_delivery_blocker(
-    context: &context::SandwichContext,
-    instruction: &AgentInstruction,
-    is_finish: bool,
-    succeeded: bool,
-) -> Option<String> {
-    if !is_finish || !succeeded {
-        return None;
-    }
-    // 未经独立审查放行的披露义务：方案在审查未派发/全部失败的情况下经人工或
-    // 仲裁放行，交付必须如实声明，不许静默。检查摘要而非拦截执行——事实边界
-    // 已发生，这里只保证它被说出来。优先于无副作用早退：披露义务挂在批准
-    // 事件上，不挂在改动量上。
-    if context
-        .plan_gate
-        .as_ref()
-        .map_or(false, |g| g.unreviewed_release)
-    {
-        let disclosed = instruction
-            .command
-            .as_ref()
-            .and_then(|command| command.get("summary"))
-            .and_then(|summary| summary.as_str())
-            .map_or(false, |s| {
-                s.contains("未经独立审查") || s.contains("未经审查") || s.contains("未经过独立审查")
-            });
-        if !disclosed {
-            return Some(
-                "本次方案放行时未收到任何独立审查结论（审查未派发或审查员全部失败）。\
-                 交付摘要必须如实写明「方案未经独立审查」，不得静默交付"
-                    .to_string(),
-            );
-        }
-    }
-    // 对于纯对话、解释答疑、或没有任何新增代码文件修改的任务，免除严苛的主根因四件套拦截
-    if context.side_effects.len() == context.inherited_side_effects_count {
-        return None;
-    }
-    // ReviewContract 是模型首轮规划后持久化的显式复杂任务声明。
-    // 不再依赖少数自然语言关键词：复杂 Bug、架构变更、公式证明等跨领域任务
-    // 只要建立契约，就共享同一套依据—验证—交付闭环；普通任务保持轻量。
-    if context.review_contract.is_none() {
-        // 未建契约的交付：不要求完整四件套，但只要交付自身宣称了主根因，
-        // 就必须就地校准（直接证据 + 结论强度）——"谁宣称根因，谁就校准"，
-        // 防止把复杂诊断的边界披露漏成无契约即免检。
-        let Some(summary) = instruction
-            .command
-            .as_ref()
-            .and_then(|command| command.get("summary"))
-            .and_then(|summary| summary.as_str())
-        else {
-            return None;
-        };
-        return if summary_makes_root_cause_claim(summary)
-            && !assess_complex_delivery_summary(summary).root_cause_calibrated
-        {
-            Some("交付提出了主根因结论，但缺少就地证据与结论强度（需在主根因小节内给出直接证据并标注 已证实/部分支持/未验证）".to_string())
-        } else {
-            None
-        };
-    }
-    let Some(summary) = instruction
-        .command
-        .as_ref()
-        .and_then(|command| command.get("summary"))
-        .and_then(|summary| summary.as_str())
-    else {
-        return Some("复杂终态缺少 summary，无法核验主根因的证据边界".to_string());
-    };
-    let assessment = assess_complex_delivery_summary(summary);
-    (!assessment.compliant).then_some(
-        "复杂终态缺少已核验范围、未核验范围或关键假设、结论强度，或主根因就地的直接证据与结论强度"
-            .to_string(),
-    )
+    !finish_reviewed || unresolved
 }
 
