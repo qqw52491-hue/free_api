@@ -72,6 +72,19 @@ pub async fn handle_submit_plan(
         );
     }
 
+    // ---- Auto 模式策略预检：submit_plan 兼任「报方案拿判定」通道 ----
+    // 判定前置为正常工具结果：FastPass 直接落账放行（不派审查——白名单文件
+    // 烧一轮 tech_lead 是纯浪费）；Escalate 切换为交叉审查模式并落入下方既有
+    // 派发链（自动开启审查）；Block 直接拒绝。写入处门禁仍兜底——此处只是把
+    // 「撞上才知道要审查」换成「报方案时拿到判定回执」。
+    if checkpoint.plan_mode == crate::agent::checkpoint::PlanExecutionMode::Auto {
+        if let Some(verdict) = auto_policy_verdict(checkpoint, submission, workspace_dir, step_id) {
+            return verdict;
+        }
+        // Escalate：auto_policy_verdict 已把模式切换为 CrossReview，
+        // 落入下方既有校验与 Tech Lead 派发链。
+    }
+
     // ---- 结构校验：方案必须带来源证据，防止空想方案进入审查 ----
     // 证据强度由任务入口分流判决驱动（evidence_policy=none/source_refs 时允许空证据），
     // 无判决默认要求证据（旧行为）。
@@ -393,5 +406,148 @@ pub async fn handle_submit_plan(
             ),
             "submit_plan:dispatch_failed",
         ),
+    }
+}
+
+/// Auto 模式下 submit_plan 的策略预检：把「写入时才跑的判定」前置为正常工具结果。
+/// - FastPass → 方案落账（审计母本）+ 核准范围登记（scope drift 对账基准），
+///   返回就绪文案；不设 plan_phase=Approved——后续写入仍逐次过策略判定，
+///   申报范围内放行、未申报的高危文件照常触发升级（比"一次直通永久放行"诚实）。
+/// - Escalate → 模式切换为 CrossReview 并返回 None，由调用方落入既有校验与
+///   Tech Lead 派发链（自动开启审查，复用整套批次台账/裁决/放行仪式）。
+/// - Block   → 返回拒绝结果（危险命令黑名单级）。
+/// 返回 Some = 终态答复；None = 继续走正常审查派发。
+fn auto_policy_verdict(
+    checkpoint: &mut AgentCheckpoint,
+    submission: &crate::agent::types::PlanSubmission,
+    workspace_dir: &Path,
+    step_id: usize,
+) -> Option<DispatchResult> {
+    let target_files: Vec<String> = submission
+        .target_files
+        .iter()
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
+    let policy = crate::agent::agent_policy::PolicyConfig::load_from_workspace_or_default(
+        Some(workspace_dir),
+    );
+    // 方案级判定只评文件——具体 shell 命令到写入那一步才出现，由写入门禁逐条评估。
+    let decision = crate::agent::agent_policy::evaluate_plan_policy(
+        &policy,
+        &target_files,
+        &[],
+        &submission.plan_summary,
+    );
+    checkpoint.policy_decision_summary = Some(decision.summary());
+    match decision {
+        crate::agent::agent_policy::PolicyDecision::FastPass { reason } => {
+            checkpoint.submitted_plan = Some(submission.clone());
+            checkpoint.submitted_plan_step = Some(step_id);
+            if !target_files.is_empty() && checkpoint.approved_target_files.is_none() {
+                checkpoint.approved_target_files = Some(target_files);
+            }
+            Some(DispatchResult { view: None,
+                success: true,
+                stdout: format!(
+                    "【✅ 方案预检通过：无需审查】\n判定: {}\n\
+                     已申报文件可直接写入；写入超出申报范围的文件时门禁仍会重新判定。",
+                    reason
+                ),
+                stderr: String::new(),
+                route: "plan_gatekeeper:auto_preflight_fast_pass".to_string(),
+            })
+        }
+        crate::agent::agent_policy::PolicyDecision::EscalateToReview {
+            reason,
+            matched_pattern,
+            suggested_roles,
+        } => {
+            println!(
+                "[plan_gate] auto submit_plan 升级审查: {} (规则 {}, 建议角色: {})",
+                reason,
+                matched_pattern,
+                suggested_roles.join(", ")
+            );
+            checkpoint.set_execution_mode(
+                crate::agent::checkpoint::PlanExecutionMode::CrossReview,
+            );
+            None
+        }
+        crate::agent::agent_policy::PolicyDecision::Block { reason } => {
+            Some(DispatchResult { view: None,
+                success: false,
+                stdout: String::new(),
+                stderr: format!("【安全策略强力阻断】\n{}", reason),
+                route: "plan_gatekeeper:policy_blocked".to_string(),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::checkpoint::PlanExecutionMode;
+    use crate::agent::types::PlanSubmission;
+
+    fn auto_checkpoint() -> AgentCheckpoint {
+        let context =
+            crate::agent::context::SandwichContext::new("system".to_string(), "goal".to_string());
+        let mut cp = AgentCheckpoint::new("run-auto-preflight".to_string(), &context);
+        cp.plan_mode = PlanExecutionMode::Auto;
+        cp
+    }
+
+    /// FastPass：白名单文件方案 → 返回"无需审查"就绪回执，方案与核准范围落账，
+    /// 但不预支 plan_phase=Approved——后续写入仍逐次过策略判定。
+    #[test]
+    fn auto_submit_plan_fast_pass_returns_ready_verdict_without_review() {
+        let mut cp = auto_checkpoint();
+        let submission = PlanSubmission {
+            plan_summary: "补充 README 的构建说明段落".to_string(),
+            target_files: vec!["docs/README.md".to_string()],
+            ..Default::default()
+        };
+        let res = auto_policy_verdict(&mut cp, &submission, Path::new("/tmp"), 7)
+            .expect("whitelisted files must fast-pass");
+        assert!(res.success, "{}", res.stderr);
+        assert!(res.stdout.contains("无需审查"));
+        assert!(cp.submitted_plan.is_some());
+        assert_eq!(cp.submitted_plan_step, Some(7));
+        assert_eq!(
+            cp.approved_target_files.as_deref(),
+            Some(&["docs/README.md".to_string()][..])
+        );
+        assert!(!cp.plan_phase.is_approved(), "直通判定不提前放行整轮写入");
+    }
+
+    /// Escalate：高危文件 → 返回 None 落入既有 Tech Lead 派发链，模式切换为审查。
+    #[test]
+    fn auto_submit_plan_escalate_flips_mode_to_cross_review() {
+        let mut cp = auto_checkpoint();
+        let submission = PlanSubmission {
+            plan_summary: "重构 submit_plan 的提交判定流程".to_string(),
+            target_files: vec!["src-tauri/src/agent/plan_submit.rs".to_string()],
+            ..Default::default()
+        };
+        let res = auto_policy_verdict(&mut cp, &submission, Path::new("/tmp"), 7);
+        assert!(res.is_none(), "src-tauri/** 高危文件必须落入审查派发链");
+        assert_eq!(cp.plan_mode, PlanExecutionMode::CrossReview);
+    }
+
+    /// 空 target_files（只读交付方案）→ FastPass，但不登记核准范围。
+    #[test]
+    fn auto_submit_plan_empty_targets_fast_pass_without_scope() {
+        let mut cp = auto_checkpoint();
+        let submission = PlanSubmission {
+            plan_summary: "纯只读分析报告，不改动任何文件".to_string(),
+            target_files: vec![],
+            ..Default::default()
+        };
+        let res = auto_policy_verdict(&mut cp, &submission, Path::new("/tmp"), 7)
+            .expect("empty targets must fast-pass");
+        assert!(res.success);
+        assert!(cp.approved_target_files.is_none());
     }
 }

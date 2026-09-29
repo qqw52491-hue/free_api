@@ -528,9 +528,10 @@
             exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Exploring, 0);
         assert!(submit_plan_rejection(&cp, &valid_submission()).is_none());
 
-        // Auto 模式 → 不适用
+        // Auto 模式 → 放行（submit_plan 兼任「报方案拿判定」通道，
+        // FastPass 直通 / Escalate 由 handle_submit_plan 内 auto_policy_verdict 分流）
         let auto = exploration_checkpoint(PlanExecutionMode::Auto, PlanPhase::Exploring, 0);
-        assert!(submit_plan_rejection(&auto, &valid_submission()).unwrap().contains("不适用"));
+        assert!(submit_plan_rejection(&auto, &valid_submission()).is_none());
 
         // PlanApproval 模式 → 不适用（应走 ask_human）
         let approval =

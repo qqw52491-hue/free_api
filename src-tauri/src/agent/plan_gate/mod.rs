@@ -20,10 +20,12 @@ pub(crate) fn submit_plan_rejection(
     checkpoint: &AgentCheckpoint,
     submission: &crate::agent::types::PlanSubmission,
 ) -> Option<String> {
-    if checkpoint.plan_mode != PlanExecutionMode::CrossReview {
+    if checkpoint.plan_mode != PlanExecutionMode::CrossReview
+        && checkpoint.plan_mode != PlanExecutionMode::Auto
+    {
         return Some(format!(
-            "【ℹ️ submit_plan 不适用】当前执行模式为 {:?}，方案提交通道仅在交叉审查模式（cross_review）下有效。\n\
-             全自动模式可直接在排查后写入；方案审批模式请调用 ask_human(kind: plan_approval) 呈报方案。",
+            "【ℹ️ submit_plan 不适用】当前执行模式为 {:?}，方案提交通道在交叉审查模式与全自动模式下有效。\n\
+             方案审批模式请调用 ask_human(kind: plan_approval) 呈报方案。",
             checkpoint.plan_mode
         ));
     }
