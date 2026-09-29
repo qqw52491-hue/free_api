@@ -1343,16 +1343,24 @@ function humanQuestionFromStep(step: AgentStepItem | undefined): string {
     return desc && desc !== "执行操作" ? desc : "";
 }
 
-/** 同一回合内、消息时间戳之前最近一个 ask_human/human 步骤——历史应答的归属启发式 */
+/** 同一回合内距离消息最近的 ask_human/human 步骤——历史应答的归属启发式。
+ *  优先取消息时间戳之前的最近者；落库精度错位时消息可能排在提问步骤
+ *  零点几秒前，此时放行 30s 窗口内"在其后"的最近 ask_human 兜底，
+ *  否则 stepId 落空、marker 只能按原时间戳漂到提问上方。 */
 function nearestHumanStepBefore(steps: AgentStepItem[], timestamp: number): AgentStepItem | undefined {
-    let best: AgentStepItem | undefined;
+    const NEAR_WINDOW_MS = 30_000;
+    let bestBefore: AgentStepItem | undefined;
+    let bestAfter: AgentStepItem | undefined;
     for (const s of steps) {
-        if (s.timestamp > timestamp) continue;
         const probe = `${s.tool || ""} ${s.action || ""}`.toLowerCase();
         if (!probe.includes("ask_human") && !probe.includes("human")) continue;
-        if (!best || s.timestamp >= best.timestamp) best = s;
+        if (s.timestamp <= timestamp) {
+            if (!bestBefore || s.timestamp >= bestBefore.timestamp) bestBefore = s;
+        } else if (s.timestamp - timestamp <= NEAR_WINDOW_MS) {
+            if (!bestAfter || s.timestamp < bestAfter.timestamp) bestAfter = s;
+        }
     }
-    return best;
+    return bestBefore || bestAfter;
 }
 
 interface StepInterventionRow {
